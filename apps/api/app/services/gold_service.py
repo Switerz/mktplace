@@ -2490,3 +2490,209 @@ def get_operacoes(db: Session) -> dict:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Neon runtime overrides
+# ---------------------------------------------------------------------------
+# Production Render cannot access the VPN-only Data Mart. The public API must
+# serve dashboard pages from Neon/Postgres marts populated by the sync job.
+
+_MKT_FILTER_FACT = {
+    "all": None,
+    "tiktok": 1,
+    "ml": 2,
+    "shopee": 3,
+}
+
+
+def _fact_mkt_clause(alias: str = "f") -> str:
+    return f"(:mkt_id IS NULL OR {alias}.marketplace_id = :mkt_id)"
+
+
+def _brand_metric(row: dict, key: str) -> float:
+    return _float(row.get(key, 0))
+
+
+def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    py, pm = _prev_month(year, month)
+    pstart, pend = _month_bounds(py, pm)
+
+    sql = text("""
+        SELECT
+            COALESCE(SUM(gmv), 0) AS gmv,
+            COALESCE(SUM(CASE WHEN marketplace_id = 1 THEN gmv ELSE 0 END), 0) AS tiktok_gmv,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN gmv ELSE 0 END), 0) AS ml_gmv,
+            COALESCE(SUM(CASE WHEN marketplace_id = 3 THEN gmv ELSE 0 END), 0) AS shopee_gmv,
+            COALESCE(SUM(orders), 0) AS orders,
+            CASE WHEN SUM(orders) > 0 THEN SUM(gmv) / SUM(orders) ELSE 0 END AS avg_ticket,
+            COALESCE(SUM(ad_spend), 0) AS ad_spend,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN ad_spend ELSE 0 END), 0) AS ml_ad_spend,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN ad_revenue ELSE 0 END), 0) AS ml_ad_revenue,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN canceled_orders ELSE 0 END), 0) AS ml_canceled,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN orders ELSE 0 END), 0) AS ml_orders,
+            COALESCE(SUM(CASE WHEN marketplace_id = 1 THEN unique_buyers ELSE 0 END), 0) AS tiktok_customers,
+            COALESCE(SUM(CASE WHEN marketplace_id = 2 THEN unique_buyers ELSE 0 END), 0) AS ml_unique_buyers,
+            COALESCE(SUM(CASE WHEN marketplace_id = 3 THEN unique_buyers ELSE 0 END), 0) AS shopee_unique_buyers,
+            COALESCE(SUM(CASE WHEN marketplace_id = 3 THEN ad_spend ELSE 0 END), 0) AS shopee_ad_spend,
+            COALESCE(SUM(CASE WHEN marketplace_id = 3 THEN ad_revenue ELSE 0 END), 0) AS shopee_ad_revenue
+        FROM marts.fact_marketplace_daily_performance
+        WHERE date BETWEEN :start AND :end
+          AND (:mkt_id IS NULL OR marketplace_id = :mkt_id)
+    """)
+
+    def run(s, e):
+        r = dict(db.execute(sql, {"start": s, "end": e, "mkt_id": mkt_id}).mappings().one())
+        gmv = _float(r["gmv"])
+        orders = int(_float(r["orders"]))
+        ml_spend = _float(r["ml_ad_spend"])
+        ml_revenue = _float(r["ml_ad_revenue"])
+        ml_orders = _float(r["ml_orders"])
+        shopee_spend = _float(r["shopee_ad_spend"])
+        shopee_revenue = _float(r["shopee_ad_revenue"])
+        return {
+            "gmv": gmv,
+            "tiktok_gmv": _float(r["tiktok_gmv"]) or None,
+            "ml_gmv": _float(r["ml_gmv"]) or None,
+            "shopee_gmv": _float(r["shopee_gmv"]) or None,
+            "orders": orders,
+            "avg_ticket": _float(r["avg_ticket"]),
+            "ad_spend": _float(r["ad_spend"]) or None,
+            "ml_roas": round(ml_revenue / ml_spend, 2) if ml_spend > 0 else None,
+            "ml_cancel_rate_pct": round(_float(r["ml_canceled"]) / ml_orders * 100, 1) if ml_orders > 0 else None,
+            "tiktok_customers": int(_float(r["tiktok_customers"])) or None,
+            "ml_unique_buyers": int(_float(r["ml_unique_buyers"])) or None,
+            "shopee_unique_buyers": int(_float(r["shopee_unique_buyers"])) or None,
+            "shopee_roas": round(shopee_revenue / shopee_spend, 2) if shopee_spend > 0 else None,
+        }
+
+    cur = run(start, end)
+    prev = run(pstart, pend)
+    mom = ((cur["gmv"] - prev["gmv"]) / prev["gmv"] * 100) if prev["gmv"] > 0 else None
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "current": cur,
+        "previous": prev,
+        "gmv_mom_pct": round(mom, 2) if mom is not None else None,
+    }
+
+
+def get_brands(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    py, pm = _prev_month(year, month)
+    pstart, pend = _month_bounds(py, pm)
+
+    sql = text("""
+        SELECT
+            l.brand_key AS brand,
+            f.marketplace_id,
+            COALESCE(SUM(f.gmv), 0) AS gmv,
+            COALESCE(SUM(f.orders), 0) AS orders,
+            COALESCE(SUM(f.ad_spend), 0) AS ad_spend,
+            COALESCE(SUM(f.ad_revenue), 0) AS ad_revenue,
+            COALESCE(SUM(f.canceled_orders), 0) AS canceled_orders,
+            COALESCE(SUM(f.total_fees), 0) AS total_fees,
+            COALESCE(SUM(f.gmv_video), 0) AS gmv_video,
+            COALESCE(SUM(f.gmv_live), 0) AS gmv_live,
+            COALESCE(SUM(f.gmv_card), 0) AS gmv_card
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+        GROUP BY l.brand_key, f.marketplace_id
+    """)
+
+    def run(s, e):
+        rows = db.execute(sql, {"start": s, "end": e, "mkt_id": mkt_id}).mappings().all()
+        result: dict[str, dict] = {}
+        for r in rows:
+            brand = r["brand"]
+            item = result.setdefault(brand, {"orders": 0})
+            mid = int(r["marketplace_id"])
+            prefix = {1: "tiktok", 2: "ml", 3: "shopee"}.get(mid)
+            if not prefix:
+                continue
+            item[f"{prefix}_gmv"] = _float(r["gmv"])
+            item[f"{prefix}_orders"] = int(_float(r["orders"]))
+            item["orders"] += int(_float(r["orders"]))
+            if mid == 1:
+                item["cos_pct"] = round(abs(_float(r["total_fees"])) / _float(r["gmv"]) * 100, 2) if _float(r["gmv"]) > 0 else None
+            if mid == 2:
+                spend = _float(r["ad_spend"])
+                item["ml_roas"] = round(_float(r["ad_revenue"]) / spend, 2) if spend > 0 else None
+                item["ml_cancel_rate_pct"] = round(_float(r["canceled_orders"]) / _float(r["orders"]) * 100, 1) if _float(r["orders"]) > 0 else None
+        return result
+
+    cur = run(start, end)
+    prev = run(pstart, pend)
+    result = []
+    for brand, c in cur.items():
+        tk = _float(c.get("tiktok_gmv"))
+        ml = _float(c.get("ml_gmv"))
+        sh = _float(c.get("shopee_gmv"))
+        total = tk + ml + sh
+        if total == 0:
+            continue
+        p = prev.get(brand, {})
+        ptk = _float(p.get("tiktok_gmv"))
+        pml = _float(p.get("ml_gmv"))
+        psh = _float(p.get("shopee_gmv"))
+        total_prev = ptk + pml + psh
+        orders = int(c.get("orders", 0))
+        mom = ((total - total_prev) / total_prev * 100) if total_prev > 0 else None
+        result.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_gmv": tk or None,
+            "ml_gmv": ml or None,
+            "shopee_gmv": sh or None,
+            "total_gmv": total,
+            "orders": orders,
+            "avg_ticket": total / orders if orders > 0 else None,
+            "tiktok_gmv_prev": ptk or None,
+            "ml_gmv_prev": pml or None,
+            "shopee_gmv_prev": psh or None,
+            "total_gmv_prev": total_prev,
+            "mom_pct": round(mom, 2) if mom is not None else None,
+            "cos_pct": c.get("cos_pct"),
+            "gpm": None,
+            "ml_roas": c.get("ml_roas"),
+            "ml_cancel_rate_pct": c.get("ml_cancel_rate_pct"),
+        })
+    result.sort(key=lambda r: -r["total_gmv"])
+    return {"ref_month": f"{year:04d}-{month:02d}", "brands": result}
+
+
+def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    cutoff = date.today().replace(day=1) - timedelta(days=1)
+    year = cutoff.year
+    month = cutoff.month
+    for _ in range(months_back - 1):
+        year, month = _prev_month(year, month)
+    start = date(year, month, 1)
+
+    rows = db.execute(text("""
+        SELECT DATE_TRUNC('month', f.date)::date AS mes,
+               l.brand_key AS brand,
+               COALESCE(SUM(f.gmv), 0) AS gmv
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date >= :start
+          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+        GROUP BY 1, 2
+        ORDER BY 1, 2
+    """), {"start": start, "mkt_id": mkt_id}).mappings().all()
+
+    months: dict[str, dict] = {}
+    for r in rows:
+        mes_dt = r["mes"]
+        key = f"{mes_dt.year:04d}-{mes_dt.month:02d}"
+        if key not in months:
+            months[key] = {"mes": key, "mes_label": f"{MES_LABELS[mes_dt.month]}/{str(mes_dt.year)[2:]}", "barbours": 0, "kokeshi": 0, "apice": 0, "lescent": 0, "rituaria": 0}
+        if r["brand"] in months[key]:
+            months[key][r["brand"]] = _float(r["gmv"])
+    return {"data": list(months.values())}
