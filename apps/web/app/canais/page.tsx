@@ -431,7 +431,7 @@ export default function CanaisPage() {
                           <td className="px-4 py-3 text-right tabular-nums text-amber-700 text-xs font-bold">{tkCardPctTotal.toFixed(1)}%</td>
                           <td className="px-4 py-3 text-right tabular-nums text-slate-500 text-xs">{fmtNumber(tkVisitorsTotal)}</td>
                           <td className="px-4 py-3 text-right tabular-nums text-xs font-semibold text-slate-600">
-                            {tkConvTotal != null ? `${tkConvTotal.toFixed(1)}%` : "—"}
+                            {kpis?.tiktok_conversion_rate != null ? `${kpis.tiktok_conversion_rate.toFixed(1)}%` : "—"}
                           </td>
                         </tr>
                       )}
