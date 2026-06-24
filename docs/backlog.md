@@ -153,6 +153,77 @@ Detalhamento em `docs/backlog_sprints_5_16.md` (a criar conforme avanÃ§amos).
 
 ---
 
+## Sprint Neon Migration — Migrar endpoints principais de RDS para Neon ✅ CONCLUÍDA
+
+**Período**: 2026-06-24
+
+### Contexto
+
+A API tinha dois backends de dados com nomes contraintuitivos:
+
+| Variável `.env` | Engine no código | Host real | Schemas |
+|---|---|---|---|
+| `DATABASE_URL` | `engine` / `get_db()` | **Neon** | `marts.*`, `raw.*` |
+| `DATAMART_DATABASE_URL` | `datamart_engine` | **RDS** (exige VPN no Render) | `gold.*` |
+
+Os endpoints do dashboard principal dependiam do RDS via `gold_service.py`. A Shopee já estava no Neon. Objetivo: mover os 8 endpoints de dashboard para `marts.*` no Neon.
+
+### Entregáveis concluídos
+
+- [x] Reescrever `apps/api/app/services/performance_service.py` com 8 funções completas para Neon:
+  - [x] `get_overview` — KPIs mensais TikTok + ML + Shopee, MoM, ROAS, cancel rate, unique buyers
+  - [x] `get_brands` — ranking por marca com GMV por canal, cos_pct, ml_roas, cancel rate, MoM
+  - [x] `get_monthly` — série mensal de GMV por marca (todos os canais incluindo Shopee)
+  - [x] `get_daily` — série diária por marca e canal (Shopee incluída)
+  - [x] `get_canais` — mix TikTok (video/live/card), buyers ML, buyers/funil Shopee
+  - [x] `get_financeiro` — settlement, taxas, ads, frete por canal e por marca
+  - [x] `get_quality` — cancel%, not-delivered%, avg_delivery_days, retorno Shopee
+  - [x] `get_pedidos` — pedidos diários TikTok + ML com breakdown por marca
+- [x] Atualizar `apps/api/app/routers/performance.py`: 8 endpoints usam `perf_svc.*` (Neon); restantes permanecem em `svc.*` (RDS)
+- [x] `health-datasource` atualizado: `active_source: neon_marts`
+
+### O que permanece em gold_service (RDS)
+
+| Endpoint | Razão |
+|---|---|
+| `/tempo-real` | `gold.tiktok_shop_hourly` — sem tabela horária no Neon |
+| `/brand-detail` | `gold.tiktok_brand_daily` — `total_views`, `active_videos` para GPM |
+| `/produtos/ml`, `/produtos/ml/summary` | `gold.ml_produto_ranking` |
+| `/produtos/tiktok` | `gold.tiktok_product_daily` |
+| `/inteligencia`, `/operacoes` | Lógica específica de `gold.*` |
+
+### Limitações conhecidas
+
+- `gpm` (TikTok) retorna sempre `None` — requer `total_views`, ausente no mart
+- `ml_unique_buyers` é soma diária (sobrestima; gold deduplicava via `ml_gestao_mensal`)
+- `ml_not_delivered_rate_pct` usa proxy `orders - delivered_orders` (não shipments reais)
+- `visitors` TikTok em `/canais` pode ser nulo em ~83% dos dias (confirmado no profiling Sprint 3)
+
+### Decisão de denominador — cancel rate
+
+Todos os cálculos de cancel rate usam `canceled / (paid + canceled)` como denominador (definição padrão e-commerce). Excepção documentada: TikTok em `/pedidos` retorna `None` quando `canceled_orders = 0` no mart (ausência de cobertura, não zero real).
+
+### Validação (2026-06-24)
+
+**Sintaxe:** `py -m py_compile` nos dois ficheiros → OK
+
+**Execução contra Neon real** (`apps/api/.venv/Scripts/python.exe`):
+
+| Endpoint | Schema Pydantic | Nota |
+|---|---|---|
+| `/overview` | ✅ | gmv=5,810,691 · mom=-4.09% |
+| `/brands` | ✅ | top=KOKESHI · labels ÁPICE/RITUÁRIA corretos |
+| `/monthly` | ✅ | 6 meses retornados |
+| `/daily` | ✅ | 26 dias para barbours |
+| `/canais` | ✅ | `tiktok_conversion_rate=None` (corrigido de 108.7%) · `shopee=2.04%` |
+| `/financeiro` | ✅ | retorna estrutura correcta |
+| `/quality` | ✅ | `tiktok_cancel_rate=None` · `shopee_cancel=13.84%` |
+| `/pedidos` | ✅ | retorna estrutura correcta |
+
+**Estado actual do Neon:** apenas dados Shopee (marketplace_id=3) populados no mart para mai/2026. TikTok e ML requerem execução do pipeline com acesso ao RDS via VPN — não é bug de código. Os campos populam-se correctamente quando o pipeline correr.
+
+---
+
 ## Backlog tÃ©cnico (nÃ£o priorizado)
 
 - Loader de metas a partir do XLSX

@@ -12,6 +12,7 @@ from app.schemas.performance import (
     QualityResponse, TempoRealResponse,
 )
 from app.services import gold_service as svc
+from app.services import performance_service as perf_svc
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
 
@@ -48,7 +49,7 @@ def overview(
     db: Session = Depends(get_db),
 ):
     year, month = _parse_month(ref_month)
-    return svc.get_overview(_require_db(db), marketplace, year, month)
+    return perf_svc.get_overview(_require_db(db), marketplace, year, month)
 
 
 @router.get("/brands", response_model=BrandsResponse)
@@ -58,7 +59,7 @@ def brands(
     db: Session = Depends(get_db),
 ):
     year, month = _parse_month(ref_month)
-    return svc.get_brands(_require_db(db), marketplace, year, month)
+    return perf_svc.get_brands(_require_db(db), marketplace, year, month)
 
 
 @router.get("/monthly", response_model=MonthlyResponse)
@@ -67,7 +68,7 @@ def monthly(
     months_back: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
 ):
-    return svc.get_monthly(_require_db(db), marketplace, months_back)
+    return perf_svc.get_monthly(_require_db(db), marketplace, months_back)
 
 
 @router.get("/daily", response_model=DailyResponse)
@@ -79,7 +80,7 @@ def daily(
 ):
     if brand not in VALID_TK_BRANDS:
         raise HTTPException(404, f"Brand '{brand}' nao encontrado.")
-    return svc.get_daily(_require_db(db), brand, marketplace, days_back)
+    return perf_svc.get_daily(_require_db(db), brand, marketplace, days_back)
 
 
 @router.get("/produtos/ml/summary", response_model=ProdutosMLSummaryResponse)
@@ -150,7 +151,7 @@ def canais(
     db: Session = Depends(get_db),
 ):
     year, month = _parse_month(ref_month)
-    return svc.get_canais(_require_db(db), marketplace, year, month)
+    return perf_svc.get_canais(_require_db(db), marketplace, year, month)
 
 
 @router.get("/financeiro", response_model=FinanceiroResponse)
@@ -160,7 +161,7 @@ def financeiro(
     db: Session = Depends(get_db),
 ):
     year, month = _parse_month(ref_month)
-    return svc.get_financeiro(_require_db(db), marketplace, year, month)
+    return perf_svc.get_financeiro(_require_db(db), marketplace, year, month)
 
 
 @router.get("/quality", response_model=QualityResponse)
@@ -170,7 +171,7 @@ def quality(
     db: Session = Depends(get_db),
 ):
     year, month = _parse_month(ref_month)
-    return svc.get_quality(_require_db(db), marketplace, year, month)
+    return perf_svc.get_quality(_require_db(db), marketplace, year, month)
 
 
 @router.get("/tempo-real", response_model=TempoRealResponse)
@@ -195,13 +196,13 @@ def pedidos(
     days_back: int = Query(30, ge=7, le=90),
     db: Session = Depends(get_db),
 ):
-    return svc.get_pedidos(_require_db(db), days_back)
+    return perf_svc.get_pedidos(_require_db(db), days_back)
 
 
 @router.get("/health-datasource")
 def datasource_health(db: Session = Depends(get_db)):
     return {
-        "active_source": "gold_tables" if db is not None else "unavailable",
+        "active_source": "neon_marts" if db is not None else "unavailable",
         "db_connected": db is not None,
     }
 
