@@ -741,10 +741,25 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
-        brand = r["brand_key"]
+        row = dict(r)
+        has_quality_signal = (
+            any(
+                _f(row.get(field)) > 0
+                for field in (
+                    "orders", "canceled_orders", "returned_orders", "delivered_orders",
+                    "unique_buyers", "new_buyers", "repeat_buyers", "gmv", "seller_shipping_cost",
+                )
+            )
+            or row.get("avg_delivery_days") is not None
+            or row.get("avg_delivery_hours") is not None
+            or row.get("problem_rate") is not None
+        )
+        if not has_quality_signal:
+            continue
+        brand = row["brand_key"]
         if brand not in by_brand:
             by_brand[brand] = {}
-        by_brand[brand][r["marketplace_id"]] = dict(r)
+        by_brand[brand][row["marketplace_id"]] = row
 
     brand_rows = []
     for brand, mkts in sorted(by_brand.items()):

@@ -73,6 +73,7 @@ export default function QualityPage() {
   const showTiktok = filter !== "ml" && filter !== "shopee";
   const showMl = filter !== "tiktok" && filter !== "shopee";
   const showShopee = filter !== "tiktok" && filter !== "ml";
+  const qualityColSpan = 1 + (showTiktok ? 1 : 0) + (showMl ? 3 : 0) + (showShopee ? 2 : 0);
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -153,7 +154,7 @@ export default function QualityPage() {
             <KpiCard
               label="Nao Entregue ML"
               value={fmtRate(kpis?.ml_not_delivered_rate_pct ?? null)}
-              subvalue="Taxa de nao-entrega"
+              subvalue="Proxy: pagos - entregues"
               accent="bg-amber-500"
             />
           )}
@@ -187,7 +188,7 @@ export default function QualityPage() {
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-violet-50">
             <h2 className="text-sm font-semibold text-slate-700">Qualidade por Marca</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Pedidos com problema, cancelamentos e logistica</p>
+            <p className="text-xs text-slate-500 mt-0.5">Cancelamentos, devolucoes e tempos logisticos</p>
           </div>
 
           <div className="overflow-x-auto">
@@ -229,7 +230,7 @@ export default function QualityPage() {
               <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
                 {brands.length === 0 && !loading && (
                   <tr>
-                    <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
+                    <td colSpan={qualityColSpan} className="px-6 py-8 text-center text-slate-400 text-sm">
                       Sem dados para o periodo selecionado.
                     </td>
                   </tr>
@@ -274,7 +275,7 @@ export default function QualityPage() {
           </div>
 
           <div className="px-6 py-3 border-t border-slate-50 flex items-center gap-6 flex-wrap">
-            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Cancel. ML:</span>
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Taxas:</span>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700">
               <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &lt;2%
             </span>
@@ -285,7 +286,7 @@ export default function QualityPage() {
               <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;5%
             </span>
             <span className="ml-auto text-[10px] text-slate-400">
-              TK Entrega: dados confiaveis a partir de abr/26
+              TK: cancelamento/problema indisponiveis; ML N. Entregue = proxy pagos - entregues
             </span>
           </div>
         </div>
@@ -367,6 +368,7 @@ export default function QualityPage() {
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &lt;11%</span>
               <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 11–14%</span>
               <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;14%</span>
+              <span className="ml-auto text-[10px] text-slate-400">Compradores ML: soma diaria em validacao</span>
             </div>
           </div>
         )}
