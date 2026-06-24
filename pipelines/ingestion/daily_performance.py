@@ -1,0 +1,337 @@
+"""
+Orquestração principal da ingestão diária de performance.
+
+Uso:
+    python -m pipelines.ingestion.daily_performance --source tiktok --mode incremental
+    python -m pipelines.ingestion.daily_performance --source ml --mode backfill --days 90
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import text
+
+from pipelines.common.db import local_session
+from pipelines.common.logging import get_logger
+from pipelines.connectors.mercadolivre import connector as ml_connector
+from pipelines.connectors.shopee import connector as shopee_connector
+from pipelines.connectors.tiktok import connector as tiktok_connector
+from pipelines.quality import checks as quality
+from pipelines.transforms import ml_gestao_diaria as ml_transform
+from pipelines.transforms import shopee_ads_daily as shopee_ads_transform
+from pipelines.transforms import shopee_orders_daily as shopee_transform
+from pipelines.transforms import shopee_shop_stats_daily as shopee_stats_transform
+from pipelines.transforms import tiktok_brand_daily as tiktok_transform
+
+logger = get_logger(__name__)
+
+UPSERT_SQL = text("""
+    INSERT INTO marts.fact_marketplace_daily_performance (
+        date, loja_id, marketplace_id, empresa_id,
+        gmv, orders, units_sold, avg_ticket,
+        unique_buyers, new_buyers, repeat_buyers, repeat_buyer_rate_pct,
+        visitors, conversion_rate,
+        canceled_orders, returned_orders, refunded_orders, problem_rate, cancel_rate_pct,
+        delivered_orders, avg_delivery_hours, avg_delivery_days,
+        ad_spend, ad_revenue, ad_impressions, ad_clicks, roas, acos_pct, ctr_pct, cpc,
+        gmv_video, gmv_live, gmv_card,
+        total_settlement, total_fees, avg_fee_pct, avg_settlement_pct,
+        seller_shipping_cost, shipping_pct_of_gmv,
+        target_revenue, target_attainment_pct, projected_month_revenue,
+        data_quality_score, source_updated_at
+    ) VALUES (
+        :date, :loja_id, :marketplace_id, :empresa_id,
+        :gmv, :orders, :units_sold, :avg_ticket,
+        :unique_buyers, :new_buyers, :repeat_buyers, :repeat_buyer_rate_pct,
+        :visitors, :conversion_rate,
+        :canceled_orders, :returned_orders, :refunded_orders, :problem_rate, :cancel_rate_pct,
+        :delivered_orders, :avg_delivery_hours, :avg_delivery_days,
+        :ad_spend, :ad_revenue, :ad_impressions, :ad_clicks, :roas, :acos_pct, :ctr_pct, :cpc,
+        :gmv_video, :gmv_live, :gmv_card,
+        :total_settlement, :total_fees, :avg_fee_pct, :avg_settlement_pct,
+        :seller_shipping_cost, :shipping_pct_of_gmv,
+        :target_revenue, :target_attainment_pct, :projected_month_revenue,
+        :data_quality_score, :source_updated_at
+    )
+    ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
+        empresa_id              = EXCLUDED.empresa_id,
+        gmv                     = EXCLUDED.gmv,
+        orders                  = EXCLUDED.orders,
+        units_sold              = EXCLUDED.units_sold,
+        avg_ticket              = EXCLUDED.avg_ticket,
+        unique_buyers           = EXCLUDED.unique_buyers,
+        new_buyers              = EXCLUDED.new_buyers,
+        repeat_buyers           = EXCLUDED.repeat_buyers,
+        repeat_buyer_rate_pct   = EXCLUDED.repeat_buyer_rate_pct,
+        visitors                = EXCLUDED.visitors,
+        conversion_rate         = EXCLUDED.conversion_rate,
+        canceled_orders         = EXCLUDED.canceled_orders,
+        returned_orders         = EXCLUDED.returned_orders,
+        refunded_orders         = EXCLUDED.refunded_orders,
+        problem_rate            = EXCLUDED.problem_rate,
+        cancel_rate_pct         = EXCLUDED.cancel_rate_pct,
+        delivered_orders        = EXCLUDED.delivered_orders,
+        avg_delivery_hours      = EXCLUDED.avg_delivery_hours,
+        avg_delivery_days       = EXCLUDED.avg_delivery_days,
+        ad_spend                = EXCLUDED.ad_spend,
+        ad_revenue              = EXCLUDED.ad_revenue,
+        ad_impressions          = EXCLUDED.ad_impressions,
+        ad_clicks               = EXCLUDED.ad_clicks,
+        roas                    = EXCLUDED.roas,
+        acos_pct                = EXCLUDED.acos_pct,
+        ctr_pct                 = EXCLUDED.ctr_pct,
+        cpc                     = EXCLUDED.cpc,
+        gmv_video               = EXCLUDED.gmv_video,
+        gmv_live                = EXCLUDED.gmv_live,
+        gmv_card                = EXCLUDED.gmv_card,
+        total_settlement        = EXCLUDED.total_settlement,
+        total_fees              = EXCLUDED.total_fees,
+        avg_fee_pct             = EXCLUDED.avg_fee_pct,
+        avg_settlement_pct      = EXCLUDED.avg_settlement_pct,
+        seller_shipping_cost    = EXCLUDED.seller_shipping_cost,
+        shipping_pct_of_gmv     = EXCLUDED.shipping_pct_of_gmv,
+        data_quality_score      = EXCLUDED.data_quality_score,
+        source_updated_at       = EXCLUDED.source_updated_at,
+        ingested_at             = NOW()
+""")
+
+
+PATCH_ADS_SQL = text("""
+    INSERT INTO marts.fact_marketplace_daily_performance (
+        date, loja_id, marketplace_id, empresa_id,
+        ad_spend, ad_revenue, ad_impressions, ad_clicks,
+        roas, acos_pct, ctr_pct, cpc,
+        source_updated_at
+    ) VALUES (
+        :date, :loja_id, :marketplace_id, :empresa_id,
+        :ad_spend, :ad_revenue, :ad_impressions, :ad_clicks,
+        :roas, :acos_pct, :ctr_pct, :cpc,
+        NOW()
+    )
+    ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
+        ad_spend       = EXCLUDED.ad_spend,
+        ad_revenue     = EXCLUDED.ad_revenue,
+        ad_impressions = EXCLUDED.ad_impressions,
+        ad_clicks      = EXCLUDED.ad_clicks,
+        roas           = EXCLUDED.roas,
+        acos_pct       = EXCLUDED.acos_pct,
+        ctr_pct        = EXCLUDED.ctr_pct,
+        cpc            = EXCLUDED.cpc,
+        source_updated_at = NOW(),
+        ingested_at    = NOW()
+""")
+
+PATCH_SHOP_STATS_SQL = text("""
+    INSERT INTO marts.fact_marketplace_daily_performance (
+        date, loja_id, marketplace_id, empresa_id,
+        visitors, conversion_rate,
+        new_buyers, repeat_buyers, repeat_buyer_rate_pct, unique_buyers,
+        source_updated_at
+    ) VALUES (
+        :date, :loja_id, :marketplace_id, :empresa_id,
+        :visitors, :conversion_rate,
+        :new_buyers, :repeat_buyers, :repeat_buyer_rate_pct, :unique_buyers,
+        NOW()
+    )
+    ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
+        visitors             = EXCLUDED.visitors,
+        conversion_rate      = EXCLUDED.conversion_rate,
+        new_buyers           = EXCLUDED.new_buyers,
+        repeat_buyers        = EXCLUDED.repeat_buyers,
+        repeat_buyer_rate_pct = EXCLUDED.repeat_buyer_rate_pct,
+        unique_buyers        = EXCLUDED.unique_buyers,
+        source_updated_at    = NOW(),
+        ingested_at          = NOW()
+""")
+
+
+def _start_sync_run(session: Any, source_name: str, marketplace_id: int) -> int:
+    result = session.execute(
+        text("""
+            INSERT INTO audit.source_sync_run (source_name, marketplace_id, status, started_at)
+            VALUES (:source_name, :marketplace_id, 'running', NOW())
+            RETURNING sync_run_id
+        """),
+        {"source_name": source_name, "marketplace_id": marketplace_id},
+    )
+    session.commit()
+    return result.scalar_one()
+
+
+def _finish_sync_run(
+    session: Any,
+    sync_run_id: int,
+    status: str,
+    rows_extracted: int,
+    rows_loaded: int,
+    source_min_date,
+    source_max_date,
+    error_message: str | None = None,
+) -> None:
+    session.execute(
+        text("""
+            UPDATE audit.source_sync_run SET
+                finished_at     = NOW(),
+                status          = :status,
+                rows_extracted  = :rows_extracted,
+                rows_loaded     = :rows_loaded,
+                source_min_date = :source_min_date,
+                source_max_date = :source_max_date,
+                error_message   = :error_message
+            WHERE sync_run_id = :sync_run_id
+        """),
+        {
+            "sync_run_id": sync_run_id,
+            "status": status,
+            "rows_extracted": rows_extracted,
+            "rows_loaded": rows_loaded,
+            "source_min_date": source_min_date,
+            "source_max_date": source_max_date,
+            "error_message": error_message,
+        },
+    )
+    session.commit()
+
+
+def _log_quality_checks(
+    session: Any,
+    results: list[quality.CheckResult],
+    marketplace_id: int,
+) -> None:
+    for r in results:
+        session.execute(
+            text("""
+                INSERT INTO audit.data_quality_check
+                    (check_name, table_name, marketplace_id, status, severity, failed_rows, details)
+                VALUES
+                    (:check_name, :table_name, :marketplace_id, :status, :severity, :failed_rows, :details)
+            """),
+            {
+                "check_name": r.name,
+                "table_name": "marts.fact_marketplace_daily_performance",
+                "marketplace_id": marketplace_id,
+                "status": r.status,
+                "severity": r.severity,
+                "failed_rows": r.failed_rows,
+                "details": r.details or None,
+            },
+        )
+    session.commit()
+
+
+def run(source: str, mode: str, days_back: int = 3) -> None:
+    if source == "tiktok":
+        marketplace_id = 1
+        fetch_fn = (
+            tiktok_connector.fetch_incremental
+            if mode == "incremental"
+            else tiktok_connector.fetch_backfill
+        )
+        transform_fn = tiktok_transform.transform_batch
+    elif source == "ml":
+        marketplace_id = 2
+        fetch_fn = (
+            ml_connector.fetch_incremental
+            if mode == "incremental"
+            else ml_connector.fetch_backfill
+        )
+        transform_fn = ml_transform.transform_batch
+    elif source == "shopee":
+        marketplace_id = 3
+        fetch_fn = (
+            shopee_connector.fetch_incremental
+            if mode == "incremental"
+            else shopee_connector.fetch_backfill
+        )
+        transform_fn = shopee_transform.transform_batch
+    elif source == "shopee-stats":
+        marketplace_id = 3
+        fetch_fn = (
+            shopee_connector.fetch_shop_stats_incremental
+            if mode == "incremental"
+            else shopee_connector.fetch_shop_stats_backfill
+        )
+        transform_fn = shopee_stats_transform.transform_batch
+    elif source == "shopee-ads":
+        marketplace_id = 3
+        fetch_fn = (
+            shopee_connector.fetch_ads_incremental
+            if mode == "incremental"
+            else shopee_connector.fetch_ads_backfill
+        )
+        transform_fn = shopee_ads_transform.transform_batch
+    else:
+        raise ValueError(f"source inválido: {source!r}. Use 'tiktok', 'ml', 'shopee', 'shopee-stats' ou 'shopee-ads'.")
+
+    logger.info("Iniciando sync: source=%s mode=%s", source, mode)
+
+    with local_session() as session:
+        sync_run_id = _start_sync_run(session, f"{source}_daily", marketplace_id)
+
+    try:
+        kwargs = {"days_back": days_back} if mode == "backfill" else {}
+        raw_rows = fetch_fn(**kwargs)
+        rows_extracted = len(raw_rows)
+
+        canonical_rows = transform_fn(raw_rows)
+        logger.info("%d linhas transformadas (de %d extraídas)", len(canonical_rows), rows_extracted)
+
+        check_results = quality.run_all(canonical_rows)
+        has_critical = quality.has_critical_failure(check_results)
+
+        with local_session() as session:
+            _log_quality_checks(session, check_results, marketplace_id)
+
+        if has_critical:
+            critical = [r for r in check_results if r.status == "fail" and r.severity == "critical"]
+            msg = "; ".join(f"{r.name}: {r.details}" for r in critical)
+            logger.error("Checks críticos falharam — abortando carga: %s", msg)
+            with local_session() as session:
+                _finish_sync_run(
+                    session, sync_run_id, "failed",
+                    rows_extracted, 0, None, None, msg,
+                )
+            return
+
+        rows_loaded = 0
+        source_dates = [r["date"] for r in canonical_rows if r.get("date")]
+        if source == "shopee-stats":
+            upsert_sql = PATCH_SHOP_STATS_SQL
+        elif source == "shopee-ads":
+            upsert_sql = PATCH_ADS_SQL
+        else:
+            upsert_sql = UPSERT_SQL
+
+        with local_session() as session:
+            for row in canonical_rows:
+                session.execute(upsert_sql, row)
+                rows_loaded += 1
+            _finish_sync_run(
+                session, sync_run_id, "success",
+                rows_extracted, rows_loaded,
+                min(source_dates) if source_dates else None,
+                max(source_dates) if source_dates else None,
+            )
+
+        logger.info("Sync concluído: %d linhas carregadas", rows_loaded)
+
+    except Exception as exc:
+        logger.exception("Erro inesperado durante sync: %s", exc)
+        with local_session() as session:
+            _finish_sync_run(
+                session, sync_run_id, "failed",
+                0, 0, None, None, str(exc),
+            )
+        raise
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Pipeline de ingestão diária de marketplaces")
+    parser.add_argument("--source", required=True, choices=["tiktok", "ml", "shopee", "shopee-stats", "shopee-ads"])
+    parser.add_argument("--mode", required=True, choices=["incremental", "backfill"])
+    parser.add_argument("--days", type=int, default=3,
+                        help="Quantos dias para trás (modo incremental=3, backfill=90)")
+    args = parser.parse_args()
+    run(source=args.source, mode=args.mode, days_back=args.days)
