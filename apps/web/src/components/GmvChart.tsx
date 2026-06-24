@@ -72,9 +72,16 @@ function CustomTooltip({
   );
 }
 
+function currentMonthKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 export default function GmvChart({ data }: Props) {
+  const partial = currentMonthKey();
   const chartData = data.map((d) => ({
     ...d,
+    mes_label: d.mes === partial ? `${d.mes_label}*` : d.mes_label,
     total: BRANDS.reduce((s, b) => s + (d[b] ?? 0), 0),
   }));
 
@@ -83,7 +90,7 @@ export default function GmvChart({ data }: Props) {
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-sm font-semibold text-slate-700">Evolucao GMV — Todos os canais</h2>
         <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">
-          Linha = total consolidado
+          Linha = total consolidado · * mês parcial
         </span>
       </div>
       {data.length === 0 ? (

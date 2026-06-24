@@ -94,6 +94,7 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
   const showMlGoal = hasGoals && visibleMl && brands.some((b) => goals[b.brand]?.ml != null);
   const showShGoal = hasGoals && visibleSh && brands.some((b) => goals[b.brand]?.shopee != null);
   const showMlRoas = visibleMl && brands.some((b) => b.ml_roas != null);
+  const showGpm = visibleTk && brands.some((b) => b.gpm != null);
 
   const totalActual = brands.reduce((s, b) => {
     let v = 0;
@@ -154,11 +155,11 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
             <th className="text-right px-2 py-2.5">Ticket</th>
             <th className="text-right px-2 py-2.5">MoM</th>
             {visibleTk && <th className="text-right px-2 py-2.5">COS%</th>}
-            {visibleTk && <th className="text-right px-2 py-2.5">R$/1k</th>}
+            {showGpm && <th className="text-right px-2 py-2.5">R$/1k</th>}
             {showMlRoas && <th className="text-right px-2 py-2.5">ROAS</th>}
-            {showTkGoal && <th className="text-right px-2 py-2.5">Meta TK</th>}
-            {showMlGoal && <th className="text-right px-2 py-2.5">Meta ML</th>}
-            {showShGoal && <th className="text-right px-4 py-2.5">Meta SH</th>}
+            {showTkGoal && <th className="text-right px-3 py-2.5">Meta TK</th>}
+            {showMlGoal && <th className="text-right px-3 py-2.5">Meta ML</th>}
+            {showShGoal && <th className="text-right px-3 py-2.5">Meta SH</th>}
           </tr>
         </thead>
         <tbody>
@@ -245,8 +246,8 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
                   </td>
                 )}
 
-                {/* R$/1k views (GPM) */}
-                {visibleTk && (
+                {/* R$/1k views (GPM) — só renderiza quando há dados */}
+                {showGpm && (
                   <td className="text-right px-2 py-2.5 text-xs text-slate-500 tabular-nums">
                     {b.gpm != null ? `R$${b.gpm.toFixed(0)}` : <span className="text-slate-300">—</span>}
                   </td>
@@ -267,21 +268,21 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
 
                 {/* Meta TK */}
                 {showTkGoal && (
-                  <td className="text-right px-2 py-2.5">
+                  <td className="text-right px-3 py-2.5">
                     <MiniBar actual={b.tiktok_gmv} goal={goals[b.brand]?.tiktok ?? null} mounted={mounted} />
                   </td>
                 )}
 
                 {/* Meta ML */}
                 {showMlGoal && (
-                  <td className="text-right px-2 py-2.5">
+                  <td className="text-right px-3 py-2.5">
                     <MiniBar actual={b.ml_gmv} goal={goals[b.brand]?.ml ?? null} mounted={mounted} />
                   </td>
                 )}
 
                 {/* Meta SH */}
                 {showShGoal && (
-                  <td className="text-right px-4 py-2.5">
+                  <td className="text-right px-3 py-2.5">
                     <MiniBar actual={b.shopee_gmv} goal={goals[b.brand]?.shopee ?? null} mounted={mounted} />
                   </td>
                 )}

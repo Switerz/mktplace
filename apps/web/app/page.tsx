@@ -130,7 +130,7 @@ export default function Dashboard() {
             label="Pedidos"
             value={overview ? fmtNumber(overview.orders) : "—"}
             subvalue={overview && (overview.tiktok_customers != null || overview.ml_unique_buyers != null || overview.shopee_unique_buyers != null)
-              ? `${fmtNumber((overview.tiktok_customers ?? 0) + (overview.ml_unique_buyers ?? 0) + (overview.shopee_unique_buyers ?? 0))} compradores`
+              ? `${fmtNumber((overview.tiktok_customers ?? 0) + (overview.ml_unique_buyers ?? 0) + (overview.shopee_unique_buyers ?? 0))} compradores (est.)`
               : undefined}
             accent="bg-cyan-500"
           />
