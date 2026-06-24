@@ -3161,7 +3161,7 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
             "shopee_gmv_per_buyer": _safe_div(_float(sh.get("gmv")), sh_brand_unique),
             "shopee_cancel_rate_pct": _pct_from_source(sh.get("cancel_rate_pct")),
             "shopee_visitors": int(_float(sh.get("visitors"))) or None,
-            "shopee_conversion_rate": _pct_from_source(sh.get("conversion_rate")),
+            "shopee_conversion_rate": _ratio_pct(sh_brand_unique, _float(sh.get("visitors"))),
         })
 
     return {
@@ -3192,7 +3192,7 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
             "shopee_repeat_buyer_rate_pct": _ratio_pct(sh_repeat, sh_unique),
             "shopee_gmv_per_buyer": _safe_div(sh_gmv, sh_unique),
             "shopee_visitors": sh_visitors or None,
-            "shopee_conversion_rate": _market_avg_pct(rows, 3, "conversion_rate"),
+            "shopee_conversion_rate": _ratio_pct(sh_unique, sh_visitors),
         },
         "brands": brands,
     }
