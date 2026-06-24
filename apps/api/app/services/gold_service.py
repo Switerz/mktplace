@@ -2696,3 +2696,381 @@ def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
         if r["brand"] in months[key]:
             months[key][r["brand"]] = _float(r["gmv"])
     return {"data": list(months.values())}
+
+# ---------------------------------------------------------------------------
+# More Neon runtime overrides for dashboard tabs
+# ---------------------------------------------------------------------------
+
+def _fact_brand_rows(db: Session, start: date, end: date, mkt_id: int | None = None) -> list[dict]:
+    return [dict(r) for r in db.execute(text("""
+        SELECT
+            l.brand_key AS brand,
+            f.marketplace_id,
+            COALESCE(SUM(f.gmv), 0) AS gmv,
+            COALESCE(SUM(f.orders), 0) AS orders,
+            COALESCE(SUM(f.units_sold), 0) AS units_sold,
+            COALESCE(SUM(f.unique_buyers), 0) AS unique_buyers,
+            COALESCE(SUM(f.new_buyers), 0) AS new_buyers,
+            COALESCE(SUM(f.repeat_buyers), 0) AS repeat_buyers,
+            AVG(f.repeat_buyer_rate_pct) AS repeat_buyer_rate_pct,
+            COALESCE(SUM(f.visitors), 0) AS visitors,
+            AVG(f.conversion_rate) AS conversion_rate,
+            COALESCE(SUM(f.canceled_orders), 0) AS canceled_orders,
+            COALESCE(SUM(f.returned_orders), 0) AS returned_orders,
+            COALESCE(SUM(f.refunded_orders), 0) AS refunded_orders,
+            AVG(f.problem_rate) AS problem_rate,
+            AVG(f.cancel_rate_pct) AS cancel_rate_pct,
+            COALESCE(SUM(f.delivered_orders), 0) AS delivered_orders,
+            AVG(f.avg_delivery_hours) AS avg_delivery_hours,
+            AVG(f.avg_delivery_days) AS avg_delivery_days,
+            COALESCE(SUM(f.ad_spend), 0) AS ad_spend,
+            COALESCE(SUM(f.ad_revenue), 0) AS ad_revenue,
+            COALESCE(SUM(f.ad_impressions), 0) AS ad_impressions,
+            COALESCE(SUM(f.ad_clicks), 0) AS ad_clicks,
+            AVG(f.roas) AS avg_roas,
+            AVG(f.acos_pct) AS acos_pct,
+            AVG(f.ctr_pct) AS ctr_pct,
+            AVG(f.cpc) AS cpc,
+            COALESCE(SUM(f.gmv_video), 0) AS gmv_video,
+            COALESCE(SUM(f.gmv_live), 0) AS gmv_live,
+            COALESCE(SUM(f.gmv_card), 0) AS gmv_card,
+            COALESCE(SUM(f.total_settlement), 0) AS total_settlement,
+            COALESCE(SUM(f.total_fees), 0) AS total_fees,
+            AVG(f.avg_fee_pct) AS avg_fee_pct,
+            AVG(f.avg_settlement_pct) AS avg_settlement_pct,
+            COALESCE(SUM(f.seller_shipping_cost), 0) AS seller_shipping_cost,
+            AVG(f.shipping_pct_of_gmv) AS shipping_pct_of_gmv
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+        GROUP BY l.brand_key, f.marketplace_id
+        ORDER BY l.brand_key, f.marketplace_id
+    """), {"start": start, "end": end, "mkt_id": mkt_id}).mappings()]
+
+
+def _by_brand_market(rows: list[dict]) -> dict[str, dict[int, dict]]:
+    result: dict[str, dict[int, dict]] = {}
+    for r in rows:
+        result.setdefault(r["brand"], {})[int(r["marketplace_id"])] = r
+    return result
+
+
+def _sum(rows: list[dict], marketplace_id: int, key: str) -> float:
+    return sum(_float(r.get(key)) for r in rows if int(r.get("marketplace_id", 0)) == marketplace_id)
+
+
+def _avg_nonzero(values: list[float]) -> float | None:
+    vals = [v for v in values if v]
+    return sum(vals) / len(vals) if vals else None
+
+
+def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+
+    tk_gmv = _sum(rows, 1, "gmv")
+    tk_video = _sum(rows, 1, "gmv_video")
+    tk_live = _sum(rows, 1, "gmv_live")
+    tk_card = _sum(rows, 1, "gmv_card")
+    tk_visitors = int(_sum(rows, 1, "visitors"))
+    tk_customers = int(_sum(rows, 1, "unique_buyers"))
+    ml_gmv = _sum(rows, 2, "gmv")
+    ml_unique = int(_sum(rows, 2, "unique_buyers"))
+    ml_new = int(_sum(rows, 2, "new_buyers"))
+    ml_repeat = int(_sum(rows, 2, "repeat_buyers"))
+    sh_gmv = _sum(rows, 3, "gmv")
+    sh_unique = int(_sum(rows, 3, "unique_buyers"))
+    sh_new = int(_sum(rows, 3, "new_buyers"))
+    sh_repeat = int(_sum(rows, 3, "repeat_buyers"))
+    sh_visitors = int(_sum(rows, 3, "visitors"))
+
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        tk_brand_gmv = _float(tk.get("gmv"))
+        ml_brand_unique = int(_float(ml.get("unique_buyers")))
+        sh_brand_unique = int(_float(sh.get("unique_buyers")))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_gmv": tk_brand_gmv or None,
+            "tiktok_gmv_video": _float(tk.get("gmv_video")) or None,
+            "tiktok_gmv_live": _float(tk.get("gmv_live")) or None,
+            "tiktok_gmv_card": _float(tk.get("gmv_card")) or None,
+            "tiktok_video_pct": round(_float(tk.get("gmv_video")) / tk_brand_gmv * 100, 1) if tk_brand_gmv else None,
+            "tiktok_live_pct": round(_float(tk.get("gmv_live")) / tk_brand_gmv * 100, 1) if tk_brand_gmv else None,
+            "tiktok_card_pct": round(_float(tk.get("gmv_card")) / tk_brand_gmv * 100, 1) if tk_brand_gmv else None,
+            "tiktok_visitors": int(_float(tk.get("visitors"))) or None,
+            "tiktok_customers": int(_float(tk.get("unique_buyers"))) or None,
+            "tiktok_conversion_rate": round(_float(tk.get("unique_buyers")) / _float(tk.get("visitors")) * 100, 2) if _float(tk.get("visitors")) else None,
+            "ml_gmv": _float(ml.get("gmv")) or None,
+            "ml_unique_buyers": ml_brand_unique or None,
+            "ml_new_buyers": int(_float(ml.get("new_buyers"))) or None,
+            "ml_repeat_buyers": int(_float(ml.get("repeat_buyers"))) or None,
+            "ml_repeat_buyer_rate_pct": _float(ml.get("repeat_buyer_rate_pct")) or None,
+            "ml_gmv_per_buyer": round(_float(ml.get("gmv")) / ml_brand_unique, 2) if ml_brand_unique else None,
+            "shopee_gmv": _float(sh.get("gmv")) or None,
+            "shopee_unique_buyers": sh_brand_unique or None,
+            "shopee_new_buyers": int(_float(sh.get("new_buyers"))) or None,
+            "shopee_repeat_buyers": int(_float(sh.get("repeat_buyers"))) or None,
+            "shopee_new_buyer_pct": round(_float(sh.get("new_buyers")) / sh_brand_unique * 100, 1) if sh_brand_unique else None,
+            "shopee_repeat_buyer_rate_pct": _float(sh.get("repeat_buyer_rate_pct")) or None,
+            "shopee_gmv_per_buyer": round(_float(sh.get("gmv")) / sh_brand_unique, 2) if sh_brand_unique else None,
+            "shopee_cancel_rate_pct": _float(sh.get("cancel_rate_pct")) or None,
+            "shopee_visitors": int(_float(sh.get("visitors"))) or None,
+            "shopee_conversion_rate": _float(sh.get("conversion_rate")) or None,
+        })
+
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_gmv": tk_gmv or None,
+            "tiktok_gmv_video": tk_video or None,
+            "tiktok_gmv_live": tk_live or None,
+            "tiktok_gmv_card": tk_card or None,
+            "tiktok_video_pct": round(tk_video / tk_gmv * 100, 1) if tk_gmv else None,
+            "tiktok_live_pct": round(tk_live / tk_gmv * 100, 1) if tk_gmv else None,
+            "tiktok_card_pct": round(tk_card / tk_gmv * 100, 1) if tk_gmv else None,
+            "tiktok_visitors": tk_visitors or None,
+            "tiktok_customers": tk_customers or None,
+            "tiktok_conversion_rate": round(tk_customers / tk_visitors * 100, 2) if tk_visitors else None,
+            "ml_unique_buyers": ml_unique or None,
+            "ml_new_buyers": ml_new or None,
+            "ml_repeat_buyers": ml_repeat or None,
+            "ml_new_buyer_pct": round(ml_new / ml_unique * 100, 1) if ml_unique else None,
+            "ml_repeat_buyer_rate_pct": round(ml_repeat / ml_unique * 100, 1) if ml_unique else None,
+            "ml_gmv_per_buyer": round(ml_gmv / ml_unique, 2) if ml_unique else None,
+            "shopee_gmv": sh_gmv or None,
+            "shopee_unique_buyers": sh_unique or None,
+            "shopee_new_buyers": sh_new or None,
+            "shopee_repeat_buyers": sh_repeat or None,
+            "shopee_new_buyer_pct": round(sh_new / sh_unique * 100, 1) if sh_unique else None,
+            "shopee_repeat_buyer_rate_pct": round(sh_repeat / sh_unique * 100, 1) if sh_unique else None,
+            "shopee_gmv_per_buyer": round(sh_gmv / sh_unique, 2) if sh_unique else None,
+            "shopee_visitors": sh_visitors or None,
+            "shopee_conversion_rate": round(sh_unique / sh_visitors * 100, 2) if sh_visitors else None,
+        },
+        "brands": brands,
+    }
+
+
+def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        ml_spend = _float(ml.get("ad_spend"))
+        sh_spend = _float(sh.get("ad_spend"))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_gmv": _float(tk.get("gmv")) or None,
+            "tiktok_settlement": _float(tk.get("total_settlement")) or None,
+            "tiktok_fees": _float(tk.get("total_fees")) or None,
+            "tiktok_avg_fee_pct": _float(tk.get("avg_fee_pct")) or None,
+            "tiktok_avg_settlement_pct": _float(tk.get("avg_settlement_pct")) or None,
+            "ml_gmv": _float(ml.get("gmv")) or None,
+            "ml_ad_spend": ml_spend or None,
+            "ml_ad_revenue": _float(ml.get("ad_revenue")) or None,
+            "ml_roas": round(_float(ml.get("ad_revenue")) / ml_spend, 2) if ml_spend else None,
+            "ml_acos_pct": _float(ml.get("acos_pct")) or None,
+            "ml_cpc": _float(ml.get("cpc")) or None,
+            "ml_ctr_pct": _float(ml.get("ctr_pct")) or None,
+            "ml_ad_clicks": int(_float(ml.get("ad_clicks"))) or None,
+            "ml_ad_impressions": int(_float(ml.get("ad_impressions"))) or None,
+            "ml_seller_shipping_cost": _float(ml.get("seller_shipping_cost")) or None,
+            "ml_shipping_pct_of_gmv": _float(ml.get("shipping_pct_of_gmv")) or None,
+            "shopee_gmv": _float(sh.get("gmv")) or None,
+            "shopee_settlement": _float(sh.get("total_settlement")) or None,
+            "shopee_fees": _float(sh.get("total_fees")) or None,
+            "shopee_avg_fee_pct": _float(sh.get("avg_fee_pct")) or None,
+            "shopee_avg_settlement_pct": _float(sh.get("avg_settlement_pct")) or None,
+            "shopee_ad_spend": sh_spend or None,
+            "shopee_ad_revenue": _float(sh.get("ad_revenue")) or None,
+            "shopee_roas": round(_float(sh.get("ad_revenue")) / sh_spend, 2) if sh_spend else None,
+            "shopee_shipping_cost": _float(sh.get("seller_shipping_cost")) or None,
+            "shopee_shipping_pct_of_gmv": _float(sh.get("shipping_pct_of_gmv")) or None,
+        })
+
+    tk_gmv = _sum(rows, 1, "gmv")
+    tk_settlement = _sum(rows, 1, "total_settlement")
+    tk_fees = _sum(rows, 1, "total_fees")
+    ml_spend = _sum(rows, 2, "ad_spend")
+    ml_revenue = _sum(rows, 2, "ad_revenue")
+    ml_clicks = _sum(rows, 2, "ad_clicks")
+    sh_gmv = _sum(rows, 3, "gmv")
+    sh_spend = _sum(rows, 3, "ad_spend")
+    sh_revenue = _sum(rows, 3, "ad_revenue")
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_gmv": tk_gmv or None,
+            "tiktok_settlement": tk_settlement or None,
+            "tiktok_fees": tk_fees or None,
+            "tiktok_avg_fee_pct": round(abs(tk_fees) / tk_gmv * 100, 2) if tk_gmv else None,
+            "tiktok_avg_settlement_pct": round(tk_settlement / tk_gmv * 100, 2) if tk_gmv else None,
+            "ml_ad_spend": ml_spend or None,
+            "ml_ad_revenue": ml_revenue or None,
+            "ml_roas": round(ml_revenue / ml_spend, 2) if ml_spend else None,
+            "ml_acos_pct": round(ml_spend / ml_revenue * 100, 2) if ml_revenue else None,
+            "ml_cpc": round(ml_spend / ml_clicks, 4) if ml_clicks else None,
+            "shopee_gmv": sh_gmv or None,
+            "shopee_ad_spend": sh_spend or None,
+            "shopee_roas": round(sh_revenue / sh_spend, 2) if sh_spend else None,
+        },
+        "brands": brands,
+    }
+
+
+def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        tk_orders = int(_float(tk.get("orders")))
+        ml_orders = int(_float(ml.get("orders")))
+        sh_orders = int(_float(sh.get("orders")))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_orders": tk_orders or None,
+            "tiktok_canceled": int(_float(tk.get("canceled_orders"))) or None,
+            "tiktok_refunded": int(_float(tk.get("refunded_orders"))) or None,
+            "tiktok_returned": int(_float(tk.get("returned_orders"))) or None,
+            "tiktok_problem_rate": _float(tk.get("problem_rate")) or None,
+            "tiktok_cancel_rate": round(_float(tk.get("canceled_orders")) / tk_orders * 100, 2) if tk_orders else None,
+            "tiktok_avg_delivery_days": round(_float(tk.get("avg_delivery_hours")) / 24, 2) if _float(tk.get("avg_delivery_hours")) else None,
+            "ml_cancel_rate_pct": _float(ml.get("cancel_rate_pct")) or None,
+            "ml_cancelled_orders": int(_float(ml.get("canceled_orders"))) or None,
+            "ml_total_orders": ml_orders or None,
+            "ml_avg_delivery_days": _float(ml.get("avg_delivery_days")) or None,
+            "ml_repeat_buyer_rate_pct": _float(ml.get("repeat_buyer_rate_pct")) or None,
+            "ml_gmv_per_buyer": round(_float(ml.get("gmv")) / _float(ml.get("unique_buyers")), 2) if _float(ml.get("unique_buyers")) else None,
+            "ml_new_buyers": int(_float(ml.get("new_buyers"))) or None,
+            "ml_unique_buyers": int(_float(ml.get("unique_buyers"))) or None,
+            "ml_shipping_pct_of_gmv": _float(ml.get("shipping_pct_of_gmv")) or None,
+            "shopee_orders": sh_orders or None,
+            "shopee_canceled_orders": int(_float(sh.get("canceled_orders"))) or None,
+            "shopee_returned_orders": int(_float(sh.get("returned_orders"))) or None,
+            "shopee_cancel_rate_pct": _float(sh.get("cancel_rate_pct")) or None,
+        })
+    tk_orders_total = _sum(rows, 1, "orders")
+    ml_orders_total = _sum(rows, 2, "orders")
+    sh_orders_total = _sum(rows, 3, "orders")
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_problem_rate": _avg_nonzero([_float(r.get("problem_rate")) for r in rows if int(r.get("marketplace_id", 0)) == 1]),
+            "tiktok_cancel_rate": round(_sum(rows, 1, "canceled_orders") / tk_orders_total * 100, 2) if tk_orders_total else None,
+            "tiktok_avg_delivery_days": _avg_nonzero([_float(r.get("avg_delivery_hours")) / 24 for r in rows if int(r.get("marketplace_id", 0)) == 1]),
+            "ml_cancel_rate_pct": round(_sum(rows, 2, "canceled_orders") / ml_orders_total * 100, 2) if ml_orders_total else None,
+            "ml_avg_delivery_days": _avg_nonzero([_float(r.get("avg_delivery_days")) for r in rows if int(r.get("marketplace_id", 0)) == 2]),
+            "shopee_cancel_rate_pct": round(_sum(rows, 3, "canceled_orders") / sh_orders_total * 100, 2) if sh_orders_total else None,
+            "shopee_return_rate_pct": round(_sum(rows, 3, "returned_orders") / sh_orders_total * 100, 2) if sh_orders_total else None,
+        },
+        "brands": brands,
+    }
+
+
+def get_pedidos(db: Session, days_back: int = 30) -> dict:
+    date_from = date.today() - timedelta(days=days_back)
+    rows = [dict(r) for r in db.execute(text("""
+        SELECT f.date, l.brand_key AS brand, f.marketplace_id,
+               COALESCE(f.orders, 0) AS orders,
+               COALESCE(f.canceled_orders, 0) AS canceled_orders,
+               COALESCE(f.delivered_orders, 0) AS delivered_orders,
+               COALESCE(f.gmv, 0) AS gmv
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date >= :date_from
+          AND f.marketplace_id IN (1, 2)
+        ORDER BY f.date, l.brand_key, f.marketplace_id
+    """), {"date_from": date_from}).mappings()]
+
+    tk_orders = sum(int(_float(r["orders"])) for r in rows if int(r["marketplace_id"]) == 1)
+    ml_orders = sum(int(_float(r["orders"])) for r in rows if int(r["marketplace_id"]) == 2)
+    tk_canceled = sum(int(_float(r["canceled_orders"])) for r in rows if int(r["marketplace_id"]) == 1)
+    ml_canceled = sum(int(_float(r["canceled_orders"])) for r in rows if int(r["marketplace_id"]) == 2)
+    tk_gmv = sum(_float(r["gmv"]) for r in rows if int(r["marketplace_id"]) == 1)
+    ml_gmv = sum(_float(r["gmv"]) for r in rows if int(r["marketplace_id"]) == 2)
+    total_orders = tk_orders + ml_orders
+    total_gmv = tk_gmv + ml_gmv
+
+    by_day: dict[str, dict] = {}
+    by_brand: dict[str, dict] = {}
+    for r in rows:
+        d = str(r["date"])
+        day = by_day.setdefault(d, {"date": d, "tiktok_orders": 0, "tiktok_canceled": 0, "ml_orders": 0, "ml_canceled": 0, "total_orders": 0, "total_gmv": 0.0})
+        brand = r["brand"]
+        b = by_brand.setdefault(brand, {"brand": brand, "label": BRAND_LABELS.get(brand, brand.upper()), "total_orders": 0, "total_gmv": 0.0})
+        orders = int(_float(r["orders"]))
+        canceled = int(_float(r["canceled_orders"]))
+        gmv = _float(r["gmv"])
+        mid = int(r["marketplace_id"])
+        if mid == 1:
+            day["tiktok_orders"] += orders
+            day["tiktok_canceled"] += canceled
+            b["tiktok_orders"] = (b.get("tiktok_orders") or 0) + orders
+            b["tiktok_canceled"] = (b.get("tiktok_canceled") or 0) + canceled
+            b["tiktok_gmv"] = (b.get("tiktok_gmv") or 0) + gmv
+        elif mid == 2:
+            day["ml_orders"] += orders
+            day["ml_canceled"] += canceled
+            b["ml_orders"] = (b.get("ml_orders") or 0) + orders
+            b["ml_canceled"] = (b.get("ml_canceled") or 0) + canceled
+            b["ml_gmv"] = (b.get("ml_gmv") or 0) + gmv
+        day["total_orders"] += orders
+        day["total_gmv"] += gmv
+        b["total_orders"] += orders
+        b["total_gmv"] += gmv
+
+    for b in by_brand.values():
+        if b.get("tiktok_orders"):
+            b["tiktok_cancel_rate_pct"] = round((b.get("tiktok_canceled") or 0) / b["tiktok_orders"] * 100, 2)
+        if b.get("ml_orders"):
+            b["ml_cancel_rate_pct"] = round((b.get("ml_canceled") or 0) / b["ml_orders"] * 100, 2)
+
+    return {
+        "days_back": days_back,
+        "kpis": {
+            "total_orders": total_orders,
+            "total_gmv": round(total_gmv, 2),
+            "avg_ticket": round(total_gmv / total_orders, 2) if total_orders else 0.0,
+            "cancel_rate_pct": round((tk_canceled + ml_canceled) / total_orders * 100, 2) if total_orders else None,
+        },
+        "tiktok": {
+            "orders": tk_orders,
+            "canceled": tk_canceled,
+            "gmv": round(tk_gmv, 2),
+            "cancel_rate_pct": round(tk_canceled / tk_orders * 100, 2) if tk_orders else None,
+            "delivered": sum(int(_float(r["delivered_orders"])) for r in rows if int(r["marketplace_id"]) == 1) or None,
+        },
+        "ml": {
+            "orders": ml_orders,
+            "canceled": ml_canceled,
+            "gmv": round(ml_gmv, 2),
+            "cancel_rate_pct": round(ml_canceled / ml_orders * 100, 2) if ml_orders else None,
+            "delivered": sum(int(_float(r["delivered_orders"])) for r in rows if int(r["marketplace_id"]) == 2) or None,
+        },
+        "daily": list(by_day.values()),
+        "by_brand": sorted(by_brand.values(), key=lambda r: -r["total_gmv"]),
+    }
