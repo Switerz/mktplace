@@ -117,7 +117,6 @@ export default function CanaisPage() {
   const tkLiveTotal = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_live ?? 0), 0);
   const tkCardTotal = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_card ?? 0), 0);
   const tkVisitorsTotal = tkBrands.reduce((s, b) => s + (b.tiktok_visitors ?? 0), 0);
-  const tkCustomersTotal = tkBrands.reduce((s, b) => s + (b.tiktok_customers ?? 0), 0);
 
   // totais ML
   const mlGmvTotal = mlBrands.reduce((s, b) => s + (b.ml_gmv ?? 0), 0);
@@ -134,7 +133,6 @@ export default function CanaisPage() {
   const tkVidPctTotal = tkGmvTotal > 0 ? (tkVidTotal / tkGmvTotal) * 100 : 0;
   const tkLivePctTotal = tkGmvTotal > 0 ? (tkLiveTotal / tkGmvTotal) * 100 : 0;
   const tkCardPctTotal = tkGmvTotal > 0 ? (tkCardTotal / tkGmvTotal) * 100 : 0;
-  const tkConvTotal = tkVisitorsTotal > 0 ? (tkCustomersTotal / tkVisitorsTotal) * 100 : null;
 
   const mlNewPctTotal = mlBuyersTotal > 0 ? (mlNewTotal / mlBuyersTotal) * 100 : 0;
   const mlRepeatPctTotal = mlBuyersTotal > 0 ? (mlRepeatTotal / mlBuyersTotal) * 100 : 0;
@@ -553,7 +551,7 @@ export default function CanaisPage() {
                 </div>
               </div>
               <p className="ml-auto text-[11px] text-slate-400 self-end">
-                Recompra = compradores com historico previo na marca no ML · compradores unicos deduplicados no mes
+                Recompra = compradores com historico previo na marca no ML · compradores mensais em validacao
               </p>
             </div>
           </div>
@@ -678,7 +676,7 @@ export default function CanaisPage() {
                 </div>
               </div>
               <p className="ml-auto text-[11px] text-slate-400 self-end">
-                Recompra = compradores com historico previo na marca na Shopee · compradores unicos deduplicados no mes
+                Recompra = compradores com historico previo na marca na Shopee · compradores mensais em validacao
               </p>
             </div>
           </div>

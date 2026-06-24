@@ -3,7 +3,7 @@
 Criado: 2026-06-24  
 Referência: Mai/2026  
 Fonte Neon: `ep-lively-frost-a6eg1wh2.us-west-2.aws.neon.tech` (`marts.*`)  
-Fonte RDS: `gold.*` — sem acesso VPN ativo nesta sessão  
+Fonte RDS/Data Mart: `gold.*` — consulta parcial via Metabase; validações complementares pendentes
 
 ---
 
@@ -97,7 +97,7 @@ Entender performance e perfil por marketplace/canal:
 
 ## 4. Queries executadas e resultados Mai/2026
 
-> **Nota:** Validação indireta via `gold_vs_marts_matrix.md` (auditoria anterior de 2026-06-24). Não foi executada query direta nesta sessão por ausência de conexão ativa ao Neon neste contexto.
+> **Nota:** Validação direta executada contra Neon para o endpoint `/canais` e para `marts.fact_marketplace_daily_performance`. Também houve consulta parcial ao Data Mart via Metabase para `gold.tiktok_brand_daily` e inspeção de `gold.v_channel_efficiency`.
 
 ### 4.1 Resumo de cobertura do mart (base gold_vs_marts_matrix)
 
@@ -113,6 +113,7 @@ Entender performance e perfil por marketplace/canal:
 - **unique_buyers:** 233.910 (soma diária — pode contar comprador múltiplas vezes)
 - **conversion_rate (avg daily):** ~3.1% (de 5 dias com dados não-zero em ~155 linhas TikTok mai/26)
 - **gmv_video / gmv_live / gmv_card:** campos populados ✅
+- **gold.tiktok_brand_daily validado via Metabase:** GMV total R$ 13.395.985,86; video 50,7%; live 21,6%; card 27,7%; visitors 215.178; customers 233.910; Barbours 72,5% do GMV TikTok.
 
 ### 4.3 ML Mai/2026
 
@@ -202,14 +203,14 @@ Substituída a exibição de `tkConvTotal` por `kpis?.tiktok_conversion_rate` na
 
 ## 9. Oportunidades futuras vindas do Data Mart (gold.*)
 
-> Acesso ao RDS não estava disponível nesta sessão. Itens marcados como "(gold — a confirmar)" dependem de acesso VPN.
+> O Data Mart foi consultado parcialmente. `gold.tiktok_brand_daily` confirmou os principais números de TikTok e `gold.v_channel_efficiency` existe com colunas de funil. Ainda falta mapear quais campos devem ser copiados para o mart do Neon e validar cobertura por mês/marca.
 
 ### 9.1 TikTok
 
 | Oportunidade | Fonte gold (a confirmar) | Valor para a aba |
 |---|---|---|
 | `total_views` para GPM | `gold.tiktok_brand_daily.total_views` | GPM = GMV / views × 1000. Métrica de eficiência de conteúdo |
-| Impressions / page_views / CTR por canal | `gold.v_channel_efficiency` | Funil completo: impressão → página → compra |
+| Impressions / page_views / CTR por canal | `gold.v_channel_efficiency` (`impressions`, `page_views`, `unique_pv`, `ctr_pct`, `conversion_pct`, `gmv_per_1k_impressions`, `gmv_per_page_view`) | Funil completo: impressão → página → compra |
 | Dados de creators | `gold.tiktok_creator_daily` | Top creators por marca, GMV por criador, GPM por criador |
 | Novos vídeos postados | `gold.tiktok_brand_daily.new_videos_posted` | Volume de produção de conteúdo |
 | Lives e minutos ao vivo | `gold.tiktok_brand_daily` | GMV por live, GMV por minuto de live |
@@ -242,7 +243,7 @@ Substituída a exibição de `tkConvTotal` por `kpis?.tiktok_conversion_rate` na
 
 2. **Adicionar nota visual** na tabela TikTok sobre `tiktok_customers` ser soma diária (pode aparecer > visitantes por marca em alguns casos). Já existe nota de rodapé sobre cobertura de visitantes — pode ser expandida.
 
-3. **Adicionar badge "proxy"** ao lado de "Compradores ML" e "Compradores Shopee" para sinalizar que o número é soma diária, não deduplilcado mensal. O usuário precisa saber que `43.841 compradores ML` é uma contagem inflada.
+3. **Adicionar badge "proxy"** ao lado de "Compradores ML" e "Compradores Shopee" para sinalizar que o número é soma diária, não deduplicado mensal. O usuário precisa saber que `43.841 compradores ML` é uma contagem inflada.
 
 4. **ML — ocultar GMV/comprador ML** ou adicionar nota de que é subestimado (denominador inflado). O valor absoluto pode enganar.
 
@@ -281,5 +282,5 @@ Substituída a exibição de `tkConvTotal` por `kpis?.tiktok_conversion_rate` na
 
 | Arquivo | Mudança |
 |---|---|
-| `apps/web/app/canais/page.tsx` | Bug fix: linha TOTAL TikTok — conversão substituída de `tkConvTotal` para `kpis?.tiktok_conversion_rate` |
+| `apps/web/app/canais/page.tsx` | Bug fix: linha TOTAL TikTok — conversão substituída de `tkConvTotal` para `kpis?.tiktok_conversion_rate`; removido cálculo legado não usado; rodapés de ML/Shopee ajustados para não afirmar deduplicação mensal não validada |
 | `docs/sections/canais_audit.md` | Criado (este documento) |
