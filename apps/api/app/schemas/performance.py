@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from typing import Optional
@@ -140,9 +140,11 @@ class FinanceiroKpis(BaseModel):
     tiktok_avg_settlement_pct: Optional[float] = None
     ml_ad_spend: Optional[float] = None
     ml_ad_revenue: Optional[float] = None
+    ml_gmv: Optional[float] = None
     ml_roas: Optional[float] = None
     ml_acos_pct: Optional[float] = None
     ml_cpc: Optional[float] = None
+    ml_total_cost_pct: Optional[float] = None
     shopee_gmv: Optional[float] = None
     shopee_settlement: Optional[float] = None
     shopee_fees: Optional[float] = None
@@ -171,6 +173,7 @@ class FinanceiroBrandRow(BaseModel):
     ml_ad_impressions: Optional[int] = None
     ml_seller_shipping_cost: Optional[float] = None
     ml_shipping_pct_of_gmv: Optional[float] = None
+    ml_total_cost_pct: Optional[float] = None
     shopee_gmv: Optional[float] = None
     shopee_settlement: Optional[float] = None
     shopee_fees: Optional[float] = None

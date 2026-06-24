@@ -1,4 +1,4 @@
-﻿"""
+"""
 Queries diretas às gold tables do Data Mart via SQLAlchemy.
 
 Substitui metabase_service.py eliminando o hop HTTP do Metabase.
@@ -3073,4 +3073,274 @@ def get_pedidos(db: Session, days_back: int = 30) -> dict:
         },
         "daily": list(by_day.values()),
         "by_brand": sorted(by_brand.values(), key=lambda r: -r["total_gmv"]),
+    }
+
+# Metric-quality overrides after Neon recheck
+# ---------------------------------------------------------------------------
+
+def _pct_from_source(value) -> float | None:
+    v = _float(value)
+    if not v:
+        return None
+    return round(v * 100, 2) if abs(v) <= 1 else round(v, 2)
+
+
+def _ratio_pct(numerator: float, denominator: float) -> float | None:
+    return round(numerator / denominator * 100, 2) if denominator else None
+
+
+def _safe_div(numerator: float, denominator: float, digits: int = 2) -> float | None:
+    return round(numerator / denominator, digits) if denominator else None
+
+
+def _market_rows(rows: list[dict], marketplace_id: int) -> list[dict]:
+    return [r for r in rows if int(r.get("marketplace_id", 0)) == marketplace_id]
+
+
+def _market_avg_pct(rows: list[dict], marketplace_id: int, key: str) -> float | None:
+    vals = [_pct_from_source(r.get(key)) for r in _market_rows(rows, marketplace_id)]
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+
+    tk_gmv = _sum(rows, 1, "gmv")
+    tk_video = _sum(rows, 1, "gmv_video")
+    tk_live = _sum(rows, 1, "gmv_live")
+    tk_card = _sum(rows, 1, "gmv_card")
+    tk_visitors = int(_sum(rows, 1, "visitors"))
+    tk_customers = int(_sum(rows, 1, "unique_buyers"))
+    ml_gmv = _sum(rows, 2, "gmv")
+    ml_unique = int(_sum(rows, 2, "unique_buyers"))
+    ml_new = int(_sum(rows, 2, "new_buyers"))
+    ml_repeat = int(_sum(rows, 2, "repeat_buyers"))
+    sh_gmv = _sum(rows, 3, "gmv")
+    sh_unique = int(_sum(rows, 3, "unique_buyers"))
+    sh_new = int(_sum(rows, 3, "new_buyers"))
+    sh_repeat = int(_sum(rows, 3, "repeat_buyers"))
+    sh_visitors = int(_sum(rows, 3, "visitors"))
+
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        tk_brand_gmv = _float(tk.get("gmv"))
+        ml_brand_unique = int(_float(ml.get("unique_buyers")))
+        sh_brand_unique = int(_float(sh.get("unique_buyers")))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_gmv": tk_brand_gmv or None,
+            "tiktok_gmv_video": _float(tk.get("gmv_video")) or None,
+            "tiktok_gmv_live": _float(tk.get("gmv_live")) or None,
+            "tiktok_gmv_card": _float(tk.get("gmv_card")) or None,
+            "tiktok_video_pct": _ratio_pct(_float(tk.get("gmv_video")), tk_brand_gmv),
+            "tiktok_live_pct": _ratio_pct(_float(tk.get("gmv_live")), tk_brand_gmv),
+            "tiktok_card_pct": _ratio_pct(_float(tk.get("gmv_card")), tk_brand_gmv),
+            "tiktok_visitors": int(_float(tk.get("visitors"))) or None,
+            "tiktok_customers": int(_float(tk.get("unique_buyers"))) or None,
+            "tiktok_conversion_rate": _pct_from_source(tk.get("conversion_rate")),
+            "ml_gmv": _float(ml.get("gmv")) or None,
+            "ml_unique_buyers": ml_brand_unique or None,
+            "ml_new_buyers": int(_float(ml.get("new_buyers"))) or None,
+            "ml_repeat_buyers": int(_float(ml.get("repeat_buyers"))) or None,
+            "ml_repeat_buyer_rate_pct": _pct_from_source(ml.get("repeat_buyer_rate_pct")),
+            "ml_gmv_per_buyer": _safe_div(_float(ml.get("gmv")), ml_brand_unique),
+            "shopee_gmv": _float(sh.get("gmv")) or None,
+            "shopee_unique_buyers": sh_brand_unique or None,
+            "shopee_new_buyers": int(_float(sh.get("new_buyers"))) or None,
+            "shopee_repeat_buyers": int(_float(sh.get("repeat_buyers"))) or None,
+            "shopee_new_buyer_pct": _ratio_pct(_float(sh.get("new_buyers")), sh_brand_unique),
+            "shopee_repeat_buyer_rate_pct": _pct_from_source(sh.get("repeat_buyer_rate_pct")),
+            "shopee_gmv_per_buyer": _safe_div(_float(sh.get("gmv")), sh_brand_unique),
+            "shopee_cancel_rate_pct": _pct_from_source(sh.get("cancel_rate_pct")),
+            "shopee_visitors": int(_float(sh.get("visitors"))) or None,
+            "shopee_conversion_rate": _pct_from_source(sh.get("conversion_rate")),
+        })
+
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_gmv": tk_gmv or None,
+            "tiktok_gmv_video": tk_video or None,
+            "tiktok_gmv_live": tk_live or None,
+            "tiktok_gmv_card": tk_card or None,
+            "tiktok_video_pct": _ratio_pct(tk_video, tk_gmv),
+            "tiktok_live_pct": _ratio_pct(tk_live, tk_gmv),
+            "tiktok_card_pct": _ratio_pct(tk_card, tk_gmv),
+            "tiktok_visitors": tk_visitors or None,
+            "tiktok_customers": tk_customers or None,
+            "tiktok_conversion_rate": _market_avg_pct(rows, 1, "conversion_rate"),
+            "ml_unique_buyers": ml_unique or None,
+            "ml_new_buyers": ml_new or None,
+            "ml_repeat_buyers": ml_repeat or None,
+            "ml_new_buyer_pct": _ratio_pct(ml_new, ml_unique),
+            "ml_repeat_buyer_rate_pct": _ratio_pct(ml_repeat, ml_unique),
+            "ml_gmv_per_buyer": _safe_div(ml_gmv, ml_unique),
+            "shopee_gmv": sh_gmv or None,
+            "shopee_unique_buyers": sh_unique or None,
+            "shopee_new_buyers": sh_new or None,
+            "shopee_repeat_buyers": sh_repeat or None,
+            "shopee_new_buyer_pct": _ratio_pct(sh_new, sh_unique),
+            "shopee_repeat_buyer_rate_pct": _ratio_pct(sh_repeat, sh_unique),
+            "shopee_gmv_per_buyer": _safe_div(sh_gmv, sh_unique),
+            "shopee_visitors": sh_visitors or None,
+            "shopee_conversion_rate": _market_avg_pct(rows, 3, "conversion_rate"),
+        },
+        "brands": brands,
+    }
+
+
+def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        tk_gmv = _float(tk.get("gmv"))
+        ml_spend = _float(ml.get("ad_spend"))
+        ml_revenue = _float(ml.get("ad_revenue"))
+        ml_clicks = _float(ml.get("ad_clicks"))
+        ml_impressions = _float(ml.get("ad_impressions"))
+        sh_gmv = _float(sh.get("gmv"))
+        sh_spend = _float(sh.get("ad_spend"))
+        sh_revenue = _float(sh.get("ad_revenue"))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_gmv": tk_gmv or None,
+            "tiktok_settlement": _float(tk.get("total_settlement")) or None,
+            "tiktok_fees": _float(tk.get("total_fees")) or None,
+            "tiktok_avg_fee_pct": _ratio_pct(abs(_float(tk.get("total_fees"))), tk_gmv),
+            "tiktok_avg_settlement_pct": _ratio_pct(_float(tk.get("total_settlement")), tk_gmv),
+            "ml_gmv": _float(ml.get("gmv")) or None,
+            "ml_ad_spend": ml_spend or None,
+            "ml_ad_revenue": ml_revenue or None,
+            "ml_roas": _safe_div(ml_revenue, ml_spend),
+            "ml_acos_pct": _ratio_pct(ml_spend, ml_revenue),
+            "ml_cpc": _safe_div(ml_spend, ml_clicks, 4),
+            "ml_ctr_pct": _ratio_pct(ml_clicks, ml_impressions),
+            "ml_ad_clicks": int(ml_clicks) or None,
+            "ml_ad_impressions": int(ml_impressions) or None,
+            "ml_seller_shipping_cost": _float(ml.get("seller_shipping_cost")) or None,
+            "ml_shipping_pct_of_gmv": _ratio_pct(_float(ml.get("seller_shipping_cost")), _float(ml.get("gmv"))),
+            "ml_total_cost_pct": _ratio_pct(ml_spend + _float(ml.get("seller_shipping_cost")), _float(ml.get("gmv"))),
+            "shopee_gmv": sh_gmv or None,
+            "shopee_settlement": _float(sh.get("total_settlement")) or None,
+            "shopee_fees": _float(sh.get("total_fees")) or None,
+            "shopee_avg_fee_pct": _ratio_pct(abs(_float(sh.get("total_fees"))), sh_gmv),
+            "shopee_avg_settlement_pct": _ratio_pct(_float(sh.get("total_settlement")), sh_gmv),
+            "shopee_ad_spend": sh_spend or None,
+            "shopee_ad_revenue": sh_revenue or None,
+            "shopee_roas": _safe_div(sh_revenue, sh_spend),
+            "shopee_shipping_cost": _float(sh.get("seller_shipping_cost")) or None,
+            "shopee_shipping_pct_of_gmv": _ratio_pct(_float(sh.get("seller_shipping_cost")), sh_gmv),
+        })
+
+    tk_gmv = _sum(rows, 1, "gmv")
+    tk_settlement = _sum(rows, 1, "total_settlement")
+    tk_fees = _sum(rows, 1, "total_fees")
+    ml_gmv = _sum(rows, 2, "gmv")
+    ml_spend = _sum(rows, 2, "ad_spend")
+    ml_revenue = _sum(rows, 2, "ad_revenue")
+    ml_clicks = _sum(rows, 2, "ad_clicks")
+    ml_shipping = _sum(rows, 2, "seller_shipping_cost")
+    sh_gmv = _sum(rows, 3, "gmv")
+    sh_settlement = _sum(rows, 3, "total_settlement")
+    sh_fees = _sum(rows, 3, "total_fees")
+    sh_spend = _sum(rows, 3, "ad_spend")
+    sh_revenue = _sum(rows, 3, "ad_revenue")
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_gmv": tk_gmv or None,
+            "tiktok_settlement": tk_settlement or None,
+            "tiktok_fees": tk_fees or None,
+            "tiktok_avg_fee_pct": _ratio_pct(abs(tk_fees), tk_gmv),
+            "tiktok_avg_settlement_pct": _ratio_pct(tk_settlement, tk_gmv),
+            "ml_ad_spend": ml_spend or None,
+            "ml_ad_revenue": ml_revenue or None,
+            "ml_gmv": ml_gmv or None,
+            "ml_roas": _safe_div(ml_revenue, ml_spend),
+            "ml_acos_pct": _ratio_pct(ml_spend, ml_revenue),
+            "ml_cpc": _safe_div(ml_spend, ml_clicks, 4),
+            "ml_total_cost_pct": _ratio_pct(ml_spend + ml_shipping, ml_gmv),
+            "shopee_gmv": sh_gmv or None,
+            "shopee_settlement": sh_settlement or None,
+            "shopee_fees": sh_fees or None,
+            "shopee_avg_fee_pct": _ratio_pct(abs(sh_fees), sh_gmv),
+            "shopee_avg_settlement_pct": _ratio_pct(sh_settlement, sh_gmv),
+            "shopee_ad_spend": sh_spend or None,
+            "shopee_roas": _safe_div(sh_revenue, sh_spend),
+        },
+        "brands": brands,
+    }
+
+
+def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
+    mkt_id = _MKT_FILTER_FACT.get(marketplace)
+    start, end = _month_bounds(year, month)
+    rows = _fact_brand_rows(db, start, end, mkt_id)
+    grouped = _by_brand_market(rows)
+    brands = []
+    for brand in sorted(grouped.keys()):
+        tk = grouped[brand].get(1, {})
+        ml = grouped[brand].get(2, {})
+        sh = grouped[brand].get(3, {})
+        tk_orders = int(_float(tk.get("orders")))
+        ml_orders = int(_float(ml.get("orders")))
+        sh_orders = int(_float(sh.get("orders")))
+        brands.append({
+            "brand": brand,
+            "label": BRAND_LABELS.get(brand, brand.upper()),
+            "tiktok_orders": tk_orders or None,
+            "tiktok_canceled": None,
+            "tiktok_refunded": None,
+            "tiktok_returned": None,
+            "tiktok_problem_rate": None,
+            "tiktok_cancel_rate": None,
+            "tiktok_avg_delivery_days": _safe_div(_float(tk.get("avg_delivery_hours")), 24),
+            "ml_cancel_rate_pct": _ratio_pct(_float(ml.get("canceled_orders")), ml_orders),
+            "ml_cancelled_orders": int(_float(ml.get("canceled_orders"))) or None,
+            "ml_total_orders": ml_orders or None,
+            "ml_avg_delivery_days": _float(ml.get("avg_delivery_days")) or None,
+            "ml_repeat_buyer_rate_pct": _pct_from_source(ml.get("repeat_buyer_rate_pct")),
+            "ml_gmv_per_buyer": _safe_div(_float(ml.get("gmv")), _float(ml.get("unique_buyers"))),
+            "ml_new_buyers": int(_float(ml.get("new_buyers"))) or None,
+            "ml_unique_buyers": int(_float(ml.get("unique_buyers"))) or None,
+            "ml_shipping_pct_of_gmv": _ratio_pct(_float(ml.get("seller_shipping_cost")), _float(ml.get("gmv"))),
+            "shopee_orders": sh_orders or None,
+            "shopee_canceled_orders": int(_float(sh.get("canceled_orders"))) or None,
+            "shopee_returned_orders": int(_float(sh.get("returned_orders"))) or None,
+            "shopee_cancel_rate_pct": _ratio_pct(_float(sh.get("canceled_orders")), sh_orders),
+            "shopee_return_rate_pct": _ratio_pct(_float(sh.get("returned_orders")), sh_orders),
+        })
+    ml_orders_total = _sum(rows, 2, "orders")
+    sh_orders_total = _sum(rows, 3, "orders")
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "marketplace": marketplace,
+        "kpis": {
+            "tiktok_problem_rate": None,
+            "tiktok_cancel_rate": None,
+            "tiktok_avg_delivery_days": _avg_nonzero([_float(r.get("avg_delivery_hours")) / 24 for r in _market_rows(rows, 1)]),
+            "ml_cancel_rate_pct": _ratio_pct(_sum(rows, 2, "canceled_orders"), ml_orders_total),
+            "ml_avg_delivery_days": _avg_nonzero([_float(r.get("avg_delivery_days")) for r in _market_rows(rows, 2)]),
+            "shopee_cancel_rate_pct": _ratio_pct(_sum(rows, 3, "canceled_orders"), sh_orders_total),
+            "shopee_return_rate_pct": _ratio_pct(_sum(rows, 3, "returned_orders"), sh_orders_total),
+        },
+        "brands": brands,
     }
