@@ -23,9 +23,12 @@ __pycache__/
 .venv/
 venv/
 env/
-Lib/
-Scripts/
-Include/
+/Lib/
+/apps/api/Lib/
+/Scripts/
+/apps/api/Scripts/
+/Include/
+/apps/api/Include/
 pyvenv.cfg
 .pytest_cache/
 .ruff_cache/

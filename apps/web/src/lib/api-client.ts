@@ -1,0 +1,1146 @@
+﻿import type { Marketplace } from "./mock-data";
+import {
+  totalGmv, totalGmvPrev, totalOrders, avgTicket,
+  BRANDS, GMV_MONTHLY,
+} from "./mock-data";
+import { calcMoM } from "./formatters";
+
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+
+type Filter = Marketplace | "all";
+
+// ---------- tipos espelhando a API ----------
+
+export interface OverviewData {
+  gmv: number;
+  tiktok_gmv: number | null;
+  ml_gmv: number | null;
+  shopee_gmv: number | null;
+  orders: number;
+  avg_ticket: number;
+  ad_spend: number | null;
+  ml_roas: number | null;
+  ml_cancel_rate_pct: number | null;
+  shopee_roas: number | null;
+  tiktok_customers: number | null;
+  ml_unique_buyers: number | null;
+  shopee_unique_buyers: number | null;
+  gmv_mom_pct: number | null;
+  prev_gmv: number;
+}
+
+export interface BrandRow {
+  brand: string;
+  label: string;
+  tiktok_gmv: number | null;
+  ml_gmv: number | null;
+  shopee_gmv: number | null;
+  total_gmv: number;
+  orders: number;
+  avg_ticket: number | null;
+  tiktok_avg_ticket: number | null;
+  ml_avg_ticket: number | null;
+  tiktok_gmv_prev: number | null;
+  ml_gmv_prev: number | null;
+  shopee_gmv_prev: number | null;
+  total_gmv_prev: number;
+  mom_pct: number | null;
+  cos_pct: number | null;
+  gpm: number | null;
+  ml_roas: number | null;
+  ml_cancel_rate_pct: number | null;
+}
+
+export interface MonthPoint {
+  mes: string;
+  mes_label: string;
+  barbours: number;
+  kokeshi: number;
+  apice: number;
+  lescent: number;
+  rituaria: number;
+}
+
+// ---------- cache em memória ----------
+
+const _cache = new Map<string, { data: unknown; at: number }>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 min
+
+function cacheGet<T>(key: string): T | undefined {
+  const e = _cache.get(key);
+  if (!e) return undefined;
+  if (Date.now() - e.at > CACHE_TTL) { _cache.delete(key); return undefined; }
+  return e.data as T;
+}
+
+function cacheSet<T>(key: string, data: T): T {
+  _cache.set(key, { data, at: Date.now() });
+  return data;
+}
+
+async function withCache<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const hit = cacheGet<T>(key);
+  if (hit !== undefined) return hit;
+  const result = await fn();
+  return cacheSet(key, result);
+}
+
+// ---------- fetch helpers ----------
+
+async function apiFetch<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${API_URL}${path}`);
+    if (!res.ok) return null;
+    return res.json() as Promise<T>;
+  } catch {
+    return null;
+  }
+}
+
+function refMonth(): string {
+  const d = new Date();
+  // mês anterior como referência padrão (igual ao service)
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// ---------- fallbacks com mock data ----------
+
+function overviewFromMock(filter: Filter): OverviewData {
+  const gmv = totalGmv(filter);
+  const prev = totalGmvPrev(filter);
+  const orders = totalOrders(filter);
+  const ticket = avgTicket(filter);
+  const adSpend = filter === "tiktok" ? null : 148_600;
+  const tkGmv = filter === "ml" ? null : totalGmv("tiktok");
+  const mlGmv = filter === "tiktok" ? null : totalGmv("ml");
+  return {
+    gmv,
+    tiktok_gmv: tkGmv,
+    ml_gmv: mlGmv,
+    shopee_gmv: filter === "shopee" ? 0 : null,
+    orders,
+    avg_ticket: ticket,
+    ad_spend: adSpend,
+    ml_roas: null,
+    ml_cancel_rate_pct: null,
+    shopee_roas: null,
+    tiktok_customers: null,
+    ml_unique_buyers: null,
+    shopee_unique_buyers: null,
+    gmv_mom_pct: calcMoM(gmv, prev),
+    prev_gmv: prev,
+  };
+}
+
+function brandsFromMock(filter: Filter): BrandRow[] {
+  return BRANDS.map((b) => {
+    const currentTk = b.tiktok ?? 0;
+    const currentMl = b.ml ?? 0;
+    const prevTk = b.tiktokPrev ?? 0;
+    const prevMl = b.mlPrev ?? 0;
+    const total =
+      filter === "tiktok" ? currentTk : filter === "ml" ? currentMl : currentTk + currentMl;
+    const totalPrev =
+      filter === "tiktok" ? prevTk : filter === "ml" ? prevMl : prevTk + prevMl;
+    const orders =
+      filter === "tiktok"
+        ? (b.tiktokOrders ?? 0)
+        : filter === "ml"
+        ? (b.mlOrders ?? 0)
+        : (b.tiktokOrders ?? 0) + (b.mlOrders ?? 0);
+    return {
+      brand: b.brand,
+      label: b.label,
+      tiktok_gmv: b.tiktok,
+      ml_gmv: b.ml,
+      shopee_gmv: null,
+      total_gmv: total,
+      orders,
+      avg_ticket: orders > 0 ? total / orders : null,
+      tiktok_avg_ticket: b.tiktokOrders && b.tiktok ? b.tiktok / b.tiktokOrders : null,
+      ml_avg_ticket: b.mlOrders && b.ml ? b.ml / b.mlOrders : null,
+      tiktok_gmv_prev: b.tiktokPrev,
+      ml_gmv_prev: b.mlPrev,
+      shopee_gmv_prev: null,
+      total_gmv_prev: totalPrev,
+      mom_pct: totalPrev > 0 ? calcMoM(total, totalPrev) : null,
+      cos_pct: null,
+      gpm: null,
+      ml_roas: null,
+      ml_cancel_rate_pct: null,
+    };
+  }).filter((b) => b.total_gmv > 0);
+}
+
+function monthlyFromMock(): MonthPoint[] {
+  return GMV_MONTHLY.map((m) => ({
+    mes: m.mes,
+    mes_label: m.mesLabel,
+    barbours: m.barbours,
+    kokeshi: m.kokeshi,
+    apice: m.apice,
+    lescent: m.lescent,
+    rituaria: m.rituaria,
+  }));
+}
+
+// ---------- funções públicas (API com fallback) ----------
+
+export function fetchOverview(
+  filter: Filter,
+  period?: string,
+): Promise<{ data: OverviewData; live: boolean }> {
+  interface ApiResp {
+    current: {
+      gmv: number;
+      tiktok_gmv?: number | null;
+      ml_gmv?: number | null;
+      shopee_gmv?: number | null;
+      orders: number;
+      avg_ticket: number;
+      ad_spend: number | null;
+      ml_roas?: number | null;
+      ml_cancel_rate_pct?: number | null;
+      shopee_roas?: number | null;
+      tiktok_customers?: number | null;
+      ml_unique_buyers?: number | null;
+      shopee_unique_buyers?: number | null;
+    };
+    previous: { gmv: number };
+    gmv_mom_pct: number | null;
+  }
+  const month = period ?? refMonth();
+  return withCache(`overview:${filter}:${month}`, async () => {
+    const raw = await apiFetch<ApiResp>(
+      `/api/v1/performance/overview?marketplace=${filter}&ref_month=${month}`
+    );
+    if (raw) {
+      return {
+        live: true,
+        data: {
+          gmv: raw.current.gmv,
+          tiktok_gmv: raw.current.tiktok_gmv ?? null,
+          ml_gmv: raw.current.ml_gmv ?? null,
+          shopee_gmv: raw.current.shopee_gmv ?? null,
+          orders: raw.current.orders,
+          avg_ticket: raw.current.avg_ticket,
+          ad_spend: raw.current.ad_spend,
+          ml_roas: raw.current.ml_roas ?? null,
+          ml_cancel_rate_pct: raw.current.ml_cancel_rate_pct ?? null,
+          shopee_roas: raw.current.shopee_roas ?? null,
+          tiktok_customers: raw.current.tiktok_customers ?? null,
+          ml_unique_buyers: raw.current.ml_unique_buyers ?? null,
+          shopee_unique_buyers: raw.current.shopee_unique_buyers ?? null,
+          gmv_mom_pct: raw.gmv_mom_pct,
+          prev_gmv: raw.previous.gmv,
+        },
+      };
+    }
+    return { live: false, data: overviewFromMock(filter) };
+  });
+}
+
+export function fetchBrands(
+  filter: Filter,
+  period?: string,
+): Promise<{ data: BrandRow[]; live: boolean }> {
+  interface ApiResp { brands: BrandRow[] }
+  const month = period ?? refMonth();
+  return withCache(`brands:${filter}:${month}`, async () => {
+    const raw = await apiFetch<ApiResp>(
+      `/api/v1/performance/brands?marketplace=${filter}&ref_month=${month}`
+    );
+    if (raw) return { live: true, data: raw.brands };
+    return { live: false, data: brandsFromMock(filter) };
+  });
+}
+
+export function fetchMonthly(filter: Filter = "all"): Promise<{ data: MonthPoint[]; live: boolean }> {
+  interface ApiResp { data: MonthPoint[] }
+  return withCache(`monthly:${filter}`, async () => {
+    const raw = await apiFetch<ApiResp>(`/api/v1/performance/monthly?months_back=6&marketplace=${filter}`);
+    if (raw) return { live: true, data: raw.data };
+    return { live: false, data: monthlyFromMock() };
+  });
+}
+
+export interface ProdutoMLRow {
+  brand: string;
+  item_id: string;
+  seller_sku: string | null;
+  title: string;
+  gross_revenue: number;
+  units_sold: number;
+  unique_buyers: number | null;
+  avg_price: number | null;
+  cancel_rate_pct: number | null;
+  pareto_bucket: string | null;
+  revenue_velocity: string | null;
+  ad_roas: number | null;
+  ad_acos_pct: number | null;
+  ad_spend: number | null;
+  ad_efficiency: string | null;
+  action_signal: string | null;
+  estimated_margin: number | null;
+  revenue_share_pct: number | null;
+  product_status: string | null;
+}
+
+export interface ProdutosMLResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: ProdutoMLRow[];
+}
+
+export interface ProdutoTikTokRow {
+  brand: string;
+  product_id: string;
+  product_name: string;
+  gmv: number;
+  orders: number;
+  items_sold: number;
+  pct_gmv_video: number | null;
+  pct_gmv_live: number | null;
+  pct_gmv_card: number | null;
+  problem_rate: number | null;
+  rating_avg: number | null;
+  total_ratings: number | null;
+}
+
+export interface ProdutosTikTokResponse {
+  ref_month: string;
+  total: number;
+  limit: number;
+  offset: number;
+  items: ProdutoTikTokRow[];
+}
+
+export function fetchProdutosML(params: {
+  brand?: string;
+  pareto_bucket?: string;
+  action_signal?: string;
+  product_status?: string;
+  revenue_velocity?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ProdutosMLResponse | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  if (params.pareto_bucket) qs.set("pareto_bucket", params.pareto_bucket);
+  if (params.action_signal) qs.set("action_signal", params.action_signal);
+  if (params.product_status) qs.set("product_status", params.product_status);
+  if (params.revenue_velocity) qs.set("revenue_velocity", params.revenue_velocity);
+  qs.set("limit", String(params.limit ?? 25));
+  qs.set("offset", String(params.offset ?? 0));
+  return withCache(`produtos-ml:${qs}`, () =>
+    apiFetch<ProdutosMLResponse>(`/api/v1/performance/produtos/ml?${qs}`)
+  );
+}
+
+export interface ProdutoShopeeRow {
+  brand: string;
+  sku_ref: string | null;
+  product_name: string;
+  variation_name: string | null;
+  gmv: number;
+  units_sold: number;
+  orders: number;
+  canceled_orders: number;
+  cancel_rate_pct: number | null;
+  unique_buyers: number | null;
+  avg_price: number | null;
+}
+
+export function fetchProdutosShopee(params: {
+  brand?: string;
+  period?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ ref_month: string; total: number; items: ProdutoShopeeRow[] } | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  qs.set("ref_month", params.period ?? refMonth());
+  qs.set("limit", String(params.limit ?? 25));
+  qs.set("offset", String(params.offset ?? 0));
+  return withCache(`produtos-shopee:${qs}`, () =>
+    apiFetch(`/api/v1/performance/produtos/shopee?${qs}`)
+  );
+}
+
+export function fetchProdutosTikTok(params: {
+  brand?: string;
+  period?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ProdutosTikTokResponse | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  qs.set("ref_month", params.period ?? refMonth());
+  qs.set("limit", String(params.limit ?? 25));
+  qs.set("offset", String(params.offset ?? 0));
+  return withCache(`produtos-tk:${qs}`, () =>
+    apiFetch<ProdutosTikTokResponse>(`/api/v1/performance/produtos/tiktok?${qs}`)
+  );
+}
+
+export interface ParetoSummaryBucket {
+  bucket: string;
+  label: string;
+  description: string;
+  gmv: number;
+  count: number;
+  gmv_pct: number;
+}
+
+export interface ProdutosMLSummary {
+  total_gmv: number;
+  total_count: number;
+  brand: string | null;
+  buckets: ParetoSummaryBucket[];
+}
+
+export function fetchProdutosMLSummary(brand?: string): Promise<ProdutosMLSummary | null> {
+  const qs = brand ? `?brand=${brand}` : "";
+  return withCache(`produtos-ml-summary:${brand ?? "all"}`, () =>
+    apiFetch<ProdutosMLSummary>(`/api/v1/performance/produtos/ml/summary${qs}`)
+  );
+}
+
+export interface CanaisKpis {
+  tiktok_gmv: number | null;
+  tiktok_gmv_video: number | null;
+  tiktok_gmv_live: number | null;
+  tiktok_gmv_card: number | null;
+  tiktok_video_pct: number | null;
+  tiktok_live_pct: number | null;
+  tiktok_card_pct: number | null;
+  tiktok_visitors: number | null;
+  tiktok_customers: number | null;
+  tiktok_conversion_rate: number | null;
+  tiktok_impressions: number | null;
+  tiktok_page_views: number | null;
+  tiktok_ctr_pct: number | null;
+  ml_unique_buyers: number | null;
+  ml_new_buyers: number | null;
+  ml_repeat_buyers: number | null;
+  ml_new_buyer_pct: number | null;
+  ml_repeat_buyer_rate_pct: number | null;
+  ml_gmv_per_buyer: number | null;
+  shopee_gmv: number | null;
+  shopee_unique_buyers: number | null;
+  shopee_new_buyers: number | null;
+  shopee_repeat_buyers: number | null;
+  shopee_new_buyer_pct: number | null;
+  shopee_repeat_buyer_rate_pct: number | null;
+  shopee_gmv_per_buyer: number | null;
+  shopee_visitors?: number | null;
+  shopee_conversion_rate?: number | null;
+}
+
+export interface CanaisBrandRow {
+  brand: string;
+  label: string;
+  tiktok_gmv: number | null;
+  tiktok_gmv_video: number | null;
+  tiktok_gmv_live: number | null;
+  tiktok_gmv_card: number | null;
+  tiktok_video_pct: number | null;
+  tiktok_live_pct: number | null;
+  tiktok_card_pct: number | null;
+  tiktok_visitors: number | null;
+  tiktok_customers: number | null;
+  tiktok_conversion_rate: number | null;
+  tiktok_impressions: number | null;
+  tiktok_page_views: number | null;
+  tiktok_ctr_pct: number | null;
+  ml_gmv: number | null;
+  ml_unique_buyers: number | null;
+  ml_new_buyers: number | null;
+  ml_repeat_buyers: number | null;
+  ml_repeat_buyer_rate_pct: number | null;
+  ml_gmv_per_buyer: number | null;
+  ml_new_buyer_pct: number | null;
+  shopee_gmv: number | null;
+  shopee_unique_buyers: number | null;
+  shopee_new_buyers: number | null;
+  shopee_repeat_buyers: number | null;
+  shopee_repeat_buyer_rate_pct: number | null;
+  shopee_gmv_per_buyer: number | null;
+  shopee_new_buyer_pct: number | null;
+  shopee_cancel_rate_pct?: number | null;
+  shopee_visitors?: number | null;
+  shopee_conversion_rate?: number | null;
+}
+
+const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
+  {
+    brand: "barbours", label: "BARBOURS",
+    tiktok_gmv: 9_709_787, tiktok_gmv_video: 4_996_333, tiktok_gmv_live: 2_201_169, tiktok_gmv_card: 2_512_285,
+    tiktok_video_pct: 51.5, tiktok_live_pct: 22.7, tiktok_card_pct: 25.9,
+    tiktok_visitors: 133_606, tiktok_customers: 2_808, tiktok_conversion_rate: 2.1,
+    tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
+    ml_gmv: 2_578_072, ml_unique_buyers: 25_541, ml_new_buyers: 23_619, ml_repeat_buyers: 1_011,
+    ml_repeat_buyer_rate_pct: 4.0, ml_gmv_per_buyer: 100.94, ml_new_buyer_pct: 92.5,
+    shopee_gmv: 612_400, shopee_unique_buyers: 5_820, shopee_new_buyers: 5_238, shopee_repeat_buyers: 408,
+    shopee_repeat_buyer_rate_pct: 7.0, shopee_gmv_per_buyer: 105.22, shopee_new_buyer_pct: 90.0,
+  },
+  {
+    brand: "kokeshi", label: "KOKESHI",
+    tiktok_gmv: 2_316_329, tiktok_gmv_video: 1_333_654, tiktok_gmv_live: 452_889, tiktok_gmv_card: 529_786,
+    tiktok_video_pct: 57.6, tiktok_live_pct: 19.6, tiktok_card_pct: 22.9,
+    tiktok_visitors: 61_982, tiktok_customers: 1_663, tiktok_conversion_rate: 2.68,
+    tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
+    ml_gmv: 789_601, ml_unique_buyers: 9_987, ml_new_buyers: 9_332, ml_repeat_buyers: 401,
+    ml_repeat_buyer_rate_pct: 4.0, ml_gmv_per_buyer: 79.06, ml_new_buyer_pct: 93.4,
+    shopee_gmv: 198_700, shopee_unique_buyers: 2_310, shopee_new_buyers: 2_100, shopee_repeat_buyers: 185,
+    shopee_repeat_buyer_rate_pct: 8.0, shopee_gmv_per_buyer: 86.02, shopee_new_buyer_pct: 90.9,
+  },
+  {
+    brand: "apice", label: "ÁPICE",
+    tiktok_gmv: 876_174, tiktok_gmv_video: 275_685, tiktok_gmv_live: 154_350, tiktok_gmv_card: 446_139,
+    tiktok_video_pct: 31.5, tiktok_live_pct: 17.6, tiktok_card_pct: 50.9,
+    tiktok_visitors: 14_059, tiktok_customers: 288, tiktok_conversion_rate: 2.05,
+    tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
+    ml_gmv: null, ml_unique_buyers: null, ml_new_buyers: null, ml_repeat_buyers: null,
+    ml_repeat_buyer_rate_pct: null, ml_gmv_per_buyer: null, ml_new_buyer_pct: null,
+    shopee_gmv: null, shopee_unique_buyers: null, shopee_new_buyers: null, shopee_repeat_buyers: null,
+    shopee_repeat_buyer_rate_pct: null, shopee_gmv_per_buyer: null, shopee_new_buyer_pct: null,
+  },
+  {
+    brand: "lescent", label: "LESCENT",
+    tiktok_gmv: 253_922, tiktok_gmv_video: 115_633, tiktok_gmv_live: 64_436, tiktok_gmv_card: 73_854,
+    tiktok_video_pct: 45.5, tiktok_live_pct: 25.4, tiktok_card_pct: 29.1,
+    tiktok_visitors: 3_903, tiktok_customers: 127, tiktok_conversion_rate: 3.25,
+    tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
+    ml_gmv: 552_643, ml_unique_buyers: 6_999, ml_new_buyers: 6_214, ml_repeat_buyers: 564,
+    ml_repeat_buyer_rate_pct: 8.1, ml_gmv_per_buyer: 78.96, ml_new_buyer_pct: 88.8,
+    shopee_gmv: 154_200, shopee_unique_buyers: 1_870, shopee_new_buyers: 1_664, shopee_repeat_buyers: 168,
+    shopee_repeat_buyer_rate_pct: 9.0, shopee_gmv_per_buyer: 82.46, shopee_new_buyer_pct: 89.0,
+  },
+  {
+    brand: "rituaria", label: "RITUÁRIA",
+    tiktok_gmv: 239_773, tiktok_gmv_video: 63_824, tiktok_gmv_live: 20_980, tiktok_gmv_card: 154_969,
+    tiktok_video_pct: 26.6, tiktok_live_pct: 8.8, tiktok_card_pct: 64.6,
+    tiktok_visitors: 1_628, tiktok_customers: 88, tiktok_conversion_rate: 5.41,
+    tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
+    ml_gmv: null, ml_unique_buyers: null, ml_new_buyers: null, ml_repeat_buyers: null,
+    ml_repeat_buyer_rate_pct: null, ml_gmv_per_buyer: null, ml_new_buyer_pct: null,
+    shopee_gmv: null, shopee_unique_buyers: null, shopee_new_buyers: null, shopee_repeat_buyers: null,
+    shopee_repeat_buyer_rate_pct: null, shopee_gmv_per_buyer: null, shopee_new_buyer_pct: null,
+  },
+];
+
+export function fetchCanais(
+  filter: Filter,
+  period?: string,
+): Promise<{ kpis: CanaisKpis; brands: CanaisBrandRow[]; live: boolean }> {
+  const month = period ?? refMonth();
+  return withCache(`canais:${filter}:${month}`, async () => {
+    interface ApiResp { kpis: CanaisKpis; brands: CanaisBrandRow[] }
+    const raw = await apiFetch<ApiResp>(
+      `/api/v1/performance/canais?marketplace=${filter}&ref_month=${month}`
+    );
+  if (raw) {
+    const brands: CanaisBrandRow[] = raw.brands.map((b) => ({
+      ...b,
+      ml_new_buyer_pct:
+        b.ml_unique_buyers && b.ml_new_buyers
+          ? parseFloat(((b.ml_new_buyers / b.ml_unique_buyers) * 100).toFixed(1))
+          : null,
+    }));
+    return { live: true, kpis: raw.kpis, brands };
+  }
+
+  const brands = filter === "ml"
+    ? CANAIS_MOCK_BRANDS.filter((b) => b.ml_gmv !== null)
+    : filter === "shopee"
+    ? CANAIS_MOCK_BRANDS.filter((b) => b.shopee_gmv !== null)
+    : CANAIS_MOCK_BRANDS;
+
+  const tkBrands = brands.filter((b) => b.tiktok_gmv !== null);
+  const mlBrands = brands.filter((b) => b.ml_gmv !== null);
+  const shBrands = CANAIS_MOCK_BRANDS.filter((b) => b.shopee_gmv !== null);
+  const tkGmv = tkBrands.reduce((s, b) => s + (b.tiktok_gmv ?? 0), 0);
+  const tkVid = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_video ?? 0), 0);
+  const tkLive = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_live ?? 0), 0);
+  const tkCard = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_card ?? 0), 0);
+  const tkVisitors = tkBrands.reduce((s, b) => s + (b.tiktok_visitors ?? 0), 0);
+  const tkCustomers = tkBrands.reduce((s, b) => s + (b.tiktok_customers ?? 0), 0);
+  const mlBuyers = mlBrands.reduce((s, b) => s + (b.ml_unique_buyers ?? 0), 0);
+  const mlNew = mlBrands.reduce((s, b) => s + (b.ml_new_buyers ?? 0), 0);
+  const mlRepeat = mlBrands.reduce((s, b) => s + (b.ml_repeat_buyers ?? 0), 0);
+  const mlGmv = mlBrands.reduce((s, b) => s + (b.ml_gmv ?? 0), 0);
+  const shBuyers = shBrands.reduce((s, b) => s + (b.shopee_unique_buyers ?? 0), 0);
+  const shNew = shBrands.reduce((s, b) => s + (b.shopee_new_buyers ?? 0), 0);
+  const shRepeat = shBrands.reduce((s, b) => s + (b.shopee_repeat_buyers ?? 0), 0);
+  const shGmv = shBrands.reduce((s, b) => s + (b.shopee_gmv ?? 0), 0);
+
+  const showTk = filter !== "ml" && filter !== "shopee";
+  const showMl = filter !== "tiktok" && filter !== "shopee";
+  const showSh = filter !== "tiktok" && filter !== "ml";
+
+  const kpis: CanaisKpis = {
+    tiktok_gmv: showTk ? tkGmv : null,
+    tiktok_gmv_video: showTk ? tkVid : null,
+    tiktok_gmv_live: showTk ? tkLive : null,
+    tiktok_gmv_card: showTk ? tkCard : null,
+    tiktok_video_pct: showTk ? parseFloat((tkVid / tkGmv * 100).toFixed(1)) : null,
+    tiktok_live_pct: showTk ? parseFloat((tkLive / tkGmv * 100).toFixed(1)) : null,
+    tiktok_card_pct: showTk ? parseFloat((tkCard / tkGmv * 100).toFixed(1)) : null,
+    tiktok_visitors: showTk ? tkVisitors : null,
+    tiktok_customers: showTk ? tkCustomers : null,
+    tiktok_conversion_rate: (showTk && tkVisitors > 0) ? parseFloat((tkCustomers / tkVisitors * 100).toFixed(1)) : null,
+    tiktok_impressions: null,
+    tiktok_page_views: null,
+    tiktok_ctr_pct: null,
+    ml_unique_buyers: showMl ? mlBuyers : null,
+    ml_new_buyers: showMl ? mlNew : null,
+    ml_repeat_buyers: showMl ? mlRepeat : null,
+    ml_new_buyer_pct: (showMl && mlBuyers > 0) ? parseFloat((mlNew / mlBuyers * 100).toFixed(1)) : null,
+    ml_repeat_buyer_rate_pct: (showMl && mlBuyers > 0) ? parseFloat((mlRepeat / mlBuyers * 100).toFixed(1)) : null,
+    ml_gmv_per_buyer: (showMl && mlBuyers > 0) ? parseFloat((mlGmv / mlBuyers).toFixed(2)) : null,
+    shopee_gmv: showSh ? shGmv : null,
+    shopee_unique_buyers: showSh ? shBuyers : null,
+    shopee_new_buyers: showSh ? shNew : null,
+    shopee_repeat_buyers: showSh ? shRepeat : null,
+    shopee_new_buyer_pct: (showSh && shBuyers > 0) ? parseFloat((shNew / shBuyers * 100).toFixed(1)) : null,
+    shopee_repeat_buyer_rate_pct: (showSh && shBuyers > 0) ? parseFloat((shRepeat / shBuyers * 100).toFixed(1)) : null,
+    shopee_gmv_per_buyer: (showSh && shBuyers > 0) ? parseFloat((shGmv / shBuyers).toFixed(2)) : null,
+  };
+
+    return { live: false, kpis, brands };
+  });
+}
+
+export interface FinanceiroKpis {
+  tiktok_gmv: number | null;
+  tiktok_settlement: number | null;
+  tiktok_fees: number | null;
+  tiktok_avg_fee_pct: number | null;
+  tiktok_avg_settlement_pct: number | null;
+  ml_gmv: number | null;
+  ml_ad_spend: number | null;
+  ml_ad_revenue: number | null;
+  ml_roas: number | null;
+  ml_acos_pct: number | null;
+  ml_cpc: number | null;
+  ml_total_cost_pct: number | null;
+  shopee_gmv?: number | null;
+  shopee_settlement?: number | null;
+  shopee_fees?: number | null;
+  shopee_avg_fee_pct?: number | null;
+  shopee_avg_settlement_pct?: number | null;
+  shopee_ad_spend?: number | null;
+  shopee_roas?: number | null;
+}
+
+export interface FinanceiroBrandRow {
+  brand: string;
+  label: string;
+  tiktok_gmv: number | null;
+  tiktok_settlement: number | null;
+  tiktok_fees: number | null;
+  tiktok_avg_fee_pct: number | null;
+  tiktok_avg_settlement_pct: number | null;
+  ml_gmv: number | null;
+  ml_ad_spend: number | null;
+  ml_ad_revenue: number | null;
+  ml_roas: number | null;
+  ml_acos_pct: number | null;
+  ml_cpc: number | null;
+  ml_ctr_pct: number | null;
+  ml_ad_clicks: number | null;
+  ml_ad_impressions: number | null;
+  ml_seller_shipping_cost: number | null;
+  ml_shipping_pct_of_gmv: number | null;
+  ml_total_cost_pct: number | null;
+  shopee_gmv?: number | null;
+  shopee_settlement?: number | null;
+  shopee_fees?: number | null;
+  shopee_avg_fee_pct?: number | null;
+  shopee_avg_settlement_pct?: number | null;
+  shopee_ad_spend?: number | null;
+  shopee_ad_revenue?: number | null;
+  shopee_roas?: number | null;
+  shopee_shipping_cost?: number | null;
+  shopee_shipping_pct_of_gmv?: number | null;
+}
+
+// Mock calibrado com proporções reais de mai/2026: taxa TikTok ~25-31%, ROAS ML 12-15x, frete ML 11-14%
+const FINANCEIRO_MOCK_BRANDS: FinanceiroBrandRow[] = [
+  { brand: "barbours", label: "BARBOURS", tiktok_gmv: 9_710_000, tiktok_fees: 2_944_000, tiktok_settlement: 7_151_000, tiktok_avg_fee_pct: 30.3, tiktok_avg_settlement_pct: 73.6, ml_gmv: 2_578_000, ml_ad_spend: 120_000, ml_ad_revenue: 1_451_000, ml_roas: 12.1, ml_acos_pct: 8.3, ml_cpc: 0.70, ml_ctr_pct: 0.28, ml_ad_clicks: 171_000, ml_ad_impressions: 61_000_000, ml_seller_shipping_cost: 307_000, ml_shipping_pct_of_gmv: 11.9, ml_total_cost_pct: 16.5 },
+  { brand: "kokeshi", label: "KOKESHI", tiktok_gmv: 2_316_000, tiktok_fees: 708_000, tiktok_settlement: 1_588_000, tiktok_avg_fee_pct: 30.6, tiktok_avg_settlement_pct: 68.6, ml_gmv: 789_000, ml_ad_spend: 34_000, ml_ad_revenue: 469_000, ml_roas: 13.7, ml_acos_pct: 7.3, ml_cpc: 0.47, ml_ctr_pct: 0.32, ml_ad_clicks: 72_000, ml_ad_impressions: 22_500_000, ml_seller_shipping_cost: 85_000, ml_shipping_pct_of_gmv: 10.7, ml_total_cost_pct: 15.1 },
+  { brand: "apice", label: "ÁPICE", tiktok_gmv: 876_000, tiktok_fees: 223_000, tiktok_settlement: 629_000, tiktok_avg_fee_pct: 25.5, tiktok_avg_settlement_pct: 71.8, ml_gmv: null, ml_ad_spend: null, ml_ad_revenue: null, ml_roas: null, ml_acos_pct: null, ml_cpc: null, ml_ctr_pct: null, ml_ad_clicks: null, ml_ad_impressions: null, ml_seller_shipping_cost: null, ml_shipping_pct_of_gmv: null, ml_total_cost_pct: null },
+  { brand: "lescent", label: "LESCENT", tiktok_gmv: 254_000, tiktok_fees: 74_000, tiktok_settlement: 168_000, tiktok_avg_fee_pct: 29.1, tiktok_avg_settlement_pct: 66.2, ml_gmv: 553_000, ml_ad_spend: 23_000, ml_ad_revenue: 338_000, ml_roas: 14.6, ml_acos_pct: 6.9, ml_cpc: 0.40, ml_ctr_pct: 0.25, ml_ad_clicks: 57_500, ml_ad_impressions: 23_000_000, ml_seller_shipping_cost: 76_000, ml_shipping_pct_of_gmv: 13.7, ml_total_cost_pct: 17.9 },
+  { brand: "rituaria", label: "RITUÁRIA", tiktok_gmv: 240_000, tiktok_fees: 61_000, tiktok_settlement: 185_000, tiktok_avg_fee_pct: 25.6, tiktok_avg_settlement_pct: 77.0, ml_gmv: null, ml_ad_spend: null, ml_ad_revenue: null, ml_roas: null, ml_acos_pct: null, ml_cpc: null, ml_ctr_pct: null, ml_ad_clicks: null, ml_ad_impressions: null, ml_seller_shipping_cost: null, ml_shipping_pct_of_gmv: null, ml_total_cost_pct: null },
+];
+
+export function fetchFinanceiro(
+  filter: Filter,
+  period?: string,
+): Promise<{ kpis: FinanceiroKpis; brands: FinanceiroBrandRow[]; live: boolean }> {
+  interface ApiResp { kpis: FinanceiroKpis; brands: FinanceiroBrandRow[] }
+  const month = period ?? refMonth();
+  return withCache(`financeiro:${filter}:${month}`, async () => {
+  const raw = await apiFetch<ApiResp>(
+    `/api/v1/performance/financeiro?marketplace=${filter}&ref_month=${month}`
+  );
+  if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
+
+  const brands = filter === "tiktok"
+    ? FINANCEIRO_MOCK_BRANDS
+    : filter === "ml"
+    ? FINANCEIRO_MOCK_BRANDS.filter((b) => b.ml_ad_spend !== null)
+    : FINANCEIRO_MOCK_BRANDS;
+
+  const allTkGmv = FINANCEIRO_MOCK_BRANDS.reduce((s, b) => s + (b.tiktok_gmv ?? 0), 0);
+  const allTkFees = FINANCEIRO_MOCK_BRANDS.reduce((s, b) => s + (b.tiktok_fees ?? 0), 0);
+  const allTkSettlement = FINANCEIRO_MOCK_BRANDS.reduce((s, b) => s + (b.tiktok_settlement ?? 0), 0);
+  const mlBrands = FINANCEIRO_MOCK_BRANDS.filter((b) => b.ml_ad_spend !== null);
+  const allMlGmv = mlBrands.reduce((s, b) => s + (b.ml_gmv ?? 0), 0);
+  const allMlSpend = mlBrands.reduce((s, b) => s + (b.ml_ad_spend ?? 0), 0);
+  const allMlRevenue = mlBrands.reduce((s, b) => s + (b.ml_ad_revenue ?? 0), 0);
+  const allMlClicks = mlBrands.reduce((s, b) => s + (b.ml_ad_clicks ?? 0), 0);
+  const allMlShipping = mlBrands.reduce((s, b) => s + (b.ml_seller_shipping_cost ?? 0), 0);
+
+  const kpis: FinanceiroKpis = {
+    tiktok_gmv: filter === "ml" ? null : allTkGmv,
+    tiktok_settlement: filter === "ml" ? null : allTkSettlement,
+    tiktok_fees: filter === "ml" ? null : allTkFees,
+    tiktok_avg_fee_pct: filter === "ml" ? null : parseFloat((allTkFees / allTkGmv * 100).toFixed(2)),
+    tiktok_avg_settlement_pct: filter === "ml" ? null : parseFloat((allTkSettlement / allTkGmv * 100).toFixed(2)),
+    ml_gmv: filter === "tiktok" ? null : allMlGmv,
+    ml_ad_spend: filter === "tiktok" ? null : allMlSpend,
+    ml_ad_revenue: filter === "tiktok" ? null : allMlRevenue,
+    ml_roas: filter === "tiktok" ? null : parseFloat((allMlRevenue / allMlSpend).toFixed(2)),
+    ml_acos_pct: filter === "tiktok" ? null : parseFloat((allMlSpend / allMlRevenue * 100).toFixed(2)),
+    ml_cpc: filter === "tiktok" ? null : parseFloat((allMlSpend / allMlClicks).toFixed(4)),
+    ml_total_cost_pct: filter === "tiktok" ? null : parseFloat(((allMlSpend + allMlShipping) / allMlGmv * 100).toFixed(2)),
+  };
+
+  return { live: false, kpis, brands };
+  });
+}
+
+export interface QualityKpis {
+  tiktok_problem_rate: number | null;
+  tiktok_cancel_rate: number | null;
+  tiktok_avg_delivery_days: number | null;
+  ml_cancel_rate_pct: number | null;
+  ml_not_delivered_rate_pct: number | null;
+  ml_avg_delivery_days: number | null;
+  shopee_cancel_rate_pct?: number | null;
+  shopee_return_rate_pct?: number | null;
+}
+
+export interface QualityBrandRow {
+  brand: string;
+  label: string;
+  tiktok_orders: number | null;
+  tiktok_canceled: number | null;
+  tiktok_refunded: number | null;
+  tiktok_returned: number | null;
+  tiktok_problem_rate: number | null;
+  tiktok_cancel_rate: number | null;
+  tiktok_avg_delivery_days: number | null;
+  ml_cancel_rate_pct: number | null;
+  ml_not_delivered_rate_pct: number | null;
+  ml_cancelled_orders: number | null;
+  ml_total_orders: number | null;
+  ml_not_delivered_shipments: number | null;
+  ml_avg_delivery_days: number | null;
+  ml_repeat_buyer_rate_pct: number | null;
+  ml_gmv_per_buyer: number | null;
+  ml_gmv_mom_pct: number | null;
+  ml_new_buyers: number | null;
+  ml_unique_buyers: number | null;
+  ml_shipping_pct_of_gmv: number | null;
+  shopee_orders?: number | null;
+  shopee_canceled_orders?: number | null;
+  shopee_returned_orders?: number | null;
+  shopee_cancel_rate_pct?: number | null;
+  shopee_return_rate_pct?: number | null;
+}
+
+const QUALITY_MOCK_BRANDS: QualityBrandRow[] = [
+  { brand: "barbours", label: "BARBOURS", tiktok_orders: 3_380, tiktok_canceled: 207, tiktok_refunded: 78, tiktok_returned: 29, tiktok_problem_rate: 8.6, tiktok_cancel_rate: 5.8, tiktok_avg_delivery_days: 5.2, ml_cancel_rate_pct: 3.1, ml_not_delivered_rate_pct: 0.8, ml_cancelled_orders: 68, ml_total_orders: 2_194, ml_not_delivered_shipments: 17, ml_avg_delivery_days: 3.9, ml_repeat_buyer_rate_pct: 8.2, ml_gmv_per_buyer: 180.50, ml_gmv_mom_pct: 12.3, ml_new_buyers: 1_984, ml_unique_buyers: 2_162, ml_shipping_pct_of_gmv: 10.5 },
+  { brand: "kokeshi", label: "KOKESHI", tiktok_orders: 3_626, tiktok_canceled: 279, tiktok_refunded: 94, tiktok_returned: 34, tiktok_problem_rate: 10.6, tiktok_cancel_rate: 7.1, tiktok_avg_delivery_days: 5.6, ml_cancel_rate_pct: 2.5, ml_not_delivered_rate_pct: 1.1, ml_cancelled_orders: 44, ml_total_orders: 1_760, ml_not_delivered_shipments: 19, ml_avg_delivery_days: 3.5, ml_repeat_buyer_rate_pct: 7.5, ml_gmv_per_buyer: 155.20, ml_gmv_mom_pct: -3.2, ml_new_buyers: 1_620, ml_unique_buyers: 1_752, ml_shipping_pct_of_gmv: 11.8 },
+  { brand: "apice", label: "ÁPICE", tiktok_orders: 3_120, tiktok_canceled: 171, tiktok_refunded: 52, tiktok_returned: 19, tiktok_problem_rate: 7.3, tiktok_cancel_rate: 5.2, tiktok_avg_delivery_days: 5.8, ml_cancel_rate_pct: null, ml_not_delivered_rate_pct: null, ml_cancelled_orders: null, ml_total_orders: null, ml_not_delivered_shipments: null, ml_avg_delivery_days: null, ml_repeat_buyer_rate_pct: null, ml_gmv_per_buyer: null, ml_gmv_mom_pct: null, ml_new_buyers: null, ml_unique_buyers: null, ml_shipping_pct_of_gmv: null },
+  { brand: "lescent", label: "LESCENT", tiktok_orders: 3_360, tiktok_canceled: 228, tiktok_refunded: 83, tiktok_returned: 31, tiktok_problem_rate: 9.8, tiktok_cancel_rate: 6.4, tiktok_avg_delivery_days: 6.2, ml_cancel_rate_pct: null, ml_not_delivered_rate_pct: null, ml_cancelled_orders: null, ml_total_orders: null, ml_not_delivered_shipments: null, ml_avg_delivery_days: null, ml_repeat_buyer_rate_pct: null, ml_gmv_per_buyer: null, ml_gmv_mom_pct: null, ml_new_buyers: null, ml_unique_buyers: null, ml_shipping_pct_of_gmv: null },
+  { brand: "rituaria", label: "RITUÁRIA", tiktok_orders: 2_490, tiktok_canceled: 131, tiktok_refunded: 47, tiktok_returned: 16, tiktok_problem_rate: 7.5, tiktok_cancel_rate: 5.0, tiktok_avg_delivery_days: 5.4, ml_cancel_rate_pct: null, ml_not_delivered_rate_pct: null, ml_cancelled_orders: null, ml_total_orders: null, ml_not_delivered_shipments: null, ml_avg_delivery_days: null, ml_repeat_buyer_rate_pct: null, ml_gmv_per_buyer: null, ml_gmv_mom_pct: null, ml_new_buyers: null, ml_unique_buyers: null, ml_shipping_pct_of_gmv: null },
+];
+
+export function fetchQuality(
+  filter: Filter,
+  period?: string,
+): Promise<{ kpis: QualityKpis; brands: QualityBrandRow[]; live: boolean }> {
+  interface ApiResp { kpis: QualityKpis; brands: QualityBrandRow[] }
+  const month = period ?? refMonth();
+  return withCache(`quality:${filter}:${month}`, async () => {
+    const raw = await apiFetch<ApiResp>(
+      `/api/v1/performance/quality?marketplace=${filter}&ref_month=${month}`
+    );
+    if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
+
+    const brands = filter === "tiktok"
+      ? QUALITY_MOCK_BRANDS
+      : filter === "ml"
+      ? QUALITY_MOCK_BRANDS.filter((b) => b.ml_cancel_rate_pct !== null)
+      : QUALITY_MOCK_BRANDS;
+
+    const kpis: QualityKpis = {
+      tiktok_problem_rate: filter === "ml" ? null : 9.0,
+      tiktok_cancel_rate: filter === "ml" ? null : 5.9,
+      tiktok_avg_delivery_days: filter === "ml" ? null : 5.6,
+      ml_cancel_rate_pct: filter === "tiktok" ? null : 2.8,
+      ml_not_delivered_rate_pct: filter === "tiktok" ? null : 0.9,
+      ml_avg_delivery_days: filter === "tiktok" ? null : 3.7,
+    };
+
+    return { live: false, kpis, brands };
+  });
+}
+
+// ---------- Tempo Real ----------
+
+export interface TempoRealHour {
+  hour: number;
+  gmv_hour: number;
+  gmv_acumulado: number;
+  gmv_hour_prior: number | null;
+  gmv_acumulado_prior: number | null;
+  gmv_avg7d: number | null;
+  customers_hour: number;
+  customers_acumulado: number;
+  conversion_hour: number | null;
+  ticket_medio: number | null;
+}
+
+export interface TempoRealBrand {
+  brand: string;
+  label: string;
+  gmv_hoje: number;
+  gmv_ontem: number | null;
+  delta_pct: number | null;
+  ritmo_projetado: number | null;
+  clientes_hoje: number;
+  ultima_hora: number;
+  conversion_hora: number | null;
+  ticket_medio: number | null;
+  hours: TempoRealHour[];
+}
+
+export interface TempoRealData {
+  total_gmv_hoje: number;
+  total_gmv_ontem: number | null;
+  total_delta_pct: number | null;
+  total_ritmo_projetado: number | null;
+  brands: TempoRealBrand[];
+}
+
+export async function fetchTempoReal(): Promise<{ data: TempoRealData; live: boolean } | null> {
+  const raw = await apiFetch<TempoRealData>("/api/v1/performance/tempo-real");
+  if (raw) return { live: true, data: raw };
+  return null;
+}
+
+// ---------- Brand Detail ----------
+
+export interface BrandDetailDayRow {
+  date: string;
+  gmv: number | null;
+  gmv_video: number | null;
+  gmv_live: number | null;
+  gmv_card: number | null;
+  new_videos_posted: number | null;
+}
+
+export interface BrandDetailCreator {
+  creator: string;
+  gmv: number;
+  videos: number;
+  lives: number;
+}
+
+export interface BrandDetailProduto {
+  product_id: string;
+  product_name: string;
+  gmv: number;
+  orders: number;
+  videos: number;
+  gpm: number | null;
+}
+
+export interface BrandDetailChannelRow {
+  channel: string;
+  label: string;
+  impressions: number;
+  page_views: number;
+  items_sold: number;
+  gmv: number;
+  ctr_pct: number | null;
+  cvr_pct: number | null;
+}
+
+export interface BrandDetail {
+  brand: string;
+  label: string;
+  ref_month: string;
+  gmv: number;
+  orders: number;
+  customers: number;
+  cvr_pct: number | null;
+  cos_pct: number | null;
+  pct_video: number | null;
+  pct_live: number | null;
+  pct_card: number | null;
+  active_videos: number;
+  new_videos_posted: number;
+  active_video_creators: number;
+  total_views: number;
+  total_lives: number;
+  live_creators: number;
+  gpm: number | null;
+  gmv_per_video: number | null;
+  gmv_per_creator: number | null;
+  gmv_per_live: number | null;
+  videos_per_creator: number | null;
+  fresh_videos: number;
+  evergreen_videos: number;
+  gmv_fresh: number;
+  gmv_evergreen: number;
+  pct_gmv_fresh: number | null;
+  viewers_pct_female: number | null;
+  viewers_pct_male: number | null;
+  viewers_pct_18_24: number | null;
+  viewers_pct_25_34: number | null;
+  viewers_pct_35_44: number | null;
+  viewers_pct_45_54: number | null;
+  viewers_pct_55_plus: number | null;
+  followers_pct_female: number | null;
+  followers_pct_male: number | null;
+  followers_pct_18_24: number | null;
+  followers_pct_25_34: number | null;
+  followers_pct_35_44: number | null;
+  followers_pct_45_54: number | null;
+  followers_pct_55_plus: number | null;
+  channel_funnel: BrandDetailChannelRow[];
+  daily: BrandDetailDayRow[];
+  top_creators: BrandDetailCreator[];
+  top_produtos: BrandDetailProduto[];
+}
+
+export function fetchBrandDetail(
+  brand: string,
+  period?: string,
+): Promise<BrandDetail | null> {
+  const month = period ?? refMonth();
+  return withCache(`brand-detail:${brand}:${month}`, () =>
+    apiFetch<BrandDetail>(
+      `/api/v1/performance/brand-detail?brand=${brand}&ref_month=${month}`
+    )
+  );
+}
+
+// ---------- Pedidos ----------
+
+export interface PedidosKpis {
+  total_orders: number;
+  total_gmv: number;
+  avg_ticket: number;
+  cancel_rate_pct: number | null;
+}
+
+export interface PedidosCanalKpis {
+  orders: number;
+  canceled: number;
+  gmv: number;
+  cancel_rate_pct: number | null;
+  delivered: number | null;
+}
+
+export interface PedidosDailyRow {
+  date: string;
+  tiktok_orders: number;
+  tiktok_canceled: number;
+  ml_orders: number;
+  ml_canceled: number;
+  total_orders: number;
+  total_gmv: number;
+}
+
+export interface PedidosBrandRow {
+  brand: string;
+  label: string;
+  tiktok_orders: number | null;
+  tiktok_canceled: number | null;
+  tiktok_cancel_rate_pct: number | null;
+  tiktok_gmv: number | null;
+  ml_orders: number | null;
+  ml_canceled: number | null;
+  ml_cancel_rate_pct: number | null;
+  ml_gmv: number | null;
+  total_orders: number;
+  total_gmv: number;
+}
+
+export interface PedidosData {
+  days_back: number;
+  kpis: PedidosKpis;
+  tiktok: PedidosCanalKpis;
+  ml: PedidosCanalKpis;
+  daily: PedidosDailyRow[];
+  by_brand: PedidosBrandRow[];
+}
+
+export function fetchPedidos(daysBack = 30): Promise<PedidosData | null> {
+  return withCache(`pedidos:${daysBack}`, () =>
+    apiFetch<PedidosData>(`/api/v1/performance/pedidos?days_back=${daysBack}`)
+  );
+}
+
+// ---------- Inteligencia ----------
+
+export interface SignalRow {
+  product_status: string;
+  n_products: number;
+  gmv: number;
+  ad_spend: number;
+  avg_roas: number | null;
+}
+
+export interface ProductSignalRow {
+  brand: string;
+  title: string;
+  pareto_bucket: string | null;
+  revenue_velocity: string | null;
+  gmv: number;
+  ad_spend: number;
+  ad_roas: number | null;
+  ad_acos_pct: number | null;
+  cancel_rate_pct: number | null;
+  revenue_share_pct: number | null;
+  units_sold: number | null;
+  days_advertised: number | null;
+  ad_efficiency: string | null;
+}
+
+export interface ParetoRow {
+  brand: string;
+  pareto_bucket: string;
+  n_products: number;
+  gmv: number;
+  ad_spend: number;
+}
+
+export interface LtvRow {
+  brand: string;
+  total_buyers: number;
+  repeat_buyers: number;
+  repeat_rate_pct: number | null;
+  avg_customer_ltv: number | null;
+  vip_buyers: number | null;
+  one_and_done_buyers: number | null;
+  at_risk_or_churned: number | null;
+  overall_roas: number | null;
+}
+
+export interface TkProductRow {
+  brand: string;
+  product_name: string;
+  gmv: number;
+  orders: number;
+  avg_pct_video: number | null;
+  avg_pct_live: number | null;
+  avg_pct_card: number | null;
+  avg_rating: number | null;
+}
+
+export interface InteligenciaData {
+  signals: SignalRow[];
+  urgent: ProductSignalRow[];
+  scale: ProductSignalRow[];
+  organic: ProductSignalRow[];
+  pareto: ParetoRow[];
+  ltv: LtvRow[];
+  tk_products: TkProductRow[];
+}
+
+export function fetchInteligencia(): Promise<{ data: InteligenciaData | null; live: boolean }> {
+  return withCache("inteligencia", async () => {
+    const raw = await apiFetch<InteligenciaData>("/api/v1/performance/inteligencia");
+    return { data: raw, live: raw != null };
+  });
+}
+
+// ---------- Operacoes ----------
+
+export interface AlertaRow {
+  tipo: string;
+  severidade: string;
+  brand: string;
+  mensagem: string;
+  ad_spend?: number;
+  gmv?: number;
+  roas?: number;
+}
+
+export interface MlVelocityRow {
+  brand: string;
+  ad_spend_7d: number;
+  gmv_7d: number;
+  orders_7d: number;
+  roas_7d: number | null;
+}
+
+export interface CreatorRow {
+  brand: string;
+  creator: string;
+  gmv: number;
+  views: number;
+  videos: number;
+  lives: number;
+  gmv_video: number;
+  gmv_live: number;
+  gpm_video: number | null;
+}
+
+export interface LiveRow {
+  brand: string;
+  days_with_lives: number;
+  total_lives: number;
+  total_minutes: number;
+  live_gmv: number;
+  total_gmv: number;
+  pct_live: number | null;
+  gmv_per_live: number | null;
+  gmv_per_minute: number | null;
+}
+
+export interface TkDailyRow {
+  brand: string;
+  ref_date: string;
+  gmv: number;
+  orders: number;
+}
+
+export interface OperacoesData {
+  alertas: AlertaRow[];
+  ml_velocity: MlVelocityRow[];
+  creators: CreatorRow[];
+  lives: LiveRow[];
+  tk_daily: TkDailyRow[];
+}
+
+export function fetchOperacoes(): Promise<{ data: OperacoesData | null; live: boolean }> {
+  return withCache("operacoes", async () => {
+    const raw = await apiFetch<OperacoesData>("/api/v1/performance/operacoes");
+    return { data: raw, live: raw != null };
+  });
+}
+
+
