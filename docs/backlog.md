@@ -224,6 +224,39 @@ Todos os cálculos de cancel rate usam `canceled / (paid + canceled)` como denom
 
 ---
 
+## Sprint Auditoria Financeiro ✅ CONCLUÍDA
+
+**Período**: 2026-06-26
+
+### Contexto
+
+Auditoria da aba Financeiro: leitura de todos os arquivos relevantes, validação das queries no Neon para Mai/2026, identificação de bugs visuais e correção.
+
+### Achados principais
+
+- `total_fees` tem sinal diferente por canal: TikTok negativo (backend aplica `abs()`), Shopee positivo (correto sem abs)
+- `shopee_fees` positivos no BD implicam que Taxa % e Liq. % sao independentes e podem somar >100% — não são complementares
+- ML não tem `total_settlement` nem `total_fees` (ambos NULL) — comissao ML ausente no mart
+- kokeshi Shopee: `settlement / gmv = 100,6%` — possível timing de pagamento entre meses
+
+### Correções aplicadas
+
+- [x] Removida coluna `Composição` da tabela TikTok (`SettlementBar` substituída por `Liq. %` numérico)
+- [x] Removida coluna `Composição` da tabela Shopee (idem)
+- [x] Removido componente `SettlementBar` sem uso
+- [x] Legenda do rodapé TikTok corrigida (sem referência à barra removida)
+- [x] Legenda do rodapé Shopee corrigida (esclarece que Taxa % e Liq. % são independentes)
+- [x] Criado `docs/sections/financeiro_audit.md`
+
+### Pendências de dados
+
+- Trazer comissão ML (`total_fees`) para o mart — campo NULL para mkt=2 em todo o histórico
+- Investigar settlement Shopee > 100% (kokeshi mai/2026) — possível problema de competência
+- Discriminar fees TikTok (comissão plataforma vs. afiliados)
+- Documentar convenção de sinal de `total_fees` no data contract
+
+---
+
 ## Backlog tÃ©cnico (nÃ£o priorizado)
 
 - Loader de metas a partir do XLSX

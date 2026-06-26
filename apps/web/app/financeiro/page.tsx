@@ -54,29 +54,6 @@ function feePctColor(v: number | null): string {
   return "text-rose-700";
 }
 
-function SettlementBar({ settlementPct }: { settlementPct: number | null }) {
-  if (settlementPct == null) return null;
-  const pct = Math.max(0, Math.min(100, settlementPct));
-  const feePct = Math.max(0, 100 - pct);
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-slate-100 flex">
-        <div
-          className="h-full bg-violet-400 rounded-l-full transition-all"
-          style={{ width: `${pct}%` }}
-        />
-        <div
-          className="h-full bg-rose-200 rounded-r-full"
-          style={{ width: `${feePct}%` }}
-        />
-      </div>
-      <span className="text-xs tabular-nums text-slate-500 w-11 text-right shrink-0">
-        {pct.toFixed(1)}%
-      </span>
-    </div>
-  );
-}
-
 function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | null }) {
   if (adPct == null && freteP == null) return null;
   const ad = Math.max(0, adPct ?? 0);
@@ -260,8 +237,8 @@ export default function FinanceiroPage() {
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxa %</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Liq. %</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Receita Liquida</th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Composicao</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -280,10 +257,10 @@ export default function FinanceiroPage() {
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.tiktok_avg_fee_pct)}`}>
                         {fmtPct(b.tiktok_avg_fee_pct)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">{fmtBrl(b.tiktok_settlement!)}</td>
-                      <td className="px-6 py-4 min-w-[160px]">
-                        <SettlementBar settlementPct={b.tiktok_avg_settlement_pct} />
+                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                        {fmtPct(b.tiktok_avg_settlement_pct)}
                       </td>
+                      <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">{fmtBrl(b.tiktok_settlement!)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -301,9 +278,7 @@ export default function FinanceiroPage() {
                 <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
               </span>
               <span className="ml-auto text-[10px] text-slate-400">
-                Composicao: <span className="inline-flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-violet-400" /> Receita</span>
-                {" "}<span className="inline-flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-rose-200" /> Taxa</span>
-                {" · "}Taxas incluem comissao de afiliados
+                Taxas incluem comissao de afiliados · Liq.% = Receita Liquida / GMV
               </span>
             </div>
           </div>
@@ -408,8 +383,8 @@ export default function FinanceiroPage() {
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxa %</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Liq. %</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Receita Liq.</th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Composicao</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Ad Spend</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ROAS</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Frete</th>
@@ -433,11 +408,11 @@ export default function FinanceiroPage() {
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.shopee_avg_fee_pct ?? null)}`}>
                         {fmtPct(b.shopee_avg_fee_pct ?? null)}
                       </td>
+                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                        {fmtPct(b.shopee_avg_settlement_pct ?? null)}
+                      </td>
                       <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">
                         {b.shopee_settlement != null ? fmtBrl(b.shopee_settlement) : "—"}
-                      </td>
-                      <td className="px-6 py-4 min-w-[160px]">
-                        <SettlementBar settlementPct={b.shopee_avg_settlement_pct ?? null} />
                       </td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-700">
                         {b.shopee_ad_spend != null ? fmtBrl(b.shopee_ad_spend) : "—"}
@@ -465,8 +440,7 @@ export default function FinanceiroPage() {
                 <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
               </span>
               <span className="ml-auto text-[10px] text-slate-400">
-                Composicao: <span className="inline-flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-violet-400" /> Receita</span>
-                {" "}<span className="inline-flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-rose-200" /> Taxa</span>
+                Taxa % e Liq.% sao independentes sobre o GMV · podem somar mais de 100% (fees positivos na fonte Shopee)
               </span>
             </div>
           </div>
