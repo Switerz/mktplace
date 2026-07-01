@@ -25,7 +25,11 @@ venv/
 env/
 /Lib/
 /apps/api/Lib/
-/Scripts/
+# NAO ignorar /Scripts/ (= /scripts/ em filesystem case-insensitive) por
+# inteiro: essa pasta tem utilitarios legitimos versionados (run_with_lock.ps1,
+# check_shopee_local.ps1, start_local_postgres.ps1) junto com residuos de uma
+# instalacao de venv feita ali por engano. Ignorar so' os residuos conhecidos.
+/Scripts/*.exe
 /apps/api/Scripts/
 /Include/
 /apps/api/Include/
@@ -37,7 +41,9 @@ pyvenv.cfg
 
 # Local data and generated artifacts
 .local/
+/logs/
 *.log
+*.lock
 *.sqlite
 *.db
 *.csv
