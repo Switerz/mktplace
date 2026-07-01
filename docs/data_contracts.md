@@ -48,7 +48,7 @@ Cada brand/loja operacional. Mapeada diretamente do campo `brand` das tabelas do
 | 2 | 1 | barbours | BARBOURS | âœ… | âœ… |
 | 3 | 1 | kokeshi | KOKESHI | âœ… | âœ… |
 | 4 | 1 | lescent | LESCENT | âœ… | âœ… |
-| 5 | 1 | rituaria | RITUÃRIA | âœ… | pendente |
+| 5 | 1 | rituaria | RITUÃRIA | âœ… | âœ… (desde 2026-07-01) |
 
 **Fora do escopo (nÃ£o incluir no seed):** `azbuy`, `gocase`
 

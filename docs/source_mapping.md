@@ -117,7 +117,7 @@ Schema: `gold` | 18 colunas
 ### Cobertura
 | Atributo | Valor |
 |---|---|
-| Brands/lojas | barbours, kokeshi, lescent |
+| Brands/lojas | barbours, kokeshi, lescent, rituaria (incluida em 2026-07-01 — dados reais desde 2025-12-28) |
 | PerÃ­odo (raw) | 2025-04-27 â†’ hoje (atualizaÃ§Ã£o contÃ­nua) |
 | Total pedidos (raw) | ~219K |
 | Status distintos | 4 |
@@ -288,14 +288,14 @@ Caminhos futuros:
 | gocase | GOCASE | âœ… | âŒ | âŒ (nÃ£o estÃ¡ no XLSX â€” investigar) |
 | kokeshi | KOKESHI | âœ… | âœ… | âœ… |
 | lescent | LESCENT | âœ… | âœ… | âœ… |
-| rituaria | RITUÃRIA | âœ… | âŒ | âœ… |
+| rituaria | RITUÃRIA | âœ… | âœ… (desde 2026-07-01) | âœ… |
 
 ---
 
 ## Perguntas em aberto
 
 1. **azbuy e gocase** existem no TikTok mas nÃ£o no XLSX de metas. SÃ£o marcas novas? Adquiridas? Grupo externo?
-2. **apice e rituaria** nÃ£o tÃªm dados no ML. AusÃªncia esperada (nÃ£o vendem lÃ¡) ou gap de ingestÃ£o?
+2. **apice** nÃ£o tem dados no ML — confirmado como ausÃªncia real da fonte, nÃ£o gap de ingestÃ£o. **rituaria** tinha dados reais desde 2025-12-28 mas estava excluÃ­da por whitelist desatualizada — corrigido em 2026-07-01.
 3. **ml.tiktok_shop_line_items** estÃ¡ no schema `api`, nÃ£o `raw`. Qual a diferenÃ§a entre `raw` e `api`? A `api` Ã© uma view ou tabela separada?
 4. O XLSX menciona abas por loja (ÃPICE, BARBOURS, etc.) com metas mensais. Quem alimenta essas metas e como seria a ingestÃ£o futura?
 5. Existe coluna de seller_account separada por loja no TikTok (shop_cipher) â€” como mapear para as brands?

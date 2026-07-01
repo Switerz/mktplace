@@ -2,7 +2,9 @@
 
 Sistema interno de acompanhamento de performance comercial, operacional e financeira das lojas GoBeauté nos marketplaces TikTok Shop, Mercado Livre e Shopee.
 
-## Status atual: Sprint Shopee - backfill local executado em 2026-06-23
+## Status atual (2026-07-01)
+
+Dashboard principal e Produtos (ML/TikTok/Shopee) migrados para o Neon. Pipelines de sync existem mas **não estão agendados** — o Neon fica desatualizado (~8-10 dias) até rodarem manualmente. Ver `docs/backlog.md` (Sprint Regularização Neon) e `docs/sections/produtos_audit.md` para o diagnóstico e bugs em aberto (data futura em produtos Shopee; `rituaria` ausente do ML).
 
 ## Lojas monitoradas
 
@@ -25,10 +27,10 @@ Sistema interno de acompanhamento de performance comercial, operacional e financ
 
 ## Arquitetura de dados atual
 
-- `DATABASE_URL`: PostgreSQL local no PC, usado para escrita e leitura dos dados tratados da Shopee.
-- `DATAMART_DATABASE_URL`: Data Mart PostgreSQL remoto, read-only, usado para TikTok/ML via schemas `gold` e `raw`.
-- A API foi preparada para consultar ambos: queries `gold/raw` usam o Data Mart; queries `marts` usam o banco local.
-- Em 2026-06-23, o Data Mart remoto precisa ter a URL recolocada em `DATAMART_DATABASE_URL`; o valor local foi removido para evitar leitura falsa.
+- `DATABASE_URL`: **Neon** (serverless PostgreSQL) — camada canônica `marts.*` consumida pelo dashboard (overview, brands, monthly, daily, canais, financeiro, quality, pedidos, produtos/ml, produtos/tiktok, produtos/shopee).
+- `DATAMART_DATABASE_URL`: **RDS AWS** (Data Mart), somente leitura, fonte de verdade de TikTok/ML via schemas `gold`/`raw`. Requer VPN a partir da máquina local; endpoints que ainda leem `gold.*` diretamente (tempo-real, brand-detail, inteligência, operações) dependem disso estar acessível.
+- **PostgreSQL local** (`mktplace_control`, porta 5432): usado apenas como staging da Shopee — `etl/load_shopee_products.py` carrega os exports XLSX/CSV de `shopee/` para lá, e `pipelines/sync_produtos.py` copia (upsert) para o Neon. Não é lido diretamente pela API.
+- Os dados chegam ao Neon através de dois pipelines que precisam ser executados/agendados manualmente: `pipelines/ingestion/daily_performance.py` (fato diário principal) e `pipelines/sync_produtos.py` (tabelas de Produtos). Ver `docs/runbook_sync_produtos.md` para o agendamento proposto.
 
 ### Postgres local portatil
 

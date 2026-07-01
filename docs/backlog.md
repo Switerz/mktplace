@@ -32,7 +32,7 @@ Atualizado em: 2026-06-23
 
 ### Perguntas em aberto (para Sprint 1)
 - [ ] O que sÃ£o `azbuy` e `gocase` no TikTok? Parte do grupo GoBeautÃ©?
-- [ ] Por que `apice` e `rituaria` nÃ£o estÃ£o no ML?
+- [x] Por que `apice` e `rituaria` nÃ£o estÃ£o no ML? **Respondido em 2026-07-01**: `apice` confirmado sem dados na fonte; `rituaria` tinha dados reais desde 2025-12-28 mas estava excluÃ­da por whitelist hardcoded desatualizada â€” corrigido, ver seÃ§Ã£o "2026-07-01" abaixo e `docs/architecture.md`.
 - [ ] Qual a diferenÃ§a entre schema `raw` e `api` no Data Mart?
 - [ ] Como serÃ£o importadas as metas do XLSX? Processo manual ou planilha conectada?
 - [ ] Credenciais de acesso ao Data Mart (read-only) estÃ£o disponÃ­veis?
@@ -55,7 +55,7 @@ Atualizado em: 2026-06-23
 
 ### DecisÃµes tomadas
 - `azbuy` e `gocase` fora do escopo â€” pipeline deve filtrar via `WHERE brand IN (SELECT brand_key FROM marts.dim_loja)`
-- `apice` sem ML (confirmado), `rituaria` pendente de populaÃ§Ã£o no ML (baixa prioridade)
+- `apice` sem ML (confirmado), `rituaria` pendente de populaÃ§Ã£o no ML (baixa prioridade) **[SUPERADO em 2026-07-01: `rituaria` jÃ¡ tinha dados reais no ML desde 2025-12-28 â€” nÃ£o era "pendente de populaÃ§Ã£o", era gap de whitelist. Incluida no escopo, ver seÃ§Ã£o "2026-07-01" abaixo]**
 - Schema `api` ignorado â€” usar apenas `raw` e `gold`
 - `fact_marketplace_daily_performance` Ã© a tabela-fato principal do MVP (nÃ£o `fact_order`)
 - `fact_order` e `fact_order_item` ficam para fase 2 (Sprint 4+)
@@ -254,6 +254,84 @@ Auditoria da aba Financeiro: leitura de todos os arquivos relevantes, validaçã
 - Investigar settlement Shopee > 100% (kokeshi mai/2026) — possível problema de competência
 - Discriminar fees TikTok (comissão plataforma vs. afiliados)
 - Documentar convenção de sinal de `total_fees` no data contract
+
+---
+
+## Sprint Auditoria Produtos ✅ CONCLUÍDA
+
+**Período**: 2026-06-26
+
+### Contexto
+
+Auditoria da aba Produtos: leitura de arquivos, validação de tabelas no Neon, identificação de bugs e correções.
+
+### Achados principais
+
+- `marts.fact_shopee_product_monthly` **não existe no Neon de produção** — tab Shopee retorna 500, UI exibe "API offline" silenciosamente
+- SQL injection em `action_signal` (parâmetro sem whitelist, interpolado diretamente no SQL de `gold.ml_produto_ranking`)
+- ML Produtos lê `gold.ml_produto_ranking` sem filtro de período — usuário não sabe a qual mês o ranking se refere
+- TikTok e ML dependem de RDS via `DATAMART_DATABASE_URL` — falham se VPN/RDS indisponível no Render
+
+### Correções aplicadas
+
+- [x] Adicionado `VALID_ML_ACTION_SIGNALS` com 6 valores permitidos em `apps/api/app/routers/performance.py`
+- [x] Validação de `action_signal` antes de chamar `get_produtos_ml` (HTTPException 422 para valor inválido)
+- [x] Criado `docs/sections/produtos_audit.md`
+
+### Pendências de dados
+
+- **Migrar `marts.fact_shopee_product_monthly` para o Neon** — tabela existe só no banco local; bloqueia tab Shopee em produção
+- Expor data de atualização do ranking ML na UI
+- Validar denominador de `problem_rate` TikTok (se `orders` no gold inclui ou exclui cancelados)
+- Documentar thresholds de `ad_efficiency` e `revenue_velocity` em `docs/kpi_dictionary.md`
+
+---
+
+## Sprint Regularização Neon (TikTok/ML/Shopee) e correção de dados ✅ CONCLUÍDA
+
+**Período**: 2026-07-01
+
+### Contexto
+
+Diagnóstico e regularização da alimentação do Neon (`fact_marketplace_daily_performance` e tabelas de Produtos), fechamento seguro da migração de Produtos, correção transacional da causa raiz da data futura em `fact_shopee_product_monthly`, e inclusão aprovada de `rituaria` no escopo de ML. Ver `docs/sections/produtos_audit.md` (Bugs 1–5) para o detalhamento completo.
+
+### Diagnóstico confirmado (somente leitura)
+
+- RDS `gold.tiktok_brand_daily`: até 2026-06-29 · `gold.ml_gestao_diaria`: até 2026-07-01 · `gold.ml_produto_ranking`: 1.581 linhas · `gold.tiktok_product_daily`: até 2026-06-29
+- Neon `fact_marketplace_daily_performance`: TikTok até 2026-06-21 (890 linhas), ML até 2026-06-23 (539), Shopee até 2026-06-20 (851) — confirma atraso de ~8-10 dias, sem cargas desde 23-24/06
+- `audit.source_sync_run`: últimas execuções em 2026-06-23 (Shopee) e 2026-06-24 (TikTok/ML) — pipelines existem mas não estão agendados
+- Zero duplicidade, zero nulos em chaves obrigatórias e zero datas futuras em `fact_marketplace_daily_performance` (grain íntegro)
+- `fact_shopee_product_monthly`: 2.206 de 5.228 linhas (42%) com `ref_month` em jul–dez/2026 (impossível) — ver Bug 3
+- **Novo achado**: `rituaria` tem R$ 8.027.817,35 de GMV real em `gold.ml_gestao_diaria` desde 2025-12-28, mas está excluída de todo o pipeline/API por whitelist hardcoded desatualizada — ver Bug 4
+
+### Causa raiz confirmada — Bug 3 (data futura Shopee)
+
+`apps/api/etl/load_shopee_products.py` usava `pd.to_datetime(order_date, dayfirst=True)` em datas já em formato ISO (`YYYY-MM-DD HH:MM`, confirmado em 85/85 arquivos `.xlsx`). `dayfirst=True` inverte dia/mês mesmo em ISO quando o dia de origem é ≤12, espalhando ~40% dos pedidos de qualquer mês real para os 12 meses do calendário. Corrigido no código (`format="%Y-%m-%d %H:%M"` explícito); dado no PG local/Neon ainda não corrigido — requer re-execução do ETL + `sync_produtos.py --full` (aprovação pendente).
+
+### Correções de código
+
+- [x] `apps/api/etl/load_shopee_products.py` — corrigido parsing de data (causa raiz do Bug 3)
+- [x] `pipelines/sync_produtos.py` — auditoria em `audit.source_sync_run` (start/finish por fonte), rollback explícito em falha, validação de origem≠destino, guarda de queda suspeita de linhas (ML/TikTok), brands lidas de `marts.dim_loja` com fallback, exit code não-zero em falha, correção de bug de carregamento de `.env` (constantes de conexão eram lidas antes do `load_dotenv()`)
+- [x] `pipelines/reconciliation/check_sources_vs_neon.py` (novo) — reconciliação somente leitura fonte vs Neon + checks de integridade
+- [x] `pipelines/reconciliation/fix_shopee_product_dates.py` (novo) — correção transacional com backup/staging/validação cruzada
+- [x] `rituaria` incluída no escopo ML em `pipelines/connectors/mercadolivre/connector.py`, `gold_service.py`, `performance_service.py`, `routers/performance.py`, `apps/web/app/produtos/page.tsx`
+- [x] `scripts/run_with_lock.ps1` (novo) — guarda de concorrência para o Task Scheduler
+- [x] Testes: `pipelines/tests/`, `apps/api/etl/tests/`, `apps/api/tests/` (40 testes, todos passando)
+
+### Correções de dados executadas em 2026-07-01 (aprovadas explicitamente)
+
+- [x] Backfill ML (RDS→Neon, 758 linhas, 2025-12-23→2026-07-01) — inclui `rituaria`
+- [x] Incremental TikTok (RDS→Neon, 70 linhas, 2026-06-16→2026-06-29)
+- [x] Sync Produtos ML (1.486 linhas, era 1.326) e TikTok (173.920 linhas) — inclui 156 produtos de `rituaria`
+- [x] Correção transacional de `fact_shopee_product_monthly` (local + Neon): backup timestamped, staging reprocessada dos 85 arquivos-fonte, validação cruzada contra `fact_marketplace_daily_performance` (diff 0,04%), substituição — GMV de R$ 8.773.954,36 para R$ 21.174.272,80, 0 `ref_month` futuro (era 2.206 linhas/42%)
+- [x] Descoberto e corrigido durante a correção acima: colisão de `variation_name` na chave única causava perda silenciosa de até 36,6% do GMV de uma marca (Bug 5) — corrigido somando em vez de sobrescrever
+- [x] Nenhuma escrita no Data Mart/RDS em nenhum momento — todas as conexões usadas foram somente leitura contra `DATAMART_DATABASE_URL`
+
+### Pendências remanescentes
+
+- [ ] Consolidar as 4 constantes de whitelist ML duplicadas em uma única fonte de verdade
+- [ ] Ativar o Windows Task Scheduler (comandos preparados em `docs/runbook_sync_produtos.md`, não ativados — requer nova autorização)
+- [ ] Avaliar adicionar `variation_name` à chave única de `fact_shopee_product_monthly` (Bug 5) se a granularidade por variação for necessária
 
 ---
 

@@ -60,8 +60,12 @@ As tabelas `gold.tiktok_brand_daily` (68 colunas) e `gold.ml_gestao_diaria` (37 
 ### 2026-06-16 â€” azbuy e gocase fora do escopo
 Confirmado pelo stakeholder: `azbuy` e `gocase` existem no Data Mart mas nÃ£o fazem parte do grupo GoBeautÃ© no contexto deste projeto. O pipeline deve sempre filtrar: `WHERE brand IN (SELECT brand_key FROM marts.dim_loja)`. Nunca hardcodar a lista de brands no cÃ³digo â€” usar a dim_loja como fonte de verdade.
 
-### 2026-06-16 â€” RituÃ¡ria pendente no ML
+### 2026-06-16 â€” RituÃ¡ria pendente no ML [SUPERADO em 2026-07-01 â€” ver decisÃ£o abaixo]
 `rituaria` existe no TikTok mas o pipeline de ML ainda nÃ£o foi populado. Cadastrar a loja no seed com `ativo = true`, mas o pipeline simplesmente nÃ£o terÃ¡ dados para ela no ML por ora. Sem tratamento especial necessÃ¡rio â€” `null` nos campos ML.
+
+### 2026-07-01 — Correção: rituaria incluída oficialmente no ML
+
+A decisão de 2026-06-16 acima estava desatualizada. Diagnóstico confirmou que `gold.ml_gestao_diaria` (RDS) tem dados reais de `rituaria` desde 2025-12-28 (~R$8M GMV histórico) — antes até da data daquela decisão. `rituaria` foi adicionada a `BRANDS_IN_SCOPE`/`ML_BRANDS`/`_ML_BRANDS`/`VALID_ML_BRANDS` (connector, `gold_service.py`, `performance_service.py`, router) e ao filtro de marca ML em `apps/web/app/produtos/page.tsx`, seguida de backfill via `daily_performance.py --source ml --mode backfill` e sync de produtos ML. `apice` permanece fora do ML — confirmado sem nenhuma linha na fonte. Ver `docs/backlog.md` e `docs/sections/produtos_audit.md` (Bug 4).
 
 ### 2026-06-16 â€” Schema api ignorado
 O schema `api` no Data Mart Ã© uma exposiÃ§Ã£o via postgres das mesmas tabelas do `raw`. NÃ£o usar â€” consumir sempre `raw` (dados brutos) e `gold` (agregados).
@@ -72,11 +76,11 @@ Em vez de construir `fact_order` (granularidade de pedido) do zero, o MVP usa as
 ### 2026-06-16 â€” Brand como chave de loja
 Tanto TikTok quanto ML usam `brand` (varchar) como identificador de loja. Os valores sÃ£o em minÃºsculas sem acento (ex: `apice`, `barbours`). Mapeamento para nome de exibiÃ§Ã£o e empresa serÃ¡ feito via seed/dim_loja.
 
-### 2026-06-16 â€” Cobertura de brands por marketplace
+### 2026-06-16 â€” Cobertura de brands por marketplace [PARCIALMENTE SUPERADO em 2026-07-01 â€” ver decisÃ£o acima sobre rituaria]
 TikTok: 7 brands (apice, azbuy, barbours, gocase, kokeshi, lescent, rituaria)
-ML: 3 brands (barbours, kokeshi, lescent)
+ML (na Ã©poca): 3 brands (barbours, kokeshi, lescent) â€” hoje 4 brands, incluindo `rituaria` (ver 2026-07-01)
 As brands `azbuy` e `gocase` nÃ£o estÃ£o no XLSX de metas â€” investigar.
-As brands `apice` e `rituaria` nÃ£o tÃªm dados no ML â€” esperado ou gap?
+~~As brands `apice` e `rituaria` nÃ£o tÃªm dados no ML â€” esperado ou gap?~~ Respondido em 2026-07-01: `rituaria` tem dados reais (gap de whitelist, corrigido); `apice` confirmado sem dados na fonte.
 
 ### 2026-06-23 — Shopee integrada via exports locais
 A Shopee passa a entrar no escopo ativo por exports manuais locais em `shopee/{brand}`. Orders, shop-stats e ads são normalizados para `marts.fact_marketplace_daily_performance`. A API oficial Shopee Open Platform continua como evolução futura.
