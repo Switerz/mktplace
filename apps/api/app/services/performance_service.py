@@ -30,12 +30,43 @@ MES_LABELS = {
     9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
 }
 
-_MKT_FILTER = {
-    "all": None,
-    "tiktok": TIKTOK_ID,
-    "ml": ML_ID,
-    "shopee": SHOPEE_ID,
-}
+_MKT_IDS = {"tiktok": TIKTOK_ID, "ml": ML_ID, "shopee": SHOPEE_ID}
+_MKT_ORDER = ["tiktok", "ml", "shopee"]  # ordem canonica: TikTok, ML, Shopee
+
+
+def normalize_marketplace_param(marketplace: str) -> str:
+    """
+    Valida e normaliza o parametro `marketplace`. Aceita "all", um canal
+    isolado ("tiktok"|"ml"|"shopee") ou uma combinacao canonica separada
+    por virgula (ex: "tiktok,ml"). Remove duplicados, ordena na ordem
+    canonica TikTok/ML/Shopee e colapsa para "all" quando os tres canais
+    estao presentes. Levanta ValueError em valor invalido ou vazio.
+    """
+    if marketplace in ("all", ""):
+        return "all"
+    tokens = [t.strip() for t in marketplace.split(",") if t.strip()]
+    if not tokens:
+        raise ValueError(
+            "marketplace deve conter ao menos um canal (tiktok, ml, shopee) ou 'all'."
+        )
+    invalid = sorted(set(tokens) - set(_MKT_ORDER))
+    if invalid:
+        raise ValueError(
+            f"marketplace invalido: {', '.join(invalid)}. "
+            "Valores aceitos: all, tiktok, ml, shopee (ou combinacao separada por virgula, ex: tiktok,ml)."
+        )
+    canonical = [mp for mp in _MKT_ORDER if mp in tokens]
+    if len(canonical) == len(_MKT_ORDER):
+        return "all"
+    return ",".join(canonical)
+
+
+def parse_marketplace_param(marketplace: str) -> list[int]:
+    """Converte o parametro normalizado em lista de marketplace_id para uso em SQL (`= ANY(:mkt_ids)`)."""
+    canonical = normalize_marketplace_param(marketplace)
+    if canonical == "all":
+        return [TIKTOK_ID, ML_ID, SHOPEE_ID]
+    return [_MKT_IDS[mp] for mp in canonical.split(",")]
 
 
 def _f(v) -> float:
@@ -69,7 +100,7 @@ def _pct_from_source(value) -> float | None:
     return round(v * 100, 2) if abs(v) <= 1 else round(v, 2)
 
 
-def _mkt_kpis(db: Session, start: date, end: date, mkt_id) -> dict[int, dict]:
+def _mkt_kpis(db: Session, start: date, end: date, mkt_ids: list[int]) -> dict[int, dict]:
     """KPIs agregados por marketplace_id para um intervalo de datas."""
     sql = text("""
         SELECT
@@ -82,15 +113,15 @@ def _mkt_kpis(db: Session, start: date, end: date, mkt_id) -> dict[int, dict]:
             COALESCE(SUM(ad_revenue), 0)       AS ad_revenue
         FROM marts.fact_marketplace_daily_performance
         WHERE date BETWEEN :start AND :end
-          AND (:mkt_id IS NULL OR marketplace_id = :mkt_id)
+          AND marketplace_id = ANY(:mkt_ids)
         GROUP BY marketplace_id
     """)
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
     return {r["marketplace_id"]: dict(r) for r in rows}
 
 
 def _brand_mkt_rows(
-    db: Session, start: date, end: date, mkt_id, extra_cols: str = ""
+    db: Session, start: date, end: date, mkt_ids: list[int], extra_cols: str = ""
 ) -> dict[str, dict[int, dict]]:
     """KPIs por brand_key × marketplace_id para um intervalo de datas."""
     sql = text(f"""
@@ -106,11 +137,11 @@ def _brand_mkt_rows(
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
     result: dict[str, dict[int, dict]] = {}
     for r in rows:
         brand = r["brand_key"]
@@ -125,7 +156,7 @@ def _brand_mkt_rows(
 # ---------------------------------------------------------------------------
 
 def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     start, end = _month_bounds(year, month)
     py, pm = _prev_month(year, month)
     pstart, pend = _month_bounds(py, pm)
@@ -170,8 +201,8 @@ def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
             "shopee_unique_buyers": int(_f(sh.get("unique_buyers"))) or None,
         }
 
-    cur = _assemble(_mkt_kpis(db, start, end, mkt_id))
-    prev = _assemble(_mkt_kpis(db, pstart, pend, mkt_id))
+    cur = _assemble(_mkt_kpis(db, start, end, mkt_ids))
+    prev = _assemble(_mkt_kpis(db, pstart, pend, mkt_ids))
     mom = round((cur["gmv"] - prev["gmv"]) / prev["gmv"] * 100, 2) if prev["gmv"] > 0 else None
 
     return {
@@ -188,14 +219,14 @@ def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_brands(db: Session, marketplace: str, year: int, month: int) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     start, end = _month_bounds(year, month)
     py, pm = _prev_month(year, month)
     pstart, pend = _month_bounds(py, pm)
 
     extra = "COALESCE(SUM(f.total_fees), 0) AS total_fees"
-    cur = _brand_mkt_rows(db, start, end, mkt_id, extra)
-    prev = _brand_mkt_rows(db, pstart, pend, mkt_id, extra)
+    cur = _brand_mkt_rows(db, start, end, mkt_ids, extra)
+    prev = _brand_mkt_rows(db, pstart, pend, mkt_ids, extra)
 
     result = []
     for brand in sorted(set(list(cur.keys()) + list(prev.keys()))):
@@ -262,7 +293,7 @@ def get_brands(db: Session, marketplace: str, year: int, month: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     today = date.today()
     year, month = today.year, today.month
     for _ in range(months_back):
@@ -277,12 +308,12 @@ def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date >= :start
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         GROUP BY DATE_TRUNC('month', f.date), l.brand_key
         ORDER BY mes, l.brand_key
     """)
 
-    rows = db.execute(sql, {"start": start, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"start": start, "mkt_ids": mkt_ids}).mappings().all()
 
     months: dict[str, dict] = {}
     for r in rows:
@@ -307,7 +338,7 @@ def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     date_from = date.today() - timedelta(days=days_back)
 
     sql = text("""
@@ -321,11 +352,11 @@ def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) ->
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE l.brand_key = :brand
           AND f.date >= :date_from
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         ORDER BY f.date, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"brand": brand, "date_from": date_from, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"brand": brand, "date_from": date_from, "mkt_ids": mkt_ids}).mappings().all()
 
     days: dict[date, dict] = {}
     for r in rows:
@@ -376,7 +407,7 @@ def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) ->
 # ---------------------------------------------------------------------------
 
 def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     start, end = _month_bounds(year, month)
 
     sql = text("""
@@ -397,12 +428,12 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
@@ -540,7 +571,7 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     start, end = _month_bounds(year, month)
 
     sql = text("""
@@ -558,12 +589,12 @@ def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_id": mkt_id}).mappings().all()
+    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
@@ -690,7 +721,7 @@ def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict
 # ---------------------------------------------------------------------------
 
 def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
-    mkt_id = _MKT_FILTER.get(marketplace)
+    mkt_ids = parse_marketplace_param(marketplace)
     start, end = _month_bounds(year, month)
     py, pm = _prev_month(year, month)
     pstart, pend = _month_bounds(py, pm)
@@ -720,23 +751,23 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND (:mkt_id IS NULL OR f.marketplace_id = :mkt_id)
+          AND f.marketplace_id = ANY(:mkt_ids)
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    # GMV ML do mês anterior para gmv_mom_pct
+    # GMV ML do mês anterior para gmv_mom_pct — sempre ML, independente da selecao de canais
     sql_prev_ml = text("""
         SELECT l.brand_key, COALESCE(SUM(f.gmv), 0) AS gmv
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND f.marketplace_id = :mkt_id
+          AND f.marketplace_id = :mkt_id_ml
         GROUP BY l.brand_key
     """)
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_id": mkt_id}).mappings().all()
-    prev_rows = db.execute(sql_prev_ml, {"start": pstart, "end": pend, "mkt_id": ML_ID}).mappings().all()
+    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
+    prev_rows = db.execute(sql_prev_ml, {"start": pstart, "end": pend, "mkt_id_ml": ML_ID}).mappings().all()
     prev_ml_gmv = {r["brand_key"]: _f(r["gmv"]) for r in prev_rows}
 
     by_brand: dict[str, dict[int, dict]] = {}
@@ -1042,6 +1073,56 @@ _PARETO_META  = {
     "D_tail":   ("D", "Cauda"),
 }
 
+# Allowlists de ordenacao — chave publica da API -> expressao SQL segura
+# (nunca interpolar sort_by/sort_dir do cliente diretamente na query).
+PRODUTOS_SHOPEE_SORT_COLUMNS = {
+    "gmv": "gmv", "units_sold": "units_sold", "orders": "completed_orders",
+    "canceled_orders": "canceled_orders", "cancel_rate_pct": "cancel_rate_pct",
+    "unique_buyers": "unique_buyers", "avg_price": "avg_price", "product_name": "product_name",
+}
+PRODUTOS_ML_SORT_COLUMNS = {
+    "gross_revenue": "gross_revenue", "units_sold": "units_sold", "unique_buyers": "unique_buyers",
+    "avg_price": "avg_price", "cancel_rate_pct": "cancel_rate_pct", "ad_roas": "ad_roas",
+    "ad_acos_pct": "ad_acos_pct", "ad_spend": "ad_spend", "estimated_margin": "estimated_margin",
+    "revenue_share_pct": "revenue_share_pct", "title": "title",
+}
+PRODUTOS_TIKTOK_SORT_COLUMNS = {
+    "gmv": "gmv", "orders": "orders", "items_sold": "items_sold", "pct_gmv_video": "pct_gmv_video",
+    "pct_gmv_live": "pct_gmv_live", "pct_gmv_card": "pct_gmv_card", "problem_rate": "problem_rate",
+    "rating_avg": "rating_avg", "total_ratings": "total_ratings", "product_name": "product_name",
+}
+
+
+def _build_order_by(
+    sort_by: str | None,
+    sort_dir: str | None,
+    allowlist: dict[str, str],
+    default_column: str,
+    default_direction: str,
+    tiebreak_columns: list[str],
+) -> str:
+    """
+    Monta um ORDER BY seguro e deterministico a partir de uma allowlist
+    explicita de colunas (nunca a partir de concatenacao direta de
+    sort_by/sort_dir do cliente). Sempre acrescenta `tiebreak_columns` (chave
+    estavel da linha, ex: brand+item_id) apos a coluna escolhida, em ASC
+    NULLS LAST, para que paginas consecutivas nunca dupliquem ou omitam
+    linhas quando ha valores empatados na coluna principal.
+    """
+    if sort_by and sort_by not in allowlist:
+        raise ValueError(f"sort_by invalido: {sort_by}. Valores aceitos: {', '.join(sorted(allowlist))}.")
+
+    if sort_by:
+        column_expr = allowlist[sort_by]
+        direction = "ASC" if (sort_dir or "desc").lower() == "asc" else "DESC"
+    else:
+        column_expr = default_column
+        direction = default_direction
+
+    order_parts = [f"{column_expr} {direction} NULLS LAST"]
+    order_parts += [f"{col} ASC NULLS LAST" for col in tiebreak_columns]
+    return "ORDER BY " + ", ".join(order_parts)
+
 
 def get_produtos_shopee(
     db: Session,
@@ -1050,6 +1131,8 @@ def get_produtos_shopee(
     month: int,
     limit: int = 25,
     offset: int = 0,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
 ) -> dict:
     ref_month = date(year, month, 1)
     filters = ["ref_month = :ref_month", "gmv > 0"]
@@ -1060,6 +1143,10 @@ def get_produtos_shopee(
         params["brand"] = brand
 
     where = " AND ".join(filters)
+    order_by = _build_order_by(
+        sort_by, sort_dir, PRODUTOS_SHOPEE_SORT_COLUMNS, "gmv", "DESC",
+        ["brand", "sku_ref", "product_name", "variation_name"],
+    )
 
     total_row = db.execute(
         text(f"SELECT COUNT(*) AS n FROM marts.fact_shopee_product_monthly WHERE {where}"),
@@ -1074,7 +1161,7 @@ def get_produtos_shopee(
                    cancel_rate_pct, unique_buyers, avg_price
             FROM marts.fact_shopee_product_monthly
             WHERE {where}
-            ORDER BY gmv DESC
+            {order_by}
             LIMIT :limit OFFSET :offset
         """),
         params,
@@ -1115,6 +1202,8 @@ def get_produtos_ml(
     revenue_velocity: str | None,
     limit: int = 25,
     offset: int = 0,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
 ) -> dict:
     brands_tuple = tuple(sorted(_ML_BRANDS))
     filters = ["brand IN :brands"]
@@ -1137,6 +1226,10 @@ def get_produtos_ml(
         params["revenue_velocity"] = revenue_velocity
 
     where = " AND ".join(filters)
+    order_by = _build_order_by(
+        sort_by, sort_dir, PRODUTOS_ML_SORT_COLUMNS, "gross_revenue", "DESC",
+        ["brand", "item_id"],
+    )
 
     total_row = db.execute(
         text(f"SELECT COUNT(*) AS n FROM marts.fact_ml_produto_ranking WHERE {where}"),
@@ -1155,7 +1248,7 @@ def get_produtos_ml(
                    action_signal, estimated_margin, revenue_share_pct, product_status
             FROM marts.fact_ml_produto_ranking
             WHERE {where}
-            ORDER BY gross_revenue DESC
+            {order_by}
             LIMIT :limit OFFSET :offset
         """),
         params,
@@ -1246,6 +1339,8 @@ def get_produtos_tiktok(
     month: int,
     limit: int = 25,
     offset: int = 0,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
 ) -> dict:
     start, end = _month_bounds(year, month)
     brands_tuple = tuple(sorted(_TK_BRANDS))
@@ -1257,16 +1352,33 @@ def get_produtos_tiktok(
         params["brand"] = brand
 
     where = " AND ".join(filters)
+    order_by = _build_order_by(
+        sort_by, sort_dir, PRODUTOS_TIKTOK_SORT_COLUMNS, "gmv", "DESC",
+        ["brand", "product_id"],
+    )
 
+    # Grao estavel do produto: (brand, product_id). product_name NAO entra no
+    # GROUP BY — se o nome mudar durante o mes, isso geraria duas linhas para
+    # o mesmo produto. Em vez disso, escolhemos o nome vigente de forma
+    # deterministica (o mais recente por data) via ARRAY_AGG ORDER BY date DESC.
     total_row = db.execute(
-        text(f"SELECT COUNT(DISTINCT product_id) AS n FROM marts.fact_tiktok_product_daily WHERE {where}"),
+        text(f"""
+            SELECT COUNT(*) AS n FROM (
+                SELECT brand, product_id
+                FROM marts.fact_tiktok_product_daily
+                WHERE {where}
+                GROUP BY brand, product_id
+                HAVING SUM(gmv) > 0
+            ) t
+        """),
         params,
     ).fetchone()
     total = int(total_row.n) if total_row else 0
 
     rows = db.execute(
         text(f"""
-            SELECT brand, product_id, product_name,
+            SELECT brand, product_id,
+                   (ARRAY_AGG(product_name ORDER BY date DESC))[1] AS product_name,
                    SUM(gmv)        AS gmv,
                    SUM(orders)     AS orders,
                    SUM(items_sold) AS items_sold,
@@ -1288,9 +1400,9 @@ def get_produtos_tiktok(
                    SUM(total_ratings) AS total_ratings
             FROM marts.fact_tiktok_product_daily
             WHERE {where}
-            GROUP BY brand, product_id, product_name
+            GROUP BY brand, product_id
             HAVING SUM(gmv) > 0
-            ORDER BY SUM(gmv) DESC
+            {order_by}
             LIMIT :limit OFFSET :offset
         """),
         params,

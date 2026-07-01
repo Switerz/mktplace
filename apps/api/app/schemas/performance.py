@@ -285,7 +285,7 @@ class ProdutoMLRow(BaseModel):
     brand: str
     item_id: str
     seller_sku: Optional[str] = None
-    title: str
+    title: Optional[str] = None
     gross_revenue: float
     units_sold: int
     unique_buyers: Optional[int] = None

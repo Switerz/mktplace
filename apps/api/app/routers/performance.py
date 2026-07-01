@@ -16,7 +16,27 @@ from app.services import performance_service as perf_svc
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
 
-MarketplaceParam = Literal["all", "tiktok", "ml", "shopee"]
+MARKETPLACE_QUERY_DESCRIPTION = (
+    "Canal(is) de marketplace: 'all' (padrao), um canal isolado "
+    "('tiktok'|'ml'|'shopee') ou combinacao separada por virgula, ex: 'tiktok,ml'."
+)
+
+
+def marketplace_query(marketplace: str = Query("all", description=MARKETPLACE_QUERY_DESCRIPTION)) -> str:
+    """Valida o parametro marketplace na borda HTTP e devolve a forma canonica."""
+    try:
+        return perf_svc.normalize_marketplace_param(marketplace)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+def _validate_sort_by(sort_by: Optional[str], allowlist: dict[str, str]) -> None:
+    if sort_by is not None and sort_by not in allowlist:
+        raise HTTPException(
+            422,
+            f"sort_by invalido: {sort_by}. Valores aceitos: {', '.join(sorted(allowlist))}.",
+        )
+
 
 VALID_ML_BRANDS = {"barbours", "kokeshi", "lescent", "rituaria"}  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
 VALID_TK_BRANDS = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
@@ -52,7 +72,7 @@ def _parse_month(ref_month: Optional[str]) -> tuple[int, int]:
 
 @router.get("/overview", response_model=OverviewResponse)
 def overview(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     ref_month: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
@@ -62,7 +82,7 @@ def overview(
 
 @router.get("/brands", response_model=BrandsResponse)
 def brands(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     ref_month: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
@@ -72,7 +92,7 @@ def brands(
 
 @router.get("/monthly", response_model=MonthlyResponse)
 def monthly(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     months_back: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
 ):
@@ -82,7 +102,7 @@ def monthly(
 @router.get("/daily", response_model=DailyResponse)
 def daily(
     brand: str = Query(...),
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     days_back: int = Query(60, ge=7, le=365),
     db: Session = Depends(get_db),
 ):
@@ -110,6 +130,8 @@ def produtos_ml(
     revenue_velocity: Optional[str] = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    sort_by: Optional[str] = Query(None, description="Coluna de ordenacao (allowlist)."),
+    sort_dir: Optional[Literal["asc", "desc"]] = Query(None),
     db: Session = Depends(get_db),
 ):
     if brand and brand not in VALID_ML_BRANDS:
@@ -122,7 +144,11 @@ def produtos_ml(
         raise HTTPException(422, f"revenue_velocity '{revenue_velocity}' invalido.")
     if action_signal and action_signal not in VALID_ML_ACTION_SIGNALS:
         raise HTTPException(422, f"action_signal invalido.")
-    return perf_svc.get_produtos_ml(_require_db(db), brand, pareto_bucket, action_signal, product_status, revenue_velocity, limit, offset)
+    _validate_sort_by(sort_by, perf_svc.PRODUTOS_ML_SORT_COLUMNS)
+    return perf_svc.get_produtos_ml(
+        _require_db(db), brand, pareto_bucket, action_signal, product_status, revenue_velocity,
+        limit, offset, sort_by, sort_dir,
+    )
 
 
 @router.get("/produtos/tiktok", response_model=ProdutosTikTokResponse)
@@ -131,12 +157,15 @@ def produtos_tiktok(
     ref_month: Optional[str] = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    sort_by: Optional[str] = Query(None, description="Coluna de ordenacao (allowlist)."),
+    sort_dir: Optional[Literal["asc", "desc"]] = Query(None),
     db: Session = Depends(get_db),
 ):
     if brand and brand not in VALID_TK_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para TikTok.")
+    _validate_sort_by(sort_by, perf_svc.PRODUTOS_TIKTOK_SORT_COLUMNS)
     year, month = _parse_month(ref_month)
-    return perf_svc.get_produtos_tiktok(_require_db(db), brand, year, month, limit, offset)
+    return perf_svc.get_produtos_tiktok(_require_db(db), brand, year, month, limit, offset, sort_by, sort_dir)
 
 
 @router.get("/produtos/shopee", response_model=ProdutosShopeeResponse)
@@ -145,18 +174,21 @@ def produtos_shopee(
     ref_month: Optional[str] = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    sort_by: Optional[str] = Query(None, description="Coluna de ordenacao (allowlist)."),
+    sort_dir: Optional[Literal["asc", "desc"]] = Query(None),
     db: Session = Depends(get_db),
 ):
     _VALID_SHOPEE = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
     if brand and brand not in _VALID_SHOPEE:
         raise HTTPException(422, f"Brand '{brand}' inválida.")
+    _validate_sort_by(sort_by, perf_svc.PRODUTOS_SHOPEE_SORT_COLUMNS)
     year, month = _parse_month(ref_month)
-    return perf_svc.get_produtos_shopee(_require_db(db), brand, year, month, limit, offset)
+    return perf_svc.get_produtos_shopee(_require_db(db), brand, year, month, limit, offset, sort_by, sort_dir)
 
 
 @router.get("/canais", response_model=CanaisResponse)
 def canais(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     ref_month: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
@@ -166,7 +198,7 @@ def canais(
 
 @router.get("/financeiro", response_model=FinanceiroResponse)
 def financeiro(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     ref_month: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
@@ -176,7 +208,7 @@ def financeiro(
 
 @router.get("/quality", response_model=QualityResponse)
 def quality(
-    marketplace: MarketplaceParam = Query("all"),
+    marketplace: str = Depends(marketplace_query),
     ref_month: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
