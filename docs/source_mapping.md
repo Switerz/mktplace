@@ -95,6 +95,8 @@ Colunas-chave:
 | problem_rate | numeric | Taxa de problemas |
 | avg_delivery_hours | numeric | Horas mÃ©dias de entrega |
 
+> **Ressalva (2026-07-01, ver `docs/sections/financeiro_audit.md` secao 11):** `total_settlement`/`total_fees` refletem o subsistema de repasses/statements do Data Mart (`gold.tiktok_settlements_summary`), nÃ£o o mesmo recorte de pedidos do `gmv` desta linha. **Comprovado** (via SQL somente-leitura): a "revenue" do repasse e ~5,5% maior que o GMV comercial em mai/2026 â€” universos/denominadores diferentes. **InferÃªncia forte, ainda nÃ£o comprovada pedido a pedido**: o repasse de um mÃªs tambÃ©m pode incluir pedidos de outro mÃªs (`raw.tiktok_shop_settlements`, que permitiria confirmar isso por `order_id`, estÃ¡ vazia nesta rÃ©plica). NÃ£o tratar `total_settlement/gmv` como margem lÃ­quida estÃ¡vel mÃªs a mÃªs.
+
 #### `gold.tiktok_orders_daily` â€” Pedidos diÃ¡rios agregados
 Schema: `gold` | 13 colunas
 
@@ -271,10 +273,13 @@ Auditoria de carga (`audit.source_sync_run`):
 - Shop-stats preenche visitantes, conversão, compradores novos/recorrentes quando o arquivo existir.
 - Ads CSV não tem granularidade diária; o pipeline distribui os totais do período como média diária e documenta essa limitação operacional.
 
+> **Correção (2026-07-01, ver `docs/sections/financeiro_audit.md` seção 11):** `total_settlement` vem da coluna "Total global" do `Order.all*.xlsx` — o valor total do pedido, **não um repasse líquido**. Foi mapeado com esse nome por engano; não representa liquidação/settlement real da Shopee (que viria de um relatório de renda/income release, não integrado nesta pipeline). O indicador correspondente foi removido da tela do Financeiro em 2026-07-01. `total_fees` (comissão líquida + taxa de serviço líquida) permanece confiável como custo real.
+
 Caminhos futuros:
 1. Validar reconciliação dos totais por brand/mês contra o Seller Center.
 2. Automatizar extração via API oficial Shopee Open Platform.
 3. Adicionar granularidade SKU/pedido em fase posterior.
+4. Localizar e integrar o relatório de renda/repasse (income release) da Shopee para obter um `total_settlement` genuíno.
 
 ---
 
@@ -299,5 +304,8 @@ Caminhos futuros:
 3. **ml.tiktok_shop_line_items** estÃ¡ no schema `api`, nÃ£o `raw`. Qual a diferenÃ§a entre `raw` e `api`? A `api` Ã© uma view ou tabela separada?
 4. O XLSX menciona abas por loja (ÃPICE, BARBOURS, etc.) com metas mensais. Quem alimenta essas metas e como seria a ingestÃ£o futura?
 5. Existe coluna de seller_account separada por loja no TikTok (shop_cipher) â€” como mapear para as brands?
+6. (2026-07-01) Onde esta o relatorio de renda/repasse (income release) da Shopee? Nao e o Order.all*.xlsx hoje usado â€” ver docs/sections/financeiro_audit.md secao 11.
+7. (2026-07-01) Existe fonte de comissao do Mercado Livre com granularidade diaria/mensal? gold.ml_produto_pnl.marketplace_fee existe mas e cumulativo por produto, sem coluna de data.
+8. (2026-07-01) raw.tiktok_shop_settlements esta vazia nesta replica do Data Mart â€” impede reconciliar statements com pedidos por competencia pedido a pedido.
 
 
