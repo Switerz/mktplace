@@ -144,7 +144,13 @@ def _load_brand(brand: str) -> pd.DataFrame | None:
             df[col] = None
 
     # Tipos
-    df["order_date"] = pd.to_datetime(df["order_date"], dayfirst=True, errors="coerce")
+    # Os exports Shopee usam "Data de criação do pedido" em formato ISO
+    # ("YYYY-MM-DD HH:MM", confirmado em 85/85 arquivos .xlsx do diretório shopee/).
+    # dayfirst=True aqui era o bug: para strings ISO, o parser do pandas/dateutil
+    # ainda troca os tokens de dia/mês quando dayfirst=True é passado explicitamente,
+    # projetando pedidos do dia 1-12 de qualquer mês real (jan-jun/2026) para meses
+    # futuros inexistentes (jul-dez/2026). Ver docs/sections/produtos_audit.md.
+    df["order_date"] = pd.to_datetime(df["order_date"], format="%Y-%m-%d %H:%M", errors="coerce")
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0).astype(int)
     df["subtotal"] = _clean_numeric(df["subtotal"])
     df["status"] = df["status"].fillna("").str.strip()
