@@ -3,9 +3,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import type { Marketplace } from "@/lib/mock-data";
 import { generateDailyData, type DailyRow, AVAILABLE_MONTHS } from "@/lib/mock-daily";
 import { fetchBrandDetail, type BrandDetail } from "@/lib/api-client";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  serializeMarketplaceSelection,
+  type MarketplaceSelection,
+} from "@/lib/marketplace-filter";
+import { summarize } from "@/lib/brand-daily-summary";
 import DailyChart from "@/components/DailyChart";
 import ChannelMixChart from "@/components/ChannelMixChart";
 import KpiCard from "@/components/KpiCard";
@@ -13,8 +19,9 @@ import MarketplaceFilter from "@/components/MarketplaceFilter";
 import PeriodSelector from "@/components/PeriodSelector";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber, calcMoM } from "@/lib/formatters";
-
-type Filter = Marketplace | "all";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
+import type { BrandDetailChannelRow } from "@/lib/api-client";
 
 const BRAND_META: Record<string, { label: string; color: string; initials: string }> = {
   barbours: { label: "BARBOURS", color: "bg-violet-600", initials: "BA" },
@@ -31,14 +38,6 @@ const BRAND_PILLS = [
   { slug: "lescent",  label: "LESCENT"  },
   { slug: "rituaria", label: "RITUARIA" },
 ];
-
-function summarize(rows: DailyRow[], filter: Filter) {
-  const gmv = rows.reduce((s, r) =>
-    s + (filter === "tiktok" ? (r.tiktok_gmv ?? 0) : filter === "ml" ? (r.ml_gmv ?? 0) : r.total_gmv), 0);
-  const orders = rows.reduce((s, r) => s + r.orders, 0);
-  const adSpend = filter !== "tiktok" ? rows.reduce((s, r) => s + (r.ad_spend ?? 0), 0) : null;
-  return { gmv, orders, adSpend, avgTicket: orders > 0 ? gmv / orders : 0 };
-}
 
 function fmtBig(v: number): string {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
@@ -85,7 +84,7 @@ export default function BrandPage() {
   const { brand } = useParams<{ brand: string }>();
   const meta = BRAND_META[brand];
 
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
   const [period, setPeriod] = useState<string>(AVAILABLE_MONTHS[0].value);
   const [daily, setDaily] = useState<DailyRow[]>([]);
   const [isLive, setIsLive] = useState(false);
@@ -102,7 +101,7 @@ export default function BrandPage() {
     async function load() {
       try {
         const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080"}/api/v1/performance/daily?brand=${brand}&marketplace=${filter}&days_back=60`
+          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080"}/api/v1/performance/daily?brand=${brand}&marketplace=${serializeMarketplaceSelection(filter)}&days_back=60`
         );
         if (res.ok) {
           const json = await res.json();
@@ -125,6 +124,23 @@ export default function BrandPage() {
     });
   }, [brand, period]);
 
+  const funnelColumnTypes = {
+    channel: "text" as const, impressions: "numeric" as const, ctr_pct: "numeric" as const,
+    page_views: "numeric" as const, cvr_pct: "numeric" as const, gmv: "numeric" as const,
+  };
+  const funnelGetValue = (row: BrandDetailChannelRow, column: string): string | number | null => {
+    switch (column) {
+      case "channel": return row.label;
+      case "impressions": return row.impressions;
+      case "ctr_pct": return row.ctr_pct;
+      case "page_views": return row.page_views;
+      case "cvr_pct": return row.cvr_pct;
+      case "gmv": return row.gmv;
+      default: return null;
+    }
+  };
+  const funnelSort = useSortableTable(brandDetail?.channel_funnel ?? [], funnelGetValue, funnelColumnTypes);
+
   if (!meta) {
     return (
       <div className="min-h-screen flex items-center justify-center text-slate-400">
@@ -140,14 +156,24 @@ export default function BrandPage() {
   const prev = summarize(prev30, filter);
   const gmvMoM = prev.gmv > 0 ? calcMoM(cur.gmv, prev.gmv) : null;
 
-  const hasTiktok = ["all", "tiktok"].includes(filter) && daily.some((r) => r.tiktok_gmv != null);
-  const hasMl = ["all", "ml"].includes(filter) && daily.some((r) => r.ml_gmv != null);
-  const showTikTokDetail = filter !== "ml";
+  const showTk = isMarketplaceSelected(filter, "tiktok");
+  const showMl = isMarketplaceSelected(filter, "ml");
+  const showSh = isMarketplaceSelected(filter, "shopee");
+  const singleChannel = filter.length === 1;
+  const hasTiktok = showTk && daily.some((r) => r.tiktok_gmv != null);
+  const hasMl = showMl && daily.some((r) => r.ml_gmv != null);
+  const hasShopee = showSh && daily.some((r) => r.shopee_gmv != null);
+  const showTikTokDetail = showTk;
 
-  const chartData = filter === "tiktok"
-    ? daily.map((r) => ({ ...r, ml_gmv: null, total_gmv: r.tiktok_gmv ?? 0 }))
-    : filter === "ml"
-    ? daily.map((r) => ({ ...r, tiktok_gmv: null, total_gmv: r.ml_gmv ?? 0 }))
+  // Zera explicitamente os canais nao selecionados quando apenas um canal
+  // esta ativo — necessario para o fallback mock (que sempre gera os 3
+  // canais juntos, independente do filtro atual).
+  const chartData = singleChannel && showTk
+    ? daily.map((r) => ({ ...r, ml_gmv: null, shopee_gmv: null, total_gmv: r.tiktok_gmv ?? 0 }))
+    : singleChannel && showMl
+    ? daily.map((r) => ({ ...r, tiktok_gmv: null, shopee_gmv: null, total_gmv: r.ml_gmv ?? 0 }))
+    : singleChannel && showSh
+    ? daily.map((r) => ({ ...r, tiktok_gmv: null, ml_gmv: null, total_gmv: r.shopee_gmv ?? 0 }))
     : daily;
 
   const last7 = [...daily].reverse().slice(0, 7);
@@ -223,7 +249,7 @@ export default function BrandPage() {
               <KpiCard label="Ad Spend" value="—" subvalue="N/D para TikTok Shop" accent="bg-slate-300" />
             )}
           </div>
-          <DailyChart data={chartData} hasTiktok={hasTiktok} hasMl={hasMl} />
+          <DailyChart data={chartData} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
         </section>
 
         {/* Deep-dive mensal — TikTok Shop */}
@@ -461,16 +487,16 @@ export default function BrandPage() {
                       <table className="w-full text-sm" aria-label="Funil de conversao por canal">
                         <thead>
                           <tr className="bg-slate-50 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                            <th className="text-left px-5 py-3">Canal</th>
-                            <th className="text-right px-4 py-3">Impressoes</th>
-                            <th className="text-right px-4 py-3">CTR%</th>
-                            <th className="text-right px-4 py-3">Pag. Produto</th>
-                            <th className="text-right px-4 py-3">CVR%</th>
-                            <th className="text-right px-5 py-3">GMV</th>
+                            <SortableHeader label="Canal" column="channel" sort={funnelSort.sort} onSort={funnelSort.toggleSort} align="left" />
+                            <SortableHeader label="Impressoes" column="impressions" sort={funnelSort.sort} onSort={funnelSort.toggleSort} />
+                            <SortableHeader label="CTR%" column="ctr_pct" sort={funnelSort.sort} onSort={funnelSort.toggleSort} />
+                            <SortableHeader label="Pag. Produto" column="page_views" sort={funnelSort.sort} onSort={funnelSort.toggleSort} />
+                            <SortableHeader label="CVR%" column="cvr_pct" sort={funnelSort.sort} onSort={funnelSort.toggleSort} />
+                            <SortableHeader label="GMV" column="gmv" sort={funnelSort.sort} onSort={funnelSort.toggleSort} />
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
-                          {d.channel_funnel.map((ch) => (
+                          {funnelSort.sortedRows.map((ch) => (
                             <tr key={ch.channel} className="hover:bg-violet-50/50 transition-colors">
                               <td className="px-5 py-3.5 font-semibold text-slate-700">
                                 <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full font-semibold ${
@@ -601,6 +627,7 @@ export default function BrandPage() {
                   <th className="text-left px-5 py-3">Data</th>
                   {hasTiktok && <th className="text-right px-4 py-3">TikTok GMV</th>}
                   {hasMl && <th className="text-right px-4 py-3">ML GMV</th>}
+                  {hasShopee && <th className="text-right px-4 py-3">Shopee GMV</th>}
                   <th className="text-right px-4 py-3">GMV Total</th>
                   <th className="text-right px-4 py-3">Pedidos</th>
                   <th className="text-right px-5 py-3">Ticket Medio</th>
@@ -623,6 +650,11 @@ export default function BrandPage() {
                     {hasMl && (
                       <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
                         {r.ml_gmv != null ? fmtBrl(r.ml_gmv) : <span className="text-slate-300">—</span>}
+                      </td>
+                    )}
+                    {hasShopee && (
+                      <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
+                        {r.shopee_gmv != null ? fmtBrl(r.shopee_gmv) : <span className="text-slate-300">—</span>}
                       </td>
                     )}
                     <td className="text-right px-4 py-3 font-bold text-gray-900 text-sm tabular-nums">

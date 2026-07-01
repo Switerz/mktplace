@@ -6,6 +6,8 @@ import { fetchTempoReal } from "@/lib/api-client";
 import type { TempoRealData, TempoRealBrand } from "@/lib/api-client";
 import HourlyChart from "@/components/HourlyChart";
 import AppNav from "@/components/AppNav";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 function fmtBrl(v: number) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
@@ -105,6 +107,37 @@ function buildTodosHours(brands: TempoRealBrand[]) {
 
 const REFRESH_INTERVAL_S = 300; // 5 minutos
 
+const BRAND_TABLE_COLUMN_TYPES = {
+  brand: "text",
+  gmv_hoje: "numeric",
+  delta_pct: "numeric",
+  ritmo_projetado: "numeric",
+  clientes_hoje: "numeric",
+  conversion_hora: "numeric",
+  ticket_medio: "numeric",
+} as const;
+
+function getBrandTableSortValue(row: TempoRealBrand, column: string): string | number | null {
+  switch (column) {
+    case "brand":
+      return row.label;
+    case "gmv_hoje":
+      return row.gmv_hoje;
+    case "delta_pct":
+      return row.delta_pct;
+    case "ritmo_projetado":
+      return row.ritmo_projetado;
+    case "clientes_hoje":
+      return row.clientes_hoje;
+    case "conversion_hora":
+      return row.conversion_hora;
+    case "ticket_medio":
+      return row.ticket_medio;
+    default:
+      return null;
+  }
+}
+
 export default function TempoRealPage() {
   const [data, setData] = useState<TempoRealData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -147,6 +180,12 @@ export default function TempoRealPage() {
 
   const selectedData: TempoRealBrand | undefined =
     selectedBrand === "todos" ? undefined : data?.brands.find((b) => b.brand === selectedBrand);
+
+  const { sort: brandTableSort, toggleSort: toggleBrandTableSort, sortedRows: sortedBrands } = useSortableTable(
+    data?.brands ?? [],
+    getBrandTableSortValue,
+    BRAND_TABLE_COLUMN_TYPES,
+  );
 
   const chartHours =
     selectedBrand === "todos" && data
@@ -372,18 +411,18 @@ export default function TempoRealPage() {
               <table className="w-full" aria-label="Resumo em tempo real por marca">
                 <thead>
                   <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
-                    <th className="text-left px-5 py-3">Marca</th>
-                    <th className="text-right px-4 py-3">GMV Hoje</th>
-                    <th className="text-right px-4 py-3">vs Ontem</th>
-                    <th className="text-right px-4 py-3">Projecao</th>
-                    <th className="text-right px-4 py-3">Clientes</th>
-                    <th className="text-right px-4 py-3">Conv.</th>
-                    <th className="text-right px-4 py-3">Ticket</th>
+                    <SortableHeader label="Marca" column="brand" sort={brandTableSort} onSort={toggleBrandTableSort} align="left" className="!px-5" />
+                    <SortableHeader label="GMV Hoje" column="gmv_hoje" sort={brandTableSort} onSort={toggleBrandTableSort} />
+                    <SortableHeader label="vs Ontem" column="delta_pct" sort={brandTableSort} onSort={toggleBrandTableSort} />
+                    <SortableHeader label="Projecao" column="ritmo_projetado" sort={brandTableSort} onSort={toggleBrandTableSort} />
+                    <SortableHeader label="Clientes" column="clientes_hoje" sort={brandTableSort} onSort={toggleBrandTableSort} />
+                    <SortableHeader label="Conv." column="conversion_hora" sort={brandTableSort} onSort={toggleBrandTableSort} />
+                    <SortableHeader label="Ticket" column="ticket_medio" sort={brandTableSort} onSort={toggleBrandTableSort} />
                     <th className="text-right px-5 py-3">Ult. hora</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.brands.map((b) => (
+                  {sortedBrands.map((b) => (
                     <tr
                       key={b.brand}
                       className={`border-t border-violet-50 hover:bg-violet-50/40 transition-colors cursor-pointer ${

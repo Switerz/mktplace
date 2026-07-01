@@ -8,8 +8,12 @@ import {
   type InteligenciaData,
   type ProductSignalRow,
   type ParetoRow,
+  type LtvRow,
+  type TkProductRow,
 } from "@/lib/api-client";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
+import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 const BRAND_LABELS: Record<string, string> = {
   apice: "ÁPICE",
@@ -162,6 +166,78 @@ export default function InteligenciaPage() {
     .filter((r) => brandFilter === "all" || r.brand === brandFilter)
     .slice(0, 10);
 
+  // Ordenação — Urgente: Parar Agora
+  const urgentColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    gmv: "numeric",
+    ad_spend: "numeric",
+    days_advertised: "numeric",
+  };
+  function getUrgentValue(row: ProductSignalRow, column: string) {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "gmv":
+        return row.gmv;
+      case "ad_spend":
+        return row.ad_spend;
+      case "days_advertised":
+        return row.days_advertised;
+      default:
+        return null;
+    }
+  }
+  const urgentSort = useSortableTable(filteredUrgent, getUrgentValue, urgentColumnTypes);
+
+  // Ordenação — Escalar Agora
+  const scaleColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    gmv: "numeric",
+    ad_roas: "numeric",
+    ad_acos_pct: "numeric",
+    revenue_share_pct: "numeric",
+  };
+  function getScaleValue(row: ProductSignalRow, column: string) {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "gmv":
+        return row.gmv;
+      case "ad_roas":
+        return row.ad_roas;
+      case "ad_acos_pct":
+        return row.ad_acos_pct;
+      case "revenue_share_pct":
+        return row.revenue_share_pct;
+      default:
+        return null;
+    }
+  }
+  const scaleSort = useSortableTable(filteredScale, getScaleValue, scaleColumnTypes);
+
+  // Ordenação — Testar Ads
+  const organicColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    gmv: "numeric",
+    units_sold: "numeric",
+    cancel_rate_pct: "numeric",
+  };
+  function getOrganicValue(row: ProductSignalRow, column: string) {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "gmv":
+        return row.gmv;
+      case "units_sold":
+        return row.units_sold;
+      case "cancel_rate_pct":
+        return row.cancel_rate_pct;
+      default:
+        return null;
+    }
+  }
+  const organicSort = useSortableTable(filteredOrganic, getOrganicValue, organicColumnTypes);
+
   // Pareto por brand: agrupa e calcula % GMV
   const paretoByBrand: Record<string, ParetoRow[]> = {};
   for (const row of data?.pareto ?? []) {
@@ -178,6 +254,67 @@ export default function InteligenciaPage() {
     ];
     return channels.reduce((a, b) => (b.pct > a.pct ? b : a));
   }
+
+  // Ordenação — LTV & Fidelização
+  const ltvColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    total_buyers: "numeric",
+    repeat_buyers: "numeric",
+    repeat_rate_pct: "numeric",
+    avg_customer_ltv: "numeric",
+    vip_buyers: "numeric",
+    one_and_done_buyers: "numeric",
+    at_risk_or_churned: "numeric",
+    overall_roas: "numeric",
+  };
+  function getLtvValue(row: LtvRow, column: string) {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "total_buyers":
+        return row.total_buyers;
+      case "repeat_buyers":
+        return row.repeat_buyers;
+      case "repeat_rate_pct":
+        return row.repeat_rate_pct;
+      case "avg_customer_ltv":
+        return row.avg_customer_ltv;
+      case "vip_buyers":
+        return row.vip_buyers;
+      case "one_and_done_buyers":
+        return row.one_and_done_buyers;
+      case "at_risk_or_churned":
+        return row.at_risk_or_churned;
+      case "overall_roas":
+        return row.overall_roas;
+      default:
+        return null;
+    }
+  }
+  const ltvSort = useSortableTable(data?.ltv ?? [], getLtvValue, ltvColumnTypes);
+
+  // Ordenação — Top Produtos TikTok
+  const tkProductsColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    gmv: "numeric",
+    orders: "numeric",
+    avg_rating: "numeric",
+  };
+  function getTkProductValue(row: TkProductRow, column: string) {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "gmv":
+        return row.gmv;
+      case "orders":
+        return row.orders;
+      case "avg_rating":
+        return row.avg_rating;
+      default:
+        return null;
+    }
+  }
+  const tkProductsSort = useSortableTable(data?.tk_products ?? [], getTkProductValue, tkProductsColumnTypes);
 
   const CHANNEL_STYLES: Record<string, string> = {
     video: "bg-violet-100 text-violet-800",
@@ -298,17 +435,17 @@ export default function InteligenciaPage() {
             <TableWrap>
               <thead>
                 <tr className="bg-slate-50 text-left">
-                  <Th>Marca</Th>
+                  <SortableHeader label="Marca" column="brand" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="left" />
                   <Th>Produto</Th>
-                  <Th right>Ad Spend</Th>
-                  <Th right>Dias c/ Ads</Th>
+                  <SortableHeader label="Ad Spend" column="ad_spend" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="right" />
+                  <SortableHeader label="Dias c/ Ads" column="days_advertised" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="right" />
                   <Th>Pareto</Th>
                   <Th>Velocity</Th>
                   <Th>Ação</Th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {filteredUrgent.map((r, i) => (
+                {urgentSort.sortedRows.map((r, i) => (
                   <tr key={i} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
                       {BRAND_LABELS[r.brand] ?? r.brand}
@@ -357,18 +494,18 @@ export default function InteligenciaPage() {
           <TableWrap>
             <thead>
               <tr className="bg-slate-50 text-left">
-                <Th>Marca</Th>
+                <SortableHeader label="Marca" column="brand" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="left" />
                 <Th>Produto</Th>
-                <Th right>GMV</Th>
-                <Th right>ROAS</Th>
-                <Th right>ACOS%</Th>
-                <Th right>Part. GMV</Th>
+                <SortableHeader label="GMV" column="gmv" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
+                <SortableHeader label="ROAS" column="ad_roas" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
+                <SortableHeader label="ACOS%" column="ad_acos_pct" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
+                <SortableHeader label="Part. GMV" column="revenue_share_pct" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
                 <Th>Velocity</Th>
                 <Th>Ação</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredScale.map((r, i) => {
+              {scaleSort.sortedRows.map((r, i) => {
                 const roasColor =
                   (r.ad_roas ?? 0) >= 12
                     ? "text-emerald-700 font-bold"
@@ -427,17 +564,17 @@ export default function InteligenciaPage() {
           <TableWrap>
             <thead>
               <tr className="bg-slate-50 text-left">
-                <Th>Marca</Th>
+                <SortableHeader label="Marca" column="brand" sort={organicSort.sort} onSort={organicSort.toggleSort} align="left" />
                 <Th>Produto</Th>
-                <Th right>GMV</Th>
+                <SortableHeader label="GMV" column="gmv" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
                 <Th>Pareto</Th>
-                <Th right>Compradores</Th>
-                <Th right>Cancel%</Th>
+                <SortableHeader label="Compradores" column="units_sold" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
+                <SortableHeader label="Cancel%" column="cancel_rate_pct" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
                 <Th>Ação</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredOrganic.map((r, i) => (
+              {organicSort.sortedRows.map((r, i) => (
                 <tr key={i} className="hover:bg-slate-50 transition-colors">
                   <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
                     {BRAND_LABELS[r.brand] ?? r.brand}
@@ -556,19 +693,19 @@ export default function InteligenciaPage() {
             <TableWrap>
               <thead>
                 <tr className="bg-slate-50 text-left">
-                  <Th>Marca</Th>
-                  <Th right>Compradores</Th>
-                  <Th right>Recorrentes</Th>
-                  <Th right>Taxa Recorrência</Th>
-                  <Th right>LTV Médio</Th>
-                  <Th right>VIPs</Th>
-                  <Th right>Compraram 1x</Th>
-                  <Th right>Em Risco</Th>
-                  <Th right>ROAS Geral</Th>
+                  <SortableHeader label="Marca" column="brand" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="left" />
+                  <SortableHeader label="Compradores" column="total_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="Recorrentes" column="repeat_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="Taxa Recorrência" column="repeat_rate_pct" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="LTV Médio" column="avg_customer_ltv" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="VIPs" column="vip_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="Compraram 1x" column="one_and_done_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="Em Risco" column="at_risk_or_churned" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                  <SortableHeader label="ROAS Geral" column="overall_roas" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {data!.ltv.map((r) => {
+                {ltvSort.sortedRows.map((r) => {
                   const recColor =
                     r.repeat_rate_pct == null ? "text-slate-400"
                       : r.repeat_rate_pct > 20 ? "text-emerald-700 font-semibold"
@@ -623,19 +760,19 @@ export default function InteligenciaPage() {
           <TableWrap>
             <thead>
               <tr className="bg-slate-50 text-left">
-                <Th>Marca</Th>
+                <SortableHeader label="Marca" column="brand" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="left" />
                 <Th>Produto</Th>
-                <Th right>GMV</Th>
-                <Th right>Pedidos</Th>
+                <SortableHeader label="GMV" column="gmv" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
+                <SortableHeader label="Pedidos" column="orders" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
                 <Th>Canal Dominante</Th>
                 <Th right>% Vídeo</Th>
                 <Th right>% Live</Th>
                 <Th right>% Card</Th>
-                <Th right>Rating</Th>
+                <SortableHeader label="Rating" column="avg_rating" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {(data?.tk_products ?? []).map((r, i) => {
+              {tkProductsSort.sortedRows.map((r, i) => {
                 const dom = dominantChannel(r);
                 return (
                   <tr key={i} className="hover:bg-slate-50 transition-colors">

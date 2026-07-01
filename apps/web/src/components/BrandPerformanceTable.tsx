@@ -1,17 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { BrandRow } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
+import { isMarketplaceSelected, type MarketplaceSelection } from "@/lib/marketplace-filter";
 import { getGoals } from "@/lib/goals-data";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
-
-type Filter = Marketplace | "all";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 interface Props {
   brands: BrandRow[];
-  filter: Filter;
+  filter: MarketplaceSelection;
   period: string;
   loading?: boolean;
   periodLabel?: string;
@@ -31,6 +32,12 @@ const BRAND_COLORS: Record<string, string> = {
   apice: "bg-amber-500",
   lescent: "bg-pink-500",
   rituaria: "bg-emerald-500",
+};
+
+const CHANNEL_MINI_LABEL: Record<Marketplace, string> = {
+  tiktok: "TikTok",
+  ml: "ML",
+  shopee: "Shopee",
 };
 
 function attainmentStyle(pct: number) {
@@ -76,6 +83,12 @@ function MiniBar({ actual, goal, mounted }: { actual: number | null; goal: numbe
   );
 }
 
+function channelGmv(row: BrandRow, mp: Marketplace): number | null {
+  if (mp === "tiktok") return row.tiktok_gmv;
+  if (mp === "ml") return row.ml_gmv;
+  return row.shopee_gmv;
+}
+
 export default function BrandPerformanceTable({ brands, filter, period, loading = false, periodLabel }: Props) {
   const goals = getGoals(period);
   const [mounted, setMounted] = useState(false);
@@ -85,9 +98,10 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const visibleTk = filter !== "ml" && filter !== "shopee";
-  const visibleMl = filter !== "tiktok" && filter !== "shopee";
-  const visibleSh = filter !== "tiktok" && filter !== "ml";
+  const visibleTk = isMarketplaceSelected(filter, "tiktok");
+  const visibleMl = isMarketplaceSelected(filter, "ml");
+  const visibleSh = isMarketplaceSelected(filter, "shopee");
+  const showChannelBreakdown = filter.length > 1;
   const hasGoals = Object.keys(goals).length > 0;
 
   const showTkGoal = hasGoals && visibleTk && brands.some((b) => goals[b.brand]?.tiktok != null);
@@ -95,6 +109,71 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
   const showShGoal = hasGoals && visibleSh && brands.some((b) => goals[b.brand]?.shopee != null);
   const showMlRoas = visibleMl && brands.some((b) => b.ml_roas != null);
   const showGpm = visibleTk && brands.some((b) => b.gpm != null);
+
+  const getSortValue = useMemo(() => {
+    return (row: BrandRow, column: string): string | number | null => {
+      if (column === "brand") return row.label;
+      if (column.startsWith("mini_")) return channelGmv(row, column.slice(5) as Marketplace);
+      if (column === "total_gmv") return row.total_gmv;
+      if (column === "orders") return row.orders;
+      if (column === "avg_ticket") return row.avg_ticket;
+      if (column === "mom_pct") return row.mom_pct;
+      if (column === "cos_pct") return row.cos_pct;
+      if (column === "gpm") return row.gpm;
+      if (column === "ml_roas") return row.ml_roas;
+      if (column === "goal_tiktok" || column === "goal_ml" || column === "goal_shopee") {
+        const mp = column.slice(5) as Marketplace;
+        const goal = goals[row.brand]?.[mp] ?? null;
+        if (!goal) return null;
+        return (channelGmv(row, mp) ?? 0) / goal;
+      }
+      return null;
+    };
+  }, [goals]);
+
+  const columnTypes = useMemo(
+    () => ({
+      brand: "text" as const,
+      mini_tiktok: "numeric" as const,
+      mini_ml: "numeric" as const,
+      mini_shopee: "numeric" as const,
+      total_gmv: "numeric" as const,
+      orders: "numeric" as const,
+      avg_ticket: "numeric" as const,
+      mom_pct: "numeric" as const,
+      cos_pct: "numeric" as const,
+      gpm: "numeric" as const,
+      ml_roas: "numeric" as const,
+      goal_tiktok: "numeric" as const,
+      goal_ml: "numeric" as const,
+      goal_shopee: "numeric" as const,
+    }),
+    [],
+  );
+
+  const { sort, toggleSort, sortedRows, resetSortIfColumnMissing } = useSortableTable(
+    brands,
+    getSortValue,
+    columnTypes,
+  );
+
+  const visibleColumns = useMemo(() => {
+    const cols = ["brand"];
+    if (showChannelBreakdown) filter.forEach((mp) => cols.push(`mini_${mp}`));
+    cols.push("total_gmv", "orders", "avg_ticket", "mom_pct");
+    if (visibleTk) cols.push("cos_pct");
+    if (showGpm) cols.push("gpm");
+    if (showMlRoas) cols.push("ml_roas");
+    if (showTkGoal) cols.push("goal_tiktok");
+    if (showMlGoal) cols.push("goal_ml");
+    if (showShGoal) cols.push("goal_shopee");
+    return cols;
+  }, [showChannelBreakdown, filter, visibleTk, showGpm, showMlRoas, showTkGoal, showMlGoal, showShGoal]);
+
+  useEffect(() => {
+    resetSortIfColumnMissing(visibleColumns);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleColumns.join(",")]);
 
   const totalActual = brands.reduce((s, b) => {
     let v = 0;
@@ -112,6 +191,7 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
   }, 0);
   const consolidatedPct = totalGoal > 0 ? totalActual / totalGoal : 0;
   const cs = attainmentStyle(consolidatedPct);
+  const colCount = visibleColumns.length;
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-violet-100 overflow-hidden">
@@ -142,35 +222,32 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
         </caption>
         <thead>
           <tr className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
-            <th className="text-left px-4 py-2.5">Marca</th>
-            {filter === "all" && (
-              <>
-                <th className="text-right px-2 py-2.5">TikTok</th>
-                <th className="text-right px-2 py-2.5">ML</th>
-                <th className="text-right px-2 py-2.5">Shopee</th>
-              </>
-            )}
-            <th className="text-right px-2 py-2.5">GMV Total</th>
-            <th className="text-right px-2 py-2.5">Pedidos</th>
-            <th className="text-right px-2 py-2.5">Ticket</th>
-            <th className="text-right px-2 py-2.5">MoM</th>
-            {visibleTk && <th className="text-right px-2 py-2.5">COS%</th>}
-            {showGpm && <th className="text-right px-2 py-2.5">R$/1k</th>}
-            {showMlRoas && <th className="text-right px-2 py-2.5">ROAS</th>}
-            {showTkGoal && <th className="text-right px-3 py-2.5">Meta TK</th>}
-            {showMlGoal && <th className="text-right px-3 py-2.5">Meta ML</th>}
-            {showShGoal && <th className="text-right px-3 py-2.5">Meta SH</th>}
+            <SortableHeader label="Marca" column="brand" sort={sort} onSort={toggleSort} align="left" className="!py-2.5" />
+            {showChannelBreakdown &&
+              filter.map((mp) => (
+                <th key={mp} className="text-right px-2 py-2.5">{CHANNEL_MINI_LABEL[mp]}</th>
+              ))}
+            <SortableHeader label="GMV Total" column="total_gmv" sort={sort} onSort={toggleSort} className="!py-2.5" />
+            <SortableHeader label="Pedidos" column="orders" sort={sort} onSort={toggleSort} className="!py-2.5" />
+            <SortableHeader label="Ticket" column="avg_ticket" sort={sort} onSort={toggleSort} className="!py-2.5" />
+            <SortableHeader label="MoM" column="mom_pct" sort={sort} onSort={toggleSort} className="!py-2.5" />
+            {visibleTk && <SortableHeader label="COS%" column="cos_pct" sort={sort} onSort={toggleSort} className="!py-2.5" />}
+            {showGpm && <SortableHeader label="R$/1k" column="gpm" sort={sort} onSort={toggleSort} className="!py-2.5" />}
+            {showMlRoas && <SortableHeader label="ROAS" column="ml_roas" sort={sort} onSort={toggleSort} className="!py-2.5" />}
+            {showTkGoal && <SortableHeader label="Meta TK" column="goal_tiktok" sort={sort} onSort={toggleSort} className="!px-3 !py-2.5" />}
+            {showMlGoal && <SortableHeader label="Meta ML" column="goal_ml" sort={sort} onSort={toggleSort} className="!px-3 !py-2.5" />}
+            {showShGoal && <SortableHeader label="Meta SH" column="goal_shopee" sort={sort} onSort={toggleSort} className="!px-3 !py-2.5" />}
           </tr>
         </thead>
         <tbody>
           {brands.length === 0 && (
             <tr>
-              <td colSpan={14} className="text-center py-10 text-slate-400 text-sm">
+              <td colSpan={colCount} className="text-center py-10 text-slate-400 text-sm">
                 {loading ? "Carregando..." : "Sem dados para o período"}
               </td>
             </tr>
           )}
-          {brands.map((b, i) => {
+          {sortedRows.map((b, i) => {
             const momColor =
               b.mom_pct == null ? "text-slate-300" : b.mom_pct >= 0 ? "text-emerald-600" : "text-rose-600";
             const momArrow = b.mom_pct == null ? "" : b.mom_pct >= 0 ? "▲" : "▼";
@@ -199,19 +276,12 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
                 </td>
 
                 {/* Colunas de canal — formato compacto sem R$ */}
-                {filter === "all" && (
-                  <>
-                    <td className="text-right px-2 py-2.5 text-xs text-slate-500 tabular-nums">
-                      {fmtM(b.tiktok_gmv) ?? <span className="text-slate-300">—</span>}
+                {showChannelBreakdown &&
+                  filter.map((mp) => (
+                    <td key={mp} className="text-right px-2 py-2.5 text-xs text-slate-500 tabular-nums">
+                      {fmtM(channelGmv(b, mp)) ?? <span className="text-slate-300">—</span>}
                     </td>
-                    <td className="text-right px-2 py-2.5 text-xs text-slate-500 tabular-nums">
-                      {fmtM(b.ml_gmv) ?? <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="text-right px-2 py-2.5 text-xs text-slate-500 tabular-nums">
-                      {fmtM(b.shopee_gmv) ?? <span className="text-slate-300">—</span>}
-                    </td>
-                  </>
-                )}
+                  ))}
 
                 {/* GMV Total */}
                 <td className="text-right px-2 py-2.5 font-bold text-gray-900 text-sm tabular-nums whitespace-nowrap">

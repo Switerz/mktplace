@@ -1,14 +1,19 @@
-﻿import type { Marketplace } from "./mock-data";
-import {
-  totalGmv, totalGmvPrev, totalOrders, avgTicket,
+﻿import {
+  totalGmv, totalGmvPrev, totalOrders,
   BRANDS, GMV_MONTHLY,
 } from "./mock-data";
 import { calcMoM } from "./formatters";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  serializeMarketplaceSelection,
+  type MarketplaceSelection,
+} from "./marketplace-filter";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
-type Filter = Marketplace | "all";
+export type Filter = MarketplaceSelection;
 
 // ---------- tipos espelhando a API ----------
 
@@ -108,22 +113,32 @@ function refMonth(): string {
 
 // ---------- fallbacks com mock data ----------
 
-function overviewFromMock(filter: Filter): OverviewData {
-  const gmv = totalGmv(filter);
-  const prev = totalGmvPrev(filter);
-  const orders = totalOrders(filter);
-  const ticket = avgTicket(filter);
-  const adSpend = filter === "tiktok" ? null : 148_600;
-  const tkGmv = filter === "ml" ? null : totalGmv("tiktok");
-  const mlGmv = filter === "tiktok" ? null : totalGmv("ml");
+function overviewFromMock(selection: MarketplaceSelection): OverviewData {
+  const showTk = isMarketplaceSelected(selection, "tiktok");
+  const showMl = isMarketplaceSelected(selection, "ml");
+  const showSh = isMarketplaceSelected(selection, "shopee");
+
+  // Shopee ainda nao tem dataset mock proprio nesta camada de fallback.
+  const tkGmv = showTk ? totalGmv("tiktok") : 0;
+  const mlGmv = showMl ? totalGmv("ml") : 0;
+  const tkGmvPrev = showTk ? totalGmvPrev("tiktok") : 0;
+  const mlGmvPrev = showMl ? totalGmvPrev("ml") : 0;
+  const tkOrders = showTk ? totalOrders("tiktok") : 0;
+  const mlOrders = showMl ? totalOrders("ml") : 0;
+
+  const gmv = tkGmv + mlGmv;
+  const prev = tkGmvPrev + mlGmvPrev;
+  const orders = tkOrders + mlOrders;
+  const ticket = orders > 0 ? gmv / orders : 0;
+
   return {
     gmv,
-    tiktok_gmv: tkGmv,
-    ml_gmv: mlGmv,
-    shopee_gmv: filter === "shopee" ? 0 : null,
+    tiktok_gmv: showTk ? tkGmv : null,
+    ml_gmv: showMl ? mlGmv : null,
+    shopee_gmv: showSh ? 0 : null,
     orders,
     avg_ticket: ticket,
-    ad_spend: adSpend,
+    ad_spend: (showMl || showSh) ? 148_600 : null,
     ml_roas: null,
     ml_cancel_rate_pct: null,
     shopee_roas: null,
@@ -135,35 +150,30 @@ function overviewFromMock(filter: Filter): OverviewData {
   };
 }
 
-function brandsFromMock(filter: Filter): BrandRow[] {
+function brandsFromMock(selection: MarketplaceSelection): BrandRow[] {
+  const showTk = isMarketplaceSelected(selection, "tiktok");
+  const showMl = isMarketplaceSelected(selection, "ml");
   return BRANDS.map((b) => {
-    const currentTk = b.tiktok ?? 0;
-    const currentMl = b.ml ?? 0;
-    const prevTk = b.tiktokPrev ?? 0;
-    const prevMl = b.mlPrev ?? 0;
-    const total =
-      filter === "tiktok" ? currentTk : filter === "ml" ? currentMl : currentTk + currentMl;
-    const totalPrev =
-      filter === "tiktok" ? prevTk : filter === "ml" ? prevMl : prevTk + prevMl;
-    const orders =
-      filter === "tiktok"
-        ? (b.tiktokOrders ?? 0)
-        : filter === "ml"
-        ? (b.mlOrders ?? 0)
-        : (b.tiktokOrders ?? 0) + (b.mlOrders ?? 0);
+    const currentTk = showTk ? (b.tiktok ?? 0) : 0;
+    const currentMl = showMl ? (b.ml ?? 0) : 0;
+    const prevTk = showTk ? (b.tiktokPrev ?? 0) : 0;
+    const prevMl = showMl ? (b.mlPrev ?? 0) : 0;
+    const total = currentTk + currentMl;
+    const totalPrev = prevTk + prevMl;
+    const orders = (showTk ? (b.tiktokOrders ?? 0) : 0) + (showMl ? (b.mlOrders ?? 0) : 0);
     return {
       brand: b.brand,
       label: b.label,
-      tiktok_gmv: b.tiktok,
-      ml_gmv: b.ml,
+      tiktok_gmv: showTk ? b.tiktok : null,
+      ml_gmv: showMl ? b.ml : null,
       shopee_gmv: null,
       total_gmv: total,
       orders,
       avg_ticket: orders > 0 ? total / orders : null,
-      tiktok_avg_ticket: b.tiktokOrders && b.tiktok ? b.tiktok / b.tiktokOrders : null,
-      ml_avg_ticket: b.mlOrders && b.ml ? b.ml / b.mlOrders : null,
-      tiktok_gmv_prev: b.tiktokPrev,
-      ml_gmv_prev: b.mlPrev,
+      tiktok_avg_ticket: showTk && b.tiktokOrders && b.tiktok ? b.tiktok / b.tiktokOrders : null,
+      ml_avg_ticket: showMl && b.mlOrders && b.ml ? b.ml / b.mlOrders : null,
+      tiktok_gmv_prev: showTk ? b.tiktokPrev : null,
+      ml_gmv_prev: showMl ? b.mlPrev : null,
       shopee_gmv_prev: null,
       total_gmv_prev: totalPrev,
       mom_pct: totalPrev > 0 ? calcMoM(total, totalPrev) : null,
@@ -190,7 +200,7 @@ function monthlyFromMock(): MonthPoint[] {
 // ---------- funções públicas (API com fallback) ----------
 
 export function fetchOverview(
-  filter: Filter,
+  selection: MarketplaceSelection,
   period?: string,
 ): Promise<{ data: OverviewData; live: boolean }> {
   interface ApiResp {
@@ -213,9 +223,10 @@ export function fetchOverview(
     gmv_mom_pct: number | null;
   }
   const month = period ?? refMonth();
-  return withCache(`overview:${filter}:${month}`, async () => {
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`overview:${marketplace}:${month}`, async () => {
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/overview?marketplace=${filter}&ref_month=${month}`
+      `/api/v1/performance/overview?marketplace=${marketplace}&ref_month=${month}`
     );
     if (raw) {
       return {
@@ -239,29 +250,33 @@ export function fetchOverview(
         },
       };
     }
-    return { live: false, data: overviewFromMock(filter) };
+    return { live: false, data: overviewFromMock(selection) };
   });
 }
 
 export function fetchBrands(
-  filter: Filter,
+  selection: MarketplaceSelection,
   period?: string,
 ): Promise<{ data: BrandRow[]; live: boolean }> {
   interface ApiResp { brands: BrandRow[] }
   const month = period ?? refMonth();
-  return withCache(`brands:${filter}:${month}`, async () => {
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`brands:${marketplace}:${month}`, async () => {
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/brands?marketplace=${filter}&ref_month=${month}`
+      `/api/v1/performance/brands?marketplace=${marketplace}&ref_month=${month}`
     );
     if (raw) return { live: true, data: raw.brands };
-    return { live: false, data: brandsFromMock(filter) };
+    return { live: false, data: brandsFromMock(selection) };
   });
 }
 
-export function fetchMonthly(filter: Filter = "all"): Promise<{ data: MonthPoint[]; live: boolean }> {
+export function fetchMonthly(
+  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+): Promise<{ data: MonthPoint[]; live: boolean }> {
   interface ApiResp { data: MonthPoint[] }
-  return withCache(`monthly:${filter}`, async () => {
-    const raw = await apiFetch<ApiResp>(`/api/v1/performance/monthly?months_back=6&marketplace=${filter}`);
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`monthly:${marketplace}`, async () => {
+    const raw = await apiFetch<ApiResp>(`/api/v1/performance/monthly?months_back=6&marketplace=${marketplace}`);
     if (raw) return { live: true, data: raw.data };
     return { live: false, data: monthlyFromMock() };
   });
@@ -327,6 +342,8 @@ export function fetchProdutosML(params: {
   revenue_velocity?: string;
   limit?: number;
   offset?: number;
+  sort_by?: string;
+  sort_dir?: "asc" | "desc";
 }): Promise<ProdutosMLResponse | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
@@ -336,6 +353,8 @@ export function fetchProdutosML(params: {
   if (params.revenue_velocity) qs.set("revenue_velocity", params.revenue_velocity);
   qs.set("limit", String(params.limit ?? 25));
   qs.set("offset", String(params.offset ?? 0));
+  if (params.sort_by) qs.set("sort_by", params.sort_by);
+  if (params.sort_dir) qs.set("sort_dir", params.sort_dir);
   return withCache(`produtos-ml:${qs}`, () =>
     apiFetch<ProdutosMLResponse>(`/api/v1/performance/produtos/ml?${qs}`)
   );
@@ -360,12 +379,16 @@ export function fetchProdutosShopee(params: {
   period?: string;
   limit?: number;
   offset?: number;
+  sort_by?: string;
+  sort_dir?: "asc" | "desc";
 }): Promise<{ ref_month: string; total: number; items: ProdutoShopeeRow[] } | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
   qs.set("ref_month", params.period ?? refMonth());
   qs.set("limit", String(params.limit ?? 25));
   qs.set("offset", String(params.offset ?? 0));
+  if (params.sort_by) qs.set("sort_by", params.sort_by);
+  if (params.sort_dir) qs.set("sort_dir", params.sort_dir);
   return withCache(`produtos-shopee:${qs}`, () =>
     apiFetch(`/api/v1/performance/produtos/shopee?${qs}`)
   );
@@ -376,12 +399,16 @@ export function fetchProdutosTikTok(params: {
   period?: string;
   limit?: number;
   offset?: number;
+  sort_by?: string;
+  sort_dir?: "asc" | "desc";
 }): Promise<ProdutosTikTokResponse | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
   qs.set("ref_month", params.period ?? refMonth());
   qs.set("limit", String(params.limit ?? 25));
   qs.set("offset", String(params.offset ?? 0));
+  if (params.sort_by) qs.set("sort_by", params.sort_by);
+  if (params.sort_dir) qs.set("sort_dir", params.sort_dir);
   return withCache(`produtos-tk:${qs}`, () =>
     apiFetch<ProdutosTikTokResponse>(`/api/v1/performance/produtos/tiktok?${qs}`)
   );
@@ -535,14 +562,15 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
 ];
 
 export function fetchCanais(
-  filter: Filter,
+  selection: MarketplaceSelection,
   period?: string,
 ): Promise<{ kpis: CanaisKpis; brands: CanaisBrandRow[]; live: boolean }> {
   const month = period ?? refMonth();
-  return withCache(`canais:${filter}:${month}`, async () => {
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`canais:${marketplace}:${month}`, async () => {
     interface ApiResp { kpis: CanaisKpis; brands: CanaisBrandRow[] }
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/canais?marketplace=${filter}&ref_month=${month}`
+      `/api/v1/performance/canais?marketplace=${marketplace}&ref_month=${month}`
     );
   if (raw) {
     const brands: CanaisBrandRow[] = raw.brands.map((b) => ({
@@ -555,11 +583,7 @@ export function fetchCanais(
     return { live: true, kpis: raw.kpis, brands };
   }
 
-  const brands = filter === "ml"
-    ? CANAIS_MOCK_BRANDS.filter((b) => b.ml_gmv !== null)
-    : filter === "shopee"
-    ? CANAIS_MOCK_BRANDS.filter((b) => b.shopee_gmv !== null)
-    : CANAIS_MOCK_BRANDS;
+  const brands = CANAIS_MOCK_BRANDS;
 
   const tkBrands = brands.filter((b) => b.tiktok_gmv !== null);
   const mlBrands = brands.filter((b) => b.ml_gmv !== null);
@@ -579,9 +603,9 @@ export function fetchCanais(
   const shRepeat = shBrands.reduce((s, b) => s + (b.shopee_repeat_buyers ?? 0), 0);
   const shGmv = shBrands.reduce((s, b) => s + (b.shopee_gmv ?? 0), 0);
 
-  const showTk = filter !== "ml" && filter !== "shopee";
-  const showMl = filter !== "tiktok" && filter !== "shopee";
-  const showSh = filter !== "tiktok" && filter !== "ml";
+  const showTk = isMarketplaceSelected(selection, "tiktok");
+  const showMl = isMarketplaceSelected(selection, "ml");
+  const showSh = isMarketplaceSelected(selection, "shopee");
 
   const kpis: CanaisKpis = {
     tiktok_gmv: showTk ? tkGmv : null,
@@ -680,22 +704,21 @@ const FINANCEIRO_MOCK_BRANDS: FinanceiroBrandRow[] = [
 ];
 
 export function fetchFinanceiro(
-  filter: Filter,
+  selection: MarketplaceSelection,
   period?: string,
 ): Promise<{ kpis: FinanceiroKpis; brands: FinanceiroBrandRow[]; live: boolean }> {
   interface ApiResp { kpis: FinanceiroKpis; brands: FinanceiroBrandRow[] }
   const month = period ?? refMonth();
-  return withCache(`financeiro:${filter}:${month}`, async () => {
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`financeiro:${marketplace}:${month}`, async () => {
   const raw = await apiFetch<ApiResp>(
-    `/api/v1/performance/financeiro?marketplace=${filter}&ref_month=${month}`
+    `/api/v1/performance/financeiro?marketplace=${marketplace}&ref_month=${month}`
   );
   if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
 
-  const brands = filter === "tiktok"
-    ? FINANCEIRO_MOCK_BRANDS
-    : filter === "ml"
-    ? FINANCEIRO_MOCK_BRANDS.filter((b) => b.ml_ad_spend !== null)
-    : FINANCEIRO_MOCK_BRANDS;
+  const showTk = isMarketplaceSelected(selection, "tiktok");
+  const showMl = isMarketplaceSelected(selection, "ml");
+  const brands = FINANCEIRO_MOCK_BRANDS;
 
   const allTkGmv = FINANCEIRO_MOCK_BRANDS.reduce((s, b) => s + (b.tiktok_gmv ?? 0), 0);
   const allTkFees = FINANCEIRO_MOCK_BRANDS.reduce((s, b) => s + (b.tiktok_fees ?? 0), 0);
@@ -708,18 +731,18 @@ export function fetchFinanceiro(
   const allMlShipping = mlBrands.reduce((s, b) => s + (b.ml_seller_shipping_cost ?? 0), 0);
 
   const kpis: FinanceiroKpis = {
-    tiktok_gmv: filter === "ml" ? null : allTkGmv,
-    tiktok_settlement: filter === "ml" ? null : allTkSettlement,
-    tiktok_fees: filter === "ml" ? null : allTkFees,
-    tiktok_avg_fee_pct: filter === "ml" ? null : parseFloat((allTkFees / allTkGmv * 100).toFixed(2)),
-    tiktok_avg_settlement_pct: filter === "ml" ? null : parseFloat((allTkSettlement / allTkGmv * 100).toFixed(2)),
-    ml_gmv: filter === "tiktok" ? null : allMlGmv,
-    ml_ad_spend: filter === "tiktok" ? null : allMlSpend,
-    ml_ad_revenue: filter === "tiktok" ? null : allMlRevenue,
-    ml_roas: filter === "tiktok" ? null : parseFloat((allMlRevenue / allMlSpend).toFixed(2)),
-    ml_acos_pct: filter === "tiktok" ? null : parseFloat((allMlSpend / allMlRevenue * 100).toFixed(2)),
-    ml_cpc: filter === "tiktok" ? null : parseFloat((allMlSpend / allMlClicks).toFixed(4)),
-    ml_total_cost_pct: filter === "tiktok" ? null : parseFloat(((allMlSpend + allMlShipping) / allMlGmv * 100).toFixed(2)),
+    tiktok_gmv: showTk ? allTkGmv : null,
+    tiktok_settlement: showTk ? allTkSettlement : null,
+    tiktok_fees: showTk ? allTkFees : null,
+    tiktok_avg_fee_pct: showTk ? parseFloat((allTkFees / allTkGmv * 100).toFixed(2)) : null,
+    tiktok_avg_settlement_pct: showTk ? parseFloat((allTkSettlement / allTkGmv * 100).toFixed(2)) : null,
+    ml_gmv: showMl ? allMlGmv : null,
+    ml_ad_spend: showMl ? allMlSpend : null,
+    ml_ad_revenue: showMl ? allMlRevenue : null,
+    ml_roas: showMl ? parseFloat((allMlRevenue / allMlSpend).toFixed(2)) : null,
+    ml_acos_pct: showMl ? parseFloat((allMlSpend / allMlRevenue * 100).toFixed(2)) : null,
+    ml_cpc: showMl ? parseFloat((allMlSpend / allMlClicks).toFixed(4)) : null,
+    ml_total_cost_pct: showMl ? parseFloat(((allMlSpend + allMlShipping) / allMlGmv * 100).toFixed(2)) : null,
   };
 
   return { live: false, kpis, brands };
@@ -775,30 +798,29 @@ const QUALITY_MOCK_BRANDS: QualityBrandRow[] = [
 ];
 
 export function fetchQuality(
-  filter: Filter,
+  selection: MarketplaceSelection,
   period?: string,
 ): Promise<{ kpis: QualityKpis; brands: QualityBrandRow[]; live: boolean }> {
   interface ApiResp { kpis: QualityKpis; brands: QualityBrandRow[] }
   const month = period ?? refMonth();
-  return withCache(`quality:${filter}:${month}`, async () => {
+  const marketplace = serializeMarketplaceSelection(selection);
+  return withCache(`quality:${marketplace}:${month}`, async () => {
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/quality?marketplace=${filter}&ref_month=${month}`
+      `/api/v1/performance/quality?marketplace=${marketplace}&ref_month=${month}`
     );
     if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
 
-    const brands = filter === "tiktok"
-      ? QUALITY_MOCK_BRANDS
-      : filter === "ml"
-      ? QUALITY_MOCK_BRANDS.filter((b) => b.ml_cancel_rate_pct !== null)
-      : QUALITY_MOCK_BRANDS;
+    const showTk = isMarketplaceSelected(selection, "tiktok");
+    const showMl = isMarketplaceSelected(selection, "ml");
+    const brands = QUALITY_MOCK_BRANDS;
 
     const kpis: QualityKpis = {
-      tiktok_problem_rate: filter === "ml" ? null : 9.0,
-      tiktok_cancel_rate: filter === "ml" ? null : 5.9,
-      tiktok_avg_delivery_days: filter === "ml" ? null : 5.6,
-      ml_cancel_rate_pct: filter === "tiktok" ? null : 2.8,
-      ml_not_delivered_rate_pct: filter === "tiktok" ? null : 0.9,
-      ml_avg_delivery_days: filter === "tiktok" ? null : 3.7,
+      tiktok_problem_rate: showTk ? 9.0 : null,
+      tiktok_cancel_rate: showTk ? 5.9 : null,
+      tiktok_avg_delivery_days: showTk ? 5.6 : null,
+      ml_cancel_rate_pct: showMl ? 2.8 : null,
+      ml_not_delivered_rate_pct: showMl ? 0.9 : null,
+      ml_avg_delivery_days: showMl ? 3.7 : null,
     };
 
     return { live: false, kpis, brands };

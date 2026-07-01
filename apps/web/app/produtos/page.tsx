@@ -10,6 +10,8 @@ import PeriodSelector from "@/components/PeriodSelector";
 import { SkeletonTableRows } from "@/components/Skeleton";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
+import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 type Tab = "ml" | "tiktok" | "shopee";
 type BrandML = "" | "barbours" | "kokeshi" | "lescent" | "rituaria";
@@ -196,6 +198,20 @@ export default function ProdutosPage() {
 
   const [isLive, setIsLive] = useState(false);
 
+  // Sorting is server-side (each page comes pre-sorted from the API); we only
+  // use `sort`/`toggleSort` from the hook to drive the query, not `sortedRows`.
+  const mlColumnTypes: Record<string, SortColumnType> = { title: "text" };
+  const mlGetValue = (row: ProdutoMLRow, column: string) => (row as unknown as Record<string, string | number | null | undefined>)[column];
+  const mlSort = useSortableTable(mlData?.items ?? [], mlGetValue, mlColumnTypes);
+
+  const tkColumnTypes: Record<string, SortColumnType> = { product_name: "text" };
+  const tkGetValue = (row: ProdutoTikTokRow, column: string) => (row as unknown as Record<string, string | number | null | undefined>)[column];
+  const tkSort = useSortableTable(tkData?.items ?? [], tkGetValue, tkColumnTypes);
+
+  const shColumnTypes: Record<string, SortColumnType> = { product_name: "text" };
+  const shGetValue = (row: ProdutoShopeeRow, column: string) => (row as unknown as Record<string, string | number | null | undefined>)[column];
+  const shSort = useSortableTable(shData?.items ?? [], shGetValue, shColumnTypes);
+
   const loadML = useCallback(() => {
     setMlLoading(true);
     fetchProdutosML({
@@ -206,11 +222,13 @@ export default function ProdutosPage() {
       revenue_velocity: mlVelocity || undefined,
       limit: PAGE_SIZE,
       offset: mlOffset,
+      sort_by: mlSort.sort.column ?? undefined,
+      sort_dir: mlSort.sort.direction ?? undefined,
     }).then((r) => {
       if (r) { setMlData(r); setIsLive(true); }
       setMlLoading(false);
     }).catch(() => setMlLoading(false));
-  }, [mlBrand, mlPareto, mlSignal, mlStatus, mlVelocity, mlOffset]);
+  }, [mlBrand, mlPareto, mlSignal, mlStatus, mlVelocity, mlOffset, mlSort.sort.column, mlSort.sort.direction]);
 
   const loadTK = useCallback(() => {
     setTkLoading(true);
@@ -219,11 +237,13 @@ export default function ProdutosPage() {
       period,
       limit: PAGE_SIZE,
       offset: tkOffset,
+      sort_by: tkSort.sort.column ?? undefined,
+      sort_dir: tkSort.sort.direction ?? undefined,
     }).then((r) => {
       if (r) { setTkData(r); setIsLive(true); }
       setTkLoading(false);
     }).catch(() => setTkLoading(false));
-  }, [tkBrand, period, tkOffset]);
+  }, [tkBrand, period, tkOffset, tkSort.sort.column, tkSort.sort.direction]);
 
   const loadSH = useCallback(() => {
     setShLoading(true);
@@ -232,11 +252,13 @@ export default function ProdutosPage() {
       period,
       limit: PAGE_SIZE,
       offset: shOffset,
+      sort_by: shSort.sort.column ?? undefined,
+      sort_dir: shSort.sort.direction ?? undefined,
     }).then((r) => {
       if (r) { setShData(r); setIsLive(true); }
       setShLoading(false);
     }).catch(() => setShLoading(false));
-  }, [shBrand, period, shOffset]);
+  }, [shBrand, period, shOffset, shSort.sort.column, shSort.sort.direction]);
 
   useEffect(() => { if (tab === "ml") loadML(); }, [tab, loadML]);
   useEffect(() => { if (tab === "tiktok") loadTK(); }, [tab, loadTK]);
@@ -251,6 +273,11 @@ export default function ProdutosPage() {
   useEffect(() => { setMlOffset(0); }, [mlBrand, mlPareto, mlSignal, mlStatus, mlVelocity]);
   useEffect(() => { setTkOffset(0); }, [tkBrand, period]);
   useEffect(() => { setShOffset(0); }, [shBrand, period]);
+
+  // Reset offset when sort changes (back to first page)
+  useEffect(() => { setMlOffset(0); }, [mlSort.sort.column, mlSort.sort.direction]);
+  useEffect(() => { setTkOffset(0); }, [tkSort.sort.column, tkSort.sort.direction]);
+  useEffect(() => { setShOffset(0); }, [shSort.sort.column, shSort.sort.direction]);
 
   const filterSelect = "text-sm border border-slate-200 rounded-lg px-3 py-1.5 text-slate-600 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent";
 
@@ -346,13 +373,13 @@ export default function ProdutosPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produto</th>
+                    <SortableHeader label="Produto" column="title" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Receita</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Unid.</th>
+                    <SortableHeader label="Receita" column="gross_revenue" sort={mlSort.sort} onSort={mlSort.toggleSort} align="right" />
+                    <SortableHeader label="Unid." column="units_sold" sort={mlSort.sort} onSort={mlSort.toggleSort} align="right" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Pareto</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Cancel.</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">ROAS</th>
+                    <SortableHeader label="Cancel." column="cancel_rate_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} align="right" />
+                    <SortableHeader label="ROAS" column="ad_roas" sort={mlSort.sort} onSort={mlSort.toggleSort} align="right" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Efic. Ads</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Sinal</th>
                   </tr>
@@ -470,13 +497,13 @@ export default function ProdutosPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produto</th>
+                    <SortableHeader label="Produto" column="product_name" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">GMV</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Pedidos</th>
+                    <SortableHeader label="GMV" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} align="right" />
+                    <SortableHeader label="Pedidos" column="orders" sort={tkSort.sort} onSort={tkSort.toggleSort} align="right" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Canal</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Prob.%</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Rating</th>
+                    <SortableHeader label="Prob.%" column="problem_rate" sort={tkSort.sort} onSort={tkSort.toggleSort} align="right" />
+                    <SortableHeader label="Rating" column="rating_avg" sort={tkSort.sort} onSort={tkSort.toggleSort} align="right" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -572,15 +599,15 @@ export default function ProdutosPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produto</th>
+                    <SortableHeader label="Produto" column="product_name" sort={shSort.sort} onSort={shSort.toggleSort} align="left" />
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Variação</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">SKU</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">GMV</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Unid.</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Pedidos</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Cancel.%</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Ticket Médio</th>
+                    <SortableHeader label="GMV" column="gmv" sort={shSort.sort} onSort={shSort.toggleSort} align="right" />
+                    <SortableHeader label="Unid." column="units_sold" sort={shSort.sort} onSort={shSort.toggleSort} align="right" />
+                    <SortableHeader label="Pedidos" column="orders" sort={shSort.sort} onSort={shSort.toggleSort} align="right" />
+                    <SortableHeader label="Cancel.%" column="cancel_rate_pct" sort={shSort.sort} onSort={shSort.toggleSort} align="right" />
+                    <SortableHeader label="Ticket Médio" column="avg_price" sort={shSort.sort} onSort={shSort.toggleSort} align="right" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">

@@ -13,6 +13,8 @@ import {
 import KpiCard from "@/components/KpiCard";
 import AppNav from "@/components/AppNav";
 import { fmtBrl } from "@/lib/formatters";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 const DAYS_OPTIONS = [
   { value: 7, label: "7 dias" },
@@ -92,8 +94,39 @@ function CanalCard({ title, accentColor, orders, canceled, gmv, cancelRate, deli
   );
 }
 
+function getBrandSortValue(row: PedidosBrandRow, column: string): string | number | null {
+  switch (column) {
+    case "brand":
+      return row.label;
+    case "tk_orders":
+      return row.tiktok_orders;
+    case "tk_cancel":
+      return row.tiktok_cancel_rate_pct;
+    case "ml_orders":
+      return row.ml_orders;
+    case "ml_cancel":
+      return row.ml_cancel_rate_pct;
+    case "total_orders":
+      return row.total_orders;
+    case "total_gmv":
+      return row.total_gmv;
+    default:
+      return null;
+  }
+}
+
+const BRAND_COLUMN_TYPES: Record<string, "numeric" | "text"> = {
+  brand: "text",
+  tk_orders: "numeric",
+  tk_cancel: "numeric",
+  ml_orders: "numeric",
+  ml_cancel: "numeric",
+  total_orders: "numeric",
+  total_gmv: "numeric",
+};
+
 function BrandTable({ rows }: { rows: PedidosBrandRow[] }) {
-  const sorted = [...rows].sort((a, b) => b.total_orders - a.total_orders);
+  const { sort, toggleSort, sortedRows } = useSortableTable(rows, getBrandSortValue, BRAND_COLUMN_TYPES);
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-violet-100 overflow-hidden">
       <div className="px-5 py-4 border-b border-violet-100">
@@ -103,17 +136,17 @@ function BrandTable({ rows }: { rows: PedidosBrandRow[] }) {
         <table className="w-full text-sm" role="table">
           <thead>
             <tr className="bg-slate-50 text-left">
-              <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Marca</th>
-              <th className="px-4 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">TK Pedidos</th>
-              <th className="px-4 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">TK Cancel.</th>
-              <th className="px-4 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">ML Pedidos</th>
-              <th className="px-4 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">ML Cancel.</th>
-              <th className="px-4 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">Total</th>
-              <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">GMV</th>
+              <SortableHeader label="Marca" column="brand" sort={sort} onSort={toggleSort} align="left" className="!px-5 !py-3 !text-[10px]" />
+              <SortableHeader label="TK Pedidos" column="tk_orders" sort={sort} onSort={toggleSort} className="!px-4 !py-3 !text-[10px]" />
+              <SortableHeader label="TK Cancel." column="tk_cancel" sort={sort} onSort={toggleSort} className="!px-4 !py-3 !text-[10px]" />
+              <SortableHeader label="ML Pedidos" column="ml_orders" sort={sort} onSort={toggleSort} className="!px-4 !py-3 !text-[10px]" />
+              <SortableHeader label="ML Cancel." column="ml_cancel" sort={sort} onSort={toggleSort} className="!px-4 !py-3 !text-[10px]" />
+              <SortableHeader label="Total" column="total_orders" sort={sort} onSort={toggleSort} className="!px-4 !py-3 !text-[10px]" />
+              <SortableHeader label="GMV" column="total_gmv" sort={sort} onSort={toggleSort} className="!px-5 !py-3 !text-[10px]" />
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
-            {sorted.map((row) => (
+            {sortedRows.map((row) => (
               <tr key={row.brand} className="hover:bg-slate-50/60 transition-colors">
                 <td className="px-5 py-3 font-semibold text-slate-700">{row.label}</td>
                 <td className="px-4 py-3 text-right tabular-nums text-slate-600">{fmtNum(row.tiktok_orders)}</td>

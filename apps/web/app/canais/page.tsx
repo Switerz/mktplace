@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { Marketplace } from "@/lib/mock-data";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchCanais,
   type CanaisKpis,
   type CanaisBrandRow,
 } from "@/lib/api-client";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  type MarketplaceSelection,
+} from "@/lib/marketplace-filter";
 import KpiCard from "@/components/KpiCard";
 import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
@@ -14,8 +18,8 @@ import PeriodSelector from "@/components/PeriodSelector";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
-
-type Filter = Marketplace | "all";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 function fmtPct(v: number | null, dec = 1): string {
   if (v == null) return "—";
@@ -78,7 +82,7 @@ function newBuyerPctStyle(v: number | null): string {
 }
 
 export default function CanaisPage() {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
   const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
   const [kpis, setKpis] = useState<CanaisKpis | null>(null);
   const [brands, setBrands] = useState<CanaisBrandRow[]>([]);
@@ -103,9 +107,9 @@ export default function CanaisPage() {
       });
   }, [filter, period, retryKey]);
 
-  const showTiktok = filter !== "ml" && filter !== "shopee";
-  const showMl = filter !== "tiktok" && filter !== "shopee";
-  const showShopee = filter !== "tiktok" && filter !== "ml";
+  const showTiktok = isMarketplaceSelected(filter, "tiktok");
+  const showMl = isMarketplaceSelected(filter, "ml");
+  const showShopee = isMarketplaceSelected(filter, "shopee");
 
   const tkBrands = brands.filter((b) => b.tiktok_gmv != null);
   const mlBrands = brands.filter((b) => b.ml_gmv != null);
@@ -148,6 +152,70 @@ export default function CanaisPage() {
   const hasShopeeData = loading || shBrands.length > 0;
 
   const periodLabel = AVAILABLE_MONTHS.find((m) => m.value === period)?.label ?? period;
+
+  const tkColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, video_pct: "numeric" as const,
+    live_pct: "numeric" as const, card_pct: "numeric" as const, visitors: "numeric" as const,
+    conversion: "numeric" as const,
+  }), []);
+  const tkGetValue = (row: CanaisBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.tiktok_gmv;
+      case "video_pct": return row.tiktok_video_pct;
+      case "live_pct": return row.tiktok_live_pct;
+      case "card_pct": return row.tiktok_card_pct;
+      case "visitors": return row.tiktok_visitors;
+      case "conversion": return row.tiktok_conversion_rate;
+      default: return null;
+    }
+  };
+  const tkSort = useSortableTable(tkBrands, tkGetValue, tkColumnTypes);
+
+  const mlColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, buyers: "numeric" as const,
+    new_pct: "numeric" as const, new: "numeric" as const, repeat: "numeric" as const,
+    repeat_pct: "numeric" as const, gmv_per_buyer: "numeric" as const,
+  }), []);
+  const mlGetValue = (row: CanaisBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.ml_gmv;
+      case "buyers": return row.ml_unique_buyers;
+      case "new_pct": return row.ml_new_buyer_pct ??
+        (row.ml_unique_buyers && row.ml_new_buyers ? (row.ml_new_buyers / row.ml_unique_buyers) * 100 : null);
+      case "new": return row.ml_new_buyers;
+      case "repeat": return row.ml_repeat_buyers;
+      case "repeat_pct": return row.ml_repeat_buyer_rate_pct;
+      case "gmv_per_buyer": return row.ml_gmv_per_buyer;
+      default: return null;
+    }
+  };
+  const mlSort = useSortableTable(mlBrands, mlGetValue, mlColumnTypes);
+
+  const shColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, buyers: "numeric" as const,
+    new_pct: "numeric" as const, new: "numeric" as const, repeat: "numeric" as const,
+    repeat_pct: "numeric" as const, gmv_per_buyer: "numeric" as const, visitors: "numeric" as const,
+    conversion: "numeric" as const,
+  }), []);
+  const shGetValue = (row: CanaisBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.shopee_gmv;
+      case "buyers": return row.shopee_unique_buyers;
+      case "new_pct": return row.shopee_new_buyer_pct ??
+        (row.shopee_unique_buyers && row.shopee_new_buyers ? (row.shopee_new_buyers / row.shopee_unique_buyers) * 100 : null);
+      case "new": return row.shopee_new_buyers;
+      case "repeat": return row.shopee_repeat_buyers;
+      case "repeat_pct": return row.shopee_repeat_buyer_rate_pct;
+      case "gmv_per_buyer": return row.shopee_gmv_per_buyer;
+      case "visitors": return row.shopee_visitors ?? null;
+      case "conversion": return row.shopee_conversion_rate ?? null;
+      default: return null;
+    }
+  };
+  const shSort = useSortableTable(shBrands, shGetValue, shColumnTypes);
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -206,7 +274,7 @@ export default function CanaisPage() {
         {/* ── KPI TikTok ── */}
         {showTiktok && (
           <div className="flex flex-col gap-3" aria-busy={loading}>
-            {filter === "all" && (
+            {filter.length > 1 && (
               <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                 TikTok Shop — Atribuicao
               </p>
@@ -249,7 +317,7 @@ export default function CanaisPage() {
         {/* ── KPI Mercado Livre ── */}
         {showMl && (
           <div className="flex flex-col gap-3" aria-busy={loading}>
-            {filter === "all" && (
+            {filter.length > 1 && (
               <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                 Mercado Livre — Perfil de compradores
               </p>
@@ -286,7 +354,7 @@ export default function CanaisPage() {
         {/* ── KPI Shopee — só quando há dados ── */}
         {showShopee && hasShopeeData && (
           <div className="flex flex-col gap-3" aria-busy={loading}>
-            {filter === "all" && (
+            {filter.length > 1 && (
               <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                 Shopee — Perfil de compradores
               </p>
@@ -333,7 +401,7 @@ export default function CanaisPage() {
         )}
 
         {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
-        {filter === "shopee" && !loading && !hasShopeeData && (
+        {filter.length === 1 && showShopee && !loading && !hasShopeeData && (
           <div className="bg-orange-50 border border-orange-100 rounded-2xl p-6 flex flex-col items-center gap-2 text-center">
             <p className="text-sm font-semibold text-orange-700">Shopee — Dados de canal em integração</p>
             <p className="text-xs text-orange-600 max-w-md">
@@ -361,15 +429,15 @@ export default function CanaisPage() {
               <table className="w-full text-sm" aria-label="Atribuicao TikTok por marca">
                 <thead>
                   <tr className="bg-slate-50">
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">GMV</th>
+                    <SortableHeader label="Marca" column="brand" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Composicao</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Video %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Live %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Card %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Visitantes</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Conversao</th>
+                    <SortableHeader label="Video %" column="video_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Live %" column="live_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Card %" column="card_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Visitantes" column="visitors" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Conversao" column="conversion" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -377,7 +445,7 @@ export default function CanaisPage() {
                     <SkeletonTableRows rows={4} cols={9} />
                   ) : (
                     <>
-                      {tkBrands.map((b, i) => {
+                      {tkSort.sortedRows.map((b, i) => {
                         const dom = dominantChannel(b.tiktok_video_pct, b.tiktok_live_pct, b.tiktok_card_pct);
                         const partPct = tkGmvTotal > 0 ? ((b.tiktok_gmv ?? 0) / tkGmvTotal) * 100 : 0;
                         return (
@@ -461,15 +529,15 @@ export default function CanaisPage() {
               <table className="w-full text-sm" aria-label="Perfil de compradores ML por marca">
                 <thead>
                   <tr className="bg-slate-50">
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">GMV</th>
+                    <SortableHeader label="Marca" column="brand" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV" column="gmv" sort={mlSort.sort} onSort={mlSort.toggleSort} />
                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Compradores</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Novos %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Novos</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Recorrentes</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Recompra %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">GMV / Comprador</th>
+                    <SortableHeader label="Compradores" column="buyers" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Novos %" column="new_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Novos" column="new" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Recorrentes" column="repeat" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Recompra %" column="repeat_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="GMV / Comprador" column="gmv_per_buyer" sort={mlSort.sort} onSort={mlSort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -477,7 +545,7 @@ export default function CanaisPage() {
                     <SkeletonTableRows rows={3} cols={9} />
                   ) : (
                     <>
-                      {mlBrands.map((b, i) => {
+                      {mlSort.sortedRows.map((b, i) => {
                         const partPct = mlGmvTotal > 0 ? ((b.ml_gmv ?? 0) / mlGmvTotal) * 100 : 0;
                         const newPct = b.ml_new_buyer_pct ??
                           (b.ml_unique_buyers && b.ml_new_buyers ? (b.ml_new_buyers / b.ml_unique_buyers) * 100 : null);
@@ -568,17 +636,17 @@ export default function CanaisPage() {
               <table className="w-full text-sm" aria-label="Perfil de compradores Shopee por marca">
                 <thead>
                   <tr className="bg-slate-50">
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">GMV</th>
+                    <SortableHeader label="Marca" column="brand" sort={shSort.sort} onSort={shSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV" column="gmv" sort={shSort.sort} onSort={shSort.toggleSort} />
                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Compradores</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Novos %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Novos</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Recorrentes</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Recompra %</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">GMV / Comprador</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Visitantes</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Conversão</th>
+                    <SortableHeader label="Compradores" column="buyers" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Novos %" column="new_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Novos" column="new" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Recorrentes" column="repeat" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Recompra %" column="repeat_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="GMV / Comprador" column="gmv_per_buyer" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Visitantes" column="visitors" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Conversão" column="conversion" sort={shSort.sort} onSort={shSort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -586,7 +654,7 @@ export default function CanaisPage() {
                     <SkeletonTableRows rows={3} cols={11} />
                   ) : (
                     <>
-                      {shBrands.map((b, i) => {
+                      {shSort.sortedRows.map((b, i) => {
                         const partPct = shGmvTotal > 0 ? ((b.shopee_gmv ?? 0) / shGmvTotal) * 100 : 0;
                         const newPct = b.shopee_new_buyer_pct ??
                           (b.shopee_unique_buyers && b.shopee_new_buyers ? (b.shopee_new_buyers / b.shopee_unique_buyers) * 100 : null);

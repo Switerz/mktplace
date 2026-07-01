@@ -1,19 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { Marketplace } from "@/lib/mock-data";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchQuality,
   type QualityKpis,
   type QualityBrandRow,
 } from "@/lib/api-client";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  type MarketplaceSelection,
+} from "@/lib/marketplace-filter";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import PeriodSelector from "@/components/PeriodSelector";
 import AppNav from "@/components/AppNav";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
-
-type Filter = Marketplace | "all";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 function fmtRate(v: number | null): string {
   if (v == null) return "—";
@@ -45,7 +49,7 @@ function cancelBg(v: number | null): string {
 }
 
 export default function QualityPage() {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
   const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
   const [kpis, setKpis] = useState<QualityKpis | null>(null);
   const [brands, setBrands] = useState<QualityBrandRow[]>([]);
@@ -70,10 +74,78 @@ export default function QualityPage() {
       });
   }, [filter, period, retryKey]);
 
-  const showTiktok = filter !== "ml" && filter !== "shopee";
-  const showMl = filter !== "tiktok" && filter !== "shopee";
-  const showShopee = filter !== "tiktok" && filter !== "ml";
+  const showTiktok = isMarketplaceSelected(filter, "tiktok");
+  const showMl = isMarketplaceSelected(filter, "ml");
+  const showShopee = isMarketplaceSelected(filter, "shopee");
   const qualityColSpan = 1 + (showTiktok ? 1 : 0) + (showMl ? 3 : 0) + (showShopee ? 2 : 0);
+
+  const qualityColumnTypes = useMemo(() => ({
+    brand: "text" as const, tk_delivery: "numeric" as const, ml_cancel: "numeric" as const,
+    ml_not_delivered: "numeric" as const, ml_delivery: "numeric" as const,
+    sh_cancel: "numeric" as const, sh_return: "numeric" as const,
+  }), []);
+  const qualityGetValue = (row: QualityBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "tk_delivery": return row.tiktok_avg_delivery_days;
+      case "ml_cancel": return row.ml_cancel_rate_pct;
+      case "ml_not_delivered": return row.ml_not_delivered_rate_pct;
+      case "ml_delivery": return row.ml_avg_delivery_days;
+      case "sh_cancel": return row.shopee_cancel_rate_pct ?? null;
+      case "sh_return": return row.shopee_return_rate_pct ?? null;
+      default: return null;
+    }
+  };
+  const qualitySort = useSortableTable(brands, qualityGetValue, qualityColumnTypes);
+  const qualityVisibleColumns = useMemo(() => {
+    const cols = ["brand"];
+    if (showTiktok) cols.push("tk_delivery");
+    if (showMl) cols.push("ml_cancel", "ml_not_delivered", "ml_delivery");
+    if (showShopee) cols.push("sh_cancel", "sh_return");
+    return cols;
+  }, [showTiktok, showMl, showShopee]);
+  useEffect(() => {
+    qualitySort.resetSortIfColumnMissing(qualityVisibleColumns);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qualityVisibleColumns.join(",")]);
+
+  const mlLoyaltyRows = brands.filter((b) => b.ml_unique_buyers != null || b.ml_repeat_buyer_rate_pct != null);
+  const mlLoyaltyColumnTypes = useMemo(() => ({
+    brand: "text" as const, buyers: "numeric" as const, new: "numeric" as const,
+    repeat_pct: "numeric" as const, gmv_per_buyer: "numeric" as const,
+    mom: "numeric" as const, shipping_pct: "numeric" as const,
+  }), []);
+  const mlLoyaltyGetValue = (row: QualityBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "buyers": return row.ml_unique_buyers;
+      case "new": return row.ml_new_buyers;
+      case "repeat_pct": return row.ml_repeat_buyer_rate_pct;
+      case "gmv_per_buyer": return row.ml_gmv_per_buyer;
+      case "mom": return row.ml_gmv_mom_pct;
+      case "shipping_pct": return row.ml_shipping_pct_of_gmv;
+      default: return null;
+    }
+  };
+  const mlLoyaltySort = useSortableTable(mlLoyaltyRows, mlLoyaltyGetValue, mlLoyaltyColumnTypes);
+
+  const shQualityRows = brands.filter((b) => b.shopee_orders != null || b.shopee_cancel_rate_pct != null);
+  const shQualityColumnTypes = useMemo(() => ({
+    brand: "text" as const, orders: "numeric" as const, canceled: "numeric" as const,
+    cancel_pct: "numeric" as const, returned: "numeric" as const, return_pct: "numeric" as const,
+  }), []);
+  const shQualityGetValue = (row: QualityBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "orders": return row.shopee_orders ?? null;
+      case "canceled": return row.shopee_canceled_orders ?? null;
+      case "cancel_pct": return row.shopee_cancel_rate_pct ?? null;
+      case "returned": return row.shopee_returned_orders ?? null;
+      case "return_pct": return row.shopee_return_rate_pct ?? null;
+      default: return null;
+    }
+  };
+  const shQualitySort = useSortableTable(shQualityRows, shQualityGetValue, shQualityColumnTypes);
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -195,34 +267,24 @@ export default function QualityPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-50 text-left">
-                  <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
+                  <SortableHeader label="Marca" column="brand" sort={qualitySort.sort} onSort={qualitySort.toggleSort} align="left" />
                   {showTiktok && (
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                      <span className="text-violet-500">TK</span> Entrega
-                      <span className="ml-1 text-[9px] font-normal text-slate-400 normal-case tracking-normal">abr/26+</span>
-                    </th>
+                    <SortableHeader
+                      label={<>TK Entrega <span className="ml-1 text-[9px] font-normal text-slate-400 normal-case tracking-normal">abr/26+</span></>}
+                      column="tk_delivery" sort={qualitySort.sort} onSort={qualitySort.toggleSort}
+                    />
                   )}
                   {showMl && (
                     <>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                        <span className="text-cyan-600">ML</span> Cancel.
-                      </th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                        <span className="text-cyan-600">ML</span> N. Entregue
-                      </th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                        <span className="text-cyan-600">ML</span> Entrega
-                      </th>
+                      <SortableHeader label="ML Cancel." column="ml_cancel" sort={qualitySort.sort} onSort={qualitySort.toggleSort} />
+                      <SortableHeader label="ML N. Entregue" column="ml_not_delivered" sort={qualitySort.sort} onSort={qualitySort.toggleSort} />
+                      <SortableHeader label="ML Entrega" column="ml_delivery" sort={qualitySort.sort} onSort={qualitySort.toggleSort} />
                     </>
                   )}
                   {showShopee && (
                     <>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                        <span className="text-orange-500">SH</span> Cancel.
-                      </th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                        <span className="text-orange-500">SH</span> Devol.
-                      </th>
+                      <SortableHeader label="SH Cancel." column="sh_cancel" sort={qualitySort.sort} onSort={qualitySort.toggleSort} />
+                      <SortableHeader label="SH Devol." column="sh_return" sort={qualitySort.sort} onSort={qualitySort.toggleSort} />
                     </>
                   )}
                 </tr>
@@ -235,7 +297,7 @@ export default function QualityPage() {
                     </td>
                   </tr>
                 )}
-                {brands.map((b) => {
+                {qualitySort.sortedRows.map((b) => {
                   return (
                     <tr key={b.brand} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 font-semibold text-slate-700 whitespace-nowrap">{b.label}</td>
@@ -304,19 +366,17 @@ export default function QualityPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Compradores</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Novos</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Recompra%</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">GMV/Buyer</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">MoM GMV</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Frete/GMV</th>
+                    <SortableHeader label="Marca" column="brand" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} align="left" />
+                    <SortableHeader label="Compradores" column="buyers" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
+                    <SortableHeader label="Novos" column="new" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
+                    <SortableHeader label="Recompra%" column="repeat_pct" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
+                    <SortableHeader label="GMV/Buyer" column="gmv_per_buyer" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
+                    <SortableHeader label="MoM GMV" column="mom" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
+                    <SortableHeader label="Frete/GMV" column="shipping_pct" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                  {brands
-                    .filter((b) => b.ml_unique_buyers != null || b.ml_repeat_buyer_rate_pct != null)
-                    .map((b) => {
+                  {mlLoyaltySort.sortedRows.map((b) => {
                       const recompra = b.ml_repeat_buyer_rate_pct;
                       const recompraColor = recompra == null ? "text-slate-400"
                         : recompra > 20 ? "text-emerald-700 font-semibold"
@@ -384,18 +444,16 @@ export default function QualityPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Pedidos</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Cancelados</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Cancel.%</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Devolvidos</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Devol.%</th>
+                    <SortableHeader label="Marca" column="brand" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} align="left" />
+                    <SortableHeader label="Pedidos" column="orders" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
+                    <SortableHeader label="Cancelados" column="canceled" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
+                    <SortableHeader label="Cancel.%" column="cancel_pct" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
+                    <SortableHeader label="Devolvidos" column="returned" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
+                    <SortableHeader label="Devol.%" column="return_pct" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                  {brands
-                    .filter((b) => b.shopee_orders != null || b.shopee_cancel_rate_pct != null)
-                    .map((b) => (
+                  {shQualitySort.sortedRows.map((b) => (
                       <tr key={b.brand} className="hover:bg-orange-50/40 transition-colors">
                         <td className="px-6 py-4 font-semibold text-slate-700 whitespace-nowrap">{b.label}</td>
                         <td className="px-4 py-4 text-right tabular-nums text-slate-600">

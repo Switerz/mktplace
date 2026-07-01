@@ -1,11 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Marketplace } from "@/lib/mock-data";
 import {
   fetchOverview, fetchBrands, fetchMonthly,
   type OverviewData, type BrandRow, type MonthPoint,
 } from "@/lib/api-client";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  type MarketplaceSelection,
+} from "@/lib/marketplace-filter";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import PeriodSelector from "@/components/PeriodSelector";
@@ -14,8 +18,6 @@ import BrandPerformanceTable from "@/components/BrandPerformanceTable";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
-
-type Filter = Marketplace | "all";
 
 function fmtSplit(tkGmv: number | null, mlGmv: number | null, shGmv: number | null): string | undefined {
   const parts: string[] = [];
@@ -26,7 +28,7 @@ function fmtSplit(tkGmv: number | null, mlGmv: number | null, shGmv: number | nu
 }
 
 export default function Dashboard() {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
   const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [brands, setBrands] = useState<BrandRow[]>([]);
@@ -142,20 +144,23 @@ export default function Dashboard() {
           {(() => {
             const mlRoas = overview?.ml_roas;
             const shRoas = overview?.shopee_roas;
-            if (filter === "tiktok") {
+            const showMl = isMarketplaceSelected(filter, "ml");
+            const showSh = isMarketplaceSelected(filter, "shopee");
+
+            if (!showMl && !showSh) {
               return <KpiCard label="ROAS" value="N/D" subvalue="Não disponível no TikTok Shop" accent="bg-slate-300" />;
             }
-            if (filter === "shopee") {
+            if (showSh && !showMl) {
               return shRoas != null
                 ? <KpiCard label="ROAS Shopee" value={`${shRoas.toFixed(1)}x`} subvalue={overview?.ad_spend != null ? `Ad Spend: ${fmtBrl(overview.ad_spend)}` : undefined} accent="bg-emerald-500" />
                 : <KpiCard label="ROAS Shopee" value="—" accent="bg-slate-300" />;
             }
-            if (filter === "ml") {
+            if (showMl && !showSh) {
               return mlRoas != null
                 ? <KpiCard label="ROAS ML" value={`${mlRoas.toFixed(1)}x`} subvalue={overview?.ad_spend != null ? `Ad Spend: ${fmtBrl(overview.ad_spend)}` : undefined} accent="bg-emerald-500" />
                 : <KpiCard label="ROAS ML" value="—" accent="bg-slate-300" />;
             }
-            // all — mostra ML e Shopee se disponíveis
+            // ML + Shopee selecionados — mostra ambos se disponíveis
             const parts: string[] = [];
             if (mlRoas != null) parts.push(`ML ${mlRoas.toFixed(1)}x`);
             if (shRoas != null) parts.push(`SH ${shRoas.toFixed(1)}x`);
@@ -180,8 +185,8 @@ export default function Dashboard() {
         {/* Evolucao historica */}
         <GmvChart data={monthly} />
 
-        {/* Alerta operacional — apenas dados reais acionaveis */}
-        {!loading && filter !== "tiktok" && (() => {
+        {/* Alerta operacional — apenas dados reais acionaveis (especifico de ML) */}
+        {!loading && isMarketplaceSelected(filter, "ml") && (() => {
           const lescent = brands.find((b) => b.brand === "lescent");
           if (!lescent || (lescent.ml_gmv ?? 0) > 0) return null;
           return (

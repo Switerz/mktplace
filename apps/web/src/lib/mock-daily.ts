@@ -7,6 +7,7 @@ export interface DailyRow {
   date: string;       // "2026-05-01"
   tiktok_gmv: number | null;
   ml_gmv: number | null;
+  shopee_gmv: number | null;
   total_gmv: number;
   orders: number;
   avg_ticket: number | null;
@@ -22,6 +23,14 @@ const TIKTOK_MONTHLY: Record<string, Record<string, number>> = {
 const ML_MONTHLY: Record<string, Record<string, number>> = {
   "2026-04": { barbours: 1_958_271, kokeshi: 166_125, lescent: 100_412 },
   "2026-05": { barbours: 2_578_760, kokeshi: 789_678, lescent: 510_206 },
+};
+
+// Mesmos totais calibrados de mai/2026 usados em CANAIS_MOCK_BRANDS/FINANCEIRO_MOCK_BRANDS
+// (apps/web/src/lib/api-client.ts) — reaproveitados aqui para manter o mock de Shopee
+// consistente entre páginas. apice/rituaria não têm Shopee calibrada (mock não inventa).
+const SHOPEE_MONTHLY: Record<string, Record<string, number>> = {
+  "2026-04": { barbours: 612_400, kokeshi: 198_700, lescent: 154_200 },
+  "2026-05": { barbours: 612_400, kokeshi: 198_700, lescent: 154_200 },
 };
 
 // Pesos por dia da semana (dom=0..sab=6) — sexta e sábado tendem a ser maiores no TikTok
@@ -48,14 +57,17 @@ export function generateDailyData(brand: string, daysBack: number = 60): DailyRo
 
     const tkMonthly = TIKTOK_MONTHLY[monthKey]?.[brand] ?? 0;
     const mlMonthly = ML_MONTHLY[monthKey]?.[brand] ?? 0;
+    const shMonthly = SHOPEE_MONTHLY[monthKey]?.[brand] ?? 0;
 
     const weight = DAY_WEIGHTS[dayOfWeek];
     const tkBase = tkMonthly > 0 ? (tkMonthly / daysInMonth) * weight : 0;
     const mlBase = mlMonthly > 0 ? (mlMonthly / daysInMonth) * weight : 0;
+    const shBase = shMonthly > 0 ? (shMonthly / daysInMonth) * weight : 0;
 
     const tkGmv = tkBase > 0 ? Math.round(tkBase * deterministicVariance(dateStr, 1)) : null;
     const mlGmv = mlBase > 0 ? Math.round(mlBase * deterministicVariance(dateStr, 2)) : null;
-    const total = (tkGmv ?? 0) + (mlGmv ?? 0);
+    const shGmv = shBase > 0 ? Math.round(shBase * deterministicVariance(dateStr, 3)) : null;
+    const total = (tkGmv ?? 0) + (mlGmv ?? 0) + (shGmv ?? 0);
 
     // Ticket médio estimado por brand
     const tickets: Record<string, number> = {
@@ -69,6 +81,7 @@ export function generateDailyData(brand: string, daysBack: number = 60): DailyRo
       date: dateStr,
       tiktok_gmv: tkGmv,
       ml_gmv: mlGmv,
+      shopee_gmv: shGmv,
       total_gmv: total,
       orders,
       avg_ticket: orders > 0 ? Math.round(total / orders) : null,

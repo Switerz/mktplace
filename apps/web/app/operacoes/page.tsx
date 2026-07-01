@@ -15,8 +15,12 @@ import {
   fetchOperacoes,
   type OperacoesData,
   type TkDailyRow,
+  type CreatorRow,
+  type LiveRow,
 } from "@/lib/api-client";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
+import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 const BRAND_LABELS: Record<string, string> = {
   apice: "ÁPICE",
@@ -142,6 +146,85 @@ export default function OperacoesPage() {
         (r) => creatorBrand === "all" || r.brand === creatorBrand
       ),
     [data, creatorBrand]
+  );
+
+  const getCreatorValue = (
+    row: CreatorRow,
+    column: string
+  ): string | number | null | undefined => {
+    switch (column) {
+      case "creator":
+        return row.creator;
+      case "gmv":
+        return row.gmv;
+      case "gmv_video":
+        return row.videos > 0 ? row.gmv_video : null;
+      case "gmv_live":
+        return row.lives > 0 ? row.gmv_live : null;
+      case "views":
+        return row.views > 0 ? row.views : null;
+      case "videos":
+        return row.videos > 0 ? row.videos : null;
+      case "lives":
+        return row.lives > 0 ? row.lives : null;
+      case "gpm_video":
+        return row.videos > 0 ? row.gpm_video : null;
+      default:
+        return null;
+    }
+  };
+  const creatorColumnTypes: Record<string, SortColumnType> = {
+    creator: "text",
+    gmv: "numeric",
+    gmv_video: "numeric",
+    gmv_live: "numeric",
+    views: "numeric",
+    videos: "numeric",
+    lives: "numeric",
+    gpm_video: "numeric",
+  };
+  const creatorsSort = useSortableTable(
+    filteredCreators,
+    getCreatorValue,
+    creatorColumnTypes
+  );
+
+  const getLiveValue = (
+    row: LiveRow,
+    column: string
+  ): string | number | null | undefined => {
+    switch (column) {
+      case "brand":
+        return BRAND_LABELS[row.brand] ?? row.brand;
+      case "total_lives":
+        return row.total_lives;
+      case "total_minutes":
+        return row.total_minutes;
+      case "live_gmv":
+        return row.live_gmv;
+      case "pct_live":
+        return row.pct_live;
+      case "gmv_per_live":
+        return row.gmv_per_live;
+      case "gmv_per_minute":
+        return row.gmv_per_minute;
+      default:
+        return null;
+    }
+  };
+  const liveColumnTypes: Record<string, SortColumnType> = {
+    brand: "text",
+    total_lives: "numeric",
+    total_minutes: "numeric",
+    live_gmv: "numeric",
+    pct_live: "numeric",
+    gmv_per_live: "numeric",
+    gmv_per_minute: "numeric",
+  };
+  const livesSort = useSortableTable(
+    data?.lives ?? [],
+    getLiveValue,
+    liveColumnTypes
   );
 
   const chartData = useMemo(
@@ -334,18 +417,59 @@ export default function OperacoesPage() {
               <tr className="bg-slate-50 text-left">
                 <Th>#</Th>
                 <Th>Marca</Th>
-                <Th>Criador</Th>
-                <Th right>GMV Total</Th>
-                <Th right>GMV Vídeo</Th>
-                <Th right>GMV Live</Th>
-                <Th right>Views</Th>
-                <Th right>Vídeos</Th>
-                <Th right>Lives</Th>
-                <Th right>GPM</Th>
+                <SortableHeader
+                  label="Criador"
+                  column="creator"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                  align="left"
+                />
+                <SortableHeader
+                  label="GMV Total"
+                  column="gmv"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GMV Vídeo"
+                  column="gmv_video"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GMV Live"
+                  column="gmv_live"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="Views"
+                  column="views"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="Vídeos"
+                  column="videos"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="Lives"
+                  column="lives"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GPM"
+                  column="gpm_video"
+                  sort={creatorsSort.sort}
+                  onSort={creatorsSort.toggleSort}
+                />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredCreators.map((r, i) => (
+              {creatorsSort.sortedRows.map((r, i) => (
                 <tr key={i} className="hover:bg-slate-50 transition-colors">
                   <td className="px-4 py-3 text-xs font-bold text-slate-400 tabular-nums w-8">
                     {i + 1}
@@ -383,7 +507,7 @@ export default function OperacoesPage() {
                   </td>
                 </tr>
               ))}
-              {filteredCreators.length === 0 && !loading && (
+              {creatorsSort.sortedRows.length === 0 && !loading && (
                 <tr>
                   <td
                     colSpan={10}
@@ -423,17 +547,53 @@ export default function OperacoesPage() {
           <TableWrap>
             <thead>
               <tr className="bg-slate-50 text-left">
-                <Th>Marca</Th>
-                <Th right>Lives</Th>
-                <Th right>Horas ao Vivo</Th>
-                <Th right>GMV Lives</Th>
-                <Th right>% GMV via Live</Th>
-                <Th right>GMV/Live</Th>
-                <Th right>GMV/min</Th>
+                <SortableHeader
+                  label="Marca"
+                  column="brand"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                  align="left"
+                />
+                <SortableHeader
+                  label="Lives"
+                  column="total_lives"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
+                <SortableHeader
+                  label="Horas ao Vivo"
+                  column="total_minutes"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GMV Lives"
+                  column="live_gmv"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
+                <SortableHeader
+                  label="% GMV via Live"
+                  column="pct_live"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GMV/Live"
+                  column="gmv_per_live"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
+                <SortableHeader
+                  label="GMV/min"
+                  column="gmv_per_minute"
+                  sort={livesSort.sort}
+                  onSort={livesSort.toggleSort}
+                />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {(data?.lives ?? []).map((r) => (
+              {livesSort.sortedRows.map((r) => (
                 <tr key={r.brand} className="hover:bg-slate-50 transition-colors">
                   <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
                     {BRAND_LABELS[r.brand] ?? r.brand}
@@ -460,7 +620,7 @@ export default function OperacoesPage() {
                   </td>
                 </tr>
               ))}
-              {(data?.lives ?? []).length === 0 && !loading && (
+              {livesSort.sortedRows.length === 0 && !loading && (
                 <tr>
                   <td
                     colSpan={7}

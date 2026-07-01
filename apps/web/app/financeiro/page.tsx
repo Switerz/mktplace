@@ -1,20 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { Marketplace } from "@/lib/mock-data";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchFinanceiro,
   type FinanceiroKpis,
   type FinanceiroBrandRow,
 } from "@/lib/api-client";
+import {
+  DEFAULT_MARKETPLACE_SELECTION,
+  isMarketplaceSelected,
+  type MarketplaceSelection,
+} from "@/lib/marketplace-filter";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import PeriodSelector from "@/components/PeriodSelector";
 import AppNav from "@/components/AppNav";
 import { fmtBrl } from "@/lib/formatters";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
-
-type Filter = Marketplace | "all";
+import { useSortableTable } from "@/lib/use-sortable-table";
+import SortableHeader from "@/components/SortableHeader";
 
 function fmtPct(v: number | null, decimals = 1): string {
   if (v == null) return "—";
@@ -75,7 +79,7 @@ function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | nul
 }
 
 export default function FinanceiroPage() {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
   const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
   const [kpis, setKpis] = useState<FinanceiroKpis | null>(null);
   const [brands, setBrands] = useState<FinanceiroBrandRow[]>([]);
@@ -100,13 +104,72 @@ export default function FinanceiroPage() {
       });
   }, [filter, period, retryKey]);
 
-  const showTiktok = filter !== "ml" && filter !== "shopee";
-  const showMl = filter !== "tiktok" && filter !== "shopee";
-  const showShopee = filter !== "tiktok" && filter !== "ml";
+  const showTiktok = isMarketplaceSelected(filter, "tiktok");
+  const showMl = isMarketplaceSelected(filter, "ml");
+  const showShopee = isMarketplaceSelected(filter, "shopee");
 
   const tkBrands = brands.filter((b) => b.tiktok_gmv != null);
   const mlBrands = brands.filter((b) => b.ml_ad_spend != null);
   const shBrands = brands.filter((b) => b.shopee_gmv != null);
+
+  const tkColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, fees: "numeric" as const,
+    fee_pct: "numeric" as const, settlement_pct: "numeric" as const, settlement: "numeric" as const,
+  }), []);
+  const tkGetValue = (row: FinanceiroBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.tiktok_gmv;
+      case "fees": return row.tiktok_fees;
+      case "fee_pct": return row.tiktok_avg_fee_pct;
+      case "settlement_pct": return row.tiktok_avg_settlement_pct;
+      case "settlement": return row.tiktok_settlement;
+      default: return null;
+    }
+  };
+  const tkSort = useSortableTable(tkBrands, tkGetValue, tkColumnTypes);
+
+  const mlColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, ad_spend: "numeric" as const,
+    ad_revenue: "numeric" as const, roas: "numeric" as const, acos: "numeric" as const,
+    frete: "numeric" as const, cost_pct: "numeric" as const,
+  }), []);
+  const mlGetValue = (row: FinanceiroBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.ml_gmv;
+      case "ad_spend": return row.ml_ad_spend;
+      case "ad_revenue": return row.ml_ad_revenue;
+      case "roas": return row.ml_roas;
+      case "acos": return row.ml_acos_pct;
+      case "frete": return row.ml_seller_shipping_cost;
+      case "cost_pct": return (row.ml_ad_spend != null && row.ml_gmv != null && row.ml_gmv > 0)
+        ? (row.ml_ad_spend / row.ml_gmv) * 100 + (row.ml_shipping_pct_of_gmv ?? 0)
+        : null;
+      default: return null;
+    }
+  };
+  const mlSort = useSortableTable(mlBrands, mlGetValue, mlColumnTypes);
+
+  const shColumnTypes = useMemo(() => ({
+    brand: "text" as const, gmv: "numeric" as const, fees: "numeric" as const,
+    fee_pct: "numeric" as const, settlement: "numeric" as const, ad_spend: "numeric" as const,
+    roas: "numeric" as const, frete: "numeric" as const,
+  }), []);
+  const shGetValue = (row: FinanceiroBrandRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "gmv": return row.shopee_gmv ?? null;
+      case "fees": return row.shopee_fees ?? null;
+      case "fee_pct": return row.shopee_avg_fee_pct ?? null;
+      case "settlement": return row.shopee_settlement ?? null;
+      case "ad_spend": return row.shopee_ad_spend ?? null;
+      case "roas": return row.shopee_roas ?? null;
+      case "frete": return row.shopee_shipping_cost ?? null;
+      default: return null;
+    }
+  };
+  const shSort = useSortableTable(shBrands, shGetValue, shColumnTypes);
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -225,12 +288,12 @@ export default function FinanceiroPage() {
               <table className="w-full text-sm" aria-label="Repasses TikTok por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas e encargos %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Repasse %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Repasse Recebido</th>
+                    <SortableHeader label="Marca" column="brand" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Taxas (R$)" column="fees" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Taxas e encargos %" column="fee_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Repasse %" column="settlement_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                    <SortableHeader label="Repasse Recebido" column="settlement" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -241,7 +304,7 @@ export default function FinanceiroPage() {
                       </td>
                     </tr>
                   )}
-                  {tkBrands.map((b) => (
+                  {tkSort.sortedRows.map((b) => (
                     <tr key={b.brand} className="hover:bg-slate-50/70 transition-colors">
                       <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">{b.label}</td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
@@ -287,14 +350,14 @@ export default function FinanceiroPage() {
               <table className="w-full text-sm" aria-label="Publicidade e custos ML por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV ML</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Ad Spend</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Receita Ads</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ROAS</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ACOS</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Frete</th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Ads + Frete / GMV</th>
+                    <SortableHeader label="Marca" column="brand" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV ML" column="gmv" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Ad Spend" column="ad_spend" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Receita Ads" column="ad_revenue" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="ROAS" column="roas" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="ACOS" column="acos" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Frete" column="frete" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                    <SortableHeader label="Ads + Frete / GMV" column="cost_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -305,7 +368,7 @@ export default function FinanceiroPage() {
                       </td>
                     </tr>
                   )}
-                  {mlBrands.map((b) => {
+                  {mlSort.sortedRows.map((b) => {
                     const adPct = b.ml_ad_spend != null && b.ml_gmv != null && b.ml_gmv > 0
                       ? b.ml_ad_spend / b.ml_gmv * 100
                       : null;
@@ -371,14 +434,14 @@ export default function FinanceiroPage() {
               <table className="w-full text-sm" aria-label="Taxas e custos Shopee por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas e encargos %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Total Global (pedidos)</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Ad Spend</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ROAS</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Frete</th>
+                    <SortableHeader label="Marca" column="brand" sort={shSort.sort} onSort={shSort.toggleSort} align="left" />
+                    <SortableHeader label="GMV" column="gmv" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Taxas (R$)" column="fees" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Taxas e encargos %" column="fee_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Total Global (pedidos)" column="settlement" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Ad Spend" column="ad_spend" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="ROAS" column="roas" sort={shSort.sort} onSort={shSort.toggleSort} />
+                    <SortableHeader label="Frete" column="frete" sort={shSort.sort} onSort={shSort.toggleSort} />
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -389,7 +452,7 @@ export default function FinanceiroPage() {
                       </td>
                     </tr>
                   )}
-                  {shBrands.map((b) => (
+                  {shSort.sortedRows.map((b) => (
                     <tr key={b.brand} className="hover:bg-orange-50/40 transition-colors">
                       <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">{b.label}</td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.shopee_gmv!)}</td>
