@@ -166,15 +166,15 @@ export default function FinanceiroPage() {
         >
           {showTiktok && (
             <KpiCard
-              label="Receita Liquida TikTok"
+              label="Repasse recebido TikTok"
               value={kpis?.tiktok_settlement != null ? fmtBrl(kpis.tiktok_settlement) : "—"}
-              subvalue={kpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(kpis.tiktok_avg_settlement_pct)} do GMV` : undefined}
+              subvalue={kpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(kpis.tiktok_avg_settlement_pct)} do GMV · competencias podem divergir` : undefined}
               accent="bg-violet-600"
             />
           )}
           {showTiktok && (
             <KpiCard
-              label="Taxa Media TikTok"
+              label="Taxas e encargos / GMV"
               value={kpis?.tiktok_avg_fee_pct != null ? fmtPct(kpis.tiktok_avg_fee_pct) : "—"}
               subvalue={kpis?.tiktok_fees != null ? fmtBrl(kpis.tiktok_fees) + " total" : undefined}
               accent="bg-violet-400"
@@ -190,23 +190,15 @@ export default function FinanceiroPage() {
           )}
           {showMl && (
             <KpiCard
-              label="Custo Total ML"
+              label="Ads + Frete / GMV"
               value={kpis?.ml_total_cost_pct != null ? fmtPct(kpis.ml_total_cost_pct) : "—"}
-              subvalue="Ads + Frete sobre GMV"
+              subvalue="Nao inclui comissao do Mercado Livre"
               accent="bg-amber-500"
             />
           )}
           {showShopee && (
             <KpiCard
-              label="Receita Liquida Shopee"
-              value={kpis?.shopee_settlement != null ? fmtBrl(kpis.shopee_settlement) : "—"}
-              subvalue={kpis?.shopee_avg_settlement_pct != null ? `${fmtPct(kpis.shopee_avg_settlement_pct)} do GMV` : undefined}
-              accent="bg-orange-500"
-            />
-          )}
-          {showShopee && (
-            <KpiCard
-              label="Taxa Media Shopee"
+              label="Taxas e encargos Shopee"
               value={kpis?.shopee_avg_fee_pct != null ? fmtPct(kpis.shopee_avg_fee_pct) : "—"}
               subvalue={kpis?.shopee_fees != null ? fmtBrl(kpis.shopee_fees) + " total" : undefined}
               accent="bg-orange-400"
@@ -222,23 +214,23 @@ export default function FinanceiroPage() {
           )}
         </div>
 
-        {/* Tabela: Liquidacao TikTok */}
+        {/* Tabela: Repasses TikTok */}
         {showTiktok && (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-violet-50">
-              <h2 className="text-sm font-semibold text-slate-700">Liquidacao TikTok</h2>
-              <p className="text-xs text-slate-500 mt-0.5">GMV bruto, taxas e receita liquida por marca</p>
+              <h2 className="text-sm font-semibold text-slate-700">Repasses TikTok</h2>
+              <p className="text-xs text-slate-500 mt-0.5">GMV bruto, taxas e encargos e repasse recebido por marca</p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm" aria-label="Liquidacao TikTok por marca">
+              <table className="w-full text-sm" aria-label="Repasses TikTok por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
                     <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxa %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Liq. %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Receita Liquida</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas e encargos %</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Repasse %</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Repasse Recebido</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -267,7 +259,7 @@ export default function FinanceiroPage() {
               </table>
             </div>
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxa %:</span>
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
                 <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> abaixo de 20%
               </span>
@@ -278,7 +270,7 @@ export default function FinanceiroPage() {
                 <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
               </span>
               <span className="ml-auto text-[10px] text-slate-400">
-                Taxas incluem comissao de afiliados · Liq.% = Receita Liquida / GMV
+                Taxas e encargos / GMV · Repasse % = Repasse Recebido / GMV · repasses e GMV podem ter competencias diferentes (o repasse pode incluir pedidos de outros meses)
               </span>
             </div>
           </div>
@@ -302,7 +294,7 @@ export default function FinanceiroPage() {
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ROAS</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ACOS</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Frete</th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Custo Total</th>
+                    <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Ads + Frete / GMV</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
@@ -356,35 +348,34 @@ export default function FinanceiroPage() {
                 <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> abaixo de 5x
               </span>
               <span className="text-slate-200 select-none mx-1">|</span>
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Custo Total:</span>
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Ads + Frete / GMV:</span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
                 <span className="inline-block w-2 h-2 rounded-sm bg-cyan-400" /> Ads
               </span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
                 <span className="inline-block w-2 h-2 rounded-sm bg-amber-300" /> Frete
               </span>
-              <span className="ml-auto text-[10px] text-slate-400">Custo Total = Ads + Frete sobre GMV · comissao ML nao disponivel na fonte · Receita Ads = GMV atribuido a anuncios</span>
+              <span className="ml-auto text-[10px] text-slate-400">Ads + Frete / GMV · nao inclui comissao do Mercado Livre (sem granularidade mensal/diaria na fonte atual) · Receita Ads = GMV atribuido a anuncios</span>
             </div>
           </div>
         )}
 
-        {/* Tabela: Liquidacao e Custos Shopee */}
+        {/* Tabela: Taxas e Custos Shopee */}
         {showShopee && (
           <div className="bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-orange-50">
-              <h2 className="text-sm font-semibold text-slate-700">Liquidacao e Custos Shopee</h2>
-              <p className="text-xs text-slate-500 mt-0.5">GMV, taxas, receita liquida, anuncios e frete por marca</p>
+              <h2 className="text-sm font-semibold text-slate-700">Taxas e Custos Shopee</h2>
+              <p className="text-xs text-slate-500 mt-0.5">GMV, taxas e encargos, total global dos pedidos, anuncios e frete por marca</p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm" aria-label="Liquidacao e custos Shopee por marca">
+              <table className="w-full text-sm" aria-label="Taxas e custos Shopee por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
                     <th className="px-6 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider">Marca</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">GMV</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas (R$)</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxa %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Liq. %</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Receita Liq.</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Taxas e encargos %</th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Total Global (pedidos)</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Ad Spend</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">ROAS</th>
                     <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Frete</th>
@@ -393,7 +384,7 @@ export default function FinanceiroPage() {
                 <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
                   {shBrands.length === 0 && !loading && (
                     <tr>
-                      <td colSpan={9} className="px-6 py-8 text-center text-slate-400 text-sm">
+                      <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
                         Sem dados Shopee para o periodo selecionado.
                       </td>
                     </tr>
@@ -407,9 +398,6 @@ export default function FinanceiroPage() {
                       </td>
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.shopee_avg_fee_pct ?? null)}`}>
                         {fmtPct(b.shopee_avg_fee_pct ?? null)}
-                      </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
-                        {fmtPct(b.shopee_avg_settlement_pct ?? null)}
                       </td>
                       <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">
                         {b.shopee_settlement != null ? fmtBrl(b.shopee_settlement) : "—"}
@@ -429,7 +417,7 @@ export default function FinanceiroPage() {
               </table>
             </div>
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxa %:</span>
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
                 <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> abaixo de 20%
               </span>
@@ -440,7 +428,7 @@ export default function FinanceiroPage() {
                 <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
               </span>
               <span className="ml-auto text-[10px] text-slate-400">
-                Taxa % e Liq.% sao independentes sobre o GMV · podem somar mais de 100% (fees positivos na fonte Shopee)
+                Taxas e encargos = comissao liquida + taxa de servico liquida, sobre o GMV · o indicador de liquidacao foi removido: o campo antigo (Total Global do pedido) nao representa repasse liquido
               </span>
             </div>
           </div>
