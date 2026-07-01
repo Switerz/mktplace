@@ -12,7 +12,7 @@ import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
 
 type Tab = "ml" | "tiktok" | "shopee";
-type BrandML = "" | "barbours" | "kokeshi" | "lescent";
+type BrandML = "" | "barbours" | "kokeshi" | "lescent" | "rituaria";
 type BrandTK = "" | "apice" | "barbours" | "kokeshi" | "lescent" | "rituaria";
 type BrandSH = "" | "apice" | "barbours" | "kokeshi" | "lescent" | "rituaria";
 type ParetoBucket = "" | "A_top50" | "B_next30" | "C_next15" | "D_tail";
@@ -303,6 +303,7 @@ export default function ProdutosPage() {
                 <option value="barbours">BARBOURS</option>
                 <option value="kokeshi">KOKESHI</option>
                 <option value="lescent">LESCENT</option>
+                <option value="rituaria">RITUARIA</option>
               </select>
               <select className={filterSelect} value={mlPareto} onChange={(e) => setMlPareto(e.target.value as ParetoBucket)}>
                 <option value="">Todos os buckets</option>

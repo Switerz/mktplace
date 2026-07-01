@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.database import datamart_engine
 BRANDS_IN_SCOPE = ("apice", "barbours", "kokeshi", "lescent", "rituaria")
-ML_BRANDS = ("barbours", "kokeshi", "lescent")
+ML_BRANDS = ("barbours", "kokeshi", "lescent", "rituaria")  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
 SHOPEE_BRANDS = BRANDS_IN_SCOPE
 SHOPEE_MARKETPLACE_ID = 3
 

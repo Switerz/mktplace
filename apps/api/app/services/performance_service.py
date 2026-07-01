@@ -1025,3 +1025,299 @@ def get_pedidos(db: Session, days_back: int = 30) -> dict:
         "daily": [v for _, v in sorted(daily_map.items())],
         "by_brand": brands,
     }
+
+
+# ---------------------------------------------------------------------------
+# Produtos — leitura exclusiva do Neon (marts.*)
+# ---------------------------------------------------------------------------
+
+_ML_BRANDS    = {"barbours", "kokeshi", "lescent", "rituaria"}  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
+_TK_BRANDS    = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
+_SH_BRANDS    = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
+_PARETO_ORDER = ("A_top50", "B_next30", "C_next15", "D_tail")
+_PARETO_META  = {
+    "A_top50":  ("A", "Top 50% GMV"),
+    "B_next30": ("B", "Next 30%"),
+    "C_next15": ("C", "Next 15%"),
+    "D_tail":   ("D", "Cauda"),
+}
+
+
+def get_produtos_shopee(
+    db: Session,
+    brand: str | None,
+    year: int,
+    month: int,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict:
+    ref_month = date(year, month, 1)
+    filters = ["ref_month = :ref_month", "gmv > 0"]
+    params: dict = {"ref_month": ref_month, "limit": limit, "offset": offset}
+
+    if brand and brand in _SH_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+
+    where = " AND ".join(filters)
+
+    total_row = db.execute(
+        text(f"SELECT COUNT(*) AS n FROM marts.fact_shopee_product_monthly WHERE {where}"),
+        params,
+    ).fetchone()
+    total = int(total_row.n) if total_row else 0
+
+    rows = db.execute(
+        text(f"""
+            SELECT brand, sku_ref, product_name, variation_name,
+                   gmv, units_sold, completed_orders, canceled_orders,
+                   cancel_rate_pct, unique_buyers, avg_price
+            FROM marts.fact_shopee_product_monthly
+            WHERE {where}
+            ORDER BY gmv DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        params,
+    ).fetchall()
+
+    items = [
+        {
+            "brand":           r.brand,
+            "sku_ref":         r.sku_ref,
+            "product_name":    r.product_name,
+            "variation_name":  r.variation_name,
+            "gmv":             _f(r.gmv),
+            "units_sold":      int(_f(r.units_sold)),
+            "orders":          int(_f(r.completed_orders)),
+            "canceled_orders": int(_f(r.canceled_orders)),
+            "cancel_rate_pct": round(_f(r.cancel_rate_pct), 2) if r.cancel_rate_pct is not None else None,
+            "unique_buyers":   int(_f(r.unique_buyers)) if r.unique_buyers is not None else None,
+            "avg_price":       round(_f(r.avg_price), 2) if r.avg_price is not None else None,
+        }
+        for r in rows
+    ]
+
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "total":     total,
+        "limit":     limit,
+        "offset":    offset,
+        "items":     items,
+    }
+
+
+def get_produtos_ml(
+    db: Session,
+    brand: str | None,
+    pareto_bucket: str | None,
+    action_signal: str | None,
+    product_status: str | None,
+    revenue_velocity: str | None,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict:
+    brands_tuple = tuple(sorted(_ML_BRANDS))
+    filters = ["brand IN :brands"]
+    params: dict = {"brands": brands_tuple, "limit": limit, "offset": offset}
+
+    if brand and brand in _ML_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+    if pareto_bucket:
+        filters.append("pareto_bucket = :pareto_bucket")
+        params["pareto_bucket"] = pareto_bucket
+    if action_signal:
+        filters.append("action_signal = :action_signal")
+        params["action_signal"] = action_signal
+    if product_status:
+        filters.append("product_status = :product_status")
+        params["product_status"] = product_status
+    if revenue_velocity:
+        filters.append("revenue_velocity = :revenue_velocity")
+        params["revenue_velocity"] = revenue_velocity
+
+    where = " AND ".join(filters)
+
+    total_row = db.execute(
+        text(f"SELECT COUNT(*) AS n FROM marts.fact_ml_produto_ranking WHERE {where}"),
+        params,
+    ).fetchone()
+    total = int(total_row.n) if total_row else 0
+
+    rows = db.execute(
+        text(f"""
+            SELECT brand, item_id, seller_sku, title,
+                   gross_revenue, units_sold, unique_buyers,
+                   CASE WHEN units_sold > 0
+                        THEN gross_revenue / units_sold ELSE NULL END AS avg_price,
+                   cancel_rate_pct, pareto_bucket, revenue_velocity,
+                   ad_roas, ad_acos_pct, ad_spend, ad_efficiency,
+                   action_signal, estimated_margin, revenue_share_pct, product_status
+            FROM marts.fact_ml_produto_ranking
+            WHERE {where}
+            ORDER BY gross_revenue DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        params,
+    ).fetchall()
+
+    items = [
+        {
+            "brand":             r.brand,
+            "item_id":           r.item_id,
+            "seller_sku":        r.seller_sku,
+            "title":             r.title,
+            "gross_revenue":     _f(r.gross_revenue),
+            "units_sold":        int(_f(r.units_sold)),
+            "unique_buyers":     int(_f(r.unique_buyers)) if r.unique_buyers is not None else None,
+            "avg_price":         round(_f(r.avg_price), 2) if r.avg_price is not None else None,
+            "cancel_rate_pct":   round(_f(r.cancel_rate_pct), 2) if r.cancel_rate_pct is not None else None,
+            "pareto_bucket":     r.pareto_bucket,
+            "revenue_velocity":  r.revenue_velocity,
+            "ad_roas":           round(_f(r.ad_roas), 2) if r.ad_roas is not None else None,
+            "ad_acos_pct":       round(_f(r.ad_acos_pct), 2) if r.ad_acos_pct is not None else None,
+            "ad_spend":          _f(r.ad_spend) if r.ad_spend is not None else None,
+            "ad_efficiency":     r.ad_efficiency,
+            "action_signal":     r.action_signal,
+            "estimated_margin":  _f(r.estimated_margin) if r.estimated_margin is not None else None,
+            "revenue_share_pct": round(_f(r.revenue_share_pct), 3) if r.revenue_share_pct is not None else None,
+            "product_status":    r.product_status,
+        }
+        for r in rows
+    ]
+
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+def get_produtos_ml_summary(db: Session, brand: str | None) -> dict:
+    brands_tuple = tuple(sorted(_ML_BRANDS))
+    filters = ["brand IN :brands", "pareto_bucket IS NOT NULL"]
+    params: dict = {"brands": brands_tuple}
+
+    if brand and brand in _ML_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+
+    where = " AND ".join(filters)
+
+    rows = db.execute(
+        text(f"""
+            SELECT pareto_bucket,
+                   COUNT(*)                        AS count,
+                   COALESCE(SUM(gross_revenue), 0) AS gmv
+            FROM marts.fact_ml_produto_ranking
+            WHERE {where}
+            GROUP BY pareto_bucket
+        """),
+        params,
+    ).fetchall()
+
+    total_gmv   = sum(_f(r.gmv) for r in rows)
+    total_count = sum(int(_f(r.count)) for r in rows)
+    row_map     = {r.pareto_bucket: r for r in rows}
+
+    buckets = []
+    for bk in _PARETO_ORDER:
+        label, desc = _PARETO_META[bk]
+        r   = row_map.get(bk)
+        gmv = _f(r.gmv) if r else 0.0
+        cnt = int(_f(r.count)) if r else 0
+        buckets.append({
+            "bucket":      bk,
+            "label":       label,
+            "description": desc,
+            "gmv":         gmv,
+            "count":       cnt,
+            "gmv_pct":     round(gmv / total_gmv * 100, 1) if total_gmv > 0 else 0.0,
+        })
+
+    return {
+        "total_gmv":   total_gmv,
+        "total_count": total_count,
+        "brand":       brand,
+        "buckets":     buckets,
+    }
+
+
+def get_produtos_tiktok(
+    db: Session,
+    brand: str | None,
+    year: int,
+    month: int,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict:
+    start, end = _month_bounds(year, month)
+    brands_tuple = tuple(sorted(_TK_BRANDS))
+    filters = ["brand IN :brands", "date BETWEEN :start AND :end"]
+    params: dict = {"brands": brands_tuple, "start": start, "end": end, "limit": limit, "offset": offset}
+
+    if brand and brand in _TK_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+
+    where = " AND ".join(filters)
+
+    total_row = db.execute(
+        text(f"SELECT COUNT(DISTINCT product_id) AS n FROM marts.fact_tiktok_product_daily WHERE {where}"),
+        params,
+    ).fetchone()
+    total = int(total_row.n) if total_row else 0
+
+    rows = db.execute(
+        text(f"""
+            SELECT brand, product_id, product_name,
+                   SUM(gmv)        AS gmv,
+                   SUM(orders)     AS orders,
+                   SUM(items_sold) AS items_sold,
+                   CASE WHEN SUM(gmv) > 0
+                        THEN SUM(gmv_video) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_video,
+                   CASE WHEN SUM(gmv) > 0
+                        THEN SUM(gmv_live) / SUM(gmv) * 100  ELSE NULL END AS pct_gmv_live,
+                   CASE WHEN SUM(gmv) > 0
+                        THEN SUM(gmv_product_card) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_card,
+                   -- Media ponderada (peso=orders) do problem_rate diario pre-calculado pelo TikTok.
+                   -- Counts (canceled/refunded/returned) sao NULL em alguns periodos; nao sao usados.
+                   CASE WHEN SUM(orders) FILTER (WHERE problem_rate IS NOT NULL) > 0
+                        THEN SUM(problem_rate * orders) FILTER (WHERE problem_rate IS NOT NULL)
+                             / SUM(orders) FILTER (WHERE problem_rate IS NOT NULL)
+                        ELSE NULL END AS problem_rate,
+                   CASE WHEN SUM(total_ratings) > 0
+                        THEN SUM(rating_avg * total_ratings) / SUM(total_ratings)
+                        ELSE NULL END AS rating_avg,
+                   SUM(total_ratings) AS total_ratings
+            FROM marts.fact_tiktok_product_daily
+            WHERE {where}
+            GROUP BY brand, product_id, product_name
+            HAVING SUM(gmv) > 0
+            ORDER BY SUM(gmv) DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        params,
+    ).fetchall()
+
+    items = [
+        {
+            "brand":        r.brand,
+            "product_id":   r.product_id,
+            "product_name": r.product_name,
+            "gmv":          _f(r.gmv),
+            "orders":       int(_f(r.orders)),
+            "items_sold":   int(_f(r.items_sold)),
+            "pct_gmv_video": round(_f(r.pct_gmv_video), 1) if r.pct_gmv_video is not None else None,
+            "pct_gmv_live":  round(_f(r.pct_gmv_live), 1)  if r.pct_gmv_live  is not None else None,
+            "pct_gmv_card":  round(_f(r.pct_gmv_card), 1)  if r.pct_gmv_card  is not None else None,
+            "problem_rate":  round(_f(r.problem_rate), 2)  if r.problem_rate   is not None else None,
+            "rating_avg":    round(_f(r.rating_avg), 1)    if r.rating_avg     is not None else None,
+            "total_ratings": int(_f(r.total_ratings))      if r.total_ratings  is not None else None,
+        }
+        for r in rows
+    ]
+
+    return {
+        "ref_month": f"{year:04d}-{month:02d}",
+        "total":     total,
+        "limit":     limit,
+        "offset":    offset,
+        "items":     items,
+    }

@@ -5,7 +5,11 @@ from pipelines.common.logging import get_logger
 
 logger = get_logger(__name__)
 
-BRANDS_IN_SCOPE = ("barbours", "kokeshi", "lescent")
+BRANDS_IN_SCOPE = ("barbours", "kokeshi", "lescent", "rituaria")
+# rituaria incluida em 2026-07-01: gold.ml_gestao_diaria tem dados reais desde
+# 2025-12-28 (~R$8M GMV histórico); a exclusão anterior estava desatualizada
+# (ver docs/architecture.md, decisão de 2026-06-16, e docs/backlog.md).
+# apice permanece fora — confirmado sem nenhuma linha em gold.ml_gestao_diaria.
 
 QUERY = """
 SELECT

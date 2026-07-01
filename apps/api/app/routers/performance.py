@@ -18,11 +18,19 @@ router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
 
 MarketplaceParam = Literal["all", "tiktok", "ml", "shopee"]
 
-VALID_ML_BRANDS = {"barbours", "kokeshi", "lescent"}
+VALID_ML_BRANDS = {"barbours", "kokeshi", "lescent", "rituaria"}  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
 VALID_TK_BRANDS = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
 VALID_ML_PARETO = {"A_top50", "B_next30", "C_next15", "D_tail"}
 VALID_ML_STATUS = {"sells+advertised", "sells_organic_only", "ad_spend_no_sales", "inactive"}
 VALID_ML_VELOCITY = {"high", "medium", "low", "zero"}
+VALID_ML_ACTION_SIGNALS = {
+    "ACAO: aumentar investimento (ROAS > 15x)",
+    "ACAO: considerar pausar ads (ROAS < 3x)",
+    "ALERTA: taxa cancelamento alta (> 10%)",
+    "OPORTUNIDADE: produto vende organico, considerar ads",
+    "REVIEW: spend sem vendas no período de orders",
+    "ATENCAO: grande variacao de preco",
+}
 
 
 def _require_db(db: Session) -> Session:
@@ -90,7 +98,7 @@ def produtos_ml_summary(
 ):
     if brand and brand not in VALID_ML_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para ML.")
-    return svc.get_produtos_ml_summary(_require_db(db), brand)
+    return perf_svc.get_produtos_ml_summary(_require_db(db), brand)
 
 
 @router.get("/produtos/ml", response_model=ProdutosMLResponse)
@@ -112,7 +120,9 @@ def produtos_ml(
         raise HTTPException(422, f"product_status '{product_status}' invalido.")
     if revenue_velocity and revenue_velocity not in VALID_ML_VELOCITY:
         raise HTTPException(422, f"revenue_velocity '{revenue_velocity}' invalido.")
-    return svc.get_produtos_ml(_require_db(db), brand, pareto_bucket, action_signal, product_status, revenue_velocity, limit, offset)
+    if action_signal and action_signal not in VALID_ML_ACTION_SIGNALS:
+        raise HTTPException(422, f"action_signal invalido.")
+    return perf_svc.get_produtos_ml(_require_db(db), brand, pareto_bucket, action_signal, product_status, revenue_velocity, limit, offset)
 
 
 @router.get("/produtos/tiktok", response_model=ProdutosTikTokResponse)
@@ -126,7 +136,7 @@ def produtos_tiktok(
     if brand and brand not in VALID_TK_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para TikTok.")
     year, month = _parse_month(ref_month)
-    return svc.get_produtos_tiktok(_require_db(db), brand, year, month, limit, offset)
+    return perf_svc.get_produtos_tiktok(_require_db(db), brand, year, month, limit, offset)
 
 
 @router.get("/produtos/shopee", response_model=ProdutosShopeeResponse)
@@ -141,7 +151,7 @@ def produtos_shopee(
     if brand and brand not in _VALID_SHOPEE:
         raise HTTPException(422, f"Brand '{brand}' inválida.")
     year, month = _parse_month(ref_month)
-    return svc.get_produtos_shopee(_require_db(db), brand, year, month, limit, offset)
+    return perf_svc.get_produtos_shopee(_require_db(db), brand, year, month, limit, offset)
 
 
 @router.get("/canais", response_model=CanaisResponse)
