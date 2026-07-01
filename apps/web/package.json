@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev --port 3000",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --test tests/financeiro-labels.test.mjs"
   },
   "dependencies": {
     "next": "^15.1.0",
