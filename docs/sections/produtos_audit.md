@@ -241,7 +241,7 @@ Não foi possível calcular a similaridade dentro do próprio SQL (Neon não tem
 
 ---
 
-### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01; código corrigido e reconciliado em staging local em 2026-07-02 — dados de produção ainda não substituídos)
+### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01; corrigido no PostgreSQL LOCAL em 2026-07-02 via Gates 1–3 — Neon ainda não corrigido, ver Gate 4)
 
 **Severidade:** Média — GMV/`units_sold`/`completed_orders` não são afetados; `canceled_orders` e `cancel_rate_pct` ficam levemente subestimados para produtos com cancelamentos concentrados.
 
@@ -273,7 +273,26 @@ Script dedicado `pipelines/reconciliation/reconcile_bug8_canceled_only.py` (nunc
 - 100% das linhas novas/alteradas têm `gmv=0` → Pareto matematicamente inalterado (buckets dependem só de linhas com `gmv>0`, nenhuma delas mudou).
 - Tabela real e Neon **não foram tocados** — nenhum `TRUNCATE`/`UPDATE` na produção, nenhuma conexão aberta com Neon.
 
-Backup e staging preservados (não removidos) para inspeção/rollback manual. Swap (Gate 3) ainda não autorizado.
+Backup e staging preservados (não removidos) para inspeção/rollback manual.
+
+**Gate 3 (2026-07-02) — swap aplicado, SOMENTE PostgreSQL local:**
+
+`pipelines/reconciliation/swap_bug8_canceled_only.py` substituiu `marts.fact_shopee_product_monthly` (local) pelo conteúdo da staging do Gate 2, numa única transação (`LOCK` → `TRUNCATE` só da tabela real → `INSERT` com lista explícita de colunas → validação `EXCEPT` nos dois sentidos + agregados → `COMMIT` só se tudo idêntico). Usa os mesmos nomes fixos de backup/staging do Gate 2 (nunca descobertos dinamicamente) e a mesma guarda de host (`localhost`/`127.0.0.1`/`::1`, sem fallback de `LOCAL_PG_URL`, nunca referencia `DATABASE_URL`/`DATAMART_DATABASE_URL`).
+
+**Pré-voo (antes do swap):** tabela real == backup do Gate 2 (`EXCEPT` 0/0 — sem drift) · staging reconferida: 2.471 linhas, GMV R$ 21.174.272,80, 53.599 cancelamentos, 0 duplicatas, 0 nulos.
+
+**Resultado do swap** (tabela real local, pós-`COMMIT`):
+- **2.471 linhas** (era 2.431).
+- **53.599 cancelamentos** (era 53.515) — **+84 recuperados**, exatamente o valor projetado.
+- GMV R$ 21.174.272,80, `units_sold` e `completed_orders`: **inalterados** em todas as 25 combinações marca×mês (diferença zero).
+- Pareto: 0 linhas novas/alteradas com `gmv≠0` → buckets A/B/C/D matematicamente inalterados.
+- Smoke test read-only (`get_produtos_shopee`/`get_produtos_shopee_summary` contra o Postgres local pós-swap, engine própria — nunca `app.database`/Neon): 3 combinações marca×mês testadas, `total` da tabela = `eligible_count` do summary em todas.
+- Backup (`..._backup_bug8_20260702_150840`) e staging (`..._staging_bug8_20260702_150840`) **preservados**, não apagados.
+- **Neon permanece intocado** — nenhuma conexão aberta com Neon em nenhuma fase do Gate 3 (nem preflight, nem swap, nem smoke test).
+
+Testes: `pipelines/tests/test_swap_bug8_canceled_only.py` — preflight bloqueia objeto ausente/drift/staging divergente (linhas, GMV, duplicatas, nulos); `_swap` sempre faz rollback antes de qualquer falha chegar a `COMMIT`; `INSERT` comprovadamente usa lista explícita de colunas (nunca `SELECT *`); guardas estruturais confirmam ausência de leitura de `DATABASE_URL`/`DATAMART_DATABASE_URL` e nomes de backup/staging como constantes fixas (nunca descoberta dinâmica via `LIKE`/`ORDER BY ... DESC LIMIT`).
+
+**Pendência**: Neon ainda reflete os dados antigos (sem os 84 cancelamentos recuperados) — ver Gate 4 (planejamento) para trazer a correção ao Neon, com backup/staging/reconciliação Neon antes de qualquer swap lá.
 
 ---
 
@@ -426,6 +445,7 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 | C16 | `apps/api/tests/test_performance_service_produtos.py`, `apps/api/tests/test_shopee_sku_consolidation.py` | Fase 1 do roadmap (fechamento de Produtos): último comentário remanescente que ainda descrevia a chave Shopee com 5 campos (incluindo `variation_name`) corrigido para os 4 campos reais; `test_cardinalidade_do_join_por_marca_e_mes` passa a checar também soma do GMV dos buckets = GMV elegível e "maior produto sempre no bucket A", por marca×mês, contra o Neon real. Nenhuma mudança de código de produção — apenas testes/docs | 2026-07-02 |
 | C17 | `apps/api/etl/load_shopee_products.py`, `apps/api/etl/tests/test_load_shopee_products_aggregate.py` | Fase 2 (Bug 8), Gate 1: `_aggregate` troca `agg_completed.merge(agg_canceled, how="left")` por `how="outer"` com `fillna` — grupos só-cancelados deixam de ser descartados. `unique_buyers` desses grupos fica `0` por decisão explícita. Nenhum dado em produção alterado por este commit — só o código do ETL, que só tem efeito quando reexecutado | 2026-07-02 |
 | C18 | `pipelines/reconciliation/reconcile_bug8_canceled_only.py` (novo), `pipelines/tests/test_reconcile_bug8_canceled_only.py` (novo) | Fase 2 (Bug 8), Gate 2: script de reconciliação SOMENTE PostgreSQL local (nunca referencia `DATABASE_URL`/`DATAMART_DATABASE_URL`; exige `LOCAL_PG_URL` explícito, sem fallback, e recusa qualquer host fora de `localhost`/`127.0.0.1`/`::1`). Criou backup + staging locais e reconciliou as 25 combinações marca×mês: `canceled_orders` +84, linhas do mart +40, GMV/units/completed com diferença zero, sem duplicatas/nulos, Pareto matematicamente inalterado. Tabela real e Neon não foram tocados. Swap (Gate 3) não executado | 2026-07-02 |
+| C19 | `pipelines/reconciliation/swap_bug8_canceled_only.py` (novo), `pipelines/tests/test_swap_bug8_canceled_only.py` (novo) | Fase 2 (Bug 8), Gate 3: swap transacional da tabela real LOCAL a partir da staging do Gate 2 (`LOCK`+`TRUNCATE`+`INSERT` com colunas explícitas+`EXCEPT` bidirecional+agregados, `COMMIT` só se idêntico). Tabela real local passa a ter 2.471 linhas e 53.599 cancelamentos (+84). GMV/units/completed inalterados, Pareto inalterado. Backup/staging preservados. Neon não tocado — permanece com os dados antigos, sem os 84 cancelamentos recuperados, até o Gate 4 | 2026-07-02 |
 
 ---
 
