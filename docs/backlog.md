@@ -396,3 +396,63 @@ Diagnóstico e regularização da alimentação do Neon (`fact_marketplace_daily
 - Kokeshi foi adicionada ao backfill local e deve passar pela mesma reconciliação das demais marcas.
 - API oficial Shopee continua como evolução futura; o MVP usa exports manuais.
 
+---
+
+## Roadmap de fases controladas (2026-07-02)
+
+Execução dividida em fases isoladas para não misturar UI, ETL, banco e integrações financeiras na mesma entrega. Cada fase abaixo só é executada mediante autorização explícita e nunca inclui commit/push/deploy/escrita em banco por conta própria.
+
+### Fase 1 — Fechar Produtos ✅ CONCLUÍDA (nesta sessão, sem commit)
+
+**Período**: 2026-07-02
+
+A maior parte do escopo já havia sido implementada e commitada em `062880b` (chave estrita Shopee `(ref_month, brand, sku_ref_key, product_name)`, estados assíncronos por canal, testes de reconciliação). Esta sessão fechou as pendências residuais:
+
+- [x] Corrigido o único comentário remanescente que ainda descrevia a chave Shopee com 5 campos (`apps/api/tests/test_performance_service_produtos.py`)
+- [x] `test_cardinalidade_do_join_por_marca_e_mes` (`test_shopee_sku_consolidation.py`) passou a checar também: soma do GMV dos buckets = GMV elegível, e "maior produto sempre no bucket A" — por marca×mês, contra o Neon real
+- [x] Confirmado por leitura de código: `variation_name` nunca entra em `JOIN ... USING`, nunca elimina linhas
+- [x] Estados assíncronos (loading/vazio/offline/troca de filtro/resposta obsoleta) revisados em `async-channel-state.ts` + `ProductTableShell.tsx` — já corretos, sem necessidade de mudança
+- [x] `pytest` (testes de Produtos), `npm test`, `npx tsc --noEmit`, `npm run build`, `compileall`, `git diff --check` — todos passando
+- [x] QA visual via Playwright (1280/768/375px, 3 marketplaces) — ver resultado na seção de auditoria
+- **Sem escrita em banco, sem commit, sem push** — apenas 2 arquivos de teste + esta documentação alterados
+
+Ver `docs/sections/produtos_audit.md` (entrada C16) para o detalhamento técnico.
+
+### Fase 2 — Bug 8 Shopee (cancelamentos subcontados) — 📋 PLANEJADA, NÃO EXECUTADA
+
+**Bug**: `apps/api/etl/load_shopee_products.py` (`_aggregate`) usa `left` merge a partir de pedidos completados — grupos com *somente* pedidos cancelados são descartados, subestimando `canceled_orders`/`cancel_rate_pct` em ~84 pedidos (19 de 25 combinações marca×mês, ver Bug 8 em `produtos_audit.md`). GMV/units/completed não são afetados.
+
+**Plano** (não executar sem autorização):
+1. Trocar `how="left"` por `how="outer"` no merge de `_aggregate()`, com `fillna(0)` em `gmv`/`units_sold`/`completed_orders`.
+2. Criar teste de regressão no ETL que reproduza um grupo só-cancelado e confirme que ele não é mais descartado.
+3. Backup timestamped local + Neon (mesmo padrão do Bug 3/5 — `pipelines/reconciliation/fix_shopee_product_dates.py`).
+4. Reprocessar os 85 XLSX em staging (nunca direto na tabela de produção).
+5. Reconciliar os ~84 cancelamentos contra os XLSX originais antes de qualquer substituição.
+6. Só substituir dados em produção após aprovação explícita, com validação cruzada documentada.
+
+**Próximo prompt sugerido**: *"Execute a Fase 2 (Bug 8 Shopee) em modo planejamento: corrija o merge do ETL e crie os testes de regressão, mas não reprocesse nem substitua dados em produção sem nova autorização explícita."*
+
+### Fase 3 — Operação e frescor — 📋 PLANEJADA, NÃO EXECUTADA
+
+Agendamento automático (Windows Task Scheduler, comandos já preparados em `docs/runbook_sync_produtos.md`), lock contra execução concorrente (`scripts/run_with_lock.ps1` já existe, falta ativar), auditoria de cargas via `audit.source_sync_run`, alertas de atraso/falha/divergência, runbook operacional.
+
+**Próximo prompt sugerido**: *"Execute a Fase 3: ative o agendamento (Task Scheduler) e o lock de concorrência para sync_produtos.py e daily_performance.py, e documente o runbook de alertas — sem alterar lógica de ETL."*
+
+### Fase 4 — Financeiro — 📋 PLANEJADA, NÃO EXECUTADA
+
+Relatório mensal de faturamento ML, comissão ML com competência temporal (`total_fees` NULL para ML no mart hoje), relatório real de renda/repasse Shopee, reconciliação de statements TikTok com pedidos. Nenhuma escrita no Data Mart permitida.
+
+**Próximo prompt sugerido**: *"Execute a Fase 4: planeje e implemente o relatório financeiro (faturamento ML, comissão ML por competência, renda Shopee, reconciliação TikTok), sem escrever no Data Mart."*
+
+### Fase 5 — Seções legadas — 📋 PLANEJADA, NÃO EXECUTADA
+
+Auditoria e refatoração de Tempo Real, Brand Detail, Inteligência, Operações — todas ainda dependentes de `gold_service.py`/RDS.
+
+**Próximo prompt sugerido**: *"Execute a Fase 5: audite Tempo Real, Brand Detail, Inteligência e Operações nos mesmos moldes da auditoria de Produtos, sem migrar dados ainda."*
+
+### Fase 6 — Release estável — 📋 PLANEJADA, NÃO EXECUTADA
+
+Smoke test de todas as abas, filtros, períodos, ordenação, paginação, estados de loading/vazio/erro, frescor de dados, reconciliação com fontes, checklist de release.
+
+**Próximo prompt sugerido**: *"Execute a Fase 6: rode o smoke test completo de todas as abas e monte o checklist de release, sem fazer deploy."*
+
