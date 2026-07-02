@@ -189,7 +189,17 @@ def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    result = agg_completed.merge(agg_canceled, on=grp_cols, how="left")
+    # outer (nao left): um grupo com SOMENTE pedidos "Cancelado" (zero
+    # "Concluido") nao existe em agg_completed e seria descartado inteiro
+    # pelo left merge, subestimando canceled_orders/cancel_rate_pct (Bug 8,
+    # ver docs/sections/produtos_audit.md). gmv/units_sold ficam 0 e
+    # unique_buyers fica 0 para esses grupos — nunique() e' calculado so'
+    # sobre compradores de pedidos concluidos, nunca sobre cancelados.
+    result = agg_completed.merge(agg_canceled, on=grp_cols, how="outer")
+    result["gmv"] = result["gmv"].fillna(0.0)
+    result["units_sold"] = result["units_sold"].fillna(0).astype(int)
+    result["completed_orders"] = result["completed_orders"].fillna(0).astype(int)
+    result["unique_buyers"] = result["unique_buyers"].fillna(0).astype(int)
     result["canceled_orders"] = result["canceled_orders"].fillna(0).astype(int)
 
     total_orders = result["completed_orders"] + result["canceled_orders"]
