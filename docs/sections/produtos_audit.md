@@ -241,7 +241,7 @@ Não foi possível calcular a similaridade dentro do próprio SQL (Neon não tem
 
 ---
 
-### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01, NÃO CORRIGIDO — fora do escopo aprovado desta sessão)
+### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01; código corrigido e reconciliado em staging local em 2026-07-02 — dados de produção ainda não substituídos)
 
 **Severidade:** Média — GMV/`units_sold`/`completed_orders` não são afetados; `canceled_orders` e `cancel_rate_pct` ficam levemente subestimados para produtos com cancelamentos concentrados.
 
@@ -255,7 +255,25 @@ result = agg_completed.merge(agg_canceled, on=grp_cols, how="left")
 ```
 O merge é `left` a partir de `agg_completed` — qualquer grupo `(brand, ref_month, sku_ref, product_name, variation_name)` que tenha **somente** pedidos cancelados (zero "Concluído" naquele grupo) nunca aparece em `agg_completed`, então é descartado inteiro pelo `left` merge: seus pedidos cancelados nunca chegam a `fact_shopee_product_monthly`. Como esses grupos também não têm GMV (só pedidos cancelados), a perda não afeta receita — mas o pedido cancelado em si desaparece da contagem.
 
-**Não corrigido nesta sessão** por instrução explícita ("não altere ETL, banco ou dados"). Recomendação futura: trocar para `outer` merge (ou `agg_completed.merge(agg_canceled, on=grp_cols, how="outer")` com `fillna(0)` em `gmv`/`units_sold`/`completed_orders`), reprocessar via `pipelines/reconciliation/` seguindo o mesmo padrão transacional do Bug 3/5 (backup + staging + validação cruzada), e validar contra os XLSX antes de substituir em produção.
+**Não corrigido na sessão de 2026-07-01** por instrução explícita ("não altere ETL, banco ou dados"). Recomendação registrada então: trocar para `outer` merge, reprocessar via `pipelines/reconciliation/` seguindo o mesmo padrão transacional do Bug 3/5, e validar contra os XLSX antes de substituir em produção.
+
+**Gate 1 (2026-07-02) — código corrigido:** `apps/api/etl/load_shopee_products.py::_aggregate` trocou `how="left"` por `how="outer"`, com `fillna` em `gmv`/`units_sold`/`completed_orders`/`unique_buyers`/`canceled_orders`. Decisão explícita: `unique_buyers` de um grupo só-cancelado fica `0` (`nunique()` continua contando apenas compradores de pedidos concluídos). 4 testes novos em `apps/api/etl/tests/test_load_shopee_products_aggregate.py`. Commit `7bd0981`.
+
+**Gate 2 (2026-07-02) — reconciliado em staging, SOMENTE PostgreSQL local, produção intocada:**
+
+Script dedicado `pipelines/reconciliation/reconcile_bug8_canceled_only.py` (nunca referencia `DATABASE_URL`/`DATAMART_DATABASE_URL` — estruturalmente incapaz de conectar a Neon/RDS; exige `LOCAL_PG_URL` explícito e recusa qualquer host fora de `localhost`/`127.0.0.1`/`::1`) criou:
+- Backup: `marts.fact_shopee_product_monthly_backup_bug8_20260702_150840` (2.431 linhas, cópia exata da tabela real).
+- Staging: `marts.fact_shopee_product_monthly_staging_bug8_20260702_150840` (2.471 linhas, reprocessada dos 85 XLSX com o ETL corrigido).
+
+**Resultado da reconciliação (25 combinações marca×mês):**
+- `canceled_orders`: 53.515 → 53.599 (**+84**, exatamente o valor estimado na investigação original).
+- Linhas do mart (grão real, pós soma de `variation_name` do Bug 5): **+40** — as 12 unidades de diferença vs. os 52 grupos identificados na granularidade fina (antes da soma de variação) se explicam por colisões com o fix do Bug 5 (ex.: `lescent` — a variação só-cancelada foi somada dentro de uma linha já existente em vez de aparecer como linha nova).
+- GMV, `units_sold`, `completed_orders`: **diferença zero em todas as 25 combinações**.
+- Sem chaves duplicadas, sem nulos em campos obrigatórios na staging.
+- 100% das linhas novas/alteradas têm `gmv=0` → Pareto matematicamente inalterado (buckets dependem só de linhas com `gmv>0`, nenhuma delas mudou).
+- Tabela real e Neon **não foram tocados** — nenhum `TRUNCATE`/`UPDATE` na produção, nenhuma conexão aberta com Neon.
+
+Backup e staging preservados (não removidos) para inspeção/rollback manual. Swap (Gate 3) ainda não autorizado.
 
 ---
 
@@ -406,6 +424,8 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 | C14 | `apps/api/app/services/performance_service.py` (`get_produtos_shopee`, `get_produtos_shopee_summary`), `app/schemas/performance.py`, `apps/web/src/lib/api-client.ts` | Removida a consolidação por similaridade textual (C12/Bug 7); chave definitiva vira a UNIQUE constraint real do mart, `(ref_month, brand, sku_ref_key, product_name)` — `variation_name` é atributo descritivo, não parte da chave. SQL puro, sem agregação em Python, nenhuma consolidação automática entre linhas do mart (resolve Bug 9). Corrigido também um bug de `JOIN ... USING` com `variation_name` (coluna nula) que descartava ~metade das linhas — encontrado pelos próprios testes de reconciliação antes de qualquer uso real | 2026-07-02 |
 | C15 | `apps/api/app/services/performance_service.py`, `app/schemas/performance.py`, `docs/sections/produtos_audit.md`, testes | Correção pré-commit: comentários/docstrings/testes que descreviam a chave Shopee como `(ref_month, brand, sku_ref_key, product_name, variation_name)` (5 campos) corrigidos para os 4 campos reais da UNIQUE constraint; adicionado teste de cardinalidade do JOIN por marca×mês | 2026-07-02 |
 | C16 | `apps/api/tests/test_performance_service_produtos.py`, `apps/api/tests/test_shopee_sku_consolidation.py` | Fase 1 do roadmap (fechamento de Produtos): último comentário remanescente que ainda descrevia a chave Shopee com 5 campos (incluindo `variation_name`) corrigido para os 4 campos reais; `test_cardinalidade_do_join_por_marca_e_mes` passa a checar também soma do GMV dos buckets = GMV elegível e "maior produto sempre no bucket A", por marca×mês, contra o Neon real. Nenhuma mudança de código de produção — apenas testes/docs | 2026-07-02 |
+| C17 | `apps/api/etl/load_shopee_products.py`, `apps/api/etl/tests/test_load_shopee_products_aggregate.py` | Fase 2 (Bug 8), Gate 1: `_aggregate` troca `agg_completed.merge(agg_canceled, how="left")` por `how="outer"` com `fillna` — grupos só-cancelados deixam de ser descartados. `unique_buyers` desses grupos fica `0` por decisão explícita. Nenhum dado em produção alterado por este commit — só o código do ETL, que só tem efeito quando reexecutado | 2026-07-02 |
+| C18 | `pipelines/reconciliation/reconcile_bug8_canceled_only.py` (novo), `pipelines/tests/test_reconcile_bug8_canceled_only.py` (novo) | Fase 2 (Bug 8), Gate 2: script de reconciliação SOMENTE PostgreSQL local (nunca referencia `DATABASE_URL`/`DATAMART_DATABASE_URL`; exige `LOCAL_PG_URL` explícito, sem fallback, e recusa qualquer host fora de `localhost`/`127.0.0.1`/`::1`). Criou backup + staging locais e reconciliou as 25 combinações marca×mês: `canceled_orders` +84, linhas do mart +40, GMV/units/completed com diferença zero, sem duplicatas/nulos, Pareto matematicamente inalterado. Tabela real e Neon não foram tocados. Swap (Gate 3) não executado | 2026-07-02 |
 
 ---
 
