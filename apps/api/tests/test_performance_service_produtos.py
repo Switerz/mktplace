@@ -39,8 +39,9 @@ class FakeSession:
 
 def test_get_produtos_shopee_fonte_vazia_retorna_lista_vazia():
     # get_produtos_shopee usa chave ESTRITA (ref_month, brand, sku_ref_key,
-    # product_name, variation_name) — SQL puro, sem consolidacao entre linhas
-    # (ver Bug 9): count + rows, igual ao padrao de ML/TikTok.
+    # product_name) — SQL puro, sem consolidacao entre linhas (ver Bug 9).
+    # variation_name e atributo descritivo, nao parte da chave: count + rows,
+    # igual ao padrao de ML/TikTok.
     db = FakeSession([FakeResult([FakeCountRow(0)]), FakeResult([])])
     result = perf_svc.get_produtos_shopee(db, brand=None, year=2026, month=6)
     assert result["total"] == 0

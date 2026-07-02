@@ -195,9 +195,13 @@ def test_cardinalidade_do_join_por_marca_e_mes(db):
       - nenhum produto (brand, sku_ref_key, product_name) aparece 2x na
         resposta;
       - total da tabela == eligible_count do summary;
-      - soma dos buckets == eligible_count;
+      - soma da contagem dos buckets == eligible_count;
+      - soma do GMV dos buckets == GMV elegivel (mesmo total apurado antes
+        e depois do JOIN);
       - GMV antes do JOIN (SUM bruto do mart) == GMV depois do JOIN (soma
-        dos itens retornados).
+        dos itens retornados);
+      - o produto de maior GMV do combo sempre cai no bucket A (acumulado
+        anterior = 0%).
     """
     combos = db.execute(text("""
         SELECT DISTINCT brand, EXTRACT(YEAR FROM ref_month)::int AS y, EXTRACT(MONTH FROM ref_month)::int AS m
@@ -249,3 +253,15 @@ def test_cardinalidade_do_join_por_marca_e_mes(db):
             f"{brand} {year}-{month:02d}: soma dos buckets ({bucket_sum}) != "
             f"eligible_count ({summary['eligible_count']})"
         )
+        bucket_gmv_sum = sum(b["gmv"] for b in summary["buckets"])
+        assert abs(bucket_gmv_sum - base_gmv) < 0.01, (
+            f"{brand} {year}-{month:02d}: soma do GMV dos buckets ({bucket_gmv_sum}) != "
+            f"GMV elegivel ({base_gmv})"
+        )
+
+        if page["items"]:
+            maior_produto = max(page["items"], key=lambda it: it["gmv"])
+            assert maior_produto["pareto_bucket"] == "A_top50", (
+                f"{brand} {year}-{month:02d}: maior produto (gmv={maior_produto['gmv']}) "
+                f"caiu no bucket {maior_produto['pareto_bucket']!r}, esperado A_top50"
+            )
