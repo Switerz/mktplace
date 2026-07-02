@@ -6,7 +6,7 @@
     "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start",
-    "test": "node --test tests/financeiro-labels.test.mjs tests/marketplace-filter.test.ts tests/use-sortable-table.test.ts tests/brand-daily-summary.test.ts"
+    "test": "node --test tests/financeiro-labels.test.mjs tests/marketplace-filter.test.ts tests/use-sortable-table.test.ts tests/brand-daily-summary.test.ts tests/produtos-tab-transition.test.ts tests/async-channel-state.test.ts"
   },
   "dependencies": {
     "next": "^15.1.0",

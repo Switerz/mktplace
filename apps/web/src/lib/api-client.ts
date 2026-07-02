@@ -97,7 +97,10 @@ async function apiFetch<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${API_URL}${path}`);
     if (!res.ok) return null;
-    return res.json() as Promise<T>;
+    // `await` explicito: sem ele, uma rejeicao de res.json() (corpo invalido)
+    // escaparia deste catch, pois a promise seria devolvida sem ser
+    // "adotada" dentro do try/catch local.
+    return (await res.json()) as T;
   } catch {
     return null;
   }
@@ -309,6 +312,8 @@ export interface ProdutosMLResponse {
   limit: number;
   offset: number;
   items: ProdutoMLRow[];
+  scope: string;
+  refreshed_at: string | null;
 }
 
 export interface ProdutoTikTokRow {
@@ -324,6 +329,7 @@ export interface ProdutoTikTokRow {
   problem_rate: number | null;
   rating_avg: number | null;
   total_ratings: number | null;
+  pareto_bucket: string | null;
 }
 
 export interface ProdutosTikTokResponse {
@@ -334,7 +340,7 @@ export interface ProdutosTikTokResponse {
   items: ProdutoTikTokRow[];
 }
 
-export function fetchProdutosML(params: {
+export interface ProdutoMLListParams {
   brand?: string;
   pareto_bucket?: string;
   action_signal?: string;
@@ -344,7 +350,9 @@ export function fetchProdutosML(params: {
   offset?: number;
   sort_by?: string;
   sort_dir?: "asc" | "desc";
-}): Promise<ProdutosMLResponse | null> {
+}
+
+export function fetchProdutosML(params: ProdutoMLListParams): Promise<ProdutosMLResponse | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
   if (params.pareto_bucket) qs.set("pareto_bucket", params.pareto_bucket);
@@ -370,41 +378,50 @@ export interface ProdutoShopeeRow {
   orders: number;
   canceled_orders: number;
   cancel_rate_pct: number | null;
+  // Calculado pelo proprio ETL — a API nunca soma/consolida entre linhas
+  // (cada produto Shopee e exatamente 1 linha do mart, chave estrita).
   unique_buyers: number | null;
   avg_price: number | null;
+  pareto_bucket: string | null;
 }
 
-export function fetchProdutosShopee(params: {
+export interface ProdutosShopeeListResponse {
+  ref_month: string;
+  total: number;
+  limit: number;
+  offset: number;
+  items: ProdutoShopeeRow[];
+}
+
+export interface ProdutoChannelListParams {
   brand?: string;
   period?: string;
+  pareto_bucket?: string;
   limit?: number;
   offset?: number;
   sort_by?: string;
   sort_dir?: "asc" | "desc";
-}): Promise<{ ref_month: string; total: number; items: ProdutoShopeeRow[] } | null> {
+}
+
+export function fetchProdutosShopee(params: ProdutoChannelListParams): Promise<ProdutosShopeeListResponse | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
   qs.set("ref_month", params.period ?? refMonth());
+  if (params.pareto_bucket) qs.set("pareto_bucket", params.pareto_bucket);
   qs.set("limit", String(params.limit ?? 25));
   qs.set("offset", String(params.offset ?? 0));
   if (params.sort_by) qs.set("sort_by", params.sort_by);
   if (params.sort_dir) qs.set("sort_dir", params.sort_dir);
   return withCache(`produtos-shopee:${qs}`, () =>
-    apiFetch(`/api/v1/performance/produtos/shopee?${qs}`)
+    apiFetch<ProdutosShopeeListResponse>(`/api/v1/performance/produtos/shopee?${qs}`)
   );
 }
 
-export function fetchProdutosTikTok(params: {
-  brand?: string;
-  period?: string;
-  limit?: number;
-  offset?: number;
-  sort_by?: string;
-  sort_dir?: "asc" | "desc";
-}): Promise<ProdutosTikTokResponse | null> {
+export function fetchProdutosTikTok(params: ProdutoChannelListParams): Promise<ProdutosTikTokResponse | null> {
   const qs = new URLSearchParams();
   if (params.brand) qs.set("brand", params.brand);
   qs.set("ref_month", params.period ?? refMonth());
+  if (params.pareto_bucket) qs.set("pareto_bucket", params.pareto_bucket);
   qs.set("limit", String(params.limit ?? 25));
   qs.set("offset", String(params.offset ?? 0));
   if (params.sort_by) qs.set("sort_by", params.sort_by);
@@ -425,15 +442,59 @@ export interface ParetoSummaryBucket {
 
 export interface ProdutosMLSummary {
   total_gmv: number;
+  // total_count inclui produtos com GMV=0 (inativos, ads sem venda etc.);
+  // eligible_count e o subconjunto com GMV>0 que entra nos buckets A/B/C/D
+  // (soma dos buckets == eligible_count, nunca == total_count).
   total_count: number;
+  eligible_count: number;
+  excluded_zero_gmv_count: number;
+  brand: string | null;
+  buckets: ParetoSummaryBucket[];
+  scope: string;
+  refreshed_at: string | null;
+}
+
+export function fetchProdutosMLSummary(params: {
+  brand?: string;
+  action_signal?: string;
+  product_status?: string;
+  revenue_velocity?: string;
+} = {}): Promise<ProdutosMLSummary | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  if (params.action_signal) qs.set("action_signal", params.action_signal);
+  if (params.product_status) qs.set("product_status", params.product_status);
+  if (params.revenue_velocity) qs.set("revenue_velocity", params.revenue_velocity);
+  return withCache(`produtos-ml-summary:${qs}`, () =>
+    apiFetch<ProdutosMLSummary>(`/api/v1/performance/produtos/ml/summary?${qs}`)
+  );
+}
+
+export interface ProdutosChannelSummary {
+  ref_month: string;
+  total_gmv: number;
+  total_count: number;
+  eligible_count: number;
+  excluded_zero_gmv_count: number;
   brand: string | null;
   buckets: ParetoSummaryBucket[];
 }
 
-export function fetchProdutosMLSummary(brand?: string): Promise<ProdutosMLSummary | null> {
-  const qs = brand ? `?brand=${brand}` : "";
-  return withCache(`produtos-ml-summary:${brand ?? "all"}`, () =>
-    apiFetch<ProdutosMLSummary>(`/api/v1/performance/produtos/ml/summary${qs}`)
+export function fetchProdutosTikTokSummary(params: { brand?: string; period?: string } = {}): Promise<ProdutosChannelSummary | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  qs.set("ref_month", params.period ?? refMonth());
+  return withCache(`produtos-tk-summary:${qs}`, () =>
+    apiFetch<ProdutosChannelSummary>(`/api/v1/performance/produtos/tiktok/summary?${qs}`)
+  );
+}
+
+export function fetchProdutosShopeeSummary(params: { brand?: string; period?: string } = {}): Promise<ProdutosChannelSummary | null> {
+  const qs = new URLSearchParams();
+  if (params.brand) qs.set("brand", params.brand);
+  qs.set("ref_month", params.period ?? refMonth());
+  return withCache(`produtos-sh-summary:${qs}`, () =>
+    apiFetch<ProdutosChannelSummary>(`/api/v1/performance/produtos/shopee/summary?${qs}`)
   );
 }
 

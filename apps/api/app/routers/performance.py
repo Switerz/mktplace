@@ -8,7 +8,8 @@ from app.database import get_db
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
-    ProdutosMLSummaryResponse, ProdutosTikTokResponse, ProdutosShopeeResponse,
+    ProdutosMLSummaryResponse, ProdutosTikTokResponse, ProdutosTikTokSummaryResponse,
+    ProdutosShopeeResponse, ProdutosShopeeSummaryResponse,
     QualityResponse, TempoRealResponse,
 )
 from app.services import gold_service as svc
@@ -40,7 +41,7 @@ def _validate_sort_by(sort_by: Optional[str], allowlist: dict[str, str]) -> None
 
 VALID_ML_BRANDS = {"barbours", "kokeshi", "lescent", "rituaria"}  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
 VALID_TK_BRANDS = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
-VALID_ML_PARETO = {"A_top50", "B_next30", "C_next15", "D_tail"}
+VALID_PARETO_BUCKETS = {"A_top50", "B_next30", "C_next15", "D_tail"}  # compartilhado: ML, TikTok e Shopee
 VALID_ML_STATUS = {"sells+advertised", "sells_organic_only", "ad_spend_no_sales", "inactive"}
 VALID_ML_VELOCITY = {"high", "medium", "low", "zero"}
 VALID_ML_ACTION_SIGNALS = {
@@ -114,11 +115,28 @@ def daily(
 @router.get("/produtos/ml/summary", response_model=ProdutosMLSummaryResponse)
 def produtos_ml_summary(
     brand: Optional[str] = Query(None),
+    action_signal: Optional[str] = Query(None),
+    product_status: Optional[str] = Query(None),
+    revenue_velocity: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
+    """
+    Cards A/B/C/D calculados dinamicamente (CTE + window function) sobre o
+    MESMO conjunto filtrado da tabela (brand + action_signal + product_status
+    + revenue_velocity), exceto o proprio filtro de pareto_bucket — os 4
+    cards continuam visiveis mesmo com um bucket selecionado na tabela.
+    fact_ml_produto_ranking nao tem competencia mensal; o campo `scope`
+    identifica isso explicitamente em vez de um seletor de mes falso.
+    """
     if brand and brand not in VALID_ML_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para ML.")
-    return perf_svc.get_produtos_ml_summary(_require_db(db), brand)
+    if product_status and product_status not in VALID_ML_STATUS:
+        raise HTTPException(422, f"product_status '{product_status}' invalido.")
+    if revenue_velocity and revenue_velocity not in VALID_ML_VELOCITY:
+        raise HTTPException(422, f"revenue_velocity '{revenue_velocity}' invalido.")
+    if action_signal and action_signal not in VALID_ML_ACTION_SIGNALS:
+        raise HTTPException(422, "action_signal invalido.")
+    return perf_svc.get_produtos_ml_summary(_require_db(db), brand, action_signal, product_status, revenue_velocity)
 
 
 @router.get("/produtos/ml", response_model=ProdutosMLResponse)
@@ -136,7 +154,7 @@ def produtos_ml(
 ):
     if brand and brand not in VALID_ML_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para ML.")
-    if pareto_bucket and pareto_bucket not in VALID_ML_PARETO:
+    if pareto_bucket and pareto_bucket not in VALID_PARETO_BUCKETS:
         raise HTTPException(422, f"pareto_bucket '{pareto_bucket}' invalido.")
     if product_status and product_status not in VALID_ML_STATUS:
         raise HTTPException(422, f"product_status '{product_status}' invalido.")
@@ -155,6 +173,7 @@ def produtos_ml(
 def produtos_tiktok(
     brand: Optional[str] = Query(None),
     ref_month: Optional[str] = Query(None),
+    pareto_bucket: Optional[str] = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
     sort_by: Optional[str] = Query(None, description="Coluna de ordenacao (allowlist)."),
@@ -163,15 +182,33 @@ def produtos_tiktok(
 ):
     if brand and brand not in VALID_TK_BRANDS:
         raise HTTPException(422, f"Brand '{brand}' invalida para TikTok.")
+    if pareto_bucket and pareto_bucket not in VALID_PARETO_BUCKETS:
+        raise HTTPException(422, f"pareto_bucket '{pareto_bucket}' invalido.")
     _validate_sort_by(sort_by, perf_svc.PRODUTOS_TIKTOK_SORT_COLUMNS)
     year, month = _parse_month(ref_month)
-    return perf_svc.get_produtos_tiktok(_require_db(db), brand, year, month, limit, offset, sort_by, sort_dir)
+    return perf_svc.get_produtos_tiktok(
+        _require_db(db), brand, year, month, limit, offset, sort_by, sort_dir, pareto_bucket,
+    )
+
+
+@router.get("/produtos/tiktok/summary", response_model=ProdutosTikTokSummaryResponse)
+def produtos_tiktok_summary(
+    brand: Optional[str] = Query(None),
+    ref_month: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Cards A/B/C/D dinamicos — mesmos filtros da tabela (brand, ref_month), exceto pareto_bucket."""
+    if brand and brand not in VALID_TK_BRANDS:
+        raise HTTPException(422, f"Brand '{brand}' invalida para TikTok.")
+    year, month = _parse_month(ref_month)
+    return perf_svc.get_produtos_tiktok_summary(_require_db(db), brand, year, month)
 
 
 @router.get("/produtos/shopee", response_model=ProdutosShopeeResponse)
 def produtos_shopee(
     brand: Optional[str] = Query(None),
     ref_month: Optional[str] = Query(None),
+    pareto_bucket: Optional[str] = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
     sort_by: Optional[str] = Query(None, description="Coluna de ordenacao (allowlist)."),
@@ -181,9 +218,27 @@ def produtos_shopee(
     _VALID_SHOPEE = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
     if brand and brand not in _VALID_SHOPEE:
         raise HTTPException(422, f"Brand '{brand}' inválida.")
+    if pareto_bucket and pareto_bucket not in VALID_PARETO_BUCKETS:
+        raise HTTPException(422, f"pareto_bucket '{pareto_bucket}' invalido.")
     _validate_sort_by(sort_by, perf_svc.PRODUTOS_SHOPEE_SORT_COLUMNS)
     year, month = _parse_month(ref_month)
-    return perf_svc.get_produtos_shopee(_require_db(db), brand, year, month, limit, offset, sort_by, sort_dir)
+    return perf_svc.get_produtos_shopee(
+        _require_db(db), brand, year, month, limit, offset, sort_by, sort_dir, pareto_bucket,
+    )
+
+
+@router.get("/produtos/shopee/summary", response_model=ProdutosShopeeSummaryResponse)
+def produtos_shopee_summary(
+    brand: Optional[str] = Query(None),
+    ref_month: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Cards A/B/C/D dinamicos — mesmos filtros da tabela (brand, ref_month), exceto pareto_bucket."""
+    _VALID_SHOPEE = {"apice", "barbours", "kokeshi", "lescent", "rituaria"}
+    if brand and brand not in _VALID_SHOPEE:
+        raise HTTPException(422, f"Brand '{brand}' inválida.")
+    year, month = _parse_month(ref_month)
+    return perf_svc.get_produtos_shopee_summary(_require_db(db), brand, year, month)
 
 
 @router.get("/canais", response_model=CanaisResponse)

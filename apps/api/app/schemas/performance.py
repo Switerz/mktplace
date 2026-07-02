@@ -263,14 +263,23 @@ class ProdutoShopeeRow(BaseModel):
     brand: str
     sku_ref: Optional[str] = None
     product_name: str
+    # Atributo descritivo, nao parte da chave de identidade — a UNIQUE
+    # constraint real do mart e (ref_month, brand, sku_ref_key, product_name).
+    # Pode ja ter sido consolidado/sobrescrito rio acima pelo ETL antes de
+    # chegar aqui (ver docs/sections/produtos_audit.md, Bug 5 e Bug 8).
     variation_name: Optional[str] = None
     gmv: float
     units_sold: int
     orders: int
     canceled_orders: int
     cancel_rate_pct: Optional[float] = None
+    # Valor calculado pelo proprio ETL (nunique de comprador na agregacao
+    # mensal); a API nunca soma/consolida entre linhas do mart — cada linha
+    # de saida e exatamente 1 linha do mart (ver docs/sections/produtos_audit.md,
+    # Bug 9 — chave estrita, sem consolidacao automatica por sku_ref_key).
     unique_buyers: Optional[int] = None
     avg_price: Optional[float] = None
+    pareto_bucket: Optional[str] = None
 
 
 class ProdutosShopeeResponse(BaseModel):
@@ -308,6 +317,8 @@ class ProdutosMLResponse(BaseModel):
     limit: int
     offset: int
     items: list[ProdutoMLRow]
+    scope: str = "ranking_acumulado_atual"
+    refreshed_at: Optional[str] = None
 
 
 class ParetoBucketSummary(BaseModel):
@@ -321,9 +332,17 @@ class ParetoBucketSummary(BaseModel):
 
 class ProdutosMLSummaryResponse(BaseModel):
     total_gmv: float
+    # total_count: TODOS os produtos no escopo filtrado (inclui GMV=0).
+    # eligible_count: apenas os com GMV>0 — os unicos que entram nos buckets
+    # A/B/C/D (soma dos buckets == eligible_count, nunca == total_count).
+    # excluded_zero_gmv_count = total_count - eligible_count.
     total_count: int
+    eligible_count: int
+    excluded_zero_gmv_count: int
     brand: Optional[str] = None
     buckets: list[ParetoBucketSummary]
+    scope: str = "ranking_acumulado_atual"
+    refreshed_at: Optional[str] = None
 
 
 class ProdutoTikTokRow(BaseModel):
@@ -339,6 +358,7 @@ class ProdutoTikTokRow(BaseModel):
     problem_rate: Optional[float] = None
     rating_avg: Optional[float] = None
     total_ratings: Optional[int] = None
+    pareto_bucket: Optional[str] = None
 
 
 class ProdutosTikTokResponse(BaseModel):
@@ -347,6 +367,26 @@ class ProdutosTikTokResponse(BaseModel):
     limit: int
     offset: int
     items: list[ProdutoTikTokRow]
+
+
+class ProdutosTikTokSummaryResponse(BaseModel):
+    ref_month: str
+    total_gmv: float
+    total_count: int
+    eligible_count: int
+    excluded_zero_gmv_count: int
+    brand: Optional[str] = None
+    buckets: list[ParetoBucketSummary]
+
+
+class ProdutosShopeeSummaryResponse(BaseModel):
+    ref_month: str
+    total_gmv: float
+    total_count: int
+    eligible_count: int
+    excluded_zero_gmv_count: int
+    brand: Optional[str] = None
+    buckets: list[ParetoBucketSummary]
 
 
 # ---------------------------------------------------------------------------

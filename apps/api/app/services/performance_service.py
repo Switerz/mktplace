@@ -1124,6 +1124,92 @@ def _build_order_by(
     return "ORDER BY " + ", ".join(order_parts)
 
 
+# ---------------------------------------------------------------------------
+# Pareto A/B/C/D dinamico — mesma regra para ML, TikTok e Shopee
+#
+# Regra (documentada para os 3 canais):
+#  1. Considera apenas produtos com GMV > 0 no conjunto ja filtrado
+#     (marketplace + marca + periodo, quando aplicavel — nunca a pagina
+#     visivel, sempre o conjunto completo antes de LIMIT/OFFSET).
+#  2. Ordena por GMV desc, com desempate deterministico pela chave estavel
+#     do produto (a mesma usada no ORDER BY normal da tabela).
+#  3. Calcula o percentual acumulado de GMV via window function
+#     (SUM(gmv) OVER (ORDER BY ...) / SUM(gmv) OVER ()).
+#  4. Classifica o produto pelo percentual acumulado ANTES de incluir esse
+#     produto (previous_cum_gmv = cum_gmv - gmv), nao depois. Ex: se o
+#     acumulado ANTERIOR ao produto e 48%, ele fica no bucket A mesmo que,
+#     ao somar seu proprio GMV, o acumulado passe para 53% — e esse mesmo
+#     produto que "cruza" a fronteira de 50%, entao ele fica no bucket que
+#     a fronteira representa (A), nao no bucket seguinte. Consequencia
+#     desejada: o maior produto do conjunto (acumulado anterior = 0%)
+#     sempre cai em A, mesmo que ele isolado represente mais de 50% do GMV
+#     total — nunca cai em B so por ser grande demais.
+#     Limiares com "<" estrito (nao "<="): acumulado anterior < 50 -> A;
+#     < 80 -> B; < 95 -> C; resto -> D. A particao ainda e estrita (soma dos
+#     buckets = GMV total, sem lacuna/sobreposicao), pois cada produto cai
+#     em exatamente um bucket com base no seu proprio acumulado anterior.
+# ---------------------------------------------------------------------------
+_PARETO_BUCKET_CASE_SQL = """CASE
+        WHEN (cum_gmv - gmv) / total_gmv * 100 < 50 THEN 'A_top50'
+        WHEN (cum_gmv - gmv) / total_gmv * 100 < 80 THEN 'B_next30'
+        WHEN (cum_gmv - gmv) / total_gmv * 100 < 95 THEN 'C_next15'
+        ELSE 'D_tail'
+    END"""
+
+
+def _pareto_buckets_from_rows(rows) -> list[dict]:
+    """Monta os 4 cards A/B/C/D a partir de linhas (pareto_bucket, count, gmv)
+    ja agrupadas pelo bucket calculado dinamicamente."""
+    total_gmv = sum(_f(r.gmv) for r in rows)
+    row_map = {r.pareto_bucket: r for r in rows}
+    buckets = []
+    for bk in _PARETO_ORDER:
+        label, desc = _PARETO_META[bk]
+        r = row_map.get(bk)
+        gmv = _f(r.gmv) if r else 0.0
+        cnt = int(_f(r.count)) if r else 0
+        buckets.append({
+            "bucket": bk, "label": label, "description": desc,
+            "gmv": gmv, "count": cnt,
+            "gmv_pct": round(gmv / total_gmv * 100, 1) if total_gmv > 0 else 0.0,
+        })
+    return buckets, total_gmv
+
+
+# ---------------------------------------------------------------------------
+# Identidade de produto Shopee — chave ESTRITA, sem consolidacao automatica.
+#
+# Historico: uma versao anterior tentou consolidar sku_ref_key duplicado
+# usando similaridade textual dinamica (difflib) para decidir se grafias
+# diferentes de product_name eram "o mesmo produto". Rejeitada: decidir
+# identidade por heuristica fuzzy em produção e um risco inaceitavel de
+# juntar produtos distintos silenciosamente (confirmado na auditoria: sku
+# "LC03034" da lescent tem 2 perfumes com fragancias diferentes; sku "40091"
+# da kokeshi tem 2 composicoes de kit diferentes — ver
+# docs/sections/produtos_audit.md Bug 7 e Bug 9).
+#
+# Chave definitiva (nenhuma consolidacao entre linhas):
+#   (ref_month, brand, sku_ref_key, product_name)
+# Essa e a UNIQUE constraint real do mart — cada linha ja e, por construcao,
+# uma unica identidade de produto. `variation_name` NAO faz parte da chave:
+# e um atributo descritivo da linha, nao um componente de identidade. Ele
+# pode ja ter sido consolidado/sobrescrito rio acima pelo proprio ETL antes
+# de chegar ao mart (ver Bug 5 — colisoes de variation_name sob o mesmo
+# sku_ref_key+product_name sao somadas na carga; Bug 8 — grupos so com
+# pedidos cancelados podem ser descartados no merge), entao o valor exibido
+# aqui e o que sobrou apos essas decisoes upstream, nunca recalculado por
+# este service. sku_ref_key vazio segue a MESMA regra (nao ha tratamento
+# especial: o proprio product_name ja diferencia).
+#
+# Consequencia aceita: o mesmo listing com o titulo editado pelo vendedor
+# durante o mes (ex.: "Leave-in Leave-in..." vs "Leave-in...") aparece como 2
+# linhas separadas em vez de 1. Preferimos dividir um produto a somar
+# produtos distintos silenciosamente. unique_buyers NUNCA precisa ser
+# anulado por essa correcao — cada linha de saida e exatamente 1 linha do
+# mart, sem soma entre linhas.
+# ---------------------------------------------------------------------------
+
+
 def get_produtos_shopee(
     db: Session,
     brand: str | None,
@@ -1133,34 +1219,76 @@ def get_produtos_shopee(
     offset: int = 0,
     sort_by: str | None = None,
     sort_dir: str | None = None,
+    pareto_bucket: str | None = None,
 ) -> dict:
     ref_month = date(year, month, 1)
-    filters = ["ref_month = :ref_month", "gmv > 0"]
+    filters = ["ref_month = :ref_month"]
     params: dict = {"ref_month": ref_month, "limit": limit, "offset": offset}
-
     if brand and brand in _SH_BRANDS:
         filters.append("brand = :brand")
         params["brand"] = brand
-
     where = " AND ".join(filters)
     order_by = _build_order_by(
         sort_by, sort_dir, PRODUTOS_SHOPEE_SORT_COLUMNS, "gmv", "DESC",
-        ["brand", "sku_ref", "product_name", "variation_name"],
+        ["brand", "sku_ref_key", "product_name", "variation_name"],
     )
 
+    base_cte = f"""
+        base AS (
+            SELECT brand, sku_ref_key, product_name, variation_name, sku_ref,
+                   gmv, units_sold, completed_orders, canceled_orders, unique_buyers,
+                   CASE WHEN units_sold > 0 THEN gmv / units_sold ELSE NULL END AS avg_price,
+                   CASE WHEN (completed_orders + canceled_orders) > 0
+                        THEN canceled_orders::numeric / (completed_orders + canceled_orders) * 100
+                        ELSE NULL END AS cancel_rate_pct
+            FROM marts.fact_shopee_product_monthly
+            WHERE {where} AND gmv > 0
+        ),
+        ranked AS (
+            SELECT brand, sku_ref_key, product_name, gmv,
+                   SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, sku_ref_key ASC, product_name ASC) AS cum_gmv,
+                   SUM(gmv) OVER ()                                                                 AS total_gmv
+            FROM base
+        ),
+        bucketed AS (
+            SELECT brand, sku_ref_key, product_name, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+            FROM ranked
+        )
+    """
+    # JOIN so por (brand, sku_ref_key, product_name) — e a UNIQUE constraint
+    # real do mart. variation_name NUNCA entra numa condicao de JOIN/USING:
+    # e frequentemente NULL, e "NULL = NULL" nunca casa em SQL — incluir essa
+    # coluna aqui derrubaria silenciosamente ~metade das linhas (bug real,
+    # encontrado e corrigido nesta mesma sessao). variation_name continua no
+    # SELECT/ORDER BY (NULLS LAST ja trata isso corretamente ali).
+
+    bucket_filter = ""
+    if pareto_bucket:
+        bucket_filter = " AND bucketed.pareto_bucket = :pareto_bucket"
+        params["pareto_bucket"] = pareto_bucket
+
     total_row = db.execute(
-        text(f"SELECT COUNT(*) AS n FROM marts.fact_shopee_product_monthly WHERE {where}"),
+        text(f"""
+            WITH {base_cte}
+            SELECT COUNT(*) AS n
+            FROM base
+            JOIN bucketed USING (brand, sku_ref_key, product_name)
+            WHERE TRUE {bucket_filter}
+        """),
         params,
     ).fetchone()
     total = int(total_row.n) if total_row else 0
 
     rows = db.execute(
         text(f"""
-            SELECT brand, sku_ref, product_name, variation_name,
-                   gmv, units_sold, completed_orders, canceled_orders,
-                   cancel_rate_pct, unique_buyers, avg_price
-            FROM marts.fact_shopee_product_monthly
-            WHERE {where}
+            WITH {base_cte}
+            SELECT base.brand, base.sku_ref_key, base.sku_ref, base.product_name, base.variation_name,
+                   base.gmv, base.units_sold, base.completed_orders, base.canceled_orders, base.unique_buyers,
+                   base.avg_price, base.cancel_rate_pct,
+                   bucketed.pareto_bucket
+            FROM base
+            JOIN bucketed USING (brand, sku_ref_key, product_name)
+            WHERE TRUE {bucket_filter}
             {order_by}
             LIMIT :limit OFFSET :offset
         """),
@@ -1180,6 +1308,7 @@ def get_produtos_shopee(
             "cancel_rate_pct": round(_f(r.cancel_rate_pct), 2) if r.cancel_rate_pct is not None else None,
             "unique_buyers":   int(_f(r.unique_buyers)) if r.unique_buyers is not None else None,
             "avg_price":       round(_f(r.avg_price), 2) if r.avg_price is not None else None,
+            "pareto_bucket":   r.pareto_bucket,
         }
         for r in rows
     ]
@@ -1191,6 +1320,103 @@ def get_produtos_shopee(
         "offset":    offset,
         "items":     items,
     }
+
+
+def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month: int) -> dict:
+    """Cards A/B/C/D — mesmos filtros da tabela (brand, ref_month), exceto o
+    proprio filtro de bucket. Usa a MESMA chave estrita de get_produtos_shopee
+    (nenhuma consolidacao entre linhas do mart)."""
+    ref_month = date(year, month, 1)
+    filters = ["ref_month = :ref_month"]
+    params: dict = {"ref_month": ref_month}
+    if brand and brand in _SH_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+    where = " AND ".join(filters)
+
+    counts_row = db.execute(
+        text(f"""
+            SELECT COUNT(*) AS total_count,
+                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count
+            FROM marts.fact_shopee_product_monthly
+            WHERE {where}
+        """),
+        params,
+    ).fetchone()
+    total_count = int(counts_row.total_count)
+    eligible_count = int(counts_row.eligible_count)
+
+    rows = db.execute(
+        text(f"""
+            WITH base AS (
+                SELECT brand, sku_ref_key, product_name, variation_name, gmv
+                FROM marts.fact_shopee_product_monthly
+                WHERE {where} AND gmv > 0
+            ),
+            ranked AS (
+                SELECT gmv,
+                       SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, sku_ref_key ASC, product_name ASC, variation_name ASC) AS cum_gmv,
+                       SUM(gmv) OVER ()                                                                                   AS total_gmv
+                FROM base
+            ),
+            bucketed AS (
+                SELECT gmv, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+                FROM ranked
+            )
+            SELECT pareto_bucket, COUNT(*) AS count, SUM(gmv) AS gmv
+            FROM bucketed
+            GROUP BY pareto_bucket
+        """),
+        params,
+    ).fetchall()
+
+    buckets, total_gmv = _pareto_buckets_from_rows(rows)
+    return {
+        "ref_month":               f"{year:04d}-{month:02d}",
+        "total_gmv":               total_gmv,
+        "total_count":             total_count,
+        "eligible_count":          eligible_count,
+        "excluded_zero_gmv_count": total_count - eligible_count,
+        "brand":                   brand,
+        "buckets":                 buckets,
+    }
+
+
+def _ml_base_filters(
+    brand: str | None,
+    action_signal: str | None,
+    product_status: str | None,
+    revenue_velocity: str | None,
+    prefix: str = "",
+) -> tuple[str, dict]:
+    """Filtros do ML exceto pareto_bucket — reusados pela tabela e pelo
+    summary, para o Pareto ser calculado sobre o mesmo conjunto filtrado.
+    `prefix` (ex: "f.") qualifica as colunas quando a query final faz JOIN
+    com a CTE do bucket (que tambem expoe `brand`), evitando coluna ambigua."""
+    brands_tuple = tuple(sorted(_ML_BRANDS))
+    filters = [f"{prefix}brand IN :brands"]
+    params: dict = {"brands": brands_tuple}
+    if brand and brand in _ML_BRANDS:
+        filters.append(f"{prefix}brand = :brand")
+        params["brand"] = brand
+    if action_signal:
+        filters.append(f"{prefix}action_signal = :action_signal")
+        params["action_signal"] = action_signal
+    if product_status:
+        filters.append(f"{prefix}product_status = :product_status")
+        params["product_status"] = product_status
+    if revenue_velocity:
+        filters.append(f"{prefix}revenue_velocity = :revenue_velocity")
+        params["revenue_velocity"] = revenue_velocity
+    return " AND ".join(filters), params
+
+
+def _ml_refreshed_at(db: Session) -> str | None:
+    """fact_ml_produto_ranking nao tem competencia mensal (sem ref_month) —
+    e um ranking acumulado, atualizado periodicamente. Expoe refreshed_at
+    real em vez de fingir um seletor de mes."""
+    row = db.execute(text("SELECT MAX(refreshed_at) AS r FROM marts.fact_ml_produto_ranking")).fetchone()
+    return row.r.isoformat() if row and row.r else None
 
 
 def get_produtos_ml(
@@ -1205,49 +1431,72 @@ def get_produtos_ml(
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> dict:
-    brands_tuple = tuple(sorted(_ML_BRANDS))
-    filters = ["brand IN :brands"]
-    params: dict = {"brands": brands_tuple, "limit": limit, "offset": offset}
+    # Duas variantes do mesmo filtro: sem prefixo para uso dentro da CTE
+    # (uma unica tabela em escopo) e com prefixo "f." para a query externa,
+    # que faz JOIN com a CTE do bucket (tambem expoe `brand`) — evita
+    # "column reference is ambiguous".
+    where, params = _ml_base_filters(brand, action_signal, product_status, revenue_velocity)
+    where_f, _ = _ml_base_filters(brand, action_signal, product_status, revenue_velocity, prefix="f.")
+    params["limit"] = limit
+    params["offset"] = offset
 
-    if brand and brand in _ML_BRANDS:
-        filters.append("brand = :brand")
-        params["brand"] = brand
-    if pareto_bucket:
-        filters.append("pareto_bucket = :pareto_bucket")
-        params["pareto_bucket"] = pareto_bucket
-    if action_signal:
-        filters.append("action_signal = :action_signal")
-        params["action_signal"] = action_signal
-    if product_status:
-        filters.append("product_status = :product_status")
-        params["product_status"] = product_status
-    if revenue_velocity:
-        filters.append("revenue_velocity = :revenue_velocity")
-        params["revenue_velocity"] = revenue_velocity
-
-    where = " AND ".join(filters)
     order_by = _build_order_by(
         sort_by, sort_dir, PRODUTOS_ML_SORT_COLUMNS, "gross_revenue", "DESC",
         ["brand", "item_id"],
     )
 
+    # Bucket calculado dinamicamente sobre o MESMO conjunto filtrado (brand +
+    # action_signal + product_status + revenue_velocity) — nunca reutiliza a
+    # coluna pareto_bucket pre-calculada da fonte, que e recalculada por
+    # marca isoladamente na origem (soma ~100% por marca) e fica incorreta
+    # quando o usuario ve varias marcas ao mesmo tempo (soma >100% combinada).
+    pareto_cte = f"""
+        WITH base AS (
+            SELECT brand, item_id, gross_revenue AS gmv
+            FROM marts.fact_ml_produto_ranking
+            WHERE {where} AND gross_revenue > 0
+        ),
+        ranked AS (
+            SELECT brand, item_id, gmv,
+                   SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, item_id ASC) AS cum_gmv,
+                   SUM(gmv) OVER ()                                         AS total_gmv
+            FROM base
+        ),
+        bucketed AS (
+            SELECT brand, item_id, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+            FROM ranked
+        )
+    """
+    bucket_filter = ""
+    if pareto_bucket:
+        bucket_filter = " AND b.pareto_bucket = :pareto_bucket"
+        params["pareto_bucket"] = pareto_bucket
+
     total_row = db.execute(
-        text(f"SELECT COUNT(*) AS n FROM marts.fact_ml_produto_ranking WHERE {where}"),
+        text(f"""
+            {pareto_cte}
+            SELECT COUNT(*) AS n
+            FROM marts.fact_ml_produto_ranking f
+            LEFT JOIN bucketed b ON b.brand = f.brand AND b.item_id = f.item_id
+            WHERE {where_f} {bucket_filter}
+        """),
         params,
     ).fetchone()
     total = int(total_row.n) if total_row else 0
 
     rows = db.execute(
         text(f"""
-            SELECT brand, item_id, seller_sku, title,
-                   gross_revenue, units_sold, unique_buyers,
-                   CASE WHEN units_sold > 0
-                        THEN gross_revenue / units_sold ELSE NULL END AS avg_price,
-                   cancel_rate_pct, pareto_bucket, revenue_velocity,
-                   ad_roas, ad_acos_pct, ad_spend, ad_efficiency,
-                   action_signal, estimated_margin, revenue_share_pct, product_status
-            FROM marts.fact_ml_produto_ranking
-            WHERE {where}
+            {pareto_cte}
+            SELECT f.brand, f.item_id, f.seller_sku, f.title,
+                   f.gross_revenue, f.units_sold, f.unique_buyers,
+                   CASE WHEN f.units_sold > 0
+                        THEN f.gross_revenue / f.units_sold ELSE NULL END AS avg_price,
+                   f.cancel_rate_pct, b.pareto_bucket, f.revenue_velocity,
+                   f.ad_roas, f.ad_acos_pct, f.ad_spend, f.ad_efficiency,
+                   f.action_signal, f.estimated_margin, f.revenue_share_pct, f.product_status
+            FROM marts.fact_ml_produto_ranking f
+            LEFT JOIN bucketed b ON b.brand = f.brand AND b.item_id = f.item_id
+            WHERE {where_f} {bucket_filter}
             {order_by}
             LIMIT :limit OFFSET :offset
         """),
@@ -1279,56 +1528,75 @@ def get_produtos_ml(
         for r in rows
     ]
 
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
+    return {
+        "total": total, "limit": limit, "offset": offset, "items": items,
+        "scope": "ranking_acumulado_atual", "refreshed_at": _ml_refreshed_at(db),
+    }
 
 
-def get_produtos_ml_summary(db: Session, brand: str | None) -> dict:
-    brands_tuple = tuple(sorted(_ML_BRANDS))
-    filters = ["brand IN :brands", "pareto_bucket IS NOT NULL"]
-    params: dict = {"brands": brands_tuple}
+def get_produtos_ml_summary(
+    db: Session,
+    brand: str | None,
+    action_signal: str | None = None,
+    product_status: str | None = None,
+    revenue_velocity: str | None = None,
+) -> dict:
+    """Cards A/B/C/D — mesmos filtros da tabela (brand + action_signal +
+    product_status + revenue_velocity), exceto o proprio filtro de bucket.
 
-    if brand and brand in _ML_BRANDS:
-        filters.append("brand = :brand")
-        params["brand"] = brand
+    total_count inclui produtos com GMV=0 (ex.: inativos, ou com gasto de ads
+    e nenhuma venda) — eles nunca entram nos buckets A/B/C/D (que so
+    consideram GMV>0), mas continuam visiveis na tabela de produtos ML.
+    excluded_zero_gmv_count = total_count - eligible_count."""
+    where, params = _ml_base_filters(brand, action_signal, product_status, revenue_velocity)
 
-    where = " AND ".join(filters)
+    counts_row = db.execute(
+        text(f"""
+            SELECT COUNT(*) AS total_count,
+                   COUNT(*) FILTER (WHERE gross_revenue > 0) AS eligible_count
+            FROM marts.fact_ml_produto_ranking
+            WHERE {where}
+        """),
+        params,
+    ).fetchone()
+    total_count = int(counts_row.total_count)
+    eligible_count = int(counts_row.eligible_count)
 
     rows = db.execute(
         text(f"""
-            SELECT pareto_bucket,
-                   COUNT(*)                        AS count,
-                   COALESCE(SUM(gross_revenue), 0) AS gmv
-            FROM marts.fact_ml_produto_ranking
-            WHERE {where}
+            WITH base AS (
+                SELECT brand, item_id, gross_revenue AS gmv
+                FROM marts.fact_ml_produto_ranking
+                WHERE {where} AND gross_revenue > 0
+            ),
+            ranked AS (
+                SELECT gmv,
+                       SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, item_id ASC) AS cum_gmv,
+                       SUM(gmv) OVER ()                                         AS total_gmv
+                FROM base
+            ),
+            bucketed AS (
+                SELECT gmv, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+                FROM ranked
+            )
+            SELECT pareto_bucket, COUNT(*) AS count, SUM(gmv) AS gmv
+            FROM bucketed
             GROUP BY pareto_bucket
         """),
         params,
     ).fetchall()
 
-    total_gmv   = sum(_f(r.gmv) for r in rows)
-    total_count = sum(int(_f(r.count)) for r in rows)
-    row_map     = {r.pareto_bucket: r for r in rows}
-
-    buckets = []
-    for bk in _PARETO_ORDER:
-        label, desc = _PARETO_META[bk]
-        r   = row_map.get(bk)
-        gmv = _f(r.gmv) if r else 0.0
-        cnt = int(_f(r.count)) if r else 0
-        buckets.append({
-            "bucket":      bk,
-            "label":       label,
-            "description": desc,
-            "gmv":         gmv,
-            "count":       cnt,
-            "gmv_pct":     round(gmv / total_gmv * 100, 1) if total_gmv > 0 else 0.0,
-        })
+    buckets, total_gmv = _pareto_buckets_from_rows(rows)
 
     return {
-        "total_gmv":   total_gmv,
-        "total_count": total_count,
-        "brand":       brand,
-        "buckets":     buckets,
+        "total_gmv":                total_gmv,
+        "total_count":              total_count,
+        "eligible_count":           eligible_count,
+        "excluded_zero_gmv_count":  total_count - eligible_count,
+        "brand":                    brand,
+        "scope":                    "ranking_acumulado_atual",
+        "refreshed_at":             _ml_refreshed_at(db),
+        "buckets":                  buckets,
     }
 
 
@@ -1341,6 +1609,7 @@ def get_produtos_tiktok(
     offset: int = 0,
     sort_by: str | None = None,
     sort_dir: str | None = None,
+    pareto_bucket: str | None = None,
 ) -> dict:
     start, end = _month_bounds(year, month)
     brands_tuple = tuple(sorted(_TK_BRANDS))
@@ -1361,15 +1630,37 @@ def get_produtos_tiktok(
     # GROUP BY — se o nome mudar durante o mes, isso geraria duas linhas para
     # o mesmo produto. Em vez disso, escolhemos o nome vigente de forma
     # deterministica (o mais recente por data) via ARRAY_AGG ORDER BY date DESC.
+    pareto_cte = f"""
+        WITH base AS (
+            SELECT brand, product_id, SUM(gmv) AS gmv
+            FROM marts.fact_tiktok_product_daily
+            WHERE {where}
+            GROUP BY brand, product_id
+            HAVING SUM(gmv) > 0
+        ),
+        ranked AS (
+            SELECT brand, product_id, gmv,
+                   SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, product_id ASC) AS cum_gmv,
+                   SUM(gmv) OVER ()                                             AS total_gmv
+            FROM base
+        ),
+        bucketed AS (
+            SELECT brand, product_id, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+            FROM ranked
+        )
+    """
+    bucket_filter = ""
+    if pareto_bucket:
+        bucket_filter = " AND b.pareto_bucket = :pareto_bucket"
+        params["pareto_bucket"] = pareto_bucket
+
     total_row = db.execute(
         text(f"""
-            SELECT COUNT(*) AS n FROM (
-                SELECT brand, product_id
-                FROM marts.fact_tiktok_product_daily
-                WHERE {where}
-                GROUP BY brand, product_id
-                HAVING SUM(gmv) > 0
-            ) t
+            {pareto_cte}
+            SELECT COUNT(*) AS n
+            FROM base
+            JOIN bucketed b USING (brand, product_id)
+            WHERE TRUE {bucket_filter}
         """),
         params,
     ).fetchone()
@@ -1377,31 +1668,38 @@ def get_produtos_tiktok(
 
     rows = db.execute(
         text(f"""
-            SELECT brand, product_id,
-                   (ARRAY_AGG(product_name ORDER BY date DESC))[1] AS product_name,
-                   SUM(gmv)        AS gmv,
-                   SUM(orders)     AS orders,
-                   SUM(items_sold) AS items_sold,
-                   CASE WHEN SUM(gmv) > 0
-                        THEN SUM(gmv_video) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_video,
-                   CASE WHEN SUM(gmv) > 0
-                        THEN SUM(gmv_live) / SUM(gmv) * 100  ELSE NULL END AS pct_gmv_live,
-                   CASE WHEN SUM(gmv) > 0
-                        THEN SUM(gmv_product_card) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_card,
-                   -- Media ponderada (peso=orders) do problem_rate diario pre-calculado pelo TikTok.
-                   -- Counts (canceled/refunded/returned) sao NULL em alguns periodos; nao sao usados.
-                   CASE WHEN SUM(orders) FILTER (WHERE problem_rate IS NOT NULL) > 0
-                        THEN SUM(problem_rate * orders) FILTER (WHERE problem_rate IS NOT NULL)
-                             / SUM(orders) FILTER (WHERE problem_rate IS NOT NULL)
-                        ELSE NULL END AS problem_rate,
-                   CASE WHEN SUM(total_ratings) > 0
-                        THEN SUM(rating_avg * total_ratings) / SUM(total_ratings)
-                        ELSE NULL END AS rating_avg,
-                   SUM(total_ratings) AS total_ratings
-            FROM marts.fact_tiktok_product_daily
-            WHERE {where}
-            GROUP BY brand, product_id
-            HAVING SUM(gmv) > 0
+            {pareto_cte},
+            agg AS (
+                SELECT brand, product_id,
+                       (ARRAY_AGG(product_name ORDER BY date DESC))[1] AS product_name,
+                       SUM(gmv)        AS gmv,
+                       SUM(orders)     AS orders,
+                       SUM(items_sold) AS items_sold,
+                       CASE WHEN SUM(gmv) > 0
+                            THEN SUM(gmv_video) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_video,
+                       CASE WHEN SUM(gmv) > 0
+                            THEN SUM(gmv_live) / SUM(gmv) * 100  ELSE NULL END AS pct_gmv_live,
+                       CASE WHEN SUM(gmv) > 0
+                            THEN SUM(gmv_product_card) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_card,
+                       -- Media ponderada (peso=orders) do problem_rate diario pre-calculado pelo TikTok.
+                       -- Counts (canceled/refunded/returned) sao NULL em alguns periodos; nao sao usados.
+                       CASE WHEN SUM(orders) FILTER (WHERE problem_rate IS NOT NULL) > 0
+                            THEN SUM(problem_rate * orders) FILTER (WHERE problem_rate IS NOT NULL)
+                                 / SUM(orders) FILTER (WHERE problem_rate IS NOT NULL)
+                            ELSE NULL END AS problem_rate,
+                       CASE WHEN SUM(total_ratings) > 0
+                            THEN SUM(rating_avg * total_ratings) / SUM(total_ratings)
+                            ELSE NULL END AS rating_avg,
+                       SUM(total_ratings) AS total_ratings
+                FROM marts.fact_tiktok_product_daily
+                WHERE {where}
+                GROUP BY brand, product_id
+                HAVING SUM(gmv) > 0
+            )
+            SELECT agg.*, b.pareto_bucket
+            FROM agg
+            JOIN bucketed b USING (brand, product_id)
+            WHERE TRUE {bucket_filter}
             {order_by}
             LIMIT :limit OFFSET :offset
         """),
@@ -1422,6 +1720,7 @@ def get_produtos_tiktok(
             "problem_rate":  round(_f(r.problem_rate), 2)  if r.problem_rate   is not None else None,
             "rating_avg":    round(_f(r.rating_avg), 1)    if r.rating_avg     is not None else None,
             "total_ratings": int(_f(r.total_ratings))      if r.total_ratings  is not None else None,
+            "pareto_bucket": r.pareto_bucket,
         }
         for r in rows
     ]
@@ -1432,4 +1731,71 @@ def get_produtos_tiktok(
         "limit":     limit,
         "offset":    offset,
         "items":     items,
+    }
+
+
+def get_produtos_tiktok_summary(db: Session, brand: str | None, year: int, month: int) -> dict:
+    """Cards A/B/C/D — mesmos filtros da tabela (brand, ref_month/mes), exceto
+    o proprio filtro de bucket."""
+    start, end = _month_bounds(year, month)
+    brands_tuple = tuple(sorted(_TK_BRANDS))
+    filters = ["brand IN :brands", "date BETWEEN :start AND :end"]
+    params: dict = {"brands": brands_tuple, "start": start, "end": end}
+    if brand and brand in _TK_BRANDS:
+        filters.append("brand = :brand")
+        params["brand"] = brand
+    where = " AND ".join(filters)
+
+    counts_row = db.execute(
+        text(f"""
+            WITH grouped AS (
+                SELECT brand, product_id, SUM(gmv) AS gmv
+                FROM marts.fact_tiktok_product_daily
+                WHERE {where}
+                GROUP BY brand, product_id
+            )
+            SELECT COUNT(*) AS total_count,
+                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count
+            FROM grouped
+        """),
+        params,
+    ).fetchone()
+    total_count = int(counts_row.total_count)
+    eligible_count = int(counts_row.eligible_count)
+
+    rows = db.execute(
+        text(f"""
+            WITH base AS (
+                SELECT brand, product_id, SUM(gmv) AS gmv
+                FROM marts.fact_tiktok_product_daily
+                WHERE {where}
+                GROUP BY brand, product_id
+                HAVING SUM(gmv) > 0
+            ),
+            ranked AS (
+                SELECT gmv,
+                       SUM(gmv) OVER (ORDER BY gmv DESC, brand ASC, product_id ASC) AS cum_gmv,
+                       SUM(gmv) OVER ()                                             AS total_gmv
+                FROM base
+            ),
+            bucketed AS (
+                SELECT gmv, {_PARETO_BUCKET_CASE_SQL} AS pareto_bucket
+                FROM ranked
+            )
+            SELECT pareto_bucket, COUNT(*) AS count, SUM(gmv) AS gmv
+            FROM bucketed
+            GROUP BY pareto_bucket
+        """),
+        params,
+    ).fetchall()
+
+    buckets, total_gmv = _pareto_buckets_from_rows(rows)
+    return {
+        "ref_month":               f"{year:04d}-{month:02d}",
+        "total_gmv":               total_gmv,
+        "total_count":             total_count,
+        "eligible_count":          eligible_count,
+        "excluded_zero_gmv_count": total_count - eligible_count,
+        "brand":                   brand,
+        "buckets":                 buckets,
     }

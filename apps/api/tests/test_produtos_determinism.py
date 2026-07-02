@@ -97,6 +97,7 @@ def _tk_row(**overrides):
         gmv=1000, orders=10, items_sold=10,
         pct_gmv_video=None, pct_gmv_live=None, pct_gmv_card=None,
         problem_rate=None, rating_avg=None, total_ratings=None,
+        pareto_bucket=None,
     )
     base.update(overrides)
     return FakeRow(**base)
