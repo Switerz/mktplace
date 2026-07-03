@@ -241,7 +241,7 @@ Não foi possível calcular a similaridade dentro do próprio SQL (Neon não tem
 
 ---
 
-### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01; corrigido no PostgreSQL LOCAL em 2026-07-02 via Gates 1–3 — Neon ainda não corrigido, ver Gate 4)
+### Bug 8 — `canceled_orders` subcontado em `fact_shopee_product_monthly`: ETL descarta grupos com só pedidos cancelados (ENCONTRADO em 2026-07-01; **RESOLVIDO em produção — local e Neon — em 2026-07-02/03 via Gates 1–4B; encerrado com QA final em 2026-07-03**)
 
 **Severidade:** Média — GMV/`units_sold`/`completed_orders` não são afetados; `canceled_orders` e `cancel_rate_pct` ficam levemente subestimados para produtos com cancelamentos concentrados.
 
@@ -292,7 +292,49 @@ Backup e staging preservados (não removidos) para inspeção/rollback manual.
 
 Testes: `pipelines/tests/test_swap_bug8_canceled_only.py` — preflight bloqueia objeto ausente/drift/staging divergente (linhas, GMV, duplicatas, nulos); `_swap` sempre faz rollback antes de qualquer falha chegar a `COMMIT`; `INSERT` comprovadamente usa lista explícita de colunas (nunca `SELECT *`); guardas estruturais confirmam ausência de leitura de `DATABASE_URL`/`DATAMART_DATABASE_URL` e nomes de backup/staging como constantes fixas (nunca descoberta dinâmica via `LIKE`/`ORDER BY ... DESC LIMIT`).
 
-**Pendência**: Neon ainda reflete os dados antigos (sem os 84 cancelamentos recuperados) — ver Gate 4 (planejamento) para trazer a correção ao Neon, com backup/staging/reconciliação Neon antes de qualquer swap lá.
+**Gate 4A.1 (2026-07-02) — diagnóstico read-only do Neon:**
+
+`pipelines/reconciliation/diagnose_bug8_neon.py --diagnose` (primeiro script da série autorizado a abrir `DATABASE_URL`; nunca referencia `DATAMART_DATABASE_URL`; transação explicitamente read-only) confirmou Neon == backup local pré-fix: 2.431 linhas, 0 drift, 0 dados novos, nas 25 combinações marca×mês. Commit `7a5b6c3`.
+
+**Gate 4A.2 (2026-07-02) — backup + staging criados no Neon:**
+
+Modo `--prepare` do mesmo script (guardas: flag explícita + `I_UNDERSTAND_THIS_TOUCHES_NEON=1` + diagnóstico limpo recalculado imediatamente antes + **revalidação sob `SHARE LOCK`** contra o backup local pré-fix, fechando a janela de corrida entre diagnóstico e lock). Numa única transação criou e reconciliou:
+- Backup Neon: `marts.fact_shopee_product_monthly_backup_bug8_neon_20260702_232445` (2.431 linhas, `EXCEPT` 0/0 vs. tabela real).
+- Staging Neon: `marts.fact_shopee_product_monthly_staging_bug8_neon_20260702_232445` (2.471 linhas, copiada da staging local já validada no Gate 2 — 13 colunas explícitas, idêntica chave a chave, 0 duplicatas/nulos).
+
+Tabela real do Neon não foi tocada neste gate. Commit do código: `54780d7`.
+
+**Gate 4B (2026-07-02) — swap aplicado no Neon (COMMIT):**
+
+`pipelines/reconciliation/swap_bug8_neon.py --swap-neon` (commit `ccd93fa`; guardas: flag + `I_UNDERSTAND_THIS_REPLACES_NEON_DATA=1` + diagnóstico limpo + nomes de backup/staging fixos + `SET LOCAL lock_timeout='10s'`/`statement_timeout='60s'` antes do `ACCESS EXCLUSIVE LOCK` + preflight completo sob o lock, incluindo verificação de FKs de terceiros). Transação única: `TRUNCATE` só da tabela real (sem `CASCADE`/`RESTART IDENTITY`) → `INSERT` com 13 colunas explícitas a partir da staging Neon → `EXCEPT` bidirecional 0/0 → agregados idênticos → `COMMIT`.
+
+**Resultado final no Neon (produção):**
+
+| Métrica | Antes (pré-fix) | Depois |
+|---|---|---|
+| Linhas | 2.431 | **2.471** (+40, todas com GMV zero) |
+| `canceled_orders` | 53.515 | **53.599** (+84 recuperados) |
+| GMV | R$ 21.174.272,80 | R$ 21.174.272,80 (inalterado) |
+| `units_sold` | 337.448 | 337.448 (inalterado) |
+| `completed_orders` | 329.588 | 329.588 (inalterado) |
+
+Além das 40 linhas novas (grupos só-cancelados, `gmv=0`, fora do Pareto por construção), **12 linhas pré-existentes** mudaram apenas em `canceled_orders`/`variation_name` — variações só-canceladas somadas em linhas já existentes pela consolidação do Bug 5 (ex.: `lescent/N4`, `kokeshi/KV37A39`). Verificado explicitamente: GMV, `units_sold` e `completed_orders` idênticos ao backup em 100% das chaves comuns, nenhuma chave do backup sumiu → **Pareto matematicamente inalterado**.
+
+**QA final de encerramento (2026-07-03, tudo read-only):**
+- Neon: 17/17 checks (agregados exatos, `EXCEPT` real↔staging 0/0, 0 duplicatas/nulos, backup/staging intocados, 40 linhas gmv=0, 12 diffs só-cancelamento, 0 chaves perdidas).
+- API pública (`https://mktplace-api.onrender.com`): **25/25 combinações marca×mês** em `/produtos/shopee` + `/produtos/shopee/summary` — HTTP 200, `eligible_count` = soma dos buckets, GMV dos buckets = `total_gmv`, nenhum produto de GMV zero no Pareto, filtros respeitados, `total_count` já refletindo as +40 linhas (ex.: apice jan/2026 `total_count=116`, `excluded_zero_gmv_count=5`).
+- Reconciliação fonte: os 85 XLSX reprocessados em memória com o `_aggregate` corrigido batem com o Neon em GMV/unidades/concluídos/cancelados nas 25 combinações (divergência zero).
+
+**Monitoramento futuro:** `pipelines/reconciliation/monitor_bug8_invariants.py` — read-only, valida **invariantes** (nunca os snapshots 2.471/53.599, que mudam com cargas futuras): duplicatas, nulos, métricas negativas, coerência das linhas só-canceladas (`gmv=0`, `cancel_rate=100`), consistência de `cancel_rate_pct`, e reconciliação de agregados por marca×mês contra os XLSX locais quando disponíveis (`canceled_orders` do Neon menor que o da fonte = assinatura de regressão ao left merge). Exit code 1 em divergência. Rodar após cada carga do ETL Shopee:
+```bash
+python -m pipelines.reconciliation.monitor_bug8_invariants            # completo
+python -m pipelines.reconciliation.monitor_bug8_invariants --skip-source  # so invariantes do mart
+```
+Testes em `pipelines/tests/test_monitor_bug8_invariants.py` (conexões falsas). Não confundir com `diagnose_bug8_neon.py --diagnose`, que compara contra o snapshot pré-fix e **passou a divergir intencionalmente** após o Gate 4B — não usar como monitor.
+
+**Política de retenção dos objetos de segurança (definida em 2026-07-03):**
+- `marts.fact_shopee_product_monthly_backup_bug8_neon_20260702_232445` e `..._staging_bug8_neon_20260702_232445` (Neon), e `..._backup_bug8_20260702_150840`/`..._staging_bug8_20260702_150840` (PostgreSQL local) devem ser **preservados até ocorrer pelo menos uma carga real posterior do ETL Shopee validada com sucesso pelo monitor acima, mais 7 dias de observação**.
+- Qualquer remoção futura exige autorização explícita — nenhum objeto foi apagado nesta sessão.
 
 ---
 
@@ -419,7 +461,7 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 | Período do ranking ML | Ausente da UI | Usuário não sabe a qual mês os dados se referem |
 | `unique_buyers` Shopee (produtos com variação combinada) | Aproximação (ETL) | Soma entre variações pode contar 2x um comprador que comprou >1 variação no mês (ver Bug 5) |
 | `unique_buyers` Shopee (`sku_ref_key` com >1 linha no mart, ver Bug 6) | `null` (não estimado) | API não soma sem chave de comprador — corrigido em 2026-07-01, era somado antes |
-| `canceled_orders`/`cancel_rate_pct` Shopee | Subestimado (~84 pedidos em jan–mai/2026) | ETL descarta grupos com só pedidos cancelados por usar `left` merge a partir de completados (ver Bug 8, não corrigido nesta sessão) |
+| `canceled_orders`/`cancel_rate_pct` Shopee | Confiável desde 2026-07-03 | Era subestimado (~84 pedidos) pelo `left` merge do ETL — corrigido no código e nos dados (local + Neon), validado contra os 85 XLSX (ver Bug 8, resolvido) |
 
 ---
 
@@ -446,6 +488,9 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 | C17 | `apps/api/etl/load_shopee_products.py`, `apps/api/etl/tests/test_load_shopee_products_aggregate.py` | Fase 2 (Bug 8), Gate 1: `_aggregate` troca `agg_completed.merge(agg_canceled, how="left")` por `how="outer"` com `fillna` — grupos só-cancelados deixam de ser descartados. `unique_buyers` desses grupos fica `0` por decisão explícita. Nenhum dado em produção alterado por este commit — só o código do ETL, que só tem efeito quando reexecutado | 2026-07-02 |
 | C18 | `pipelines/reconciliation/reconcile_bug8_canceled_only.py` (novo), `pipelines/tests/test_reconcile_bug8_canceled_only.py` (novo) | Fase 2 (Bug 8), Gate 2: script de reconciliação SOMENTE PostgreSQL local (nunca referencia `DATABASE_URL`/`DATAMART_DATABASE_URL`; exige `LOCAL_PG_URL` explícito, sem fallback, e recusa qualquer host fora de `localhost`/`127.0.0.1`/`::1`). Criou backup + staging locais e reconciliou as 25 combinações marca×mês: `canceled_orders` +84, linhas do mart +40, GMV/units/completed com diferença zero, sem duplicatas/nulos, Pareto matematicamente inalterado. Tabela real e Neon não foram tocados. Swap (Gate 3) não executado | 2026-07-02 |
 | C19 | `pipelines/reconciliation/swap_bug8_canceled_only.py` (novo), `pipelines/tests/test_swap_bug8_canceled_only.py` (novo) | Fase 2 (Bug 8), Gate 3: swap transacional da tabela real LOCAL a partir da staging do Gate 2 (`LOCK`+`TRUNCATE`+`INSERT` com colunas explícitas+`EXCEPT` bidirecional+agregados, `COMMIT` só se idêntico). Tabela real local passa a ter 2.471 linhas e 53.599 cancelamentos (+84). GMV/units/completed inalterados, Pareto inalterado. Backup/staging preservados. Neon não tocado — permanece com os dados antigos, sem os 84 cancelamentos recuperados, até o Gate 4 | 2026-07-02 |
+| C20 | `pipelines/reconciliation/diagnose_bug8_neon.py` (novo), `pipelines/tests/test_diagnose_bug8_neon.py`, `pipelines/tests/test_prepare_bug8_neon.py` (novos) | Fase 2 (Bug 8), Gates 4A.1/4A.2: diagnóstico read-only Neon vs. backup local pré-fix (commit `7a5b6c3`) e criação transacional de backup+staging no Neon com revalidação sob `SHARE LOCK` contra condição de corrida (commit `54780d7`). Executado em 2026-07-02: Neon confirmado idêntico ao pré-fix, `..._backup_bug8_neon_20260702_232445` (2.431) e `..._staging_bug8_neon_20260702_232445` (2.471) criados e reconciliados. Tabela real do Neon não tocada | 2026-07-02 |
+| C21 | `pipelines/reconciliation/swap_bug8_neon.py`, `pipelines/tests/test_swap_bug8_neon.py` (novos) | Fase 2 (Bug 8), Gate 4B (commit `ccd93fa`): swap da tabela real do NEON a partir da staging auditada — `SET LOCAL lock_timeout/statement_timeout` → `ACCESS EXCLUSIVE LOCK` → preflight sob lock (real==backup Neon, staging válida, sem FKs de terceiros) → `TRUNCATE`+`INSERT` explícito → `EXCEPT` 0/0 → `COMMIT`. Executado com sucesso em 2026-07-02: Neon em produção com 2.471 linhas / 53.599 cancelamentos, GMV/units/completed/Pareto inalterados. Backup/staging Neon preservados | 2026-07-02 |
+| C22 | `pipelines/reconciliation/monitor_bug8_invariants.py`, `pipelines/tests/test_monitor_bug8_invariants.py` (novos), docs | Encerramento do Bug 8: QA final read-only (Neon 17/17 checks; API pública 25/25 combinações marca×mês; reconciliação fonte XLSX diff zero) + monitor reutilizável de invariantes pós-carga (read-only, sem snapshots hardcoded, detecta regressão ao left merge via `canceled_orders` menor que a fonte) + política de retenção de backup/staging documentada | 2026-07-03 |
 
 ---
 
@@ -457,7 +502,7 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 4. **Documentar thresholds de `ad_efficiency` e `revenue_velocity`** em `docs/kpi_dictionary.md`.
 5. **Ativar o agendamento** de `pipelines/sync_produtos.py` e `pipelines/ingestion/daily_performance.py` no Windows Task Scheduler — comandos preparados em `docs/runbook_sync_produtos.md`, **não ativados** (requer nova autorização).
 6. **Avaliar adicionar `variation_name` à chave única de `fact_shopee_product_monthly`** via migration, se a granularidade por variação for necessária na UI (ver Bug 5).
-7. **Corrigir o merge `left` de `_aggregate()` em `load_shopee_products.py`** para `outer` (com `fillna(0)`), reprocessar via pipeline de reconciliação transacional e validar contra XLSX antes de substituir em produção (ver Bug 8 — requer nova autorização, fora do escopo desta sessão).
+7. ~~**Corrigir o merge `left` de `_aggregate()` em `load_shopee_products.py`**~~ — **CONCLUÍDO em 2026-07-02/03** (Bug 8 resolvido via Gates 1–4B; monitor pós-carga em `pipelines/reconciliation/monitor_bug8_invariants.py`).
 8. **Se houver demanda de negócio real para consolidar listings com título editado** (categoria B do Bug 7, 78 grupos), criar um arquivo de aliases explícito e versionado (`docs/data/shopee_sku_aliases.yaml` ou similar) com revisão manual por entrada — nunca gerado automaticamente por similaridade (ver Bug 9, item 3).
 
 ---
@@ -468,4 +513,4 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 |---|---|---|---|
 | ML | Sim (Neon, atualizado até 2026-07-01) | Ranking sem data explícita | Confiável, inclui `rituaria` (Bug 4 resolvido) — sem contexto temporal no ranking (Problema 5) |
 | TikTok | Sim (Neon, atualizado até 2026-06-29) | Filtrado por mês | Confiável com ressalva de problem_rate |
-| Shopee | Sim (Neon, corrigido) | jan–mai/2026 | Confiável para GMV/units/completed (validado contra os 85 XLSX originais, diff zero) — identidade de produto usa chave estrita, sem consolidação automática (Bug 9); `canceled_orders` levemente subestimado (Bug 8, não corrigido) |
+| Shopee | Sim (Neon, corrigido) | jan–mai/2026 | Confiável para GMV/units/completed/**canceled** (validado contra os 85 XLSX originais, diff zero nas 25 combinações marca×mês em 2026-07-03) — identidade de produto usa chave estrita, sem consolidação automática (Bug 9); Bug 8 resolvido em produção |

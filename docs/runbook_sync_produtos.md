@@ -19,11 +19,13 @@
 > menos de 1.000 linhas num full backfill (TikTok). Ver `pipelines/tests/`
 > para os testes dessas guardas.
 >
-> Há também um bug de dados conhecido em `fact_shopee_product_monthly`
-> (`ref_month` incorreto em ~42% das linhas, causa raiz corrigida no código
-> em `apps/api/etl/load_shopee_products.py` mas dado ainda não corrigido) —
-> ver `docs/sections/produtos_audit.md` (Bug 3) antes de rodar `--full` para
-> Shopee em produção.
+> **Atualizado em 2026-07-03:** os dois bugs de dados conhecidos de
+> `fact_shopee_product_monthly` estão **resolvidos em produção** (local e
+> Neon): `ref_month` incorreto (Bug 3, dados corrigidos em 2026-07-01) e
+> grupos só-cancelados descartados pelo `left` merge (Bug 8, dados
+> corrigidos em 2026-07-02 via Gates 1–4B, commit do swap `ccd93fa`). Ver
+> `docs/sections/produtos_audit.md`. **Após cada carga Shopee, rodar o
+> monitor read-only de invariantes** (seção "Alertas de qualidade" abaixo).
 
 ---
 
@@ -236,12 +238,15 @@ for r in cur.fetchall(): print(r)
 EOF
 ```
 
-Saída esperada (atualizado após a correção de 2026-07-01 — ver `docs/sections/produtos_audit.md` Bug 3/Bug 5):
+Saída esperada (atualizado após a correção do Bug 8 em 2026-07-02 — ver `docs/sections/produtos_audit.md` Bug 3/Bug 5/Bug 8):
 ```
-('shopee', 2431, datetime.date(2026, 5, 1))
+('shopee', 2471, datetime.date(2026, 5, 1))
 ('ml',     1486, datetime.date(2026, 7, 1))
 ('tiktok', 173920, datetime.date(2026, 6, 29))
 ```
+Nota: das 2.471 linhas Shopee, 40 têm `gmv = 0` — são grupos com somente
+pedidos cancelados, presença **intencional** desde o fix do Bug 8 (eles
+ficam fora do Pareto, que só considera `gmv > 0`).
 Se `shopee` aparecer com `max_d` além do mês corrente ou contagem voltando a subir de forma inexplicada, investigar antes de assumir que é frescor normal — já houve um bug de parsing de data que inflava `ref_month` para meses futuros (Bug 3).
 
 ---
@@ -253,6 +258,32 @@ Após cada sync, verificar:
 1. **Shopee**: `COUNT` ≥ contagem do mês anterior — redução indica problema na fonte
 2. **ML**: `COUNT` entre 1.200 e 1.500 — variação grande indica truncamento ou explosion na fonte
 3. **TikTok**: `MAX(date)` ≥ D-2 — atraso indica falha silenciosa no incremental
+
+### Monitor de invariantes do Bug 8 (Shopee — rodar após cada carga)
+
+```bash
+# Completo: invariantes do mart + reconciliação contra os XLSX locais
+python -m pipelines.reconciliation.monitor_bug8_invariants
+
+# Só invariantes do mart (máquina sem os arquivos-fonte)
+python -m pipelines.reconciliation.monitor_bug8_invariants --skip-source
+```
+
+Somente leitura (Neon com sessão read-only; nunca toca `DATAMART_DATABASE_URL`).
+Valida **invariantes**, não snapshots — funciona para qualquer carga futura:
+duplicatas/nulos/negativos na chave do mart, coerência de linhas
+só-canceladas (`gmv=0`, `cancel_rate=100`), consistência de
+`cancel_rate_pct`, e agregados por marca×mês contra a fonte XLSX
+(`canceled_orders` do Neon menor que o da fonte = regressão ao `left`
+merge do Bug 8). Exit code ≠ 0 em divergência — adequado para encadear
+após o sync no Task Scheduler quando o agendamento for ativado.
+
+**Retenção dos objetos de segurança do Bug 8**: os backups/stagings
+`marts.fact_shopee_product_monthly_{backup,staging}_bug8_neon_20260702_232445`
+(Neon) e `..._{backup,staging}_bug8_20260702_150840` (PG local) devem ser
+preservados até pelo menos **1 carga real posterior do ETL Shopee validada
+com sucesso por este monitor + 7 dias de observação**; qualquer remoção
+exige autorização explícita.
 
 ---
 

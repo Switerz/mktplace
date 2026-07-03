@@ -418,19 +418,26 @@ A maior parte do escopo já havia sido implementada e commitada em `062880b` (ch
 
 Ver `docs/sections/produtos_audit.md` (entrada C16) para o detalhamento técnico.
 
-### Fase 2 — Bug 8 Shopee (cancelamentos subcontados) — 📋 PLANEJADA, NÃO EXECUTADA
+### Fase 2 — Bug 8 Shopee (cancelamentos subcontados) — ✅ CONCLUÍDA (2026-07-02/03)
 
-**Bug**: `apps/api/etl/load_shopee_products.py` (`_aggregate`) usa `left` merge a partir de pedidos completados — grupos com *somente* pedidos cancelados são descartados, subestimando `canceled_orders`/`cancel_rate_pct` em ~84 pedidos (19 de 25 combinações marca×mês, ver Bug 8 em `produtos_audit.md`). GMV/units/completed não são afetados.
+**Bug**: `apps/api/etl/load_shopee_products.py` (`_aggregate`) usava `left` merge a partir de pedidos completados — grupos com *somente* pedidos cancelados eram descartados, subestimando `canceled_orders`/`cancel_rate_pct` em 84 pedidos. GMV/units/completed nunca foram afetados.
 
-**Plano** (não executar sem autorização):
-1. Trocar `how="left"` por `how="outer"` no merge de `_aggregate()`, com `fillna(0)` em `gmv`/`units_sold`/`completed_orders`.
-2. Criar teste de regressão no ETL que reproduza um grupo só-cancelado e confirme que ele não é mais descartado.
-3. Backup timestamped local + Neon (mesmo padrão do Bug 3/5 — `pipelines/reconciliation/fix_shopee_product_dates.py`).
-4. Reprocessar os 85 XLSX em staging (nunca direto na tabela de produção).
-5. Reconciliar os ~84 cancelamentos contra os XLSX originais antes de qualquer substituição.
-6. Só substituir dados em produção após aprovação explícita, com validação cruzada documentada.
+**Executada em gates com aprovação explícita por etapa** (detalhamento completo em `docs/sections/produtos_audit.md`, Bug 8):
 
-**Próximo prompt sugerido**: *"Execute a Fase 2 (Bug 8 Shopee) em modo planejamento: corrija o merge do ETL e crie os testes de regressão, mas não reprocesse nem substitua dados em produção sem nova autorização explícita."*
+| Gate | Entrega | Commit |
+|---|---|---|
+| 1 | Fix do merge (`left`→`outer`) + 4 testes de regressão do ETL | `7bd0981` |
+| 2 | Backup + staging LOCAIS reconciliados (25 combinações, diff zero em GMV/units/completed, +84 cancelados) | `819ded1` |
+| 3 | Swap transacional da tabela real LOCAL | `654153e` |
+| 4A.1 | Diagnóstico read-only do Neon (idêntico ao pré-fix) | `7a5b6c3` |
+| 4A.2 | Backup + staging criados no NEON com revalidação sob lock | `54780d7` |
+| 4B | Swap da tabela real do NEON — **COMMIT em produção** | `ccd93fa` |
+
+**Resultado final (local + Neon)**: 2.471 linhas (+40, todas GMV zero), 53.599 cancelamentos (+84), GMV R$ 21.174.272,80 / unidades / concluídos / Pareto inalterados. QA de encerramento em 2026-07-03: Neon 17/17 checks, API pública 25/25 combinações, reconciliação contra os 85 XLSX com diff zero.
+
+**Monitor pós-carga**: `python -m pipelines.reconciliation.monitor_bug8_invariants` (read-only, invariantes — rodar após cada carga futura do ETL Shopee).
+
+**Retenção**: backups/stagings (local e Neon) preservados até 1 carga real posterior validada + 7 dias; remoção só com autorização explícita.
 
 ### Fase 3 — Operação e frescor — 📋 PLANEJADA, NÃO EXECUTADA
 
