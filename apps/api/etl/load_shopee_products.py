@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -18,10 +19,47 @@ from sqlalchemy import create_engine, text
 # Configuração
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/mktplace_control",
-)
+# Este loader so' deve escrever no PostgreSQL LOCAL (nunca no Neon nem no
+# Data Mart/RDS de producao) — exige LOCAL_PG_URL explicitamente, sem
+# fallback com credencial hardcoded, e restringe o host a localhost. A
+# resolucao e' LAZY (so' dentro de main(), nunca no import do modulo):
+# outros scripts (reconcile_bug8_canceled_only.py, monitor_bug8_invariants.py,
+# fix_shopee_product_dates.py, diagnose_bug8_neon.py) importam so' as
+# funcoes puras deste arquivo (BRANDS, DDL, _aggregate, _load_brand) sem
+# precisar de nenhuma conexao — um _get_local_pg_url() eager no topo do
+# modulo quebraria esses imports sempre que a variavel nao estivesse
+# definida no ambiente de quem so' quer reaproveitar a logica pura.
+_ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _sanitize_url(url: str) -> str:
+    if not url:
+        return "(nao configurado)"
+    p = urlsplit(url)
+    host = p.hostname or "?"
+    port = p.port if p.port is not None else "?"
+    db = p.path.lstrip("/") or "?"
+    return f"{host}:{port}/{db}"
+
+
+def _get_local_pg_url() -> str:
+    url = os.environ.get("LOCAL_PG_URL", "")
+    if not url:
+        raise RuntimeError(
+            "LOCAL_PG_URL nao definido. Este loader escreve exclusivamente no "
+            "PostgreSQL local — a variavel e' exigida explicitamente, sem "
+            "fallback com credencial hardcoded, para nunca escrever num banco "
+            "nao pretendido (Neon/Data Mart)."
+        )
+    host = (urlsplit(url).hostname or "").lower()
+    if host not in _ALLOWED_LOCAL_HOSTS:
+        raise RuntimeError(
+            f"LOCAL_PG_URL aponta para um host nao permitido ({_sanitize_url(url)}). "
+            f"So' localhost/127.0.0.1/::1 sao aceitos — este loader nunca deve "
+            f"escrever num host remoto (Neon/Data Mart)."
+        )
+    return url
+
 
 SHOPEE_ROOT = Path(r"C:\Users\Notebook\Desktop\mktplace\shopee")
 BRANDS = ["apice", "barbours", "kokeshi", "lescent", "rituaria"]
@@ -225,7 +263,9 @@ def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    engine = create_engine(DATABASE_URL)
+    local_pg_url = _get_local_pg_url()
+    print(f"PostgreSQL local (destino): {_sanitize_url(local_pg_url)}")
+    engine = create_engine(local_pg_url)
 
     with engine.begin() as conn:
         conn.execute(text(DDL))
