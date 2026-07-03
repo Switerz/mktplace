@@ -16,28 +16,41 @@ Dois modos:
       dados novos no Neon (chaves que nao existem no backup) ou drift
       (mesma chave, valores diferentes).
 
-  --prepare: escrita de backup/staging no Neon. NAO IMPLEMENTADO nesta
-      versao — por decisao explicita de escopo (Gate 4A.2, nao autorizado
-      ainda), este modo sempre recusa a execucao apos validar suas
-      proprias guardas (flag + variavel de ambiente + diagnostico limpo),
-      levantando NotImplementedError. Nao existe nenhuma instrucao SQL de
-      escrita (criar tabela, inserir linha, ou qualquer operacao que
-      remova/sobrescreva dados existentes) em nenhum lugar deste arquivo.
+  --prepare: cria backup + staging SOMENTE no Neon (Gate 4A.2), a partir
+      da staging local ja validada no Gate 2 — nunca reprocessa os XLSX de
+      novo. Exige simultaneamente: flag --prepare, variavel de ambiente
+      I_UNDERSTAND_THIS_TOUCHES_NEON=1, e um diagnostico limpo executado
+      imediatamente antes (sempre recalculado, nunca reaproveitado). Roda
+      numa unica transacao no Neon: adquire um lock de leitura na tabela
+      real (bloqueia escritores concorrentes sem bloquear leitores e sem
+      ser, ele mesmo, uma escrita), cria o backup a partir da tabela real,
+      cria a staging e a popula com as 13 colunas de negocio explicitas,
+      reconcilia cada objeto criado (contagem, GMV, unidades, concluidos,
+      cancelados, duplicidades, nulos), e so' commita se tudo passar —
+      qualquer falha aciona rollback integral antes de propagar a excecao.
+      Nomes de backup/staging sao gerados internamente com timestamp e
+      validados como identificadores seguros antes de entrar em qualquer
+      SQL; o modo recusa criar um objeto se o nome gerado ja existir (nunca
+      sobrescreve). A tabela real do Neon nunca recebe nenhuma instrucao
+      que a modifique — nenhuma instrucao SQL desse tipo existe neste
+      arquivo, para nenhuma tabela.
 
 Uso:
     python -m pipelines.reconciliation.diagnose_bug8_neon              # diagnose
     python -m pipelines.reconciliation.diagnose_bug8_neon --diagnose   # idem, explicito
-    python -m pipelines.reconciliation.diagnose_bug8_neon --prepare    # sempre recusa nesta versao
+    python -m pipelines.reconciliation.diagnose_bug8_neon --prepare    # cria backup/staging no Neon (guardas obrigatorias)
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
 
@@ -47,7 +60,12 @@ from pipelines.reconciliation.reconcile_bug8_canceled_only import (  # noqa: E40
 )
 from pipelines.reconciliation.swap_bug8_canceled_only import (  # noqa: E402
     BACKUP_TABLE,
+    EXPECTED_STAGING_CANCELED,
+    EXPECTED_STAGING_GMV,
+    EXPECTED_STAGING_ROWS,
     REAL_TABLE,
+    STAGING_TABLE as LOCAL_STAGING_TABLE,
+    _table_exists,
 )
 
 BUSINESS_COLUMNS = [
@@ -56,8 +74,15 @@ BUSINESS_COLUMNS = [
     "cancel_rate_pct", "unique_buyers", "avg_price",
 ]
 
+# Identificador seguro: letra inicial, so' minusculas/numeros/underscore,
+# tamanho compativel com o limite de identificador do Postgres (63 bytes).
+# Aplicado a TODO nome de tabela gerado internamente antes de entrar em
+# qualquer f-string SQL — defesa em profundidade mesmo sem entrada de
+# usuario, contra um refactor futuro que introduza interpolacao insegura.
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
-class PrepareNotAuthorizedError(RuntimeError):
+
+class PrepareValidationError(RuntimeError):
     pass
 
 
@@ -90,6 +115,25 @@ def _local_readonly(url: str):
     conn = psycopg2.connect(url, cursor_factory=RealDictCursor, connect_timeout=10)
     conn.set_session(readonly=True)
     return conn
+
+
+def _neon_writable(url: str):
+    """Conexao Neon SEM readonly=True — usada exclusivamente pelo modo
+    --prepare, que precisa criar backup/staging. Autocommit permanece
+    desligado (padrao do psycopg2): toda a operacao roda numa unica
+    transacao controlada explicitamente por do_prepare_neon (commit/
+    rollback manuais)."""
+    return psycopg2.connect(url, cursor_factory=RealDictCursor, connect_timeout=15)
+
+
+def _now_tag() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _validate_identifier(name: str) -> str:
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"identificador gerado internamente falhou na validacao de seguranca: {name!r}")
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -234,13 +278,171 @@ def _print_report(report: dict, neon_url: str, local_url: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# --prepare — gated, NAO IMPLEMENTADO (Gate 4A.2)
+# Helpers de agregacao/reconciliacao no Neon (puros o suficiente para
+# testar com conexoes falsas — recebem conn/cursor, nunca abrem conexao)
 # ---------------------------------------------------------------------------
-def run_prepare(args, diagnose_fn=None) -> None:
-    """Sempre recusa a execucao nesta versao do script. Valida as guardas
-    (flag + variavel de ambiente + diagnostico limpo) antes de recusar, para
-    que a recusa em si ja sirva de teste dessas guardas quando o Gate 4A.2
-    for autorizado e a criacao de backup/staging for implementada aqui."""
+def _aggregates_from_rows(rows: list[dict]) -> dict:
+    return {
+        "n": len(rows),
+        "gmv": round(sum(float(r["gmv"] or 0) for r in rows), 2),
+        "units_sold": sum(int(r["units_sold"] or 0) for r in rows),
+        "completed_orders": sum(int(r["completed_orders"] or 0) for r in rows),
+        "canceled_orders": sum(int(r["canceled_orders"] or 0) for r in rows),
+    }
+
+
+def _aggregates_from_table(conn, table: str) -> dict:
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT COUNT(*) AS n, COALESCE(SUM(gmv), 0) AS gmv,
+               COALESCE(SUM(units_sold), 0) AS units_sold,
+               COALESCE(SUM(completed_orders), 0) AS completed_orders,
+               COALESCE(SUM(canceled_orders), 0) AS canceled_orders
+        FROM marts.{table}
+    """)
+    row = dict(cur.fetchone())
+    cur.close()
+    return {
+        "n": int(row["n"]), "gmv": round(float(row["gmv"]), 2),
+        "units_sold": int(row["units_sold"]), "completed_orders": int(row["completed_orders"]),
+        "canceled_orders": int(row["canceled_orders"]),
+    }
+
+
+def _duplicates_and_nulls(conn, table: str) -> tuple[int, int]:
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT COUNT(*) AS n FROM (
+            SELECT ref_month, brand, sku_ref_key, product_name
+            FROM marts.{table}
+            GROUP BY ref_month, brand, sku_ref_key, product_name
+            HAVING COUNT(*) > 1
+        ) d
+    """)
+    dupes = cur.fetchone()["n"]
+    cur.execute(f"""
+        SELECT COUNT(*) AS n FROM marts.{table}
+        WHERE ref_month IS NULL OR brand IS NULL OR product_name IS NULL
+    """)
+    nulls = cur.fetchone()["n"]
+    cur.close()
+    return dupes, nulls
+
+
+def _except_both_directions(conn, table_a: str, table_b: str) -> tuple[int, int]:
+    cols = ", ".join(BUSINESS_COLUMNS)
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) AS n FROM (SELECT {cols} FROM marts.{table_a} EXCEPT SELECT {cols} FROM marts.{table_b}) x")
+    a_not_b = cur.fetchone()["n"]
+    cur.execute(f"SELECT COUNT(*) AS n FROM (SELECT {cols} FROM marts.{table_b} EXCEPT SELECT {cols} FROM marts.{table_a}) x")
+    b_not_a = cur.fetchone()["n"]
+    cur.close()
+    return a_not_b, b_not_a
+
+
+# ---------------------------------------------------------------------------
+# Gate 4A.2 — cria backup + staging SOMENTE no Neon (implementado, mas so'
+# executado sob as guardas de run_prepare; nao chamado com conexoes reais
+# nesta sessao).
+# ---------------------------------------------------------------------------
+def do_prepare_neon(neon_conn, local_conn, tag: str) -> dict:
+    """Dentro de uma UNICA transacao no Neon: valida que os nomes gerados
+    nao colidem com objetos existentes, adquire um lock de leitura
+    (SHARE MODE — bloqueia escritores concorrentes sem bloquear leitores e
+    sem constituir, ele mesmo, uma escrita), REVALIDA sob o lock que o Neon
+    ainda e' identico ao backup local pre-fix (fecha a janela de corrida
+    entre o diagnostico inicial de run_prepare, que roda ANTES desta
+    funcao/do lock, e o momento em que de fato vamos escrever), cria o
+    backup a partir da tabela real, cria a staging e a popula com as
+    linhas da staging local ja validada (13 colunas explicitas), reconcilia
+    cada objeto criado, e so' faz commit se TODAS as reconciliacoes
+    passarem. Qualquer excecao aciona rollback antes de propagar. NUNCA
+    emite uma instrucao que modifique a tabela real."""
+    backup_name = _validate_identifier(f"{REAL_TABLE}_backup_bug8_neon_{tag}")
+    staging_name = _validate_identifier(f"{REAL_TABLE}_staging_bug8_neon_{tag}")
+
+    cur = neon_conn.cursor()
+    try:
+        if _table_exists(cur, backup_name):
+            raise PrepareValidationError(f"objeto ja existe, recusando sobrescrever: marts.{backup_name}")
+        if _table_exists(cur, staging_name):
+            raise PrepareValidationError(f"objeto ja existe, recusando sobrescrever: marts.{staging_name}")
+
+        cur.execute(f"LOCK TABLE marts.{REAL_TABLE} IN SHARE MODE")
+
+        # Revalidacao SOB O LOCK, antes de qualquer escrita: reusa a mesma
+        # comparacao de run_diagnose (13 colunas de negocio nos dois
+        # sentidos + chaves + agregados por marca x mes) contra o Neon
+        # (agora protegido pelo lock) e o backup local pre-fix. Se algo
+        # mudou entre o diagnostico inicial (fora desta transacao) e agora,
+        # aborta antes do CREATE TABLE do backup Neon.
+        revalidation = run_diagnose(neon_conn, local_conn)
+        if revalidation["problems"]:
+            raise PrepareValidationError(
+                "revalidacao sob lock encontrou divergencia entre o Neon e o backup local "
+                "pre-fix — o Neon mudou entre o diagnostico inicial e a aquisicao do lock, "
+                "abortando antes de qualquer escrita: " + "; ".join(revalidation["problems"])
+            )
+
+        cur.execute(f"CREATE TABLE marts.{backup_name} AS SELECT * FROM marts.{REAL_TABLE}")
+
+        real_agg = _aggregates_from_table(neon_conn, REAL_TABLE)
+        backup_agg = _aggregates_from_table(neon_conn, backup_name)
+        if real_agg != backup_agg:
+            raise PrepareValidationError(f"backup diverge da tabela real imediatamente apos a criacao: real={real_agg} backup={backup_agg}")
+        real_not_backup, backup_not_real = _except_both_directions(neon_conn, REAL_TABLE, backup_name)
+        if real_not_backup or backup_not_real:
+            raise PrepareValidationError(f"backup diverge da tabela real (EXCEPT nao-zero: real_not_backup={real_not_backup} backup_not_real={backup_not_real})")
+
+        from etl.load_shopee_products import DDL as _SHOPEE_TABLE_DDL
+        cur.execute(_SHOPEE_TABLE_DDL.replace(REAL_TABLE, staging_name))
+
+        local_rows = _fetch_business_rows(local_conn, LOCAL_STAGING_TABLE)
+        if not local_rows:
+            raise PrepareValidationError("staging local esta vazia — nada para copiar ao Neon")
+
+        insert_sql = f"INSERT INTO marts.{staging_name} ({', '.join(BUSINESS_COLUMNS)}) VALUES %s"
+        batch = [tuple(r[c] for c in BUSINESS_COLUMNS) for r in local_rows]
+        execute_values(cur, insert_sql, batch, page_size=500)
+
+        staging_agg = _aggregates_from_table(neon_conn, staging_name)
+        local_agg = _aggregates_from_rows(local_rows)
+        for key in ("n", "gmv", "units_sold", "completed_orders", "canceled_orders"):
+            if staging_agg[key] != local_agg[key]:
+                raise PrepareValidationError(f"staging Neon diverge da staging local em {key}: neon={staging_agg[key]} local={local_agg[key]}")
+
+        expected = {"n": EXPECTED_STAGING_ROWS, "gmv": EXPECTED_STAGING_GMV, "canceled_orders": EXPECTED_STAGING_CANCELED}
+        for key, exp in expected.items():
+            if staging_agg[key] != exp:
+                raise PrepareValidationError(f"staging Neon nao confere com os numeros esperados do Gate 2 em {key}: {staging_agg[key]} != {exp}")
+
+        dupes, nulls = _duplicates_and_nulls(neon_conn, staging_name)
+        if dupes:
+            raise PrepareValidationError(f"staging Neon com {dupes} chaves duplicadas")
+        if nulls:
+            raise PrepareValidationError(f"staging Neon com {nulls} linhas com nulos obrigatorios")
+
+        neon_conn.commit()
+        cur.close()
+        return {
+            "backup_table": backup_name, "staging_table": staging_name,
+            "backup_agg": backup_agg, "staging_agg": staging_agg,
+        }
+    except Exception:
+        neon_conn.rollback()
+        cur.close()
+        raise
+
+
+# ---------------------------------------------------------------------------
+# --prepare — orquestracao gated
+# ---------------------------------------------------------------------------
+def run_prepare(args, diagnose_fn=None, connect_fn=None, tag_fn=None) -> dict:
+    """Guardas obrigatorias e simultaneas: flag --prepare, variavel de
+    ambiente I_UNDERSTAND_THIS_TOUCHES_NEON=1, e diagnostico limpo
+    executado IMEDIATAMENTE antes (sempre chamado de novo aqui, nunca
+    reaproveitado de uma execucao anterior). So' depois disso abre conexao
+    de escrita com o Neon e delega a do_prepare_neon."""
     if not args.prepare:
         raise RuntimeError("modo prepare requer a flag --prepare explicita")
     if os.environ.get("I_UNDERSTAND_THIS_TOUCHES_NEON") != "1":
@@ -249,6 +451,9 @@ def run_prepare(args, diagnose_fn=None) -> None:
             "I_UNDERSTAND_THIS_TOUCHES_NEON=1 explicitamente definida"
         )
 
+    neon_url = _get_neon_url()
+    print(f"Neon (prepare): {_sanitize_url(neon_url)}")
+
     diagnose_fn = diagnose_fn or _run_diagnose_from_env
     report = diagnose_fn()
     if report["problems"]:
@@ -256,13 +461,27 @@ def run_prepare(args, diagnose_fn=None) -> None:
             f"diagnostico encontrou {len(report['problems'])} problema(s) — modo prepare recusado: "
             + "; ".join(report["problems"])
         )
+    print("Diagnostico limpo, executado agora — prosseguindo com backup/staging no Neon.")
 
-    raise PrepareNotAuthorizedError(
-        "Gate 4A.2 nao autorizado nesta sessao: a criacao de backup/staging no "
-        "Neon nao esta implementada nesta versao do script, por decisao "
-        "explicita de escopo. Nenhuma instrucao SQL de escrita para o Neon "
-        "existe neste arquivo."
-    )
+    tag_fn = tag_fn or _now_tag
+    tag = tag_fn()
+
+    if connect_fn is not None:
+        neon_conn, local_conn = connect_fn()
+    else:
+        local_url = _get_local_pg_url()
+        neon_conn = _neon_writable(neon_url)
+        local_conn = _local_readonly(local_url)
+
+    try:
+        result = do_prepare_neon(neon_conn, local_conn, tag)
+    finally:
+        neon_conn.close()
+        local_conn.close()
+
+    print(f"Backup Neon criado: marts.{result['backup_table']}")
+    print(f"Staging Neon criada: marts.{result['staging_table']}")
+    return result
 
 
 def _run_diagnose_from_env() -> dict:
@@ -283,13 +502,13 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Gate 4A — diagnostico/preparo Neon do Bug 8")
     parser.add_argument("--diagnose", action="store_true", help="Somente leitura (padrao)")
-    parser.add_argument("--prepare", action="store_true", help="Escrita de backup/staging no Neon — nao implementado nesta versao")
+    parser.add_argument("--prepare", action="store_true", help="Cria backup/staging no Neon — exige guardas explicitas, ver docstring do modulo")
     args = parser.parse_args()
 
     if args.prepare:
         try:
             run_prepare(args)
-        except (RuntimeError, PrepareNotAuthorizedError) as e:
+        except RuntimeError as e:
             print(f"!!! RECUSADO: {e}")
             return 1
         return 0

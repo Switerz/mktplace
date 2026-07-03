@@ -172,6 +172,7 @@ def test_prepare_bloqueado_sem_variavel_de_ambiente(monkeypatch):
 
 def test_prepare_recusa_se_diagnostico_encontrar_problema(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_TOUCHES_NEON", "1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake:fake@fake-neon-host/fakedb")
     args = types.SimpleNamespace(prepare=True)
 
     def fake_diagnose_com_problema():
@@ -181,15 +182,9 @@ def test_prepare_recusa_se_diagnostico_encontrar_problema(monkeypatch):
         diag.run_prepare(args, diagnose_fn=fake_diagnose_com_problema)
 
 
-def test_prepare_com_tudo_ok_ainda_recusa_por_nao_estar_implementado(monkeypatch):
-    monkeypatch.setenv("I_UNDERSTAND_THIS_TOUCHES_NEON", "1")
-    args = types.SimpleNamespace(prepare=True)
-
-    def fake_diagnose_limpo():
-        return {"problems": []}
-
-    with pytest.raises(diag.PrepareNotAuthorizedError, match="Gate 4A.2 nao autorizado"):
-        diag.run_prepare(args, diagnose_fn=fake_diagnose_limpo)
+# A implementacao completa de do_prepare_neon (criacao de backup/staging
+# no Neon, reconciliacao, commit/rollback) e' testada em
+# pipelines/tests/test_prepare_bug8_neon.py, com conexoes falsas dedicadas.
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +217,15 @@ def test_nenhum_comando_destrutivo_existe_no_script():
     assert forbidden not in source.lower()
 
 
-def test_nenhum_insert_ou_create_table_existe_no_script():
-    """Gate 4A.1 nao implementa nenhuma escrita no Neon — nem CREATE TABLE
-    nem INSERT devem existir ainda (isso e' o Gate 4A.2, nao autorizado)."""
+def test_insert_e_create_table_nunca_tem_a_tabela_real_como_alvo():
+    """O Gate 4A.2 (implementado neste modulo) cria backup/staging via
+    CREATE TABLE/INSERT — mas SEMPRE em marts.{backup_name}/{staging_name}
+    gerados, nunca em marts.{REAL_TABLE} diretamente. Verifica a fonte:
+    nenhuma ocorrencia literal de 'INSERT INTO marts.{REAL_TABLE}' ou
+    'CREATE TABLE marts.{REAL_TABLE}' (as f-strings do modulo usam nomes
+    de variavel diferentes para backup/staging, nunca REAL_TABLE)."""
     source = MODULE_PATH.read_text(encoding="utf-8")
-    assert not re.search(r"\bINSERT\s+INTO\b", source, re.IGNORECASE)
-    assert not re.search(r"\bCREATE\s+TABLE\b", source, re.IGNORECASE)
+    assert "INSERT INTO marts.{REAL_TABLE}" not in source
+    assert "CREATE TABLE marts.{REAL_TABLE}" not in source
+    assert re.search(r"\bINSERT\s+INTO\b", source, re.IGNORECASE), "esperado: Gate 4A.2 cria staging via INSERT"
+    assert re.search(r"\bCREATE\s+TABLE\b", source, re.IGNORECASE), "esperado: Gate 4A.2 cria backup/staging via CREATE TABLE"
