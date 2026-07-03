@@ -88,51 +88,16 @@ Esses horários pressupõem execução sequencial numa única máquina com um ú
 
 ### Guarda de concorrência (lock file)
 
-Nem `daily_performance.py` nem `sync_produtos.py` implementam lock próprio hoje. Para Windows Task Scheduler, a forma mais simples de evitar duas execuções simultâneas da mesma fonte (ex.: um `--full` manual rodando ao mesmo tempo que o incremental agendado) é envolver cada chamada num wrapper PowerShell com lock file:
-
-```powershell
-# scripts/run_with_lock.ps1 — uso: run_with_lock.ps1 <nome-lock> <comando...>
-param([string]$LockName, [Parameter(ValueFromRemainingArguments)]$Cmd)
-$lockFile = "C:\Users\Notebook\Desktop\mktplace\logs\$LockName.lock"
-if (Test-Path $lockFile) {
-    Write-Error "Lock '$LockName' já existe — outra execução pode estar em andamento. Abortando."
-    exit 1
-}
-New-Item -ItemType File -Path $lockFile -Force | Out-Null
-try {
-    & $Cmd[0] $Cmd[1..($Cmd.Length-1)]
-    $exitCode = $LASTEXITCODE
-} finally {
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-}
-exit $exitCode
-```
-
-O exit code do script Python (0 = sucesso, 1 = falha — `sync_produtos.py` já retorna isso via `sys.exit(main())`) propaga para o Task Scheduler, que marca "Last Run Result" ≠ 0 e permite configurar notificação/alerta externo.
-
-### Criar as tarefas no Windows Task Scheduler
-
-```powershell
-# Salvar como setup_tasks.ps1 — executar como Administrador
-# Pré-requisito: scripts/run_with_lock.ps1 (guarda de concorrência acima)
-
-$python = "C:\Users\Notebook\Desktop\mktplace\apps\api\.venv\Scripts\python.exe"
-$lock   = "C:\Users\Notebook\Desktop\mktplace\scripts\run_with_lock.ps1"
-$logdir = "C:\Users\Notebook\Desktop\mktplace\logs"
-New-Item -ItemType Directory -Force -Path $logdir | Out-Null
-
-# --- daily_performance.py (fato principal) ---
-schtasks /create /tn "mktplace_daily_ml"     /tr "powershell -File `"$lock`" daily_ml     $python -m pipelines.ingestion.daily_performance --source ml     --mode incremental >> `"$logdir\daily_ml.log`" 2>&1"     /sc daily /st 06:00 /f
-schtasks /create /tn "mktplace_daily_tiktok" /tr "powershell -File `"$lock`" daily_tiktok $python -m pipelines.ingestion.daily_performance --source tiktok --mode incremental >> `"$logdir\daily_tiktok.log`" 2>&1" /sc daily /st 06:10 /f
-schtasks /create /tn "mktplace_daily_shopee" /tr "powershell -File `"$lock`" daily_shopee $python -m pipelines.ingestion.daily_performance --source shopee --mode incremental >> `"$logdir\daily_shopee.log`" 2>&1" /sc daily /st 06:20 /f
-
-# --- sync_produtos.py (tabelas de Produtos) — depois do daily correspondente ---
-schtasks /create /tn "mktplace_sync_ml"     /tr "powershell -File `"$lock`" sync_ml     $python `"C:\Users\Notebook\Desktop\mktplace\pipelines\sync_produtos.py`" --source ml     >> `"$logdir\sync_ml.log`" 2>&1"     /sc daily /st 06:35 /f
-schtasks /create /tn "mktplace_sync_tiktok" /tr "powershell -File `"$lock`" sync_tiktok $python `"C:\Users\Notebook\Desktop\mktplace\pipelines\sync_produtos.py`" --source tiktok >> `"$logdir\sync_tiktok.log`" 2>&1" /sc daily /st 06:45 /f
-schtasks /create /tn "mktplace_sync_shopee" /tr "powershell -File `"$lock`" sync_shopee $python `"C:\Users\Notebook\Desktop\mktplace\pipelines\sync_produtos.py`" --source shopee >> `"$logdir\sync_shopee.log`" 2>&1" /sc daily /st 06:55 /f
-```
-
-**Nenhuma dessas tarefas foi criada no Task Scheduler** — os comandos acima são a proposta para revisão e ativação futura mediante nova autorização explícita. `scripts/run_with_lock.ps1` já foi criado e testado (lock cria/remove corretamente, exit code propagado — testado com `cmd /c exit 0` e `cmd /c exit 7`), mas `schtasks /create` não foi executado.
+> **Superseded pela Fase 3A (seção abaixo).** O texto e os comandos que
+> estavam aqui (`run_with_lock.ps1` com `Test-Path`/`New-Item` e 6 tarefas
+> `schtasks` separadas para `daily_performance`/`sync_produtos`) descreviam
+> uma proposta ad-hoc anterior à auditoria formal. Foram **removidos** por
+> estarem desatualizados em relação ao `scripts/run_with_lock.ps1` real
+> (lock atômico por PID, não por `Test-Path`) e por proporem uma agenda de
+> 6 tarefas independentes que a Fase 3A substituiu por 2 tarefas
+> orquestradas (ver "Fase 3A — Automação preparada" abaixo, que é a fonte
+> de verdade atual). Manter os dois textos em paralelo arriscava alguém
+> copiar o snippet errado.
 
 ### Reprocessamento manual e observabilidade
 
@@ -287,6 +252,195 @@ exige autorização explícita.
 
 ---
 
+## Fase 3A — Automação preparada, NÃO ativada (2026-07-03, revisada)
+
+Esta seção documenta a auditoria completa das cargas, a decisão sobre o
+host, o endurecimento operacional implementado e a agenda proposta. **Nenhuma
+tarefa foi criada no Windows Task Scheduler** — só código, testes e esta
+documentação. Ativação real é a Fase 3B, que exige autorização explícita
+separada.
+
+> **Revisão 1 (2026-07-03)**: a primeira versão desta fase foi reprovada em
+> revisão por 10 problemas concretos (preflight guardado mas não amarrado à
+> execução real, working directory não garantido, agenda Shopee incompleta,
+> aspas inválidas no `schtasks /tr`, health check com fontes silenciosamente
+> ausentes, corrida no lock, loader Shopee sem trava de host, credenciais
+> hardcoded em `preflight.py`, documentação duplicada).
+>
+> **Revisão 2 (2026-07-03)**: a versão corrigida da Revisão 1 ainda foi
+> reprovada por mais 7 pontos: (1) `last_run_failed` não reprovava o status
+> geral sozinho; (2) os 3 checks de arquivo Shopee usavam o mesmo glob
+> (não distinguiam orders/stats/ads) e uma whitelist de marcas própria em
+> vez da lista oficial do conector; (3) 2 tarefas agendadas em horários
+> separados não garantiam que a primeira tivesse terminado antes da
+> segunda começar (health check podia rodar antes do fim real da
+> primeira); (4) nenhum timeout individual por step — uma fonte travada
+> podia consumir o timeout global inteiro; (5) `schtasks /create` simples
+> não representa `StartWhenAvailable`/`MultipleInstancesPolicy`/
+> `ExecutionTimeLimit`, e o horário 06:00 não tinha justificativa
+> verificada; (6) `Stop-Process` no timeout não aguardava confirmação real
+> de término antes de liberar o lock, e `LockName` não era validado contra
+> path traversal; (7) documentação afirmava garantias (health check
+> "sempre por último") que o código de 2 tarefas não sustentava de
+> verdade. Esta seção descreve o desenho **corrigido pela segunda vez**
+> (pipeline único `full_daily`, timeout por step, XML do Task Scheduler,
+> lock com espera pós-kill); a tabela de agenda e a matriz de cargas
+> abaixo já refletem esta versão final.
+
+### Matriz das cargas
+
+| Carga | Comando | Interpretador | Diretório de trabalho | Fonte | Destino | VPN? | PG local? | Arquivos locais? | Janela | Idempotente? | Lock | Registra em `audit.source_sync_run`? |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TikTok diário | `python -m pipelines.ingestion.daily_performance --source tiktok --mode incremental` | `apps/api/.venv/Scripts/python.exe` | raiz do repo | RDS `gold.tiktok_brand_daily` | Neon `fact_marketplace_daily_performance` | Sim | Não | Não | incremental 3d (`--days`); backfill usa `--mode backfill --days N` | Sim (`ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE`) | nenhum hoje — `run_with_lock.ps1` proposto | Sim (`{source}_daily`) |
+| Mercado Livre diário | `python -m pipelines.ingestion.daily_performance --source ml --mode incremental` | idem | raiz do repo | RDS `gold.ml_gestao_diaria` | Neon `fact_marketplace_daily_performance` | Sim | Não | Não | idem | Sim (idem) | idem | Sim |
+| Shopee diário (+ stats + ads) | `python -m pipelines.ingestion.daily_performance --source shopee[,shopee-stats,shopee-ads] --mode incremental` | idem | raiz do repo | XLSX/CSV em `shopee/{brand}/` (`SHOPEE_DATA_PATH`) | Neon `fact_marketplace_daily_performance` (upsert parcial para stats/ads) | **Não** | **Não** | **Sim** | incremental 3d | Sim (idem) | idem | Sim, 3 `source_name` distintos |
+| Produtos TikTok | `python -m pipelines.sync_produtos --source tiktok [--days N]` | idem | raiz do repo | RDS `gold.tiktok_product_daily` | Neon `fact_tiktok_product_daily` | Sim | Não | Não | incremental 7d default; `--full` = desde 2025-10-01, aborta se < 1.000 linhas | Sim (`ON CONFLICT (date, product_id)`) | idem | Sim (`tiktok_product_daily`) |
+| Produtos ML | `python -m pipelines.sync_produtos --source ml` | idem | raiz do repo | RDS `gold.ml_produto_ranking` | Neon `fact_ml_produto_ranking` | Sim | Não | Não | full refresh sempre (snapshot); aborta se < 50% do count anterior | Sim (`ON CONFLICT (brand, item_id)`) | idem | Sim (`ml_produto_ranking`) |
+| **Produtos Shopee** | `python -m pipelines.sync_produtos --source shopee` | idem | raiz do repo | **PostgreSQL local** `marts.fact_shopee_product_monthly` (`LOCAL_PG_URL`) | Neon `fact_shopee_product_monthly` | Não | **Sim** | Não (lê do PG local, não dos XLSX diretamente) | incremental (mês atual + anterior); `--full` = tudo | Sim (`ON CONFLICT (ref_month, brand, sku_ref_key, product_name)`) | idem | Sim (`shopee_product_monthly`) |
+| Monitor Bug 8 | `python -m pipelines.reconciliation.monitor_bug8_invariants [--skip-source]` | idem | raiz do repo | Neon (leitura) + opcionalmente XLSX locais | nenhum (só leitura) | Não | Não | Opcional (camada 2) | roda sob demanda, proposto após cada sync Shopee | N/A (não escreve) | proposto | Não (não é uma carga; ver Riscos abaixo) |
+
+**Impacto se a máquina estiver desligada ou a VPN indisponível**: nenhuma carga roda — os dados existentes no Neon permanecem como estão (nenhuma perda), só ficam mais desatualizados. TikTok/ML ficam bloqueados sem VPN; Shopee (diário e Produtos) não depende de VPN, mas Produtos Shopee depende do PostgreSQL local estar no ar.
+
+**Risco encontrado na auditoria original — CORRIGIDO nesta revisão**: `apps/api/etl/load_shopee_products.py` (o passo que popula o PostgreSQL local a partir dos XLSX, **anterior** a `sync_produtos --source shopee`) lia `os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/mktplace_control")` — a mesma variável usada em todo o resto do projeto para o **Neon**, com um fallback de credencial hardcoded. Se chamado por um wrapper que já tivesse carregado o `.env`, `DATABASE_URL` apontaria para o Neon e o script escreveria direto lá, fora do controle de `sync_produtos.py`. Corrigido: o loader agora exige `LOCAL_PG_URL` explicitamente (`_get_local_pg_url()`, sem fallback com credencial) e bloqueia qualquer host que não seja `localhost`/`127.0.0.1`/`::1`, levantando `RuntimeError` sanitizado (nunca expõe usuário/senha) se a variável faltar ou apontar para um host remoto. A resolução é *lazy* — só acontece dentro de `main()`, nunca no import do módulo — porque `reconcile_bug8_canceled_only.py`, `monitor_bug8_invariants.py`, `fix_shopee_product_dates.py` e `diagnose_bug8_neon.py` importam só as funções puras (`BRANDS`, `DDL`, `_aggregate`, `_load_brand`) sem precisar de conexão nenhuma; ver `apps/api/etl/tests/test_load_shopee_products_local_pg_guard.py`. Ainda assim, `apps/api/etl/load_shopee_products.py` **continua fora da agenda proposta** — permanece um passo manual, disparado por humano quando novos exports chegam.
+
+### Decisão sobre o host: notebook + VPN
+
+**Aceitável como solução PROVISÓRIA, com limitações que devem ficar visíveis a quem for autorizar a ativação.**
+
+Motivos para aceitar agora:
+- É o único host com VPN configurada para o RDS, PostgreSQL local com os dados Shopee, e acesso aos arquivos `shopee/` — não existe hoje alternativa pronta sem reconstruir esses três acessos em outra máquina.
+- O impacto de falha é baixo: nenhuma carga escreve dados incorretos silenciosamente sem os testes/guardas já existentes (`_assert_distinct_targets`, `MIN_ROWS_RATIO`, aborto sem commit), e o Neon simplesmente fica desatualizado até a próxima execução manual ou agendada — não há corrupção de dados por a máquina estar desligada.
+
+Limitações que tornam isso **provisório, não definitivo**:
+- A máquina precisa estar ligada e sem suspender/hibernar no horário agendado — não há redundância nem re-tentativa automática entre dias.
+- A VPN precisa estar conectada manualmente (ou com auto-connect configurado) antes do horário de TikTok/ML — se cair, essas duas cargas falham silenciosamente até alguém notar (por isso o health check, ver abaixo).
+- O RDS não é alcançável pelo Render (onde a API roda) — só por esta máquina. Se o notebook for desligado por período longo, TikTok/ML no Neon ficam cada vez mais atrasados sem nenhum outro caminho de atualização.
+- Task Scheduler do Windows não tem retry nativo elegante nem alerta externo — depende de alguém rodar o health check manualmente ou de uma automação externa futura consultar o exit code / os logs.
+- Credenciais do Windows Task Scheduler: uma tarefa agendada armazena a conta de execução no XML da tarefa, não a senha do banco — mas se a tarefa for exportada/inspecionada, os comandos podem aparecer nos logs do Event Viewer do Windows. Por isso todos os scripts desta automação leem credenciais de variável de ambiente (`.env`), nunca de argumento de linha de comando — `run_with_lock.ps1` agora recusa rodar se detectar uma connection string com usuário:senha embutidos em qualquer argumento.
+
+Caminho futuro mais robusto (não implementado, fora de escopo): mover TikTok/ML para uma instância na mesma VPC do RDS (ex.: EC2 pequena) com acesso direto sem VPN, rodando os mesmos scripts via cron; manter Shopee local (arquivos + PostgreSQL local não têm por que migrar); reportar tudo a um monitor externo (não implementado nesta fase — está fora do escopo de "sem alerta externo" desta etapa).
+
+### Endurecimento implementado
+
+**`scripts/run_with_lock.ps1`** (reescrito nesta revisão e endurecido em duas revisões seguintes):
+- **Lock atômico**: `[System.IO.File]::Open(..., FileMode.CreateNew, ..., FileShare.None)` — uma única chamada de SO que falha com `IOException` se o lock já existir.
+- **O lock é atualizado para o PID do processo FILHO logo após ele ser iniciado** (corrigido na revisão mais recente) — troca atômica via escrever num arquivo temporário e `[System.IO.File]::Replace` (rename atômico ao nível do sistema de arquivos: o caminho do lock nunca fica ausente/vazio/truncado em nenhum instante observável, então nenhuma outra tentativa concorrente pode interpretar esse instante como "lock morto"). Isso importa porque o processo wrapper (`run_with_lock.ps1`) fica vivo durante toda a espera do filho — sem essa troca, o lock sempre pareceria "vivo" (é o próprio wrapper) até ele mesmo terminar, mesmo que o processo filho real tenha ficado travado.
+- **Recuperação por PID vivo/morto, não por idade**: vivo → `BLOCKED` sempre, não importa há quanto tempo o lock existe; morto → remove o lock órfão e tenta adquirir de novo uma única vez.
+- **`-WorkingDirectory`** (default: raiz do repo) sempre passado a `Start-Process -WorkingDirectory` — garante o diretório certo independentemente de onde o Task Scheduler ou quem chamou o script estava posicionado. Validado com um teste Pester que invoca o script a partir de `C:\Windows\System32` de propósito.
+- `-TimeoutSeconds` (default 3600): mata o processo filho se exceder (`Stop-Process -Force`) e **aguarda até 30s a confirmação real de término** (`Get-Process` deixa de encontrar o PID). **O que acontece depois desses 30s foi corrigido na revisão mais recente**: se o filho **realmente terminou** dentro da espera, o lock é removido normalmente; se o filho **continuar vivo** mesmo após os 30s, o lock **NÃO é removido** — fica preservado contendo o PID (real, vivo) do filho, para que a próxima tentativa encontre esse PID vivo via `Test-LockOwnerAlive` e fique corretamente `BLOCKED`, em vez de "recuperar" um lock e rodar uma segunda execução ao lado de um processo zumbi que pode continuar escrevendo em banco/arquivo. Quando esse PID finalmente morrer (fora dessa execução), uma tentativa futura reconhece o PID morto e recupera o lock normalmente. **Nunca afirmar que o lock é sempre liberado após os 30s de espera — essa era exatamente a falha corrigida.**
+- **`LockName` validado** contra `^[A-Za-z0-9_-]+$` **antes de qualquer acesso a disco** — corrigido nesta revisão: `LockName` vira diretamente parte de um caminho de arquivo (`logs\<LockName>.lock`); sem essa validação, um valor como `..\..\algo` poderia apontar o lock para fora de `logs\`.
+- stdout/stderr em arquivos **separados e datados**: `logs/<lock>_<yyyyMMdd_HHmmss>_stdout.log` / `..._stderr.log`.
+- Recusa rodar se qualquer argumento parecer uma connection string com credenciais embutidas (`usuario:senha@`).
+- Imprime uma linha final `STATUS=SUCCESS|FAILED|BLOCKED EXITCODE=N WORKDIR=... STDOUT_LOG=... STDERR_LOG=...`.
+
+**`pipelines/ops/orchestrate.py`** (reescrito na revisão seguinte — 2 pipelines → 1): amarra o preflight à execução real e sequencia os passos de um **único pipeline** (`full_daily`) **em processo** — nunca por intervalo de horário do Task Scheduler nem por uma segunda tarefa agendada com folga. Um desenho anterior com 2 pipelines/tarefas separados (`daily_ingestion` @ 06:00 + `produtos_and_monitor` @ 06:35) foi descartado: não havia garantia de que o primeiro tivesse terminado antes do segundo começar (o primeiro podia legitimamente rodar até seu timeout total enquanto o segundo começava por horário) — o health check do segundo podia rodar **antes** do fim real do primeiro. Para cada passo: se houver `preflight_source`, roda o preflight primeiro — aprovado → executa o comando real; bloqueado → o passo vira `BLOCKED` e **o comando real nunca é chamado**. Se o passo declara `depends_on`, só roda se todas as dependências tiverem terminado com `SUCCESS`; caso contrário vira `SKIPPED`. `always_run=True` (usado pelo health check) roda mesmo se algo antes falhou ou foi bloqueado. **Cada `Step` agora tem um `timeout_seconds` individual** (900s para as fontes diárias, 600s para Produtos, 300s para o monitor do Bug 8, 180s para o health check — soma de 6780s): `_default_executor` passa esse valor a `subprocess.run(..., timeout=...)`; se estourar, `subprocess.TimeoutExpired` é capturado, o passo vira `FAILED` e a orquestração **segue para o próximo passo** — uma fonte travada (ex.: ML preso numa query longa) nunca consome o timeout global nem trava as fontes independentes seguintes (TikTok/Shopee continuam normalmente).
+
+Pipeline único `full_daily`: `daily_ml` → `daily_tiktok` → `daily_shopee_orders` → `daily_shopee_stats` → `daily_shopee_ads` → `sync_produtos_ml` → `sync_produtos_tiktok` → `sync_produtos_shopee` → `monitor_bug8` (só se `sync_produtos_shopee` = `SUCCESS`) → `health_check` (sempre, por último — garantido pela posição dele como último item da tupla + `always_run=True`; não existe segunda tarefa/segundo lock depois desta para rodar antes).
+
+```bash
+python -m pipelines.ops.orchestrate --pipeline full_daily
+```
+
+**`scripts/run_task.ps1`** (atualizado na revisão seguinte — 2 `TaskKey`s → 1): wrapper fino chamado pelo Task Scheduler — recebe só uma `-TaskKey` curta e resolve internamente o lock/timeout/comando reais via `orchestrate.py`, delegando a `run_with_lock.ps1`. Agora só conhece `full_daily`, com `-TimeoutSeconds 9000` (2h30) — **maior que a soma dos timeouts individuais dos steps internos (6780s)**, com margem de ~2220s (~33%) documentada para overhead de spawn de processo Python, imports pandas/sqlalchemy, e latência de rede VPN/Neon entre passos. Se essa margem não existisse, o timeout **externo** mataria o processo pai antes que os timeouts **internos** por step tivessem chance de proteger as fontes independentes.
+
+**`pipelines/ops/preflight.py`** (endurecido nesta e na revisão seguinte): `SELECT 1` read-only contra RDS, Neon ou PostgreSQL local, e checagem de arquivos Shopee — antes de disparar a carga real. `LOCAL_PG_URL` exigida explicitamente, sem fallback com credencial hardcoded, **e agora também restrita ao allowlist de host** (`localhost`/`127.0.0.1`/`::1`), mesma guarda do loader Shopee. Toda conexão de diagnóstico abre a sessão com `set_session(readonly=True)`. Os checks de arquivos Shopee foram **separados por padrão de arquivo real** (corrigido nesta revisão — antes os 3 usavam o mesmo glob, o que deixaria `shopee-stats`/`shopee-ads` passarem mesmo sem os arquivos certos): `check_shopee_orders_files()` procura `Order.all*.xlsx`, `check_shopee_stats_files()` procura `*.shopee-shop-stats.*.xlsx`, `check_shopee_ads_files()` procura `Dados*.csv` — todos contra a lista **oficial** de marcas do conector real (`pipelines.connectors.shopee.connector.BRANDS_IN_SCOPE`, nunca uma whitelist duplicada). **Decisão documentada**: se qualquer marca oficial estiver sem o arquivo esperado, a fonte inteira é **bloqueada** (não só um aviso) — evita que uma carga parcial (algumas marcas sem dado) seja registrada em `audit.source_sync_run` como "success" sem sinalizar a lacuna. As mensagens de bloqueio citam só os nomes das marcas ausentes, nunca o valor de `SHOPEE_DATA_PATH`.
+
+```bash
+python -m pipelines.ops.preflight --source tiktok_daily
+python -m pipelines.ops.preflight --source produtos_shopee
+```
+
+**`pipelines/ops/health_check.py`** (reescrito nesta e na revisão seguinte): duas dimensões de frescor, deliberadamente separadas — (1) frescor de **execução**, via `audit.source_sync_run`, contra uma lista explícita `EXPECTED_SOURCES` (8 fontes) — uma fonte esperada sem nenhum histórico é sempre reportada como atrasada, nunca omitida; (2) frescor de **dado**, via `MAX(date/refreshed_at/ref_month)` avaliado contra um threshold em dias, com `fact_shopee_product_monthly` (`manual_monthly`) isento do threshold por natureza. Duas correções desta revisão: **(a)** cada fonte agora expõe `execution_stale` e `last_run_failed` como campos **separados** — antes, uma falha na última execução só virava atenção geral se também estourasse o threshold de frescor; agora `last_run_failed=True` sozinho já torna `stale=True`, mesmo com um sucesso recente dentro do threshold (um job quebrado não fica mais mascarado de OK); **(b)** uma data **no futuro** em qualquer tabela (`days_since < 0`) é sempre sinalizada como **erro de qualidade** (nunca "fresca"), inclusive para `fact_shopee_product_monthly` — regressão direta do Bug 3 (`ref_month` projetado para meses futuros por bug de parsing). Cada fonte/tabela no JSON traz um campo `reason`. Também roda as invariantes do Bug 8 (reaproveitando `monitor_bug8_invariants.check_db_invariants`, print informativo suprimido).
+
+```bash
+python -m pipelines.ops.health_check          # saída legível
+python -m pipelines.ops.health_check --json   # saída estruturada para automação
+```
+
+**`pipelines/ops/schedule_plan.py`** (reescrito nesta e na revisão seguinte — 8 tarefas → 2 → **1**): declara só os dados da agenda proposta e sabe renderizar, como TEXTO: o comando `schtasks /create` simples **e** a definição XML equivalente do Task Scheduler — **não importa `subprocess`, `os.system` nem qualquer API do Task Scheduler**. A tarefa chama `run_task.ps1 -TaskKey full_daily` com a convenção de aspa dobrada `""..."" ` no `/tr` (validada com o parser real do PowerShell, zero erros). `schtasks /create` simples **não representa com segurança** `MultipleInstancesPolicy`, `StartWhenAvailable` nem `ExecutionTimeLimit` — por isso `render_task_scheduler_xml()` gera a definição XML equivalente (também só texto, nunca aplicada) com essas 3 configurações; ver "Configurações propostas do Task Scheduler" abaixo. `render_schtasks_command(task, allow_overwrite=False)` nunca inclui `/f` por padrão.
+
+### Configurações propostas do Task Scheduler (texto para revisão, Fase 3B)
+
+`schtasks /create` com flags simples não cobre 3 configurações de segurança operacional pedidas nesta revisão — por isso a definição de referência para a Fase 3B é o **XML** gerado por `pipelines.ops.schedule_plan.render_task_scheduler_xml()`, nunca o `schtasks /create` simples:
+
+| Configuração | Valor proposto | Motivo |
+|---|---|---|
+| `MultipleInstancesPolicy` | `IgnoreNew` | Impede o **próprio Task Scheduler** de iniciar uma nova instância enquanto a anterior ainda roda — camada adicional **em cima** do lock de arquivo (`run_with_lock.ps1`), não no lugar dele. Duas proteções independentes contra concorrência. |
+| `StartWhenAvailable` | `true` | Se o notebook estiver desligado/suspenso no horário agendado, a tarefa roda assim que a máquina estiver disponível de novo, em vez de simplesmente pular o dia — relevante dado que o host é um notebook (ver decisão sobre o host acima), não um servidor sempre ligado. |
+| `ExecutionTimeLimit` | `PT2H40M` (9600s) | Hard-limit do **próprio Task Scheduler**, independente do `-TimeoutSeconds` (9000s) do `run_with_lock.ps1` — **deliberadamente maior, não igual** (corrigido na revisão mais recente): depois que o wrapper detecta seu próprio timeout de 9000s, ele ainda gasta tempo chamando `Stop-Process`, aguardando até 30s a confirmação real de término do filho, e gravando os logs finais. Se `ExecutionTimeLimit` fosse igual a 9000s, o Task Scheduler poderia matar o **wrapper** no meio dessa limpeza, antes de ele decidir se o lock deve ou não ser removido. 9600s dá 600s de margem para essa limpeza. |
+| `Settings/Enabled` | `false` **sempre** | **Corrigido na revisão mais recente**: a tarefa é gerada **desativada** de propósito — o trigger continua totalmente configurado (horário, recorrência diária) para a revisão humana ver quando ela rodaria, mas o Task Scheduler nunca dispara uma tarefa com `Settings/Enabled=false`, mesmo com o trigger habilitado. A ativação (mudar para `Enabled=true`) é um passo **manual e separado** da importação — só depois de importar o XML, consultar a tarefa no Agendador de Tarefas e validar que a definição importada bate com o que foi revisado aqui. `render_task_scheduler_xml()` não aceita nenhum parâmetro para habilitar — não há como chamá-la e obter `Enabled=true` por engano. |
+
+Para ver o XML exato (texto, nada aplicado):
+```bash
+python -m pipelines.ops.schedule_plan
+```
+
+Nenhum `schtasks /create /xml` foi executado — a importação real do XML é a Fase 3B.
+
+### Agenda proposta (não ativada)
+
+**UMA ÚNICA tarefa** no Task Scheduler — a dependência real entre passos (monitor do Bug 8 só depois do sync de Produtos Shopee ter **terminado de verdade**; health check só depois de **tudo**) é resolvida **dentro** da tarefa por `pipelines.ops.orchestrate.PIPELINES["full_daily"]` (sequencial em processo, sob um único lock), não por agendar horários com folga entre tarefas separadas — essa fragilidade (a segunda tarefa podia começar antes da primeira terminar) foi corrigida nesta revisão fundindo as duas tarefas anteriores numa só.
+
+| Horário | Tarefa (`TaskKey`) | Passos internos (em ordem, via `orchestrate.py`, cada um com timeout individual) | Timeout externo (lock) | VPN? |
+|---|---|---|---|---|
+| 06:00 (**hipótese, não confirmada** — ver nota abaixo) | `mktplace_full_daily` (`full_daily`) | daily_ml(900s) → daily_tiktok(900s) → daily_shopee_orders(900s) → daily_shopee_stats(900s) → daily_shopee_ads(900s) → sync_produtos_ml(600s) → sync_produtos_tiktok(600s) → sync_produtos_shopee(600s) → monitor_bug8(300s, só se shopee=SUCCESS) → health_check(180s, sempre, garantido último) | 9000s | ML/TikTok sim; Shopee/Produtos/monitor/health não |
+
+**O horário 06:00 é uma hipótese herdada da proposta original, não uma confirmação read-only de quando RDS (`gold.*`) e os exports Shopee tipicamente ficam disponíveis.** Antes da Fase 3B: confirmar rodando `python -m pipelines.ops.preflight` manualmente por alguns dias nesse horário, ou revisando os timestamps reais de atualização das fontes. Se RDS/Shopee tipicamente atualizam depois das 06:00, a tarefa vai bloquear no preflight (RDS) ou processar arquivos do dia anterior (Shopee) todo dia, até o horário ser ajustado com base em dado real.
+
+Para ver os comandos `schtasks /create` e o XML exatos (texto, nada executado):
+```bash
+python -m pipelines.ops.schedule_plan
+```
+
+Preflight amarrado à execução real? **Sim, obrigatoriamente** — dentro de cada `Step` de `orchestrate.py`, o preflight roda antes do comando real; se bloqueado, o comando real **nunca é chamado**.
+
+Health check é comprovadamente o último passo global? **Sim** — não há segunda tarefa nem segundo lock depois deste: `health_check` é o último item de `PIPELINES["full_daily"]`, com `always_run=True`, dentro do mesmo processo sequencial. Isso só é verdade porque existe **uma única tarefa**; era exatamente essa garantia que faltava no desenho de 2 tarefas anterior.
+
+### Troubleshooting e recuperação
+
+- **Tarefa perdida (processo morto, máquina reiniciada no meio de uma carga)**: o lock em `logs/<nome>.lock` fica órfão com o PID de um processo que não existe mais. `run_with_lock.ps1` detecta isso e recupera automaticamente na próxima tentativa — nunca por idade do arquivo, só por o dono estar vivo ou morto.
+- **Uma fonte trava (timeout individual)**: o step correspondente vira `FAILED` após seu `timeout_seconds` individual estourar; os steps seguintes (fontes independentes) continuam normalmente — só `monitor_bug8` depende especificamente de `sync_produtos_shopee`.
+- **Task Scheduler mostra "Last Run Result" ≠ 0**: ver `logs/<nome>_<data>_stderr.log` da execução correspondente.
+- **Verificar frescor sem esperar o Task Scheduler**: `python -m pipelines.ops.health_check` a qualquer momento — somente leitura. Uma fonte sem nenhum histórico aparece como atrasada; uma data no futuro em qualquer tabela aparece como erro de qualidade, nunca "fresca".
+- **Verificar se uma fonte específica pode rodar agora**: `python -m pipelines.ops.preflight --source <fonte>` — não dispara a carga, só diagnostica. Para Shopee, `shopee_daily`/`shopee-stats_daily`/`shopee-ads_daily` checam padrões de arquivo DIFERENTES.
+- **Rodar o pipeline completo manualmente**: `python -m pipelines.ops.orchestrate --pipeline full_daily` — preflight amarrado, mesma lógica usada pelo Task Scheduler quando ativado.
+- **Rodar o monitor do Bug 8 manualmente**: `python -m pipelines.reconciliation.monitor_bug8_invariants` (completo) ou `--skip-source`.
+
+### Retenção de logs
+
+Sem limpeza automática nesta fase (`logs/` já é ignorado pelo git). Comando manual/periódico recomendado para reter só os últimos 30 dias:
+```powershell
+Get-ChildItem "C:\Users\Notebook\Desktop\mktplace\logs" -Filter "*.log" |
+  Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+  Remove-Item -Force
+```
+Não incluído no Task Scheduler nesta fase (nenhuma nova tarefa foi criada).
+
+### Ativação futura (Fase 3B) e desativação
+
+**Ativação — dois passos manuais e SEPARADOS, nunca um só:**
+1. Revisar o XML gerado por `render_task_scheduler_xml()` (recomendado, cobre `MultipleInstancesPolicy`/`StartWhenAvailable`/`ExecutionTimeLimit`) ou o comando `schtasks /create` simples (menos completo), confirmar o horário 06:00 com dado real (ver nota acima), e só então importar/criar a tarefa manualmente. **A tarefa importada nasce com `Settings/Enabled=false`** — registrada no Task Scheduler, mas inerte (nunca dispara, mesmo com o trigger configurado).
+2. Só depois de consultar a tarefa importada no Agendador de Tarefas (linha de comando ou UI) e confirmar que a definição bate exatamente com o que foi revisado no passo 1, habilitar manualmente (`Settings/Enabled=true`). Nenhum script desta fase faz qualquer um desses dois passos automaticamente.
+
+**Desativação (rollback operacional — nunca rollback de dados)**: remover a tarefa do Task Scheduler (`schtasks /delete /tn "mktplace_full_daily" /f`) não desfaz nenhuma carga já aplicada — os dados no Neon continuam como estavam.
+
+### Riscos residuais conhecidos, não bloqueantes
+
+- **`Update-LockOwnerPid` (troca do PID do lock de wrapper para filho) pode falhar silenciosamente**: se a chamada lançar exceção, `run_with_lock.ps1` só registra `Write-Warning` e **segue em frente** sem abortar a execução (documentado explicitamente no próprio script, não corrigido nesta revisão — corrigir isso redesenharia a estratégia de lock, fora do escopo pedido). Nesse cenário, o lock permanece com o PID do **wrapper** durante toda a execução; se, além disso, o timeout estourar e o processo filho sobreviver ao `Stop-Process`, o lock preservado conteria o PID do wrapper (que está prestes a morrer), não o do filho real — reabrindo, só nessa combinação rara de duas falhas, a mesma janela de corrida que esta revisão existe para fechar. **Deve ser observado nos logs**: `grep` por `"Nao foi possivel atualizar o dono do lock"` em `logs\*_stderr.log` — nenhuma ocorrência esperada em operação normal; qualquer ocorrência merece investigação manual antes da próxima execução daquele lock.
+
+### Testes desta fase
+
+- `pipelines/tests/test_ops_preflight.py` (42 testes) — checks individuais, `LOCAL_PG_URL` sem fallback e com allowlist de host (bloqueia sem tentar conectar), sessão read-only, checks de arquivo Shopee **separados por padrão real** (orders/stats/ads) contra a lista oficial de marcas do conector, bloqueio da fonte inteira quando uma marca oficial falta, `SHOPEE_DATA_PATH` nunca aparece na mensagem, guardas estruturais.
+- `pipelines/tests/test_ops_health_check.py` (35 testes) — todas as fontes esperadas aparecem mesmo sem histórico, `execution_stale`/`last_run_failed` **separados** (falha na última execução sempre reprova, mesmo com sucesso recente dentro do threshold), data no futuro em fonte diária e manual/mensal sempre erro de qualidade, regressões de `build_report` para os dois casos, JSON com `reason`, credenciais nunca aparecem.
+- `pipelines/tests/test_ops_orchestrate.py` (27 testes) — preflight bloqueado impede o comando real, exit code propagado, **timeout individual por step vira `FAILED` e não trava fontes independentes seguintes** (ML timeout → TikTok/Shopee normais), orçamento somado dos timeouts (6780s) com margem sobre o timeout externo (9000s), `depends_on`/`always_run`, **health check comprovadamente o último `call` em 5 cenários mistos de sucesso/falha/timeout/bloqueio**, pipelines antigos de 2 tarefas confirmados como removidos.
+- `pipelines/tests/test_ops_schedule_plan.py` (23 testes) — 1 tarefa (não 2, não 8), XML bem formado com `MultipleInstancesPolicy=IgnoreNew`/`StartWhenAvailable=true`/`ExecutionTimeLimit=PT2H40M` (9600s, maior que os 9000s do lock, com margem para a limpeza pós-timeout) **e `Settings/Enabled=false` sempre** (tarefa nasce desativada; `render_task_scheduler_xml()` não aceita nenhum parâmetro para habilitar), horário 06:00 sinalizado como hipótese não confirmada, aspas dobradas validadas no parser real do PowerShell, `/f` nunca por padrão, nenhuma capacidade de execução importada.
+- `apps/api/etl/tests/test_load_shopee_products_local_pg_guard.py` (10 testes) — `LOCAL_PG_URL` sem fallback, host remoto bloqueado, hosts locais aceitos, erros nunca expõem credenciais, imports de função pura nunca exigem `LOCAL_PG_URL`.
+- `scripts/run_with_lock.tests.ps1` (15 testes Pester) — exit code propagado, `WorkingDirectory` correto por padrão e a partir de `C:\Windows\System32`, lock com dono vivo bloqueia mesmo antigo, lock com dono morto recupera, duas tentativas simultâneas via `Start-Job` (exatamente uma vence), credencial em argumento recusada, timeout mata o processo e retorna 124, **aguarda confirmação real de término do processo morto antes de liberar o lock** (verificado via `Get-CimInstance Win32_Process`, não só inferido), **`LockName` com `..`/`/` rejeitado antes de tocar disco**, stdout/stderr separados.
+- `scripts/run_task.tests.ps1` (7 testes Pester) — `Resolve-TaskInvocation` resolve a `TaskKey` única (`full_daily`) com lock/timeout/módulo corretos, timeout externo (9000s) maior que o orçamento interno (6780s), `$null` para chave desconhecida, dot-source não executa nada.
+- Total: 389 testes pytest (`pipelines/tests` + `apps/api/etl/tests` + `apps/api/tests`) + 25 testes Pester, todos executados nesta revisão (nenhum banco real tocado; comandos Pester usam só `cmd.exe`/`powershell.exe` inofensivos).
+
+---
+
 ## Histórico de decisões
 
 | Data | Decisão |
@@ -295,3 +449,6 @@ exige autorização explícita.
 | 2026-06-26 | `estimated_margin` alterado de `NUMERIC(8,4)` para `NUMERIC(18,2)` (valores até 811k) |
 | 2026-06-26 | `problem_rate` definido como média ponderada por orders do campo diário da fonte |
 | 2026-06-26 | ML dedup: 1.418 raw → 1.326 pós-dedup (92 pares duplicados na fonte, mantém maior `gross_revenue`) |
+| 2026-07-03 | Fase 3A (1ª versão): automação preparada (preflight, health check, `run_with_lock.ps1` com timeout/stale-lock/logs separados, agenda proposta de 8 tarefas) — **não ativada**. Reprovada em revisão. |
+| 2026-07-03 | Fase 3A (revisão 1): preflight amarrado à execução real via `orchestrate.py`; agenda reduzida a 2 tarefas orquestradas; lock atômico por PID (sem stale por idade); `WorkingDirectory` garantido inclusive a partir de `C:\Windows\System32`; aspas do `schtasks /tr` corrigidas via `run_task.ps1`; health check com fontes esperadas explícitas e frescor de dado avaliado contra threshold; `preflight.py` e `apps/api/etl/load_shopee_products.py` exigem `LOCAL_PG_URL` sem fallback, com allowlist de host — **ainda não ativada**. Reprovada de novo em revisão. |
+| 2026-07-03 | Fase 3A (revisão 2): agenda fundida em **1 tarefa** (`full_daily`) — elimina a corrida entre 2 tarefas em horários separados; timeout **individual por step** em `orchestrate.py` (uma fonte travada não consome o timeout global nem trava fontes independentes); `health_check.py` com `execution_stale`/`last_run_failed` separados (falha na última execução sempre reprova) e data-no-futuro sempre erro de qualidade; `preflight.py` com checks de arquivo Shopee separados por padrão real (orders/stats/ads) contra a lista oficial de marcas do conector, bloqueando a fonte inteira se uma marca oficial faltar, e `check_local_pg` com allowlist de host; `run_with_lock.ps1` aguarda confirmação real de término após `Stop-Process` antes de liberar o lock, e valida `LockName` contra path traversal; `schedule_plan.py` gera a definição XML do Task Scheduler (`MultipleInstancesPolicy=IgnoreNew`, `StartWhenAvailable=true`, `ExecutionTimeLimit=PT2H30M`) como texto, e o horário 06:00 é sinalizado explicitamente como hipótese não confirmada — **ainda não ativada**, aguardando nova revisão |
