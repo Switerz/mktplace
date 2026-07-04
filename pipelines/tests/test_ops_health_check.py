@@ -344,7 +344,7 @@ def test_data_no_dia_de_hoje_nao_e_tratada_como_futuro():
 
 def test_build_report_ok_quando_tudo_fresco_e_bug8_limpo():
     conn = all_fresh_conn()
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is True
     assert report["bug8_invariants"]["ok"] is True
     assert len(report["sources"]) == len(hc.EXPECTED_SOURCES)
@@ -352,26 +352,26 @@ def test_build_report_ok_quando_tudo_fresco_e_bug8_limpo():
 
 def test_build_report_atencao_quando_fonte_de_execucao_stale():
     conn = FakeConn(last_run={}, last_success={})  # nenhuma fonte tem historico
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
 
 
 def test_build_report_atencao_quando_dado_stale():
     old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
     conn = all_fresh_conn(daily_freshness_rows=[{"marketplace_id": 1, "max_date": old_date}, {"marketplace_id": 2, "max_date": TODAY}, {"marketplace_id": 3, "max_date": TODAY}])
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
 
 
 def test_build_report_nao_falha_so_por_shopee_produtos_manual_estar_defasado():
     conn = all_fresh_conn(shopee_produtos_max=TODAY - timedelta(days=90))
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is True
 
 
 def test_build_report_atencao_quando_bug8_tem_divergencia():
     conn = all_fresh_conn(bug8_scalars=[("HAVING COUNT(*) > 1", 3)])
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
     assert report["bug8_invariants"]["ok"] is False
 
@@ -387,7 +387,7 @@ def test_build_report_atencao_quando_ultima_execucao_falhou_mesmo_com_sucesso_re
         last_run={"ml_daily": {"started_at": NOW, "finished_at": NOW, "status": "failed", "error_message": "falha pontual"}},
         last_success={"ml_daily": success_time},
     )
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
     ml_status = next(s for s in report["sources"] if s["source_name"] == "ml_daily")
     assert ml_status["execution_stale"] is False
@@ -403,7 +403,7 @@ def test_build_report_atencao_quando_dado_no_futuro():
     conn = all_fresh_conn(daily_freshness_rows=[
         {"marketplace_id": 1, "max_date": TODAY}, {"marketplace_id": 2, "max_date": future_date}, {"marketplace_id": 3, "max_date": TODAY},
     ])
-    report = hc.build_report(conn)
+    report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
     ml_row = next(d for d in report["data_freshness"] if d["label"].startswith("fact_marketplace_daily_performance[ml]"))
     assert ml_row["stale"] is True
@@ -431,8 +431,13 @@ def test_run_bug8_check_suprime_o_print_informativo():
 # ---------------------------------------------------------------------------
 
 def test_main_retorna_0_quando_report_ok(monkeypatch, capsys):
+    """main() nao aceita `now` (e' o entrypoint real, sempre usa o relogio
+    de producao) — para o teste ficar deterministico sem depender do dia em
+    que a suite roda, fixa-se o relogio via monkeypatch de hc._now (a
+    pequena funcao de relogio isolada), nunca datetime.now() global."""
     monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
     monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn())
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
     monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
     exit_code = hc.main()
     assert exit_code == 0
@@ -440,8 +445,13 @@ def test_main_retorna_0_quando_report_ok(monkeypatch, capsys):
 
 
 def test_main_retorna_1_quando_bug8_diverge(monkeypatch, capsys):
+    """Relogio fixado (ver test_main_retorna_0_quando_report_ok) para que a
+    reprovacao venha exclusivamente da divergencia do Bug 8 sendo testada
+    aqui, nunca de frescor "acidentalmente" tambem estourado pelo relogio
+    real no momento em que a suite roda."""
     monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
     monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(bug8_scalars=[("HAVING COUNT(*) > 1", 5)]))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
     monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
     exit_code = hc.main()
     assert exit_code == 1

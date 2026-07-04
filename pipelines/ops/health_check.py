@@ -111,8 +111,16 @@ class SourceStatus:
     reason: str
 
 
+def _now() -> datetime:
+    """Ponto unico de leitura do relogio real (UTC). Isolado numa funcao
+    pequena para que build_report()/main() possam ser testados com um
+    relogio fixo sem monkeypatchar datetime.now() global nem depender de
+    freezegun."""
+    return datetime.now(timezone.utc)
+
+
 def fetch_source_statuses(conn, now: datetime | None = None) -> list[SourceStatus]:
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     cur = conn.cursor()
     out: list[SourceStatus] = []
 
@@ -252,7 +260,7 @@ def _evaluate_date_freshness(label: str, cadence: str, max_value, today: date, t
 
 
 def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessResult]:
-    today = today or datetime.now(timezone.utc).date()
+    today = today or _now().date()
     cur = conn.cursor()
     results: list[DataFreshnessResult] = []
 
@@ -290,9 +298,16 @@ def run_bug8_check(conn) -> dict:
     return {"ok": not problems, "problems": problems}
 
 
-def build_report(conn) -> dict:
-    sources = fetch_source_statuses(conn)
-    data_freshness = fetch_data_freshness(conn)
+def build_report(conn, now: datetime | None = None) -> dict:
+    """`now` e' lido UMA UNICA vez aqui (ou recebido do chamador) e
+    repassado para as duas dimensoes de frescor — evita que
+    fetch_source_statuses/fetch_data_freshness leiam o relogio em momentos
+    ligeiramente diferentes dentro do mesmo relatorio (ex.: um straddle de
+    meia-noite UTC poderia fazer as duas dimensoes discordarem sobre "hoje").
+    Tambem e' o ponto de injecao de relogio para testes deterministicos."""
+    now = now or _now()
+    sources = fetch_source_statuses(conn, now=now)
+    data_freshness = fetch_data_freshness(conn, today=now.date())
     bug8 = run_bug8_check(conn)
 
     exec_stale = [s for s in sources if s.stale]
