@@ -7,6 +7,7 @@ Uso:
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -133,53 +134,302 @@ def _find_xlsx(brand_dir: Path) -> list[Path]:
     ]
 
 
-def _clean_numeric(series: pd.Series) -> pd.Series:
-    """Converte série que pode ter vírgula decimal para float."""
-    return (
-        series.astype(str)
-        .str.replace(r"\s", "", regex=True)
-        .str.replace(",", ".", regex=False)
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-    )
+_EMPTY_NUMERIC_TOKENS = {"", "-", "N/A", "NA", "NULL", "NONE"}
 
 
-def _load_brand(brand: str) -> pd.DataFrame | None:
+class ShopeeNumericParseError(ValueError):
+    """Valor numérico Shopee não vazio que não pôde ser interpretado.
+
+    Implementação LOCAL e independente do parser canônico em
+    pipelines/connectors/shopee/_numeric.py::parse_brl_float — mesmo
+    contrato de formatos (ver docstring de _parse_brl_float abaixo e
+    apps/api/etl/tests/test_load_shopee_products_numeric.py), mas
+    deliberadamente duplicada em vez de importada:
+
+    `apps/api` é empacotado e implantado de forma independente
+    (pyproject.toml próprio em apps/api/, .venv próprio, sem `pipelines`
+    nas dependências) e é executado com cwd=apps/api (ver docstring do
+    módulo). Confirmado empiricamente nesta sessão: `import pipelines`
+    levanta ModuleNotFoundError no .venv real de apps/api quando o cwd é
+    apps/api — pipelines nunca é instalado nesse ambiente. Um
+    `sys.path.insert()` para alcançá-lo seria, além de frágil, a direção
+    OPOSTA do único precedente já existente no repositório
+    (pipelines/reconciliation/*.py insere apps/api no sys.path para
+    reaproveitar ESTE arquivo — nunca o contrário). A mensagem desta
+    exceção nunca contém o valor bruto da célula (nem repr, nem conteúdo
+    original) — só uma descrição genérica do problema; contexto de
+    localização (arquivo/linha/coluna/marca) é responsabilidade do
+    chamador (_clean_numeric).
+    """
+
+
+class ShopeeProductInputError(ValueError):
+    """Entrada de uma marca incompleta ou ilegível: nenhum arquivo Order
+    encontrado, falha ao ler um arquivo XLSX, ou coluna obrigatória
+    ausente (order_date/product_name/status/qty/subtotal).
+
+    Levantada em vez de logar-e-pular (comportamento anterior, que
+    permitia _prepare_all_brands concluir e a Fase B começar com uma
+    marca ou arquivo silenciosamente omitido). Qualquer entrada
+    incompleta interrompe TODA a Fase A — nenhuma marca parcial chega a
+    _write_prepared_brands.
+
+    A mensagem contém apenas marca/arquivo/coluna (o que estiver
+    disponível para o caso específico) — nunca conteúdo de célula, nunca
+    a exceção original de pd.read_excel (que pode conter detalhes
+    internos do arquivo/planilha). Nunca encadeada: __cause__ e
+    __context__ sempre None, mesmo padrão de ShopeeNumericParseError."""
+
+
+def _parse_brl_float(val: object) -> float | None:
+    """Mesmo contrato de pipelines/connectors/shopee/_numeric.py::parse_brl_float:
+
+    - None/vazio/"-"/"N/A"/"NULL"/"NONE" (case-insensitive) -> None (sem
+      valor; o chamador decide a contribuição, aqui 0.0).
+    - "1234.56" (ponto decimal, formato real confirmado nos exports) e
+      "1234,56"/"1.234,56" (BR, vírgula decimal, com ou sem separador de
+      milhar) -> interpretados corretamente.
+    - "R$", espaços e NBSP são removidos antes do parsing.
+    - Formato US ("1,234.56", vírgula de milhar + ponto decimal) ->
+      ShopeeNumericParseError — decisão posicional (último "," depois do
+      último "." = BR aceito; antes = US/ambíguo rejeitado), nenhuma
+      evidência desse formato nos exports atuais.
+    - float nativo NaN -> None (AUSÊNCIA, não erro). Divergência
+      deliberada e documentada em relação ao parser canônico de
+      pipelines/connectors/shopee/_numeric.py (que rejeita NaN nativo):
+      lá, o valor vem direto de célula openpyxl, onde um NaN só
+      apareceria por uma anomalia real. Aqui, o valor vem de
+      `pd.read_excel(..., dtype=str)`, e foi confirmado empiricamente
+      nesta sessão que o PRÓPRIO pandas converte célula vazia E texto
+      reconhecido como "não disponível" (ex.: a string literal "NaN",
+      "NA", "N/A", "null") para o mesmo sentinela float NaN ANTES desta
+      função ver o valor — não há como distinguir os dois casos depois
+      do read_excel, e ambos já significam "sem valor" no contrato desta
+      função (mesma categoria de None/""/"-"/"N/A" string). Tratar como
+      erro quebraria qualquer célula genuinamente vazia na coluna
+      "Subtotal do produto" (confirmado 0 ocorrências nos 383.298 linhas
+      auditadas — não é o caso hoje, mas seria um falso positivo grave
+      se ocorresse).
+    - float nativo Infinity/-Infinity -> ShopeeNumericParseError. Ao
+      contrário de NaN, pandas NUNCA usa Infinity como sentinela de
+      ausência — um Infinity nativo só pode vir de dado genuinamente
+      inválido, nunca de célula vazia.
+    - String "Infinity"/"-Infinity"/"inf" (texto que pandas NÃO
+      reconhece como token de ausência, ao contrário de "NaN"/"NA"/
+      "N/A"/"null"/"None") -> ShopeeNumericParseError, via math.isfinite
+      após a tentativa de conversão.
+    - Qualquer outro valor não vazio e não interpretável ->
+      ShopeeNumericParseError. Nunca levanta encadeada (__cause__ e
+      __context__ sempre None) — a conversão é tentada e o resultado
+      guardado numa flag ANTES de qualquer `raise`, nunca dentro do bloco
+      `except`, para que nenhuma exceção esteja "sendo tratada" no
+      momento do raise (mesmo padrão de _numeric.py; verificado com
+      traceback.format_exception nos testes).
+    """
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        raise ShopeeNumericParseError("valor booleano inesperado em campo numérico") from None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+    if isinstance(val, (int, float)):
+        value = float(val)
+        if not math.isfinite(value):
+            raise ShopeeNumericParseError("valor numérico não finito (Infinity)") from None
+        return value
+
+    s = str(val).replace("\xa0", " ").replace("R$", "").strip()
+    s = s.replace(" ", "")
+    if s.upper() in _EMPTY_NUMERIC_TOKENS:
+        return None
+
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            raise ShopeeNumericParseError("formato numérico ambíguo (padrão US ou inválido)") from None
+    elif "," in s:
+        s = s.replace(",", ".")
+
+    conversion_ok = True
+    value = None
+    try:
+        value = float(s)
+    except ValueError:
+        conversion_ok = False
+
+    if not conversion_ok:
+        raise ShopeeNumericParseError("valor numérico inválido") from None
+
+    if not math.isfinite(value):
+        raise ShopeeNumericParseError("valor numérico não finito (NaN/Infinity)") from None
+    return value
+
+
+def _clean_numeric(series: pd.Series, *, column: str, brand: str,
+                    source_files: pd.Series, source_rows: pd.Series) -> pd.Series:
+    """Converte uma coluna de export Shopee (string) para float64.
+
+    Contrato (ver _parse_brl_float acima):
+      - Ausência legítima (None/vazio/"-"/"N/A") -> 0.0 (nenhuma
+        contribuição no GMV — mesmo comportamento já existente).
+      - Valor não vazio e inválido -> ShopeeNumericParseError, ANTES de
+        qualquer fillna/agregação/escrita — nunca vira 0.0 silenciosamente.
+        A mensagem inclui só brand/arquivo/linha/coluna — nunca o valor
+        bruto, nunca comprador/pedido/CPF.
+
+    dtype de retorno é sempre float64 explícito (nunca object), mesmo
+    quando toda a série é ausência (para não quebrar somas downstream).
+    """
+    values: list[float] = []
+    for val, file_name, row_num in zip(series, source_files, source_rows):
+        # Flag booleana em vez de `raise ... from exc` dentro do `except`:
+        # garante __context__ = None de verdade (nao apenas suprimido na
+        # exibicao por `from None`) — nenhuma excecao esta "sendo tratada"
+        # no momento do raise abaixo. Mesmo padrao de
+        # pipelines/connectors/shopee/_parser.py::_to_float.
+        parse_ok = True
+        parsed = None
+        try:
+            parsed = _parse_brl_float(val)
+        except ShopeeNumericParseError:
+            parse_ok = False
+
+        if not parse_ok:
+            raise ShopeeNumericParseError(
+                f"valor numérico inválido: brand={brand} arquivo={file_name} linha={row_num} coluna={column}"
+            ) from None
+
+        values.append(0.0 if parsed is None else parsed)
+    return pd.Series(values, index=series.index, dtype="float64")
+
+
+def _parse_qty_int(val: object) -> int | None:
+    """Quantidade: reaproveita _parse_brl_float para o parsing numérico de
+    base (mesmo contrato de ausência/formato BR/US/NaN/Infinity — ver
+    docstring acima) e adiciona duas validações específicas de contagem:
+
+    - deve ser um inteiro exato (sem parte fracionária): "1.5"/"2,50" são
+      REJEITADOS, nunca truncados silenciosamente para 1/2 — uma
+      quantidade fracionária é sempre um erro de dado, não um valor
+      legítimo arredondável.
+    - deve ser >= 0: quantidade negativa é rejeitada (nunca aceita como
+      um "estorno" implícito ou similar — não há evidência desse uso nos
+      exports auditados).
+
+    Ausência legítima (None) vem de _parse_brl_float sem alteração.
+    """
+    value = _parse_brl_float(val)
+    if value is None:
+        return None
+    if value != int(value):
+        raise ShopeeNumericParseError("quantidade não inteira") from None
+    if value < 0:
+        raise ShopeeNumericParseError("quantidade negativa") from None
+    return int(value)
+
+
+def _clean_int(series: pd.Series, *, column: str, brand: str,
+               source_files: pd.Series, source_rows: pd.Series) -> pd.Series:
+    """Converte uma coluna de export Shopee (string) para int64, seguindo
+    o mesmo padrão fail-fast/sanitizado de _clean_numeric (ver acima),
+    mas via _parse_qty_int (inteiro exato, não negativo).
+
+    - Ausência legítima (None/vazio/"-"/"N/A"/NaN nativo) -> 0 (mesmo
+      comportamento já existente para Quantidade).
+    - Valor não vazio e inválido (texto, decimal não inteiro, negativo,
+      Infinity, formato US) -> ShopeeNumericParseError, ANTES de qualquer
+      fillna/agregação/escrita — nunca vira 0 silenciosamente, nunca é
+      truncado. Mensagem inclui só brand/arquivo/linha/coluna — nunca o
+      valor bruto.
+    """
+    values: list[int] = []
+    for val, file_name, row_num in zip(series, source_files, source_rows):
+        parse_ok = True
+        parsed = None
+        try:
+            parsed = _parse_qty_int(val)
+        except ShopeeNumericParseError:
+            parse_ok = False
+
+        if not parse_ok:
+            raise ShopeeNumericParseError(
+                f"quantidade inválida: brand={brand} arquivo={file_name} linha={row_num} coluna={column}"
+            ) from None
+
+        values.append(0 if parsed is None else parsed)
+    return pd.Series(values, index=series.index, dtype="int64")
+
+
+_REQUIRED_COLS = ("order_date", "product_name", "status", "qty", "subtotal")
+_OPTIONAL_COLS = ("sku_ref", "variation_name", "buyer_username")
+
+
+def _load_brand(brand: str) -> pd.DataFrame:
+    """Levanta ShopeeProductInputError (nunca retorna None nem prossegue
+    silenciosamente) se a marca não tiver nenhum arquivo Order, se
+    qualquer arquivo falhar ao ler, ou se faltar qualquer uma das colunas
+    obrigatórias — ver contrato completo em ShopeeProductInputError."""
     brand_dir = SHOPEE_ROOT / brand
     files = _find_xlsx(brand_dir)
     if not files:
-        print(f"  [{brand}] nenhum ficheiro Order encontrado — ignorado.")
-        return None
+        raise ShopeeProductInputError(f"nenhum arquivo Order encontrado: brand={brand}") from None
 
     frames = []
     for f in sorted(files):
+        # Flag booleana em vez de `raise ... from e` dentro do `except`:
+        # __cause__/__context__ ficam None de verdade (mesmo padrão de
+        # _parse_brl_float/_clean_numeric) — a exceção original de
+        # pd.read_excel nunca é encadeada nem sua mensagem é incluída
+        # (pode conter detalhes internos do arquivo/planilha).
+        read_ok = True
+        df = None
         try:
             df = pd.read_excel(f, dtype=str)
-            frames.append(df)
-        except Exception as e:
-            print(f"  [{brand}] erro a ler {f.name}: {e}")
+        except Exception:
+            read_ok = False
 
-    if not frames:
-        return None
+        if not read_ok:
+            raise ShopeeProductInputError(
+                f"falha ao ler arquivo Order: brand={brand} arquivo={f.name}"
+            ) from None
 
-    raw = pd.concat(frames, ignore_index=True)
+        # Schema validado POR ARQUIVO INDIVIDUAL, ANTES de qualquer
+        # pd.concat com outros arquivos da marca. Se a validação rodasse
+        # só depois do concat, uma coluna obrigatória ausente neste
+        # arquivo mas presente em outro arquivo da mesma marca existiria
+        # globalmente no DataFrame concatenado — as linhas DESTE arquivo
+        # virariam NaN/None nessa coluna, que _clean_int/_clean_numeric
+        # tratam como ausência legítima (0), mascarando silenciosamente
+        # um arquivo com schema incompleto atrás de outro arquivo válido.
+        df.columns = [c.strip() for c in df.columns]
+        rename = {k: v for k, v in COL_MAP.items() if k in df.columns}
+        df = df.rename(columns=rename)
 
-    # Normalizar nomes de colunas
-    raw.columns = [c.strip() for c in raw.columns]
+        for col in _REQUIRED_COLS:
+            if col not in df.columns:
+                raise ShopeeProductInputError(
+                    f"coluna obrigatória ausente: brand={brand} arquivo={f.name} coluna={col}"
+                ) from None
 
-    # Renomear para nomes internos (ignora colunas ausentes)
-    rename = {k: v for k, v in COL_MAP.items() if k in raw.columns}
-    df = raw.rename(columns=rename)
+        # Colunas opcionais: podem faltar neste arquivo (viram coluna de
+        # None) — contrato inalterado, confirmado sem evidência de uso
+        # obrigatório nos exports. Preenchidas por arquivo (não só depois
+        # do concat) para que todo elemento de `frames` já tenha o schema
+        # completo antes de ser concatenado.
+        for col in _OPTIONAL_COLS:
+            if col not in df.columns:
+                df[col] = None
 
-    # Garantir que colunas obrigatórias existem
-    for col in ["order_date", "product_name", "status"]:
-        if col not in df.columns:
-            print(f"  [{brand}] coluna obrigatória ausente: {col} — ignorado.")
-            return None
+        # Provenance por linha (nome do arquivo + numero fisico da
+        # linha no Excel, header=linha 1) — usada so' para contexto
+        # sanitizado em erros de parsing numerico (_clean_numeric),
+        # nunca persistida no banco (removida antes do return).
+        df["_source_file"] = f.name
+        df["_source_row"] = df.index + 2
+        frames.append(df)
 
-    for col in ["sku_ref", "variation_name", "qty", "subtotal", "buyer_username"]:
-        if col not in df.columns:
-            df[col] = None
+    df = pd.concat(frames, ignore_index=True)
 
     # Tipos
     # Os exports Shopee usam "Data de criação do pedido" em formato ISO
@@ -189,8 +439,15 @@ def _load_brand(brand: str) -> pd.DataFrame | None:
     # projetando pedidos do dia 1-12 de qualquer mês real (jan-jun/2026) para meses
     # futuros inexistentes (jul-dez/2026). Ver docs/sections/produtos_audit.md.
     df["order_date"] = pd.to_datetime(df["order_date"], format="%Y-%m-%d %H:%M", errors="coerce")
-    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0).astype(int)
-    df["subtotal"] = _clean_numeric(df["subtotal"])
+    df["qty"] = _clean_int(
+        df["qty"], column="Quantidade", brand=brand,
+        source_files=df["_source_file"], source_rows=df["_source_row"],
+    )
+    df["subtotal"] = _clean_numeric(
+        df["subtotal"], column="Subtotal do produto", brand=brand,
+        source_files=df["_source_file"], source_rows=df["_source_row"],
+    )
+    df = df.drop(columns=["_source_file", "_source_row"])
     df["status"] = df["status"].fillna("").str.strip()
     df["brand"] = brand
 
@@ -259,10 +516,53 @@ def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — duas fases deliberadamente separadas: NENHUMA conexão/engine/DDL
+# acontece enquanto qualquer marca ainda não foi validada e agregada.
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def _prepare_all_brands() -> list[tuple[str, pd.DataFrame]]:
+    """Fase A — somente memória/arquivos, nenhum banco.
+
+    Carrega, valida (fail-fast via _clean_int/_clean_numeric) e agrega
+    CADA marca de BRANDS antes de qualquer engine/conexão/DDL ser sequer
+    considerado. Se qualquer marca levantar ShopeeNumericParseError,
+    ShopeeProductInputError (arquivo ausente/ilegível, coluna obrigatória
+    ausente — ver _load_brand) ou qualquer outra exceção, ela propaga
+    daqui e main() nunca chega a chamar
+    _get_local_pg_url()/create_engine() — a garantia fail-fast vale para
+    TODAS as marcas, não só a primeira a falhar, e o retorno só acontece
+    se TODAS as marcas de BRANDS tiverem sido preparadas com sucesso
+    (nunca uma lista parcial).
+
+    _load_brand nunca deveria retornar None (todo caminho de falha
+    levanta ShopeeProductInputError) — o `if df is None: raise` abaixo é
+    uma segunda barreira defensiva: mesmo que uma regressão futura em
+    _load_brand volte a retornar None silenciosamente, esta função ainda
+    assim recusa prosseguir para a Fase B com uma marca sem dados.
+
+    Só os agregados (pequenos — uma linha por sku/mês, não por pedido)
+    são retidos; o DataFrame bruto de cada marca (uma linha por SKU por
+    pedido, até centenas de milhares de linhas) é descartado assim que a
+    agregação daquela marca termina, nunca acumulado para todas as marcas
+    simultaneamente.
+    """
+    prepared: list[tuple[str, pd.DataFrame]] = []
+    for brand in BRANDS:
+        print(f"\n[{brand}] a carregar...")
+        df = _load_brand(brand)
+        if df is None:
+            raise ShopeeProductInputError(f"marca sem dados preparados inesperadamente: brand={brand}") from None
+        agg = _aggregate(df)
+        print(f"  {len(agg)} linhas agregadas.")
+        prepared.append((brand, agg))
+        del df
+    return prepared
+
+
+def _write_prepared_brands(prepared: list[tuple[str, pd.DataFrame]]) -> int:
+    """Fase B — só chega aqui depois que TODAS as marcas da Fase A foram
+    validadas e agregadas com sucesso. Abre a única conexão/engine desta
+    execução, executa o DDL e grava os agregados já prontos."""
     local_pg_url = _get_local_pg_url()
     print(f"PostgreSQL local (destino): {_sanitize_url(local_pg_url)}")
     engine = create_engine(local_pg_url)
@@ -273,15 +573,7 @@ def main() -> None:
 
     total_inserted = 0
 
-    for brand in BRANDS:
-        print(f"\n[{brand}] a carregar...")
-        df = _load_brand(brand)
-        if df is None:
-            continue
-
-        agg = _aggregate(df)
-        print(f"  {len(agg)} linhas agregadas.")
-
+    for brand, agg in prepared:
         rows_inserted = 0
         with engine.begin() as conn:
             for _, row in agg.iterrows():
@@ -309,6 +601,12 @@ def main() -> None:
         print(f"  {rows_inserted} linhas inseridas/actualizadas.")
         total_inserted += rows_inserted
 
+    return total_inserted
+
+
+def main() -> None:
+    prepared = _prepare_all_brands()
+    total_inserted = _write_prepared_brands(prepared)
     print(f"\nTotal: {total_inserted} linhas carregadas.")
 
 
