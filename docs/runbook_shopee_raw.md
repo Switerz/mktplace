@@ -120,7 +120,7 @@ Reconciliação final confirmada contra a primary: **384.882 linhas no manifesto
 - **Ads sem granularidade diária** — cada linha do CSV é um anúncio agregado por período; a raw preserva isso (não distribui/estima).
 - **Schema drift confirmado**: `orders` da marca `apice` tem header diferente das outras 4 marcas (tem `CPF do Comprador`, não tem `Domestic Delivered Date`/`Shopee Owned`/`Pedido FBS`). `ads` de `kokeshi` tem uma coluna extra (`Segmentação de Público`). `raw_payload` absorve isso naturalmente (JSONB sem schema fixo); qualquer staging futura deve tratar por nome de coluna, nunca por posição.
 - **Header duplicado**: `Cidade` aparece duas vezes no header original de todas as marcas — a segunda ocorrência vira `"Cidade__col<posição>"` em `raw_payload` para não sobrescrever a primeira.
-- **Achado colateral no parser de produção (fora do escopo desta fase, não corrigido aqui)**: `pipelines/connectors/shopee/_parser.py::_parse_float` não remove separador de milhar. Um valor como `"1.234,56"` vira `"1.234.56"` → `ValueError` → `0.0`. Qualquer pedido com `Subtotal do produto`/`Total global`/comissão ≥ R$ 1.000 é silenciosamente zerado no agregador de produção atual — recomendo abrir como bug separado.
+- ~~**Achado colateral no parser de produção**: `_parse_float` não remove separador de milhar — qualquer valor ≥ R$ 1.000 seria zerado.~~ **Investigado e corrigido em 2026-07-04 (seção 11) — a hipótese estava certa sobre o defeito de código, mas errada sobre o impacto**: auditoria de 100% dos dados reais mostrou que nenhuma linha usa esse formato, logo nenhuma linha histórica foi afetada. Ver seção 11 para causa raiz, contrato do parser corrigido e quantificação completa.
 - **Permissões herdadas do schema `raw`** para 6 roles internas — ver seção 5 (risco aceito, documentado, não corrigido).
 - **`shopee/.impeccable/hook.cache.json`**: arquivo não relacionado à Shopee, corretamente classificado como desconhecido pelo inventário, não carregado, não removido.
 - **`--dry-run`/`--inventory` leem cada arquivo por completo (~4-5 min)**: aceitável para uma operação manual pontual; otimização de leitura única fica para trabalho futuro se o volume crescer muito.
@@ -133,3 +133,85 @@ Design é INSERT-only por transação de arquivo (seção 6) — não existe "ro
 ## 10. Backfill futuro (novos exports)
 
 Rodar `--apply --backfill` novamente processa só os arquivos novos/alterados (idempotência por `file_sha256`) — os 120 arquivos já carregados são pulados automaticamente. Não há agendamento automático desta carga; é operação manual, como o restante da pipeline Shopee hoje.
+
+## 11. Correção do parser numérico e quantificação de impacto (2026-07-04)
+
+Esta seção fecha o achado colateral registrado na seção 8 (separador de milhar). Escopo: apenas código, testes e documentação — **nenhuma escrita em banco, nenhum reprocessamento, nenhum commit foi feito como parte desta fase**.
+
+### 11.1 Causa raiz confirmada
+
+`pipelines/connectors/shopee/_parser.py::_parse_float` (orders) e `pipelines/connectors/shopee/_parser_ads.py::_parse_float` (ads) — duas implementações **divergentes** da mesma ideia — faziam apenas `replace(",", ".")` sem remover separador de milhar. Um valor `"1.234,56"` virava `"1.234.56"`, `float()` levantava `ValueError`, e a função devolvia `0.0` **sem log, sem contagem, sem qualquer rastro** — indistinguível de um valor real igual a zero. Uma terceira implementação (`_parse_brl_float` em `pipelines/ingestion/load_shopee_raw.py`, usada só para diagnóstico de reconciliação, nunca na carga real) já tratava o separador de milhar corretamente, mas retornava `None` em vez de levantar erro para valor inválido — três regras numéricas divergentes coexistiam no repositório para o mesmo tipo de dado.
+
+### 11.2 Formatos efetivamente encontrados nas fontes (auditoria de 100% dos dados, não amostra)
+
+| Fonte | Arquivos | Linhas/registros verificados | Formato numérico encontrado |
+|---|---:|---:|---|
+| `Order.all*.xlsx` (orders) | 85 | 383.298 | Decimal com ponto, sem milhar (`"1546.30"`). 100% das strings, inclusive valores ≥ R$ 1.000 (`"1098.30"`, `"1019.38"`, etc.). Zero ocorrências de vírgula, `R$`, NBSP, negativo, vazio ou `N/A` nas 6 colunas numéricas usadas pelo agregador. |
+| `Dados*.csv` (ads) | 10 | 804 | Idêntico — decimal com ponto, sem milhar (`"1133.83"`, `"38147.83"`). Nota: o CSV usa `,` como delimitador de coluna — um número BR real (vírgula decimal) exigiria o campo entre aspas, o que é a provável razão pela qual o export sempre usa ponto decimal aqui. |
+| `*.shopee-shop-stats.*.xlsx` | 25 | 755 linhas diárias úteis (780 linhas físicas na Raw — ver nota abaixo) | Inteiros puros (`"1077"`) para contagens; vírgula decimal só em percentuais sempre < 100 (`"3,84%"`) — tratado por `_parse_pct`, uma função diferente, já correta. Não usa `_parse_float`. |
+
+Nenhum dos 3 tipos de export contém, hoje, um valor que dispare o bug do separador de milhar.
+
+**Nota — 755 linhas diárias úteis vs. 780 linhas físicas na Raw (diferença de 25, uma por arquivo):** cada arquivo `*.shopee-shop-stats.*.xlsx` tem uma linha de **total do período** (linha física 1 da planilha, ex.: `"01/03/2026-31/03/2026"` com os totais agregados do mês inteiro) além das linhas diárias (a partir da linha física 4). O parser de produção (`_parser_shop_stats.py::_read_xlsx`) começa a ler em `rows[4:]` e **nunca usa essa linha de total** — ela não é um dia, e incluí-la quebraria a granularidade diária das métricas. A camada Raw (`pipelines/ingestion/shopee_raw/inventory.py::read_shop_stats_file`), por design, preserva **toda linha física do arquivo sem filtro de negócio** (mesmo princípio aplicado a orders e ads) — então ela grava essa linha de total como mais um `ParsedRow`, uma por arquivo. 25 arquivos × 1 linha de total cada = as 25 linhas a mais (755 + 25 = 780). Não é uma divergência a corrigir: é a diferença esperada entre "grão de negócio útil" (produção) e "espelho append-only de toda linha física exportada" (Raw) — o mesmo princípio documentado em `docs/data_contracts.md` seção 7 para orders/ads. Confirma também a soma total do backfill: 383.298 (orders) + 780 (shop-stats) + 804 (ads) = 384.882 linhas-filhas.
+
+### 11.3 Impacto histórico quantificado — ZERO linhas afetadas
+
+Comparação linha a linha entre o parser **antigo** (`_parse_float` pré-correção, executado verbatim) e o **novo** (`parse_brl_float`), sobre 100% dos dados reais — não uma amostra:
+
+| Fonte | Linhas/registros comparados | Valores com resultado divergente | Diferença nas somas totais |
+|---|---:|---:|---:|
+| Orders (6 colunas × 383.298 linhas) | 2.299.788 valores | **0** | R$ 0,00 em todas as 6 colunas (`Quantidade`, `Subtotal do produto`, `Total global`, `Taxa de comissão líquida`, `Taxa de serviço líquida`, `Valor estimado do frete`) |
+| Ads (4 colunas × 804 registros) | 3.216 valores | **0** | R$ 0,00 em todas as 4 colunas (`Impressões`, `Cliques`, `Despesas`, `GMV`) |
+
+Somas totais idênticas ao centavo antes/depois (ex.: `Subtotal do produto` = R$ 24.859.859,62 nas duas versões; `GMV` de ads = R$ 16.887.993,55 nas duas versões). Não há distribuição por brand/mês/tipo de arquivo a reportar porque não há nenhuma linha divergente em nenhuma combinação. Não há menor/maior diferença a reportar pelo mesmo motivo (conjunto vazio). Não há valores ambíguos remanescentes: o formato US (vírgula de milhar, rejeitado explicitamente desde o endurecimento de 2026-07-04 — seção 11.8) não foi encontrado em nenhuma linha; se fosse, o parser corrigido levantaria `ShopeeNumericParseError` (fail-fast) em vez de aceitar ou converter incorretamente.
+
+**Conclusão prática**: `fact_marketplace_daily_performance` (via `_parser.py`/`_parser_ads.py`), `marts.fact_shopee_product_monthly` (via `apps/api/etl/load_shopee_products.py`, que tem uma implementação pandas com a mesma classe de limitação — ver 11.5) e `raw.shopee_*` (que preserva os valores originais em texto, sem parsear) **nunca estiveram incorretos por causa deste bug**. O bug era real no código; o impacto medido nos dados é zero.
+
+### 11.4 Contrato do parser corrigido
+
+Documentado em `docs/data_contracts.md` (seção "Contrato do parser numérico") e no docstring de `pipelines/connectors/shopee/_numeric.py::parse_brl_float`. Resumo da decisão de design:
+
+- Vazio/ausente (`None`, `""`, `"-"`, `"N/A"`) → `None` (sem valor, contribui 0 na agregação).
+- Valor não vazio inválido, ou não finito (NaN/±Infinity) → `ShopeeNumericParseError`, **nunca `0.0`**. A decisão final (seção 11.8, 2026-07-04) é **fail-fast**: os chamadores (`_parser.py`, `_parser_ads.py`) relançam a exceção com contexto sanitizado (marca/arquivo/linha ou índice do anúncio/campo — nunca o valor bruto, nunca buyer/order_id) e a deixam propagar, interrompendo a leitura da fonte com exit code != 0. Publicar uma métrica financeira construída sobre um valor não interpretável com status de sucesso foi considerado um risco maior do que perder a agregação daquele arquivo — o orquestrador (`pipelines/ops/orchestrate.py`) já marca o step como `FAILED` e segue com as fontes independentes seguintes.
+- Formato US (`"1,234.56"`) → rejeitado explicitamente (mesma exceção), nunca convertido para um valor incorreto — ver seção 11.8.
+- Três implementações divergentes (`_parser.py::_parse_float`, `_parser_ads.py::_parse_float`, `load_shopee_raw.py::_parse_brl_float`) foram consolidadas em uma única função compartilhada (`pipelines/connectors/shopee/_numeric.py::parse_brl_float`), eliminando a divergência de regras.
+
+### 11.5 Achado relacionado, não corrigido nesta fase
+
+`apps/api/etl/load_shopee_products.py::_clean_numeric` (usada para `Subtotal do produto` → `marts.fact_shopee_product_monthly.gmv`) tem a mesma classe de defeito (regex de limpeza baseada em pandas não remove separador de milhar antes de `pd.to_numeric`, e usa `fillna(0.0)` — mesmo silêncio). Mesma conclusão de impacto: como a coluna fonte é a mesma (`Subtotal do produto`, confirmado 100% ponto-decimal sem milhar), o impacto medido também é zero. **Não foi alterado nesta fase** — é uma aplicação diferente (`apps/api`, não `pipelines/connectors/shopee`), com histórico extenso de bugs já corrigidos e reconciliados (Bugs 1–9 em `docs/sections/produtos_audit.md`), e alterar sua lógica de parsing está fora do escopo mínimo desta correção. Recomendação: aplicar a mesma consolidação (`parse_brl_float`) em uma sessão futura dedicada a `load_shopee_products.py`, com sua própria reconciliação — seguindo o mesmo padrão de Gates já usado nos Bugs 3/5/8 daquele arquivo.
+
+### 11.6 Testes adicionados
+
+- `pipelines/tests/test_shopee_numeric.py` — contrato completo de `parse_brl_float` (formatos reais, bug histórico, BR com milhar, moeda, negativos, tipos nativos, ausência de valor, valor inválido, formato US rejeitado, NaN/Infinity rejeitados, sanitização da mensagem de erro, amostras anonimizadas dos dados reais).
+- `pipelines/tests/test_shopee_parser.py` — agregação de orders ponta a ponta com o parser corrigido (valores reais, BR com milhar, valor inválido interrompe com erro controlado e mensagem sanitizada, valor ausente sem erro, múltiplas linhas por pedido).
+- `pipelines/tests/test_shopee_parser_ads.py` — mesma cobertura para o CSV de ads.
+- `pipelines/tests/test_shopee_raw_numeric_wrapper.py` — `_reconcile_source`/`_print_dry_run_report` contam `numeric_parse_errors` e reprovam a reconciliação (exit code != 0) quando > 0, nunca declarando "Reconciliação OK" ao ignorar uma célula inválida.
+
+Suíte completa de `pipelines/tests` (463 testes, incluindo os 77 de Shopee numérico) passando; nenhum teste pré-existente quebrou.
+
+### 11.8 Endurecimento final (2026-07-04, antes do commit)
+
+Revisão de segurança pré-commit identificou 5 lacunas na correção da seção 11.1–11.7 e todas foram fechadas — apenas código/testes/documentação, nenhum banco acessado, nenhum dado reprocessado:
+
+1. **Fail-fast em vez de "rejeita e zera".** A decisão original (11.4) de logar e contabilizar `0.0` para valor inválido ainda permitia publicar uma métrica financeira incorreta com status de sucesso. Corrigido: `_to_float` em `_parser.py`/`_parser_ads.py` não captura mais `ShopeeNumericParseError` para continuar — relança com contexto e deixa propagar. Valor ausente legítimo (`None`) continua contribuindo zero, sem exceção.
+2. **Mensagens de exceção sanitizadas.** `ShopeeNumericParseError` nunca mais inclui `repr(val)` nem o conteúdo original da célula — só uma descrição genérica ("valor numérico inválido", "valor numérico não finito"). O contexto adicionado pelos chamadores é limitado a marca, nome do arquivo, número da linha física (orders, via novo campo `_source_row`/`_source_file` propagado por `_read_xlsx`) ou índice do anúncio (ads), e nome do campo — nunca buyer, endereço, CPF ou `order_id`.
+3. **Formato US rejeitado explicitamente**, não mais "silenciosamente interpretado como BR" (que era o comportamento documentado antes deste endurecimento, herdado de `_parse_brl_float`). Regra: o último separador (`,` ou `.`) decide qual é o decimal; se a vírgula vem depois do ponto (BR, `"1.234,56"`) é aceito, se vem antes (US, `"1,234.56"`) é rejeitado.
+4. **Valores não finitos rejeitados.** `"NaN"`, `"Infinity"`, `"-Infinity"` (qualquer capitalização) e os floats nativos `float("nan")`/`float("inf")` agora falham em `math.isfinite()` após a conversão e levantam `ShopeeNumericParseError`, em vez de produzir um valor não finito silenciosamente aceito.
+5. **Diagnóstico da Raw não esconde mais erro numérico.** `load_shopee_raw.py::_parse_brl_float_or_none` (que convertia `ShopeeNumericParseError` em `None`, indistinguível de uma célula vazia) foi removido. `_reconcile_source` agora conta `numeric_parse_errors`; `_print_dry_run_report` reprova a reconciliação (`SystemExit(1)`) quando esse total é maior que zero — nunca declara "Reconciliação OK" ignorando uma célula inválida. A carga real (`--apply`) nunca usou esse parser — comportamento inalterado.
+
+**Confirmado nesta revisão**: os formatos reais já auditados (11.2/11.3) continuam produzindo exatamente os mesmos valores — a suíte de testes que cobre amostras reais (`test_amostras_anonimizadas_de_orders_reais`, `test_amostras_anonimizadas_de_ads_reais`, e os testes de agregação com valores reais em `test_shopee_parser.py`/`test_shopee_parser_ads.py`) passa sem alteração de valores esperados. A auditoria completa dos 384.882 registros **não foi re-executada** nesta revisão (não solicitada, e os testes acima já garantem que os valores reais não mudaram) — o impacto histórico medido na seção 11.3 continua válido e é **zero**.
+
+### 11.7 Plano de remediação de dados históricos — **não autorizado, não executado**
+
+Como a quantificação (seção 11.3) encontrou **zero linhas divergentes**, não há dado histórico a corrigir hoje. Este plano fica registrado apenas como procedimento a seguir **se** uma auditoria futura (com novos exports) encontrar divergência real — por exemplo, um arquivo que passe a falhar com `ShopeeNumericParseError` (formato US, valor não finito, ou outro valor não interpretável) e precise ser corrigido na fonte ou ter seu suporte formalmente estendido:
+
+1. **Tabelas potencialmente atingidas**: `marts.fact_marketplace_daily_performance` (Neon, via `_parser.py`/`_parser_ads.py`), `marts.fact_shopee_product_monthly` (local + Neon, via `load_shopee_products.py`, se a mesma consolidação for aplicada lá).
+2. **Período atingido**: seria delimitado pela reconciliação por arquivo/brand/mês, nunca assumido como "tudo".
+3. **Backup**: snapshot timestamped das tabelas atingidas antes de qualquer escrita (mesmo padrão já usado nos Bugs 3/5/8 — `..._backup_<motivo>_<timestamp>`).
+4. **Staging**: reprocessar os arquivos fonte com o parser corrigido em uma tabela `..._staging_<motivo>_<timestamp>`, nunca sobrescrever a tabela real diretamente.
+5. **Reconciliação**: comparar staging vs. backup por brand × mês (GMV, contagens, taxas) — só prosseguir se a diferença for exatamente a esperada (mesmo padrão de `EXCEPT` bidirecional 0/0 + agregados idênticos já usado nos Gates 2/3 do Bug 8).
+6. **Swap/upsert**: transação única (`LOCK` → `TRUNCATE` só da tabela real → `INSERT` explícito por coluna → validação pós-swap → `COMMIT` só se tudo idêntico), seguindo exatamente o padrão de `pipelines/reconciliation/swap_bug8_canceled_only.py`.
+7. **Rollback**: backup preservado (nunca removido) até pelo menos uma carga real subsequente validada + 7 dias de observação — mesma política já adotada para os objetos do Bug 8 (seção 8 de `produtos_audit.md`).
+8. **Validação dos endpoints**: smoke test read-only dos endpoints afetados (`/performance/financeiro`, `/produtos/shopee`) comparando totais antes/depois, mesmo padrão do QA final do Bug 8.
+
+**Autorização explícita do usuário é necessária antes de executar qualquer um desses passos** — nada acima foi iniciado.
