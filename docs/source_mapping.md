@@ -281,6 +281,12 @@ Caminhos futuros:
 3. Adicionar granularidade SKU/pedido em fase posterior.
 4. Localizar e integrar o relatório de renda/repasse (income release) da Shopee para obter um `total_settlement` genuíno.
 
+### Fase Raw Shopee (2026-07-03) — inventário, contrato e carga real concluídos
+
+Inventário completo de `shopee/` (121 arquivos, ~118 MB; 120 elegíveis) e as 4 tabelas `raw.shopee_*` criadas e carregadas com o backfill completo: **384.882 linhas, reconciliação sem órfãs/duplicidades/discrepâncias**. Carga integral com PII autorizada explicitamente pelo usuário. Ver `docs/runbook_shopee_raw.md` e `docs/data_contracts.md` seção 7 para o contrato e os detalhes de execução.
+
+Achado do preflight: o schema `raw` de destino é o do **Data Mart** (RDS), o mesmo warehouse compartilhado que hoje tem `raw.tiktok_shop_orders`/`raw.ml_orders` e ~200 outras tabelas de fontes não relacionadas a marketplaces (Facebook Ads, GA4, Tiny, Bling, Yampi, WhatsApp etc. — schemas `raw`, `raw_data`, `staging`, `silver`, `api`, `gold`). A credencial `DATAMART_DATABASE_URL` é uma **read replica** (`pg_is_in_recovery()=true`), não superuser (correção de um relato anterior impreciso) — achado relevante para qualquer reconciliação rodada logo após uma escrita grande (lag de replicação, ver runbook seção 7).
+
 ---
 
 ## Mapeamento Brand â†’ Empresa (XLSX vs Banco)

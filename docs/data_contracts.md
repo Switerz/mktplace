@@ -403,3 +403,29 @@ Fontes:
 - `Dados*.csv`: mídia paga; como o export é agregado por período, o pipeline distribui totais como média diária.
 
 Caveat: a Shopee ainda não tem API conectada; a fonte de verdade operacional nesta fase são os exports do Seller Center.
+
+---
+
+## 7. Raw Shopee (Fase Raw Shopee — 2026-07-03, aplicado e carregado)
+
+Contrato para 4 tabelas em `raw.*` no **Data Mart** (não no Neon, não no Postgres local) — DDL em `db/sql/raw/shopee_raw_ddl.sql`, **executado**, com backfill completo (384.882 linhas, 120 arquivos, reconciliação sem problemas). Ver `docs/runbook_shopee_raw.md` para o runbook completo.
+
+Diferença de propósito em relação a `fact_marketplace_daily_performance` (seção 1 acima): aquela tabela é o **agregado diário** consumido pelo dashboard; as tabelas abaixo são o **espelho append-only da linha física exportada pela Shopee**, sem nenhuma agregação, filtro por status ou dedup — pensadas para auditoria/reprocessamento futuro, não para consumo direto do frontend.
+
+### raw.shopee_ingestion_file
+Grão: um arquivo físico (+ sheet) ingerido. Idempotência técnica via `UNIQUE(file_sha256, sheet_name)`.
+
+### raw.shopee_order_item_export
+Grão: uma linha física de SKU de um export `Order.all*.xlsx`, em um arquivo/snapshot específico. `raw_payload JSONB` guarda todas as colunas originais por nome exato da Shopee. **Contém PII direta** (nome do destinatário, telefone, endereço, CEP; CPF apenas no template da marca apice) — carga integral com PII autorizada explicitamente pelo usuário em 2026-07-03 (ver runbook seção 5); nenhum HMAC/mascaramento foi aplicado. Pedidos cancelados e exports sobrepostos **não são filtrados nem deduplicados** aqui — isso é responsabilidade de uma staging futura, fora do escopo desta fase.
+
+### raw.shopee_shop_stats_export
+Grão: uma linha física do relatório shop-stats (a linha de total do período OU uma linha diária). Sem PII.
+
+### raw.shopee_ads_export
+Grão: uma linha física por anúncio no CSV de ads. Sem PII. Mantém a limitação de granularidade agregada por período (sem distribuição diária) na própria raw — a distribuição fica para staging/gold, como já ocorre hoje.
+
+### Regras de qualidade específicas desta camada
+
+1. **Nunca deduplicar** por `order_id`/data entre arquivos — grão é por linha física de arquivo, não por evento de negócio.
+2. **Nunca** usar `DATAMART_DATABASE_URL` para escrever nestas tabelas — Gate 2 exige uma credencial dedicada (`DATAMART_SHOPEE_WRITE_URL`), distinta da de leitura.
+3. `raw_payload` é a fonte da verdade dos valores originais; qualquer campo técnico (file_id, source_row_number, hashes, timestamps) fica **fora** do payload.
