@@ -19,6 +19,7 @@ from typing import Optional
 import openpyxl
 
 from pipelines.common.logging import get_logger
+from pipelines.connectors.shopee._numeric import ShopeeNumericParseError, parse_brl_float
 
 logger = get_logger(__name__)
 
@@ -42,16 +43,33 @@ _STATUS_CANCELLED = "Cancelado"
 _STATUS_COMPLETED = "Concluído"
 
 
-def _parse_float(val) -> float:
-    if val is None:
-        return 0.0
-    s = str(val).replace("\xa0", "").replace(" ", "").replace(",", ".").strip()
-    if not s or s in ("-", ""):
-        return 0.0
+def _to_float(val, *, brand: str, source_file: str, source_row, field: str) -> float:
+    """Converte para float; valor ausente vira 0.0 (nenhuma contribuição
+    — contrato de _numeric.py). Valor não vazio e inválido NUNCA vira
+    0.0: uma NOVA exceção com contexto sanitizado (marca/arquivo/linha/
+    campo, nunca o valor bruto da célula nem buyer/order_id) propaga até
+    interromper a leitura desta fonte — fail-fast. O orquestrador externo
+    já é responsável por marcar esse step como FAILED e seguir com as
+    fontes independentes seguintes (ver docs/runbook_shopee_raw.md).
+
+    A exceção original de parse_brl_float() (já sanitizada, mas ainda
+    assim) NUNCA é encadeada: o `raise` só acontece depois que o bloco
+    `except` termina (flag booleana), então __cause__ e __context__ da
+    exceção pública ficam None — mesmo padrão de _numeric.py, mesma
+    verificação em pipelines/tests/test_shopee_parser.py."""
+    parse_ok = True
+    parsed = None
     try:
-        return float(s)
-    except ValueError:
-        return 0.0
+        parsed = parse_brl_float(val)
+    except ShopeeNumericParseError:
+        parse_ok = False
+
+    if not parse_ok:
+        raise ShopeeNumericParseError(
+            f"valor numérico inválido: brand={brand} arquivo={source_file} linha={source_row} campo={field}"
+        ) from None
+
+    return parsed if parsed is not None else 0.0
 
 
 def _parse_date(val) -> Optional[date]:
@@ -98,12 +116,13 @@ def _read_xlsx(path: Path) -> list[dict]:
         logger.warning("%s: colunas ausentes no header: %s", path.name, missing)
 
     result: list[dict] = []
-    for row in rows[1:]:
+    for row_num, row in enumerate(rows[1:], start=2):
         if all(v is None for v in row):
             continue
-        result.append(
-            {key: (row[idx] if idx < len(row) else None) for key, idx in col_index.items()}
-        )
+        record = {key: (row[idx] if idx < len(row) else None) for key, idx in col_index.items()}
+        record["_source_file"] = path.name
+        record["_source_row"] = row_num
+        result.append(record)
 
     return result
 
@@ -154,14 +173,17 @@ def _aggregate_daily(rows: list[dict], brand: str) -> list[dict]:
         if not o["buyer_username"]:
             o["buyer_username"] = row.get("buyer_username") or ""
 
+        source_file = row.get("_source_file")
+        source_row = row.get("_source_row")
+
         # SKU-level: soma
-        o["subtotal"] += _parse_float(row.get("subtotal"))
-        o["qty"]      += _parse_float(row.get("qty"))
+        o["subtotal"] += _to_float(row.get("subtotal"), brand=brand, source_file=source_file, source_row=source_row, field="subtotal")
+        o["qty"]      += _to_float(row.get("qty"), brand=brand, source_file=source_file, source_row=source_row, field="qty")
 
         # Order-level: max (a Shopee repete o mesmo valor em todas as linhas SKU
         # de um pedido; max() captura o valor real descartando os zeros)
         for field in ("total_global", "commission_net", "service_fee_net", "freight_est"):
-            v = _parse_float(row.get(field))
+            v = _to_float(row.get(field), brand=brand, source_file=source_file, source_row=source_row, field=field)
             if v > o[field]:
                 o[field] = v
 

@@ -30,6 +30,7 @@ from sqlalchemy import create_engine
 
 from pipelines.common.config import settings
 from pipelines.connectors.shopee.connector import BRANDS_IN_SCOPE
+from pipelines.connectors.shopee._numeric import ShopeeNumericParseError, parse_brl_float
 from pipelines.ingestion.shopee_raw import ddl, inventory as inv, reconcile, write_conn, writer
 from pipelines.ingestion.shopee_raw.pii import classify_headers, has_direct_pii
 
@@ -47,26 +48,6 @@ _RECONCILE_FIELDS = {
     inv.SOURCE_SHOP_STATS: ["Vendas (BRL)", "Pedidos", "Visitantes"],
     inv.SOURCE_ADS: ["Despesas", "Impressões", "Cliques", "GMV"],
 }
-
-
-def _parse_brl_float(val) -> Optional[float]:
-    """Parser numérico independente do parser de produção, usado só para
-    diagnóstico de reconciliação (ver docs/runbook_shopee_raw.md — o parser
-    de produção em _parser.py tem uma lacuna conhecida com separador de
-    milhar que este parser evita deliberadamente)."""
-    if val is None:
-        return None
-    s = str(val).replace("\xa0", "").strip()
-    if s in ("", "-"):
-        return None
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
 
 
 def _filter_records(
@@ -157,8 +138,12 @@ def _print_pii_report(records: list[inv.FileInventoryRecord]) -> None:
 
 
 def _reconcile_source(records: list[inv.FileInventoryRecord], data_path: Path) -> dict:
+    """Diagnóstico read-only (dry-run). Uma célula numérica inválida NUNCA
+    é silenciosamente excluída da soma: é contada em
+    `totals["numeric_parse_errors"]`, que `_print_dry_run_report` usa para
+    reprovar a reconciliação (nunca declarar "OK" ignorando o erro)."""
     per_file = []
-    totals = {"physical_rows": 0, "parsed_rows": 0, "rejected_rows": 0}
+    totals = {"physical_rows": 0, "parsed_rows": 0, "rejected_rows": 0, "numeric_parse_errors": 0}
     numeric_sums: dict[str, float] = {}
 
     for r in records:
@@ -179,9 +164,15 @@ def _reconcile_source(records: list[inv.FileInventoryRecord], data_path: Path) -
         totals["rejected_rows"] += rejected
 
         file_sums: dict[str, float] = {}
+        file_numeric_errors = 0
         for row in result.rows:
             for field_name in _RECONCILE_FIELDS[r.source_type]:
-                v = _parse_brl_float(row.raw_payload.get(field_name))
+                try:
+                    v = parse_brl_float(row.raw_payload.get(field_name))
+                except ShopeeNumericParseError:
+                    file_numeric_errors += 1
+                    totals["numeric_parse_errors"] += 1
+                    continue
                 if v is not None:
                     file_sums[field_name] = file_sums.get(field_name, 0.0) + v
                     numeric_sums[field_name] = numeric_sums.get(field_name, 0.0) + v
@@ -193,6 +184,7 @@ def _reconcile_source(records: list[inv.FileInventoryRecord], data_path: Path) -
                 "parsed_rows": parsed,
                 "rejected_rows": rejected,
                 "numeric_sums": file_sums,
+                "numeric_parse_errors": file_numeric_errors,
             }
         )
 
@@ -211,6 +203,7 @@ def _print_dry_run_report(records: list[inv.FileInventoryRecord], data_path: Pat
     grand_total_physical = 0
     grand_total_parsed = 0
     grand_total_rejected = 0
+    grand_total_numeric_errors = 0
 
     for (brand, source_type), group_records in sorted(by_group.items()):
         if source_type not in _RECONCILE_FIELDS:
@@ -220,21 +213,32 @@ def _print_dry_run_report(records: list[inv.FileInventoryRecord], data_path: Pat
         grand_total_physical += t["physical_rows"]
         grand_total_parsed += t["parsed_rows"]
         grand_total_rejected += t["rejected_rows"]
+        grand_total_numeric_errors += t["numeric_parse_errors"]
         print(f"\n-- {brand} / {source_type} --")
         print(f"  arquivos legíveis processados: {len([f for f in recon['per_file'] if 'error' not in f])}")
         print(f"  linhas físicas (parseadas + rejeitadas): {t['physical_rows']}")
         print(f"  linhas parseadas (seriam inseridas): {t['parsed_rows']}")
         print(f"  linhas rejeitadas (vazias): {t['rejected_rows']}")
+        print(f"  células numéricas inválidas (não vazias, não interpretáveis): {t['numeric_parse_errors']}")
         for field_name, total in recon["numeric_sums"].items():
             print(f"  soma bruta '{field_name}': {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         for err in [f for f in recon["per_file"] if "error" in f]:
             print(f"  ERRO ao ler {err['file']}: {err['error']}")
 
-    print(f"\nTOTAL GERAL — físicas={grand_total_physical} parseadas={grand_total_parsed} rejeitadas={grand_total_rejected}")
+    print(
+        f"\nTOTAL GERAL — físicas={grand_total_physical} parseadas={grand_total_parsed} "
+        f"rejeitadas={grand_total_rejected} erros_numericos={grand_total_numeric_errors}"
+    )
     if grand_total_physical != grand_total_parsed + grand_total_rejected:
         print("INCONSISTÊNCIA: físicas != parseadas + rejeitadas — investigar antes de aprovar Gate 2.")
         raise SystemExit(1)
-    print("Reconciliação OK: linhas físicas == parseadas + rejeitadas em 100% dos arquivos legíveis.")
+    if grand_total_numeric_errors > 0:
+        print(
+            f"INCONSISTÊNCIA: {grand_total_numeric_errors} célula(s) numérica(s) inválida(s) "
+            "encontrada(s) — a reconciliação não pode ser declarada limpa ignorando-as."
+        )
+        raise SystemExit(1)
+    print("Reconciliação OK: linhas físicas == parseadas + rejeitadas e zero células numéricas inválidas em 100% dos arquivos legíveis.")
 
 
 def _load_secret_or_none(secret_path: Path, repo_root: Path) -> tuple[Optional[dict], Optional[str]]:

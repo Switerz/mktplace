@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from pipelines.common.logging import get_logger
+from pipelines.connectors.shopee._numeric import ShopeeNumericParseError, parse_brl_float
 
 logger = get_logger(__name__)
 
@@ -37,16 +38,27 @@ _COL_MAP: dict[str, str] = {
 }
 
 
-def _parse_float(val: str) -> float:
-    if not val or val.strip() in ("-", ""):
-        return 0.0
-    s = val.replace("\xa0", "").replace("%", "").replace(",", ".").strip()
-    # Remove separador de milhar (ponto antes de 3 dígitos seguido de vírgula/ponto)
-    # Formato BR: 1.234,56 → já tratado acima
+def _to_float(val, *, brand: str, file_name: str, ad_index: int, field: str) -> float:
+    """Ausente vira 0.0 (contrato de _numeric.py). Não vazio e inválido
+    NUNCA vira 0.0: uma NOVA exceção com contexto sanitizado (marca/
+    arquivo/índice do anúncio/campo, nunca o valor bruto) propaga —
+    fail-fast, interrompe a leitura deste arquivo. Ver _parser.py::_to_float
+    para a mesma decisão de design (flag booleana antes do `raise`, para
+    __cause__/__context__ ficarem None — a exceção original nunca é
+    encadeada)."""
+    parse_ok = True
+    parsed = None
     try:
-        return float(s)
-    except ValueError:
-        return 0.0
+        parsed = parse_brl_float(val)
+    except ShopeeNumericParseError:
+        parse_ok = False
+
+    if not parse_ok:
+        raise ShopeeNumericParseError(
+            f"valor numérico inválido: brand={brand} arquivo={file_name} anuncio_idx={ad_index} campo={field}"
+        ) from None
+
+    return parsed if parsed is not None else 0.0
 
 
 def _parse_period(period_str: str) -> tuple[Optional[date], Optional[date]]:
@@ -120,7 +132,7 @@ def _parse_ads_file(path: Path, brand: str) -> list[dict]:
     n_ads = 0
     for row in reader:
         for csv_col, key in _COL_MAP.items():
-            totals[key] += _parse_float(row.get(csv_col, ""))
+            totals[key] += _to_float(row.get(csv_col, ""), brand=brand, file_name=path.name, ad_index=n_ads, field=key)
         n_ads += 1
 
     if n_ads == 0:
