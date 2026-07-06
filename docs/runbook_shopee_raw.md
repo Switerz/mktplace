@@ -35,7 +35,7 @@ Achados confirmados por preflight real (2026-07-03):
 
 ## 3. Diferença deliberada de `raw.shopee_*` vs `raw.tiktok_shop_orders`/`raw.ml_orders`
 
-As tabelas do TikTok/ML em `raw` têm `UNIQUE(order_id)` — são efetivamente upsert/dedupe por pedido. As tabelas `raw.shopee_*` são **append-only por linha física de arquivo**, sem chave de negócio: o mesmo pedido aparece várias vezes entre exports sobrepostos, e isso é esperado — deduplicação de negócio fica para uma staging futura, fora do escopo desta fase.
+As tabelas do TikTok/ML em `raw` têm `UNIQUE(order_id)` — são efetivamente upsert/dedupe por pedido. As tabelas `raw.shopee_*` são **append-only por linha física de arquivo**, sem chave de negócio: o mesmo pedido aparece várias vezes entre exports sobrepostos, e isso é esperado. **Correção (2026-07-06):** a staging tipada da Shopee (Fase Staging 1) preserva o mesmo grão de snapshot — não deduplica pedidos. A deduplicação/seleção de negócio fica para uma camada Gold futura, fora do escopo desta fase e da staging.
 
 ## 4. Como rodar
 

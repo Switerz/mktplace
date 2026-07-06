@@ -145,7 +145,14 @@ COMMENT ON TABLE raw.shopee_order_item_export IS
     'Grao: uma linha fisica de SKU de um pedido, em um export Order.all*.xlsx '
     'especifico. Append-only: um mesmo pedido pode aparecer em varias linhas '
     '(itens) e em varios arquivos/exports sobrepostos — isso e esperado e '
-    'nao deve ser deduplicado aqui. Deduplicacao de negocio fica para staging.';
+    'nao deve ser deduplicado aqui. Correcao (2026-07-06, ver review pre-commit '
+    'da Fase Staging Shopee 1): a staging tipada (silver.stg_shopee_'
+    'order_item_snapshots) TAMBEM preserva o grao de snapshot 1:1 com esta '
+    'tabela — nao existe hoje uma chave confiavel para decidir qual snapshot '
+    'de um pedido e o vigente quando exports se sobrepoem. A '
+    'selecao/deduplicacao de negocio por pedido fica para uma camada Gold '
+    'futura, ainda nao implementada — nao para a staging, como uma versao '
+    'anterior deste comentario dizia.';
 COMMENT ON COLUMN raw.shopee_order_item_export.raw_payload IS
     'Todas as colunas originais do export, chave = header exato da Shopee, '
     'incluindo PII direta (nome do destinatario, telefone, endereco, CEP, '
