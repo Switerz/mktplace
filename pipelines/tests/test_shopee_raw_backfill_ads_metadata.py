@@ -1,9 +1,9 @@
 """
-Testes do DRAFT de backfill HISTÓRICO e ATÔMICO de source_metadata (Fase
-Staging Shopee 2A, Gate 2B — revisão de 2026-07-07, 5ª rodada). Nenhum
-banco real é tocado: Fase A usa uma conexão SQLAlchemy FALSA, Fase B (e a
-restauração) usam uma conexão psycopg2 FALSA. Este módulo NUNCA é
-executado de verdade nesta fase.
+Testes do backfill HISTÓRICO e ATÔMICO de source_metadata (Fase Staging
+Shopee 2A, Gate 2B — CLI operacional desde 2026-07-07). Nenhum banco real é
+tocado: Fase A e a CLI de dry-run usam uma conexão SQLAlchemy FALSA, Fase B
+(e a restauração) usam uma conexão psycopg2 FALSA. `--apply-confirmed`
+nunca é chamado contra um banco real neste módulo de teste.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from pipelines.ingestion.shopee_raw import backfill_ads_metadata_draft as backfill
+from pipelines.ingestion.shopee_raw import backfill_ads_metadata as backfill
 from pipelines.ingestion.shopee_raw import write_conn
 from pipelines.ingestion.shopee_raw.hashing import sha256_file
 from pipelines.ingestion.shopee_raw.inventory import SourceReadError
@@ -961,11 +961,659 @@ def test_apply_e_idempotente_segunda_chamada_com_plano_vazio_e_no_op(tmp_path):
     assert result.outcome == "aborted_nothing_pending"
 
 
-def test_main_sempre_recusa_executar_mesmo_com_apply_confirmed(capsys):
+# =============================================================================
+# CLI: _check_migration_state / _dry_run_with_conn (núcleo testável do
+# --dry-run) -- conexão SQLAlchemy FALSA que despacha por conteúdo do SQL,
+# mesmo estilo de _FakeCursorB (Fase B) para nunca depender de banco real.
+# =============================================================================
+
+
+class _FakeResult:
+    def __init__(self, scalar_value=None, fetchone_value=None, mapping_rows=None):
+        self._scalar_value = scalar_value
+        self._fetchone_value = fetchone_value
+        self._rows = mapping_rows or []
+
+    def scalar(self):
+        return self._scalar_value
+
+    def fetchone(self):
+        return self._fetchone_value
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeDryRunConn:
+    def __init__(
+        self, *, in_recovery=False, column_type="jsonb", constraint_row=(True,),
+        total_manifests=120, not_null_count=0, pending_manifests=None,
+    ):
+        self.in_recovery = in_recovery
+        self.column_type = column_type
+        self.constraint_row = constraint_row
+        self.total_manifests = total_manifests
+        self.not_null_count = not_null_count
+        self.pending_manifests = pending_manifests or []
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        upper = sql.upper()
+        if "PG_IS_IN_RECOVERY" in upper:
+            return _FakeResult(scalar_value=self.in_recovery)
+        if "INFORMATION_SCHEMA.COLUMNS" in upper:
+            return _FakeResult(fetchone_value=(self.column_type,) if self.column_type else None)
+        if "PG_CONSTRAINT" in upper:
+            return _FakeResult(fetchone_value=self.constraint_row)
+        if "IS NOT NULL" in upper:
+            return _FakeResult(scalar_value=self.not_null_count)
+        if upper.strip().startswith("SELECT COUNT(*) FROM RAW.SHOPEE_INGESTION_FILE"):
+            return _FakeResult(scalar_value=self.total_manifests)
+        if "SOURCE_TYPE = 'ADS'" in upper:
+            return _FakeResult(mapping_rows=self.pending_manifests)
+        raise AssertionError(f"SQL inesperado na conexão falsa: {sql}")
+
+
+def _make_fake_engine(conn):
+    class _Ctx:
+        def __enter__(self):
+            return conn
+
+        def __exit__(self, *a):
+            return False
+
+    class _ConnectResult:
+        def execution_options(self, **kw):
+            return _Ctx()
+
+    class _Engine:
+        def connect(self):
+            return _ConnectResult()
+
+    return _Engine()
+
+
+def test_check_migration_state_ok_quando_tudo_confere():
+    check = backfill._check_migration_state(_FakeDryRunConn())
+    assert check.ok is True
+    assert check.problems == []
+
+
+def test_check_migration_state_replica_detectada_aborta_antes_de_checar_coluna():
+    check = backfill._check_migration_state(_FakeDryRunConn(in_recovery=True))
+    assert check.ok is False
+    assert any("pg_is_in_recovery" in p for p in check.problems)
+    assert check.column_exists is False  # nunca chegou a checar
+
+
+def test_check_migration_state_coluna_ausente():
+    check = backfill._check_migration_state(_FakeDryRunConn(column_type=None))
+    assert check.ok is False
+    assert any("coluna source_metadata não existe" in p for p in check.problems)
+
+
+def test_check_migration_state_constraint_ausente():
+    check = backfill._check_migration_state(_FakeDryRunConn(constraint_row=None))
+    assert check.ok is False
+    assert any("constraint" in p and "não existe" in p for p in check.problems)
+
+
+def test_check_migration_state_constraint_nao_validada():
+    check = backfill._check_migration_state(_FakeDryRunConn(constraint_row=(False,)))
+    assert check.ok is False
+    assert any("não está validada" in p for p in check.problems)
+
+
+def test_check_migration_state_drift_no_total_de_manifestos():
+    check = backfill._check_migration_state(_FakeDryRunConn(total_manifests=121))
+    assert check.ok is False
+    assert any("total de manifestos mudou" in p for p in check.problems)
+
+
+def test_check_migration_state_metadata_ja_preenchida_e_drift():
+    check = backfill._check_migration_state(_FakeDryRunConn(not_null_count=3))
+    assert check.ok is False
+    assert any("já têm source_metadata" in p for p in check.problems)
+
+
+def test_dry_run_com_conn_plano_10_10_pronto_retorna_exit_0(tmp_path):
+    manifests = _exact_scope_manifests(tmp_path)
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is True
+    assert report.exit_code == 0
+    assert report.total_pending_ads == 10
+    assert set(report.count_by_brand) == set(_BRANDS)
+    assert len(report.periods) == 10
+    assert report.problems == []
+
+
+def test_dry_run_com_conn_9_manifestos_retorna_nao_zero(tmp_path):
+    manifests = _exact_scope_manifests(tmp_path)[:9]
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is False
+    assert report.exit_code != 0
+    assert report.total_pending_ads == 9
+    assert any("exatamente 10" in p for p in report.problems)
+
+
+def test_dry_run_com_conn_11_manifestos_retorna_nao_zero(tmp_path):
+    manifests = _exact_scope_manifests(tmp_path)
+    extra = dict(manifests[0])
+    extra["file_id"] = 999
+    extra["source_filename"] = "apice/Dados+extra.csv"
+    _write_valid_ads_csv(tmp_path / extra["source_filename"])
+    extra["file_sha256"] = sha256_file(tmp_path / extra["source_filename"])
+    manifests = manifests + [extra]
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is False
+    assert report.exit_code != 0
+    assert report.total_pending_ads == 11
+    assert any("exatamente 10" in p for p in report.problems)
+
+
+def test_dry_run_com_conn_hash_divergente_retorna_nao_zero(tmp_path):
+    manifests = _exact_scope_manifests(tmp_path)
+    manifests[0] = dict(manifests[0], file_sha256="f" * 64)
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is False
+    assert report.exit_code != 0
+    assert any("hash" in p for p in report.problems)
+
+
+def test_dry_run_com_conn_preambulo_invalido_retorna_nao_zero(tmp_path):
+    manifests = _exact_scope_manifests(tmp_path)
+    bad_path = tmp_path / manifests[0]["source_filename"]
+    bad_path.write_text(_INVALID_CSV, encoding="utf-8-sig", newline="")
+    manifests[0] = dict(manifests[0], file_sha256=sha256_file(bad_path))
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is False
+    assert report.exit_code != 0
+    assert any(f"file_id={manifests[0]['file_id']}" in p for p in report.problems)
+
+
+def test_dry_run_com_conn_coluna_ausente_nao_chega_a_buscar_manifestos(tmp_path, monkeypatch):
+    def _boom(*a, **kw):
+        raise AssertionError("não deveria buscar manifestos com migration não confirmada")
+
+    monkeypatch.setattr(backfill, "_pending_ads_manifests", _boom)
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(column_type=None), tmp_path)
+    assert report.ready is False
+    assert report.exit_code == 3
+    assert any("coluna source_metadata não existe" in p for p in report.problems)
+
+
+def test_dry_run_com_conn_replica_detectada_nao_chega_a_buscar_manifestos(tmp_path, monkeypatch):
+    def _boom(*a, **kw):
+        raise AssertionError("não deveria buscar manifestos numa réplica")
+
+    monkeypatch.setattr(backfill, "_pending_ads_manifests", _boom)
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(in_recovery=True), tmp_path)
+    assert report.ready is False
+    assert report.exit_code == 3
+
+
+def test_dry_run_report_nunca_expoe_shop_id_url_ou_filename_completo(tmp_path, capsys):
+    manifests = _exact_scope_manifests(tmp_path)
+    report = backfill._dry_run_with_conn(_FakeDryRunConn(pending_manifests=manifests), tmp_path)
+    assert report.ready is True
+
+    backfill._print_dry_run_report(report)
+    out = capsys.readouterr().out
+
+    assert "999999999" not in out  # shop_id usado em _VALID_CSV
+    for m in manifests:
+        assert m["source_filename"] not in out  # filename completo nunca aparece
+    assert "postgresql://" not in out
+    assert "@" not in out  # forma comum de credencial embutida em URL
+
+
+def test_run_dry_run_bloqueado_por_secret_nunca_abre_engine(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(backfill, "create_engine", lambda *a, **k: called.append(1))
+    report = backfill.run_dry_run(secret_path=tmp_path / "nao_existe.local", repo_root=tmp_path)
+    assert report.ready is False
+    assert report.exit_code == 2
+    assert called == []
+
+
+def test_main_dry_run_usa_run_dry_run_e_propaga_exit_code_pronto(monkeypatch, capsys):
+    fake_report = backfill.DryRunReport(
+        ready=True, exit_code=0,
+        migration_state=backfill.MigrationStateCheck(ok=True, total_manifests=120, manifests_with_metadata_not_null=0),
+        total_pending_ads=10, count_by_brand={"apice": 2},
+        periods=[{"brand": "apice", "period_start": "2026-01-01", "period_end": "2026-03-31"}],
+    )
+    monkeypatch.setattr(backfill, "run_dry_run", lambda **kw: fake_report)
+    exit_code = backfill.main(["--dry-run"])
+    assert exit_code == 0
+    assert "ready=True" in capsys.readouterr().out
+
+
+def test_main_dry_run_retorna_exit_code_nao_zero_quando_nao_pronto(monkeypatch):
+    fake_report = backfill.DryRunReport(
+        ready=False, exit_code=5,
+        migration_state=backfill.MigrationStateCheck(ok=True, total_manifests=120, manifests_with_metadata_not_null=0),
+        problems=["esperado exatamente 10 manifestos, encontrado 9"],
+    )
+    monkeypatch.setattr(backfill, "run_dry_run", lambda **kw: fake_report)
+    assert backfill.main(["--dry-run"]) == 5
+
+
+# --- CLI: --apply-confirmed (guardrails -- NUNCA chamado contra banco real) --
+
+
+def test_apply_confirmed_sem_audit_path_nao_chama_run_apply_confirmed(monkeypatch):
+    called = []
+    monkeypatch.setattr(backfill, "run_apply_confirmed", lambda *a, **k: called.append(1))
     exit_code = backfill.main(["--apply-confirmed"])
     assert exit_code != 0
+    assert called == []
+
+
+def test_apply_confirmed_bloqueado_por_secret_ausente_nao_abre_conexao_de_escrita(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(write_conn, "open_write_connection", lambda *a, **k: called.append(1))
+    exit_code = backfill.run_apply_confirmed(
+        tmp_path / "backup.json", secret_path=tmp_path / "nao_existe.local", repo_root=tmp_path,
+    )
+    assert exit_code == 2
+    assert called == []
+
+
+def test_apply_confirmed_bloqueado_por_i_understand_diferente_de_1_nao_abre_conexao(tmp_path, monkeypatch):
+    secret_path = tmp_path / ".env.shopee-write.local"
+    secret_path.write_text(
+        "DATAMART_SHOPEE_WRITE_URL=postgresql://writer@host/db\nI_UNDERSTAND_THIS_WRITES_DATAMART_RAW=0\n"
+    )
+    called = []
+    monkeypatch.setattr(write_conn, "open_write_connection", lambda *a, **k: called.append(1))
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", secret_path=secret_path, repo_root=tmp_path)
+    assert exit_code == 2
+    assert called == []
+
+
+def test_apply_confirmed_bloqueado_por_preflight_nao_abre_conexao_de_escrita(monkeypatch, tmp_path):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    blocked_report = write_conn.PreflightReport(ok=False, blocking_reasons=["rolsuper=true"])
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: blocked_report)
+    called = []
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: called.append(1))
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path)
+    assert exit_code == 3
+    assert called == []
+
+
+def test_apply_confirmed_bloqueado_por_replica_nao_abre_conexao_de_escrita(monkeypatch, tmp_path):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+    monkeypatch.setattr(backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeDryRunConn(in_recovery=True)))
+    called = []
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: called.append(1))
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 4
+    assert called == []
+
+
+def test_apply_confirmed_bloqueado_por_plano_nao_pronto_nao_abre_conexao_de_escrita(monkeypatch, tmp_path):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+    manifests = _exact_scope_manifests(tmp_path)[:9]  # escopo errado -> plano nunca fica pronto
+    monkeypatch.setattr(
+        backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeDryRunConn(pending_manifests=manifests))
+    )
+    called = []
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: called.append(1))
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 5
+    assert called == []
+
+
+def test_apply_confirmed_sucesso_chama_exclusivamente_apply_backfill_atomic(monkeypatch, tmp_path):
+    """Prova que, quando todas as guardas passam, a ÚNICA operação de
+    escrita é a chamada a apply_backfill_atomic (nunca um INSERT/UPDATE
+    solto no meio de run_apply_confirmed)."""
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+    manifests = _exact_scope_manifests(tmp_path)
+    monkeypatch.setattr(
+        backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeDryRunConn(pending_manifests=manifests))
+    )
+
+    class _FakeWriteConn:
+        def close(self):
+            pass
+
+    fake_write_conn = _FakeWriteConn()
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: fake_write_conn)
+    monkeypatch.setattr(backfill.write_conn, "try_acquire_advisory_lock", lambda conn: True)
+    monkeypatch.setattr(backfill.write_conn, "release_advisory_lock", lambda conn: None)
+
+    calls = []
+
+    def _fake_apply(conn, plan, **kw):
+        calls.append((conn, plan, kw))
+        return backfill.BackfillResult(outcome="committed", updated_file_ids=list(range(1, 11)))
+
+    monkeypatch.setattr(backfill, "apply_backfill_atomic", _fake_apply)
+
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    conn, plan, kw = calls[0]
+    assert conn is fake_write_conn
+    assert plan.ready is True
+    assert kw["confirm_flag"] is True
+    assert kw["confirm_secret_value"] == "1"
+
+
+# =============================================================================
+# CLI: sanitização adversarial de TODAS as falhas do caminho de escrita --
+# exceções simuladas em cada um dos 9 pontos de risco de run_apply_confirmed
+# carregam uma DSN fictícia com senha, um filename fictício, um shop_id
+# fictício e um CPF fictício, para provar que NADA disso aparece em
+# stdout/stderr, mesmo numa exceção nunca antes vista. --apply-confirmed
+# nunca é chamado contra um banco real nestes testes.
+# =============================================================================
+
+_FAKE_SECRET_MSG = (
+    "dsn=postgresql://shopee_writer:S3nh4Sup3rSecreta@db.internal.acme.com:5432/datamart "
+    "arquivo=apice/Dados+Gerais-01-01-2026.csv shop_id=999999999 cpf=123.456.789-00"
+)
+_FAKE_SECRET_TOKENS = (
+    "S3nh4Sup3rSecreta",
+    "shopee_writer:S3nh4Sup3rSecreta@",
+    "Dados+Gerais-01-01-2026.csv",
+    "999999999",
+    "123.456.789-00",
+)
+
+
+def _assert_no_secrets_leaked(text):
+    for token in _FAKE_SECRET_TOKENS:
+        assert token not in text, f"vazou em stdout/stderr: {token!r}\n--- saída completa ---\n{text}"
+
+
+def _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path, pending_manifests=None):
+    """Deixa passar secret/preflight/migration/plano até o ponto de abrir a
+    conexão de escrita -- usado pelos testes que simulam falha DEPOIS
+    desse ponto (open_write_connection em diante)."""
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+    manifests = pending_manifests if pending_manifests is not None else _exact_scope_manifests(tmp_path)
+    monkeypatch.setattr(
+        backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeDryRunConn(pending_manifests=manifests))
+    )
+
+
+def test_apply_confirmed_secret_excecao_inesperada_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    def _boom(p, r):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 2
     captured = capsys.readouterr()
-    assert "DRAFT" in captured.err
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_run_preflight_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 3
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_create_engine_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "create_engine", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_check_migration_state_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+
+    class _FakeConnRaisingOnExecute:
+        def execute(self, *a, **k):
+            raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeConnRaisingOnExecute()))
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_plan_backfill_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(backfill.write_conn, "load_write_secret", lambda p, r: {
+        "DATAMART_SHOPEE_WRITE_URL": "postgresql://writer@host/db",
+        "I_UNDERSTAND_THIS_WRITES_DATAMART_RAW": "1",
+    })
+    ok_report = write_conn.PreflightReport(ok=True, safe_summary={"rolsuper": False})
+    monkeypatch.setattr(backfill.write_conn, "run_preflight", lambda *a, **k: ok_report)
+    monkeypatch.setattr(backfill, "create_engine", lambda *a, **k: _make_fake_engine(_FakeDryRunConn()))
+
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "_pending_ads_manifests", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_open_write_connection_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path)
+
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 6
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_try_acquire_advisory_lock_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path)
+
+    class _FakeWriteConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: _FakeWriteConn())
+
+    def _boom(conn):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "try_acquire_advisory_lock", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 6
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_apply_backfill_atomic_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path)
+
+    class _FakeWriteConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: _FakeWriteConn())
+    monkeypatch.setattr(backfill.write_conn, "try_acquire_advisory_lock", lambda conn: True)
+    monkeypatch.setattr(backfill.write_conn, "release_advisory_lock", lambda conn: None)
+
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "apply_backfill_atomic", _boom)
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+    assert exit_code == 9
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_commit_ocorreu_mas_release_lock_falha_reporta_committed(tmp_path, monkeypatch, capsys):
+    """O cenário crítico pedido: apply_backfill_atomic já retornou
+    'committed' -- uma falha DEPOIS disso (release_advisory_lock) NUNCA
+    pode virar 'o backfill falhou'. A conexão ainda é fechada (libera o
+    lock de sessão de qualquer forma), o resultado reportado continua
+    'committed', o exit code continua 0, e o aviso nunca sugere retry."""
+    _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path)
+
+    closed = []
+
+    class _FakeWriteConn:
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: _FakeWriteConn())
+    monkeypatch.setattr(backfill.write_conn, "try_acquire_advisory_lock", lambda conn: True)
+
+    def _boom_release(conn):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "release_advisory_lock", _boom_release)
+    committed_result = backfill.BackfillResult(
+        outcome="committed", updated_file_ids=list(range(1, 11)), backup_sha256="a" * 64,
+    )
+    monkeypatch.setattr(backfill, "apply_backfill_atomic", lambda *a, **k: committed_result)
+
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+
+    assert exit_code == 0  # NUNCA reportado como falho por causa do release do lock
+    assert closed == [1]  # conexão fechada mesmo com a falha -- libera o lock de sessão de qualquer forma
+    captured = capsys.readouterr()
+    assert "Resultado: committed" in captured.out
+    assert "AVISO" in captured.err
+    # o aviso pode EXPLICAR que não há retry automático (é a garantia
+    # pedida), mas nunca pode SUGERIR uma ação de repetir a operação
+    assert "tente novamente" not in captured.err.lower()
+    assert "tentar novamente" not in captured.err.lower()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+def test_apply_confirmed_conn_close_excecao_nunca_vaza_segredos(tmp_path, monkeypatch, capsys):
+    _setup_apply_confirmed_happy_guards(monkeypatch, tmp_path)
+
+    class _FakeWriteConn:
+        def close(self):
+            raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill.write_conn, "open_write_connection", lambda *a, **k: _FakeWriteConn())
+    monkeypatch.setattr(backfill.write_conn, "try_acquire_advisory_lock", lambda conn: True)
+    monkeypatch.setattr(backfill.write_conn, "release_advisory_lock", lambda conn: None)
+    committed_result = backfill.BackfillResult(outcome="committed", updated_file_ids=list(range(1, 11)))
+    monkeypatch.setattr(backfill, "apply_backfill_atomic", lambda *a, **k: committed_result)
+
+    exit_code = backfill.run_apply_confirmed(tmp_path / "backup.json", repo_root=tmp_path, data_path=tmp_path)
+
+    assert exit_code == 0  # falha ao fechar a conexão não muda o resultado já obtido
+    captured = capsys.readouterr()
+    assert "Resultado: committed" in captured.out
+    _assert_no_secrets_leaked(captured.out + captured.err)
+
+
+# --- main(): última barreira ------------------------------------------------
+
+
+def test_main_ultima_barreira_cobre_dry_run_e_nunca_vaza_traceback_cru(monkeypatch, capsys):
+    def _boom(**kw):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "run_dry_run", _boom)
+    exit_code = backfill.main(["--dry-run"])
+    assert exit_code == 10
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_ultima_barreira_cobre_apply_confirmed_e_nunca_vaza_traceback_cru(monkeypatch, tmp_path, capsys):
+    def _boom(*a, **k):
+        raise RuntimeError(_FAKE_SECRET_MSG)
+
+    monkeypatch.setattr(backfill, "run_apply_confirmed", _boom)
+    exit_code = backfill.main(["--apply-confirmed", "--audit-path", str(tmp_path / "backup.json")])
+    assert exit_code == 10
+    captured = capsys.readouterr()
+    _assert_no_secrets_leaked(captured.out + captured.err)
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_backfill_cli_nenhuma_dependencia_nova():
+    import ast
+    from pathlib import Path
+
+    src = Path(backfill.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    top_level_modules = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level_modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top_level_modules.add(node.module.split(".")[0])
+    allowed = {
+        "__future__", "argparse", "json", "os", "re", "sys", "tempfile",
+        "dataclasses", "datetime", "pathlib", "typing",
+        "psycopg2", "sqlalchemy", "pipelines",
+    }
+    assert top_level_modules <= allowed, top_level_modules - allowed
 
 
 # --- backup sem possibilidade de sobrescrita (corrida TOCTOU) ---------------
@@ -979,7 +1627,7 @@ def test_write_audit_atomic_aborta_se_destino_surge_entre_validacao_e_publicacao
     audit_path = tmp_path / "backup.json"
     conn = _FakeConnB(revalidation_rows=_revalidation_rows_for(plan.items))
 
-    import pipelines.ingestion.shopee_raw.backfill_ads_metadata_draft as mod
+    import pipelines.ingestion.shopee_raw.backfill_ads_metadata as mod
 
     real_link = mod.os.link
 

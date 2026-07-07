@@ -259,7 +259,8 @@ começava no header. O período era aproximado pelo **nome do arquivo**
 os 2 CSVs da kokeshi (`Dados+Gerais-01-01-19-03.csv`, sem ano) ficavam com
 período NULL — um fallback silencioso e frágil.
 
-**Design atual** (Fase Staging Shopee 2A, Gate 2B — draft, não aplicado):
+**Design atual** (Fase Staging Shopee 2A, Gate 2B — migration aplicada em
+2026-07-07, backfill ainda pendente):
 `raw.shopee_ingestion_file.source_metadata jsonb` guarda o período REAL,
 extraído do **preâmbulo** do CSV (as ~6 linhas antes do header `#,...`) por
 `pipelines/ingestion/shopee_raw/ads_metadata.py` — nunca do nome do
@@ -282,26 +283,30 @@ qualquer INSERT. Isso é uma mudança deliberada em relação ao design
 anterior (que gravava NULL silenciosamente para os arquivos fora do
 padrão).
 
-Artefatos desta fase (drafts, nada aplicado em nenhum banco):
+Artefatos desta fase (status em 2026-07-07 — migration aplicada, backfill
+pendente, staging ainda draft):
 - `db/sql/raw/shopee_raw_add_source_metadata.sql` — migration para o
   ambiente já carregado (`ALTER TABLE ... ADD COLUMN` + `CHECK
-  jsonb_typeof(...) = 'object'`);
+  jsonb_typeof(...) = 'object'`) — **APLICADA na primary**, coluna e
+  constraint confirmadas e validadas;
 - `db/sql/raw/shopee_raw_ddl.sql` — DDL base atualizado para que ambientes
   NOVOS já nasçam com a coluna;
 - `pipelines/ingestion/shopee_raw/writer.py` — extrai e valida o preâmbulo
   DURANTE a ingestão de novos arquivos ads, na MESMA transação do arquivo
   (falha antes de qualquer INSERT se o preâmbulo for inválido); orders/
   shop_stats continuam com `source_metadata` sempre NULL;
-  `pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py` — backfill
-  ATÔMICO (tudo-ou-nada na Fase A de planejamento; transação única com
-  backup auditável, revalidação sob `LOCK TABLE` e reconciliação 100% na
-  Fase B) para os manifestos ads já existentes — nenhuma execução real
-  nesta fase.
+- `pipelines/ingestion/shopee_raw/backfill_ads_metadata.py` — CLI
+  operacional: `--dry-run` (somente leitura, já executado com sucesso —
+  plano 10/10 pronto) e `--apply-confirmed` (backfill ATÔMICO — tudo-ou-
+  nada na Fase A de planejamento; transação única com backup auditável,
+  revalidação sob `LOCK TABLE` e reconciliação 100% na Fase B — implementado
+  e testado, execução real **pendente de autorização separada**).
 
-**Nenhuma aplicação real da staging deve ocorrer antes do Gate 2B**
-(migration + backfill de `source_metadata`) — sem isso, TODAS as linhas de
-`raw.shopee_ads_export` seriam rejeitadas na pré-validação (nenhum
-manifesto ads tem `source_metadata` preenchida hoje).
+**Nenhuma aplicação real da staging deve ocorrer antes do backfill**
+(Gate 2B: migration **feita** + backfill **pendente** de `source_metadata`)
+— sem isso, TODAS as linhas de `raw.shopee_ads_export` seriam rejeitadas na
+pré-validação (nenhum manifesto ads tem `source_metadata` preenchida hoje —
+120/120 continuam NULL, confirmado pós-migration).
 
 ## 9. Reconciliação preview (read-only, 2026-07-06, 100% da Raw)
 
@@ -330,16 +335,16 @@ execução, uma tentativa isolada esbarrou em
 runbook da Raw), resolvido no retry seguinte; não é um problema do
 contrato ou das queries.
 
-**Estado atual (pós-revisão de Gate 2B, 2026-07-06 2ª rodada, ainda não
-aplicada em nenhum banco)**: a linha `ads` da tabela acima NÃO se repetiria
-hoje — como `raw.shopee_ingestion_file.source_metadata` ainda não existe/
-não foi preenchida em nenhum ambiente, uma nova execução do preview (depois
-da migration aplicada, mas antes do backfill) mostraria **804/804 linhas de
-ads rejeitadas** por `ads_metadata_period_is_invalid` (source_metadata
-NULL) — o comportamento CORRETO e esperado do novo design (rejeitar em vez
-de gravar NULL silenciosamente), não uma regressão. orders/shop_stats não
-são afetados (contrato inalterado para essas duas fontes) e devem
-continuar em 0 rejeitadas. A reconciliação preview só volta a ficar "limpa"
+**Estado atual (pós-migration de Gate 2B, 2026-07-07 — coluna existe,
+backfill ainda não rodou)**: a linha `ads` da tabela acima NÃO se
+repetiria hoje — `raw.shopee_ingestion_file.source_metadata` já existe mas
+continua NULL em 120/120 manifestos (nenhum backfill aplicado ainda), então
+uma nova execução do preview mostraria **804/804 linhas de ads
+rejeitadas** por `ads_metadata_period_is_invalid` (source_metadata NULL) —
+o comportamento CORRETO e esperado do novo design (rejeitar em vez de
+gravar NULL silenciosamente), não uma regressão. orders/shop_stats não são
+afetados (contrato inalterado para essas duas fontes) e devem continuar em
+0 rejeitadas. A reconciliação preview só volta a ficar "limpa"
 para ads depois que o Gate 2B (migration + backfill) rodar de verdade.
 
 **Dois bugs reais foram encontrados e corrigidos durante esta reconciliação**
@@ -389,9 +394,10 @@ staging de marketplaces do warehouse). Justificativa:
    confirmar com a Shopee/Seller Center antes de usar em métrica.
 2. Unidade de "Compensar Moedas Shopee" (moedas vs centavos).
 3. Algoritmo/segredo/rotação de pseudonimização de comprador único (seção 5).
-4. **Resolvido em 2026-07-06** (seção 8): período dos ads (incluindo
+4. **Resolvido em 2026-07-06/07** (seção 8): período dos ads (incluindo
    kokeshi) passa a vir de `source_metadata` (preâmbulo do CSV), não do
-   nome do arquivo — draft criado, aplicação pendente do Gate 2B.
+   nome do arquivo — migration aplicada em 2026-07-07; backfill dos 10
+   manifestos ainda pendente de autorização separada.
 5. "Status do pedido" tem valores-frase ("O comprador pode pedir uma
    devolução até YYYY-MM-DD", 28 linhas) — definir bucket canônico na Gold.
 6. **Corrigido em 2026-07-06** (a formulação anterior deste item era uma

@@ -1,8 +1,10 @@
 -- ============================================================================
--- DRAFT — NÃO EXECUTADO EM NENHUM BANCO (Fase Staging Shopee 2A, Gate 2B).
--- Revisado em 2026-07-06 (2ª rodada) após review pré-implementação.
+-- APLICADA na primary em 2026-07-07 (Fase Staging Shopee 2A, Gate 2B) —
+-- coluna e constraint confirmadas e validadas; backfill dos 10 manifestos
+-- ads ainda pendente (autorização separada). Revisado em 2026-07-06
+-- (2ª rodada) após review pré-implementação.
 --
--- Migration proposta (NÃO aplicada): adiciona `source_metadata jsonb` a
+-- Esta migration (já aplicada): adiciona `source_metadata jsonb` a
 -- raw.shopee_ingestion_file para guardar metadados de nível de ARQUIVO que
 -- hoje só existem no preâmbulo dos CSVs de ads e nunca foram persistidos —
 -- especificamente o período REAL do relatório ("Período,DD/MM/YYYY -
@@ -71,15 +73,18 @@ COMMENT ON COLUMN raw.shopee_ingestion_file.source_metadata IS
 COMMIT;
 
 -- ============================================================================
--- Pré-requisitos operacionais (não satisfeitos, não executados por este
--- draft):
+-- Pré-requisitos operacionais — status em 2026-07-07: migration JÁ
+-- APLICADA na primary (coluna + constraint confirmadas e validadas); o
+-- backfill (passo 2 abaixo) segue pendente de autorização separada.
 --   1. Esta ALTER TABLE precisa rodar com a credencial de escrita da Raw
 --      (DATAMART_SHOPEE_WRITE_URL via .env.shopee-write.local), a mesma
 --      usada para o DDL original — nunca com DATAMART_DATABASE_URL.
---   2. Depois da migration, rodar o backfill histórico e controlado (draft
---      em pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py)
---      para popular source_metadata dos 10 manifestos ads já existentes —
---      o plano exige exatamente 10 manifestos / 5 marcas / 2 arquivos por
+--      **Satisfeito.**
+--   2. Depois da migration, rodar o backfill histórico e controlado (CLI
+--      em pipelines/ingestion/shopee_raw/backfill_ads_metadata.py,
+--      `--apply-confirmed`) para popular source_metadata dos 10
+--      manifestos ads já existentes — o plano exige exatamente 10
+--      manifestos / 5 marcas / 2 arquivos por
 --      marca e aborta se o estado divergir (ver docstring daquele módulo).
 --   3. Autorização explícita do usuário antes de qualquer execução real —
 --      este arquivo é só o draft da migration, não uma aprovação.
@@ -92,13 +97,15 @@ COMMIT;
 --      ambiente futuro criado do zero. Uma não substitui a outra.
 --
 -- Ordem operacional completa (ver docstring de
--- backfill_ads_metadata_draft.py para o detalhamento e os riscos entre
--- passos): (1) commit/revisão do código; (2) aplicar SOMENTE esta
--- migration; (3) validar coluna+constraint; (4) rodar o backfill histórico
--- dos 10 manifestos; (5) reconciliar 10/10; (6) rodar o preview read-only
--- completo contra 100% da Raw (gate obrigatório); (7) só depois considerar
--- o DDL/transform da staging. Nenhuma nova ingestão Raw deve rodar entre
--- os passos 1 e 2 — o writer.py já atualizado depende desta coluna existir.
+-- backfill_ads_metadata.py para o detalhamento e os riscos entre
+-- passos): (1) commit/revisão do código — feito; (2) aplicar SOMENTE esta
+-- migration — feito em 2026-07-07; (3) validar coluna+constraint — feito;
+-- (4) rodar o backfill histórico dos 10 manifestos (`--apply-confirmed`) —
+-- pendente, autorização separada; (5) reconciliar 10/10; (6) rodar o
+-- preview read-only completo contra 100% da Raw (gate obrigatório);
+-- (7) só depois considerar o DDL/transform da staging. Nenhuma nova
+-- ingestão Raw deveria ter rodado entre os passos 1 e 2 — confirmado que
+-- não rodou (contagens de manifesto inalteradas no Gate 3 pós-migration).
 --
 -- Rollback (revisado em 2026-07-06 — NÃO é mais "DROP COLUMN"):
 --   Enquanto a coluna estiver NULL para todas as linhas (antes de qualquer

@@ -212,7 +212,7 @@ Revisão de segurança pré-commit identificou 5 lacunas na correção da seçã
 
 ## 12. Gate 2B — metadata dos relatórios Ads (`source_metadata`) e `buyer_cpf` na Staging (2026-07-06/07)
 
-**Status atual: código e testes versionados, zero aplicação real.** `source_metadata` **ainda NÃO existe** em `raw.shopee_ingestion_file` no Data Mart — a migration (`db/sql/raw/shopee_raw_add_source_metadata.sql`) é um DRAFT, nunca executada. O backfill histórico (`pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py`) e a staging tipada (`db/sql/staging/shopee_staging_*.sql`) também são DRAFTs — nada disso foi aplicado em nenhum banco.
+**Status atual (2026-07-07): migration aplicada, backfill ainda pendente.** `source_metadata jsonb` **já existe** em `raw.shopee_ingestion_file` na primary — coluna e constraint (`ck_shopee_ingestion_file_source_metadata_is_object`) confirmadas e validadas (migration `db/sql/raw/shopee_raw_add_source_metadata.sql` aplicada em transação única). 120/120 manifestos continuam com `source_metadata IS NULL` — nenhum backfill rodou ainda. O backfill histórico (`pipelines/ingestion/shopee_raw/backfill_ads_metadata.py`) já tem CLI operacional (`--dry-run` executável livremente, `--apply-confirmed` implementado e testado mas não autorizado nesta rodada) — ver `docs/staging_shopee_contract.md` seção 8. A staging tipada (`db/sql/staging/shopee_staging_*.sql`) continua DRAFT — nada aplicado.
 
 ### 12.1 O que isso adiciona
 
@@ -221,23 +221,23 @@ Revisão de segurança pré-commit identificou 5 lacunas na correção da seçã
 
 ### 12.2 Ordem operacional obrigatória (nenhum passo pode ser pulado ou invertido)
 
-1. Commit/revisão do código (mapping/writer/backfill/testes) — feito nesta rodada.
-2. Aplicar **SOMENTE** a migration `shopee_raw_add_source_metadata.sql` — não o DDL base (já atualizado neste repositório só para ambientes novos futuros) e não a staging.
-3. Validar a coluna e a constraint (`information_schema.columns` + `pg_constraint`) antes de prosseguir.
-4. Executar o backfill histórico dos 10 manifestos ads conhecidos (`apply_backfill_atomic`) — escopo EXATO (10 manifestos, 5 marcas oficiais, 2 arquivos cada); qualquer desvio aborta.
+1. Commit/revisão do código (mapping/writer/backfill/testes) — **feito**.
+2. Aplicar **SOMENTE** a migration `shopee_raw_add_source_metadata.sql` — não o DDL base (já atualizado neste repositório só para ambientes novos futuros) e não a staging. **Feito em 2026-07-07** (coluna + constraint confirmadas e validadas na primary).
+3. Validar a coluna e a constraint (`information_schema.columns` + `pg_constraint`) antes de prosseguir — **feito**; `backfill_ads_metadata.py --dry-run` revalida o mesmo estado a cada execução.
+4. Executar o backfill histórico dos 10 manifestos ads conhecidos (`apply_backfill_atomic`, via `--apply-confirmed`) — escopo EXATO (10 manifestos, 5 marcas oficiais, 2 arquivos cada); qualquer desvio aborta. **Pendente** — autorização separada da migration.
 5. Reconciliar 10/10 (embutido no próprio backfill) — reconferir manualmente antes de seguir.
 6. Executar o preview read-only completo (`pipelines/staging/shopee/preview.py`) contra 100% da Raw — **gate obrigatório**, sem exceção, antes do próximo passo.
 7. Só depois disso considerar aplicar o DDL/transform da staging (`db/sql/staging/*.sql`) — nunca antes.
 
-**Risco explícito entre os passos 1 e 2**: o `writer.py` já atualizado (committed no passo 1) tenta gravar `source_metadata` em toda ingestão de arquivo `ads`, mesmo antes da coluna existir. **Nenhuma nova ingestão Raw (`load_shopee_raw.py --apply --pilot`/`--backfill`) pode rodar entre a atualização do código e a aplicação da migration** — um arquivo `ads` processado nessa janela falharia por completo (coluna inexistente), sem dado parcial (política success-only já documentada na seção 6), mas também sem sucesso.
+**Risco que já passou (histórico)**: entre o commit do código (passo 1) e a aplicação da migration (passo 2), o `writer.py` dependia da coluna `source_metadata` existir — uma ingestão Raw nessa janela teria rejeitado o arquivo `ads` inteiro (coluna inexistente, política success-only já documentada na seção 6). A migration já foi aplicada (passo 2); confirmado no Gate 3 pós-migration que nenhuma ingestão nova rodou nessa janela (contagens de manifesto por marca/source_type inalteradas).
 
 ### 12.3 Restauração do backfill exige backup + SHA-256
 
-`apply_backfill_atomic` exige `audit_path` obrigatório (sem valor padrão) e publica o backup de forma atômica (`os.link`, nunca sobrescreve um arquivo existente) ANTES de qualquer `UPDATE`. `restore_from_backup_atomic` (nunca executado, só testado contra conexão falsa) trata esse arquivo como entrada não confiável: exige `expected_backup_sha256` calculado e comparado ANTES de abrir qualquer cursor, valida a estrutura completa do JSON (exatamente 10 registros, marcas oficiais, metadata com formato/calendário válidos), revalida cada registro sob lock contra o estado atual, e só reverte com `UPDATE` de compare-and-swap incluindo o `source_metadata` atual no `WHERE`.
+`apply_backfill_atomic` exige `audit_path` obrigatório (sem valor padrão) e publica o backup de forma atômica (`os.link`, nunca sobrescreve um arquivo existente) ANTES de qualquer `UPDATE`. `restore_from_backup_atomic` (nunca executado, só testado contra conexão falsa, sem CLI exposta) trata esse arquivo como entrada não confiável: exige `expected_backup_sha256` calculado e comparado ANTES de abrir qualquer cursor, valida a estrutura completa do JSON (exatamente 10 registros, marcas oficiais, metadata com formato/calendário válidos), revalida cada registro sob lock contra o estado atual, e só reverte com `UPDATE` de compare-and-swap incluindo o `source_metadata` atual no `WHERE`.
 
-### 12.4 Artefatos (todos draft, nenhum aplicado)
+### 12.4 Artefatos (migration aplicada, backfill pendente)
 
-`db/sql/raw/shopee_raw_add_source_metadata.sql`, `db/sql/raw/shopee_raw_ddl.sql` (DDL base já atualizado para ambientes novos), `pipelines/ingestion/shopee_raw/ads_metadata.py`, `pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py`, `pipelines/ingestion/shopee_raw/writer.py` (extração de `source_metadata` na mesma transação do arquivo ads), `db/sql/staging/shopee_staging_ddl.sql`/`shopee_staging_transform.sql`, `pipelines/staging/shopee/*`. Contrato completo em `docs/staging_shopee_contract.md`.
+`db/sql/raw/shopee_raw_add_source_metadata.sql` (**aplicada** em 2026-07-07), `db/sql/raw/shopee_raw_ddl.sql` (DDL base já atualizado para ambientes novos), `pipelines/ingestion/shopee_raw/ads_metadata.py`, `pipelines/ingestion/shopee_raw/backfill_ads_metadata.py` (CLI: `--dry-run` executado e operacional; `--apply-confirmed` implementado/testado, execução real **pendente**), `pipelines/ingestion/shopee_raw/writer.py` (extração de `source_metadata` na mesma transação do arquivo ads), `db/sql/staging/shopee_staging_ddl.sql`/`shopee_staging_transform.sql` (DRAFT, nada aplicado), `pipelines/staging/shopee/*`. Contrato completo em `docs/staging_shopee_contract.md`.
 
 ### 11.7 Plano de remediação de dados históricos — **não autorizado, não executado**
 

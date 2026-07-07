@@ -1,10 +1,37 @@
 """
-DRAFT — Fase Staging Shopee 2A (Gate 2B). NÃO EXECUTADO nesta fase.
+Backfill HISTÓRICO e CONTROLADO (Fase Staging Shopee 2A, Gate 2B — CLI
+operacional desde 2026-07-07) de `raw.shopee_ingestion_file.source_metadata`
+para os 10 manifestos `source_type='ads'` conhecidos hoje, usando o
+preâmbulo do CSV local correspondente (ver `ads_metadata.py`).
 
-Backfill HISTÓRICO e CONTROLADO (revisão de 2026-07-07, 5ª rodada) de
-`raw.shopee_ingestion_file.source_metadata` para os 10 manifestos
-`source_type='ads'` conhecidos hoje, usando o preâmbulo do CSV local
-correspondente (ver `ads_metadata.py`).
+A migration `db/sql/raw/shopee_raw_add_source_metadata.sql` já foi aplicada
+na primary (2026-07-07) — coluna `source_metadata jsonb` e constraint
+`ck_shopee_ingestion_file_source_metadata_is_object` confirmadas e
+validadas. Este módulo ainda não aplicou nenhum backfill real: `--dry-run`
+é somente leitura e pode ser executado livremente; `--apply-confirmed`
+exige autorização explícita separada a cada execução (ver seção "Uso" e
+`main()` abaixo).
+
+## Uso
+
+    python -m pipelines.ingestion.shopee_raw.backfill_ads_metadata --dry-run
+
+    # Só depois de autorização explícita separada:
+    python -m pipelines.ingestion.shopee_raw.backfill_ads_metadata \\
+        --apply-confirmed --audit-path <caminho fora do repo ou .gitignore>
+
+`--dry-run` nunca abre conexão de escrita — só uma sessão explicitamente
+`postgresql_readonly=True` na mesma primary usada pelo secret de escrita
+(precisa ser a mesma credencial porque a réplica de leitura, `DATAMART_
+DATABASE_URL`, está sujeita a lag e não é adequada para confirmar o estado
+mais recente da migration). `--apply-confirmed` é o único caminho que abre
+uma conexão de escrita de verdade, e só chega a fazê-lo depois de: secret
+com as 2 chaves esperadas (`I_UNDERSTAND_THIS_WRITES_DATAMART_RAW=1`
+incluído), preflight de escrita limpo (`write_conn.run_preflight`), estado
+da migration confirmado (coluna/constraint/sem drift de contagem) e um
+plano 10/10 recalculado NA HORA (nunca reaproveita um plano de uma
+chamada anterior). `restore_from_backup_atomic` continua sem CLI — só
+testado, nunca exposto como comando.
 
 ## Validação compartilhada (revisão de 2026-07-07)
 
@@ -117,13 +144,17 @@ falsa.
 
 ## Ordem operacional completa (ver também db/sql/raw/shopee_raw_add_source_metadata.sql)
 
-1. Commit/revisão deste código (mapping/writer/backfill/testes).
+1. Commit/revisão deste código (mapping/writer/backfill/testes) — feito.
 2. Aplicar SOMENTE a migration `shopee_raw_add_source_metadata.sql` — não
    o DDL base (esse já está atualizado neste working tree, é só para
-   ambientes NOVOS futuros) e não a staging.
+   ambientes NOVOS futuros) e não a staging. **Feito em 2026-07-07**:
+   coluna e constraint confirmadas e validadas na primary.
 3. Validar a coluna e a constraint (`information_schema.columns` +
-   `pg_constraint`) antes de prosseguir.
-4. Executar este backfill histórico dos 10 manifestos (`apply_backfill_atomic`).
+   `pg_constraint`) antes de prosseguir — **feito** (parte do Gate 1/3 da
+   migration); `--dry-run` deste módulo revalida o mesmo estado a cada
+   execução (`_check_migration_state`), para detectar drift.
+4. Executar este backfill histórico dos 10 manifestos (`apply_backfill_atomic`,
+   via `--apply-confirmed`) — **pendente, autorização separada exigida**.
 5. Reconciliar 10/10 (já embutido no passo 7 da Fase B; reconferir
    manualmente antes de seguir).
 6. Executar o preview read-only completo (`pipelines/staging/shopee/preview.py`)
@@ -131,20 +162,26 @@ falsa.
 7. Só depois disso considerar aplicar o DDL/transform da staging
    (`db/sql/staging/*.sql`) — nunca antes.
 
-**Risco operacional entre os passos 1 e 2**: o `writer.py` já atualizado
-(commitado no passo 1) DEPENDE da coluna `source_metadata` existir. Se uma
-nova ingestão Raw rodar entre o commit do código e a migration, o INSERT
-do manifesto ads falhará (coluna inexistente) e o arquivo inteiro será
-rejeitado (política success-only). **Nenhuma nova ingestão Raw deve ser
-executada nesta janela.**
+**Risco operacional que já passou (histórico)**: entre o commit do código
+(passo 1) e a aplicação da migration (passo 2), o `writer.py` dependia da
+coluna `source_metadata` existir — uma ingestão Raw nessa janela teria
+rejeitado o arquivo `ads` inteiro (política success-only). A migration já
+foi aplicada, então esse risco específico não existe mais; o mesmo cuidado
+se aplica a qualquer nova coluna futura que dependa de uma migration ainda
+não aplicada.
 
-Pré-requisitos para uma execução real (nenhum satisfeito/realizado aqui):
-  1. Migration `db/sql/raw/shopee_raw_add_source_metadata.sql` aplicada.
+Pré-requisitos para uma execução real do backfill (passo 4):
+  1. Migration `db/sql/raw/shopee_raw_add_source_metadata.sql` aplicada —
+     **satisfeito** (2026-07-07).
   2. Credencial de escrita da Raw (`DATAMART_SHOPEE_WRITE_URL` via
-     `.env.shopee-write.local`) — nunca `DATAMART_DATABASE_URL`.
-  3. Autorização explícita do usuário para a execução real.
+     `.env.shopee-write.local`) — nunca `DATAMART_DATABASE_URL` —
+     **satisfeito** (mesmo arquivo usado pela migration).
+  3. Autorização explícita do usuário para a execução real do backfill —
+     **pendente**, separada da autorização já dada para `--dry-run`.
 
-`main()` sempre recusa executar, independente dos argumentos — ver rodapé.
+`main()` executa `--dry-run` de verdade (somente leitura). `--apply-confirmed`
+está implementado e testado, mas nenhuma chamada a ele está autorizada nesta
+rodada — ver guardrails em `run_apply_confirmed`.
 """
 from __future__ import annotations
 
@@ -160,12 +197,17 @@ from pathlib import Path
 from typing import Optional
 
 import psycopg2.extras
+from sqlalchemy import create_engine, text
 
+from pipelines.common.config import settings
 from pipelines.connectors.shopee.connector import BRANDS_IN_SCOPE
 from pipelines.ingestion.shopee_raw import write_conn
 from pipelines.ingestion.shopee_raw.ads_metadata import AdsPreambleError, parse_ads_preamble
 from pipelines.ingestion.shopee_raw.hashing import sha256_file
 from pipelines.ingestion.shopee_raw.inventory import SourceReadError, _decode_ads_csv
+
+DEFAULT_WRITE_SECRET_PATH = Path(__file__).resolve().parents[3] / ".env.shopee-write.local"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Escopo histórico EXATO desta aplicação (auditoria de 2026-07-06) — não é
 # um parâmetro de configuração para volumes futuros. `EXPECTED_BRANDS` vem
@@ -174,6 +216,13 @@ from pipelines.ingestion.shopee_raw.inventory import SourceReadError, _decode_ad
 EXPECTED_BRANDS = frozenset(BRANDS_IN_SCOPE)
 EXPECTED_FILES_PER_BRAND = 2
 EXPECTED_TOTAL_PENDING_ADS_MANIFESTS = len(EXPECTED_BRANDS) * EXPECTED_FILES_PER_BRAND
+
+# Total de manifestos (todos os source_type) confirmado no Gate 1/3 da
+# migration source_metadata (2026-07-07) — usado só como DETECTOR DE DRIFT
+# no --dry-run (uma ingestão Raw nova nesta janela mudaria este número), não
+# como um parâmetro de escopo do backfill em si (esse é sempre 10/5×2, ver
+# EXPECTED_TOTAL_PENDING_ADS_MANIFESTS acima).
+EXPECTED_TOTAL_MANIFESTS_AT_MIGRATION = 120
 
 _RE_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _RE_ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -246,7 +295,6 @@ def _pending_ads_manifests(conn) -> list[dict]:
     """Manifestos ads ainda sem source_metadata. Usa uma conexão
     SQLAlchemy (read-only ou de escrita, a critério do chamador) — só
     leitura nesta função."""
-    from sqlalchemy import text
     rows = conn.execute(text(
         "SELECT file_id, source_filename, file_sha256, brand, source_type "
         "FROM raw.shopee_ingestion_file "
@@ -982,22 +1030,418 @@ def restore_from_backup_atomic(
         cur.close()
 
 
+# =============================================================================
+# CLI operacional — --dry-run (somente leitura, sempre pode ser executado) e
+# --apply-confirmed (escrita real, protegido por múltiplos guardrails; ver
+# `run_apply_confirmed`). `restore_from_backup_atomic` NÃO tem comando aqui
+# — continua só testado, nunca exposto.
+# =============================================================================
+
+
+@dataclass
+class MigrationStateCheck:
+    """Estado da migration `source_metadata` confirmado NA HORA (não
+    reaproveita a validação feita quando a migration foi aplicada) — ver
+    `_check_migration_state`. `ok=True` só se coluna, constraint e as
+    contagens de drift (total de manifestos, 100% NULL) baterem com o
+    esperado."""
+    ok: bool
+    in_recovery: Optional[bool] = None
+    column_exists: bool = False
+    column_type: Optional[str] = None
+    constraint_validated: bool = False
+    total_manifests: Optional[int] = None
+    manifests_with_metadata_not_null: Optional[int] = None
+    problems: list[str] = field(default_factory=list)
+
+
+def _check_migration_state(conn) -> MigrationStateCheck:
+    """Confirma, nesta ordem (para nunca rodar uma query que dependeria de
+    algo ainda não confirmado): `pg_is_in_recovery()=false` (a sessão
+    precisa ser a PRIMARY); coluna `source_metadata` existe e é `jsonb`;
+    constraint `ck_shopee_ingestion_file_source_metadata_is_object` existe
+    e está `convalidated`; e só então o drift de contagem desde a migration
+    (2026-07-07: 120 manifestos, 120/120 NULL) — um desvio aqui não impede
+    a leitura, mas marca `ok=False` (sinal de ingestão Raw nova ou backfill
+    parcial já aplicado por fora deste módulo). Conexão SQLAlchemy somente
+    leitura — nunca escreve."""
+    check = MigrationStateCheck(ok=False)
+
+    check.in_recovery = conn.execute(text("SELECT pg_is_in_recovery()")).scalar()
+    if check.in_recovery:
+        check.problems.append("pg_is_in_recovery()=true -- alvo não é a primary")
+        return check
+
+    col = conn.execute(text(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema='raw' AND table_name='shopee_ingestion_file' "
+        "AND column_name='source_metadata'"
+    )).fetchone()
+    check.column_exists = col is not None
+    check.column_type = col[0] if col else None
+    if not check.column_exists:
+        check.problems.append("coluna source_metadata não existe -- migration não aplicada")
+        return check
+    if check.column_type != "jsonb":
+        check.problems.append(f"coluna source_metadata tem tipo inesperado: {check.column_type}")
+        return check
+
+    con = conn.execute(text(
+        "SELECT convalidated FROM pg_constraint "
+        "WHERE conname = 'ck_shopee_ingestion_file_source_metadata_is_object'"
+    )).fetchone()
+    if con is None:
+        check.problems.append("constraint ck_shopee_ingestion_file_source_metadata_is_object não existe")
+        return check
+    check.constraint_validated = bool(con[0])
+    if not check.constraint_validated:
+        check.problems.append("constraint existe mas não está validada (convalidated=false)")
+        return check
+
+    check.total_manifests = conn.execute(text("SELECT count(*) FROM raw.shopee_ingestion_file")).scalar()
+    check.manifests_with_metadata_not_null = conn.execute(text(
+        "SELECT count(*) FROM raw.shopee_ingestion_file WHERE source_metadata IS NOT NULL"
+    )).scalar()
+    if check.total_manifests != EXPECTED_TOTAL_MANIFESTS_AT_MIGRATION:
+        check.problems.append(
+            f"total de manifestos mudou desde a migration (esperado "
+            f"{EXPECTED_TOTAL_MANIFESTS_AT_MIGRATION}, encontrado {check.total_manifests}) "
+            "-- possível ingestão Raw nova nesta janela"
+        )
+    if check.manifests_with_metadata_not_null:
+        check.problems.append(
+            f"{check.manifests_with_metadata_not_null} manifesto(s) já têm source_metadata "
+            "preenchido -- estado não é mais 0/120, revisar antes de prosseguir"
+        )
+
+    check.ok = not check.problems
+    return check
+
+
+@dataclass
+class DryRunReport:
+    """Só o suficiente para decidir/relatar — NUNCA carrega shop_id,
+    filename completo ou conteúdo de célula (ver `_print_dry_run_report`,
+    que é a única função que imprime isto)."""
+    ready: bool
+    exit_code: int
+    migration_state: MigrationStateCheck
+    total_pending_ads: int = 0
+    count_by_brand: dict = field(default_factory=dict)
+    periods: list = field(default_factory=list)  # [{"brand", "period_start", "period_end"}]
+    problems: list = field(default_factory=list)
+
+
+def _dry_run_with_conn(conn, data_path: Path) -> DryRunReport:
+    """Núcleo testável do dry-run — recebe uma conexão SQLAlchemy já aberta
+    (readonly, a critério do chamador real; uma conexão falsa nos testes).
+    Nunca abre/fecha conexão, nunca lê o secret — isso é responsabilidade de
+    `run_dry_run`."""
+    migration_state = _check_migration_state(conn)
+    if not migration_state.ok:
+        return DryRunReport(
+            ready=False, exit_code=3, migration_state=migration_state,
+            problems=list(migration_state.problems),
+        )
+
+    manifests = _pending_ads_manifests(conn)
+    count_by_brand: dict[str, int] = {}
+    for m in manifests:
+        count_by_brand[m["brand"]] = count_by_brand.get(m["brand"], 0) + 1
+
+    plan = plan_backfill(conn, data_path)
+    periods = [
+        {
+            "brand": item.brand,
+            "period_start": item.metadata["period_start"],
+            "period_end": item.metadata["period_end"],
+        }
+        for item in plan.items
+    ]
+
+    return DryRunReport(
+        ready=plan.ready,
+        exit_code=0 if plan.ready else 5,
+        migration_state=migration_state,
+        total_pending_ads=len(manifests),
+        count_by_brand=count_by_brand,
+        periods=periods,
+        problems=list(plan.problems),
+    )
+
+
+def run_dry_run(
+    secret_path: Path = DEFAULT_WRITE_SECRET_PATH,
+    repo_root: Path = REPO_ROOT,
+    data_path: Optional[Path] = None,
+) -> DryRunReport:
+    """Fluxo real: carrega o secret pelo mesmo fluxo seguro de
+    `write_conn` (nunca `os.environ`), abre uma sessão explicitamente
+    `postgresql_readonly=True` na mesma primary da escrita (a réplica de
+    leitura tem lag — ver docstring do módulo) e delega a
+    `_dry_run_with_conn`. Nunca levanta para o chamador — qualquer falha
+    de secret/conexão vira um `DryRunReport` com `ready=False` e o motivo
+    sanitizado em `problems`."""
+    try:
+        secret = write_conn.load_write_secret(secret_path, repo_root)
+        write_url = write_conn.validate_write_guardrails(secret, settings.datamart_url or "")
+    except write_conn.SecretLoadError as exc:
+        return DryRunReport(
+            ready=False, exit_code=2,
+            migration_state=MigrationStateCheck(ok=False, problems=[str(exc)]),
+            problems=[str(exc)],
+        )
+
+    data_path = data_path or Path(settings.shopee_data_path)
+
+    try:
+        engine = create_engine(write_url, pool_pre_ping=True)
+        with engine.connect().execution_options(postgresql_readonly=True) as conn:
+            return _dry_run_with_conn(conn, data_path)
+    except Exception as exc:  # noqa: BLE001
+        sanitized = write_conn.sanitize_error_message(exc)
+        return DryRunReport(
+            ready=False, exit_code=4,
+            migration_state=MigrationStateCheck(ok=False, problems=[sanitized]),
+            problems=[f"erro de conexão/consulta: {sanitized}"],
+        )
+
+
+def _print_dry_run_report(report: DryRunReport) -> None:
+    """Única função que imprime o resultado do dry-run — nunca imprime
+    URL/credencial/shop_id/filename completo/conteúdo de célula. `periods`
+    só carrega marca + datas (ver `DryRunReport`)."""
+    ms = report.migration_state
+    print("=== Dry-run backfill source_metadata (Fase Staging Shopee 2A, Gate 2B) ===")
+    print(
+        f"Migration: coluna existe={ms.column_exists} tipo={ms.column_type} "
+        f"constraint validada={ms.constraint_validated} pg_is_in_recovery={ms.in_recovery}"
+    )
+    if ms.total_manifests is not None:
+        print(f"Total de manifestos: {ms.total_manifests} (esperado {EXPECTED_TOTAL_MANIFESTS_AT_MIGRATION})")
+        print(f"Manifestos com source_metadata preenchido: {ms.manifests_with_metadata_not_null}")
+    print(f"Manifestos ads pendentes localizados: {report.total_pending_ads} (esperado {EXPECTED_TOTAL_PENDING_ADS_MANIFESTS})")
+    print(f"Contagem por marca: {dict(sorted(report.count_by_brand.items()))}")
+    print("Períodos identificados (só marca + datas -- sem shop_id/filename):")
+    for p in sorted(report.periods, key=lambda x: x["brand"]):
+        print(f"  - {p['brand']}: {p['period_start']} a {p['period_end']}")
+    print(f"ready={report.ready}")
+    if report.problems:
+        print("Problemas:")
+        for p in report.problems:
+            print(f"  - {p}")
+
+
+_RE_CPF_LIKE = re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}")
+_RE_FILE_PATH_LIKE = re.compile(r"[\w./\\+-]+\.(?:csv|xlsx|xls|json|txt)", re.IGNORECASE)
+_RE_LONG_DIGIT_RUN = re.compile(r"\d{6,}")  # shop_id/CPF residual, telefone, etc.
+
+
+def _sanitize_write_path_exception(exc: BaseException) -> str:
+    """Mensagem SEGURA para qualquer falha no caminho de escrita de
+    `run_apply_confirmed` -- nunca o texto livre de `str(exc)`. Uma
+    exceção de baixo nível não prevista (driver, rede, um bug futuro) pode
+    conter QUALQUER coisa: DSN com senha, nome de arquivo, `shop_id`, CPF.
+    `write_conn.sanitize_error_message` só cobre o padrão `usuario:senha@`
+    de uma URL — não é (e não tenta ser) um scrubber genérico de PII, então
+    NUNCA é suficiente sozinho aqui. Por isso o valor exibido ao usuário é
+    sempre `tipo da exceção + mensagem passada por 3 filtros em série`
+    (credencial de DSN, CPF, caminho de arquivo, sequência longa de
+    dígitos) — mas o TIPO é a garantia real; os filtros são defesa em
+    profundidade, nunca a única barreira."""
+    msg = write_conn.sanitize_error_message(exc)
+    msg = _RE_CPF_LIKE.sub("<redacted>", msg)
+    msg = _RE_FILE_PATH_LIKE.sub("<redacted>", msg)
+    msg = _RE_LONG_DIGIT_RUN.sub("<redacted>", msg)
+    return f"{type(exc).__name__}: {msg}"
+
+
+def run_apply_confirmed(
+    audit_path: Path,
+    secret_path: Path = DEFAULT_WRITE_SECRET_PATH,
+    repo_root: Path = REPO_ROOT,
+    data_path: Optional[Path] = None,
+) -> int:
+    """ÚNICA função que pode chegar a chamar `apply_backfill_atomic` contra
+    um banco real. Cada guarda abaixo retorna ANTES de abrir uma conexão de
+    escrita (`write_conn.open_write_connection`) se falhar — nenhuma delas
+    pode ser pulada:
+
+    1. Secret com as 2 chaves esperadas, incluindo
+       `I_UNDERSTAND_THIS_WRITES_DATAMART_RAW=1` (`write_conn.load_write_secret`).
+    2. URL de escrita diferente da de leitura (`validate_write_guardrails`).
+    3. Preflight de escrita limpo (`write_conn.run_preflight`) — inclui
+       `rolsuper=false`, mesmo cluster físico da leitura, permissões no
+       schema `raw`.
+    4. Estado da migration confirmado NA HORA (`_check_migration_state`) —
+       inclui `pg_is_in_recovery()=false` (primary confirmada).
+    5. Plano 10/10 RECALCULADO nesta chamada (nunca reaproveita um plano de
+       uma chamada anterior a `--dry-run`).
+
+    Só depois de 1-5 passarem é que uma conexão de escrita é aberta, e a
+    única operação de escrita real é a chamada a `apply_backfill_atomic`.
+
+    TODA exceção nos 9 pontos de risco do caminho de escrita (preflight,
+    conexão read-only, checagem de migration, cálculo do plano, abertura
+    da conexão de escrita, aquisição/liberação do advisory lock,
+    `apply_backfill_atomic`, fechamento da conexão) é capturada aqui e
+    convertida em `_sanitize_write_path_exception` — nunca um traceback
+    cru chega a `stdout`/`stderr`.
+
+    Caso especial (item crítico): se `apply_backfill_atomic` já retornou
+    `committed` e SÓ a liberação do advisory lock ou o fechamento da
+    conexão falharem depois disso, o resultado ainda é reportado como
+    `committed` (o COMMIT já aconteceu, não pode virar falha por causa de
+    limpeza pós-transação) — a falha vira um AVISO sanitizado, e o `finally`
+    fecha a conexão de qualquer forma, o que libera um advisory lock de
+    SESSÃO mesmo que `release_advisory_lock` tenha lançado. Nunca sugere
+    retry automático (um retry reaplicaria um backfill já commitado)."""
+    try:
+        secret = write_conn.load_write_secret(secret_path, repo_root)
+        write_url = write_conn.validate_write_guardrails(secret, settings.datamart_url or "")
+    except write_conn.SecretLoadError as exc:
+        print(f"--apply-confirmed bloqueado: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"--apply-confirmed bloqueado ao carregar o secret -- {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+        return 2
+
+    try:
+        preflight = write_conn.run_preflight(write_url, settings.datamart_url or "", expect_tables_exist=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--apply-confirmed bloqueado -- preflight falhou inesperadamente: {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+        return 3
+    print("\n=== Preflight de escrita (--apply-confirmed) — nunca exibe host/IP/usuário/senha ===")
+    for key, value in preflight.safe_summary.items():
+        print(f"  {key}: {value}")
+    for warning in preflight.warnings:
+        print(f"  AVISO (não bloqueante): {warning}")
+    if not preflight.ok:
+        print("--apply-confirmed NÃO executado -- preflight bloqueado:", file=sys.stderr)
+        for reason in preflight.blocking_reasons:
+            print(f"  - {reason}", file=sys.stderr)
+        return 3
+
+    data_path = data_path or Path(settings.shopee_data_path)
+
+    try:
+        engine = create_engine(write_url, pool_pre_ping=True)
+        with engine.connect().execution_options(postgresql_readonly=True) as ro_conn:
+            migration_state = _check_migration_state(ro_conn)
+            if not migration_state.ok:
+                print("--apply-confirmed NÃO executado -- estado da migration não confirmado:", file=sys.stderr)
+                for p in migration_state.problems:
+                    print(f"  - {p}", file=sys.stderr)
+                return 4
+            plan = plan_backfill(ro_conn, data_path)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"--apply-confirmed bloqueado -- falha ao confirmar migration/plano na sessão de leitura: "
+            f"{_sanitize_write_path_exception(exc)}",
+            file=sys.stderr,
+        )
+        return 4
+
+    if not plan.ready:
+        print("--apply-confirmed NÃO executado -- plano recalculado agora não está 10/10 pronto:", file=sys.stderr)
+        for p in plan.problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 5
+
+    try:
+        conn = write_conn.open_write_connection(write_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--apply-confirmed bloqueado -- falha ao abrir conexão de escrita: {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+        return 6
+
+    warnings_post_result: list[str] = []
+    result: Optional[BackfillResult] = None
+    try:
+        try:
+            lock_acquired = write_conn.try_acquire_advisory_lock(conn)
+        except Exception as exc:  # noqa: BLE001
+            print(f"--apply-confirmed abortado -- falha ao adquirir advisory lock: {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+            return 6
+        if not lock_acquired:
+            print("--apply-confirmed abortado: advisory lock em uso -- sem retry automático.", file=sys.stderr)
+            return 6
+
+        try:
+            result = apply_backfill_atomic(
+                conn,
+                plan,
+                confirm_flag=True,
+                confirm_secret_value=secret["I_UNDERSTAND_THIS_WRITES_DATAMART_RAW"],
+                audit_path=audit_path,
+                repo_root=repo_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # apply_backfill_atomic já tem seu próprio catch-all interno e
+            # nunca deveria propagar -- esta é defesa em profundidade contra
+            # um bug futuro que quebre essa garantia.
+            print(f"--apply-confirmed -- falha inesperada durante o backfill: {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+            return 9
+
+        try:
+            write_conn.release_advisory_lock(conn)
+        except Exception as exc:  # noqa: BLE001
+            # O COMMIT (se `result.outcome == "committed"`) já aconteceu --
+            # uma falha ao liberar o advisory lock de SESSÃO não desfaz o
+            # backfill e NUNCA deve ser reportada como falha dele. Fechar a
+            # conexão no `finally` externo libera o lock de qualquer jeito
+            # (lock de sessão morre com a conexão). Nunca sugere retry.
+            warnings_post_result.append(
+                f"release_advisory_lock falhou após o resultado acima (lock de sessão será liberado ao "
+                f"fechar a conexão, sem retry automático): {_sanitize_write_path_exception(exc)}"
+            )
+    finally:
+        try:
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            warnings_post_result.append(f"falha ao fechar a conexão de escrita: {_sanitize_write_path_exception(exc)}")
+
+    print(f"\nResultado: {result.outcome}")
+    print(f"file_ids atualizados: {sorted(result.updated_file_ids)}")
+    if result.backup_sha256:
+        print(f"backup_sha256: {result.backup_sha256}")
+    if result.problems:
+        print("Problemas:")
+        for p in result.problems:
+            print(f"  - {p}")
+    for w in warnings_post_result:
+        print(f"AVISO (não bloqueante, não afeta o resultado do backfill acima): {w}", file=sys.stderr)
+    return 0 if result.outcome == "committed" else 9
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--dry-run", action="store_true")
     group.add_argument("--apply-confirmed", action="store_true")
-    parser.parse_args(argv)
+    parser.add_argument("--audit-path", default=None, help="Obrigatório com --apply-confirmed.")
+    parser.add_argument("--data-path", default=None, help="Sobrepõe SHOPEE_DATA_PATH.")
+    args = parser.parse_args(argv)
 
-    print(
-        "ESTE SCRIPT É UM DRAFT DA FASE STAGING SHOPEE 2A (Gate 2B) E NÃO "
-        "DEVE SER EXECUTADO SEM: (1) a migration source_metadata aplicada, "
-        "(2) DATAMART_SHOPEE_WRITE_URL configurada, (3) autorização "
-        "explícita do usuário. Encerrando sem fazer nada, mesmo com "
-        "--apply-confirmed.",
-        file=sys.stderr,
-    )
-    return 2
+    try:
+        data_path = Path(args.data_path) if args.data_path else None
+
+        if args.apply_confirmed:
+            if not args.audit_path:
+                print("--apply-confirmed exige --audit-path.", file=sys.stderr)
+                return 1
+            return run_apply_confirmed(Path(args.audit_path), data_path=data_path)
+
+        report = run_dry_run(data_path=data_path)
+        _print_dry_run_report(report)
+        return report.exit_code
+    except Exception as exc:  # noqa: BLE001
+        # Última barreira: mesmo que um bug escape de todo o resto (dry-run
+        # ou apply-confirmed), NUNCA deixa um traceback cru -- que poderia
+        # conter DSN/senha/filename/shop_id/PII de uma exceção de baixo
+        # nível não prevista -- chegar ao stdout/stderr do usuário. Só tipo
+        # + mensagem já filtrada por `_sanitize_write_path_exception`.
+        print(f"Falha inesperada -- {_sanitize_write_path_exception(exc)}", file=sys.stderr)
+        return 10
 
 
 if __name__ == "__main__":
