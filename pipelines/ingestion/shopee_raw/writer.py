@@ -8,6 +8,16 @@ commit. Sem UPDATE, sem DELETE, sem retry automático.
 
 Nunca loga `raw_payload` nem qualquer valor de célula — só contagens,
 hashes e metadados técnicos.
+
+`source_metadata` (Fase Staging Shopee 2A, Gate 2B — revisão de 2026-07-06):
+para `source_type='ads'`, o preâmbulo do CSV é extraído e validado ANTES de
+qualquer INSERT nesta mesma transação — um preâmbulo ausente/inválido
+(`AdsPreambleError`) aborta o arquivo inteiro sem gravar nada (mesma
+política "success-only" das linhas-filhas: nunca uma carga parcial).
+`source_metadata` fica sempre NULL para orders/shop_stats — esse tipo de
+arquivo não tem preâmbulo estruturado equivalente. Requer que a migration
+`db/sql/raw/shopee_raw_add_source_metadata.sql` já tenha sido aplicada
+(coluna existente) antes de uma execução real — não aplicada nesta fase.
 """
 from __future__ import annotations
 
@@ -18,7 +28,7 @@ from typing import Optional
 
 import psycopg2.extras
 
-from pipelines.ingestion.shopee_raw import inventory as inv
+from pipelines.ingestion.shopee_raw import ads_metadata, inventory as inv
 from pipelines.ingestion.shopee_raw.hashing import json_safe, sha256_file
 
 SOURCE_TABLE_MAP = {
@@ -76,6 +86,18 @@ def insert_file(
         path = data_path / record.relative_path
         sha_before = record.file_sha256
         result = inv.read_source_file(path, record.source_type)
+
+        source_metadata = None
+        if record.source_type == inv.SOURCE_ADS:
+            # Falha ANTES de qualquer INSERT (nextval incluso) se o
+            # preâmbulo estiver ausente/inválido — AdsPreambleError sobe
+            # para o except genérico abaixo, que faz rollback e nunca
+            # grava nada deste arquivo (mesma política success-only das
+            # linhas-filhas).
+            lines, _ = inv._decode_ads_csv(path)
+            preamble = ads_metadata.parse_ads_preamble(lines)
+            source_metadata = preamble.to_jsonb_dict()
+
         sha_after = sha256_file(path)
         if sha_after != sha_before:
             conn.rollback()
@@ -110,11 +132,13 @@ def insert_file(
             INSERT INTO raw.shopee_ingestion_file (
                 file_id, batch_id, source_type, brand, source_filename,
                 file_sha256, file_size_bytes, source_modified_at, sheet_name,
-                source_row_count, headers_json, schema_fingerprint, ingestion_status
+                source_row_count, headers_json, schema_fingerprint, ingestion_status,
+                source_metadata
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                %s, %s, %s, 'success'
+                %s, %s, %s, 'success',
+                %s
             )
             """,
             (
@@ -130,6 +154,7 @@ def insert_file(
                 len(result.rows),
                 psycopg2.extras.Json(record.headers or []),
                 record.schema_fingerprint,
+                psycopg2.extras.Json(source_metadata) if source_metadata is not None else None,
             ),
         )
 

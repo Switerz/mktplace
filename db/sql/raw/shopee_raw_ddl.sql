@@ -10,6 +10,14 @@
 -- raw.tiktok_shop_orders / raw.ml_orders / ~200 outras tabelas de outras
 -- fontes). NÃO é o Neon (marts.*) nem o Postgres local.
 --
+-- `source_metadata` (adicionada nesta revisão, 2026-07-06, Fase Staging
+-- Shopee 2A Gate 2B): incluída diretamente aqui para que AMBIENTES NOVOS
+-- já nasçam com a coluna. O ambiente JÁ CARREGADO em 2026-07-03/04 precisa
+-- da migration separada db/sql/raw/shopee_raw_add_source_metadata.sql (um
+-- CREATE TABLE não pode ser reaplicado num ambiente existente) — as duas
+-- mudanças coexistem, uma não substitui a outra. Ver aquele arquivo para o
+-- racional completo (minimização, alternativas descartadas, rollback).
+--
 -- Confirmado por inspeção read-only em 2026-07-03 (transação
 -- SET default_transaction_read_only=on, usuário postgres/postgres):
 --   - Não existe nenhum objeto raw.*shopee* hoje.
@@ -87,6 +95,8 @@ CREATE TABLE raw.shopee_ingestion_file (
                          CHECK (ingestion_status = 'success'),
     ingested_at         timestamptz NOT NULL DEFAULT now(),
     error_message       text,
+    source_metadata     jsonb
+                         CHECK (source_metadata IS NULL OR jsonb_typeof(source_metadata) = 'object'),
     CONSTRAINT uk_shopee_ingestion_file_sha256_sheet UNIQUE (file_sha256, sheet_name)
 );
 
@@ -104,6 +114,15 @@ COMMENT ON COLUMN raw.shopee_ingestion_file.ingestion_status IS
     'Sempre "success" nesta fase — politica success-only, sem UPDATE de '
     'status. error_message existe para evolucao futura do schema, mas nao '
     'e usado neste modo de operacao (fica sempre NULL).';
+COMMENT ON COLUMN raw.shopee_ingestion_file.source_metadata IS
+    'Metadados de nivel de ARQUIVO extraidos de fora do corpo tabular '
+    '(ex.: preambulo dos CSVs de ads — periodo real do relatorio, data de '
+    'criacao, ID da loja). NULL para arquivos sem esse tipo de metadado '
+    '(orders, shop_stats). Nunca contem dado de comprador/PII de cliente, '
+    'nem username/nome de loja (minimizacao — ver '
+    'pipelines/ingestion/shopee_raw/ads_metadata.py). Chaves usadas hoje: '
+    'period_start, period_end, report_created_at (naive, timezone do '
+    'Seller Center desconhecido — nunca assumir UTC), shop_id.';
 
 CREATE INDEX idx_shopee_ingestion_file_brand ON raw.shopee_ingestion_file USING btree (brand);
 CREATE INDEX idx_shopee_ingestion_file_source_type ON raw.shopee_ingestion_file USING btree (source_type);

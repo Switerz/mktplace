@@ -336,6 +336,96 @@ def test_insert_file_dois_arquivos_ads_identicos_sheet_name_null_e_idempotente(t
     assert outcome_b.file_id == outcome_a.file_id
 
 
+def _write_ads_csv_missing_periodo(path):
+    """CSV de ads com preâmbulo inválido (sem 'Período') — usado para
+    provar que insert_file aborta ANTES de qualquer INSERT/execute_values."""
+    lines = [
+        "Relatório de Todos os Anúncios CPC - Shopee Brasil",
+        "Nome de Usuário,marca",
+        "ID da Loja,123",
+        "Data de Criação do Relatório,19/06/2026 17:12",
+        "",
+        "#,Nome do Anúncio,Status,Impressões,Cliques,Despesas,GMV",
+        "1,Anúncio 1,Ativo,1000,50,10.00,100.00",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+
+
+def test_insert_file_ads_grava_source_metadata_minimizado_no_manifesto(tmp_path):
+    """source_metadata para ads deve conter só period_start/period_end/
+    report_created_at/shop_id — nunca shop_username/shop_display_name
+    (minimização, revisão de 2026-07-06)."""
+    data_path = tmp_path / "shopee"
+    (data_path / "apice").mkdir(parents=True)
+    path = data_path / "apice" / "Dados+Gerais+A.csv"
+    _write_ads_csv(path, [["Anúncio 1", "Ativo", 1000, 50, "10,00", "100,00"]])
+    record = _ads_record(data_path, "apice/Dados+Gerais+A.csv", "apice")
+    conn = FakeConn(next_file_id=321)
+
+    outcome = writer.insert_file(conn, data_path, record, "batch-1")
+
+    assert outcome.outcome == "inserted"
+    source_metadata_param = conn.manifest_insert_params[-1]
+    assert source_metadata_param.adapted == {
+        "period_start": "2026-01-01",
+        "period_end": "2026-03-31",
+        "report_created_at": "2026-06-19T17:12:00",
+        "shop_id": "123",
+    }
+
+
+def test_insert_file_orders_source_metadata_fica_none_no_manifesto(tmp_path):
+    data_path = tmp_path / "shopee"
+    (data_path / "apice").mkdir(parents=True)
+    _write_orders_xlsx(
+        data_path / "apice" / "Order.all.a.xlsx",
+        [["1", "Concluído", "2026-01-01", 1, 10.0, 10.0, 0, 0, 0, "u", "SP", "SP"]],
+    )
+    record = _record(data_path, "apice/Order.all.a.xlsx", "apice")
+    conn = FakeConn()
+
+    outcome = writer.insert_file(conn, data_path, record, "batch-1")
+
+    assert outcome.outcome == "inserted"
+    assert conn.manifest_insert_params[-1] is None
+
+
+def test_insert_file_ads_preambulo_invalido_aborta_antes_de_qualquer_insert(tmp_path):
+    """Falha ANTES de nextval/execute_values/INSERT do manifesto — mesma
+    política success-only das linhas-filhas: um preâmbulo inválido não
+    deixa NENHUM rastro, nem parcial."""
+    data_path = tmp_path / "shopee"
+    (data_path / "apice").mkdir(parents=True)
+    path = data_path / "apice" / "Dados+Gerais+Ruim.csv"
+    _write_ads_csv_missing_periodo(path)
+    record = _ads_record(data_path, "apice/Dados+Gerais+Ruim.csv", "apice")
+    conn = FakeConn()
+
+    outcome = writer.insert_file(conn, data_path, record, "batch-1")
+
+    assert outcome.outcome == "failed"
+    assert "AdsPreambleError" in outcome.error
+    assert conn.rolled_back is True
+    assert conn.committed is False
+    assert conn.execute_values_calls == []
+    assert not any(sql.upper().startswith("SELECT NEXTVAL") for sql, _ in conn.executed)
+    assert not any(sql.upper().startswith("INSERT INTO RAW.SHOPEE_INGESTION_FILE") for sql, _ in conn.executed)
+
+
+def test_insert_file_ads_erro_de_preambulo_nunca_vaza_valor_bruto(tmp_path):
+    data_path = tmp_path / "shopee"
+    (data_path / "apice").mkdir(parents=True)
+    path = data_path / "apice" / "Dados+Gerais+Ruim.csv"
+    _write_ads_csv_missing_periodo(path)
+    record = _ads_record(data_path, "apice/Dados+Gerais+Ruim.csv", "apice")
+    conn = FakeConn()
+
+    outcome = writer.insert_file(conn, data_path, record, "batch-1")
+
+    assert "marca" not in (outcome.error or "")
+    assert "123" not in (outcome.error or "")
+
+
 def test_is_already_ingested_usa_comparacao_null_safe():
     """A query de idempotencia precisa usar IS NOT DISTINCT FROM (nao '='),
     senao sheet_name=NULL nunca bateria com outro NULL."""
