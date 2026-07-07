@@ -65,7 +65,6 @@ RE_ORDERS_TS = r"^([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2})$"
 RE_ISO_DATE = r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$"
 RE_BR_DATE = r"^([0-9]{2})/([0-9]{2})/([0-9]{4})$"
 RE_BR_TS_SECONDS = r"^([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2})$"
-RE_FILENAME_PERIOD = r"([0-9]{2})_([0-9]{2})_([0-9]{4})-([0-9]{2})_([0-9]{2})_([0-9]{4})"
 RE_BR_DATE_RANGE = r"^([0-9]{2})/([0-9]{2})/([0-9]{4})-([0-9]{2})/([0-9]{2})/([0-9]{4})$"
 
 # Números: dígitos puros, sem separador de milhar, sem NaN/Infinity/moeda.
@@ -275,43 +274,63 @@ def shop_stats_data_format_is_invalid(x: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Período extraído do NOME do arquivo de ads: "..._DD_MM_YYYY-DD_MM_YYYY..."
+# Período de ads — vem de raw.shopee_ingestion_file.source_metadata (jsonb
+# populado pelo parser do preâmbulo do CSV, ver
+# pipelines/ingestion/shopee_raw/ads_metadata.py), NUNCA do nome do arquivo.
+#
+# Revisão de 2026-07-06 (2ª rodada): as funções anteriores
+# (`filename_period_*`, que liam "..._DD_MM_YYYY-DD_MM_YYYY..." do NOME do
+# arquivo) foram REMOVIDAS — o nome do arquivo é um fallback frágil (2 dos
+# 10 arquivos observados, ambos da kokeshi, não têm o ano no nome) e este
+# contrato não usa mais fallback silencioso para o período de ads: um
+# manifesto sem `source_metadata` válido REJEITA a linha na pré-validação
+# (ver `_extra_row_conditions` em validations.py), em vez de gravar NULL.
 # ---------------------------------------------------------------------------
 
-def filename_period_is_invalid(filename_expr: str) -> str:
-    """Verdadeiro apenas quando o nome CASA com o padrão de período mas os
-    componentes são calendarialmente inválidos, ou quando início > fim.
-    Arquivo fora do padrão (ex.: kokeshi) não é "inválido" — é
-    'sem período', tratado à parte (vira NULL, gap documentado)."""
-    f = filename_expr
-    d1, m1, y1 = (_group(f, RE_FILENAME_PERIOD, i) for i in (1, 2, 3))
-    d2, m2, y2 = (_group(f, RE_FILENAME_PERIOD, i) for i in (4, 5, 6))
-    valid1 = _is_valid_ymd(y1, m1, d1)
-    valid2 = _is_valid_ymd(y2, m2, d2)
-    order_ok = f"(({y1} * 10000 + {m1} * 100 + {d1}) <= ({y2} * 10000 + {m2} * 100 + {d2}))"
+def ads_metadata_period_is_invalid(metadata_expr: str) -> str:
+    """Verdadeiro quando o manifesto NÃO tem um `source_metadata` jsonb
+    válido para o período do relatório de ads: coluna NULL, não é um
+    objeto jsonb, `period_start`/`period_end` ausentes ou fora do formato
+    ISO (YYYY-MM-DD), calendário impossível, ou início > fim. Nunca lança
+    erro (`->>`/`jsonb_typeof` em jsonb NULL ou não-objeto retornam NULL,
+    nunca exceção) — seguro para a contagem fail-fast prévia."""
+    m = metadata_expr
+    start = f"({m} ->> 'period_start')"
+    end = f"({m} ->> 'period_end')"
+    y1, mo1, d1 = (_group(start, RE_ISO_DATE, i) for i in (1, 2, 3))
+    y2, mo2, d2 = (_group(end, RE_ISO_DATE, i) for i in (1, 2, 3))
+    valid1 = _is_valid_ymd(y1, mo1, d1)
+    valid2 = _is_valid_ymd(y2, mo2, d2)
+    order_ok = f"(({y1} * 10000 + {mo1} * 100 + {d1}) <= ({y2} * 10000 + {mo2} * 100 + {d2}))"
+    # Cada termo do OR usa um predicado que NUNCA avalia para NULL quando
+    # é o motivo real da invalidez (IS NULL/IS NOT NULL, nunca um !~ ou
+    # NOT sobre uma subexpressão que também pode ser NULL) — em lógica de
+    # três valores do SQL, `TRUE OR NULL` é `TRUE`, mas `NULL OR NULL` é
+    # `NULL` (não conta como rejeição no `count(*) FILTER`). Sem os termos
+    # `IS NULL` explícitos, um manifesto com objeto válido mas SEM a chave
+    # 'period_start'/'period_end' passaria batido (silenciosamente NULL
+    # em vez de rejeitado) — exatamente o fallback silencioso proibido.
     return (
-        f"({f} ~ '{RE_FILENAME_PERIOD}' AND ("
-        f"NOT {valid1} OR NOT {valid2} OR NOT {order_ok}"
-        "))"
+        f"({m} IS NULL "
+        f"OR jsonb_typeof({m}) <> 'object' "
+        f"OR {start} IS NULL OR {end} IS NULL "
+        f"OR {start} !~ '{RE_ISO_DATE}' OR {end} !~ '{RE_ISO_DATE}' "
+        f"OR NOT {valid1} OR NOT {valid2} OR NOT {order_ok})"
     )
 
 
-def filename_period_start_value(filename_expr: str) -> str:
-    f = filename_expr
-    d1, m1, y1 = (_group(f, RE_FILENAME_PERIOD, i) for i in (1, 2, 3))
-    return (
-        f"(CASE WHEN {f} !~ '{RE_FILENAME_PERIOD}' THEN NULL "
-        f"ELSE make_date({y1}, {m1}, {d1}) END)"
-    )
+def ads_metadata_period_start_value(metadata_expr: str) -> str:
+    m = metadata_expr
+    start = f"({m} ->> 'period_start')"
+    y1, mo1, d1 = (_group(start, RE_ISO_DATE, i) for i in (1, 2, 3))
+    return f"(CASE WHEN {start} !~ '{RE_ISO_DATE}' THEN NULL ELSE make_date({y1}, {mo1}, {d1}) END)"
 
 
-def filename_period_end_value(filename_expr: str) -> str:
-    f = filename_expr
-    d2, m2, y2 = (_group(f, RE_FILENAME_PERIOD, i) for i in (4, 5, 6))
-    return (
-        f"(CASE WHEN {f} !~ '{RE_FILENAME_PERIOD}' THEN NULL "
-        f"ELSE make_date({y2}, {m2}, {d2}) END)"
-    )
+def ads_metadata_period_end_value(metadata_expr: str) -> str:
+    m = metadata_expr
+    end = f"({m} ->> 'period_end')"
+    y2, mo2, d2 = (_group(end, RE_ISO_DATE, i) for i in (1, 2, 3))
+    return f"(CASE WHEN {end} !~ '{RE_ISO_DATE}' THEN NULL ELSE make_date({y2}, {mo2}, {d2}) END)"
 
 
 # ---------------------------------------------------------------------------

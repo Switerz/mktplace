@@ -150,8 +150,9 @@ def _extra_row_conditions(spec: mapping.TableSpec) -> list[RowCondition]:
         )]
     if spec.source_type == "ads":
         return [RowCondition(
-            reason=f"{prefix}período do relatório (nome do arquivo) com calendário ou ordem inválidos",
-            condition_sql=semantics.filename_period_is_invalid("f.source_filename"),
+            reason=f"{prefix}source_metadata do manifesto ausente ou período do relatório "
+                   "inválido/incompleto (sem fallback do nome do arquivo)",
+            condition_sql=semantics.ads_metadata_period_is_invalid("f.source_metadata"),
         )]
     return []
 

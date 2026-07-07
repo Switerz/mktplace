@@ -148,8 +148,12 @@ ORDERS = TableSpec(
         "pedido mais de uma vez. A selecao do snapshot vigente por pedido "
         "(ex.: por raw_ingested_at mais recente, ou por file_id mais alto) "
         "e responsabilidade de uma camada Gold futura, ainda nao "
-        "implementada. Sem PII direta: nome, telefone, CPF, endereco, CEP, "
-        "bairro, username e textos livres ficam SO na Raw."
+        "implementada. CONTEM PII DIRETA: buyer_cpf (CPF do comprador, so "
+        "template apice) e mantido nesta tabela por decisao de negocio "
+        "explicita (revisao de 2026-07-06) -- NAO vai para Gold/API/"
+        "frontend automaticamente, nunca deve ser logado/exibido em "
+        "preview/erros/testes. Nome, telefone, endereco, CEP, bairro, "
+        "username e textos livres continuam SO na Raw (excluidos aqui)."
     ),
     columns=_PROVENANCE + (
         # Identificação do pedido / status
@@ -157,6 +161,16 @@ ORDERS = TableSpec(
                       nullable=False, pii_class=IDENTIFICADOR_OPERACIONAL,
                       note="14 chars [0-9A-Z] em 100% da base; NAO e chave unica desta tabela "
                            "(repete entre snapshots) — ver aviso de grao no comentario da tabela"),
+        StagingColumn("buyer_cpf", "text", "text_null_blank", ("CPF do Comprador",),
+                      pii_class=PII_DIRETA,
+                      note="PII DIRETA -- CPF do comprador, preservado como texto puro (sem "
+                           "cast numerico, zeros a esquerda e mascara mantidos exatamente como "
+                           "vieram, sem normalizacao/validacao de digitos nesta fase); string "
+                           "vazia vira NULL. So o template apice tem essa chave (demais marcas "
+                           "-> NULL). Mantido na staging por decisao de negocio explicita "
+                           "(revisao de 2026-07-06) -- NAO propagar para Gold/API/frontend "
+                           "automaticamente. NUNCA logar, imprimir em preview/erro/teste, ou "
+                           "incluir em mensagem de excecao. Sem indice nesta coluna."),
         StagingColumn("order_status", "text", "text_required", ("Status do pedido",),
                       nullable=False,
                       note="valor bruto Shopee; inclui frases como 'O comprador pode "
@@ -278,8 +292,8 @@ ORDERS = TableSpec(
     excluded=(
         ExcludedKey("Nome do destinatário", PII_DIRETA, "nome civil do recebedor"),
         ExcludedKey("Telefone", PII_DIRETA, "telefone (mascarado no export, ainda assim PII)"),
-        ExcludedKey("CPF do Comprador", PII_DIRETA,
-                    "documento; só template apice (4 não vazios em 21.914)"),
+        # "CPF do Comprador" NÃO está mais excluído — mapeado para buyer_cpf
+        # (PII_DIRETA, decisão de negócio explícita, revisão de 2026-07-06).
         ExcludedKey("Endereço de entrega", ENDERECO_LOCALIZACAO, "endereço completo"),
         ExcludedKey("CEP", ENDERECO_LOCALIZACAO,
                     "quase-identificador de alta granularidade"),
@@ -393,16 +407,24 @@ ADS = TableSpec(
     grain="1 anúncio agregado no período coberto pelo CSV (sem granularidade diária)",
     comment=(
         "Staging tipada 1:1 da raw.shopee_ads_export. O periodo do relatorio "
-        "vem do NOME do arquivo (report_period_start/end) porque as linhas de "
-        "metadados do CSV nao foram persistidas na Raw; arquivos fora do "
-        "padrao (kokeshi) ficam com periodo NULL — gap documentado. NAO "
+        "vem de raw.shopee_ingestion_file.source_metadata (jsonb extraido do "
+        "preambulo do CSV pelo parser ads_metadata.py) — NUNCA do nome do "
+        "arquivo. Um manifesto ads sem source_metadata valido reprova a "
+        "linha inteira na pre-validacao (sem fallback silencioso para NULL); "
+        "por isso report_period_start/end sao NOT NULL nesta tabela. NAO "
         "distribuir valores por dia nesta camada. Sem PII."
     ),
     columns=_PROVENANCE + (
-        StagingColumn("report_period_start", "date", "ads_report_period_start", (),
-                      note="extraído de f.source_filename; NULL quando fora do padrão"),
-        StagingColumn("report_period_end", "date", "ads_report_period_end", (),
-                      note="extraído de f.source_filename; NULL quando fora do padrão"),
+        StagingColumn("report_period_start", "date", "ads_metadata_period_start", (),
+                      nullable=False,
+                      note="extraído de raw.shopee_ingestion_file.source_metadata.period_start "
+                           "(preâmbulo do CSV); ausência/invalidez reprova a linha na "
+                           "pré-validação — nunca fallback do nome do arquivo"),
+        StagingColumn("report_period_end", "date", "ads_metadata_period_end", (),
+                      nullable=False,
+                      note="extraído de raw.shopee_ingestion_file.source_metadata.period_end "
+                           "(preâmbulo do CSV); ausência/invalidez reprova a linha na "
+                           "pré-validação — nunca fallback do nome do arquivo"),
         StagingColumn("ad_seq", "integer", "int_strict", ("#",), nullable=False,
                       non_negative=True, note="posição da linha no relatório"),
         StagingColumn("ad_name", "text", "text_required", ("Nome do Anúncio",),
@@ -485,9 +507,7 @@ ADS = TableSpec(
         "CREATE INDEX idx_stg_shopee_ads_file_id ON silver.stg_shopee_ads (file_id);",
         "ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT "
         "ck_stg_shopee_ads_report_period CHECK ("
-        "(report_period_start IS NULL AND report_period_end IS NULL) "
-        "OR (report_period_start IS NOT NULL AND report_period_end IS NOT NULL "
-        "AND report_period_start <= report_period_end));",
+        "report_period_start <= report_period_end);",
         "ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT "
         "ck_stg_shopee_ads_ended_after_started CHECK (ended_at IS NULL OR ended_at >= started_at);",
     ),

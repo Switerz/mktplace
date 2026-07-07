@@ -65,12 +65,15 @@ def _is_invalid_cases() -> list[tuple[str, str, bool]]:
                       sem.br_ts_seconds_is_invalid(f"'{v}'", blank_placeholder="Ilimitado"), expect_invalid))
 
     for v, expect_invalid in [
-        ("apice/Dados-01_01_2026-31_03_2026.csv", False),
-        ("apice/Dados-31_02_2026-31_03_2026.csv", True),
-        ("apice/Dados-01_04_2026-01_01_2026.csv", True),
-        ("kokeshi/Dados+Gerais-01-01-19-03.csv", False),
+        ("""'{"period_start":"2026-01-01","period_end":"2026-03-31"}'::jsonb""", False),
+        ("NULL::jsonb", True),
+        ("'[]'::jsonb", True),
+        ("""'{"period_start":"2026-01-01"}'::jsonb""", True),
+        ("""'{"period_start":"2026-13-01","period_end":"2026-03-31"}'::jsonb""", True),
+        ("""'{"period_start":"2026-03-31","period_end":"2026-01-01"}'::jsonb""", True),
+        ("""'{"period_start":"nao-e-data","period_end":"2026-03-31"}'::jsonb""", True),
     ]:
-        cases.append((f"filename_period({v!r})", sem.filename_period_is_invalid(f"'{v}'"), expect_invalid))
+        cases.append((f"ads_metadata_period({v})", sem.ads_metadata_period_is_invalid(v), expect_invalid))
 
     for v, expect_invalid in [
         ("1.234,56", False), ("1234,56", False), ("123.45", False),

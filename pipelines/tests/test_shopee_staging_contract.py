@@ -156,10 +156,15 @@ RAW_KEYS = {
 
 # Headers que NUNCA podem aparecer no SQL gerado (PII direta / quase-
 # identificadores / texto livre — minimização por desenho).
+#
+# "CPF do Comprador" NÃO está nesta lista: é a ÚNICA exceção aprovada por
+# decisão de negócio explícita (revisão de 2026-07-06) — mapeado para
+# `buyer_cpf` (PII_DIRETA, ver mapping.ORDERS.comment). Todo outro header
+# PII_DIRETA/quase-identificador/texto-livre continua proibido de extração
+# de valor no SQL gerado.
 FORBIDDEN_IN_SQL = [
     "Nome do destinatário",
     "Telefone",
-    "CPF do Comprador",
     "Endereço de entrega",
     "CEP",
     "Bairro",
@@ -195,15 +200,38 @@ def test_nomes_de_coluna_unicos_e_snake_case():
             assert re.fullmatch(r"[a-z][a-z0-9_]*", n), f"coluna fora do padrão snake_case: {n}"
 
 
-def test_pii_direta_do_catalogo_raw_esta_excluida():
+def test_pii_direta_do_catalogo_raw_esta_excluida_exceto_cpf_aprovado():
     """Todo header classificado como PII_DIRETA no catálogo da Raw está fora
-    das colunas selecionadas."""
+    das colunas selecionadas — EXCETO 'CPF do Comprador', mapeado para
+    `buyer_cpf` por decisão de negócio explícita (revisão de 2026-07-06,
+    ver mapping.ORDERS.comment). Nenhum outro PII_DIRETA pode ser
+    selecionado sem uma decisão equivalente."""
     pii_headers = {h for h, rule in pii.ORDERS_PII_CATALOG.items()
                    if rule.classification == pii.PII_DIRETA}
+    approved_exception = {"CPF do Comprador"}
     selected = {k for c in mapping.ORDERS.columns for k in c.source_keys}
-    assert not (pii_headers & selected), (
-        f"headers de PII direta selecionados na staging: {pii_headers & selected}"
-    )
+    unexpected = (pii_headers & selected) - approved_exception
+    assert not unexpected, f"headers de PII direta selecionados sem aprovação: {unexpected}"
+    assert "CPF do Comprador" in selected, "buyer_cpf deveria mapear 'CPF do Comprador'"
+
+
+def test_buyer_cpf_e_marcado_como_pii_direta_e_sem_indice():
+    col = next(c for c in mapping.ORDERS.columns if c.column == "buyer_cpf")
+    assert col.pii_class == mapping.PII_DIRETA
+    assert col.rule == "text_null_blank"
+    assert col.source_keys == ("CPF do Comprador",)
+    assert col.non_negative is False
+    # nenhuma coluna buyer_cpf em extra_ddl (sem índice dedicado)
+    assert not any("buyer_cpf" in stmt for stmt in mapping.ORDERS.extra_ddl)
+
+
+def test_comentario_da_tabela_orders_nao_afirma_mais_sem_pii_direta():
+    """Regressão: o comentário antigo dizia 'Sem PII direta' — agora que
+    buyer_cpf existe, essa afirmação seria falsa."""
+    comment_lower = mapping.ORDERS.comment.lower()
+    assert "sem pii direta" not in comment_lower
+    assert "contem pii direta" in comment_lower or "contém pii direta" in comment_lower
+    assert "buyer_cpf" in comment_lower
 
 
 def test_buyer_key_foi_removida():
@@ -238,6 +266,18 @@ def test_sql_gerado_nao_referencia_pii():
         assert value_access not in transform, f"transformação EXTRAI VALOR de {forbidden!r}"
         assert value_access not in ddl, f"DDL EXTRAI VALOR de {forbidden!r}"
     assert "raw_payload ->>" not in ddl, "DDL não deve acessar raw_payload de forma alguma"
+
+
+def test_cpf_do_comprador_e_a_unica_excecao_aprovada_no_sql_gerado():
+    """Prova positiva da exceção deliberada: buyer_cpf EXTRAI valor de 'CPF
+    do Comprador' na transformação (nunca na DDL, que só declara colunas).
+    Este teste nunca lê nem imprime um valor real — só confirma a presença
+    do PADRÃO de extração no texto SQL gerado a partir de dados sintéticos
+    de mapping.py."""
+    transform = build_sql.render_transform_file()
+    ddl = build_sql.render_ddl_file()
+    assert "raw_payload ->> 'CPF do Comprador'" in transform
+    assert "raw_payload ->> 'CPF do Comprador'" not in ddl
 
 
 def test_sem_select_estrela():
@@ -326,10 +366,22 @@ def test_ddl_shop_stats_tem_check_de_ordem_de_periodo():
 def test_ddl_ads_tem_checks_de_periodo_e_ended_after_started():
     ddl = build_sql.build_ddl(mapping.ADS)
     assert "report_period_start <= report_period_end" in ddl
-    assert "(report_period_start IS NULL AND report_period_end IS NULL)" in ddl
     assert "ended_at IS NULL OR ended_at >= started_at" in ddl
     # Explicitamente SEM teto de 100% para ACOS/afins (pedido da revisão).
     assert "acos_pct <= 100" not in ddl and "acos_pct<=100" not in ddl
+
+
+def test_ddl_ads_report_period_e_not_null():
+    """Revisão de 2026-07-06: o período de ads vem de source_metadata do
+    manifesto, sem fallback silencioso — um manifesto sem metadata válida
+    REJEITA a linha na pré-validação, então a coluna nunca fica NULL na
+    staging e o contrato reflete isso com NOT NULL (não mais nullable)."""
+    for col_name in ("report_period_start", "report_period_end"):
+        col = next(c for c in mapping.ADS.columns if c.column == col_name)
+        assert col.nullable is False
+    ddl = build_sql.build_ddl(mapping.ADS)
+    for col_name in ("report_period_start", "report_period_end"):
+        assert re.search(rf"{col_name}\s+date NOT NULL", ddl), f"{col_name} deveria ser NOT NULL no DDL gerado"
 
 
 def test_transacao_tem_advisory_lock_lock_table_e_ordem_correta():

@@ -126,7 +126,9 @@ ADVISORY_LOCK_NAMESPACE = 84772001
 
 _DRAFT_HEADER = """\
 -- ============================================================================
--- DRAFT — NÃO EXECUTADO EM NENHUM BANCO (Fase Staging Shopee 1).
+-- DRAFT — NÃO EXECUTADO EM NENHUM BANCO (Fase Staging Shopee 2A — draft
+-- não aplicado; contrato original da Fase Staging Shopee 1, revisado nas
+-- rodadas de Gate 2B — source_metadata de ads e buyer_cpf).
 -- Gerado por: python -m pipelines.staging.shopee.build_sql --write
 -- Fonte da verdade do contrato: pipelines/staging/shopee/mapping.py
 -- Fonte da verdade das validações: pipelines/staging/shopee/validations.py
@@ -155,7 +157,8 @@ def column_expression(col: mapping.StagingColumn) -> str:
         return "COALESCE(" + ", ".join(parts) + ")"
     rule, params = rr.resolve(col.rule)
     if not col.source_keys:
-        # Regra "zero-arg", baseada em f.source_filename (ex.: período de ads).
+        # Regra "zero-arg", baseada em campo do manifesto f.* (ex.: período
+        # de ads, vindo de f.source_metadata — nunca de f.source_filename).
         return rule.value(*params)
     (key,) = col.source_keys
     return rule.value(sql_rules.payload(key), *params)

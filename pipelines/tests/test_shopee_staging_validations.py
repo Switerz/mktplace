@@ -90,9 +90,17 @@ def test_coalesce_column_gera_condicao_or_entre_as_chaves():
     assert " OR " in cond
 
 
-def test_ads_tem_checagem_de_periodo_do_filename():
-    reasons = {c.reason for c in validations._extra_row_conditions(mapping.ADS)}
-    assert any("período do relatório" in r for r in reasons)
+def test_ads_tem_checagem_de_periodo_via_source_metadata_do_manifesto():
+    """Revisão de 2026-07-06: o período de ads vem de
+    raw.shopee_ingestion_file.source_metadata (jsonb), nunca mais do nome
+    do arquivo — um manifesto sem metadata válida REJEITA a linha (não gera
+    NULL silenciosamente)."""
+    conditions = validations._extra_row_conditions(mapping.ADS)
+    reasons = {c.reason for c in conditions}
+    assert any("período do relatório" in r and "source_metadata" in r for r in reasons)
+    cond = next(c for c in conditions if "source_metadata" in c.reason)
+    assert "f.source_metadata" in cond.condition_sql
+    assert "f.source_filename" not in cond.condition_sql
 
 
 def test_orders_tem_checagem_de_padrao_do_order_id():

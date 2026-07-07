@@ -1,5 +1,7 @@
 -- ============================================================================
--- DRAFT — NÃO EXECUTADO EM NENHUM BANCO (Fase Staging Shopee 1).
+-- DRAFT — NÃO EXECUTADO EM NENHUM BANCO (Fase Staging Shopee 2A — draft
+-- não aplicado; contrato original da Fase Staging Shopee 1, revisado nas
+-- rodadas de Gate 2B — source_metadata de ads e buyer_cpf).
 -- Gerado por: python -m pipelines.staging.shopee.build_sql --write
 -- Fonte da verdade do contrato: pipelines/staging/shopee/mapping.py
 -- Fonte da verdade das validações: pipelines/staging/shopee/validations.py
@@ -32,6 +34,7 @@ CREATE TABLE silver.stg_shopee_order_item_snapshots (
     row_sha256                      char(64) NOT NULL,
     raw_ingested_at                 timestamptz NOT NULL,
     order_id                        varchar(20) NOT NULL,
+    buyer_cpf                       text,
     order_status                    text NOT NULL,
     return_refund_status            text,
     cancel_reason                   text,
@@ -94,12 +97,13 @@ CREATE TABLE silver.stg_shopee_order_item_snapshots (
 );
 
 COMMENT ON TABLE silver.stg_shopee_order_item_snapshots IS
-    'ATENCAO: NAO E UMA TABELA CANONICA. Staging tipada 1:1 da raw.shopee_order_item_export, grao = linha fisica de SKU por arquivo/snapshot. Exports sobrepostos NAO sao deduplicados aqui -- o mesmo pedido pode aparecer em multiplas linhas com file_id diferentes. NAO fazer SUM/COUNT/agregacao direta sobre esta tabela para metricas de negocio: o resultado pode contar o mesmo pedido mais de uma vez. A selecao do snapshot vigente por pedido (ex.: por raw_ingested_at mais recente, ou por file_id mais alto) e responsabilidade de uma camada Gold futura, ainda nao implementada. Sem PII direta: nome, telefone, CPF, endereco, CEP, bairro, username e textos livres ficam SO na Raw.';
+    'ATENCAO: NAO E UMA TABELA CANONICA. Staging tipada 1:1 da raw.shopee_order_item_export, grao = linha fisica de SKU por arquivo/snapshot. Exports sobrepostos NAO sao deduplicados aqui -- o mesmo pedido pode aparecer em multiplas linhas com file_id diferentes. NAO fazer SUM/COUNT/agregacao direta sobre esta tabela para metricas de negocio: o resultado pode contar o mesmo pedido mais de uma vez. A selecao do snapshot vigente por pedido (ex.: por raw_ingested_at mais recente, ou por file_id mais alto) e responsabilidade de uma camada Gold futura, ainda nao implementada. CONTEM PII DIRETA: buyer_cpf (CPF do comprador, so template apice) e mantido nesta tabela por decisao de negocio explicita (revisao de 2026-07-06) -- NAO vai para Gold/API/frontend automaticamente, nunca deve ser logado/exibido em preview/erros/testes. Nome, telefone, endereco, CEP, bairro, username e textos livres continuam SO na Raw (excluidos aqui).';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.raw_id IS 'PK; id da linha na tabela raw.shopee_*_export correspondente';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.file_id IS 'FK física para raw.shopee_ingestion_file(file_id) — ver build_sql.py';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.source_row_number IS 'linha física no arquivo original';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.row_sha256 IS 'hash da linha Raw — auditoria de correspondência';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_id IS '14 chars [0-9A-Z] em 100% da base; NAO e chave unica desta tabela (repete entre snapshots) — ver aviso de grao no comentario da tabela';
+COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.buyer_cpf IS 'PII DIRETA -- CPF do comprador, preservado como texto puro (sem cast numerico, zeros a esquerda e mascara mantidos exatamente como vieram, sem normalizacao/validacao de digitos nesta fase); string vazia vira NULL. So o template apice tem essa chave (demais marcas -> NULL). Mantido na staging por decisao de negocio explicita (revisao de 2026-07-06) -- NAO propagar para Gold/API/frontend automaticamente. NUNCA logar, imprimir em preview/erro/teste, ou incluir em mensagem de excecao. Sem indice nesta coluna.';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_status IS 'valor bruto Shopee; inclui frases como ''O comprador pode pedir uma devolução até YYYY-MM-DD'' — mapeamento canônico é da Gold';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_type IS 'só template apice; 100% vazio na base atual';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.is_hot_listing IS 'conjunto documentado: Y/N — qualquer outro valor estoura';
@@ -225,8 +229,8 @@ CREATE TABLE silver.stg_shopee_ads (
     source_row_number               integer NOT NULL,
     row_sha256                      char(64) NOT NULL,
     raw_ingested_at                 timestamptz NOT NULL,
-    report_period_start             date,
-    report_period_end               date,
+    report_period_start             date NOT NULL,
+    report_period_end               date NOT NULL,
     ad_seq                          integer NOT NULL CHECK (ad_seq >= 0),
     ad_name                         text NOT NULL,
     ad_status                       text NOT NULL,
@@ -267,13 +271,13 @@ CREATE TABLE silver.stg_shopee_ads (
 );
 
 COMMENT ON TABLE silver.stg_shopee_ads IS
-    'Staging tipada 1:1 da raw.shopee_ads_export. O periodo do relatorio vem do NOME do arquivo (report_period_start/end) porque as linhas de metadados do CSV nao foram persistidas na Raw; arquivos fora do padrao (kokeshi) ficam com periodo NULL — gap documentado. NAO distribuir valores por dia nesta camada. Sem PII.';
+    'Staging tipada 1:1 da raw.shopee_ads_export. O periodo do relatorio vem de raw.shopee_ingestion_file.source_metadata (jsonb extraido do preambulo do CSV pelo parser ads_metadata.py) — NUNCA do nome do arquivo. Um manifesto ads sem source_metadata valido reprova a linha inteira na pre-validacao (sem fallback silencioso para NULL); por isso report_period_start/end sao NOT NULL nesta tabela. NAO distribuir valores por dia nesta camada. Sem PII.';
 COMMENT ON COLUMN silver.stg_shopee_ads.raw_id IS 'PK; id da linha na tabela raw.shopee_*_export correspondente';
 COMMENT ON COLUMN silver.stg_shopee_ads.file_id IS 'FK física para raw.shopee_ingestion_file(file_id) — ver build_sql.py';
 COMMENT ON COLUMN silver.stg_shopee_ads.source_row_number IS 'linha física no arquivo original';
 COMMENT ON COLUMN silver.stg_shopee_ads.row_sha256 IS 'hash da linha Raw — auditoria de correspondência';
-COMMENT ON COLUMN silver.stg_shopee_ads.report_period_start IS 'extraído de f.source_filename; NULL quando fora do padrão';
-COMMENT ON COLUMN silver.stg_shopee_ads.report_period_end IS 'extraído de f.source_filename; NULL quando fora do padrão';
+COMMENT ON COLUMN silver.stg_shopee_ads.report_period_start IS 'extraído de raw.shopee_ingestion_file.source_metadata.period_start (preâmbulo do CSV); ausência/invalidez reprova a linha na pré-validação — nunca fallback do nome do arquivo';
+COMMENT ON COLUMN silver.stg_shopee_ads.report_period_end IS 'extraído de raw.shopee_ingestion_file.source_metadata.period_end (preâmbulo do CSV); ausência/invalidez reprova a linha na pré-validação — nunca fallback do nome do arquivo';
 COMMENT ON COLUMN silver.stg_shopee_ads.ad_seq IS 'posição da linha no relatório';
 COMMENT ON COLUMN silver.stg_shopee_ads.ad_status IS 'Em Andamento | Pausado | Encerrado';
 COMMENT ON COLUMN silver.stg_shopee_ads.ad_type IS 'vazio nos 5 anúncios shop-level (GMV Max Shop)';
@@ -304,7 +308,7 @@ ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT fk_stg_shopee_ads_file_id FOREI
 CREATE UNIQUE INDEX uk_stg_shopee_ads_file_row ON silver.stg_shopee_ads (file_id, source_row_number);
 CREATE INDEX idx_stg_shopee_ads_brand ON silver.stg_shopee_ads (brand);
 CREATE INDEX idx_stg_shopee_ads_file_id ON silver.stg_shopee_ads (file_id);
-ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT ck_stg_shopee_ads_report_period CHECK ((report_period_start IS NULL AND report_period_end IS NULL) OR (report_period_start IS NOT NULL AND report_period_end IS NOT NULL AND report_period_start <= report_period_end));
+ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT ck_stg_shopee_ads_report_period CHECK (report_period_start <= report_period_end);
 ALTER TABLE silver.stg_shopee_ads ADD CONSTRAINT ck_stg_shopee_ads_ended_after_started CHECK (ended_at IS NULL OR ended_at >= started_at);
 
 -- REVOKE ALL FROM PUBLIC só remove o acesso implícito do pseudo-role

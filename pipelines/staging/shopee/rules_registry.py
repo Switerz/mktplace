@@ -83,22 +83,25 @@ REGISTRY: dict[str, Rule] = {
                                    is_invalid=semantics.br_date_range_is_invalid),
 }
 
-# Regras que operam sobre uma expressão fixa (o nome do arquivo no
-# manifesto), não sobre uma chave do raw_payload — por isso não recebem `x`.
-FILENAME_REGISTRY: dict[str, Rule] = {
-    "ads_report_period_start": Rule(
-        value=lambda: semantics.filename_period_start_value("f.source_filename"),
-        is_invalid=lambda: semantics.filename_period_is_invalid("f.source_filename"),
+# Regras que operam sobre um campo do MANIFESTO (raw.shopee_ingestion_file,
+# alias "f"), não sobre uma chave do raw_payload — por isso não recebem `x`.
+# Revisão de 2026-07-06 (2ª rodada): o período de ads vem de
+# `f.source_metadata` (jsonb do preâmbulo do CSV), nunca mais de
+# `f.source_filename` — ver docstring de `semantics.ads_metadata_period_is_invalid`.
+MANIFEST_REGISTRY: dict[str, Rule] = {
+    "ads_metadata_period_start": Rule(
+        value=lambda: semantics.ads_metadata_period_start_value("f.source_metadata"),
+        is_invalid=lambda: semantics.ads_metadata_period_is_invalid("f.source_metadata"),
     ),
-    "ads_report_period_end": Rule(
-        value=lambda: semantics.filename_period_end_value("f.source_filename"),
-        is_invalid=lambda: semantics.filename_period_is_invalid("f.source_filename"),
+    "ads_metadata_period_end": Rule(
+        value=lambda: semantics.ads_metadata_period_end_value("f.source_metadata"),
+        is_invalid=lambda: semantics.ads_metadata_period_is_invalid("f.source_metadata"),
     ),
 }
 
 
 def resolve(rule: str) -> tuple[Rule, list[str]]:
     name, params = parse_rule(rule)
-    if name in FILENAME_REGISTRY:
-        return FILENAME_REGISTRY[name], params
+    if name in MANIFEST_REGISTRY:
+        return MANIFEST_REGISTRY[name], params
     return REGISTRY[name], params

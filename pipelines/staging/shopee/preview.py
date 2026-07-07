@@ -48,7 +48,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-from pipelines.staging.shopee import mapping, validations
+from pipelines.staging.shopee import mapping, semantics, validations
 from pipelines.staging.shopee.build_sql import build_select
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -85,7 +85,7 @@ _MONTH_BUCKET_SQL = {
         "split_part(btrim(r.raw_payload ->> 'Data'), '/', 1)::integer), 'YYYY-MM') "
         "ELSE 'period_total' END"
     ),
-    "ads": "f.source_filename",
+    "ads": "COALESCE(f.source_metadata ->> 'period_start', '(sem source_metadata)')",
 }
 
 
@@ -202,13 +202,21 @@ def run_preview(engine) -> dict:
 
             report[st] = src
 
-        # ads: cobertura do período extraído do filename (informativo, gap conhecido)
+        # ads: cobertura do período vindo de source_metadata (manifesto).
+        # Diagnóstico via count(*) FILTER sobre a condição COMPARTILHADA de
+        # invalidez (não sobre o SELECT tipado): uma linha cujo
+        # source_metadata falte/seja inválido é rejeitada ANTES do INSERT
+        # pela pré-validação (ver validations.py) — nunca chega a ser
+        # persistida com report_period_start/end NULL.
+        ads_metadata_invalid = semantics.ads_metadata_period_is_invalid("f.source_metadata")
         per = conn.execute(text(
-            "SELECT count(*) AS n, count(report_period_start) AS com_periodo FROM (\n"
-            + build_select(mapping.ADS, incremental=False) + "\n) t"
+            "SELECT count(*) AS n, "
+            f"count(*) FILTER (WHERE NOT ({ads_metadata_invalid})) AS com_periodo "
+            "FROM raw.shopee_ads_export r "
+            "LEFT JOIN raw.shopee_ingestion_file f ON f.file_id = r.file_id"
         )).one()
-        report["ads"]["linhas_com_periodo_do_filename"] = per.com_periodo
-        report["ads"]["linhas_sem_periodo_do_filename"] = per.n - per.com_periodo
+        report["ads"]["linhas_com_periodo_do_manifesto"] = per.com_periodo
+        report["ads"]["linhas_sem_periodo_do_manifesto"] = per.n - per.com_periodo
 
     return report
 
@@ -235,8 +243,9 @@ def print_report(report: dict) -> None:
         print("  contagem por brand/bucket:")
         for row in src["contagem_brand_bucket"]:
             print(f"    {row['brand']:<10} {row['bucket']}: {row['n']}")
-    print(f"\nads com periodo do filename: {report['ads']['linhas_com_periodo_do_filename']} | "
-          f"sem: {report['ads']['linhas_sem_periodo_do_filename']}")
+    print(f"\nads com periodo valido no source_metadata do manifesto: "
+          f"{report['ads']['linhas_com_periodo_do_manifesto']} | "
+          f"sem (seriam rejeitadas na pre-validacao): {report['ads']['linhas_sem_periodo_do_manifesto']}")
     if report["problems"]:
         print("\nPROBLEMAS ENCONTRADOS:")
         for p in report["problems"]:

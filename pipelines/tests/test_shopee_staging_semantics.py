@@ -40,8 +40,8 @@ def test_nenhuma_funcao_de_valor_usa_sentinela_literal_puro_no_else():
         semantics.br_ts_seconds_value("x"),
         semantics.br_date_range_start_value("x"),
         semantics.br_date_range_end_value("x"),
-        semantics.filename_period_start_value("f.source_filename"),
-        semantics.filename_period_end_value("f.source_filename"),
+        semantics.ads_metadata_period_start_value("f.source_metadata"),
+        semantics.ads_metadata_period_end_value("f.source_metadata"),
         semantics.int_value("x"),
         semantics.int_value("x", sql_type="bigint"),
         semantics.numeric_dot_value("x"),
@@ -107,7 +107,7 @@ def test_is_invalid_nunca_referencia_funcoes_que_lancam_erro():
         semantics.br_date_is_invalid("x"),
         semantics.br_ts_seconds_is_invalid("x"),
         semantics.br_date_range_is_invalid("x"),
-        semantics.filename_period_is_invalid("f.source_filename"),
+        semantics.ads_metadata_period_is_invalid("f.source_metadata"),
         semantics.numeric_dot_is_invalid("x"),
         semantics.numeric_br_is_invalid("x"),
         semantics.pct_flexible_is_invalid("x"),
@@ -134,14 +134,28 @@ def test_bool_pair_usa_apenas_o_par_especifico_nunca_a_uniao():
 
 def test_regexes_de_data_usam_grupos_de_captura():
     for pattern in (semantics.RE_ORDERS_TS, semantics.RE_ISO_DATE, semantics.RE_BR_DATE,
-                    semantics.RE_BR_TS_SECONDS, semantics.RE_FILENAME_PERIOD,
-                    semantics.RE_BR_DATE_RANGE):
+                    semantics.RE_BR_TS_SECONDS, semantics.RE_BR_DATE_RANGE):
         assert re.search(r"\([^)]*\)", pattern), f"regex sem grupo de captura: {pattern}"
 
 
-def test_filename_period_end_nao_falha_para_arquivo_fora_do_padrao():
-    """Arquivos fora do padrão (ex.: kokeshi) não são 'inválidos' — viram
-    NULL (gap documentado), nunca disparam a checagem de invalidez."""
-    inv = semantics.filename_period_is_invalid("'Dados+Gerais-01-01-19-03.csv'")
-    # A condição exige que o nome CASE com o padrão para contar como inválido.
-    assert semantics.RE_FILENAME_PERIOD in inv
+def test_ads_metadata_period_is_invalid_nunca_avalia_null_para_metadata_ausente():
+    """Regressão-chave (revisão de 2026-07-06): em lógica de três valores do
+    SQL, `NULL OR NULL` é `NULL`, não `TRUE` — sem termos `IS NULL`
+    explícitos, um `source_metadata` ausente (coluna NULL) ou um objeto sem
+    a chave 'period_start'/'period_end' passaria batido pelo `count(*)
+    FILTER`, reintroduzindo o fallback silencioso que esta revisão proíbe.
+    Cada cenário abaixo deve produzir uma condição que contenha um teste
+    `IS NULL` determinístico (nunca dependente só de regex/aritmética que
+    também pode ser NULL)."""
+    inv = semantics.ads_metadata_period_is_invalid("f.source_metadata")
+    assert "f.source_metadata IS NULL" in inv
+    assert "->> 'period_start') IS NULL" in inv
+    assert "->> 'period_end') IS NULL" in inv
+    assert "jsonb_typeof(f.source_metadata) <> 'object'" in inv
+
+
+def test_ads_metadata_period_is_invalid_nunca_referencia_funcao_que_lanca_erro():
+    forbidden = ("make_date(", "make_timestamp(", "to_date(", "to_timestamp(", "::date", "::jsonb")
+    inv = semantics.ads_metadata_period_is_invalid("f.source_metadata")
+    for token in forbidden:
+        assert token not in inv, f"is_invalid chama algo que pode lançar erro: {token}"
