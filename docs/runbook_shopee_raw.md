@@ -210,6 +210,35 @@ Revisão de segurança pré-commit identificou 5 lacunas na correção da seçã
 
 **Confirmado nesta revisão**: os formatos reais já auditados (11.2/11.3) continuam produzindo exatamente os mesmos valores — a suíte de testes que cobre amostras reais (`test_amostras_anonimizadas_de_orders_reais`, `test_amostras_anonimizadas_de_ads_reais`, e os testes de agregação com valores reais em `test_shopee_parser.py`/`test_shopee_parser_ads.py`) passa sem alteração de valores esperados. A auditoria completa dos 384.882 registros **não foi re-executada** nesta revisão (não solicitada, e os testes acima já garantem que os valores reais não mudaram) — o impacto histórico medido na seção 11.3 continua válido e é **zero**.
 
+## 12. Gate 2B — metadata dos relatórios Ads (`source_metadata`) e `buyer_cpf` na Staging (2026-07-06/07)
+
+**Status atual: código e testes versionados, zero aplicação real.** `source_metadata` **ainda NÃO existe** em `raw.shopee_ingestion_file` no Data Mart — a migration (`db/sql/raw/shopee_raw_add_source_metadata.sql`) é um DRAFT, nunca executada. O backfill histórico (`pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py`) e a staging tipada (`db/sql/staging/shopee_staging_*.sql`) também são DRAFTs — nada disso foi aplicado em nenhum banco.
+
+### 12.1 O que isso adiciona
+
+- **`source_metadata jsonb`** em `raw.shopee_ingestion_file`: guarda o período REAL do relatório de ads (extraído do preâmbulo do CSV pelo parser `pipelines/ingestion/shopee_raw/ads_metadata.py`, nunca do nome do arquivo) — `period_start`, `period_end`, `report_created_at` (naive, timezone do Seller Center desconhecido), `shop_id`. NULL para `orders`/`shop_stats`.
+- **`buyer_cpf`** em `silver.stg_shopee_order_item_snapshots` (staging draft): CPF do comprador (só template `apice`), preservado como texto puro (zeros à esquerda e máscara mantidos, sem cast/normalização/validação de dígitos). Marcado **PII DIRETA** em `mapping.py`/DDL/comentários — é a **única** exceção aprovada ao catálogo de PII da Raw (`pipelines/ingestion/shopee_raw/pii.py`), por decisão de negócio explícita. **`buyer_cpf` NÃO é propagado para Gold/API/frontend automaticamente** — fica só na staging até uma decisão explícita futura — e nunca deve ser logado/impresso em preview, erros ou testes (nenhum teste deste repositório lê/imprime um valor real de CPF).
+
+### 12.2 Ordem operacional obrigatória (nenhum passo pode ser pulado ou invertido)
+
+1. Commit/revisão do código (mapping/writer/backfill/testes) — feito nesta rodada.
+2. Aplicar **SOMENTE** a migration `shopee_raw_add_source_metadata.sql` — não o DDL base (já atualizado neste repositório só para ambientes novos futuros) e não a staging.
+3. Validar a coluna e a constraint (`information_schema.columns` + `pg_constraint`) antes de prosseguir.
+4. Executar o backfill histórico dos 10 manifestos ads conhecidos (`apply_backfill_atomic`) — escopo EXATO (10 manifestos, 5 marcas oficiais, 2 arquivos cada); qualquer desvio aborta.
+5. Reconciliar 10/10 (embutido no próprio backfill) — reconferir manualmente antes de seguir.
+6. Executar o preview read-only completo (`pipelines/staging/shopee/preview.py`) contra 100% da Raw — **gate obrigatório**, sem exceção, antes do próximo passo.
+7. Só depois disso considerar aplicar o DDL/transform da staging (`db/sql/staging/*.sql`) — nunca antes.
+
+**Risco explícito entre os passos 1 e 2**: o `writer.py` já atualizado (committed no passo 1) tenta gravar `source_metadata` em toda ingestão de arquivo `ads`, mesmo antes da coluna existir. **Nenhuma nova ingestão Raw (`load_shopee_raw.py --apply --pilot`/`--backfill`) pode rodar entre a atualização do código e a aplicação da migration** — um arquivo `ads` processado nessa janela falharia por completo (coluna inexistente), sem dado parcial (política success-only já documentada na seção 6), mas também sem sucesso.
+
+### 12.3 Restauração do backfill exige backup + SHA-256
+
+`apply_backfill_atomic` exige `audit_path` obrigatório (sem valor padrão) e publica o backup de forma atômica (`os.link`, nunca sobrescreve um arquivo existente) ANTES de qualquer `UPDATE`. `restore_from_backup_atomic` (nunca executado, só testado contra conexão falsa) trata esse arquivo como entrada não confiável: exige `expected_backup_sha256` calculado e comparado ANTES de abrir qualquer cursor, valida a estrutura completa do JSON (exatamente 10 registros, marcas oficiais, metadata com formato/calendário válidos), revalida cada registro sob lock contra o estado atual, e só reverte com `UPDATE` de compare-and-swap incluindo o `source_metadata` atual no `WHERE`.
+
+### 12.4 Artefatos (todos draft, nenhum aplicado)
+
+`db/sql/raw/shopee_raw_add_source_metadata.sql`, `db/sql/raw/shopee_raw_ddl.sql` (DDL base já atualizado para ambientes novos), `pipelines/ingestion/shopee_raw/ads_metadata.py`, `pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py`, `pipelines/ingestion/shopee_raw/writer.py` (extração de `source_metadata` na mesma transação do arquivo ads), `db/sql/staging/shopee_staging_ddl.sql`/`shopee_staging_transform.sql`, `pipelines/staging/shopee/*`. Contrato completo em `docs/staging_shopee_contract.md`.
+
 ### 11.7 Plano de remediação de dados históricos — **não autorizado, não executado**
 
 Como a quantificação (seção 11.3) encontrou **zero linhas divergentes**, não há dado histórico a corrigir hoje. Este plano fica registrado apenas como procedimento a seguir **se** uma auditoria futura (com novos exports) encontrar divergência real — por exemplo, um arquivo que passe a falhar com `ShopeeNumericParseError` (formato US, valor não finito, ou outro valor não interpretável) e precise ser corrigido na fonte ou ter seu suporte formalmente estendido:

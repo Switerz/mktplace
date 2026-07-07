@@ -168,13 +168,31 @@ casos, 0 falhas) após as revisões seguintes, incluindo a defesa em
 profundidade (a expressão de VALOR realmente estoura para as entradas
 inválidas testadas, nunca aceita silenciosamente).
 
-## 5. PII — minimização por desenho
+## 5. PII — minimização por desenho (com UMA exceção aprovada: `buyer_cpf`)
 
 Classificação completa por coluna em `mapping.py` (`pii_class`). A staging
-analítica **não carrega**: nome do destinatário, telefone, CPF, endereço,
-CEP, bairro, observação do comprador, "Nota" (texto livre) e o username do
+analítica **não carrega**: nome do destinatário, telefone, endereço, CEP,
+bairro, observação do comprador, "Nota" (texto livre) e o username do
 comprador — tudo isso permanece só na Raw (acesso via roles internas já
 aceito). Localização mantida: cidade + UF + país (baixa granularidade).
+
+**Exceção aprovada — `buyer_cpf` (revisão de 2026-07-06, 3ª rodada).**
+Decisão de negócio explícita: o CPF do comprador (`raw_payload ->> 'CPF do
+Comprador'`, só template apice — 21.914 linhas com a chave, 4 células não
+vazias, 2 com 11 dígitos e 2 só com máscara de asteriscos, conforme
+inventário já auditado) passa a ser carregado em
+`silver.stg_shopee_order_item_snapshots.buyer_cpf text NULL`, marcado
+`PII_DIRETA` em `mapping.py`/DDL/comentários. Regras: preservado como
+TEXTO puro (sem cast numérico, zeros à esquerda e máscara mantidos
+exatamente como vieram), string vazia vira `NULL`, sem normalização nem
+validação de dígitos nesta fase, **sem índice** nesta coluna. Esta é a
+**ÚNICA** exceção — todo outro header `PII_DIRETA` do catálogo da Raw
+continua excluído (`pii.py::ORDERS_PII_CATALOG`). `buyer_cpf` NÃO é
+propagado para Gold/API/frontend automaticamente e nunca deve ser
+logado/impresso em preview, mensagens de erro ou testes — os testes
+estruturais (`test_shopee_staging_contract.py`) confirmam que a EXTRAÇÃO
+de valor (`raw_payload ->> 'CPF do Comprador'`) existe no SQL gerado sem
+nunca ler/imprimir um valor real de CPF em nenhum teste.
 
 **Revisão 2026-07-06 — `buyer_key` removida.** A versão original reservava
 uma coluna `buyer_key char(64)` para um futuro HMAC de comprador único,
@@ -200,9 +218,9 @@ o DDL agora inclui:
   evidência).
 - `silver.stg_shopee_shop_stats`: `period_start <= period_end` quando
   ambos preenchidos (além do CHECK de `row_type` já existente).
-- `silver.stg_shopee_ads`: `report_period_start`/`report_period_end` ambos
-  nulos ou ambos preenchidos, com `start <= end`; `ended_at IS NULL OR
-  ended_at >= started_at`.
+- `silver.stg_shopee_ads`: `report_period_start`/`report_period_end` são
+  **NOT NULL** (revisão de 2026-07-06 — ver seção 8) com `start <= end`;
+  `ended_at IS NULL OR ended_at >= started_at`.
 
 Essas constraints são um backstop declarativo — a defesa primária continua
 sendo a contagem fail-fast do passo 4 da seção 3, que aborta antes de
@@ -210,11 +228,13 @@ qualquer INSERT tentar violar um CHECK.
 
 ## 7. Mapping (resumo — completo em `mapping.py`)
 
-- **orders**: 71 chaves reais no `raw_payload` → colunas tipadas + 9
-  exclusões de PII/texto livre (username do comprador passou a ser
-  excluído explicitamente nesta revisão, já que `buyer_key` foi removida).
-  Inclui os 2 templates (apice tem `Tipo de pedido`, `Returned quantity`,
-  `Desconto de Frete Aproximado`, `CPF do Comprador`; não tem `Domestic
+- **orders**: 71 chaves reais no `raw_payload` → colunas tipadas + 8
+  exclusões de PII/texto livre (username do comprador continua excluído
+  explicitamente, já que `buyer_key` foi removida; `CPF do Comprador`
+  DEIXOU de ser exclusão nesta revisão — ver seção 5 — e passou a ser
+  mapeado para `buyer_cpf`, PII_DIRETA). Inclui os 2 templates (apice tem
+  `Tipo de pedido`, `Returned quantity`, `Desconto de Frete Aproximado`,
+  `CPF do Comprador`; não tem `Domestic
   Delivered Date`/`Pedido FBS`/`Shopee Owned`/`Data da Finalização do
   Cancelamento`). Headers duplicados desambiguados por posição:
   `Cidade__col58/59` (a 1ª "Cidade" é 100% vazia) e `Desconto do
@@ -230,21 +250,65 @@ qualquer INSERT tentar violar um CHECK.
 Formatos comprovados por inventário sanitizado sobre 100% da Raw (contagens
 por classe de formato, jsonb_typeof, comprimentos — sem valores de PII).
 
-## 8. Gap conhecido: período do relatório de ads
+## 8. Período do relatório de ads — resolvido via `source_metadata` (2026-07-06)
 
-As linhas de metadados do CSV de ads (que contêm "Período") **não foram
-persistidas na Raw** (o loader começa no header). O período em
-`report_period_start/end` é extraído do **nome do arquivo**
-(`...-01_01_2026-31_03_2026.csv`) — funciona para 8 dos 10 arquivos (582 de
-804 linhas). Os 2 CSVs da kokeshi (`Dados+Gerais-01-01-19-03.csv`, sem ano)
-ficam com período NULL. Opções futuras: (a) renomear os arquivos da kokeshi
-no padrão; (b) evoluir a Raw para persistir as linhas de metadados do CSV.
-**Nenhuma aplicação real da staging deve ocorrer antes de decidir esse
-ponto** (backfill/renomeação) se a Gold precisar do período completo.
+**Histórico do gap** (Fase Staging Shopee 1): as linhas de metadados do CSV
+de ads (que contêm "Período") não eram persistidas na Raw — o loader
+começava no header. O período era aproximado pelo **nome do arquivo**
+(`...-01_01_2026-31_03_2026.csv`), o que funcionava para 8 dos 10 arquivos;
+os 2 CSVs da kokeshi (`Dados+Gerais-01-01-19-03.csv`, sem ano) ficavam com
+período NULL — um fallback silencioso e frágil.
+
+**Design atual** (Fase Staging Shopee 2A, Gate 2B — draft, não aplicado):
+`raw.shopee_ingestion_file.source_metadata jsonb` guarda o período REAL,
+extraído do **preâmbulo** do CSV (as ~6 linhas antes do header `#,...`) por
+`pipelines/ingestion/shopee_raw/ads_metadata.py` — nunca do nome do
+arquivo. Confirmado por inspeção read-only: os 10 CSVs locais têm preâmbulo
+estruturado idêntico, e os 2 da kokeshi TÊM o período completo no preâmbulo
+(`01/01/2026 - 19/03/2026` e `20/03/2026 - 20/06/2026`) apesar do nome sem
+ano.
+
+Chaves gravadas (minimizadas — sem `shop_username`/`shop_display_name`,
+sem necessidade concreta identificada):
+`period_start`, `period_end`, `report_created_at` (naive — timezone do
+Seller Center desconhecido, nunca assumir UTC), `shop_id`.
+
+**Sem fallback silencioso**: `report_period_start`/`report_period_end` na
+staging são **NOT NULL** — um manifesto `ads` sem `source_metadata` válido
+(ausente, não é um objeto jsonb, período ausente/malformado, início > fim)
+REPROVA a linha inteira na pré-validação (`validations.
+ads_metadata_period_is_invalid`), abortando a transformação antes de
+qualquer INSERT. Isso é uma mudança deliberada em relação ao design
+anterior (que gravava NULL silenciosamente para os arquivos fora do
+padrão).
+
+Artefatos desta fase (drafts, nada aplicado em nenhum banco):
+- `db/sql/raw/shopee_raw_add_source_metadata.sql` — migration para o
+  ambiente já carregado (`ALTER TABLE ... ADD COLUMN` + `CHECK
+  jsonb_typeof(...) = 'object'`);
+- `db/sql/raw/shopee_raw_ddl.sql` — DDL base atualizado para que ambientes
+  NOVOS já nasçam com a coluna;
+- `pipelines/ingestion/shopee_raw/writer.py` — extrai e valida o preâmbulo
+  DURANTE a ingestão de novos arquivos ads, na MESMA transação do arquivo
+  (falha antes de qualquer INSERT se o preâmbulo for inválido); orders/
+  shop_stats continuam com `source_metadata` sempre NULL;
+  `pipelines/ingestion/shopee_raw/backfill_ads_metadata_draft.py` — backfill
+  ATÔMICO (tudo-ou-nada na Fase A de planejamento; transação única com
+  backup auditável, revalidação sob `LOCK TABLE` e reconciliação 100% na
+  Fase B) para os manifestos ads já existentes — nenhuma execução real
+  nesta fase.
+
+**Nenhuma aplicação real da staging deve ocorrer antes do Gate 2B**
+(migration + backfill de `source_metadata`) — sem isso, TODAS as linhas de
+`raw.shopee_ads_export` seriam rejeitadas na pré-validação (nenhum
+manifesto ads tem `source_metadata` preenchida hoje).
 
 ## 9. Reconciliação preview (read-only, 2026-07-06, 100% da Raw)
 
-Executada com `DATAMART_DATABASE_URL` (read replica) em sessão
+**Snapshot histórico** (Fase Staging Shopee 1, ANTES da revisão de
+Gate 2B/source_metadata desta seção 8 — período de ads ainda vinha do NOME
+do arquivo, nunca rejeitava linha, só gravava NULL para os 2 arquivos da
+kokeshi). Executada com `DATAMART_DATABASE_URL` (read replica) em sessão
 `postgresql_readonly=True`, reaproveitando `validations.build_merged_row_query`
 e `validations.build_scan_checks` (a mesma fonte da transformação) + o
 SELECT tipado completo sobre as 384.882 linhas:
@@ -256,7 +320,7 @@ SELECT tipado completo sobre as 384.882 linhas:
 | ads | 804 (10 arq.) | 804 | 0 | 0 | 0 | 0 |
 
 Todas as ~130 checagens individuais (obrigatoriedade, formato/domínio,
-não-negatividade, padrão de `order_id`, período do filename de ads,
+não-negatividade, padrão de `order_id`, período do NOME do arquivo de ads,
 integridade estrutural Raw/manifesto) retornaram contagem **zero**. Somas
 de sanidade idênticas às auditadas na fase Raw: `product_subtotal`
 R$ 24.859.859,62; ads `gmv` R$ 16.887.993,55; `quantity` 392.474. Durante a
@@ -265,6 +329,18 @@ execução, uma tentativa isolada esbarrou em
 — conflito transitório de replicação na read replica (já documentado no
 runbook da Raw), resolvido no retry seguinte; não é um problema do
 contrato ou das queries.
+
+**Estado atual (pós-revisão de Gate 2B, 2026-07-06 2ª rodada, ainda não
+aplicada em nenhum banco)**: a linha `ads` da tabela acima NÃO se repetiria
+hoje — como `raw.shopee_ingestion_file.source_metadata` ainda não existe/
+não foi preenchida em nenhum ambiente, uma nova execução do preview (depois
+da migration aplicada, mas antes do backfill) mostraria **804/804 linhas de
+ads rejeitadas** por `ads_metadata_period_is_invalid` (source_metadata
+NULL) — o comportamento CORRETO e esperado do novo design (rejeitar em vez
+de gravar NULL silenciosamente), não uma regressão. orders/shop_stats não
+são afetados (contrato inalterado para essas duas fontes) e devem
+continuar em 0 rejeitadas. A reconciliação preview só volta a ficar "limpa"
+para ads depois que o Gate 2B (migration + backfill) rodar de verdade.
 
 **Dois bugs reais foram encontrados e corrigidos durante esta reconciliação**
 (não apenas hipotéticos — reproduzidos contra a base real):
@@ -313,13 +389,46 @@ staging de marketplaces do warehouse). Justificativa:
    confirmar com a Shopee/Seller Center antes de usar em métrica.
 2. Unidade de "Compensar Moedas Shopee" (moedas vs centavos).
 3. Algoritmo/segredo/rotação de pseudonimização de comprador único (seção 5).
-4. Período dos ads da kokeshi (seção 8): renomear arquivos ou evoluir Raw.
+4. **Resolvido em 2026-07-06** (seção 8): período dos ads (incluindo
+   kokeshi) passa a vir de `source_metadata` (preâmbulo do CSV), não do
+   nome do arquivo — draft criado, aplicação pendente do Gate 2B.
 5. "Status do pedido" tem valores-frase ("O comprador pode pedir uma
    devolução até YYYY-MM-DD", 28 linhas) — definir bucket canônico na Gold.
-6. Raw de orders cobre até 2026-05-31; o Neon tem dados até ~2026-06-20
-   (carregados direto dos arquivos em jun/2026). Se existirem exports de
-   junho em `shopee/`, rodar o backfill da Raw antes da primeira carga real
-   da staging.
+6. **Corrigido em 2026-07-06** (a formulação anterior deste item era uma
+   inferência não comprovada — ver análise abaixo). Raw de orders/
+   shop-stats cobre até 2026-05-31; a tabela `marts.fact_marketplace_
+   daily_performance` do Neon tem linhas até ~2026-06-19/20, mas isso NÃO
+   é evidência de exports de orders/shop-stats de junho:
+
+   - **Comprovado** (consulta read-only a `marts.fact_marketplace_daily_
+     performance`, `WHERE marketplace_id = 3`, 2026-07-06): a maior data
+     com GMV/pedidos/unidades ≠ 0 (métricas derivadas de orders) é
+     **2026-05-31** para as 5 marcas — idêntico à cobertura da Raw. A
+     maior data com visitantes ≠ 0 (shop-stats) também é **2026-05-31**
+     para as 5 marcas. A maior data com métricas de Ads ≠ 0 (ad_spend/
+     ad_impressions/ad_clicks) é **2026-06-19** (4 marcas) / **2026-06-20**
+     (kokeshi) — e os VALORES de Ads são idênticos (constantes) em todos
+     os dias da amostra, inclusive dentro de maio, revelando que a
+     coluna não é uma métrica diária real: é o total do período do
+     relatório de Ads (que não tem granularidade diária — ver seção 8)
+     repetido em cada dia do "date spine" da tabela, até o fim do período
+     do relatório.
+   - **Comprovado**: o período do relatório de Ads recuperado do
+     preâmbulo dos 10 CSVs locais (seção 8) tem `period_end` = 2026-06-19
+     para apice/barbours/lescent/rituaria e 2026-06-20 para kokeshi —
+     exatamente as datas que aparecem como "máxima com Ads ≠ 0" no Neon.
+     Isso fecha a explicação: a cobertura "até meados de junho" do Neon é
+     100% explicada pelo período do relatório de Ads já carregado,
+     **não** por um export de orders/shop-stats de junho.
+   - **Desconhecido**: se um dia existiram arquivos de orders/shop-stats
+     de junho que hoje não estão mais em `shopee/`. Não há evidência A
+     FAVOR dessa hipótese (o Neon não mostra nenhum GMV/pedido/visitante
+     depois de 2026-05-31) nem CONTRA ela de forma conclusiva — é uma
+     pergunta em aberto para quem opera as pastas de export, não algo
+     decidível só com os dados disponíveis nesta auditoria.
+   - Ausência de junho na Raw não é um defeito de código corrigível: se
+     os arquivos de junho não existem em `shopee/`, é ausência real de
+     dado-fonte, não um bug de parsing/carga.
 7. Regra de seleção do snapshot vigente para `stg_shopee_order_item_snapshots`
    (seção 2) — a definir na Gold.
 
