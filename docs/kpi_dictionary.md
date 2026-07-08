@@ -121,6 +121,7 @@ Legenda de disponibilidade:
 - **Zero â‰  null**: dados ausentes ou nÃ£o disponÃ­veis devem ser exibidos como `null`/`indisponÃ­vel`, nunca como zero, para nÃ£o distorcer mÃ©dias e agregaÃ§Ãµes.
 - **Metas**: ainda nÃ£o estÃ£o no banco. SerÃ£o carregadas via loader do XLSX em sprint futura.
 - **Shopee**: integração via exports locais em andamento. Orders e shop-stats têm granularidade diária; ads CSV é distribuído como média diária do período.
+- **Compradores (`unique_buyers`/`customers`) — soma diária, não comprador único do intervalo**: `marts.fact_marketplace_daily_performance` guarda `unique_buyers` já deduplicado **dentro de cada dia**, mas os endpoints que agregam um intervalo (`/overview`, `/canais`, `/quality`) fazem `SUM(unique_buyers)` entre os dias do período. Um comprador que compra em 2 dias diferentes do mesmo mês é contado 2 vezes. O Neon não tem uma coluna de identidade do comprador para deduplicar de verdade entre dias (a Gold antiga do ML deduplicava mensalmente via `gold.ml_gestao_mensal`, mas essa lógica não foi portada). Consequência: `ml_unique_buyers`, `shopee_unique_buyers` e `tiktok_customers` (e as métricas derivadas por comprador, como `gmv_per_buyer`) são **estimativas por soma diária**, tendem a **sobrestimar** o comprador único real, e a UI precisa deixar isso explícito (rótulo "soma diária" nos KPIs e tabelas de Gerencial/Canais/Qualidade) em vez de apresentar como comprador único do período.
 
 ## Shopee — KPIs mapeados na fase atual
 
