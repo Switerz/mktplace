@@ -1,21 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   fetchQuality,
   type QualityKpis,
   type QualityBrandRow,
 } from "@/lib/api-client";
-import {
-  DEFAULT_MARKETPLACE_SELECTION,
-  isMarketplaceSelected,
-  type MarketplaceSelection,
-} from "@/lib/marketplace-filter";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
-import PeriodSelector from "@/components/PeriodSelector";
+import BrandFilter from "@/components/BrandFilter";
+import DateRangeFilter from "@/components/DateRangeFilter";
 import AppNav from "@/components/AppNav";
-import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
+import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 
@@ -48,31 +47,41 @@ function cancelBg(v: number | null): string {
   return "bg-rose-50";
 }
 
-export default function QualityPage() {
-  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
-  const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
+function QualityPageInner() {
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior", defaultCompare: true });
+  const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const [kpis, setKpis] = useState<QualityKpis | null>(null);
   const [brands, setBrands] = useState<QualityBrandRow[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
   useEffect(() => {
+    // Ignora a resposta se os filtros mudarem antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
-    fetchQuality(filter, period)
+    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
+    fetchQuality(filters.channels, undefined, opts)
       .then((result) => {
+        if (ignore) return;
         setKpis(result.kpis);
         setBrands(result.brands);
         setIsLive(result.live);
+        setRefreshedAt(result.meta.refreshedAt);
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados de qualidade. Verifique a conexão.");
         setLoading(false);
       });
-  }, [filter, period, retryKey]);
+    return () => { ignore = true; };
+  }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
+
+  const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
 
   const showTiktok = isMarketplaceSelected(filter, "tiktok");
   const showMl = isMarketplaceSelected(filter, "ml");
@@ -177,10 +186,34 @@ export default function QualityPage() {
       <AppNav />
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <MarketplaceFilter value={filter} onChange={setFilter} />
-          <PeriodSelector value={period} onChange={setPeriod} />
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div className="flex items-start gap-3 flex-wrap">
+            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+          </div>
+          <DateRangeFilter
+            dateFrom={filters.dateFrom}
+            dateTo={filters.dateTo}
+            compare={filters.compare}
+            onChange={(v) => setFilters(v)}
+            onCompareChange={(compare) => setFilters({ compare })}
+          />
         </div>
+
+        <p className="text-xs text-slate-400 -mt-3">
+          Período: {periodLabel}
+          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+        </p>
+
+        {(() => {
+          const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
+          const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
+          return note && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
+              <p className="text-xs text-amber-800">{note}</p>
+            </div>
+          );
+        })()}
 
         {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -428,7 +461,7 @@ export default function QualityPage() {
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &lt;11%</span>
               <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 11–14%</span>
               <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;14%</span>
-              <span className="ml-auto text-[10px] text-slate-400">Compradores ML: soma diaria em validacao</span>
+              <span className="ml-auto text-[10px] text-slate-400">Compradores ML: soma diária por dia — não é comprador único do período (mesma pessoa pode ser contada em mais de um dia)</span>
             </div>
           </div>
         )}
@@ -486,5 +519,13 @@ export default function QualityPage() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function QualityPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+      <QualityPageInner />
+    </Suspense>
   );
 }

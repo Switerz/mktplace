@@ -1,7 +1,11 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
+import { FILTER_AWARE_PAGES, isFilterAwarePath, appendQuery } from "@/lib/filters/nav-links";
+
+const FILTER_QUERY_KEYS = ["channels", "brands", "date_from", "date_to", "compare"];
 
 interface NavPage {
   href: string;
@@ -49,8 +53,35 @@ const SECTIONS: NavSection[] = [
   },
 ];
 
+const NAV_FALLBACK = <nav className="bg-white border-b border-violet-100 h-[46px]" aria-label="Navegação principal" />;
+
 export default function AppNav() {
+  return (
+    <Suspense fallback={NAV_FALLBACK}>
+      <AppNavInner />
+    </Suspense>
+  );
+}
+
+function AppNavInner() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const preservedQuery = isFilterAwarePath(pathname)
+    ? (() => {
+        const qs = new URLSearchParams();
+        for (const key of FILTER_QUERY_KEYS) {
+          const v = searchParams.get(key);
+          if (v) qs.set(key, v);
+        }
+        return qs.toString();
+      })()
+    : "";
+
+  function hrefFor(pageHref: string): string {
+    if (!FILTER_AWARE_PAGES.has(pageHref)) return pageHref;
+    return appendQuery(pageHref, preservedQuery);
+  }
 
   return (
     <nav className="bg-white border-b border-violet-100" aria-label="Navegação principal">
@@ -91,7 +122,7 @@ export default function AppNav() {
                   return (
                     <Link
                       key={page.href}
-                      href={page.href}
+                      href={hrefFor(page.href)}
                       className={`flex items-center px-3 py-3 text-sm font-medium border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-inset ${
                         isActive
                           ? "border-violet-600 text-violet-700"

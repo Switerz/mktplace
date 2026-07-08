@@ -1,21 +1,21 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { generateDailyData, type DailyRow, AVAILABLE_MONTHS } from "@/lib/mock-daily";
 import { fetchBrandDetail, type BrandDetail } from "@/lib/api-client";
-import {
-  DEFAULT_MARKETPLACE_SELECTION,
-  isMarketplaceSelected,
-  serializeMarketplaceSelection,
-  type MarketplaceSelection,
-} from "@/lib/marketplace-filter";
+import { isMarketplaceSelected, serializeMarketplaceSelection } from "@/lib/marketplace-filter";
+import { useGlobalFilters } from "@/hooks/useGlobalFilters";
+import { previousEquivalentRange } from "@/lib/filters/presets";
+import { appendQuery } from "@/lib/filters/nav-links";
+import { fmtPeriodo } from "@/lib/filters/format";
 import { summarize } from "@/lib/brand-daily-summary";
 import DailyChart from "@/components/DailyChart";
 import ChannelMixChart from "@/components/ChannelMixChart";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
+import DateRangeFilter from "@/components/DateRangeFilter";
 import PeriodSelector from "@/components/PeriodSelector";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber, calcMoM } from "@/lib/formatters";
@@ -80,13 +80,21 @@ function SectionTitle({ children }: { children: ReactNode }) {
   );
 }
 
-export default function BrandPage() {
+function BrandPageInner() {
   const { brand } = useParams<{ brand: string }>();
   const meta = BRAND_META[brand];
 
-  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior", defaultCompare: true });
+  const filter = filters.channels; // alias — preserva as referencias existentes abaixo
+  const searchParams = useSearchParams();
+  // Preserva canal/marca/periodo ao voltar ao Gerencial ou trocar de marca
+  // pelos pills — "/brand/[brand]" e uma rota compativel com o contrato de
+  // filtros globais, tratada aqui pela querystring atual (nunca hardcoded).
+  const currentQuery = searchParams.toString();
+  const withQuery = (href: string) => appendQuery(href, currentQuery);
   const [period, setPeriod] = useState<string>(AVAILABLE_MONTHS[0].value);
   const [daily, setDaily] = useState<DailyRow[]>([]);
+  const [prevDaily, setPrevDaily] = useState<DailyRow[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [brandDetail, setBrandDetail] = useState<BrandDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
@@ -98,30 +106,61 @@ export default function BrandPage() {
   }, []);
 
   useEffect(() => {
-    async function load() {
+    // Ignora a resposta se marca/canal/periodo mudarem antes dela chegar.
+    let ignore = false;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+    const marketplace = serializeMarketplaceSelection(filter);
+
+    async function fetchDailyRange(dateFrom: string, dateTo: string): Promise<DailyRow[] | null> {
       try {
         const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080"}/api/v1/performance/daily?brand=${brand}&marketplace=${serializeMarketplaceSelection(filter)}&days_back=60`
+          `${apiUrl}/api/v1/performance/daily?brand=${brand}&marketplace=${marketplace}&date_from=${dateFrom}&date_to=${dateTo}`
         );
-        if (res.ok) {
-          const json = await res.json();
-          setDaily(json.data);
-          setIsLive(true);
-          return;
-        }
+        if (res.ok) return (await res.json()).data;
       } catch {/* api offline */}
-      setDaily(generateDailyData(brand, 60));
-      setIsLive(false);
+      return null;
+    }
+
+    async function load() {
+      const cur = await fetchDailyRange(filters.dateFrom, filters.dateTo);
+      if (ignore) return;
+      if (cur) {
+        setDaily(cur);
+        setIsLive(true);
+      } else {
+        const days = Math.max(1, Math.round(
+          (new Date(`${filters.dateTo}T00:00:00`).getTime() - new Date(`${filters.dateFrom}T00:00:00`).getTime()) / 86_400_000
+        ) + 1);
+        setDaily(generateDailyData(brand, days));
+        setIsLive(false);
+      }
+
+      if (filters.compare) {
+        const prevRange = previousEquivalentRange(filters.dateFrom, filters.dateTo);
+        const prev = await fetchDailyRange(prevRange.dateFrom, prevRange.dateTo);
+        if (ignore) return;
+        setPrevDaily(prev ?? []);
+      } else {
+        setPrevDaily([]);
+      }
     }
     load();
-  }, [brand, filter]);
+    return () => { ignore = true; };
+  }, [brand, filter, filters.dateFrom, filters.dateTo, filters.compare]);
 
   useEffect(() => {
+    // Deep-dive mensal TikTok tem competencia PROPRIA (mes calendario via
+    // PeriodSelector), independente do intervalo global acima — ver nota na
+    // secao "TikTok Shop — Analise Mensal" mais abaixo. Protegido contra
+    // resposta fora de ordem do mesmo jeito que o efeito diario.
+    let ignore = false;
     setDetailLoading(true);
     fetchBrandDetail(brand, period).then((d) => {
+      if (ignore) return;
       setBrandDetail(d);
       setDetailLoading(false);
     });
+    return () => { ignore = true; };
   }, [brand, period]);
 
   const funnelColumnTypes = {
@@ -150,11 +189,10 @@ export default function BrandPage() {
     );
   }
 
-  const last30 = daily.slice(-30);
-  const prev30 = daily.slice(-60, -30);
-  const cur = summarize(last30, filter);
-  const prev = summarize(prev30, filter);
-  const gmvMoM = prev.gmv > 0 ? calcMoM(cur.gmv, prev.gmv) : null;
+  const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
+  const cur = summarize(daily, filter);
+  const prev = summarize(prevDaily, filter);
+  const gmvMoM = filters.compare && prev.gmv > 0 ? calcMoM(cur.gmv, prev.gmv) : null;
 
   const showTk = isMarketplaceSelected(filter, "tiktok");
   const showMl = isMarketplaceSelected(filter, "ml");
@@ -185,7 +223,7 @@ export default function BrandPage() {
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Link
-              href="/"
+              href={withQuery("/")}
               className="text-slate-400 hover:text-violet-600 transition-colors text-sm font-medium flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
             >
               &larr; Dashboard
@@ -216,7 +254,7 @@ export default function BrandPage() {
           {BRAND_PILLS.map((b) => (
             <Link
               key={b.slug}
-              href={`/brand/${b.slug}`}
+              href={withQuery(`/brand/${b.slug}`)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
                 b.slug === brand
                   ? "bg-violet-600 text-white shadow-sm"
@@ -228,19 +266,28 @@ export default function BrandPage() {
           ))}
         </nav>
 
-        {/* Filtro de canal */}
-        <MarketplaceFilter value={filter} onChange={setFilter} />
+        {/* Filtro de canal e periodo */}
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <MarketplaceFilter value={filter} onChange={(channels) => setFilters({ channels })} />
+          <DateRangeFilter
+            dateFrom={filters.dateFrom}
+            dateTo={filters.dateTo}
+            compare={filters.compare}
+            onChange={(v) => setFilters(v)}
+            onCompareChange={(compare) => setFilters({ compare })}
+          />
+        </div>
 
-        {/* Tendencia — ultimos 30d */}
-        <section aria-label="Tendencia dos ultimos 30 dias">
-          <SectionTitle>Tendencia — Ultimos 30 dias</SectionTitle>
+        {/* Tendencia — periodo selecionado */}
+        <section aria-label={`Tendencia — ${periodLabel}`}>
+          <SectionTitle>Tendencia — {periodLabel}</SectionTitle>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <KpiCard label="GMV (30d)" value={fmtBrl(cur.gmv)} mom={gmvMoM} accent={meta.color} />
-            <KpiCard label="Pedidos (30d)" value={fmtNumber(cur.orders)} accent="bg-cyan-500" />
+            <KpiCard label="GMV" value={fmtBrl(cur.gmv)} mom={gmvMoM} accent={meta.color} />
+            <KpiCard label="Pedidos" value={fmtNumber(cur.orders)} accent="bg-cyan-500" />
             <KpiCard label="Ticket Medio" value={fmtBrl(cur.avgTicket)} accent="bg-amber-500" />
             {cur.adSpend != null && cur.adSpend > 0 ? (
               <KpiCard
-                label="Ad Spend (30d)"
+                label="Ad Spend"
                 value={fmtBrl(cur.adSpend)}
                 subvalue={`ROAS ~${(cur.gmv / cur.adSpend).toFixed(1)}x`}
                 accent="bg-emerald-500"
@@ -252,13 +299,20 @@ export default function BrandPage() {
           <DailyChart data={chartData} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
         </section>
 
-        {/* Deep-dive mensal — TikTok Shop */}
+        {/* Deep-dive mensal — TikTok Shop. Competencia PROPRIA (mes
+            calendario via PeriodSelector), independente do periodo global
+            selecionado acima — a fonte (gold.tiktok_brand_daily) so suporta
+            mes fechado, nao intervalos arbitrarios. Nao misturar com o
+            periodo da secao "Tendencia" acima. */}
         {showTikTokDetail && (
-          <section aria-label="Analise mensal TikTok Shop">
-            <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
-              <SectionTitle>TikTok Shop — Analise Mensal</SectionTitle>
+          <section aria-label="Analise mensal TikTok Shop — competencia mensal independente">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-1">
+              <SectionTitle>TikTok Shop — Análise Mensal</SectionTitle>
               <PeriodSelector value={period} onChange={setPeriod} />
             </div>
+            <p className="text-[11px] text-slate-400 mb-3">
+              Competência mensal independente — não usa o período selecionado acima (canal/marca são compartilhados, mas a fonte só suporta mês calendário fechado).
+            </p>
 
             {detailLoading && (
               <div className="h-32 flex items-center justify-center text-slate-400 text-sm">
@@ -675,5 +729,13 @@ export default function BrandPage() {
 
       </main>
     </div>
+  );
+}
+
+export default function BrandPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+      <BrandPageInner />
+    </Suspense>
   );
 }

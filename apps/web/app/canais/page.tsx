@@ -1,23 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   fetchCanais,
   type CanaisKpis,
   type CanaisBrandRow,
 } from "@/lib/api-client";
-import {
-  DEFAULT_MARKETPLACE_SELECTION,
-  isMarketplaceSelected,
-  type MarketplaceSelection,
-} from "@/lib/marketplace-filter";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import KpiCard from "@/components/KpiCard";
 import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
-import PeriodSelector from "@/components/PeriodSelector";
+import BrandFilter from "@/components/BrandFilter";
+import DateRangeFilter from "@/components/DateRangeFilter";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
-import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
+import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 
@@ -81,31 +80,39 @@ function newBuyerPctStyle(v: number | null): string {
   return "text-rose-700 bg-rose-50 font-semibold";
 }
 
-export default function CanaisPage() {
-  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
-  const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
+function CanaisPageInner() {
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
+  const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const [kpis, setKpis] = useState<CanaisKpis | null>(null);
   const [brands, setBrands] = useState<CanaisBrandRow[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
   useEffect(() => {
+    // Ignora a resposta se os filtros mudarem antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
-    fetchCanais(filter, period)
+    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
+    fetchCanais(filters.channels, undefined, opts)
       .then((r) => {
+        if (ignore) return;
         setKpis(r.kpis);
         setBrands(r.brands);
         setIsLive(r.live);
+        setRefreshedAt(r.meta.refreshedAt);
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados de canais.");
         setLoading(false);
       });
-  }, [filter, period, retryKey]);
+    return () => { ignore = true; };
+  }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
 
   const showTiktok = isMarketplaceSelected(filter, "tiktok");
   const showMl = isMarketplaceSelected(filter, "ml");
@@ -151,7 +158,8 @@ export default function CanaisPage() {
   // Shopee: só renderiza seção completa quando há dados reais
   const hasShopeeData = loading || shBrands.length > 0;
 
-  const periodLabel = AVAILABLE_MONTHS.find((m) => m.value === period)?.label ?? period;
+  const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
+  const isEmpty = !loading && !error && brands.length === 0;
 
   const tkColumnTypes = useMemo(() => ({
     brand: "text" as const, gmv: "numeric" as const, video_pct: "numeric" as const,
@@ -247,10 +255,35 @@ export default function CanaisPage() {
       <AppNav />
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <MarketplaceFilter value={filter} onChange={setFilter} />
-          <PeriodSelector value={period} onChange={setPeriod} />
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div className="flex items-start gap-3 flex-wrap">
+            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+          </div>
+          <DateRangeFilter
+            dateFrom={filters.dateFrom}
+            dateTo={filters.dateTo}
+            compare={filters.compare}
+            onChange={(v) => setFilters(v)}
+            onCompareChange={(compare) => setFilters({ compare })}
+            hideCompare
+          />
         </div>
+
+        <p className="text-xs text-slate-400 -mt-3">
+          Período: {periodLabel}
+          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+        </p>
+
+        {(() => {
+          const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
+          const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
+          return note && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
+              <p className="text-xs text-amber-800">{note}</p>
+            </div>
+          );
+        })()}
 
         {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -270,6 +303,13 @@ export default function CanaisPage() {
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {loading ? "Carregando dados de canais..." : error ? "Falha ao carregar." : "Dados de canais carregados."}
         </span>
+
+        {isEmpty && (
+          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
+            <p className="text-slate-500 text-sm font-medium">Sem dados no período e filtros selecionados.</p>
+            <p className="text-slate-400 text-xs mt-1">Tente ampliar o intervalo de datas ou revisar canal/marca.</p>
+          </div>
+        )}
 
         {/* ── KPI TikTok ── */}
         {showTiktok && (
@@ -305,7 +345,7 @@ export default function CanaisPage() {
                   <KpiCard
                     label="Conversao TikTok"
                     value={fmtPct(kpis?.tiktok_conversion_rate ?? null)}
-                    subvalue={kpis?.tiktok_customers != null ? `${fmtNumber(kpis.tiktok_customers)} compradores` : undefined}
+                    subvalue={kpis?.tiktok_customers != null ? `${fmtNumber(kpis.tiktok_customers)} compradores (soma diária)` : undefined}
                     accent="bg-violet-300"
                   />
                 </>
@@ -342,7 +382,7 @@ export default function CanaisPage() {
                   <KpiCard
                     label="GMV por Comprador ML"
                     value={kpis?.ml_gmv_per_buyer != null ? fmtBrl(kpis.ml_gmv_per_buyer) : "—"}
-                    subvalue={kpis?.ml_unique_buyers != null ? `${fmtNumber(kpis.ml_unique_buyers)} compradores` : undefined}
+                    subvalue={kpis?.ml_unique_buyers != null ? `${fmtNumber(kpis.ml_unique_buyers)} compradores (soma diária)` : undefined}
                     accent="bg-amber-500"
                   />
                 </>
@@ -379,7 +419,7 @@ export default function CanaisPage() {
                   <KpiCard
                     label="GMV / Comprador Shopee"
                     value={kpis?.shopee_gmv_per_buyer != null ? fmtBrl(kpis.shopee_gmv_per_buyer) : "—"}
-                    subvalue={kpis?.shopee_unique_buyers != null ? `${fmtNumber(kpis.shopee_unique_buyers)} compradores` : undefined}
+                    subvalue={kpis?.shopee_unique_buyers != null ? `${fmtNumber(kpis.shopee_unique_buyers)} compradores (soma diária)` : undefined}
                     accent="bg-amber-500"
                   />
                   <KpiCard
@@ -619,7 +659,7 @@ export default function CanaisPage() {
                 </div>
               </div>
               <p className="ml-auto text-[11px] text-slate-400 self-end">
-                Recompra = compradores com historico previo na marca no ML · compradores mensais em validacao
+                Recompra = compradores com historico previo na marca no ML · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
               </p>
             </div>
           </div>
@@ -744,7 +784,7 @@ export default function CanaisPage() {
                 </div>
               </div>
               <p className="ml-auto text-[11px] text-slate-400 self-end">
-                Recompra = compradores com historico previo na marca na Shopee · compradores mensais em validacao
+                Recompra = compradores com historico previo na marca na Shopee · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
               </p>
             </div>
           </div>
@@ -778,5 +818,13 @@ export default function CanaisPage() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function CanaisPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+      <CanaisPageInner />
+    </Suspense>
   );
 }

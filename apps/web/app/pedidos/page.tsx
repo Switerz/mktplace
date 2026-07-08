@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend,
@@ -10,17 +10,17 @@ import {
   type PedidosData,
   type PedidosBrandRow,
 } from "@/lib/api-client";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import KpiCard from "@/components/KpiCard";
+import MarketplaceFilter from "@/components/MarketplaceFilter";
+import BrandFilter from "@/components/BrandFilter";
+import DateRangeFilter from "@/components/DateRangeFilter";
 import AppNav from "@/components/AppNav";
 import { fmtBrl } from "@/lib/formatters";
+import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
-
-const DAYS_OPTIONS = [
-  { value: 7, label: "7 dias" },
-  { value: 14, label: "14 dias" },
-  { value: 30, label: "30 dias" },
-];
 
 function fmtNum(v: number | null): string {
   if (v == null) return "—";
@@ -174,8 +174,8 @@ function BrandTable({ rows }: { rows: PedidosBrandRow[] }) {
   );
 }
 
-export default function PedidosPage() {
-  const [daysBack, setDaysBack] = useState(30);
+function PedidosPageInner() {
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "30d" });
   const [data, setData] = useState<PedidosData | null>(null);
   const [loading, setLoading] = useState(true);
   const [isLive, setIsLive] = useState(false);
@@ -183,10 +183,14 @@ export default function PedidosPage() {
   const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
+    // Ignora a resposta se os filtros mudarem antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
-    fetchPedidos(daysBack)
+    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo };
+    fetchPedidos(filters.channels, opts)
       .then((result) => {
+        if (ignore) return;
         if (result) {
           setData(result);
           setIsLive(true);
@@ -197,16 +201,21 @@ export default function PedidosPage() {
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados de pedidos. Verifique a conexão.");
         setLoading(false);
       });
-  }, [daysBack, retryKey]);
+    return () => { ignore = true; };
+  }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, retryKey]);
 
   const kpis = data?.kpis;
   const tk = data?.tiktok;
   const ml = data?.ml;
   const daily = data?.daily ?? [];
   const brands = data?.by_brand ?? [];
+  const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
+  const showShopeeOnly = isMarketplaceSelected(filters.channels, "shopee")
+    && !isMarketplaceSelected(filters.channels, "tiktok") && !isMarketplaceSelected(filters.channels, "ml");
 
   const chartData = daily.map((r) => ({
     date: shortDate(r.date),
@@ -245,31 +254,38 @@ export default function PedidosPage() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
         {/* Controls */}
-        <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-800 leading-none">Pedidos</h2>
             <p className="text-xs text-slate-500 mt-0.5">TikTok Shop + Mercado Livre</p>
           </div>
-          <div className="flex items-center gap-2">
-            {loading && <span className="text-xs text-violet-400 animate-pulse">Atualizando...</span>}
-            <span className="text-xs text-slate-500 font-medium shrink-0">Janela</span>
-            <div className="flex gap-1 bg-white border border-violet-100 rounded-xl p-1 shadow-sm">
-              {DAYS_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => setDaysBack(opt.value)}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
-                    daysBack === opt.value
-                      ? "bg-violet-600 text-white shadow"
-                      : "text-violet-700 hover:bg-violet-50"
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+          <div className="flex items-start gap-3 flex-wrap">
+            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+            {loading && <span className="text-xs text-violet-400 animate-pulse self-center">Atualizando...</span>}
+            <DateRangeFilter
+              dateFrom={filters.dateFrom}
+              dateTo={filters.dateTo}
+              compare={filters.compare}
+              onChange={(v) => setFilters(v)}
+              onCompareChange={(compare) => setFilters({ compare })}
+              hideCompare
+            />
           </div>
         </div>
+
+        <p className="text-xs text-slate-400 -mt-3">
+          Período: {periodLabel}
+          {data?.refreshed_at && <> · Atualizado em {fmtRefreshedAt(data.refreshed_at)}</>}
+        </p>
+
+        {showShopeeOnly && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+            <p className="text-sm text-amber-800">
+              Pedidos ainda não cobre Shopee nesta fonte — selecione TikTok Shop e/ou Mercado Livre.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -295,7 +311,7 @@ export default function PedidosPage() {
           <KpiCard
             label="Total de pedidos"
             value={kpis ? fmtNum(kpis.total_orders) : "—"}
-            subvalue={`últimos ${daysBack} dias`}
+            subvalue={periodLabel}
             accent="bg-violet-600"
           />
           <KpiCard
@@ -353,17 +369,17 @@ export default function PedidosPage() {
         {chartData.length > 0 && (
           <div className="bg-white rounded-2xl shadow-sm border border-violet-100 p-5">
             <h2 className="text-sm font-semibold text-slate-700 mb-4">
-              Volume diário de pedidos — últimos {daysBack} dias
+              Volume diário de pedidos — {periodLabel}
             </h2>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={chartData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }} barSize={daysBack > 14 ? 8 : 14}>
+              <BarChart data={chartData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }} barSize={chartData.length > 14 ? 8 : 14}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
                 <XAxis
                   dataKey="date"
                   tick={{ fontSize: 11, fill: "#64748b" }}
                   tickLine={false}
                   axisLine={false}
-                  interval={daysBack > 14 ? 4 : 1}
+                  interval={chartData.length > 14 ? 4 : 1}
                 />
                 <YAxis
                   tick={{ fontSize: 11, fill: "#64748b" }}
@@ -403,5 +419,13 @@ export default function PedidosPage() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function PedidosPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+      <PedidosPageInner />
+    </Suspense>
   );
 }

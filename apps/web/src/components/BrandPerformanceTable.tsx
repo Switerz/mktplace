@@ -2,10 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import type { BrandRow } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
 import { isMarketplaceSelected, type MarketplaceSelection } from "@/lib/marketplace-filter";
 import { getGoals } from "@/lib/goals-data";
+import { appendQuery } from "@/lib/filters/nav-links";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
@@ -92,6 +94,12 @@ function channelGmv(row: BrandRow, mp: Marketplace): number | null {
 export default function BrandPerformanceTable({ brands, filter, period, loading = false, periodLabel }: Props) {
   const goals = getGoals(period);
   const [mounted, setMounted] = useState(false);
+  const searchParams = useSearchParams();
+  // Preserva os filtros globais (canal/marca/periodo) ao abrir o drill-down
+  // de uma marca — sem isso, clicar numa linha da tabela perdia o contexto
+  // de filtro que o usuario acabou de aplicar.
+  const query = searchParams.toString();
+  const brandHref = (brand: string) => appendQuery(`/brand/${brand}`, query);
 
   useEffect(() => {
     const raf = requestAnimationFrame(() => setMounted(true));
@@ -267,7 +275,7 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
                       {BRAND_INITIALS[b.brand] ?? b.brand.substring(0, 2).toUpperCase()}
                     </span>
                     <Link
-                      href={`/brand/${b.brand}`}
+                      href={brandHref(b.brand)}
                       className="font-semibold text-gray-800 text-xs hover:text-violet-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 rounded"
                     >
                       {b.label}

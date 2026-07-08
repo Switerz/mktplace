@@ -1,22 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   fetchFinanceiro,
   type FinanceiroKpis,
   type FinanceiroBrandRow,
 } from "@/lib/api-client";
-import {
-  DEFAULT_MARKETPLACE_SELECTION,
-  isMarketplaceSelected,
-  type MarketplaceSelection,
-} from "@/lib/marketplace-filter";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
-import PeriodSelector from "@/components/PeriodSelector";
+import BrandFilter from "@/components/BrandFilter";
+import DateRangeFilter from "@/components/DateRangeFilter";
 import AppNav from "@/components/AppNav";
 import { fmtBrl } from "@/lib/formatters";
-import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
+import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 
@@ -78,31 +77,41 @@ function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | nul
   );
 }
 
-export default function FinanceiroPage() {
-  const [filter, setFilter] = useState<MarketplaceSelection>(DEFAULT_MARKETPLACE_SELECTION);
-  const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
+function FinanceiroPageInner() {
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
+  const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const [kpis, setKpis] = useState<FinanceiroKpis | null>(null);
   const [brands, setBrands] = useState<FinanceiroBrandRow[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
   useEffect(() => {
+    // Ignora a resposta se os filtros mudarem antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
-    fetchFinanceiro(filter, period)
+    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
+    fetchFinanceiro(filters.channels, undefined, opts)
       .then((result) => {
+        if (ignore) return;
         setKpis(result.kpis);
         setBrands(result.brands);
         setIsLive(result.live);
+        setRefreshedAt(result.meta.refreshedAt);
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados financeiros.");
         setLoading(false);
       });
-  }, [filter, period, retryKey]);
+    return () => { ignore = true; };
+  }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
+
+  const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
 
   const showTiktok = isMarketplaceSelected(filter, "tiktok");
   const showMl = isMarketplaceSelected(filter, "ml");
@@ -201,10 +210,35 @@ export default function FinanceiroPage() {
       <AppNav />
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <MarketplaceFilter value={filter} onChange={setFilter} />
-          <PeriodSelector value={period} onChange={setPeriod} />
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div className="flex items-start gap-3 flex-wrap">
+            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+          </div>
+          <DateRangeFilter
+            dateFrom={filters.dateFrom}
+            dateTo={filters.dateTo}
+            compare={filters.compare}
+            onChange={(v) => setFilters(v)}
+            onCompareChange={(compare) => setFilters({ compare })}
+            hideCompare
+          />
         </div>
+
+        <p className="text-xs text-slate-400 -mt-3">
+          Período: {periodLabel}
+          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+        </p>
+
+        {(() => {
+          const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
+          const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
+          return note && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
+              <p className="text-xs text-amber-800">{note}</p>
+            </div>
+          );
+        })()}
 
         {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -498,5 +532,13 @@ export default function FinanceiroPage() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function FinanceiroPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+      <FinanceiroPageInner />
+    </Suspense>
   );
 }

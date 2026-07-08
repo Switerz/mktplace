@@ -106,6 +106,60 @@ async function apiFetch<T>(path: string): Promise<T | null> {
   }
 }
 
+// ---------- filtros globais (canal, marca, periodo, comparacao) ----------
+
+export interface GlobalFilterParams {
+  brands?: string[];
+  dateFrom?: string;
+  dateTo?: string;
+  compare?: boolean;
+}
+
+export interface ResponseMeta {
+  dateFrom: string | null;
+  dateTo: string | null;
+  compareDateFrom: string | null;
+  compareDateTo: string | null;
+  refreshedAt: string | null;
+}
+
+const EMPTY_META: ResponseMeta = {
+  dateFrom: null, dateTo: null, compareDateFrom: null, compareDateTo: null, refreshedAt: null,
+};
+
+function metaFromResponse(raw: {
+  date_from?: string | null; date_to?: string | null;
+  compare_date_from?: string | null; compare_date_to?: string | null;
+  refreshed_at?: string | null;
+}): ResponseMeta {
+  return {
+    dateFrom: raw.date_from ?? null,
+    dateTo: raw.date_to ?? null,
+    compareDateFrom: raw.compare_date_from ?? null,
+    compareDateTo: raw.compare_date_to ?? null,
+    refreshedAt: raw.refreshed_at ?? null,
+  };
+}
+
+/** Monta a querystring do contrato novo (channels/brands/date_from/date_to/
+ * compare). Usa `ref_month` como fallback legado apenas quando nenhuma data
+ * personalizada foi passada — nunca mistura os dois. */
+function buildFilterQuery(marketplace: string, period: string | undefined, filters?: GlobalFilterParams): URLSearchParams {
+  const qs = new URLSearchParams();
+  qs.set("channels", marketplace);
+  if (filters?.brands && filters.brands.length > 0) {
+    qs.set("brands", [...filters.brands].sort().join(","));
+  }
+  if (filters?.dateFrom && filters?.dateTo) {
+    qs.set("date_from", filters.dateFrom);
+    qs.set("date_to", filters.dateTo);
+  } else {
+    qs.set("ref_month", period ?? refMonth());
+  }
+  if (filters?.compare) qs.set("compare", "true");
+  return qs;
+}
+
 function refMonth(): string {
   const d = new Date();
   // mês anterior como referência padrão (igual ao service)
@@ -205,7 +259,8 @@ function monthlyFromMock(): MonthPoint[] {
 export function fetchOverview(
   selection: MarketplaceSelection,
   period?: string,
-): Promise<{ data: OverviewData; live: boolean }> {
+  filters?: GlobalFilterParams,
+): Promise<{ data: OverviewData; live: boolean; meta: ResponseMeta }> {
   interface ApiResp {
     current: {
       gmv: number;
@@ -224,16 +279,20 @@ export function fetchOverview(
     };
     previous: { gmv: number };
     gmv_mom_pct: number | null;
+    date_from?: string | null;
+    date_to?: string | null;
+    compare_date_from?: string | null;
+    compare_date_to?: string | null;
+    refreshed_at?: string | null;
   }
-  const month = period ?? refMonth();
   const marketplace = serializeMarketplaceSelection(selection);
-  return withCache(`overview:${marketplace}:${month}`, async () => {
-    const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/overview?marketplace=${marketplace}&ref_month=${month}`
-    );
+  const qs = buildFilterQuery(marketplace, period, filters);
+  return withCache(`overview:${qs.toString()}`, async () => {
+    const raw = await apiFetch<ApiResp>(`/api/v1/performance/overview?${qs.toString()}`);
     if (raw) {
       return {
         live: true,
+        meta: metaFromResponse(raw),
         data: {
           gmv: raw.current.gmv,
           tiktok_gmv: raw.current.tiktok_gmv ?? null,
@@ -253,23 +312,29 @@ export function fetchOverview(
         },
       };
     }
-    return { live: false, data: overviewFromMock(selection) };
+    return { live: false, meta: EMPTY_META, data: overviewFromMock(selection) };
   });
 }
 
 export function fetchBrands(
   selection: MarketplaceSelection,
   period?: string,
-): Promise<{ data: BrandRow[]; live: boolean }> {
-  interface ApiResp { brands: BrandRow[] }
-  const month = period ?? refMonth();
+  filters?: GlobalFilterParams,
+): Promise<{ data: BrandRow[]; live: boolean; meta: ResponseMeta }> {
+  interface ApiResp {
+    brands: BrandRow[];
+    date_from?: string | null; date_to?: string | null;
+    compare_date_from?: string | null; compare_date_to?: string | null;
+    refreshed_at?: string | null;
+  }
   const marketplace = serializeMarketplaceSelection(selection);
-  return withCache(`brands:${marketplace}:${month}`, async () => {
+  const qs = buildFilterQuery(marketplace, period, filters);
+  return withCache(`brands:${qs.toString()}`, async () => {
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/brands?marketplace=${marketplace}&ref_month=${month}`
+      `/api/v1/performance/brands?${qs.toString()}`
     );
-    if (raw) return { live: true, data: raw.brands };
-    return { live: false, data: brandsFromMock(selection) };
+    if (raw) return { live: true, meta: metaFromResponse(raw), data: raw.brands };
+    return { live: false, meta: EMPTY_META, data: brandsFromMock(selection) };
   });
 }
 
@@ -282,6 +347,33 @@ export function fetchMonthly(
     const raw = await apiFetch<ApiResp>(`/api/v1/performance/monthly?months_back=6&marketplace=${marketplace}`);
     if (raw) return { live: true, data: raw.data };
     return { live: false, data: monthlyFromMock() };
+  });
+}
+
+// ---------- Tendencia (respeita canal, marca e periodo — usado no Gerencial) ----------
+
+export interface TrendPoint {
+  date: string;
+  label: string;
+  gmv: number;
+  orders: number;
+}
+
+export function fetchTrend(
+  selection: MarketplaceSelection,
+  filters?: GlobalFilterParams,
+): Promise<{ granularity: "day" | "month"; data: TrendPoint[]; live: boolean; meta: ResponseMeta }> {
+  interface ApiResp {
+    granularity: "day" | "month"; data: TrendPoint[];
+    date_from?: string | null; date_to?: string | null;
+    refreshed_at?: string | null;
+  }
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildFilterQuery(marketplace, undefined, filters);
+  return withCache(`trend:${qs.toString()}`, async () => {
+    const raw = await apiFetch<ApiResp>(`/api/v1/performance/trend?${qs.toString()}`);
+    if (raw) return { live: true, meta: metaFromResponse(raw), granularity: raw.granularity, data: raw.data };
+    return { live: false, meta: EMPTY_META, granularity: "day", data: [] };
   });
 }
 
@@ -625,13 +717,19 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
 export function fetchCanais(
   selection: MarketplaceSelection,
   period?: string,
-): Promise<{ kpis: CanaisKpis; brands: CanaisBrandRow[]; live: boolean }> {
-  const month = period ?? refMonth();
+  filters?: GlobalFilterParams,
+): Promise<{ kpis: CanaisKpis; brands: CanaisBrandRow[]; live: boolean; meta: ResponseMeta }> {
   const marketplace = serializeMarketplaceSelection(selection);
-  return withCache(`canais:${marketplace}:${month}`, async () => {
-    interface ApiResp { kpis: CanaisKpis; brands: CanaisBrandRow[] }
+  const qs = buildFilterQuery(marketplace, period, filters);
+  return withCache(`canais:${qs.toString()}`, async () => {
+    interface ApiResp {
+      kpis: CanaisKpis; brands: CanaisBrandRow[];
+      date_from?: string | null; date_to?: string | null;
+      compare_date_from?: string | null; compare_date_to?: string | null;
+      refreshed_at?: string | null;
+    }
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/canais?marketplace=${marketplace}&ref_month=${month}`
+      `/api/v1/performance/canais?${qs.toString()}`
     );
   if (raw) {
     const brands: CanaisBrandRow[] = raw.brands.map((b) => ({
@@ -641,7 +739,7 @@ export function fetchCanais(
           ? parseFloat(((b.ml_new_buyers / b.ml_unique_buyers) * 100).toFixed(1))
           : null,
     }));
-    return { live: true, kpis: raw.kpis, brands };
+    return { live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands };
   }
 
   const brands = CANAIS_MOCK_BRANDS;
@@ -697,7 +795,7 @@ export function fetchCanais(
     shopee_gmv_per_buyer: (showSh && shBuyers > 0) ? parseFloat((shGmv / shBuyers).toFixed(2)) : null,
   };
 
-    return { live: false, kpis, brands };
+    return { live: false, meta: EMPTY_META, kpis, brands };
   });
 }
 
@@ -767,15 +865,21 @@ const FINANCEIRO_MOCK_BRANDS: FinanceiroBrandRow[] = [
 export function fetchFinanceiro(
   selection: MarketplaceSelection,
   period?: string,
-): Promise<{ kpis: FinanceiroKpis; brands: FinanceiroBrandRow[]; live: boolean }> {
-  interface ApiResp { kpis: FinanceiroKpis; brands: FinanceiroBrandRow[] }
-  const month = period ?? refMonth();
+  filters?: GlobalFilterParams,
+): Promise<{ kpis: FinanceiroKpis; brands: FinanceiroBrandRow[]; live: boolean; meta: ResponseMeta }> {
+  interface ApiResp {
+    kpis: FinanceiroKpis; brands: FinanceiroBrandRow[];
+    date_from?: string | null; date_to?: string | null;
+    compare_date_from?: string | null; compare_date_to?: string | null;
+    refreshed_at?: string | null;
+  }
   const marketplace = serializeMarketplaceSelection(selection);
-  return withCache(`financeiro:${marketplace}:${month}`, async () => {
+  const qs = buildFilterQuery(marketplace, period, filters);
+  return withCache(`financeiro:${qs.toString()}`, async () => {
   const raw = await apiFetch<ApiResp>(
-    `/api/v1/performance/financeiro?marketplace=${marketplace}&ref_month=${month}`
+    `/api/v1/performance/financeiro?${qs.toString()}`
   );
-  if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
+  if (raw) return { live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands: raw.brands };
 
   const showTk = isMarketplaceSelected(selection, "tiktok");
   const showMl = isMarketplaceSelected(selection, "ml");
@@ -806,7 +910,7 @@ export function fetchFinanceiro(
     ml_total_cost_pct: showMl ? parseFloat(((allMlSpend + allMlShipping) / allMlGmv * 100).toFixed(2)) : null,
   };
 
-  return { live: false, kpis, brands };
+  return { live: false, meta: EMPTY_META, kpis, brands };
   });
 }
 
@@ -861,15 +965,21 @@ const QUALITY_MOCK_BRANDS: QualityBrandRow[] = [
 export function fetchQuality(
   selection: MarketplaceSelection,
   period?: string,
-): Promise<{ kpis: QualityKpis; brands: QualityBrandRow[]; live: boolean }> {
-  interface ApiResp { kpis: QualityKpis; brands: QualityBrandRow[] }
-  const month = period ?? refMonth();
+  filters?: GlobalFilterParams,
+): Promise<{ kpis: QualityKpis; brands: QualityBrandRow[]; live: boolean; meta: ResponseMeta }> {
+  interface ApiResp {
+    kpis: QualityKpis; brands: QualityBrandRow[];
+    date_from?: string | null; date_to?: string | null;
+    compare_date_from?: string | null; compare_date_to?: string | null;
+    refreshed_at?: string | null;
+  }
   const marketplace = serializeMarketplaceSelection(selection);
-  return withCache(`quality:${marketplace}:${month}`, async () => {
+  const qs = buildFilterQuery(marketplace, period, filters);
+  return withCache(`quality:${qs.toString()}`, async () => {
     const raw = await apiFetch<ApiResp>(
-      `/api/v1/performance/quality?marketplace=${marketplace}&ref_month=${month}`
+      `/api/v1/performance/quality?${qs.toString()}`
     );
-    if (raw) return { live: true, kpis: raw.kpis, brands: raw.brands };
+    if (raw) return { live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands: raw.brands };
 
     const showTk = isMarketplaceSelected(selection, "tiktok");
     const showMl = isMarketplaceSelected(selection, "ml");
@@ -884,7 +994,7 @@ export function fetchQuality(
       ml_avg_delivery_days: showMl ? 3.7 : null,
     };
 
-    return { live: false, kpis, brands };
+    return { live: false, meta: EMPTY_META, kpis, brands };
   });
 }
 
@@ -1078,11 +1188,28 @@ export interface PedidosData {
   ml: PedidosCanalKpis;
   daily: PedidosDailyRow[];
   by_brand: PedidosBrandRow[];
+  date_from?: string | null;
+  date_to?: string | null;
+  refreshed_at?: string | null;
 }
 
-export function fetchPedidos(daysBack = 30): Promise<PedidosData | null> {
-  return withCache(`pedidos:${daysBack}`, () =>
-    apiFetch<PedidosData>(`/api/v1/performance/pedidos?days_back=${daysBack}`)
+export function fetchPedidos(
+  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+  filters?: GlobalFilterParams,
+  daysBack = 30,
+): Promise<PedidosData | null> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = new URLSearchParams();
+  qs.set("channels", marketplace);
+  if (filters?.brands && filters.brands.length > 0) qs.set("brands", [...filters.brands].sort().join(","));
+  if (filters?.dateFrom && filters?.dateTo) {
+    qs.set("date_from", filters.dateFrom);
+    qs.set("date_to", filters.dateTo);
+  } else {
+    qs.set("days_back", String(daysBack));
+  }
+  return withCache(`pedidos:${qs.toString()}`, () =>
+    apiFetch<PedidosData>(`/api/v1/performance/pedidos?${qs.toString()}`)
   );
 }
 
