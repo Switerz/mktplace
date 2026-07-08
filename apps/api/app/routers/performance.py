@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.deps.filters import ResolvedFilters, filters_query, filters_query_default_days
+from app.deps.period import EffectivePeriod, resolve_period, today_brt
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
     ProdutosMLSummaryResponse, ProdutosTikTokResponse, ProdutosTikTokSummaryResponse,
     ProdutosShopeeResponse, ProdutosShopeeSummaryResponse,
-    QualityResponse, TempoRealResponse,
+    QualityResponse, TempoRealResponse, TrendResponse,
 )
 from app.services import gold_service as svc
 from app.services import performance_service as perf_svc
@@ -29,6 +31,17 @@ def marketplace_query(marketplace: str = Query("all", description=MARKETPLACE_QU
         return perf_svc.normalize_marketplace_param(marketplace)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+def _year_month_for_service(period: EffectivePeriod) -> tuple[int, int]:
+    """Deriva (year, month) para as assinaturas legadas dos services a partir
+    do periodo resolvido. So e usado de fato quando period.ref_month existe
+    (branch de compatibilidade calendario); para intervalos personalizados
+    o valor e ignorado internamente pelo service."""
+    if period.ref_month:
+        y, m = period.ref_month.split("-")
+        return int(y), int(m)
+    return period.start.year, period.start.month
 
 
 def _validate_sort_by(sort_by: Optional[str], allowlist: dict[str, str]) -> None:
@@ -73,22 +86,26 @@ def _parse_month(ref_month: Optional[str]) -> tuple[int, int]:
 
 @router.get("/overview", response_model=OverviewResponse)
 def overview(
-    marketplace: str = Depends(marketplace_query),
-    ref_month: Optional[str] = Query(None),
+    filters: ResolvedFilters = Depends(filters_query),
     db: Session = Depends(get_db),
 ):
-    year, month = _parse_month(ref_month)
-    return perf_svc.get_overview(_require_db(db), marketplace, year, month)
+    year, month = _year_month_for_service(filters.period)
+    return perf_svc.get_overview(
+        _require_db(db), filters.channels, year, month,
+        brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
+    )
 
 
 @router.get("/brands", response_model=BrandsResponse)
 def brands(
-    marketplace: str = Depends(marketplace_query),
-    ref_month: Optional[str] = Query(None),
+    filters: ResolvedFilters = Depends(filters_query),
     db: Session = Depends(get_db),
 ):
-    year, month = _parse_month(ref_month)
-    return perf_svc.get_brands(_require_db(db), marketplace, year, month)
+    year, month = _year_month_for_service(filters.period)
+    return perf_svc.get_brands(
+        _require_db(db), filters.channels, year, month,
+        brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
+    )
 
 
 @router.get("/monthly", response_model=MonthlyResponse)
@@ -100,16 +117,33 @@ def monthly(
     return perf_svc.get_monthly(_require_db(db), marketplace, months_back)
 
 
+@router.get("/trend", response_model=TrendResponse)
+def trend(
+    filters: ResolvedFilters = Depends(filters_query),
+    db: Session = Depends(get_db),
+):
+    """Serie de GMV/pedidos no grao adequado ao intervalo filtrado — respeita
+    channels/brands/date_from/date_to. A soma de `data[].gmv` sempre bate com
+    o GMV de /overview para o mesmo escopo (mesma WHERE clause)."""
+    return perf_svc.get_trend(_require_db(db), filters.channels, filters.brands, filters.period)
+
+
 @router.get("/daily", response_model=DailyResponse)
 def daily(
     brand: str = Query(...),
     marketplace: str = Depends(marketplace_query),
     days_back: int = Query(60, ge=7, le=365),
+    date_from: Optional[date] = Query(None, description="Alternativa a days_back: inicio do intervalo (inclusive)."),
+    date_to: Optional[date] = Query(None, description="Alternativa a days_back: fim do intervalo (inclusive)."),
     db: Session = Depends(get_db),
 ):
     if brand not in VALID_TK_BRANDS:
         raise HTTPException(404, f"Brand '{brand}' nao encontrado.")
-    return perf_svc.get_daily(_require_db(db), brand, marketplace, days_back)
+    period = (
+        resolve_period(date_from=date_from, date_to=date_to, default_days=days_back, today=today_brt())
+        if (date_from or date_to) else None
+    )
+    return perf_svc.get_daily(_require_db(db), brand, marketplace, days_back, period=period)
 
 
 @router.get("/produtos/ml/summary", response_model=ProdutosMLSummaryResponse)
@@ -243,32 +277,38 @@ def produtos_shopee_summary(
 
 @router.get("/canais", response_model=CanaisResponse)
 def canais(
-    marketplace: str = Depends(marketplace_query),
-    ref_month: Optional[str] = Query(None),
+    filters: ResolvedFilters = Depends(filters_query),
     db: Session = Depends(get_db),
 ):
-    year, month = _parse_month(ref_month)
-    return perf_svc.get_canais(_require_db(db), marketplace, year, month)
+    year, month = _year_month_for_service(filters.period)
+    return perf_svc.get_canais(
+        _require_db(db), filters.channels, year, month,
+        brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
+    )
 
 
 @router.get("/financeiro", response_model=FinanceiroResponse)
 def financeiro(
-    marketplace: str = Depends(marketplace_query),
-    ref_month: Optional[str] = Query(None),
+    filters: ResolvedFilters = Depends(filters_query),
     db: Session = Depends(get_db),
 ):
-    year, month = _parse_month(ref_month)
-    return perf_svc.get_financeiro(_require_db(db), marketplace, year, month)
+    year, month = _year_month_for_service(filters.period)
+    return perf_svc.get_financeiro(
+        _require_db(db), filters.channels, year, month,
+        brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
+    )
 
 
 @router.get("/quality", response_model=QualityResponse)
 def quality(
-    marketplace: str = Depends(marketplace_query),
-    ref_month: Optional[str] = Query(None),
+    filters: ResolvedFilters = Depends(filters_query),
     db: Session = Depends(get_db),
 ):
-    year, month = _parse_month(ref_month)
-    return perf_svc.get_quality(_require_db(db), marketplace, year, month)
+    year, month = _year_month_for_service(filters.period)
+    return perf_svc.get_quality(
+        _require_db(db), filters.channels, year, month,
+        brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
+    )
 
 
 @router.get("/tempo-real", response_model=TempoRealResponse)
@@ -280,20 +320,44 @@ def tempo_real(db: Session = Depends(get_db)):
 def brand_detail(
     brand: str = Query(...),
     ref_month: Optional[str] = Query(None),
+    channels: Optional[str] = Query(
+        None,
+        description=(
+            "A fonte (gold.tiktok_brand_daily) e TikTok-only. Se informado, "
+            "precisa incluir 'tiktok' (ou ser 'all') — canais que excluem "
+            "TikTok sao rejeitados com 422 em vez de retornar dados de "
+            "TikTok como se o filtro tivesse sido aplicado."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     if brand not in VALID_TK_BRANDS:
         raise HTTPException(404, f"Brand '{brand}' nao encontrada.")
+    if channels is not None:
+        try:
+            canonical = perf_svc.normalize_marketplace_param(channels)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        mkt_ids = perf_svc.parse_marketplace_param(canonical)
+        if perf_svc.TIKTOK_ID not in mkt_ids:
+            raise HTTPException(
+                422,
+                "brand-detail so tem dados de TikTok Shop (gold.tiktok_brand_daily); "
+                "'channels' precisa incluir 'tiktok' (ou ser omitido/'all').",
+            )
     year, month = _parse_month(ref_month)
     return svc.get_brand_detail(_require_db(db), brand, year, month)
 
 
 @router.get("/pedidos", response_model=PedidosResponse)
 def pedidos(
-    days_back: int = Query(30, ge=7, le=90),
+    filters: ResolvedFilters = Depends(filters_query_default_days(30)),
     db: Session = Depends(get_db),
 ):
-    return perf_svc.get_pedidos(_require_db(db), days_back)
+    return perf_svc.get_pedidos(
+        _require_db(db), filters.period.days,
+        marketplace=filters.channels, brand_keys=filters.brands, period=filters.period,
+    )
 
 
 @router.get("/health-datasource")

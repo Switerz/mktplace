@@ -12,6 +12,8 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.deps.period import EffectivePeriod
+
 TIKTOK_ID = 1
 ML_ID = 2
 SHOPEE_ID = 3
@@ -100,30 +102,70 @@ def _pct_from_source(value) -> float | None:
     return round(v * 100, 2) if abs(v) <= 1 else round(v, 2)
 
 
-def _mkt_kpis(db: Session, start: date, end: date, mkt_ids: list[int]) -> dict[int, dict]:
-    """KPIs agregados por marketplace_id para um intervalo de datas."""
-    sql = text("""
-        SELECT
-            marketplace_id,
-            COALESCE(SUM(gmv), 0)              AS gmv,
-            COALESCE(SUM(orders), 0)           AS orders,
-            COALESCE(SUM(canceled_orders), 0)  AS canceled_orders,
-            COALESCE(SUM(unique_buyers), 0)    AS unique_buyers,
-            COALESCE(SUM(ad_spend), 0)         AS ad_spend,
-            COALESCE(SUM(ad_revenue), 0)       AS ad_revenue
-        FROM marts.fact_marketplace_daily_performance
-        WHERE date BETWEEN :start AND :end
-          AND marketplace_id = ANY(:mkt_ids)
-        GROUP BY marketplace_id
+def _brand_filter_sql(brand_keys: list[str] | None, params: dict, alias: str = "l") -> str:
+    """Adiciona brand_keys aos params (quando presente) e devolve a clausula
+    SQL correspondente (string vazia quando nenhuma marca foi filtrada)."""
+    if not brand_keys:
+        return ""
+    params["brand_keys"] = brand_keys
+    return f" AND {alias}.brand_key = ANY(:brand_keys)"
+
+
+def _max_refreshed_at(
+    db: Session, start: date, end: date, mkt_ids: list[int], brand_keys: list[str] | None = None
+) -> str | None:
+    """MAX(ingested_at) do escopo filtrado — usado para expor frescor de dado
+    no payload dos endpoints que adotaram o contrato novo de filtros."""
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
+        SELECT MAX(f.ingested_at) AS refreshed_at
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
     """)
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
+    row = db.execute(sql, params).mappings().first()
+    ts = row["refreshed_at"] if row else None
+    return ts.isoformat() if ts else None
+
+
+def _mkt_kpis(
+    db: Session, start: date, end: date, mkt_ids: list[int], brand_keys: list[str] | None = None
+) -> dict[int, dict]:
+    """KPIs agregados por marketplace_id para um intervalo de datas, com
+    filtro opcional de marca(s)."""
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
+        SELECT
+            f.marketplace_id,
+            COALESCE(SUM(f.gmv), 0)              AS gmv,
+            COALESCE(SUM(f.orders), 0)           AS orders,
+            COALESCE(SUM(f.canceled_orders), 0)  AS canceled_orders,
+            COALESCE(SUM(f.unique_buyers), 0)    AS unique_buyers,
+            COALESCE(SUM(f.ad_spend), 0)         AS ad_spend,
+            COALESCE(SUM(f.ad_revenue), 0)       AS ad_revenue
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY f.marketplace_id
+    """)
+    rows = db.execute(sql, params).mappings().all()
     return {r["marketplace_id"]: dict(r) for r in rows}
 
 
 def _brand_mkt_rows(
-    db: Session, start: date, end: date, mkt_ids: list[int], extra_cols: str = ""
+    db: Session, start: date, end: date, mkt_ids: list[int], extra_cols: str = "",
+    brand_keys: list[str] | None = None,
 ) -> dict[str, dict[int, dict]]:
-    """KPIs por brand_key × marketplace_id para um intervalo de datas."""
+    """KPIs por brand_key × marketplace_id para um intervalo de datas, com
+    filtro opcional de marca(s)."""
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
     sql = text(f"""
         SELECT
             l.brand_key,
@@ -138,10 +180,11 @@ def _brand_mkt_rows(
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
           AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
+    rows = db.execute(sql, params).mappings().all()
     result: dict[str, dict[int, dict]] = {}
     for r in rows:
         brand = r["brand_key"]
@@ -155,11 +198,40 @@ def _brand_mkt_rows(
 # Overview
 # ---------------------------------------------------------------------------
 
-def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
+def get_overview(
+    db: Session, marketplace: str, year: int, month: int, *,
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    start, end = _month_bounds(year, month)
-    py, pm = _prev_month(year, month)
-    pstart, pend = _month_bounds(py, pm)
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        start, end = _month_bounds(year, month)
+
+    if compare_period is not None:
+        if period is not None and period.ref_month is not None:
+            # compare=true sobre um mes calendario completo (via ref_month ou
+            # via date_from/date_to que cobrem o mes inteiro) usa o mes
+            # calendario anterior de verdade, nao a janela de N dias corridos
+            # de compare_period — evita divergir do MoM ja auditado quando os
+            # meses tem contagens de dias diferentes (ex: maio=31, junho=30).
+            py, pm = _prev_month(year, month)
+            pstart, pend = _month_bounds(py, pm)
+        else:
+            pstart, pend = compare_period.start, compare_period.end
+    elif period is None:
+        # Legado: chamada direta sem ResolvedFilters (fora do fluxo do
+        # router — ex: testes/integracoes que nao passam period) sempre
+        # calculou o mes calendario anterior automaticamente.
+        py, pm = _prev_month(year, month)
+        pstart, pend = _month_bounds(py, pm)
+    else:
+        # period veio do filtro global mas compare nao foi pedido — a
+        # comparacao e opt-in via compare=true, nunca automatica (o toggle da
+        # UI controla exatamente isso: desligar comparacao faz o MoM sumir).
+        pstart, pend = None, None
 
     def _assemble(data: dict[int, dict]) -> dict:
         tk = data.get(TIKTOK_ID, {})
@@ -201,16 +273,29 @@ def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
             "shopee_unique_buyers": int(_f(sh.get("unique_buyers"))) or None,
         }
 
-    cur = _assemble(_mkt_kpis(db, start, end, mkt_ids))
-    prev = _assemble(_mkt_kpis(db, pstart, pend, mkt_ids))
-    mom = round((cur["gmv"] - prev["gmv"]) / prev["gmv"] * 100, 2) if prev["gmv"] > 0 else None
+    cur = _assemble(_mkt_kpis(db, start, end, mkt_ids, brand_keys))
+    if pstart is not None:
+        prev = _assemble(_mkt_kpis(db, pstart, pend, mkt_ids, brand_keys))
+        mom = round((cur["gmv"] - prev["gmv"]) / prev["gmv"] * 100, 2) if prev["gmv"] > 0 else None
+    else:
+        prev = _assemble({})
+        mom = None
+
+    ref_month_label = period.ref_month if period is not None else f"{year:04d}-{month:02d}"
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
 
     return {
-        "ref_month": f"{year:04d}-{month:02d}",
+        "ref_month": ref_month_label,
         "marketplace": marketplace,
         "current": cur,
         "previous": prev,
         "gmv_mom_pct": mom,
+        "date_from": start,
+        "date_to": end,
+        "compare_date_from": pstart,
+        "compare_date_to": pend,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
     }
 
 
@@ -218,15 +303,44 @@ def get_overview(db: Session, marketplace: str, year: int, month: int) -> dict:
 # Brands
 # ---------------------------------------------------------------------------
 
-def get_brands(db: Session, marketplace: str, year: int, month: int) -> dict:
+def get_brands(
+    db: Session, marketplace: str, year: int, month: int, *,
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    start, end = _month_bounds(year, month)
-    py, pm = _prev_month(year, month)
-    pstart, pend = _month_bounds(py, pm)
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        start, end = _month_bounds(year, month)
+
+    if compare_period is not None:
+        if period is not None and period.ref_month is not None:
+            # compare=true sobre um mes calendario completo (via ref_month ou
+            # via date_from/date_to que cobrem o mes inteiro) usa o mes
+            # calendario anterior de verdade, nao a janela de N dias corridos
+            # de compare_period — evita divergir do MoM ja auditado quando os
+            # meses tem contagens de dias diferentes (ex: maio=31, junho=30).
+            py, pm = _prev_month(year, month)
+            pstart, pend = _month_bounds(py, pm)
+        else:
+            pstart, pend = compare_period.start, compare_period.end
+    elif period is None:
+        # Legado: chamada direta sem ResolvedFilters (fora do fluxo do
+        # router — ex: testes/integracoes que nao passam period) sempre
+        # calculou o mes calendario anterior automaticamente.
+        py, pm = _prev_month(year, month)
+        pstart, pend = _month_bounds(py, pm)
+    else:
+        # period veio do filtro global mas compare nao foi pedido — a
+        # comparacao e opt-in via compare=true, nunca automatica (o toggle da
+        # UI controla exatamente isso: desligar comparacao faz o MoM sumir).
+        pstart, pend = None, None
 
     extra = "COALESCE(SUM(f.total_fees), 0) AS total_fees"
-    cur = _brand_mkt_rows(db, start, end, mkt_ids, extra)
-    prev = _brand_mkt_rows(db, pstart, pend, mkt_ids, extra)
+    cur = _brand_mkt_rows(db, start, end, mkt_ids, extra, brand_keys)
+    prev = _brand_mkt_rows(db, pstart, pend, mkt_ids, extra, brand_keys) if pstart is not None else {}
 
     result = []
     for brand in sorted(set(list(cur.keys()) + list(prev.keys()))):
@@ -285,7 +399,18 @@ def get_brands(db: Session, marketplace: str, year: int, month: int) -> dict:
         })
 
     result.sort(key=lambda r: -r["total_gmv"])
-    return {"ref_month": f"{year:04d}-{month:02d}", "brands": result}
+    ref_month_label = period.ref_month if period is not None else f"{year:04d}-{month:02d}"
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
+    return {
+        "ref_month": ref_month_label,
+        "brands": result,
+        "date_from": start,
+        "date_to": end,
+        "compare_date_from": pstart,
+        "compare_date_to": pend,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +459,78 @@ def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Trend — serie do intervalo filtrado (respeita canal, marca e periodo),
+# usada pelo grafico de tendencia do Gerencial. Usa a MESMA WHERE clause de
+# _mkt_kpis (agregado do overview), entao a soma da serie sempre reconcilia
+# com o KPI de GMV do mesmo escopo — nao ha como divergir silenciosamente.
+# ---------------------------------------------------------------------------
+
+def get_trend(
+    db: Session, marketplace: str, brand_keys: list[str] | None, period: EffectivePeriod,
+) -> dict:
+    mkt_ids = parse_marketplace_param(marketplace)
+    # Granularidade adequada ao tamanho do intervalo: diaria ate 92 dias
+    # (~3 meses, ainda legivel em um grafico), mensal acima disso (intervalos
+    # de ate 366 dias resultariam em ~366 barras diarias, ilegivel).
+    granularity = "day" if period.days <= 92 else "month"
+    trunc_expr = "f.date" if granularity == "day" else "DATE_TRUNC('month', f.date)::date"
+
+    params: dict = {"start": period.start, "end": period.end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
+        SELECT {trunc_expr} AS bucket,
+               COALESCE(SUM(f.gmv), 0)    AS gmv,
+               COALESCE(SUM(f.orders), 0) AS orders
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY {trunc_expr}
+        ORDER BY {trunc_expr}
+    """)
+    rows = db.execute(sql, params).mappings().all()
+
+    data = []
+    for r in rows:
+        bucket: date = r["bucket"]
+        label = (
+            f"{bucket.day:02d}/{bucket.month:02d}"
+            if granularity == "day"
+            else f"{MES_LABELS[bucket.month]}/{str(bucket.year)[2:]}"
+        )
+        data.append({
+            "date": bucket.isoformat(),
+            "label": label,
+            "gmv": round(_f(r["gmv"]), 2),
+            "orders": int(_f(r["orders"])),
+        })
+
+    refreshed_at = _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys)
+    return {
+        "granularity": granularity,
+        "data": data,
+        "date_from": period.start,
+        "date_to": period.end,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Daily
 # ---------------------------------------------------------------------------
 
-def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) -> dict:
+def get_daily(
+    db: Session, brand: str, marketplace: str, days_back: int = 60, *,
+    period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    date_from = date.today() - timedelta(days=days_back)
+    if period is not None:
+        date_from, date_to = period.start, period.end
+    else:
+        date_from = date.today() - timedelta(days=days_back)
+        date_to = date.today()
 
     sql = text("""
         SELECT
@@ -351,12 +542,14 @@ def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) ->
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE l.brand_key = :brand
-          AND f.date >= :date_from
+          AND f.date BETWEEN :date_from AND :date_to
           AND f.marketplace_id = ANY(:mkt_ids)
         ORDER BY f.date, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"brand": brand, "date_from": date_from, "mkt_ids": mkt_ids}).mappings().all()
+    rows = db.execute(
+        sql, {"brand": brand, "date_from": date_from, "date_to": date_to, "mkt_ids": mkt_ids}
+    ).mappings().all()
 
     days: dict[date, dict] = {}
     for r in rows:
@@ -406,11 +599,21 @@ def get_daily(db: Session, brand: str, marketplace: str, days_back: int = 60) ->
 # Canais
 # ---------------------------------------------------------------------------
 
-def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
+def get_canais(
+    db: Session, marketplace: str, year: int, month: int, *,
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    start, end = _month_bounds(year, month)
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        start, end = _month_bounds(year, month)
 
-    sql = text("""
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
         SELECT
             l.brand_key,
             f.marketplace_id,
@@ -429,11 +632,12 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
           AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
+    rows = db.execute(sql, params).mappings().all()
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
@@ -558,11 +762,21 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
         "shopee_conversion_rate": _pct(sh_buyers_t, sh_vis_t, 2),
     }
 
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
     return {
-        "ref_month": f"{year:04d}-{month:02d}",
+        "ref_month": period.ref_month if period is not None else f"{year:04d}-{month:02d}",
         "marketplace": marketplace,
         "kpis": kpis,
         "brands": brand_rows,
+        "date_from": start,
+        "date_to": end,
+        # Canais nao tem comparacao por metrica (nunca teve "previous" nesta
+        # tela) — quando compare=true, ecoamos so as datas do periodo
+        # equivalente anterior, sem inventar deltas que a fonte nao calcula.
+        "compare_date_from": compare_period.start if compare_period is not None else None,
+        "compare_date_to": compare_period.end if compare_period is not None else None,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
     }
 
 
@@ -570,11 +784,21 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
 # Financeiro
 # ---------------------------------------------------------------------------
 
-def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict:
+def get_financeiro(
+    db: Session, marketplace: str, year: int, month: int, *,
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    start, end = _month_bounds(year, month)
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        start, end = _month_bounds(year, month)
 
-    sql = text("""
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
         SELECT
             l.brand_key,
             f.marketplace_id,
@@ -590,11 +814,12 @@ def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
           AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
+    rows = db.execute(sql, params).mappings().all()
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
@@ -708,11 +933,21 @@ def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict
         "shopee_roas": round(sh_rev_t / sh_spend_t, 2) if sh_spend_t > 0 else None,
     }
 
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
     return {
-        "ref_month": f"{year:04d}-{month:02d}",
+        "ref_month": period.ref_month if period is not None else f"{year:04d}-{month:02d}",
         "marketplace": marketplace,
         "kpis": kpis,
         "brands": brand_rows,
+        "date_from": start,
+        "date_to": end,
+        # Financeiro nao calcula deltas por metrica (nunca teve "previous"
+        # nesta tela) — quando compare=true, ecoamos so as datas do periodo
+        # equivalente anterior, sem inventar comparacoes que a fonte nao tem.
+        "compare_date_from": compare_period.start if compare_period is not None else None,
+        "compare_date_to": compare_period.end if compare_period is not None else None,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
     }
 
 
@@ -720,13 +955,44 @@ def get_financeiro(db: Session, marketplace: str, year: int, month: int) -> dict
 # Quality
 # ---------------------------------------------------------------------------
 
-def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
+def get_quality(
+    db: Session, marketplace: str, year: int, month: int, *,
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    start, end = _month_bounds(year, month)
-    py, pm = _prev_month(year, month)
-    pstart, pend = _month_bounds(py, pm)
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        start, end = _month_bounds(year, month)
 
-    sql = text("""
+    if compare_period is not None:
+        if period is not None and period.ref_month is not None:
+            # compare=true sobre um mes calendario completo (via ref_month ou
+            # via date_from/date_to que cobrem o mes inteiro) usa o mes
+            # calendario anterior de verdade, nao a janela de N dias corridos
+            # de compare_period — evita divergir do MoM ja auditado quando os
+            # meses tem contagens de dias diferentes (ex: maio=31, junho=30).
+            py, pm = _prev_month(year, month)
+            pstart, pend = _month_bounds(py, pm)
+        else:
+            pstart, pend = compare_period.start, compare_period.end
+    elif period is None:
+        # Legado: chamada direta sem ResolvedFilters (fora do fluxo do
+        # router — ex: testes/integracoes que nao passam period) sempre
+        # calculou o mes calendario anterior automaticamente.
+        py, pm = _prev_month(year, month)
+        pstart, pend = _month_bounds(py, pm)
+    else:
+        # period veio do filtro global mas compare nao foi pedido — a
+        # comparacao e opt-in via compare=true, nunca automatica (o toggle da
+        # UI controla exatamente isso: desligar comparacao faz o MoM sumir).
+        pstart, pend = None, None
+
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
         SELECT
             l.brand_key,
             f.marketplace_id,
@@ -752,23 +1018,30 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
           AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
         GROUP BY l.brand_key, f.marketplace_id
         ORDER BY l.brand_key, f.marketplace_id
     """)
 
-    # GMV ML do mês anterior para gmv_mom_pct — sempre ML, independente da selecao de canais
-    sql_prev_ml = text("""
-        SELECT l.brand_key, COALESCE(SUM(f.gmv), 0) AS gmv
-        FROM marts.fact_marketplace_daily_performance f
-        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
-        WHERE f.date BETWEEN :start AND :end
-          AND f.marketplace_id = :mkt_id_ml
-        GROUP BY l.brand_key
-    """)
+    rows = db.execute(sql, params).mappings().all()
 
-    rows = db.execute(sql, {"start": start, "end": end, "mkt_ids": mkt_ids}).mappings().all()
-    prev_rows = db.execute(sql_prev_ml, {"start": pstart, "end": pend, "mkt_id_ml": ML_ID}).mappings().all()
-    prev_ml_gmv = {r["brand_key"]: _f(r["gmv"]) for r in prev_rows}
+    if pstart is not None:
+        # GMV ML do periodo anterior para gmv_mom_pct — sempre ML, independente da selecao de canais
+        prev_params: dict = {"start": pstart, "end": pend, "mkt_id_ml": ML_ID}
+        prev_brand_filter = _brand_filter_sql(brand_keys, prev_params)
+        sql_prev_ml = text(f"""
+            SELECT l.brand_key, COALESCE(SUM(f.gmv), 0) AS gmv
+            FROM marts.fact_marketplace_daily_performance f
+            JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+            WHERE f.date BETWEEN :start AND :end
+              AND f.marketplace_id = :mkt_id_ml
+              {prev_brand_filter}
+            GROUP BY l.brand_key
+        """)
+        prev_rows = db.execute(sql_prev_ml, prev_params).mappings().all()
+        prev_ml_gmv = {r["brand_key"]: _f(r["gmv"]) for r in prev_rows}
+    else:
+        prev_ml_gmv = {}
 
     by_brand: dict[str, dict[int, dict]] = {}
     for r in rows:
@@ -880,8 +1153,9 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
     kpi_sh_cancel = round(sh_canceled_all / (sh_orders_all + sh_canceled_all) * 100, 2) if (sh_orders_all + sh_canceled_all) > 0 else None
     kpi_sh_return = round(sh_returned_all / sh_orders_all * 100, 2) if sh_orders_all > 0 else None
 
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
     return {
-        "ref_month": f"{year:04d}-{month:02d}",
+        "ref_month": period.ref_month if period is not None else f"{year:04d}-{month:02d}",
         "marketplace": marketplace,
         "kpis": {
             "tiktok_problem_rate": kpi_tk_prob,
@@ -894,6 +1168,12 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
             "shopee_return_rate_pct": kpi_sh_return,
         },
         "brands": brand_rows,
+        "date_from": start,
+        "date_to": end,
+        "compare_date_from": pstart,
+        "compare_date_to": pend,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
     }
 
 
@@ -901,36 +1181,56 @@ def get_quality(db: Session, marketplace: str, year: int, month: int) -> dict:
 # Pedidos
 # ---------------------------------------------------------------------------
 
-def get_pedidos(db: Session, days_back: int = 30) -> dict:
-    end = date.today()
-    start = end - timedelta(days=days_back - 1)
+def get_pedidos(
+    db: Session, days_back: int = 30, *,
+    marketplace: str = "all",
+    brand_keys: list[str] | None = None,
+    period: EffectivePeriod | None = None,
+) -> dict:
+    if period is not None:
+        start, end = period.start, period.end
+    else:
+        end = date.today()
+        start = end - timedelta(days=days_back - 1)
 
-    sql_kpis = text("""
+    # Pedidos so cobre TikTok e ML na fonte atual (Shopee nao integrada nesta
+    # tela) — interseccao com o canal pedido, nunca ignora um filtro invalido
+    # silenciosamente: canal=shopee isolado retorna zero honesto, nao TK+ML.
+    mkt_ids = [i for i in parse_marketplace_param(marketplace) if i in (TIKTOK_ID, ML_ID)]
+
+    params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+
+    sql_kpis = text(f"""
         SELECT
-            marketplace_id,
-            COALESCE(SUM(orders), 0)           AS orders,
-            COALESCE(SUM(canceled_orders), 0)  AS canceled_orders,
-            COALESCE(SUM(delivered_orders), 0) AS delivered_orders,
-            COALESCE(SUM(gmv), 0)              AS gmv
-        FROM marts.fact_marketplace_daily_performance
-        WHERE date BETWEEN :start AND :end
-          AND marketplace_id IN (1, 2)
-        GROUP BY marketplace_id
+            f.marketplace_id,
+            COALESCE(SUM(f.orders), 0)           AS orders,
+            COALESCE(SUM(f.canceled_orders), 0)  AS canceled_orders,
+            COALESCE(SUM(f.delivered_orders), 0) AS delivered_orders,
+            COALESCE(SUM(f.gmv), 0)              AS gmv
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY f.marketplace_id
     """)
 
-    sql_daily = text("""
-        SELECT date, marketplace_id,
-               COALESCE(SUM(orders), 0)          AS orders,
-               COALESCE(SUM(canceled_orders), 0) AS canceled_orders,
-               COALESCE(SUM(gmv), 0)             AS gmv
-        FROM marts.fact_marketplace_daily_performance
-        WHERE date BETWEEN :start AND :end
-          AND marketplace_id IN (1, 2)
-        GROUP BY date, marketplace_id
-        ORDER BY date, marketplace_id
+    sql_daily = text(f"""
+        SELECT f.date, f.marketplace_id,
+               COALESCE(SUM(f.orders), 0)          AS orders,
+               COALESCE(SUM(f.canceled_orders), 0) AS canceled_orders,
+               COALESCE(SUM(f.gmv), 0)             AS gmv
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.date BETWEEN :start AND :end
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY f.date, f.marketplace_id
+        ORDER BY f.date, f.marketplace_id
     """)
 
-    sql_brand = text("""
+    sql_brand = text(f"""
         SELECT l.brand_key, f.marketplace_id,
                COALESCE(SUM(f.orders), 0)          AS orders,
                COALESCE(SUM(f.canceled_orders), 0) AS canceled_orders,
@@ -938,11 +1238,11 @@ def get_pedidos(db: Session, days_back: int = 30) -> dict:
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
-          AND f.marketplace_id IN (1, 2)
+          AND f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
         GROUP BY l.brand_key, f.marketplace_id
     """)
 
-    params = {"start": start, "end": end}
     kpis_by_mkt = {r["marketplace_id"]: dict(r) for r in db.execute(sql_kpis, params).mappings().all()}
     daily_raw = db.execute(sql_daily, params).mappings().all()
     brand_raw = db.execute(sql_brand, params).mappings().all()
@@ -1031,8 +1331,13 @@ def get_pedidos(db: Session, days_back: int = 30) -> dict:
             "total_gmv": round((tk_g or 0) + (ml_g or 0), 2),
         })
 
+    refreshed_at = _max_refreshed_at(db, start, end, mkt_ids, brand_keys) if period is not None else None
     return {
-        "days_back": days_back,
+        "days_back": (end - start).days + 1,
+        "date_from": start,
+        "date_to": end,
+        "filters": {"channels": marketplace, "brands": brand_keys},
+        "refreshed_at": refreshed_at,
         "kpis": {
             "total_orders": total_all,
             "total_gmv": round(total_gmv, 2),

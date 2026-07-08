@@ -5,6 +5,14 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+class FiltersEcho(BaseModel):
+    """Ecoa os filtros efetivamente aplicados — canal(is) e marca(s) — para
+    o cliente confirmar o que o backend realmente usou (ver
+    docs/filtros_globais_contrato.md)."""
+    channels: str
+    brands: Optional[list[str]] = None
+
+
 class KpiSummary(BaseModel):
     gmv: float
     tiktok_gmv: Optional[float] = None
@@ -22,11 +30,17 @@ class KpiSummary(BaseModel):
 
 
 class OverviewResponse(BaseModel):
-    ref_month: str          # "2026-05"
-    marketplace: str        # "all" | "tiktok" | "ml"
+    ref_month: Optional[str] = None   # "2026-05"; None quando date_from/date_to e um intervalo personalizado
+    marketplace: str                  # "all" | "tiktok" | "ml"
     current: KpiSummary
     previous: KpiSummary
     gmv_mom_pct: Optional[float] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    compare_date_from: Optional[date] = None
+    compare_date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class BrandPerformance(BaseModel):
@@ -50,8 +64,14 @@ class BrandPerformance(BaseModel):
 
 
 class BrandsResponse(BaseModel):
-    ref_month: str
+    ref_month: Optional[str] = None
     brands: list[BrandPerformance]
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    compare_date_from: Optional[date] = None
+    compare_date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class MonthlyBrandGmv(BaseModel):
@@ -66,6 +86,22 @@ class MonthlyBrandGmv(BaseModel):
 
 class MonthlyResponse(BaseModel):
     data: list[MonthlyBrandGmv]
+
+
+class TrendPoint(BaseModel):
+    date: str
+    label: str
+    gmv: float
+    orders: int
+
+
+class TrendResponse(BaseModel):
+    granularity: str  # "day" | "month"
+    data: list[TrendPoint]
+    date_from: date
+    date_to: date
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class DailyRow(BaseModel):
@@ -126,10 +162,16 @@ class QualityBrandRow(BaseModel):
 
 
 class QualityResponse(BaseModel):
-    ref_month: str
+    ref_month: Optional[str] = None
     marketplace: str
     kpis: QualityKpis
     brands: list[QualityBrandRow]
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    compare_date_from: Optional[date] = None
+    compare_date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class FinanceiroKpis(BaseModel):
@@ -187,10 +229,16 @@ class FinanceiroBrandRow(BaseModel):
 
 
 class FinanceiroResponse(BaseModel):
-    ref_month: str
+    ref_month: Optional[str] = None
     marketplace: str
     kpis: FinanceiroKpis
     brands: list[FinanceiroBrandRow]
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    compare_date_from: Optional[date] = None
+    compare_date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class CanaisKpis(BaseModel):
@@ -253,10 +301,16 @@ class CanaisBrandRow(BaseModel):
 
 
 class CanaisResponse(BaseModel):
-    ref_month: str
+    ref_month: Optional[str] = None
     marketplace: str
     kpis: CanaisKpis
     brands: list[CanaisBrandRow]
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    compare_date_from: Optional[date] = None
+    compare_date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 class ProdutoShopeeRow(BaseModel):
@@ -440,6 +494,10 @@ class PedidosResponse(BaseModel):
     ml: PedidosCanalKpis
     daily: list[PedidosDailyRow]
     by_brand: list[PedidosBrandRow]
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    filters: Optional[FiltersEcho] = None
+    refreshed_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
