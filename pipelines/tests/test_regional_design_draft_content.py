@@ -20,10 +20,20 @@ def test_doc_existe():
     assert DOC_PATH.exists(), f"Documento nao encontrado: {DOC_PATH}"
 
 
-def test_doc_marca_status_como_draft_nao_aplicado():
-    content = _read_doc().lower()
-    assert "draft" in content
-    assert "não aplicado" in content or "nao aplicado" in content
+def test_doc_marca_gate_6a_aplicado_e_gate_6b_pendente():
+    """Atualizado apos o Gate 6A ser aplicado de fato (DDL + primeira carga
+    no Data Mart, com autorizacao explicita) -- o documento agora precisa
+    refletir isso com precisao: Gate 6A concluido, Gate 6B (sync Neon,
+    endpoints, frontend) continua pendente/bloqueado. Antes desta correcao,
+    este teste checava o oposto (doc sempre "draft, nao aplicado"), o que
+    deixou de ser verdade a partir da aplicacao real."""
+    content = _read_doc()
+    lower = content.lower()
+    assert "gate 6a" in lower
+    assert "gate 6b" in lower
+    assert "aplicad" in lower  # "aplicada"/"aplicado" -- Gate 6A concluido
+    # Gate 6B precisa continuar marcado como nao iniciado/bloqueado.
+    assert any(term in lower for term in ("não iniciado", "nao iniciado", "bloqueado", "pendente"))
 
 
 def test_doc_documenta_tiktok_como_sem_cobertura_regional():
@@ -72,9 +82,13 @@ def test_doc_documenta_timezone_brt_confirmado():
     assert "america/sao_paulo" in content or "brt" in content
 
 
-def test_doc_nunca_afirma_gold_aplicada():
-    """Guarda-corpo simples: o documento nao pode conter uma frase que
-    afirme a Gold como aplicada -- ela deve permanecer draft ate o Gate 6."""
+def test_doc_nunca_afirma_gate_6b_concluido():
+    """Guarda-corpo atualizado: agora que o Gate 6A (DDL + primeira carga)
+    foi de fato aplicado, o risco de regressao mudou de direcao -- o que
+    nao pode acontecer e o documento passar a afirmar que o Gate 6B (sync
+    Data Mart -> Neon, endpoints /regioes/*, frontend) tambem foi feito,
+    quando continua bloqueado aguardando autorizacao separada."""
     content = _read_doc().lower()
-    assert "gold aplicada com sucesso" not in content
-    assert "ddl executado no data mart" not in content
+    assert "sync data mart" in content or "sync neon" in content or "gate 6b" in content
+    assert "endpoints em produção" not in content and "endpoints em producao" not in content
+    assert "frontend atualizado" not in content and "deploy realizado" not in content

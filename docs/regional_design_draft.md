@@ -1,11 +1,12 @@
 # Análise de Venda e Custos por UF — Auditoria e Design (Gate 4)
 
-Status: **draft, não aplicado**. Nenhuma DDL/DML foi executada no Data Mart, Neon ou Postgres local. Nenhuma Gold regional existe hoje.
+Status: **`gold.marketplace_region_daily` APLICADA no Data Mart (Gate 6A, autorização explícita do Mário)**. DDL e primeira carga executadas em transações separadas, com preflight de escrita aprovado imediatamente antes de cada uma. Sync Data Mart → Neon, endpoints da API e qualquer mudança de frontend **continuam não iniciados** (Gate 6B, gate separado).
 
 **Gates desta frente (não confundir "desenhar" com "aplicar")**:
 - **Gate 4** (auditoria read-only) — **concluído**: Shopee confirmado confiável, dedup aprovado; ML utilizável com causa raiz de cobertura confirmada; TikTok confirmado sem UF estrutural.
-- **Gate 5** (design técnico + contrato de API + decisões de produto documentadas) — **concluído nesta sessão**: schema com numerador/denominador, contrato de endpoint com `coverage_warning`/`coverage_level`, decisão de barbours tomada (Opção A), fonte ML resolvida (`raw.ml_shipments`/`raw.ml_shipment_costs`), timezone confirmada (BRT nativo, sem conversão).
-- **Gate 6** (aplicação real — DDL no Data Mart, primeira carga, sync Data Mart → Neon, endpoints em produção) — **não iniciado, gate separado**, requer autorização explícita adicional. Todas as decisões de design bloqueantes deste gate estão resolvidas (ver §9); nada neste documento ou no `db/sql/gold/marketplace_region_daily_draft.sql` deve ser interpretado como aprovação para aplicar.
+- **Gate 5** (design técnico + contrato de API + decisões de produto documentadas) — **concluído**: schema com numerador/denominador, contrato de endpoint com `coverage_warning`/`coverage_level`, decisão de barbours tomada (Opção A), fonte ML resolvida (`raw.ml_shipments`/`raw.ml_shipment_costs`), timezone confirmada (BRT nativo, sem conversão).
+- **Gate 6A** (aplicação real — DDL + primeira carga no Data Mart) — **CONCLUÍDO**. Ver §10 para o resultado real (contagens, reconciliação, cobertura por marca/mês).
+- **Gate 6B** (sync Data Mart → Neon, endpoints `/regioes/*`, qualquer mudança de frontend/deploy) — **não iniciado, gate separado**, requer autorização explícita adicional.
 
 ## 0. Execução — o que foi feito em cada sessão
 
@@ -340,22 +341,70 @@ Inspecionado o SQL real de `gold.ml_gestao_diaria` (é uma **VIEW**, não tabela
 8. **Credencial do Data Mart** — rotação confirmada pelo usuário; acesso feito via `pipelines.common.db` (mecanismo já validado do repo), nunca imprimindo credenciais.
 9. **Thresholds de `coverage_level` (80%/50%, §6) são provisórios** — não validados com o time de produto; ajustar antes do Gate 6 se necessário, mas não bloqueiam o design (é uma constante, não uma decisão estrutural).
 
-## 9. Checklist de prontidão para o Gate 6 (aplicação — ainda NÃO autorizada)
+## 9. Checklist de prontidão para o Gate 6A (aplicação)
 
 | Item bloqueante | Status |
 |---|---|
 | Dedup Shopee aprovado por comparação campo a campo | ✅ Resolvido (§1.1a/§2) |
 | Causa raiz da cobertura ML (barbours) confirmada | ✅ Resolvido (§1.2a) |
 | Decisão de produto para o histórico de barbours | ✅ Decidida — Opção A (§1.2b) |
-| Fonte ML para o transform (silver vs raw) | ✅ Decidida — usar `raw.ml_shipments`/`raw.ml_shipment_costs` (§1.2c) |
+| Fonte ML para o transform (silver vs raw) | ✅ Decidida — usou `raw.ml_shipments`/`raw.ml_shipment_costs` (§1.2c) |
 | Timezone dos timestamps naive | ✅ Confirmado — BRT nativo, sem conversão (§1.2d) |
-| Schema com numerador/denominador (evita médias erradas) | ✅ No draft (§3, `db/sql/gold/marketplace_region_daily_draft.sql`) |
-| Contrato de API com `coverage_warning`/`coverage_level` | ✅ No draft (§6) |
-| TikTok tratado como `sem_cobertura`, nunca GMV=0 por UF | ✅ Especificado (§6) |
+| Schema com numerador/denominador (evita médias erradas) | ✅ Aplicado (`db/sql/gold/marketplace_region_daily_ddl.sql`) |
+| Contrato de API com `coverage_warning`/`coverage_level` | ✅ Especificado (§6) — implementação do endpoint é Gate 6B |
+| TikTok tratado como `sem_cobertura`, nunca GMV=0 por UF | ✅ Confirmado — 0 linhas na Gold aplicada (§10) |
 | Regra "sem custo Shopee inventado equivalente ao ML" | ✅ Confirmada e documentada (§4C) |
-| Autorização explícita para aplicar DDL/criar Gold | ❌ **Não solicitada nesta rodada — Gate 6 separado, aguardando pedido explícito** |
-| Validação de thresholds de `coverage_level` com produto | ⚠️ Pendente, não bloqueante (constante ajustável sem migração) |
+| Autorização explícita para aplicar DDL/criar Gold | ✅ **Autorizada e executada (§10)** |
+| Validação de thresholds de `coverage_level` com produto | ⚠️ Pendente, não bloqueante (constante ajustável sem migração, fica para o Gate 6B) |
 
-**Todas as decisões de design bloqueantes estão resolvidas. O único item que falta para o Gate 6 é a autorização explícita para aplicar — que é uma decisão de escopo/timing, não uma pendência técnica.**
+**Gate 6A concluído.** Gate 6B (sync Neon, endpoints, frontend) permanece bloqueado até autorização separada.
+
+## 10. Gate 6A — Resultado da aplicação real (executado com autorização explícita)
+
+DDL aplicada (`db/sql/gold/marketplace_region_daily_ddl.sql`, 13 statements — 1 tabela, 3 índices, 9 comentários) e primeira carga (`pipelines/ingestion/gold_regional/loader.py::execute_first_load`) executadas em transações separadas, cada uma precedida por um preflight de escrita que confirmou: conexão no **primary** (`pg_is_in_recovery=false`), mesmo cluster físico da réplica de leitura, role sem superuser com permissão adequada em `gold`, e `gold.marketplace_region_daily` **não existente** antes do DDL.
+
+### Contagens e estrutura
+
+- **Total de linhas**: 33.343.
+- **Constraints**: `chk_region_gmv_non_negative`, `chk_region_shipping_non_negative`, `chk_region_uf_valida` (todas `convalidated=true`), `uq_region_daily` (UNIQUE), `marketplace_region_daily_pkey`.
+- **Índices**: `ix_region_daily_date`, `ix_region_daily_uf`, `ix_region_daily_loja` + os 2 implícitos de PK/UNIQUE.
+- **Colunas**: as 20 da DDL, exatamente — nenhuma coluna de PII (CPF/nome/telefone/endereço/`order_id`/etc.) existe na tabela.
+- **UF distintas presentes**: as 27 siglas oficiais + `XX` (28 valores) — nenhum estado ficou de fora do mapa.
+
+### Reconciliação (recalculada da fonte no momento da carga, dentro da transação — nunca contra uma constante fixa)
+
+| | Staging | Fonte recalculada | Diff |
+|---|---|---|---|
+| GMV Shopee (dedupicado) | R$ 21.335.370,49 | R$ 21.335.370,49 | R$ 0,00 |
+| GMV ML (`status='paid'`) | R$ 28.700.027,29 | R$ 28.700.027,29 | R$ 0,00 |
+
+Shopee (todas as 5 marcas): 310.495 pedidos, 336.265 unidades, 50.606 cancelados, 4.031 devolvidos/contestados.
+
+### Cobertura ML por marca (agregada no período todo, `uf_fill_pct` = `shipping_cost_coverage_pct` porque os dois numeradores coincidem nesta carga)
+
+| Marca (`loja_id`) | Pedidos | Cobertura |
+|---|---|---|
+| barbours (2) | 136.197 | **51,83%** |
+| kokeshi (3) | 67.045 | 89,69% |
+| lescent (4) | 47.844 | 98,98% |
+| rituaria (5) | 81.764 | 100,00% |
+
+**Barbours nov/2025–mar/2026, mês a mês (confirma a Opção A funcionando como desenhado — aparece como cobertura baixa, não como erro/exclusão)**:
+
+| Mês | Pedidos | `uf_fill_pct` |
+|---|---|---|
+| 2025-11 | 10.130 | 42,26% |
+| 2025-12 | 5.416 | 33,86% |
+| 2026-01 | 9.036 | 1,72% |
+| 2026-02 | 12.122 | 0,12% |
+| 2026-03 | 19.784 | 0,27% |
+
+### Integridade
+
+Zero duplicidade em `(date, marketplace_id, loja_id, uf)`; zero nulos nas colunas obrigatórias; zero linha com numerador > denominador; **TikTok: 0 linhas** (confirmado, marketplace_id=1 ausente por completo).
+
+### Validações não executadas nesta etapa (fora do escopo do Gate 6A)
+
+Sync Data Mart → Neon, endpoints `/regioes/*`, qualquer mudança de frontend, e validação dos thresholds de `coverage_level` (80%/50%) com o time de produto — todos ficam para o Gate 6B.
 
 Ver plano de implementação desta feature em `C:\Users\Notebook\.claude\plans\quiet-crafting-rain.md` para o contexto completo dos Gates 1–4. Módulo de auditoria reutilizável: `pipelines/reconciliation/audit_marketplace_region_sources.py` (testes com conexão falsa em `pipelines/tests/test_audit_marketplace_region_sources.py`).
