@@ -11,6 +11,7 @@ import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import AppNav from "@/components/AppNav";
+import RegioesBrazilMap from "@/components/RegioesBrazilMap";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import {
@@ -256,6 +257,9 @@ function RegioesPageInner() {
               />
             </div>
 
+            {/* Mapa do Brasil por UF — cartograma em grade, ver RegioesBrazilMap.tsx */}
+            <RegioesBrazilMap rows={byUf} totalGmv={summary?.gmv ?? 0} loading={loading} />
+
             {/* Ranking por UF */}
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50">
@@ -393,10 +397,6 @@ function RegioesPageInner() {
                 </table>
               </div>
             </div>
-
-            <p className="text-[10px] text-slate-400">
-              Mapa do Brasil por UF ainda não implementado — esta é a primeira visualização regional (tabelas/cards), sem componente geográfico nesta fase.
-            </p>
           </>
         )}
       </main>
