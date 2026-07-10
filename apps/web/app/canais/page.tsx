@@ -5,6 +5,8 @@ import {
   fetchCanais,
   type CanaisKpis,
   type CanaisBrandRow,
+  type CanaisChannelRow,
+  type CanaisChannelMedian,
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
@@ -19,10 +21,40 @@ import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/fo
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import {
+  formatChannelMetric,
+  signalLabel,
+  signalTone,
+  CHANNEL_BADGE_TONE,
+  type FormattedMetric,
+} from "@/lib/canais-channel-metrics";
 
 function fmtPct(v: number | null, dec = 1): string {
   if (v == null) return "—";
   return v.toFixed(dec) + "%";
+}
+
+const fmtPct1 = (v: number) => `${v.toFixed(1)}%`;
+const fmtRoas = (v: number) => `${v.toFixed(2)}x`;
+
+function channelMetricToneClass(tone: FormattedMetric["tone"]): string {
+  if (tone === "value") return "text-slate-700 font-medium";
+  if (tone === "warning") return "text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 text-xs font-semibold";
+  return "text-slate-400 text-xs italic";
+}
+
+function ChannelMetricCell({
+  value, applicable, available, format, warning,
+}: {
+  value: number | null; applicable: boolean; available: boolean;
+  format: (v: number) => string; warning?: string | null;
+}) {
+  const { text, tone } = formatChannelMetric(value, applicable, available, format);
+  return (
+    <span className={channelMetricToneClass(tone)} title={warning ?? undefined}>
+      {text}
+    </span>
+  );
 }
 
 function AttributionBar({
@@ -85,6 +117,8 @@ function CanaisPageInner() {
   const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const [kpis, setKpis] = useState<CanaisKpis | null>(null);
   const [brands, setBrands] = useState<CanaisBrandRow[]>([]);
+  const [channelRows, setChannelRows] = useState<CanaisChannelRow[]>([]);
+  const [channelMedians, setChannelMedians] = useState<CanaisChannelMedian[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +136,8 @@ function CanaisPageInner() {
         if (ignore) return;
         setKpis(r.kpis);
         setBrands(r.brands);
+        setChannelRows(r.channelRows);
+        setChannelMedians(r.channelMedians);
         setIsLive(r.live);
         setRefreshedAt(r.meta.refreshedAt);
         setLoading(false);
@@ -224,6 +260,35 @@ function CanaisPageInner() {
     }
   };
   const shSort = useSortableTable(shBrands, shGetValue, shColumnTypes);
+
+  // ── Matriz comparativa marca x canal (Ads/Custo/Frete + sinais) — Gate 2 ──
+  const medianByChannel = useMemo(() => {
+    const m = new Map<string, CanaisChannelMedian>();
+    channelMedians.forEach((cm) => m.set(cm.channel, cm));
+    return m;
+  }, [channelMedians]);
+
+  const channelMatrixColumnTypes = useMemo(() => ({
+    brand: "text" as const, channel: "text" as const, gmv: "numeric" as const,
+    orders: "numeric" as const, ads_gmv_pct: "numeric" as const, roas: "numeric" as const,
+    acos_pct: "numeric" as const, marketplace_cost_pct: "numeric" as const,
+    seller_shipping_pct: "numeric" as const,
+  }), []);
+  const channelMatrixGetValue = (row: CanaisChannelRow, column: string): string | number | null => {
+    switch (column) {
+      case "brand": return row.label;
+      case "channel": return row.channel_label;
+      case "gmv": return row.gmv;
+      case "orders": return row.orders;
+      case "ads_gmv_pct": return row.ads_available ? row.ads_gmv_pct : null;
+      case "roas": return row.ads_available ? row.roas : null;
+      case "acos_pct": return row.ads_available ? row.acos_pct : null;
+      case "marketplace_cost_pct": return row.marketplace_cost_available ? row.marketplace_cost_pct : null;
+      case "seller_shipping_pct": return row.seller_shipping_available ? row.seller_shipping_pct : null;
+      default: return null;
+    }
+  };
+  const channelMatrixSort = useSortableTable(channelRows, channelMatrixGetValue, channelMatrixColumnTypes);
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -450,6 +515,103 @@ function CanaisPageInner() {
             </p>
           </div>
         )}
+
+        {/* ── Comparativo entre Canais: Ads, Custo e Frete (Gate 2) ── */}
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-violet-50">
+            <h2 className="text-sm font-semibold text-slate-700">Comparativo entre Canais — Ads, Custo e Frete</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Marca × marketplace — mesmas métricas já validadas na aba Financeiro, lado a lado para comparar oportunidades.
+              Não inclui desconto nem comissão de afiliados (ver docs/sections/canais_audit.md, seção 14).
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" aria-label="Comparativo entre canais">
+              <thead>
+                <tr className="bg-slate-50">
+                  <SortableHeader label="Marca" column="brand" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} align="left" />
+                  <SortableHeader label="Canal" column="channel" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} align="left" />
+                  <SortableHeader label="GMV" column="gmv" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="Pedidos" column="orders" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="Ads/GMV" column="ads_gmv_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="ROAS" column="roas" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="ACOS" column="acos_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="Custo marketplace/GMV" column="marketplace_cost_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <SortableHeader label="Frete seller/GMV" column="seller_shipping_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Sinal</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {loading ? (
+                  <SkeletonTableRows rows={5} cols={10} />
+                ) : channelMatrixSort.sortedRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-6 py-8 text-center text-sm text-slate-400">
+                      {isLive
+                        ? "Sem dados de canal no período e filtros selecionados."
+                        : "Comparativo disponível apenas com a API conectada — o modo demonstração não modela Ads/Custo/Frete por canal."}
+                    </td>
+                  </tr>
+                ) : (
+                  channelMatrixSort.sortedRows.map((row, i) => (
+                    <tr key={`${row.brand}-${row.channel}`} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
+                      <td className="px-6 py-3.5 font-semibold text-slate-700 whitespace-nowrap">{row.label}</td>
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${CHANNEL_BADGE_TONE[row.channel] ?? ""}`}>
+                          {row.channel_label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(row.gmv)}</td>
+                      <td className="px-4 py-3.5 text-right tabular-nums text-slate-500">{fmtNumber(row.orders)}</td>
+                      <td className="px-4 py-3.5 text-right tabular-nums">
+                        <ChannelMetricCell value={row.ads_gmv_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
+                      </td>
+                      <td className="px-4 py-3.5 text-right tabular-nums">
+                        <ChannelMetricCell value={row.roas} applicable={row.ads_applicable} available={row.ads_available} format={fmtRoas} />
+                      </td>
+                      <td className="px-4 py-3.5 text-right tabular-nums">
+                        <ChannelMetricCell value={row.acos_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
+                      </td>
+                      <td className="px-4 py-3.5 text-right tabular-nums">
+                        <ChannelMetricCell
+                          value={row.marketplace_cost_pct}
+                          applicable={row.marketplace_cost_applicable}
+                          available={row.marketplace_cost_available}
+                          format={fmtPct1}
+                          warning={row.data_warning}
+                        />
+                      </td>
+                      <td className="px-4 py-3.5 text-right tabular-nums">
+                        <ChannelMetricCell value={row.seller_shipping_pct} applicable={row.seller_shipping_applicable} available={row.seller_shipping_available} format={fmtPct1} />
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex flex-wrap gap-1">
+                          {row.signals.length === 0 ? (
+                            <span className="text-slate-300 text-xs">—</span>
+                          ) : (
+                            row.signals.map((s) => (
+                              <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap ${signalTone(s)}`}>
+                                {signalLabel(s)}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-6 py-3 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-1.5">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
+            <span className="text-xs text-slate-500">N/A = não se aplica a esse canal</span>
+            <span className="text-xs text-amber-700 font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
+            <span className="ml-auto text-[10px] text-slate-400 max-w-md text-right">
+              Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
+            </span>
+          </div>
+        </div>
 
         {/* ── Tabela: Atribuicao TikTok por canal ── */}
         {showTiktok && (

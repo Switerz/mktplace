@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FiltersEcho(BaseModel):
@@ -300,11 +300,60 @@ class CanaisBrandRow(BaseModel):
     shopee_conversion_rate: Optional[float] = None
 
 
+class CanaisChannelRow(BaseModel):
+    """Uma linha da matriz comparativa marca x canal (Gate 2, docs/sections/
+    canais_audit.md secao 14). `ads_available`/`marketplace_cost_available`/
+    `seller_shipping_available` distinguem "nao aplicavel" (N/A — o canal nao
+    opera esse tipo de custo) de "aplicavel mas sem dado" (Sem dado — o mart
+    nao tem o campo populado). Nunca inclui desconto ou afiliados (bloqueados
+    no Gate 1 por falta de fonte/semantica confiavel)."""
+    brand: str
+    label: str
+    channel: str
+    channel_label: str
+    gmv: float
+    orders: int
+    ad_spend: Optional[float] = None
+    ad_revenue: Optional[float] = None
+    ads_gmv_pct: Optional[float] = None
+    roas: Optional[float] = None
+    acos_pct: Optional[float] = None
+    marketplace_cost_pct: Optional[float] = None
+    seller_shipping_pct: Optional[float] = None
+    ads_available: bool
+    marketplace_cost_available: bool
+    seller_shipping_available: bool
+    ads_applicable: bool
+    marketplace_cost_applicable: bool
+    seller_shipping_applicable: bool
+    data_warning: Optional[str] = None
+    signals: list[str] = Field(default_factory=list)
+
+
+class CanaisChannelMedian(BaseModel):
+    """Mediana/percentil 75 por canal, usados como limiar dos sinais de
+    oportunidade (`custo_alto`/`frete_alto`/`roas_forte`/`ads_subutilizado`).
+    So calculado com >=2 marcas com dado valido no canal — None quando a
+    comparacao seria contra si mesma."""
+    channel: str
+    channel_label: str
+    gmv_median: Optional[float] = None
+    ads_gmv_pct_median: Optional[float] = None
+    roas_median: Optional[float] = None
+    marketplace_cost_pct_median: Optional[float] = None
+    marketplace_cost_pct_p75: Optional[float] = None
+    seller_shipping_pct_median: Optional[float] = None
+    seller_shipping_pct_p75: Optional[float] = None
+    brands_with_data: int
+
+
 class CanaisResponse(BaseModel):
     ref_month: Optional[str] = None
     marketplace: str
     kpis: CanaisKpis
     brands: list[CanaisBrandRow]
+    channel_rows: list[CanaisChannelRow] = Field(default_factory=list)
+    channel_medians: list[CanaisChannelMedian] = Field(default_factory=list)
     date_from: Optional[date] = None
     date_to: Optional[date] = None
     compare_date_from: Optional[date] = None

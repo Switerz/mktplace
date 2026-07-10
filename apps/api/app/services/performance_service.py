@@ -102,6 +102,190 @@ def _pct_from_source(value) -> float | None:
     return round(v * 100, 2) if abs(v) <= 1 else round(v, 2)
 
 
+def _ratio(num: float, denom: float, decimals: int = 2) -> float | None:
+    """Razao simples (nao-percentual, ex: ROAS). Denominador zero/negativo -> None, nunca 0 ou infinito."""
+    return round(num / denom, decimals) if denom > 0 else None
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2
+
+
+def _percentile_nearest_rank(values: list[float], pct: float) -> float | None:
+    """Percentil por nearest-rank (sem interpolacao) — limiar simples e
+    explicavel para os sinais de oportunidade da Canais (docs/sections/
+    canais_audit.md secao 14.6), nao pretende ser estatistica formal."""
+    if not values:
+        return None
+    s = sorted(values)
+    idx = max(0, min(len(s) - 1, round(pct / 100 * (len(s) - 1))))
+    return s[idx]
+
+
+# ---------------------------------------------------------------------------
+# Contrato de aplicabilidade/disponibilidade por canal — fechado no Gate 1
+# (docs/sections/canais_audit.md secao 14.2/14.4). "Aplicavel" = o canal
+# opera esse tipo de custo/receita por modelo de negocio; "disponivel" = o
+# mart tem o dado populado para o periodo filtrado. Uma metrica pode ser
+# aplicavel e ainda assim indisponivel (ex: comissao ML) — os dois nunca
+# devem ser confundidos na UI (N/A != Sem dado).
+# ---------------------------------------------------------------------------
+_ADS_APPLICABLE = {"tiktok": False, "ml": True, "shopee": True}
+_COST_APPLICABLE = {"tiktok": True, "ml": True, "shopee": True}
+_SHIPPING_APPLICABLE = {"tiktok": False, "ml": True, "shopee": True}
+_CHANNEL_LABEL = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
+
+_TIKTOK_COST_WARNING = (
+    "Base de repasse (settlements) difere do GMV comercial em ~5,5% "
+    "(referencia mai/2026, ver financeiro_audit.md secao 11.1) — usar como "
+    "referencia direcional, nao como valor exato mes a mes."
+)
+_ML_COST_MISSING_WARNING = (
+    "Comissao do Mercado Livre nao esta disponivel no mart (total_fees "
+    "nulo para ML). Fonte real existe em gold.ml_produto_pnl.marketplace_fee, "
+    "porem e cumulativa por produto, sem competencia mensal — nao aplicavel "
+    "a um mes especifico (ver financeiro_audit.md secao 11.4)."
+)
+
+
+def _channel_row(channel: str, brand: str, label: str, raw: dict) -> dict:
+    """Monta uma linha da matriz comparativa marca x canal (Canais Gate 2).
+    `raw` e o dict agregado de uma (brand, marketplace_id) vindo do mart."""
+    gmv = _f(raw.get("gmv"))
+    orders = int(_f(raw.get("orders")))
+    ad_spend = _f(raw.get("ad_spend"))
+    ad_revenue = _f(raw.get("ad_revenue"))
+    ad_spend_n = int(raw.get("ad_spend_n") or 0)
+    fees_n = int(raw.get("total_fees_n") or 0)
+    shipping_n = int(raw.get("seller_shipping_cost_n") or 0)
+    fees = _f(raw.get("total_fees"))
+    if channel == "tiktok":
+        fees = abs(fees)
+    shipping = _f(raw.get("seller_shipping_cost"))
+
+    ads_available = _ADS_APPLICABLE[channel] and ad_spend_n > 0
+    cost_available = _COST_APPLICABLE[channel] and fees_n > 0
+    shipping_available = _SHIPPING_APPLICABLE[channel] and shipping_n > 0
+
+    data_warning = None
+    if channel == "tiktok" and cost_available:
+        data_warning = _TIKTOK_COST_WARNING
+    elif channel == "ml" and _COST_APPLICABLE[channel] and not cost_available:
+        data_warning = _ML_COST_MISSING_WARNING
+
+    return {
+        "brand": brand,
+        "label": label,
+        "channel": channel,
+        "channel_label": _CHANNEL_LABEL[channel],
+        "gmv": gmv,
+        "orders": orders,
+        "ad_spend": ad_spend if ads_available else None,
+        "ad_revenue": ad_revenue if ads_available else None,
+        "ads_gmv_pct": _pct(ad_spend, gmv) if ads_available else None,
+        "roas": _ratio(ad_revenue, ad_spend) if ads_available else None,
+        "acos_pct": _pct(ad_spend, ad_revenue) if ads_available else None,
+        "marketplace_cost_pct": _pct(fees, gmv) if cost_available else None,
+        "seller_shipping_pct": _pct(shipping, gmv) if shipping_available else None,
+        # "available" = tem dado no periodo filtrado; "applicable" = o canal
+        # opera esse tipo de custo por modelo de negocio (contrato fixo do
+        # Gate 1). O frontend usa os dois juntos para distinguir "N/A" de
+        # "Sem dado" sem duplicar esta tabela de regras.
+        "ads_available": ads_available,
+        "marketplace_cost_available": cost_available,
+        "seller_shipping_available": shipping_available,
+        "ads_applicable": _ADS_APPLICABLE[channel],
+        "marketplace_cost_applicable": _COST_APPLICABLE[channel],
+        "seller_shipping_applicable": _SHIPPING_APPLICABLE[channel],
+        "data_warning": data_warning,
+        "signals": [],
+    }
+
+
+def _build_channel_rows(by_brand: dict[str, dict[int, dict]]) -> tuple[list[dict], list[dict]]:
+    """Constroi a matriz marca x canal + medianas por canal e anota sinais
+    de oportunidade (ver docs/sections/canais_audit.md secao 14.5/14.6).
+    Comparacoes (mediana/percentil) só se aplicam com >=2 marcas com dado
+    valido no canal — nunca compara uma marca contra si mesma."""
+    channel_rows: list[dict] = []
+    for brand, mkts in sorted(by_brand.items()):
+        label = BRAND_LABELS.get(brand, brand.upper())
+        for channel, mkt_id in (("tiktok", TIKTOK_ID), ("ml", ML_ID), ("shopee", SHOPEE_ID)):
+            raw = mkts.get(mkt_id)
+            if not raw:
+                continue
+            channel_rows.append(_channel_row(channel, brand, label, raw))
+
+    channel_medians: list[dict] = []
+    for channel in ("tiktok", "ml", "shopee"):
+        rows_c = [r for r in channel_rows if r["channel"] == channel]
+        gmv_vals = [r["gmv"] for r in rows_c if r["gmv"] is not None]
+        ads_vals = [r["ads_gmv_pct"] for r in rows_c if r["ads_gmv_pct"] is not None]
+        roas_vals = [r["roas"] for r in rows_c if r["roas"] is not None]
+        cost_vals = [r["marketplace_cost_pct"] for r in rows_c if r["marketplace_cost_pct"] is not None]
+        ship_vals = [r["seller_shipping_pct"] for r in rows_c if r["seller_shipping_pct"] is not None]
+
+        gmv_med = _median(gmv_vals) if len(gmv_vals) >= 2 else None
+        ads_med = _median(ads_vals) if len(ads_vals) >= 2 else None
+        roas_med = _median(roas_vals) if len(roas_vals) >= 2 else None
+        cost_p75 = _percentile_nearest_rank(cost_vals, 75) if len(cost_vals) >= 2 else None
+        ship_p75 = _percentile_nearest_rank(ship_vals, 75) if len(ship_vals) >= 2 else None
+
+        channel_medians.append({
+            "channel": channel,
+            "channel_label": _CHANNEL_LABEL[channel],
+            "gmv_median": gmv_med,
+            "ads_gmv_pct_median": ads_med,
+            "roas_median": roas_med,
+            "marketplace_cost_pct_median": _median(cost_vals) if len(cost_vals) >= 2 else None,
+            "marketplace_cost_pct_p75": cost_p75,
+            "seller_shipping_pct_median": _median(ship_vals) if len(ship_vals) >= 2 else None,
+            "seller_shipping_pct_p75": ship_p75,
+            "brands_with_data": len(rows_c),
+        })
+
+        for row in rows_c:
+            signals: list[str] = []
+            if row["ads_available"]:
+                if row["roas"] is not None and roas_med is not None and row["roas"] >= roas_med:
+                    signals.append("roas_forte")
+                if gmv_med is not None and row["gmv"] is not None and row["gmv"] >= gmv_med:
+                    ads_low = row["ads_gmv_pct"] is None or (ads_med is not None and row["ads_gmv_pct"] < ads_med)
+                    roas_ok = (
+                        row["roas"] is None
+                        or (roas_med is not None and row["roas"] >= roas_med)
+                        or row["ad_spend"] == 0
+                    )
+                    if ads_low and roas_ok:
+                        signals.append("ads_subutilizado")
+            elif _ADS_APPLICABLE[channel]:
+                signals.append("sem_dado")
+
+            if row["marketplace_cost_available"]:
+                if cost_p75 is not None and row["marketplace_cost_pct"] is not None and row["marketplace_cost_pct"] >= cost_p75:
+                    signals.append("custo_alto")
+            elif _COST_APPLICABLE[channel] and "sem_dado" not in signals:
+                signals.append("sem_dado")
+
+            if row["seller_shipping_available"]:
+                if ship_p75 is not None and row["seller_shipping_pct"] is not None and row["seller_shipping_pct"] >= ship_p75:
+                    signals.append("frete_alto")
+            elif _SHIPPING_APPLICABLE[channel] and "sem_dado" not in signals:
+                signals.append("sem_dado")
+
+            row["signals"] = signals
+
+    channel_rows.sort(key=lambda r: r["gmv"] or 0, reverse=True)
+    return channel_rows, channel_medians
+
+
 def _brand_filter_sql(brand_keys: list[str] | None, params: dict, alias: str = "l") -> str:
     """Adiciona brand_keys aos params (quando presente) e devolve a clausula
     SQL correspondente (string vazia quando nenhuma marca foi filtrada)."""
@@ -627,7 +811,14 @@ def get_canais(
             COALESCE(SUM(f.repeat_buyers), 0)            AS repeat_buyers,
             COALESCE(SUM(f.canceled_orders), 0)          AS canceled_orders,
             COALESCE(SUM(f.orders), 0)                   AS orders,
-            AVG(NULLIF(f.conversion_rate, 0))            AS avg_conversion_rate
+            AVG(NULLIF(f.conversion_rate, 0))            AS avg_conversion_rate,
+            COALESCE(SUM(f.ad_spend), 0)                 AS ad_spend,
+            COALESCE(SUM(f.ad_revenue), 0)                AS ad_revenue,
+            COALESCE(SUM(f.total_fees), 0)                AS total_fees,
+            COALESCE(SUM(f.seller_shipping_cost), 0)      AS seller_shipping_cost,
+            COUNT(f.ad_spend)                             AS ad_spend_n,
+            COUNT(f.total_fees)                           AS total_fees_n,
+            COUNT(f.seller_shipping_cost)                 AS seller_shipping_cost_n
         FROM marts.fact_marketplace_daily_performance f
         JOIN marts.dim_loja l ON l.loja_id = f.loja_id
         WHERE f.date BETWEEN :start AND :end
@@ -645,6 +836,8 @@ def get_canais(
         if brand not in by_brand:
             by_brand[brand] = {}
         by_brand[brand][r["marketplace_id"]] = dict(r)
+
+    channel_rows, channel_medians = _build_channel_rows(by_brand)
 
     brand_rows = []
     for brand, mkts in sorted(by_brand.items()):
@@ -768,6 +961,11 @@ def get_canais(
         "marketplace": marketplace,
         "kpis": kpis,
         "brands": brand_rows,
+        # Matriz comparativa marca x canal (Ads/Custo/Frete + sinais de
+        # oportunidade) — Gate 2, docs/sections/canais_audit.md secao 14.
+        # Nao inclui desconto nem afiliados (bloqueados no Gate 1).
+        "channel_rows": channel_rows,
+        "channel_medians": channel_medians,
         "date_from": start,
         "date_to": end,
         # Canais nao tem comparacao por metrica (nunca teve "previous" nesta

@@ -657,6 +657,46 @@ export interface CanaisBrandRow {
   shopee_conversion_rate?: number | null;
 }
 
+// Matriz comparativa marca x canal (Ads/Custo/Frete + sinais) — Gate 2,
+// docs/sections/canais_audit.md secao 14. Nunca inclui desconto/afiliados
+// (bloqueados no Gate 1 por falta de fonte/semantica confiavel).
+export interface CanaisChannelRow {
+  brand: string;
+  label: string;
+  channel: "tiktok" | "ml" | "shopee";
+  channel_label: string;
+  gmv: number;
+  orders: number;
+  ad_spend: number | null;
+  ad_revenue: number | null;
+  ads_gmv_pct: number | null;
+  roas: number | null;
+  acos_pct: number | null;
+  marketplace_cost_pct: number | null;
+  seller_shipping_pct: number | null;
+  ads_available: boolean;
+  marketplace_cost_available: boolean;
+  seller_shipping_available: boolean;
+  ads_applicable: boolean;
+  marketplace_cost_applicable: boolean;
+  seller_shipping_applicable: boolean;
+  data_warning: string | null;
+  signals: string[];
+}
+
+export interface CanaisChannelMedian {
+  channel: "tiktok" | "ml" | "shopee";
+  channel_label: string;
+  gmv_median: number | null;
+  ads_gmv_pct_median: number | null;
+  roas_median: number | null;
+  marketplace_cost_pct_median: number | null;
+  marketplace_cost_pct_p75: number | null;
+  seller_shipping_pct_median: number | null;
+  seller_shipping_pct_p75: number | null;
+  brands_with_data: number;
+}
+
 const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
   {
     brand: "barbours", label: "BARBOURS",
@@ -719,12 +759,17 @@ export function fetchCanais(
   selection: MarketplaceSelection,
   period?: string,
   filters?: GlobalFilterParams,
-): Promise<{ kpis: CanaisKpis; brands: CanaisBrandRow[]; live: boolean; meta: ResponseMeta }> {
+): Promise<{
+  kpis: CanaisKpis; brands: CanaisBrandRow[];
+  channelRows: CanaisChannelRow[]; channelMedians: CanaisChannelMedian[];
+  live: boolean; meta: ResponseMeta;
+}> {
   const marketplace = serializeMarketplaceSelection(selection);
   const qs = buildFilterQuery(marketplace, period, filters);
   return withCache(`canais:${qs.toString()}`, async () => {
     interface ApiResp {
       kpis: CanaisKpis; brands: CanaisBrandRow[];
+      channel_rows?: CanaisChannelRow[]; channel_medians?: CanaisChannelMedian[];
       date_from?: string | null; date_to?: string | null;
       compare_date_from?: string | null; compare_date_to?: string | null;
       refreshed_at?: string | null;
@@ -740,7 +785,11 @@ export function fetchCanais(
           ? parseFloat(((b.ml_new_buyers / b.ml_unique_buyers) * 100).toFixed(1))
           : null,
     }));
-    return { live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands };
+    return {
+      live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands,
+      channelRows: raw.channel_rows ?? [],
+      channelMedians: raw.channel_medians ?? [],
+    };
   }
 
   const brands = CANAIS_MOCK_BRANDS;
@@ -796,7 +845,9 @@ export function fetchCanais(
     shopee_gmv_per_buyer: (showSh && shBuyers > 0) ? parseFloat((shGmv / shBuyers).toFixed(2)) : null,
   };
 
-    return { live: false, meta: EMPTY_META, kpis, brands };
+    // Modo demonstracao (API offline): dados mock nao modelam Ads/Custo/Frete
+    // por canal — a matriz comparativa fica vazia em vez de inventar valores.
+    return { live: false, meta: EMPTY_META, kpis, brands, channelRows: [], channelMedians: [] };
   });
 }
 
