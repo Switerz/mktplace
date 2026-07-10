@@ -28,6 +28,7 @@ const SECTIONS: NavSection[] = [
       { href: "/produtos", label: "Produtos" },
       { href: "/qualidade", label: "Qualidade" },
       { href: "/financeiro", label: "Financeiro" },
+      { href: "/regioes", label: "Regiões" },
       { href: "/tempo-real", label: "Tempo Real" },
     ],
   },

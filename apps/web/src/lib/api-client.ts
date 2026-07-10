@@ -9,6 +9,7 @@ import {
   serializeMarketplaceSelection,
   type MarketplaceSelection,
 } from "./marketplace-filter";
+import { buildRegioesQueryParams } from "./regioes-query";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -1351,6 +1352,155 @@ export function fetchOperacoes(): Promise<{ data: OperacoesData | null; live: bo
     const raw = await apiFetch<OperacoesData>("/api/v1/performance/operacoes");
     return { data: raw, live: raw != null };
   });
+}
+
+// ---------- Regioes (Gate 6D.1) ----------
+// Sem dataset mock — ao contrario das demais telas, nao existe fallback de
+// demonstracao aqui: inventar numeros de cobertura/GMV por UF plausiveis
+// seria mais arriscado que simplesmente mostrar "API indisponivel" (mesmo
+// padrao ja usado por fetchPedidos/fetchBrandDetail/fetchTempoReal, que
+// tambem retornam T | null direto, sem wrapper live/mock).
+
+export type CoverageLevel = "ok" | "partial" | "low" | "not_applicable";
+
+export interface RegioesSummaryData {
+  gmv: number;
+  orders: number;
+  units_sold: number;
+  ufs_com_venda: number;
+  uf_known_orders: number;
+  uf_eligible_orders: number;
+  uf_fill_pct: number | null;
+  shipping_cost_covered_orders: number;
+  shipping_cost_eligible_orders: number;
+  shipping_cost_coverage_pct: number | null;
+  seller_shipping_cost: number | null;
+  coverage_level: CoverageLevel;
+  coverage_warning: boolean;
+  date_from: string;
+  date_to: string;
+  refreshed_at: string | null;
+  channels_sem_cobertura_regional: string[];
+}
+
+export interface RegiaoUfRow {
+  uf: string;
+  gmv: number;
+  orders: number;
+  units_sold: number;
+  canceled_orders: number;
+  returned_orders: number;
+  seller_shipping_cost: number | null;
+  uf_known_orders: number;
+  uf_eligible_orders: number;
+  shipping_cost_covered_orders: number;
+  shipping_cost_eligible_orders: number;
+  uf_fill_pct: number | null;
+  shipping_cost_coverage_pct: number | null;
+  coverage_level: CoverageLevel;
+  coverage_warning: boolean;
+}
+
+export interface RegioesByUfData {
+  data: RegiaoUfRow[];
+  date_from: string;
+  date_to: string;
+  refreshed_at: string | null;
+  channels_sem_cobertura_regional: string[];
+}
+
+export interface RegiaoBrandRow {
+  brand: string;
+  label: string;
+  marketplace_id: number;
+  marketplace: string;
+  gmv: number;
+  orders: number;
+  units_sold: number;
+  uf_known_orders: number;
+  uf_eligible_orders: number;
+  uf_fill_pct: number | null;
+  shipping_cost_covered_orders: number;
+  shipping_cost_eligible_orders: number;
+  shipping_cost_coverage_pct: number | null;
+  coverage_level: CoverageLevel;
+  coverage_warning: boolean;
+}
+
+export interface RegioesByBrandData {
+  data: RegiaoBrandRow[];
+  date_from: string;
+  date_to: string;
+  refreshed_at: string | null;
+  channels_sem_cobertura_regional: string[];
+}
+
+export interface RegiaoTrendPoint {
+  date: string;
+  label: string;
+  gmv: number;
+  orders: number;
+  uf_fill_pct: number | null;
+}
+
+export interface RegioesTrendData {
+  granularity: "day" | "month";
+  data: RegiaoTrendPoint[];
+  date_from: string;
+  date_to: string;
+  refreshed_at: string | null;
+  channels_sem_cobertura_regional: string[];
+}
+
+export interface RegioesFilterParams extends GlobalFilterParams {
+  /** UF(s) — filtro LOCAL da tela (nao faz parte do contrato de filtros
+   * globais/URL), suportado apenas por summary e by-uf (mesmo contrato do
+   * backend — by-brand/trend nao aceitam uf). */
+  uf?: string[];
+}
+
+export function fetchRegioesSummary(
+  selection: MarketplaceSelection,
+  filters?: RegioesFilterParams,
+): Promise<RegioesSummaryData | null> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildRegioesQueryParams(marketplace, filters);
+  return withCache(`regioes-summary:${qs.toString()}`, () =>
+    apiFetch<RegioesSummaryData>(`/api/v1/regioes/summary?${qs.toString()}`)
+  );
+}
+
+export function fetchRegioesByUf(
+  selection: MarketplaceSelection,
+  filters?: RegioesFilterParams,
+): Promise<RegioesByUfData | null> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildRegioesQueryParams(marketplace, filters);
+  return withCache(`regioes-by-uf:${qs.toString()}`, () =>
+    apiFetch<RegioesByUfData>(`/api/v1/regioes/by-uf?${qs.toString()}`)
+  );
+}
+
+export function fetchRegioesByBrand(
+  selection: MarketplaceSelection,
+  filters?: GlobalFilterParams,
+): Promise<RegioesByBrandData | null> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildFilterQuery(marketplace, undefined, filters);
+  return withCache(`regioes-by-brand:${qs.toString()}`, () =>
+    apiFetch<RegioesByBrandData>(`/api/v1/regioes/by-brand?${qs.toString()}`)
+  );
+}
+
+export function fetchRegioesTrend(
+  selection: MarketplaceSelection,
+  filters?: GlobalFilterParams,
+): Promise<RegioesTrendData | null> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildFilterQuery(marketplace, undefined, filters);
+  return withCache(`regioes-trend:${qs.toString()}`, () =>
+    apiFetch<RegioesTrendData>(`/api/v1/regioes/trend?${qs.toString()}`)
+  );
 }
 
 
