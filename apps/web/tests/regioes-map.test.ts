@@ -1,43 +1,15 @@
-// Testes do mapa regional (Gate 6D.2): normalizacao de intensidade de GMV,
-// escala de cor, e integridade da grade do cartograma. Roda via
-// `node --test` com type-stripping nativo do Node.
+// Testes do mapa regional (Gate 6D.3 — mapa real por UF): normalizacao de
+// intensidade de GMV, escala de cor, contorno de cobertura e ranking. Roda
+// via `node --test` com type-stripping nativo do Node. A geometria real do
+// mapa (paths SVG) e' testada separadamente em brazil-uf-paths.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  BRAZIL_UF_GRID, computeGmvIntensity, intensityToColor, textColorForIntensity, coverageGlyph,
+  computeGmvIntensity, intensityToColor, textColorForIntensity, coverageGlyph,
+  coverageStrokeColor, topUfsByGmv,
 } from "../src/lib/regioes-map.ts";
-
-const ALL_27_UFS = [
-  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
-  "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
-];
-
-// ---------------------------------------------------------------------------
-// Integridade da grade — regressao critica: nenhuma UF duplicada/faltando,
-// nenhuma celula (col,row) compartilhada por duas UFs, XX nunca presente.
-// ---------------------------------------------------------------------------
-test("BRAZIL_UF_GRID: contem exatamente as 27 UFs oficiais, sem duplicatas", () => {
-  const ufs = BRAZIL_UF_GRID.map((p) => p.uf);
-  assert.equal(ufs.length, 27);
-  assert.equal(new Set(ufs).size, 27);
-  assert.deepEqual([...ufs].sort(), [...ALL_27_UFS].sort());
-});
-
-test("BRAZIL_UF_GRID: nunca inclui XX", () => {
-  assert.ok(!BRAZIL_UF_GRID.some((p) => p.uf === "XX"));
-});
-
-test("BRAZIL_UF_GRID: nenhuma celula (col,row) e compartilhada por duas UFs", () => {
-  const cells = BRAZIL_UF_GRID.map((p) => `${p.col},${p.row}`);
-  const dupes = cells.filter((c, i) => cells.indexOf(c) !== i);
-  assert.deepEqual(dupes, []);
-});
-
-test("BRAZIL_UF_GRID: todas as posicoes sao nao-negativas", () => {
-  assert.ok(BRAZIL_UF_GRID.every((p) => p.col >= 0 && p.row >= 0));
-});
 
 // ---------------------------------------------------------------------------
 // computeGmvIntensity — maior GMV vira intensidade maxima; zero/ausente
@@ -137,8 +109,54 @@ test("coverageGlyph: partial/low/not_applicable tem marcadores distintos entre s
 });
 
 // ---------------------------------------------------------------------------
+// coverageStrokeColor — sinal adicional de cobertura no contorno do estado,
+// nunca substitui a cor de preenchimento (GMV). "ok"/"not_applicable" nao
+// tem contorno de alerta (usam o contorno neutro padrao do mapa).
+// ---------------------------------------------------------------------------
+test("coverageStrokeColor: 'ok' e 'not_applicable' nao tem contorno de alerta", () => {
+  assert.equal(coverageStrokeColor("ok"), null);
+  assert.equal(coverageStrokeColor("not_applicable"), null);
+});
+
+test("coverageStrokeColor: 'low' e 'partial' tem contornos distintos entre si", () => {
+  const low = coverageStrokeColor("low");
+  const partial = coverageStrokeColor("partial");
+  assert.ok(low);
+  assert.ok(partial);
+  assert.notEqual(low, partial);
+});
+
+// ---------------------------------------------------------------------------
+// topUfsByGmv — ranking usado no painel de detalhe quando nada esta em
+// foco/selecionado; XX nunca aparece (nao e' uma UF do mapa).
+// ---------------------------------------------------------------------------
+test("topUfsByGmv: retorna as N maiores por gmv, maior primeiro", () => {
+  const top = topUfsByGmv([
+    { uf: "SP", gmv: 100 },
+    { uf: "RJ", gmv: 300 },
+    { uf: "MG", gmv: 200 },
+  ], 2);
+  assert.deepEqual(top.map((r) => r.uf), ["RJ", "MG"]);
+});
+
+test("topUfsByGmv: exclui XX mesmo com gmv alto", () => {
+  const top = topUfsByGmv([{ uf: "XX", gmv: 999999 }, { uf: "SP", gmv: 100 }], 3);
+  assert.deepEqual(top.map((r) => r.uf), ["SP"]);
+});
+
+test("topUfsByGmv: limit maior que o total nao lanca excecao", () => {
+  const top = topUfsByGmv([{ uf: "SP", gmv: 100 }], 10);
+  assert.equal(top.length, 1);
+});
+
+test("topUfsByGmv: lista vazia retorna lista vazia", () => {
+  assert.deepEqual(topUfsByGmv([], 3), []);
+});
+
+// ---------------------------------------------------------------------------
 // Sem dependencia pesada nova — nenhuma lib de mapa/geo/scale foi
-// adicionada ao package.json para implementar o cartograma.
+// adicionada ao package.json para implementar o mapa (o asset de geometria
+// e' um arquivo TS local versionado, ver brazil-uf-paths.ts).
 // ---------------------------------------------------------------------------
 test("package.json: nenhuma dependencia pesada de mapa/geo foi adicionada", () => {
   const pkgPath = path.join(import.meta.dirname, "..", "package.json");

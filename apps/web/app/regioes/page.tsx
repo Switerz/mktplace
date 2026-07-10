@@ -257,7 +257,7 @@ function RegioesPageInner() {
               />
             </div>
 
-            {/* Mapa do Brasil por UF — cartograma em grade, ver RegioesBrazilMap.tsx */}
+            {/* Mapa do Brasil por UF — geometria real (SVG), ver RegioesBrazilMap.tsx */}
             <RegioesBrazilMap rows={byUf} totalGmv={summary?.gmv ?? 0} loading={loading} />
 
             {/* Ranking por UF */}

@@ -1,55 +1,17 @@
 import type { CoverageLevel } from "./api-client";
 
 /**
- * Cartograma em grade (grid map) do Brasil por UF — NÃO é uma projeção
- * geográfica precisa. Posições em (col, row) aproximam a posição relativa
- * real de cada estado por região (Norte no topo, Nordeste no arco superior
- * direito, Centro-Oeste no meio, Sudeste/Sul na parte inferior), o
- * suficiente para reconhecimento visual num dashboard sem depender de
- * geometria SVG real (que exigiria um dataset topográfico externo — fora do
- * escopo "sem dependência pesada" / "sem baixar assets externos em
- * runtime" deste Gate). Pode ser substituído por um SVG geográfico real no
- * futuro sem mudar o contrato deste módulo (computeGmvIntensity/
- * intensityToColor continuam válidos para qualquer forma de apresentação).
+ * Utilidades de apresentação do mapa regional por UF — normalização de
+ * intensidade de GMV, escala de cor e ranking. A geometria real do mapa
+ * (paths SVG por UF, com projeção geográfica de fato) vive em
+ * ./brazil-uf-paths; este módulo não depende de nenhuma forma de
+ * apresentação específica (grade, SVG, etc.) e continua valendo tal como
+ * antes da troca do cartograma em grade pelo mapa real.
  *
- * `XX` (UF desconhecida) deliberadamente NÃO entra nesta grade — é sempre
- * exibida separadamente (ver RegioesBrazilMap.tsx).
+ * `XX` (UF desconhecida) é deliberadamente excluída de toda normalização
+ * aqui — é sempre exibida separadamente, fora do mapa (ver
+ * RegioesBrazilMap.tsx).
  */
-export interface UfPosition {
-  uf: string;
-  col: number;
-  row: number;
-}
-
-export const BRAZIL_UF_GRID: readonly UfPosition[] = [
-  { uf: "RR", col: 2, row: 0 },
-  { uf: "AM", col: 1, row: 1 },
-  { uf: "PA", col: 3, row: 1 },
-  { uf: "AP", col: 4, row: 1 },
-  { uf: "RO", col: 1, row: 2 },
-  { uf: "MA", col: 4, row: 2 },
-  { uf: "PI", col: 5, row: 2 },
-  { uf: "CE", col: 6, row: 2 },
-  { uf: "RN", col: 7, row: 2 },
-  { uf: "AC", col: 0, row: 3 },
-  { uf: "MT", col: 2, row: 3 },
-  { uf: "TO", col: 3, row: 3 },
-  { uf: "BA", col: 5, row: 3 },
-  { uf: "PE", col: 6, row: 3 },
-  { uf: "PB", col: 7, row: 3 },
-  { uf: "MS", col: 2, row: 4 },
-  { uf: "GO", col: 3, row: 4 },
-  { uf: "DF", col: 4, row: 4 },
-  { uf: "SE", col: 5, row: 4 },
-  { uf: "AL", col: 6, row: 4 },
-  { uf: "MG", col: 4, row: 5 },
-  { uf: "ES", col: 5, row: 5 },
-  { uf: "SP", col: 3, row: 6 },
-  { uf: "RJ", col: 4, row: 6 },
-  { uf: "PR", col: 3, row: 7 },
-  { uf: "SC", col: 3, row: 8 },
-  { uf: "RS", col: 3, row: 9 },
-] as const;
 
 /**
  * Intensidade de GMV (0 a 1) relativa ao MAIOR gmv presente no conjunto
@@ -103,4 +65,30 @@ export function coverageGlyph(level: CoverageLevel): string {
     case "low": return "!!";
     case "not_applicable": return "–";
   }
+}
+
+/**
+ * Cor de contorno por nível de cobertura — sinal ADICIONAL à cor de
+ * preenchimento (que continua representando GMV), nunca a substitui.
+ * "ok"/"not_applicable" usam o contorno neutro padrão do mapa.
+ */
+export function coverageStrokeColor(level: CoverageLevel): string | null {
+  switch (level) {
+    case "low": return "#e11d48"; // rose-600
+    case "partial": return "#d97706"; // amber-600
+    default: return null;
+  }
+}
+
+/**
+ * Top N UFs por GMV, maior primeiro — usado no painel de detalhe quando
+ * nenhuma UF está em foco/selecionada. `XX` é sempre excluída (não é uma UF
+ * do mapa). Empates mantêm a ordem original (sort estável).
+ */
+export function topUfsByGmv<T extends { uf: string; gmv: number }>(rows: readonly T[], limit: number): T[] {
+  return rows
+    .filter((r) => r.uf !== "XX")
+    .slice()
+    .sort((a, b) => b.gmv - a.gmv)
+    .slice(0, Math.max(0, limit));
 }
