@@ -422,4 +422,47 @@ Diagnóstico somente leitura confirmou: `marts.fact_marketplace_region_daily` ai
 
 **Validação rodada**: `pytest pipelines/tests` completo (908 passed), `compileall` nos 3 arquivos novos, `alembic upgrade head --sql` (gera o SQL da migration 005 offline, sem conectar a nenhum banco — cadeia 001→005 íntegra), `git diff --cached --check` (sem problemas de whitespace), varredura manual de segredos/PII nos 3 arquivos novos (únicos matches são texto explicativo e credenciais fake de teste, iguais ao padrão já usado em `test_gold_regional_ddl.py`).
 
-**Gate 6B permanece bloqueado**: nem a migration 005 foi aplicada no Neon, nem `pipelines/sync_region_daily.py --sync` foi executado contra qualquer banco real. Gate 6B.2 (preflight real Data Mart + Neon) e Gate 6B.3 (aplicar migration + executar sync real) exigem autorização explícita separada, como em todos os gates anteriores desta feature.
+**Gate 6B.1 concluído nesta forma** (implementação + testes, nenhuma escrita real) — ver §12 para o resultado da execução real do Gate 6B.2/6B.3, autorizada e executada em seguida.
+
+## 12. Gate 6B.2/6B.3 — Resultado da execução real (executado com autorização explícita)
+
+### Achado de preflight: drift do alembic
+
+A tabela `alembic_version` não existia no Neon — as migrations 001–004 haviam sido aplicadas por fora do mecanismo do alembic em algum momento anterior, mas a estrutura já batia exatamente com o que elas descrevem (confirmado objeto a objeto antes de qualquer ação). Runbook de reconciliação, autorizado explicitamente pelo usuário entre três opções apresentadas: `alembic stamp 004` (grava apenas a tabela de controle, zero DDL de negócio) seguido de `alembic upgrade head` (roda somente a migration 005, confirmado via `alembic upgrade 004:head --sql` antes da execução real). Nenhuma das migrations 001–004 foi reexecutada.
+
+### Preflight (somente leitura, antes de qualquer escrita)
+
+- **Data Mart**: `gold.marketplace_region_daily` com 33.343 linhas, zero duplicidade, zero nulos obrigatórios, TikTok 0 linhas, zero colunas de PII (20 colunas, nenhuma suspeita).
+- **Neon**: `marts.fact_marketplace_region_daily` não existia (OK para prosseguir); `dim_calendario` cobre 2024-01-01–2027-12-31; `dim_marketplace`/`dim_loja` com os mesmos IDs 1–5 já usados em todo o Gate 6A; role com `CREATE`/`USAGE` em `marts` e `audit`.
+
+### Migration 005 aplicada
+
+`alembic upgrade head` (real, com estado reconciliado em 004) criou `marts.fact_marketplace_region_daily` com exatamente as constraints/FKs/índices esperados: `chk_fmrd_gmv_non_negative`, `chk_fmrd_shipping_non_negative`, `chk_fmrd_uf_valida`, FKs para `dim_calendario(date)`/`dim_marketplace(marketplace_id)`/`dim_loja(loja_id)`, `UNIQUE(date, marketplace_id, loja_id, uf)`, PK, e os 3 índices `idx_fmrd_date`/`idx_fmrd_uf`/`idx_fmrd_loja_marketplace`. Tabela criada vazia (0 linhas), confirmado antes do sync.
+
+### Sync executado (`pipelines/sync_region_daily.py --sync`)
+
+**33.343 linhas** carregadas no Neon (primeira carga — sem tabela anterior, backup não aplicável). GMV total: R$ 50.035.397,78 (idêntico à fonte).
+
+### Reconciliação pós-carga (Neon vs. Data Mart)
+
+| Verificação | Resultado |
+|---|---|
+| Contagem total | 33.343 = 33.343 |
+| Combinações marketplace × loja × mês | 75 = 75 (idênticas nos dois lados — zero linhas exclusivas de qualquer lado) |
+| GMV, orders, units_sold, canceled_orders, returned_orders, uf_known/eligible, shipping_cost_covered/eligible por marketplace × loja × mês | Idênticos em todas as 75 combinações |
+| Duplicidade na chave `(date, marketplace_id, loja_id, uf)` | 0 |
+| Nulos obrigatórios | 0 |
+| Numerador > denominador | 0 |
+| TikTok (`marketplace_id=1`) | 0 linhas |
+| Colunas de PII | 0 (20 colunas, nenhuma suspeita) |
+| Barbours nov/2025–mar/2026 (`uf_fill_pct`) | 42,26% / 33,86% / 1,72% / 0,12% / 0,27% — **idêntico ao Data Mart (§10)**, baixa cobertura preservada, não mascarada |
+
+Diagnóstico idempotente pós-carga (`pipelines/sync_region_daily.py --diagnose`): `Precisa sincronizar: False` — fonte e destino batem exatamente.
+
+### Escopo não tocado
+
+Frontend, endpoints `/regioes/*`, e qualquer deploy continuam intocados — nenhum arquivo de `apps/web` ou `apps/api/app/routers` foi alterado nesta etapa.
+
+### Gate 6C
+
+Bloqueado, aguardando autorização explícita separada: endpoints `/regioes/*` lendo `marts.fact_marketplace_region_daily`, e qualquer mudança de frontend.
