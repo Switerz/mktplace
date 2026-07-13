@@ -34,6 +34,10 @@ test("legenda distingue N\\/A de Sem dado explicitamente", () => {
   assert.match(source, /Sem dado = deveria existir/);
 });
 
+test("legenda explica o terceiro estado — (denominador zero/nao calculavel)", () => {
+  assert.match(source, /— = denominador zero ou m[ée]trica n[ãa]o calc/);
+});
+
 test("usa o modulo de metricas por canal em vez de logica ad-hoc duplicada", () => {
   assert.match(source, /from "@\/lib\/canais-channel-metrics"/);
 });

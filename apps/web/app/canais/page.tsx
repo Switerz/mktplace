@@ -607,6 +607,7 @@ function CanaisPageInner() {
             <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
             <span className="text-xs text-slate-500">N/A = não se aplica a esse canal</span>
             <span className="text-xs text-amber-700 font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
+            <span className="text-xs text-slate-400">— = denominador zero ou métrica não calculável no período (ex.: Ads/GMV quando GMV = 0)</span>
             <span className="ml-auto text-[10px] text-slate-400 max-w-md text-right">
               Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
             </span>

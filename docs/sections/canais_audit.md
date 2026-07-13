@@ -396,3 +396,21 @@ Não é A puro (dado 100% pronto) nem D (não precisa de endpoint novo — é ex
 | `apps/web/app/canais/page.tsx` | Novas colunas na matriz por canal, card de "Cobertura de dados", seção "Oportunidades" |
 | `apps/web/src/lib/api-client.ts` | Atualizar tipos `CanaisKpis`/`CanaisBrandRow` |
 | `docs/sections/canais_audit.md` | Esta seção (14) — Gate 1 concluído |
+
+---
+
+## 15. Gate 2 — QA de produção (2026-07-13): granularidade dos Ads Shopee
+
+Implementação do Gate 2 (`get_canais()` estendido com `channel_rows`/`channel_medians`) validada em produção (Render + Vercel) após redeploy. Todos os itens do contrato da seção 14 confirmados corretos: TikTok em N/A para Ads/ROAS/ACOS/Frete, ML em "Sem dado" para custo marketplace, Shopee com valores reais quando disponível, sinais de oportunidade coerentes, sem erros de console.
+
+Uma checagem de QA comparou ROAS/ACOS da Shopee entre mai/2026 e jun/2026 e encontrou os dois praticamente iguais por marca, apesar de `ad_spend`/`ad_revenue` absolutos serem diferentes entre os meses. Investigação direta contra a API (comparação numérica, sem alterar cálculo) confirmou a causa raiz — **não é bug do Gate 2**, é uma característica já documentada da fonte de dados:
+
+- O export de Ads da Shopee (`Dados*.csv`, ver `docs/source_mapping.md` seção Shopee) **não tem granularidade diária** — vem como total do período.
+- O pipeline distribui esse total como média diária ao longo dos dias cobertos pelo arquivo (limitação operacional já registrada em `docs/source_mapping.md`).
+- Como `ad_spend` e `ad_revenue` diários são ambos fatias proporcionais do mesmo total fixo, a razão entre eles (ROAS/ACOS) tende a ficar estável para **qualquer recorte de data dentro da mesma janela de distribuição** — mesmo que os valores absolutos mudem corretamente com o período (confirmado: `ad_spend`/`ad_revenue` de mai/2026 ≠ jun/2026 em todas as 5 marcas testadas).
+- Adicionalmente, **pedidos/GMV e Ads da Shopee têm coberturas temporais diferentes**: a sincronização de pedidos (`shopee_daily`) cobre até 31/05/2026, enquanto Ads (`shopee-ads_daily`) cobre até 20/06/2026. Por isso jun/2026 mostra `gmv=0`/`orders=0` com `ad_spend`/`ad_revenue` reais — um gap de cobertura pré-existente, não introduzido por este Gate.
+- Quando `gmv=0` e há dado de Ads no período, `ads_gmv_pct` fica `None` (denominador zero) e a UI mostra `—` corretamente — nunca "0%". Esse terceiro estado (distinto de N/A e de Sem dado) foi adicionado à legenda do rodapé da tabela em `apps/web/app/canais/page.tsx` nesta rodada.
+
+**Nenhuma alteração de cálculo foi feita** — `roas`/`acos_pct`/`ads_gmv_pct` continuam `ad_revenue/ad_spend`, `ad_spend/ad_revenue*100` e `ad_spend/gmv*100` respectivamente, exatamente como no Gate 2. O ajuste desta rodada foi só de clareza textual (legenda) e desta nota de documentação.
+
+**Pendência de dados registrada (fora do escopo desta rodada):** se a granularidade diária real dos Ads Shopee ou a reconciliação de cobertura pedidos×ads vier a ser necessária para decisões operacionais, requer nova fonte (relatório com granularidade diária da Shopee Ads) — mesma categoria de pendência de dados já registrada na seção 14.3.
