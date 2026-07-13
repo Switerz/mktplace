@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps.filters import ResolvedFilters, filters_query, filters_query_default_days
 from app.deps.period import EffectivePeriod, resolve_period, today_brt
+from app.schemas.executive_summary import ExecutiveSummaryResponse
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -14,6 +15,7 @@ from app.schemas.performance import (
     ProdutosShopeeResponse, ProdutosShopeeSummaryResponse,
     QualityResponse, TempoRealResponse, TrendResponse,
 )
+from app.services import executive_summary_service
 from app.services import gold_service as svc
 from app.services import performance_service as perf_svc
 
@@ -126,6 +128,19 @@ def trend(
     channels/brands/date_from/date_to. A soma de `data[].gmv` sempre bate com
     o GMV de /overview para o mesmo escopo (mesma WHERE clause)."""
     return perf_svc.get_trend(_require_db(db), filters.channels, filters.brands, filters.period)
+
+
+@router.get("/executive-summary", response_model=ExecutiveSummaryResponse)
+def executive_summary(
+    filters: ResolvedFilters = Depends(filters_query),
+    db: Session = Depends(get_db),
+):
+    """Resumo executivo da Gerencial (Gate 2, Fase 1 — docs/sections/
+    gerencial_audit.md secao 11): Health/Changes/Risks/DataWarnings.
+    Reaproveita get_overview/get_brands/get_quality/get_canais e
+    regioes_service.get_summary — nao duplica SQL. Opportunities e Matriz
+    Marca x Canal ficam para a Fase 2."""
+    return executive_summary_service.get_executive_summary(_require_db(db), filters)
 
 
 @router.get("/daily", response_model=DailyResponse)

@@ -2,8 +2,8 @@
 
 import { Suspense, useEffect, useState } from "react";
 import {
-  fetchOverview, fetchBrands, fetchTrend,
-  type OverviewData, type BrandRow, type TrendPoint,
+  fetchOverview, fetchBrands, fetchTrend, fetchExecutiveSummary,
+  type OverviewData, type BrandRow, type TrendPoint, type ExecutiveSummaryData,
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
@@ -13,6 +13,7 @@ import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import TrendChart from "@/components/TrendChart";
 import BrandPerformanceTable from "@/components/BrandPerformanceTable";
+import ExecutiveSummaryCard from "@/components/ExecutiveSummaryCard";
 import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
@@ -37,6 +38,8 @@ function DashboardInner() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  const [execSummary, setExecSummary] = useState<ExecutiveSummaryData | null>(null);
+  const [execLoading, setExecLoading] = useState(true);
 
   useEffect(() => {
     // Ignora a resposta se os filtros mudarem antes dela chegar — evita que
@@ -64,6 +67,27 @@ function DashboardInner() {
       setError("Falha ao carregar dados. Verifique a conexão e tente novamente.");
       setLoading(false);
     });
+    return () => { ignore = true; };
+  }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
+
+  useEffect(() => {
+    // Efeito independente do Promise.all acima: uma falha aqui nunca deve
+    // acionar o banner de erro nem bloquear cards/tabela/trend — o resumo
+    // executivo e um bloco de sintese, nao um dado essencial da Gerencial.
+    let ignore = false;
+    setExecLoading(true);
+    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
+    fetchExecutiveSummary(filters.channels, opts)
+      .then((res) => {
+        if (ignore) return;
+        setExecSummary(res.data);
+        setExecLoading(false);
+      })
+      .catch(() => {
+        if (ignore) return;
+        setExecSummary(null);
+        setExecLoading(false);
+      });
     return () => { ignore = true; };
   }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
 
@@ -150,6 +174,11 @@ function DashboardInner() {
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {loading ? "Carregando dados..." : error ? "Falha ao carregar dados." : "Dados carregados."}
         </span>
+
+        {/* Resumo executivo — sintese de Saude/O que mudou/Atencoes (Gate 2
+            Fase 1). Fetch e falha independentes dos cards/tabela/trend
+            abaixo (ver useEffect proprio). */}
+        <ExecutiveSummaryCard data={execSummary} loading={execLoading} />
 
         {isEmpty ? (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">

@@ -378,6 +378,65 @@ export function fetchTrend(
   });
 }
 
+// ---------- Resumo executivo (Gerencial, Gate 2 Fase 1) ----------
+// Sem fallback de mock: e um bloco de insights, nao um KPI de demonstracao —
+// se a API falhar, `data` vem null e o componente mostra aviso discreto,
+// deixando cards/tabela/trend da Gerencial funcionando normalmente (eles
+// tem seu proprio fetch independente em Promise.all).
+
+export interface ExecutivePeriod {
+  date_from: string;
+  date_to: string;
+  compare_date_from: string | null;
+  compare_date_to: string | null;
+  refreshed_at: string | null;
+}
+
+export interface ExecutiveHealth {
+  status: "ok" | "attention" | "critical";
+  gmv: number;
+  gmv_mom_pct: number | null;
+  orders: number;
+  avg_ticket: number;
+  summary: string;
+}
+
+export interface ExecutiveInsight {
+  type: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  description: string;
+  brand: string | null;
+  marketplace: string | null;
+  metric_value: number | null;
+  href: string;
+}
+
+export interface ExecutiveDataWarning {
+  type: string;
+  severity: "info" | "warning" | "critical";
+  message: string;
+  href: string | null;
+}
+
+export interface ExecutiveSummaryData {
+  period: ExecutivePeriod;
+  health: ExecutiveHealth;
+  changes: ExecutiveInsight[];
+  risks: ExecutiveInsight[];
+  data_warnings: ExecutiveDataWarning[];
+}
+
+export async function fetchExecutiveSummary(
+  selection: MarketplaceSelection,
+  filters?: GlobalFilterParams,
+): Promise<{ data: ExecutiveSummaryData | null }> {
+  const marketplace = serializeMarketplaceSelection(selection);
+  const qs = buildFilterQuery(marketplace, undefined, filters);
+  const raw = await apiFetch<ExecutiveSummaryData>(`/api/v1/performance/executive-summary?${qs.toString()}`);
+  return { data: raw };
+}
+
 export interface ProdutoMLRow {
   brand: string;
   item_id: string;
