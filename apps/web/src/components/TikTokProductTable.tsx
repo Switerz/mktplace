@@ -38,7 +38,7 @@ interface Props {
 /** Colunas especificas do TikTok Shop: composicao do GMV por video/live/card,
  * taxa de problemas (ressalva de cobertura), rating e numero de avaliacoes. */
 export default function TikTokProductTable({ items, loading, sort, onSort, pagination }: Props) {
-  const COL_COUNT = 8;
+  const COL_COUNT = 9;
   return (
     <ProductTableShell<ProdutoTikTokRow>
       ariaLabel="Produtos TikTok Shop"
@@ -51,6 +51,7 @@ export default function TikTokProductTable({ items, loading, sort, onSort, pagin
           <SortableHeader label="Produto" column="product_name" sort={sort} onSort={onSort} align="left" />
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
           <SortableHeader label="GMV" column="gmv" sort={sort} onSort={onSort} align="right" />
+          <SortableHeader label="Preço Médio" column="avg_price" sort={sort} onSort={onSort} align="right" />
           <SortableHeader label="Pedidos" column="orders" sort={sort} onSort={onSort} align="right" />
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Pareto</th>
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Canal</th>
@@ -66,6 +67,9 @@ export default function TikTokProductTable({ items, loading, sort, onSort, pagin
           </td>
           <td className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase whitespace-nowrap">{p.brand}</td>
           <td className="px-4 py-3 text-right tabular-nums text-slate-700 font-medium whitespace-nowrap">{fmtBrl(p.gmv)}</td>
+          <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums text-slate-600">
+            {p.avg_price != null ? fmtBrl(p.avg_price) : <span className="text-slate-300">—</span>}
+          </td>
           <td className="px-4 py-3 text-right whitespace-nowrap">
             <p className="tabular-nums text-slate-600">{fmtNumber(p.orders)} ped.</p>
             {p.items_sold != null && p.items_sold !== p.orders && (

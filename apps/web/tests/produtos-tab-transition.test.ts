@@ -7,6 +7,9 @@ import {
   brandSurvivesTabChange,
   toggleBucketSelection,
   zeroGmvNote,
+  avgPriceNote,
+  marginUnavailableNote,
+  lastNMonths,
   ML_BRAND_VALUES,
   TK_SH_BRAND_VALUES,
 } from "../src/lib/produtos-tab-transition.ts";
@@ -59,4 +62,36 @@ test("zeroGmvNote: 1 produto excluido usa singular", () => {
 
 test("zeroGmvNote: mais de 1 produto excluido usa plural", () => {
   assert.match(zeroGmvNote(239), /239 produtos sem GMV estão fora dos buckets/);
+});
+
+test("avgPriceNote: null/undefined nao mostra nota (dirigido pela API, nunca hardcoded)", () => {
+  assert.equal(avgPriceNote(null), "");
+  assert.equal(avgPriceNote(undefined), "");
+});
+
+test("avgPriceNote: valor presente formata como moeda BRL cheia", () => {
+  assert.match(avgPriceNote(123.456), /R\$\s*123,46/);
+});
+
+test("marginUnavailableNote: ML menciona ROAS/ACOS, nao 'margem' calculavel", () => {
+  const note = marginUnavailableNote("ml");
+  assert.match(note, /Margem real indisponível/);
+  assert.match(note, /ROAS\/ACOS/);
+});
+
+test("marginUnavailableNote: TikTok e Shopee bloqueiam qualquer eficiencia de ads por produto", () => {
+  assert.match(marginUnavailableNote("tiktok"), /indisponível nesta fonte/);
+  assert.match(marginUnavailableNote("shopee"), /indisponível nesta fonte/);
+});
+
+test("lastNMonths: mes atual e o primeiro da lista e leva o sufixo '(atual)'", () => {
+  const months = lastNMonths(3, new Date(2026, 5, 15)); // Jun/2026 (mes 0-indexado)
+  assert.deepEqual(months.map((m) => m.value), ["2026-06", "2026-05", "2026-04"]);
+  assert.equal(months[0].label, "Jun/26 (atual)");
+  assert.equal(months[1].label, "Mai/26");
+});
+
+test("lastNMonths: atravessa virada de ano corretamente", () => {
+  const months = lastNMonths(3, new Date(2026, 0, 10)); // Jan/2026
+  assert.deepEqual(months.map((m) => m.value), ["2026-01", "2025-12", "2025-11"]);
 });

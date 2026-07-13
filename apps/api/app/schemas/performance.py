@@ -446,6 +446,9 @@ class ProdutosMLSummaryResponse(BaseModel):
     buckets: list[ParetoBucketSummary]
     scope: str = "ranking_acumulado_atual"
     refreshed_at: Optional[str] = None
+    # total_gmv / total_units do escopo elegivel (GMV>0) — media ponderada,
+    # NUNCA media simples de avg_price por linha (ver produtos_audit.md 10.5).
+    avg_price_weighted: Optional[float] = None
 
 
 class ProdutoTikTokRow(BaseModel):
@@ -455,6 +458,9 @@ class ProdutoTikTokRow(BaseModel):
     gmv: float
     orders: int
     items_sold: int
+    # gmv / items_sold, calculado no service (NULL quando items_sold = 0) —
+    # ver docs/sections/produtos_audit.md secao 10.2.
+    avg_price: Optional[float] = None
     pct_gmv_video: Optional[float] = None
     pct_gmv_live: Optional[float] = None
     pct_gmv_card: Optional[float] = None
@@ -480,6 +486,7 @@ class ProdutosTikTokSummaryResponse(BaseModel):
     excluded_zero_gmv_count: int
     brand: Optional[str] = None
     buckets: list[ParetoBucketSummary]
+    avg_price_weighted: Optional[float] = None
 
 
 class ProdutosShopeeSummaryResponse(BaseModel):
@@ -490,6 +497,7 @@ class ProdutosShopeeSummaryResponse(BaseModel):
     excluded_zero_gmv_count: int
     brand: Optional[str] = None
     buckets: list[ParetoBucketSummary]
+    avg_price_weighted: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

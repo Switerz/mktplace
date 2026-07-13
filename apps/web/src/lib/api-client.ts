@@ -416,6 +416,8 @@ export interface ProdutoTikTokRow {
   gmv: number;
   orders: number;
   items_sold: number;
+  // gmv / items_sold, calculado no backend (null quando items_sold = 0).
+  avg_price: number | null;
   pct_gmv_video: number | null;
   pct_gmv_live: number | null;
   pct_gmv_card: number | null;
@@ -545,6 +547,9 @@ export interface ProdutosMLSummary {
   buckets: ParetoSummaryBucket[];
   scope: string;
   refreshed_at: string | null;
+  // total_gmv do escopo elegivel / total de unidades — media ponderada,
+  // nunca media simples de avg_price por linha.
+  avg_price_weighted: number | null;
 }
 
 export function fetchProdutosMLSummary(params: {
@@ -571,6 +576,7 @@ export interface ProdutosChannelSummary {
   excluded_zero_gmv_count: number;
   brand: string | null;
   buckets: ParetoSummaryBucket[];
+  avg_price_weighted: number | null;
 }
 
 export function fetchProdutosTikTokSummary(params: { brand?: string; period?: string } = {}): Promise<ProdutosChannelSummary | null> {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchProdutosML, fetchProdutosTikTok, fetchProdutosShopee,
   fetchProdutosMLSummary, fetchProdutosTikTokSummary, fetchProdutosShopeeSummary,
@@ -16,9 +16,11 @@ import ProductCount from "@/components/ProductCount";
 import MercadoLivreProductTable from "@/components/MercadoLivreProductTable";
 import TikTokProductTable from "@/components/TikTokProductTable";
 import ShopeeProductTable from "@/components/ShopeeProductTable";
-import { AVAILABLE_MONTHS } from "@/lib/mock-daily";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
-import { brandSurvivesTabChange, toggleBucketSelection, zeroGmvNote, type ProdutosTab } from "@/lib/produtos-tab-transition";
+import {
+  brandSurvivesTabChange, toggleBucketSelection, zeroGmvNote, avgPriceNote, marginUnavailableNote,
+  lastNMonths, type ProdutosTab,
+} from "@/lib/produtos-tab-transition";
 import { initialChannelState, startFetch, resolveFetch, resolveFetchError, type ChannelState } from "@/lib/async-channel-state";
 
 type Tab = ProdutosTab;
@@ -58,9 +60,14 @@ function fmtRefreshedAt(iso: string | null): string {
   }
 }
 
+const PERIOD_MONTHS_BACK = 7;
+
 export default function ProdutosPage() {
   const [tab, setTab] = useState<Tab>("ml");
-  const [period, setPeriod] = useState(AVAILABLE_MONTHS[0].value);
+  // Gerado a partir da data atual em vez de uma lista fixa hardcoded (Gate 2,
+  // produtos_audit.md secao 10.4) — calculado uma vez por montagem da pagina.
+  const monthOptions = useMemo(() => lastNMonths(PERIOD_MONTHS_BACK, new Date()), []);
+  const [period, setPeriod] = useState(() => monthOptions[0].value);
 
   // Filtros padronizados (marca + bucket) — marca e compartilhada entre
   // abas (preservada quando existe no canal); bucket e sempre por aba,
@@ -285,7 +292,7 @@ export default function ProdutosPage() {
     setShBucket(null);
   }
 
-  const periodLabel = AVAILABLE_MONTHS.find((m) => m.value === period)?.label ?? period;
+  const periodLabel = monthOptions.find((m) => m.value === period)?.label ?? period;
 
   return (
     <div className="min-h-screen bg-[#f8f7ff]">
@@ -352,7 +359,7 @@ export default function ProdutosPage() {
               onSelectBucket={setMlBucket}
               scopeNote={
                 mlSummaryState.data
-                  ? `Escopo: ranking acumulado atual${mlSummaryState.data.refreshed_at ? ` · atualizado em ${fmtRefreshedAt(mlSummaryState.data.refreshed_at)}` : ""} — o Mercado Livre nao possui competência mensal na fonte atual, por isso não há seletor de período aqui.${zeroGmvNote(mlSummaryState.data.excluded_zero_gmv_count)}`
+                  ? `Escopo: ranking acumulado atual${mlSummaryState.data.refreshed_at ? ` · atualizado em ${fmtRefreshedAt(mlSummaryState.data.refreshed_at)}` : ""} — o Mercado Livre nao possui competência mensal na fonte atual, por isso não há seletor de período aqui.${zeroGmvNote(mlSummaryState.data.excluded_zero_gmv_count)}${avgPriceNote(mlSummaryState.data.avg_price_weighted)} ${marginUnavailableNote("ml")}`
                   : undefined
               }
             />
@@ -375,7 +382,7 @@ export default function ProdutosPage() {
                 <option value="">Todas as marcas</option>
                 {TK_SH_BRANDS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
               </ProductSelect>
-              <PeriodSelector value={period} onChange={setPeriod} />
+              <PeriodSelector value={period} onChange={setPeriod} months={monthOptions} />
               <ProductCount total={tkState.data?.total ?? null} />
             </ProductFilterBar>
 
@@ -384,7 +391,7 @@ export default function ProdutosPage() {
               loading={tkSummaryState.loading}
               activeBucket={tkBucket}
               onSelectBucket={setTkBucket}
-              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(tkSummaryState.data?.excluded_zero_gmv_count)}`}
+              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(tkSummaryState.data?.excluded_zero_gmv_count)}${avgPriceNote(tkSummaryState.data?.avg_price_weighted)} ${marginUnavailableNote("tiktok")}`}
             />
 
             <TikTokProductTable
@@ -405,7 +412,7 @@ export default function ProdutosPage() {
                 <option value="">Todas as marcas</option>
                 {TK_SH_BRANDS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
               </ProductSelect>
-              <PeriodSelector value={period} onChange={setPeriod} />
+              <PeriodSelector value={period} onChange={setPeriod} months={monthOptions} />
               <ProductCount total={shState.data?.total ?? null} />
             </ProductFilterBar>
 
@@ -414,7 +421,7 @@ export default function ProdutosPage() {
               loading={shSummaryState.loading}
               activeBucket={shBucket}
               onSelectBucket={setShBucket}
-              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(shSummaryState.data?.excluded_zero_gmv_count)}`}
+              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(shSummaryState.data?.excluded_zero_gmv_count)}${avgPriceNote(shSummaryState.data?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
             />
 
             <ShopeeProductTable

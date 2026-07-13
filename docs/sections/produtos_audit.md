@@ -515,3 +515,154 @@ A aba ML lê `gold.ml_produto_ranking` que é um ranking sem data de corte expos
 | ML | Sim (Neon, atualizado até 2026-07-01) | Ranking sem data explícita | Confiável, inclui `rituaria` (Bug 4 resolvido) — sem contexto temporal no ranking (Problema 5) |
 | TikTok | Sim (Neon, atualizado até 2026-06-29) | Filtrado por mês | Confiável com ressalva de problem_rate |
 | Shopee | Sim (Neon, corrigido) | jan–mai/2026 | Confiável para GMV/units/completed/**canceled** (validado contra os 85 XLSX originais, diff zero nas 25 combinações marca×mês em 2026-07-03) — identidade de produto usa chave estrita, sem consolidação automática (Bug 9); Bug 8 resolvido em produção |
+
+---
+
+## 10. Preço médio e margem do anúncio — Gate 1 (auditoria, 2026-07-13)
+
+Pedido do gestor: "Colocar preço médio e margem do anúncio. Ter flag de data e escolha do período." Esta seção audita fonte, grão e disponibilidade **antes** de qualquer implementação. Nenhuma alteração de UI/API/banco foi feita nesta rodada — leitura de código e de documentação apenas.
+
+### 10.1 Estado atual (mapeamento)
+
+| Tab | Endpoints | Filtros suportados hoje | Grão | Fonte |
+|---|---|---|---|---|
+| Mercado Livre | `/produtos/ml`, `/produtos/ml/summary` | `brand`, `pareto_bucket`, `action_signal`, `product_status`, `revenue_velocity`, sort | Produto (`brand`+`item_id`) — **ranking acumulado, sem competência temporal** | `marts.fact_ml_produto_ranking` (snapshot de `gold.ml_produto_ranking`, RDS) |
+| TikTok Shop | `/produtos/tiktok`, `/produtos/tiktok/summary` | `brand`, `ref_month`, `pareto_bucket`, sort | Produto/mês (`brand`+`product_id`, agregado de linhas diárias) | `marts.fact_tiktok_product_daily` (snapshot de `gold.tiktok_product_daily`, RDS) |
+| Shopee | `/produtos/shopee`, `/produtos/shopee/summary` | `brand`, `ref_month`, `pareto_bucket`, sort | Produto/mês (`ref_month`+`brand`+`sku_ref_key`+`product_name`, chave estrita, sem consolidação — ver Bug 7/9) | `marts.fact_shopee_product_monthly` (Neon, ETL local) |
+
+Confirmado em código (`apps/api/app/services/performance_service.py:1716-2275`, `apps/api/alembic/versions/004_create_product_tables.py`):
+
+- Nenhum dos 3 marts de produto tem coluna de **custo/CMV**. Busca por `cmv|product_cost|cost_of_goods|unit_cost` no service e no schema não retornou nenhum resultado.
+- `fact_shopee_product_monthly` e `fact_tiktok_product_daily` **não têm nenhuma coluna de ads/fee/frete a nível de produto** — só existem em GMV/unidades/pedidos/cancelamento (+ mix de canal e rating no caso TikTok).
+- `fact_ml_produto_ranking` é a **única** das três com colunas de ads reais a nível de produto: `ad_spend`, `ad_roas`, `ad_acos_pct`, `days_advertised` (todas `NUMERIC`/`BIGINT`, tipadas desde a migration 004).
+- `estimated_margin` (`NUMERIC(18,2)`) existe no schema e na query do ML desde o início, é copiado 1:1 de `gold.ml_produto_ranking.estimated_margin` (`pipelines/sync_produtos.py:278,343`) mas **nunca teve a fórmula documentada** — já sinalizado como proxy não confiável na seção 3/6 deste documento (2026-06-26) e reconfirmado agora: não há em nenhum lugar do repositório (services, pipelines, migrations, docs) o cálculo de origem, porque ele é gerado a montante, no schema `gold` do RDS, fora deste repositório.
+- Na UI hoje (`MercadoLivreProductTable.tsx`, `TikTokProductTable.tsx`, `ShopeeProductTable.tsx`): ML mostra Receita/Unid./Pareto/Cancel./**ROAS**/Efic. Ads/Sinal — **não mostra `avg_price`, `ad_acos_pct`, `ad_spend` nem `estimated_margin`**, embora os 4 já cheguem da API. TikTok mostra GMV/Pedidos/Pareto/Canal/Prob.%/Rating — **sem preço médio** (não vem pronto da API, mas é calculável). Shopee **já mostra "Ticket Médio" (`avg_price`)**.
+
+### 10.2 Preço médio — auditoria por marketplace
+
+| Marketplace | Fórmula preferencial | Implementado? | Grão | Denominador zero/null | Confiável? | Limitações |
+|---|---|---|---|---|---|---|
+| Mercado Livre | `gross_revenue / units_sold` | Sim, no service (`performance_service.py:1995-1996`) — **calculado, não pré-armazenado** | Por anúncio (`item_id`) | `NULL` quando `units_sold = 0` (`CASE WHEN units_sold > 0`) | **Confiável** | Só chega até a API; não é exibido na tabela do frontend hoje |
+| Shopee | `gmv / units_sold` | Sim (`performance_service.py:1743`) | Por linha do mart (produto+variação+SKU, chave estrita) | `NULL` quando `units_sold = 0` | **Confiável** | Se duas variações do mesmo produto têm preços muito diferentes, o preço médio da linha "produto" (quando variações são agregadas rio acima) pode mascarar dispersão — não investigado nesta rodada |
+| TikTok Shop | `gmv / items_sold` | **Não implementado** — a query atual não expõe essa razão | Por produto/mês (se implementado) | Precisaria do mesmo guard `CASE WHEN items_sold > 0` | **Confiável, se implementado** — `gmv` e `items_sold` já existem na mesma agregação (`performance_service.py:2176-2180`), é adição de uma expressão, sem mudança de fonte | Nenhuma — é a mesma fórmula e os dois insumos já estão no `SELECT` |
+
+**Veredito:** preço médio é seguro para os 3 marketplaces com a fórmula `receita/unidades`, sempre com guarda contra divisão por zero (`NULL`, nunca `0`). ML e Shopee já calculam; falta só (a) expor `avg_price` na tabela do frontend ML e (b) adicionar a expressão em TikTok. Nenhum dos dois é uma mudança de fonte de dado — é exposição/cálculo local sobre colunas já existentes.
+
+### 10.3 "Margem do anúncio" — auditoria de componentes por marketplace
+
+| Componente | Mercado Livre | TikTok Shop | Shopee |
+|---|---|---|---|
+| GMV/receita por produto | ✅ `gross_revenue` | ✅ `gmv` | ✅ `gmv` |
+| Preço médio por produto | ✅ (calculável) | ✅ (calculável) | ✅ (implementado) |
+| Unidades por produto | ✅ `units_sold` | ✅ `items_sold` | ✅ `units_sold` |
+| Taxas/fees do marketplace por produto | ❌ (existe só lifetime/cumulativo, sem data — `gold.ml_produto_pnl.marketplace_fee`, ~16,5% da receita bruta lifetime, ver `docs/kpi_dictionary.md:269` e `financeiro_audit.md:11.4`) | ❌ (não existe no mart de produto; nem a nível de brand/dia há granularidade de produto) | ❌ (fees existem por marca/dia no financeiro, não por produto) |
+| Frete seller por produto | ❌ | ❌ | ❌ |
+| Ad spend por produto | ✅ `ad_spend` | ❌ (não existe no mart de produto) | ❌ (existe por marca/dia — `fact_marketplace_daily_performance` —, não por produto) |
+| Ad revenue/ROAS/ACOS por produto | ✅ `ad_roas`, `ad_acos_pct` (real, já na API) | ❌ | ❌ |
+| Descontos por produto | ❌ (não auditado nesta rodada, nenhuma menção encontrada) | ❌ | ❌ |
+| Comissão de afiliados por produto | ❌ | ❌ | ❌ |
+| CMV/custo do produto (SKU) | ❌ **Nenhum dos 3 marketplaces tem esse dado em qualquer mart do repositório** | ❌ | ❌ |
+| Repasse/settlement por produto | ❌ | ❌ | ❌ |
+| **Margem real possível?** | **Não** — falta CMV e a comissão real não tem competência mensal | **Não** — falta CMV e falta ads/fee por produto | **Não** — falta CMV e falta ads/fee por produto |
+
+**Sobre `estimated_margin` (ML) especificamente:** é um valor pré-calculado no `gold` (RDS), copiado sem transformação pelo pipeline de sync. Sem acesso à lógica de origem (fora deste repositório, e não documentada em nenhum lugar acessível), **não deve ser exibido nem nomeado como "margem"** — reforça a decisão já registrada na seção 6 deste documento em 2026-06-26. Isso não mudou nesta auditoria.
+
+**O que É honesto implementar agora, por marketplace:**
+
+| Marketplace | Métrica honesta possível | Nome sugerido |
+|---|---|---|
+| Mercado Livre | ROAS e ACOS por produto (dado real, já na API, parcialmente na UI) | "ROAS do anúncio" / "ACOS do anúncio" (já é o nome de fato — só falta expor ACOS e `ad_spend` na tabela) |
+| TikTok Shop | Nenhuma — não há nenhum componente de custo/ads por produto no mart atual | Bloquear qualquer indicador de "margem" ou "eficiência de ads" nesta aba até existir fonte |
+| Shopee | Nenhuma — ads existe só por marca/dia, não por produto | Bloquear; se houver demanda, avaliar romper `fact_marketplace_daily_performance` (ads por marca/dia) por produto exigiria nova extração na origem, não é ajuste de exposição |
+
+**Recomendação desta seção:** **Caminho C, restrito ao Mercado Livre; Caminho A (bloquear) para TikTok e Shopee.** Não implementar "margem" real nem `estimated_margin` em nenhum marketplace. Nenhuma nomenclatura com a palavra "margem" deve aparecer na UI enquanto não houver CMV — usar "ROAS"/"ACOS" (ML) e nada (TikTok/Shopee, até nova fonte).
+
+### 10.4 Período/data — auditoria por marketplace
+
+| Marketplace | `ref_month` | `date_from`/`date_to` | Granularidade diária | Granularidade mensal | Acumulado |
+|---|---|---|---|---|---|
+| Mercado Livre | ❌ Não suportado — `fact_ml_produto_ranking` é um ranking snapshot sem coluna de data | ❌ | ❌ | ❌ | ✅ **Único modo hoje** (`scope: "ranking_acumulado_atual"`) |
+| TikTok Shop | ✅ Suportado (`year`/`month` na query) | ❌ Não suportado no endpoint de produtos (existe em `/daily`, não em `/produtos/tiktok`) | Fonte é diária (`fact_tiktok_product_daily`), mas a API só agrega por mês inteiro | ✅ | ❌ |
+| Shopee | ✅ Suportado (`year`/`month`) | ❌ Não suportado | ❌ Fonte já é mensal (`fact_shopee_product_monthly`) — não há como refinar para dia | ✅ **Único grão da fonte** | ❌ |
+
+Observações adicionais:
+- O seletor de período do frontend (`AVAILABLE_MONTHS`, `apps/web/src/lib/mock-daily.ts:95-103`) é uma **lista fixa de 7 meses hardcoded** (Dez/25–Jun/26), não gerada dinamicamente a partir do mês atual — vai ficar desatualizada sem manutenção manual.
+- ML não tem seletor de período no frontend hoje (`page.tsx:315-368`, sem `<PeriodSelector>` na aba ML) — condizente com a fonte (`ranking_acumulado_atual`), mas o usuário não vê nenhuma indicação de "desde quando" esse acumulado é — pendência já registrada na seção 8, item 2 ("expor data de atualização do ranking ML"), ainda não resolvida.
+- Fingir granularidade diária para TikTok/Shopee na aba Produtos **não é recomendado**: a API de produtos só agrega por mês inteiro (mesmo a fonte TikTok sendo diária); daria a falsa impressão de que o usuário pode escolher qualquer intervalo.
+
+**Proposta de contrato de período para a aba Produtos:**
+
+1. **ML:** manter sem seletor de período (a fonte não tem competência temporal). Implementar a pendência já registrada: exibir "Ranking atualizado em: DD/MM/AAAA" no cabeçalho, usando o campo de atualização mais recente disponível em `gold.ml_produto_ranking` (a confirmar se existe `updated_at`/`refreshed_at`; `_ml_refreshed_at(db)` já existe no service e já é usado no summary — só falta renderizar no header da tabela, não no summary).
+2. **TikTok/Shopee:** manter seletor mensal (`ref_month`), mas trocar a lista hardcoded `AVAILABLE_MONTHS` por uma lista gerada dinamicamente (últimos N meses a partir do mês corrente) — bug de manutenção, não de dado.
+3. **Não adicionar `date_from`/`date_to` de intervalo livre** na aba Produtos para nenhum marketplace nesta fase — nenhuma das 3 fontes de produto suporta granularidade diária real na agregação atual (TikTok teria que reagregar a query, o que é possível mas não pedido explicitamente pelo gestor; Shopee e ML não têm a granularidade na fonte, ponto final).
+4. **Estado de cobertura visível ao usuário:** cada tab já expõe (ou deveria expor) o texto de escopo atual (`scopeNote` em `ProductParetoSummary`) — usar esse mesmo padrão para deixar explícito "período não suportado" quando aplicável (hoje já existe para ML: "o Mercado Livre nao possui competência mensal na fonte atual, por isso não há seletor de período aqui").
+
+### 10.5 Proposta de UX (para Gate 2, não implementar ainda)
+
+**Filtros no topo (por tab):** marketplace (já existe via tabs) · marca (já existe) · período (já existe para TikTok/Shopee; N/A documentado para ML) · bucket Pareto (já existe) · para ML, manter também status/velocidade/sinal (já existem).
+
+**Cards por marketplace (topo da tabela, hoje só há o resumo Pareto A/B/C/D):**
+- GMV total do escopo filtrado (já calculado no summary via `total_gmv`);
+- Produtos ativos = `eligible_count` (já existe);
+- Preço médio do escopo (novo — média ponderada por GMV, não média simples de `avg_price` por linha, para não distorcer por produtos de baixo volume);
+- % de produtos com ROAS calculável (ML apenas — `ad_spend IS NOT NULL`); para TikTok/Shopee, badge fixo "Eficiência de ads: dado indisponível nesta fonte";
+- Alerta de dados incompletos quando `excluded_zero_gmv_count > 0` (já existe o dado, falta só exibir explicitamente como alerta, hoje é só uma nota de rodapé).
+
+**Tabela (colunas por marketplace, incrementais ao que já existe):**
+- ML: adicionar `avg_price`, `ad_acos_pct`, `ad_spend` às colunas já existentes (Receita, Unid., Pareto, Cancel., ROAS, Efic. Ads, Sinal). Não adicionar `estimated_margin`.
+- TikTok: adicionar `avg_price` calculado (`gmv/items_sold`) à tabela existente.
+- Shopee: nenhuma mudança de coluna — já mostra `avg_price`.
+
+**Badges sugeridos (reaproveitando os já usados em Efic. Ads/pareto onde fizer sentido):**
+- "preço alto/baixo" — evitar: sem um preço de referência/categoria para comparar, um badge relativo (ex.: p75 do próprio conjunto filtrado) seria mais honesto que "alto" em termos absolutos;
+- "baixo giro" — já existe uma proxy (`revenue_velocity` no ML); não existe equivalente para TikTok/Shopee;
+- "boa eficiência" — já existe (`ad_efficiency`, só ML);
+- "margem indisponível" — usar em vez de qualquer valor de margem, nos 3 marketplaces;
+- "dados parciais" — usar quando `ad_spend`/`ad_roas` forem `NULL` mas o produto tiver GMV > 0 (ML), e sempre para ads em TikTok/Shopee.
+
+### 10.6 Recomendação final do Gate 1
+
+**Caminho recomendado: B condicionado por marketplace (não é uma escolha única A/B/C/D — cada marketplace tem disponibilidade diferente).**
+
+1. **Preço médio:** implementar para os 3 marketplaces agora (ML: expor `avg_price` já existente na API; TikTok: adicionar `gmv/items_sold` na query; Shopee: nenhuma mudança). Baixo risco, sem mudança de fonte.
+2. **"Margem do anúncio":** **bloquear a palavra "margem" e o campo `estimated_margin` nos 3 marketplaces.** Para ML, implementar ROAS/ACOS por produto (dado real, já disponível, hoje só ROAS está na UI) — nomear como "ROAS do anúncio"/"ACOS do anúncio", nunca como "margem". Para TikTok e Shopee, não há nenhum componente de ads/custo por produto na fonte atual — não implementar nada nessa frente até existir uma nova extração (pendência de dado, não de UI).
+3. **Período:** manter o contrato atual por marketplace (ML = acumulado sem seletor + expor data de atualização; TikTok/Shopee = seletor mensal existente, trocar a lista hardcoded por geração dinâmica). Não introduzir `date_from`/`date_to` de intervalo livre na aba Produtos nesta fase.
+4. **Antes de qualquer Gate 2 de implementação:** validar com o gestor se "ROAS/ACOS do anúncio" (Mercado Livre apenas) atende a intenção de "margem do anúncio" do pedido original, já que margem real está bloqueada nos 3 marketplaces por falta de CMV.
+
+**Pendência que seria necessária para desbloquear margem real:** um CMV por SKU (custo do produto) e uma fonte de comissão de marketplace com competência temporal (mensal/diária) para os 3 canais — hoje inexistente neste repositório em qualquer schema (`marts`, `gold` auditado via `source_mapping.md`, `data_contracts.md`). Isso é trabalho de nova fonte/pipeline (Caminho D), não de UI, e está fora do escopo deste Gate 1.
+
+### 10.7 Gate 2 — implementação (2026-07-13)
+
+Implementado exatamente conforme a recomendação da seção 10.6, com uma query read-only adicional ao RDS (`DATAMART_DATABASE_URL`, via `apps/api/.venv`) para confirmar dois pontos que ficaram em aberto no Gate 1.
+
+**Query read-only executada (colunas e agregados apenas, nenhuma linha/PII impressa):**
+
+| Pergunta do Gate 2 | Resposta confirmada |
+|---|---|
+| `gold.ml_produto_ranking` tem `updated_at`/`refreshed_at`/`snapshot_date`? | **Não** — 24 colunas, nenhuma delas é timestamp de atualização do snapshot (`first_sale`/`last_sale` são sobre a venda, não sobre a carga). |
+| `gold.ml_produto_pnl` tem `updated_at`/`refreshed_at`/`snapshot_date`? | **Não** — 40 colunas; só existem `first_ad_date`/`last_ad_date` (sobre a campanha de ads, não sobre a carga do snapshot). |
+| Origem/fórmula de `estimated_margin` | **Descoberta nesta rodada:** em `gold.ml_produto_pnl`, `estimated_margin = gross_revenue - marketplace_fee - ad_spend` de forma **exata** (diff médio e máximo = 0,00 em 1.659 linhas). É uma contribuição antes de CMV e frete, não uma margem líquida real. |
+| `estimated_margin` é comparável entre `ml_produto_ranking` (a tabela que a API usa) e `ml_produto_pnl`? | **Não verificável com segurança**: `(brand, item_id)` **não é chave única** em nenhuma das duas tabelas (1.659 linhas / apenas 1.559 pares distintos em cada uma) — um JOIN direto gera fan-out (1.861 pares casados) e o diff deixa de ser confiável. Testado também dentro da própria `ml_produto_ranking` (sem JOIN): nenhuma combinação de `gross_revenue`/`ad_spend`/`price_spread_pct` reproduziu `estimated_margin` — o valor depende de `marketplace_fee`, que só existe em `ml_produto_pnl`. |
+| `marketplace_fee` está populado? | Sim, 100% (1.659/1.659) em `ml_produto_pnl`; média ~18,75% da receita bruta nesta amostra (mesma ordem de grandeza dos ~16,5% já documentados na seção 11.4 do `financeiro_audit.md`) — **sem coluna de data**, confirma o achado do Gate 1: é lifetime/cumulativo, não pode ser atribuído a um mês específico. |
+
+**Consequência prática (decisão mantida do Gate 1, agora com evidência adicional):** mesmo com a fórmula de `estimated_margin` agora conhecida, ela (a) depende de uma comissão lifetime sem competência temporal e (b) exclui CMV — continua sendo, na melhor hipótese, uma "contribuição estimada pré-CMV acumulada", nunca uma margem real. **Não foi implementado, não foi exposto na UI, e o nome "margem" não foi usado em nenhum lugar novo.** "Atualizado em" no header do ranking ML usa `MAX(refreshed_at)` do próprio mart `marts.fact_ml_produto_ranking` no Neon (carimbo de quando o pipeline de sync rodou pela última vez) — não do RDS, que não tem esse campo. Essa função (`_ml_refreshed_at`) e a exibição no frontend (`ProductParetoSummary` → `scopeNote`) já existiam antes deste Gate 2 e foram confirmadas corretas, não recriadas.
+
+**Implementado:**
+
+1. **Preço médio nos 3 marketplaces** — `avg_price` (receita/unidades, `NULL` quando denominador é zero):
+   - ML: já existia na API (`performance_service.py:1996`), passou a ser exibido na tabela do frontend (`MercadoLivreProductTable.tsx`), coluna "Preço Médio".
+   - TikTok: novo — `SUM(gmv)/SUM(items_sold)` adicionado à CTE `agg` de `get_produtos_tiktok`, ao schema `ProdutoTikTokRow` e à tabela do frontend.
+   - Shopee: sem alteração (já existia e já era exibido).
+2. **Preço médio ponderado no summary (cards)** — novo campo `avg_price_weighted` (receita elegível total / unidades elegíveis totais, **nunca** média simples de `avg_price` por linha) nos 3 endpoints `/summary`, via helper `_weighted_avg_price()`. Exibido como texto no `scopeNote` de cada aba (função pura `avgPriceNote()`, dirigida pela API, mesmo padrão de `zeroGmvNote`).
+3. **ROAS/ACOS/Ad Spend no ML** — já existiam na API; passaram a ser exibidos na tabela (coluna "Eficiência Ads": ROAS em destaque + ACOS% e Ad Spend empilhados abaixo). `estimated_margin` **não** foi adicionado à UI nem ao rótulo da coluna.
+4. **Nota fixa de margem indisponível** — função pura `marginUnavailableNote(tab)` em `produtos-tab-transition.ts`, exibida no `scopeNote` das 3 abas: para ML explica que ROAS/ACOS reflete eficiência de Ads (não margem); para TikTok/Shopee explica a ausência total de dado de ads/custo por produto.
+5. **Lista de meses dinâmica (TikTok/Shopee)** — nova função pura `lastNMonths(count, today)`, substitui a lista hardcoded `AVAILABLE_MONTHS` na aba Produtos (mês atual primeiro, com sufixo "(atual)"); `PeriodSelector` ganhou uma prop opcional `months` (default preserva o comportamento antigo na página de marca, que não foi alterada).
+6. **Não implementado (por decisão explícita):** `date_from`/`date_to` livre em Produtos; qualquer rótulo "margem" fora de `estimated_margin` (mantido só como campo técnico, não usado na UI); ROAS/ACOS/margem para TikTok/Shopee (sem fonte).
+
+**Arquivos alterados:**
+- Backend: `apps/api/app/schemas/performance.py`, `apps/api/app/services/performance_service.py`.
+- Testes backend: `apps/api/tests/test_performance_service_produtos.py` (+11 testes novos: avg_price TikTok normal/zero, avg_price_weighted nos 3 summaries normal/zero, ROAS/ACOS preservados no schema ML, TikTok/Shopee sem margem/ads no schema, nenhum schema usa "margin" fora de `estimated_margin`), `apps/api/tests/test_produtos_determinism.py` (fixture `_tk_row` atualizada).
+- Frontend: `apps/web/app/produtos/page.tsx`, `apps/web/src/components/MercadoLivreProductTable.tsx`, `apps/web/src/components/TikTokProductTable.tsx`, `apps/web/src/components/PeriodSelector.tsx`, `apps/web/src/lib/api-client.ts`, `apps/web/src/lib/produtos-tab-transition.ts`.
+- Testes frontend: `apps/web/tests/produtos-tab-transition.test.ts` (+7 testes novos: `avgPriceNote`, `marginUnavailableNote`, `lastNMonths` incluindo virada de ano).
+
+**Validação:** `pytest` completo (362 passed), `npm test` (174 passed), `npx tsc --noEmit` (sem erros), `npm run build` (sucesso), `python -m compileall app` (sem erros), smoke read-only dos 6 endpoints de produtos contra o Neon real (ML/TikTok/Shopee, list + summary, com e sem `ref_month`), `git diff --check` limpo, scan de segredos/PII no diff sem resultados.

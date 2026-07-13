@@ -94,7 +94,7 @@ def test_build_order_by_desempate_shopee_usa_chave_completa():
 def _tk_row(**overrides):
     base = dict(
         brand="barbours", product_id="1", product_name="Produto",
-        gmv=1000, orders=10, items_sold=10,
+        gmv=1000, orders=10, items_sold=10, avg_price=100.0,
         pct_gmv_video=None, pct_gmv_live=None, pct_gmv_card=None,
         problem_rate=None, rating_avg=None, total_ratings=None,
         pareto_bucket=None,

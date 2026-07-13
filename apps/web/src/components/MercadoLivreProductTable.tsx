@@ -53,10 +53,13 @@ interface Props {
   pagination: { limit: number; offset: number; onChange: (offset: number) => void };
 }
 
-/** Colunas especificas do Mercado Livre: cancelamento, ROAS/ACOS, eficiencia
- * de ads, ad spend, velocidade, status, sinal de acao e margem estimada. */
+/** Colunas especificas do Mercado Livre: preco medio, cancelamento,
+ * eficiencia de Ads (ROAS/ACOS/spend), velocidade, status e sinal de acao.
+ * Nao inclui margem: `estimated_margin` tem formula desconhecida na fonte
+ * (ver docs/sections/produtos_audit.md secao 10.3) e nunca deve ser exibido
+ * como margem. */
 export default function MercadoLivreProductTable({ items, loading, sort, onSort, pagination }: Props) {
-  const COL_COUNT = 9;
+  const COL_COUNT = 10;
   return (
     <ProductTableShell<ProdutoMLRow>
       ariaLabel="Produtos Mercado Livre"
@@ -69,10 +72,11 @@ export default function MercadoLivreProductTable({ items, loading, sort, onSort,
           <SortableHeader label="Produto" column="title" sort={sort} onSort={onSort} align="left" />
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Marca</th>
           <SortableHeader label="Receita" column="gross_revenue" sort={sort} onSort={onSort} align="right" />
+          <SortableHeader label="Preço Médio" column="avg_price" sort={sort} onSort={onSort} align="right" />
           <SortableHeader label="Unid." column="units_sold" sort={sort} onSort={onSort} align="right" />
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Pareto</th>
           <SortableHeader label="Cancel." column="cancel_rate_pct" sort={sort} onSort={onSort} align="right" />
-          <SortableHeader label="ROAS" column="ad_roas" sort={sort} onSort={onSort} align="right" />
+          <SortableHeader label="Eficiência Ads" column="ad_roas" sort={sort} onSort={onSort} align="right" />
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Efic. Ads</th>
           <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Sinal</th>
         </tr>
@@ -89,6 +93,9 @@ export default function MercadoLivreProductTable({ items, loading, sort, onSort,
             {p.revenue_share_pct != null && (
               <p className="text-[11px] text-slate-500 tabular-nums mt-0.5">{p.revenue_share_pct.toFixed(1)}% do total</p>
             )}
+          </td>
+          <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums text-slate-600">
+            {p.avg_price != null ? fmtBrl(p.avg_price) : <span className="text-slate-300">—</span>}
           </td>
           <td className="px-4 py-3 text-right whitespace-nowrap">
             <p className="tabular-nums text-slate-600">{fmtNumber(p.units_sold)}</p>
@@ -117,12 +124,20 @@ export default function MercadoLivreProductTable({ items, loading, sort, onSort,
               </span>
             ) : <span className="text-slate-300">—</span>}
           </td>
-          <td className="px-4 py-3 text-right tabular-nums">
+          <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
             {p.ad_roas != null ? (
               <span className={p.ad_roas >= 4 ? "text-emerald-700 font-semibold" : p.ad_roas >= 2.5 ? "text-amber-700" : "text-rose-700"}>
-                {p.ad_roas.toFixed(1)}x
+                {p.ad_roas.toFixed(1)}x ROAS
               </span>
             ) : <span className="text-slate-300">—</span>}
+            {(p.ad_acos_pct != null || p.ad_spend != null) && (
+              <p className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                {[
+                  p.ad_acos_pct != null && `ACOS ${p.ad_acos_pct.toFixed(1)}%`,
+                  p.ad_spend != null && `Spend ${fmtBrl(p.ad_spend)}`,
+                ].filter(Boolean).join(" · ")}
+              </p>
+            )}
           </td>
           <td className="px-4 py-3 text-center">
             {p.ad_efficiency && (

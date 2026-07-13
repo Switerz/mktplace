@@ -1590,7 +1590,8 @@ PRODUTOS_ML_SORT_COLUMNS = {
     "revenue_share_pct": "revenue_share_pct", "title": "title",
 }
 PRODUTOS_TIKTOK_SORT_COLUMNS = {
-    "gmv": "gmv", "orders": "orders", "items_sold": "items_sold", "pct_gmv_video": "pct_gmv_video",
+    "gmv": "gmv", "orders": "orders", "items_sold": "items_sold", "avg_price": "avg_price",
+    "pct_gmv_video": "pct_gmv_video",
     "pct_gmv_live": "pct_gmv_live", "pct_gmv_card": "pct_gmv_card", "problem_rate": "problem_rate",
     "rating_avg": "rating_avg", "total_ratings": "total_ratings", "product_name": "product_name",
 }
@@ -1658,6 +1659,17 @@ _PARETO_BUCKET_CASE_SQL = """CASE
         WHEN (cum_gmv - gmv) / total_gmv * 100 < 95 THEN 'C_next15'
         ELSE 'D_tail'
     END"""
+
+
+def _weighted_avg_price(total_revenue: float, total_units) -> float | None:
+    """Preco medio ponderado do escopo = receita total / unidades totais
+    (nunca media simples de `avg_price` por linha, que sub-representaria
+    produtos de alto volume e baixo preco). NULL quando nao ha unidades no
+    escopo elegivel (GMV>0) — ver produtos_audit.md secao 10.5."""
+    units = int(total_units) if total_units is not None else 0
+    if units <= 0:
+        return None
+    return round(total_revenue / units, 2)
 
 
 def _pareto_buckets_from_rows(rows) -> list[dict]:
@@ -1840,7 +1852,8 @@ def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month
     counts_row = db.execute(
         text(f"""
             SELECT COUNT(*) AS total_count,
-                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count
+                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count,
+                   SUM(units_sold) FILTER (WHERE gmv > 0) AS eligible_units
             FROM marts.fact_shopee_product_monthly
             WHERE {where}
         """),
@@ -1848,6 +1861,7 @@ def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month
     ).fetchone()
     total_count = int(counts_row.total_count)
     eligible_count = int(counts_row.eligible_count)
+    eligible_units = counts_row.eligible_units
 
     rows = db.execute(
         text(f"""
@@ -1882,6 +1896,7 @@ def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month
         "excluded_zero_gmv_count": total_count - eligible_count,
         "brand":                   brand,
         "buckets":                 buckets,
+        "avg_price_weighted":      _weighted_avg_price(total_gmv, eligible_units),
     }
 
 
@@ -2056,7 +2071,8 @@ def get_produtos_ml_summary(
     counts_row = db.execute(
         text(f"""
             SELECT COUNT(*) AS total_count,
-                   COUNT(*) FILTER (WHERE gross_revenue > 0) AS eligible_count
+                   COUNT(*) FILTER (WHERE gross_revenue > 0) AS eligible_count,
+                   SUM(units_sold) FILTER (WHERE gross_revenue > 0) AS eligible_units
             FROM marts.fact_ml_produto_ranking
             WHERE {where}
         """),
@@ -2064,6 +2080,7 @@ def get_produtos_ml_summary(
     ).fetchone()
     total_count = int(counts_row.total_count)
     eligible_count = int(counts_row.eligible_count)
+    eligible_units = counts_row.eligible_units
 
     rows = db.execute(
         text(f"""
@@ -2100,6 +2117,7 @@ def get_produtos_ml_summary(
         "scope":                    "ranking_acumulado_atual",
         "refreshed_at":             _ml_refreshed_at(db),
         "buckets":                  buckets,
+        "avg_price_weighted":       _weighted_avg_price(total_gmv, eligible_units),
     }
 
 
@@ -2178,6 +2196,8 @@ def get_produtos_tiktok(
                        SUM(gmv)        AS gmv,
                        SUM(orders)     AS orders,
                        SUM(items_sold) AS items_sold,
+                       CASE WHEN SUM(items_sold) > 0
+                            THEN SUM(gmv) / SUM(items_sold) ELSE NULL END AS avg_price,
                        CASE WHEN SUM(gmv) > 0
                             THEN SUM(gmv_video) / SUM(gmv) * 100 ELSE NULL END AS pct_gmv_video,
                        CASE WHEN SUM(gmv) > 0
@@ -2217,6 +2237,7 @@ def get_produtos_tiktok(
             "gmv":          _f(r.gmv),
             "orders":       int(_f(r.orders)),
             "items_sold":   int(_f(r.items_sold)),
+            "avg_price":    round(_f(r.avg_price), 2) if r.avg_price is not None else None,
             "pct_gmv_video": round(_f(r.pct_gmv_video), 1) if r.pct_gmv_video is not None else None,
             "pct_gmv_live":  round(_f(r.pct_gmv_live), 1)  if r.pct_gmv_live  is not None else None,
             "pct_gmv_card":  round(_f(r.pct_gmv_card), 1)  if r.pct_gmv_card  is not None else None,
@@ -2252,19 +2273,21 @@ def get_produtos_tiktok_summary(db: Session, brand: str | None, year: int, month
     counts_row = db.execute(
         text(f"""
             WITH grouped AS (
-                SELECT brand, product_id, SUM(gmv) AS gmv
+                SELECT brand, product_id, SUM(gmv) AS gmv, SUM(items_sold) AS items_sold
                 FROM marts.fact_tiktok_product_daily
                 WHERE {where}
                 GROUP BY brand, product_id
             )
             SELECT COUNT(*) AS total_count,
-                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count
+                   COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count,
+                   SUM(items_sold) FILTER (WHERE gmv > 0) AS eligible_units
             FROM grouped
         """),
         params,
     ).fetchone()
     total_count = int(counts_row.total_count)
     eligible_count = int(counts_row.eligible_count)
+    eligible_units = counts_row.eligible_units
 
     rows = db.execute(
         text(f"""
@@ -2301,4 +2324,5 @@ def get_produtos_tiktok_summary(db: Session, brand: str | None, year: int, month
         "excluded_zero_gmv_count": total_count - eligible_count,
         "brand":                   brand,
         "buckets":                 buckets,
+        "avg_price_weighted":      _weighted_avg_price(total_gmv, eligible_units),
     }
