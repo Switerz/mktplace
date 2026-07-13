@@ -25,6 +25,10 @@ function SortIcon({ active, direction }: { active: boolean; direction: SortState
 /**
  * Cabeçalho de coluna ordenável reutilizável. Substitui um <th> estático:
  * `<SortableHeader label="GMV" column="gmv" sort={sort} onSort={toggleSort} />`
+ *
+ * A área clicável é a célula inteira (o <button> preenche o <th> via
+ * w-full h-full), não só o texto/ícone — mais fácil de acertar no touch e
+ * com mouse, sem abrir mão do <button> semântico nem do foco visível.
  */
 export default function SortableHeader({ label, column, sort, onSort, align = "right", className = "" }: Props) {
   const active = sort.column === column;
@@ -36,15 +40,15 @@ export default function SortableHeader({ label, column, sort, onSort, align = "r
     <th
       scope="col"
       aria-sort={ariaSort}
-      className={`px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider ${
+      className={`text-xs font-semibold text-slate-600 uppercase tracking-wider p-0 ${
         align === "right" ? "text-right" : "text-left"
       } ${className}`}
     >
       <button
         type="button"
         onClick={() => onSort(column)}
-        className={`inline-flex items-center gap-1 hover:text-violet-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 rounded ${
-          align === "right" ? "flex-row-reverse" : ""
+        className={`w-full h-full flex items-center gap-1 px-4 py-3 hover:text-violet-700 hover:bg-slate-100/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
+          align === "right" ? "justify-end flex-row-reverse" : "justify-start"
         } ${active ? "text-violet-700" : ""}`}
       >
         <span>{label}</span>

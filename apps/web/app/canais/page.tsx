@@ -21,6 +21,7 @@ import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/fo
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
 import {
   formatChannelMetric,
   signalLabel,
@@ -321,7 +322,7 @@ function CanaisPageInner() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
             <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
           </div>
@@ -525,7 +526,7 @@ function CanaisPageInner() {
               Não inclui desconto nem comissão de afiliados (ver docs/sections/canais_audit.md, seção 14).
             </p>
           </div>
-          <div className="overflow-x-auto">
+          <TableScrollHint>
             <table className="w-full text-sm" aria-label="Comparativo entre canais">
               <thead>
                 <tr className="bg-slate-50">
@@ -602,7 +603,7 @@ function CanaisPageInner() {
                 )}
               </tbody>
             </table>
-          </div>
+          </TableScrollHint>
           <div className="px-6 py-3 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-1.5">
             <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
             <span className="text-xs text-slate-500">N/A = não se aplica a esse canal</span>
@@ -628,7 +629,7 @@ function CanaisPageInner() {
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> Card</span>
               </div>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Atribuicao TikTok por marca">
                 <thead>
                   <tr className="bg-slate-50">
@@ -708,7 +709,7 @@ function CanaisPageInner() {
                   )}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Dominante:</span>
               <span className="flex items-center gap-1.5 text-xs text-violet-700"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Video</span>
@@ -728,7 +729,7 @@ function CanaisPageInner() {
               <h2 className="text-sm font-semibold text-slate-700">Perfil de Compradores ML por Marca</h2>
               <p className="text-xs text-slate-400 mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Perfil de compradores ML por marca">
                 <thead>
                   <tr className="bg-slate-50">
@@ -805,7 +806,7 @@ function CanaisPageInner() {
                   )}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center gap-3 flex-wrap">
@@ -835,7 +836,7 @@ function CanaisPageInner() {
               <h2 className="text-sm font-semibold text-slate-700">Perfil de Compradores Shopee por Marca</h2>
               <p className="text-xs text-slate-400 mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Perfil de compradores Shopee por marca">
                 <thead>
                   <tr className="bg-slate-50">
@@ -930,7 +931,7 @@ function CanaisPageInner() {
                   )}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center gap-3 flex-wrap">

@@ -21,7 +21,7 @@ export default function BrandFilter({ value, onChange }: Props) {
     <div
       role="group"
       aria-label="Filtro de marcas"
-      className="flex gap-2 bg-white border border-violet-100 rounded-xl p-1 shadow-sm w-fit overflow-x-auto"
+      className="flex gap-2 bg-white border border-violet-100 rounded-xl p-1 shadow-sm w-fit overflow-x-auto min-w-0 max-w-full"
     >
       <button
         type="button"

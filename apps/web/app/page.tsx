@@ -101,12 +101,12 @@ function DashboardInner() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
             <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
           </div>
-          <div className="flex items-center gap-3">
-            {loading && <span className="text-xs text-violet-400 animate-pulse">Atualizando...</span>}
+          <div className="flex items-center gap-3 min-w-0 flex-wrap">
+            {loading && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
             <DateRangeFilter
               dateFrom={filters.dateFrom}
               dateTo={filters.dateTo}

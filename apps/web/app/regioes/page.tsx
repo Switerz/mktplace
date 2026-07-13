@@ -19,6 +19,7 @@ import {
 } from "@/lib/regioes-format";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
 
 const ALL_UFS = [
   "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
@@ -141,7 +142,7 @@ function RegioesPageInner() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
             <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
             <div className="flex items-center gap-1.5 bg-white border border-violet-100 rounded-xl px-3 py-1.5 shadow-sm">
@@ -157,8 +158,8 @@ function RegioesPageInner() {
               </select>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {loading && <span className="text-xs text-violet-400 animate-pulse">Atualizando...</span>}
+          <div className="flex items-center gap-3 min-w-0 flex-wrap">
+            {loading && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
             <DateRangeFilter
               dateFrom={filters.dateFrom}
               dateTo={filters.dateTo}
@@ -266,7 +267,7 @@ function RegioesPageInner() {
                 <h2 className="text-sm font-semibold text-slate-700">Ranking por UF</h2>
                 <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de identificação de UF, por estado</p>
               </div>
-              <div className="overflow-x-auto">
+              <TableScrollHint>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-slate-50 text-left">
@@ -299,7 +300,7 @@ function RegioesPageInner() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </TableScrollHint>
             </div>
 
             {/* Tabela por marca x marketplace */}
@@ -308,7 +309,7 @@ function RegioesPageInner() {
                 <h2 className="text-sm font-semibold text-slate-700">Cobertura por Marca × Canal</h2>
                 <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de UF/frete por marca e marketplace</p>
               </div>
-              <div className="overflow-x-auto">
+              <TableScrollHint>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-slate-50 text-left">
@@ -346,7 +347,7 @@ function RegioesPageInner() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScrollHint>
               {semCobertura.length > 0 && (
                 <div className="px-6 py-3 border-t border-slate-50">
                   <span className="text-[10px] text-slate-400">
@@ -367,7 +368,7 @@ function RegioesPageInner() {
                   Granularidade {trendGranularity === "day" ? "diária" : "mensal"}
                 </span>
               </div>
-              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+              <TableScrollHint className="max-h-80 overflow-y-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-slate-50">
                     <tr className="text-left">
@@ -395,7 +396,7 @@ function RegioesPageInner() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScrollHint>
             </div>
           </>
         )}

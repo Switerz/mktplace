@@ -17,6 +17,7 @@ import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/fo
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
 
 function fmtRate(v: number | null): string {
   if (v == null) return "—";
@@ -187,7 +188,7 @@ function QualityPageInner() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
             <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
           </div>
@@ -296,7 +297,7 @@ function QualityPageInner() {
             <p className="text-xs text-slate-500 mt-0.5">Cancelamentos, devolucoes e tempos logisticos</p>
           </div>
 
-          <div className="overflow-x-auto">
+          <TableScrollHint>
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-50 text-left">
@@ -367,7 +368,7 @@ function QualityPageInner() {
                 })}
               </tbody>
             </table>
-          </div>
+          </TableScrollHint>
 
           <div className="px-6 py-3 border-t border-slate-50 flex items-center gap-6 flex-wrap">
             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Taxas:</span>
@@ -395,7 +396,7 @@ function QualityPageInner() {
                 <p className="text-xs text-slate-500 mt-0.5">ML e canal de aquisicao (~90% novos por mes). Recompra &lt;10% e esperado.</p>
               </div>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
@@ -451,7 +452,7 @@ function QualityPageInner() {
                     })}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-50 flex items-center gap-6 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Recompra:</span>
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &gt;20%</span>
@@ -473,7 +474,7 @@ function QualityPageInner() {
               <h2 className="text-sm font-semibold text-slate-700">Qualidade — Shopee</h2>
               <p className="text-xs text-slate-500 mt-0.5">Cancelamentos e devoluções por marca</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-left">
@@ -508,7 +509,7 @@ function QualityPageInner() {
                     ))}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-50 flex items-center gap-6 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Cancel./Devol.:</span>
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &lt;2%</span>

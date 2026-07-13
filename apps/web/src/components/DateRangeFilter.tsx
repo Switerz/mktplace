@@ -55,13 +55,13 @@ export default function DateRangeFilter({
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2 min-w-0 max-w-full">
       <div className="flex items-center gap-2 min-w-0 flex-wrap">
         <span className="text-xs text-slate-500 font-medium shrink-0">Período</span>
         <div
           role="group"
           aria-label="Presets de período"
-          className="flex gap-1 bg-white border border-violet-100 rounded-xl p-1 shadow-sm overflow-x-auto"
+          className="flex gap-1 bg-white border border-violet-100 rounded-xl p-1 shadow-sm overflow-x-auto min-w-0 max-w-full"
         >
           {DATE_PRESET_OPTIONS.map((opt) => {
             const active = showCustom ? opt.value === "personalizado" : activePreset === opt.value;
@@ -93,19 +93,19 @@ export default function DateRangeFilter({
         )}
       </div>
       {showCustom && (
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <label className="flex items-center gap-1.5 text-xs text-slate-500">
+        <div className="flex flex-col gap-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
+            <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
               De
               <input
                 type="date"
                 value={dateFrom}
                 max={dateTo < todayIso ? dateTo : todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom: e.target.value, dateTo })}
-                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
               />
             </label>
-            <label className="flex items-center gap-1.5 text-xs text-slate-500">
+            <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
               Até
               <input
                 type="date"
@@ -113,7 +113,7 @@ export default function DateRangeFilter({
                 min={dateFrom}
                 max={todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom, dateTo: e.target.value })}
-                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
               />
             </label>
           </div>

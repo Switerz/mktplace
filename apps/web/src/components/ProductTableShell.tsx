@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { SkeletonTableRows } from "@/components/Skeleton";
+import TableScrollHint from "@/components/TableScrollHint";
 import { fmtNumber } from "@/lib/formatters";
 
 interface PaginationProps {
@@ -92,7 +93,7 @@ export default function ProductTableShell<T>({
   const isEmpty = items !== null && items.length === 0;
   return (
     <>
-      <div className="overflow-x-auto">
+      <TableScrollHint>
         <table className="w-full text-sm" aria-label={ariaLabel}>
           <thead>{thead}</thead>
           <tbody className="divide-y divide-slate-50">
@@ -121,7 +122,7 @@ export default function ProductTableShell<T>({
             )}
           </tbody>
         </table>
-      </div>
+      </TableScrollHint>
       {pagination && <Pagination {...pagination} />}
     </>
   );
