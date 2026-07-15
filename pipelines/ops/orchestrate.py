@@ -44,6 +44,17 @@ modulos executados, cada um com suas guardas). Nunca referencia
 DATAMART_DATABASE_URL diretamente (so' os checks de preflight, que fazem
 SELECT 1). Nunca ativa Task Scheduler.
 
+Politica de criticidade (Gate B1, 2026-07-15): cada `Step` tem um campo
+`critical` (default True). Um step nao-critico (hoje, so'
+`sync_produtos_shopee` — bloqueado por `LOCAL_PG_URL` ausente e' um gap
+manual conhecido, nao uma falha de execucao) que FAILED/BLOCKED nunca vira
+exit code != 0 sozinho; so' rebaixa o resultado para DEGRADED. Isso existe
+para o pipeline inteiro nao reportar "falha" todo dia por causa de um gap
+Shopee ja conhecido, enquanto ainda alerta de verdade (exit 1) se ML/
+TikTok/qualquer step critico realmente quebrar. Ver `compute_overall_status`.
+Regional (Gold + sync Neon) ainda NAO faz parte deste pipeline — fica para
+o Gate B2.
+
 Uso:
     python -m pipelines.ops.orchestrate --pipeline full_daily
 """
@@ -71,6 +82,11 @@ class Step:
     preflight_source: str | None = None
     depends_on: tuple[str, ...] = field(default_factory=tuple)
     always_run: bool = False
+    # Gate B1: default True preserva o comportamento de todo step ja
+    # existente. Um step critical=False que FAILED/BLOCKED nunca faz o
+    # pipeline inteiro reportar FAILED/exit 1 sozinho — so' rebaixa o
+    # resultado geral para DEGRADED (ver compute_overall_status).
+    critical: bool = True
 
 
 # Pipeline unico: todas as fontes diarias, depois Produtos, depois
@@ -86,7 +102,11 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         Step("daily_shopee_ads", "pipelines.ingestion.daily_performance", ("--source", "shopee-ads", "--mode", "incremental"), timeout_seconds=900, preflight_source="shopee-ads_daily"),
         Step("sync_produtos_ml", "pipelines.sync_produtos", ("--source", "ml"), timeout_seconds=600, preflight_source="produtos_ml"),
         Step("sync_produtos_tiktok", "pipelines.sync_produtos", ("--source", "tiktok"), timeout_seconds=600, preflight_source="produtos_tiktok"),
-        Step("sync_produtos_shopee", "pipelines.sync_produtos", ("--source", "shopee"), timeout_seconds=600, preflight_source="produtos_shopee"),
+        # Nao-critico (Gate B1): bloqueado por LOCAL_PG_URL ausente e' um
+        # gap manual conhecido (docs/runbook_sync_produtos.md), nao uma
+        # falha de execucao — nao deve fazer o pipeline inteiro reportar
+        # FAILED/exit 1 sozinho.
+        Step("sync_produtos_shopee", "pipelines.sync_produtos", ("--source", "shopee"), timeout_seconds=600, preflight_source="produtos_shopee", critical=False),
         # So' roda se sync_produtos_shopee tiver SUCCEEDED de verdade nesta
         # mesma execucao — nunca por o relogio ter passado tempo suficiente.
         Step("monitor_bug8", "pipelines.reconciliation.monitor_bug8_invariants", ("--skip-source",), timeout_seconds=300, depends_on=("sync_produtos_shopee",)),
@@ -164,6 +184,41 @@ def run_pipeline(name: str, executor=None, preflight_fn=None) -> dict[str, str]:
     return results
 
 
+def compute_overall_status(name: str, results: dict[str, str]) -> str:
+    """Status geral do pipeline (Gate B1), calculado a partir do `critical`
+    de cada Step (relookup em PIPELINES[name] — `results` so' tem status,
+    nao o Step inteiro) cruzado com o status de cada step:
+      - "FAILED": algum step CRITICO com status FAILED ou BLOCKED.
+      - "DEGRADED": nenhum critico falhou/bloqueou, mas algum NAO-CRITICO
+        (ex.: sync_produtos_shopee bloqueado por LOCAL_PG_URL) FAILED ou
+        BLOCKED.
+      - "OK": nenhum FAILED/BLOCKED em nenhum step (criticos ou nao).
+
+    SKIPPED nunca conta como falha aqui, independente de criticidade — um
+    step critico pulado porque dependia de um nao-critico bloqueado
+    (ex.: monitor_bug8 quando sync_produtos_shopee e' BLOCKED) nao derruba
+    o resultado geral sozinho; o que derruba (para DEGRADED) e' o proprio
+    sync_produtos_shopee BLOCKED, ja contado como nao-critico."""
+    steps = PIPELINES[name]
+    critical_by_name = {s.name: s.critical for s in steps}
+
+    has_critical_failure = any(
+        critical_by_name.get(step_name, True) and status in ("FAILED", "BLOCKED")
+        for step_name, status in results.items()
+    )
+    if has_critical_failure:
+        return "FAILED"
+
+    has_noncritical_failure = any(
+        not critical_by_name.get(step_name, True) and status in ("FAILED", "BLOCKED")
+        for step_name, status in results.items()
+    )
+    if has_noncritical_failure:
+        return "DEGRADED"
+
+    return "OK"
+
+
 def main() -> int:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=str(REPO_ROOT / ".env"))
@@ -173,10 +228,21 @@ def main() -> int:
     args = parser.parse_args()
 
     results = run_pipeline(args.pipeline)
+    overall = compute_overall_status(args.pipeline, results)
 
-    print(f"\nRESUMO {args.pipeline}: {results}")
-    any_failed_or_blocked = any(v in ("FAILED", "BLOCKED") for v in results.values())
-    return 1 if any_failed_or_blocked else 0
+    steps = PIPELINES[args.pipeline]
+    critical_results = {s.name: results[s.name] for s in steps if s.critical}
+    noncritical_results = {s.name: results[s.name] for s in steps if not s.critical}
+
+    print(f"\nRESUMO {args.pipeline}:")
+    print(f"  CRITICO: {critical_results}")
+    print(f"  NAO-CRITICO (esperado, nao derruba o pipeline sozinho): {noncritical_results}")
+    print(f"STATUS GERAL: {overall}")
+
+    # Exit 1 so' em FAILED (falha/bloqueio critico). DEGRADED (so' gap
+    # nao-critico conhecido, ex.: Shopee manual) e OK retornam exit 0 —
+    # o pipeline nao deve "falhar" todo dia por um gap ja conhecido.
+    return 1 if overall == "FAILED" else 0
 
 
 if __name__ == "__main__":

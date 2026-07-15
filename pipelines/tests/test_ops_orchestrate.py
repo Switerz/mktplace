@@ -329,3 +329,111 @@ def test_shopee_orders_stats_ads_sao_passos_separados_no_pipeline():
     shopee-ads como fontes distintas."""
     names = {step.name for step in orch.PIPELINES["full_daily"]}
     assert {"daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads"} <= names
+
+
+# =============================================================================
+# Gate B1 — politica critico/nao-critico (Step.critical + compute_overall_status)
+# =============================================================================
+
+def test_step_critical_default_true_preserva_comportamento_antigo():
+    """Todo step ja existente, EXCETO sync_produtos_shopee (marcado
+    critical=False de proposito neste gate), continua critical=True por
+    default — nada muda para eles."""
+    for step in orch.PIPELINES["full_daily"]:
+        if step.name == "sync_produtos_shopee":
+            assert step.critical is False
+        else:
+            assert step.critical is True, f"{step.name} deveria continuar critical=True (default)"
+
+
+def test_compute_overall_status_ok_quando_tudo_passa():
+    executor = make_executor()
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("full_daily", results) == "OK"
+
+
+def test_compute_overall_status_failed_quando_step_critico_falha():
+    executor = make_executor(returncodes={"daily_ml": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_compute_overall_status_failed_quando_step_critico_bloqueado_no_preflight():
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("ml_daily",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["daily_ml"] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_compute_overall_status_degraded_quando_produtos_shopee_bloqueado_por_local_pg_url():
+    """Cenario central do Gate B1: produtos_shopee bloqueado (LOCAL_PG_URL
+    ausente) e' um gap manual conhecido — o pipeline deve reportar
+    DEGRADED, nunca FAILED, quando ML/TikTok/tudo mais critico passou."""
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["sync_produtos_shopee"] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+
+
+def test_compute_overall_status_degraded_quando_sync_produtos_shopee_falha_execucao():
+    """Nao-critico tambem cobre FAILED (nao so' BLOCKED) — sync_produtos_shopee
+    pode falhar por outro motivo (nao so' preflight) e ainda assim so'
+    degradar, nao derrubar o pipeline."""
+    executor = make_executor(returncodes={"sync_produtos_shopee": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["sync_produtos_shopee"] == "FAILED"
+    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+
+
+def test_compute_overall_status_skipped_por_dependencia_nao_critica_nao_derruba_pipeline():
+    """monitor_bug8 SKIPPED porque sync_produtos_shopee (nao-critico) foi
+    bloqueado nao deve, por si so', contribuir para FAILED nem para um
+    segundo motivo de DEGRADED — SKIPPED nunca conta como falha aqui."""
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["monitor_bug8"] == "SKIPPED"
+    # DEGRADED so' por causa do proprio sync_produtos_shopee (nao-critico);
+    # nunca escala pra FAILED so' porque um step downstream foi pulado.
+    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+
+
+def test_compute_overall_status_failed_tem_prioridade_sobre_degraded():
+    """Se um step critico E um nao-critico falham na mesma execucao, o
+    resultado e' FAILED (critico sempre vence), nunca DEGRADED."""
+    executor = make_executor(returncodes={"daily_ml": 1, "sync_produtos_shopee": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_compute_overall_status_ok_mesmo_com_monitor_bug8_skipped_por_falha_critica_upstream():
+    """Caso diferente do 'skip nao-critico': aqui o proprio
+    sync_produtos_shopee teve SUCCESS mas outro step CRITICO falhou em
+    paralelo (sem relacao de dependencia) — nao deve mudar o resultado do
+    proprio sync_produtos_shopee nem do monitor_bug8, so' confirma que
+    FAILED de um step critico independente ainda e' pego corretamente."""
+    executor = make_executor(returncodes={"daily_tiktok": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["sync_produtos_shopee"] == "SUCCESS"
+    assert results["monitor_bug8"] == "SUCCESS"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+@pytest.mark.parametrize("scenario,expected", [
+    ({"returncodes": {}, "blocked": ()}, "OK"),
+    ({"returncodes": {"daily_ml": 1}, "blocked": ()}, "FAILED"),
+    ({"returncodes": {}, "blocked": ("produtos_shopee",)}, "DEGRADED"),
+    ({"returncodes": {"sync_produtos_shopee": 1}, "blocked": ("tiktok_daily",)}, "FAILED"),
+])
+def test_compute_overall_status_cenarios_mistos(scenario, expected):
+    executor = make_executor(returncodes=scenario["returncodes"])
+    preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("full_daily", results) == expected

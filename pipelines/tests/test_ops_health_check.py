@@ -441,7 +441,9 @@ def test_main_retorna_0_quando_report_ok(monkeypatch, capsys):
     monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
     exit_code = hc.main()
     assert exit_code == 0
-    assert "STATUS GERAL: OK" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "STATUS GERAL (inclui conhecidos/manuais): OK" in out
+    assert "STATUS CRITICO (decide o exit code): OK" in out
 
 
 def test_main_retorna_1_quando_bug8_diverge(monkeypatch, capsys):
@@ -482,6 +484,127 @@ def test_main_nunca_imprime_credenciais(monkeypatch, capsys):
     assert "S3nhaSecreta" not in out
     assert "segredouser" not in out
     assert "ep-fake.neon.tech" in out
+
+
+# =============================================================================
+# Gate B1 — ok_critical separado de ok (Shopee manual = nao-critico)
+# =============================================================================
+
+def test_expected_source_critical_default_true():
+    for s in hc.EXPECTED_SOURCES:
+        assert s.critical is True, f"{s.source_name} deveria continuar critical=True (default, Gate B1)"
+
+
+def test_build_report_stale_em_fonte_critica_reprova_ok_e_ok_critical():
+    old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
+    # marketplace_id=2 (ml) stale -- fonte critica
+    conn = all_fresh_conn(daily_freshness_rows=[
+        {"marketplace_id": 1, "max_date": TODAY},
+        {"marketplace_id": 2, "max_date": old_date},
+        {"marketplace_id": 3, "max_date": TODAY},
+    ])
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is False
+    ml_entry = next(d for d in report["data_freshness"] if d["label"] == "fact_marketplace_daily_performance[ml]")
+    assert ml_entry["critical"] is True
+    assert ml_entry["stale"] is True
+    assert "reason" in ml_entry and ml_entry["reason"]
+
+
+def test_build_report_stale_apenas_em_shopee_reprova_ok_mas_nao_ok_critical():
+    """Cenario central do Gate B1: Shopee (ingestao manual) defasado nunca
+    faz ok_critical virar False sozinho, mesmo que `ok` (visao completa)
+    continue reprovando para visibilidade."""
+    old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
+    conn = all_fresh_conn(daily_freshness_rows=[
+        {"marketplace_id": 1, "max_date": TODAY},
+        {"marketplace_id": 2, "max_date": TODAY},
+        {"marketplace_id": 3, "max_date": old_date},
+    ])
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+    shopee_entry = next(d for d in report["data_freshness"] if d["label"] == "fact_marketplace_daily_performance[shopee]")
+    assert shopee_entry["critical"] is False
+    assert shopee_entry["stale"] is True
+    assert "reason" in shopee_entry and shopee_entry["reason"]
+
+
+def test_build_report_ok_critical_true_quando_so_shopee_produtos_manual_defasado():
+    """marts.fact_shopee_product_monthly[ref_month] ja nunca vira stale por
+    threshold_days=None, mas confirma tambem marcado critical=False."""
+    conn = all_fresh_conn(shopee_produtos_max=TODAY - timedelta(days=90))
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok_critical"] is True
+    entry = next(d for d in report["data_freshness"] if "ref_month" in d["label"])
+    assert entry["critical"] is False
+    assert entry["stale"] is False  # cadencia manual_monthly, nunca stale por si so'
+
+
+def test_build_report_bug8_divergencia_reprova_ok_critical_mesmo_sem_nenhuma_fonte_stale():
+    """Bug 8 (reconciliacao Shopee) nao tem conceito de 'critico/nao-critico'
+    — uma divergencia sempre reprova ok_critical tambem, nunca so' `ok`."""
+    conn = all_fresh_conn(bug8_scalars=[("HAVING COUNT(*) > 1", 3)])
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is False
+
+
+def test_build_report_todas_as_entradas_de_data_freshness_tem_campo_critical():
+    conn = all_fresh_conn()
+    report = hc.build_report(conn, now=NOW)
+    assert all("critical" in d for d in report["data_freshness"])
+    assert all("critical" in s for s in report["sources"])
+
+
+def test_main_retorna_1_quando_apenas_fonte_critica_stale(monkeypatch, capsys):
+    old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(daily_freshness_rows=[
+        {"marketplace_id": 1, "max_date": TODAY},
+        {"marketplace_id": 2, "max_date": old_date},
+        {"marketplace_id": 3, "max_date": TODAY},
+    ]))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "ATRASADO-CRITICO" in out
+
+
+def test_main_retorna_0_quando_apenas_shopee_stale(monkeypatch, capsys):
+    """Regressao central do Gate B1: antes, isso retornava exit 1 todo dia
+    so' por causa do gap manual conhecido de Shopee."""
+    old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(daily_freshness_rows=[
+        {"marketplace_id": 1, "max_date": TODAY},
+        {"marketplace_id": 2, "max_date": TODAY},
+        {"marketplace_id": 3, "max_date": old_date},
+    ]))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "ATRASADO-CONHECIDO" in out
+    assert "STATUS CRITICO (decide o exit code): OK" in out
+
+
+def test_main_json_tem_ok_critical_e_campo_critical_por_entrada(monkeypatch, capsys):
+    import json
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn())
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py", "--json"])
+    hc.main()
+    parsed = json.loads(capsys.readouterr().out)
+    assert "ok" in parsed
+    assert "ok_critical" in parsed
+    assert all("critical" in s for s in parsed["sources"])
+    assert all("critical" in d for d in parsed["data_freshness"])
+    assert all("reason" in d for d in parsed["data_freshness"])
 
 
 def test_main_fecha_a_conexao(monkeypatch):

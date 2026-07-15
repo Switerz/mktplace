@@ -32,6 +32,21 @@ upstream parou de produzir dado):
 Thresholds centralizados em EXPECTED_SOURCES e DAILY_DATA_FRESHNESS_THRESHOLD_DAYS
 — nunca espalhados pelo corpo das funcoes.
 
+Politica de criticidade (Gate B1, 2026-07-15): cada fonte de execucao
+(`ExpectedSource`) e cada entrada de frescor de dado (`DataFreshnessResult`)
+tem um campo `critical` (default True). `fact_marketplace_daily_performance
+[shopee]` (e a entrada de cadencia manual `fact_shopee_product_monthly`)
+sao marcadas `critical=False` — Shopee e' ingestao manual, sabidamente
+defasada ate alguem atualizar os exports, nao uma falha de pipeline.
+`build_report()` devolve DOIS campos:
+  - `ok`: visao completa, considerando TODAS as fontes (criticas e
+    conhecidas/manuais) — so' para visibilidade/JSON, nunca decide o exit
+    code sozinho.
+  - `ok_critical`: so' fontes CRITICAS (+ invariantes do Bug 8, sempre
+    critico) — e' isso que `main()` usa para o exit code. Um Shopee
+    manual defasado nunca faz `python -m pipelines.ops.health_check`
+    retornar exit 1 sozinho.
+
 Nenhuma escrita em nenhum banco. Nenhum alerta externo (e-mail/WhatsApp/
 webhook) — so' saida para o operador e exit code para automacao externa.
 O JSON traz um campo `reason` por fonte/tabela explicando a causa do
@@ -73,6 +88,11 @@ class ExpectedSource:
     source_name: str
     cadence: str  # "daily" | "manual_monthly"
     exec_threshold_hours: float
+    # Gate B1: default True preserva o comportamento de toda fonte ja
+    # existente. critical=False so' se aplica a fontes cuja EXECUCAO e'
+    # sabidamente manual/nao-diaria por desenho (nenhuma hoje — mesmo
+    # Shopee roda sync todo dia; ver docstring do modulo).
+    critical: bool = True
 
 
 # Lista EXPLICITA e completa das fontes que esperamos ver em
@@ -109,6 +129,7 @@ class SourceStatus:
     stale: bool
     last_error: str | None
     reason: str
+    critical: bool = True
 
 
 def _now() -> datetime:
@@ -153,6 +174,7 @@ def fetch_source_statuses(conn, now: datetime | None = None) -> list[SourceStatu
                     stale=True,
                     last_error=None,
                     reason="nenhuma execucao registrada para esta fonte esperada",
+                    critical=expected.critical,
                 )
             )
             continue
@@ -205,6 +227,7 @@ def fetch_source_statuses(conn, now: datetime | None = None) -> list[SourceStatu
                 stale=execution_stale or last_run_failed,
                 last_error=(last["error_message"][:200] if last.get("error_message") else None),
                 reason=reason,
+                critical=expected.critical,
             )
         )
     cur.close()
@@ -220,11 +243,18 @@ class DataFreshnessResult:
     threshold_days: float | None
     stale: bool
     reason: str
+    # Gate B1: default True preserva o comportamento de toda entrada ja
+    # existente. critical=False marca fontes manuais/conhecidas (hoje, so'
+    # as derivadas de Shopee) — stale nelas nunca deve decidir o exit code
+    # de `main()` sozinho (ver `ok_critical` em build_report()).
+    critical: bool = True
 
 
-def _evaluate_date_freshness(label: str, cadence: str, max_value, today: date, threshold_days: float | None) -> DataFreshnessResult:
+def _evaluate_date_freshness(
+    label: str, cadence: str, max_value, today: date, threshold_days: float | None, *, critical: bool = True,
+) -> DataFreshnessResult:
     if max_value is None:
-        return DataFreshnessResult(label, cadence, None, None, threshold_days, True, f"{label}: tabela sem nenhuma linha")
+        return DataFreshnessResult(label, cadence, None, None, threshold_days, True, f"{label}: tabela sem nenhuma linha", critical)
 
     value_date = max_value.date() if hasattr(max_value, "date") else max_value
     days_since = (today - value_date).days
@@ -239,6 +269,7 @@ def _evaluate_date_freshness(label: str, cadence: str, max_value, today: date, t
             label, cadence, value_date.isoformat(), days_since, threshold_days, True,
             f"{label}: data no FUTURO ({value_date.isoformat()}, {-days_since}d a frente de hoje) — "
             f"erro de qualidade (parsing/fuso), nunca tratado como fresco",
+            critical,
         )
 
     if threshold_days is None:
@@ -248,6 +279,7 @@ def _evaluate_date_freshness(label: str, cadence: str, max_value, today: date, t
             label, cadence, value_date.isoformat(), days_since, None, False,
             f"{label}: cadencia {cadence}, ultimo periodo ha {days_since}d — nao avaliado contra threshold "
             f"(a execucao do sync correspondente e' o que detecta uma quebra real)",
+            critical,
         )
 
     stale = days_since > threshold_days
@@ -256,7 +288,7 @@ def _evaluate_date_freshness(label: str, cadence: str, max_value, today: date, t
         if stale
         else f"{label}: dado fresco ({days_since}d, limite {threshold_days}d)"
     )
-    return DataFreshnessResult(label, cadence, value_date.isoformat(), days_since, threshold_days, stale, reason)
+    return DataFreshnessResult(label, cadence, value_date.isoformat(), days_since, threshold_days, stale, reason, critical)
 
 
 def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessResult]:
@@ -269,10 +301,14 @@ def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessR
     )
     daily_rows = {int(r["marketplace_id"]): r["max_date"] for r in cur.fetchall()}
     for mkt_id, label in MARKETPLACE_LABELS.items():
+        # Shopee (ingestao manual, exports XLSX/CSV) e' nao-critico: fica
+        # defasado ate alguem atualizar os arquivos, nao e' uma falha de
+        # pipeline. ML/TikTok continuam criticos.
         results.append(
             _evaluate_date_freshness(
                 f"fact_marketplace_daily_performance[{label}]", "daily",
                 daily_rows.get(mkt_id), today, DAILY_DATA_FRESHNESS_THRESHOLD_DAYS,
+                critical=(label != "shopee"),
             )
         )
 
@@ -282,8 +318,12 @@ def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessR
     cur.execute("SELECT MAX(refreshed_at) AS m FROM marts.fact_ml_produto_ranking")
     results.append(_evaluate_date_freshness("fact_ml_produto_ranking", "daily", cur.fetchone()["m"], today, DAILY_DATA_FRESHNESS_THRESHOLD_DAYS))
 
+    # Cadencia manual_monthly (Shopee Produtos) — ja nunca vira stale por si
+    # so' (threshold_days=None), mas marcada nao-critica tambem para deixar
+    # explicito que e' outro ponto de ingestao manual Shopee, consistente
+    # com a fonte de daily-performance acima.
     cur.execute(f"SELECT MAX(ref_month) AS m FROM marts.{REAL_TABLE}")
-    results.append(_evaluate_date_freshness(f"marts.{REAL_TABLE}[ref_month]", "manual_monthly", cur.fetchone()["m"], today, None))
+    results.append(_evaluate_date_freshness(f"marts.{REAL_TABLE}[ref_month]", "manual_monthly", cur.fetchone()["m"], today, None, critical=False))
 
     cur.close()
     return results
@@ -314,8 +354,17 @@ def build_report(conn, now: datetime | None = None) -> dict:
     data_stale = [d for d in data_freshness if d.stale]
     ok = not exec_stale and not data_stale and bug8["ok"]
 
+    # Gate B1: ok_critical ignora fontes/entradas critical=False (hoje, so'
+    # Shopee) — e' isso que `main()` usa para o exit code. `ok` continua
+    # existindo, completo, so' para visibilidade (JSON/log), nunca decide
+    # o exit code sozinho.
+    exec_stale_critical = [s for s in exec_stale if s.critical]
+    data_stale_critical = [d for d in data_stale if d.critical]
+    ok_critical = not exec_stale_critical and not data_stale_critical and bug8["ok"]
+
     return {
         "ok": ok,
+        "ok_critical": ok_critical,
         "sources": [asdict(s) for s in sources],
         "data_freshness": [asdict(d) for d in data_freshness],
         "bug8_invariants": bug8,
@@ -325,12 +374,18 @@ def build_report(conn, now: datetime | None = None) -> dict:
 def _print_human(report: dict) -> None:
     print("=== Frescor de EXECUCAO por fonte (audit.source_sync_run) ===")
     for s in report["sources"]:
-        flag = "ATRASADA" if s["stale"] else "OK"
+        if not s["stale"]:
+            flag = "OK"
+        else:
+            flag = "ATRASADA-CRITICO" if s["critical"] else "ATRASADA-CONHECIDO"
         print(f"[{flag}] {s['source_name']} (cadencia={s['cadence']}): {s['reason']}")
 
     print("\n=== Frescor de DADO (MAX direto nas tabelas do Neon) ===")
     for d in report["data_freshness"]:
-        flag = "ATRASADO" if d["stale"] else "OK"
+        if not d["stale"]:
+            flag = "OK"
+        else:
+            flag = "ATRASADO-CRITICO" if d["critical"] else "ATRASADO-CONHECIDO"
         print(f"[{flag}] {d['reason']}")
 
     print("\n=== Invariantes do Bug 8 (Shopee) ===")
@@ -340,7 +395,11 @@ def _print_human(report: dict) -> None:
         for p in report["bug8_invariants"]["problems"]:
             print(f"  DIVERGENCIA: {p}")
 
-    print(f"\nSTATUS GERAL: {'OK' if report['ok'] else 'ATENCAO'}")
+    # "GERAL" inclui fontes conhecidas/manuais (Shopee) — so' visibilidade.
+    # "CRITICO" ignora essas fontes e e' o que decide o exit code (Gate B1):
+    # um Shopee manual defasado nunca aparece aqui como motivo de atencao.
+    print(f"\nSTATUS GERAL (inclui conhecidos/manuais): {'OK' if report['ok'] else 'ATENCAO'}")
+    print(f"STATUS CRITICO (decide o exit code): {'OK' if report['ok_critical'] else 'ATENCAO'}")
 
 
 def main() -> int:
@@ -366,7 +425,10 @@ def main() -> int:
     else:
         _print_human(report)
 
-    return 0 if report["ok"] else 1
+    # Gate B1: exit code decidido por ok_critical (ignora Shopee manual),
+    # nao mais por `ok` (que incluiria o gap conhecido de Shopee e faria
+    # este processo sair com exit 1 quase todo dia).
+    return 0 if report["ok_critical"] else 1
 
 
 if __name__ == "__main__":
