@@ -52,8 +52,15 @@ exit code != 0 sozinho; so' rebaixa o resultado para DEGRADED. Isso existe
 para o pipeline inteiro nao reportar "falha" todo dia por causa de um gap
 Shopee ja conhecido, enquanto ainda alerta de verdade (exit 1) se ML/
 TikTok/qualquer step critico realmente quebrar. Ver `compute_overall_status`.
-Regional (Gold + sync Neon) ainda NAO faz parte deste pipeline — fica para
-o Gate B2.
+
+Regional (Gate B2, 2026-07-15): `gold_regional_incremental` +
+`sync_region_if_needed` foram integrados a full_daily, ambos CRITICOS (sem
+gap manual conhecido aceito, diferente de sync_produtos_shopee). O sync Neon
+so' roda de fato quando o proprio wrapper (via diagnose) constata divergencia
+— evita TRUNCATE+INSERT e uma tabela de backup nova todo dia sem necessidade.
+O Task Scheduler continua Disabled; a ativacao fica para um gate futuro
+(B3/B4), apos um periodo de confianca com execucoes MANUAIS observadas
+destes dois steps.
 
 Uso:
     python -m pipelines.ops.orchestrate --pipeline full_daily
@@ -100,6 +107,20 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         Step("daily_shopee_orders", "pipelines.ingestion.daily_performance", ("--source", "shopee", "--mode", "incremental"), timeout_seconds=900, preflight_source="shopee_daily"),
         Step("daily_shopee_stats", "pipelines.ingestion.daily_performance", ("--source", "shopee-stats", "--mode", "incremental"), timeout_seconds=900, preflight_source="shopee-stats_daily"),
         Step("daily_shopee_ads", "pipelines.ingestion.daily_performance", ("--source", "shopee-ads", "--mode", "incremental"), timeout_seconds=900, preflight_source="shopee-ads_daily"),
+        # Gate B2 (2026-07-15): regional (Gold incremental + sync Neon
+        # condicional), ambos CRITICOS de proposito — diferente de
+        # sync_produtos_shopee (Gate B1), aqui nao ha' nenhum gap manual
+        # conhecido aceito; um FAILED/BLOCKED real deve reprovar o pipeline
+        # (FAILED), nao so' rebaixar para DEGRADED. O periodo de confianca
+        # antes de ativar o Task Scheduler vem de execucoes MANUAIS
+        # observadas, nao de marcar estes steps como nao-criticos.
+        Step("gold_regional_incremental", "pipelines.ingestion.gold_regional.loader", ("--incremental",), timeout_seconds=300, preflight_source="gold_regional_incremental", critical=True),
+        # So' roda se gold_regional_incremental teve SUCCESS nesta mesma
+        # execucao — nunca dispara um sync Neon baseado em Gold desatualizado
+        # ou parcialmente carregado. O proprio wrapper decide, via diagnose,
+        # se um sync e' realmente necessario (evita TRUNCATE+INSERT e backup
+        # novo todo dia quando Data Mart e Neon ja' estao em paridade).
+        Step("sync_region_if_needed", "pipelines.ops.sync_region_if_needed", (), timeout_seconds=120, preflight_source="sync_region_daily", depends_on=("gold_regional_incremental",), critical=True),
         Step("sync_produtos_ml", "pipelines.sync_produtos", ("--source", "ml"), timeout_seconds=600, preflight_source="produtos_ml"),
         Step("sync_produtos_tiktok", "pipelines.sync_produtos", ("--source", "tiktok"), timeout_seconds=600, preflight_source="produtos_tiktok"),
         # Nao-critico (Gate B1): bloqueado por LOCAL_PG_URL ausente e' um
@@ -120,8 +141,9 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
     ),
 }
 
-# Soma dos timeouts individuais de full_daily = 900*5 + 600*3 + 300 + 180
-# = 6780s (~1h53). O timeout EXTERNO (run_with_lock.ps1 -TimeoutSeconds,
+# Soma dos timeouts individuais de full_daily = 900*5 + 300 + 120 + 600*3 +
+# 300 + 180 = 7200s (~2h, Gate B2 acrescentou gold_regional_incremental=300s
+# e sync_region_if_needed=120s). O timeout EXTERNO (run_with_lock.ps1 -TimeoutSeconds,
 # ver scripts/run_task.ps1) tem que ser MAIOR que essa soma, com margem —
 # senao o lock externo mata o processo pai antes que os timeouts internos
 # por step tenham chance de proteger as fontes independentes seguintes.

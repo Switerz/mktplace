@@ -437,3 +437,103 @@ def test_compute_overall_status_cenarios_mistos(scenario, expected):
     preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
     assert orch.compute_overall_status("full_daily", results) == expected
+
+
+# =============================================================================
+# Gate B2 — gold_regional_incremental + sync_region_if_needed integrados a
+# full_daily, ambos CRITICOS (diferente de sync_produtos_shopee no Gate B1)
+# =============================================================================
+
+def test_gold_regional_e_sync_region_estao_na_ordem_correta():
+    """Ordem exata pedida: os 2 novos steps ficam depois de todas as fontes
+    diarias (inclusive shopee-ads) e antes de qualquer sync de Produtos."""
+    names = [step.name for step in orch.PIPELINES["full_daily"]]
+    assert names.index("daily_shopee_ads") < names.index("gold_regional_incremental")
+    assert names.index("gold_regional_incremental") < names.index("sync_region_if_needed")
+    assert names.index("sync_region_if_needed") < names.index("sync_produtos_ml")
+
+
+def test_gold_regional_e_sync_region_sao_criticos():
+    steps_by_name = {step.name: step for step in orch.PIPELINES["full_daily"]}
+    assert steps_by_name["gold_regional_incremental"].critical is True
+    assert steps_by_name["sync_region_if_needed"].critical is True
+
+
+def test_sync_region_if_needed_depende_de_gold_regional_incremental():
+    steps_by_name = {step.name: step for step in orch.PIPELINES["full_daily"]}
+    assert steps_by_name["sync_region_if_needed"].depends_on == ("gold_regional_incremental",)
+
+
+def test_gold_regional_incremental_falha_execucao_vira_failed_no_geral():
+    """Regional e' critico: uma falha de execucao real (nao so' preflight)
+    tem que reprovar o pipeline inteiro (FAILED), nao so' degradar."""
+    executor = make_executor(returncodes={"gold_regional_incremental": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["gold_regional_incremental"] == "FAILED"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_gold_regional_incremental_bloqueado_no_preflight_vira_failed_no_geral():
+    """Diferente de produtos_shopee (Gate B1): nao ha' gap manual conhecido
+    aceito para o regional — um BLOCKED aqui e' FAILED, nunca DEGRADED."""
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("gold_regional_incremental",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["gold_regional_incremental"] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_sync_region_if_needed_e_pulado_se_gold_regional_incremental_falhar():
+    executor = make_executor(returncodes={"gold_regional_incremental": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["sync_region_if_needed"] == "SKIPPED"
+
+
+def test_sync_region_if_needed_bloqueado_no_preflight_vira_failed_no_geral():
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("sync_region_daily",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["sync_region_if_needed"] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_regional_ok_e_shopee_nao_critico_bloqueado_continua_degradado():
+    """Confirma que o comportamento do Gate B1 (shopee nao-critico so'
+    degrada) continua intacto depois de o regional (critico) ter sido
+    adicionado — os dois nao interferem um no outro."""
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results["gold_regional_incremental"] == "SUCCESS"
+    assert results["sync_region_if_needed"] == "SUCCESS"
+    assert results["sync_produtos_shopee"] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+
+
+def test_regional_falha_critica_e_shopee_nao_critico_falha_junto_ainda_e_failed():
+    """Critico sempre vence: mesmo com o gap conhecido de shopee tambem
+    presente na mesma execucao, uma falha real do regional continua
+    reprovando o pipeline inteiro (FAILED, nunca DEGRADED)."""
+    executor = make_executor(returncodes={"gold_regional_incremental": 1, "sync_produtos_shopee": 1})
+    preflight_fn = make_preflight()
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+def test_gold_regional_incremental_chama_o_modulo_certo_com_flag_incremental():
+    steps_by_name = {step.name: step for step in orch.PIPELINES["full_daily"]}
+    step = steps_by_name["gold_regional_incremental"]
+    assert step.module == "pipelines.ingestion.gold_regional.loader"
+    assert step.args == ("--incremental",)
+
+
+def test_sync_region_if_needed_chama_o_modulo_certo_sem_flags():
+    """sync_region_if_needed.py nao aceita/precisa de flags — a decisao
+    diagnose-then-maybe-sync e' sempre a mesma, ao contrario de
+    sync_region_daily.py (que tem --diagnose/--sync)."""
+    steps_by_name = {step.name: step for step in orch.PIPELINES["full_daily"]}
+    step = steps_by_name["sync_region_if_needed"]
+    assert step.module == "pipelines.ops.sync_region_if_needed"
+    assert step.args == ()

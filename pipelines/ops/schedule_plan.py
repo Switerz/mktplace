@@ -50,16 +50,18 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 
 # Timeout externo do run_with_lock.ps1 para a TaskKey full_daily. Tem que
 # ser MAIOR que a soma dos timeouts individuais dos steps de
-# pipelines.ops.orchestrate.PIPELINES["full_daily"] (6780s), com margem
-# para overhead de spawn de processo Python + imports pandas/sqlalchemy +
-# latencia de rede VPN/Neon entre passos — senao o lock externo mataria o
-# processo pai ANTES que os timeouts internos por step tivessem chance de
-# proteger as fontes independentes seguintes. Duplicado aqui de proposito
-# (sem import cruzado de pipelines.ops.orchestrate, para nao dar a este
-# modulo nenhuma dependencia transitiva de subprocess) — ver
+# pipelines.ops.orchestrate.PIPELINES["full_daily"] (7200s desde o Gate B2,
+# que acrescentou gold_regional_incremental=300s e
+# sync_region_if_needed=120s), com margem para overhead de spawn de
+# processo Python + imports pandas/sqlalchemy + latencia de rede VPN/Neon
+# entre passos — senao o lock externo mataria o processo pai ANTES que os
+# timeouts internos por step tivessem chance de proteger as fontes
+# independentes seguintes. Duplicado aqui de proposito (sem import cruzado
+# de pipelines.ops.orchestrate, para nao dar a este modulo nenhuma
+# dependencia transitiva de subprocess) — ver
 # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-# (6780s) e o teste que trava os dois valores em sincronia.
-EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de ~2220s (~33%) sobre 6780s
+# (7200s) e o teste que trava os dois valores em sincronia.
+EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de ~1800s (~25%) sobre 7200s
 
 # ExecutionTimeLimit do PROPRIO Task Scheduler (hard-limit independente do
 # -TimeoutSeconds do run_with_lock.ps1) precisa ficar ACIMA de

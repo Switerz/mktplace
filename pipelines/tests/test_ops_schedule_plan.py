@@ -215,12 +215,18 @@ def test_xml_configura_execution_time_limit_maior_que_o_timeout_do_lock():
 
 def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
     """Trava os numeros em sincronia: 9000s (timeout do lock) tem que
-    ficar acima de 6780s (soma dos timeouts individuais dos steps de
-    pipelines.ops.orchestrate.PIPELINES['full_daily']), com margem; e o
-    ExecutionTimeLimit do Task Scheduler (9600s) tem que ficar acima do
-    timeout do lock, com margem adicional para a limpeza pos-timeout
-    (Stop-Process + espera + logs)."""
-    internal_budget_seconds = 6780
+    ficar acima de 7200s (soma dos timeouts individuais dos steps de
+    pipelines.ops.orchestrate.PIPELINES['full_daily'], desde o Gate B2 que
+    acrescentou gold_regional_incremental=300s + sync_region_if_needed=120s),
+    com margem; e o ExecutionTimeLimit do Task Scheduler (9600s) tem que
+    ficar acima do timeout do lock, com margem adicional para a limpeza
+    pos-timeout (Stop-Process + espera + logs)."""
+    import pipelines.ops.orchestrate as orch
+    internal_budget_seconds = 7200
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == internal_budget_seconds, (
+        "orcamento hardcoded neste teste saiu de sincronia com a soma real "
+        "dos timeouts de PIPELINES['full_daily'] — atualize os dois numeros juntos"
+    )
     assert sp.EXTERNAL_LOCK_TIMEOUT_SECONDS > internal_budget_seconds
     margin = sp.EXTERNAL_LOCK_TIMEOUT_SECONDS - internal_budget_seconds
     assert margin > 0.15 * internal_budget_seconds

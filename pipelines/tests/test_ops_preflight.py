@@ -413,6 +413,155 @@ def test_local_pg_indisponivel_bloqueia_produtos_shopee(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Gate B2 — check_gold_regional_write: delega inteiramente a
+# pipelines.ingestion.gold_regional.write_conn (secret + guardrails +
+# preflight somente-leitura), nunca abre conexao de escrita neste modulo.
+# ---------------------------------------------------------------------------
+
+def _fake_write_secret():
+    return {"DATAMART_GOLD_WRITE_URL": "postgresql://writeuser:S3nhaSecreta@write-host.internal/db",
+            "I_UNDERSTAND_THIS_WRITES_DATAMART_GOLD": "1"}
+
+
+def test_check_gold_regional_write_bloqueia_quando_secret_nao_existe(monkeypatch):
+    def _raise(*a, **k):
+        raise preflight.gold_write_conn.SecretLoadError("arquivo de secret nao encontrado: .env.gold-write.local")
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", _raise)
+    result = preflight.check_gold_regional_write()
+    assert result.ok is False
+    assert "nao encontrado" in result.detail
+
+
+def test_check_gold_regional_write_bloqueia_quando_guardrails_falham(monkeypatch):
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", lambda *a, **k: _fake_write_secret())
+
+    def _raise(*a, **k):
+        raise preflight.gold_write_conn.SecretLoadError("DATAMART_GOLD_WRITE_URL e identica a DATAMART_DATABASE_URL")
+    monkeypatch.setattr(preflight.gold_write_conn, "validate_write_guardrails", _raise)
+    result = preflight.check_gold_regional_write()
+    assert result.ok is False
+    assert "identica" in result.detail
+
+
+def test_check_gold_regional_write_bloqueia_quando_preflight_de_escrita_reprova(monkeypatch):
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", lambda *a, **k: _fake_write_secret())
+    monkeypatch.setattr(preflight.gold_write_conn, "validate_write_guardrails", lambda secret, url: "postgresql://writeuser:S3nhaSecreta@write-host.internal/db")
+    report = preflight.gold_write_conn.PreflightReport(ok=False, blocking_reasons=["rolsuper=true"])
+    monkeypatch.setattr(preflight.gold_write_conn, "run_preflight", lambda *a, **k: report)
+    result = preflight.check_gold_regional_write()
+    assert result.ok is False
+    assert "rolsuper=true" in result.detail
+
+
+def test_check_gold_regional_write_passa_com_fakes(monkeypatch):
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", lambda *a, **k: _fake_write_secret())
+    monkeypatch.setattr(preflight.gold_write_conn, "validate_write_guardrails", lambda secret, url: "postgresql://writeuser:S3nhaSecreta@write-host.internal/db")
+    report = preflight.gold_write_conn.PreflightReport(ok=True)
+    monkeypatch.setattr(preflight.gold_write_conn, "run_preflight", lambda *a, **k: report)
+    result = preflight.check_gold_regional_write()
+    assert result.ok is True
+
+
+def test_check_gold_regional_write_nunca_expoe_segredo_ou_url(monkeypatch):
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", lambda *a, **k: _fake_write_secret())
+    monkeypatch.setattr(preflight.gold_write_conn, "validate_write_guardrails", lambda secret, url: "postgresql://writeuser:S3nhaSecreta@write-host.internal/db")
+    report = preflight.gold_write_conn.PreflightReport(ok=True)
+    monkeypatch.setattr(preflight.gold_write_conn, "run_preflight", lambda *a, **k: report)
+    result = preflight.check_gold_regional_write()
+    assert "S3nhaSecreta" not in result.detail
+    assert "writeuser" not in result.detail
+    assert "write-host.internal" not in result.detail
+
+
+def test_check_gold_regional_write_nunca_abre_conexao_de_escrita_neste_modulo():
+    """Guarda estrutural: preflight.py nao pode chamar
+    write_conn.open_write_connection nem instanciar psycopg2 diretamente
+    para o fluxo gold_regional — toda conexao (mesmo somente-leitura) e'
+    delegada a write_conn.run_preflight."""
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "open_write_connection" not in source
+
+
+# ---------------------------------------------------------------------------
+# Gate B2 — check_sync_region_consent: so' confere a variavel de ambiente,
+# nunca abre conexao (RDS/Neon ja cobertos por check_rds/check_neon)
+# ---------------------------------------------------------------------------
+
+def test_check_sync_region_consent_bloqueia_sem_env_var(monkeypatch):
+    monkeypatch.delenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", raising=False)
+    result = preflight.check_sync_region_consent()
+    assert result.ok is False
+
+
+def test_check_sync_region_consent_passa_com_env_var_1(monkeypatch):
+    monkeypatch.setenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", "1")
+    result = preflight.check_sync_region_consent()
+    assert result.ok is True
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes"])
+def test_check_sync_region_consent_bloqueia_valores_diferentes_de_1(monkeypatch, value):
+    monkeypatch.setenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", value)
+    result = preflight.check_sync_region_consent()
+    assert result.ok is False
+
+
+# ---------------------------------------------------------------------------
+# Gate B2 — SOURCE_CHECKS/run_preflight das 2 novas fontes
+# ---------------------------------------------------------------------------
+
+def test_source_checks_tem_gold_regional_incremental():
+    assert preflight.SOURCE_CHECKS["gold_regional_incremental"] == (preflight.check_gold_regional_write, preflight.check_rds)
+
+
+def test_source_checks_tem_sync_region_daily():
+    assert preflight.SOURCE_CHECKS["sync_region_daily"] == (preflight.check_sync_region_consent, preflight.check_rds, preflight.check_neon)
+
+
+def test_run_preflight_gold_regional_incremental_bloqueia_sem_secret(monkeypatch):
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
+    monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
+
+    def _raise(*a, **k):
+        raise preflight.gold_write_conn.SecretLoadError("arquivo de secret nao encontrado")
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", _raise)
+
+    ok, results = preflight.run_preflight("gold_regional_incremental")
+    assert ok is False
+
+
+def test_run_preflight_gold_regional_incremental_passa_com_fakes(monkeypatch):
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
+    monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
+    monkeypatch.setattr(preflight.gold_write_conn, "load_write_secret", lambda *a, **k: _fake_write_secret())
+    monkeypatch.setattr(preflight.gold_write_conn, "validate_write_guardrails", lambda secret, url: "postgresql://w:p@write-host/db")
+    monkeypatch.setattr(preflight.gold_write_conn, "run_preflight", lambda *a, **k: preflight.gold_write_conn.PreflightReport(ok=True))
+
+    ok, results = preflight.run_preflight("gold_regional_incremental")
+    assert ok is True
+
+
+def test_run_preflight_sync_region_daily_bloqueia_sem_consentimento(monkeypatch):
+    monkeypatch.delenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", raising=False)
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
+
+    ok, results = preflight.run_preflight("sync_region_daily")
+    assert ok is False
+
+
+def test_run_preflight_sync_region_daily_passa_com_consentimento_e_conectividade(monkeypatch):
+    monkeypatch.setenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", "1")
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
+
+    ok, results = preflight.run_preflight("sync_region_daily")
+    assert ok is True
+
+
+# ---------------------------------------------------------------------------
 # main() — exit codes e ausencia de credenciais na saida
 # ---------------------------------------------------------------------------
 

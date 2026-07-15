@@ -30,8 +30,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "apps" / "api"))
 
 from pipelines.connectors.shopee.connector import BRANDS_IN_SCOPE  # noqa: E402
+from pipelines.ingestion.gold_regional import write_conn as gold_write_conn  # noqa: E402
 
 _ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+_GOLD_REGIONAL_WRITE_SECRET_PATH = REPO_ROOT / ".env.gold-write.local"
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,54 @@ def check_shopee_ads_files() -> CheckResult:
     return _check_shopee_pattern(label, pattern)
 
 
+def check_gold_regional_write() -> CheckResult:
+    """Gate B2: read-only — nunca abre uma conexao de ESCRITA aqui. Confirma
+    em sequencia (1) que `.env.gold-write.local` existe/esta' gitignored/nao
+    rastreado e tem exatamente as 2 chaves esperadas (`load_write_secret`),
+    (2) que a write_url nao e' identica a DATAMART_DATABASE_URL
+    (`validate_write_guardrails`), (3) o preflight somente-leitura do proprio
+    pacote gold_regional (`write_conn.run_preflight`, sessao
+    readonly=True desde a conexao) aprova o alvo: nao esta' em recovery, nao
+    e' rolsuper, mesmo cluster fisico da leitura, permissao no schema gold, e
+    `gold.marketplace_region_daily` ja existe. Nunca imprime o conteudo do
+    secret nem qualquer host/URL — so' as mensagens ja saneadas de
+    SecretLoadError/PreflightReport.blocking_reasons (nenhuma delas ecoa a
+    DSN, ver write_conn.sanitize_error_message)."""
+    label = "Gold regional (escrita)"
+    try:
+        secret = gold_write_conn.load_write_secret(_GOLD_REGIONAL_WRITE_SECRET_PATH, REPO_ROOT)
+    except gold_write_conn.SecretLoadError as exc:
+        return CheckResult(label, False, f"{label}: {exc}")
+
+    datamart_read_url = os.environ.get("DATAMART_DATABASE_URL", "")
+    try:
+        write_url = gold_write_conn.validate_write_guardrails(secret, datamart_read_url)
+    except gold_write_conn.SecretLoadError as exc:
+        return CheckResult(label, False, f"{label}: {exc}")
+
+    report = gold_write_conn.run_preflight(write_url, datamart_read_url, expect_table_exists=True)
+    if not report.ok:
+        return CheckResult(label, False, f"{label}: preflight bloqueado — {'; '.join(report.blocking_reasons)}")
+    return CheckResult(label, True, f"{label}: secret valido, preflight de escrita OK")
+
+
+def check_sync_region_consent() -> CheckResult:
+    """So' verifica a variavel de ambiente de consentimento exigida por
+    pipelines.sync_region_daily.run_sync antes de disparar o sync — nunca
+    abre conexao aqui (RDS/Neon ja sao cobertos por check_rds/check_neon,
+    registrados junto com esta mesma fonte em SOURCE_CHECKS). Isso garante
+    BLOCKED explicito ANTES do wrapper sync_region_if_needed sequer tentar
+    diagnosticar, em vez de deixar run_sync levantar RuntimeError no meio da
+    execucao se o sync acabar sendo necessario."""
+    label = "Sync regional (consentimento)"
+    if os.environ.get("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY") != "1":
+        return CheckResult(
+            label, False,
+            f"{label}: I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY != '1' — sync nao sera' disparado, mesmo que necessario",
+        )
+    return CheckResult(label, True, f"{label}: OK")
+
+
 # Fontes suportadas e suas dependencias. produtos_shopee depende do
 # PostgreSQL local (populado manualmente por apps/api/etl/load_shopee_products.py
 # a partir dos XLSX — esse passo NAO faz parte desta automacao, ver runbook),
@@ -165,6 +216,11 @@ SOURCE_CHECKS = {
     "produtos_tiktok": (check_rds, check_neon),
     "produtos_ml": (check_rds, check_neon),
     "produtos_shopee": (check_local_pg, check_neon),
+    # Gate B2 (2026-07-15): regional (Gold incremental + sync Neon
+    # condicional) — ambos CRITICOS em orchestrate.py, sem gap manual
+    # conhecido aceito (diferente de produtos_shopee).
+    "gold_regional_incremental": (check_gold_regional_write, check_rds),
+    "sync_region_daily": (check_sync_region_consent, check_rds, check_neon),
 }
 
 
