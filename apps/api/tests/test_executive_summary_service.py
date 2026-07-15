@@ -77,7 +77,14 @@ def _regioes_summary(coverage_level="ok", uf_fill_pct=95.0, channels_sem_cobertu
     }
 
 
-def _compose(*, overview=None, brands=None, quality=None, canais=None, regioes_summary=None, channels="all", mkt_ids=None, now=NOW):
+def _daily_freshness_row(marketplace, max_date):
+    return {"marketplace": marketplace, "max_date": max_date}
+
+
+def _compose(
+    *, overview=None, brands=None, quality=None, canais=None, regioes_summary=None,
+    channels="all", mkt_ids=None, daily_freshness=None, regional_max_date=None, now=NOW,
+):
     return svc._compose_executive_summary(
         overview=overview or _overview(),
         brands=brands or _brands([]),
@@ -86,6 +93,8 @@ def _compose(*, overview=None, brands=None, quality=None, canais=None, regioes_s
         regioes_summary=regioes_summary or _regioes_summary(),
         channels=channels,
         mkt_ids=mkt_ids if mkt_ids is not None else [TIKTOK_ID, ML_ID, SHOPEE_ID],
+        daily_freshness=daily_freshness if daily_freshness is not None else [],
+        regional_max_date=regional_max_date,
         now=now,
     )
 
@@ -97,6 +106,14 @@ def _compose(*, overview=None, brands=None, quality=None, canais=None, regioes_s
 def test_resultado_valida_contra_schema_pydantic():
     result = _compose()
     ExecutiveSummaryResponse(**result)  # nao deve levantar
+
+
+def test_resultado_com_risco_stale_data_e_campos_aditivos_valida_contra_schema():
+    result = _compose(
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 6, 20))],
+        regional_max_date=date(2026, 7, 9),
+    )
+    ExecutiveSummaryResponse(**result)  # campos aditivos (source/last_date/threshold_days/staleness_days) sao Optional
 
 
 def test_resultado_com_riscos_e_changes_tambem_valida_contra_schema():
@@ -290,17 +307,85 @@ def test_risco_cobertura_regional_ok_nao_gera_risco():
     assert not any(r["type"] == "low_regional_coverage" for r in result["risks"])
 
 
-def test_risco_dado_defasado_dispara_acima_do_limite():
-    overview = _overview(refreshed_at="2026-07-10T00:00:00+00:00")  # ~3.5 dias antes de NOW
-    result = _compose(overview=overview)
+def test_risco_dado_defasado_ml_tiktok_frescos_nao_dispara_mesmo_com_refreshed_at_antigo():
+    # Regressao do achado 2026-07-15 (gerencial_audit.md secao 11): mes
+    # fechado nunca e' retocado por um sync incremental forward-only, entao
+    # `refreshed_at` (ingested_at filtrado pelo periodo visualizado) fica
+    # "velho" por desenho, mesmo com o pipeline saudavel e MAX(date) da
+    # tabela inteira fresco. A regra nova NUNCA olha para `refreshed_at` do
+    # periodo — so' para `daily_freshness` (MAX(date) global).
+    overview = _overview(refreshed_at="2026-06-15T00:00:00+00:00")  # ~1 mes antes de NOW, mes fechado
+    result = _compose(
+        overview=overview,
+        daily_freshness=[
+            _daily_freshness_row("ml", date(2026, 7, 12)),
+            _daily_freshness_row("tiktok", date(2026, 7, 11)),
+        ],
+    )
+    assert not any(r["type"] == "stale_data" for r in result["risks"])
+    # refreshed_at continua no payload como metadado, so' nao gera risco
+    assert result["period"]["refreshed_at"] == "2026-06-15T00:00:00+00:00"
+
+
+def test_risco_dado_defasado_dispara_por_marketplace_quando_max_date_global_antigo():
+    result = _compose(daily_freshness=[_daily_freshness_row("shopee", date(2026, 6, 20))])  # NOW = 13/07
     risks = [r for r in result["risks"] if r["type"] == "stale_data"]
-    assert any(r["href"] == "/" for r in risks)
+    assert len(risks) == 1
+    risk = risks[0]
+    assert risk["marketplace"] == "shopee"
+    assert risk["source"] == "fact_marketplace_daily_performance"
+    assert risk["last_date"] == "2026-06-20"
+    assert risk["threshold_days"] == svc.DAILY_FRESHNESS_THRESHOLD_DAYS
+    assert risk["staleness_days"] == (NOW.date() - date(2026, 6, 20)).days
+    assert risk["href"] == "/canais"
 
 
-def test_risco_dado_defasado_nao_dispara_sem_refreshed_at():
-    overview = _overview(refreshed_at=None)
-    result = _compose(overview=overview)
-    assert not any(r["type"] == "stale_data" and r["href"] == "/" for r in result["risks"])
+def test_risco_dado_defasado_shopee_dispara_mesmo_com_ml_tiktok_frescos_sem_mascaramento():
+    result = _compose(daily_freshness=[
+        _daily_freshness_row("ml", date(2026, 7, 12)),
+        _daily_freshness_row("tiktok", date(2026, 7, 11)),
+        _daily_freshness_row("shopee", date(2026, 6, 20)),
+    ])
+    stale = [r for r in result["risks"] if r["type"] == "stale_data"]
+    assert len(stale) == 1
+    assert stale[0]["marketplace"] == "shopee"
+    # ML/TikTok frescos NUNCA aparecem como risco so' porque Shopee esta stale
+    # (a checagem e' por marketplace, MAX() agregado nunca mascara isso)
+    assert not any(r["marketplace"] in ("ml", "tiktok") for r in stale)
+
+
+def test_risco_dado_defasado_nao_dispara_dentro_do_limite():
+    result = _compose(daily_freshness=[_daily_freshness_row("ml", NOW.date())])
+    assert not any(r["type"] == "stale_data" for r in result["risks"])
+
+
+def test_risco_dado_defasado_ignora_marketplace_sem_nenhuma_linha_no_escopo():
+    # max_date=None (ex.: marketplace_id filtrado sem nenhuma linha na tabela)
+    # nao inventa risco — ausencia total de dado no periodo ja e' coberta por
+    # missing_data.
+    result = _compose(daily_freshness=[_daily_freshness_row("shopee", None)])
+    assert not any(r["type"] == "stale_data" for r in result["risks"])
+
+
+def test_risco_regional_defasado_dispara_acima_do_limite():
+    result = _compose(regional_max_date=date(2026, 7, 9))  # NOW=13/07, 4d > limite de 3d
+    risks = [r for r in result["risks"] if r["type"] == "stale_data" and r["source"] == "fact_marketplace_region_daily"]
+    assert len(risks) == 1
+    risk = risks[0]
+    assert risk["last_date"] == "2026-07-09"
+    assert risk["threshold_days"] == svc.REGIONAL_FRESHNESS_THRESHOLD_DAYS
+    assert risk["staleness_days"] == 4
+    assert risk["href"] == "/regioes"
+
+
+def test_risco_regional_fresco_nao_dispara():
+    result = _compose(regional_max_date=NOW.date())
+    assert not any(r["source"] == "fact_marketplace_region_daily" for r in result["risks"] if r["type"] == "stale_data")
+
+
+def test_risco_regional_sem_linha_no_escopo_nao_dispara():
+    result = _compose(regional_max_date=None)
+    assert not any(r.get("source") == "fact_marketplace_region_daily" for r in result["risks"])
 
 
 def test_risco_missing_data_apenas_quando_gmv_e_orders_zerados():
@@ -374,3 +459,64 @@ def test_get_executive_summary_fim_a_fim_sem_dados():
     assert result["health"]["status"] == "critical"
     assert any(r["type"] == "missing_data" for r in result["risks"])
     assert result["changes"] == []
+
+
+class FakeFreshnessSession:
+    """Sessao falsa que reconhece as duas queries NOVAS de frescor (por
+    substring do SQL, nao por ordem de chamada — robusta a mudancas internas
+    dos outros services) e devolve vazio para qualquer outra query. Usada
+    para provar que `get_executive_summary` consulta `MAX(date)` da tabela
+    INTEIRA, independente do periodo (mes fechado) requisitado."""
+
+    def __init__(self, daily_rows, regional_row):
+        self._daily_rows = daily_rows
+        self._regional_row = regional_row
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "MAX(date) AS max_date" in sql and "fact_marketplace_daily_performance" in sql and "BETWEEN" not in sql:
+            return _FreshnessResult(self._daily_rows)
+        if "MAX(date) AS max_date" in sql and "fact_marketplace_region_daily" in sql:
+            return _FreshnessResult([self._regional_row] if self._regional_row is not None else [])
+        return _EmptyResult()
+
+
+class _FreshnessResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+def test_get_executive_summary_frescor_independe_do_periodo_visualizado():
+    # Periodo requisitado e' mes fechado (junho), mas o Shopee so' tem dado
+    # ate 2026-06-20 na tabela INTEIRA — a query de frescor nao filtra por
+    # `f.date BETWEEN start AND end`, entao o risco aparece independente de
+    # qual mes o usuario esta olhando.
+    period = EffectivePeriod(start=date(2026, 6, 1), end=date(2026, 6, 30), ref_month="2026-06")
+    filters = ResolvedFilters(
+        channels="all", mkt_ids=[TIKTOK_ID, ML_ID, SHOPEE_ID], brands=None,
+        period=period, compare_period=None,
+    )
+    db = FakeFreshnessSession(
+        daily_rows=[
+            {"marketplace_id": TIKTOK_ID, "max_date": date(2026, 7, 11)},
+            {"marketplace_id": ML_ID, "max_date": date(2026, 7, 12)},
+            {"marketplace_id": SHOPEE_ID, "max_date": date(2026, 6, 20)},
+        ],
+        regional_row={"max_date": date(2026, 7, 9)},
+    )
+    result = svc.get_executive_summary(db, filters, now=NOW)
+    ExecutiveSummaryResponse(**result)
+    stale = [r for r in result["risks"] if r["type"] == "stale_data"]
+    assert {r["marketplace"] for r in stale if r["marketplace"]} == {"shopee"}
+    assert any(r["source"] == "fact_marketplace_region_daily" for r in stale)
+    # ML e TikTok, frescos na tabela inteira, nunca aparecem como stale
+    assert not any(r["marketplace"] in ("ml", "tiktok") for r in stale)

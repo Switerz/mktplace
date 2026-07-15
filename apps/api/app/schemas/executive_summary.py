@@ -52,6 +52,14 @@ class ExecutiveRisk(BaseModel):
     marketplace: Optional[str] = None
     metric_value: Optional[float] = None
     href: str
+    # Campos aditivos (Gate 2 Fase 1, correcao da regra stale_data — ver
+    # docs/sections/gerencial_audit.md secao 11): so' preenchidos em riscos
+    # type=="stale_data"; None em qualquer outro tipo. Aditivo e compativel
+    # com o frontend atual, que nao os declara nem os exige.
+    source: Optional[str] = None
+    last_date: Optional[str] = None
+    threshold_days: Optional[int] = None
+    staleness_days: Optional[int] = None
 
 
 class ExecutiveDataWarning(BaseModel):

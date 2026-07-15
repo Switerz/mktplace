@@ -16,8 +16,9 @@ Composicao deliberada em duas camadas:
 from __future__ import annotations
 
 import statistics
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.deps.filters import ResolvedFilters
@@ -40,10 +41,21 @@ HEALTH_DROP_CRITICAL_PCT = -20.0  # GMV agregado abaixo disso -> health="critica
 CANCEL_ALERT_MULTIPLIER = 1.5   # cancelamento >= mediana do canal * este fator -> risco
 MIN_BRANDS_FOR_CANCEL_MEDIAN = 2  # nao compara contra amostra de 1 marca
 
-STALE_HOURS = 48                # refreshed_at mais velho que isso -> risco de dado defasado
+# Frescor de DADO (MAX(date) da tabela inteira vs. hoje) — NUNCA filtrado
+# pelo periodo visualizado. Mesmo conceito de `pipelines/ops/health_check.py`
+# (`DAILY_DATA_FRESHNESS_THRESHOLD_DAYS`, tambem =3 para os 3 marketplaces);
+# nao importamos o modulo de pipelines dentro da API (camadas separadas),
+# so' replicamos a constante. Ver docs/sections/gerencial_audit.md secao 11
+# para o achado que motivou a correcao (2026-07-15): a regra antiga usava
+# `MAX(ingested_at)` filtrado pelo periodo visualizado, o que acusava
+# stale_data falso-positivo para qualquer mes historico fechado (as linhas
+# daquele mes nunca sao retocadas por um sync incremental forward-only),
+# mesmo com o pipeline saudavel e dado recente disponivel.
+DAILY_FRESHNESS_THRESHOLD_DAYS = 3
+REGIONAL_FRESHNESS_THRESHOLD_DAYS = 3  # regional ainda nao tem sync recorrente (Fase 3B pendente); mesmo limiar por ora
 
 _MKT_DISPLAY = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
-_SOURCE_HREF = {"overview": "/", "brands": "/", "qualidade": "/qualidade", "canais": "/canais", "regioes": "/regioes"}
+_MKT_ID_NAME = {perf_svc.TIKTOK_ID: "tiktok", perf_svc.ML_ID: "ml", perf_svc.SHOPEE_ID: "shopee"}
 
 
 def _year_month_for_period(period: EffectivePeriod) -> tuple[int, int]:
@@ -56,7 +68,11 @@ def _year_month_for_period(period: EffectivePeriod) -> tuple[int, int]:
     return period.start.year, period.start.month
 
 
-def get_executive_summary(db: Session, filters: ResolvedFilters) -> dict:
+def get_executive_summary(db: Session, filters: ResolvedFilters, *, now: datetime | None = None) -> dict:
+    """`now` injetavel (mesmo padrao de `pipelines/ops/health_check.py._now()`
+    e `app.deps.period.today_brt()`) — permite testes deterministicos das
+    regras de frescor sem depender do relogio real da maquina."""
+    now = now or datetime.now(timezone.utc)
     period = filters.period
     # Health/Changes exigem MoM sempre (nao e opt-in aqui como nos outros
     # endpoints) — se o caller nao pediu compare=true, calculamos o periodo
@@ -83,12 +99,47 @@ def get_executive_summary(db: Session, filters: ResolvedFilters) -> dict:
     regioes_summary = regioes_svc.get_summary(
         db, filters.mkt_ids, filters.brands, period, channels=filters.channels,
     )
+    daily_freshness = _fetch_daily_performance_freshness(db, filters.mkt_ids)
+    regional_max_date = _fetch_regional_freshness(db, filters.mkt_ids)
 
     return _compose_executive_summary(
         overview=overview, brands=brands, quality=quality, canais=canais,
         regioes_summary=regioes_summary, channels=filters.channels, mkt_ids=filters.mkt_ids,
-        now=datetime.now(timezone.utc),
+        daily_freshness=daily_freshness, regional_max_date=regional_max_date,
+        now=now,
     )
+
+
+# ---------------------------------------------------------------------------
+# Frescor de dado — MAX(date) por marketplace, independente do periodo
+# visualizado. Consultas leves (1 GROUP BY pequeno cada), no mesmo estilo de
+# `performance_service._max_refreshed_at` — nao reaproveitamos aquela funcao
+# porque ela mede `ingested_at` filtrado por periodo (o proprio problema que
+# esta correcao resolve), nao `date` da tabela inteira.
+# ---------------------------------------------------------------------------
+
+def _fetch_daily_performance_freshness(db: Session, mkt_ids: list[int]) -> list[dict]:
+    sql = text("""
+        SELECT marketplace_id, MAX(date) AS max_date
+        FROM marts.fact_marketplace_daily_performance
+        WHERE marketplace_id = ANY(:mkt_ids)
+        GROUP BY marketplace_id
+    """)
+    rows = db.execute(sql, {"mkt_ids": mkt_ids}).mappings().all()
+    return [
+        {"marketplace": _MKT_ID_NAME.get(r["marketplace_id"], str(r["marketplace_id"])), "max_date": r["max_date"]}
+        for r in rows
+    ]
+
+
+def _fetch_regional_freshness(db: Session, mkt_ids: list[int]) -> date | None:
+    sql = text("""
+        SELECT MAX(date) AS max_date
+        FROM marts.fact_marketplace_region_daily
+        WHERE marketplace_id = ANY(:mkt_ids)
+    """)
+    row = db.execute(sql, {"mkt_ids": mkt_ids}).mappings().first()
+    return row["max_date"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +148,8 @@ def get_executive_summary(db: Session, filters: ResolvedFilters) -> dict:
 
 def _compose_executive_summary(
     *, overview: dict, brands: dict, quality: dict, canais: dict, regioes_summary: dict,
-    channels: str, mkt_ids: list[int], now: datetime,
+    channels: str, mkt_ids: list[int], daily_freshness: list[dict], regional_max_date,
+    now: datetime,
 ) -> dict:
     cur = overview["current"]
     gmv = cur["gmv"]
@@ -107,13 +159,10 @@ def _compose_executive_summary(
     no_data = gmv == 0 and orders == 0
 
     risks = _build_risks(quality, canais, regioes_summary, no_data)
-    risks.extend(_build_staleness_risks(now, {
-        "overview": overview.get("refreshed_at"),
-        "brands": brands.get("refreshed_at"),
-        "qualidade": quality.get("refreshed_at"),
-        "canais": canais.get("refreshed_at"),
-        "regioes": regioes_summary.get("refreshed_at"),
-    }))
+    risks.extend(_build_daily_performance_freshness_risks(daily_freshness, now))
+    regional_risk = _build_regional_freshness_risk(regional_max_date, now)
+    if regional_risk is not None:
+        risks.append(regional_risk)
 
     changes = _build_changes(brands)
     data_warnings = _build_data_warnings(regioes_summary, mkt_ids)
@@ -286,30 +335,70 @@ def _append_cancel_risks(risks: list[dict], quality: dict, marketplace: str, fie
             })
 
 
-def _build_staleness_risks(now: datetime, sources: dict[str, str | None]) -> list[dict]:
+def _build_daily_performance_freshness_risks(freshness_rows: list[dict], now: datetime) -> list[dict]:
+    """Um risco por marketplace com `MAX(date)` acima do limite — nunca
+    agregado entre marketplaces (`MAX()` combinado mascararia um Shopee
+    parado atras de um ML/TikTok em dia). `max_date is None` (nenhuma linha
+    para esse marketplace no escopo filtrado) nao gera risco aqui — ausencia
+    total de dado no periodo selecionado ja e' coberta por `missing_data`."""
     risks: list[dict] = []
-    for source_name, refreshed_at in sources.items():
-        if not refreshed_at:
-            continue  # sem refreshed_at confiavel -> nao inventar risco
-        try:
-            ts = datetime.fromisoformat(refreshed_at)
-        except ValueError:
+    today = now.date()
+    for row in freshness_rows:
+        max_date = row["max_date"]
+        if max_date is None:
             continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        age_hours = (now - ts).total_seconds() / 3600
-        if age_hours > STALE_HOURS:
-            risks.append({
-                "type": "stale_data",
-                "severity": "warning",
-                "title": f"Dado de {source_name} desatualizado",
-                "description": f"Última atualização há {age_hours:.0f}h (limite de referência: {STALE_HOURS}h).",
-                "brand": None,
-                "marketplace": None,
-                "metric_value": round(age_hours, 1),
-                "href": _SOURCE_HREF.get(source_name, "/"),
-            })
+        staleness_days = (today - max_date).days
+        if staleness_days <= DAILY_FRESHNESS_THRESHOLD_DAYS:
+            continue
+        mkt_name = row["marketplace"]
+        display = _MKT_DISPLAY.get(mkt_name, mkt_name)
+        risks.append({
+            "type": "stale_data",
+            "severity": "warning",
+            "title": f"{display} sem dados recentes",
+            "description": (
+                f"{display} sem dados desde {max_date.strftime('%d/%m/%Y')} "
+                f"({staleness_days}d, limite de {DAILY_FRESHNESS_THRESHOLD_DAYS}d)."
+            ),
+            "brand": None,
+            "marketplace": mkt_name,
+            "metric_value": float(staleness_days),
+            "href": "/canais",
+            "source": "fact_marketplace_daily_performance",
+            "last_date": max_date.isoformat(),
+            "threshold_days": DAILY_FRESHNESS_THRESHOLD_DAYS,
+            "staleness_days": staleness_days,
+        })
     return risks
+
+
+def _build_regional_freshness_risk(max_date, now: datetime) -> dict | None:
+    """`max_date is None` (nenhuma linha regional no escopo — ex.: so' TikTok
+    selecionado, que estruturalmente nunca tem cobertura regional) nao gera
+    risco; esse caso ja e' coberto pelo data_warning `not_applicable`."""
+    if max_date is None:
+        return None
+    today = now.date()
+    staleness_days = (today - max_date).days
+    if staleness_days <= REGIONAL_FRESHNESS_THRESHOLD_DAYS:
+        return None
+    return {
+        "type": "stale_data",
+        "severity": "warning",
+        "title": "Dado regional desatualizado",
+        "description": (
+            f"Regiões sem dados desde {max_date.strftime('%d/%m/%Y')} "
+            f"({staleness_days}d, limite de {REGIONAL_FRESHNESS_THRESHOLD_DAYS}d)."
+        ),
+        "brand": None,
+        "marketplace": None,
+        "metric_value": float(staleness_days),
+        "href": "/regioes",
+        "source": "fact_marketplace_region_daily",
+        "last_date": max_date.isoformat(),
+        "threshold_days": REGIONAL_FRESHNESS_THRESHOLD_DAYS,
+        "staleness_days": staleness_days,
+    }
 
 
 def _build_data_warnings(regioes_summary: dict, mkt_ids: list[int]) -> list[dict]:
