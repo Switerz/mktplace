@@ -466,3 +466,27 @@ Frontend, endpoints `/regioes/*`, e qualquer deploy continuam intocados — nenh
 ### Gate 6C
 
 Bloqueado, aguardando autorização explícita separada: endpoints `/regioes/*` lendo `marts.fact_marketplace_region_daily`, e qualquer mudança de frontend.
+
+### Gate 6C (parte 2) — refresh incremental de `gold.marketplace_region_daily` (2026-07-15)
+
+Diagnóstico (Gerencial, Resumo Executivo, achado `stale_data` regional) confirmou que `gold.marketplace_region_daily` no Data Mart não avançava desde 2026-07-09. Causa raiz, por marketplace (não é uma causa única):
+
+- **ML**: a fonte real do loader (`raw.ml_orders`) está fresca (dado até o dia corrente) — o gap era só porque `pipelines/ingestion/gold_regional/loader.py::execute_first_load()` nunca foi reexecutado. Essa função recalcula o histórico **inteiro** sem filtro de data e faz um INSERT simples (sem `TRUNCATE`) numa tabela com `UNIQUE (date, marketplace_id, loja_id, uf)` — rodá-la de novo hoje falharia por violação dessa constraint (rollback seguro, mas inútil). **Não é um comando de refresh**, é literalmente só a carga inicial do Gate 6A.3, e continua exatamente assim (código intocado).
+- **Shopee**: a fonte real do loader (`silver.stg_shopee_order_item_snapshots`) está ela mesma parada em **2026-05-31** — `gold.marketplace_region_daily` já está 100% em dia com essa fonte para Shopee. O gap aqui é **upstream**, no transform raw→silver do Shopee (fora do escopo deste loader) — **não resolvido neste gate, propositalmente**.
+- **TikTok**: nunca tem linha regional em nenhuma fonte mapeada (decisão de domínio, Gate 6A/6B) — nenhuma mudança aqui.
+
+**Solução implementada**: `pipelines/ingestion/gold_regional/loader.py` ganhou um segundo caminho de carga, `execute_incremental_load()`, e um modo somente-leitura equivalente, `diagnose_incremental_load()`, expostos via CLI:
+
+```bash
+python -m pipelines.ingestion.gold_regional.loader --diagnose      # somente leitura, nunca abre conexao de escrita
+python -m pipelines.ingestion.gold_regional.loader --incremental   # escreve; requer .env.gold-write.local (mesmo secret do Gate 6A)
+```
+
+Desenho da carga incremental:
+- Para cada marketplace suportado (ML, Shopee), calcula `MAX(date)` já carregado em `gold.marketplace_region_daily` e só recalcula/insere linhas com `date` posterior a esse valor — nunca `TRUNCATE`/`DELETE`/`UPDATE`, só `INSERT` das linhas novas.
+- Um marketplace sem novidade na fonte (hoje, Shopee) nunca bloqueia o refresh dos demais (hoje, ML) — cada marketplace é avaliado e carregado independentemente dentro da mesma transação.
+- Se **nenhum** marketplace tiver data nova, a execução retorna `no_op` sem criar staging nem tentar inserir nada.
+- Mesma disciplina transacional do `execute_first_load()`: 1 transação, advisory lock (`ADVISORY_LOCK_KEY` compartilhado — as duas funções nunca rodam concorrentemente entre si), validações recalculadas antes do insert (duplicidade, nulos, numerador≤denominador, reconciliação de GMV — escopadas à janela incremental, não à fonte inteira), validação pós-insert (zero linhas TikTok), rollback completo em qualquer falha, sem retry automático.
+- `execute_first_load()` permanece **intocado** — usado só para uma eventual carga inicial nova (ex.: um ambiente do zero), nunca para refresh.
+
+**Status após esta implementação**: código pronto e testado (42 testes em `pipelines/tests/test_gold_regional_loader.py`, incluindo o caminho incremental), mas **`--incremental` ainda não foi executado em produção nesta rodada** — só `--diagnose` (somente leitura). Scheduler segue **desativado** (Fase 3B, ver `docs/backlog.md` e memória de sessão) — a decisão de rodar `--incremental` manualmente e/ou de incorporar este comando a um pipeline recorrente fica para uma próxima rodada, com autorização explícita separada.
