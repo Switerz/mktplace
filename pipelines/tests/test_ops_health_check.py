@@ -491,8 +491,14 @@ def test_main_nunca_imprime_credenciais(monkeypatch, capsys):
 # =============================================================================
 
 def test_expected_source_critical_default_true():
+    """Gate B4: shopee_product_monthly virou critical=False (rastreio de
+    execucao de sync_produtos_shopee, bloqueado pelo gap conhecido de
+    LOCAL_PG_URL) -- todas as demais fontes continuam critical=True."""
     for s in hc.EXPECTED_SOURCES:
-        assert s.critical is True, f"{s.source_name} deveria continuar critical=True (default, Gate B1)"
+        if s.source_name == "shopee_product_monthly":
+            assert s.critical is False
+        else:
+            assert s.critical is True, f"{s.source_name} deveria continuar critical=True (default, Gate B1)"
 
 
 def test_build_report_stale_em_fonte_critica_reprova_ok_e_ok_critical():
@@ -636,3 +642,143 @@ def test_nunca_ativa_task_scheduler():
     source = MODULE_PATH.read_text(encoding="utf-8")
     assert "schtasks" not in source.lower()
     assert "register-scheduledtask" not in source.lower()
+
+
+# =============================================================================
+# Gate B4 (2026-07-15) — shopee_product_monthly (EXECUCAO) tambem nao-critico
+# =============================================================================
+
+def _fresh_run_override(**by_source_name):
+    """Baseline 100% fresco (todas as EXPECTED_SOURCES) com sobrescrita
+    APENAS das fontes passadas -- ao contrario de repassar last_run/
+    last_success diretamente para all_fresh_conn(), que SUBSTITUI o dict
+    inteiro (colapsando as demais fontes para 'sem historico')."""
+    fresh = {s.source_name: {"started_at": NOW - timedelta(hours=1), "finished_at": NOW - timedelta(hours=1), "status": "success", "error_message": None} for s in hc.EXPECTED_SOURCES}
+    fresh.update(by_source_name)
+    return fresh
+
+
+def _fresh_success_override(**by_source_name):
+    fresh = {s.source_name: NOW - timedelta(hours=1) for s in hc.EXPECTED_SOURCES}
+    fresh.update(by_source_name)
+    return fresh
+
+
+def test_expected_source_shopee_product_monthly_e_nao_critico():
+    entry = next(s for s in hc.EXPECTED_SOURCES if s.source_name == "shopee_product_monthly")
+    assert entry.critical is False
+
+
+def test_build_report_stale_apenas_em_shopee_product_monthly_execucao_reprova_ok_mas_nao_ok_critical():
+    """Regressao do achado do Gate B3: sync_produtos_shopee fica BLOCKED por
+    LOCAL_PG_URL ausente ha dias -- a entrada de EXECUCAO
+    shopee_product_monthly fica sem sucesso recente por causa disso, mas
+    isso sozinho nao pode reprovar ok_critical (senao full_daily reporta
+    FAILED todo dia so' por esse gap ja conhecido, mesmo com ML/TikTok/
+    regional saudaveis)."""
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(shopee_product_monthly={"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(shopee_product_monthly=NOW - timedelta(hours=300)),
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+    entry = next(s for s in report["sources"] if s["source_name"] == "shopee_product_monthly")
+    assert entry["critical"] is False
+    assert entry["stale"] is True
+    # nenhuma outra fonte deveria ter sido afetada por esse isolamento
+    others = [s for s in report["sources"] if s["source_name"] != "shopee_product_monthly"]
+    assert all(not s["stale"] for s in others), "isolar shopee_product_monthly nao pode tornar outras fontes stale"
+
+
+def test_build_report_stale_em_shopee_product_monthly_e_shopee_daily_juntos_ainda_ok_critical():
+    """Os dois gaps Shopee conhecidos (execucao shopee_product_monthly +
+    dado fact_marketplace_daily_performance[shopee]) podem coexistir sem
+    derrubar ok_critical — ambos sao nao-criticos, por motivos distintos mas
+    relacionados (ingestao manual Shopee)."""
+    old_date = TODAY - timedelta(days=hc.DAILY_DATA_FRESHNESS_THRESHOLD_DAYS + 5)
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(shopee_product_monthly={"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(shopee_product_monthly=NOW - timedelta(hours=300)),
+        daily_freshness_rows=[
+            {"marketplace_id": 1, "max_date": TODAY},
+            {"marketplace_id": 2, "max_date": TODAY},
+            {"marketplace_id": 3, "max_date": old_date},
+        ],
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+    exec_entry = next(s for s in report["sources"] if s["source_name"] == "shopee_product_monthly")
+    data_entry = next(d for d in report["data_freshness"] if d["label"] == "fact_marketplace_daily_performance[shopee]")
+    assert exec_entry["stale"] is True and exec_entry["critical"] is False
+    assert data_entry["stale"] is True and data_entry["critical"] is False
+
+
+def test_build_report_stale_em_ml_ou_tiktok_execucao_ainda_reprova_ok_critical():
+    """Fontes criticas de EXECUCAO continuam derrubando ok_critical — o Gate
+    B4 so' afeta shopee_product_monthly, nunca ml_daily/tiktok_daily."""
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(ml_daily={"started_at": NOW - timedelta(hours=40), "finished_at": NOW - timedelta(hours=40), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(ml_daily=NOW - timedelta(hours=40)),  # threshold ml_daily = 30h
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is False
+
+
+def test_build_report_bug8_diverge_reprova_ok_critical_mesmo_com_shopee_produtos_stale():
+    """bug8_invariants continua sempre critico — nao existe conceito de
+    nao-critico para ele, mesmo depois do Gate B4."""
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(shopee_product_monthly={"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(shopee_product_monthly=NOW - timedelta(hours=300)),
+        bug8_scalars=[("HAVING COUNT(*) > 1", 3)],
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is False
+
+
+def test_main_retorna_0_quando_apenas_shopee_product_monthly_execucao_stale(monkeypatch, capsys):
+    """Regressao ponta-a-ponta do achado do Gate B3: `full_daily` nao deve
+    mais reportar FAILED so' por esse gap ja conhecido de Shopee (sync_produtos_shopee
+    BLOCKED por LOCAL_PG_URL ausente)."""
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(
+        last_run=_fresh_run_override(shopee_product_monthly={"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(shopee_product_monthly=NOW - timedelta(hours=300)),
+    ))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "ATRASADA-CONHECIDO" in out
+    assert "STATUS CRITICO (decide o exit code): OK" in out
+
+
+def test_main_retorna_1_quando_ml_execucao_stale_mesmo_com_shopee_produtos_ok(monkeypatch, capsys):
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(
+        last_run=_fresh_run_override(ml_daily={"started_at": NOW - timedelta(hours=40), "finished_at": NOW - timedelta(hours=40), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(ml_daily=NOW - timedelta(hours=40)),
+    ))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 1
+    assert "ATRASADA-CRITICO" in capsys.readouterr().out
+
+
+def test_main_retorna_1_quando_bug8_diverge_mesmo_com_shopee_produtos_stale(monkeypatch, capsys):
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(
+        last_run=_fresh_run_override(shopee_product_monthly={"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}),
+        last_success=_fresh_success_override(shopee_product_monthly=NOW - timedelta(hours=300)),
+        bug8_scalars=[("HAVING COUNT(*) > 1", 7)],
+    ))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 1

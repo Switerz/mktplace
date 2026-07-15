@@ -32,13 +32,20 @@ upstream parou de produzir dado):
 Thresholds centralizados em EXPECTED_SOURCES e DAILY_DATA_FRESHNESS_THRESHOLD_DAYS
 — nunca espalhados pelo corpo das funcoes.
 
-Politica de criticidade (Gate B1, 2026-07-15): cada fonte de execucao
-(`ExpectedSource`) e cada entrada de frescor de dado (`DataFreshnessResult`)
-tem um campo `critical` (default True). `fact_marketplace_daily_performance
-[shopee]` (e a entrada de cadencia manual `fact_shopee_product_monthly`)
-sao marcadas `critical=False` — Shopee e' ingestao manual, sabidamente
-defasada ate alguem atualizar os exports, nao uma falha de pipeline.
-`build_report()` devolve DOIS campos:
+Politica de criticidade (Gate B1, 2026-07-15; completada no Gate B4,
+2026-07-15): cada fonte de execucao (`ExpectedSource`) e cada entrada de
+frescor de dado (`DataFreshnessResult`) tem um campo `critical` (default
+True). `fact_marketplace_daily_performance[shopee]` e a entrada de cadencia
+manual `fact_shopee_product_monthly` (frescor de DADO) sao marcadas
+`critical=False` desde o Gate B1; a entrada de EXECUCAO `shopee_product_monthly`
+(rastreio de quando `sync_produtos_shopee` rodou com sucesso) ganhou
+`critical=False` no Gate B4, pelo mesmo motivo — sem isso, o gap manual
+conhecido de `LOCAL_PG_URL` (que bloqueia `sync_produtos_shopee` no
+preflight) fazia o proprio `health_check` reprovar `ok_critical` (e, dentro
+de `full_daily`, o step `health_check` inteiro) todo dia, mesmo com
+ML/TikTok/regional saudaveis. Shopee e' ingestao manual, sabidamente
+defasada ate alguem atualizar os exports/LOCAL_PG_URL, nao uma falha de
+pipeline. `build_report()` devolve DOIS campos:
   - `ok`: visao completa, considerando TODAS as fontes (criticas e
     conhecidas/manuais) — so' para visibilidade/JSON, nunca decide o exit
     code sozinho.
@@ -89,9 +96,12 @@ class ExpectedSource:
     cadence: str  # "daily" | "manual_monthly"
     exec_threshold_hours: float
     # Gate B1: default True preserva o comportamento de toda fonte ja
-    # existente. critical=False so' se aplica a fontes cuja EXECUCAO e'
-    # sabidamente manual/nao-diaria por desenho (nenhuma hoje — mesmo
-    # Shopee roda sync todo dia; ver docstring do modulo).
+    # existente. Gate B4 (2026-07-15): critical=False tambem se aplica a
+    # `shopee_product_monthly` — a EXECUCAO desse sync so' acontece de fato
+    # quando `sync_produtos_shopee` roda (bloqueado por LOCAL_PG_URL
+    # ausente, gap manual conhecido desde o Gate B1); ficar sem sucesso
+    # registrado e' consequencia direta desse mesmo gap, nao uma quebra nova
+    # de pipeline — ver docstring do modulo.
     critical: bool = True
 
 
@@ -107,10 +117,16 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     ExpectedSource("shopee-ads_daily", "daily", 48),
     ExpectedSource("tiktok_product_daily", "daily", 30),
     ExpectedSource("ml_produto_ranking", "daily", 30),
-    # A EXECUCAO deste sync roda todo dia (mesmo sem dado novo) — so' o
-    # DADO upstream (XLSX + loader manual) tem cadencia mensal/manual, ver
-    # fetch_data_freshness.
-    ExpectedSource("shopee_product_monthly", "daily", 48),
+    # Gate B4 (2026-07-15): critical=False. Em teoria a EXECUCAO deste sync
+    # roda todo dia (mesmo sem dado novo) independente do DADO upstream (que
+    # tem cadencia mensal/manual, ver fetch_data_freshness) — mas, na
+    # pratica, essa execucao e' feita por `sync_produtos_shopee`, que fica
+    # BLOCKED por `LOCAL_PG_URL` ausente (gap manual conhecido, ja
+    # nao-critico em orchestrate.py desde o Gate B1). Sem essa marcacao,
+    # o proprio step `health_check` do full_daily reprovava (FAILED) o
+    # pipeline inteiro todo dia por causa desse MESMO gap ja aceito,
+    # mesmo com ML/TikTok/regional saudaveis (achado do Gate B3).
+    ExpectedSource("shopee_product_monthly", "daily", 48, critical=False),
 )
 
 
