@@ -10,6 +10,25 @@
 # isoladamente (via dot-source, sem executar nada) sem tocar no Task
 # Scheduler nem em nenhum pipeline real.
 #
+# Gate B6.1d (2026-07-16) — bug corrigido: `Invoke-ResolvedTask` passa o
+# comando real a run_with_lock.ps1 via DOT-SOURCE em processo (nunca mais
+# um `powershell -File run_with_lock.ps1 ...` aninhado), com o array de
+# argumentos ja construido ligado explicitamente a `-Cmd` numa unica
+# expressao PowerShell. Causa raiz do bug (achado no Gate B6.1c, real:
+# `full_daily` falhava com "orchestrate.py: error: the following arguments
+# are required: --pipeline" antes de qualquer step rodar): run_with_lock.ps1
+# usa atributos `[Parameter(...)]`, o que o PowerShell trata como um
+# "advanced script" com TODOS os CommonParameters habilitados implicitamente
+# (Verbose, Debug, PipelineVariable, WhatIf, Confirm, etc). `--pipeline` e'
+# um prefixo AMBIGUO-LIVRE de `-PipelineVariable` — quando os argumentos
+# chegavam como texto bruto de linha de comando (via `-File` aninhado), o
+# parameter binder do PowerShell silenciosamente consumia `--pipeline` E o
+# valor seguinte (`full_daily`) como `-PipelineVariable`, sem nunca deixa-los
+# chegar em `$Cmd`/`Start-Process`. Passar o array ja construido via
+# dot-source elimina essa classe inteira de colisao — nao so' para
+# `--pipeline`, para qualquer futuro flag que coincida com um
+# CommonParameter (ex.: `--verbose`, `--debug`).
+#
 # Uso real (Task Scheduler):
 #   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey daily_ingestion
 #
@@ -68,6 +87,34 @@ function Resolve-TaskInvocation {
     }
 }
 
+function Invoke-ResolvedTask {
+    # Gate B6.1d: dot-source de run_with_lock.ps1 EM PROCESSO (nunca um
+    # `powershell -File run_with_lock.ps1 ...` aninhado) — o comando real
+    # (PythonExe + ModuleArgs, incluindo flags como `--pipeline`) e' passado
+    # como um ARRAY JA' CONSTRUIDO, ligado explicitamente ao parametro -Cmd
+    # numa unica expressao PowerShell avaliada NESTE processo. Isso nunca
+    # re-tokeniza os argumentos como texto de linha de comando atravessando
+    # um novo processo — e' exatamente essa re-tokenizacao que fazia
+    # `--pipeline full_daily` ser silenciosamente consumido pelo PowerShell
+    # como o parametro comum `-PipelineVariable` (ver nota no topo deste
+    # arquivo). `-Cmd` continua aceitando `ValueFromRemainingArguments` para
+    # quem chama run_with_lock.ps1 diretamente via CLI com argumentos
+    # simples (uso original, ainda suportado) — aqui so' preferimos o
+    # binding NOMEADO explicito, que sempre funciona independente disso.
+    param(
+        [Parameter(Mandatory = $true)][PSCustomObject]$Invocation
+    )
+    $fullCmd = @($Invocation.PythonExe) + $Invocation.ModuleArgs
+    . $Invocation.LockScript -LockName $Invocation.LockName -TimeoutSeconds $Invocation.TimeoutSeconds `
+        -WorkingDirectory $Invocation.WorkingDirectory -Cmd $fullCmd
+    # run_with_lock.ps1 termina com `exit $exitCode` (sempre, em qualquer
+    # desfecho) — como foi dot-sourced (nao um processo filho separado),
+    # esse `exit` encerra ESTE MESMO processo com o exit code correto.
+    # Nenhuma linha depois desta chamada (nem o `exit $LASTEXITCODE` no
+    # bloco abaixo) e' de fato alcancada no caminho real; fica so' como
+    # rede de seguranca caso o comportamento de `exit` mude no futuro.
+}
+
 # So' executa de verdade quando chamado diretamente (nao quando
 # dot-sourced pelos testes para so' carregar as funcoes acima).
 if ($MyInvocation.InvocationName -ne '.') {
@@ -87,8 +134,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 1
     }
 
-    & powershell -NoProfile -NonInteractive -File $invocation.LockScript $invocation.LockName `
-        -TimeoutSeconds $invocation.TimeoutSeconds -WorkingDirectory $invocation.WorkingDirectory `
-        $invocation.PythonExe @($invocation.ModuleArgs)
+    Invoke-ResolvedTask -Invocation $invocation
     exit $LASTEXITCODE
 }

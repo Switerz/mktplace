@@ -487,8 +487,15 @@ def test_check_gold_regional_write_nunca_abre_conexao_de_escrita_neste_modulo():
 # nunca abre conexao (RDS/Neon ja cobertos por check_rds/check_neon)
 # ---------------------------------------------------------------------------
 
-def test_check_sync_region_consent_bloqueia_sem_env_var(monkeypatch):
+def test_check_sync_region_consent_bloqueia_sem_env_var(monkeypatch, tmp_path):
+    # Gate B6.1d: isola de DEFAULT_REGION_SYNC_CONSENT_PATH real -- desde o
+    # Gate B6.1b, .env.region-sync.local pode legitimamente existir de
+    # verdade na raiz do repo (consentimento persistente para o scheduler),
+    # entao este teste (que quer "sem NENHUM consentimento") precisa
+    # apontar para um path que garantidamente nao existe, senao passaria a
+    # depender do estado real do disco do operador.
     monkeypatch.delenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", raising=False)
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / "nao-existe.local")
     result = preflight.check_sync_region_consent()
     assert result.ok is False
 
@@ -500,8 +507,9 @@ def test_check_sync_region_consent_passa_com_env_var_1(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["0", "true", "yes"])
-def test_check_sync_region_consent_bloqueia_valores_diferentes_de_1(monkeypatch, value):
+def test_check_sync_region_consent_bloqueia_valores_diferentes_de_1(monkeypatch, tmp_path, value):
     monkeypatch.setenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", value)
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / "nao-existe.local")
     result = preflight.check_sync_region_consent()
     assert result.ok is False
 
@@ -616,8 +624,9 @@ def test_run_preflight_gold_regional_incremental_passa_com_fakes(monkeypatch):
     assert ok is True
 
 
-def test_run_preflight_sync_region_daily_bloqueia_sem_consentimento(monkeypatch):
+def test_run_preflight_sync_region_daily_bloqueia_sem_consentimento(monkeypatch, tmp_path):
     monkeypatch.delenv("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", raising=False)
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / "nao-existe.local")
     monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
     monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
