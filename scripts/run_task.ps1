@@ -29,12 +29,13 @@
 # `--pipeline`, para qualquer futuro flag que coincida com um
 # CommonParameter (ex.: `--verbose`, `--debug`).
 #
-# Uso real (Task Scheduler):
-#   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey daily_ingestion
+# Uso real (Task Scheduler ou manual):
+#   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey full_daily
+#   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey shopee_manual_refresh
 #
 # Uso em teste (Pester) — carrega so' as funcoes, nao executa nada:
 #   . .\scripts\run_task.ps1
-#   Resolve-TaskInvocation -TaskKey daily_ingestion -RepoRoot "C:\repo" -PythonExe "python.exe" -LockScript "lock.ps1"
+#   Resolve-TaskInvocation -TaskKey full_daily -RepoRoot "C:\repo" -PythonExe "python.exe" -LockScript "lock.ps1"
 
 param(
     [string]$TaskKey
@@ -47,20 +48,40 @@ function Get-TaskDefinitions {
     # documenta esta tabela para revisao; esta e' a versao que roda de
     # fato quando o Task Scheduler dispara.
     #
-    # UMA UNICA TaskKey (full_daily): o desenho anterior com 2 TaskKeys
-    # separadas (daily_ingestion + produtos_and_monitor, agendadas em
-    # horarios diferentes) foi descartado porque nao havia garantia de que
-    # a primeira tivesse terminado antes da segunda comecar — agora tudo
-    # roda sob o MESMO lock, em pipelines.ops.orchestrate.PIPELINES["full_daily"].
+    # DUAS TaskKeys desde o Gate C1 (2026-07-16):
+    #   - "full_daily": fontes REALMENTE recorrentes (ml, tiktok, regional,
+    #     produtos ml/tiktok, health_check) — a UNICA candidata a rodar sob
+    #     o Task Scheduler (ver schedule_plan.py, que so' agenda esta).
+    #   - "shopee_manual_refresh": Shopee (orders/stats/ads) + produtos
+    #     Shopee + Bug 8 + health_check — MANUAL, sob demanda, nunca
+    #     agendada. Existe aqui so' para reaproveitar o mesmo wrapper de
+    #     lock/timeout/log (run_with_lock.ps1) quando o operador decide
+    #     rodar Shopee manualmente, evitando concorrencia com um
+    #     `full_daily` em andamento (locks distintos, mas o operador ainda
+    #     assim nunca deveria rodar os dois ao mesmo tempo por engano).
+    #
+    # O desenho anterior a isso, com 2 TaskKeys agendadas em horarios
+    # diferentes (daily_ingestion + produtos_and_monitor), foi descartado
+    # porque nao havia garantia de que a primeira tivesse terminado antes
+    # da segunda comecar. Essa garantia ("um pipeline so' avanca depois que
+    # o anterior de verdade terminou, nunca por horario") continua valendo
+    # para cada TaskKey individualmente — as duas de agora sao
+    # independentes de proposito (uma automatica, outra manual), nao
+    # amarradas uma a outra.
     #
     # TimeoutSeconds=9000 (2h30) tem que ficar MAIOR que a soma dos
-    # timeouts individuais dos steps internos (6780s — ver
-    # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS),
-    # com margem: senao este timeout EXTERNO mataria o processo pai antes
-    # que os timeouts internos por step tivessem chance de proteger as
-    # fontes independentes seguintes.
+    # timeouts individuais dos steps internos de cada pipeline (ver
+    # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
+    # = 3600s desde o Gate C1, e
+    # SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3780s), com
+    # margem: senao este timeout EXTERNO mataria o processo pai antes que
+    # os timeouts internos por step tivessem chance de proteger as fontes
+    # independentes seguintes. Os dois pipelines reaproveitam o mesmo
+    # 9000s por simplicidade — ambos os orcamentos internos cabem com
+    # folga.
     return @{
         "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
+        "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
     }
 }
 

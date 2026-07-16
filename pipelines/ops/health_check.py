@@ -33,19 +33,26 @@ Thresholds centralizados em EXPECTED_SOURCES e DAILY_DATA_FRESHNESS_THRESHOLD_DA
 — nunca espalhados pelo corpo das funcoes.
 
 Politica de criticidade (Gate B1, 2026-07-15; completada no Gate B4,
-2026-07-15): cada fonte de execucao (`ExpectedSource`) e cada entrada de
-frescor de dado (`DataFreshnessResult`) tem um campo `critical` (default
-True). `fact_marketplace_daily_performance[shopee]` e a entrada de cadencia
-manual `fact_shopee_product_monthly` (frescor de DADO) sao marcadas
-`critical=False` desde o Gate B1; a entrada de EXECUCAO `shopee_product_monthly`
-(rastreio de quando `sync_produtos_shopee` rodou com sucesso) ganhou
-`critical=False` no Gate B4, pelo mesmo motivo — sem isso, o gap manual
-conhecido de `LOCAL_PG_URL` (que bloqueia `sync_produtos_shopee` no
-preflight) fazia o proprio `health_check` reprovar `ok_critical` (e, dentro
-de `full_daily`, o step `health_check` inteiro) todo dia, mesmo com
-ML/TikTok/regional saudaveis. Shopee e' ingestao manual, sabidamente
-defasada ate alguem atualizar os exports/LOCAL_PG_URL, nao uma falha de
-pipeline. `build_report()` devolve DOIS campos:
+2026-07-15; estendida no Gate C1, 2026-07-16): cada fonte de execucao
+(`ExpectedSource`) e cada entrada de frescor de dado (`DataFreshnessResult`)
+tem um campo `critical` (default True). `fact_marketplace_daily_performance[shopee]`
+e a entrada de cadencia manual `fact_shopee_product_monthly` (frescor de
+DADO) sao marcadas `critical=False` desde o Gate B1; a entrada de EXECUCAO
+`shopee_product_monthly` (rastreio de quando `sync_produtos_shopee` rodou
+com sucesso) ganhou `critical=False` no Gate B4, pelo mesmo motivo — sem
+isso, o gap manual conhecido de `LOCAL_PG_URL` (que bloqueia
+`sync_produtos_shopee` no preflight) fazia o proprio `health_check`
+reprovar `ok_critical` todo dia, mesmo com ML/TikTok/regional saudaveis.
+No Gate C1, as entradas de EXECUCAO `shopee_daily`/`shopee-stats_daily`/
+`shopee-ads_daily` TAMBEM ganharam `critical=False` — desde esse gate, os
+steps correspondentes saem de `full_daily` (que roda todo dia) e passam a
+viver no pipeline MANUAL `shopee_manual_refresh`
+(`orchestrate.py::PIPELINES`), rodado so' sob demanda; sem essa marcacao,
+a EXECUCAO delas ficaria sem sucesso registrado por mais de 48h assim que
+`full_daily` parasse de roda-las, recriando o mesmo alarme-fadiga. Shopee
+e' ingestao manual, sabidamente defasada ate alguem atualizar os exports/
+rodar `shopee_manual_refresh`, nao uma falha de pipeline. `build_report()`
+devolve DOIS campos:
   - `ok`: visao completa, considerando TODAS as fontes (criticas e
     conhecidas/manuais) — so' para visibilidade/JSON, nunca decide o exit
     code sozinho.
@@ -112,9 +119,19 @@ class ExpectedSource:
 EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     ExpectedSource("ml_daily", "daily", 30),
     ExpectedSource("tiktok_daily", "daily", 30),
-    ExpectedSource("shopee_daily", "daily", 48),
-    ExpectedSource("shopee-stats_daily", "daily", 48),
-    ExpectedSource("shopee-ads_daily", "daily", 48),
+    # Gate C1 (2026-07-16): critical=False nas 3 entradas abaixo. Desde este
+    # gate, `daily_shopee_orders`/`daily_shopee_stats`/`daily_shopee_ads`
+    # saem de `full_daily` (que roda todo dia) e passam a viver em
+    # `orchestrate.py::PIPELINES["shopee_manual_refresh"]` (roda so' quando
+    # o operador confirma export Shopee novo). Sem esta marcacao, a
+    # EXECUCAO desses 3 steps ficaria sem sucesso registrado por mais de
+    # 48h assim que `full_daily` parasse de roda-los todo dia, e
+    # `ok_critical` voltaria a False so' por causa desse gap ja' aceito —
+    # exatamente o alarme-fadiga que o Gate B4 corrigiu para
+    # `shopee_product_monthly`, agora pelo mesmo motivo para estas 3 fontes.
+    ExpectedSource("shopee_daily", "daily", 48, critical=False),
+    ExpectedSource("shopee-stats_daily", "daily", 48, critical=False),
+    ExpectedSource("shopee-ads_daily", "daily", 48, critical=False),
     ExpectedSource("tiktok_product_daily", "daily", 30),
     ExpectedSource("ml_produto_ranking", "daily", 30),
     # Gate B4 (2026-07-15): critical=False. Em teoria a EXECUCAO deste sync
@@ -128,7 +145,6 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     # mesmo com ML/TikTok/regional saudaveis (achado do Gate B3).
     ExpectedSource("shopee_product_monthly", "daily", 48, critical=False),
 )
-
 
 @dataclass
 class SourceStatus:

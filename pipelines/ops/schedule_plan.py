@@ -50,18 +50,22 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 
 # Timeout externo do run_with_lock.ps1 para a TaskKey full_daily. Tem que
 # ser MAIOR que a soma dos timeouts individuais dos steps de
-# pipelines.ops.orchestrate.PIPELINES["full_daily"] (7200s desde o Gate B2,
-# que acrescentou gold_regional_incremental=300s e
-# sync_region_if_needed=120s), com margem para overhead de spawn de
-# processo Python + imports pandas/sqlalchemy + latencia de rede VPN/Neon
-# entre passos — senao o lock externo mataria o processo pai ANTES que os
-# timeouts internos por step tivessem chance de proteger as fontes
+# pipelines.ops.orchestrate.PIPELINES["full_daily"] (3600s desde o Gate C1,
+# que removeu os steps Shopee diarios — ver PIPELINES["shopee_manual_refresh"],
+# um pipeline MANUAL separado, nunca agendado), com margem para overhead de
+# spawn de processo Python + imports pandas/sqlalchemy + latencia de rede
+# VPN/Neon entre passos — senao o lock externo mataria o processo pai ANTES
+# que os timeouts internos por step tivessem chance de proteger as fontes
 # independentes seguintes. Duplicado aqui de proposito (sem import cruzado
 # de pipelines.ops.orchestrate, para nao dar a este modulo nenhuma
 # dependencia transitiva de subprocess) — ver
 # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-# (7200s) e o teste que trava os dois valores em sincronia.
-EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de ~1800s (~25%) sobre 7200s
+# (3600s) e o teste que trava os dois valores em sincronia. O mesmo
+# EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e' reaproveitado pela TaskKey
+# shopee_manual_refresh em scripts/run_task.ps1 (orcamento interno 3780s,
+# tambem cabe com folga) — essa TaskKey nao e' agendada aqui (ver
+# PROPOSED_SCHEDULE, abaixo), so' existe para uso manual do operador.
+EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de ~5400s (~150%) sobre 3600s
 
 # ExecutionTimeLimit do PROPRIO Task Scheduler (hard-limit independente do
 # -TimeoutSeconds do run_with_lock.ps1) precisa ficar ACIMA de
@@ -97,22 +101,23 @@ PROPOSED_SCHEDULE: tuple[ScheduledTask, ...] = (
         time_is_confirmed=False,
         notes=(
             "HIPOTESE, NAO CONFIRMADA — 06:00 foi herdado da proposta original "
-            "sem uma verificacao read-only de quando o RDS (gold.*) e os exports "
-            "Shopee tipicamente ficam disponiveis nesta operacao. Antes da Fase "
-            "3B, confirmar isso (ex.: rodar `python -m pipelines.ops.preflight` "
-            "manualmente por alguns dias nesse horario, ou revisar os "
-            "timestamps reais de atualizacao das fontes) — se RDS/Shopee "
-            "tipicamente atualizam DEPOIS das 06:00, a tarefa vai bloquear no "
-            "preflight (RDS) ou processar arquivos do dia anterior (Shopee) "
-            "todo dia, ate o horario ser ajustado com base em dado real, nao "
-            "em uma suposicao herdada. Roda em processo unico via "
-            "pipelines.ops.orchestrate.PIPELINES['full_daily']: ml/tiktok/"
-            "shopee(+stats+ads) diarios, depois Produtos ML/TikTok/Shopee, "
-            "depois o monitor do Bug 8 (so' se o sync Shopee teve SUCCESS "
-            "nesta execucao), depois o health check (sempre, por ultimo, "
-            "garantido pela posicao dele em PIPELINES['full_daily'] + "
-            "always_run=True — nao ha segunda tarefa/segundo lock depois desta "
-            "para rodar antes)."
+            "sem uma verificacao read-only de quando o RDS (gold.*) tipicamente "
+            "fica disponivel nesta operacao. Antes da Fase 3B/Gate C3, confirmar "
+            "isso (ex.: rodar `python -m pipelines.ops.preflight` manualmente "
+            "por alguns dias nesse horario, ou revisar os timestamps reais de "
+            "atualizacao das fontes) — se RDS tipicamente atualiza DEPOIS das "
+            "06:00, a tarefa vai bloquear no preflight todo dia, ate o horario "
+            "ser ajustado com base em dado real, nao em uma suposicao herdada. "
+            "Roda em processo unico via pipelines.ops.orchestrate.PIPELINES['full_daily']: "
+            "ml/tiktok diarios, regional (Gold incremental + sync Neon "
+            "condicional), Produtos ML/TikTok, depois o health check (sempre, "
+            "por ultimo, garantido pela posicao dele em PIPELINES['full_daily'] "
+            "+ always_run=True — nao ha segunda tarefa/segundo lock depois "
+            "desta para rodar antes). Shopee (orders/stats/ads, produtos, "
+            "Bug 8) NAO faz parte deste pipeline desde o Gate C1 (2026-07-16) "
+            "— vive em PIPELINES['shopee_manual_refresh'], rodado so' "
+            "manualmente pelo operador quando ha' export Shopee novo, NUNCA "
+            "agendado (sem entrada correspondente neste PROPOSED_SCHEDULE)."
         ),
     ),
 )

@@ -461,6 +461,8 @@ Versão corrigida pela segunda vez:
 
 **Gate B1 (2026-07-15), antes da Fase 3B**: `orchestrate.py`/`health_check.py` ganharam política crítico/não-crítico — `Step.critical` (só `sync_produtos_shopee`=False, gap conhecido de `LOCAL_PG_URL`) e `ok_critical` separado de `ok` (Shopee manual defasado não decide mais o exit code sozinho). Status geral do pipeline passa a ser OK/DEGRADED/FAILED, exit 1 só em FAILED. Detalhe completo, testes (+22) e exemplos em `docs/runbook_sync_produtos.md` (seção "Gate B1"). Scheduler segue desativado; Gold regional ainda fora do `full_daily` (Gate B2).
 
+**A partir do Gate B1, esta seção deixou de ser atualizada gate a gate — `docs/runbook_sync_produtos.md` é a fonte viva** de todo o progresso da automação (Gates B2 a B6.1d: regional incremental, política crítico/não-crítico completa, consentimento persistente de sync regional, correção da passagem de `--pipeline` na cadeia `run_task.ps1`→`run_with_lock.ps1`, e o Gate C1 — separação de Shopee em pipeline manual `shopee_manual_refresh`, distinto de `full_daily`). Consulte lá para o estado atual antes de assumir que a Fase 3A/3B descrita acima ainda reflete o desenho corrente.
+
 **Próximo prompt sugerido**: *"Revise a Fase 3A corrigida pela segunda vez (diff, testes, agenda em docs/runbook_sync_produtos.md) e, se aprovada, execute a Fase 3B: confirme o horário com dado real e crie a tarefa real no Task Scheduler (XML ou schtasks /create) manualmente."*
 
 ### Fase 4 — Financeiro — 📋 PLANEJADA, NÃO EXECUTADA

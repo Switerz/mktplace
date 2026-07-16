@@ -215,14 +215,15 @@ def test_xml_configura_execution_time_limit_maior_que_o_timeout_do_lock():
 
 def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
     """Trava os numeros em sincronia: 9000s (timeout do lock) tem que
-    ficar acima de 7200s (soma dos timeouts individuais dos steps de
-    pipelines.ops.orchestrate.PIPELINES['full_daily'], desde o Gate B2 que
-    acrescentou gold_regional_incremental=300s + sync_region_if_needed=120s),
+    ficar acima de 3600s (soma dos timeouts individuais dos steps de
+    pipelines.ops.orchestrate.PIPELINES['full_daily'] desde o Gate C1, que
+    removeu os 3 steps Shopee — ml=900+tiktok=900+regional=300+
+    sync_region=120+produtos_ml=600+produtos_tiktok=600+health_check=180),
     com margem; e o ExecutionTimeLimit do Task Scheduler (9600s) tem que
     ficar acima do timeout do lock, com margem adicional para a limpeza
     pos-timeout (Stop-Process + espera + logs)."""
     import pipelines.ops.orchestrate as orch
-    internal_budget_seconds = 7200
+    internal_budget_seconds = 3600
     assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == internal_budget_seconds, (
         "orcamento hardcoded neste teste saiu de sincronia com a soma real "
         "dos timeouts de PIPELINES['full_daily'] — atualize os dois numeros juntos"
@@ -233,6 +234,39 @@ def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
 
     cleanup_margin = sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS - sp.EXTERNAL_LOCK_TIMEOUT_SECONDS
     assert cleanup_margin >= 300, "margem insuficiente para Stop-Process + espera de ate 30s + logs"
+
+
+# ---------------------------------------------------------------------------
+# Gate C1 (2026-07-16) — Shopee vira pipeline manual separado; a agenda
+# PROPOSTA (schtasks/Task Scheduler) continua com uma unica tarefa, e essa
+# tarefa continua apontando exclusivamente para full_daily.
+# ---------------------------------------------------------------------------
+
+def test_shopee_manual_refresh_nao_tem_nenhuma_tarefa_agendada():
+    """Gate C1: shopee_manual_refresh existe em orchestrate.PIPELINES mas
+    NUNCA deve ganhar uma entrada em PROPOSED_SCHEDULE — e' manual, sob
+    demanda, nunca disparado pelo Task Scheduler."""
+    task_keys = [task.task_key for task in sp.PROPOSED_SCHEDULE]
+    assert "shopee_manual_refresh" not in task_keys
+
+
+def test_unica_tarefa_agendada_continua_sendo_full_daily_apos_gate_c1():
+    assert len(sp.PROPOSED_SCHEDULE) == 1
+    assert sp.PROPOSED_SCHEDULE[0].task_key == "full_daily"
+    rendered = sp.render_schtasks_command(sp.PROPOSED_SCHEDULE[0])
+    assert "-TaskKey full_daily" in rendered
+    assert "shopee" not in rendered.lower()
+
+
+def test_notes_da_tarefa_full_daily_documenta_a_exclusao_do_shopee():
+    """As notes deste module descrevem o CONTEUDO do full_daily para quem
+    for revisar a agenda antes de ativar — desde o Gate C1, Shopee so' pode
+    aparecer nas notes para EXPLICAR que ficou de fora (vive em
+    shopee_manual_refresh, rodado manualmente), nunca implicando que faz
+    parte do que este full_daily executa."""
+    notes = sp.PROPOSED_SCHEDULE[0].notes.lower()
+    assert "shopee_manual_refresh" in notes
+    assert "nao faz parte deste pipeline" in notes or "não faz parte deste pipeline" in notes
 
 
 def test_xml_nunca_e_importado_ou_aplicado_pelo_modulo():

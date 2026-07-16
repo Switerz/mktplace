@@ -14,6 +14,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 import pipelines.ops.health_check as hc
 
 MODULE_PATH = Path(hc.__file__)
@@ -493,9 +495,13 @@ def test_main_nunca_imprime_credenciais(monkeypatch, capsys):
 def test_expected_source_critical_default_true():
     """Gate B4: shopee_product_monthly virou critical=False (rastreio de
     execucao de sync_produtos_shopee, bloqueado pelo gap conhecido de
-    LOCAL_PG_URL) -- todas as demais fontes continuam critical=True."""
+    LOCAL_PG_URL). Gate C1: shopee_daily/shopee-stats_daily/shopee-ads_daily
+    tambem viraram critical=False (steps correspondentes saem de
+    full_daily e passam a viver em shopee_manual_refresh, manual) -- todas
+    as demais fontes continuam critical=True."""
+    non_critical_since_gates_b4_c1 = {"shopee_product_monthly", "shopee_daily", "shopee-stats_daily", "shopee-ads_daily"}
     for s in hc.EXPECTED_SOURCES:
-        if s.source_name == "shopee_product_monthly":
+        if s.source_name in non_critical_since_gates_b4_c1:
             assert s.critical is False
         else:
             assert s.critical is True, f"{s.source_name} deveria continuar critical=True (default, Gate B1)"
@@ -782,3 +788,110 @@ def test_main_retorna_1_quando_bug8_diverge_mesmo_com_shopee_produtos_stale(monk
     monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
     exit_code = hc.main()
     assert exit_code == 1
+
+
+# =============================================================================
+# Gate C1 (2026-07-16) — shopee_daily/shopee-stats_daily/shopee-ads_daily
+# (EXECUCAO) tambem nao-criticas: os steps correspondentes saem de
+# full_daily (automatico) e passam a viver em shopee_manual_refresh
+# (manual), entao ficar sem execucao recente por mais de 48h e' esperado,
+# nao uma quebra de pipeline.
+# =============================================================================
+
+_ALL_SHOPEE_EXEC_SOURCES = ("shopee_daily", "shopee-stats_daily", "shopee-ads_daily", "shopee_product_monthly")
+
+
+@pytest.mark.parametrize("source_name", ["shopee_daily", "shopee-stats_daily", "shopee-ads_daily"])
+def test_expected_source_shopee_daily_stats_ads_sao_nao_criticas(source_name):
+    entry = next(s for s in hc.EXPECTED_SOURCES if s.source_name == source_name)
+    assert entry.critical is False
+
+
+def test_build_report_stale_em_todas_as_fontes_shopee_execucao_reprova_ok_mas_nao_ok_critical():
+    """Cenario central do Gate C1: com daily_shopee_orders/stats/ads
+    vivendo em shopee_manual_refresh (nao mais em full_daily), essas 3
+    fontes de EXECUCAO (+ shopee_product_monthly, ja nao-critica desde o
+    Gate B4) podem ficar todas stale ao mesmo tempo sem derrubar
+    ok_critical."""
+    stale_overrides = {
+        name: {"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}
+        for name in _ALL_SHOPEE_EXEC_SOURCES
+    }
+    success_overrides = {name: NOW - timedelta(hours=300) for name in _ALL_SHOPEE_EXEC_SOURCES}
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(**stale_overrides),
+        last_success=_fresh_success_override(**success_overrides),
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+    for name in _ALL_SHOPEE_EXEC_SOURCES:
+        entry = next(s for s in report["sources"] if s["source_name"] == name)
+        assert entry["critical"] is False
+        assert entry["stale"] is True
+    others = [s for s in report["sources"] if s["source_name"] not in _ALL_SHOPEE_EXEC_SOURCES]
+    assert all(not s["stale"] for s in others), "isolar as fontes Shopee nao pode tornar ML/TikTok/produtos stale"
+
+
+def test_main_retorna_0_quando_apenas_fontes_shopee_execucao_stale(monkeypatch, capsys):
+    """Regressao ponta-a-ponta do Gate C1: full_daily (que so' roda health_check
+    depois de ml/tiktok/regional/produtos ml/tiktok) nao deve reportar
+    FAILED so' porque Shopee (agora um pipeline manual separado) esta'
+    sem execucao recente ha' dias."""
+    stale_overrides = {
+        name: {"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}
+        for name in _ALL_SHOPEE_EXEC_SOURCES
+    }
+    success_overrides = {name: NOW - timedelta(hours=300) for name in _ALL_SHOPEE_EXEC_SOURCES}
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(
+        last_run=_fresh_run_override(**stale_overrides),
+        last_success=_fresh_success_override(**success_overrides),
+    ))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "ATRASADA-CONHECIDO" in out
+    assert "STATUS CRITICO (decide o exit code): OK" in out
+
+
+def test_main_retorna_1_quando_ml_ou_tiktok_execucao_stale_mesmo_com_todo_shopee_stale(monkeypatch, capsys):
+    """ML/TikTok (execucao) continuam criticos e reprovam ok_critical/exit
+    code, mesmo com TODAS as fontes Shopee (execucao) tambem stale ao
+    mesmo tempo — o Gate C1 nao afeta a criticidade de ML/TikTok."""
+    stale_overrides = {
+        name: {"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}
+        for name in _ALL_SHOPEE_EXEC_SOURCES
+    }
+    stale_overrides["ml_daily"] = {"started_at": NOW - timedelta(hours=40), "finished_at": NOW - timedelta(hours=40), "status": "success", "error_message": None}
+    success_overrides = {name: NOW - timedelta(hours=300) for name in _ALL_SHOPEE_EXEC_SOURCES}
+    success_overrides["ml_daily"] = NOW - timedelta(hours=40)  # threshold ml_daily = 30h
+    monkeypatch.setattr(hc, "_get_neon_url", lambda: "postgresql://u:p@neon-host/db")
+    monkeypatch.setattr(hc, "_neon_readonly", lambda url: all_fresh_conn(
+        last_run=_fresh_run_override(**stale_overrides),
+        last_success=_fresh_success_override(**success_overrides),
+    ))
+    monkeypatch.setattr(hc, "_now", lambda: NOW)
+    monkeypatch.setattr(hc.sys, "argv", ["health_check.py"])
+    exit_code = hc.main()
+    assert exit_code == 1
+    assert "ATRASADA-CRITICO" in capsys.readouterr().out
+
+
+def test_build_report_bug8_continua_critico_mesmo_com_todo_shopee_execucao_stale():
+    """bug8_invariants continua sempre critico — Gate C1 nao muda isso."""
+    stale_overrides = {
+        name: {"started_at": NOW - timedelta(hours=300), "finished_at": NOW - timedelta(hours=300), "status": "success", "error_message": None}
+        for name in _ALL_SHOPEE_EXEC_SOURCES
+    }
+    success_overrides = {name: NOW - timedelta(hours=300) for name in _ALL_SHOPEE_EXEC_SOURCES}
+    conn = all_fresh_conn(
+        last_run=_fresh_run_override(**stale_overrides),
+        last_success=_fresh_success_override(**success_overrides),
+        bug8_scalars=[("HAVING COUNT(*) > 1", 3)],
+    )
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is False

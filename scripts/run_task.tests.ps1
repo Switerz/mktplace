@@ -13,8 +13,9 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
 
     . $script
 
-    It "conhece exatamente a TaskKey unica da agenda proposta (full_daily)" {
-        (Get-TaskDefinitions).Keys | Should Be @("full_daily")
+    It "conhece exatamente as duas TaskKeys desde o Gate C1 (full_daily, shopee_manual_refresh)" {
+        $known = (Get-TaskDefinitions).Keys | Sort-Object
+        ($known -join ",") | Should Be "full_daily,shopee_manual_refresh"
     }
 
     It "resolve full_daily com lock/timeout/modulo corretos" {
@@ -25,10 +26,46 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
         ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline full_daily"
     }
 
-    It "TimeoutSeconds externo (9000) e' maior que o orcamento somado dos steps internos (7200 desde o Gate B2)" {
+    It "TimeoutSeconds externo (9000) e' maior que o orcamento somado dos steps internos de full_daily (3600 desde o Gate C1)" {
         $inv = Resolve-TaskInvocation -TaskKey "full_daily" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
-        $internalBudget = 7200
+        $internalBudget = 3600
         ($inv.TimeoutSeconds -gt $internalBudget) | Should Be $true
+    }
+
+    # --- Gate C1 (2026-07-16) -- nova TaskKey shopee_manual_refresh ---------
+
+    It "resolve shopee_manual_refresh com lock/timeout/modulo corretos" {
+        $inv = Resolve-TaskInvocation -TaskKey "shopee_manual_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $inv.LockName | Should Be "shopee_manual_refresh"
+        $inv.TimeoutSeconds | Should Be 9000
+        $inv.WorkingDirectory | Should Be $repoRoot
+        ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline shopee_manual_refresh"
+    }
+
+    It "shopee_manual_refresh usa o mesmo LockScript (run_with_lock.ps1) recebido como parametro, igual full_daily" {
+        $invFull = Resolve-TaskInvocation -TaskKey "full_daily" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $invShopee = Resolve-TaskInvocation -TaskKey "shopee_manual_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $invFull.LockScript | Should Be $invShopee.LockScript
+        $invFull.LockScript | Should Be "lock.ps1"
+    }
+
+    It "TimeoutSeconds externo (9000) e' maior que o orcamento somado dos steps internos de shopee_manual_refresh (3780 desde o Gate C1)" {
+        $inv = Resolve-TaskInvocation -TaskKey "shopee_manual_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $internalBudget = 3780
+        ($inv.TimeoutSeconds -gt $internalBudget) | Should Be $true
+    }
+
+    It "adicionar shopee_manual_refresh nao altera em nada a resolucao de full_daily (locks distintos, sem interferencia)" {
+        $inv = Resolve-TaskInvocation -TaskKey "full_daily" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $inv.LockName | Should Be "full_daily"
+        ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline full_daily"
+        $inv.LockName | Should Not Be "shopee_manual_refresh"
+    }
+
+    It "shopee_manual_refresh nao passa nenhuma flag Shopee-especifica insegura (ex.: --skip-lock, --force)" {
+        $inv = Resolve-TaskInvocation -TaskKey "shopee_manual_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        ($inv.ModuleArgs -contains "--skip-lock") | Should Be $false
+        ($inv.ModuleArgs -contains "--force") | Should Be $false
     }
 
     It "retorna `$null para uma TaskKey desconhecida (nunca lanca excecao)" {
@@ -157,6 +194,37 @@ Invoke-ResolvedTask -Invocation `$invocation
         ($dumped -contains "[pipelines.ops.orchestrate]") | Should Be $true
         ($dumped -contains "[--pipeline]") | Should Be $true
         ($dumped -contains "[full_daily]") | Should Be $true
+        (Test-Path (Join-Path $repoRoot "logs\b6_1d_pipeline_test.lock")) | Should Be $false
+    }
+
+    It "Gate C1: --pipeline shopee_manual_refresh tambem sobrevive ate' o comando, com lock proprio" {
+        # Mesma classe de risco do teste acima (full_daily), aplicada a'
+        # TaskKey nova do Gate C1 -- confirma que Invoke-ResolvedTask nao
+        # tem nenhum caminho especial por pipeline: o mesmo dot-source com
+        # binding nomeado explicito vale para qualquer ModuleArgs.
+        $dumpFile = Join-Path $harnessDir "dumped_shopee_pipeline.txt"
+        Remove-Item $dumpFile -Force -ErrorAction SilentlyContinue
+        $harness = Join-Path $harnessDir "harness_shopee_pipeline.ps1"
+        New-B61dHarness -Path $harness -RunTaskScript $script -LockScript $lockScript -PythonExe "powershell.exe" `
+            -ModuleArgs @("-NoProfile", "-File", $argDumper, "-m", "pipelines.ops.orchestrate", "--pipeline", "shopee_manual_refresh") `
+            -WorkingDirectory $repoRoot -LockName "b6_1d_shopee_pipeline_test" -TimeoutSeconds 30
+
+        $env:B6_1D_DUMP_FILE = $dumpFile
+        try {
+            & powershell -NoProfile -NonInteractive -File $harness 2>$null | Out-Null
+        } finally {
+            Remove-Item Env:\B6_1D_DUMP_FILE -ErrorAction SilentlyContinue
+        }
+
+        (Test-Path $dumpFile) | Should Be $true
+        $dumped = Get-Content $dumpFile
+        ($dumped -contains "[-m]") | Should Be $true
+        ($dumped -contains "[pipelines.ops.orchestrate]") | Should Be $true
+        ($dumped -contains "[--pipeline]") | Should Be $true
+        ($dumped -contains "[shopee_manual_refresh]") | Should Be $true
+        (Test-Path (Join-Path $repoRoot "logs\b6_1d_shopee_pipeline_test.lock")) | Should Be $false
+        # Locks distintos (full_daily vs shopee_manual_refresh): nenhum
+        # residuo de lock de um interfere no outro.
         (Test-Path (Join-Path $repoRoot "logs\b6_1d_pipeline_test.lock")) | Should Be $false
     }
 

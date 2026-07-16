@@ -5,6 +5,12 @@ depends_on/always_run, timeout INDIVIDUAL por step (uma fonte travada nao
 consome o timeout global nem trava fontes independentes seguintes), e
 propagacao de exit code — tudo com executor/preflight_fn injetados
 (fakes). Nenhum subprocess real, nenhum banco tocado.
+
+Gate C1 (2026-07-16): PIPELINES virou DOIS pipelines independentes —
+`full_daily` (automatico, so' fontes recorrentes: ml, tiktok, regional,
+produtos ml/tiktok, health_check) e `shopee_manual_refresh` (manual, so'
+sob demanda: shopee orders/stats/ads, produtos shopee, bug8, health_check).
+Os testes abaixo refletem essa separacao.
 """
 import re
 import subprocess
@@ -39,7 +45,7 @@ def make_executor(returncodes=None, calls=None, timeout_on=()):
 
 
 # ---------------------------------------------------------------------------
-# preflight obrigatoriamente amarrado a execucao real
+# preflight obrigatoriamente amarrado a execucao real (full_daily)
 # ---------------------------------------------------------------------------
 
 def test_preflight_aprovado_executa_o_comando_real():
@@ -49,7 +55,7 @@ def test_preflight_aprovado_executa_o_comando_real():
 
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
 
-    assert calls[:5] == ["daily_ml", "daily_tiktok", "daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads"]
+    assert calls[:2] == ["daily_ml", "daily_tiktok"]
     assert all(v == "SUCCESS" for v in results.values())
 
 
@@ -63,19 +69,18 @@ def test_preflight_bloqueado_o_comando_real_nunca_e_chamado():
     assert "daily_tiktok" not in calls, "executor foi chamado mesmo com preflight bloqueado"
     assert results["daily_tiktok"] == "BLOCKED"
     assert results["daily_ml"] == "SUCCESS"
-    assert results["daily_shopee_orders"] == "SUCCESS"
 
 
 def test_preflight_bloqueado_nao_impede_passos_independentes_de_rodar():
     calls = []
     executor = make_executor(calls=calls)
-    preflight_fn = make_preflight(blocked_sources=("shopee_daily",))
+    preflight_fn = make_preflight(blocked_sources=("ml_daily",))
 
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
 
-    assert results["daily_shopee_orders"] == "BLOCKED"
-    assert results["daily_shopee_stats"] == "SUCCESS"
-    assert results["daily_shopee_ads"] == "SUCCESS"
+    assert results["daily_ml"] == "BLOCKED"
+    assert results["daily_tiktok"] == "SUCCESS"
+    assert results["sync_produtos_ml"] == "SUCCESS"
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +113,8 @@ def test_timeout_individual_marca_o_step_como_failed():
 
 def test_timeout_de_uma_fonte_nao_impede_fontes_independentes_seguintes():
     """Regressao pedida explicitamente: timeout de ML seguido de execucao
-    NORMAL de TikTok/Shopee — uma fonte travada nao pode consumir o
-    timeout global nem travar as demais."""
+    NORMAL de TikTok/regional/produtos — uma fonte travada nao pode
+    consumir o timeout global nem travar as demais."""
     calls = []
     executor = make_executor(calls=calls, timeout_on=("daily_ml",))
     preflight_fn = make_preflight()
@@ -118,10 +123,10 @@ def test_timeout_de_uma_fonte_nao_impede_fontes_independentes_seguintes():
 
     assert results["daily_ml"] == "FAILED"
     assert results["daily_tiktok"] == "SUCCESS"
-    assert results["daily_shopee_orders"] == "SUCCESS"
-    assert results["daily_shopee_stats"] == "SUCCESS"
-    assert results["daily_shopee_ads"] == "SUCCESS"
-    assert "daily_tiktok" in calls and "daily_shopee_orders" in calls
+    assert results["gold_regional_incremental"] == "SUCCESS"
+    assert results["sync_produtos_ml"] == "SUCCESS"
+    assert results["sync_produtos_tiktok"] == "SUCCESS"
+    assert "daily_tiktok" in calls and "sync_produtos_ml" in calls
 
 
 def test_default_executor_propaga_timeout_individual_do_step(monkeypatch):
@@ -146,15 +151,18 @@ def test_timeout_budget_individual_soma_menos_que_o_recomendado_externo():
     margem dentro do timeout externo documentado em scripts/run_task.ps1
     (9000s) — se um dia a soma dos steps ultrapassar isso, o lock externo
     mataria o processo pai antes dos timeouts internos protegerem as
-    fontes independentes."""
+    fontes independentes. Vale para os DOIS pipelines (Gate C1)."""
     RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000
-    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS < RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS
-    margin = RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS - orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    assert margin > 0.15 * orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS, "margem de seguranca insuficiente"
+    for budget in (orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS, orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS):
+        assert budget < RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS
+        margin = RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS - budget
+        assert margin > 0.15 * budget, "margem de seguranca insuficiente"
 
 
 # ---------------------------------------------------------------------------
 # depends_on / always_run — sequenciamento real, nunca por horario
+# (monitor_bug8/sync_produtos_shopee vivem em shopee_manual_refresh desde o
+# Gate C1 — nao existem mais em full_daily)
 # ---------------------------------------------------------------------------
 
 def test_monitor_bug8_so_roda_se_sync_shopee_teve_sucesso_real():
@@ -162,7 +170,7 @@ def test_monitor_bug8_so_roda_se_sync_shopee_teve_sucesso_real():
     executor = make_executor(calls=calls)
     preflight_fn = make_preflight()
 
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
 
     assert "monitor_bug8" in calls
     assert results["monitor_bug8"] == "SUCCESS"
@@ -172,7 +180,7 @@ def test_monitor_bug8_e_pulado_se_sync_shopee_falhar():
     executor = make_executor(returncodes={"sync_produtos_shopee": 1})
     preflight_fn = make_preflight()
 
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
 
     assert results["sync_produtos_shopee"] == "FAILED"
     assert results["monitor_bug8"] == "SKIPPED"
@@ -182,7 +190,7 @@ def test_monitor_bug8_e_pulado_se_sync_shopee_foi_bloqueado_no_preflight():
     executor = make_executor()
     preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
 
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
 
     assert results["sync_produtos_shopee"] == "BLOCKED"
     assert results["monitor_bug8"] == "SKIPPED"
@@ -192,16 +200,16 @@ def test_monitor_bug8_e_pulado_se_sync_shopee_deu_timeout():
     executor = make_executor(timeout_on=("sync_produtos_shopee",))
     preflight_fn = make_preflight()
 
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
 
     assert results["sync_produtos_shopee"] == "FAILED"
     assert results["monitor_bug8"] == "SKIPPED"
 
 
-def test_health_check_sempre_roda_mesmo_se_tudo_antes_falhou():
+def test_health_check_sempre_roda_mesmo_se_tudo_antes_falhou_em_full_daily():
     calls = []
     executor = make_executor(
-        returncodes={"sync_produtos_ml": 1, "sync_produtos_tiktok": 1, "sync_produtos_shopee": 1},
+        returncodes={"sync_produtos_ml": 1, "sync_produtos_tiktok": 1},
         calls=calls,
     )
     preflight_fn = make_preflight()
@@ -210,18 +218,32 @@ def test_health_check_sempre_roda_mesmo_se_tudo_antes_falhou():
 
     assert "health_check" in calls
     assert results["health_check"] == "SUCCESS"
-    assert results["monitor_bug8"] == "SKIPPED"
 
 
-def test_health_check_sempre_roda_mesmo_com_tudo_bloqueado_no_preflight():
+def test_health_check_sempre_roda_mesmo_com_tudo_bloqueado_no_preflight_em_full_daily():
     calls = []
     executor = make_executor(calls=calls)
-    preflight_fn = make_preflight(blocked_sources=("produtos_ml", "produtos_tiktok", "produtos_shopee"))
+    preflight_fn = make_preflight(blocked_sources=("produtos_ml", "produtos_tiktok"))
 
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
 
     assert "health_check" in calls
     assert results["health_check"] == "SUCCESS"
+
+
+def test_health_check_sempre_roda_mesmo_se_tudo_antes_falhou_em_shopee_manual_refresh():
+    calls = []
+    executor = make_executor(
+        returncodes={"daily_shopee_orders": 1, "daily_shopee_stats": 1, "daily_shopee_ads": 1, "sync_produtos_shopee": 1},
+        calls=calls,
+    )
+    preflight_fn = make_preflight()
+
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
+
+    assert "health_check" in calls
+    assert results["health_check"] == "SUCCESS"
+    assert results["monitor_bug8"] == "SKIPPED"
 
 
 def test_pipeline_desconhecido_levanta_erro():
@@ -232,11 +254,16 @@ def test_pipeline_desconhecido_levanta_erro():
 def test_pipelines_antigos_de_2_tarefas_nao_existem_mais():
     """Regressao explicita: o desenho anterior (2 tarefas agendadas
     separadamente, 'daily_ingestion' + 'produtos_and_monitor') foi
-    substituido por um unico pipeline orquestrado, porque a segunda tarefa
-    podia comecar por horario antes da primeira ter terminado de verdade."""
+    substituido por pipelines orquestrados, porque a segunda tarefa podia
+    comecar por horario antes da primeira ter terminado de verdade."""
     assert "daily_ingestion" not in orch.PIPELINES
     assert "produtos_and_monitor" not in orch.PIPELINES
-    assert set(orch.PIPELINES) == {"full_daily"}
+
+
+def test_pipelines_disponiveis_sao_exatamente_full_daily_e_shopee_manual_refresh():
+    """Gate C1: exatamente 2 pipelines — nenhum terceiro, nenhuma task
+    Shopee agendada por engano."""
+    assert set(orch.PIPELINES) == {"full_daily", "shopee_manual_refresh"}
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +271,14 @@ def test_pipelines_antigos_de_2_tarefas_nao_existem_mais():
 # em qualquer combinacao de sucesso/falha/bloqueio/timeout anterior
 # ---------------------------------------------------------------------------
 
-def test_health_check_e_sempre_o_ultimo_step_da_definicao_do_pipeline():
+@pytest.mark.parametrize("pipeline_name", ["full_daily", "shopee_manual_refresh"])
+def test_health_check_e_sempre_o_ultimo_step_da_definicao_do_pipeline(pipeline_name):
     """Garantia estrutural: nao existe segunda tarefa/segundo pipeline
     agendado depois deste — health_check ser o ULTIMO item da tupla
-    PIPELINES['full_daily'] e' o que torna 'health check por ultimo,
-    sempre' uma propriedade do desenho, nao uma esperanca de horario."""
-    steps = orch.PIPELINES["full_daily"]
+    PIPELINES[pipeline_name] e' o que torna 'health check por ultimo,
+    sempre' uma propriedade do desenho, nao uma esperanca de horario.
+    Vale para os DOIS pipelines desde o Gate C1."""
+    steps = orch.PIPELINES[pipeline_name]
     assert steps[-1].name == "health_check"
     assert steps[-1].always_run is True
 
@@ -258,10 +287,10 @@ def test_health_check_e_sempre_o_ultimo_step_da_definicao_do_pipeline():
     {"returncodes": {}, "timeout_on": (), "blocked": ()},
     {"returncodes": {"daily_ml": 1}, "timeout_on": (), "blocked": ()},
     {"returncodes": {}, "timeout_on": ("daily_tiktok",), "blocked": ()},
-    {"returncodes": {}, "timeout_on": (), "blocked": ("shopee_daily", "produtos_ml")},
-    {"returncodes": {"sync_produtos_shopee": 1}, "timeout_on": ("daily_shopee_ads",), "blocked": ("tiktok_daily",)},
+    {"returncodes": {}, "timeout_on": (), "blocked": ("ml_daily", "produtos_ml")},
+    {"returncodes": {}, "timeout_on": ("sync_produtos_tiktok",), "blocked": ("tiktok_daily",)},
 ])
-def test_health_check_roda_por_ultimo_em_qualquer_cenario_misto(scenario):
+def test_health_check_roda_por_ultimo_em_qualquer_cenario_misto_full_daily(scenario):
     """Executa o pipeline inteiro com uma mistura de sucesso/falha/timeout/
     bloqueio e confirma que health_check e' sempre o ULTIMO nome a ser
     chamado pelo executor, nunca antecipado."""
@@ -270,6 +299,20 @@ def test_health_check_roda_por_ultimo_em_qualquer_cenario_misto(scenario):
     preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
 
     orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+
+    assert calls[-1] == "health_check", f"health_check nao foi o ultimo chamado: {calls}"
+
+
+@pytest.mark.parametrize("scenario", [
+    {"returncodes": {}, "timeout_on": (), "blocked": ()},
+    {"returncodes": {"sync_produtos_shopee": 1}, "timeout_on": ("daily_shopee_ads",), "blocked": ("shopee-stats_daily",)},
+])
+def test_health_check_roda_por_ultimo_em_qualquer_cenario_misto_shopee_manual_refresh(scenario):
+    calls = []
+    executor = make_executor(returncodes=scenario["returncodes"], calls=calls, timeout_on=scenario["timeout_on"])
+    preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
+
+    orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
 
     assert calls[-1] == "health_check", f"health_check nao foi o ultimo chamado: {calls}"
 
@@ -318,33 +361,130 @@ def test_nunca_ativa_task_scheduler():
     assert "register-scheduledtask" not in source.lower()
 
 
-def test_todos_os_steps_tem_timeout_individual_positivo():
-    for step in orch.PIPELINES["full_daily"]:
+@pytest.mark.parametrize("pipeline_name", ["full_daily", "shopee_manual_refresh"])
+def test_todos_os_steps_tem_timeout_individual_positivo(pipeline_name):
+    for step in orch.PIPELINES[pipeline_name]:
         assert step.timeout_seconds > 0, f"{step.name} sem timeout individual"
 
 
-def test_shopee_orders_stats_ads_sao_passos_separados_no_pipeline():
+def test_shopee_orders_stats_ads_sao_passos_separados_no_shopee_manual_refresh():
     """Bug corrigido numa revisao anterior: a agenda antiga so' cobria
     'shopee', ignorando que daily_performance trata shopee/shopee-stats/
-    shopee-ads como fontes distintas."""
-    names = {step.name for step in orch.PIPELINES["full_daily"]}
+    shopee-ads como fontes distintas. Desde o Gate C1, esses 3 passos vivem
+    em shopee_manual_refresh, nao mais em full_daily."""
+    names = {step.name for step in orch.PIPELINES["shopee_manual_refresh"]}
     assert {"daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads"} <= names
+
+
+# =============================================================================
+# Gate C1 (2026-07-16) — separacao Shopee manual x full_daily automatico
+# =============================================================================
+
+def test_full_daily_nao_contem_nenhum_step_shopee():
+    """Achado do Gate B6.1c: daily_shopee_orders estourando timeout
+    derrubava full_daily inteiro. A correcao e' de desenho: Shopee (cadencia
+    manual) nao pode mais viver dentro de full_daily (cadencia diaria
+    automatica)."""
+    names = {step.name for step in orch.PIPELINES["full_daily"]}
+    shopee_step_names = {"daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads", "sync_produtos_shopee", "monitor_bug8"}
+    assert names.isdisjoint(shopee_step_names)
+
+
+def test_full_daily_contem_exatamente_as_fontes_recorrentes_na_ordem_correta():
+    names = [step.name for step in orch.PIPELINES["full_daily"]]
+    assert names == [
+        "daily_ml",
+        "daily_tiktok",
+        "gold_regional_incremental",
+        "sync_region_if_needed",
+        "sync_produtos_ml",
+        "sync_produtos_tiktok",
+        "health_check",
+    ]
+
+
+def test_shopee_manual_refresh_contem_os_steps_shopee_na_ordem_correta():
+    names = [step.name for step in orch.PIPELINES["shopee_manual_refresh"]]
+    assert names == [
+        "daily_shopee_orders",
+        "daily_shopee_stats",
+        "daily_shopee_ads",
+        "sync_produtos_shopee",
+        "monitor_bug8",
+        "health_check",
+    ]
+
+
+def test_monitor_bug8_depende_de_sync_produtos_shopee_em_shopee_manual_refresh():
+    steps_by_name = {step.name: step for step in orch.PIPELINES["shopee_manual_refresh"]}
+    assert steps_by_name["monitor_bug8"].depends_on == ("sync_produtos_shopee",)
+
+
+def test_sync_produtos_shopee_continua_critical_false():
+    steps_by_name = {step.name: step for step in orch.PIPELINES["shopee_manual_refresh"]}
+    assert steps_by_name["sync_produtos_shopee"].critical is False
+
+
+def test_daily_shopee_orders_stats_ads_sao_criticos_dentro_do_pipeline_manual():
+    """Dentro de shopee_manual_refresh (execucao manual e deliberada), os 3
+    steps diarios Shopee SAO criticos — uma falha real deve aparecer como
+    FAILED, nao um DEGRADED silencioso que mascararia uma carga incompleta."""
+    steps_by_name = {step.name: step for step in orch.PIPELINES["shopee_manual_refresh"]}
+    for name in ("daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads"):
+        assert steps_by_name[name].critical is True, f"{name} deveria ser critical=True dentro de shopee_manual_refresh"
+
+
+def test_falha_de_daily_shopee_orders_nao_afeta_full_daily():
+    """daily_shopee_orders nem existe mais em full_daily — uma falha nele
+    (via timeout_on/returncodes) nao pode influenciar full_daily de forma
+    alguma, porque o executor de full_daily nunca vai sequer tentar
+    chama-lo."""
+    calls = []
+    executor = make_executor(calls=calls, returncodes={"daily_shopee_orders": 1}, timeout_on=("daily_shopee_orders",))
+    preflight_fn = make_preflight()
+
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+
+    assert "daily_shopee_orders" not in calls
+    assert "daily_shopee_orders" not in results
+    assert orch.compute_overall_status("full_daily", results) == "OK"
+
+
+def test_falha_de_daily_shopee_orders_falha_shopee_manual_refresh():
+    executor = make_executor(timeout_on=("daily_shopee_orders",))
+    preflight_fn = make_preflight()
+
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
+
+    assert results["daily_shopee_orders"] == "FAILED"
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "FAILED"
+
+
+def test_full_daily_com_todas_as_fontes_shopee_bloqueadas_no_preflight_nao_vira_failed():
+    """Shopee stale/ausente/bloqueado (mesmo TODAS as suas fontes de
+    preflight) nao pode afetar full_daily de jeito nenhum — os steps
+    correspondentes nem fazem parte deste pipeline desde o Gate C1."""
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=("shopee_daily", "shopee-stats_daily", "shopee-ads_daily", "produtos_shopee"))
+
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+
+    assert orch.compute_overall_status("full_daily", results) == "OK"
+    assert all(status == "SUCCESS" for status in results.values())
+
+
+def test_full_daily_nunca_fica_degraded_pois_todos_os_steps_sao_criticos():
+    """Diferente de antes do Gate C1 (quando sync_produtos_shopee, nao-
+    critico, vivia aqui e podia degradar o pipeline): hoje TODOS os steps
+    de full_daily sao critical=True, entao o unico resultado possivel
+    quando algo falha/bloqueia e' FAILED, nunca DEGRADED."""
+    for step in orch.PIPELINES["full_daily"]:
+        assert step.critical is True, f"{step.name} deveria ser critical=True em full_daily (Gate C1)"
 
 
 # =============================================================================
 # Gate B1 — politica critico/nao-critico (Step.critical + compute_overall_status)
 # =============================================================================
-
-def test_step_critical_default_true_preserva_comportamento_antigo():
-    """Todo step ja existente, EXCETO sync_produtos_shopee (marcado
-    critical=False de proposito neste gate), continua critical=True por
-    default — nada muda para eles."""
-    for step in orch.PIPELINES["full_daily"]:
-        if step.name == "sync_produtos_shopee":
-            assert step.critical is False
-        else:
-            assert step.critical is True, f"{step.name} deveria continuar critical=True (default)"
-
 
 def test_compute_overall_status_ok_quando_tudo_passa():
     executor = make_executor()
@@ -369,14 +509,15 @@ def test_compute_overall_status_failed_quando_step_critico_bloqueado_no_prefligh
 
 
 def test_compute_overall_status_degraded_quando_produtos_shopee_bloqueado_por_local_pg_url():
-    """Cenario central do Gate B1: produtos_shopee bloqueado (LOCAL_PG_URL
-    ausente) e' um gap manual conhecido — o pipeline deve reportar
-    DEGRADED, nunca FAILED, quando ML/TikTok/tudo mais critico passou."""
+    """Cenario central do Gate B1 (hoje dentro de shopee_manual_refresh,
+    desde o Gate C1): produtos_shopee bloqueado (LOCAL_PG_URL ausente) e'
+    um gap manual conhecido — o pipeline deve reportar DEGRADED, nunca
+    FAILED, quando os steps Shopee diarios passaram."""
     executor = make_executor()
     preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
     assert results["sync_produtos_shopee"] == "BLOCKED"
-    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "DEGRADED"
 
 
 def test_compute_overall_status_degraded_quando_sync_produtos_shopee_falha_execucao():
@@ -385,9 +526,9 @@ def test_compute_overall_status_degraded_quando_sync_produtos_shopee_falha_execu
     degradar, nao derrubar o pipeline."""
     executor = make_executor(returncodes={"sync_produtos_shopee": 1})
     preflight_fn = make_preflight()
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
     assert results["sync_produtos_shopee"] == "FAILED"
-    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "DEGRADED"
 
 
 def test_compute_overall_status_skipped_por_dependencia_nao_critica_nao_derruba_pipeline():
@@ -396,20 +537,20 @@ def test_compute_overall_status_skipped_por_dependencia_nao_critica_nao_derruba_
     segundo motivo de DEGRADED — SKIPPED nunca conta como falha aqui."""
     executor = make_executor()
     preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
     assert results["monitor_bug8"] == "SKIPPED"
     # DEGRADED so' por causa do proprio sync_produtos_shopee (nao-critico);
     # nunca escala pra FAILED so' porque um step downstream foi pulado.
-    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "DEGRADED"
 
 
 def test_compute_overall_status_failed_tem_prioridade_sobre_degraded():
     """Se um step critico E um nao-critico falham na mesma execucao, o
     resultado e' FAILED (critico sempre vence), nunca DEGRADED."""
-    executor = make_executor(returncodes={"daily_ml": 1, "sync_produtos_shopee": 1})
+    executor = make_executor(returncodes={"daily_shopee_orders": 1, "sync_produtos_shopee": 1})
     preflight_fn = make_preflight()
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
-    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "FAILED"
 
 
 def test_compute_overall_status_ok_mesmo_com_monitor_bug8_skipped_por_falha_critica_upstream():
@@ -418,37 +559,47 @@ def test_compute_overall_status_ok_mesmo_com_monitor_bug8_skipped_por_falha_crit
     paralelo (sem relacao de dependencia) — nao deve mudar o resultado do
     proprio sync_produtos_shopee nem do monitor_bug8, so' confirma que
     FAILED de um step critico independente ainda e' pego corretamente."""
-    executor = make_executor(returncodes={"daily_tiktok": 1})
+    executor = make_executor(returncodes={"daily_shopee_stats": 1})
     preflight_fn = make_preflight()
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
     assert results["sync_produtos_shopee"] == "SUCCESS"
     assert results["monitor_bug8"] == "SUCCESS"
-    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == "FAILED"
 
 
 @pytest.mark.parametrize("scenario,expected", [
     ({"returncodes": {}, "blocked": ()}, "OK"),
     ({"returncodes": {"daily_ml": 1}, "blocked": ()}, "FAILED"),
-    ({"returncodes": {}, "blocked": ("produtos_shopee",)}, "DEGRADED"),
-    ({"returncodes": {"sync_produtos_shopee": 1}, "blocked": ("tiktok_daily",)}, "FAILED"),
 ])
-def test_compute_overall_status_cenarios_mistos(scenario, expected):
+def test_compute_overall_status_cenarios_mistos_full_daily(scenario, expected):
     executor = make_executor(returncodes=scenario["returncodes"])
     preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
     assert orch.compute_overall_status("full_daily", results) == expected
 
 
+@pytest.mark.parametrize("scenario,expected", [
+    ({"returncodes": {}, "blocked": ()}, "OK"),
+    ({"returncodes": {}, "blocked": ("produtos_shopee",)}, "DEGRADED"),
+    ({"returncodes": {"sync_produtos_shopee": 1}, "blocked": ("shopee_daily",)}, "FAILED"),
+])
+def test_compute_overall_status_cenarios_mistos_shopee_manual_refresh(scenario, expected):
+    executor = make_executor(returncodes=scenario["returncodes"])
+    preflight_fn = make_preflight(blocked_sources=scenario["blocked"])
+    results = orch.run_pipeline("shopee_manual_refresh", executor=executor, preflight_fn=preflight_fn)
+    assert orch.compute_overall_status("shopee_manual_refresh", results) == expected
+
+
 # =============================================================================
 # Gate B2 — gold_regional_incremental + sync_region_if_needed integrados a
-# full_daily, ambos CRITICOS (diferente de sync_produtos_shopee no Gate B1)
+# full_daily, ambos CRITICOS
 # =============================================================================
 
 def test_gold_regional_e_sync_region_estao_na_ordem_correta():
-    """Ordem exata pedida: os 2 novos steps ficam depois de todas as fontes
-    diarias (inclusive shopee-ads) e antes de qualquer sync de Produtos."""
+    """Ordem exata: os 2 steps regionais ficam depois das fontes diarias
+    (ml, tiktok) e antes de qualquer sync de Produtos."""
     names = [step.name for step in orch.PIPELINES["full_daily"]]
-    assert names.index("daily_shopee_ads") < names.index("gold_regional_incremental")
+    assert names.index("daily_tiktok") < names.index("gold_regional_incremental")
     assert names.index("gold_regional_incremental") < names.index("sync_region_if_needed")
     assert names.index("sync_region_if_needed") < names.index("sync_produtos_ml")
 
@@ -475,8 +626,6 @@ def test_gold_regional_incremental_falha_execucao_vira_failed_no_geral():
 
 
 def test_gold_regional_incremental_bloqueado_no_preflight_vira_failed_no_geral():
-    """Diferente de produtos_shopee (Gate B1): nao ha' gap manual conhecido
-    aceito para o regional — um BLOCKED aqui e' FAILED, nunca DEGRADED."""
     executor = make_executor()
     preflight_fn = make_preflight(blocked_sources=("gold_regional_incremental",))
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
@@ -496,29 +645,6 @@ def test_sync_region_if_needed_bloqueado_no_preflight_vira_failed_no_geral():
     preflight_fn = make_preflight(blocked_sources=("sync_region_daily",))
     results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
     assert results["sync_region_if_needed"] == "BLOCKED"
-    assert orch.compute_overall_status("full_daily", results) == "FAILED"
-
-
-def test_regional_ok_e_shopee_nao_critico_bloqueado_continua_degradado():
-    """Confirma que o comportamento do Gate B1 (shopee nao-critico so'
-    degrada) continua intacto depois de o regional (critico) ter sido
-    adicionado — os dois nao interferem um no outro."""
-    executor = make_executor()
-    preflight_fn = make_preflight(blocked_sources=("produtos_shopee",))
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
-    assert results["gold_regional_incremental"] == "SUCCESS"
-    assert results["sync_region_if_needed"] == "SUCCESS"
-    assert results["sync_produtos_shopee"] == "BLOCKED"
-    assert orch.compute_overall_status("full_daily", results) == "DEGRADED"
-
-
-def test_regional_falha_critica_e_shopee_nao_critico_falha_junto_ainda_e_failed():
-    """Critico sempre vence: mesmo com o gap conhecido de shopee tambem
-    presente na mesma execucao, uma falha real do regional continua
-    reprovando o pipeline inteiro (FAILED, nunca DEGRADED)."""
-    executor = make_executor(returncodes={"gold_regional_incremental": 1, "sync_produtos_shopee": 1})
-    preflight_fn = make_preflight()
-    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
     assert orch.compute_overall_status("full_daily", results) == "FAILED"
 
 
