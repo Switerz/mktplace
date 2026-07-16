@@ -22,6 +22,15 @@ Guardas preservadas (nao reimplementadas, so' herdadas de sync_region_daily):
     da excecao — passam por sync_region_daily._sanitize_error_message antes
     de aparecer em stdout/stderr (nunca host/URL/credencial).
 
+Gate B6.1b: main() tambem tenta carregar o consentimento persistente de
+pipelines.ops.region_sync_consent (arquivo gitignored
+`.env.region-sync.local`) ANTES de chamar run() — necessario para quando
+este modulo e' invocado standalone (sem o preflight do orquestrador ja ter
+resolvido o consentimento antes). Isso NAO reimplementa nem afrouxa o gate
+original de run_sync(): so' garante que, se um consentimento persistente e
+valido existir, a variavel de ambiente que run_sync() exige ja esteja
+presente em os.environ quando ele for chamado.
+
 Uso:
     python -m pipelines.ops.sync_region_if_needed
 """
@@ -35,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "apps" / "api"))
 
 from pipelines import sync_region_daily as srd  # noqa: E402
+from pipelines.ops import region_sync_consent  # noqa: E402
 
 
 class SyncIfNeededError(RuntimeError):
@@ -101,6 +111,7 @@ def run(diagnose_fn=None, sync_fn=None) -> SyncIfNeededResult:
 def main() -> int:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=str(REPO_ROOT / ".env"))
+    region_sync_consent.ensure_region_sync_consent()
 
     try:
         result = run()

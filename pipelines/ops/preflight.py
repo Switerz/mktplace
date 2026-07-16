@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT / "apps" / "api"))
 
 from pipelines.connectors.shopee.connector import BRANDS_IN_SCOPE  # noqa: E402
 from pipelines.ingestion.gold_regional import write_conn as gold_write_conn  # noqa: E402
+from pipelines.ops import region_sync_consent  # noqa: E402
 
 _ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -187,20 +188,33 @@ def check_gold_regional_write() -> CheckResult:
 
 
 def check_sync_region_consent() -> CheckResult:
-    """So' verifica a variavel de ambiente de consentimento exigida por
-    pipelines.sync_region_daily.run_sync antes de disparar o sync — nunca
-    abre conexao aqui (RDS/Neon ja sao cobertos por check_rds/check_neon,
-    registrados junto com esta mesma fonte em SOURCE_CHECKS). Isso garante
-    BLOCKED explicito ANTES do wrapper sync_region_if_needed sequer tentar
-    diagnosticar, em vez de deixar run_sync levantar RuntimeError no meio da
-    execucao se o sync acabar sendo necessario."""
+    """Verifica o consentimento exigido por pipelines.sync_region_daily.run_sync
+    antes de disparar o sync — nunca abre conexao aqui (RDS/Neon ja sao
+    cobertos por check_rds/check_neon, registrados junto com esta mesma
+    fonte em SOURCE_CHECKS). Isso garante BLOCKED explicito ANTES do wrapper
+    sync_region_if_needed sequer tentar diagnosticar, em vez de deixar
+    run_sync levantar RuntimeError no meio da execucao se o sync acabar
+    sendo necessario.
+
+    Gate B6.1b: alem da variavel de ambiente (setada manualmente para uma
+    unica invocacao, como em todos os Gates B2-B5), tambem aceita o
+    consentimento persistente e gitignored de
+    `region_sync_consent.DEFAULT_REGION_SYNC_CONSENT_PATH`
+    (`.env.region-sync.local`) — necessario para a execucao AGENDADA (Task
+    Scheduler, processo novo, sem a sessao interativa de quem seta a
+    variavel manualmente). `ensure_region_sync_consent()` prioriza a
+    variavel de ambiente ja definida e nunca imprime o conteudo do arquivo,
+    so' o nome (fixo, sem informacao sensivel)."""
     label = "Sync regional (consentimento)"
-    if os.environ.get("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY") != "1":
+    already_set = os.environ.get("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY") == "1"
+    if not region_sync_consent.ensure_region_sync_consent():
         return CheckResult(
             label, False,
-            f"{label}: I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY != '1' — sync nao sera' disparado, mesmo que necessario",
+            f"{label}: I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY != '1' (nem por variavel de ambiente, nem por "
+            f"{region_sync_consent.DEFAULT_REGION_SYNC_CONSENT_PATH.name}) — sync nao sera' disparado, mesmo que necessario",
         )
-    return CheckResult(label, True, f"{label}: OK")
+    source = "variavel de ambiente" if already_set else region_sync_consent.DEFAULT_REGION_SYNC_CONSENT_PATH.name
+    return CheckResult(label, True, f"{label}: OK (via {source})")
 
 
 # Fontes suportadas e suas dependencias. produtos_shopee depende do

@@ -215,3 +215,114 @@ def test_nunca_ativa_task_scheduler_ou_chama_subprocess():
     source = Path(sut.__file__).read_text(encoding="utf-8")
     assert "schtasks" not in source.lower()
     assert "subprocess" not in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# Gate B6.1b — main() tenta carregar o consentimento PERSISTENTE
+# (pipelines.ops.region_sync_consent, arquivo `.env.region-sync.local`)
+# antes de run(), para tambem funcionar quando este modulo e' invocado
+# standalone (sem o preflight do orquestrador ja ter resolvido o
+# consentimento antes) — necessario para a execucao AGENDADA.
+# ---------------------------------------------------------------------------
+
+_CONSENT_KEY = "I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY"
+
+
+@pytest.fixture
+def _clean_region_consent_env():
+    """region_sync_consent.ensure_region_sync_consent muta os.environ
+    diretamente (nao via monkeypatch) quando o consentimento vem de
+    arquivo — limpa antes/depois para nunca vazar entre testes."""
+    import os
+    os.environ.pop(_CONSENT_KEY, None)
+    yield
+    os.environ.pop(_CONSENT_KEY, None)
+
+
+def test_main_needs_sync_com_consentimento_do_arquivo_chama_sync_uma_vez(monkeypatch, tmp_path, capsys, _clean_region_consent_env):
+    import os
+
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    consent_file = tmp_path / ".env.region-sync.local"
+    consent_file.write_text(f"{_CONSENT_KEY}=1\n", encoding="utf-8")
+    monkeypatch.setattr(sut.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", consent_file)
+
+    sync_calls = []
+
+    def _sync_fn(args):
+        # confirma que, no momento em que o sync de verdade seria chamado,
+        # a env var ja esta presente no processo (carregada do arquivo)
+        assert os.environ.get(_CONSENT_KEY) == "1"
+        sync_calls.append(args)
+        return _sync_result(n=10)
+
+    monkeypatch.setattr(sut.srd, "run_diagnose", lambda: _report(needs_sync=True, n=10, target_n=5))
+    monkeypatch.setattr(sut.srd, "run_sync", _sync_fn)
+    monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
+
+    exit_code = sut.main()
+
+    assert exit_code == 0
+    assert len(sync_calls) == 1
+    assert "SYNC realizado" in capsys.readouterr().out
+
+
+def test_main_needs_sync_false_nao_chama_sync_mesmo_com_consentimento_no_arquivo(monkeypatch, tmp_path, capsys, _clean_region_consent_env):
+    """needs_sync=False nunca deve exigir/chamar escrita real, mesmo quando
+    ha' consentimento persistente disponivel — o diagnose ainda decide."""
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    consent_file = tmp_path / ".env.region-sync.local"
+    consent_file.write_text(f"{_CONSENT_KEY}=1\n", encoding="utf-8")
+    monkeypatch.setattr(sut.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", consent_file)
+
+    sync_calls = []
+    monkeypatch.setattr(sut.srd, "run_diagnose", lambda: _report(needs_sync=False))
+    monkeypatch.setattr(sut.srd, "run_sync", lambda args: sync_calls.append(args) or _sync_result())
+    monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
+
+    exit_code = sut.main()
+
+    assert exit_code == 0
+    assert sync_calls == [], "needs_sync=False nunca deveria chamar sync, mesmo com consentimento disponivel"
+    assert "NO_OP" in capsys.readouterr().out
+
+
+def test_main_sem_consentimento_bloqueia_antes_de_qualquer_escrita(monkeypatch, tmp_path, capsys, _clean_region_consent_env):
+    """Sem env var e sem arquivo (persistente ou de sessao): o gate
+    ORIGINAL de sync_region_daily.run_sync (nao tocado neste Gate) continua
+    recusando antes de qualquer tentativa de escrita real — confirma que a
+    ausencia de consentimento persistente nao abre uma porta lateral."""
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    monkeypatch.setattr(sut.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / "nao-existe.local")
+
+    def _fake_sync_fn_espelha_o_gate_original(args):
+        # Espelha o gate ORIGINAL de sync_region_daily.run_sync sem
+        # duplicar a implementacao real (que tem sua propria suite de
+        # testes) — so' confirma que o wrapper propaga a recusa.
+        import os as _os
+        if _os.environ.get(_CONSENT_KEY) != "1":
+            raise RuntimeError(
+                "Gate 6B requer a variavel de ambiente "
+                "I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY=1 explicitamente definida"
+            )
+        pytest.fail("nao deveria alcancar o corpo do sync sem consentimento")
+
+    monkeypatch.setattr(sut.srd, "run_diagnose", lambda: _report(needs_sync=True))
+    monkeypatch.setattr(sut.srd, "run_sync", _fake_sync_fn_espelha_o_gate_original)
+    monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
+
+    exit_code = sut.main()
+
+    assert exit_code == 1
+    assert "ERRO" in capsys.readouterr().err
+
+
+def test_main_chama_ensure_region_sync_consent(monkeypatch):
+    """Confirma que main() de fato tenta carregar o consentimento
+    persistente (nao so' documentacao) — sem essa chamada, a execucao
+    agendada standalone nunca encontraria o arquivo."""
+    calls = []
+    monkeypatch.setattr(sut.region_sync_consent, "ensure_region_sync_consent", lambda: calls.append(1) or False)
+    monkeypatch.setattr(sut, "run", lambda: sut.SyncIfNeededResult(no_op=True, needs_sync=False, source_rows=0))
+    sut.main()
+    assert calls == [1]

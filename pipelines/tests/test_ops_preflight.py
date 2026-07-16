@@ -518,6 +518,81 @@ def test_source_checks_tem_sync_region_daily():
     assert preflight.SOURCE_CHECKS["sync_region_daily"] == (preflight.check_sync_region_consent, preflight.check_rds, preflight.check_neon)
 
 
+# ---------------------------------------------------------------------------
+# Gate B6.1b — check_sync_region_consent tambem aceita o consentimento
+# persistente de region_sync_consent (.env.region-sync.local), necessario
+# para a execucao AGENDADA (sem sessao interativa setando a env var).
+# ---------------------------------------------------------------------------
+
+_CONSENT_KEY = "I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY"
+
+
+@pytest.fixture
+def _clean_region_consent_env():
+    """region_sync_consent.ensure_region_sync_consent muta os.environ
+    diretamente (nao via monkeypatch) quando o consentimento vem de
+    arquivo — limpa antes/depois para nunca vazar entre testes."""
+    import os
+    os.environ.pop(_CONSENT_KEY, None)
+    yield
+    os.environ.pop(_CONSENT_KEY, None)
+
+
+def test_check_sync_region_consent_bloqueia_sem_env_e_sem_arquivo(monkeypatch, tmp_path, _clean_region_consent_env):
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / ".env.region-sync.local")
+    result = preflight.check_sync_region_consent()
+    assert result.ok is False
+    assert ".env.region-sync.local" in result.detail
+
+
+def test_check_sync_region_consent_passa_com_arquivo_persistente_valido(monkeypatch, tmp_path, _clean_region_consent_env):
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    consent_file = tmp_path / ".env.region-sync.local"
+    consent_file.write_text(f"{_CONSENT_KEY}=1\n", encoding="utf-8")
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", consent_file)
+
+    result = preflight.check_sync_region_consent()
+
+    assert result.ok is True
+    assert ".env.region-sync.local" in result.detail
+
+
+def test_check_sync_region_consent_bloqueia_com_arquivo_persistente_invalido(monkeypatch, tmp_path, _clean_region_consent_env):
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    consent_file = tmp_path / ".env.region-sync.local"
+    consent_file.write_text(f"{_CONSENT_KEY}=0\n", encoding="utf-8")
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", consent_file)
+
+    result = preflight.check_sync_region_consent()
+
+    assert result.ok is False
+
+
+def test_check_sync_region_consent_env_var_tem_prioridade_sobre_arquivo(monkeypatch, tmp_path, _clean_region_consent_env):
+    """Se a env var ja estiver definida no processo, ela vence — o arquivo
+    nem precisa existir/ser lido."""
+    monkeypatch.setenv(_CONSENT_KEY, "1")
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", tmp_path / "nao-existe.local")
+
+    result = preflight.check_sync_region_consent()
+
+    assert result.ok is True
+    assert "variavel de ambiente" in result.detail
+
+
+def test_check_sync_region_consent_nunca_expoe_conteudo_do_arquivo(monkeypatch, tmp_path, _clean_region_consent_env):
+    monkeypatch.delenv(_CONSENT_KEY, raising=False)
+    consent_file = tmp_path / ".env.region-sync.local"
+    consent_file.write_text(f"{_CONSENT_KEY}=1\nSEGREDO_QUE_NAO_DEVERIA_APARECER=xyz\n", encoding="utf-8")
+    monkeypatch.setattr(preflight.region_sync_consent, "DEFAULT_REGION_SYNC_CONSENT_PATH", consent_file)
+
+    result = preflight.check_sync_region_consent()
+
+    assert "SEGREDO_QUE_NAO_DEVERIA_APARECER" not in result.detail
+    assert "xyz" not in result.detail
+
+
 def test_run_preflight_gold_regional_incremental_bloqueia_sem_secret(monkeypatch):
     monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://u:p@rds-host/db")
     monkeypatch.setattr(preflight.psycopg2, "connect", _fake_connect_factory())
