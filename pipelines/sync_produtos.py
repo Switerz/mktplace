@@ -251,6 +251,67 @@ def sync_shopee(full: bool = False, brands: set = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Gate C2.4 (2026-07-17) — retry estrito e unico para conflito de recovery
+# numa read replica do RDS. Achado no Gate C2.2/C2.3: gold.ml_produto_ranking
+# e' uma VIEW cara (joins/agregacoes sobre ml_order_line_items/ml_orders/
+# ml_ads_items, dezenas de milhares de linhas), lida contra um read replica
+# com hot_standby_feedback=off — nessas condicoes, o Postgres pode cancelar
+# uma query longa ("canceling statement due to conflict with recovery")
+# quando o replay do WAL precisa remover versoes de linha que a query ainda
+# precisa. Historico (audit.source_sync_run) mostra isso como raro (1 falha
+# em 9+ execucoes), mas a condicao estrutural pode recorrer a qualquer
+# momento — nao e' um bug de dado, e' comportamento documentado do Postgres
+# para esse tipo de conflito, e a propria documentacao do Postgres recomenda
+# retry para essa classe de erro.
+#
+# Escopo do retry, deliberadamente estreito: cobre SOMENTE a leitura da fonte
+# RDS (abrir conexao + executar + fetchall) — nunca _audit_start/_audit_finish,
+# nunca a leitura de prev_count no Neon, nunca a conexao/escrita de destino no
+# Neon. Isso garante: _audit_start roda uma unica vez por chamada de sync_ml,
+# a escrita no Neon so' e' tentada depois de uma leitura RDS bem-sucedida (nunca
+# escrita parcial), e nenhum outro tipo de erro (RuntimeError de validacao do
+# MIN_ROWS_RATIO, erro de conexao generico, etc) e' mascarado por um retry
+# que nao faz sentido para ele.
+def _is_recovery_conflict_error(exc: BaseException) -> bool:
+    """True somente para o conflito de recovery especifico de read replica —
+    nunca classifica um OperationalError/erro de conexao generico como
+    retryable so' pelo tipo. `pgcode` (quando disponivel num psycopg2 real)
+    e' so' reforco opcional de contexto no log, nunca uma dependencia: um
+    teste com exception fake sem `pgcode` deve continuar funcionando."""
+    message = str(exc)
+    return (
+        "conflict with recovery" in message
+        or "User query might have needed to see row versions" in message
+    )
+
+
+def _sleep(seconds: float) -> None:
+    """Wrapper fino sobre time.sleep — existe so' para ser monkeypatchado
+    nos testes (evita esperar o backoff real de verdade)."""
+    time.sleep(seconds)
+
+
+def _read_rds_with_recovery_retry(read_fn, *, max_attempts=2, backoff_seconds=8):
+    """Executa read_fn() com retry unico e estrito para conflito de recovery.
+
+    Qualquer erro que nao seja _is_recovery_conflict_error(exc) sobe
+    imediatamente, sem retry (erro de dado/validacao, conexao generica,
+    etc). Se a ultima tentativa tambem falhar por conflito de recovery, o
+    erro original e' propagado (sem mascarar). Nunca envolve escrita —
+    read_fn deve ser uma leitura pura, idempotente por natureza."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return read_fn()
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_recovery_conflict_error(exc):
+                raise
+            print("[ml] RDS recovery conflict during ML product read; retrying once...")
+            _sleep(backoff_seconds)
+
+
+# ---------------------------------------------------------------------------
 # ML: RDS gold.ml_produto_ranking -> Neon
 # Estrategia: full refresh sempre (snapshot sem dimensao temporal, 1326 linhas)
 #             Deduplicar por (brand, item_id) mantendo maior gross_revenue.
@@ -267,24 +328,31 @@ def sync_ml(brands: set = None) -> dict:
         cur.close()
 
         print("[ml] lendo fonte (RDS gold.ml_produto_ranking)...")
-        src = _rds()
-        sc = src.cursor(cursor_factory=RealDictCursor)
 
-        sc.execute(f"""
-            SELECT DISTINCT ON (brand, item_id)
-                   brand, item_id, seller_sku, title,
-                   gross_revenue, units_sold, unique_buyers, units_per_buyer,
-                   cancel_rate_pct, ad_spend, ad_roas, ad_acos_pct, days_advertised,
-                   revenue_share_pct, cumulative_revenue_pct, estimated_margin,
-                   price_spread_pct, pareto_bucket, revenue_velocity,
-                   ad_efficiency, action_signal, product_status,
-                   first_sale, last_sale
-            FROM gold.ml_produto_ranking
-            WHERE brand IN {_brands_sql(brands)}
-            ORDER BY brand, item_id, gross_revenue DESC NULLS LAST
-        """)
-        rows = sc.fetchall()
-        sc.close(); src.close()
+        def _read_from_rds():
+            src = _rds()
+            try:
+                sc = src.cursor(cursor_factory=RealDictCursor)
+                sc.execute(f"""
+                    SELECT DISTINCT ON (brand, item_id)
+                           brand, item_id, seller_sku, title,
+                           gross_revenue, units_sold, unique_buyers, units_per_buyer,
+                           cancel_rate_pct, ad_spend, ad_roas, ad_acos_pct, days_advertised,
+                           revenue_share_pct, cumulative_revenue_pct, estimated_margin,
+                           price_spread_pct, pareto_bucket, revenue_velocity,
+                           ad_efficiency, action_signal, product_status,
+                           first_sale, last_sale
+                    FROM gold.ml_produto_ranking
+                    WHERE brand IN {_brands_sql(brands)}
+                    ORDER BY brand, item_id, gross_revenue DESC NULLS LAST
+                """)
+                fetched = sc.fetchall()
+                sc.close()
+                return fetched
+            finally:
+                src.close()
+
+        rows = _read_rds_with_recovery_retry(_read_from_rds)
         print(f"[ml] fonte (pos-dedup): {len(rows)} linhas")
 
         if prev_count > 0 and len(rows) < prev_count * MIN_ROWS_RATIO:

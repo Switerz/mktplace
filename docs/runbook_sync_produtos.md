@@ -155,6 +155,15 @@ O script usa `ON CONFLICT DO UPDATE` dentro de **uma única transação por font
 ### Falha durante sync ML
 Full refresh em transação única. Se falhar, Neon mantém os dados do refresh anterior intactos.
 
+### Conflito de recovery na leitura RDS do ML (Gate C2.4, 2026-07-17)
+```
+psycopg2 (Operational/DatabaseError): canceling statement due to conflict with recovery
+DETAIL:  User query might have needed to see row versions that must be removed.
+```
+**Causa**: `gold.ml_produto_ranking` é uma VIEW cara (joins/agregações sobre `ml_order_line_items`/`ml_orders`/`ml_ads_items`), lida contra um **read replica** do RDS com `hot_standby_feedback=off` — o Postgres pode cancelar a query quando o replay do WAL no replica precisa remover versões de linha que a query ainda usa. Achado nos Gates C2.2/C2.3: raro (1 falha em 9+ execuções auditadas), mas a condição estrutural pode recorrer a qualquer momento; não é um bug de dado, é comportamento documentado do Postgres para essa classe de conflito.
+
+**Mitigação (Gate C2.4)**: `sync_ml()` agora tem retry **único e estrito**, restrito à leitura da fonte RDS (nunca à escrita no Neon nem à auditoria): se a leitura falhar com essa mensagem específica, espera 8s e tenta mais uma vez (nova conexão); qualquer outro tipo de erro (validação, conexão genérica) sobe imediatamente, sem retry. Se as duas tentativas falharem, o erro original é propagado e nenhuma escrita é feita no Neon (a conexão de destino só abre depois de uma leitura bem-sucedida) — comportamento idêntico ao de antes do Gate C2.4 nesse caso, só que agora dando uma segunda chance à leitura antes de desistir.
+
 ### Neon retorna erro de conexão
 Verificar `DATABASE_URL` e conectividade. O Neon tem sleep automático em planos gratuitos — a primeira conexão pode demorar 2-3s.
 
