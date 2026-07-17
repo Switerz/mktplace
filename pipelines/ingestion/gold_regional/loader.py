@@ -131,6 +131,20 @@ class NothingToLoadError(LoadValidationError):
     tabela final."""
 
 
+class InvalidWindowError(ValueError):
+    """Janela [date_from, date_to] inválida para diagnose/refresh de Shopee
+    por janela (Gate S2/S3) — data invertida, no futuro, ou maior que o
+    teto de sanidade. Nunca chega a abrir conexão nenhuma."""
+
+
+# Teto de sanidade para --diagnose-shopee-window / --refresh-shopee-window
+# (Gate S3): Shopee é janela móvel recente, não deveria precisar reprocessar
+# vários meses de uma vez. Existe para pegar erro de digitação/uso indevido
+# antes de rodar qualquer coisa contra o banco — não é um limite técnico do
+# Postgres nem da fonte.
+MAX_SHOPEE_WINDOW_DAYS = 180
+
+
 @dataclass
 class LoadResult:
     rows_inserted: int = 0
@@ -169,6 +183,65 @@ class IncrementalLoadResult:
     ml_gmv_staging: Optional[Decimal] = None
     ml_gmv_source: Optional[Decimal] = None
     tiktok_rows: int = 0
+
+
+@dataclass
+class ShopeeWindowDiagnoseReport:
+    """Resultado de `diagnose_shopee_window` (Gate S2) — somente leitura.
+    `rows_to_delete`/`rows_to_insert` descrevem o impacto de um FUTURO
+    `--refresh-shopee-window` (Gate S3, ainda não implementado): como esse
+    refresh substituiria TODA a janela (delete completo + insert do
+    recálculo), `rows_to_delete` é sempre `gold_rows` e `rows_to_insert` é
+    sempre `recalculated_rows` — não há diff linha-a-linha nesta camada."""
+    date_from: date
+    date_to: date
+    gold_rows: int = 0
+    gold_gmv: Decimal = Decimal("0")
+    gold_orders: int = 0
+    recalculated_rows: int = 0
+    recalculated_gmv: Decimal = Decimal("0")
+    recalculated_orders: int = 0
+    rows_to_delete: int = 0
+    rows_to_insert: int = 0
+    gmv_delta: Decimal = Decimal("0")
+    orders_delta: int = 0
+    overlaps_existing_gold_data: bool = False
+    zero_source_risk: bool = False  # recalculado==0 linhas E gold>0 linhas na janela
+    duplicate_key_count: int = 0
+    null_required_count: int = 0
+    numerator_over_denominator_count: int = 0
+    # Comparação exata por chave (Gate S2.1) — FULL OUTER JOIN Gold vs. fonte
+    # no grão (date, marketplace_id, loja_id, uf), campos comparados com
+    # IS DISTINCT FROM. Detecta redistribuição entre chaves invisível aos
+    # agregados.
+    gold_only_key_count: int = 0
+    source_only_key_count: int = 0
+    changed_key_count: int = 0
+
+    @property
+    def would_change_data(self) -> bool:
+        """A janela NÃO está reconciliada — um refresh mudaria os dados.
+        `False` não é erro: significa que Gold e fonte já batem exatamente
+        chave a chave e campo a campo."""
+        return (
+            self.gold_only_key_count > 0
+            or self.source_only_key_count > 0
+            or self.changed_key_count > 0
+        )
+
+    @property
+    def structurally_safe_for_refresh(self) -> bool:
+        """A fonte recalculada é estruturalmente sã para servir de base a um
+        futuro refresh (Gate S3): sem risco de zerar a Gold, sem duplicidade
+        de chave, sem nulos obrigatórios, sem numerador > denominador.
+        Independe de `would_change_data` — uma janela pode estar reconciliada
+        (nada a mudar) E ser estruturalmente sã ao mesmo tempo."""
+        return (
+            not self.zero_source_risk
+            and self.duplicate_key_count == 0
+            and self.null_required_count == 0
+            and self.numerator_over_denominator_count == 0
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -858,13 +931,318 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
 
 
 # ---------------------------------------------------------------------------
+# Diagnose de janela Shopee (Gate S2) — somente leitura, sem staging, sem
+# DDL/DML. Recalcula o MESMO dedup "arquivo vencedor" de
+# SQL_INSERT_SHOPEE_STAGING/_shopee_incremental_select, escopado a uma
+# janela [date_from, date_to] arbitrária (não só "> MAX(date)"), e compara
+# com o que já está em gold.marketplace_region_daily para Shopee na mesma
+# janela. Existe para decidir SE um `--refresh-shopee-window` (Gate S3,
+# ainda não implementado — sem DELETE/INSERT neste gate) seria seguro.
+#
+# date_from/date_to vêm de --date-from/--date-to na CLI, ou seja, são
+# ENTRADA DE USUÁRIO — diferente de `min_date` em _shopee_incremental_select
+# (sempre computado internamente, nunca do usuário). Por isso aqui as datas
+# são SEMPRE bind parameters do psycopg2 (%(date_from)s/%(date_to)s), nunca
+# interpoladas como literal de string na query. Isso obriga escapar como
+# `%%` os `%` literais de `ILIKE '%cancel%'` na mesma string (psycopg2 faz
+# substituição estilo printf quando há qualquer %(nome)s na query) — mesma
+# armadilha já documentada no comentário de _shopee_incremental_select,
+# resolvida aqui com bind parameter em vez de literal porque a entrada,
+# desta vez, não é confiável por construção.
+#
+# Sem TEMP TABLE: uma sessão readonly=True bloqueia até `CREATE TEMP TABLE`
+# (mexe em catálogo do sistema mesmo sem persistir dados) — por isso as 4
+# validações (agregados/duplicidade/nulos/numerador-denominador) reexecutam
+# o recálculo completo cada uma via CTE (`WITH shopee_window_recalc AS
+# (...)”), em vez de materializar uma vez como execute_first_load/
+# execute_incremental_load fazem em staging. Aceitável para um comando de
+# diagnose usado sob demanda; o refresh real (Gate S3) volta a materializar
+# em staging dentro de uma transação de escrita.
+# ---------------------------------------------------------------------------
+
+SQL_SHOPEE_WINDOW_GOLD_AGGREGATES = f"""
+    SELECT COUNT(*), COALESCE(SUM(gmv), 0), COALESCE(SUM(orders), 0)
+    FROM gold.marketplace_region_daily
+    WHERE marketplace_id = {SHOPEE_MARKETPLACE_ID}
+      AND date BETWEEN %(date_from)s AND %(date_to)s
+"""
+
+# Mesmo dedup de SQL_INSERT_SHOPEE_STAGING/_shopee_incremental_select
+# (DISTINCT ON (brand, order_id) ORDER BY file_id DESC + join de volta para
+# preservar multi-item), só que filtrado por uma janela [date_from, date_to]
+# via bind parameter em vez de "> min_date" literal.
+SQL_SHOPEE_WINDOW_RECALC_ROWS = f"""
+WITH shopee_winning_file AS (
+    SELECT DISTINCT ON (brand, order_id) brand, order_id, file_id
+    FROM silver.stg_shopee_order_item_snapshots
+    ORDER BY brand, order_id, file_id DESC
+),
+shopee_all_lines_of_winner AS (
+    SELECT s.*
+    FROM silver.stg_shopee_order_item_snapshots s
+    JOIN shopee_winning_file w
+      ON w.brand = s.brand AND w.order_id = s.order_id AND w.file_id = s.file_id
+),
+shopee_per_order AS (
+    SELECT
+        brand,
+        order_id,
+        MAX(order_created_at)::date AS order_date,
+        MAX(order_amount) AS order_amount,
+        MAX(order_status) AS order_status,
+        MAX(return_refund_status) AS return_refund_status,
+        MAX(delivery_state) AS delivery_state,
+        MAX(buyer_paid_shipping_fee) AS buyer_paid_shipping_fee,
+        MAX(estimated_shipping_fee) AS estimated_shipping_fee,
+        MAX(reverse_shipping_fee) AS reverse_shipping_fee,
+        SUM(quantity) AS units
+    FROM shopee_all_lines_of_winner
+    GROUP BY brand, order_id
+),
+shopee_uf_map(delivery_state, uf) AS (VALUES {_SHOPEE_UF_MAP_VALUES}),
+shopee_brand_loja(brand, loja_id) AS (VALUES {_BRAND_LOJA_VALUES}),
+shopee_final AS (
+    SELECT
+        o.order_date AS date,
+        {SHOPEE_MARKETPLACE_ID} AS marketplace_id,
+        bl.loja_id,
+        COALESCE(m.uf, 'XX') AS uf,
+        o.order_amount, o.order_status, o.return_refund_status,
+        o.buyer_paid_shipping_fee, o.estimated_shipping_fee, o.reverse_shipping_fee,
+        o.units
+    FROM shopee_per_order o
+    JOIN shopee_brand_loja bl ON bl.brand = o.brand
+    LEFT JOIN shopee_uf_map m ON m.delivery_state = o.delivery_state
+    WHERE o.order_date BETWEEN %(date_from)s AND %(date_to)s
+)
+SELECT
+    date, marketplace_id, loja_id, uf,
+    SUM(CASE WHEN order_status NOT ILIKE '%%cancel%%' THEN order_amount ELSE 0 END) AS gmv,
+    COUNT(*) FILTER (WHERE order_status NOT ILIKE '%%cancel%%') AS orders,
+    SUM(CASE WHEN order_status NOT ILIKE '%%cancel%%' THEN units ELSE 0 END) AS units_sold,
+    COUNT(*) FILTER (WHERE order_status ILIKE '%%cancel%%') AS canceled_orders,
+    COUNT(*) FILTER (WHERE return_refund_status IS NOT NULL) AS returned_orders,
+    NULL::numeric AS seller_shipping_cost,
+    SUM(buyer_paid_shipping_fee) AS buyer_shipping_fee,
+    SUM(estimated_shipping_fee) AS estimated_shipping_fee,
+    SUM(reverse_shipping_fee) AS reverse_shipping_fee,
+    COUNT(*) FILTER (WHERE uf <> 'XX') AS uf_known_orders,
+    COUNT(*) AS uf_eligible_orders,
+    0 AS shipping_cost_covered_orders,
+    0 AS shipping_cost_eligible_orders
+FROM shopee_final
+GROUP BY date, marketplace_id, loja_id, uf
+"""
+
+SQL_SHOPEE_WINDOW_RECALC_AGGREGATES = f"""
+WITH shopee_window_recalc AS (
+    {SQL_SHOPEE_WINDOW_RECALC_ROWS}
+)
+SELECT COUNT(*), COALESCE(SUM(gmv), 0), COALESCE(SUM(orders), 0) FROM shopee_window_recalc
+"""
+
+SQL_SHOPEE_WINDOW_RECALC_DUPLICATES = f"""
+WITH shopee_window_recalc AS (
+    {SQL_SHOPEE_WINDOW_RECALC_ROWS}
+)
+SELECT COUNT(*) FROM (
+    SELECT date, marketplace_id, loja_id, uf FROM shopee_window_recalc
+    GROUP BY date, marketplace_id, loja_id, uf HAVING COUNT(*) > 1
+) t
+"""
+
+SQL_SHOPEE_WINDOW_RECALC_NULLS = f"""
+WITH shopee_window_recalc AS (
+    {SQL_SHOPEE_WINDOW_RECALC_ROWS}
+)
+SELECT COUNT(*) FROM shopee_window_recalc
+WHERE date IS NULL OR marketplace_id IS NULL OR loja_id IS NULL OR uf IS NULL
+"""
+
+SQL_SHOPEE_WINDOW_RECALC_NUMERATOR_DENOMINATOR = f"""
+WITH shopee_window_recalc AS (
+    {SQL_SHOPEE_WINDOW_RECALC_ROWS}
+)
+SELECT COUNT(*) FROM shopee_window_recalc
+WHERE uf_known_orders > uf_eligible_orders
+   OR shipping_cost_covered_orders > shipping_cost_eligible_orders
+"""
+
+# Colunas de negócio comparadas campo a campo (Gate S2.1). Chave técnica
+# (id) e carimbos (ingested_at, source_updated_at) são EXCLUÍDOS de
+# propósito: o diagnose responde "os DADOS mudariam", não "a linha foi
+# reingerida". A ordem/lista espelha exatamente as colunas produzidas pelo
+# recálculo Shopee (SQL_SHOPEE_WINDOW_RECALC_ROWS) e presentes em
+# gold.marketplace_region_daily.
+_WINDOW_BUSINESS_COLUMNS = (
+    "gmv", "orders", "units_sold", "canceled_orders", "returned_orders",
+    "seller_shipping_cost", "buyer_shipping_fee", "estimated_shipping_fee", "reverse_shipping_fee",
+    "uf_known_orders", "uf_eligible_orders",
+    "shipping_cost_covered_orders", "shipping_cost_eligible_orders",
+)
+
+_WINDOW_KEY_COLUMNS = ("date", "marketplace_id", "loja_id", "uf")
+
+# `IS DISTINCT FROM` (não `<>`): trata NULL como um valor comparável, então
+# NULL-vs-0 e NULL-vs-NULL são classificados corretamente — um `<>` retorna
+# NULL (não TRUE) quando um lado é NULL e a mudança passaria despercebida.
+_WINDOW_CHANGED_PREDICATE = " OR ".join(
+    f"g.{c} IS DISTINCT FROM s.{c}" for c in _WINDOW_BUSINESS_COLUMNS
+)
+
+_WINDOW_GOLD_SELECT_COLUMNS = ", ".join(_WINDOW_KEY_COLUMNS + _WINDOW_BUSINESS_COLUMNS)
+
+# Comparação exata por chave (date, marketplace_id, loja_id, uf) via FULL
+# OUTER JOIN entre a Gold Shopee atual (na janela) e o recálculo da fonte
+# (na mesma janela). Detecta REDISTRIBUIÇÃO entre chaves — ex.: pedidos que
+# saem de uf='XX' para uf='SP' sem alterar GMV/orders/linhas totais — que
+# uma comparação só de agregados jamais pegaria. As colunas de chave são
+# NOT NULL nos dois lados (constraint na Gold; COALESCE/GROUP BY no
+# recálculo), então `s.date IS NULL` / `g.date IS NULL` são sinais
+# confiáveis de "sem correspondência do outro lado" no FULL OUTER JOIN.
+SQL_SHOPEE_WINDOW_KEY_DIFF = f"""
+WITH shopee_window_recalc AS (
+    {SQL_SHOPEE_WINDOW_RECALC_ROWS}
+),
+gold_window AS (
+    SELECT {_WINDOW_GOLD_SELECT_COLUMNS}
+    FROM gold.marketplace_region_daily
+    WHERE marketplace_id = {SHOPEE_MARKETPLACE_ID}
+      AND date BETWEEN %(date_from)s AND %(date_to)s
+)
+SELECT
+    COUNT(*) FILTER (WHERE s.date IS NULL) AS gold_only_key_count,
+    COUNT(*) FILTER (WHERE g.date IS NULL) AS source_only_key_count,
+    COUNT(*) FILTER (
+        WHERE g.date IS NOT NULL AND s.date IS NOT NULL
+          AND ({_WINDOW_CHANGED_PREDICATE})
+    ) AS changed_key_count
+FROM gold_window g
+FULL OUTER JOIN shopee_window_recalc s
+  ON g.date = s.date
+ AND g.marketplace_id = s.marketplace_id
+ AND g.loja_id = s.loja_id
+ AND g.uf = s.uf
+"""
+
+
+def _validate_shopee_window(date_from: date, date_to: date) -> None:
+    """Validações de negócio da janela — rodam ANTES de qualquer conexão.
+    Formato ISO já é garantido por `type=date.fromisoformat` no argparse
+    (CLI) ou pela responsabilidade do chamador (uso como função)."""
+    if date_from > date_to:
+        raise InvalidWindowError(f"date_from ({date_from.isoformat()}) é posterior a date_to ({date_to.isoformat()})")
+    today = date.today()
+    if date_to > today:
+        raise InvalidWindowError(f"date_to ({date_to.isoformat()}) está no futuro (hoje: {today.isoformat()})")
+    window_days = (date_to - date_from).days + 1
+    if window_days > MAX_SHOPEE_WINDOW_DAYS:
+        raise InvalidWindowError(
+            f"janela de {window_days} dia(s) excede o máximo permitido de {MAX_SHOPEE_WINDOW_DAYS} dias"
+        )
+
+
+def diagnose_shopee_window(read_url: str, date_from: date, date_to: date) -> ShopeeWindowDiagnoseReport:
+    """Somente leitura — NUNCA abre conexão de escrita, nunca lê o secret de
+    escrita dedicado (o mesmo arquivo local usado por `--incremental`),
+    nunca cria staging/temp table, nunca insere/deleta. Sessão
+    explicitamente `readonly=True` (mesmo padrão de
+    `diagnose_incremental_load`/`write_conn._connect_readonly`). Recalcula,
+    a partir de `silver.stg_shopee_order_item_snapshots`, o mesmo dedup
+    "arquivo vencedor" da carga, escopado à janela [date_from, date_to], e
+    compara com o que já está em `gold.marketplace_region_daily` para
+    Shopee na mesma janela — para avaliar se um `--refresh-shopee-window`
+    (Gate S3, ainda NÃO implementado) seria seguro."""
+    _validate_shopee_window(date_from, date_to)
+    params = {"date_from": date_from, "date_to": date_to}
+
+    # Snapshot consistente (Gate S2.1): TODAS as consultas na MESMA conexão,
+    # numa ÚNICA transação read-only REPEATABLE READ (autocommit desligado).
+    # REPEATABLE READ fixa o snapshot no primeiro comando e o mantém para
+    # todas as consultas seguintes — sem isso (READ COMMITTED/autocommit),
+    # cada SELECT poderia ver um estado diferente se houvesse ingestão
+    # concorrente entre eles, e o key-diff (Gold vs. fonte) compararia dois
+    # instantes distintos. `readonly=True` garante que, mesmo com um bug
+    # aqui, nada consegue escrever. Rollback explícito ao final INCLUSIVE no
+    # sucesso (é uma transação só de leitura — não há nada a commitar; o
+    # rollback só fecha o snapshot de forma limpa).
+    #
+    # `conn.close()` precisa acontecer em QUALQUER caminho depois que
+    # `connect()` retornar uma conexão — inclusive se `set_session()` (que já
+    # fala com o servidor para configurar isolation level/readonly) falhar.
+    # Por isso `set_session()` entra DENTRO do `try`, não antes dele.
+    conn = psycopg2.connect(read_url, connect_timeout=15)
+    try:
+        conn.set_session(readonly=True, isolation_level="REPEATABLE READ", autocommit=False)
+        with conn.cursor() as cur:
+            cur.execute(SQL_SHOPEE_WINDOW_GOLD_AGGREGATES, params)
+            gold_rows, gold_gmv, gold_orders = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_RECALC_AGGREGATES, params)
+            recalc_rows, recalc_gmv, recalc_orders = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_RECALC_DUPLICATES, params)
+            (dup_count,) = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_RECALC_NULLS, params)
+            (null_count,) = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_RECALC_NUMERATOR_DENOMINATOR, params)
+            (bad_count,) = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_KEY_DIFF, params)
+            gold_only, source_only, changed = cur.fetchone()
+        conn.rollback()  # sucesso: transação só de leitura, fecha o snapshot limpo
+    except Exception:
+        # Best-effort: se o rollback em si falhar (ex.: conexão já caída
+        # porque foi isso que quebrou o try), nunca deixar essa falha
+        # mascarar a exceção original que estamos prestes a propagar.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    finally:
+        conn.close()
+
+    gold_rows = int(gold_rows)
+    gold_orders = int(gold_orders)
+    recalc_rows = int(recalc_rows)
+    recalc_orders = int(recalc_orders)
+
+    return ShopeeWindowDiagnoseReport(
+        date_from=date_from,
+        date_to=date_to,
+        gold_rows=gold_rows,
+        gold_gmv=gold_gmv,
+        gold_orders=gold_orders,
+        recalculated_rows=recalc_rows,
+        recalculated_gmv=recalc_gmv,
+        recalculated_orders=recalc_orders,
+        rows_to_delete=gold_rows,
+        rows_to_insert=recalc_rows,
+        gmv_delta=recalc_gmv - gold_gmv,
+        orders_delta=recalc_orders - gold_orders,
+        overlaps_existing_gold_data=gold_rows > 0,
+        zero_source_risk=(recalc_rows == 0 and gold_rows > 0),
+        duplicate_key_count=int(dup_count),
+        null_required_count=int(null_count),
+        numerator_over_denominator_count=int(bad_count),
+        gold_only_key_count=int(gold_only),
+        source_only_key_count=int(source_only),
+        changed_key_count=int(changed),
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI — `python -m pipelines.ingestion.gold_regional.loader --diagnose` ou
 # `--incremental`. `--diagnose` nunca lê o secret de escrita nem abre
 # conexão de escrita. `--incremental` só lê `.env.gold-write.local` (nunca
 # `os.environ`, nunca `.env` principal) e só chega a conectar depois dos
 # guardrails estáticos (arquivo ignorado/não rastreado, exatamente as 2
 # chaves esperadas, URL de escrita diferente da de leitura) e do preflight
-# de escrita passarem.
+# de escrita passarem. `--diagnose-shopee-window` (Gate S2) segue a mesma
+# disciplina somente-leitura de `--diagnose`, nunca a de `--incremental`.
 # ---------------------------------------------------------------------------
 
 def _load_secret_or_none(secret_path: Path, repo_root: Path) -> tuple[Optional[dict], Optional[str]]:
@@ -918,6 +1296,60 @@ def run_diagnose_cli() -> int:
     return 0
 
 
+def run_diagnose_shopee_window_cli(date_from: date, date_to: date) -> int:
+    """Somente leitura (Gate S2/S2.1) — nunca chama `_resolve_write_url`/
+    `write_conn.load_write_secret`, nunca lê `.env.gold-write.local`.
+
+    Exit codes:
+      0  diagnose OK (independe de would_change_data — janela reconciliada
+         ou não, desde que estruturalmente sã);
+      2  configuração/janela inválida (sem DATAMART_DATABASE_URL, janela
+         inválida);
+      3  falha ao consultar a fonte;
+      4  diagnose rodou, mas a fonte é ESTRUTURALMENTE INSEGURA para servir
+         de base a um refresh (structurally_safe_for_refresh=False) — Gate
+         S3 nunca deve prosseguir com esta janela sem investigação."""
+    read_url = settings.datamart_url
+    if not read_url:
+        print("DATAMART_DATABASE_URL não configurado — diagnose-shopee-window abortado.", file=sys.stderr)
+        return 2
+
+    try:
+        report = diagnose_shopee_window(read_url, date_from, date_to)
+    except InvalidWindowError as exc:
+        print(f"--diagnose-shopee-window rejeitado: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"diagnose-shopee-window falhou: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 3
+
+    print(f"=== Diagnose Shopee — janela [{report.date_from} .. {report.date_to}] (somente leitura, snapshot consistente, sem refresh) ===")
+    print(f"  Gold atual:        rows={report.gold_rows} gmv={report.gold_gmv} orders={report.gold_orders}")
+    print(f"  Recalculado fonte: rows={report.recalculated_rows} gmv={report.recalculated_gmv} orders={report.recalculated_orders}")
+    print(f"  Impacto de um futuro refresh (Gate S3, não implementado): rows_to_delete={report.rows_to_delete} rows_to_insert={report.rows_to_insert}")
+    print(f"  Delta agregado: gmv={report.gmv_delta} orders={report.orders_delta}")
+    print(f"  Sobrepõe dado já existente na Gold: {report.overlaps_existing_gold_data}")
+    print("  --- Comparação exata por chave (date, marketplace_id, loja_id, uf) ---")
+    print(f"  gold_only_key_count={report.gold_only_key_count} source_only_key_count={report.source_only_key_count} changed_key_count={report.changed_key_count}")
+    print(f"  would_change_data={report.would_change_data}")
+    print(f"  structurally_safe_for_refresh={report.structurally_safe_for_refresh}")
+    if not report.would_change_data:
+        print("  (janela já reconciliada — Gold e fonte batem chave a chave e campo a campo; não é erro.)")
+    if report.zero_source_risk:
+        print("  ALERTA: fonte recalculada tem ZERO linhas na janela, mas a Gold atual tem linhas — investigar antes de cogitar qualquer refresh.")
+    if report.duplicate_key_count:
+        print(f"  ALERTA: {report.duplicate_key_count} combinação(ões) de chave duplicada(s) no recálculo.")
+    if report.null_required_count:
+        print(f"  ALERTA: {report.null_required_count} linha(s) com coluna obrigatória nula no recálculo.")
+    if report.numerator_over_denominator_count:
+        print(f"  ALERTA: {report.numerator_over_denominator_count} linha(s) com numerador > denominador de cobertura no recálculo.")
+
+    if not report.structurally_safe_for_refresh:
+        print("  RESULTADO: fonte ESTRUTURALMENTE INSEGURA para refresh — Gate S3 não deve prosseguir com esta janela (exit 4).", file=sys.stderr)
+        return 4
+    return 0
+
+
 def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH, repo_root: Path = REPO_ROOT) -> int:
     write_url, err = _resolve_write_url(secret_path, repo_root)
     if err:
@@ -954,10 +1386,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--diagnose", action="store_true", help="Somente leitura: MAX(date) por marketplace (gold vs. fonte) e estimativa de linhas novas.")
     mode.add_argument("--incremental", action="store_true", help="Escreve em gold.marketplace_region_daily — só linhas novas. Requer .env.gold-write.local.")
+    mode.add_argument(
+        "--diagnose-shopee-window", action="store_true",
+        help="Somente leitura (Gate S2): recalcula a janela Shopee [--date-from, --date-to] a partir da "
+             "fonte (mesmo dedup arquivo-vencedor da carga) e compara com gold.marketplace_region_daily. "
+             "Nunca escreve — o refresh real (Gate S3) ainda não existe.",
+    )
+    parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window.")
+    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window.")
     args = parser.parse_args(argv)
+
+    if args.diagnose_shopee_window and (args.date_from is None or args.date_to is None):
+        parser.error("--diagnose-shopee-window requer --date-from e --date-to")
 
     if args.diagnose:
         return run_diagnose_cli()
+    if args.diagnose_shopee_window:
+        return run_diagnose_shopee_window_cli(args.date_from, args.date_to)
     return run_incremental_cli()
 
 

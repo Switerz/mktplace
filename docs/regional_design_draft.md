@@ -490,3 +490,48 @@ Desenho da carga incremental:
 - `execute_first_load()` permanece **intocado** — usado só para uma eventual carga inicial nova (ex.: um ambiente do zero), nunca para refresh.
 
 **Status após esta implementação**: código pronto e testado (42 testes em `pipelines/tests/test_gold_regional_loader.py`, incluindo o caminho incremental), mas **`--incremental` ainda não foi executado em produção nesta rodada** — só `--diagnose` (somente leitura). Scheduler segue **desativado** (Fase 3B, ver `docs/backlog.md` e memória de sessão) — a decisão de rodar `--incremental` manualmente e/ou de incorporar este comando a um pipeline recorrente fica para uma próxima rodada, com autorização explícita separada.
+
+### Gate S1 — auditoria: por que Shopee precisa de refresh por janela, não de `--incremental` (2026-07-17)
+
+Auditoria read-only (sem alteração de código) confirmou a causa raiz descrita no início desta seção: `--incremental` só insere `date > MAX(date)` já carregado por marketplace. Isso é seguro para ML (fonte não tem exports sobrepostos), mas **não serve para Shopee**: a automação externa de scraping (`docs/shopee_datamart_operacao_completa.md`) baixa exports de janela móvel, que podem trazer, no mesmo arquivo, a correção de um pedido de um dia **já carregado** na Gold. Como `gold.marketplace_region_daily` só recebe `INSERT` (nunca `UPDATE`/`DELETE`) e tem `UNIQUE (date, marketplace_id, loja_id, uf)`, essa correção nunca chegaria via `--incremental` — seria descartada pelo filtro de data, ou colidiria com a constraint se alguém tentasse forçar.
+
+Auditado também: não existe hoje metadado (`file_id`/`batch_id`/`source_filename`/`ingested_at`) suficiente para inferir automaticamente **quais** `order_date` um novo arquivo afetou — um único export cobre uma janela ampla e pode corrigir um pedido de meses atrás. Decisão do Gate S1: exigir `--date-from`/`--date-to` explícitos no MVP, nunca inferência automática de janela.
+
+Proposta de contrato (ainda não implementada neste gate): `--diagnose-shopee-window`/`--refresh-shopee-window`, com `DELETE` restrito por `marketplace_id=SHOPEE AND date BETWEEN`, backup pré-delete, secret dedicado novo (nunca reaproveitar `.env.gold-write.local` do `--incremental`, já que este seria o primeiro `DELETE` de todo o módulo), e sync para Neon permanecendo em passo manual separado via `sync_region_daily.py --sync` (que já faz refresh completo Data Mart→Neon, sem o problema de `MAX(date)`).
+
+### Gate S2 — `--diagnose-shopee-window` (somente leitura) implementado (2026-07-17)
+
+Implementado em `pipelines/ingestion/gold_regional/loader.py`: `diagnose_shopee_window(read_url, date_from, date_to)` + CLI:
+
+```bash
+python -m pipelines.ingestion.gold_regional.loader \
+  --diagnose-shopee-window --date-from YYYY-MM-DD --date-to YYYY-MM-DD
+```
+
+**100% somente leitura** — mesma disciplina de `diagnose_incremental_load`: sessão `readonly=True`, nunca cria staging/temp table, nunca lê o secret de escrita (`.env.gold-write.local`, usado só por `--incremental`). Nesta versão original do Gate S2 a sessão usava `autocommit=True` (cada consulta no seu próprio snapshot) — **substituído no Gate S2.1** por uma única transação read-only `REPEATABLE READ` com `autocommit=False` (ver seção abaixo). **Não implementa `--refresh-shopee-window` nem qualquer `DELETE`/`INSERT`** — isso fica para o Gate S3.
+
+Recalcula, a partir de `silver.stg_shopee_order_item_snapshots`, o **mesmo dedup "arquivo vencedor"** já usado pela carga (`DISTINCT ON (brand, order_id) ORDER BY file_id DESC` + join de volta preservando multi-item), escopado à janela pedida via bind parameter (`order_date BETWEEN %(date_from)s AND %(date_to)s` — nunca literal de string, porque aqui a data **é** entrada de usuário, diferente do `min_date` interno do incremental). Compara com o que já está em `gold.marketplace_region_daily` para Shopee na mesma janela e reporta: linhas/GMV/orders atuais vs. recalculados, `rows_to_delete`/`rows_to_insert` (impacto de um futuro refresh), delta de GMV/orders, se a janela sobrepõe dado já existente, alerta se a fonte recalculada zerar com a Gold tendo linhas, e duplicidade/nulos/numerador>denominador no recálculo.
+
+Validações de janela (antes de qualquer conexão): `date_from <= date_to`, `date_to` não pode ser futuro, janela máxima de `MAX_SHOPEE_WINDOW_DAYS = 180` dias.
+
+Validado com 27 testes novos (`pipelines/tests/test_gold_regional_window_diagnose.py`) + suíte completa (1092 testes) sem regressão, e com uma execução real read-only contra o Data Mart: janela `2026-05-25..2026-05-31` (já carregada) retornou recálculo **idêntico** à Gold (768 linhas, GMV R$ 1.234.373,97, delta zero) — confirma que a lógica de dedup recalculada bate exatamente com o que já foi validado na carga original.
+
+**Status**: só o diagnose existe. `--refresh-shopee-window` (novo secret dedicado, `DELETE` restrito, backup, transação, rollback) é o Gate S3, ainda não implementado — autorização separada.
+
+### Gate S2.1 — endurecimento do diagnose: snapshot consistente + comparação exata por chave (2026-07-17)
+
+Micro-gate de endurecimento **antes** de qualquer `DELETE` do Gate S3. Continua **100% somente leitura, sem escrita, sem DDL/DML, sem secret novo**. Dois problemas do Gate S2 corrigidos:
+
+**1. Snapshot consistente.** No Gate S2, `diagnose_shopee_window` rodava em `autocommit=True` com cada `SELECT` num snapshot próprio — uma ingestão concorrente entre consultas poderia fazer a Gold e a fonte serem lidas em instantes diferentes. Agora todas as consultas rodam na **mesma conexão, numa única transação read-only `REPEATABLE READ`** (`autocommit=False`): o snapshot é fixado no primeiro comando e mantido para todas as demais. Rollback explícito ao final **inclusive no sucesso** (transação só de leitura — nada a commitar; o rollback só fecha o snapshot limpo); rollback também em qualquer exceção; `close` garantido em `finally`. `readonly=True` mantém a garantia de que nem um bug conseguiria escrever.
+
+**2. Comparação exata por chave (não só agregados).** O Gate S2 comparava apenas linhas/GMV/orders totais — cego a **redistribuição entre chaves** (ex.: pedidos migrando de `uf='XX'` para `uf='SP'` sem alterar nenhum total). Agora um `FULL OUTER JOIN` no grão `(date, marketplace_id, loja_id, uf)` compara a Gold Shopee atual com o recálculo da fonte, campo a campo com `IS DISTINCT FROM` (trata `NULL` vs. `0` corretamente, o que `<>` não faz) em todas as 13 colunas de negócio (`gmv`, `orders`, `units_sold`, `canceled_orders`, `returned_orders`, `seller_shipping_cost`, `buyer_shipping_fee`, `estimated_shipping_fee`, `reverse_shipping_fee`, `uf_known_orders`, `uf_eligible_orders`, `shipping_cost_covered_orders`, `shipping_cost_eligible_orders`) — `id`/`ingested_at`/`source_updated_at` são excluídos de propósito (o diagnose responde "os DADOS mudariam", não "a linha foi reingerida"). Sem soma/hash aproximado como substituto da comparação campo a campo.
+
+O relatório passou a expor `gold_only_key_count`, `source_only_key_count`, `changed_key_count`, e duas propriedades derivadas:
+- `would_change_data` = `gold_only > 0 OR source_only > 0 OR changed > 0`. **`False` não é erro** — significa janela já reconciliada (Gold e fonte batem chave a chave e campo a campo).
+- `structurally_safe_for_refresh` = `not zero_source_risk AND duplicate_key_count == 0 AND null_required_count == 0 AND numerator_over_denominator_count == 0`. Independe de `would_change_data` (as duas dimensões são ortogonais).
+
+**Exit codes da CLI**: `0` OK (reconciliada ou não, desde que estruturalmente sã); `2` config/janela inválida; `3` falha de consulta; `4` **estruturalmente insegura** (`structurally_safe_for_refresh=False`) — o Gate S3 nunca deve prosseguir com a janela sem investigação. `would_change_data=False` nunca gera exit não-zero.
+
+Validado: **50 testes** em `pipelines/tests/test_gold_regional_window_diagnose.py` (inclui garantias transacionais — `readonly`/`REPEATABLE READ`/`autocommit=False`/mesma conexão/rollback no sucesso e na falha/close sempre; redistribuição de UF com totais iguais; `NULL` vs `0` via `IS DISTINCT FROM`; bloqueios estruturais; exit codes) + suíte completa (1115 testes) sem regressão. Smoke real read-only: janelas `2026-05-25..05-31` (768 linhas) e `2026-06-01..06-30` (186 linhas) retornaram `would_change_data=False`/`structurally_safe_for_refresh=True`/exit 0 — Gold e fonte idênticas chave a chave e campo a campo, confirmando que a comparação exata bate com o que a carga original produziu. Nenhum `order_id`/CPF/filename/URL/host/linha individual impresso.
+
+**Status**: diagnose endurecido e confiável para decidir se uma janela precisa ser substituída. `--refresh-shopee-window` (escrita real) segue **inexistente** — Gate S3, autorização separada.
