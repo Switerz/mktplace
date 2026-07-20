@@ -613,6 +613,20 @@ Pontos importantes para quem opera o scraping:
   — isso fica para o piloto do Gate S4, com credencial dedicada e restrita
   para a pessoa responsavel pelo scraping (nunca o writer generico atual),
   e autorizacao explicita separada.
+- **Atualizacao 2026-07-20 (Gate S4.1, preparacao read-only do piloto)**: o
+  `mktplace` rodou o diagnose real (somente leitura) contra o Data Mart numa
+  janela de controle e em todo junho/2026 (ate a data maxima real da fonte,
+  2026-06-25) em blocos de ate 7 dias. Resultado: **todas** as janelas
+  testadas ja estao reconciliadas (`would_change_data=False`) — inclusive as
+  que cobrem o periodo do lote inserido por esta automacao em 2026-07-17.
+  Ou seja, ate agora **nao ha uma janela real disponivel para validar o
+  refresh de escrita fazendo diferenca observavel**; isso nao e um erro, so
+  significa que a fonte e a Gold ja convergem no que foi auditado. Tambem
+  foi feita uma auditoria read-only de permissoes (tabela/sequence Gold
+  existem, role dedicada `gold_shopee_window_writer` ainda nao existe) e
+  preparado o SQL de criacao dessa role — nada disso foi executado. Continua
+  valendo: **nao habilitar `--refresh-shopee-window`** nesta automacao ate o
+  piloto real (Gate S4.2/S4.3) ser concluido do lado `mktplace`.
 
 ## Alertas e falhas comuns
 
