@@ -1355,6 +1355,23 @@ class ShopeeWindowRestoreResult:
     warnings: list = field(default_factory=list)
 
 
+@dataclass
+class ShopeeWindowWriteValidationResult:
+    """Resultado de `validate_shopee_window_write_path` (Gate S4.3a) —
+    NUNCA descreve uma escrita persistente, porque nenhuma acontece. Só
+    contagens/booleans agregados, nunca linhas/chaves individuais."""
+    outcome: str  # "validated" | "blocked" | "failed"
+    staging_rows: int = 0
+    gold_rows: int = 0
+    gold_only_key_count: int = 0
+    source_only_key_count: int = 0
+    changed_key_count: int = 0
+    structurally_safe_for_refresh: bool = False
+    would_change_data: bool = False
+    problems: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # audit_path — validação ANTECIPADA (refresh: destino NOVO, nunca deve
 # existir) vs. tratamento como ENTRADA NÃO CONFIÁVEL (restore: arquivo
@@ -2484,6 +2501,230 @@ def execute_shopee_window_restore(
                 )
 
 
+# =============================================================================
+# Gate S4.3a — validação do caminho de escrita Shopee, ESTRUTURALMENTE
+# incapaz de persistir qualquer dado. Não é `execute_shopee_window_refresh`
+# com uma flag de dry-run: é uma função SEPARADA, sem nenhum parâmetro cujo
+# default invertido por engano libere escrita. Exercita exatamente o mesmo
+# caminho (advisory lock -> table lock -> staging TEMP -> validações
+# estruturais -> key-diff -> fingerprint fora do escopo), mas:
+#   - NUNCA chama _write_window_backup_atomic (nenhum backup é publicado);
+#   - NUNCA executa SQL_REFRESH_DELETE nem SQL_INSERT_FINAL (o único INSERT
+#     é o de staging, em stg_marketplace_region_daily, uma TEMP TABLE
+#     ON COMMIT DROP);
+#   - NUNCA chama conn.commit() — a transação SEMPRE termina em ROLLBACK,
+#     inclusive no caminho "would_change_data=True" (que só REPORTA a
+#     divergência, nunca avança para backup/refresh).
+# Motivação (ver docs/regional_design_draft.md, Gate S4.3a): não é seguro
+# tratar "esperar um NO_OP" como validação do piloto real — se seed a fonte
+# mudar entre um diagnose e um futuro --refresh-shopee-window, o comando
+# real pode legitimamente avançar para backup+DELETE+INSERT. Este modo
+# permite validar secret/preflight/lock/staging/reconciliação com a
+# credencial dedicada sem nenhum risco de escrita persistente, mesmo se a
+# janela estiver divergente.
+# =============================================================================
+
+def validate_shopee_window_write_path(
+    write_url: str,
+    date_from: date,
+    date_to: date,
+) -> ShopeeWindowWriteValidationResult:
+    """Gate S4.3a. Ordem idêntica à do refresh real (`--refresh-shopee-window`,
+    Gate S3) até o ponto em que ele publicaria o backup: validar janela ->
+    connect (protegido) -> autocommit=False -> MESMO advisory lock ->
+    lock_timeout/statement_timeout -> MESMO table lock -> fingerprint fora
+    do escopo (antes) -> staging TEMP materializado com o MESMO SQL Shopee
+    auditado -> validações estruturais (duplicidade, nulos,
+    numerador<=denominador, NaN/negativo, escopo marketplace/janela,
+    zero_source_risk) -> key-diff (would_change_data) -> fingerprint fora
+    do escopo (depois, deve bater com antes) -> ROLLBACK sempre, inclusive
+    no sucesso. Release do lock/close no finally.
+
+    Qualquer validação estrutural bloqueia (outcome="blocked") ANTES do
+    key-diff — mesmo critério do refresh real, mas sem nenhum
+    `--confirm-empty-window` para liberar `zero_source_risk` (este modo
+    nunca avança para escrita, então não há necessidade de uma exceção
+    para o caso raro de fonte zerada — ele só reporta o bloqueio).
+
+    Se `would_change_data=True`, a função só relata a divergência
+    (`outcome="validated"`) e segue direto para o ROLLBACK — nunca chega
+    perto de publicar backup ou executar DELETE/INSERT na Gold.
+
+    Se o ROLLBACK final (o do caminho de sucesso) falhar, o resultado NUNCA
+    é reportado como `validated`: não é possível confirmar que a transação
+    encerrou de forma limpa, então o outcome vira `failed`."""
+    try:
+        _validate_shopee_window(date_from, date_to)
+    except InvalidWindowError as exc:
+        return ShopeeWindowWriteValidationResult(outcome="blocked", problems=[str(exc)])
+
+    params = {"date_from": date_from, "date_to": date_to, "shopee_marketplace_id": SHOPEE_MARKETPLACE_ID}
+    result: Optional[ShopeeWindowWriteValidationResult] = None
+    lock_acquired = False
+
+    # connect() protegido — mesmo padrão do refresh/restore: falha nunca
+    # escapa como exceção nativa do psycopg2/libpq.
+    try:
+        conn = psycopg2.connect(write_url, connect_timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        return ShopeeWindowWriteValidationResult(outcome="failed", problems=[sanitize_error_message(exc)])
+
+    try:
+        # autocommit=False DENTRO do try: se a própria atribuição falhar, o
+        # finally ainda fecha a conexão.
+        conn.autocommit = False
+
+        lock_acquired = try_acquire_advisory_lock(conn)
+        if not lock_acquired:
+            result = ShopeeWindowWriteValidationResult(
+                outcome="blocked",
+                problems=[
+                    f"advisory lock {ADVISORY_LOCK_KEY} já está em uso — outra execução de carga da Gold "
+                    "regional pode estar em andamento. Abortando sem tentar novamente."
+                ],
+            )
+            return result
+
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SET LOCAL statement_timeout = '900s'")
+            cur.execute(f"LOCK TABLE {_GOLD_TABLE_QUALIFIED} IN SHARE ROW EXCLUSIVE MODE")
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_before = cur.fetchone()
+
+            cur.execute(SQL_CREATE_STAGING)
+            cur.execute(
+                f"INSERT INTO stg_marketplace_region_daily ({_STAGING_INSERT_COLUMNS}) {SQL_SHOPEE_WINDOW_RECALC_ROWS}",
+                params,
+            )
+
+            cur.execute(SQL_REFRESH_STAGING_AGGREGATES)
+            staging_rows, _staging_gmv, _staging_orders = cur.fetchone()
+            staging_rows = int(staging_rows)
+
+            cur.execute(SQL_VALIDATE_DUPLICATES)
+            (dup_count,) = cur.fetchone()
+            cur.execute(SQL_VALIDATE_NULLS)
+            (null_count,) = cur.fetchone()
+            cur.execute(SQL_VALIDATE_NUMERATOR_DENOMINATOR)
+            (bad_count,) = cur.fetchone()
+            cur.execute(SQL_REFRESH_NAN_NEGATIVE_CHECK)
+            (nan_negative_count,) = cur.fetchone()
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_IN_STAGING, params)
+            (out_of_scope_in_staging,) = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_GOLD_AGGREGATES, params)
+            gold_rows, _gold_gmv, _gold_orders = cur.fetchone()
+            gold_rows = int(gold_rows)
+
+            zero_source_risk = (staging_rows == 0 and gold_rows > 0)
+
+            structural_problems: list[str] = []
+            if dup_count:
+                structural_problems.append(f"{dup_count} combinação(ões) de chave duplicada(s) no staging")
+            if null_count:
+                structural_problems.append(f"{null_count} linha(s) com coluna obrigatória nula no staging")
+            if bad_count:
+                structural_problems.append(f"{bad_count} linha(s) com numerador > denominador no staging")
+            if nan_negative_count:
+                structural_problems.append(f"{nan_negative_count} linha(s) com NaN/valor negativo incompatível com as constraints no staging")
+            if out_of_scope_in_staging:
+                structural_problems.append(f"{out_of_scope_in_staging} linha(s) no staging fora do escopo marketplace/janela")
+            if zero_source_risk:
+                structural_problems.append(
+                    "fonte recalculada tem ZERO linhas na janela e a Gold atual tem linhas -- "
+                    "este modo de validação nunca avança para escrita, mas o achado precisa ser investigado "
+                    "antes de qualquer piloto real de --refresh-shopee-window"
+                )
+
+            if structural_problems:
+                result = ShopeeWindowWriteValidationResult(
+                    outcome="blocked",
+                    staging_rows=staging_rows,
+                    gold_rows=gold_rows,
+                    structurally_safe_for_refresh=False,
+                    problems=structural_problems,
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_KEY_DIFF, params)
+            gold_only, source_only, changed = cur.fetchone()
+            would_change_data = bool(gold_only or source_only or changed)
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_after = cur.fetchone()
+            if out_of_scope_after != out_of_scope_before:
+                result = ShopeeWindowWriteValidationResult(
+                    outcome="failed",
+                    staging_rows=staging_rows,
+                    gold_rows=gold_rows,
+                    problems=[
+                        "fingerprint fora do escopo (ML/TikTok ou Shopee fora da janela) mudou durante a "
+                        "validação -- inesperado num caminho que nunca escreve; investigar concorrência"
+                    ],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+        # Rollback do caminho de SUCESSO — esta função nunca commita nada.
+        # Se o próprio rollback falhar aqui, não é seguro afirmar que a
+        # transação encerrou de forma limpa — o resultado nunca vira
+        # "validated" silenciosamente.
+        try:
+            conn.rollback()
+        except Exception as exc:  # noqa: BLE001
+            result = ShopeeWindowWriteValidationResult(
+                outcome="failed",
+                staging_rows=staging_rows,
+                gold_rows=gold_rows,
+                gold_only_key_count=int(gold_only),
+                source_only_key_count=int(source_only),
+                changed_key_count=int(changed),
+                structurally_safe_for_refresh=True,
+                would_change_data=would_change_data,
+                problems=[
+                    f"rollback de encerramento falhou ({sanitize_error_message(exc)}) -- não é possível "
+                    "confirmar que a transação de validação encerrou de forma limpa"
+                ],
+            )
+            return result
+
+        result = ShopeeWindowWriteValidationResult(
+            outcome="validated",
+            staging_rows=staging_rows,
+            gold_rows=gold_rows,
+            gold_only_key_count=int(gold_only),
+            source_only_key_count=int(source_only),
+            changed_key_count=int(changed),
+            structurally_safe_for_refresh=True,
+            would_change_data=would_change_data,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result = ShopeeWindowWriteValidationResult(outcome="failed", problems=[sanitize_error_message(exc)])
+        _rollback_best_effort(conn, result)
+        return result
+    finally:
+        if lock_acquired:
+            try:
+                release_advisory_lock(conn)
+            except Exception as exc:  # noqa: BLE001
+                if result is not None:
+                    result.warnings.append(
+                        f"falha ao liberar advisory lock após a validação ({sanitize_error_message(exc)}) — "
+                        "resultado principal preservado, sem retry sugerido"
+                    )
+        try:
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            if result is not None:
+                result.warnings.append(
+                    f"falha ao fechar a conexão ({sanitize_error_message(exc)}) — resultado principal preservado, sem retry sugerido"
+                )
+
+
 # ---------------------------------------------------------------------------
 # CLI — `python -m pipelines.ingestion.gold_regional.loader --diagnose` ou
 # `--incremental`. `--diagnose` nunca lê o secret de escrita nem abre
@@ -2822,6 +3063,94 @@ def run_restore_shopee_window_cli(
     return 4
 
 
+def run_validate_shopee_window_write_path_cli(
+    date_from: date,
+    date_to: date,
+    secret_path: Path = DEFAULT_WINDOW_WRITE_SECRET_PATH,
+    repo_root: Path = REPO_ROOT,
+) -> int:
+    """Gate S4.3a — CLI de `--validate-shopee-window-write-path`. Mesmo
+    secret/preflight dedicados do refresh (`.env.gold-window-write.local`),
+    mas `validate_shopee_window_write_path` NUNCA persiste nada — sempre
+    ROLLBACK, nunca publica backup, nunca executa DELETE/INSERT na Gold,
+    nunca chama commit. Não substitui o piloto real do Gate S4.3 (que ainda
+    fará o DELETE/INSERT de verdade): só confirma que o caminho de escrita
+    (lock, staging, validações estruturais, reconciliação) funciona ponta a
+    ponta com a credencial dedicada, sem nenhum risco de escrita
+    persistente — mesmo que a janela esteja divergente.
+
+    Ordem: `DATAMART_DATABASE_URL` configurado -> janela válida -> secret
+    dedicado -> guardrails -> preflight real -> `validate_shopee_window_write_path`.
+    Nunca requer `--audit-path` (nenhum backup é produzido).
+
+    Exit codes: 0 validado (independente de `would_change_data`); 2
+    config/janela/secret/preflight inválido; 3 bloqueio estrutural/lock; 4
+    falha inesperada (rollback executado)."""
+    if not settings.datamart_url:
+        print("DATAMART_DATABASE_URL não configurado — validate-shopee-window-write-path abortado.", file=sys.stderr)
+        return 2
+
+    try:
+        _validate_shopee_window(date_from, date_to)
+    except InvalidWindowError as exc:
+        print(f"--validate-shopee-window-write-path rejeitado: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        secret = window_write_conn.load_window_write_secret(secret_path, repo_root)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--validate-shopee-window-write-path bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        write_url = window_write_conn.validate_window_write_guardrails(secret, settings.datamart_url)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--validate-shopee-window-write-path bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    # Mesma barreira defensiva do refresh/restore: run_window_preflight é
+    # projetado para nunca levantar, mas se uma regressão futura o fizer,
+    # a CLI nunca pode virar traceback/mensagem nativa — e nunca chama a
+    # validação real se o preflight não rodou de forma confiável.
+    try:
+        report = window_write_conn.run_window_preflight(write_url, settings.datamart_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--validate-shopee-window-write-path bloqueado: falha inesperada no preflight: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 2
+    _print_window_write_preflight(report, "validação do caminho de escrita Shopee (nunca persiste nada)")
+    if not report.ok:
+        print("VALIDAÇÃO NÃO executada — preflight bloqueado.", file=sys.stderr)
+        return 2
+
+    try:
+        result = validate_shopee_window_write_path(write_url, date_from, date_to)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--validate-shopee-window-write-path falhou de forma inesperada: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 4
+
+    for w in result.warnings:
+        print(f"AVISO: {w}", file=sys.stderr)
+
+    print(f"=== Validação do caminho de escrita Shopee — janela [{date_from} .. {date_to}] (sem persistir nada, sempre ROLLBACK) ===")
+    print(f"  staging_rows={result.staging_rows} gold_rows={result.gold_rows}")
+    print(f"  gold_only_key_count={result.gold_only_key_count} source_only_key_count={result.source_only_key_count} changed_key_count={result.changed_key_count}")
+    print(f"  structurally_safe_for_refresh={result.structurally_safe_for_refresh}")
+    print(f"  would_change_data={result.would_change_data}")
+
+    if result.outcome == "validated":
+        print("VALIDADO: caminho de escrita funcionou ponta a ponta e a transação terminou em ROLLBACK — nada foi persistido.")
+        return 0
+    if result.outcome == "blocked":
+        print("BLOQUEADO (nenhuma escrita realizada):", file=sys.stderr)
+        for p in result.problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 3
+    print("FALHOU (rollback executado):", file=sys.stderr)
+    for p in result.problems:
+        print(f"  - {p}", file=sys.stderr)
+    return 4
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=str(REPO_ROOT / ".env"))
@@ -2849,8 +3178,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Gate S3: restaura gold.marketplace_region_daily a partir de um backup de --refresh-shopee-window "
              "(compare-and-swap — --audit-path + --expected-backup-sha256). Requer .env.gold-window-write.local.",
     )
-    parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window.")
-    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window.")
+    mode.add_argument(
+        "--validate-shopee-window-write-path", action="store_true",
+        help="Gate S4.3a: valida o MESMO caminho de escrita do refresh (secret dedicado, preflight, advisory "
+             "lock, table lock, staging TEMP, validações estruturais, reconciliação Gold x fonte) sem NUNCA "
+             "persistir nada — sempre ROLLBACK, nunca publica backup, nunca executa DELETE/INSERT na Gold. "
+             "Requer .env.gold-window-write.local. Não substitui o piloto real de --refresh-shopee-window.",
+    )
+    parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window/--validate-shopee-window-write-path.")
+    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window/--validate-shopee-window-write-path.")
     parser.add_argument(
         "--audit-path", type=Path, default=None,
         help="Caminho absoluto do .json de backup — destino (--refresh-shopee-window) ou origem "
@@ -2875,10 +3211,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.restore_shopee_window and (args.audit_path is None or args.expected_backup_sha256 is None):
         parser.error("--restore-shopee-window requer --audit-path e --expected-backup-sha256")
 
+    if args.validate_shopee_window_write_path and (args.date_from is None or args.date_to is None):
+        parser.error("--validate-shopee-window-write-path requer --date-from e --date-to")
+
     if (args.date_from is not None or args.date_to is not None) and not (
-        args.diagnose_shopee_window or args.refresh_shopee_window
+        args.diagnose_shopee_window or args.refresh_shopee_window or args.validate_shopee_window_write_path
     ):
-        parser.error("--date-from/--date-to só são válidos junto com --diagnose-shopee-window ou --refresh-shopee-window")
+        parser.error(
+            "--date-from/--date-to só são válidos junto com --diagnose-shopee-window, "
+            "--refresh-shopee-window ou --validate-shopee-window-write-path"
+        )
 
     if args.audit_path is not None and not (args.refresh_shopee_window or args.restore_shopee_window):
         parser.error("--audit-path só é válido junto com --refresh-shopee-window ou --restore-shopee-window")
@@ -2903,6 +3245,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return run_refresh_shopee_window_cli(args.date_from, args.date_to, args.audit_path, args.confirm_empty_window)
         if args.restore_shopee_window:
             return run_restore_shopee_window_cli(args.audit_path, args.expected_backup_sha256)
+        if args.validate_shopee_window_write_path:
+            return run_validate_shopee_window_write_path_cli(args.date_from, args.date_to)
         return run_incremental_cli()
     except Exception as exc:  # noqa: BLE001
         print(f"falha inesperada e não tratada: {sanitize_error_message(exc)}", file=sys.stderr)

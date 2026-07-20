@@ -640,6 +640,18 @@ Pontos importantes para quem opera o scraping:
   Gate S4.3 (piloto real de escrita), que depende ainda de uma janela
   Shopee candidata (hoje nenhuma existe) e de autorizacao explicita
   separada.
+- **Atualizacao 2026-07-20 (Gate S4.3a, modo de validacao sem persistencia)**:
+  o `mktplace` implementou `--validate-shopee-window-write-path` — exercita
+  o MESMO caminho de escrita do refresh real (secret dedicado, preflight,
+  locks, staging temporaria, validacoes estruturais, reconciliacao Gold x
+  fonte) mas **nunca** publica backup, nunca faz `DELETE`/`INSERT` na Gold
+  e sempre termina em `ROLLBACK`, mesmo quando a janela esta divergente.
+  So codigo, testes (34 novos, suite completa com 1338 passando) e
+  documentacao — **nenhuma execucao real contra o banco nesta rodada**.
+  Isso nao e o piloto real do Gate S4.3 (que ainda vai escrever de
+  verdade); e um jeito seguro de confirmar que o caminho funciona antes
+  dele. Continua valendo: esta automacao externa **nao deve habilitar**
+  nenhum comando de escrita real (`--refresh-shopee-window`) ainda.
 
 ## Alertas e falhas comuns
 
