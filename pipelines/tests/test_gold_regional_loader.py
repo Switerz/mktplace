@@ -439,16 +439,49 @@ def test_ha_validacao_pos_insert_explicita_de_zero_linhas_tiktok():
 # ---------------------------------------------------------------------------
 
 def test_nenhuma_constante_sql_do_loader_contem_statement_destrutivo():
+    """Gate S3 introduziu a ÚNICA exceção sancionada deste módulo:
+    `SQL_REFRESH_DELETE` (--refresh-shopee-window), estritamente escopado a
+    `marketplace_id = SHOPEE AND date BETWEEN`. Esta constante é a ÚNICA
+    permitida a conter `DELETE FROM` — qualquer OUTRA constante `SQL_*` com
+    DELETE, TRUNCATE, UPDATE...SET ou DROP continua proibida. Ver
+    `test_sql_refresh_delete_e_a_unica_excecao_sancionada` e
+    `test_sql_refresh_delete_tem_escopo_restrito_marketplace_e_janela` para
+    a validação positiva dessa exceção."""
     import re
     forbidden = re.compile(r"\bDROP\s+(TABLE|SCHEMA|DATABASE|INDEX|VIEW)\b|\bTRUNCATE\b|\bDELETE\s+FROM\b|\bUPDATE\s+\w+\s+SET\b", re.IGNORECASE)
-    sql_constants = [
-        v for k, v in vars(loader).items()
+    sql_constants = {
+        k: v for k, v in vars(loader).items()
         if k.startswith("SQL_") and isinstance(v, str)
-    ]
+    }
     assert len(sql_constants) >= 8
-    for sql in sql_constants:
+    for name, sql in sql_constants.items():
+        if name == "SQL_REFRESH_DELETE":
+            continue
         match = forbidden.search(sql)
-        assert not match, f"statement destrutivo suspeito: {match.group(0)!r} em {sql[:80]}..."
+        assert not match, f"statement destrutivo suspeito: {match.group(0)!r} em {name}: {sql[:80]}..."
+
+
+def test_sql_refresh_delete_e_a_unica_excecao_sancionada():
+    """Nenhuma OUTRA constante SQL_* do módulo pode conter DELETE — só
+    `SQL_REFRESH_DELETE` (Gate S3, --refresh-shopee-window)."""
+    import re
+    sql_constants = {
+        k: v for k, v in vars(loader).items()
+        if k.startswith("SQL_") and isinstance(v, str)
+    }
+    assert "SQL_REFRESH_DELETE" in sql_constants
+    delete_constants = [k for k, v in sql_constants.items() if re.search(r"\bDELETE\s+FROM\b", v, re.IGNORECASE)]
+    assert delete_constants == ["SQL_REFRESH_DELETE"]
+
+
+def test_sql_refresh_delete_tem_escopo_restrito_marketplace_e_janela():
+    import re
+    sql_upper = loader.SQL_REFRESH_DELETE.upper()
+    assert "DELETE FROM GOLD.MARKETPLACE_REGION_DAILY" in sql_upper
+    assert "MARKETPLACE_ID = %(SHOPEE_MARKETPLACE_ID)S" in sql_upper
+    assert "DATE BETWEEN %(DATE_FROM)S AND %(DATE_TO)S" in sql_upper
+    # nunca um DELETE sem WHERE, nunca literal de data/id interpolado
+    assert not re.search(r"'\d{4}-\d{2}-\d{2}'", loader.SQL_REFRESH_DELETE)
 
 
 def test_create_temp_table_on_commit_drop_nao_e_falso_positivo_destrutivo():

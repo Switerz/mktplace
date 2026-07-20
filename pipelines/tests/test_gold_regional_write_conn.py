@@ -512,3 +512,135 @@ def test_try_acquire_advisory_lock_true_false():
 def test_release_advisory_lock_nao_levanta():
     conn = ScriptedConn([("PG_ADVISORY_UNLOCK", "one", (True,))])
     wc.release_advisory_lock(conn)  # não deve levantar exceção
+
+
+# =============================================================================
+# Gate S3.3 — ciclo de conexão dos helpers compartilhados: set_session
+# protegido, close best-effort, exceção original nunca mascarada
+# =============================================================================
+
+class _LifecycleConn:
+    """Fake mínimo para o ciclo connect/set_session/close: permite fazer
+    set_session e/ou close levantarem, e conta quantas vezes close rodou."""
+
+    def __init__(self, set_session_error=None, close_error=None, identity_responses=None):
+        self.set_session_error = set_session_error
+        self.close_error = close_error
+        self.set_session_calls = 0
+        self.close_calls = 0
+        self._responses = identity_responses or _identity_responses()
+
+    def set_session(self, readonly=None, autocommit=None):
+        self.set_session_calls += 1
+        if self.set_session_error is not None:
+            raise self.set_session_error
+
+    def cursor(self):
+        return ScriptedCursor(self._responses)
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _install_lifecycle_conn(monkeypatch, conn):
+    monkeypatch.setattr(wc.psycopg2, "connect", lambda url, connect_timeout=15: conn)
+    return conn
+
+
+def test_connect_readonly_set_session_falha_fecha_conexao_e_preserva_excecao(monkeypatch):
+    original = RuntimeError("falha simulada no set_session")
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn(set_session_error=original))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wc._connect_readonly("postgresql://writer@host/db")
+
+    assert exc_info.value is original  # exceção ORIGINAL, intacta
+    assert conn.close_calls == 1
+
+
+def test_connect_readonly_set_session_e_close_falham_excecao_original_prevalece(monkeypatch):
+    original = RuntimeError("falha original do set_session")
+    conn = _install_lifecycle_conn(
+        monkeypatch,
+        _LifecycleConn(set_session_error=original, close_error=OSError("close também falhou")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wc._connect_readonly("postgresql://writer@host/db")
+
+    assert exc_info.value is original  # a falha do close nunca mascara a original
+    assert conn.close_calls == 1
+
+
+def test_connect_readonly_caminho_feliz_retorna_conexao_aberta(monkeypatch):
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn())
+
+    returned = wc._connect_readonly("postgresql://writer@host/db")
+
+    assert returned is conn
+    assert conn.set_session_calls == 1
+    assert conn.close_calls == 0  # caminho feliz: conexão continua aberta para o chamador
+
+
+def test_fetch_target_identity_set_session_falha_fecha_conexao(monkeypatch):
+    original = RuntimeError("falha simulada no set_session")
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn(set_session_error=original))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wc._fetch_target_identity("postgresql://reader@host/db")
+
+    assert exc_info.value is original
+    assert conn.close_calls == 1
+
+
+def test_fetch_target_identity_query_falha_fecha_conexao_e_preserva_excecao(monkeypatch):
+    original = RuntimeError("falha simulada na query de identidade")
+    responses = [("CURRENT_DATABASE()", "raise", original)]
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn(identity_responses=responses))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wc._fetch_target_identity("postgresql://reader@host/db")
+
+    assert exc_info.value is original
+    assert conn.close_calls == 1
+
+
+def test_fetch_target_identity_close_falha_durante_outra_falha_nao_mascara(monkeypatch):
+    original = RuntimeError("falha original da query")
+    responses = [("CURRENT_DATABASE()", "raise", original)]
+    conn = _install_lifecycle_conn(
+        monkeypatch,
+        _LifecycleConn(identity_responses=responses, close_error=OSError("close falhou")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wc._fetch_target_identity("postgresql://reader@host/db")
+
+    assert exc_info.value is original  # OSError do close nunca substitui a original
+    assert conn.close_calls == 1
+
+
+def test_fetch_target_identity_caminho_feliz_contrato_inalterado(monkeypatch):
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn())
+
+    identity = wc._fetch_target_identity("postgresql://reader@host/db")
+
+    assert identity == {"db": "datamart", "port": 5432, "sysid": "sysid-A"}
+    assert conn.close_calls == 1  # identidade sempre fecha a própria conexão
+
+
+def test_fetch_target_identity_fallback_sysid_none_preservado(monkeypatch):
+    """Contrato do fallback do helper GENÉRICO inalterado: pg_control_system
+    inacessível -> sysid=None (o preflight de janela é quem recusa isso)."""
+    responses = [
+        ("CURRENT_DATABASE()", "one", ("datamart", 5432)),
+        ("PG_CONTROL_SYSTEM", "raise", RuntimeError("permission denied for function pg_control_system")),
+    ]
+    conn = _install_lifecycle_conn(monkeypatch, _LifecycleConn(identity_responses=responses))
+
+    identity = wc._fetch_target_identity("postgresql://reader@host/db")
+
+    assert identity == {"db": "datamart", "port": 5432, "sysid": None}
+    assert conn.close_calls == 1

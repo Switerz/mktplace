@@ -155,8 +155,22 @@ class PreflightReport:
 
 
 def _connect_readonly(write_url: str, timeout: int = 15):
+    """Gate S3.3: `set_session()` fala com o servidor e pode levantar — se
+    isso acontecer DEPOIS de `connect()` ter retornado uma conexão, ela
+    seria vazada (o chamador nunca a recebeu para poder fechá-la). Por isso
+    o `set_session()` fica protegido: em falha, fecha a conexão em
+    best-effort (um `close()` que também falhe nunca mascara a exceção
+    original) e propaga a exceção original intacta. Caminho feliz
+    inalterado: retorna a conexão aberta, já readonly/autocommit."""
     conn = psycopg2.connect(write_url, connect_timeout=timeout)
-    conn.set_session(readonly=True, autocommit=True)
+    try:
+        conn.set_session(readonly=True, autocommit=True)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass  # best-effort — a exceção original do set_session prevalece
+        raise
     return conn
 
 
@@ -165,10 +179,17 @@ def _fetch_target_identity(url: str, timeout: int = 15) -> dict:
     gravado uma vez no initdb do cluster e nunca muda — é uma forma de
     confirmar "mesmo servidor físico" muito mais confiável do que comparar
     hostnames em texto. Faz fallback para porta+database se
-    `pg_control_system()` não estiver acessível."""
+    `pg_control_system()` não estiver acessível (fallback deste helper
+    GENÉRICO — `window_write_conn.run_window_preflight` continua recusando
+    esse fallback para o caminho com DELETE, exigindo sysid nos dois lados).
+
+    Gate S3.3: `set_session()` roda DENTRO do ciclo protegido — a conexão
+    fecha sempre (falha no set_session, falha em qualquer query, ou
+    sucesso), em best-effort: um `close()` que falhe durante outra falha
+    nunca a mascara (a exceção original continua propagando)."""
     conn = psycopg2.connect(url, connect_timeout=timeout)
-    conn.set_session(readonly=True, autocommit=True)
     try:
+        conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:
             cur.execute("SELECT current_database(), inet_server_port()")
             db, port = cur.fetchone()
@@ -179,7 +200,10 @@ def _fetch_target_identity(url: str, timeout: int = 15) -> dict:
                 sysid = None
         return {"db": db, "port": port, "sysid": sysid}
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass  # best-effort — nunca mascara a exceção original em voo
 
 
 def run_preflight(write_url: str, expected_read_url: str, expect_table_exists: bool) -> PreflightReport:

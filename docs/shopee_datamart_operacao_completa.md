@@ -549,6 +549,71 @@ substituida, sem deixar de ser somente leitura:
 Continua sem escrever nada, sem secret novo, e o refresh de escrita
 (`--refresh-shopee-window`, Gate S3) continua nao existindo.
 
+**Atualizacao 2026-07-17 (Gate S3, refresh/restore transacionais — implementado,
+NAO executado):** o `mktplace` agora tem, alem do diagnostico, o comando de
+escrita real por janela e o respectivo restore:
+
+```powershell
+python -m pipelines.ingestion.gold_regional.loader `
+  --refresh-shopee-window --date-from YYYY-MM-DD --date-to YYYY-MM-DD `
+  --audit-path <caminho-absoluto-fora-do-repo.json>
+
+python -m pipelines.ingestion.gold_regional.loader `
+  --restore-shopee-window --audit-path <backup.json> --expected-backup-sha256 <64-hex>
+```
+
+Pontos importantes para quem opera o scraping:
+
+- **Secret dedicado, novo**: `.env.gold-window-write.local` (2 chaves:
+  `DATAMART_GOLD_WINDOW_WRITE_URL` e
+  `I_UNDERSTAND_THIS_DELETES_GOLD_SHOPEE_WINDOW`) — **nunca** o mesmo secret
+  do incremental. Privilegio minimo: so SELECT/INSERT/DELETE na tabela Gold
+  regional e SELECT na Silver Shopee, nunca CREATE/UPDATE/TRUNCATE/DROP nem
+  acesso a tabelas ML/TikTok.
+- **Atualizacao 2026-07-18 (Gate S3.1, revisao de seguranca pre-commit)**: o
+  preflight ficou mais rigoroso antes de qualquer piloto real —
+  `rds_superuser` agora **bloqueia** (antes era so aviso), o `system_identifier`
+  do cluster fisico e **obrigatorio nos dois lados** (sem cair para
+  comparacao por database+porta, que era aceitavel no incremental mas nao
+  aqui), SSL precisa estar **confirmado** ativo, e CREATE/UPDATE/TRUNCATE na
+  Gold viraram **privilegios proibidos** que tambem bloqueiam se a
+  credencial os tiver. O backup passou a ser validado **integralmente**, nao
+  so pelo SHA-256 (que só garante integridade dos bytes): contagens e
+  agregados (GMV/pedidos) declarados sao recalculados a partir dos registros
+  e precisam bater exatamente. As validacoes de janela/caminho/hash/JSON
+  agora rodam **antes** de ler o secret ou conectar no banco. Nada disso
+  mudou o escopo do DELETE nem foi executado de verdade.
+- **Atualizacao 2026-07-18 (Gate S3.2, correcao final pre-commit)**: quatro
+  lacunas defensivas fechadas — o preflight nunca mais deixa uma falha de
+  consulta escapar como erro cru (vira bloqueio sanitizado); toda checagem
+  sensivel exige o valor booleano exato ("nao foi possivel confirmar"
+  bloqueia literalmente, inclusive nos privilegios proibidos); o backup e
+  lido UMA unica vez em binario com limite de tamanho, e hash/JSON sao
+  calculados dos mesmos bytes (sem janela para o arquivo mudar entre as
+  checagens); e caminhos problematicos nunca viram traceback. Continua sem
+  nenhuma execucao real contra o banco.
+- **Escopo do DELETE**: sempre e so `marketplace_id=Shopee AND date BETWEEN
+  date_from AND date_to` — nunca ML, TikTok, ou Shopee fora da janela.
+- **Backup automatico antes de qualquer DELETE**: publicado de forma atomica
+  (nunca sobrescreve um backup anterior) com um `.sha256` ao lado, para
+  possibilitar o `--restore-shopee-window` depois.
+- **NO_OP nao e erro**: se a janela ja estiver reconciliada (Gold == fonte),
+  o comando nao apaga/insere nada e retorna sucesso.
+- **`--confirm-empty-window`** e uma excecao explicita, so' para o caso raro
+  de a fonte recalculada dar zero linhas com a Gold tendo linhas — nao
+  desativa nenhuma outra validacao.
+- **Restore e compare-and-swap**: só restaura se o estado atual da Gold
+  bater exatamente com o que o refresh deixou — se algo mudou a janela
+  depois, o restore se recusa a sobrescrever.
+- **Nada disso foi executado de verdade nesta rodada** — sem conexao a
+  banco, sem secret real criado, sem DDL/DML remoto. Sync Neon continua
+  em passo manual separado (`sync_region_daily.py --sync`), so' depois de
+  um refresh reconciliado.
+- **A automacao externa de scraping NAO deve habilitar este comando ainda**
+  — isso fica para o piloto do Gate S4, com credencial dedicada e restrita
+  para a pessoa responsavel pelo scraping (nunca o writer generico atual),
+  e autorizacao explicita separada.
+
 ## Alertas e falhas comuns
 
 ### Sessao Shopee expirada

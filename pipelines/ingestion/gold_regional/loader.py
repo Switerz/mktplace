@@ -68,16 +68,22 @@ sempre 0 para ML (sem sinal limpo identificado na auditoria).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
+import re
 import sys
+import tempfile
 from dataclasses import dataclass, field
-from datetime import date
-from decimal import Decimal
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
 import psycopg2
 
 from pipelines.common.config import settings
+from pipelines.ingestion.gold_regional import window_write_conn
 from pipelines.ingestion.gold_regional import write_conn
 from pipelines.ingestion.gold_regional.write_conn import (
     ADVISORY_LOCK_KEY,
@@ -89,6 +95,7 @@ from pipelines.ingestion.gold_regional.write_conn import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_WRITE_SECRET_PATH = REPO_ROOT / ".env.gold-write.local"
+DEFAULT_WINDOW_WRITE_SECRET_PATH = REPO_ROOT / ".env.gold-window-write.local"
 
 TIKTOK_MARKETPLACE_ID = 1
 ML_MARKETPLACE_ID = 2
@@ -1234,6 +1241,1249 @@ def diagnose_shopee_window(read_url: str, date_from: date, date_to: date) -> Sho
     )
 
 
+# =============================================================================
+# Gate S3 — refresh e restore transacionais da Gold regional Shopee POR
+# JANELA. PRIMEIRO caminho de escrita deste módulo que faz DELETE (todos os
+# outros — execute_first_load, execute_incremental_load, DDL — só fazem
+# INSERT/DDL). Secret e preflight DEDICADOS em
+# pipelines/ingestion/gold_regional/window_write_conn.py
+# (.env.gold-window-write.local — NUNCA .env.gold-write.local, o secret do
+# --incremental). Escopo do DELETE/INSERT sempre e só:
+#     marketplace_id = SHOPEE_MARKETPLACE_ID AND date BETWEEN date_from AND date_to
+# Nenhuma linha ML, TikTok ou Shopee fora da janela é tocada — garantido
+# tanto pelo WHERE explícito quanto por um fingerprint agregado de "tudo
+# fora do escopo" conferido antes e depois de qualquer escrita (defesa em
+# profundidade contra um bug no WHERE, não só confiança nele).
+#
+# `execute_shopee_window_refresh`/`execute_shopee_window_restore` NUNCA
+# reaproveitam `diagnose_shopee_window`: recalculam tudo (inclusive
+# structurally_safe_for_refresh) sob o table lock, na hora — um diagnose
+# executado minutos antes pode estar desatualizado.
+# =============================================================================
+
+_GOLD_TABLE_QUALIFIED = "gold.marketplace_region_daily"
+_RE_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+WINDOW_BACKUP_SCHEMA_VERSION = 1
+
+# Lista ordenada das 17 colunas de _STAGING_INSERT_COLUMNS — fonte única
+# (derivada da mesma constante já usada pela carga/incremental/diagnose,
+# nunca redigitada à mão) para o formato dos registros de backup/restore.
+_STAGING_INSERT_COLUMNS_LIST = [c.strip() for c in _STAGING_INSERT_COLUMNS.split(",")]
+
+_DECIMAL_COLUMN_NAMES = frozenset(
+    ("gmv", "seller_shipping_cost", "buyer_shipping_fee", "estimated_shipping_fee", "reverse_shipping_fee")
+)
+_REQUIRED_NONNEGATIVE_INT_COLUMNS = (
+    "orders", "units_sold", "canceled_orders", "returned_orders",
+    "uf_known_orders", "uf_eligible_orders",
+    "shipping_cost_covered_orders", "shipping_cost_eligible_orders",
+)
+_NULLABLE_DECIMAL_COLUMNS = (
+    "seller_shipping_cost", "buyer_shipping_fee", "estimated_shipping_fee", "reverse_shipping_fee",
+)
+
+# Mesmo conjunto de 5 lojas Shopee de _BRAND_LOJA_VALUES (apice=1,
+# barbours=2, kokeshi=3, lescent=4, rituaria=5) — hardcoded aqui (não
+# reparseado de _BRAND_LOJA_VALUES) para o validador de registro de backup
+# nunca depender de parsing de string em caminho de segurança.
+_VALID_SHOPEE_LOJA_IDS = frozenset({1, 2, 3, 4, 5})
+
+# 27 UFs oficiais + 'XX' — mesmo conjunto do CHECK chk_region_uf_valida em
+# db/sql/gold/marketplace_region_daily_ddl.sql (fonte da verdade do schema;
+# hardcoded aqui de propósito — um registro de backup é entrada NÃO
+# CONFIÁVEL e não deve depender de uma query ao banco para ser validado).
+_VALID_UF_CODES = frozenset({
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
+    "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+    "XX",
+})
+
+# Gate S3.1: limites explícitos contra um backup adversarial/corrompido —
+# "o SHA comprova integridade dos bytes, mas não torna metadados
+# semanticamente verdadeiros" (ver validate_window_backup_payload).
+_ISO_UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+MAX_WINDOW_BACKUP_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB — verificado ANTES de read_text/json.loads
+MAX_WINDOW_BACKUP_RECORDS = MAX_SHOPEE_WINDOW_DAYS * len(_VALID_SHOPEE_LOJA_IDS) * len(_VALID_UF_CODES)  # 180*5*28
+
+_WINDOW_RECORD_KEYS = frozenset(_STAGING_INSERT_COLUMNS_LIST)
+
+_WINDOW_BACKUP_TOP_LEVEL_KEYS = frozenset({
+    "schema_version", "created_at_utc", "marketplace_id", "date_from", "date_to",
+    "grain_key", "business_columns", "before_count", "after_count",
+    "before_aggregates", "after_aggregates", "before_records", "planned_after_records",
+})
+
+
+class BackupIntegrityError(RuntimeError):
+    """Backup de janela Shopee gravado/lido não reconferiu com o esperado."""
+
+
+def _rollback_best_effort(conn, result) -> None:
+    """Tenta o rollback; se ele PRÓPRIO falhar, anexa um aviso sanitizado a
+    `result` (que já foi decidido — bloqueio deliberado OU exceção capturada)
+    em vez de deixar a falha do rollback mascarar o motivo original do
+    abort. Usado em TODO ponto de rollback de `execute_shopee_window_refresh`/
+    `execute_shopee_window_restore`, não só no `except` genérico."""
+    try:
+        conn.rollback()
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"falha ao executar rollback ({sanitize_error_message(exc)}) — resultado principal preservado"
+        )
+
+
+@dataclass
+class ShopeeWindowRefreshResult:
+    outcome: str  # "committed" | "no_op" | "blocked" | "failed"
+    rows_deleted: int = 0
+    rows_inserted: int = 0
+    backup_path: Optional[str] = None
+    backup_sha256: Optional[str] = None
+    gold_gmv_before: Optional[Decimal] = None
+    gold_gmv_after: Optional[Decimal] = None
+    problems: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+@dataclass
+class ShopeeWindowRestoreResult:
+    outcome: str  # "committed" | "blocked" | "failed"
+    rows_deleted: int = 0
+    rows_inserted: int = 0
+    problems: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# audit_path — validação ANTECIPADA (refresh: destino NOVO, nunca deve
+# existir) vs. tratamento como ENTRADA NÃO CONFIÁVEL (restore: arquivo
+# EXISTENTE, ver validate_window_backup_payload). Duas funções distintas de
+# propósito — as regras são opostas.
+# ---------------------------------------------------------------------------
+
+def _validate_new_window_audit_path(audit_path: Path, repo_root: Path) -> Optional[str]:
+    """Checagem antecipada para o DESTINO de um novo backup (refresh) —
+    NUNCA usada para o backup de ENTRADA do restore. A garantia final
+    contra sobrescrita vem de `os.link` em `_write_window_backup_atomic`
+    (imune à corrida TOCTOU entre esta checagem e a publicação).
+
+    Gate S3.1: NENHUMA mensagem aqui pode conter o caminho absoluto,
+    `repo_root`, ou qualquer estrutura de diretório — nunca expor
+    usuário/máquina local em logs/saída de erro. Quando um nome de arquivo
+    ajuda a identificar QUAL arquivo (já existe / companion já existe), usa
+    só `.name` (basename), nunca o caminho completo.
+
+    Gate S3.2 (Finding 4): NUNCA levanta exceção — `resolve()`/`is_dir()`/
+    `exists()` podem levantar OSError/RuntimeError/ValueError em paths
+    patológicos (loop de symlink, NUL embutido no Windows, ACL negando
+    stat); qualquer uma vira um problema sanitizado, nunca um traceback."""
+    try:
+        if not audit_path.is_absolute():
+            return "audit_path precisa ser um caminho absoluto"
+        if audit_path.suffix != ".json":
+            return "audit_path precisa terminar em .json"
+        if not audit_path.parent.is_dir():
+            return "diretório pai de audit_path não existe"
+
+        resolved = audit_path.resolve()
+        repo_resolved = repo_root.resolve()
+        if resolved == repo_resolved or repo_resolved in resolved.parents:
+            return "audit_path não pode estar dentro do repositório"
+
+        if audit_path.exists():
+            return f"audit_path já existe (recusado — nunca sobrescrever um backup anterior): {audit_path.name}"
+
+        sha_path = Path(str(audit_path) + ".sha256")
+        if sha_path.exists():
+            return f"companion .sha256 já existe (recusado): {sha_path.name}"
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"falha ao validar audit_path (caminho inacessível ou inválido): {type(exc).__name__}"
+
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Formato do registro de backup — 1 linha do grão regional
+# (date, marketplace_id, loja_id, uf) + 13 campos de negócio, EXATAMENTE as
+# 17 colunas de _STAGING_INSERT_COLUMNS. Nunca contém order_id/CPF/
+# filename/file_id/URL/host/credencial — a Gold regional não tem essas
+# colunas (grão é agregado, não linha de pedido). Decimal sempre como
+# string; date sempre ISO-8601.
+# ---------------------------------------------------------------------------
+
+def _row_to_backup_record(row: tuple) -> dict:
+    d = dict(zip(_STAGING_INSERT_COLUMNS_LIST, row))
+    d["date"] = d["date"].isoformat()
+    for col in _DECIMAL_COLUMN_NAMES:
+        value = d[col]
+        d[col] = None if value is None else str(value)
+    return d
+
+
+def _backup_record_to_row_values(record: dict) -> tuple:
+    """Converte um registro de backup (JSON, JÁ validado por
+    `_validate_window_record`) de volta para os tipos nativos do INSERT
+    (Decimal/date/int) — nunca chamada sem validação prévia completa."""
+    values = []
+    for col in _STAGING_INSERT_COLUMNS_LIST:
+        v = record[col]
+        if col == "date":
+            values.append(date.fromisoformat(v))
+        elif col in _DECIMAL_COLUMN_NAMES:
+            values.append(None if v is None else Decimal(v))
+        else:
+            values.append(v)
+    return tuple(values)
+
+
+def _records_by_key(records) -> dict:
+    return {(r["date"], r["marketplace_id"], r["loja_id"], r["uf"]): r for r in records}
+
+
+def _aggregate_backup_records(records: list[dict]) -> dict:
+    gmv_sum = sum((Decimal(r["gmv"]) for r in records), Decimal("0"))
+    orders_sum = sum(r["orders"] for r in records)
+    return {"rows": len(records), "gmv": str(gmv_sum), "orders": orders_sum}
+
+
+def _parse_decimal_field(value):
+    """Retorna (Decimal, None) se válido, ou (None, problema) caso
+    contrário. NUNCA levanta exceção. Só aceita string (formato de
+    serialização esperado) — um int/float/bool aqui indica um arquivo que
+    não passou pela serialização esperada (Decimal sempre como string)."""
+    if not isinstance(value, str):
+        return None, "esperado string numérica (Decimal serializado)"
+    try:
+        d = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return None, "não é um número decimal válido"
+    if not d.is_finite():
+        return None, "não é finito (NaN/Infinity)"
+    return d, None
+
+
+def _valid_iso_date_in_window(value, date_from: date, date_to: date):
+    if not isinstance(value, str):
+        return None, "esperado string de data ISO (YYYY-MM-DD)"
+    try:
+        d = date.fromisoformat(value)
+    except ValueError:
+        return None, "formato ou calendário de data inválido"
+    if not (date_from <= d <= date_to):
+        return None, f"data fora da janela [{date_from.isoformat()}, {date_to.isoformat()}]"
+    return d, None
+
+
+def _validate_window_record(record, date_from: date, date_to: date) -> list[str]:
+    """Type-safety PRIMEIRO (nunca usa um valor em set()/dict/comparação
+    antes de saber o tipo), depois formato/domínio. NUNCA levanta exceção,
+    seja qual for o tipo de `record`. Usada tanto por
+    `validate_window_backup_payload` (backup como entrada não confiável no
+    restore) quanto internamente por `_write_window_backup_atomic` (revalida
+    o próprio backup relido do disco após publicar)."""
+    if not isinstance(record, dict):
+        return ["registro não é um objeto JSON"]
+
+    extra = set(record.keys()) - _WINDOW_RECORD_KEYS
+    missing = _WINDOW_RECORD_KEYS - set(record.keys())
+    problems: list[str] = []
+    if extra:
+        problems.append(f"chave(s) inesperada(s): {sorted(extra)}")
+    if missing:
+        problems.append(f"chave(s) ausente(s): {sorted(missing)}")
+    if problems:
+        return problems
+
+    _, date_problem = _valid_iso_date_in_window(record["date"], date_from, date_to)
+    if date_problem:
+        problems.append(f"date: {date_problem}")
+
+    marketplace_id = record["marketplace_id"]
+    if isinstance(marketplace_id, bool) or not isinstance(marketplace_id, int) or marketplace_id != SHOPEE_MARKETPLACE_ID:
+        problems.append(f"marketplace_id inválido (esperado {SHOPEE_MARKETPLACE_ID}, Shopee)")
+
+    loja_id = record["loja_id"]
+    if isinstance(loja_id, bool) or not isinstance(loja_id, int) or loja_id not in _VALID_SHOPEE_LOJA_IDS:
+        problems.append(f"loja_id inválido (esperado um de {sorted(_VALID_SHOPEE_LOJA_IDS)})")
+
+    uf = record["uf"]
+    if not isinstance(uf, str) or uf not in _VALID_UF_CODES:
+        problems.append("uf inválida")
+
+    gmv_value, gmv_problem = _parse_decimal_field(record["gmv"])
+    if gmv_problem:
+        problems.append(f"gmv: {gmv_problem}")
+    elif gmv_value < 0:
+        problems.append("gmv negativo")
+
+    for col in _NULLABLE_DECIMAL_COLUMNS:
+        value = record[col]
+        if value is None:
+            continue
+        parsed, problem = _parse_decimal_field(value)
+        if problem:
+            problems.append(f"{col}: {problem}")
+        elif parsed < 0:
+            problems.append(f"{col} negativo")
+
+    int_values: dict = {}
+    for col in _REQUIRED_NONNEGATIVE_INT_COLUMNS:
+        value = record[col]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            problems.append(f"{col} inválido (esperado inteiro >= 0)")
+        else:
+            int_values[col] = value
+
+    if "uf_known_orders" in int_values and "uf_eligible_orders" in int_values:
+        if int_values["uf_known_orders"] > int_values["uf_eligible_orders"]:
+            problems.append("uf_known_orders > uf_eligible_orders")
+    if "shipping_cost_covered_orders" in int_values and "shipping_cost_eligible_orders" in int_values:
+        if int_values["shipping_cost_covered_orders"] > int_values["shipping_cost_eligible_orders"]:
+            problems.append("shipping_cost_covered_orders > shipping_cost_eligible_orders")
+
+    return problems
+
+
+def _duplicate_keys_in_records(records: list[dict]) -> list[tuple]:
+    """Só chamar DEPOIS que cada registro já passou por
+    `_validate_window_record` sem problemas — usa (date, marketplace_id,
+    loja_id, uf) como tupla de chave, que só é seguro depois da
+    type-safety individual."""
+    counts: dict[tuple, int] = {}
+    for r in records:
+        key = (r["date"], r["marketplace_id"], r["loja_id"], r["uf"])
+        counts[key] = counts.get(key, 0) + 1
+    return [k for k, n in counts.items() if n > 1]
+
+
+def _validate_aggregates_field(payload_aggregates, records: list[dict], field_name: str) -> list[str]:
+    """Valida `before_aggregates`/`after_aggregates`: dict com EXATAMENTE
+    `rows`/`gmv`/`orders`, tipos válidos, `rows` igual à contagem real de
+    `records`, e GMV/pedidos RECALCULADOS a partir de `records` idênticos
+    ao declarado. Só chamar DEPOIS que `records` já passou por
+    `_validate_window_record` sem problemas (usa `r["gmv"]`/`r["orders"]`
+    como valores confiáveis). O SHA do arquivo comprova integridade de
+    bytes, não que os agregados declarados batem com os registros —
+    por isso esta reconciliação é obrigatória, não opcional."""
+    if not isinstance(payload_aggregates, dict):
+        return [f"{field_name} não é um objeto"]
+
+    expected_keys = frozenset({"rows", "gmv", "orders"})
+    extra = set(payload_aggregates.keys()) - expected_keys
+    missing = expected_keys - set(payload_aggregates.keys())
+    problems: list[str] = []
+    if extra:
+        problems.append(f"{field_name}: chave(s) inesperada(s): {sorted(extra)}")
+    if missing:
+        problems.append(f"{field_name}: chave(s) ausente(s): {sorted(missing)}")
+    if problems:
+        return problems
+
+    rows = payload_aggregates["rows"]
+    if isinstance(rows, bool) or not isinstance(rows, int) or rows < 0:
+        problems.append(f"{field_name}.rows inválido (esperado inteiro >= 0)")
+    elif rows != len(records):
+        problems.append(f"{field_name}.rows ({rows}) não bate com a contagem real de registros ({len(records)})")
+
+    gmv_declared, gmv_problem = _parse_decimal_field(payload_aggregates.get("gmv"))
+    if gmv_problem:
+        problems.append(f"{field_name}.gmv: {gmv_problem}")
+    else:
+        recomputed_gmv = sum((Decimal(r["gmv"]) for r in records), Decimal("0"))
+        if gmv_declared != recomputed_gmv:
+            problems.append(f"{field_name}.gmv declarado não bate com a soma recalculada dos registros")
+
+    orders_declared = payload_aggregates.get("orders")
+    if isinstance(orders_declared, bool) or not isinstance(orders_declared, int) or orders_declared < 0:
+        problems.append(f"{field_name}.orders inválido (esperado inteiro >= 0)")
+    else:
+        recomputed_orders = sum(r["orders"] for r in records)
+        if orders_declared != recomputed_orders:
+            problems.append(f"{field_name}.orders declarado não bate com a soma recalculada dos registros")
+
+    return problems
+
+
+def validate_window_backup_payload(payload) -> list[str]:
+    """Trata o backup como ENTRADA NÃO CONFIÁVEL — NUNCA levanta exceção,
+    seja qual for o JSON. O SHA-256 (conferido ANTES desta função, em
+    `_validate_and_load_window_backup`) comprova só a integridade dos
+    BYTES do arquivo — não torna os METADADOS declarados (contagens,
+    agregados, colunas) semanticamente verdadeiros; por isso toda
+    reconciliação abaixo continua obrigatória mesmo com o hash batendo.
+
+    Ordem: forma do topo -> `schema_version` conhecido -> `created_at_utc`
+    (timestamp UTC válido) / `marketplace_id` / `grain_key` (EXATAMENTE a
+    chave oficial) / `business_columns` (EXATAMENTE as colunas oficiais, NA
+    ORDEM oficial) -> janela válida (<=180 dias) -> `before_records`/
+    `planned_after_records` são listas -> limite máximo de registros
+    (180 dias × 5 lojas × 28 UFs) -> cada registro (campo a campo,
+    `_validate_window_record`, before/planned validados SEPARADAMENTE) ->
+    chave única dentro de cada lista -> `before_count`/`after_count` batem
+    com o tamanho real das listas -> `before_aggregates`/`after_aggregates`
+    recalculados a partir dos registros e idênticos ao declarado.
+
+    Usada tanto por `_validate_and_load_window_backup` (arquivo fornecido
+    pelo operador, tanto no fail-fast da CLI quanto na revalidação
+    autoritativa de `execute_shopee_window_restore`) quanto por
+    `_write_window_backup_atomic` (revalida o próprio backup relido do
+    disco logo após publicar)."""
+    if not isinstance(payload, dict):
+        return ["backup não é um objeto JSON no nível superior"]
+
+    extra = set(payload.keys()) - _WINDOW_BACKUP_TOP_LEVEL_KEYS
+    missing = _WINDOW_BACKUP_TOP_LEVEL_KEYS - set(payload.keys())
+    problems: list[str] = []
+    if extra:
+        problems.append(f"chave(s) de nível superior inesperada(s): {sorted(extra)}")
+    if missing:
+        problems.append(f"chave(s) de nível superior ausente(s): {sorted(missing)}")
+    if problems:
+        return problems
+
+    schema_version = payload["schema_version"]
+    if schema_version != WINDOW_BACKUP_SCHEMA_VERSION:
+        return [f"schema_version desconhecido: {schema_version!r} (esperado {WINDOW_BACKUP_SCHEMA_VERSION})"]
+
+    created_at_utc = payload["created_at_utc"]
+    if not isinstance(created_at_utc, str) or not _ISO_UTC_TIMESTAMP_RE.match(created_at_utc):
+        problems.append("created_at_utc inválido (esperado timestamp UTC 'YYYY-MM-DDTHH:MM:SSZ')")
+    else:
+        try:
+            datetime.strptime(created_at_utc, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            problems.append("created_at_utc com calendário/hora inválidos")
+
+    marketplace_id = payload["marketplace_id"]
+    if isinstance(marketplace_id, bool) or not isinstance(marketplace_id, int) or marketplace_id != SHOPEE_MARKETPLACE_ID:
+        problems.append("marketplace_id do backup não é Shopee")
+
+    if payload["grain_key"] != list(_WINDOW_KEY_COLUMNS):
+        problems.append("grain_key não bate com a chave oficial (date, marketplace_id, loja_id, uf)")
+
+    if payload["business_columns"] != list(_WINDOW_BUSINESS_COLUMNS):
+        problems.append("business_columns não bate com as colunas oficiais (conjunto e ordem)")
+
+    date_from_raw = payload["date_from"]
+    date_to_raw = payload["date_to"]
+    if not isinstance(date_from_raw, str) or not isinstance(date_to_raw, str):
+        problems.append("date_from/date_to devem ser strings ISO")
+        return problems
+
+    try:
+        parsed_from = date.fromisoformat(date_from_raw)
+        parsed_to = date.fromisoformat(date_to_raw)
+    except ValueError:
+        problems.append("date_from/date_to com formato ou calendário inválido")
+        return problems
+
+    try:
+        _validate_shopee_window(parsed_from, parsed_to)
+    except InvalidWindowError as exc:
+        problems.append(f"janela do backup inválida: {exc}")
+
+    if not isinstance(payload["before_records"], list):
+        problems.append("before_records não é uma lista")
+    if not isinstance(payload["planned_after_records"], list):
+        problems.append("planned_after_records não é uma lista")
+    if problems:
+        return problems
+
+    before_records = payload["before_records"]
+    after_records = payload["planned_after_records"]
+
+    if len(before_records) > MAX_WINDOW_BACKUP_RECORDS:
+        problems.append(f"before_records excede o limite de {MAX_WINDOW_BACKUP_RECORDS} registros")
+    if len(after_records) > MAX_WINDOW_BACKUP_RECORDS:
+        problems.append(f"planned_after_records excede o limite de {MAX_WINDOW_BACKUP_RECORDS} registros")
+    if problems:
+        return problems
+
+    for i, r in enumerate(before_records):
+        problems.extend(f"before_records[{i}]: {p}" for p in _validate_window_record(r, parsed_from, parsed_to))
+    for i, r in enumerate(after_records):
+        problems.extend(f"planned_after_records[{i}]: {p}" for p in _validate_window_record(r, parsed_from, parsed_to))
+    if problems:
+        return problems
+
+    before_dupes = _duplicate_keys_in_records(before_records)
+    if before_dupes:
+        problems.append(f"before_records com {len(before_dupes)} chave(s) duplicada(s)")
+    after_dupes = _duplicate_keys_in_records(after_records)
+    if after_dupes:
+        problems.append(f"planned_after_records com {len(after_dupes)} chave(s) duplicada(s)")
+    if problems:
+        return problems
+
+    before_count = payload["before_count"]
+    if isinstance(before_count, bool) or not isinstance(before_count, int) or before_count < 0:
+        problems.append("before_count inválido (esperado inteiro >= 0)")
+    elif before_count != len(before_records):
+        problems.append(f"before_count ({before_count}) não bate com o tamanho real de before_records ({len(before_records)})")
+
+    after_count = payload["after_count"]
+    if isinstance(after_count, bool) or not isinstance(after_count, int) or after_count < 0:
+        problems.append("after_count inválido (esperado inteiro >= 0)")
+    elif after_count != len(after_records):
+        problems.append(f"after_count ({after_count}) não bate com o tamanho real de planned_after_records ({len(after_records)})")
+
+    problems.extend(_validate_aggregates_field(payload["before_aggregates"], before_records, "before_aggregates"))
+    problems.extend(_validate_aggregates_field(payload["after_aggregates"], after_records, "after_aggregates"))
+
+    return problems
+
+
+def _validate_existing_window_audit_path(audit_path: Path, repo_root: Path) -> Optional[str]:
+    """Checagem do backup de ENTRADA do restore — o arquivo deve EXISTIR
+    (oposto de `_validate_new_window_audit_path`, que é para o DESTINO de
+    um novo backup no refresh, que nunca deve existir ainda). Mensagens
+    nunca contêm caminho absoluto/repo_root — nunca expor estrutura de
+    diretório local.
+
+    Gate S3.2 (Finding 4): NUNCA levanta exceção — mesma proteção de
+    `_validate_new_window_audit_path` (paths patológicos viram problema
+    sanitizado, nunca traceback)."""
+    try:
+        if not audit_path.is_absolute():
+            return "audit_path precisa ser um caminho absoluto"
+        if audit_path.suffix != ".json":
+            return "audit_path precisa terminar em .json"
+
+        resolved = audit_path.resolve()
+        repo_resolved = repo_root.resolve()
+        if resolved == repo_resolved or repo_resolved in resolved.parents:
+            return "audit_path não pode estar dentro do repositório"
+
+        if not audit_path.exists():
+            return "audit_path não existe"
+        if not audit_path.is_file():
+            return "audit_path não é um arquivo regular"
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"falha ao validar audit_path (caminho inacessível ou inválido): {type(exc).__name__}"
+
+    return None
+
+
+def _validate_and_load_window_backup(
+    audit_path: Path, expected_backup_sha256: str, repo_root: Path,
+) -> tuple[Optional[dict], list[str]]:
+    """Valida e carrega um backup de janela Shopee como ENTRADA NÃO
+    CONFIÁVEL — NUNCA levanta exceção. Retorna `(payload, [])` se tudo
+    validar, ou `(None, problemas)` caso contrário.
+
+    Usada tanto por `run_restore_shopee_window_cli` (fail-fast ANTES de ler
+    o secret ou rodar o preflight) quanto por `execute_shopee_window_restore`
+    (validação AUTORITATIVA — sempre revalida do zero; o arquivo pode ter
+    mudado entre as duas chamadas, então a checagem antecipada da CLI NUNCA
+    substitui esta).
+
+    Gate S3.2 (Finding 3): o arquivo é aberto UMA ÚNICA VEZ, em modo
+    binário, e TODAS as decisões (tamanho via `os.fstat` no descritor
+    aberto, leitura limitada a `MAX_WINDOW_BACKUP_FILE_BYTES + 1` bytes,
+    SHA-256, decodificação UTF-8, parse JSON) operam sobre o MESMO conjunto
+    de bytes — fecha a janela TOCTOU do desenho anterior (stat, depois
+    reabrir para hash, depois reabrir para read_text: o arquivo podia mudar
+    entre cada passo, e o JSON parseado podia não ser o que o SHA validou).
+    A leitura é sempre limitada: mesmo que `fstat` minta (arquivo crescendo
+    concorrentemente), um byte além do teto aborta — nunca carrega um
+    arquivo sem limite na memória.
+
+    Ordem: caminho (absoluto, `.json`, fora do repo, existe) -> formato do
+    SHA (64 hex) -> open binário único -> fstat (teto de tamanho) ->
+    leitura limitada -> SHA-256 dos bytes lidos -> decodificação UTF-8 +
+    parse JSON dos MESMOS bytes -> estrutura completa
+    (`validate_window_backup_payload`). Mensagens nunca contêm caminho
+    absoluto nem conteúdo do arquivo."""
+    path_problem = _validate_existing_window_audit_path(audit_path, repo_root)
+    if path_problem:
+        return None, [path_problem]
+
+    if not isinstance(expected_backup_sha256, str) or not _RE_SHA256_HEX.match(expected_backup_sha256):
+        return None, ["expected_backup_sha256 inválido (esperado hexadecimal de 64 caracteres)"]
+
+    try:
+        with open(audit_path, "rb") as f:
+            declared_size = os.fstat(f.fileno()).st_size
+            if declared_size > MAX_WINDOW_BACKUP_FILE_BYTES:
+                return None, [f"arquivo de backup excede o limite de tamanho ({MAX_WINDOW_BACKUP_FILE_BYTES} bytes)"]
+            raw_bytes = f.read(MAX_WINDOW_BACKUP_FILE_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        # ValueError cobre paths patológicos (ex.: NUL embutido no Windows).
+        return None, [f"falha ao abrir/ler backup: {type(exc).__name__}"]
+
+    if len(raw_bytes) > MAX_WINDOW_BACKUP_FILE_BYTES:
+        # fstat disse que cabia, mas a leitura trouxe um byte além do teto
+        # (arquivo mudou entre fstat e read) — nunca confiar só no fstat.
+        return None, [f"arquivo de backup excede o limite de tamanho ({MAX_WINDOW_BACKUP_FILE_BYTES} bytes)"]
+
+    actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    if actual_sha256 != expected_backup_sha256:
+        return None, ["SHA-256 do backup não bate com o esperado -- arquivo pode ter sido alterado"]
+
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, [f"falha ao decodificar/parsear backup: {type(exc).__name__}"]
+
+    structure_problems = validate_window_backup_payload(payload)
+    if structure_problems:
+        return None, structure_problems
+
+    return payload, []
+
+
+def _write_window_backup_atomic(
+    audit_path: Path,
+    date_from: date,
+    date_to: date,
+    before_rows: list[tuple],
+    after_rows: list[tuple],
+) -> str:
+    """Publica o backup em `audit_path` SEM POSSIBILIDADE DE SOBRESCRITA:
+
+    1. Monta o payload versionado (schema_version/created_at_utc/
+       marketplace_id/date_from/date_to/grain_key/business_columns/
+       contagens/agregados/registros) — só agregados e linhas do grão
+       regional; nunca order_id/CPF/filename/file_id/URL/host/credencial
+       (a Gold regional não tem essas colunas).
+    2. Cria um temporário com EXCLUSIVIDADE (`tempfile.mkstemp`) no MESMO
+       diretório de `audit_path` (mesmo filesystem, necessário para o link).
+    3. `flush` + `os.fsync` antes de fechar.
+    4. Publica com `os.link(tmp, audit_path)` — cria uma segunda entrada de
+       diretório apontando para o mesmo arquivo; falha com
+       `FileExistsError` se `audit_path` já existir — NUNCA sobrescreve
+       (diferente de `os.rename`/`os.replace`). Fecha a corrida TOCTOU
+       entre `_validate_new_window_audit_path` e esta publicação.
+    5. O temporário é removido em QUALQUER caminho (sucesso ou falha).
+    6. Relê `audit_path` do disco, revalida a ESTRUTURA COMPLETA
+       (`validate_window_backup_payload`), só então calcula o SHA-256 e
+       publica o companion `.sha256` pelo MESMO mecanismo atômico.
+
+    Mesmo padrão já auditado em
+    pipelines/ingestion/shopee_raw/backfill_ads_metadata.py —
+    reimplementado aqui (não importado), para não acoplar o pacote
+    gold_regional ao pacote shopee_raw (domínios de negócio distintos)."""
+    before_records = [_row_to_backup_record(r) for r in before_rows]
+    after_records = [_row_to_backup_record(r) for r in after_rows]
+
+    payload = {
+        "schema_version": WINDOW_BACKUP_SCHEMA_VERSION,
+        "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "marketplace_id": SHOPEE_MARKETPLACE_ID,
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
+        "grain_key": list(_WINDOW_KEY_COLUMNS),
+        "business_columns": list(_WINDOW_BUSINESS_COLUMNS),
+        "before_count": len(before_records),
+        "after_count": len(after_records),
+        "before_aggregates": _aggregate_backup_records(before_records),
+        "after_aggregates": _aggregate_backup_records(after_records),
+        "before_records": before_records,
+        "planned_after_records": after_records,
+    }
+    data = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(audit_path.parent), prefix=audit_path.name + ".", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp_path, audit_path)
+        except FileExistsError:
+            raise BackupIntegrityError(
+                f"audit_path passou a existir entre a validação e a publicação (corrida detectada, nada sobrescrito): {audit_path.name}"
+            )
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    reread_text = audit_path.read_text(encoding="utf-8")
+    reread_payload = json.loads(reread_text)
+    reread_problems = validate_window_backup_payload(reread_payload)
+    if reread_problems:
+        raise BackupIntegrityError("backup relido do disco falhou na revalidação estrutural")
+    if reread_payload["before_count"] != len(before_records) or reread_payload["after_count"] != len(after_records):
+        raise BackupIntegrityError("backup relido do disco tem contagens diferentes das esperadas")
+
+    backup_sha256 = _sha256_file(audit_path)
+
+    sha_path = Path(str(audit_path) + ".sha256")
+    sha_fd, sha_tmp_name = tempfile.mkstemp(dir=str(sha_path.parent), prefix=sha_path.name + ".", suffix=".tmp")
+    sha_tmp_path = Path(sha_tmp_name)
+    try:
+        with os.fdopen(sha_fd, "wb") as f:
+            f.write((backup_sha256 + "\n").encode("ascii"))
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(sha_tmp_path, sha_path)
+        except FileExistsError:
+            raise BackupIntegrityError(
+                f"companion .sha256 passou a existir entre a validação e a publicação: {sha_path.name}"
+            )
+    finally:
+        if sha_tmp_path.exists():
+            sha_tmp_path.unlink()
+
+    return backup_sha256
+
+
+# ---------------------------------------------------------------------------
+# SQL do refresh/restore — reaproveita ao máximo o que já existe
+# (SQL_CREATE_STAGING, SQL_SHOPEE_WINDOW_RECALC_ROWS, SQL_VALIDATE_*,
+# SQL_INSERT_FINAL, SQL_SHOPEE_WINDOW_GOLD_AGGREGATES, _WINDOW_GOLD_SELECT_COLUMNS,
+# _WINDOW_CHANGED_PREDICATE — todos do Gate S2/S2.1, mesmo módulo). Só o que
+# é genuinamente NOVO neste gate (fingerprint fora do escopo, checagem
+# explícita de NaN/negativo, DELETE, leitura de linhas para o backup) ganha
+# constante própria.
+# ---------------------------------------------------------------------------
+
+SQL_REFRESH_STAGING_AGGREGATES = "SELECT COUNT(*), COALESCE(SUM(gmv), 0), COALESCE(SUM(orders), 0) FROM stg_marketplace_region_daily"
+
+SQL_REFRESH_OUT_OF_SCOPE_IN_STAGING = """
+    SELECT COUNT(*) FROM stg_marketplace_region_daily
+    WHERE marketplace_id <> %(shopee_marketplace_id)s
+       OR date < %(date_from)s OR date > %(date_to)s
+"""
+
+# Postgres numeric: 'NaN'::numeric >= 0 é TRUE (achado documentado do
+# projeto) — por isso o `<> 'NaN'` é SEMPRE explícito aqui, nunca só
+# `>= 0`. Defesa em profundidade: a fonte (silver) já tem CHECK (<>'NaN')
+# nas colunas de origem, então isto não deveria disparar nunca — mas o
+# primeiro caminho de escrita com DELETE desta tabela garante de qualquer
+# forma, sem confiar apenas na camada anterior.
+SQL_REFRESH_NAN_NEGATIVE_CHECK = """
+    SELECT COUNT(*) FROM stg_marketplace_region_daily
+    WHERE gmv = 'NaN' OR gmv < 0
+       OR (seller_shipping_cost IS NOT NULL AND (seller_shipping_cost = 'NaN' OR seller_shipping_cost < 0))
+       OR (buyer_shipping_fee IS NOT NULL AND (buyer_shipping_fee = 'NaN' OR buyer_shipping_fee < 0))
+       OR (estimated_shipping_fee IS NOT NULL AND (estimated_shipping_fee = 'NaN' OR estimated_shipping_fee < 0))
+       OR (reverse_shipping_fee IS NOT NULL AND (reverse_shipping_fee = 'NaN' OR reverse_shipping_fee < 0))
+"""
+
+# Fingerprint agregado de TUDO fora do escopo do refresh/restore (ML,
+# TikTok, e Shopee fora da janela) — capturado ANTES e DEPOIS de qualquer
+# DELETE/INSERT, sob o mesmo table lock. Cobre as duas garantias exigidas
+# (ML/TikTok inalterados E Shopee fora da janela inalterada) numa única
+# query, porque `NOT (marketplace_id=SHOPEE AND date BETWEEN...)` é
+# exatamente a união dos dois casos.
+SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT = """
+    SELECT COUNT(*), COALESCE(SUM(gmv), 0), COALESCE(SUM(orders), 0), COALESCE(SUM(units_sold), 0),
+           COALESCE(SUM(canceled_orders), 0), COALESCE(SUM(returned_orders), 0),
+           COALESCE(SUM(seller_shipping_cost), 0), COALESCE(SUM(buyer_shipping_fee), 0),
+           COALESCE(SUM(estimated_shipping_fee), 0), COALESCE(SUM(reverse_shipping_fee), 0),
+           COALESCE(SUM(uf_known_orders), 0), COALESCE(SUM(uf_eligible_orders), 0),
+           COALESCE(SUM(shipping_cost_covered_orders), 0), COALESCE(SUM(shipping_cost_eligible_orders), 0)
+    FROM gold.marketplace_region_daily
+    WHERE NOT (marketplace_id = %(shopee_marketplace_id)s AND date BETWEEN %(date_from)s AND %(date_to)s)
+"""
+
+SQL_SELECT_GOLD_WINDOW_ROWS = f"""
+    SELECT {_STAGING_INSERT_COLUMNS}
+    FROM gold.marketplace_region_daily
+    WHERE marketplace_id = %(shopee_marketplace_id)s
+      AND date BETWEEN %(date_from)s AND %(date_to)s
+    ORDER BY date, loja_id, uf
+"""
+
+SQL_SELECT_STAGING_ROWS = f"""
+    SELECT {_STAGING_INSERT_COLUMNS}
+    FROM stg_marketplace_region_daily
+    ORDER BY date, loja_id, uf
+"""
+
+# Comparação exata por chave — MESMA lógica de SQL_SHOPEE_WINDOW_KEY_DIFF
+# (Gate S2.1), mas contra a TEMP TABLE já materializada (o staging JÁ É o
+# recálculo, feito uma única vez sob o lock) em vez de recalcular a fonte
+# via CTE a cada chamada. Reexecutada 2x pelo refresh: antes do DELETE
+# (decide no_op/blocked/prosseguir) e depois do INSERT (reconciliação
+# pós-insert obrigatória) — mesma query, dois momentos diferentes da mesma
+# transação.
+SQL_REFRESH_KEY_DIFF = f"""
+    WITH gold_window AS (
+        SELECT {_WINDOW_GOLD_SELECT_COLUMNS}
+        FROM gold.marketplace_region_daily
+        WHERE marketplace_id = %(shopee_marketplace_id)s
+          AND date BETWEEN %(date_from)s AND %(date_to)s
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE s.date IS NULL) AS gold_only_key_count,
+        COUNT(*) FILTER (WHERE g.date IS NULL) AS source_only_key_count,
+        COUNT(*) FILTER (
+            WHERE g.date IS NOT NULL AND s.date IS NOT NULL
+              AND ({_WINDOW_CHANGED_PREDICATE})
+        ) AS changed_key_count
+    FROM gold_window g
+    FULL OUTER JOIN stg_marketplace_region_daily s
+      ON g.date = s.date
+     AND g.marketplace_id = s.marketplace_id
+     AND g.loja_id = s.loja_id
+     AND g.uf = s.uf
+"""
+
+# DELETE — o ÚNICO permitido em todo o módulo, e só neste formato lógico:
+# marketplace_id = Shopee AND date BETWEEN date_from AND date_to. Datas e
+# marketplace_id SEMPRE bind parameters (entrada de usuário/backup — nunca
+# interpolados como literal de string).
+SQL_REFRESH_DELETE = """
+    DELETE FROM gold.marketplace_region_daily
+    WHERE marketplace_id = %(shopee_marketplace_id)s
+      AND date BETWEEN %(date_from)s AND %(date_to)s
+"""
+
+# INSERT de restauração — 1 linha por vez (nunca um bulk execute_values):
+# um bulk INSERT paginado tornaria cur.rowcount não confiável entre páginas
+# (gotcha conhecido do psycopg2), e este caminho já é raro/deliberado, não
+# um hot path — o custo de N INSERTs individuais é aceitável em troca de um
+# rowcount==1 por linha sempre confiável. Colunas explícitas, nunca `id`.
+SQL_RESTORE_INSERT_ROW = (
+    f"INSERT INTO gold.marketplace_region_daily ({_STAGING_INSERT_COLUMNS}) "
+    f"VALUES ({', '.join(['%s'] * len(_STAGING_INSERT_COLUMNS_LIST))})"
+)
+
+
+def execute_shopee_window_refresh(
+    write_url: str,
+    date_from: date,
+    date_to: date,
+    audit_path: Path,
+    *,
+    confirm_empty_window: bool = False,
+    repo_root: Path = REPO_ROOT,
+) -> ShopeeWindowRefreshResult:
+    """Gate S3 — refresh transacional da Gold regional Shopee por janela.
+    Substitui SOMENTE `marketplace_id=SHOPEE AND date BETWEEN date_from AND
+    date_to`.
+
+    Ordem: validar janela/audit_path (ANTES de conectar) -> 1 conexão de
+    escrita, autocommit=False -> advisory lock (MESMA chave de
+    execute_first_load/execute_incremental_load — nunca rodam
+    concorrentemente com este refresh) -> lock_timeout/statement_timeout ->
+    LOCK TABLE ... SHARE ROW EXCLUSIVE MODE -> fingerprint fora do escopo
+    (antes) -> staging TEMP materializado UMA vez -> validações do staging
+    (duplicidade, nulos, numerador<=denominador, NaN/negativo, escopo
+    marketplace/janela) -> structurally_safe recalculado SOB O LOCK (nunca
+    reaproveita diagnose) -> comparação por chave Gold-atual vs. staging
+    (decide no_op) -> backup atômico ANTES do DELETE -> DELETE escopado
+    (rowcount == contagem anterior) -> INSERT do staging (rowcount ==
+    contagem do staging) -> reconciliação pós-insert (chave a chave e campo
+    a campo) -> fingerprint fora do escopo (depois, deve bater com antes)
+    -> COMMIT só se tudo passar. ROLLBACK completo em qualquer falha, sem
+    retry automático. Lock/close no finally — se o COMMIT já ocorreu e só
+    a liberação do lock/close falhar, o resultado `committed` é preservado
+    (com aviso sanitizado, sem sugestão de retry)."""
+    try:
+        _validate_shopee_window(date_from, date_to)
+    except InvalidWindowError as exc:
+        return ShopeeWindowRefreshResult(outcome="blocked", problems=[str(exc)])
+
+    audit_problem = _validate_new_window_audit_path(audit_path, repo_root)
+    if audit_problem:
+        return ShopeeWindowRefreshResult(outcome="blocked", problems=[audit_problem])
+
+    params = {"date_from": date_from, "date_to": date_to, "shopee_marketplace_id": SHOPEE_MARKETPLACE_ID}
+    result: Optional[ShopeeWindowRefreshResult] = None
+    lock_acquired = False
+    backup_sha256: Optional[str] = None
+
+    # Gate S3.1: connect() protegido — se falhar, retorna failed com erro
+    # sanitizado (nunca deixa a exceção nativa do psycopg2/libpq escapar
+    # sem passar por sanitize_error_message).
+    try:
+        conn = psycopg2.connect(write_url, connect_timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        return ShopeeWindowRefreshResult(outcome="failed", problems=[sanitize_error_message(exc)])
+
+    try:
+        # autocommit=False DENTRO do try: se a própria atribuição falhar
+        # (raro, mas possível), o finally ainda fecha a conexão.
+        conn.autocommit = False
+
+        lock_acquired = try_acquire_advisory_lock(conn)
+        if not lock_acquired:
+            result = ShopeeWindowRefreshResult(
+                outcome="blocked",
+                problems=[
+                    f"advisory lock {ADVISORY_LOCK_KEY} já está em uso — outra execução de carga da Gold "
+                    "regional pode estar em andamento. Abortando sem tentar novamente."
+                ],
+            )
+            return result
+
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            # Janela de até 180 dias recalculada do zero pode custar mais que
+            # o incremental diário (600s, só "> MAX(date)") — teto próprio,
+            # documentado aqui por ser um valor novo, não copiado sem revisão.
+            cur.execute("SET LOCAL statement_timeout = '900s'")
+            cur.execute(f"LOCK TABLE {_GOLD_TABLE_QUALIFIED} IN SHARE ROW EXCLUSIVE MODE")
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_before = cur.fetchone()
+
+            cur.execute(SQL_CREATE_STAGING)
+            cur.execute(
+                f"INSERT INTO stg_marketplace_region_daily ({_STAGING_INSERT_COLUMNS}) {SQL_SHOPEE_WINDOW_RECALC_ROWS}",
+                params,
+            )
+
+            cur.execute(SQL_REFRESH_STAGING_AGGREGATES)
+            staging_rows, staging_gmv, staging_orders = cur.fetchone()
+            staging_rows = int(staging_rows)
+
+            cur.execute(SQL_VALIDATE_DUPLICATES)
+            (dup_count,) = cur.fetchone()
+            cur.execute(SQL_VALIDATE_NULLS)
+            (null_count,) = cur.fetchone()
+            cur.execute(SQL_VALIDATE_NUMERATOR_DENOMINATOR)
+            (bad_count,) = cur.fetchone()
+            cur.execute(SQL_REFRESH_NAN_NEGATIVE_CHECK)
+            (nan_negative_count,) = cur.fetchone()
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_IN_STAGING, params)
+            (out_of_scope_in_staging,) = cur.fetchone()
+
+            cur.execute(SQL_SHOPEE_WINDOW_GOLD_AGGREGATES, params)
+            gold_rows, gold_gmv, gold_orders = cur.fetchone()
+            gold_rows = int(gold_rows)
+
+            zero_source_risk = (staging_rows == 0 and gold_rows > 0)
+
+            structural_problems: list[str] = []
+            if dup_count:
+                structural_problems.append(f"{dup_count} combinação(ões) de chave duplicada(s) no staging")
+            if null_count:
+                structural_problems.append(f"{null_count} linha(s) com coluna obrigatória nula no staging")
+            if bad_count:
+                structural_problems.append(f"{bad_count} linha(s) com numerador > denominador no staging")
+            if nan_negative_count:
+                structural_problems.append(f"{nan_negative_count} linha(s) com NaN/valor negativo incompatível com as constraints no staging")
+            if out_of_scope_in_staging:
+                structural_problems.append(f"{out_of_scope_in_staging} linha(s) no staging fora do escopo marketplace/janela")
+
+            if zero_source_risk and not confirm_empty_window:
+                result = ShopeeWindowRefreshResult(
+                    outcome="blocked",
+                    problems=[
+                        "fonte recalculada tem ZERO linhas na janela e a Gold atual tem linhas -- "
+                        "requer --confirm-empty-window"
+                    ] + structural_problems,
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            if structural_problems:
+                result = ShopeeWindowRefreshResult(outcome="blocked", problems=structural_problems)
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_KEY_DIFF, params)
+            gold_only, source_only, changed = cur.fetchone()
+            would_change_data = bool(gold_only or source_only or changed)
+
+            if not would_change_data:
+                result = ShopeeWindowRefreshResult(outcome="no_op", rows_deleted=0, rows_inserted=0)
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_SELECT_GOLD_WINDOW_ROWS, params)
+            before_rows = cur.fetchall()
+            cur.execute(SQL_SELECT_STAGING_ROWS)
+            after_rows = cur.fetchall()
+
+            try:
+                backup_sha256 = _write_window_backup_atomic(audit_path, date_from, date_to, before_rows, after_rows)
+            except (OSError, BackupIntegrityError, json.JSONDecodeError) as exc:
+                # Nenhum DELETE aconteceu ainda (o backup é publicado ANTES).
+                # Se o JSON chegou a ser publicado mas o companion .sha256
+                # falhou, um artefato parcial pode existir em disco — nunca
+                # removido automaticamente, mas o resultado avisa disso de
+                # forma sanitizada (sem caminho absoluto).
+                result = ShopeeWindowRefreshResult(
+                    outcome="failed",
+                    problems=[
+                        f"falha ao gravar/validar backup atômico ({type(exc).__name__}) — nenhum DELETE foi "
+                        "executado; um artefato de backup parcial (JSON sem o companion .sha256, ou vice-versa) "
+                        "pode existir em disco no destino informado e deve ser conferido manualmente antes de "
+                        "tentar novamente"
+                    ],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_DELETE, params)
+            deleted = cur.rowcount
+            if deleted != gold_rows:
+                result = ShopeeWindowRefreshResult(
+                    outcome="failed", backup_path=str(audit_path), backup_sha256=backup_sha256,
+                    problems=[f"DELETE removeu {deleted} linha(s), esperado {gold_rows}"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_INSERT_FINAL)
+            inserted = cur.rowcount
+            if inserted != staging_rows:
+                result = ShopeeWindowRefreshResult(
+                    outcome="failed", backup_path=str(audit_path), backup_sha256=backup_sha256,
+                    problems=[f"INSERT inseriu {inserted} linha(s), esperado {staging_rows}"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_KEY_DIFF, params)
+            post_gold_only, post_source_only, post_changed = cur.fetchone()
+            if post_gold_only or post_source_only or post_changed:
+                result = ShopeeWindowRefreshResult(
+                    outcome="failed", backup_path=str(audit_path), backup_sha256=backup_sha256,
+                    problems=["reconciliação pós-insert divergente (Gold != staging chave a chave/campo a campo)"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_after = cur.fetchone()
+            if out_of_scope_after != out_of_scope_before:
+                result = ShopeeWindowRefreshResult(
+                    outcome="failed", backup_path=str(audit_path), backup_sha256=backup_sha256,
+                    problems=["linha(s) fora do escopo (ML/TikTok ou Shopee fora da janela) foram alteradas -- rollback"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+        # commit() fica FORA de qualquer atribuição prévia de `result` —
+        # só é seguro considerar "committed" depois que commit() retornar
+        # sem levantar. Se commit() falhar, cai no except abaixo (nunca
+        # "committed").
+        conn.commit()
+        result = ShopeeWindowRefreshResult(
+            outcome="committed",
+            rows_deleted=deleted,
+            rows_inserted=inserted,
+            backup_path=str(audit_path),
+            backup_sha256=backup_sha256,
+            gold_gmv_before=gold_gmv,
+            gold_gmv_after=staging_gmv,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        # Preserva backup_path/backup_sha256 se o backup já tinha sido
+        # publicado com sucesso antes desta falha (ex.: DELETE/INSERT/commit
+        # levantaram uma exceção genérica, não só um rowcount divergente
+        # tratado explicitamente acima) — nunca perde essa informação de
+        # auditoria só porque a falha não foi uma das antecipadas.
+        result = ShopeeWindowRefreshResult(
+            outcome="failed",
+            problems=[sanitize_error_message(exc)],
+            backup_path=str(audit_path) if backup_sha256 else None,
+            backup_sha256=backup_sha256,
+        )
+        _rollback_best_effort(conn, result)
+        return result
+    finally:
+        if lock_acquired:
+            try:
+                release_advisory_lock(conn)
+            except Exception as exc:  # noqa: BLE001
+                if result is not None:
+                    result.warnings.append(
+                        f"falha ao liberar advisory lock após a operação ({sanitize_error_message(exc)}) — "
+                        "resultado principal preservado, sem retry sugerido"
+                    )
+        try:
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            if result is not None:
+                result.warnings.append(
+                    f"falha ao fechar a conexão ({sanitize_error_message(exc)}) — resultado principal preservado, sem retry sugerido"
+                )
+
+
+def execute_shopee_window_restore(
+    write_url: str,
+    audit_path: Path,
+    expected_backup_sha256: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> ShopeeWindowRestoreResult:
+    """Gate S3 — restore compare-and-swap a partir de um backup de
+    `execute_shopee_window_refresh`. O arquivo é ENTRADA NÃO CONFIÁVEL:
+
+    1. `_validate_and_load_window_backup` (AUTORITATIVA — sempre revalida
+       do zero, nunca reaproveita uma checagem anterior da CLI, porque o
+       arquivo pode ter mudado entre as duas chamadas): caminho, formato do
+       SHA, tamanho do arquivo (ANTES de ler o conteúdo), SHA-256
+       recalculado e comparado, JSON parseado, estrutura completa
+       (`validate_window_backup_payload` — schema_version, created_at_utc,
+       marketplace_id só Shopee, grain_key/business_columns oficiais,
+       janela válida e <=180 dias, limite de registros, registros campo a
+       campo, chave única, contagens e agregados reconciliados).
+    2. Sob advisory lock + table lock, compara o estado ATUAL da Gold na
+       janela do backup contra `planned_after_records` — se não for
+       EXATAMENTE igual (chave a chave e campo a campo), aborta ANTES de
+       qualquer DELETE (compare-and-swap: impede restaurar sobre uma carga
+       posterior que já mudou a janela).
+    3. DELETE restrito à mesma janela/Shopee -> insere `before_records`
+       (1 INSERT por linha, nunca bulk — rowcount==1 sempre confiável) ->
+       reconcilia EXATAMENTE contra `before_records` -> confirma fingerprint
+       fora do escopo (ML/TikTok/Shopee fora da janela) inalterado -> COMMIT.
+    4. ROLLBACK completo em qualquer falha, sem retry automático."""
+    payload, problems = _validate_and_load_window_backup(audit_path, expected_backup_sha256, repo_root)
+    if problems:
+        return ShopeeWindowRestoreResult(outcome="blocked", problems=problems)
+
+    date_from = date.fromisoformat(payload["date_from"])
+    date_to = date.fromisoformat(payload["date_to"])
+    before_records = payload["before_records"]
+    planned_after_records = payload["planned_after_records"]
+
+    params = {"date_from": date_from, "date_to": date_to, "shopee_marketplace_id": SHOPEE_MARKETPLACE_ID}
+    result: Optional[ShopeeWindowRestoreResult] = None
+    lock_acquired = False
+
+    # Gate S3.1: connect() protegido — mesmo padrão do refresh.
+    try:
+        conn = psycopg2.connect(write_url, connect_timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        return ShopeeWindowRestoreResult(outcome="failed", problems=[sanitize_error_message(exc)])
+
+    try:
+        conn.autocommit = False  # dentro do try -- se falhar, finally ainda fecha a conexão
+
+        lock_acquired = try_acquire_advisory_lock(conn)
+        if not lock_acquired:
+            result = ShopeeWindowRestoreResult(
+                outcome="blocked",
+                problems=[f"advisory lock {ADVISORY_LOCK_KEY} já está em uso — abortando sem tentar novamente."],
+            )
+            return result
+
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SET LOCAL statement_timeout = '900s'")
+            cur.execute(f"LOCK TABLE {_GOLD_TABLE_QUALIFIED} IN SHARE ROW EXCLUSIVE MODE")
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_before = cur.fetchone()
+
+            cur.execute(SQL_SELECT_GOLD_WINDOW_ROWS, params)
+            current_rows = cur.fetchall()
+            current_records = [_row_to_backup_record(r) for r in current_rows]
+
+            current_by_key = _records_by_key(current_records)
+            planned_by_key = _records_by_key(planned_after_records)
+            cas_gold_only = sorted(set(current_by_key) - set(planned_by_key))
+            cas_source_only = sorted(set(planned_by_key) - set(current_by_key))
+            cas_changed = sorted(
+                k for k in (set(current_by_key) & set(planned_by_key)) if current_by_key[k] != planned_by_key[k]
+            )
+
+            if cas_gold_only or cas_source_only or cas_changed:
+                result = ShopeeWindowRestoreResult(
+                    outcome="blocked",
+                    problems=[
+                        "estado atual da Gold diverge de planned_after_records -- restauração recusada "
+                        "(compare-and-swap: uma carga posterior provavelmente alterou a janela)",
+                        f"gold_only={len(cas_gold_only)} source_only={len(cas_source_only)} changed={len(cas_changed)}",
+                    ],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            expected_current_count = len(planned_after_records)
+
+            cur.execute(SQL_REFRESH_DELETE, params)
+            deleted = cur.rowcount
+            if deleted != expected_current_count:
+                result = ShopeeWindowRestoreResult(
+                    outcome="failed",
+                    problems=[f"DELETE removeu {deleted} linha(s), esperado {expected_current_count}"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            inserted = 0
+            for record in before_records:
+                values = _backup_record_to_row_values(record)
+                cur.execute(SQL_RESTORE_INSERT_ROW, values)
+                if cur.rowcount != 1:
+                    result = ShopeeWindowRestoreResult(
+                        outcome="failed",
+                        problems=[f"INSERT de restauração afetou {cur.rowcount} linha(s) (esperado 1)"],
+                    )
+                    _rollback_best_effort(conn, result)
+                    return result
+                inserted += 1
+
+            cur.execute(SQL_SELECT_GOLD_WINDOW_ROWS, params)
+            final_rows = cur.fetchall()
+            final_records = [_row_to_backup_record(r) for r in final_rows]
+            final_by_key = _records_by_key(final_records)
+            before_by_key = _records_by_key(before_records)
+
+            recon_gold_only = sorted(set(final_by_key) - set(before_by_key))
+            recon_source_only = sorted(set(before_by_key) - set(final_by_key))
+            recon_changed = sorted(
+                k for k in (set(final_by_key) & set(before_by_key)) if final_by_key[k] != before_by_key[k]
+            )
+            if recon_gold_only or recon_source_only or recon_changed:
+                result = ShopeeWindowRestoreResult(
+                    outcome="failed",
+                    problems=["reconciliação pós-restauração divergente (Gold != before_records chave a chave/campo a campo)"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+            cur.execute(SQL_REFRESH_OUT_OF_SCOPE_FINGERPRINT, params)
+            out_of_scope_after = cur.fetchone()
+            if out_of_scope_after != out_of_scope_before:
+                result = ShopeeWindowRestoreResult(
+                    outcome="failed",
+                    problems=["linha(s) fora do escopo (ML/TikTok ou Shopee fora da janela) foram alteradas durante a restauração -- rollback"],
+                )
+                _rollback_best_effort(conn, result)
+                return result
+
+        # commit() fica fora de qualquer atribuição prévia de `result` — só
+        # é seguro considerar "committed" depois que commit() retornar sem
+        # levantar.
+        conn.commit()
+        result = ShopeeWindowRestoreResult(outcome="committed", rows_deleted=deleted, rows_inserted=inserted)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result = ShopeeWindowRestoreResult(outcome="failed", problems=[sanitize_error_message(exc)])
+        _rollback_best_effort(conn, result)
+        return result
+    finally:
+        if lock_acquired:
+            try:
+                release_advisory_lock(conn)
+            except Exception as exc:  # noqa: BLE001
+                if result is not None:
+                    result.warnings.append(
+                        f"falha ao liberar advisory lock após a operação ({sanitize_error_message(exc)}) — "
+                        "resultado principal preservado, sem retry sugerido"
+                    )
+        try:
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            if result is not None:
+                result.warnings.append(
+                    f"falha ao fechar a conexão ({sanitize_error_message(exc)}) — resultado principal preservado, sem retry sugerido"
+                )
+
+
 # ---------------------------------------------------------------------------
 # CLI — `python -m pipelines.ingestion.gold_regional.loader --diagnose` ou
 # `--incremental`. `--diagnose` nunca lê o secret de escrita nem abre
@@ -1243,6 +2493,9 @@ def diagnose_shopee_window(read_url: str, date_from: date, date_to: date) -> Sho
 # chaves esperadas, URL de escrita diferente da de leitura) e do preflight
 # de escrita passarem. `--diagnose-shopee-window` (Gate S2) segue a mesma
 # disciplina somente-leitura de `--diagnose`, nunca a de `--incremental`.
+# `--refresh-shopee-window`/`--restore-shopee-window` (Gate S3) usam um
+# secret e preflight PRÓPRIOS (`.env.gold-window-write.local`, via
+# `window_write_conn.py`) — nunca `.env.gold-write.local`.
 # ---------------------------------------------------------------------------
 
 def _load_secret_or_none(secret_path: Path, repo_root: Path) -> tuple[Optional[dict], Optional[str]]:
@@ -1376,6 +2629,199 @@ def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH, repo_root
     return 0
 
 
+def _print_window_write_preflight(report: window_write_conn.WindowPreflightReport, label: str) -> None:
+    print(f"\n=== Preflight de escrita ({label}) — nunca exibe host/IP/usuário/senha ===")
+    for key, value in report.safe_summary.items():
+        print(f"  {key}: {value}")
+    for warning in report.warnings:
+        print(f"  AVISO (não bloqueante): {warning}")
+    if not report.ok:
+        print("  BLOQUEADO:")
+        for reason in report.blocking_reasons:
+            print(f"    - {reason}")
+
+
+def run_refresh_shopee_window_cli(
+    date_from: date,
+    date_to: date,
+    audit_path: Path,
+    confirm_empty_window: bool = False,
+    secret_path: Path = DEFAULT_WINDOW_WRITE_SECRET_PATH,
+    repo_root: Path = REPO_ROOT,
+) -> int:
+    """Gate S3.1 — CLI de `--refresh-shopee-window`. Secret/preflight
+    DEDICADOS (`window_write_conn.py`/`.env.gold-window-write.local`) —
+    nunca `.env.gold-write.local`.
+
+    Ordem: `DATAMART_DATABASE_URL` configurado -> janela válida
+    (`_validate_shopee_window`) -> `audit_path` válido
+    (`_validate_new_window_audit_path`) -> SÓ ENTÃO secret -> preflight ->
+    `execute_shopee_window_refresh` (que revalida janela/audit_path do zero
+    — a checagem antecipada aqui é só fail-fast, nunca autoritativa).
+
+    Exit codes: 0 committed/no_op; 2 config/janela/audit_path/secret/
+    preflight inválido (nunca chegou a abrir a transação de escrita real);
+    3 blocked (bloqueio estrutural encontrado sob o lock); 4 failed
+    (rollback completo executado).
+
+    Nunca imprime caminho absoluto: erros de audit_path usam categoria/
+    basename; a confirmação de sucesso mostra só `audit_path.name` + SHA."""
+    if not settings.datamart_url:
+        print("DATAMART_DATABASE_URL não configurado — refresh-shopee-window abortado.", file=sys.stderr)
+        return 2
+
+    try:
+        _validate_shopee_window(date_from, date_to)
+    except InvalidWindowError as exc:
+        print(f"--refresh-shopee-window rejeitado: {exc}", file=sys.stderr)
+        return 2
+
+    audit_problem = _validate_new_window_audit_path(audit_path, repo_root)
+    if audit_problem:
+        print(f"--refresh-shopee-window rejeitado: {audit_problem}", file=sys.stderr)
+        return 2
+
+    try:
+        secret = window_write_conn.load_window_write_secret(secret_path, repo_root)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--refresh-shopee-window bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        write_url = window_write_conn.validate_window_write_guardrails(secret, settings.datamart_url)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--refresh-shopee-window bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    # Gate S3.2 (Finding 1): run_window_preflight é projetado para NUNCA
+    # levantar (sempre retorna um report), mas esta barreira cobre uma
+    # regressão futura — a CLI nunca pode virar traceback/mensagem nativa.
+    try:
+        report = window_write_conn.run_window_preflight(write_url, settings.datamart_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--refresh-shopee-window bloqueado: falha inesperada no preflight: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 2
+    _print_window_write_preflight(report, "refresh por janela Shopee")
+    if not report.ok:
+        print("REFRESH NÃO executado — preflight bloqueado.", file=sys.stderr)
+        return 2
+
+    try:
+        result = execute_shopee_window_refresh(
+            write_url, date_from, date_to, audit_path,
+            confirm_empty_window=confirm_empty_window, repo_root=repo_root,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Barreira final: nenhuma exceção não prevista pode escapar como
+        # traceback com mensagem nativa do driver — execute_shopee_window_refresh
+        # já captura e sanitiza tudo internamente, mas esta barreira cobre
+        # qualquer bug futuro que reintroduza um caminho sem try/except.
+        print(f"--refresh-shopee-window falhou de forma inesperada: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 4
+
+    for w in result.warnings:
+        print(f"AVISO: {w}", file=sys.stderr)
+
+    if result.outcome == "committed":
+        print(f"REFRESH COMMITTED: {result.rows_deleted} linha(s) deletada(s), {result.rows_inserted} linha(s) inserida(s).")
+        backup_name = Path(result.backup_path).name if result.backup_path else None
+        print(f"Backup: {backup_name} (sha256={result.backup_sha256})")
+        return 0
+    if result.outcome == "no_op":
+        print("NO_OP: janela já reconciliada — Gold e fonte batem chave a chave e campo a campo. Nenhuma escrita realizada.")
+        return 0
+    if result.outcome == "blocked":
+        print("BLOQUEADO (nenhuma escrita realizada):", file=sys.stderr)
+        for p in result.problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 3
+    print("FALHOU (rollback completo executado):", file=sys.stderr)
+    for p in result.problems:
+        print(f"  - {p}", file=sys.stderr)
+    if result.backup_path:
+        print(f"  (backup preservado para auditoria: {Path(result.backup_path).name}, sha256={result.backup_sha256})", file=sys.stderr)
+    return 4
+
+
+def run_restore_shopee_window_cli(
+    audit_path: Path,
+    expected_backup_sha256: str,
+    secret_path: Path = DEFAULT_WINDOW_WRITE_SECRET_PATH,
+    repo_root: Path = REPO_ROOT,
+) -> int:
+    """Gate S3.1 — CLI de `--restore-shopee-window`. Mesmo secret/preflight
+    dedicados do refresh.
+
+    Ordem: `DATAMART_DATABASE_URL` configurado -> `audit_path`/SHA/tamanho/
+    JSON/estrutura validados por completo via `_validate_and_load_window_backup`
+    (fail-fast) -> SÓ ENTÃO secret -> preflight ->
+    `execute_shopee_window_restore` (que REVALIDA tudo de novo, do zero —
+    o arquivo pode ter mudado entre esta checagem e a execução; a checagem
+    daqui nunca é autoritativa).
+
+    Exit codes: 0 committed; 2 hash/JSON/estrutura/secret/preflight
+    inválido; 3 blocked (compare-and-swap recusou — estado atual diverge de
+    planned_after_records); 4 failed.
+
+    Nunca imprime caminho absoluto nas mensagens de erro/sucesso."""
+    if not settings.datamart_url:
+        print("DATAMART_DATABASE_URL não configurado — restore-shopee-window abortado.", file=sys.stderr)
+        return 2
+
+    _, problems = _validate_and_load_window_backup(audit_path, expected_backup_sha256, repo_root)
+    if problems:
+        print("--restore-shopee-window rejeitado (validado antes de ler secret/preflight):", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 2
+
+    try:
+        secret = window_write_conn.load_window_write_secret(secret_path, repo_root)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--restore-shopee-window bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        write_url = window_write_conn.validate_window_write_guardrails(secret, settings.datamart_url)
+    except window_write_conn.WindowSecretLoadError as exc:
+        print(f"--restore-shopee-window bloqueado: {exc}", file=sys.stderr)
+        return 2
+
+    # Gate S3.2 (Finding 1): mesma barreira defensiva do refresh — o
+    # preflight nunca deveria levantar, mas se levantar, nunca vira traceback.
+    try:
+        report = window_write_conn.run_window_preflight(write_url, settings.datamart_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--restore-shopee-window bloqueado: falha inesperada no preflight: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 2
+    _print_window_write_preflight(report, "restore por janela Shopee")
+    if not report.ok:
+        print("RESTORE NÃO executado — preflight bloqueado.", file=sys.stderr)
+        return 2
+
+    try:
+        result = execute_shopee_window_restore(write_url, audit_path, expected_backup_sha256, repo_root=repo_root)
+    except Exception as exc:  # noqa: BLE001
+        print(f"--restore-shopee-window falhou de forma inesperada: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 4
+
+    for w in result.warnings:
+        print(f"AVISO: {w}", file=sys.stderr)
+
+    if result.outcome == "committed":
+        print(f"RESTORE COMMITTED: {result.rows_deleted} linha(s) deletada(s), {result.rows_inserted} linha(s) restaurada(s).")
+        return 0
+    if result.outcome == "blocked":
+        print("BLOQUEADO (nenhuma escrita realizada):", file=sys.stderr)
+        for p in result.problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 3
+    print("FALHOU (rollback completo executado):", file=sys.stderr)
+    for p in result.problems:
+        print(f"  - {p}", file=sys.stderr)
+    return 4
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=str(REPO_ROOT / ".env"))
@@ -1390,20 +2836,77 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--diagnose-shopee-window", action="store_true",
         help="Somente leitura (Gate S2): recalcula a janela Shopee [--date-from, --date-to] a partir da "
              "fonte (mesmo dedup arquivo-vencedor da carga) e compara com gold.marketplace_region_daily. "
-             "Nunca escreve — o refresh real (Gate S3) ainda não existe.",
+             "Nunca escreve.",
     )
-    parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window.")
-    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window.")
+    mode.add_argument(
+        "--refresh-shopee-window", action="store_true",
+        help="Gate S3: substitui gold.marketplace_region_daily para Shopee na janela [--date-from, --date-to] "
+             "(DELETE + INSERT restritos ao escopo, backup atômico obrigatório via --audit-path). "
+             "Requer .env.gold-window-write.local.",
+    )
+    mode.add_argument(
+        "--restore-shopee-window", action="store_true",
+        help="Gate S3: restaura gold.marketplace_region_daily a partir de um backup de --refresh-shopee-window "
+             "(compare-and-swap — --audit-path + --expected-backup-sha256). Requer .env.gold-window-write.local.",
+    )
+    parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window.")
+    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window.")
+    parser.add_argument(
+        "--audit-path", type=Path, default=None,
+        help="Caminho absoluto do .json de backup — destino (--refresh-shopee-window) ou origem "
+             "(--restore-shopee-window). Obrigatório com os dois.",
+    )
+    parser.add_argument(
+        "--confirm-empty-window", action="store_true",
+        help="Só com --refresh-shopee-window: libera o caso staging vazio + Gold com linhas na janela.",
+    )
+    parser.add_argument(
+        "--expected-backup-sha256", default=None, metavar="<64-hex>",
+        help="Só com --restore-shopee-window: SHA-256 esperado do arquivo de backup — obrigatório.",
+    )
     args = parser.parse_args(argv)
 
     if args.diagnose_shopee_window and (args.date_from is None or args.date_to is None):
         parser.error("--diagnose-shopee-window requer --date-from e --date-to")
 
-    if args.diagnose:
-        return run_diagnose_cli()
-    if args.diagnose_shopee_window:
-        return run_diagnose_shopee_window_cli(args.date_from, args.date_to)
-    return run_incremental_cli()
+    if args.refresh_shopee_window and (args.date_from is None or args.date_to is None or args.audit_path is None):
+        parser.error("--refresh-shopee-window requer --date-from, --date-to e --audit-path")
+
+    if args.restore_shopee_window and (args.audit_path is None or args.expected_backup_sha256 is None):
+        parser.error("--restore-shopee-window requer --audit-path e --expected-backup-sha256")
+
+    if (args.date_from is not None or args.date_to is not None) and not (
+        args.diagnose_shopee_window or args.refresh_shopee_window
+    ):
+        parser.error("--date-from/--date-to só são válidos junto com --diagnose-shopee-window ou --refresh-shopee-window")
+
+    if args.audit_path is not None and not (args.refresh_shopee_window or args.restore_shopee_window):
+        parser.error("--audit-path só é válido junto com --refresh-shopee-window ou --restore-shopee-window")
+
+    if args.confirm_empty_window and not args.refresh_shopee_window:
+        parser.error("--confirm-empty-window só é válido junto com --refresh-shopee-window")
+
+    if args.expected_backup_sha256 is not None and not args.restore_shopee_window:
+        parser.error("--expected-backup-sha256 só é válido junto com --restore-shopee-window")
+
+    # Barreira final: nenhuma exceção não prevista pode produzir traceback
+    # ou mensagem nativa contendo infraestrutura na saída da CLI. Cada
+    # run_*_cli já sanitiza tudo internamente — esta é a última rede de
+    # segurança contra um bug futuro que reintroduza um caminho sem
+    # try/except, nunca uma substituta para o tratamento interno.
+    try:
+        if args.diagnose:
+            return run_diagnose_cli()
+        if args.diagnose_shopee_window:
+            return run_diagnose_shopee_window_cli(args.date_from, args.date_to)
+        if args.refresh_shopee_window:
+            return run_refresh_shopee_window_cli(args.date_from, args.date_to, args.audit_path, args.confirm_empty_window)
+        if args.restore_shopee_window:
+            return run_restore_shopee_window_cli(args.audit_path, args.expected_backup_sha256)
+        return run_incremental_cli()
+    except Exception as exc:  # noqa: BLE001
+        print(f"falha inesperada e não tratada: {sanitize_error_message(exc)}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
