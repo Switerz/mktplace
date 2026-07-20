@@ -652,6 +652,44 @@ Pontos importantes para quem opera o scraping:
   verdade); e um jeito seguro de confirmar que o caminho funciona antes
   dele. Continua valendo: esta automacao externa **nao deve habilitar**
   nenhum comando de escrita real (`--refresh-shopee-window`) ainda.
+- **Atualizacao 2026-07-20 (Gate S4.3b, primeira execucao real do modo de
+  validacao)**: com autorizacao explicita, `--validate-shopee-window-write-path`
+  rodou uma unica vez contra o Data Mart real (janela `2026-01-01..2026-01-07`,
+  credencial dedicada). Resultado: `failed` (exit 4) — nao por bug de logica,
+  mas porque o `CREATE TEMP TABLE` da staging aciona um trigger de auditoria
+  de DDL do AWS DMS que exige `INSERT` numa tabela de auditoria que a role
+  dedicada (corretamente) nao tem. **Zero linha escrita, zero backup, rollback
+  confirmado, lock liberado, dados e privilegios inalterados** (conferido
+  read-only antes/depois). Isso na pratica **evitou** que o futuro piloto
+  real de `--refresh-shopee-window` batesse nesse mesmo bloqueio sem nenhuma
+  rede de seguranca. Continua valendo: esta automacao externa **nao deve
+  habilitar** nenhum comando de escrita real ainda — falta resolver esse
+  GRANT adicional (fora desta rodada) e ainda nao ha janela candidata.
+- **Atualizacao 2026-07-20 (Gate S4.3c, diagnostico read-only do bloqueio)**:
+  investigacao 100% somente leitura confirmou a causa raiz do achado do
+  Gate S4.3b: a funcao do trigger de auditoria DDL da AWS DMS
+  (`awsdms_intercept_ddl`) esta configurada como `SECURITY INVOKER`, nao
+  `SECURITY DEFINER` como o padrao oficial da AWS documenta. Por isso,
+  qualquer role nova e corretamente restrita (nao so a do Shopee) precisa
+  de GRANT proprio nessa tabela de auditoria para rodar qualquer DDL —
+  nao e uma lacuna especifica desta automacao. Recomendacao (nao
+  executada): corrigir o artefato DMS (`SECURITY DEFINER`), nao conceder
+  privilegio de escrita nessa tabela a nenhuma role de negocio. Nenhuma
+  ACL/funcao/role foi alterada nesta rodada. Continua valendo: esta
+  automacao externa **nao deve habilitar** nenhum comando de escrita real
+  ainda.
+- **Atualizacao 2026-07-20 (Gate S4.3d, preflight detecta o bloqueio DMS
+  antes de qualquer lock/staging)**: o preflight de escrita do `mktplace`
+  (usado tanto por `--refresh-shopee-window` quanto pelo modo de validacao)
+  agora detecta sozinho, so' com consultas de catalogo (sem tocar em
+  banco real nesta rodada), se o interceptor de DDL do AWS DMS esta
+  configurado de um jeito que bloquearia `CREATE TEMP TABLE` — e bloqueia
+  a execucao **antes** de abrir qualquer transacao de escrita, adquirir
+  lock ou tentar a staging. Nunca exige nem concede privilegio de
+  auditoria DMS para a role Shopee. So codigo/testes/documentacao —
+  nenhuma alteracao real de ACL/funcao/role. Continua valendo: esta
+  automacao externa **nao deve habilitar** nenhum comando de escrita real
+  ainda.
 
 ## Alertas e falhas comuns
 

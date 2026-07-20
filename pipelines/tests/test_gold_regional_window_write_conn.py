@@ -846,3 +846,192 @@ def test_run_window_preflight_so_o_valor_esperado_exato_aprova(monkeypatch):
     report = wwc.run_window_preflight(write_url, _READ_URL)
     assert report.ok is False  # 0 não é False literal — inconclusivo bloqueia
     assert any("rolsuper" in r for r in report.blocking_reasons)
+
+
+# =============================================================================
+# Gate S4.3d — compatibilidade do interceptor de DDL do AWS DMS
+# (achado real do Gate S4.3b: CREATE TEMP TABLE aciona awsdms_intercept_ddl).
+# Nenhum banco real é tocado -- ScriptedConn/ScriptedCursor, mesmo padrão do
+# resto deste arquivo.
+# =============================================================================
+
+_DMS_EVTFOID = 999999
+_DMS_OWNER_OID = 555555
+_DMS_SEQ_QUALIFIED = "public.awsdms_ddl_audit_c_key_seq"
+
+
+def _dms_responses(
+    trigger_present=True,
+    evtenabled="O",
+    function_present=True,
+    prosecdef=True,
+    table_present=True,
+    insert_ok=True,
+    delete_ok=True,
+    sequence_present=True,
+    usage_ok=True,
+):
+    """Constrói as respostas cientadas do bloco de checagem DMS, na ORDEM
+    real das consultas, parando assim que o código de produção pararia de
+    consultar (trigger ausente/desabilitado, função ausente, tabela
+    ausente, sequence ausente -- cada um interrompe a cadeia real de
+    queries em `run_window_preflight`). Colocado ANTES de
+    `_MAIN_HAPPY_RESPONSES` pelo chamador para que os matchers específicos
+    (com `%S, %S` em vez de `CURRENT_USER`) vençam qualquer matcher
+    genérico pré-existente (ex.: `HAS_SEQUENCE_PRIVILEGE` bare)."""
+    responses = []
+    if not trigger_present:
+        return responses  # nenhum matcher -> fetchone() default (None) -> trigger ausente
+    responses.append(("PG_EVENT_TRIGGER", "one", (evtenabled, _DMS_EVTFOID)))
+    if evtenabled == "D":
+        return responses  # desabilitado -> código nunca consulta a função
+
+    if not function_present:
+        responses.append(("PROSECDEF, PROOWNER FROM PG_PROC", "one", None))
+        return responses
+    responses.append(("PROSECDEF, PROOWNER FROM PG_PROC", "one", (prosecdef, _DMS_OWNER_OID)))
+
+    if not table_present:
+        responses.append(("PG_CLASS C JOIN PG_NAMESPACE N ON N.OID = C.RELNAMESPACE", "one", (False,)))
+        return responses
+    responses.append(("PG_CLASS C JOIN PG_NAMESPACE N ON N.OID = C.RELNAMESPACE", "one", (True,)))
+
+    responses.append(("HAS_TABLE_PRIVILEGE(%S, %S, 'INSERT')", "one", (insert_ok, delete_ok)))
+
+    if not sequence_present:
+        responses.append(("PG_GET_SERIAL_SEQUENCE", "one", (None,)))
+        return responses
+    responses.append(("PG_GET_SERIAL_SEQUENCE", "one", (_DMS_SEQ_QUALIFIED,)))
+    responses.append(("HAS_SEQUENCE_PRIVILEGE(%S, %S, 'USAGE')", "one", (usage_ok,)))
+    return responses
+
+
+def _install_dms_scenario(monkeypatch, **dms_kwargs):
+    responses = _dms_responses(**dms_kwargs) + _MAIN_HAPPY_RESPONSES
+    return _install_fake_connect(monkeypatch, main_responses=responses)
+
+
+def test_dms_trigger_ausente_nao_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, trigger_present=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is True
+    assert report.safe_summary["dms_ddl_trigger_present"] is False
+    assert report.safe_summary["dms_ddl_trigger_enabled"] is False
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is True
+
+
+def test_dms_trigger_desabilitado_nao_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, evtenabled="D")
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is True
+    assert report.safe_summary["dms_ddl_trigger_present"] is True
+    assert report.safe_summary["dms_ddl_trigger_enabled"] is False
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is True
+
+
+def test_dms_trigger_habilitado_security_invoker_bloqueia(monkeypatch):
+    """Reproduz exatamente o achado real do Gate S4.3b: prosecdef=false."""
+    write_url = _install_dms_scenario(monkeypatch, prosecdef=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_function_security_definer"] is False
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is False
+    assert any("Interceptor DDL do AWS DMS incompatível" in r for r in report.blocking_reasons)
+    assert any("SECURITY DEFINER" in r for r in report.blocking_reasons)
+
+
+def test_dms_security_definer_com_privilegios_corretos_aprova(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, prosecdef=True)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is True
+    assert report.safe_summary["dms_function_security_definer"] is True
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is True
+
+
+def test_dms_owner_sem_insert_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, insert_ok=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_function_owner_can_insert_audit"] is False
+    assert any("INSERT" in r for r in report.blocking_reasons)
+
+
+def test_dms_owner_sem_delete_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, delete_ok=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_function_owner_can_delete_audit"] is False
+    assert any("DELETE" in r for r in report.blocking_reasons)
+
+
+def test_dms_owner_sem_usage_sequence_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, usage_ok=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_function_owner_can_use_sequence"] is False
+    assert any("USAGE" in r for r in report.blocking_reasons)
+
+
+def test_dms_tabela_ausente_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, table_present=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_audit_table_present"] is False
+    assert any("tabela de auditoria" in r for r in report.blocking_reasons)
+
+
+def test_dms_sequence_ausente_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, sequence_present=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_audit_sequence_present"] is False
+    assert any("sequence de auditoria" in r for r in report.blocking_reasons)
+
+
+def test_dms_funcao_ausente_bloqueia(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, function_present=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_function_present"] is False
+    assert any("função do interceptor" in r for r in report.blocking_reasons)
+
+
+def test_dms_resultado_inconclusivo_bloqueia(monkeypatch):
+    """Trigger habilitado, mas a consulta seguinte (prosecdef/owner) LEVANTA
+    uma exceção (simulando uma falha real de consulta) -- os campos ainda
+    não coletados permanecem `None` (inconclusivo), e "inconclusivo nunca
+    é tratado como aprovado" precisa valer aqui também."""
+    responses = [
+        ("PG_EVENT_TRIGGER", "one", ("O", _DMS_EVTFOID)),
+        ("PROSECDEF, PROOWNER FROM PG_PROC", "raise", RuntimeError("falha simulada na consulta")),
+    ] + _MAIN_HAPPY_RESPONSES
+    write_url = _install_fake_connect(monkeypatch, main_responses=responses)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    assert report.safe_summary["dms_ddl_trigger_present"] is True
+    assert report.safe_summary["dms_ddl_trigger_enabled"] is True
+    assert report.safe_summary["dms_function_present"] is None  # nunca confirmado -> inconclusivo
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is False
+    assert any("Interceptor DDL do AWS DMS incompatível" in r for r in report.blocking_reasons)
+
+
+def test_dms_mensagem_nunca_vaza_owner_corpo_ou_infraestrutura(monkeypatch):
+    write_url = _install_dms_scenario(monkeypatch, prosecdef=False)
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is False
+    combined = " ".join(report.blocking_reasons) + " " + str(report.safe_summary)
+    for forbidden in (
+        str(_DMS_OWNER_OID), "prosrc", "awsdms-gogroup", "datamart-gogroup.example.rds.amazonaws.com",
+        "10.0.0.5", "postgres:", "password",
+    ):
+        assert forbidden not in combined
+
+
+def test_dms_nao_afeta_preflight_sem_dms_configurado_no_cluster(monkeypatch):
+    """Regressão: sem nenhuma resposta DMS cientada (cluster sem o
+    artefato), o preflight segue exatamente como antes do Gate S4.3d."""
+    write_url = _install_fake_connect(monkeypatch)  # _MAIN_HAPPY_RESPONSES puro, sem PG_EVENT_TRIGGER
+    report = wwc.run_window_preflight(write_url, _READ_URL)
+    assert report.ok is True
+    assert report.safe_summary["dms_ddl_trigger_present"] is False
+    assert report.safe_summary["dms_ddl_interceptor_compatible"] is True

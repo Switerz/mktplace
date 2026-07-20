@@ -46,6 +46,16 @@ com privilégio mínimo diferente):
 
 Este módulo NUNCA cria/altera role, secret ou arquivo `.env.gold-window-write.local`
 real — só lê e valida o que já existir em disco.
+
+Gate S4.3d — o preflight também detecta, ANTES de qualquer staging/lock
+operacional, se o event trigger de auditoria de DDL do AWS DMS
+(`awsdms_intercept_ddl`, achado real do Gate S4.3b: `CREATE TEMP TABLE` da
+staging aciona esse trigger) está configurado de um jeito incompatível com
+uma role least-privilege — sem nunca exigir/sugerir privilégio de auditoria
+DMS para a role Shopee. Ver `run_window_preflight` para a semântica
+completa (trigger ausente/desabilitado nunca bloqueia; trigger ativo exige
+`SECURITY DEFINER` + owner da função com os privilégios corretos, com
+"inconclusivo bloqueia" valendo aqui também).
 """
 from __future__ import annotations
 
@@ -68,6 +78,21 @@ _GOLD_TABLE_NAME = "marketplace_region_daily"
 _GOLD_TABLE_QUALIFIED = f"{_GOLD_TABLE_SCHEMA}.{_GOLD_TABLE_NAME}"
 _SILVER_SOURCE_TABLE_QUALIFIED = "silver.stg_shopee_order_item_snapshots"
 _GOLD_ID_SEQUENCE_QUALIFIED = f"{_GOLD_TABLE_SCHEMA}.{_GOLD_TABLE_NAME}_id_seq"
+
+# Gate S4.3d — interceptor de DDL do AWS DMS (achado real do Gate S4.3b/S4.3c:
+# `CREATE TEMP TABLE` da staging aciona este event trigger, que tenta INSERT/
+# DELETE numa tabela de auditoria de todo o cluster). Nomes fixos do artefato
+# oficial AWS DMS — hardcoded de propósito, mesmo padrão de `_GOLD_TABLE_NAME`/
+# `_SILVER_SOURCE_TABLE_QUALIFIED` acima: o preflight nunca deve depender de
+# descobrir esses nomes dinamicamente a partir de uma fonte não confiável.
+_DMS_DDL_TRIGGER_NAME = "awsdms_intercept_ddl"
+_DMS_AUDIT_TABLE_SCHEMA = "public"
+_DMS_AUDIT_TABLE_NAME = "awsdms_ddl_audit"
+_DMS_AUDIT_TABLE_QUALIFIED = f"{_DMS_AUDIT_TABLE_SCHEMA}.{_DMS_AUDIT_TABLE_NAME}"
+# Coluna serial oficial do artefato AWS DMS (confirmada via auditoria read-only
+# do Gate S4.3c) — usada só para localizar a sequence via
+# `pg_get_serial_sequence`, nunca para ler/gravar linhas da tabela.
+_DMS_AUDIT_SERIAL_COLUMN = "c_key"
 
 
 class WindowSecretLoadError(RuntimeError):
@@ -173,6 +198,20 @@ def run_window_preflight(write_url: str, expected_read_url: str) -> WindowPrefli
     `gold.marketplace_region_daily`. Nunca exige nem concede nada em
     tabelas ML/TikTok.
 
+    Gate S4.3d — compatibilidade do interceptor de DDL do AWS DMS
+    (`awsdms_intercept_ddl`, achado real do Gate S4.3b): event trigger
+    ausente OU desabilitado nunca bloqueia (`dms_ddl_interceptor_compatible
+    = True`, o `CREATE TEMP TABLE` da staging não seria interceptado).
+    Trigger presente E habilitado exige TODOS explícitos como `True`
+    (mesma regra "inconclusivo bloqueia" do resto deste preflight): função
+    do trigger existe; `SECURITY DEFINER` (`prosecdef=true`); tabela e
+    sequence de auditoria existem; o OWNER da função (nunca a role
+    conectada) tem `INSERT`/`DELETE` na tabela e `USAGE` na sequence. Nunca
+    exige nem sugere privilégio de auditoria DMS para a role Shopee — só
+    confere se o PRÓPRIO artefato está configurado para funcionar com
+    qualquer role. Mensagem de bloqueio nunca inclui owner/corpo da
+    função/host/IP/URL/credencial.
+
     Nunca escreve nada — mesmo em caso de bug, a sessão está em
     `readonly=True` desde a conexão (reaproveita `write_conn._connect_readonly`/
     `write_conn._fetch_target_identity`)."""
@@ -237,6 +276,21 @@ def run_window_preflight(write_url: str, expected_read_url: str) -> WindowPrefli
     is_rds_superuser_member = None
     ssl_in_use = None
     server_version = None
+
+    # Gate S4.3d — todos inicializados como None (inconclusivo) ANTES de
+    # qualquer consulta, mesmo padrão do restante do preflight: se uma
+    # exceção interromper as consultas no meio, os campos ainda não
+    # coletados permanecem None, e "None bloqueia" (checagens abaixo)
+    # garante que o report nunca aprove silenciosamente.
+    dms_ddl_trigger_present = None
+    dms_ddl_trigger_enabled = None
+    dms_function_present = None
+    dms_function_security_definer = None
+    dms_audit_table_present = None
+    dms_audit_sequence_present = None
+    dms_function_owner_can_insert_audit = None
+    dms_function_owner_can_delete_audit = None
+    dms_function_owner_can_use_sequence = None
 
     try:
         with conn.cursor() as cur:
@@ -326,6 +380,68 @@ def run_window_preflight(write_url: str, expected_read_url: str) -> WindowPrefli
 
             cur.execute("SELECT current_setting('server_version')")
             (server_version,) = cur.fetchone()
+
+            # Gate S4.3d — compatibilidade do interceptor de DDL do AWS DMS
+            # (achado do Gate S4.3b/S4.3c: `CREATE TEMP TABLE` da staging
+            # aciona este event trigger). Nunca consulta/exige privilégio da
+            # role least-privilege que está conectada — só verifica se o
+            # PRÓPRIO artefato DMS (função + tabela/sequence de auditoria)
+            # está configurado de forma que QUALQUER role consiga rodar DDL
+            # sem precisar de GRANT individual (isto é, `SECURITY DEFINER`
+            # com o owner da função já tendo os privilégios necessários).
+            cur.execute(
+                "SELECT evtenabled, evtfoid FROM pg_event_trigger WHERE evtname = %s",
+                (_DMS_DDL_TRIGGER_NAME,),
+            )
+            trigger_row = cur.fetchone()
+            dms_ddl_trigger_present = trigger_row is not None
+            dms_evtfoid = None
+            if trigger_row is not None:
+                evtenabled, dms_evtfoid = trigger_row
+                # 'D' = disabled; 'O'/'A' disparam em sessão normal (origin);
+                # 'R' só dispara em sessão de réplica -- tratado como
+                # "habilitado" por padrão conservador (o mesmo "inconclusivo
+                # bloqueia" já usado no resto deste preflight: nunca assumir
+                # que um modo incomum "não vai disparar para nós").
+                dms_ddl_trigger_enabled = evtenabled != "D"
+            else:
+                dms_ddl_trigger_enabled = False
+
+            if dms_ddl_trigger_present and dms_ddl_trigger_enabled:
+                cur.execute("SELECT prosecdef, proowner FROM pg_proc WHERE oid = %s", (dms_evtfoid,))
+                func_row = cur.fetchone()
+                dms_function_present = func_row is not None
+                if func_row is not None:
+                    dms_function_security_definer, dms_owner_oid = func_row
+
+                    cur.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = %s AND c.relname = %s)",
+                        (_DMS_AUDIT_TABLE_SCHEMA, _DMS_AUDIT_TABLE_NAME),
+                    )
+                    (dms_audit_table_present,) = cur.fetchone()
+
+                    if dms_audit_table_present:
+                        # `has_table_privilege`/`has_sequence_privilege` aceitam
+                        # OID de role diretamente -- o nome do owner nunca
+                        # precisa ser lido nem impresso.
+                        cur.execute(
+                            "SELECT has_table_privilege(%s, %s, 'INSERT'), "
+                            "has_table_privilege(%s, %s, 'DELETE')",
+                            (dms_owner_oid, _DMS_AUDIT_TABLE_QUALIFIED, dms_owner_oid, _DMS_AUDIT_TABLE_QUALIFIED),
+                        )
+                        dms_function_owner_can_insert_audit, dms_function_owner_can_delete_audit = cur.fetchone()
+
+                        cur.execute(
+                            "SELECT pg_get_serial_sequence(%s, %s)",
+                            (_DMS_AUDIT_TABLE_QUALIFIED, _DMS_AUDIT_SERIAL_COLUMN),
+                        )
+                        (dms_seq_qualified,) = cur.fetchone()
+                        dms_audit_sequence_present = dms_seq_qualified is not None
+                        if dms_audit_sequence_present:
+                            cur.execute("SELECT has_sequence_privilege(%s, %s, 'USAGE')", (dms_owner_oid, dms_seq_qualified))
+                            (dms_function_owner_can_use_sequence,) = cur.fetchone()
     except Exception as exc:  # noqa: BLE001
         # Finding 1 (Gate S3.2): uma falha INESPERADA em qualquer consulta
         # (role, privilégio, tabela, sequence...) nunca escapa como
@@ -401,6 +517,48 @@ def run_window_preflight(write_url: str, expected_read_url: str) -> WindowPrefli
     if gold_sequence_exists is True and can_use_id_sequence is not True:
         report.blocking_reasons.append(f"permissão insuficiente/não confirmada: falta USAGE na sequence {_GOLD_ID_SEQUENCE_QUALIFIED}")
 
+    # Gate S4.3d — compatibilidade do interceptor de DDL do AWS DMS.
+    # Semântica: trigger ausente OU desabilitado nunca bloqueia (o `CREATE
+    # TEMP TABLE` da staging não seria interceptado). Trigger presente E
+    # habilitado exige TODOS os itens abaixo como `True` explícito -- igual
+    # ao resto deste preflight, "não confirmado" (`None`) bloqueia como se
+    # fosse `False`. Nunca sugere/exige privilégio DMS para a role
+    # conectada -- só confere se o PRÓPRIO artefato está corretamente
+    # configurado (`SECURITY DEFINER` + owner com os privilégios certos).
+    dms_trigger_active = dms_ddl_trigger_present is True and dms_ddl_trigger_enabled is True
+    if not dms_trigger_active:
+        dms_ddl_interceptor_compatible = True
+    else:
+        dms_ddl_interceptor_compatible = (
+            dms_function_present is True
+            and dms_function_security_definer is True
+            and dms_audit_table_present is True
+            and dms_audit_sequence_present is True
+            and dms_function_owner_can_insert_audit is True
+            and dms_function_owner_can_delete_audit is True
+            and dms_function_owner_can_use_sequence is True
+        )
+
+        if not dms_ddl_interceptor_compatible:
+            reasons = []
+            if dms_function_present is not True:
+                reasons.append("função do interceptor não encontrada/não confirmada")
+            if dms_function_security_definer is not True:
+                reasons.append("função sem SECURITY DEFINER (ou não confirmado)")
+            if dms_audit_table_present is not True:
+                reasons.append("tabela de auditoria ausente/não confirmada")
+            if dms_audit_sequence_present is not True:
+                reasons.append("sequence de auditoria ausente/não confirmada")
+            if dms_function_owner_can_insert_audit is not True:
+                reasons.append("owner da função sem INSERT confirmado na tabela de auditoria")
+            if dms_function_owner_can_delete_audit is not True:
+                reasons.append("owner da função sem DELETE confirmado na tabela de auditoria")
+            if dms_function_owner_can_use_sequence is not True:
+                reasons.append("owner da função sem USAGE confirmado na sequence de auditoria")
+            report.blocking_reasons.append(
+                "Interceptor DDL do AWS DMS incompatível com execução least-privilege: " + "; ".join(reasons)
+            )
+
     report.safe_summary = {
         "pg_is_in_recovery": in_recovery,
         "target_confirmado": same_physical_cluster,
@@ -426,6 +584,16 @@ def run_window_preflight(write_url: str, expected_read_url: str) -> WindowPrefli
         "membro_rds_superuser": is_rds_superuser_member,
         "ssl_in_use": ssl_in_use,
         "server_version": server_version,
+        "dms_ddl_trigger_present": dms_ddl_trigger_present,
+        "dms_ddl_trigger_enabled": dms_ddl_trigger_enabled,
+        "dms_function_present": dms_function_present,
+        "dms_function_security_definer": dms_function_security_definer,
+        "dms_audit_table_present": dms_audit_table_present,
+        "dms_audit_sequence_present": dms_audit_sequence_present,
+        "dms_function_owner_can_insert_audit": dms_function_owner_can_insert_audit,
+        "dms_function_owner_can_delete_audit": dms_function_owner_can_delete_audit,
+        "dms_function_owner_can_use_sequence": dms_function_owner_can_use_sequence,
+        "dms_ddl_interceptor_compatible": dms_ddl_interceptor_compatible,
     }
     report.ok = not report.blocking_reasons
     return report

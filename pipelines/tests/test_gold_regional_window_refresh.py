@@ -1053,3 +1053,40 @@ def test_refresh_path_com_falha_de_resolve_bloqueia_sem_conectar(monkeypatch, tm
     result = loader.execute_shopee_window_refresh("postgresql://writer@host/db", _D_FROM, _D_TO, tmp_path / "b.json")
     assert result.outcome == "blocked"
     assert any("RuntimeError" in p for p in result.problems)
+
+
+# =============================================================================
+# Gate S4.3d — quando o preflight bloqueia por incompatibilidade do
+# interceptor DDL do AWS DMS, o refresh real NUNCA roda.
+# =============================================================================
+
+def test_run_refresh_cli_bloqueado_por_incompatibilidade_dms_nao_executa_refresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(loader.settings, "datamart_database_url", "postgresql://read@host/db")
+    monkeypatch.setattr(
+        loader.window_write_conn, "load_window_write_secret",
+        lambda *a, **k: {"DATAMART_GOLD_WINDOW_WRITE_URL": "postgresql://writer@host/db", "I_UNDERSTAND_THIS_DELETES_GOLD_SHOPEE_WINDOW": "1"},
+    )
+    monkeypatch.setattr(
+        loader.window_write_conn, "validate_window_write_guardrails",
+        lambda secret, read_url: "postgresql://writer@host/db",
+    )
+
+    class DmsIncompatiblePreflightReport:
+        ok = False
+        warnings = []
+        blocking_reasons = [
+            "Interceptor DDL do AWS DMS incompatível com execução least-privilege: "
+            "função sem SECURITY DEFINER (ou não confirmado)"
+        ]
+        safe_summary = {"dms_ddl_interceptor_compatible": False}
+
+    monkeypatch.setattr(loader.window_write_conn, "run_window_preflight", lambda *a, **k: DmsIncompatiblePreflightReport())
+
+    def boom_execute(*a, **k):
+        raise AssertionError("refresh nunca deveria executar com o interceptor DMS incompatível")
+    monkeypatch.setattr(loader, "execute_shopee_window_refresh", boom_execute)
+
+    rc = loader.run_refresh_shopee_window_cli(_D_FROM, _D_TO, tmp_path / "b.json")
+
+    assert rc == 2
+    assert not (tmp_path / "b.json").exists()

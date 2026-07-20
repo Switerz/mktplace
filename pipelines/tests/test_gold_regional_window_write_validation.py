@@ -765,3 +765,39 @@ def test_run_validate_cli_nunca_imprime_order_id_cpf_filename(monkeypatch, capsy
     combined = (captured.out + captured.err).lower()
     for forbidden in ("order_id", "cpf", "filename", "host=", "user=", "password"):
         assert forbidden not in combined
+
+
+# ---------------------------------------------------------------------------
+# Gate S4.3d — quando o preflight bloqueia por incompatibilidade do
+# interceptor DDL do AWS DMS, a validação real NUNCA roda.
+# ---------------------------------------------------------------------------
+
+def test_run_validate_cli_bloqueado_por_incompatibilidade_dms_nao_executa_validacao(monkeypatch):
+    monkeypatch.setattr(loader.settings, "datamart_database_url", "postgresql://read@host/db")
+    monkeypatch.setattr(
+        loader.window_write_conn, "load_window_write_secret",
+        lambda *a, **k: {"DATAMART_GOLD_WINDOW_WRITE_URL": "postgresql://writer@host/db", "I_UNDERSTAND_THIS_DELETES_GOLD_SHOPEE_WINDOW": "1"},
+    )
+    monkeypatch.setattr(
+        loader.window_write_conn, "validate_window_write_guardrails",
+        lambda secret, read_url: "postgresql://writer@host/db",
+    )
+
+    class DmsIncompatiblePreflightReport:
+        ok = False
+        warnings = []
+        blocking_reasons = [
+            "Interceptor DDL do AWS DMS incompatível com execução least-privilege: "
+            "função sem SECURITY DEFINER (ou não confirmado)"
+        ]
+        safe_summary = {"dms_ddl_interceptor_compatible": False}
+
+    monkeypatch.setattr(loader.window_write_conn, "run_window_preflight", lambda *a, **k: DmsIncompatiblePreflightReport())
+
+    def boom_validate(*a, **k):
+        raise AssertionError("validação nunca deveria executar com o interceptor DMS incompatível")
+    monkeypatch.setattr(loader, "validate_shopee_window_write_path", boom_validate)
+
+    rc = loader.run_validate_shopee_window_write_path_cli(_D_FROM, _D_TO)
+
+    assert rc == 2
