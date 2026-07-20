@@ -735,6 +735,35 @@ Pontos importantes para quem opera o scraping:
   arquivo. Continua valendo: **nao habilitar** nenhum comando de escrita
   real ainda; os proximos gates (S5.2 em diante, ordem revisada) tratam
   dessas lacunas de orquestracao, nao de seguranca.
+- **Atualizacao 2026-07-20 (Gate S5.2, resolucao read-only da janela por
+  file_ids — nenhuma escrita real)**: novo componente
+  `pipelines/ingestion/gold_regional/shopee_batch_window.py` (CLI:
+  `python -m pipelines.ingestion.gold_regional.shopee_batch_window
+  --file-id <id> [--file-id <id> ...] --json`). Recebe os `file_id`s que o
+  runner Raw/Silver ja' retorna hoje (`load_shopee_raw.py`), confirma que
+  TODOS estao na Silver reconciliada e devolve `date_from`/`date_to` como
+  JSON — ou bloqueia (nunca calcula janela parcial) se algum `file_id`
+  estiver ausente, o lote vier vazio, alguma data vier nula, ou a janela
+  exceder o limite ja usado pelo refresh (180 dias). So' consulta
+  `silver.stg_shopee_order_item_snapshots`, com a MESMA credencial
+  dedicada do refresh — nunca a role Gold ganhou acesso a `raw.*`, nunca
+  usa a read replica. Este modulo e' so' o primeiro passo (resolver a
+  janela); o wrapper que de fato chamaria o refresh (Gate S5.3) e o
+  receipt/audit_path (Gate S5.4) continuam nao implementados. Continua
+  valendo: **nao habilitar** nenhum comando de escrita real ainda.
+- **Atualizacao 2026-07-20 (Gate S5.2.1, hardening pre-commit — sem impacto
+  na CLI usada pela automacao)**: revisao pre-commit endureceu a API Python
+  interna do modulo acima antes de qualquer integracao. A CLI (`--file-id`
+  / `--json`) nao mudou de uso para quem so' chama o binario. Para quem
+  vier a importar o modulo diretamente em Python: o UNICO contrato publico
+  agora e' `resolve_shopee_batch_window(write_url, datamart_read_url,
+  file_ids)` (note o novo 2o argumento obrigatorio) — ela sempre roda o
+  preflight dedicado (`window_write_conn.run_window_preflight`) antes de
+  qualquer consulta e bloqueia com `reason_code=preflight_blocked` se ele
+  nao aprovar; nao ha' parametro para pular essa checagem. O reason_code
+  antigo `window_exceeds_limit` foi removido e substituido por
+  `refresh_window_invalid` (mesmo reason_code tanto para janela > 180 dias
+  quanto para data futura — a causa exata continua no campo `problems`).
 
 ## Alertas e falhas comuns
 
