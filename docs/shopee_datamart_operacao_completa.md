@@ -703,6 +703,38 @@ Pontos importantes para quem opera o scraping:
   para o piloto real (Gate S4.3, DELETE/INSERT de verdade) — sem mais
   bloqueio de infraestrutura conhecido. Continua valendo: esta automacao
   externa **nao deve habilitar** nenhum comando de escrita real ainda.
+- **Atualizacao 2026-07-20 (Gate S5.1, auditoria/diagnostico do contrato
+  operacional — nenhum codigo alterado)**: revisao completa concluiu que
+  os primitivos de escrita da Gold regional (secret dedicado, preflight,
+  locks, backup, rollback) ja sao seguros o suficiente para operacao
+  manual cuidadosa, mas ainda faltam pecas de orquestracao antes de uma
+  automacao recorrente sem supervisao. **Achado importante**: este proprio
+  documento (`shopee_datamart_daily_jobs_handoff.md`, referenciado mas nao
+  alterado nesta rodada) esta desatualizado e cita coisas que contradizem
+  a arquitetura atual (comando `--refresh-full` inexistente, acesso direto
+  ao Neon) — nao seguir esse handoff antigo ao pe' da letra.
+- **Atualizacao 2026-07-20 (Gate S5.1b, correcao de desenho antes de
+  implementar — nenhum codigo alterado)**: tres correcoes ao diagnostico
+  acima, confirmadas no codigo real:
+  (1) a decisao de "precisa atualizar a Gold?" **nunca** pode vir de um
+  diagnose lido de `DATAMART_DATABASE_URL` (que e' uma read replica,
+  com lag ja documentado em incidente real) — o jeito seguro e' chamar
+  `execute_shopee_window_refresh` diretamente contra o primary, que ja
+  decide `committed`/`no_op` sob lock, com a staging e o key-diff
+  autoritativos calculados na mesma transacao/conexao (nunca a replica);
+  (2) apos a automacao atualizar a Gold Shopee, a Torre roda **so'**
+  `python -m pipelines.ops.sync_region_if_needed` — nao encadear
+  `--incremental` antes, sao mecanismos para problemas diferentes
+  (avanco por data nova vs. correcao retroativa por janela);
+  (3) a identidade do lote **ja existe** e nao precisa ser inventada:
+  `load_shopee_raw.py` ja retorna `file_id` por arquivo (inclusive
+  quando pulado por ja' ingerido) e `batch_id` ja agrupa os arquivos de
+  uma mesma execucao no manifesto Raw — o proximo gate so' precisa usar
+  esses `file_id`s para confirmar reconciliacao Raw×Silver e calcular
+  `MIN`/`MAX(order_created_at)` como janela candidata, nunca a data do
+  arquivo. Continua valendo: **nao habilitar** nenhum comando de escrita
+  real ainda; os proximos gates (S5.2 em diante, ordem revisada) tratam
+  dessas lacunas de orquestracao, nao de seguranca.
 
 ## Alertas e falhas comuns
 

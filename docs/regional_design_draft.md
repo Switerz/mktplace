@@ -797,3 +797,88 @@ Diferente de `.env.gold-write.local` (secret do `--incremental`, só `INSERT`) e
 **Validação pós-execução (somente leitura)**: nenhum advisory lock remanescente (`count=0`); `--diagnose-shopee-window` na mesma janela **idêntico** ao snapshot anterior (512 linhas, `would_change_data=False`); fingerprint agregado independente das 13 colunas **idêntico byte a byte** ao capturado antes (`diff` confirmou arquivos idênticos); nenhum backup `.json`/`.sha256` novo (não seria produzido por este modo de qualquer forma); `git status` sem nenhum arquivo novo.
 
 **Status**: `awsdms_intercept_ddl()` agora `SECURITY DEFINER`, alinhado ao contrato oficial da AWS. `gold_shopee_window_writer` nunca recebeu nem precisou de privilégio na infraestrutura DMS — nenhum `GRANT`/`REVOKE` foi executado em lugar nenhum. O caminho de escrita da Gold regional Shopee (secret → preflight → advisory lock → table lock → staging TEMP → validações → reconciliação → rollback) está **confirmado funcional ponta a ponta com a credencial dedicada**, sem nenhuma escrita persistente. **Zero `--refresh-shopee-window`, zero `--restore-shopee-window`, zero backup, zero sync Neon executado nesta rodada** — a única escrita real foi o `ALTER FUNCTION` em si; a validação do caminho terminou sempre em `ROLLBACK`. O que falta para o piloto real do Gate S4.3 (o `DELETE`/`INSERT` de verdade, persistente) é só a ausência de janela candidata (Gate S4.1) — não há mais bloqueio de infraestrutura conhecido. **Nada foi commitado nesta rodada.**
+
+### Gate S5.1 — diagnóstico do contrato operacional Shopee Raw→Silver→Gold (2026-07-20, revisado no Gate S5.1b)
+
+**100% diagnóstico e leitura de código/documentação — zero conexão com banco, zero alteração de role/secret/DMS, zero código alterado.** Resposta completa (16 perguntas, contrato, sequência, recomendação) entregue no turno de chat correspondente; esta seção registra o resumo executivo para referência futura. **Revisado no Gate S5.1b** após três correções de desenho apontadas antes de qualquer implementação (ver abaixo) — nenhum código foi alterado em nenhuma das duas rodadas.
+
+**O que já está pronto** (evidenciado em `pipelines/ingestion/gold_regional/loader.py`/`window_write_conn.py`, testado em 1353 testes e validado com execução real nos Gates S4.2–S4.3e): secret dedicado + preflight (incluindo a checagem DMS do Gate S4.3d) + advisory lock + table lock + staging TEMP + validações estruturais recalculadas sob lock + comparação por chave + backup atômico pré-DELETE + DELETE/INSERT escopados + reconciliação pós-insert + fingerprint fora do escopo + rollback-por-padrão + modo de validação sem persistência — tudo com resultado machine-readable (`outcome`/dataclass) e exit codes distintos (0/2/3/4) e sem nenhum retry automático embutido. `load_shopee_raw.py --apply --backfill` (Raw) também já é idempotente por hash, com preflight e reconciliação pós-carga via primary.
+
+#### Correção 1 (Gate S5.1b) — a decisão autoritativa nunca pode depender da réplica
+
+**Rastro no código** (evidência exata):
+- `run_diagnose_shopee_window_cli` (`loader.py:2806`) usa `read_url = settings.datamart_url` — isto é, `DATAMART_DATABASE_URL`. Este é o mesmo valor que `sync_region_daily.py` documenta explicitamente como **read replica**, com um incidente real já registrado: *"DATAMART_DATABASE_URL é uma read replica (achado desta fase: pg_is_in_recovery()=true) [...] usar a réplica aqui já causou uma leitura incompleta que parecia um problema real quando era só lag"*.
+- `run_refresh_shopee_window_cli` (`loader.py:2932`) resolve `write_url` a partir do secret dedicado (`window_write_conn.validate_window_write_guardrails`), nunca de `settings.datamart_url`. O preflight (`window_write_conn.run_window_preflight`, linha ~349) **bloqueia explicitamente** se `pg_is_in_recovery()` do `write_url` não for confirmado `false` — ou seja, o próprio preflight impede que `write_url` seja uma réplica. `write_url` é sempre o **primary**.
+- Dentro de `execute_shopee_window_refresh` (`loader.py:2074`+), a staging (`stg_marketplace_region_daily`, populada a partir de `silver.stg_shopee_order_item_snapshots`) e a leitura de `gold.marketplace_region_daily` para o key-diff (`SQL_REFRESH_KEY_DIFF`, linha 2208) rodam **na mesma conexão** (`write_url`, o primary), **na mesma transação**, sob o mesmo `LOCK TABLE ... SHARE ROW EXCLUSIVE MODE` adquirido logo antes. Não há leitura de réplica em nenhum ponto desta função.
+- Ordem exata confirmada em código (linhas 2208–2242): `SQL_REFRESH_KEY_DIFF` decide `would_change_data`; se `False`, o `return` de `outcome="no_op"` (linha 2212-2215) acontece **antes** de qualquer `SELECT` das linhas para backup (linha 2217), antes de `_write_window_backup_atomic` (linha 2223) e antes de `SQL_REFRESH_DELETE` (linha 2242).
+
+**Respostas diretas**:
+- *Um wrapper que usa diagnose na réplica para decidir não chamar o refresh pode perder um lote recém-carregado?* **Sim.** Se a Silver acabou de ser escrita (via primary) e o diagnose lê a réplica antes da replicação alcançar esse ponto, `would_change_data` pode aparecer `False` quando já é `True` no primary — exatamente a classe de bug que `sync_region_daily.py` já documentou como incidente real (só que lá era sobre a Raw; aqui seria sobre a Gold).
+- *Chamar diretamente o refresh autoritativo no primary é seguro quando não há mudança?* **Sim.** O único custo de um `no_op` é abrir a transação, adquirir o advisory lock + table lock e materializar a staging — tudo isso é revertido por `ROLLBACK` (via `_rollback_best_effort`) antes de qualquer escrita persistente.
+- *No caminho `no_op`, há zero backup e zero DELETE/INSERT persistente?* **Sim, confirmado pela ordem de código acima** — `no_op` retorna estritamente antes das três operações (SELECT para backup, escrita do backup, `DELETE`).
+
+**Comparação A/B/C**:
+- **A** (diagnose na réplica → refresh só se divergir): rejeitada — risco real e já precedentemente confirmado de falso `no_op` por lag.
+- **B** (novo diagnose read-only no primary → refresh só se divergir): elimina o risco de réplica, mas duplica lógica (um segundo cálculo de `would_change_data` fora da transação de escrita) sem necessidade — `execute_shopee_window_refresh` já faz exatamente esse cálculo, sob lock, de forma mais forte (nada pode mudar entre o diagnose e o refresh porque não há intervalo).
+- **C** (chamar `execute_shopee_window_refresh` diretamente no primary; ele decide `committed`/`no_op` sob lock com staging autoritativa): **recomendada** — é a opção mais simples que não permite falso `no_op` por lag, porque a função já faz exatamente isso e já está implementada, testada e validada em execução real.
+
+**Correção aplicada**: a recomendação deste gate deixa de ser "replicar `sync_region_if_needed.py` com um diagnose-then-conditional-refresh" e passa a ser **opção C** — o wrapper futuro (Gate S5.3, renumerado) deve chamar `execute_shopee_window_refresh` diretamente contra o primary, sem nenhum diagnose read-only prévio decidindo se vale a pena chamá-lo. Um diagnose continua útil só como ferramenta de inspeção humana (não como gate de decisão automatizada).
+
+#### Correção 2 (Gate S5.1b) — procedimento Data Mart → Neon
+
+Depois que a automação externa atualizar a Gold Shopee, a Torre deve executar **somente**:
+
+```
+python -m pipelines.ops.sync_region_if_needed
+```
+
+**Não** encadear `python -m pipelines.ingestion.gold_regional.loader --incremental` antes disso como pré-requisito. Motivo: `--incremental` (`execute_incremental_load`) resolve **avanço por data nova** (`date > MAX(date)` já carregado) para ML e Shopee juntos — ele não teria motivo para rodar só por causa de um refresh de janela histórica Shopee (que tipicamente corrige datas **já** carregadas, não avança a data máxima), e rodá-lo automaticamente antes do sync criaria uma dependência artificial entre dois mecanismos que resolvem problemas diferentes (avanço incremental vs. correção retroativa por janela). `sync_region_if_needed.py` já lê `gold.marketplace_region_daily` como fonte (via `fetch_source_rows`) independente de qual caminho a atualizou (`--incremental` ou `--refresh-shopee-window`) — não precisa que os dois rodem em sequência.
+
+#### Correção 3 (Gate S5.1b) — identidade do lote, antes de qualquer wrapper
+
+**Rastro no código** (`pipelines/ingestion/shopee_raw/writer.py`):
+- `FileWriteOutcome` (linha 46) já tem um campo `file_id: Optional[int]`, preenchido tanto para `outcome="inserted"` (linha 162) quanto para `outcome="skipped_idempotent"` (linha 84) — ou seja, **todo arquivo processado por `load_shopee_raw.py --apply --backfill` já retorna seu `file_id` real**, mesmo quando pulado por idempotência.
+- `batch_id` (`writer.new_batch_id()`, um UUID novo por invocação da CLI) é **persistido em `raw.shopee_ingestion_file.batch_id`** (linha 133/146) para cada arquivo daquela execução — já é o agrupador real de "um lote pode conter múltiplos arquivos" (`run_apply_backfill` processa N arquivos elegíveis numa única invocação, todos com o mesmo `batch_id`).
+- `batch_id` **não** é propagado até a Silver (confirmado: nenhuma coluna `batch_id` em `pipelines/staging/shopee/mapping.py`); `file_id`, sim, é (já usado pelo dedup da Gold em `loader.py`, via `silver.stg_shopee_order_item_snapshots.file_id`).
+
+**Conclusão — nenhum identificador novo precisa ser inventado**: a identidade do lote já existe e é **`batch_id` (agrupador do Raw) + a lista de `file_id`s** retornada por `writer.insert_file`/`run_apply_backfill`. O contrato do Gate S5.2 (helper de resolução de janela) deve:
+1. Receber a lista de `file_id`s do lote (de um `batch_id`, ou passada diretamente pelo chamador).
+2. Confirmar que **todos** chegaram à Silver: comparar contagem de linhas em `raw.shopee_order_item_export WHERE file_id = ANY(...)` contra `silver.stg_shopee_order_item_snapshots WHERE file_id = ANY(...)` (mesmo critério de reconciliação já usado por `build_sql.py`/`validations.post_insert_check`).
+3. Só então calcular `MIN(order_created_at)::date`/`MAX(order_created_at)::date` em `silver.stg_shopee_order_item_snapshots WHERE file_id = ANY(...)` — **nunca** pela data do arquivo.
+4. Bloquear (nunca inferir um resultado parcial) se: algum `file_id` do lote tiver `outcome="failed"` no retorno do backfill; a contagem Raw×Silver não bater para algum `file_id`; ou a lista de `file_id`s vier vazia.
+
+Isso é 100% somente leitura e não depende de nenhum runner Silver novo — só precisa que a Silver já esteja reconciliada (responsabilidade que já existe, de um lado ou de outro, ver Correção 5 abaixo).
+
+#### Correção 4 (Gate S5.1b) — próximos gates reordenados
+
+- **S5.2**: resolver a janela afetada por lote/`file_id`s (Correção 3), 100% read-only, machine-readable (função + testes com fakes).
+- **S5.3**: wrapper operacional único, chamando `execute_shopee_window_refresh` diretamente contra o primary (Correção 1, opção C) — `committed`/`no_op`/`blocked`/`failed`, sem diagnose-then-conditional prévio.
+- **S5.4**: receipt JSON, `run_id`, commit do repositório, timestamps estruturados, convenção segura de `audit_path` (diretório, nome único, retenção).
+- **S5.5**: decidir se o runner Silver externo precisa ser trazido para este repositório ou se basta formalizar sua interface (ver Correção 5).
+- **S5.6**: runbook operacional final + teste integrado ponta a ponta sem nenhuma escrita persistente.
+- **S6**: primeiro refresh persistente real, só quando surgir uma janela genuinamente divergente.
+
+Esta ordem substitui a lista anterior (que colocava o wrapper antes de resolver a janela).
+
+#### Correção 5 (Gate S5.1b) — runner Silver: não é bloqueio automático
+
+Separação explícita:
+- **Requisito de integração** (obrigatório, já satisfeito estruturalmente): a Silver precisa terminar reconciliada e fornecer os identificadores do lote (`file_id`s) — isso já é verdade independente de onde o SQL roda, porque `file_id`/`raw_id` já são colunas reais da Silver e a reconciliação já é um critério documentado (`build_sql.py`/`docs/shopee_datamart_daily_jobs_handoff.md` §7.5).
+- **Melhoria de governança** (não bloqueante): trazer o runner (execução de `db/sql/staging/shopee_staging_transform.sql`) para dentro deste repositório, versionado e testado, em vez de a automação externa manter seu próprio wrapper com um workaround de lock.
+- **Bloqueio real** (só se confirmado): apenas se o runner externo **não conseguir** fornecer os `file_id`s do lote processado ou garantir/confirmar que a carga terminou (success-only, sem parcial). **Isso ainda não foi confirmado nem negado** — o código do runner externo está fora deste repositório e não foi inspecionado nesta auditoria. Até essa confirmação, a ausência de um runner Silver *neste repo* é reclassificada de "bloqueante" para **"verificação pendente"**.
+
+**Decisão arquitetural reafirmada, sem alteração**: a automação externa não recebe e não deve receber, em nenhum gate futuro, a credencial administrativa nem `DATABASE_URL` (Neon) — ela opera só com `gold_shopee_window_writer`/`.env.gold-window-write.local` (Gold) e a role dedicada de Raw/Silver já existente. O sync Data Mart → Neon continua exclusivamente sob responsabilidade da Torre, via `sync_region_if_needed` (Correção 2).
+
+**Lacunas ainda válidas do S5.1 original** (com a Correção 3 já resolvendo o item 2 conceitualmente — falta só implementar): saída `--json` nas CLIs de janela Shopee; evidência de execução sem `run_id`/commit/timestamps estruturados; `docs/shopee_datamart_daily_jobs_handoff.md` desatualizado (propõe `--refresh-full` inexistente e acesso a Neon — preservado sem alteração, mas não deve ser seguido ao pé da letra); ausência de template de `.env` escopado à automação (o `.env` principal mistura `DATABASE_URL` do Neon com `DATAMART_DATABASE_URL`).
+
+**Lacunas não bloqueantes (melhorias)**: retenção/limpeza dos backups `.json`/`.sha256`; runbook operacional em linguagem de operação; SLA explícito de sincronização Gold→Neon quando o scheduler for reativado (`full_daily` continua desabilitado).
+
+#### Pergunta central revisada (Gate S5.1b)
+
+> *Qual é o menor código que ainda falta para a automação externa atualizar a Gold de forma autônoma, sem depender de réplica, interpretação de stdout humano ou escolha manual da janela?*
+
+Dois pedaços pequenos, nenhum deles tocando lógica de transação/segurança já auditada:
+1. **Uma função read-only** que recebe uma lista de `file_id`s (já retornados por `load_shopee_raw.py`), confirma que todos chegaram à Silver reconciliada, e devolve `MIN`/`MAX(order_created_at)` como janela candidata — ou um sinal claro de "lote incompleto/parcial" (Gate S5.2).
+2. **Um wrapper fino** que recebe essa janela e chama `execute_shopee_window_refresh` diretamente contra o primary — sem diagnose prévio na réplica —, devolvendo `committed`/`no_op`/`blocked`/`failed` como JSON + exit code (Gate S5.3).
+
+Tudo o mais (locks, staging autoritativa, backup atômico, rollback, validação estrutural, decisão sob lock) **já existe, já está testado e já foi validado em execução real**. O risco de handoff continua sendo de **automação/orquestração incompleta**, não de segurança — e a Correção 1 deste gate era a única lacuna que, se implementada do jeito originalmente sugerido (opção A/B com diagnose na réplica), teria introduzido um risco real novo.
