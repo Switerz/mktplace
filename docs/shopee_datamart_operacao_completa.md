@@ -690,6 +690,19 @@ Pontos importantes para quem opera o scraping:
   nenhuma alteracao real de ACL/funcao/role. Continua valendo: esta
   automacao externa **nao deve habilitar** nenhum comando de escrita real
   ainda.
+- **Atualizacao 2026-07-20 (Gate S4.3e, correcao real do interceptor DMS)**:
+  com autorizacao explicita, `ALTER FUNCTION public.awsdms_intercept_ddl()
+  SECURITY DEFINER` foi executado uma unica vez (funcao/owner/corpo/
+  assinatura inalterados, nenhum GRANT novo, nenhum privilegio dado a
+  `gold_shopee_window_writer`). Depois, `--validate-shopee-window-write-path`
+  rodou de novo na mesma janela de controle e **desta vez concluiu com
+  sucesso** (`outcome=validated`, exit 0, sempre `ROLLBACK`, zero escrita
+  persistente) — confirmando que o bloqueio do Gate S4.3b foi resolvido.
+  O caminho de escrita da Gold regional Shopee esta confirmado funcional
+  ponta a ponta com a credencial dedicada. Falta so' uma janela candidata
+  para o piloto real (Gate S4.3, DELETE/INSERT de verdade) — sem mais
+  bloqueio de infraestrutura conhecido. Continua valendo: esta automacao
+  externa **nao deve habilitar** nenhum comando de escrita real ainda.
 
 ## Alertas e falhas comuns
 
