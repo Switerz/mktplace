@@ -627,6 +627,19 @@ Pontos importantes para quem opera o scraping:
   preparado o SQL de criacao dessa role — nada disso foi executado. Continua
   valendo: **nao habilitar `--refresh-shopee-window`** nesta automacao ate o
   piloto real (Gate S4.2/S4.3) ser concluido do lado `mktplace`.
+- **Atualizacao 2026-07-20 (Gate S4.2, provisionamento da credencial
+  dedicada)**: com autorizacao explicita, o `mktplace` criou a role
+  `gold_shopee_window_writer` (privilegios minimos: `SELECT` na Silver
+  Shopee, `SELECT/INSERT/DELETE` só em `gold.marketplace_region_daily`,
+  sem `UPDATE`/`TRUNCATE`/`CREATE`/superuser), criou o secret local
+  `.env.gold-window-write.local` (gitignored, fora do Git) e rodou **somente**
+  o preflight de leitura contra essa credencial nova — aprovado
+  (`ok=True`, sem bloqueios). **Nenhuma linha de dado foi escrita, nenhum
+  refresh/restore/sync foi executado.** Esta automacao externa **continua
+  sem autorizacao para habilitar `--refresh-shopee-window`** — falta o
+  Gate S4.3 (piloto real de escrita), que depende ainda de uma janela
+  Shopee candidata (hoje nenhuma existe) e de autorizacao explicita
+  separada.
 
 ## Alertas e falhas comuns
 
