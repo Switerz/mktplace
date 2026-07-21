@@ -7,6 +7,7 @@ mesma ordem das chamadas de run_reconciliation — nenhum banco real é usado.
 from __future__ import annotations
 
 from collections import namedtuple
+from pathlib import Path
 
 from pipelines.ingestion.shopee_raw import reconcile
 
@@ -55,6 +56,7 @@ class FakeConnection:
                 "execute() foi chamado antes de execution_options(postgresql_readonly=True) — "
                 "a proteção read-only precisa valer ANTES da primeira query."
             )
+        self._engine.executed.append((stmt, params))
         return self._queue.pop(0)
 
 
@@ -62,6 +64,7 @@ class FakeEngine:
     def __init__(self, queued_results):
         self._queued_results = queued_results
         self.execution_options_calls: list[dict] = []
+        self.executed: list[tuple] = []
 
     def connect(self):
         return FakeConnection(self._queued_results, self)
@@ -169,3 +172,164 @@ def test_run_reconciliation_falha_se_readonly_nao_for_ativado(monkeypatch):
         assert False, "deveria ter levantado AssertionError na primeira query"
     except AssertionError as exc:
         assert "antes de execution_options" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# reconcile_batch_file_ids — Gate S5.5.1 (reconciliação escopada ao lote atual,
+# nunca comparada contra contagem histórica agregada)
+# ---------------------------------------------------------------------------
+
+FileRow = namedtuple("FileRow", ["file_id", "source_type", "source_row_count"])
+ChildCountRow = namedtuple("ChildCountRow", ["file_id", "n"])
+
+
+def test_reconcile_batch_file_ids_happy_path():
+    queue = [
+        FakeResult(rows=[
+            FileRow(1, "orders", 5),
+            FileRow(2, "shop_stats", 3),
+            FileRow(3, "ads", 2),
+        ]),
+        FakeResult(rows=[ChildCountRow(1, 5)]),
+        FakeResult(rows=[ChildCountRow(2, 3)]),
+        FakeResult(rows=[ChildCountRow(3, 2)]),
+    ]
+    engine = FakeEngine(queue)
+
+    report = reconcile.reconcile_batch_file_ids(engine, [1, 2, 3])
+
+    assert report.reconciled is True
+    assert report.problems == []
+    assert report.requested_file_count == 3
+    assert report.found_file_ids == [1, 2, 3]
+    assert report.missing_file_ids == []
+    assert report.source_type_by_file_id == {1: "orders", 2: "shop_stats", 3: "ads"}
+    assert report.row_count_mismatches == {}
+
+
+def test_reconcile_batch_file_ids_detecta_ausente_do_manifesto():
+    queue = [
+        FakeResult(rows=[FileRow(1, "orders", 5)]),
+        FakeResult(rows=[ChildCountRow(1, 5)]),
+    ]
+    engine = FakeEngine(queue)
+
+    report = reconcile.reconcile_batch_file_ids(engine, [1, 2])
+
+    assert report.reconciled is False
+    assert report.missing_file_ids == [2]
+    assert any("ausente" in p for p in report.problems)
+
+
+def test_reconcile_batch_file_ids_lote_parcialmente_visivel_bloqueia():
+    """Mais de um file_id pedido, só parte aparece no manifesto -- mesmo
+    caminho de `missing_file_ids`, testado explicitamente com 3 pedidos e
+    só 1 encontrado."""
+    queue = [
+        FakeResult(rows=[FileRow(2, "orders", 4)]),
+        FakeResult(rows=[ChildCountRow(2, 4)]),
+    ]
+    engine = FakeEngine(queue)
+
+    report = reconcile.reconcile_batch_file_ids(engine, [1, 2, 3])
+
+    assert report.reconciled is False
+    assert report.missing_file_ids == [1, 3]
+    assert report.found_file_ids == [2]
+
+
+def test_reconcile_batch_file_ids_detecta_divergencia_linhas_filhas():
+    queue = [
+        FakeResult(rows=[FileRow(1, "orders", 10)]),
+        FakeResult(rows=[ChildCountRow(1, 7)]),
+    ]
+    engine = FakeEngine(queue)
+
+    report = reconcile.reconcile_batch_file_ids(engine, [1])
+
+    assert report.reconciled is False
+    assert report.row_count_mismatches == {1: {"expected": 10, "actual": 7}}
+    assert any("diverge" in p for p in report.problems)
+
+
+def test_reconcile_batch_file_ids_detecta_duplicado_na_lista_solicitada():
+    queue = [
+        FakeResult(rows=[FileRow(1, "orders", 5)]),
+        FakeResult(rows=[ChildCountRow(1, 5)]),
+    ]
+    engine = FakeEngine(queue)
+
+    report = reconcile.reconcile_batch_file_ids(engine, [1, 1])
+
+    assert report.reconciled is False
+    assert any("duplicado" in p for p in report.problems)
+
+
+def test_reconcile_batch_file_ids_lista_vazia_e_trivialmente_reconciliada():
+    engine = FakeEngine([])
+
+    report = reconcile.reconcile_batch_file_ids(engine, [])
+
+    assert report.reconciled is True
+    assert report.requested_file_count == 0
+    assert engine.execution_options_calls == []
+
+
+def test_reconcile_batch_file_ids_usa_bind_parameters_nunca_interpola_ids():
+    queue = [
+        FakeResult(rows=[FileRow(999999, "orders", 5)]),
+        FakeResult(rows=[ChildCountRow(999999, 5)]),
+    ]
+    engine = FakeEngine(queue)
+
+    reconcile.reconcile_batch_file_ids(engine, [999999])
+
+    assert engine.executed  # confirma que consultas de fato rodaram
+    for stmt, _params in engine.executed:
+        assert "999999" not in str(stmt)
+    assert any(
+        params and 999999 in params.get("file_ids", []) for _stmt, params in engine.executed
+    )
+
+
+def test_reconcile_batch_file_ids_ativa_readonly_antes_de_qualquer_query():
+    queue = [
+        FakeResult(rows=[FileRow(1, "orders", 5)]),
+        FakeResult(rows=[ChildCountRow(1, 5)]),
+    ]
+    engine = FakeEngine(queue)
+
+    reconcile.reconcile_batch_file_ids(engine, [1])
+
+    assert {"postgresql_readonly": True} in engine.execution_options_calls
+
+
+def test_reconcile_batch_file_ids_falha_se_readonly_nao_for_ativado():
+    class NeverReadonlyConnection(FakeConnection):
+        def execution_options(self, **kwargs):
+            self._engine.execution_options_calls.append(kwargs)
+            return self  # nunca liga self._readonly, mesmo pedindo
+
+    class NeverReadonlyEngine(FakeEngine):
+        def connect(self):
+            return NeverReadonlyConnection(self._queued_results, self)
+
+    engine = NeverReadonlyEngine([FakeResult(rows=[FileRow(1, "orders", 5)])])
+    try:
+        reconcile.reconcile_batch_file_ids(engine, [1])
+        assert False, "deveria ter levantado AssertionError na primeira query"
+    except AssertionError as exc:
+        assert "antes de execution_options" in str(exc)
+
+
+def test_reconcile_batch_file_ids_nunca_seleciona_raw_payload():
+    """Verifica só as linhas de SQL de fato (contendo `SELECT`), nunca o
+    docstring da função -- que legitimamente cita `raw_payload` em prosa
+    explicando que NUNCA é selecionado (mesma armadilha de falso positivo
+    já documentada em outros gates)."""
+    import inspect
+    source = inspect.getsource(reconcile.reconcile_batch_file_ids)
+    sql_lines = [line for line in source.splitlines() if "SELECT" in line.upper()]
+    assert sql_lines  # confirma que há de fato SQL nesta função
+    for line in sql_lines:
+        assert "raw_payload" not in line

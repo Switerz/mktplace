@@ -11,16 +11,41 @@ Uso:
     python -m pipelines.ingestion.load_shopee_raw --apply --create-schema
     python -m pipelines.ingestion.load_shopee_raw --apply --pilot
     python -m pipelines.ingestion.load_shopee_raw --apply --backfill
+    python -m pipelines.ingestion.load_shopee_raw --apply --backfill --json
 
 `--inventory`/`--dry-run` nunca leem o secret de escrita e nunca abrem
 conexão de escrita. `--apply` só lê `.env.shopee-write.local` (nunca
 `os.environ`), e só chega a conectar depois de todos os guardrails
 estáticos (arquivo ignorado/não rastreado, exatamente as 2 chaves
 esperadas, URL de escrita diferente da de leitura) passarem.
+
+Gate S5.5.1 — `--json` (só válido com `--apply --backfill`; qualquer outra
+combinação bloqueia ANTES de secret/preflight/filesystem/banco) imprime
+UM ÚNICO documento JSON em stdout com `batch_id` + os `file_id`s que a
+própria execução produziu (`inserted`/`skipped_idempotent`), agrupados por
+`source_type` — nunca `relative_path`/filename/hash/`order_id`/
+`raw_payload`, nunca DSN/host/usuário. `batch_id` reflete a invocação
+ATUAL; um arquivo `skipped_idempotent` pode ter sido originalmente
+persistido sob um `batch_id` diferente — seu `file_id` continua válido,
+mas o `batch_id` desta resposta não é o `batch_id` gravado no manifesto
+daquele arquivo especificamente.
+
+Também corrigido neste gate: o antigo cálculo de `incomplete` comparava a
+contagem HISTÓRICA TOTAL de `raw.shopee_ingestion_file` (todas as
+execuções já feitas) contra `len(eligible)` (só os arquivos desta
+execução) — uma comparação sem sentido que causava um falso exit code 9
+em qualquer banco com mais de uma carga histórica. Substituído por
+`reconcile.reconcile_batch_file_ids`, escopado exclusivamente aos
+`file_id`s que ESTA execução de fato produziu — nunca ao histórico. A
+saúde GLOBAL da Raw (`reconcile.run_reconciliation`, órfãos/duplicidade
+de manifesto/totais agregados) continua rodando e continua bloqueando se
+genuinamente quebrada — as duas checagens são conceitualmente separadas e
+nenhuma mascara a outra.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -314,6 +339,67 @@ def _print_write_outcome(outcome: writer.FileWriteOutcome, label: str) -> None:
     print(line)
 
 
+# ---------------------------------------------------------------------------
+# Gate S5.5.1 — saída --json do backfill. Só válido com --apply --backfill;
+# UM ÚNICO documento JSON no stdout, nunca relative_path/filename/hash/
+# order_id/raw_payload, nunca DSN/host/usuário.
+# ---------------------------------------------------------------------------
+
+RAW_JSON_SCHEMA_VERSION = 1
+
+
+def _strip_relative_path_from_error(error_text: Optional[str]) -> Optional[str]:
+    """`writer._safe_error_summary` inclui `file=<relative_path>` como o
+    ÚLTIMO token da mensagem (metadado seguro para os outros consumidores
+    já existentes, mas o contrato JSON deste módulo proíbe qualquer nome/
+    caminho de arquivo) — remove só esse trecho final, preservando tipo da
+    exceção/pgcode/constraint. Nunca modifica `writer.py`: a mensagem
+    chega aqui já pronta, esta função só filtra o que sai no JSON."""
+    if not error_text:
+        return error_text
+    idx = error_text.find(" file=")
+    if idx == -1:
+        return error_text
+    return error_text[:idx].strip()
+
+
+def _raw_json_payload(
+    *,
+    batch_id: Optional[str],
+    raw_status: str,
+    eligible: int = 0,
+    inserted: int = 0,
+    skipped: int = 0,
+    failed: int = 0,
+    file_ids_by_source: Optional[dict] = None,
+    raw_reconciled: bool = False,
+    problems: Optional[list] = None,
+    warnings: Optional[list] = None,
+) -> dict:
+    file_ids_by_source = file_ids_by_source or {"orders": [], "shop_stats": [], "ads": []}
+    return {
+        "schema_version": RAW_JSON_SCHEMA_VERSION,
+        "batch_id": batch_id,
+        "raw_status": raw_status,
+        "eligible_file_count": eligible,
+        "inserted_file_count": inserted,
+        "skipped_idempotent_file_count": skipped,
+        "failed_file_count": failed,
+        "file_ids_by_source": file_ids_by_source,
+        "order_file_ids": list(file_ids_by_source.get("orders", [])),
+        "raw_reconciled": raw_reconciled,
+        "problems": list(problems or []),
+        "warnings": list(warnings or []),
+    }
+
+
+def _print_raw_json(payload: dict) -> None:
+    # Único documento JSON no stdout — nenhum texto humano antes/depois,
+    # nem misturado. Avisos/logs auxiliares (se inevitáveis) vão para
+    # stderr, nunca para stdout.
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
 def run_apply_pilot(
     secret_path: Path = DEFAULT_WRITE_SECRET_PATH,
     repo_root: Path = REPO_ROOT,
@@ -383,15 +469,35 @@ def run_apply_backfill(
     data_path: Optional[Path] = None,
     source: str = "all",
     brand: Optional[str] = None,
+    as_json: bool = False,
 ) -> int:
+    """Gate S5.5.1: `as_json=True` produz UM ÚNICO documento JSON no
+    stdout (contrato em `_raw_json_payload`) — nenhum `print` humano roda
+    nesse modo; avisos de preflight (se houver) só entram no campo
+    `warnings` do JSON, nunca em stdout/stderr separadamente. Sem
+    `as_json`, o comportamento/formato humano é preservado integralmente,
+    exceto pela correção do falso `incomplete` (ver `reconcile_batch_file_ids`
+    abaixo — a saúde GLOBAL de `reconcile.run_reconciliation` continua
+    rodando e continua bloqueando por conta própria, sem relação com a
+    contagem histórica que causava o bug)."""
     write_url, err = _resolve_write_url(secret_path, repo_root)
     if err:
+        if as_json:
+            _print_raw_json(_raw_json_payload(batch_id=None, raw_status="blocked", problems=[err]))
+            return 2
         print(f"--apply --backfill bloqueado: {err}", file=sys.stderr)
         return 2
 
     report = write_conn.run_preflight(write_url, settings.datamart_url, expect_tables_exist=True)
-    _print_write_preflight(report, "antes do backfill — raw.shopee_* deve existir")
+    if not as_json:
+        _print_write_preflight(report, "antes do backfill — raw.shopee_* deve existir")
     if not report.ok:
+        if as_json:
+            _print_raw_json(_raw_json_payload(
+                batch_id=None, raw_status="blocked",
+                problems=list(report.blocking_reasons), warnings=list(report.warnings),
+            ))
+            return 3
         print("BACKFILL NÃO executado — preflight bloqueado.", file=sys.stderr)
         return 3
 
@@ -400,24 +506,37 @@ def run_apply_backfill(
     eligible = [r for r in records if r.source_type in writer.SOURCE_TABLE_MAP and r.is_readable and r.brand_known]
     eligible = _filter_records(eligible, source, brand, None)
     if not eligible:
+        if as_json:
+            _print_raw_json(_raw_json_payload(batch_id=None, raw_status="no_files", raw_reconciled=True))
+            return 0
         print("Nenhum arquivo elegível para os filtros informados.")
         return 0
 
-    print(f"\n{len(eligible)} arquivo(s) elegível(is) para o backfill (transação por arquivo, sem paralelismo, sem retry).")
+    if not as_json:
+        print(f"\n{len(eligible)} arquivo(s) elegível(is) para o backfill (transação por arquivo, sem paralelismo, sem retry).")
 
     outcomes: list[writer.FileWriteOutcome] = []
+    batch_id: Optional[str] = None
     conn = write_conn.open_write_connection(write_url)
     try:
         if not write_conn.try_acquire_advisory_lock(conn):
+            if as_json:
+                _print_raw_json(_raw_json_payload(
+                    batch_id=None, raw_status="blocked", eligible=len(eligible),
+                    problems=["advisory lock em uso por outra execução — sem retry automático"],
+                ))
+                return 6
             print("BACKFILL abortado: advisory lock em uso por outra execução — sem retry automático.", file=sys.stderr)
             return 6
         try:
             batch_id = writer.new_batch_id()
-            print(f"batch_id={batch_id}")
+            if not as_json:
+                print(f"batch_id={batch_id}")
             for record in eligible:
                 outcome = writer.insert_file(conn, data_path, record, batch_id)
                 outcomes.append(outcome)
-                _print_write_outcome(outcome, "backfill")
+                if not as_json:
+                    _print_write_outcome(outcome, "backfill")
         finally:
             write_conn.release_advisory_lock(conn)
     finally:
@@ -426,16 +545,16 @@ def run_apply_backfill(
     inserted = [o for o in outcomes if o.outcome == "inserted"]
     skipped = [o for o in outcomes if o.outcome == "skipped_idempotent"]
     failed = [o for o in outcomes if o.outcome == "failed"]
-    print(
-        f"\nBACKFILL: {len(inserted)} inseridos, {len(skipped)} pulados (idempotência), "
-        f"{len(failed)} falharam, de {len(eligible)} elegíveis."
-    )
-    if failed:
-        print("Arquivos com falha (transação individual revertida, nenhum dado parcial persistido):")
-        for o in failed:
-            print(f"  - {o.relative_path}: {o.error}")
+    if not as_json:
+        print(
+            f"\nBACKFILL: {len(inserted)} inseridos, {len(skipped)} pulados (idempotência), "
+            f"{len(failed)} falharam, de {len(eligible)} elegíveis."
+        )
+        if failed:
+            print("Arquivos com falha (transação individual revertida, nenhum dado parcial persistido):")
+            for o in failed:
+                print(f"  - {o.relative_path}: {o.error}")
 
-    print("\n=== Reconciliação pós-carga (via PRIMARY, sessão explicitamente read-only) ===")
     # Reconciliação imediata após escrita usa a PRIMARY (a própria conexão de
     # escrita, em modo postgresql_readonly=True — nunca escreve, mas nunca
     # está sujeita a lag de réplica). DATAMART_DATABASE_URL é uma read
@@ -443,28 +562,86 @@ def run_apply_backfill(
     # conferências posteriores, não para a checagem logo após o backfill —
     # usar a réplica aqui já causou uma leitura incompleta que parecia um
     # problema real quando era só lag (ver docs/runbook_shopee_raw.md).
+    if not as_json:
+        print("\n=== Reconciliação pós-carga (via PRIMARY, sessão explicitamente read-only) ===")
     engine = create_engine(write_url)
     recon = reconcile.run_reconciliation(engine)
-    reconciled_files = sum(v["arquivos"] for v in recon.manifest_counts_by_source_brand.values())
-    incomplete = reconciled_files != len(eligible)
-    if incomplete:
-        print(
-            f"PROBLEMA: reconciliação na primary não reflete todos os arquivos processados "
-            f"({reconciled_files} manifestos visíveis / {len(eligible)} elegíveis) — investigar antes de confiar nesta carga."
-        )
+
+    # Gate S5.5.1: contrato interno de FileWriteOutcome — um outcome de
+    # sucesso (inserted/skipped_idempotent) SEM file_id válido reprova o
+    # contrato explicitamente (nunca é silenciosamente ignorado); um
+    # outcome "failed" nunca deve entrar no cálculo de file_ids, mesmo que
+    # por algum bug tivesse um file_id preenchido — restrito por
+    # construção a `inserted + skipped`, nunca a `outcomes` inteiro.
+    contract_violations = [o for o in (inserted + skipped) if o.file_id is None]
+    contract_problems = (
+        [f"{len(contract_violations)} outcome(s) de sucesso sem file_id válido (violação do contrato interno)"]
+        if contract_violations else []
+    )
+
+    # Gate S5.5.1: reconciliação ESCOPADA aos file_ids que ESTA execução de
+    # fato produziu (inserted/skipped_idempotent) — nunca comparada contra
+    # o histórico total de raw.shopee_ingestion_file (essa era a causa
+    # exata do falso exit 9). `recon` (saúde global) continua separado e
+    # continua bloqueando por conta própria se houver problema genuíno.
+    outcome_file_ids = sorted({o.file_id for o in (inserted + skipped) if o.file_id is not None})
+    batch_recon = reconcile.reconcile_batch_file_ids(engine, outcome_file_ids)
+
+    file_ids_by_source: dict[str, list[int]] = {"orders": [], "shop_stats": [], "ads": []}
+    for fid, source_type in batch_recon.source_type_by_file_id.items():
+        if source_type in file_ids_by_source:
+            file_ids_by_source[source_type].append(fid)
+    for key in file_ids_by_source:
+        file_ids_by_source[key].sort()
+
+    if failed and len(failed) == len(eligible):
+        raw_status = "failed"
+    elif failed:
+        raw_status = "partially_failed"
+    else:
+        raw_status = "all_files_committed"
+
+    raw_reconciled = (
+        not failed and not contract_violations and batch_recon.reconciled and not recon.problems
+    )
+
+    if as_json:
+        problems: list[str] = []
+        for o in failed:
+            problems.append(f"falha ao inserir arquivo: {_strip_relative_path_from_error(o.error)}")
+        problems.extend(contract_problems)
+        problems.extend(batch_recon.problems)
+        problems.extend(recon.problems)
+        _print_raw_json(_raw_json_payload(
+            batch_id=batch_id, raw_status=raw_status, eligible=len(eligible),
+            inserted=len(inserted), skipped=len(skipped), failed=len(failed),
+            file_ids_by_source=file_ids_by_source, raw_reconciled=raw_reconciled,
+            problems=problems,
+        ))
+        return 0 if not failed and raw_reconciled else 9
+
     print(f"Total de linhas no manifesto: {recon.total_manifest_rows} | total de linhas-filhas: {recon.total_child_rows}")
     for key, counts in sorted(recon.manifest_counts_by_source_brand.items()):
         print(f"  {key}: {counts}")
     print(f"Tamanho ocupado (bytes): {recon.table_sizes_bytes}")
     print(f"PII (orders) — arquivos com headers de PII direta presentes: {recon.pii_headers_present_files} | ausentes: {recon.pii_headers_absent_files}")
     if recon.problems:
-        print("PROBLEMAS DE RECONCILIAÇÃO:")
+        print("PROBLEMAS DE RECONCILIAÇÃO (saúde global da Raw):")
         for p in recon.problems:
             print(f"  - {p}")
     else:
-        print("Reconciliação OK: nenhuma linha órfã, nenhuma duplicidade, manifesto == linhas-filhas.")
+        print("Reconciliação OK (saúde global): nenhuma linha órfã, nenhuma duplicidade, manifesto == linhas-filhas.")
+    if contract_violations:
+        print(f"PROBLEMA: {contract_problems[0]}")
+    print(f"\n=== Reconciliação do lote atual ({len(outcome_file_ids)} file_id(s) produzido(s) por esta execução) ===")
+    if batch_recon.problems:
+        print("PROBLEMAS NA RECONCILIAÇÃO DO LOTE ATUAL:")
+        for p in batch_recon.problems:
+            print(f"  - {p}")
+    else:
+        print("Reconciliação do lote atual OK: todos os file_ids desta execução confirmados no manifesto, sem divergência de linhas-filhas.")
 
-    return 0 if not failed and not recon.problems and not incomplete else 9
+    return 0 if not failed and raw_reconciled else 9
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -483,8 +660,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--brand", choices=BRANDS_IN_SCOPE, default=None)
     parser.add_argument("--file", default=None, help="Filtra por substring no caminho relativo.")
     parser.add_argument("--data-path", default=None, help="Sobrepõe SHOPEE_DATA_PATH.")
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Só válido com --apply --backfill: imprime um único documento JSON em stdout.",
+    )
 
     args = parser.parse_args(argv)
+
+    # Gate S5.5.1: --json só é aceito em --apply --backfill — bloqueia
+    # ANTES de secret/preflight/filesystem/banco, para qualquer outra
+    # combinação (inventory/dry-run/create-schema/pilot).
+    if args.json and not (args.apply and args.backfill):
+        print("--json só é aceito em --apply --backfill.", file=sys.stderr)
+        return 1
 
     if args.apply:
         if sum([args.create_schema, args.pilot, args.backfill]) != 1:
@@ -495,7 +683,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return run_apply_create_schema()
         if args.pilot:
             return run_apply_pilot(data_path=data_path)
-        return run_apply_backfill(data_path=data_path, source=args.source, brand=args.brand)
+        return run_apply_backfill(data_path=data_path, source=args.source, brand=args.brand, as_json=args.json)
 
     data_path = Path(args.data_path) if args.data_path else Path(settings.shopee_data_path)
     try:

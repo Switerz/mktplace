@@ -856,6 +856,62 @@ Pontos importantes para quem opera o scraping:
   disco, nao so' `schema_version`/`run_id` — qualquer campo divergente
   bloqueia como `receipt_status=failed`, sem nunca remover o receipt
   automaticamente.
+- **Atualizacao 2026-07-23 (Gate S5.5, DIAGNOSTICO — zero codigo alterado,
+  zero execucao)**: auditoria com evidencia de codigo sobre se esta
+  automacao ja fornece tudo que `run_shopee_gold_batch` precisa.
+  Confirmado: `batch_id` ja e' gerado (`writer.new_batch_id()`) e cobre
+  pedidos+stats+ads juntos numa mesma chamada `--apply --backfill`, mas
+  hoje so' sai como texto (`print(f"batch_id={batch_id}")` — sem
+  `--json`). Achado mais importante: `file_id` (existe internamente para
+  arquivos novos E ja' ingeridos) **nunca e' impresso em lugar nenhum** —
+  nem texto, nem JSON — entao hoje NAO ha' como a automacao capturar
+  `file_id`s so' consumindo o CLI oficial. Confirmado tambem: o transform
+  Silver roda numa unica transacao real (pedidos+stats+ads juntos) e ja'
+  garante, ANTES do commit, que 100% das linhas Raw tem correspondente na
+  Silver — essa garantia e' estrutural (transacional), nao depende de
+  nenhuma checagem externa, e o job Gold (via `resolve_shopee_batch_window`,
+  Gate S5.2.1) reconfere isso de novo, de forma independente, antes de
+  qualquer escrita. Tambem confirmado: nao existe runner Python versionado
+  no `mktplace` que execute o SQL Silver — quem executa e' so' o script
+  externo desta automacao (fora deste repositorio), lendo o `.sql` do
+  checkout `.mktplace/` com uma adaptacao de lock em memoria (ja
+  documentada acima). E encontrado um bug real (nao corrigido nesta
+  rodada): o exit code `9` que esta automacao ja contorna com um
+  workaround de parsing de texto vem de um calculo que compara o lote
+  atual contra o HISTORICO TOTAL de arquivos reconciliados, nao so' os
+  desta execucao. Classificacao: **opcao B** (ajuste minimo necessario) —
+  e o ajuste e' inteiramente do lado do loader Raw oficial deste
+  repositorio (`load_shopee_raw.py`, adicionar `--json` com `batch_id` +
+  `file_id`/`source_type` por arquivo), nao da automacao externa nem de um
+  novo runner Silver. Perguntas abertas para a pessoa responsavel pelo
+  scraping (nao verificaveis neste repositorio): comando real usado para
+  Silver, como capturam `batch_id`/`file_id` hoje, onde manterao
+  `--artifacts-dir` persistente, e como capturarao o JSON/exit code do job
+  Gold. Nada foi implementado nesta rodada.
+- **Atualizacao 2026-07-23 (Gate S5.5.1, IMPLEMENTADO — zero banco real,
+  zero Silver/Gold executado)**: `load_shopee_raw.py` ganhou
+  `--json` (so' valido com `--apply --backfill`; qualquer outra combinacao
+  bloqueia antes de secret/preflight/banco). Novo comando para a automacao
+  externa usar:
+  ```text
+  python -m pipelines.ingestion.load_shopee_raw --apply --backfill --data-path <batch> --json
+  ```
+  O JSON traz `batch_id` da invocacao atual + `file_id`s agrupados por
+  `source_type` (`orders`/`shop_stats`/`ads`) para `inserted` E
+  `skipped_idempotent` — nunca `relative_path`/filename/hash/`order_id`/
+  `raw_payload`, nunca DSN/host/usuario. Um arquivo `skipped_idempotent`
+  pode ter sido gravado originalmente sob outro `batch_id` (execucao
+  passada) — seu `file_id` continua valido, mas o JSON nunca alega que o
+  `batch_id` atual esta' no manifesto daquele arquivo especificamente.
+  Corrigido tambem o bug real ja documentado acima: o exit code 9 falso
+  vinha de comparar o lote atual contra o HISTORICO TOTAL de arquivos
+  reconciliados — removido por completo (nao so' trocado por `>=`) e
+  substituido por uma reconciliacao NOVA, escopada exclusivamente aos
+  `file_id`s que a execucao atual de fato produziu (nunca ao historico).
+  A saude GLOBAL da Raw (orfaos, duplicidade de manifesto) continua
+  rodando em paralelo e continua bloqueando por conta propria se
+  genuinamente quebrada. `writer.py` nao foi alterado. Este gate ainda
+  NAO executa Silver nem Gold — so' formaliza o que o loader Raw devolve.
 
 ## Alertas e falhas comuns
 

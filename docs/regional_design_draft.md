@@ -1136,3 +1136,142 @@ Preservado integralmente (nenhuma mudança): `committed`/`no_op` + receipt falho
 **Testes**: suíte do módulo cresceu de 67 para **82** testes — validação de `file_ids` via `validate_batch_file_ids` (vazia/duplicada/zero/negativa/acima do bigint/acima do limite, todas bloqueando antes de Git/probe/refresh, tanto na função pública quanto na CLI antes do secret); `git_dirty=True` produz o warning esperado sem nenhum nome de arquivo; publicação combinando falha principal (escrita ou link) com falha de limpeza — ambas preservadas no retorno; publicação bem-sucedida com falha de limpeza retorna `problem=None` + warning; revalidação integral detectando divergência em `operation_outcome`/`backup_sha256`/`file_ids`, sempre sem remover o receipt. Suíte completa: **1541 testes**, sem regressão nos 10 arquivos focais de Gold regional/refresh/preflight/ops (685 testes).
 
 **Status**: implementado e testado, **zero conexão com banco real**, **job real nunca executado**. Não commitado — gate de revisão.
+
+### Gate S5.5 — validação do contrato do runner externo Raw/Silver com o job Gold (2026-07-23)
+
+**Somente diagnóstico/contrato — zero código alterado, zero banco real, zero execução.** Inspecionados com evidência de código/commit: `pipelines/ingestion/load_shopee_raw.py`, `pipelines/ingestion/shopee_raw/writer.py` (`FileWriteOutcome`, `new_batch_id`, `insert_file`, `is_already_ingested`), `pipelines/ingestion/shopee_raw/inventory.py` (`FileInventoryRecord`, `SOURCE_ORDERS`/`SOURCE_SHOP_STATS`/`SOURCE_ADS`), `pipelines/ingestion/shopee_raw/reconcile.py`, `db/sql/raw/shopee_raw_ddl.sql`, `db/sql/staging/shopee_staging_transform.sql` (+ `pipelines/staging/shopee/build_sql.py`, sua fonte geradora), `pipelines/ops/run_shopee_gold_batch.py`, `docs/shopee_datamart_operacao_completa.md` (a documentação real da automação externa — vivendo fora deste repositório, em `C:\Users\User\Documents\relatorio_mercos\shopee_automacao`, fixada no commit `f32c52c`) e `docs/shopee_datamart_daily_jobs_handoff.md` (referência histórica apenas — já sinalizado como desatualizado desde o Gate S5.1, contém `--refresh-full`/acesso direto ao Neon que não existem/não se aplicam mais; não seguido).
+
+**Achado central nº 1 — `batch_id` já existe e já é persistido, mas só sai como texto humano.** `writer.new_batch_id()` gera um UUID4 por invocação de `run_apply_backfill`/`run_apply_pilot` (um único `batch_id` cobre pedidos+stats+ads juntos numa mesma chamada com `--source all`, o padrão) e é persistido em `raw.shopee_ingestion_file.batch_id` por arquivo. Mas `load_shopee_raw.py` não tem nenhuma flag `--json` — o valor só é exposto via `print(f"batch_id={batch_id}")` (texto puro, misturado com o resto do log). Confirmado nos dois locais (`load_shopee_raw.py:416,513`).
+
+**Achado central nº 2 — `file_id` é capturado internamente mas NUNCA impresso, nem como texto.** `FileWriteOutcome.file_id` é populado para `"inserted"` (novo `nextval`) E para `"skipped_idempotent"` (reaproveita o `file_id` já existente via `is_already_ingested`) — confirmado em `writer.py:84,162`. Porém `_print_write_outcome` (`load_shopee_raw.py:310-314`) imprime só `outcome`/`rows_inserted`/`relative_path`/`error` — **nunca `file_id`**. Isso significa que, hoje, nenhum processo externo que só consuma o CLI (via subprocesso, sem importar Python) tem QUALQUER forma de capturar `file_id` — nem por JSON, nem por parsing de texto, porque o número simplesmente não é emitido em lugar nenhum.
+
+**Achado central nº 3 — a automação externa já chama o loader oficial via SUBPROCESSO, lendo texto/exit code, com um workaround documentado para um bug real.** `docs/shopee_datamart_operacao_completa.md` confirma: `python -m pipelines.ingestion.load_shopee_raw --apply --backfill --data-path <batch>`, com o wrapper local aceitando **somente** o caso em que o exit code `9` vem acompanhado de "0 falharam" + "manifesto == linhas-filhas" no output — um workaround em cima de parsing de texto para compensar uma inconsistência real do loader oficial. Causa raiz identificada nesta rodada: `run_apply_backfill` (`load_shopee_raw.py:449`) calcula `incomplete = reconciled_files != len(eligible)`, mas `reconciled_files` soma **todo** `raw.shopee_ingestion_file` reconciliado (histórico completo, todas as execuções), não só os arquivos processados nesta chamada — então, em qualquer banco com mais de uma carga histórica, essa comparação quase sempre diverge e produz exit 9 mesmo com sucesso pleno. **Não corrigido nesta rodada** (fora de escopo — diagnóstico apenas), mas é um achado concreto, não hipotético.
+
+**Achado central nº 4 — não existe runner Python versionado para o transform Silver; a execução é 100% externa.** `pipelines/staging/shopee/build_sql.py` só GERA o texto de `db/sql/staging/shopee_staging_transform.sql` (`"NADA aqui executa SQL em banco"`, docstring própria) — nenhum módulo em `mktplace` conecta e executa esse SQL. Quem executa é exclusivamente o script externo (`shopee_datamart.py`, fora deste repositório), que lê o arquivo do checkout `.mktplace/` (confirmado idêntico entre o commit pinado `f32c52c` e o HEAD atual — `git log f32c52c..HEAD -- db/sql/staging/shopee_staging_transform.sql` vazio) e substitui `LOCK TABLE ... IN SHARE MODE` por `ACCESS SHARE MODE` em memória antes de rodar, porque a role dedicada não tem `UPDATE`. O cabeçalho do próprio arquivo SQL ainda diz `"DRAFT — NÃO EXECUTADO EM NENHUM BANCO"` — desatualizado em relação à realidade (a automação já rodou com sucesso em produção, piloto de 2026-07-17, 405.771 linhas), mas não corrigido aqui (fora de escopo).
+
+**Achado central nº 5 — a garantia "toda linha Raw elegível está na Silver" já é transacional e ATÔMICA, sem precisar de checagem externa.** O transform roda **1 única transação** (`BEGIN`...`COMMIT`, `shopee_staging_transform.sql:28,741`) para as 3 fontes juntas. O "Passo 6" (pós-insert, linhas 728-738) compara **100% das linhas de `raw.shopee_order_item_export`/`shop_stats`/`ads`** (não só as do lote atual) contra as tabelas `silver.stg_*` correspondentes, campo a campo (`file_id`/`brand`/`source_row_number`/`row_sha256`) — qualquer linha órfã ou com carga parcial aborta a transação inteira antes do `COMMIT`. Ou seja: se o script terminar com sucesso (exit 0 do lado de quem o executa), a garantia "todo `file_id` de pedidos está 100% na Silver" já é verdadeira por construção — não é uma inferência do runner. **Além disso**, o job Gold (`run_shopee_gold_batch` → `refresh_shopee_window_if_needed` → `resolve_shopee_batch_window`, Gate S5.2.1) **já reverifica isso de novo, de forma independente e autoritativa**, bloqueando com `missing_file_ids` se qualquer `file_id` informado não estiver na Silver — então mesmo que o runner externo errasse sua própria auto-avaliação de `silver_reconciled`, o job Gold nunca escreveria com base numa Silver incompleta.
+
+**Achado central nº 6 — `FileWriteOutcome` não distingue pedidos de stats/ads.** O dataclass (`writer.py:45-51`) não carrega `source_type` — só quem chama `writer.insert_file` (dentro do próprio loop de `run_apply_backfill`/`run_apply_pilot`) tem acesso a `record.source_type` (de `FileInventoryRecord`, populado por `inventory.detect_source_type` via padrão de nome de arquivo). Hoje esse dado nunca escapa da função — nem em texto, nem em retorno estruturado.
+
+#### Tabela confirmado / não confirmado / impacto
+
+| # | Item | Status | Evidência | Impacto se não corrigido |
+|---|---|---|---|---|
+| 1 | `batch_id` gerado e persistido, cobre pedidos+stats+ads | **Confirmado** | `writer.py:193-194`, `load_shopee_raw.py:415-416` | — |
+| 2 | `batch_id` sai como JSON | **Não confirmado — hoje é só texto** | `load_shopee_raw.py` sem `--json` | Runner precisa parsear stdout (frágil) |
+| 3 | `file_id` capturado para inserted E skipped_idempotent | **Confirmado** | `writer.py:84,162` | — |
+| 4 | `file_id` exposto de QUALQUER forma pelo CLI | **Não confirmado — nunca impresso** | `load_shopee_raw.py:310-314` | Runner não tem como saber `file_id`s sem reimplementar a query `is_already_ingested` por conta própria |
+| 5 | Distinção pedidos vs. stats/ads no outcome | **Não confirmado** | `FileWriteOutcome` sem `source_type` | Runner precisa correlacionar por nome de arquivo (duplicando `detect_source_type`) ou consultar `raw.shopee_ingestion_file.source_type` à parte |
+| 6 | Silver roda em transação única, todas as fontes juntas | **Confirmado** | `shopee_staging_transform.sql:28-741` | — |
+| 7 | Silver garante 100% Raw↔Silver antes do commit (não só o lote atual) | **Confirmado** | `shopee_staging_transform.sql:728-738` | — |
+| 8 | Existe runner Python versionado (mktplace) que executa o transform Silver | **Não confirmado — não existe** | `build_sql.py` só gera texto | Execução real depende inteiramente de código externo não auditado por este repositório |
+| 9 | Gold rechecagem independente de "file_ids na Silver" | **Confirmado** | `resolve_shopee_batch_window`, Gate S5.2.1 | — |
+| 10 | Exit code do loader Raw confiável para "tudo OK" | **Não confirmado — bug real** | `load_shopee_raw.py:449` (`incomplete` compara contra histórico total, não o lote) | Automação precisa manter workaround de parsing de texto |
+| 11 | `artifacts_dir` persistente/configurado do lado do runner | **Não verificável no repositório** | não documentado em `shopee_datamart_operacao_completa.md` | Bloqueia a integração até resposta externa |
+| 12 | Runner sabe capturar JSON + exit code do `run_shopee_gold_batch` | **Não verificável no repositório** | idem | Bloqueia a integração até resposta externa |
+
+#### Contrato JSON proposto (Raw/Silver → Gold)
+
+```json
+{
+  "schema_version": 1,
+  "batch_id": "uuid gerado por writer.new_batch_id()",
+  "raw_status": "all_files_committed",
+  "silver_status": "committed",
+  "order_file_ids": [1, 2, 3],
+  "order_files_expected": 3,
+  "silver_row_count": 12345,
+  "silver_reconciled": true,
+  "completed_at_utc": "2026-07-23T10:00:00Z",
+  "problems": [],
+  "warnings": []
+}
+```
+Ajustado ao que é realmente produzível hoje: **removido** `order_files_in_silver` (proposta original do gate) — esse número não é algo que o runner Raw/Silver calcule sozinho; é exatamente o que `resolve_shopee_batch_window`/`shopee_batch_window.py --json` (Gate S5.2.1, já existente) já devolve (`found_file_count`) ao ser chamado com os mesmos `order_file_ids` — não faz sentido duplicar esse cálculo no runner. `raw_status` é `"all_files_committed"` (não `"committed"` simples) porque a Raw é **por arquivo** (uma transação cada, `writer.py` docstring) — nunca uma única transação atômica como a Silver; o campo é um agregado (`zero falhas`), não um commit único. `silver_status` sim é `"committed"`/`"aborted"` porque o transform É uma única transação real. `silver_reconciled` é a AUTOAVALIAÇÃO do runner (script terminou sem `RAISE EXCEPTION`) — não uma confirmação vinda da role Gold; o job Gold sempre reconfirma isso de forma independente (achado nº 5 acima).
+
+#### Critérios para chamar (ou pular) a Gold
+
+Chamar `run_shopee_gold_batch` somente quando, simultaneamente: `raw_status == "all_files_committed"`; `silver_status == "committed"`; `silver_reconciled == true`; `order_file_ids` não vazio, sem duplicatas; `batch_id` e `run_id` disponíveis; `artifacts_dir` persistente e configurado (pendente de confirmação externa). Se o lote só tiver stats/ads (sem arquivo de pedidos): `gold_status = "not_applicable"`, o job Gold **nunca é chamado** com lista vazia, e isso **não é tratado como falha** — é um caminho de sucesso normal (mesmo espírito de `no_op` no S5.3: ausência de trabalho não é erro).
+
+#### Política de retry / exit codes
+
+Scraping/download: pode repetir livremente (camada mais externa, sem efeito no banco). Raw: pode repetir por idempotência de hash (`uk_shopee_ingestion_file_sha256_sheet_nullsafe`) — um arquivo já ingerido vira `skipped_idempotent`, nunca duplica. Silver: só repetir depois de `ROLLBACK`/abort confirmado (a transação é tudo-ou-nada; nunca reexecutar sobre um estado que já comitou parcialmente, porque não existe "parcial" nesse desenho — só comitou tudo ou nada). Gold (`run_shopee_gold_batch`): **nunca** retry automático em nenhum caminho — exit 5 significa "dados persistidos, evidência local incompleta, intervenção manual, nunca repetir o refresh automaticamente"; `blocked`/`failed` (exit 2/3/4) também não devem ser reexecutados automaticamente sem diagnóstico (podem indicar janela inválida, preflight bloqueado, ou uma condição estrutural que retry nenhum resolve sozinho). Uma nova tentativa manual usa **sempre** um `run_id` novo (nunca reaproveita o de uma tentativa anterior que já tenha publicado qualquer artefato — garantia "nunca sobrescrever" já reforça isso).
+
+#### Integração com Neon (reafirmado, sem mudança)
+
+O runner externo termina sua responsabilidade após Data Mart Gold + receipt — ele não recebe `DATABASE_URL` do Neon, não chama `sync_region_if_needed`. A Torre executa o sync por processo separado; enquanto o scheduler estiver desabilitado (achado já registrado em `project_data_pipeline_scheduler_status`), esse sync é manual pela equipe da Torre.
+
+#### Classificação
+
+**B, com uma ressalva concreta**: o runner (tanto a automação externa quanto o loader oficial que ela chama) fornece dados suficientes **em texto/estado interno**, mas não em formato estruturado — e um campo (`file_id`) hoje não é exposto em NENHUMA forma, nem texto. Isso não é a opção C ("precisa de helper/runner versionado antes da liberação" para Silver) porque o transform Silver já é seguro e auditável por construção (achado nº 5) — o ajuste necessário é inteiramente do lado do loader Raw oficial (`load_shopee_raw.py`, código deste próprio repositório), não da automação externa nem de um novo runner Silver.
+
+#### Menor ajuste necessário
+
+Adicionar uma flag `--json` a `load_shopee_raw.py` (modos `--apply --backfill`/`--apply --pilot`) que, ao final, imprime **um único documento JSON** em stdout contendo `batch_id` + uma lista `[{relative_path, source_type, outcome, file_id, rows_inserted}]` — dado que **já existe** em memória (`FileWriteOutcome` + `FileInventoryRecord.source_type`), só não é serializado hoje. Mesmo padrão já estabelecido em `shopee_batch_window.py`/`refresh_shopee_window_if_needed.py`/`run_shopee_gold_batch.py` (avisos/logs em stderr, um único JSON em stdout). Nenhuma lógica de validação nova — é só serialização do que já é calculado. Corrigir também (separadamente, mesma oportunidade) o cálculo de `incomplete` em `run_apply_backfill` para escopar `reconciled_files` só aos arquivos desta execução, eliminando a necessidade do workaround de exit code 9 documentado pela automação externa.
+
+#### Perguntas para a pessoa externa (não verificável no repositório)
+
+1. Comando exato usado hoje para rodar a transformação Silver (linha de comando/script Python real, não só o caminho do `.sql`)?
+2. Como `shopee_pipeline.py`/`shopee_datamart.py` recebem `batch_id` hoje — capturam stdout do subprocesso, ou há algum retorno estruturado já implementado do lado de vocês?
+3. Como recebem/derivam os `file_id`s hoje, já que o loader oficial não os imprime?
+4. Como distinguem hoje, no seu código, quais arquivos processados são de pedidos vs. stats/ads?
+5. Como confirmam hoje "commit" e "reconciliação" da Silver — leem o exit code do processo que roda o SQL, ou fazem alguma query própria depois?
+6. Onde pretendem manter o `--artifacts-dir` (caminho absoluto, fora do repositório, persistente entre execuções) para os receipts do job Gold?
+7. Como pretendem capturar o JSON + exit code de `run_shopee_gold_batch` — subprocess com `capture_output`, redirecionamento para arquivo, outro mecanismo?
+8. Qual processo notifica a Torre depois de um `committed` — e-mail, log compartilhado, outro canal?
+
+#### Sequência operacional final proposta
+
+1. Scraping/download (automação externa, sem mudança).
+2. Raw via `load_shopee_raw.py --apply --backfill` — **com o ajuste mínimo proposto** (`--json`), capturando `batch_id` + `file_id`/`source_type` por arquivo estruturadamente.
+3. Silver via o SQL oficial (mecanismo de execução real a esclarecer — pergunta nº 1) — sucesso = transação `COMMIT`.
+4. Runner monta o handoff JSON (schema acima) a partir dos dados já capturados nos passos 2-3 — sem nenhum cálculo novo além de filtrar `order_file_ids` pelos arquivos com `source_type='orders'`.
+5. Se `order_file_ids` vazio: `gold_status=not_applicable`, encerra com sucesso, sem chamar o job Gold.
+6. Se critérios da seção "Critérios para chamar ou pular a Gold" batem: chama `python -m pipelines.ops.run_shopee_gold_batch --file-id ... --artifacts-dir ... --batch-id ... --run-id ... --json`.
+7. Runner interpreta exit code (0=sucesso, 2/3/4=bloqueio/falha sem retry automático, 5=sucesso com evidência incompleta — intervenção manual) e notifica a Torre conforme resultado (pergunta nº 8).
+8. Torre roda `sync_region_if_needed` manualmente, em processo separado, quando decidir refletir no Neon.
+
+**Status**: diagnóstico concluído com evidência de código para praticamente todas as perguntas objetivas; 4 perguntas permanecem abertas exclusivamente por dependerem de informação do lado externo (não verificável neste repositório). Não commitado — gate de revisão/diagnóstico, nenhum código alterado.
+
+### Gate S5.5.1 — contrato JSON do loader Raw Shopee e correção da reconciliação do lote atual (2026-07-23)
+
+**Implementado, testado, zero conexão com banco real, zero execução Raw/Silver/Gold.** Fecha o achado nº 2 e nº 10 do S5.5 (`file_id` nunca exposto; falso exit 9): `pipelines/ingestion/load_shopee_raw.py` ganhou `--json` (só válido com `--apply --backfill`) e a reconciliação passou a ser escopada ao lote atual via nova função em `pipelines/ingestion/shopee_raw/reconcile.py`. `writer.py` **não foi alterado** — `FileWriteOutcome.file_id` já era populado corretamente para `inserted`/`skipped_idempotent`; faltava só serializar.
+
+**Causa exata do bug antigo**: `run_apply_backfill` calculava `reconciled_files = sum(v["arquivos"] for v in recon.manifest_counts_by_source_brand.values())` — uma soma sobre **todo o histórico** de `raw.shopee_ingestion_file` (todas as execuções já feitas, todas as brands/source_types) — e comparava isso contra `len(eligible)` (só os arquivos **desta** execução). Em qualquer banco com mais de uma carga histórica, `reconciled_files` quase sempre excede `len(eligible)`, produzindo `incomplete=True` e exit 9 mesmo com `0 falharam` e reconciliação genuína OK — exatamente o workaround de parsing de texto que a automação externa já documentava.
+
+**Correção**: a comparação errada foi **removida por completo** (nunca só trocada por `>=`, que continuaria semanticamente errada). Nova função `reconcile.reconcile_batch_file_ids(engine, file_ids)` — recebe SÓ os `file_id`s que `inserted`/`skipped_idempotent` desta execução de fato produziram (nunca uma contagem agregada) e confirma, via 1+N consultas com bind parameters (`file_id = ANY(:file_ids)`, sessão `execution_options(postgresql_readonly=True)` contra a PRIMARY, mesmo padrão já auditado de `run_reconciliation`): (1) todos existem no manifesto; (2) `source_type` de cada um, direto do manifesto (nunca herdado do scan local); (3) contagem de linhas-filhas por `file_id` bate com `source_row_count` (detecta carga parcial dentro de um `file_id` já existente). `file_id`s duplicados na lista pedida também bloqueiam. A saúde GLOBAL (`reconcile.run_reconciliation` — órfãos, duplicidade de manifesto, totais agregados) continua rodando **em paralelo, sem relação com a contagem histórica** e continua bloqueando por conta própria se genuinamente quebrada — as duas checagens nunca se mascaram.
+
+**Contrato JSON final** (`_raw_json_payload`, `RAW_JSON_SCHEMA_VERSION=1`):
+```json
+{
+  "schema_version": 1,
+  "batch_id": "uuid da invocação atual, ou null se ainda não criado",
+  "raw_status": "all_files_committed|partially_failed|blocked|no_files|failed",
+  "eligible_file_count": 3,
+  "inserted_file_count": 2,
+  "skipped_idempotent_file_count": 1,
+  "failed_file_count": 0,
+  "file_ids_by_source": {"orders": [101], "shop_stats": [102], "ads": [103]},
+  "order_file_ids": [101],
+  "raw_reconciled": true,
+  "problems": [],
+  "warnings": []
+}
+```
+`raw_status` é `"all_files_committed"` (nunca `"committed"` simples) porque a Raw é **por arquivo** — cada `insert_file` é sua própria transação (`writer.py`, inalterado) — nunca uma transação atômica única como a Silver; o campo é um agregado (zero falhas), não um commit único. `"failed"` só quando **todos** os elegíveis falharam; `"partially_failed"` quando há mistura. `"no_files"` quando não há elegíveis para os filtros (sucesso, `raw_reconciled=true` trivialmente). `"blocked"` para secret/preflight/advisory-lock bloqueados — `batch_id=null` nesses casos (ainda não foi gerado nesse ponto do fluxo).
+
+**`batch_id` da invocação vs. `batch_id` histórico de `skipped_idempotent`**: documentado explicitamente no docstring do módulo — o `batch_id` do JSON é sempre o da chamada ATUAL; um arquivo `skipped_idempotent` pode ter sido persistido originalmente sob um `batch_id` diferente (de uma execução passada) — seu `file_id` continua válido e aparece normalmente em `file_ids_by_source`, mas o contrato nunca alega que o `batch_id` desta resposta está gravado no manifesto daquele arquivo especificamente.
+
+**Regras de contrato reforçadas**: `order_file_ids` é sempre exatamente `file_ids_by_source["orders"]` (nunca uma lista separada recalculada); IDs sempre `sorted(set(...))` (únicos e ordenados) — nunca a ordem bruta de processamento; um outcome de sucesso (`inserted`/`skipped_idempotent`) sem `file_id` válido é tratado como violação de contrato explícita (`problems` + `raw_reconciled=false` + exit 9), nunca silenciosamente omitido; `outcome_file_ids` é calculado só a partir de `inserted + skipped` (nunca `outcomes` inteiro), então um `failed` nunca pode vazar um `file_id` mesmo hipotético. Erros de arquivo (`FileWriteOutcome.error`, de `writer._safe_error_summary`) passam por `_strip_relative_path_from_error` antes de entrar no JSON — remove só o token final `file=<relative_path>`, preserva tipo de exceção/`pgcode`/`constraint` (metadado técnico já considerado seguro).
+
+**Nunca no JSON**: `relative_path`/filename, `file_sha256`, `order_id`, `raw_payload`, linha individual, DSN/host/IP/usuário/porta/database, conteúdo de secret, traceback não sanitizado — confirmado por regressão estática escaneando só `_raw_json_payload`/`_print_raw_json` (nunca o docstring do módulo, que cita esses nomes em prosa).
+
+**Modo humano** (sem `--json`): preservado integralmente — mesmos textos/exit codes — exceto a correção do `incomplete` (a antiga mensagem "PROBLEMA: reconciliação na primary não reflete todos os arquivos processados" nunca mais aparece) e uma nova seção "Reconciliação do lote atual", que reporta a mesma `reconcile_batch_file_ids` também no modo texto, separada com clareza da "Reconciliação OK (saúde global)" já existente.
+
+**Comando que a automação externa deverá usar**: `python -m pipelines.ingestion.load_shopee_raw --apply --backfill --data-path <batch> --json`.
+
+**Este gate ainda não executa Silver nem Gold** — só formaliza o que o loader Raw devolve; a chamada a `run_shopee_gold_batch` continua sendo decisão de quem orquestra (automação externa), não deste loader.
+
+**Testes**: 29 novos (10 em `test_shopee_raw_reconcile.py`, 19 em `test_load_shopee_raw_cli.py`) — cobrindo allowlist de combinação `--json`, bloqueio antes de secret/preflight/banco, JSON único parseável sem texto misturado, `file_id` correto para inserted/skipped_idempotent, agrupamento por `source_type`, unicidade/ordenação, violação de contrato (sucesso sem `file_id`), `failed` nunca inventa `file_id`, ausência de `relative_path`/hash/`order_id`/`raw_payload` no JSON, histórico grande não causa mais falso exit 9 (prova direta da correção), `file_id` ausente/divergência de linhas-filhas bloqueiam, bind parameters, sessão read-only, modo humano preservado. Suíte completa: **1571 testes**, sem regressão em `test_shopee_raw_writer.py` (writer.py inalterado, 15 testes).
+
+**Status**: implementado e testado, **zero banco real, zero Gold, zero sync, zero commit/push**. Não commitado — gate de revisão.

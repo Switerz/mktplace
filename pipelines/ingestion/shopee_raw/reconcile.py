@@ -62,6 +62,24 @@ class ReconciliationReport:
     problems: list[str] = field(default_factory=list)
 
 
+@dataclass
+class BatchFileReconciliationReport:
+    """Reconciliação ESCOPADA aos `file_id`s de UMA execução do backfill —
+    Gate S5.5.1. Não confundir com `ReconciliationReport` (saúde global de
+    toda a Raw, histórico completo): esta função só confirma o que a
+    execução ATUAL de fato produziu (`inserted`/`skipped_idempotent`),
+    nunca compara contra contagens históricas agregadas — é exatamente essa
+    comparação (lote atual vs. histórico total) que causava o falso exit 9
+    corrigido neste gate."""
+    requested_file_count: int = 0
+    found_file_ids: list = field(default_factory=list)
+    missing_file_ids: list = field(default_factory=list)
+    source_type_by_file_id: dict = field(default_factory=dict)
+    row_count_mismatches: dict = field(default_factory=dict)
+    reconciled: bool = False
+    problems: list[str] = field(default_factory=list)
+
+
 def run_reconciliation(engine) -> ReconciliationReport:
     """`execution_options(postgresql_readonly=True)` instrui o driver
     (psycopg2) a chamar `set_session(readonly=True)` ANTES de qualquer
@@ -153,4 +171,89 @@ def run_reconciliation(engine) -> ReconciliationReport:
             f"linhas-filhas ({report.total_child_rows})"
         )
 
+    return report
+
+
+def reconcile_batch_file_ids(engine, file_ids: list[int]) -> BatchFileReconciliationReport:
+    """Reconciliação read-only ESCOPADA a um conjunto específico de
+    `file_id`s — Gate S5.5.1. Pensada para ser chamada logo após um
+    backfill, com os `file_id`s que os próprios outcomes
+    (`inserted`/`skipped_idempotent`) da execução ATUAL devolveram — nunca
+    com uma contagem agregada histórica (essa comparação era a causa raiz
+    do falso exit 9 corrigido neste gate).
+
+    Mesmo padrão de sessão já auditado em `run_reconciliation`:
+    `execution_options(postgresql_readonly=True)` ANTES de qualquer
+    `execute()` — recomendado contra a PRIMARY (a própria credencial de
+    escrita, logo após o commit) para não sofrer lag de réplica, mesma
+    decisão já documentada no módulo. IDs sempre via bind parameter
+    (`ANY(:file_ids)`), nunca interpolados na string SQL.
+
+    Confirma: (1) todos os `file_id`s pedidos existem no manifesto
+    (`raw.shopee_ingestion_file`); (2) o `source_type` de cada um, direto
+    do manifesto (fonte de verdade — nunca herdado do scan local); (3) que
+    a contagem de linhas-filhas por `file_id` bate com
+    `source_row_count` do manifesto (detecta carga parcial dentro de um
+    `file_id` já existente). Nunca seleciona `raw_payload`, PII ou uma
+    linha individual — só contagens/IDs/`source_type`. `file_id`s
+    duplicados na lista pedida também bloqueiam (`reconciled=False`)."""
+    report = BatchFileReconciliationReport(requested_file_count=len(file_ids))
+    if not file_ids:
+        report.reconciled = True
+        return report
+
+    seen: set[int] = set()
+    dupes: set[int] = set()
+    for fid in file_ids:
+        (dupes if fid in seen else seen).add(fid)
+    if dupes:
+        report.problems.append(f"file_id(s) duplicado(s) na lista solicitada: {sorted(dupes)}")
+
+    unique_ids = sorted(seen)
+
+    with engine.connect().execution_options(postgresql_readonly=True) as conn:
+        manifest_rows = conn.execute(
+            text(
+                "SELECT file_id, source_type, source_row_count FROM raw.shopee_ingestion_file "
+                "WHERE file_id = ANY(:file_ids)"
+            ),
+            {"file_ids": unique_ids},
+        ).fetchall()
+
+        found_ids: set[int] = set()
+        expected_rows_by_id: dict[int, int] = {}
+        ids_by_source: dict[str, list[int]] = {}
+        for r in manifest_rows:
+            found_ids.add(r.file_id)
+            report.source_type_by_file_id[r.file_id] = r.source_type
+            expected_rows_by_id[r.file_id] = r.source_row_count or 0
+            ids_by_source.setdefault(r.source_type, []).append(r.file_id)
+
+        report.found_file_ids = sorted(found_ids)
+        report.missing_file_ids = sorted(set(unique_ids) - found_ids)
+        if report.missing_file_ids:
+            report.problems.append(
+                f"{len(report.missing_file_ids)} file_id(s) ausente(s) do manifesto raw.shopee_ingestion_file"
+            )
+
+        for source_type, ids in ids_by_source.items():
+            table = _CHILD_TABLES.get(source_type)
+            if table is None:
+                report.problems.append(f"source_type desconhecido no manifesto para file_id(s): {source_type!r}")
+                continue
+            rows = conn.execute(
+                text(f"SELECT file_id, count(*) AS n FROM raw.{table} WHERE file_id = ANY(:ids) GROUP BY file_id"),
+                {"ids": ids},
+            ).fetchall()
+            actual_by_id = {r.file_id: r.n for r in rows}
+            for fid in ids:
+                expected = expected_rows_by_id.get(fid, 0)
+                actual = actual_by_id.get(fid, 0)
+                if actual != expected:
+                    report.row_count_mismatches[fid] = {"expected": expected, "actual": actual}
+                    report.problems.append(
+                        f"file_id={fid}: linhas-filhas ({actual}) diverge de source_row_count do manifesto ({expected})"
+                    )
+
+    report.reconciled = not report.problems
     return report
