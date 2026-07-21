@@ -794,6 +794,68 @@ Pontos importantes para quem opera o scraping:
   etapas (resolucao, segundo preflight, refresh), sem duplicar; (4) o
   parser de `--file-id` deixou de depender de um simbolo privado do modulo
   de resolucao de janela.
+- **Atualizacao 2026-07-22 (Gate S5.4a, DESENHO — zero codigo alterado,
+  zero banco real)**: contrato de evidencia operacional (run_id/batch_id/
+  audit_path/receipt) definido antes de implementar qualquer escrita de
+  artefato. Decisao central: `operation_outcome` (o que de fato aconteceu
+  na Gold: committed/no_op/blocked/failed, vindo so' do refresh) e
+  `receipt_status` (ok/failed/not_attempted, so' sobre a evidencia local em
+  disco) sao dois campos SEPARADOS — uma falha ao publicar o receipt NUNCA
+  altera nem esconde `operation_outcome`. Um `committed` cujo receipt falhe
+  ganha um exit code proprio (5, novo) para nao ser confundido com "exit 0
+  normal" nem com "exit 4 = rollback" — nunca sugere retry automatico do
+  refresh, so' conferencia manual a partir do `backup_path`/`backup_sha256`
+  ja publicados pelo proprio refresh. `batch_id` continua sendo so'
+  metadado de correlacao fornecido pelo chamador — nunca confirmado contra
+  o banco por este modulo. Recomendacao arquitetural (Gate S5.4b, ainda nao
+  implementado): um modulo NOVO (`run_shopee_gold_batch.py`) que chama
+  `refresh_shopee_window_if_needed` sem alterar uma linha dele — a CLI
+  atual (`--audit-path`) continua funcionando exatamente como esta.
+  **Correcao aplicada no S5.4b**: `run_id` NAO e' autogerado — `batch_id`/
+  `run_id` sao SEMPRE obrigatorios, fornecidos pela DAG; e `no_op` com
+  receipt falho tambem usa exit 5 (nao so' `committed`).
+- **Atualizacao 2026-07-22 (Gate S5.4b, IMPLEMENTADO — zero banco real,
+  job real nunca executado)**: novo componente
+  `pipelines/ops/run_shopee_gold_batch.py` (CLI:
+  `python -m pipelines.ops.run_shopee_gold_batch --file-id <id>
+  [--file-id <id> ...] --artifacts-dir <dir-absoluto> --batch-id <id>
+  --run-id <id> --json`). Gera os 3 nomes deterministicos
+  (`shopee_window_backup_{batch_id}_{run_id}.json`/`.sha256`/
+  `shopee_window_receipt_{batch_id}_{run_id}.json`) dentro de
+  `--artifacts-dir`, chama `refresh_shopee_window_if_needed` (S5.3, unica
+  operacao de dados deste modulo — nunca o resolvedor/preflight/
+  `execute_shopee_window_refresh`/diagnose/restore/sync diretamente) e
+  publica um receipt atomico com metadados (`started_at_utc`/
+  `finished_at_utc`/`duration_seconds`/`git_commit`/`git_dirty`, este ultimo
+  so' warning se indisponivel, nunca bloqueia). `batch_id`/`run_id`
+  continuam obrigatorios e SEM geracao automatica — a DAG fornece os dois;
+  uma nova tentativa manual precisa vir com `run_id` novo (a garantia
+  "nunca sobrescrever" torna reuso perigoso automaticamente rejeitado).
+  `operation_outcome`/`receipt_status` continuam dois campos
+  independentes — `committed`/`no_op` NUNCA viram `failed` por falha do
+  receipt; nesse caso o exit vira **5** (novo), sinalizando "dados
+  concluidos, evidencia local incompleta, nunca repetir o refresh
+  automaticamente". CLI do S5.3 (`--audit-path`) continua funcionando sem
+  nenhuma alteracao, em modulo separado. Retencao/delecao automatica
+  continua fora de escopo.
+- **Atualizacao 2026-07-22 (Gate S5.4b.1, hardening pre-commit — sem
+  impacto na CLI usada pela automacao)**: revisao pre-commit corrigiu
+  quatro pontos no componente acima. (1) `file_ids` agora e' validado
+  explicitamente com a funcao publica `shopee_batch_window.validate_batch_
+  file_ids` ANTES de Git/`artifacts_dir`/probe/secret/conexao — tanto na
+  CLI quanto dentro da propria funcao publica (defesa em profundidade);
+  entrada invalida (vazia, duplicada, zero, negativa, fora da faixa
+  bigint, acima do limite) bloqueia com exit 2 sem tocar Git nem o
+  filesystem. (2) `git_dirty=True` agora sempre gera um warning generico
+  (nunca nomes de arquivo, nunca a saida de `git status`) — antes, o
+  estado "dirty" em si era silencioso. (3) A publicacao do receipt foi
+  corrigida para nunca perder o aviso de limpeza do temporario quando a
+  falha principal (escrita/link) e a falha de limpeza acontecem juntas —
+  as duas informacoes agora sempre chegam preservadas. (4) A revalidacao
+  pos-publicacao do receipt agora compara o payload INTEGRAL relido do
+  disco, nao so' `schema_version`/`run_id` — qualquer campo divergente
+  bloqueia como `receipt_status=failed`, sem nunca remover o receipt
+  automaticamente.
 
 ## Alertas e falhas comuns
 

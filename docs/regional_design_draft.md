@@ -962,3 +962,177 @@ Preservado integralmente: dois preflights; zero `diagnose_shopee_window`; refres
 **Testes**: suíte do wrapper cresceu de 45 para **66** testes. Suíte completa: **1459 testes**, sem regressão nos 9 arquivos focais de Gold regional/refresh/preflight/ops (603 testes).
 
 **Status**: implementado e testado, **zero conexão com banco real**, **wrapper real nunca executado**. Não commitado — gate de revisão.
+
+### Gate S5.4a — desenho do contrato de evidência operacional (2026-07-22)
+
+**Somente diagnóstico/desenho — zero código alterado, zero banco real, zero artefato criado fora de `tmp_path`.** Inspecionados: `pipelines/ops/refresh_shopee_window_if_needed.py` (S5.3/S5.3.1, contrato congelado), `loader.py` (`_write_window_backup_atomic`, `_validate_new_window_audit_path`, `_sha256_file`, `WINDOW_BACKUP_SCHEMA_VERSION`), `pipelines/ingestion/shopee_raw/backfill_ads_metadata.py` (mesmo padrão `mkstemp`+`fsync`+`os.link`, reimplementado ali de propósito — não importado — por separação de domínio), `sync_region_daily.py` (`_now_tag`/`_validate_identifier`, precedente de tag temporal e de allowlist regex), `sync_produtos.py`/`daily_performance.py` (`sync_run_id` — um id **de banco**, gerado por `RETURNING` numa tabela de auditoria própria; **não é o mesmo conceito** de `run_id` deste gate, que é puramente local/filesystem e nunca toca essa tabela). Nenhum precedente de `run_id`/`receipt`/`schema_version` de arquivo já existe para este caminho — este gate desenha do zero.
+
+**Pergunta central e a decisão que a resolve**: como garantir que uma falha do receipt depois de um `commit` da Gold nunca faça a automação interpretar que o refresh não aconteceu? Resposta: **`operation_outcome` e `receipt_status` são dois campos independentes, nunca combinados em um só**. `operation_outcome` (`committed`/`no_op`/`blocked`/`failed`) continua vindo EXCLUSIVAMENTE de `execute_shopee_window_refresh` via `refresh_shopee_window_if_needed` — a escrita/falha do receipt NUNCA o altera, nunca o esconde, nunca o reinterpreta. `receipt_status` (`ok`/`failed`/`not_attempted`) descreve só a evidência local. A automação deve decidir "os dados mudaram?" lendo `operation_outcome`, nunca `receipt_status`. O único lugar onde isso ganha um sinal adicional é o exit code: `committed` + receipt falho ganha um exit code PRÓPRIO (5, não 4) — ver Matriz abaixo — para que mesmo uma automação que só olha exit code (sem parsear o JSON) perceba que precisa investigar, sem jamais confundir com "o refresh falhou/rollback".
+
+#### 1. Identificadores
+
+- **`batch_id`**: string opaca fornecida pela automação externa (Raw). Nunca validada contra o banco — reafirma a decisão já registrada no docstring do S5.2 ("este módulo nunca lê `raw.shopee_ingestion_file` nem tenta confirmar `batch_id`"). Só validada por FORMATO (ver regex abaixo). No receipt, `batch_id` é metadado de correlação fornecido pelo chamador — a mera presença do campo nunca deve ser lida como "validado no banco pela role Gold"; nenhum campo tipo `batch_id_verified` é criado, e o docstring do módulo novo deixa isso explícito por escrito.
+- **`run_id`**: **os dois** — `--run-id` é OPCIONAL. Se a DAG fornecer, usa como está (só valida formato) — permite correlacionar o receipt com o run_id nativo da própria orquestração. Se omitido (uso manual, ad-hoc), gera localmente: `{timestamp_utc_compacto}-{8 hex}` (ex.: `20260722T143015Z-a1b2c3d4`, via `datetime.now(timezone.utc)` + `uuid.uuid4().hex[:8]`) — ordenável lexicograficamente, resistente a colisão sem precisar de contador/lock file. Mesmo espírito de `_now_tag()` (`sync_region_daily.py`), com sufixo aleatório a mais porque aqui o run_id vira nome de arquivo compartilhado por um diretório potencialmente usado por múltiplas execuções concorrentes.
+- **Formato/comprimento/path traversal**: um único validador (`_validate_run_or_batch_id`) reaproveitado para os dois campos: string não vazia, `len <= 128`, regex `^[A-Za-z0-9][A-Za-z0-9_.-]*$` (não pode começar com `.`/`-`), e rejeição explícita de `..` como substring (defesa em profundidade mesmo a regex já não permitindo `/`). Nunca concatenado cru em um path — sempre via `Path(dir) / nome_montado`.
+- **Nova tentativa manual — reutilizar ou criar outro run_id?** Nenhuma lógica especial de "contador de tentativa" é necessária: a garantia "nunca sobrescrever" (mesmo mecanismo `os.link`/`FileExistsError` do backup) já resolve isso de graça. Se a tentativa anterior não chegou a publicar nada em disco (bloqueio de entrada/config, preflight bloqueado antes de qualquer resolução), reusar o mesmo `run_id` é seguro — não há nada para colidir. Se a tentativa anterior já publicou QUALQUER artefato (backup e/ou receipt) para aquele `(batch_id, run_id)`, reusar o mesmo `run_id` é automaticamente rejeitado pela checagem "já existe" (Matriz, item A/H) — o que força, corretamente, uma nova tentativa manual a vir com um `run_id` novo, sem precisar de uma regra adicional.
+
+#### 2. Versionamento
+
+- **`git_commit`**: obtido via `git rev-parse HEAD`, reaproveitando o helper já auditado `write_conn._run_git` (mesmo padrão de subprocess já usado por `window_write_conn.load_window_write_secret`) — nunca uma nova implementação de subprocess. Somente leitura, local, sem rede, sem tocar nenhuma credencial Postgres.
+- **`.git` ausente ou binário `git` não encontrado**: `git_commit = null` + **warning** (nunca bloqueia): `"git_commit indisponível: não foi possível determinar (repositório .git ausente ou git não encontrado)"`. Decisão: git é metadado de proveniência/auditoria, não um gate de segurança como o preflight — bloquear uma operação real da Gold por causa de um ambiente de deploy sem `.git` seria desproporcional.
+- **Working tree dirty**: `git status --porcelain` (ou `git diff --quiet` + `git diff --cached --quiet`) → `git_dirty: true|false|null` (`null` se a checagem em si falhar) + warning quando `true`: `"working tree possui alterações não commitadas — git_commit pode não refletir exatamente o código em execução"`. Nunca bloqueia.
+- **`DESIGN.md`/docs pré-existentes não geram exceção especial**: a checagem de dirty é genérica (`git status --porcelain` cru) — nenhuma lista de arquivos ignorados, nenhum tratamento especial para os três arquivos historicamente fora de escopo deste projeto. Se estiverem modificados no momento da execução, `git_dirty=true` é reportado com honestidade (é warning, não bloqueio) — não há necessidade de "decisão explícita" adicional além desta: a checagem sempre diz a verdade e nunca impede a operação.
+- **Decisão final**: `git_commit`/`git_dirty` ausentes ou indisponíveis **nunca bloqueiam** — sempre `warning`, nunca `problem`, nunca reason_code.
+
+#### 2b. Diretório e nomes (convenção proposta)
+
+Um único `--artifacts-dir <dir>` absoluto, validado (absoluto, fora do repositório, é diretório, já existe, gravável — via probe de escrita, ver Matriz item B). Dentro dele, três arquivos por execução, nomeados deterministicamente a partir de `batch_id`+`run_id` (já validados pela regex acima, portanto seguros para interpolar em nome de arquivo):
+
+```
+shopee_window_backup_{batch_id}_{run_id}.json
+shopee_window_backup_{batch_id}_{run_id}.json.sha256
+shopee_window_receipt_{batch_id}_{run_id}.json
+```
+
+Satisfaz: nenhum dado sensível no nome (`batch_id`/`run_id` são ids opacos de correlação, nunca order_id/filename original do scraping); `.sha256` no MESMO padrão já usado pelo backup (`str(path) + ".sha256"`); nunca sobrescreve (`os.link`, `FileExistsError` se já existir — mesmo mecanismo do backup, estendido ao receipt).
+
+#### 3. Publicação do receipt
+
+Mesmo mecanismo de 6 passos já auditado em `_write_window_backup_atomic` (reimplementado localmente no módulo novo — não importado de `loader.py`, mesma separação de domínio já usada por `backfill_ads_metadata.py`): `tempfile.mkstemp` no MESMO diretório → `write`+`flush`+`os.fsync` → `os.link(tmp, receipt_path)` (falha com `FileExistsError` se já existir — nunca sobrescreve) → `tmp` removido em `finally` SEMPRE → releitura do disco + revalidação estrutural do JSON antes de declarar `receipt_status="ok"` (um arquivo parcial nunca vira receipt válido: a escrita só toca o nome final via `os.link`, nunca escreve diretamente nele). Nenhuma exclusão do backup em nenhum caminho, sucesso ou falha — backup e receipt são permanentes do ponto de vista desta execução (ver Retenção). `schema_version` (inteiro, mesmo padrão de `WINDOW_BACKUP_SCHEMA_VERSION=1`) é o primeiro campo do receipt.
+
+#### 4. Matriz crítica de falhas
+
+| # | Cenário | `operation_outcome` | `receipt_status` | `reason_code` | Exit |
+|---|---|---|---|---|---|
+| A | Diretório/paths inválidos (relativo, dentro do repo, não existe, ou qualquer um dos 3 nomes computados já existe) — antes do banco | `blocked` | `not_attempted` | `artifacts_dir_invalid` | **2** |
+| B | Probe de escrita no diretório falha (permissão negada) — antes do refresh | `blocked` | `not_attempted` | `artifacts_dir_not_writable` | **2** |
+| C | Refresh `blocked`/`failed`, receipt publicado com sucesso | `blocked`/`failed` | `ok` | (o mesmo reason_code já existente do S5.3/S5.3.1) | 3/4 (inalterado) |
+| D | Refresh `no_op`, receipt publicado | `no_op` | `ok` | `no_op` | **0** |
+| E | Refresh `committed`, receipt publicado | `committed` | `ok` | `committed` | **0** |
+| F | Refresh `committed`, publicação do receipt FALHA | **`committed`** (nunca alterado/escondido) | `failed` | `committed_receipt_publish_failed` (novo, exclusivo desta combinação) | **5 (novo)** |
+| G | Backup publicado, refresh falha/rollback, receipt também falha | `failed` | `failed` | `refresh_failed`/`unexpected_error` (inalterado — já sinaliza "nada persistido") | 4 (inalterado) |
+| H | Path do receipt já existe para o mesmo `run_id` | detectado cedo → como A (exit 2); detectado só na publicação (corrida) → como F/G conforme `operation_outcome` | `not_attempted` ou `failed` | `artifacts_dir_invalid` (cedo) ou o mesmo de F/G (tarde) | 2, ou 5/4 conforme o caso |
+
+Regra geral: só `committed` ganha o exit code diferenciado (5) quando o receipt falha — `no_op`/`blocked`/`failed` já têm exit codes que não sugerem "sucesso silencioso" (0 para `no_op` é seguro porque nada foi escrito na Gold; `blocked`/`failed` já são 2/3/4). `committed` é o único caso em que o exit code padrão (0) esconderia uma lacuna real de evidência — daí o novo código.
+
+**Semântica do exit 5**: "operação de dados concluída com sucesso; evidência local (receipt) incompleta — requer conferência/reconstituição manual a partir de `backup_path`/`backup_sha256` (já publicados pelo próprio refresh, antes do DELETE); nunca retry automático do refresh." O JSON no caso F preserva TODOS os campos normais do resultado (`rows_deleted`, `rows_inserted`, `gmv_before`/`gmv_after`, `backup_path`, `backup_sha256`) exatamente como um `committed` bem-sucedido — só `receipt_status`/`reason_code`/exit code sinalizam a lacuna.
+
+**Correções aplicadas na implementação (Gate S5.4b)** — três pontos deste desenho ficaram incompletos ou imprecisos e foram corrigidos ao implementar:
+1. **`run_id` NÃO é autogerado.** A frase "os dois — DAG-supplied OU gerado localmente" (seção 1 acima) estava errada: `batch_id` e `run_id` são **sempre obrigatórios**, fornecidos pelo chamador (a DAG) — este módulo nunca gera nenhum dos dois. Uma nova tentativa manual precisa vir com um `run_id` novo; isso é responsabilidade de quem chama, não deste módulo (a garantia "nunca sobrescrever" já torna perigoso reusar um `run_id` cuja tentativa anterior tenha publicado qualquer artefato — ver seção 1 acima, que permanece correta nesse ponto).
+2. **`no_op` + receipt falho TAMBÉM usa exit 5**, não só `committed`. A matriz acima (linha F) só cobria `committed`; a regra correta e implementada é: qualquer `operation_outcome` cujo exit code BASE seria 0 (`committed` OU `no_op`) escala para 5 quando o receipt falha — porque em ambos os casos o exit 0 padrão esconderia silenciosamente a lacuna de evidência. `blocked`/`failed` (linhas C/G) NUNCA escalam, porque seus exit codes (2/3/4) já não sugerem sucesso.
+3. **Nomes de arquivo**: a convenção com underscores (`shopee_window_backup_{batch_id}_{run_id}.json` etc., seção 2b acima) está correta e foi implementada sem alteração — confirmado aqui só para deixar explícito que não há divergência entre o desenho e o código.
+
+#### 5. Schema do receipt (proposto)
+
+```json
+{
+  "schema_version": 1,
+  "batch_id": "string opaca, fornecida pelo chamador",
+  "run_id": "string opaca, fornecida ou gerada localmente",
+  "file_ids": [1, 2, 3],
+  "started_at_utc": "2026-07-22T14:30:00Z",
+  "finished_at_utc": "2026-07-22T14:30:07Z",
+  "duration_seconds": 7.42,
+  "git_commit": "abc123...ou null",
+  "git_dirty": true,
+  "operation_outcome": "committed",
+  "reason_code": "committed",
+  "date_from": "2026-06-15",
+  "date_to": "2026-06-21",
+  "window_days": 7,
+  "requested_file_count": 3,
+  "found_file_count": 3,
+  "silver_row_count": 512,
+  "rows_deleted": 10,
+  "rows_inserted": 12,
+  "gmv_before": "500.00",
+  "gmv_after": "620.00",
+  "backup_path": "/abs/path/...",
+  "backup_sha256": "...",
+  "receipt_status": "ok",
+  "problems": [],
+  "warnings": []
+}
+```
+Mapeia 1:1 os campos já existentes de `ShopeeWindowRefreshIfNeededResult` (S5.3/S5.3.1, inalterado) + identificadores/timestamps/metadado de versão de código/`receipt_status`, únicos campos genuinamente novos. Decimal sempre como string, data sempre ISO-8601 (mesma convenção do backup). NUNCA inclui: URL/host/IP/usuário, conteúdo de secret, `order_id`, filename original do scraping, linhas individuais, conteúdo do backup (só `backup_path`/`backup_sha256`, nunca `before_records`/`planned_after_records`).
+
+#### 6. Integração no código — decisão arquitetural
+
+Comparadas 3 opções: (A) ampliar `refresh_shopee_window_if_needed.py`; (B) módulo novo `pipelines/ops/run_shopee_gold_batch.py`, que CHAMA `refresh_shopee_window_if_needed` sem alterá-lo; (C) receipt dentro de `loader.py` — descartada de imediato (violaria a restrição permanente de não alterar `loader.py` e misturaria "operação autoritativa de banco" com "evidência operacional/orquestração").
+
+**Recomendação: opção B.** Motivos: (1) preserva o contrato S5.3/S5.3.1 já versionado e testado (66 testes) sem nenhum risco de regressão — zero linha alterada em `refresh_shopee_window_if_needed.py`; (2) `refresh_shopee_window_if_needed` continua reutilizável sozinho, com a assinatura exatamente como está hoje; (3) não duplica a LÓGICA de secret/preflight — o módulo novo chama as MESMAS funções já auditadas (`window_write_conn.load_window_write_secret`/`validate_window_write_guardrails`/`run_window_preflight` só indiretamente, via `refresh_shopee_window_if_needed`) exatamente como `shopee_batch_window.run_cli` e `refresh_shopee_window_if_needed.run_cli` já fazem cada um independentemente hoje (mesmo padrão aceito de pequena duplicação de boilerplate de CLI, nunca de algoritmo); (4) testes determinísticos: a suíte nova trata `refresh_shopee_window_if_needed` como caixa-preta (monkeypatch), sem precisar reimplementar nenhum fake de banco.
+
+#### 7. Compatibilidade
+
+CLI atual (`python -m pipelines.ops.refresh_shopee_window_if_needed --file-id ... --audit-path ... [--json]`) permanece **exatamente como está** — módulo intocado. Nova CLI, em módulo novo e separado: `python -m pipelines.ops.run_shopee_gold_batch --file-id <id> [--file-id <id> ...] --artifacts-dir <dir-absoluto> --batch-id <id> [--run-id <id>] [--json]` — `--artifacts-dir`/`--batch-id` obrigatórios, `--run-id` opcional (gerado se omitido). "Mutuamente exclusivo" é resolvido pela SEPARAÇÃO EM DOIS PROGRAMAS/MÓDULOS distintos (não por um único parser com grupos condicionais) — evita qualquer ambiguidade de precedência entre `--audit-path` e `--artifacts-dir` num mesmo comando. Contrato S5.3 não é tocado.
+
+#### 8. Retenção
+
+Nenhuma deleção automática neste gate nem em nenhum futuro Gate S5.4b — backups e receipts são permanentes do ponto de vista da execução que os cria. Política de retenção recomendada para o FUTURO: um job separado, read-only por padrão, com seu próprio gate de consentimento explícito (mesmo padrão `.env.gold-window-write.local`) — nunca invocado implicitamente pelo caminho de refresh/receipt.
+
+#### 9. Arquivos que mudariam no Gate S5.4b
+
+- NOVO: `pipelines/ops/run_shopee_gold_batch.py`
+- NOVO: `pipelines/tests/test_ops_run_shopee_gold_batch.py`
+- MODIFICADO: `docs/regional_design_draft.md` (seção S5.4b)
+- MODIFICADO: `docs/shopee_datamart_operacao_completa.md` (bullet S5.4b)
+- **Sem alteração**: `loader.py`, `window_write_conn.py`, `shopee_batch_window.py`, `refresh_shopee_window_if_needed.py` (S5.3/S5.3.1, congelado), `pipelines/ops/__init__.py` (já existe vazio).
+
+#### 10. Testes obrigatórios (S5.4b)
+
+Validação de `run_id`/`batch_id` (formato, comprimento, `..`, vazio); `artifacts_dir` inválido/relativo/dentro do repo/inexistente bloqueia antes do banco (Matriz A); probe de escrita falha bloqueia antes do refresh (Matriz B); `refresh_shopee_window_if_needed` mockado retornando cada `operation_outcome` — receipt publicado com sucesso preserva todos os campos (C/D/E); publicação do receipt falhando com `operation_outcome=committed` produz exit 5 e preserva `backup_path`/`backup_sha256`/`rows_deleted`/`rows_inserted` (F); publicação falhando com `operation_outcome=failed` mantém exit 4 (G); path do receipt já existente bloqueia cedo (H, exit 2) e simulação de corrida no `os.link` (`FileExistsError` armadilhado) bloqueia tarde com o mesmo `operation_outcome` preservado; `git_commit`/`git_dirty` ausentes viram warning, nunca bloqueiam (testado com `_run_git` falso retornando erro); nenhuma exclusão de backup em nenhum teste; regressão estática (zero SQL novo, zero chamada a `diagnose_shopee_window`/restore/sync, `refresh_shopee_window_if_needed` chamado como caixa-preta); JSON único, exit codes fechados incluindo o novo 5; CLI nova com `--artifacts-dir`/`--batch-id`/`--run-id`; scan de PII/segredos no schema do receipt.
+
+#### 11. Riscos restantes
+
+Corrida TOCTOU residual entre a checagem antecipada (Matriz A) e a publicação real (mesma classe de risco já aceita para `audit_path` desde o S3 — mitigada, nunca eliminada, pelo `os.link`/`FileExistsError`; a segurança dos dados em si continua garantida pelo lock advisory no Postgres, não por este check local). `run_id`, sendo sempre fornecido pela DAG (nunca autogerado — ver correção acima), não é formalmente livre de colisão só porque este módulo não gera nada: cabe à DAG garantir unicidade por tentativa; a garantia "nunca sobrescrever" é a rede de segurança final. Disco cheio/quota durante a escrita do receipt cai no mesmo caminho já desenhado (`receipt_status=failed`, exit 4/5 conforme `operation_outcome`) — sem tratamento especial necessário. Risco operacional a documentar explicitamente para quem consumir o exit code 5: a política de retry da automação PRECISA tratar o exit 5 como "não repetir o refresh — investigar/reconciliar o receipt a partir do `backup_path` já publicado", nunca como um exit genérico de falha a ser re-tentado. Ambiente de deploy sem `.git`/binário `git` deve ser validado antes do S5.4b (warning-only já decidido, mas vale confirmar que o binário `git` está disponível no runtime real). Reuso indevido de `(batch_id, run_id)` pela automação (bug na DAG, não neste módulo) é mascarado como bloqueio "já existe" — seguro, mas pode confundir quem depura; documentado como comportamento esperado, não defeito.
+
+### Gate S5.4b — implementação do job Shopee com artifacts e receipt atômico (2026-07-22)
+
+**Implementado, testado, zero conexão com banco real, zero alteração de `loader.py`/`window_write_conn.py`/`shopee_batch_window.py`/`refresh_shopee_window_if_needed.py`.** Novo módulo: `pipelines/ops/run_shopee_gold_batch.py`. Este módulo não tem SQL próprio, não abre conexão — a ÚNICA operação de dados que chama é `refresh_shopee_window_if_needed` (S5.3/S5.3.1), inalterado.
+
+**Contrato**: `run_shopee_gold_batch(write_url, datamart_read_url, file_ids, artifacts_dir, batch_id, run_id, *, repo_root=REPO_ROOT) -> ShopeeGoldBatchResult`. `batch_id`/`run_id` **sempre obrigatórios** (corrige a ambiguidade do S5.4a) — nunca gerados automaticamente.
+
+**Ordem**: valida `batch_id`/`run_id` (allowlist ASCII `^[A-Za-z0-9][A-Za-z0-9._-]*$`, ≤100 caracteres, `..` explicitamente rejeitado — Unicode/espaço/`/`/`\` já rejeitados pelo simples não-casamento da regex) → valida `artifacts_dir` (absoluto, fora do repositório, existe, é diretório) → computa os 3 nomes determinísticos e recusa se QUALQUER um já existir → probe de escrita (cria+fsync+remove um temporário; falha na criação OU na remoção bloqueia, nunca deixa resíduo) → SÓ ENTÃO chama `refresh_shopee_window_if_needed(write_url, datamart_read_url, file_ids, backup_path)` → monta e publica o receipt atomicamente (mesmo padrão técnico de `_write_window_backup_atomic`, reimplementado localmente — nunca importado, schema diferente) → `operation_outcome`/`receipt_status` permanecem sempre dois campos independentes.
+
+**Vocabulário de reason_code**: locais deste módulo (`invalid_input`, `artifacts_dir_invalid`, `artifacts_dir_not_writable`, `datamart_url_not_configured`, `secret_load_error`, `unexpected_error`) todos exit 2 (exceto `unexpected_error`, exit 4) — nenhum chega perto do banco. Reason_codes vindos de `refresh_shopee_window_if_needed` são reaproveitados VERBATIM (nunca reinventados) via `_BASE_EXIT_CODE = {**_LOCAL_REASON_EXIT_CODE, **refresh_wrapper._REASON_CODE_EXIT_CODE}` — fonte única, sem risco de drift entre as duas tabelas.
+
+**Exit code final** (`_exit_code_for`): nunca deriva só de `reason_code`, porque a MESMA operação pode ter dois exit codes diferentes dependendo de `receipt_status`. Regra: `base = _BASE_EXIT_CODE[reason_code]`; se `receipt_status == "failed"` E `operation_outcome` em `("committed", "no_op")`, o exit vira **5**; caso contrário, o `base` é preservado sem alteração.
+
+| `operation_outcome` | `receipt_status` | Exit |
+|---|---|---|
+| validação local falhou | `not_attempted` | 2 |
+| `blocked` | `ok` | 3 (ou 2, se o reason_code for `preflight_blocked`/`invalid_input`) |
+| `blocked` | `failed` | **inalterado** — 3 (ou 2) |
+| `failed` | `ok` | 4 |
+| `failed` | `failed` | **inalterado** — 4 |
+| `no_op` | `ok` | 0 |
+| `committed` | `ok` | 0 |
+| `no_op` | `failed` | **5** |
+| `committed` | `failed` | **5** |
+
+**Prova de que `committed`/`no_op` nunca viram `failed`**: `run_shopee_gold_batch` monta o `ShopeeGoldBatchResult` final SEMPRE a partir de `refresh_result.outcome`/`refresh_result.reason_code` (nunca reatribuídos); a publicação do receipt só popula `receipt_status`/anexa a `problems`/`warnings` — nunca escreve em `operation_outcome`. Testes dedicados (`test_committed_receipt_falha_nunca_vira_failed`, `test_no_op_receipt_falha_nunca_vira_failed`) mockam `_publish_receipt_atomic` para falhar e confirmam `operation_outcome` intacto + `rows_deleted`/`rows_inserted`/`backup_path`/`backup_sha256` preservados.
+
+**Git**: `subprocess.run(["git", *args], cwd=..., capture_output=True, text=True, timeout=5, shell=False)` — lista de argumentos (nunca `shell=True`), timeout curto, nunca imprime `stderr` nativo (só `returncode`/`stdout.strip()` para o hash, ou `type(exc).__name__` para qualquer falha). `.git` ausente/binário não encontrado/timeout viram `warning`, nunca bloqueiam. `git_dirty` é só um booleano (nunca a lista de arquivos — confirmado em teste que a saída de `git status --porcelain` nunca aparece no JSON). Clock (`_utc_now`) e coletor Git (`_run_git_subprocess`) são funções soltas no nível do módulo, monkeypatcháveis diretamente nos testes — sem parâmetro de injeção na assinatura pública, sem framework genérico.
+
+**Receipt**: publicação atômica reimplementada localmente (`_publish_receipt_atomic`) — `mkstemp` no mesmo diretório → `write`+`flush`+`fsync` → `os.link` exclusivo (nunca sobrescreve; `FileExistsError` é a proteção FINAL contra corrida, não o `exists()` antecipado) → releitura+revalidação estrutural → `tmp` removido em `finally` sempre; falha só na limpeza do `tmp` NUNCA mascara o sucesso da publicação (vira `warning`, não `problem`, `receipt_status` continua `"ok"`). Nunca reutiliza `loader._write_window_backup_atomic` (payload completamente diferente) — só o padrão técnico.
+
+**CLI**: `python -m pipelines.ops.run_shopee_gold_batch --file-id <id> [--file-id <id> ...] --artifacts-dir <dir-absoluto> --batch-id <id> --run-id <id> [--json]`. `--artifacts-dir`/`--batch-id`/`--run-id` todos obrigatórios (argparse `required=True`) — CLI do S5.3 (`--audit-path`) permanece intocada, em módulo separado.
+
+**Testes**: 67 novos em `pipelines/tests/test_ops_run_shopee_gold_batch.py` — allowlist de ids (vazio/`..`/barra/contrabarra/espaço/Unicode/tamanho excessivo bloqueiam; válidos passam); `artifacts_dir` relativo/dentro do repo/inexistente/é-arquivo bloqueia; qualquer um dos 3 artefatos já existente bloqueia; probe falha na criação/remoção bloqueia sem resíduo; `refresh_shopee_window_if_needed` chamado exatamente uma vez com os args corretos; matriz completa outcome×receipt_status×exit code (8 combinações parametrizadas); `committed`/`no_op` + receipt falho nunca viram `failed` (dedicado); `backup_path`/`sha256` preservados quando o refresh falha depois do backup publicado; publicação atômica do receipt (nunca sobrescreve, releitura, remove temp em sucesso/falha, falha de limpeza não mascara, corrida no `os.link` bloqueia sem sobrescrever); receipt determinístico entre execuções idênticas; git commit disponível/`.git` ausente/timeout/dirty (warning-only, nunca bloqueia); timestamps UTC ISO-8601; duração nunca negativa; CLI (ordem de validação, JSON único mesmo com receipt falho, stderr só avisos/preflight, sem PII/infraestrutura); regressão estática (zero SQL/psycopg2/cursor/commit, zero chamada direta a resolvedor/preflight/refresh/diagnose/restore/sync, zero função privada do S5.2/S5.3, `shell=False`+timeout no subprocess Git). Suíte completa: **1526 testes**, sem regressão nos 10 arquivos focais de Gold regional/refresh/preflight/ops (670 testes).
+
+**Status**: implementado e testado, **zero conexão com banco real**, **job real nunca executado**. Retenção/deleção automática não implementada (nem nesta nem em nenhuma execução futura da mesma natureza — ver seção 8 do S5.4a). Não commitado — gate de revisão.
+
+### Gate S5.4b.1 — hardening final de validação e artefatos (2026-07-22)
+
+Revisão pré-commit corrigiu quatro pontos no módulo do S5.4b, todos dentro de `run_shopee_gold_batch.py`, sem tocar `loader.py`/`window_write_conn.py`/`shopee_batch_window.py`/`refresh_shopee_window_if_needed.py`:
+
+1. **`file_ids` validado explicitamente com a função pública do S5.2** (`shopee_batch_window.validate_batch_file_ids`) — antes, a validação de faixa/duplicados/limite só acontecia indiretamente, várias camadas depois, dentro de `resolve_shopee_batch_window`. Agora: a CLI converte string→int e chama `validate_batch_file_ids` ANTES de Git/`artifacts_dir`/probe/secret/conexão; `run_shopee_gold_batch` repete a MESMA chamada como defesa em profundidade, antes até de coletar Git ou tocar o filesystem. A lista já validada/ordenada (nunca a bruta) é a usada nos nomes determinísticos, na chamada ao S5.3, no receipt e no stdout. Entrada inválida (vazia, duplicada, zero, negativa, acima do bigint, acima do limite de quantidade) bloqueia como `blocked`/`invalid_input`/`receipt_status=not_attempted`/exit 2 — o refresh nunca é chamado, e nem Git nem o probe de escrita chegam a rodar (confirmado com armadilhas `AssertionError` em ambos nos testes).
+2. **`git_dirty=True` agora sempre produz warning.** Antes, só a FALHA em determinar `git_dirty` gerava warning — o estado "dirty" em si era silencioso. Agora, sempre que `git_dirty is True`, um warning GENÉRICO é adicionado ("working tree possui alterações não commitadas; git_commit pode não representar integralmente o código executado") — nunca a saída de `git status`, nunca nomes de arquivo, nunca bloqueia.
+3. **`_publish_receipt_atomic` reestruturado** para nunca retornar de dentro do bloco protegido por `finally` — um `return` dentro do `try` "fixa" o valor de retorno antes do `finally` rodar, então uma falha de escrita/link CONCORRENTE com uma falha de limpeza do temporário perdia silenciosamente o aviso de limpeza. Agora `publish_problem`/`cleanup_warning`/`linked_successfully` são variáveis locais preenchidas primeiro, com um único ponto de retorno após o `try`/`finally` — garantindo que as duas informações cheguem sempre juntas quando ambas existirem.
+4. **Revalidação pós-publicação agora é integral** (`reread != payload`, dict completo) — antes só comparava `schema_version`/`run_id`, deixando passar despercebida qualquer divergência em outro campo (`operation_outcome`, `backup_sha256`, `file_ids`, etc.). Qualquer campo divergente vira `problem`/`receipt_status=failed`; o receipt divergente nunca é removido automaticamente — preservado como evidência para investigação manual.
+
+Preservado integralmente (nenhuma mudança): `committed`/`no_op` + receipt falho → exit 5; `blocked`/`failed` preservam seus próprios exit codes (2/3/4); `operation_outcome` nunca alterado pela publicação do receipt; `run_id`/`batch_id` continuam obrigatórios, sem autogeração; nomes determinísticos inalterados; zero SQL/banco direto; única operação de dados é `refresh_shopee_window_if_needed`; zero retry; os quatro módulos protegidos permanecem sem diff.
+
+**Testes**: suíte do módulo cresceu de 67 para **82** testes — validação de `file_ids` via `validate_batch_file_ids` (vazia/duplicada/zero/negativa/acima do bigint/acima do limite, todas bloqueando antes de Git/probe/refresh, tanto na função pública quanto na CLI antes do secret); `git_dirty=True` produz o warning esperado sem nenhum nome de arquivo; publicação combinando falha principal (escrita ou link) com falha de limpeza — ambas preservadas no retorno; publicação bem-sucedida com falha de limpeza retorna `problem=None` + warning; revalidação integral detectando divergência em `operation_outcome`/`backup_sha256`/`file_ids`, sempre sem remover o receipt. Suíte completa: **1541 testes**, sem regressão nos 10 arquivos focais de Gold regional/refresh/preflight/ops (685 testes).
+
+**Status**: implementado e testado, **zero conexão com banco real**, **job real nunca executado**. Não commitado — gate de revisão.
