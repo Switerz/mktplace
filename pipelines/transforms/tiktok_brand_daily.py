@@ -73,12 +73,26 @@ def transform(row: dict) -> Optional[dict]:
         "ctr_pct": None,
         "cpc": None,
 
-        # TikTok-específico: conteúdo
+        # TikTok-específico: conteúdo — passthrough absoluto de
+        # gold.tiktok_brand_daily (Gate R2.1: preservados; não são KPIs de
+        # GMV a serem removidos). Ressalva: a Gold calcula essa quebra por
+        # canal com base no GMV externo antigo (próximo de total_amount),
+        # não no GMV corrigido (sub_total) — gmv_video+gmv_live+gmv_card
+        # não necessariamente somam ao novo `gmv` deste dict. Não recomputar
+        # essa quebra a partir de raw.tiktok_shop_orders (não há coluna de
+        # canal na Raw) — ver seção "Gate R2" do documento-base.
         "gmv_video": row.get("gmv_video"),
         "gmv_live": row.get("gmv_live"),
         "gmv_card": row.get("gmv_card"),
 
-        # Financeiro
+        # Financeiro — Gate R2: total_settlement/total_fees continuam
+        # passthrough do gold externo (valores absolutos, não tocados,
+        # população de statement e não de pedido — ver
+        # docs/analise_reconciliacao_xlsx_torre_jan_maio_2026.md seção
+        # "Gate R2"). avg_fee_pct/avg_settlement_pct dividiam esses valores
+        # pelo GMV antigo; o conector não os seleciona mais (universo do
+        # numerador incompatível com o novo GMV — não inventar essa
+        # equivalência). row.get(...) retorna None automaticamente.
         "total_settlement": row.get("total_settlement"),
         "total_fees": row.get("total_fees"),
         "avg_fee_pct": row.get("avg_fee_pct"),

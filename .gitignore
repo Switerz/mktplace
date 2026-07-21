@@ -52,6 +52,8 @@ pyvenv.cfg
 # Gate R1 (reconciliação XLSX x Torre): CSVs versionados por decisão do projeto
 !docs/reconciliation/xlsx_gmv_reference_jan_maio_2026.csv
 !docs/reconciliation/torre_gmv_baseline_20260721.csv
+# Gate R2: candidato de validação TikTok/Shopee corrigidos + ML copiado do R1
+!docs/reconciliation/torre_gmv_candidate_r2_jan_maio_2026.csv
 
 # Tooling / local agent caches
 .codex/

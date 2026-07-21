@@ -20,6 +20,7 @@ from typing import Optional
 import openpyxl
 
 from pipelines.common.logging import get_logger
+from pipelines.connectors.shopee._numeric import parse_brl_float
 
 logger = get_logger(__name__)
 
@@ -31,7 +32,26 @@ _COL_MAP: dict[str, str] = {
     "# de novos compradores":       "new_buyers",
     "# de compradores existentes":  "repeat_buyers",
     "Repetir Índice de Compras":    "repeat_buyer_rate_str",
+
+    # Gate R2.1 (Projeto R): shop-stats é a fonte autoritativa do GMV
+    # Shopee — reutiliza o parser numérico canônico de _numeric.py, nunca
+    # um parser monetário novo.
+    "Vendas (BRL)":                        "sales_brl_str",
+    "Vendas Canceladas":                   "cancelled_sales_str",
+    "Vendas Devolvidas / Reembolsadas":    "refunded_sales_str",
 }
+
+# As três colunas financeiras são obrigatórias para calcular o GMV líquido.
+# Ausência de qualquer uma delas BLOQUEIA o parsing do arquivo (nunca um
+# warning silencioso que deixaria o GMV incompleto).
+_FINANCIAL_REQUIRED_KEYS = {"sales_brl_str", "cancelled_sales_str", "refunded_sales_str"}
+
+
+class ShopeeShopStatsError(ValueError):
+    """Erro de contrato do shop-stats: colunas financeiras obrigatórias
+    ausentes, valor nulo inesperado numa linha diária válida, ou GMV
+    líquido negativo. Sempre bloqueia — nunca produz um GMV incompleto ou
+    incorreto silenciosamente."""
 
 
 def _parse_int(val) -> Optional[int]:
@@ -89,8 +109,17 @@ def _read_xlsx(path: Path) -> list[dict]:
             col_index[key] = i
 
     missing = set(_COL_MAP.values()) - set(col_index.keys())
-    if missing:
-        logger.warning("%s: colunas ausentes no header diário: %s", path.name, missing)
+    missing_financial = _FINANCIAL_REQUIRED_KEYS & missing
+    if missing_financial:
+        # Bloqueia — nunca um warning silencioso que deixaria o GMV
+        # incompleto ou inexistente sem que o chamador perceba.
+        raise ShopeeShopStatsError(
+            f"{path.name}: colunas financeiras obrigatórias ausentes no header "
+            f"diário: {sorted(missing_financial)}"
+        )
+    missing_nao_financeiro = missing - _FINANCIAL_REQUIRED_KEYS
+    if missing_nao_financeiro:
+        logger.warning("%s: colunas ausentes no header diário: %s", path.name, missing_nao_financeiro)
 
     result = []
     for row in rows[4:]:
@@ -106,6 +135,29 @@ def _read_xlsx(path: Path) -> list[dict]:
             idx = col_index.get(key)
             return row[idx] if idx is not None and idx < len(row) else None
 
+        sales_brl = parse_brl_float(_get("sales_brl_str"))
+        cancelled_sales_brl = parse_brl_float(_get("cancelled_sales_str"))
+        refunded_sales_brl = parse_brl_float(_get("refunded_sales_str"))
+
+        # Linha diária válida (tem data) mas com campo financeiro
+        # obrigatório vazio/ausente: bloqueia — nunca vira 0 silencioso
+        # (diferente do contrato de Order.all, onde ausência = "sem
+        # contribuição"; aqui as 3 colunas são obrigatórias por definição
+        # do relatório gerencial da Shopee).
+        if sales_brl is None or cancelled_sales_brl is None or refunded_sales_brl is None:
+            raise ShopeeShopStatsError(
+                f"{path.name}: dia {d.isoformat()} tem campo financeiro obrigatório "
+                f"ausente (Vendas (BRL) / Vendas Canceladas / Vendas Devolvidas ou "
+                f"Reembolsadas)"
+            )
+
+        gmv = round(sales_brl - cancelled_sales_brl - refunded_sales_brl, 2)
+        if gmv < 0:
+            raise ShopeeShopStatsError(
+                f"{path.name}: dia {d.isoformat()} produziu GMV líquido negativo "
+                f"(Vendas Canceladas + Devolvidas/Reembolsadas maior que Vendas (BRL))"
+            )
+
         result.append({
             "date":                  d,
             "visitors":              _parse_int(_get("visitors")),
@@ -114,6 +166,10 @@ def _read_xlsx(path: Path) -> list[dict]:
             "new_buyers":            _parse_int(_get("new_buyers")),
             "repeat_buyers":         _parse_int(_get("repeat_buyers")),
             "repeat_buyer_rate_pct": _parse_pct(_get("repeat_buyer_rate_str")),
+            "sales_brl":             round(sales_brl, 2),
+            "cancelled_sales_brl":   round(cancelled_sales_brl, 2),
+            "refunded_sales_brl":    round(refunded_sales_brl, 2),
+            "gmv":                   gmv,
         })
 
     return result

@@ -128,11 +128,13 @@ PATCH_SHOP_STATS_SQL = text("""
         date, loja_id, marketplace_id, empresa_id,
         visitors, conversion_rate,
         new_buyers, repeat_buyers, repeat_buyer_rate_pct, unique_buyers,
+        gmv,
         source_updated_at
     ) VALUES (
         :date, :loja_id, :marketplace_id, :empresa_id,
         :visitors, :conversion_rate,
         :new_buyers, :repeat_buyers, :repeat_buyer_rate_pct, :unique_buyers,
+        :gmv,
         NOW()
     )
     ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
@@ -142,9 +144,17 @@ PATCH_SHOP_STATS_SQL = text("""
         repeat_buyers        = EXCLUDED.repeat_buyers,
         repeat_buyer_rate_pct = EXCLUDED.repeat_buyer_rate_pct,
         unique_buyers        = EXCLUDED.unique_buyers,
+        gmv                  = EXCLUDED.gmv,
         source_updated_at    = NOW(),
         ingested_at          = NOW()
 """)
+# Gate R2.1 (Projeto R): shop-stats passa a ser a fonte AUTORITATIVA final
+# do GMV Shopee. O step `daily_shopee_stats` já roda depois de
+# `daily_shopee_orders` em `shopee_manual_refresh` (ordem/criticidade dos
+# steps não alterada aqui — ver pipelines/ops/orchestrate.py); como este
+# PATCH roda por último e agora sobrescreve `gmv` também, ele é o valor que
+# prevalece no upsert final. Este SQL não foi executado nesta correção —
+# só o texto foi alterado, para revisão.
 
 
 def _start_sync_run(session: Any, source_name: str, marketplace_id: int) -> int:

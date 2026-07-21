@@ -528,3 +528,241 @@ R4, não uma entrega deste projeto.
 A precisão de R$ 0,01 por célula não é o Gate R4 desta primeira camada; é
 evolução posterior, condicionada a snapshot, competência e fontes originais
 ainda não decididas com o negócio.
+
+## 11. Gate R2 — Correção semântica de GMV: TikTok e Shopee
+
+Data: 21/07/2026 (R2), corrigido em 21/07/2026 (R2.1 — segundo e último ciclo
+deste gate, stop-loss aplicado a partir daqui). Escopo: implementar e validar
+a correção de GMV de TikTok e Shopee usando a baseline e o comparador do Gate
+R1, sem nenhuma escrita real em banco (backfill, sync, deploy) e sem tocar
+Mercado Livre. Antes de editar qualquer código, confirmado read-only que o
+Task Scheduler continua desabilitado por desenho: `pipelines/ops/schedule_plan.py`
+só imprime comando/XML para revisão humana (nunca importa/aplica),
+`Settings/Enabled` do XML gerado é sempre `false` sem parâmetro para mudar
+isso, e `pipelines/ops/orchestrate.py` documenta explicitamente "Nunca ativa
+Task Scheduler" / "O Task Scheduler continua Disabled". Consulta direta e
+também read-only ao Agendador de Tarefas do Windows (`schtasks /query`) não
+retornou nenhuma tarefa deste projeto.
+
+**Resumo do que mudou entre R2 e R2.1**: TikTok recebeu hardening estreito
+sobre a mesma regra aprovada (`SUM(sub_total)` de status elegíveis) — nada
+de semântica mudou. Shopee teve a tentativa do R2 (classificação de status
+sobre `Order.all*.xlsx`) **revertida por não atingir a meta** (24,8% de
+redução; exigido ≥75%) e **substituída pela fonte autoritativa correta**:
+os relatórios gerenciais `shop-stats`, que já trazem `Vendas (BRL)`,
+`Vendas Canceladas` e `Vendas Devolvidas/Reembolsadas` prontos por dia. Essa
+nova fonte atinge a meta (0,93% de erro, 85,4% de redução).
+
+### 11.1 TikTok — hardening da regra aprovada
+
+A regra em si não mudou: **GMV = `SUM(sub_total)` dos status elegíveis**
+(`COMPLETED`, `DELIVERED`, `IN_TRANSIT`; `CANCELLED` fora). O que mudou foi
+o hardening do conector (`pipelines/connectors/tiktok/connector.py`):
+
+1. **Consistência `orders`/`avg_ticket`.** Comparação read-only agregada
+   (jan-mai/2026, 755 células `date × brand` com pedido elegível na Raw)
+   entre `gold.orders` e a contagem elegível calculada da própria Raw
+   (`orders_eligible`) mostrou que são **populações incompatíveis**, não uma
+   diferença de arredondamento: 741 de 755 células divergem, soma das
+   diferenças absolutas = 78.292 pedidos, maior divergência única = 1.421
+   pedidos numa única célula (nenhuma célula ficou sem linha na Gold nesse
+   período). Implementada a preferência mínima pedida: `orders =
+   COALESCE(gold.orders, orders_eligible_da_raw)` — usa a Gold quando
+   existe linha, cai para a contagem elegível da Raw só quando não existe;
+   `avg_ticket` é recomputado usando exatamente esse mesmo valor escolhido
+   como denominador (nunca mistura `orders_eligible` da Raw com `gmv` e
+   `gold.orders` com `avg_ticket` em pares diferentes).
+2. **`gmv_video`/`gmv_live`/`gmv_card` preservados** — restaurados como
+   passthrough absoluto da Gold (o Gate R2 os havia removido por engano,
+   tratando-os como "KPI de GMV a remover"; não eram). Documentado que
+   podem não somar ao novo GMV, pois a Gold os calcula com base no GMV
+   externo antigo.
+3. **`orders_unexpected_status`** agora conta status **nulo OU** fora da
+   allowlist (antes só contava fora da allowlist — `NOT IN` do SQL não
+   captura `NULL` sozinho).
+4. **`sub_total IS NULL` em pedido elegível bloqueia.** Adicionada contagem
+   `orders_eligible_null_subtotal`; se `fetch()` encontrar qualquer pedido
+   elegível com `sub_total` nulo no intervalo consultado, levanta
+   `TikTokConnectorError` **antes de retornar qualquer linha** — nenhum GMV
+   incompleto é calculado silenciosamente (um `sub_total` nulo contribuiria
+   0 na soma sem nenhum aviso). Nenhum caso real encontrado em jan-mai/2026.
+5. Preservado sem alteração: Raw como tabela dirigente (LEFT JOIN da Gold,
+   nunca o contrário), dia só com `CANCELLED` retornando GMV zero, dedup
+   determinístico por `order_id`, bind parameters em todos os filtros, zero
+   PII (`cpf`/`order_id` nunca selecionados na saída), nenhuma escrita.
+
+Candidato TikTok regenerado com o conector endurecido: **erro absoluto
+R$ 647.202,95, 1,13%, redução de 80,5%** — idêntico ao R2, confirmando que o
+hardening não alterou o resultado numérico (as divergências de `orders` só
+afetam `avg_ticket`, não o GMV).
+
+### 11.2 Shopee — diagnóstico agregado obrigatório
+
+Antes de trocar a fonte, reconciliação agregada por marca × mês
+(jan-mai/2026, sem order_id/comprador/filename) comparando XLSX, Torre
+atual, `Order.all` original (exclui só cancelado — idêntico à Torre atual),
+`Order.all` corrigido (exclui cancelado + devolvido, tentativa do R2),
+`Vendas (BRL)`/`Vendas Canceladas`/`Vendas Devolvidas ou Reembolsadas` e GMV
+líquido do `shop-stats`:
+
+| Marca | Mês | XLSX | Torre atual | OA corrigido | SS Vendas | SS Canceladas | SS Devolvidas | SS líquido |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Barbours | Abr | 2.425.534,74 | 2.752.126,41 | 2.697.398,46 | 3.043.432,03 | 548.978,38 | 44.723,02 | 2.449.730,63 |
+| Kokeshi | Abr | 2.104.218,36 | 2.307.942,92 | 2.291.103,48 | 2.426.811,34 | 311.262,32 | 12.660,12 | 2.102.888,90 |
+| Barbours | Mai | 1.601.148,11 | 1.774.185,47 | 1.738.334,02 | 2.045.726,34 | 368.074,43 | 31.986,31 | 1.645.665,60 |
+
+(tabela completa de 25 células nos artefatos de execução desta correção; as
+3 linhas acima ilustram o padrão observado em todas).
+
+**Totais (25 células):**
+
+| Métrica | Valor |
+|---|---:|
+| XLSX referência | R$ 19.920.944,56 |
+| Torre atual / `Order.all` original (exclui só cancelado) | R$ 21.181.850,05 |
+| `Order.all` corrigido (exclui cancelado + devolvido) | R$ 20.853.916,05 |
+| `shop-stats` Vendas (BRL) | R$ 23.882.857,07 |
+| `shop-stats` Vendas Canceladas | R$ 3.536.160,13 |
+| `shop-stats` Vendas Devolvidas/Reembolsadas | R$ 274.365,47 |
+| `shop-stats` líquido (Vendas − Canceladas − Devolvidas) | R$ 20.072.331,47 |
+
+Cobertura de dias: todos os 25 arquivos `shop-stats` cobrem o mês
+calendário completo (28–31 dias, conforme o mês) em todas as 5 marcas —
+nenhuma divergência de cobertura entre `Order.all`, `shop-stats` e o
+calendário.
+
+**Explicação quantitativa do porquê `Order.all` corrigido removeu só
+~R$ 328 mil enquanto `shop-stats` líquido remove ~R$ 1,11 milhão**:
+`Vendas Canceladas` do `shop-stats` somam R$ 3.536.160,13 — mais que o dobro
+do gap total a explicar (R$ 1.260.905,49) — e `Vendas Devolvidas/
+Reembolsadas` somam R$ 274.365,47. Ou seja: `Vendas (BRL)` do `shop-stats`
+(R$ 23,88 milhões) já é uma base **bruta maior** que a soma de `subtotal`
+dos pedidos não cancelados do `Order.all` (R$ 21,18 milhões) — os dois
+relatórios não partem do mesmo número bruto. O campo `Status da Devolução /
+Reembolso` do `Order.all` captura muito menos devolução/reembolso em valor
+financeiro do que o `shop-stats` gerencial. **Não foi investigada a causa
+exata pedido a pedido** (fora do orçamento deste gate): a explicação mais
+provável, sem evidência definitiva, é diferença de snapshot/semântica entre
+o relatório de pedidos (`Order.all`, estado do pedido no momento da
+exportação) e o relatório gerencial (`shop-stats`, que aparentemente
+contabiliza cancelamentos/devoluções de forma mais completa e/ou numa
+janela de captura diferente). Isso é registrado como **limitação**, não
+como bloqueador, pois o resultado agregado com `shop-stats` já atinge o
+critério de aceite (seção 11.4).
+
+**Top 5 maiores diferenças `Order.all` corrigido × `shop-stats` líquido:**
+
+| Marca | Mês | OA corrigido | SS líquido | Diferença |
+|---|---|---:|---:|---:|
+| Barbours | Abr | R$ 2.697.398,46 | R$ 2.449.730,63 | R$ 247.667,83 |
+| Kokeshi | Abr | R$ 2.291.103,48 | R$ 2.102.888,90 | R$ 188.214,58 |
+| Barbours | Mai | R$ 1.738.334,02 | R$ 1.645.665,60 | R$ 92.668,42 |
+| Barbours | Mar | R$ 2.679.512,01 | R$ 2.621.696,40 | R$ 57.815,61 |
+| Kokeshi | Mar | (ver artefato) | (ver artefato) | R$ 17.654,98 |
+
+### 11.3 Shopee — fonte autoritativa: shop-stats
+
+**Achado que motivou a troca**: os arquivos `*.shopee-shop-stats.*.xlsx` já
+trazem, prontos por linha diária (e no total mensal, não usado), `Vendas
+(BRL)`, `Vendas Canceladas` e `Vendas Devolvidas / Reembolsadas` —
+confirmado presente nos 25 arquivos (5 marcas × 5 meses).
+
+**Fórmula diária**: `gmv = Vendas (BRL) − Vendas Canceladas − Vendas
+Devolvidas ou Reembolsadas`, calculada e arredondada para 2 casas em
+`pipelines/connectors/shopee/_parser_shop_stats.py`.
+
+**Campos alterados**:
+
+- `pipelines/connectors/shopee/_parser_shop_stats.py`: `_COL_MAP` ganhou
+  `"Vendas (BRL)"`, `"Vendas Canceladas"`, `"Vendas Devolvidas /
+  Reembolsadas"`. Reutiliza `_numeric.py::parse_brl_float` (nenhum parser
+  monetário novo). Regras de bloqueio (nova classe `ShopeeShopStatsError`):
+  ausência de qualquer uma das 3 colunas obrigatórias no header bloqueia
+  (não é warning); valor ausente/vazio numa linha diária válida bloqueia
+  (diferente do contrato do `Order.all`, onde ausência = 0 — aqui as 3
+  colunas são obrigatórias por definição do relatório); valor inválido
+  propaga `ShopeeNumericParseError` (nunca vira 0 silencioso); GMV líquido
+  negativo bloqueia. A linha de totais mensais (linha 1 do arquivo) nunca é
+  usada como substituta das linhas diárias — a leitura diária continua
+  ancorada no header da linha 3 e nas linhas 4+.
+- `pipelines/transforms/shopee_shop_stats_daily.py`: `transform()` passa a
+  incluir `gmv` no dict canônico — só repassa o valor já calculado, não
+  recalcula. Pedidos/unidades/cancelamentos continuam vindo exclusivamente
+  de `shopee_orders_daily.py` (`Order.all`), não tocados.
+- `pipelines/ingestion/daily_performance.py`: `PATCH_SHOP_STATS_SQL` ganhou
+  `gmv` na lista de colunas do `INSERT`, no `VALUES` e no `ON CONFLICT DO
+  UPDATE SET` — **só o texto do SQL foi alterado, não executado**. Como o
+  step `daily_shopee_stats` já roda depois de `daily_shopee_orders` em
+  `shopee_manual_refresh` (ordem/criticidade não alteradas), esse PATCH
+  passa a ser o passo que prevalece por último sobre o campo `gmv` no
+  upsert — tornando-o a fonte final autoritativa.
+- `pipelines/connectors/shopee/_parser.py` (`Order.all`): **revertido
+  integralmente** ao estado anterior ao Gate R2 (`git checkout --`, sem
+  diff contra o commit do Gate R1) — a tentativa de classificação por
+  status/devolução não é mais a regra de GMV vigente, evitando duas
+  definições concorrentes. `pipelines/tests/test_shopee_gmv_classification.py`
+  removido (testava a regra revertida).
+
+### 11.4 Resultado final por canal
+
+Candidato final regenerado em
+`docs/reconciliation/torre_gmv_candidate_r2_jan_maio_2026.csv` (70 células:
+TikTok via `connector.fetch()` endurecido; Shopee via
+`parse_brand_shop_stats()`; Mercado Livre **copiado sem alteração** da
+baseline do Gate R1). Validado com:
+
+```bash
+python -m pipelines.reconciliation.reconcile_xlsx_torre_gmv \
+  --reference docs/reconciliation/xlsx_gmv_reference_jan_maio_2026.csv \
+  --candidate docs/reconciliation/torre_gmv_candidate_r2_jan_maio_2026.csv \
+  --json
+```
+
+| Canal | Erro % antes (R1) | Erro % depois (R2.1) | Redução | Critério (≤1,25% e ≥75%) |
+|---|---:|---:|---:|---|
+| TikTok | 5,76% | **1,13%** | **80,5%** | ✅ atingido |
+| Shopee | 6,33% | **0,93%** | **85,4%** | ✅ atingido |
+| Mercado Livre | 11,40% | 11,40% (não tocado) | — | fora do escopo deste gate |
+| Total (70 células) | 7,05% | 3,22% | — | — |
+
+Shopee bate exatamente a projeção original do Gate R1 (erro absoluto
+R$ 184.711,47, 0,93%, redução 85,4%) — a simulação por `shop-stats` feita
+naquele gate se confirma com a implementação real.
+
+### 11.5 Limitações restantes
+
+1. Causa exata do porquê `Order.all`/`return_status` não captura
+   integralmente o impacto financeiro de devoluções/reembolsos (seção
+   11.2) — não investigada pedido a pedido, conforme orçamento do gate.
+   **Não é bloqueador**: o `shop-stats` já é a fonte autoritativa e atinge
+   o critério; isso fica registrado como contexto/limitação, não como
+   dívida a resolver.
+2. TikTok: a fonte de refunds/devoluções continua ausente em
+   `gold.tiktok_brand_daily` (já documentado no Gate R1) — não resolvido
+   aqui, fora do escopo.
+3. `avg_fee_pct`/`avg_settlement_pct` (TikTok) continuam fora da consulta
+   (universo de *statement*, incompatível com o GMV de pedido/dia).
+   `avg_fee_pct`/`avg_settlement_pct`/`shipping_pct_of_gmv` do Shopee não
+   foram alterados nesta correção (Order.all foi revertido ao estado
+   original do Gate R1, onde esses campos já existiam com a semântica
+   antiga) — não são o foco deste gate.
+4. `gold.tiktok_brand_daily` é uma tabela **externa** (fora deste
+   repositório) — a correção age no ponto de consumo (conector), não na
+   origem.
+5. O PATCH do `gmv` no `shop-stats` (`PATCH_SHOP_STATS_SQL`) foi alterado
+   apenas como texto — não executado; a ativação real (rodar
+   `daily_performance --source shopee-stats`) é uma decisão de publicação
+   fora do escopo deste gate (fica para o Gate R4).
+6. Mercado Livre não foi tocado, conforme escopo proibido deste gate.
+
+### 11.6 Confirmação de zero escrita real
+
+Nenhuma escrita em banco, backfill, sync, deploy, migration ou execução de
+`daily_performance`/`full_daily` foi realizada. As únicas operações contra
+bancos/arquivos foram: (a) consultas read-only agregadas ao Data Mart
+(inspeção de `raw.tiktok_shop_orders`, comparação `gold.orders` vs
+`orders_eligible`, e execução de `fetch()` do conector corrigido — todos
+`SELECT`s puros via `datamart_query`); (b) leitura pura de arquivos locais
+`Order.all*.xlsx` e `*.shopee-shop-stats.*.xlsx` (sem escrita). O CSV
+candidato foi gerado localmente e comparado com o comparador do Gate R1;
+nenhuma tabela/view/migration foi criada ou alterada.
