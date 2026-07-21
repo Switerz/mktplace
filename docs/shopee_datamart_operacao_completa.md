@@ -1,5 +1,8 @@
 # Automacao Shopee -> Data Mart
 
+Para o procedimento operacional final da Gold Shopee, consulte
+[`docs/shopee_gold_operacao_handoff.md`](shopee_gold_operacao_handoff.md).
+
 Documento de operacao e handoff da automacao Shopee em
 `C:\Users\User\Documents\relatorio_mercos\shopee_automacao`.
 
