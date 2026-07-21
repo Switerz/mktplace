@@ -49,6 +49,9 @@ pyvenv.cfg
 *.csv
 *.xlsx
 *.xls
+# Gate R1 (reconciliação XLSX x Torre): CSVs versionados por decisão do projeto
+!docs/reconciliation/xlsx_gmv_reference_jan_maio_2026.csv
+!docs/reconciliation/torre_gmv_baseline_20260721.csv
 
 # Tooling / local agent caches
 .codex/
