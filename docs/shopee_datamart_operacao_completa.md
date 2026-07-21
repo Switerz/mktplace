@@ -764,6 +764,36 @@ Pontos importantes para quem opera o scraping:
   antigo `window_exceeds_limit` foi removido e substituido por
   `refresh_window_invalid` (mesmo reason_code tanto para janela > 180 dias
   quanto para data futura — a causa exata continua no campo `problems`).
+- **Atualizacao 2026-07-21 (Gate S5.3, wrapper unico de refresh por lote —
+  ainda nenhuma escrita real executada nesta rodada)**: novo componente
+  `pipelines/ops/refresh_shopee_window_if_needed.py` (CLI:
+  `python -m pipelines.ops.refresh_shopee_window_if_needed --file-id <id>
+  [--file-id <id> ...] --audit-path <caminho-absoluto.json> --json`). Este
+  e' o PRIMEIRO componente deste repositorio que pode de fato disparar o
+  refresh autoritativo (`--refresh-shopee-window`) a partir dos mesmos
+  `file_id`s que o runner Raw/Silver ja' retorna hoje: resolve a janela
+  (Gate S5.2.1, com preflight e primary ja' confirmados) e, SO' se a
+  janela vier `resolved`, chama o refresh diretamente — nunca antes disso.
+  `audit_path` continua obrigatorio e fornecido por quem chama (a geracao
+  automatica de `run_id`/receipt fica para o Gate S5.4, ainda pendente).
+  Sem retry em nenhum caminho; o refresh e' chamado no maximo uma vez por
+  execucao. Continua valendo: a automacao externa segue sem `DATABASE_URL`
+  do Neon, e este wrapper nao adiciona nenhum SQL/logica de transacao
+  propria — so' orquestra componentes ja' auditados.
+- **Atualizacao 2026-07-21 (Gate S5.3.1, hardening pre-commit do wrapper —
+  sem impacto na CLI usada pela automacao)**: revisao pre-commit corrigiu
+  quatro pontos no componente acima antes de qualquer integracao. A CLI
+  (`--file-id`/`--audit-path`/`--json`) nao mudou de uso. Para quem importa
+  o modulo em Python: (1) uma excecao inesperada de `resolve_shopee_batch_
+  window` agora e' sempre capturada dentro da propria funcao publica —
+  nunca escapa como traceback; (2) um resultado `resolved` que nao cumprir
+  um contrato explicito (datas validas e em ordem, `refresh_window_valid`,
+  contagens batendo, sem `missing_file_ids`, janela em dias positiva) e'
+  rejeitado como `resolver_contract_invalid` (exit 4) antes do segundo
+  preflight/refresh; (3) o resultado final agora inclui os avisos das tres
+  etapas (resolucao, segundo preflight, refresh), sem duplicar; (4) o
+  parser de `--file-id` deixou de depender de um simbolo privado do modulo
+  de resolucao de janela.
 
 ## Alertas e falhas comuns
 
