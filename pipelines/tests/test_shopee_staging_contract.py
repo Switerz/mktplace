@@ -22,6 +22,7 @@ ORDERS_RAW_KEYS = {
     "Cancelar Motivo",
     "CEP",
     "Cidade",
+    "Cidade__col57",
     "Cidade__col58",
     "Cidade__col59",
     "Código do Cupom",
@@ -36,6 +37,7 @@ ORDERS_RAW_KEYS = {
     "Desconto da Leve Mais por Menos do vendedor",
     "Desconto de Frete Aproximado",
     "Desconto do vendedor",
+    "Desconto do vendedor__col22",
     "Desconto do vendedor__col23",
     "Desconto do vendedor__col26",
     "Desconto Shopee da Leve Mais por Menos",
@@ -184,6 +186,29 @@ def test_cobertura_completa_das_chaves_reais():
             f"{spec.source_type}: faltam {sorted(expected - covered)}; "
             f"sobram {sorted(covered - expected)}"
         )
+
+
+def test_apice_junho_layout_sem_tipo_de_pedido_resolve_via_coalesce():
+    """Gate Junho/Ápice: quando o export não tem a coluna 'Tipo de pedido', a
+    2ª ocorrência de 'Cidade'/'Desconto do vendedor' desloca 1 posição (col57/
+    col22 em vez de col58/col23) — o COALESCE precisa cobrir as duas variantes,
+    na mesma coluna canônica, sem tratar isso como schema drift."""
+    delivery_city = next(c for c in mapping.ORDERS.columns if c.column == "delivery_city")
+    assert delivery_city.source_keys == ("Cidade__col57", "Cidade__col58", "Cidade__col59", "Cidade")
+    expr_city = build_sql.column_expression(delivery_city)
+    assert expr_city.startswith("COALESCE(")
+    assert all(k in expr_city for k in ("Cidade__col57", "Cidade__col58", "Cidade__col59", "Cidade"))
+
+    seller_discount_2 = next(c for c in mapping.ORDERS.columns if c.column == "seller_discount_2")
+    assert seller_discount_2.source_keys == (
+        "Desconto do vendedor__col22", "Desconto do vendedor__col23", "Desconto do vendedor__col26",
+    )
+    expr_discount = build_sql.column_expression(seller_discount_2)
+    assert expr_discount.startswith("COALESCE(")
+    assert all(
+        k in expr_discount
+        for k in ("Desconto do vendedor__col22", "Desconto do vendedor__col23", "Desconto do vendedor__col26")
+    )
 
 
 def test_mapeadas_e_excluidas_sao_disjuntas():

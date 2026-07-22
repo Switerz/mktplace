@@ -241,11 +241,14 @@ ORDERS = TableSpec(
         _money("seller_discount", "Desconto do vendedor",
                note="1ª ocorrência do header duplicado"),
         StagingColumn("seller_discount_2", "numeric(14,2)", "coalesce:numeric_dot",
-                      ("Desconto do vendedor__col23", "Desconto do vendedor__col26"),
+                      ("Desconto do vendedor__col22", "Desconto do vendedor__col23", "Desconto do vendedor__col26"),
                       pii_class=FINANCEIRO,
-                      note="2ª ocorrência do header duplicado (col23 na apice, col26 nas "
-                           "demais); semântica exata não confirmada — NÃO alimentar Gold "
-                           "enquanto não confirmado com a Shopee/Seller Center"),
+                      note="2ª ocorrência do header duplicado (col22/col23 na apice, "
+                           "dependendo do layout do export — col22 aparece quando a coluna "
+                           "'Tipo de pedido' está ausente do template, deslocando as colunas "
+                           "seguintes em 1 posição; col26 nas demais marcas); semântica exata "
+                           "não confirmada — NÃO alimentar Gold enquanto não confirmado com a "
+                           "Shopee/Seller Center"),
         _money("shopee_commercial_incentive", "Incentivo Shopee para ação comercial"),
         _money("commercial_action_adjustment", "Ajuste por participação em ação comercial"),
         _money("pix_payment_adjustment", "Ajuste por pagamento via PIX"),
@@ -280,10 +283,13 @@ ORDERS = TableSpec(
                note="só template apice"),
         # Localização de baixa granularidade (minimização: só cidade/UF/país)
         StagingColumn("delivery_city", "text", "coalesce:text_null_blank",
-                      ("Cidade__col58", "Cidade__col59", "Cidade"),
+                      ("Cidade__col57", "Cidade__col58", "Cidade__col59", "Cidade"),
                       pii_class=ENDERECO_LOCALIZACAO,
                       note="header 'Cidade' duplicado; 1ª ocorrência é 100% vazia — o valor "
-                           "real está em Cidade__col58 (apice) / Cidade__col59 (demais)"),
+                           "real está em Cidade__col57/col58 (apice, dependendo do layout do "
+                           "export — col57 aparece quando a coluna 'Tipo de pedido' está "
+                           "ausente do template, deslocando as colunas seguintes em 1 posição) "
+                           "/ Cidade__col59 (demais)"),
         StagingColumn("delivery_state", "text", "text_null_blank", ("UF",),
                       pii_class=ENDERECO_LOCALIZACAO, note="nome por extenso (ex: 'São Paulo')"),
         StagingColumn("country_code", "varchar(2)", "text_null_blank", ("País",),

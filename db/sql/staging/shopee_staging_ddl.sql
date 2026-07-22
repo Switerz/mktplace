@@ -124,12 +124,12 @@ COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.sku_total_weight_kg IS 
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_total_weight_kg IS 'nível pedido; unidade inferida kg';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.product_subtotal IS 'GMV bruto da linha; soma auditada R$ 24.859.859,62';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.seller_discount IS '1ª ocorrência do header duplicado';
-COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.seller_discount_2 IS '2ª ocorrência do header duplicado (col23 na apice, col26 nas demais); semântica exata não confirmada — NÃO alimentar Gold enquanto não confirmado com a Shopee/Seller Center';
+COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.seller_discount_2 IS '2ª ocorrência do header duplicado (col22/col23 na apice, dependendo do layout do export — col22 aparece quando a coluna ''Tipo de pedido'' está ausente do template, deslocando as colunas seguintes em 1 posição; col26 nas demais marcas); semântica exata não confirmada — NÃO alimentar Gold enquanto não confirmado com a Shopee/Seller Center';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.shopee_coins_offset IS 'inteiro 0–10.000; unidade (moedas vs centavos) NÃO confirmada — não alimentar Gold enquanto não confirmado';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_amount IS 'nível pedido';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.order_grand_total IS 'nível pedido; NÃO é settlement (ver docs/data_contracts.md)';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.approx_shipping_discount IS 'só template apice';
-COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.delivery_city IS 'header ''Cidade'' duplicado; 1ª ocorrência é 100% vazia — o valor real está em Cidade__col58 (apice) / Cidade__col59 (demais)';
+COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.delivery_city IS 'header ''Cidade'' duplicado; 1ª ocorrência é 100% vazia — o valor real está em Cidade__col57/col58 (apice, dependendo do layout do export — col57 aparece quando a coluna ''Tipo de pedido'' está ausente do template, deslocando as colunas seguintes em 1 posição) / Cidade__col59 (demais)';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.delivery_state IS 'nome por extenso (ex: ''São Paulo'')';
 COMMENT ON COLUMN silver.stg_shopee_order_item_snapshots.country_code IS '''BR'' em 100% da base';
 

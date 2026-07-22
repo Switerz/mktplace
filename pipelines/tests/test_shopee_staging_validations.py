@@ -86,7 +86,11 @@ def test_coalesce_column_gera_condicao_or_entre_as_chaves():
     key = "orders: seller_discount_2: valor fora do formato/domínio esperado"
     assert key in conditions
     cond = conditions[key].condition_sql
-    assert "Desconto do vendedor__col23" in cond and "Desconto do vendedor__col26" in cond
+    assert (
+        "Desconto do vendedor__col22" in cond
+        and "Desconto do vendedor__col23" in cond
+        and "Desconto do vendedor__col26" in cond
+    )
     assert " OR " in cond
 
 

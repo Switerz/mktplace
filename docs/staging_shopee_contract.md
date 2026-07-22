@@ -228,18 +228,24 @@ qualquer INSERT tentar violar um CHECK.
 
 ## 7. Mapping (resumo — completo em `mapping.py`)
 
-- **orders**: 71 chaves reais no `raw_payload` → colunas tipadas + 8
+- **orders**: 73 chaves reais no `raw_payload` → colunas tipadas + 8
   exclusões de PII/texto livre (username do comprador continua excluído
   explicitamente, já que `buyer_key` foi removida; `CPF do Comprador`
   DEIXOU de ser exclusão nesta revisão — ver seção 5 — e passou a ser
-  mapeado para `buyer_cpf`, PII_DIRETA). Inclui os 2 templates (apice tem
-  `Tipo de pedido`, `Returned quantity`, `Desconto de Frete Aproximado`,
-  `CPF do Comprador`; não tem `Domestic
+  mapeado para `buyer_cpf`, PII_DIRETA). Inclui os 2 templates de marca
+  (apice tem `Tipo de pedido`, `Returned quantity`, `Desconto de Frete
+  Aproximado`, `CPF do Comprador`; não tem `Domestic
   Delivered Date`/`Pedido FBS`/`Shopee Owned`/`Data da Finalização do
-  Cancelamento`). Headers duplicados desambiguados por posição:
-  `Cidade__col58/59` (a 1ª "Cidade" é 100% vazia) e `Desconto do
-  vendedor__col23/26` (2ª ocorrência → `seller_discount_2`, semântica não
-  confirmada — **não alimentar Gold** enquanto não confirmado).
+  Cancelamento`), mais uma variação de layout confirmada em 2026-07
+  (Gate Junho/Ápice): exports de apice sem a coluna `Tipo de pedido`
+  deslocam 1 posição as colunas seguintes, sem adicionar nem remover
+  nenhuma outra chave (diff posicional exato, confirmado read-only).
+  Headers duplicados desambiguados por posição: `Cidade__col57/58/59`
+  (a 1ª "Cidade" é 100% vazia; `col57` é a apice sem `Tipo de pedido`,
+  `col58` é a apice com `Tipo de pedido`, `col59` é as demais marcas) e
+  `Desconto do vendedor__col22/23/26` (2ª ocorrência → `seller_discount_2`,
+  mesmo padrão de deslocamento; semântica não confirmada — **não
+  alimentar Gold** enquanto não confirmado).
 - **shop_stats**: 17 chaves → 100% mapeadas. Dinheiro em formato BR
   ("1.234,56"), percentuais "3,84%" (unidade 0–100, comprovada < 100).
 - **ads**: 36 chaves → 100% mapeadas (kokeshi tem `Segmentação de Público`,
