@@ -766,3 +766,231 @@ bancos/arquivos foram: (a) consultas read-only agregadas ao Data Mart
 `Order.all*.xlsx` e `*.shopee-shop-stats.*.xlsx` (sem escrita). O CSV
 candidato foi gerado localmente e comparado com o comparador do Gate R1;
 nenhuma tabela/view/migration foi criada ou alterada.
+
+## 12. Gate R3 — Análise semântica do GMV do Mercado Livre
+
+Data: 21/07/2026. Objetivo: determinar se `gold.ml_gestao_diaria` usa a
+definição de negócio correta para o GMV do ML, usando **somente** as 14
+células com cobertura adequada. O backfill das cargas parciais de
+março/abril (Kokeshi/Lescent/Barbours) é responsabilidade externa de um
+engenheiro de dados do time e não foi implementado nem executado aqui — este
+gate avança independentemente desse trabalho, conforme escopo.
+
+**Resultado em uma frase: a regra atual foi mantida.** Nenhum dos 3
+candidatos alternativos avaliados (mudança de competência, de coluna
+monetária, ou exclusão por status de pagamento) reduz o erro agregado de
+forma que justifique trocar a regra — as diferenças entre eles ficaram todas
+dentro de 0,08 ponto percentual do erro atual. "Não alterar" é o resultado
+documentado deste gate.
+
+### 12.1 Regra atual (comprovada por leitura da definição real da view)
+
+`gold.ml_gestao_diaria` é uma **view** no Data Mart (não uma tabela física,
+diferente do TikTok). Sua definição real foi lida via
+`pg_get_viewdef('gold.ml_gestao_diaria'::regclass, true)` — não inferida:
+
+```sql
+SUM(CASE WHEN o.status = 'paid' THEN o.total_amount ELSE 0 END) AS gmv
+-- agrupado por: o.date_created::date, o.brand
+-- fonte: raw.ml_orders (nenhum JOIN com pagamentos/claims/devoluções na formação do GMV)
+```
+
+- **Tabela de origem**: `raw.ml_orders` (view não usa `raw.ml_order_payments`
+  para o `gmv`, apenas para outras métricas fora do escopo de GMV).
+- **Coluna monetária**: `total_amount`.
+- **Coluna de competência/data**: `date_created` (data de criação do
+  pedido), convertida para `date`.
+- **Status incluídos**: somente `paid`. Status distintos observados em
+  `raw.ml_orders` para as 4 marcas em jan-mai/2026: `paid` (199.393),
+  `cancelled` (9.916), `partially_refunded` (131), `pending_cancel` (3).
+  Nenhum status `refunded` isolado existe no nível do pedido — reembolso
+  total aparece como `cancelled`.
+- **Deduplicação**: nenhuma explícita necessária — `raw.ml_orders` agrupa
+  por `(date_created::date, brand)` sem qualquer sinal de duplicidade
+  (já confirmado no Gate R1, seção 4.3).
+- **Cancelamentos/devoluções/reembolsos**: excluídos indiretamente pelo
+  filtro `status = 'paid'` — nenhum JOIN com pagamentos ou reembolsos
+  entra na soma do GMV.
+
+### 12.2 Respostas às perguntas do gate
+
+1. **Regra atual**: descrita acima — confirmada pela definição real da
+   view, não por inferência.
+2. **`status = 'paid'` reconstrói o estado atual sobre meses históricos?**
+   Sim, comprovado: `raw.ml_orders` mantém um único status por pedido (o
+   mais recente), e a view filtra por esse status atual, não por uma
+   fotografia do fechamento do mês. Isso significa que um pedido pago em
+   janeiro e cancelado/reembolsado depois de fevereiro deixa de contar no
+   GMV de janeiro da Torre retroativamente — o XLSX, por ser uma fotografia
+   manual do fechamento, não sofre esse efeito. Este é um viés estrutural
+   real, mas seu impacto agregado não foi isolável sem a fotografia
+   histórica do estado dos pedidos (não disponível no Data Mart atual).
+3. **Competência correta**: testada a alternativa `date_closed` (também
+   presente e 100% populada em `raw.ml_orders`, para pedidos `paid`). A
+   diferença entre `date_created` e `date_closed` é irrelevante em
+   magnitude: de 199.393 pedidos pagos (jan-mai/2026, 4 marcas), apenas 768
+   mudam de **dia** e só 54 mudam de **mês** entre as duas datas — não há
+   nenhuma outra data de aprovação/pagamento na própria `raw.ml_orders`
+   (essa granularidade só existe em `raw.ml_order_payments.date_approved`,
+   nível pagamento, não pedido).
+4. **`total_amount` representa o mesmo conceito do XLSX?** Parcialmente
+   verificável: `shipping_cost` e `taxes_amount` estão **zerados em 100%**
+   dos pedidos `paid` no período (nenhum valor não-nulo/diferente de zero
+   encontrado) — ou seja, não há como `total_amount` estar somando frete ou
+   impostos populados nesta extração; ele já é, na prática, o valor do
+   pedido sem esses componentes. `paid_amount` (valor efetivamente pago,
+   podendo incluir juros de parcelamento) difere de `total_amount` em
+   ~6% dos pedidos pagos, sistematicamente para cima (R$ 18.386.924,33 vs
+   R$ 18.251.503,15 nas 4 marcas) — não foi possível confirmar a causa
+   exata (parcelamento é a hipótese mais provável, não comprovada pedido a
+   pedido) e, semanticamente, `paid_amount` misturaria custo financeiro de
+   parcelamento ao conceito de GMV, o que não é desejável.
+5. **Risco de subtrair reembolso duas vezes?** Reconfirmado, com um ângulo
+   adicional: além do achado do Gate R1 (`transaction_amount_refunded` não
+   deve ser subtraído — dupla exclusão para pedidos já `cancelled`/
+   `partially_refunded`), foi testada uma abordagem que não subtrai valor,
+   apenas **exclui** pedidos `paid` cujo pagamento associado já está
+   `refunded`/`charged_back` em `raw.ml_order_payments.status`. O valor em
+   jogo é pequeno em todas as células (máximo R$ 1.383,63 numa única
+   célula, ver CSV) — não explica nenhum resíduo relevante, mas confirma
+   que a defasagem entre status do pedido e status do pagamento existe e é
+   uma dívida de qualidade de dados, não uma causa estrutural do desvio.
+6. **Kokeshi/maio e Rituária/janeiro**: nenhum dos 4 candidatos (atual,
+   competência, coluna monetária, exclusão por pagamento) aproxima essas
+   duas células do XLSX de forma material — ver seção 12.4. Permanecem
+   **inconclusivas por análise agregada do Data Mart**; a causa mais
+   provável, sem evidência definitiva, é diferença de origem/conceito ou
+   fotografia temporal do lado do XLSX (já registrado no Gate R1, seção
+   4.5) — não investigado pedido a pedido, conforme orçamento deste gate.
+
+### 12.3 Candidatos avaliados (controle obrigatório incluso)
+
+Todas as consultas foram somente leitura e agregadas por `brand`/mês; nenhum
+`order_id`, CPF, nome ou linha individual foi impresso ou persistido.
+
+| Variante | Coluna monetária | Competência | Filtro de status | Justificativa |
+|---|---|---|---|---|
+| `current_rule` (controle) | `total_amount` | `date_created` | `status = 'paid'` | Regra vigente na view `gold.ml_gestao_diaria` |
+| `competencia_date_closed` | `total_amount` | `date_closed` | `status = 'paid'` | Testa se a data de "fechamento" do pedido (mais próxima de aprovação/pagamento) explica o desvio |
+| `paid_amount` | `paid_amount` | `date_created` | `status = 'paid'` | Testa se o valor efetivamente pago (não o valor nominal do pedido) é o conceito do XLSX |
+| `exclude_refund_chargeback_payment` | `total_amount` | `date_created` | `status = 'paid'` **e** sem pagamento `refunded`/`charged_back` associado | Testa se a defasagem status-pedido vs status-pagamento explica o desvio, sem repetir o erro de subtrair valor (Gate R1, seção 4.4) |
+
+Candidatos **não avaliados e por quê**: nenhuma outra coluna monetária de
+pedido além de `total_amount`/`paid_amount` existe em `raw.ml_orders`;
+`shipping_cost`/`taxes_amount` estão zerados (não são candidatos viáveis);
+nenhuma outra data de competência de pedido existe além de
+`date_created`/`date_closed` (a única outra data granular,
+`ml_order_payments.date_approved`, é nível pagamento, não pedido, e mudaria
+a unidade de análise sem justificativa — não avaliada como candidato
+autônomo, só usada para o teste de exclusão por status de pagamento).
+
+### 12.4 Resultado nas 14 células válidas
+
+CSV completo (20 células × 4 variantes = 80 linhas) em
+`docs/reconciliation/ml_gmv_semantic_analysis_jan_maio_2026.csv`. Resumo
+agregado, **apenas as 14 células válidas**:
+
+| Variante | XLSX total | Erro absoluto | Erro % |
+|---|---:|---:|---:|
+| `current_rule` (controle) | R$ 13.977.252,50 | R$ 294.369,28 | **2,1061%** |
+| `competencia_date_closed` | R$ 13.977.252,50 | R$ 293.853,68 | 2,1024% |
+| `paid_amount` | R$ 13.977.252,50 | R$ 282.821,10 | 2,0234% |
+| `exclude_refund_chargeback_payment` | R$ 13.977.252,50 | R$ 294.073,86 | 2,1039% |
+
+Nenhuma alternativa se afasta da regra atual por mais de 0,08 ponto
+percentual — uma diferença que cabe inteiramente dentro da margem de
+ruído/snapshot já documentada, não uma correção estrutural. `paid_amount` é
+a variante numericamente mais próxima do XLSX, mas por uma margem pequena
+(~4% de redução relativa do erro) e sem justificativa semântica limpa (mistura
+custo de parcelamento ao GMV) — não atende ao critério de "regra única
+justificável pela semântica real dos campos".
+
+**Comportamento por marca** (todas as variantes, célula a célula, no CSV):
+nenhuma variante inverte o sinal do resíduo em nenhuma marca nem produz uma
+melhora consistente através de todas as 4 marcas — cada variante melhora
+algumas células e piora outras, sem padrão sistemático atribuível a uma
+única marca.
+
+**Cinco maiores resíduos absolutos, regra atual, 14 células válidas:**
+
+| Marca | Mês | XLSX | Torre | Diferença | % |
+|---|---|---:|---:|---:|---:|
+| Rituária | Jan | R$ 1.161.029,68 | R$ 1.086.580,75 | -R$ 74.448,93 | -6,41% |
+| Kokeshi | Mai | R$ 694.595,80 | R$ 789.185,88 | +R$ 94.590,08 | +13,62% |
+| Barbours | Mai | R$ 2.621.563,85 | R$ 2.574.181,00 | -R$ 47.382,85 | -1,81% |
+| Rituária | Mar | R$ 1.930.169,31 | R$ 1.913.711,54 | -R$ 16.457,77 | -0,85% |
+| Rituária | Mai | R$ 1.217.681,96 | R$ 1.232.211,96 | +R$ 14.530,00 | +1,19% |
+
+### 12.5 Células excluídas por carga parcial (visíveis, não usadas na decisão)
+
+| Marca | Mês | XLSX | Torre (regra atual) | Cobertura aproximada (Gate R1) |
+|---|---|---:|---:|---:|
+| Barbours | Mar | R$ 2.193.217,84 | R$ 1.855.698,93 | 88% |
+| Barbours | Abr | R$ 2.157.550,98 | R$ 1.958.196,41 | 93% |
+| Kokeshi | Mar | R$ 453.249,92 | R$ 22.479,87 | 5% |
+| Kokeshi | Abr | R$ 557.474,28 | R$ 166.125,65 | 29% |
+| Lescent | Mar | R$ 463.429,79 | R$ 207.078,42 | 47% |
+| Lescent | Abr | R$ 506.449,76 | R$ 100.412,51 | 22% |
+
+Presentes no CSV (`coverage_status = excluded_partial_load`) para as 4
+variantes, mas **não participaram** de nenhum cálculo de erro agregado nem
+da decisão de manter a regra atual.
+
+### 12.6 Decisão de implementação
+
+**Nenhuma alteração de código foi feita.** Nenhum dos 3 candidatos
+alternativos atende simultaneamente aos 5 critérios exigidos:
+
+1. Justificável pela semântica real dos campos: `competencia_date_closed`
+   sim (mas sem efeito prático); `paid_amount` parcialmente (mistura custo
+   financeiro); `exclude_refund_chargeback_payment` sim (mas efeito
+   irrelevante em valor).
+2. Aplica-se igualmente a todas as marcas e meses: sim para os 3, mas sem
+   nenhum ganho que justifique a troca.
+3. Reduz o erro agregado nas 14 células válidas: reduções de 0,004 a 0,08
+   ponto percentual — não materiais.
+4. Não depende de exceções por marca/mês: sim para os 3 (nenhuma exceção
+   foi criada ou cogitada).
+5. Não introduz dupla subtração/mistura de competência: `paid_amount`
+   introduz mistura de custo financeiro (falha parcial neste critério).
+
+Como nenhum candidato passa integralmente pelos 5 critérios com ganho
+material, a regra atual (`SUM(total_amount) WHERE status='paid'`, competência
+`date_created`) foi **mantida**. "Não alterar" é o resultado documentado
+deste gate.
+
+### 12.7 Dependência externa do backfill e validação futura (Gate R4)
+
+O backfill de março/abril (Barbours/Kokeshi/Lescent) continua sendo
+responsabilidade do engenheiro de dados do time, fora do escopo deste
+projeto. Quando o backfill for entregue, o Gate R4 deve:
+
+1. Regerar as mesmas 4 variantes deste CSV para as 6 células hoje excluídas
+   por carga parcial, usando o comparador do Gate R1;
+2. Confirmar que a cobertura de pedidos passa a ser comparável às células
+   já válidas (ordem de grandeza de `Qtde Vendas` do XLSX, não só ausência
+   de erro);
+3. Reavaliar se a regra atual (mantida neste gate) continua sendo a melhor
+   opção **com as 20 células completas**, já que a decisão deste gate foi
+   tomada deliberadamente sem as 6 células parciais.
+
+### 12.8 Achados classificados
+
+| Achado | Classificação |
+|---|---|
+| Regra atual (`status='paid'`, `total_amount`, `date_created`) confirmada pela definição real da view, sem candidato que a supere materialmente | necessário — resolvido (mantida, com evidência documentada) |
+| `status='paid'` reconstrói estado atual sobre meses históricos (viés estrutural real, mas não isolável em magnitude sem fotografia histórica) | dívida |
+| ~1,2% dos pedidos `paid` sem nenhum registro em `raw.ml_order_payments` (gap de completude na Raw, mais concentrado em Barbours/mai) | dívida |
+| Defasagem entre status do pedido (`paid`) e status do pagamento associado (`refunded`/`charged_back`) existe mas é financeiramente pequena (≤ R$ 1.383,63 por célula) | dívida |
+| Kokeshi/mai (+13,62%) e Rituária/jan (-6,41%) permanecem inconclusivos por análise agregada do Data Mart | dívida (requer rastreio pedido a pedido contra a planilha-fonte, fora do orçamento) |
+| Backfill de março/abril (Barbours/Kokeshi/Lescent) | fora do escopo — dependência externa (engenheiro de dados do time) |
+| Investigação pedido a pedido de Kokeshi/mai e Rituária/jan | fora do escopo deste gate |
+
+### 12.9 Confirmação de zero escrita real
+
+Todas as consultas contra o Data Mart foram somente leitura e agregadas por
+`brand`/mês (`SELECT`/`pg_get_viewdef`, sem `INSERT`/`UPDATE`/`DELETE`).
+Nenhum `order_id`, CPF, nome, e-mail ou endereço foi impresso, persistido ou
+incluído no CSV. Nenhum backfill, paginação, ingestão histórica, pipeline,
+sync, scheduler ou deploy foi executado. Nenhum código de TikTok ou Shopee
+foi tocado.

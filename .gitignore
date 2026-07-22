@@ -54,6 +54,8 @@ pyvenv.cfg
 !docs/reconciliation/torre_gmv_baseline_20260721.csv
 # Gate R2: candidato de validação TikTok/Shopee corrigidos + ML copiado do R1
 !docs/reconciliation/torre_gmv_candidate_r2_jan_maio_2026.csv
+# Gate R3: analise semantica do GMV Mercado Livre (14 celulas validas + 6 parciais x 4 variantes)
+!docs/reconciliation/ml_gmv_semantic_analysis_jan_maio_2026.csv
 
 # Tooling / local agent caches
 .codex/
