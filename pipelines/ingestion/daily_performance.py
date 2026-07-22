@@ -4,11 +4,13 @@ Orquestração principal da ingestão diária de performance.
 Uso:
     python -m pipelines.ingestion.daily_performance --source tiktok --mode incremental
     python -m pipelines.ingestion.daily_performance --source ml --mode backfill --days 90
+    python -m pipelines.ingestion.daily_performance --source tiktok --mode backfill \\
+        --date-from 2026-01-01 --date-to 2026-05-31
 """
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -231,9 +233,57 @@ def _log_quality_checks(
     session.commit()
 
 
-def run(source: str, mode: str, days_back: int = 3) -> None:
+# Gate R4 Task 2 (Projeto R): janela exata (--date-from/--date-to) para
+# publicar somente o intervalo já validado (jan-mai), sem alcançar
+# jun/jul via --days. Só estas 3 fontes têm regra de GMV aprovada/pendente
+# de validação neste projeto; shopee (orders)/shopee-ads não têm janela
+# exata aprovada e continuam só no caminho --days/incremental existente.
+_DATE_WINDOW_ALLOWED_SOURCES = ("tiktok", "shopee-stats", "ml")
+
+
+def _resolve_date_window(
+    source: str, mode: str, date_from: str | None, date_to: str | None
+) -> tuple[date, date] | None:
+    """Valida --date-from/--date-to ANTES de qualquer I/O (sessão de
+    escrita, audit.source_sync_run, consulta à fonte, UPSERT). Levanta
+    ValueError para qualquer combinação inválida. Retorna None quando
+    nenhuma janela foi solicitada — nesse caso o caminho --days/incremental
+    existente fica 100% inalterado.
+    """
+    if date_from is None and date_to is None:
+        return None
+    if date_from is None or date_to is None:
+        raise ValueError("--date-from e --date-to devem ser fornecidos juntos.")
+    if mode != "backfill":
+        raise ValueError("--date-from/--date-to exigem --mode backfill.")
+    if source not in _DATE_WINDOW_ALLOWED_SOURCES:
+        raise ValueError(
+            f"--date-from/--date-to só são suportados para source em "
+            f"{_DATE_WINDOW_ALLOWED_SOURCES}, recebido {source!r}."
+        )
+    parsed_from = date.fromisoformat(date_from)
+    parsed_to = date.fromisoformat(date_to)
+    if parsed_from > parsed_to:
+        raise ValueError(f"--date-from ({parsed_from}) não pode ser posterior a --date-to ({parsed_to}).")
+    if parsed_to > date.today():
+        raise ValueError(f"--date-to ({parsed_to}) não pode estar no futuro (hoje: {date.today()}).")
+    return parsed_from, parsed_to
+
+
+def run(
+    source: str,
+    mode: str,
+    days_back: int = 3,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> None:
+    # Validação da janela exata acontece antes de qualquer outra coisa —
+    # nenhuma sessão de escrita, audit ou fetch é tocado se ela falhar.
+    window = _resolve_date_window(source, mode, date_from, date_to)
+
     if source == "tiktok":
         marketplace_id = 1
+        connector_fetch = tiktok_connector.fetch
         fetch_fn = (
             tiktok_connector.fetch_incremental
             if mode == "incremental"
@@ -242,6 +292,7 @@ def run(source: str, mode: str, days_back: int = 3) -> None:
         transform_fn = tiktok_transform.transform_batch
     elif source == "ml":
         marketplace_id = 2
+        connector_fetch = ml_connector.fetch
         fetch_fn = (
             ml_connector.fetch_incremental
             if mode == "incremental"
@@ -250,6 +301,7 @@ def run(source: str, mode: str, days_back: int = 3) -> None:
         transform_fn = ml_transform.transform_batch
     elif source == "shopee":
         marketplace_id = 3
+        connector_fetch = None
         fetch_fn = (
             shopee_connector.fetch_incremental
             if mode == "incremental"
@@ -258,6 +310,7 @@ def run(source: str, mode: str, days_back: int = 3) -> None:
         transform_fn = shopee_transform.transform_batch
     elif source == "shopee-stats":
         marketplace_id = 3
+        connector_fetch = shopee_connector.fetch_shop_stats
         fetch_fn = (
             shopee_connector.fetch_shop_stats_incremental
             if mode == "incremental"
@@ -266,6 +319,7 @@ def run(source: str, mode: str, days_back: int = 3) -> None:
         transform_fn = shopee_stats_transform.transform_batch
     elif source == "shopee-ads":
         marketplace_id = 3
+        connector_fetch = None
         fetch_fn = (
             shopee_connector.fetch_ads_incremental
             if mode == "incremental"
@@ -275,14 +329,20 @@ def run(source: str, mode: str, days_back: int = 3) -> None:
     else:
         raise ValueError(f"source inválido: {source!r}. Use 'tiktok', 'ml', 'shopee', 'shopee-stats' ou 'shopee-ads'.")
 
-    logger.info("Iniciando sync: source=%s mode=%s", source, mode)
+    if window is not None:
+        logger.info("Iniciando sync: source=%s mode=%s janela=%s..%s", source, mode, window[0], window[1])
+    else:
+        logger.info("Iniciando sync: source=%s mode=%s", source, mode)
 
     with local_session() as session:
         sync_run_id = _start_sync_run(session, f"{source}_daily", marketplace_id)
 
     try:
-        kwargs = {"days_back": days_back} if mode == "backfill" else {}
-        raw_rows = fetch_fn(**kwargs)
+        if window is not None:
+            raw_rows = connector_fetch(window[0], window[1])
+        else:
+            kwargs = {"days_back": days_back} if mode == "backfill" else {}
+            raw_rows = fetch_fn(**kwargs)
         rows_extracted = len(raw_rows)
 
         canonical_rows = transform_fn(raw_rows)
@@ -343,5 +403,15 @@ if __name__ == "__main__":
     parser.add_argument("--mode", required=True, choices=["incremental", "backfill"])
     parser.add_argument("--days", type=int, default=3,
                         help="Quantos dias para trás (modo incremental=3, backfill=90)")
+    parser.add_argument("--date-from", default=None, metavar="YYYY-MM-DD",
+                        help="Data inicial exata (só --mode backfill; source em tiktok/shopee-stats/ml)")
+    parser.add_argument("--date-to", default=None, metavar="YYYY-MM-DD",
+                        help="Data final exata (só --mode backfill; source em tiktok/shopee-stats/ml)")
     args = parser.parse_args()
-    run(source=args.source, mode=args.mode, days_back=args.days)
+    run(
+        source=args.source,
+        mode=args.mode,
+        days_back=args.days,
+        date_from=args.date_from,
+        date_to=args.date_to,
+    )
