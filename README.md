@@ -2,9 +2,9 @@
 
 Sistema interno de acompanhamento de performance comercial, operacional e financeira das lojas GoBeauté nos marketplaces TikTok Shop, Mercado Livre e Shopee.
 
-## Status atual (2026-07-01)
+## Status atual
 
-Dashboard principal e Produtos (ML/TikTok/Shopee) migrados para o Neon. Pipelines de sync existem mas **não estão agendados** — o Neon fica desatualizado (~8-10 dias) até rodarem manualmente. Ver `docs/backlog.md` (Sprint Regularização Neon) e `docs/sections/produtos_audit.md` para o diagnóstico e bugs em aberto (data futura em produtos Shopee; `rituaria` ausente do ML).
+O andamento das frentes, entregas recentes, bloqueios e próximos marcos é mantido em [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md). Esse documento é o ponto de entrada para o status geral; runbooks e análises continuam como fonte dos detalhes técnicos.
 
 ## Lojas monitoradas
 
@@ -57,6 +57,7 @@ uv run --no-project --with openpyxl --with pydantic-settings --with sqlalchemy -
 
 ## DocumentaÃ§Ã£o
 
+- [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) — status geral, roadmap e próximas prioridades
 - [docs/architecture.md](docs/architecture.md) â€” arquitetura e decisÃµes tÃ©cnicas
 - [docs/source_mapping.md](docs/source_mapping.md) â€” mapeamento detalhado das fontes
 - [docs/kpi_dictionary.md](docs/kpi_dictionary.md) â€” dicionÃ¡rio de KPIs

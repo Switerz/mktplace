@@ -547,6 +547,164 @@ Confirmado empiricamente (arg-dumper temporário no lugar do Python real, nenhum
 
 **Não executado neste gate** (por instrução explícita): nenhum `full_daily`/`shopee_manual_refresh` real, nenhum sync/incremental real, Task Scheduler não tocado, sem commit/push.
 
+### Retomada operacional (2026-07-23) — handoff Shopee validado
+
+A pausa aberta em 17/07 foi encerrada. O refresh seguro da Gold Shopee por
+`file_id`/janela foi implementado, o primeiro lote completo de junho passou
+por Raw, Silver e Gold para as cinco marcas, e backup/receipt/reconciliação
+foram validados em execução real. Shopee continua manual por desenho e não
+volta ao `full_daily`.
+
+**Ciclo encerrado em 24/07/2026.** A ativação do scheduler seguiu esta
+ordem, sem nenhum subgate arquitetural novo:
+
+1. **Concluído em 23/07:** Gold regional de junho sincronizada com o Neon;
+   backup preservado e paridade confirmada em 37.282 linhas e
+   R$ 57.739.424,80;
+2. **Concluído em 23/07 (ver Gate C2 abaixo):** rodada manual observada do
+   `full_daily` via `run_task.ps1 -TaskKey full_daily` — sete steps
+   `SUCCESS`, `STATUS GERAL: OK`, `ok_critical=true`, locks liberados,
+   logs preservados, zero steps Shopee;
+3. **Concluído em 23/07:** revisão pré-ativação (instalado × código
+   versionado) sem incompatibilidade real — único ajuste apontado foi a
+   falta de histórico de execução real às 06:00;
+4. **Concluído em 23/07:** task `mktplace_full_daily` habilitada via
+   `schtasks /Change /TN "\mktplace_full_daily" /ENABLE`, por autorização
+   explícita, mantendo horário (06:00), conta e demais parâmetros
+   inalterados;
+5. **Concluído em 24/07 (ver Gate C3 abaixo):** primeira execução agendada
+   real observada às 06:00 — concluiu sozinha, sem intervenção manual,
+   `STATUS GERAL: OK`.
+
+`shopee_manual_refresh` permanece sem task agendada. Qualquer dívida
+cosmética ou melhoria não necessária a esses critérios vai para backlog.
+
+### Gate C2 (2026-07-23) — rodada manual observada de `full_daily`
+
+Execução real única, via `powershell -NoProfile -NonInteractive -File
+scripts\run_task.ps1 -TaskKey full_daily`. Logs preservados em
+`logs/full_daily_20260723_184604_stdout.log` e
+`logs/full_daily_20260723_184604_stderr.log`.
+
+**Resultado dos sete steps:**
+
+| Step | Status |
+|---|---|
+| `daily_ml` | SUCCESS |
+| `daily_tiktok` | SUCCESS |
+| `gold_regional_incremental` | SUCCESS |
+| `sync_region_if_needed` | SUCCESS (`NO_OP` — Data Mart e Neon já em paridade, 37.282 linhas) |
+| `sync_produtos_ml` | SUCCESS |
+| `sync_produtos_tiktok` | SUCCESS |
+| `health_check` | SUCCESS |
+
+`STATUS GERAL: OK`. `health_check` reportou `ok_critical=true` e
+`ok=false` — o `ok=false` vem exclusivamente dos alertas não-críticos e
+manuais já conhecidos de Shopee (`shopee_daily`/`shopee-ads_daily`/
+`shopee_product_monthly` com execução defasada, gap aceito desde os Gates
+B1/B4/C1), nunca reprovando `ok_critical` nem o `STATUS GERAL`. Confirmado
+nos logs: nenhum `[RUN]` relacionado a Shopee em nenhum step — o pipeline
+`full_daily` não contém Shopee desde o Gate C1, e este comportamento se
+confirmou na execução real. Nenhum `FAILED`/`BLOCKED` funcional em nenhum
+step.
+
+**Timeout externo (124) do shell que acompanhava o processo**: a
+ferramenta usada para disparar o comando parou de aguardar após ~14s e
+reportou exit code 124, mas isso foi só o timeout de acompanhamento da
+própria ferramenta — não o exit code do pipeline. O subprocesso Python
+continuou normalmente em segundo plano, terminou sozinho (ver os sete
+`SUCCESS` e `STATUS GERAL: OK` no stdout) e removeu `full_daily.lock`
+como de costume. Não indica falha do pipeline nem exige nova execução.
+
+**Dois avisos não-bloqueantes, classificados como dívida/monitoramento
+(não corrigidos neste gate, por instrução explícita):**
+
+1. `UnicodeEncodeError` (2 ocorrências no stderr): o logger, ao rodar sob
+   o code page padrão do Windows (cp1252), falha ao tentar imprimir o
+   caractere "→" nas mensagens de log de `pipelines/connectors/
+   mercadolivre/connector.py` e `pipelines/connectors/tiktok/
+   connector.py`. Os dois steps (`daily_ml`, `daily_tiktok`) continuaram e
+   terminaram com sucesso — é só a formatação da linha de log que falha,
+   nunca a execução. Dívida de encoding, não corrigida nesta rodada.
+2. Aviso do TikTok (6.463 pedidos com `order_status` nulo ou fora da
+   allowlist conhecida, não incluídos no GMV): comportamento já conhecido
+   e as regras vigentes já foram reconciliadas no Gate R2 — não impediu o
+   pipeline. Classificado como dívida/monitoramento, sem nova investigação
+   nesta rodada.
+
+**Estado do Task Scheduler `mktplace_full_daily`, confirmado nesta rodada
+(não presumido)** — consultado via `schtasks /Query /TN
+"\mktplace_full_daily" /V` e via `Get-ScheduledTask`: **Disabled**,
+nunca disparou de fato (última execução real = nunca), horário 06:00
+diário continua como hipótese não confirmada (mesma ressalva desde a
+Fase 3A).
+
+**Veredito deste gate**: GO apenas para **preparar/revisar** a ativação
+do Scheduler (horário, configuração, estado) — não é autorização para
+habilitar a task. Se o estado da task não pudesse ter sido confirmado
+nesta consulta, isso seria o único bloqueio operacional a resolver antes
+da ativação; como foi confirmado (`Disabled`, via duas ferramentas
+distintas), não há bloqueio novo.
+
+**Não executado neste gate** (por instrução explícita): nenhum novo
+`full_daily`/`health_check`/`shopee_manual_refresh` real, nenhuma correção
+de encoding, nenhuma alteração das regras TikTok, nenhuma conexão manual a
+banco, nenhum backfill/sync separado/restore/deploy, Task Scheduler não
+criado/alterado/habilitado/desabilitado, sem commit/push.
+
+### Gate C3 (2026-07-24) — primeira execução agendada real do `full_daily`
+
+Task `mktplace_full_daily` habilitada em 23/07
+(`schtasks /Change /TN "\mktplace_full_daily" /ENABLE`, horário/conta/demais
+parâmetros mantidos inalterados). Primeira execução real disparada pelo
+próprio Task Scheduler, sem nenhuma intervenção manual: início às
+06:00:01, `LastTaskResult=0`. Logs preservados em
+`logs/full_daily_20260724_060002_stdout.log` e
+`logs/full_daily_20260724_060002_stderr.log`.
+
+**Resultado dos sete steps:**
+
+| Step | Status |
+|---|---|
+| `daily_ml` | SUCCESS |
+| `daily_tiktok` | SUCCESS |
+| `gold_regional_incremental` | SUCCESS (30 linha(s) inserida(s) — marketplace `ml`) |
+| `sync_region_if_needed` | SUCCESS (sync real desta vez, não `NO_OP`: 37.282 → 37.851 linhas, backup `marts.fact_marketplace_region_daily_backup_20260724_060206`) |
+| `sync_produtos_ml` | SUCCESS |
+| `sync_produtos_tiktok` | SUCCESS |
+| `health_check` | SUCCESS |
+
+`STATUS GERAL: OK`. `ok_critical=true`; `ok=false` só pelos mesmos alertas
+não-críticos e manuais de Shopee já aceitos (execução defasada de
+`shopee_daily`/`shopee-ads_daily`/`shopee_product_monthly`). Confirmado:
+nenhum `[RUN]` Shopee em toda a execução, nenhum `FAILED`/`BLOCKED`.
+`sync_region_if_needed` executou um sync real (em vez de `NO_OP`, como no
+Gate C2) porque o `gold_regional_incremental` desta execução alterou o
+estado de `gold.marketplace_region_daily` o suficiente para gerar
+divergência real com o Neon — comportamento esperado e aceito
+explicitamente pela autorização desta rodada (`NO_OP` ou sync real são
+igualmente válidos, desde que o step termine `SUCCESS`); a mecânica exata
+da carga incremental não foi investigada nesta observação, por estar fora
+do escopo (somente leitura/monitoramento).
+
+Dois avisos não-bloqueantes, mesma classificação do Gate C2 (dívida/
+monitoramento, não corrigidos): `UnicodeEncodeError` do logger (cp1252
+vs. "→", 2 ocorrências, mesmas duas linhas de `daily_ml`/`daily_tiktok`) e
+o aviso do TikTok sobre pedidos com `order_status` nulo/fora da allowlist
+(8.211 desta vez — comportamento já conhecido e reconciliado no Gate R2).
+
+Lock `full_daily.lock` confirmado ausente após a execução (liberado
+normalmente). Task Scheduler segue **Habilitado** (`Enabled=true`,
+`Estado de tarefa agendada: Habilitado`), próxima execução agendada para
+25/07/2026 06:00. Nenhuma alteração de código, task, horário, credenciais,
+`.env` ou health check separado nesta rodada — só observação e leitura.
+
+**Veredito**: GO — a automação diária de ML/TikTok/regional está validada
+ponta a ponta, incluindo o disparo real pelo Task Scheduler sem qualquer
+intervenção manual. Recomenda-se observar mais algumas execuções diárias
+antes de considerar o horário 06:00 definitivamente estável (só uma
+ocorrência real até aqui).
+
 ### Testes desta fase
 
 - `pipelines/tests/test_ops_preflight.py` (64 testes, +17 no Gate B2, +5 no Gate B6.1b) — checks individuais, `LOCAL_PG_URL` sem fallback e com allowlist de host (bloqueia sem tentar conectar), sessão read-only, checks de arquivo Shopee **separados por padrão real** (orders/stats/ads) contra a lista oficial de marcas do conector, bloqueio da fonte inteira quando uma marca oficial falta, `SHOPEE_DATA_PATH` nunca aparece na mensagem, guardas estruturais, **`check_gold_regional_write`** (bloqueia sem secret/guardrails/preflight de escrita, passa com fakes, nunca expõe secret/URL, nunca abre conexão de escrita neste módulo), **`check_sync_region_consent`** (bloqueia sem `I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY=1` ou com valor≠`1`, passa com `1`), `SOURCE_CHECKS`/`run_preflight` das duas novas fontes (`gold_regional_incremental`, `sync_region_daily`); **Gate B6.1b**: `check_sync_region_consent` também passa com consentimento persistente via arquivo (`.env.region-sync.local`), bloqueia com arquivo ausente/inválido, variável de ambiente tem prioridade sobre o arquivo, nunca expõe o conteúdo do arquivo (só o nome).
@@ -582,4 +740,6 @@ Confirmado empiricamente (arg-dumper temporário no lugar do Python real, nenhum
 | 2026-07-15 | Gate B6.1b (fecha o achado do Gate B6.1): novo módulo `pipelines/ops/region_sync_consent.py` — consentimento persistente e gitignored via `.env.region-sync.local` (mesmo padrão de `.env.gold-write.local`), consultado por `check_sync_region_consent()` e por `sync_region_if_needed.py::main()` quando a variável de ambiente ainda não está definida no processo. Nunca cria o arquivo automaticamente, nunca imprime seu conteúdo, nunca persiste em `.env`. O gate original de `sync_region_daily.run_sync()` não foi alterado. `sync_region_if_needed` continua `critical=True` (decisão preservada, não rebaixada). Scheduler segue **Disabled** até o Gate B6.2 — que deve confirmar a criação real do arquivo pelo operador antes de habilitar a task. Nenhuma execução real de pipeline/DB/scheduler neste gate. |
 | 2026-07-16 | Gate B6.1c (operador cria `.env.region-sync.local` de verdade; primeira execução real da cadeia `run_task.ps1 → run_with_lock.ps1`): **achado crítico** — `full_daily` falhava com `orchestrate.py: error: the following arguments are required: --pipeline`, sem rodar nenhum step. Causa raiz: `--pipeline` colide com o CommonParameter `-PipelineVariable` do PowerShell (`run_with_lock.ps1` é um "advanced script" por usar atributos `[Parameter(...)]`) e é silenciosamente consumido junto com `full_daily` quando os argumentos atravessam um `-File` aninhado. Se ativada hoje, a task falharia assim todo dia. Corrigido no Gate B6.1d. |
 | 2026-07-16 | Gate B6.1d (fecha o achado do Gate B6.1c): `scripts/run_task.ps1` ganha `Invoke-ResolvedTask` — dot-source em processo de `run_with_lock.ps1` (nunca mais um `-File` aninhado), comando real passado como array já construído ligado a `-Cmd` numa única expressão PowerShell, eliminando a colisão com CommonParameters. `run_with_lock.ps1` não foi alterado (uso direto via CLI para outras `TaskKey`s continua idêntico). Confirmado com arg-dumper temporário: `--pipeline full_daily` sobrevive, `-WorkingDirectory`/lock/timeout continuam corretos. Limitação separada e pré-existente documentada (path com espaço dentro de um argumento do comando, via `Start-Process -ArgumentList`) — não afeta o `full_daily` real, não corrigida neste gate. Corrigidos incidentalmente 4 testes de `test_ops_preflight.py` que assumiam `.env.region-sync.local` nunca existir de verdade. Scheduler segue **Disabled**; próximo passo é repetir o Gate B6.1c para confirmar a correção ponta a ponta. Nenhuma execução real de `full_daily`/banco/scheduler/commit/deploy neste gate. |
+| 2026-07-23 | Gate C2 (rodada manual observada de `full_daily` via `run_task.ps1`, pós-sync regional): sete steps `SUCCESS` (`daily_ml`, `daily_tiktok`, `gold_regional_incremental`, `sync_region_if_needed` `NO_OP`/paridade 37.282 linhas, `sync_produtos_ml`, `sync_produtos_tiktok`, `health_check`), `STATUS GERAL: OK`, `ok_critical=true` (`ok=false` só pelos alertas Shopee não-críticos já conhecidos), zero steps Shopee, lock liberado, logs preservados. Timeout externo (124) da ferramenta de acompanhamento não é o exit code do pipeline — o subprocesso terminou sozinho e liberou o lock normalmente. Dois avisos não-bloqueantes registrados como dívida: `UnicodeEncodeError` do logger (cp1252 vs. "→") em `daily_ml`/`daily_tiktok`, e o aviso já conhecido do TikTok sobre pedidos com `order_status` nulo/fora da allowlist (regras já reconciliadas no Gate R2). Task Scheduler `mktplace_full_daily` reconfirmado **Disabled** nesta rodada via `schtasks`/`Get-ScheduledTask` (não presumido); horário 06:00 segue como hipótese não confirmada. GO apenas para revisar/preparar a ativação do Scheduler — não autoriza habilitar a task. Nenhuma execução real de `full_daily`/`health_check`/`shopee_manual_refresh`, correção de código, alteração do Scheduler ou commit/push neste gate. |
+| 2026-07-24 | Gate C3 (primeira execução agendada real do `full_daily`, task habilitada no Gate anterior): disparo automático pelo Task Scheduler às 06:00:01, `LastTaskResult=0`, sem nenhuma intervenção manual. Sete steps `SUCCESS` (`daily_ml`, `daily_tiktok`, `gold_regional_incremental`, `sync_region_if_needed` — desta vez com sync real 37.282→37.851 linhas e backup, não `NO_OP` como no Gate C2 —, `sync_produtos_ml`, `sync_produtos_tiktok`, `health_check`), `STATUS GERAL: OK`, `ok_critical=true`, zero steps Shopee, lock liberado, logs preservados. Mesmos dois avisos não-bloqueantes do Gate C2 (`UnicodeEncodeError` do logger, aviso TikTok de status nulo/fora da allowlist), sem nova investigação. Task Scheduler segue **Habilitado**, próxima execução 25/07 06:00. Ciclo de fechamento operacional e automação **encerrado** com este gate. Nenhuma alteração de código/task/horário/credenciais/`.env` nesta rodada — só observação read-only. |
 | 2026-07-16 | Gate C1 (retry do Gate B6.1c revela achado operacional, não bug): execução real de `full_daily` (~18min) falhou por `daily_shopee_orders` estourar seu timeout de 900s num arquivo Shopee grande — causa raiz era rodar ingestão **manual** (Shopee só muda com upload de export novo) todo dia dentro de um pipeline de cadência **automática diária**, não um timeout pequeno demais. `orchestrate.py::PIPELINES` separado em dois pipelines independentes: `full_daily` (ml/tiktok/regional/produtos ml-tiktok/health_check, orçamento 7200s→3600s) e `shopee_manual_refresh` (novo, manual, nunca agendado: Shopee orders/stats/ads críticos + produtos Shopee + Bug 8 + health_check, orçamento 3780s). `health_check.py::EXPECTED_SOURCES` — `shopee_daily`/`shopee-stats_daily`/`shopee-ads_daily` (execução) marcados `critical=False`, mesmo padrão do Gate B4 para `shopee_product_monthly`, evitando que `ok_critical` reprove só por Shopee ter saído da cadência diária. `run_task.ps1` ganha `TaskKey "shopee_manual_refresh"` reaproveitando o mesmo `Invoke-ResolvedTask`/lock/timeout/log, com lock separado. `schedule_plan.py` só atualiza comentários de orçamento (7200s→3600s); `EXTERNAL_LOCK_TIMEOUT_SECONDS`/`TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS` (9000s/9600s) e a lógica de criação/ativação **não foram alterados**; `PROPOSED_SCHEDULE` continua com 1 única tarefa (`full_daily`), nenhuma tarefa Shopee é proposta. Scheduler segue **Disabled** até o Gate C3 (depois do Gate C2 — rodar `full_daily` sem Shopee via `run_task.ps1`, observado estável). 1.427→1.451 testes pytest (+24) e 13→19 testes Pester em `run_task.tests.ps1` (+6), todos passando. Nenhuma execução real de `full_daily`/`shopee_manual_refresh`/banco/scheduler/commit/deploy neste gate. |
