@@ -17,7 +17,6 @@ import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import PeriodSelector from "@/components/PeriodSelector";
-import AppNav from "@/components/AppNav";
 import { fmtBrl, fmtNumber, calcMoM } from "@/lib/formatters";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
@@ -218,36 +217,23 @@ function BrandPageInner() {
   const d = brandDetail;
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link
-              href={withQuery("/")}
-              className="text-slate-400 hover:text-violet-600 transition-colors text-sm font-medium flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-            >
-              &larr; Dashboard
-            </Link>
-            <span className="text-slate-200 select-none">|</span>
-            <span className={`w-9 h-9 rounded-xl ${meta.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
-              {meta.initials}
-            </span>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-none">{meta.label}</h1>
-              <p className="text-xs text-slate-400">Drill-down por marca</p>
-            </div>
+    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-8">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <span className={`w-9 h-9 rounded-xl ${meta.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
+            {meta.initials}
+          </span>
+          <div>
+            <h2 className="text-lg font-bold text-gray-900 leading-none">{meta.label}</h2>
+            <p className="text-xs text-slate-400">Drill-down por marca</p>
           </div>
-          {!isLive && (
-            <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
-              Demonstracao
-            </span>
-          )}
         </div>
-      </header>
-
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-8">
+        {!isLive && (
+          <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
+            Demonstração
+          </span>
+        )}
+      </div>
 
         {/* Navegacao entre marcas */}
         <nav aria-label="Selecionar marca" className="flex flex-wrap gap-2">
@@ -727,8 +713,7 @@ function BrandPageInner() {
           </div>
         </section>
 
-      </main>
-    </div>
+      </div>
   );
 }
 

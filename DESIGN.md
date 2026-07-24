@@ -246,7 +246,7 @@ The visual language for meta vs. real.
 - **Do** cap the uppercase label treatment to table column headers and status badges. Section card titles use Title weight (600, 14px, mixed case) — not the UPPERCASE LABEL style.
 
 ### Don't:
-- **Don't** use a charcoal or dark sidebar as primary navigation. This is the Metabase default aesthetic — the exact reference the product brief names as forbidden. Navigation lives in the page header; it is minimal and violet-accented.
+- **Don't** use a charcoal or dark sidebar as primary navigation. This is the Metabase default aesthetic — the exact reference the product brief names as forbidden. Navigation lives in a persistent light/lavender sidebar on desktop (white surface, violet-tinted border, violet accent on the active item — never charcoal/dark) with a matching mobile drawer; the topbar remains as a contextual header (brand identity, current route) above the content, not the primary navigation surface. Depth-on-demand and preserved filters remain the guiding principles either way.
 - **Don't** lay out data as a "data dump": oversized chart blocks with no hierarchy, crowded side-by-side tables without whitespace. This is the Looker anti-pattern named in the brief. Summary first, depth on demand.
 - **Don't** use Retool's dense-gray form-builder look: gray backgrounds on interactive elements, no rounded corners, no brand color presence. Every interactive element in this system has a violet or brand-color identity.
 - **Don't** use beige, sand, or warm-tinted backgrounds. The body is a cool lavender (#f8f7ff), not a warm neutral. Warm backgrounds are the corporate Excel anti-pattern.

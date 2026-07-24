@@ -7,7 +7,7 @@ import {
   type ProdutosMLResponse, type ProdutosTikTokResponse, type ProdutosShopeeListResponse,
   type ProdutosMLSummary, type ProdutosChannelSummary,
 } from "@/lib/api-client";
-import AppNav from "@/components/AppNav";
+import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PeriodSelector from "@/components/PeriodSelector";
 import ProductMarketplaceTabs from "@/components/ProductMarketplaceTabs";
 import ProductFilterBar, { ProductSelect } from "@/components/ProductFilterBar";
@@ -295,28 +295,12 @@ export default function ProdutosPage() {
   const periodLabel = monthOptions.find((m) => m.value === period)?.label ?? period;
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center">
-              <span className="text-white font-bold text-xs tracking-tight">TC</span>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-none">Torre de Controle</h1>
-              <p className="text-xs text-slate-500">Gobeaute · Marketplaces</p>
-            </div>
-          </div>
-          <span className={`text-xs rounded-lg px-3 py-1.5 font-medium ${isLive ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-amber-700 bg-amber-50 border border-amber-200"}`}>
-            {isLive ? "Dados ao vivo · API conectada" : "Demonstração · API offline"}
-          </span>
-        </div>
-      </header>
+    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
+      <div className="flex justify-end">
+        <LiveStatusBadge live={isLive} />
+      </div>
 
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        <ProductMarketplaceTabs tabs={TABS} active={tab} onChange={handleTabChange} />
+      <ProductMarketplaceTabs tabs={TABS} active={tab} onChange={handleTabChange} />
 
         {/* ML view */}
         {tab === "ml" && (
@@ -433,7 +417,6 @@ export default function ProdutosPage() {
             />
           </div>
         )}
-      </main>
-    </div>
+      </div>
   );
 }

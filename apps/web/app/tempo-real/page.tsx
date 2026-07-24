@@ -1,11 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { fetchTempoReal } from "@/lib/api-client";
 import type { TempoRealData, TempoRealBrand } from "@/lib/api-client";
 import HourlyChart from "@/components/HourlyChart";
-import AppNav from "@/components/AppNav";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 
@@ -204,46 +202,31 @@ export default function TempoRealPage() {
     : selectedData?.ultima_hora;
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link
-              href="/"
-              className="text-slate-400 hover:text-violet-600 transition-colors text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-            >
-              &larr; Dashboard
-            </Link>
-            <span className="text-slate-200 select-none">|</span>
-            <div>
-              <h1 className="text-base font-bold text-gray-900 leading-none">Tempo Real — TikTok Shop</h1>
-              <p className="text-xs text-slate-400 mt-0.5">{dateLabel} · {hourLabel}</p>
-            </div>
-          </div>
-          {!loading && data && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => doFetch(true)}
-                disabled={refreshing}
-                className="text-xs font-medium text-slate-500 border border-slate-200 rounded-full px-3 py-1 hover:bg-slate-50 transition-colors disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-                title="Atualizar agora"
-              >
-                {refreshing ? "Atualizando..." : `↻ ${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, "0")}`}
-              </button>
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
-                <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${refreshing ? "" : "animate-pulse"}`} />
-                {lastUpdated
-                  ? `Atualizado ${lastUpdated.getHours().toString().padStart(2,"0")}:${lastUpdated.getMinutes().toString().padStart(2,"0")}`
-                  : "Ao vivo"}
-              </span>
-            </div>
-          )}
+    <div className="max-w-7xl mx-auto px-6 py-8 space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-base font-bold text-gray-900 leading-none">Tempo Real — TikTok Shop</h2>
+          <p className="text-xs text-slate-400 mt-0.5">{dateLabel} · {hourLabel}</p>
         </div>
-      </header>
-
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 space-y-5">
+        {!loading && data && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => doFetch(true)}
+              disabled={refreshing}
+              className="text-xs font-medium text-slate-500 border border-slate-200 rounded-full px-3 py-1 hover:bg-slate-50 transition-colors disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              title="Atualizar agora"
+            >
+              {refreshing ? "Atualizando..." : `↻ ${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, "0")}`}
+            </button>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+              <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${refreshing ? "" : "animate-pulse"}`} />
+              {lastUpdated
+                ? `Atualizado ${lastUpdated.getHours().toString().padStart(2,"0")}:${lastUpdated.getMinutes().toString().padStart(2,"0")}`
+                : "Ao vivo"}
+            </span>
+          </div>
+        )}
+      </div>
 
         {loading && (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
@@ -477,7 +460,6 @@ export default function TempoRealPage() {
             </p>
           </>
         )}
-      </main>
-    </div>
+      </div>
   );
 }

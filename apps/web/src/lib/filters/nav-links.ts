@@ -19,3 +19,30 @@ export function isFilterAwarePath(pathname: string): boolean {
 export function appendQuery(href: string, query: string): string {
   return query ? `${href}?${query}` : href;
 }
+
+/** Chaves de filtro global preservadas ao navegar entre paginas filter-aware
+ * (canal, marca, periodo, comparacao) — mesma lista que o AppNav usava
+ * inline, extraida para ser compartilhada pela Sidebar e pelo MobileDrawer. */
+export const FILTER_QUERY_KEYS = ["channels", "brands", "date_from", "date_to", "compare"];
+
+/** Monta a querystring de filtros a preservar ao navegar a partir de
+ * `pathname`, usando um leitor de parametro generico (`searchParams.get` do
+ * Next, ou um dublê simples em teste) — nao depende de nenhum tipo do
+ * Next.js para permanecer testavel com node:test. */
+export function buildPreservedQuery(pathname: string, getParam: (key: string) => string | null): string {
+  if (!isFilterAwarePath(pathname)) return "";
+  const qs = new URLSearchParams();
+  for (const key of FILTER_QUERY_KEYS) {
+    const v = getParam(key);
+    if (v) qs.set(key, v);
+  }
+  return qs.toString();
+}
+
+/** Resolve o href final de um item de navegacao, anexando a querystring
+ * preservada apenas quando a pagina de destino participa do contrato de
+ * filtros globais. */
+export function hrefForPage(pageHref: string, preservedQuery: string): string {
+  if (!FILTER_AWARE_PAGES.has(pageHref)) return pageHref;
+  return appendQuery(pageHref, preservedQuery);
+}

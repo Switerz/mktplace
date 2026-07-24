@@ -10,7 +10,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import AppNav from "@/components/AppNav";
+import LiveStatusBadge from "@/components/LiveStatusBadge";
 import {
   fetchOperacoes,
   type OperacoesData,
@@ -244,36 +244,12 @@ export default function OperacoesPage() {
   const atencoes = alertas.filter((a) => a.severidade === "atencao");
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center">
-              <span className="text-white font-bold text-xs tracking-tight">TC</span>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-none">Torre de Controle</h1>
-              <p className="text-xs text-slate-500">Gobeaute · Marketplaces</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {isLive ? (
-              <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 font-medium">
-                Dados ao vivo · API conectada
-              </span>
-            ) : (
-              <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
-                Demonstracao · API offline
-              </span>
-            )}
-          </div>
-        </div>
-      </header>
+    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
+      <div className="flex justify-end">
+        <LiveStatusBadge live={isLive} />
+      </div>
 
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        {error && (
+      {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
             <div>
               <p className="text-xs font-semibold text-rose-700 uppercase tracking-wider mb-1">
@@ -799,7 +775,6 @@ export default function OperacoesPage() {
             )}
           </div>
         </div>
-      </main>
-    </div>
+      </div>
   );
 }

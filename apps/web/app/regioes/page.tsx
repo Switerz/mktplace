@@ -10,7 +10,6 @@ import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
-import AppNav from "@/components/AppNav";
 import RegioesBrazilMap from "@/components/RegioesBrazilMap";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
@@ -123,25 +122,8 @@ function RegioesPageInner() {
   const brandSort = useSortableTable(byBrand, brandGetValue, brandColumnTypes);
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center">
-              <span className="text-white font-bold text-xs tracking-tight">TC</span>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-none">Torre de Controle</h1>
-              <p className="text-xs text-slate-400">Gobeauté · Marketplaces</p>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        <div className="flex items-start justify-between flex-wrap gap-3">
+    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
+      <div className="flex items-start justify-between flex-wrap gap-3">
           <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
             <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
@@ -400,8 +382,7 @@ function RegioesPageInner() {
             </div>
           </>
         )}
-      </main>
-    </div>
+      </div>
   );
 }
 

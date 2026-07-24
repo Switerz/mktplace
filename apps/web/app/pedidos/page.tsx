@@ -16,7 +16,7 @@ import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
-import AppNav from "@/components/AppNav";
+import LiveStatusBadge from "@/components/LiveStatusBadge";
 import { fmtBrl } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import { useSortableTable } from "@/lib/use-sortable-table";
@@ -224,36 +224,12 @@ function PedidosPageInner() {
   }));
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff]">
-      <header className="bg-white border-b border-violet-100 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center">
-              <span className="text-white font-bold text-xs tracking-tight">TC</span>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-none">Torre de Controle</h1>
-              <p className="text-xs text-slate-500">Gobeaute · Marketplaces</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {isLive ? (
-              <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 font-medium">
-                Dados ao vivo · API conectada
-              </span>
-            ) : (
-              <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
-                Sem dados · API offline
-              </span>
-            )}
-          </div>
-        </div>
-      </header>
+    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
+      <div className="flex justify-end">
+        <LiveStatusBadge live={isLive} offlineLabel="Sem dados · API offline" />
+      </div>
 
-      <AppNav />
-
-      <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-        {/* Controls */}
+      {/* Controls */}
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-800 leading-none">Pedidos</h2>
@@ -417,8 +393,7 @@ function PedidosPageInner() {
             <p className="text-sm text-slate-500">API offline — conecte o banco de dados para visualizar pedidos.</p>
           </div>
         )}
-      </main>
-    </div>
+      </div>
   );
 }
 

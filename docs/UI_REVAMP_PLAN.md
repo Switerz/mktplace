@@ -15,6 +15,8 @@
 8. Não inventar rotas, métricas ou dados.
 9. Não copiar regras de negócio B2B sem equivalente real na Torre.
 
+**Status do Gate U1 — Fundação visual e novo shell:** **CONCLUÍDO/APROVADO** (24/07/2026). Sidebar clara/lavanda persistente no desktop, drawer mobile e topbar compartilhados foram implementados em um shell único (`apps/web/src/components/shell/`), substituindo o antigo `AppNav` renderizado por página. Filtros globais, contratos de API e regras de negócio não foram alterados. Os dois findings de revisão em runtime (container ausente em Financeiro/Qualidade; foco escapando do drawer) foram corrigidos e validados. Detalhes completos no relatório do Gate U1 (fora deste documento — ver histórico da conversa/commit). Este documento não foi reescrito para refletir o U1; apenas este marcador de status foi adicionado. **Próximo gate: U2 — Gerencial completa e padrão de drill-down.**
+
 ---
 
 ## 1. Objetivo do revamp
