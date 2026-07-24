@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { generateDailyData, type DailyRow, AVAILABLE_MONTHS } from "@/lib/mock-daily";
@@ -8,18 +8,20 @@ import { fetchBrandDetail, type BrandDetail } from "@/lib/api-client";
 import { isMarketplaceSelected, serializeMarketplaceSelection } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { previousEquivalentRange } from "@/lib/filters/presets";
-import { appendQuery } from "@/lib/filters/nav-links";
+import { mergeFilteredHref } from "@/lib/filters/nav-links";
 import { fmtPeriodo } from "@/lib/filters/format";
-import { summarize } from "@/lib/brand-daily-summary";
+import { summarize, isOrdersReliable, projectDailyRowsBySelection } from "@/lib/brand-daily-summary";
 import DailyChart from "@/components/DailyChart";
 import ChannelMixChart from "@/components/ChannelMixChart";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import PeriodSelector from "@/components/PeriodSelector";
+import { SkeletonKpiCard } from "@/components/Skeleton";
 import { fmtBrl, fmtNumber, calcMoM } from "@/lib/formatters";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
 import type { BrandDetailChannelRow } from "@/lib/api-client";
 
 const BRAND_META: Record<string, { label: string; color: string; initials: string }> = {
@@ -37,6 +39,17 @@ const BRAND_PILLS = [
   { slug: "lescent",  label: "LESCENT"  },
   { slug: "rituaria", label: "RITUARIA" },
 ];
+
+/** Identidade estavel da requisicao diaria atual (Tendencia + Ultimos 7
+ * Dias) — mesmo padrao "Finding 2" da Gerencial/Canais (Gate U2/U3):
+ * enquanto a chave resolvida nao bate com a atual (inclusive ao trocar de
+ * marca pelos pills), os dados diarios em estado sao tratados como
+ * potencialmente da marca/filtro anterior e nao sao exibidos. */
+function buildDailyRequestKey(
+  brand: string, channels: readonly string[], dateFrom: string, dateTo: string, compare: boolean,
+): string {
+  return `${brand}|${channels.join(",")}|${dateFrom}|${dateTo}|${compare}`;
+}
 
 function fmtBig(v: number): string {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
@@ -86,15 +99,19 @@ function BrandPageInner() {
   const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior", defaultCompare: true });
   const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const searchParams = useSearchParams();
-  // Preserva canal/marca/periodo ao voltar ao Gerencial ou trocar de marca
-  // pelos pills — "/brand/[brand]" e uma rota compativel com o contrato de
-  // filtros globais, tratada aqui pela querystring atual (nunca hardcoded).
-  const currentQuery = searchParams.toString();
-  const withQuery = (href: string) => appendQuery(href, currentQuery);
+  // Combina os filtros globais atuais com o href de destino (mesmo padrao de
+  // mergeFilteredHref usado em Canais/Gerencial) — a marca do destino sempre
+  // sobrescreve `brands=` atual, para nunca navegar para uma marca com a
+  // querystring apontando para a marca anterior (Gate U3, Task 6).
+  const buildHref = (href: string) => mergeFilteredHref(href, searchParams);
+  const backToCanais = mergeFilteredHref("/canais", searchParams);
+
   const [period, setPeriod] = useState<string>(AVAILABLE_MONTHS[0].value);
   const [daily, setDaily] = useState<DailyRow[]>([]);
   const [prevDaily, setPrevDaily] = useState<DailyRow[]>([]);
   const [isLive, setIsLive] = useState(false);
+  const [dailyLoading, setDailyLoading] = useState(true);
+  const [resolvedDailyKey, setResolvedDailyKey] = useState<string | null>(null);
   const [brandDetail, setBrandDetail] = useState<BrandDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
   const [mounted, setMounted] = useState(false);
@@ -104,9 +121,18 @@ function BrandPageInner() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  const dailyRequestKey = useMemo(
+    () => buildDailyRequestKey(brand, filter, filters.dateFrom, filters.dateTo, filters.compare),
+    [brand, filter, filters.dateFrom, filters.dateTo, filters.compare],
+  );
+
   useEffect(() => {
-    // Ignora a resposta se marca/canal/periodo mudarem antes dela chegar.
+    // Ignora a resposta se marca/canal/periodo mudarem antes dela chegar —
+    // inclusive troca de marca pelos pills, que reusa este mesmo componente
+    // (o React Nao remonta so porque o parametro de rota mudou).
     let ignore = false;
+    setDailyLoading(true);
+    const key = buildDailyRequestKey(brand, filter, filters.dateFrom, filters.dateTo, filters.compare);
     const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
     const marketplace = serializeMarketplaceSelection(filter);
 
@@ -142,10 +168,18 @@ function BrandPageInner() {
       } else {
         setPrevDaily([]);
       }
+      if (ignore) return;
+      setResolvedDailyKey(key);
+      setDailyLoading(false);
     }
     load();
     return () => { ignore = true; };
   }, [brand, filter, filters.dateFrom, filters.dateTo, filters.compare]);
+
+  // Dados diarios so sao considerados frescos quando a chave resolvida bate
+  // com a chave atual — fecha o frame de render em que marca/filtro ja
+  // mudaram mas o efeito ainda nao rodou (ex: troca de marca pelos pills).
+  const dailyIsFresh = !dailyLoading && resolvedDailyKey === dailyRequestKey;
 
   useEffect(() => {
     // Deep-dive mensal TikTok tem competencia PROPRIA (mes calendario via
@@ -189,58 +223,73 @@ function BrandPageInner() {
   }
 
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
-  const cur = summarize(daily, filter);
-  const prev = summarize(prevDaily, filter);
+  // Pedidos/Ticket Medio do fallback mock nao sao separados por canal (ver
+  // isOrdersReliable) — em modo demonstracao com selecao parcial de canal,
+  // ficam N/D em vez de reaproveitar o total combinado dos 3 canais.
+  const ordersReliable = isOrdersReliable(isLive, filter);
+  const cur = summarize(daily, filter, ordersReliable);
+  const prev = summarize(prevDaily, filter, ordersReliable);
   const gmvMoM = filters.compare && prev.gmv > 0 ? calcMoM(cur.gmv, prev.gmv) : null;
 
   const showTk = isMarketplaceSelected(filter, "tiktok");
   const showMl = isMarketplaceSelected(filter, "ml");
   const showSh = isMarketplaceSelected(filter, "shopee");
-  const singleChannel = filter.length === 1;
   const hasTiktok = showTk && daily.some((r) => r.tiktok_gmv != null);
   const hasMl = showMl && daily.some((r) => r.ml_gmv != null);
   const hasShopee = showSh && daily.some((r) => r.shopee_gmv != null);
   const showTikTokDetail = showTk;
 
-  // Zera explicitamente os canais nao selecionados quando apenas um canal
-  // esta ativo — necessario para o fallback mock (que sempre gera os 3
-  // canais juntos, independente do filtro atual).
-  const chartData = singleChannel && showTk
-    ? daily.map((r) => ({ ...r, ml_gmv: null, shopee_gmv: null, total_gmv: r.tiktok_gmv ?? 0 }))
-    : singleChannel && showMl
-    ? daily.map((r) => ({ ...r, tiktok_gmv: null, shopee_gmv: null, total_gmv: r.ml_gmv ?? 0 }))
-    : singleChannel && showSh
-    ? daily.map((r) => ({ ...r, tiktok_gmv: null, ml_gmv: null, total_gmv: r.shopee_gmv ?? 0 }))
-    : daily;
-
-  const last7 = [...daily].reverse().slice(0, 7);
+  // Projeta os canais nao selecionados para null e recalcula total_gmv pela
+  // soma dos canais selecionados (Gate U3, Finding 2) — necessario para o
+  // fallback mock (que sempre gera os 3 canais juntos, independente do
+  // filtro atual); em modo ao vivo e um no-op (API ja filtra por
+  // marketplace). Grafico e tabela "Ultimos 7 Dias" usam a MESMA colecao
+  // projetada, para nunca divergir entre si.
+  const projectedDaily = projectDailyRowsBySelection(daily, filter);
+  const last7 = [...projectedDaily].reverse().slice(0, 7);
   const d = brandDetail;
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-8">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <span className={`w-9 h-9 rounded-xl ${meta.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
-            {meta.initials}
-          </span>
-          <div>
-            <h2 className="text-lg font-bold text-gray-900 leading-none">{meta.label}</h2>
-            <p className="text-xs text-slate-400">Drill-down por marca</p>
+      <div className="flex flex-col gap-2">
+        <Link
+          href={backToCanais}
+          className="text-xs font-semibold text-violet-600 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded w-fit"
+        >
+          ← Voltar para Canais
+        </Link>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <span className={`w-9 h-9 rounded-xl ${meta.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
+              {meta.initials}
+            </span>
+            <div>
+              <h2 className="text-lg font-bold text-gray-900 leading-none">{meta.label}</h2>
+              <p className="text-xs text-slate-400">Visão da marca</p>
+            </div>
           </div>
+          {dailyIsFresh ? (
+            !isLive && (
+              <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
+                Demonstração
+              </span>
+            )
+          ) : (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          )}
         </div>
-        {!isLive && (
-          <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
-            Demonstração
-          </span>
-        )}
       </div>
 
-        {/* Navegacao entre marcas */}
+        {/* Navegacao entre marcas — path e brands= sempre apontam para a
+            mesma marca de destino (mergeFilteredHref sobrescreve brands=
+            explicitamente, nunca herda a marca anterior). */}
         <nav aria-label="Selecionar marca" className="flex flex-wrap gap-2">
           {BRAND_PILLS.map((b) => (
             <Link
               key={b.slug}
-              href={withQuery(`/brand/${b.slug}`)}
+              href={buildHref(`/brand/${b.slug}?brands=${b.slug}`)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
                 b.slug === brand
                   ? "bg-violet-600 text-white shadow-sm"
@@ -265,35 +314,50 @@ function BrandPageInner() {
         </div>
 
         {/* Tendencia — periodo selecionado */}
-        <section aria-label={`Tendencia — ${periodLabel}`}>
-          <SectionTitle>Tendencia — {periodLabel}</SectionTitle>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <KpiCard label="GMV" value={fmtBrl(cur.gmv)} mom={gmvMoM} accent={meta.color} />
-            <KpiCard label="Pedidos" value={fmtNumber(cur.orders)} accent="bg-cyan-500" />
-            <KpiCard label="Ticket Medio" value={fmtBrl(cur.avgTicket)} accent="bg-amber-500" />
-            {cur.adSpend != null && cur.adSpend > 0 ? (
-              <KpiCard
-                label="Ad Spend"
-                value={fmtBrl(cur.adSpend)}
-                subvalue={`ROAS ~${(cur.gmv / cur.adSpend).toFixed(1)}x`}
-                accent="bg-emerald-500"
-              />
-            ) : (
-              <KpiCard label="Ad Spend" value="—" subvalue="N/D para TikTok Shop" accent="bg-slate-300" />
-            )}
-          </div>
-          <DailyChart data={chartData} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
+        <section aria-label={`Tendencia — ${periodLabel}`} aria-busy={!dailyIsFresh}>
+          <SectionTitle>Período selecionado — {periodLabel}</SectionTitle>
+          {!dailyIsFresh ? (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard />
+            </div>
+          ) : (
+            <>
+              {!ordersReliable && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 mb-4">
+                  <p className="text-xs text-amber-800">
+                    Modo demonstração com seleção parcial de canal — os dados de exemplo não separam pedidos por canal; Pedidos e Ticket Médio ficam indisponíveis para esta seleção. GMV continua filtrável normalmente.
+                  </p>
+                </div>
+              )}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <KpiCard label="GMV" value={fmtBrl(cur.gmv)} mom={gmvMoM} accent={meta.color} />
+                <KpiCard label="Pedidos" value={cur.orders != null ? fmtNumber(cur.orders) : "N/D"} accent="bg-cyan-500" />
+                <KpiCard label="Ticket Medio" value={cur.avgTicket != null ? fmtBrl(cur.avgTicket) : "N/D"} accent="bg-amber-500" />
+                {cur.adSpend != null && cur.adSpend > 0 ? (
+                  <KpiCard
+                    label="Ad Spend"
+                    value={fmtBrl(cur.adSpend)}
+                    subvalue={`ROAS ~${(cur.gmv / cur.adSpend).toFixed(1)}x`}
+                    accent="bg-emerald-500"
+                  />
+                ) : (
+                  <KpiCard label="Ad Spend" value="—" subvalue="N/D para TikTok Shop" accent="bg-slate-300" />
+                )}
+              </div>
+              <DailyChart data={projectedDaily} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
+            </>
+          )}
         </section>
 
         {/* Deep-dive mensal — TikTok Shop. Competencia PROPRIA (mes
             calendario via PeriodSelector), independente do periodo global
             selecionado acima — a fonte (gold.tiktok_brand_daily) so suporta
             mes fechado, nao intervalos arbitrarios. Nao misturar com o
-            periodo da secao "Tendencia" acima. */}
+            periodo da secao "Período selecionado" acima. */}
         {showTikTokDetail && (
-          <section aria-label="Analise mensal TikTok Shop — competencia mensal independente">
+          <section aria-label="Inteligência TikTok — competencia mensal independente">
             <div className="flex flex-wrap items-center justify-between gap-4 mb-1">
-              <SectionTitle>TikTok Shop — Análise Mensal</SectionTitle>
+              <SectionTitle>TikTok Shop — Inteligência (competência mensal)</SectionTitle>
               <PeriodSelector value={period} onChange={setPeriod} />
             </div>
             <p className="text-[11px] text-slate-400 mb-3">
@@ -523,7 +587,7 @@ function BrandPageInner() {
                       <h2 className="text-sm font-semibold text-slate-700">Funil por Canal</h2>
                       <p className="text-xs text-slate-400 mt-0.5">Impressoes → pagina do produto → vendas</p>
                     </div>
-                    <div className="overflow-x-auto">
+                    <TableScrollHint>
                       <table className="w-full text-sm" aria-label="Funil de conversao por canal">
                         <thead>
                           <tr className="bg-slate-50 text-xs font-semibold text-slate-500 uppercase tracking-wider">
@@ -570,7 +634,7 @@ function BrandPageInner() {
                           ))}
                         </tbody>
                       </table>
-                    </div>
+                    </TableScrollHint>
                     <div className="px-5 py-2.5 border-t border-slate-100">
                       <p className="text-[10px] text-slate-400">CTR = impressoes que geraram visita a pagina do produto · CVR = visitas que converteram em pedido</p>
                     </div>
@@ -583,32 +647,34 @@ function BrandPageInner() {
                     <div className="px-5 py-4 border-b border-violet-100">
                       <h2 className="text-sm font-semibold text-slate-700">Top 5 Creators</h2>
                     </div>
-                    <table className="w-full" aria-label="Top 5 creators por GMV">
-                      <thead>
-                        <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                          <th className="text-left px-5 py-3">Creator</th>
-                          <th className="text-right px-4 py-3">GMV</th>
-                          <th className="text-right px-4 py-3">Videos</th>
-                          <th className="text-right px-5 py-3">Lives</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {d.top_creators.map((c, i) => (
-                          <tr
-                            key={c.creator}
-                            className={`border-t border-violet-100 hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
-                          >
-                            <td className="px-5 py-3 text-sm text-slate-700 font-medium">
-                              <span className="text-slate-400 tabular-nums mr-2">{i + 1}.</span>
-                              {c.creator}
-                            </td>
-                            <td className="text-right px-4 py-3 text-sm font-bold text-slate-900 tabular-nums">{fmtBrl(c.gmv)}</td>
-                            <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(c.videos)}</td>
-                            <td className="text-right px-5 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(c.lives)}</td>
+                    <TableScrollHint>
+                      <table className="w-full" aria-label="Top 5 creators por GMV">
+                        <thead>
+                          <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                            <th className="text-left px-5 py-3">Creator</th>
+                            <th className="text-right px-4 py-3">GMV</th>
+                            <th className="text-right px-4 py-3">Videos</th>
+                            <th className="text-right px-5 py-3">Lives</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {d.top_creators.map((c, i) => (
+                            <tr
+                              key={c.creator}
+                              className={`border-t border-violet-100 hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
+                            >
+                              <td className="px-5 py-3 text-sm text-slate-700 font-medium">
+                                <span className="text-slate-400 tabular-nums mr-2">{i + 1}.</span>
+                                {c.creator}
+                              </td>
+                              <td className="text-right px-4 py-3 text-sm font-bold text-slate-900 tabular-nums">{fmtBrl(c.gmv)}</td>
+                              <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(c.videos)}</td>
+                              <td className="text-right px-5 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(c.lives)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </TableScrollHint>
                   </div>
                 )}
 
@@ -618,36 +684,38 @@ function BrandPageInner() {
                     <div className="px-5 py-4 border-b border-violet-100">
                       <h2 className="text-sm font-semibold text-slate-700">Top 5 Produtos — TikTok Shop</h2>
                     </div>
-                    <table className="w-full" aria-label="Top 5 produtos por GMV">
-                      <thead>
-                        <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                          <th className="text-left px-5 py-3">Produto</th>
-                          <th className="text-right px-4 py-3">GMV</th>
-                          <th className="text-right px-4 py-3">Pedidos</th>
-                          <th className="text-right px-4 py-3">Videos</th>
-                          <th className="text-right px-5 py-3">GPM</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {d.top_produtos.map((p, i) => (
-                          <tr
-                            key={p.product_id}
-                            className={`border-t border-violet-100 hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
-                          >
-                            <td className="px-5 py-3 text-sm text-slate-700 max-w-[200px]">
-                              <span className="text-slate-400 tabular-nums mr-2">{i + 1}.</span>
-                              <span className="font-medium truncate">{p.product_name}</span>
-                            </td>
-                            <td className="text-right px-4 py-3 text-sm font-bold text-slate-900 tabular-nums">{fmtBrl(p.gmv)}</td>
-                            <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(p.orders)}</td>
-                            <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(p.videos)}</td>
-                            <td className="text-right px-5 py-3 text-sm text-slate-600 tabular-nums">
-                              {p.gpm != null ? `R$${p.gpm.toFixed(2)}` : <span className="text-slate-300">—</span>}
-                            </td>
+                    <TableScrollHint>
+                      <table className="w-full" aria-label="Top 5 produtos por GMV">
+                        <thead>
+                          <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                            <th className="text-left px-5 py-3">Produto</th>
+                            <th className="text-right px-4 py-3">GMV</th>
+                            <th className="text-right px-4 py-3">Pedidos</th>
+                            <th className="text-right px-4 py-3">Videos</th>
+                            <th className="text-right px-5 py-3">GPM</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {d.top_produtos.map((p, i) => (
+                            <tr
+                              key={p.product_id}
+                              className={`border-t border-violet-100 hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
+                            >
+                              <td className="px-5 py-3 text-sm text-slate-700 max-w-[200px]">
+                                <span className="text-slate-400 tabular-nums mr-2">{i + 1}.</span>
+                                <span className="font-medium truncate">{p.product_name}</span>
+                              </td>
+                              <td className="text-right px-4 py-3 text-sm font-bold text-slate-900 tabular-nums">{fmtBrl(p.gmv)}</td>
+                              <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(p.orders)}</td>
+                              <td className="text-right px-4 py-3 text-sm text-slate-600 tabular-nums">{fmtNumber(p.videos)}</td>
+                              <td className="text-right px-5 py-3 text-sm text-slate-600 tabular-nums">
+                                {p.gpm != null ? `R$${p.gpm.toFixed(2)}` : <span className="text-slate-300">—</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </TableScrollHint>
                   </div>
                 )}
 
@@ -657,59 +725,74 @@ function BrandPageInner() {
         )}
 
         {/* Ultimos 7 dias */}
-        <section aria-label="Ultimos 7 dias">
+        <section aria-label="Ultimos 7 dias" aria-busy={!dailyIsFresh}>
           <SectionTitle>Ultimos 7 Dias</SectionTitle>
+          {!ordersReliable && dailyIsFresh && (
+            <p className="text-[11px] text-slate-400 -mt-2 mb-3">
+              Pedidos e Ticket Médio indisponíveis nesta seleção (modo demonstração, canal parcial) — ver nota acima.
+            </p>
+          )}
           <div className="bg-white rounded-2xl shadow-sm border border-violet-100 overflow-hidden">
-            <table className="w-full" aria-label="Ultimos 7 dias de performance">
-              <caption className="sr-only">Dados diarios de GMV, pedidos e ticket medio dos ultimos 7 dias</caption>
-              <thead>
-                <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                  <th className="text-left px-5 py-3">Data</th>
-                  {hasTiktok && <th className="text-right px-4 py-3">TikTok GMV</th>}
-                  {hasMl && <th className="text-right px-4 py-3">ML GMV</th>}
-                  {hasShopee && <th className="text-right px-4 py-3">Shopee GMV</th>}
-                  <th className="text-right px-4 py-3">GMV Total</th>
-                  <th className="text-right px-4 py-3">Pedidos</th>
-                  <th className="text-right px-5 py-3">Ticket Medio</th>
-                </tr>
-              </thead>
-              <tbody>
-                {last7.map((r, i) => (
-                  <tr
-                    key={r.date}
-                    className={`border-t border-violet-100 hover:bg-violet-50/50 hover:shadow-[0_4px_12px_0_rgba(124,58,237,0.08),0_1px_3px_0_rgba(0,0,0,0.06)] transition-all duration-150 ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
-                  >
-                    <td className="px-5 py-3 text-sm text-gray-700 font-medium">
-                      {new Date(r.date + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
-                    </td>
-                    {hasTiktok && (
-                      <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
-                        {r.tiktok_gmv != null ? fmtBrl(r.tiktok_gmv) : <span className="text-slate-300">—</span>}
-                      </td>
-                    )}
-                    {hasMl && (
-                      <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
-                        {r.ml_gmv != null ? fmtBrl(r.ml_gmv) : <span className="text-slate-300">—</span>}
-                      </td>
-                    )}
-                    {hasShopee && (
-                      <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
-                        {r.shopee_gmv != null ? fmtBrl(r.shopee_gmv) : <span className="text-slate-300">—</span>}
-                      </td>
-                    )}
-                    <td className="text-right px-4 py-3 font-bold text-gray-900 text-sm tabular-nums">
-                      {fmtBrl(r.total_gmv)}
-                    </td>
-                    <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
-                      {fmtNumber(r.orders)}
-                    </td>
-                    <td className="text-right px-5 py-3 text-sm text-gray-600 tabular-nums">
-                      {r.avg_ticket != null ? fmtBrl(r.avg_ticket) : <span className="text-slate-300">—</span>}
-                    </td>
+            <TableScrollHint>
+              <table className="w-full" aria-label="Ultimos 7 dias de performance">
+                <caption className="sr-only">Dados diarios de GMV, pedidos e ticket medio dos ultimos 7 dias</caption>
+                <thead>
+                  <tr className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    <th className="text-left px-5 py-3">Data</th>
+                    {hasTiktok && <th className="text-right px-4 py-3">TikTok GMV</th>}
+                    {hasMl && <th className="text-right px-4 py-3">ML GMV</th>}
+                    {hasShopee && <th className="text-right px-4 py-3">Shopee GMV</th>}
+                    <th className="text-right px-4 py-3">GMV Total</th>
+                    <th className="text-right px-4 py-3">Pedidos</th>
+                    <th className="text-right px-5 py-3">Ticket Medio</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {!dailyIsFresh ? (
+                    <tr>
+                      <td colSpan={7} className="px-5 py-8 text-center text-sm text-slate-400">Carregando...</td>
+                    </tr>
+                  ) : (
+                    last7.map((r, i) => (
+                      <tr
+                        key={r.date}
+                        className={`border-t border-violet-100 hover:bg-violet-50/50 hover:shadow-[0_4px_12px_0_rgba(124,58,237,0.08),0_1px_3px_0_rgba(0,0,0,0.06)] transition-all duration-150 ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}
+                      >
+                        <td className="px-5 py-3 text-sm text-gray-700 font-medium">
+                          {new Date(r.date + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
+                        </td>
+                        {hasTiktok && (
+                          <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
+                            {r.tiktok_gmv != null ? fmtBrl(r.tiktok_gmv) : <span className="text-slate-300">—</span>}
+                          </td>
+                        )}
+                        {hasMl && (
+                          <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
+                            {r.ml_gmv != null ? fmtBrl(r.ml_gmv) : <span className="text-slate-300">—</span>}
+                          </td>
+                        )}
+                        {hasShopee && (
+                          <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
+                            {r.shopee_gmv != null ? fmtBrl(r.shopee_gmv) : <span className="text-slate-300">—</span>}
+                          </td>
+                        )}
+                        <td className="text-right px-4 py-3 font-bold text-gray-900 text-sm tabular-nums">
+                          {fmtBrl(r.total_gmv)}
+                        </td>
+                        <td className="text-right px-4 py-3 text-sm text-gray-600 tabular-nums">
+                          {ordersReliable ? fmtNumber(r.orders) : <span className="text-slate-400 text-xs">N/D</span>}
+                        </td>
+                        <td className="text-right px-5 py-3 text-sm text-gray-600 tabular-nums">
+                          {!ordersReliable
+                            ? <span className="text-slate-400 text-xs">N/D</span>
+                            : r.avg_ticket != null ? fmtBrl(r.avg_ticket) : <span className="text-slate-300">—</span>}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </TableScrollHint>
           </div>
         </section>
 

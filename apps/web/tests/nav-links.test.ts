@@ -73,6 +73,32 @@ test("FILTER_QUERY_KEYS cobre exatamente as chaves do contrato de filtros globai
   assert.deepEqual([...FILTER_QUERY_KEYS].sort(), ["brands", "channels", "compare", "date_from", "date_to"]);
 });
 
+// Drill-down marca x canal (Gate U3, Task 4/6) — destino da matriz de Canais
+// e das tabelas detalhadas para /brand/[brand], e troca de marca pelos pills
+// dentro da propria pagina de marca.
+test("matriz de canais: marca e canal do destino sobrescrevem os filtros atuais, datas/compare permanecem", () => {
+  const current = currentSearch("channels=ml,shopee&brands=barbours&date_from=2026-06-01&date_to=2026-06-30&compare=true");
+  const href = mergeFilteredHref("/brand/kokeshi?brands=kokeshi&channels=ml", current);
+  const [path, query] = href.split("?");
+  assert.equal(path, "/brand/kokeshi");
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("brands"), "kokeshi");
+  assert.equal(params.get("channels"), "ml");
+  assert.equal(params.get("date_from"), "2026-06-01");
+  assert.equal(params.get("date_to"), "2026-06-30");
+  assert.equal(params.get("compare"), "true");
+});
+
+test("troca de marca pelos pills: path e brands= sempre apontam para a mesma marca de destino, nunca para a anterior", () => {
+  const current = currentSearch("channels=all&brands=kokeshi&date_from=2026-06-01&date_to=2026-06-30");
+  const href = mergeFilteredHref("/brand/barbours?brands=barbours", current);
+  const [path, query] = href.split("?");
+  assert.equal(path, "/brand/barbours");
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("brands"), "barbours"); // nunca "kokeshi" (marca anterior)
+  assert.equal(params.get("channels"), "all");
+});
+
 // Regressao — nenhuma rota existente foi removida da navegacao neste gate.
 test("regressao: NAV_SECTIONS continua cobrindo todas as rotas do inventario do U0", () => {
   const hrefs = NAV_SECTIONS.flatMap((s) => s.pages.map((p) => p.href));

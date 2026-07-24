@@ -2,6 +2,8 @@
 // (Gate 2, docs/sections/canais_audit.md secao 14). Modulo puro (sem React)
 // para ser testavel isoladamente — mesmo padrao de async-channel-state.ts.
 
+import type { CanaisChannelMedian, CanaisChannelRow } from "./api-client";
+
 export type MetricTone = "value" | "muted" | "warning";
 
 export interface FormattedMetric {
@@ -67,4 +69,18 @@ export function signalLabel(signal: string): string {
 
 export function signalTone(signal: string): string {
   return CHANNEL_SIGNAL_TONE[signal] ?? "text-slate-500 bg-slate-100 border border-slate-200";
+}
+
+/**
+ * Localiza a mediana/p75 do MESMO canal de uma linha da matriz comparativa
+ * (Gate U3, drill-down marca x canal). Nunca mistura mediana de outro canal
+ * — usa igualdade estrita de `channel`. Retorna `null` quando o canal nao
+ * tem mediana calculada (ex: `channelMedians` vazio no modo demonstracao) em
+ * vez de inventar uma referencia de comparacao.
+ */
+export function findChannelMedian(
+  medians: CanaisChannelMedian[],
+  channel: CanaisChannelRow["channel"],
+): CanaisChannelMedian | null {
+  return medians.find((m) => m.channel === channel) ?? null;
 }
