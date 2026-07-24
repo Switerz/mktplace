@@ -961,9 +961,10 @@ deste gate.
 
 ### 12.7 Dependência externa do backfill e validação futura (Gate R4)
 
-O backfill de março/abril (Barbours/Kokeshi/Lescent) continua sendo
-responsabilidade do engenheiro de dados do time, fora do escopo deste
-projeto. Quando o backfill for entregue, o Gate R4 deve:
+No encerramento do Gate R3, o backfill de março/abril
+(Barbours/Kokeshi/Lescent) continuava sob responsabilidade do engenheiro de
+dados do time, fora do escopo deste projeto. Ele foi concluído e validado
+posteriormente no Gate R4, registrado na seção 13. O plano de validação era:
 
 1. Regerar as mesmas 4 variantes deste CSV para as 6 células hoje excluídas
    por carga parcial, usando o comparador do Gate R1;
@@ -994,3 +995,65 @@ Nenhum `order_id`, CPF, nome, e-mail ou endereço foi impresso, persistido ou
 incluído no CSV. Nenhum backfill, paginação, ingestão histórica, pipeline,
 sync, scheduler ou deploy foi executado. Nenhum código de TikTok ou Shopee
 foi tocado.
+
+## 13. Gate R4 — Publicação final e encerramento
+
+Data da publicação: 22/07/2026. O backfill externo do Mercado Livre foi
+validado antes de qualquer escrita: as seis células anteriormente parciais
+passaram a apresentar cobertura entre 99,9% e 101,0% da quantidade do XLSX,
+sem duplicidade ou nulo crítico. As quatro variantes semânticas do Gate R3
+foram recalculadas nas 20 células completas; nenhuma superou materialmente
+a regra vigente, que permaneceu `SUM(total_amount) WHERE status='paid'`,
+pela competência `date_created`.
+
+A publicação controlada no Neon foi executada uma única vez para
+`marketplace_id=2`, exclusivamente entre 01/01/2026 e 31/05/2026:
+
+- `sync_run_id=73`, `status=success`;
+- 603 linhas extraídas e 603 carregadas;
+- `source_min_date=2026-01-01` e `source_max_date=2026-05-31`;
+- Data Mart e Neon reconciliados nas 603 chaves diárias;
+- zero chave ausente e zero diferença em GMV, pedidos, unidades vendidas ou
+  pedidos cancelados;
+- TikTok, Shopee e Mercado Livre fora da janela permaneceram inalterados;
+- a API de produção respondeu HTTP 200 e reproduziu os valores do Neon nas
+  amostras de março e abril, sem indício de cache defasado.
+
+O snapshot anterior do ML no Neon foi preservado fora do repositório:
+603 linhas, SHA-256
+`4f0293ee2be375956f7252250ac0d9d9db8a11878d2cff09f1702f78aa3454e9`.
+Nenhum retry, restore, scheduler ou deploy foi executado.
+
+### 13.1 Resultado final
+
+O estado final publicado das 70 células está versionado em
+`docs/reconciliation/torre_gmv_final_20260722.csv`.
+
+| Canal | Erro absoluto final | Erro percentual final |
+|---|---:|---:|
+| TikTok | R$ 647.202,95 | 1,1259% |
+| Shopee | R$ 184.711,47 | 0,9272% |
+| Mercado Livre | R$ 510.963,38 | 2,5160% |
+| **Total** | **R$ 1.342.877,80** | **1,3743%** |
+
+O erro total caiu de R$ 6.888.737,91 (7,05%) para R$ 1.342.877,80
+(1,3743%), redução de aproximadamente 80,5% no erro absoluto. O Mercado
+Livre, isoladamente, caiu de 11,3969% para 2,5160%, redução relativa de
+77,9%.
+
+### 13.2 Encerramento e limitações aceitas
+
+A frente **Reconciliação XLSX × Torre — janeiro a maio de 2026** está
+concluída na camada de dados, Neon e API. Não se exige precisão de R$ 0,01
+por célula nesta primeira camada: diferenças residuais de fotografia,
+competência e fonte manual continuam documentadas.
+
+Permanecem como dívida, sem reabrir este projeto:
+
+- Kokeshi/maio e Rituária/janeiro no Mercado Livre, ainda inconclusivos por
+  análise agregada;
+- o viés de usar o status atual do pedido para reconstruir meses históricos;
+- um registro antigo `shopee_daily` órfão em `audit.source_sync_run`, sem
+  relação com esta publicação;
+- QA visual do frontend, separado da reconciliação de dados já confirmada
+  pela API.

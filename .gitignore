@@ -56,6 +56,8 @@ pyvenv.cfg
 !docs/reconciliation/torre_gmv_candidate_r2_jan_maio_2026.csv
 # Gate R3: analise semantica do GMV Mercado Livre (14 celulas validas + 6 parciais x 4 variantes)
 !docs/reconciliation/ml_gmv_semantic_analysis_jan_maio_2026.csv
+# Gate R4: estado final publicado na Torre apos reconciliacao dos 3 canais
+!docs/reconciliation/torre_gmv_final_20260722.csv
 
 # Tooling / local agent caches
 .codex/
