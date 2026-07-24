@@ -5,6 +5,10 @@ import { HEALTH_STATUS_LABEL, HEALTH_STATUS_TONE, SEVERITY_LABEL, SEVERITY_TONE,
 interface ExecutiveSummaryCardProps {
   data: ExecutiveSummaryData | null;
   loading: boolean;
+  /** Resolve o href de um insight/warning combinando os filtros globais
+   * atuais com o destino gerado pelo backend (Gate U2, Task 7) — qualquer
+   * parametro que o proprio href ja traga (ex: `?brands=kokeshi`) vence. */
+  buildHref: (href: string) => string;
 }
 
 // Bloco de sintese acima da tabela/trend da Gerencial (Gate 2 Fase 1 — ver
@@ -12,7 +16,7 @@ interface ExecutiveSummaryCardProps {
 // executive-summary falhar, `data` chega null e so este bloco mostra um
 // aviso discreto — cards/tabela/trend tem fetch proprio e continuam
 // funcionando normalmente.
-export default function ExecutiveSummaryCard({ data, loading }: ExecutiveSummaryCardProps) {
+export default function ExecutiveSummaryCard({ data, loading, buildHref }: ExecutiveSummaryCardProps) {
   if (loading) {
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-violet-100 p-5 animate-pulse" aria-busy="true">
@@ -52,21 +56,31 @@ export default function ExecutiveSummaryCard({ data, loading }: ExecutiveSummary
         <div className="flex flex-col gap-1.5">
           {data_warnings.map((w, i) => (
             <p key={i} className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-              {w.message}
+              {/* Um warning so vira link quando o backend fornece um destino
+                  real — nunca fabricamos um href falso (Gate U2, Task 7). */}
+              {w.href ? (
+                <Link href={buildHref(w.href)} className="hover:underline font-medium">
+                  {w.message}
+                </Link>
+              ) : (
+                w.message
+              )}
             </p>
           ))}
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <InsightColumn title="O que mudou" items={changes} emptyText="Sem mudanças relevantes de marca no período." />
-        <InsightColumn title="Atenções" items={sortedRisks} emptyText="Sem riscos identificados no período." />
+        <InsightColumn title="O que mudou" items={changes} emptyText="Sem mudanças relevantes de marca no período." buildHref={buildHref} />
+        <InsightColumn title="Atenções" items={sortedRisks} emptyText="Sem riscos identificados no período." buildHref={buildHref} />
       </div>
     </section>
   );
 }
 
-function InsightColumn({ title, items, emptyText }: { title: string; items: ExecutiveInsight[]; emptyText: string }) {
+function InsightColumn({
+  title, items, emptyText, buildHref,
+}: { title: string; items: ExecutiveInsight[]; emptyText: string; buildHref: (href: string) => string }) {
   return (
     <div className="flex flex-col gap-2 min-w-0">
       <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{title}</p>
@@ -80,7 +94,7 @@ function InsightColumn({ title, items, emptyText }: { title: string; items: Exec
                 {SEVERITY_LABEL[item.severity]}
               </span>
               <div className="min-w-0">
-                <Link href={item.href} className="text-sm font-medium text-violet-700 hover:underline">
+                <Link href={buildHref(item.href)} className="text-sm font-medium text-violet-700 hover:underline">
                   {item.title}
                 </Link>
                 <p className="text-xs text-slate-500">{item.description}</p>

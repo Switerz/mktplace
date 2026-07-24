@@ -46,3 +46,41 @@ export function hrefForPage(pageHref: string, preservedQuery: string): string {
   if (!FILTER_AWARE_PAGES.has(pageHref)) return pageHref;
   return appendQuery(pageHref, preservedQuery);
 }
+
+/**
+ * Combina os filtros globais atualmente aplicados com o href de um destino
+ * (gerado pelo backend, ex: `ExecutiveInsight.href`, ou fixo na propria
+ * tela, ex: painel de canais/drill-downs). Regra de precedencia:
+ * - qualquer parametro de filtro que o proprio destino ja traga
+ *   explicitamente (`?brands=kokeshi`) sempre vence sobre o filtro global
+ *   atualmente aplicado, mesmo que sejam a mesma chave;
+ * - os demais filtros globais (`FILTER_QUERY_KEYS`) nao sobrescritos pelo
+ *   destino sao preservados;
+ * - nenhum parametro fora do contrato de filtros globais e herdado do
+ *   estado atual — so os que o proprio destino ja trouxer.
+ */
+export function mergeFilteredHref(destinationHref: string, currentSearch: URLSearchParams): string {
+  const [path, destQuery = ""] = destinationHref.split("?");
+  const destParams = new URLSearchParams(destQuery);
+
+  const merged = new URLSearchParams();
+  for (const key of FILTER_QUERY_KEYS) {
+    const current = currentSearch.get(key);
+    if (current) merged.set(key, current);
+  }
+  for (const [key, value] of destParams) {
+    merged.set(key, value);
+  }
+
+  return appendQuery(path, merged.toString());
+}
+
+/** Mesma logica de `mergeFilteredHref`, mas tolera destino ausente (ex:
+ * `ExecutiveDataWarning.href` pode ser `null`) — nunca fabrica um link para
+ * um aviso que nao tem destino real. */
+export function mergeOptionalFilteredHref(
+  destinationHref: string | null,
+  currentSearch: URLSearchParams,
+): string | null {
+  return destinationHref == null ? null : mergeFilteredHref(destinationHref, currentSearch);
+}

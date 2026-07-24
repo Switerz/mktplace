@@ -10,6 +10,15 @@ import MobileDrawer from "./MobileDrawer";
  * Shell compartilhado por todas as rotas (Gate U1): sidebar desktop + topbar
  * + drawer mobile + area de conteudo, montados uma unica vez no layout raiz
  * para que nao sejam remontados a cada navegacao entre paginas.
+ *
+ * `id="app-shell-root"` (Gate U2) e o alvo de `inert` do KpiDrilldownDialog
+ * — o dialogo e portalizado para `document.body` (fora desta arvore) e
+ * torna todo o shell inerte enquanto aberto, o que bloqueia inclusive o
+ * hamburger do drawer mobile (nunca deve ser possivel abrir o drawer atras
+ * do dialogo). O drawer, por sua vez, ja torna Topbar+main inertes
+ * enquanto aberto — como esses cards ficam dentro de `main`, o drawer aberto
+ * ja impede abrir o dialogo por tras dele, sem necessidade de coordenacao
+ * adicional entre os dois.
  */
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -32,7 +41,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   }, [drawerOpen]);
 
   return (
-    <div className="min-h-screen bg-[#f8f7ff] md:flex">
+    <div id="app-shell-root" className="min-h-screen bg-[#f8f7ff] md:flex">
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Topbar + conteudo ficam inertes enquanto o drawer mobile esta

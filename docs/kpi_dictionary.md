@@ -127,7 +127,7 @@ Legenda de disponibilidade:
 
 | KPI | Fonte | No banco | No dashboard | Caveat |
 |---|---|---|---|---|
-| GMV | `Order.all*.xlsx` | ✅ | ✅ Gerencial, Canais, Financeiro | subtotal dos pedidos ativos; cancelados excluídos |
+| GMV | shop-stats XLSX | ✅ | ✅ Gerencial, Canais, Financeiro | `Vendas (BRL) - Vendas Canceladas - Vendas Devolvidas/Reembolsadas` (shop-stats é a fonte autoritativa do GMV desde o Gate R2.1; `Order.all*.xlsx` segue sendo fonte de Pedidos/Unidades) |
 | Pedidos | `Order.all*.xlsx` | ✅ | ✅ Gerencial, Qualidade | pedidos não cancelados |
 | Unidades vendidas | `Order.all*.xlsx` | ✅ | ✅ Gerencial, Produtos | soma de quantidade nas linhas SKU ativas |
 | Ticket médio | derivado | 🔶 | ✅ Produtos | `gmv / orders` |
