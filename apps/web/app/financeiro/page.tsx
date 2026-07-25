@@ -1,6 +1,8 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   fetchFinanceiro,
   type FinanceiroKpis,
@@ -8,6 +10,7 @@ import {
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
+import { mergeFilteredHref } from "@/lib/filters/nav-links";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
@@ -18,6 +21,9 @@ import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/fo
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
+import { buildFinanceiroRequestKey } from "@/lib/financeiro-request-key";
+import { computeRequestStatus } from "@/lib/request-freshness";
 
 function fmtPct(v: number | null, decimals = 1): string {
   if (v == null) return "—";
@@ -79,6 +85,7 @@ function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | nul
 
 function FinanceiroPageInner() {
   const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
+  const searchParams = useSearchParams();
   const filter = filters.channels; // alias — preserva as referencias existentes abaixo
   const [kpis, setKpis] = useState<FinanceiroKpis | null>(null);
   const [brands, setBrands] = useState<FinanceiroBrandRow[]>([]);
@@ -87,12 +94,22 @@ function FinanceiroPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  // Chave da ultima requisicao resolvida com sucesso — comparada com a
+  // chave atual para decidir se o estado em memoria reflete de fato os
+  // filtros exibidos agora.
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+
+  const requestKey = useMemo(
+    () => buildFinanceiroRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare, retryKey }),
+    [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey],
+  );
 
   useEffect(() => {
     // Ignora a resposta se os filtros mudarem antes dela chegar.
     let ignore = false;
     setLoading(true);
     setError(null);
+    const key = buildFinanceiroRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare, retryKey });
     const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
     fetchFinanceiro(filters.channels, undefined, opts)
       .then((result) => {
@@ -101,15 +118,39 @@ function FinanceiroPageInner() {
         setBrands(result.brands);
         setIsLive(result.live);
         setRefreshedAt(result.meta.refreshedAt);
+        setResolvedKey(key);
         setLoading(false);
       })
       .catch(() => {
         if (ignore) return;
         setError("Falha ao carregar dados financeiros.");
+        // A chave precisa ser marcada como resolvida MESMO na falha — senao
+        // `computeRequestStatus` nunca sai de "loading" (resolvedKey nunca
+        // bate com requestKey) e a falha da requisicao atual nunca vira
+        // "error" de fato (fica presa em loading para sempre).
+        setResolvedKey(key);
         setLoading(false);
       });
     return () => { ignore = true; };
   }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
+
+  // FINDING 2 (rodada de correcao) — loading/error/fresh SEPARADOS: depois
+  // de um erro definitivo, `dataIsFresh` fica `false` para sempre, mas
+  // `isLoadingState` tambem precisa ficar `false` (senao skeleton/opacidade/
+  // aria-busy continuariam ligados como se ainda estivesse buscando).
+  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const dataIsFresh = requestStatus.fresh;
+  const isLoadingState = requestStatus.loading;
+  const isErrorState = requestStatus.error;
+
+  // Versoes protegidas do estado bruto — nenhum calculo/card/tabela/link
+  // abaixo deve ler kpis/brands/isLive/refreshedAt diretamente.
+  const displayKpis = dataIsFresh ? kpis : null;
+  const displayBrands = dataIsFresh ? brands : [];
+  const displayIsLive = dataIsFresh ? isLive : false;
+  const displayRefreshedAt = dataIsFresh ? refreshedAt : null;
+
+  const buildHref = useMemo(() => (href: string) => mergeFilteredHref(href, searchParams), [searchParams]);
 
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
 
@@ -117,9 +158,9 @@ function FinanceiroPageInner() {
   const showMl = isMarketplaceSelected(filter, "ml");
   const showShopee = isMarketplaceSelected(filter, "shopee");
 
-  const tkBrands = brands.filter((b) => b.tiktok_gmv != null);
-  const mlBrands = brands.filter((b) => b.ml_ad_spend != null);
-  const shBrands = brands.filter((b) => b.shopee_gmv != null);
+  const tkBrands = displayBrands.filter((b) => b.tiktok_gmv != null);
+  const mlBrands = displayBrands.filter((b) => b.ml_ad_spend != null);
+  const shBrands = displayBrands.filter((b) => b.shopee_gmv != null);
 
   const tkColumnTypes = useMemo(() => ({
     brand: "text" as const, gmv: "numeric" as const, fees: "numeric" as const,
@@ -182,8 +223,21 @@ function FinanceiroPageInner() {
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      <div className="flex justify-end">
-        <LiveStatusBadge live={isLive} />
+      {/* Cabecalho */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold text-gray-900">Financeiro</h2>
+          <p className="text-sm text-slate-500">Comparar repasse, taxas, mídia e frete conforme a disponibilidade de dado de cada canal.</p>
+        </div>
+        {/* Badge live/mock só aparece quando os dados sao frescos — nunca o
+            estado da requisicao ANTERIOR durante a transicao de filtro. */}
+        {dataIsFresh ? (
+          <LiveStatusBadge live={displayIsLive} />
+        ) : isLoadingState ? (
+          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+            Atualizando dados...
+          </span>
+        ) : null}
       </div>
 
       <div className="flex items-start justify-between flex-wrap gap-3">
@@ -203,12 +257,12 @@ function FinanceiroPageInner() {
 
         <p className="text-xs text-slate-400 -mt-3">
           Período: {periodLabel}
-          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+          {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
         </p>
 
-        {(() => {
+        {dataIsFresh && (() => {
           const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
-          const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
+          const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
           return note && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
               <p className="text-xs text-amber-800">{note}</p>
@@ -229,42 +283,53 @@ function FinanceiroPageInner() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {loading ? "Carregando dados financeiros..." : error ? "Falha ao carregar." : "Dados financeiros carregados."}
+          {isLoadingState ? "Carregando dados financeiros..." : isErrorState ? "Falha ao carregar." : "Dados financeiros carregados."}
         </span>
 
+      {isErrorState ? (
+        // FINDING 2: erro definitivo mostra so cabecalho/filtros/banner de
+        // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo,
+        // nunca `aria-busy=true`. Estado de erro dedicado, sem tentar
+        // renderizar KPIs/tabelas.
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
+          <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados financeiros.</p>
+          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+        </div>
+      ) : (
+      <>
         {/* KPI Cards */}
         <div
-          className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}
-          aria-busy={loading}
+          className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}
+          aria-busy={isLoadingState}
         >
           {showTiktok && (
             <KpiCard
               label="Repasse recebido TikTok"
-              value={kpis?.tiktok_settlement != null ? fmtBrl(kpis.tiktok_settlement) : "—"}
-              subvalue={kpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(kpis.tiktok_avg_settlement_pct)} do GMV · competencias podem divergir` : undefined}
+              value={displayKpis?.tiktok_settlement != null ? fmtBrl(displayKpis.tiktok_settlement) : "—"}
+              subvalue={displayKpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(displayKpis.tiktok_avg_settlement_pct)} do GMV · competencias podem divergir` : undefined}
               accent="bg-violet-600"
             />
           )}
           {showTiktok && (
             <KpiCard
               label="Taxas e encargos / GMV"
-              value={kpis?.tiktok_avg_fee_pct != null ? fmtPct(kpis.tiktok_avg_fee_pct) : "—"}
-              subvalue={kpis?.tiktok_fees != null ? fmtBrl(kpis.tiktok_fees) + " total" : undefined}
+              value={displayKpis?.tiktok_avg_fee_pct != null ? fmtPct(displayKpis.tiktok_avg_fee_pct) : "—"}
+              subvalue={displayKpis?.tiktok_fees != null ? fmtBrl(displayKpis.tiktok_fees) + " total" : undefined}
               accent="bg-violet-400"
             />
           )}
           {showMl && (
             <KpiCard
               label="ROAS ML"
-              value={fmtRoas(kpis?.ml_roas ?? null)}
-              subvalue={kpis?.ml_acos_pct != null ? `ACOS ${fmtPct(kpis.ml_acos_pct)}` : undefined}
+              value={fmtRoas(displayKpis?.ml_roas ?? null)}
+              subvalue={displayKpis?.ml_acos_pct != null ? `ACOS ${fmtPct(displayKpis.ml_acos_pct)}` : undefined}
               accent="bg-cyan-500"
             />
           )}
           {showMl && (
             <KpiCard
               label="Ads + Frete / GMV"
-              value={kpis?.ml_total_cost_pct != null ? fmtPct(kpis.ml_total_cost_pct) : "—"}
+              value={displayKpis?.ml_total_cost_pct != null ? fmtPct(displayKpis.ml_total_cost_pct) : "—"}
               subvalue="Nao inclui comissao do Mercado Livre"
               accent="bg-amber-500"
             />
@@ -272,29 +337,36 @@ function FinanceiroPageInner() {
           {showShopee && (
             <KpiCard
               label="Taxas e encargos Shopee"
-              value={kpis?.shopee_avg_fee_pct != null ? fmtPct(kpis.shopee_avg_fee_pct) : "—"}
-              subvalue={kpis?.shopee_fees != null ? fmtBrl(kpis.shopee_fees) + " total" : undefined}
+              value={displayKpis?.shopee_avg_fee_pct != null ? fmtPct(displayKpis.shopee_avg_fee_pct) : "—"}
+              subvalue={displayKpis?.shopee_fees != null ? fmtBrl(displayKpis.shopee_fees) + " total" : undefined}
               accent="bg-orange-400"
             />
           )}
           {showShopee && (
             <KpiCard
               label="ROAS Shopee"
-              value={kpis?.shopee_roas != null ? fmtRoas(kpis.shopee_roas) : "—"}
-              subvalue={kpis?.shopee_ad_spend != null ? `Ad spend ${fmtBrl(kpis.shopee_ad_spend)}` : undefined}
+              value={displayKpis?.shopee_roas != null ? fmtRoas(displayKpis.shopee_roas) : "—"}
+              subvalue={displayKpis?.shopee_ad_spend != null ? `Ad spend ${fmtBrl(displayKpis.shopee_ad_spend)}` : undefined}
               accent="bg-amber-400"
             />
           )}
         </div>
 
+        {/* Navegacao interna compacta (Task 4) */}
+        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
+          {showTiktok && <a href="#tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">TikTok Shop</a>}
+          {showMl && <a href="#mercado-livre" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Mercado Livre</a>}
+          {showShopee && <a href="#shopee" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Shopee</a>}
+        </nav>
+
         {/* Tabela: Repasses TikTok */}
         {showTiktok && (
-          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+          <div id="tiktok" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-violet-50">
               <h2 className="text-sm font-semibold text-slate-700">Repasses TikTok</h2>
               <p className="text-xs text-slate-500 mt-0.5">GMV bruto, taxas e encargos e repasse recebido por marca</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Repasses TikTok por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
@@ -306,8 +378,8 @@ function FinanceiroPageInner() {
                     <SortableHeader label="Repasse Recebido" column="settlement" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                  {tkBrands.length === 0 && !loading && (
+                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                  {tkBrands.length === 0 && dataIsFresh && (
                     <tr>
                       <td colSpan={6} className="px-6 py-8 text-center text-slate-400 text-sm">
                         Sem dados para o periodo selecionado.
@@ -316,7 +388,14 @@ function FinanceiroPageInner() {
                   )}
                   {tkSort.sortedRows.map((b) => (
                     <tr key={b.brand} className="hover:bg-slate-50/70 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">{b.label}</td>
+                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                        <Link
+                          href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)}
+                          className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                        >
+                          {b.label}
+                        </Link>
+                      </td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-600">{fmtBrl(b.tiktok_fees!)}</td>
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.tiktok_avg_fee_pct)}`}>
@@ -330,7 +409,7 @@ function FinanceiroPageInner() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
@@ -351,12 +430,12 @@ function FinanceiroPageInner() {
 
         {/* Tabela: Publicidade e Custos ML */}
         {showMl && (
-          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+          <div id="mercado-livre" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-violet-50">
               <h2 className="text-sm font-semibold text-slate-700">Publicidade e Custos ML</h2>
               <p className="text-xs text-slate-500 mt-0.5">Ad Spend, receita atribuida, frete e custo total como % do GMV</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Publicidade e custos ML por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
@@ -370,8 +449,8 @@ function FinanceiroPageInner() {
                     <SortableHeader label="Ads + Frete / GMV" column="cost_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                  {mlBrands.length === 0 && !loading && (
+                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                  {mlBrands.length === 0 && dataIsFresh && (
                     <tr>
                       <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
                         Sem dados de anuncios ML para o periodo selecionado.
@@ -384,7 +463,14 @@ function FinanceiroPageInner() {
                       : null;
                     return (
                       <tr key={b.brand} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">{b.label}</td>
+                        <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                          <Link
+                            href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)}
+                            className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                          >
+                            {b.label}
+                          </Link>
+                        </td>
                         <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.ml_gmv!)}</td>
                         <td className="px-4 py-4 text-right tabular-nums text-slate-700">{fmtBrl(b.ml_ad_spend!)}</td>
                         <td className="px-4 py-4 text-right tabular-nums text-emerald-700 font-medium">
@@ -407,7 +493,7 @@ function FinanceiroPageInner() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
 
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">ROAS:</span>
@@ -435,12 +521,12 @@ function FinanceiroPageInner() {
 
         {/* Tabela: Taxas e Custos Shopee */}
         {showShopee && (
-          <div className="bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
+          <div id="shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-orange-50">
               <h2 className="text-sm font-semibold text-slate-700">Taxas e Custos Shopee</h2>
               <p className="text-xs text-slate-500 mt-0.5">GMV, taxas e encargos, total global dos pedidos, anuncios e frete por marca</p>
             </div>
-            <div className="overflow-x-auto">
+            <TableScrollHint>
               <table className="w-full text-sm" aria-label="Taxas e custos Shopee por marca">
                 <thead>
                   <tr className="bg-slate-50 text-left">
@@ -454,8 +540,8 @@ function FinanceiroPageInner() {
                     <SortableHeader label="Frete" column="frete" sort={shSort.sort} onSort={shSort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                  {shBrands.length === 0 && !loading && (
+                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                  {shBrands.length === 0 && dataIsFresh && (
                     <tr>
                       <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
                         Sem dados Shopee para o periodo selecionado.
@@ -464,7 +550,14 @@ function FinanceiroPageInner() {
                   )}
                   {shSort.sortedRows.map((b) => (
                     <tr key={b.brand} className="hover:bg-orange-50/40 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">{b.label}</td>
+                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                        <Link
+                          href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)}
+                          className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                        >
+                          {b.label}
+                        </Link>
+                      </td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.shopee_gmv!)}</td>
                       <td className="px-4 py-4 text-right tabular-nums text-slate-600">
                         {b.shopee_fees != null ? fmtBrl(b.shopee_fees) : "—"}
@@ -488,7 +581,7 @@ function FinanceiroPageInner() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScrollHint>
             <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
               <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
@@ -506,6 +599,8 @@ function FinanceiroPageInner() {
             </div>
           </div>
         )}
+      </>
+      )}
       </div>
   );
 }

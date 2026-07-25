@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   fetchRegioesSummary, fetchRegioesByUf, fetchRegioesByBrand, fetchRegioesTrend,
   type RegioesSummaryData, type RegiaoUfRow, type RegiaoBrandRow, type RegiaoTrendPoint,
@@ -10,7 +11,6 @@ import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
-import RegioesBrazilMap from "@/components/RegioesBrazilMap";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import {
@@ -19,11 +19,26 @@ import {
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import {
+  buildRegioesRequestKey, buildRegioesFetchScopes, describeRegioesPartialSections, formatRegioesPartialWarning,
+} from "@/lib/regioes-request-key";
+import { computeRequestStatus } from "@/lib/request-freshness";
 
 const ALL_UFS = [
   "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
   "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO", "XX",
 ];
+
+// Mapa SVG do Brasil — pesado (27 UFs de path + logica de hover/selecao) e
+// so usado nesta pagina; carregado sob demanda (Task 5) para nao entrar no
+// bundle inicial de outras rotas. Sem SSR: e puramente interativo (hover/
+// clique/teclado), nao ha conteudo indexavel perdido no fallback.
+const RegioesBrazilMap = dynamic(() => import("@/components/RegioesBrazilMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="bg-white border border-violet-100 rounded-2xl shadow-sm h-96 animate-pulse" aria-hidden="true" />
+  ),
+});
 
 function CoverageBadge({ level }: { level: RegiaoUfRow["coverage_level"] }) {
   return (
@@ -40,53 +55,102 @@ function RegioesPageInner() {
   const [ufFilter, setUfFilter] = useState<string>("");
 
   const [summary, setSummary] = useState<RegioesSummaryData | null>(null);
-  const [byUf, setByUf] = useState<RegiaoUfRow[]>([]);
-  const [byBrand, setByBrand] = useState<RegiaoBrandRow[]>([]);
-  const [trend, setTrend] = useState<RegiaoTrendPoint[]>([]);
+  // `null` = secao indisponivel (endpoint individual falhou); `[]` = secao
+  // resolvida com sucesso e realmente vazia (FINDING 3 — nunca confundir os
+  // dois). `summary == null` continua sendo o unico gatilho de erro TOTAL.
+  const [byUf, setByUf] = useState<RegiaoUfRow[] | null>(null);
+  const [byBrand, setByBrand] = useState<RegiaoBrandRow[] | null>(null);
+  const [trend, setTrend] = useState<RegiaoTrendPoint[] | null>(null);
   const [trendGranularity, setTrendGranularity] = useState<"day" | "month">("day");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [semCobertura, setSemCobertura] = useState<string[]>([]);
+  // Chave da ultima requisicao resolvida com sucesso — comparada com a
+  // chave atual para decidir se o estado em memoria reflete de fato os
+  // filtros exibidos agora.
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+
+  const requestKey = useMemo(
+    () => buildRegioesRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, uf: ufFilter, retryKey }),
+    [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, ufFilter, retryKey],
+  );
 
   useEffect(() => {
     let ignore = false;
     setLoading(true);
     setError(null);
-    const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo };
-    const ufOpts = ufFilter ? { ...opts, uf: [ufFilter] } : opts;
+    const key = buildRegioesRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, uf: ufFilter, retryKey });
+    const { ufScoped, national } = buildRegioesFetchScopes(
+      { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo }, ufFilter,
+    );
     Promise.all([
-      fetchRegioesSummary(filters.channels, ufOpts),
-      fetchRegioesByUf(filters.channels, ufOpts),
-      fetchRegioesByBrand(filters.channels, opts),
-      fetchRegioesTrend(filters.channels, opts),
+      fetchRegioesSummary(filters.channels, ufScoped),
+      fetchRegioesByUf(filters.channels, ufScoped),
+      fetchRegioesByBrand(filters.channels, national),
+      fetchRegioesTrend(filters.channels, national),
     ]).then(([sm, uf, br, tr]) => {
       if (ignore) return;
       if (sm == null) {
         setError("Falha ao carregar dados regionais. Verifique a conexão e tente novamente.");
+        // A chave precisa ser marcada como resolvida MESMO na falha — senao
+        // `computeRequestStatus` nunca sai de "loading" (resolvedKey nunca
+        // bate com requestKey) e a falha da requisicao atual nunca vira
+        // "error" de fato (fica presa em loading para sempre).
+        setResolvedKey(key);
         setLoading(false);
         return;
       }
       setSummary(sm);
-      setByUf(uf?.data ?? []);
-      setByBrand(br?.data ?? []);
-      setTrend(tr?.data ?? []);
+      setByUf(uf?.data ?? null);
+      setByBrand(br?.data ?? null);
+      setTrend(tr?.data ?? null);
       setTrendGranularity(tr?.granularity ?? "day");
       setRefreshedAt(sm.refreshed_at);
       setSemCobertura(sm.channels_sem_cobertura_regional);
+      setResolvedKey(key);
       setLoading(false);
     }).catch(() => {
       if (ignore) return;
       setError("Falha ao carregar dados regionais. Verifique a conexão e tente novamente.");
+      setResolvedKey(key);
       setLoading(false);
     });
     return () => { ignore = true; };
   }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, ufFilter, retryKey]);
 
+  // FINDING 2 (rodada de correcao) — loading/error/fresh SEPARADOS: depois
+  // de um erro definitivo, `dataIsFresh` fica `false` para sempre, mas
+  // `isLoadingState` tambem precisa ficar `false` (senao skeleton/opacidade/
+  // aria-busy continuariam ligados como se ainda estivesse buscando).
+  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const dataIsFresh = requestStatus.fresh;
+  const isLoadingState = requestStatus.loading;
+  const isErrorState = requestStatus.error;
+
+  // Versoes protegidas do estado bruto — nenhum calculo/card/tabela/mapa
+  // abaixo deve ler summary/byUf/byBrand/trend/refreshedAt/semCobertura
+  // diretamente; sempre via estas constantes. byUf/byBrand/trend viram `[]`
+  // tanto quando indisponiveis (FINDING 3) quanto quando nao frescos — a
+  // distincao "indisponivel" x "vazio real" e feita separadamente abaixo
+  // (unavailableSections), nunca no valor exibido nas tabelas/mapa.
+  const displaySummary = dataIsFresh ? summary : null;
+  const displayByUf = dataIsFresh ? (byUf ?? []) : [];
+  const displayByBrand = dataIsFresh ? (byBrand ?? []) : [];
+  const displayTrend = dataIsFresh ? (trend ?? []) : [];
+  const displayRefreshedAt = dataIsFresh ? refreshedAt : null;
+  const displaySemCobertura = dataIsFresh ? semCobertura : [];
+
+  // Dados parciais (FINDING 3): `summary == null` ja e' erro TOTAL (acima).
+  // Aqui, com `summary` resolvido, cada secao individual que veio `null`
+  // (nao `[]`) e' listada — nunca durante loading/erro total.
+  const unavailableSections = dataIsFresh ? describeRegioesPartialSections({ byUf, byBrand, trend }) : [];
+  const partialWarning = formatRegioesPartialWarning(unavailableSections);
+
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
-  const isEmpty = !loading && !error && summary != null && summary.orders === 0 && byUf.length === 0;
-  const aviso = semCoberturaAviso(semCobertura);
+  const isEmpty = dataIsFresh && displaySummary != null && displaySummary.orders === 0 && byUf != null && byUf.length === 0;
+  const aviso = semCoberturaAviso(displaySemCobertura);
 
   const ufColumnTypes = useMemo(() => ({
     uf: "text" as const, gmv: "numeric" as const, orders: "numeric" as const,
@@ -97,12 +161,12 @@ function RegioesPageInner() {
       case "uf": return row.uf;
       case "gmv": return row.gmv;
       case "orders": return row.orders;
-      case "share": return summary ? fmtShareOfTotalPct(row.gmv, summary.gmv) : null;
+      case "share": return displaySummary ? fmtShareOfTotalPct(row.gmv, displaySummary.gmv) : null;
       case "uf_fill_pct": return row.uf_fill_pct;
       default: return null;
     }
   };
-  const ufSort = useSortableTable(byUf, ufGetValue, ufColumnTypes);
+  const ufSort = useSortableTable(displayByUf, ufGetValue, ufColumnTypes);
 
   const brandColumnTypes = useMemo(() => ({
     brand: "text" as const, marketplace: "text" as const, gmv: "numeric" as const,
@@ -119,10 +183,16 @@ function RegioesPageInner() {
       default: return null;
     }
   };
-  const brandSort = useSortableTable(byBrand, brandGetValue, brandColumnTypes);
+  const brandSort = useSortableTable(displayByBrand, brandGetValue, brandColumnTypes);
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
+      {/* Cabecalho */}
+      <div className="min-w-0">
+        <h2 className="text-xl font-bold text-gray-900">Regiões</h2>
+        <p className="text-sm text-slate-500">Distribuição geográfica de GMV e pedidos por UF — cobertura de identificação regional por canal.</p>
+      </div>
+
       <div className="flex items-start justify-between flex-wrap gap-3">
           <div className="flex items-start gap-3 flex-wrap min-w-0">
             <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
@@ -141,7 +211,7 @@ function RegioesPageInner() {
             </div>
           </div>
           <div className="flex items-center gap-3 min-w-0 flex-wrap">
-            {loading && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
+            {isLoadingState && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
             <DateRangeFilter
               dateFrom={filters.dateFrom}
               dateTo={filters.dateTo}
@@ -155,7 +225,7 @@ function RegioesPageInner() {
 
         <p className="text-xs text-slate-400 -mt-3">
           Período: {periodLabel}
-          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+          {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
         </p>
 
         {error && (
@@ -174,76 +244,92 @@ function RegioesPageInner() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {loading ? "Carregando dados regionais..." : error ? "Falha ao carregar dados regionais." : "Dados regionais carregados."}
+          {isLoadingState ? "Carregando dados regionais..." : isErrorState ? "Falha ao carregar dados regionais." : "Dados regionais carregados."}
         </span>
 
-        {aviso && (
+        {dataIsFresh && aviso && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
             <p className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-1">Canal sem cobertura regional</p>
             <p className="text-sm text-amber-800">{aviso}</p>
           </div>
         )}
 
-        {!loading && !error && summary?.coverage_warning && (
-          <div className={`rounded-2xl p-4 border ${summary.coverage_level === "low" ? "bg-rose-50 border-rose-200" : "bg-amber-50 border-amber-200"}`}>
-            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${summary.coverage_level === "low" ? "text-rose-700" : "text-amber-700"}`}>
-              {summary.coverage_level === "low" ? "Cobertura de UF baixa" : "Cobertura de UF parcial"}
+        {dataIsFresh && displaySummary?.coverage_warning && (
+          <div className={`rounded-2xl p-4 border ${displaySummary.coverage_level === "low" ? "bg-rose-50 border-rose-200" : "bg-amber-50 border-amber-200"}`}>
+            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${displaySummary.coverage_level === "low" ? "text-rose-700" : "text-amber-700"}`}>
+              {displaySummary.coverage_level === "low" ? "Cobertura de UF baixa" : "Cobertura de UF parcial"}
             </p>
-            <p className={`text-sm ${summary.coverage_level === "low" ? "text-rose-800" : "text-amber-800"}`}>
-              Apenas {fmtPctOrNA(summary.uf_fill_pct)} dos pedidos elegíveis ({fmtNumber(summary.uf_known_orders)} de {fmtNumber(summary.uf_eligible_orders)}) têm UF identificada no período/filtros selecionados. Os números por UF abaixo refletem só os pedidos com UF conhecida — não é erro, é limitação de dado na fonte.
+            <p className={`text-sm ${displaySummary.coverage_level === "low" ? "text-rose-800" : "text-amber-800"}`}>
+              Apenas {fmtPctOrNA(displaySummary.uf_fill_pct)} dos pedidos elegíveis ({fmtNumber(displaySummary.uf_known_orders)} de {fmtNumber(displaySummary.uf_eligible_orders)}) têm UF identificada no período/filtros selecionados. Os números por UF abaixo refletem só os pedidos com UF conhecida — não é erro, é limitação de dado na fonte.
             </p>
           </div>
         )}
 
-        {isEmpty ? (
+        {isErrorState ? (
+          // FINDING 2: erro definitivo mostra so cabecalho/filtros/banner de
+          // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo,
+          // nunca `aria-busy=true`. Estado de erro dedicado, sem tentar
+          // renderizar KPIs/mapa/tabelas.
+          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
+            <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados regionais.</p>
+            <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+          </div>
+        ) : isEmpty ? (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
             <p className="text-slate-500 text-sm font-medium">Sem dados regionais no período e filtros selecionados.</p>
             <p className="text-slate-400 text-xs mt-1">Tente ampliar o intervalo de datas ou revisar canal/marca/UF.</p>
           </div>
         ) : (
           <>
+            {partialWarning && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5">
+                <p className="text-xs text-amber-800">{partialWarning}</p>
+              </div>
+            )}
+
             {/* KPI Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4" aria-busy={loading}>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4" aria-busy={isLoadingState}>
               <KpiCard
                 label="GMV Regional"
-                value={summary ? fmtBrl(summary.gmv) : "—"}
+                value={displaySummary ? fmtBrl(displaySummary.gmv) : "—"}
                 accent="bg-violet-600"
               />
               <KpiCard
                 label="Pedidos"
-                value={summary ? fmtNumber(summary.orders) : "—"}
+                value={displaySummary ? fmtNumber(displaySummary.orders) : "—"}
                 accent="bg-cyan-500"
               />
               <KpiCard
                 label="UFs com venda"
-                value={summary ? `${summary.ufs_com_venda}/27` : "—"}
+                value={displaySummary ? `${displaySummary.ufs_com_venda}/27` : "—"}
                 accent="bg-amber-500"
               />
               <KpiCard
                 label="Cobertura UF"
-                value={summary ? fmtPctOrNA(summary.uf_fill_pct) : "—"}
-                subvalue={summary ? coverageLabel(summary.coverage_level) : undefined}
-                accent={summary?.coverage_level === "ok" ? "bg-emerald-500" : summary?.coverage_level === "partial" ? "bg-amber-500" : summary?.coverage_level === "low" ? "bg-rose-500" : "bg-slate-300"}
+                value={displaySummary ? fmtPctOrNA(displaySummary.uf_fill_pct) : "—"}
+                subvalue={displaySummary ? coverageLabel(displaySummary.coverage_level) : undefined}
+                accent={displaySummary?.coverage_level === "ok" ? "bg-emerald-500" : displaySummary?.coverage_level === "partial" ? "bg-amber-500" : displaySummary?.coverage_level === "low" ? "bg-rose-500" : "bg-slate-300"}
               />
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 -mt-2" aria-busy={loading}>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 -mt-2" aria-busy={isLoadingState}>
               <KpiCard
                 label="Cobertura Custo Frete"
-                value={summary ? fmtPctOrNA(summary.shipping_cost_coverage_pct) : "—"}
+                value={displaySummary ? fmtPctOrNA(displaySummary.shipping_cost_coverage_pct) : "—"}
                 subvalue="Quando aplicável — Shopee não tem este dado na fonte"
                 accent="bg-slate-400"
               />
               <KpiCard
                 label="Custo Frete Seller"
-                value={summary?.seller_shipping_cost != null ? fmtBrl(summary.seller_shipping_cost) : "N/A"}
+                value={displaySummary?.seller_shipping_cost != null ? fmtBrl(displaySummary.seller_shipping_cost) : "N/A"}
                 accent="bg-slate-400"
               />
             </div>
 
-            {/* Mapa do Brasil por UF — geometria real (SVG), ver RegioesBrazilMap.tsx */}
-            <RegioesBrazilMap rows={byUf} totalGmv={summary?.gmv ?? 0} loading={loading} />
+            {/* Mapa do Brasil por UF — geometria real (SVG), ver RegioesBrazilMap.tsx.
+                Carregado via next/dynamic (Task 5) — usa o filtro local de UF. */}
+            <RegioesBrazilMap rows={displayByUf} totalGmv={displaySummary?.gmv ?? 0} loading={isLoadingState} />
 
-            {/* Ranking por UF */}
+            {/* Ranking por UF — usa o filtro local de UF */}
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50">
                 <h2 className="text-sm font-semibold text-slate-700">Ranking por UF</h2>
@@ -260,16 +346,18 @@ function RegioesPageInner() {
                       <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Cobertura</th>
                     </tr>
                   </thead>
-                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                    {byUf.length === 0 && !loading && (
+                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                    {displayByUf.length === 0 && dataIsFresh && (
                       <tr>
                         <td colSpan={5} className="px-6 py-8 text-center text-slate-400 text-sm">
-                          Sem dados por UF para o período e filtros selecionados.
+                          {unavailableSections.includes("byUf")
+                            ? "Dados indisponíveis para o Ranking por UF neste momento."
+                            : "Sem dados por UF para o período e filtros selecionados."}
                         </td>
                       </tr>
                     )}
                     {ufSort.sortedRows.map((row) => {
-                      const share = summary ? fmtShareOfTotalPct(row.gmv, summary.gmv) : null;
+                      const share = displaySummary ? fmtShareOfTotalPct(row.gmv, displaySummary.gmv) : null;
                       return (
                         <tr key={row.uf} className="hover:bg-slate-50 transition-colors">
                           <td className="px-6 py-3 font-semibold text-slate-700 whitespace-nowrap">{row.uf}</td>
@@ -285,11 +373,18 @@ function RegioesPageInner() {
               </TableScrollHint>
             </div>
 
-            {/* Tabela por marca x marketplace */}
+            {/* Tabela por marca x marketplace — escopo NACIONAL dos filtros
+                globais: o endpoint by-brand nao aceita filtro de UF (contrato
+                de backend nao alterado neste gate). */}
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50">
                 <h2 className="text-sm font-semibold text-slate-700">Cobertura por Marca × Canal</h2>
                 <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de UF/frete por marca e marketplace</p>
+                {ufFilter && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1 mt-2 inline-block">
+                    O filtro de UF ({ufFilter}) não se aplica aqui — esta tabela sempre mostra o escopo nacional dos filtros globais (canal/marca/período).
+                  </p>
+                )}
               </div>
               <TableScrollHint>
                 <table className="w-full text-sm">
@@ -304,11 +399,13 @@ function RegioesPageInner() {
                       <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Alerta</th>
                     </tr>
                   </thead>
-                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                    {byBrand.length === 0 && !loading && (
+                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                    {displayByBrand.length === 0 && dataIsFresh && (
                       <tr>
                         <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-sm">
-                          Sem dados por marca/canal para o período e filtros selecionados.
+                          {unavailableSections.includes("byBrand")
+                            ? "Dados indisponíveis para Cobertura por Marca × Canal neste momento."
+                            : "Sem dados por marca/canal para o período e filtros selecionados."}
                         </td>
                       </tr>
                     )}
@@ -330,21 +427,28 @@ function RegioesPageInner() {
                   </tbody>
                 </table>
               </TableScrollHint>
-              {semCobertura.length > 0 && (
+              {displaySemCobertura.length > 0 && (
                 <div className="px-6 py-3 border-t border-slate-50">
                   <span className="text-[10px] text-slate-400">
-                    {semCobertura.map((c) => (c === "tiktok" ? "TikTok Shop" : c)).join(", ")} não aparece nesta tabela — sem cobertura regional na fonte.
+                    {displaySemCobertura.map((c) => (c === "tiktok" ? "TikTok Shop" : c)).join(", ")} não aparece nesta tabela — sem cobertura regional na fonte.
                   </span>
                 </div>
               )}
             </div>
 
-            {/* Tendencia — tabela simples (sem mapa/grafico nesta fase) */}
+            {/* Tendencia — tabela simples (sem mapa/grafico nesta fase).
+                Escopo NACIONAL dos filtros globais: o endpoint trend nao
+                aceita filtro de UF. */}
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50 flex items-center justify-between gap-4 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-700">Tendência</h2>
                   <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de UF por período — respeita canal e marca</p>
+                  {ufFilter && (
+                    <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1 mt-2 inline-block">
+                      O filtro de UF ({ufFilter}) não se aplica aqui — esta série sempre mostra o escopo nacional dos filtros globais.
+                    </p>
+                  )}
                 </div>
                 <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">
                   Granularidade {trendGranularity === "day" ? "diária" : "mensal"}
@@ -360,15 +464,17 @@ function RegioesPageInner() {
                       <th className="px-4 py-3 text-xs font-semibold text-slate-600 uppercase tracking-wider text-right">Cobertura UF</th>
                     </tr>
                   </thead>
-                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                    {trend.length === 0 && !loading && (
+                  <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                    {displayTrend.length === 0 && dataIsFresh && (
                       <tr>
                         <td colSpan={4} className="px-6 py-8 text-center text-slate-400 text-sm">
-                          Sem série de tendência para o período e filtros selecionados.
+                          {unavailableSections.includes("trend")
+                            ? "Dados indisponíveis para a Tendência neste momento."
+                            : "Sem série de tendência para o período e filtros selecionados."}
                         </td>
                       </tr>
                     )}
-                    {trend.map((p) => (
+                    {displayTrend.map((p) => (
                       <tr key={p.date} className="hover:bg-slate-50 transition-colors">
                         <td className="px-6 py-3 font-medium text-slate-700 whitespace-nowrap">{p.label}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-slate-600">{fmtBrl(p.gmv)}</td>

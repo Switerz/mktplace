@@ -99,6 +99,22 @@ test("troca de marca pelos pills: path e brands= sempre apontam para a mesma mar
   assert.equal(params.get("channels"), "all");
 });
 
+// Financeiro (Gate U4, Task 4/6) — tabelas por canal linkam a marca da linha
+// para /brand/[brand], com o canal DA LINHA (nao dos filtros globais) e
+// preservando data_from/date_to/compare.
+test("Financeiro: link de marca da tabela Shopee sobrescreve brands/channels e preserva datas/compare", () => {
+  const current = currentSearch("channels=ml,shopee&brands=barbours,kokeshi&date_from=2026-06-01&date_to=2026-06-30&compare=true");
+  const href = mergeFilteredHref("/brand/kokeshi?brands=kokeshi&channels=shopee", current);
+  const [path, query] = href.split("?");
+  assert.equal(path, "/brand/kokeshi");
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("brands"), "kokeshi");
+  assert.equal(params.get("channels"), "shopee");
+  assert.equal(params.get("date_from"), "2026-06-01");
+  assert.equal(params.get("date_to"), "2026-06-30");
+  assert.equal(params.get("compare"), "true");
+});
+
 // Regressao — nenhuma rota existente foi removida da navegacao neste gate.
 test("regressao: NAV_SECTIONS continua cobrindo todas as rotas do inventario do U0", () => {
   const hrefs = NAV_SECTIONS.flatMap((s) => s.pages.map((p) => p.href));
