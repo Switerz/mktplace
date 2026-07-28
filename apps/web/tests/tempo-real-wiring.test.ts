@@ -109,3 +109,49 @@ test("doFetch reseta countdown para REFRESH_INTERVAL_S no finally — unico pont
   const doFetchDefinitions = SRC.match(/const doFetch = /g) ?? [];
   assert.equal(doFetchDefinitions.length, 1, "deve existir exatamente 1 definicao de doFetch, compartilhada por carga inicial, refresh manual e refresh automatico");
 });
+
+// --- U6-02 — guarda de hidratacao (React #418) da data/hora ---
+//
+// A data/hora do cabecalho derivam do relogio (new Date()), que difere entre
+// o SSR e o primeiro render do cliente — gerando hydration mismatch #418. A
+// correcao usa um estado `clientReady` (false no SSR e no 1o render do
+// cliente, ambos exibindo o mesmo placeholder deterministico) ativado em
+// useEffect. Nao pode voltar a ler o relogio no render sem guarda, nem
+// esconder o erro so com suppressHydrationWarning, nem criar novo agendamento.
+
+test("existe estado client-ready inicialmente false", () => {
+  assert.match(SRC, /const \[clientReady, setClientReady\] = useState\(false\);/, "deve existir clientReady = useState(false)");
+});
+
+test("clientReady e ativado dentro de um useEffect", () => {
+  assert.match(SRC, /useEffect\(\(\) => \{\s*setClientReady\(true\);\s*\}, \[\]\);/, "setClientReady(true) deve rodar num useEffect de montagem");
+});
+
+test("data/hora NAO sao lidas de new Date() no render sem guarda de clientReady", () => {
+  // O unico new Date() do escopo de render (fora do doFetch, que usa em
+  // setLastUpdated) deve estar guardado por clientReady.
+  assert.match(SRC, /const now = clientReady \? new Date\(\) : null;/, "now deve ser derivado condicionalmente de clientReady");
+  // dateLabel/hourLabel derivam de `now` (que ja depende de clientReady),
+  // nunca chamando new Date() diretamente na sua atribuicao.
+  const dateLabelIdx = SRC.indexOf("const dateLabel =");
+  const hourLabelIdx = SRC.indexOf("const hourLabel =");
+  assert.ok(dateLabelIdx > -1 && hourLabelIdx > -1, "dateLabel e hourLabel devem existir");
+  const labelsBlock = SRC.slice(dateLabelIdx, hourLabelIdx + 200);
+  assert.doesNotMatch(labelsBlock, /new Date\(\)/, "dateLabel/hourLabel nao podem chamar new Date() diretamente — devem derivar de `now`");
+});
+
+test("placeholder pre-mount e deterministico (nao vem do relogio)", () => {
+  assert.match(SRC, /"--:--"/, "hourLabel deve cair num placeholder estavel '--:--' antes de clientReady");
+});
+
+test("a correcao de hidratacao nao usa suppressHydrationWarning nem cria novo agendamento", () => {
+  // Fora de comentarios (o codigo real), suppressHydrationWarning nao pode
+  // aparecer — o fix corrige a causa, nao esconde o sintoma.
+  const codeLines = SRC.split("\n").filter((line) => !line.trim().startsWith("//"));
+  const code = codeLines.join("\n");
+  assert.doesNotMatch(code, /suppressHydrationWarning/, "o fix nao pode apenas esconder o erro com suppressHydrationWarning");
+  // continua havendo exatamente 1 setInterval real (o tick do countdown) —
+  // o effect de clientReady nao introduz um segundo relogio.
+  const setIntervalCalls = code.match(/setInterval\(/g) ?? [];
+  assert.equal(setIntervalCalls.length, 1, "o fix de hidratacao nao pode introduzir um novo setInterval");
+});

@@ -11,6 +11,7 @@ import { appendQuery } from "@/lib/filters/nav-links";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
 
 interface Props {
   brands: BrandRow[];
@@ -223,7 +224,11 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
         )}
       </div>
 
-      {/* Table — sem overflow-x para eliminar scroll lateral */}
+      {/* Tabela larga (U6-01): scroll horizontal INTERNO via TableScrollHint —
+          o card/cabecalho/rodape ficam fixos, so a tabela rola no mobile e o
+          hint some sozinho no desktop quando todas as colunas cabem. Nunca
+          esconder colunas nem clipar o conteudo para "resolver" o mobile. */}
+      <TableScrollHint>
       <table className="w-full" aria-label={`Performance por marca${periodLabel ? ` — ${periodLabel}` : ""}`}>
         <caption className="sr-only">
           Tabela de performance e atingimento de metas por marca{periodLabel ? ` referente a ${periodLabel}` : ""}
@@ -369,6 +374,7 @@ export default function BrandPerformanceTable({ brands, filter, period, loading 
           })}
         </tbody>
       </table>
+      </TableScrollHint>
 
       {/* Rodapé legenda */}
       {visibleTk && (

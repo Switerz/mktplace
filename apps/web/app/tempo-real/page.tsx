@@ -151,6 +151,14 @@ export default function TempoRealPage() {
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_S);
   const [selectedBrand, setSelectedBrand] = useState<string>("todos");
   const [mode, setMode] = useState<ChartMode>("acumulado");
+  // Evita hydration mismatch (React #418, U6-02): data/hora derivam do relogio,
+  // que difere entre o SSR e o primeiro render do cliente. `clientReady` comeca
+  // false — no SSR e no 1o render do cliente ambos batem no mesmo placeholder
+  // deterministico — e so vira true apos a montagem, quando passamos a exibir a
+  // data/hora locais. Nao usa `suppressHydrationWarning` (que so esconderia o
+  // erro) nem introduz nenhum novo intervalo: o tick de countdown ja re-renderiza
+  // a cada 1s e mantem o horario atualizado depois da montagem.
+  const [clientReady, setClientReady] = useState(false);
 
   // Evita atualizacao de estado apos unmount (StrictMode/navegacao rapida).
   const mountedRef = useRef(true);
@@ -198,6 +206,13 @@ export default function TempoRealPage() {
     return () => { mountedRef.current = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Marca o cliente como montado (U6-02) — libera a exibicao de data/hora
+  // locais. Nao ha setInterval aqui: nenhuma nova fonte de agendamento e'
+  // introduzida (o countdown segue sendo a unica).
+  useEffect(() => {
+    setClientReady(true);
+  }, []);
+
   // Unica fonte de verdade do agendamento (Finding 1 da rodada de correcao):
   // antes havia DOIS relogios independentes — este tick de 1s decrementando
   // `countdown`, e um `setInterval(doFetch, REFRESH_INTERVAL_S * 1000)`
@@ -227,9 +242,17 @@ export default function TempoRealPage() {
 
   const status = computeTempoRealStatus({ initialLoading, refreshing, hasData: data != null, lastFetchFailed });
 
-  const now = new Date();
-  const dateLabel = now.toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
-  const hourLabel = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
+  // So le o relogio depois da montagem (clientReady); antes disso, ambos SSR
+  // e 1o render do cliente produzem exatamente o mesmo placeholder neutro,
+  // eliminando o hydration mismatch #418 (U6-02). O tick de countdown
+  // re-renderiza a cada 1s e mantem a hora atualizada apos a montagem.
+  const now = clientReady ? new Date() : null;
+  const dateLabel = now
+    ? now.toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })
+    : "—";
+  const hourLabel = now
+    ? `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`
+    : "--:--";
 
   const selectedData: TempoRealBrand | undefined =
     selectedBrand === "todos" ? undefined : data?.brands.find((b) => b.brand === selectedBrand);
@@ -419,7 +442,7 @@ export default function TempoRealPage() {
 
               <div className="px-4 pt-4 pb-2">
                 {chartHours.length > 0 ? (
-                  <HourlyChart hours={chartHours} mode={mode} currentHour={now.getHours()} />
+                  <HourlyChart hours={chartHours} mode={mode} currentHour={now ? now.getHours() : 0} />
                 ) : (
                   <div className="h-64 flex items-center justify-center text-slate-400 text-sm">
                     Sem dados horarios
