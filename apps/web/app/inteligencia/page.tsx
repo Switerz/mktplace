@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import KpiCard from "@/components/KpiCard";
 import {
@@ -14,6 +14,8 @@ import {
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
+import { computeRequestStatus } from "@/lib/request-freshness";
 
 const BRAND_LABELS: Record<string, string> = {
   apice: "ÁPICE",
@@ -93,9 +95,9 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
 
 function TableWrap({ children }: { children: React.ReactNode }) {
   return (
-    <div className="overflow-x-auto">
+    <TableScrollHint>
       <table className="w-full text-sm">{children}</table>
-    </div>
+    </TableScrollHint>
   );
 }
 
@@ -114,21 +116,50 @@ export default function InteligenciaPage() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [brandFilter, setBrandFilter] = useState<string>("all");
+  // Chave da ultima requisicao resolvida (sucesso ou falha) — comparada com
+  // a chave atual para nunca deixar uma resposta obsoleta (de um retry
+  // anterior) sobrescrever o retry ATUAL em andamento (mesmo padrao
+  // Financeiro/Regioes/Qualidade/Pedidos, Gate U4/U5). Esta tela nao tem
+  // filtros globais — a unica variavel de identidade e o proprio retryKey.
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+  const requestKey = useMemo(() => String(retryKey), [retryKey]);
 
   useEffect(() => {
+    // Ignora a resposta se um novo retry disparar antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
+    const key = String(retryKey);
     fetchInteligencia()
       .then((res) => {
+        if (ignore) return;
         setData(res.data);
         setIsLive(res.live);
+        setResolvedKey(key);
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados de inteligência. Verifique a conexão.");
+        // A chave precisa ser marcada como resolvida MESMO na falha — senao
+        // `computeRequestStatus` nunca sai de "loading".
+        setResolvedKey(key);
         setLoading(false);
       });
+    return () => { ignore = true; };
   }, [retryKey]);
+
+  // FINDING 2 (Gate U4) — loading/error/fresh SEPARADOS.
+  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const dataIsFresh = requestStatus.fresh;
+  const isLoadingState = requestStatus.loading;
+  const isErrorState = requestStatus.error;
+
+  // Versao protegida do estado bruto — `data == null` com sucesso e'
+  // indisponibilidade real (nunca "modo demonstração"); nenhum calculo/card/
+  // tabela abaixo deve ler `data`/`isLive` brutos diretamente.
+  const displayData = dataIsFresh ? data : null;
+  const displayIsLive = dataIsFresh ? isLive : false;
 
   // Signals por status
   const statusMeta: Record<string, { label: string; accent: string; buildSub: (gmv: number, spend: number, n: number, roas: number | null) => string }> = {
@@ -154,15 +185,15 @@ export default function InteligenciaPage() {
     },
   };
 
-  const signalMap = Object.fromEntries((data?.signals ?? []).map((s) => [s.product_status, s]));
+  const signalMap = Object.fromEntries((displayData?.signals ?? []).map((s) => [s.product_status, s]));
 
-  const filteredUrgent = (data?.urgent ?? []).filter(
+  const filteredUrgent = (displayData?.urgent ?? []).filter(
     (r) => brandFilter === "all" || r.brand === brandFilter
   );
-  const filteredScale = (data?.scale ?? []).filter(
+  const filteredScale = (displayData?.scale ?? []).filter(
     (r) => brandFilter === "all" || r.brand === brandFilter
   );
-  const filteredOrganic = (data?.organic ?? [])
+  const filteredOrganic = (displayData?.organic ?? [])
     .filter((r) => brandFilter === "all" || r.brand === brandFilter)
     .slice(0, 10);
 
@@ -240,7 +271,7 @@ export default function InteligenciaPage() {
 
   // Pareto por brand: agrupa e calcula % GMV
   const paretoByBrand: Record<string, ParetoRow[]> = {};
-  for (const row of data?.pareto ?? []) {
+  for (const row of displayData?.pareto ?? []) {
     if (!paretoByBrand[row.brand]) paretoByBrand[row.brand] = [];
     paretoByBrand[row.brand].push(row);
   }
@@ -291,7 +322,7 @@ export default function InteligenciaPage() {
         return null;
     }
   }
-  const ltvSort = useSortableTable(data?.ltv ?? [], getLtvValue, ltvColumnTypes);
+  const ltvSort = useSortableTable(displayData?.ltv ?? [], getLtvValue, ltvColumnTypes);
 
   // Ordenação — Top Produtos TikTok
   const tkProductsColumnTypes: Record<string, SortColumnType> = {
@@ -314,7 +345,7 @@ export default function InteligenciaPage() {
         return null;
     }
   }
-  const tkProductsSort = useSortableTable(data?.tk_products ?? [], getTkProductValue, tkProductsColumnTypes);
+  const tkProductsSort = useSortableTable(displayData?.tk_products ?? [], getTkProductValue, tkProductsColumnTypes);
 
   const CHANNEL_STYLES: Record<string, string> = {
     video: "bg-violet-100 text-violet-800",
@@ -327,10 +358,30 @@ export default function InteligenciaPage() {
     card: "Card",
   };
 
+  const hasAnyData = dataIsFresh && displayData != null;
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      <div className="flex justify-end">
-        <LiveStatusBadge live={isLive} />
+      {/* Cabecalho */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold text-gray-900">Inteligência</h2>
+          <p className="text-sm text-slate-500">Priorização de portfólio e mídia — produtos para pausar, escalar ou testar ads.</p>
+        </div>
+        {dataIsFresh ? (
+          <LiveStatusBadge live={displayIsLive} />
+        ) : isLoadingState ? (
+          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+            Atualizando dados...
+          </span>
+        ) : null}
+      </div>
+
+      {/* Nota de escopo (Task 5) — esta tela nao herda os filtros globais. */}
+      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+        <p className="text-xs text-slate-600">
+          Esta tela usa o snapshot/escopo fornecido por <code className="font-mono text-[11px]">fetchInteligencia</code> — filtros globais de canal, marca e período não se aplicam aqui. O filtro de marca abaixo é local e afeta somente as seções do Mercado Livre.
+        </p>
       </div>
 
       {/* Filtro por marca ML */}
@@ -367,17 +418,46 @@ export default function InteligenciaPage() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {loading ? "Carregando inteligência..." : error ? "Falha ao carregar." : "Dados carregados."}
+          {isLoadingState ? "Carregando inteligência..." : isErrorState ? "Falha ao carregar." : "Dados carregados."}
         </span>
 
+      {isErrorState ? (
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
+          <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de inteligência.</p>
+          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+        </div>
+      ) : dataIsFresh && !hasAnyData ? (
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
+          <p className="text-slate-500 text-sm font-medium">Dados de inteligência indisponíveis no momento.</p>
+          <p className="text-slate-400 text-xs mt-1">Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.</p>
+          <button
+            onClick={() => setRetryKey((k) => k + 1)}
+            className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      ) : (
+      <>
+        {/* Navegacao interna compacta */}
+        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
+          <a href="#status-portfolio" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Status Portfólio</a>
+          <a href="#urgente" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Urgente</a>
+          <a href="#escalar" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Escalar</a>
+          <a href="#testar-ads" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Testar Ads</a>
+          <a href="#pareto" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Pareto</a>
+          <a href="#ltv" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">LTV</a>
+          <a href="#top-tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Top TikTok</a>
+        </nav>
+
         {/* Seção 1 — Status de Portfólio ML */}
-        <div>
+        <div id="status-portfolio" className="scroll-mt-24">
           <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
             Status de Portfólio ML
           </h2>
           <div
-            className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={loading}
+            className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+            aria-busy={isLoadingState}
           >
             {Object.entries(statusMeta).map(([key, meta]) => {
               const row = signalMap[key];
@@ -399,10 +479,11 @@ export default function InteligenciaPage() {
         </div>
 
         {/* Seção 2 — Urgente: Parar Agora */}
-        {(filteredUrgent.length > 0 || loading) && (
+        {(filteredUrgent.length > 0 || isLoadingState) && (
           <div
-            className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={loading}
+            id="urgente"
+            className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+            aria-busy={isLoadingState}
           >
             <SectionHeader
               title="Urgente: Parar Agora!"
@@ -446,7 +527,7 @@ export default function InteligenciaPage() {
                     </td>
                   </tr>
                 ))}
-                {filteredUrgent.length === 0 && !loading && (
+                {filteredUrgent.length === 0 && dataIsFresh && (
                   <tr>
                     <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-sm">
                       Nenhum produto nesta categoria.
@@ -460,8 +541,9 @@ export default function InteligenciaPage() {
 
         {/* Seção 3 — Escalar Agora */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="escalar"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Escalar Agora"
@@ -517,7 +599,7 @@ export default function InteligenciaPage() {
                   </tr>
                 );
               })}
-              {filteredScale.length === 0 && !loading && (
+              {filteredScale.length === 0 && dataIsFresh && (
                 <tr>
                   <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
                     Nenhum produto elegível para escalar no momento.
@@ -530,8 +612,9 @@ export default function InteligenciaPage() {
 
         {/* Seção 4 — Testar Ads */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="testar-ads"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Testar Ads"
@@ -582,7 +665,7 @@ export default function InteligenciaPage() {
                   </td>
                 </tr>
               ))}
-              {filteredOrganic.length === 0 && !loading && (
+              {filteredOrganic.length === 0 && dataIsFresh && (
                 <tr>
                   <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-sm">
                     Nenhum produto orgânico elegível.
@@ -595,8 +678,9 @@ export default function InteligenciaPage() {
 
         {/* Seção 5 — Concentração Pareto por Marca */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="pareto"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Concentração Pareto por Marca"
@@ -650,17 +734,18 @@ export default function InteligenciaPage() {
                 </div>
               );
             })}
-            {Object.keys(paretoByBrand).length === 0 && !loading && (
+            {Object.keys(paretoByBrand).length === 0 && dataIsFresh && (
               <p className="text-sm text-slate-400 text-center py-4">Sem dados de pareto disponíveis.</p>
             )}
           </div>
         </div>
 
         {/* Seção 6 — LTV & Fidelização */}
-        {(data?.ltv ?? []).length > 0 && (
+        {(displayData?.ltv ?? []).length > 0 && (
           <div
-            className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={loading}
+            id="ltv"
+            className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+            aria-busy={isLoadingState}
           >
             <SectionHeader
               title="LTV & Fidelização — Mercado Livre"
@@ -726,8 +811,9 @@ export default function InteligenciaPage() {
 
         {/* Seção 7 — Top Produtos TikTok */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="top-tiktok"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Top Produtos TikTok — Últimos 30 dias"
@@ -784,7 +870,7 @@ export default function InteligenciaPage() {
                   </tr>
                 );
               })}
-              {(data?.tk_products ?? []).length === 0 && !loading && (
+              {(displayData?.tk_products ?? []).length === 0 && dataIsFresh && (
                 <tr>
                   <td colSpan={9} className="px-6 py-8 text-center text-slate-400 text-sm">
                     Sem dados TikTok nos últimos 30 dias.
@@ -794,6 +880,8 @@ export default function InteligenciaPage() {
             </tbody>
           </TableWrap>
         </div>
+      </>
+      )}
       </div>
   );
 }

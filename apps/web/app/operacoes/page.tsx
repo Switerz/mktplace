@@ -21,6 +21,8 @@ import {
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import TableScrollHint from "@/components/TableScrollHint";
+import { computeRequestStatus } from "@/lib/request-freshness";
 
 const BRAND_LABELS: Record<string, string> = {
   apice: "ÁPICE",
@@ -53,9 +55,9 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
 
 function TableWrap({ children }: { children: React.ReactNode }) {
   return (
-    <div className="overflow-x-auto">
+    <TableScrollHint>
       <table className="w-full text-sm">{children}</table>
-    </div>
+    </TableScrollHint>
   );
 }
 
@@ -124,28 +126,57 @@ export default function OperacoesPage() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [creatorBrand, setCreatorBrand] = useState<string>("all");
+  // Chave da ultima requisicao resolvida (sucesso ou falha) — comparada com
+  // a chave atual para nunca deixar uma resposta obsoleta (de um retry
+  // anterior) sobrescrever o retry ATUAL em andamento (mesmo padrao
+  // Financeiro/Regioes/Qualidade/Pedidos/Inteligencia, Gate U4/U5). Esta tela
+  // nao tem filtros globais — a unica variavel de identidade e o retryKey.
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+  const requestKey = useMemo(() => String(retryKey), [retryKey]);
 
   useEffect(() => {
+    // Ignora a resposta se um novo retry disparar antes dela chegar.
+    let ignore = false;
     setLoading(true);
     setError(null);
+    const key = String(retryKey);
     fetchOperacoes()
       .then((res) => {
+        if (ignore) return;
         setData(res.data);
         setIsLive(res.live);
+        setResolvedKey(key);
         setLoading(false);
       })
       .catch(() => {
+        if (ignore) return;
         setError("Falha ao carregar dados de operações. Verifique a conexão.");
+        // A chave precisa ser marcada como resolvida MESMO na falha — senao
+        // `computeRequestStatus` nunca sai de "loading".
+        setResolvedKey(key);
         setLoading(false);
       });
+    return () => { ignore = true; };
   }, [retryKey]);
+
+  // FINDING 2 (Gate U4) — loading/error/fresh SEPARADOS.
+  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const dataIsFresh = requestStatus.fresh;
+  const isLoadingState = requestStatus.loading;
+  const isErrorState = requestStatus.error;
+
+  // Versao protegida do estado bruto — `data == null` com sucesso e'
+  // indisponibilidade real; nenhum calculo/card/tabela abaixo deve ler
+  // `data`/`isLive` brutos diretamente.
+  const displayData = dataIsFresh ? data : null;
+  const displayIsLive = dataIsFresh ? isLive : false;
 
   const filteredCreators = useMemo(
     () =>
-      (data?.creators ?? []).filter(
+      (displayData?.creators ?? []).filter(
         (r) => creatorBrand === "all" || r.brand === creatorBrand
       ),
-    [data, creatorBrand]
+    [displayData, creatorBrand]
   );
 
   const getCreatorValue = (
@@ -222,31 +253,51 @@ export default function OperacoesPage() {
     gmv_per_minute: "numeric",
   };
   const livesSort = useSortableTable(
-    data?.lives ?? [],
+    displayData?.lives ?? [],
     getLiveValue,
     liveColumnTypes
   );
 
   const chartData = useMemo(
-    () => buildChartData(data?.tk_daily ?? []),
-    [data]
+    () => buildChartData(displayData?.tk_daily ?? []),
+    [displayData]
   );
 
   // Only show brands that actually appear in tk_daily
   const brandsInChart = useMemo(() => {
     const seen = new Set<string>();
-    for (const r of data?.tk_daily ?? []) seen.add(r.brand);
+    for (const r of displayData?.tk_daily ?? []) seen.add(r.brand);
     return ALL_BRANDS.filter((b) => seen.has(b));
-  }, [data]);
+  }, [displayData]);
 
-  const alertas = data?.alertas ?? [];
+  const alertas = displayData?.alertas ?? [];
   const criticos = alertas.filter((a) => a.severidade === "critico");
   const atencoes = alertas.filter((a) => a.severidade === "atencao");
 
+  const hasAnyData = dataIsFresh && displayData != null;
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      <div className="flex justify-end">
-        <LiveStatusBadge live={isLive} />
+      {/* Cabecalho */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold text-gray-900">Operações</h2>
+          <p className="text-sm text-slate-500">Acompanhamento e priorização operacional — alertas, criadores, lives e velocidade de mídia.</p>
+        </div>
+        {dataIsFresh ? (
+          <LiveStatusBadge live={displayIsLive} />
+        ) : isLoadingState ? (
+          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+            Atualizando dados...
+          </span>
+        ) : null}
+      </div>
+
+      {/* Nota de escopo (Task 6) — esta tela nao herda os filtros globais. */}
+      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+        <p className="text-xs text-slate-600">
+          Cada seção usa o período fornecido pelo próprio endpoint (<code className="font-mono text-[11px]">fetchOperacoes</code>) — filtros globais de canal, marca e período não se aplicam aqui. O filtro de marca abaixo é local e afeta somente a tabela de Top Criadores.
+        </p>
       </div>
 
       {error && (
@@ -270,23 +321,51 @@ export default function OperacoesPage() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {loading
+          {isLoadingState
             ? "Carregando dados de operações..."
-            : error
+            : isErrorState
             ? "Falha ao carregar."
             : "Dados carregados."}
         </span>
 
+      {isErrorState ? (
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
+          <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de operações.</p>
+          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+        </div>
+      ) : dataIsFresh && !hasAnyData ? (
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
+          <p className="text-slate-500 text-sm font-medium">Dados de operações indisponíveis no momento.</p>
+          <p className="text-slate-400 text-xs mt-1">Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.</p>
+          <button
+            onClick={() => setRetryKey((k) => k + 1)}
+            className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      ) : (
+      <>
+        {/* Navegacao interna compacta */}
+        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
+          <a href="#alertas" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Alertas</a>
+          <a href="#top-criadores" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Top Criadores</a>
+          <a href="#lives" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Performance de Lives</a>
+          <a href="#velocidade-ml" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Velocidade ML</a>
+          <a href="#trend-tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Trend TikTok</a>
+        </nav>
+
         {/* Seção 1 — Alertas Ativos */}
         <div
-          className={`transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="alertas"
+          className={`scroll-mt-24 transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
             Alertas Ativos — Últimos 7 dias
           </h2>
 
-          {alertas.length === 0 && !loading ? (
+          {alertas.length === 0 && dataIsFresh ? (
             <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
               <p className="text-sm font-semibold text-emerald-800">
                 Nenhum alerta ativo esta semana.
@@ -361,10 +440,11 @@ export default function OperacoesPage() {
 
         {/* Seção 2 — Top Criadores */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
-            loading ? "opacity-50 pointer-events-none" : ""
+          id="top-criadores"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
+            isLoadingState ? "opacity-50 pointer-events-none" : ""
           }`}
-          aria-busy={loading}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Top Criadores — Últimos 7 dias"
@@ -483,7 +563,7 @@ export default function OperacoesPage() {
                   </td>
                 </tr>
               ))}
-              {creatorsSort.sortedRows.length === 0 && !loading && (
+              {creatorsSort.sortedRows.length === 0 && dataIsFresh && (
                 <tr>
                   <td
                     colSpan={10}
@@ -511,10 +591,11 @@ export default function OperacoesPage() {
 
         {/* Seção 3 — Performance de Lives */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
-            loading ? "opacity-50 pointer-events-none" : ""
+          id="lives"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
+            isLoadingState ? "opacity-50 pointer-events-none" : ""
           }`}
-          aria-busy={loading}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Performance de Lives — Últimos 30 dias"
@@ -596,7 +677,7 @@ export default function OperacoesPage() {
                   </td>
                 </tr>
               ))}
-              {livesSort.sortedRows.length === 0 && !loading && (
+              {livesSort.sortedRows.length === 0 && dataIsFresh && (
                 <tr>
                   <td
                     colSpan={7}
@@ -629,14 +710,15 @@ export default function OperacoesPage() {
 
         {/* Seção 4 — Velocidade ML */}
         <div
-          className={`transition-opacity duration-200 ${loading ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={loading}
+          id="velocidade-ml"
+          className={`scroll-mt-24 transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
+          aria-busy={isLoadingState}
         >
           <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
             Velocidade ML — Últimos 7 dias
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {(data?.ml_velocity ?? []).map((r) => {
+            {(displayData?.ml_velocity ?? []).map((r) => {
               const lowRoas = r.roas_7d != null && r.roas_7d < 3 && r.ad_spend_7d > 0;
               return (
                 <div
@@ -693,7 +775,7 @@ export default function OperacoesPage() {
               );
             })}
             {ML_BRANDS.filter(
-              (b) => !(data?.ml_velocity ?? []).some((r) => r.brand === b)
+              (b) => !(displayData?.ml_velocity ?? []).some((r) => r.brand === b)
             ).map((b) => (
               <div
                 key={b}
@@ -710,10 +792,11 @@ export default function OperacoesPage() {
 
         {/* Seção 5 — Trend TikTok */}
         <div
-          className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
-            loading ? "opacity-50 pointer-events-none" : ""
+          id="trend-tiktok"
+          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${
+            isLoadingState ? "opacity-50 pointer-events-none" : ""
           }`}
-          aria-busy={loading}
+          aria-busy={isLoadingState}
         >
           <SectionHeader
             title="Trend TikTok — Últimos 14 dias"
@@ -767,7 +850,7 @@ export default function OperacoesPage() {
                 </ComposedChart>
               </ResponsiveContainer>
             ) : (
-              !loading && (
+              dataIsFresh && (
                 <p className="text-sm text-slate-400 text-center py-10">
                   Sem dados TikTok nos últimos 14 dias.
                 </p>
@@ -775,6 +858,8 @@ export default function OperacoesPage() {
             )}
           </div>
         </div>
+      </>
+      )}
       </div>
   );
 }

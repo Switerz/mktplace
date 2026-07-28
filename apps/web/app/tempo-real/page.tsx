@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchTempoReal } from "@/lib/api-client";
 import type { TempoRealData, TempoRealBrand } from "@/lib/api-client";
 import HourlyChart from "@/components/HourlyChart";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
+import { computeTempoRealStatus } from "@/lib/tempo-real-status";
 
 function fmtBrl(v: number) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
@@ -138,39 +139,93 @@ function getBrandTableSortValue(row: TempoRealBrand, column: string): string | n
 
 export default function TempoRealPage() {
   const [data, setData] = useState<TempoRealData | null>(null);
-  const [loading, setLoading] = useState(true);
+  // true apenas durante a primeiríssima tentativa de fetch da tela.
+  const [initialLoading, setInitialLoading] = useState(true);
+  // true durante qualquer fetch subsequente (timer automatico ou botao manual).
   const [refreshing, setRefreshing] = useState(false);
+  // so muda em fetch bem-sucedido — nunca numa falha (Task 4).
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // a ULTIMA tentativa de fetch concluida falhou (retornou null/erro) — dado
+  // anterior (se houver) e preservado e marcado como possivelmente defasado.
+  const [lastFetchFailed, setLastFetchFailed] = useState(false);
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_S);
   const [selectedBrand, setSelectedBrand] = useState<string>("todos");
   const [mode, setMode] = useState<ChartMode>("acumulado");
 
-  const doFetch = (silent = false) => {
-    if (!silent) setLoading(true);
+  // Evita atualizacao de estado apos unmount (StrictMode/navegacao rapida).
+  const mountedRef = useRef(true);
+  // Evita requests sobrepostas entre o timer automatico e o botao manual —
+  // uma nova chamada de doFetch() enquanto outra ainda esta em voo e' um
+  // no-op silencioso (nunca dispara um 2o fetch concorrente).
+  const inFlightRef = useRef(false);
+
+  const doFetch = (silent: boolean) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    if (!silent) setInitialLoading(true);
     else setRefreshing(true);
-    fetchTempoReal().then((res) => {
-      if (res?.data) setData(res.data);
-      setLastUpdated(new Date());
-      setLoading(false);
-      setRefreshing(false);
-      setCountdown(REFRESH_INTERVAL_S);
-    });
+    fetchTempoReal()
+      .then((res) => {
+        if (!mountedRef.current) return;
+        if (res?.data) {
+          setData(res.data);
+          setLastUpdated(new Date());
+          setLastFetchFailed(false);
+        } else {
+          // Falha (null/exceção) — preserva o ultimo dado valido em memoria
+          // (setData NAO e chamado aqui) e apenas marca a tentativa como
+          // falha; `lastUpdated` deliberadamente nao muda.
+          setLastFetchFailed(true);
+        }
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setLastFetchFailed(true);
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+        if (!mountedRef.current) return;
+        setInitialLoading(false);
+        setRefreshing(false);
+        setCountdown(REFRESH_INTERVAL_S);
+      });
   };
 
   // carga inicial
-  useEffect(() => { doFetch(false); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // auto-refresh a cada 5 min
   useEffect(() => {
-    const iv = setInterval(() => doFetch(true), REFRESH_INTERVAL_S * 1000);
-    return () => clearInterval(iv);
+    mountedRef.current = true;
+    doFetch(false);
+    return () => { mountedRef.current = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // countdown regressivo
+  // Unica fonte de verdade do agendamento (Finding 1 da rodada de correcao):
+  // antes havia DOIS relogios independentes — este tick de 1s decrementando
+  // `countdown`, e um `setInterval(doFetch, REFRESH_INTERVAL_S * 1000)`
+  // separado, criado uma unica vez na montagem. Um refresh manual (ou uma
+  // tentativa demorada) reiniciava `countdown` para 300s no `finally` de
+  // `doFetch`, mas o segundo relogio continuava disparando no horario
+  // ORIGINAL — o texto podia mostrar "4:00" enquanto o proximo fetch real
+  // ja estava a 2 minutos de distancia. Agora so existe este tick: ele so
+  // decrementa o numero exibido, nunca chama `doFetch` diretamente.
   useEffect(() => {
-    const tick = setInterval(() => setCountdown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    const tick = setInterval(() => setCountdown((c) => (c > 0 ? c - 1 : c)), 1000);
     return () => clearInterval(tick);
   }, []);
+
+  // O countdown chegar a zero e' o UNICO gatilho do refresh automatico —
+  // substitui o segundo `setInterval` independente que existia antes. Como
+  // `doFetch` sempre reseta `countdown` para `REFRESH_INTERVAL_S` no seu
+  // `finally` (sucesso OU falha, manual OU automatico — ver abaixo), este
+  // efeito nunca dispara duas vezes para o mesmo ciclo: a dependencia
+  // `countdown` só volta a valer 0 depois que a tentativa anterior concluiu
+  // e reagendou o proximo ciclo inteiro. `doFetch` já guarda (`inFlightRef`)
+  // contra qualquer sobreposicao com um clique manual simultaneo.
+  useEffect(() => {
+    if (countdown === 0) doFetch(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countdown]);
+
+  const status = computeTempoRealStatus({ initialLoading, refreshing, hasData: data != null, lastFetchFailed });
 
   const now = new Date();
   const dateLabel = now.toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
@@ -208,41 +263,77 @@ export default function TempoRealPage() {
           <h2 className="text-base font-bold text-gray-900 leading-none">Tempo Real — TikTok Shop</h2>
           <p className="text-xs text-slate-400 mt-0.5">{dateLabel} · {hourLabel}</p>
         </div>
-        {!loading && data && (
+        {data && (
           <div className="flex items-center gap-2">
             <button
               onClick={() => doFetch(true)}
-              disabled={refreshing}
+              disabled={refreshing || initialLoading}
               className="text-xs font-medium text-slate-500 border border-slate-200 rounded-full px-3 py-1 hover:bg-slate-50 transition-colors disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
               title="Atualizar agora"
             >
               {refreshing ? "Atualizando..." : `↻ ${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, "0")}`}
             </button>
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
-              <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${refreshing ? "" : "animate-pulse"}`} />
-              {lastUpdated
-                ? `Atualizado ${lastUpdated.getHours().toString().padStart(2,"0")}:${lastUpdated.getMinutes().toString().padStart(2,"0")}`
-                : "Ao vivo"}
-            </span>
+            {status === "stale" ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-3 py-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                Falha ao atualizar
+                {lastUpdated && ` · dados de ${lastUpdated.getHours().toString().padStart(2, "0")}:${lastUpdated.getMinutes().toString().padStart(2, "0")}`}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+                <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${status === "updating" ? "" : "animate-pulse"}`} />
+                {status === "updating"
+                  ? "Atualizando..."
+                  : lastUpdated
+                  ? `Atualizado ${lastUpdated.getHours().toString().padStart(2, "0")}:${lastUpdated.getMinutes().toString().padStart(2, "0")}`
+                  : "Ao vivo"}
+              </span>
+            )}
           </div>
         )}
       </div>
 
-        {loading && (
-          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
+        <span className="sr-only" aria-live="polite" aria-atomic="true">
+          {status === "initial"
+            ? "Carregando dados em tempo real..."
+            : status === "unavailable"
+            ? "Dados em tempo real indisponíveis."
+            : status === "updating"
+            ? "Atualizando dados em tempo real..."
+            : status === "stale"
+            ? "Falha ao atualizar — exibindo o último dado válido."
+            : "Dados em tempo real atualizados."}
+        </span>
+
+        {status === "initial" && (
+          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center" aria-busy="true">
             <p className="text-slate-400 text-sm">Carregando dados em tempo real...</p>
           </div>
         )}
 
-        {!loading && !data && (
+        {status === "unavailable" && (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
             <p className="text-slate-500 font-medium text-sm">API offline — dados em tempo real indisponiveis</p>
             <p className="text-slate-400 text-xs mt-1">Configure METABASE_API_KEY e reinicie a API para ativar este cockpit.</p>
+            <button
+              onClick={() => doFetch(false)}
+              className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            >
+              Tentar novamente
+            </button>
           </div>
         )}
 
-        {!loading && data && (
+        {data && (
           <>
+            {status === "stale" && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
+                <p className="text-xs text-amber-800">
+                  Falha ao atualizar automaticamente — exibindo o último dado válido
+                  {lastUpdated && ` (recebido às ${lastUpdated.getHours().toString().padStart(2, "0")}:${lastUpdated.getMinutes().toString().padStart(2, "0")})`}. Nova tentativa automática em breve.
+                </p>
+              </div>
+            )}
             {/* KPIs — 4 cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-5 py-4">

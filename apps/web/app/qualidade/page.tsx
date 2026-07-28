@@ -18,6 +18,8 @@ import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import { buildQualityRequestKey } from "@/lib/quality-request-key";
+import { computeRequestStatus } from "@/lib/request-freshness";
 
 function fmtRate(v: number | null): string {
   if (v == null) return "—";
@@ -58,12 +60,22 @@ function QualityPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  // Chave da ultima requisicao resolvida com sucesso ou falha — comparada
+  // com a chave atual para decidir se o estado em memoria reflete de fato
+  // os filtros exibidos agora (mesmo padrao Financeiro/Regioes, Gate U4).
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+
+  const requestKey = useMemo(
+    () => buildQualityRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare, retryKey }),
+    [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey],
+  );
 
   useEffect(() => {
     // Ignora a resposta se os filtros mudarem antes dela chegar.
     let ignore = false;
     setLoading(true);
     setError(null);
+    const key = buildQualityRequestKey({ channels: filters.channels, brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare, retryKey });
     const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
     fetchQuality(filters.channels, undefined, opts)
       .then((result) => {
@@ -72,15 +84,37 @@ function QualityPageInner() {
         setBrands(result.brands);
         setIsLive(result.live);
         setRefreshedAt(result.meta.refreshedAt);
+        setResolvedKey(key);
         setLoading(false);
       })
       .catch(() => {
         if (ignore) return;
         setError("Falha ao carregar dados de qualidade. Verifique a conexão.");
+        // A chave precisa ser marcada como resolvida MESMO na falha — senao
+        // `computeRequestStatus` nunca sai de "loading" (resolvedKey nunca
+        // bate com requestKey) e a falha da requisicao atual nunca vira
+        // "error" de fato (fica presa em loading para sempre).
+        setResolvedKey(key);
         setLoading(false);
       });
     return () => { ignore = true; };
   }, [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey]);
+
+  // FINDING 2 (Gate U4) — loading/error/fresh SEPARADOS: depois de um erro
+  // definitivo, `dataIsFresh` fica `false` para sempre, mas `isLoadingState`
+  // tambem precisa ficar `false` (senao skeleton/opacidade/aria-busy
+  // continuariam ligados como se ainda estivesse buscando).
+  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const dataIsFresh = requestStatus.fresh;
+  const isLoadingState = requestStatus.loading;
+  const isErrorState = requestStatus.error;
+
+  // Versoes protegidas do estado bruto — nenhum calculo/card/tabela abaixo
+  // deve ler kpis/brands/isLive/refreshedAt diretamente.
+  const displayKpis = dataIsFresh ? kpis : null;
+  const displayBrands = dataIsFresh ? brands : [];
+  const displayIsLive = dataIsFresh ? isLive : false;
+  const displayRefreshedAt = dataIsFresh ? refreshedAt : null;
 
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
 
@@ -106,7 +140,7 @@ function QualityPageInner() {
       default: return null;
     }
   };
-  const qualitySort = useSortableTable(brands, qualityGetValue, qualityColumnTypes);
+  const qualitySort = useSortableTable(displayBrands, qualityGetValue, qualityColumnTypes);
   const qualityVisibleColumns = useMemo(() => {
     const cols = ["brand"];
     if (showTiktok) cols.push("tk_delivery");
@@ -119,7 +153,7 @@ function QualityPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qualityVisibleColumns.join(",")]);
 
-  const mlLoyaltyRows = brands.filter((b) => b.ml_unique_buyers != null || b.ml_repeat_buyer_rate_pct != null);
+  const mlLoyaltyRows = displayBrands.filter((b) => b.ml_unique_buyers != null || b.ml_repeat_buyer_rate_pct != null);
   const mlLoyaltyColumnTypes = useMemo(() => ({
     brand: "text" as const, buyers: "numeric" as const, new: "numeric" as const,
     repeat_pct: "numeric" as const, gmv_per_buyer: "numeric" as const,
@@ -139,7 +173,7 @@ function QualityPageInner() {
   };
   const mlLoyaltySort = useSortableTable(mlLoyaltyRows, mlLoyaltyGetValue, mlLoyaltyColumnTypes);
 
-  const shQualityRows = brands.filter((b) => b.shopee_orders != null || b.shopee_cancel_rate_pct != null);
+  const shQualityRows = displayBrands.filter((b) => b.shopee_orders != null || b.shopee_cancel_rate_pct != null);
   const shQualityColumnTypes = useMemo(() => ({
     brand: "text" as const, orders: "numeric" as const, canceled: "numeric" as const,
     cancel_pct: "numeric" as const, returned: "numeric" as const, return_pct: "numeric" as const,
@@ -157,10 +191,26 @@ function QualityPageInner() {
   };
   const shQualitySort = useSortableTable(shQualityRows, shQualityGetValue, shQualityColumnTypes);
 
+  const hasMlLoyalty = showMl && displayBrands.some((b) => b.ml_repeat_buyer_rate_pct != null || b.ml_unique_buyers != null);
+  const hasShQuality = showShopee && displayBrands.some((b) => b.shopee_cancel_rate_pct != null || b.shopee_orders != null);
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      <div className="flex justify-end">
-        <LiveStatusBadge live={isLive} />
+      {/* Cabecalho */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold text-gray-900">Qualidade</h2>
+          <p className="text-sm text-slate-500">Cancelamentos, devoluções/problemas, entrega e fidelização por canal e marca.</p>
+        </div>
+        {/* Badge live/mock só aparece quando os dados sao frescos — nunca o
+            estado da requisicao ANTERIOR durante a transicao de filtro. */}
+        {dataIsFresh ? (
+          <LiveStatusBadge live={displayIsLive} />
+        ) : isLoadingState ? (
+          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+            Atualizando dados...
+          </span>
+        ) : null}
       </div>
 
       <div className="flex items-start justify-between flex-wrap gap-3">
@@ -179,12 +229,12 @@ function QualityPageInner() {
 
         <p className="text-xs text-slate-400 -mt-3">
           Período: {periodLabel}
-          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+          {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
         </p>
 
-        {(() => {
+        {dataIsFresh && (() => {
           const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
-          const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
+          const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
           return note && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
               <p className="text-xs text-amber-800">{note}</p>
@@ -208,18 +258,36 @@ function QualityPageInner() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {loading ? "Carregando dados de qualidade..." : error ? "Falha ao carregar." : "Dados de qualidade carregados."}
+          {isLoadingState ? "Carregando dados de qualidade..." : isErrorState ? "Falha ao carregar." : "Dados de qualidade carregados."}
         </span>
+
+      {isErrorState ? (
+        // FINDING 2: erro definitivo mostra so cabecalho/filtros/banner de
+        // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo.
+        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
+          <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de qualidade.</p>
+          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+        </div>
+      ) : (
+      <>
+        {/* Navegacao interna compacta (Task 1) */}
+        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
+          <a href="#resumo" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Resumo</a>
+          <a href="#qualidade-marca" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Qualidade por Marca</a>
+          {hasMlLoyalty && <a href="#fidelizacao-ml" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Fidelização ML</a>}
+          {hasShQuality && <a href="#qualidade-shopee" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Qualidade Shopee</a>}
+        </nav>
 
         {/* KPI Cards */}
         <div
-          className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}
-          aria-busy={loading}
+          id="resumo"
+          className={`scroll-mt-24 grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}
+          aria-busy={isLoadingState}
         >
           {showTiktok && (
             <KpiCard
               label="Entrega TK"
-              value={fmtDays(kpis?.tiktok_avg_delivery_days ?? null)}
+              value={fmtDays(displayKpis?.tiktok_avg_delivery_days ?? null)}
               subvalue="Tempo medio · dados a partir de abr/26"
               accent="bg-violet-500"
             />
@@ -227,7 +295,7 @@ function QualityPageInner() {
           {showMl && (
             <KpiCard
               label="Cancelamento ML"
-              value={fmtRate(kpis?.ml_cancel_rate_pct ?? null)}
+              value={fmtRate(displayKpis?.ml_cancel_rate_pct ?? null)}
               subvalue="Taxa de cancelamento"
               accent="bg-cyan-500"
             />
@@ -235,7 +303,7 @@ function QualityPageInner() {
           {showMl && (
             <KpiCard
               label="Nao Entregue ML"
-              value={fmtRate(kpis?.ml_not_delivered_rate_pct ?? null)}
+              value={fmtRate(displayKpis?.ml_not_delivered_rate_pct ?? null)}
               subvalue="Proxy: pagos - entregues"
               accent="bg-amber-500"
             />
@@ -243,7 +311,7 @@ function QualityPageInner() {
           {showMl && (
             <KpiCard
               label="Entrega ML"
-              value={fmtDays(kpis?.ml_avg_delivery_days ?? null)}
+              value={fmtDays(displayKpis?.ml_avg_delivery_days ?? null)}
               subvalue="Tempo medio em dias"
               accent="bg-emerald-500"
             />
@@ -251,7 +319,7 @@ function QualityPageInner() {
           {showShopee && (
             <KpiCard
               label="Cancelamento Shopee"
-              value={fmtRate(kpis?.shopee_cancel_rate_pct ?? null)}
+              value={fmtRate(displayKpis?.shopee_cancel_rate_pct ?? null)}
               subvalue="Taxa de cancelamento"
               accent="bg-orange-500"
             />
@@ -259,7 +327,7 @@ function QualityPageInner() {
           {showShopee && (
             <KpiCard
               label="Devolucao Shopee"
-              value={fmtRate(kpis?.shopee_return_rate_pct ?? null)}
+              value={fmtRate(displayKpis?.shopee_return_rate_pct ?? null)}
               subvalue="Taxa de devolucao"
               accent="bg-rose-400"
             />
@@ -267,7 +335,7 @@ function QualityPageInner() {
         </div>
 
         {/* Tabela por marca */}
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+        <div id="qualidade-marca" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-violet-50">
             <h2 className="text-sm font-semibold text-slate-700">Qualidade por Marca</h2>
             <p className="text-xs text-slate-500 mt-0.5">Cancelamentos, devolucoes e tempos logisticos</p>
@@ -299,8 +367,8 @@ function QualityPageInner() {
                   )}
                 </tr>
               </thead>
-              <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
-                {brands.length === 0 && !loading && (
+              <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                {displayBrands.length === 0 && dataIsFresh && (
                   <tr>
                     <td colSpan={qualityColSpan} className="px-6 py-8 text-center text-slate-400 text-sm">
                       Sem dados para o periodo selecionado.
@@ -364,8 +432,8 @@ function QualityPageInner() {
         </div>
 
         {/* Fidelizacao ML */}
-        {showMl && brands.some((b) => b.ml_repeat_buyer_rate_pct != null || b.ml_unique_buyers != null) && (
-          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+        {hasMlLoyalty && (
+          <div id="fidelizacao-ml" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-violet-50 flex items-start justify-between gap-4 flex-wrap">
               <div>
                 <h2 className="text-sm font-semibold text-slate-700">Fidelizacao — Mercado Livre</h2>
@@ -385,7 +453,7 @@ function QualityPageInner() {
                     <SortableHeader label="Frete/GMV" column="shipping_pct" sort={mlLoyaltySort.sort} onSort={mlLoyaltySort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
+                <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {mlLoyaltySort.sortedRows.map((b) => {
                       const recompra = b.ml_repeat_buyer_rate_pct;
                       const recompraColor = recompra == null ? "text-slate-400"
@@ -444,8 +512,8 @@ function QualityPageInner() {
         )}
 
         {/* Qualidade Shopee por marca */}
-        {showShopee && brands.some((b) => b.shopee_cancel_rate_pct != null || b.shopee_orders != null) && (
-          <div className="bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
+        {hasShQuality && (
+          <div id="qualidade-shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-orange-50">
               <h2 className="text-sm font-semibold text-slate-700">Qualidade — Shopee</h2>
               <p className="text-xs text-slate-500 mt-0.5">Cancelamentos e devoluções por marca</p>
@@ -462,7 +530,7 @@ function QualityPageInner() {
                     <SortableHeader label="Devol.%" column="return_pct" sort={shQualitySort.sort} onSort={shQualitySort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${loading ? "opacity-50" : ""}`}>
+                <tbody className={`divide-y divide-slate-50 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {shQualitySort.sortedRows.map((b) => (
                       <tr key={b.brand} className="hover:bg-orange-50/40 transition-colors">
                         <td className="px-6 py-4 font-semibold text-slate-700 whitespace-nowrap">{b.label}</td>
@@ -494,6 +562,8 @@ function QualityPageInner() {
             </div>
           </div>
         )}
+      </>
+      )}
       </div>
   );
 }
