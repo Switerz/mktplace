@@ -104,6 +104,15 @@
 
 **Dívidas remanescentes (não bloqueiam o encerramento):** **U6-03** (overflow horizontal marginal de 3px em Pedidos no tablet — não piorou); **U6-04** (dois `<h1>` por página — topbar + título); **QA de fluxos com dado vivo bloqueado pela API local offline** (download CSV real de Produtos com o botão corretamente desabilitado offline; Canais detalhe marca×canal → Marca, cuja matriz é vazia por design em demonstração; e o refresh "stale" do Tempo Real após um sucesso real); **3 vulnerabilidades altas** de dependências (`next` direta; `postcss`/`sharp` transitivas); **ausência de teste automatizado de componente React** (mitigada por typecheck + build + testes de lógica pura/regressão estática). **Gate U6 concluído — Gates U0–U6 concluídos; revamp de UI/UX encerrado.** (Não implica deploy: nenhum commit/push/deploy foi feito.)
 
+**Checkpoint P1 — publicação e auditoria pós-deploy (03/08/2026):** posterior ao encerramento dos gates U0–U6 acima (cujas frases sobre "nenhum deploy" descrevem corretamente aqueles gates e permanecem válidas para eles). Após o commit final do U6 (`9fcf72a`), a integração GitHub→Vercel publicou o frontend **automaticamente** — não houve deploy manual durante os gates. Auditoria pós-deploy encerrada como **GO COM RESTRIÇÃO**, com base em confirmações manuais no dashboard Vercel e verificações públicas read-only reproduzidas:
+- deployment do commit `9fcf72a` em **Production, status Ready**;
+- **domínio canônico** `https://mktplace-gobeaute.vercel.app` respondendo (HTTP 200 nas 11 rotas: `/`, `/canais`, `/produtos`, `/regioes`, `/financeiro`, `/qualidade`, `/tempo-real`, `/pedidos`, `/inteligencia`, `/operacoes`, `/brand/barbours`); `https://mktplace-blond.vercel.app` redireciona (307) para o canônico;
+- bundle publicado aponta para o backend público `mktplace-api.onrender.com`, **sem** `localhost:8080`/`127.0.0.1:8081`; backend online (`openapi.json` 200) e **CORS correto** (`Access-Control-Allow-Origin: https://mktplace-gobeaute.vercel.app`) no endpoint agregado `overview`;
+- o fallback "Demonstração · API offline" antes observado ocorria **apenas na URL efêmera de deployment** (atrás do SSO da Vercel e com Origin fora da allowlist de CORS do backend) — **não** é falha do deployment nem erro de `NEXT_PUBLIC_API_URL`; a URL efêmera não deve ser usada como endereço da Torre;
+- `mktplace-one.vercel.app` é uma URL antiga e retorna `DEPLOYMENT_NOT_FOUND` (precisa ser corrigida manualmente no campo "About" do GitHub).
+
+**Restrições/decisões em aberto (não implementadas neste checkpoint):** o domínio canônico está publicamente acessível **sem autenticação própria** da Torre (definir modelo de acesso/autenticação); o smoke visual completo em produção não foi automatizado. **Próximo ciclo: Gate G1 — evolução drill-down-driven da Gerencial**, uma frente separada do revamp U0–U6, ainda não iniciada.
+
 ---
 
 ## 1. Objetivo do revamp

@@ -105,3 +105,11 @@ Variaveis de ambiente necessarias no projeto da Vercel:
 - `NEXT_PUBLIC_API_URL`: URL publica do backend FastAPI.
 
 Observacao: o backend FastAPI e os pipelines Python nao ficam hospedados automaticamente na Vercel por esta configuracao. A Vercel ira publicar o app Next.js em `apps/web`; o backend precisa estar disponivel em outro host e informado em `NEXT_PUBLIC_API_URL`.
+
+### Publicacao atual (producao)
+
+- URL canonica (endereco operacional da Torre): `https://mktplace-gobeaute.vercel.app`
+- `https://mktplace-blond.vercel.app` e apenas um alias que redireciona (HTTP 307) para o dominio canonico.
+- As URLs efemeras de deployment da Vercel (padrao `mktplace-<hash>-...vercel.app`) NAO sao o endereco da Torre: alem de serem descartaveis, ficam atras do SSO da Vercel e nao constam na allowlist de CORS do backend, o que faz a Torre cair em modo demonstracao/offline nelas. Use sempre o dominio canonico.
+- `NEXT_PUBLIC_API_URL` deve apontar para o backend publico (FastAPI em `mktplace-api.onrender.com`), nunca para `localhost`/IP local.
+- O CORS do backend precisa autorizar o dominio canonico (`Access-Control-Allow-Origin: https://mktplace-gobeaute.vercel.app`); sem isso o frontend publicado nao consegue consumir a API e exibe o fallback offline.
