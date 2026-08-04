@@ -401,6 +401,9 @@ export interface ExecutiveHealth {
   summary: string;
 }
 
+export type InsightCategory = "performance" | "efficiency_ops" | "data_confidence";
+export type InsightReferenceKind = "median" | "p75" | "threshold" | "previous_period";
+
 export interface ExecutiveInsight {
   type: string;
   severity: "info" | "warning" | "critical";
@@ -410,6 +413,18 @@ export interface ExecutiveInsight {
   marketplace: string | null;
   metric_value: number | null;
   href: string;
+  // Campos aditivos (Gate G1) — Optional/podem faltar em payload legado.
+  category?: InsightCategory | null;
+  reference_value?: number | null;
+  reference_kind?: InsightReferenceKind | null;
+  delta_abs?: number | null;
+  delta_pct?: number | null;
+  confidence_note?: string | null;
+  // Preenchidos só em stale_data (aditivos do Gate 2 Fase 1).
+  source?: string | null;
+  last_date?: string | null;
+  threshold_days?: number | null;
+  staleness_days?: number | null;
 }
 
 export interface ExecutiveDataWarning {
@@ -417,6 +432,7 @@ export interface ExecutiveDataWarning {
   severity: "info" | "warning" | "critical";
   message: string;
   href: string | null;
+  category?: InsightCategory | null;
 }
 
 export interface ExecutiveSummaryData {

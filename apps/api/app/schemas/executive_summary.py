@@ -13,6 +13,11 @@ from pydantic import BaseModel, Field
 from app.schemas.performance import FiltersEcho
 
 Severity = Literal["info", "warning", "critical"]
+# Categoria semantica (Gate G1) — separa desempenho comercial, eficiencia/
+# operacao e confianca no dado. Aditivo e Optional: payloads/clientes antigos
+# que nao a declaram continuam validos.
+InsightCategory = Literal["performance", "efficiency_ops", "data_confidence"]
+ReferenceKind = Literal["median", "p75", "threshold", "previous_period"]
 
 
 class ExecutivePeriod(BaseModel):
@@ -41,6 +46,14 @@ class ExecutiveChange(BaseModel):
     marketplace: Optional[str] = None
     metric_value: Optional[float] = None
     href: str
+    # Campos aditivos (Gate G1) — categorizacao + referencia/diferenca para o
+    # drill-down. Todos Optional: retrocompativel com o contrato anterior.
+    category: Optional[InsightCategory] = None
+    reference_value: Optional[float] = None
+    reference_kind: Optional[ReferenceKind] = None
+    delta_abs: Optional[float] = None
+    delta_pct: Optional[float] = None
+    confidence_note: Optional[str] = None
 
 
 class ExecutiveRisk(BaseModel):
@@ -60,6 +73,14 @@ class ExecutiveRisk(BaseModel):
     last_date: Optional[str] = None
     threshold_days: Optional[int] = None
     staleness_days: Optional[int] = None
+    # Campos aditivos (Gate G1) — categorizacao + referencia/diferenca/
+    # confianca para o drill-down. Todos Optional: retrocompativel.
+    category: Optional[InsightCategory] = None
+    reference_value: Optional[float] = None
+    reference_kind: Optional[ReferenceKind] = None
+    delta_abs: Optional[float] = None
+    delta_pct: Optional[float] = None
+    confidence_note: Optional[str] = None
 
 
 class ExecutiveDataWarning(BaseModel):
@@ -67,6 +88,9 @@ class ExecutiveDataWarning(BaseModel):
     severity: Severity
     message: str
     href: Optional[str] = None
+    # Aditivo (Gate G1): sempre "data_confidence" — os warnings nunca sao
+    # risco comercial. Optional para retrocompatibilidade.
+    category: Optional[InsightCategory] = None
 
 
 class ExecutiveSummaryResponse(BaseModel):

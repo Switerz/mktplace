@@ -12,6 +12,7 @@ caminho "sem dados" funciona de ponta a ponta.
 """
 from __future__ import annotations
 
+import statistics
 from datetime import date, datetime, timezone
 
 import pytest
@@ -60,9 +61,41 @@ def _quality(brand_rows, refreshed_at="2026-07-13T06:00:00+00:00"):
     return {"ref_month": "2026-06", "marketplace": "all", "kpis": {}, "brands": brand_rows, "refreshed_at": refreshed_at}
 
 
-def _canais(channel_rows, refreshed_at="2026-07-13T06:00:00+00:00"):
+def _canais(channel_rows, channel_medians=None, refreshed_at="2026-07-13T06:00:00+00:00"):
     return {"ref_month": "2026-06", "marketplace": "all", "kpis": {}, "brands": [], "channel_rows": channel_rows,
-            "channel_medians": [], "refreshed_at": refreshed_at}
+            "channel_medians": channel_medians or [], "refreshed_at": refreshed_at}
+
+
+_CH_LABEL = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
+
+
+def _p75_nearest_rank(values):
+    """Mesma formula do performance_service._percentile_nearest_rank(.,75) —
+    para os testes montarem o mesmo p75 que Canais usaria."""
+    s = sorted(values)
+    idx = max(0, min(len(s) - 1, round(0.75 * (len(s) - 1))))
+    return s[idx]
+
+
+def _canais_cost(channel, cost_values):
+    """Monta um `canais` com uma marca por valor de custo, marcando
+    `custo_alto` exatamente onde Canais marcaria (`custo >= p75`, >=2 marcas),
+    e o channel_medians com mediana/p75 correspondentes. Deixa o GUARDRAIL da
+    camada executiva ser o que os testes exercitam."""
+    med = statistics.median(cost_values) if len(cost_values) >= 2 else None
+    p75 = _p75_nearest_rank(cost_values) if len(cost_values) >= 2 else None
+    rows = []
+    for i, v in enumerate(cost_values):
+        signals = ["custo_alto"] if (p75 is not None and v is not None and v >= p75) else []
+        rows.append({
+            "brand": f"b{i}", "label": f"B{i}", "channel": channel, "channel_label": _CH_LABEL[channel],
+            "gmv": 10_000, "orders": 100, "marketplace_cost_pct": v, "signals": signals,
+        })
+    medians = [{
+        "channel": channel, "channel_label": _CH_LABEL[channel],
+        "marketplace_cost_pct_median": med, "marketplace_cost_pct_p75": p75,
+    }]
+    return _canais(rows, channel_medians=medians)
 
 
 def _regioes_summary(coverage_level="ok", uf_fill_pct=95.0, channels_sem_cobertura=None, refreshed_at="2026-07-13T06:00:00+00:00"):
@@ -153,26 +186,61 @@ def test_health_critical_quando_sem_dado_no_periodo():
     assert any(r["type"] == "missing_data" for r in result["risks"])
 
 
-def test_health_attention_por_risco_warning_mesmo_sem_queda_de_gmv():
+def test_health_attention_por_risco_comercial_warning_mesmo_sem_queda_de_gmv():
+    # Cancelamento alto (risco COMERCIAL) sobe a saude para "attention" mesmo
+    # com GMV estavel — comportamento preservado para riscos comerciais.
     result = _compose(
         overview=_overview(gmv_mom_pct=2.0),
-        regioes_summary=_regioes_summary(coverage_level="low", uf_fill_pct=10.0),
+        quality=_quality([
+            {"brand": "a", "label": "A", "ml_cancel_rate_pct": 4.0},
+            {"brand": "b", "label": "B", "ml_cancel_rate_pct": 4.0},
+            {"brand": "c", "label": "C", "ml_cancel_rate_pct": 20.0},
+        ]),
     )
     assert result["health"]["status"] == "attention"
 
 
-def test_health_summary_texto_reflete_queda_e_contagem_de_riscos():
+def test_health_confianca_no_dado_nao_altera_saude_comercial():
+    # Gate G1: cobertura baixa + dado defasado (ambos data_confidence) com GMV
+    # estavel NAO devem tornar a saude "attention" — sao avisos de dado.
+    result = _compose(
+        overview=_overview(gmv_mom_pct=2.0),
+        regioes_summary=_regioes_summary(coverage_level="low", uf_fill_pct=10.0),
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 6, 20))],
+    )
+    assert result["health"]["status"] == "ok"
+    # os avisos de dado existem, so' nao mexem na saude comercial
+    assert any(r["type"] == "low_regional_coverage" for r in result["risks"])
+    assert any(r["type"] == "stale_data" for r in result["risks"])
+
+
+def test_health_summary_menciona_apenas_variacao_de_gmv_sem_contagem():
+    # Finding 7 (Task 3): o summary comunica SO' a variacao de GMV — nunca uma
+    # contagem de riscos/atencoes (as quantidades vivem no Pulso, ja agrupadas).
     result = _compose(
         overview=_overview(gmv_mom_pct=-25.0),
+        quality=_quality([
+            {"brand": "a", "label": "A", "ml_cancel_rate_pct": 4.0},
+            {"brand": "b", "label": "B", "ml_cancel_rate_pct": 4.0},
+            {"brand": "c", "label": "C", "ml_cancel_rate_pct": 20.0},
+        ]),
         regioes_summary=_regioes_summary(coverage_level="low", uf_fill_pct=10.0),
     )
-    assert "caiu" in result["health"]["summary"]
-    assert "risco" in result["health"]["summary"]
+    summary = result["health"]["summary"]
+    assert "caiu" in summary and "25.0%" in summary
+    # nenhuma contagem de atencoes/riscos no texto
+    assert "atenção" not in summary and "atenções" not in summary and "risco" not in summary
+
+
+def test_health_summary_crescimento():
+    result = _compose(overview=_overview(gmv_mom_pct=8.0))
+    assert result["health"]["summary"] == "GMV cresceu 8.0% frente ao período anterior."
 
 
 def test_health_summary_sem_comparacao_disponivel():
     result = _compose(overview=_overview(gmv_mom_pct=None))
-    assert "sem comparação" in result["health"]["summary"]
+    assert "comparação" in result["health"]["summary"].lower()
+    assert "atenção" not in result["health"]["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +294,50 @@ def test_changes_queda_moderada_fica_warning():
     assert drop["severity"] == "warning"
 
 
+def test_changes_growth_tem_categoria_e_referencia_periodo_anterior():
+    result = _compose(brands=_brands([_brand_row("kokeshi", "KOKESHI", 50_000, 20_000, 150.0)]))
+    g = result["changes"][0]
+    assert g["category"] == "performance"
+    assert g["reference_kind"] == "previous_period"
+    assert g["reference_value"] == 20_000
+    assert g["delta_abs"] == 30_000
+    assert g["delta_pct"] == 150.0
+
+
+def test_changes_drop_tem_delta_negativo_e_categoria():
+    result = _compose(brands=_brands([_brand_row("kokeshi", "KOKESHI", 40_000, 50_000, -20.0)]))
+    d = result["changes"][0]
+    assert d["category"] == "performance"
+    assert d["delta_abs"] == -10_000
+    assert d["delta_pct"] == -20.0
+
+
+def test_risco_cancelamento_tem_referencia_threshold_e_confidence_note():
+    quality = _quality([
+        {"brand": "a", "label": "A", "ml_cancel_rate_pct": 4.0},
+        {"brand": "b", "label": "B", "ml_cancel_rate_pct": 4.0},
+        {"brand": "c", "label": "C", "ml_cancel_rate_pct": 20.0},
+    ])
+    risk = next(r for r in _compose(quality=quality)["risks"] if r["type"] == "high_cancel_rate")
+    assert risk["category"] == "efficiency_ops"
+    assert risk["reference_kind"] == "threshold"
+    assert risk["reference_value"] == pytest.approx(4.0 * 1.5)  # mediana 4 x 1,5
+    assert risk["delta_abs"] == pytest.approx(20.0 - 6.0)
+    assert "mediana" in risk["confidence_note"].lower()
+
+
+def test_missing_data_categoria_data_confidence_e_fora_da_contagem_comercial():
+    result = _compose(overview=_overview(gmv=0.0, orders=0, gmv_mom_pct=None))
+    md = next(r for r in result["risks"] if r["type"] == "missing_data")
+    assert md["category"] == "data_confidence"
+    # Finding 3 (Task 3): nunca fabricar "0" como metrica em missing_data
+    assert md["metric_value"] is None
+    assert result["health"]["status"] == "critical"
+    # nao e' contado como atencao comercial no summary
+    assert "Sem dados" in result["health"]["summary"]
+    assert "atenção" not in result["health"]["summary"]
+
+
 # ---------------------------------------------------------------------------
 # Risks — nao inventam dado ausente
 # ---------------------------------------------------------------------------
@@ -263,35 +375,87 @@ def test_risco_cancelamento_nao_compara_ml_com_shopee():
     assert result["risks"] == [] or not any(r["marketplace"] == "shopee" for r in result["risks"])
 
 
-def test_risco_custo_alto_reaproveita_sinal_de_canais():
-    canais = _canais([{
-        "brand": "kokeshi", "label": "KOKESHI", "channel": "shopee", "channel_label": "Shopee",
-        "gmv": 10_000, "orders": 100, "marketplace_cost_pct": 35.0, "signals": ["custo_alto"],
-    }])
-    result = _compose(canais=canais)
+def test_risco_custo_alto_guardrail_ignora_distribuicao_toda_zero():
+    # [0,0,0,0,0] — o cenario real do falso-positivo 0,0% (TikTok, 07/2026):
+    # p75=0, `custo_alto` marca todas, mas current>0 falha -> nenhum high_cost.
+    result = _compose(canais=_canais_cost("tiktok", [0.0, 0.0, 0.0, 0.0, 0.0]))
+    assert not any(r["type"] == "high_cost" for r in result["risks"])
+
+
+def test_risco_custo_alto_guardrail_ignora_distribuicao_plana_positiva():
+    # [5,5,5,5,5] — mediana=p75=5; `custo_alto` marca todas, mas nenhum
+    # current>mediana -> nenhum high_cost (nao ha outlier real).
+    result = _compose(canais=_canais_cost("shopee", [5.0, 5.0, 5.0, 5.0, 5.0]))
+    assert not any(r["type"] == "high_cost" for r in result["risks"])
+
+
+def test_risco_custo_alto_guardrail_preserva_outlier_legitimo():
+    # [5,5,5,5,6] — so' a marca com 6 (current>mediana=5 e >=p75=5).
+    result = _compose(canais=_canais_cost("shopee", [5.0, 5.0, 5.0, 5.0, 6.0]))
     risks = [r for r in result["risks"] if r["type"] == "high_cost"]
     assert len(risks) == 1
-    assert risks[0]["brand"] == "kokeshi"
-    assert risks[0]["href"] == "/canais?brands=kokeshi"
+    assert risks[0]["metric_value"] == 6.0
+    assert risks[0]["brand"] == "b4"  # o quinto valor (6.0)
+
+
+def test_risco_custo_alto_dispara_para_valores_acima_de_mediana_e_p75():
+    # [2,3,4,10,12] — mediana=4, p75=10; disparam 10 e 12.
+    result = _compose(canais=_canais_cost("ml", [2.0, 3.0, 4.0, 10.0, 12.0]))
+    risks = sorted((r for r in result["risks"] if r["type"] == "high_cost"), key=lambda r: r["metric_value"])
+    assert [r["metric_value"] for r in risks] == [10.0, 12.0]
+    assert all(r["category"] == "efficiency_ops" for r in risks)
+    assert all(r["reference_kind"] == "p75" and r["reference_value"] == 10.0 for r in risks)
+
+
+def test_risco_custo_alto_texto_mostra_atual_vs_mediana_e_p75_nunca_acima_do_usual():
+    result = _compose(canais=_canais_cost("shopee", [10.0, 12.0, 14.0, 30.0, 32.0]))
+    risk = next(r for r in result["risks"] if r["type"] == "high_cost")
+    desc = risk["description"]
+    assert "mediana" in desc and "p75" in desc
+    assert "acima do usual" not in desc
+    assert risk["delta_abs"] is not None and risk["confidence_note"] is not None
+
+
+def test_risco_custo_alto_texto_verdadeiro_quando_custo_igual_ao_p75():
+    # Finding 2 (Task 3): [1,2,3,4,4] -> mediana=3, p75=4; as marcas com 4
+    # disparam (>mediana e >=p75) com delta EXATO de 0,0 p.p. O texto nao pode
+    # dizer "acima do p75" (seria falso) — usa "diferença vs p75: +0.0 p.p.".
+    result = _compose(canais=_canais_cost("shopee", [1.0, 2.0, 3.0, 4.0, 4.0]))
+    risks = [r for r in result["risks"] if r["type"] == "high_cost"]
+    assert len(risks) == 2  # as duas marcas com 4.0
+    for r in risks:
+        assert r["metric_value"] == 4.0
+        assert r["delta_abs"] == 0.0
+        assert "acima do p75" not in r["description"]
+        assert "diferença vs p75: +0.0 p.p." in r["description"]
 
 
 def test_risco_custo_alto_ignora_linha_sem_sinal():
-    canais = _canais([{
-        "brand": "kokeshi", "label": "KOKESHI", "channel": "shopee", "channel_label": "Shopee",
-        "gmv": 10_000, "orders": 100, "marketplace_cost_pct": 10.0, "signals": [],
-    }])
+    canais = _canais_cost("shopee", [10.0, 30.0])  # b1 (30) tem custo_alto...
+    # ...mas removemos o sinal manualmente para garantir que sem sinal nao emite
+    for row in canais["channel_rows"]:
+        row["signals"] = []
     result = _compose(canais=canais)
     assert not any(r["type"] == "high_cost" for r in result["risks"])
 
 
-def test_risco_custo_alto_tiktok_menciona_aviso_de_base_diferente():
+def test_risco_custo_alto_sem_mediana_p75_nao_emite():
+    # Uma unica marca no canal -> Canais nao calcula mediana/p75 (>=2) -> o
+    # guardrail nao tem referencia -> nunca emite (mesmo com signal forcado).
     canais = _canais([{
-        "brand": "kokeshi", "label": "KOKESHI", "channel": "tiktok", "channel_label": "TikTok Shop",
+        "brand": "kokeshi", "label": "KOKESHI", "channel": "shopee", "channel_label": "Shopee",
         "gmv": 10_000, "orders": 100, "marketplace_cost_pct": 35.0, "signals": ["custo_alto"],
-    }])
+    }], channel_medians=[{"channel": "shopee", "channel_label": "Shopee",
+                          "marketplace_cost_pct_median": None, "marketplace_cost_pct_p75": None}])
     result = _compose(canais=canais)
+    assert not any(r["type"] == "high_cost" for r in result["risks"])
+
+
+def test_risco_custo_alto_tiktok_menciona_aviso_de_base_diferente_no_confidence_note():
+    result = _compose(canais=_canais_cost("tiktok", [5.0, 6.0, 7.0, 20.0, 22.0]))
     risk = next(r for r in result["risks"] if r["type"] == "high_cost")
-    assert "TikTok" in risk["description"]
+    assert "TikTok" in risk["title"]
+    assert "TikTok" in risk["confidence_note"]
 
 
 def test_risco_cobertura_regional_baixa():

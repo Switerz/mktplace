@@ -164,16 +164,22 @@ Referências:
 
 ## Ciclo ativo — evolução drill-down-driven da Gerencial
 
-Status: PLANEJADO — aguardando Gate G1.
+Status: **Gate G1 CONCLUÍDO (04/08/2026) — nova Gerencial drill-down-driven implementada, corrigida e validada em navegador. Aguardando revisão para commit (sem commit/push/deploy).**
 
 Objetivo:
 tornar a síntese executiva compacta, priorizada e explicável, com
 drill-down antes da navegação.
 
+Task 1 (design + auditoria) entregou, em [GERENCIAL_DRILLDOWN_PLAN.md](GERENCIAL_DRILLDOWN_PLAN.md): matriz da verdade de todos os alertas; **causa provada do "custo alto = 0,0%"** (falso positivo — sinal relativo `custo_alto` degenerando com custo TikTok somando 0 em 07/2026, `0 >= p75(0)` dispara para todas as marcas, texto incorreto); composição visual única (Pulso do período, KPIs no topo); regra determinística de categorização/agrupamento/prioridade; contrato mínimo aditivo do drill-down (sem endpoint novo); e o plano estreito da Task 2.
+
+Task 2 (implementação) entregou: guardrail do `high_cost` (elimina o falso positivo 0,0% — exige custo atual > 0, > mediana e ≥ p75 do canal, sem threshold arbitrário e sem tocar os sinais de Canais); saúde comercial separada da confiança no dado (frescor/cobertura/`not_applicable` não afetam a saúde; `missing_data` força "indisponível"); Pulso do período (KPIs no topo, no máx. 3 insights agrupados/priorizados + "Ver todos", contagem separada de avisos de dado) com drill-down que explica antes de navegar (reusa o `KpiDrilldownDialog`); contrato estendido de forma aditiva (sem endpoint novo). 411 testes da API, 387 do web, typecheck e build verdes; detector mecânico sem findings.
+
+Task 3 (correção consolidada + QA) corrigiu 8 findings: formatação orientada ao campo no drill-down (growth/drop com referência/delta em BRL, custo em p.p.); texto verdadeiro quando custo == p75 ("diferença vs p75: +0,0 p.p."); missing_data como "Dados indisponíveis" (nunca "Crítico", sem métrica "0" fabricada); evidência de stale_data (origem/última data/defasagem/limite) propagada ao drill-down; severidade de grupo = pior de todos os membros; CTA por membro em grupos multi-marca preservando querystring; `health.summary` só com variação de GMV (contagem vive no Pulso); acessibilidade (heading semântico, alvos ~44px, foco coerente). QA visual em navegador (Playwright temporário, executive-summary interceptado com payloads sintéticos): cenário normal, missing_data, falha isolada do resumo, diálogo individual + "Ver todos", CTA por membro, desktop/tablet/mobile, teclado/foco — tudo verde, sem overflow nem erros de console. 412 testes da API, 395 do web, typecheck, build e detector Impeccable verdes.
+
 Sequência:
-1. Gate G1 Task 1 — design e auditoria da verdade dos alertas;
-2. Gate G1 Task 2 — implementação;
-3. Gate G1 Task 3 — QA e única correção consolidada, se necessária.
+1. Gate G1 Task 1 — design e auditoria da verdade dos alertas — **concluída**;
+2. Gate G1 Task 2 — implementação — **concluída**;
+3. Gate G1 Task 3 — QA em navegador e correção consolidada — **concluída (PASS)**.
 
 Limite:
 máximo de três prompts; sem subgates G1.1/G1.2.

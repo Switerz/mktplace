@@ -52,7 +52,18 @@ MIN_BRANDS_FOR_CANCEL_MEDIAN = 2  # nao compara contra amostra de 1 marca
 # daquele mes nunca sao retocadas por um sync incremental forward-only),
 # mesmo com o pipeline saudavel e dado recente disponivel.
 DAILY_FRESHNESS_THRESHOLD_DAYS = 3
-REGIONAL_FRESHNESS_THRESHOLD_DAYS = 3  # regional ainda nao tem sync recorrente (Fase 3B pendente); mesmo limiar por ora
+# O `full_daily` recorrente ja executa `gold_regional_incremental` e
+# `sync_region_if_needed`; este alerta significa que `MAX(date)` regional
+# passou do limite APESAR desse mecanismo — pode ser ausencia de linhas novas
+# na origem ou desatualizacao operacional, nao ausencia de automacao. Mesmo
+# limiar de 3d do frescor diario.
+REGIONAL_FRESHNESS_THRESHOLD_DAYS = 3
+
+# Tipos de risco que contam como saude COMERCIAL/operacional (Gate G1) — o
+# resto (stale_data/low_regional_coverage/missing_data/not_applicable) e'
+# "confianca no dado" e nunca entra na saude comercial nem na contagem do
+# summary.
+COMMERCIAL_RISK_TYPES = ("high_cancel_rate", "high_cost")
 
 _MKT_DISPLAY = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
 _MKT_ID_NAME = {perf_svc.TIKTOK_ID: "tiktok", perf_svc.ML_ID: "ml", perf_svc.SHOPEE_ID: "shopee"}
@@ -167,17 +178,27 @@ def _compose_executive_summary(
     changes = _build_changes(brands)
     data_warnings = _build_data_warnings(regioes_summary, mkt_ids)
 
-    has_critical_risk = any(r["severity"] == "critical" for r in risks)
-    has_warning_risk = any(r["severity"] == "warning" for r in risks)
+    # Saude COMERCIAL (Gate G1): so' riscos comerciais/operacionais validos
+    # entram (high_cancel_rate, high_cost apos o guardrail). Frescor/cobertura/
+    # not_applicable sao "confianca no dado" e NUNCA alteram a saude comercial.
+    # missing_data e' excecao de disponibilidade: forca "critical" para a tela
+    # nunca dizer "Saudavel" sem dados, mas NAO conta como risco comercial nem
+    # entra na contagem do summary (no frontend aparece como "Dados
+    # indisponiveis", nao como diagnostico comercial).
+    commercial_risks = [r for r in risks if r["type"] in COMMERCIAL_RISK_TYPES]
+    has_critical_commercial = any(r["severity"] == "critical" for r in commercial_risks)
+    has_warning_commercial = any(r["severity"] == "warning" for r in commercial_risks)
 
-    if has_critical_risk or (gmv_mom_pct is not None and gmv_mom_pct <= HEALTH_DROP_CRITICAL_PCT):
+    if no_data:
         status = "critical"
-    elif has_warning_risk or (gmv_mom_pct is not None and gmv_mom_pct <= HEALTH_DROP_WARN_PCT):
+    elif has_critical_commercial or (gmv_mom_pct is not None and gmv_mom_pct <= HEALTH_DROP_CRITICAL_PCT):
+        status = "critical"
+    elif has_warning_commercial or (gmv_mom_pct is not None and gmv_mom_pct <= HEALTH_DROP_WARN_PCT):
         status = "attention"
     else:
         status = "ok"
 
-    summary = _health_summary(gmv_mom_pct, len(risks))
+    summary = _health_summary(gmv_mom_pct, no_data)
 
     return {
         "period": {
@@ -202,15 +223,19 @@ def _compose_executive_summary(
     }
 
 
-def _health_summary(gmv_mom_pct: float | None, risk_count: int) -> str:
+def _health_summary(gmv_mom_pct: float | None, no_data: bool) -> str:
+    """Gate G1 (Task 3, Finding 7): comunica SOMENTE a variacao de GMV frente
+    ao periodo anterior, a ausencia de comparacao, ou a indisponibilidade de
+    dados. NAO conta atencoes/riscos aqui — as quantidades vivem no proprio
+    Pulso, que conhece o agrupamento final (contar riscos brutos aqui
+    contradizia o numero agrupado exibido na tela)."""
+    if no_data:
+        return "Sem dados no período selecionado — não é possível avaliar o desempenho."
     if gmv_mom_pct is None:
-        trend_txt = "sem comparação disponível para o período"
-    elif gmv_mom_pct >= 0:
-        trend_txt = f"GMV cresceu {gmv_mom_pct:.1f}% frente ao período anterior"
-    else:
-        trend_txt = f"GMV caiu {abs(gmv_mom_pct):.1f}% frente ao período anterior"
-    risk_txt = f"{risk_count} risco(s) identificado(s)" if risk_count else "sem riscos identificados"
-    return f"{trend_txt}; {risk_txt}."
+        return "Sem comparação disponível para o período."
+    if gmv_mom_pct >= 0:
+        return f"GMV cresceu {gmv_mom_pct:.1f}% frente ao período anterior."
+    return f"GMV caiu {abs(gmv_mom_pct):.1f}% frente ao período anterior."
 
 
 def _build_changes(brands_resp: dict) -> list[dict]:
@@ -234,6 +259,12 @@ def _build_changes(brands_resp: dict) -> list[dict]:
             "marketplace": None,
             "metric_value": b["mom_pct"],
             "href": f"/canais?brands={b['brand']}",
+            # Gate G1: categoria + referencia (periodo anterior) + diferenca
+            "category": "performance",
+            "reference_value": b["total_gmv_prev"],
+            "reference_kind": "previous_period",
+            "delta_abs": b["total_gmv"] - b["total_gmv_prev"],
+            "delta_pct": b["mom_pct"],
         })
     for b in drop:
         severity = "critical" if b["mom_pct"] <= DROP_STEEP_PCT else "warning"
@@ -248,6 +279,11 @@ def _build_changes(brands_resp: dict) -> list[dict]:
             "marketplace": None,
             "metric_value": b["mom_pct"],
             "href": f"/canais?brands={b['brand']}",
+            "category": "performance",
+            "reference_value": b["total_gmv_prev"],
+            "reference_kind": "previous_period",
+            "delta_abs": b["total_gmv"] - b["total_gmv_prev"],
+            "delta_pct": b["mom_pct"],
         })
     return changes
 
@@ -256,6 +292,9 @@ def _build_risks(quality: dict, canais: dict, regioes_summary: dict, no_data: bo
     risks: list[dict] = []
 
     if no_data:
+        # Excecao de disponibilidade (Gate G1): categoria data_confidence —
+        # forca a saude critica (tela nunca diz "Saudavel" sem dados) mas NAO
+        # e' contado como risco comercial nem entra no summary comercial.
         risks.append({
             "type": "missing_data",
             "severity": "critical",
@@ -263,8 +302,11 @@ def _build_risks(quality: dict, canais: dict, regioes_summary: dict, no_data: bo
             "description": "GMV e pedidos vieram zerados para os filtros aplicados — confira canal, marca e período.",
             "brand": None,
             "marketplace": None,
-            "metric_value": 0.0,
+            # NAO fabricar "0" como metrica (Finding 3): missing_data e'
+            # ausencia de dado, nao um valor medido.
+            "metric_value": None,
             "href": "/",
+            "category": "data_confidence",
         })
 
     # Cancelamento alto: comparado dentro do MESMO canal (nunca ML vs Shopee —
@@ -274,21 +316,59 @@ def _build_risks(quality: dict, canais: dict, regioes_summary: dict, no_data: bo
     _append_cancel_risks(risks, quality, "ml", "ml_cancel_rate_pct")
     _append_cancel_risks(risks, quality, "shopee", "shopee_cancel_rate_pct")
 
-    # Custo alto: reaproveita o sinal ja calculado em Canais (mediana/p75 por
-    # canal, so com >=2 marcas com dado valido) — nao recalcula do zero.
+    # Custo alto (Gate G1 — guardrail): o sinal `custo_alto` de Canais e'
+    # relativo (top-quartil, `custo >= p75`) e DEGENERA quando a distribuicao
+    # nao tem dispersao — ex.: custo do TikTok somando 0 para todas as marcas
+    # gera cost_vals=[0,0,0,0,0], p75=0 e `0 >= 0` marca 100% das marcas com
+    # "0,0%" (falso positivo). Aqui, SO' na camada executiva (a matriz/sinais
+    # de Canais ficam intocados), so' emitimos o risco quando ha dispersao
+    # real e valor material, reusando mediana/p75 ja calculados por Canais:
+    #   custo atual > 0  E  custo atual > mediana do canal  E  custo >= p75.
+    # Isso elimina [0,0,0,0,0] e a distribuicao plana positiva [5,5,5,5,5]
+    # (nenhum > mediana), preserva um outlier legitimo [5,5,5,5,6] (so' o 6) e
+    # NAO inventa nenhum threshold comercial arbitrario.
+    cost_ref = {m["channel"]: m for m in canais.get("channel_medians", [])}
+    cost_sample: dict[str, int] = {}
+    for r in canais.get("channel_rows", []):
+        if r.get("marketplace_cost_pct") is not None:
+            cost_sample[r["channel"]] = cost_sample.get(r["channel"], 0) + 1
     for row in canais.get("channel_rows", []):
-        if "custo_alto" in row.get("signals", []):
-            note = " Base de custo do TikTok difere de GMV comercial (~5,5%, ver aviso de dados)." if row["channel"] == "tiktok" else ""
-            risks.append({
-                "type": "high_cost",
-                "severity": "warning",
-                "title": f"Custo de marketplace alto em {row['label']} ({row['channel_label']})",
-                "description": f"Custo/GMV de {row['marketplace_cost_pct']:.1f}% acima do usual entre marcas do canal.{note}",
-                "brand": row["brand"],
-                "marketplace": row["channel"],
-                "metric_value": row["marketplace_cost_pct"],
-                "href": f"/canais?brands={row['brand']}",
-            })
+        if "custo_alto" not in row.get("signals", []):
+            continue
+        ref = cost_ref.get(row["channel"])
+        current = row.get("marketplace_cost_pct")
+        median = ref.get("marketplace_cost_pct_median") if ref else None
+        p75 = ref.get("marketplace_cost_pct_p75") if ref else None
+        if current is None or median is None or p75 is None:
+            continue
+        if not (current > 0 and current > median and current >= p75):
+            continue
+        note = " Base de custo do TikTok difere de GMV comercial (~5,5%, ver aviso de dados)." if row["channel"] == "tiktok" else ""
+        n = cost_sample.get(row["channel"], 0)
+        risks.append({
+            "type": "high_cost",
+            "severity": "warning",
+            "title": f"Custo de marketplace alto em {row['label']} ({row['channel_label']})",
+            # NUNCA "X% acima do usual" (X seria o proprio custo). Tambem NAO
+            # afirma "acima do p75" quando current == p75 (delta 0,0 p.p. seria
+            # falso): usa "diferenca vs p75: +N p.p.", sempre verdadeiro
+            # (inclui +0,0 quando esta exatamente no p75).
+            "description": (
+                f"Custo/GMV de {current:.1f}% no canal — mediana {median:.1f}%, p75 {p75:.1f}% "
+                f"(diferença vs p75: {current - p75:+.1f} p.p.)."
+            ),
+            "brand": row["brand"],
+            "marketplace": row["channel"],
+            "metric_value": current,
+            "href": f"/canais?brands={row['brand']}",
+            "category": "efficiency_ops",
+            "reference_value": p75,
+            "reference_kind": "p75",
+            "delta_abs": current - p75,
+            "confidence_note": (
+                f"Mediana {median:.1f}%, p75 {p75:.1f}% entre {n} marca(s) com custo no canal.{note}"
+            ),
+        })
 
     level = regioes_summary.get("coverage_level")
     if level in ("low", "partial"):
@@ -306,6 +386,7 @@ def _build_risks(quality: dict, canais: dict, regioes_summary: dict, no_data: bo
             "marketplace": None,
             "metric_value": uf_fill_pct,
             "href": "/regioes",
+            "category": "data_confidence",
         })
 
     return risks
@@ -321,17 +402,31 @@ def _append_cancel_risks(risks: list[dict], quality: dict, marketplace: str, fie
         return
     threshold = median * CANCEL_ALERT_MULTIPLIER
     display = _MKT_DISPLAY.get(marketplace, marketplace)
+    n = len(values)
     for brand, label, rate in values:
         if rate >= threshold:
             risks.append({
                 "type": "high_cancel_rate",
                 "severity": "warning",
                 "title": f"Cancelamento alto em {label} ({display})",
-                "description": f"Cancelamento de {rate:.1f}% vs mediana de {median:.1f}% entre marcas do canal.",
+                "description": (
+                    f"Cancelamento de {rate:.1f}% vs limite {threshold:.1f}% "
+                    f"(mediana {median:.1f}% × {CANCEL_ALERT_MULTIPLIER:g}) do canal."
+                ),
                 "brand": brand,
                 "marketplace": marketplace,
                 "metric_value": rate,
                 "href": f"/qualidade?brands={brand}",
+                # Gate G1: eficiencia/operacao; referencia = limite efetivo
+                # (mediana x fator); diferenca em pontos percentuais.
+                "category": "efficiency_ops",
+                "reference_value": threshold,
+                "reference_kind": "threshold",
+                "delta_abs": rate - threshold,
+                "confidence_note": (
+                    f"Mediana {median:.1f}% entre {n} marca(s) do canal; "
+                    f"limite = mediana × {CANCEL_ALERT_MULTIPLIER:g}."
+                ),
             })
 
 
@@ -368,6 +463,7 @@ def _build_daily_performance_freshness_risks(freshness_rows: list[dict], now: da
             "last_date": max_date.isoformat(),
             "threshold_days": DAILY_FRESHNESS_THRESHOLD_DAYS,
             "staleness_days": staleness_days,
+            "category": "data_confidence",
         })
     return risks
 
@@ -398,6 +494,7 @@ def _build_regional_freshness_risk(max_date, now: datetime) -> dict | None:
         "last_date": max_date.isoformat(),
         "threshold_days": REGIONAL_FRESHNESS_THRESHOLD_DAYS,
         "staleness_days": staleness_days,
+        "category": "data_confidence",
     }
 
 
@@ -413,5 +510,6 @@ def _build_data_warnings(regioes_summary: dict, mkt_ids: list[int]) -> list[dict
             "severity": "info",
             "message": "TikTok Shop não possui cobertura regional (UF) em nenhuma fonte mapeada — fica fora da leitura de cobertura.",
             "href": "/regioes",
+            "category": "data_confidence",
         })
     return warnings

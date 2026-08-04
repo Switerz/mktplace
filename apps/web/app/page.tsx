@@ -19,7 +19,9 @@ import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import TrendChart from "@/components/TrendChart";
 import BrandPerformanceTable from "@/components/BrandPerformanceTable";
-import ExecutiveSummaryCard from "@/components/ExecutiveSummaryCard";
+import PulsoPeriodoPanel from "@/components/PulsoPeriodoPanel";
+import InsightDrilldownContent, { type PulseView } from "@/components/InsightDrilldownContent";
+import { buildPulse } from "@/lib/executive-pulse";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
@@ -77,7 +79,14 @@ function DashboardInner() {
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [execSummary, setExecSummary] = useState<ExecutiveSummaryData | null>(null);
   const [execLoading, setExecLoading] = useState(true);
+  // Chave da ultima requisicao de resumo executivo concluida (sucesso OU
+  // falha) — mesma protecao contra dado antigo do Finding 2, agora para o
+  // Pulso. Enquanto != requestKey, o Pulso e' tratado como carregando.
+  const [execResolvedKey, setExecResolvedKey] = useState<string | null>(null);
   const [openKpi, setOpenKpi] = useState<KpiKind | null>(null);
+  // Drill-down do Pulso (Gate G1): null = fechado; senao o modo/grupo aberto
+  // no MESMO KpiDrilldownDialog reutilizado (nunca modal empilhado).
+  const [pulseView, setPulseView] = useState<PulseView | null>(null);
   // Chave da ultima requisicao que terminou com SUCESSO (Finding 2) — null
   // ate o primeiro fetch resolver. Comparada com `requestKey` (derivado dos
   // filtros/retryKey atuais) para decidir se overview/brands/trend em
@@ -132,16 +141,24 @@ function DashboardInner() {
     // executivo e um bloco de sintese, nao um dado essencial da Gerencial.
     let ignore = false;
     setExecLoading(true);
+    // Fecha qualquer drill-down do Pulso aberto — so' faz sentido para o dado
+    // que estava fresco ate agora (mesma regra do setOpenKpi(null) acima).
+    setPulseView(null);
+    const key = buildRequestKey(filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey);
     const opts = { brands: filters.brands, dateFrom: filters.dateFrom, dateTo: filters.dateTo, compare: filters.compare };
     fetchExecutiveSummary(filters.channels, opts)
       .then((res) => {
         if (ignore) return;
         setExecSummary(res.data);
+        setExecResolvedKey(key);
         setExecLoading(false);
       })
       .catch(() => {
         if (ignore) return;
         setExecSummary(null);
+        // Conclui a chave mesmo na falha (senao o Pulso fica preso em
+        // "carregando" para sempre — mesmo Finding do U4).
+        setExecResolvedKey(key);
         setExecLoading(false);
       });
     return () => { ignore = true; };
@@ -175,6 +192,26 @@ function DashboardInner() {
     avg_ticket: displayOverview ? fmtBrl(displayOverview.avg_ticket) : "—",
     roas: roasCard.value,
   };
+
+  // Pulso do periodo (Gate G1) — protegido por frescor de requisicao, como os
+  // KPIs: so' usa o resumo executivo quando a chave resolvida bate com a
+  // atual. Enquanto carrega/estranho, o painel mostra skeleton; se a
+  // requisicao concluiu sem dado, mostra o estado de indisponibilidade.
+  const execFresh = !execLoading && execResolvedKey === requestKey && execSummary != null;
+  const pulseLoading = execLoading || execResolvedKey !== requestKey;
+  const pulseUnavailable = !pulseLoading && execSummary == null;
+  const pulse = useMemo(() => buildPulse(execFresh ? execSummary : null), [execFresh, execSummary]);
+  const pulseHealth = execFresh ? execSummary!.health : null;
+
+  const pulseDialogTitle = (() => {
+    if (!pulseView) return "";
+    if (pulseView.key) {
+      const g = pulse.commercial.find((x) => x.key === pulseView.key)
+        ?? pulse.dataConfidence.groups.find((x) => x.key === pulseView.key);
+      if (g) return g.title;
+    }
+    return "Todos os sinais do período";
+  })();
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
@@ -252,11 +289,6 @@ function DashboardInner() {
         {loading ? "Carregando dados..." : error ? "Falha ao carregar dados." : "Dados carregados."}
       </span>
 
-      {/* Resumo executivo — sintese de Saude/O que mudou/Atencoes, ponto de
-          entrada do fluxo resumo->desvio->clique->explicacao. Fetch e falha
-          independentes dos cards/tabela/trend abaixo (ver useEffect proprio). */}
-      <ExecutiveSummaryCard data={execSummary} loading={execLoading} buildHref={buildHref} />
-
       {isEmpty ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
           <p className="text-slate-500 text-sm font-medium">Sem dados no período e filtros selecionados.</p>
@@ -302,13 +334,29 @@ function DashboardInner() {
             />
           </div>
 
-          {/* Area analitica principal — tendencia em destaque + composicao
-              por canal, lado a lado no desktop. */}
+          {/* Area analitica principal (Gate G1): tendencia em destaque a
+              esquerda; coluna direita empilha Pulso do periodo + Desempenho
+              por canal no desktop. No mobile a ordem e' KPIs -> Pulso ->
+              Tendencia -> Canal (via order-*), sem toggle. O <table> por
+              marca segue abaixo. Ordem no DOM: Tendencia (ancora o span 2x2),
+              Pulso, Canal. */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
-            <div className="lg:col-span-2">
+            <div className="order-2 lg:order-none lg:col-span-2 lg:row-span-2">
               <TrendChart data={displayTrend} granularity={trendGranularity} loading={loading} />
             </div>
-            <ChannelPerformancePanel overview={displayOverview} channels={filters.channels} loading={loading} buildHref={buildHref} />
+            <div className="order-1 lg:order-none">
+              <PulsoPeriodoPanel
+                pulse={pulse}
+                health={pulseHealth}
+                loading={pulseLoading}
+                unavailable={pulseUnavailable}
+                onOpenInsight={(key) => setPulseView({ mode: "insight", key })}
+                onOpenAll={() => setPulseView({ mode: "all", key: null })}
+              />
+            </div>
+            <div className="order-3 lg:order-none">
+              <ChannelPerformancePanel overview={displayOverview} channels={filters.channels} loading={loading} buildHref={buildHref} />
+            </div>
           </div>
 
           {/* Tabela por marca */}
@@ -350,6 +398,26 @@ function DashboardInner() {
             overview={displayOverview}
             brands={displayBrands}
             channels={filters.channels}
+            buildHref={buildHref}
+          />
+        )}
+      </KpiDrilldownDialog>
+
+      {/* Drill-down do Pulso (Gate G1) — reusa o MESMO shell acessível do
+          KpiDrilldownDialog. "Ver todos" e detalhe de grupo vivem no mesmo
+          diálogo (troca de view por estado, sem modal empilhado). */}
+      <KpiDrilldownDialog
+        open={pulseView != null}
+        onClose={() => setPulseView(null)}
+        title={pulseDialogTitle}
+      >
+        {pulseView && (
+          <InsightDrilldownContent
+            pulse={pulse}
+            view={pulseView}
+            periodLabel={periodLabel}
+            onSelectGroup={(key) => setPulseView({ mode: "all", key })}
+            onBackToAll={() => setPulseView({ mode: "all", key: null })}
             buildHref={buildHref}
           />
         )}
