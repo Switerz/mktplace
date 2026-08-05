@@ -237,6 +237,7 @@ def _build_channel_rows(by_brand: dict[str, dict[int, dict]]) -> tuple[list[dict
         roas_med = _median(roas_vals) if len(roas_vals) >= 2 else None
         cost_p75 = _percentile_nearest_rank(cost_vals, 75) if len(cost_vals) >= 2 else None
         ship_p75 = _percentile_nearest_rank(ship_vals, 75) if len(ship_vals) >= 2 else None
+        cost_med = _median(cost_vals) if len(cost_vals) >= 2 else None
 
         channel_medians.append({
             "channel": channel,
@@ -244,7 +245,7 @@ def _build_channel_rows(by_brand: dict[str, dict[int, dict]]) -> tuple[list[dict
             "gmv_median": gmv_med,
             "ads_gmv_pct_median": ads_med,
             "roas_median": roas_med,
-            "marketplace_cost_pct_median": _median(cost_vals) if len(cost_vals) >= 2 else None,
+            "marketplace_cost_pct_median": cost_med,
             "marketplace_cost_pct_p75": cost_p75,
             "seller_shipping_pct_median": _median(ship_vals) if len(ship_vals) >= 2 else None,
             "seller_shipping_pct_p75": ship_p75,
@@ -269,7 +270,25 @@ def _build_channel_rows(by_brand: dict[str, dict[int, dict]]) -> tuple[list[dict
                 signals.append("sem_dado")
 
             if row["marketplace_cost_available"]:
-                if cost_p75 is not None and row["marketplace_cost_pct"] is not None and row["marketplace_cost_pct"] >= cost_p75:
+                # Gate DQ2 (achado 6 do DQ1): `custo_alto` e' um sinal RELATIVO
+                # (top-quartil do canal) e degenera quando a distribuicao nao
+                # tem dispersao — custo do TikTok somando 0 em todas as marcas
+                # produz cost_vals=[0,0,...], p75=0 e `0 >= 0` marcaria 100% das
+                # marcas com "0,0%" de custo. A mesma guarda ja aprovada no Gate
+                # G1 para a camada executiva passa a valer no PRODUTOR do sinal:
+                #   custo atual > 0  E  > mediana do canal  E  >= p75.
+                # Elimina [0,0,0,0,0] e a distribuicao plana positiva
+                # [5,5,5,5,5] (nenhum > mediana), preserva o outlier legitimo
+                # [10,20,40] (so' o 40) e NAO introduz threshold comercial novo.
+                current_cost = row["marketplace_cost_pct"]
+                if (
+                    cost_p75 is not None
+                    and cost_med is not None
+                    and current_cost is not None
+                    and current_cost > 0
+                    and current_cost > cost_med
+                    and current_cost >= cost_p75
+                ):
                     signals.append("custo_alto")
             elif _COST_APPLICABLE[channel] and "sem_dado" not in signals:
                 signals.append("sem_dado")

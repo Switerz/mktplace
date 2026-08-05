@@ -223,6 +223,109 @@ def test_custo_alto_usa_percentil_75_do_canal():
 
 
 # ---------------------------------------------------------------------------
+# Gate DQ2 — `custo_alto` exige base de custo valida e distribuicao com
+# dispersao real (achado 6 do DQ1). Nenhum threshold comercial novo: e' a
+# mesma guarda ja aprovada no Gate G1, agora no produtor do sinal.
+# ---------------------------------------------------------------------------
+
+def test_custo_alto_nao_dispara_quando_custo_do_canal_e_zero_em_todas_as_marcas():
+    """TikTok com total_fees somando 0: cost_vals=[0,0,0], p75=0 e `0 >= 0`
+    marcaria 100% das marcas com custo "0,0%" — falso positivo eliminado."""
+    rows = [
+        _row("apice", perf_svc.TIKTOK_ID, gmv=1000, total_fees=0, total_fees_n=10),
+        _row("barbours", perf_svc.TIKTOK_ID, gmv=2000, total_fees=0, total_fees_n=10),
+        _row("kokeshi", perf_svc.TIKTOK_ID, gmv=3000, total_fees=0, total_fees_n=10),
+    ]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "tiktok", 2026, 5)
+
+    for brand in ("apice", "barbours", "kokeshi"):
+        tk = _row_for(result["channel_rows"], brand, "tiktok")
+        assert tk["marketplace_cost_pct"] == 0.0, "zero real segue sendo exibido como 0,0%"
+        assert "custo_alto" not in tk["signals"], f"{brand}: custo zero nunca sustenta custo_alto"
+
+
+def test_custo_alto_nao_dispara_com_custo_indisponivel_null():
+    """Sem linha de fee no periodo (total_fees_n=0) o custo e' indisponivel
+    (None, nunca 0) e o sinal nao pode ser emitido — vira `sem_dado`."""
+    rows = [
+        _row("apice", perf_svc.TIKTOK_ID, gmv=1000, total_fees=0, total_fees_n=0),
+        _row("barbours", perf_svc.TIKTOK_ID, gmv=2000, total_fees=0, total_fees_n=0),
+    ]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "tiktok", 2026, 5)
+
+    for brand in ("apice", "barbours"):
+        tk = _row_for(result["channel_rows"], brand, "tiktok")
+        assert tk["marketplace_cost_available"] is False
+        assert tk["marketplace_cost_pct"] is None, "ausencia e' None, nunca zero"
+        assert "custo_alto" not in tk["signals"]
+        assert "sem_dado" in tk["signals"]
+
+
+def test_custo_alto_nao_dispara_em_distribuicao_plana_positiva():
+    """[5%,5%,5%] tem p75=5 e todas as marcas atenderiam `>= p75`; nenhuma
+    esta acima da mediana, entao nao existe outlier a reportar."""
+    rows = [
+        _row("apice", perf_svc.SHOPEE_ID, gmv=1000, total_fees=50, total_fees_n=10),
+        _row("barbours", perf_svc.SHOPEE_ID, gmv=1000, total_fees=50, total_fees_n=10),
+        _row("kokeshi", perf_svc.SHOPEE_ID, gmv=1000, total_fees=50, total_fees_n=10),
+    ]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "shopee", 2026, 5)
+
+    for brand in ("apice", "barbours", "kokeshi"):
+        assert "custo_alto" not in _row_for(result["channel_rows"], brand, "shopee")["signals"]
+
+
+def test_custo_alto_preservado_para_outlier_legitimo_de_ml_e_shopee():
+    """Nao mascarar sinal verdadeiro: [5,5,5,6] mantem o 6 sinalizado nos dois
+    canais com base de custo real."""
+    for mkt_id, channel in ((perf_svc.ML_ID, "ml"), (perf_svc.SHOPEE_ID, "shopee")):
+        rows = [
+            _row("apice", mkt_id, gmv=1000, total_fees=50, total_fees_n=10),
+            _row("barbours", mkt_id, gmv=1000, total_fees=50, total_fees_n=10),
+            _row("lescent", mkt_id, gmv=1000, total_fees=50, total_fees_n=10),
+            _row("kokeshi", mkt_id, gmv=1000, total_fees=60, total_fees_n=10),
+        ]
+        db = FakeMappingSession([rows])
+        result = perf_svc.get_canais(db, channel, 2026, 5)
+
+        assert "custo_alto" in _row_for(result["channel_rows"], "kokeshi", channel)["signals"], channel
+        for brand in ("apice", "barbours", "lescent"):
+            assert "custo_alto" not in _row_for(result["channel_rows"], brand, channel)["signals"], f"{channel}/{brand}"
+
+
+def test_custo_abaixo_do_p75_nunca_recebe_custo_alto():
+    rows = [
+        _row("apice", perf_svc.SHOPEE_ID, gmv=1000, total_fees=100, total_fees_n=10),   # 10%
+        _row("barbours", perf_svc.SHOPEE_ID, gmv=1000, total_fees=200, total_fees_n=10),  # 20%
+        _row("kokeshi", perf_svc.SHOPEE_ID, gmv=1000, total_fees=400, total_fees_n=10),   # 40% (p75)
+    ]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "shopee", 2026, 5)
+
+    medians = {m["channel"]: m for m in result["channel_medians"]}["shopee"]
+    for brand in ("apice", "barbours"):
+        row = _row_for(result["channel_rows"], brand, "shopee")
+        assert row["marketplace_cost_pct"] < medians["marketplace_cost_pct_p75"]
+        assert "custo_alto" not in row["signals"]
+
+
+def test_custo_alto_exige_referencia_do_mesmo_canal_com_pelo_menos_duas_marcas():
+    """Uma marca sozinha no canal nao tem mediana/p75 (nunca se compara contra
+    si mesma) — sem referencia, sem sinal."""
+    rows = [_row("kokeshi", perf_svc.SHOPEE_ID, gmv=1000, total_fees=900, total_fees_n=10)]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "shopee", 2026, 5)
+
+    medians = {m["channel"]: m for m in result["channel_medians"]}["shopee"]
+    assert medians["marketplace_cost_pct_p75"] is None
+    assert medians["marketplace_cost_pct_median"] is None
+    assert "custo_alto" not in _row_for(result["channel_rows"], "kokeshi", "shopee")["signals"]
+
+
+# ---------------------------------------------------------------------------
 # Ordenacao por GMV desc e contrato de resposta (schema)
 # ---------------------------------------------------------------------------
 

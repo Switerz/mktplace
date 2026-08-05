@@ -282,8 +282,56 @@ Achado estrutural novo: a fonte reconstrói o estado *atual* dos pedidos, então
 julho divergiu R$ 155,90 (ML) e R$ 37,54 (TikTok) em ~1h após a própria carga.
 Os resíduos de jan–mai são deriva acumulada desde 22/07, não erro de pipeline.
 
-Nenhuma correção foi aplicada. As 6 correções necessárias e os 7 requisitos que
-o DQ1 estabelece para a migração ao Airflow estão no checkpoint.
+Nenhuma correção foi aplicada no DQ1. As 6 correções necessárias e os 7
+requisitos que ele estabelece para a migração ao Airflow estão no checkpoint.
+
+## Gate DQ2 — verdade da interface (TikTok, Regiões e sinais de Canais)
+
+Status: **CONCLUÍDO e VERSIONADO em 05/08/2026** (uma implementação + uma
+rodada consolidada; sem deploy). Escopo estritamente de
+**representação**: nenhuma regra de GMV, allowlist de status, threshold de
+negócio, endpoint, cálculo de cancelamento, dado, pipeline ou banco foi
+alterado. Detalhes em
+[MARKETPLACE_DATA_QUALITY_CHECKPOINT.md](MARKETPLACE_DATA_QUALITY_CHECKPOINT.md) §11.1.
+
+Os dois bloqueadores do DQ1 deixaram de ser representações enganosas:
+
+1. **TikTok em Qualidade** — a tela não exibia cancelamento/devolução do canal
+   e a ausência nunca era declarada. Agora há cards explícitos com valor `N/D`
+   ("Não disponível nesta fonte"), nota afirmando que ausência de dado **não é
+   taxa zero** e `aria-live` comunicando a indisponibilidade. A API já
+   devolvia `None` corretamente — nada no backend precisou mudar.
+2. **Regiões** — as três dimensões passam a ser distintas na tela: cobertura de
+   **canal** ("TikTok Shop fora do escopo"), **elegibilidade** (só pedidos
+   elegíveis ao fato regional) e **preenchimento de UF** ("UF preenchida
+   (elegíveis)"). O total virou "GMV com cobertura regional" e 100% de
+   preenchimento passa a vir com ressalva explícita de que não é cobertura de
+   100% do GMV. Nenhum percentual geral foi fabricado; seleção só-TikTok rende
+   `not_applicable`. Contrato da API inalterado.
+
+O achado 6 (`custo_alto` no TikTok) teve o **diagnóstico do DQ1 corrigido**: o
+sinal depende do fee de marketplace (que o TikTok tem, com aviso de base), não
+do dado de mídia — os dois sinais de julho eram legítimos e foram preservados.
+O risco real, de degeneração quando a distribuição não tem dispersão, foi
+fechado aplicando ao **produtor** a guarda já aprovada no Gate G1 (`custo > 0`
+e `> mediana` e `>= p75`), sem threshold novo e sem regressão em ML/Shopee.
+
+**Limitações estruturais mantidas:** cancelamento/devolução de TikTok continuam
+inexistentes na cadeia servida (nada foi calculado da Raw) e Regiões continua
+medindo escopo próprio, não comparável ao GMV total. **A duplicidade de
+`silver.stg_shopee_shop_stats` (mai/jun) segue pendente e precisa ser resolvida
+antes de a Silver Shopee ser adotada como fonte no Airflow.**
+
+Com o DQ2 concluído, o **Airflow está tecnicamente desbloqueado no que depende
+das correções de verdade da interface** — os requisitos de representação que o
+DQ1 levantou estão atendidos. A frente **permanece pausada apenas por
+priorização**: retomaremos primeiro a evolução de drill-down (Gate G3, ainda
+não iniciado). Nada de Airflow foi criado, configurado ou executado.
+
+Validação: API 435 testes, web 429 testes, typecheck e build verdes; QA visual
+em navegador (Qualidade com TikTok isolado/combinado/ML, Regiões com
+Todos/TikTok/ML, Canais com TikTok) em desktop 1440×900 e mobile 390×844, sem
+erro de console/hydration e com querystring preservada.
 
 ## Próximas prioridades
 

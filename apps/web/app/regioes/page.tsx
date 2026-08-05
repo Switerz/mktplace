@@ -16,6 +16,7 @@ import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import {
   fmtPctOrNA, coverageLabel, coverageBadgeClass, semCoberturaAviso, fmtShareOfTotalPct,
 } from "@/lib/regioes-format";
+import { buildRegionalScope, REGIONAL_GMV_LABEL, UF_FILL_LABEL } from "@/lib/regioes-scope";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
@@ -151,6 +152,12 @@ function RegioesPageInner() {
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
   const isEmpty = dataIsFresh && displaySummary != null && displaySummary.orders === 0 && byUf != null && byUf.length === 0;
   const aviso = semCoberturaAviso(displaySemCobertura);
+  // Gate DQ2: escopo regional declarado (canal x elegibilidade x preenchimento
+  // de UF sao dimensoes distintas) — o total desta tela nunca deve ser lido
+  // como o GMV do periodo. So' com dado fresco; nunca durante loading/erro.
+  const regionalScope = dataIsFresh
+    ? buildRegionalScope(filters.channels, displaySemCobertura, displaySummary?.uf_fill_pct ?? null)
+    : null;
 
   const ufColumnTypes = useMemo(() => ({
     uf: "text" as const, gmv: "numeric" as const, orders: "numeric" as const,
@@ -247,6 +254,23 @@ function RegioesPageInner() {
           {isLoadingState ? "Carregando dados regionais..." : isErrorState ? "Falha ao carregar dados regionais." : "Dados regionais carregados."}
         </span>
 
+        {/* Gate DQ2: escopo do que esta sendo medido, SEMPRE visivel com dado
+            fresco — separa cobertura de canal (dimensao 1) do preenchimento de
+            UF (dimensao 3) e impede a leitura de "cobertura integral". */}
+        {regionalScope && (
+          <div className={`rounded-2xl p-4 border ${regionalScope.status === "not_applicable" ? "bg-slate-50 border-slate-200" : regionalScope.status === "partial_channels" ? "bg-amber-50 border-amber-200" : "bg-violet-50/60 border-violet-100"}`}>
+            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${regionalScope.status === "not_applicable" ? "text-slate-600" : regionalScope.status === "partial_channels" ? "text-amber-700" : "text-violet-700"}`}>
+              {regionalScope.status === "not_applicable" ? "Sem cobertura regional na seleção" : "Escopo regional"}
+            </p>
+            <p className={`text-sm ${regionalScope.status === "not_applicable" ? "text-slate-700" : regionalScope.status === "partial_channels" ? "text-amber-800" : "text-slate-700"}`}>
+              {regionalScope.scopeNote}
+            </p>
+            {regionalScope.ufFillCaveat && (
+              <p className="text-xs text-amber-800 mt-1.5">{regionalScope.ufFillCaveat}</p>
+            )}
+          </div>
+        )}
+
         {dataIsFresh && aviso && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
             <p className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-1">Canal sem cobertura regional</p>
@@ -290,8 +314,9 @@ function RegioesPageInner() {
             {/* KPI Cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4" aria-busy={isLoadingState}>
               <KpiCard
-                label="GMV Regional"
+                label={REGIONAL_GMV_LABEL}
                 value={displaySummary ? fmtBrl(displaySummary.gmv) : "—"}
+                subvalue={regionalScope ? `Escopo: ${regionalScope.channelsInScope.join(" + ") || "nenhum canal com regional"}` : undefined}
                 accent="bg-violet-600"
               />
               <KpiCard
@@ -305,9 +330,9 @@ function RegioesPageInner() {
                 accent="bg-amber-500"
               />
               <KpiCard
-                label="Cobertura UF"
+                label={UF_FILL_LABEL}
                 value={displaySummary ? fmtPctOrNA(displaySummary.uf_fill_pct) : "—"}
-                subvalue={displaySummary ? coverageLabel(displaySummary.coverage_level) : undefined}
+                subvalue={displaySummary ? `${coverageLabel(displaySummary.coverage_level)} · dentro dos pedidos elegíveis` : undefined}
                 accent={displaySummary?.coverage_level === "ok" ? "bg-emerald-500" : displaySummary?.coverage_level === "partial" ? "bg-amber-500" : displaySummary?.coverage_level === "low" ? "bg-rose-500" : "bg-slate-300"}
               />
             </div>

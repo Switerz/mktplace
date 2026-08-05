@@ -20,6 +20,12 @@ import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import { buildQualityRequestKey } from "@/lib/quality-request-key";
 import { computeRequestStatus } from "@/lib/request-freshness";
+import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import {
+  TIKTOK_UNAVAILABLE_QUALITY_METRICS,
+  TIKTOK_QUALITY_UNAVAILABLE_NOTE,
+  qualityLoadedAnnouncement,
+} from "@/lib/quality-availability";
 
 function fmtRate(v: number | null): string {
   if (v == null) return "—";
@@ -258,7 +264,11 @@ function QualityPageInner() {
         )}
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {isLoadingState ? "Carregando dados de qualidade..." : isErrorState ? "Falha ao carregar." : "Dados de qualidade carregados."}
+          {isLoadingState
+            ? "Carregando dados de qualidade..."
+            : isErrorState
+              ? "Falha ao carregar."
+              : qualityLoadedAnnouncement(showTiktok)}
         </span>
 
       {isErrorState ? (
@@ -292,6 +302,20 @@ function QualityPageInner() {
               accent="bg-violet-500"
             />
           )}
+          {/* Gate DQ2: cancelamento e devolucao do TikTok NAO existem na fonte
+              servida (API devolve null). Antes, a tela simplesmente omitia as
+              duas metricas para o canal e a ausencia nunca era declarada.
+              Agora sao cards explicitos de indisponibilidade — valor "N/D"
+              (nunca "0%"/"—") e accent neutro (nunca verde de "saudavel"). */}
+          {showTiktok && TIKTOK_UNAVAILABLE_QUALITY_METRICS.map((m) => (
+            <KpiCard
+              key={m.label}
+              label={m.label}
+              value={m.value}
+              subvalue={m.subvalue}
+              accent="bg-slate-300"
+            />
+          ))}
           {showMl && (
             <KpiCard
               label="Cancelamento ML"
@@ -335,10 +359,18 @@ function QualityPageInner() {
         </div>
 
         {/* Tabela por marca */}
+        {/* Gate DQ2: limitacao declarada uma vez, junto da tabela que promete
+            "cancelamentos e devolucoes" — sem ela, a ausencia das colunas do
+            TikTok seria lida como "canal sem cancelamento". */}
+        {showTiktok && <DataQualityNote note={TIKTOK_QUALITY_UNAVAILABLE_NOTE} />}
+
         <div id="qualidade-marca" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-violet-50">
             <h2 className="text-sm font-semibold text-slate-700">Qualidade por Marca</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Cancelamentos, devolucoes e tempos logisticos</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Cancelamentos, devolucoes e tempos logisticos
+              {showTiktok && " · TikTok Shop entra apenas com tempo de entrega (cancelamento/devolução indisponíveis na fonte)"}
+            </p>
           </div>
 
           <TableScrollHint>
