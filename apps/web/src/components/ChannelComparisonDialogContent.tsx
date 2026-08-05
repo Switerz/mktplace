@@ -1,15 +1,18 @@
 "use client";
 
-import Link from "next/link";
 import type { CanaisChannelMedian, CanaisChannelRow } from "@/lib/api-client";
 import { formatChannelMetric, signalLabel, signalTone } from "@/lib/canais-channel-metrics";
+import { buildChannelDiagnosis } from "@/lib/channel-signal-reasons";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
-import { fmtRefreshedAt } from "@/lib/filters/format";
+import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
+import EvidenceRow from "@/components/drilldown/EvidenceRow";
+import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownCta from "@/components/drilldown/DrilldownCta";
 
 interface Props {
   row: CanaisChannelRow;
   /** null quando o canal nao tem mediana calculada (ex: modo demonstracao) —
-   * nunca inventa uma referencia de comparacao nesse caso. */
+   * nunca inventa uma referencia de comparacao. */
   median: CanaisChannelMedian | null;
   periodLabel: string;
   refreshedAt: string | null;
@@ -22,51 +25,56 @@ interface Props {
 const fmtPct1 = (v: number) => `${v.toFixed(1)}%`;
 const fmtRoas = (v: number) => `${v.toFixed(2)}x`;
 
-function MetricRow({
-  label, value, applicable, available, format, median, medianLabel, warning,
-}: {
-  label: string;
-  value: number | null;
-  applicable: boolean;
-  available: boolean;
-  format: (v: number) => string;
-  median?: number | null;
-  medianLabel?: string;
-  warning?: string | null;
-}) {
+/** Linha de métrica do canal no formato do contrato de 3 estados
+ * (N/A / Sem dado / — / valor) + referência do MESMO canal na sub-linha. */
+function metricEvidence(
+  label: string,
+  value: number | null,
+  applicable: boolean,
+  available: boolean,
+  format: (v: number) => string,
+  median?: number | null,
+  medianLabel?: string,
+  warning?: string | null,
+) {
   const { text, tone } = formatChannelMetric(value, applicable, available, format);
-  const toneClass = tone === "value" ? "text-slate-800 font-semibold" : tone === "warning" ? "text-amber-700" : "text-slate-400";
   return (
-    <li className="flex items-center justify-between gap-3 text-xs">
-      <span className="text-slate-500">{label}</span>
-      <span className="text-right">
-        <span className={toneClass} title={warning ?? undefined}>{text}</span>
-        {median != null && (
-          <span className="block text-[10px] text-slate-400 tabular-nums">
-            {medianLabel ?? "Mediana do canal"}: {format(median)}
-          </span>
-        )}
-      </span>
-    </li>
+    <EvidenceRow
+      label={label}
+      value={text}
+      tone={tone}
+      reference={median != null ? `${medianLabel ?? "Mediana do canal"}: ${format(median)}` : null}
+      title={warning ?? undefined}
+    />
   );
 }
 
 /**
  * Conteudo do drill-down marca x canal aberto a partir da matriz
- * "Comparativo entre Canais" (Gate U3, Task 4) — reutiliza o mesmo
- * `KpiDrilldownDialog` generico do Gate U2, sem fetch novo (so os dados de
+ * "Comparativo entre Canais" (Gate U3; evoluído no Gate G2 para o contrato
+ * de docs/DRILLDOWN_ARCHITECTURE.md §3) — reutiliza o mesmo
+ * `KpiDrilldownDialog` generico, sem fetch novo (so os dados de
  * `channelRows`/`channelMedians` ja carregados pela pagina Canais).
+ * Ordem: contexto → diagnóstico humano → métricas principais → evidências
+ * vs referências do mesmo canal → sinais explicados → qualidade → CTA.
  */
 export default function ChannelComparisonDialogContent({ row, median, periodLabel, refreshedAt, buildHref }: Props) {
+  const diagnosis = buildChannelDiagnosis(row, median);
+
   return (
     <div className="flex flex-col gap-4 text-sm">
+      {/* 1. Contexto (marca/canal já estão no título do diálogo) */}
+      <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
+
+      {/* 2. Diagnóstico em linguagem humana — derivado só dos sinais e
+          referências já carregados (channel-signal-reasons). */}
       <div>
-        <p className="text-xs text-slate-400">
-          {periodLabel}
-          {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
-        </p>
+        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">O que o período mostra</p>
+        <p className="text-slate-700">{diagnosis.headline}</p>
       </div>
 
+      {/* 3. Métricas principais (par local — sem componente compartilhado:
+          este é o único consumidor deste layout, ver decisão anti-registry). */}
       <div className="grid grid-cols-2 gap-3">
         <div>
           <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">GMV</p>
@@ -81,70 +89,57 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
         </div>
       </div>
 
+      {/* 4. Evidências vs referências do mesmo canal */}
       <ul className="flex flex-col gap-2 border-t border-violet-50 pt-3">
-        <MetricRow
-          label="Ads/GMV" value={row.ads_gmv_pct} applicable={row.ads_applicable} available={row.ads_available}
-          format={fmtPct1} median={median?.ads_gmv_pct_median}
-        />
-        <MetricRow
-          label="ROAS" value={row.roas} applicable={row.ads_applicable} available={row.ads_available}
-          format={fmtRoas} median={median?.roas_median}
-        />
-        <MetricRow
-          label="ACOS" value={row.acos_pct} applicable={row.ads_applicable} available={row.ads_available}
-          format={fmtPct1}
-        />
-        <MetricRow
-          label="Custo marketplace/GMV" value={row.marketplace_cost_pct} applicable={row.marketplace_cost_applicable}
-          available={row.marketplace_cost_available} format={fmtPct1} median={median?.marketplace_cost_pct_median}
-          medianLabel="Mediana" warning={row.data_warning}
-        />
-        {median?.marketplace_cost_pct_p75 != null && (
-          <li className="flex items-center justify-between gap-3 text-xs">
-            <span className="text-slate-400">P75 do canal (custo marketplace/GMV)</span>
-            <span className="text-slate-400 tabular-nums">{fmtPct1(median.marketplace_cost_pct_p75)}</span>
-          </li>
+        {metricEvidence("Ads/GMV", row.ads_gmv_pct, row.ads_applicable, row.ads_available, fmtPct1, median?.ads_gmv_pct_median)}
+        {metricEvidence("ROAS", row.roas, row.ads_applicable, row.ads_available, fmtRoas, median?.roas_median)}
+        {metricEvidence("ACOS", row.acos_pct, row.ads_applicable, row.ads_available, fmtPct1)}
+        {metricEvidence(
+          "Custo marketplace/GMV", row.marketplace_cost_pct, row.marketplace_cost_applicable,
+          row.marketplace_cost_available, fmtPct1, median?.marketplace_cost_pct_median, "Mediana", row.data_warning,
         )}
-        <MetricRow
-          label="Frete seller/GMV" value={row.seller_shipping_pct} applicable={row.seller_shipping_applicable}
-          available={row.seller_shipping_available} format={fmtPct1} median={median?.seller_shipping_pct_median}
-          medianLabel="Mediana"
-        />
+        {median?.marketplace_cost_pct_p75 != null && (
+          <EvidenceRow label="P75 do canal (custo marketplace/GMV)" value={fmtPct1(median.marketplace_cost_pct_p75)} tone="muted" mutedLabel />
+        )}
+        {metricEvidence(
+          "Frete seller/GMV", row.seller_shipping_pct, row.seller_shipping_applicable,
+          row.seller_shipping_available, fmtPct1, median?.seller_shipping_pct_median, "Mediana",
+        )}
         {median?.seller_shipping_pct_p75 != null && (
-          <li className="flex items-center justify-between gap-3 text-xs">
-            <span className="text-slate-400">P75 do canal (frete seller/GMV)</span>
-            <span className="text-slate-400 tabular-nums">{fmtPct1(median.seller_shipping_pct_p75)}</span>
-          </li>
+          <EvidenceRow label="P75 do canal (frete seller/GMV)" value={fmtPct1(median.seller_shipping_pct_p75)} tone="muted" mutedLabel />
         )}
       </ul>
 
-      {row.data_warning && (
-        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-          {row.data_warning}
-        </p>
-      )}
-
+      {/* 5. Sinais que explicam o diagnóstico — chip + evidência textual,
+          nunca chip mudo (Gate G2). */}
       <div className="flex flex-col gap-1.5">
         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sinais</p>
-        {row.signals.length === 0 ? (
+        {diagnosis.explanations.length === 0 ? (
           <span className="text-slate-300 text-xs">Nenhum sinal no período.</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {row.signals.map((s) => (
-              <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap ${signalTone(s)}`}>
-                {signalLabel(s)}
-              </span>
+          <ul className="flex flex-col gap-1.5">
+            {diagnosis.explanations.map((e) => (
+              <li key={e.signal} className="flex items-start gap-2">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap shrink-0 mt-0.5 ${signalTone(e.signal)}`}>
+                  {signalLabel(e.signal)}
+                </span>
+                <span className="text-xs text-slate-600">{e.reason}</span>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </div>
 
-      <Link
-        href={buildHref(`/brand/${row.brand}?brands=${row.brand}&channels=${row.channel}`)}
-        className="text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-      >
-        Abrir visão completa da marca →
-      </Link>
+      {/* 6. Qualidade/cobertura do dado */}
+      <DataQualityNote note={row.data_warning} />
+
+      {/* 7. Próximo passo — filtros preservados via buildHref. */}
+      <div className="flex flex-col gap-1">
+        {diagnosis.nextAction && <p className="text-xs text-slate-500">{diagnosis.nextAction}</p>}
+        <DrilldownCta href={buildHref(`/brand/${row.brand}?brands=${row.brand}&channels=${row.channel}`)}>
+          Abrir visão completa da marca →
+        </DrilldownCta>
+      </div>
     </div>
   );
 }

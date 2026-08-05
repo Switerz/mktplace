@@ -202,6 +202,10 @@ function DashboardInner() {
   const pulseUnavailable = !pulseLoading && execSummary == null;
   const pulse = useMemo(() => buildPulse(execFresh ? execSummary : null), [execFresh, execSummary]);
   const pulseHealth = execFresh ? execSummary!.health : null;
+  // refreshed_at da MESMA resposta fresca do executive-summary (Gate G2) —
+  // nunca o timestamp do overview nem de uma requisicao anterior: se o
+  // resumo nao esta fresco, o detalhe do insight nao exibe timestamp algum.
+  const pulseRefreshedAt = execFresh ? execSummary!.period.refreshed_at : null;
 
   const pulseDialogTitle = (() => {
     if (!pulseView) return "";
@@ -416,6 +420,7 @@ function DashboardInner() {
             pulse={pulse}
             view={pulseView}
             periodLabel={periodLabel}
+            refreshedAt={pulseRefreshedAt}
             onSelectGroup={(key) => setPulseView({ mode: "all", key })}
             onBackToAll={() => setPulseView({ mode: "all", key: null })}
             buildHref={buildHref}

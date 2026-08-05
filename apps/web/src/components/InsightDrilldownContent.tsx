@@ -8,6 +8,9 @@ import {
   referenceKindLabel, metricLabel,
 } from "@/lib/executive-pulse";
 import { SEVERITY_LABEL, SEVERITY_TONE, type ExecutiveSeverity } from "@/lib/executive-summary";
+import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
+import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownCta from "@/components/drilldown/DrilldownCta";
 
 export type PulseView = { mode: "insight" | "all"; key: string | null };
 
@@ -15,6 +18,10 @@ interface Props {
   pulse: Pulse;
   view: PulseView;
   periodLabel: string;
+  /** refreshed_at da MESMA resposta fresca do executive-summary que gerou o
+   * insight (Gate G2) — null quando a resposta não traz o timestamp; nunca o
+   * timestamp de outra requisição. */
+  refreshedAt: string | null;
   /** No modo "all", selecionar um grupo mostra o detalhe no MESMO diálogo. */
   onSelectGroup: (key: string) => void;
   onBackToAll: () => void;
@@ -109,20 +116,20 @@ function InsightDetail({ insight }: { insight: PulseInsight }) {
         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Por que essa severidade</p>
         <p className="text-slate-600 text-xs">{severityReason(insight.type, insight.severity)}</p>
       </div>
-      {insight.confidence_note && (
-        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-          {insight.confidence_note}
-        </p>
-      )}
+      <DataQualityNote note={insight.confidence_note} />
     </div>
   );
 }
 
-function GroupDetail({ group, periodLabel, buildHref }: { group: PulseGroup; periodLabel: string; buildHref: (h: string) => string }) {
+function GroupDetail({ group, periodLabel, refreshedAt, buildHref }: { group: PulseGroup; periodLabel: string; refreshedAt: string | null; buildHref: (h: string) => string }) {
   const many = group.count > 1;
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-xs text-slate-400">{CATEGORY_LABEL[group.category] ?? group.category} · {periodLabel}</p>
+      <DrilldownContextLine
+        leading={CATEGORY_LABEL[group.category] ?? group.category}
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+      />
 
       {many ? (
         <div className="flex flex-col gap-2">
@@ -158,12 +165,9 @@ function GroupDetail({ group, periodLabel, buildHref }: { group: PulseGroup; per
 
       {/* Grupo unitário mantém o CTA único (Finding 6). */}
       {!many && group.representative.href && (
-        <Link
-          href={buildHref(group.representative.href)}
-          className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded self-start"
-        >
+        <DrilldownCta href={buildHref(group.representative.href)}>
           Abrir na tela de origem →
-        </Link>
+        </DrilldownCta>
       )}
     </div>
   );
@@ -195,7 +199,7 @@ function GroupButton({ group, onSelect, innerRef }: { group: PulseGroup; onSelec
  * listando grupos por categoria — selecionar um grupo troca para o detalhe.
  * Gerencia o foco na troca lista <-> detalhe para nunca deixá-lo no body. */
 export default function InsightDrilldownContent(props: Props) {
-  const { pulse, view, periodLabel, onSelectGroup, onBackToAll, buildHref } = props;
+  const { pulse, view, periodLabel, refreshedAt, onSelectGroup, onBackToAll, buildHref } = props;
   const selected = findGroup(pulse, view.key);
   const backRef = useRef<HTMLButtonElement>(null);
   const firstGroupRef = useRef<HTMLButtonElement>(null);
@@ -222,7 +226,7 @@ export default function InsightDrilldownContent(props: Props) {
             ← Voltar para todos os sinais
           </button>
         )}
-        <GroupDetail group={selected} periodLabel={periodLabel} buildHref={buildHref} />
+        <GroupDetail group={selected} periodLabel={periodLabel} refreshedAt={refreshedAt} buildHref={buildHref} />
       </div>
     );
   }

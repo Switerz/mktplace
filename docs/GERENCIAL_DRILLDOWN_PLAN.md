@@ -8,6 +8,8 @@
 
 Fonte de verdade: o **código atual**. Documentos históricos são contexto.
 
+> **Continuação (Gate G2):** a evolução transversal do padrão de drill-down (contrato UX comum aos três conteúdos + primeira expansão em Canais) está desenhada em [DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md). Este documento permanece como registro do ciclo G1 (Gerencial), já concluído.
+
 ---
 
 ## 1. Problema observado
