@@ -181,6 +181,21 @@ class ShopeeProductInputError(ValueError):
     __context__ sempre None, mesmo padrão de ShopeeNumericParseError."""
 
 
+class ShopeeProductKeyCollisionError(ValueError):
+    """Uma marca preparada ainda tem duplicidade na chave real da tabela
+    (ref_month, brand, sku_ref_key, product_name) ao chegar na Fase B.
+
+    Guarda defensiva: a consolidação de colisões de variation_name
+    (_collapse_variation_collisions) roda na Fase A e deveria eliminar toda
+    duplicidade nessa chave. Se, por qualquer regressão, um DataFrame
+    preparado ainda colidir, o UPSERT linha-a-linha de _write_prepared_brands
+    aplicaria last-wins silencioso (descartando gmv/units das linhas
+    perdidas) — exatamente o Bug 5. Esta exceção interrompe a Fase B ANTES de
+    _get_local_pg_url()/create_engine(): nenhuma conexão é aberta. A mensagem
+    inclui só marca/mês/contagem — nunca valor de célula, sku, produto ou PII.
+    Nunca encadeada (__cause__/__context__ None), mesmo padrão das demais."""
+
+
 def _parse_brl_float(val: object) -> float | None:
     """Mesmo contrato de pipelines/connectors/shopee/_numeric.py::parse_brl_float:
 
@@ -515,6 +530,83 @@ def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+_COLLAPSE_KEY = ["ref_month", "brand", "sku_ref_key", "product_name"]
+_SUM_COLS = ["gmv", "units_sold", "completed_orders", "canceled_orders", "unique_buyers"]
+
+
+def _collapse_variation_collisions(aggregated: pd.DataFrame) -> pd.DataFrame:
+    """Consolida linhas que colidem na chave REAL da tabela
+    (ref_month, brand, sku_ref_key, product_name) — Bug 5.
+
+    `_aggregate` agrupa incluindo `variation_name`, mas a UNIQUE constraint
+    do mart NÃO inclui `variation_name`. Quando o mesmo sku_ref_key+produto
+    tem mais de uma variação (cor/tamanho) no mesmo mês, essas linhas
+    colidem na chave real. O UPSERT linha-a-linha de `_write_prepared_brands`
+    (`ON CONFLICT DO UPDATE SET gmv = EXCLUDED.gmv`) aplicaria last-wins,
+    descartando o gmv/units das variações anteriores.
+
+    Esta função incorpora ao loader recorrente a MESMA semântica já aprovada
+    e aplicada aos dados históricos por
+    `pipelines/reconciliation/fix_shopee_product_dates.py::_rebuild_staging`
+    (ver docs/sections/produtos_audit.md, Bug 5): em vez de sobrescrever,
+    SOMA as linhas colidentes e recalcula os derivados a partir dos totais.
+
+    Contrato (por chave real):
+      - gmv, units_sold, completed_orders, canceled_orders, unique_buyers:
+        SOMADOS. `unique_buyers` é somado entre variações — mesma aproximação
+        histórica aprovada (pode contar 2x um comprador de >1 variação no mês,
+        limitação documentada); este gate não altera essa métrica.
+      - cancel_rate_pct = canceled/(completed+canceled)*100 (arred. 4), ou
+        None quando não há pedido nenhum na chave.
+      - avg_price = gmv/units_sold (arred. 2), ou None quando units_sold == 0.
+      - variation_name: variações não-nulas combinadas de forma determinística,
+        sem rótulos duplicados ("; ".join(dict.fromkeys(...))) — None se todas
+        forem nulas. Nunca last-wins silencioso.
+      - sku_ref: primeiro valor não-nulo na ordem de entrada (determinístico).
+
+    Função PURA: só memória, sem I/O. Chave sem colisão passa inalterada nos
+    valores. Preserva exatamente as colunas de `_aggregate` (mesma ordem).
+    """
+    if aggregated.empty:
+        return aggregated.copy()
+
+    out_rows: list[dict] = []
+    # sort=False + dropna=False: preserva a ordem de primeira aparição (torna
+    # sku_ref/variation determinísticos) e nunca descarta uma chave por NULL
+    # (a chave real nunca tem NULL — product_name/sku_ref_key sempre presentes).
+    for (ref_month, brand, sku_ref_key, product_name), grp in aggregated.groupby(
+        _COLLAPSE_KEY, dropna=False, sort=False
+    ):
+        gmv = float(grp["gmv"].sum())
+        units_sold = int(grp["units_sold"].sum())
+        completed_orders = int(grp["completed_orders"].sum())
+        canceled_orders = int(grp["canceled_orders"].sum())
+        unique_buyers = int(grp["unique_buyers"].sum())
+
+        sku_ref = next((v for v in grp["sku_ref"] if pd.notna(v)), None)
+
+        variations = [
+            str(v) for v in grp["variation_name"]
+            if pd.notna(v) and str(v) != ""
+        ]
+        variation_name = "; ".join(dict.fromkeys(variations)) or None
+
+        total_orders = completed_orders + canceled_orders
+        cancel_rate_pct = round(canceled_orders / total_orders * 100, 4) if total_orders > 0 else None
+        avg_price = round(gmv / units_sold, 2) if units_sold > 0 else None
+
+        out_rows.append({
+            "brand": brand, "ref_month": ref_month, "sku_ref": sku_ref,
+            "product_name": product_name, "variation_name": variation_name,
+            "gmv": gmv, "units_sold": units_sold,
+            "completed_orders": completed_orders, "unique_buyers": unique_buyers,
+            "canceled_orders": canceled_orders, "cancel_rate_pct": cancel_rate_pct,
+            "avg_price": avg_price, "sku_ref_key": sku_ref_key,
+        })
+
+    return pd.DataFrame(out_rows, columns=list(aggregated.columns))
+
+
 # ---------------------------------------------------------------------------
 # Main — duas fases deliberadamente separadas: NENHUMA conexão/engine/DDL
 # acontece enquanto qualquer marca ainda não foi validada e agregada.
@@ -553,16 +645,39 @@ def _prepare_all_brands() -> list[tuple[str, pd.DataFrame]]:
         if df is None:
             raise ShopeeProductInputError(f"marca sem dados preparados inesperadamente: brand={brand}") from None
         agg = _aggregate(df)
-        print(f"  {len(agg)} linhas agregadas.")
-        prepared.append((brand, agg))
+        # Consolida colisões de variation_name na chave real ANTES de qualquer
+        # escrita (Bug 5) — sem isso, o UPSERT da Fase B faria last-wins e
+        # perderia gmv/units das variações. Roda ainda na Fase A (só memória).
+        collapsed = _collapse_variation_collisions(agg)
+        print(f"  {len(agg)} linhas agregadas -> {len(collapsed)} após consolidar variações.")
+        prepared.append((brand, collapsed))
         del df
     return prepared
+
+
+def _assert_unique_keys(prepared: list[tuple[str, pd.DataFrame]]) -> None:
+    """Guarda defensiva da Fase B: recusa prosseguir se qualquer DataFrame
+    preparado ainda tiver duplicidade na chave real
+    (ref_month, brand, sku_ref_key, product_name). Chamada ANTES de
+    _get_local_pg_url()/create_engine() — nenhuma conexão é aberta quando
+    dispara. Mensagem sanitizada (marca + contagem), nunca célula/PII."""
+    for brand, agg in prepared:
+        dup_mask = agg.duplicated(subset=_COLLAPSE_KEY, keep=False)
+        if bool(dup_mask.any()):
+            n_keys = int(agg.loc[dup_mask].groupby(_COLLAPSE_KEY, dropna=False).ngroups)
+            raise ShopeeProductKeyCollisionError(
+                f"duplicidade remanescente na chave real apos consolidacao: "
+                f"brand={brand} chaves_duplicadas={n_keys}"
+            ) from None
 
 
 def _write_prepared_brands(prepared: list[tuple[str, pd.DataFrame]]) -> int:
     """Fase B — só chega aqui depois que TODAS as marcas da Fase A foram
     validadas e agregadas com sucesso. Abre a única conexão/engine desta
     execução, executa o DDL e grava os agregados já prontos."""
+    # Guarda defensiva ANTES de qualquer conexão: nenhuma escrita se ainda
+    # houver colisão na chave real (protege contra last-wins do UPSERT).
+    _assert_unique_keys(prepared)
     local_pg_url = _get_local_pg_url()
     print(f"PostgreSQL local (destino): {_sanitize_url(local_pg_url)}")
     engine = create_engine(local_pg_url)
