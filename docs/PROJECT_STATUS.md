@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 05/08/2026 (Shopee atualizado até 04/08 — carga parcial de agosto)
+**Última atualização:** 05/08/2026 (recuperação histórica ML/TikTok encerrada — junho, julho e 01–05/08 reconciliados; auditoria DQ1 concluída; Shopee atualizado até 04/08)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -24,7 +24,7 @@ Uma nova frente foi aberta em 24/07: o **Revamp de UI/UX da Torre**. O Gate U0 (
 | Gold regional e sync Neon | **CONCLUÍDO** | Data Mart e Neon em paridade contínua: 37.282 linhas em 23/07, atualizado automaticamente para 37.851 linhas na execução agendada de 24/07 (novo dado ML incremental do dia); em 04/08 o sync manual condicional levou o Neon a **41.363 linhas** em paridade exata com o Data Mart (por marketplace: mkt2=19.877, mkt3=21.486) após o fechamento de julho, com backup automático `..._backup_20260804_190456`. Sync regional agora roda dentro do `full_daily` recorrente, com backup automático a cada execução com divergência real. | Acompanhar a cadência diária dentro do `full_daily`. | Nenhuma. |
 | Automação diária ML/TikTok | **ATIVO** | Task Scheduler `mktplace_full_daily` habilitado em 23/07. Primeira execução agendada real (24/07, 06:00) concluiu sozinha, sem intervenção: sete steps (`daily_ml`, `daily_tiktok`, `gold_regional_incremental`, `sync_region_if_needed`, `sync_produtos_ml`, `sync_produtos_tiktok`, `health_check`) todos `SUCCESS`, `STATUS GERAL: OK`, `ok_critical=true`, zero steps Shopee, lock liberado, logs preservados. Próxima execução: 25/07 06:00. | Observar as próximas execuções diárias e tratar a dívida de encoding (`UnicodeEncodeError` do logger) quando priorizado. | Horário 06:00 mantido por autorização explícita, ainda sem histórico de múltiplos dias. |
 | API oficial Shopee | **PAUSADO** | Ainda usamos exports manuais. Criação dos apps por marca pausada em 24/07 para priorizar o Revamp de UI/UX. | Retomar criação e aprovação dos apps por marca no Console Shopee quando repriorizado. | Acessos, aprovação e configuração por marca. |
-| Revamp UI/UX (Torre) | **PUBLICADO — GO COM RESTRIÇÃO** | **Publicado na Vercel:** commit `9fcf72a` em Production **Ready**; domínio canônico `https://mktplace-gobeaute.vercel.app` (200 nas 11 rotas), `mktplace-blond.vercel.app` como alias/redirecionamento; bundle apontando para o backend público `mktplace-api.onrender.com` (sem `localhost`/IP local); API online e CORS correto para o domínio canônico. O fallback "API offline" observado ocorria só na URL efêmera de deployment (SSO + Origin fora do CORS), não é falha do deployment nem de `NEXT_PUBLIC_API_URL`. Auditoria pós-deploy encerrada em 03/08/2026. Gates U0–U6 concluídos — ver histórico em [UI_REVAMP_PLAN.md](UI_REVAMP_PLAN.md). Gate U6 (QA integrado e fechamento) concluído em 28/07: QA visual executado em navegador (Playwright + Chromium temporários e isolados em `%TEMP%`, Torre na porta 3100) em desktop 1440×900, tablet 768×1024 e mobile 390×844 — 12 rotas carregam, drawer/drill-down/filtros→URL/links de marca/estados de erro validados; a rodada consolidada final corrigiu 2 findings: scroll horizontal interno na tabela "Performance por Marca" (via `TableScrollHint`, colunas antes cortadas no mobile) e eliminação do hydration error React #418 em Tempo Real (`clientReady` gating a data/hora do relógio no SSR). 376 testes, typecheck e build passando; nenhuma dependência nova; nenhum backend/pipeline/banco tocado; sem U6.1/U6.2. Gates U0–U4 concluídos e aprovados (24–25/07). Gate U5 (Qualidade, Tempo Real, Pedidos, Inteligência e Operações) implementado em 26/07: as 5 telas restantes ganharam cabeçalho/hierarquia consistente com U1–U4, navegação interna compacta, e o mesmo padrão `resolvedKey`/`display*` protegido por frescor de requisição. Decisão de filtros por tela replicada do escopo aprovado: Qualidade/Pedidos continuam herdando filtros globais; Tempo Real/Inteligência/Operações continuam independentes. Inteligência/Operações ganharam a guarda contra resposta obsoleta de retry que faltava (bug de wiring pré-existente). Rodada de correção consolidada em 28/07 resolveu 2 findings: (1) Tempo Real tinha dois relógios independentes (countdown exibido × `setInterval` de auto-refresh próprio) que podiam divergir após refresh manual/tentativa demorada — unificado num único agendamento: o countdown chegar a zero é agora o único gatilho do refresh automático, com `inFlightRef`/`mountedRef`/preservação de dado em falha preservados integralmente; (2) Pedidos com seleção exclusivamente Shopee exibia badge "API offline" e `aria-live` "dados carregados", confundindo ausência de cobertura com falha real — corrigido com indicador neutro e anúncio de acessibilidade específico, preservando o bloco de indisponibilidade e a ausência de fetch já existentes. Nenhuma métrica/rota/endpoint/regra de negócio alterada; nenhuma ação de escrita/pedido individual criada; nenhuma dependência nova. Filtros globais e contratos de API preservados; **376 testes, typecheck e build passando. Gate U6 concluído em 28/07/2026; publicado e auditado (GO COM RESTRIÇÃO) em 03/08/2026.** | Gate G1 (Gerencial drill-down-driven) concluído em 04/08 (commit `f5394d4`). **Gate G2 — arquitetura transversal de drill-down: Task 2 (implementação) concluída em 05/08** — 4 primitives de composição extraídos (`DrilldownContextLine`/`EvidenceRow`/`DataQualityNote`/`DrilldownCta`; `DrilldownMetricPair` descartado por falta de 2º consumidor), Canais como primeira aplicação completa do contrato (diagnóstico humano + sinais explicados via `channel-signal-reasons.ts`, referências do mesmo canal, p75 inclusivo), KPI com referência vs período anterior (só GMV, dado já carregado) e Insight com `refreshed_at` da resposta fresca do executive-summary. Zero endpoint/fetch/métrica nova; um único shell de diálogo; 412 testes, typecheck e build verdes. **Task 3 (QA visual + rodada única) concluída em 05/08: Gate G2 CONCLUÍDO tecnicamente** — QA em navegador (Playwright/Chromium temporários em `%TEMP%`, build de produção na porta 3100, API pública read-only) em desktop 1440×900 e mobile 390×844 nos 3 fluxos (Gerencial→KPI, Gerencial→Pulso, Canais→Detalhe→Marca): 0 erro de console/hydration, 0 host inesperado, foco/Escape/backdrop OK, filtros preservados ponta a ponta, 1 único shell. Rodada única = 3 findings semânticos (explicação completa de `ads_subutilizado` espelhando a regra real; inconsistência sinal×p75 dita explicitamente; próximo passo sem prometer o que a página de Marca não tem). 416 testes, typecheck e build verdes; zero dependência nova. Ver [DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md) §6–7. **Aguardando revisão para commit (sem commit/push/deploy).** | Restrições/decisões: o domínio canônico está público sem autenticação própria da Torre (definir modelo de acesso); smoke visual completo em produção não automatizado; corrigir manualmente o campo "About" do GitHub (`mktplace-one.vercel.app` → `mktplace-gobeaute.vercel.app`); não usar URLs efêmeras da Vercel como endereço da Torre. Dívidas não bloqueantes herdadas: U6-03 (3px em Pedidos no tablet), U6-04 (dois `<h1>`), 3 vulnerabilidades altas (`next`/`postcss`/`sharp`), ausência de teste automatizado de componente React. |
+| Revamp UI/UX (Torre) | **PUBLICADO — GO COM RESTRIÇÃO** | **Publicado na Vercel:** commit `9fcf72a` em Production **Ready**; domínio canônico `https://mktplace-gobeaute.vercel.app` (200 nas 11 rotas), `mktplace-blond.vercel.app` como alias/redirecionamento; bundle apontando para o backend público `mktplace-api.onrender.com` (sem `localhost`/IP local); API online e CORS correto para o domínio canônico. O fallback "API offline" observado ocorria só na URL efêmera de deployment (SSO + Origin fora do CORS), não é falha do deployment nem de `NEXT_PUBLIC_API_URL`. Auditoria pós-deploy encerrada em 03/08/2026. Gates U0–U6 concluídos — ver histórico em [UI_REVAMP_PLAN.md](UI_REVAMP_PLAN.md). Gate U6 (QA integrado e fechamento) concluído em 28/07: QA visual executado em navegador (Playwright + Chromium temporários e isolados em `%TEMP%`, Torre na porta 3100) em desktop 1440×900, tablet 768×1024 e mobile 390×844 — 12 rotas carregam, drawer/drill-down/filtros→URL/links de marca/estados de erro validados; a rodada consolidada final corrigiu 2 findings: scroll horizontal interno na tabela "Performance por Marca" (via `TableScrollHint`, colunas antes cortadas no mobile) e eliminação do hydration error React #418 em Tempo Real (`clientReady` gating a data/hora do relógio no SSR). 376 testes, typecheck e build passando; nenhuma dependência nova; nenhum backend/pipeline/banco tocado; sem U6.1/U6.2. Gates U0–U4 concluídos e aprovados (24–25/07). Gate U5 (Qualidade, Tempo Real, Pedidos, Inteligência e Operações) implementado em 26/07: as 5 telas restantes ganharam cabeçalho/hierarquia consistente com U1–U4, navegação interna compacta, e o mesmo padrão `resolvedKey`/`display*` protegido por frescor de requisição. Decisão de filtros por tela replicada do escopo aprovado: Qualidade/Pedidos continuam herdando filtros globais; Tempo Real/Inteligência/Operações continuam independentes. Inteligência/Operações ganharam a guarda contra resposta obsoleta de retry que faltava (bug de wiring pré-existente). Rodada de correção consolidada em 28/07 resolveu 2 findings: (1) Tempo Real tinha dois relógios independentes (countdown exibido × `setInterval` de auto-refresh próprio) que podiam divergir após refresh manual/tentativa demorada — unificado num único agendamento: o countdown chegar a zero é agora o único gatilho do refresh automático, com `inFlightRef`/`mountedRef`/preservação de dado em falha preservados integralmente; (2) Pedidos com seleção exclusivamente Shopee exibia badge "API offline" e `aria-live` "dados carregados", confundindo ausência de cobertura com falha real — corrigido com indicador neutro e anúncio de acessibilidade específico, preservando o bloco de indisponibilidade e a ausência de fetch já existentes. Nenhuma métrica/rota/endpoint/regra de negócio alterada; nenhuma ação de escrita/pedido individual criada; nenhuma dependência nova. Filtros globais e contratos de API preservados; **376 testes, typecheck e build passando. Gate U6 concluído em 28/07/2026; publicado e auditado (GO COM RESTRIÇÃO) em 03/08/2026.** | Gate G1 (Gerencial drill-down-driven) concluído em 04/08 (commit `f5394d4`). **Gate G2 — arquitetura transversal de drill-down: Task 2 (implementação) concluída em 05/08** — 4 primitives de composição extraídos (`DrilldownContextLine`/`EvidenceRow`/`DataQualityNote`/`DrilldownCta`; `DrilldownMetricPair` descartado por falta de 2º consumidor), Canais como primeira aplicação completa do contrato (diagnóstico humano + sinais explicados via `channel-signal-reasons.ts`, referências do mesmo canal, p75 inclusivo), KPI com referência vs período anterior (só GMV, dado já carregado) e Insight com `refreshed_at` da resposta fresca do executive-summary. Zero endpoint/fetch/métrica nova; um único shell de diálogo; 412 testes, typecheck e build verdes. **Task 3 (QA visual + rodada única) concluída em 05/08: Gate G2 CONCLUÍDO tecnicamente** — QA em navegador (Playwright/Chromium temporários em `%TEMP%`, build de produção na porta 3100, API pública read-only) em desktop 1440×900 e mobile 390×844 nos 3 fluxos (Gerencial→KPI, Gerencial→Pulso, Canais→Detalhe→Marca): 0 erro de console/hydration, 0 host inesperado, foco/Escape/backdrop OK, filtros preservados ponta a ponta, 1 único shell. Rodada única = 3 findings semânticos (explicação completa de `ads_subutilizado` espelhando a regra real; inconsistência sinal×p75 dita explicitamente; próximo passo sem prometer o que a página de Marca não tem). 416 testes, typecheck e build verdes; zero dependência nova. Ver [DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md) §6–7. **G2 encerrado e versionado no commit `903aba0` ("feat(web): padroniza drilldowns da torre"), já em `origin/main`** — 15 arquivos, somente `apps/web/` e `docs/`, nenhum toque em backend/pipeline/banco. Estado preservado; nenhuma alteração de G2 nesta operação de backfill. | Restrições/decisões: o domínio canônico está público sem autenticação própria da Torre (definir modelo de acesso); smoke visual completo em produção não automatizado; corrigir manualmente o campo "About" do GitHub (`mktplace-one.vercel.app` → `mktplace-gobeaute.vercel.app`); não usar URLs efêmeras da Vercel como endereço da Torre. Dívidas não bloqueantes herdadas: U6-03 (3px em Pedidos no tablet), U6-04 (dois `<h1>`), 3 vulnerabilidades altas (`next`/`postcss`/`sharp`), ausência de teste automatizado de componente React. |
 | Serving Data Mart × Neon | **PLANEJADO** | O Data Mart é a fonte analítica; o Neon continua como camada servida pela API. A decisão futura está registrada. | Comparar manutenção do Neon com uma camada `serving` direta no Data Mart. | Três canais precisam estar estáveis e automatizados primeiro. |
 | Evolução da Torre | **CONTÍNUO** | API e painéis já refletem as principais correções publicadas. | Priorizar KPIs, visualizações e QA conforme as entregas de dados avançarem. | Alinhamento de produto e disponibilidade de dados confiáveis. |
 | Octaprice e inteligência B2B | **PLANEJADO** | Escopo conceitual definido; nenhum desenvolvimento iniciado. | Fazer discovery da API, catálogo, vendedores, regras de preço e notificações. | Contrato da API e política comercial. |
@@ -166,7 +166,7 @@ Referências:
 
 ## Ciclo ativo — evolução drill-down-driven da Gerencial
 
-Status: **Gate G1 CONCLUÍDO (04/08/2026) — nova Gerencial drill-down-driven implementada, corrigida e validada em navegador. Aguardando revisão para commit (sem commit/push/deploy).**
+Status: **Gate G1 CONCLUÍDO (04/08/2026) — nova Gerencial drill-down-driven implementada, corrigida e validada em navegador; versionado no commit `f5394d4`.** A evolução transversal desse padrão (Gate G2 — contrato comum aos três conteúdos de detalhe e primeira aplicação completa em Canais) foi encerrada em 05/08/2026 e versionada no commit `903aba0` — ver [DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md).
 
 Objetivo:
 tornar a síntese executiva compacta, priorizada e explicável, com
@@ -185,6 +185,105 @@ Sequência:
 
 Limite:
 máximo de três prompts; sem subgates G1.1/G1.2.
+
+## Backfill ML e TikTok — 01/07 a 05/08/2026
+
+Status: **CONCLUÍDO em 05/08/2026 (SUCCESS).** Frente independente do G2, que
+permanece exatamente como foi encerrado (commit `903aba0`, em `origin/main`).
+
+Problema: a Torre estava materialmente incompleta desde julho. O incremental
+usa lookback de 3 dias e as execuções de 01/08 e 03/08 do `full_daily` foram
+`BLOCKED` por indisponibilidade da VPN/Data Mart (`STATUS GERAL: FAILED` nos
+dois dias). Como a execução seguinte só recarregou os dias recentes, os
+buracos históricos nunca foram recuperados — e o health check baseado em
+`MAX(data)` indicava dado "fresco" com julho incompleto.
+
+Operação executada: uma única execução por canal de
+`pipelines.ingestion.daily_performance --mode backfill --date-from 2026-07-01
+--date-to 2026-08-05`, sem retry, sem alteração de código, de regra de GMV ou
+de allowlist de status.
+
+| Canal | Antes (janela) | Depois (janela) | Fonte | Cobertura julho |
+|---|---|---|---|---|
+| Mercado Livre | R$ 3.169.757,92 / 80 linhas / 20 dias | R$ 6.658.336,47 / 144 linhas / 36 dias | paridade R$ 0,00 | 31/31 dias × 4 marcas |
+| TikTok Shop | R$ 3.640.542,16 / 85 linhas / 17 dias | R$ 10.461.442,13 / 180 linhas / 36 dias | paridade R$ 0,00 | 31/31 dias × 5 marcas |
+
+Julho fechado: ML R$ 5.778.258,36 (era R$ 2.593.883,38, −55,1%); TikTok
+R$ 9.454.502,44 (era R$ 3.365.849,64, −64,4%).
+
+Validação: `audit.source_sync_run` #108 (ml, 144/144) e #109 (tiktok, 180/180)
+com `status=success` e janela de fonte `2026-07-01..2026-08-05`; 14 checks de
+qualidade `pass`; zero duplicidade na chave `(date, loja_id, marketplace_id)`;
+reconciliação dia × marca em GMV, `orders`, `units_sold` e `unique_buyers` com
+zero divergência sob a regra vigente do conector; API de produção em paridade
+total com o Neon nas 9 combinações canal × marca. Hash agregado das linhas fora
+da janela e de Shopee inalterado antes e depois das duas cargas.
+
+Ressalvas:
+
+- **Agosto é mês aberto.** O retrato é o do Data Mart em 05/08/2026 18:59 UTC
+  (15:59 São Paulo); o dia corrente não está fechado e o Data Mart continua
+  recebendo dados depois da execução das 06:00.
+- **TikTok subestima os últimos dias por definição da regra.** Em 05/08 todos
+  os pedidos da fonte estavam em `AWAITING_COLLECTION`, `AWAITING_SHIPMENT`,
+  `UNPAID`, `ON_HOLD` ou `CANCELLED` — nenhum em `COMPLETED`/`DELIVERED`/
+  `IN_TRANSIT` —, então o GMV do dia é R$ 0,00 legitimamente. A curva amadurece
+  em 2–3 dias (01/08 R$ 327 mil → 04/08 R$ 99 mil → 05/08 R$ 0). São 12.481
+  pedidos fora da allowlist conhecida em jul+ago, deliberadamente excluídos.
+- **Junho não foi reprocessado** (fora da janela autorizada) e segue divergente
+  da fonte recalculada hoje: TikTok Neon ~R$ 597 mil acima, ML ~R$ 13 mil
+  acima. É diferença de fotografia de carga, não lacuna de cobertura — junho
+  tem 100% dos dias nos dois canais. Reprocessar exige autorização própria.
+- `audit.source_sync_run` #90 (`tiktok_daily`, 26/07) segue com
+  `status=running` órfão, resíduo da execução interrompida. Não é lock e não
+  bloqueia nada.
+
+**Junho reprocessado e encerrado (05/08/2026).** Em execução única por canal na
+janela 01–30/06, ML passou de R$ 4.581.094,67 para R$ 4.567.893,85 e TikTok de
+R$ 9.658.673,45 para R$ 9.060.774,62 — ambos em paridade R$ 0,00 com o Data Mart
+em GMV, `orders`, `units_sold`, `unique_buyers` e `canceled_orders`, 30/30 dias
+por marca, `source_sync_run` #110 e #111 `success`. Com isso a **recuperação
+histórica de ML e TikTok está encerrada**: junho, julho e 01–05/08 reconciliam
+com a fonte e com a API de produção. Fingerprint por canal/mês comprovou
+alteração restrita a `mkt2_2026-06` e `mkt1_2026-06` (24 de 26 buckets
+inalterados).
+
+Próxima frente: **automação server-side do consumo do Data Mart** no
+**repositório corporativo do Airflow**, substituindo o Windows Task Scheduler
+local — janela fechada idempotente e health check por cobertura (não por
+`MAX(data)`). Frente escolhida e **pausada até o fechamento do Gate DQ1**.
+
+## Gate DQ1 — qualidade de dados dos três marketplaces
+
+Status: **CONCLUÍDO em 05/08/2026** (auditoria read-only e documental, rodada
+única, sem escrita, pipeline, deploy ou commit). Detalhes, números e
+classificação completa em
+[MARKETPLACE_DATA_QUALITY_CHECKPOINT.md](MARKETPLACE_DATA_QUALITY_CHECKPOINT.md).
+
+Cadeia confirmada: a Torre **não** chama as APIs dos canais — elas alimentam o
+Data Mart a montante e a Torre consome o Data Mart (Shopee segue via export
+manual).
+
+Veredito: **ML, TikTok e Shopee = TRUSTED WITH LIMITATION**; **Regiões = NOT
+TRUSTED como GMV comparável entre canais**. Cobertura jan–jul integral nos três
+canais (única ausência, ML/barbours em 20/01, é ausência real na fonte); Neon ×
+API em paridade R$ 0,00 em `/daily`, `/overview`, `/monthly`, `/canais` e
+`/quality`; zero duplicidade e zero nulo de chave.
+
+Dois bloqueadores abertos: (1) **TikTok não tem cancelamento nem devolução em
+nenhum ponto servido** — `gold.tiktok_brand_daily.canceled/returned/refunded`
+valem 0 em todas as 1.080 linhas de 2026 contra 436.814 pedidos `CANCELLED` na
+Raw, e a ausência não é declarada como `not_applicable`; (2) **Regiões mede
+43,8% menos que Gerencial/Canais no mesmo período** (julho: R$ 12,67M vs
+R$ 22,54M) e reporta `uf_fill_pct: 100%` / `coverage_level: ok`.
+
+Achado estrutural novo: a fonte reconstrói o estado *atual* dos pedidos, então
+**um mês fechado reconcilia apenas no instante da carga e deriva depois** —
+julho divergiu R$ 155,90 (ML) e R$ 37,54 (TikTok) em ~1h após a própria carga.
+Os resíduos de jan–mai são deriva acumulada desde 22/07, não erro de pipeline.
+
+Nenhuma correção foi aplicada. As 6 correções necessárias e os 7 requisitos que
+o DQ1 estabelece para a migração ao Airflow estão no checkpoint.
 
 ## Próximas prioridades
 
