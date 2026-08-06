@@ -428,6 +428,61 @@ Escopo da Task 2 (quando desbloqueada): 1 módulo puro
 Marca **não** consegue evidenciar (custo, frete, cancelamento) para nunca
 prometer métrica ausente.
 
+## Gate G4 — timeout de `/brand-detail` (diagnóstico)
+
+Status: **Gate G4 encerrado em 06/08/2026 como `GO COM RESTRIÇÃO` — aguardando
+revisão/commit.** Task 1 (diagnóstico read-only) e Task 2 (mitigação fail-fast +
+QA) concluídas. Nenhum deploy realizado. Evidência em
+[DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md) §8.9 (diagnóstico) e §8.10
+(mitigação).
+
+**A mitigação NÃO restaura os dados.** Foi adicionado
+`datamart_connect_timeout_seconds` (default **10s**, faixa 1–30 validada pelo
+Pydantic) aplicado **exclusivamente** ao `datamart_engine`; o engine
+principal/Neon segue criado exatamente como antes. O código está **implementado
+e validado, mas a mitigação ainda NÃO está ativa em produção**: somente **após a
+publicação do backend** as rotas servidas pelo Data Mart passarão a falhar em
+aproximadamente **10s** em vez de 45–120s — espera que o frontend já representa
+como indisponibilidade. **Até essa publicação, produção continua podendo esperar
+45–120s**, e **mesmo depois dela os dados seguirão indisponíveis**.
+**`/brand-detail`, `/tempo-real`, `/inteligencia` e `/operacoes` continuam sem
+conteúdo do Data Mart em produção.** A correção definitiva depende da **decisão
+de camada de serving**;
+migrar/sincronizar essas fontes para o Neon deve ser tratado futuramente junto
+da arquitetura do Airflow, sem ampliar o G4. Provas: falha em 4,99s contra host
+não roteável (1 tentativa, sem retry, sem DSN em mensagem), `SELECT 1` OK no
+Neon e OK em 2,09s no Data Mart via VPN (o timeout não impede conexão válida),
+14 testes focais novos e 449 testes da API passando.
+
+**Causa raiz confirmada: não é consulta lenta, plano, índice, view nem cold
+start — é a ausência de conectividade entre o Render e o Data Mart (RDS).** As
+5 consultas de `get_brand_detail` leem `gold.*`, então `_uses_datamart()` as
+roteia para o `datamart_engine`, que aponta para o RDS AWS — e o RDS **exige
+VPN** (`runbook_sync_produtos.md`), conectividade que o `DECISIONS.md` ainda
+lista como critério de uma decisão futura. Em produção nenhuma consulta chega a
+executar: o tempo é **100% tempo de conexão** (0 bytes recebidos).
+
+Prova por separação, medida no mesmo instante: as 4 rotas que ainda usam o
+`gold_service` (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`)
+deram **timeout em 4/4**, enquanto todas as rotas migradas para o
+`performance_service`/Neon responderam em **0,42–0,82s**. Com acesso ao Data
+Mart, as 5 consultas rodam em **4,07s no total** (nenhuma estoura
+`statement_timeout` de 20s), o que descarta o SQL como causa.
+
+Impacto: o payload alimenta somente a seção "TikTok Shop — Inteligência
+(competência mensal)" da página de Marca, que **já degrada isoladamente** ("Dados
+mensais indisponíveis — API offline"); o custo real é o usuário **esperar 45–120s
+antes de ver a indisponibilidade**. As telas Tempo Real, Inteligência e
+Operações dependem das outras 3 rotas afetadas.
+
+A mitigação escolhida — **falhar rápido** no caminho do Data Mart, com
+`connect_timeout` curto e explícito — foi **implementada e validada na Task 2**
+(ver acima e §8.10), e **depende de publicação do backend para produzir efeito em
+produção**. Migrar `/brand-detail` para o Neon **não** era correção mínima: no
+`marts` existe apenas `fact_tiktok_product_daily`, sem equivalentes de
+`tiktok_brand_daily`, `tiktok_creator_daily` ou `v_channel_efficiency` — seria
+frente de dados própria.
+
 ## Próximas prioridades
 
 1. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.

@@ -365,7 +365,69 @@ Regras duras: **nenhum valor monetário, percentual, mediana/p75, texto livre, m
 
 **Validações finais:** web **460 testes**, typecheck e build verdes; `git diff --check` OK; scan de secrets/PII limpo; `package-lock.json` sem diff; zero dependência nova; zero arquivo de backend/API/pipeline/banco; **um único shell de diálogo** (`KpiDrilldownDialog`; o outro `role="dialog"` é o `MobileDrawer` de navegação, pré-existente).
 
-**Gate G3 tecnicamente concluído — aguardando revisão/commit. Nenhum deploy realizado.**
+**Gate G3 encerrado e versionado no commit `74cc3b1`. Nenhum deploy manual foi executado naquele gate.**
+
+## 8.9. Gate G4 — Task 1: diagnóstico do timeout de `/brand-detail` (06/08/2026, read-only)
+
+Diagnóstico da dívida levantada em §8.8. **Zero código, SQL, banco, deploy ou escrita.**
+
+**Veredito: causa raiz confirmada — não é consulta lenta, plano, índice, view nem cold start. É ausência de conectividade Render → Data Mart (RDS).**
+
+**Matriz HTTP (1 chamada por combinação, produção):** `brand-detail` deu **timeout em 4/4** combinações (kokeshi e apice × mai/2026 e jul/2026), sempre **0 bytes recebidos** aos 40s — determinístico, independente de marca e de mês. Controle `/daily` no mesmo período: **HTTP 200 em 0,82s**.
+
+**Caminho real:** `router /brand-detail` → `gold_service.get_brand_detail` → **5 consultas sequenciais** via `_query`, sem retry, sem cache e sem timeout interno. Fontes: `monthly` e `daily` em `gold.tiktok_brand_daily`; `creators` em `gold.tiktok_creator_daily` (GROUP BY + LIMIT 5); `products` em `gold.tiktok_product_daily` (GROUP BY + LIMIT 5); `channel_funnel` na view `gold.v_channel_efficiency`. Todas as cinco casam com `_uses_datamart()` (prefixo `gold.`), então **cada uma abre uma conexão nova no `datamart_engine`** — o RDS AWS, que **exige VPN** (`runbook_sync_produtos.md`: "RDS AWS (VPN obrigatória)" vs "Neon (internet pública — sem VPN)"). `DECISIONS.md` lista "conectividade segura e read-only entre Render e RDS" como critério de uma decisão **futura**, isto é, ainda inexistente.
+
+**Prova por separação de grupos (mesmo instante, produção):**
+
+| Grupo | Rotas | Resultado |
+|---|---|---|
+| `gold_service` → `datamart_engine` (RDS/VPN) | `/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes` | **4/4 timeout**, 0 bytes |
+| `performance_service` → Neon (`marts.*`) | `/daily`, `/quality`, `/pedidos` (e todas as demais) | **200 em 0,42–0,82s** |
+
+A separação é perfeita e **descarta cold start do Render** (rotas do Neon respondem em sub-segundo no mesmo momento). Todo o resto da API já havia migrado para `performance_service`; sobraram exatamente 4 rotas no serviço legado.
+
+**Isolamento das 5 consultas (Task C) — com acesso ao Data Mart, `statement_timeout=20s`, uma execução cada (kokeshi 2026-05):**
+
+| Consulta | Fonte | Status | Duração | Linhas |
+|---|---|---|---:|---:|
+| monthly | `gold.tiktok_brand_daily` | OK | 2.243,7 ms | 1 |
+| daily | `gold.tiktok_brand_daily` | OK | 423,9 ms | 31 |
+| creators | `gold.tiktok_creator_daily` | OK | 445,3 ms | 5 |
+| products | `gold.tiktok_product_daily` | OK | 481,1 ms | 5 |
+| channel_funnel | `gold.v_channel_efficiency` | OK | 473,0 ms | 3 |
+| **total do serviço** | — | OK | **4.067,9 ms** | — |
+
+Nenhuma consulta estourou o timeout; a primeira concentra o handshake. **Logo o SQL não é o problema.**
+
+**Task D — `EXPLAIN`/índices: não executado, por não existir consulta problemática.** A instrução restringia o plano à consulta lenta e nenhuma se qualificou. **Decomposição do tempo em produção:** tempo de conexão = **100%** (TCP sem resposta, 0 bytes até 40–120s); tempo de consulta = **0** (nenhuma chega a executar); serialização = irrelevante (payload de 1+31+5+5+3 linhas); cold start = **descartado**.
+
+**Contrato e necessidade (Task E):** o payload alimenta **apenas** a seção "TikTok Shop — Inteligência (competência mensal)" — `monthly` nos cards, `daily` no `ChannelMixChart`, `channel_funnel` no "Funil por Canal", `top_creators` e `top_produtos` nos Top 5. O frontend **já degrada essa seção isoladamente** (`{!detailLoading && !d}` → "Dados mensais indisponíveis — API offline"); KPIs, gráfico do período, Últimos 7 Dias e o banner do G3 seguem funcionando. No backend, porém, a resposta é atômica: as 5 são sequenciais e qualquer falha derruba o endpoint inteiro. O custo real hoje para o usuário é **esperar 45–120s antes de ver a indisponibilidade**.
+
+**Menor correção recomendada (uma só, para a Task 2): fazer o caminho do Data Mart falhar rápido** — `connect_timeout` curto e explícito no `datamart_engine` (o `_query` já levanta erro tratado quando o engine é `None`), de modo que os 45–120s de espera virem uma falha em poucos segundos, que o frontend **já** sabe representar. Não remove funcionalidade (onde há VPN, continua funcionando), não cria endpoint, não toca SQL/índice/banco.
+
+**Não recomendado agora, com evidência:** migrar `/brand-detail` para o Neon exigiria criar/sincronizar três fontes inexistentes lá — no `marts` só existe `fact_tiktok_product_daily`, sem equivalentes de `tiktok_brand_daily`, `tiktok_creator_daily` ou `v_channel_efficiency`. É frente de dados própria, não correção mínima.
+
+**Achados classificados:** *bloqueador* — 4 rotas servidas pelo Data Mart inalcançável em produção (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`), afetando as telas correspondentes; *necessário* — falhar rápido em vez de pendurar; *dívida* — `_query` abre uma conexão nova por consulta (5 por request), ineficiência real mas não a causa; a migração das 4 rotas para uma camada de serving alcançável (decisão já prevista em `DECISIONS.md`); *fora do escopo* — VPN/VPC no Render, criação de índices, refactor do `gold_service`.
+
+## 8.10. Gate G4 — Task 2: fail-fast do Data Mart (06/08/2026) — **GO COM RESTRIÇÃO**
+
+**Mitigação aplicada, não correção.** A causa raiz permanece: **o Render não tem conectividade com o Data Mart (RDS)**. Esta task apenas encurta a espera — **os dados não voltaram**.
+
+**O que mudou:** `app/config.py` ganhou `datamart_connect_timeout_seconds: int = Field(default=10, ge=1, le=30)` (validação pelo próprio Pydantic, sem dependência nova) e `app/database.py` teve `_make_engine(url, connect_timeout=None)` estendido para aplicar `connect_args={"connect_timeout": N}` **somente quando o parâmetro é fornecido**. O `datamart_engine` passa o valor configurado; o **engine principal/Neon é criado exatamente como antes, sem `connect_args` novo**. Preservados: `pool_pre_ping=True` nos dois, retorno `None` para URL vazia, `SessionLocal`, `DataMartSessionLocal`, `check_connection` e `check_datamart_connection`. **Nenhum retry, fallback, cache ou conexão compartilhada** foi introduzido, e a falha continua propagando como falha — nunca é convertida em sucesso vazio.
+
+**Nada foi tocado em:** `gold_service.py`, consultas SQL, routers, schemas, frontend, banco, `.env`, Render/VPC/VPN, pipelines/Airflow, dependências.
+
+**Provas medidas:**
+- Host inalcançável (`192.0.2.1`, TEST-NET-1 da RFC 5737 — sem depender de IP externo real) com timeout de 5s: **falhou em 4,99s**, **1 única tentativa** (sem retry) e **sem DSN/senha na mensagem**.
+- Engine principal/Neon: `SELECT 1` **OK**, inalterado.
+- Data Mart real via VPN com `connect_timeout=10`: `SELECT 1` **OK em 2,09s** — o timeout **não** impede conexão válida.
+- Testes focais `tests/test_datamart_connect_timeout.py`: **14 casos** (URL vazia → `None`; Neon sem `connect_timeout`; Data Mart com o valor exato; `pool_pre_ping` nos dois; default 10; faixa 1–30 aceita e 0/-1/31/120 rejeitados; falha de criação não vaza DSN; mensagens de `check_*` sem DSN/senha; fontes e roteamento do `gold_service` intactos; ausência de mecânica de retry/backoff no código, ignorando comentários). Suíte completa da API: **449 passed**; `compileall` OK; import/startup da API OK.
+
+**Restrição que permanece:** `/brand-detail`, `/tempo-real`, `/inteligencia` e `/operacoes` **continuam sem conteúdo do Data Mart em produção**.
+
+Sobre o efeito da mitigação, para não haver ambiguidade: o código está **implementado e validado**, mas **ainda não está ativo em produção**. **Somente após a publicação do backend** essas rotas passarão a falhar em aproximadamente **10s**; **até essa publicação, produção continua podendo esperar 45–120s**. E **mesmo depois de publicada, os dados continuarão indisponíveis** — o que muda é apenas a rapidez com que a indisponibilidade aparece, algo que o frontend já representa.
+
+A **correção definitiva depende da decisão de camada de serving** (`DECISIONS.md`); a migração/sincronização dessas fontes para o Neon deve ser tratada futuramente **junto da arquitetura do Airflow**, sem ampliar o G4 (lembrando que em `marts` só existe `fact_tiktok_product_daily`, sem equivalentes de `tiktok_brand_daily`, `tiktok_creator_daily` ou `v_channel_efficiency`).
 
 ## 9. Riscos e não-objetivos
 

@@ -1,4 +1,5 @@
-﻿from pydantic_settings import BaseSettings, SettingsConfigDict
+﻿from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -11,6 +12,16 @@ class Settings(BaseSettings):
     datamart_db: str = ""
     datamart_user: str = ""
     datamart_password: str = ""
+    # Gate G4: timeout de CONEXAO aplicado exclusivamente ao engine do Data
+    # Mart. Causa raiz diagnosticada (ver docs/DRILLDOWN_ARCHITECTURE.md §8.9):
+    # o Render nao tem conectividade com o RDS, entao `connect()` fica pendurado
+    # 45-120s sem receber byte algum e as 4 rotas servidas pelo gold_service
+    # (/brand-detail, /tempo-real, /inteligencia, /operacoes) so' falham depois
+    # dessa espera. Falhar rapido nao restaura o dado — apenas encurta a espera
+    # para algo que o frontend ja' representa como indisponibilidade.
+    # Default conservador para nao atrapalhar o uso local via VPN em rede lenta;
+    # faixa validada pelo proprio Pydantic (sem dependencia nova).
+    datamart_connect_timeout_seconds: int = Field(default=10, ge=1, le=30)
     app_env: str = "development"
     log_level: str = "INFO"
     api_port: int = 8080
