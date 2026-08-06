@@ -3,6 +3,7 @@
 import type { CanaisChannelMedian, CanaisChannelRow } from "@/lib/api-client";
 import { formatChannelMetric, signalLabel, signalTone } from "@/lib/canais-channel-metrics";
 import { buildChannelDiagnosis } from "@/lib/channel-signal-reasons";
+import { buildArrivalParams } from "@/lib/brand-arrival-context";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
@@ -60,6 +61,12 @@ function metricEvidence(
  */
 export default function ChannelComparisonDialogContent({ row, median, periodLabel, refreshedAt, buildHref }: Props) {
   const diagnosis = buildChannelDiagnosis(row, median);
+  // Destino da marca: marca/canal explícitos (vencem os filtros herdados) +
+  // contexto de chegada quando existe sinal conhecido (Gate G3).
+  const arrivalParams = buildArrivalParams(row.signals, row.channel, row.brand);
+  const brandHref =
+    `/brand/${row.brand}?brands=${row.brand}&channels=${row.channel}` +
+    (arrivalParams ? `&${arrivalParams}` : "");
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -133,10 +140,13 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
       {/* 6. Qualidade/cobertura do dado */}
       <DataQualityNote note={row.data_warning} />
 
-      {/* 7. Próximo passo — filtros preservados via buildHref. */}
+      {/* 7. Próximo passo — filtros preservados via buildHref. O Gate G3 anexa
+          o contexto de chegada (`ctx_*`) SOMENTE quando há sinal conhecido na
+          linha: só identificadores, nenhum valor desta linha vai na URL. Sem
+          sinal, o CTA continua idêntico ao do G2. */}
       <div className="flex flex-col gap-1">
         {diagnosis.nextAction && <p className="text-xs text-slate-500">{diagnosis.nextAction}</p>}
-        <DrilldownCta href={buildHref(`/brand/${row.brand}?brands=${row.brand}&channels=${row.channel}`)}>
+        <DrilldownCta href={buildHref(brandHref)}>
           Abrir visão completa da marca →
         </DrilldownCta>
       </div>

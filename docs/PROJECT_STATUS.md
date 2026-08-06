@@ -333,6 +333,101 @@ em navegador (Qualidade com TikTok isolado/combinado/ML, Regiões com
 Todos/TikTok/ML, Canais com TikTok) em desktop 1440×900 e mobile 390×844, sem
 erro de console/hydration e com querystring preservada.
 
+## Gate G3 — página de Marca "chegando quente"
+
+Status: **Gate G3 CONCLUÍDO tecnicamente em 06/08/2026 (Tasks 1–3) — aguardando
+revisão/commit.** Task 1 (desenho) em 05/08; Task 2 (implementação) e Task 3 (QA
+visual, veredito **PASS**) em 06/08. Nenhum deploy realizado. Registro completo
+em [DRILLDOWN_ARCHITECTURE.md](DRILLDOWN_ARCHITECTURE.md) §8 (§8.7 = Task 2,
+§8.8 = QA).
+
+**QA visual (Task 3): PASS.** 10 verificações × 2 viewports (desktop 1440×900 e
+mobile 390×844), com Playwright/Chromium temporários em `%TEMP%` e API pública
+read-only: acesso direto sem banner; contexto válido com banner antes dos KPIs;
+âncora `#marca-periodo` funcionando (inclusive por teclado); TikTok+`custo_alto`
+sem âncora e com limitação declarada; combinações inválidas ignoradas em
+silêncio; troca de marca/canal descartando o contexto; retorno a Canais com
+filtros preservados e sem `ctx_*`; sidebar não propagando contexto; a11y OK.
+**0 erro de console, 0 hydration, 0 overflow, 0 host inesperado.** Sob falha
+total da API o banner permanece sem declarar frescor nem fabricar métrica.
+**Nenhuma rodada de correção de aplicação foi necessária** — os findings dos
+primeiros runs eram do próprio script de QA (`networkidle` que nunca estabiliza,
+espera da matriz, filtro de canal multi-seleção e sidebar oculta no mobile).
+
+**Dívida descoberta no QA (fora do escopo, pré-existente):** o endpoint
+`GET /api/v1/performance/brand-detail` **não responde em produção** (timeout em
+45–120s para as marcas/meses testados, contra ~0,4s de `/performance/daily`). A
+página de Marca já o chamava antes do G3 — o gate não adicionou fetch algum. O
+efeito é a seção "TikTok Shop — Inteligência (competência mensal)" não
+completar; KPIs, gráfico, últimos 7 dias e o banner de chegada funcionam.
+Corrigir exige backend, proibido neste gate.
+
+**Backend do G1 + DQ2 publicado e verificado (06/08/2026).** O deploy manual no
+Render foi concluído no commit `04493d5` e a verificação read-only pós-deploy
+passou: `/canais` com TikTok em 01–05/08 retorna **0 sinais `custo_alto`** no
+cenário `custo = mediana = p75 = 0` (antes 5/5) e `/executive-summary` traz os
+**5 campos aditivos do G1**, sem a frase "…acima do usual". Achado colateral: o
+G1 também nunca havia chegado à produção — os dois gates entraram juntos. O
+bloqueador operacional que travava a Task 2 está **encerrado**.
+
+**Task 2 implementada:** o CTA "Abrir visão completa da marca" (detalhe marca ×
+canal) passa a anexar um contexto **allowlisted** (`ctx_from=canais`,
+`ctx_signal`, `ctx_channel`, `ctx_brand`) e a página de Marca renderiza um bloco
+compacto "Você chegou aqui por…" com o sinal em linguagem humana, canal,
+período, retorno à evidência em Canais e — **somente quando a página realmente
+evidencia o sinal** — um CTA de âncora. `ads_subutilizado` é o único sinal com
+evidência real aqui (KPI de investimento do período); custo, frete, `sem_dado` e
+ROAS declaram a limitação em vez de prometer métrica ausente. **Nenhum número
+trafega na URL**, `ctx_*` fica fora de `FILTER_QUERY_KEYS` (a sidebar descarta o
+contexto) e, sem contexto válido, a página é idêntica à atual. `ctx_from=gerencial`
+**não** foi implementado por não existir produtor real — propagação transitiva
+desde a Gerencial segue como dívida.
+
+Uma rodada estreita de correção fechou dois pontos da revisão: (1) **validação de
+compatibilidade sinal × canal** nos dois lados (parse e produtor) — como a URL é
+entrada não confiável, o TikTok aceita apenas `custo_alto` e `sem_dado`,
+espelhando a aplicabilidade do contrato (sem Ads e sem frete de seller no
+canal), enquanto ML e Shopee aceitam os cinco; (2) **redação neutra de
+`ads_subutilizado`** ("sinal de Ads subutilizado no canal"), porque a regra
+também dispara com percentual de Ads ausente ou gasto zero — afirmar "abaixo da
+mediana" não seria verdade em todos os ramos. Nenhuma mediana/percentual é
+transportada ou recalculada. Zero endpoint, fetch, dependência, registry, modal
+novo ou mudança de backend; **460 testes**, typecheck e build verdes.
+
+**Precheck do DQ2 em produção (read-only) revelou o bloqueador:** o front do
+DQ2 **está publicado** (Qualidade mostra `Cancelamento TK`/`N/D`/"nesta fonte";
+Regiões usa "GMV com cobertura regional" e "UF preenchida", sem o rótulo
+antigo), mas a **API do Render ainda roda a lógica pré-DQ2**. Prova
+comportamental: em `/canais?channels=tiktok` na janela 01–05/08 o custo de
+marketplace é **0,0% em todas as marcas** (mediana 0,0 · p75 0,0) e a API
+**emite `custo_alto` para as 5** — exatamente o falso positivo que a guarda do
+DQ2 elimina. Julho não discrimina as duas versões (distribuição com dispersão
+real, sinais legítimos em ambas). Nenhum deploy/redeploy foi feito. **A Task 2
+do G3 só deve começar depois de o backend do commit `04493d5` estar em
+produção.**
+
+Diagnóstico da jornada: o contexto é perdido **no `<Link>` do CTA** —
+`mergeFilteredHref` transporta apenas `FILTER_QUERY_KEYS` mais o que o destino
+traz (`brands`, `channels`), então a Marca recebe *o quê* (marca, canal,
+período) e nunca *o porquê* (sinal, origem). A mesma regra é o que garante, sem
+alteração alguma, que o contexto **não vaze** pela sidebar.
+
+Contrato escolhido: **parâmetros explícitos e allowlisted na URL** (`ctx_from`,
+`ctx_signal`, `ctx_channel`, `ctx_brand`), com a seção-alvo **derivada** do
+sinal em vez de transportada. Nenhum valor monetário, percentual, referência ou
+texto livre na querystring; o bloco de contexto **não exibe número algum** — a
+URL nunca é fonte de verdade de métrica. Contexto inválido, marca ou canal
+incompatível: ignorado em silêncio. Sem contexto: página idêntica à atual.
+`FILTER_QUERY_KEYS` **não** é ampliada; zero endpoint, fetch, dependência,
+registry ou estado global.
+
+Escopo da Task 2 (quando desbloqueada): 1 módulo puro
+(`brand-arrival-context.ts`), 1 componente pequeno reusando as primitives do G2
+(`BrandArrivalBanner`), edições em `app/brand/[brand]/page.tsx` e no CTA de
+`ChannelComparisonDialogContent`. Um mapa explícito declara quais sinais a
+Marca **não** consegue evidenciar (custo, frete, cancelamento) para nunca
+prometer métrica ausente.
+
 ## Próximas prioridades
 
 1. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.

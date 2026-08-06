@@ -23,6 +23,8 @@ import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import type { BrandDetailChannelRow } from "@/lib/api-client";
+import BrandArrivalBanner from "@/components/BrandArrivalBanner";
+import { parseBrandArrivalContext, SECTION_PERIOD } from "@/lib/brand-arrival-context";
 
 const BRAND_META: Record<string, { label: string; color: string; initials: string }> = {
   barbours: { label: "BARBOURS", color: "bg-violet-600", initials: "BA" },
@@ -105,6 +107,16 @@ function BrandPageInner() {
   // querystring apontando para a marca anterior (Gate U3, Task 6).
   const buildHref = (href: string) => mergeFilteredHref(href, searchParams);
   const backToCanais = mergeFilteredHref("/canais", searchParams);
+
+  // Contexto de chegada "quente" (Gate G3): validado contra a marca da rota e
+  // o canal filtrado. Marca/canal incompatíveis, enum inválido, parâmetro
+  // repetido ou ausência ⇒ `null` e a página fica idêntica à de sempre.
+  // `ctx_*` NUNCA entra em FILTER_QUERY_KEYS, então nem a sidebar nem os
+  // links desta página repropagam o contexto.
+  const arrivalCtx = useMemo(
+    () => parseBrandArrivalContext(searchParams, brand, filters.channels),
+    [searchParams, brand, filters.channels],
+  );
 
   const [period, setPeriod] = useState<string>(AVAILABLE_MONTHS[0].value);
   const [daily, setDaily] = useState<DailyRow[]>([]);
@@ -313,8 +325,14 @@ function BrandPageInner() {
           />
         </div>
 
-        {/* Tendencia — periodo selecionado */}
-        <section aria-label={`Tendencia — ${periodLabel}`} aria-busy={!dailyIsFresh}>
+        {/* Chegada "quente" (Gate G3) — depois do cabecalho/filtros e ANTES dos
+            KPIs; nao renderiza nada sem contexto valido. */}
+        <BrandArrivalBanner ctx={arrivalCtx} periodLabel={periodLabel} buildHref={buildHref} />
+
+        {/* Tendencia — periodo selecionado. `id`/`scroll-mt-24` (Gate G3):
+            ancora do CTA "Ver investimento do período" do banner de chegada —
+            o shell fixo nao pode cobrir o titulo da secao. */}
+        <section id={SECTION_PERIOD} className="scroll-mt-24" aria-label={`Tendencia — ${periodLabel}`} aria-busy={!dailyIsFresh}>
           <SectionTitle>Período selecionado — {periodLabel}</SectionTitle>
           {!dailyIsFresh ? (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

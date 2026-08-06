@@ -207,7 +207,167 @@ QA visual com Playwright temporário (mesmo setup U6/G1, porta 3100, `%TEMP%`): 
 
 **Dívidas registradas (não implementadas):** "chegada quente" na página de Marca; drill transacional (endpoint novo); tendência diária no detalhe; explicação de `roas_forte` poderia adotar a redação inclusiva "na mediana ou acima" (hoje mostra os dois números sem afirmar o corte).
 
-## 8. Riscos e não-objetivos
+## 8. Gate G3 — Task 1: página de Marca "chegando quente" (desenho, 05/08/2026)
+
+Somente auditoria e desenho — zero implementação. Fecha a dívida registrada em §7 ("chegada quente na Marca").
+
+### 8.1. Precheck do DQ2 em produção (read-only) — **BLOQUEADOR OPERACIONAL**
+
+| Item | Resultado |
+|---|---|
+| Front — Qualidade/TikTok como indisponível | ✅ publicado (`Cancelamento TK`, `N/D`, "nesta fonte", "taxa zero" no chunk `app/qualidade/page-e394…`) |
+| Front — "GMV com cobertura regional" | ✅ publicado; rótulo antigo "GMV Regional" **ausente** do bundle |
+| Front — UF relativa aos elegíveis / escopo | ✅ "UF preenchida", "Escopo regional", "fora do escopo" presentes |
+| Front — TikTok isolado = `not_applicable` | ✅ lógica publicada (`regioes-scope` no chunk de Regiões) |
+| **API — `custo_alto` sem base válida** | ❌ **backend ainda com a lógica pré-DQ2** |
+
+Prova comportamental: em `/canais?channels=tiktok` na janela **01–05/08** (e em 04/08 isolado) o custo de marketplace é **0,0% em todas as marcas** (mediana 0,0 · p75 0,0) e a API **emite `custo_alto` para as 5 marcas** — exatamente o falso positivo que a guarda do DQ2 elimina. Em julho a distribuição tem dispersão real (29,3 · 25,1 · 24,9 · 24,6 · 20,5; mediana 24,9 · p75 25,1), então julho **não discrimina** as duas versões da regra: os dois sinais são legítimos nas duas.
+
+**Consequência (na data do desenho):** o commit `04493d5` estava em `origin/main` e o front publicado, mas o backend do Render **não**. Foi classificado como **bloqueador operacional** e nenhum deploy foi feito por este gate.
+
+**RESOLVIDO em 06/08/2026.** O deploy manual do backend no Render foi concluído no commit `04493d5` (serviço Live) e a verificação read-only pós-deploy **passou nos dois critérios**: (1) `/canais?channels=tiktok` em 01–05/08, no cenário degenerado `custo = mediana = p75 = 0`, retorna **0 sinais `custo_alto`** (antes 5/5); (2) `/executive-summary` traz os **5 campos aditivos do G1** (`category`, `reference_value`, `reference_kind`, `delta_abs`, `confidence_note`) em todos os insights, e a frase que o G1 removeu ("…acima do usual") não aparece mais. Achado colateral registrado: o G1 também nunca havia chegado à produção — os dois gates entraram juntos neste deploy. **Bloqueador encerrado; Task 2 desbloqueada e implementada (§8.7).**
+
+### 8.2. Diagnóstico da jornada e o ponto exato da perda
+
+CTAs que terminam em `/brand/[brand]` (todos via `buildHref` → `mergeFilteredHref`):
+
+| Origem | Href gerado | Contexto que existe na origem |
+|---|---|---|
+| `ChannelComparisonDialogContent:139` (detalhe marca×canal) | `/brand/{brand}?brands={brand}&channels={channel}` | **diagnóstico completo**: sinais, mediana/p75 do canal, `data_warning`, headline |
+| `canais/page.tsx:722/830/946` (tabelas por canal) | idem, `channels` fixo | linha da tabela |
+| `financeiro/page.tsx:393/468/555` | idem | linha da tabela |
+| `BrandPerformanceTable` / `BrandTable` (Gerencial) | `/brand/{brand}` + query preservada | linha da tabela |
+| Pulso (`InsightDrilldownContent`) | `insight.href` do backend → hoje `/canais?brands=…`, **nunca** `/brand/…` | tipo do insight, severidade, referência |
+
+**Ponto exato da perda:** no `<Link>` do CTA. `mergeFilteredHref` transporta **apenas** `FILTER_QUERY_KEYS` (`channels`, `brands`, `date_from`, `date_to`, `compare`) mais o que o destino trouxer explicitamente. O href do detalhe traz só `brands` e `channels` — ou seja, a Marca recebe **o quê** (marca, canal, período) e nunca **o porquê** (sinal, origem). A página não tem nenhum estado/prop de entrada além da rota e da querystring.
+
+Consequência secundária: essa mesma regra é a razão pela qual o contexto **não vaza** pela sidebar — `buildPreservedQuery` itera só `FILTER_QUERY_KEYS`, então qualquer parâmetro novo fora dessa lista é descartado ao navegar pelo menu. **O requisito "não sobreviver à navegação pela sidebar" já é garantido pela arquitetura atual, sem alteração.**
+
+Dados na Marca hoje: `/performance/daily` (por marca × canal × período) + `fetchBrandDetail(brand, period)`; estados `dailyIsFresh` (`resolvedDailyKey === dailyRequestKey`), `detailLoading`, `isLive`, skeletons. Link de volta **já existe** (`backToCanais = mergeFilteredHref("/canais", …)`). **Nenhuma seção tem `id`** — só `<h2>`; ancoragem exigirá adicionar `id`s.
+
+**Capacidade real da Marca por tipo de sinal** (base para não prometer o que não existe):
+
+| Sinal/insight de origem | A Marca tem evidência? | Seção-alvo |
+|---|---|---|
+| `drop`, `growth` (GMV) | **sim** | "Mix de Canal — GMV Diário" + "Últimos 7 Dias" |
+| `ads_subutilizado`, `roas_forte` | **parcial** — KPI Ad Spend/ROAS existe para ML/Shopee; "N/D para TikTok Shop" | KPIs |
+| `custo_alto` / `high_cost` | **NÃO** — não há custo/fee por marca nesta tela | nenhuma → texto honesto + CTA de volta |
+| `frete_alto` | **NÃO** | nenhuma → idem |
+| `high_cancel_rate` | **NÃO** (qualidade vive em `/qualidade`) | nenhuma → idem |
+| `sem_dado`, `stale_data` | n/a | nota de qualidade |
+
+### 8.3. Contrato de contexto — decisão
+
+Opções comparadas:
+
+| Opção | Veredito |
+|---|---|
+| **A. parâmetros explícitos e allowlisted na URL** | **ESCOLHIDA** — compartilhável, sobrevive a back/forward, zero estado global, zero endpoint, e a allowlist existente já impede vazamento pela sidebar |
+| B. fragmento/âncora + parâmetros mínimos | **parcialmente adotada**: a âncora é usada para levar à seção, mas a seção é **derivada** do sinal, não transportada (menos superfície e impossível apontar seção inexistente) |
+| C. fetch de endpoint existente na Marca | **rejeitada** — "de onde o usuário veio" é fato da navegação, não do servidor; recalcular o sinal exigiria buscar `/canais` inteiro (todas as marcas) só para uma linha, duplicando lógica e custo |
+
+**Parâmetros allowlisted** (prefixo `ctx_`, deliberadamente **fora** de `FILTER_QUERY_KEYS`):
+
+| Param | Domínio (enum fechado) | Papel |
+|---|---|---|
+| `ctx_from` | `canais` \| `gerencial` | origem da jornada (rótulo e destino do CTA de volta) |
+| `ctx_signal` | `drop` \| `growth` \| `custo_alto` \| `high_cost` \| `frete_alto` \| `ads_subutilizado` \| `roas_forte` \| `high_cancel_rate` \| `sem_dado` \| `stale_data` | motivo, em linguagem humana |
+| `ctx_channel` | `tiktok` \| `ml` \| `shopee` | canal do sinal — usado para **detectar incompatibilidade** quando o usuário troca o filtro |
+| `ctx_brand` | slug de marca conhecida | marca do sinal — idem, contra a troca de marca pelos pills |
+
+Regras duras: **nenhum valor monetário, percentual, mediana/p75, texto livre, mensagem ou JSON na URL**; a querystring **nunca** é fonte de verdade de métrica — o bloco de contexto **não exibe número algum**, só o motivo qualitativo, canal e período (os números continuam vindo dos fetches da própria página). Parâmetro desconhecido/valor fora do enum → **ignorado silenciosamente**. Sem contexto → página idêntica à atual. `FILTER_QUERY_KEYS` **não** é ampliada (justificativa: manter os `ctx_*` fora dela é o que garante o descarte na sidebar e impede que o contexto contamine outras telas). Sem registry, sem context provider.
+
+### 8.4. Experiência
+
+**Com contexto válido** — bloco compacto logo abaixo do cabeçalho da marca (nunca antes dos KPIs, nunca substituindo-os):
+"**Você chegou aqui por:** {motivo em linguagem humana} · {canal} · {período}" + linha indicando a seção relevante (ou a ausência dela, honestamente) + **CTA "Voltar à evidência em {origem}"** (reaproveita `DrilldownCta` e a lógica de `backToCanais`) + âncora/realce leve na seção-alvo quando ela existe. Não abre modal, não repete resumo executivo, não fabrica evidência; limitação declarada via `DataQualityNote` quando o sinal é de dado (`sem_dado`/`stale_data`) ou quando a Marca **não** tem a evidência (custo/frete/cancelamento).
+
+**Sem contexto:** nada é renderizado — nenhum espaço vazio, banner genérico ou texto de "chegada quente".
+
+**Contexto inválido/desatualizado** (enum inválido, `ctx_brand` ≠ rota, `ctx_channel` fora do filtro atual): parâmetros ignorados em silêncio, sem erro, sem dado de outra marca/canal, filtros seguem funcionando. Trocar marca ou canal de forma incompatível **descarta** o bloco.
+
+### 8.5. Matriz de jornadas
+
+| # | Jornada | Params | Texto | Seção | CTA de volta | Esperado |
+|---|---|---|---|---|---|---|
+| 1 | Gerencial → KPI → Canais → detalhe → Marca | `brands`,`channels`,datas,`compare` + `ctx_from=canais`,`ctx_signal`,`ctx_channel`,`ctx_brand` | "Você chegou aqui por: custo de marketplace no topo do canal · Shopee · 01–31/07" | custo: nenhuma (declarado) | "Voltar à evidência em Canais" | bloco + KPIs intactos |
+| 2 | Gerencial → Pulso individual → Canais → detalhe → Marca | idem, `ctx_from=canais` | idem ao sinal da linha | conforme §8.2 | idem | idem |
+| 3 | Gerencial → Pulso agrupado → membro → Canais → detalhe → Marca | idem | idem | idem | idem | idem (membro não muda o contrato) |
+| 4 | Canais direto → detalhe → Marca | idem | idem | idem | idem | idem |
+| 5 | URL direta `/brand/kokeshi` sem contexto | nenhum `ctx_*` | — | — | `backToCanais` atual | página **idêntica** à de hoje |
+| 6 | Contexto inválido (`ctx_signal=xyz`) | inválido | — | — | atual | ignora em silêncio |
+| 7 | Troca de marca pelos pills | `ctx_brand` ≠ rota | — | — | atual | bloco **desaparece** |
+| 8 | Troca de canal no filtro | `ctx_channel` ∉ filtro | — | — | atual | bloco **desaparece** |
+| 9 | Mobile 390×844 | idem 1 | idem, empilhado | idem | idem | sem overflow; alvo ≥44px |
+| 10 | Botão voltar do navegador | histórico | volta ao detalhe em Canais | — | — | filtros preservados (query na URL) |
+| 11 | Sidebar → outra tela → volta | `ctx_*` descartados | — | — | — | contexto **não** sobrevive |
+
+### 8.6. Plano exato da Task 2 (bloqueada até o backend do DQ2 ir a produção)
+
+**Novo (1 módulo puro):** `apps/web/src/lib/brand-arrival-context.ts` — `parseBrandArrivalContext(searchParams, routeBrand, selectedChannels)` → `BrandArrivalContext | null`, com enums fechados, validação de compatibilidade, mapa `signal → { motivo, seção-alvo | null, temEvidência }` e builder do href de retorno. Sem React, testável com node:test.
+
+**Novo (1 componente pequeno):** `apps/web/src/components/BrandArrivalBanner.tsx` — apresentação do bloco reusando `DrilldownContextLine`, `DataQualityNote` e `DrilldownCta` do G2. Não cria primitive novo.
+
+**Editados (3):** `app/brand/[brand]/page.tsx` (parse + render do bloco + `id`s nas seções-alvo); `src/components/ChannelComparisonDialogContent.tsx` (anexar `ctx_*` **apenas** ao CTA da marca); `apps/web/package.json` (registrar o teste).
+
+**Não muda:** backend, endpoints, `FILTER_QUERY_KEYS`, `KpiDrilldownDialog`, primitives do G2, `channel-signal-reasons.ts`, demais telas. **Zero endpoint, zero fetch novo, zero dependência.**
+
+**Testes:** unitários do parse (enum inválido → null; `ctx_brand` divergente → null; `ctx_channel` fora do filtro → null; sem params → null; sinal sem evidência na Marca → `temEvidência=false`; href de retorno preserva filtros e **não** propaga `ctx_*`) + estáticos de wiring (bloco só com contexto válido; `ctx_*` fora de `FILTER_QUERY_KEYS`; um único shell de diálogo; nenhum número vindo da URL).
+
+**Critérios de aceite:** as 11 jornadas de §8.5; null ≠ zero; frescor de requisição intacto; a11y (bloco anunciado, foco/âncora, alvos ≥44px); desktop+mobile sem overflow; querystring compartilhável; suítes web/API, typecheck e build verdes.
+
+**Task 3:** QA visual em navegador (jornadas 1, 5, 6, 7, 8 em desktop e mobile) + uma rodada consolidada de correção.
+
+### 8.7. Task 2 implementada (06/08/2026) — QA visual pendente na Task 3
+
+**Ajuste de escopo aplicado:** o contrato aceita **somente `ctx_from=canais`**. `gerencial` não foi implementado porque não existe produtor real hoje (o Pulso aponta para `/canais`, nunca para `/brand/…`) — não se cria enum sem wiring. A jornada continua podendo começar na Gerencial; o contexto mostrado na Marca representa **a evidência imediata escolhida no detalhe marca × canal**. A **propagação transitiva desde a Gerencial permanece dívida futura**.
+
+**Criado:** `src/lib/brand-arrival-context.ts` (módulo puro) e `src/components/BrandArrivalBanner.tsx` (bloco compacto, não-modal, reusando `DrilldownContextLine`/`DataQualityNote`/`DrilldownCta`). **Editado:** o CTA da marca em `ChannelComparisonDialogContent.tsx`, `app/brand/[brand]/page.tsx` (parse + banner + `id`/`scroll-mt-24` na seção "Período selecionado") e a lista de testes do `package.json`.
+
+**Contrato final:** `ctx_from=canais` · `ctx_signal ∈ {custo_alto, frete_alto, ads_subutilizado, sem_dado, roas_forte}` · `ctx_channel ∈ {tiktok, ml, shopee}` · `ctx_brand ∈ {barbours, kokeshi, apice, lescent, rituaria}`. Todos obrigatórios; parâmetro **repetido é ambíguo e invalida** o contexto; marca precisa bater com a rota e canal precisa estar no filtro atual. **Nenhum dígito trafega na querystring** (teste dedicado) — a URL nunca é fonte de verdade de métrica e o banner não exibe número algum. `ctx_*` **não** entra em `FILTER_QUERY_KEYS`, então a sidebar e os links da própria Marca descartam o contexto.
+
+**Compatibilidade sinal × canal** (rodada de correção da Task 2): como a URL é **entrada não confiável**, não basta o produtor legítimo nunca gerar a combinação. `SIGNALS_BY_CHANNEL` espelha a aplicabilidade do contrato vigente (`_ADS_APPLICABLE` e `_SHIPPING_APPLICABLE` são `false` para TikTok; `_COST_APPLICABLE` é `true` nos três) — **TikTok aceita apenas `custo_alto` e `sem_dado`**; ML e Shopee aceitam os cinco. A guarda vale nos **dois lados**: `parseBrandArrivalContext` devolve `null` e `buildArrivalParams` devolve `""` para combinação incompatível. Nenhum threshold, sinal ou regra de negócio foi criado.
+
+**Redação neutra de `ads_subutilizado`:** a descrição passou a ser "sinal de Ads subutilizado no canal" — a regra do canal também dispara quando o percentual de Ads está **ausente** (a ausência conta como subutilização) ou quando o **gasto é zero**, então "abaixo da mediana" não seria verdade em todos os ramos. A nota continua explicando que esta página mostra **apenas o investimento do período** e que a comparação com o canal e o diagnóstico completo permanecem na matriz por canal. Nenhuma mediana/percentual é transportada ou recalculada.
+
+**Prioridade de sinal** (a URL não transporta array): espelha a classificação do G2 — atenção antes de destaque, na ordem `custo_alto → frete_alto → ads_subutilizado → sem_dado → roas_forte`. Sem sinal conhecido, o CTA funciona **sem** `ctx_*`. Nenhum threshold criado, nenhuma severidade reclassificada.
+
+**Honestidade por capacidade:** `ads_subutilizado` é o **único** sinal de Canais com evidência real nesta página (KPI "Ad Spend" do período; "N/D" no TikTok) e ganha a âncora `#marca-periodo` + CTA "Ver investimento do período", com a ressalva de que **a comparação contra a mediana do canal fica em Canais**. `custo_alto`, `frete_alto`, `sem_dado` e `roas_forte` **não têm âncora**: declaram a limitação via `DataQualityNote` e oferecem apenas o retorno à evidência. Nenhuma seção foi criada para receber âncora.
+
+**Testes:** `tests/brand-arrival-context.test.ts` — **31 casos** (válido; sem contexto; parcial; `ctx_from=gerencial` rejeitado; sinal desconhecido; marca incompatível; canal incompatível; parâmetro repetido; reader sem `getAll`; prioridade determinística; sem sinal ⇒ sem `ctx_*`; só identificadores/zero dígito; domínio de canal/marca; **as 8 combinações sinal × canal, incluindo TikTok rejeitando `ads_subutilizado`/`frete_alto`/`roas_forte` e aceitando `custo_alto`/`sem_dado`, mais o produtor não gerando incompatível**; **descrição neutra de `ads_subutilizado`**; mapa de evidência; todo enum com texto; retorno sem repropagar `ctx_*`; `ctx_*` fora de `FILTER_QUERY_KEYS`; null ≠ zero; produtor/consumidor únicos; zero fetch e zero modal novo; banner sem declarar frescor; âncora real com `scroll-mt`). Suíte web **460 passed**, typecheck e build verdes. **QA visual: pendente (Task 3).**
+
+### 8.8. Task 3 — QA visual (06/08/2026): **PASS**. Gate G3 tecnicamente concluído
+
+**Ambiente:** build de produção local em `localhost:3100` contra a API pública read-only (com G1+DQ2 já publicados); Playwright/Chromium **temporários e isolados em `%TEMP%`**; interceptação local usada **apenas** para devolver o header CORS da API pública (zero backend alternativo, zero escrita). Screenshots e logs fora do Git. **Viewports:** desktop 1440×900 e mobile 390×844 (tablet não foi necessário — nenhum finding de breakpoint).
+
+**Jornadas executadas (10 verificações × 2 viewports) — zero finding de aplicação:**
+
+| # | Jornada | Resultado |
+|---|---|---|
+| J1 | Acesso direto sem contexto | nenhum banner, nenhum espaço vazio, layout idêntico, URL sem `ctx_*` |
+| J2 | Canais → detalhe → Marca | linha não-clicável; CTA só com `brands`, `channels`, datas, `compare` + os 4 `ctx_*`; **nenhum dígito nos valores de contexto**; banner **antes** dos KPIs, com canal e período coerentes e sem métrica |
+| J3 | `ads_subutilizado` (evidência parcial) | descrição neutra, nota de escopo, CTA "Ver investimento do período" → `#marca-periodo`, seção visível e não encoberta, alvo ≥44px |
+| J4 | TikTok + `custo_alto` | banner presente, **nenhuma âncora**, limitação de custo declarada, sem prometer ROAS/frete, retorno funcionando |
+| J5 | TikTok + `roas_forte`/`ads_subutilizado`/`frete_alto` | banner **não** renderiza; página normal; nenhuma mensagem falsa |
+| J6 | `ctx_brand` ≠ rota, depois troca pelos pills | contexto ignorado; cabeçalho da marca da rota; pills **não** propagam `ctx_*`; banner desaparece |
+| J7 | Canal do contexto sai do filtro | com Shopee ainda selecionado o banner **permanece** (correto — o filtro é multi-seleção); ao **remover** Shopee o banner **desaparece** |
+| J8 | Retorno à evidência | destino `/canais` com marca/canal/datas/`compare` preservados, **sem** `ctx_*`, diálogo não abre sozinho |
+| J9 | Sidebar e URL compartilhável | sidebar **não** propaga `ctx_*`; a URL quente reexibe o banner |
+| A11y | região nomeada, nomes acessíveis, alvos ≥44px, tabulação, âncora por teclado, headings | OK |
+
+**Console: 0 erros · 0 hydration · 0 host inesperado · 0 overflow horizontal** nos dois viewports. **Estados:** sob falha total da API o banner permanece (o contexto vem da URL) e **não** declara frescor nem fabrica métrica — confirmado nos dois viewports.
+
+**Nenhuma rodada consolidada de correção de aplicação foi necessária.** Os findings dos dois primeiros runs eram do **instrumento de teste**, corrigidos no script: (a) `waitUntil: "networkidle"` nunca estabiliza na página de Marca; (b) sem `networkidle`, J2 precisava aguardar a matriz de Canais renderizar; (c) J7 assumia seleção única de canal, quando o filtro é **multi-seleção com toggle**; (d) no mobile a sidebar é `hidden md:flex` (o menu vive no drawer).
+
+**Dívida descoberta e registrada (fora do escopo, pré-existente ao G3):** `GET /api/v1/performance/brand-detail` **não responde em produção** — timeout em 120s e 45s para kokeshi mai/jun/jul e apice mai, enquanto `/performance/daily` responde em ~0,4s. A página de Marca já chamava esse endpoint antes deste gate (o G3 não adicionou fetch algum); o efeito é a seção "TikTok Shop — Inteligência (competência mensal)" não completar, enquanto KPIs, gráfico, últimos 7 dias e o banner de chegada funcionam normalmente. Corrigir exige backend, proibido neste gate.
+
+**Dívidas preservadas:** propagação transitiva desde a Gerencial (`ctx_from=gerencial`); ausência de evidência de custo/frete/cancelamento/ROAS na Marca; `frete_alto` com risco de degeneração (herdado do DQ2).
+
+**Validações finais:** web **460 testes**, typecheck e build verdes; `git diff --check` OK; scan de secrets/PII limpo; `package-lock.json` sem diff; zero dependência nova; zero arquivo de backend/API/pipeline/banco; **um único shell de diálogo** (`KpiDrilldownDialog`; o outro `role="dialog"` é o `MobileDrawer` de navegação, pré-existente).
+
+**Gate G3 tecnicamente concluído — aguardando revisão/commit. Nenhum deploy realizado.**
+
+## 9. Riscos e não-objetivos
 
 - **Não-objetivo:** registry universal, refactor do shell, drill transacional (endpoint novo), mudanças em Produtos/Tempo Real/Inteligência/Operações, alterar semântica de nenhum sinal existente.
 - **Risco 1:** o "diagnóstico humano" de Canais precisa nascer dos dados já carregados (sinais + mediana) — se soar genérico, reduzir a escopo de sinal explicado (sem frase-síntese) em vez de inventar heurística nova.
