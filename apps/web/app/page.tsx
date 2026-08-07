@@ -52,6 +52,7 @@ import {
 } from "@/lib/gerencial/brand-matrix";
 import { mergeChannelSeries, reconcileSeriesTotal, type MergedBucket } from "@/lib/gerencial/trend-series";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
+import type { TrendGranularityRequest } from "@/lib/api-client";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
 import MarketplaceFilter from "@/components/MarketplaceFilter";
@@ -83,6 +84,13 @@ import {
   VolumeHealthDrilldownContent,
 } from "@/components/gerencial/GerencialDrilldowns";
 
+/** Rotulo do grao efetivo, usado no contexto do drill-down do ponto. */
+const GRAIN_LABEL: Record<"day" | "week" | "month", string> = {
+  day: "grão diário",
+  week: "grão semanal",
+  month: "grão mensal",
+};
+
 /** Todo drill-down da pagina passa por UM shell. `view` decide o conteudo. */
 type DialogView =
   | { kind: "kpi"; key: KpiKind }
@@ -105,6 +113,10 @@ function GerencialInner() {
   // Metrica do grafico: estado LOCAL. `/trend` entrega GMV e Pedidos na mesma
   // resposta, entao alternar nao dispara requisicao alguma nem fecha o dialogo.
   const [metric, setMetric] = useState<TrendMetric>("gmv");
+  // Granularidade PEDIDA (Gate V2-2): estado local que entra SOMENTE na
+  // identidade das series de `/trend`. Trocar o grao refaz as chamadas de
+  // serie dos canais selecionados e nao toca as outras cinco fontes.
+  const [granularity, setGranularity] = useState<TrendGranularityRequest>("auto");
   const [dialog, setDialog] = useState<DialogView | null>(null);
 
   const sources = useGerencialSources({
@@ -113,6 +125,7 @@ function GerencialInner() {
     dateFrom: filters.dateFrom,
     dateTo: filters.dateTo,
     compare: filters.compare,
+    granularity,
   });
 
   /**
@@ -148,8 +161,10 @@ function GerencialInner() {
   const kpis = useMemo(() => buildKpiBand(overview, filters.channels), [overview, filters.channels]);
 
   const merged = useMemo(
-    () => mergeChannelSeries(sources.series, filters.channels, metric),
-    [sources.series, filters.channels, metric],
+    // A granularidade PEDIDA entra no merge para que um grao explicito ignorado
+    // pela API seja tratado como contrato incompativel, e nao como sucesso.
+    () => mergeChannelSeries(sources.series, filters.channels, metric, granularity),
+    [sources.series, filters.channels, metric, granularity],
   );
   const reconciliation = useMemo(
     () =>
@@ -353,6 +368,8 @@ function GerencialInner() {
             merged={merged}
             metric={metric}
             onMetricChange={setMetric}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
             reconciliation={reconciliation}
             compareActive={filters.compare}
             loading={merged.loadingChannels.length > 0 && merged.availableChannels.length === 0}
@@ -466,7 +483,8 @@ function GerencialInner() {
             merged={merged}
             metric={metric}
             channels={filters.channels}
-            granularityLabel={merged.granularity === "day" ? "grão diário" : "grão mensal"}
+            granularityLabel={GRAIN_LABEL[merged.granularity]}
+            bounds={{ dateFrom: filters.dateFrom, dateTo: filters.dateTo }}
             periodLabel={periodLabel}
             brandsFilter={filters.brands}
             demoMode={sources.demoMode}

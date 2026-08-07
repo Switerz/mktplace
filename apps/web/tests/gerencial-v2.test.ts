@@ -675,7 +675,8 @@ test("E2. ausencia de investimento nunca vira R$ 0", () => {
 
 test("D2. grao diario fixa o dia; grao mensal fixa o mes inteiro", () => {
   const day = bucketRange("2026-07-15", "day");
-  assert.deepEqual(day, { dateFrom: "2026-07-15", dateTo: "2026-07-15", label: "este dia" });
+  // Gate V2-2 acrescentou `clamped`: o dia nunca e cortado.
+  assert.deepEqual(day, { dateFrom: "2026-07-15", dateTo: "2026-07-15", label: "este dia", clamped: false });
 
   const month = bucketRange("2026-07-01", "month");
   assert.equal(month.dateFrom, "2026-07-01");
@@ -1119,7 +1120,12 @@ test("F1j. o hook usa a funcao pura e nao Object.values(seriesState)", () => {
   const hook = codeOnly(read("src/hooks/useGerencialSources.ts"));
   assert.match(hook, /decideDemoMode\(\{/, "a decisao vem do modulo puro");
   assert.doesNotMatch(hook, /Object\.values\(seriesState\)/, "series fora da selecao nao podem entrar");
-  assert.match(hook, /expectedSeriesKey: \(channel\) => buildChannelSeriesKey\(keyInput, channel\)/);
+  // Gate V2-2: a chave da serie passou a incluir a granularidade PEDIDA, para
+  // que trocar o grao refaca as series sem tocar as outras cinco fontes.
+  assert.match(
+    hook,
+    /expectedSeriesKey: \(channel\) => buildChannelSeriesKey\(keyInput, channel, input\.granularity\)/,
+  );
   // mock com decisao pendente => estado NEUTRO de carregamento, nunca numeros
   assert.match(hook, /loading: state\.loading \|\| \(mockNotAllowed && demoPending\)/);
   assert.match(hook, /error: state\.errored \|\| \(mockNotAllowed && !demoPending\)/);

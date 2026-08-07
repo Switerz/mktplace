@@ -337,8 +337,8 @@ Ranking de produtos na Gerencial fica registrado como **evolução futura depend
 | KPI Investimento em Ads | ad_spend | `/overview` | período | existente | **reuso** | ML + Shopee; TikTok `N/D` | não somar canal sem ads |
 | KPI ROAS por canal | ml_roas, shopee_roas | `/overview` | período | existente | **reuso** | ML + Shopee; TikTok `N/D` | **nunca** consolidar |
 | Evolução temporal | GMV \| Pedidos por canal | `/trend` — **1 chamada por canal selecionado, até 3** (§6.5) | dia/mês | existente | **reuso, nº de chamadas maior** | todos | somar séries só no mesmo bucket e escopo |
-| Série comparativa na evolução | período anterior | `/trend` **ignora** `compare_period` ([performance.py:130](../apps/api/app/routers/performance.py#L130)) | — | — | **indisponível no V2-1 — declarado, sem controle visual morto** | — | — |
-| Granularidade selecionável | dia/semana/mês | backend decide e devolve em `granularity` | — | — | **extensão aditiva, V2-2** | — | intervalo curto em grão mensal gera 1 ponto |
+| Série comparativa na evolução | período anterior | `/trend` passou a devolver `comparison` quando o filtro pede comparação (V2-2) | mesma do atual | **estendido, aditivo** | indisponível no V2-1 (declarado); **entregue na Task 1/2 do V2-2** | todos | alinhamento **ordinal**; total anterior só com todos os canais completos; ausência ≠ 0 |
+| Granularidade selecionável | dia/semana/mês | `granularity=auto\|day\|week\|month` em `/trend` (V2-2); `auto` = regra antiga | — | **estendido, aditivo** | **entregue na Task 1/2 do V2-2** | todos | intervalo curto em grão mensal gera 1 ponto; semana ISO (segunda) com bordas parciais |
 | Pulso do período | insights priorizados | `/executive-summary` | insight | existente | **reuso** | todos | risco comercial nunca misturado a aviso de dado |
 | Resumo de canais | share de GMV | `/overview` | canal | existente | **reuso** | todos | — |
 | **Saúde do volume por canal** | GMV, pedidos considerados, cancelados, taxa, devolvidos, taxa de devolução | `/overview` + `/quality` | período × canal | existente | **reuso** | ML sem devolução; TikTok `N/D` nas duas | **médio** — semântica de status difere por fonte; sem ranking entre canais (§6.2, itens 1–4) |
@@ -483,7 +483,7 @@ Não transformar a página em mosaico de cards iguais: a hierarquia vem de **um*
 |---|---|---|---|
 | **V2-0** | Auditoria + blueprint (este documento + spec) | este único prompt + **1** rodada de correção consolidada (**consumida**) | §9 do enunciado original, revisado |
 | **V2-1** | Reconstrução da Gerencial reutilizando endpoints existentes | implementação + **no máximo 1** correção consolidada | §8.1 |
-| **V2-2** | Propagação às outras superfícies + extensão aditiva de `/trend` | implementação + **no máximo 1** correção consolidada | Regras de §7.1 em 11 rotas; sem regressão de contrato |
+| **V2-2** | **Task 1/2:** extensão aditiva de `/trend` (granularidade + série comparativa) — *tecnicamente concluída e versionada; backend `e8f0630` publicado no Render com smoke PASS, frontend versionado na Fase B* (§13.2). **Task 2/2:** propagação às outras superfícies — *não iniciada* | implementação + **no máximo 1** correção consolidada — **consumida** em 07/08/2026 (§13.1) | Task 1/2: §8.3. Task 2/2: regras de §7.1 em 11 rotas; sem regressão de contrato |
 | **V2-3** | QA integrado (desktop/tablet/mobile + a11y) e produção | QA + **no máximo 1** correção consolidada | §7.2 medido por bounding box; 0 erro de console/hydration; a11y sem regressão |
 
 Sem subgates recursivos (nada de V2-1.1). **Após duas correções do mesmo problema, parar e replanejar.**
@@ -510,6 +510,53 @@ Sem subgates recursivos (nada de V2-1.1). **Após duas correções do mesmo prob
 `DESIGN.md` **não foi tocado** (tem alteração local preexistente e está fora do escopo). A aplicar quando autorizado: regras de coordenação de altura (§7.1); critérios de alinhamento de §7.2; degraus médios `brand-200/300/400/500`; densidade de card `p-4`; `tabular-nums` obrigatório; comportamento responsivo do diálogo; barra de filtros sticky; faixa de confiança como elemento próprio.
 
 **Acrescentado após o V2-1:** a rampa tipográfica do `DESIGN.md` documenta 12/14/18/30px, mas a Torre usa há muito os passos de **anotação densa** `text-[11px]` e `text-[10px]` — presentes em **16** e **22** arquivos preexistentes, respectivamente, muito antes deste ciclo. O detector do Impeccable sinaliza esses dois valores como fora da rampa; a correção correta é documentá-los no `DESIGN.md` como passos `annotation` e `annotation-sm`, não removê-los do código. Também a escala do valor de KPI: o `DESIGN.md` exige 30px, e a faixa de cinco KPIs do V2 usa `text-2xl` (24px) para caber em tablet sem estourar a trilha — decisão do blueprint que precisa virar exceção documentada.
+
+### 8.3 Critérios da Task 1/2 do V2-2 (extensão aditiva de `/trend`)
+
+1. **Aditividade:** cliente que não envia `granularity` recebe o comportamento
+   anterior; a compatibilidade é de **comportamento**, com schema **aditivo** (a
+   resposta passa a trazer `comparison`, ainda que `null`, logo o JSON não é
+   idêntico). `comparison` é opcional na resposta, e sua ausência com `compare=true`
+   é lida como **indisponibilidade do contrato**, nunca como "não solicitada". Zero endpoint novo, tabela, read model, dependência ou
+   pipeline.
+2. **Allowlist fechada:** `auto|day|week|month`; qualquer outro valor devolve **422**.
+   A string do usuário **nunca** é interpolada no SQL — a expressão sai de um mapa
+   constante indexado pelo valor já validado.
+3. **Uma implementação de SQL** para as duas janelas, parametrizada pelo período: o
+   caminho atual e o comparativo não podem divergir por construção.
+4. **`auto` preserva a regra anterior:** dia até 92 dias, mês acima. O campo
+   `granularity` da resposta devolve o grão **efetivo**, e a interface informa qual
+   foi quando o usuário pediu automático.
+5. **Granularidade só na identidade das séries** (`buildChannelSeriesKey` e cache key
+   de `fetchTrend`), nunca na chave global: trocar o grão refaz apenas `/trend`;
+   trocar a métrica continua sem requisição; teto de **3 chamadas** preservado.
+6. **Alinhamento ordinal** entre as duas janelas, com data e rótulo **reais** dos dois
+   lados. Posição sem par permanece ausência, nunca zero; zero explícito permanece
+   zero.
+7. **Total anterior só com todos os canais comparativos completos.** Erro, vazio ou
+   parcial tem estado próprio e **não apaga a série atual**.
+8. **`compare=false` não renderiza nenhuma interface comparativa** — nem legenda, nem
+   aviso, nem linha.
+9. **Semana ISO (segunda a domingo)**, com a primeira e a última semana cortadas pelo
+   período global e o corte declarado no drill-down; aritmética sem `Date`, imune a
+   fuso.
+10. **Uma** linha para o período anterior (o total), distinguida por traço e não por
+    cor; a comparação por canal existe no dado e no drill-down, e não é desenhada.
+11. Suíte de backend e de frontend, typecheck e build verdes; piso de 12px mantido
+    nos arquivos tocados; zero arquivo das outras dez rotas alterado.
+12. **Ordem de publicação:** deploy manual da API no Render **antes** do frontend que
+    depende do contrato novo.
+13. **Uma janela comparativa canônica** (`resolve_compare_period`), aplicada nos dois
+    dependencies de filtros, com os **seis** endpoints agregados reportando o mesmo
+    intervalo: mês fechado → mês anterior completo; customizado → janela deslizante
+    de mesma duração; `compare=false` → nenhuma janela.
+14. **Datas da comparação vindas do contrato HTTP**, transportadas até a interface e
+    nunca reconstruídas dos buckets; janela desconhecida ou divergente entre canais
+    bloqueia o total anterior e é nomeada, preservando a série atual; comparação
+    vazia continua exibindo a janela real.
+15. **Granularidades divergentes não se mesclam:** grãos distintos entre canais, ou
+    grão explícito ignorado pela API, expõem estado próprio, sem merge, sem
+    conversão e sem reagregação, nomeando canais e grãos.
 
 ---
 
@@ -618,3 +665,93 @@ alteram contrato deste plano:
 
 A afirmação de "12 caminhos de drill-down" foi substituída por **16 tipos de
 acionamento**, com o critério de contagem explicitado — ver §15.6 do spec.
+
+---
+
+## 13. Registro da Task 1/2 do V2-2 (07/08/2026)
+
+Duas linhas da matriz de §6 mudaram de status: **série comparativa** e
+**granularidade selecionável** deixaram de ser "indisponível" e "extensão futura" e
+passaram a implementadas. O que muda no plano, além da matriz:
+
+- **O risco 5 da §10 materializou-se como previsto.** A extensão tocou backend, é
+  aditiva e tem default igual ao comportamento atual — mas cria uma **ordem
+  obrigatória de publicação**: API no Render antes do frontend. Publicar o frontend
+  primeiro deixa o grão semanal sem efeito real. Nem backend nem frontend estão
+  publicados.
+- **O risco 2 (até 3 chamadas de `/trend`) não aumentou.** A granularidade entra
+  apenas na identidade das séries, e a série comparativa vem **na mesma resposta** do
+  período atual — o teto de 3 chamadas foi preservado, com um campo a mais em cada
+  resposta em vez de uma requisição a mais.
+- **O critério 3 da §8.1 foi superado por entrega, não revogado.** "Comparação
+  declarada como indisponível — sem controle morto" era o aceite correto para o V2-1,
+  quando o backend ignorava `compare_period` em `/trend`. Agora a comparação existe;
+  a frase que a declarava indisponível foi removida do card, e o seletor de grão é um
+  controle **vivo** de quatro estados.
+
+Os critérios de aceite desta task estão em §8.3, e os contratos completos —
+granularidade, comparação, alinhamento ordinal, semanas parciais e compatibilidade
+retroativa — em §17 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md).
+
+**A propagação do design às outras dez rotas (Task 2/2) não foi iniciada:** nenhum
+arquivo fora da Gerencial e de seus helpers foi alterado, e as fontes abaixo de 12px
+das outras rotas seguem como dívida registrada.
+
+### 13.1 Rodada consolidada de correção da Task 1/2 (07/08/2026)
+
+Rodada **única** do V2-2, e com ela o orçamento de correção do gate está
+**consumido**. Três findings materiais e cinco correções factuais.
+
+**Bloqueador — a janela comparativa divergia dos KPIs.** É o risco 3 da §10
+("coordenar frescor entre múltiplas respostas") manifestado num lugar que o
+blueprint não previa: não no frescor, mas na **definição do período anterior**. Havia
+duas regras no código — a janela deslizante de `filters.compare_period` e a correção
+de mês-calendário aplicada localmente em overview/brands/quality. Com junho
+selecionado, o KPI comparava com 01–31/05 e o gráfico novo com 02–31/05. Agora existe
+uma função canônica na camada de período, e os seis endpoints agregados reportam o
+mesmo intervalo. Detalhe em §17.7 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md).
+
+Vale registrar que o defeito **não foi criado** pela Task 1/2: `/canais` e
+`/financeiro` já ecoavam a janela deslizante enquanto `/overview` usava o mês
+fechado. O que a Task 1/2 fez foi tornar a divergência **visível**, ao colocar as
+duas leituras no mesmo card.
+
+**Alto — as datas reais da comparação eram descartadas.** O backend já devolvia
+`comparison.date_from`/`date_to`, e o frontend reconstruía o intervalo a partir do
+primeiro e do último bucket. Errado em três situações (semana parcial, mês parcial e
+`data: []`). As datas passaram a ser transportadas do contrato até a interface, e
+divergência de janela entre canais é agora um estado nomeado.
+
+**Alto — granularidades diferentes não podem ser mescladas.** A regra "a mais grossa
+vence" não tornava as séries compatíveis: apenas escondia o problema. O teste que a
+legitimava foi **removido** e substituído por contraprovas de mismatch.
+
+**Correções factuais.** "Compatibilidade byte a byte" virou "compatibilidade
+retroativa de comportamento, com schema aditivo" — a resposta passa a incluir
+`comparison`, ainda que `null`, então o JSON não é idêntico. E a ausência do campo
+com `compare=true` passou a ser `unsupported` (indisponibilidade declarada), não
+"não solicitada": o usuário pediu. O orçamento de correção volta a ser o do gate
+inteiro, não um por task.
+
+### 13.2 Publicação faseada da Task 1/2 (07/08/2026)
+
+O risco 5 da §10 previa que a extensão de `/trend` exigiria deploy manual no Render.
+A consequência prática foi tratada como **duas fases**, e não como uma entrega única,
+porque o frontend novo depende de um contrato que só existe depois do deploy:
+
+| Fase | Conteúdo | Estado |
+| --- | --- | --- |
+| **A** | 8 arquivos de backend | commit `e8f0630`, publicado manualmente no Render |
+| **smoke** | validações HTTP read-only contra a API publicada | **PASS** — ver §17.9 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md) |
+| **B** | 11 arquivos de frontend + estes 3 documentos | versionado nesta entrega |
+
+Confirmado com **dados reais** no smoke: grão semanal com semana ISO; janela
+comparativa canônica (junho/2026 → 01–31/05, não a janela deslizante); a mesma janela
+declarada por `/overview`; e a soma da série atual reconciliando com o `current.gmv`
+do `/overview` em **R$ 0,00**.
+
+**A publicação do frontend segue o fluxo automático GitHub→Vercel.** Esta entrega
+para no push: o deployment **não** é declarado Ready, **não** foi consultado e **não**
+passou por smoke visual em produção. A rodada consolidada de correção do V2-2
+continua **consumida** (§13.1). A **Task 2/2** (propagação às outras dez superfícies)
+e o **V2-3** (QA integrado e produção) permanecem **não iniciados**.

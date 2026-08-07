@@ -40,6 +40,9 @@ import {
   type OverviewData,
   type QualityBrandRow,
   type QualityKpis,
+  type TrendComparisonOutcome,
+  type TrendGranularity,
+  type TrendGranularityRequest,
   type TrendPoint,
 } from "@/lib/api-client";
 import { computeRequestStatus, type RequestStatus } from "@/lib/request-freshness";
@@ -49,7 +52,11 @@ import {
   buildGerencialRequestKey,
   type GerencialKeyInput,
 } from "@/lib/gerencial/request-key";
-import type { ChannelSeries, ChannelSeriesStatus } from "@/lib/gerencial/trend-series";
+import type {
+  ChannelSeries,
+  ChannelSeriesStatus,
+  ComparisonStatus,
+} from "@/lib/gerencial/trend-series";
 import { decideDemoMode } from "@/lib/gerencial/demo-mode";
 
 interface SourceState<T> {
@@ -122,8 +129,13 @@ export interface QualitySlice {
 }
 
 interface TrendSlice {
-  granularity: "day" | "month";
+  /** Granularidade EFETIVA devolvida pelo backend (pode diferir da pedida — e
+   * quando difere de um pedido explicito, e' contrato incompativel). */
+  granularity: TrendGranularity;
   points: TrendPoint[];
+  /** Gate V2-2: comparacao da MESMA resposta, com os tres estados de contrato
+   * (`not_requested`, `unsupported`, `ok`) e a janela REAL quando `ok`. */
+  comparison: TrendComparisonOutcome;
 }
 
 export interface GerencialSources {
@@ -151,6 +163,9 @@ export interface UseGerencialSourcesInput {
   dateFrom: string;
   dateTo: string;
   compare: boolean;
+  /** Gate V2-2: granularidade PEDIDA. Entra somente na identidade das series
+   * de `/trend` — trocar de granularidade nao refaz as outras cinco fontes. */
+  granularity: TrendGranularityRequest;
 }
 
 export function useGerencialSources(input: UseGerencialSourcesInput): GerencialSources {
@@ -330,14 +345,14 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     });
 
     for (const channel of channels) {
-      const channelKey = buildChannelSeriesKey(keyInput, channel);
-      fetchTrend([channel], filterOpts)
+      const channelKey = buildChannelSeriesKey(keyInput, channel, input.granularity);
+      fetchTrend([channel], filterOpts, input.granularity)
         .then((res) => {
           if (ignore) return;
           setSeriesState((prev) => ({
             ...prev,
             [channel]: {
-              data: { granularity: res.granularity, points: res.data },
+              data: { granularity: res.granularity, points: res.data, comparison: res.comparison },
               live: res.live,
               loading: false,
               errored: false,
@@ -365,7 +380,8 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     return () => {
       ignore = true;
     };
-  }, [requestKey, channelsKey, filterOpts, keyInput]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `input.granularity` participa: trocar o grao refaz SO' as series.
+  }, [requestKey, channelsKey, filterOpts, keyInput, input.granularity]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Modo demonstracao e' propriedade da PAGINA e exige que TODAS as fontes com
@@ -391,7 +407,7 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
         },
         selectedChannels: input.channels,
         seriesByChannel: seriesState,
-        expectedSeriesKey: (channel) => buildChannelSeriesKey(keyInput, channel),
+        expectedSeriesKey: (channel) => buildChannelSeriesKey(keyInput, channel, input.granularity),
       }),
     [requestKey, overviewState, brandsState, canaisState, qualityState, input.channels, seriesState, keyInput],
   );
@@ -421,10 +437,11 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     [qualityState, requestKey, demoMode, demoPending],
   );
 
+  const compareRequested = input.compare;
   const series = useMemo<ChannelSeries[]>(() => {
     return input.channels.map((channel) => {
       const state = seriesState[channel];
-      const channelKey = buildChannelSeriesKey(keyInput, channel);
+      const channelKey = buildChannelSeriesKey(keyInput, channel, input.granularity);
       const status = computeRequestStatus({
         loading: state?.loading ?? true,
         error: state?.errored ?? false,
@@ -438,14 +455,35 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
       if (status.loading || (mockNotAllowed && demoPending)) seriesStatus = "loading";
       else if (status.error || mockNotAllowed) seriesStatus = "error";
       else seriesStatus = "fresh";
+      // Estado da COMPARACAO, independente do da serie atual: ela pode falhar
+      // sozinha, e `compare=false` e' `not_requested` (nunca erro).
+      const cmp = state?.data?.comparison ?? null;
+      const cmpOk = cmp?.status === "ok" ? cmp : null;
+      let comparisonStatus: ComparisonStatus;
+      if (!compareRequested) comparisonStatus = "not_requested";
+      else if (seriesStatus === "loading") comparisonStatus = "loading";
+      else if (seriesStatus === "error") comparisonStatus = "error";
+      // `unsupported`: a comparacao foi PEDIDA e a API nao respondeu o campo.
+      // Nao e' "nao solicitada" nem uma falha de rede — e' contrato ausente.
+      else if (cmp == null || cmp.status === "unsupported") comparisonStatus = "unsupported";
+      else if (cmp.status === "not_requested") comparisonStatus = "unsupported";
+      else if (cmpOk!.data.length === 0) comparisonStatus = "empty";
+      else comparisonStatus = "fresh";
+      const settled = comparisonStatus === "fresh" || comparisonStatus === "empty";
       return {
         channel,
         status: seriesStatus,
         granularity: state?.data?.granularity ?? "day",
         points: seriesStatus === "fresh" ? (state?.data?.points ?? []) : [],
+        comparisonStatus,
+        comparisonPoints: comparisonStatus === "fresh" ? (cmpOk?.data ?? []) : [],
+        // Janela do CONTRATO, transportada intacta e apenas quando a comparacao
+        // concluiu. Vazia (`data: []`) tambem tem janela.
+        comparisonDateFrom: settled ? (cmpOk?.dateFrom ?? null) : null,
+        comparisonDateTo: settled ? (cmpOk?.dateTo ?? null) : null,
       };
     });
-  }, [input.channels, seriesState, keyInput, demoMode, demoPending]);
+  }, [input.channels, seriesState, keyInput, demoMode, demoPending, compareRequested, input.granularity]);
 
   const sourceStatuses = [overview.status, brands.status, executiveSummary.status, canais.status, quality.status];
   const anyLoading =

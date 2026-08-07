@@ -360,21 +360,93 @@ export interface TrendPoint {
   orders: number;
 }
 
+/** Granularidade que o cliente PEDE. `auto` deixa o backend decidir. */
+export type TrendGranularityRequest = "auto" | "day" | "week" | "month";
+/** Granularidade EFETIVAMENTE usada pela resposta. */
+export type TrendGranularity = "day" | "week" | "month";
+
+/** Serie do periodo anterior (Gate V2-2). `data: []` = janela solicitada e
+ * respondida SEM registros — que e' diferente de janela desconhecida. As datas
+ * vem exclusivamente do contrato HTTP, nunca dos buckets. */
+export interface TrendComparison {
+  dateFrom: string | null;
+  dateTo: string | null;
+  data: TrendPoint[];
+}
+
+/**
+ * Resultado do lado comparativo, em tres estados que NAO podem ser confundidos:
+ *
+ * - `not_requested`: `compare=false`. Nenhuma interface comparativa.
+ * - `unsupported`: `compare=true` e a resposta **nao** trouxe o campo
+ *   `comparison` — API mais antiga que o frontend (ordem de deploy invertida).
+ *   E' indisponibilidade declarada, jamais "nao solicitado": o usuario pediu.
+ * - `ok`: a janela veio no contrato, com ou sem registros.
+ */
+export type TrendComparisonOutcome =
+  | { status: "not_requested" }
+  | { status: "unsupported" }
+  | ({ status: "ok" } & TrendComparison);
+
+export interface TrendResult {
+  granularity: TrendGranularity;
+  data: TrendPoint[];
+  comparison: TrendComparisonOutcome;
+  live: boolean;
+  meta: ResponseMeta;
+}
+
 export function fetchTrend(
   selection: MarketplaceSelection,
   filters?: GlobalFilterParams,
-): Promise<{ granularity: "day" | "month"; data: TrendPoint[]; live: boolean; meta: ResponseMeta }> {
+  /** Gate V2-2: opcional e com default `auto` — chamadores antigos seguem
+   * recebendo exatamente o comportamento anterior. */
+  granularity: TrendGranularityRequest = "auto",
+): Promise<TrendResult> {
   interface ApiResp {
-    granularity: "day" | "month"; data: TrendPoint[];
-    date_from?: string | null; date_to?: string | null;
+    granularity: TrendGranularity;
+    data: TrendPoint[];
+    // Campo aditivo. Um backend ainda nao publicado com o contrato novo nao o
+    // envia — e' `unsupported` quando o usuario PEDIU comparacao, nunca
+    // "nao solicitada".
+    comparison?: { date_from?: string | null; date_to?: string | null; data: TrendPoint[] } | null;
+    date_from?: string | null;
+    date_to?: string | null;
     refreshed_at?: string | null;
   }
+  // `compare` e' a intencao do usuario, e e' o que distingue "nao pedi" de
+  // "pedi e a API nao sabe responder".
+  const compareRequested = filters?.compare === true;
   const marketplace = serializeMarketplaceSelection(selection);
   const qs = buildFilterQuery(marketplace, undefined, filters);
-  return withCache(`trend:${qs.toString()}`, async () => {
+  if (granularity !== "auto") qs.set("granularity", granularity);
+  // A granularidade entra na chave de cache: pedir `week` depois de `day` no
+  // mesmo filtro nao pode devolver a serie diaria em cache.
+  return withCache(`trend:${granularity}:${qs.toString()}`, async () => {
     const raw = await apiFetch<ApiResp>(`/api/v1/performance/trend?${qs.toString()}`);
-    if (raw) return { live: true, meta: metaFromResponse(raw), granularity: raw.granularity, data: raw.data };
-    return { live: false, meta: EMPTY_META, granularity: "day", data: [] };
+    if (raw) {
+      return {
+        live: true,
+        meta: metaFromResponse(raw),
+        granularity: raw.granularity,
+        data: raw.data,
+        comparison: raw.comparison
+          ? {
+              status: "ok" as const,
+              dateFrom: raw.comparison.date_from ?? null,
+              dateTo: raw.comparison.date_to ?? null,
+              data: raw.comparison.data ?? [],
+            }
+          : { status: compareRequested ? ("unsupported" as const) : ("not_requested" as const) },
+      };
+    }
+    return {
+      live: false,
+      meta: EMPTY_META,
+      granularity: "day",
+      data: [],
+      comparison: { status: compareRequested ? "unsupported" : "not_requested" },
+    };
   });
 }
 

@@ -34,6 +34,13 @@ import { CANCEL_RATE_FORMULA, NO_CROSS_CHANNEL_RANKING } from "@/lib/gerencial/v
 
 const SECTION_LABEL = "text-xs font-semibold text-slate-500 uppercase tracking-wide";
 
+/** Escopo do ponto por grao. O grao semanal (Gate V2-2) nao e' "competência". */
+const BUCKET_SCOPE_LABEL: Record<"day" | "week" | "month", string> = {
+  day: "do dia",
+  week: "da semana",
+  month: "da competência",
+};
+
 function metricLabel(metric: TrendMetric): string {
   return metric === "gmv" ? "GMV" : "Pedidos";
 }
@@ -186,6 +193,7 @@ export function TrendBucketDrilldownContent({
   periodLabel,
   brandsFilter,
   demoMode,
+  bounds,
   onPinRange,
 }: {
   bucket: MergedBucket;
@@ -196,6 +204,10 @@ export function TrendBucketDrilldownContent({
   periodLabel: string;
   brandsFilter: string[];
   demoMode: boolean;
+  /** Periodo global atual. No grao SEMANAL a primeira e a ultima semana quase
+   * sempre sao parciais, e o CTA nunca deve aplicar datas fora do que o
+   * usuario estava vendo. */
+  bounds: { dateFrom: string; dateTo: string };
   onPinRange: (dateFrom: string, dateTo: string) => void;
 }) {
   const [state, setState] = useState<BucketDetailState>({
@@ -205,7 +217,7 @@ export function TrendBucketDrilldownContent({
     brandsStatus: "loading",
   });
 
-  const range = bucketRange(bucket.date, merged.granularity);
+  const range = bucketRange(bucket.date, merged.granularity, bounds);
 
   useEffect(() => {
     let ignore = false;
@@ -301,10 +313,44 @@ export function TrendBucketDrilldownContent({
         )}
       </div>
 
+      {/* Lado comparativo alinhado por posicao ordinal, com a data REAL da
+          janela anterior. O CTA abaixo continua fixando o periodo ATUAL. */}
+      {bucket.comparison && (
+        <div className="flex flex-col gap-1">
+          <p className={SECTION_LABEL}>Mesma posição no período anterior</p>
+          <p className="text-xs text-slate-500 tabular-nums">
+            {bucket.comparison.label} · {bucket.comparison.date}
+          </p>
+          <ul className="flex flex-col gap-1">
+            {channels.map((channel) => {
+              const value = bucket.comparison!.values[channel];
+              return (
+                <EvidenceRow
+                  key={channel}
+                  label={CHANNEL_LABEL[channel]}
+                  value={value == null ? "Sem dado nesta posição" : formatMetric(value, metric)}
+                  tone={value == null ? "muted" : "value"}
+                />
+              );
+            })}
+          </ul>
+          {bucket.comparison.total == null && (
+            <p className="text-xs text-slate-500 mt-1">
+              Total anterior não exibido: falta valor em pelo menos um canal comparativo nesta posição.
+            </p>
+          )}
+          {/* Janela do CONTRATO, nao derivada dos buckets: o primeiro bucket
+              semanal comeca antes dela. */}
+          {merged.comparison.dateFrom && merged.comparison.dateTo && (
+            <p className="text-xs text-slate-500 mt-1 tabular-nums">
+              Janela anterior completa: {merged.comparison.dateFrom} a {merged.comparison.dateTo}.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>
-          Detalhe {merged.granularity === "day" ? "do dia" : "da competência"}
-        </p>
+        <p className={SECTION_LABEL}>Detalhe {BUCKET_SCOPE_LABEL[merged.granularity]}</p>
 
         {anyLoading ? (
           <p className="text-xs text-slate-500" role="status" aria-busy="true">
@@ -374,6 +420,11 @@ export function TrendBucketDrilldownContent({
       <p className="text-xs text-slate-500 -mt-2 tabular-nums">
         Aplicará {range.dateFrom} a {range.dateTo}. Canais, marcas e comparação são preservados; apenas o
         intervalo de datas muda.
+        {range.clamped && (
+          <span className="block text-slate-500">
+            Intervalo cortado pelo período selecionado: este bucket é parcial na borda do filtro.
+          </span>
+        )}
       </p>
     </div>
   );

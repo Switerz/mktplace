@@ -590,7 +590,7 @@ escopo), então sua análise é 100% de leitura de código.
 
 ### Gate V2-1 — reconstrução da Gerencial
 
-**IMPLEMENTADO E CORRIGIDO, aguardando revisão (07/08/2026).** A rodada principal
+**CONCLUÍDO E VERSIONADO em `13c7ee0` (07/08/2026), 33 arquivos.** A rodada principal
 de implementação e a **única** rodada consolidada de correção foram executadas; o
 orçamento do gate está esgotado. Somente a rota `/` e seus componentes/helpers
 diretos foram tocados — nenhuma outra tela recebeu o novo design.
@@ -685,9 +685,10 @@ dependência (`package-lock.json` intocado), zero banco/pipeline/Scheduler/Airfl
 zero deploy, zero commit.
 
 Limitações declaradas: `/executive-summary` responde em ~2,9s contra ~0,7s das
-outras fontes, o que é justamente o motivo dos estados independentes; a série
-comparativa e a granularidade selecionável seguem indisponíveis e declaradas em
-texto (extensão aditiva fica no V2-2); dois itens do spec não foram implementados
+outras fontes, o que é justamente o motivo dos estados independentes; **no
+encerramento do V2-1** a série comparativa e a granularidade selecionável seguiam
+indisponíveis e declaradas em texto (as duas foram entregues depois, na Task 1/2 do
+V2-2 — ver a seção seguinte); dois itens do spec não foram implementados
 e estão registrados em §14.5 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md).
 Dívidas que **não** foram tocadas por estarem fora do escopo do gate: os dois
 `<h1>` da página (U6-04, do shell), três componentes que ficaram obsoletos na
@@ -697,9 +698,112 @@ abaixo de 12px nas outras dez rotas (16 arquivos com 11px, 22 com 10px, 3 com
 para o valor de KPI em 24px — registrado para aplicação futura, já que este gate
 não pode tocar o arquivo.
 
+### Gate V2-2, Task 1/2 — granularidade selecionável e série do período anterior
+
+**TECNICAMENTE CONCLUÍDA E VERSIONADA (07/08/2026), em publicação faseada.** A rodada
+de implementação e a **única** rodada consolidada de correção do V2-2 foram
+executadas; o orçamento de correção do gate está esgotado. Fecha as duas limitações
+que o V2-1 declarou em texto no card de Evolução. É a **primeira alteração de
+backend do ciclo de revamp**: `GET /api/v1/performance/trend` foi estendido de forma
+**aditiva**, sem endpoint novo, tabela, read model, dependência ou pipeline.
+
+O que o contrato passou a aceitar e devolver:
+
+- **`granularity=auto|day|week|month`** (novo parâmetro, opcional). `auto` é o
+  default e reproduz exatamente a regra anterior: **dia** até 92 dias de janela,
+  **mês** acima disso. `week` é um grão novo, com semana **ISO-8601 começando na
+  segunda** (`DATE_TRUNC('week', …)` do Postgres). Valor fora da allowlist devolve
+  **422**, e a expressão SQL é escolhida por **mapeamento sobre a allowlist já
+  validada** — a string do usuário nunca é interpolada no SQL.
+- **`comparison`** (novo campo, opcional na resposta): quando o filtro global tem
+  comparação ativa, vem `{date_from, date_to, data}` com a série do período
+  anterior sob os **mesmos** canais, marcas e granularidade; quando não há
+  comparação, vem `null`. O SQL da série tem **uma única implementação**,
+  parametrizada pelo período — as duas janelas não podem divergir por construção.
+
+Na interface, o card de Evolução ganhou um **seletor de grão de quatro estados**
+(Automática / Diária / Semanal / Mensal). Em Automática, o card informa o grão que
+foi **resolvido**, para o eixo nunca ficar sem explicação. A granularidade entra
+**somente** na identidade das séries (`buildChannelSeriesKey` e o cache key de
+`fetchTrend`), não na chave global: trocar o grão refaz apenas as chamadas de
+`/trend` dos canais selecionados e não toca as outras cinco fontes; trocar a
+métrica continua sem nenhuma requisição.
+
+A série anterior é desenhada como **uma linha tracejada neutra** — o total do
+período anterior, não seis séries concorrendo com a leitura principal —, e o
+alinhamento com o período atual é por **posição ordinal**, preservando a data e o
+rótulo reais dos dois lados no tooltip e no detalhe do ponto. Julho (31 buckets)
+contra fevereiro (28) deixa os três últimos pontos **sem par**, e ausência de par
+permanece ausência: nunca vira R$ 0. O total anterior só é exibido quando **todos**
+os canais comparativos estão completos; comparação parcial, em erro ou sem
+registros tem estado próprio e **não apaga a série atual**. Com `compare=false`,
+nenhuma interface comparativa é renderizada.
+
+O CTA do ponto continua fixando o **período atual**, agora cortado pelo intervalo
+global: no grão semanal a primeira e a última semana são quase sempre parciais, e o
+drill-down avisa quando o intervalo foi cortado em vez de aplicar datas que o
+usuário não estava vendo.
+
+**Compatibilidade retroativa:** clientes que não enviam `granularity` recebem o
+mesmo comportamento de antes — compatibilidade retroativa de
+comportamento, com schema aditivo (a resposta passa a incluir `comparison`, mesmo
+que `null`, portanto o JSON não é idêntico). Uma API ainda sem o campo continua
+respondendo, e o frontend lê essa ausência conforme a intenção do usuário: com
+`compare=false` é "não solicitada"; com `compare=true` é **indisponibilidade
+declarada**. Na prática isso significa que **a publicação do frontend que depende do
+contrato novo exige um deploy manual da API no Render antes** — sem ele, o grão
+explícito cai em estado de contrato incompatível e a comparação em indisponível
+(degradação visível, não um gráfico errado).
+
+**A entrega foi publicada em duas fases, nessa ordem.** Fase A: os 8 arquivos de
+backend no commit **`e8f0630`**, publicado **manualmente no Render**. Em seguida, um
+**smoke read-only PASS** contra a API publicada, somente `GET` e sem retry, confirmou
+com **dados reais**: grão semanal com semana ISO (5 buckets, todos em segunda-feira);
+janela comparativa canônica — junho/2026 comparando com **01–31/05**, não com a janela
+deslizante; a **mesma** janela declarada por `/overview`; a soma da série atual
+reconciliando com o `current.gmv` do `/overview` em **R$ 0,00** e pedidos idênticos;
+período customizado de 10 dias comparando com 30/06–09/07; `granularity` inválida em
+**422**; `compare=false` devolvendo `comparison: null` com o campo presente; e o modo
+automático preservado (30 dias → grão diário). Os 27 paths publicados são idênticos
+aos do código — nenhum endpoint desapareceu. Fase B: os 11 arquivos de frontend e
+estes três documentos, versionados nesta entrega.
+
+**A publicação do frontend segue o fluxo automático GitHub→Vercel** e para no push: o
+deployment **não** é declarado Ready, **não** foi consultado e **não** passou por
+smoke visual em produção.
+
+**A rodada de correção fechou três findings materiais**, um deles bloqueador e de
+origem anterior a este gate. (1) A **janela comparativa divergia dos KPIs**: havia
+duas definições de "período anterior" no código — a janela deslizante de mesma
+duração entregue pelos filtros e a correção de mês-calendário aplicada localmente em
+`/overview`, `/brands` e `/quality`. Com junho selecionado, o KPI comparava com
+01–31/05 e a nova série com 02–31/05; `/canais` e `/financeiro` já ecoavam a janela
+deslizante antes deste gate, então o defeito não foi criado aqui — foi tornado
+visível ao colocar as duas leituras no mesmo card. Agora existe **uma** função
+canônica na camada de período (`resolve_compare_period`), aplicada nos dois
+dependencies de filtros, e os **seis** endpoints agregados reportam o mesmo
+intervalo, verificado tanto no valor ecoado quanto no `start`/`end` que chega ao SQL.
+(2) As **datas reais da comparação eram descartadas**: o backend já as devolvia e o
+frontend reconstruía o intervalo a partir do primeiro e do último bucket — errado em
+semana parcial, em mês parcial e com janela vazia. As datas passaram a ser
+transportadas do contrato até a interface, e janela desconhecida ou divergente entre
+canais virou estado nomeado que bloqueia o total anterior sem apagar a série atual.
+(3) **Granularidades diferentes não são mescladas**: a regra "a mais grossa vence"
+não tornava as séries compatíveis, apenas escondia o problema; grãos distintos entre
+canais, ou um grão explícito ignorado pela API, agora expõem estado próprio, sem
+merge, sem conversão e sem reagregação, nomeando canais e grãos. O teste que
+legitimava a regra antiga foi removido.
+
+Validações: **485 testes de backend** (36 focais novos), **580 no frontend** (34
+focais novos), typecheck e build verdes. Nenhum arquivo das outras dez rotas foi
+alterado; a **propagação visual às outras superfícies (Task 2/2) não foi iniciada**, e
+o **V2-3** (QA integrado e produção) também **não foi iniciado**. Detalhe dos
+contratos em §17 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md), e do smoke da API
+publicada em §17.9.
+
 ## Próximas prioridades
 
-1. Revisar o Gate V2-1 e decidir se a correção consolidada é necessária antes de abrir o **V2-2** (propagação às outras superfícies + extensão aditiva de `/trend`).
+1. Acompanhar o deployment automático da Vercel do frontend do **V2-2** e validar a Gerencial em produção (grão semanal e comparação); em seguida abrir a Task 2/2 (propagação do design às outras superfícies).
 2. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
 3. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
 4. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.

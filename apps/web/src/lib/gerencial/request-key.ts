@@ -15,6 +15,7 @@
  * para o QA verificar que a troca nao refez nenhum fetch.
  */
 import type { Marketplace } from "../mock-data.ts";
+import type { TrendGranularityRequest } from "../api-client.ts";
 
 export type TrendMetric = "gmv" | "orders";
 
@@ -43,9 +44,19 @@ export function buildGerencialRequestKey(input: GerencialKeyInput): string {
  * Chave de FETCH de uma serie de canal unico. Deriva da chave global trocando
  * a selecao de canais pelo canal isolado — dois canais diferentes no mesmo
  * filtro nunca colidem, e trocar de periodo/marca invalida as tres series.
+ *
+ * A GRANULARIDADE entra aqui, e somente aqui (Gate V2-2): ela muda o resultado
+ * de `/trend` e de mais nada. Trocar de granularidade refaz apenas as chamadas
+ * de serie dos canais selecionados — `/overview`, `/brands`, `/quality`,
+ * `/canais` e `/executive-summary` nao sao tocados, porque a chave deles
+ * (`buildGerencialRequestKey`) nao a inclui.
  */
-export function buildChannelSeriesKey(input: GerencialKeyInput, channel: Marketplace): string {
-  return buildGerencialRequestKey({ ...input, channels: [channel] });
+export function buildChannelSeriesKey(
+  input: GerencialKeyInput,
+  channel: Marketplace,
+  granularity: TrendGranularityRequest = "auto",
+): string {
+  return `${buildGerencialRequestKey({ ...input, channels: [channel] })}|g:${granularity}`;
 }
 
 /** Chave VISUAL: inclui a metrica selecionada. Nao deve ser usada para fetch.

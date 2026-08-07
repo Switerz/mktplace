@@ -34,6 +34,9 @@ interface Props {
   metric: TrendMetric;
   /** Total desenhavel apenas quando todos os buckets estao completos. */
   showTotal: boolean;
+  /** Gate V2-2: desenha o TOTAL do periodo anterior. So' vem `true` quando a
+   * comparacao esta completa — total parcial nunca e' desenhado. */
+  showComparisonTotal: boolean;
   /** Canal em foco enquanto o dialogo da serie esta aberto: as demais linhas
    * (e o total) recuam visualmente, isolando a serie sob explicacao. */
   highlightedChannel: Marketplace | null;
@@ -70,19 +73,29 @@ function ChartTooltip({
   label,
   metric,
   showTotal,
+  showComparisonTotal,
 }: {
   active?: boolean;
-  payload?: { dataKey: string; value: number | null }[];
+  payload?: { dataKey: string; value: number | null; payload?: MergedBucket }[];
   label?: string;
   metric: TrendMetric;
   showTotal: boolean;
+  showComparisonTotal: boolean;
 }) {
   if (!active || !payload?.length) return null;
   const channelRows = payload.filter((p) => p.dataKey.startsWith("values."));
   const totalRow = payload.find((p) => p.dataKey === "total");
+  // O bucket completo vem no payload: dele saem a data e o rotulo REAIS do
+  // periodo anterior, nunca a data atual deslocada.
+  const bucket = payload[0]?.payload;
+  const cmp = bucket?.comparison ?? null;
   return (
     <div className="bg-white border border-violet-100 rounded-xl shadow-lg px-3 py-2 text-xs min-w-[168px]">
-      <p className="font-semibold text-slate-700 mb-1.5">{label}</p>
+      <p className="font-semibold text-slate-700">{label}</p>
+      {showComparisonTotal && (
+        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Período atual</p>
+      )}
+      {!showComparisonTotal && <span className="block mb-1.5" />}
       <ul className="flex flex-col gap-0.5">
         {channelRows.map((row) => {
           const channel = row.dataKey.replace("values.", "") as Marketplace;
@@ -109,6 +122,24 @@ function ChartTooltip({
           <span className="tabular-nums font-semibold text-slate-900">{formatValue(totalRow.value, metric)}</span>
         </p>
       )}
+      {showComparisonTotal && (
+        <div className="mt-1.5 pt-1.5 border-t border-slate-200">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Período anterior</p>
+          {cmp ? (
+            <>
+              <p className="text-xs text-slate-500 tabular-nums">{cmp.label} · {cmp.date}</p>
+              <p className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Total anterior</span>
+                <span className="tabular-nums font-medium text-slate-700">
+                  {cmp.total != null ? formatValue(cmp.total, metric) : <span className="text-slate-400">incompleto</span>}
+                </span>
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-slate-400">Sem ponto correspondente na janela anterior.</p>
+          )}
+        </div>
+      )}
       <p className="mt-1.5 text-xs text-slate-500">Clique para abrir o detalhe do período</p>
     </div>
   );
@@ -119,6 +150,7 @@ export default function EvolutionChart({
   channels,
   metric,
   showTotal,
+  showComparisonTotal,
   highlightedChannel,
   onSelectBucket,
 }: Props) {
@@ -156,7 +188,11 @@ export default function EvolutionChart({
           tickLine={false}
           width={metric === "gmv" ? 62 : 48}
         />
-        <Tooltip content={<ChartTooltip metric={metric} showTotal={showTotal} />} />
+        <Tooltip
+          content={
+            <ChartTooltip metric={metric} showTotal={showTotal} showComparisonTotal={showComparisonTotal} />
+          }
+        />
         {showTotal && (
           <Line
             type="monotone"
@@ -167,6 +203,24 @@ export default function EvolutionChart({
             strokeOpacity={isolating ? 0.18 : 1}
             dot={false}
             activeDot={{ r: 4 }}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        )}
+        {/* Periodo anterior: UMA linha (o total), tracejada e neutra. Fica atras
+            das series atuais na ordem de render e nao concorre com a leitura
+            principal. O tracejado distingue sem depender de cor. */}
+        {showComparisonTotal && (
+          <Line
+            type="monotone"
+            dataKey="comparison.total"
+            name="Total do período anterior"
+            stroke="#94a3b8"
+            strokeWidth={1.75}
+            strokeDasharray="6 4"
+            strokeOpacity={isolating ? 0.15 : 0.9}
+            dot={false}
+            activeDot={{ r: 3 }}
             connectNulls={false}
             isAnimationActive={false}
           />

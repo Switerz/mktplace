@@ -815,3 +815,237 @@ dos ticks no navegador: 13 ticks, nenhum abaixo de 12px.
 
 Ver §15.6: a referência oficial passou a ser **16 tipos de acionamento**, com o
 critério explicado (os cinco KPIs contam como cinco).
+
+## 17. Gate V2-2, Task 1/2 — granularidade selecionável e série do período anterior
+
+Fecha as duas limitações que o V2-1 declarou em texto no card de Evolução. Primeira
+alteração de backend do ciclo de revamp, e **aditiva**: nenhum endpoint novo,
+tabela, read model, dependência ou pipeline.
+
+**Tecnicamente concluída.** Publicação faseada: o backend foi versionado em
+**`e8f0630`** e publicado manualmente no Render, com **smoke read-only PASS**
+(§17.9); o frontend é versionado nesta entrega e segue o fluxo automático
+GitHub→Vercel — deployment **não** declarado Ready e **não** validado em produção.
+
+### 17.1 Contrato de granularidade
+
+| Aspecto | Regra |
+| --- | --- |
+| Parâmetro | `granularity` em `GET /api/v1/performance/trend`, opcional |
+| Allowlist | `auto`, `day`, `week`, `month` — qualquer outro valor devolve **422** |
+| Default | `auto`, idêntico ao comportamento pré-gate |
+| Resolução de `auto` | `day` se a janela efetiva tem **≤ 92 dias**; `month` acima disso |
+| Semana | ISO-8601, **segunda a domingo** (`DATE_TRUNC('week', f.date)::date`) |
+| Rótulos | dia `15/07`; semana `Sem. 29/06`; mês `Jul/26` |
+| Campo de resposta | `granularity` devolve o grão **efetivo**, nunca o pedido |
+
+**Segurança do SQL.** A string recebida nunca é interpolada. A expressão de
+truncamento sai de um mapa constante (`_TREND_TRUNC_SQL`) indexado pelo valor **já
+validado** pela allowlist; um valor ausente do mapa é erro de programação, não uma
+consulta. O SQL da série tem **uma única implementação** (`_trend_series`),
+parametrizada por período e granularidade — o caminho atual e o comparativo não
+podem divergir por construção.
+
+### 17.2 Contrato comparativo
+
+`comparison` é `null` quando o filtro global não pede comparação, e
+`{date_from, date_to, data}` quando pede. A janela anterior usa os **mesmos**
+canais, marcas e granularidade. Buckets sem registro **não são fabricados**: a
+série anterior pode ser mais curta, mais longa ou vazia.
+
+**A janela é resolvida uma única vez, na camada de período** (§17.7): não existe
+mais uma regra por endpoint.
+
+**As datas vêm exclusivamente do contrato.** `comparison.date_from`/`date_to` são
+transportadas intactas da resposta até a interface (`TrendComparison` →
+`ChannelSeries.comparisonDateFrom/To` → `ComparisonSummary.dateFrom/To` → card e
+drill-down). Reconstruí-las a partir do primeiro e do último bucket estava errado
+em três situações: no grão semanal o primeiro bucket começa **antes** da janela; no
+mensal os limites do bucket não são os da janela; e com `data: []` a janela é
+conhecida mas desapareceria. Se um canal concluir a comparação **sem** declarar a
+janela, a comparação fica **indisponível** — nunca se infere um intervalo.
+
+**Janelas divergentes entre canais bloqueiam o total.** Todos os canais
+comparativos resolvidos precisam declarar a mesma janela. Divergência é classificada
+como `windowIssue: "inconsistent"`, nomeada canal por canal na interface, e não
+desenha total nem par ordinal — somar janelas diferentes produz um número sem
+significado. A série **atual** permanece intacta.
+
+**Alinhamento por posição ordinal.** O bucket *n* do período atual pareia com o
+bucket *n* do anterior, não por data e não por deslocamento de calendário —
+períodos de tamanhos diferentes (31 dias contra 28) não têm correspondência de
+data possível. O par carrega a **data e o rótulo reais** do lado anterior, exibidos
+no tooltip e no detalhe do ponto; nenhuma data atual é reaproveitada como se fosse
+a anterior.
+
+Estados, todos distintos na interface:
+
+| Situação | Representação |
+| --- | --- |
+| `compare=false` → `not_requested` | nenhuma interface comparativa — nem legenda, nem aviso, nem linha |
+| Carregando | estado próprio, nunca confundido com erro |
+| Erro em ≥1 canal | a série **atual** permanece intacta; o total anterior não é exibido |
+| `compare=true` e campo `comparison` ausente → `unsupported` | indisponibilidade **declarada** ("comparação não suportada pela API"), jamais silêncio |
+| Janela desconhecida (`windowIssue: "unknown"`) | comparação indisponível; nenhum intervalo inferido dos pontos |
+| Janelas divergentes (`windowIssue: "inconsistent"`) | janelas nomeadas por canal; total e par ordinal bloqueados |
+| Sem registros na janela anterior | "sem registros", nunca `R$ 0` — **e a janela real continua exibida** |
+| Posição sem par ordinal | ausência (`null`), nunca `0` |
+| Zero explícito na origem | `0`, preservado como valor |
+| Completa | linha tracejada neutra + total anterior |
+
+**Total anterior só com tudo completo.** `seriesTotal` é `null` se qualquer canal
+comparativo falhou, está vazio ou não tem valor em algum bucket. Total parcial
+somado com total completo é o erro clássico dessa tela, e ele é impossível aqui.
+
+**Uma linha, não seis.** O período anterior entra como **um** traço (`comparison.total`,
+`#94a3b8`, `strokeDasharray="6 4"`), distinguido por padrão de traço e não por cor.
+A comparação por canal existe no dado e no drill-down, e deliberadamente **não** é
+desenhada.
+
+### 17.3 Granularidade na identidade das requisições
+
+A granularidade entra **somente** onde muda o dado:
+
+- `buildChannelSeriesKey(input, channel, granularity)` — sufixo `|g:<grão>`;
+- cache key de `fetchTrend` — `trend:<grão>:<querystring>`;
+- **não** entra em `buildGerencialRequestKey` (a chave global).
+
+Consequências verificadas por teste: trocar o grão refaz apenas as séries de
+`/trend` dos canais selecionados (as outras cinco fontes não são refeitas); trocar
+a métrica continua sem nenhuma requisição; o teto de **3 chamadas** de `/trend` é
+preservado; resposta de um grão antigo chegando depois é descartada pela chave.
+
+### 17.4 Semanas parciais e o CTA do ponto
+
+`bucketRange(bucketDate, granularity, bounds)` devolve o intervalo do bucket
+**cortado** pelo período global e um sinalizador `clamped`. No grão semanal a
+primeira e a última semana quase sempre extrapolam o filtro — o CTA nunca aplica
+datas que o usuário não estava vendo, e o drill-down declara o corte. A aritmética
+usa dias epoch (algoritmo civil-from-days), **sem `Date`**, para não depender de
+fuso: 28/12/2026 → 03/01/2027 atravessa a virada de ano corretamente.
+
+O CTA continua fixando o período **atual**. A posição anterior aparece como
+**evidência** no detalhe do ponto, nunca como destino de navegação.
+
+### 17.5 Compatibilidade retroativa e ordem de publicação
+
+Um cliente que não envia `granularity` recebe o mesmo **comportamento** de antes
+(compatibilidade retroativa de comportamento, com schema **aditivo** — o JSON não é
+idêntico: ele passa a incluir `comparison`, ainda que como `null`);
+`comparison` é opcional no schema de resposta, então uma API ainda sem o campo
+continua respondendo. Mas a leitura dessa ausência depende da **intenção do
+usuário**: com `compare=false` é `not_requested` (nada renderiza); com
+`compare=true` é `unsupported` — indisponibilidade declarada, porque o usuário
+pediu a comparação e ela não veio. Tratar os dois casos como iguais esconderia
+exatamente a falha de ordem de deploy que esta seção existe para prevenir.
+
+**Ordem obrigatória de publicação:** a API precisa de um **deploy manual no Render
+antes** de o frontend que usa o contrato novo ser publicado. Publicar o frontend
+primeiro faz o seletor de grão explícito cair em "granularidades incompatíveis"
+(§17.6) e a comparação em `unsupported` — degradação visível e honesta, não um
+gráfico errado.
+
+**A ordem foi respeitada.** Fase A: backend versionado em `e8f0630` e publicado
+manualmente no Render, com o contrato novo verificado no ar (§17.9). Fase B: o
+frontend é versionado depois disso, e sua publicação segue o fluxo automático
+GitHub→Vercel — o deployment **não** está declarado Ready nem validado em produção.
+
+### 17.6 Granularidade divergente: não se mescla
+
+Uma resposta em grão diário e outra em semanal **não formam uma série**. As datas
+representam buckets diferentes, e soma, alinhamento ordinal e tooltip ficariam
+semanticamente errados. Pode acontecer com cache antigo, deploy parcial ou resposta
+incompatível — e a única resposta correta é não mesclar.
+
+`mergeChannelSeries` recebe a granularidade **pedida** e expõe
+`granularityIssue`:
+
+| Causa | `kind` | Efeito |
+| --- | --- | --- |
+| Canais da mesma requisição com grãos diferentes | `channel_mismatch` | zero merge: `buckets: []`, sem total atual nem anterior, sem legenda |
+| Grão **explícito** pedido e outro devolvido | `unsupported_request` | idem, e a mensagem diz que a escolha não foi aplicada |
+
+Em ambos os casos: nenhuma conversão, nenhuma reagregação, os canais e grãos
+divergentes são **nomeados**, e o problema é local ao bloco — matriz, Pulso,
+movimentos e fila continuam intactos. Com `auto`, aceita-se `day` ou `month`
+conforme a regra do backend, exigindo apenas que os canais concordem entre si.
+
+### 17.7 Regra canônica da janela comparativa
+
+**Finding bloqueador da revisão.** A comparação era resolvida em dois lugares:
+`filters.compare_period` entregava uma janela deslizante de mesma duração, e
+`/overview`, `/brands` e `/quality` corrigiam localmente o mês fechado para o mês
+anterior completo. `/trend`, `/canais` e `/financeiro` usavam a janela crua. Com o
+período 01–30/06, o KPI comparava com 01–31/05 e o gráfico com 02–31/05 — o delta e
+a série respondiam a perguntas diferentes.
+
+Agora existe **uma** função, `app.deps.period.resolve_compare_period(period, compare=)`:
+
+1. `compare=false` → `None` (a comparação é opt-in, nunca automática);
+2. período com `ref_month` preenchido (mês fechado, via `ref_month=YYYY-MM` **ou**
+   via `date_from`/`date_to` cobrindo o mês inteiro) → **mês calendário anterior
+   completo**;
+3. período customizado → janela imediatamente anterior de mesma duração.
+
+Aplicada em `filters_query` **e** `filters_query_default_days`, então
+`ResolvedFilters.compare_period` já chega correto a todos os services. O primitivo
+`resolve_previous_period` continua existindo, documentado como janela deslizante e
+explicitamente **não** para resolver um mês fechado. Os tratamentos locais de
+overview/brands/quality permanecem porque são **idempotentes** com a janela
+canônica (teste dedicado), e porque ainda cobrem a chamada legada sem
+`ResolvedFilters`. `executive_summary_service` passou a usar a mesma função, para
+não existir uma segunda definição de "período anterior" no código — sem mudança de
+número, já que as três fontes que ele consulta aplicavam a correção local.
+
+**Alcance real da mudança**, declarado: para um mês fechado com `compare=true`,
+`/canais` e `/financeiro` passam a **ecoar** `compare_date_from/to` com o mês
+anterior completo, no lugar da janela deslizante que ecoavam antes. Nenhuma tela
+consome esses dois campos hoje, e nenhum dos dois endpoints calcula comparação — só
+ecoam. `/overview`, `/brands` e `/quality` não mudam de número (a correção local já
+produzia esse resultado), `/trend` passa a concordar com eles, `/regioes` ignora
+`compare_period` e `/pedidos` nem o recebe.
+
+Comportamentos preservados e travados por teste: junho/2026 → 01–31/05;
+maio/2026 → 01–30/04; janeiro/2026 → 01–31/12/2025; mês fechado materializado por
+`date_from`/`date_to` → igual ao `ref_month`; mês **parcial** → janela deslizante;
+customizado de 10 dias → os 10 dias imediatamente anteriores; `compare=false` →
+nenhuma janela. E os seis endpoints (`/overview`, `/brands`, `/canais`,
+`/financeiro`, `/quality`, `/trend`) reportam a **mesma** janela, verificada tanto
+no valor ecoado quanto no `start`/`end` que chega ao SQL.
+
+### 17.8 Fora do escopo desta task
+
+Não foram tocados: as outras dez rotas (a propagação visual é a Task 2/2, não
+iniciada), o `DESIGN.md`, banco, pipeline, Scheduler e Airflow. `granularity` não
+foi adicionado a nenhuma outra rota da API.
+
+### 17.9 Smoke read-only do contrato publicado (07/08/2026)
+
+Executado contra `https://mktplace-api.onrender.com` **depois** do deploy manual do
+`e8f0630`, somente `GET`, sem retry. Veredito **PASS**. A API não expõe hash de
+build, então o commit é confirmado indiretamente: o `/openapi.json` no ar traz
+`granularity` em `/trend`, `TrendResponse.comparison` e o schema `TrendComparison`,
+nenhum deles presente em `13c7ee0`, e o `detail` do 422 é literalmente a string
+introduzida pelo commit.
+
+| Verificação | Resultado |
+| --- | --- |
+| Paths publicados × código em `e8f0630` | **27 = 27**, diff vazio nos dois sentidos — nenhum endpoint desapareceu |
+| Mês fechado (jun/2026) em grão semanal | 200; `granularity: "week"`; 5 buckets, todos em segunda-feira |
+| Janela comparativa | `2026-05-01` a `2026-05-31` — a canônica, não a deslizante (que daria 02/05) |
+| Mesma janela em `/overview` | `compare_date_from/to` idênticos |
+| Reconciliação série atual × `current.gmv` | diferença de **R$ 0,00** (tolerância R$ 0,05); pedidos idênticos |
+| Período customizado de 10 dias | comparação `2026-06-30` a `2026-07-09`, mesma duração, encostada sem lacuna |
+| `granularity=hour` | **422** com a lista de valores válidos |
+| `compare=false` | 200, `comparison: null`, com o campo **presente** (schema aditivo confirmado no ar) |
+| Sem `granularity` | 200, `granularity: "day"` para 30 dias — regra automática preservada |
+| Grão diário × semanal no mesmo escopo | soma de GMV **idêntica** — valida a agregação compartilhada |
+
+**Achado que confirma o Finding 2 com dado real:** o primeiro bucket da série
+anterior é `2026-04-27`, a segunda-feira da semana que contém 01/05, enquanto a
+janela declarada começa em `2026-05-01`. Uma interface que derivasse a janela do
+primeiro bucket exibiria "27/04" para uma comparação que é maio. O caso previsto em
+§17.2 ocorre no primeiro cenário real testado.
+
+**Não validado:** nada em produção do frontend. O deployment da Vercel não foi
+consultado, não está declarado Ready e não passou por smoke visual.
