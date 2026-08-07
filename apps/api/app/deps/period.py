@@ -131,10 +131,42 @@ def resolve_period(
 
 
 def resolve_previous_period(period: EffectivePeriod) -> EffectivePeriod:
-    """Periodo imediatamente anterior, com a mesma duracao em dias. Usado
-    apenas quando `compare=true` e passado explicitamente — nao substitui o
-    MoM calendario ja existente em /overview, /brands e /quality."""
+    """PRIMITIVO: janela imediatamente anterior com a mesma duracao em dias.
+
+    Nao use diretamente para resolver a comparacao de um request — para isso
+    existe `resolve_compare_period`, que e a regra canonica. Este primitivo
+    ignora deliberadamente o fato de o periodo ser um mes calendario, e para
+    meses de tamanhos diferentes ele NAO devolve o mes anterior inteiro
+    (junho tem 30 dias, entao junho -> 02/05..31/05, nao 01/05..31/05)."""
     span = period.days
     prev_end = period.start - timedelta(days=1)
     prev_start = prev_end - timedelta(days=span - 1)
     return EffectivePeriod(start=prev_start, end=prev_end, ref_month=None)
+
+
+def resolve_compare_period(period: EffectivePeriod, *, compare: bool) -> Optional[EffectivePeriod]:
+    """REGRA CANONICA da janela comparativa — ponto unico de verdade para
+    TODOS os endpoints (overview, brands, canais, financeiro, quality, trend).
+
+    1. `compare=False` -> None (a comparacao e opt-in, nunca automatica);
+    2. periodo que representa um mes calendario completo (`ref_month`
+       preenchido, seja via `ref_month=YYYY-MM` ou via `date_from`/`date_to`
+       cobrindo o mes inteiro) -> **mes calendario anterior completo**;
+    3. periodo customizado -> janela imediatamente anterior de mesma duracao.
+
+    O caso 2 existe porque meses vizinhos tem contagens de dias diferentes: a
+    janela deslizante daria 02/05..31/05 para junho, enquanto o MoM auditado
+    de /overview, /brands e /quality sempre usou 01/05..31/05. Antes desta
+    funcao, /trend, /canais e /financeiro recebiam a janela deslizante e
+    /overview a corrigia localmente — o grafico e o delta do KPI respondiam a
+    perguntas diferentes. Resolver aqui faz a janela chegar correta a todos os
+    services, e mantem os tratamentos locais idempotentes."""
+    if not compare:
+        return None
+    if period.ref_month is not None:
+        year_s, month_s = period.ref_month.split("-")
+        year, month = int(year_s), int(month_s)
+        py, pm = (year - 1, 12) if month == 1 else (year, month - 1)
+        start, end = _month_bounds(py, pm)
+        return EffectivePeriod(start=start, end=end, ref_month=f"{py:04d}-{pm:02d}")
+    return resolve_previous_period(period)

@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.deps.filters import ResolvedFilters
-from app.deps.period import EffectivePeriod, resolve_previous_period
+from app.deps.period import EffectivePeriod, resolve_compare_period
 from app.services import performance_service as perf_svc
 from app.services import regioes_service as regioes_svc
 
@@ -88,7 +88,12 @@ def get_executive_summary(db: Session, filters: ResolvedFilters, *, now: datetim
     # Health/Changes exigem MoM sempre (nao e opt-in aqui como nos outros
     # endpoints) — se o caller nao pediu compare=true, calculamos o periodo
     # anterior por conta propria.
-    compare_period = filters.compare_period or resolve_previous_period(period)
+    # Mesma regra canonica dos outros endpoints (`resolve_compare_period`), para
+    # nao existir uma segunda definicao de "periodo anterior" no codigo. Para
+    # `period.ref_month` preenchido o resultado e identico ao que
+    # overview/brands/quality ja corrigiam localmente; para periodo customizado
+    # e a janela deslizante de sempre. Portanto: sem mudanca de numero.
+    compare_period = filters.compare_period or resolve_compare_period(period, compare=True)
     year, month = _year_month_for_period(period)
 
     overview = perf_svc.get_overview(

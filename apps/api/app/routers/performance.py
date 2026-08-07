@@ -122,12 +122,38 @@ def monthly(
 @router.get("/trend", response_model=TrendResponse)
 def trend(
     filters: ResolvedFilters = Depends(filters_query),
+    granularity: str = Query(
+        "auto",
+        description=(
+            "Granularidade dos buckets: auto (padrao, mantem a regra vigente — "
+            "diaria ate 92 dias, mensal acima), day, week (semana ISO, comecando "
+            "na segunda-feira) ou month."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
-    """Serie de GMV/pedidos no grao adequado ao intervalo filtrado — respeita
+    """Serie de GMV/pedidos no grao do intervalo filtrado — respeita
     channels/brands/date_from/date_to. A soma de `data[].gmv` sempre bate com
-    o GMV de /overview para o mesmo escopo (mesma WHERE clause)."""
-    return perf_svc.get_trend(_require_db(db), filters.channels, filters.brands, filters.period)
+    o GMV de /overview para o mesmo escopo (mesma WHERE clause).
+
+    Gate V2-2, extensao ADITIVA: `granularity` (default `auto`) e a serie do
+    periodo anterior em `comparison`, presente somente quando `compare=true`.
+    Os defaults reproduzem exatamente o contrato anterior."""
+    # Allowlist ESTRITA: valor fora dela e' 422, e a string do usuario nunca
+    # chega ao SQL — o service resolve a expressao por mapeamento.
+    if granularity not in perf_svc.TREND_GRANULARITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"granularity deve ser um de: {', '.join(perf_svc.TREND_GRANULARITIES)}",
+        )
+    return perf_svc.get_trend(
+        _require_db(db),
+        filters.channels,
+        filters.brands,
+        filters.period,
+        granularity=granularity,
+        compare_period=filters.compare_period,
+    )
 
 
 @router.get("/executive-summary", response_model=ExecutiveSummaryResponse)

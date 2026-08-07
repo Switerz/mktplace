@@ -95,9 +95,27 @@ class TrendPoint(BaseModel):
     orders: int
 
 
-class TrendResponse(BaseModel):
-    granularity: str  # "day" | "month"
+class TrendComparison(BaseModel):
+    """Serie do periodo ANTERIOR (Gate V2-2), com as datas reais da janela.
+
+    Nao existe shift de datas: `data` traz os buckets do proprio periodo
+    anterior, e o alinhamento com o atual e' feito no cliente por posicao
+    ordinal do bucket.
+    """
+    date_from: date
+    date_to: date
     data: list[TrendPoint]
+
+
+class TrendResponse(BaseModel):
+    # Granularidade EFETIVAMENTE usada: "day" | "week" | "month".
+    granularity: str
+    data: list[TrendPoint]
+    # Gate V2-2, campo ADITIVO e opcional:
+    # - `None`  => comparacao NAO solicitada (`compare=false`);
+    # - objeto  => solicitada; `data: []` significa "sem registros na janela
+    #   anterior", que e' diferente de nao ter sido pedida.
+    comparison: Optional[TrendComparison] = None
     date_from: date
     date_to: date
     filters: Optional[FiltersEcho] = None

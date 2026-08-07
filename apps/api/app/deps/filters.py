@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps.period import (
-    EffectivePeriod, MAX_RANGE_DAYS, resolve_period, resolve_previous_period, today_brt,
+    EffectivePeriod, MAX_RANGE_DAYS, resolve_compare_period, resolve_period,
+    resolve_previous_period, today_brt,
 )
 from app.services.performance_service import normalize_marketplace_param, parse_marketplace_param
 
@@ -31,6 +32,7 @@ __all__ = [
     "EffectivePeriod",
     "ResolvedFilters",
     "resolve_period",
+    "resolve_compare_period",
     "resolve_previous_period",
     "resolve_brands",
     "get_scope_brand_keys",
@@ -88,7 +90,7 @@ def filters_query(
     date_from: Optional[date] = Query(None, description="Inicio do periodo (inclusive), YYYY-MM-DD."),
     date_to: Optional[date] = Query(None, description="Fim do periodo (inclusive), YYYY-MM-DD."),
     ref_month: Optional[str] = Query(None, description="Alias legado de date_from/date_to, formato YYYY-MM."),
-    compare: bool = Query(False, description="Se true, calcula tambem o periodo imediatamente anterior de mesma duracao."),
+    compare: bool = Query(False, description="Se true, calcula tambem a janela comparativa canonica: mes calendario anterior completo quando o periodo e um mes fechado, senao a janela imediatamente anterior de mesma duracao."),
     db: Session = Depends(get_db),
 ) -> ResolvedFilters:
     today = today_brt()  # relogio lido uma unica vez por request, em America/Sao_Paulo
@@ -103,7 +105,7 @@ def filters_query(
         ref_month=ref_month, date_from=date_from, date_to=date_to,
         default_mode="previous_month", today=today,
     )
-    compare_period = resolve_previous_period(period) if compare else None
+    compare_period = resolve_compare_period(period, compare=compare)
     brand_keys = resolve_brands(brands, db)
 
     return ResolvedFilters(
@@ -141,7 +143,7 @@ def filters_query_default_days(default_days: int):
             ref_month=ref_month, date_from=effective_date_from, date_to=effective_date_to,
             default_days=default_days, today=today,
         )
-        compare_period = resolve_previous_period(period) if compare else None
+        compare_period = resolve_compare_period(period, compare=compare)
         brand_keys = resolve_brands(brands, db)
 
         return ResolvedFilters(

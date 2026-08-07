@@ -668,16 +668,55 @@ def get_monthly(db: Session, marketplace: str, months_back: int = 6) -> dict:
 # com o KPI de GMV do mesmo escopo — nao ha como divergir silenciosamente.
 # ---------------------------------------------------------------------------
 
-def get_trend(
-    db: Session, marketplace: str, brand_keys: list[str] | None, period: EffectivePeriod,
-) -> dict:
-    mkt_ids = parse_marketplace_param(marketplace)
-    # Granularidade adequada ao tamanho do intervalo: diaria ate 92 dias
-    # (~3 meses, ainda legivel em um grafico), mensal acima disso (intervalos
-    # de ate 366 dias resultariam em ~366 barras diarias, ilegivel).
-    granularity = "day" if period.days <= 92 else "month"
-    trunc_expr = "f.date" if granularity == "day" else "DATE_TRUNC('month', f.date)::date"
+# Granularidades ACEITAS na requisicao e a expressao SQL de cada uma.
+# A string do usuario JAMAIS entra no SQL: ela e' validada contra esta allowlist
+# e o que vai para a query e' o VALOR do mapa, nunca a entrada.
+TREND_GRANULARITIES = ("auto", "day", "week", "month")
 
+# `DATE_TRUNC('week', ...)` no Postgres usa a norma ISO-8601: a semana comeca na
+# SEGUNDA-FEIRA. E' o que queremos, e nao depende de locale nem de timezone
+# porque `f.date` e' `date`, sem componente de hora.
+_TREND_TRUNC_SQL: dict[str, str] = {
+    "day": "f.date",
+    "week": "DATE_TRUNC('week', f.date)::date",
+    "month": "DATE_TRUNC('month', f.date)::date",
+}
+
+
+def resolve_trend_granularity(requested: str, period: EffectivePeriod) -> str:
+    """Traduz a granularidade PEDIDA na granularidade EFETIVA.
+
+    `auto` preserva exatamente a regra vigente antes do Gate V2-2: diaria ate 92
+    dias (~3 meses, ainda legivel num grafico), mensal acima disso (intervalos de
+    366 dias dariam ~366 barras diarias). As demais sao explicitas.
+    """
+    if requested == "auto":
+        return "day" if period.days <= 92 else "month"
+    return requested
+
+
+def _trend_label(bucket: date, granularity: str) -> str:
+    """Rotulo do bucket. Sem locale e sem timezone: e' derivado dos campos da
+    propria data. A semana usa o dia de INICIO com um prefixo inequivoco, para
+    nao ser confundida com um dia isolado."""
+    if granularity == "day":
+        return f"{bucket.day:02d}/{bucket.month:02d}"
+    if granularity == "week":
+        return f"Sem. {bucket.day:02d}/{bucket.month:02d}"
+    return f"{MES_LABELS[bucket.month]}/{str(bucket.year)[2:]}"
+
+
+def _trend_series(
+    db: Session,
+    mkt_ids: list[int],
+    brand_keys: list[str] | None,
+    period: EffectivePeriod,
+    granularity: str,
+) -> list[dict]:
+    """Agregacao da serie num intervalo. UNICA implementacao do SQL — o periodo
+    anterior usa exatamente esta funcao, com a MESMA granularidade e os MESMOS
+    filtros, para que as duas series sejam comparaveis por construcao."""
+    trunc_expr = _TREND_TRUNC_SQL[granularity]
     params: dict = {"start": period.start, "end": period.end, "mkt_ids": mkt_ids}
     brand_filter = _brand_filter_sql(brand_keys, params)
     sql = text(f"""
@@ -693,26 +732,58 @@ def get_trend(
         ORDER BY {trunc_expr}
     """)
     rows = db.execute(sql, params).mappings().all()
-
-    data = []
-    for r in rows:
-        bucket: date = r["bucket"]
-        label = (
-            f"{bucket.day:02d}/{bucket.month:02d}"
-            if granularity == "day"
-            else f"{MES_LABELS[bucket.month]}/{str(bucket.year)[2:]}"
-        )
-        data.append({
-            "date": bucket.isoformat(),
-            "label": label,
+    return [
+        {
+            "date": r["bucket"].isoformat(),
+            "label": _trend_label(r["bucket"], granularity),
             "gmv": round(_f(r["gmv"]), 2),
             "orders": int(_f(r["orders"])),
-        })
+        }
+        for r in rows
+    ]
+
+
+def get_trend(
+    db: Session,
+    marketplace: str,
+    brand_keys: list[str] | None,
+    period: EffectivePeriod,
+    *,
+    granularity: str = "auto",
+    compare_period: EffectivePeriod | None = None,
+) -> dict:
+    """Serie temporal do escopo filtrado.
+
+    Extensao ADITIVA do Gate V2-2: `granularity` e `compare_period` sao
+    opcionais e os defaults reproduzem o COMPORTAMENTO anterior (o schema e'
+    aditivo: `comparison` passa a existir na resposta, ainda que como `None`) —
+    `granularity="auto"` e `compare_period=None` devolvem `comparison: None`.
+
+    `data` continua representando EXCLUSIVAMENTE o periodo atual; a serie
+    anterior vive em `comparison`, com as proprias datas reais. Nenhum shift
+    artificial de datas acontece aqui.
+    """
+    mkt_ids = parse_marketplace_param(marketplace)
+    effective = resolve_trend_granularity(granularity, period)
+
+    data = _trend_series(db, mkt_ids, brand_keys, period, effective)
+
+    comparison: dict | None = None
+    if compare_period is not None:
+        # Mesmos canais, marcas e granularidade EFETIVA da serie atual. Uma
+        # janela anterior sem linhas devolve `data: []` — "sem registros", que e'
+        # diferente de nao ter sido pedida (`comparison: None`).
+        comparison = {
+            "date_from": compare_period.start,
+            "date_to": compare_period.end,
+            "data": _trend_series(db, mkt_ids, brand_keys, compare_period, effective),
+        }
 
     refreshed_at = _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys)
     return {
-        "granularity": granularity,
+        "granularity": effective,
         "data": data,
+        "comparison": comparison,
         "date_from": period.start,
         "date_to": period.end,
         "filters": {"channels": marketplace, "brands": brand_keys},
