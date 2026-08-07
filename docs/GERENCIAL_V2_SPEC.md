@@ -1,8 +1,8 @@
 # Gerencial V2 — Especificação da tela flagship
 
-**Gate:** V2-0 (desenho — **zero implementação**)
-**Status:** **CONCLUÍDO — REVISADO, aguardando versionamento**
-**Data:** 06/08/2026 (rodada de correção consolidada aplicada na mesma data)
+**Gate de origem:** V2-0 (desenho) — encerrado e versionado no commit `c110e85`
+**Gate de implementação:** V2-1 — **implementado, aguardando revisão** (07/08/2026). Registro em §14
+**Data do desenho:** 06/08/2026 (com uma rodada de correção consolidada e uma correção factual)
 **Documento irmão:** [UI_REVAMP_V2_PLAN.md](UI_REVAMP_V2_PLAN.md) (auditoria, matriz de padrões, contratos de dados, sistema visual, roadmap)
 
 **Escopo de dados:** nada aqui cria endpoint. A especificação **reutiliza endpoints existentes** — `/overview`, `/brands`, `/trend`, `/canais`, `/executive-summary`, `/quality`, `/regioes/summary` — e **aumenta de forma controlada o número de chamadas**: até **3** chamadas de `/trend`, uma por canal selecionado (§4). Isso exige coordenação de frescor e de **falha parcial** entre respostas; nenhum bloco pode se declarar completo se uma fonte necessária falhar.
@@ -42,9 +42,11 @@
 
 ### 2.2 Faixa de confiança no dado (elemento próprio, **não** é KPI)
 
-Faixa **horizontal compacta entre o cabeçalho/filtros e a faixa de KPIs**. Uma linha, três informações: canais com cobertura no período · maior defasagem observada · contagem de avisos ativos. **Clicável**, abrindo drill-down de cobertura, defasagem e avisos.
+Faixa **horizontal compacta entre o cabeçalho/filtros e a faixa de KPIs**, clicável, abrindo o drill-down de disponibilidade, defasagem e avisos.
 
-Fonte: `/executive-summary.data_warnings` com `source`, `last_date`, `staleness_days`. Sem dado fresco, a faixa mostra "Verificando cobertura…" e **não** exibe número.
+**Semântica corrigida na rodada consolidada — ver §15.2 para o contrato completo.** A faixa afirma **disponibilidade de série** (derivada dos estados por canal das chamadas de `/trend`), não "cobertura" inferida de `gmv != null`: um canal com série de valores zero é *disponível*, um canal sem nenhuma linha é *sem registros*, e um canal cuja fonte falhou é *indisponível*. Defasagem, avisos e fontes nomeadas vêm do `/executive-summary` **separadamente** — se ele não responder, a disponibilidade das séries continua valendo e a faixa declara que defasagem e avisos não foram verificados.
+
+Sem nenhuma série concluída, a faixa mostra "Verificando disponibilidade das séries…" e **não** exibe número.
 
 ### 2.3 Faixa de 5 KPIs (decisão encerrada)
 
@@ -499,3 +501,317 @@ Ordem do G2 — **contexto → diagnóstico → evidência → limitação → a
 - Dados do Data Mart (`/tempo-real`, `/inteligencia`, `/operacoes`, seção mensal de Marca — G4); margem, CMV, devolução ML; cancelamento/devolução TikTok como número; pedido individual; qualquer escrita; meta/orçamento; qualquer conceito B2B da referência; alteração de `DESIGN.md`.
 
 **Nenhuma decisão de produto permanece aberta.** Bloco dominante (Evolução Temporal, 7/5 colunas) e faixa de KPIs estão fechados neste documento.
+
+---
+
+## 14. Registro de implementação (Gate V2-1)
+
+**Status: implementado, aguardando revisão.** Somente a rota `/` e seus
+componentes/helpers diretos foram tocados. Zero backend, zero endpoint novo,
+zero dependência, zero banco/pipeline/Airflow/Scheduler, zero deploy.
+
+### 14.1 Arquitetura final
+
+`app/page.tsx` (494 linhas) é **coordenador**: filtros, identidade das
+requisições (delegada ao hook), derivação via helpers puros, composição dos oito
+blocos e o estado do único diálogo. Nenhuma regra de negócio no JSX.
+
+| Camada | Arquivos |
+|---|---|
+| Lógica pura (testável sem React) | `src/lib/gerencial/{request-key,trend-series,kpi-band,volume-health,brand-matrix,attention,channel-colors}.ts` |
+| Coordenação de fontes | `src/hooks/useGerencialSources.ts` |
+| Blocos | `src/components/gerencial/{GerencialHeader,ConfidenceStrip,KpiBand,EvolutionCard,EvolutionChart,PulseChannelsColumn,VolumeHealthCard,BrandChannelMatrix,MovementsPanels,AttentionQueue}.tsx` |
+| Conteúdos de drill-down | `src/components/gerencial/GerencialDrilldowns.tsx` |
+
+**Reuso, não duplicação:** `KpiDrilldownDialog` (shell único), os quatro
+primitives do G2, `PulsoPeriodoPanel`, `ChannelComparisonDialogContent`
+(células da matriz), `TableScrollHint`, `computeRequestStatus`,
+`gmvChannelBreakdown`, `mergeFilteredHref`, `useGlobalFilters`.
+`KpiCard` **não** foi tocado — é consumido por sete outras rotas, e a faixa nova
+usa um componente próprio. `KpiDrilldownContent` e `KPI_META` foram **estendidos**
+de forma aditiva com `ad_spend`.
+
+**Obsoletos na Gerencial (mantidos no repositório):** `TrendChart`,
+`ChannelPerformancePanel`, `BrandPerformanceTable`. Dois deles são asseverados
+por testes estáticos preexistentes (`regioes-map`, `global-filters`,
+`scroll-hint`), então removê-los sairia do escopo deste gate — ficam como dívida
+de limpeza.
+
+### 14.2 Achados do próprio QA, corrigidos
+
+1. **Fallback de mock passando por dado live.** Os fetchers não rejeitam: sem
+   API, devolvem mock com `live: false`. Um `/quality` em falha renderizava
+   números mockados de cancelamento ao lado de KPIs reais. Corrigido em
+   `toSource`: fora do modo demonstração, `live: false` é indisponibilidade da
+   fonte. O modo demonstração continua sendo decidido pelo overview, com a
+   página inteira rotulada — contrato herdado das 11 rotas.
+2. **Overflow horizontal de 5px no mobile.** O `<button>` do card de KPI se
+   dimensionava pelo conteúdo e estourava a trilha da grade; corrigido com
+   `w-full min-w-0`. Medido antes (`scrollWidth` 395 em viewport 390) e depois
+   (390 = 390).
+3. **`recharts` no bundle inicial.** Os cards importavam `CHANNEL_STROKE` de
+   `EvolutionChart`, e o import estático anulava o `next/dynamic`. As cores
+   foram movidas para `channel-colors.ts`: First Load da rota `/` caiu de
+   **252 kB para 144 kB**.
+
+### 14.3 Medições de alinhamento (bounding box, runtime)
+
+Critério de §7.2 do plano: diferença ≤24px entre o final visual do card de
+Evolução e do item Pulso+Canais.
+
+| Viewport | 3 canais | só TikTok | só ML | só Shopee |
+|---|---|---|---|---|
+| Desktop 1440×900 | **0px** | **0px** | **0px** | **0px** |
+| Tablet 1024×768 | **0px** | **0px** | **0px** | **0px** |
+| Mobile 390×844 | n/a (empilhado) | — | — | — |
+
+Medido de novo com todas as seis fontes resolvidas (coluna direita crescendo de
+452px para 642px no desktop): **0px**. Zero overflow horizontal nos três
+viewports. Zero linha órfã por `row-span` — o `row-span` foi eliminado.
+
+### 14.4 Limitações declaradas
+
+- `/executive-summary` responde em **2,86s** contra ~0,7s das outras cinco
+  fontes (medido localmente). É exatamente o que justifica estados
+  independentes: KPIs, evolução, volume e matriz pintam antes; Pulso, faixa de
+  confiança e fila de atenção chegam depois, cada um com o próprio skeleton.
+- A série comparativa e a granularidade selecionável seguem **indisponíveis** e
+  declaradas em texto — extensão aditiva de `/trend` fica no V2-2.
+- Dois `<h1>` na página (shell + Gerencial) — dívida preexistente **U6-04**, não
+  introduzida aqui; corrigi-la exige tocar o shell, fora do escopo.
+- `text-[11px]`/`text-[10px]` ficam fora da rampa do `DESIGN.md`; ver §8.2 do
+  plano. Prática preexistente em 16 e 22 arquivos, mantida por consistência.
+
+### 14.5 Itens do spec que NÃO foram implementados
+
+Registrados aqui para não haver divergência entre desenho e código:
+
+1. **Elo entre insight e ponto da série** (§5): o desenho previa destacar, no
+   gráfico, o ponto do `last_date` de um insight em foco. **Não implementado.**
+   Exigiria elevar o estado de foco do Pulso até o gráfico, atravessando dois
+   blocos, e o ganho não justifica o acoplamento nesta rodada. O restante do §5
+   está implementado.
+2. **`max-h` com rolagem interna na lista de insights** (§5): desnecessário na
+   prática — `buildPulse` já limita `pulse.top` a três itens, então a lista é
+   limitada por construção. Os painéis de Movimentos e Concentração, que podem
+   crescer, **têm** o `max-h` com rolagem.
+
+Nenhum dos dois afeta os contratos de dado, os estados ou a acessibilidade.
+
+---
+
+## 15. Rodada consolidada de correção (V2-1, única permitida)
+
+**Status: corrigido, aguardando revisão.** Uma revisão estrita encontrou nove
+findings — dois funcionais graves, quatro lacunas de contrato e três de
+qualidade. Todos corrigidos nesta rodada. Não haverá outra.
+
+### 15.1 Findings e correções
+
+| # | Finding | Correção |
+|---|---|---|
+| **A** | O ramo `overviewStatus.error \|\| isEmpty` envolvia quase todos os blocos: uma falha só do `/overview` apagava evolução, Pulso, matriz, movimentos e fila, contradizendo o contrato do próprio hook | Gate global **removido**. A estrutura fica sempre montada; cada bloco recebe o estado da própria fonte. `KpiBand` ganhou estado de erro; o `aria-live` passou a **nomear** as fontes indisponíveis em vez de dizer "Dados carregados" |
+| **B** | Quatro caminhos de drill-down do spec estavam ausentes | Implementados: legenda de canal (com isolamento visual da série), cabeçalho de canal da matriz, concentração por marca (explica antes de navegar) e chips de sinal na célula |
+| **C** | Falha de `/canais` apagava a matriz, que depende de `/brands` para o GMV | Estado **parcial**: GMV/share/variação permanecem, sinais e referências são declarados indisponíveis, e a célula aberta informa exatamente o que falta. Só erro de `/brands` bloqueia a matriz |
+| **D1** | O detalhe do ponto imprimia números **mockados** com uma nota de demonstração | Guarda de mock: em página live, resposta não-live é indisponibilidade. `overview` e `brands` do recorte ganharam estados independentes, com parcial nomeando a fonte ausente |
+| **D2** | Em grão mensal o CTA dizia "Fixar este dia" e aplicava `date_from = date_to = bucket.date`, reduzindo o mês a um dia | `bucketRange()` puro, sem `Date` (logo sem erro de fuso). Grão mensal aplica o primeiro e o **último dia real** do mês |
+| **E** | A nota de cobertura de Ads citava sempre "Mercado Livre e Shopee", mesmo com um só selecionado | `adsCoverageNote()` deriva da seleção; as sete combinações estão cobertas em teste. Ausência de valor continua `N/D`, nunca R$ 0 |
+| **F** | A faixa afirmava "cobertura" a partir de `gmv != null` | Passou a afirmar **disponibilidade de série**, derivada dos estados por canal. §15.2 |
+| **G** | O diálogo só fechava quando o filtro mudava pelos controles da página | Efeito sobre a **identidade dos filtros efetivos**: fecha por back/forward e URL externa também. Trocar a métrica não fecha nem refaz fetch |
+| **H** | 26 ocorrências novas de fonte abaixo de 12px | Todas elevadas a ≥12px nos arquivos do V2. Dívida realmente preexistente (16 arquivos com 11px, 22 com 10px, 3 com 9px) **não** foi tocada |
+
+### 15.2 Semântica final da faixa de confiança
+
+A faixa **não** infere cobertura de valor. Ela reporta o estado da série de cada
+canal, em quatro valores distintos:
+
+| Estado | Significado | Origem |
+|---|---|---|
+| `checking` | verificando | série ainda carregando |
+| `available` | série disponível | resposta fresca **com** registros — inclusive registros de valor zero |
+| `no_records` | sem registros no período | resposta fresca **sem** nenhuma linha |
+| `unavailable` | série indisponível | a fonte daquele canal falhou |
+
+Texto da faixa: "Série disponível em X de Y canais", mais "N sem registros" e
+"N indisponíveis" quando houver. Defasagem, avisos e fontes nomeadas continuam
+vindo do `/executive-summary`, **separadamente**: se ele não responder, a faixa
+mantém a disponibilidade das séries e declara que defasagem e avisos **não foram
+verificados** — o que é diferente de afirmar que não existem.
+
+O drill-down diz o limite explicitamente: disponibilidade de série **não**
+comprova completude do dado.
+
+### 15.3 Achado adicional do QA — modo demonstração
+
+Decidir o modo demonstração apenas pelo `/overview` produzia um estado misto:
+com `/overview` fora do ar e as demais fontes live, a página exibia **KPIs
+mockados ao lado de matriz e evolução reais**, com só um badge global. A regra
+passou a exigir que **todas** as fontes com fallback tenham caído para mock; se
+ao menos uma respondeu de verdade, a que caiu é tratada como indisponível —
+inclusive o próprio `overview`.
+
+### 15.4 Contratos finais
+
+**Detalhe do ponto (live × mock):**
+
+| Página | Resposta | Comportamento |
+|---|---|---|
+| live | live | números exibidos |
+| live | não-live (mock) | **indisponível** — números não são renderizados |
+| live | uma fonte live, outra não | evidência da que respondeu + nota parcial **nomeando** a ausente |
+| live | ambas não-live | erro do detalhe; a série já carregada continua válida |
+| demonstração | mock | exibido, com o bloco rotulado como demonstração |
+
+**CTA do bucket:** grão diário → "Fixar este dia como período", `date_from = date_to = dia`. Grão mensal → "Fixar este mês como período", primeiro ao último dia real do mês (fevereiro comum, bissexto, regra do século e dezembro cobertos em teste). Canais, marcas e comparação preservados nos dois casos.
+
+**Cobertura de Ads pelas sete combinações:**
+
+| Seleção | Nota |
+|---|---|
+| TikTok | "Sem cobertura de mídia na seleção · TikTok Shop: não disponível nesta fonte" |
+| ML | "Cobertura: Mercado Livre" |
+| Shopee | "Cobertura: Shopee" |
+| ML + Shopee | "Cobertura: Mercado Livre e Shopee" |
+| TikTok + ML | "Cobertura: Mercado Livre · TikTok Shop: não disponível nesta fonte" |
+| TikTok + Shopee | "Cobertura: Shopee · TikTok Shop: não disponível nesta fonte" |
+| os três | "Cobertura: Mercado Livre e Shopee · TikTok Shop: não disponível nesta fonte" |
+
+### 15.5 Matriz fonte × bloco
+
+| Bloco | Fontes | Comportamento em falha |
+|---|---|---|
+| Faixa de confiança | séries `/trend` + `/executive-summary` | disponibilidade das séries sobrevive; avisos ficam "não verificados" |
+| 5 KPIs | `/overview` | bloco em erro com retry; nada mais é afetado |
+| Evolução | até 3 × `/trend` | canal nomeado, total não desenhado, demais séries ficam |
+| Pulso | `/executive-summary` | painel de indisponibilidade; resumo de canais preservado |
+| Resumo de canais | `/overview` | painel de indisponibilidade; Pulso preservado |
+| Saúde do volume | `/quality` + `/overview` | bloco declara a fonte ausente; demais blocos ficam |
+| Matriz — GMV/share/variação | `/brands` | só `/brands` bloqueia a matriz |
+| Matriz — sinais e referências | `/canais` | **parcial**: grade fica, sinais declarados indisponíveis |
+| Movimentos e Concentração | `/brands` | bloco em erro com retry |
+| Fila de atenção | `/executive-summary` | duas listas com estado próprio |
+
+### 15.6 Drill-downs concluídos — 16 tipos de acionamento
+
+Contando cada elemento acionável como um tipo, são **16**. Os cinco KPIs contam
+como **cinco** tipos, porque cada card tem conteúdo, decomposição e regra de
+comparação próprios:
+
+| # | Acionamento |
+|---|---|
+| 1–5 | KPI de GMV, Pedidos, Ticket Médio, Investimento em Ads e ROAS por canal |
+| 6 | Faixa de confiança no dado |
+| 7 | Ponto da série (bucket) |
+| 8 | **Legenda de canal da evolução** |
+| 9 | Barra de canal no resumo |
+| 10 | Linha de canal em Saúde do volume |
+| 11 | **Cabeçalho de canal da matriz** |
+| 12 | Célula da matriz (marca × canal) |
+| 13 | Insight do Pulso (detalhe e "ver todos") |
+| 14 | Item de Movimentos |
+| 15 | **Marca em Concentração** |
+| 16 | Linha da fila de atenção — comercial e aviso de dado |
+
+Uma contagem por *conteúdo distinto de diálogo* daria um número menor, porque os
+cinco KPIs compartilham o mesmo componente de conteúdo; para evitar ambiguidade,
+a referência oficial deste documento é **16 tipos de acionamento**.
+
+Todos no **shell único**, com foco contido, `Escape`, retorno de foco ao gatilho
+e exatamente um diálogo visível — verificado por teclado nos quatro caminhos
+novos. Os chips de sinal são `<span>` dentro do botão da célula (nunca botão
+aninhado) e o nome acessível da célula anuncia os sinais.
+
+---
+
+## 16. Reparação de stop-loss (V2-1, pré-commit)
+
+Cinco inconsistências encontradas na revisão da rodada consolidada. Escopo
+estritamente limitado a elas — não é uma nova rodada de produto.
+
+### 16.1 Cálculo final do modo demonstração
+
+A regra saiu do hook para um módulo puro e testável,
+`src/lib/gerencial/demo-mode.ts`. A versão anterior errava de duas formas
+silenciosas: `every` sobre uma **lista filtrada** é vacuamente verdadeiro — bastava
+o `/overview` mock concluir primeiro para a página virar "demonstração" enquanto as
+demais fontes ainda carregavam — e `Object.values(seriesState)` incluía canais fora
+da seleção e chaves de requisições antigas.
+
+`decideDemoMode` avalia o **conjunto esperado** da requisição atual: as quatro
+fontes agregadas com fallback (`overview`, `brands`, `canais`, `quality`) mais **uma
+série por canal selecionado**. Cada uma precisa de `loading=false`,
+`errored=false`, `resolvedKey` igual à chave esperada (a do canal, para séries) e
+`live=false`. O `/executive-summary` não entra: não tem fallback mock, ele falha de
+verdade.
+
+Cada fonte esperada é classificada em **quatro** estados — `pending` (ausente,
+carregando ou com chave antiga), `live`, `mock` e `terminal_error` (chave atual,
+concluída com erro) — e a decisão segue esta precedência:
+
+1. alguma `live` → `demoMode=false`, `pending=false`;
+2. alguma `terminal_error` → `demoMode=false`, `pending=false`;
+3. todas `mock` → `demoMode=true`, `pending=false`;
+4. resta alguma `pending` → `demoMode=false`, `pending=true`.
+
+O estado `terminal_error` existe por um bug real encontrado na revisão final: um
+erro era tratado como espera, então `pending` ficava verdadeiro para sempre. Como
+`pending` converte os mocks das outras fontes em carregamento neutro,
+`sources.anyLoading` nunca encerrava e a interface podia ficar em "Atualizando…"
+indefinidamente. **Erro é uma conclusão**: com ele, a demonstração já não pode ser
+confirmada, logo não há o que esperar — e as fontes em mock passam a indisponíveis.
+Um erro com `resolvedKey` antigo **não** é terminal para a requisição nova.
+
+Enquanto `pending` é verdadeiro, uma fonte cujo mock foi substituído fica em estado
+**neutro de carregamento** — não exibe os números mockados nem afirma
+indisponibilidade definitiva.
+
+| Cenário | `demoMode` | `pending` | Efeito na interface |
+|---|---|---|---|
+| Só `/overview` mock concluiu; demais carregando | `false` | `true` | KPIs em carregamento neutro; **nenhum número mock** |
+| Quatro agregadas mock; série ainda carregando | `false` | `true` | idem |
+| Todas as fontes atuais mock | `true` | `false` | mock coerente, página rotulada como demonstração |
+| Uma live e as demais mock | `false` | `false` | fontes mockadas declaradas **indisponíveis** |
+| Erro **terminal** numa fonte esperada (agregada ou série), com a chave atual | `false` | `false` | decisão **tomada**: as fontes em mock viram indisponíveis, e `anyLoading` encerra |
+| Erro com `resolvedKey` **antigo** | `false` | `true` | erro de outra requisição não conclui a atual |
+| `resolvedKey` antigo (agregada ou série) | `false` | `true` | decisão não é reaproveitada |
+| Série de canal **não** selecionado, live | irrelevante | — | não influencia a decisão |
+| Série de canal selecionado ausente | `false` | `true` | nunca confirma |
+| Troca de filtro | `false` | `true` | a decisão anterior é descartada |
+
+### 16.2 Quatro estados do detalhe da célula da matriz
+
+`matrixRow` ausente tem quatro causas, e antes as quatro produziam a mesma frase
+("indisponível nesta carga"), o que culpava a fonte inclusive quando ela respondeu
+bem:
+
+| Estado de `/canais` | Mensagem |
+|---|---|
+| `loading` | "Verificando sinais e referências comparativas deste canal…", com `role="status"` e `aria-busy` |
+| `error` | "Fonte de sinais e referências indisponível nesta carga." |
+| `fresh` + demonstração + sem linha | "O modo demonstração não modela Ads, custos, frete, sinais ou medianas por marca × canal." |
+| `fresh` live + sem linha | "Não há registro comparativo para {marca} × {canal} no período." — e diz explicitamente que **não indica falha de carga** |
+
+Com `matrixRow` presente, o comportamento anterior é preservado: o diálogo
+comparativo completo.
+
+### 16.3 Sinal desconhecido
+
+`signalLabel` devolvia o próprio identificador como fallback, então um
+`snake_case` novo do backend podia aparecer cru na interface — inclusive no
+`headline` de Canais. Agora devolve **"Sinal não mapeado"**; o identificador
+permanece apenas no contrato, e `isUnmappedSignal()` existe para diagnóstico e
+teste sem renderizar nada. A correção vale também para `/canais` e para o diálogo
+comparativo, que compartilham o helper.
+
+### 16.4 Tipografia — varredura ampliada
+
+`EvolutionChart` ainda passava `tick={{ fontSize: 11 }}` nos dois eixos: estilo
+inline do Recharts, invisível para uma busca por classes Tailwind. Ambos foram para
+12px, e a verificação passou a cobrir três formas — `text-[Npx]`, `fontSize: N` e
+`font-size: Npx` — em todos os arquivos do V2. O QA mede o tamanho **renderizado**
+dos ticks no navegador: 13 ticks, nenhum abaixo de 12px.
+
+### 16.5 Contagem de drill-downs
+
+Ver §15.6: a referência oficial passou a ser **16 tipos de acionamento**, com o
+critério explicado (os cinco KPIs contam como cinco).

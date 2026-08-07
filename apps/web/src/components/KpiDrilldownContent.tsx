@@ -2,6 +2,7 @@
 
 import type { BrandRow, OverviewData } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import {
   KPI_META,
   avgTicketBrandBreakdown,
@@ -89,7 +90,8 @@ export default function KpiDrilldownContent({ kind, value, periodLabel, refreshe
         {kind === "gmv" && <GmvBreakdown overview={overview} brands={brands} channels={channels} />}
         {kind === "orders" && <OrdersBreakdown brands={brands} />}
         {kind === "avg_ticket" && <AvgTicketBreakdown brands={brands} />}
-        {kind === "roas" && <RoasBreakdown overview={overview} />}
+        {kind === "ad_spend" && <AdSpendBreakdown overview={overview} channels={channels} />}
+        {kind === "roas" && <RoasBreakdown overview={overview} channels={channels} />}
       </div>
 
       <DrilldownCta href={buildHref(meta.nextHref)}>{meta.nextLabel} →</DrilldownCta>
@@ -150,13 +152,66 @@ function AvgTicketBreakdown({ brands }: { brands: BrandRow[] }) {
   );
 }
 
-function RoasBreakdown({ overview }: { overview: OverviewData }) {
+/**
+ * Investimento em Ads (Gate V2-1): declara a COBERTURA em vez de fingir que a
+ * soma cobre os tres canais. O TikTok aparece como indisponivel nesta fonte,
+ * nunca como R$ 0, e nenhum delta e' exibido — o contrato nao traz o
+ * investimento do periodo anterior.
+ */
+function AdSpendBreakdown({ overview, channels }: { overview: OverviewData; channels: Marketplace[] }) {
+  const mlSelected = isMarketplaceSelected(channels, "ml");
+  const shopeeSelected = isMarketplaceSelected(channels, "shopee");
+  const tiktokSelected = isMarketplaceSelected(channels, "tiktok");
+  return (
+    <>
+      <ul className="flex flex-col gap-1">
+        <EvidenceRow
+          label="Total dos canais com mídia"
+          value={overview.ad_spend != null ? fmtBrl(overview.ad_spend) : "Sem dado"}
+          tone={overview.ad_spend != null ? "value" : "muted"}
+          reference={mlSelected || shopeeSelected ? "Cobertura: Mercado Livre e Shopee" : null}
+        />
+        {tiktokSelected && (
+          <EvidenceRow label="TikTok Shop" value="Não disponível nesta fonte" tone="muted" />
+        )}
+      </ul>
+      <div className="mt-1">
+        <DataQualityNote note="O contrato não traz o investimento do período anterior, então este indicador não exibe variação." />
+      </div>
+    </>
+  );
+}
+
+/**
+ * ROAS por canal (Gate V2-1): uma linha por canal, sem nenhum consolidado.
+ * Canal nao selecionado e' omitido; canal selecionado sem valor fica explicito.
+ */
+function RoasBreakdown({ overview, channels }: { overview: OverviewData; channels: Marketplace[] }) {
   const r = roasBreakdown(overview);
   return (
-    <ul className="flex flex-col gap-1">
-      <EvidenceRow label="Mercado Livre" value={r.ml != null ? `${r.ml.toFixed(1)}x` : "—"} tone={r.ml != null ? "value" : "muted"} />
-      <EvidenceRow label="Shopee" value={r.shopee != null ? `${r.shopee.toFixed(1)}x` : "—"} tone={r.shopee != null ? "value" : "muted"} />
-      <EvidenceRow label="TikTok Shop" value="Não disponível" tone="muted" />
-    </ul>
+    <>
+      <ul className="flex flex-col gap-1">
+        {isMarketplaceSelected(channels, "ml") && (
+          <EvidenceRow
+            label="Mercado Livre"
+            value={r.ml != null ? `${r.ml.toFixed(1)}x` : "Sem dado"}
+            tone={r.ml != null ? "value" : "muted"}
+          />
+        )}
+        {isMarketplaceSelected(channels, "shopee") && (
+          <EvidenceRow
+            label="Shopee"
+            value={r.shopee != null ? `${r.shopee.toFixed(1)}x` : "Sem dado"}
+            tone={r.shopee != null ? "value" : "muted"}
+          />
+        )}
+        {isMarketplaceSelected(channels, "tiktok") && (
+          <EvidenceRow label="TikTok Shop" value="Não disponível nesta fonte" tone="muted" />
+        )}
+      </ul>
+      <div className="mt-1">
+        <DataQualityNote note="Não existe ROAS consolidado: somar ou tirar média entre canais com investimentos e regras diferentes produziria um número sem significado." />
+      </div>
+    </>
   );
 }

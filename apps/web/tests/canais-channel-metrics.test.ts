@@ -54,8 +54,14 @@ test("rotulos de sinal cobrem os 5 codigos do contrato, sem desconto/afiliados",
   }
 });
 
-test("signalLabel/signalTone tem fallback seguro para um sinal desconhecido", () => {
-  assert.equal(signalLabel("codigo_novo_desconhecido"), "codigo_novo_desconhecido");
+// Reparacao de stop-loss do V2-1: o fallback ANTERIOR devolvia o proprio
+// identificador, o que fazia um `snake_case` do backend aparecer cru na
+// interface — contrariando o contrato "nunca exibir identificador cru". O
+// fallback agora e' um rotulo humano; o identificador fica so' no diagnostico.
+test("signalLabel/signalTone tem fallback humano para um sinal desconhecido", () => {
+  assert.equal(signalLabel("codigo_novo_desconhecido"), "Sinal não mapeado");
+  assert.doesNotMatch(signalLabel("codigo_novo_desconhecido"), /codigo_novo_desconhecido/);
+  assert.doesNotMatch(signalLabel("codigo_novo_desconhecido"), /_/, "sem snake_case no rótulo");
   assert.match(signalTone("codigo_novo_desconhecido"), /slate/);
 });
 

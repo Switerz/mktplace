@@ -8,7 +8,10 @@ import type { BrandRow, OverviewData } from "./api-client";
 import type { Marketplace } from "./mock-data";
 import { isMarketplaceSelected } from "./marketplace-filter.ts";
 
-export type KpiKind = "gmv" | "orders" | "avg_ticket" | "roas";
+/** `ad_spend` entrou no Gate V2-1: a faixa da Gerencial passou de 4 para 5
+ * KPIs (GMV, Pedidos, Ticket Medio, Investimento em Ads e ROAS por canal). A
+ * extensao e' aditiva — nenhum consumidor existente precisou mudar. */
+export type KpiKind = "gmv" | "orders" | "avg_ticket" | "ad_spend" | "roas";
 
 export interface KpiMeta {
   label: string;
@@ -47,11 +50,23 @@ export const KPI_META: Record<KpiKind, KpiMeta> = {
     nextLabel: "Ver detalhamento por canal em Canais",
     nextHref: "/canais",
   },
+  ad_spend: {
+    label: "Investimento em Ads",
+    definition:
+      "Investimento em mídia no período, somado nos canais que reportam anúncios. A cobertura é de Mercado Livre e Shopee.",
+    formula: "Investimento = investimento Mercado Livre + investimento Shopee",
+    caveat:
+      "TikTok Shop não reporta investimento em mídia nesta fonte, então não entra na soma e não é exibido como zero. O contrato não traz o investimento do período anterior, portanto este indicador não tem variação.",
+    nextLabel: "Ver detalhamento de mídia em Financeiro",
+    nextHref: "/financeiro",
+  },
   roas: {
-    label: "ROAS",
-    definition: "Receita atribuída a anúncios dividida pelo investimento em mídia — disponível hoje para Mercado Livre e Shopee.",
+    label: "ROAS por canal",
+    definition:
+      "Receita atribuída a anúncios dividida pelo investimento em mídia, apurada por canal — disponível hoje para Mercado Livre e Shopee.",
     formula: "ROAS = receita atribuída a anúncios / investimento em anúncios",
-    caveat: "TikTok Shop não tem ROAS disponível no contrato de dados atual — nenhum valor consolidado que dependa dele é exibido.",
+    caveat:
+      "Cada canal tem seu próprio ROAS e nenhum valor consolidado é exibido: somar ou tirar média de ROAS entre canais produziria um número sem significado. TikTok Shop não tem ROAS no contrato atual.",
     nextLabel: "Ver detalhamento de mídia em Financeiro",
     nextHref: "/financeiro",
   },

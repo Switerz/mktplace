@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 06/08/2026 (Gate V2-0 concluído — auditoria comparativa contra a torre_b2b e blueprint da nova Gerencial, sem implementação; Gate G4 versionado em `b91874c`)
+**Última atualização:** 07/08/2026 (Gate V2-1 implementado e corrigido, aguardando revisão — nova Gerencial flagship com os oito blocos do blueprint, fontes verdadeiramente independentes, dezesseis tipos de acionamento de drill-down e lacuna visual medida em 0px; Gate V2-0 versionado em `c110e85`)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -588,9 +588,118 @@ verificação numérica é tarefa do QA do V2-3. A referência não pôde ser ex
 (depende de Supabase e variáveis ausentes; criar credenciais está fora de
 escopo), então sua análise é 100% de leitura de código.
 
+### Gate V2-1 — reconstrução da Gerencial
+
+**IMPLEMENTADO E CORRIGIDO, aguardando revisão (07/08/2026).** A rodada principal
+de implementação e a **única** rodada consolidada de correção foram executadas; o
+orçamento do gate está esgotado. Somente a rota `/` e seus componentes/helpers
+diretos foram tocados — nenhuma outra tela recebeu o novo design.
+
+**A rodada de correção fechou nove findings de uma revisão estrita**, dois deles
+funcionais e graves: (1) o ramo global de erro/vazio da página apagava evolução,
+Pulso, matriz, movimentos e fila quando **só** o `/overview` falhava, contrariando
+o próprio contrato de fontes independentes — o gate global foi removido e cada
+bloco passou a responder apenas às suas fontes, com o `aria-live` nomeando o que
+ficou indisponível; (2) o detalhe de um ponto da série imprimia números
+**mockados** com uma nota de demonstração, e agora, em página live, resposta
+não-live é indisponibilidade, com `overview` e `brands` do recorte em estados
+separados. Fecharam também: os quatro caminhos de drill-down que faltavam
+(legenda de canal com isolamento da série, cabeçalho de canal da matriz,
+concentração por marca explicando antes de navegar, e chips de sinal na célula);
+o estado parcial da matriz quando `/canais` falha mas `/brands` está fresco; o CTA
+do bucket mensal, que dizia "fixar este dia" e reduzia o mês a um dia; a nota de
+cobertura de Ads, que citava Mercado Livre e Shopee mesmo com um só selecionado; e
+o fechamento do diálogo por mudança de filtro vinda de back/forward ou URL colada.
+
+A **faixa de confiança ganhou semântica honesta**: deixou de inferir "cobertura" a
+partir de `gmv != null` e passou a reportar **disponibilidade de série** em quatro
+estados distintos — verificando, disponível (inclusive com registros de valor
+zero), sem registros e indisponível. Defasagem e avisos continuam vindo do
+`/executive-summary` em separado; se ele não responder, a faixa mantém a
+disponibilidade e declara que defasagem e avisos **não foram verificados**, em vez
+de afirmar que não existem.
+
+O QA da rodada encontrou um achado adicional que a revisão não previa: decidir o
+modo demonstração apenas pelo `/overview` exibia KPIs mockados ao lado de matriz e
+evolução reais. A regra passou a exigir que **todas** as fontes com fallback
+tenham caído para mock.
+
+Uma **reparação final de stop-loss** fechou cinco inconsistências da própria rodada
+de correção, antes do commit. A mais relevante: a regra de modo demonstração ainda
+podia ativar com **uma única fonte** concluída em mock, porque `every` sobre uma
+lista filtrada é vacuamente verdadeiro — e a lista de séries incluía canais fora da
+seleção e chaves de requisições antigas. A decisão foi extraída para um módulo puro
+(`lib/gerencial/demo-mode.ts`) que exige o conjunto esperado da requisição atual e
+devolve também um estado *pendente*, no qual uma fonte mockada fica em carregamento
+neutro em vez de exibir números. Uma **correção terminal** fechou o último bug dessa
+regra: um erro era tratado como espera, então o estado pendente nunca terminava —
+os mocks das outras fontes ficavam presos em carregamento e a interface podia
+permanecer em "Atualizando…" indefinidamente. Erro passou a ser uma conclusão
+(`terminal_error`): a demonstração já não pode ser confirmada, as fontes em mock
+viram indisponíveis e o carregamento encerra. Um erro com chave de requisição antiga
+não é terminal para a requisição nova. Fecharam também: as quatro causas distintas de uma
+célula da matriz sem linha comparativa, que antes recebiam a mesma frase de "falha
+de carga"; o fallback de `signalLabel`, que devolvia o identificador `snake_case`
+cru e podia vazá-lo para a interface de Canais; os `tick={{ fontSize: 11 }}` do
+Recharts, que escaparam da varredura de tipografia por serem estilo inline; e a
+contagem documental de drill-downs, agora **16 tipos de acionamento** com o critério
+explicado.
+
+Entregue: os oito blocos do blueprint (faixa de confiança, cinco KPIs, Evolução
+dominante, Pulso+Canais, Saúde do volume por canal, Matriz Marca × Canal,
+Movimentos + Concentração por marca, Fila de atenção), com a lógica de negócio em
+sete módulos puros (`src/lib/gerencial/*`) testáveis sem React, um hook de
+coordenação das seis fontes (`useGerencialSources`) e dez componentes de bloco. O
+`page.tsx` ficou como coordenador (494 linhas), sem regra de negócio no JSX.
+
+**A lacuna visual foi eliminada por construção e medida em runtime:** a diferença
+entre o final visual do card de Evolução e do item Pulso+Canais é de **0px** nos
+oito casos de desktop e tablet (com um e com três canais), contra o critério de
+≤24px; zero overflow horizontal nos três viewports; o `row-span` e o
+`items-start` que causavam a faixa órfã não existem mais.
+
+O alerta hard-coded de Lescent saiu do JSX: a fila de atenção passou a ser
+alimentada pelo `/executive-summary`, com listas separadas para risco comercial e
+confiança no dado (avisos de dado têm escala própria, sem "Crítico" comercial).
+
+**Três achados do próprio QA, corrigidos na rodada:** (1) os fetchers não
+rejeitam — sem API devolvem mock com `live: false` — e um `/quality` em falha
+renderizava cancelamento mockado ao lado de KPIs reais; agora, fora do modo
+demonstração, `live: false` é indisponibilidade da fonte; (2) 5px de overflow
+horizontal no mobile, causados por um `<button>` de KPI que se dimensionava pelo
+conteúdo; (3) o `recharts` estava no bundle inicial porque os cards importavam as
+cores de canal do módulo do gráfico, anulando o `next/dynamic` — First Load da
+rota `/` caiu de **252 kB para 144 kB**.
+
+Validações após a correção: **520 testes** (56 na suíte do V2), typecheck e build
+verdes; detector do Impeccable sem findings nos 12 arquivos visuais do V2; QA em
+navegador nos três viewports com nove cenários, incluindo falha isolada de
+`/overview`, de `/canais` e de uma série de `/trend`, detalhe do ponto com uma
+fonte indisponível, período longo em grão mensal, e navegação **por teclado** nos
+quatro caminhos de drill-down novos — **zero falhas, zero erro de console ou
+hydration, zero host inesperado, zero overflow horizontal**. Diferença entre o
+card de Evolução e o item Pulso+Canais: **0px** nos quatro casos de desktop e
+tablet, contra o critério de ≤24px. First Load da rota `/`: 147 kB, com o
+`recharts` fora do bundle inicial. Zero backend, zero endpoint novo, zero
+dependência (`package-lock.json` intocado), zero banco/pipeline/Scheduler/Airflow,
+zero deploy, zero commit.
+
+Limitações declaradas: `/executive-summary` responde em ~2,9s contra ~0,7s das
+outras fontes, o que é justamente o motivo dos estados independentes; a série
+comparativa e a granularidade selecionável seguem indisponíveis e declaradas em
+texto (extensão aditiva fica no V2-2); dois itens do spec não foram implementados
+e estão registrados em §14.5 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md).
+Dívidas que **não** foram tocadas por estarem fora do escopo do gate: os dois
+`<h1>` da página (U6-04, do shell), três componentes que ficaram obsoletos na
+Gerencial mas são asseverados por testes estáticos preexistentes, e as fontes
+abaixo de 12px nas outras dez rotas (16 arquivos com 11px, 22 com 10px, 3 com
+9px). A rampa do `DESIGN.md` continua sem passo de anotação densa e sem exceção
+para o valor de KPI em 24px — registrado para aplicação futura, já que este gate
+não pode tocar o arquivo.
+
 ## Próximas prioridades
 
-1. Versionar o Gate V2-0 revisado e decidir a abertura do **Gate V2-1** (reconstrução da Gerencial reutilizando endpoints existentes). Nenhuma decisão de produto segue aberta: o bloco dominante é a **Evolução Temporal** (7 colunas, contra 5 do item Pulso+Canais) e a faixa de KPIs está fechada.
+1. Revisar o Gate V2-1 e decidir se a correção consolidada é necessária antes de abrir o **V2-2** (propagação às outras superfícies + extensão aditiva de `/trend`).
 2. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
 3. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
 4. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.

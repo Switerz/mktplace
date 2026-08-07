@@ -159,7 +159,12 @@ test("sinal desconhecido: fallback seguro, nunca quebra nem inventa causa", () =
   const d = buildChannelDiagnosis(row({ signals: ["sinal_novo_do_backend"] }), median());
   assert.equal(d.explanations.length, 1);
   assert.match(d.explanations[0].reason, /Sinal sem explicação mapeada/);
-  assert.match(d.headline, /Outros sinais: sinal_novo_do_backend\./);
+  // Reparacao de stop-loss do V2-1: o headline usava `signalLabel`, cujo fallback
+  // antigo devolvia o identificador — e assim `sinal_novo_do_backend` aparecia cru
+  // na interface de Canais. Agora sai o rotulo humano, e o identificador nao vaza.
+  assert.match(d.headline, /Outros sinais: Sinal não mapeado\./);
+  assert.doesNotMatch(d.headline, /sinal_novo_do_backend/);
+  assert.doesNotMatch(d.explanations[0].label, /sinal_novo_do_backend/);
 });
 
 test("roas_forte sem mediana: valor proprio + indisponibilidade da referencia", () => {

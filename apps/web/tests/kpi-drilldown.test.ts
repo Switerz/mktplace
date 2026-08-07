@@ -178,11 +178,29 @@ test("roasBreakdown: TikTok sempre indisponivel; ML/Shopee refletem o dado real"
   assert.equal(r.shopee, null);
 });
 
-// --- Conteudo/metadados dos 4 drill-downs ---
+// --- Conteudo/metadados dos drill-downs de KPI ---
 
-test("KPI_META cobre exatamente os 4 KPIs suportados", () => {
-  const kinds: KpiKind[] = ["gmv", "orders", "avg_ticket", "roas"];
+// Gate V2-1: a faixa da Gerencial passou de 4 para 5 KPIs, com a entrada de
+// `ad_spend` (Investimento em Ads). `KPI_META` tem de cobrir exatamente esses
+// cinco — nem a menos (KPI sem explicacao) nem a mais (metadado orfao).
+test("KPI_META cobre exatamente os 5 KPIs suportados", () => {
+  const kinds: KpiKind[] = ["gmv", "orders", "avg_ticket", "ad_spend", "roas"];
   assert.deepEqual(Object.keys(KPI_META).sort(), [...kinds].sort());
+});
+
+test("KPI_META.ad_spend declara cobertura ML+Shopee, TikTok indisponivel e ausencia de variacao", () => {
+  const text = `${KPI_META.ad_spend.definition} ${KPI_META.ad_spend.caveat ?? ""}`;
+  assert.match(text, /Mercado Livre/);
+  assert.match(text, /Shopee/);
+  assert.match(text, /TikTok/);
+  // Sem delta: o contrato nao traz investimento do periodo anterior.
+  assert.match(text, /varia[çc][ãa]o/i);
+});
+
+test("KPI_META.roas proibe consolidado entre canais na propria explicacao", () => {
+  const text = `${KPI_META.roas.definition} ${KPI_META.roas.caveat ?? ""}`;
+  assert.match(text, /por canal/i);
+  assert.match(text, /somar|m[ée]dia/i);
 });
 
 test("KPI_META.roas menciona TikTok como indisponivel na definicao/caveat", () => {

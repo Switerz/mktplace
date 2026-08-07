@@ -53,18 +53,50 @@ test("um unico shell de dialogo: so KpiDrilldownDialog portaliza/define role=dia
   }
 });
 
-test("refreshed_at do insight vem do executive-summary fresco (execFresh), nunca do overview", () => {
+// Gate V2-1: o wiring mudou (as seis fontes passaram a ter estado proprio em
+// `useGerencialSources`), mas o INVARIANTE e' o mesmo — o refreshed_at do
+// detalhe de insight vem da resposta fresca do executive-summary, nunca do
+// overview. Agora quem garante o frescor e' `toSource`, que zera o campo
+// enquanto a chave resolvida nao bate com a chave atual.
+test("refreshed_at do insight vem do executive-summary fresco, nunca do overview", () => {
   const src = read("app/page.tsx");
-  // a constante existe e é gated por execFresh sobre o period da MESMA resposta
-  assert.match(
-    src,
-    /const pulseRefreshedAt = execFresh \? execSummary!\.period\.refreshed_at : null;/,
-    "pulseRefreshedAt deve ser derivado de execSummary.period.refreshed_at com gate execFresh",
+  const insightBlock = src.slice(
+    src.indexOf("<InsightDrilldownContent"),
+    src.indexOf("/>", src.indexOf("<InsightDrilldownContent")),
   );
-  // e é exatamente ela que alimenta o conteúdo do insight
-  const insightBlock = src.slice(src.indexOf("<InsightDrilldownContent"), src.indexOf("</KpiDrilldownDialog>", src.indexOf("<InsightDrilldownContent")));
-  assert.match(insightBlock, /refreshedAt=\{pulseRefreshedAt\}/, "InsightDrilldownContent recebe pulseRefreshedAt");
-  assert.doesNotMatch(insightBlock, /refreshedAt=\{refreshedAt\}/, "não pode receber o refreshedAt do overview");
+  assert.match(
+    insightBlock,
+    /refreshedAt=\{sources\.executiveSummary\.refreshedAt\}/,
+    "InsightDrilldownContent recebe o refreshedAt da fonte executive-summary",
+  );
+  assert.doesNotMatch(
+    insightBlock,
+    /refreshedAt=\{sources\.overview\.refreshedAt\}/,
+    "não pode receber o refreshedAt do overview",
+  );
+
+  // O frescor e' aplicado na fonte: fora de `status.fresh`, refreshedAt e' null.
+  const hook = read("src/hooks/useGerencialSources.ts");
+  assert.match(
+    hook,
+    /refreshedAt:\s*status\.fresh \? state\.refreshedAt : null/,
+    "toSource deve anular refreshedAt quando a fonte não está fresca",
+  );
+  assert.match(hook, /data:\s*status\.fresh \? state\.data : null/, "dado obsoleto nunca vaza");
+});
+
+// Gate V2-1: os conteudos novos da Gerencial seguem a regra do shell unico.
+// A regra de "nao fazer fetch proprio" tem UMA excecao autorizada aqui: o
+// detalhe de um ponto da serie carrega overview+brands sob demanda para aquele
+// dia, com os endpoints existentes (Task E, item 3). A excecao e' pontual e
+// vale so' para esse conteudo — nao ha endpoint novo nem fetch nos demais.
+test("conteudos de drill-down da Gerencial V2 nao criam shell nem role=dialog proprio", () => {
+  const src = read("src/components/gerencial/GerencialDrilldowns.tsx");
+  assert.doesNotMatch(src, /createPortal/, "não deve portalizar modal próprio");
+  assert.doesNotMatch(src, /role="dialog"/, "não deve definir um segundo dialog");
+  // o fetch sob demanda usa apenas os fetchers existentes, nunca uma rota nova
+  assert.doesNotMatch(src, /\bfetch\s*\(\s*[`"']/, "não deve chamar fetch() cru com URL");
+  assert.match(src, /fetchOverview|fetchBrands/, "usa os fetchers existentes");
 });
 
 test("dialogo de Canais so abre com dados frescos (dataIsFresh) e conteudo condicionado", () => {

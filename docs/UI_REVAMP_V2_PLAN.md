@@ -509,6 +509,8 @@ Sem subgates recursivos (nada de V2-1.1). **Após duas correções do mesmo prob
 
 `DESIGN.md` **não foi tocado** (tem alteração local preexistente e está fora do escopo). A aplicar quando autorizado: regras de coordenação de altura (§7.1); critérios de alinhamento de §7.2; degraus médios `brand-200/300/400/500`; densidade de card `p-4`; `tabular-nums` obrigatório; comportamento responsivo do diálogo; barra de filtros sticky; faixa de confiança como elemento próprio.
 
+**Acrescentado após o V2-1:** a rampa tipográfica do `DESIGN.md` documenta 12/14/18/30px, mas a Torre usa há muito os passos de **anotação densa** `text-[11px]` e `text-[10px]` — presentes em **16** e **22** arquivos preexistentes, respectivamente, muito antes deste ciclo. O detector do Impeccable sinaliza esses dois valores como fora da rampa; a correção correta é documentá-los no `DESIGN.md` como passos `annotation` e `annotation-sm`, não removê-los do código. Também a escala do valor de KPI: o `DESIGN.md` exige 30px, e a faixa de cinco KPIs do V2 usa `text-2xl` (24px) para caber em tablet sem estourar a trilha — decisão do blueprint que precisa virar exceção documentada.
+
 ---
 
 ## 9. O que explicitamente não deve ser copiado
@@ -551,3 +553,68 @@ E **nenhuma linha de código** da referência é copiada: a transferência é de
 - **A referência não foi executada.** Depende de Supabase e variáveis de ambiente ausentes; criar credenciais está fora de escopo. A análise é 100% de código, e está declarada como tal.
 - **Nenhum teste, typecheck ou build rodado** — nenhum arquivo de código foi alterado neste gate nem na rodada de correção.
 - **Nenhum banco, pipeline, Data Mart, Neon, Scheduler, Airflow ou deploy acionado.**
+
+---
+
+## 12. Registro da rodada consolidada do V2-1 (07/08/2026)
+
+Nove findings de revisão estrita, todos corrigidos numa única rodada — detalhe em
+[GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md) §15. Os três que alteram contratos
+registrados neste plano:
+
+1. **§6.4, faixa de confiança.** A linha da matriz de dados dizia "cobertura,
+   defasagem, nº de avisos" a partir do `/executive-summary`. A cobertura passou
+   a ser **disponibilidade de série**, derivada das chamadas de `/trend` já
+   feitas — a existência de GMV nunca comprovou cobertura, e um zero real caía na
+   mesma gaveta de uma ausência de linha. Defasagem e avisos continuam vindo do
+   `/executive-summary`, agora com um estado explícito de "não verificado".
+2. **§6.1, KPI de Investimento em Ads.** A nota de cobertura passou a derivar
+   estritamente da seleção; as sete combinações úteis estão cobertas em teste.
+   Ausência de valor continua `N/D` — o contrato não permite concluir que a
+   ausência representa gasto zero.
+3. **Modo demonstração.** Achado do QA, não da revisão: decidir demonstração só
+   pelo `/overview` produzia KPIs mockados ao lado de matriz e evolução live.
+   Passou a exigir que **todas** as fontes com fallback tenham caído para mock.
+
+### 12.1 Veredito da tipografia — o que era dívida e o que não era
+
+A afirmação anterior (§8.2) de que `text-[11px]`/`text-[10px]` no V2 eram "dívida
+preexistente" estava **errada como justificativa**: a existência dessas classes em
+arquivos antigos não transforma uma ocorrência nova em dívida herdada.
+
+- **Introduzido pelo V2-1 e corrigido:** 26 ocorrências abaixo de 12px nos
+  arquivos novos (`AttentionQueue` 8, `VolumeHealthCard` 9, `KpiBand` 7,
+  `PulseChannelsColumn` 1, `GerencialDrilldowns` 1) mais uma no `EvolutionChart`.
+  Todas elevadas para ≥12px. Um finding de `gray-on-color` na legenda de canal
+  também foi corrigido: o hover do estado inativo passou a ser neutro, reservando
+  o violeta ao estado ativo.
+- **Dívida realmente preexistente, NÃO tocada:** 16 arquivos com `text-[11px]`,
+  22 com `text-[10px]` e 3 com `text-[9px]`, fora dos arquivos do V2. Corrigi-los
+  exigiria mexer nas outras dez rotas, o que este gate proíbe.
+- **Pendência documental que permanece:** a rampa do `DESIGN.md` documenta
+  12/14/18/30px e não tem passo de anotação densa; o valor de KPI do V2 usa
+  `text-2xl` (24px) contra os 30px exigidos. Ambos seguem registrados para
+  aplicação futura no `DESIGN.md`, que este gate não pode tocar.
+
+Detector do Impeccable ao final da rodada: **zero findings** nos 12 arquivos
+visuais do V2 (11 componentes + `app/page.tsx`).
+
+### 12.2 Reparação de stop-loss (pré-commit)
+
+Cinco inconsistências da própria rodada consolidada, corrigidas antes do commit —
+registro completo em [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md) §16. As duas que
+alteram contrato deste plano:
+
+1. **Decisão de modo demonstração** (§6.4 e §8.1, critério 5). A regra passou a um
+   módulo puro que exige o **conjunto esperado** da requisição atual — quatro
+   agregadas com fallback mais uma série por canal selecionado — e devolve também um
+   estado `pending`, no qual uma fonte mockada fica em carregamento neutro em vez de
+   exibir números. A heurística anterior confirmava demonstração com uma única fonte
+   concluída, porque `every` sobre lista filtrada é vacuamente verdadeiro.
+2. **Piso de legibilidade** (§7.3 e §12.1). A verificação de tipografia passou a
+   cobrir estilo inline e CSS, não só classes Tailwind: os `tick={{ fontSize: 11 }}`
+   do Recharts tinham escapado da varredura anterior. O QA agora mede o tamanho
+   **renderizado** no navegador.
+
+A afirmação de "12 caminhos de drill-down" foi substituída por **16 tipos de
+acionamento**, com o critério de contagem explicitado — ver §15.6 do spec.

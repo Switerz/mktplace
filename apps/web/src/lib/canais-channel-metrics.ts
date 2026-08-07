@@ -63,8 +63,19 @@ export const CHANNEL_BADGE_TONE: Record<string, string> = {
 };
 
 /** Rotulo de fallback para um sinal desconhecido — nunca quebra a UI. */
+/** Rotulo exibido quando o backend manda um sinal que a UI nao conhece. O
+ * identificador cru (snake_case) NUNCA e' renderizado nem interpolado em
+ * `aria-label` — ele fica so' no contrato/diagnostico. */
+export const UNKNOWN_SIGNAL_LABEL = "Sinal não mapeado";
+
 export function signalLabel(signal: string): string {
-  return CHANNEL_SIGNAL_LABEL[signal] ?? signal;
+  return CHANNEL_SIGNAL_LABEL[signal] ?? UNKNOWN_SIGNAL_LABEL;
+}
+
+/** Verdadeiro quando o sinal nao tem rotulo humano — util para diagnostico e
+ * teste, sem que o identificador cru chegue a interface. */
+export function isUnmappedSignal(signal: string): boolean {
+  return CHANNEL_SIGNAL_LABEL[signal] === undefined;
 }
 
 export function signalTone(signal: string): string {
