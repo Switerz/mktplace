@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 05/08/2026 (recuperação histórica ML/TikTok encerrada — junho, julho e 01–05/08 reconciliados; auditoria DQ1 concluída; Shopee atualizado até 04/08)
+**Última atualização:** 06/08/2026 (Gate V2-0 concluído — auditoria comparativa contra a torre_b2b e blueprint da nova Gerencial, sem implementação; Gate G4 versionado em `b91874c`)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -483,11 +483,116 @@ produção**. Migrar `/brand-detail` para o Neon **não** era correção mínima
 `tiktok_brand_daily`, `tiktok_creator_daily` ou `v_channel_efficiency` — seria
 frente de dados própria.
 
+## Ciclo ativo — Revamp UI V2 (Gerencial flagship)
+
+**Gate V2-0 (auditoria comparativa e blueprint): CONCLUÍDO — REVISADO, aguardando
+versionamento (06/08/2026) — somente desenho, nenhuma linha de UI
+implementada.** Uma rodada de correção consolidada foi aplicada na mesma data,
+resolvendo 4 findings de revisão do blueprint e encerrando as duas decisões de
+produto que estavam abertas. Aberto porque, apesar de U0–U6 e
+G1–G4 terem entregado shell, acessibilidade, estados de dados, drill-downs e
+confiabilidade, o resultado visual e analítico da Gerencial continua abaixo do
+padrão esperado: área vazia sob o gráfico de tendência, baixa densidade útil e
+pouca continuidade entre resumo, tendência, decomposição, ranking e ação.
+
+Entregas do gate, em [UI_REVAMP_V2_PLAN.md](UI_REVAMP_V2_PLAN.md) (auditoria,
+matriz de padrões, contratos de dados, sistema visual, roadmap) e
+[GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md) (blueprint, wireframes, mapa de
+drill-down):
+
+- **Causa técnica da lacuna visual identificada e evidenciada.** O container do
+  bloco analítico usa `items-start` (`apps/web/app/page.tsx:347`), o gráfico tem
+  altura **fixa** (`ResponsiveContainer height={260}`) e ocupa `lg:row-span-2`,
+  enquanto a coluna direita (Pulso + Canais) tem altura de conteúdo e soma mais
+  que o gráfico. As linhas da grade passam a ser ditadas pela coluna direita, e
+  `align-items: start` impede o item de esticar até sua área — sobram ~200–260px
+  de faixa branca sob o gráfico. **Trocar `items-start` por `items-stretch` não
+  resolve**: o item de grade é um wrapper vazio, o card interno não tem `h-full`
+  e a altura do gráfico é pixel fixo — são três mudanças acopladas. A correção
+  local entra no V2-1 como parte de um sistema de alturas, não como entrega
+  isolada, porque preencher pixel não é preencher significado.
+- **A referência (`torre_b2b`) resolve o mesmo layout sem truque:** nenhum
+  `items-start`, o card **é** o item de grade e a área do gráfico é
+  `flex-1 min-h-[18rem]`. Padrão adotado e transformado em regra normativa.
+- **Achado que inverte a direção da comparação:** a referência tem **0**
+  `role="dialog"`, **0** `aria-live` e **0** `aria-sort` em todo o repositório, e
+  **0** `aria-`/`role=` na Gerencial. Nenhum padrão de interação dela pode ser
+  copiado como está; nossa acessibilidade e nosso contrato de frescor
+  (`requestKey`/`resolvedKey`) permanecem como alvo a preservar, não a substituir.
+- **Viabilidade de dados classificada item a item:** o V2-1 **não cria endpoint**
+  e **não altera backend, banco ou pipeline** — reutiliza os endpoints atuais do
+  Neon. A redação "frontend-only" foi corrigida na revisão porque era imprecisa:
+  o V2-1 **aumenta de forma controlada o número de chamadas** (até 3 de `/trend`)
+  e por isso precisa coordenar frescor e **falha parcial** entre respostas,
+  nunca declarando um bloco completo se uma fonte necessária falhar. Só duas
+  melhorias pedem **extensão aditiva** de `/trend` (série comparativa e
+  granularidade), que ficam no V2-2 — hoje o router não repassa `compare_period`,
+  então `compare` é buscado e silenciosamente ignorado pelo gráfico. **Nenhuma
+  read model nova.** Seguem indisponíveis: margem/CMV, devolução ML,
+  cancelamento/devolução TikTok, grão transacional e tudo servido pelo Data Mart.
+- **Recusa de comparabilidade sem lastro (reforçada na revisão).** O funil de 4
+  etapas da referência foi rejeitado e, na revisão, **toda a composição monetária
+  foi removida** — o contrato não oferece valor cancelado, valor devolvido nem
+  GMV anterior às exclusões. O bloco passou a ser **"Saúde do volume por canal"**,
+  com métricas independentes por canal, cada uma na sua unidade, sem segmentos
+  mutuamente exclusivos. Os rótulos foram acertados na correção factual final:
+  `ml_total_orders` é **"Pedidos considerados"** (`ml_orders + ml_canceled`), não
+  "pedidos elegíveis"; em Shopee o total considerado é
+  `shopee_orders + shopee_canceled_orders`; o TikTok exibe **"Pedidos
+  registrados"**, sem inferir total considerado. **ML e Shopee usam a mesma
+  fórmula de taxa** — `cancelados / (não cancelados + cancelados)` — e o
+  frontend consome a taxa servida pelo endpoint, declara a definição no
+  drill-down e **nunca recalcula com outro denominador**. Não há ranking
+  competitivo de cancelamento entre canais, mas a justificativa é semântica e não
+  aritmética: fonte, processo de captura e semântica operacional dos status
+  diferem entre marketplaces (API, export manual, allowlist com maturação) e o
+  TikTok não tem cobertura confiável — então cada canal é apresentado
+  descritivamente. Devolvidos e taxa de devolução da Shopee são métricas
+  independentes, nunca partição do total.
+- **Ranking de produtos removido da Gerencial.** Produtos não têm escopo temporal
+  uniforme (ML é acumulado atual; TikTok e Shopee são competência mensal), então
+  um Top Produtos sob o período global compararia três janelas sob o mesmo
+  rótulo. Substituído por **"Concentração por marca"** via `/brands` no mesmo
+  período global; ranking de produtos fica registrado como evolução futura
+  dependente de contrato temporal uniforme.
+- **Tendência por canal com até três chamadas existentes:** `/trend` devolve série
+  agregada sem dimensão de canal, então o frontend fará **uma chamada por canal
+  selecionado (máximo 3)** com seleção unitária, somando as séries por bucket
+  para o total, com reconciliação contra o agregado do mesmo escopo, canal sem
+  dado distinguível de zero real, identidade de requisição incluindo métrica, e
+  falha parcial nomeando o canal ausente sem fallback silencioso.
+- **Faixa final de KPIs fechada:** GMV, Pedidos, Ticket Médio, Investimento em
+  Ads e ROAS por canal. **Confiança no dado deixou de ser o quinto KPI** e passou
+  a ser uma faixa horizontal compacta e clicável entre filtros e KPIs. **Delta
+  somente em GMV** — Pedidos e Ticket exibem "Comparação indisponível", Ads e
+  ROAS ficam sem delta, e ROAS não tem total consolidado, soma nem média entre
+  canais.
+- **Roadmap V2-0 → V2-3** com orçamento de uma correção consolidada por gate e 14
+  critérios mensuráveis para o V2-1. O teto genérico de 96px de área vazia foi
+  substituído, na revisão, por critérios verificáveis por bounding box: diferença
+  de **no máximo 24px** entre o final visual do card de Evolução e do item
+  composto Pulso+Canais em desktop e tablet, zero linha órfã por `row-span`,
+  nenhum espaço entre irmãos acima do gap do grid, e reconhecimento de que área
+  interna de gráfico e de estados vazio/erro/carregando não conta como área vazia.
+
+Restrições do gate respeitadas: zero alteração em `apps/web` e `apps/api`, zero
+dependência, zero endpoint, zero banco/pipeline/Scheduler/Airflow, zero deploy,
+zero cópia de código da referência, `DESIGN.md` não tocado (mudanças necessárias
+registradas para aplicação futura) e resíduos preexistentes preservados. Clone
+temporário da referência criado fora do repositório e removido ao final. **V2-1
+não foi aberto.**
+
+Limitação declarada: **não houve validação visual em navegador**. As alturas do
+diagnóstico foram derivadas das classes CSS, não medidas em runtime — a
+verificação numérica é tarefa do QA do V2-3. A referência não pôde ser executada
+(depende de Supabase e variáveis ausentes; criar credenciais está fora de
+escopo), então sua análise é 100% de leitura de código.
+
 ## Próximas prioridades
 
-1. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
-2. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
-3. Priorizar o próximo ciclo de visualizações e QA da Torre.
+1. Versionar o Gate V2-0 revisado e decidir a abertura do **Gate V2-1** (reconstrução da Gerencial reutilizando endpoints existentes). Nenhuma decisão de produto segue aberta: o bloco dominante é a **Evolução Temporal** (7 colunas, contra 5 do item Pulso+Canais) e a faixa de KPIs está fechada.
+2. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
+3. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
 4. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.
 
 ## Fora do foco atual
