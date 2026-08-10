@@ -17,6 +17,8 @@ import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt } from "@/lib/filters/format";
 import { useSortableTable } from "@/lib/use-sortable-table";
@@ -299,51 +301,51 @@ function PedidosPageInner() {
   }));
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-gray-900">Pedidos</h2>
-          <p className="text-sm text-slate-500">Volume, GMV e cancelamento agregados por canal, data e marca.</p>
-        </div>
-        {/* FINDING 2 (rodada de correcao) — Shopee isolada nunca chama fetch
-            (ver efeito abaixo): "API offline" implicaria falha de rede, que
-            nunca ocorreu aqui — e' apenas uma fonte sem cobertura Shopee.
-            Checado ANTES de `dataIsFresh` (que e' `true` nesse caminho, pois
-            a identidade foi marcada como resolvida sem erro/loading). */}
-        {dataIsFresh && showShopeeOnly ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Shopee sem cobertura nesta visão
-          </span>
-        ) : dataIsFresh ? (
-          <LiveStatusBadge live={displayIsLive} offlineLabel="Sem dados · API offline" />
-        ) : isLoadingState ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados...
-          </span>
-        ) : null}
-      </div>
-
-      {/* Controls */}
-        <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap min-w-0">
-            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-          </div>
-          <DateRangeFilter
-            dateFrom={filters.dateFrom}
-            dateTo={filters.dateTo}
-            compare={filters.compare}
-            onChange={(v) => setFilters(v)}
-            onCompareChange={(compare) => setFilters({ compare })}
-            hideCompare
-          />
-        </div>
-
-        <p className="text-xs text-slate-400 -mt-3">
-          Período: {periodLabel}
-          {dataIsFresh && displayData?.refreshed_at && <> · Atualizado em {fmtRefreshedAt(displayData.refreshed_at)}</>}
-        </p>
+    <PageContainer>
+      <PageHeader
+        title="Pedidos"
+        subtitle="Volume, GMV e cancelamento agregados por canal, data e marca — cobertura de TikTok Shop e Mercado Livre."
+        scopeLine={
+          <>
+            Período: {periodLabel}
+            {dataIsFresh && displayData?.refreshed_at && <> · Atualizado em {fmtRefreshedAt(displayData.refreshed_at)}</>}
+          </>
+        }
+        // FINDING 2 (rodada de correcao) — Shopee isolada nunca chama fetch
+        // (ver efeito abaixo): "API offline" implicaria falha de rede, que
+        // nunca ocorreu aqui — e' apenas uma fonte sem cobertura Shopee.
+        // Checado ANTES de `dataIsFresh` (que e' `true` nesse caminho, pois
+        // a identidade foi marcada como resolvida sem erro/loading).
+        status={
+          dataIsFresh && showShopeeOnly ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Shopee sem cobertura nesta visão
+            </span>
+          ) : dataIsFresh ? (
+            <LiveStatusBadge live={displayIsLive} offlineLabel="Sem dados · API offline" />
+          ) : isLoadingState ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          ) : null
+        }
+        filters={
+          <>
+            <div className="flex items-start gap-3 flex-wrap min-w-0">
+              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+            </div>
+            <DateRangeFilter
+              dateFrom={filters.dateFrom}
+              dateTo={filters.dateTo}
+              compare={filters.compare}
+              onChange={(v) => setFilters(v)}
+              onCompareChange={(compare) => setFilters({ compare })}
+              hideCompare
+            />
+          </>
+        }
+      />
 
         {showShopeeOnly && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
@@ -522,7 +524,7 @@ function PedidosPageInner() {
         )}
       </>
       )}
-      </div>
+      </PageContainer>
   );
 }
 

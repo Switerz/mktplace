@@ -16,6 +16,8 @@ import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
@@ -222,43 +224,44 @@ function FinanceiroPageInner() {
   const shSort = useSortableTable(shBrands, shGetValue, shColumnTypes);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-gray-900">Financeiro</h2>
-          <p className="text-sm text-slate-500">Comparar repasse, taxas, mídia e frete conforme a disponibilidade de dado de cada canal.</p>
-        </div>
-        {/* Badge live/mock só aparece quando os dados sao frescos — nunca o
-            estado da requisicao ANTERIOR durante a transicao de filtro. */}
-        {dataIsFresh ? (
-          <LiveStatusBadge live={displayIsLive} />
-        ) : isLoadingState ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados...
-          </span>
-        ) : null}
-      </div>
-
-      <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap min-w-0">
-            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-          </div>
-          <DateRangeFilter
-            dateFrom={filters.dateFrom}
-            dateTo={filters.dateTo}
-            compare={filters.compare}
-            onChange={(v) => setFilters(v)}
-            onCompareChange={(compare) => setFilters({ compare })}
-            hideCompare
-          />
-        </div>
-
-        <p className="text-xs text-slate-400 -mt-3">
-          Período: {periodLabel}
-          {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
-        </p>
+    <PageContainer>
+      <PageHeader
+        title="Financeiro"
+        subtitle="Comparar repasse, taxas, mídia e frete conforme a disponibilidade de dado de cada canal."
+        scopeLine={
+          <>
+            Período: {periodLabel}
+            {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
+          </>
+        }
+        // Badge live/mock só aparece quando os dados sao frescos — nunca o
+        // estado da requisicao ANTERIOR durante a transicao de filtro.
+        status={
+          dataIsFresh ? (
+            <LiveStatusBadge live={displayIsLive} />
+          ) : isLoadingState ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          ) : null
+        }
+        filters={
+          <>
+            <div className="flex items-start gap-3 flex-wrap min-w-0">
+              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+            </div>
+            <DateRangeFilter
+              dateFrom={filters.dateFrom}
+              dateTo={filters.dateTo}
+              compare={filters.compare}
+              onChange={(v) => setFilters(v)}
+              onCompareChange={(compare) => setFilters({ compare })}
+              hideCompare
+            />
+          </>
+        }
+      />
 
         {dataIsFresh && (() => {
           const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
@@ -601,7 +604,7 @@ function FinanceiroPageInner() {
         )}
       </>
       )}
-      </div>
+      </PageContainer>
   );
 }
 

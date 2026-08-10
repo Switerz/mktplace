@@ -154,8 +154,20 @@ export default function EvolutionChart({
   highlightedChannel,
   onSelectBucket,
 }: Props) {
-  // Rotulos do eixo X: com muitos buckets, mostra 1 a cada N para nao empilhar.
-  const interval = buckets.length > 16 ? Math.ceil(buckets.length / 12) : 0;
+  // Rotulos do eixo X (Gate V2-3, correcao consolidada).
+  //
+  // Antes: `interval = 0` para <=16 buckets, o que em Recharts significa
+  // "renderize TODOS os rotulos" e faz `minTickGap` ser IGNORADO. No grao
+  // semanal do V2-2 o rotulo ficou mais largo (`Sem. 29/06` ~60px contra ~34px
+  // de `29/06`), e cinco deles nao cabem nos ~308px de area util do mobile de
+  // 390px: medido, dois pares colidiam com folga minima de -1px.
+  //
+  // Agora `preserveStartEnd` + `minTickGap` deixa o proprio Recharts derrubar os
+  // rotulos do meio que nao caibam, sempre preservando o primeiro e o ultimo.
+  // Vale para todos os graos (o diario com 30 buckets tinha o mesmo problema no
+  // mobile) e nao mexe em bucket, granularidade, comparacao nem requisicao. A
+  // fonte permanece em 12px: nada e' encolhido para caber.
+  const interval = "preserveStartEnd" as const;
 
   // Isolamento visual do canal em foco: as demais series recuam em opacidade e
   // espessura, sem sair do grafico (o contexto de comparacao continua legivel).
@@ -166,7 +178,10 @@ export default function EvolutionChart({
     <ResponsiveContainer width="100%" height="100%">
       <LineChart
         data={buckets}
-        margin={{ top: 6, right: 8, left: 0, bottom: 0 }}
+        // `right: 28` (era 8) reserva a metade do ultimo rotulo, que o Recharts
+        // centra no ultimo ponto — ele ficava 22px fora da area do grafico e
+        // aparecia cortado na borda do card no mobile.
+        margin={{ top: 6, right: 28, left: 0, bottom: 0 }}
         onClick={(state) => {
           const point = state?.activePayload?.[0]?.payload as MergedBucket | undefined;
           if (point?.date) onSelectBucket(point.date);
@@ -179,7 +194,9 @@ export default function EvolutionChart({
           axisLine={false}
           tickLine={false}
           interval={interval}
-          minTickGap={4}
+          // Folga suficiente para o rotulo semanal (`Sem. 29/06`) nunca encostar
+          // no vizinho. Era 4px, que so' servia ao rotulo diario curto.
+          minTickGap={20}
         />
         <YAxis
           tickFormatter={(v: number) => axisTick(v, metric)}

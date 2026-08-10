@@ -8,6 +8,8 @@ import {
   type ProdutosMLSummary, type ProdutosChannelSummary,
 } from "@/lib/api-client";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import PeriodSelector from "@/components/PeriodSelector";
 import ProductMarketplaceTabs from "@/components/ProductMarketplaceTabs";
 import ProductFilterBar, { ProductSelect } from "@/components/ProductFilterBar";
@@ -378,24 +380,26 @@ export default function ProdutosPage() {
   const shPageNumber = Math.floor(shOffset / PAGE_SIZE) + 1;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-gray-900">Produtos</h2>
-          <p className="text-sm text-slate-500">Ranking de produtos por marketplace — GMV, eficiência de Ads e sinais de ação.</p>
-        </div>
-        {/* Badge de fonte da aba ativa — nunca reflete o live/mock da requisicao
-            ANTERIOR: enquanto a tabela OU o resumo Pareto da aba atual ainda
-            estao buscando, mostra um estado neutro em vez do `isLive` antigo. */}
-        {activeLoading ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados...
-          </span>
-        ) : (
-          <LiveStatusBadge live={isLive} />
-        )}
-      </div>
+    <PageContainer>
+      {/* Esta pagina NAO herda filtros globais (decisao do contrato de filtros):
+          escopo e periodo sao proprios de cada aba, e por isso o cabecalho nao
+          ganha barra sticky — barra vazia seria afordancia falsa. */}
+      <PageHeader
+        title="Produtos"
+        subtitle="Ranking de produtos por marketplace — cada aba tem contrato temporal próprio, sem ranking consolidado entre canais."
+        // Badge de fonte da aba ativa — nunca reflete o live/mock da requisicao
+        // ANTERIOR: enquanto a tabela OU o resumo Pareto da aba atual ainda
+        // estao buscando, mostra um estado neutro em vez do `isLive` antigo.
+        status={
+          activeLoading ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          ) : (
+            <LiveStatusBadge live={isLive} />
+          )
+        }
+      />
 
       <ProductMarketplaceTabs tabs={TABS} active={tab} onChange={handleTabChange} />
 
@@ -405,7 +409,7 @@ export default function ProdutosPage() {
           loading, nunca quando os dois falham (o estado de erro/offline de
           cada componente ja cobre esse caso). */}
       {activePartialWarning && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5">
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-2.5">
           <p className="text-xs text-amber-800">{activePartialWarning}</p>
         </div>
       )}
@@ -579,6 +583,6 @@ export default function ProdutosPage() {
             />
           </div>
         )}
-      </div>
+    </PageContainer>
   );
 }

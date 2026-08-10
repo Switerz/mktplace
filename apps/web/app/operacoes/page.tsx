@@ -11,6 +11,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import {
   fetchOperacoes,
   type OperacoesData,
@@ -277,21 +279,22 @@ export default function OperacoesPage() {
   const hasAnyData = dataIsFresh && displayData != null;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-gray-900">Operações</h2>
-          <p className="text-sm text-slate-500">Acompanhamento e priorização operacional — alertas, criadores, lives e velocidade de mídia.</p>
-        </div>
-        {dataIsFresh ? (
-          <LiveStatusBadge live={displayIsLive} />
-        ) : isLoadingState ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados...
-          </span>
-        ) : null}
-      </div>
+    <PageContainer>
+      {/* Contrato independente dos filtros globais (ver nota de escopo abaixo):
+          sem barra sticky, para nao sugerir um escopo que a tela nao aplica. */}
+      <PageHeader
+        title="Operações"
+        subtitle="Acompanhamento e priorização operacional — alertas, criadores, lives e velocidade de mídia."
+        status={
+          dataIsFresh ? (
+            <LiveStatusBadge live={displayIsLive} />
+          ) : isLoadingState ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          ) : null
+        }
+      />
 
       {/* Nota de escopo (Task 6) — esta tela nao herda os filtros globais. */}
       <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
@@ -860,6 +863,6 @@ export default function OperacoesPage() {
         </div>
       </>
       )}
-      </div>
+    </PageContainer>
   );
 }

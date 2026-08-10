@@ -24,6 +24,7 @@ import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import type { BrandDetailChannelRow } from "@/lib/api-client";
 import BrandArrivalBanner from "@/components/BrandArrivalBanner";
+import PageContainer from "@/components/layout/PageContainer";
 import { parseBrandArrivalContext, SECTION_PERIOD } from "@/lib/brand-arrival-context";
 
 const BRAND_META: Record<string, { label: string; color: string; initials: string }> = {
@@ -262,7 +263,7 @@ function BrandPageInner() {
   const d = brandDetail;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-8">
+    <PageContainer>
       <div className="flex flex-col gap-2">
         <Link
           href={backToCanais}
@@ -276,7 +277,7 @@ function BrandPageInner() {
               {meta.initials}
             </span>
             <div>
-              <h2 className="text-lg font-bold text-gray-900 leading-none">{meta.label}</h2>
+              <h2 className="text-xl font-bold text-gray-900 leading-none">{meta.label}</h2>
               <p className="text-xs text-slate-400">Visão da marca</p>
             </div>
           </div>
@@ -814,7 +815,7 @@ function BrandPageInner() {
           </div>
         </section>
 
-      </div>
+      </PageContainer>
   );
 }
 

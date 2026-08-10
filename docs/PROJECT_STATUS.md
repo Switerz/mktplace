@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 07/08/2026 (Gate V2-1 implementado e corrigido, aguardando revisão — nova Gerencial flagship com os oito blocos do blueprint, fontes verdadeiramente independentes, dezesseis tipos de acionamento de drill-down e lacuna visual medida em 0px; Gate V2-0 versionado em `c110e85`)
+**Última atualização:** 10/08/2026 (**Revamp Visual V2 tecnicamente concluído e aprovado, V2-0 a V2-4** — V2-0 em `c110e85`, V2-1 em `13c7ee0`, Fase A do V2-2 em `e8f0630`, Fase B em `2336567`, e a Task 2/2 do V2-2 + V2-3 + V2-4 versionadas neste fechamento. Publicação automática ainda **não validada**.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -590,7 +590,7 @@ escopo), então sua análise é 100% de leitura de código.
 
 ### Gate V2-1 — reconstrução da Gerencial
 
-**CONCLUÍDO E VERSIONADO em `13c7ee0` (07/08/2026), 33 arquivos.** A rodada principal
+**CONCLUÍDO, APROVADO E VERSIONADO em `13c7ee0` (07/08/2026), 33 arquivos.** A rodada principal
 de implementação e a **única** rodada consolidada de correção foram executadas; o
 orçamento do gate está esgotado. Somente a rota `/` e seus componentes/helpers
 diretos foram tocados — nenhuma outra tela recebeu o novo design.
@@ -796,14 +796,134 @@ legitimava a regra antiga foi removido.
 
 Validações: **485 testes de backend** (36 focais novos), **580 no frontend** (34
 focais novos), typecheck e build verdes. Nenhum arquivo das outras dez rotas foi
-alterado; a **propagação visual às outras superfícies (Task 2/2) não foi iniciada**, e
-o **V2-3** (QA integrado e produção) também **não foi iniciado**. Detalhe dos
+alterado. *Estado registrado naquela rodada: a propagação visual às outras
+superfícies (Task 2/2) e o V2-3 ainda não haviam sido iniciados — ambos foram
+concluídos depois e versionados no fechamento de 10/08/2026.* Detalhe dos
 contratos em §17 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md), e do smoke da API
 publicada em §17.9.
 
+### Gate V2-2, Task 2/2 — propagação visual às dez superfícies
+
+**APROVADA e versionada no fechamento do Revamp V2 (10/08/2026)**, junto com o V2-3 e o V2-4. A publicação segue o fluxo automático GitHub→Vercel e **ainda não foi validada**.
+
+A **Task 1/2 está publicada e validada em produção como PASS WITH ISSUE**: backend
+`e8f0630` no Render com smoke read-only PASS, frontend `2336567` no ar e confirmado
+por assinatura funcional, com grão semanal, comparação canônica (junho/2026 →
+01–31/05) e reconciliação trend × overview em **R$ 0,00**. O único issue é
+**cosmético** — no mobile de 390px os cinco rótulos semanais do eixo X ficam colados
+(folga mínima −1px) e o último aparece cortado — e está **reservado ao V2-3**, não
+corrigido aqui.
+
+Nesta task, as dez superfícies restantes (`/canais`, `/produtos`, `/regioes`,
+`/financeiro`, `/qualidade`, `/pedidos`, `/tempo-real`, `/inteligencia`,
+`/operacoes`, `/brand/[brand]`) receberam a linguagem visual do V2 **sem nenhuma
+alteração de contrato de dados, métrica, filtro, endpoint ou regra de negócio**.
+Dois componentes compartilhados foram extraídos com consumidores reais —
+`layout/PageContainer` (10 rotas) e `layout/PageHeader` (9; `/brand` mantém
+cabeçalho próprio) —, o container passou de `max-w-7xl` para `max-w-[1440px]` com o
+ritmo `gap-3`/`gap-4` da Gerencial, a linha de escopo saiu de um ajuste `-mt-3` para
+o cabeçalho, e a barra de filtros virou **sticky apenas nas cinco rotas que herdam
+filtros globais**.
+
+**Nenhum drill-down novo foi criado**, por decisão: fora de `/canais` nenhum bloco
+reúne contexto, evidência, limitação e próximo passo com os dados já carregados, e
+requisição nova estava proibida. O diálogo marca × canal de `/canais` foi preservado
+intacto, com um único shell.
+
+Todas as limitações de dado seguem visíveis e agora travadas por teste: N/D do
+TikTok em Qualidade (nunca 0%), ausência de cobertura Shopee em Pedidos (nunca "API
+offline"), ROAS por canal sem consolidação, cobertura regional distinta de GMV
+total, e indisponibilidade explicada em Tempo Real / Inteligência / Operações.
+O **checkpoint do GMV TikTok com frete não foi implementado**: produção segue em
+`sub_total`, `KPI_META` não afirma frete e a escolha de coluna continua pendente.
+
+Validações: **605 testes** (25 focais novos), typecheck e build verdes, detector do
+Impeccable sem findings; `app/page.tsx` e `src/components/gerencial/**` intocados.
+*Estado registrado naquela rodada: sem QA integrado e sem validação em produção — o
+sanity visual cobriu render, overflow e erro fatal, e o V2-3 ainda não havia sido
+iniciado.* O QA integrado foi executado depois, no V2-3, e o fechamento terminal no
+V2-4. Detalhe em §14 do [UI_REVAMP_V2_PLAN.md](UI_REVAMP_V2_PLAN.md).
+
+### Gate V2-3 — correção consolidada e QA integrado
+
+**`BLOCKED — REPLAN REQUIRED` (10/08/2026).** As duas correções deste gate foram tecnicamente aprovadas, mas um finding material na própria Gerencial impediu o encerramento; o fechamento passou ao Gate V2-4, sem V2-3.1. Nada foi versionado.
+
+A **Task 2/2 do V2-2 não foi aprovada isoladamente**: a revisão encontrou um finding
+material — a barra de filtros anunciada como sticky estava **estruturalmente
+inoperante**, porque `position: sticky` é limitado pela caixa do elemento pai e a
+barra vivia dentro de um wrapper que terminava logo depois dela. Medido em `/canais`:
+topo da barra em **−336px** no desktop e **−667px** no mobile após o scroll. O teste
+que a cobria verificava apenas a presença da classe CSS, não o comportamento.
+
+O trabalho foi **absorvido pelo V2-3**, sem criar V2-2.1 nem outro subgate, e
+**consumiu a única correção consolidada do V2-3**.
+
+Duas correções: (1) `PageHeader` passou a devolver um **Fragment**, de modo que
+cabeçalho e barra são irmãos no fluxo do container da página — sticky provado por
+medição em **`top=0px`** nas cinco rotas e nos três viewports; (2) os rótulos do eixo
+X da Gerencial deixaram de colidir e de ser cortados no mobile de 390px
+(`interval="preserveStartEnd"` + `minTickGap` + margem direita), com a fonte mantida
+em 12px e sem tocar bucket, granularidade, comparação ou requisições.
+
+**Finding material NÃO corrigido, registrado:** a barra sticky da **própria
+Gerencial** (`GerencialHeader`, do V2-1) tem o mesmo defeito — topo em −729px
+(desktop), −597px (tablet) e −631px (mobile). O gate autoriza tocar a Gerencial
+apenas nos ticks, então a correção fica pendente de decisão própria.
+
+QA integrado em 3 viewports × 11 rotas: render, overflow zero, sticky medido antes e
+depois do scroll, ausência de barra nas rotas sem filtros globais, estado parcial com
+falha induzida (fontes frescas permanecem, ausência nomeada, nenhum skeleton preso),
+diálogo com shell único e foco devolvido, e as limitações de canal preservadas
+(N/D do TikTok, cobertura Shopee, ROAS por canal, GMV regional × total). Validações:
+**607 testes**, typecheck, build e detector do Impeccable verdes.
+
+**Limite de ambiente declarado:** o build local não alcança dado real (API local
+ausente; API pública fora do CORS para o origin local), então onde dado real era
+necessário o harness interceptou as requisições e as repassou — técnica de teste, sem
+alterar repositório, backend ou build. **Nada foi validado em produção.**
+
+### Gate V2-4 — correção terminal do sticky da Gerencial
+
+**`PASS` — APROVADO, e realizou o fechamento terminal do Revamp V2 (10/08/2026).** Versionado neste fechamento; a publicação automática ainda não foi validada. **Não houve V2-3.1 nem V2-4.1.**
+
+**O V2-3 foi reclassificado como `BLOCKED — REPLAN REQUIRED`.** Suas duas correções
+foram tecnicamente aprovadas, mas o QA encontrou um finding material na própria
+Gerencial: `GerencialHeader` tinha o mesmo defeito estrutural de sticky que o
+`PageHeader` — barra com topo em **−729px** (desktop), **−597px** (tablet) e
+**−631px** (mobile) após o scroll. Um sticky inoperante na tela principal não é
+ressalva cosmética, então o veredito anterior de "PASS WITH ISSUE" está revogado.
+**Nenhum código havia sido versionado**, e o fechamento passou a este V2-4, sem
+criar V2-3.1.
+
+A correção foi de **um arquivo de produto**: `GerencialHeader` passou a devolver um
+**Fragment**, tornando cabeçalho e barra irmãos no fluxo do container da Gerencial,
+cuja caixa abrange toda a página. `app/page.tsx` não precisou mudar. Título,
+subtítulo, período, `refreshedAt`, badge, estado "Atualizando dados…", filtros via
+`children`, `useGlobalFilters`, querystring e request identity preservados; zero
+fetch, estado, modal ou filtro novo; `EvolutionChart` intocado neste gate.
+
+QA focal: a barra ancora em **`top=0px`** nos três viewports, com o título fora de
+cena, conteúdo visível abaixo dela, 20 controles focáveis, diálogo acima da barra
+(z-index 50 × 30), foco contido, Escape e devolução de foco ao gatilho, zero
+overflow e zero erro fatal — e as mesmas seis fontes de dados. Regressão limpa:
+`/canais` mantém `top=0px` em desktop e mobile, `/produtos` segue sem barra.
+
+Não re-medido aqui: os **ticks semanais no mobile**, porque o gráfico exige série
+real e o build local não a alcança (API local ausente, API pública fora do CORS, e o
+proxy do harness passou a falhar nesta rodada). A evidência do V2-3 permanece
+aplicável — `EvolutionChart` não foi alterado e um teste trava os quatro parâmetros
+que produzem o comportamento.
+
+Validações: **612 testes** (5 focais novos), typecheck, build e detector do
+Impeccable verdes. Com o sticky da Gerencial aprovado nos três viewports, o
+**Revamp V2 (V2-0 a V2-4) está tecnicamente concluído e APROVADO** — versionado
+no fechamento de 10/08/2026, com a publicação automática ainda **não validada**. Dívidas pré-existentes mantidas: alvos de
+toque dos filtros, `fetch` cru em `/brand`, dois `<h1>` do shell, e o checkpoint do
+GMV TikTok com frete, ainda não implementado.
+
 ## Próximas prioridades
 
-1. Acompanhar o deployment automático da Vercel do frontend do **V2-2** e validar a Gerencial em produção (grão semanal e comparação); em seguida abrir a Task 2/2 (propagação do design às outras superfícies).
+1. Acompanhar a publicação automática do fechamento do Revamp V2 e executar o smoke pós-publicação **read-only**.
 2. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
 3. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
 4. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.

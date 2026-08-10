@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { fetchTempoReal } from "@/lib/api-client";
 import type { TempoRealData, TempoRealBrand } from "@/lib/api-client";
 import HourlyChart from "@/components/HourlyChart";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import { computeTempoRealStatus } from "@/lib/tempo-real-status";
@@ -280,13 +282,14 @@ export default function TempoRealPage() {
     : selectedData?.ultima_hora;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-base font-bold text-gray-900 leading-none">Tempo Real — TikTok Shop</h2>
-          <p className="text-xs text-slate-400 mt-0.5">{dateLabel} · {hourLabel}</p>
-        </div>
-        {data && (
+    <PageContainer>
+      {/* Sem filtros globais por contrato (a tela e' de janela corrente, nao de
+          periodo filtrado): o cabecalho nao ganha barra sticky. */}
+      <PageHeader
+        title="Tempo Real — TikTok Shop"
+        subtitle="Janela corrente do dia por hora — pedidos, GMV e criadores ativos."
+        scopeLine={<>{dateLabel} · {hourLabel}</>}
+        status={data ? (
           <div className="flex items-center gap-2">
             <button
               onClick={() => doFetch(true)}
@@ -313,8 +316,8 @@ export default function TempoRealPage() {
               </span>
             )}
           </div>
-        )}
-      </div>
+        ) : null}
+      />
 
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {status === "initial"
@@ -574,6 +577,6 @@ export default function TempoRealPage() {
             </p>
           </>
         )}
-      </div>
+    </PageContainer>
   );
 }

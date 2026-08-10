@@ -1339,3 +1339,107 @@ test("T10. erro terminal nao esconde as fontes que responderam", () => {
   const mockNotAllowed = !d.demoMode;
   assert.equal(mockNotAllowed && !d.pending, true, "mock viraria erro, nunca loading");
 });
+
+// ---------------------------------------------------------------------------
+// Gate V2-4 — correcao terminal do sticky do GerencialHeader
+//
+// O QA do V2-3 mediu o topo da barra em -729px (desktop), -597px (tablet) e
+// -631px (mobile) apos o scroll: a barra existia no CSS e nao existia na
+// pratica. Causa: `position: sticky` e' limitado pela caixa do elemento PAI, e a
+// barra vivia dentro de um wrapper deste componente que terminava logo depois
+// dela. Estes testes travam a ESTRUTURA — procurar a string `sticky top-0` nunca
+// foi prova de nada.
+// ---------------------------------------------------------------------------
+
+test("V24-1. GerencialHeader devolve Fragment, sem wrapper curto em volta do sticky", () => {
+  const src = codeOnly(read("src/components/gerencial/GerencialHeader.tsx"));
+
+  // 1. Retorno e' Fragment: cabecalho e barra sobem para o container da pagina.
+  assert.match(src, /return \(\s*<>/, "GerencialHeader deve devolver um Fragment");
+  assert.match(src, /<\/>\s*\);/, "Fragment fechado");
+
+  // 2. O wrapper visual do cabecalho FECHA antes de a barra comecar.
+  const cabecalho = src.indexOf('<div className="flex items-start justify-between gap-3 flex-wrap">');
+  const stickyClasse = src.indexOf("sticky top-0 z-30");
+  assert.ok(cabecalho > -1, "linha do cabecalho deve existir");
+  assert.ok(stickyClasse > cabecalho, "ordem esperada: cabecalho, depois barra");
+  // o slice termina onde COMECA a tag da barra, senao contaria o `<div` dela
+  const tagSticky = src.lastIndexOf("<div", stickyClasse);
+  const entre = src.slice(cabecalho, tagSticky);
+  const abre = (entre.match(/<div/g) || []).length;
+  const fecha = (entre.match(/<\/div>/g) || []).length;
+  assert.equal(abre, fecha, `wrapper do cabecalho deve estar fechado antes da barra (abre=${abre} fecha=${fecha})`);
+
+  // 3. O antigo wrapper que causava o defeito nao pode voltar.
+  assert.doesNotMatch(
+    src,
+    /return \(\s*<div className="flex flex-col gap-3">/,
+    "o wrapper `flex flex-col gap-3` em volta de cabecalho+barra era a causa do defeito",
+  );
+
+  // 4. Barra UNICA.
+  assert.equal((src.match(/sticky top-0 z-30/g) || []).length, 1, "exatamente uma barra sticky");
+});
+
+test("V24-2. o pai efetivo do sticky e o container da pagina inteira", () => {
+  // `app/page.tsx` NAO precisou mudar: o GerencialHeader ja era filho direto do
+  // container. Este teste garante que ele continue sendo, e que o container nao
+  // ganhe `overflow`/`transform` — os dois criariam bloco de contencao e
+  // matariam o sticky outra vez.
+  const page = codeOnly(read("app/page.tsx"));
+  const container = page.match(/<div className="max-w-\[1440px\][^"]*"/);
+  assert.ok(container, "container da Gerencial deve existir");
+  assert.doesNotMatch(container[0], /overflow-(hidden|auto|scroll|clip)/);
+  assert.doesNotMatch(container[0], /transform|scale-|rotate-|translate-/);
+  // e o cabecalho e' filho DIRETO desse container
+  const idxContainer = page.indexOf(container[0]);
+  const idxHeader = page.indexOf("<GerencialHeader");
+  assert.ok(idxHeader > idxContainer, "GerencialHeader vem dentro do container");
+  const entre = page.slice(idxContainer + container[0].length, idxHeader);
+  assert.equal((entre.match(/<div/g) || []).length, 0, "nenhum wrapper intermediario entre container e cabecalho");
+});
+
+test("V24-3. a correcao nao introduziu fetch, estado, modal ou filtro novo", () => {
+  const src = read("src/components/gerencial/GerencialHeader.tsx");
+  const code = codeOnly(src);
+  assert.doesNotMatch(code, /useState|useEffect|useReducer|useRef/, "componente segue sem estado");
+  assert.doesNotMatch(code, /\bfetch\b|apiFetch|axios/, "componente segue sem fetch");
+  assert.doesNotMatch(code, /role="dialog"|createPortal/, "nenhum modal proprio");
+  assert.doesNotMatch(code, /useGlobalFilters|useSearchParams|useRouter/, "a fonte de verdade dos filtros segue na pagina");
+  // contrato preservado: os filtros continuam chegando por children
+  assert.match(code, /\{children\}/);
+  for (const prop of ["periodLabel", "refreshedAt", "live", "loading"]) {
+    assert.match(code, new RegExp(prop), `prop ${prop} preservada`);
+  }
+  // conteudo preservado
+  assert.match(src, /Visão Gerencial/);
+  assert.match(src, /Como estamos, onde investigar e para onde ir a seguir\./);
+  assert.match(src, /Período: \{periodLabel\}/);
+  assert.match(src, /Atualizado em \{fmtRefreshedAt\(refreshedAt\)\}/);
+  assert.match(src, /<LiveStatusBadge live=\{live\} \/>/);
+  assert.match(src, /Atualizando dados…/);
+  // o `<h1>` da Gerencial permanece: promover/rebaixar aqui mexeria na divida U6-04
+  assert.match(code, /<h1 className="text-xl font-bold text-gray-900">Visão Gerencial<\/h1>/);
+});
+
+test("V24-4. PageHeader das outras dez rotas nao regrediu", () => {
+  const src = codeOnly(read("src/components/layout/PageHeader.tsx"));
+  assert.match(src, /return \(\s*<>/, "PageHeader segue devolvendo Fragment");
+  assert.equal((src.match(/sticky top-0 z-30/g) || []).length, 1, "uma barra");
+  assert.match(src, /filters && \(/, "sem filtros, nenhuma barra");
+  // e os dois componentes seguem SEPARADOS: nenhuma abstracao generica nova
+  assert.doesNotMatch(src, /GerencialHeader/);
+  assert.doesNotMatch(
+    codeOnly(read("src/components/gerencial/GerencialHeader.tsx")),
+    /components\/layout\/PageHeader/,
+    "GerencialHeader nao deve virar PageHeader: headings e composicao diferem",
+  );
+});
+
+test("V24-5. os ticks semanais do V2-3 seguem intactos", () => {
+  const chart = codeOnly(read("src/components/gerencial/EvolutionChart.tsx"));
+  assert.match(chart, /const interval = "preserveStartEnd" as const;/);
+  assert.match(chart, /minTickGap=\{20\}/);
+  assert.match(chart, /margin=\{\{ top: 6, right: 28, left: 0, bottom: 0 \}\}/);
+  assert.match(chart, /tick=\{\{ fontSize: 12, fill: "#64748b" \}\}/);
+});

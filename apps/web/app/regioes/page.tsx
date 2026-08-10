@@ -9,6 +9,8 @@ import {
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import KpiCard from "@/components/KpiCard";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
@@ -193,47 +195,50 @@ function RegioesPageInner() {
   const brandSort = useSortableTable(displayByBrand, brandGetValue, brandColumnTypes);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="min-w-0">
-        <h2 className="text-xl font-bold text-gray-900">Regiões</h2>
-        <p className="text-sm text-slate-500">Distribuição geográfica de GMV e pedidos por UF — cobertura de identificação regional por canal.</p>
-      </div>
-
-      <div className="flex items-start justify-between flex-wrap gap-3">
-          <div className="flex items-start gap-3 flex-wrap min-w-0">
-            <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-            <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-            <div className="flex items-center gap-1.5 bg-white border border-violet-100 rounded-xl px-3 py-1.5 shadow-sm">
-              <label htmlFor="uf-filter" className="text-xs text-slate-500 font-medium">UF</label>
-              <select
-                id="uf-filter"
-                value={ufFilter}
-                onChange={(e) => setUfFilter(e.target.value)}
-                className="text-sm font-semibold text-violet-700 bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-              >
-                <option value="">Todas</option>
-                {ALL_UFS.map((uf) => <option key={uf} value={uf}>{uf}</option>)}
-              </select>
+    <PageContainer>
+      <PageHeader
+        title="Regiões"
+        subtitle="Distribuição geográfica de GMV e pedidos por UF — cobertura de identificação regional por canal."
+        scopeLine={
+          <>
+            Período: {periodLabel}
+            {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
+          </>
+        }
+        filters={
+          <>
+            <div className="flex items-start gap-3 flex-wrap min-w-0">
+              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+              {/* A UF e' filtro/acao DESTA pagina: fica na barra, entra na
+                  identidade da requisicao local e nao vira filtro global. */}
+              <div className="flex items-center gap-1.5 bg-white border border-violet-100 rounded-xl px-3 py-1.5 shadow-sm">
+                <label htmlFor="uf-filter" className="text-xs text-slate-500 font-medium">UF</label>
+                <select
+                  id="uf-filter"
+                  value={ufFilter}
+                  onChange={(e) => setUfFilter(e.target.value)}
+                  className="text-sm font-semibold text-violet-700 bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                >
+                  <option value="">Todas</option>
+                  {ALL_UFS.map((uf) => <option key={uf} value={uf}>{uf}</option>)}
+                </select>
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-3 min-w-0 flex-wrap">
-            {isLoadingState && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
-            <DateRangeFilter
-              dateFrom={filters.dateFrom}
-              dateTo={filters.dateTo}
-              compare={false}
-              onChange={(v) => setFilters(v)}
-              onCompareChange={() => {}}
-              hideCompare
-            />
-          </div>
-        </div>
-
-        <p className="text-xs text-slate-400 -mt-3">
-          Período: {periodLabel}
-          {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
-        </p>
+            <div className="flex items-center gap-3 min-w-0 flex-wrap">
+              {isLoadingState && <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando...</span>}
+              <DateRangeFilter
+                dateFrom={filters.dateFrom}
+                dateTo={filters.dateTo}
+                compare={false}
+                onChange={(v) => setFilters(v)}
+                onCompareChange={() => {}}
+                hideCompare
+              />
+            </div>
+          </>
+        }
+      />
 
         {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -513,7 +518,7 @@ function RegioesPageInner() {
             </div>
           </>
         )}
-      </div>
+      </PageContainer>
   );
 }
 

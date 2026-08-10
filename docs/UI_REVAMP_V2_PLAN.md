@@ -484,7 +484,8 @@ Não transformar a página em mosaico de cards iguais: a hierarquia vem de **um*
 | **V2-0** | Auditoria + blueprint (este documento + spec) | este único prompt + **1** rodada de correção consolidada (**consumida**) | §9 do enunciado original, revisado |
 | **V2-1** | Reconstrução da Gerencial reutilizando endpoints existentes | implementação + **no máximo 1** correção consolidada | §8.1 |
 | **V2-2** | **Task 1/2:** extensão aditiva de `/trend` (granularidade + série comparativa) — *tecnicamente concluída e versionada; backend `e8f0630` publicado no Render com smoke PASS, frontend versionado na Fase B* (§13.2). **Task 2/2:** propagação às outras superfícies — *não iniciada* | implementação + **no máximo 1** correção consolidada — **consumida** em 07/08/2026 (§13.1) | Task 1/2: §8.3. Task 2/2: regras de §7.1 em 11 rotas; sem regressão de contrato |
-| **V2-3** | QA integrado (desktop/tablet/mobile + a11y) e produção | QA + **no máximo 1** correção consolidada | §7.2 medido por bounding box; 0 erro de console/hydration; a11y sem regressão |
+| **V2-3** | QA integrado (desktop/tablet/mobile + a11y) e produção | QA + **no máximo 1** correção consolidada — **consumida** | **`BLOCKED — REPLAN REQUIRED`**: as duas correções foram aprovadas, mas o sticky da própria Gerencial reprovou o gate (§15.3). Fechamento transferido ao **V2-4** (§16), sem V2-3.1 |
+| **V2-4** | Correção terminal do sticky da Gerencial e fechamento do Revamp | gate terminal, **sem** rodada adicional | **`PASS`** (§16): barra ancorada em `top=0px` nos três viewports, regressões limpas. **Revamp V2 concluído e aprovado**, sem V2-4.1 |
 
 Sem subgates recursivos (nada de V2-1.1). **Após duas correções do mesmo problema, parar e replanejar.**
 
@@ -754,4 +755,231 @@ do `/overview` em **R$ 0,00**.
 para no push: o deployment **não** é declarado Ready, **não** foi consultado e **não**
 passou por smoke visual em produção. A rodada consolidada de correção do V2-2
 continua **consumida** (§13.1). A **Task 2/2** (propagação às outras dez superfícies)
-e o **V2-3** (QA integrado e produção) permanecem **não iniciados**.
+e o **V2-3** ainda **não haviam sido iniciados naquela rodada** — foram concluídos depois (§15 e §16).
+
+---
+
+## 14. Task 2/2 do V2-2 — propagação às dez superfícies (07/08/2026)
+
+**Aprovada e versionada no fechamento do Revamp V2 (10/08/2026).** *Ao ser escrita, esta seção registrava o estado daquela rodada: implementada, aguardando revisão.* Nenhuma alteração de contrato de dados,
+métrica, filtro, endpoint ou regra de negócio: a task move linguagem visual,
+hierarquia, densidade e estados, e nada mais.
+
+### 14.1 O que foi unificado
+
+Duas extrações, com **consumidores reais** (a regra de ≥2 consumidores foi
+respeitada; nenhum framework, registry ou design system paralelo foi criado):
+
+| Componente | Consumidores | Por que existe |
+| --- | --- | --- |
+| `layout/PageContainer` | **10** rotas | `max-w-7xl` (1280px) apertava tabelas largas em 1440; `py-8`/`gap-6` espalhavam os blocos. Passa a `max-w-[1440px]`, `px-4 sm:px-6`, `py-6`, `gap-3 sm:gap-4` — o ritmo já usado na Gerencial |
+| `layout/PageHeader` | **9** rotas | ordem da narrativa (escopo antes dos filtros, sem `-mt-3`), barra de filtros **sticky** só onde há filtros globais, e título em `text-xl` |
+
+`/brand/[brand]` recebe o container mas **não** o `PageHeader`: seu cabeçalho tem
+composição própria (voltar para Canais, avatar da marca, pills de troca de marca)
+e seria o único consumidor daquele contrato. Título alinhado a `text-xl` no
+próprio arquivo.
+
+**Barra sticky por rota**, conforme o contrato de filtros globais: sim em
+`/canais`, `/regioes`, `/financeiro`, `/qualidade`, `/pedidos`; **não** em
+`/produtos`, `/tempo-real`, `/inteligencia` e `/operacoes`, que não herdam
+filtros globais — barra vazia ali seria afordância falsa. `/brand` mantém a
+própria linha de filtros no fluxo, não fixa.
+
+**Nível de título preservado em `<h2>`** de propósito: o `<h1>` da página é o do
+shell (`Torre de Controle`). Promover para `<h1>` agravaria a dívida **U6-04**
+(dois `<h1>`), que é do shell e está fora deste gate.
+
+### 14.2 Progressive disclosure: nenhum drill-down novo
+
+Decisão deliberada. O critério de §11.1 do [GERENCIAL_V2_SPEC.md](GERENCIAL_V2_SPEC.md)
+exige que os dados **já carregados** sustentem contexto, evidência, limitação e
+próximo passo útil. Nas nove rotas fora de `/canais`, nenhum bloco reúne os quatro
+sem uma requisição nova — e requisição nova está proibida nesta task. O diálogo de
+marca × canal de `/canais` permanece como a melhor superfície de detalhe e foi
+preservado intacto, com um único `KpiDrilldownDialog` e os primitives do G2.
+Criar modal decorativo seria pior que manter a navegação e o filtro que já
+existem.
+
+### 14.3 O que não mudou, por contrato
+
+Request identity (`requestKey`/`resolvedKey`), estados loading/error/empty/partial/
+fresh, `ctx_*` fora de `FILTER_QUERY_KEYS`, preservação de filtros nos CTAs, as
+limitações declaradas de cada canal (N/D do TikTok em Qualidade, ausência de
+cobertura Shopee em Pedidos, ROAS por canal sem consolidação, cobertura regional
+distinta de GMV total, indisponibilidade explicada em Tempo Real / Inteligência /
+Operações) e o conjunto de fontes de cada rota — agora **registrado em teste**,
+de modo que acrescentar um fetcher a qualquer uma delas quebra a suíte.
+
+**Checkpoint TikTok com frete: nada implementado.** Produção segue em `sub_total`;
+`KPI_META` não afirma frete; a escolha entre `total_amount` e
+`sub_total + shipping_fee` continua pendente; Produtos TikTok segue no valor de
+produto sem rateio. Travado por teste.
+
+### 14.4 Estado e limites desta entrega
+
+Validações: **605 testes** (25 focais novos), typecheck e build verdes, detector do
+Impeccable sem findings nos 12 arquivos visuais. `app/page.tsx` e
+`src/components/gerencial/**` **não foram tocados** (diff vazio).
+
+O issue cosmético dos rótulos semanais do eixo X no mobile de 390px, achado no
+smoke da Task 1/2, **não foi corrigido** aqui — está reservado ao V2-3, junto com o
+QA integrado. Esta task **não** passou por QA integrado nem por validação em
+produção; o sanity visual executado cobre render, overflow e erro fatal, e nada
+além disso. O **V2-3 não foi iniciado**.
+
+---
+
+## 15. Gate V2-3 — correção consolidada e QA integrado (10/08/2026)
+
+> **Veredito: `BLOCKED — REPLAN REQUIRED`.** As duas correções deste gate foram
+> **tecnicamente aprovadas** (§15.2), mas o QA encontrou um finding material na
+> própria Gerencial (§15.3) que impediu o encerramento. **Nenhum código havia sido
+> versionado** em nenhum momento. O fechamento foi transferido ao **Gate V2-4**
+> (§16), sem criar V2-3.1. O veredito anterior de "PASS WITH ISSUE" está
+> **revogado**: um sticky inoperante na tela principal não é ressalva cosmética.
+
+### 15.1 Por que a Task 2/2 não foi aprovada isoladamente
+
+A revisão da Task 2/2 encontrou um **finding material**: a barra de filtros
+anunciada como sticky estava **estruturalmente inoperante**. `position: sticky` é
+limitado pela caixa do elemento **pai**, e a barra vivia dentro de um
+`<div className="flex flex-col gap-3">` do próprio `PageHeader`, que terminava
+imediatamente depois dela — a barra "colava" apenas dentro da altura do cabeçalho
+e rolava para fora da tela junto com ele. Medido em `/canais` antes da correção:
+`scrollY=507` no desktop com o topo da barra em **−336px**; `scrollY=900` no mobile
+com **−667px**.
+
+O teste `P4` era insuficiente: verificava a presença da string `sticky top-0 z-30`,
+não o comportamento. **Presença de classe CSS não é prova de sticky.**
+
+O trabalho foi **absorvido pelo V2-3**, sem criar V2-2.1 nem qualquer subgate, e
+esta rodada **consome a única correção consolidada do V2-3**.
+
+### 15.2 As duas correções
+
+**1. Sticky — `PageHeader` passa a devolver um Fragment.** Cabeçalho e barra saem
+como **irmãos** no fluxo do `PageContainer`, cujo box tem a altura de todo o
+conteúdo da página. Nenhum wrapper novo, nenhuma rota replica filtros, nenhum
+`useGlobalFilters`/`requestKey`/fetch/querystring tocado. `PageContainer` continua
+sem `overflow` e sem `transform` — os dois criariam bloco de contenção e matariam o
+sticky de novo, e há teste para isso.
+
+**2. Ticks do eixo X da Gerencial.** `interval = 0` (para ≤16 buckets) significa em
+Recharts "renderize TODOS os rótulos" e faz `minTickGap` ser **ignorado**. Com o
+grão semanal do V2-2 o rótulo ficou mais largo (`Sem. 29/06` ≈60px contra ≈34px de
+`29/06`) e cinco deles não cabiam nos ~308px de área útil do mobile de 390px.
+Agora: `interval="preserveStartEnd"`, `minTickGap={20}` e `margin.right` de 8→28 —
+o Recharts derruba os rótulos do meio que não caibam, sempre preservando o primeiro
+e o último, e a metade do último rótulo passa a ter espaço reservado. Fonte
+permanece em **12px**: nada foi encolhido. Bucket, granularidade, comparação e
+requisições intocados.
+
+### 15.3 Finding material NÃO corrigido
+
+**A barra sticky da própria Gerencial (`GerencialHeader`) tem o mesmo defeito
+estrutural.** Medido nesta rodada: topo em **−729px** (desktop), **−597px**
+(tablet) e **−631px** (mobile) após o scroll. É o mesmo padrão que o `PageHeader`
+tinha, e vem do **V2-1** — não foi introduzido aqui.
+
+Não foi corrigido porque o gate autoriza tocar a Gerencial **apenas** nos ticks
+semanais. Fica registrado como pendência que precisa de decisão própria: a correção
+é a mesma (devolver Fragment), mas exige autorização explícita para alterar
+`components/gerencial/**`.
+
+### 15.4 QA integrado
+
+3 viewports × 11 rotas. **Sticky provado por medição** — `top=0px` após o scroll em
+`/canais`, `/regioes`, `/financeiro`, `/qualidade` e `/pedidos`, contra −336px antes
+— e **ausência** de barra confirmada em `/produtos`, `/tempo-real`,
+`/inteligencia`, `/operacoes` e `/brand/kokeshi`. Ticks semanais sem colisão e sem
+corte nos três viewports. Diálogo com shell único, `aria-modal`, foco contido,
+Escape e devolução de foco ao gatilho. Estado parcial verificado com falha
+**induzida** de uma fonte: as frescas permanecem, a ausente é nomeada, nenhum
+skeleton preso.
+
+**Limite de ambiente declarado:** o build local não alcança dado real — com a API em
+`localhost` há `ERR_CONNECTION_REFUSED`, e com a API pública o origin local está
+fora do CORS. Onde dado real era necessário, o **harness** interceptou as requisições
+e as repassou com cabeçalho de CORS. Isso é técnica de teste: nada no repositório, no
+backend ou no build mudou por causa disso. **Nada foi validado em produção**, e nada
+aqui afirma publicação.
+
+---
+
+## 16. Gate V2-4 — correção terminal do sticky da Gerencial (10/08/2026)
+
+Gate **terminal e estreito**, sem rodada adicional de correção. Absorve o
+fechamento do V2-3 sem criar V2-3.1.
+
+### 16.1 A correção
+
+Um único arquivo de produto: `src/components/gerencial/GerencialHeader.tsx`. O
+componente passou a devolver um **Fragment**, de modo que cabeçalho e barra de
+filtros são **irmãos** no fluxo do container da Gerencial
+(`max-w-[1440px] … flex flex-col gap-4`, em `app/page.tsx`), cuja caixa abrange
+todo o conteúdo da página. É a mesma solução estrutural validada no `PageHeader`
+das outras dez rotas.
+
+`app/page.tsx` **não precisou mudar**: o `GerencialHeader` já era filho direto
+desse container — verificado por teste, que também garante a ausência de wrapper
+intermediário e a ausência de `overflow`/`transform` no container (os dois
+criariam bloco de contenção e matariam o sticky de novo).
+
+Os dois componentes seguem **separados de propósito**: `GerencialHeader` tem `<h1>`
+e subtítulo próprios, `PageHeader` tem `<h2>` e barra opcional. Um contrato
+genérico esconderia essa diferença sem ganho.
+
+Preservados e travados por teste: título, subtítulo, `periodLabel`, `refreshedAt`,
+`LiveStatusBadge`, o estado "Atualizando dados…", os filtros via `children`,
+`useGlobalFilters` como fonte de verdade na página, querystring, request identity,
+`top-0`, `z-30` abaixo do diálogo, e **zero** fetch, estado, modal ou filtro novo.
+`EvolutionChart` **não** foi tocado neste gate.
+
+### 16.2 Medições
+
+| Viewport | Antes (V2-3) | Depois (V2-4) |
+| --- | --- | --- |
+| desktop 1440×900 | **−729px** | **0px** (scrollY 900) |
+| tablet 1024×768 | **−597px** | **0px** (scrollY 768) |
+| mobile 390×844 | **−631px** | **0px** (scrollY 844) |
+
+Em cada viewport: título da Gerencial fora da viewport, 9–11 elementos de conteúdo
+visíveis abaixo da barra, barra ocupando 157–279px (17–33% da altura, abaixo do
+teto de 40%), 20 controles focáveis dentro da barra fixa com o controle focado
+visível e clicável, zero overflow horizontal, zero erro fatal. Diálogo acima da
+barra (`z-index` 50 contra 30), `aria-modal`, foco contido, Escape fecha e o foco
+retorna ao gatilho. Nenhuma chamada, filtro ou valor mudou — as mesmas seis fontes.
+
+Regressão: `/canais` mantém `top=0px` em desktop e mobile; `/produtos` continua
+**sem** barra sticky.
+
+### 16.3 O que não foi medido neste gate
+
+Os **ticks semanais no mobile** não puderam ser **re-medidos** aqui. O gráfico só
+renderiza com série real, e o build local não a alcança: API em `localhost` dá
+`ERR_CONNECTION_REFUSED`, a API pública recusa o origin local por CORS, e o proxy
+do harness — que funcionara no V2-3 — passou a falhar em todas as fontes nesta
+rodada (`curl` direto responde 200; o `route.fetch` do Playwright, não).
+
+A evidência do V2-3 continua **aplicável**, porque `EvolutionChart` não foi
+alterado no V2-4 e o teste `V24-5` trava os quatro parâmetros exatos que produzem o
+comportamento (`interval="preserveStartEnd"`, `minTickGap={20}`,
+`margin.right: 28`, `fontSize: 12`). Medido no V2-3, com dado real: mobile com 3
+rótulos e folga de **+48px**, tablet 5 rótulos e **+29px**, desktop 5 e **+75px**,
+zero colisão, zero corte, fonte 12px, tooltip com a data completa.
+
+### 16.4 Estado do Revamp V2
+
+Com o sticky da Gerencial aprovado nos **três** viewports, o **Revamp V2 está
+tecnicamente concluído e APROVADO** — V2-0 a V2-4. O working tree acumulado do
+V2-2 Task 2/2, do V2-3 e do V2-4 foi **versionado no fechamento de 10/08/2026**.
+**Não houve V2-3.1 nem V2-4.1.** A publicação segue o fluxo automático
+GitHub→Vercel e **ainda não foi validada**: nada aqui afirma deploy, Ready ou
+produção verificada.
+
+Dívidas **pré-existentes**, mantidas como tal e não resolvidas: alvos de toque de
+21–32px em `MarketplaceFilter`/`BrandFilter`/`DateRangeFilter` (de U1/U3), o `fetch`
+cru do helper `fetchDailyRange` em `/brand/[brand]`, os dois `<h1>` do shell
+(U6-04) e o checkpoint do GMV TikTok com frete, que segue **não implementado**
+(produção em `sub_total`).

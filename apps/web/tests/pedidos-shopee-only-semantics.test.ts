@@ -26,7 +26,7 @@ function sliceBetween(src: string, startMarker: string, endMarker: string): stri
 }
 
 test("cabecalho: showShopeeOnly e' verificado ANTES de renderizar o LiveStatusBadge (nunca 'API offline' para cobertura ausente)", () => {
-  const header = sliceBetween(SRC, "{/* Cabecalho */}", "{/* Controls */}");
+  const header = sliceBetween(SRC, "        status={", "        filters={");
   const shopeeOnlyIdx = header.indexOf("showShopeeOnly");
   const liveBadgeIdx = header.indexOf("<LiveStatusBadge");
   assert.notEqual(shopeeOnlyIdx, -1, "cabecalho deve checar showShopeeOnly");
@@ -35,7 +35,7 @@ test("cabecalho: showShopeeOnly e' verificado ANTES de renderizar o LiveStatusBa
 });
 
 test("cabecalho: Shopee isolada mostra indicador neutro, nunca o LiveStatusBadge com estado offline", () => {
-  const header = sliceBetween(SRC, "{/* Cabecalho */}", "{/* Controls */}");
+  const header = sliceBetween(SRC, "        status={", "        filters={");
   const branchStart = header.indexOf("dataIsFresh && showShopeeOnly");
   assert.notEqual(branchStart, -1, "deve existir um branch dedicado para dataIsFresh && showShopeeOnly");
   const branchEnd = header.indexOf(") : dataIsFresh ? (", branchStart);
@@ -71,7 +71,7 @@ test("Shopee isolada continua sem chamar fetchPedidos (branch de skip permanece 
 });
 
 test("selecao mista (Shopee + TikTok/ML) preserva o comportamento existente: LiveStatusBadge e aria-live de sucesso/loading normais", () => {
-  const header = sliceBetween(SRC, "{/* Cabecalho */}", "{/* Controls */}");
+  const header = sliceBetween(SRC, "        status={", "        filters={");
   // O branch dedicado a Shopee isolada usa `dataIsFresh && showShopeeOnly`
   // — quando a selecao e mista, `showShopeeOnly` e' falso e o fluxo cai no
   // branch geral (`dataIsFresh ? <LiveStatusBadge ... /> : ...`), que segue

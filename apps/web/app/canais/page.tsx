@@ -21,6 +21,8 @@ import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
 import DateRangeFilter from "@/components/DateRangeFilter";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
+import PageContainer from "@/components/layout/PageContainer";
+import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
@@ -356,41 +358,42 @@ function CanaisPageInner() {
   const channelMatrixSort = useSortableTable(displayChannelRows, channelMatrixGetValue, channelMatrixColumnTypes);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-6">
-      {/* Cabecalho */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-gray-900">Canais</h2>
-          <p className="text-sm text-slate-500">Comparar TikTok Shop, Mercado Livre e Shopee — e investigar marca × canal.</p>
-        </div>
-        {dataIsFresh ? (
-          <LiveStatusBadge live={isLive} />
-        ) : loading ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados...
-          </span>
-        ) : null}
-      </div>
-      <p className="text-xs text-slate-400 -mt-3">
-        Período: {periodLabel}
-        {dataIsFresh && refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
-      </p>
-
-      {/* Barra de filtros */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div className="flex items-start gap-3 flex-wrap min-w-0">
-          <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-          <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-        </div>
-        <DateRangeFilter
-          dateFrom={filters.dateFrom}
-          dateTo={filters.dateTo}
-          compare={filters.compare}
-          onChange={(v) => setFilters(v)}
-          onCompareChange={(compare) => setFilters({ compare })}
-          hideCompare
-        />
-      </div>
+    <PageContainer>
+      <PageHeader
+        title="Canais"
+        subtitle="Comparar TikTok Shop, Mercado Livre e Shopee — e investigar marca × canal."
+        scopeLine={
+          <>
+            Período: {periodLabel}
+            {dataIsFresh && refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+          </>
+        }
+        status={
+          dataIsFresh ? (
+            <LiveStatusBadge live={isLive} />
+          ) : loading ? (
+            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+              Atualizando dados...
+            </span>
+          ) : null
+        }
+        filters={
+          <>
+            <div className="flex items-start gap-3 flex-wrap min-w-0">
+              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
+              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
+            </div>
+            <DateRangeFilter
+              dateFrom={filters.dateFrom}
+              dateTo={filters.dateTo}
+              compare={filters.compare}
+              onChange={(v) => setFilters(v)}
+              onCompareChange={(compare) => setFilters({ compare })}
+              hideCompare
+            />
+          </>
+        }
+      />
 
       {/* Navegacao interna compacta */}
       <InternalNav showTiktok={showTiktok} showMl={showMl} showShopee={showShopee} />
@@ -1080,7 +1083,7 @@ function CanaisPageInner() {
           />
         )}
       </KpiDrilldownDialog>
-    </div>
+    </PageContainer>
   );
 }
 

@@ -24,8 +24,25 @@ interface Props {
 }
 
 export default function GerencialHeader({ periodLabel, refreshedAt, live, loading, children }: Props) {
+  // Fragment de proposito (Gate V2-4, correcao terminal): cabecalho e barra saem
+  // como IRMAOS no fluxo do container da Gerencial.
+  //
+  // Antes, os dois viviam dentro de um `<div className="flex flex-col gap-3">`
+  // deste componente. `position: sticky` e' limitado pela caixa do elemento PAI,
+  // e aquele pai terminava imediatamente apos a barra: ela tinha curso praticamente
+  // zero e rolava para fora da tela junto com o cabecalho. Medido no QA do V2-3:
+  // topo da barra em -729px (desktop), -597px (tablet) e -631px (mobile).
+  //
+  // Com o Fragment, o pai passa a ser o container da pagina (`max-w-[1440px] …
+  // flex flex-col gap-4` em `app/page.tsx`), cuja caixa abrange todo o conteudo —
+  // e a barra permanece em `top: 0` durante todo o scroll. `app/page.tsx` NAO
+  // precisou mudar: o `GerencialHeader` ja era filho direto desse container.
+  //
+  // Mesma solucao estrutural validada no `PageHeader` das outras dez rotas, sem
+  // fundir os dois componentes: os headings e a composicao diferem (aqui `<h1>`
+  // e um subtitulo proprio) e um contrato generico esconderia essa diferenca.
   return (
-    <div className="flex flex-col gap-3">
+    <>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <h1 className="text-xl font-bold text-gray-900">Visão Gerencial</h1>
@@ -49,6 +66,6 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
       <div className="sticky top-0 z-30 -mx-6 px-6 py-2 bg-[#f8f7ff]/95 backdrop-blur supports-[backdrop-filter]:bg-[#f8f7ff]/80 border-b border-violet-100/70">
         <div className="flex items-start justify-between gap-3 flex-wrap">{children}</div>
       </div>
-    </div>
+    </>
   );
 }
