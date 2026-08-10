@@ -983,3 +983,85 @@ Dívidas **pré-existentes**, mantidas como tal e não resolvidas: alvos de toqu
 cru do helper `fetchDailyRange` em `/brand/[brand]`, os dois `<h1>` do shell
 (U6-04) e o checkpoint do GMV TikTok com frete, que segue **não implementado**
 (produção em `sub_total`).
+
+---
+
+## 17. Smoke pós-publicação do Revamp V2 — 10/08/2026
+
+**Veredito: `PASS WITH ISSUE`.** Somente `GET` e navegação read-only; nenhuma
+alteração em Vercel, Render, domínio, alias, variável ou CORS.
+
+Produção **comportamentalmente consistente com o commit `04d0d17`**. Sem acesso
+autenticado ao painel da Vercel, a correspondência ao SHA não é afirmada: a prova é
+por sinais exclusivos deste release — sobretudo o sticky da Gerencial ancorado, que
+antes de `04d0d17` media −729/−597/−631px.
+
+Domínio canônico: `https://mktplace-gobeaute.vercel.app`.
+
+### 17.1 O que foi comprovado
+
+- **11 rotas** respondendo **HTTP 200**: `/`, `/canais`, `/produtos`, `/regioes`,
+  `/financeiro`, `/qualidade`, `/tempo-real`, `/pedidos`, `/inteligencia`,
+  `/operacoes`, `/brand/barbours`.
+- Backend público: `/openapi.json` e `/api/v1/performance/health-datasource` em
+  **200**.
+- **Zero** fallback "Demonstração · API offline" nas fontes saudáveis — a Gerencial
+  exibe `Dados ao vivo`.
+- **Sticky da Gerencial em `top=0px` nos três viewports**, com o título saindo de
+  cena e conteúdo analítico visível abaixo da barra:
+
+  | Viewport | Altura da barra | % da viewport |
+  | --- | --- | --- |
+  | desktop 1440×900 | 117px | **13%** |
+  | tablet 1024×768 | 195px | **25%** |
+  | mobile 390×844 | 239px | **28%** |
+
+- **Zero overflow horizontal** em todos os viewports e rotas verificadas.
+- **Ticks semanais legíveis, sem corte e sem colisão**: 3 rótulos no mobile (folga
+  +48px), 5 no tablet (+29px) e 5 no desktop (+75px), sempre em 12px.
+- **Comparação anterior e tooltip validados**: janela canônica declarada
+  (`Período anterior: 2026-06-01 a 2026-06-30` para julho/2026) e tooltip com a data
+  completa do bucket anterior nos três viewports.
+- **Diálogo aprovado**: shell único, `aria-modal`, acima do sticky (`z-index` 50
+  contra 30), foco inicial dentro, focus trap, Escape fecha, foco retorna ao gatilho,
+  e filtros preservados no destino do CTA.
+- **Canais e Produtos sem regressão**: em Canais o cabeçalho não sobrepõe os filtros
+  e a barra permanece ancorada ao rolar (desktop e mobile); em Produtos o
+  `PageHeader` é estático, sem sticky indevido, com tabs, resumo, exportação e tabela
+  utilizáveis.
+- **Zero finding causado pelo release.**
+
+### 17.2 Ressalva — três superfícies sem fonte em produção
+
+`/api/v1/performance/tempo-real`, `/api/v1/performance/inteligencia` e
+`/api/v1/performance/operacoes` respondem **500**, verificado fora do navegador. A
+causa é a dependência do **Data Mart, inalcançável a partir do Render**. No browser o
+erro aparece rotulado como CORS apenas porque a resposta 500 do FastAPI não carrega
+`Access-Control-Allow-Origin`; o CORS em si está correto, já que `/overview` e
+`/canais` respondem 200 do mesmo origin.
+
+Explicitamente:
+
+- **não é regressão do Revamp V2** — a condição precede todo este ciclo (Gate G4);
+- as páginas **degradam honestamente**: estado de indisponibilidade nomeado, sem erro
+  fatal e sem dado inventado;
+- a Torre **permanece incompleta nessas três superfícies**;
+- **corrigir CORS isoladamente não resolve**: o problema é ausência de fonte, não
+  cabeçalho de resposta;
+- a correção definitiva depende de uma **camada de serving acessível ao backend**;
+- a direção recomendada é **materializar/sincronizar esses dados no Neon** por uma
+  orquestração **server-side futura, possivelmente Airflow**;
+- **nenhuma solução dessa arquitetura foi implementada neste fechamento.**
+
+### 17.3 Dívidas não bloqueantes
+
+- Um controle da barra de filtros **sem nome acessível**.
+- Um controle da barra de filtros **abaixo do tamanho mínimo** de alvo.
+- Correspondência ao SHA comprovada **comportamentalmente**, não pelo painel
+  autenticado da Vercel.
+- Decisão do **GMV TikTok com frete** ainda **pendente** (produção em `sub_total`).
+
+### 17.4 Encerramento
+
+**V2-0 a V2-4: concluídos, versionados, publicados e validados.** Não há
+necessidade de **V2-5**. A frente **Revamp Visual V2 está encerrada**.

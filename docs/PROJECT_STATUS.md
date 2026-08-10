@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 10/08/2026 (**Revamp Visual V2 tecnicamente concluído e aprovado, V2-0 a V2-4** — V2-0 em `c110e85`, V2-1 em `13c7ee0`, Fase A do V2-2 em `e8f0630`, Fase B em `2336567`, e a Task 2/2 do V2-2 + V2-3 + V2-4 versionadas neste fechamento. Publicação automática ainda **não validada**.)
+**Última atualização:** 10/08/2026 (**Revamp Visual V2 — `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: `/tempo-real`, `/inteligencia` e `/operacoes` sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -921,12 +921,49 @@ no fechamento de 10/08/2026, com a publicação automática ainda **não validad
 toque dos filtros, `fetch` cru em `/brand`, dois `<h1>` do shell, e o checkpoint do
 GMV TikTok com frete, ainda não implementado.
 
+### Smoke pós-publicação do Revamp V2 — `PUBLICADO — PASS WITH ISSUE`
+
+**Commit publicado: `04d0d17`. Smoke read-only executado em 10/08/2026** contra
+`https://mktplace-gobeaute.vercel.app`, somente `GET` e navegação, sem qualquer
+alteração em Vercel, Render, domínio, variável ou CORS.
+
+Evidências principais: **11 rotas em HTTP 200** e backend (`/openapi.json`,
+`/health-datasource`) em 200; **zero** fallback "Demonstração · API offline" nas
+fontes saudáveis; **sticky da Gerencial em `top=0px` nos três viewports** (117px/13%
+no desktop, 195px/25% no tablet, 239px/28% no mobile), contra −729/−597/−631px antes
+da correção; **zero overflow horizontal**; ticks semanais legíveis, sem corte nem
+colisão; comparação anterior com a janela canônica declarada e tooltip com data
+completa; diálogo com shell único, foco contido, Escape e retorno de foco; Canais e
+Produtos sem regressão. **Zero finding causado pelo release.** A correspondência ao
+commit é comprovada **comportamentalmente** — não houve acesso ao painel autenticado
+da Vercel.
+
+**Restrição operacional aberta (não é regressão do Revamp):**
+`/api/v1/performance/tempo-real`, `/api/v1/performance/inteligencia` e
+`/api/v1/performance/operacoes` respondem **500** porque dependem do **Data Mart,
+inalcançável a partir do Render** (Gate G4). No browser o erro aparece rotulado como
+CORS apenas porque a resposta 500 não carrega o cabeçalho de origem; o CORS está
+correto. As três páginas degradam honestamente, mas a Torre **permanece incompleta**
+nessas superfícies. Corrigir CORS isoladamente não resolve: falta **fonte**. A
+correção definitiva exige uma camada de serving acessível ao backend — a direção
+recomendada é materializar/sincronizar esses dados no Neon por uma orquestração
+server-side futura, possivelmente Airflow. **Nada dessa arquitetura foi
+implementado.**
+
+Dívidas não bloqueantes: um controle de filtro sem nome acessível, um abaixo do
+tamanho mínimo de alvo, e a decisão do **GMV TikTok com frete** ainda pendente
+(produção em `sub_total`). Detalhe em §17 do
+[UI_REVAMP_V2_PLAN.md](UI_REVAMP_V2_PLAN.md).
+
 ## Próximas prioridades
 
-1. Acompanhar a publicação automática do fechamento do Revamp V2 e executar o smoke pós-publicação **read-only**.
-2. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
-3. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
-4. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.
+1. Desenhar a **camada de serving acessível** para Tempo Real, Inteligência e Operações — hoje sem fonte em produção.
+2. Integrar essa materialização ao **futuro Airflow** (ainda não existente, não configurado e não executado), eliminando a dependência síncrona Render → Data Mart/VPN.
+3. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
+4. Manter a decisão do **GMV TikTok com frete** como frente separada.
+5. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
+6. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
+7. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.
 
 ## Fora do foco atual
 
