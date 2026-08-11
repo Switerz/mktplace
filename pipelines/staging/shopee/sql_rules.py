@@ -55,23 +55,43 @@ def coalesce_headers(headers: tuple[str, ...], inner: Callable[[str], str], alia
 
 
 def shop_stats_row_type(x: str) -> str:
-    """'DD/MM/YYYY' → 'daily'; 'DD/MM/YYYY-DD/MM/YYYY' → 'period_total'.
+    """'DD/MM/YYYY' → 'daily'; 'DD/MM/YYYY-DD/MM/YYYY' → 'period_total';
+    'DD/MM/YYYY HH:MM' → 'hourly' (Gate SD1-2).
     Outro formato → NULL, que reprova no NOT NULL (fail-fast). Validação
-    semântica de calendário é feita separadamente por
-    `semantics.shop_stats_data_format_is_invalid` / `br_date_is_invalid` /
-    `br_date_range_is_invalid` (contadas ANTES do INSERT)."""
+    semântica de calendário/hora é feita separadamente por
+    `semantics.shop_stats_data_format_is_invalid` / `shop_stats_date_is_invalid`
+    / `br_date_range_is_invalid` (contadas ANTES do INSERT).
+
+    O tipo é decidido pelo FORMATO do valor, não pelo nome da coluna: é isso
+    que impede tratar 'Tempo' como um alias de 'Data'."""
     v = f"btrim({x})"
     return (
         "(CASE "
         f"WHEN {v} ~ '^[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}$' THEN 'daily' "
         f"WHEN {v} ~ '^[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}-[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}$' THEN 'period_total' "
+        f"WHEN {v} ~ '^[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}} [0-9]{{2}}:[0-9]{{2}}$' THEN 'hourly' "
         "ELSE NULL END)"
     )
 
 
 def shop_stats_stat_date(x: str) -> str:
-    """Valor de `stat_date` quando `row_type='daily'`. Usa `make_date` por
+    """Valor de `stat_date` para `row_type='daily'` E `row_type='hourly'`:
+    nos dois casos a linha se refere a UM dia. Usa `make_date` por
     componentes (não `to_date`) para ficar consistente com a validação
-    semântica compartilhada — ver `semantics.br_date_value`."""
+    semântica compartilhada — ver `semantics.br_date_value` /
+    `semantics.br_hour_ts_date_value`. Para 'period_total' nenhum dos dois
+    formatos casa e o resultado é NULL, como exige a constraint."""
     from pipelines.staging.shopee import semantics
-    return semantics.br_date_value(x)
+    return (
+        "COALESCE("
+        f"{semantics.br_date_value(x)}, {semantics.br_hour_ts_date_value(x)}"
+        ")"
+    )
+
+
+def shop_stats_stat_hour(x: str) -> str:
+    """Valor de `stat_hour` — preenchido SOMENTE quando `row_type='hourly'`.
+    Diário e total de período não casam com o formato horário e resultam em
+    NULL, como exige a constraint."""
+    from pipelines.staging.shopee import semantics
+    return semantics.br_hour_ts_hour_value(x)

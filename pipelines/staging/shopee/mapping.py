@@ -354,22 +354,35 @@ SHOP_STATS = TableSpec(
     staging_table="silver.stg_shopee_shop_stats",
     raw_table="raw.shopee_shop_stats_export",
     source_type="shop_stats",
-    grain="1 linha física do relatório shop-stats: um dia OU o total do período",
+    grain="1 linha física do relatório shop-stats: um dia, uma HORA, OU o total do período",
     comment=(
         "Staging tipada 1:1 da raw.shopee_shop_stats_export. row_type separa "
-        "linha diaria ('daily', coluna Data = DD/MM/YYYY) da linha de total "
-        "do periodo ('period_total', Data = range) — a Gold decide qual usar; "
-        "esta camada preserva as duas. Valores monetarios no formato BR "
-        "('1.234,56') e percentuais '3,84%' (unidade 0-100). Sem PII."
+        "linha diaria ('daily', coluna Data = DD/MM/YYYY), linha HORARIA "
+        "('hourly', coluna Tempo = DD/MM/YYYY HH:MM, Gate SD1-2) e linha de "
+        "total do periodo ('period_total', Data/Tempo = range) — a Gold decide "
+        "qual usar; esta camada preserva as tres, sem agregar hora em dia e sem "
+        "fabricar total. Valores monetarios no formato BR ('1.234,56') e "
+        "percentuais '3,84%' (unidade 0-100). Sem PII."
     ),
     columns=_PROVENANCE + (
-        StagingColumn("row_type", "varchar(12)", "shop_stats_row_type", ("Data",),
-                      nullable=False, note="'daily' | 'period_total'"),
-        StagingColumn("stat_date", "date", "shop_stats_stat_date", ("Data",),
-                      note="preenchida só quando row_type='daily'"),
-        StagingColumn("period_start", "date", "shop_stats_period_start", ("Data",),
+        # Gate SD1-2: a coluna de tempo é 'Data' no layout diário e 'Tempo' no
+        # horário. O COALESCE só escolhe a coluna que EXISTE no arquivo; quem
+        # decide o row_type é o FORMATO do valor — por isso 'Tempo' nunca vira
+        # um alias de 'Data'.
+        StagingColumn("row_type", "varchar(12)", "coalesce:shop_stats_row_type",
+                      ("Data", "Tempo"),
+                      nullable=False, note="'daily' | 'hourly' | 'period_total'"),
+        StagingColumn("stat_date", "date", "coalesce:shop_stats_stat_date",
+                      ("Data", "Tempo"),
+                      note="preenchida quando row_type='daily' ou 'hourly'"),
+        StagingColumn("stat_hour", "time without time zone",
+                      "coalesce:shop_stats_stat_hour", ("Data", "Tempo"),
+                      note="preenchida só quando row_type='hourly'; sempre hora cheia"),
+        StagingColumn("period_start", "date", "coalesce:shop_stats_period_start",
+                      ("Data", "Tempo"),
                       note="preenchida só quando row_type='period_total'"),
-        StagingColumn("period_end", "date", "shop_stats_period_end", ("Data",),
+        StagingColumn("period_end", "date", "coalesce:shop_stats_period_end",
+                      ("Data", "Tempo"),
                       note="preenchida só quando row_type='period_total'"),
     ) + tuple(
         StagingColumn(col, "numeric(14,2)", "numeric_br", (header,), pii_class=FINANCEIRO)
@@ -385,10 +398,23 @@ SHOP_STATS = TableSpec(
     ),
     excluded=(),
     extra_ddl=(
+        # Gate SD1-2: três ramos mutuamente exclusivos. 'daily' e 'period_total'
+        # mantêm exatamente a regra anterior (linhas históricas continuam
+        # válidas sem nenhum UPDATE); 'hourly' é o ramo novo.
         "ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT "
         "ck_stg_shopee_shop_stats_row_type CHECK ("
-        "(row_type = 'daily' AND stat_date IS NOT NULL AND period_start IS NULL AND period_end IS NULL) "
-        "OR (row_type = 'period_total' AND stat_date IS NULL AND period_start IS NOT NULL AND period_end IS NOT NULL));",
+        "(row_type = 'daily' AND stat_date IS NOT NULL AND stat_hour IS NULL "
+        "AND period_start IS NULL AND period_end IS NULL) "
+        "OR (row_type = 'hourly' AND stat_date IS NOT NULL AND stat_hour IS NOT NULL "
+        "AND period_start IS NULL AND period_end IS NULL) "
+        "OR (row_type = 'period_total' AND stat_date IS NULL AND stat_hour IS NULL "
+        "AND period_start IS NOT NULL AND period_end IS NOT NULL));",
+        # Hora cheia: só minuto/segundo zerados. Não prejudica o histórico,
+        # onde stat_hour é sempre NULL.
+        "ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT "
+        "ck_stg_shopee_shop_stats_stat_hour_cheia CHECK ("
+        "stat_hour IS NULL OR (EXTRACT(minute FROM stat_hour) = 0 "
+        "AND EXTRACT(second FROM stat_hour) = 0));",
         "ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT "
         "ck_stg_shopee_shop_stats_period_order CHECK ("
         "period_start IS NULL OR period_end IS NULL OR period_start <= period_end);",
@@ -459,10 +485,18 @@ ADS = TableSpec(
                       non_negative=True),
         StagingColumn("ctr_pct", "numeric(8,2)", "pct_flexible", ("CTR",),
                       non_negative=True, note="0–100"),
-        StagingColumn("add_to_cart", "integer", "int_null_placeholder", ("Add to Cart",),
+        # Gate SD1: a Shopee traduziu os dois rótulos no export de 10/08/2026
+        # ("Add to Cart" → "Adicionar ao carrinho", "Add to Cart Rate" →
+        # "Taxa de adição ao carrinho"), nas 5 marcas, sem qualquer outra
+        # mudança de coluna, ordem, tipo ou formato. Os nomes em inglês são
+        # PRESERVADOS: um arquivo antigo continua sendo lido igual. Alias
+        # estreito e explícito — nunca fuzzy matching, que esconderia drift.
+        StagingColumn("add_to_cart", "integer", "coalesce:int_null_placeholder",
+                      ("Add to Cart", "Adicionar ao carrinho"),
                       non_negative=True),
-        StagingColumn("add_to_cart_rate_pct", "numeric(8,2)", "pct_flexible",
-                      ("Add to Cart Rate",), non_negative=True, note="0–100; '-' → NULL"),
+        StagingColumn("add_to_cart_rate_pct", "numeric(8,2)", "coalesce:pct_flexible",
+                      ("Add to Cart Rate", "Taxa de adição ao carrinho"),
+                      non_negative=True, note="0–100; '-' → NULL"),
         StagingColumn("conversions", "integer", "int_strict", ("Conversões",),
                       non_negative=True),
         StagingColumn("direct_conversions", "integer", "int_strict", ("Conversões Diretas",),

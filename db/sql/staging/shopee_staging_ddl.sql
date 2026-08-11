@@ -154,7 +154,7 @@ CREATE INDEX idx_stg_shopee_order_item_snapshots_file_id ON silver.stg_shopee_or
 REVOKE ALL ON silver.stg_shopee_order_item_snapshots FROM PUBLIC;
 
 -- ----------------------------------------------------------------------------
--- silver.stg_shopee_shop_stats — grão: 1 linha física do relatório shop-stats: um dia OU o total do período
+-- silver.stg_shopee_shop_stats — grão: 1 linha física do relatório shop-stats: um dia, uma HORA, OU o total do período
 -- ----------------------------------------------------------------------------
 CREATE TABLE silver.stg_shopee_shop_stats (
     raw_id                          bigint NOT NULL PRIMARY KEY,
@@ -165,6 +165,7 @@ CREATE TABLE silver.stg_shopee_shop_stats (
     raw_ingested_at                 timestamptz NOT NULL,
     row_type                        varchar(12) NOT NULL,
     stat_date                       date,
+    stat_hour                       time without time zone,
     period_start                    date,
     period_end                      date,
     sales_brl                       numeric(14,2) CHECK (sales_brl <> 'NaN'),
@@ -187,13 +188,14 @@ CREATE TABLE silver.stg_shopee_shop_stats (
 );
 
 COMMENT ON TABLE silver.stg_shopee_shop_stats IS
-    'Staging tipada 1:1 da raw.shopee_shop_stats_export. row_type separa linha diaria (''daily'', coluna Data = DD/MM/YYYY) da linha de total do periodo (''period_total'', Data = range) — a Gold decide qual usar; esta camada preserva as duas. Valores monetarios no formato BR (''1.234,56'') e percentuais ''3,84%'' (unidade 0-100). Sem PII.';
+    'Staging tipada 1:1 da raw.shopee_shop_stats_export. row_type separa linha diaria (''daily'', coluna Data = DD/MM/YYYY), linha HORARIA (''hourly'', coluna Tempo = DD/MM/YYYY HH:MM, Gate SD1-2) e linha de total do periodo (''period_total'', Data/Tempo = range) — a Gold decide qual usar; esta camada preserva as tres, sem agregar hora em dia e sem fabricar total. Valores monetarios no formato BR (''1.234,56'') e percentuais ''3,84%'' (unidade 0-100). Sem PII.';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.raw_id IS 'PK; id da linha na tabela raw.shopee_*_export correspondente';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.file_id IS 'FK física para raw.shopee_ingestion_file(file_id) — ver build_sql.py';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.source_row_number IS 'linha física no arquivo original';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.row_sha256 IS 'hash da linha Raw — auditoria de correspondência';
-COMMENT ON COLUMN silver.stg_shopee_shop_stats.row_type IS '''daily'' | ''period_total''';
-COMMENT ON COLUMN silver.stg_shopee_shop_stats.stat_date IS 'preenchida só quando row_type=''daily''';
+COMMENT ON COLUMN silver.stg_shopee_shop_stats.row_type IS '''daily'' | ''hourly'' | ''period_total''';
+COMMENT ON COLUMN silver.stg_shopee_shop_stats.stat_date IS 'preenchida quando row_type=''daily'' ou ''hourly''';
+COMMENT ON COLUMN silver.stg_shopee_shop_stats.stat_hour IS 'preenchida só quando row_type=''hourly''; sempre hora cheia';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.period_start IS 'preenchida só quando row_type=''period_total''';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.period_end IS 'preenchida só quando row_type=''period_total''';
 COMMENT ON COLUMN silver.stg_shopee_shop_stats.order_conversion_rate_pct IS 'unidade 0–100';
@@ -207,7 +209,8 @@ COMMENT ON COLUMN silver.stg_shopee_shop_stats.repeat_purchase_rate_pct IS 'unid
 ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT fk_stg_shopee_shop_stats_raw_id FOREIGN KEY (raw_id) REFERENCES raw.shopee_shop_stats_export (id);
 ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT fk_stg_shopee_shop_stats_file_id FOREIGN KEY (file_id) REFERENCES raw.shopee_ingestion_file (file_id);
 
-ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT ck_stg_shopee_shop_stats_row_type CHECK ((row_type = 'daily' AND stat_date IS NOT NULL AND period_start IS NULL AND period_end IS NULL) OR (row_type = 'period_total' AND stat_date IS NULL AND period_start IS NOT NULL AND period_end IS NOT NULL));
+ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT ck_stg_shopee_shop_stats_row_type CHECK ((row_type = 'daily' AND stat_date IS NOT NULL AND stat_hour IS NULL AND period_start IS NULL AND period_end IS NULL) OR (row_type = 'hourly' AND stat_date IS NOT NULL AND stat_hour IS NOT NULL AND period_start IS NULL AND period_end IS NULL) OR (row_type = 'period_total' AND stat_date IS NULL AND stat_hour IS NULL AND period_start IS NOT NULL AND period_end IS NOT NULL));
+ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT ck_stg_shopee_shop_stats_stat_hour_cheia CHECK (stat_hour IS NULL OR (EXTRACT(minute FROM stat_hour) = 0 AND EXTRACT(second FROM stat_hour) = 0));
 ALTER TABLE silver.stg_shopee_shop_stats ADD CONSTRAINT ck_stg_shopee_shop_stats_period_order CHECK (period_start IS NULL OR period_end IS NULL OR period_start <= period_end);
 CREATE UNIQUE INDEX uk_stg_shopee_shop_stats_file_row ON silver.stg_shopee_shop_stats (file_id, source_row_number);
 CREATE INDEX idx_stg_shopee_shop_stats_brand_date ON silver.stg_shopee_shop_stats (brand, stat_date);

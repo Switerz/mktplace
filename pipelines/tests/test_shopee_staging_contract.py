@@ -94,6 +94,11 @@ ORDERS_RAW_KEYS = {
 SHOP_STATS_RAW_KEYS = {
     "Cliques Por Produto",
     "Data",
+    # Gate SD1-2: coluna de tempo do layout HORÁRIO (DD/MM/YYYY HH:MM),
+    # presente nos 5 arquivos reais de 10/08/2026 (um por marca). Não é um
+    # alias de 'Data' — é outro grão, com row_type próprio ('hourly'). Ainda
+    # não consta da Raw porque esse lote não foi carregado.
+    "Tempo",
     "# de compradores",
     "# de compradores em potencial",
     "# de compradores existentes",
@@ -117,6 +122,14 @@ ADS_RAW_KEYS = {
     "ACOS Direto",
     "Add to Cart",
     "Add to Cart Rate",
+    # Gate SD1: a Shopee traduziu estes dois rótulos no export de 10/08/2026.
+    # Comprovado nos 5 arquivos reais (um por marca), comparando cada marca
+    # com o seu PRÓPRIO template histórico: só estes dois nomes mudaram, e os
+    # nomes em inglês seguem no contrato para os arquivos já ingeridos. Ainda
+    # não constam da Raw porque esse lote não foi carregado — por isso entram
+    # aqui, no universo de chaves reais observadas nos arquivos-fonte.
+    "Adicionar ao carrinho",
+    "Taxa de adição ao carrinho",
     "Cliques",
     "Cliques de Produtos",
     "Conversões",

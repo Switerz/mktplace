@@ -66,6 +66,9 @@ RE_ISO_DATE = r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$"
 RE_BR_DATE = r"^([0-9]{2})/([0-9]{2})/([0-9]{4})$"
 RE_BR_TS_SECONDS = r"^([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2})$"
 RE_BR_DATE_RANGE = r"^([0-9]{2})/([0-9]{2})/([0-9]{4})-([0-9]{2})/([0-9]{2})/([0-9]{4})$"
+# Gate SD1-2: shop-stats horário — coluna 'Tempo' = "DD/MM/YYYY HH:MM".
+# Grão distinto do diário: NÃO é um rename de 'Data'.
+RE_BR_TS_HOUR = r"^([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2})$"
 
 # Números: dígitos puros, sem separador de milhar, sem NaN/Infinity/moeda.
 RE_DOT_NUMERIC = r"^-?[0-9]+(\.[0-9]+)?$"
@@ -266,11 +269,64 @@ def br_date_range_end_value(x: str) -> str:
     return f"(CASE WHEN {v} !~ '{RE_BR_DATE_RANGE}' THEN NULL ELSE make_date({y2}, {m2}, {d2}) END)"
 
 
-def shop_stats_data_format_is_invalid(x: str) -> str:
-    """Verdadeiro quando a coluna 'Data' (sempre obrigatória) não casa nem
-    com o formato diário nem com o de total de período."""
+def br_hour_ts_is_invalid(x: str) -> str:
+    """Gate SD1-2: verdadeiro quando o valor CASA com o formato horário
+    "DD/MM/YYYY HH:MM" mas é semanticamente inválido — data de calendário
+    inexistente, hora fora de 00–23 ou minuto diferente de 00.
+
+    Minuto != 00 é recusado de propósito: o contrato comprovado é o de horas
+    cheias. Truncar silenciosamente um "13:37" para 13h inventaria semântica.
+    Valores que não casam com o formato não são julgados aqui (ficam por
+    conta de `shop_stats_data_format_is_invalid`)."""
     v = f"btrim({x})"
-    return f"({v} !~ '{RE_BR_DATE}' AND {v} !~ '{RE_BR_DATE_RANGE}')"
+    day, month, year = (_group(v, RE_BR_TS_HOUR, i) for i in (1, 2, 3))
+    hour, minute = (_group(v, RE_BR_TS_HOUR, i) for i in (4, 5))
+    return (
+        f"({v} ~ '{RE_BR_TS_HOUR}' AND ("
+        f"NOT {_is_valid_ymd(year, month, day)} "
+        f"OR {hour} NOT BETWEEN 0 AND 23 "
+        f"OR {minute} <> 0"
+        "))"
+    )
+
+
+def br_hour_ts_date_value(x: str) -> str:
+    """Componente DATA de "DD/MM/YYYY HH:MM" (NULL se não casar)."""
+    v = f"btrim({x})"
+    day, month, year = (_group(v, RE_BR_TS_HOUR, i) for i in (1, 2, 3))
+    return (
+        f"(CASE WHEN {v} !~ '{RE_BR_TS_HOUR}' THEN NULL "
+        f"ELSE make_date({year}, {month}, {day}) END)"
+    )
+
+
+def br_hour_ts_hour_value(x: str) -> str:
+    """Componente HORA de "DD/MM/YYYY HH:MM" como time (NULL se não casar).
+    Sempre hora cheia — minuto e segundo zerados, conforme o contrato."""
+    v = f"btrim({x})"
+    hour = _group(v, RE_BR_TS_HOUR, 4)
+    return (
+        f"(CASE WHEN {v} !~ '{RE_BR_TS_HOUR}' THEN NULL "
+        f"ELSE make_time({hour}, 0, 0) END)"
+    )
+
+
+def shop_stats_date_is_invalid(x: str) -> str:
+    """Validação semântica da coluna de tempo do shop-stats, cobrindo os dois
+    layouts: diário ('Data' = DD/MM/YYYY) e horário ('Tempo' = DD/MM/YYYY
+    HH:MM). Cada ramo só julga o valor que casa com o SEU formato."""
+    return f"({br_date_is_invalid(x)} OR {br_hour_ts_is_invalid(x)})"
+
+
+def shop_stats_data_format_is_invalid(x: str) -> str:
+    """Verdadeiro quando a coluna de tempo (sempre obrigatória) não casa com
+    NENHUM dos três formatos reconhecidos: diário, total de período ou
+    horário. Qualquer quarto formato continua bloqueando (fail-fast)."""
+    v = f"btrim({x})"
+    return (
+        f"({v} !~ '{RE_BR_DATE}' AND {v} !~ '{RE_BR_DATE_RANGE}' "
+        f"AND {v} !~ '{RE_BR_TS_HOUR}')"
+    )
 
 
 # ---------------------------------------------------------------------------

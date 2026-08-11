@@ -8,11 +8,35 @@ Estrutura da sheet 'Pedido Feito' (sheet ativa):
   Row 0: header (linha de totais)
   Row 1: totais do período (ex: '01/03/2026-31/03/2026')
   Row 2: vazio (separador)
-  Row 3: header das linhas diárias
-  Row 4+: uma linha por dia no formato 'DD/MM/YYYY'
+  Row 3: header das linhas de detalhe
+  Row 4+: as linhas de detalhe
+
+Dois layouts de detalhe são reconhecidos, e SOMENTE dois (Gate SD1):
+
+  - histórico/diário: coluna 'Data', uma linha por dia ('DD/MM/YYYY');
+  - horário: coluna 'Tempo', 24 linhas ('DD/MM/YYYY HH:MM') de um único dia.
+
+No layout horário a representação diária vem da LINHA DE TOTAL DO PERÍODO
+(Row 1), nunca de uma hora isolada e nunca da soma de campos não aditivos.
+A soma das 24 horas é usada apenas como VALIDAÇÃO dos campos comprovadamente
+aditivos — ver `_ADDITIVE_HOURLY_COLS` e a prova agregada do Gate SD1:
+
+  aditivos (soma 24h == total, nas 5 marcas):
+      Vendas (BRL), Vendas Sem os Descontos da Shopee, Vendas Canceladas,
+      Vendas Devolvidas / Reembolsadas, Pedidos, Pedidos Cancelados,
+      Pedidos Devolvidos / Reembolsados, Cliques Por Produto
+  razão derivada (nunca somar):
+      Vendas por Pedido (= Vendas / Pedidos no total)
+  razão não somável e NÃO derivável de Pedidos/Visitantes (usar o total):
+      Taxa de Conversão de Pedidos
+  únicos deduplicados no dia (soma 24h > total sempre; usar o total):
+      Visitantes
+
+Qualquer terceiro layout continua bloqueando (fail-fast), sem fallback.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -45,6 +69,37 @@ _COL_MAP: dict[str, str] = {
 # Ausência de qualquer uma delas BLOQUEIA o parsing do arquivo (nunca um
 # warning silencioso que deixaria o GMV incompleto).
 _FINANCIAL_REQUIRED_KEYS = {"sales_brl_str", "cancelled_sales_str", "refunded_sales_str"}
+
+# --- Layout horário (Gate SD1) -------------------------------------------
+# Nomes de coluna que IDENTIFICAM cada layout. 'Tempo' nunca é tratado como
+# alias de 'Data': são grãos diferentes (hora x dia) e caminhos distintos.
+_DAILY_DATE_COL = "Data"
+_HOURLY_DATE_COL = "Tempo"
+
+# Linha 1 da planilha carrega o total do período, sob o mesmo header da
+# linha 3 (mesma convenção já usada por shopee_raw/inventory.py).
+_PERIOD_TOTAL_ROW = 1
+
+_FINANCIAL_SOURCE_COLS = (
+    "Vendas (BRL)",
+    "Vendas Canceladas",
+    "Vendas Devolvidas / Reembolsadas",
+)
+
+# Campos cuja aditividade foi COMPROVADA nas 5 marcas (soma 24h == total).
+# Só estes são reconciliados; somar qualquer outro seria inventar semântica.
+_ADDITIVE_HOURLY_COLS = _FINANCIAL_SOURCE_COLS + ("Pedidos",)
+
+# Tolerância de arredondamento na reconciliação soma-horária x total.
+_HOURLY_SUM_TOLERANCE = 0.02
+
+# O contrato comprovado é o de um dia FECHADO: 24 horas, 00 a 23. Um export
+# intradiário (dia corrente, parcial) não é suportado e bloqueia — melhor
+# recusar do que publicar um "dia" com cobertura silenciosamente parcial.
+_HOURLY_EXPECTED_HOURS = tuple(range(24))
+
+_HOURLY_TS_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})$")
+_PERIOD_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})\s*-\s*(\d{2})/(\d{2})/(\d{4})$")
 
 
 class ShopeeShopStatsError(ValueError):
@@ -88,6 +143,166 @@ def _parse_date(val) -> Optional[date]:
         return None
 
 
+def _parse_period(val) -> Optional[tuple[date, date]]:
+    """'10/08/2026-10/08/2026' → (date, date). Qualquer outro formato → None."""
+    if val is None:
+        return None
+    m = _PERIOD_RE.match(str(val).strip())
+    if not m:
+        return None
+    try:
+        d0 = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        d1 = date(int(m.group(6)), int(m.group(5)), int(m.group(4)))
+    except ValueError:
+        return None
+    return d0, d1
+
+
+def _parse_hourly_ts(val) -> Optional[tuple[date, int]]:
+    """'10/08/2026 13:00' → (date, 13). Minuto diferente de 00 → None
+    (o contrato comprovado tem sempre HH:00; um minuto qualquer indicaria
+    outro grão e deve bloquear em vez de ser silenciosamente truncado)."""
+    if val is None:
+        return None
+    m = _HOURLY_TS_RE.match(str(val).strip())
+    if not m or m.group(5) != "00":
+        return None
+    try:
+        d = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+    hora = int(m.group(4))
+    if not 0 <= hora <= 23:
+        return None
+    return d, hora
+
+
+def _read_hourly_layout(path: Path, header: tuple, rows: list) -> list[dict]:
+    """Layout horário → EXATAMENTE uma linha diária, vinda da linha de total.
+
+    Fail-fast em qualquer desvio do contrato comprovado no Gate SD1. As
+    mensagens citam só nome de arquivo e de coluna — nunca valores.
+    """
+    col_index: dict[str, int] = {}
+    for i, name in enumerate(header):
+        if name and name not in col_index:
+            col_index[name] = i
+
+    faltando = [c for c in _FINANCIAL_SOURCE_COLS if c not in col_index]
+    if faltando:
+        raise ShopeeShopStatsError(
+            f"{path.name}: layout horário sem coluna financeira obrigatória: {sorted(faltando)}"
+        )
+
+    def cell(row, name):
+        idx = col_index.get(name)
+        return row[idx] if idx is not None and idx < len(row) else None
+
+    if len(rows) <= _PERIOD_TOTAL_ROW:
+        raise ShopeeShopStatsError(f"{path.name}: layout horário sem linha de total do período")
+    periodo = _parse_period(cell(rows[_PERIOD_TOTAL_ROW], _HOURLY_DATE_COL))
+    if periodo is None:
+        raise ShopeeShopStatsError(
+            f"{path.name}: layout horário sem linha de total do período válida "
+            f"(coluna {_HOURLY_DATE_COL!r} da linha de total)"
+        )
+    dia, dia_fim = periodo
+    if dia != dia_fim:
+        raise ShopeeShopStatsError(
+            f"{path.name}: layout horário com total de período cobrindo mais de um dia"
+        )
+    total_row = rows[_PERIOD_TOTAL_ROW]
+
+    horas: dict[int, tuple] = {}
+    for row in rows[4:]:
+        if all(v is None for v in row):
+            continue
+        ts = _parse_hourly_ts(cell(row, _HOURLY_DATE_COL))
+        if ts is None:
+            raise ShopeeShopStatsError(
+                f"{path.name}: linha de detalhe com {_HOURLY_DATE_COL!r} fora do formato "
+                f"horário esperado (DD/MM/YYYY HH:00)"
+            )
+        d, hora = ts
+        if d != dia:
+            raise ShopeeShopStatsError(
+                f"{path.name}: layout horário com mais de uma data nas linhas de detalhe"
+            )
+        if hora in horas:
+            raise ShopeeShopStatsError(
+                f"{path.name}: layout horário com hora duplicada ({hora:02d})"
+            )
+        horas[hora] = row
+
+    if tuple(sorted(horas)) != _HOURLY_EXPECTED_HOURS:
+        ausentes = [h for h in _HOURLY_EXPECTED_HOURS if h not in horas]
+        raise ShopeeShopStatsError(
+            f"{path.name}: layout horário deve ter as 24 horas de um dia fechado; "
+            f"faltam {len(ausentes)} hora(s)"
+        )
+
+    # Reconciliação: soma das 24 horas == total, SOMENTE nos campos aditivos.
+    for coluna in _ADDITIVE_HOURLY_COLS:
+        if coluna not in col_index:
+            continue
+        total = parse_brl_float(cell(total_row, coluna))
+        if total is None:
+            raise ShopeeShopStatsError(
+                f"{path.name}: coluna aditiva {coluna!r} sem valor na linha de total"
+            )
+        soma = 0.0
+        for hora in _HOURLY_EXPECTED_HOURS:
+            v = parse_brl_float(cell(horas[hora], coluna))
+            if v is None:
+                raise ShopeeShopStatsError(
+                    f"{path.name}: coluna aditiva {coluna!r} sem valor na hora {hora:02d}"
+                )
+            soma += v
+        if abs(round(soma - total, 2)) > _HOURLY_SUM_TOLERANCE:
+            raise ShopeeShopStatsError(
+                f"{path.name}: soma das 24 horas não reconcilia com o total do período "
+                f"na coluna {coluna!r}"
+            )
+
+    sales_brl = parse_brl_float(cell(total_row, "Vendas (BRL)"))
+    cancelled_sales_brl = parse_brl_float(cell(total_row, "Vendas Canceladas"))
+    refunded_sales_brl = parse_brl_float(cell(total_row, "Vendas Devolvidas / Reembolsadas"))
+    if sales_brl is None or cancelled_sales_brl is None or refunded_sales_brl is None:
+        raise ShopeeShopStatsError(
+            f"{path.name}: dia {dia.isoformat()} tem campo financeiro obrigatório "
+            f"ausente na linha de total do período"
+        )
+    if sales_brl < 0 or cancelled_sales_brl < 0 or refunded_sales_brl < 0:
+        raise ShopeeShopStatsError(
+            f"{path.name}: dia {dia.isoformat()} tem valor financeiro negativo "
+            f"na linha de total do período"
+        )
+
+    gmv = round(sales_brl - cancelled_sales_brl - refunded_sales_brl, 2)
+    if gmv < 0:
+        raise ShopeeShopStatsError(
+            f"{path.name}: dia {dia.isoformat()} produziu GMV líquido negativo "
+            f"(Vendas Canceladas + Devolvidas/Reembolsadas maior que Vendas (BRL))"
+        )
+
+    # Visitantes e taxa de conversão vêm do TOTAL — nunca somados (visitantes
+    # são únicos deduplicados no dia; conversão é razão). Colunas de
+    # compradores não existem neste layout: ficam None, nunca 0.
+    return [{
+        "date":                  dia,
+        "visitors":              _parse_int(cell(total_row, "Visitantes")),
+        "conversion_rate":       _parse_pct(cell(total_row, "Taxa de Conversão de Pedidos")),
+        "unique_buyers":         _parse_int(cell(total_row, "# de compradores")),
+        "new_buyers":            _parse_int(cell(total_row, "# de novos compradores")),
+        "repeat_buyers":         _parse_int(cell(total_row, "# de compradores existentes")),
+        "repeat_buyer_rate_pct": _parse_pct(cell(total_row, "Repetir Índice de Compras")),
+        "sales_brl":             round(sales_brl, 2),
+        "cancelled_sales_brl":   round(cancelled_sales_brl, 2),
+        "refunded_sales_brl":    round(refunded_sales_brl, 2),
+        "gmv":                   gmv,
+    }]
+
+
 def _read_xlsx(path: Path) -> list[dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
@@ -98,8 +313,14 @@ def _read_xlsx(path: Path) -> list[dict]:
         logger.warning("%s: menos de 5 linhas — ignorado", path.name)
         return []
 
-    # Row 3 (índice 3) é o header das linhas diárias
+    # Row 3 (índice 3) é o header das linhas de detalhe
     header = rows[3]
+
+    # Roteamento de layout (Gate SD1): 'Tempo' sem 'Data' é o layout horário.
+    # O caminho diário abaixo permanece exatamente como estava.
+    nomes_header = {h for h in header if h}
+    if _HOURLY_DATE_COL in nomes_header and _DAILY_DATE_COL not in nomes_header:
+        return _read_hourly_layout(path, header, rows)
     col_index: dict[str, int] = {}
     for i, name in enumerate(header):
         if not name:
@@ -116,6 +337,16 @@ def _read_xlsx(path: Path) -> list[dict]:
         raise ShopeeShopStatsError(
             f"{path.name}: colunas financeiras obrigatórias ausentes no header "
             f"diário: {sorted(missing_financial)}"
+        )
+    if "date_str" in missing:
+        # Gate SD1: sem coluna de data e sem ser o layout horário, este é um
+        # TERCEIRO layout desconhecido. Antes, todas as linhas eram descartadas
+        # silenciosamente (0 linhas, só um warning) — uma carga "success" com
+        # zero dado. Agora bloqueia explicitamente, como as financeiras.
+        raise ShopeeShopStatsError(
+            f"{path.name}: header de detalhe sem coluna de data reconhecida "
+            f"({_DAILY_DATE_COL!r} para o layout diário, {_HOURLY_DATE_COL!r} para o "
+            f"horário) — layout desconhecido, nenhuma linha seria produzida"
         )
     missing_nao_financeiro = missing - _FINANCIAL_REQUIRED_KEYS
     if missing_nao_financeiro:
