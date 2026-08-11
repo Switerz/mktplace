@@ -683,6 +683,9 @@ Nenhum deles foi executado. Os três são sequenciais, e o S1 é pré-requisito 
 
 ### Gate S1 — provar acesso e publicar a primeira tabela
 
+> **Executado em 11/08/2026 — `PARTIAL — PILOTO VALIDADO`.** Registro completo com
+> números, fingerprints e limites da prova em [§26](#26-execução-do-gate-s1--registro-do-piloto-11082026).
+
 **Objetivo:** publicar **uma** tabela nova ponta a ponta e provar o **piloto técnico**
 (§24.1, resultado 1), sem trocar nenhum endpoint. A **prova operacional do Airflow**
 (resultado 2) é objetivo do mesmo gate **somente se** o repositório/worker estiver
@@ -765,3 +768,161 @@ Gate G4 voltam a funcionar (`/operacoes`, `/brand-detail`, `/inteligencia`) e
 **`/tempo-real` continua indisponível em produção**. Isso deve constar de qualquer
 relatório de encerramento — nada de "camada de serving concluída" com uma tela ainda
 sem fonte.
+
+## 26. Execução do Gate S1 — registro do piloto (11/08/2026)
+
+**Veredito: `PARTIAL — PILOTO VALIDADO`.** O **piloto técnico foi validado**: migration,
+carga histórica, incremental, isolamento da janela e reconciliação passaram, todos com
+prova registrada abaixo.
+
+O resultado geral permanece `PARTIAL` por **um único motivo**: a execução dentro de um
+**worker Airflow real não foi comprovada**. Nenhuma infraestrutura Airflow, DAG,
+connection, secret ou pool foi validada — §24 e §24.1 seguem valendo integralmente, e o
+`PARTIAL` é exatamente o desfecho que o §25 previa para esse cenário.
+
+`/operacoes` continuar lendo o Data Mart **não é falha nem pendência do S1**. A troca do
+endpoint pertence explicitamente ao Gate S2 (§25) e é a fronteira esperada entre os dois
+gates.
+
+### 26.1 Preflight — a barreira que importou
+
+A primeira tentativa deste piloto foi **abortada** como `BLOCKED` porque a ingestão
+Shopee estava ativa. A evidência não veio de "silêncio de WAL", que é critério ruim: o
+Data Mart é uma **réplica física de leitura** (`pg_is_in_recovery() = true`), e o
+processo `startup` que aplica o WAL mantém `AccessExclusiveLock` de forma rotineira —
+24 deles na primeira medição. Confundir isso com DDL de cliente produziria bloqueios
+falsos todos os dias.
+
+Os dois critérios que realmente funcionam:
+
+1. **Crescimento de relação por amostragem dupla.** Em 46 s, `raw.shopee_order_item_export`
+   cresceu 3,05 MB e `gold.item_ciclo` 107 MB — ingestão inequívoca. Na rodada aprovada,
+   o total em bytes das tabelas `%shopee%` ficou **idêntico** entre as duas leituras.
+2. **Fingerprint duplo da fonte**, separado por ≥ 30 s, na janela fechada.
+
+Duas armadilhas de medição foram encontradas e corrigidas no próprio preflight, e valem
+como advertência para o S2:
+
+- `mode LIKE '%Exclusive%'` **sem** `locktype = 'relation'` conta o `ExclusiveLock` que
+  toda sessão mantém sobre o próprio `virtualxid`. Isso produziu "19 locks de escrita"
+  onde havia zero. O filtro por `locktype` é obrigatório.
+- um regex de verbo de escrita sobre `pg_stat_activity.query` casa com nomes de coluna:
+  três "sessões de escrita" eram consultas `SELECT` do Metabase contendo `created_at`.
+
+### 26.2 Fingerprints da fonte
+
+Janela fechada `ref_date <= 2026-08-10`. As 4 linhas de 11/08 foram **ignoradas** em
+todas as etapas — dia corrente incompleto, recusado por desenho.
+
+| Momento | Linhas | Chaves | Datas | Marcas | `gmv` | `paid_orders` | Checksum |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Preflight, leitura 1 | 1.621 | 1.621 | 471 | 4 | 38.238.512,60 | 452.665 | `fe649ede…` |
+| Preflight, leitura 2 (+35 s) | 1.621 | 1.621 | 471 | 4 | 38.238.512,60 | 452.665 | `fe649ede…` |
+| Revalidação pós-backfill | 1.621 | 1.621 | 471 | 4 | **38.238.360,80** | **452.663** | `f93e9a33…` |
+
+Zero duplicidade em `(ref_date, brand)`, zero nulo obrigatório, zero negativo, 471/471
+dias com linha, 719 `roas` não nulos (razão — **nunca somada**).
+
+### 26.3 Migration 006
+
+`alembic upgrade 006`, tentativa única, exit 0, `005 → 006`. Relações em `marts`:
+**31 → 32**, nenhuma desaparecida, nenhuma existente alterada.
+
+Contrato físico conferido no banco: 9 colunas; `roas NUMERIC(12,4)` **nullable**, todas
+as demais de negócio `NOT NULL`; `synced_at` com `DEFAULT NOW()`; PK
+`pk_fact_ml_gestao_diaria (ref_date, brand)`; índice `idx_fmgd_brand_ref_date (brand, ref_date)`;
+5 CHECKs, sendo 4 com `<> 'NaN'` explícito; comentário de tabela e 3 de coluna. Tabela
+criada **vazia**.
+
+### 26.4 Publicações
+
+| Etapa | `run_id` | Janela | Apagadas | Publicadas | `EXCEPT` |
+| --- | --- | --- | --- | --- | --- |
+| Backfill histórico | `s1t2-bf1` | 27/04/2025 – 10/08/2026 | 0 | 1.621 | `(0, 0)` |
+| Incremental | `s1t2-inc1` | 04/08/2026 – 10/08/2026 | 28 | 28 | `(0, 0)` |
+
+Reconciliação independente do módulo (leitura separada em cada engine, checksum de
+negócio normalizado para os tipos do destino) fechou em **todos** os campos nas duas
+janelas: histórica `59ecb562…` e incremental `159473c1…`, idênticos entre origem e
+destino.
+
+**O `DELETE` ficou provadamente restrito à janela.** As 1.593 linhas anteriores a
+04/08 mantiveram checksum `dad5e010…` inalterado e seguem marcadas com `s1t2-bf1`,
+enquanto as 28 linhas da janela passaram a `s1t2-inc1`.
+
+### 26.5 Idempotência sob fonte estável — validação residual
+
+A segunda publicação histórica controlada **não ocorreu**, porque sua condição não se
+cumpriu: entre o backfill e a revalidação, a fonte mudou.
+
+A deriva foi localizada e é pequena e explicável — **2 chaves**, em 06/08 e 08/08, cada
+uma perdendo 1 pedido pago e R$ 75,90 de GMV. É **maturação retroativa real** de status
+no ML sobre dias já fechados, e é exatamente o fenômeno que justifica o lookback de 7
+dias (§7). O incremental subsequente **corrigiu integralmente** a diferença: **−R$ 151,80**
+em `gmv` e **−2 pedidos**, restaurando paridade total com a fonte.
+
+O que **não** foi demonstrado em produção, então, é a **idempotência dos campos de
+negócio sob uma fonte estável**: duas execuções consecutivas sobre a mesma fotografia da
+origem deixando as sete colunas de negócio inalteradas.
+
+**O critério correto não é igualdade byte a byte da linha completa.** `synced_at` e
+`source_run_id` são campos de **auditoria** e mudam a cada execução por desenho — é assim
+que se rastreia qual run publicou cada linha (foi justamente o que provou o isolamento da
+janela em §26.4). Uma contraprova que exigisse a linha inteira idêntica estaria medindo a
+coisa errada e reprovaria um pipeline correto.
+
+O piloto **comprovou**: convergência (o destino alcança a fonte após mudança retroativa),
+unicidade da chave, reconciliação origem × destino nas duas janelas e isolamento do
+`DELETE` à janela publicada.
+
+**Essa validação residual não bloqueia o início do Gate S2.** Quando houver janela
+operacional estável, a contraprova deve comparar **apenas as chaves e os sete campos de
+negócio**, admitindo explicitamente a atualização de `synced_at` e `source_run_id`.
+
+### 26.6 Estado final do destino
+
+1.621 linhas; 0 duplicidade de PK; 0 nulo obrigatório; 0 negativo; **0 linha de 11/08
+ou posterior**; 902 `roas` NULL preservados; `synced_at` e `source_run_id` presentes em
+100% das linhas.
+
+### 26.7 O que este gate NÃO provou
+
+O primeiro item é a **razão do `PARTIAL`**. Os demais são limites conhecidos ou fronteiras
+de escopo, não pendências do S1.
+
+- **Airflow — a razão do `PARTIAL`**: nenhuma DAG, connection, secret ou pool foi criado;
+  nenhum `SELECT 1` rodou dentro de um worker real. §24 inalterado. Nada aqui afirma que
+  o Airflow existe, está configurado ou tem conectividade.
+- **`downgrade`**: escrito e restrito aos dois objetos do S1, mas **nunca executado**.
+- **Idempotência sob fonte estável**: validação residual, definida em §26.5. Não bloqueia
+  o S2.
+- **Execução sem VPN**: o piloto rodou de máquina local com VPN. O Render **continua**
+  sem alcançar o Data Mart — é o problema que o S2 resolve ao trocar a fonte do endpoint
+  para o Neon.
+
+Fora desta lista, por ser **fronteira de escopo e não lacuna**: `/operacoes` segue lendo
+`gold.ml_gestao_diaria` via `gold_service.py` (11 referências, arquivo intocado) e nenhum
+efeito no site era esperado. Trocar o endpoint é o objetivo declarado do Gate S2.
+- **Ambiente**: o módulo exige `DATABASE_URL` e `DATAMART_DATABASE_URL` no ambiente,
+  **sem fallback** e sem carregar `.env` por conta própria. `python -m pipelines.sync_ml_gestao_diaria`
+  falha com exit 2 se as variáveis não estiverem exportadas — comportamento correto para
+  Render/Airflow, mas que exige carregá-las explicitamente em execução local.
+
+### 26.8 Estado final — Gate S1 encerrado
+
+**Gate S1 encerrado. Resultado: `PARTIAL — PILOTO VALIDADO`.**
+
+A camada de serving tem sua **primeira tabela disponível no Neon**:
+`marts.fact_ml_gestao_diaria`, com **1.621 linhas até 10/08/2026**, **zero duplicidade**
+na chave `(ref_date, brand)`, **zero linha do dia corrente** e **origem e destino
+reconciliados** nas duas janelas (histórica e incremental), agregados e checksum de
+negócio incluídos.
+
+**O Gate S2 não foi iniciado**, e está **tecnicamente desbloqueado** para desenhar e
+migrar `/operacoes`: existe tabela no Neon, contrato físico verificado, módulo de sync
+com reconciliação e isolamento de janela provados.
+
+**Desbloqueio técnico não é afirmação de infraestrutura.** Nada aqui diz que o Airflow
+existe, está configurado ou tem conectividade — §24 permanece a referência, e a prova
+operacional continua pendente de nome/URL, acesso, modelo de hospedagem e `SELECT 1`
+executado de dentro do worker real.

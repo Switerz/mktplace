@@ -1011,8 +1011,8 @@ horário, cadência intraday e um rótulo "ao vivo" que precisa de decisão de p
    não ativa DAG nem agendamento, e nenhuma alegação de conectividade do Airflow pode
    ser feita.
 
-Roadmap proposto em três gates, sem nenhum executado — S1: piloto e primeira tabela
-nova (`fact_ml_gestao_diaria`); S2: `/operacoes` ponta a ponta com as duas fatos
+Roadmap proposto em três gates — **S1 executado em 11/08/2026 como
+`PARTIAL — PILOTO VALIDADO`** (registro abaixo); S2: `/operacoes` ponta a ponta com as duas fatos
 TikTok novas; S3: `/brand-detail` e `/inteligencia`, **reutilizando** as fatos de
 produto existentes e criando só `fact_ml_cross_company_summary`. **`/tempo-real` fica
 para uma fase seguinte** (grão horário, cadência intraday e decisão de produto sobre o
@@ -1021,9 +1021,61 @@ e isso não deve ser lido como camada de serving concluída. A decisão do **GMV
 entra nesta arquitetura: produção segue em `sub_total`. Blueprint completo em
 [SERVING_AIRFLOW_PLAN.md](SERVING_AIRFLOW_PLAN.md).
 
+### Gate S1 executado — `PARTIAL — PILOTO VALIDADO` (11/08/2026)
+
+A primeira tabela da camada de serving está no Neon, carregada e reconciliada, **sem
+troca de endpoint**. Migration `006` aplicada (`005 → 006`, tentativa única, exit 0),
+criando `marts.fact_ml_gestao_diaria` — relações em `marts` de 31 para 32, nenhuma
+existente alterada. Contrato conferido no banco: 9 colunas, `roas` nullable, PK
+`(ref_date, brand)`, índice `(brand, ref_date)`, 5 CHECKs (4 com `<> 'NaN'`).
+
+Duas publicações, ambas com `EXCEPT` bidirecional `(0, 0)`: backfill `s1t2-bf1` de
+27/04/2025 a 10/08/2026 (0 apagadas, **1.621 publicadas**) e incremental `s1t2-inc1` de
+04/08 a 10/08 (28 apagadas, 28 publicadas). Reconciliação independente do módulo fechou
+em todos os campos nas duas janelas, checksum de negócio incluído. Destino final: 1.621
+linhas, zero duplicidade de PK, zero nulo obrigatório, zero negativo, **zero linha de
+11/08**, 902 `roas` NULL preservados.
+
+**Por que `PARTIAL` e não `SUCCESS`.** O piloto técnico foi validado — migration, carga
+histórica, incremental, isolamento da janela e reconciliação passaram. O resultado geral
+fica em `PARTIAL` por **um único motivo**: a execução dentro de um **worker Airflow real
+não foi comprovada**, e nenhuma infraestrutura Airflow, DAG, connection, secret ou pool
+foi validada. `/operacoes` continuar no Data Mart **não é falha nem pendência do S1** — é
+a fronteira esperada entre S1 e S2, onde a troca do endpoint está declarada.
+
+Três pontos que não devem ser lidos como formalidade:
+
+1. **Idempotência sob fonte estável: validação residual.** A segunda publicação
+   controlada não ocorreu porque a fonte mudou entre o backfill e a revalidação — 2
+   chaves, em 06/08 e 08/08, cada uma perdendo 1 pedido pago e R$ 75,90, por **maturação
+   retroativa real** de status no ML. O incremental de sete dias corrigiu integralmente
+   **−R$ 151,80** e **−2 pedidos**. Logo, não foi demonstrada em produção a idempotência
+   dos **campos de negócio** sob fonte estável. O critério **não** é igualdade byte a byte
+   da linha completa: `synced_at` e `source_run_id` são auditoria e mudam entre execuções
+   por desenho. O piloto comprovou convergência, unicidade, reconciliação e isolamento da
+   janela. **Isso não bloqueia o início do S2**; quando houver janela operacional estável,
+   a contraprova deve comparar apenas chaves e campos de negócio, admitindo atualização
+   dos campos de auditoria.
+2. **O bloqueio anterior era real.** A primeira tentativa deste piloto parou como
+   `BLOCKED` com a ingestão Shopee ativa (`raw.shopee_order_item_export` crescendo
+   3,05 MB em 46 s). O critério que funciona é crescimento de relação por amostragem
+   dupla, não silêncio de WAL: o Data Mart é réplica de leitura, e o processo de replay
+   mantém `AccessExclusiveLock` rotineiramente.
+3. **Limites conhecidos.** Nada do Airflow foi provado; o Render continua sem alcançar o
+   Data Mart (o S2 resolve isso ao trocar a fonte do endpoint); e o `downgrade` da
+   migration, escrito e restrito aos dois objetos do S1, nunca foi executado.
+
+**Estado final: Gate S1 encerrado**, com a primeira tabela de serving disponível no Neon
+(`marts.fact_ml_gestao_diaria`, 1.621 linhas até 10/08/2026, zero duplicidade, zero linha
+do dia corrente, origem e destino reconciliados). **S2 não iniciado**, porém
+**tecnicamente desbloqueado** para desenhar e migrar `/operacoes` — o que **não** afirma
+que o Airflow exista, esteja configurado ou tenha conectividade.
+
+Registro completo em [SERVING_AIRFLOW_PLAN.md §26](SERVING_AIRFLOW_PLAN.md).
+
 ## Próximas prioridades
 
-1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 não iniciado.**
+1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 executado como `PARTIAL — PILOTO VALIDADO`; S2 não iniciado.**
 2. Integrar essa materialização ao **Airflow da organização** — que **existe** segundo o proprietário, mas **não foi localizado nem está visível** com as credenciais desta sessão, e cuja plataforma, URL, hospedagem e rede ainda não foram informadas; **nenhuma DAG foi inspecionada, configurada ou executada** —, eliminando a dependência síncrona Render → Data Mart/VPN.
 3. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
 4. Manter a decisão do **GMV TikTok com frete** como frente separada.
