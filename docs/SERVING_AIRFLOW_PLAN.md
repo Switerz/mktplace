@@ -1,0 +1,767 @@
+# Camada de serving Data Mart → Neon → Render → futuro Airflow
+
+**Gate S0, Task 1/3 — CONCLUÍDA e APROVADA. 11/08/2026.**
+Blueprint entregue, **zero implementação**: nenhuma DAG, nenhum schema, nenhum sync,
+nenhum endpoint, nenhuma migração. Auditoria read-only, uma rodada consolidada de
+correção consumida. **O Gate S1 não foi iniciado.**
+
+Resultados centrais fixados por este documento:
+
+- **quatro** endpoints realmente indisponíveis em produção — `/brand-detail`,
+  `/tempo-real`, `/inteligencia` e `/operacoes` (§1);
+- **quatro** tabelas novas em S1–S3: `fact_ml_gestao_diaria`,
+  `fact_tiktok_brand_content_daily`, `fact_tiktok_creator_daily` e
+  `fact_ml_cross_company_summary` (§4);
+- **duas fatos existentes de reuso obrigatório**: `marts.fact_ml_produto_ranking` e
+  `marts.fact_tiktok_product_daily` — nenhuma tabela duplicada, nenhuma segunda
+  verdade para os mesmos produtos (§3.5);
+- a fato de produtos TikTok receberá, no futuro, **apenas migration aditiva** de
+  `active_videos` e `video_views`, junto da **extensão explícita** da lista de
+  colunas de `pipelines/sync_produtos.py` (§3.5, §25 Gate S3);
+- **nenhuma cópia indiscriminada da Gold**: lista de colunas explícita e versionada,
+  zero `SELECT *` (§4.2);
+- **`/tempo-real` permanece fora de S1–S3** e **não deve ser declarado resolvido**
+  (§25.3);
+- o **Airflow existe** segundo o proprietário, mas **repositório, hospedagem e
+  conectividade não foram acessíveis nesta sessão** (§24);
+- **piloto manual não prova a conectividade do worker** — são dois resultados
+  distintos (§24.1).
+
+---
+
+## 1. Problema atual
+
+Quatro endpoints da API leem `gold.*`/`raw.*` no **Data Mart (RDS)**. O roteamento é
+automático: `gold_service._uses_datamart(sql)` detecta os prefixos `gold.`/`raw.` e
+envia a consulta ao `datamart_engine`, em vez do engine principal (Neon).
+
+O RDS **exige VPN**. O Render não a tem. Consequência medida em produção
+(11/08/2026, `curl` direto, fora do navegador):
+
+| Endpoint | Status em produção |
+| --- | --- |
+| `/api/v1/performance/brand-detail?brand=barbours` | **500** |
+| `/api/v1/performance/tempo-real` | **500** |
+| `/api/v1/performance/inteligencia` | **500** |
+| `/api/v1/performance/operacoes` | **500** |
+
+O Gate G4 já havia diagnosticado a causa raiz — **ausência de conectividade, não
+consulta lenta**: com VPN as cinco consultas de `get_brand_detail` rodam em 4,07s;
+sem VPN o tempo é 100% tempo de conexão, 0 byte recebido.
+
+**Correção do smoke anterior.** O smoke pós-publicação de 10/08/2026 reportou 500 em
+apenas três superfícies e tratou `/brand-detail` como saudável. **Estava errado, e o
+erro era do instrumento:** a passagem rápida esperava 2,2s por rota, e o request de
+`brand-detail` — disparado depois do `/daily` na página de Marca — não concluía nessa
+janela. Com 9s de espera ele aparece: `net::ERR_FAILED`, com o mesmo rótulo de CORS
+dos outros três. **As quatro superfícies do G4 seguem dependentes do Data Mart e as
+quatro falham.** O G4 estava certo.
+
+**Por que o navegador diz "CORS".** A resposta 500 do FastAPI não carrega
+`Access-Control-Allow-Origin`, então o browser bloqueia a leitura e rotula como
+política de CORS. O CORS está correto: `/overview` e `/canais` respondem 200 do mesmo
+origin. **Ajustar CORS não resolve nada** — falta fonte, não cabeçalho.
+
+---
+
+## 2. Os quatro endpoints e seus consumidores
+
+| Endpoint | Router | `response_model` | Service | Consumidor no frontend | Comportamento na falha |
+| --- | --- | --- | --- | --- | --- |
+| `/brand-detail` | `performance.py:360` | `BrandDetailResponse` | `gold_service.get_brand_detail` (1662–1919) | `app/brand/[brand]/page.tsx:204` — **seção mensal TikTok** | seção indisponível; o resto da página vive de `/daily` (Neon, 200) |
+| `/tempo-real` | `:355` | `TempoRealResponse` | `get_tempo_real` (1490–1594) | `app/tempo-real/page.tsx:177` | estado indisponível; o polling preserva o último dado válido (não há nenhum) |
+| `/inteligencia` | `:412` | **nenhum** | `get_inteligencia` (2096–2314) | `app/inteligencia/page.tsx:135` | estado indisponível nomeado |
+| `/operacoes` | `:417` | **nenhum** | `get_operacoes` (2315–2507) | `app/operacoes/page.tsx:145` | estado indisponível nomeado |
+
+Nas quatro, o frontend **degrada honestamente**: nomeia a indisponibilidade, não
+inventa número e não cai em mock fora do modo demonstração. Duas observações que
+importam para a migração:
+
+- `/inteligencia` e `/operacoes` **não têm `response_model`**. Não existe schema
+  fixando o contrato — a compatibilidade depende do que o frontend lê, e isso precisa
+  ser travado por teste **antes** de trocar a fonte (§19).
+- `/brand-detail` é chamado **secundariamente** e com o **mês anterior**
+  (`ref_month=2026-05` observado), o que explica por que a falha passa desapercebida
+  numa inspeção superficial da página de Marca.
+
+---
+
+## 3. Matriz fonte → grão → chave → destino
+
+Nove objetos do Data Mart sustentam os quatro endpoints. As colunas temporais reais
+são `date`, `ref_date` e `date_brt`; `brand` é **texto** (a marca, não `loja_id`).
+
+| # | Fonte (Data Mart) | Natureza | Grão real | Chave | Filtros no SQL | Endpoints | Destino proposto no Neon |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `gold.tiktok_brand_daily` | série diária | dia × marca | `(date, brand)` | `brand`, `date BETWEEN` | brand-detail, operacoes | `marts.fact_tiktok_brand_content_daily` |
+| 2 | `gold.tiktok_creator_daily` | série diária | dia × marca × criador | `(date, brand, creator)` | `brand`, `date BETWEEN` | brand-detail, operacoes | `marts.fact_tiktok_creator_daily` |
+| 3 | `gold.tiktok_product_daily` | série diária | dia × produto | **`(date, product_id)`** | `brand`, `date >=` | brand-detail, inteligencia | **`marts.fact_tiktok_product_daily` — JÁ EXISTE** |
+| 4 | `gold.v_channel_efficiency` | **view** | dia × marca | `(date, brand)` | `brand`, `date BETWEEN` | brand-detail | **decisão pendente** (§4.1) |
+| 5 | `gold.tiktok_shop_hourly` | série **horária** | dia × hora × marca | `(date_brt, hour_brt, brand)` | `date_brt = CURRENT_DATE`; e os 7 dias anteriores | tempo-real | `marts.fact_tiktok_hourly` |
+| 6 | `gold.ml_produto_ranking` | **snapshot** | produto (estado atual) | **`(brand, item_id)`** | `brand IN`, `product_status`, `pareto_bucket` | inteligencia | **`marts.fact_ml_produto_ranking` — JÁ EXISTE** |
+| 7 | `gold.ml_cross_company_summary` | **snapshot** | marca | `(brand)` | `brand IN` | inteligencia | `marts.fact_ml_cross_company_summary` |
+| 8 | `gold.ml_gestao_diaria` | série diária | dia × marca | `(ref_date, brand)` | `brand IN`, `ref_date >=` | operacoes | `marts.fact_ml_gestao_diaria` |
+| 9 | `raw.tiktok_shop_orders` | eventos | pedido | `order_id` | só em `/debug/raw-tempo-real` | (debug) | **fora de escopo** |
+
+### 3.1 O que já existe no Neon
+
+| Fonte | Já existe equivalente? | Diagnóstico |
+| --- | --- | --- |
+| 1 `tiktok_brand_daily` | **parcialmente** | `marts.fact_marketplace_daily_performance` tem GMV/pedidos por dia × marca × canal, mas **não** as colunas de conteúdo e audiência (`total_views`, `active_videos`, `new_videos_posted`, demographics) — é exatamente isso que `brand-detail` consome. Registrado em §2 de `gold_vs_marts_matrix.md` |
+| 2 `tiktok_creator_daily` | **não** | grão por criador sem equivalente |
+| 3 `tiktok_product_daily` | **SIM — já existe** | `marts.fact_tiktok_product_daily`, criada pela migration `004_create_product_tables.py`, chave `UNIQUE (date, product_id)`, sincronizada por `pipelines/sync_produtos.py` e já consumida por `performance_service.py:2247` na página de Produtos. Ver §3.5 |
+| 4 `v_channel_efficiency` | **não** | é view, e a definição **não é nossa** nem está versionada em repositório nosso |
+| 5 `tiktok_shop_hourly` | **não** | o mart é diário; especificado no mesmo handoff §2 |
+| 6 `ml_produto_ranking` | **SIM — já existe** | `marts.fact_ml_produto_ranking`, mesma migration `004`, chave `UNIQUE (brand, item_id)`, sincronizada por `sync_produtos.py` e já consumida por `performance_service.py:2064`. Ver §3.5 |
+| 7 `ml_cross_company_summary` | **não** | lógica multi-company específica |
+| 8 `ml_gestao_diaria` | **não** | existe `pipelines/transforms/ml_gestao_diaria.py`, mas ele alimenta a **gold**, não o mart |
+
+**Correção da primeira versão deste blueprint.** Ela afirmava que as fontes 3 e 6 não
+tinham equivalente no Neon. **Estava errado**: as duas tabelas existem, são
+sincronizadas e já servem a página de Produtos. A reauditoria está em §3.5, e as
+consequências percorrem §4, §18, §22, §23 e §25 — a contagem de tabelas novas caiu de
+sete para **quatro**.
+
+**Fonte de verdade:** nos nove casos, o Data Mart. Nenhuma destas tabelas é produzida
+por este repositório — a transformação da `gold` **não está versionada aqui**
+(constatação do G4 e do handoff §3) e nosso acesso é por réplica de leitura. Isso é
+decisivo para o desenho: **não podemos recalcular, só copiar.**
+
+### 3.2 Janela histórica, cadência e watermark
+
+| Fonte | Janela necessária | Cadência de leitura pela API | Sincronização proposta | Watermark | Dedup por |
+| --- | --- | --- | --- | --- | --- |
+| 1 | ≥ 13 meses (mês corrente + comparativo + histórico) | mensal | diária, janela fechada | `date` | `(date, brand)` |
+| 2 | ≥ 13 meses | mensal e 7 dias | diária, janela fechada | `date` | `(date, brand, creator)` |
+| 3 | ≥ 13 meses | mensal e 30 dias | **já sincronizada**: incremental, últimos 7 dias + hoje | `date` | `(date, product_id)` |
+| 4 | ≥ 13 meses | mensal | — (§4.1) | `date` | `(date, brand)` |
+| 5 | dia corrente + 7 dias anteriores | **intraday** (a tela recarrega a cada 5 min) | **15–30 min**, janela de 2 dias | `(date_brt, hour_brt)` | `(date_brt, hour_brt, brand)` |
+| 6 | estado atual | a cada carga da tela | **já sincronizada**: substituição integral | não se aplica | `(brand, item_id)` |
+| 7 | estado atual | a cada carga da tela | diária, **substituição integral** | não se aplica | `(brand)` |
+| 8 | 7 dias | 7 dias | diária, janela fechada | `ref_date` | `(ref_date, brand)` |
+
+**Snapshots não têm watermark.** `ml_produto_ranking` e `ml_cross_company_summary`
+são estado corrente, sem coluna temporal nas consultas — a única sincronização
+correta é **substituição integral**, nunca upsert incremental. Se algum dia se
+quiser histórico deles, é preciso acrescentar `snapshot_date` **no destino** e passar
+a acumular: decisão de produto, não desta task.
+
+**Late-arriving data é a regra, não a exceção.** O status de um pedido muda depois da
+criação (handoff §4, item 3), então uma janela fechada de D-1 não basta: a
+recomputação precisa de janela móvel (§11). Este é exatamente o defeito já conhecido
+do Scheduler atual — lookback de 3 dias com buracos permanentes que `MAX(data)` não
+detecta.
+
+### 3.5 Reauditoria das duas fatos de produto que já existem
+
+Comparação coluna a coluna entre o que os endpoints consomem da gold e o que as
+tabelas do Neon oferecem. Read-only, sobre a migration `004` e o SQL dos services.
+
+**`marts.fact_ml_produto_ranking`** — chave `UNIQUE (brand, item_id)`.
+`get_inteligencia` consome: `brand`, `title`, `product_status`, `pareto_bucket`,
+`revenue_velocity`, `ad_efficiency`, `gross_revenue`, `units_sold`,
+`unique_buyers`, `cancel_rate_pct`, `ad_spend`, `ad_roas`, `ad_acos_pct`,
+`days_advertised`, `revenue_share_pct`. (`n_products`, `avg_roas` e `gmv` são
+apelidos de agregados, não colunas de origem.) **Todas as 15 existem na tabela do
+Neon.**
+
+**`marts.fact_tiktok_product_daily`** — chave `UNIQUE (date, product_id)`.
+
+- `get_inteligencia` consome `brand`, `product_name`, `gmv`, `orders`,
+  `pct_gmv_video`, `pct_gmv_live`, `pct_gmv_card`, `rating_avg`. **Todas
+  existem.**
+- `get_brand_detail` consome `product_id`, `product_name`, `gmv`, `orders` —
+  presentes — **mais `active_videos` e `video_views`**, que **não existem** na
+  tabela do Neon. São usadas para derivar `videos = SUM(active_videos)` e
+  `gpm = SUM(gmv) / SUM(video_views) * 1000`.
+
+**Classificação por endpoint:**
+
+| Endpoint | Fonte | Classificação |
+| --- | --- | --- |
+| `/inteligencia` | `ml_produto_ranking` | **reutilizável sem mudança** |
+| `/inteligencia` | `tiktok_product_daily` | **reutilizável sem mudança** |
+| `/brand-detail` (seção de produtos) | `tiktok_product_daily` | **reutilizável após adicionar coluna**: `active_videos`, `video_views` |
+
+**Nenhuma tabela duplicada será proposta.** As duas existentes são a única verdade
+para esses produtos; o que falta é **acrescentar duas colunas** a uma delas, por
+migration aditiva, e estender o `SELECT` de `sync_produtos.py` para trazê-las.
+
+**Cadência e estratégia atuais de `pipelines/sync_produtos.py`** (já em produção,
+não propostas):
+
+| Fonte | Estratégia | Chave do upsert |
+| --- | --- | --- |
+| `gold.ml_produto_ranking` | **substituição integral** (snapshot sem dimensão temporal) | `ON CONFLICT (brand, item_id)` |
+| `gold.tiktok_product_daily` | **incremental por `date`**, últimos 7 dias + hoje | `ON CONFLICT (date, product_id)` |
+
+Tem ainda uma guarda anti-truncamento: abaixo de um percentual do total anterior no
+Neon, uma fonte que fez substituição integral é rejeitada. O `health_check.py`
+acompanha `MAX(date)` de `fact_tiktok_product_daily` — **e é exatamente o critério
+que §15 recomenda substituir por cobertura**, uma dívida do que já existe, não desta
+proposta.
+
+### 3.3 Regras de marketplace e status a preservar
+
+- **Escopo de marcas.** `BRANDS_IN_SCOPE` (5 marcas) e `ML_BRANDS` são filtros
+  aplicados no SQL de origem. A cópia deve preservá-los, ou copiar o superconjunto e
+  filtrar na leitura — **nunca** ampliar o escopo silenciosamente.
+- **`product_status` e `pareto_bucket`** (`ml_produto_ranking`) são categorias vindas
+  da gold, consumidas literalmente pela tela de Inteligência. São dados, não regra
+  nossa: copiar sem reinterpretar.
+- **`brand` é texto**, não `loja_id`. Não converter na cópia: a chave que os
+  endpoints e o frontend usam é a marca em texto.
+- **Fuso.** `tiktok_shop_hourly` já vem em BRT (`date_brt`/`hour_brt`). A cópia
+  **não deve** reconverter; o handoff §2 alerta explicitamente para não assumir que
+  `created_at` esteja em BRT.
+- **Allowlist de status do TikTok** (`COMPLETED/DELIVERED/IN_TRANSIT`) vale para o
+  cálculo de GMV a partir da Raw. As tabelas 1–5 já chegam calculadas pela gold, então
+  a allowlist **não** se reaplica na cópia.
+- **TikTok sem cancelamento/devolução** e **Regiões medindo menos que Canais** são
+  limitações de dado já documentadas (DQ1/DQ2). A cópia não as corrige nem as piora.
+
+### 3.4 Dependência semântica separada: GMV TikTok com frete
+
+`docs/tiktok_gmv_com_frete_decisao.md` registra a decisão de incluir frete no GMV do
+TikTok, com a **escolha da coluna ainda pendente** (`total_amount` contra
+`sub_total + shipping_fee`, com R$ 36.138,24 de resíduo não identificado).
+
+**Isso não entra nesta arquitetura.** Produção continua na regra vigente
+(`sub_total`) até decisão explícita. A camada de serving **copia** o que a gold
+entrega; se a definição mudar, muda na origem e/ou no conector, e a cópia acompanha.
+Nenhuma tabela proposta aqui embute a decisão de frete, e nenhum campo novo de frete
+é criado por esta frente.
+
+---
+
+## 4. Tabelas propostas no Neon
+
+Schema `marts`, mesmo padrão das fatos existentes (`fact_marketplace_daily_performance`,
+`fact_marketplace_region_daily`), criadas por **migration Alembic** — a numeração
+segue de `005_create_fact_marketplace_region_daily.py`.
+
+**Quatro tabelas novas**, não sete: as fontes 3 e 6 já têm destino (§3.5), a 4 está
+pendente de decisão (§4.1) e a 5 pertence à fase de Tempo Real (§25.3).
+
+| Tabela | Estado | PK | Índices sugeridos | Origem |
+| --- | --- | --- | --- | --- |
+| `marts.fact_ml_gestao_diaria` | **nova** (S1) | `(ref_date, brand)` | `(brand, ref_date)` | fonte 8 |
+| `marts.fact_tiktok_brand_content_daily` | **nova** (S2) | `(date, brand)` | `(brand, date)` | fonte 1 |
+| `marts.fact_tiktok_creator_daily` | **nova** (S2) | `(date, brand, creator)` | `(brand, date)`, `(date)` | fonte 2 |
+| `marts.fact_ml_cross_company_summary` | **nova** (S3) | `(brand)` | — | fonte 7 |
+| `marts.fact_tiktok_product_daily` | **existe** — falta migration **aditiva** de `active_videos`, `video_views` | `(date, product_id)` | já criados | fonte 3 |
+| `marts.fact_ml_produto_ranking` | **existe** — nada a fazer | `(brand, item_id)` | já criados | fonte 6 |
+| `marts.fact_tiktok_hourly` | **fase de Tempo Real**, fora dos três gates | `(date_brt, hour_brt, brand)` | `(brand, date_brt)` | fonte 5 |
+
+Cada tabela recebe `CHECK` contra os defeitos já vividos neste projeto: coluna
+numérica com `CHECK (col <> 'NaN')` explícito, porque **`'NaN'::numeric >= 0` é
+TRUE** no Postgres e passaria por um `CHECK (col >= 0)` sozinho.
+
+### 4.2 Contrato de colunas — lista explícita, nunca espelho da origem
+
+**A camada de serving não copia a Gold inteira.** Copiar tudo importa colunas que
+ninguém consome, arrasta atributos e identificadores sem uso, e transforma qualquer
+mudança na origem em mudança silenciosa no nosso destino.
+
+Regras, válidas para toda tabela desta frente:
+
+1. **Lista explícita e versionada de colunas**, declarada na migration e no módulo de
+   sync. **Zero `SELECT *`**, na extração e na publicação.
+2. Copiar **somente**: as colunas da chave, os campos efetivamente consumidos pelos
+   quatro endpoints, e os campos de auditoria técnica.
+3. Quando uma fonte atende **mais de um endpoint**, a lista é a **união** das colunas
+   consumidas — e essa união é declarada, não inferida em tempo de execução.
+4. **Tipos explícitos** na migration. Nada de inferência a partir da origem.
+5. Coluna nova exige **alteração consciente de contrato**: migration aditiva +
+   atualização da lista no sync + revisão de quem passa a consumi-la. Não existe
+   "veio de graça".
+6. **Preservar os nomes da origem** quando isso evita mudar o SQL do service — a
+   migração deve trocar `gold.` por `marts.` e nada mais, sempre que possível.
+7. **Não copiar identificadores nem atributos que nenhum endpoint lê** (nomes
+   internos, chaves técnicas da origem, campos de PII).
+
+#### Contrato por tabela
+
+| Tabela | Chave | Colunas mínimas / grupos consumidos | Consumidores | Auditoria |
+| --- | --- | --- | --- | --- |
+| `marts.fact_ml_gestao_diaria` | `(ref_date, brand)` | métricas de gestão diária lidas por `get_operacoes` (velocidade de mídia e alertas) — **lista a fechar no S1 lendo o `SELECT` do service** | `/operacoes` | `synced_at`, `source_run_id` |
+| `marts.fact_tiktok_brand_content_daily` | `(date, brand)` | união de `/brand-detail` e `/operacoes`: conteúdo e audiência (`total_views`, `active_videos`, `new_videos_posted`, demographics consumidas) — **sem** GMV/pedidos, que já vivem em `fact_marketplace_daily_performance` | `/brand-detail`, `/operacoes` | `synced_at`, `source_run_id` |
+| `marts.fact_tiktok_creator_daily` | `(date, brand, creator)` | união de `/brand-detail` (top criadores do mês) e `/operacoes` (tabela de criadores) | `/brand-detail`, `/operacoes` | `synced_at`, `source_run_id` |
+| `marts.fact_ml_cross_company_summary` | `(brand)` | somente os campos que `get_inteligencia` lê do resumo por marca | `/inteligencia` | `synced_at`, `source_run_id` |
+| `marts.fact_tiktok_product_daily` **(existe)** | `(date, product_id)` | já cobre `/inteligencia`; **acrescentar `active_videos` e `video_views`** para `/brand-detail` (§3.5) | `/produtos`, `/inteligencia`, `/brand-detail` | `ingested_at` (já existe) |
+| `marts.fact_ml_produto_ranking` **(existe)** | `(brand, item_id)` | nada a acrescentar | `/produtos`, `/inteligencia` | `ingested_at`, `refreshed_at` (já existem) |
+
+**Evolução de schema.** Toda alteração é **aditiva** e passa por migration nomeada:
+nunca renomear, nunca remover, nunca reordenar. Remoção de coluna só depois de provar
+que nenhum endpoint a lê — e isso é gate próprio, não efeito colateral. As duas
+tabelas que já existem seguem servindo a página de Produtos durante toda a frente:
+**qualquer mudança nelas é aditiva por obrigação**, sob pena de quebrar um consumidor
+em produção.
+
+### 4.1 `v_channel_efficiency` — decisão pendente
+
+É a única fonte que **não é tabela**. Três opções, nenhuma decidida:
+
+1. **Copiar o resultado da view** como fato diário (`marts.fact_channel_efficiency_daily`).
+   Simples, mas congela uma definição que não controlamos: se a view mudar na origem,
+   a cópia divergirá em silêncio.
+2. **Reimplementar a expressão** no Neon a partir das fatos já copiadas. Só é viável
+   se a definição da view for legível e derivável das fontes 1–3 — **não verificado**,
+   porque exige `pg_get_viewdef` com VPN.
+3. **Não copiar** e deixar a seção correspondente de `brand-detail` declaradamente
+   indisponível, como hoje.
+
+**Recomendação:** decidir só depois de ler a definição da view com VPN (Gate S1,
+critério de aceite). Até então, a opção 3 é a honesta, e é o estado atual — não
+piora nada.
+
+---
+
+## 5. Copiar fatos, criar marts de serving ou cachear por endpoint?
+
+**Decisão: copiar fatos Gold estáveis, no grão da origem.** Um fato por fonte, sem
+transformação.
+
+Por quê:
+
+- **Reuso comprovado pela matriz.** Três das oito tabelas servem **dois** endpoints
+  cada (`tiktok_brand_daily` → brand-detail + operacoes; `tiktok_creator_daily` →
+  brand-detail + operacoes; `tiktok_product_daily` → brand-detail + inteligencia). Um
+  cache por endpoint duplicaria essas cópias e criaria duas verdades para o mesmo
+  número.
+- **A agregação já é barata.** Os `GROUP BY` dos quatro endpoints são por criador,
+  produto ou status, sobre janelas de 7–30 dias em cinco marcas. Não é o volume que
+  justifica materializar recorte — é a **conectividade**.
+- **Precedente interno.** `sync_region_daily.py` já copia `gold.marketplace_region_daily`
+  → `marts.fact_marketplace_region_daily` no grão da origem, com validação por
+  agregados. Reaproveitar esse padrão é mais seguro que inventar outro.
+- **Contra o cache JSON por endpoint:** invalidaria a possibilidade de novos recortes
+  (drill-downs, filtros) sem novo job, acoplaria o schema de armazenamento ao schema
+  de resposta da API, e tornaria qualquer mudança de UI uma mudança de pipeline. Só se
+  justificaria se houvesse gargalo de latência comprovado — e não há: com fonte
+  acessível as consultas rodam em ~4s no total, e no Neon serão mais rápidas.
+
+**Marts de serving derivados (agregações próprias) ficam fora por ora.** Só valem se
+uma consulta específica se provar lenta no Neon, o que é medição do Gate S2, não
+suposição de agora.
+
+---
+
+## 6. Fluxo recomendado
+
+```
+Data Mart (RDS, VPN)              ← somente leitura
+   │  extração incremental por janela móvel (ou integral, nos snapshots)
+   ▼
+EXECUTOR com acesso ao RDS      ← condição obrigatória, ainda NÃO provada (§24.1)
+   │
+   ▼
+Neon: staging TEMP na mesma transação
+   │  validações: contagem, somas, duplicidade na chave, nulos, NaN
+   ▼
+publicação atômica  (upsert por janela  |  TRUNCATE+INSERT nos snapshots)
+   │
+   ▼
+marts.fact_*  →  FastAPI/Render (engine principal)  →  frontend
+```
+
+Duas propriedades vêm do desenho, não de disciplina operacional:
+
+- **O Render nunca fala com o Data Mart.** Depois da migração, `_uses_datamart()`
+  deixa de ser acionado pelos quatro endpoints, porque o SQL passa a dizer `marts.`.
+- **O executor responsável pela extração é o único componente que precisa alcançar o
+  Data Mart; se esse executor for o worker Airflow, sua conectividade precisa ser
+  provada.** Enquanto não for, o executor pode ser uma máquina em rede com VPN
+  rodando o mesmo módulo — o desenho não muda, só quem o dispara (§24.1).
+
+---
+
+## 7. Primeira carga histórica
+
+Padrão de `sync_region_daily.py`, adaptado:
+
+1. Ler **todas** as linhas da fonte no recorte histórico (≥ 13 meses), conexão
+   somente leitura.
+2. Abrir **uma única transação** no Neon: `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`,
+   criar staging `TEMP ... ON COMMIT DROP`, inserir.
+3. Validar staging contra a fonte por **agregados calculados em Python** — contagem e
+   somas de todas as colunas numéricas — porque a comparação `EXCEPT` cross-database
+   é impossível: fonte e destino são servidores diferentes.
+4. Se a tabela real já tiver linhas, criar **backup** `marts.<tabela>_backup_<tag>`
+   antes de tocá-la.
+5. `TRUNCATE` + `INSERT` a partir da staging validada, na mesma transação.
+6. `EXCEPT` real **dentro do Neon** (staging × real) após o insert, para provar
+   igualdade linha a linha.
+
+Volume estimado, para dimensionar: 5 marcas × ~400 dias = ~2 mil linhas na fonte 1;
+a fonte 3 (produto) é a maior — a Raw tem 2,8 mi de itens, mas o grão agregado
+dia × marca × produto deve ficar em ordem de 10⁵–10⁶ linhas. **Medir antes de
+carregar** é critério de aceite do Gate S1.
+
+## 8. Estratégia incremental
+
+- **Séries diárias (1, 2, 3, 8):** janela móvel de **D-N a D-1**, com `N ≥ 7` para
+  absorver late-arriving data, e `MERGE`/upsert por chave. Nunca `MAX(date)` como
+  watermark — é justamente o que deixou buracos permanentes no Scheduler atual.
+- **Horária (5):** janela de **2 dias** (`CURRENT_DATE - 1` e `CURRENT_DATE`), a cada
+  15–30 min, upsert por `(date_brt, hour_brt, brand)`.
+- **Snapshots (6, 7):** **substituição integral** diária. Não há incremento possível.
+
+## 9. Sobreposição e deduplicação
+
+A janela móvel **sobrepõe** de propósito. A deduplicação é a chave primária: `INSERT
+... ON CONFLICT (chave) DO UPDATE`. Reprocessar o mesmo dia N vezes converge para o
+mesmo estado — é o que torna o job idempotente. As chaves de dedup por fonte estão em
+§3.2.
+
+Risco a tratar explicitamente: **linha que desaparece da origem**. Upsert não apaga.
+Para as séries diárias, a janela deve ser publicada com `DELETE` do intervalo +
+`INSERT`, dentro da transação — não `ON CONFLICT` puro — para que a cópia reflita
+remoções. Nos snapshots, `TRUNCATE`+`INSERT` já resolve.
+
+## 10. Transações e publicação atômica
+
+Uma transação por tabela e por janela. Dentro dela: lock, staging, validação, delete
+do intervalo, insert, verificação. **Se qualquer validação falhar, `ROLLBACK`** e a
+tabela real permanece exatamente como estava — nenhum estado intermediário fica
+visível para a API. `ON COMMIT DROP` na staging garante limpeza mesmo em rollback.
+
+## 11. Watermark e late-arriving data
+
+O watermark é **por janela, não por linha**: o job registra `(tabela, janela_inicio,
+janela_fim, executado_em)` numa tabela de auditoria e recomputa a janela inteira. A
+consequência é que o health check **não pode ser `MAX(data)`** — precisa ser
+**cobertura**: para cada dia do intervalo esperado, existe linha? Foi essa distinção
+que o achado de 05/08/2026 sobre o Scheduler tornou obrigatória.
+
+## 12. Retries seguros
+
+Como cada execução recomputa a janela inteira dentro de uma transação, **retry é
+seguro por construção**: repetir produz o mesmo estado. Requisitos: `retries` com
+backoff no operator, **advisory lock** no Neon por tabela para impedir duas execuções
+concorrentes da mesma janela (padrão já usado em `run_shopee_gold_batch.py`), e
+`statement_timeout` explícito para o job não ficar pendurado.
+
+## 13. Rollback
+
+Três níveis: (a) `ROLLBACK` da transação, automático em qualquer falha de validação;
+(b) **backup por tag** antes de qualquer carga integral, como em `sync_region_daily.py`;
+(c) restauração a partir do backup, como procedimento manual documentado em runbook.
+Não propor rollback automático de dado publicado — decisão humana.
+
+## 14. Auditoria de execução
+
+Reutilizar o padrão existente `source_sync_run` (já usado no backfill de ML/TikTok):
+por execução, registrar tabela, janela, linhas lidas, linhas publicadas, agregados
+da fonte e do destino, duração, status e mensagem de erro **sanitizada** (sem DSN —
+`sync_region_daily.py` já tem `_sanitize_error_message` para isso).
+
+## 15. Frescor e health check
+
+- **Por cobertura**, não por `MAX`: para cada `(tabela, dia)` do intervalo esperado,
+  existe linha? Buraco no meio precisa aparecer.
+- **Frescor exposto na API**: as tabelas novas carregam `synced_at`, e os endpoints
+  passam a devolvê-lo — o frontend já sabe exibir `refreshed_at` e a faixa de
+  confiança da Gerencial já tem lugar para isso.
+- `/health-datasource` deve passar a reportar também a idade da última sincronização
+  por tabela, e não só `db_connected`.
+- **Tempo Real precisa de critério próprio:** a tela se diz "ao vivo". Com sync de
+  15–30 min ela **não é** ao vivo, e isso precisa ser declarado na interface — o
+  rótulo atual passaria a ser impreciso. Decisão de produto a registrar no Gate S2.
+
+## 16. Alertas
+
+Falha de execução, janela com cobertura incompleta, e divergência de agregados
+fonte × destino. Canal e política de escalonamento seguem a convenção do repositório
+Airflow — **não verificável nesta task** (§24). Sem alerta, um sync que para de rodar
+é indistinguível de um sync que roda: as telas simplesmente ficam velhas em silêncio.
+
+## 17. Segurança e secrets
+
+- DSN do Data Mart e do Neon **somente** como connection/secret do Airflow. Nunca em
+  código, log, mensagem de erro ou artefato.
+- Credencial do Data Mart **read-only** (já existe o papel `datamart-gogroup-reader`).
+- No Neon, o usuário do job precisa de escrita **apenas** no schema `marts` e nas
+  tabelas desta frente.
+- Mensagens de erro sanitizadas, com o padrão já implementado.
+- **Nenhuma credencial nova é criada por esta task.**
+
+## 18. Custos e volume
+
+O incremento diário é pequeno (5 marcas). **A fonte 3 (produto) sai da conta de
+custo desta frente**: já está carregada e sincronizada no Neon (§3.5), e o que resta é
+uma migration aditiva de duas colunas. O peso remanescente está na **cadência intraday
+da fonte 5**, que pertence à fase de Tempo Real. Para as quatro tabelas novas, as
+medições de contagem de linhas e tamanho em disco continuam pré-requisito do gate que
+cria cada uma — sem esses números, estimativa de custo é chute.
+
+## 19. Contrato de compatibilidade da API
+
+A migração é **fonte, não contrato**: o JSON de resposta deve permanecer idêntico.
+
+- `/brand-detail` e `/tempo-real` têm `response_model` — o Pydantic já é a guarda.
+- `/inteligencia` e `/operacoes` **não têm**. Antes de trocar a fonte, é necessário
+  **congelar o formato atual em teste** (snapshot do dicionário retornado, com dados
+  fixos), senão a migração pode mudar o payload sem ninguém perceber.
+- Regra dura: **nenhum campo renomeado, removido ou reordenado** na migração. Campo
+  novo (ex.: `synced_at`) é aditivo e opcional.
+- Nenhum recálculo: se a gold entrega um número, a cópia entrega o mesmo número. Toda
+  divergência é bug, não melhoria.
+
+## 20. Migração endpoint por endpoint
+
+Um endpoint por vez, com a fonte antiga ainda disponível para comparação sob VPN:
+
+1. Criar tabela + sync + backfill.
+2. Comparar, com VPN, a resposta antiga (gold) e a nova (marts) para o mesmo
+   parâmetro — igualdade campo a campo.
+3. Trocar o SQL do service de `gold.` para `marts.`.
+4. Publicar o backend.
+5. Smoke do endpoint em produção.
+6. Só então o próximo.
+
+Nenhum "big bang". A troca de `gold.` para `marts.` desliga o `_uses_datamart()`
+para aquele endpoint — é a linha que remove a dependência de VPN.
+
+## 21. Critérios de aceite
+
+1. Os quatro endpoints respondem **200 em produção**, sem VPN.
+2. Resposta **idêntica** à da fonte gold para os mesmos parâmetros, verificado com VPN.
+3. Sync **idempotente**: duas execuções seguidas produzem o mesmo estado.
+4. Cobertura **sem buracos** no intervalo esperado, verificada por dia.
+5. Falha de validação **não publica** nada (rollback comprovado por teste).
+6. Nenhum DSN em log, erro ou artefato.
+7. `synced_at` exposto e visível na interface.
+8. Zero mudança no payload dos endpoints (testes de contrato).
+9. Alerta dispara quando o sync falha ou a cobertura fica incompleta.
+
+## 22. Riscos e decisões pendentes
+
+| # | Risco / decisão | Severidade | Encaminhamento |
+| --- | --- | --- | --- |
+| 1 | **O executor pode não alcançar o RDS.** Não presumido, não provado | **Bloqueador da integração Airflow** | Dois resultados distintos (§24.1): o **piloto** pode rodar de máquina com VPN e provar schema/carga/idempotência; a **prova operacional do Airflow** exige `SELECT 1` de dentro do worker real. Sem ela, nenhuma afirmação de conectividade do Airflow pode ser feita |
+| 2 | **Repositório Airflow existe** (informado pelo proprietário) mas **não foi localizado nem está visível** com as credenciais desta sessão | **Bloqueador da integração** | §24: falta nome/URL, modelo de hospedagem e rede |
+| 3 | Definição de `v_channel_efficiency` desconhecida | Média | §4.1, decidir com VPN |
+| 4 | ~~Volume da fonte 3 não medido~~ — **resolvido**: a tabela já existe e está sincronizada | — | medir apenas as **quatro tabelas novas**, no gate que cria cada uma |
+| 5 | Cadência de Tempo Real (15–30 min) contradiz o rótulo "ao vivo" | Média | decisão de produto no Gate S2 |
+| 6 | Snapshots sem histórico: 6 e 7 perdem o passado a cada carga | Média | aceitar por ora; `snapshot_date` é decisão de produto. Vale notar que a 6 **já se comporta assim em produção** hoje |
+| 7 | Linha removida na origem não é apagada por upsert puro | Média | publicação por `DELETE` do intervalo + `INSERT` (§9) |
+| 8 | `/inteligencia` e `/operacoes` sem `response_model` | Média | congelar o formato em teste antes de migrar (§19) |
+| 9 | GMV TikTok com frete pode mudar a definição na origem | Baixa para esta frente | frente **separada**; a cópia acompanha a origem (§3.4) |
+| 10 | Concorrência entre o Scheduler atual e o Airflow durante a transição | Média | advisory lock por tabela + desligar o job antigo só depois do novo provado |
+
+---
+
+## 23. Primeira fatia vertical recomendada
+
+**`/operacoes`.** Não é a única defensável, mas é a que mais prova com menos risco:
+
+- Suas três fontes (`ml_gestao_diaria`, `tiktok_brand_daily`, `tiktok_creator_daily`)
+  são **todas séries diárias com watermark natural** — exatamente o padrão que
+  `sync_region_daily.py` já resolveu neste repositório.
+- **Duas das três são reaproveitadas** por `/brand-detail`, então o segundo endpoint
+  fica muito mais barato: sobra `tiktok_product_daily` e a decisão da view.
+- **Nenhuma view a materializar** e nenhum snapshot: o caminho incremental completo é
+  exercitado, que é a parte difícil.
+- **Cadência diária**, compatível com a janela do `full_daily` já agendado.
+- Entrega **valor real**: a tela de Operações volta a funcionar.
+
+**Ordem recomendada:** `/operacoes` → `/brand-detail` → `/inteligencia` →
+**`/tempo-real` por último**. Tempo Real é deliberadamente o fim da fila: grão
+horário, cadência intraday, janela de 2 dias e um rótulo de "ao vivo" que precisa de
+decisão de produto. Misturá-lo na primeira fatia acopla o problema fácil ao difícil.
+
+**Não publicar as quatro de uma vez.** O modo de falha de um big bang aqui é o pior
+possível: quatro telas trocando de fonte ao mesmo tempo, sem baseline de comparação,
+com a fonte antiga inacessível para conferência a partir de produção.
+
+---
+
+## 24. Auditoria do repositório Airflow — EXISTE, MAS NÃO VISÍVEL NESTA SESSÃO
+
+**Fato correto:** o proprietário informou que **existe um repositório Airflow na
+organização**. Ele **não foi localizado nem está visível** com as credenciais desta
+sessão. Plataforma, URL, modelo de hospedagem e topologia de rede **ainda não foram
+informados**, e **nenhuma DAG foi inspecionada, configurada ou executada**.
+
+Nada foi instalado, nenhuma credencial foi criada, nenhum clone foi feito.
+
+O que foi tentado, read-only, pelo acesso GitHub já configurado:
+
+| Busca | Resultado |
+| --- | --- |
+| `org:b2b-gogroup airflow` | 0 repositórios |
+| `org:b2b-gogroup` (todos) | 1 repositório: `b2b-agent` — não é Airflow |
+| `user:Switerz airflow` | 0 repositórios |
+| `user:Switerz` (todos) | 8 repositórios, nenhum de Airflow (`mktplace`, `markov`, `finance`, `gotrends`, `gotrends2`, `gti`, `formstransp`, perfil) |
+| `org:gocase` | 0 repositórios visíveis |
+| busca de código (`DAG airflow`) | **falhou**: `Authentication Failed: Requires authentication` — o token disponível não faz code search |
+
+**Informação que falta, exatamente:**
+
+1. **nome e URL** do repositório Airflow (org e repo) — ele existe; o que falta é
+   sabermos onde;
+2. **acesso de leitura** para o token/credencial já usado por este ambiente — o token
+   atual enxerga apenas repositórios públicos de `Switerz` e `b2b-gogroup`, e não faz
+   code search;
+3. se o Airflow é **auto-hospedado ou gerenciado** (MWAA, Composer, Astronomer), o que
+   muda profundamente connections, deploy e rede.
+
+Portanto **nada foi possível inspecionar** sobre: estrutura de DAGs, padrão de
+connections/secrets, operators/hooks disponíveis, ambientes e forma de deploy,
+convenções de retries/pools/timeouts/SLAs/alertas, acesso esperado ao Data Mart,
+acesso esperado ao Neon, testes e CI, política de backfill, e exemplos de cargas
+Postgres → Postgres.
+
+**Isto não bloqueia o blueprint** — o desenho de §3 a §23 é independente do
+orquestrador. Bloqueia a **integração concreta**, que passa a ser dependência
+declarada do Gate S1.
+
+### 24.1 Dois resultados distintos, que não se substituem
+
+**Não se presume que o worker do Airflow alcance o Data Mart.** O RDS exige VPN, e o
+Render — outro serviço gerenciado — não a tem. A confusão a evitar é tratar "o sync
+rodou" como "o Airflow funciona". São duas provas separadas:
+
+**1. Piloto técnico do módulo** — pode ser feito já:
+
+- implementado e testado **neste** repositório;
+- executado **manualmente**, de uma máquina com VPN;
+- prova **schema, carga, idempotência e reconciliação** fonte × destino;
+- **não prova nada sobre o Airflow**: nem conectividade, nem secrets, nem agendamento.
+
+**2. Prova operacional do Airflow** — só de dentro do ambiente real:
+
+- executada **de dentro do worker/executor** do Airflow;
+- `SELECT 1` contra o **Data Mart**;
+- acesso de escrita ao **Neon**;
+- confirmação de que **secrets/connections** resolvem;
+- **obrigatória** antes de declarar a integração Airflow pronta.
+
+**Consequências, se o repositório/worker continuar inacessível:**
+
+- o Gate S1 pode chegar no máximo a **`PARTIAL — PILOTO VALIDADO`**;
+- **não** pode ser marcado como concluído;
+- o Gate S2 **não** pode ativar DAG nem agendamento — a migração do endpoint fica
+  dependente de execução manual documentada, e isso precisa estar declarado na tela
+  (frescor) e no runbook;
+- **nenhuma alegação de conectividade do Airflow pode ser feita** em documento,
+  relatório ou status.
+
+Se o worker não alcançar o RDS, a alternativa é um executor em rede com VPN (papel que
+hoje o Windows Task Scheduler cumpre) publicando no Neon, com o Airflow apenas
+orquestrando e observando — o desenho de §3 a §23 não muda.
+
+### 24.2 O que este repositório já oferece como precedente
+
+Independente do Airflow, o padrão de sync **já existe e está auditado** aqui:
+
+- `pipelines/sync_region_daily.py` — Data Mart → Neon de `gold.marketplace_region_daily`
+  para `marts.fact_marketplace_region_daily`: leitura integral da fonte, transação
+  única no Neon com `LOCK TABLE ... ACCESS EXCLUSIVE`, staging `TEMP ... ON COMMIT
+  DROP`, validação por agregados calculados em Python (contagem + somas), checagem de
+  duplicidade na chave e de nulos, backup por tag antes de tocar a tabela real,
+  `TRUNCATE`+`INSERT`, e `EXCEPT` staging × real dentro do Neon depois do insert.
+  Tem também `_sanitize_error_message` para não vazar DSN.
+- `pipelines/sync_produtos.py` — mesmo espírito, para produtos.
+- `pipelines/ops/` — `health_check.py`, `orchestrate.py`, `preflight.py`,
+  `schedule_plan.py`, `sync_region_if_needed.py`: preflight de privilégios, plano de
+  agendamento e health check já implementados.
+- `apps/api/alembic/versions/` — cinco migrations, a última justamente
+  `005_create_fact_marketplace_region_daily.py`: o molde do DDL das tabelas novas.
+
+**Consequência prática:** a lógica de sync pode ser escrita e testada **neste
+repositório**, como módulo importável, e a DAG do Airflow ficar sendo apenas o
+agendador que a invoca. Isso reduz o acoplamento ao orquestrador desconhecido e
+permite avançar no Gate S1 mesmo antes de resolver o acesso ao repositório Airflow.
+
+---
+
+## 25. Roadmap — três gates
+
+Nenhum deles foi executado. Os três são sequenciais, e o S1 é pré-requisito duro.
+
+### Gate S1 — provar acesso e publicar a primeira tabela
+
+**Objetivo:** publicar **uma** tabela nova ponta a ponta e provar o **piloto técnico**
+(§24.1, resultado 1), sem trocar nenhum endpoint. A **prova operacional do Airflow**
+(resultado 2) é objetivo do mesmo gate **somente se** o repositório/worker estiver
+acessível; se não estiver, o gate encerra como **`PARTIAL — PILOTO VALIDADO`**.
+
+| Item | Conteúdo |
+| --- | --- |
+| **Repositório** | este (`mktplace`) para o módulo de sync e a migration; repositório Airflow **apenas** para o teste de conectividade, se localizado |
+| **Arquivos prováveis** | `apps/api/alembic/versions/006_create_fact_ml_gestao_diaria.py`; `pipelines/sync_ml_gestao_diaria.py` (moldado em `sync_region_daily.py`); `pipelines/tests/` |
+| **Escrita autorizada** | migration DDL no Neon (`marts`), e escrita de dados **somente** na tabela nova. Nenhuma tabela existente é tocada |
+| **Dependências** | acesso VPN ao Data Mart **para o executor do piloto** (máquina local serve); para a prova operacional, nome/URL/acesso do repositório Airflow e do worker |
+| **Testes** | idempotência (duas execuções → mesmo estado); rollback em validação falha; dedup na chave; cobertura sem buracos; nenhum DSN em log; agregados fonte × destino idênticos |
+| **Aceite (piloto)** | tabela criada e carregada; agregados fonte × destino batendo; segunda execução sem diferença; rollback comprovado; contagem de linhas e tamanho em disco **medidos e registrados** |
+| **Aceite (Airflow)** | `SELECT 1` no Data Mart **de dentro do worker**, escrita no Neon e secrets resolvendo. **Sem isso, o gate é `PARTIAL`** |
+| **Stop-loss** | se **nem o piloto** alcançar o RDS (máquina com VPN inclusive), **parar** e replanejar a arquitetura — não tentar contorno por túnel improvisado. Se só o worker não alcançar, encerrar `PARTIAL` e reportar, sem afirmar conectividade do Airflow |
+
+### Gate S2 — migrar `/operacoes` (primeira fatia vertical completa)
+
+**Objetivo:** completar as três tabelas de `/operacoes` e trocar a fonte do endpoint,
+com comparação contra a gold antes da troca.
+
+| Item | Conteúdo |
+| --- | --- |
+| **Repositório** | este, para tabelas, sync, service e testes; repositório Airflow para a DAG diária |
+| **Arquivos prováveis** | migrations `007`/`008` (`fact_tiktok_brand_content_daily`, `fact_tiktok_creator_daily`); syncs correspondentes; `apps/api/app/services/gold_service.py` (`get_operacoes`: `gold.` → `marts.`); teste de contrato congelando o payload atual |
+| **Escrita autorizada** | DDL e dados nas tabelas novas; **publicação do backend no Render** ao final |
+| **Dependências** | Gate S1 com piloto validado; backfill histórico executado. **DAG/agendamento somente se o worker estiver provado** (§24.1); caso contrário, execução manual documentada em runbook e frescor declarado na tela |
+| **Testes** | contrato: payload de `/operacoes` **idêntico** ao atual (snapshot com dados fixos); comparação gold × marts com VPN; suíte da API verde |
+| **Aceite** | `/operacoes` em **200 em produção sem VPN**, com payload idêntico ao contrato congelado; `synced_at` exposto; cobertura sem buracos; alerta configurado **se** houver Airflow provado — senão, o runbook declara a operação manual |
+| **Stop-loss** | qualquer divergência de payload ou de número **para** a troca. Não migrar "quase igual" |
+
+### Gate S3 — migrar `/brand-detail` e `/inteligencia`
+
+**Objetivo:** fechar os dois endpoints restantes de cadência diária **reutilizando as
+duas fatos de produto que já existem** e criando apenas o destino realmente ausente.
+`/tempo-real` **não** entra aqui — §25.3.
+
+| Item | Conteúdo |
+| --- | --- |
+| **Repositório** | este; repositório Airflow para as DAGs, **se** o worker estiver provado |
+| **Reuso obrigatório** | `marts.fact_ml_produto_ranking` (**nada a fazer**) e `marts.fact_tiktok_product_daily` (**migration aditiva** de `active_videos` e `video_views`, mais o `SELECT` de `sync_produtos.py` estendido). **Nenhuma tabela nova de produto**, nenhuma segunda verdade |
+| **Única tabela nova** | `marts.fact_ml_cross_company_summary` (snapshot por marca, substituição integral) |
+| **Arquivos prováveis** | migration aditiva das duas colunas; migration de `fact_ml_cross_company_summary`; `pipelines/sync_produtos.py` (lista de colunas); sync novo do cross-company; `get_brand_detail` e `get_inteligencia` de `gold.` → `marts.` |
+| **Escrita autorizada** | DDL aditivo em `fact_tiktok_product_daily`; DDL e dados em `fact_ml_cross_company_summary`; recarga das duas colunas novas na fato existente; publicação do backend |
+| **Dependências** | Gate S2 aprovado; **decisão sobre `v_channel_efficiency`** (§4.1) com a definição da view em mãos |
+| **Testes** | contrato dos dois endpoints (o de `/inteligencia` **precisa ser criado**, pois não há `response_model`); **regressão da página de Produtos**, que consome as duas fatos existentes e não pode quebrar; substituição integral idempotente; comparação com VPN |
+| **Aceite** | os dois endpoints em 200 em produção sem VPN, payload idêntico; `/produtos` **sem regressão**; a seção de `brand-detail` que depende da view resolvida **ou declaradamente indisponível**, nunca aproximada |
+| **Stop-loss** | se a definição da view não puder ser lida, **não** reimplementar por engenharia reversa: manter a seção indisponível e reportar. Qualquer regressão em `/produtos` para o gate |
+
+### 25.1 Separação por natureza de mudança
+
+| Natureza | Onde | Gates |
+| --- | --- | --- |
+| **Alterações neste repositório** | módulos de sync em `pipelines/`, migrations em `apps/api/alembic/versions/`, SQL dos services em `gold_service.py`, testes | S1, S2, S3 |
+| **Alterações no repositório Airflow** | DAGs, connections, pools, alertas | S1 (só teste de conectividade), S2, S3 |
+| **SQL/migrações no Neon** | `CREATE TABLE` em `marts` + índices + `CHECK` | S1, S2, S3 |
+| **Publicação do backend Render** | somente quando o SQL de um service muda de `gold.` para `marts.` | S2, S3 |
+| **Backfill inicial** | carga histórica por tabela, com backup por tag | S1 (uma tabela), S2, S3 |
+
+### 25.2 O que fica fora dos três gates
+
+A decisão do **GMV TikTok com frete** (frente separada, §3.4) e as dívidas de
+acessibilidade dos filtros. Também fica fora qualquer mart de serving derivado: só se
+uma consulta se provar lenta no Neon, medido, não suposto.
+
+### 25.3 `/tempo-real` — próxima fase, não resolvido
+
+Os três gates **não comportam** `/tempo-real`, e a classificação honesta é
+**próxima fase**, não "resolvido". Razões:
+
+- grão **horário** (`date_brt`, `hour_brt`), o único fora do padrão diário;
+- cadência **intraday**: a tela recarrega a cada 5 min, e um sync de 15–30 min exige
+  agendamento próprio, não a janela do `full_daily`;
+- uma **decisão de produto pendente**: com sync de 15–30 min a tela **não é** "ao
+  vivo", e o rótulo atual passaria a ser impreciso (§15);
+- exige a tabela nova `marts.fact_tiktok_hourly`, que **não é criada** em S1–S3.
+
+**Consequência a declarar:** ao fim dos três gates, três das quatro superfícies do
+Gate G4 voltam a funcionar (`/operacoes`, `/brand-detail`, `/inteligencia`) e
+**`/tempo-real` continua indisponível em produção**. Isso deve constar de qualquer
+relatório de encerramento — nada de "camada de serving concluída" com uma tela ainda
+sem fonte.

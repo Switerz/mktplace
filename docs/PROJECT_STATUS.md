@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 10/08/2026 (**Revamp Visual V2 — `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: `/tempo-real`, `/inteligencia` e `/operacoes` sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S0 Task 1 concluída, blueprint aprovado**, documental e read-only, sem DAG/schema/sync implementados e com o **S1 não iniciado**. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -938,12 +938,15 @@ Produtos sem regressão. **Zero finding causado pelo release.** A correspondênc
 commit é comprovada **comportamentalmente** — não houve acesso ao painel autenticado
 da Vercel.
 
-**Restrição operacional aberta (não é regressão do Revamp):**
+**Restrição operacional aberta (não é regressão do Revamp):** as **quatro**
+superfícies do Gate G4 — `/api/v1/performance/brand-detail`,
 `/api/v1/performance/tempo-real`, `/api/v1/performance/inteligencia` e
-`/api/v1/performance/operacoes` respondem **500** porque dependem do **Data Mart,
-inalcançável a partir do Render** (Gate G4). No browser o erro aparece rotulado como
-CORS apenas porque a resposta 500 não carrega o cabeçalho de origem; o CORS está
-correto. As três páginas degradam honestamente, mas a Torre **permanece incompleta**
+`/api/v1/performance/operacoes` — respondem **500** porque dependem do **Data Mart,
+inalcançável a partir do Render** (Gate G4). *A redação anterior desta seção citava
+apenas três: `/brand-detail` também falha, e o smoke não o detectou por janela de
+espera curta — corrigido no Gate S0.* No browser o erro aparece rotulado como CORS
+apenas porque a resposta 500 não carrega o cabeçalho de origem; o CORS está correto.
+As **quatro** páginas degradam honestamente, mas a Torre **permanece incompleta**
 nessas superfícies. Corrigir CORS isoladamente não resolve: falta **fonte**. A
 correção definitiva exige uma camada de serving acessível ao backend — a direção
 recomendada é materializar/sincronizar esses dados no Neon por uma orquestração
@@ -955,10 +958,73 @@ tamanho mínimo de alvo, e a decisão do **GMV TikTok com frete** ainda pendente
 (produção em `sub_total`). Detalhe em §17 do
 [UI_REVAMP_V2_PLAN.md](UI_REVAMP_V2_PLAN.md).
 
+### Gate S0, Task 1 concluída — blueprint aprovado (camada de serving Data Mart → Neon)
+
+**CONCLUÍDA e APROVADA em 11/08/2026**, após uma rodada consolidada de correção.
+Auditoria e blueprint, **read-only e documental**: **nenhuma DAG, schema, sync,
+endpoint ou migração foi implementado**, e **o Gate S1 não foi iniciado**. Nada de
+serving, Airflow ou endpoint foi corrigido — as quatro superfícies seguem
+indisponíveis em produção. O **Revamp
+Visual V2 permanece encerrado** (V2-0 a V2-4, publicado e validado).
+
+**Correção factual sobre o smoke de 10/08/2026.** Aquele smoke reportou 500 em três
+superfícies e tratou `/brand-detail` como saudável. **Estava errado, por limitação do
+instrumento:** a passagem rápida esperava 2,2s por rota e o request de `brand-detail`
+— disparado depois do `/daily` na página de Marca — não concluía nessa janela. Medido
+agora com 9s e por `curl` direto: **as quatro superfícies do Gate G4 respondem 500**
+(`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`). O G4 estava certo.
+
+Causa confirmada e inalterada: os quatro endpoints leem `gold.*` e são roteados ao
+Data Mart (RDS), que **exige VPN** e é inalcançável do Render. O rótulo de CORS no
+navegador é consequência de a resposta 500 não carregar `Access-Control-Allow-Origin`
+— o CORS está correto, e ajustá-lo **não resolve**: falta fonte.
+
+**Desenho recomendado:** copiar as fatos estáveis da gold para `marts.*` no grão da
+origem (sem transformação, sem cache por endpoint), com sync por janela móvel em
+transação única, staging temporária, validação por agregados, publicação atômica e
+health check **por cobertura**, não por `MAX(data)`. **Quatro** tabelas novas mapeadas — não sete: `marts.fact_ml_produto_ranking` e
+`marts.fact_tiktok_product_daily` **já existem**, são sincronizadas por
+`pipelines/sync_produtos.py` e já servem a página de Produtos, e serão **reutilizadas**
+(à segunda falta apenas uma migration aditiva de `active_videos` e `video_views` para
+atender `/brand-detail`). Três fontes servem dois endpoints cada, o que é o argumento
+contra cache por formato de resposta. O padrão já existe e está auditado neste repositório em
+`pipelines/sync_region_daily.py`.
+
+**Primeira fatia vertical recomendada: `/operacoes`** — três fontes diárias com
+watermark natural, duas delas reaproveitadas por `/brand-detail`, sem view a
+materializar e sem snapshot. `/tempo-real` fica deliberadamente **por último**: grão
+horário, cadência intraday e um rótulo "ao vivo" que precisa de decisão de produto.
+
+**Dois bloqueadores declarados:**
+
+1. **O repositório Airflow existe** (informado pelo proprietário), mas **não foi
+   localizado nem está visível** com as credenciais desta sessão — falta nome/URL,
+   leitura para o token disponível (que enxerga só repositórios públicos de
+   `Switerz` e `b2b-gogroup`, e não faz code search), e o modelo de hospedagem/rede.
+   **Nenhuma DAG foi inspecionada, configurada ou executada.** Não bloqueia o
+   blueprint; bloqueia a integração concreta.
+2. **Não se presume que o worker alcance o Data Mart, e piloto não é prova.** O
+   **piloto técnico** do módulo pode rodar de máquina com VPN e provar schema, carga,
+   idempotência e reconciliação — mas **não** prova Airflow. A **prova operacional**
+   exige `SELECT 1` no Data Mart, escrita no Neon e secrets resolvendo **de dentro do
+   worker real**. Sem ela, o Gate S1 encerra como `PARTIAL — PILOTO VALIDADO`, o S2
+   não ativa DAG nem agendamento, e nenhuma alegação de conectividade do Airflow pode
+   ser feita.
+
+Roadmap proposto em três gates, sem nenhum executado — S1: piloto e primeira tabela
+nova (`fact_ml_gestao_diaria`); S2: `/operacoes` ponta a ponta com as duas fatos
+TikTok novas; S3: `/brand-detail` e `/inteligencia`, **reutilizando** as fatos de
+produto existentes e criando só `fact_ml_cross_company_summary`. **`/tempo-real` fica
+para uma fase seguinte** (grão horário, cadência intraday e decisão de produto sobre o
+rótulo "ao vivo"): ao fim dos três gates ele **continuará indisponível em produção**,
+e isso não deve ser lido como camada de serving concluída. A decisão do **GMV TikTok com frete permanece frente separada** e não
+entra nesta arquitetura: produção segue em `sub_total`. Blueprint completo em
+[SERVING_AIRFLOW_PLAN.md](SERVING_AIRFLOW_PLAN.md).
+
 ## Próximas prioridades
 
-1. Desenhar a **camada de serving acessível** para Tempo Real, Inteligência e Operações — hoje sem fonte em produção.
-2. Integrar essa materialização ao **futuro Airflow** (ainda não existente, não configurado e não executado), eliminando a dependência síncrona Render → Data Mart/VPN.
+1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 não iniciado.**
+2. Integrar essa materialização ao **Airflow da organização** — que **existe** segundo o proprietário, mas **não foi localizado nem está visível** com as credenciais desta sessão, e cuja plataforma, URL, hospedagem e rede ainda não foram informadas; **nenhuma DAG foi inspecionada, configurada ou executada** —, eliminando a dependência síncrona Render → Data Mart/VPN.
 3. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
 4. Manter a decisão do **GMV TikTok com frete** como frente separada.
 5. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
