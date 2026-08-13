@@ -926,3 +926,258 @@ com reconciliação e isolamento de janela provados.
 existe, está configurado ou tem conectividade — §24 permanece a referência, e a prova
 operacional continua pendente de nome/URL, acesso, modelo de hospedagem e `SELECT 1`
 executado de dentro do worker real.
+
+## 27. Gate S2, Task 1/3 — contrato, schemas e sync locais (11/08/2026)
+
+**Estado: implementada localmente, aguardando revisão.** Nenhuma migration aplicada,
+nenhuma tabela TikTok criada no Neon, endpoint ainda em `gold.*`, Airflow não comprovado.
+O Neon segue em `alembic_version = 006` e `marts` segue com 32 relações.
+
+### 27.1 Auditoria read-only das duas fontes
+
+Janela fechada `date <= 2026-08-10`. As duas são **TABELAS** (não views) e **nenhuma tem
+PK ou UNIQUE físico**: o grão é convenção na Gold e passa a ser restrição no destino.
+
+Números **já com a allowlist oficial de cinco marcas** aplicada (ver §27.8).
+
+| | `gold.tiktok_brand_daily` | `gold.tiktok_creator_daily` |
+| --- | --- | --- |
+| grão | `(date, brand)` | `(date, brand, creator)` |
+| linhas / chaves | **1.546 / 1.546** | **184.252 / 184.252** |
+| duplicidade | **0** | **0** |
+| intervalo | 05/10/2025 – 10/08/2026 | 07/10/2025 – 10/08/2026 |
+| datas / dias sem linha | 310 / **0** | 308 / **0** |
+| marcas | **5** (allowlist oficial) | **5** (allowlist oficial) |
+| colunas totais | 68 | 18 |
+| colunas consumidas | 37 | 9 |
+| nulos em obrigatórias | **0** (21 colunas) | **0** (9 colunas) |
+| NaN | **0** (35 colunas) | **0** (6 colunas) |
+| linhas descartadas pelo filtro de marca | 398 | 13.282 |
+| criadores distintos | — | 22.074 |
+
+Quatro achados que moldaram o desenho:
+
+1. **Cobertura de ~10 meses, não 13.** As fontes começam em 05/10 e 07/10/2025 — **87 e
+   89 dias depois** do piso de 13 meses. O piso vale "quando a fonte possuir essa
+   cobertura", então o backfill leva **todo o histórico disponível** e o diagnóstico
+   **declara o déficit** em cada execução, em vez de omiti-lo.
+2. **`total_live_minutes` tem 2 valores negativos**, um deles **−29.545.461**, em
+   03/04/2026 e 06/05/2026, ambos em marcas do escopo. A soma histórica da coluna fica
+   **negativa** (−8.485.885): os negativos somam −59.026.387 contra +50.540.502 dos
+   válidos. É defeito de dado na ingestão TikTok. Impacto no payload atual de
+   `/operacoes`: **zero**, porque o bloco `lives` usa janela de 30 dias e as linhas ruins
+   são de abril/maio. Consequência de desenho: **proibido CHECK `>= 0`** nessa coluna —
+   copiar exatamente é o contrato desta task, e corrigir a origem pertence ao pipeline de
+   ingestão, não à camada de serving.
+3. **`total_fees` é negativa em 1.529 de 1.546 linhas** (mín. −266.342,00). É taxa;
+   negativo é o esperado. Também sem CHECK de não-negatividade.
+4. **14 colunas de demografia são 100% nulas** e `visitors`/`customers` são nulas em
+   68,6% e 48,2%. `brand-detail` calcula médias ponderadas sobre elas, que hoje retornam
+   sempre `NULL`. São opcionais e ficam fora da exigência de não-nulo.
+
+### 27.2 A regra de nulabilidade
+
+Mecânica e baseada em evidência, a mesma do Gate S1: **NOT NULL somente onde a auditoria
+provou zero nulos em todo o histórico.** Resultado: 21 de 37 colunas NOT NULL na
+`brand_content`, e **todas as 9** na `creator_daily`, que não tem um único nulo.
+
+### 27.3 Contrato congelado de `/operacoes`
+
+`apps/api/tests/test_operacoes_contract.py`, **30 testes**, sem banco e sem produção
+(que responde 500 no Render). Intercepta `gold_service._query` — o ponto certo, porque
+`_query` roteia `gold.*` para o `datamart_engine` e uma Session falsa nem seria
+consultada — e congela `date.today()` em 11/08/2026.
+
+Congela os cinco blocos (`alertas`, `ml_velocity`, `creators`, `lives`, `tk_daily`) campo
+a campo: nomes, tipos, nulabilidade, arredondamentos (1 casa em `pct_live`, 2 nos
+demais), ordenação, `LIMIT 30`, `HAVING SUM(total_lives) > 0`, as janelas de 7/14/30
+dias, os filtros de marca e o comportamento de lista vazia.
+
+Duas sutilezas ficaram explicitamente congeladas, porque mudá-las na troca de fonte
+alteraria o payload:
+
+- **falsy-para-`None`**: `if r.get("roas_7d")` trata **0 como ausente**. Um ROAS de
+  exatamente 0 sai como `null`, não como `0.0`. Vale igual para `gpm_video`, `pct_live`,
+  `gmv_per_live` e `gmv_per_minute`;
+- **precedência do `elif`**: gasto sem venda gera `ad_sem_gmv` (crítico) e **nunca** é
+  rebaixado a `roas_baixo`, mesmo quando as duas condições valeriam.
+
+Há também um teste que prova que `get_operacoes` **ainda lê `gold.*`** e não menciona
+`marts.*` — a troca é a Task 3/3.
+
+### 27.4 Migrations 007 e 008 — escritas, não aplicadas
+
+Cadeia linear `006 → 007 → 008`, head único `008`, verificada por `alembic history` sem
+aplicar.
+
+| | 007 | 008 |
+| --- | --- | --- |
+| tabela | `marts.fact_tiktok_brand_content_daily` | `marts.fact_tiktok_creator_daily` |
+| PK | `(date, brand)` | `(date, brand, creator)` |
+| índice | `idx_ftbcd_brand_date (brand, date)` | `idx_ftcd_brand_date (brand, date)` |
+| colunas | 37 negócio + 2 auditoria | 9 negócio + 2 auditoria |
+
+Ambas: criação **fail-fast** sem `IF NOT EXISTS`, zero `SELECT` e zero DML, nada
+executado no import (verificado por AST), `downgrade` restrito aos próprios dois objetos.
+
+**`NUMERIC` sem escala declarada**, igual à fonte. Fixar `NUMERIC(18,2)` arredondaria e
+quebraria a igualdade de payload que o Gate S2 precisa provar — é uma diferença
+deliberada em relação à 006.
+
+**Por que o nome tem `content`.** As colunas de valor destas tabelas pertencem à linhagem
+de **conteúdo** do TikTok, que não é o GMV oficial do marketplace: o canônico é calculado
+da Raw com `sub_total` e allowlist de status, a Gold calcula sobre o valor antigo
+(≈`total_amount`) e fica **+2,43%** acima, e `gmv_video`/`gmv_live`/`gmv_card` **não
+decompõem** o GMV de pedidos. O sufixo existe para que ninguém some `gmv` desta tabela
+como GMV do canal.
+
+### 27.5 Sync — um módulo, duas specs literais
+
+`pipelines/sync_tiktok_serving.py`. As duas tabelas têm mecânica idêntica e diferem só em
+origem, destino, chave e colunas: duas cópias de 400 linhas envelheceriam divergindo, e
+um framework genérico seria abstração prematura. O meio-termo é **um módulo com duas
+`TableSpec` literais e fixas** — nada descoberto em runtime, e uma terceira tabela exige
+escrever a spec à mão.
+
+Contratos implementados: Data Mart aberto `readonly=True`; diagnóstico como **padrão** e
+escrita só sob `--apply`; janela sempre terminando em **D−1** com o dia corrente recusado
+explicitamente; incremental móvel com **mínimo de 7 dias fechados** (lookback menor é
+erro); **transação única e advisory lock próprio por tabela** (`907120007` e `908120008`,
+distintos entre si e do `906120006` do S1); staging `pg_temp ... ON COMMIT DROP`;
+`DELETE` só da janela + `INSERT` com lista explícita de colunas; validação de chave,
+nulos, NaN, negativos e cobertura antes de qualquer escrita; agregados fonte × staging ×
+destino; `EXCEPT` bidirecional; rollback integral; erros sanitizados; zero
+retry/backoff/sleep/agendamento; zero escrita em Gold/Raw/Silver; zero dependência de
+Airflow.
+
+**Por que `DELETE` da janela e não `ON CONFLICT DO UPDATE`:** upsert **não apaga**. Se uma
+linha desaparecer da fonte dentro da janela — dia reprocessado, criador removido, marca
+sem movimento — o upsert a deixaria órfã no destino para sempre. Dois testes provam a
+remoção retroativa refletida, um por tabela.
+
+### 27.6 Por que a mudança de GMV não pode entrar no S2
+
+A decisão de incluir frete altera `pipelines/connectors/tiktok/connector.py` e **muda o
+GMV retroativamente em toda a série**, exigindo recarga do histórico. Se ela entrasse
+nesta frente, as duas provas centrais do S2 ficariam impossíveis de interpretar:
+
+1. **a comparação Gold × Marts** compararia números calculados por regras diferentes; uma
+   divergência não distinguiria erro de cópia de mudança de definição;
+2. **a garantia de payload idêntico** perderia sentido: o payload mudaria de propósito, e
+   o teste de contrato — cuja única função é falhar quando a troca de fonte altera algo —
+   teria de ser reescrito exatamente no momento em que precisa ser imutável.
+
+São mudanças de natureza distinta: uma troca **de onde o dado vem**, a outra troca **o que
+o dado significa**. Misturá-las tira a capacidade de saber qual das duas quebrou. Produção
+segue em `sub_total`, esta task copia exatamente o que a Gold serve, e a escolha entre
+`total_amount` e `sub_total + shipping_fee` continua pendente na frente separada.
+
+### 27.7 Plano operacional da Task 2/3
+
+Pré-condição, com a lição do S1: confirmar ausência de escrita concorrente por
+**crescimento de relação em amostragem dupla**, nunca por silêncio de WAL, e com filtro
+`locktype = 'relation'` nos locks — o processo de replay da réplica mantém
+`AccessExclusiveLock` rotineiramente, e `ExclusiveLock` sobre `virtualxid` existe em toda
+sessão.
+
+Sequência: fingerprint duplo das duas fontes (≥30 s) → `alembic upgrade 007` → conferir
+contrato físico → `alembic upgrade 008` → conferir → diagnóstico de backfill das duas →
+`--apply --backfill --table brand` → reconciliar → `--apply --backfill --table creator`
+→ reconciliar → incremental de 7 dias nas duas → reconciliação final.
+
+Volume esperado: **1.546** linhas na `brand_content` e **184.252** na `creator_daily`,
+medidos em dry-run read-only com a allowlist. A `creator_daily` é ~119× a `brand_content`
+e ~114× a fato do S1 — é a primeira publicação deste porte da camada de serving, e o
+`statement_timeout` do destino já está em 300 s por isso.
+
+**Corte comum explícito — obrigatório na Task 2/3.** As duas tabelas Gold não são
+carregadas em sincronia: em 12/08/2026, `tiktok_brand_daily` já tinha 11/08 e
+`tiktok_creator_daily` não. A validação de cobertura recusa a janela nesse caso, e isso é
+o comportamento correto — **não deve ser afrouxado no código**. A regra fica no preflight,
+que calcula:
+
+```
+common_date_to = min(D−1,
+                     MAX(date) de gold.tiktok_brand_daily,
+                     MAX(date) de gold.tiktok_creator_daily)
+```
+
+A primeira carga das duas tabelas usa **esse mesmo corte comum, passado explicitamente**
+via `--date-from/--date-to`, nunca a janela default. Assim as duas fatos ficam alinhadas na
+mesma data de fechamento, e a reconciliação entre elas é interpretável.
+
+**Se alguma das fontes não tiver cobertura contínua até `common_date_to`, a operação
+para.** Não se publica janela com dia vazio, e não se ajusta a validação para aceitá-la: um
+buraco no meio da série é achado a investigar na origem, não obstáculo a contornar no
+serving.
+
+Contraprova de idempotência pendente do S1: comparar **apenas chaves e campos de
+negócio**, admitindo atualização de `synced_at` e `source_run_id`.
+
+### 27.8 Minimização de dados — somente as cinco marcas oficiais
+
+A Gold contém marcas além das cinco autorizadas, e **nenhuma delas tem consumidor na
+Torre**: `/brand-detail` recusa marca fora da lista e `/operacoes` filtra por
+`BRANDS_IN_SCOPE`. Copiar o excedente não serviria a nenhuma tela e ampliaria sem
+necessidade a superfície de dado pessoal, porque `creator` é handle público
+potencialmente identificável.
+
+O sync usa a **allowlist oficial**, importada de
+`pipelines.connectors.tiktok.connector.BRANDS_IN_SCOPE`. Não há uma segunda lista no
+módulo de serving: um teste verifica a **identidade** (`is`) com a tupla do conector, e
+outro proíbe qualquer marca literal no código. Uma terceira cópia divergiria da primeira
+no dia em que uma marca entrasse ou saísse, e o sync passaria a publicar um conjunto que
+nenhum consumidor autoriza.
+
+O filtro é **parametrizado** — `brand = ANY(%(brands)s)`, com a lista indo como parâmetro
+nas duas queries. Interpolar `IN ('a','b')` funcionaria hoje e viraria injeção no dia em
+que a lista viesse de fora do código; há teste garantindo que nenhum valor da allowlist
+aparece no texto do SQL. Como defesa em profundidade, `validate_source_rows` reprova a
+fotografia se qualquer marca externa aparecer, e a mensagem informa **a quantidade, nunca
+os nomes**.
+
+Efeito medido, em janela histórica até 10/08/2026: **398** linhas descartadas na
+`brand_daily` (1.944 → 1.546, −20,5%) e **13.282** na `creator_daily`
+(197.448 → 184.252, −6,7%); criadores distintos caem de 22.913 para **22.074**. O
+`source_min_date` das duas fontes **não muda** com o filtro (05/10 e 07/10/2025), e os
+dois valores negativos de `total_live_minutes` continuam dentro do escopo — seguem sendo
+copiados exatamente, como dívida da origem.
+
+### 27.9 Reconciliação exata em `Decimal`
+
+A reconciliação **não usa `float` em nenhum caminho**. `float` tem 53 bits de mantissa, e
+somar ~184 mil valores monetários em ponto flutuante acumula erro de representação; o
+Postgres soma `NUMERIC` em decimal exato. A comparação confrontaria dois números
+calculados em aritméticas diferentes e poderia divergir por centavos sem nada estar errado
+no dado — ou, pior, esconder uma divergência real dentro da margem.
+
+`_dec()` preserva o `Decimal` que vem do psycopg2, converte inteiro exatamente, usa
+`Decimal(str(x))` para os demais tipos (nunca `Decimal(float)`, que herdaria o erro
+binário), recusa booleano e trata nulo como `Decimal("0")` **apenas nas somas**, onde o
+contrato vigente do endpoint já faz `COALESCE(..., 0)`. Isso não afeta a contagem de
+não-nulos das razões nem a validação de obrigatórias.
+
+Os agregados **não são arredondados** antes da comparação — arredondar esconderia
+divergência real dentro da tolerância. `aggregates_from_rows` e `aggregates_from_table`
+produzem `Decimal` dos dois lados, e `compare_aggregates` compara valor exato. A
+comparação é de **valor**, não de escala: `Decimal("100")` e `Decimal("100.0000")` são
+iguais, o que é o comportamento correto para `SUM` vindo de colunas com escalas
+diferentes. `_print_agg` formata com `:f` para evitar notação científica, lendo do
+dicionário sem escrever de volta.
+
+**Contraprova adversarial**, com o volume real da fato de criador — 197.448 ocorrências de
+`12345.67891`:
+
+| Aritmética | Total |
+| --- | --- |
+| `Decimal` (exato) | `2437629609.42168` |
+| `float` + `round(…, 4)` (implementação anterior) | `2437629609.4189` |
+| diferença | **−0,00278** |
+
+Não é erro de arredondamento benigno: é desvio real, do tipo que uma tolerância monetária
+silenciosa esconderia. No caso pequeno, `sum(0.1 × 10)` em `float` dá
+`0.9999999999999999` e nunca é igual a `1.0`; em `Decimal`, dá exatamente `1.0`.
+
+Preservados sem mudança: razões nunca somadas, contagem de razões não nulas, NaN recusado
+(detectado por `Decimal.is_nan()`, sem passar por `float`), colunas assinadas isentas de
+CHECK de não-negatividade e `EXCEPT` bidirecional restrito às colunas de negócio.

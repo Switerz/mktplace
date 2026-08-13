@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 não iniciado**. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 1/3 implementada localmente e aguardando revisão** — migrations 007/008 escritas mas NAO aplicadas, nenhuma tabela TikTok no Neon, endpoint ainda em `gold.*`. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -1072,6 +1072,57 @@ do dia corrente, origem e destino reconciliados). **S2 não iniciado**, porém
 que o Airflow exista, esteja configurado ou tenha conectividade.
 
 Registro completo em [SERVING_AIRFLOW_PLAN.md §26](SERVING_AIRFLOW_PLAN.md).
+
+### Gate S2, Task 1/3 — implementada localmente, aguardando revisão (11/08/2026)
+
+Contrato, schemas e sync das duas fatos TikTok de `/operacoes` prontos **localmente**.
+**Nenhuma migration aplicada, nenhuma tabela TikTok criada no Neon** (que segue em
+`alembic_version = 006`, com 32 relações em `marts`), **endpoint ainda em `gold.*`** e
+**Airflow não comprovado**. Zero escrita em banco: todo acesso foi read-only.
+
+Entregue: auditoria read-only das duas fontes; contrato congelado de `/operacoes` em 30
+testes sem banco; migrations `007` e `008` escritas e não aplicadas (cadeia linear
+`006 → 007 → 008`, head único); `pipelines/sync_tiktok_serving.py` com uma spec literal
+por tabela; 73 testes focais do sync e das migrations. Suítes completas verdes: **1.856**
+em `pipelines/tests` e **515** em `apps/api/tests`. Dry-runs read-only, já com a
+allowlist oficial de cinco marcas, confirmaram **1.546** linhas na fonte de marca e
+**184.252** na de criador, janela terminando em D−1.
+
+Três achados da auditoria que valem registro:
+
+1. **A cobertura histórica é de ~10 meses, não 13.** As fontes começam em 05/10 e
+   07/10/2025, 87 e 89 dias depois do piso de referência. O piso vale quando a fonte o
+   possui; o backfill leva todo o histórico disponível e o diagnóstico declara o déficit
+   em cada execução.
+2. **`gold.tiktok_brand_daily.total_live_minutes` tem 2 valores negativos**, um deles
+   −29.545.461, em 03/04 e 06/05/2026, em marcas do escopo — a soma histórica da coluna é
+   negativa. É defeito de dado na ingestão TikTok, **sem impacto no payload atual** de
+   `/operacoes` porque o bloco `lives` usa janela de 30 dias. Consequência: a coluna fica
+   sem CHECK de não-negatividade, porque o contrato da task é copiar exatamente; corrigir a
+   origem é outra frente.
+3. **14 colunas de demografia são 100% nulas** na fonte, então as médias ponderadas de
+   `brand-detail` retornam sempre `NULL` hoje.
+4. **As duas tabelas Gold não são carregadas em sincronia.** Em 12/08/2026,
+   `tiktok_brand_daily` já tinha 11/08 e `tiktok_creator_daily` não. A validação de
+   cobertura recusa a janela nesse caso, em vez de publicar um dia vazio — a Task 2/3
+   precisa alinhar a janela ao menor `MAX(date)` das duas fontes.
+
+**Duas correções da revisão, aplicadas.** *Minimização de dados:* o sync copia **somente
+as cinco marcas oficiais**, reutilizando a allowlist de
+`pipelines.connectors.tiktok.connector.BRANDS_IN_SCOPE` — sem criar lista nova, com filtro
+**parametrizado** (`brand = ANY(%(brands)s)`) nas duas queries e reprovação de marca
+externa como defesa em profundidade. As marcas extras não têm consumidor autorizado, e
+`creator` é handle público potencialmente identificável. Efeito: 398 e 13.282 linhas
+descartadas. *Reconciliação exata:* toda métrica reconciliada passou a usar
+`decimal.Decimal`, sem `float` em nenhum caminho e sem arredondar antes de comparar — com
+197.448 ocorrências de `12345.67891`, a implementação anterior em `float` divergia do total
+exato em 0,00278.
+
+**GMV TikTok com frete permanece frente separada e inalterado.** Produção segue em
+`sub_total`. Misturar a mudança ao S2 inviabilizaria as duas provas do gate: a comparação
+Gold × Marts passaria a confrontar regras diferentes, e a garantia de payload idêntico
+perderia sentido justo quando o teste de contrato precisa ser imutável. Detalhe em
+[SERVING_AIRFLOW_PLAN.md §27](SERVING_AIRFLOW_PLAN.md).
 
 ## Próximas prioridades
 
