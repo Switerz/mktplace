@@ -1181,3 +1181,75 @@ silenciosa esconderia. No caso pequeno, `sum(0.1 × 10)` em `float` dá
 Preservados sem mudança: razões nunca somadas, contagem de razões não nulas, NaN recusado
 (detectado por `Decimal.is_nan()`, sem passar por `float`), colunas assinadas isentas de
 CHECK de não-negatividade e `EXCEPT` bidirecional restrito às colunas de negócio.
+
+## 28. Preflight da Task 2/3 bloqueado por VPN, e o hardening que ele revelou (12/08/2026)
+
+**Estado: `BLOCKED`. Nenhuma escrita ocorreu** — zero migration, zero `--apply`, zero DDL
+ou DML. O Neon segue em `alembic_version = 006`, com as duas tabelas do S2 ausentes, e
+nenhuma autorizacao de migration ou backfill foi consumida.
+
+### 28.1 O que bloqueou
+
+Exclusivamente a **VPN desconectada**. A causa foi confirmada, nao suposta: nenhum
+adaptador de tunel ativo, **nenhuma rota para a faixa privada** do Data Mart e nenhum
+cliente de VPN em execucao. O lado do Neon passou integralmente — Alembic linear
+`006 -> 007 -> 008` com head unico, os seis objetos de 007/008 ausentes um a um, zero
+constraint ou indice de migration parcial, grants suficientes (`marts` CREATE/USAGE,
+`alembic_version` SELECT/UPDATE e **TEMP no database**, que a staging `pg_temp` exige),
+zero backend concorrente, zero lock de escrita e zero advisory lock em uso.
+
+Sem ler a fonte nao existe `common_date_to`, nem fingerprint duplo, nem verificacao de
+cobertura. Nenhum `GO` foi emitido com numeros da rodada anterior.
+
+Um dado de dimensionamento ficou resolvido no caminho, e e' boa noticia: `marts` ja contem
+`fact_tiktok_product_daily` com **208.451 linhas em 73 MB**. O porte da `creator_daily`
+(~184 mil linhas) tem precedente no mesmo banco, o que reduz bastante o peso do risco de
+`statement_timeout=300s`.
+
+### 28.2 O finding: a mensagem de erro vazava topologia
+
+O timeout expos **hostname e IP privado** na saida, e a checagem confirmou que o
+sanitizador entao em uso nao os removia: ele redigia `usuario:senha@` e **preservava todo
+o resto**. Num log de execucao real — Render, Airflow, agendador — isso publica topologia
+interna para quem tiver acesso ao log, sem nenhum ganho diagnostico.
+
+**Corrigido nos dois modulos de serving**, com a regra invertida: mensagem de conexao
+**nunca e' ecoada**; e' classificada numa das cinco categorias fixas.
+
+| Categoria | Quando |
+| --- | --- |
+| `falha de autenticacao no banco: credencial recusada pelo servidor.` | `password authentication failed`, `authentication failed`, `no password supplied`, `role "..." does not exist` |
+| `conexao recusada por regra de acesso do servidor (pg_hba.conf).` | `pg_hba.conf`, `no pg_hba entry` |
+| `servidor inalcancavel ou timeout de conexao (verifique a VPN).` | `timed out`, `timeout expired`, falha de resolucao de nome, `no route to host`, rede inalcancavel |
+| `conexao recusada pelo servidor (porta fechada ou servico parado).` | `connection refused` |
+| `falha de conexao com o banco.` | demais falhas de conexao e qualquer mensagem com topologia |
+
+Formatos sensiveis cobertos: DSN completa (`postgresql://` e `postgres://`), `server at`,
+IPv4, IPv6 (forma completa e comprimida, com ou sem colchetes), porta (`port=` e
+`port N`) e as chaves libpq `host=`, `hostaddr=`, `user=`, `password=`, `dbname=`,
+`passfile=`, `sslcert=`, `sslkey=`. Nome de database tambem sai: `database "..." does not
+exist` e' classificado.
+
+**Mensagens seguras continuam legiveis**, porque sao o que serve para diagnosticar:
+divergencia de agregado, violacao de constraint, cobertura incompleta, valor negativo e
+`canceling statement due to statement timeout` passam intactas. Duas armadilhas de
+deteccao foram evitadas de proposito: um horario como `10:20:30` nao e' confundido com
+IPv6 (a deteccao exige `::` ou pelo menos cinco grupos) e uma versao como `17.9` nao e'
+confundida com IPv4 (exige quatro grupos pontuados). Sem esses cuidados, o hardening
+apagaria mensagens legitimas.
+
+Tambem por contrato: `str(exc)` e nunca `repr(exc)` — que carrega os argumentos da excecao
+—, nunca `exc.__cause__` ou traceback, que guardam a mensagem nativa completa, e nenhum
+log auxiliar. O `print` de falha do CLI usa exclusivamente o sanitizador, e um teste ponta
+a ponta injeta a falha de conexao e verifica o `stderr`.
+
+O texto das cinco categorias e' **identico nos dois modulos** — o bloco foi copiado
+literalmente, e um teste cruzado importa o outro modulo e compara categoria por categoria,
+para que a mesma falha produza a mesma mensagem nas duas frentes.
+
+### 28.3 Isto nao desbloqueia a Task 2/3
+
+O hardening corrige uma exposicao de log; **nao substitui o preflight**. O mesmo preflight
+read-only precisa ser **repetido integralmente apos a VPN voltar**: corte comum,
+fingerprint duplo com intervalo de 30 s, cobertura, duplicidade, allowlist e concorrencia
+no Data Mart. So um `GO` daquele preflight autoriza aplicar 007/008.

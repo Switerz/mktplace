@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 1/3 implementada localmente e aguardando revisão** — migrations 007/008 escritas mas NAO aplicadas, nenhuma tabela TikTok no Neon, endpoint ainda em `gold.*`. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 1/3 versionada em `ea7566a`; preflight da Task 2/3 `BLOCKED` por VPN desconectada** — migrations 007/008 escritas mas NAO aplicadas, nenhuma tabela TikTok no Neon, endpoint ainda em `gold.*`. Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -1123,6 +1123,33 @@ exato em 0,00278.
 Gold × Marts passaria a confrontar regras diferentes, e a garantia de payload idêntico
 perderia sentido justo quando o teste de contrato precisa ser imutável. Detalhe em
 [SERVING_AIRFLOW_PLAN.md §27](SERVING_AIRFLOW_PLAN.md).
+
+### Preflight da Task 2/3 bloqueado por VPN — `BLOCKED` (12/08/2026)
+
+O preflight operacional da Task 2/3 parou como `BLOCKED` **exclusivamente porque a VPN
+estava desconectada** (nenhum adaptador de tunel, nenhuma rota para a faixa privada do
+Data Mart, nenhum cliente em execucao). **Nenhuma escrita ocorreu**: zero migration, zero
+`--apply`, zero DDL/DML. O Neon segue em `alembic_version = 006`, as duas tabelas do S2
+continuam ausentes e nenhuma autorizacao foi consumida.
+
+O lado do Neon passou por inteiro — Alembic linear com head unico `008`, os seis objetos de
+007/008 ausentes, zero vestigio de migration parcial, grants suficientes (incluindo TEMP,
+que a staging exige), zero concorrencia e zero lock. Sem acesso a fonte nao ha
+`common_date_to` nem fingerprint, e nenhum `GO` foi emitido com numeros da rodada anterior.
+Um risco caiu de peso no caminho: `marts` ja tem `fact_tiktok_product_daily` com 208.451
+linhas em 73 MB, entao o porte da `creator_daily` tem precedente no mesmo banco.
+
+**Finding corrigido:** o timeout expos hostname e IP privado, e o sanitizador de erros
+preservava topologia — redigia so `usuario:senha@`. Os dois modulos de serving (S1 e S2)
+passaram a **classificar** falhas de conexao em cinco categorias fixas e nunca ecoar a
+mensagem nativa, omitindo DSN, hostname, IPv4/IPv6, porta, usuario, senha e nome de
+database. Mensagens seguras (constraint, divergencia de agregado, `statement timeout`)
+continuam legiveis, e um horario ou numero de versao nao e' confundido com endereco.
+Categorias identicas nos dois modulos, verificadas por teste cruzado.
+
+**Isso nao desbloqueia a Task 2/3 sozinho.** O mesmo preflight read-only precisa ser
+repetido integralmente quando a VPN voltar; so o `GO` dele autoriza aplicar 007/008.
+Detalhe em [SERVING_AIRFLOW_PLAN.md §28](SERVING_AIRFLOW_PLAN.md).
 
 ## Próximas prioridades
 

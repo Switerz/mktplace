@@ -406,15 +406,25 @@ def test_18_zero_retry_backoff_ou_agendamento():
 
 
 def test_19_dsn_e_credencial_nunca_aparecem_em_erro():
+    """A DSN inteira desaparece: mensagem de conexao volta como CATEGORIA fixa.
+
+    O contrato mudou no hardening: antes a funcao redigia `usuario:senha@` e
+    devolvia o resto, o que preservava hostname, IP e porta. Agora nao ha o que
+    redigir, porque a mensagem original nao e' ecoada.
+    """
     exc = Exception(
         "could not connect: postgresql://PLACEHOLDER_USER:PLACEHOLDER_SECRET"
         "@PLACEHOLDER_HOST:5432/db timeout"
     )
     msg = s.sanitize_error_message(exc)
-    assert "PLACEHOLDER_SECRET" not in msg
-    assert "PLACEHOLDER_USER:PLACEHOLDER_SECRET" not in msg
-    assert "<redacted>" in msg
-    assert len(msg) <= 500
+    # `timeout` solto nao e' a frase `timed out` do libpq: cai na categoria
+    # generica de conexao, e nao na de servidor inalcancavel. A classificacao
+    # e' precisa de proposito, em vez de chutar a causa.
+    assert msg == s.ERRO_CONEXAO
+    for proibido in ("PLACEHOLDER_SECRET", "PLACEHOLDER_USER", "PLACEHOLDER_HOST",
+                     "5432", "postgresql://"):
+        assert proibido not in msg
+    assert len(msg) <= s.MAX_ERRO_CHARS
 
 
 def test_19b_run_id_e_sanitizado_e_rastreavel():
@@ -819,3 +829,272 @@ def test_26_nenhuma_referencia_ao_airflow_como_conectividade_provada():
         for frase in ["airflow alcanca", "airflow conectado", "worker provado",
                       "conectividade do airflow comprovada", "airflow validado"]:
             assert frase not in texto, f"{arq.name} afirma conectividade do Airflow: {frase!r}"
+
+
+# ---------------------------------------------------------------------------
+# Z. Sanitizacao de erro — categorias fixas, zero topologia
+# ---------------------------------------------------------------------------
+# Todos os dados abaixo sao SINTETICOS: dominios `.invalid` (RFC 2606), IPv4 de
+# documentacao (RFC 5737), IPv6 de documentacao (RFC 3849) e credenciais
+# ficticias. Nenhum host, IP ou credencial real aparece neste arquivo.
+
+HOST_FALSO = "banco-exemplo.db.invalid"
+IPV4_FALSO = "192.0.2.10"
+IPV4_FALSO_2 = "198.51.100.20"
+IPV6_FALSO = "2001:db8::1"
+IPV6_FALSO_LONGO = "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+USUARIO_FALSO = "usuario_ficticio"
+SENHA_FALSA = "senha_ficticia"
+DB_FALSO = "banco_ficticio"
+
+TOPOLOGIA_PROIBIDA = (
+    HOST_FALSO, IPV4_FALSO, IPV4_FALSO_2, IPV6_FALSO, IPV6_FALSO_LONGO,
+    USUARIO_FALSO, SENHA_FALSA, DB_FALSO, "5432",
+)
+
+
+def _sem_topologia(msg: str) -> None:
+    """Nenhum fragmento sensivel pode sobrar na mensagem devolvida."""
+    for proibido in TOPOLOGIA_PROIBIDA:
+        assert proibido not in msg, f"vazou {proibido!r} em {msg!r}"
+    assert "server at" not in msg
+    assert "postgresql://" not in msg and "postgres://" not in msg
+    assert len(msg) <= s.MAX_ERRO_CHARS
+
+
+def test_z01_dsn_completa_com_credencial_e_host():
+    exc = Exception(
+        f"could not connect: postgresql://{USUARIO_FALSO}:{SENHA_FALSA}"
+        f"@{HOST_FALSO}:5432/{DB_FALSO}"
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_CONEXAO
+    _sem_topologia(msg)
+
+
+def test_z02_mensagem_nativa_connection_to_server_at():
+    """A forma exata que o libpq produz e que vazou topologia no preflight."""
+    exc = Exception(
+        f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO}), port 5432 failed: '
+        f"Connection timed out (0x0000274C/10060)\n\tIs the server running on that "
+        f"host and accepting TCP/IP connections?"
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_INALCANCAVEL
+    _sem_topologia(msg)
+
+
+def test_z03_autenticacao_recusada():
+    exc = Exception(
+        f'FATAL:  password authentication failed for user "{USUARIO_FALSO}"'
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_AUTENTICACAO
+    _sem_topologia(msg)
+
+
+def test_z03b_role_inexistente_nao_vaza_usuario():
+    exc = Exception(f'FATAL:  role "{USUARIO_FALSO}" does not exist')
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_AUTENTICACAO
+    _sem_topologia(msg)
+
+
+def test_z04_pg_hba_conf():
+    exc = Exception(
+        f'FATAL:  no pg_hba.conf entry for host "{IPV4_FALSO}", user '
+        f'"{USUARIO_FALSO}", database "{DB_FALSO}", no encryption'
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_PG_HBA
+    _sem_topologia(msg)
+
+
+def test_z05_timeout():
+    for texto in (
+        f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO}), port 5432 failed: '
+        "Connection timed out",
+        "timeout expired",
+        f"could not translate host name \"{HOST_FALSO}\" to address: "
+        "Name or service not known",
+    ):
+        msg = s.sanitize_error_message(Exception(texto))
+        assert msg == s.ERRO_INALCANCAVEL, texto[:40]
+        _sem_topologia(msg)
+
+
+def test_z06_connection_refused():
+    exc = Exception(
+        f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO_2}), port 5432 failed: '
+        "Connection refused"
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_RECUSADA
+    _sem_topologia(msg)
+
+
+def test_z07_ipv4_isolado_em_mensagem_inesperada():
+    """Nenhuma categoria casa, mas ha IP: cai na categoria generica."""
+    exc = Exception(f"erro inesperado ao falar com {IPV4_FALSO} durante a carga")
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_CONEXAO
+    _sem_topologia(msg)
+
+
+def test_z08_ipv6():
+    for endereco in (IPV6_FALSO, IPV6_FALSO_LONGO, f"[{IPV6_FALSO}]:5432"):
+        exc = Exception(f"falha estranha no endereco {endereco}")
+        msg = s.sanitize_error_message(exc)
+        assert msg == s.ERRO_CONEXAO, endereco
+        _sem_topologia(msg)
+
+
+def test_z09_formato_key_value_do_libpq():
+    exc = Exception(
+        f"invalid connection option: host={HOST_FALSO} hostaddr={IPV4_FALSO} "
+        f"port=5432 user={USUARIO_FALSO} password={SENHA_FALSA} dbname={DB_FALSO}"
+    )
+    msg = s.sanitize_error_message(exc)
+    assert msg == s.ERRO_CONEXAO
+    _sem_topologia(msg)
+
+
+def test_z10_mensagem_segura_de_sql_e_preservada():
+    """Validacao e constraint nao tem topologia e sao uteis: continuam legiveis."""
+    seguras = [
+        "staging divergiu da fonte: sum_gmv: fonte=100 destino=99",
+        'new row for relation "fact_x" violates check constraint "ck_x_gmv"',
+        "2 valor(es) negativo(s) na coluna total_live_minutes",
+        "cobertura incompleta: 1 dia(s) sem linha",
+        "canceling statement due to statement timeout",
+        "duplicate key value violates unique constraint \"pk_fact_x\"",
+    ]
+    for texto in seguras:
+        msg = s.sanitize_error_message(Exception(texto))
+        assert msg == texto, f"mensagem segura foi descartada: {texto}"
+
+
+def test_z10b_horario_nao_e_confundido_com_ipv6():
+    """`10:20:30` nao pode virar endereco e apagar a mensagem."""
+    texto = "falha de validacao registrada as 10:20:30 na janela"
+    assert s.sanitize_error_message(Exception(texto)) == texto
+
+
+def test_z10c_versao_com_ponto_nao_e_confundida_com_ipv4():
+    texto = "driver reportou versao 17.9 incompativel com a extensao"
+    assert s.sanitize_error_message(Exception(texto)) == texto
+
+
+def test_z11_limite_de_500_caracteres():
+    # mensagem longa SEM topologia: truncada, nunca estourando o limite
+    longa = "erro de validacao " + ("x" * 2000)
+    msg = s.sanitize_error_message(Exception(longa))
+    assert len(msg) == s.MAX_ERRO_CHARS == 500
+    # e com topologia: categoria fixa, muito abaixo do limite
+    msg2 = s.sanitize_error_message(Exception(f"server at {HOST_FALSO} " + "y" * 2000))
+    assert msg2 == s.ERRO_CONEXAO
+    assert len(msg2) <= s.MAX_ERRO_CHARS
+
+
+def test_z12_nunca_devolve_mensagem_nativa_completa():
+    """Contrato 1: nenhuma variante de erro de conexao volta como texto original."""
+    nativas = [
+        f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO}), port 5432 failed',
+        f"could not connect to server: Connection refused\n\tIs the server running "
+        f"on host \"{HOST_FALSO}\" ({IPV4_FALSO}) and accepting TCP/IP connections "
+        f"on port 5432?",
+        "server closed the connection unexpectedly",
+        f'FATAL:  database "{DB_FALSO}" does not exist',
+        "terminating connection due to administrator command",
+    ]
+    for texto in nativas:
+        msg = s.sanitize_error_message(Exception(texto))
+        assert msg in (s.ERRO_AUTENTICACAO, s.ERRO_PG_HBA, s.ERRO_INALCANCAVEL,
+                       s.ERRO_RECUSADA, s.ERRO_CONEXAO), texto[:50]
+        assert msg != texto
+        _sem_topologia(msg)
+
+
+def test_z13_tem_topologia_cobre_os_formatos_do_contrato():
+    for texto in (
+        "server at algum lugar",
+        f"postgresql://{USUARIO_FALSO}:{SENHA_FALSA}@{HOST_FALSO}/{DB_FALSO}",
+        f"postgres://{HOST_FALSO}/{DB_FALSO}",
+        f"host={HOST_FALSO}", f"hostaddr={IPV4_FALSO}", f"user={USUARIO_FALSO}",
+        f"password={SENHA_FALSA}", f"dbname={DB_FALSO}", "port=5432", "port 5432",
+        IPV4_FALSO, IPV6_FALSO, IPV6_FALSO_LONGO,
+    ):
+        assert s.tem_topologia(texto), f"nao detectou topologia em {texto!r}"
+    for texto in ("erro de constraint", "sum_gmv divergiu", "10:20:30", "versao 17.9"):
+        assert not s.tem_topologia(texto), f"falso positivo em {texto!r}"
+
+
+def test_z14_nao_usa_repr_nem_encadeamento_de_excecao():
+    """Contrato 7: `repr` carrega os argumentos, e `__cause__` guarda a nativa."""
+    # normaliza espacos: os dois helpers `code_only` devolvem formatos diferentes
+    # (um preserva as linhas, o outro junta tokens), e o contrato vale nos dois.
+    codigo = re.sub(r"\s+", "", code_only(Path(s.__file__)))
+    assert "repr(" not in codigo
+    assert "__cause__" not in codigo and "__context__" not in codigo
+    assert "traceback" not in codigo
+    assert "logging" not in codigo
+    # a unica leitura da excecao e' `str(exc)`
+    assert codigo.count("str(exc)") == 1
+
+
+def test_z15_cli_imprime_somente_a_mensagem_sanitizada():
+    """O `print` de falha do CLI usa exclusivamente `sanitize_error_message`."""
+    fonte = Path(s.__file__).read_text(encoding="utf-8")
+    linhas = [l for l in fonte.splitlines() if "FALHA" in l and "print(" in l]
+    assert linhas, "nenhum print de falha encontrado"
+    for l in linhas:
+        assert "sanitize_error_message(exc)" in l, l
+        assert "{exc}" not in l and "repr(exc)" not in l and "str(exc)" not in l
+
+
+def test_z16_cli_sanitiza_erro_de_conexao_de_ponta_a_ponta(capsys, monkeypatch):
+    """Falha na conexao com a fonte: stderr recebe categoria, nunca topologia."""
+    def explode(*a, **k):
+        raise Exception(
+            f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO}), port 5432 '
+            f"failed: Connection timed out"
+        )
+
+    monkeypatch.setattr(s.psycopg2, "connect", explode)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@z/db")
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://x:y@z/db")
+    codigo = s.main(["--backfill"])
+    assert codigo == 2
+    err = capsys.readouterr().err
+    assert s.ERRO_INALCANCAVEL in err
+    _sem_topologia(err.replace("FALHA", "").strip().splitlines()[-1])
+
+
+def test_z17_categorias_sao_textos_fixos_e_curtos():
+    for cat in (s.ERRO_AUTENTICACAO, s.ERRO_PG_HBA, s.ERRO_INALCANCAVEL,
+                s.ERRO_RECUSADA, s.ERRO_CONEXAO):
+        assert isinstance(cat, str) and 10 < len(cat) <= 120
+        assert not s.tem_topologia(cat), f"a propria categoria tem topologia: {cat}"
+
+
+def test_z18_categorias_identicas_entre_os_dois_modulos():
+    """Contrato 12: a mesma entrada produz a mesma categoria nas duas frentes."""
+    import importlib
+    outro = importlib.import_module('pipelines.sync_tiktok_serving')
+    for nome in ("ERRO_AUTENTICACAO", "ERRO_PG_HBA", "ERRO_INALCANCAVEL",
+                 "ERRO_RECUSADA", "ERRO_CONEXAO", "MAX_ERRO_CHARS"):
+        assert getattr(s, nome) == getattr(outro, nome), nome
+    entradas = [
+        f'connection to server at "{HOST_FALSO}" ({IPV4_FALSO}), port 5432 failed: '
+        "Connection timed out",
+        f'FATAL:  password authentication failed for user "{USUARIO_FALSO}"',
+        f'FATAL:  no pg_hba.conf entry for host "{IPV4_FALSO}"',
+        "Connection refused",
+        f"could not connect: postgresql://{USUARIO_FALSO}:{SENHA_FALSA}@{HOST_FALSO}/{DB_FALSO}",
+        f"endereco estranho {IPV6_FALSO}",
+        "erro de constraint sem topologia",
+    ]
+    for texto in entradas:
+        a = s.sanitize_error_message(Exception(texto))
+        b = outro.sanitize_error_message(Exception(texto))
+        assert a == b, f"divergiu entre os modulos: {texto[:50]}"

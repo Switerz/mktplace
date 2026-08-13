@@ -150,10 +150,127 @@ def validate_identifier(name: str) -> str:
     return name
 
 
+# ---------------------------------------------------------------------------
+# Sanitizacao de erro — categorias fixas, zero topologia
+# ---------------------------------------------------------------------------
+# A versao anterior removia apenas `usuario:senha@` e preservava o resto. Isso
+# nao bastava: a mensagem nativa do libpq e' da forma
+# `connection to server at "<host>" (<ip>), port <porta> failed: ...`, e um
+# timeout de VPN escrevia hostname e IP privado no log de execucao — topologia
+# interna vazando para quem lesse o log, sem nenhum ganho diagnostico.
+#
+# A regra agora e' a inversa: mensagem de conexao NUNCA e' ecoada. Ela e'
+# CLASSIFICADA numa categoria fixa, escolhida para dizer o que o operador precisa
+# fazer (checar credencial, checar regra de acesso, checar VPN) sem revelar onde
+# o banco fica. Mensagens de diagnostico sem topologia — validacao, constraint,
+# timeout de statement — continuam preservadas, porque sao uteis e inofensivas.
+
+#: Limite maximo da mensagem devolvida.
+MAX_ERRO_CHARS = 500
+
+#: Categorias FIXAS. Texto identico ao do modulo de serving do TikTok, para que a
+#: mesma falha produza a mesma mensagem nas duas frentes.
+ERRO_AUTENTICACAO = "falha de autenticacao no banco: credencial recusada pelo servidor."
+ERRO_PG_HBA = "conexao recusada por regra de acesso do servidor (pg_hba.conf)."
+ERRO_INALCANCAVEL = "servidor inalcancavel ou timeout de conexao (verifique a VPN)."
+ERRO_RECUSADA = "conexao recusada pelo servidor (porta fechada ou servico parado)."
+ERRO_CONEXAO = "falha de conexao com o banco."
+
+_AUTENTICACAO_RE = re.compile(
+    r"password authentication failed"
+    r"|authentication failed"
+    r"|no password supplied"
+    r"|password supplied is not"
+    r"|role\s+\"[^\"]*\"\s+does not exist",
+    re.I,
+)
+_PG_HBA_RE = re.compile(r"pg_hba\.conf|no pg_hba entry", re.I)
+_INALCANCAVEL_RE = re.compile(
+    r"timed out"
+    r"|timeout expired"
+    r"|could not translate host name"
+    r"|name or service not known"
+    r"|temporary failure in name resolution"
+    r"|no route to host"
+    r"|network is unreachable"
+    r"|host is unreachable",
+    re.I,
+)
+_RECUSADA_RE = re.compile(r"connection refused|couldn't connect to server", re.I)
+_CONEXAO_RE = re.compile(
+    r"could not connect"
+    r"|connection to server"
+    r"|server closed the connection"
+    r"|connection has been closed"
+    r"|terminating connection"
+    r"|database\s+\"[^\"]*\"\s+does not exist",
+    re.I,
+)
+
+#: Marcadores de topologia. Se qualquer um aparecer, o texto original NUNCA e'
+#: ecoado, mesmo que nenhuma categoria especifica case.
+_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+#: IPv6 exige `::` ou pelo menos 5 grupos. Sem isso, um horario como `10:20:30`
+#: seria confundido com endereco e apagaria uma mensagem legitima.
+_IPV6_RE = re.compile(
+    r"""(?<![\w:])(
+        (?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}
+      | (?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}:?){0,7}
+      | ::(?:[0-9a-f]{1,4}:?)+
+    )(?![\w:])""",
+    re.I | re.X,
+)
+_TOPOLOGIA_RE = re.compile(
+    r"server\s+at"
+    r"|postgres(?:ql)?://"
+    r"|\b(?:host|hostaddr|user|password|dbname|port|passfile|sslcert|sslkey)\s*="
+    r"|\bport\s+\d+",
+    re.I,
+)
+_CREDENCIAL_URI_RE = re.compile(r"//[^/\s@]+:[^/\s@]+@")
+
+
+def _classificar_erro_conexao(texto: str) -> str | None:
+    """Categoria fixa para falha de conexao conhecida, ou `None` se nao for uma."""
+    if _AUTENTICACAO_RE.search(texto):
+        return ERRO_AUTENTICACAO
+    if _PG_HBA_RE.search(texto):
+        return ERRO_PG_HBA
+    if _INALCANCAVEL_RE.search(texto):
+        return ERRO_INALCANCAVEL
+    if _RECUSADA_RE.search(texto):
+        return ERRO_RECUSADA
+    if _CONEXAO_RE.search(texto):
+        return ERRO_CONEXAO
+    return None
+
+
+def tem_topologia(texto: str) -> bool:
+    """DSN, hostname, IPv4/IPv6, porta, usuario, senha ou nome de database."""
+    return bool(
+        _TOPOLOGIA_RE.search(texto)
+        or _IPV4_RE.search(texto)
+        or _IPV6_RE.search(texto)
+    )
+
+
 def sanitize_error_message(exc: Exception) -> str:
-    """Nunca confia em `str(exc)`: remove `usuario:senha@` antes de logar. Defesa
-    em profundidade caso o driver algum dia inclua a DSN na mensagem."""
-    return re.sub(r"//[^/\s@]+:[^/\s@]+@", "//<redacted>@", str(exc))[:500]
+    """Mensagem segura para log: categoria fixa quando ha conexao ou topologia.
+
+    Usa `str(exc)` de proposito, nunca `repr(exc)` (que carrega os argumentos da
+    excecao) e nunca `exc.__cause__`/traceback: a cadeia de excecoes do psycopg2
+    guarda a mensagem nativa completa, e reproduzi-la anularia esta funcao.
+    """
+    texto = str(exc)
+    categoria = _classificar_erro_conexao(texto)
+    if categoria is not None:
+        return categoria
+    if tem_topologia(texto):
+        return ERRO_CONEXAO
+    # Sem topologia e sem cara de conexao: e' diagnostico util (validacao,
+    # constraint, timeout de statement). Preserva, com a redacao de credencial
+    # mantida como defesa em profundidade.
+    return _CREDENCIAL_URI_RE.sub("//<redacted>@", texto)[:MAX_ERRO_CHARS]
 
 
 def sanitize_run_id(raw: str) -> str:
