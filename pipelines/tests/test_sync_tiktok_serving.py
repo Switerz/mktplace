@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -881,16 +881,20 @@ def test_g12_auditoria_presente_nas_duas():
 # H. Fronteiras do Gate S2 Task 1/3
 # ---------------------------------------------------------------------------
 
-def test_h01_gold_service_continua_apontando_para_gold():
-    """A troca de fonte e' a Task 3/3. Aqui `/operacoes` precisa seguir na gold."""
+def test_h01_operacoes_le_exclusivamente_as_tres_fatos_de_serving():
+    """Invertido na Task 3/3: `/operacoes` passou a ler `marts.*`, e so isso."""
     txt = GOLD_SERVICE.read_text(encoding="utf-8")
     corpo = txt[txt.index("def get_operacoes"):]
     corpo = corpo[:corpo.index("# ---------------------------------------------------------------------------")]
-    assert "gold.ml_gestao_diaria" in corpo
-    assert "gold.tiktok_creator_daily" in corpo
-    assert "gold.tiktok_brand_daily" in corpo
-    assert "marts.fact_tiktok_brand_content_daily" not in corpo
-    assert "marts.fact_tiktok_creator_daily" not in corpo
+    assert "gold." not in corpo and "raw." not in corpo
+    for rel in ("marts.fact_ml_gestao_diaria",
+                "marts.fact_tiktok_brand_content_daily",
+                "marts.fact_tiktok_creator_daily"):
+        assert rel in corpo, rel
+    # teto D-1 nas cinco consultas
+    assert corpo.count("{d_fechado}") == 5
+    # os demais endpoints seguem na gold
+    assert "gold.tiktok_brand_daily" in txt
 
 
 def test_h02_o_sync_nao_menciona_gold_service_nem_endpoint():
@@ -1486,3 +1490,47 @@ def test_z18_categorias_identicas_entre_os_dois_modulos():
         a = s.sanitize_error_message(Exception(texto))
         b = outro.sanitize_error_message(Exception(texto))
         assert a == b, f"divergiu entre os modulos: {texto[:50]}"
+
+
+# ---------------------------------------------------------------------------
+# L. Politica de convergencia: lookback 90 e dia operacional em America/Sao_Paulo
+# ---------------------------------------------------------------------------
+
+def test_l01_lookback_default_e_90():
+    """Era 7, dimensionado por hipotese. A medicao do Gate S2 Task 3/3 mostrou
+    reafirmacao retroativa de ate 27 dias na fato de marca."""
+    assert s.DEFAULT_LOOKBACK_DAYS == 90
+    assert s.incremental_window(s.BRAND_SPEC, HOJE) == (date(2026, 5, 13), D1)
+
+
+def test_l02_piso_contratual_e_7():
+    assert s.MIN_LOOKBACK_DAYS == 7
+    for n in (0, 1, 3, 6, -5):
+        with pytest.raises(ValueError, match=">= 7"):
+            s.incremental_window(s.BRAND_SPEC, HOJE, n)
+
+
+def test_l03_lookback_explicito_entre_piso_e_default_continua_valido():
+    for n in (7, 14, 30, 90, 180):
+        d_from, d_to = s.incremental_window(s.BRAND_SPEC, HOJE, n)
+        assert d_to == D1
+        assert (d_to - d_from).days == n - 1 or d_from == s.BRAND_SPEC.source_min_date
+
+
+def test_l04_dia_operacional_usa_america_sao_paulo():
+    assert str(s.TZ_OPERACIONAL) == "America/Sao_Paulo"
+    # 00:05 UTC de 12/08 ainda e' 11/08 no Brasil (UTC-3)
+    assert s.hoje_operacional(datetime(2026, 8, 12, 0, 5, tzinfo=timezone.utc)) == date(2026, 8, 11)
+    assert s.hoje_operacional(datetime(2026, 8, 12, 2, 59, tzinfo=timezone.utc)) == date(2026, 8, 11)
+    assert s.hoje_operacional(datetime(2026, 8, 12, 3, 0, tzinfo=timezone.utc)) == date(2026, 8, 12)
+
+
+def test_l05_nenhum_date_today_no_codigo():
+    """`date.today()` usa o fuso do PROCESSO — proibido neste modulo."""
+    assert "date.today()" not in code_only(Path(s.__file__))
+
+
+def test_l06_help_declara_default_90_e_minimo_7():
+    ajuda = s.build_parser().format_help()
+    assert "90" in ajuda and "7" in ajuda
+    assert "Default 7" not in ajuda

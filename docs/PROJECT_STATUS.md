@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 1/3 versionada em `ea7566a`; preflight da Task 2/3 `BLOCKED` por VPN desconectada** — migrations 007/008 escritas mas NAO aplicadas, nenhuma tabela TikTok no Neon, endpoint ainda em `gold.*`. Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 3/3: `SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`** — as três fatos de serving recarregadas até D-1 (12/08/2026) e reconciliadas, `/operacoes` com payload idêntico ao da Gold e provado sem Data Mart. **Ainda não versionado nem publicado.** Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -1067,7 +1067,7 @@ Três pontos que não devem ser lidos como formalidade:
 
 **Estado final: Gate S1 encerrado**, com a primeira tabela de serving disponível no Neon
 (`marts.fact_ml_gestao_diaria`, 1.621 linhas até 10/08/2026, zero duplicidade, zero linha
-do dia corrente, origem e destino reconciliados). **S2 não iniciado**, porém
+do dia corrente, origem e destino reconciliados). **S2 Tasks 1/3 e 2/3 concluídas; Task 3/3 `BLOCKED`** (ver abaixo), porém
 **tecnicamente desbloqueado** para desenhar e migrar `/operacoes` — o que **não** afirma
 que o Airflow exista, esteja configurado ou tenha conectividade.
 
@@ -1151,9 +1151,143 @@ Categorias identicas nos dois modulos, verificadas por teste cruzado.
 repetido integralmente quando a VPN voltar; so o `GO` dele autoriza aplicar 007/008.
 Detalhe em [SERVING_AIRFLOW_PLAN.md §28](SERVING_AIRFLOW_PLAN.md).
 
+### Gate S2, Task 2/3 — `SUCCESS`: serving TikTok publicado e reconciliado (13/08/2026)
+
+As duas fatos TikTok estao no Neon, carregadas e reconciliadas, **sem troca de endpoint**.
+Migrations `007` e `008` aplicadas numa unica tentativa (`006 -> 007 -> 008`, exit 0);
+relacoes em `marts` de 32 para 34.
+
+Corte comum calculado na execucao: **`common_date_to = 2026-08-11`** — D-1 era 12/08, a
+`brand_daily` ja tinha 12/08 e a `creator_daily` nao, entao o corte recuou para o dia que
+ambas cobrem. Publicado: **1.551** linhas em `fact_tiktok_brand_content_daily`
+(2025-10-05..2026-08-11, 311 datas) e **185.035** em `fact_tiktok_creator_daily`
+(2025-10-07..2026-08-11, 309 datas), `EXCEPT` bidirecional `(0,0)` nas duas, em 7 s e 50 s.
+O risco de `statement_timeout=300s` nao se materializou.
+
+Reconciliacao independente conferiu contagem, chaves, datas, cinco marcas, min/max,
+duplicidade, nulos, NaN, cobertura e todas as somas em `Decimal`. Zero linha fora da janela,
+zero marca fora da allowlist, auditoria completa.
+
+**Um alarme que era de collation, nao de dado.** O fingerprint da `creator_daily` divergiu
+entre as bases com todo o resto identico. Causa medida: Data Mart em `en_US.UTF-8` e Neon em
+`C.UTF-8`, e `STRING_AGG(... ORDER BY texto)` depende de collation. Com `COLLATE "C"` nos
+dois lados os hashes batem, e a comparacao de conjuntos em memoria fechou em 185.035 tuplas
+identicas, zero exclusiva de cada lado. Fica a licao para a Task 3/3: comparacao entre
+engines exige collation explicita ou comparacao de conjuntos.
+
+**Isolamento provado:** das 34 relacoes de `marts`, so as 2 novas mudaram de contagem.
+`fact_ml_gestao_diaria` identica antes e depois (1.621 linhas, checksum `fe3ca591…`), 15
+tabelas Shopee inalteradas. `gold_service.py` intocado — `/operacoes` segue em `gold.*`. **A
+decisao de frete no GMV TikTok permanece separada e inalterada.**
+
+**Task 3/3 nao iniciada**, Airflow segue sem prova e a contraprova de idempotencia continua
+pendente. Detalhe em [SERVING_AIRFLOW_PLAN.md §29](SERVING_AIRFLOW_PLAN.md).
+
+### Gate S2, Task 3/3 — `BLOCKED` por deriva de valor na janela coberta (13/08/2026)
+
+A troca de `/operacoes` para `marts.*` **nao foi feita**: zero linha de codigo alterada, zero
+escrita, zero sync, zero migration. O endpoint segue em `gold.*`.
+
+O bloqueio veio do criterio de paridade, e a investigacao mudou o entendimento do problema.
+A comparacao executou **as cinco consultas reais do endpoint** nas duas fontes e reconstruiu
+o payload com o mesmo codigo de pos-processamento. Dentro do corte comum (2026-08-10)
+**todas as chaves sao comuns** nas tres tabelas — 1.621, 1.546 e 184.257, zero exclusiva de
+qualquer lado —, mas **64, 23 e 6 chaves tem valor diferente**. Nao e' erro de mapeamento: e'
+a Gold **reafirmando** numeros de dias ja fechados depois da copia.
+
+A magnitude e' pequena (`gmv` do ML difere −R$ 5.631,15, ou −0,0147%; TikTok brand tem `gmv`
+e `orders` identicos) mas **visivel no payload**: `orders_7d` de uma marca sai 1.653 contra
+1.656, e a contagem de videos de um criador sai 166 contra 165. Numero exibido que muda com a
+fonte e' material numa torre de controle, e o contrato congelado nao admite alteracao.
+
+**O achado que ultrapassa a Task 3/3:** medindo a data mais antiga com valor alterado, a
+`ml_gestao_diaria` reafirma ate **68 dias** para tras e a `tiktok_brand_daily` ate **27**. O
+`DEFAULT_LOOKBACK_DAYS = 7` dos dois modulos foi dimensionado por hipotese, nao por medicao —
+um incremental de 7 dias corrigiria a ponta e deixaria **deriva permanente** nas datas mais
+antigas, invisivel a qualquer checagem por `MAX(date)`. Nada foi alterado: dimensionar janela
+de convergencia e' decisao de arquitetura, nao ajuste de constante.
+
+Para fechar a Task 3/3: decidir a estrategia de convergencia (lookback pelo horizonte medido,
+refresh periodico ou reconciliacao que detecte deriva fora da janela) e depois recarregar as
+tres tabelas com backfill completo, trocando o endpoint na mesma execucao em que a paridade
+for medida. Detalhe em [SERVING_AIRFLOW_PLAN.md §30](SERVING_AIRFLOW_PLAN.md).
+
+### Gate S2, Task 3/3 — correcao de convergencia implementada localmente (13/08/2026)
+
+**`READY FOR REVIEW — AGUARDANDO BACKFILL COMPLETO`.** Politica temporal D-1 no fuso do
+Brasil, lookback incremental de 90 dias e troca de `/operacoes` para `marts.*`
+implementados e validados **localmente**. **Nada publicado**: zero commit, push, deploy,
+escrita em banco ou sync.
+
+**Causa do BLOCKED anterior:** a Gold reafirma valores de dias ja fechados ate **68 dias**
+para tras (`ml_gestao_diaria`) e **27** (`tiktok_brand_daily`) — muito alem dos 7 dias de
+lookback dimensionados por hipotese. Um incremental de 7 corrigiria a ponta e deixaria
+deriva permanente no meio da serie, invisivel a qualquer checagem por `MAX(date)`.
+
+**Politica adotada.** `/operacoes` vira visao de dias fechados: teto **inclusivo em D-1**
+nas cinco consultas, com os limites inferiores **nominais** inalterados (7, 14 e 30
+dias). O tamanho efetivo da janela mudou de proposito: sem teto, o dia corrente podia
+elevar o intervalo para 8/15/31 datas; agora sao exatamente 7/14/30 dias fechados — o
+painel deixa de exibir um numero que mudava sozinho ao longo do dia. O dia vem do
+fuso **America/Sao_Paulo** via `zoneinfo`, sem dependencia nova — sem isso, entre 21h e 00h
+no Brasil o servidor em UTC ja teria virado o dia e o painel mudaria sozinho no fim da
+tarde. O lookback incremental passou a **90 dias** nos dois modulos, com piso contratual de
+7 explicito (antes o piso estava acoplado ao default no modulo TikTok, e mudar o default
+teria elevado o piso silenciosamente). **90 dias e' a rotina, nao garantia eterna:** fica
+registrado como politica futura um **backfill historico periodico**, semanal quando houver
+Airflow — nao implementado, sem DAG e sem agendamento.
+
+**Troca cirurgica:** so `/operacoes`. Zero `gold.`/`raw.` nas cinco consultas,
+`_uses_datamart` devolve `False` e um teste roda o endpoint com `datamart_engine = None`
+para provar que nada tenta o Data Mart. `/brand-detail`, `/inteligencia` e `/tempo-real`
+seguem na gold. Contrato congelado alterado **apenas** em fonte e teto: nenhuma expectativa
+de payload mudou, e foi assim que ele provou seu proposito.
+
+**Ainda nao ha paridade de producao:** as `marts.*` seguem com os dados defasados do §30. A
+proxima etapa exige **autorizacao de escrita para backfill completo** das tres tabelas, com
+paridade medida na mesma execucao; so entao o endpoint pode ser publicado. Airflow continua
+sem prova e **a decisao de frete no GMV TikTok permanece separada**. Detalhe em
+[SERVING_AIRFLOW_PLAN.md §31](SERVING_AIRFLOW_PLAN.md).
+
+### Gate S2, Task 3/3 — backfill completo e `/operacoes` validado (13/08/2026)
+
+**`SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`.** As tres tabelas de
+serving foram recarregadas integralmente ate **D-1 = 2026-08-12** (America/Sao_Paulo) e
+reconciliadas; `/operacoes` produz payload **identico** ao da Gold. **Nada publicado**: zero
+commit, push ou deploy.
+
+| Tabela | `run_id` | Publicadas | `EXCEPT` |
+| --- | --- | --- | --- |
+| `fact_ml_gestao_diaria` | `s2t3-full-ml` | 1.629 | `(0,0)` |
+| `fact_tiktok_brand_content_daily` | `s2t3-full-brand` | 1.556 | `(0,0)` |
+| `fact_tiktok_creator_daily` | `s2t3-full-creator` | 185.697 | `(0,0)` |
+
+As tres fontes cobriam D-1 sem buraco e ficaram estaveis entre duas amostras separadas por
+35 s. A reconciliacao conferiu linhas, chaves, datas, marcas, min/max, duplicidades, nulos,
+NaN e todas as somas em `Decimal`, com comparacao linha a linha **por conjunto** — imune a
+collation, aplicando desde o inicio a licao do §29.5. Zero linha do dia corrente, zero marca
+fora da allowlist, um unico `source_run_id` por tabela.
+
+**Isolamento:** das 34 tabelas de `marts`, exatamente 3 mudaram — as autorizadas. As 7
+tabelas Shopee ficaram identicas e o Alembic seguiu em `008`. (Correcao factual: sao 7
+tabelas Shopee, nao 15; o numero anterior contava indices.)
+
+**`/operacoes`:** payload de Gold e de Marts identicos campo a campo com o mesmo teto D-1
+(`alertas=0, ml_velocity=4, creators=30, lives=5, tk_daily=70`), e prova runtime com
+`datamart_engine = None` mostrando as cinco consultas passando pela Session do Neon, todas
+em `marts.*`. O Gate G4 deixa de bloquear este endpoint assim que ele for publicado.
+
+**Correcao de redacao:** o teto D-1 **e' mudanca comportamental**. Os limites inferiores
+nominais foram preservados, mas antes o dia corrente podia render 8/15/31 datas; agora sao
+exatamente 7/14/30 dias fechados.
+
+**Falta versionar e publicar.** Airflow continua sem prova e o backfill historico periodico
+segue como politica do futuro Airflow. **Frete no GMV TikTok permanece frente separada.**
+Detalhe em [SERVING_AIRFLOW_PLAN.md §32](SERVING_AIRFLOW_PLAN.md).
+
 ## Próximas prioridades
 
-1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 executado como `PARTIAL — PILOTO VALIDADO`; S2 não iniciado.**
+1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 executado como `PARTIAL — PILOTO VALIDADO`; S2 com Tasks 1/3 e 2/3 concluídas e Task 3/3 `BLOCKED` por deriva de valor.**
 2. Integrar essa materialização ao **Airflow da organização** — que **existe** segundo o proprietário, mas **não foi localizado nem está visível** com as credenciais desta sessão, e cuja plataforma, URL, hospedagem e rede ainda não foram informadas; **nenhuma DAG foi inspecionada, configurada ou executada** —, eliminando a dependência síncrona Render → Data Mart/VPN.
 3. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
 4. Manter a decisão do **GMV TikTok com frete** como frente separada.

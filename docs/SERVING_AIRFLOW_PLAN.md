@@ -679,7 +679,7 @@ permite avançar no Gate S1 mesmo antes de resolver o acesso ao repositório Air
 
 ## 25. Roadmap — três gates
 
-Nenhum deles foi executado. Os três são sequenciais, e o S1 é pré-requisito duro.
+Os três são sequenciais, e o S1 é pré-requisito duro. **Estado em 13/08/2026:** S1 encerrado como `PARTIAL — PILOTO VALIDADO` (§26), S2 com as Tasks 1/3 e 2/3 concluídas (§27 e §29) e a Task 3/3 com backfill completo e `/operacoes` validado localmente, aguardando versionamento (§30 o `BLOCKED` que a motivou, §31 a correção de convergência, §32 a carga e a validação); S3 não iniciado.
 
 ### Gate S1 — provar acesso e publicar a primeira tabela
 
@@ -1253,3 +1253,398 @@ O hardening corrige uma exposicao de log; **nao substitui o preflight**. O mesmo
 read-only precisa ser **repetido integralmente apos a VPN voltar**: corte comum,
 fingerprint duplo com intervalo de 30 s, cobertura, duplicidade, allowlist e concorrencia
 no Data Mart. So um `GO` daquele preflight autoriza aplicar 007/008.
+
+## 29. Gate S2, Task 2/3 — serving TikTok publicado e reconciliado (13/08/2026)
+
+**`SUCCESS — SERVING TIKTOK PUBLICADO E RECONCILIADO`.** Migrations 007 e 008 aplicadas
+numa unica tentativa, as duas fatos carregadas e reconciliadas, e **nenhum endpoint
+trocado** — `/operacoes` e `/brand-detail` continuam lendo `gold.*`, o que e' a Task 3/3.
+
+### 29.1 Corte comum e janelas
+
+`common_date_to = 2026-08-11`, calculado na execucao: D-1 era 12/08, a `brand_daily` ja
+tinha 12/08 e a `creator_daily` nao. O corte recuou para o dia que **ambas** cobrem
+integralmente, em vez de forcar as duas ate uma data que uma delas nao possui.
+
+| | Janela | Linhas | Datas |
+| --- | --- | --- | --- |
+| `brand_content` | 2025-10-05 .. 2026-08-11 | **1.551** | 311 |
+| `creator_daily` | 2025-10-07 .. 2026-08-11 | **185.035** | 309 |
+
+12/08 ficou de fora desta carga de proposito. O incremental de sete dias o absorve na
+proxima execucao, sem intervencao.
+
+### 29.2 Preflight final antes da primeira escrita
+
+24 verificacoes, todas aprovadas, com **hashes completos** conferidos contra o baseline —
+nao apenas prefixos. Fingerprints reproduzidos identicos nas janelas congeladas:
+`brand` chaves `234a15069a9c84b0d37d5b2a4e3611ef` e negocio `704c57deeb9f122c2da98dfae6b7d33c`;
+`creator` chaves `6ad7dacde5b630a619d34c1434c6b7fe` e negocio `ae353fee616a4123565d9350b46f44f5`.
+
+Concorrencia verificada por amostragem dupla de 36 s: tamanho e contagem bruta das duas
+fontes identicos, zero lock de escrita de cliente com filtro `locktype='relation'`, zero
+advisory lock do serving, zero outro backend no Neon.
+
+### 29.3 Migration
+
+`alembic upgrade 008`, uma tentativa, exit 0, `006 -> 007 -> 008`. Relacoes em `marts`:
+**32 -> 34**, nenhuma desaparecida.
+
+Contrato fisico conferido no banco: `brand_content` com **39 colunas** e **13 CHECKs**;
+`creator_daily` com **11 colunas** e **5 CHECKs**; PKs `(date, brand)` e
+`(date, brand, creator)`; indices `idx_ftbcd_brand_date` e `idx_ftcd_brand_date`;
+`NUMERIC` sem escala declarada nas duas; nulabilidade exatamente igual as colunas
+opcionais da spec; `total_fees` e `total_live_minutes` **sem** CHECK de nao-negatividade,
+como a auditoria exigia; ambas criadas **vazias**.
+
+### 29.4 Publicacao e reconciliacao
+
+| | `run_id` | Apagadas | Publicadas | `EXCEPT` | Duracao |
+| --- | --- | --- | --- | --- | --- |
+| Brand | `s2t2-bf-brand` | 0 | **1.551** | `(0, 0)` | 7 s |
+| Creator | `s2t2-bf-creator` | 0 | **185.035** | `(0, 0)` | 50 s |
+
+Reconciliacao independente do modulo, em conexoes separadas por engine: contagem, chaves,
+datas, marcas, min/max, duplicidade, nulos obrigatorios, NaN, cobertura e **todas** as
+somas em `Decimal` (21 colunas na `brand_content`, 6 na `creator_daily`) conferem entre
+origem e destino. Zero linha fora da janela, zero marca fora da allowlist, auditoria
+completa em 100% das linhas, um unico `source_run_id` por tabela.
+
+O risco de `statement_timeout=300s` nao se materializou: 50 s para 185 mil linhas, com a
+leitura da fonte fora da transacao.
+
+### 29.5 Uma divergencia de fingerprint que era de COLLATION, nao de dado
+
+A reconciliacao da `creator_daily` acusou divergencia nos dois fingerprints, com **tudo o
+mais identico** — contagens, somas `Decimal` e o `EXCEPT` bidirecional `(0,0)`.
+
+A causa foi medida: **as duas bases tem collation diferente**. O Data Mart usa
+`en_US.UTF-8` e o Neon usa `C.UTF-8`. O fingerprint e' `MD5(STRING_AGG(... ORDER BY l))`,
+e o `ORDER BY` sobre texto depende de collation — logo o mesmo conjunto de linhas produz
+digests diferentes. Forcando `COLLATE "C"` nos dois lados, os hashes batem exatamente:
+chaves `37c25cd37c18fd38bae511d882bc7b7d` e negocio `02b68b9e1a5aba319c5045089ded355d` em
+ambas as pontas.
+
+A `brand_content` nao tropecou porque suas chaves (`date;brand`) sao digitos, hifens,
+ponto-e-virgula e minusculas ASCII, que ordenam igual nas duas collations. Os handles de
+criador tem maiusculas, pontuacao e digitos misturados, onde as regras divergem.
+
+Prova definitiva, sem qualquer ordenacao SQL: as tuplas de chave e negocio das duas pontas
+foram comparadas como conjuntos em memoria — **185.035 de cada lado, conjuntos identicos,
+zero exclusiva em qualquer direcao, zero duplicata**.
+
+**Licao para a Task 3/3 e para qualquer comparacao entre engines:** fingerprint por
+`STRING_AGG` so e' comparavel entre bases com collation explicita (`COLLATE "C"`) ou por
+comparacao de conjuntos. Sem isso, produz falso alarme em qualquer texto com maiuscula ou
+pontuacao — e um falso alarme aqui teria parado a operacao sem motivo.
+
+### 29.6 Isolamento e escopo
+
+Inventario de `marts` comparado antes e depois: das 34 relacoes, **exatamente 2 mudaram de
+contagem** — as duas recem-criadas. `marts.fact_ml_gestao_diaria` ficou **identica**: 1.621
+linhas, intervalo 2025-04-27..2026-08-10 e checksum de negocio
+`fe3ca591681649768b87dae936f00ef4` antes e depois. As 15 tabelas Shopee em `marts`
+inalteradas. Database: 164,2 MB -> 197,2 MB; `brand_content` ocupa 544 kB e
+`creator_daily` 32 MB.
+
+Zero alteracao de codigo, SQL versionado, contrato, endpoint ou regra de negocio.
+`gold_service.py` intocado, com 27 referencias a `gold.*`. O connector TikTok intocado: a
+**decisao de frete no GMV permanece frente separada e inalterada**, e producao segue em
+`sub_total`.
+
+### 29.7 O que continua pendente
+
+- **Task 3/3**: trocar a fonte de `/operacoes` para `marts.*`, com o contrato congelado de
+  30 testes como criterio de payload identico. Nao iniciada.
+- **Airflow**: nada provado. Nenhuma DAG, connection, secret ou pool. §24 inalterado.
+- **Idempotencia sob fonte estavel**: continua sem contraprova. Nenhuma segunda execucao
+  foi feita, por decisao explicita desta operacao.
+- **12/08 na `brand_daily`**: fora desta carga, entra no proximo incremental.
+
+## 30. Gate S2, Task 3/3 — BLOCKED por deriva de valor dentro da janela coberta (13/08/2026)
+
+**`BLOCKED`. Nenhuma linha de codigo foi alterada.** `get_operacoes` continua lendo
+`gold.*`. Zero escrita, zero sync, zero migration, zero commit.
+
+A troca de fonte parou no criterio que existe justamente para isso: **houve diferenca
+material dentro de uma janela coberta pelas duas fontes**. O importante e' que a
+investigacao mudou o entendimento do problema — nao e' atraso de um dia, e' **reafirmacao
+retroativa profunda**.
+
+### 30.1 Frescor: Gold ja avancou
+
+| Tabela | Gold | Marts | Defasagem | Linhas a mais na Gold |
+| --- | --- | --- | --- | --- |
+| `ml_gestao_diaria` | 2025-04-27..**2026-08-13** | ..2026-08-10 | **3 dias** | 12 |
+| `tiktok_brand_daily` | 2025-10-05..**2026-08-12** | ..2026-08-11 | 1 dia | 5 |
+| `tiktok_creator_daily` | 2025-10-07..**2026-08-12** | ..2026-08-11 | 1 dia | 662 |
+
+Corte comum entre as tres copias: **2026-08-10**, limitado pela fato do S1, que nao recebeu
+incremental desde o backfill de 11/08.
+
+### 30.2 O metodo: SQL de producao nas duas fontes
+
+Em vez de reescrever as consultas a mao, o teste **capturou as cinco consultas que
+`get_operacoes` monta**, executou cada uma nas duas fontes (a versao Marts com apenas a
+troca de nome de relacao) e **reconstruiu o payload com o mesmo codigo de
+pos-processamento**. Comparar dois payloads produzidos pelo codigo de producao elimina a
+chance de o proprio teste introduzir a diferenca.
+
+### 30.3 O achado: nao e' mapeamento, e' reafirmacao retroativa
+
+Comparacao chave a chave, por conjunto (sem ordenacao nem collation), dentro do corte comum:
+
+| Tabela | Chaves Gold / Marts | So na Gold | So em Marts | **Valor diferente** |
+| --- | --- | --- | --- | --- |
+| `ml_gestao_diaria` | 1.621 / 1.621 | 0 | 0 | **64** |
+| `tiktok_brand_daily` | 1.546 / 1.546 | 0 | 0 | **23** |
+| `tiktok_creator_daily` | 184.257 / 184.257 | 0 | 0 | **6** |
+
+**Todas as chaves sao comuns nas tres tabelas.** Erro de mapeamento ou de coluna produziria
+divergencia sistematica — colunas inteiras, ou chaves faltando. O que existe e' um punhado
+de chaves com valor alterado: a Gold **reafirmou** numeros de dias ja fechados depois de a
+copia ter sido feita.
+
+Magnitude, dentro do corte comum:
+
+| Tabela | Metrica | Gold | Marts | Diferenca |
+| --- | --- | --- | --- | --- |
+| `ml_gestao_diaria` | `gmv` | 38.232.729,65 | 38.238.360,80 | **−5.631,15 (−0,0147%)** |
+| | `paid_orders` | 452.591 | 452.663 | −72 (−0,0159%) |
+| `tiktok_brand_daily` | `gmv` / `orders` | — | — | **0,0000% (identicos)** |
+| | `new_videos_posted` | 712.771 | 712.741 | +30 (0,0042%) |
+| `tiktok_creator_daily` | `gmv_total` | 81.006.826,52 | 81.006.709,62 | +116,90 (0,0001%) |
+| | `views_video` | 1.488.273.035 | 1.488.259.447 | +13.588 (0,0009%) |
+
+Percentualmente minusculo, **mas visivel no payload**: com o corte comum,
+`ml_velocity[3].orders_7d` sai 1.653 na Gold e 1.656 em Marts, e `creators[3].videos` sai
+166 contra 165. Numa torre de controle, numero exibido que muda conforme a fonte e'
+material por definicao, independente do percentual — e o contrato congelado nao admite
+alteracao de payload.
+
+### 30.4 A consequencia estrutural: o lookback de 7 dias nao converge
+
+Este e' o achado que ultrapassa a Task 3/3. Medindo a data mais antiga cujo valor mudou:
+
+| Tabela | Data mais antiga alterada | Horizonte | Lookback de 7 dias resolve? |
+| --- | --- | --- | --- |
+| `ml_gestao_diaria` | 2026-06-03 | **68 dias** | **NAO** |
+| `tiktok_brand_daily` | 2026-07-14 | **27 dias** | **NAO** |
+| `tiktok_creator_daily` | 2026-08-10 | 0 dias | SIM |
+
+`DEFAULT_LOOKBACK_DAYS = 7` nos dois modulos de sync foi dimensionado por hipotese
+("late-arriving data"), nao por medicao. A medicao agora mostra que a `ml_gestao_diaria`
+reafirma valores **ate 68 dias** para tras e a `tiktok_brand_daily` **ate 27**. Um
+incremental de 7 dias corrigiria a ponta e **deixaria deriva permanente** nas datas de 8 a
+68 dias — exatamente o tipo de buraco silencioso que `MAX(date)` nao detecta.
+
+Nada disso foi alterado nesta task: corrigir dimensionamento de janela nao e' "ajustar um
+numero", e' decisao de arquitetura da camada de serving.
+
+### 30.5 O que fecharia a Task 3/3
+
+Duas coisas, em ordem:
+
+1. **Decidir a estrategia de convergencia** — lookback dimensionado pelo horizonte medido
+   (>= ~70 dias para ML, >= ~30 para a brand), ou refresh completo periodico, ou
+   reconciliacao que detecte deriva fora da janela. Sem isso, a camada de serving acumula
+   divergencia invisivel a cada dia.
+2. **Recarregar as tres tabelas** com backfill completo (nao incremental) e trocar o
+   endpoint **imediatamente depois**, com a paridade medida na mesma execucao.
+
+Enquanto isso, `/operacoes` no `gold.*` continua indisponivel em producao pelo Gate G4 — a
+troca resolve a disponibilidade, mas nao ao custo de servir numero que difere da fonte.
+
+### 30.6 Fronteiras preservadas
+
+`gold_service.py` intocado (27 referencias a `gold.*`). Router, schema e frontend intocados.
+`/brand-detail`, `/inteligencia` e `/tempo-real` intocados. Zero escrita nos dois bancos,
+zero sync, zero migration, zero Airflow. **A decisao de frete no GMV TikTok permanece frente
+separada e inalterada.** Nenhum handle de criador, linha individual, DSN ou topologia foi
+impresso em nenhuma etapa.
+
+## 31. Gate S2, Task 3/3 — correcao arquitetural de convergencia (13/08/2026)
+
+**`READY FOR REVIEW — AGUARDANDO BACKFILL COMPLETO`.** As tres mudancas estao
+implementadas e validadas **localmente**: politica temporal D-1 no fuso do Brasil,
+lookback incremental de 90 dias e troca de `/operacoes` para `marts.*`. **Nada foi
+publicado**: zero commit, zero push, zero deploy, zero escrita em banco, zero sync.
+
+### 31.1 A causa do BLOCKED, e por que a resposta nao e' "um numero maior"
+
+O §30 mediu reafirmacao retroativa da Gold **alem de sete dias**: ate 68 dias em
+`ml_gestao_diaria` e 27 em `tiktok_brand_daily`. O lookback de 7 corrigiria a ponta e
+deixaria deriva permanente no meio da serie — invisivel a checagem por `MAX(date)`,
+porque a data maxima estaria certa e os valores nao.
+
+A correcao tem duas partes independentes, e as duas eram necessarias:
+
+- **teto D-1 no endpoint** resolve o dia corrente parcial, que nunca deveria ser servido;
+- **lookback de 90 dias** resolve a convergencia da copia.
+
+Nenhuma delas sozinha bastava: o teto sem o lookback serviria dado fechado porem
+desatualizado; o lookback sem o teto continuaria mostrando um dia que muda sozinho ao
+longo da tarde.
+
+### 31.2 Politica temporal: D-1 em America/Sao_Paulo
+
+`/operacoes` passa a ser uma **visao de dias fechados**. As cinco consultas ganharam teto
+**inclusivo** em D-1; os limites inferiores **nominais** continuam os mesmos — 7 dias
+(alertas, velocity, creators), 14 (tk_daily) e 30 (lives).
+
+**O tamanho efetivo da janela mudou, e isso e' intencional.** Antes, por nao haver teto,
+a presenca do dia corrente na fonte podia produzir **8, 15 ou 31 datas**. Agora as janelas
+tem exatamente **7, 14 e 30 dias fechados**. Retirar o dia corrente e' alteracao
+comportamental deliberada — o painel deixa de exibir um numero que mudava sozinho ao longo
+do dia —, nao uma troca neutra.
+
+O dia vem do **fuso do negocio**, nao do processo. `zoneinfo` e' biblioteca padrao, sem
+dependencia nova. A razao e' concreta: a API roda em UTC no Render, os testes rodam no
+fuso da maquina e um worker futuro pode rodar em qualquer lugar. Sem fuso explicito,
+entre **21h e 00h no horario de Brasilia** (00h-03h UTC) o servidor ja teria virado o dia
+e serviria uma janela deslocada — o painel mudaria sozinho no fim da tarde, sem que nada
+tivesse acontecido no negocio. Ha teste para exatamente esse intervalo.
+
+A mesma convencao vale nos dois modulos de sync: `date.today()` foi eliminado de ambos
+(zero ocorrencias restantes), substituido por `hoje_operacional()`.
+
+### 31.3 Lookback: default 90, piso 7
+
+`DEFAULT_LOOKBACK_DAYS` passou de 7 para **90** nos dois modulos, com um comentario que
+registra a medicao que motivou a mudanca — o numero deixou de ser hipotese e passou a ser
+consequencia de dado observado.
+
+Introduzi tambem `MIN_LOOKBACK_DAYS = 7` **explicito**, e isso corrige um acoplamento
+perigoso: no modulo do TikTok a validacao era `if lookback_days < DEFAULT_LOOKBACK_DAYS`,
+de modo que mudar o default para 90 teria **silenciosamente elevado o piso para 90** e
+tornado impossivel qualquer reprocessamento menor. Piso e default agora sao constantes
+separadas, com significados distintos: o piso e' contratual (menos que isso nao absorve
+late-arriving data nenhum), o default e' a rotina.
+
+Efeito colateral assumido e documentado: o piso do modulo do S1 subiu de 1 para 7. Uma
+janela de 1 dia nao absorve reafirmacao alguma, e manter dois pisos diferentes em modulos
+gemeos e' o tipo de assimetria que causa incidente. O teste que exigia a janela de 1 dia
+foi reescrito para exigir a recusa, com a justificativa no proprio teste.
+
+**90 dias e' a rotina, nao garantia eterna.** Reafirmacao mais antiga que 90 dias exige
+**backfill historico periodico** — direcao recomendada: semanal, quando o Airflow existir.
+Nada disso foi implementado: sem DAG, sem agendamento, sem Airflow.
+
+### 31.4 Troca de fonte, restrita a `/operacoes`
+
+As cinco consultas passaram a ler `marts.fact_ml_gestao_diaria`,
+`marts.fact_tiktok_brand_content_daily` e `marts.fact_tiktok_creator_daily`. Zero `gold.`
+e zero `raw.` no corpo de `get_operacoes`; `_uses_datamart` devolve `False` para as cinco,
+o que faz `_query` usar a Session do Neon e **nunca abrir `datamart_engine`**. Um teste
+executa `get_operacoes` com `datamart_engine = None` e uma Session falsa, e verifica que
+as cinco consultas passam pela Session e o payload sai bem formado.
+
+`/brand-detail`, `/inteligencia` e `/tempo-real` **continuam na gold** — a troca foi
+cirurgica. Calculos, thresholds, filtros de marca, `GROUP BY`, `HAVING`, `LIMIT 30`,
+ordenacoes, arredondamentos, comportamento falsy e textos de alerta: **intactos**.
+
+### 31.5 O contrato congelado, e o que ele provou
+
+O arquivo de contrato mudou em **duas coisas apenas**: o classificador reconhece `marts.*`
+e as janelas exigem o teto D-1. **Nenhuma expectativa de payload foi alterada** — os
+mesmos valores, campos, tipos, arredondamentos, limites e ordenacoes de antes, incluindo o
+snapshot completo dos cinco blocos.
+
+Foi assim que o contrato provou o que existia para provar: ao trocar a fonte, os testes de
+payload continuaram verdes **sem edicao**, e os unicos que falharam foram os de fronteira,
+que descreviam de onde o dado vinha. Se alguma expectativa de valor tivesse precisado
+mudar, a troca teria alterado o contrato — e o certo seria parar.
+
+### 31.6 O que isto NAO significa
+
+**Nao ha paridade real de producao.** As tabelas `marts.*` seguem com os dados defasados
+medidos no §30: a copia esta correta em estrutura e errada em frescor. Publicar agora
+serviria numero desatualizado com aparencia de correto.
+
+A proxima etapa exige **autorizacao de escrita** para backfill completo das tres tabelas,
+com paridade medida na mesma execucao. So depois disso o endpoint pode ser publicado.
+
+**Airflow continua inexistente e nao comprovado.** **A decisao de frete no GMV TikTok
+permanece frente separada e inalterada.**
+
+## 32. Gate S2, Task 3/3 — backfill completo e /operacoes validado (13/08/2026)
+
+**`SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`.** As tres tabelas
+de serving foram recarregadas integralmente e reconciliadas, e `/operacoes` produz payload
+**identico** ao da Gold. **Nada publicado**: zero commit, push ou deploy.
+
+### 32.1 Dia operacional e cobertura
+
+D-1 = **2026-08-12**, resolvido em America/Sao_Paulo. As tres fontes cobriam D-1 **sem
+buraco algum** desde o primeiro dado — o corte comum recuado do §30 nao foi necessario.
+
+Amostragem dupla com 35 s de intervalo: as tres fontes **estaveis** em linhas, chaves,
+datas, marcas, agregados `Decimal` e fingerprints com `COLLATE "C"`.
+
+### 32.2 Os tres backfills, uma tentativa cada
+
+| Tabela | `run_id` | Janela | Apagadas | Publicadas | `EXCEPT` | Duracao |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fact_ml_gestao_diaria` | `s2t3-full-ml` | 2025-04-27 .. 2026-08-12 | 1.621 | **1.629** | `(0,0)` | 8 s |
+| `fact_tiktok_brand_content_daily` | `s2t3-full-brand` | 2025-10-05 .. 2026-08-12 | 1.551 | **1.556** | `(0,0)` | 6 s |
+| `fact_tiktok_creator_daily` | `s2t3-full-creator` | 2025-10-07 .. 2026-08-12 | 185.035 | **185.697** | `(0,0)` | 55 s |
+
+Antes de cada carga TikTok, o fingerprint da fonte foi reconferido contra o do precheck e
+bateu — a fotografia carregada e' a mesma que foi validada.
+
+### 32.3 Reconciliacao integral
+
+Para as tres, comparacao independente do modulo, em conexoes separadas por engine: linhas,
+chaves, datas, marcas, min/max, duplicidades, nulos obrigatorios, NaN e **todas** as somas
+em `Decimal` (4, 21 e 6 colunas) conferem. As razoes conferem por contagem de nao-nulos.
+
+A comparacao linha a linha foi feita **por conjunto**, imune a collation: zero tupla
+exclusiva de qualquer lado, zero duplicata em qualquer lado. E' a lição do §29.5 aplicada
+desde o inicio, em vez de descoberta no meio.
+
+Invariantes do destino, nas tres: contem **somente** a janela publicada, **zero linha do
+dia corrente ou posterior**, zero linha antes do inicio da fonte, zero marca fora da
+allowlist, auditoria completa e **um unico `source_run_id`** por tabela.
+
+### 32.4 Isolamento
+
+Inventario completo de `marts` comparado antes e depois: das **34** tabelas, exatamente
+**3** mudaram de contagem — as tres autorizadas. As **7** tabelas Shopee ficaram com
+contagens identicas. Alembic permaneceu em `008`. Database: 197 MB -> 230 MB;
+`creator_daily` ocupa 65 MB, `brand_content` 1000 kB e a fato do ML 616 kB.
+
+Correcao factual: sao **7** tabelas Shopee em `marts`, nao 15. O numero anterior contava
+indices, por nao filtrar `relkind='r'`.
+
+### 32.5 `/operacoes` — paridade e prova runtime
+
+**Paridade dos cinco blocos.** O SQL real do endpoint foi executado nas duas fontes, com o
+mesmo teto D-1, e os dois payloads foram reconstruidos pelo **mesmo** codigo de
+pos-processamento. Resultado: `alertas=0, ml_velocity=4, creators=30, lives=5, tk_daily=70`
+nos dois lados e **zero divergencia campo a campo**, incluindo ordenacao, tipos e nulls.
+
+**Prova runtime.** Com `datamart_engine = None` no processo — sem editar `.env` — e uma
+Session real do Neon, `get_operacoes` atravessou inteiro: cinco blocos bem formados, as
+cinco consultas passando pela Session, todas em `marts.*` e nenhuma citando `gold.`. O
+payload runtime saiu **identico** ao do teste de paridade.
+
+As cinco consultas foram verificadas uma a uma: teto D-1 presente, `_uses_datamart` = False,
+e o conjunto de relacoes usadas e' exatamente as tres fatos de serving.
+
+### 32.6 Correcao de redacao
+
+Estava escrito que "a quantidade de dias nao mudou" ao descrever o teto D-1. Era falso e
+foi corrigido em comentario, teste e nos dois documentos: os limites inferiores **nominais**
+foram preservados (7, 14 e 30 dias), mas antes, por nao haver teto, a presenca do dia
+corrente podia produzir **8, 15 ou 31 datas**. Agora as janelas tem exatamente **7, 14 e 30
+dias fechados**. Retirar o dia corrente e' **alteracao comportamental intencional** — o
+painel deixa de exibir um numero que mudava sozinho ao longo do dia —, nao uma troca neutra.
+
+### 32.7 Estado e o que falta
+
+O endpoint **ainda nao foi publicado**: o codigo esta validado localmente e aguarda
+versionamento. **Airflow continua inexistente e nao comprovado** — a politica de backfill
+historico periodico (semanal) permanece do futuro Airflow, sem DAG criada. Politica vigente:
+**D-1 no fuso do Brasil + lookback incremental de 90 dias**, com piso de 7 e reprocessamento
+pontual por `--date-from/--date-to`. **A decisao de frete no GMV TikTok permanece frente
+separada e inalterada.**

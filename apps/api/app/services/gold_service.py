@@ -7,14 +7,37 @@ O schema gold.* deve ser acessível pelo usuario configurado.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import datamart_engine
+
+#: Fuso do negocio. O dia operacional e' o dia no Brasil, nao o do processo: a API
+#: roda em UTC no Render, os testes rodam no fuso da maquina e um worker futuro
+#: pode rodar em qualquer lugar. Sem isso, entre 21h e 00h no Brasil (00h-03h UTC)
+#: o servidor ja teria "virado o dia" e serviria uma janela deslocada.
+#: `zoneinfo` e' biblioteca padrao — nenhuma dependencia nova.
+TZ_OPERACIONAL = ZoneInfo("America/Sao_Paulo")
+
+
+def _hoje_operacional(agora: datetime | None = None) -> date:
+    """Data corrente em America/Sao_Paulo, independente do fuso do processo."""
+    return (agora or datetime.now(timezone.utc)).astimezone(TZ_OPERACIONAL).date()
+
+
+def _ultimo_dia_fechado(agora: datetime | None = None) -> date:
+    """Teto inclusivo das janelas de `/operacoes`: D-1 no fuso do negocio.
+
+    O dia corrente e' parcial por construcao — a Gold/Marts so o completa no dia
+    seguinte — e servir um total parcial faz o numero da tela mudar ao longo do
+    dia sem que nada tenha acontecido no negocio.
+    """
+    return _hoje_operacional(agora) - timedelta(days=1)
 BRANDS_IN_SCOPE = ("apice", "barbours", "kokeshi", "lescent", "rituaria")
 ML_BRANDS = ("barbours", "kokeshi", "lescent", "rituaria")  # rituaria incluida em 2026-07-01 (ver docs/backlog.md)
 SHOPEE_BRANDS = BRANDS_IN_SCOPE
@@ -2313,7 +2336,17 @@ def get_inteligencia(db: Session) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_operacoes(db: Session) -> dict:
-    today = date.today()
+    # Dia operacional no fuso do negocio, nao no do processo (ver TZ_OPERACIONAL).
+    today = _hoje_operacional()
+    # Teto INCLUSIVO de todas as cinco janelas: o dia corrente e' parcial e nao e'
+    # servido.
+    #
+    # Os limites inferiores NOMINAIS foram preservados — 7, 14 e 30 dias contados de
+    # `today`. O tamanho efetivo da janela, porem, MUDOU: sem teto, quando o dia
+    # corrente ja tinha linha na fonte, o intervalo rendia 8, 15 ou 31 datas. Agora
+    # rende exatamente 7, 14 e 30 dias FECHADOS. Retirar o dia corrente e' alteracao
+    # comportamental intencional, nao neutralidade.
+    d_fechado = today - timedelta(days=1)
     d7_start = today - timedelta(days=7)
     d14_start = today - timedelta(days=14)
     d30_start = today - timedelta(days=30)
@@ -2323,9 +2356,10 @@ def get_operacoes(db: Session) -> dict:
                COALESCE(ad_spend, 0) AS ad_spend,
                COALESCE(gmv, 0)      AS gmv,
                COALESCE(roas, 0)     AS roas
-        FROM gold.ml_gestao_diaria
+        FROM marts.fact_ml_gestao_diaria
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND ref_date >= '{d7_start}'
+          AND ref_date <= '{d_fechado}'
         ORDER BY ref_date DESC
     """
     gestao_rows = _query(db, gestao_sql)
@@ -2365,9 +2399,10 @@ def get_operacoes(db: Session) -> dict:
                CASE WHEN SUM(ad_spend) > 0
                     THEN SUM(ad_revenue) / SUM(ad_spend)
                     ELSE NULL END            AS roas_7d
-        FROM gold.ml_gestao_diaria
+        FROM marts.fact_ml_gestao_diaria
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND ref_date >= '{d7_start}'
+          AND ref_date <= '{d_fechado}'
         GROUP BY brand
         ORDER BY brand
     """
@@ -2393,9 +2428,10 @@ def get_operacoes(db: Session) -> dict:
                CASE WHEN SUM(views_video) > 0
                     THEN SUM(gmv_video) / SUM(views_video) * 1000
                     ELSE NULL END              AS gpm_video
-        FROM gold.tiktok_creator_daily
+        FROM marts.fact_tiktok_creator_daily
         WHERE brand IN {_fmt_list(BRANDS_IN_SCOPE)}
           AND date >= '{d7_start}'
+          AND date <= '{d_fechado}'
         GROUP BY brand, creator
         ORDER BY SUM(gmv_total) DESC
         LIMIT 30
@@ -2431,9 +2467,10 @@ def get_operacoes(db: Session) -> dict:
                CASE WHEN SUM(total_live_minutes) > 0
                     THEN SUM(gmv_live) / SUM(total_live_minutes)
                     ELSE NULL END              AS gmv_per_minute
-        FROM gold.tiktok_brand_daily
+        FROM marts.fact_tiktok_brand_content_daily
         WHERE brand IN {_fmt_list(BRANDS_IN_SCOPE)}
           AND date >= '{d30_start}'
+          AND date <= '{d_fechado}'
         GROUP BY brand
         HAVING SUM(total_lives) > 0
         ORDER BY SUM(gmv_live) DESC
@@ -2458,9 +2495,10 @@ def get_operacoes(db: Session) -> dict:
                date AS ref_date,
                COALESCE(SUM(gmv), 0)    AS gmv,
                COALESCE(SUM(orders), 0) AS orders
-        FROM gold.tiktok_brand_daily
+        FROM marts.fact_tiktok_brand_content_daily
         WHERE brand IN {_fmt_list(BRANDS_IN_SCOPE)}
           AND date >= '{d14_start}'
+          AND date <= '{d_fechado}'
         GROUP BY brand, date
         ORDER BY date, brand
     """

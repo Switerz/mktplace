@@ -84,7 +84,8 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 
 import psycopg2
@@ -205,8 +206,26 @@ AUDIT_COLUMNS = ["synced_at", "source_run_id"]
 ALLOWED_BRANDS = BRANDS_IN_SCOPE
 
 #: Janela default do modo incremental, em dias COMPLETOS terminando no ultimo dia
-#: fechado (D-1). >= 7 porque a fonte tem late-arriving data.
-DEFAULT_LOOKBACK_DAYS = 7
+#: fechado (D-1).
+#:
+#: Eram 7 dias, dimensionados por HIPOTESE ("late-arriving data"). A medicao do
+#: Gate S2 Task 3/3 mostrou que a hipotese era curta: comparando Gold x Marts
+#: dentro de uma janela coberta pelas duas, a fonte reafirmou valores de dias ja
+#: fechados ate **68 dias** para tras (`ml_gestao_diaria`) e **27**
+#: (`tiktok_brand_daily`). Um lookback de 7 corrigiria a ponta e deixaria deriva
+#: PERMANENTE nas datas mais antigas — invisivel a qualquer checagem por
+#: `MAX(date)`, porque a data maxima estaria correta e os valores nao.
+#:
+#: 90 dias cobrem o horizonte medido com folga. NAO e' garantia eterna: e' a
+#: rotina. Reafirmacao mais antiga que 90 dias exige backfill historico periodico
+#: (politica registrada em docs/SERVING_AIRFLOW_PLAN.md), nao um numero maior aqui.
+DEFAULT_LOOKBACK_DAYS = 90
+
+#: Piso contratual da janela incremental. Menor que isto nao absorve nem o
+#: late-arriving data mais banal, entao e' recusado mesmo quando explicito.
+#: Valores entre o piso e o default continuam validos por `--lookback-days`, para
+#: reprocessamento pontual sob decisao humana.
+MIN_LOOKBACK_DAYS = 7
 
 #: Piso de historico desejado, em meses. Vale "quando a fonte possuir essa
 #: cobertura": hoje as duas fontes tem ~10 meses, e o deficit e' DECLARADO em vez
@@ -419,6 +438,18 @@ def default_run_id(spec: TableSpec, now: datetime | None = None) -> str:
 # Validacao de janela — regra unica de D-1
 # ---------------------------------------------------------------------------
 
+#: Fuso do negocio. O dia operacional e' o dia no Brasil, nao o do processo: este
+#: modulo roda hoje numa maquina Windows, amanha num worker que pode estar em UTC.
+#: Sem isso, entre 21h e 00h no Brasil (00h-03h UTC) o processo ja teria virado o
+#: dia e publicaria uma janela deslocada. `zoneinfo` e' biblioteca padrao.
+TZ_OPERACIONAL = ZoneInfo("America/Sao_Paulo")
+
+
+def hoje_operacional(agora: datetime | None = None) -> date:
+    """Data corrente em America/Sao_Paulo, independente do fuso do processo."""
+    return (agora or datetime.now(timezone.utc)).astimezone(TZ_OPERACIONAL).date()
+
+
 def last_closed_date(today: date | None = None) -> date:
     """Ultimo dia FECHADO: `today - 1`. Regra unica de toda a janela deste modulo.
 
@@ -427,7 +458,7 @@ def last_closed_date(today: date | None = None) -> date:
     a proxima execucao a corrigi-lo — qualquer leitura no meio veria um numero que
     nao e' o do dia.
     """
-    return (today or date.today()) - timedelta(days=1)
+    return (today or hoje_operacional()) - timedelta(days=1)
 
 
 def require_closed_day(spec: TableSpec, today: date | None = None) -> date:
@@ -467,7 +498,7 @@ def history_deficit_days(spec: TableSpec, today: date | None = None) -> int:
 def validate_window(spec: TableSpec, date_from: date, date_to: date,
                     today: date | None = None) -> tuple[date, date]:
     """Janela fechada e sã. Recusa invertida, futura e o **dia corrente**."""
-    today = today or date.today()
+    today = today or hoje_operacional()
     fechado = last_closed_date(today)
     if not isinstance(date_from, date) or not isinstance(date_to, date):
         raise ValueError("date_from e date_to precisam ser datas.")
@@ -500,9 +531,9 @@ def incremental_window(spec: TableSpec, today: date | None = None,
     A sobreposicao entre execucoes e' DELIBERADA: absorve late-arriving data e
     converge por idempotencia, porque cada execucao reescreve a janela inteira.
     """
-    if lookback_days < DEFAULT_LOOKBACK_DAYS:
+    if lookback_days < MIN_LOOKBACK_DAYS:
         raise ValueError(
-            f"lookback_days precisa ser >= {DEFAULT_LOOKBACK_DAYS} (dias fechados): "
+            f"lookback_days precisa ser >= {MIN_LOOKBACK_DAYS} (dias fechados): "
             f"recebido {lookback_days}."
         )
     fechado = require_closed_day(spec, today)
@@ -1011,7 +1042,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "fechado (D-1). O dia corrente nunca e' publicado."))
     p.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS,
                    help=(f"janela movel de N dias COMPLETOS, terminando no ultimo dia "
-                         f"fechado (D-1). Minimo e default {DEFAULT_LOOKBACK_DAYS}."))
+                         f"fechado (D-1). Default {DEFAULT_LOOKBACK_DAYS}, minimo "
+                         f"{MIN_LOOKBACK_DAYS}."))
     p.add_argument("--date-from", help="inicio explicito da janela (YYYY-MM-DD)")
     p.add_argument("--date-to", help="fim explicito da janela (YYYY-MM-DD), no maximo D-1")
     p.add_argument("--apply", action="store_true",
@@ -1022,7 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_window_from_args(spec: TableSpec, args: argparse.Namespace,
                              today: date | None = None) -> tuple[date, date]:
-    today = today or date.today()
+    today = today or hoje_operacional()
     if args.backfill:
         if args.date_from or args.date_to:
             raise ValueError("--backfill nao combina com --date-from/--date-to.")
@@ -1053,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_id = sanitize_run_id(args.run_id) if args.run_id else default_run_id(spec)
                 codigo = apply_window(spec, date_from, date_to, run_id) or codigo
             else:
-                codigo = diagnose(spec, date_from, date_to, date.today()) or codigo
+                codigo = diagnose(spec, date_from, date_to, hoje_operacional()) or codigo
         except Exception as exc:  # noqa: BLE001 — fronteira do CLI
             print(f"FALHA ({spec.name}): {sanitize_error_message(exc)}", file=sys.stderr)
             return 2

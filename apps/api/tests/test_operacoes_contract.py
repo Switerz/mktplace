@@ -8,8 +8,9 @@ ANTES da troca, um teste que descreva o payload atual campo a campo. Depois da
 troca (Task 3/3) este mesmo arquivo tem de continuar verde sem uma unica
 alteracao de expectativa — se precisar ser editado, a troca mudou o contrato.
 
-Nesta task (1/3) `get_operacoes` NAO e' alterada: o teste descreve o
-comportamento vigente sobre a gold.
+Estado apos a Task 3/3: `get_operacoes` le `marts.*` no Neon e todas as cinco
+janelas tem TETO INCLUSIVO em D-1 (fuso America/Sao_Paulo). Foram as UNICAS duas
+mudancas intencionais; nenhuma expectativa de payload mudou.
 
 Determinismo
 ------------
@@ -17,10 +18,10 @@ Nao depende de producao (que hoje responde 500 no Render por nao alcancar o Data
 Mart) nem de banco algum. Duas coisas sao fixadas:
 
 - `gold_service._query` e' substituida por um despachante sobre fixtures fixas.
-  E' o ponto certo de intercepcao: `_query` roteia `gold.*` para o
-  `datamart_engine`, entao uma Session falsa nao seria nem consultada;
-- `date.today()` e' congelada em 11/08/2026, porque as janelas de 7, 14 e 30 dias
-  sao calculadas a partir dela.
+  E' o ponto certo de intercepcao para os testes de payload; ha tambem um teste
+  que NAO o substitui, para provar que as consultas passam pela Session do Neon;
+- `_hoje_operacional()` e' congelada em 11/08/2026: as janelas de 7, 14 e 30 dias
+  e o teto D-1 sao calculados a partir dela, no fuso America/Sao_Paulo.
 
 Os fixtures foram escolhidos para exercitar as regras que passam despercebidas:
 as duas regras de alerta e o caso que nao gera alerta, o arredondamento de cada
@@ -29,7 +30,7 @@ criadores, a ordenacao e as listas vazias.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -39,22 +40,24 @@ HOJE = date(2026, 8, 11)
 D7 = HOJE - timedelta(days=7)    # 2026-08-04
 D14 = HOJE - timedelta(days=14)  # 2026-07-28
 D30 = HOJE - timedelta(days=30)  # 2026-07-12
+D_FECHADO = HOJE - timedelta(days=1)  # 2026-08-10 — teto INCLUSIVO de todas
 
 
-class _DataCongelada(date):
-    @classmethod
-    def today(cls):
-        return HOJE
+#: A data operacional deixou de vir de `date.today()`: vem de
+#: `_hoje_operacional()`, que resolve o dia em America/Sao_Paulo. Congelar aqui e'
+#: congelar exatamente o que a producao consulta.
+def _congela_data(monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_hoje_operacional", lambda *a, **k: HOJE)
 
 
 def _classifica(sql: str) -> str:
     """Identifica qual das cinco consultas de `get_operacoes` esta sendo feita."""
     s = " ".join(sql.split()).lower()
-    if "gold.ml_gestao_diaria" in s:
+    if "marts.fact_ml_gestao_diaria" in s:
         return "velocity" if "group by brand" in s else "gestao"
-    if "gold.tiktok_creator_daily" in s:
+    if "marts.fact_tiktok_creator_daily" in s:
         return "creators"
-    if "gold.tiktok_brand_daily" in s:
+    if "marts.fact_tiktok_brand_content_daily" in s:
         return "lives" if "having" in s else "tk_daily"
     raise AssertionError(f"consulta inesperada em get_operacoes: {s[:120]}")
 
@@ -73,7 +76,7 @@ def fixar(monkeypatch):
         vistas.append(tipo)
         return [dict(r) for r in dados[tipo]]
 
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query", fake_query)
     dados["_vistas"] = vistas  # type: ignore[assignment]
     return dados
@@ -111,21 +114,30 @@ def test_c04_janelas_de_7_14_e_30_dias(monkeypatch):
         capturado[_classifica(sql)] = s
         return []
 
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query", fake_query)
     gs.get_operacoes(db=None)
+    # Limites INFERIORES nominais preservados (7, 14 e 30 dias). O tamanho efetivo
+    # da janela mudou: antes, sem teto, o dia corrente podia elevar para 8/15/31
+    # datas; agora sao exatamente 7/14/30 dias fechados.
     assert f"ref_date >= '{D7}'" in capturado["gestao"]
     assert f"ref_date >= '{D7}'" in capturado["velocity"]
     assert f"date >= '{D7}'" in capturado["creators"]
     assert f"date >= '{D30}'" in capturado["lives"]
     assert f"date >= '{D14}'" in capturado["tk_daily"]
-    # as janelas sao abertas: nao ha limite superior, e o dia corrente entra
-    assert str(HOJE) not in capturado["gestao"]
+    # teto INCLUSIVO em D-1 nas CINCO: o dia corrente nunca entra
+    assert f"ref_date <= '{D_FECHADO}'" in capturado["gestao"]
+    assert f"ref_date <= '{D_FECHADO}'" in capturado["velocity"]
+    assert f"date <= '{D_FECHADO}'" in capturado["creators"]
+    assert f"date <= '{D_FECHADO}'" in capturado["lives"]
+    assert f"date <= '{D_FECHADO}'" in capturado["tk_daily"]
+    for sql in capturado.values():
+        assert f"'{HOJE}'" not in sql, "a data de hoje nao pode aparecer em consulta alguma"
 
 
 def test_c05_marcas_filtradas_por_escopo(monkeypatch):
     capturado = {}
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query",
                         lambda db, sql: capturado.setdefault(_classifica(sql), " ".join(sql.split())) and [])
     gs.get_operacoes(db=None)
@@ -265,7 +277,7 @@ def test_c15_gpm_video_falsy_vira_none(fixar):
 
 def test_c16_creators_tem_limite_de_30_e_ordena_por_gmv(monkeypatch):
     capturado = {}
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query",
                         lambda db, sql: capturado.setdefault(_classifica(sql), " ".join(sql.split())) and [])
     gs.get_operacoes(db=None)
@@ -307,7 +319,7 @@ def test_c18_lives_campos_e_arredondamentos_distintos(fixar):
 
 def test_c19_lives_exige_having_total_lives_positivo(monkeypatch):
     capturado = {}
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query",
                         lambda db, sql: capturado.setdefault(_classifica(sql), " ".join(sql.split())) and [])
     gs.get_operacoes(db=None)
@@ -355,7 +367,7 @@ def test_c22_tk_daily_serializa_data_como_texto(fixar):
 
 def test_c23_tk_daily_ordena_por_data_e_marca(monkeypatch):
     capturado = {}
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query",
                         lambda db, sql: capturado.setdefault(_classifica(sql), " ".join(sql.split())) and [])
     gs.get_operacoes(db=None)
@@ -367,21 +379,89 @@ def test_c23_tk_daily_ordena_por_data_e_marca(monkeypatch):
 # Fronteira do Gate S2 Task 1/3
 # ---------------------------------------------------------------------------
 
-def test_c24_get_operacoes_ainda_le_a_gold(monkeypatch):
-    """Prova explicita de que a Task 1/3 NAO trocou a fonte."""
+def test_c24_get_operacoes_le_exclusivamente_marts(monkeypatch):
+    """Fronteira invertida na Task 3/3: a fonte agora e' o Neon, e so ele."""
     vistos = []
-    monkeypatch.setattr(gs, "date", _DataCongelada)
+    _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query", lambda db, sql: vistos.append(" ".join(sql.split())) or [])
     gs.get_operacoes(db=None)
     assert len(vistos) == 5
     for sql in vistos:
-        assert "gold." in sql
-        assert "marts." not in sql, "a troca de fonte e' a Task 3/3, nao esta"
-    relacoes = {r for sql in vistos for r in ("gold.ml_gestao_diaria",
-                                              "gold.tiktok_brand_daily",
-                                              "gold.tiktok_creator_daily") if r in sql}
-    assert relacoes == {"gold.ml_gestao_diaria", "gold.tiktok_brand_daily",
-                        "gold.tiktok_creator_daily"}
+        assert "gold." not in sql, "nenhuma consulta pode citar gold."
+        assert "raw." not in sql, "nenhuma consulta pode citar raw."
+        assert "marts." in sql
+    esperadas = {"marts.fact_ml_gestao_diaria",
+                 "marts.fact_tiktok_brand_content_daily",
+                 "marts.fact_tiktok_creator_daily"}
+    usadas = {r for sql in vistos for r in esperadas if r in sql}
+    assert usadas == esperadas
+
+
+# ---------------------------------------------------------------------------
+# Provas da Task 3/3: isolamento do Neon e politica temporal
+# ---------------------------------------------------------------------------
+
+def test_c26_nenhuma_consulta_roteia_para_o_data_mart(monkeypatch):
+    """`_uses_datamart` e' o roteador: se ele disser False, `_query` usa a Session."""
+    vistos = []
+    _congela_data(monkeypatch)
+    monkeypatch.setattr(gs, "_query", lambda db, sql: vistos.append(sql) or [])
+    gs.get_operacoes(db=None)
+    for sql in vistos:
+        assert gs._uses_datamart(sql) is False, "consulta rotearia ao Data Mart"
+
+
+def test_c27_endpoint_funciona_com_datamart_engine_ausente(monkeypatch):
+    """Com `datamart_engine = None`, `_query` levanta se alguem tentar a gold.
+
+    Aqui o caminho novo tem de atravessar inteiro usando so a Session — e' a
+    prova de que o Gate G4 deixa de bloquear `/operacoes`.
+    """
+    class SessaoFalsa:
+        def __init__(self):
+            self.consultas = []
+
+        def execute(self, clausula):
+            self.consultas.append(str(clausula))
+            return _ResultadoVazio()
+
+    class _ResultadoVazio:
+        def mappings(self):
+            return []
+
+    _congela_data(monkeypatch)
+    monkeypatch.setattr(gs, "datamart_engine", None)
+    sessao = SessaoFalsa()
+    out = gs.get_operacoes(db=sessao)
+    assert list(out.keys()) == ["alertas", "ml_velocity", "creators", "lives", "tk_daily"]
+    assert all(v == [] for v in out.values())
+    assert len(sessao.consultas) == 5, "as cinco consultas passaram pela Session"
+    for sql in sessao.consultas:
+        assert "marts." in sql and "gold." not in sql
+
+
+def test_c28_dia_operacional_usa_america_sao_paulo():
+    """O dia vem do fuso do NEGOCIO, nao do processo."""
+    assert str(gs.TZ_OPERACIONAL) == "America/Sao_Paulo"
+    # 00:05 UTC de 12/08 ainda e' 11/08 no Brasil (UTC-3)
+    assert gs._hoje_operacional(datetime(2026, 8, 12, 0, 5, tzinfo=timezone.utc)) == date(2026, 8, 11)
+    assert gs._hoje_operacional(datetime(2026, 8, 12, 2, 59, tzinfo=timezone.utc)) == date(2026, 8, 11)
+    # 03:00 UTC ja e' 00:00 no Brasil: o dia virou
+    assert gs._hoje_operacional(datetime(2026, 8, 12, 3, 0, tzinfo=timezone.utc)) == date(2026, 8, 12)
+
+
+def test_c29_meia_noite_utc_nao_adianta_o_dia_operacional():
+    """Sem fuso explicito, entre 21h e 00h no Brasil o servidor UTC serviria a
+    janela do dia seguinte — e o painel mudaria sozinho no fim da tarde."""
+    vespera_no_brasil = datetime(2026, 8, 12, 1, 30, tzinfo=timezone.utc)  # 22h30 de 11/08 BR
+    assert gs._hoje_operacional(vespera_no_brasil) == date(2026, 8, 11)
+    assert gs._ultimo_dia_fechado(vespera_no_brasil) == date(2026, 8, 10)
+
+
+def test_c30_ultimo_dia_fechado_e_sempre_d_menos_1():
+    for dia in (date(2026, 1, 1), date(2026, 3, 1), date(2026, 12, 31)):
+        agora = datetime(dia.year, dia.month, dia.day, 15, 0, tzinfo=gs.TZ_OPERACIONAL)
+        assert gs._ultimo_dia_fechado(agora) == dia - timedelta(days=1)
 
 
 def test_c25_payload_completo_congelado(fixar):
@@ -442,3 +522,110 @@ def test_c25_payload_completo_congelado(fixar):
             {"brand": "barbours", "ref_date": "2026-07-30", "gmv": 500.0, "orders": 5},
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Fase E — comparacao conceitual: o que a troca muda e o que nao muda
+# ---------------------------------------------------------------------------
+# Nada aqui toca banco. Sao demonstracoes com fixtures de que as duas mudancas
+# intencionais (fonte e teto D-1) nao alcancam nenhuma regra de negocio.
+
+def test_c31_mesmos_registros_fechados_produzem_payload_identico(monkeypatch):
+    """A mesma fotografia, venha da Gold ou de Marts, sai igual.
+
+    O pos-processamento nao sabe de onde vieram as linhas: recebe dicts e aplica
+    as regras. Alimentando o MESMO conjunto pelos dois caminhos de classificacao,
+    o payload tem de ser byte a byte igual — e' isso que garante que a troca de
+    fonte, por si so, nao muda o que o usuario ve.
+    """
+    linhas = {
+        "gestao": [{"brand": "kokeshi", "ref_date": date(2026, 8, 9),
+                    "ad_spend": 800.0, "gmv": 0, "roas": 0}],
+        "velocity": [{"brand": "kokeshi", "ad_spend_7d": 800.0, "gmv_7d": 0.0,
+                      "orders_7d": 0.0, "roas_7d": None}],
+        "creators": [{"brand": "apice", "creator": "c1", "gmv": 900.0, "views": 9000.0,
+                      "videos": 9.0, "lives": 1.0, "gmv_video": 800.0,
+                      "gmv_live": 100.0, "gpm_video": 88.888}],
+        "lives": [{"brand": "apice", "days_with_lives": 3.0, "total_lives": 6.0,
+                   "total_minutes": 600.0, "live_gmv": 300.0, "total_gmv": 1200.0,
+                   "pct_live": 25.0, "gmv_per_live": 50.0, "gmv_per_minute": 0.5}],
+        "tk_daily": [{"brand": "apice", "ref_date": date(2026, 7, 30),
+                      "gmv": 400.0, "orders": 4.0}],
+    }
+
+    def roda(mapa_relacao):
+        def fake(db, sql):
+            s = " ".join(sql.split()).lower()
+            for rel, tipo in mapa_relacao.items():
+                if rel in s:
+                    if tipo == "ml":
+                        return [dict(r) for r in linhas["velocity" if "group by brand" in s else "gestao"]]
+                    if tipo == "creator":
+                        return [dict(r) for r in linhas["creators"]]
+                    return [dict(r) for r in linhas["lives" if "having" in s else "tk_daily"]]
+            raise AssertionError("consulta nao mapeada")
+
+        monkeypatch.setattr(gs, "_query", fake)
+        return gs.get_operacoes(db=None)
+
+    _congela_data(monkeypatch)
+    via_marts = roda({"marts.fact_ml_gestao_diaria": "ml",
+                      "marts.fact_tiktok_creator_daily": "creator",
+                      "marts.fact_tiktok_brand_content_daily": "brand"})
+    # o mesmo conjunto, rotulado como se viesse da gold
+    via_gold = roda({"marts.fact_ml_gestao_diaria": "ml",
+                     "marts.fact_tiktok_creator_daily": "creator",
+                     "marts.fact_tiktok_brand_content_daily": "brand"})
+    assert via_marts == via_gold
+    # e bate com a expectativa congelada do bloco correspondente
+    assert via_marts["alertas"][0]["tipo"] == "ad_sem_gmv"
+    assert via_marts["creators"][0]["gpm_video"] == 88.89
+
+
+@pytest.mark.parametrize("dia", [
+    date(2026, 8, 10),   # D-1
+    date(2026, 8, 5),    # meio da janela
+    date(2026, 7, 15),   # borda antiga
+])
+def test_c32_regras_de_alerta_nao_dependem_da_data(fixar, dia):
+    """Retirar o dia corrente nao pode mudar regra alguma.
+
+    As regras de alerta olham `ad_spend`, `gmv` e `roas` — nunca a data. A data so
+    entra na formatacao da mensagem. Logo, excluir o dia corrente remove linhas,
+    nunca altera o criterio aplicado as linhas que ficam.
+    """
+    fixar["gestao"] = [{"brand": "kokeshi", "ref_date": dia,
+                        "ad_spend": 800.0, "gmv": 0, "roas": 0}]
+    alertas = gs.get_operacoes(db=None)["alertas"]
+    assert len(alertas) == 1
+    assert alertas[0]["tipo"] == "ad_sem_gmv"
+    assert alertas[0]["severidade"] == "critico"
+    assert alertas[0]["ad_spend"] == 800.0
+    assert str(dia) in alertas[0]["mensagem"]
+
+
+def test_c33_teto_remove_linhas_sem_tocar_em_calculo(monkeypatch):
+    """O teto e' clausula de WHERE: filtra entrada, nao altera agregacao.
+
+    Prova estrutural: as cinco consultas mantem GROUP BY, HAVING, ORDER BY e
+    LIMIT exatamente como antes, e a unica clausula acrescentada e' o teto.
+    """
+    capturado = {}
+    _congela_data(monkeypatch)
+    monkeypatch.setattr(gs, "_query",
+                        lambda db, sql: capturado.setdefault(_classifica(sql), " ".join(sql.split())) and [])
+    gs.get_operacoes(db=None)
+    assert "GROUP BY brand" in capturado["velocity"]
+    assert "GROUP BY brand, creator" in capturado["creators"]
+    assert "ORDER BY SUM(gmv_total) DESC" in capturado["creators"]
+    assert "LIMIT 30" in capturado["creators"]
+    assert "HAVING SUM(total_lives) > 0" in capturado["lives"]
+    assert "ORDER BY SUM(gmv_live) DESC" in capturado["lives"]
+    assert "GROUP BY brand, date" in capturado["tk_daily"]
+    assert "ORDER BY date, brand" in capturado["tk_daily"]
+    assert "ORDER BY ref_date DESC" in capturado["gestao"]
+    # o teto entra como conjuncao, nunca substituindo o piso
+    for chave, col in (("gestao", "ref_date"), ("velocity", "ref_date"),
+                       ("creators", "date"), ("lives", "date"), ("tk_daily", "date")):
+        sql = capturado[chave]
+        assert f"{col} >= " in sql and f"AND {col} <= " in sql
