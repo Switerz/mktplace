@@ -404,6 +404,28 @@ Fontes:
 
 Caveat: a Shopee ainda não tem API conectada; a fonte de verdade operacional nesta fase são os exports do Seller Center.
 
+#### Propriedade de colunas no Daily: cada fonte Shopee escreve só o que é seu (Gate SD2-C, 2026-08-17)
+
+As três fontes Shopee gravam na **mesma linha** `date × loja_id × marketplace_id`, em execuções separadas. Cada uma usa um SQL de upsert **parcial**, restrito às colunas de que é fonte:
+
+| fonte | `--source` | SQL | colunas que atualiza |
+|---|---|---|---|
+| Orders | `shopee` | `PATCH_SHOPEE_ORDERS_SQL` | `orders`, `units_sold`, `avg_ticket`, `canceled_orders`, `returned_orders`, `cancel_rate_pct`, `delivered_orders`, `total_settlement`, `total_fees`, `avg_fee_pct`, `avg_settlement_pct`, `seller_shipping_cost`, `shipping_pct_of_gmv` |
+| shop-stats | `shopee-stats` | `PATCH_SHOP_STATS_SQL` | **`gmv`** (autoritativo), `visitors`, `conversion_rate`, `new_buyers`, `repeat_buyers`, `repeat_buyer_rate_pct`, `unique_buyers` |
+| ads | `shopee-ads` | `PATCH_ADS_SQL` | `ad_spend`, `ad_revenue`, `ad_impressions`, `ad_clicks`, `roas`, `acos_pct`, `ctr_pct`, `cpc` |
+
+Pontos que o contrato fixa:
+
+- **Orders NÃO possui o GMV do Daily.** `_parser.py` calcula um `gmv` a partir de `Subtotal do produto`, mas esse valor **nunca** é gravado: `gmv` está fora tanto do INSERT quanto do UPDATE do patch de Orders. O GMV Shopee do Daily vem de shop-stats (Gate R2.1: `Vendas − Canceladas − Devolvidas/Reembolsadas`).
+- Uma chave diária criada por Orders nasce com `gmv` **NULL**, não zero. Ausência de shop-stats é ausência de dado, não venda zero. A coluna é nullable e não há CHECK que obrigue valor.
+- `unique_buyers` é o único campo que as duas fontes produzem. Orders o grava por `COALESCE(existente, novo)`: nunca sobrescreve um valor autoritativo já presente, só preenche quando está vazio. Na sequência histórica Orders → shop-stats → ads o resultado final não muda, porque shop-stats roda depois.
+- `refunded_orders`, `problem_rate`, `avg_delivery_hours`, `avg_delivery_days` e `data_quality_score` não têm fonte Shopee hoje: nenhum dos três patches os escreve, então nunca são zerados por uma execução parcial.
+- ML e TikTok continuam no `UPSERT_SQL` completo, sem alteração.
+
+Antes deste gate, `--source shopee` usava o `UPSERT_SQL` completo. Como o transform de Orders devolve `None` para o funil e para a mídia, uma execução isolada de Orders **apagava** visitantes, conversão, compradores e os 8 campos de Ads, e **substituía** o GMV autoritativo pelo subtotal dos pedidos. O comportamento só não causava dano quando `shopee_manual_refresh` rodava a sequência inteira, com shop-stats e ads reescrevendo depois.
+
+Comportamento confirmado em produção na operação SD2-D (17/08/2026), com duas execuções de Orders sobre a janela 10–16/08 que já tinha GMV de shop-stats e Ads publicados: GMV (R$ 149.489,35 a R$ 172.357,39), visitantes (133.762 a 171.106) e `ad_spend` (9.544,56/dia) ficaram **numericamente idênticos** antes e depois; os campos de Orders foram atualizados; e o dia 16/08 — que tinha linha criada apenas pelo patch de Ads — recebeu Orders, taxas e frete mantendo `gmv` **NULL**, servido pela API como `shopee_gmv: null` ao lado de `orders: 2298`.
+
 #### Contrato do parser numérico (`pipelines/connectors/shopee/_numeric.py::parse_brl_float`, 2026-07-04, endurecido em 2026-07-04)
 
 Usado por `_parser.py` (orders: `Quantidade`, `Subtotal do produto`, `Total global`, `Taxa de comissão líquida`, `Taxa de serviço líquida`, `Valor estimado do frete`) e por `_parser_ads.py` (ads: `Impressões`, `Cliques`, `Despesas`, `GMV`). Não é usado pelos parsers de shop-stats (`_parse_int`/`_parse_pct` em `_parser_shop_stats.py` são funções separadas, corretas para os formatos encontrados — inteiros puros e percentuais com vírgula decimal sempre < 100).

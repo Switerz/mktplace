@@ -125,6 +125,66 @@ PATCH_ADS_SQL = text("""
         ingested_at    = NOW()
 """)
 
+PATCH_SHOPEE_ORDERS_SQL = text("""
+    INSERT INTO marts.fact_marketplace_daily_performance (
+        date, loja_id, marketplace_id, empresa_id,
+        orders, units_sold, avg_ticket, unique_buyers,
+        canceled_orders, returned_orders, cancel_rate_pct, delivered_orders,
+        total_settlement, total_fees, avg_fee_pct, avg_settlement_pct,
+        seller_shipping_cost, shipping_pct_of_gmv,
+        source_updated_at
+    ) VALUES (
+        :date, :loja_id, :marketplace_id, :empresa_id,
+        :orders, :units_sold, :avg_ticket, :unique_buyers,
+        :canceled_orders, :returned_orders, :cancel_rate_pct, :delivered_orders,
+        :total_settlement, :total_fees, :avg_fee_pct, :avg_settlement_pct,
+        :seller_shipping_cost, :shipping_pct_of_gmv,
+        NOW()
+    )
+    ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
+        empresa_id           = EXCLUDED.empresa_id,
+        orders               = EXCLUDED.orders,
+        units_sold           = EXCLUDED.units_sold,
+        avg_ticket           = EXCLUDED.avg_ticket,
+        canceled_orders      = EXCLUDED.canceled_orders,
+        returned_orders      = EXCLUDED.returned_orders,
+        cancel_rate_pct      = EXCLUDED.cancel_rate_pct,
+        delivered_orders     = EXCLUDED.delivered_orders,
+        total_settlement     = EXCLUDED.total_settlement,
+        total_fees           = EXCLUDED.total_fees,
+        avg_fee_pct          = EXCLUDED.avg_fee_pct,
+        avg_settlement_pct   = EXCLUDED.avg_settlement_pct,
+        seller_shipping_cost = EXCLUDED.seller_shipping_cost,
+        shipping_pct_of_gmv  = EXCLUDED.shipping_pct_of_gmv,
+        unique_buyers        = COALESCE(
+            marts.fact_marketplace_daily_performance.unique_buyers,
+            EXCLUDED.unique_buyers),
+        source_updated_at    = NOW(),
+        ingested_at          = NOW()
+""")
+# Gate SD2-C (17/08/2026): `--source shopee` (orders) usava o UPSERT_SQL COMPLETO,
+# que escreve EXCLUDED em TODAS as colunas. Como `shopee_orders_daily.transform`
+# devolve `None` para visitors/conversion_rate/new_buyers/repeat_buyers/
+# repeat_buyer_rate_pct e para os 8 campos de Ads, e devolve o subtotal dos
+# pedidos em `gmv`, rodar orders isoladamente APAGAVA o funil e a mídia já
+# publicados e SUBSTITUÍA o GMV autoritativo de shop-stats pelo subtotal.
+#
+# Este patch restringe orders às colunas de que ele é fonte. Fora da lista de
+# UPDATE — portanto preservados — ficam: `gmv` (shop-stats é autoritativo, Gate
+# R2.1), o funil de shop-stats, os 8 campos de Ads, os campos TikTok, as metas,
+# e os campos que o transform de orders nunca preenche (`refunded_orders`,
+# `problem_rate`, `avg_delivery_hours`, `avg_delivery_days`,
+# `data_quality_score`).
+#
+# `unique_buyers` é o único campo disputado: shop-stats e orders o produzem. O
+# COALESCE preserva um valor autoritativo já gravado (shop-stats roda por último
+# na sequência histórica orders → shop-stats → ads, então o resultado final
+# daquela sequência não muda) e só preenche quando a coluna está vazia — caso
+# real das linhas de 16/08 criadas apenas pelo patch de Ads.
+#
+# No INSERT de uma chave nova, `gmv` fica NULL de propósito: ausência de dado de
+# shop-stats não é venda zero. O schema permite (coluna nullable, sem CHECK).
+
 PATCH_SHOP_STATS_SQL = text("""
     INSERT INTO marts.fact_marketplace_daily_performance (
         date, loja_id, marketplace_id, empresa_id,
@@ -371,6 +431,10 @@ def run(
             upsert_sql = PATCH_SHOP_STATS_SQL
         elif source == "shopee-ads":
             upsert_sql = PATCH_ADS_SQL
+        elif source == "shopee":
+            # Gate SD2-C: orders escreve só as colunas de que é fonte; ver a
+            # nota em PATCH_SHOPEE_ORDERS_SQL. TikTok e ML seguem no UPSERT_SQL.
+            upsert_sql = PATCH_SHOPEE_ORDERS_SQL
         else:
             upsert_sql = UPSERT_SQL
 
