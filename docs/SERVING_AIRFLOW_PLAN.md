@@ -1983,3 +1983,126 @@ processos gerenciada.
 apos um **piloto autorizado**: primeiro o wrapper em modo diagnostico (sem `--apply`)
 conferindo `effective_date_to` contra os watermarks reais, depois uma execucao manual
 completa com VPN ativa, e so' entao confiar no agendamento.
+
+## 37. Checkpoint O1 — piloto da ponte diaria executado UMA vez: `OK` (17/08/2026)
+
+O codigo da secao 36 foi versionado em `950c40747c4f038f0c6e62f06903d1bf22aedfb2` (11
+arquivos) e, depois disso, a TaskKey manual foi executada **exatamente uma vez**:
+
+```
+powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey serving_refresh
+```
+
+Uma unica invocacao, tres tentativas independentes de escrita, **zero retry**. Nenhuma
+execucao individual com `--apply`, nenhum `full_daily`, nenhum backfill completo.
+
+### 37.1 Resultado
+
+Inicio 12:33:16, fim 12:34:21 — **65,1 s**. `STATUS=SUCCESS EXITCODE=0`, lock
+`full_daily.lock` adquirido no inicio e **liberado** no fim. `STATUS GERAL: OK`.
+
+| Step | run_id | Janela | Apagadas | Publicadas | EXCEPT | Exit |
+| --- | --- | --- | --- | --- | --- | --- |
+| `serving_ml` | `serving_ml_20260817_123326` | 19/05..16/08 | 360 | 360 | (0,0) | 0 |
+| `serving_tiktok_brand` | `serving_brand_20260817_123340` | 19/05..16/08 | 450 | 450 | (0,0) | 0 |
+| `serving_tiktok_creator` | `serving_creator_20260817_123353` | 19/05..16/08 | 65.574 | **66.223** | (0,0) | 0 |
+
+O creator publicou 649 linhas a mais do que apagou: e' o dia **16/08**, que a fonte passou a
+ter. O preflight dos tres steps aprovou (Data Mart, Neon e as 3 tabelas existindo, revisao
+008) antes de cada invocacao.
+
+### 37.2 Watermarks efetivos — e uma mudanca relevante da fonte
+
+| Target | `source_max` | D-1 | `effective_date_to` | `date_from` | Datas |
+| --- | --- | --- | --- | --- | --- |
+| ml | **17/08 (D0)** | 16/08 | **16/08** — limitado por D-1 | 19/05 | 90/90 |
+| brand | 16/08 | 16/08 | **16/08** — igual a D-1 | 19/05 | 90/90 |
+| creator | **16/08** | 16/08 | **16/08** — igual a D-1 | 19/05 | 90/90 |
+
+`gold.ml_gestao_diaria` tinha D0 e foi corretamente cortada em D-1 — o contrato de teto
+funcionou contra dado real, nao so' em teste.
+
+**Registro honesto de cobertura:** a Gold do creator, que na Task 1/2 estava em D-2 (15/08),
+avancou para 16/08 antes do piloto. Portanto **este piloto NAO exercitou o caminho "creator
+atrasado"**, que e' justamente a razao de existir da ponte. Os tres targets estavam em D-1, e
+o comportamento de `min(D-1, source_max)` com fonte atrasada segue provado apenas por teste,
+nao por execucao real. Isso e' pendencia de observacao, nao defeito.
+
+### 37.3 Reconciliacao
+
+Nas tres janelas, Gold x Marts: mesma contagem, mesmas chaves, mesmas datas, `EXCEPT`
+bidirecional zero nas duas direcoes, somas `Decimal` identicas em todas as colunas aditivas
+verificadas, zero duplicidade, zero nulo obrigatorio, zero NaN.
+
+Fingerprints `MD5` calculados com `COLLATE "C"` explicito nas duas pontas (as duas usam
+locales diferentes; sem isso o fingerprint divergiria com dados identicos):
+
+| Target | Fingerprint | Destino == snapshot da execucao | Gold agora |
+| --- | --- | --- | --- |
+| ml | `6c2a5cbd9f0b` | sim | tambem identica |
+| brand | `aeadbebe5977` | sim | tambem identica |
+| creator | `178790eb3deb` | sim | tambem identica |
+
+**Zero delta pos-snapshot** nesta rodada — as tres fontes estavam identicas ao snapshot
+depois da escrita, algo que nao se pode esperar sempre de uma Gold viva.
+
+Antes da escrita houve amostragem dupla das tres fontes separada por **72,5 s**, com
+fingerprint, contagens e agregados `Decimal` identicos nas duas leituras: a fonte estava
+estavel durante a operacao.
+
+### 37.4 Isolamento provado
+
+Snapshot das **35 tabelas** de `marts` antes e depois. Uma unica contagem mudou:
+`fact_tiktok_creator_daily` (187.917 -> 188.566). As outras 34 ficaram estaveis, incluindo
+`fact_ml_gestao_diaria` e `fact_tiktok_brand_content_daily` — que apagaram e publicaram o
+mesmo numero de linhas, logo contagem estavel **nao** prova ausencia de mudanca; o que prova
+e' o `source_run_id` novo, verificado em todas as tres.
+
+`alembic_version` inalterado em **008**. Zero Shopee, zero regional, zero produtos, zero
+daily. Nenhuma tabela fora das tres autorizadas mudou de contagem.
+
+Os 773 registros do creator que mantiveram o `run_id` anterior sao de **18/05**, fora da
+janela de 90 dias — prova de que o `DELETE` respeitou o escopo pedido.
+
+### 37.5 `/operacoes`
+
+| Verificacao | Resultado |
+| --- | --- |
+| local, com `datamart_engine = None` | 200 em 4,48 s, os 5 blocos presentes |
+| producao `/health` | 200 |
+| producao `/health-datasource` | 200, `active_source=neon_marts`, `db_connected=true` |
+| producao `/operacoes` | **200 em 0,45 s**, 11.055 bytes |
+| payload producao x Neon atualizado | **byte-identico** |
+| dado de D0 (17/08) no payload | **zero**, nas duas pontas |
+
+Blocos: `alertas=0`, `ml_velocity=4`, `creators=30`, `lives=5`, `tk_daily=70`. O bloco
+`creators` passou a cobrir sete dias reais — a assimetria registrada na secao 35 se resolveu
+porque a fonte avancou, nao porque algo foi fabricado. Sem regressao em `overview`, `trend`,
+`canais`, `quality` e `daily` (este ultimo com os parametros que exige).
+
+Nenhum deploy foi feito: o backend em producao ja rodava a revisao que le `marts.*`, e o que
+mudou foi o **dado**.
+
+### 37.6 O que segue aberto
+
+**A `serving_refresh` esta operacional e comprovada.** Ja o `full_daily` **contem** os tres
+steps novos, mas **a primeira execucao agendada ainda nao foi observada** — o piloto exercitou
+a TaskKey manual, nao o caminho automatico com as dependencias `daily_ml`/`daily_tiktok`.
+
+**Nenhuma alteracao do Scheduler.** `mktplace_full_daily` segue `Ready`, habilitada, mesma
+acao e mesmo horario, `LastTaskResult=1` da execucao de 17/08 as 06:00, proxima em 18/08 as
+06:00. Nada foi criado, desabilitado ou reconfigurado.
+
+**A confiabilidade continua dependendo de notebook ligado, usuario logado e VPN ativa**
+(`LogonType=Interactive`, `RunLevel=Limited`).
+
+**O horario 06:00 permanece divida** — e' quando a VPN tende a estar fora; em agosto so' 5 dos
+17 dias tiveram execucao as 06:00.
+
+**Airflow nao existe**, nao esta configurado e nunca executou este projeto.
+
+**Backfill historico periodico segue pendente:** o lookback de 90 dias nao cobre correcao
+anterior a essa janela, e a cadencia nao foi decidida.
+
+**Proxima etapa:** observar UMA execucao agendada do `full_daily`, sem retry, e comparar o
+resultado com este piloto.
