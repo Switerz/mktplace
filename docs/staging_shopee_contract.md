@@ -682,3 +682,119 @@ Raw, então uma aplicação manual deste DDL com essa mesma credencial **não
 precisa de nenhum GRANT REFERENCES adicional** — o bloqueio de privilégio
 só existe para uma FUTURA role de automação dedicada e diferente. Nenhuma
 role foi criada nem GRANT executado.
+
+## 15. Anomalia de origem: marcador textual `err` (Gate SD2, 17/08/2026)
+
+Auditoria read-only do lote kokeshi 10–16/08/2026 (três partes,
+`Order.all.order_creation_date.20260810_20260816_part_{1,2,3}_of_3.xlsx`)
+encontrou um modo de falha **da fonte**, não do contrato: a Shopee exportou o
+literal `err` no lugar do valor numérico.
+
+Perfil das três partes — 65 colunas e assinatura de cabeçalho idênticas
+(`8621e8ad05d59e42`), sem drift estrutural; 5.178 / 5.339 / 5.473 linhas;
+partição disjunta por pedido (zero sobreposição, 14.844 pedidos na união).
+
+Alcance medido da anomalia:
+
+- restrita à **parte 3/3** — partes 1 e 2 não têm nenhuma ocorrência;
+- presente em **18 colunas**, todas sob o contrato numérico, sempre em 100%
+  das 5.473 linhas (nunca parcial);
+- inclui `Valor Total` → `order_amount`, `Total global` → `order_grand_total`,
+  as quatro colunas de comissão/serviço (bruta e líquida), `Taxa de transação`,
+  `Valor estimado do frete`, `Taxa de envio pagas pelo comprador`,
+  `Taxa de Envio Reversa`, os cupons/incentivos e
+  `Total descontado Cartão de Crédito`;
+- **não** atinge `Subtotal do produto` nem `Quantidade` — ambos 100%
+  parseáveis nas três partes — nem data, status ou identificador de pedido.
+
+Consequência para o contrato: `err` **não** é um marcador de um único campo e
+por isso **não** é candidato a uma exceção estreita de parsing. Duas razões
+independentes:
+
+1. `order_amount` (de `Valor Total`) é a base do GMV da **Gold regional**
+   Shopee — `SUM(CASE WHEN order_status NOT ILIKE '%cancel%' THEN order_amount
+   ELSE 0 END)`. Convertê-lo a `NULL` faria o `SUM` ignorar as linhas
+   afetadas e produzir um GMV regional **subestimado sem sinalização**.
+2. `total_settlement`, `total_fees` e `seller_shipping_cost` do Daily derivam
+   de `Total global`, comissão + serviço líquidos e `Valor estimado do frete`
+   (ver `pipelines/connectors/shopee/_parser.py`) — todos corrompidos, e o
+   consumo na API usa `COALESCE(SUM(total_settlement), 0)`, que converteria
+   ausência em zero.
+
+O fail-fast atual está **correto** e foi mantido: nenhuma flexibilização de
+parsing foi implementada. O tratamento é obter novo export da marca. O GMV do
+Daily Shopee não depende dessas colunas (vem de shop-stats, e de
+`Subtotal do produto` no caminho de orders), então a anomalia não contamina o
+GMV publicado — ela impede a carga, não a distorce.
+
+### 15.1 Export substituto auditado e aprovado (SD2-B, 17/08/2026)
+
+Dois arquivos novos cobrindo 13–16/08 foram auditados read-only como candidatos
+a substituir a parcela corrompida:
+
+- `Order.all.order_creation_date.20260813_20260816_part_1_of_2.xlsx` — 5.453
+  linhas, 13–15/08, 5.000 pedidos;
+- `Order.all.order_creation_date.20260813_20260816_part_2_of_2.xlsx` — 3.818
+  linhas, 15–16/08, 3.371 pedidos.
+
+Resultado: **zero `err` e zero célula inválida** nas 18 colunas antes
+corrompidas e em todas as demais colunas numéricas do contrato. Cabeçalho com 65
+colunas e assinatura `8621e8ad05d59e42` — idêntica à do export anterior, sem
+drift estrutural. Partição interna disjunta (nenhum pedido compartilhado entre
+as duas partes) e zero duplicidade no grão pedido+SKU.
+
+Contra o export anterior: os 4.844 pedidos do arquivo corrompido estão **todos**
+contidos no novo (`A3/3 exclusivo = 0`), e em 14/08 o novo traz 2.244 linhas =
+1.823 do `part_2_of_3` + 421 do `part_3_of_3`, a união exata. Nos 3.527 pedidos
+comuns com o export saudável, zero status revisado e zero data de criação
+divergente — o novo export é snapshot mais recente e consistente, não uma
+revisão de regra de negócio.
+
+O arquivo corrompido continua registrado nesta seção como evidência histórica e
+**nunca** deve ser carregado.
+
+Risco a observar na carga (medido, não hipotético): Raw/Silver/Gold toleram
+snapshots sobrepostos, porque a Gold escolhe o arquivo vencedor por
+`DISTINCT ON (brand, order_id) ORDER BY file_id DESC` e faz JOIN de volta para
+preservar pedidos multi-item. O **Daily orders não tolera**:
+`_parser.parse_brand` concatena todos os `Order.all*.xlsx` da pasta da marca e
+`_aggregate_daily` **soma** `subtotal` e `qty` por linha (os campos order-level
+usam `max()` e não duplicam). Com 3.527 pedidos compartilhados entre o export
+antigo e o novo em 13–14/08, um root único duplicaria GMV e unidades desses
+dias. A carga do Daily exige **roots disjuntos**, nunca um root único com
+exports sobrepostos.
+
+### 15.2 Carga executada e confirmada (SD2-D, 17/08/2026)
+
+O lote foi carregado com o desenho acima e reconciliado. Registro operacional,
+sem PII:
+
+| file_id | marca | linhas | período do arquivo | classificação |
+|---|---|---|---|---|
+| 274 | apice | 863 | 10–16/08 | válido principal |
+| 275 | barbours | 2.412 | 10–16/08 | válido principal |
+| 276 | lescent | 1.198 | 10–16/08 | válido principal |
+| 277 | rituaria | 1.073 | 10–16/08 | válido principal |
+| 278 | kokeshi | 5.178 | 10–12/08 | válido anterior |
+| 279 | kokeshi | 5.339 | 12–14/08 | válido anterior |
+| 280 | kokeshi | 5.453 | 13–15/08 | válido substituto |
+| 281 | kokeshi | 3.818 | 15–16/08 | válido substituto |
+
+Confirmações da carga:
+
+- a ordem de ingestão deu ao substituto o `file_id` maior (antigo termina em
+  279, novo começa em 280), e a dedup da Gold escolheu o **novo em 3.527 de
+  3.527** pedidos sobrepostos, zero pelo antigo;
+- nenhum pedido vencedor tem itens espalhados por mais de um arquivo;
+- o arquivo corrompido permaneceu ausente de Raw, Silver, Gold, Daily e de todos
+  os roots — provado também por conteúdo: **zero linhas com `err`** em
+  `Total global` e `Valor Total` em toda a `raw.shopee_order_item_export`;
+- a janela Gold derivada foi **10–16/08**, não 11–16/08: 2.855 pedidos de 10/08
+  tiveram o vencedor alterado, porque os novos `file_id` superam os anteriores;
+- o Daily foi carregado em dois roots disjuntos e **não somou** a sobreposição —
+  13/08 ficou em 1.663 pedidos (uma soma daria 3.326) e 14/08 em 1.767 (daria
+  3.201), e os totais diários batem exatamente com a Gold nos sete dias.
+
+Os dois registros com `part_3_of_3` no manifesto da Raw são arquivos
+**históricos legítimos do barbours** (fev/2026 e jul/2026) — não têm relação com
+o arquivo proibido da kokeshi.

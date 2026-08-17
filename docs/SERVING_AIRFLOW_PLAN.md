@@ -1648,3 +1648,71 @@ historico periodico (semanal) permanece do futuro Airflow, sem DAG criada. Polit
 **D-1 no fuso do Brasil + lookback incremental de 90 dias**, com piso de 7 e reprocessamento
 pontual por `--date-from/--date-to`. **A decisao de frete no GMV TikTok permanece frente
 separada e inalterada.**
+
+## 33. Operacao SD2-A (17/08/2026) — tentativa de fechamento ate 16/08: `BLOCKED`
+
+Objetivo era reconciliar as tres fatos com teto fixo em 16/08. A operacao parou
+no precheck de cobertura das fontes, **antes de qualquer escrita**; as tres
+autorizacoes (uma por tabela) nao foram consumidas.
+
+Causa: `gold.tiktok_brand_daily` e `gold.tiktok_creator_daily` param em
+**15/08**; so `gold.ml_gestao_diaria` alcanca 16/08. O diagnose read-only dos
+proprios syncs confirmou de forma independente, recusando a janela com
+`cobertura incompleta: 1 dia(s) sem linha` (exit 2) para brand e creator; o
+diagnose do ML passou (exit 0).
+
+Janelas apuradas no preflight, para reuso quando as fontes maturarem:
+
+| tabela | `--date-from` (MIN real da fonte) | `--date-to` |
+|---|---|---|
+| `fact_ml_gestao_diaria` | 2025-04-27 | 2026-08-16 |
+| `fact_tiktok_brand_content_daily` | 2025-10-05 | 2026-08-16 |
+| `fact_tiktok_creator_daily` | 2025-10-07 | 2026-08-16 |
+
+Integridade das fontes verificada e aprovada: fingerprint deterministico
+identico em duas amostragens separadas, zero duplicidade de chave, zero NaN,
+cobertura diaria contigua desde o MIN. Os `NULL` em `roas` (906 de 1.645 na
+fonte ML) sao esperados — `roas` e' RATIO_COLUMN e esta fora de
+`REQUIRED_COLUMNS`, que cobre apenas chave + aditivas.
+
+Nada foi escrito: as tres tabelas seguem com 1.637 / 1.566 / 187.185 linhas,
+`max(date) = 14/08` e os `source_run_id` de 14–15/08 intactos. Nenhum run_id
+`sd2a-*` foi criado.
+
+**Airflow continua inexistente e nao comprovado.** Nenhuma DAG, agendamento ou
+deploy nesta operacao.
+
+## 34. Operacao SD2-B (17/08/2026) — serving reconciliado: `SUCCESS`
+
+A regra de corte passou a ser **independente por fonte**:
+`effective_to = min(MAX(date) estavel da fonte, teto operacional)`. A regra
+anterior — parar todas se qualquer fonte nao alcancasse o teto — era acoplada
+demais e travava o ML por causa do atraso do TikTok. Com o corte independente,
+as tres tabelas fecharam na mesma operacao.
+
+Backfill historico integral, uma tentativa por tabela, todas bem-sucedidas:
+
+| tabela | janela | apagadas | publicadas | run_id |
+|---|---|---|---|---|
+| `fact_ml_gestao_diaria` | 2025-04-27 → 2026-08-16 | 1.637 | 1.645 | `sd2b-full-ml-20260816` |
+| `fact_tiktok_brand_content_daily` | 2025-10-05 → 2026-08-15 | 1.566 | 1.571 | `sd2b-full-brand-20260815` |
+| `fact_tiktok_creator_daily` | 2025-10-07 → 2026-08-15 | 187.185 | 187.848 | `sd2b-full-creator-20260815` |
+
+Nenhum `--backfill` foi usado: a janela e' explicita nas duas pontas, para que o
+teto nao avance dinamicamente com o relogio.
+
+O drift historico que motivava esta operacao foi **eliminado**. Alem do `EXCEPT`
+bidirecional (0, 0) reportado pelos proprios syncs, uma reconciliacao
+independente cross-database comparou conjunto de chaves e tupla de valores
+coluna a coluna: **zero celula divergente** nas 5, 35 e 6 colunas de negocio,
+contra 52, 532 e 267 celulas divergentes antes. Cada destino ficou com um unico
+`source_run_id` cobrindo 100% das linhas — os run_ids `s2-*` de 14–15/08 foram
+substituidos pelo DELETE+INSERT da janela completa.
+
+Nota de interface: **o TikTok fecha em 15/08 e o ML em 16/08.** A diferenca e'
+real (as fontes Gold do TikTok param em 15/08) e nao deve ser mascarada; a data
+ausente nao foi fabricada.
+
+Politica vigente inalterada: D-1 no fuso do Brasil + lookback incremental de 90
+dias, piso de 7, reprocessamento pontual por `--date-from/--date-to`. **Airflow
+continua inexistente e nao comprovado**; nenhuma DAG criada nesta operacao.

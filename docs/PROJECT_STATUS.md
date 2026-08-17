@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 3/3: `SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`** — as três fatos de serving recarregadas até D-1 (12/08/2026) e reconciliadas, `/operacoes` com payload idêntico ao da Gold e provado sem Data Mart. **Ainda não versionado nem publicado.** Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 17/08/2026 (ver **Checkpoint 17/08/2026** logo abaixo do resumo executivo). Contexto anterior — 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 3/3: `SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`** — as três fatos de serving recarregadas até D-1 (12/08/2026) e reconciliadas, `/operacoes` com payload idêntico ao da Gold e provado sem Data Mart. **Ainda não versionado nem publicado.** Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -10,6 +10,353 @@ A fase de **consistência e completude dos dados** foi concluída para janeiro a
 Em paralelo, o primeiro ciclo completo do fluxo manual Shopee foi validado com dados de junho: Raw, Silver e Gold regional foram carregadas e reconciliadas para as cinco marcas. A transferência dessa rotina pode avançar enquanto a API oficial não estiver disponível. A sincronização regional de junho já foi concluída; uma rodada manual observada do `full_daily` também foi concluída com sucesso (`STATUS GERAL: OK`, sem executar Shopee). O Task Scheduler `mktplace_full_daily` foi habilitado em 23/07 e sua primeira execução agendada (24/07, 06:00) rodou automaticamente com sucesso — `STATUS GERAL: OK`, `ok_critical=true`, zero Shopee, sem intervenção manual. A automação diária de ML/TikTok/regional está, portanto, ativa e validada.
 
 Uma nova frente foi aberta em 24/07: o **Revamp de UI/UX da Torre**. O Gate U0 (auditoria e especificação, sem implementação) foi concluído em 24/07, após uma rodada única de correção do roadmap — detalhes em [UI_REVAMP_PLAN.md](UI_REVAMP_PLAN.md). O Gate U1 (fundação visual e novo shell — sidebar clara/lavanda persistente no desktop, drawer mobile e topbar compartilhados) foi concluído e aprovado em 24/07, após uma rodada de correção de dois findings de revisão em runtime. O Gate U2 (Gerencial completa e padrão de drill-down) foi concluído em 24/07: a Gerencial foi reorganizada, os 4 KPIs principais ganharam drill-down agregado acessível (mesmo diálogo reutilizável) e um novo painel de desempenho por canal foi adicionado — tudo sobre os dados e contratos de API já existentes, sem alteração de backend/pipeline/banco. O Gate U3 (Canais e Marcas) foi concluído em 24/07, após uma rodada de implementação e uma rodada única de correção consolidada pré-commit: a página Canais foi reorganizada com navegação interna, resumos por canal e a matriz comparativa em destaque com um novo drill-down marca × canal (reaproveitando o mesmo diálogo do U2); a página de Marca ganhou link de volta preservando filtros e teve corrigido um fallback de modo demonstração que superestimava Pedidos/Ticket Médio sob seleção parcial de canal. Na rodada de correção, três findings foram resolvidos: Canais exibia dados antigos sob filtro/erro novo (corrigido com constantes `display*` protegidas por frescor), "Últimos 7 Dias" da página de marca reutilizava GMV combinado do mock sob seleção parcial de 2 canais (corrigido com uma projeção pura compartilhada entre gráfico e tabela), e o alvo de toque do botão "Detalhe" foi ampliado para 44×44px. O Gate U4 (Produtos, Regiões e Financeiro) foi implementado em 24/07 e passou por uma rodada consolidada de correção pré-commit (também 24/07), que resolveu 4 findings de revisão: (1) Produtos ganhou identidade de requisição própria por tabela e por resumo Pareto, em cada canal, corrigindo um frame de render anterior ao efeito em que a troca de aba/filtro podia mostrar dado/badge/escopo da identidade anterior; (2) Regiões e Financeiro separaram explicitamente os estados loading/error/fresh (antes um erro definitivo deixava skeleton/opacidade ligados como se ainda estivesse carregando); (3) Regiões passou a distinguir seção indisponível (`null`) de seção vazia com sucesso (`[]`), com um aviso compacto quando só uma parte dos dados falha, e Produtos ganhou o mesmo aviso quando exatamente tabela ou resumo falha; (4) a biblioteca `xlsx` (promovida a `dependency` na implementação original) foi **removida por completo** por ter vulnerabilidades de alta severidade sem correção disponível — a exportação de Produtos passou a gerar CSV (separador `;`, BOM UTF-8, proteção contra formula injection, sem nenhuma biblioteca). Um patch final estreito em 25/07 corrigiu um wiring incompleto do Finding 2: os caminhos de falha de Regiões e Financeiro atualizavam `error`/`loading` mas nunca concluíam `resolvedKey`, deixando a requisição atual presa em "loading" mesmo após um erro definitivo — corrigido com `setResolvedKey(key)` nos 3 pontos de falha, com regressão estática dedicada. As três páginas mantêm cabeçalho/hierarquia consistentes, `requestKey`/`resolvedKey` (com UF local incluída na identidade em Regiões), `RegioesBrazilMap` lazy via `next/dynamic`, e Financeiro com navegação marca→`/brand/[brand]` e `TableScrollHint` nas 3 tabelas. Filtros globais, contratos de API e regras de negócio preservados nos quatro gates; `npm audit --omit=dev` caiu de 4 para 3 vulnerabilidades altas — `next` é dependência **direta**, `postcss` e `sharp` são dependências **transitivas** relacionadas ao `next`; as três são pré-existentes e tratadas como dívida separada. O Gate U5 (Qualidade, Tempo Real, Pedidos, Inteligência e Operações) foi implementado em 26/07 numa única rodada: as 5 telas restantes ganharam o mesmo padrão de identidade de requisição do U4 (`resolvedKey`/`display*` protegidos por frescor), decisão de filtros por tela replicada do escopo aprovado (Qualidade/Pedidos herdam filtros globais; Tempo Real/Inteligência/Operações não herdam), cobertura Shopee isolada/combinada tratada explicitamente em Pedidos, e o polling de Tempo Real reescrito com uma máquina de 5 estados que nunca mais perde o último dado válido numa falha silenciosa nem sobrepõe requisições. 44 novos testes (359 no total), typecheck e build passando. Uma rodada de correção consolidada do U5 em 28/07 resolveu 2 findings de revisão: (1) Tempo Real tinha dois relógios independentes — o countdown exibido e um `setInterval` de auto-refresh próprio, criados separadamente — que podiam divergir após um refresh manual ou uma tentativa demorada (o texto mostrava um prazo que não correspondia ao próximo fetch real); corrigido unificando em uma única fonte de verdade: o countdown chegar a zero passou a ser o único gatilho do refresh automático; (2) Pedidos com seleção exclusivamente Shopee (sem cobertura nesta fonte) exibia badge "API offline" e anunciava "dados carregados" via `aria-live`, confundindo ausência de cobertura com falha de rede/sucesso; corrigido com um indicador neutro e uma mensagem de acessibilidade específica. 9 testes novos (368 no total), typecheck e build passando; nenhuma métrica/rota/dependência alterada; sem U5.1. **Gate U5 aprovado em 28/07/2026.** O **Gate U6 (QA integrado e fechamento) foi concluído em 28/07/2026**, encerrando o revamp: o QA visual pendente desde o U1 foi finalmente executado em navegador (Playwright + Chromium temporários e isolados em `%TEMP%`, Torre na porta 3100) em desktop/tablet/mobile — as 12 rotas, o drawer, os drill-downs, os filtros→URL e os estados de erro foram validados — e a rodada consolidada final corrigiu os 2 últimos findings necessários (scroll horizontal interno na tabela "Performance por Marca" e o hydration error React #418 em Tempo Real), com 376 testes, typecheck e build passando. **Gates U0–U6 concluídos.** Em 28/07 o commit `9fcf72a` foi publicado automaticamente na Vercel (integração GitHub→Vercel) e a **auditoria pós-deploy foi encerrada em 03/08/2026 como GO COM RESTRIÇÃO**: deployment Production **Ready** do commit `9fcf72a`, domínio canônico `https://mktplace-gobeaute.vercel.app` respondendo (200 nas 11 rotas), `https://mktplace-blond.vercel.app` como alias/redirecionamento, bundle apontando para o backend público (`mktplace-api.onrender.com`, sem `localhost`/IP local), API online (`openapi.json` 200) e CORS correto para o domínio canônico. O fallback "Demonstração · API offline" observado antes ocorria **apenas na URL efêmera de deployment** — atrás do SSO da Vercel e fora da allowlist de CORS do backend — e **não** representa falha do deployment nem erro de `NEXT_PUBLIC_API_URL`. Restrições em aberto: o domínio canônico está público sem autenticação própria da Torre (decisão de acesso pendente), o smoke visual completo em produção não foi automatizado, e o campo "About" do GitHub ainda aponta para a URL antiga (`mktplace-one.vercel.app`, que retorna `DEPLOYMENT_NOT_FOUND`). Em paralelo, a criação dos apps oficiais Shopee por marca foi pausada para priorizar essa frente.
+
+## Checkpoint 17/08/2026 — operação de atualização ML/TikTok/Shopee até 16/08
+
+**Resultado geral: `PARTIAL`.** Teto operacional D−1 = 16/08/2026 respeitado em
+todas as camadas (0 linhas ≥ 17/08 nas seis tabelas tocadas). Nenhum retry de
+escrita, nenhum commit/push, nenhuma correção de código.
+
+**Publicado:**
+
+- **ML Daily 01–16/08** (backfill de janela exata, 64 linhas) e **TikTok Daily
+  01–16/08** (80 linhas). Divergência prévia era material — o TikTok estava
+  desatualizado por não-maturação: 10/08 marcava R$ 9.741,23 contra
+  R$ 369.846,24 reais; 09/08, R$ 188.955,98 contra R$ 373.741,75. Após a carga,
+  **paridade exata com a fonte nos 32 pares dia × marketplace**. `source_sync_run`
+  151/152 `success`.
+- **Shopee Raw + Silver** do lote isolado 10–16/08: 10 arquivos (5 shop-stats,
+  5 ads), 364 linhas, reconciliação Raw íntegra e Silver committed (40 + 324).
+- **Shopee Daily**: GMV de shop-stats em **10–15/08** e ads em 10–16/08. O GMV de
+  10/08 foi revisado de R$ 167.838,15 para **R$ 149.489,35** — shop-stats é a
+  fonte autoritativa por contrato.
+- **Produtos TikTok**: 14/08 corrigido de 675 para 876 linhas e 15/08 publicado.
+
+**Não executado, com razão:**
+
+- **Shopee orders (Raw/Silver/Gold/Daily)** — drift de conteúdo na origem: na
+  parte 3/3 do export kokeshi, a coluna `Total global` vem com marcador textual
+  em **todas as 5.473 linhas**. O transform Silver tem fail-fast nessa coluna
+  (`order_grand_total: valor fora do formato/domínio esperado`), então carregar
+  abortaria a transação e derrubaria junto as outras quatro marcas. Como a parte
+  3/3 é justamente a que cobre 14–16/08, carregar só as partes 1 e 2 publicaria
+  um GMV silenciosamente incompleto. **Requer novo export do kokeshi.**
+- **Serving ML e TikTok (3 fatos)** — drift histórico anterior ao gap, o que pela
+  regra da operação interrompe a etapa sem ampliar janela: `fact_ml_gestao_diaria`
+  52 células em 17 datas desde 29/06; `fact_tiktok_brand_content_daily` 532
+  células em 221 datas desde 06/10/2025 (colunas mais afetadas:
+  `new_videos_posted`, `total_fees`); `fact_tiktok_creator_daily` 267 células em
+  3 datas desde 12/08. Causa provável comum: revisão retroativa da fonte após a
+  carga do serving — a investigar antes de qualquer novo backfill.
+- **Produtos ML** — `gold.ml_produto_ranking` é ranking acumulado sem data de
+  referência e **já incorpora 17/08** (13 produtos com `last_sale = 17/08`); o
+  teto não pode ser respeitado sem alterar a query.
+- **Gold regional incremental + sync** — `_ml_incremental_select` filtra só
+  `date_created > min_date`, **sem teto superior**; o diagnose apontou 104 linhas
+  novas incluindo 17/08. Gold e Neon regional já estão em paridade exata
+  (mkt2 21.606 / R$ 33.474.947,57; mkt3 22.561 / R$ 37.666.242,46), então o sync
+  seria no-op.
+- **Produtos Shopee** — segue não isolável (`SHOPEE_ROOT` fixo no loader).
+
+**Achados que exigem decisão:**
+
+1. **`/api/v1/performance/operacoes` responde 500 em produção** (determinístico,
+   2/2), enquanto `/overview`, `/canais`, `/regioes/summary` e os dois resumos de
+   Produtos respondem 200. A mesma função roda **OK localmente contra o mesmo
+   Neon**. O commit `861648a` (14/08) trocou `gold.*` por `marts.*` nesse
+   endpoint; na revisão anterior o SQL contém `FROM gold.`, o que faz
+   `_uses_datamart()` rotear para o Data Mart — inalcançável do Render — e
+   levantar `RuntimeError`. **Hipótese: produção está numa revisão anterior a
+   `861648a`; o deploy resolveria.** Não executado por não estar autorizado.
+2. **Shopee 11–15/08 tem GMV e ads, mas `orders` nulo**, e **16/08 tem ads sem
+   GMV** — o conector de ads só aceita `--days`, não janela exata, e rateia o
+   total do período uniformemente (comportamento já vigente: 25–31/07 e 01–09/08
+   seguem o mesmo padrão). Some quando o export do kokeshi for refeito.
+3. O export shop-stats trouxe **16/08 zerado com 0 visitantes** — truncamento, não
+   um zero real. Por isso a janela publicada parou em 15/08.
+
+**Preservado:** resíduos Git intocados; `raw.ml_orders`/`gold.*` sem escrita;
+runs órfãos 52 e 90 (julho) não tocados; backups anteriores não removidos.
+
+### Gate SD2 Task 1/2 (17/08/2026) — `BLOCKED`, sem alteração de código
+
+Auditoria read-only das três partes do lote kokeshi para decidir se o marcador
+`err` podia ser suportado com segurança. **Não pôde.** Nenhuma linha de código,
+schema ou SQL gerado foi alterada; nenhuma carga executada.
+
+A hipótese de trabalho era que `err` estivesse restrito a `Total global`, campo
+que o próprio contrato já registra como não-settlement. A medição refutou isso:
+`err` está em **18 colunas**, todas sob o contrato numérico, em 100% das 5.473
+linhas da parte 3/3 — incluindo `Valor Total`, comissão e serviço (bruta e
+líquida), `Taxa de transação`, `Valor estimado do frete` e as taxas de envio.
+As partes 1/3 e 2/3 estão limpas.
+
+Dois motivos independentes tornam a flexibilização inviável no escopo previsto:
+
+1. o GMV da **Gold regional** Shopee vem de `order_amount` (`Valor Total`), não
+   de `Subtotal do produto` — converter para `NULL` produziria um GMV regional
+   subestimado sem sinalização, porque `SUM` ignora NULL;
+2. `total_settlement` é consumido na API por `COALESCE(SUM(...), 0)` em quatro
+   superfícies, e há um `AVG(avg_settlement_pct)` que ignora NULLs — ausência
+   viraria zero ou média parcial.
+
+O que a auditoria também estabeleceu, e vale para a Task 2/2: as três partes têm
+cabeçalho idêntico (65 colunas, assinatura `8621e8ad05d59e42`), formam partição
+**disjunta** por pedido (14.844 pedidos, zero sobreposição), e a parte 3/3 é
+insubstituível — **15/08 e 16/08 existem só nela** (2.371 e 2.681 linhas), além
+de 421 linhas de 14/08. `Subtotal do produto` e `Quantidade` estão 100%
+parseáveis nas três partes, assim como data, status e identificador.
+
+**Encaminhamento: novo export da kokeshi.** É correção de origem, não de código
+— o fail-fast atual se comportou como projetado. Detalhamento em
+[staging_shopee_contract.md](staging_shopee_contract.md) §15.
+
+### Operação SD2-A (17/08/2026) — `BLOCKED`, zero escritas consumidas
+
+Tentativa de fechar as três fatos de serving até 16/08. **Parada no precheck de
+cobertura, antes de qualquer escrita.** As três autorizações de escrita
+permanecem intactas — nenhuma foi consumida.
+
+| fonte Gold | MAX(date) | cobre 16/08? |
+|---|---|---|
+| `gold.ml_gestao_diaria` | 2026-08-16 | sim |
+| `gold.tiktok_brand_daily` | 2026-08-15 | **não** |
+| `gold.tiktok_creator_daily` | 2026-08-15 | **não** |
+
+Dois gates independentes convergiram: o precheck de cobertura e o próprio
+diagnose read-only dos syncs oficiais, que recusaram a janela com
+`cobertura incompleta: 1 dia(s) sem linha` (exit 2) para brand e creator. O
+diagnose do ML passou (exit 0). Publicar 16/08 para TikTok exigiria fabricar a
+data — não foi feito.
+
+As fontes estão íntegras e estáveis: fingerprints determinísticos idênticos em
+duas amostragens separadas, zero duplicidade de chave, zero NaN, cobertura
+diária contígua. O drift histórico segue medido e pendente — na janela até
+16/08 o ML tem 1.645 linhas na fonte contra 1.637 no destino (Δ GMV
+R$ 242.544,86); brand 1.571 contra 1.566; creator 187.848 contra 187.185.
+
+**Estado do serving: inalterado** — 1.637 / 1.566 / 187.185 linhas, todas ainda
+em `max(date) = 14/08`, com os `source_run_id` de 14–15/08 preservados.
+
+**Quando destravar:** assim que `gold.tiktok_brand_daily` e
+`gold.tiktok_creator_daily` alcançarem 16/08. O ML já está apto isoladamente
+hoje — o diagnose passa limpo com `--date-from 2025-04-27 --date-to 2026-08-16`
+— mas depende de autorização própria, já que a regra desta operação era parar
+antes de qualquer escrita se qualquer fonte não cobrisse o teto.
+
+Reconfirmados read-only, ambos agravados desde a última medição: Produtos ML
+(ranking acumulado, 0 de 24 colunas com data de referência, agora **22** linhas
+com `last_sale = 17/08`) e Regional (`raw.ml_orders` com **31** pedidos de
+17/08 que o `_ml_incremental_select` arrastaria por não ter teto superior).
+Nenhum dos dois foi tocado.
+
+`/operacoes` valida localmente contra o Neon atual — cinco blocos do contrato
+presentes, teto respeitado, 40 testes de contrato verdes — e segue **500 em
+produção**, classificado como `861648a` ainda não publicado no Render. Só ficará
+disponível após publicação separada do backend, fora do escopo desta operação.
+
+Sem mudança de GMV, frete TikTok, elegibilidade, status ou regra comercial.
+Shopee **não** está integralmente atualizada: orders/Gold/Daily-orders seguem
+bloqueados pelo defeito de origem, e o Daily tem GMV só até 15/08. Airflow
+continua não criado e não comprovado.
+
+### Operação SD2-B (17/08/2026) — serving `SUCCESS`; Shopee auditada e liberada para plano
+
+Duas trilhas independentes. A regra de corte deixou de ser acoplada: cada fonte
+usa `effective_to = min(MAX(date) estável, 2026-08-16)`, e uma fonte atrasada
+não bloqueia mais as outras.
+
+**Trilha B — serving reconciliado. As três escritas foram executadas, uma
+tentativa cada, todas com sucesso:**
+
+| tabela | janela publicada | linhas | run_id |
+|---|---|---|---|
+| `fact_ml_gestao_diaria` | 2025-04-27 → **2026-08-16** | 1.637 → **1.645** | `sd2b-full-ml-20260816` |
+| `fact_tiktok_brand_content_daily` | 2025-10-05 → **2026-08-15** | 1.566 → **1.571** | `sd2b-full-brand-20260815` |
+| `fact_tiktok_creator_daily` | 2025-10-07 → **2026-08-15** | 187.185 → **187.848** | `sd2b-full-creator-20260815` |
+
+O TikTok publica até 15/08 porque suas fontes Gold param aí — a data ausente
+**não foi fabricada**. A data efetiva difere por fonte e é isso que a
+documentação e a interface devem refletir.
+
+**O drift histórico foi eliminado.** Reconciliação bidirecional independente
+(conjunto de chaves + tupla, coluna a coluna, cross-database) devolveu `EXCEPT`
+0/0 e **zero célula divergente** nas três — contra 52, 532 e 267 células
+divergentes medidas antes. Cada tabela ficou com um único `source_run_id`
+cobrindo 100% das linhas, `MAX(date)` exatamente igual ao seu `effective_to`,
+zero duplicidade e zero linha acima de 16/08.
+
+Isolamento provado: das 35 tabelas de `marts`, mudaram apenas as três
+autorizadas. `fact_marketplace_daily_performance` (3.177),
+`fact_marketplace_region_daily` (44.167), `fact_shopee_product_monthly` (3.631),
+`fact_ml_produto_ranking` (1.647), `fact_tiktok_product_daily` (213.013) e os 18
+backups permaneceram idênticos. Nenhuma tabela nova, nenhuma migration.
+
+**Trilha A — novo export Kokeshi APROVADO na auditoria, sem nenhuma escrita
+Shopee.** Os dois arquivos de 13–16/08 substituem a parcela corrompida:
+
+- 65 colunas e assinatura de cabeçalho `8621e8ad05d59e42`, idênticas ao export
+  anterior — sem drift estrutural;
+- 5.453 + 3.818 linhas; partição interna disjunta (zero pedido compartilhado);
+- **zero `err` e zero inválido** nas 18 colunas antes corrompidas e em todas as
+  demais numéricas do contrato;
+- cobrem 13/08 (1.975), 14/08 (2.244), 15/08 (2.371) e 16/08 (2.681);
+- em 14/08 o novo traz 2.244 = 1.823 do A2/3 + 421 do A3/3 — a união exata;
+- **`A3/3 exclusivo = 0`**: descartar o arquivo corrompido não perde pedido
+  algum;
+- nos 3.527 pedidos comuns com o export saudável anterior, zero status revisado
+  e zero data divergente.
+
+O arquivo corrompido `..._20260810_20260816_part_3_of_3.xlsx` permanece
+registrado como evidência e **nunca** é candidato a carga.
+
+**Risco identificado no plano de carga:** Raw/Silver/Gold toleram sobreposição,
+porque a Gold deduplica por `DISTINCT ON (brand, order_id) ORDER BY file_id
+DESC` com JOIN de volta (preserva pedidos multi-item) — o maior `file_id` vence.
+Já o **Daily orders duplicaria**: `parse_brand` concatena todos os
+`Order.all*.xlsx` da pasta e `_aggregate_daily` **soma** `subtotal` e `qty` por
+linha, então os 3.527 pedidos compartilhados entre A2/3 e o novo export seriam
+contados duas vezes em 13–14/08. Os campos order-level usam `max()` e não
+duplicam. Conclusão: **roots disjuntos e duas execuções**, nunca um root único.
+
+Ainda pendente para a Shopee: o shop-stats de 16/08 veio truncado (GMV 0,00 com
+0 visitantes), então o **GMV Daily de 16/08 continua indisponível** mesmo com
+Orders válido. Orders bom não autoriza promover `Subtotal do produto` a GMV
+oficial do Daily — shop-stats segue a fonte autoritativa por contrato.
+
+`/operacoes` valida localmente (5 blocos, teto respeitado, 40 testes de contrato
+verdes) e segue **500 em produção**: `861648a` ainda não publicado no Render.
+Produtos ML e Regional não foram tocados; seus bloqueios seguem registrados.
+
+### Operação SD2-C (17/08/2026) — `BLOCKED` antes das escritas; patch do Daily entregue
+
+Objetivo era fechar Shopee Orders 10–16/08 nas quatro camadas. **Nenhuma das
+seis escritas autorizadas foi consumida.** O inventário obrigatório revelou que
+o plano de carga estava incompleto, e a operação parou no ponto previsto pela
+própria regra ("não amplie silenciosamente; pare antes do apply e reporte").
+
+**Causa da parada:** não é só a Kokeshi que está pendente. A Raw de **todas as
+cinco marcas** para em 10/08, e as outras quatro têm um Orders de 10–16/08 no
+disco, ainda não carregado:
+
+| marca | arquivo | linhas | pedidos | período | integridade |
+|---|---|---|---|---|---|
+| apice | `Order.all.20260810_20260816.xlsx` | 863 | 566 | 10–16/08 | `err`=0, inválidos=0 |
+| barbours | `Order.all.order_creation_date.20260810_20260816.xlsx` | 2.412 | 2.191 | 10–16/08 | `err`=0, inválidos=0 |
+| lescent | idem | 1.198 | 1.126 | 10–16/08 | `err`=0, inválidos=0 |
+| rituaria | idem | 1.073 | 983 | 10–16/08 | `err`=0, inválidos=0 |
+
+(apice tem 64 colunas — é o segundo template já registrado no contrato, não
+drift.)
+
+Carregar só a Kokeshi produziria uma **Gold regional Shopee com uma única marca
+em 11–16/08**: o refresh por janela "substituiria TODA a janela (delete completo
++ insert do recálculo)", e o recálculo sai da Silver, que não teria as outras
+quatro marcas nesses dias. Não haveria perda — a Gold hoje termina em 10/08 —
+mas haveria publicação incompleta apresentada como fechamento.
+
+**Entregue nesta operação (local, sem banco):** a correção do Daily Orders, que
+era pré-requisito e é independente do bloqueio. `--source shopee` usava o
+`UPSERT_SQL` completo; como o transform de Orders devolve `None` para o funil e
+para os 8 campos de Ads e devolve o subtotal em `gmv`, uma execução isolada de
+Orders **apagaria** o shop-stats de 10–15/08 e os Ads de 10–16/08 já publicados,
+e **substituiria** o GMV autoritativo pelo subtotal dos pedidos. O novo
+`PATCH_SHOPEE_ORDERS_SQL` restringe Orders às suas colunas; `gmv`, funil, Ads,
+campos TikTok e metas ficam fora do UPDATE. Uma chave nova nasce com `gmv` NULL,
+não zero. `unique_buyers` usa `COALESCE(existente, novo)` para não sobrescrever
+o valor autoritativo do shop-stats. Detalhes em
+[data_contracts.md](data_contracts.md) §6.
+
+26 testes focais novos provam **comportamento**, não texto: um interpretador do
+`DO UPDATE SET` aplica as atribuições reais sobre uma linha preexistente e
+verifica que GMV, visitantes, conversão, compradores e os 8 campos de Ads
+sobrevivem; `run()` é executado de verdade para provar que ML e TikTok continuam
+no `UPSERT_SQL` e que cada `--source` Shopee usa o seu patch. Suíte total: 1.966
+testes verdes.
+
+**Falta para fechar a Shopee** (ordem sugerida, com o patch já no lugar): Raw dos
+4 arquivos das outras marcas + Kokeshi A1/3 e A2/3, depois Kokeshi novo 1/2 e
+2/2 (file_id maior vence 13–14/08); Silver; janela Gold derivada dos
+`order_file_ids` das cinco marcas; Daily em dois roots disjuntos, cada um com as
+cinco marcas. O arquivo `part_3_of_3` continua proibido — ausente da Raw (por
+hash e por nome) e da Silver, confirmado nesta operação.
+
+### Operação SD2-D (17/08/2026) — Shopee Orders 10–16/08 fechada: trilha `SUCCESS`, geral `PARTIAL`
+
+As sete escritas autorizadas foram executadas, uma tentativa cada, **todas com
+sucesso e sem retry**. Raw, Silver, Gold e Daily Orders estão reconciliados de
+ponta a ponta.
+
+**Raw — 8 arquivos, 25.334 linhas, 3 batches:**
+
+| file_id | marca | linhas | batch |
+|---|---|---|---|
+| 274–277 | apice, barbours, lescent, rituaria | 863 / 2.412 / 1.198 / 1.073 | `304ebf3c` |
+| 278–279 | kokeshi (export anterior saudável) | 5.178 / 5.339 | `91e3d985` |
+| 280–281 | kokeshi (export substituto) | 5.453 / 3.818 | `41148c24` |
+
+A ordem garantiu a precedência exigida: antigo termina em 279, novo começa em
+280. O arquivo corrompido `part_3_of_3` ficou **ausente de tudo** — provado por
+quatro ângulos: por nome (0), por hash (0), na Silver (0) e por conteúdo (zero
+linhas com `err` em `Total global` e `Valor Total` em toda a Raw de orders).
+
+**Silver — 25.334 linhas, 0 pendências, 0 órfãos, 0 NaN.** A dedup fez o que
+devia: dos **3.527 pedidos sobrepostos** entre os dois exports Kokeshi, **3.527
+foram vencidos pelo novo e 0 pelo antigo**, e nenhum pedido vencedor tem itens
+espalhados por mais de um arquivo.
+
+**Gold — janela derivada 10–16/08, não 11–16/08.** A hipótese de começar em
+11/08 foi refutada por medição: **2.855 pedidos de 10/08 tiveram o vencedor
+alterado** (revisados, não novos), porque os file_ids 274–281 são maiores que os
+anteriores. O conjunto completo de vencedores da janela é exatamente
+`[274..281]` — nenhum file_id antigo vence, então os 8 novos bastam para
+reconstruir as cinco marcas. Resultado: 99 linhas deletadas → **727 inseridas**,
+receipt `committed/ok`, backup de 432.233 bytes com SHA-256 conferido contra o
+companion. Fora da janela **intacto** (22.462 linhas, R$ 37.497.838,71), junho
+(3.213) e julho (3.408) idênticos.
+
+**Daily — dois roots disjuntos, sem dupla contagem.** O Root A publicou Kokeshi
+10–14/08 e o Root B sobrescreveu 13–16/08. Estado final da Kokeshi: 1.912,
+2.025, 1.746, 1.663, **1.767**, 1.886, 2.298 = 11.297 pedidos. A prova de que
+não houve soma: 13/08 ficou em 1.663 (uma soma daria 3.326) e 14/08 em 1.767
+(uma soma daria 3.201). Os totais diários do Daily batem **exatamente** com a
+Gold nos sete dias (2.508 / 2.701 / 2.302 / 2.246 / 2.306 / 2.513 / 3.009).
+
+**O patch parcial funcionou como projetado.** GMV, visitantes, conversão,
+compradores e os oito campos de Ads ficaram **numericamente idênticos** ao
+snapshot anterior às escritas — R$ 149.489,35 em 10/08 até R$ 172.357,39 em
+15/08, 133.762 a 171.106 visitantes, ad_spend 9.544,56 nos sete dias. Nenhuma
+coluna de outra fonte foi zerada, e o GMV nunca foi contaminado pelo subtotal
+dos pedidos.
+
+**GMV de 16/08 continua indisponível.** O shop-stats daquele dia veio truncado e
+não foi recarregado nesta operação. A linha de 16/08 tem Orders, taxas e frete
+válidos, mas `gmv` **NULL** — e o campo por canal reflete isso honestamente:
+`shopee_gmv: null` com `orders: 2298`. Não é venda zero.
+
+**Achado aberto — representação/verdade da interface, não cosmético.** No
+endpoint `/daily`, `shopee_gmv` vem corretamente `null` em 16/08, mas o agregado
+`total_gmv` trata o canal indisponível como zero, devolvendo `0.0`. **Um total
+agregado não pode parecer completo quando um canal selecionado está
+indisponível** — quem lê o total conclui "vendeu zero" onde o correto é "não
+sabemos". O problema **não foi introduzido pelo SD2** (é anterior a esta frente)
+e **não bloqueia a carga**, que está reconciliada; mas é um defeito de verdade da
+interface, não um detalhe de apresentação, e **deve ser tratado em gate
+separado** — a decisão de contrato (propagar indisponibilidade no total, ou
+distinguir "sem dado" de "zero" na resposta) não foi tomada aqui e nenhuma
+alteração de API foi feita nesta operação.
+
+**Isolamento provado.** Das tabelas do Neon, mudaram apenas as colunas Orders do
+Daily Shopee. Permaneceram idênticas: `fact_marketplace_region_daily` (44.167,
+max 15/08), `fact_ml_gestao_diaria` (1.645), `fact_ml_produto_ranking` (1.647),
+`fact_shopee_product_monthly` (3.631), `fact_tiktok_brand_content_daily`
+(1.571), `fact_tiktok_creator_daily` (187.848), `fact_tiktok_product_daily`
+(213.013), e os GMVs de ML e TikTok no Daily.
+
+**Restrições que mantêm o resultado geral em `PARTIAL`:** GMV Shopee de 16/08
+ausente; Regional Neon não sincronizado (o mecanismo atual arrastaria ML de
+17/08); `/operacoes` ainda 500 em produção, aguardando publicação do backend
+`861648a`. Serving ML/TikTok não foi repetido. 1.967 testes verdes.
 
 ## Portfólio de frentes
 
