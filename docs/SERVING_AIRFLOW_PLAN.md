@@ -1845,3 +1845,141 @@ pool. §24 permanece a referencia.
 5. **Publicar shop-stats Shopee valido de 16/08** quando disponivel.
 6. **Smoke visual de `/operacoes`** pendente.
 7. **Airflow** ainda nao existe, nao esta configurado e nunca foi executado neste projeto.
+
+## 36. Checkpoint O1 Task 2/2 — ponte de serving IMPLEMENTADA, ainda NAO executada (17/08/2026)
+
+O diagnostico da Task 1/2 provou por que o serving nao se atualiza sozinho: os tres CLIs
+calculam a janela com teto FIXO em D-1, e `gold.tiktok_creator_daily` estava em D-2. Nesse
+estado, `date_coverage` reprova a janela por dia faltante e o CLI sai com codigo nao-zero
+**sem escrever nada** — seguro, mas inviavel para execucao diaria.
+
+Esta task implementou a ponte. **Nada foi executado**: nenhum sync rodou, nenhum banco foi
+escrito, nenhum agendamento foi criado ou alterado, nenhum deploy aconteceu. O codigo
+existe e esta testado; a operacao continua exatamente como estava antes desta task.
+
+### 36.1 O contrato de watermark
+
+Por tabela, independentemente:
+
+```
+effective_date_to = min(D-1 em America/Sao_Paulo, source_max)
+date_from         = max(source_min, effective_date_to - (lookback_days - 1))
+```
+
+`source_max` vem de um `MAX(<coluna de data>)` na propria fonte, com a **mesma allowlist de
+marca** que o CLI usa na leitura real. Isso nao e' detalhe: se `gold.tiktok_brand_daily`
+tivesse 16/08 para uma marca FORA da allowlist e apenas 15/08 dentro dela, um `source_max`
+sem filtro pediria uma janela que o CLI nao consegue cobrir — e a cobertura reprovaria,
+reproduzindo a falha que a ponte existe para evitar. A allowlist vai como **parametro**
+(`brand = ANY(%(brands)s)`), nunca interpolada, e e' a mesma tupla do conector.
+
+Consequencias, cada uma travada por teste:
+
+| Regra | Como e' garantida |
+| --- | --- |
+| ML e brand nao sao rebaixados por creator em D-2 | janela resolvida por target; nao existe watermark comum |
+| D0 nunca e' publicado | teto D-1 no wrapper **e** `validate_window` no CLI — duas barreiras |
+| dia ausente permanece ausente | o wrapper nao escreve nada e nao pede dia que a fonte nao tem |
+| `source_max` nulo ou anterior ao `source_min` | falha **antes** de qualquer subprocesso |
+| lookback < 7 | falha antes de abrir conexao |
+| `--table all` | nunca usado: uma invocacao por target, com `--table` explicito |
+| zero retry | exatamente um subprocesso por invocacao, sem laco nem backoff |
+| sem shell injection | `subprocess.run` recebe LISTA; `shell=True` nao existe no modulo |
+| exit code | propagado do filho sem traducao (ML sai 1, TikTok sai 2) |
+
+### 36.2 Criticidade: `critical=True`, contrariando a recomendacao inicial
+
+O diagnostico sugeriu `critical=False`. A decisao do Checkpoint O1 foi o oposto, e a razao
+e' que `/operacoes` **ja esta em producao** lendo essas tabelas: defasagem tem que aparecer
+como FAILED/exit 1, nao como `DEGRADED` silencioso.
+
+Isso e' seguro porque a falha de um serving **nao desfaz** o que ja foi commitado. Cada
+carga anterior tem transacao propria, e cada sync de serving e' atomico — o endpoint
+continua servindo o snapshot anterior em vez de ficar sem dado. Marcar como nao-critico
+esconderia do usuario exatamente aquilo que ele veria no painel.
+
+### 36.3 Fiacao no `full_daily`
+
+Tres steps novos, depois de toda a ingestao e antes do `health_check`:
+
+| Step | Depende de | Timeout do step | Timeout do filho |
+| --- | --- | --- | --- |
+| `serving_ml` | `daily_ml` | 600s | 540s |
+| `serving_tiktok_brand` | `daily_tiktok` | 600s | 540s |
+| `serving_tiktok_creator` | `daily_tiktok` | 1800s | 1740s |
+
+Nao ha' dependencia cruzada de proposito: uma fonte de canal bloqueada impede **somente** o
+serving daquele canal. TikTok fora do ar nao congela o serving do ML.
+
+O creator recebe o triplo porque reescreve **66.347 linhas** numa janela de 90 dias, contra
+360 do ML e 450 do brand (medido em 17/08). O timeout do filho fica **abaixo** do timeout do
+step para que o wrapper ainda consiga reportar — sem isso o orquestrador mataria o wrapper e
+deixaria o CLI orfao escrevendo no Neon.
+
+Orcamento interno do `full_daily`: **3600s -> 6600s**, contra 9000s do lock externo (margem
+de 2400s, ~36%). `SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS` = 3000s.
+
+### 36.4 TaskKey manual `serving_refresh` — contingencia, nao automacao
+
+Pipeline com **somente** os tres steps de serving, na ordem ML -> brand -> creator.
+**Nao esta agendada**, nao tem entrada em `PROPOSED_SCHEDULE` e **nenhuma tarefa do Windows
+foi criada ou alterada** por esta task. Serve a um cenario real: o `full_daily` das 06:00 foi
+bloqueado no preflight porque a VPN estava fora, e mais tarde o operador quer atualizar so'
+o serving, sem reprocessar daily/produtos/regional.
+
+Reusa o **lock logico do `full_daily`** (`Lock = "full_daily"` em `Get-TaskDefinitions`):
+sobreposicao com uma execucao agendada em andamento e' impossivel por construcao, nao por
+disciplina do operador. E' o oposto deliberado de `shopee_manual_refresh`, que tem lock
+proprio porque mexe em fontes disjuntas.
+
+Sem `health_check`: ele reprova por fontes **alheias** ao serving — em 17/08 saiu com exit 1
+apenas porque `ml_produto_ranking` estava a 39,8h do limite de 30h. Incluir aqui faria uma
+recuperacao de serving bem-sucedida reportar FAILED por um motivo que ela nao pode resolver.
+
+### 36.5 Preflight
+
+As tres fontes novas (`serving_ml`, `serving_tiktok_brand`, `serving_tiktok_creator`) exigem
+Data Mart (fonte), Neon (destino) e a existencia das tres tabelas de serving.
+
+Sobre a checagem de migration: o pedido era verificar Alembic 008. A implementacao verifica
+a **existencia das tres tabelas** via `to_regclass`, reportando a revisao corrente do Alembic
+no detalhe sem usa-la como critério. Os dois provariam a mesma coisa hoje, mas comparar com o
+literal `'008'` passaria a bloquear todo o serving no dia em que uma migration 009 de qualquer
+outro assunto entrasse — a pre-condicao real do sync e' a tabela existir, nao o numero da
+revisao. Nenhuma linha das fatos e' lida: `to_regclass` nao toca em conteudo.
+
+### 36.6 O que esta ponte NAO resolve
+
+**A ponte nao foi executada.** Afirmar que o serving "agora se atualiza em producao" seria
+falso: o codigo existe, esta testado e nao rodou nenhuma vez.
+
+**Nenhum Scheduler foi criado ou alterado.** `mktplace_full_daily` continua sendo a unica
+tarefa do sistema, com a mesma acao, o mesmo horario e as mesmas configuracoes. A partir da
+proxima execucao dela, os tres steps novos passariam a ser exercitados — e e' exatamente por
+isso que um piloto autorizado deve vir antes de confiar no resultado.
+
+**Airflow nao existe**, nao esta configurado e nunca executou este projeto. §24 permanece a
+referencia; esta ponte e' temporaria por construcao.
+
+**A confiabilidade continua dependendo de notebook ligado, usuario logado e VPN ativa.** A
+tarefa roda com `LogonType=Interactive` e `RunLevel=Limited`. Em agosto, execucoes as 06:00
+apareceram em apenas 5 dos 17 dias.
+
+**O horario 06:00 continua uma divida**, e a mais impactante: e' justamente quando a VPN
+tende a estar fora. Nao foi alterado nesta task.
+
+**Backfill historico periodico ainda requer decisao futura.** O lookback de 90 dias absorve
+reafirmacoes recentes, mas nao cobre correcao anterior a essa janela. A cadencia de
+`--backfill` (semanal? mensal?) nao foi decidida nem implementada.
+
+**Risco residual conhecido, nao corrigido:** se o orquestrador matar o wrapper por timeout do
+step, no Windows o CLI neto pode sobreviver como orfao. O timeout do filho, 60s abaixo do
+timeout do step, existe para que o caminho normal nunca chegue la'. Nao ha' arvore de
+processos gerenciada.
+
+### 36.7 Estado desta task
+
+`IMPLEMENTADO E TESTADO, NAO EXECUTADO`. A Task 2/2 so' sera' operacionalmente concluida
+apos um **piloto autorizado**: primeiro o wrapper em modo diagnostico (sem `--apply`)
+conferindo `effective_date_to` contra os watermarks reais, depois uma execucao manual
+completa com VPN ativa, e so' entao confiar no agendamento.

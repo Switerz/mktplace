@@ -217,6 +217,73 @@ def check_sync_region_consent() -> CheckResult:
     return CheckResult(label, True, f"{label}: OK (via {source})")
 
 
+#: Tabelas de serving que `/operacoes` le em producao, criadas pelas migrations
+#: 006/007/008. Nomes FIXOS, vindos dos proprios modulos de sync (nunca uma
+#: quarta copia da lista) — ver o teste que trava essa identidade.
+_SERVING_TARGET_TABLES = (
+    "marts.fact_ml_gestao_diaria",
+    "marts.fact_tiktok_brand_content_daily",
+    "marts.fact_tiktok_creator_daily",
+)
+
+
+def check_serving_tables() -> CheckResult:
+    """Confirma que as migrations do serving foram aplicadas, ANTES de disparar
+    um sync que falharia no meio.
+
+    Checa a EXISTENCIA das tres tabelas (`to_regclass`, uma consulta so', sem
+    ler linha nenhuma) em vez de comparar `alembic_version` com o literal
+    '008'. Os dois provariam a mesma coisa hoje, mas a versao travada no
+    literal passaria a bloquear todo o serving no dia em que uma migration 009
+    de qualquer outro assunto entrasse — a pre-condicao real do sync e' a
+    tabela existir, nao o numero da revisao. A revisao corrente e' reportada no
+    detalhe, para diagnostico, sem virar critério de aprovacao.
+
+    Somente leitura: `to_regclass` e `alembic_version` nao escrevem nada.
+    """
+    label = "Serving (migrations 006/007/008)"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            faltando = []
+            for tabela in _SERVING_TARGET_TABLES:
+                cur.execute("SELECT to_regclass(%s)", (tabela,))
+                if cur.fetchone()[0] is None:
+                    faltando.append(tabela)
+            revisao = "?"
+            try:
+                cur.execute("SELECT version_num FROM alembic_version")
+                linha = cur.fetchone()
+                if linha:
+                    revisao = str(linha[0])
+            except Exception:
+                # Ausencia/erro de leitura do controle de versao nao invalida o
+                # que importa: a existencia das tabelas, ja verificada acima.
+                revisao = "indisponivel"
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False, f"{label}: falha de conexao ({sanitize_url(url)}) — {type(e).__name__}")
+
+    if faltando:
+        nomes = ", ".join(t.split(".")[-1] for t in faltando)
+        return CheckResult(
+            label, False,
+            f"{label}: {len(faltando)} tabela(s) ausente(s) ({nomes}) — migration nao aplicada; "
+            f"revisao corrente do Alembic: {revisao}",
+        )
+    return CheckResult(
+        label, True,
+        f"{label}: as 3 tabelas existem (revisao corrente do Alembic: {revisao})",
+    )
+
+
 # Fontes suportadas e suas dependencias. produtos_shopee depende do
 # PostgreSQL local (populado manualmente por apps/api/etl/load_shopee_products.py
 # a partir dos XLSX — esse passo NAO faz parte desta automacao, ver runbook),
@@ -235,6 +302,15 @@ SOURCE_CHECKS = {
     # conhecido aceito (diferente de produtos_shopee).
     "gold_regional_incremental": (check_gold_regional_write, check_rds),
     "sync_region_daily": (check_sync_region_consent, check_rds, check_neon),
+    # Checkpoint O1 Task 2/2 (2026-08-17): os tres steps de serving. Data Mart
+    # (fonte Gold) e Neon (destino) sao AMBOS obrigatorios — sem um dos dois nao
+    # ha' o que ler nem onde escrever — e as tabelas de destino precisam existir
+    # antes de o wrapper sequer resolver a janela. Uma fonte por target, mesmo
+    # que os checks sejam identicos: e' o que faz `serving_ml` poder passar
+    # enquanto `serving_tiktok_creator` bloqueia, e vice-versa.
+    "serving_ml": (check_rds, check_neon, check_serving_tables),
+    "serving_tiktok_brand": (check_rds, check_neon, check_serving_tables),
+    "serving_tiktok_creator": (check_rds, check_neon, check_serving_tables),
 }
 
 

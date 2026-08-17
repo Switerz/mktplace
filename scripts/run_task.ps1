@@ -32,6 +32,7 @@
 # Uso real (Task Scheduler ou manual):
 #   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey full_daily
 #   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey shopee_manual_refresh
+#   powershell -NoProfile -NonInteractive -File scripts\run_task.ps1 -TaskKey serving_refresh
 #
 # Uso em teste (Pester) — carrega so' as funcoes, nao executa nada:
 #   . .\scripts\run_task.ps1
@@ -48,7 +49,9 @@ function Get-TaskDefinitions {
     # documenta esta tabela para revisao; esta e' a versao que roda de
     # fato quando o Task Scheduler dispara.
     #
-    # DUAS TaskKeys desde o Gate C1 (2026-07-16):
+    # TRES TaskKeys: as duas do Gate C1 (2026-07-16), abaixo, e
+    # "serving_refresh" (Checkpoint O1 Task 2/2, 2026-08-17), documentada logo
+    # depois destas.
     #   - "full_daily": fontes REALMENTE recorrentes (ml, tiktok, regional,
     #     produtos ml/tiktok, health_check) — a UNICA candidata a rodar sob
     #     o Task Scheduler (ver schedule_plan.py, que so' agenda esta).
@@ -72,16 +75,35 @@ function Get-TaskDefinitions {
     # TimeoutSeconds=9000 (2h30) tem que ficar MAIOR que a soma dos
     # timeouts individuais dos steps internos de cada pipeline (ver
     # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    # = 3600s desde o Gate C1, e
-    # SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3780s), com
+    # = 6600s desde o Checkpoint O1 Task 2/2, que somou 3000s dos tres steps
+    # de serving aos 3600s do Gate C1;
+    # SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3780s; e
+    # SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3000s), com
     # margem: senao este timeout EXTERNO mataria o processo pai antes que
     # os timeouts internos por step tivessem chance de proteger as fontes
     # independentes seguintes. Os dois pipelines reaproveitam o mesmo
     # 9000s por simplicidade — ambos os orcamentos internos cabem com
     # folga.
+    # TERCEIRA TaskKey desde o Checkpoint O1 Task 2/2 (2026-08-17):
+    #   - "serving_refresh": so' os tres steps de serving (ML, TikTok brand,
+    #     TikTok creator), MANUAL, NUNCA agendada (sem entrada em
+    #     schedule_plan.py PROPOSED_SCHEDULE, sem tarefa criada no Task
+    #     Scheduler). Serve a UM cenario real: o `full_daily` das 06:00 foi
+    #     bloqueado no preflight porque a VPN estava fora, e mais tarde o
+    #     operador quer atualizar so' o serving que `/operacoes` le, sem
+    #     reprocessar daily/produtos/regional.
+    #
+    #     Lock = "full_daily" DE PROPOSITO, nao um lock proprio: as duas
+    #     TaskKeys mexem nas mesmas fontes e no mesmo destino, e compartilhar o
+    #     lock torna a sobreposicao impossivel por construcao — se o `full_daily`
+    #     agendado estiver em andamento, esta TaskKey sai BLOCKED sem rodar, em
+    #     vez de disputar a mesma janela de dados. E' o oposto do desenho de
+    #     "shopee_manual_refresh", que tem lock separado porque mexe em fontes
+    #     disjuntas (Shopee) e pode legitimamente rodar em paralelo.
     return @{
         "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
         "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
+        "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
     }
 }
 

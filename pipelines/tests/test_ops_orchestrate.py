@@ -260,10 +260,11 @@ def test_pipelines_antigos_de_2_tarefas_nao_existem_mais():
     assert "produtos_and_monitor" not in orch.PIPELINES
 
 
-def test_pipelines_disponiveis_sao_exatamente_full_daily_e_shopee_manual_refresh():
-    """Gate C1: exatamente 2 pipelines — nenhum terceiro, nenhuma task
-    Shopee agendada por engano."""
-    assert set(orch.PIPELINES) == {"full_daily", "shopee_manual_refresh"}
+def test_pipelines_disponiveis_sao_exatamente_os_tres_conhecidos():
+    """Gate C1: full_daily + shopee_manual_refresh. Checkpoint O1 Task 2/2
+    (2026-08-17): serving_refresh, a TaskKey MANUAL de contingencia — nenhum
+    quarto pipeline, e nenhuma task Shopee ou de serving agendada por engano."""
+    assert set(orch.PIPELINES) == {"full_daily", "shopee_manual_refresh", "serving_refresh"}
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +392,10 @@ def test_full_daily_nao_contem_nenhum_step_shopee():
 
 
 def test_full_daily_contem_exatamente_as_fontes_recorrentes_na_ordem_correta():
+    """Os tres steps de serving entraram no Checkpoint O1 Task 2/2 (2026-08-17)
+    DEPOIS de toda a ingestao e ANTES do health_check. A posicao e' o contrato:
+    e' o que garante 'serving depois das fontes do dia' sem depender de
+    horario."""
     names = [step.name for step in orch.PIPELINES["full_daily"]]
     assert names == [
         "daily_ml",
@@ -399,6 +404,9 @@ def test_full_daily_contem_exatamente_as_fontes_recorrentes_na_ordem_correta():
         "sync_region_if_needed",
         "sync_produtos_ml",
         "sync_produtos_tiktok",
+        "serving_ml",
+        "serving_tiktok_brand",
+        "serving_tiktok_creator",
         "health_check",
     ]
 
@@ -663,3 +671,329 @@ def test_sync_region_if_needed_chama_o_modulo_certo_sem_flags():
     step = steps_by_name["sync_region_if_needed"]
     assert step.module == "pipelines.ops.sync_region_if_needed"
     assert step.args == ()
+
+
+# =============================================================================
+# Checkpoint O1 Task 2/2 (2026-08-17) — ponte de serving no full_daily
+# =============================================================================
+
+SERVING_STEPS = ["serving_ml", "serving_tiktok_brand", "serving_tiktok_creator"]
+
+
+def _por_nome(pipeline="full_daily"):
+    return {s.name: s for s in orch.PIPELINES[pipeline]}
+
+
+def test_serving_ml_depende_so_de_daily_ml():
+    assert _por_nome()["serving_ml"].depends_on == ("daily_ml",)
+
+
+@pytest.mark.parametrize("nome", ["serving_tiktok_brand", "serving_tiktok_creator"])
+def test_serving_tiktok_depende_so_de_daily_tiktok(nome):
+    assert _por_nome()[nome].depends_on == ("daily_tiktok",)
+
+
+def test_nao_existe_dependencia_cruzada_entre_canais():
+    """ML nunca depende de TikTok e vice-versa. Uma dependencia comum faria a
+    VPN cair para um canal e congelar o serving do outro de graca."""
+    p = _por_nome()
+    assert "daily_tiktok" not in p["serving_ml"].depends_on
+    for nome in ("serving_tiktok_brand", "serving_tiktok_creator"):
+        assert "daily_ml" not in p[nome].depends_on
+
+
+def test_falha_de_daily_tiktok_bloqueia_so_o_serving_de_tiktok():
+    """Item central do contrato: uma fonte de canal quebrada impede SOMENTE o
+    serving daquele canal. serving_ml continua rodando."""
+    calls = []
+    executor = make_executor(returncodes={"daily_tiktok": 1}, calls=calls)
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert results["serving_tiktok_brand"] == "SKIPPED"
+    assert results["serving_tiktok_creator"] == "SKIPPED"
+    assert results["serving_ml"] == "SUCCESS"
+    assert "serving_ml" in calls
+    assert "serving_tiktok_brand" not in calls
+    assert "serving_tiktok_creator" not in calls
+
+
+def test_falha_de_daily_ml_bloqueia_so_o_serving_de_ml():
+    calls = []
+    executor = make_executor(returncodes={"daily_ml": 1}, calls=calls)
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert results["serving_ml"] == "SKIPPED"
+    assert results["serving_tiktok_brand"] == "SUCCESS"
+    assert results["serving_tiktok_creator"] == "SUCCESS"
+    assert "serving_ml" not in calls
+
+
+def test_fonte_de_canal_bloqueada_no_preflight_tambem_pula_so_aquele_serving():
+    calls = []
+    executor = make_executor(calls=calls)
+    preflight_fn = make_preflight(blocked_sources=("tiktok_daily",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+
+    assert results["daily_tiktok"] == "BLOCKED"
+    assert results["serving_tiktok_brand"] == "SKIPPED"
+    assert results["serving_ml"] == "SUCCESS"
+
+
+def test_timeout_da_fonte_do_canal_pula_o_serving_daquele_canal():
+    calls = []
+    executor = make_executor(calls=calls, timeout_on=("daily_tiktok",))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert results["daily_tiktok"] == "FAILED"
+    assert results["serving_tiktok_creator"] == "SKIPPED"
+    assert results["serving_ml"] == "SUCCESS"
+
+
+def test_16_falha_de_brand_nao_impede_o_orquestrador_de_avaliar_creator():
+    """Sao STEPS separados, com invocacoes separadas do wrapper: brand falhar
+    nao cancela creator, cuja dependencia (daily_tiktok) foi satisfeita. E o
+    oposto do --table all do CLI, onde o primeiro erro aborta o laco."""
+    calls = []
+    executor = make_executor(returncodes={"serving_tiktok_brand": 1}, calls=calls)
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert results["serving_tiktok_brand"] == "FAILED"
+    assert results["serving_tiktok_creator"] == "SUCCESS"
+    assert "serving_tiktok_creator" in calls
+
+
+def test_17_falha_de_serving_nao_desfaz_ingestao_ja_concluida():
+    """Os steps de ingestao rodaram e mantiveram SUCCESS: o orquestrador nao tem
+    caminho que reverta um step anterior por causa de uma falha posterior. Cada
+    carga tem transacao propria."""
+    calls = []
+    executor = make_executor(
+        returncodes={"serving_ml": 1, "serving_tiktok_brand": 2, "serving_tiktok_creator": 124},
+        calls=calls,
+    )
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert results["daily_ml"] == "SUCCESS"
+    assert results["daily_tiktok"] == "SUCCESS"
+    assert results["sync_produtos_ml"] == "SUCCESS"
+    assert results["sync_produtos_tiktok"] == "SUCCESS"
+    assert results["gold_regional_incremental"] == "SUCCESS"
+    for nome in ("daily_ml", "daily_tiktok", "sync_produtos_ml", "sync_produtos_tiktok"):
+        assert calls.count(nome) == 1
+
+
+@pytest.mark.parametrize("nome", SERVING_STEPS)
+def test_18_falha_de_qualquer_serving_derruba_o_pipeline_para_failed(nome):
+    """Decisao explicita do Checkpoint O1: critical=True. /operacoes ja esta em
+    producao lendo estas tabelas, entao defasagem tem que aparecer como FAILED."""
+    executor = make_executor(returncodes={nome: 1})
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+@pytest.mark.parametrize("nome", SERVING_STEPS)
+def test_18_serving_bloqueado_no_preflight_tambem_vira_failed(nome):
+    step = _por_nome()[nome]
+    executor = make_executor()
+    preflight_fn = make_preflight(blocked_sources=(step.preflight_source,))
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=preflight_fn)
+    assert results[nome] == "BLOCKED"
+    assert orch.compute_overall_status("full_daily", results) == "FAILED"
+
+
+@pytest.mark.parametrize("nome", SERVING_STEPS)
+def test_18_todos_os_steps_de_serving_sao_criticos(nome):
+    assert _por_nome()[nome].critical is True
+
+
+def test_19_sucesso_dos_tres_permite_health_check_executar():
+    calls = []
+    executor = make_executor(calls=calls)
+    results = orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    assert all(results[n] == "SUCCESS" for n in SERVING_STEPS)
+    assert calls[-1] == "health_check"
+    assert orch.compute_overall_status("full_daily", results) == "OK"
+
+
+def test_19_health_check_roda_mesmo_com_os_tres_servings_falhando():
+    calls = []
+    executor = make_executor(returncodes={n: 1 for n in SERVING_STEPS}, calls=calls)
+    orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+    assert calls[-1] == "health_check"
+
+
+def test_20_serving_roda_depois_de_toda_a_ingestao_e_antes_do_health_check():
+    calls = []
+    executor = make_executor(calls=calls)
+    orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+
+    ingestao = ["daily_ml", "daily_tiktok", "gold_regional_incremental",
+                "sync_region_if_needed", "sync_produtos_ml", "sync_produtos_tiktok"]
+    for fonte in ingestao:
+        for serv in SERVING_STEPS:
+            assert calls.index(fonte) < calls.index(serv), f"{serv} rodou antes de {fonte}"
+    for serv in SERVING_STEPS:
+        assert calls.index(serv) < calls.index("health_check")
+
+
+def test_20_ordem_interna_do_serving_e_ml_brand_creator():
+    calls = []
+    executor = make_executor(calls=calls)
+    orch.run_pipeline("full_daily", executor=executor, preflight_fn=make_preflight())
+    assert [c for c in calls if c in SERVING_STEPS] == SERVING_STEPS
+
+
+def test_21_nenhum_step_de_serving_toca_shopee():
+    for pipeline in ("full_daily", "serving_refresh"):
+        for step in orch.PIPELINES[pipeline]:
+            if step.name in SERVING_STEPS:
+                assert "shopee" not in step.name.lower()
+                assert "shopee" not in step.module.lower()
+                assert not any("shopee" in a.lower() for a in step.args)
+
+
+def test_21_full_daily_continua_sem_nenhum_step_shopee_depois_da_ponte():
+    names = {s.name for s in orch.PIPELINES["full_daily"]}
+    shopee = {"daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads",
+              "sync_produtos_shopee", "monitor_bug8"}
+    assert names.isdisjoint(shopee)
+
+
+def test_21_serving_refresh_nao_contem_nenhum_step_shopee():
+    names = {s.name for s in orch.PIPELINES["serving_refresh"]}
+    shopee = {"daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads",
+              "sync_produtos_shopee", "monitor_bug8"}
+    assert names.isdisjoint(shopee)
+
+
+def test_22_serving_refresh_contem_somente_os_tres_steps_de_serving():
+    assert [s.name for s in orch.PIPELINES["serving_refresh"]] == SERVING_STEPS
+
+
+def test_22_serving_refresh_nao_tem_health_check():
+    """health_check reprova por fontes ALHEIAS ao serving (em 17/08 saiu 1 so
+    por ml_produto_ranking): incluir aqui faria uma recuperacao bem-sucedida
+    reportar FAILED por um motivo que ela nao pode resolver."""
+    assert "health_check" not in {s.name for s in orch.PIPELINES["serving_refresh"]}
+
+
+def test_22_serving_refresh_nao_tem_ingestao_nem_produtos_nem_regional():
+    names = {s.name for s in orch.PIPELINES["serving_refresh"]}
+    assert names.isdisjoint({"daily_ml", "daily_tiktok", "sync_produtos_ml",
+                             "sync_produtos_tiktok", "gold_regional_incremental",
+                             "sync_region_if_needed"})
+
+
+def test_22_steps_de_serving_refresh_nao_dependem_de_step_inexistente():
+    """Um depends_on apontando para um step que nao existe NESTE pipeline faria
+    todos virarem SKIPPED e a contingencia nunca rodaria."""
+    nomes = {s.name for s in orch.PIPELINES["serving_refresh"]}
+    for step in orch.PIPELINES["serving_refresh"]:
+        assert set(step.depends_on) <= nomes
+        assert step.depends_on == ()
+
+
+def test_22_serving_refresh_executa_os_tres_de_fato():
+    calls = []
+    executor = make_executor(calls=calls)
+    results = orch.run_pipeline("serving_refresh", executor=executor, preflight_fn=make_preflight())
+    assert calls == SERVING_STEPS
+    assert all(v == "SUCCESS" for v in results.values())
+    assert orch.compute_overall_status("serving_refresh", results) == "OK"
+
+
+def test_22_serving_refresh_falha_vira_failed():
+    executor = make_executor(returncodes={"serving_tiktok_creator": 2})
+    results = orch.run_pipeline("serving_refresh", executor=executor, preflight_fn=make_preflight())
+    assert orch.compute_overall_status("serving_refresh", results) == "FAILED"
+
+
+def test_22_mesmo_comando_e_criticidade_nos_dois_pipelines():
+    """Os dois pipelines derivam do mesmo construtor: comando, preflight,
+    timeout e criticidade nao podem divergir entre eles."""
+    fd = _por_nome("full_daily")
+    sr = _por_nome("serving_refresh")
+    for nome in SERVING_STEPS:
+        assert fd[nome].module == sr[nome].module
+        assert fd[nome].args == sr[nome].args
+        assert fd[nome].timeout_seconds == sr[nome].timeout_seconds
+        assert fd[nome].preflight_source == sr[nome].preflight_source
+        assert fd[nome].critical is True and sr[nome].critical is True
+        assert fd[nome].depends_on != () and sr[nome].depends_on == ()
+
+
+@pytest.mark.parametrize("nome", SERVING_STEPS)
+def test_cada_step_de_serving_chama_o_wrapper_com_um_unico_target_e_apply(nome):
+    step = _por_nome()[nome]
+    assert step.module == "pipelines.ops.serving_refresh"
+    assert step.args[0] == "--target"
+    assert step.args[2] == "--apply"
+    assert step.args.count("--target") == 1
+    assert step.args.count("--apply") == 1
+    assert "all" not in step.args
+
+
+def test_os_tres_targets_do_wrapper_estao_cobertos_sem_repeticao():
+    targets = [s.args[1] for s in orch.PIPELINES["full_daily"] if s.name in SERVING_STEPS]
+    assert targets == ["ml", "brand", "creator"]
+    assert len(set(targets)) == 3
+
+
+def test_24_nenhuma_task_do_windows_e_criada_por_este_modulo():
+    baixo = MODULE_PATH.read_text(encoding="utf-8").lower()
+    for termo in ("schtasks", "register-scheduledtask", "new-scheduledtask",
+                  "set-scheduledtask", "enable-scheduledtask", "start-scheduledtask"):
+        assert termo not in baixo, termo
+
+
+def test_24_nenhuma_referencia_a_airflow_ou_dag():
+    baixo = MODULE_PATH.read_text(encoding="utf-8").lower()
+    assert "airflow" not in baixo
+
+
+def test_27_orcamento_interno_dos_tres_pipelines_cabe_no_timeout_externo():
+    EXTERNO = 9000
+    for budget in (orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS,
+                   orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS,
+                   orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS):
+        assert budget < EXTERNO
+        assert (EXTERNO - budget) > 0.15 * budget, "margem de seguranca insuficiente"
+
+
+def test_27_orcamento_do_full_daily_e_a_soma_real_incluindo_serving():
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 6600
+    assert orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3000
+
+
+def test_27_creator_tem_orcamento_maior_que_ml_e_brand():
+    """66.347 linhas numa janela de 90 dias, contra 360 do ML e 450 do brand."""
+    p = _por_nome()
+    assert p["serving_tiktok_creator"].timeout_seconds > p["serving_ml"].timeout_seconds
+    assert p["serving_tiktok_creator"].timeout_seconds > p["serving_tiktok_brand"].timeout_seconds
+
+
+def test_28_os_sete_steps_antigos_mantem_comando_criticidade_e_dependencia():
+    """Trava o contrato preexistente: a ponte NAO pode ter mudado nenhum dos
+    sete steps que ja rodavam."""
+    esperado = {
+        "daily_ml": ("pipelines.ingestion.daily_performance", ("--source", "ml", "--mode", "incremental"), 900, "ml_daily", (), True, False),
+        "daily_tiktok": ("pipelines.ingestion.daily_performance", ("--source", "tiktok", "--mode", "incremental"), 900, "tiktok_daily", (), True, False),
+        "gold_regional_incremental": ("pipelines.ingestion.gold_regional.loader", ("--incremental",), 300, "gold_regional_incremental", (), True, False),
+        "sync_region_if_needed": ("pipelines.ops.sync_region_if_needed", (), 120, "sync_region_daily", ("gold_regional_incremental",), True, False),
+        "sync_produtos_ml": ("pipelines.sync_produtos", ("--source", "ml"), 600, "produtos_ml", (), True, False),
+        "sync_produtos_tiktok": ("pipelines.sync_produtos", ("--source", "tiktok"), 600, "produtos_tiktok", (), True, False),
+        "health_check": ("pipelines.ops.health_check", ("--json",), 180, None, (), True, True),
+    }
+    p = _por_nome()
+    for nome, alvo in esperado.items():
+        s = p[nome]
+        assert (s.module, s.args, s.timeout_seconds, s.preflight_source,
+                s.depends_on, s.critical, s.always_run) == alvo, nome
+
+
+def test_28_shopee_manual_refresh_ficou_intacto():
+    names = [s.name for s in orch.PIPELINES["shopee_manual_refresh"]]
+    assert names == ["daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads",
+                     "sync_produtos_shopee", "monitor_bug8", "health_check"]
+    assert orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3780

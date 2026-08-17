@@ -104,6 +104,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "apps" / "api"))
 
 from pipelines.ops.preflight import run_preflight  # noqa: E402
+from pipelines.ops import serving_refresh  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -122,7 +123,53 @@ class Step:
     critical: bool = True
 
 
-# DOIS pipelines independentes, cada um sob seu proprio lock externo (ver
+# Checkpoint O1 Task 2/2 (2026-08-17): dependencia de FONTE por target de
+# serving. O serving de um canal so' roda depois que a ingestao DAQUELE canal
+# terminou com SUCCESS nesta mesma execucao — nunca por horario.
+#
+# NAO existe dependencia cruzada de proposito: `serving_ml` depende so' de
+# `daily_ml`, e os dois de TikTok so' de `daily_tiktok`. Uma dependencia comum
+# (ex.: os tres dependendo de ambos) faria a VPN cair para o TikTok e congelar o
+# serving do ML de graca, e vice-versa. Uma fonte de canal bloqueada impede
+# somente o serving daquele canal.
+SERVING_SOURCE_DEPENDENCY: dict[str, tuple[str, ...]] = {
+    "ml": ("daily_ml",),
+    "brand": ("daily_tiktok",),
+    "creator": ("daily_tiktok",),
+}
+
+
+def _serving_step(target_name: str, depends_on: tuple[str, ...] = ()) -> Step:
+    """UMA fonte de verdade para modulo, argumentos, preflight, criticidade e
+    timeout de cada step de serving.
+
+    O mesmo target aparece em DOIS pipelines com contratos de dependencia
+    diferentes (`full_daily` amarra a ingestao do dia; `serving_refresh`, a
+    TaskKey manual de contingencia, nao tem ingestao para amarrar). Construir os
+    dois pela mesma funcao e' o que impede o comando ou a criticidade de
+    divergirem entre eles — duplicar as tuplas a mao seria a forma obvia de,
+    numa edicao futura, corrigir um pipeline e esquecer o outro.
+
+    `critical=True` e' decisao explicita do Checkpoint O1: `/operacoes` ja esta
+    em producao lendo estas tabelas, entao uma falha precisa aparecer como
+    FAILED/exit 1. Isso NAO desfaz `daily_ml`/`daily_tiktok` ja commitados — os
+    steps anteriores tem transacao propria — e o endpoint continua servindo o
+    snapshot anterior porque cada sync e' atomico. Marcar como nao-critico
+    esconderia defasagem de quem usa o painel.
+    """
+    target = serving_refresh.TARGETS[target_name]
+    return Step(
+        name=target.step_name,
+        module="pipelines.ops.serving_refresh",
+        args=("--target", target.name, "--apply"),
+        timeout_seconds=target.step_timeout_seconds,
+        preflight_source=target.preflight_source,
+        depends_on=depends_on,
+        critical=True,
+    )
+
+
+# TRES pipelines independentes, cada um sob seu proprio lock externo (ver
 # scripts/run_task.ps1) — health_check so' roda depois que TUDO antes, DENTRO
 # do mesmo pipeline, realmente terminou (nunca por horario).
 PIPELINES: dict[str, tuple[Step, ...]] = {
@@ -151,6 +198,12 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         Step("sync_region_if_needed", "pipelines.ops.sync_region_if_needed", (), timeout_seconds=120, preflight_source="sync_region_daily", depends_on=("gold_regional_incremental",), critical=True),
         Step("sync_produtos_ml", "pipelines.sync_produtos", ("--source", "ml"), timeout_seconds=600, preflight_source="produtos_ml"),
         Step("sync_produtos_tiktok", "pipelines.sync_produtos", ("--source", "tiktok"), timeout_seconds=600, preflight_source="produtos_tiktok"),
+        # Checkpoint O1 Task 2/2 (2026-08-17): as tres fatos de serving que
+        # `/operacoes` le em producao. Ficam DEPOIS de toda a ingestao e ANTES do
+        # health_check — a posicao e' o que garante "serving depois das fontes do
+        # dia", sem depender de horario. Cada um resolve a propria janela via
+        # min(D-1, source_max), entao creator em D-2 nao atrasa ML nem brand.
+        *(_serving_step(t, SERVING_SOURCE_DEPENDENCY[t]) for t in serving_refresh.TARGET_ORDER),
         # Sempre roda por ultimo, mesmo se algo anterior falhou/bloqueou —
         # e' o resumo do estado real, precisa rodar para reportar a falha.
         # always_run + ser o ULTIMO item desta tupla e' o que garante
@@ -183,14 +236,37 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # acabou de rodar (inclusive se algo antes falhou/bloqueou).
         Step("health_check", "pipelines.ops.health_check", ("--json",), timeout_seconds=180, always_run=True),
     ),
+    # Checkpoint O1 Task 2/2 (2026-08-17): pipeline MANUAL de contingencia, sem
+    # entrada em schedule_plan.PROPOSED_SCHEDULE e sem tarefa no Task Scheduler.
+    # Existe para UM cenario real e recorrente: o `full_daily` das 06:00 foi
+    # bloqueado no preflight porque a VPN estava fora, e mais tarde o operador
+    # quer atualizar SO' o serving, sem reprocessar daily/produtos/regional.
+    #
+    # Reutiliza o LOCK LOGICO do full_daily (ver Get-TaskDefinitions em
+    # scripts/run_task.ps1: Lock = "full_daily"), entao a sobreposicao com uma
+    # execucao agendada em andamento e' impossivel por construcao, nao por
+    # disciplina do operador.
+    #
+    # Sem health_check de proposito: ele reprova por fontes ALHEIAS ao serving —
+    # em 17/08 saiu com exit 1 apenas porque `ml_produto_ranking` estava a 39,8h
+    # do limite de 30h. Incluir aqui faria uma recuperacao de serving
+    # bem-sucedida reportar FAILED por um motivo que ela nao tem como resolver.
+    "serving_refresh": tuple(
+        _serving_step(t) for t in serving_refresh.TARGET_ORDER
+    ),
 }
 
 # Soma dos timeouts individuais de full_daily = 900*2 (ml, tiktok) + 300
 # (gold_regional_incremental) + 120 (sync_region_if_needed) + 600*2
-# (produtos ml, tiktok) + 180 (health_check) = 3600s (~1h). Caiu de 7200s
-# para 3600s no Gate C1 (2026-07-16), que removeu os 3 steps Shopee diarios
-# (900*3=2700s) + sync_produtos_shopee (600s) + monitor_bug8 (300s) daqui —
-# ver PIPELINES["shopee_manual_refresh"]. O timeout EXTERNO (run_with_lock.ps1
+# (produtos ml, tiktok) + 180 (health_check) = 3600s (~1h) ate o Gate C1, e
+# 6600s (~1h50) desde o Checkpoint O1 Task 2/2 (2026-08-17), que somou os tres
+# steps de serving: 600 (serving_ml) + 600 (serving_tiktok_brand) + 1800
+# (serving_tiktok_creator) = 3000s. O creator recebe o triplo dos outros porque
+# reescreve 66.347 linhas numa janela de 90 dias, contra 360 do ML e 450 do
+# brand (medido em 17/08/2026). Caiu de 7200s para 3600s no Gate C1
+# (2026-07-16), que removeu os 3 steps Shopee diarios (900*3=2700s) +
+# sync_produtos_shopee (600s) + monitor_bug8 (300s) daqui — ver
+# PIPELINES["shopee_manual_refresh"]. O timeout EXTERNO (run_with_lock.ps1
 # -TimeoutSeconds, ver scripts/run_task.ps1) tem que ser MAIOR que essa
 # soma, com margem — senao o lock externo mata o processo pai antes que os
 # timeouts internos por step tenham chance de proteger as fontes
@@ -199,6 +275,11 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
 # para nao dar a schedule_plan.py/run_task.ps1 nenhuma dependencia deste
 # modulo Python).
 FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step in PIPELINES["full_daily"])
+
+# Soma dos timeouts individuais de serving_refresh = 600 + 600 + 1800 = 3000s
+# (~50min). Pipeline MANUAL de contingencia, sem tarefa agendada — reaproveita
+# o mesmo EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e o mesmo LOCK do full_daily.
+SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step in PIPELINES["serving_refresh"])
 
 # Soma dos timeouts individuais de shopee_manual_refresh = 900*3 (orders,
 # stats, ads) + 600 (sync_produtos_shopee) + 300 (monitor_bug8) + 180

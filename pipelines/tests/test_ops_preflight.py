@@ -704,3 +704,218 @@ def test_nunca_ativa_task_scheduler():
     assert "schtasks" not in source.lower()
     assert "register-scheduledtask" not in source.lower()
     assert "new-scheduledtask" not in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint O1 Task 2/2 (2026-08-17) — preflight dos tres steps de serving
+# ---------------------------------------------------------------------------
+
+SERVING_SOURCES = ("serving_ml", "serving_tiktok_brand", "serving_tiktok_creator")
+
+
+class _FakeServingConn:
+    """Conexao fake para check_serving_tables: `to_regclass` devolve None para
+    as tabelas declaradas ausentes."""
+
+    def __init__(self, ausentes=(), revisao="008", erro_alembic=False):
+        self.ausentes = set(ausentes)
+        self.revisao = revisao
+        self.erro_alembic = erro_alembic
+        self.executed = []
+        self.readonly_sessions = []
+        self.closed = False
+        self._proximo = None
+
+    def set_session(self, readonly=None, **kwargs):
+        self.readonly_sessions.append(readonly)
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "to_regclass" in sql:
+            tabela = params[0]
+            self._proximo = (None,) if tabela in self.ausentes else (tabela,)
+        elif "alembic_version" in sql:
+            if self.erro_alembic:
+                raise RuntimeError("relation alembic_version does not exist")
+            self._proximo = (self.revisao,)
+        else:
+            self._proximo = None
+
+    def fetchone(self):
+        return self._proximo
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("source", SERVING_SOURCES)
+def test_serving_exige_rds_e_neon_obrigatorios(source):
+    """Data Mart e' a fonte Gold, Neon e' o destino: sem um dos dois nao ha o
+    que ler nem onde escrever."""
+    checks = preflight.SOURCE_CHECKS[source]
+    assert preflight.check_rds in checks
+    assert preflight.check_neon in checks
+
+
+@pytest.mark.parametrize("source", SERVING_SOURCES)
+def test_serving_exige_as_tabelas_de_destino(source):
+    assert preflight.check_serving_tables in preflight.SOURCE_CHECKS[source]
+
+
+def test_as_tres_fontes_de_serving_existem_e_sao_separadas():
+    """Uma fonte por target, mesmo com checks identicos: e o que permite
+    serving_ml passar enquanto serving_tiktok_creator bloqueia."""
+    for s in SERVING_SOURCES:
+        assert s in preflight.SOURCE_CHECKS
+    assert len(set(SERVING_SOURCES)) == 3
+
+
+def test_check_serving_tables_ok_quando_as_tres_existem(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn()
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    r = preflight.check_serving_tables()
+
+    assert r.ok is True
+    assert "as 3 tabelas existem" in r.detail
+    assert "008" in r.detail
+    assert conn.closed is True
+
+
+def test_check_serving_tables_bloqueia_quando_falta_tabela(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn(ausentes={"marts.fact_tiktok_creator_daily"})
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    r = preflight.check_serving_tables()
+
+    assert r.ok is False
+    assert "fact_tiktok_creator_daily" in r.detail
+    assert "migration nao aplicada" in r.detail
+
+
+def test_check_serving_tables_verifica_as_tres_tabelas(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn()
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    preflight.check_serving_tables()
+
+    consultadas = [p[0] for sql, p in conn.executed if p and "to_regclass" in sql]
+    assert consultadas == [
+        "marts.fact_ml_gestao_diaria",
+        "marts.fact_tiktok_brand_content_daily",
+        "marts.fact_tiktok_creator_daily",
+    ]
+
+
+def test_check_serving_tables_usa_sessao_readonly_e_nao_escreve(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn()
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    preflight.check_serving_tables()
+
+    assert conn.readonly_sessions == [True]
+    for sql, _ in conn.executed:
+        assert sql.strip().upper().startswith("SELECT"), sql
+
+
+def test_check_serving_tables_nao_le_nenhuma_linha_das_fatos(monkeypatch):
+    """`to_regclass` nao toca no conteudo: nada de scan caro num preflight."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn()
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    preflight.check_serving_tables()
+
+    for sql, _ in conn.executed:
+        assert "FROM marts." not in sql
+        assert "COUNT(" not in sql.upper()
+
+
+def test_check_serving_tables_aprova_mesmo_sem_ler_alembic(monkeypatch):
+    """A pre-condicao real e a tabela existir. Um erro ao ler a revisao nao
+    pode bloquear o serving inteiro."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon-host/db")
+    conn = _FakeServingConn(erro_alembic=True)
+    monkeypatch.setattr(preflight.psycopg2, "connect", lambda url, connect_timeout=5: conn)
+
+    r = preflight.check_serving_tables()
+
+    assert r.ok is True
+    assert "indisponivel" in r.detail
+
+
+def test_check_serving_tables_sem_url_bloqueia_sem_conectar(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    def _nunca(*a, **k):
+        raise AssertionError("tentou conectar sem URL configurada")
+
+    monkeypatch.setattr(preflight.psycopg2, "connect", _nunca)
+    r = preflight.check_serving_tables()
+    assert r.ok is False
+    assert "nao configurada" in r.detail
+
+
+def test_check_serving_tables_falha_de_conexao_nao_expoe_credencial(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://usuario:senha@neon-host:5432/db")
+
+    def _boom(url, connect_timeout=5):
+        raise RuntimeError('connection to server at "neon-host" (10.0.0.9) failed')
+
+    monkeypatch.setattr(preflight.psycopg2, "connect", _boom)
+    r = preflight.check_serving_tables()
+
+    assert r.ok is False
+    assert "senha" not in r.detail
+    assert "usuario:senha" not in r.detail
+
+
+def test_lista_de_tabelas_de_serving_bate_com_os_modulos_de_sync():
+    """Nao e uma quarta copia: os nomes tem que ser os mesmos que os CLIs
+    escrevem de fato."""
+    import pipelines.sync_ml_gestao_diaria as ml_sync
+    import pipelines.sync_tiktok_serving as tk_sync
+
+    assert set(preflight._SERVING_TARGET_TABLES) == {
+        ml_sync.TARGET_TABLE,
+        tk_sync.BRAND_SPEC.target_table,
+        tk_sync.CREATOR_SPEC.target_table,
+    }
+
+
+def test_run_preflight_serving_agrega_os_tres_checks(monkeypatch):
+    """Comportamental: com os tres checks aprovando, a fonte libera; com um
+    reprovando, a fonte inteira bloqueia."""
+    monkeypatch.setitem(
+        preflight.SOURCE_CHECKS, "serving_ml",
+        (lambda: preflight.CheckResult("a", True, "a: ok"),
+         lambda: preflight.CheckResult("b", True, "b: ok"),
+         lambda: preflight.CheckResult("c", True, "c: ok")),
+    )
+    ok, results = preflight.run_preflight("serving_ml")
+    assert ok is True and len(results) == 3
+
+    monkeypatch.setitem(
+        preflight.SOURCE_CHECKS, "serving_ml",
+        (lambda: preflight.CheckResult("a", True, "a: ok"),
+         lambda: preflight.CheckResult("b", False, "b: bloqueado"),
+         lambda: preflight.CheckResult("c", True, "c: ok")),
+    )
+    ok, results = preflight.run_preflight("serving_ml")
+    assert ok is False
+
+
+def test_preflight_de_serving_nao_depende_de_shopee_nem_de_pg_local():
+    for s in SERVING_SOURCES:
+        checks = preflight.SOURCE_CHECKS[s]
+        assert preflight.check_local_pg not in checks
+        assert preflight.check_shopee_orders_files not in checks
+        assert preflight.check_shopee_stats_files not in checks
+        assert preflight.check_shopee_ads_files not in checks

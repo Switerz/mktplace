@@ -50,9 +50,11 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 
 # Timeout externo do run_with_lock.ps1 para a TaskKey full_daily. Tem que
 # ser MAIOR que a soma dos timeouts individuais dos steps de
-# pipelines.ops.orchestrate.PIPELINES["full_daily"] (3600s desde o Gate C1,
-# que removeu os steps Shopee diarios — ver PIPELINES["shopee_manual_refresh"],
-# um pipeline MANUAL separado, nunca agendado), com margem para overhead de
+# pipelines.ops.orchestrate.PIPELINES["full_daily"] (3600s no Gate C1, que
+# removeu os steps Shopee diarios — ver PIPELINES["shopee_manual_refresh"], um
+# pipeline MANUAL separado, nunca agendado; 6600s desde o Checkpoint O1 Task 2/2
+# (2026-08-17), que somou os tres steps de serving: 600+600+1800=3000s), com
+# margem para overhead de
 # spawn de processo Python + imports pandas/sqlalchemy + latencia de rede
 # VPN/Neon entre passos — senao o lock externo mataria o processo pai ANTES
 # que os timeouts internos por step tivessem chance de proteger as fontes
@@ -64,8 +66,11 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 # EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e' reaproveitado pela TaskKey
 # shopee_manual_refresh em scripts/run_task.ps1 (orcamento interno 3780s,
 # tambem cabe com folga) — essa TaskKey nao e' agendada aqui (ver
-# PROPOSED_SCHEDULE, abaixo), so' existe para uso manual do operador.
-EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de ~5400s (~150%) sobre 3600s
+# PROPOSED_SCHEDULE, abaixo), so' existe para uso manual do operador. O mesmo
+# vale para a TaskKey serving_refresh (orcamento interno 3000s, Checkpoint O1
+# Task 2/2): MANUAL, sem entrada em PROPOSED_SCHEDULE, e compartilhando o LOCK
+# do full_daily para que as duas nunca se sobreponham.
+EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de 2400s (~36%) sobre 6600s
 
 # ExecutionTimeLimit do PROPRIO Task Scheduler (hard-limit independente do
 # -TimeoutSeconds do run_with_lock.ps1) precisa ficar ACIMA de
@@ -110,14 +115,20 @@ PROPOSED_SCHEDULE: tuple[ScheduledTask, ...] = (
             "ser ajustado com base em dado real, nao em uma suposicao herdada. "
             "Roda em processo unico via pipelines.ops.orchestrate.PIPELINES['full_daily']: "
             "ml/tiktok diarios, regional (Gold incremental + sync Neon "
-            "condicional), Produtos ML/TikTok, depois o health check (sempre, "
+            "condicional), Produtos ML/TikTok, os tres syncs de serving "
+            "(serving_ml, serving_tiktok_brand, serving_tiktok_creator — "
+            "Checkpoint O1 Task 2/2, 2026-08-17, cada um dependendo da ingestao "
+            "do SEU canal), depois o health check (sempre, "
             "por ultimo, garantido pela posicao dele em PIPELINES['full_daily'] "
             "+ always_run=True — nao ha segunda tarefa/segundo lock depois "
             "desta para rodar antes). Shopee (orders/stats/ads, produtos, "
             "Bug 8) NAO faz parte deste pipeline desde o Gate C1 (2026-07-16) "
             "— vive em PIPELINES['shopee_manual_refresh'], rodado so' "
             "manualmente pelo operador quando ha' export Shopee novo, NUNCA "
-            "agendado (sem entrada correspondente neste PROPOSED_SCHEDULE)."
+            "agendado (sem entrada correspondente neste PROPOSED_SCHEDULE). A "
+            "TaskKey serving_refresh tambem NAO e' agendada: e' contingencia "
+            "manual para recuperar so' o serving depois de um dia em que a VPN "
+            "bloqueou esta tarefa."
         ),
     ),
 )

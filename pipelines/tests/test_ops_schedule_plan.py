@@ -215,15 +215,16 @@ def test_xml_configura_execution_time_limit_maior_que_o_timeout_do_lock():
 
 def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
     """Trava os numeros em sincronia: 9000s (timeout do lock) tem que
-    ficar acima de 3600s (soma dos timeouts individuais dos steps de
-    pipelines.ops.orchestrate.PIPELINES['full_daily'] desde o Gate C1, que
-    removeu os 3 steps Shopee — ml=900+tiktok=900+regional=300+
-    sync_region=120+produtos_ml=600+produtos_tiktok=600+health_check=180),
-    com margem; e o ExecutionTimeLimit do Task Scheduler (9600s) tem que
-    ficar acima do timeout do lock, com margem adicional para a limpeza
-    pos-timeout (Stop-Process + espera + logs)."""
+    ficar acima de 6600s (soma dos timeouts individuais dos steps de
+    pipelines.ops.orchestrate.PIPELINES['full_daily'] — ml=900+tiktok=900+
+    regional=300+sync_region=120+produtos_ml=600+produtos_tiktok=600 do Gate C1,
+    mais serving_ml=600+serving_tiktok_brand=600+serving_tiktok_creator=1800 do
+    Checkpoint O1 Task 2/2, mais health_check=180), com margem; e o
+    ExecutionTimeLimit do Task Scheduler (9600s) tem que ficar acima do timeout
+    do lock, com margem adicional para a limpeza pos-timeout (Stop-Process +
+    espera + logs)."""
     import pipelines.ops.orchestrate as orch
-    internal_budget_seconds = 3600
+    internal_budget_seconds = 6600
     assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == internal_budget_seconds, (
         "orcamento hardcoded neste teste saiu de sincronia com a soma real "
         "dos timeouts de PIPELINES['full_daily'] — atualize os dois numeros juntos"
@@ -326,3 +327,155 @@ def test_nenhuma_chamada_de_execucao_de_processo_no_modulo():
 def test_nunca_referencia_datamart_database_url():
     source = MODULE_PATH.read_text(encoding="utf-8")
     assert "DATAMART_DATABASE_URL" not in source
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint O1 Task 2/2 (2026-08-17) — TaskKey manual serving_refresh
+# ---------------------------------------------------------------------------
+
+RUN_TASK_PS1 = Path(sp.__file__).resolve().parents[2] / "scripts" / "run_task.ps1"
+
+
+def _task_definitions_via_powershell():
+    """Le o mapeamento REAL de TaskKeys usando o proprio PowerShell: dot-source
+    de run_task.ps1 (que so' carrega funcoes, nao executa nada) e serializa
+    Get-TaskDefinitions como JSON. E' comportamental — exercita o mesmo codigo
+    que roda quando o Task Scheduler dispara, em vez de casar texto com regex.
+    """
+    import json
+    import subprocess
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f". '{RUN_TASK_PS1}'; "
+        "Get-TaskDefinitions | ConvertTo-Json -Depth 5 -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_22_taskkey_serving_refresh_existe_e_roda_o_pipeline_certo():
+    defs = _task_definitions_via_powershell()
+    assert "serving_refresh" in defs
+    cfg = defs["serving_refresh"]
+    assert cfg["Module"] == "pipelines.ops.orchestrate"
+    assert list(cfg["ModuleArgs"]) == ["--pipeline", "serving_refresh"]
+
+
+def test_22_as_taskkeys_sao_exatamente_tres():
+    defs = _task_definitions_via_powershell()
+    assert set(defs) == {"full_daily", "shopee_manual_refresh", "serving_refresh"}
+
+
+def test_23_serving_refresh_usa_o_lock_do_full_daily():
+    """Compartilhar o lock e' o que torna a sobreposicao IMPOSSIVEL por
+    construcao: se o full_daily agendado estiver rodando, esta TaskKey sai
+    BLOCKED em vez de disputar as mesmas fontes e o mesmo destino."""
+    defs = _task_definitions_via_powershell()
+    assert defs["serving_refresh"]["Lock"] == "full_daily"
+    assert defs["serving_refresh"]["Lock"] == defs["full_daily"]["Lock"]
+
+
+def test_23_shopee_manual_refresh_mantem_lock_proprio():
+    """Contraste deliberado: Shopee mexe em fontes disjuntas e pode rodar em
+    paralelo; serving nao pode."""
+    defs = _task_definitions_via_powershell()
+    assert defs["shopee_manual_refresh"]["Lock"] == "shopee_manual_refresh"
+    assert defs["shopee_manual_refresh"]["Lock"] != defs["full_daily"]["Lock"]
+
+
+def test_23_serving_refresh_reusa_o_mesmo_timeout_externo():
+    defs = _task_definitions_via_powershell()
+    assert defs["serving_refresh"]["TimeoutSeconds"] == sp.EXTERNAL_LOCK_TIMEOUT_SECONDS
+    assert defs["serving_refresh"]["TimeoutSeconds"] == defs["full_daily"]["TimeoutSeconds"]
+
+
+def test_23_resolve_task_invocation_resolve_serving_refresh():
+    """O resolvedor real (mesma funcao que o Task Scheduler exercita) devolve o
+    lock e o comando corretos para a TaskKey nova."""
+    import json
+    import subprocess
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f". '{RUN_TASK_PS1}'; "
+        "Resolve-TaskInvocation -TaskKey serving_refresh -RepoRoot 'C:\\repo' "
+        "-PythonExe 'python.exe' -LockScript 'lock.ps1' | ConvertTo-Json -Depth 5 -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    inv = json.loads(result.stdout)
+    assert inv["LockName"] == "full_daily"
+    assert list(inv["ModuleArgs"]) == ["-m", "pipelines.ops.orchestrate",
+                                       "--pipeline", "serving_refresh"]
+
+
+def test_24_serving_refresh_nao_esta_na_agenda_proposta():
+    """Contingencia MANUAL: nenhuma tarefa do Windows para ela."""
+    chaves = {t.task_key for t in sp.PROPOSED_SCHEDULE}
+    assert "serving_refresh" not in chaves
+    assert chaves == {"full_daily"}
+
+
+def test_24_continua_havendo_exatamente_uma_tarefa_agendada():
+    assert len(sp.PROPOSED_SCHEDULE) == 1
+    assert sp.PROPOSED_SCHEDULE[0].task_name == "mktplace_full_daily"
+
+
+def test_24_nenhum_comando_renderizado_menciona_serving_refresh():
+    for task in sp.PROPOSED_SCHEDULE:
+        rendered = sp.render_schtasks_command(task)
+        assert "serving_refresh" not in rendered
+        assert "-TaskKey full_daily" in rendered
+
+
+def _ps1_sem_comentarios(path: Path) -> str:
+    """Codigo PowerShell sem comentarios.
+
+    Necessario pelo mesmo motivo de `test_modulo_nunca_importa_capacidade_de_execucao`
+    acima: run_task.ps1 DOCUMENTA por que existe — "um comando /tr do schtasks
+    com varios niveis de aspas e' fragil" — e um grep no texto bruto casaria com
+    essa explicacao, nao com uma chamada real. Sem AST para PowerShell, remover
+    comentario de linha e bloco `<# #>` e' a aproximacao honesta.
+    """
+    import re as _re
+    texto = path.read_text(encoding="utf-8")
+    texto = _re.sub(r"<#.*?#>", " ", texto, flags=_re.S)
+    linhas = []
+    for linha in texto.splitlines():
+        sem = _re.sub(r"(?<!`)#.*$", "", linha)
+        linhas.append(sem)
+    return "\n".join(linhas)
+
+
+def test_24_run_task_ps1_nao_cria_nem_altera_tarefa():
+    """O wrapper resolve e delega; nunca registra, habilita ou dispara tarefa.
+
+    A TaskKey serving_refresh e' contingencia MANUAL: existir no mapeamento nao
+    cria agendamento algum.
+    """
+    baixo = _ps1_sem_comentarios(RUN_TASK_PS1).lower()
+    assert "serving_refresh" in baixo, "a TaskKey deveria estar no codigo, nao so' no comentario"
+    for termo in ("schtasks", "register-scheduledtask", "new-scheduledtask",
+                  "set-scheduledtask", "enable-scheduledtask",
+                  "start-scheduledtask", "unregister-scheduledtask"):
+        assert termo not in baixo, termo
+
+
+def test_24_run_task_ps1_nao_menciona_airflow():
+    assert "airflow" not in RUN_TASK_PS1.read_text(encoding="utf-8").lower()
+
+
+def test_orcamento_do_serving_refresh_cabe_no_timeout_externo():
+    import pipelines.ops.orchestrate as orch
+    assert orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3000
+    assert orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS < sp.EXTERNAL_LOCK_TIMEOUT_SECONDS
+    margem = sp.EXTERNAL_LOCK_TIMEOUT_SECONDS - orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS
+    assert margem > 0.15 * orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS
