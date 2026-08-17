@@ -1716,3 +1716,132 @@ ausente nao foi fabricada.
 Politica vigente inalterada: D-1 no fuso do Brasil + lookback incremental de 90
 dias, piso de 7, reprocessamento pontual por `--date-from/--date-to`. **Airflow
 continua inexistente e nao comprovado**; nenhuma DAG criada nesta operacao.
+
+## 35. Gate S2 — FECHADO: `PASS COM RESTRICAO` (17/08/2026)
+
+`/operacoes` esta em producao lendo o Neon. O Gate S2 encerra aqui.
+
+**Tres coisas distintas aconteceram, e confundi-las produz relatorio falso:**
+
+1. **Codigo versionado** — a troca das cinco consultas de `gold.*` para `marts.*`, com
+   teto D-1 em `America/Sao_Paulo`, foi versionada em `861648a` e esta contida em
+   `41eb1719a2730f545aaebd038c616bf0d0746ff7` (os commits posteriores tocaram apenas
+   `docs/` e `pipelines/`; a arvore de `apps/api` e' byte-identica nos dois).
+2. **Dados publicados no Neon** — as tres fatos de serving foram carregadas e
+   reconciliadas por execucoes manuais dos CLIs versionados.
+3. **Deploy do backend** — executado **manualmente pelo proprietario no painel do
+   Render**, nao pelo agente. Esta sessao nunca teve acesso executavel ao Render:
+   sem CLI, sem token, sem variavel de ambiente.
+
+### 35.1 O que mudou em producao
+
+| Endpoint | Antes do deploy | Depois |
+| --- | --- | --- |
+| `/api/v1/performance/operacoes` | **500** em ~10,4 s | **200** em **0,50 s** e **0,44 s** |
+| `/health` | 200 | 200 |
+| `/api/v1/performance/health-datasource` | 200 | 200, `active_source=neon_marts`, `db_connected=true` |
+
+A queda de ~10,4 s para 0,44 s e' a evidencia direta de que o endpoint **deixou de
+esperar o Data Mart**: os 10 s eram o timeout da tentativa de conexao a um host que o
+Render nao alcanca.
+
+Payload **deterministico** nas duas leituras (11.037 bytes, byte-identico) e **identico
+ao snapshot reconciliado no Neon** — nove agregados conferidos, zero divergencia. Cinco
+blocos: `alertas=0`, `ml_velocity=4`, `creators=30`, `lives=5`, `tk_daily=70`. Campos,
+tipos, nulls e as tres ordenacoes preservados. **Zero dado de 17/08** no payload.
+
+Endpoints previamente saudaveis sem regressao: `overview`, `daily`, `trend`, `canais` e
+`quality`, todos 200.
+
+### 35.2 A restricao: cobertura das fontes
+
+| Fato de serving | Cobertura |
+| --- | --- |
+| `marts.fact_ml_gestao_diaria` | ate **16/08** |
+| `marts.fact_tiktok_brand_content_daily` | ate **16/08** |
+| `marts.fact_tiktok_creator_daily` | ate **15/08** |
+
+A `creator_daily` para em 15/08 porque **a fonte Gold para em 15/08**. O dia 16/08 e'
+**ausencia da fonte, nunca zero fabricado**: nao existe linha, e o bloco `creators`
+agrega seis dias reais (10/08..15/08) em vez de sete. A consequencia a comunicar a quem
+le o painel e' que esse bloco cobre um dia menos que `ml_velocity` e `tk_daily` — e' a
+verdade da fonte, mas e' assimetria invisivel na tela.
+
+### 35.3 O delta pos-snapshot do ML
+
+Depois de a sincronizacao terminar, a Gold **reafirmou uma chave** do ML em **14/08**:
+
+| | Marts (publicado) | Gold (posterior) | Delta |
+| --- | --- | --- | --- |
+| `gmv` | R$ 27.805,78 | R$ 27.750,78 | **−R$ 55,00** |
+| `paid_orders` | 286 | 285 | **−1** |
+
+Impacto na janela de sete dias: **0,0060%** do GMV e **0,0085%** dos pedidos.
+
+Classificacao: **alteracao legitima da fonte, posterior ao snapshot reconciliado**. A
+fotografia publicada permanece consistente com o snapshot produzido as 13:28:44 UTC, e o
+delta **sera absorvido pelo proximo incremental**.
+
+**Isto nao estabelece tolerancia permanente**, nao cria regra de qualidade nova e nao
+autoriza ignorar outras divergencias. Foi aceitacao explicita e pontual, para este
+release, verificada como sendo exatamente essa chave e essas duas colunas — nenhuma
+outra data, nenhuma outra coluna, e zero divergencia nas tres superficies TikTok.
+
+### 35.4 A igualdade e' relativa ao snapshot, nao absoluta
+
+O criterio deste release foi deliberadamente reformulado, e a razao e' estrutural: **a
+Gold e' fonte viva**. Ela reafirma dias ja fechados por cancelamento, devolucao ou ajuste
+retroativo, e continua mudando depois da carga. Exigir igualdade absoluta com uma fonte
+que se move torna qualquer release impossivel por construcao — sempre havera uma chave
+nova divergindo entre a carga e a verificacao.
+
+O criterio que substitui a igualdade absoluta:
+
+1. destino reconciliado integralmente **com o snapshot usado pela execucao**;
+2. zero corrupcao, duplicidade, nulo obrigatorio ou NaN;
+3. divergencias posteriores ao snapshot **identificadas e declaradas**;
+4. nenhuma divergencia nova alem da unica chave autorizada;
+5. codigo comprovadamente independente do Data Mart.
+
+### 35.5 O que NAO foi resolvido
+
+**O Gate G4 nao foi fechado.** Apenas **uma** das quatro superficies saiu do 500:
+
+| Rota | Estado |
+| --- | --- |
+| `/operacoes` | **200 pelo Neon** |
+| `/inteligencia` | **500** em ~10,8 s |
+| `/tempo-real` | **500** em ~10,8 s |
+| `/brand-detail` | **500** em ~10,8 s |
+
+As tres continuam dependentes do Data Mart e sao escopo do **Gate S3, ainda nao
+iniciado**. Nao afirmar que o sistema esta independente do Data Mart: o que se tornou
+independente foi `/operacoes`.
+
+**Smoke visual nao executado.** Chrome esta instalado, mas sem driver de automacao
+(`playwright` e `selenium` ausentes) e nenhuma dependencia foi instalada. A pagina HTTP
+`/operacoes` no dominio canonico respondeu 200 em 1,11 s sem mensagem de falha no HTML
+servido, mas o Next.js renderiza no cliente: isso **nao substitui QA visual** e nao prova
+que os cinco blocos apareceram na tela.
+
+**Airflow continua inexistente e nao comprovado.** Nenhuma DAG, connection, secret ou
+pool. §24 permanece a referencia.
+
+### 35.6 Dividas e pendencias, em ordem
+
+1. **Os syncs de serving nao estao no `full_daily` nem em Airflow.**
+   `sync_ml_gestao_diaria` e `sync_tiktok_serving` nao aparecem no orquestrador — seus
+   steps sao `daily_ml`, `daily_tiktok`, `gold_regional_incremental`,
+   `sync_region_if_needed`, `sync_produtos_ml/tiktok` e `health_check`. Portanto o
+   serving **de producao** volta a ficar defasado sem execucao manual. Antes do deploy
+   isso era problema de laboratorio; agora e' do usuario.
+2. **O `full_daily` de 17/08 terminou com `LastTaskResult=1`** — causa ainda nao
+   investigada.
+3. **Gate S3 (futuro, nao iniciado):** migrar `/inteligencia`, `/tempo-real` e
+   `/brand-detail`, removendo a dependencia operacional dessas rotas do Data Mart.
+4. **Representacao de `total_gmv` quando Shopee esta `NULL`** — o total pode parecer
+   completo tratando canal indisponivel como zero ou omissao. Problema de verdade, alheio
+   a `/operacoes`.
+5. **Publicar shop-stats Shopee valido de 16/08** quando disponivel.
+6. **Smoke visual de `/operacoes`** pendente.
+7. **Airflow** ainda nao existe, nao esta configurado e nunca foi executado neste projeto.

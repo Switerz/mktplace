@@ -1,6 +1,6 @@
 # Status geral — Torre de Controle de Marketplaces
 
-**Última atualização:** 17/08/2026 (ver **Checkpoint 17/08/2026** logo abaixo do resumo executivo). Contexto anterior — 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 3/3: `SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`** — as três fatos de serving recarregadas até D-1 (12/08/2026) e reconciliadas, `/operacoes` com payload idêntico ao da Gold e provado sem Data Mart. **Ainda não versionado nem publicado.** Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
+**Última atualização:** 17/08/2026 — **Gate S2 FECHADO: `PASS COM RESTRIÇÃO`. `/operacoes` está em produção lendo o Neon** (revisão `41eb171`, publicada manualmente no Render pelo proprietário): HTTP 200 em ~0,45 s, contra 500 em ~10,4 s antes. Serving cobre ML e TikTok brand até 16/08 e TikTok creator até 15/08 — 16/08 do creator é **ausência da fonte, nunca zero fabricado**. **O Gate G4 NÃO foi fechado:** `/inteligência`, `/tempo-real` e `/brand-detail` seguem 500 por dependência do Data Mart e são escopo do **Gate S3, não iniciado**. **Airflow continua inexistente e não comprovado**, e os syncs de serving **não estão no `full_daily`** — sem execução manual o serving volta a defasar. (ver **Checkpoint 17/08/2026** logo abaixo do resumo executivo). Contexto anterior — 11/08/2026 (**Frente ativa: camada de serving Data Mart → Neon — Gate S1 encerrado como `PARTIAL — PILOTO VALIDADO`**: migration `006` aplicada e `marts.fact_ml_gestao_diaria` criada, carregada e reconciliada; **execução dentro de worker Airflow ainda não comprovada** — é a razão do `PARTIAL`; **Gate S2 Task 3/3: `SUCCESS — BACKFILL COMPLETO E /OPERACOES PRONTO PARA VERSIONAMENTO`** — as três fatos de serving recarregadas até D-1 (12/08/2026) e reconciliadas, `/operacoes` com payload idêntico ao da Gold e provado sem Data Mart. **Ainda não versionado nem publicado.** Sanitização de erro endurecida nos dois módulos de serving: topologia não vaza mais em log. As **quatro** superfícies do G4 respondem 500 em produção — a medição de 10/08 que indicava três estava errada por janela de espera curta. **Revamp Visual V2 encerrado: `PUBLICADO — PASS WITH ISSUE`.** Fechamento publicado no commit `04d0d17` e validado por smoke read-only em 10/08/2026: 11 rotas em HTTP 200, sticky da Gerencial em `top=0px` nos três viewports, zero overflow, ticks semanais legíveis, comparação e diálogo aprovados, **zero regressão causada pelo release**. Restrição operacional aberta: as **quatro** superfícies do G4 (`/brand-detail`, `/tempo-real`, `/inteligencia`, `/operacoes`) sem fonte em produção — dependem do Data Mart, inalcançável do Render. Frente do Revamp **encerrada**; V2-0 a V2-4 em `c110e85`, `13c7ee0`, `e8f0630`, `2336567` e `04d0d17`.)
 **Objetivo deste documento:** apresentar, em um único lugar, o estado das grandes frentes do projeto. Os detalhes técnicos, comandos e evidências continuam nos documentos específicos indicados em cada seção.
 
 ## Resumo executivo
@@ -1632,15 +1632,60 @@ exatamente 7/14/30 dias fechados.
 segue como politica do futuro Airflow. **Frete no GMV TikTok permanece frente separada.**
 Detalhe em [SERVING_AIRFLOW_PLAN.md §32](SERVING_AIRFLOW_PLAN.md).
 
+### Gate S2 — FECHADO: `PASS COM RESTRICAO` (17/08/2026)
+
+**`/operacoes` esta em producao lendo o Neon.** A revisao
+`41eb1719a2730f545aaebd038c616bf0d0746ff7` foi publicada **manualmente pelo proprietario
+no painel do Render** — nao pelo agente, que nunca teve acesso executavel ao servico.
+
+O endpoint passou de **500 em ~10,4 s** para **200 em 0,50 s e 0,44 s**; a queda de
+latencia e' a evidencia de que deixou de esperar o Data Mart. `health-datasource` reporta
+`active_source=neon_marts` com `db_connected=true`. Payload deterministico nas duas
+leituras e **identico ao snapshot reconciliado no Neon** (nove agregados, zero
+divergencia): `alertas=0`, `ml_velocity=4`, `creators=30`, `lives=5`, `tk_daily=70`, com
+**zero dado de 17/08**. Sem regressao em `overview`, `daily`, `trend`, `canais` e
+`quality`, todos 200.
+
+**Restricao:** o serving cobre ML e TikTok brand ate **16/08** e TikTok creator ate
+**15/08**, porque a fonte Gold do creator para em 15/08. O dia 16/08 e' **ausencia da
+fonte, nunca zero fabricado** — o bloco `creators` agrega seis dias reais em vez de sete.
+
+**Delta pos-snapshot registrado:** apos a sincronizacao, a Gold reafirmou uma chave do ML
+em 14/08 — GMV R$ 27.805,78 (Marts) contra R$ 27.750,78 (Gold) e 286 contra 285 pedidos,
+delta de R$ 55,00 e 1 pedido, ou 0,0060% do GMV e 0,0085% dos pedidos na janela de sete
+dias. Classificado como **alteracao legitima posterior ao snapshot** e sera absorvido pelo
+proximo incremental. **Nao estabelece tolerancia permanente.** A igualdade verificada e'
+relativa ao snapshot da execucao, porque a Gold e' fonte viva.
+
+**O Gate G4 nao foi fechado:** apenas uma das quatro superficies saiu do 500.
+`/inteligencia`, `/tempo-real` e `/brand-detail` seguem em **500 (~10,8 s)** por
+dependencia conhecida do Data Mart, e sao escopo do **Gate S3, ainda nao iniciado**. O que
+se tornou independente do Data Mart foi `/operacoes`, nao o sistema.
+
+**Smoke visual nao executado** — sem driver de navegador, e nenhuma dependencia foi
+instalada. A pagina HTTP respondeu 200, o que **nao substitui** QA visual. **Airflow
+continua inexistente e nao comprovado.**
+
+Registro completo em [SERVING_AIRFLOW_PLAN.md §35](SERVING_AIRFLOW_PLAN.md).
+
 ## Próximas prioridades
 
-1. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 executado como `PARTIAL — PILOTO VALIDADO`; S2 com Tasks 1/3 e 2/3 concluídas e Task 3/3 `BLOCKED` por deriva de valor.**
-2. Integrar essa materialização ao **Airflow da organização** — que **existe** segundo o proprietário, mas **não foi localizado nem está visível** com as credenciais desta sessão, e cuja plataforma, URL, hospedagem e rede ainda não foram informadas; **nenhuma DAG foi inspecionada, configurada ou executada** —, eliminando a dependência síncrona Render → Data Mart/VPN.
-3. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
-4. Manter a decisão do **GMV TikTok com frete** como frente separada.
-5. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
-6. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
-7. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.
+1. **Diagnostico read-only do `full_daily`**, que terminou 17/08 com `LastTaskResult=1`.
+   Causa nao investigada; e' a primeira prioridade operacional porque a automacao diaria
+   e' a base de tudo o mais.
+2. **Desenhar a atualizacao recorrente do serving.** `sync_ml_gestao_diaria` e
+   `sync_tiktok_serving` **nao estao** no `full_daily` nem em Airflow, entao o serving de
+   producao volta a ficar defasado sem execucao manual — e agora isso afeta o usuario, nao
+   so o laboratorio.
+3. **Somente depois: Gate S3** — migrar `/inteligencia`, `/tempo-real` e `/brand-detail`
+   para o Neon, removendo a dependencia operacional dessas rotas do Data Mart.
+4. **Obter nome/URL e o modelo de hospedagem do Airflow** (auto-hospedado ou gerenciado) e o acesso de leitura ao repositório — é a próxima ação do Gate S0. Depois disso, **provar de dentro do worker real** o acesso ao Data Mart e ao Neon. O **piloto técnico** do módulo de sync pode avançar antes disso, de máquina com VPN, mas **não** prova o Airflow. **S1 executado como `PARTIAL — PILOTO VALIDADO`; S2 FECHADO como `PASS COM RESTRIÇÃO` — ver a seção de fechamento acima.**
+5. Integrar essa materialização ao **Airflow da organização** — que **existe** segundo o proprietário, mas **não foi localizado nem está visível** com as credenciais desta sessão, e cuja plataforma, URL, hospedagem e rede ainda não foram informadas; **nenhuma DAG foi inspecionada, configurada ou executada** —, eliminando a dependência síncrona Render → Data Mart/VPN.
+6. Depois disso, tratar as dívidas menores de acessibilidade dos filtros (nome acessível e tamanho de alvo).
+7. Manter a decisão do **GMV TikTok com frete** como frente separada.
+8. Observar as próximas execuções diárias do `full_daily` agendado antes de considerar o horário 06:00 definitivamente estável.
+9. Transferir a rotina manual Shopee e iniciar a configuração administrativa da API oficial.
+10. Fazer discovery do Octaprice em paralelo, sem iniciar implementação prematura.
 
 ## Fora do foco atual
 
