@@ -407,6 +407,8 @@ def test_full_daily_contem_exatamente_as_fontes_recorrentes_na_ordem_correta():
         "serving_ml",
         "serving_tiktok_brand",
         "serving_tiktok_creator",
+        "serving_ml_cross_company",
+        "serving_tiktok_channel_efficiency",
         "health_check",
     ]
 
@@ -962,7 +964,7 @@ def test_27_orcamento_interno_dos_tres_pipelines_cabe_no_timeout_externo():
 
 
 def test_27_orcamento_do_full_daily_e_a_soma_real_incluindo_serving():
-    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 6600
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7500
     assert orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3000
 
 

@@ -72,6 +72,8 @@ def _tiktok_row(**overrides):
         "pct_gmv_video": None, "pct_gmv_live": None, "pct_gmv_card": None,
         "canceled": 0, "refunded": 0, "returned": 0, "problem_rate": None,
         "rating_avg": None, "total_ratings": None,
+        # Gate S3: as duas colunas de conteudo que o sync passou a transportar.
+        "active_videos": None, "video_views": None,
     }
     row.update(overrides)
     return row

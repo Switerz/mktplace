@@ -144,6 +144,21 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     # pipeline inteiro todo dia por causa desse MESMO gap ja aceito,
     # mesmo com ML/TikTok/regional saudaveis (achado do Gate B3).
     ExpectedSource("shopee_product_monthly", "daily", 48, critical=False),
+    # Gate S3 (2026-08-18): os dois snapshots de serving que `/inteligencia` e
+    # `/brand-detail` passaram a consumir. CRITICOS e com o mesmo contrato de 30h
+    # das outras fontes diarias criticas, porque:
+    #   - os dois steps correspondentes (`serving_ml_cross_company` e
+    #     `serving_tiktok_channel_efficiency`) rodam TODO dia dentro de
+    #     `full_daily` e sao `critical=True` no orchestrate;
+    #   - sem estas entradas, o sync poderia falhar ou nem executar por dias e o
+    #     health check ainda reportaria `ok_critical=true`, deixando as duas telas
+    #     defasadas em silencio. Foi exatamente essa a lacuna apontada na revisao
+    #     da Task 2/3.
+    # O nome e' o MESMO `name` do target em sync_serving_snapshots.SPECS — um
+    # teste trava essa igualdade para que CLI, audit log e health check nunca
+    # divirjam.
+    ExpectedSource("ml_cross_company", "daily", 30),
+    ExpectedSource("tiktok_channel_efficiency", "daily", 30),
 )
 
 @dataclass
@@ -349,6 +364,35 @@ def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessR
 
     cur.execute("SELECT MAX(refreshed_at) AS m FROM marts.fact_ml_produto_ranking")
     results.append(_evaluate_date_freshness("fact_ml_produto_ranking", "daily", cur.fetchone()["m"], today, DAILY_DATA_FRESHNESS_THRESHOLD_DAYS))
+
+    # Gate S3 (2026-08-18) — as duas fatos novas.
+    #
+    # A EXECUCAO (audit.source_sync_run, acima) e a COBERTURA DO DADO (aqui) sao
+    # sinais DIFERENTES e os dois precisam existir: um sync pode executar com
+    # sucesso todo dia e ainda assim servir dado que parou de avancar, porque a
+    # fonte upstream parou. Um sinal so' nao detecta o outro caso.
+    #
+    # `fact_ml_cross_company_summary` NAO tem data de negocio: a fonte
+    # (gold.ml_cross_company_summary) e' snapshot sem dimensao temporal. Usar
+    # `MAX(synced_at)` — o campo de auditoria da propria fotografia — e' o mesmo
+    # padrao ja adotado para `fact_ml_produto_ranking` (MAX(refreshed_at)) logo
+    # acima, e evita fabricar uma data de negocio que a fonte nao tem.
+    #
+    # Tabela vazia ou `MAX(...)` NULL cai no primeiro ramo de
+    # `_evaluate_date_freshness`, que ja devolve stale=True com "tabela sem
+    # nenhuma linha" — ausencia nunca e' convertida em zero nem em "fresco".
+    cur.execute("SELECT MAX(synced_at) AS m FROM marts.fact_ml_cross_company_summary")
+    results.append(_evaluate_date_freshness(
+        "fact_ml_cross_company_summary[synced_at]", "daily", cur.fetchone()["m"],
+        today, DAILY_DATA_FRESHNESS_THRESHOLD_DAYS))
+
+    # `fact_tiktok_channel_efficiency_daily` TEM data de negocio diaria. O teto
+    # normal e' D-1 (o serving nunca publica D0), entao um dia de defasagem e'
+    # esperado e cabe folgado no limite de 3 dias.
+    cur.execute("SELECT MAX(date) AS m FROM marts.fact_tiktok_channel_efficiency_daily")
+    results.append(_evaluate_date_freshness(
+        "fact_tiktok_channel_efficiency_daily", "daily", cur.fetchone()["m"],
+        today, DAILY_DATA_FRESHNESS_THRESHOLD_DAYS))
 
     # Cadencia manual_monthly (Shopee Produtos) — ja nunca vira stale por si
     # so' (threshold_days=None), mas marcada nao-critica tambem para deixar

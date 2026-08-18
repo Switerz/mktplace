@@ -284,6 +284,102 @@ def check_serving_tables() -> CheckResult:
     )
 
 
+#: Tabelas de serving criadas pelo Gate S3 (migrations 009 e 010). Separadas das
+#: do S2 porque as duas fontes sao SNAPSHOT sem janela e tem sync proprio
+#: (pipelines/sync_serving_snapshots.py), nao o wrapper do O1.
+_SERVING_S3_TARGET_TABLES = (
+    "marts.fact_ml_cross_company_summary",
+    "marts.fact_tiktok_channel_efficiency_daily",
+)
+
+
+def check_serving_s3_tables() -> CheckResult:
+    """Confirma que as migrations 009/010 foram aplicadas, ANTES de disparar um
+    snapshot que falharia no meio.
+
+    Mesmo desenho de `check_serving_tables`: `to_regclass`, uma consulta so', sem
+    ler linha nenhuma, e a revisao corrente do Alembic apenas no detalhe — nunca
+    como critério. Travar no literal '011' bloquearia todo o serving no dia em que
+    uma migration 012 de outro assunto entrasse; a pre-condicao real do sync e' a
+    tabela existir.
+    """
+    label = "Serving S3 (migrations 009/010)"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            faltando = []
+            for tabela in _SERVING_S3_TARGET_TABLES:
+                cur.execute("SELECT to_regclass(%s)", (tabela,))
+                if cur.fetchone()[0] is None:
+                    faltando.append(tabela)
+            revisao = "?"
+            try:
+                cur.execute("SELECT version_num FROM alembic_version")
+                linha = cur.fetchone()
+                if linha:
+                    revisao = str(linha[0])
+            except Exception:
+                revisao = "indisponivel"
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — {type(e).__name__}")
+
+    if faltando:
+        nomes = ", ".join(t.split(".")[-1] for t in faltando)
+        return CheckResult(
+            label, False,
+            f"{label}: {len(faltando)} tabela(s) ausente(s) ({nomes}) — migration nao "
+            f"aplicada; revisao corrente do Alembic: {revisao}",
+        )
+    return CheckResult(label, True,
+                       f"{label}: as 2 tabelas existem (revisao corrente do Alembic: {revisao})")
+
+
+def check_tiktok_product_content_columns() -> CheckResult:
+    """Confirma que a migration 011 adicionou `active_videos` e `video_views` a
+    `marts.fact_tiktok_product_daily`.
+
+    Sem elas o sync TikTok falharia no INSERT, e `/brand-detail` nao poderia
+    montar `top_produtos` pelo Neon. Le somente `information_schema`.
+    """
+    label = "Produto TikTok (migration 011)"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                 WHERE table_schema = 'marts' AND table_name = 'fact_tiktok_product_daily'
+                   AND column_name IN ('active_videos', 'video_views')
+            """)
+            presentes = {r[0] for r in cur.fetchall()}
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — {type(e).__name__}")
+
+    faltando = {"active_videos", "video_views"} - presentes
+    if faltando:
+        return CheckResult(label, False,
+                           f"{label}: coluna(s) ausente(s) ({', '.join(sorted(faltando))}) — "
+                           f"migration 011 nao aplicada")
+    return CheckResult(label, True, f"{label}: as 2 colunas existem")
+
+
 # Fontes suportadas e suas dependencias. produtos_shopee depende do
 # PostgreSQL local (populado manualmente por apps/api/etl/load_shopee_products.py
 # a partir dos XLSX — esse passo NAO faz parte desta automacao, ver runbook),
@@ -311,6 +407,15 @@ SOURCE_CHECKS = {
     "serving_ml": (check_rds, check_neon, check_serving_tables),
     "serving_tiktok_brand": (check_rds, check_neon, check_serving_tables),
     "serving_tiktok_creator": (check_rds, check_neon, check_serving_tables),
+    # Gate S3 (2026-08-18): os dois snapshots sem janela. Data Mart (fonte) e Neon
+    # (destino) obrigatorios, mais a existencia das tabelas que as migrations
+    # 009/010 criam. Uma fonte por target, mesmo com checks parcialmente iguais:
+    # e' o que permite um passar enquanto o outro bloqueia.
+    "serving_ml_cross_company": (check_rds, check_neon, check_serving_s3_tables),
+    "serving_tiktok_channel_efficiency": (check_rds, check_neon, check_serving_s3_tables),
+    # `sync_produtos_tiktok` passa a escrever as duas colunas da migration 011;
+    # sem elas o INSERT falharia no meio da carga.
+    "produtos_tiktok_s3": (check_rds, check_neon, check_tiktok_product_content_columns),
 }
 
 

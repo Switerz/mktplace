@@ -165,15 +165,29 @@ def test_gold_service_intocado_e_sem_retry_ou_fallback():
     from pathlib import Path
 
     gold = Path(importlib.import_module("app.services.gold_service").__file__).read_text(encoding="utf-8")
-    # o roteamento por prefixo e as 5 fontes continuam exatamente como antes
+    # O roteamento por prefixo continua exatamente como antes: e' ele que manda
+    # qualquer SQL com gold./raw. para o datamart_engine.
     assert 'return any(token in lowered for token in (" gold.", "from gold."' in gold
+
+    # Fontes Gold que PERMANECEM. O Gate S3 migrou `/inteligencia` e
+    # `/brand-detail` para `marts.*`, mas estas quatro continuam sendo lidas da
+    # Gold por OUTRAS funcoes do arquivo (`get_overview`, `get_canais`,
+    # `get_tempo_real`, `get_produtos_tiktok`...), que nao foram tocadas.
     for src in (
         "FROM gold.tiktok_brand_daily",
-        "FROM gold.tiktok_creator_daily",
         "FROM gold.tiktok_product_daily",
         "FROM gold.v_channel_efficiency",
+        "FROM gold.tiktok_shop_hourly",
     ):
         assert src in gold, f"fonte {src} nao pode ter mudado"
+
+    # Fontes que o Gate S3 removeu do arquivo por completo, porque as duas rotas
+    # migradas eram as UNICAS consumidoras. Se voltarem a aparecer, alguem
+    # reintroduziu dependencia de Data Mart numa rota ja migrada.
+    for migrada in ("FROM gold.tiktok_creator_daily", "FROM gold.ml_cross_company_summary"):
+        assert migrada not in gold, (
+            f"{migrada} voltou ao gold_service: as rotas que a consumiam foram "
+            "migradas para marts.* no Gate S3")
     database_src = Path(importlib.import_module("app.database").__file__).read_text(encoding="utf-8")
 
     def code_only(src: str) -> str:

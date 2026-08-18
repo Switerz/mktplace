@@ -22,10 +22,12 @@ Regras de seguranca:
     - brands fora do escopo sao filtrados na leitura
 """
 import argparse
+import hashlib
 import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import psycopg2
@@ -312,8 +314,216 @@ def _read_rds_with_recovery_retry(read_fn, *, max_attempts=2, backoff_seconds=8)
 
 
 # ---------------------------------------------------------------------------
+# Snapshot ML — helpers puros da reconciliacao
+# ---------------------------------------------------------------------------
+# Deliberadamente locais e minusculos, em vez de importados de
+# pipelines/sync_serving_snapshots.py: aquele modulo tem allowlist LITERAL de
+# exatamente dois targets, e registrar um terceiro spec so' para reaproveitar
+# tres funcoes puras transformaria uma allowlist fechada em framework.
+
+#: Colunas de negocio do ranking ML, na ordem do INSERT. `refreshed_at` entra
+#: separado porque recebe o MESMO instante para todas as linhas do snapshot.
+ML_BUSINESS_COLUMNS = (
+    "brand", "item_id", "seller_sku", "title",
+    "gross_revenue", "units_sold", "unique_buyers", "units_per_buyer",
+    "cancel_rate_pct", "ad_spend", "ad_roas", "ad_acos_pct", "days_advertised",
+    "revenue_share_pct", "cumulative_revenue_pct", "estimated_margin",
+    "price_spread_pct", "pareto_bucket", "revenue_velocity",
+    "ad_efficiency", "action_signal", "product_status",
+    "first_sale", "last_sale",
+)
+
+ML_KEY_COLUMNS = ("brand", "item_id")
+
+#: Somaveis, para a reconciliacao por agregado.
+ML_ADDITIVE_COLUMNS = ("gross_revenue", "units_sold", "unique_buyers", "ad_spend")
+
+#: Advisory lock proprio do ranking ML. Fora da faixa das fatos do Gate S2
+#: (906120006/907120007/908120008) e das duas do S3 (909120009/910120010).
+ML_RANKING_ADVISORY_LOCK_KEY = 911_120_011
+
+#: Nome da staging temporaria. `pg_temp` + `ON COMMIT DROP`: some no commit e
+#: tambem no rollback.
+ML_STAGING_NAME = "stg_ml_produto_ranking"
+
+
+def _ml_key(row: dict) -> tuple:
+    return tuple(str(row[c]) for c in ML_KEY_COLUMNS)
+
+
+def _ml_canonico(valor) -> str:
+    """Serializacao canonica para o fingerprint. `Decimal` normalizado para que
+    1.10 e 1.1 nao gerem hashes diferentes; None recebe marcador improduzivel."""
+    if valor is None:
+        return "\x00"
+    if isinstance(valor, Decimal):
+        return format(valor.normalize(), "f")
+    return str(valor)
+
+
+def ml_fingerprint(rows: list) -> str:
+    """Hash determinístico da fotografia, calculado em PYTHON.
+
+    Nao em SQL de proposito: `MD5(STRING_AGG(... ORDER BY texto))` depende de
+    colacao, e as duas pontas deste projeto usam locales diferentes
+    (`en_US.UTF-8` no RDS, `C.UTF-8` no Neon) — o mesmo dado geraria hashes
+    distintos. Ordenar aqui elimina a classe do problema.
+    """
+    h = hashlib.md5()
+    for r in sorted(rows, key=_ml_key):
+        h.update("|".join(_ml_canonico(r.get(c)) for c in ML_BUSINESS_COLUMNS).encode("utf-8"))
+        h.update(b";")
+    return h.hexdigest()
+
+
+def ml_aggregates(rows: list) -> dict:
+    """Agregados em `Decimal`, nunca `float`: somar milhares de valores
+    monetarios em ponto flutuante ja divergiu neste projeto."""
+    out = {"count": len(rows), "keys": len({_ml_key(r) for r in rows})}
+    for c in ML_ADDITIVE_COLUMNS:
+        total = Decimal(0)
+        for r in rows:
+            v = r.get(c)
+            if v is not None:
+                total += Decimal(str(v))
+        out[f"sum_{c}"] = total
+    return out
+
+
+def ml_compare(esperado: dict, obtido: dict) -> list:
+    return [f"{k}: fotografia={v} destino={obtido.get(k)}"
+            for k, v in esperado.items() if obtido.get(k) != v]
+
+
+def ml_validate_snapshot(rows: list) -> list:
+    """Reprovacoes possiveis ANTES de qualquer escrita: chave unica, chave nula,
+    coluna ausente, tipo nao numerico em coluna somavel."""
+    problemas = []
+    vistas, dup = set(), 0
+    for r in rows:
+        k = _ml_key(r)
+        if k in vistas:
+            dup += 1
+        vistas.add(k)
+    if dup:
+        problemas.append(f"{dup} chave(s) (brand, item_id) duplicada(s) na fotografia")
+
+    faltando = [c for c in ML_BUSINESS_COLUMNS if rows and c not in rows[0]]
+    if faltando:
+        problemas.append(f"colunas ausentes na fonte: {faltando}")
+
+    nulos = sum(1 for r in rows if any(r.get(c) is None for c in ML_KEY_COLUMNS))
+    if nulos:
+        problemas.append(f"{nulos} linha(s) com chave nula")
+
+    for r in rows:
+        for c in ML_ADDITIVE_COLUMNS:
+            v = r.get(c)
+            if v is None:
+                continue
+            if isinstance(v, Decimal) and v.is_nan():
+                problemas.append(f"NaN em {c}")
+                break
+    return problemas
+
+
+def ml_publish_snapshot(dst, rows: list, now, staging_reader=None) -> dict:
+    """UMA transacao: advisory lock -> staging -> validacao -> DELETE integral ->
+    INSERT -> reconciliacao contra a FOTOGRAFIA -> commit.
+
+    O `DELETE` sem `WHERE` e' o ponto: e' o que faz chave desaparecida da fonte
+    desaparecer do destino. O upsert anterior nunca removia nada, e por isso o
+    "full refresh" declarado no docstring deste modulo era falso.
+
+    A reconciliacao compara o destino com `rows` — a fotografia capturada nesta
+    execucao — e NUNCA com uma releitura posterior da Gold, que e' mutavel e sem
+    dimensao temporal.
+    """
+    cols = ", ".join(ML_BUSINESS_COLUMNS)
+    staging = f"pg_temp.{ML_STAGING_NAME}"
+    resultado = {"deleted": 0, "published": 0, "checks": {}}
+    leitor = staging_reader or _ml_read_rows
+
+    try:
+        dc = dst.cursor(cursor_factory=RealDictCursor)
+        dc.execute("SELECT pg_advisory_xact_lock(%s)", (ML_RANKING_ADVISORY_LOCK_KEY,))
+        dc.execute(f"""
+            CREATE TEMP TABLE {ML_STAGING_NAME}
+                (LIKE marts.fact_ml_produto_ranking INCLUDING DEFAULTS)
+            ON COMMIT DROP
+        """)
+
+        if rows:
+            batch = [
+                tuple(r[c] for c in ML_BUSINESS_COLUMNS) + (now,)
+                for r in rows
+            ]
+            execute_values(
+                dc,
+                f"INSERT INTO {staging} ({cols}, refreshed_at) VALUES %s",
+                batch, page_size=500,
+            )
+
+        staging_rows = leitor(dc, staging)
+        problemas = ml_compare(ml_aggregates(rows), ml_aggregates(staging_rows))
+        if problemas:
+            raise RuntimeError("staging divergiu da fotografia: " + "; ".join(problemas))
+        if ml_fingerprint(staging_rows) != ml_fingerprint(rows):
+            raise RuntimeError("staging divergiu da fotografia no fingerprint")
+
+        dc.execute("DELETE FROM marts.fact_ml_produto_ranking")
+        resultado["deleted"] = dc.rowcount
+
+        dc.execute(f"""
+            INSERT INTO marts.fact_ml_produto_ranking ({cols}, refreshed_at)
+            SELECT {cols}, refreshed_at FROM {staging}
+        """)
+        resultado["published"] = dc.rowcount
+
+        destino_rows = leitor(dc, "marts.fact_ml_produto_ranking")
+        esperado = ml_aggregates(rows)
+        problemas = ml_compare(esperado, ml_aggregates(destino_rows))
+        if problemas:
+            raise RuntimeError("destino divergiu da fotografia: " + "; ".join(problemas))
+
+        so_foto = {_ml_key(r) for r in rows} - {_ml_key(r) for r in destino_rows}
+        so_dest = {_ml_key(r) for r in destino_rows} - {_ml_key(r) for r in rows}
+        if so_foto or so_dest:
+            raise RuntimeError(
+                f"EXCEPT bidirecional divergiu: fotografia-destino={len(so_foto)} "
+                f"destino-fotografia={len(so_dest)}")
+
+        fp = ml_fingerprint(rows)
+        if ml_fingerprint(destino_rows) != fp:
+            raise RuntimeError("fingerprint do destino difere do da fotografia")
+
+        resultado["checks"] = {
+            "aggregates": {k: str(v) for k, v in esperado.items()},
+            "except_both_ways": (len(so_foto), len(so_dest)),
+            "fingerprint": fp,
+        }
+        dc.close()
+        dst.commit()
+        return resultado
+    except Exception:
+        dst.rollback()
+        raise
+
+
+def _ml_read_rows(cur, relacao: str) -> list:
+    cur.execute(f"SELECT {', '.join(ML_BUSINESS_COLUMNS)} FROM {relacao}")
+    return [dict(r) for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
 # ML: RDS gold.ml_produto_ranking -> Neon
-# Estrategia: full refresh sempre (snapshot sem dimensao temporal, 1326 linhas)
+# Estrategia: SNAPSHOT TRANSACIONAL (Gate S3). A fonte nao tem dimensao
+#             temporal, entao a tabela e' substituida por INTEIRO dentro de
+#             uma transacao: staging pg_temp -> DELETE integral -> INSERT ->
+#             reconciliacao contra a fotografia capturada -> commit.
+#             Antes do Gate S3 o docstring dizia "full refresh" mas a escrita
+#             era apenas ON CONFLICT DO UPDATE, que nunca remove chave que
+#             desapareceu da fonte — o refresh era declarado, nao real.
 #             Deduplicar por (brand, item_id) mantendo maior gross_revenue.
 # ---------------------------------------------------------------------------
 def sync_ml(brands: set = None) -> dict:
@@ -361,73 +571,29 @@ def sync_ml(brands: set = None) -> dict:
                 f"(limite={MIN_ROWS_RATIO:.0%}). Carga abortada sem commit — investigar RDS antes de repetir."
             )
 
+        problemas = ml_validate_snapshot(rows)
+        if problemas:
+            raise RuntimeError(
+                "[ml] fotografia reprovada, nada foi escrito: " + "; ".join(problemas))
+
+        fp_foto = ml_fingerprint(rows)
+        print(f"[ml] fingerprint da fotografia: {fp_foto}")
+
         dst = _neon()
+        # `refreshed_at` UNICO para todas as linhas do mesmo snapshot: antes do
+        # Gate S3 o INSERT usava `now` e o DO UPDATE usava `NOW()`, o que fazia
+        # linhas do mesmo refresh carregarem instantes diferentes.
         now = datetime.now(timezone.utc)
-
-        UPSERT = """
-        INSERT INTO marts.fact_ml_produto_ranking
-            (brand, item_id, seller_sku, title,
-             gross_revenue, units_sold, unique_buyers, units_per_buyer,
-             cancel_rate_pct, ad_spend, ad_roas, ad_acos_pct, days_advertised,
-             revenue_share_pct, cumulative_revenue_pct, estimated_margin,
-             price_spread_pct, pareto_bucket, revenue_velocity,
-             ad_efficiency, action_signal, product_status,
-             first_sale, last_sale, refreshed_at)
-        VALUES %s
-        ON CONFLICT (brand, item_id)
-        DO UPDATE SET
-            seller_sku             = EXCLUDED.seller_sku,
-            title                  = EXCLUDED.title,
-            gross_revenue          = EXCLUDED.gross_revenue,
-            units_sold             = EXCLUDED.units_sold,
-            unique_buyers          = EXCLUDED.unique_buyers,
-            units_per_buyer        = EXCLUDED.units_per_buyer,
-            cancel_rate_pct        = EXCLUDED.cancel_rate_pct,
-            ad_spend               = EXCLUDED.ad_spend,
-            ad_roas                = EXCLUDED.ad_roas,
-            ad_acos_pct            = EXCLUDED.ad_acos_pct,
-            days_advertised        = EXCLUDED.days_advertised,
-            revenue_share_pct      = EXCLUDED.revenue_share_pct,
-            cumulative_revenue_pct = EXCLUDED.cumulative_revenue_pct,
-            estimated_margin       = EXCLUDED.estimated_margin,
-            price_spread_pct       = EXCLUDED.price_spread_pct,
-            pareto_bucket          = EXCLUDED.pareto_bucket,
-            revenue_velocity       = EXCLUDED.revenue_velocity,
-            ad_efficiency          = EXCLUDED.ad_efficiency,
-            action_signal          = EXCLUDED.action_signal,
-            product_status         = EXCLUDED.product_status,
-            first_sale             = EXCLUDED.first_sale,
-            last_sale              = EXCLUDED.last_sale,
-            refreshed_at           = NOW(),
-            ingested_at            = NOW()
-        """
-
-        batch = [
-            (
-                r["brand"], r["item_id"], r["seller_sku"], r["title"],
-                r["gross_revenue"], r["units_sold"], r["unique_buyers"], r["units_per_buyer"],
-                r["cancel_rate_pct"], r["ad_spend"], r["ad_roas"], r["ad_acos_pct"],
-                r["days_advertised"], r["revenue_share_pct"], r["cumulative_revenue_pct"],
-                r["estimated_margin"], r["price_spread_pct"],
-                r["pareto_bucket"], r["revenue_velocity"], r["ad_efficiency"],
-                r["action_signal"], r["product_status"],
-                r["first_sale"], r["last_sale"], now,
-            )
-            for r in rows
-        ]
-
         try:
-            dc = dst.cursor()
-            execute_values(dc, UPSERT, batch, page_size=500)
-            dst.commit()
-            dc.close()
-        except Exception:
-            dst.rollback()
-            raise
+            res = ml_publish_snapshot(dst, rows, now)
         finally:
             dst.close()
 
-        print(f"[ml] Neon: {len(batch)} linhas upserted")
+        batch = rows  # contrato de retorno preservado: len(batch) == linhas publicadas
+        print(f"[ml] apagadas: {res['deleted']}   publicadas: {res['published']}")
+        print(f"[ml] EXCEPT bidirecional: {res['checks']['except_both_ways']}")
+        print(f"[ml] fingerprint do destino confere com a fotografia: {fp_foto}")
+        print(f"[ml] Neon: {len(batch)} linha(s) no snapshot publicado")
         sales_dates = [r["last_sale"] for r in rows if r.get("last_sale")]
         _audit_finish(
             audit_conn, run_id, "success", len(rows), len(batch),
@@ -477,7 +643,8 @@ def sync_tiktok(days: int = DEFAULT_TIKTOK_DAYS, full: bool = False, brands: set
                    items_sold_video, items_sold_live, items_sold_product_card,
                    pct_gmv_video, pct_gmv_live, pct_gmv_card,
                    canceled, refunded, returned, problem_rate,
-                   rating_avg, total_ratings
+                   rating_avg, total_ratings,
+                   active_videos, video_views
             FROM gold.tiktok_product_daily
             WHERE brand IN {_brands_sql(brands)}
               AND date >= %s
@@ -508,7 +675,8 @@ def sync_tiktok(days: int = DEFAULT_TIKTOK_DAYS, full: bool = False, brands: set
                  items_sold_video, items_sold_live, items_sold_product_card,
                  pct_gmv_video, pct_gmv_live, pct_gmv_card,
                  canceled, refunded, returned, problem_rate,
-                 rating_avg, total_ratings)
+                 rating_avg, total_ratings,
+                 active_videos, video_views)
             VALUES %s
             ON CONFLICT (date, product_id)
             DO UPDATE SET
@@ -532,6 +700,8 @@ def sync_tiktok(days: int = DEFAULT_TIKTOK_DAYS, full: bool = False, brands: set
                 problem_rate            = EXCLUDED.problem_rate,
                 rating_avg              = EXCLUDED.rating_avg,
                 total_ratings           = EXCLUDED.total_ratings,
+                active_videos           = EXCLUDED.active_videos,
+                video_views             = EXCLUDED.video_views,
                 ingested_at             = NOW()
         """
 
@@ -549,6 +719,7 @@ def sync_tiktok(days: int = DEFAULT_TIKTOK_DAYS, full: bool = False, brands: set
                         r["pct_gmv_video"], r["pct_gmv_live"], r["pct_gmv_card"],
                         r["canceled"], r["refunded"], r["returned"], r["problem_rate"],
                         r["rating_avg"], r["total_ratings"],
+                        r["active_videos"], r["video_views"],
                     )
                     for r in rows[i : i + BATCH_SIZE]
                 ]

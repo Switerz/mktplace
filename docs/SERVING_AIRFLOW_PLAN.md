@@ -2106,3 +2106,319 @@ anterior a essa janela, e a cadencia nao foi decidida.
 
 **Proxima etapa:** observar UMA execucao agendada do `full_daily`, sem retry, e comparar o
 resultado com este piloto.
+
+## 38. Gate S3 Task 2/3 — `/inteligencia` e `/brand-detail` implementadas, NADA aplicado (18/08/2026)
+
+Esta task escreveu codigo, migrations e testes **dentro de um git worktree isolado**
+(worktree isolado do S3, detached em `d04306e` — e portanto **um commit atras** de
+`origin/main`, que avancou para `a1c5ffe` em 18/08 com o hotfix do help regional; a
+incorporacao e' escopo da Task 3, ver §38.12). O **checkout operacional usado pelo
+Task Scheduler** **nao recebeu um byte** — ele roda diariamente
+sob o Task Scheduler e precisava continuar identico para a execucao de 19/08 as 06:00.
+
+**Nada foi aplicado:** zero migration executada, zero escrita em banco, zero sync com
+`--apply`, zero backfill, zero alteracao de Scheduler, zero commit, push ou deploy.
+
+### 38.1 Contexto herdado do O1
+
+O Checkpoint O1 encerrou como `PASS COM RESTRICAO`. A execucao agendada de 18/08 as
+06:00 comprovou o caminho automatico: dez steps `SUCCESS`, `LastTaskResult=0`,
+`STATUS GERAL: OK`, `ok_critical=true`, lock liberado. O aceite central foi a fonte
+Creator em **D-2**: `source_max=16/08` contra D-1 de 17/08, `effective_date_to`
+limitado honestamente em **16/08**, 66.224 linhas publicadas, `EXCEPT` bidirecional
+`(0,0)`, e **zero linha fabricada em 17/08** — ausencia representada como ausencia.
+
+A restricao do O1 era o ranking ML. A investigacao fechou a questao: a "queda de
+1.766 para 1.648" **nunca existiu** — era comparacao entre `COUNT(*)` bruto da Gold
+(que tem 119 chaves duplicadas) e um destino deduplicado por `(brand, item_id)`.
+Chaves, distribuicao por marca e `ad_spend` em paridade perfeita; a divergencia
+residual de 118 chaves em `gross_revenue`/`units_sold`/`unique_buyers` e' **restatement
+posterior ao snapshot**, com `ad_spend` e `ad_roas` em divergencia zero.
+
+O que faltava era **provar** essa consistencia, e nao era possivel: `sync_ml`
+declarava "full refresh" mas escrevia com `ON CONFLICT DO UPDATE`, sem preservar
+fotografia alguma. A Parte D desta task corrige isso.
+
+### 38.2 Reuso: quatro das sete fontes ja estavam no Neon
+
+| Fonte Gold | Destino | Cobertura | Estrategia |
+| --- | --- | --- | --- |
+| `gold.tiktok_brand_daily` | `fact_tiktok_brand_content_daily` (007) | 36/36 | janela 90d (O1) |
+| `gold.tiktok_creator_daily` | `fact_tiktok_creator_daily` (008) | 6/6 | janela 90d (O1) |
+| `gold.ml_produto_ranking` | `fact_ml_produto_ranking` | 15/15 | **snapshot** (Parte D) |
+| `gold.tiktok_product_daily` | `fact_tiktok_product_daily` | 10/12 | upsert + 2 colunas (Parte E) |
+| `gold.ml_cross_company_summary` | **nova** (009) | 0/9 | **snapshot** (Parte C) |
+| `gold.v_channel_efficiency` | **nova** (010) | 0/7 | **snapshot** (Parte C) |
+| `gold.tiktok_shop_hourly` | — | — | **fora do S3** |
+
+A migration 006 (`fact_ml_gestao_diaria`) nao serve nenhuma das duas rotas.
+
+### 38.3 Por que snapshot, e por que NAO no wrapper do O1
+
+`serving_refresh.Target` tem **12 campos obrigatorios, zero defaults**, incluindo
+`date_column` e `source_min_date`, e `build_argv` **sempre** emite
+`--date-from/--date-to`. As duas fontes novas nao cabem:
+
+- `ml_cross_company_summary` e' snapshot **sem coluna de data** — quatro linhas, uma
+  por marca ML. Fabricar uma data mentiria sobre o grao;
+- `v_channel_efficiency` TEM data, mas `/brand-detail` aceita **qualquer mes** desde
+  outubro/2025, e a medicao mostrou **71,4% das linhas fora da janela de 90 dias**
+  (3.378 de 4.728). Uma janela movel congelaria esse historico. A leitura integral
+  custou **1,25 s e 2,45 s** em duas medicoes separadas por 35 s, com fingerprint
+  identico (`c66a1b67...`). Substituir tudo e' mais simples E mais correto.
+
+Generalizar o wrapper foi descartado: seria um modulo tentando servir contratos
+incompativeis, e e' gatilho explicito de stop-loss. O modulo novo,
+`pipelines/sync_serving_snapshots.py`, tem **allowlist literal de dois targets**, sem
+registro dinamico e sem framework.
+
+Contrato dos dois: fonte read-only capturada **uma vez**; validacao de chaves, tipos,
+duplicidade e volume (piso absoluto e proporcional ao destino); advisory lock proprio
+(909120009 e 910120010); staging `pg_temp ... ON COMMIT DROP`; `DELETE` integral;
+`INSERT` de colunas explicitas; reconciliacao contra a **fotografia** por contagem,
+chaves, agregados `Decimal`, `EXCEPT` bidirecional e fingerprint; commit so' no fim;
+rollback integral em qualquer falha. Zero retry, zero backoff, zero sleep.
+
+O fingerprint e' calculado **em Python**, com `hashlib`. Nao em SQL de proposito:
+`MD5(STRING_AGG(... ORDER BY texto))` depende de colacao, e as duas pontas usam
+locales diferentes (`en_US.UTF-8` no RDS, `C.UTF-8` no Neon) — o mesmo dado geraria
+hashes distintos.
+
+### 38.4 O `sync_ml` virou snapshot transacional de verdade
+
+Antes: `ON CONFLICT DO UPDATE`. Chave que desaparecia da fonte **permanecia no destino
+para sempre**, e nenhuma fotografia era preservada — impossivel provar consistencia.
+
+Agora: advisory lock proprio (911120011), staging `pg_temp`, `DELETE` integral,
+`INSERT`, reconciliacao contra a fotografia capturada, commit so' no fim, rollback
+integral. `refreshed_at` recebe **o mesmo instante** para todas as linhas do snapshot —
+antes o `INSERT` usava `now` e o `DO UPDATE` usava `NOW()`, e linhas do mesmo refresh
+carregavam instantes diferentes.
+
+Preservado sem alteracao: dedup `DISTINCT ON (brand, item_id) ORDER BY ...,
+gross_revenue DESC NULLS LAST`, allowlist de marcas, as 24 colunas, a guarda
+`MIN_ROWS_RATIO`, o contrato de CLI, a forma do retorno (`{"source": N, "upserted": N}`)
+e a auditoria. `sync_shopee` e `sync_tiktok` continuam com upsert de proposito.
+
+### 38.5 Migrations 009, 010 e 011 — escritas, NAO aplicadas
+
+Cadeia linear `008 -> 009 -> 010 -> 011`, head unico:
+
+| Revisao | Objeto | Grao / PK |
+| --- | --- | --- |
+| **009** | `marts.fact_ml_cross_company_summary` | `(brand)`, 4 linhas, sem indice extra |
+| **010** | `marts.fact_tiktok_channel_efficiency_daily` | `(date, brand, channel)` + indice `(brand, date)` |
+| **011** | `ALTER` em `marts.fact_tiktok_product_daily` | `+active_videos`, `+video_views` |
+
+`CREATE TABLE` sem `IF NOT EXISTS` (colisao tem de falhar alto); `NUMERIC` sem escala
+(escala arredondaria e quebraria a igualdade de payload); `CHECK >= 0` validado contra
+os minimos medidos na fonte; `CHECK <> 'NaN'` explicito, porque `'NaN'::numeric >= 0`
+avalia TRUE em Postgres.
+
+As duas colunas da 011 nascem **anulaveis e sem default**. `NOT NULL` falharia sobre as
+213 mil linhas existentes, e `DEFAULT 0` apagaria a distincao entre "nao
+retroalimentado" e "zero medido" — distincao real: na fonte as duas colunas tem **zero
+nulo** e ~104.800 zeros cada.
+
+### 38.6 Wiring: 12 steps no `full_daily`
+
+| # | Step novo | Depende de | Timeout |
+| --- | --- | --- | --- |
+| 10 | `serving_ml_cross_company` | `sync_produtos_ml` | 300s |
+| 11 | `serving_tiktok_channel_efficiency` | `sync_produtos_tiktok`, `serving_tiktok_brand`, `serving_tiktok_creator` | 600s |
+
+Ambos `critical=True`: as tabelas alimentam telas que vao a producao, e defasagem tem
+de aparecer como FAILED. A falha nao apaga dado anterior — o sync substitui a tabela
+DENTRO de uma transacao.
+
+`serving_ml_cross_company` depende de `sync_produtos_ml` porque `/inteligencia` le os
+**dois** snapshots ML na mesma tela; publicar um sem o outro serviria metades de
+instantes diferentes. As datas das quatro fontes de `/brand-detail` **nao** sao
+niveladas: brand e creator mantem `min(D-1, source_max)`, e a channel efficiency e'
+snapshot integral. A dependencia e' de **ordem de execucao**, nao de janela.
+
+Orcamento interno: **6.600s -> 7.500s**, contra 9.000s do lock externo (margem de
+1.500s, 20%). `health_check` segue por ultimo e `always_run=True`. Zero Shopee.
+Nenhuma tarefa do Windows criada ou alterada.
+
+### 38.7 Troca do backend
+
+`/inteligencia`: as **sete** consultas passaram para `marts.fact_ml_produto_ranking`
+(5), `marts.fact_ml_cross_company_summary` (1) e `marts.fact_tiktok_product_daily` (1).
+Alem disso, `date.today()` deu lugar a `_hoje_operacional()`, que resolve o dia em
+`America/Sao_Paulo` via `zoneinfo` — biblioteca padrao, zero dependencia nova. Num
+servidor UTC o dia virava as 21:00 locais e a janela de 30 dias de `tk_products` saia
+deslocada.
+
+`/brand-detail`: as **cinco** consultas passaram para as quatro fatos `marts.*`.
+
+Zero `gold.`, zero `raw.` e `_uses_datamart=False` nas duas funcoes. A troca foi
+cirurgica: `gold.tiktok_product_daily` aparece em outras funcoes do arquivo e **nao**
+foi tocada la'. As definicoes duplicadas nao relacionadas (`get_canais` 3x,
+`get_quality` 3x) **nao** foram refatoradas — mexer nelas ampliaria o diff sem pedido.
+
+**Payload preservado integralmente.** Os dois contratos congelados foram escritos
+ANTES da troca, rodaram verdes contra `gold.*`, e continuam verdes contra `marts.*`
+**sem uma unica expectativa editada** — 168 testes. Nenhum campo novo, nenhum campo
+removido, nenhum `response_model` criado, zero frontend.
+
+### 38.8 Frescor: por preflight, nao por payload
+
+A auditoria da Task 1/3 sugeriu expor `refreshed_at`/`source_max` na interface e ao
+mesmo tempo prometeu payload identico — as duas coisas sao incompativeis, e nenhum dos
+contratos atuais tem campo de frescor. O padrao adotado:
+
+- payload **integralmente preservado**, zero campo novo, zero frontend;
+- frescor controlado por **preflight, logs, `audit.source_sync_run`,
+  `synced_at`/`source_run_id` por linha e bloqueio de publicacao**;
+- evolucao visual de frescor e' **frente separada**.
+
+Consequencia aceita e declarada: quem olha o painel **nao ve** que o dado esta
+atrasado. A protecao e' operacional — o sync bloqueia a publicacao em vez de servir
+dado errado — nao visual.
+
+### 38.9 O que a Task 3/3 tera de fazer
+
+**Antes do cutover de `/brand-detail`**, reconciliar integralmente as **quatro**
+dependencias, de **outubro/2025 ate o ultimo dia disponivel**:
+`fact_tiktok_brand_content_daily`, `fact_tiktok_creator_daily`,
+`fact_tiktok_product_daily` e a nova `fact_tiktok_channel_efficiency_daily`.
+
+A reconciliacao tera de cobrir: igualdade de chaves; igualdade de valores; corte por
+**mes x marca** em todo o intervalo; duplicidades; nulls; NaN; fingerprint sob
+`COLLATE "C"`; **zero null em `active_videos` e `video_views`** apos o backfill
+integral; e nenhuma chave exclusiva em qualquer direcao.
+
+A divida de restatement historico e' real e medida neste repositorio (§30.3):
+`new_videos_posted` divergiu **+30 (0,0042%)** num corte comum, e o documento conclui
+que numero exibido que muda conforme a fonte e' material por definicao. **O lookback de
+90 dias nao garante convergencia futura do historico** — um restatement em novembro de
+2025 nunca sera absorvido por incremental. Backfill periodico permanece necessario, e
+sua cadencia segue **pendente de decisao**.
+
+**Antes do cutover de `/inteligencia`**, executar os **dois** snapshots ML na mesma
+rodada operacional e provar cada destino contra a fotografia capturada pelo respectivo
+sync — nunca contra uma releitura posterior da Gold, que e' mutavel e sem dimensao
+temporal.
+
+### 38.10 O que NAO aconteceu nesta task
+
+- nenhuma migration aplicada; `alembic` segue em **008** no banco real;
+- nenhuma escrita em banco, nenhum sync com `--apply`, nenhum backfill;
+- `--full` do TikTok **nao** foi executado;
+- nenhuma alteracao de Scheduler; a tarefa segue habilitada, com proxima execucao em
+  19/08 as 06:00;
+- **Airflow nao e' necessario neste gate** e nao foi tocado;
+- `/inteligencia` e `/brand-detail` **nao foram publicadas** — seguem 500 em producao;
+- `/tempo-real` permanece **fora do S3**, por exigir serving intraday e decisao de
+  produto;
+- nenhum commit, push ou deploy;
+- o **checkout operacional permaneceu byte a byte intacto**.
+
+### 38.11 Correcao de observabilidade: o health check passou a monitorar as duas fontes
+
+A revisao da Task 2/3 apontou uma lacuna material: os dois steps novos entraram no
+`full_daily` como `critical=True`, mas `pipelines/ops/health_check.py` **nao os
+monitorava**. Nesse estado, um sync podia falhar — ou nem executar — por dias, e o
+health check ainda reportaria `ok_critical=true`, deixando `/inteligencia` e
+`/brand-detail` defasados **em silencio**.
+
+Fechada de forma estreita, sem redesenhar o health check:
+
+**Auditoria.** `pipelines/sync_serving_snapshots.py` nao registrava nada em
+`audit.source_sync_run` — os syncs de serving do O1 tambem nao registram, entao
+estes dois sao os primeiros. Foi adicionada a instrumentacao minima, no padrao ja
+usado por `sync_produtos.py`/`daily_performance.py`/`sync_region_daily.py`: um
+`INSERT 'running'` no inicio e um `UPDATE` com status no fim, numa conexao
+**separada** da transacao de dados — o registro `failed` precisa sobreviver ao
+rollback, senao a falha apagaria a propria evidencia. Somente `--apply` registra;
+diagnostico nao aparece no audit log como publicacao. Uma execucao logica por
+target: um par start/finish, nunca duplicado. Mensagem de erro **sanitizada** e
+truncada em 500 caracteres. Zero retry, zero dependencia nova.
+
+**Nomes.** Uma unica string por target em CLI, `audit.source_sync_run.source_name`,
+`EXPECTED_SOURCES` e mensagens: `ml_cross_company` e `tiktok_channel_efficiency`.
+Um teste trava essa igualdade — nome divergente faria o health check monitorar uma
+fonte que ninguem grava e reportar "nenhuma execucao registrada" para sempre.
+
+**Execucao.** Duas entradas em `EXPECTED_SOURCES`, `critical=True`, cadencia diaria,
+threshold de **30h** — o mesmo contrato das outras fontes diarias criticas. Execucao
+ausente, com `status=failed` ou mais antiga que 30h torna `ok_critical=false`.
+
+**Cobertura do dado.** Duas consultas read-only novas em `fetch_data_freshness`:
+
+| Tabela | Sinal | Por que |
+| --- | --- | --- |
+| `fact_ml_cross_company_summary` | `MAX(synced_at)` | a fonte e' snapshot **sem** data de negocio; usar o campo de auditoria da propria fotografia evita fabricar uma data que a fonte nao tem. Mesmo padrao ja adotado para `fact_ml_produto_ranking` (`MAX(refreshed_at)`) |
+| `fact_tiktok_channel_efficiency_daily` | `MAX(date)` | tem data diaria; o teto normal e' D-1, entao um dia de defasagem e' o estado correto e cabe no limite de 3 dias |
+
+Tabela vazia ou `MAX(...)` NULL cai no ramo que ja devolve `stale=True` com
+"tabela sem nenhuma linha" — **ausencia nunca e' convertida em zero nem em fresco**.
+Data no futuro tambem nunca e' fresca.
+
+**Execucao e cobertura sao sinais distintos, e os dois foram preservados.** Um sync
+pode rodar com sucesso todo dia e ainda servir dado que parou de avancar, porque a
+fonte upstream parou; e a tabela pode ter dado recente de uma carga anterior
+enquanto o sync parou de executar. Os dois casos tem teste proprio.
+
+Nenhuma leitura do Data Mart foi introduzida no health check, nenhuma comparacao
+Gold x Marts, nenhum `COUNT(*)` integral, nenhum retry, nenhuma escrita corretiva e
+nenhum fallback silencioso. O fake do banco nos testes passou a **falhar alto** para
+qualquer consulta de frescor sem ramo explicito: sem isso, uma consulta nova cairia
+no retorno generico e o teste ficaria verde provando nada.
+
+Shopee segue **nao critica** nas quatro entradas conhecidas, e as regras das fontes
+antigas nao mudaram — travado por teste.
+
+**Lacuna que permanece, declarada:** as tres fatos de serving do O1
+(`fact_ml_gestao_diaria`, `fact_tiktok_brand_content_daily`,
+`fact_tiktok_creator_daily`) tambem **nao** tem entrada em `EXPECTED_SOURCES` nem
+verificacao de frescor, porque os syncs do O1 nao registram em
+`audit.source_sync_run`. E' a mesma classe de lacuna, fora do escopo deste finding,
+e fica registrada aqui como divida.
+
+### 38.12 Ordem OBRIGATORIA da primeira publicacao (Task 3/3)
+
+Nada disto foi executado. A sequencia importa porque duas das etapas, feitas fora de
+ordem, quebram producao:
+
+1. **incorporar, sem force, o hotfix concorrente JA PUBLICADO.** Situacao medida em
+   18/08/2026: `origin/main` esta em
+   `a1c5ffeb01a77978192f7dff88eaa38b776ece44` — *fix(pipelines): impede efeitos
+   colaterais no help regional*, de 18/08 12:35:45 −0300. Nao e' mais uma hipotese:
+   o commit existe e esta na main;
+2. **reconciliar a base da implementacao S3 com a `origin/main` atual.** O worktree
+   isolado do S3 esta em `d04306e` e portanto **um commit atras**. O hotfix altera
+   exatamente dois arquivos — `pipelines/ops/sync_region_if_needed.py` e
+   `pipelines/tests/test_ops_sync_region_if_needed.py` — e **nenhum** deles esta
+   entre os 25 que o S3 toca: **zero conflito de caminho conhecido**. A incorporacao
+   nao foi feita nesta rodada, de proposito;
+3. **nunca publicar o backend antes de o schema e os dados estarem prontos**;
+4. **aplicar as migrations 009, 010 e 011** no Neon, nessa ordem;
+5. **validar schema e Alembic** (head unico, tabelas e colunas presentes);
+6. **executar exatamente os backfills/snapshots iniciais autorizados** — nada alem;
+7. **reconciliar fonte x Marts**, com os criterios da secao 38.9;
+8. **validar `/produtos` do Mercado Livre antes e depois**: `sync_produtos_ml` deixou
+   de ser upsert e passou a **substituicao integral**, e `marts.fact_ml_produto_ranking`
+   alimenta tambem essa superficie **ja existente**. Contraprova de nao regressao e'
+   obrigatoria — nao basta validar `/inteligencia`;
+9. **somente depois da prontidao do banco**, versionar e enviar o codigo que pode
+   acionar deploy do backend;
+10. **atualizar o checkout operacional por fast-forward** antes da proxima execucao
+    das 06:00;
+11. **smoke dos endpoints** e, posteriormente, observar uma execucao agendada real
+    com os doze steps.
+
+Dois riscos explicitos de inverter a ordem:
+
+- **um push antecipado pode fazer o Render consultar tabelas que ainda nao existem.**
+  O backend publicado passaria a ler `marts.fact_ml_cross_company_summary` e
+  `marts.fact_tiktok_channel_efficiency_daily`; sem as migrations aplicadas, as duas
+  rotas quebrariam — e hoje elas ao menos falham por um motivo conhecido;
+- **atualizar o checkout operacional antes das migrations pode fazer o proximo
+  `full_daily` falhar no preflight.** `check_serving_s3_tables` e
+  `check_tiktok_product_content_columns` bloqueiam os steps novos enquanto as
+  tabelas/colunas nao existirem, e os steps sao `critical=True` — o pipeline inteiro
+  reportaria FAILED.
+
+**Nenhuma dessas acoes foi executada nesta correcao.**

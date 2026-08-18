@@ -219,12 +219,14 @@ def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
     pipelines.ops.orchestrate.PIPELINES['full_daily'] — ml=900+tiktok=900+
     regional=300+sync_region=120+produtos_ml=600+produtos_tiktok=600 do Gate C1,
     mais serving_ml=600+serving_tiktok_brand=600+serving_tiktok_creator=1800 do
-    Checkpoint O1 Task 2/2, mais health_check=180), com margem; e o
+    Checkpoint O1 Task 2/2, mais serving_ml_cross_company=300+
+    serving_tiktok_channel_efficiency=600 do Gate S3, mais health_check=180),
+    com margem; e o
     ExecutionTimeLimit do Task Scheduler (9600s) tem que ficar acima do timeout
     do lock, com margem adicional para a limpeza pos-timeout (Stop-Process +
     espera + logs)."""
     import pipelines.ops.orchestrate as orch
-    internal_budget_seconds = 6600
+    internal_budget_seconds = 7500
     assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == internal_budget_seconds, (
         "orcamento hardcoded neste teste saiu de sincronia com a soma real "
         "dos timeouts de PIPELINES['full_daily'] — atualize os dois numeros juntos"

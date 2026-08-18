@@ -105,6 +105,7 @@ sys.path.insert(0, str(REPO_ROOT / "apps" / "api"))
 
 from pipelines.ops.preflight import run_preflight  # noqa: E402
 from pipelines.ops import serving_refresh  # noqa: E402
+from pipelines import sync_serving_snapshots  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,52 @@ SERVING_SOURCE_DEPENDENCY: dict[str, tuple[str, ...]] = {
     "brand": ("daily_tiktok",),
     "creator": ("daily_tiktok",),
 }
+
+
+# Gate S3 (2026-08-18): dependencia de cada snapshot sem janela.
+#
+# `serving_ml_cross_company` depende de `sync_produtos_ml` porque `/inteligencia`
+# le os DOIS snapshots ML na mesma tela (`fact_ml_produto_ranking` alimenta seis
+# blocos, `fact_ml_cross_company_summary` alimenta o bloco `ltv`). Publicar um sem
+# o outro serviria a tela com metades de instantes diferentes.
+#
+# `serving_tiktok_channel_efficiency` depende de `sync_produtos_tiktok` e das duas
+# fatos de serving TikTok porque `/brand-detail` monta a mesma tela com as quatro
+# fontes. NAO ha nivelamento de data entre elas: cada uma mantem seu proprio teto
+# (brand/creator por `min(D-1, source_max)`, channel efficiency por snapshot
+# integral), e a dependencia e' de ORDEM de execucao, nao de janela.
+SNAPSHOT_SOURCE_DEPENDENCY: dict[str, tuple[str, ...]] = {
+    "ml_cross_company": ("sync_produtos_ml",),
+    "tiktok_channel_efficiency": (
+        "sync_produtos_tiktok", "serving_tiktok_brand", "serving_tiktok_creator",
+    ),
+}
+
+
+def _snapshot_step(target_name: str, depends_on: tuple[str, ...] = ()) -> Step:
+    """Step de snapshot integral, servido pelo modulo proprio
+    `pipelines.sync_serving_snapshots` — NUNCA pelo wrapper do O1.
+
+    O wrapper `serving_refresh.py` exige `date_column` e `source_min_date` e sempre
+    emite `--date-from/--date-to`; as duas fontes deste caminho sao snapshot sem
+    janela (uma sem data alguma). Generalizar o wrapper para cobrir os dois regimes
+    foi descartado de proposito.
+
+    `critical=True` pela mesma razao dos steps do O1: as tabelas alimentam telas
+    que vao a producao, e defasagem tem de aparecer como FAILED. A falha nao apaga
+    o dado anterior — o sync substitui a tabela DENTRO de uma transacao, e qualquer
+    problema faz rollback integral.
+    """
+    spec = sync_serving_snapshots.SPECS[target_name]
+    return Step(
+        name=spec.step_name,
+        module="pipelines.sync_serving_snapshots",
+        args=("--target", spec.name, "--apply"),
+        timeout_seconds=spec.step_timeout_seconds,
+        preflight_source=spec.preflight_source,
+        depends_on=depends_on,
+        critical=True,
+    )
 
 
 def _serving_step(target_name: str, depends_on: tuple[str, ...] = ()) -> Step:
@@ -204,6 +251,10 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # dia", sem depender de horario. Cada um resolve a propria janela via
         # min(D-1, source_max), entao creator em D-2 nao atrasa ML nem brand.
         *(_serving_step(t, SERVING_SOURCE_DEPENDENCY[t]) for t in serving_refresh.TARGET_ORDER),
+        # Gate S3 (2026-08-18): os dois snapshots sem janela, depois das fontes de
+        # que cada tela depende e antes do health_check.
+        *(_snapshot_step(t, SNAPSHOT_SOURCE_DEPENDENCY[t])
+          for t in sync_serving_snapshots.TARGET_ORDER),
         # Sempre roda por ultimo, mesmo se algo anterior falhou/bloqueou —
         # e' o resumo do estado real, precisa rodar para reportar a falha.
         # always_run + ser o ULTIMO item desta tupla e' o que garante
@@ -259,9 +310,11 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
 # Soma dos timeouts individuais de full_daily = 900*2 (ml, tiktok) + 300
 # (gold_regional_incremental) + 120 (sync_region_if_needed) + 600*2
 # (produtos ml, tiktok) + 180 (health_check) = 3600s (~1h) ate o Gate C1, e
-# 6600s (~1h50) desde o Checkpoint O1 Task 2/2 (2026-08-17), que somou os tres
+# 6600s (~1h50) no Checkpoint O1 Task 2/2 (2026-08-17), que somou os tres
 # steps de serving: 600 (serving_ml) + 600 (serving_tiktok_brand) + 1800
-# (serving_tiktok_creator) = 3000s. O creator recebe o triplo dos outros porque
+# (serving_tiktok_creator) = 3000s; e 7500s (~2h05) desde o Gate S3 Task 2/3
+# (2026-08-18), que somou 300 (serving_ml_cross_company, quatro linhas) + 600
+# (serving_tiktok_channel_efficiency, ~4.7 mil linhas) = 900s. O creator recebe o triplo dos outros porque
 # reescreve 66.347 linhas numa janela de 90 dias, contra 360 do ML e 450 do
 # brand (medido em 17/08/2026). Caiu de 7200s para 3600s no Gate C1
 # (2026-07-16), que removeu os 3 steps Shopee diarios (900*3=2700s) +

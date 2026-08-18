@@ -159,15 +159,32 @@ ML_ROW = {
 
 
 class _AuditNeonCursor:
-    """Cursor fake para a conexao Neon de auditoria/leitura de prev_count."""
+    """Cursor fake para a conexao Neon de auditoria/leitura de prev_count e para a
+    escrita do snapshot ML.
+
+    Desde o Gate S3 `sync_ml` nao usa mais `ON CONFLICT DO UPDATE`: ele carrega
+    uma staging `pg_temp`, apaga a tabela real por inteiro, insere de volta e
+    RECONCILIA o destino contra a fotografia capturada. O fake precisa modelar
+    esse fluxo — staging, DELETE, INSERT e as duas releituras — senao a
+    reconciliacao veria destino vazio e abortaria. Modelar o fluxo real e' o
+    ponto: um fake que aceitasse qualquer coisa nao provaria nada.
+    """
 
     def __init__(self, conn):
         self.conn = conn
         self._last_sql = ""
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self._last_sql = sql
-        self.conn.executed.append((" ".join(sql.split()), params))
+        normalizado = " ".join(sql.split())
+        self.conn.executed.append((normalizado, params))
+        if normalizado.startswith("DELETE FROM marts.fact_ml_produto_ranking"):
+            self.rowcount = len(self.conn.target)
+            self.conn.target = []
+        elif normalizado.startswith("INSERT INTO marts.fact_ml_produto_ranking"):
+            self.conn.target = list(self.conn.staged)
+            self.rowcount = len(self.conn.target)
 
     def fetchone(self):
         if "RETURNING sync_run_id" in self._last_sql:
@@ -177,8 +194,26 @@ class _AuditNeonCursor:
             return (self.conn.prev_count,)
         return None
 
+    def fetchall(self):
+        """Releituras da reconciliacao: staging e tabela real."""
+        normalizado = " ".join(self._last_sql.split())
+        if "FROM pg_temp." in normalizado:
+            return list(self.conn.staged)
+        if "FROM marts.fact_ml_produto_ranking" in normalizado:
+            return list(self.conn.target)
+        return []
+
     def close(self):
         pass
+
+
+def _fake_execute_values(cur, sql, batch, page_size=500):
+    """Substitui `execute_values` no fake: converte as tuplas de volta em dicts
+    e as guarda como conteudo da staging. `refreshed_at` e' o ultimo elemento e
+    nao entra na reconciliacao (que compara ML_BUSINESS_COLUMNS)."""
+    conn = cur.conn
+    cols = sp.ML_BUSINESS_COLUMNS
+    conn.staged = [dict(zip(cols, tupla[: len(cols)])) for tupla in batch]
 
 
 class _AuditNeonConn:
@@ -192,6 +227,9 @@ class _AuditNeonConn:
         self.closed = False
         self.run_id_counter = 0
         self.prev_count = prev_count
+        #: conteudo da staging e da tabela real, para a reconciliacao do snapshot
+        self.staged = []
+        self.target = []
 
     def cursor(self, cursor_factory=None):
         return _AuditNeonCursor(self)
@@ -271,7 +309,7 @@ def test_sync_ml_recovery_conflict_na_primeira_leitura_sucesso_na_segunda(monkey
 
     monkeypatch.setattr(sp, "_neon", fake_neon)
     monkeypatch.setattr(sp, "_rds", rds_factory)
-    monkeypatch.setattr(sp, "execute_values", lambda cur, sql, batch, page_size=500: None)
+    monkeypatch.setattr(sp, "execute_values", _fake_execute_values)
 
     result = sp.sync_ml(brands={"kokeshi"})
 
@@ -319,7 +357,7 @@ def test_sync_ml_nao_abre_conexao_de_escrita_antes_da_leitura_rds_suceder(monkey
 
     monkeypatch.setattr(sp, "_neon", fake_neon)
     monkeypatch.setattr(sp, "_rds", rds_factory)
-    monkeypatch.setattr(sp, "execute_values", lambda cur, sql, batch, page_size=500: None)
+    monkeypatch.setattr(sp, "execute_values", _fake_execute_values)
 
     sp.sync_ml(brands={"kokeshi"})
 
@@ -395,7 +433,7 @@ def test_sync_ml_sucesso_de_primeira_nao_faz_retry_nem_dorme(monkeypatch):
 
     monkeypatch.setattr(sp, "_neon", fake_neon)
     monkeypatch.setattr(sp, "_rds", rds_factory)
-    monkeypatch.setattr(sp, "execute_values", lambda cur, sql, batch, page_size=500: None)
+    monkeypatch.setattr(sp, "execute_values", _fake_execute_values)
 
     result = sp.sync_ml(brands={"kokeshi"})
 

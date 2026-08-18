@@ -51,11 +51,24 @@ class FakeCursor:
             return {"m": self.conn.tiktok_produtos_max}
         if "fact_ml_produto_ranking" in sql:
             return {"m": self.conn.ml_produtos_max}
+        # Gate S3: as duas fatos novas. Ramos EXPLICITOS de proposito — ver o
+        # fallback estrito no fim deste metodo.
+        if "MAX(synced_at) AS m FROM marts.fact_ml_cross_company_summary" in sql:
+            return {"m": self.conn.ml_cross_company_synced_at}
+        if "MAX(date) AS m FROM marts.fact_tiktok_channel_efficiency_daily" in sql:
+            return {"m": self.conn.tiktok_channel_efficiency_max}
         if "ref_month) AS m FROM marts." in sql:
             return {"m": self.conn.shopee_produtos_max}
         for marker, value in self.conn.bug8_scalars:
             if marker in sql:
                 return {"n": value}
+        # Fallback ESTRITO para consultas de frescor: qualquer `... AS m` que nao
+        # tenha ramo explicito acima e' erro de teste, nao dado ausente. Sem esta
+        # guarda, uma consulta nova cairia no `{"n": 0}` e o teste ficaria verde
+        # sem exercitar nada.
+        if "AS m FROM marts." in sql:
+            raise AssertionError(
+                f"consulta de frescor sem ramo explicito no FakeCursor: {sql[:120]}")
         return {"n": 0}
 
     def fetchall(self):
@@ -74,7 +87,8 @@ _UNSET = object()
 class FakeConn:
     def __init__(self, last_run=None, last_success=None, daily_freshness_rows=None,
                  tiktok_produtos_max=_UNSET, ml_produtos_max=_UNSET, shopee_produtos_max=_UNSET,
-                 bug8_scalars=None):
+                 bug8_scalars=None,
+                 ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET):
         self.executed = []
         self.closed = False
         self.last_run = last_run or {}
@@ -87,6 +101,17 @@ class FakeConn:
         self.tiktok_produtos_max = TODAY if tiktok_produtos_max is _UNSET else tiktok_produtos_max
         self.ml_produtos_max = TODAY if ml_produtos_max is _UNSET else ml_produtos_max
         self.shopee_produtos_max = (TODAY - timedelta(days=40)) if shopee_produtos_max is _UNSET else shopee_produtos_max
+        # Gate S3. `fact_ml_cross_company_summary` nao tem data de negocio: o
+        # frescor vem de MAX(synced_at), um timestamp. `_evaluate_date_freshness`
+        # chama `.date()` nele, entao o default e' um datetime com fuso.
+        self.ml_cross_company_synced_at = (
+            NOW - timedelta(hours=6) if ml_cross_company_synced_at is _UNSET
+            else ml_cross_company_synced_at)
+        # `fact_tiktok_channel_efficiency_daily` tem data diaria com teto D-1:
+        # ontem e' o estado normal, nao defasagem.
+        self.tiktok_channel_efficiency_max = (
+            TODAY - timedelta(days=1) if tiktok_channel_efficiency_max is _UNSET
+            else tiktok_channel_efficiency_max)
         self.bug8_scalars = bug8_scalars or [
             ("HAVING COUNT(*) > 1", 0), ("IS NULL", 0), ("gmv < 0", 0),
             ("IS DISTINCT FROM 100", 0), ("ROUND(canceled_orders::numeric", 0),
@@ -895,3 +920,341 @@ def test_build_report_bug8_continua_critico_mesmo_com_todo_shopee_execucao_stale
     report = hc.build_report(conn, now=NOW)
     assert report["ok"] is False
     assert report["ok_critical"] is False
+
+
+# =============================================================================
+# Gate S3 (2026-08-18) — as duas fontes de snapshot no contrato critico
+# =============================================================================
+# Finding corrigido: os steps `serving_ml_cross_company` e
+# `serving_tiktok_channel_efficiency` entraram no `full_daily` como criticos, mas
+# o health check nao os monitorava. Nesse estado, um sync podia falhar por dias e
+# `ok_critical` continuaria `true`, deixando `/inteligencia` e `/brand-detail`
+# defasados em silencio.
+#
+# EXECUCAO e COBERTURA sao sinais distintos e os dois sao testados aqui: um sync
+# pode rodar com sucesso todo dia e ainda servir dado que parou de avancar.
+
+S3_FONTES = ("ml_cross_company", "tiktok_channel_efficiency")
+S3_LABEL_ML = "fact_ml_cross_company_summary[synced_at]"
+S3_LABEL_TK = "fact_tiktok_channel_efficiency_daily"
+
+
+def _freshness(report, label):
+    return next(d for d in report["data_freshness"] if d["label"] == label)
+
+
+# --- 1. classificacao -------------------------------------------------------
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_fonte_esta_em_expected_sources_e_e_critica(fonte):
+    esperada = next((s for s in hc.EXPECTED_SOURCES if s.source_name == fonte), None)
+    assert esperada is not None, f"{fonte} ausente de EXPECTED_SOURCES"
+    assert esperada.critical is True
+    assert esperada.cadence == "daily"
+    assert esperada.exec_threshold_hours == 30, "mesmo contrato das outras diarias criticas"
+
+
+def test_s3_nomes_sao_os_mesmos_dos_targets_do_sync():
+    """Uma unica string por target entre CLI, audit log e health check. Nomes
+    divergentes fariam o health check monitorar uma fonte que ninguem grava."""
+    import pipelines.sync_serving_snapshots as ss
+    nomes_hc = {s.source_name for s in hc.EXPECTED_SOURCES}
+    for target in ss.TARGET_ORDER:
+        spec = ss.SPECS[target]
+        assert spec.audit_source_name == spec.name == target
+        assert target in nomes_hc, f"{target} nao esta em EXPECTED_SOURCES"
+
+
+# --- 2. execucao saudavel ---------------------------------------------------
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_execucao_recente_com_sucesso_mantem_a_fonte_saudavel(fonte):
+    conn = all_fresh_conn()
+    statuses = hc.fetch_source_statuses(conn, now=NOW)
+    s = by_name(statuses, fonte)
+    assert s.stale is False
+    assert s.execution_stale is False
+    assert s.last_run_failed is False
+    assert s.critical is True
+
+
+def test_s3_execucao_e_dado_frescos_mantem_ok_critical_true():
+    report = hc.build_report(all_fresh_conn(), now=NOW)
+    assert report["ok_critical"] is True
+    assert _freshness(report, S3_LABEL_ML)["stale"] is False
+    assert _freshness(report, S3_LABEL_TK)["stale"] is False
+
+
+# --- 3/4/5. execucao ausente, falha e antiga --------------------------------
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_execucao_ausente_reprova_ok_critical(fonte):
+    """Fonte sem nenhuma linha no audit log e' sempre stale — nunca
+    "ausente e' OK"."""
+    conn = all_fresh_conn()
+    conn.last_run.pop(fonte)
+    conn.last_success.pop(fonte)
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok_critical"] is False
+    s = next(x for x in report["sources"] if x["source_name"] == fonte)
+    assert s["stale"] is True
+    assert s["critical"] is True
+    # A fonte e' identificada pelo campo `source_name` do registro e pela saida
+    # humana, que imprime nome + razao. A string `reason` omite o nome de
+    # proposito em TODAS as fontes (quem imprime o fornece), entao exigir o nome
+    # dentro dela mudaria a mensagem de todas as fontes existentes — fora do
+    # escopo deste finding.
+    assert s["source_name"] == fonte
+    assert "nenhuma execucao registrada" in s["reason"]
+
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_saida_humana_identifica_a_fonte_afetada(fonte, capsys):
+    conn = all_fresh_conn()
+    conn.last_run.pop(fonte)
+    conn.last_success.pop(fonte)
+    hc._print_human(hc.build_report(conn, now=NOW))
+    saida = capsys.readouterr().out
+    linha = next(l for l in saida.splitlines() if fonte in l)
+    assert "ATRASADA-CRITICO" in linha, linha
+    assert "nenhuma execucao registrada" in linha
+
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_ultima_execucao_failed_reprova_ok_critical(fonte):
+    conn = all_fresh_conn()
+    conn.last_run[fonte] = {
+        "started_at": NOW - timedelta(hours=1), "finished_at": NOW - timedelta(hours=1),
+        "status": "failed", "error_message": "fonte reprovada, nada foi escrito",
+    }
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok_critical"] is False
+    s = next(x for x in report["sources"] if x["source_name"] == fonte)
+    assert s["last_run_failed"] is True
+    assert s["stale"] is True
+
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_execucao_antiga_reprova_ok_critical(fonte):
+    """31h > 30h de threshold."""
+    conn = all_fresh_conn()
+    antigo = NOW - timedelta(hours=31)
+    conn.last_run[fonte] = {"started_at": antigo, "finished_at": antigo,
+                            "status": "success", "error_message": None}
+    conn.last_success[fonte] = antigo
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok_critical"] is False
+    s = next(x for x in report["sources"] if x["source_name"] == fonte)
+    assert s["execution_stale"] is True
+    assert s["hours_since_success"] > 30
+
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_execucao_dentro_do_limite_de_30h_nao_reprova(fonte):
+    conn = all_fresh_conn()
+    quase = NOW - timedelta(hours=29)
+    conn.last_run[fonte] = {"started_at": quase, "finished_at": quase,
+                            "status": "success", "error_message": None}
+    conn.last_success[fonte] = quase
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok_critical"] is True
+
+
+# --- 6/7. frescor do snapshot ML (sem data de negocio) ----------------------
+
+def test_s3_ml_cross_company_tabela_vazia_fica_stale():
+    """`MAX(synced_at)` NULL cobre os dois casos — tabela vazia e coluna nula."""
+    conn = all_fresh_conn(ml_cross_company_synced_at=None)
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_ML)
+    assert entry["stale"] is True
+    assert entry["critical"] is True
+    assert "sem nenhuma linha" in entry["reason"]
+    assert report["ok_critical"] is False
+
+
+def test_s3_ml_cross_company_snapshot_antigo_fica_stale():
+    conn = all_fresh_conn(ml_cross_company_synced_at=NOW - timedelta(days=5))
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_ML)
+    assert entry["stale"] is True
+    assert entry["days_since"] == 5
+    assert report["ok_critical"] is False
+
+
+def test_s3_ml_cross_company_usa_synced_at_e_nao_fabrica_data_de_negocio():
+    """A fonte e' snapshot sem dimensao temporal: inventar uma data de negocio
+    mentiria sobre o grao. O sinal e' o campo de auditoria da fotografia."""
+    conn = all_fresh_conn()
+    hc.fetch_data_freshness(conn, today=TODAY)
+    consultas = [s for s in conn.executed if "fact_ml_cross_company_summary" in s]
+    assert consultas == ["SELECT MAX(synced_at) AS m FROM marts.fact_ml_cross_company_summary"]
+
+
+def test_s3_ml_cross_company_dentro_do_limite_nao_fica_stale():
+    conn = all_fresh_conn(ml_cross_company_synced_at=NOW - timedelta(days=2))
+    report = hc.build_report(conn, now=NOW)
+    assert _freshness(report, S3_LABEL_ML)["stale"] is False
+    assert report["ok_critical"] is True
+
+
+# --- 8/9. frescor da fato de canal (data diaria, teto D-1) ------------------
+
+def test_s3_channel_efficiency_tabela_vazia_fica_stale():
+    conn = all_fresh_conn(tiktok_channel_efficiency_max=None)
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_TK)
+    assert entry["stale"] is True
+    assert entry["critical"] is True
+    assert "sem nenhuma linha" in entry["reason"]
+    assert report["ok_critical"] is False
+
+
+def test_s3_channel_efficiency_data_antiga_fica_stale():
+    conn = all_fresh_conn(tiktok_channel_efficiency_max=TODAY - timedelta(days=4))
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_TK)
+    assert entry["stale"] is True
+    assert entry["days_since"] == 4
+    assert report["ok_critical"] is False
+
+
+def test_s3_channel_efficiency_em_d_menos_1_e_o_estado_normal():
+    """O serving nunca publica D0: um dia de defasagem e' o teto correto, nao
+    atraso."""
+    conn = all_fresh_conn(tiktok_channel_efficiency_max=TODAY - timedelta(days=1))
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_TK)
+    assert entry["stale"] is False
+    assert entry["days_since"] == 1
+    assert report["ok_critical"] is True
+
+
+def test_s3_channel_efficiency_data_no_futuro_nunca_e_fresca():
+    conn = all_fresh_conn(tiktok_channel_efficiency_max=TODAY + timedelta(days=1))
+    report = hc.build_report(conn, now=NOW)
+    entry = _freshness(report, S3_LABEL_TK)
+    assert entry["stale"] is True
+    assert "FUTURO" in entry["reason"]
+
+
+# --- 10/11. execucao x cobertura sao sinais independentes -------------------
+
+def test_s3_execucao_ok_mas_dado_parado_ainda_reprova():
+    """O caso que justifica os DOIS sinais: o sync roda todo dia com sucesso e
+    ainda assim serve dado que parou de avancar."""
+    conn = all_fresh_conn(tiktok_channel_efficiency_max=TODAY - timedelta(days=10))
+    statuses = hc.fetch_source_statuses(conn, now=NOW)
+    assert by_name(statuses, "tiktok_channel_efficiency").stale is False
+    report = hc.build_report(conn, now=NOW)
+    assert _freshness(report, S3_LABEL_TK)["stale"] is True
+    assert report["ok_critical"] is False
+
+
+def test_s3_dado_ok_mas_execucao_parada_ainda_reprova():
+    """O inverso: a tabela tem dado recente de uma carga anterior, mas o sync
+    parou de executar."""
+    conn = all_fresh_conn()
+    antigo = NOW - timedelta(hours=40)
+    for fonte in S3_FONTES:
+        conn.last_run[fonte] = {"started_at": antigo, "finished_at": antigo,
+                                "status": "success", "error_message": None}
+        conn.last_success[fonte] = antigo
+    report = hc.build_report(conn, now=NOW)
+    assert _freshness(report, S3_LABEL_ML)["stale"] is False
+    assert _freshness(report, S3_LABEL_TK)["stale"] is False
+    assert report["ok_critical"] is False
+
+
+@pytest.mark.parametrize("fonte", S3_FONTES)
+def test_s3_falha_nao_e_rebaixada_a_alerta_nao_critico(fonte):
+    """Nada de tratamento tipo Shopee: estas duas alimentam telas em producao."""
+    conn = all_fresh_conn()
+    conn.last_run.pop(fonte)
+    conn.last_success.pop(fonte)
+    report = hc.build_report(conn, now=NOW)
+    s = next(x for x in report["sources"] if x["source_name"] == fonte)
+    assert s["critical"] is True
+    assert report["ok"] is False
+    assert report["ok_critical"] is False, "nao pode degradar para alerta informativo"
+
+
+# --- 12. Shopee segue nao critica ------------------------------------------
+
+@pytest.mark.parametrize("fonte", ["shopee_daily", "shopee-stats_daily",
+                                   "shopee-ads_daily", "shopee_product_monthly"])
+def test_s3_fontes_shopee_continuam_nao_criticas(fonte):
+    esperada = next(s for s in hc.EXPECTED_SOURCES if s.source_name == fonte)
+    assert esperada.critical is False
+
+
+def test_s3_todo_shopee_stale_nao_reprova_ok_critical():
+    """Regra preexistente preservada: o gap manual do Shopee nao derruba o
+    critico, e as duas fontes novas nao mudaram isso."""
+    conn = all_fresh_conn()
+    antigo = NOW - timedelta(hours=200)
+    for fonte in ("shopee_daily", "shopee-stats_daily", "shopee-ads_daily",
+                  "shopee_product_monthly"):
+        conn.last_run[fonte] = {"started_at": antigo, "finished_at": antigo,
+                                "status": "failed", "error_message": "gap manual"}
+        conn.last_success[fonte] = antigo
+    report = hc.build_report(conn, now=NOW)
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+
+
+def test_s3_as_regras_das_fontes_antigas_nao_mudaram():
+    esperado = {
+        "ml_daily": (30, True), "tiktok_daily": (30, True),
+        "shopee_daily": (48, False), "shopee-stats_daily": (48, False),
+        "shopee-ads_daily": (48, False), "tiktok_product_daily": (30, True),
+        "ml_produto_ranking": (30, True), "shopee_product_monthly": (48, False),
+    }
+    por_nome = {s.source_name: (s.exec_threshold_hours, s.critical) for s in hc.EXPECTED_SOURCES}
+    for nome, alvo in esperado.items():
+        assert por_nome[nome] == alvo, nome
+    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 2
+
+
+# --- 13. o fake responde explicitamente, sem fallback generico --------------
+
+def test_s3_fake_falha_alto_em_consulta_de_frescor_sem_ramo_explicito():
+    """Guarda do proprio harness: se alguem adicionar uma consulta de frescor e
+    esquecer o ramo no fake, o teste tem de FALHAR em vez de passar pelo
+    `{"n": 0}` generico."""
+    conn = all_fresh_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(date) AS m FROM marts.fact_inexistente_qualquer")
+    with pytest.raises(AssertionError, match="sem ramo explicito"):
+        cur.fetchone()
+
+
+def test_s3_as_duas_consultas_novas_sao_executadas_de_fato():
+    conn = all_fresh_conn()
+    hc.fetch_data_freshness(conn, today=TODAY)
+    assert "SELECT MAX(synced_at) AS m FROM marts.fact_ml_cross_company_summary" in conn.executed
+    assert "SELECT MAX(date) AS m FROM marts.fact_tiktok_channel_efficiency_daily" in conn.executed
+
+
+def test_s3_health_check_nao_le_o_data_mart_nem_faz_count_integral():
+    conn = all_fresh_conn()
+    hc.build_report(conn, now=NOW)
+    for sql in conn.executed:
+        assert " gold." not in sql and "from gold." not in sql.lower()
+        assert " raw." not in sql and "from raw." not in sql.lower()
+    novas = [s for s in conn.executed
+             if "fact_ml_cross_company_summary" in s or "fact_tiktok_channel_efficiency_daily" in s]
+    assert novas, "as consultas novas deveriam ter sido executadas"
+    for sql in novas:
+        assert "COUNT(*)" not in sql, "frescor nao precisa de COUNT integral"
+        assert "JOIN" not in sql.upper()
+
+
+def test_s3_as_duas_fontes_aparecem_no_relatorio_final():
+    report = hc.build_report(all_fresh_conn(), now=NOW)
+    nomes = {s["source_name"] for s in report["sources"]}
+    labels = {d["label"] for d in report["data_freshness"]}
+    for fonte in S3_FONTES:
+        assert fonte in nomes
+    assert S3_LABEL_ML in labels
+    assert S3_LABEL_TK in labels

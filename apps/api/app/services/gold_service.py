@@ -1767,7 +1767,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
             CASE WHEN SUM(followers_views_weighted) > 0
                  THEN SUM(followers_pct_age_55_plus * followers_views_weighted) / SUM(followers_views_weighted)
                  ELSE NULL END AS followers_pct_55_plus
-        FROM gold.tiktok_brand_daily
+        FROM marts.fact_tiktok_brand_content_daily
         WHERE brand = '{brand}'
           AND date BETWEEN '{start}' AND '{end}'
     """
@@ -1779,7 +1779,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
                COALESCE(gmv_live, 0)            AS gmv_live,
                COALESCE(gmv_card, 0)            AS gmv_card,
                COALESCE(new_videos_posted, 0)   AS new_videos_posted
-        FROM gold.tiktok_brand_daily
+        FROM marts.fact_tiktok_brand_content_daily
         WHERE brand = '{brand}'
           AND date BETWEEN '{start}' AND '{end}'
         ORDER BY date
@@ -1790,7 +1790,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
                SUM(gmv_total)    AS gmv,
                SUM(videos_count) AS videos,
                SUM(lives_count)  AS lives
-        FROM gold.tiktok_creator_daily
+        FROM marts.fact_tiktok_creator_daily
         WHERE brand = '{brand}'
           AND date BETWEEN '{start}' AND '{end}'
         GROUP BY creator
@@ -1806,7 +1806,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
                CASE WHEN SUM(video_views) > 0
                     THEN SUM(gmv) / SUM(video_views) * 1000
                     ELSE NULL END  AS gpm
-        FROM gold.tiktok_product_daily
+        FROM marts.fact_tiktok_product_daily
         WHERE brand = '{brand}'
           AND date BETWEEN '{start}' AND '{end}'
         GROUP BY product_id, product_name
@@ -1826,7 +1826,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
                CASE WHEN SUM(page_views) > 0
                     THEN SUM(items_sold)::numeric / SUM(page_views) * 100
                     ELSE NULL END AS cvr_pct
-        FROM gold.v_channel_efficiency
+        FROM marts.fact_tiktok_channel_efficiency_daily
         WHERE brand = '{brand}'
           AND date BETWEEN '{start}' AND '{end}'
         GROUP BY channel
@@ -2123,7 +2123,7 @@ def get_inteligencia(db: Session) -> dict:
                COALESCE(SUM(gross_revenue), 0) AS gmv,
                COALESCE(SUM(ad_spend), 0)      AS ad_spend,
                AVG(CASE WHEN ad_roas > 0 THEN ad_roas END) AS avg_roas
-        FROM gold.ml_produto_ranking
+        FROM marts.fact_ml_produto_ranking
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND product_status IS NOT NULL
         GROUP BY product_status
@@ -2147,7 +2147,7 @@ def get_inteligencia(db: Session) -> dict:
                COALESCE(ad_spend, 0)      AS ad_spend,
                ad_roas, ad_acos_pct, cancel_rate_pct,
                revenue_share_pct, units_sold, days_advertised, ad_efficiency
-        FROM gold.ml_produto_ranking
+        FROM marts.fact_ml_produto_ranking
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND product_status = 'ad_spend_no_sales'
         ORDER BY ad_spend DESC
@@ -2178,7 +2178,7 @@ def get_inteligencia(db: Session) -> dict:
                COALESCE(ad_spend, 0)      AS ad_spend,
                ad_roas, ad_acos_pct, cancel_rate_pct,
                revenue_share_pct, units_sold, days_advertised, ad_efficiency
-        FROM gold.ml_produto_ranking
+        FROM marts.fact_ml_produto_ranking
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND product_status = 'sells+advertised'
           AND ad_roas >= 8
@@ -2211,7 +2211,7 @@ def get_inteligencia(db: Session) -> dict:
                ad_roas, ad_acos_pct, cancel_rate_pct,
                revenue_share_pct, units_sold, days_advertised, ad_efficiency,
                unique_buyers
-        FROM gold.ml_produto_ranking
+        FROM marts.fact_ml_produto_ranking
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND product_status = 'sells_organic_only'
         ORDER BY gross_revenue DESC
@@ -2241,7 +2241,7 @@ def get_inteligencia(db: Session) -> dict:
                COUNT(*)                        AS n_products,
                COALESCE(SUM(gross_revenue), 0) AS gmv,
                COALESCE(SUM(ad_spend), 0)      AS ad_spend
-        FROM gold.ml_produto_ranking
+        FROM marts.fact_ml_produto_ranking
         WHERE brand IN {_fmt_list(ML_BRANDS)}
           AND pareto_bucket IS NOT NULL
         GROUP BY brand, pareto_bucket
@@ -2264,7 +2264,7 @@ def get_inteligencia(db: Session) -> dict:
             SELECT brand, total_buyers, repeat_buyers, repeat_rate_pct,
                    avg_customer_ltv, vip_buyers, one_and_done_buyers,
                    at_risk_or_churned, overall_roas
-            FROM gold.ml_cross_company_summary
+            FROM marts.fact_ml_cross_company_summary
             WHERE brand IN {_fmt_list(ML_BRANDS)}
             ORDER BY brand
         """
@@ -2285,7 +2285,12 @@ def get_inteligencia(db: Session) -> dict:
     except Exception:
         ltv = []
 
-    today = date.today()
+    # Gate S3: o dia operacional e' o dia no Brasil, nunca o do processo. Antes
+    # desta troca a janela de 30 dias de `tk_products` vinha de `date.today()`,
+    # que num servidor UTC vira o dia as 21:00 locais e serviria um recorte de
+    # 30 dias deslocado. Mesma funcao que `/operacoes` ja usa; zero dependencia
+    # nova (`zoneinfo` e' biblioteca padrao).
+    today = _hoje_operacional()
     tk30_start = today - timedelta(days=30)
     tk_products_sql = f"""
         SELECT brand, product_name,
@@ -2298,7 +2303,7 @@ def get_inteligencia(db: Session) -> dict:
                CASE WHEN SUM(gmv) > 0
                     THEN AVG(pct_gmv_card)  ELSE NULL END AS avg_pct_card,
                AVG(NULLIF(rating_avg, 0)) AS avg_rating
-        FROM gold.tiktok_product_daily
+        FROM marts.fact_tiktok_product_daily
         WHERE brand IN {_fmt_list(BRANDS_IN_SCOPE)}
           AND date >= '{tk30_start}'
           AND gmv > 0
