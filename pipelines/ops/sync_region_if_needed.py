@@ -33,10 +33,13 @@ presente em os.environ quando ele for chamado.
 
 Uso:
     python -m pipelines.ops.sync_region_if_needed
+    python -m pipelines.ops.sync_region_if_needed --help   (so' imprime ajuda)
 """
 from __future__ import annotations
 
+import argparse
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,7 +111,35 @@ def run(diagnose_fn=None, sync_fn=None) -> SyncIfNeededResult:
     )
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Parser sem nenhuma flag: este modulo so' tem um modo de operacao.
+
+    Existe para que `--help`/`-h` e qualquer argumento desconhecido sejam
+    resolvidos por argparse ANTES de qualquer efeito colateral. Sem ele,
+    `--help` era silenciosamente ignorado e a execucao seguia direto para
+    load_dotenv + consentimento + diagnose + possivel sync em producao.
+    """
+    return argparse.ArgumentParser(
+        prog="python -m pipelines.ops.sync_region_if_needed",
+        description=(
+            "Wrapper condicional do sync regional: roda o diagnose (somente "
+            "leitura) e so' executa o sync quando ha' divergencia real. Nao "
+            "aceita argumentos e nao faz retry."
+        ),
+        epilog=(
+            "Sem argumentos: executa diagnose e, se necessario, um unico sync. "
+            "O sync herda as guardas de pipelines.sync_region_daily "
+            "(--sync + I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY=1)."
+        ),
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    # ANTES de qualquer efeito colateral: --help sai em 0 e argumento
+    # desconhecido sai em 2, ambos via SystemExit levantado por argparse,
+    # sem tocar .env, consentimento, conexao, diagnose ou sync.
+    _build_parser().parse_args(argv)
+
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=str(REPO_ROOT / ".env"))
     region_sync_consent.ensure_region_sync_consent()

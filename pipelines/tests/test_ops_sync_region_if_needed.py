@@ -163,7 +163,7 @@ def test_sem_retry_automatico_em_falha_de_diagnose():
 
 def test_main_retorna_0_no_op(monkeypatch, capsys):
     monkeypatch.setattr(sut, "run", lambda: sut.SyncIfNeededResult(no_op=True, needs_sync=False, source_rows=100))
-    exit_code = sut.main()
+    exit_code = sut.main([])
     assert exit_code == 0
     assert "NO_OP" in capsys.readouterr().out
 
@@ -177,7 +177,7 @@ def test_main_retorna_0_quando_sync_e_executado(monkeypatch, capsys):
             backup_table="fact_marketplace_region_daily_backup_20260715",
         ),
     )
-    exit_code = sut.main()
+    exit_code = sut.main([])
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "SYNC realizado" in out
@@ -189,7 +189,7 @@ def test_main_retorna_1_e_nunca_propaga_excecao_quando_run_falha(monkeypatch, ca
         raise sut.SyncIfNeededError("sync falhou: falha de conexao (detalhes omitidos por seguranca)")
     monkeypatch.setattr(sut, "run", _raise)
 
-    exit_code = sut.main()
+    exit_code = sut.main([])
 
     assert exit_code == 1
     assert "ERRO" in capsys.readouterr().err
@@ -260,7 +260,7 @@ def test_main_needs_sync_com_consentimento_do_arquivo_chama_sync_uma_vez(monkeyp
     monkeypatch.setattr(sut.srd, "run_sync", _sync_fn)
     monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
 
-    exit_code = sut.main()
+    exit_code = sut.main([])
 
     assert exit_code == 0
     assert len(sync_calls) == 1
@@ -280,7 +280,7 @@ def test_main_needs_sync_false_nao_chama_sync_mesmo_com_consentimento_no_arquivo
     monkeypatch.setattr(sut.srd, "run_sync", lambda args: sync_calls.append(args) or _sync_result())
     monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
 
-    exit_code = sut.main()
+    exit_code = sut.main([])
 
     assert exit_code == 0
     assert sync_calls == [], "needs_sync=False nunca deveria chamar sync, mesmo com consentimento disponivel"
@@ -311,7 +311,7 @@ def test_main_sem_consentimento_bloqueia_antes_de_qualquer_escrita(monkeypatch, 
     monkeypatch.setattr(sut.srd, "run_sync", _fake_sync_fn_espelha_o_gate_original)
     monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py"])
 
-    exit_code = sut.main()
+    exit_code = sut.main([])
 
     assert exit_code == 1
     assert "ERRO" in capsys.readouterr().err
@@ -324,5 +324,211 @@ def test_main_chama_ensure_region_sync_consent(monkeypatch):
     calls = []
     monkeypatch.setattr(sut.region_sync_consent, "ensure_region_sync_consent", lambda: calls.append(1) or False)
     monkeypatch.setattr(sut, "run", lambda: sut.SyncIfNeededResult(no_op=True, needs_sync=False, source_rows=0))
-    sut.main()
+    sut.main([])
     assert calls == [1]
+
+
+# ---------------------------------------------------------------------------
+# Hotfix 18/08/2026 — parsing de argumentos ANTES de qualquer efeito colateral.
+#
+# Bug corrigido: `--help` era ignorado e a execucao seguia direto para
+# load_dotenv + consentimento + diagnose + possivel sync em producao (foi o
+# que aconteceu na operacao de 18/08). Os testes abaixo provam COMPORTAMENTO
+# (nenhum side effect e' alcancado), nao a presenca textual do parser.
+# ---------------------------------------------------------------------------
+
+class _EspiaoDeEfeitos:
+    """Registra qualquer efeito colateral que main() nao deveria alcancar."""
+
+    def __init__(self):
+        self.dotenv = []
+        self.consentimento = []
+        self.run = []
+        self.diagnose = []
+        self.sync = []
+
+    def instalar(self, monkeypatch):
+        import dotenv as _dotenv
+        monkeypatch.setattr(_dotenv, "load_dotenv",
+                            lambda *a, **k: self.dotenv.append(1) or True)
+        monkeypatch.setattr(sut.region_sync_consent, "ensure_region_sync_consent",
+                            lambda: self.consentimento.append(1) or False)
+        monkeypatch.setattr(sut, "run",
+                            lambda *a, **k: self.run.append(1) or pytest.fail(
+                                "run() NAO deveria ser chamado"))
+        monkeypatch.setattr(sut.srd, "run_diagnose",
+                            lambda *a, **k: self.diagnose.append(1) or pytest.fail(
+                                "run_diagnose NAO deveria ser chamado"))
+        monkeypatch.setattr(sut.srd, "run_sync",
+                            lambda *a, **k: self.sync.append(1) or pytest.fail(
+                                "run_sync NAO deveria ser chamado"))
+
+    def nada_aconteceu(self):
+        return not (self.dotenv or self.consentimento or self.run
+                    or self.diagnose or self.sync)
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_help_sai_em_zero_sem_nenhum_efeito_colateral(flag, monkeypatch, capsys):
+    espiao = _EspiaoDeEfeitos()
+    espiao.instalar(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        sut.main([flag])
+
+    assert exc.value.code == 0
+    assert espiao.nada_aconteceu(), (
+        "--help nao pode carregar .env, validar consentimento, abrir conexao, "
+        "diagnosticar nem sincronizar")
+    saida = capsys.readouterr().out
+    assert "usage:" in saida.lower()
+
+
+def test_help_nao_carrega_dotenv_nem_consentimento(monkeypatch):
+    """Explicita as duas chamadas que causavam a escrita acidental."""
+    espiao = _EspiaoDeEfeitos()
+    espiao.instalar(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        sut.main(["--help"])
+
+    assert espiao.dotenv == [], "load_dotenv nao pode ser chamado com --help"
+    assert espiao.consentimento == [], "consentimento nao pode ser validado com --help"
+
+
+def test_argumento_desconhecido_sai_em_2_antes_de_qualquer_efeito(monkeypatch, capsys):
+    espiao = _EspiaoDeEfeitos()
+    espiao.instalar(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        sut.main(["--qualquer-coisa"])
+
+    assert exc.value.code == 2
+    assert espiao.nada_aconteceu()
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_argumento_posicional_desconhecido_tambem_bloqueia(monkeypatch):
+    espiao = _EspiaoDeEfeitos()
+    espiao.instalar(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        sut.main(["--sync"])
+
+    assert exc.value.code == 2
+    assert espiao.nada_aconteceu(), (
+        "--sync nao existe neste wrapper e nao pode virar uma porta lateral")
+
+
+def test_sem_argumentos_mantem_o_caminho_normal(monkeypatch, capsys):
+    """main([]) preserva exatamente o fluxo anterior ao hotfix."""
+    ordem = []
+    import dotenv as _dotenv
+    monkeypatch.setattr(_dotenv, "load_dotenv", lambda *a, **k: ordem.append("dotenv") or True)
+    monkeypatch.setattr(sut.region_sync_consent, "ensure_region_sync_consent",
+                        lambda: ordem.append("consentimento") or False)
+    monkeypatch.setattr(sut, "run",
+                        lambda: ordem.append("run") or sut.SyncIfNeededResult(
+                            no_op=True, needs_sync=False, source_rows=42))
+
+    exit_code = sut.main([])
+
+    assert exit_code == 0
+    assert ordem == ["dotenv", "consentimento", "run"], (
+        "ordem do caminho normal nao pode mudar: .env -> consentimento -> run")
+    assert "NO_OP" in capsys.readouterr().out
+
+
+def test_consentimento_e_validado_antes_de_run(monkeypatch):
+    """Garante que o parser nao inverteu a ordem das guardas."""
+    ordem = []
+    import dotenv as _dotenv
+    monkeypatch.setattr(_dotenv, "load_dotenv", lambda *a, **k: True)
+    monkeypatch.setattr(sut.region_sync_consent, "ensure_region_sync_consent",
+                        lambda: ordem.append("consentimento") or False)
+    monkeypatch.setattr(sut, "run",
+                        lambda: ordem.append("run") or sut.SyncIfNeededResult(
+                            no_op=True, needs_sync=False, source_rows=1))
+
+    sut.main([])
+
+    assert ordem.index("consentimento") < ordem.index("run")
+
+
+def test_main_sem_argv_explicito_le_sys_argv(monkeypatch, capsys):
+    """Comportamento de CLI real: argv=None cai em sys.argv[1:].
+
+    E' esse caminho que o `python -m ...` usa; sem ele o hotfix nao teria
+    efeito na linha de comando.
+    """
+    monkeypatch.setattr(sut.sys, "argv", ["sync_region_if_needed.py", "--help"])
+    espiao = _EspiaoDeEfeitos()
+    espiao.instalar(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        sut.main()
+
+    assert exc.value.code == 0
+    assert espiao.nada_aconteceu()
+
+
+def test_parser_nao_declara_nenhuma_flag_de_escrita():
+    """O wrapper tem um unico modo; qualquer flag nova seria porta lateral."""
+    parser = sut._build_parser()
+    acoes = {a.dest for a in parser._actions}
+    assert acoes == {"help"}, f"parser deveria expor apenas --help, tem {acoes}"
+
+
+def test_help_em_subprocess_real_sai_zero_sem_tocar_banco():
+    """Prova ponta a ponta em `python -m ...`, sem risco de tocar producao.
+
+    Seguranca do teste (nao depende do hotfix estar correto): o ambiente do
+    processo filho recebe DSNs invalidos, e `load_dotenv` NAO sobrescreve
+    variaveis ja presentes no ambiente (override=False e' o default). Logo,
+    se o parsing regredisse e a execucao seguisse para o diagnose, ela
+    falharia contra um host inexistente — nunca contra o banco real. Um
+    exit 0 com "usage:" so' e' possivel se o parser tiver curto-circuitado
+    ANTES de qualquer conexao.
+    """
+    import os
+    import subprocess
+    import sys as _sys
+
+    env = dict(os.environ)
+    env["DATABASE_URL"] = "postgresql://u:p@127.0.0.1:1/naoexiste"
+    env["DATAMART_DATABASE_URL"] = "postgresql://u:p@127.0.0.1:1/naoexiste"
+    env.pop("I_UNDERSTAND_THIS_WRITES_NEON_REGION_DAILY", None)
+
+    proc = subprocess.run(
+        [_sys.executable, "-m", "pipelines.ops.sync_region_if_needed", "--help"],
+        cwd=str(sut.REPO_ROOT), env=env, capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, (
+        f"--help deveria sair em 0; saiu {proc.returncode}. stderr={proc.stderr[:400]}")
+    assert "usage:" in proc.stdout.lower()
+    combinado = (proc.stdout + proc.stderr).lower()
+    for vazamento in ("sync realizado", "no_op:", "backup preservado"):
+        assert vazamento not in combinado, (
+            f"--help nao pode produzir sinal de execucao real: {vazamento!r}")  # noqa: E501
+
+
+def test_argumento_invalido_em_subprocess_real_sai_dois_sem_tocar_banco():
+    """Mesma protecao do teste acima, para o caminho de argumento invalido."""
+    import os
+    import subprocess
+    import sys as _sys
+
+    env = dict(os.environ)
+    env["DATABASE_URL"] = "postgresql://u:p@127.0.0.1:1/naoexiste"
+    env["DATAMART_DATABASE_URL"] = "postgresql://u:p@127.0.0.1:1/naoexiste"
+
+    proc = subprocess.run(
+        [_sys.executable, "-m", "pipelines.ops.sync_region_if_needed", "--sync"],
+        cwd=str(sut.REPO_ROOT), env=env, capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 2, (
+        f"argumento invalido deveria sair em 2; saiu {proc.returncode}")
+    assert "unrecognized arguments" in proc.stderr.lower()
+    assert "sync realizado" not in (proc.stdout + proc.stderr).lower()
