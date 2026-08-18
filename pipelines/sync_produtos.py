@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import psycopg2
@@ -395,6 +395,130 @@ def ml_compare(esperado: dict, obtido: dict) -> list:
             for k, v in esperado.items() if obtido.get(k) != v]
 
 
+# ---------------------------------------------------------------------------
+# Projecao canonica da fotografia para os TIPOS do destino
+# ---------------------------------------------------------------------------
+# A fonte `gold.ml_produto_ranking` usa NUMERIC sem escala e carrega precisao
+# cheia (ex.: cumulative_revenue_pct = 94.838155642022304628). O destino declara
+# escalas (NUMERIC(8,4), NUMERIC(18,2), ...), e a staging e' criada com
+# `LIKE marts.fact_ml_produto_ranking`, herdando essas escalas: o PostgreSQL
+# arredonda no INSERT.
+#
+# Comparar o fingerprint da staging tipada com o Decimal bruto da Gold e'
+# incorreto — foi o que reprovou a primeira tentativa de carga em 18/08/2026,
+# com 1.388 de 1.648 linhas divergindo so' em cumulative_revenue_pct. O
+# arredondamento nao e' perda nova: o upsert anterior ao Gate S3 gravava
+# exatamente os mesmos valores.
+#
+# A correcao NAO relaxa o guardrail. Ela coloca as duas pontas na mesma lingua:
+# projeta a fotografia para o tipo do destino e compara projetada x staging x
+# destino. Diferenca acima do arredondamento declarado continua reprovando.
+
+#: Colunas de `ML_BUSINESS_COLUMNS` que o destino declara como NUMERIC com
+#: escala. Allowlist EXPLICITA: nem o codigo descobre colunas sozinho, nem
+#: aceita que o schema mude sem que alguem olhe.
+ML_NUMERIC_COLUMNS = (
+    "gross_revenue", "units_per_buyer", "cancel_rate_pct", "ad_spend",
+    "ad_roas", "ad_acos_pct", "revenue_share_pct", "cumulative_revenue_pct",
+    "estimated_margin", "price_spread_pct",
+)
+
+
+def ml_target_numeric_scales(cur) -> dict:
+    """Escalas NUMERIC realmente declaradas em `marts.fact_ml_produto_ranking`.
+
+    Lidas do `information_schema`, nunca hardcoded: quem decide para qual escala
+    o PostgreSQL converte a fotografia e' o schema, nao este modulo.
+
+    Levanta antes de qualquer escrita se codigo e schema divergirem: coluna da
+    allowlist ausente, deixou de ser `numeric`, escala nula/invalida, ou coluna
+    que virou `numeric` com escala sem entrar na allowlist. Nos quatro casos, o
+    fingerprint esperado seria calculado sobre uma premissa falsa.
+    """
+    cur.execute("""
+        SELECT column_name, data_type, numeric_precision, numeric_scale
+        FROM information_schema.columns
+        WHERE table_schema = 'marts' AND table_name = 'fact_ml_produto_ranking'
+    """)
+    schema = {r["column_name"]: r for r in cur.fetchall()}
+
+    escalas, problemas = {}, []
+    for col in ML_NUMERIC_COLUMNS:
+        info = schema.get(col)
+        if info is None:
+            problemas.append(f"{col}: coluna numerica esperada ausente no destino")
+            continue
+        if info["data_type"] != "numeric":
+            problemas.append(
+                f"{col}: esperado numeric, schema declara {info['data_type']}")
+            continue
+        escala = info["numeric_scale"]
+        if escala is None or isinstance(escala, bool) or not isinstance(escala, int) \
+                or escala < 0:
+            problemas.append(f"{col}: numeric_scale invalida ({escala!r})")
+            continue
+        escalas[col] = escala
+
+    # O inverso importa igual: coluna de negocio que virou numeric com escala
+    # sem entrar na allowlist ficaria comparada crua contra staging arredondada.
+    for col in ML_BUSINESS_COLUMNS:
+        info = schema.get(col)
+        if info is None:
+            problemas.append(f"{col}: coluna de negocio ausente no destino")
+        elif (info["data_type"] == "numeric" and info["numeric_scale"] is not None
+                and col not in ML_NUMERIC_COLUMNS):
+            problemas.append(
+                f"{col}: numeric(scale={info['numeric_scale']}) no schema mas fora "
+                "de ML_NUMERIC_COLUMNS")
+
+    if problemas:
+        raise RuntimeError(
+            "schema do destino incompativel com o codigo, nada foi escrito: "
+            + "; ".join(problemas))
+    return escalas
+
+
+def _ml_quantiza(valor, escala: int):
+    """Reproduz a conversao para `NUMERIC(p,s)` do PostgreSQL.
+
+    `ROUND_HALF_UP` do modulo `decimal` e' "ties away from zero" — exatamente a
+    regra do PostgreSQL — e nao o meio-par que `round()` do Python usa por
+    default. Sem isso, 0.00005 e -0.00005 divergiriam da staging.
+
+    Nenhuma tolerancia, nenhum epsilon, nenhuma passagem por float.
+    """
+    if valor is None:
+        return None
+    if isinstance(valor, float):
+        raise RuntimeError(
+            "valor float em coluna numeric: o arredondamento binario nao e' "
+            "reproduzivel de forma exata — a fonte precisa entregar Decimal")
+    if not isinstance(valor, Decimal):
+        # int e afins passam intactos: nao ha' arredondamento a reproduzir.
+        return valor
+    return valor.quantize(Decimal(1).scaleb(-escala), rounding=ROUND_HALF_UP)
+
+
+def ml_project_to_target(rows: list, escalas: dict) -> list:
+    """Fotografia projetada para os tipos do destino, em lista NOVA.
+
+    `rows` nunca e' mutada: a staging continua recebendo o valor original e e' o
+    PostgreSQL que aplica o tipo real. Aqui apenas se calcula o que ele vai
+    produzir.
+
+    Toca EXCLUSIVAMENTE as colunas de `escalas`. Texto, data, inteiro, NULL e
+    coluna de chave atravessam byte a byte.
+    """
+    projetadas = []
+    for r in rows:
+        novo = dict(r)
+        for col, escala in escalas.items():
+            if col in novo:
+                novo[col] = _ml_quantiza(novo[col], escala)
+        projetadas.append(novo)
+    return projetadas
+
+
 def ml_validate_snapshot(rows: list) -> list:
     """Reprovacoes possiveis ANTES de qualquer escrita: chave unica, chave nula,
     coluna ausente, tipo nao numerico em coluna somavel."""
@@ -446,6 +570,15 @@ def ml_publish_snapshot(dst, rows: list, now, staging_reader=None) -> dict:
 
     try:
         dc = dst.cursor(cursor_factory=RealDictCursor)
+
+        # PRIMEIRA acao, antes do lock e muito antes do DELETE: se o schema do
+        # destino nao for o que o codigo supoe, a carga morre aqui sem ter
+        # tocado em nada e sem ter tomado lock.
+        escalas = ml_target_numeric_scales(dc)
+        # A fotografia contra a qual tudo sera' reconciliado. `rows` segue
+        # intacta e e' ela que vai para a staging.
+        foto = ml_project_to_target(rows, escalas)
+
         dc.execute("SELECT pg_advisory_xact_lock(%s)", (ML_RANKING_ADVISORY_LOCK_KEY,))
         dc.execute(f"""
             CREATE TEMP TABLE {ML_STAGING_NAME}
@@ -465,10 +598,10 @@ def ml_publish_snapshot(dst, rows: list, now, staging_reader=None) -> dict:
             )
 
         staging_rows = leitor(dc, staging)
-        problemas = ml_compare(ml_aggregates(rows), ml_aggregates(staging_rows))
+        problemas = ml_compare(ml_aggregates(foto), ml_aggregates(staging_rows))
         if problemas:
             raise RuntimeError("staging divergiu da fotografia: " + "; ".join(problemas))
-        if ml_fingerprint(staging_rows) != ml_fingerprint(rows):
+        if ml_fingerprint(staging_rows) != ml_fingerprint(foto):
             raise RuntimeError("staging divergiu da fotografia no fingerprint")
 
         dc.execute("DELETE FROM marts.fact_ml_produto_ranking")
@@ -481,26 +614,32 @@ def ml_publish_snapshot(dst, rows: list, now, staging_reader=None) -> dict:
         resultado["published"] = dc.rowcount
 
         destino_rows = leitor(dc, "marts.fact_ml_produto_ranking")
-        esperado = ml_aggregates(rows)
+        esperado = ml_aggregates(foto)
         problemas = ml_compare(esperado, ml_aggregates(destino_rows))
         if problemas:
             raise RuntimeError("destino divergiu da fotografia: " + "; ".join(problemas))
 
-        so_foto = {_ml_key(r) for r in rows} - {_ml_key(r) for r in destino_rows}
-        so_dest = {_ml_key(r) for r in destino_rows} - {_ml_key(r) for r in rows}
+        so_foto = {_ml_key(r) for r in foto} - {_ml_key(r) for r in destino_rows}
+        so_dest = {_ml_key(r) for r in destino_rows} - {_ml_key(r) for r in foto}
         if so_foto or so_dest:
             raise RuntimeError(
                 f"EXCEPT bidirecional divergiu: fotografia-destino={len(so_foto)} "
                 f"destino-fotografia={len(so_dest)}")
 
-        fp = ml_fingerprint(rows)
+        fp = ml_fingerprint(foto)
         if ml_fingerprint(destino_rows) != fp:
             raise RuntimeError("fingerprint do destino difere do da fotografia")
 
         resultado["checks"] = {
             "aggregates": {k: str(v) for k, v in esperado.items()},
             "except_both_ways": (len(so_foto), len(so_dest)),
+            # O fingerprint REPORTADO e' o da fotografia tipada — o unico que
+            # staging e destino podem igualar. O bruto fica ao lado apenas para
+            # rastreabilidade: se os dois diferirem, houve arredondamento
+            # declarado pelo schema, e isso e' esperado, nao defeito.
             "fingerprint": fp,
+            "fingerprint_raw": ml_fingerprint(rows),
+            "target_scales": dict(escalas),
         }
         dc.close()
         dst.commit()
@@ -576,8 +715,10 @@ def sync_ml(brands: set = None) -> dict:
             raise RuntimeError(
                 "[ml] fotografia reprovada, nada foi escrito: " + "; ".join(problemas))
 
-        fp_foto = ml_fingerprint(rows)
-        print(f"[ml] fingerprint da fotografia: {fp_foto}")
+        # Fingerprint BRUTO, sem a tipagem do destino. Informativo: nao e' o que
+        # a reconciliacao usa, porque a staging herda as escalas do destino e
+        # arredonda no INSERT. O valor conferido sai de `ml_publish_snapshot`.
+        print(f"[ml] fingerprint da fonte (bruto): {ml_fingerprint(rows)}")
 
         dst = _neon()
         # `refreshed_at` UNICO para todas as linhas do mesmo snapshot: antes do
@@ -592,7 +733,9 @@ def sync_ml(brands: set = None) -> dict:
         batch = rows  # contrato de retorno preservado: len(batch) == linhas publicadas
         print(f"[ml] apagadas: {res['deleted']}   publicadas: {res['published']}")
         print(f"[ml] EXCEPT bidirecional: {res['checks']['except_both_ways']}")
-        print(f"[ml] fingerprint do destino confere com a fotografia: {fp_foto}")
+        print(f"[ml] escalas do destino: {res['checks']['target_scales']}")
+        print("[ml] fingerprint conferido (fotografia tipada = staging = destino): "
+              f"{res['checks']['fingerprint']}")
         print(f"[ml] Neon: {len(batch)} linha(s) no snapshot publicado")
         sales_dates = [r["last_sale"] for r in rows if r.get("last_sale")]
         _audit_finish(

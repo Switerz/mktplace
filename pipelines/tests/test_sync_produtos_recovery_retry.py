@@ -11,9 +11,12 @@ Neon nem a auditoria — testado explicitamente abaixo.
 
 Usa conexoes/cursores falsos — nenhuma credencial real, nenhum banco real.
 """
+from decimal import Decimal
+
 import pytest
 
 import pipelines.sync_produtos as sp
+from pipelines.tests.test_s3_ml_snapshot import SCHEMA_DESTINO, schema_rows
 
 RECOVERY_MSG = "canceling statement due to conflict with recovery"
 ROW_VERSIONS_MSG = (
@@ -147,11 +150,19 @@ def test_retry_max_attempts_customizado_e_respeitado(monkeypatch):
 # Integracao com sync_ml() — fakes de conexao/cursor
 # ---------------------------------------------------------------------------
 
+#: As colunas `numeric` vem como `Decimal`, nunca `float`: e' o que o psycopg2
+#: entrega para `numeric` — a fixture usava float e por isso nao representava a
+#: fonte real. Importa desde o Gate S3, porque a projecao para os tipos do
+#: destino quantiza `Decimal` e recusa `float` explicitamente (arredondamento
+#: binario nao e' reproduzivel de forma exata).
 ML_ROW = {
     "brand": "kokeshi", "item_id": "i1", "seller_sku": "sku1", "title": "Produto",
-    "gross_revenue": 100.0, "units_sold": 1, "unique_buyers": 1, "units_per_buyer": 1.0,
-    "cancel_rate_pct": 0.0, "ad_spend": 0.0, "ad_roas": None, "ad_acos_pct": None,
-    "days_advertised": 0, "revenue_share_pct": 1.0, "cumulative_revenue_pct": 1.0,
+    "gross_revenue": Decimal("100.00"), "units_sold": 1, "unique_buyers": 1,
+    "units_per_buyer": Decimal("1.0000"),
+    "cancel_rate_pct": Decimal("0.0000"), "ad_spend": Decimal("0.00"),
+    "ad_roas": None, "ad_acos_pct": None,
+    "days_advertised": 0, "revenue_share_pct": Decimal("1.0000"),
+    "cumulative_revenue_pct": Decimal("1.0000"),
     "estimated_margin": None, "price_spread_pct": None, "pareto_bucket": "A",
     "revenue_velocity": None, "ad_efficiency": None, "action_signal": None,
     "product_status": "active", "first_sale": "2026-01-01", "last_sale": "2026-07-01",
@@ -195,8 +206,13 @@ class _AuditNeonCursor:
         return None
 
     def fetchall(self):
-        """Releituras da reconciliacao: staging e tabela real."""
+        """Releituras da reconciliacao: schema do destino, staging e tabela real."""
         normalizado = " ".join(self._last_sql.split())
+        if "information_schema.columns" in normalizado:
+            # Desde a correcao do Gate S3, a publicacao le' as escalas declaradas
+            # antes de qualquer escrita, para projetar a fotografia nos tipos do
+            # destino. O fake devolve o schema REAL medido no Neon.
+            return schema_rows(SCHEMA_DESTINO)
         if "FROM pg_temp." in normalizado:
             return list(self.conn.staged)
         if "FROM marts.fact_ml_produto_ranking" in normalizado:
@@ -210,10 +226,18 @@ class _AuditNeonCursor:
 def _fake_execute_values(cur, sql, batch, page_size=500):
     """Substitui `execute_values` no fake: converte as tuplas de volta em dicts
     e as guarda como conteudo da staging. `refreshed_at` e' o ultimo elemento e
-    nao entra na reconciliacao (que compara ML_BUSINESS_COLUMNS)."""
+    nao entra na reconciliacao (que compara ML_BUSINESS_COLUMNS).
+
+    A staging e' `LIKE marts.fact_ml_produto_ranking`, entao o PostgreSQL
+    converte cada valor para a escala declarada. O fake aplica a mesma projecao,
+    senao simularia uma staging que guarda precisao infinita — que nao existe.
+    """
     conn = cur.conn
     cols = sp.ML_BUSINESS_COLUMNS
-    conn.staged = [dict(zip(cols, tupla[: len(cols)])) for tupla in batch]
+    cruas = [dict(zip(cols, tupla[: len(cols)])) for tupla in batch]
+    escalas = {c: e for c, (t, _p, e) in SCHEMA_DESTINO.items()
+               if t == "numeric" and e is not None and c in sp.ML_NUMERIC_COLUMNS}
+    conn.staged = sp.ml_project_to_target(cruas, escalas)
 
 
 class _AuditNeonConn:
