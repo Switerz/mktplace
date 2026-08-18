@@ -2422,3 +2422,221 @@ Dois riscos explicitos de inverter a ordem:
   reportaria FAILED.
 
 **Nenhuma dessas acoes foi executada nesta correcao.**
+
+
+## 39. Gate S3 Task 3/3 — publicacao inicial: migrations aplicadas, quatro cargas e a correcao de escala
+
+**Resultado: `SUCCESS` na publicacao dos dados; backend ainda dependente de deploy manual.**
+Executado em 18/08/2026, no worktree isolado do S3, com o checkout operacional
+intocado durante toda a operacao.
+
+### 39.1 Integracao do hotfix
+
+`origin/main` estava em `a1c5ffe` (*fix(pipelines): impede efeitos colaterais no
+help regional*). Os 25 arquivos da Task 2 foram commitados em `6e6f152` sobre
+`d04306e` e **rebased sem force** para `868177d`, cujo pai e' `a1c5ffe`. Prova de
+integridade: os 25 blobs do S3 ficaram byte a byte identicos ao pre-rebase, e os
+dois arquivos do hotfix identicos aos de `a1c5ffe`. Zero conflito.
+
+Validacao pos-rebase: `pipelines/tests` **2474 passed** (+11 do teste que veio com
+o hotfix), suite da API **626 passed** com o ambiente carregado apenas em memoria,
+contratos de `/inteligencia` (63), `/brand-detail` (105) e `/produtos` (62),
+`compileall` em 9 modulos, head unico do Alembic em `011`, e o DDL offline de
+`008:head` gerando 2 `CREATE TABLE`, 1 `CREATE INDEX`, 2 `ALTER TABLE` e 3
+`UPDATE alembic_version`, **sem nenhum `DROP`/`DELETE`/`TRUNCATE`**.
+
+### 39.2 Concorrencia observada: um segundo ator no mesmo dia
+
+O audit log esta em **UTC**, e revelou **duas** execucoes completas em 18/08, nao
+uma:
+
+| Janela (local) | Origem | Rastro em `logs/` |
+|---|---|---|
+| 06:00–06:03 | `full_daily` agendado | sim |
+| **11:10–11:33** | **invocacao direta** | **nenhum** |
+
+A segunda rodou `shopee_daily`, `shopee-stats`, `shopee-ads`, `ml_daily`,
+`tiktok_daily`, `ml_produto_ranking` e `marketplace_region_daily`, e deixou
+`fact_marketplace_region_daily_backup_20260818_113303`. Como nao passou pelo
+`run_with_lock`, **`logs/*.lock` nao a detectaria**. Por isso esta task passou a
+comparar `MAX(sync_run_id)` de `audit.source_sync_run` contra um baseline antes de
+cada escrita — cinco gates, todos aprovados, nenhuma run de terceiro durante a
+janela. **Divida:** canalizar toda execucao manual pelo wrapper de lock, ou
+combinar janelas, antes da proxima operacao concorrente.
+
+### 39.3 Migrations 009–011 aplicadas
+
+`alembic upgrade head`, **uma tentativa**, exit 0, `008 -> 009 -> 010 -> 011`.
+
+| Objeto | Estado apos a migration |
+|---|---|
+| `marts.fact_ml_cross_company_summary` | PK `(brand)`, 9 CHECKs `>= 0 AND <> 'NaN'`, **0 linhas** |
+| `marts.fact_tiktok_channel_efficiency_daily` | PK `(date, brand, channel)`, 6 CHECKs, indice `idx_ftced_brand_date`, **0 linhas** |
+| `fact_tiktok_product_daily.active_videos` | `bigint`, nullable, sem default |
+| `fact_tiktok_product_daily.video_views` | `bigint`, nullable, sem default |
+
+**Zero** relacao preexistente alterada, zero tabela removida.
+
+### 39.4 D1 reprovou por guardrail — e o guardrail estava certo
+
+A primeira tentativa de `sync_produtos --source ml` abortou em 13,4 s com
+`staging divergiu da fotografia no fingerprint`, **sem escrever nada**. Prova de
+rollback integral: `fact_ml_produto_ranking` permaneceu com 1.648 linhas, 1.648
+chaves, fingerprint `d9732f278813082a` e as quatro somas byte a byte iguais a'
+fotografia previa. Audit `sync_run_id=170`, `status=failed`, `ext=0 load=0`, zero
+advisory lock pendente.
+
+**Causa medida.** `gold.ml_produto_ranking` usa `NUMERIC` sem escala e carrega
+precisao cheia; o destino declara escala; e a staging e'
+`CREATE TEMP TABLE (LIKE marts.fact_ml_produto_ranking)`, herdando as escalas do
+destino. O PostgreSQL arredonda no `INSERT`, e o codigo comparava o `Decimal`
+bruto da Gold com o valor **ja arredondado**:
+
+| Coluna | Gold | Marts | Linhas afetadas |
+|---|---|---|---|
+| `cumulative_revenue_pct` | `numeric` | `numeric(8,4)` | **1.388 de 1.648** |
+| `gross_revenue`, `ad_spend`, `estimated_margin` | `numeric` | `(18,2)` / `(14,2)` | 0 |
+
+Exemplo real: `94.838155642022304628` -> `94.8382`. Os agregados passavam porque
+as quatro colunas somaveis ja vem com duas casas da fonte — so' o fingerprint
+acusava. **O arredondamento nao e' perda nova:** o upsert anterior ao Gate S3
+gravava exatamente os mesmos valores. O defeito estava no contrato de
+reconciliacao, nao na carga.
+
+### 39.5 A correcao: projecao canonica para os tipos do destino
+
+Commit `3559ab7` — *fix(pipelines): alinha fingerprint ml a escala do destino*.
+
+- `ml_target_numeric_scales(cur)` le' `data_type`/`numeric_scale` do
+  `information_schema` e **levanta antes do advisory lock e do `DELETE`** se
+  codigo e schema divergirem: coluna da allowlist ausente, que deixou de ser
+  `numeric`, escala nula/invalida, ou coluna de negocio que virou `numeric` com
+  escala **sem** entrar na allowlist. Nenhuma escala hardcoded.
+- `_ml_quantiza(valor, escala)` reproduz o cast para `NUMERIC(p,s)` com
+  `ROUND_HALF_UP`, que e' *ties away from zero* como no PostgreSQL — e nao o
+  meio-par default do Python. Conferido contra o **banco real em 21 casos**,
+  incluindo empates negativos: **zero divergencia**.
+- `ml_project_to_target(rows, escalas)` devolve lista NOVA; `rows` nunca e'
+  mutada e segue sendo o que vai para a staging, para que quem arredonda continue
+  sendo o banco.
+
+Fingerprint, agregados esperados e as comparacoes de staging e destino passaram a
+usar a fotografia projetada. O fingerprint **reportado** e' o tipado; o bruto fica
+em `checks["fingerprint_raw"]` para rastreabilidade. Sem tolerancia, sem epsilon,
+sem float — `float` em coluna `numeric` virou erro explicito. Guardrail
+**nao afrouxado**: diferenca acima do arredondamento declarado, em texto, data,
+chave, `NULL` ou coluna nao numerica continua reprovando com rollback integral.
+36 testes novos; `pipelines/tests` foi a **2510 passed**.
+
+### 39.6 As quatro cargas
+
+Uma tentativa cada, precedida de gate de writer/lock/audit e de reconferencia da
+fonte.
+
+| # | Comando | Resultado | Audit |
+|---|---|---|---|
+| D1 | `sync_produtos --source ml` | 1.648 apagadas / **1.648 publicadas**, `EXCEPT (0,0)`, 17,5 s | `171 success` |
+| D2 | `sync_produtos --source tiktok --full` | 214.573 fonte / **214.573 upserted**, 167,5 s | `172 success` |
+| D3 | `sync_serving_snapshots --target ml_cross_company --apply` | 0 apagadas / **4 publicadas**, `EXCEPT (0,0)` | `173 success` |
+| D4 | `sync_serving_snapshots --target tiktok_channel_efficiency --apply` | 0 apagadas / **4.743 publicadas**, `EXCEPT (0,0)` | `174 success` |
+
+`run_id`: `s3-init-ml-cross-20260818` e `s3-init-tiktok-eff-20260818`. O registro
+`170 failed` foi **preservado**.
+
+Em D1 o fingerprint bruto da fonte (`c1390487d0c9…`) e o tipado
+(`adfd4a5bbaa02847…`) **diferem**, exatamente como a correcao preve; o tipado
+conferiu contra staging e destino.
+
+### 39.7 Reconciliacao
+
+**ML produto.** 1.648 = 1.648 = 1.648 (fonte, fotografia tipada, destino),
+`EXCEPT (0,0)`, zero chave nula, zero duplicidade, zero `NaN`. O destino confere
+com o fingerprint que a propria execucao reconciliou (`adfd4a5bbaa02847…`).
+Contra a fonte relida ~25 min depois ha' deriva em 27 chaves — 26 com receita
+maior (venda nova, +R$ 4.039,34 / +49 unidades) e **uma com queda de
+R$ 69,90 e −1 unidade, com `cancel_rate_pct` subindo de 3,0600 para 3,07: um
+cancelamento**. `cumulative_revenue_pct` divergiu em 808 chaves porque e' um
+acumulado: a mudanca de um produto desloca o percentual de todos abaixo dele no
+ranking. Deriva **integralmente explicada** por restatement pos-snapshot, o mesmo
+principio ratificado no Gate S2 — consistencia e' relativa a' fotografia da
+execucao, nao igualdade eterna.
+
+**TikTok produto.** 214.573 chaves na fonte, 214.573 no destino, **zero chave
+ausente e zero extra**. `active_videos` e `video_views`: **zero divergencia**,
+zero nulo nas duas pontas, **zero zero fabricado**, somas identicas a' fonte
+(12.347.070 e 1.964.308.065). As unicas diferencas de valor estao em
+`pct_gmv_video` (25.852), `pct_gmv_live` (27.408) e `pct_gmv_card` (33.345) e sao
+**exatamente** o arredondamento declarado do destino (`numeric` -> `numeric(8,4)`):
+apos projetar a fonte para a escala, o residuo e' **zero** nas tres. Comportamento
+preexistente da tabela, nao introduzido pelo S3.
+
+**ML cross-company.** 4 = 4, `EXCEPT (0,0)`, fingerprint **identico a' fonte
+viva** (`0fbe1a75dd165cd1…`), quatro marcas, `date_from`/`date_to` `NULL`,
+`synced_at` preenchido, zero agregado divergente.
+
+**TikTok efficiency.** 4.743 = 4.743 no grao `(date, brand, channel)`,
+`EXCEPT (0,0)`, fingerprint **identico** (`b5a3ea91b2c0e30b…`), datas
+2025-10-05..2026-08-17 — **zero data futura** —, cinco marcas e os tres canais
+`LIVE`/`PRODUCT_CARD`/`VIDEO`, zero agregado divergente.
+
+### 39.8 Isolamento
+
+Das 39 tabelas de `marts`, **37 com contagem identica** a' fotografia
+pos-migration; as duas que mudaram sao as autorizadas (`0 -> 4` e `0 -> 4.743`).
+**Zero** relacao fora de escopo alterada: Shopee, regional, daily marketplace,
+gestao diaria, creator, brand content e dimensoes intactas. No audit, apenas os
+cinco registros desta task (170 a 174).
+
+### 39.9 `/produtos` ML e as rotas novas
+
+As **oito** chamadas do baseline (duas paginas, top-100 ordenado, summary e uma
+por marca) repetidas apos as cargas: **8/8 em HTTP 200**, esquema identico,
+conjunto de campos identico, paginacao e filtros identicos, contagens identicas
+(25/25, 100/100, 4 buckets). Valores mudaram — e' o snapshot novo, e o destino
+foi provado identico a' fotografia da execucao. Nenhum item autoritativo perdido:
+o `EXCEPT` contra a fonte e' `(0,0)`.
+
+`/inteligencia` e `/brand-detail` foram exercitadas **com o engine do Data Mart
+substituido por um objeto que levanta em qualquer `connect()`**:
+
+| Rota | Status |
+|---|---|
+| `/inteligencia` | **200** |
+| `/brand-detail?brand=apice&ref_month=2026-07` | **200** |
+| `/brand-detail?brand=apice&ref_month=2026-06` | **200** |
+| `/brand-detail?brand=barbours&ref_month=2026-07` | **200** |
+| `/brand-detail?brand=barbours&ref_month=2026-06` | **200** |
+
+**Zero** query roteada para o Data Mart. Payload de `/inteligencia` completo:
+`ltv` 4, `organic` 20, `pareto` 16, `scale` 20, `signals` 4, `tk_products` 25,
+`urgent` 30 — nenhuma secao vazia, nenhum valor inventado para `NULL`. Antes das
+migrations as duas rotas retornavam **500**; e' a diferenca que fecha o Gate G4
+para elas.
+
+### 39.10 Health check
+
+`STATUS CRITICO: OK` (exit 0). `ml_cross_company` e `tiktok_channel_efficiency`
+com ultimo sucesso ha' 0,2 h, dentro do limite de 30 h, e as duas coberturas
+frescas (`MAX(synced_at)` 0d e `MAX(date)` 1d, limite 3d). `shopee_product_monthly`
+segue `[ATRASADA-CONHECIDO]` e **nao critica**. Invariantes do Bug 8 sem
+divergencia. Nenhuma fonte nova ausente, `failed` ou `stale`.
+
+### 39.11 O que continua em aberto
+
+1. **Backend nao publicado.** O Render segue exigindo acao do proprietario; as
+   rotas so' respondem 200 **localmente**. Afirmar que `/inteligencia` e
+   `/brand-detail` estao no ar seria falso.
+2. **Airflow inexistente** e nao configurado. Nada neste gate depende dele.
+3. **Observacao agendada pendente:** a execucao do `full_daily` com os **12
+   steps** ainda nao foi observada. A primeira oportunidade e' 19/08 as 06:00.
+4. **Divida de auditoria dos syncs O1:** `serving_ml`, `serving_tiktok_brand` e
+   `serving_tiktok_creator` continuam sem registro proprio em
+   `audit.source_sync_run` — o `serving_refresh` nao audita por fonte. Divida
+   anterior, fora do escopo do S3.
+5. **Concorrencia:** ver 39.2.
+6. **Escalas estreitas em outras tabelas.** `fact_tiktok_product_daily` tem o
+   mesmo padrao (`numeric` -> `numeric(8,4)`) em `pct_gmv_*`. Nao e' defeito, mas
+   qualquer reconciliacao futura por fingerprint nessas colunas tera' de projetar
+   para a escala do destino, como o ML passou a fazer.
+7. **06:00 continua divida:** confiabilidade depende de notebook ligado, usuario
+   logado e VPN ativa.
