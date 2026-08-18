@@ -980,7 +980,9 @@ def test_28_os_sete_steps_antigos_mantem_comando_criticidade_e_dependencia():
     sete steps que ja rodavam."""
     esperado = {
         "daily_ml": ("pipelines.ingestion.daily_performance", ("--source", "ml", "--mode", "incremental"), 900, "ml_daily", (), True, False),
-        "daily_tiktok": ("pipelines.ingestion.daily_performance", ("--source", "tiktok", "--mode", "incremental"), 900, "tiktok_daily", (), True, False),
+        # --days 10 adicionado em 18/08/2026 (ver test_29_*): unica alteracao
+        # intencional neste conjunto; os outros seis seguem congelados.
+        "daily_tiktok": ("pipelines.ingestion.daily_performance", ("--source", "tiktok", "--mode", "incremental", "--days", "10"), 900, "tiktok_daily", (), True, False),
         "gold_regional_incremental": ("pipelines.ingestion.gold_regional.loader", ("--incremental",), 300, "gold_regional_incremental", (), True, False),
         "sync_region_if_needed": ("pipelines.ops.sync_region_if_needed", (), 120, "sync_region_daily", ("gold_regional_incremental",), True, False),
         "sync_produtos_ml": ("pipelines.sync_produtos", ("--source", "ml"), 600, "produtos_ml", (), True, False),
@@ -993,6 +995,41 @@ def test_28_os_sete_steps_antigos_mantem_comando_criticidade_e_dependencia():
         assert (s.module, s.args, s.timeout_seconds, s.preflight_source,
                 s.depends_on, s.critical, s.always_run) == alvo, nome
 
+
+def test_29_lookback_do_tiktok_cobre_a_maturacao_de_status():
+    """O TikTok precisa de janela maior que o default de 3 dias.
+
+    Medicao de 18/08/2026 em raw.tiktok_shop_orders: o GMV so' conta
+    COMPLETED/DELIVERED/IN_TRANSIT, e o pedido leva mediana de 5,1 dias ate
+    DELIVERED (p90 8,3) e 9,0 dias ate IN_TRANSIT. Com lookback de 3 dias o
+    dia saia da rotina ainda ~50% imaturo e nunca era revisitado — foi o que
+    congelou 14/08 em -59,7% do valor real. Este teste impede que a janela
+    volte silenciosamente para o default.
+    """
+    p = _por_nome()
+    args = p["daily_tiktok"].args
+    assert "--days" in args, "daily_tiktok precisa de --days explicito"
+    dias = int(args[args.index("--days") + 1])
+    assert dias >= 8, (
+        f"lookback do TikTok e' {dias}; precisa cobrir a estabilizacao "
+        "observada (~8 dias) para nao deixar dia imaturo orfao")
+    assert dias == 10, "valor acordado no gate de 18/08/2026"
+
+
+def test_29_ml_mantem_o_lookback_default():
+    """A mudanca e' cirurgica: so' o TikTok. O ML tem revisao retroativa por
+    cancelamento, de magnitude bem menor (0,17% do mes de agosto), e sua
+    janela nao foi alterada neste gate."""
+    p = _por_nome()
+    assert "--days" not in p["daily_ml"].args
+
+
+def test_29_lookback_cabe_no_timeout_do_step():
+    """Custo medido em 18/08/2026: o fetch de 17 dias levou 43s. Dez dias
+    ficam bem abaixo do timeout do step, com folga de mais de uma ordem de
+    grandeza."""
+    p = _por_nome()
+    assert p["daily_tiktok"].timeout_seconds == 900
 
 def test_28_shopee_manual_refresh_ficou_intacto():
     names = [s.name for s in orch.PIPELINES["shopee_manual_refresh"]]

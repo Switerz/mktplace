@@ -228,7 +228,19 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
     # full_daily inteiro mesmo com ML/TikTok/regional saudaveis).
     "full_daily": (
         Step("daily_ml", "pipelines.ingestion.daily_performance", ("--source", "ml", "--mode", "incremental"), timeout_seconds=900, preflight_source="ml_daily"),
-        Step("daily_tiktok", "pipelines.ingestion.daily_performance", ("--source", "tiktok", "--mode", "incremental"), timeout_seconds=900, preflight_source="tiktok_daily"),
+        # Lookback do TikTok = 10 dias (nao o default de 3). Medicao de
+        # 18/08/2026 sobre raw.tiktok_shop_orders: o status de um pedido leva
+        # mediana de 5,1 dias ate DELIVERED (p90 8,3) e 9,0 dias ate
+        # IN_TRANSIT — e o GMV so' conta COMPLETED/DELIVERED/IN_TRANSIT. Com
+        # janela de 3 dias, um dia saia da rotina ainda ~50% imaturo e nunca
+        # mais era revisitado: o 14/08 ficou congelado em R$ 113.620,30 contra
+        # R$ 282.160,44 reais (-59,7%), porque 71% dos seus pedidos mudaram de
+        # status depois da ultima gravacao. Dez dias cobrem o p90 de DELIVERED
+        # e a mediana de IN_TRANSIT; pela mesma medicao, um dia so' estabiliza
+        # (~0% fora da allowlist) a partir de ~8 dias de idade.
+        # Custo medido: o fetch de 17 dias levou 43s contra os 900s de timeout
+        # do step; 10 dias ficam bem dentro da folga.
+        Step("daily_tiktok", "pipelines.ingestion.daily_performance", ("--source", "tiktok", "--mode", "incremental", "--days", "10"), timeout_seconds=900, preflight_source="tiktok_daily"),
         # Gate B2 (2026-07-15): regional (Gold incremental + sync Neon
         # condicional), ambos CRITICOS de proposito — diferente de
         # sync_produtos_shopee (Gate B1), aqui nao ha' nenhum gap manual
