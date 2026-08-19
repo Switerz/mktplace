@@ -1,22 +1,26 @@
 # Oráculo × Torre Marketplace — Plano e Implementação do Conector MCP
 
-> **Status:** OM0 e **OM1 CONCLUÍDOS** — Task 1/2 (implementação) e Task 2/2
-> (integração com o V3-1A + QA local real).
+> **Status:** OM0 e **OM1 CONCLUÍDOS**; **OM2-P0 CONCLUÍDO com `NO-GO`**.
 > **Nenhum deploy, nenhum segredo, nenhuma publicação.**
+>
+> **Conexão do Claude.ai: `BLOCKED_BY_IDENTITY_PROVIDER`.** O bearer
+> compartilhado **não é compatível** com o custom connector do Claude.ai (§29);
+> OAuth é o único caminho, e **não existe issuer escolhido ou implementado**.
 >
 > **Todo deployment DESABILITADO por construção** — a rota responde 404 em
 > Production, Preview e custom environments enquanto não houver autenticação
 > real (§13.4.1, §25.4, **§26.1**).
-> **OAuth: ainda pendente.** **OM2: NÃO iniciado.**
+> **OAuth: não implementado.** **OM2: NÃO iniciado.**
 > **`/api/mcp` NÃO está habilitado na Vercel; o Claude.ai NÃO foi conectado.**
 >
-> **Gate:** OM0 → OM1 · **Base integrada:** `origin/main` @ `e675948` (V3-1A)
+> **Gate:** OM0 → OM1 → OM2-P0 · **Base integrada:** `origin/main` @ `e675948` (V3-1A)
 > **Branch/worktree:** `oracle-mcp`
 > **Auditoria:** 2026-08-18 · **Checkpoint OM0-F:** 2026-08-18
 > **Implementação local (OM1 Task 1/2):** 2026-08-18 — ver **§25**
 > **Correção consolidada pré-QA:** 2026-08-19 — ver **§26**
 > **Correção terminal pré-QA:** 2026-08-19 — ver **§27**
 > **Task 2/2 — integração e QA local:** 2026-08-19 — ver **§28**
+> **OM2-P0 — compatibilidade de autenticação:** 2026-08-19 — ver **§29**
 
 ---
 
@@ -43,8 +47,13 @@ autenticação **não bloqueia escrever o servidor localmente** — bloqueia
 
 **Recomendação:** OM1 pode começar **local, dev/test e read-only**, desde que a
 rota nasça **fail-closed** e permaneça **desabilitada em produção** até haver
-auth real. O desenho A (OAuth) está adiado; o desenho B (bearer compartilhado)
-**não está aprovado**. Nenhum bypass de plataforma conta como autenticação.
+auth real. Nenhum bypass de plataforma conta como autenticação.
+
+> **Atualizado pelo OM2-P0 (§29):** o desenho B (bearer compartilhado)
+> **não é caminho para conectar o Claude.ai** — o custom connector não permite
+> configurar header estático. Ele sobrevive apenas como alternativa **local**
+> para Claude Code, e continua **não aprovado**. O desenho A (OAuth) segue
+> adiado e permanece o **único** caminho para o Claude.ai.
 
 ### 1.1 Achados que mudam o desenho
 
@@ -143,7 +152,9 @@ Mapeamento por função de serviço (extraído do código):
 
 ```
 Oráculo / Claude.ai
-        │  Streamable HTTP (POST JSON-RPC) + Authorization: Bearer
+        │  Streamable HTTP (POST JSON-RPC) + credencial ainda NÃO definida
+        │  (OM2-P0/§29: bearer estático não é configurável no Claude.ai;
+        │   o caminho é OAuth, hoje sem issuer — a rota segue 404)
         ▼
 https://mktplace-gobeaute.vercel.app/api/mcp        ← Next.js Route Handler
         │                                             runtime = "nodejs" (obrigatório)
@@ -1050,6 +1061,13 @@ itens 1–7 não há o que ligar. Nenhum issuer é inventado neste documento.
 
 ### 13.3 Desenho B — bearer compartilhado (piloto)
 
+> **SUPERADO PELO OM2-P0 (§29): `NO-GO` para o Claude.ai.**
+> O custom connector do Claude.ai **não permite configurar header estático** —
+> aceita a URL do servidor e, opcionalmente, credenciais **OAuth**. Um bearer
+> compartilhado, portanto, **nunca chegaria** ao servidor por esse caminho.
+> O conteúdo abaixo permanece válido **apenas** como referência para um piloto
+> **local** com Claude Code (§29.4, Caminho A), e continua **não aprovado**.
+
 Descrito **apenas como alternativa temporária**, sujeita à aprovação explícita do
 proprietário. **Esta task não o aprova.**
 
@@ -1075,11 +1093,12 @@ vazar, o vazamento é indetectável por identidade — só por padrão de uso.
 **Decisão do proprietário (2026-08-18): OAuth está ADIADO.** A regra vigente
 passa a distinguir *implementar* de *publicar*:
 
-1. **OAuth** — **adiado**. Continua sendo o destino para acesso por pessoa, mas
-   não é pré-requisito do trabalho local. Requisitos do §13.2 permanecem válidos
-   para quando for retomado.
-2. **Bearer compartilhado** — **não aprovado**. Permanece descrito apenas como
-   alternativa possível para um piloto futuro, sujeito a aprovação explícita.
+1. **OAuth** — **adiado**, e — pelo OM2-P0 (§29) — o **único** caminho possível
+   para conectar o Claude.ai. Não é pré-requisito do trabalho local. Requisitos
+   do §13.2 permanecem válidos para quando for retomado.
+2. **Bearer compartilhado** — **não aprovado** e, pelo OM2-P0, **inaplicável ao
+   Claude.ai**. Sobrevive somente como alternativa **local** para Claude Code,
+   sujeita a aprovação explícita.
 3. **Publicação pública do MCP: BLOQUEADA** enquanto não houver autenticação
    real decidida e implementada.
 4. **Implementação local/dev/test: PERMITIDA**, sob as condições do §13.4.1.
@@ -1135,7 +1154,7 @@ registrado como risco R1 (§21).
 
 | # | Decisão | Bloqueia | Opções |
 |---|---|---|---|
-| **D1** | **Modelo de autenticação** — **DECIDIDO em 2026-08-18: OAuth adiado** | **publicação pública** do MCP (não bloqueia OM1 local/dev/test — §13.4.1) | retomar quando houver issuer (desenho A) ou aprovar bearer de piloto (desenho B). Até lá, a rota permanece **desabilitada em produção**, fail-closed |
+| **D1** | **Modelo de autenticação** — OAuth adiado (2026-08-18); **OM2-P0 (2026-08-19) descartou o bearer para o Claude.ai** | **conexão do Claude.ai** (não bloqueia OM1 local/dev/test — §13.4.1) | **escolher um issuer/provedor de identidade** e então desenhar OAuth (desenho A). O bearer (desenho B) só serve a um piloto **local** com Claude Code. Até lá, a rota permanece **404 em todo ambiente hospedado**, fail-closed |
 | **D2** | Proteger a API do Render | não bloqueia OM1, mas é risco aberto | (a) frente separada agora; (b) aceitar formalmente o risco |
 | **D3** | Escopo de exposição | catálogo final | confirmar que GMV/ROAS/produtos por marca podem ser lidos via Claude.ai |
 | **D4** | Operações (PII de creators) | tool futura | (a) financiar projeção sem creator; (b) manter fora |
@@ -1195,7 +1214,7 @@ Mapeado sem alterar nada. Nenhuma configuração foi tocada; a CLI não foi usad
 | Deployment Protection | aparenta **desligada** (200 sem auth) | **não desativar nada**. Se for ligada depois, ver §16.1: **não existe** exceção por path para GET/POST |
 | Fluid Compute | não confirmado | verificar; útil para I/O-bound |
 | Timeout da função | default | alinhar ao teto de 25 s do adapter |
-| Variáveis server-side | nenhuma existe hoje | `MCP_BACKEND_API_URL` e, se D1 = bearer, `ORACLE_MCP_BEARER_TOKEN` — **sem** `NEXT_PUBLIC_` |
+| Variáveis server-side | nenhuma existe hoje | `MCP_BACKEND_API_URL`. **Nenhuma variável de token foi criada**, e o OM2-P0 (§29) descartou o bearer como caminho para o Claude.ai — **sem** `NEXT_PUBLIC_` em nenhuma hipótese |
 | Preview × Production | — | segredos **distintos** por ambiente; piloto começa só em Production |
 | Logs | — | garantir que não registrem `Authorization` |
 
@@ -2487,3 +2506,118 @@ versões inalteradas por esta frente. Nenhuma correção automática foi executa
 **Requisito para publicar de verdade:** autenticação real decidida e
 implementada (§13.4.1). Nenhum bypass da plataforma conta como autenticação
 (§16.1).
+
+---
+
+## 29. OM2-P0 — auditoria de compatibilidade de autenticação
+
+> **Concluído em 2026-08-19.** Veredito:
+> **`NO-GO` — bearer compartilhado não é compatível com o custom connector do
+> Claude.ai.**
+>
+> Task exclusivamente read-only e documental. **Zero código, zero OAuth, zero
+> token criado, zero configuração do Claude.ai ou do Claude Code, zero Vercel,
+> zero deploy. O OM2 não foi iniciado.**
+
+### 29.1 A pergunta e a resposta
+
+**Pergunta:** o Claude.ai, ao configurar um custom/remote MCP connector, permite
+definir um header estático `Authorization: Bearer <token>` para as chamadas
+Streamable HTTP?
+
+**Resposta: não.** O diálogo de custom connector aceita **a URL do servidor** e,
+opcionalmente, em *Advanced settings*, **OAuth Client ID e OAuth Client Secret**.
+Não existe campo para header, API key ou token. A autenticação, quando o servidor
+a exige, ocorre pelo **fluxo do próprio servidor** após a URL ser adicionada.
+
+Um detalhe de arquitetura fecha o caso: o Claude.ai conecta ao servidor **a partir
+da infraestrutura de nuvem da Anthropic**, não do dispositivo do usuário. Não há
+ponto local onde injetar um header.
+
+### 29.2 Matriz de superfícies
+
+| Superfície | Bearer/header estático | Caminho aplicável |
+|---|---|---|
+| **Claude.ai** (custom connector) | **não configurável** | servidor sem auth **ou** OAuth |
+| **Claude Code / cliente local** | **suportado** (`--header`, `headers` em `.mcp.json`) | piloto local **opcional e separado** |
+| **MCP público do Oráculo** | **não autorizado sem auth** | permanece **404** |
+| **Futuro Claude.ai autenticado** | depende de **OAuth** | **bloqueado pela ausência de issuer** |
+
+> **Cuidado com uma confusão fácil:** o *MCP connector da Messages API* aceita um
+> campo `authorization_token`. Isso é uma **superfície diferente** (API de
+> mensagens, uso programático) e a própria documentação o descreve como token
+> **OAuth**, obtido pelo consumidor da API. Ele **não** torna o bearer
+> compartilhado compatível com o custom connector do Claude.ai.
+
+### 29.3 Estado da conexão: `BLOCKED_BY_IDENTITY_PROVIDER`
+
+A conexão do Claude.ai depende de OAuth, e **não existe issuer/provedor de
+identidade escolhido ou implementado** para o Oráculo. Enquanto isso:
+
+- **nenhuma autenticação foi implementada** — nem OAuth, nem bearer, nem PAT;
+- **nenhuma conexão com o Claude.ai foi feita**;
+- **nenhuma publicação ocorreu**;
+- `/api/mcp` **continua respondendo 404** em Production, Preview e custom
+  environments, por construção (§26.1).
+
+### 29.4 Os dois caminhos futuros — nenhum iniciado
+
+#### Caminho A — piloto local opcional (Claude Code)
+
+- Claude Code conectado a um servidor rodando **localmente**;
+- **nenhuma exposição pública**;
+- **nenhuma credencial versionada**;
+- exige **autorização explícita** do proprietário para alterar qualquer
+  configuração MCP local;
+- **não é substituto** da integração com o Claude.ai — é apenas uma forma de
+  exercitar as tools antes de investir em identidade.
+
+#### Caminho B — integração com o Claude.ai
+
+**Depende, previamente, da escolha de um issuer/provedor de identidade.** Só
+depois disso um gate futuro deverá desenhar:
+
+- OAuth 2.1;
+- Protected Resource Metadata (RFC 9728);
+- `WWW-Authenticate`;
+- validação de **issuer** e **audience**;
+- **scopes read-only**;
+- expiração e revogação;
+- ausência de token em logs;
+- preservação do rate limit já implementado.
+
+**O provedor não foi desenhado nem implementado nesta task.**
+
+### 29.5 Fatos preservados
+
+- As **cinco tools read-only** do OM1 continuam implementadas e testadas.
+- A utilidade técnica já foi validada pela suíte existente (168 testes MCP e a
+  suíte completa verde na integração da Task 2/2, §28).
+- **Nenhuma conexão real com o Claude.ai foi feita.**
+- `/api/mcp` segue **desabilitado em todos os ambientes hospedados**.
+- A **Vercel não fornece exceção de Deployment Protection específica para uma
+  rota** (§16.1) — não há como compensar a ausência de auth pela plataforma.
+- **Não existe issuer OAuth escolhido ou implementado.**
+- A **API pública do Render** permanece uma **frente de segurança separada**,
+  ainda aberta (risco R1).
+
+### 29.6 Referências primárias
+
+Consultadas e verificadas na auditoria; citadas, não transcritas:
+
+| Fonte | O que estabelece |
+|---|---|
+| Documentação de **custom connectors** do Claude.ai (Centro de Ajuda) | os campos do diálogo: URL e, em *Advanced settings*, OAuth Client ID/Secret — nenhum campo de header |
+| Documentação **MCP do Claude Code** | suporte explícito a `--header "Authorization: Bearer ..."` e a `headers` em `.mcp.json`, além de OAuth via `/mcp` |
+| **Especificação de Authorization do MCP** (2026-07-28) | OAuth 2.1 como base; Protected Resource Metadata obrigatória para servidor protegido; cliente não envia tokens que não tenham sido emitidos pelo authorization server do servidor |
+| Documentação do **MCP connector da Messages API** | `authorization_token` como token OAuth obtido pelo consumidor — superfície distinta do custom connector |
+
+### 29.7 Decisão que continua pendente do proprietário
+
+**Escolher o issuer/provedor de identidade** — ou aceitar que a integração com o
+Claude.ai fica parada. Sem essa decisão não há gate seguinte a executar.
+
+Como alternativa de baixo custo e sem exposição, o **Caminho A** (piloto local com
+Claude Code) pode ser autorizado separadamente; ele **não** destrava o Claude.ai.
+
+**A frente do Oráculo encerra aqui até haver decisão.**
