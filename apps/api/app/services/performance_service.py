@@ -94,6 +94,28 @@ def _pct(num: float, denom: float, decimals: int = 1) -> float | None:
     return round(num / denom * 100, decimals) if denom > 0 else None
 
 
+def _tk_content_divergence(content_base: float, commercial_gmv: float) -> float | None:
+    """Divergencia entre a base de conteudo do TikTok e o GMV comercial.
+
+    `(content_base - commercial_gmv) / commercial_gmv * 100`.
+
+    E' DIAGNOSTICO DE RECONCILIACAO entre duas linhagens, nunca share, nunca
+    cobertura e nunca correcao do GMV comercial. As duas grandezas vem de
+    fontes diferentes: `content_base` e' passthrough da `gold.tiktok_brand_daily`
+    (quebra calculada sobre o valor antigo, ~`total_amount`) e `commercial_gmv`
+    e' `SUM(sub_total)` da Raw com allowlist de status. Medida em jan-jun/2026
+    a divergencia foi de +6,85%, mas o valor VARIA com periodo e filtros e por
+    isso nao e' constante em lugar algum do codigo.
+
+    Retorna None quando qualquer um dos dois lados nao for positivo: sem base
+    nao ha o que reconciliar, e sem GMV comercial nao ha denominador. Zero
+    fabricado aqui seria pior que ausencia — leria como "linhagens batem".
+    """
+    if content_base <= 0:
+        return None
+    return _pct(content_base - commercial_gmv, commercial_gmv)
+
+
 def _pct_from_source(value) -> float | None:
     """Converte campo conversion_rate do mart (ratio 0-1 ou pct >1) para percentagem."""
     v = _f(value)
@@ -941,6 +963,17 @@ def get_canais(
             tk_vid = _f(tk["gmv_video"])
             tk_live = _f(tk["gmv_live"])
             tk_card = _f(tk["gmv_card"])
+            # UE-F1A: o mix de conteudo se fecha sobre a PROPRIA base de
+            # conteudo, nunca sobre `tk_gmv`. Provado no Gate UE0
+            # (docs/UNIT_ECONOMICS_ATTRIBUTION_AUDIT.md secao 4.2): a soma
+            # video+live+card e' passthrough da `gold.tiktok_brand_daily`, que
+            # calcula a quebra sobre o GMV antigo (~total_amount), enquanto
+            # `gmv` no mart e' SUM(sub_total) da Raw. Dividir pelo GMV
+            # comercial fazia os tres percentuais somarem ~106,85% em
+            # jan-jun/2026 e a barra de atribuicao mentir sobre a particao.
+            # As categorias particionam exatamente a base de conteudo — sao
+            # particao valida de OUTRO numerador.
+            tk_content_base = tk_vid + tk_live + tk_card
             tk_vis = int(_f(tk["visitors"]))
             tk_buyers = int(_f(tk["unique_buyers"]))
             row.update({
@@ -948,9 +981,11 @@ def get_canais(
                 "tiktok_gmv_video": tk_vid or None,
                 "tiktok_gmv_live": tk_live or None,
                 "tiktok_gmv_card": tk_card or None,
-                "tiktok_video_pct": _pct(tk_vid, tk_gmv),
-                "tiktok_live_pct": _pct(tk_live, tk_gmv),
-                "tiktok_card_pct": _pct(tk_card, tk_gmv),
+                "tiktok_video_pct": _pct(tk_vid, tk_content_base),
+                "tiktok_live_pct": _pct(tk_live, tk_content_base),
+                "tiktok_card_pct": _pct(tk_card, tk_content_base),
+                "tiktok_content_gmv_base": tk_content_base or None,
+                "tiktok_content_gmv_divergence_pct": _tk_content_divergence(tk_content_base, tk_gmv),
                 "tiktok_visitors": tk_vis or None,
                 "tiktok_customers": tk_buyers or None,
                 "tiktok_conversion_rate": _pct_from_source(tk.get("avg_conversion_rate")),
@@ -1003,6 +1038,10 @@ def get_canais(
     tk_vid_t = _sum_brand("tiktok_gmv_video")
     tk_live_t = _sum_brand("tiktok_gmv_live")
     tk_card_t = _sum_brand("tiktok_gmv_card")
+    # UE-F1A: base do total = soma dos COMPONENTES entre marcas, e os
+    # percentuais saem dessa soma. Media simples dos percentuais das marcas
+    # estaria errada: pesaria igualmente marcas de tamanhos muito diferentes.
+    tk_content_base_t = tk_vid_t + tk_live_t + tk_card_t
     tk_vis_t = _sum_brand_int("tiktok_visitors")
     tk_cust_t = _sum_brand_int("tiktok_customers")
     ml_buyers_t = _sum_brand_int("ml_unique_buyers")
@@ -1020,9 +1059,11 @@ def get_canais(
         "tiktok_gmv_video": tk_vid_t or None,
         "tiktok_gmv_live": tk_live_t or None,
         "tiktok_gmv_card": tk_card_t or None,
-        "tiktok_video_pct": _pct(tk_vid_t, tk_gmv_t),
-        "tiktok_live_pct": _pct(tk_live_t, tk_gmv_t),
-        "tiktok_card_pct": _pct(tk_card_t, tk_gmv_t),
+        "tiktok_video_pct": _pct(tk_vid_t, tk_content_base_t),
+        "tiktok_live_pct": _pct(tk_live_t, tk_content_base_t),
+        "tiktok_card_pct": _pct(tk_card_t, tk_content_base_t),
+        "tiktok_content_gmv_base": tk_content_base_t or None,
+        "tiktok_content_gmv_divergence_pct": _tk_content_divergence(tk_content_base_t, tk_gmv_t),
         "tiktok_visitors": tk_vis_t or None,
         "tiktok_customers": tk_cust_t or None,
         "tiktok_conversion_rate": (lambda vals: round(sum(vals) / len(vals), 2) if vals else None)(

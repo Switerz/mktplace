@@ -264,9 +264,19 @@ class CanaisKpis(BaseModel):
     tiktok_gmv_video: Optional[float] = None
     tiktok_gmv_live: Optional[float] = None
     tiktok_gmv_card: Optional[float] = None
+    # UE-F1A: os tres percentuais abaixo se fecham sobre
+    # `tiktok_content_gmv_base` (= video+live+card), NAO sobre `tiktok_gmv`.
+    # Sao mix da linhagem de conteudo, nao share das vendas totais.
     tiktok_video_pct: Optional[float] = None
     tiktok_live_pct: Optional[float] = None
     tiktok_card_pct: Optional[float] = None
+    # Denominador explicito do mix, exposto para a UI poder mostrar o valor
+    # monetario da base em vez de so percentuais.
+    tiktok_content_gmv_base: Optional[float] = None
+    # Diagnostico de reconciliacao entre linhagens (base de conteudo x GMV
+    # comercial). Nunca share, nunca cobertura. Ver
+    # docs/UNIT_ECONOMICS_ATTRIBUTION_AUDIT.md secao 11.
+    tiktok_content_gmv_divergence_pct: Optional[float] = None
     tiktok_visitors: Optional[int] = None
     tiktok_customers: Optional[int] = None
     tiktok_conversion_rate: Optional[float] = None
@@ -294,9 +304,13 @@ class CanaisBrandRow(BaseModel):
     tiktok_gmv_video: Optional[float] = None
     tiktok_gmv_live: Optional[float] = None
     tiktok_gmv_card: Optional[float] = None
+    # UE-F1A: mesmo contrato da CanaisKpis — os tres percentuais se fecham
+    # sobre `tiktok_content_gmv_base`, nunca sobre `tiktok_gmv`.
     tiktok_video_pct: Optional[float] = None
     tiktok_live_pct: Optional[float] = None
     tiktok_card_pct: Optional[float] = None
+    tiktok_content_gmv_base: Optional[float] = None
+    tiktok_content_gmv_divergence_pct: Optional[float] = None
     tiktok_visitors: Optional[int] = None
     tiktok_customers: Optional[int] = None
     tiktok_conversion_rate: Optional[float] = None
