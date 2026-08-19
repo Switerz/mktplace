@@ -85,11 +85,55 @@ function cacheSet<T>(key: string, data: T): T {
   return data;
 }
 
+/**
+ * Gate PF1 — decide se um resultado pode ser memoizado.
+ *
+ * O defeito que isto corrige: `withCache` chamava `cacheSet` incondicionalmente,
+ * então uma FALHA ficava memoizada por `CACHE_TTL` inteiro e o botão "Tentar
+ * novamente" não tocava a rede — ele reencontrava a mesma falha no cache. Como
+ * `apiFetch` captura todo erro e devolve `null` (HTTP não-2xx, rede, timeout e
+ * JSON inválido colapsam no mesmo valor), a falha chegava aqui como valor de
+ * retorno normal, e não como exceção.
+ *
+ * As três formas que uma falha assume neste arquivo, todas auditadas:
+ *
+ *   1. `null` — as 12 funções que devolvem `apiFetch(...)` direto;
+ *   2. `{ live: false, ... }` — as 7 que normalizam a falha em dado de
+ *      demonstração (`if (raw) ... else ...`);
+ *   3. `{ data: null, live: raw != null }` — Inteligência e Operações, cujo
+ *      `live` é `false` exatamente quando `apiFetch` falhou.
+ *
+ * `live` é discriminador confiável, não heurística: em todos os pontos que o
+ * atribuem, `live` é verdadeiro se e somente se `apiFetch` devolveu não-nulo, e
+ * NENHUMA interface de payload da API declara um campo `live` — a única com
+ * `live` é `TrendResult`, que é tipo de retorno do frontend.
+ *
+ * O que esta função deliberadamente NÃO faz: julgar por truthiness. `0`,
+ * `false`, `""` e `[]` obtidos com sucesso são valores legítimos e continuam
+ * cacheáveis. Um `if (result)` transformaria zero real em cache miss.
+ *
+ * Resposta 200 com seções parciais é SUCESSO e permanece cacheável — cada
+ * endpoint tem chave própria, então o que falhou não entra no cache e o que
+ * respondeu entra. A parcialidade é tratada na camada de tela.
+ */
+export function isCacheableApiResult(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "object" && "live" in value && (value as { live?: unknown }).live === false) {
+    return false;
+  }
+  return true;
+}
+
 async function withCache<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const hit = cacheGet<T>(key);
+  // `!== undefined` e nao truthiness: e' o que permite cachear 0/false/""/[].
   if (hit !== undefined) return hit;
   const result = await fn();
-  return cacheSet(key, result);
+  // Somente sucesso e' memoizado. O resultado e' devolvido ao chamador nos dois
+  // casos, entao fallback e estado visual seguem exatamente como antes: o que
+  // muda e' o que fica no cache, nunca o que a tela recebe.
+  if (isCacheableApiResult(result)) cacheSet(key, result);
+  return result;
 }
 
 // ---------- fetch helpers ----------
