@@ -347,10 +347,24 @@ test("P20. Tempo Real / Inteligencia / Operacoes: indisponibilidade explicada, s
     assert.match(src, /indispon[íi]ve/i, `${arquivo}: precisa nomear a indisponibilidade`);
     assert.doesNotMatch(codeOnly(src), /MOCK_|mockData|fakeData/, `${arquivo}: nenhum mock local`);
   }
-  // as duas telas de Data Mart declaram que nao herdam filtros globais
+  // As duas telas de Data Mart declaram que NAO herdam filtros globais.
+  //
+  // A verificacao passou a ser da GARANTIA, nao da redacao (Gate V3-1A): a
+  // Inteligencia foi reescrita e diz a mesma coisa com outras palavras. Amarrar
+  // o teste a uma frase literal transformava a copia em contrato e NAO pegava o
+  // defeito que importa — uma tela passar a herdar os filtros de fato. As duas
+  // asserçoes abaixo pegam: ausencia do hook de filtros globais, e presenca de
+  // uma declaracao explicita ao leitor.
   for (const arquivo of ["app/inteligencia/page.tsx", "app/operacoes/page.tsx"]) {
-    assert.match(read(arquivo), /filtros globais de canal, marca e período não se aplicam/,
-      `${arquivo}: contrato independente declarado`);
+    const src = read(arquivo);
+    assert.doesNotMatch(codeOnly(src), /useGlobalFilters/,
+      `${arquivo}: nao pode passar a herdar os filtros globais`);
+    assert.match(
+      src,
+      // tolerante a quebra de linha do JSX — a garantia importa, a formatacao nao
+      /filtros globais de canal, marca e período não se aplicam|não\s+respondem ao período global/,
+      `${arquivo}: contrato independente declarado ao leitor`,
+    );
   }
 });
 

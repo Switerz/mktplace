@@ -12,10 +12,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-const SRC = fs.readFileSync(
-  path.join(import.meta.dirname, "..", "app", "pedidos", "page.tsx"),
-  "utf8",
-);
+// Normalizacao para LF, UMA vez. O repositorio esta com `core.autocrlf=true` e
+// sem `.gitattributes`, entao no Windows o arquivo chega em CRLF — e os
+// marcadores multilinha abaixo (`"useEffect(() => {\n    // Ignora..."`) nunca
+// casavam, deixando este teste vermelho por motivo de plataforma, nao de
+// semantica. `app/pedidos/page.tsx` NAO foi alterado.
+const SRC = fs
+  .readFileSync(path.join(import.meta.dirname, "..", "app", "pedidos", "page.tsx"), "utf8")
+  .replace(/\r\n/g, "\n");
 
 function sliceBetween(src: string, startMarker: string, endMarker: string): string {
   const start = src.indexOf(startMarker);

@@ -1,8 +1,8 @@
 # Gate V3 — Inteligência e Marca 360 (desenho)
 
-**Status:** **V3-0 CONCLUÍDO — DESENHO APROVADO.** Próximo marco: **V3-1A**, que
-**ainda não foi iniciado**. **Nenhuma implementação foi realizada neste gate** — nem
-frontend, nem backend, nem migration, nem pipeline.
+**Status:** **V3-0 CONCLUÍDO — DESENHO APROVADO.** **V3-1A IMPLEMENTADO — AGUARDANDO
+REVISÃO** (Task 1/2; a Task 2/2 de QA visual não começou). V3-1B, V3-2 e V3-3 não
+iniciados. Nenhum backend, migration ou pipeline foi tocado em nenhum momento.
 **Data:** 18/08/2026. **Base:** `origin/main` = `3998af5`.
 **Escopo:** frontend de `/inteligencia` e `/brand/[brand]`, e o fluxo de drill-down
 entre Inteligência, Marca, Canais e Produtos.
@@ -1312,7 +1312,7 @@ divisão reflete uma dependência real, não um subgate para inflar processo.
 | Fase | Conteúdo | Depende de | Critério de saída |
 |---|---|---|---|
 | **V3-0** | Este desenho, corrigido nos sete findings | — | **CONCLUÍDO — DESENHO APROVADO** pelo proprietário em 18/08/2026 |
-| **V3-1A** — fundação da Inteligência | Cabeçalho de regimes (ML fotografia × TikTok 30 dias); **rituária** derivada do payload; remoção das duas falsas affordances (`<span>` de botão e hover de linha); concentração Pareto com diálogo **só de agregados** + CTA para `/produtos`; **wiring da querystring canônica `/produtos?channels=ml&brands=…&pareto_bucket=…` (§9.2)** e de `lens` em `/inteligencia`; listas e fila honestamente truncadas ("amostra capada"); fila com lentes substituindo as três tabelas; LTV filtrável; os 13 estados; tipografia ≥12px; bloco 3 **como listas/faixas**, sem matriz | **payload atual** | 5 tabelas → 1; zero falsa affordance; rituária visível; nenhuma contagem apresentada como total; `/produtos` reproduzível por URL na forma canônica; `lens` com allowlist e sem propagação pela sidebar; suíte + typecheck + build verdes |
+| **V3-1A** — fundação da Inteligência ✅ **IMPLEMENTADO + QA VISUAL + A11Y 44px/12px FECHADA — AGUARDANDO REVISÃO** | Cabeçalho de regimes (ML fotografia × TikTok 30 dias); **rituária** derivada do payload; remoção das duas falsas affordances (`<span>` de botão e hover de linha); concentração Pareto com diálogo **só de agregados** + CTA para `/produtos`; **wiring da querystring canônica `/produtos?channels=ml&brands=…&pareto_bucket=…` (§9.2)** e de `lens` em `/inteligencia`; listas e fila honestamente truncadas ("amostra capada"); fila com lentes substituindo as três tabelas; LTV filtrável; os 13 estados; tipografia ≥12px; bloco 3 **como listas/faixas**, sem matriz | **payload atual** | 5 tabelas → 1; zero falsa affordance; rituária visível; nenhuma contagem apresentada como total; `/produtos` reproduzível por URL na forma canônica; `lens` com allowlist e sem propagação pela sidebar; suíte + typecheck + build verdes |
 | **contrato backend** | **BE6** `opportunity_map` — universo + `total_count` + as duas referências com origem + quadrantes com fronteiras + agregados completos + destaques com `item_id` e `returned_count` + **as duas faixas** (§15.1); **BE3** contagens verdadeiras; **BE4** frescor do snapshot; **BE5** `available_months` (§15.2). **BE1 e BE2 saíram** (§15.0) | — | contratos aceitos e servidos; nenhum campo entregue sem consumidor |
 | **V3-1B** — conclusão da Inteligência | **Matriz 2×2 definitiva**: quatro quadrantes com fronteiras `>=` explícitas, as duas referências exibidas com origem, **agregados do universo separados dos pontos de destaque**, e as **duas faixas** (`sem_ads` e `roas_indisponivel_com_investimento`) como blocos distintos; contagens verdadeiras substituindo "ao menos N"; etiqueta de frescor com timestamp | **BE6** (matriz), BE3, BE4 | nenhuma afirmação de cobertura sem `total_count`; nenhum eixo derivado de `product_status`; pontos truncados **nunca** rotulados como "todos os produtos"; desperdício com Ads visível na sua própria faixa |
 | **V3-2** — Marca 360 | Contêiner de regime mensal cercado + nota de não-sobreposição; `ctx_from=inteligencia` com `ctx_focus` próprio (§9.1); remoção de Demographics; **competências reais** via `available_months`; sinalização de mock no cabeçalho do bloco; guarda de identidade do `brandDetail`; drill-downs de canal e produto **sem benchmark entre superfícies** | V3-1A/B (produtor do contexto) **e obrigatoriamente BE5** | dois regimes inequívocos; nenhuma seção sem etiqueta de período; **zero import de módulo mock**; volta à evidência reconstruindo marca + foco, sem repropagar `ctx_*` |
@@ -1321,5 +1321,446 @@ divisão reflete uma dependência real, não um subgate para inflar processo.
 **Dependências que não podem ser contornadas:** a matriz sem BE6 não existe (degrada
 para listas, §7.3.1); a Marca sem BE5 não pode ser aceita como "competências sem mock".
 
-**V3-1A não foi iniciado.** O desenho está aprovado e versionado; a implementação começa
-numa task própria. Nada além deste documento foi produzido no V3-0.
+**V3-1A está implementado, com QA visual executado em navegador real, e aguarda revisão** (registro em §20; QA em §20.9). **V3-1B, V3-2 e
+V3-3 não foram iniciados.**
+
+---
+
+## 20. Registro do V3-1A — Task 1/2 (implementada em 18/08/2026)
+
+**Estado: `IMPLEMENTADO, QA VISUAL EXECUTADO E A11Y FECHADA — AGUARDANDO REVISÃO`.** Este
+registro descreve a **Task 1/2**, durante a qual nenhum navegador foi usado, nem como
+apoio de implementação. O QA visual formal foi executado depois, na **Task 2/2**
+(18/08/2026), e está registrado no §20.9.
+
+### 20.1 Arquivos
+
+**Criados** — módulos puros (sem React, testáveis com `node:test`):
+
+| Arquivo | Papel |
+|---|---|
+| `src/lib/inteligencia/brands.ts` | marcas ML **derivadas do payload**, seleção local, filtro por marca |
+| `src/lib/inteligencia/lens.ts` | contrato de `lens` (allowlist, parse, construção de href, âncoras) |
+| `src/lib/inteligencia/queue.ts` | união discriminada das três listas, ordenação e notas de amostra |
+| `src/lib/inteligencia/priorities.ts` | cartões de prioridade e contagem por origem |
+| `src/lib/inteligencia/pareto.ts` | concentração por marca, share do bucket, href canônico |
+| `src/lib/produtos-url.ts` | contrato canônico de querystring de `/produtos` |
+
+**Componentes criados:** `components/inteligencia/PriorityCards.tsx`,
+`ConcentrationBars.tsx`, `EvidenceQueue.tsx`, e
+`components/drilldown/DrilldownMetricPair.tsx` — a única peça de composição prevista
+no G2 §3.1 que nunca havia sido construída, agora com o primeiro consumidor real.
+
+**Reescritos:** `app/inteligencia/page.tsx` (sete blocos).
+**Tocado só para o wiring de URL:** `app/produtos/page.tsx`.
+
+### 20.2 O que usa o payload atual
+
+**Tudo.** Nenhum fetch novo, nenhum endpoint novo, nenhuma dependência nova: a página
+continua com **uma única** chamada a `fetchInteligencia()`, e prioridades, faixas,
+concentração, listas compactas, fila e LTV são derivações puras (`useMemo`) sobre esse
+mesmo payload.
+
+### 20.3 O que permanece bloqueado
+
+- **A matriz 2×2 definitiva continua bloqueada por BE6.** O bloco 3 foi entregue como
+  **faixas de amostra priorizada** — sem scatter, sem eixo, sem quadrante, sem mediana
+  de subconjunto, e sem a faixa `roas_indisponivel_com_investimento`. Cada faixa declara
+  a regra que a formou e o limite conhecido da lista. Verificado por teste sobre o
+  código, não sobre a prosa.
+- **Marca 360 continua bloqueada por BE5 e é escopo do V3-2.** Nenhum `ctx_*` é
+  produzido: os destinos de marca são **frios** (`/brand/<marca>?brands=<marca>`).
+- **Contagens verdadeiras dependem de BE3**; **frescor com timestamp depende de BE4**.
+  Enquanto não existirem, a etiqueta ML diz literalmente "fotografia do último
+  carregamento" e as contagens são sempre rotuladas como amostra.
+
+### 20.4 Contratos de URL implementados
+
+`/inteligencia?brands=<marca>&lens=parar|escalar|testar|todos` — `lens` ausente,
+repetido ou inválido resolve para `todos`; a lente padrão é omitida da URL; `ctx_*` é
+descartado na construção do href.
+
+`/produtos?channels=ml&brands=<marca>&pareto_bucket=<bucket>` — parsing e construção
+centralizados em `produtos-url.ts`, com allowlist de canal, marca **validada contra as
+marcas da aba** e bucket allowlisted. Parâmetro ausente, repetido, vazio, inválido ou
+incompatível com o canal é ignorado com segurança. A página fala `brands` (plural); o
+endpoint continua recebendo `brand` (singular), e a tradução é explícita em
+`brandParamForEndpoint`. `lens` e `pareto_bucket` ficam fora de `FILTER_QUERY_KEYS`, e
+nenhuma das duas páginas é filter-aware — a sidebar não os propaga.
+
+### 20.4b Correção consolidada pré-QA (18/08/2026)
+
+Cinco findings da revisão, todos fechados. Os dois primeiros eram defeitos reais de
+comportamento, não de estilo.
+
+**1 — `buildQueue` apagava linhas reais (bloqueador).** O módulo deduplicava por
+`(brand, title)` "como guarda". Só que o grão da tabela-fonte é `(brand, item_id)` e o
+payload **não** entrega `item_id`: duas linhas com o mesmo título podem ser dois
+produtos, e o frontend não tem como provar o contrário. Contraprova reproduzida antes
+da correção — duas linhas de `urgent` com o mesmo título e ad spend 100 e 200 viravam
+**uma** linha e uma soma de **R$ 100 em vez de 300**. Perda silenciosa numa cifra
+monetária, propagada para fila, contagens por lente, cartões de prioridade, somas e
+listas compactas. Correção: concatenação pura na ordem de `KIND_ORDER`, com `kind` como
+única adição, **zero deduplicação**; `evidenceKey` foi **removida** por não ter uso
+honesto. Quatro testes novos provam preservação: mesma lista, origens diferentes,
+contagens/somas exatas em todas as lentes.
+
+**2 — loading estava sendo apresentado como vazio.** `status.loading` caía no ramo do
+conteúdo normal; com `displayData` nulo, a página dizia "Nenhuma prioridade…", "Sem
+dados TikTok…" e "Sem dados de LTV…" **antes de a requisição terminar** — e o texto de
+vazio afirma inclusive "não é modo demonstração", o que agrava a falsidade. Agora existe
+`InteligenciaSkeleton` com `role="status"`/`aria-busy`, sem valor, sem contagem zero, sem
+texto de vazio e sem controle acionável, num ramo que **precede** error e
+indisponibilidade. Chips e cartões ficam `disabled` durante o carregamento.
+
+**3 — bloco 5 não cumpria o contrato drill-down-driven do §7.5.** Cada linha das duas
+listas ML ganhou botão "Detalhe" com nome acessível (produto + marca, ≥44px) abrindo o
+**diálogo único**; cada lista ganhou "Ver todos na fila →" apontando para a lente certa
+com `#fila-evidencias` e a marca preservada, sem `ctx_*` e sem métrica na URL. A redação
+de truncamento passou a `listSampleNote`: **"5 de ao menos 30"** quando a lista bateu o
+LIMIT, "5 de N registros recebidos" quando ficou abaixo. O card TikTok declara o próprio
+teto (`TK_PRODUCTS_LIMIT = 25`) e diz que "3 no mobile é apresentação, não cobertura".
+
+**4 — suíte inteira verde.** As duas falhas pré-existentes foram corrigidas **nos
+testes**, sem tocar produção: `gerencial-v2.test.ts` F5 deixou de exigir que o
+`PROJECT_STATUS.md` repetisse uma frase histórica (o SPEC é a fonte durável dos 16
+acionamentos; a contraprova de que "doze caminhos" não voltou permanece), e
+`pedidos-shopee-only-semantics.test.ts` normaliza a fonte para LF uma única vez —
+`app/pedidos/page.tsx` **não** foi alterado.
+
+**5 — semântica da tabela LTV.** A coluna de ação tinha `<th>` rotulado "Marca",
+duplicando a primeira coluna. Passou a `<th scope="col">Detalhe</th>`. Métricas e
+navegação inalteradas.
+
+**Coerência do wiring de Produtos:** os **seis** pontos de request passaram a usar
+`brandParamForEndpoint(brand)`. A afirmação de centralização deixou de ser retórica —
+zero tradução inline sobrou, e um teste trava os dois números.
+
+### 20.5 Testes e validações
+
+Três arquivos novos, **65 testes**: `inteligencia-v3.test.ts` (43),
+`produtos-url.test.ts` (parsing e construção), `inteligencia-v3-wiring.test.ts` (22
+contratos de JSX que o harness sem DOM não consegue renderizar).
+
+| Validação | Resultado |
+|---|---|
+| `npm test` | **690 pass / 0 fail** — suíte inteira verde, incluindo as duas falhas antes pré-existentes |
+| `npm run typecheck` | limpo |
+| `npm run build` | sucesso; `/inteligencia` 11,8 kB e `/produtos` 11,2 kB, ambas estáticas |
+| `git diff --check` | limpo |
+| Scan de secrets/DSN/token/IP/PII/caminho pessoal | 0 em 2.718 linhas novas |
+| Diff em `apps/api`, `pipelines`, `db`, migrations, `package-lock.json` | **zero** |
+
+**Dois testes preexistentes foram atualizados**, os dois porque codificavam
+comportamento que o desenho V3-0 rejeitou ou copy que virou contrato:
+
+- `u5-resolvedkey-wiring.test.ts` exigia que o filtro de marca alcançasse **apenas**
+  `urgent/scale/organic` e "nunca pareto/ltv" — exatamente o defeito **B9** da
+  auditoria. Reescrito para o contrato aprovado: a seleção alcança **todos** os blocos
+  ML, e nunca o bloco TikTok. A inversão está documentada no próprio teste.
+- `v22-propagacao-visual.test.ts` (P20) casava com uma **frase literal** da nota de
+  escopo. Passou a verificar a **garantia**: ausência de `useGlobalFilters` mais uma
+  declaração explícita ao leitor, em qualquer redação.
+
+### 20.6 As duas falhas que eram pré-existentes (agora corrigidas nos testes)
+
+| Teste | Causa | Prova |
+|---|---|---|
+| `gerencial-v2.test.ts` F5 | exige `dezesseis tipos de acionamento` em `PROJECT_STATUS.md`; a frase saiu no Revamp V2 (`04d0d17`) e o teste nunca foi atualizado | 0 ocorrências em `a1c5ffe`, `d04306e`, `3998af5`, `a5bbbdd` e `309b6bf` — todos anteriores a esta task |
+| `pedidos-shopee-only-semantics.test.ts` | marcador multilinha com `\n` contra arquivo em **CRLF** (`core.autocrlf=true`, sem `.gitattributes`) | `app/pedidos/page.tsx` e o teste são **byte-idênticos ao HEAD**; nenhum dos dois foi tocado |
+
+As duas foram corrigidas **na camada de teste**, sem tocar código de produção:
+`app/pedidos/page.tsx` permanece byte-idêntico ao HEAD, e o SPEC da Gerencial passou a
+ser a fonte durável da contagem em vez de uma frase repetida num documento volátil. A
+sensibilidade a fim de linha do repositório (`core.autocrlf=true` sem `.gitattributes`)
+continua sendo uma dívida própria: aqui ela foi neutralizada no ponto de leitura, não na
+raiz.
+
+### 20.7 Findings corrigidos durante a implementação
+
+- O `evidenceKey` foi escrito com um **byte NUL literal** como separador, o que tornava
+  o módulo um arquivo binário para o git e o grep. Trocado por `\u0000` escapado — o
+  separador NUL é mantido de propósito, porque evita colisão entre `("a b","c")` e
+  `("a","b c")`.
+- Quatro asserções minhas casavam com a **prosa que explica a proibição** em vez de com
+  o código (a página diz "não há matriz, eixo, quadrante nem mediana"). Passaram a usar
+  um `codeOnly` que remove comentários, e a verificar identificadores de
+  implementação — não palavras.
+- O piso de 12px foi escopado corretamente: **estrito** nos cinco arquivos autorais, e
+  em `/produtos` a asserção garante que o wiring **não acrescentou** nenhuma
+  ocorrência (as três existentes são anteriores e ficam como dívida registrada).
+
+### 20.8 Riscos remanescentes
+
+1. **QA visual EXECUTADO** em 18/08/2026 (§20.9), em navegador real. Os **4 achados
+   de alvo/tipografia (A1–A4) foram FECHADOS** no patch terminal de 19/08/2026
+   (§20.10), com medição em navegador nos três viewports. Resta **1 achado de
+   plataforma fora de escopo**: `withCache` memoiza a falha por 5 min, encaminhado
+   para o gate próprio **PF1**, antes do V3-1B.
+2. **Três `text-[10px]` em `/produtos`** permanecem, anteriores a esta task; o redesenho
+   visual daquela página não está no escopo do V3-1A.
+3. **`EvidenceRow` usa `text-[10px]`** na sub-linha de referência. O componente é do G2
+   e é compartilhado por Canais e Gerencial; para não regredir aquelas telas, ele não
+   foi tocado, e os diálogos desta página **não usam** a prop `reference`, de modo que o
+   caminho de 10px não é renderizado aqui.
+4. **Visitar `/produtos` sem querystring passa a reescrever a URL** para
+   `?channels=ml` na primeira renderização. É o preço de tornar o estado reproduzível;
+   estável, sem laço de render.
+5. As duas falhas de teste pré-existentes seguem vermelhas na suíte.
+
+### 20.9 QA visual do V3-1A — Task 2/2 (executada em 18/08/2026)
+
+**Estado: `QA VISUAL EXECUTADO — 1 CORREÇÃO APLICADA, 4 ACHADOS ABERTOS`.**
+
+O QA foi executado **em navegador real**, não simulado. Playwright 1.62.1 veio do
+cache do `npx` já presente na máquina e dirigiu o **Chromium 149.0.7827.55** do cache
+`ms-playwright` via `executablePath` — **nenhuma dependência foi instalada** e
+`package-lock.json` permanece intocado. Todo artefato (scripts, screenshots, JSON de
+resultados, log do servidor) ficou em `%TEMP%`; nada entrou no repositório.
+
+#### Método
+
+O backend real não estava alcançável, então a matriz de estados foi provada por
+**interceptação de rede determinística** (`page.route`) sobre a build de produção
+(`next build` + `next start`, porta local). Isso é o oposto de fabricar dado para
+encobrir ausência de backend: o payload injetado é um **fixture declarado**, cada
+número esperado foi calculado à mão antes de olhar a tela, e o relatório distingue o
+que foi provado por renderização do que foi provado por leitura de código.
+
+Viewports: **1440×900**, **1024×768** e **390×844**, com screenshot inspecionado em
+cada um.
+
+#### O que foi provado por comportamento renderizado
+
+- **Preservação da fila (o bug que a rodada pré-QA corrigiu).** O fixture tem duas
+  linhas com o mesmo par `(marca, título)` dentro de `urgent` e uma colisão
+  `barbours/"COLIDE"` entre `urgent` e `scale` — exatamente o que o dedup removido
+  destruía. Renderizou **6 linhas para 6 linhas de fonte**, duas "DUPLICADO" e duas
+  "COLIDE", na ordem `parar→parar→parar→escalar→escalar→testar`; abas
+  `{Parar 3, Escalar 2, Testar 1, Todos 6}`; somas dos cartões R$ 700 / R$ 4K / R$ 800
+  contra 700 / 4.000 / 800 calculados à mão. Nenhuma linha perdida, nenhuma soma
+  corrompida.
+- **`null` distinto de zero.** A linha `kokeshi` do LTV tem `repeat_rate_pct: 0` real e
+  os demais campos `null`: renderizou `0,0%` para o zero e `—` para os nulos, nunca
+  `0` para ausência.
+- **Estados.** *loading* mostra esqueleto com `role="status"`/`aria-busy`, sem valor e
+  sem controle habilitado; *fresh sem dado* mostra vazio explícito; a **precedência**
+  entre esqueleto, erro e vazio foi verificada na renderização, não no código.
+- **Querystring.** `lens` nos quatro valores, `reload`, `back`/`forward`, valor inválido
+  (`matriz`) e repetido caindo em `todos`, e **zero link de navegação carregando
+  `lens`** — a sidebar não propaga estado de tela.
+- **Rota canônica para `/produtos`.** O CTA do bucket gera
+  `/produtos?channels=ml&brands=barbours&pareto_bucket=A_top50`, sem métrica e sem
+  `ctx_*`; o request ao endpoint sai com **`brand=barbours` no singular** e
+  `pareto_bucket=A_top50`; `reload` reproduz o estado; bucket inválido (`E_outro`) e
+  marca não-ML (`apice`) são descartados da URL.
+- **Drill-downs.** Cartões de prioridade, listas compactas ML, Pareto, fila e LTV:
+  nome acessível específico, um único diálogo, foco inicial no fechar, *focus trap*,
+  `Escape` e clique fora fechando, e **foco devolvido ao elemento de origem**. O bloco
+  TikTok tem **zero acionáveis** — o payload não traz identificador de produto, e a
+  tela não finge que traz.
+- **Truncamento honesto.** As quatro redações de amostra apareceram na tela, e os
+  limites foram provados no *off-by-one* (29/31).
+- **Console e rede.** 849 requests, **somente** para o host local, **zero** request de
+  escrita, **zero** erro de console ou de página em toda a bateria.
+
+#### Correção aplicada — rodada única consolidada
+
+**Separador decimal errado para pt-BR.** Todo percentual, ROAS e nota renderizava com
+**ponto**: `12.0x`, `0.0%`, `8.0%`, `4.5`. A causa é `Number.toFixed()`, insensível a
+locale. Na mesma tela `fmtBrl`/`fmtNumber` já usavam pt-BR, então a página misturava
+duas convenções numéricas numa interface brasileira — e não havia um único número com
+vírgula. Corrigido com `src/lib/inteligencia/format.ts`
+(`decBr`/`pctBr`/`roasBr`/`fractionAsPctBr`) aplicado nos **14 pontos** de
+`page.tsx` (9), `EvidenceQueue.tsx` (4) e `ConcentrationBars.tsx` (1). A correção é
+**só de apresentação**: mesma quantidade de casas decimais, nenhum cálculo, métrica,
+threshold ou arredondamento de negócio alterado. `src/lib/formatters.ts` **não** foi
+tocado — o `fmtPct` de lá é formatador de *delta* (prefixa `+`) e é compartilhado por
+outras telas. Cinco testes focais travam a convenção, incluindo um que reprova qualquer
+`toFixed` que volte aos quatro arquivos visuais do V3-1A.
+
+#### Achados abertos — não corrigidos, por disciplina de escopo
+
+A rodada consolidada única já havia sido gasta na correção acima quando a fase de
+responsividade rodou. Abrir uma segunda onda contrariaria o contrato da task, então os
+achados abaixo ficaram **classificados e com a correção pronta**. O proprietário autorizou explicitamente uma segunda correção estreita, e **os quatro foram fechados no §20.10**.
+Nenhum é bloqueante: todos passam o mínimo AA de alvo (WCAG 2.5.8, 24×24 CSS px).
+
+| # | Achado | Origem | Local | Correção proposta |
+|---|---|---|---|---|
+| A1 ✅ **FECHADO (§20.10)** | Navegação interna de seções com alvo de **24px** de altura (`px-2.5 py-1 text-xs`) — abaixo dos 44px do §12, e é a navegação principal da tela no mobile de 390px | **introduzido pelo V3-1A** | `app/inteligencia/page.tsx`, `<nav>` de âncoras | subir para `py-2.5` ou `min-h-11` |
+| A2 | Glifo de ordenação a `text-[10px]` | **atribuição corrigida no §20.10: é do `SortableHeader` COMPARTILHADO, preexistente ao V3-1A**, e não de `EvidenceQueue.tsx` | `src/components/SortableHeader.tsx` | `text-[10px]` para `text-xs` — **FECHADO no §20.10** |
+| A3 ✅ **FECHADO (§20.10)** | Segmentos da barra Pareto com **30px** de altura (`h-8`) | introduzido pelo V3-1A, por desenho | `ConcentrationBars.tsx` | aceitável: barra empilhada é faixa fina, os alvos têm 330–1100px de largura e passam o AA |
+| A4 ✅ **FECHADO (§20.10)** | Cabeçalhos ordenáveis com **40px** de altura | introduzido pelo V3-1A | `EvidenceQueue.tsx`, `#ltv` | aceitável: controle secundário, 97–252px de largura, passa o AA |
+
+#### Achado real fora do escopo — não corrigido
+
+**`withCache` memoiza a falha por 5 minutos.** `apiFetch` captura todo erro e devolve
+`null`; `withCache` guarda esse `null` sob `CACHE_TTL = 5 * 60 * 1000`. Consequência
+observada: depois de uma falha de rede, o botão **"Tentar novamente" é inerte por cinco
+minutos** — a tela repete a indisponibilidade sem tocar a rede. O defeito está em
+`src/lib/api-client.ts`, **fora da lista de arquivos permitidos** desta task, e é
+**anterior ao V3-1A** (afeta todas as telas que usam o cache). Fica registrado como
+dívida de plataforma, não como regressão deste gate.
+
+#### Dívidas preexistentes — apenas classificadas
+
+As três ocorrências de `text-[10px]` em `/produtos` e a sub-linha de `EvidenceRow`
+seguem como no §20.8: **não são renderizadas nem introduzidas pelo V3-1A** e não foram
+tocadas. Os três avisos `gray-on-color` do detector nas linhas de classes condicionais
+dos chips permanecem **falsos positivos** — o `text-slate-600` é o ramo do ternário que
+só se aplica a fundo claro; nenhum ternário foi alterado para silenciar o detector.
+
+#### Validações reexecutadas depois da correção
+
+`npm test` **695/695** (5 novos), `npm run typecheck` limpo, `npm run build`
+compilando, `git diff --check` limpo, detector Impeccable com **apenas** os 3 falsos
+positivos já pré-classificados, e o scan de segredos/DSN/token/IP/PII/caminhos
+pessoais em 27 arquivos **sem ocorrência**. As jornadas afetadas foram reexecutadas
+nos três viewports.
+
+### 20.10 Patch terminal de acessibilidade — A1 a A4 (19/08/2026)
+
+**Estado: `A1–A4 FECHADOS — CONTRATO DE ALVO E TIPOGRAFIA VERDE NOS TRÊS VIEWPORTS`.**
+
+Segunda correção estreita, **explicitamente autorizada pelo proprietário** depois do
+stop-loss registrado no §20.9. Não é V3-1A.1, não amplia o redesenho e não
+carrega refatoração.
+
+O contrato autoritativo do projeto foi aplicado sem desconto: **todo controle
+interativo com área renderizada mínima de 44×44px** e **nenhum texto ou glifo abaixo
+de 12px**. Os 24px, 30px e 40px do §20.9 deixaram de ser dívida aceitável, e o critério
+AA de 24×24px (WCAG 2.5.8) **não** foi usado como justificativa.
+
+#### Correção de classificação do §20.9
+
+O achado **A2 estava atribuído ao arquivo errado**. O glifo de 10px não vive em
+`EvidenceQueue.tsx`: ele está em `src/components/SortableHeader.tsx`, componente
+**compartilhado por 14 arquivos e 156 usos**. Portanto A2 é **dívida preexistente**
+que o V3-1A passou a renderizar nesta tela, e não um defeito introduzido pelo gate.
+A1 e A3 seguem corretamente atribuídos ao V3-1A; A4 é do mesmo componente
+compartilhado, também preexistente.
+
+#### Diff funcional
+
+| # | Arquivo | De | Para |
+|---|---|---|---|
+| A1 | `app/inteligencia/page.tsx` | `px-2.5 py-1` | `inline-flex items-center justify-center min-h-11 min-w-11 px-2.5` |
+| A2 | `src/components/SortableHeader.tsx` (2 ramos do `SortIcon`) | `text-[10px] leading-none` | `text-xs leading-none` |
+| A4 | `src/components/SortableHeader.tsx` (botão) | `w-full h-full flex` | `w-full h-full min-h-11 flex` |
+| A3 | `src/components/inteligencia/ConcentrationBars.tsx` (contêiner) | `flex h-8` | `flex min-h-11` |
+| A3 | `src/components/inteligencia/ConcentrationBars.tsx` (segmento) | `h-full min-w-[2.5rem]` | `self-stretch min-h-11 min-w-11` |
+
+Duas decisões merecem registro, porque a primeira tentativa **não** fechou o contrato
+e a medição em navegador provou isso:
+
+1. **`h-11` no contêider do Pareto rendia 42px, não 44.** O contêiner tem
+   `border border-slate-100`; no `border-box`, a altura de conteúdo fica em 42px e o
+   filho `h-full` herdava 42px. A correção move a garantia para o próprio acionável:
+   `min-h-11` no contêiner e `self-stretch min-h-11` no botão. A altura passou a ser
+   propriedade do controle, não consequência aritmética do pai.
+2. **O rótulo curto "LTV" media 39,8px de largura.** `min-h-11` resolvia a altura e
+   deixava a largura em 39,8px. `min-w-11` estabelece o piso de 44px sem travar nada:
+   rótulos longos seguem a largura natural (81,6px a 115,2px), como o contrato pede.
+
+O tamanho do glifo é **explícito** (`text-xs`), e não herdado, de propósito:
+`/pedidos` passa `!text-[10px]` no `className` do `<th>` em 7 usos, então um glifo que
+herdasse o tamanho voltaria a 10px naquela tela sem que este componente fosse tocado.
+
+#### Medições em navegador — antes e depois
+
+Playwright 1.62.1 + Chromium 149 do cache local, `getBoundingClientRect()` e
+`getComputedStyle()`, com a build de produção servida localmente.
+
+| Alvo | Antes | 1ª tentativa | Depois | Critério |
+|---|---|---|---|---|
+| Links da navegação interna (6) | 24px de altura; "LTV" 39,8px de largura | 44px de altura; 39,8px de largura | **44×44px** (mín.), largura natural até 115,2px | altura ≥44 obrigatória |
+| Segmentos do Pareto (3) | ~30px | **42px** | **44px** de altura; largura 96,6–1100px | ≥44×44 |
+| Cabeçalhos ordenáveis | ~40px | 44px | **44px** (mín.; 56px e 73px onde o rótulo quebra) | ≥44 de altura |
+| Glifo de ordenação | 10px | 12px | **12px** em todos os 12 glifos | ≥12px |
+
+Repetido nos três viewports, com o mesmo resultado: **1440×900**, **1024×768** e
+**390×844**. Zero overflow horizontal em todos (`scrollWidth == clientWidth`:
+1440/1440, 1024/1024, 390/390) e nenhum controle excedendo a viewport.
+
+#### Contratos funcionais verificados na renderização
+
+- **Navegação interna** leva às seções corretas: `#fila-evidencias` e `#concentracao`
+  em `top=96px`; `#ltv`, última seção da página, em `top=533px` — a página já está no
+  fim do scroll, e a seção fica visível. Rótulos, destinos e ordem inalterados.
+- **Ordenação** asc/desc funcionando: `aria-sort` alterna `descending`→`ascending`, os
+  valores realmente invertem (`R$ 3K, R$ 1K, R$ 800, R$ 0, R$ 0, R$ 0` ⇄ o inverso) e
+  as 6 linhas sobrevivem a todos os estados.
+- **Pareto** abre o drill-down correto: `aria-label="Detalhe do bucket A — top 50% do
+  GMV de BARBOURS"` abre o diálogo do bucket A daquela marca.
+- **Diálogo** com *focus trap*, `Escape` fechando e foco devolvido ao segmento.
+- **Foco visível** por teclado no link interno e no cabeçalho ordenável.
+- **Zero erro de aplicação e zero erro de hidratação** no console.
+
+#### Regressão do componente compartilhado
+
+`SortableHeader` é usado por **14 arquivos, 156 vezes**. Duas verificações
+independentes:
+
+1. **Medição em navegador**, desktop e mobile: `/canais` (4 tabelas, 34 cabeçalhos),
+   `/produtos` (1 tabela, 6), `/qualidade` (2 tabelas, 14) e `/inteligencia` (12) —
+   **66 cabeçalhos**, todos com altura ≥44px, todos os glifos a 12px, ordenação
+   funcional (`aria-sort` `none`→`ascending`), estrutura de tabela sem regressão e zero
+   overflow novo em nenhuma das duas larguras.
+2. **Auditoria estática dos 156 usos.** Os únicos tokens que os consumidores passam via
+   `className` são `!py-2.5` (11×), `!py-3` (7×), `!text-[10px]` (7×), `!px-4` (5×),
+   `!px-5` (3×) e `!px-3` (3×): **nenhum token de altura**. E `className` é aplicado ao
+   `<th>`, nunca ao `<button>` — então `min-h-11` não é sobrescrevível por consumidor
+   algum. A API pública, o `aria-sort`, o `scope="col"`, o alinhamento e a lógica de
+   `onSort` ficaram idênticos.
+
+**Escopo real da medição em `/regioes`:** a rota **foi aberta em desktop e mobile** e
+verificada quanto a viewport, layout e overflow — **não houve overflow horizontal** em
+nenhuma das duas larguras. Mas **a tabela não montou**, nem com payload injetado (os
+quatro endpoints da rota têm contratos que o fixture desta rodada não reproduz, e
+reconstruí-los estava fora do escopo de um patch de três regras CSS). Portanto
+**nenhum `SortableHeader` dessa rota foi medido em runtime**, e nada é afirmado sobre a
+altura dos cabeçalhos da tabela de Regiões. A garantia ali é **indireta**: é o mesmo
+componente compartilhado, agora com `min-h-11`, e a auditoria estática dos 156 usos não
+encontrou nenhum override de altura. Fica registrado como **risco não bloqueante**.
+
+#### Dívida preexistente registrada, não corrigida
+
+`/pedidos` rebaixa o rótulo do `<th>` a 10px com `!text-[10px]` em 7 usos. É
+**anterior ao V3-1A**, está fora de A1–A4 e exigiria editar uma página que não faz
+parte deste patch. Depois desta rodada o glifo daquela tela renderiza a 12px e o
+rótulo continua a 10px — a inconsistência ficou mais visível, e é assim que deve ser
+até que a dívida seja tratada em gate próprio.
+
+#### Testes
+
+`tests/a11y-target-44.test.ts`, **12 testes**, registrado no script `test`. Travam o
+contrato de classe por **token** (e não por substring: `min-w-11` como substring
+casaria com `min-w-110`), a API pública e a semântica do componente compartilhado, e o
+contrato funcional puro do Pareto — `concentrationByBrand` continua devolvendo
+`50/30/15/5` e `null` distinto de zero quando não há GMV total. Dois testes de
+regressão impedem que qualquer arquivo visual do V3-1A volte a declarar texto abaixo de
+12px ou altura fixa abaixo de 44px perto de um acionável.
+
+O cabeçalho do arquivo declara explicitamente o que estes testes **não** são: `node
+--test` não tem DOM, então eles não medem pixel. A medição é a do navegador, acima.
+
+#### Validações
+
+`npm test` **707/707** (12 novos), `npm run typecheck` limpo, `npm run build`
+compilando, `git diff --check` limpo, `package-lock.json` **não modificado**, **zero
+dependência nova**, nenhum arquivo fora de `apps/web/` e `docs/`, detector Impeccable
+com **apenas** os 3 falsos positivos `gray-on-color` já pré-classificados, e scan de
+secrets/token/DSN/IP privado/PII/caminhos pessoais nas linhas novas **sem ocorrência**.
+
+**Nenhum commit, push ou deploy.** O Gate V3-1A **continua aguardando revisão e
+versionamento**.
+
+#### Dívida prioritária de plataforma — fora deste patch
+
+Dívida prioritária de plataforma: `withCache` armazena respostas degradadas/falhas por
+até cinco minutos, tornando "Tentar novamente" ineficaz em algumas telas. Correção deve
+ocorrer em gate próprio **PF1**, antes do V3-1B.
+
+Este defeito **não foi causado pelo V3-1A**: está em `src/lib/api-client.ts`, é
+anterior ao gate e afeta todas as telas que usam o cache.

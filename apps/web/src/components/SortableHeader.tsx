@@ -13,10 +13,10 @@ interface Props {
 
 function SortIcon({ active, direction }: { active: boolean; direction: SortState["direction"] }) {
   if (!active || !direction) {
-    return <span className="text-slate-300 text-[10px] leading-none" aria-hidden="true">↕</span>;
+    return <span className="text-slate-300 text-xs leading-none" aria-hidden="true">↕</span>;
   }
   return (
-    <span className="text-violet-600 text-[10px] leading-none" aria-hidden="true">
+    <span className="text-violet-600 text-xs leading-none" aria-hidden="true">
       {direction === "asc" ? "▲" : "▼"}
     </span>
   );
@@ -47,7 +47,7 @@ export default function SortableHeader({ label, column, sort, onSort, align = "r
       <button
         type="button"
         onClick={() => onSort(column)}
-        className={`w-full h-full flex items-center gap-1 px-4 py-3 hover:text-violet-700 hover:bg-slate-100/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
+        className={`w-full h-full min-h-11 flex items-center gap-1 px-4 py-3 hover:text-violet-700 hover:bg-slate-100/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
           align === "right" ? "justify-end flex-row-reverse" : "justify-start"
         } ${active ? "text-violet-700" : ""}`}
       >

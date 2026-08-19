@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   fetchProdutosML, fetchProdutosTikTok, fetchProdutosShopee,
   fetchProdutosMLSummary, fetchProdutosTikTokSummary, fetchProdutosShopeeSummary,
@@ -72,10 +73,22 @@ function fmtRefreshedAt(iso: string | null): string {
   }
 }
 
+import {
+  brandParamForEndpoint, buildProdutosQuery, parseProdutosUrl, type ParetoBucket,
+} from "@/lib/produtos-url";
+
 const PERIOD_MONTHS_BACK = 7;
 
-export default function ProdutosPage() {
-  const [tab, setTab] = useState<Tab>("ml");
+function ProdutosPageInner() {
+  // Contrato canonico de querystring (Gate V3-1A, §9.2 do plano V3):
+  //   /produtos?channels=ml&brands=<marca>&pareto_bucket=<bucket>
+  // Todo parsing passa por `parseProdutosUrl`, que e' allowlisted e degrada
+  // com seguranca — nao existe leitura ad hoc de searchParams nesta pagina.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const fromUrl = useMemo(() => parseProdutosUrl(searchParams), [searchParams]);
+
+  const [tab, setTab] = useState<Tab>(fromUrl.tab ?? "ml");
   // Gerado a partir da data atual em vez de uma lista fixa hardcoded (Gate 2,
   // produtos_audit.md secao 10.4) — calculado uma vez por montagem da pagina.
   const monthOptions = useMemo(() => lastNMonths(PERIOD_MONTHS_BACK, new Date()), []);
@@ -84,10 +97,16 @@ export default function ProdutosPage() {
   // Filtros padronizados (marca + bucket) — marca e compartilhada entre
   // abas (preservada quando existe no canal); bucket e sempre por aba,
   // porque cada canal calcula seu proprio ranking Pareto.
-  const [brand, setBrand] = useState("");
-  const [mlBucket, setMlBucket] = useState<string | null>(null);
-  const [tkBucket, setTkBucket] = useState<string | null>(null);
-  const [shBucket, setShBucket] = useState<string | null>(null);
+  const [brand, setBrand] = useState(fromUrl.brand ?? "");
+  const [mlBucket, setMlBucket] = useState<string | null>(
+    fromUrl.tab === "ml" ? fromUrl.bucket : null,
+  );
+  const [tkBucket, setTkBucket] = useState<string | null>(
+    fromUrl.tab === "tiktok" ? fromUrl.bucket : null,
+  );
+  const [shBucket, setShBucket] = useState<string | null>(
+    fromUrl.tab === "shopee" ? fromUrl.bucket : null,
+  );
 
   // Filtros especificos do ML (nao existem em TikTok/Shopee)
   const [mlSignal, setMlSignal] = useState("");
@@ -205,7 +224,7 @@ export default function ProdutosPage() {
       let failed = false;
       try {
         result = await fetchProdutosML({
-          brand: brand || undefined,
+          brand: brandParamForEndpoint(brand),
           pareto_bucket: mlBucket || undefined,
           action_signal: mlSignal || undefined,
           product_status: mlStatus || undefined,
@@ -233,7 +252,7 @@ export default function ProdutosPage() {
       let failed = false;
       try {
         result = await fetchProdutosTikTok({
-          brand: brand || undefined,
+          brand: brandParamForEndpoint(brand),
           period,
           pareto_bucket: tkBucket || undefined,
           limit: PAGE_SIZE,
@@ -259,7 +278,7 @@ export default function ProdutosPage() {
       let failed = false;
       try {
         result = await fetchProdutosShopee({
-          brand: brand || undefined,
+          brand: brandParamForEndpoint(brand),
           period,
           pareto_bucket: shBucket || undefined,
           limit: PAGE_SIZE,
@@ -291,7 +310,7 @@ export default function ProdutosPage() {
       let failed = false;
       try {
         result = await fetchProdutosMLSummary({
-          brand: brand || undefined, action_signal: mlSignal || undefined,
+          brand: brandParamForEndpoint(brand), action_signal: mlSignal || undefined,
           product_status: mlStatus || undefined, revenue_velocity: mlVelocity || undefined,
         });
       } catch {
@@ -312,7 +331,7 @@ export default function ProdutosPage() {
       let result: ProdutosChannelSummary | null = null;
       let failed = false;
       try {
-        result = await fetchProdutosTikTokSummary({ brand: brand || undefined, period });
+        result = await fetchProdutosTikTokSummary({ brand: brandParamForEndpoint(brand), period });
       } catch {
         failed = true;
       } finally {
@@ -331,7 +350,7 @@ export default function ProdutosPage() {
       let result: ProdutosChannelSummary | null = null;
       let failed = false;
       try {
-        result = await fetchProdutosShopeeSummary({ brand: brand || undefined, period });
+        result = await fetchProdutosShopeeSummary({ brand: brandParamForEndpoint(brand), period });
       } catch {
         failed = true;
       } finally {
@@ -356,6 +375,22 @@ export default function ProdutosPage() {
   useEffect(() => { if (tab === "ml") setMlOffset(0); }, [tab]);
   useEffect(() => { if (tab === "tiktok") setTkOffset(0); }, [tab]);
   useEffect(() => { if (tab === "shopee") setShOffset(0); }, [tab]);
+
+  // Sincroniza a URL com o estado atual, sem navegar e sem empilhar
+  // historico. `pareto_bucket` fica FORA de FILTER_QUERY_KEYS e `/produtos`
+  // nao e' filter-aware — a sidebar nunca transporta esses parametros para
+  // outra tela. Nenhuma metrica viaja: so' canal, marca e bucket.
+  const activeBucket = tab === "ml" ? mlBucket : tab === "tiktok" ? tkBucket : shBucket;
+  useEffect(() => {
+    const next = buildProdutosQuery({
+      tab,
+      brand,
+      bucket: (activeBucket as ParetoBucket | null) ?? null,
+    });
+    if (next !== searchParams.toString()) {
+      router.replace(`/produtos?${next}`, { scroll: false });
+    }
+  }, [tab, brand, activeBucket, router, searchParams]);
 
   function handleTabChange(next: Tab) {
     setTab(next);
@@ -584,5 +619,14 @@ export default function ProdutosPage() {
           </div>
         )}
     </PageContainer>
+  );
+}
+
+export default function ProdutosPage() {
+  // `useSearchParams` exige limite de Suspense no App Router.
+  return (
+    <Suspense fallback={<PageContainer><p className="text-sm text-slate-500">Carregando produtos…</p></PageContainer>}>
+      <ProdutosPageInner />
+    </Suspense>
   );
 }

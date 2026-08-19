@@ -1,133 +1,162 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
-import KpiCard from "@/components/KpiCard";
-import {
-  fetchInteligencia,
-  type InteligenciaData,
-  type ProductSignalRow,
-  type ParetoRow,
-  type LtvRow,
-  type TkProductRow,
-} from "@/lib/api-client";
-import { fmtBrl, fmtNumber } from "@/lib/formatters";
-import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
+import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
+import DrilldownMetricPair from "@/components/drilldown/DrilldownMetricPair";
+import EvidenceRow from "@/components/drilldown/EvidenceRow";
+import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import PriorityCards from "@/components/inteligencia/PriorityCards";
+import ConcentrationBars from "@/components/inteligencia/ConcentrationBars";
+import EvidenceQueue from "@/components/inteligencia/EvidenceQueue";
+import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import { fetchInteligencia, type InteligenciaData, type LtvRow } from "@/lib/api-client";
+import { fmtBrl, fmtNumber } from "@/lib/formatters";
+import { decBr, pctBr, roasBr } from "@/lib/inteligencia/format";
+import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import { computeRequestStatus } from "@/lib/request-freshness";
+import {
+  BRAND_ALL, brandLabel, brandScopeLabel, filterByBrand, mlBrandsFromPayload, parseBrandSelection,
+} from "@/lib/inteligencia/brands";
+import {
+  buildLensHref, INTELIGENCIA_ANCHORS, LENSES, LENS_LABELS, parseLens, readSingleParam, type Lens,
+} from "@/lib/inteligencia/lens";
+import {
+  buildQueue, KIND_LABELS, KIND_RULES, lensSampleNote, listSampleNote, queueForLens,
+  sampleNote, sortForLens, TK_PRODUCTS_LIMIT, tkSampleNote, type EvidenceItem,
+} from "@/lib/inteligencia/queue";
+import { buildPriorities, priorityLimit, receivedByKind, type Priority } from "@/lib/inteligencia/priorities";
+import {
+  BUCKET_LABEL, buildParetoProdutosHref, concentrationByBrand, type BucketShare,
+} from "@/lib/inteligencia/pareto";
 
-const BRAND_LABELS: Record<string, string> = {
-  apice: "ÁPICE",
-  barbours: "BARBOURS",
-  kokeshi: "KOKESHI",
-  lescent: "LESCENT",
-  rituaria: "RITUÁRIA",
-};
+// ---------------------------------------------------------------------------
+// Regimes temporais — a página tem DOIS, e eles nunca se misturam.
+//
+// Os blocos ML leem `marts.fact_ml_produto_ranking`, uma fotografia acumulada
+// SEM coluna de data: não respondem a `date_from`/`date_to` e não têm janela.
+// `tk_products` é o único bloco com janela (30 dias). O texto do snapshot é
+// literal enquanto BE4 não entregar `refreshed_at` — nunca um timestamp
+// inventado.
+// ---------------------------------------------------------------------------
+const REGIME_ML = "Mercado Livre · fotografia do último carregamento";
+const REGIME_TK = "TikTok Shop · últimos 30 dias";
 
-const ML_BRANDS = ["barbours", "kokeshi", "lescent"];
-
-const PARETO_COLORS: Record<string, string> = {
-  A_top50: "bg-violet-600",
-  B_next30: "bg-violet-400",
-  C_next15: "bg-violet-200",
-  D_tail: "bg-slate-200",
-};
-
-const PARETO_TEXT: Record<string, string> = {
-  A_top50: "text-white",
-  B_next30: "text-white",
-  C_next15: "text-violet-800",
-  D_tail: "text-slate-600",
-};
-
-const VELOCITY_STYLES: Record<string, string> = {
-  high: "bg-emerald-100 text-emerald-800",
-  medium: "bg-amber-100 text-amber-800",
-  low: "bg-rose-100 text-rose-700",
-  zero: "bg-slate-100 text-slate-500",
-};
-
-const VELOCITY_LABELS: Record<string, string> = {
-  high: "Alta",
-  medium: "Média",
-  low: "Baixa",
-  zero: "Zero",
-};
-
-function truncate(s: string | null | undefined, n: number) {
-  if (!s) return "—";
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
-
-function fmt(v: number | null | undefined, decimals = 1): string {
-  if (v == null) return "—";
-  return v.toFixed(decimals);
-}
-
-function VelocityBadge({ v }: { v: string | null }) {
-  if (!v) return <span className="text-slate-300">—</span>;
+function RegimeBadge({ text, tone = "ml" }: { text: string; tone?: "ml" | "tk" }) {
+  const cls = tone === "ml"
+    ? "bg-slate-100 text-slate-700 border-slate-200"
+    : "bg-violet-50 text-violet-800 border-violet-200";
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${VELOCITY_STYLES[v] ?? "bg-slate-100 text-slate-500"}`}>
-      {VELOCITY_LABELS[v] ?? v}
+    <span className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-lg border ${cls}`}>
+      {text}
     </span>
   );
 }
 
-function ParetoBadge({ v }: { v: string | null }) {
-  if (!v) return <span className="text-slate-300">—</span>;
-  const label = v.replace("_top50", "").replace("_next30", "").replace("_next15", "").replace("_tail", "");
+function SectionCard({ id, title, subtitle, regime, action, children }: {
+  id?: string;
+  title: string;
+  subtitle?: string;
+  regime?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${PARETO_COLORS[v] ?? "bg-slate-100"} ${PARETO_TEXT[v] ?? "text-slate-700"}`}>
-      {label}
-    </span>
+    <section
+      id={id}
+      className={`bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden${id ? " scroll-mt-24" : ""}`}
+    >
+      <div className="px-4 sm:px-6 py-4 border-b border-violet-50 flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
+          {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+          {regime && <p className="text-xs text-slate-400 mt-1">{regime}</p>}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
   );
 }
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+/** `null` → "—" com título "sem dado"; zero continua sendo zero. */
+function nullable(v: number | null | undefined, fmt: (x: number) => string) {
+  if (v == null) return <span className="text-slate-400" title="sem dado">—</span>;
+  return <span className="tabular-nums">{fmt(v)}</span>;
+}
+
+/**
+ * Estrutura neutra durante `status.loading`.
+ *
+ * Existe porque o ramo de carregamento estava caindo no conteudo normal: com
+ * `displayData` nulo, a pagina exibia "Nenhuma prioridade...", "Sem dados
+ * TikTok..." e "Sem dados de LTV..." enquanto a requisicao ainda estava em voo.
+ * Dizer "nao ha dado" antes de a resposta chegar e' falso — e o texto de vazio
+ * da pagina afirma inclusive que "nao e' modo demonstracao", o que agrava a
+ * mentira. Aqui nao ha valor, nao ha contagem zero, nao ha texto de vazio e
+ * nao ha controle acionavel.
+ */
+function InteligenciaSkeleton() {
   return (
-    <div className="px-6 py-4 border-b border-violet-50">
-      <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
-      {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+    <div role="status" aria-busy="true" aria-live="off" className="flex flex-col gap-6">
+      <span className="sr-only">Carregando inteligência…</span>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <SkeletonKpiCard />
+        <SkeletonKpiCard />
+        <SkeletonKpiCard />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse min-h-[9rem]">
+            <div className="h-3 bg-slate-100 rounded w-32" />
+            <div className="h-3 bg-slate-100 rounded w-full" />
+            <div className="h-8 bg-slate-200 rounded w-16 mt-auto" />
+          </div>
+        ))}
+      </div>
+      <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
+        <div className="px-4 sm:px-6 py-4 border-b border-violet-50 animate-pulse">
+          <div className="h-3 bg-slate-100 rounded w-48" />
+        </div>
+        <table className="w-full text-sm">
+          <tbody><SkeletonTableRows rows={5} cols={6} /></tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
-function TableWrap({ children }: { children: React.ReactNode }) {
-  return (
-    <TableScrollHint>
-      <table className="w-full text-sm">{children}</table>
-    </TableScrollHint>
-  );
-}
+type DialogState =
+  | { kind: "priority"; priority: Priority }
+  | { kind: "bucket"; brand: string; share: BucketShare; totalGmv: number }
+  | { kind: "evidence"; item: EvidenceItem };
 
-function Th({ children, right }: { children: React.ReactNode; right?: boolean }) {
-  return (
-    <th className={`px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider ${right ? "text-right" : "text-left"}`}>
-      {children}
-    </th>
-  );
-}
+function InteligenciaPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
-export default function InteligenciaPage() {
   const [data, setData] = useState<InteligenciaData | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
-  const [brandFilter, setBrandFilter] = useState<string>("all");
-  // Chave da ultima requisicao resolvida (sucesso ou falha) — comparada com
-  // a chave atual para nunca deixar uma resposta obsoleta (de um retry
-  // anterior) sobrescrever o retry ATUAL em andamento (mesmo padrao
-  // Financeiro/Regioes/Qualidade/Pedidos, Gate U4/U5). Esta tela nao tem
-  // filtros globais — a unica variavel de identidade e o proprio retryKey.
   const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+
+  // A tela não herda filtros globais (decisão do U5, preservada). A única
+  // variável de identidade da requisição continua sendo o `retryKey` — marca e
+  // lente são recorte LOCAL sobre o payload, não parâmetros de fetch.
   const requestKey = useMemo(() => String(retryKey), [retryKey]);
 
   useEffect(() => {
-    // Ignora a resposta se um novo retry disparar antes dela chegar.
     let ignore = false;
     setLoading(true);
     setError(null);
@@ -143,748 +172,635 @@ export default function InteligenciaPage() {
       .catch(() => {
         if (ignore) return;
         setError("Falha ao carregar dados de inteligência. Verifique a conexão.");
-        // A chave precisa ser marcada como resolvida MESMO na falha — senao
-        // `computeRequestStatus` nunca sai de "loading".
+        // Resolvida TAMBÉM na falha — senão `computeRequestStatus` nunca sai
+        // de "loading" (Finding 2 do Gate U4).
         setResolvedKey(key);
         setLoading(false);
       });
     return () => { ignore = true; };
   }, [retryKey]);
 
-  // FINDING 2 (Gate U4) — loading/error/fresh SEPARADOS.
-  const requestStatus = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
-  const dataIsFresh = requestStatus.fresh;
-  const isLoadingState = requestStatus.loading;
-  const isErrorState = requestStatus.error;
+  const status = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
+  const displayData = status.fresh ? data : null;
+  const displayIsLive = status.fresh ? isLive : false;
 
-  // Versao protegida do estado bruto — `data == null` com sucesso e'
-  // indisponibilidade real (nunca "modo demonstração"); nenhum calculo/card/
-  // tabela abaixo deve ler `data`/`isLive` brutos diretamente.
-  const displayData = dataIsFresh ? data : null;
-  const displayIsLive = dataIsFresh ? isLive : false;
+  // ---- recorte local: marca e lente, ambos reproduzíveis pela URL ----
+  const mlBrands = useMemo(() => mlBrandsFromPayload(displayData), [displayData]);
+  const brandParam = readSingleParam(searchParams, "brands");
+  const brandSel = useMemo(() => parseBrandSelection(brandParam, mlBrands), [brandParam, mlBrands]);
+  const lens: Lens = useMemo(() => parseLens(searchParams), [searchParams]);
 
-  // Signals por status
-  const statusMeta: Record<string, { label: string; accent: string; buildSub: (gmv: number, spend: number, n: number, roas: number | null) => string }> = {
-    "sells+advertised": {
-      label: "Vende + Ads",
-      accent: "bg-violet-600",
-      buildSub: (_g, _s, _n, roas) => `ROAS médio: ${roas != null ? roas.toFixed(1) + "x" : "—"}`,
-    },
-    sells_organic_only: {
-      label: "Vende Orgânico",
-      accent: "bg-amber-500",
-      buildSub: (gmv) => `${fmtBrl(gmv)} sem ads`,
-    },
-    ad_spend_no_sales: {
-      label: "Ads sem Venda",
-      accent: "bg-rose-600",
-      buildSub: (_g, spend) => `${fmtBrl(spend)} gastos desperdicados`,
-    },
-    inactive: {
-      label: "Inativo",
-      accent: "bg-slate-400",
-      buildSub: (_g, _s, n) => `${n} produtos parados`,
-    },
+  const setBrand = useCallback((next: string) => {
+    const qs = new URLSearchParams();
+    if (next !== BRAND_ALL) qs.set("brands", next);
+    const current = readSingleParam(searchParams, "lens");
+    if (current) qs.set("lens", current);
+    const q = qs.toString();
+    router.replace(q ? `/inteligencia?${q}` : "/inteligencia", { scroll: false });
+  }, [router, searchParams]);
+
+  const setLens = useCallback((next: Lens) => {
+    router.replace(buildLensHref("/inteligencia", next, searchParams), { scroll: false });
+  }, [router, searchParams]);
+
+  // Troca de recorte fecha diálogo incompatível — nenhum detalhe sobrevive a
+  // um escopo que não o produziu mais.
+  useEffect(() => { setDialog(null); }, [brandSel, lens]);
+
+  // ---- derivações puras sobre o payload já carregado ----
+  const priorities = useMemo(() => buildPriorities(displayData, brandSel), [displayData, brandSel]);
+  const counts = useMemo(() => receivedByKind(displayData, brandSel), [displayData, brandSel]);
+  const queue = useMemo(() => buildQueue(displayData, brandSel), [displayData, brandSel]);
+  const lensRows = useMemo(() => sortForLens(queueForLens(queue, lens), lens), [queue, lens]);
+  const concentration = useMemo(() => concentrationByBrand(displayData, brandSel), [displayData, brandSel]);
+  const ltvRows = useMemo(() => filterByBrand(displayData?.ltv, brandSel), [displayData, brandSel]);
+  const tkReceived = (displayData?.tk_products ?? []).length;
+  const tkRows = useMemo(() => (displayData?.tk_products ?? []).slice(0, 5), [displayData]);
+
+  const worst = useMemo(() => sortForLens(queueForLens(queue, "parar"), "parar").slice(0, 5), [queue]);
+  const best = useMemo(() => sortForLens(queueForLens(queue, "escalar"), "escalar").slice(0, 5), [queue]);
+
+  // ---- LTV ordenável, com as métricas existentes preservadas ----
+  const ltvTypes: Record<string, SortColumnType> = {
+    brand: "text", total_buyers: "numeric", repeat_buyers: "numeric", repeat_rate_pct: "numeric",
+    avg_customer_ltv: "numeric", vip_buyers: "numeric", one_and_done_buyers: "numeric",
+    at_risk_or_churned: "numeric", overall_roas: "numeric",
   };
+  const ltvGet = (row: LtvRow, c: string): string | number | null =>
+    c === "brand" ? brandLabel(row.brand) : ((row as unknown as Record<string, number | null>)[c] ?? null);
+  const ltvSort = useSortableTable(ltvRows, ltvGet, ltvTypes);
 
-  const signalMap = Object.fromEntries((displayData?.signals ?? []).map((s) => [s.product_status, s]));
+  const scope = brandScopeLabel(brandSel);
+  const hasData = status.fresh && displayData != null;
+  const singleBrand = brandSel !== BRAND_ALL ? brandSel : null;
 
-  const filteredUrgent = (displayData?.urgent ?? []).filter(
-    (r) => brandFilter === "all" || r.brand === brandFilter
-  );
-  const filteredScale = (displayData?.scale ?? []).filter(
-    (r) => brandFilter === "all" || r.brand === brandFilter
-  );
-  const filteredOrganic = (displayData?.organic ?? [])
-    .filter((r) => brandFilter === "all" || r.brand === brandFilter)
-    .slice(0, 10);
-
-  // Ordenação — Urgente: Parar Agora
-  const urgentColumnTypes: Record<string, SortColumnType> = {
-    brand: "text",
-    gmv: "numeric",
-    ad_spend: "numeric",
-    days_advertised: "numeric",
-  };
-  function getUrgentValue(row: ProductSignalRow, column: string) {
-    switch (column) {
-      case "brand":
-        return BRAND_LABELS[row.brand] ?? row.brand;
-      case "gmv":
-        return row.gmv;
-      case "ad_spend":
-        return row.ad_spend;
-      case "days_advertised":
-        return row.days_advertised;
-      default:
-        return null;
-    }
-  }
-  const urgentSort = useSortableTable(filteredUrgent, getUrgentValue, urgentColumnTypes);
-
-  // Ordenação — Escalar Agora
-  const scaleColumnTypes: Record<string, SortColumnType> = {
-    brand: "text",
-    gmv: "numeric",
-    ad_roas: "numeric",
-    ad_acos_pct: "numeric",
-    revenue_share_pct: "numeric",
-  };
-  function getScaleValue(row: ProductSignalRow, column: string) {
-    switch (column) {
-      case "brand":
-        return BRAND_LABELS[row.brand] ?? row.brand;
-      case "gmv":
-        return row.gmv;
-      case "ad_roas":
-        return row.ad_roas;
-      case "ad_acos_pct":
-        return row.ad_acos_pct;
-      case "revenue_share_pct":
-        return row.revenue_share_pct;
-      default:
-        return null;
-    }
-  }
-  const scaleSort = useSortableTable(filteredScale, getScaleValue, scaleColumnTypes);
-
-  // Ordenação — Testar Ads
-  const organicColumnTypes: Record<string, SortColumnType> = {
-    brand: "text",
-    gmv: "numeric",
-    units_sold: "numeric",
-    cancel_rate_pct: "numeric",
-  };
-  function getOrganicValue(row: ProductSignalRow, column: string) {
-    switch (column) {
-      case "brand":
-        return BRAND_LABELS[row.brand] ?? row.brand;
-      case "gmv":
-        return row.gmv;
-      case "units_sold":
-        return row.units_sold;
-      case "cancel_rate_pct":
-        return row.cancel_rate_pct;
-      default:
-        return null;
-    }
-  }
-  const organicSort = useSortableTable(filteredOrganic, getOrganicValue, organicColumnTypes);
-
-  // Pareto por brand: agrupa e calcula % GMV
-  const paretoByBrand: Record<string, ParetoRow[]> = {};
-  for (const row of displayData?.pareto ?? []) {
-    if (!paretoByBrand[row.brand]) paretoByBrand[row.brand] = [];
-    paretoByBrand[row.brand].push(row);
-  }
-
-  // TikTok canal dominante
-  function dominantChannel(row: { avg_pct_video: number | null; avg_pct_live: number | null; avg_pct_card: number | null }) {
-    const channels = [
-      { key: "video", pct: row.avg_pct_video ?? 0 },
-      { key: "live", pct: row.avg_pct_live ?? 0 },
-      { key: "card", pct: row.avg_pct_card ?? 0 },
-    ];
-    return channels.reduce((a, b) => (b.pct > a.pct ? b : a));
-  }
-
-  // Ordenação — LTV & Fidelização
-  const ltvColumnTypes: Record<string, SortColumnType> = {
-    brand: "text",
-    total_buyers: "numeric",
-    repeat_buyers: "numeric",
-    repeat_rate_pct: "numeric",
-    avg_customer_ltv: "numeric",
-    vip_buyers: "numeric",
-    one_and_done_buyers: "numeric",
-    at_risk_or_churned: "numeric",
-    overall_roas: "numeric",
-  };
-  function getLtvValue(row: LtvRow, column: string) {
-    switch (column) {
-      case "brand":
-        return BRAND_LABELS[row.brand] ?? row.brand;
-      case "total_buyers":
-        return row.total_buyers;
-      case "repeat_buyers":
-        return row.repeat_buyers;
-      case "repeat_rate_pct":
-        return row.repeat_rate_pct;
-      case "avg_customer_ltv":
-        return row.avg_customer_ltv;
-      case "vip_buyers":
-        return row.vip_buyers;
-      case "one_and_done_buyers":
-        return row.one_and_done_buyers;
-      case "at_risk_or_churned":
-        return row.at_risk_or_churned;
-      case "overall_roas":
-        return row.overall_roas;
-      default:
-        return null;
-    }
-  }
-  const ltvSort = useSortableTable(displayData?.ltv ?? [], getLtvValue, ltvColumnTypes);
-
-  // Ordenação — Top Produtos TikTok
-  const tkProductsColumnTypes: Record<string, SortColumnType> = {
-    brand: "text",
-    gmv: "numeric",
-    orders: "numeric",
-    avg_rating: "numeric",
-  };
-  function getTkProductValue(row: TkProductRow, column: string) {
-    switch (column) {
-      case "brand":
-        return BRAND_LABELS[row.brand] ?? row.brand;
-      case "gmv":
-        return row.gmv;
-      case "orders":
-        return row.orders;
-      case "avg_rating":
-        return row.avg_rating;
-      default:
-        return null;
-    }
-  }
-  const tkProductsSort = useSortableTable(displayData?.tk_products ?? [], getTkProductValue, tkProductsColumnTypes);
-
-  const CHANNEL_STYLES: Record<string, string> = {
-    video: "bg-violet-100 text-violet-800",
-    live: "bg-rose-100 text-rose-800",
-    card: "bg-sky-100 text-sky-800",
-  };
-  const CHANNEL_LABELS: Record<string, string> = {
-    video: "Vídeo",
-    live: "Live",
-    card: "Card",
-  };
-
-  const hasAnyData = dataIsFresh && displayData != null;
+  const dialogTitle = dialog == null ? ""
+    : dialog.kind === "priority" ? `${dialog.priority.title} · ${scope}`
+    : dialog.kind === "bucket" ? `Bucket ${dialog.share.bucket.charAt(0)} · ${brandLabel(dialog.brand)}`
+    : `${dialog.item.title ?? "Produto"} · ${brandLabel(dialog.item.brand)}`;
 
   return (
     <PageContainer>
-      {/* Contrato independente dos filtros globais (ver nota de escopo abaixo):
-          sem barra sticky, para nao sugerir um escopo que a tela nao aplica. */}
+      {/* ---------------- Bloco 1 — cabeçalho e regimes ---------------- */}
       <PageHeader
         title="Inteligência"
-        subtitle="Priorização de portfólio e mídia — produtos para pausar, escalar ou testar ads."
+        subtitle="Radar de portfólio: o que exige atenção, quanto representa e para onde seguir."
         status={
-          dataIsFresh ? (
-            <LiveStatusBadge live={displayIsLive} />
-          ) : isLoadingState ? (
-            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-              Atualizando dados...
-            </span>
-          ) : null
+          status.fresh ? <LiveStatusBadge live={displayIsLive} />
+            : status.loading ? (
+              <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+                Atualizando dados...
+              </span>
+            ) : null
         }
       />
 
-      {/* Nota de escopo (Task 5) — esta tela nao herda os filtros globais. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <RegimeBadge text={REGIME_ML} />
+        <RegimeBadge text={REGIME_TK} tone="tk" />
+      </div>
+
       <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
         <p className="text-xs text-slate-600">
-          Esta tela usa o snapshot/escopo fornecido por <code className="font-mono text-[11px]">fetchInteligencia</code> — filtros globais de canal, marca e período não se aplicam aqui. O filtro de marca abaixo é local e afeta somente as seções do Mercado Livre.
+          Os blocos de Mercado Livre vêm de uma <strong>fotografia acumulada sem janela de datas</strong> — não
+          respondem ao período global e não têm intervalo. Só o bloco de produtos TikTok tem janela, de 30 dias.
+          O filtro de marca abaixo é <strong>local</strong> e afeta as análises ML compatíveis.
         </p>
       </div>
 
-      {/* Filtro por marca ML */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {["all", ...ML_BRANDS].map((b) => (
+      {/* Chips de marca: a lista vem do PAYLOAD, incluindo Rituária */}
+      <div className="-mx-1 overflow-x-auto">
+        <div className="flex items-center gap-2 px-1 py-0.5 w-max" role="group" aria-label="Filtro local de marca ML">
+          <button
+            type="button"
+            onClick={() => setBrand(BRAND_ALL)}
+            aria-pressed={brandSel === BRAND_ALL}
+            disabled={status.loading}
+            className={`min-h-11 px-3 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+              brandSel === BRAND_ALL ? "bg-violet-600 text-white border-violet-600" : "bg-white text-slate-600 border-violet-100 hover:border-violet-300"
+            }`}
+          >
+            Todas as marcas
+          </button>
+          {mlBrands.map((b) => (
             <button
               key={b}
-              onClick={() => setBrandFilter(b)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
-                brandFilter === b
-                  ? "bg-violet-600 text-white border-violet-600"
-                  : "bg-white text-slate-600 border-violet-100 hover:border-violet-300"
+              type="button"
+              onClick={() => setBrand(b)}
+              aria-pressed={brandSel === b}
+              disabled={status.loading}
+              aria-label={`Filtrar por ${brandLabel(b)}`}
+              className={`min-h-11 px-3 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                brandSel === b ? "bg-violet-600 text-white border-violet-600" : "bg-white text-slate-600 border-violet-100 hover:border-violet-300"
               }`}
             >
-              {b === "all" ? "Todas as marcas" : BRAND_LABELS[b]}
+              {brandLabel(b)}
             </button>
           ))}
-          <span className="text-[10px] text-slate-400 ml-2">Filtro aplica-se a seções ML</span>
         </div>
+      </div>
 
-        {error && (
-          <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold text-rose-700 uppercase tracking-wider mb-1">Erro de carregamento</p>
-              <p className="text-sm text-rose-800">{error}</p>
-            </div>
-            <button
-              onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
-              className="text-xs font-semibold text-rose-700 border border-rose-300 rounded-lg px-3 py-1.5 hover:bg-rose-100 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
-            >
-              Tentar novamente
-            </button>
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-xs font-semibold text-rose-700 uppercase tracking-wider mb-1">Erro de carregamento</p>
+            <p className="text-sm text-rose-800">{error}</p>
           </div>
-        )}
+          <button
+            type="button"
+            onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
+            className="min-h-11 px-3 text-xs font-semibold text-rose-700 border border-rose-300 rounded-lg hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      )}
 
-        <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {isLoadingState ? "Carregando inteligência..." : isErrorState ? "Falha ao carregar." : "Dados carregados."}
-        </span>
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {status.loading ? "Carregando inteligência..."
+          : status.error ? "Falha ao carregar."
+          : `Dados carregados. Escopo ${scope}, lente ${LENS_LABELS[lens]}.`}
+      </span>
 
-      {isErrorState ? (
+      {/* Precedencia: loading -> error -> indisponibilidade real -> fresh.
+          `status.loading`, `status.error` e `status.fresh` sao mutuamente
+          exclusivos por construcao (`computeRequestStatus`), e o ramo de
+          carregamento vem PRIMEIRO para que nenhum texto de vazio apareca
+          antes de a requisicao terminar. */}
+      {status.loading ? (
+        <InteligenciaSkeleton />
+      ) : status.error ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
           <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de inteligência.</p>
-          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+          <p className="text-slate-500 text-xs mt-1">Use &quot;Tentar novamente&quot; no banner de erro acima.</p>
         </div>
-      ) : dataIsFresh && !hasAnyData ? (
+      ) : status.fresh && !hasData ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
           <p className="text-slate-500 text-sm font-medium">Dados de inteligência indisponíveis no momento.</p>
-          <p className="text-slate-400 text-xs mt-1">Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.</p>
+          <p className="text-slate-500 text-xs mt-1">
+            Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.
+          </p>
           <button
+            type="button"
             onClick={() => setRetryKey((k) => k + 1)}
-            className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            className="mt-3 min-h-11 px-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
           >
             Tentar novamente
           </button>
         </div>
       ) : (
-      <>
-        {/* Navegacao interna compacta */}
-        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
-          <a href="#status-portfolio" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Status Portfólio</a>
-          <a href="#urgente" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Urgente</a>
-          <a href="#escalar" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Escalar</a>
-          <a href="#testar-ads" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Testar Ads</a>
-          <a href="#pareto" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Pareto</a>
-          <a href="#ltv" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">LTV</a>
-          <a href="#top-tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Top TikTok</a>
-        </nav>
+        <>
+          <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
+            {[
+              [INTELIGENCIA_ANCHORS.prioridades, "Prioridades"],
+              [INTELIGENCIA_ANCHORS.oportunidades, "Oportunidades"],
+              [INTELIGENCIA_ANCHORS.concentracao, "Concentração"],
+              [INTELIGENCIA_ANCHORS.produtos, "Produtos e mídia"],
+              [INTELIGENCIA_ANCHORS.fila, "Fila de evidências"],
+              [INTELIGENCIA_ANCHORS.ltv, "LTV"],
+            ].map(([anchor, label]) => (
+              <a
+                key={anchor}
+                href={`#${anchor}`}
+                className="inline-flex items-center justify-center min-h-11 min-w-11 px-2.5 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              >
+                {label}
+              </a>
+            ))}
+          </nav>
 
-        {/* Seção 1 — Status de Portfólio ML */}
-        <div id="status-portfolio" className="scroll-mt-24">
-          <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
-            Status de Portfólio ML
-          </h2>
-          <div
-            className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={isLoadingState}
-          >
-            {Object.entries(statusMeta).map(([key, meta]) => {
-              const row = signalMap[key];
-              const n = row?.n_products ?? 0;
-              const gmv = row?.gmv ?? 0;
-              const spend = row?.ad_spend ?? 0;
-              const roas = row?.avg_roas ?? null;
-              return (
-                <KpiCard
-                  key={key}
-                  label={meta.label}
-                  value={String(n)}
-                  subvalue={meta.buildSub(gmv, spend, n, roas)}
-                  accent={meta.accent}
-                />
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Seção 2 — Urgente: Parar Agora */}
-        {(filteredUrgent.length > 0 || isLoadingState) && (
-          <div
-            id="urgente"
-            className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={isLoadingState}
-          >
-            <SectionHeader
-              title="Urgente: Parar Agora!"
-              subtitle={`${filteredUrgent.length} produto(s) com ad spend sem nenhuma venda`}
-            />
-            <TableWrap>
-              <thead>
-                <tr className="bg-slate-50 text-left">
-                  <SortableHeader label="Marca" column="brand" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="left" />
-                  <Th>Produto</Th>
-                  <SortableHeader label="Ad Spend" column="ad_spend" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="right" />
-                  <SortableHeader label="Dias c/ Ads" column="days_advertised" sort={urgentSort.sort} onSort={urgentSort.toggleSort} align="right" />
-                  <Th>Pareto</Th>
-                  <Th>Velocity</Th>
-                  <Th>Ação</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {urgentSort.sortedRows.map((r, i) => (
-                  <tr key={i} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                      {BRAND_LABELS[r.brand] ?? r.brand}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700 max-w-xs" title={r.title}>
-                      {truncate(r.title, 40)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
-                      <span className="inline-block bg-rose-50 text-rose-700 font-semibold rounded px-2 py-0.5 text-xs">
-                        {fmtBrl(r.ad_spend)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.days_advertised ?? "—"}
-                    </td>
-                    <td className="px-4 py-3"><ParetoBadge v={r.pareto_bucket} /></td>
-                    <td className="px-4 py-3"><VelocityBadge v={r.revenue_velocity} /></td>
-                    <td className="px-4 py-3">
-                      <span className="inline-block bg-rose-600 text-white text-[10px] font-semibold px-2 py-1 rounded">
-                        Pausar Ads
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {filteredUrgent.length === 0 && dataIsFresh && (
-                  <tr>
-                    <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-sm">
-                      Nenhum produto nesta categoria.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </TableWrap>
-          </div>
-        )}
-
-        {/* Seção 3 — Escalar Agora */}
-        <div
-          id="escalar"
-          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={isLoadingState}
-        >
-          <SectionHeader
-            title="Escalar Agora"
-            subtitle="Produtos com ads ativos e ROAS >= 8x — candidatos a aumentar budget"
-          />
-          <TableWrap>
-            <thead>
-              <tr className="bg-slate-50 text-left">
-                <SortableHeader label="Marca" column="brand" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="left" />
-                <Th>Produto</Th>
-                <SortableHeader label="GMV" column="gmv" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
-                <SortableHeader label="ROAS" column="ad_roas" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
-                <SortableHeader label="ACOS%" column="ad_acos_pct" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
-                <SortableHeader label="Part. GMV" column="revenue_share_pct" sort={scaleSort.sort} onSort={scaleSort.toggleSort} align="right" />
-                <Th>Velocity</Th>
-                <Th>Ação</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {scaleSort.sortedRows.map((r, i) => {
-                const roasColor =
-                  (r.ad_roas ?? 0) >= 12
-                    ? "text-emerald-700 font-bold"
-                    : "text-amber-700 font-semibold";
-                return (
-                  <tr key={i} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                      {BRAND_LABELS[r.brand] ?? r.brand}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700 max-w-xs" title={r.title}>
-                      {truncate(r.title, 40)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-900 font-semibold text-sm">
-                      {fmtBrl(r.gmv)}
-                    </td>
-                    <td className={`px-4 py-3 text-right tabular-nums text-sm ${roasColor}`}>
-                      {r.ad_roas != null ? r.ad_roas.toFixed(1) + "x" : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {fmt(r.ad_acos_pct)}%
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.revenue_share_pct != null
-                        ? (r.revenue_share_pct * 100).toFixed(1) + "%"
-                        : "—"}
-                    </td>
-                    <td className="px-4 py-3"><VelocityBadge v={r.revenue_velocity} /></td>
-                    <td className="px-4 py-3">
-                      <span className="inline-block bg-emerald-600 text-white text-[10px] font-semibold px-2 py-1 rounded">
-                        Aumentar Budget
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-              {filteredScale.length === 0 && dataIsFresh && (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
-                    Nenhum produto elegível para escalar no momento.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </TableWrap>
-        </div>
-
-        {/* Seção 4 — Testar Ads */}
-        <div
-          id="testar-ads"
-          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={isLoadingState}
-        >
-          <SectionHeader
-            title="Testar Ads"
-            subtitle="Produtos orgânicos com bom GMV — ainda sem investimento em publicidade"
-          />
-          <TableWrap>
-            <thead>
-              <tr className="bg-slate-50 text-left">
-                <SortableHeader label="Marca" column="brand" sort={organicSort.sort} onSort={organicSort.toggleSort} align="left" />
-                <Th>Produto</Th>
-                <SortableHeader label="GMV" column="gmv" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
-                <Th>Pareto</Th>
-                <SortableHeader label="Compradores" column="units_sold" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
-                <SortableHeader label="Cancel%" column="cancel_rate_pct" sort={organicSort.sort} onSort={organicSort.toggleSort} align="right" />
-                <Th>Ação</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {organicSort.sortedRows.map((r, i) => (
-                <tr key={i} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                    {BRAND_LABELS[r.brand] ?? r.brand}
-                  </td>
-                  <td className="px-4 py-3 text-slate-700 max-w-xs" title={r.title}>
-                    {truncate(r.title, 40)}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-slate-900 font-semibold text-sm">
-                    {fmtBrl(r.gmv)}
-                  </td>
-                  <td className="px-4 py-3"><ParetoBadge v={r.pareto_bucket} /></td>
-                  <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                    {r.units_sold != null ? fmtNumber(r.units_sold) : "—"}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-sm">
-                    <span className={
-                      r.cancel_rate_pct == null ? "text-slate-400"
-                        : r.cancel_rate_pct < 2 ? "text-emerald-700"
-                        : r.cancel_rate_pct < 5 ? "text-amber-700"
-                        : "text-rose-700 font-semibold"
-                    }>
-                      {fmt(r.cancel_rate_pct)}%
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="inline-block bg-amber-500 text-white text-[10px] font-semibold px-2 py-1 rounded">
-                      Testar Ads
-                    </span>
-                  </td>
-                </tr>
-              ))}
-              {filteredOrganic.length === 0 && dataIsFresh && (
-                <tr>
-                  <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-sm">
-                    Nenhum produto orgânico elegível.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </TableWrap>
-        </div>
-
-        {/* Seção 5 — Concentração Pareto por Marca */}
-        <div
-          id="pareto"
-          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={isLoadingState}
-        >
-          <SectionHeader
-            title="Concentração Pareto por Marca"
-            subtitle="Distribuição do GMV por bucket A/B/C/D — Mercado Livre"
-          />
-          <div className="px-6 py-5 flex flex-col gap-5">
-            {ML_BRANDS.map((brand) => {
-              const rows = paretoByBrand[brand] ?? [];
-              const totalGmv = rows.reduce((s, r) => s + r.gmv, 0);
-              const totalN = rows.reduce((s, r) => s + r.n_products, 0);
-              const bucketOrder = ["A_top50", "B_next30", "C_next15", "D_tail"];
-              const byBucket = Object.fromEntries(rows.map((r) => [r.pareto_bucket, r]));
-              return (
-                <div key={brand}>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-700">{BRAND_LABELS[brand]}</span>
-                    <span className="text-[10px] text-slate-400">{totalN} produtos · {fmtBrl(totalGmv)} GMV total</span>
-                  </div>
-                  {/* Barra empilhada */}
-                  <div className="flex h-5 rounded overflow-hidden w-full">
-                    {bucketOrder.map((bk) => {
-                      const row = byBucket[bk];
-                      if (!row || totalGmv === 0) return null;
-                      const pct = (row.gmv / totalGmv) * 100;
-                      return (
-                        <div
-                          key={bk}
-                          className={`${PARETO_COLORS[bk]} h-full`}
-                          style={{ width: `${pct}%` }}
-                          title={`${bk}: ${pct.toFixed(1)}% GMV (${row.n_products} produtos)`}
-                        />
-                      );
-                    })}
-                  </div>
-                  {/* Legenda */}
-                  <div className="flex gap-4 mt-1.5 flex-wrap">
-                    {bucketOrder.map((bk) => {
-                      const row = byBucket[bk];
-                      if (!row) return null;
-                      const pct = totalGmv > 0 ? (row.gmv / totalGmv) * 100 : 0;
-                      const label = bk.replace("_top50", "").replace("_next30", "").replace("_next15", "").replace("_tail", "");
-                      return (
-                        <span key={bk} className="flex items-center gap-1.5 text-[10px] text-slate-500">
-                          <span className={`w-2.5 h-2.5 rounded-sm inline-block ${PARETO_COLORS[bk]}`} />
-                          <span className="font-semibold text-slate-700">{label}</span>
-                          <span>{pct.toFixed(0)}% · {row.n_products}p</span>
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-            {Object.keys(paretoByBrand).length === 0 && dataIsFresh && (
-              <p className="text-sm text-slate-400 text-center py-4">Sem dados de pareto disponíveis.</p>
+          {/* ---------------- Bloco 2 — prioridades ---------------- */}
+          <section id={INTELIGENCIA_ANCHORS.prioridades} className="scroll-mt-24">
+            <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">
+              Prioridades da fotografia ML atual
+            </h2>
+            <p className="text-xs text-slate-500 mb-3">
+              {REGIME_ML} · escopo {scope}. As contagens são dos registros recebidos, não do portfólio.
+            </p>
+            {priorities.length > 0 ? (
+              <PriorityCards priorities={priorities} onOpen={(p) => setDialog({ kind: "priority", priority: p })} disabled={status.loading} />
+            ) : (
+              <p className="text-sm text-slate-500 bg-white border border-violet-100 rounded-2xl px-6 py-8 text-center">
+                Nenhuma prioridade nas listas recebidas para {scope}.
+              </p>
             )}
-          </div>
-        </div>
+          </section>
 
-        {/* Seção 6 — LTV & Fidelização */}
-        {(displayData?.ltv ?? []).length > 0 && (
-          <div
-            id="ltv"
-            className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-            aria-busy={isLoadingState}
+          {/* ---------------- Bloco 3 — faixas de oportunidade ----------------
+              Degradação honesta: BE6 (`opportunity_map`) não existe, então NÃO
+              há matriz, eixo, quadrante nem mediana de GMV do subconjunto. São
+              faixas de amostra priorizada, com a regra e o limite à vista. */}
+          <SectionCard
+            id={INTELIGENCIA_ANCHORS.oportunidades}
+            title="Faixas de oportunidade — amostra priorizada"
+            subtitle="Cada faixa vem de uma lista própria do payload, com limite conhecido. Não é o portfólio completo."
+            regime={REGIME_ML}
           >
-            <SectionHeader
-              title="LTV & Fidelização — Mercado Livre"
-              subtitle="Dados cross-temporais de comportamento de compradores por marca"
+            <div className="px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+              {(["parar", "escalar", "testar"] as const).map((kind) => {
+                const rows = sortForLens(queueForLens(queue, kind), kind);
+                return (
+                  <div key={kind} className="border border-slate-200 rounded-xl p-4 flex flex-col gap-2 min-h-[9rem]">
+                    <p className="text-sm font-semibold text-slate-800">{KIND_LABELS[kind]}</p>
+                    <p className="text-xs text-slate-500">{KIND_RULES[kind]}</p>
+                    <p className="text-2xl font-bold text-slate-900 tabular-nums leading-none">
+                      {rows.length}
+                    </p>
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-auto">
+                      {sampleNote(kind, rows.length)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setLens(kind)}
+                      aria-label={`Abrir a lente ${LENS_LABELS[kind]} na fila de evidências`}
+                      className="self-start inline-flex items-center min-h-11 text-xs font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                    >
+                      Ver na fila →
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="px-4 sm:px-6 pb-5 text-xs text-slate-500">
+              A visão de quadrantes (retorno × volume sobre o portfólio inteiro) depende de um contrato de backend
+              ainda inexistente. Enquanto ele não existir, esta seção mostra amostras priorizadas em vez de sugerir
+              cobertura que o dado não tem.
+            </p>
+          </SectionCard>
+
+          {/* ---------------- Bloco 4 — concentração ---------------- */}
+          <SectionCard
+            id={INTELIGENCIA_ANCHORS.concentracao}
+            title="Concentração por marca"
+            subtitle="Distribuição do GMV entre os buckets A/B/C/D. Clique num bucket para ver os agregados."
+            regime={REGIME_ML}
+          >
+            <ConcentrationBars
+              concentration={concentration}
+              onOpenBucket={(brand, share, totalGmv) => setDialog({ kind: "bucket", brand, share, totalGmv })}
+              disabled={status.loading}
             />
-            <TableWrap>
-              <thead>
-                <tr className="bg-slate-50 text-left">
-                  <SortableHeader label="Marca" column="brand" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="left" />
-                  <SortableHeader label="Compradores" column="total_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="Recorrentes" column="repeat_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="Taxa Recorrência" column="repeat_rate_pct" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="LTV Médio" column="avg_customer_ltv" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="VIPs" column="vip_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="Compraram 1x" column="one_and_done_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="Em Risco" column="at_risk_or_churned" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                  <SortableHeader label="ROAS Geral" column="overall_roas" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {ltvSort.sortedRows.map((r) => {
-                  const recColor =
-                    r.repeat_rate_pct == null ? "text-slate-400"
-                      : r.repeat_rate_pct > 20 ? "text-emerald-700 font-semibold"
-                      : r.repeat_rate_pct > 10 ? "text-amber-700 font-semibold"
-                      : "text-rose-600 font-semibold";
-                  return (
-                    <tr key={r.brand} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                        {BRAND_LABELS[r.brand] ?? r.brand}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                        {fmtNumber(r.total_buyers)}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                        {fmtNumber(r.repeat_buyers)}
-                      </td>
-                      <td className={`px-4 py-3 text-right tabular-nums text-sm ${recColor}`}>
-                        {r.repeat_rate_pct != null ? r.repeat_rate_pct.toFixed(1) + "%" : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-900 font-semibold text-sm">
-                        {r.avg_customer_ltv != null ? fmtBrl(r.avg_customer_ltv) : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-violet-700 font-semibold text-sm">
-                        {r.vip_buyers != null ? fmtNumber(r.vip_buyers) : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                        {r.one_and_done_buyers != null ? fmtNumber(r.one_and_done_buyers) : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-rose-600 text-sm">
-                        {r.at_risk_or_churned != null ? fmtNumber(r.at_risk_or_churned) : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-900 font-semibold text-sm">
-                        {r.overall_roas != null ? r.overall_roas.toFixed(1) + "x" : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </TableWrap>
+          </SectionCard>
+
+          {/* ---------------- Bloco 5 — produtos e mídia ----------------
+              Contrato §7.5: cada linha ML abre o detalhe do produto no diálogo
+              ÚNICO, e cada lista tem CTA para a lente correspondente da fila.
+              O truncamento é escrito como "de ao menos N" quando a lista bateu
+              o LIMIT do backend — "de N" sugeriria que N é o portfólio. */}
+          <section id={INTELIGENCIA_ANCHORS.produtos} className="scroll-mt-24 grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+            {([
+              { title: "Maior desperdício de Ads", rows: worst, kind: "parar" as const },
+              { title: "Maior retorno com Ads", rows: best, kind: "escalar" as const },
+            ]).map((panel) => {
+              const received = counts[panel.kind];
+              const max = Math.max(
+                ...panel.rows.map((r) => Math.abs((panel.kind === "parar" ? r.ad_spend : r.gmv) ?? 0)),
+                1,
+              );
+              return (
+                <SectionCard key={panel.title} title={panel.title} regime={REGIME_ML}>
+                  {panel.rows.length === 0 ? (
+                    <p className="px-6 py-8 text-center text-sm text-slate-500">
+                      Nenhum produto nesta faixa para {scope}.
+                    </p>
+                  ) : (
+                    <ul className="divide-y divide-slate-100 list-none p-0 m-0">
+                      {panel.rows.map((r, i) => {
+                        const value = (panel.kind === "parar" ? r.ad_spend : r.gmv) ?? 0;
+                        return (
+                          <li key={`${r.brand}-${i}`} className={`px-4 sm:px-6 py-3 ${i >= 3 ? "hidden sm:block" : ""}`}>
+                            <div className="flex items-baseline justify-between gap-3">
+                              <p className="text-xs font-semibold text-slate-500">{brandLabel(r.brand)}</p>
+                              <p className="text-sm font-semibold text-slate-900 tabular-nums">
+                                {panel.kind === "parar"
+                                  ? nullable(r.ad_spend, fmtBrl)
+                                  : (r.ad_roas == null
+                                      ? <span className="text-slate-400" title="sem dado">—</span>
+                                      : roasBr(r.ad_roas))}
+                              </p>
+                            </div>
+                            <p className="text-sm text-slate-700 leading-snug" title={r.title ?? undefined}>
+                              {r.title && r.title.length > 46 ? `${r.title.slice(0, 46)}…` : (r.title ?? "—")}
+                            </p>
+                            <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden" aria-hidden="true">
+                              <div
+                                className={panel.kind === "parar" ? "h-full bg-rose-400" : "h-full bg-emerald-400"}
+                                style={{ width: `${Math.max(4, (Math.abs(value) / max) * 100)}%` }}
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setDialog({ kind: "evidence", item: r })}
+                              aria-label={`Detalhe de ${r.title ?? "produto sem título"}, marca ${brandLabel(r.brand)}`}
+                              className="mt-2 inline-flex items-center min-h-11 px-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                            >
+                              Detalhe
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <div className="px-4 sm:px-6 py-3 border-t border-slate-100 flex flex-col gap-1">
+                    <p className="text-xs text-slate-500">
+                      {panel.rows.length === 0
+                        ? "Sem registros nesta lista."
+                        : `${listSampleNote(panel.kind, panel.rows.length, received)} · 3 no mobile é apresentação, não cobertura.`}
+                    </p>
+                    <Link
+                      href={buildLensHref("/inteligencia", panel.kind, searchParams, { anchor: INTELIGENCIA_ANCHORS.fila })}
+                      aria-label={`Ver todos os registros da lente ${LENS_LABELS[panel.kind]} na fila de evidências`}
+                      className="inline-flex items-center min-h-11 text-xs font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded self-start"
+                    >
+                      Ver todos na fila →
+                    </Link>
+                  </div>
+                </SectionCard>
+              );
+            })}
+
+            {/* TikTok: etiqueta e teto próprios; sem ROAS/Ads, que o contrato
+                do TikTok não entrega, e sem drill-down sem evidência. */}
+            <SectionCard title="Produtos TikTok em destaque" regime={REGIME_TK}>
+              {tkRows.length === 0 ? (
+                <p className="px-6 py-8 text-center text-sm text-slate-500">Sem dados TikTok na janela de 30 dias.</p>
+              ) : (
+                <ul className="divide-y divide-slate-100 list-none p-0 m-0">
+                  {tkRows.map((r, i) => (
+                    <li key={`${r.brand}-tk-${i}`} className={`px-4 sm:px-6 py-3 ${i >= 3 ? "hidden sm:block" : ""}`}>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <p className="text-xs font-semibold text-slate-500">{brandLabel(r.brand)}</p>
+                        <p className="text-sm font-semibold text-slate-900 tabular-nums">{fmtBrl(r.gmv)}</p>
+                      </div>
+                      <p className="text-sm text-slate-700 leading-snug" title={r.product_name}>
+                        {r.product_name.length > 46 ? `${r.product_name.slice(0, 46)}…` : r.product_name}
+                      </p>
+                      <p className="text-xs text-slate-500 tabular-nums mt-0.5">
+                        {fmtNumber(r.orders)} pedidos · nota {r.avg_rating == null ? "—" : decBr(r.avg_rating)}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="px-4 sm:px-6 py-3 text-xs text-slate-500 border-t border-slate-100">
+                {tkRows.length === 0
+                  ? `O payload traz até ${TK_PRODUCTS_LIMIT} produtos nesta janela.`
+                  : `${tkSampleNote(tkRows.length, tkReceived)} · 3 no mobile é apresentação, não cobertura.`}{" "}
+                Agrupado por nome de produto, como o payload entrega. Sem ROAS ou Ads: o contrato do TikTok
+                não traz investimento de mídia.
+              </p>
+            </SectionCard>
+          </section>
+
+          {/* ---------------- Bloco 6 — fila de evidências ---------------- */}
+          <SectionCard
+            id={INTELIGENCIA_ANCHORS.fila}
+            title="Fila de evidências"
+            subtitle={lensSampleNote(lens, counts)}
+            regime={REGIME_ML}
+          >
+            <div className="px-4 sm:px-6 pt-4 flex flex-wrap gap-1" role="group" aria-label="Lente da fila de evidências">
+              {LENSES.map((l) => {
+                const count = l === "todos" ? counts.parar + counts.escalar + counts.testar : counts[l];
+                return (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setLens(l)}
+                    aria-pressed={lens === l}
+                    aria-label={`Lente ${LENS_LABELS[l]}, ${count} registros exibidos`}
+                    className={`min-h-11 px-3 rounded-lg text-xs font-semibold border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                      lens === l ? "bg-violet-600 text-white border-violet-600" : "bg-white text-slate-600 border-violet-100 hover:border-violet-300"
+                    }`}
+                  >
+                    {LENS_LABELS[l]}
+                    <span className={`ml-1.5 tabular-nums ${lens === l ? "text-violet-100" : "text-slate-400"}`}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-4">
+              <EvidenceQueue
+                lens={lens}
+                rows={lensRows}
+                onOpenDetail={(item) => setDialog({ kind: "evidence", item })}
+                loading={status.loading}
+              />
+            </div>
+          </SectionCard>
+
+          {/* ---------------- Bloco 7 — LTV e destinos ---------------- */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+            <div className="lg:col-span-2">
+              <SectionCard
+                id={INTELIGENCIA_ANCHORS.ltv}
+                title="LTV e fidelização"
+                subtitle="Comportamento de compradores por marca. A fonte não tem dimensão temporal."
+                regime={REGIME_ML}
+              >
+                {ltvRows.length === 0 ? (
+                  <p className="px-6 py-8 text-center text-sm text-slate-500">Sem dados de LTV para {scope}.</p>
+                ) : (
+                  <TableScrollHint>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 text-left">
+                          <SortableHeader label="Marca" column="brand" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="left" />
+                          <SortableHeader label="Compradores" column="total_buyers" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                          <SortableHeader label="Recorrência" column="repeat_rate_pct" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                          <SortableHeader label="LTV médio" column="avg_customer_ltv" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                          <SortableHeader label="Em risco" column="at_risk_or_churned" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                          <SortableHeader label="ROAS geral" column="overall_roas" sort={ltvSort.sort} onSort={ltvSort.toggleSort} align="right" />
+                          <th scope="col" className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Detalhe</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {ltvSort.sortedRows.map((r) => (
+                          <tr key={r.brand}>
+                            <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">{brandLabel(r.brand)}</td>
+                            <td className="px-4 py-3 text-right text-sm text-slate-600">{nullable(r.total_buyers, fmtNumber)}</td>
+                            <td className="px-4 py-3 text-right text-sm text-slate-600">
+                              {r.repeat_rate_pct == null ? <span className="text-slate-400" title="sem dado">—</span> : <span className="tabular-nums">{pctBr(r.repeat_rate_pct)}</span>}
+                            </td>
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-slate-900">{nullable(r.avg_customer_ltv, fmtBrl)}</td>
+                            <td className="px-4 py-3 text-right text-sm text-slate-600">{nullable(r.at_risk_or_churned, fmtNumber)}</td>
+                            <td className="px-4 py-3 text-right text-sm text-slate-600">
+                              {r.overall_roas == null ? <span className="text-slate-400" title="sem dado">—</span> : <span className="tabular-nums">{roasBr(r.overall_roas)}</span>}
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <Link
+                                href={`/brand/${r.brand}?brands=${r.brand}`}
+                                aria-label={`Abrir a visão da marca ${brandLabel(r.brand)}`}
+                                className="inline-flex items-center justify-center min-h-11 px-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                              >
+                                Abrir
+                              </Link>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </TableScrollHint>
+                )}
+              </SectionCard>
+            </div>
+
+            <SectionCard title="Próximos destinos" subtitle="Navegação limpa, sem contexto de origem.">
+              <ul className="px-4 sm:px-6 py-4 flex flex-col gap-2 list-none m-0">
+                <li>
+                  <Link href="/canais" className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded">
+                    Comparar canais →
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href={singleBrand ? `/produtos?channels=ml&brands=${singleBrand}` : "/produtos?channels=ml"}
+                    className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                  >
+                    Abrir Produtos no Mercado Livre →
+                  </Link>
+                </li>
+                {singleBrand && (
+                  <li>
+                    <Link
+                      href={`/brand/${singleBrand}?brands=${singleBrand}`}
+                      aria-label={`Abrir a visão da marca ${brandLabel(singleBrand)}`}
+                      className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                    >
+                      Abrir marca {brandLabel(singleBrand)} →
+                    </Link>
+                  </li>
+                )}
+              </ul>
+              <p className="px-4 sm:px-6 pb-4 text-xs text-slate-500">
+                Selecione uma única marca para habilitar o destino de marca.
+              </p>
+            </SectionCard>
+          </div>
+        </>
+      )}
+
+      {/* ---------------- Diálogo único (contrato §3 do G2) ---------------- */}
+      <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle}>
+        {dialog?.kind === "priority" && (
+          <div className="flex flex-col gap-4">
+            <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
+            <p className="text-sm text-slate-700">
+              {dialog.priority.received} registro{dialog.priority.received === 1 ? "" : "s"} nesta lista porque são{" "}
+              {KIND_RULES[dialog.priority.kind]}.
+            </p>
+            <DrilldownMetricPair
+              label={dialog.priority.amountLabel}
+              value={fmtBrl(dialog.priority.amount)}
+              referenceLabel="Registros exibidos"
+              referenceValue={String(dialog.priority.received)}
+            />
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                Maiores contribuintes (até 5)
+              </p>
+              <ul className="flex flex-col gap-1 list-none p-0 m-0">
+                {dialog.priority.contributors.map((c, i) => (
+                  <EvidenceRow
+                    key={`${c.brand}-${i}`}
+                    label={`${brandLabel(c.brand)} · ${c.title && c.title.length > 30 ? `${c.title.slice(0, 30)}…` : c.title}`}
+                    value={dialog.priority.kind === "parar"
+                      ? (c.ad_spend == null ? "sem dado" : fmtBrl(c.ad_spend))
+                      : (c.gmv == null ? "sem dado" : fmtBrl(c.gmv))}
+                    tone={(dialog.priority.kind === "parar" ? c.ad_spend : c.gmv) == null ? "muted" : "value"}
+                  />
+                ))}
+              </ul>
+            </div>
+            <DataQualityNote
+              note={`${dialog.priority.limitation}. A lista é capada em até ${priorityLimit(dialog.priority.kind)} no backend, então este número não é o total do portfólio.`}
+            />
+            <DrilldownCta href={buildLensHref("/inteligencia", dialog.priority.kind, searchParams)}>
+              Ver evidências na lente {LENS_LABELS[dialog.priority.kind]} →
+            </DrilldownCta>
           </div>
         )}
 
-        {/* Seção 7 — Top Produtos TikTok */}
-        <div
-          id="top-tiktok"
-          className={`scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden transition-opacity duration-200 ${isLoadingState ? "opacity-50 pointer-events-none" : ""}`}
-          aria-busy={isLoadingState}
-        >
-          <SectionHeader
-            title="Top Produtos TikTok — Últimos 30 dias"
-            subtitle="Produtos com maior GMV no período, agrupados por marca e nome"
-          />
-          <TableWrap>
-            <thead>
-              <tr className="bg-slate-50 text-left">
-                <SortableHeader label="Marca" column="brand" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="left" />
-                <Th>Produto</Th>
-                <SortableHeader label="GMV" column="gmv" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
-                <SortableHeader label="Pedidos" column="orders" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
-                <Th>Canal Dominante</Th>
-                <Th right>% Vídeo</Th>
-                <Th right>% Live</Th>
-                <Th right>% Card</Th>
-                <SortableHeader label="Rating" column="avg_rating" sort={tkProductsSort.sort} onSort={tkProductsSort.toggleSort} align="right" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {tkProductsSort.sortedRows.map((r, i) => {
-                const dom = dominantChannel(r);
-                return (
-                  <tr key={i} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                      {BRAND_LABELS[r.brand] ?? r.brand}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700 max-w-xs" title={r.product_name}>
-                      {truncate(r.product_name, 40)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-900 font-semibold text-sm">
-                      {fmtBrl(r.gmv)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {fmtNumber(r.orders)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${CHANNEL_STYLES[dom.key]}`}>
-                        {CHANNEL_LABELS[dom.key]}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.avg_pct_video != null ? r.avg_pct_video.toFixed(0) + "%" : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.avg_pct_live != null ? r.avg_pct_live.toFixed(0) + "%" : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.avg_pct_card != null ? r.avg_pct_card.toFixed(0) + "%" : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-sm">
-                      {r.avg_rating != null ? r.avg_rating.toFixed(1) : "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-              {(displayData?.tk_products ?? []).length === 0 && dataIsFresh && (
-                <tr>
-                  <td colSpan={9} className="px-6 py-8 text-center text-slate-400 text-sm">
-                    Sem dados TikTok nos últimos 30 dias.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </TableWrap>
-        </div>
-      </>
-      )}
+        {dialog?.kind === "bucket" && (
+          <div className="flex flex-col gap-4">
+            <DrilldownContextLine leading={`${brandLabel(dialog.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
+            <p className="text-sm text-slate-700">
+              {BUCKET_LABEL[dialog.share.bucket]} concentra{" "}
+              {dialog.share.sharePct == null ? "uma parcela não calculável" : pctBr(dialog.share.sharePct)}{" "}
+              do GMV de {brandLabel(dialog.brand)}.
+            </p>
+            <DrilldownMetricPair
+              label="GMV do bucket"
+              value={fmtBrl(dialog.share.gmv)}
+              referenceLabel="GMV da marca"
+              referenceValue={fmtBrl(dialog.totalGmv)}
+            />
+            <ul className="flex flex-col gap-1 list-none p-0 m-0">
+              <EvidenceRow label="Produtos no bucket" value={fmtNumber(dialog.share.n_products)} />
+              <EvidenceRow label="Ad spend no bucket" value={fmtBrl(dialog.share.ad_spend)} />
+              <EvidenceRow
+                label="Participação no GMV da marca"
+                value={dialog.share.sharePct == null ? "sem dado" : pctBr(dialog.share.sharePct)}
+                tone={dialog.share.sharePct == null ? "muted" : "value"}
+              />
+            </ul>
+            <DataQualityNote note="Este payload traz apenas os agregados do bucket — ele não contém a lista de produtos. Use o destino abaixo, onde a consulta por bucket existe." />
+            <DrilldownCta
+              href={buildParetoProdutosHref(dialog.brand, dialog.share.bucket)}
+              ariaLabel={`Ver produtos do bucket ${dialog.share.bucket.charAt(0)} de ${brandLabel(dialog.brand)} em Produtos`}
+            >
+              Ver produtos deste bucket →
+            </DrilldownCta>
+          </div>
+        )}
+
+        {dialog?.kind === "evidence" && (
+          <div className="flex flex-col gap-4">
+            <DrilldownContextLine
+              leading={`${KIND_LABELS[dialog.item.kind]} · fotografia ML`}
+              periodLabel="sem janela temporal"
+              refreshedAt={null}
+            />
+            <p className="text-sm text-slate-700">
+              Este produto está na lista porque são {KIND_RULES[dialog.item.kind]}.
+            </p>
+            <DrilldownMetricPair
+              label={dialog.item.kind === "parar" ? "Ad spend" : "GMV"}
+              value={dialog.item.kind === "parar"
+                ? (dialog.item.ad_spend == null ? "sem dado" : fmtBrl(dialog.item.ad_spend))
+                : (dialog.item.gmv == null ? "sem dado" : fmtBrl(dialog.item.gmv))}
+              referenceLabel={dialog.item.kind === "escalar" ? "ROAS" : "Velocidade"}
+              referenceValue={dialog.item.kind === "escalar"
+                ? (dialog.item.ad_roas == null ? "sem dado" : roasBr(dialog.item.ad_roas))
+                : (dialog.item.revenue_velocity ?? "sem dado")}
+            />
+            <ul className="flex flex-col gap-1 list-none p-0 m-0">
+              <EvidenceRow label="GMV" value={dialog.item.gmv == null ? "sem dado" : fmtBrl(dialog.item.gmv)} tone={dialog.item.gmv == null ? "muted" : "value"} />
+              <EvidenceRow label="Ad spend" value={dialog.item.ad_spend == null ? "sem dado" : fmtBrl(dialog.item.ad_spend)} tone={dialog.item.ad_spend == null ? "muted" : "value"} />
+              <EvidenceRow label="ROAS" value={dialog.item.ad_roas == null ? "sem dado" : roasBr(dialog.item.ad_roas)} tone={dialog.item.ad_roas == null ? "muted" : "value"} />
+              <EvidenceRow label="ACOS" value={dialog.item.ad_acos_pct == null ? "sem dado" : pctBr(dialog.item.ad_acos_pct)} tone={dialog.item.ad_acos_pct == null ? "muted" : "value"} />
+              <EvidenceRow label="Dias com ads" value={dialog.item.days_advertised == null ? "sem dado" : fmtNumber(dialog.item.days_advertised)} tone={dialog.item.days_advertised == null ? "muted" : "value"} />
+              <EvidenceRow label="Bucket Pareto" value={dialog.item.pareto_bucket ?? "sem dado"} tone={dialog.item.pareto_bucket == null ? "muted" : "value"} />
+            </ul>
+            <DataQualityNote note="Fotografia ML sem janela temporal, e sem CMV — não há margem real por produto. O detalhe usa a linha já carregada; ele não é compartilhável por identificador de produto nesta fase." />
+            <DrilldownCta
+              href={`/brand/${dialog.item.brand}?brands=${dialog.item.brand}`}
+              ariaLabel={`Abrir a visão da marca ${brandLabel(dialog.item.brand)}`}
+            >
+              Abrir marca {brandLabel(dialog.item.brand)} →
+            </DrilldownCta>
+          </div>
+        )}
+      </KpiDrilldownDialog>
     </PageContainer>
+  );
+}
+
+export default function InteligenciaPage() {
+  // `useSearchParams` exige limite de Suspense no App Router.
+  return (
+    <Suspense fallback={<PageContainer><p className="text-sm text-slate-500">Carregando inteligência…</p></PageContainer>}>
+      <InteligenciaPageInner />
+    </Suspense>
   );
 }

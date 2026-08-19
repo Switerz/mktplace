@@ -82,14 +82,42 @@ test("Pedidos: cards/series de canal nao selecionado nunca aparecem (gating por 
   assert.match(src, /\{showMlSel && <Bar dataKey="ml"/, "serie do grafico (ML) deve ser condicionada a showMlSel");
 });
 
-test("Inteligencia: filtro local de marca (brandFilter) so filtra as secoes ML (urgent/scale/organic), nunca pareto/ltv/tk_products", () => {
+// CONTRATO INVERTIDO NO GATE V3-1A — leia antes de "corrigir" este teste.
+//
+// A versao anterior exigia que o filtro local de marca alcancasse SOMENTE
+// urgent/scale/organic e "nunca pareto/ltv". Isso era o defeito B9 apontado na
+// auditoria do V3-0: `ltv` e `pareto` sao blocos de Mercado Livre, tem coluna
+// `brand`, e ficavam de fora do filtro — selecionar uma marca deixava duas
+// secoes mostrando o portfolio inteiro, sem dizer isso ao leitor.
+//
+// O desenho aprovado (docs/INTELIGENCIA_BRAND_V3_PLAN.md §7.4 e §7.7) exige o
+// oposto: a selecao de marca vale para TODOS os blocos ML. `tk_products`
+// continua de fora, e por um motivo diferente e legitimo — e' TikTok, tem
+// janela de 30 dias e regime temporal proprio.
+test("Inteligencia: a selecao local de marca alcanca TODOS os blocos ML, e nunca o bloco TikTok", () => {
   const src = readSource("app", "inteligencia", "page.tsx");
-  // As 3 secoes ML filtradas por dado: filteredUrgent, filteredScale, filteredOrganic.
-  const dataFilterUses = (src.match(/r\.brand === brandFilter/g) ?? []).length;
-  assert.equal(dataFilterUses, 3, `esperado brandFilter filtrando dado exatamente 3 vezes (urgent/scale/organic), encontrado ${dataFilterUses}`);
-  // Pareto/LTV/TikTok products nunca devem referenciar brandFilter.
-  const paretoBlock = src.slice(src.indexOf("paretoByBrand: Record"), src.indexOf("Ordenação — LTV"));
-  assert.doesNotMatch(paretoBlock, /brandFilter/, "bloco de Pareto nao deve ser afetado pelo filtro local de marca");
+
+  // O filtro e' uma funcao pura compartilhada, nao uma comparacao espalhada.
+  assert.match(src, /filterByBrand/, "o filtro vem do modulo puro de marcas");
+  assert.doesNotMatch(src, /r\.brand === brandFilter/,
+    "comparacao inline substituida por filterByBrand");
+
+  // urgent/scale/organic entram pela fila; pareto e ltv recebem a selecao
+  // explicitamente. Os quatro pontos abaixo sao os consumidores do recorte.
+  for (const [expr, quem] of [
+    ["buildQueue(displayData, brandSel)", "fila (urgent/scale/organic)"],
+    ["concentrationByBrand(displayData, brandSel)", "Pareto"],
+    ["filterByBrand(displayData?.ltv, brandSel)", "LTV"],
+    ["buildPriorities(displayData, brandSel)", "prioridades"],
+  ] as const) {
+    assert.ok(src.includes(expr), `${quem} precisa receber a selecao de marca: ${expr}`);
+  }
+
+  // tk_products NAO recebe a selecao — regime temporal proprio (30 dias).
+  assert.match(src, /displayData\?\.tk_products \?\? \[\]\)\.slice\(0, 5\)/,
+    "tk_products e' fatiado sem filtro de marca");
+  assert.doesNotMatch(src, /filterByBrand\(displayData\?\.tk_products/,
+    "o bloco TikTok nao participa do recorte de marca ML");
 });
 
 test("Operacoes: filtro local de marca (creatorBrand) so filtra a tabela de criadores, nunca alertas/lives/ml_velocity/tk_daily", () => {

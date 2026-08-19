@@ -1217,13 +1217,25 @@ test("F4b. os ticks do grafico estao em 12px", () => {
 
 // --- Finding 5: contagem documental ----------------------------------------
 
+// A fonte DURAVEL do contrato dos 16 acionamentos e' o GERENCIAL_V2_SPEC.md.
+//
+// A versao anterior deste teste exigia que `PROJECT_STATUS.md` repetisse a
+// frase "dezesseis tipos de acionamento" para sempre. O PROJECT_STATUS e' um
+// diario de bordo: seu resumo executivo e' reescrito a cada gate, e a frase
+// saiu no proprio Revamp V2 (`04d0d17`) — o teste ficou vermelho desde entao,
+// sem que nada de funcional tivesse regredido. Exigir duplicacao de contrato
+// num documento volatil transforma um relato em contrato.
+//
+// O que continua garantido, e e' o que importa: (1) a contagem ambigua nao
+// voltou ao PROJECT_STATUS; (2) o SPEC declara os 16 tipos; (3) o SPEC explica
+// o critério de contagem.
 test("F5. a documentacao usa contagem de drill-down nao ambigua", () => {
   const status = read("../../docs/PROJECT_STATUS.md");
   const spec = read("../../docs/GERENCIAL_V2_SPEC.md");
-  assert.doesNotMatch(status, /doze caminhos de drill-down/, "contagem ambígua removida");
-  assert.match(status, /dezesseis tipos de acionamento/);
-  assert.match(spec, /16 tipos de acionamento/);
-  assert.match(spec, /Os cinco KPIs contam\ncomo \*\*cinco\*\* tipos/, "o critério está explicado");
+  assert.doesNotMatch(status, /doze caminhos de drill-down/, "contagem ambígua não pode voltar");
+  assert.match(spec, /16 tipos de acionamento/, "o SPEC é a fonte durável da contagem");
+  // `\s+` em vez de `\n`: o arquivo pode estar em CRLF no checkout (autocrlf).
+  assert.match(spec, /Os cinco KPIs contam\s+como \*\*cinco\*\* tipos/, "o critério está explicado");
 });
 
 // ===========================================================================
