@@ -239,8 +239,19 @@ test("32. nenhuma dependencia nova no package.json", () => {
     dependencies: Record<string, string>; devDependencies: Record<string, string>;
   };
   const deps = Object.keys(pkg.dependencies ?? {}).sort();
-  assert.deepEqual(deps, ["next", "react", "react-dom", "recharts"],
-    "o conjunto de dependencias de runtime nao pode mudar no V3-1A");
+  // A guarda continua sendo uma allowlist EXATA: qualquer pacote fora desta
+  // lista faz o teste falhar. O V3-1A nao introduziu nenhuma dependencia de
+  // runtime — as duas adicoes abaixo vieram do gate OM1 (servidor MCP
+  // read-only em app/api/mcp), integrado depois do V3-1A:
+  //   @modelcontextprotocol/server  SDK oficial do MCP (runtime da rota)
+  //   zod                           validacao de input/output das tools
+  // Ambas sao dependencias de runtime por necessidade: a rota e' server-side e
+  // o build da Vercel precisa delas em `dependencies`, nao em `devDependencies`.
+  assert.deepEqual(
+    deps,
+    ["@modelcontextprotocol/server", "next", "react", "react-dom", "recharts", "zod"],
+    "o conjunto de dependencias de runtime so muda por gate declarado (V3-1A: nenhuma; OM1: server+zod)",
+  );
   assert.ok(!("xlsx" in (pkg.dependencies ?? {})), "xlsx foi removido no U4 e nao volta");
 });
 
