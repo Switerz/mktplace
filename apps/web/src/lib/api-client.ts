@@ -10,6 +10,7 @@ import {
   type MarketplaceSelection,
 } from "./marketplace-filter";
 import { buildRegioesQueryParams } from "./regioes-query";
+import { computeContentMix } from "./tiktok-content-mix";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -793,9 +794,15 @@ export interface CanaisKpis {
   tiktok_gmv_video: number | null;
   tiktok_gmv_live: number | null;
   tiktok_gmv_card: number | null;
+  // Mix INTERNO da base de conteudo (denominador = tiktok_content_gmv_base),
+  // nunca participacao nas vendas totais. Ver src/lib/tiktok-content-mix.ts.
   tiktok_video_pct: number | null;
   tiktok_live_pct: number | null;
   tiktok_card_pct: number | null;
+  /** video+live+card. Denominador dos tres percentuais acima. */
+  tiktok_content_gmv_base: number | null;
+  /** Diagnostico de reconciliacao base x GMV comercial. Nao e' cobertura. */
+  tiktok_content_gmv_divergence_pct: number | null;
   tiktok_visitors: number | null;
   tiktok_customers: number | null;
   tiktok_conversion_rate: number | null;
@@ -826,9 +833,12 @@ export interface CanaisBrandRow {
   tiktok_gmv_video: number | null;
   tiktok_gmv_live: number | null;
   tiktok_gmv_card: number | null;
+  // Mesmo contrato da CanaisKpis: mix interno da base de conteudo.
   tiktok_video_pct: number | null;
   tiktok_live_pct: number | null;
   tiktok_card_pct: number | null;
+  tiktok_content_gmv_base: number | null;
+  tiktok_content_gmv_divergence_pct: number | null;
   tiktok_visitors: number | null;
   tiktok_customers: number | null;
   tiktok_conversion_rate: number | null;
@@ -894,11 +904,27 @@ export interface CanaisChannelMedian {
   brands_with_data: number;
 }
 
-const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
+/**
+ * Semente do mock: SO os valores de origem. Os campos derivados do mix de
+ * conteudo (`tiktok_*_pct`, `tiktok_content_gmv_base`,
+ * `tiktok_content_gmv_divergence_pct`) sao calculados por
+ * `computeContentMix`, para que o fallback de demonstracao obedeca ao mesmo
+ * contrato do backend POR CONSTRUCAO — e nao por percentuais escritos a mao,
+ * que antes vinham do denominador errado (GMV comercial).
+ */
+type CanaisMockSeed = Omit<
+  CanaisBrandRow,
+  | "tiktok_video_pct"
+  | "tiktok_live_pct"
+  | "tiktok_card_pct"
+  | "tiktok_content_gmv_base"
+  | "tiktok_content_gmv_divergence_pct"
+>;
+
+const CANAIS_MOCK_SEED: CanaisMockSeed[] = [
   {
     brand: "barbours", label: "BARBOURS",
     tiktok_gmv: 9_709_787, tiktok_gmv_video: 4_996_333, tiktok_gmv_live: 2_201_169, tiktok_gmv_card: 2_512_285,
-    tiktok_video_pct: 51.5, tiktok_live_pct: 22.7, tiktok_card_pct: 25.9,
     tiktok_visitors: 133_606, tiktok_customers: 2_808, tiktok_conversion_rate: 2.1,
     tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
     ml_gmv: 2_578_072, ml_unique_buyers: 25_541, ml_new_buyers: 23_619, ml_repeat_buyers: 1_011,
@@ -909,7 +935,6 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
   {
     brand: "kokeshi", label: "KOKESHI",
     tiktok_gmv: 2_316_329, tiktok_gmv_video: 1_333_654, tiktok_gmv_live: 452_889, tiktok_gmv_card: 529_786,
-    tiktok_video_pct: 57.6, tiktok_live_pct: 19.6, tiktok_card_pct: 22.9,
     tiktok_visitors: 61_982, tiktok_customers: 1_663, tiktok_conversion_rate: 2.68,
     tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
     ml_gmv: 789_601, ml_unique_buyers: 9_987, ml_new_buyers: 9_332, ml_repeat_buyers: 401,
@@ -920,7 +945,6 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
   {
     brand: "apice", label: "ÁPICE",
     tiktok_gmv: 876_174, tiktok_gmv_video: 275_685, tiktok_gmv_live: 154_350, tiktok_gmv_card: 446_139,
-    tiktok_video_pct: 31.5, tiktok_live_pct: 17.6, tiktok_card_pct: 50.9,
     tiktok_visitors: 14_059, tiktok_customers: 288, tiktok_conversion_rate: 2.05,
     tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
     ml_gmv: null, ml_unique_buyers: null, ml_new_buyers: null, ml_repeat_buyers: null,
@@ -931,7 +955,6 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
   {
     brand: "lescent", label: "LESCENT",
     tiktok_gmv: 253_922, tiktok_gmv_video: 115_633, tiktok_gmv_live: 64_436, tiktok_gmv_card: 73_854,
-    tiktok_video_pct: 45.5, tiktok_live_pct: 25.4, tiktok_card_pct: 29.1,
     tiktok_visitors: 3_903, tiktok_customers: 127, tiktok_conversion_rate: 3.25,
     tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
     ml_gmv: 552_643, ml_unique_buyers: 6_999, ml_new_buyers: 6_214, ml_repeat_buyers: 564,
@@ -942,7 +965,6 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
   {
     brand: "rituaria", label: "RITUÁRIA",
     tiktok_gmv: 239_773, tiktok_gmv_video: 63_824, tiktok_gmv_live: 20_980, tiktok_gmv_card: 154_969,
-    tiktok_video_pct: 26.6, tiktok_live_pct: 8.8, tiktok_card_pct: 64.6,
     tiktok_visitors: 1_628, tiktok_customers: 88, tiktok_conversion_rate: 5.41,
     tiktok_impressions: null, tiktok_page_views: null, tiktok_ctr_pct: null,
     ml_gmv: null, ml_unique_buyers: null, ml_new_buyers: null, ml_repeat_buyers: null,
@@ -951,6 +973,23 @@ const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = [
     shopee_repeat_buyer_rate_pct: null, shopee_gmv_per_buyer: null, shopee_new_buyer_pct: null,
   },
 ];
+
+/** Deriva os campos de mix de conteudo a partir dos valores monetarios. */
+function withContentMix(seed: CanaisMockSeed): CanaisBrandRow {
+  const mix = computeContentMix(
+    seed.tiktok_gmv_video, seed.tiktok_gmv_live, seed.tiktok_gmv_card, seed.tiktok_gmv,
+  );
+  return {
+    ...seed,
+    tiktok_video_pct: mix.videoPct,
+    tiktok_live_pct: mix.livePct,
+    tiktok_card_pct: mix.cardPct,
+    tiktok_content_gmv_base: mix.base,
+    tiktok_content_gmv_divergence_pct: mix.divergencePct,
+  };
+}
+
+const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = CANAIS_MOCK_SEED.map(withContentMix);
 
 export function fetchCanais(
   selection: MarketplaceSelection,
@@ -998,6 +1037,7 @@ export function fetchCanais(
   const tkVid = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_video ?? 0), 0);
   const tkLive = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_live ?? 0), 0);
   const tkCard = tkBrands.reduce((s, b) => s + (b.tiktok_gmv_card ?? 0), 0);
+  const tkMixTotal = computeContentMix(tkVid, tkLive, tkCard, tkGmv);
   const tkVisitors = tkBrands.reduce((s, b) => s + (b.tiktok_visitors ?? 0), 0);
   const tkCustomers = tkBrands.reduce((s, b) => s + (b.tiktok_customers ?? 0), 0);
   const mlBuyers = mlBrands.reduce((s, b) => s + (b.ml_unique_buyers ?? 0), 0);
@@ -1018,9 +1058,14 @@ export function fetchCanais(
     tiktok_gmv_video: showTk ? tkVid : null,
     tiktok_gmv_live: showTk ? tkLive : null,
     tiktok_gmv_card: showTk ? tkCard : null,
-    tiktok_video_pct: showTk ? parseFloat((tkVid / tkGmv * 100).toFixed(1)) : null,
-    tiktok_live_pct: showTk ? parseFloat((tkLive / tkGmv * 100).toFixed(1)) : null,
-    tiktok_card_pct: showTk ? parseFloat((tkCard / tkGmv * 100).toFixed(1)) : null,
+    // Mix do TOTAL: soma os componentes entre marcas primeiro e so entao
+    // calcula o percentual sobre a base somada — nunca media dos percentuais
+    // das marcas, e nunca `tkGmv` (GMV comercial) como denominador.
+    tiktok_video_pct: showTk ? tkMixTotal.videoPct : null,
+    tiktok_live_pct: showTk ? tkMixTotal.livePct : null,
+    tiktok_card_pct: showTk ? tkMixTotal.cardPct : null,
+    tiktok_content_gmv_base: showTk ? tkMixTotal.base : null,
+    tiktok_content_gmv_divergence_pct: showTk ? tkMixTotal.divergencePct : null,
     tiktok_visitors: showTk ? tkVisitors : null,
     tiktok_customers: showTk ? tkCustomers : null,
     tiktok_conversion_rate: (showTk && tkVisitors > 0) ? parseFloat((tkCustomers / tkVisitors * 100).toFixed(1)) : null,

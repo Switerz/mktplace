@@ -37,6 +37,15 @@ import {
   CHANNEL_BADGE_TONE,
   type FormattedMetric,
 } from "@/lib/canais-channel-metrics";
+import {
+  contentMixFromApi,
+  contentMixWeights,
+  dominantContentOrigin,
+  formatContentPctBr,
+  formatDivergenceBr,
+  MIX_UNAVAILABLE_LABEL,
+  type ContentMix,
+} from "@/lib/tiktok-content-mix";
 
 function fmtPct(v: number | null, dec = 1): string {
   if (v == null) return "—";
@@ -76,31 +85,46 @@ function ChannelMetricCell({
   );
 }
 
-function AttributionBar({
-  video, live, card,
-}: { video: number | null; live: number | null; card: number | null }) {
-  const v = video ?? 0;
-  const l = live ?? 0;
-  const c = card ?? 0;
-  const others = Math.max(0, 100 - v - l - c);
+/**
+ * Barra de COMPOSICAO do mix de conteudo — video, live e card/vitrine.
+ *
+ * Duas mudancas de contrato em relacao a antiga `AttributionBar`:
+ *
+ * 1. **Sem segmento residual.** A antiga calculava
+ *    `others = Math.max(0, 100 - v - l - c)` e pintava o vao de cinza. Esse
+ *    residuo nao existe na fonte: as tres categorias particionam a base de
+ *    conteudo por construcao, e o vao era so arredondamento (ate 0,3pp).
+ *    Agora os pesos sao os valores MONETARIOS via `flexGrow`, entao a barra
+ *    preenche 100% sem inventar categoria e sem mexer nos percentuais exibidos.
+ * 2. **Sem barra falsa de 0%.** Sem base valida a antiga renderizava tres
+ *    divs de largura 0 sobre fundo cinza, visualmente identico a "tudo zero".
+ *    Agora declara indisponibilidade em texto.
+ */
+function ContentMixBar({ mix, gmvVideo, gmvLive, gmvCard }: {
+  mix: ContentMix;
+  gmvVideo: number | null;
+  gmvLive: number | null;
+  gmvCard: number | null;
+}) {
+  if (mix.base == null) {
+    return <span className="text-xs text-slate-400">{MIX_UNAVAILABLE_LABEL}</span>;
+  }
+  const w = contentMixWeights(gmvVideo, gmvLive, gmvCard);
+  const label =
+    `Mix do GMV de conteúdo sobre base de ${fmtBrl(mix.base)}: ` +
+    `vídeo ${formatContentPctBr(mix.videoPct)}, live ${formatContentPctBr(mix.livePct)}, card/vitrine ${formatContentPctBr(mix.cardPct)}.`;
   return (
     <div
       className="flex h-2 rounded-full overflow-hidden w-28 bg-slate-100"
-      title={`Video ${v.toFixed(0)}% · Live ${l.toFixed(0)}% · Card ${c.toFixed(0)}%`}
+      role="img"
+      aria-label={label}
+      title={label}
     >
-      <div className="bg-violet-500 transition-all" style={{ width: `${v}%` }} />
-      <div className="bg-cyan-500 transition-all" style={{ width: `${l}%` }} />
-      <div className="bg-amber-400 transition-all" style={{ width: `${c}%` }} />
-      {others > 0.5 && <div className="bg-slate-300 transition-all" style={{ width: `${others}%` }} />}
+      <div className="bg-violet-500 transition-all" style={{ flexGrow: w.video }} />
+      <div className="bg-cyan-500 transition-all" style={{ flexGrow: w.live }} />
+      <div className="bg-amber-400 transition-all" style={{ flexGrow: w.card }} />
     </div>
   );
-}
-
-function dominantChannel(video: number | null, live: number | null, card: number | null): "video" | "live" | "card" {
-  const v = video ?? 0; const l = live ?? 0; const c = card ?? 0;
-  if (v >= l && v >= c) return "video";
-  if (l >= v && l >= c) return "live";
-  return "card";
 }
 
 const CHANNEL_STYLE = {
@@ -247,9 +271,13 @@ function CanaisPageInner() {
   const shNewTotal = shBrands.reduce((s, b) => s + (b.shopee_new_buyers ?? 0), 0);
   const shRepeatTotal = shBrands.reduce((s, b) => s + (b.shopee_repeat_buyers ?? 0), 0);
 
-  const tkVidPctTotal = tkGmvTotal > 0 ? (tkVidTotal / tkGmvTotal) * 100 : 0;
-  const tkLivePctTotal = tkGmvTotal > 0 ? (tkLiveTotal / tkGmvTotal) * 100 : 0;
-  const tkCardPctTotal = tkGmvTotal > 0 ? (tkCardTotal / tkGmvTotal) * 100 : 0;
+  // Mix do TOTAL: consumido do backend, NAO recalculado aqui.
+  //
+  // Antes esta pagina fazia `tkVidTotal / tkGmvTotal * 100` — o mesmo defeito
+  // de denominador que o UE-F1A corrigiu no backend, duplicado no cliente, e
+  // ainda com fallback `: 0` que fabricava 0% quando nao havia base. O
+  // contrato (base = video+live+card) mora no backend; aqui so se le.
+  const tkMixTotal = contentMixFromApi(displayKpis);
 
   const mlNewPctTotal = mlBuyersTotal > 0 ? (mlNewTotal / mlBuyersTotal) * 100 : 0;
   const mlRepeatPctTotal = mlBuyersTotal > 0 ? (mlRepeatTotal / mlBuyersTotal) * 100 : 0;
@@ -438,8 +466,11 @@ function CanaisPageInner() {
       {showTiktok && (
         <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
           <div>
-            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-slate-700">TikTok Shop</h2>
-            <p className="text-xs text-slate-400">Atribuição de GMV por origem — video, live e card/vitrine.</p>
+            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-slate-700">Mix do GMV de conteúdo do TikTok</h2>
+            <p className="text-xs text-slate-500">
+              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
+              TikTok. Não representa participação nas vendas totais.
+            </p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {!dataIsFresh ? (
@@ -447,32 +478,63 @@ function CanaisPageInner() {
             ) : (
               <>
                 <KpiCard
-                  label="Video TikTok"
-                  value={fmtPct(displayKpis?.tiktok_video_pct ?? null)}
+                  label="Vídeo — % da base de conteúdo"
+                  value={formatContentPctBr(displayKpis?.tiktok_video_pct)}
                   subvalue={displayKpis?.tiktok_gmv_video != null ? fmtBrl(displayKpis.tiktok_gmv_video) : undefined}
                   accent="bg-violet-600"
                 />
                 <KpiCard
-                  label="Live TikTok"
-                  value={fmtPct(displayKpis?.tiktok_live_pct ?? null)}
+                  label="Live — % da base de conteúdo"
+                  value={formatContentPctBr(displayKpis?.tiktok_live_pct)}
                   subvalue={displayKpis?.tiktok_gmv_live != null ? fmtBrl(displayKpis.tiktok_gmv_live) : undefined}
                   accent="bg-cyan-500"
                 />
                 <KpiCard
-                  label="Card TikTok"
-                  value={fmtPct(displayKpis?.tiktok_card_pct ?? null)}
+                  label="Card/vitrine — % da base de conteúdo"
+                  value={formatContentPctBr(displayKpis?.tiktok_card_pct)}
                   subvalue={displayKpis?.tiktok_gmv_card != null ? fmtBrl(displayKpis.tiktok_gmv_card) : undefined}
                   accent="bg-amber-400"
                 />
                 <KpiCard
                   label="Conversao TikTok"
-                  value={fmtPct(displayKpis?.tiktok_conversion_rate ?? null)}
+                  value={formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
                   subvalue={displayKpis?.tiktok_customers != null ? `${fmtNumber(displayKpis.tiktok_customers)} compradores (soma diária)` : undefined}
                   accent="bg-violet-300"
                 />
               </>
             )}
           </div>
+          {/* Faixa de reconciliacao — diagnostico NEUTRO entre duas linhagens.
+            * Fica FORA da barra de composicao de proposito: a divergencia nao e'
+            * um quarto segmento do mix. Sem cor de julgamento (positivo nao e'
+            * "bom", negativo nao e' "ruim") e sem a palavra cobertura/share. */}
+          {dataIsFresh && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-slate-500">Base de conteúdo:</span>
+                <span className="text-xs font-semibold tabular-nums text-slate-700">
+                  {tkMixTotal.base != null ? fmtBrl(tkMixTotal.base) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-slate-500">GMV comercial TikTok:</span>
+                <span className="text-xs font-semibold tabular-nums text-slate-700">
+                  {displayKpis?.tiktok_gmv != null ? fmtBrl(displayKpis.tiktok_gmv) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-slate-500">Diferença entre base de conteúdo e GMV comercial:</span>
+                <span className="text-xs font-semibold tabular-nums text-slate-600">
+                  {formatDivergenceBr(tkMixTotal.divergencePct)}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 basis-full">
+                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
+                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
+                margem nem severidade.
+              </p>
+            </div>
+          )}
         </section>
       )}
 
@@ -613,7 +675,7 @@ function CanaisPageInner() {
                   <tr key={`${row.brand}-${row.channel}`} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
                     <td className="px-6 py-3.5 font-semibold text-slate-700 whitespace-nowrap">{row.label}</td>
                     <td className="px-4 py-3.5 whitespace-nowrap">
-                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${CHANNEL_BADGE_TONE[row.channel] ?? ""}`}>
+                      <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${CHANNEL_BADGE_TONE[row.channel] ?? ""}`}>
                         {row.channel_label}
                       </span>
                     </td>
@@ -646,7 +708,7 @@ function CanaisPageInner() {
                           <span className="text-slate-300 text-xs">—</span>
                         ) : (
                           row.signals.map((s) => (
-                            <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap ${signalTone(s)}`}>
+                            <span key={s} className={`text-xs px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap ${signalTone(s)}`}>
                               {signalLabel(s)}
                             </span>
                           ))
@@ -671,41 +733,51 @@ function CanaisPageInner() {
           </table>
         </TableScrollHint>
         <div className="px-6 py-3 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-1.5">
-          <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
           <span className="text-xs text-slate-500">N/A = não se aplica a esse canal</span>
           <span className="text-xs text-amber-700 font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
           <span className="text-xs text-slate-400">— = denominador zero ou métrica não calculável no período (ex.: Ads/GMV quando GMV = 0)</span>
-          <span className="ml-auto text-[10px] text-slate-400 max-w-md text-right">
+          <span className="ml-auto text-xs text-slate-400 max-w-md text-right">
             Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
           </span>
         </div>
       </div>
 
-      {/* ── Tabela: Atribuicao TikTok por canal ── */}
+      {/* ── Tabela: Mix do GMV de conteudo do TikTok por marca ── */}
       {showTiktok && (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-violet-50 flex items-start justify-between">
             <div>
-              <h2 className="text-sm font-semibold text-slate-700">Atribuicao TikTok por Marca</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Origem do GMV — video, live e card/vitrine</p>
+              <h2 className="text-sm font-semibold text-slate-700">Mix do GMV de conteúdo por marca</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Vídeo, live e card/vitrine são composição interna da base de conteúdo de cada marca — não participação nas
+                vendas totais.
+              </p>
             </div>
-            <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-400 uppercase tracking-widest shrink-0">
+            <div className="flex items-center gap-3 text-xs font-semibold text-slate-400 uppercase tracking-widest shrink-0">
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Video</span>
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" /> Live</span>
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> Card</span>
             </div>
           </div>
           <TableScrollHint>
-            <table className="w-full text-sm" aria-label="Atribuicao TikTok por marca">
+            <table
+              className="w-full text-sm"
+              aria-label="Mix do GMV de conteúdo por marca — vídeo, live e card/vitrine como composição interna da base de conteúdo"
+            >
               <thead>
                 <tr className="bg-slate-50">
                   <SortableHeader label="Marca" column="brand" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
-                  <SortableHeader label="GMV" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Composicao</th>
-                  <SortableHeader label="Video %" column="video_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Live %" column="live_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Card %" column="card_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <SortableHeader label="GMV comercial" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                    Share da marca no GMV comercial
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                    Mix de conteúdo
+                  </th>
+                  <SortableHeader label="Vídeo % da base" column="video_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <SortableHeader label="Live % da base" column="live_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <SortableHeader label="Card % da base" column="card_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                   <SortableHeader label="Visitantes" column="visitors" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                   <SortableHeader label="Conversao" column="conversion" sort={tkSort.sort} onSort={tkSort.toggleSort} />
                 </tr>
@@ -716,8 +788,11 @@ function CanaisPageInner() {
                 ) : (
                   <>
                     {tkSort.sortedRows.map((b, i) => {
-                      const dom = dominantChannel(b.tiktok_video_pct, b.tiktok_live_pct, b.tiktok_card_pct);
-                      const partPct = tkGmvTotal > 0 ? ((b.tiktok_gmv ?? 0) / tkGmvTotal) * 100 : 0;
+                      // Mix vem do backend; `dom` e' null quando nao ha base
+                      // valida — nunca rotula "Video" sobre ausencia de dado.
+                      const mix = contentMixFromApi(b);
+                      const dom = dominantContentOrigin(mix);
+                      const partPct = tkGmvTotal > 0 ? ((b.tiktok_gmv ?? 0) / tkGmvTotal) * 100 : null;
                       return (
                         <tr key={b.brand} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
                           <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
@@ -730,24 +805,41 @@ function CanaisPageInner() {
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
                           <td className="px-4 py-3.5 text-right tabular-nums">
-                            <span className="text-slate-500 text-xs">{partPct.toFixed(1)}%</span>
+                            <span className="text-slate-500 text-xs">{formatContentPctBr(partPct)}</span>
                           </td>
                           <td className="px-4 py-3.5">
-                            <AttributionBar video={b.tiktok_video_pct} live={b.tiktok_live_pct} card={b.tiktok_card_pct} />
+                            <div className="flex flex-col gap-1">
+                              <ContentMixBar
+                                mix={mix}
+                                gmvVideo={b.tiktok_gmv_video}
+                                gmvLive={b.tiktok_gmv_live}
+                                gmvCard={b.tiktok_gmv_card}
+                              />
+                              {mix.base != null && (
+                                <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+                                  Base {fmtBrl(mix.base)}
+                                </span>
+                              )}
+                              {/* Sublinha separada: diagnostico de reconciliacao,
+                                * fora da barra de composicao de proposito. */}
+                              <span className="text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                                Dif. base × GMV comercial: {formatDivergenceBr(mix.divergencePct)}
+                              </span>
+                            </div>
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "video" ? CHANNEL_STYLE.video : DIM_STYLE}`}>
-                              {fmtPct(b.tiktok_video_pct)}
+                              {formatContentPctBr(b.tiktok_video_pct)}
                             </span>
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "live" ? CHANNEL_STYLE.live : DIM_STYLE}`}>
-                              {fmtPct(b.tiktok_live_pct)}
+                              {formatContentPctBr(b.tiktok_live_pct)}
                             </span>
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "card" ? CHANNEL_STYLE.card : DIM_STYLE}`}>
-                              {fmtPct(b.tiktok_card_pct)}
+                              {formatContentPctBr(b.tiktok_card_pct)}
                             </span>
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums text-slate-500">
@@ -755,7 +847,7 @@ function CanaisPageInner() {
                           </td>
                           <td className="px-4 py-3.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${convRateStyle(b.tiktok_conversion_rate)}`}>
-                              {fmtPct(b.tiktok_conversion_rate)}
+                              {formatContentPctBr(b.tiktok_conversion_rate)}
                             </span>
                           </td>
                         </tr>
@@ -767,14 +859,29 @@ function CanaisPageInner() {
                         <td className="px-4 py-3 text-right tabular-nums font-bold text-slate-800 text-sm">{fmtBrl(tkGmvTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums"><span className="text-slate-400 text-xs">100%</span></td>
                         <td className="px-4 py-3">
-                          <AttributionBar video={tkVidPctTotal} live={tkLivePctTotal} card={tkCardPctTotal} />
+                          <div className="flex flex-col gap-1">
+                            <ContentMixBar
+                              mix={tkMixTotal}
+                              gmvVideo={tkVidTotal}
+                              gmvLive={tkLiveTotal}
+                              gmvCard={tkCardTotal}
+                            />
+                            {tkMixTotal.base != null && (
+                              <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+                                Base {fmtBrl(tkMixTotal.base)}
+                              </span>
+                            )}
+                            <span className="text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                              Dif. base × GMV comercial: {formatDivergenceBr(tkMixTotal.divergencePct)}
+                            </span>
+                          </div>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-violet-700 text-xs font-bold">{tkVidPctTotal.toFixed(1)}%</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-cyan-700 text-xs font-bold">{tkLivePctTotal.toFixed(1)}%</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-amber-700 text-xs font-bold">{tkCardPctTotal.toFixed(1)}%</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-violet-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.videoPct)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-cyan-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.livePct)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-amber-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.cardPct)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-slate-500 text-xs">{fmtNumber(tkVisitorsTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-xs font-semibold text-slate-600">
-                          {displayKpis?.tiktok_conversion_rate != null ? `${displayKpis.tiktok_conversion_rate.toFixed(1)}%` : "—"}
+                          {formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
                         </td>
                       </tr>
                     )}
@@ -784,11 +891,11 @@ function CanaisPageInner() {
             </table>
           </TableScrollHint>
           <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Dominante:</span>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Dominante:</span>
             <span className="flex items-center gap-1.5 text-xs text-violet-700"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Video</span>
             <span className="flex items-center gap-1.5 text-xs text-cyan-700"><span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" /> Live</span>
             <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> Card</span>
-            <span className="ml-auto text-[10px] text-slate-400">
+            <span className="ml-auto text-xs text-slate-400">
               Conversao calculada apenas nos dias com dado de visitantes — cobertura estruturalmente limitada pela API TikTok
             </span>
           </div>
@@ -890,19 +997,19 @@ function CanaisPageInner() {
           <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
                 <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 85%</span>
                 <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 70–85%</span>
                 <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 70%</span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
                 <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 15%</span>
                 <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 8–15%</span>
                 <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 8%</span>
               </div>
             </div>
-            <p className="ml-auto text-[11px] text-slate-400 self-end">
+            <p className="ml-auto text-xs text-slate-400 self-end">
               Recompra = compradores com historico previo na marca no ML · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
             </p>
           </div>
@@ -1022,19 +1129,19 @@ function CanaisPageInner() {
           <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
                 <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 85%</span>
                 <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 70–85%</span>
                 <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 70%</span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
                 <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 15%</span>
                 <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 8–15%</span>
                 <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 8%</span>
               </div>
             </div>
-            <p className="ml-auto text-[11px] text-slate-400 self-end">
+            <p className="ml-auto text-xs text-slate-400 self-end">
               Recompra = compradores com historico previo na marca na Shopee · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
             </p>
           </div>

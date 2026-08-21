@@ -15,6 +15,49 @@ Toda afirmação material deste documento carrega um destes marcadores:
 - **[RECOMENDAÇÃO]** — juízo de engenharia/produto desta auditoria. Não é propriedade da fonte.
 - **[DECISÃO]** — pertence ao proprietário/stakeholder. A auditoria pode recomendar, não resolver.
 
+## Estado de implementação do contrato da §11
+
+| Gate | Commit | O que entregou |
+|---|---|---|
+| **UE-F1A** (backend) | `417be72` `fix(api): corrige mix de conteudo do tiktok` | Denominador do mix passou a ser `gmv_video+gmv_live+gmv_card`; campos aditivos `tiktok_content_gmv_base` e `tiktok_content_gmv_divergence_pct` em `CanaisKpis`/`CanaisBrandRow` |
+| **UE-F1B** (frontend) | `feat(web): corrige mix de conteudo do tiktok` | Aba Canais passou a exibir "Mix do GMV de conteúdo", com faixa de reconciliação separada, formatação pt-BR e sem categoria residual. Versionado em `main`; a publicação da interface é etapa de deploy própria |
+
+**[FATO]** O UE-F1B encontrou **dois defeitos adicionais do mesmo tipo**, que a revisão 2 não havia mapeado porque a auditoria original olhou o backend:
+
+1. `apps/web/app/canais/page.tsx` **recalculava** os percentuais do total no cliente (`tkVidTotal / tkGmvTotal * 100`), com fallback `: 0` que fabricava 0% na ausência de base — o mesmo defeito do backend, duplicado.
+2. `apps/web/src/lib/api-client.ts` fazia o mesmo no mock (`tkVid / tkGmv`), e os percentuais das marcas no mock eram literais escritos à mão derivados do GMV comercial.
+
+Ambos corrigidos no UE-F1B: o frontend passou a consumir os campos do backend para dados live, e o mock passou a derivar o contrato por construção via `computeContentMix`.
+
+**[FATO]** `ChannelMixChart` foi auditado e **não** tinha o defeito: trabalha só com valores monetários absolutos empilhados (`gmv_video/live/card`), sem percentual e sem denominador, e serve `/brand-detail`, não Canais. Ficou intacto.
+
+**[FATO]** O risco descrito na §7.1 ("risco ativo, em produção") deixa de existir quando o UE-F1B chegar à interface publicada. O backend já está publicado (abaixo); a tela passa a exibir o contrato correto a partir do deploy do frontend.
+
+### Smoke read-only do backend publicado — 21/08/2026, 17:50 UTC
+
+**[FATO] Resultado: PASS.** `GET /openapi.json` e `GET /api/v1/performance/canais` no backend canônico, somente leitura, com `Cache-Control: no-cache` e parâmetro de cache-busting. `cf-cache-status: DYNAMIC` e `x-render-origin-server: uvicorn` em todas as respostas — leitura viva do origin, sem cópia intermediária.
+
+| Verificação | Resultado |
+|---|---|
+| `/openapi.json` | HTTP 200 |
+| `CanaisKpis` | **27 campos**, os dois novos presentes |
+| `CanaisBrandRow` | **30 campos**, os dois novos presentes |
+| Payload `kpis` | ambos os campos presentes |
+| Payload `brands` | ambos os campos em **5/5** linhas |
+| `base == gmv_video+gmv_live+gmv_card` (±R$ 0,01) | OK nas 5 marcas e no total |
+| `pct_x == componente/base × 100` (±0,06 p.p.) | OK |
+| Soma dos três percentuais | 100,0% por marca · **99,9%** no total — dentro da tolerância de arredondamento, sem ajuste artificial |
+| `divergência == (base − gmv)/gmv × 100` (±0,1 p.p.) | OK |
+| `kpis.base == Σ bases das marcas` (±R$ 0,01) | OK |
+| Categoria residual "Outros" | **inexistente** no payload |
+| Janela sem dado (jan/2024, jan/2025) | os dois campos **serializados com `null`**, percentuais `null` — nunca 0 |
+
+Duas medições anteriores (20 e 21/08) encontraram 25/28 e foram classificadas como **BLOCKED BY DEPLOY ORDER**; o build no ar era anterior ao `417be72`. Após o deploy manual do proprietário, o contrato publicado passou a 27/30. **A API não expõe hash de build**, então o commit no ar é comprovado indiretamente, pela contagem de campos e pela conformidade das fórmulas — a mesma limitação já registrada em `docs/PROJECT_STATUS.md` §17.9.
+
+**[FATO] Não observável em produção nesta janela** (coberto pelos 38 testes locais, não pelo smoke): componente individual igual a zero com base válida (percentual `0,0`) e divergência exatamente `0,0`. Nenhuma das 5 marcas apresentou esses casos em jan–jul/2026.
+
+---
+
 ## O que mudou na revisão 2
 
 Quatro reclassificações, sendo duas que **fortalecem** conclusões e duas que **corrigem erros meus** da revisão 1:
