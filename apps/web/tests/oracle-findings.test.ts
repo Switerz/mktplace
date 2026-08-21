@@ -94,10 +94,18 @@ test("F1: custom environment (VERCEL_TARGET_ENV) e' NEGADO", () => {
   assert.equal(d.allowed === false && d.reason, "hosted_deployment_disabled");
 });
 
-test("F1: custom environment publicado como producao e' NEGADO como producao", () => {
-  const d = evaluateAccess({ ...LOCAL_OK, VERCEL_TARGET_ENV: "production" });
+test("F1: custom environment nomeado NUNCA e' producao, nem com VERCEL_ENV=production", () => {
+  // Correcao do Gate OM2: um target custom nomeado e' sempre negado como
+  // deployment nao-producao, mesmo que VERCEL_ENV diga "production".
+  const d = evaluateAccess({
+    ...LOCAL_OK,
+    NODE_ENV: "production",
+    VERCEL: "1",
+    VERCEL_ENV: "production",
+    VERCEL_TARGET_ENV: "staging-qa",
+  });
   assert.equal(d.allowed, false);
-  assert.equal(d.allowed === false && d.reason, "production_disabled");
+  assert.equal(d.allowed === false && d.reason, "hosted_deployment_disabled");
 });
 
 test("F1: VERCEL_ENV=development (vercel dev) tambem e' hospedado -> NEGADO", () => {
@@ -106,15 +114,21 @@ test("F1: VERCEL_ENV=development (vercel dev) tambem e' hospedado -> NEGADO", ()
   assert.equal(d.allowed === false && d.reason, "hosted_deployment_disabled");
 });
 
-test("F1: producao continua NEGADA por NODE_ENV e por VERCEL_ENV", () => {
-  for (const env of [
-    { ...LOCAL_OK, NODE_ENV: "production" },
-    { ...LOCAL_OK, VERCEL_ENV: "production" },
-  ]) {
-    const d = evaluateAccess(env);
-    assert.equal(d.allowed, false);
-    assert.equal(d.allowed === false && d.reason, "production_disabled");
-  }
+test("F1: sem OAuth, producao Vercel nega; host desconhecido tambem", () => {
+  // Producao REALISTA da Vercel, sem OAuth -> missing_oauth_config.
+  const prod = evaluateAccess({
+    ...LOCAL_OK,
+    NODE_ENV: "production",
+    VERCEL: "1",
+    VERCEL_ENV: "production",
+  });
+  assert.equal(prod.allowed, false);
+  assert.equal(prod.allowed === false && prod.reason, "missing_oauth_config");
+
+  // NODE_ENV=production SEM sinal de plataforma: host desconhecido, negado.
+  const unknown = evaluateAccess({ ...LOCAL_OK, NODE_ENV: "production" });
+  assert.equal(unknown.allowed, false);
+  assert.equal(unknown.allowed === false && unknown.reason, "environment_not_permitted");
 });
 
 test("F1: local SEM nenhum sinal da Vercel + flag explicita -> PERMITIDO", () => {

@@ -1,19 +1,25 @@
 # Oráculo × Torre Marketplace — Plano e Implementação do Conector MCP
 
-> **Status:** OM0 e **OM1 CONCLUÍDOS**; **OM2-P0 CONCLUÍDO com `NO-GO`**.
-> **Nenhum deploy, nenhum segredo, nenhuma publicação.**
+> **Status:** OM0 e **OM1 CONCLUÍDOS**; **OM2-P0 concluído** (`NO-GO` para bearer
+> no Claude.ai); **OM2 Task 1/2 CONCLUÍDA — OAuth 2.1 com Auth0 implementado e
+> validado LOCALMENTE** (§30).
+> **Nenhum deploy, nenhuma configuração na Vercel, nenhum segredo, nenhuma
+> publicação.**
 >
-> **Conexão do Claude.ai: `BLOCKED_BY_IDENTITY_PROVIDER`.** O bearer
-> compartilhado **não é compatível** com o custom connector do Claude.ai (§29);
-> OAuth é o único caminho, e **não existe issuer escolhido ou implementado**.
+> **Issuer escolhido: Auth0** (`https://gobeaute-oraculo.us.auth0.com/`), com
+> **Google apenas como provedor de identidade**. Audience =
+> `https://mktplace-gobeaute.vercel.app/api/mcp`; permission = `oracle:read`;
+> **DCR não habilitado** (Client ID/Secret pré-registrados no Claude.ai).
 >
-> **Todo deployment DESABILITADO por construção** — a rota responde 404 em
-> Production, Preview e custom environments enquanto não houver autenticação
-> real (§13.4.1, §25.4, **§26.1**).
-> **OAuth: não implementado.** **OM2: NÃO iniciado.**
-> **`/api/mcp` NÃO está habilitado na Vercel; o Claude.ai NÃO foi conectado.**
+> **Produção da Vercel é elegível SOMENTE com todos os guardrails** (OAuth
+> completo + flag + backend allowlisted). **Preview, custom environments e host
+> desconhecido respondem 404 sempre** — a classificação usa os sinais explícitos
+> da plataforma, **nunca** `NODE_ENV`, porque a Vercel executa Preview com
+> `NODE_ENV=production` (§13.4.1, §26.1, **§30.7**, **§31.1**).
+> **`/api/mcp` ainda NÃO está habilitado na Vercel; o Claude.ai NÃO foi
+> conectado.** Publicação = **OM2 Task 2/2**, não iniciada.
 >
-> **Gate:** OM0 → OM1 → OM2-P0 · **Base integrada:** `origin/main` @ `e675948` (V3-1A)
+> **Gate:** OM0 → OM1 → OM2-P0 → OM2 T1/2 · **Base:** `origin/main` @ `417be72`
 > **Branch/worktree:** `oracle-mcp`
 > **Auditoria:** 2026-08-18 · **Checkpoint OM0-F:** 2026-08-18
 > **Implementação local (OM1 Task 1/2):** 2026-08-18 — ver **§25**
@@ -21,6 +27,8 @@
 > **Correção terminal pré-QA:** 2026-08-19 — ver **§27**
 > **Task 2/2 — integração e QA local:** 2026-08-19 — ver **§28**
 > **OM2-P0 — compatibilidade de autenticação:** 2026-08-19 — ver **§29**
+> **OM2 Task 1/2 — OAuth 2.1 com Auth0 (local):** 2026-08-21 — ver **§30**
+> **OM2 T1/2 — correção de segurança pré-versionamento:** 2026-08-21 — ver **§31**
 
 ---
 
@@ -2621,3 +2629,417 @@ Como alternativa de baixo custo e sem exposição, o **Caminho A** (piloto local
 Claude Code) pode ser autorizado separadamente; ele **não** destrava o Claude.ai.
 
 **A frente do Oráculo encerra aqui até haver decisão.**
+
+---
+
+## 30. OM2 Task 1/2 — OAuth 2.1 com Auth0 (implementação local)
+
+> **Executada em 2026-08-21**, no worktree `oracle-mcp` sobre `origin/main` @
+> `417be72`. **Implementação e validação LOCAIS concluídas.**
+>
+> **Nenhum deploy, nenhuma configuração na Vercel, nenhuma conexão do
+> Claude.ai, nenhum segredo criado ou armazenado, nenhum commit, nenhum push.**
+> A publicação é a **Task 2/2**, ainda não iniciada.
+
+### 30.1 Decisão de arquitetura
+
+O `/api/mcp` passa a ser um **OAuth 2.1 resource server**. Ele valida token e
+nada mais:
+
+```
+Claude.ai  --Authorization Code + PKCE-->  Auth0  --login social-->  Google
+                                             |
+                    access token (aud = resource canônico, oracle:read)
+                                             v
+                                     POST /api/mcp  (valida JWT)
+                                             v
+                                  cinco tools read-only
+                                             v
+                                   FastAPI allowlisted
+```
+
+**O Google é apenas o provedor de identidade dentro do Auth0.** Nenhum token do
+Google — nem access token, nem ID token — é credencial aceita aqui. O MCP aceita
+**exclusivamente** access token emitido pelo Auth0 para a audience canônica.
+
+**Nenhum endpoint próprio de `/authorize`, `/token`, `/register`, login,
+consentimento, callback ou sessão foi criado** — isso pertence ao Auth0, e há
+teste que falha se algum desses caminhos aparecer.
+
+> **Configuração do dashboard Auth0: informada pelo proprietário.** O agente não
+> acessou o Auth0, não usou a Management API e não verificou o tenant. O único
+> dado confirmado tecnicamente foi o **discovery público** do issuer
+> (`/.well-known/openid-configuration`), que não é segredo.
+
+### 30.2 Correção factual ao OM2-P0
+
+A documentação de autenticação de conectores do Claude, na versão vigente,
+**passou a listar `static_headers` como tipo suportado em beta** — credencial
+fixa inserida por um administrador da organização como header. Isso **nuança** o
+`NO-GO` do §29, que descrevia a UI sem campo de header.
+
+**Não muda o rumo**, por dois motivos: o proprietário já decidiu por OAuth, e
+OAuth é estritamente melhor aqui — dá **identidade por pessoa**, expiração e
+revogação, que um header compartilhado por organização não dá. Registrado para
+que o §29 não seja lido como mais absoluto do que é hoje.
+
+A mesma documentação **confirma** o desenho escolhido: para custom connectors,
+"o campo OAuth Client Secret é **opcional** — forneça-o apenas se seu
+authorization server exigir autenticação de cliente confidencial", e
+pré-registrar o próprio Client ID "evita dynamic client registration
+inteiramente". **DCR não é necessário e não foi habilitado.**
+
+### 30.3 Contrato das variáveis
+
+Todas **server-side**. Nenhuma com `NEXT_PUBLIC_`.
+
+| Variável | Valor | Papel |
+|---|---|---|
+| `ORACLE_MCP_ENABLED` | `1` | habilitação explícita (já existia) |
+| `MCP_BACKEND_API_URL` | `https://mktplace-api.onrender.com` | backend allowlisted (já existia) |
+| `ORACLE_AUTH_ISSUER` | `https://gobeaute-oraculo.us.auth0.com/` | issuer do Auth0 |
+| `ORACLE_AUTH_AUDIENCE` | `https://mktplace-gobeaute.vercel.app/api/mcp` | audience exigida no `aud` |
+| `ORACLE_AUTH_REQUIRED_SCOPE` | `oracle:read` | permission exigida |
+
+**Nenhum Client ID ou Client Secret entra no ambiente do MCP.** A validação de
+JWT usa apenas issuer e JWKS **públicos**; o Client Secret da aplicação Auth0
+pertence ao Claude.ai. Há teste que falha se qualquer módulo passar a referenciar
+`CLIENT_SECRET`, `CLIENT_ID`, `GOOGLE_CLIENT`, `AUTH0_CLIENT` ou `NEXT_PUBLIC_`.
+
+**Validação estrita, fail-closed:**
+
+- **issuer** — https obrigatório, hostname **exatamente**
+  `gobeaute-oraculo.us.auth0.com` (constante server-only, **nunca `endsWith`**),
+  sem porta, sem credencial, sem query/fragment, path apenas raiz. A barra final
+  é **normalizada num único ponto** para a forma canônica do claim `iss` do
+  Auth0 (`https://host/`), de modo que a comparação adiante seja igualdade exata
+  de string.
+- **audience** — precisa ser **exatamente** o resource canônico. Uma barra final
+  a mais já invalida.
+- **JWKS** — **derivado** do issuer (`{issuer}.well-known/jwks.json`), nunca
+  configurado à mão.
+- **scope** — token único, formato validado.
+
+Configuração divergente **não é corrigida em silêncio**: a config inteira é
+recusada, e em contexto hospedado isso vira 404.
+
+### 30.4 Protected Resource Metadata (RFC 9728)
+
+Duas rotas públicas, **sem autenticação** (é assim que o cliente descobre o
+authorization server), servidas pelo **mesmo módulo** — não há cópia que possa
+divergir:
+
+- `/.well-known/oauth-protected-resource/api/mcp` — **forma primária**
+  path-specific, que é a primeira que o cliente do Claude sonda para um resource
+  com path;
+- `/.well-known/oauth-protected-resource` — forma root, apenas para
+  interoperabilidade.
+
+Documento, com **exatamente** quatro campos — nenhuma capability inventada:
+
+```json
+{
+  "resource": "https://mktplace-gobeaute.vercel.app/api/mcp",
+  "authorization_servers": ["https://gobeaute-oraculo.us.auth0.com/"],
+  "scopes_supported": ["oracle:read"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+`authorization_servers` tem **um** elemento de propósito: o cliente do Claude usa
+a primeira entrada e **não** faz fallback para as seguintes.
+
+Sem OAuth configurado, os dois endpoints respondem **404** — publicar um
+documento apontando para um issuer inválido seria pior que não publicar nada.
+
+### 30.5 Verificação do token
+
+Biblioteca: **`jose@6.2.9`**, promovida de transitiva-dev a **dependência de
+produção**. Justificativa: é a implementação JOSE de referência para
+Node/Web-standard, cobre JWKS remoto com cache e rotação por `kid`, e **já
+estava na árvore na mesma versão** — a mudança no lockfile foi de **uma linha**,
+com **zero pacote adicionado**. Nenhuma criptografia artesanal foi escrita.
+
+A verificação é ligada ao SDK pelo contrato `OAuthTokenVerifier`, e os desafios
+HTTP saem de `verifyBearerToken` + `bearerAuthChallengeResponse` — helpers
+oficiais, não código próprio.
+
+Claims validadas, todas obrigatórias:
+
+| Item | Regra |
+|---|---|
+| `Authorization` | esquema **Bearer**; header only |
+| assinatura | JWKS do issuer, rotação por `kid` |
+| algoritmo | **apenas `RS256`** — `none` e toda a família `HS*` rejeitados |
+| `iss` | igualdade exata com o issuer normalizado |
+| `aud` | precisa **conter** a audience canônica |
+| `exp` | obrigatório; tolerância de relógio de 5 s |
+| `nbf` | validado quando presente |
+| `sub` | string não vazia |
+| permission | `oracle:read` como **elemento completo** |
+
+### 30.6 Regra final de permission × scope
+
+Resolvido em documentação oficial do Auth0, e é a diferença que importa:
+
+- **`permissions`** — com RBAC + *Add Permissions in the Access Token*, contém
+  **todas** as permissions atribuídas ao usuário, **sem filtro** pelo pedido;
+- **`scope`** — com RBAC, contém a **interseção** entre o que o cliente pediu e o
+  que o usuário tem.
+
+**Decisão:** a autorização considera a **união** das duas claims, com comparação
+de **elemento completo** (`oracle:reader` e `oracle:read:all` **não** passam).
+Isso torna a autorização correta *independentemente* de o cliente ter solicitado
+o scope.
+
+**E, além disso**, emitimos `scope="oracle:read"` no `WWW-Authenticate` — que é o
+mecanismo documentado para controlar quais scopes o Claude solicita. As duas
+coisas juntas, não uma no lugar da outra.
+
+A checagem acontece em **dois pontos** (no verificador e no `requiredScopes` do
+SDK). Redundância deliberada: se um for removido por engano, o outro continua
+negando.
+
+### 30.7 Matriz 404 / 401 / 403 / 200
+
+| Situação | Resposta |
+|---|---|
+| Produção, OAuth **incompleto** (qualquer variável faltando ou inválida) | **404** genérico, sem `WWW-Authenticate` |
+| Produção, issuer de host divergente | **404** (não 401) |
+| Produção, sem `ORACLE_MCP_ENABLED=1` | **404** |
+| Produção, backend divergente | **404** |
+| Produção, stub de identidade | **404** |
+| **Preview / custom env / `VERCEL=1`**, mesmo com OAuth completo | **404** |
+| Local sem OAuth configurado | permitido sem bearer (modo OM1) |
+| Local **com** OAuth configurado | **401** sem bearer |
+| Configurado, sem `Authorization` | **401** + `WWW-Authenticate` |
+| Esquema não-Bearer (`Basic`, `Token`, `bearerabc`) | **401** |
+| Bearer vazio / malformado | **401** |
+| Assinatura inválida | **401** |
+| `alg: none` ou `HS256` | **401** |
+| `iss` divergente | **401** |
+| `aud` divergente (inclusive array sem a canônica) | **401** |
+| `exp` no passado, ou `exp` ausente | **401** |
+| `nbf` no futuro | **401** |
+| `sub` ausente | **401** |
+| Token válido **sem** `oracle:read` | **403** `insufficient_scope` |
+| Token válido com `oracle:reader` / `oracle:read:all` | **403** |
+| Token válido **com** `oracle:read` | **200**, tools alcançáveis |
+
+Desafios:
+
+```http
+401: WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp", scope="oracle:read"
+403: WWW-Authenticate: Bearer error="insufficient_scope", scope="oracle:read", resource_metadata="…"
+```
+
+**Preview segue fail-closed** — não há decisão documental que o libere, e
+ausência de decisão não é permissão.
+
+### 30.8 Ordem de execução e não-propagação
+
+A ordem é inegociável e testada: **fronteira de ambiente → autenticação → MCP
+instanciado → tools alcançáveis → backend**. Uma chamada sem autenticação
+**não produz nenhum tráfego** para o Render — provado com `fetch` espião em cada
+caso de 401/403/404.
+
+**O bearer encerra sua função na fronteira do MCP.** O `AuthInfo` verificado
+**não** é repassado adiante, e o adapter não recebe nem token, nem `sub`, nem
+claims. Há um teste que executa uma tool real com token válido e inspeciona
+**todas** as chamadas upstream, afirmando ausência do JWT, de header
+`Authorization`, do subject, da palavra `permissions` e de token na query.
+
+**Logs:** permitido request ID, status, categoria sanitizada e, se necessário,
+subject **pseudonimizado** (prefixo de SHA-256, testado como determinístico e
+sem o `sub` cru). Proibido bearer, JWT, refresh token, authorization code,
+Client Secret, e-mail, claims integrais e conteúdo das tools. Todas as falhas de
+token convergem para a **mesma** resposta — há teste provando que não existe
+oráculo de diagnóstico.
+
+### 30.9 Testes e validação
+
+| Verificação | Resultado |
+|---|---|
+| `tests/oracle-oauth.test.ts` (novo) | **55/55** |
+| `npm run test:mcp` | **223/223** |
+| `npm test` (suíte completa) | **968/968 — 100% verde** |
+| `npm run typecheck` | limpo |
+| `npm run build` | sucesso; `/api/mcp` e as **duas** rotas `.well-known` como `ƒ` |
+| `git diff --check` | limpo |
+| `npm audit --omit=dev` | 4 high **preexistentes** (árvore do `next`); **`jose` sem vulnerabilidade** |
+
+Todas as chaves e tokens dos testes são **sintéticos, gerados em runtime**.
+Nenhum PEM, JWT ou fixture com aparência de credencial real foi versionado, e
+**nenhum teste toca o Auth0 real, a rede ou produção**.
+
+Dois testes do V3 e do OM1 foram atualizados ao novo contrato, **sem
+enfraquecimento**: o motivo de negação em produção mudou de
+`production_disabled` para `missing_oauth_config` (continua 404, apenas mais
+preciso), e a allowlist exata de dependências do V3 passou a incluir `jose`,
+mantendo `deepEqual`.
+
+### 30.10 Achado de protocolo
+
+O transporte 2026-07-28 exige, além do `Mcp-Method`, o header **`Mcp-Name`**
+concordando com `params.name` em `tools/call` — divergência é rejeitada com
+`-32020`. Mesma família da regra já registrada no §25.5.
+
+### 30.11 O que continua fora
+
+- **Nenhum deploy.** Nenhuma variável foi criada na Vercel.
+- **Claude.ai não conectado.** Nenhum conector registrado.
+- **Nenhum segredo** criado, rotacionado, lido ou armazenado.
+- Zero Auth0 Management API, zero Google Cloud API, zero `.env` editado, zero
+  banco, zero backend FastAPI, zero pipeline.
+- **As cinco tools continuam read-only**, sem alteração além do necessário à
+  autenticação — com teste afirmando isso.
+- **A API pública do Render continua sendo frente de segurança separada** (R1):
+  proteger o `/api/mcp` não a protege.
+- **Task 2/2 não iniciada.**
+
+---
+
+## 31. OM2 Task 1/2 — correção consolidada de segurança (pré-versionamento)
+
+> **Executada em 2026-08-21.** Veredito da revisão: `REQUEST CHANGES`. Quatro
+> findings, sendo **um deles um fail-open real de Preview** introduzido no §30.
+> **Sem commit, sem push, sem deploy, sem Vercel/Auth0/Claude.ai.**
+
+### 31.1 Finding 1 — Preview era fail-open por `NODE_ENV`
+
+**O defeito, confirmado por execução antes da correção:** a Vercel executa
+**Preview com `NODE_ENV=production`**. O §30 avaliava `isProductionEnv` — que
+consultava `NODE_ENV` — **antes** de distinguir o ambiente Vercel. Resultado
+medido:
+
+| Ambiente (todos com `NODE_ENV=production`) | Antes | Depois |
+|---|---|---|
+| `VERCEL_ENV=production` | PERMITIDO | **PERMITIDO** (correto) |
+| **`VERCEL_ENV=preview`** | **PERMITIDO** ← fail-open | **404** |
+| **`VERCEL=1` sem `VERCEL_ENV`** | **PERMITIDO** ← fail-open | **404** |
+| **`VERCEL_TARGET_ENV=staging-qa`** | **PERMITIDO** ← fail-open | **404** |
+
+Os testes do §30 usavam `NODE_ENV=development` para simular Preview, e por isso
+**mascaravam** o defeito. Isso foi corrigido: a matriz de ambiente agora usa
+`NODE_ENV=production` de propósito, porque é o que a plataforma faz.
+
+**Nova precedência — `NODE_ENV` não decide nada quando há sinal Vercel:**
+
+```
+classifyEnv(env):
+  há sinal Vercel (VERCEL=1 | VERCEL_ENV | VERCEL_TARGET_ENV)?
+    → VERCEL_ENV === "production"
+      E (VERCEL_TARGET_ENV ausente ou "production")   → "vercel-production"
+    → qualquer outro caso                            → "vercel-other"   (404)
+  sem sinal Vercel:
+    → NODE_ENV é "development" ou "test"             → "local"
+    → qualquer outro caso                            → "unknown-host"   (404)
+```
+
+Duas decisões que valem explicitar:
+
+1. **Um custom environment nomeado nunca é produção**, mesmo que `VERCEL_ENV`
+   diga `production`. `VERCEL_TARGET_ENV=staging-qa` + `VERCEL_ENV=production`
+   → **404**.
+2. **`unknown-host` é novo e fecha uma brecha que eu mesmo teria aberto.** Ao
+   parar de tratar `NODE_ENV=production` como produção, um deployment **fora da
+   Vercel** cairia no ramo local e poderia servir **sem autenticação**.
+   Agora: sem sinal de plataforma e sem `NODE_ENV` de dev/test → nega com
+   `environment_not_permitted`. Custo aceito: `next start` local responde 404;
+   o uso local é `npm run dev`.
+
+### 31.2 Finding 2 — permission canônica fail-closed
+
+`ORACLE_AUTH_REQUIRED_SCOPE` aceitava qualquer token sintaticamente válido —
+configurar `openid` (que todo token OIDC carrega) esvaziaria a autorização sem
+nada falhar.
+
+Agora existe a constante server-side **`CANONICAL_ORACLE_SCOPE = "oracle:read"`**,
+e a configuração só é válida quando a variável, após `trim`, é **exatamente**
+igual a ela. A config resolvida usa **a constante**, não o valor do ambiente.
+
+Recusados, derrubando a configuração inteira: `oracle:reader`, `oracle:read:all`,
+`openid`, `profile`, `read`, `oracle:write`, múltiplos scopes em qualquer ordem,
+espaços internos, vazio e ausente. Em produção isso vira **404 genérico, sem
+`WWW-Authenticate`** — nada é anunciado.
+
+A variável **não** foi removida: continua sendo confirmação explícita de
+configuração. Ela apenas não escolhe mais a permission.
+
+### 31.3 Finding 3 — metadata alinhada à disponibilidade real
+
+Os dois endpoints `.well-known` verificavam **somente** OAuth. Agora
+`protectedResourceMetadataResponse` **reusa `evaluateAccess`** — a mesma função
+que governa a rota MCP, não uma reimplementação — e publica apenas quando a
+rota está operacionalmente elegível. `auth !== null` é a condição que fecha o
+caso local: localmente a rota pode rodar sem OAuth (modo OM1), e nesse caso não
+existe authorization server para anunciar.
+
+O documento **continua público e sem bearer**; apenas a *disponibilidade* segue
+a decisão fail-closed.
+
+| Situação | Metadata |
+|---|---|
+| Production Vercel completa | **200** |
+| Local completo (OAuth + flag + backend) | **200** |
+| OAuth completo, **sem** feature flag | **404** |
+| OAuth completo, backend ausente ou divergente | **404** |
+| **Preview** com tudo configurado | **404** |
+| **Custom environment** com tudo configurado | **404** |
+| `VERCEL=1` sem `VERCEL_ENV` confiável | **404** |
+| OAuth incompleto (issuer/audience) | **404** |
+| Scope não canônico | **404** |
+| Local **sem** OAuth (modo OM1) | **404** |
+
+Os dois caminhos devolvem **corpo idêntico** — há teste que serve os dois e
+compara byte a byte.
+
+### 31.4 Finding 4 — redação obsoleta
+
+O cabeçalho de `app/api/mcp/route.ts` ainda dizia *"piloto LOCAL/DEV. Producao
+esta DESABILITADA por construcao"*. Reescrito: produção Vercel é elegível
+**somente** com todos os guardrails; Preview e custom environments seguem
+negados; e a classificação usa os sinais explícitos da plataforma, **nunca**
+`NODE_ENV` — com a razão registrada no próprio comentário.
+
+O histórico do OM1 (§25–§28) permanece como **histórico**, e as seções de status
+foram atualizadas para não afirmar mais que produção está desabilitada por
+construção.
+
+### 31.5 Revisão adicional — o que permanece intacto
+
+Verificado por teste, não por leitura:
+
+- **resource server apenas** — zero `/authorize`, `/token`, `/register`,
+  callback, cookie ou sessão (teste falha se algum caminho aparecer);
+- issuer e audience **exatos**; **somente RS256**; `exp`/`sub`/`iss`/`aud`
+  obrigatórios;
+- **nenhum token do Google** é credencial aceita;
+- **bearer nunca propagado ao backend** — teste executa uma tool real e
+  inspeciona todas as chamadas upstream;
+- **401/403 antes de instanciar as tools**; toda negação com **zero chamada
+  upstream**;
+- **Client ID/Secret ausentes** do código e das variáveis do MCP (teste falha se
+  algum módulo passar a referenciá-los, ou usar `NEXT_PUBLIC_`);
+- **`jose` como única nova dependência produtiva**;
+- as **cinco tools continuam read-only**;
+- **a API pública do Render permanece fora de escopo** — frente separada (R1).
+
+### 31.6 Resultados
+
+| Verificação | Resultado |
+|---|---|
+| `tests/oracle-oauth.test.ts` | **73/73** (era 55) |
+| `npm run test:mcp` | **241/241** (era 223) |
+| `npm test` | **986/986 — 100% verde** |
+| `npm run typecheck` | limpo |
+| `npm run build` | sucesso; **as duas** rotas `.well-known` e `/api/mcp` como `ƒ` |
+| `npm audit --omit=dev` | 4 high **preexistentes** (árvore do `next`); `jose` limpo |
+| `git diff --check` | limpo |
+| `package-lock.json` | alterado **somente** pela promoção do `jose` já presente (189 → 189 pacotes, 1 linha) |
+
+**18 testes novos** nesta rodada: matriz realista de ambiente (11) e permission
+canônica (5), mais metadata alinhada (2 casos compostos cobrindo 12 situações).
+Cinco testes anteriores foram corrigidos para reproduzir Preview e produção de
+forma **realista** — `NODE_ENV=development` não é mais aceito como contraprova
+de Preview.

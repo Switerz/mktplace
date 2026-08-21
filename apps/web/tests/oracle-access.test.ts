@@ -14,20 +14,32 @@ const OK_URL = "https://mktplace-api.onrender.com";
 // ---------------------------------------------------------------------------
 
 test("producao sem auth real -> NEGADO", () => {
-  const d = evaluateAccess({ NODE_ENV: "production", MCP_BACKEND_API_URL: OK_URL });
+  // Producao REALISTA da Vercel: NODE_ENV=production + VERCEL_ENV=production.
+  const d = evaluateAccess({
+    NODE_ENV: "production",
+    VERCEL: "1",
+    VERCEL_ENV: "production",
+    MCP_BACKEND_API_URL: OK_URL,
+  });
   assert.equal(d.allowed, false);
-  assert.equal(d.allowed === false && d.reason, "production_disabled");
+  // Gate OM2: producao SEM OAuth configurado nega por `missing_oauth_config`.
+  // Continua 404; o motivo apenas ficou mais preciso.
+  assert.equal(d.allowed === false && d.reason, "missing_oauth_config");
 });
 
 test("producao COM a flag local ligada -> continua NEGADO", () => {
   // Este e' o caso que mais importa: uma flag de dev nao pode destravar prod.
   const d = evaluateAccess({
     NODE_ENV: "production",
+    VERCEL: "1",
+    VERCEL_ENV: "production",
     ORACLE_MCP_ENABLED: "1",
     MCP_BACKEND_API_URL: OK_URL,
   });
   assert.equal(d.allowed, false);
-  assert.equal(d.allowed === false && d.reason, "production_disabled");
+  // Gate OM2: producao SEM OAuth configurado nega por `missing_oauth_config`.
+  // Continua 404; o motivo apenas ficou mais preciso.
+  assert.equal(d.allowed === false && d.reason, "missing_oauth_config");
 });
 
 test("VERCEL_ENV=production tambem NEGA, mesmo com NODE_ENV=development", () => {
@@ -38,16 +50,26 @@ test("VERCEL_ENV=production tambem NEGA, mesmo com NODE_ENV=development", () => 
     MCP_BACKEND_API_URL: OK_URL,
   });
   assert.equal(d.allowed, false);
-  assert.equal(d.allowed === false && d.reason, "production_disabled");
+  // Gate OM2: producao SEM OAuth configurado nega por `missing_oauth_config`.
+  // Continua 404; o motivo apenas ficou mais preciso.
+  assert.equal(d.allowed === false && d.reason, "missing_oauth_config");
 });
 
 test("producao com stub de teste -> NEGADO (stub nunca destrava prod)", () => {
   const d = evaluateAccess(
-    { NODE_ENV: "production", ORACLE_MCP_ENABLED: "1", MCP_BACKEND_API_URL: OK_URL },
+    {
+      NODE_ENV: "production",
+      VERCEL: "1",
+      VERCEL_ENV: "production",
+      ORACLE_MCP_ENABLED: "1",
+      MCP_BACKEND_API_URL: OK_URL,
+    },
     { testIdentity: { subject: "fake" } },
   );
   assert.equal(d.allowed, false);
-  assert.equal(d.allowed === false && d.reason, "production_disabled");
+  // Gate OM2: producao SEM OAuth configurado nega por `missing_oauth_config`.
+  // Continua 404; o motivo apenas ficou mais preciso.
+  assert.equal(d.allowed === false && d.reason, "missing_oauth_config");
 });
 
 // ---------------------------------------------------------------------------
