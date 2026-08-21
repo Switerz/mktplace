@@ -130,8 +130,20 @@ def test_g08_inteligencia_atravessa_inteira_sem_datamart(monkeypatch):
     monkeypatch.setattr(gs, "datamart_engine", None)
     sessao = SessaoFalsa()
     out = gs.get_inteligencia(sessao)
-    assert list(out) == ["signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products"]
-    assert len(sessao.consultas) == 7, sessao.consultas
+    # Gate V3-BE: as SETE chaves originais continuam nas sete primeiras
+    # posicoes, na mesma ordem — e' isso que prova que nada foi removido nem
+    # reordenado. Depois delas entram as seis aditivas do BE3/BE4/BE6.
+    assert list(out) == [
+        "signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products",
+        "urgent_total_count", "scale_total_count", "organic_total_count",
+        "ml_snapshot_refreshed_at", "ml_scope_brands", "opportunity_map",
+    ]
+    assert list(out)[:7] == [
+        "signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products",
+    ]
+    # 7 originais + 2 do `opportunity_map` (agregados e destaques). BE3 e BE4
+    # NAO abrem round-trip: viajam na consulta de `signals`.
+    assert len(sessao.consultas) == 9, sessao.consultas
 
 
 def test_g09_brand_detail_atravessa_inteira_sem_datamart(monkeypatch):
@@ -140,7 +152,9 @@ def test_g09_brand_detail_atravessa_inteira_sem_datamart(monkeypatch):
     out = gs.get_brand_detail(sessao, "kokeshi", 2026, 7)
     assert out["brand"] == "kokeshi"
     assert out["channel_funnel"] == [] and out["top_produtos"] == []
-    assert len(sessao.consultas) == 5, sessao.consultas
+    # Gate V3-BE: +1 consulta, a de `available_months` (BE5).
+    assert len(sessao.consultas) == 6, sessao.consultas
+    assert out["available_months"] == []
 
 
 @pytest.mark.parametrize("nome,chamada", [
@@ -161,8 +175,8 @@ def test_g10_todas_as_consultas_passam_pela_session(monkeypatch, nome, chamada):
         assert "marts." in baixo
 
 
-def test_g11_ltv_degrada_mas_as_outras_seis_consultas_vao_a_session(monkeypatch):
-    """`ltv` esta em try/except. Mesmo se a fonte dele falhasse, as outras seis
+def test_g11_ltv_degrada_mas_as_outras_consultas_vao_a_session(monkeypatch):
+    """`ltv` esta em try/except. Mesmo se a fonte dele falhasse, as outras oito
     continuam na Session — nenhuma cai para o Data Mart."""
     monkeypatch.setattr(gs, "datamart_engine", None)
     sessao = SessaoFalsa()
@@ -176,7 +190,8 @@ def test_g11_ltv_degrada_mas_as_outras_seis_consultas_vao_a_session(monkeypatch)
     sessao.execute = execute
     out = gs.get_inteligencia(sessao)
     assert out["ltv"] == []
-    assert len(sessao.consultas) == 6
+    # 9 menos a de `ltv`, que levanta antes de ser registrada.
+    assert len(sessao.consultas) == 8
 
 
 # ===========================================================================
@@ -247,7 +262,10 @@ def test_g17_response_models_inalterados():
 def test_g18_nenhum_campo_novo_nos_schemas():
     from app.schemas.performance import BrandDetailResponse, TempoRealResponse
     assert len(TempoRealResponse.model_fields) == 5
-    assert len(BrandDetailResponse.model_fields) == 37
+    # Gate V3-BE: +1 campo, `available_months` (BE5). A contraprova abaixo
+    # continua exata: nenhum campo de FRESCOR entrou aqui — o frescor do
+    # snapshot ML vive em `/inteligencia`, que nao tem response_model.
+    assert len(BrandDetailResponse.model_fields) == 38
     for campo in BrandDetailResponse.model_fields:
         assert not any(t in campo.lower() for t in
                        ("refreshed", "synced", "source_max", "stale", "coverage")), campo
@@ -255,7 +273,10 @@ def test_g18_nenhum_campo_novo_nos_schemas():
 
 def test_g19_a_assinatura_das_duas_funcoes_nao_mudou():
     import inspect
-    assert list(inspect.signature(gs.get_inteligencia).parameters) == ["db"]
+    # Gate V3-BE: `ml_brands` opcional (default None = as quatro marcas ML).
+    # Chamada antiga `get_inteligencia(db)` continua valendo.
+    assert list(inspect.signature(gs.get_inteligencia).parameters) == ["db", "ml_brands"]
+    assert inspect.signature(gs.get_inteligencia).parameters["ml_brands"].default is None
     assert list(inspect.signature(gs.get_brand_detail).parameters) == ["db", "brand", "year", "month"]
 
 

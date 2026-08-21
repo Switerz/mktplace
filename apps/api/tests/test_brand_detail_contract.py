@@ -37,8 +37,12 @@ MARCA = "kokeshi"
 
 
 def _classifica(sql: str) -> str:
-    """Qual das cinco consultas de `get_brand_detail` esta sendo feita."""
+    """Qual das seis consultas de `get_brand_detail` esta sendo feita."""
     s = " ".join(sql.split()).lower()
+    # Gate V3-BE / BE5: a unica consulta que projeta competencia e NAO filtra
+    # por mes — e por isso a unica capaz de listar outros meses.
+    if "distinct to_char(date" in s:
+        return "available_months"
     if "group by channel" in s:
         return "channel_funnel"
     if "group by creator" in s:
@@ -56,6 +60,7 @@ def _classifica(sql: str) -> str:
 def fixar(monkeypatch):
     dados: dict[str, list[dict]] = {
         "monthly": [], "daily": [], "creators": [], "products": [], "channel_funnel": [],
+        "available_months": [],
     }
     vistas: list[tuple[str, str]] = []
 
@@ -102,7 +107,9 @@ LINHA_MENSAL = {
 }
 
 CAMPOS_TOP_LEVEL = [
-    "brand", "label", "ref_month", "gmv", "orders", "customers", "cvr_pct", "cos_pct",
+    # Gate V3-BE / BE5: `available_months` entra logo depois de `ref_month`,
+    # que continua ecoando a competencia PEDIDA.
+    "brand", "label", "ref_month", "available_months", "gmv", "orders", "customers", "cvr_pct", "cos_pct",
     "pct_video", "pct_live", "pct_card", "active_videos", "new_videos_posted",
     "active_video_creators", "total_views", "total_lives", "live_creators", "gpm",
     "gmv_per_video", "gmv_per_creator", "gmv_per_live", "videos_per_creator",
@@ -127,11 +134,13 @@ def test_b01_chaves_top_level_exatas_e_na_ordem(fixar):
     assert list(out) == CAMPOS_TOP_LEVEL
 
 
-def test_b02_sao_45_chaves_das_quais_4_listas(fixar):
+def test_b02_sao_46_chaves_das_quais_5_listas(fixar):
+    """Gate V3-BE: +1 chave e +1 lista, `available_months`."""
     out = _chamar()
-    assert len(out) == 45
+    assert len(out) == 46
     listas = [k for k, v in out.items() if isinstance(v, list)]
-    assert listas == ["channel_funnel", "daily", "top_creators", "top_produtos"]
+    assert listas == ["available_months", "channel_funnel", "daily",
+                      "top_creators", "top_produtos"]
 
 
 def test_b03_identificacao_da_marca_e_do_mes(fixar):
@@ -148,11 +157,14 @@ def test_b04_ref_month_formatado_com_zero_a_esquerda(fixar, ano, mes, esperado):
     assert _chamar(year=ano, month=mes)["ref_month"] == esperado
 
 
-def test_b05_as_cinco_consultas_sao_executadas(fixar):
+def test_b05_as_seis_consultas_sao_executadas(fixar):
+    """Gate V3-BE: +1 consulta, a de `available_months` (BE5)."""
     _, vistas = fixar
     _chamar()
     assert sorted(t for t, _ in vistas) == [
-        "channel_funnel", "creators", "daily", "monthly", "products"]
+        "available_months", "channel_funnel", "creators", "daily", "monthly",
+        "products"]
+    assert len(vistas) == 6
 
 
 def test_b06_fonte_vazia_produz_zeros_e_listas_vazias(fixar):
@@ -177,9 +189,18 @@ def test_b06_fonte_vazia_produz_zeros_e_listas_vazias(fixar):
     (2025, 10, "2025-10-01", "2025-10-31"),  # primeiro mes com dado na fonte
 ])
 def test_b07_janela_de_mes_calendario_em_todas_as_consultas(fixar, ano, mes, ini, fim):
+    """Todas as consultas DE DADOS seguem cercadas pelo mes calendario. A de
+    `available_months` e a unica excecao, e e' deliberada: ela existe para
+    descobrir OUTRAS competencias, entao nao pode ser filtrada pelo mes pedido.
+    """
     _, vistas = fixar
     _chamar(year=ano, month=mes)
     for tipo, sql in vistas:
+        if tipo == "available_months":
+            assert ini not in sql and fim not in sql, (
+                "available_months nao pode ser cercada pelo mes pedido")
+            assert "between" not in sql.lower()
+            continue
         assert ini in sql, f"{tipo} sem inicio {ini}"
         assert fim in sql, f"{tipo} sem fim {fim}"
 
@@ -517,6 +538,7 @@ def test_b37_nenhum_campo_novo_ou_removido_com_fonte_completa(fixar):
                           "orders": 1, "videos": 1, "gpm": 1.0}]
     dados["channel_funnel"] = [{"channel": "VIDEO", "impressions": 1, "page_views": 1,
                                 "items_sold": 1, "gmv": 1.0, "ctr_pct": 1.0, "cvr_pct": 1.0}]
+    dados["available_months"] = [{"mes": "2026-07"}, {"mes": "2026-06"}]
     out = _chamar()
     assert list(out) == CAMPOS_TOP_LEVEL
     assert list(out["channel_funnel"][0]) == ["channel", "label", "impressions",

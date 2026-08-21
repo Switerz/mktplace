@@ -5,7 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deps.filters import ResolvedFilters, filters_query, filters_query_default_days
+from app.deps.filters import (
+    ResolvedFilters, filters_query, filters_query_default_days, resolve_brands,
+)
 from app.deps.period import EffectivePeriod, resolve_period, today_brt
 from app.schemas.executive_summary import ExecutiveSummaryResponse
 from app.schemas.performance import (
@@ -410,8 +412,27 @@ def datasource_health(db: Session = Depends(get_db)):
 
 
 @router.get("/inteligencia")
-def inteligencia(db: Session = Depends(get_db)):
-    return svc.get_inteligencia(_require_db(db))
+def inteligencia(
+    brands: Optional[str] = Query(
+        None,
+        description=(
+            "Marca(s) (brand_key) separadas por virgula, o MESMO filtro canonico das "
+            "demais rotas. Omitido = todas. O escopo ML e derivado da allowlist "
+            "ML_BRANDS: marcas validas que nao vendem no Mercado Livre (apice) saem "
+            "do escopo ML e devolvem `ml_scope_brands` vazio, sem dado fabricado. "
+            "`tk_products` e TikTok e permanece global."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    sessao = _require_db(db)
+    # Valida pela infraestrutura existente, o mesmo `resolve_brands` das demais
+    # rotas. A validacao executa uma consulta read-only em `marts.dim_loja`;
+    # marca inexistente vira 422 antes de qualquer SQL COMERCIAL de
+    # `get_inteligencia`. O servico depois projeta as marcas validadas sobre a
+    # allowlist ML (`resolve_ml_scope`, segunda defesa, pura).
+    pedidas = resolve_brands(brands, sessao)
+    return svc.get_inteligencia(sessao, ml_brands=pedidas)
 
 
 @router.get("/operacoes")

@@ -46,6 +46,13 @@ def _classifica(sql: str) -> str:
     valer antes e depois da troca de `gold.*` para `marts.*`.
     """
     s = " ".join(sql.split()).lower()
+    # Gate V3-BE: as duas consultas do `opportunity_map` sao as unicas que
+    # calculam a mediana do portfolio. `row_number` separa os destaques dos
+    # agregados. Discriminadores de negocio, nao de schema.
+    if "percentile_disc" in s and "row_number" in s:
+        return "opp_destaques"
+    if "percentile_disc" in s:
+        return "opp_agregados"
     if "total_buyers" in s and "repeat_buyers" in s:
         return "ltv"
     if "pct_gmv_video" in s:
@@ -87,6 +94,7 @@ def fixar(monkeypatch):
     dados: dict[str, list[dict]] = {
         "signals": [], "urgent": [], "scale": [], "organic": [],
         "pareto": [], "ltv": [], "tk_products": [],
+        "opp_agregados": [], "opp_destaques": [],
     }
     vistas: list[tuple[str, str]] = []
 
@@ -98,6 +106,18 @@ def fixar(monkeypatch):
     _congela_data(monkeypatch)
     monkeypatch.setattr(gs, "_query", fake_query)
     return dados, vistas
+
+
+def _base_ltv() -> dict:
+    return {"brand": "b", "total_buyers": 1, "repeat_buyers": 1, "repeat_rate_pct": 1.0,
+            "avg_customer_ltv": 1.0, "vip_buyers": 1, "one_and_done_buyers": 1,
+            "at_risk_or_churned": 1, "overall_roas": 1.0}
+
+
+def _base_tk() -> dict:
+    return {"brand": "a", "product_name": "p", "gmv": 1.0, "orders": 1,
+            "avg_pct_video": 1.0, "avg_pct_live": 1.0, "avg_pct_card": 1.0,
+            "avg_rating": 1.0}
 
 
 def _sql_de(vistas, tipo: str) -> str:
@@ -112,27 +132,58 @@ def _sql_de(vistas, tipo: str) -> str:
 # ===========================================================================
 
 def test_i01_chaves_top_level_exatas(fixar):
-    """Sete blocos, nesta ordem, nem um a mais."""
+    """Sete blocos originais nas sete PRIMEIRAS posicoes, mais as seis chaves
+    aditivas do Gate V3-BE. Treze no total, nesta ordem, nem uma a mais.
+    """
     out = gs.get_inteligencia(object())
-    assert list(out) == ["signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products"]
+    assert list(out) == [
+        "signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products",
+        "urgent_total_count", "scale_total_count", "organic_total_count",
+        "ml_snapshot_refreshed_at", "ml_scope_brands", "opportunity_map",
+    ]
+
+
+BLOCOS_LISTA = ("signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products")
 
 
 def test_i02_todos_os_blocos_sao_listas(fixar):
+    """Os sete blocos originais seguem listas. As chaves aditivas tem tipos
+    proprios e declarados: tres inteiros, um timestamp opcional, uma lista de
+    marcas e um dict."""
     out = gs.get_inteligencia(object())
-    for k, v in out.items():
-        assert isinstance(v, list), f"{k} deveria ser lista"
+    for k in BLOCOS_LISTA:
+        assert isinstance(out[k], list), f"{k} deveria ser lista"
+    for k in ("urgent_total_count", "scale_total_count", "organic_total_count"):
+        assert isinstance(out[k], int) and not isinstance(out[k], bool)
+    assert out["ml_snapshot_refreshed_at"] is None or isinstance(out["ml_snapshot_refreshed_at"], str)
+    assert isinstance(out["ml_scope_brands"], list)
+    assert isinstance(out["opportunity_map"], dict)
 
 
 def test_i03_fonte_vazia_produz_sete_listas_vazias(fixar):
+    """Fonte vazia: as sete listas vazias, os tres totais em zero, frescor
+    `None` e o mapa no estado `empty` — sem nada fabricado.
+    """
     out = gs.get_inteligencia(object())
-    assert all(v == [] for v in out.values())
+    assert all(out[k] == [] for k in BLOCOS_LISTA)
+    assert out["urgent_total_count"] == 0
+    assert out["scale_total_count"] == 0
+    assert out["organic_total_count"] == 0
+    assert out["ml_snapshot_refreshed_at"] is None
+    assert out["opportunity_map"]["classification_status"] == "empty"
+    assert out["opportunity_map"]["total_count"] == 0
 
 
 def test_i04_as_sete_consultas_sao_executadas(fixar):
+    """Nove consultas: as sete originais mais as duas do `opportunity_map`.
+    BE3 e BE4 NAO abrem round-trip — viajam na consulta de `signals`.
+    """
     _, vistas = fixar
     gs.get_inteligencia(object())
     assert sorted(t for t, _ in vistas) == [
-        "ltv", "organic", "pareto", "scale", "signals", "tk_products", "urgent"]
+        "ltv", "opp_agregados", "opp_destaques", "organic", "pareto",
+        "scale", "signals", "tk_products", "urgent"]
+    assert len(vistas) == 9
 
 
 # ===========================================================================
@@ -152,11 +203,22 @@ def test_i05_signals_campos_e_tipos(fixar):
     assert isinstance(s["n_products"], int)
 
 
-def test_i06_signals_avg_roas_zero_vira_none(fixar):
-    """Guarda `if r.get("avg_roas")`: zero e' falsy e sai `None`, nao `0.0`."""
+def test_i06_signals_avg_roas_preserva_zero(fixar):
+    """Gate V3-BE: a guarda virou `is not None`. A DEFINICAO de `avg_roas` NAO
+    mudou: segue `AVG(CASE WHEN ad_roas > 0 ...)`, que por construcao devolve
+    `NULL` ou positivo, nunca zero. Nao confundir esta media de positivos com o
+    ROAS individual do produto, que agora preserva zero.
+    """
     dados, _ = fixar
     dados["signals"] = [{"product_status": "x", "n_products": 1, "gmv": 0,
                          "ad_spend": 0, "avg_roas": 0}]
+    assert gs.get_inteligencia(object())["signals"][0]["avg_roas"] == 0.0
+
+
+def test_i06b_signals_avg_roas_null_continua_none(fixar):
+    dados, _ = fixar
+    dados["signals"] = [{"product_status": "x", "n_products": 1, "gmv": 0,
+                         "ad_spend": 0, "avg_roas": None}]
     assert gs.get_inteligencia(object())["signals"][0]["avg_roas"] is None
 
 
@@ -220,12 +282,31 @@ def test_i10_blocos_de_produto_arredondam_como_hoje(fixar, bloco):
 @pytest.mark.parametrize("bloco", ["urgent", "scale", "organic"])
 @pytest.mark.parametrize("campo", ["ad_roas", "ad_acos_pct", "cancel_rate_pct",
                                    "revenue_share_pct", "units_sold", "days_advertised"])
-def test_i11_zero_vira_none_em_todo_campo_com_guarda_falsy(fixar, bloco, campo):
-    """Comportamento historico: a guarda e' `if r.get(campo)`, entao zero sai
-    `None`. Congelado de proposito — mudar isso mudaria o payload."""
+def test_i11_zero_numerico_e_preservado_em_todo_campo_opcional(fixar, bloco, campo):
+    """Gate V3-BE, Task A: a guarda virou `is not None`. Zero e um VALOR e
+    chega ao payload como zero. Antes a serializacao o transformava em `None`,
+    e um ROAS zero real (133 produtos na fotografia auditada) chegava a tela
+    como indisponibilidade.
+    """
     dados, _ = fixar
     linha = dict(LINHA_PRODUTO)
     linha[campo] = 0
+    dados[bloco] = [linha]
+    obtido = gs.get_inteligencia(object())[bloco][0][campo]
+    assert obtido == 0
+    assert obtido is not None
+
+
+@pytest.mark.parametrize("bloco", ["urgent", "scale", "organic"])
+@pytest.mark.parametrize("campo", ["ad_roas", "ad_acos_pct", "cancel_rate_pct",
+                                   "revenue_share_pct", "units_sold", "days_advertised"])
+def test_i11b_null_continua_null_em_todo_campo_opcional(fixar, bloco, campo):
+    """Contraprova: `None` na fonte segue `None` no payload. Zero e ausencia
+    continuam distinguiveis.
+    """
+    dados, _ = fixar
+    linha = dict(LINHA_PRODUTO)
+    linha[campo] = None
     dados[bloco] = [linha]
     assert gs.get_inteligencia(object())[bloco][0][campo] is None
 
@@ -333,12 +414,21 @@ def test_i19_ltv_campos_e_arredondamento(fixar):
 
 @pytest.mark.parametrize("campo", ["repeat_rate_pct", "avg_customer_ltv", "vip_buyers",
                                    "one_and_done_buyers", "at_risk_or_churned", "overall_roas"])
-def test_i20_ltv_zero_vira_none(fixar, campo):
+def test_i20_ltv_preserva_zero(fixar, campo):
+    """Gate V3-BE: recorrencia 0% e LTV 0 sao fatos, nao ausencia."""
     dados, _ = fixar
-    base = {"brand": "b", "total_buyers": 1, "repeat_buyers": 1, "repeat_rate_pct": 1.0,
-            "avg_customer_ltv": 1.0, "vip_buyers": 1, "one_and_done_buyers": 1,
-            "at_risk_or_churned": 1, "overall_roas": 1.0}
+    base = _base_ltv()
     base[campo] = 0
+    dados["ltv"] = [base]
+    assert gs.get_inteligencia(object())["ltv"][0][campo] == 0
+
+
+@pytest.mark.parametrize("campo", ["repeat_rate_pct", "avg_customer_ltv", "vip_buyers",
+                                   "one_and_done_buyers", "at_risk_or_churned", "overall_roas"])
+def test_i20b_ltv_null_continua_none(fixar, campo):
+    dados, _ = fixar
+    base = _base_ltv()
+    base[campo] = None
     dados["ltv"] = [base]
     assert gs.get_inteligencia(object())["ltv"][0][campo] is None
 
@@ -362,7 +452,10 @@ def test_i22_ltv_indisponivel_degrada_para_lista_vazia_sem_derrubar_a_rota(monke
     monkeypatch.setattr(gs, "_query", fake_query)
     out = gs.get_inteligencia(object())
     assert out["ltv"] == []
-    assert list(out) == ["signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products"]
+    assert list(out)[:7] == [
+        "signals", "urgent", "scale", "organic", "pareto", "ltv", "tk_products",
+    ]
+    assert len(out) == 13
 
 
 def test_i23_falha_fora_de_ltv_propaga(monkeypatch):
@@ -402,13 +495,22 @@ def test_i24_tk_products_campos_e_arredondamento(fixar):
 
 
 @pytest.mark.parametrize("campo", ["avg_pct_video", "avg_pct_live", "avg_pct_card", "avg_rating"])
-def test_i25_tk_products_zero_vira_none(fixar, campo):
+def test_i25_tk_products_preserva_zero(fixar, campo):
+    """Gate V3-BE: 0% de GMV em video/live/card e um fato do mix, nao ausencia."""
     dados, _ = fixar
-    base = {"brand": "a", "product_name": "p", "gmv": 1.0, "orders": 1,
-            "avg_pct_video": 1.0, "avg_pct_live": 1.0, "avg_pct_card": 1.0, "avg_rating": 1.0}
+    base = _base_tk()
     base[campo] = 0
     dados["tk_products"] = [base]
-    assert gs.get_inteligencia(object())["tk_products"][campo == campo and 0][campo] is None
+    assert gs.get_inteligencia(object())["tk_products"][0][campo] == 0
+
+
+@pytest.mark.parametrize("campo", ["avg_pct_video", "avg_pct_live", "avg_pct_card", "avg_rating"])
+def test_i25b_tk_products_null_continua_none(fixar, campo):
+    dados, _ = fixar
+    base = _base_tk()
+    base[campo] = None
+    dados["tk_products"] = [base]
+    assert gs.get_inteligencia(object())["tk_products"][0][campo] is None
 
 
 def test_i26_tk_products_limit_25_janela_30_dias_e_gmv_positivo(fixar):

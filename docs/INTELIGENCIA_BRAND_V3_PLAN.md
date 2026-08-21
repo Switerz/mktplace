@@ -1764,3 +1764,287 @@ ocorrer em gate próprio **PF1**, antes do V3-1B.
 
 Este defeito **não foi causado pelo V3-1A**: está em `src/lib/api-client.ts`, é
 anterior ao gate e afeta todas as telas que usam o cache.
+
+---
+
+## 23. Gate V3-BE — BE3, BE4, BE5 e BE6 implementados (21/08/2026)
+
+**Estado: `IMPLEMENTADO E VALIDADO LOCALMENTE — AGUARDANDO REVISÃO. Nenhum
+frontend nesta task.`** Uma rodada de correção consolidada pré-versionamento
+(21/08/2026) fechou o `returned_count` de topo exigido pelo §15.1-D e corrigiu
+duas imprecisões factuais deste registro: a tabela de escopo descrevia o helper
+puro como se fosse o contrato da rota, e o orçamento de consultas media só o
+serviço. Ver §23.2, §23.3 e §23.8. Base: `417be72` (o UE-F1A já integrado). Zero commit,
+push ou deploy.
+
+### 23.1 Universo ML — quatro marcas, não cinco
+
+`ML_BRANDS = ("barbours", "kokeshi", "lescent", "rituaria")`. **Ápice não
+pertence ao universo ML**: ela existe em `BRANDS_IN_SCOPE` (TikTok/Shopee) e tem
+**zero linhas** em `marts.fact_ml_produto_ranking`, porque não vende no Mercado
+Livre. O plano dizia "cinco marcas" em algumas passagens; o fato medido é quatro.
+
+### 23.2 Parâmetro opcional de escopo
+
+`/inteligencia` passou a aceitar o **mesmo filtro canônico das outras rotas**,
+`brands=<marca>[,<marca>]`. Não há segundo contrato de querystring, e a chamada
+antiga sem querystring continua idêntica.
+
+Há **duas camadas** de validação, com contratos diferentes, e é preciso não
+confundi-las.
+
+**Camada 1 — a rota HTTP**, via `resolve_brands`, o helper *canônico* que as
+demais rotas já usam. Ele é **case-sensitive** e valida contra
+`marts.dim_loja`, o que custa **uma consulta read-only** quando o parâmetro
+existe. O contrato público é **lowercase**, o mesmo que o frontend já emite.
+
+**Camada 2 — `resolve_ml_scope`**, helper *puro*, sem banco, que projeta o
+pedido sobre a allowlist `ML_BRANDS`. É a **segunda defesa**, não a primeira.
+
+| entrada em `?brands=` | rota HTTP | `ml_scope_brands` |
+|---|---|---|
+| ausente, vazio | 200, **zero consulta de validação** | as quatro marcas ML |
+| `barbours,kokeshi` | 200 | `["barbours","kokeshi"]` |
+| `kokeshi,barbours` ou com repetição | 200 | idêntico ao anterior — saída determinística |
+| `apice` | 200 — é marca válida do grupo | `[]`: universo ML vazio, **nada fabricado** |
+| `BARBOURS` | **422** — `resolve_brands` não normaliza caixa | n/a |
+| marca inexistente | **422** | n/a |
+| string injetável | **422** | n/a |
+
+**Onde exatamente o 422 acontece.** *Depois* do `SELECT` read-only em
+`marts.dim_loja`, e *antes* de qualquer consulta comercial de
+`get_inteligencia`. Ou seja: **não** é "antes de qualquer SQL" — é antes de
+qualquer SQL **de negócio**. A string do usuário nunca é interpolada: ela só
+existe como valor comparado em memória contra as chaves vindas de `dim_loja`.
+
+**O que `resolve_ml_scope` faz e a rota não.** O helper puro normaliza caixa
+(`["BARBOURS"]` → `("barbours",)`) e descarta silenciosamente o que está fora
+da allowlist (`["'; DROP TABLE --"]` → `()`). Isso vale para chamadas diretas
+ao serviço, **não** para o endpoint — que rejeita esses dois casos com 422
+antes de chegar lá. A rota **não aceita maiúsculas**, e o contrato global de
+`resolve_brands` não foi alterado para que ela aceitasse: mudá-lo mexeria em
+todas as outras rotas.
+
+Escopo ML vazio **não monta `IN ()`**: as consultas ML simplesmente não são
+emitidas.
+
+O escopo alcança `signals`, `urgent`, `scale`, `organic`, `pareto`, `ltv`, os três
+totais, o frescor e o `opportunity_map`. **`tk_products` permanece global** — é
+TikTok, e o contrato do V3-1A não muda de grão nem de escopo.
+
+### 23.3 Orçamento de consultas — 9 / 8 / 6
+
+BE3 e BE4 **não abriram round-trip**: as três contagens e `MAX(refreshed_at)`
+viajam como colunas auxiliares na consulta de `signals`, que já agrupava por
+`product_status`. Cada item de `signals` continua com os mesmos cinco campos; as
+colunas auxiliares só alimentam os metadados de topo.
+
+**No serviço** — é o que o número 9/8/6 mede:
+
+| caminho | antes | agora |
+|---|---|---|
+| `get_inteligencia` normal | 7 | **9** (+2, do `opportunity_map`) |
+| `get_inteligencia` com falha de LTV | 6 | **8** |
+| `get_brand_detail` | 5 | **6** (+1, `available_months`) |
+
+**Na chamada HTTP** — o filtro novo cobra uma consulta de validação, e
+**somente quando o parâmetro existe**:
+
+| chamada | consultas | composição |
+|---|---|---|
+| `GET /inteligencia` | **9** (8 com falha de LTV) | só o serviço |
+| `GET /inteligencia?brands=…` | **10** (9 com falha de LTV) | 1 `SELECT` read-only em `marts.dim_loja` + as 9 do serviço |
+| `GET /brand-detail` | **6** | só o serviço |
+
+A distinção que importa: **BE3 e BE4 não adicionaram round-trip** — eles
+viajam em `signals`. A consulta extra é da **validação do filtro novo**, ela
+não existe quando `brands` é omitido, e não deve ser reclassificada como
+"zero round-trip".
+
+### 23.4 As treze chaves do payload
+
+As sete originais permanecem nas **sete primeiras posições, na mesma ordem** —
+é isso que prova que nada foi removido nem reordenado. Depois delas, seis
+aditivas:
+
+```
+signals, urgent, scale, organic, pareto, ltv, tk_products,
+urgent_total_count, scale_total_count, organic_total_count,
+ml_snapshot_refreshed_at, ml_scope_brands, opportunity_map
+```
+
+### 23.5 BE3 — totais verdadeiros
+
+`urgent_total_count`, `scale_total_count`, `organic_total_count`: inteiros, mesmo
+escopo e mesmo filtro comercial da lista respectiva, contados **antes do LIMIT**,
+zero quando não há linha, e sempre `>= len(lista)`. `scale_total_count` carrega o
+corte extra `ad_roas >= 8` — não é o `n_products` do status.
+
+As três listas ganharam **desempate determinístico** `chave DESC, brand ASC,
+item_id ASC`, sem mudar filtro nem limite. Antes, `scale` tinha 92 grupos
+empatados em `ad_roas` cobrindo 204 linhas com `LIMIT 20`: quais 20 apareciam era
+indefinido. `item_id` **não** foi acrescentado ao payload das três listas — ele
+entra só na cláusula de ordenação.
+
+### 23.6 BE4 — frescor real
+
+`ml_snapshot_refreshed_at`: `MAX(refreshed_at)` do universo filtrado, em ISO-8601
+UTC com sufixo `Z` e segundos inteiros; `null` quando a tabela ou o escopo está
+vazio. Não usa `now()`, `ingested_at`, `last_sale` nem o relógio da resposta, e
+**não assume timestamp uniforme** — toma o máximo real.
+
+### 23.7 BE5 — `available_months`
+
+`BrandDetailResponse.available_months: list[str]`, de
+`marts.fact_tiktok_brand_content_daily`, por marca consultada, `YYYY-MM`
+decrescente, sem duplicidade, `[]` para marca sem histórico. **Não cria endpoint
+novo.** `ref_month` continua ecoando a competência **pedida**: um mês bem
+formatado mas inexistente segue devolvendo **200 com dados vazios e a lista real
+de competências**, sem troca silenciosa; formato inválido segue **422**.
+
+A consulta é a **única** de `/brand-detail` sem a janela do mês — de propósito,
+porque ela existe justamente para descobrir *outras* competências. O teste de
+contrato passou a afirmar isso explicitamente, em vez de exigir a janela em todas.
+
+### 23.8 BE6 — `opportunity_map`
+
+Universo: o snapshot **inteiro** no escopo (`product_status IS NOT NULL`),
+incluindo `inactive` e os `sells+advertised` com ROAS < 8 — **nunca**
+`urgent ∪ scale ∪ organic`. `total_count` é o universo, antes de qualquer limite.
+
+Referências **descritivas, nunca metas**: `roas_reference = 8.0` (o corte que
+`scale` já usava) e `gmv_reference` pela **mediana `PERCENTILE_DISC`** do GMV
+estritamente positivo, **recalculada dentro do escopo**. `DISC` e não `CONT`
+porque devolve o próprio `NUMERIC` da coluna: a fronteira alta inclusiva fica
+exata, sem cast de float, e a referência é um GMV efetivamente observado.
+
+Precedência: `sem_ads` → `roas_indisponivel_com_investimento` → quadrantes.
+`ad_roas = 0` é **valor numérico baixo**, nunca indisponibilidade. Fronteiras
+altas inclusivas (`ROAS >= 8`, `GMV >= mediana`).
+
+As **quatro** chaves de quadrante e as **duas** faixas estão sempre no payload,
+mesmo zeradas. Destaques: **10 por quadrante**, ordenados por
+`ad_spend DESC, gmv DESC, brand ASC, item_id ASC` — declarado no payload como
+`highlight_order`. Vêm **somente dos quadrantes**, nunca das faixas, com a mesma
+classificação dos agregados. O LIMIT não toca os agregados. `title` é **só
+exibição**; a URL usa `item_id`.
+
+#### Os dois níveis de `returned_count` — e por que não se confundem
+
+O §15.1-D pede `returned_count` como "quantos pontos vieram **no total**", e a
+regra de interface compara `returned_count < total_count` para dizer que os
+pontos são **destaques**, não o universo. O diálogo por quadrante precisa do
+mesmo número recortado. São **quatro** grandezas distintas:
+
+| campo | significado |
+|---|---|
+| `opportunity_map.total_count` | universo completo no escopo |
+| `opportunity_map.returned_count` | **total** de pontos de destaque retornados = `len(highlights)` |
+| `quadrants[*].count` | universo **daquele** quadrante |
+| `quadrants[*].returned_count` | destaques **daquele** quadrante |
+
+As faixas **não** têm `returned_count`, porque nunca produzem destaque.
+Invariantes garantidos e testados:
+
+- `returned_count == len(highlights)`;
+- `returned_count == sum(q.returned_count for q in quadrants)`;
+- `q.returned_count <= q.count` para todo quadrante;
+- `returned_count <= sum(q.count for q in quadrants)`;
+- `q.returned_count <= 10`;
+- nenhum destaque vem das duas faixas;
+- os agregados são idênticos com ou sem destaques — o LIMIT não os alcança.
+
+Nos estados `empty` e `unavailable_no_positive_gmv`, `returned_count` é **0** e
+`highlights` é `[]`.
+
+#### Sem GMV positivo — sem quadrante fabricado
+
+`classification_status = "unavailable_no_positive_gmv"`, `gmv_reference: null`,
+os quatro quadrantes zerados, `highlights: []`, e os produtos com Ads e ROAS
+numérico contados em `unclassified_count`. O invariante nesse estado é
+`sem_ads + roas_indisponivel_com_investimento + unclassified_count = total_count`.
+A UI futura mostra indisponibilidade da matriz, nunca quatro quadrantes falsos.
+Universo vazio → `classification_status = "empty"`, tudo zerado e referências
+`null`. Com GMV positivo → `"available"` e `unclassified_count = 0`.
+
+### 23.9 Zero não é null
+
+O serializador usava `if r.get(campo)`, e **zero é falsy**: um ROAS zero real
+chegava à tela como indisponibilidade. Trocado por `is not None` nos **30 pontos**
+de `get_inteligencia` — `ad_roas`, `ad_acos_pct`, `cancel_rate_pct`,
+`revenue_share_pct`, `units_sold`, `days_advertised` nas três listas, os seis
+campos opcionais de `ltv`, os percentuais e o rating de `tk_products`, e
+`signals.avg_roas`.
+
+A **definição** de `signals.avg_roas` não mudou: segue
+`AVG(CASE WHEN ad_roas > 0 THEN ad_roas END)`, que por construção devolve `NULL`
+ou positivo. Essa média de positivos não se confunde com o ROAS individual do
+produto.
+
+O teste antigo congelava o defeito de propósito
+(`test_i11_zero_vira_none_em_todo_campo_com_guarda_falsy`, "Congelado de
+propósito"). Ele foi **invertido**, e cada família ganhou a contraprova de que
+`None` continua `None` — zero e ausência seguem distinguíveis.
+
+### 23.10 Atualização do teste legado do Gate S3
+
+`apps/api/tests/test_s3_source_swap.py` congelava o contrato anterior. **Sete**
+pontos foram atualizados, e **somente** onde a mudança aditiva exige:
+
+| ponto | de | para |
+|---|---|---|
+| chaves de topo | 7 | 13, com asserção extra de que as 7 originais são as 7 primeiras |
+| consultas de `/inteligencia` | `== 7` | `== 9` |
+| consultas com falha de LTV | `== 6` | `== 8` |
+| nome/docstring "outras seis" | — | "outras oito" |
+| `BrandDetailResponse` | `== 37` | `== 38` |
+| assinatura | `["db"]` | `["db", "ml_brands"]`, + `default is None` |
+
+**Nenhuma contraprova foi afrouxada.** Continuam exatas e verdes: zero `gold.` e
+zero `raw.` por função, toda consulta passando pela `Session`, conjunto de tabelas
+autorizado por igualdade de conjunto, ausência de Data Mart, `TempoRealResponse`
+em 5 campos, nenhum campo de frescor em `BrandDetailResponse`, e as contagens de
+tabela por função. Nada virou `>=`, presença parcial ou subconjunto.
+
+### 23.11 Validação
+
+**Suíte completa: 43 failed, 796 passed, 8 skipped** — os **mesmos 43 node IDs**
+ambientais do baseline (`43 failed, 727 passed, 8 skipped`), **zero falha nova** e
+**zero falha antiga desaparecida**. Os +69 aprovados são os testes novos.
+`compileall`, import/startup, OpenAPI e `git diff --check` limpos.
+
+**Integração read-only contra o Neon** (transação read-only, `statement_timeout`
+15s, só `SELECT`, sem `EXPLAIN ANALYZE`), nos cinco escopos:
+
+| escopo | `total_count` | `gmv_reference` | invariante |
+|---|---|---|---|
+| global (4 marcas) | 1.650 | 2.207,05 | ✅ |
+| barbours | 721 | 1.816,73 | ✅ |
+| kokeshi | 487 | 1.833,81 | ✅ |
+| lescent | 218 | 3.973,90 | ✅ |
+| rituaria | 224 | 2.718,40 | ✅ |
+| só ápice | 0 | `null` | `empty`, `ml_scope_brands: []` |
+
+A fonte **avançou de 1.648 para 1.650** entre a auditoria (19/08) e esta
+implementação (21/08), com `refreshed_at = 2026-08-21T09:02:43Z`. É exatamente por
+isso que **nenhuma contagem viva foi congelada em teste unitário**: os testes
+fixam invariantes e contratos, não números da fotografia.
+
+Também provado nos dados reais: zero duplicidade de `(brand, item_id)`;
+`total_count` igual ao universo real; a mediana **muda por marca** e nenhuma
+herda a global; `available_months` com 11 competências (`2025-10`…`2026-08`) nas
+cinco marcas, decrescente e sem duplicidade; mês inexistente devolvendo 200 com
+dados vazios e a lista real; marca sem histórico com `[]`; e **18 produtos com
+`ad_roas = 0` chegando às listas servidas como zero** — antes todos viravam
+`null`.
+
+### 23.12 Risco remanescente
+
+`_query(db, sql)` continua **sem** bind params, por decisão de escopo: alterá-la
+globalmente exigiria tocar `test_operacoes_contract.py`, fora da allowlist. A
+segurança vem da **derivação por allowlist**, que é mais forte aqui do que
+parametrizar, porque nenhuma string do usuário existe no caminho. Se algum dia um
+valor livre precisar entrar numa cláusula, a parametrização passa a ser
+obrigatória e vira gate próprio.
+
+**V3-1B e V3-2 não foram iniciados.** O frontend não foi tocado.

@@ -661,6 +661,10 @@ class BrandDetailResponse(BaseModel):
     brand: str
     label: str
     ref_month: str
+    #: BE5 — competencias que realmente possuem linha para esta marca,
+    #: `YYYY-MM` decrescente. Lista vazia = marca sem historico. `ref_month`
+    #: acima continua ecoando o mes PEDIDO, mesmo que ele nao esteja aqui.
+    available_months: list[str] = []
     gmv: float
     orders: int
     customers: int

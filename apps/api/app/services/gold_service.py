@@ -1833,8 +1833,20 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
         ORDER BY channel
     """
 
+    # BE5 — competencias que REALMENTE possuem linha para esta marca. Nao
+    # inventa mes, nao preenche lacuna e nao troca silenciosamente o mes
+    # pedido: `ref_month` continua ecoando o solicitado mesmo que ele nao
+    # esteja aqui.
+    sql_available_months = f"""
+        SELECT DISTINCT TO_CHAR(date, 'YYYY-MM') AS mes
+        FROM marts.fact_tiktok_brand_content_daily
+        WHERE brand = '{brand}'
+        ORDER BY mes DESC
+    """
+
     monthly_rows = _query(db, sql_monthly)
     daily_rows = _query(db, sql_daily)
+    available_months_rows = _query(db, sql_available_months)
     creators = _query(db, sql_creators)
     products = _query(db, sql_products)
     channel_funnel_rows = _query(db, sql_channel_funnel)
@@ -1849,6 +1861,7 @@ def get_brand_detail(db: Session, brand: str, year: int, month: int) -> dict:
         "brand": brand,
         "label": BRAND_LABELS.get(brand, brand.upper()),
         "ref_month": f"{year:04d}-{month:02d}",
+        "available_months": [r["mes"] for r in available_months_rows],
         "gmv": _float(m.get("gmv", 0)),
         "orders": int(_float(m.get("orders", 0))),
         "customers": int(_float(m.get("customers", 0))),
@@ -2116,180 +2129,441 @@ def get_pedidos(db: Session, days_back: int = 30) -> dict:
 # Inteligencia
 # ---------------------------------------------------------------------------
 
-def get_inteligencia(db: Session) -> dict:
-    signals_sql = f"""
-        SELECT product_status,
-               COUNT(*)                       AS n_products,
-               COALESCE(SUM(gross_revenue), 0) AS gmv,
-               COALESCE(SUM(ad_spend), 0)      AS ad_spend,
-               AVG(CASE WHEN ad_roas > 0 THEN ad_roas END) AS avg_roas
-        FROM marts.fact_ml_produto_ranking
-        WHERE brand IN {_fmt_list(ML_BRANDS)}
-          AND product_status IS NOT NULL
-        GROUP BY product_status
-        ORDER BY gmv DESC
-    """
-    signals_rows = _query(db, signals_sql)
-    signals = [
-        {
-            "product_status": r["product_status"],
-            "n_products": int(_float(r["n_products"])),
-            "gmv": _float(r["gmv"]),
-            "ad_spend": _float(r["ad_spend"]),
-            "avg_roas": round(_float(r["avg_roas"]), 2) if r.get("avg_roas") else None,
-        }
-        for r in signals_rows
-    ]
+def resolve_ml_scope(ml_brands: tuple | list | None) -> tuple[str, ...]:
+    """Escopo ML canonico, derivado SOMENTE da allowlist `ML_BRANDS`.
 
-    urgent_sql = f"""
-        SELECT brand, title, pareto_bucket, revenue_velocity,
-               COALESCE(gross_revenue, 0) AS gmv,
-               COALESCE(ad_spend, 0)      AS ad_spend,
-               ad_roas, ad_acos_pct, cancel_rate_pct,
-               revenue_share_pct, units_sold, days_advertised, ad_efficiency
-        FROM marts.fact_ml_produto_ranking
-        WHERE brand IN {_fmt_list(ML_BRANDS)}
-          AND product_status = 'ad_spend_no_sales'
-        ORDER BY ad_spend DESC
-        LIMIT 30
-    """
-    urgent = [
-        {
-            "brand": r["brand"],
-            "title": r["title"],
-            "pareto_bucket": r.get("pareto_bucket"),
-            "revenue_velocity": r.get("revenue_velocity"),
-            "gmv": _float(r["gmv"]),
-            "ad_spend": _float(r["ad_spend"]),
-            "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") else None,
-            "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") else None,
-            "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") else None,
-            "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") else None,
-            "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") else None,
-            "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") else None,
-            "ad_efficiency": r.get("ad_efficiency"),
-        }
-        for r in _query(db, urgent_sql)
-    ]
+    Nenhuma string do usuario chega ao SQL: o parametro serve apenas para
+    SELECIONAR elementos da constante. Qualquer valor fora de `ML_BRANDS` — e
+    `apice` e' o caso real, porque a marca nao vende no Mercado Livre — e'
+    descartado aqui, antes de qualquer montagem de clausula.
 
-    scale_sql = f"""
-        SELECT brand, title, pareto_bucket, revenue_velocity,
-               COALESCE(gross_revenue, 0) AS gmv,
-               COALESCE(ad_spend, 0)      AS ad_spend,
-               ad_roas, ad_acos_pct, cancel_rate_pct,
-               revenue_share_pct, units_sold, days_advertised, ad_efficiency
-        FROM marts.fact_ml_produto_ranking
-        WHERE brand IN {_fmt_list(ML_BRANDS)}
-          AND product_status = 'sells+advertised'
-          AND ad_roas >= 8
-        ORDER BY ad_roas DESC
-        LIMIT 20
+    `None` significa "sem filtro" e devolve as quatro marcas. A saida e' sempre
+    deduplicada e na ordem canonica de `ML_BRANDS`, entao a ordem e a repeticao
+    que o usuario enviar nao mudam o resultado.
     """
-    scale = [
-        {
-            "brand": r["brand"],
-            "title": r["title"],
-            "pareto_bucket": r.get("pareto_bucket"),
-            "revenue_velocity": r.get("revenue_velocity"),
-            "gmv": _float(r["gmv"]),
-            "ad_spend": _float(r["ad_spend"]),
-            "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") else None,
-            "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") else None,
-            "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") else None,
-            "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") else None,
-            "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") else None,
-            "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") else None,
-            "ad_efficiency": r.get("ad_efficiency"),
-        }
-        for r in _query(db, scale_sql)
-    ]
+    if ml_brands is None:
+        return ML_BRANDS
+    pedidas = {str(b).strip().lower() for b in ml_brands}
+    return tuple(b for b in ML_BRANDS if b in pedidas)
 
-    organic_sql = f"""
-        SELECT brand, title, pareto_bucket, revenue_velocity,
-               COALESCE(gross_revenue, 0) AS gmv,
-               COALESCE(ad_spend, 0)      AS ad_spend,
-               ad_roas, ad_acos_pct, cancel_rate_pct,
-               revenue_share_pct, units_sold, days_advertised, ad_efficiency,
-               unique_buyers
-        FROM marts.fact_ml_produto_ranking
-        WHERE brand IN {_fmt_list(ML_BRANDS)}
-          AND product_status = 'sells_organic_only'
-        ORDER BY gross_revenue DESC
-        LIMIT 20
-    """
-    organic = [
-        {
-            "brand": r["brand"],
-            "title": r["title"],
-            "pareto_bucket": r.get("pareto_bucket"),
-            "revenue_velocity": r.get("revenue_velocity"),
-            "gmv": _float(r["gmv"]),
-            "ad_spend": _float(r["ad_spend"]),
-            "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") else None,
-            "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") else None,
-            "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") else None,
-            "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") else None,
-            "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") else None,
-            "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") else None,
-            "ad_efficiency": r.get("ad_efficiency"),
-        }
-        for r in _query(db, organic_sql)
-    ]
 
-    pareto_sql = f"""
-        SELECT brand, pareto_bucket,
-               COUNT(*)                        AS n_products,
-               COALESCE(SUM(gross_revenue), 0) AS gmv,
-               COALESCE(SUM(ad_spend), 0)      AS ad_spend
-        FROM marts.fact_ml_produto_ranking
-        WHERE brand IN {_fmt_list(ML_BRANDS)}
-          AND pareto_bucket IS NOT NULL
-        GROUP BY brand, pareto_bucket
-        ORDER BY brand, pareto_bucket
-    """
-    pareto = [
-        {
-            "brand": r["brand"],
-            "pareto_bucket": r["pareto_bucket"],
-            "n_products": int(_float(r["n_products"])),
-            "gmv": _float(r["gmv"]),
-            "ad_spend": _float(r["ad_spend"]),
-        }
-        for r in _query(db, pareto_sql)
-    ]
+# Referencias descritivas do `opportunity_map` (Gate V3-BE / BE6).
+# `8` nao e' numero novo: e' o corte que `scale` ja usa desde o V3-1A.
+OPPORTUNITY_ROAS_REFERENCE = 8.0
+HIGHLIGHT_LIMIT_PER_QUADRANT = 10
+HIGHLIGHT_ORDER = "ad_spend_desc_gmv_desc_brand_item"
+QUADRANT_KEYS = ("escalar", "testar_investimento", "monitorar", "reduzir_parar")
+BAND_KEYS = ("sem_ads", "roas_indisponivel_com_investimento")
+OPPORTUNITY_REFERENCE_NOTE = (
+    "Referencias descritivas do portfolio no escopo atual; nao sao metas comerciais."
+)
 
+
+def _empty_opportunity_map(brands: tuple[str, ...], status: str) -> dict:
+    """Estrutura estavel: as quatro chaves de quadrante e as duas faixas existem
+    SEMPRE, mesmo zeradas. A UI nunca precisa lidar com chave ausente."""
+    return {
+        "scope": "ml_snapshot",
+        "classification_status": status,
+        "brands": list(brands),
+        "total_count": 0,
+        # Total de pontos de destaque retornados (§15.1-D). Distinto de
+        # `total_count`, que e o universo, e de `quadrants[*].returned_count`,
+        # que e o recorte por quadrante. Estado vazio: zero destaques.
+        "returned_count": 0,
+        "roas_reference": OPPORTUNITY_ROAS_REFERENCE,
+        "gmv_reference": None,
+        "gmv_reference_basis_count": 0,
+        "reference_note": OPPORTUNITY_REFERENCE_NOTE,
+        "unclassified_count": 0,
+        "highlight_limit_per_quadrant": HIGHLIGHT_LIMIT_PER_QUADRANT,
+        "highlight_order": HIGHLIGHT_ORDER,
+        "quadrants": [
+            {"key": k, "count": 0, "gmv": 0.0, "ad_spend": 0.0, "returned_count": 0}
+            for k in QUADRANT_KEYS
+        ],
+        "bands": [{"key": k, "count": 0, "gmv": 0.0, "ad_spend": 0.0} for k in BAND_KEYS],
+        "highlights": [],
+    }
+
+
+def _monta_opportunity_map(
+    brands: tuple[str, ...], agregados: list[dict], destaques: list[dict],
+) -> dict:
+    """Monta o bloco a partir das DUAS consultas do BE6. Funcao pura: e' aqui
+    que os invariantes de contagem sao garantidos, e e' isto que os testes
+    unitarios exercitam sem banco."""
+    por_classe = {r["classe"]: r for r in agregados}
+    total = sum(int(_float(r["count"])) for r in agregados)
+    if total == 0:
+        return _empty_opportunity_map(brands, "empty")
+
+    # `gmv_reference` e `basis_count` vem repetidos em toda linha (CROSS JOIN da
+    # CTE `ref`); qualquer linha serve.
+    amostra = agregados[0]
+    basis = int(_float(amostra.get("basis_count")))
+    referencia = amostra.get("gmv_reference")
+    gmv_ref = round(_float(referencia), 2) if referencia is not None else None
+
+    # Sem GMV positivo nao existe eixo de volume. A decisao aprovada e' NAO
+    # fabricar quadrante: os produtos com Ads e ROAS numerico ficam contados em
+    # `unclassified_count`, e a matriz e' declarada indisponivel.
+    indisponivel = basis == 0
+    status = "unavailable_no_positive_gmv" if indisponivel else "available"
+
+    destaques_por_classe: dict[str, list[dict]] = {k: [] for k in QUADRANT_KEYS}
+    for d in destaques:
+        classe = d.get("classe")
+        if classe in destaques_por_classe:
+            destaques_por_classe[classe].append({
+                "item_id": d["item_id"],
+                "brand": d["brand"],
+                # `title` e' SOMENTE exibicao. A URL canonica usa `item_id`.
+                "title": d.get("title"),
+                "gmv": _float(d["gmv"]),
+                "ad_spend": _float(d["ad_spend"]),
+                "ad_roas": round(_float(d["ad_roas"]), 2) if d.get("ad_roas") is not None else None,
+                "quadrant": classe,
+            })
+
+    quadrantes = []
+    for k in QUADRANT_KEYS:
+        r = por_classe.get(k)
+        quadrantes.append({
+            "key": k,
+            "count": int(_float(r["count"])) if r else 0,
+            "gmv": round(_float(r["gmv"]), 2) if r else 0.0,
+            "ad_spend": round(_float(r["ad_spend"]), 2) if r else 0.0,
+            "returned_count": len(destaques_por_classe[k]),
+        })
+
+    faixas = []
+    for k in BAND_KEYS:
+        r = por_classe.get(k)
+        faixas.append({
+            "key": k,
+            "count": int(_float(r["count"])) if r else 0,
+            "gmv": round(_float(r["gmv"]), 2) if r else 0.0,
+            "ad_spend": round(_float(r["ad_spend"]), 2) if r else 0.0,
+        })
+
+    nao_classificados = por_classe.get("unclassified")
+    unclassified = int(_float(nao_classificados["count"])) if nao_classificados else 0
+
+    highlights = [h for k in QUADRANT_KEYS for h in destaques_por_classe[k]]
+    # `returned_count` de topo: quantos pontos vieram NO TOTAL. E a soma dos
+    # `returned_count` por quadrante por construcao, porque `highlights` e a
+    # concatenacao das mesmas listas. A regra de interface do §15.1-D compara
+    # este numero com `total_count` para dizer que os pontos sao DESTAQUES.
+    return {
+        "scope": "ml_snapshot",
+        "classification_status": status,
+        "brands": list(brands),
+        "total_count": total,
+        "returned_count": len(highlights),
+        "roas_reference": OPPORTUNITY_ROAS_REFERENCE,
+        "gmv_reference": gmv_ref,
+        "gmv_reference_basis_count": basis,
+        "reference_note": OPPORTUNITY_REFERENCE_NOTE,
+        "unclassified_count": unclassified,
+        "highlight_limit_per_quadrant": HIGHLIGHT_LIMIT_PER_QUADRANT,
+        "highlight_order": HIGHLIGHT_ORDER,
+        "quadrants": quadrantes,
+        "bands": faixas,
+        "highlights": highlights,
+    }
+
+
+def get_inteligencia(db: Session, ml_brands: tuple | list | None = None) -> dict:
+    # Escopo derivado da allowlist: `_fmt_list` so' recebe elementos de
+    # `ML_BRANDS`. Escopo vazio (o caso "somente apice") nao monta `IN ()`:
+    # devolve o payload ML vazio e nao inventa dado.
+    escopo = resolve_ml_scope(ml_brands)
+    escopo_sql = _fmt_list(escopo) if escopo else None
+
+    signals: list[dict] = []
+    urgent: list[dict] = []
+    scale: list[dict] = []
+    organic: list[dict] = []
+    pareto: list[dict] = []
     ltv: list[dict] = []
-    try:
-        ltv_sql = f"""
-            SELECT brand, total_buyers, repeat_buyers, repeat_rate_pct,
-                   avg_customer_ltv, vip_buyers, one_and_done_buyers,
-                   at_risk_or_churned, overall_roas
-            FROM marts.fact_ml_cross_company_summary
-            WHERE brand IN {_fmt_list(ML_BRANDS)}
-            ORDER BY brand
+    urgent_total_count = 0
+    scale_total_count = 0
+    organic_total_count = 0
+    ml_snapshot_refreshed_at = None
+    opportunity_map = _empty_opportunity_map(escopo, "empty")
+
+    if escopo_sql is not None:
+        # BE3 + BE4 viajam de carona na consulta de `signals`: os totais reais
+        # das tres listas (ANTES do LIMIT) e o frescor do snapshot saem dos
+        # mesmos grupos, sem nenhum round-trip novo. Os itens de `signals`
+        # continuam com os cinco campos de sempre; as colunas auxiliares so'
+        # alimentam os metadados de topo.
+        signals_sql = f"""
+            SELECT product_status,
+                   COUNT(*)                       AS n_products,
+                   COALESCE(SUM(gross_revenue), 0) AS gmv,
+                   COALESCE(SUM(ad_spend), 0)      AS ad_spend,
+                   AVG(CASE WHEN ad_roas > 0 THEN ad_roas END) AS avg_roas,
+                   COUNT(*) FILTER (WHERE ad_roas >= {OPPORTUNITY_ROAS_REFERENCE:g}) AS n_roas_ref,
+                   MAX(refreshed_at)               AS max_refreshed_at
+            FROM marts.fact_ml_produto_ranking
+            WHERE brand IN {escopo_sql}
+              AND product_status IS NOT NULL
+            GROUP BY product_status
+            ORDER BY gmv DESC
         """
-        ltv = [
+        signals_rows = _query(db, signals_sql)
+        signals = [
+            {
+                "product_status": r["product_status"],
+                "n_products": int(_float(r["n_products"])),
+                "gmv": _float(r["gmv"]),
+                "ad_spend": _float(r["ad_spend"]),
+                # `avg_roas` e' media dos ROAS POSITIVOS por regra preexistente
+                # (AVG(CASE WHEN ad_roas > 0)). Nao confundir com o ROAS
+                # individual do produto, que preserva zero.
+                "avg_roas": round(_float(r["avg_roas"]), 2) if r.get("avg_roas") is not None else None,
+            }
+            for r in signals_rows
+        ]
+        por_status = {r["product_status"]: r for r in signals_rows}
+        # `.get()` e nao indice: as colunas auxiliares sao aditivas e um
+        # chamador que projete so' os campos antigos nao pode explodir.
+        urgent_total_count = int(_float(por_status.get("ad_spend_no_sales", {}).get("n_products")))
+        organic_total_count = int(_float(por_status.get("sells_organic_only", {}).get("n_products")))
+        # `scale` tem o corte comercial extra `ad_roas >= 8`, entao o total dele
+        # NAO e' o `n_products` do status: e' a coluna filtrada.
+        scale_total_count = int(_float(por_status.get("sells+advertised", {}).get("n_roas_ref")))
+        frescores = [r["max_refreshed_at"] for r in signals_rows if r.get("max_refreshed_at") is not None]
+        if frescores:
+            # Maximo REAL do universo filtrado. Nunca `now()`, `ingested_at` nem
+            # `last_sale`; e nao assume que todas as linhas compartilham o mesmo
+            # timestamp.
+            alvo = max(frescores)
+            if alvo.tzinfo is None:
+                alvo = alvo.replace(tzinfo=timezone.utc)
+            ml_snapshot_refreshed_at = alvo.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        urgent_sql = f"""
+            SELECT brand, title, pareto_bucket, revenue_velocity,
+                   COALESCE(gross_revenue, 0) AS gmv,
+                   COALESCE(ad_spend, 0)      AS ad_spend,
+                   ad_roas, ad_acos_pct, cancel_rate_pct,
+                   revenue_share_pct, units_sold, days_advertised, ad_efficiency
+            FROM marts.fact_ml_produto_ranking
+            WHERE brand IN {escopo_sql}
+              AND product_status = 'ad_spend_no_sales'
+            ORDER BY ad_spend DESC, brand ASC, item_id ASC
+            LIMIT 30
+        """
+        urgent = [
             {
                 "brand": r["brand"],
-                "total_buyers": int(_float(r["total_buyers"])),
-                "repeat_buyers": int(_float(r["repeat_buyers"])),
-                "repeat_rate_pct": round(_float(r["repeat_rate_pct"]), 2) if r.get("repeat_rate_pct") else None,
-                "avg_customer_ltv": round(_float(r["avg_customer_ltv"]), 2) if r.get("avg_customer_ltv") else None,
-                "vip_buyers": int(_float(r["vip_buyers"])) if r.get("vip_buyers") else None,
-                "one_and_done_buyers": int(_float(r["one_and_done_buyers"])) if r.get("one_and_done_buyers") else None,
-                "at_risk_or_churned": int(_float(r["at_risk_or_churned"])) if r.get("at_risk_or_churned") else None,
-                "overall_roas": round(_float(r["overall_roas"]), 2) if r.get("overall_roas") else None,
+                "title": r["title"],
+                "pareto_bucket": r.get("pareto_bucket"),
+                "revenue_velocity": r.get("revenue_velocity"),
+                "gmv": _float(r["gmv"]),
+                "ad_spend": _float(r["ad_spend"]),
+                "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") is not None else None,
+                "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") is not None else None,
+                "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") is not None else None,
+                "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") is not None else None,
+                "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") is not None else None,
+                "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") is not None else None,
+                "ad_efficiency": r.get("ad_efficiency"),
             }
-            for r in _query(db, ltv_sql)
+            for r in _query(db, urgent_sql)
         ]
-    except Exception:
-        ltv = []
+
+        scale_sql = f"""
+            SELECT brand, title, pareto_bucket, revenue_velocity,
+                   COALESCE(gross_revenue, 0) AS gmv,
+                   COALESCE(ad_spend, 0)      AS ad_spend,
+                   ad_roas, ad_acos_pct, cancel_rate_pct,
+                   revenue_share_pct, units_sold, days_advertised, ad_efficiency
+            FROM marts.fact_ml_produto_ranking
+            WHERE brand IN {escopo_sql}
+              AND product_status = 'sells+advertised'
+              AND ad_roas >= 8
+            ORDER BY ad_roas DESC, brand ASC, item_id ASC
+            LIMIT 20
+        """
+        scale = [
+            {
+                "brand": r["brand"],
+                "title": r["title"],
+                "pareto_bucket": r.get("pareto_bucket"),
+                "revenue_velocity": r.get("revenue_velocity"),
+                "gmv": _float(r["gmv"]),
+                "ad_spend": _float(r["ad_spend"]),
+                "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") is not None else None,
+                "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") is not None else None,
+                "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") is not None else None,
+                "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") is not None else None,
+                "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") is not None else None,
+                "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") is not None else None,
+                "ad_efficiency": r.get("ad_efficiency"),
+            }
+            for r in _query(db, scale_sql)
+        ]
+
+        organic_sql = f"""
+            SELECT brand, title, pareto_bucket, revenue_velocity,
+                   COALESCE(gross_revenue, 0) AS gmv,
+                   COALESCE(ad_spend, 0)      AS ad_spend,
+                   ad_roas, ad_acos_pct, cancel_rate_pct,
+                   revenue_share_pct, units_sold, days_advertised, ad_efficiency,
+                   unique_buyers
+            FROM marts.fact_ml_produto_ranking
+            WHERE brand IN {escopo_sql}
+              AND product_status = 'sells_organic_only'
+            ORDER BY gross_revenue DESC, brand ASC, item_id ASC
+            LIMIT 20
+        """
+        organic = [
+            {
+                "brand": r["brand"],
+                "title": r["title"],
+                "pareto_bucket": r.get("pareto_bucket"),
+                "revenue_velocity": r.get("revenue_velocity"),
+                "gmv": _float(r["gmv"]),
+                "ad_spend": _float(r["ad_spend"]),
+                "ad_roas": round(_float(r["ad_roas"]), 2) if r.get("ad_roas") is not None else None,
+                "ad_acos_pct": round(_float(r["ad_acos_pct"]), 2) if r.get("ad_acos_pct") is not None else None,
+                "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") is not None else None,
+                "revenue_share_pct": round(_float(r["revenue_share_pct"]), 3) if r.get("revenue_share_pct") is not None else None,
+                "units_sold": int(_float(r["units_sold"])) if r.get("units_sold") is not None else None,
+                "days_advertised": int(_float(r["days_advertised"])) if r.get("days_advertised") is not None else None,
+                "ad_efficiency": r.get("ad_efficiency"),
+            }
+            for r in _query(db, organic_sql)
+        ]
+
+        pareto_sql = f"""
+            SELECT brand, pareto_bucket,
+                   COUNT(*)                        AS n_products,
+                   COALESCE(SUM(gross_revenue), 0) AS gmv,
+                   COALESCE(SUM(ad_spend), 0)      AS ad_spend
+            FROM marts.fact_ml_produto_ranking
+            WHERE brand IN {escopo_sql}
+              AND pareto_bucket IS NOT NULL
+            GROUP BY brand, pareto_bucket
+            ORDER BY brand, pareto_bucket
+        """
+        pareto = [
+            {
+                "brand": r["brand"],
+                "pareto_bucket": r["pareto_bucket"],
+                "n_products": int(_float(r["n_products"])),
+                "gmv": _float(r["gmv"]),
+                "ad_spend": _float(r["ad_spend"]),
+            }
+            for r in _query(db, pareto_sql)
+        ]
+
+        try:
+            ltv_sql = f"""
+                SELECT brand, total_buyers, repeat_buyers, repeat_rate_pct,
+                       avg_customer_ltv, vip_buyers, one_and_done_buyers,
+                       at_risk_or_churned, overall_roas
+                FROM marts.fact_ml_cross_company_summary
+                WHERE brand IN {escopo_sql}
+                ORDER BY brand
+            """
+            ltv = [
+                {
+                    "brand": r["brand"],
+                    "total_buyers": int(_float(r["total_buyers"])),
+                    "repeat_buyers": int(_float(r["repeat_buyers"])),
+                    "repeat_rate_pct": round(_float(r["repeat_rate_pct"]), 2) if r.get("repeat_rate_pct") is not None else None,
+                    "avg_customer_ltv": round(_float(r["avg_customer_ltv"]), 2) if r.get("avg_customer_ltv") is not None else None,
+                    "vip_buyers": int(_float(r["vip_buyers"])) if r.get("vip_buyers") is not None else None,
+                    "one_and_done_buyers": int(_float(r["one_and_done_buyers"])) if r.get("one_and_done_buyers") is not None else None,
+                    "at_risk_or_churned": int(_float(r["at_risk_or_churned"])) if r.get("at_risk_or_churned") is not None else None,
+                    "overall_roas": round(_float(r["overall_roas"]), 2) if r.get("overall_roas") is not None else None,
+                }
+                for r in _query(db, ltv_sql)
+            ]
+        except Exception:
+            ltv = []
+
+        # BE6 — o universo e' o snapshot INTEIRO no escopo, nunca a uniao das
+        # tres listas capadas. `PERCENTILE_DISC` devolve o proprio NUMERIC da
+        # coluna, entao a fronteira alta inclusiva e' exata e a referencia e' um
+        # GMV efetivamente observado. A mediana e' recalculada DENTRO do escopo.
+        universo_cte = f"""
+            WITH universo AS (
+                SELECT brand, item_id, title,
+                       COALESCE(gross_revenue, 0) AS gmv,
+                       ad_spend, ad_roas
+                FROM marts.fact_ml_produto_ranking
+                WHERE brand IN {escopo_sql}
+                  AND product_status IS NOT NULL
+            ), ref AS (
+                SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY gmv) AS gmv_ref,
+                       COUNT(*) AS basis_count
+                FROM universo WHERE gmv > 0
+            ), classificado AS (
+                SELECT u.brand, u.item_id, u.title, u.gmv, u.ad_spend, u.ad_roas,
+                       r.gmv_ref, r.basis_count,
+                       CASE
+                           WHEN u.ad_spend IS NULL OR u.ad_spend <= 0
+                               THEN 'sem_ads'
+                           WHEN u.ad_roas IS NULL
+                               THEN 'roas_indisponivel_com_investimento'
+                           WHEN r.gmv_ref IS NULL
+                               THEN 'unclassified'
+                           WHEN u.ad_roas >= {OPPORTUNITY_ROAS_REFERENCE:g} AND u.gmv >= r.gmv_ref
+                               THEN 'escalar'
+                           WHEN u.ad_roas >= {OPPORTUNITY_ROAS_REFERENCE:g}
+                               THEN 'testar_investimento'
+                           WHEN u.gmv >= r.gmv_ref
+                               THEN 'monitorar'
+                           ELSE 'reduzir_parar'
+                       END AS classe
+                FROM universo u CROSS JOIN ref r
+            )"""
+        # Agregados do universo COMPLETO: nenhum LIMIT participa deles.
+        agregados_sql = universo_cte + """
+            SELECT classe,
+                   COUNT(*)                    AS count,
+                   COALESCE(SUM(gmv), 0)       AS gmv,
+                   COALESCE(SUM(ad_spend), 0)  AS ad_spend,
+                   MAX(gmv_ref)                AS gmv_reference,
+                   MAX(basis_count)            AS basis_count
+            FROM classificado
+            GROUP BY classe
+            ORDER BY classe
+        """
+        # Destaques: somente dos quatro quadrantes, nunca das faixas, com a
+        # mesma classificacao dos agregados e ordenacao totalmente determinada.
+        destaques_sql = universo_cte + f"""
+            , ranked AS (
+                SELECT c.*, ROW_NUMBER() OVER (
+                           PARTITION BY c.classe
+                           ORDER BY c.ad_spend DESC, c.gmv DESC, c.brand ASC, c.item_id ASC
+                       ) AS rn
+                FROM classificado c
+                WHERE c.classe IN ('escalar', 'testar_investimento', 'monitorar', 'reduzir_parar')
+            )
+            SELECT brand, item_id, title, gmv, ad_spend, ad_roas, classe
+            FROM ranked
+            WHERE rn <= {HIGHLIGHT_LIMIT_PER_QUADRANT}
+            ORDER BY classe, rn
+        """
+        opportunity_map = _monta_opportunity_map(
+            escopo, _query(db, agregados_sql), _query(db, destaques_sql),
+        )
 
     # Gate S3: o dia operacional e' o dia no Brasil, nunca o do processo. Antes
     # desta troca a janela de 30 dias de `tk_products` vinha de `date.today()`,
     # que num servidor UTC vira o dia as 21:00 locais e serviria um recorte de
     # 30 dias deslocado. Mesma funcao que `/operacoes` ja usa; zero dependencia
     # nova (`zoneinfo` e' biblioteca padrao).
+    #
+    # Gate V3-BE: `tk_products` e' TikTok e permanece GLOBAL — o escopo ML nao o
+    # filtra, para nao mudar o grao nem o contrato firmado no V3-1A.
     today = _hoje_operacional()
     tk30_start = today - timedelta(days=30)
     tk_products_sql = f"""
@@ -2317,10 +2591,10 @@ def get_inteligencia(db: Session) -> dict:
             "product_name": r["product_name"],
             "gmv": _float(r["gmv"]),
             "orders": int(_float(r["orders"])),
-            "avg_pct_video": round(_float(r["avg_pct_video"]), 1) if r.get("avg_pct_video") else None,
-            "avg_pct_live": round(_float(r["avg_pct_live"]), 1) if r.get("avg_pct_live") else None,
-            "avg_pct_card": round(_float(r["avg_pct_card"]), 1) if r.get("avg_pct_card") else None,
-            "avg_rating": round(_float(r["avg_rating"]), 1) if r.get("avg_rating") else None,
+            "avg_pct_video": round(_float(r["avg_pct_video"]), 1) if r.get("avg_pct_video") is not None else None,
+            "avg_pct_live": round(_float(r["avg_pct_live"]), 1) if r.get("avg_pct_live") is not None else None,
+            "avg_pct_card": round(_float(r["avg_pct_card"]), 1) if r.get("avg_pct_card") is not None else None,
+            "avg_rating": round(_float(r["avg_rating"]), 1) if r.get("avg_rating") is not None else None,
         }
         for r in _query(db, tk_products_sql)
     ]
@@ -2333,6 +2607,12 @@ def get_inteligencia(db: Session) -> dict:
         "pareto": pareto,
         "ltv": ltv,
         "tk_products": tk_products,
+        "urgent_total_count": urgent_total_count,
+        "scale_total_count": scale_total_count,
+        "organic_total_count": organic_total_count,
+        "ml_snapshot_refreshed_at": ml_snapshot_refreshed_at,
+        "ml_scope_brands": list(escopo),
+        "opportunity_map": opportunity_map,
     }
 
 
