@@ -18,7 +18,13 @@ import EvidenceQueue from "@/components/inteligencia/EvidenceQueue";
 import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
-import { fetchInteligencia, type InteligenciaData, type LtvRow } from "@/lib/api-client";
+import OpportunityMatrix from "@/components/inteligencia/OpportunityMatrix";
+import {
+  BAND_META, QUADRANT_META, freshnessLabel, isSample, matrixState,
+  moedaExata, readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
+  type BandKey, type QuadrantKey,
+} from "@/lib/inteligencia/opportunity";
+import { fetchInteligencia, type InteligenciaData, type LtvRow, type OpportunityHighlight } from "@/lib/api-client";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { decBr, pctBr, roasBr } from "@/lib/inteligencia/format";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
@@ -137,7 +143,13 @@ function InteligenciaSkeleton() {
 type DialogState =
   | { kind: "priority"; priority: Priority }
   | { kind: "bucket"; brand: string; share: BucketShare; totalGmv: number }
-  | { kind: "evidence"; item: EvidenceItem };
+  | { kind: "evidence"; item: EvidenceItem }
+  // ---- Gate V3-1B, bloco 3 ----
+  | { kind: "quadrant"; key: QuadrantKey }
+  | { kind: "point"; highlight: OpportunityHighlight }
+  | { kind: "band"; key: BandKey }
+  /** <640: a matriz inteira mora no diálogo (§13). */
+  | { kind: "matrix" };
 
 function InteligenciaPageInner() {
   const router = useRouter();
@@ -150,22 +162,51 @@ function InteligenciaPageInner() {
   const [retryKey, setRetryKey] = useState(0);
   const [resolvedKey, setResolvedKey] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  // Universo de marcas ML, aprendido da resposta SEM escopo. Com o filtro
+  // aplicado no servidor (V3-1B), o payload traz só a marca pedida — derivar os
+  // chips dele colapsaria o seletor para uma marca só.
+  const [brandUniverse, setBrandUniverse] = useState<string[]>([]);
 
-  // A tela não herda filtros globais (decisão do U5, preservada). A única
-  // variável de identidade da requisição continua sendo o `retryKey` — marca e
-  // lente são recorte LOCAL sobre o payload, não parâmetros de fetch.
-  const requestKey = useMemo(() => String(retryKey), [retryKey]);
+  // A tela não herda filtros globais (decisão do U5, preservada). A lente segue
+  // recorte LOCAL. A MARCA, porém, passou a ser parâmetro de fetch no V3-1B:
+  // `gmv_reference` do `opportunity_map` é a mediana DO ESCOPO, e recalculá-la
+  // no cliente seria refazer no frontend uma decisão que é contrato. Por isso a
+  // marca entra na identidade da requisição.
+  const brandParamAtual = readSingleParam(searchParams, "brands");
+  // QA (J3) mostrou um fallback SILENCIOSO aqui: exigir que a marca estivesse
+  // no universo ML aprendido fazia `?brands=apice` cair no escopo GLOBAL, porque
+  // apice nao e marca de ML. A tela mostrava o portfolio inteiro como se o
+  // filtro nao existisse — exatamente o silencio que o plano proibe.
+  //
+  // Agora o parametro e encaminhado sempre que tiver forma de `brand_key`, e
+  // quem decide o escopo ML e a API: apice devolve `ml_scope_brands: []`, que e
+  // o estado correto de "sem escopo Mercado Livre". A allowlist de FORMA fica
+  // aqui so para nao encaminhar lixo de URL; a allowlist de VALOR e do backend.
+  const escopoPedido = useMemo(() => {
+    const v = brandParamAtual?.trim().toLowerCase();
+    if (!v) return null;
+    return /^[a-z][a-z0-9_]{1,32}$/.test(v) ? [v] : null;
+  }, [brandParamAtual]);
+  const requestKey = useMemo(
+    () => `${retryKey}|${escopoPedido ? escopoPedido.join(",") : "all"}`,
+    [retryKey, escopoPedido],
+  );
 
   useEffect(() => {
     let ignore = false;
     setLoading(true);
     setError(null);
-    const key = String(retryKey);
-    fetchInteligencia()
+    const key = `${retryKey}|${escopoPedido ? escopoPedido.join(",") : "all"}`;
+    fetchInteligencia(escopoPedido)
       .then((res) => {
         if (ignore) return;
         setData(res.data);
         setIsLive(res.live);
+        // O universo só é aprendido de uma resposta SEM escopo; uma resposta
+        // filtrada não conhece as outras marcas e não pode encolher a lista.
+        if (!escopoPedido && res.data?.ml_scope_brands?.length) {
+          setBrandUniverse(res.data.ml_scope_brands);
+        }
         setResolvedKey(key);
         setLoading(false);
       })
@@ -178,15 +219,19 @@ function InteligenciaPageInner() {
         setLoading(false);
       });
     return () => { ignore = true; };
-  }, [retryKey]);
+  }, [retryKey, escopoPedido]);
 
   const status = computeRequestStatus({ loading, error: error != null, resolvedKey, requestKey });
   const displayData = status.fresh ? data : null;
   const displayIsLive = status.fresh ? isLive : false;
 
   // ---- recorte local: marca e lente, ambos reproduzíveis pela URL ----
-  const mlBrands = useMemo(() => mlBrandsFromPayload(displayData), [displayData]);
-  const brandParam = readSingleParam(searchParams, "brands");
+  // Universo aprendido tem precedência; o payload é a semente da primeira carga.
+  const mlBrands = useMemo(() => {
+    const doPayload = mlBrandsFromPayload(displayData);
+    return brandUniverse.length >= doPayload.length ? brandUniverse : doPayload;
+  }, [displayData, brandUniverse]);
+  const brandParam = brandParamAtual;
   const brandSel = useMemo(() => parseBrandSelection(brandParam, mlBrands), [brandParam, mlBrands]);
   const lens: Lens = useMemo(() => parseLens(searchParams), [searchParams]);
 
@@ -213,6 +258,23 @@ function InteligenciaPageInner() {
   const queue = useMemo(() => buildQueue(displayData, brandSel), [displayData, brandSel]);
   const lensRows = useMemo(() => sortForLens(queueForLens(queue, lens), lens), [queue, lens]);
   const concentration = useMemo(() => concentrationByBrand(displayData, brandSel), [displayData, brandSel]);
+  // Bloco 3: consumido DIRETO do contrato. Nada de mediana, referência,
+  // classificação, agregado, faixa ou seleção de destaque recalculados aqui.
+  const oppMap = displayData?.opportunity_map ?? null;
+  const mlScope = displayData?.ml_scope_brands ?? [];
+  const oppState = matrixState(oppMap, mlScope);
+  // FINDING 1 (Task 2/2): um unico timestamp de exibicao para todo o bloco ML.
+  //
+  // Ele sai de `displayData`, nao de `data`. Essa distincao e a protecao: quando
+  // `status.fresh` e falso — loading, erro ou resposta obsoleta cuja chave nao
+  // bate com a atual — `displayData` ja e `null`, e o timestamp cai para `null`
+  // junto. Nenhum dialogo pode exibir o frescor de uma requisicao anterior.
+  //
+  // `null` significa FRESCOR INDISPONIVEL, nunca "agora": em escopo ML vazio o
+  // proprio backend devolve null, e `new Date()` mostraria a hora do navegador
+  // como se fosse a da carga.
+  const mlRefreshedAt = displayData?.ml_snapshot_refreshed_at ?? null;
+  const frescorMl = freshnessLabel(mlRefreshedAt);
   const ltvRows = useMemo(() => filterByBrand(displayData?.ltv, brandSel), [displayData, brandSel]);
   const tkReceived = (displayData?.tk_products ?? []).length;
   const tkRows = useMemo(() => (displayData?.tk_products ?? []).slice(0, 5), [displayData]);
@@ -237,6 +299,11 @@ function InteligenciaPageInner() {
   const dialogTitle = dialog == null ? ""
     : dialog.kind === "priority" ? `${dialog.priority.title} · ${scope}`
     : dialog.kind === "bucket" ? `Bucket ${dialog.share.bucket.charAt(0)} · ${brandLabel(dialog.brand)}`
+    : dialog.kind === "quadrant" ? `${QUADRANT_META[dialog.key].label} · ${scope}`
+    : dialog.kind === "band" ? `${BAND_META[dialog.key].label} · ${scope}`
+    : dialog.kind === "matrix" ? `Mapa de oportunidades · ${scope}`
+    : dialog.kind === "point"
+      ? `${dialog.highlight.title ?? dialog.highlight.item_id} · ${brandLabel(dialog.highlight.brand)}`
     : `${dialog.item.title ?? "Produto"} · ${brandLabel(dialog.item.brand)}`;
 
   return (
@@ -386,45 +453,39 @@ function InteligenciaPageInner() {
             )}
           </section>
 
-          {/* ---------------- Bloco 3 — faixas de oportunidade ----------------
-              Degradação honesta: BE6 (`opportunity_map`) não existe, então NÃO
-              há matriz, eixo, quadrante nem mediana de GMV do subconjunto. São
-              faixas de amostra priorizada, com a regra e o limite à vista. */}
+          {/* ---------------- Bloco 3 — matriz definitiva (V3-1B, §7.3) ----------
+              O bloco consome `opportunity_map` DIRETO. Nenhuma mediana,
+              referência, classificação, agregado, faixa ou seleção de destaque
+              é recalculada aqui: tudo isso é contrato do BE6, e refazer no
+              cliente seria divergir dele na primeira mudança de regra.
+
+              Universo, agregados e destaques ficam separados na tela porque são
+              grandezas diferentes. Quando `returned_count < total_count`, a
+              seção declara que os pontos são destaques e que os agregados
+              cobrem o universo. */}
           <SectionCard
             id={INTELIGENCIA_ANCHORS.oportunidades}
-            title="Faixas de oportunidade — amostra priorizada"
-            subtitle="Cada faixa vem de uma lista própria do payload, com limite conhecido. Não é o portfólio completo."
+            title="Mapa de oportunidades"
+            subtitle={
+              oppState === "available"
+                ? "Retorno × volume no snapshot ML inteiro. Clique num quadrante para os agregados, ou num ponto para o produto."
+                : "Retorno × volume no snapshot ML inteiro."
+            }
             regime={REGIME_ML}
           >
-            <div className="px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
-              {(["parar", "escalar", "testar"] as const).map((kind) => {
-                const rows = sortForLens(queueForLens(queue, kind), kind);
-                return (
-                  <div key={kind} className="border border-slate-200 rounded-xl p-4 flex flex-col gap-2 min-h-[9rem]">
-                    <p className="text-sm font-semibold text-slate-800">{KIND_LABELS[kind]}</p>
-                    <p className="text-xs text-slate-500">{KIND_RULES[kind]}</p>
-                    <p className="text-2xl font-bold text-slate-900 tabular-nums leading-none">
-                      {rows.length}
-                    </p>
-                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-auto">
-                      {sampleNote(kind, rows.length)}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setLens(kind)}
-                      aria-label={`Abrir a lente ${LENS_LABELS[kind]} na fila de evidências`}
-                      className="self-start inline-flex items-center min-h-11 text-xs font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-                    >
-                      Ver na fila →
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
+            <OpportunityMatrix
+              map={oppMap}
+              mlScope={mlScope}
+              onOpenQuadrant={(key) => setDialog({ kind: "quadrant", key })}
+              onOpenPoint={(highlight) => setDialog({ kind: "point", highlight })}
+              onOpenBand={(key) => setDialog({ kind: "band", key })}
+              onOpenMatrix={() => setDialog({ kind: "matrix" })}
+              disabled={status.loading}
+            />
             <p className="px-4 sm:px-6 pb-5 text-xs text-slate-500">
-              A visão de quadrantes (retorno × volume sobre o portfólio inteiro) depende de um contrato de backend
-              ainda inexistente. Enquanto ele não existir, esta seção mostra amostras priorizadas em vez de sugerir
-              cobertura que o dado não tem.
+              Escopo <code>ml_snapshot</code>: fotografia do Mercado Livre, sem janela
+              temporal. TikTok não entra neste mapa porque a fonte dele não tem ROAS.
+              {" "}{frescorMl}.
             </p>
           </SectionCard>
 
@@ -449,8 +510,8 @@ function InteligenciaPageInner() {
               o LIMIT do backend — "de N" sugeriria que N é o portfólio. */}
           <section id={INTELIGENCIA_ANCHORS.produtos} className="scroll-mt-24 grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
             {([
-              { title: "Maior desperdício de Ads", rows: worst, kind: "parar" as const },
-              { title: "Maior retorno com Ads", rows: best, kind: "escalar" as const },
+              { title: "Maior desperdício de Ads", rows: worst, kind: "parar" as const, total: displayData?.urgent_total_count ?? null },
+              { title: "Maior retorno com Ads", rows: best, kind: "escalar" as const, total: displayData?.scale_total_count ?? null },
             ]).map((panel) => {
               const received = counts[panel.kind];
               const max = Math.max(
@@ -505,7 +566,9 @@ function InteligenciaPageInner() {
                     <p className="text-xs text-slate-500">
                       {panel.rows.length === 0
                         ? "Sem registros nesta lista."
-                        : `${listSampleNote(panel.kind, panel.rows.length, received)} · 3 no mobile é apresentação, não cobertura.`}
+                        : `${panel.total != null
+                            ? trueSampleNote(panel.rows.length, panel.total, "registro")
+                            : listSampleNote(panel.kind, panel.rows.length, received)} · 3 no mobile é apresentação, não cobertura.`}
                     </p>
                     <Link
                       href={buildLensHref("/inteligencia", panel.kind, searchParams, { anchor: INTELIGENCIA_ANCHORS.fila })}
@@ -682,6 +745,132 @@ function InteligenciaPageInner() {
 
       {/* ---------------- Diálogo único (contrato §3 do G2) ---------------- */}
       <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle}>
+        {/* ---- V3-1B: quadrante. Regra, fronteiras, origem de cada
+             referência, agregados do UNIVERSO e quantos destaques. ---- */}
+        {dialog?.kind === "quadrant" && oppMap && (() => {
+          const q = oppMap.quadrants.find((x) => x.key === dialog.key);
+          const meta = QUADRANT_META[dialog.key];
+          const gmvRef = oppMap.gmv_reference == null ? "sem referência" : moedaExata(oppMap.gmv_reference);
+          return (
+            <div className="flex flex-col gap-4">
+              <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
+              <p className="text-sm text-slate-700">
+                <strong>Regra:</strong> {meta.regra(roasBr(oppMap.roas_reference), gmvRef)}.{" "}
+                Fronteiras altas são inclusivas. {meta.leitura}
+              </p>
+              <DrilldownMetricPair
+                label="Produtos no quadrante (universo)"
+                value={fmtNumber(q?.count ?? 0)}
+                referenceLabel="Destaques plotados"
+                referenceValue={fmtNumber(q?.returned_count ?? 0)}
+              />
+              <DrilldownMetricPair
+                label="GMV do quadrante"
+                value={fmtBrl(q?.gmv ?? 0)}
+                referenceLabel="Ad spend do quadrante"
+                referenceValue={fmtBrl(q?.ad_spend ?? 0)}
+              />
+              <div>
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  De onde vem cada referência
+                </p>
+                <ul className="flex flex-col gap-1 list-none p-0 m-0">
+                  {referenceOrigins(oppMap, moedaExata).map((t) => (
+                    <li key={t} className="text-xs text-slate-600">{t}</li>
+                  ))}
+                </ul>
+              </div>
+              <DataQualityNote
+                note={`Fotografia ML sem janela temporal: o quadrante descreve o estado do snapshot, não um período. ${sampleDeclaration(oppMap)}`}
+              />
+              <button
+                type="button"
+                onClick={() => { setDialog(null); setLens(dialog.key === "escalar" ? "escalar" : dialog.key === "reduzir_parar" ? "parar" : "todos"); }}
+                aria-label={`Ver a fila de evidências filtrada a partir do quadrante ${meta.label}`}
+                className="self-start inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+              >
+                Ver evidências na fila →
+              </button>
+            </div>
+          );
+        })()}
+
+        {/* ---- V3-1B: ponto. Produto, as duas comparações e o porquê. ---- */}
+        {dialog?.kind === "point" && oppMap && (() => {
+          const h = dialog.highlight;
+          const leitura = readPoint(h, oppMap, moedaExata, roasBr);
+          return (
+            <div className="flex flex-col gap-4">
+              <DrilldownContextLine leading={`${brandLabel(h.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
+              <DrilldownMetricPair label="GMV" value={fmtBrl(h.gmv)} referenceLabel="Ad spend" referenceValue={fmtBrl(h.ad_spend)} />
+              <DrilldownMetricPair
+                label="ROAS"
+                value={h.ad_roas == null ? "sem dado" : roasBr(h.ad_roas)}
+                referenceLabel="Referência de ROAS"
+                referenceValue={roasBr(oppMap.roas_reference)}
+              />
+              <ul className="flex flex-col gap-1 list-none p-0 m-0">
+                <li className="text-sm text-slate-700">{leitura.roasComparacao}</li>
+                <li className="text-sm text-slate-700">{leitura.gmvComparacao}</li>
+              </ul>
+              <p className="text-sm text-slate-700">{leitura.porque}</p>
+              <DataQualityNote
+                note="Fotografia ML sem janela temporal. As duas referências descrevem o portfólio do escopo atual; não são metas."
+              />
+              <Link
+                // Link FRIO, de proposito. O plano reserva o contexto QUENTE de
+                // chegada ao V3-2, e so' "com wiring real": a pagina de Marca nao tem
+                // hoje nenhum consumidor de foco vindo da Inteligencia, e emitir
+                // contexto que ninguem le seria divida sem retorno. O filtro de
+                // marca, sim, viaja.
+                href={`/brand/${h.brand}?brands=${h.brand}`}
+                aria-label={`Abrir a visão da marca ${brandLabel(h.brand)} a partir deste produto`}
+                className="self-start inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+              >
+                Abrir marca deste produto →
+              </Link>
+            </div>
+          );
+        })()}
+
+        {/* ---- V3-1B: faixa. As duas explicações são DIFERENTES, e cada uma
+             diz o que NÃO é, porque é justamente o que se confunde. ---- */}
+        {dialog?.kind === "band" && oppMap && (() => {
+          const b = oppMap.bands.find((x) => x.key === dialog.key);
+          const meta = BAND_META[dialog.key];
+          return (
+            <div className="flex flex-col gap-4">
+              <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
+              <p className="text-sm text-slate-700">{meta.explicacao}</p>
+              <DrilldownMetricPair
+                label="Produtos na faixa"
+                value={fmtNumber(b?.count ?? 0)}
+                referenceLabel="GMV da faixa"
+                referenceValue={fmtBrl(b?.gmv ?? 0)}
+              />
+              <DrilldownMetricPair
+                label="Ad spend da faixa"
+                value={fmtBrl(b?.ad_spend ?? 0)}
+                referenceLabel="Universo classificado"
+                referenceValue={fmtNumber(oppMap.total_count)}
+              />
+              <DataQualityNote note={`${meta.naoConfundir} Faixa não produz destaque plotado: ela fica fora dos quadrantes.`} />
+            </div>
+          );
+        })()}
+
+        {/* ---- V3-1B: <640, a matriz inteira dentro do diálogo (§13) ---- */}
+        {dialog?.kind === "matrix" && oppMap && (
+          <OpportunityMatrix
+            map={oppMap}
+            mlScope={mlScope}
+            onOpenQuadrant={(key) => setDialog({ kind: "quadrant", key })}
+            onOpenPoint={(highlight) => setDialog({ kind: "point", highlight })}
+            onOpenBand={(key) => setDialog({ kind: "band", key })}
+            semBreakpoint
+          />
+        )}
+
         {dialog?.kind === "priority" && (
           <div className="flex flex-col gap-4">
             <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />

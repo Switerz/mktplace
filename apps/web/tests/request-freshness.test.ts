@@ -489,7 +489,9 @@ test("PF1 chaves: as 21 chaves reais seguem identicas e nenhuma perdeu filtro/pa
     "produtos-tk:${qs}", "produtos-ml-summary:${qs}", "produtos-tk-summary:${qs}",
     "produtos-sh-summary:${qs}", "canais:${qs.toString()}", "financeiro:${qs.toString()}",
     "quality:${qs.toString()}", "brand-detail:${brand}:${month}", "pedidos:${qs.toString()}",
-    "inteligencia", "operacoes", "regioes-summary:${qs.toString()}", "regioes-by-uf:${qs.toString()}",
+    // Gate V3-1B: a chave ganhou o escopo de marca. Sem isso, `?brands=barbours`
+    // e o escopo global colidiriam na mesma entrada do cache.
+    "inteligencia:${escopo ? escopo.join(\",\") : \"all\"}", "operacoes", "regioes-summary:${qs.toString()}", "regioes-by-uf:${qs.toString()}",
     "regioes-by-brand:${qs.toString()}", "regioes-trend:${qs.toString()}",
   ]);
 });

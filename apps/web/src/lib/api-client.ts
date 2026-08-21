@@ -1564,6 +1564,62 @@ export interface TkProductRow {
   avg_rating: number | null;
 }
 
+/** Gate V3-BE / BE6 — um quadrante do mapa de oportunidades.
+ *
+ * `count`/`gmv`/`ad_spend` descrevem o UNIVERSO do quadrante; `returned_count`
+ * conta apenas os destaques devolvidos. Os dois nunca se confundem.
+ */
+export interface OpportunityQuadrant {
+  key: "escalar" | "testar_investimento" | "monitorar" | "reduzir_parar";
+  count: number;
+  gmv: number;
+  ad_spend: number;
+  returned_count: number;
+}
+
+/** Faixa fora dos quadrantes. Sem `returned_count`: faixa nao produz destaque. */
+export interface OpportunityBand {
+  key: "sem_ads" | "roas_indisponivel_com_investimento";
+  count: number;
+  gmv: number;
+  ad_spend: number;
+}
+
+export interface OpportunityHighlight {
+  item_id: string;
+  brand: string;
+  /** Somente exibicao. NUNCA vai para a URL. */
+  title: string | null;
+  gmv: number;
+  ad_spend: number;
+  /** `0` e retorno baixo medido; `null` e indisponibilidade de medicao. */
+  ad_roas: number | null;
+  quadrant: OpportunityQuadrant["key"];
+}
+
+export type OpportunityStatus = "available" | "empty" | "unavailable_no_positive_gmv";
+
+export interface OpportunityMap {
+  scope: string;
+  classification_status: OpportunityStatus;
+  brands: string[];
+  /** Universo completo no escopo. */
+  total_count: number;
+  /** Total de destaques devolvidos = soma dos `returned_count` dos quadrantes. */
+  returned_count: number;
+  roas_reference: number;
+  /** `null` quando nao existe GMV positivo no escopo. Nunca recalcular no cliente. */
+  gmv_reference: number | null;
+  gmv_reference_basis_count: number;
+  reference_note: string;
+  unclassified_count: number;
+  highlight_limit_per_quadrant: number;
+  highlight_order: string;
+  quadrants: OpportunityQuadrant[];
+  bands: OpportunityBand[];
+  highlights: OpportunityHighlight[];
+}
+
 export interface InteligenciaData {
   signals: SignalRow[];
   urgent: ProductSignalRow[];
@@ -1572,11 +1628,36 @@ export interface InteligenciaData {
   pareto: ParetoRow[];
   ltv: LtvRow[];
   tk_products: TkProductRow[];
+  // ---- Gate V3-BE, aditivos ----
+  /** Total REAL das listas, antes do LIMIT. Substitui o "ao menos N". */
+  urgent_total_count: number;
+  scale_total_count: number;
+  organic_total_count: number;
+  /** Frescor da fotografia ML, ISO-8601 UTC. `null` = indisponivel; nunca `new Date()`. */
+  ml_snapshot_refreshed_at: string | null;
+  /** Escopo ML efetivo. `[]` quando a selecao nao tem marca de ML (apice). */
+  ml_scope_brands: string[];
+  opportunity_map: OpportunityMap;
 }
 
-export function fetchInteligencia(): Promise<{ data: InteligenciaData | null; live: boolean }> {
-  return withCache("inteligencia", async () => {
-    const raw = await apiFetch<InteligenciaData>("/api/v1/performance/inteligencia");
+/**
+ * Gate V3-1B: o escopo de marca vai para a API, e nao e mais aplicado somente no
+ * cliente. E' obrigatorio porque `gmv_reference` do `opportunity_map` e' a mediana
+ * do escopo — recalcula-la no cliente seria refazer no frontend uma decisao que
+ * pertence ao contrato.
+ *
+ * O escopo entra na CHAVE do cache: sem isso, `?brands=barbours` e o escopo global
+ * colidiriam na mesma entrada.
+ */
+export function fetchInteligencia(
+  brands?: readonly string[] | null,
+): Promise<{ data: InteligenciaData | null; live: boolean }> {
+  const escopo = brands && brands.length > 0 ? [...brands].sort() : null;
+  const qs = escopo ? `?brands=${encodeURIComponent(escopo.join(","))}` : "";
+  return withCache(`inteligencia:${escopo ? escopo.join(",") : "all"}`, async () => {
+    const raw = await apiFetch<InteligenciaData>(
+      `/api/v1/performance/inteligencia${qs}`,
+    );
     return { data: raw, live: raw != null };
   });
 }

@@ -58,6 +58,10 @@ const BRAND_TABLE_SRC = fs.readFileSync(
   path.join(import.meta.dirname, "..", "src", "components", "BrandPerformanceTable.tsx"),
   "utf8",
 );
+const HINT_SRC = fs.readFileSync(
+  path.join(import.meta.dirname, "..", "src", "components", "TableScrollHint.tsx"),
+  "utf8",
+);
 
 test("BrandPerformanceTable importa e usa TableScrollHint", () => {
   assert.match(BRAND_TABLE_SRC, /import\s+TableScrollHint\s+from\s+["']@\/components\/TableScrollHint["'];/, "deve importar TableScrollHint");
@@ -76,4 +80,35 @@ test("BrandPerformanceTable: o <table> fica DENTRO do TableScrollHint", () => {
 
 test("BrandPerformanceTable: nao volta ao anti-padrao 'sem overflow-x para eliminar scroll lateral'", () => {
   assert.doesNotMatch(BRAND_TABLE_SRC, /sem overflow-x para eliminar scroll lateral/, "o comentario/regra que justificava remover o scroll lateral nao pode voltar");
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gate V3-1B — piso tipográfico de 12px na dica de rolagem
+//
+// O QA visual mediu 11px em tablet e mobile: a dica usava `text-[11px]`,
+// abaixo do piso de 12px que o V3 declara. A troca é só de classe — texto,
+// `aria-hidden`, cor, espaçamento e comportamento seguem idênticos.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("TableScrollHint: a dica de rolagem nao renderiza abaixo de 12px", () => {
+  assert.doesNotMatch(HINT_SRC, /text-\[11px\]/, "11px era o valor medido no QA e esta abaixo do piso");
+  // nenhum tamanho arbitrario abaixo do piso, em nenhum ponto do componente
+  for (const m of HINT_SRC.matchAll(/text-\[(\d+)px\]/g)) {
+    assert.ok(Number(m[1]) >= 12, `TableScrollHint renderiza texto a ${m[1]}px`);
+  }
+  assert.match(HINT_SRC, /sm:hidden text-center text-xs text-slate-400 pt-1/,
+    "a dica passou a usar a classe de 12px, preservando alinhamento, cor e espacamento");
+});
+
+test("TableScrollHint: estrutura e semantica da dica preservadas na troca", () => {
+  // a dica continua decorativa: quem usa leitor de tela nao ouve "arraste"
+  assert.match(HINT_SRC, /<p aria-hidden="true" className="sm:hidden text-center text-xs/,
+    "a dica continua aria-hidden e restrita ao mobile");
+  assert.match(HINT_SRC, /← arraste para ver mais →/, "o texto da dica nao mudou");
+  // e o componente segue com a mesma API e a mesma mecanica de bordas
+  assert.match(HINT_SRC, /export default function TableScrollHint\(\{ children, className = "" \}: Props\)/,
+    "API publica inalterada");
+  assert.match(HINT_SRC, /edges\.canScrollRight/, "a dica continua condicionada a borda rolavel");
+  assert.ok(!/text-\[10px\]|text-\[11px\]/.test(HINT_SRC));
 });

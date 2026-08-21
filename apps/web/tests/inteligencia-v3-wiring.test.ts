@@ -101,25 +101,24 @@ test("26. nenhum ctx_* e' produzido pela Inteligencia (contexto quente e' do V3-
 // EXPLICA ao leitor que nao ha quadrante, nao ha mediana de subconjunto e que
 // a contagem nao e' o total do portfolio. Proibir a palavra proibiria a
 // explicacao. O que precisa nao existir e' o codigo.
-test("27. zero matriz, quadrante, eixo ou scatter antes de BE6 (implementacao)", () => {
+test("27. a matriz do V3-1B le o contrato BE6 e nao deriva nada no cliente", () => {
+  // Este teste era o congelamento do estado PRE-BE6: proibia matriz, quadrante,
+  // eixo e scatter porque o payload nao os sustentava. BE6 chegou e o Gate V3-1B
+  // implementou a matriz, entao o congelamento virou o seu oposto. O que
+  // continua proibido e DERIVAR no cliente aquilo que e contrato.
   const src = codeOnly(read(INTEL));
-  const proibidos = [
-    /ScatterChart|<Scatter\b/, /XAxis|YAxis|ZAxis|CartesianGrid/,
-    /opportunity_map/, /gmv_reference|roas_reference/,
-    /quadrant[A-Za-z]*\s*[:=]/,
-    // Chaves EXCLUSIVAS do contrato BE6. `escalar` sozinho nao entra: e' o
-    // nome legitimo de uma lente da fila, e proibi-lo proibiria a lente.
-    /testar_investimento|reduzir_parar|monitorar/,
-    /roas_indisponivel_com_investimento/,
-  ];
-  for (const p of proibidos) {
-    assert.ok(!p.test(src), `${p} aparece na pagina antes de BE6`);
+  // a pagina consome o contrato e delega o desenho ao componente proprio
+  assert.match(src, /opportunity_map/, "a matriz consome o contrato BE6");
+  assert.match(src, /OpportunityMatrix/, "e delega o desenho ao componente proprio");
+  // nada de biblioteca de grafico: o plano cartesiano e SVG autoral
+  for (const p of [/ScatterChart|<Scatter\b/, /XAxis|YAxis|ZAxis|CartesianGrid/,
+                   /from "recharts"/]) {
+    assert.ok(!p.test(src), `${p} nao pode aparecer nesta pagina`);
   }
-  // recharts nao pode ser importado aqui: nao ha grafico nesta pagina
-  assert.ok(!/from "recharts"/.test(src), "nenhum grafico antes de BE6");
-  // e a degradacao esta declarada ao leitor
-  assert.match(src, /amostra priorizada/i);
-  assert.match(src, /Faixas de oportunidade/);
+  // nenhuma referencia e recalculada aqui: elas sao LIDAS do mapa
+  assert.ok(!/gmv_reference\s*=(?!=)/.test(src), "gmv_reference nao pode ser atribuida na pagina");
+  assert.ok(!/roas_reference\s*=(?!=)/.test(src), "roas_reference nao pode ser atribuida na pagina");
+  assert.ok(!/ad_roas\s*>=\s*\d/.test(src), "a pagina nao reclassifica por comparacao numerica");
 });
 
 test("27b. nenhuma mediana de subconjunto e' CALCULADA", () => {
@@ -277,8 +276,24 @@ test("regimes: ML sem janela e TikTok com 30 dias, nunca misturados", () => {
   assert.match(src, /Mercado Livre · fotografia do .ltimo carregamento/);
   assert.match(src, /TikTok Shop · .ltimos 30 dias/);
   // nenhum timestamp inventado
-  assert.ok(!/refreshedAt=\{(?!null)/.test(src), "refreshedAt precisa ser null enquanto BE4 nao existe");
+  // BE4 existe: o proibido deixou de ser "qualquer valor" e passou a ser
+  // "valor inventado". O unico valor aceito vem do contrato, e ele so chega
+  // quando a resposta e fresca (`displayData`, nao `data`).
+  assert.ok(!/refreshedAt=\{new Date/.test(src), "nunca o relogio do navegador");
+  assert.ok(!/refreshedAt=\{Date\./.test(src), "nunca Date.now()");
+  assert.match(src, /const mlRefreshedAt = displayData\?\.ml_snapshot_refreshed_at \?\? null;/,
+    "o timestamp sai de displayData, protegido por frescor de requisicao");
+  // Gate V3-1B: os tres dialogos novos do bloco 3 tambem passam `null`, entao a
+  // contagem subiu de 3 para 6. A contraprova que importa e a de cima: nenhum
+  // `refreshedAt` recebe valor diferente de `null` nesta pagina. O frescor do
+  // BE4 e exibido como TEXTO proprio do bloco ML, nao injetado nos dialogos.
+  // Gate V3-1B Task 2/2 (FINDING 1): os tres dialogos do bloco 3 passaram a
+  // receber o frescor REAL de `ml_snapshot_refreshed_at`, protegido por frescor
+  // de requisicao. Congelar em `null` valia antes do BE4; agora protegeria a
+  // AUSENCIA em vez do contrato. Os 3 que sobram sao blocos anteriores ao V3-1B.
   assert.equal((src.match(/refreshedAt=\{null\}/g) ?? []).length, 3);
+  assert.equal((src.match(/refreshedAt=\{mlRefreshedAt\}/g) ?? []).length, 3,
+    "os tres dialogos da matriz recebem o frescor do contrato");
 });
 
 test("estado: resolvedKey marcado tambem na falha (protecao do U4 preservada)", () => {

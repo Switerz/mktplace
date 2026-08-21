@@ -1,8 +1,12 @@
 # Gate V3 — Inteligência e Marca 360 (desenho)
 
-**Status:** **V3-0 CONCLUÍDO — DESENHO APROVADO.** **V3-1A IMPLEMENTADO — AGUARDANDO
-REVISÃO** (Task 1/2; a Task 2/2 de QA visual não começou). V3-1B, V3-2 e V3-3 não
-iniciados. Nenhum backend, migration ou pipeline foi tocado em nenhum momento.
+**Status:** **V3-0, V3-1A, PF1 e V3-BE VERSIONADOS** (`309b6bf`, `e675948`,
+`45fa3f8`, `26434c8`), com o contrato do V3-BE **confirmado em produção**.
+**V3-1B TECNICAMENTE CONCLUÍDO** — matriz definitiva implementada, integrada a
+`7b1b451` e com **QA visual final de 96/96** em navegador real — **aguardando
+versionamento**. **V3-2 e V3-3 não iniciados.** Nenhum pipeline ou migration foi
+tocado em nenhum momento; o V3-BE foi a única etapa que alterou backend, e o fez
+de forma aditiva.
 **Data:** 18/08/2026. **Base:** `origin/main` = `3998af5`.
 **Escopo:** frontend de `/inteligencia` e `/brand/[brand]`, e o fluxo de drill-down
 entre Inteligência, Marca, Canais e Produtos.
@@ -1306,29 +1310,36 @@ nova; dependência nova; alteração de `DESIGN.md`; deploy; Scheduler; pipeline
 ## 19. Roadmap
 
 Três tasks operacionais, com as dependências internas explícitas. O V3-1 tem duas
-etapas porque a matriz definitiva **não é implementável** com o payload atual — a
-divisão reflete uma dependência real, não um subgate para inflar processo.
+etapas porque a matriz definitiva **não era implementável** com o payload de
+18/08 — a divisão refletiu uma dependência real, não um subgate para inflar
+processo. A dependência foi resolvida pelo **BE6**, entregue no V3-BE.
 
 | Fase | Conteúdo | Depende de | Critério de saída |
 |---|---|---|---|
 | **V3-0** | Este desenho, corrigido nos sete findings | — | **CONCLUÍDO — DESENHO APROVADO** pelo proprietário em 18/08/2026 |
-| **V3-1A** — fundação da Inteligência ✅ **IMPLEMENTADO + QA VISUAL + A11Y 44px/12px FECHADA — AGUARDANDO REVISÃO** | Cabeçalho de regimes (ML fotografia × TikTok 30 dias); **rituária** derivada do payload; remoção das duas falsas affordances (`<span>` de botão e hover de linha); concentração Pareto com diálogo **só de agregados** + CTA para `/produtos`; **wiring da querystring canônica `/produtos?channels=ml&brands=…&pareto_bucket=…` (§9.2)** e de `lens` em `/inteligencia`; listas e fila honestamente truncadas ("amostra capada"); fila com lentes substituindo as três tabelas; LTV filtrável; os 13 estados; tipografia ≥12px; bloco 3 **como listas/faixas**, sem matriz | **payload atual** | 5 tabelas → 1; zero falsa affordance; rituária visível; nenhuma contagem apresentada como total; `/produtos` reproduzível por URL na forma canônica; `lens` com allowlist e sem propagação pela sidebar; suíte + typecheck + build verdes |
-| **contrato backend** | **BE6** `opportunity_map` — universo + `total_count` + as duas referências com origem + quadrantes com fronteiras + agregados completos + destaques com `item_id` e `returned_count` + **as duas faixas** (§15.1); **BE3** contagens verdadeiras; **BE4** frescor do snapshot; **BE5** `available_months` (§15.2). **BE1 e BE2 saíram** (§15.0) | — | contratos aceitos e servidos; nenhum campo entregue sem consumidor |
-| **V3-1B** — conclusão da Inteligência | **Matriz 2×2 definitiva**: quatro quadrantes com fronteiras `>=` explícitas, as duas referências exibidas com origem, **agregados do universo separados dos pontos de destaque**, e as **duas faixas** (`sem_ads` e `roas_indisponivel_com_investimento`) como blocos distintos; contagens verdadeiras substituindo "ao menos N"; etiqueta de frescor com timestamp | **BE6** (matriz), BE3, BE4 | nenhuma afirmação de cobertura sem `total_count`; nenhum eixo derivado de `product_status`; pontos truncados **nunca** rotulados como "todos os produtos"; desperdício com Ads visível na sua própria faixa |
-| **V3-2** — Marca 360 | Contêiner de regime mensal cercado + nota de não-sobreposição; `ctx_from=inteligencia` com `ctx_focus` próprio (§9.1); remoção de Demographics; **competências reais** via `available_months`; sinalização de mock no cabeçalho do bloco; guarda de identidade do `brandDetail`; drill-downs de canal e produto **sem benchmark entre superfícies** | V3-1A/B (produtor do contexto) **e obrigatoriamente BE5** | dois regimes inequívocos; nenhuma seção sem etiqueta de período; **zero import de módulo mock**; volta à evidência reconstruindo marca + foco, sem repropagar `ctx_*` |
-| **V3-3** — QA integrado | a11y (foco, nome acessível, contraste, ≥12px), responsivo em desktop/tablet/mobile, os 13 estados, matriz de drill-down acionamento a acionamento, regressões | V3-1, V3-2 | zero scroll horizontal de página; zero elemento clicável sem affordance e sem nome acessível; zero par de blocos com vazio desproporcional |
+| **V3-1A** — fundação da Inteligência ✅ **VERSIONADO E PUBLICADO (`e675948`)** | Cabeçalho de regimes (ML fotografia × TikTok 30 dias); **rituária** derivada do payload; remoção das duas falsas affordances (`<span>` de botão e hover de linha); concentração Pareto com diálogo **só de agregados** + CTA para `/produtos`; **wiring da querystring canônica `/produtos?channels=ml&brands=…&pareto_bucket=…` (§9.2)** e de `lens` em `/inteligencia`; listas e fila honestamente truncadas ("amostra capada"); fila com lentes substituindo as três tabelas; LTV filtrável; os 13 estados; tipografia ≥12px; bloco 3 **como listas/faixas**, sem matriz | **payload atual** | 5 tabelas → 1; zero falsa affordance; rituária visível; nenhuma contagem apresentada como total; `/produtos` reproduzível por URL na forma canônica; `lens` com allowlist e sem propagação pela sidebar; suíte + typecheck + build verdes |
+| **contrato backend** ✅ **VERSIONADO NO V3-BE (`26434c8`) E CONFIRMADO EM PRODUÇÃO** | **BE6** `opportunity_map` — universo + `total_count` + as duas referências com origem + quadrantes com fronteiras + agregados completos + destaques com `item_id` e `returned_count` + **as duas faixas** (§15.1); **BE3** contagens verdadeiras; **BE4** frescor do snapshot; **BE5** `available_months` (§15.2). **BE1 e BE2 saíram** (§15.0) | — | contratos aceitos e servidos; nenhum campo entregue sem consumidor |
+| **V3-1B** — conclusão da Inteligência ✅ **TECNICAMENTE CONCLUÍDO — QA VISUAL FINAL 96/96, AGUARDANDO VERSIONAMENTO** | **Matriz 2×2 definitiva**: quatro quadrantes com fronteiras `>=` explícitas, as duas referências exibidas com origem, **agregados do universo separados dos pontos de destaque**, e as **duas faixas** (`sem_ads` e `roas_indisponivel_com_investimento`) como blocos distintos; contagens verdadeiras substituindo "ao menos N"; etiqueta de frescor com timestamp | **BE6** (matriz), BE3, BE4 | nenhuma afirmação de cobertura sem `total_count`; nenhum eixo derivado de `product_status`; pontos truncados **nunca** rotulados como "todos os produtos"; desperdício com Ads visível na sua própria faixa |
+| **V3-2** — Marca 360 ⏳ **NÃO INICIADO (desbloqueado pelo BE5)** | Contêiner de regime mensal cercado + nota de não-sobreposição; `ctx_from=inteligencia` com `ctx_focus` próprio (§9.1); remoção de Demographics; **competências reais** via `available_months`; sinalização de mock no cabeçalho do bloco; guarda de identidade do `brandDetail`; drill-downs de canal e produto **sem benchmark entre superfícies** | V3-1A/B (produtor do contexto) **e obrigatoriamente BE5** | dois regimes inequívocos; nenhuma seção sem etiqueta de período; **zero import de módulo mock**; volta à evidência reconstruindo marca + foco, sem repropagar `ctx_*` |
+| **V3-3** — QA integrado ⏳ **NÃO INICIADO** | a11y (foco, nome acessível, contraste, ≥12px), responsivo em desktop/tablet/mobile, os 13 estados, matriz de drill-down acionamento a acionamento, regressões | V3-1, V3-2 | zero scroll horizontal de página; zero elemento clicável sem affordance e sem nome acessível; zero par de blocos com vazio desproporcional |
 
 **Dependências que não podem ser contornadas:** a matriz sem BE6 não existe (degrada
-para listas, §7.3.1); a Marca sem BE5 não pode ser aceita como "competências sem mock".
+para listas, §7.3.1); a Marca sem BE5 não pode ser aceita como "competências sem
+mock". **As duas foram entregues e versionadas no V3-BE (`26434c8`)**, então nenhuma
+delas bloqueia mais nada.
 
-**V3-1A está implementado, com QA visual executado em navegador real, e aguarda revisão** (registro em §20; QA em §20.9). **V3-1B, V3-2 e
-V3-3 não foram iniciados.**
+**V3-1A, PF1 e V3-BE estão versionados** (registro do V3-1A em §20; QA em §20.9;
+patch de acessibilidade em §22; V3-BE em §23). **O V3-1B está tecnicamente
+concluído, com QA visual final de 96/96, e aguarda versionamento** (§25 e §26).
+**V3-2 e V3-3 não foram iniciados.**
 
 ---
 
 ## 20. Registro do V3-1A — Task 1/2 (implementada em 18/08/2026)
 
-**Estado: `IMPLEMENTADO, QA VISUAL EXECUTADO E A11Y FECHADA — AGUARDANDO REVISÃO`.** Este
+**Estado em 18/08/2026, quando este registro foi escrito: `IMPLEMENTADO, QA VISUAL
+EXECUTADO E A11Y FECHADA — AGUARDANDO REVISÃO`. Hoje o V3-1A está VERSIONADO E
+PUBLICADO em `e675948`.** Este
 registro descreve a **Task 1/2**, durante a qual nenhum navegador foi usado, nem como
 apoio de implementação. O QA visual formal foi executado depois, na **Task 2/2**
 (18/08/2026), e está registrado no §20.9.
@@ -1753,14 +1764,16 @@ dependência nova**, nenhum arquivo fora de `apps/web/` e `docs/`, detector Impe
 com **apenas** os 3 falsos positivos `gray-on-color` já pré-classificados, e scan de
 secrets/token/DSN/IP privado/PII/caminhos pessoais nas linhas novas **sem ocorrência**.
 
-**Nenhum commit, push ou deploy.** O Gate V3-1A **continua aguardando revisão e
-versionamento**.
+**Nenhum commit, push ou deploy nesta rodada.** Ao ser escrito, este registro
+deixava o Gate V3-1A aguardando revisão e versionamento; o versionamento ocorreu
+depois, em `e675948`.
 
 #### Dívida prioritária de plataforma — fora deste patch
 
 Dívida prioritária de plataforma: `withCache` armazena respostas degradadas/falhas por
-até cinco minutos, tornando "Tentar novamente" ineficaz em algumas telas. Correção deve
-ocorrer em gate próprio **PF1**, antes do V3-1B.
+até cinco minutos, tornando "Tentar novamente" ineficaz em algumas telas. Correção
+deve ocorrer em gate próprio **PF1**, antes do V3-1B. **Esse gate foi executado e
+versionado em `45fa3f8`, antes do V3-1B, como previsto aqui.**
 
 Este defeito **não foi causado pelo V3-1A**: está em `src/lib/api-client.ts`, é
 anterior ao gate e afeta todas as telas que usam o cache.
@@ -1769,8 +1782,9 @@ anterior ao gate e afeta todas as telas que usam o cache.
 
 ## 23. Gate V3-BE — BE3, BE4, BE5 e BE6 implementados (21/08/2026)
 
-**Estado: `IMPLEMENTADO E VALIDADO LOCALMENTE — AGUARDANDO REVISÃO. Nenhum
-frontend nesta task.`** Uma rodada de correção consolidada pré-versionamento
+**Estado: `VERSIONADO EM 26434c8 — CONTRATO CONFIRMADO EM PRODUÇÃO pelo smoke
+read-only do V3-1B (§24.1). Nenhum frontend nesta task.`** Uma rodada de correção
+consolidada pré-versionamento
 (21/08/2026) fechou o `returned_count` de topo exigido pelo §15.1-D e corrigiu
 duas imprecisões factuais deste registro: a tabela de escopo descrevia o helper
 puro como se fosse o contrato da rota, e o orçamento de consultas media só o
@@ -2047,4 +2061,421 @@ parametrizar, porque nenhuma string do usuário existe no caminho. Se algum dia 
 valor livre precisar entrar numa cláusula, a parametrização passa a ser
 obrigatória e vira gate próprio.
 
-**V3-1B e V3-2 não foram iniciados.** O frontend não foi tocado.
+**O V3-2 não foi iniciado.** O frontend não foi tocado **nesta task** — o V3-1B, que
+consome este contrato, veio depois (§24 e §25).
+
+---
+
+## 24. Gate V3-1B — smoke do V3-BE e matriz definitiva (21/08/2026)
+
+**Estado ao fim desta task: `IMPLEMENTADO LOCALMENTE — QA VISUAL PENDENTE (Task
+2/2). V3-2 e V3-3 não iniciados.`** Base: `6a5c957`. Zero commit, push ou deploy.
+O QA visual foi executado depois, na Task 2/2 (§25), e fechado em 96/96 na rodada
+terminal (§26).
+
+### 24.1 Fase A — smoke de produção do V3-BE: `PASS`
+
+Somente leituras HTTP `GET`, sem header de autenticação, sem imprimir secret nem
+PII. **75 verificações, 0 falhas.** O contrato do V3-BE **está servido em
+produção**: `/openapi.json` declara `brands` em `/inteligencia` e
+`available_months` em `BrandDetailResponse`; o payload tem as 13 chaves na ordem,
+com as 7 originais nas 7 primeiras posições.
+
+Observado no escopo global: `ml_scope_brands` = as quatro marcas ML;
+`ml_snapshot_refreshed_at = 2026-08-21T09:02:43Z`; `total_count = 1650`;
+`returned_count = 40 = len(highlights) =` soma dos `returned_count` por
+quadrante; invariante das seis classes fechando em 1650; zero duplicidade de
+`(brand, item_id)` nos destaques; nenhum destaque vindo das faixas.
+
+`brands=barbours`: escopo respeitado em todas as superfícies ML, sem vazamento
+de outra marca, e `gmv_reference` **recalculada** (1816,73 contra 2207,05 do
+global). `brands=apice`: escopo ML vazio, listas e totais zerados,
+`classification_status = "empty"`, referências `null`, frescor `null` — nada
+fabricado.
+
+**Entradas inválidas.** Quatro delas — marca inexistente, `BARBOURS`,
+`barbours'/*` e `barbours' UNION SELECT 1` — devolvem **422 do app**, em JSON,
+sem SQL, DSN ou stack. Duas com sintaxe de injeção mais agressiva
+(`'; DROP TABLE …`, `') OR 1=1 --`) são barradas **antes** por WAF de borda com
+**403 `text/html`**: a requisição nem chega ao FastAPI. É camada adicional, mais
+restritiva que o contrato, nunca menos. Nota não-bloqueante: a mensagem de 422
+**ecoa o valor inválido** e lista as marcas válidas — comportamento
+pré-existente do `resolve_brands` compartilhado, em JSON, sem vetor de HTML.
+
+`/brand-detail`: `available_months` com 11 competências `YYYY-MM`, decrescente,
+sem duplicidade, competência pedida ecoada. Com `1999-01`: **200**, conteúdo
+mensal vazio, `ref_month` continua `1999-01`, a lista real inalterada — nenhuma
+troca silenciosa.
+
+**O SHA não é demonstrável por HTTP:** nem `/health` nem
+`/health-datasource` expõem versão ou commit. O que este smoke prova é o
+**contrato**; não afirmo qual SHA está rodando.
+
+### 24.2 Fase B — a matriz
+
+O bloco 3 deixou de ser a degradação em faixas e passou a ser a matriz 2×2 do
+§7.3: eixo X `roas` × `roas_reference`, eixo Y `gmv` × `gmv_reference`, tamanho
+do ponto pelo investimento, cor consistente por quadrante, rótulo só no maior
+contribuinte de cada quadrante.
+
+**Campos consumidos:** os seis aditivos. `opportunity_map` inteiro,
+`urgent_total_count`/`scale_total_count` (bloco 5), `ml_snapshot_refreshed_at`
+(frescor do bloco ML) e `ml_scope_brands` (escopo e estado).
+
+**A regra que organiza tudo é negativa:** o frontend **não decide nada** do mapa.
+Mediana, referência de ROAS, classificação, agregados, faixas e seleção de
+destaques vêm do contrato. `axisPosition` posiciona o ponto **dentro da metade
+que o backend já atribuiu** — nunca escolhe a metade —, então o desenho não pode
+contradizer a classificação, nem por erro de ponto flutuante na fronteira
+inclusiva, nem se a regra do contrato mudar. Há teste estático caçando
+recomputação.
+
+**Três grandezas separadas na tela**, porque são coisas diferentes: universo
+(`total_count`), agregados por quadrante (que cobrem o universo) e destaques
+plotados (`returned_count`). Quando `returned_count < total_count`, a seção
+declara em texto que os agregados cobrem o universo e os pontos são só destaques.
+
+**Escopo de marca virou parâmetro de fetch.** Era recorte só no cliente; agora
+vai para a API, porque `gmv_reference` é a mediana **do escopo** e recalculá-la
+no cliente seria refazer contrato. O escopo entra na **chave do cache** (antes
+`withCache("inteligencia")` era constante — global e filtrado colidiriam) e na
+**identidade da requisição**. O universo de marcas dos chips é aprendido apenas
+de resposta **sem** escopo: uma resposta filtrada não conhece as outras marcas e
+não pode encolher o seletor.
+
+**Estados tratados:** `available`, `empty`, `unavailable_no_positive_gmv`,
+loading, erro, resposta obsoleta e **escopo ML vazio** — este último é estado
+próprio, distinto de universo zero, porque as duas coisas exigem frases
+diferentes. Sem `gmv_reference` **nenhum ponto é plotado** e a matriz é declarada
+indisponível, com os produtos de Ads e ROAS medido contados em
+`unclassified_count` — zero quadrante fabricado.
+
+**As duas faixas nunca se fundem.** `sem_ads` explica ausência de investimento e
+diz que **não** é retorno indisponível; `roas_indisponivel_com_investimento`
+explica falha de mensuração e diz que **não** é ROAS baixo, registrando que
+`ROAS = 0` é retorno baixo **medido** e ocupa quadrante.
+
+**Drill-downs**, todos no `KpiDrilldownDialog` único (nenhum shell novo):
+quadrante (regra com as fronteiras, origem declarada de cada referência,
+agregados do universo, quantidade de destaques, limitação de fotografia sem
+janela, CTA para a fila); ponto (produto, marca, GMV, Ads, ROAS, as duas
+comparações, o porquê do quadrante, CTA para a marca); e uma faixa cada, com as
+explicações distintas. No mobile (<640) a **matriz inteira** abre no mesmo
+diálogo, conforme o §13.
+
+**URLs:** nenhum título, dinheiro, percentual, JSON ou texto livre viaja.
+`item_id` **não** viaja — o §9.1 é explícito, e a página de Marca não tem
+consumidor.
+
+### 24.3 Uma divergência deliberada da instrução da Task
+
+A Task pedia, no drill-down do ponto, "CTA para `/brand/[brand]` com os
+identificadores `ctx_*` allowlisted pelo plano". **Implementei o CTA frio**, sem
+nenhum `ctx_*`, por três razões: o §9.1 allowlista **seis** focos derivados dos
+blocos do payload e **nenhum** para o `opportunity_map`; o plano condiciona o
+valor novo `ctx_from=inteligencia` a existir "**só com wiring real**"; e a página
+de Marca **não tem hoje consumidor** de foco vindo da Inteligência — o contexto
+quente é explicitamente do V3-2. Emitir contexto que ninguém lê seria dívida sem
+retorno, e criar um sétimo foco seria estender o allowlist sem consumidor. O
+filtro de marca, sim, viaja. **Decisão fechada na Task 2/2 (FINDING 2):** o CTA do ponto **permanece frio** no
+V3-1B. Não se cria `ctx_focus` novo, enum novo, `ctx_from=inteligencia` parcial,
+`item_id` na URL nem consumidor especulativo na Marca. O ponto abre
+`/brand/<marca>` preservando apenas os filtros compatíveis, e a **chegada quente**
+**do `opportunity_map` será decidida e implementada de ponta a ponta no V3-2**. Os
+seis focos já allowlistados para os outros blocos e o contrato de
+`ctx_from=canais` seguem intocados.
+
+### 24.4 Testes
+
+`tests/inteligencia-v31b.test.ts`, **38 testes**: a regra negativa (nada
+recalculado), universo × agregados × destaques, os dois níveis de
+`returned_count`, os quatro estados, escopo vazio como estado próprio, sem
+`gmv_reference` nenhum ponto, as duas faixas distintas com o que cada uma **não**
+é, ROAS zero em quadrante e ROAS null em faixa, fronteira inclusiva e posição
+nunca contradizendo o quadrante, raio por área com piso clicável, rótulo só nos
+maiores, origem das referências, frescor sem `new Date()`, totais verdadeiros,
+escopo na chave de cache e na identidade, URLs sem valor livre, CTA frio, um
+único shell, alvos de 44px com nome acessível e foco visível, colapso mobile,
+SVG com nome acessível, e nenhum texto abaixo de 12px.
+
+**Três congelamentos do V3-1A foram invertidos, porque BE6 chegou:** o que
+proibia matriz/quadrante/eixo antes de BE6 agora exige que a matriz **leia** o
+contrato e proíbe **derivar** referência ou classificação na página; a contagem
+de `refreshedAt={null}` foi de 3 para 6 (os três diálogos novos), preservando a
+contraprova de que nenhum `refreshedAt` recebe valor diferente de `null`; e a
+lista de chaves de cache do PF1 ganhou o escopo em `inteligencia:`.
+
+### 24.5 Validações
+
+**989 testes, 989 aprovados** na suíte web — não havia falha preexistente aqui, e
+não há nenhuma agora. `npm run typecheck` limpo, `npm run build` compilando,
+`git diff --check` limpo. Detector Impeccable nos arquivos visuais: **os 3
+`gray-on-color` já pré-classificados como falsos positivos no V3-1A**, e **zero
+finding novo** — `OpportunityMatrix.tsx` saiu limpo.
+
+**QA visual formal em navegador: PENDENTE, é a Task 2/2.** Nada foi simulado.
+
+Nenhum backend, endpoint, migration, SQL, pipeline, banco, dependência ou deploy
+nesta task. As 43 falhas preexistentes da suíte da API não foram tocadas.
+
+---
+
+## 25. Gate V3-1B Task 2/2 — integração, dois findings e QA visual (21/08/2026)
+
+**Estado: `V3-1B TECNICAMENTE CONCLUÍDO — AGUARDANDO REVISÃO E VERSIONAMENTO.
+V3-2 e V3-3 não iniciados.`** Zero commit, push ou deploy.
+
+### 25.1 Integração com `7b1b451`
+
+`origin/main` avançou para **`7b1b451`** (*feat(web): protege mcp do oraculo com
+oauth*) durante a Task 1/2, tocando três caminhos que o V3-1B também alterava.
+Integrei com backup externo em `%TEMP%` (patch binário + cópia dos três arquivos
+novos + SHA-256 dos dez), stash **nomeado** `V3-1B-task1-rastreados`,
+`git merge --ff-only`, reaplicação e só então descarte do stash. Nenhum `reset`,
+`restore`, `checkout` destrutivo ou `clean`.
+
+**Os três sobrepostos, resolvidos por conteúdo e não por lado:**
+
+| arquivo | resolução |
+|---|---|
+| `package.json` | único conflito real. Base = **main** (dependências corretas do OAuth) + `tests/inteligencia-v31b.test.ts` acrescentado **uma vez**. **52 testes**: `oracle-oauth`, `tiktok-content-mix` e todos os do Oráculo preservados; **zero dependência nova**; `package-lock.json` intocado pelo V3 |
+| `tests/inteligencia-v3-wiring.test.ts` | mesclou sozinho. **As 8 linhas que `7b1b451` acrescentou estão todas presentes.** 29 testes antes e depois — o teste 27 foi **renomeado**, nenhum apagado |
+| `docs/PROJECT_STATUS.md` | mesclou sozinho. `OM2`, `OAuth`, `Oráculo` e `MCP` preservados, 1844 linhas antes e depois; só a linha da frente V3 mudou |
+
+**Prova de que nada se perdeu:** 7 dos 10 arquivos ficaram **byte-idênticos** ao
+backup, e os 3 que mudaram são exatamente os sobrepostos. Os três arquivos novos
+do V3-1B conferem byte a byte com a cópia externa.
+
+### 25.2 FINDING 1 — frescor real nos drill-downs
+
+Os três diálogos novos usavam `refreshedAt={null}`, embora o BE4 entregue
+`ml_snapshot_refreshed_at`. Corrigido com **um único timestamp de exibição**:
+
+```
+const mlRefreshedAt = displayData?.ml_snapshot_refreshed_at ?? null;
+```
+
+A proteção inteira está em sair de `displayData`, não de `data`:
+`displayData = status.fresh ? data : null`, então loading, erro e resposta
+obsoleta derrubam o timestamp para `null` junto com os dados. **Nenhum diálogo
+pode exibir o frescor de uma requisição anterior.** `null` continua significando
+frescor indisponível — nunca "agora", e nunca `new Date()`.
+
+Recebem o valor: quadrante, ponto e faixa. O congelamento herdado que exigia
+`refreshedAt={null}` foi atualizado: ele valia antes do BE4; agora protegeria a
+**ausência** em vez do contrato. Passou a afirmar 3 `null` (blocos anteriores ao
+V3-1B) + 3 com o valor do contrato, mais a proibição explícita de
+`new Date()`/`Date.now()`.
+
+### 25.3 FINDING 2 — CTA frio, decisão fechada
+
+O CTA do ponto **permanece frio**. O ponto abre `/brand/<marca>` preservando
+apenas o filtro compatível, e **nada mais**: sem `ctx_*`, sem `item_id`, sem
+métrica, sem texto livre. A chegada quente do `opportunity_map` será decidida e
+implementada **de ponta a ponta no V3-2**. Os seis focos já allowlistados para os
+outros blocos e o contrato de `ctx_from=canais` seguem intocados.
+
+### 25.4 QA visual — executado em navegador real
+
+Chromium 149 via Playwright do cache local, build de produção servida
+localmente, artefatos somente em `%TEMP%`. **96 verificações; 88 aprovadas nesta
+rodada.** O resultado final, depois das correções e da reconciliação da contagem,
+é **96/96** e está em §26.
+
+Por viewport (**1440×900**, **1024×768**, **390×844**): chamada global emitida,
+universo 1650 declarado, destaques nomeados como destaques, declaração de
+truncamento presente, frescor do contrato renderizado, total verdadeiro do BE3
+(674) no bloco 5, **zero overflow horizontal**, nenhum alvo interativo abaixo de
+44×44px. Desktop e tablet mostram a matriz 2×2; **mobile a colapsa** e oferece o
+acionamento.
+
+`brands=barbours`: a chamada filtrada realmente ocorre (`["all","barbours"]`),
+universo do escopo (721), **pontos só da marca**, nenhuma outra marca nas
+superfícies ML. `brands=apice`: estado próprio de "sem escopo Mercado Livre",
+distinto de universo zero, zero ponto, **zero resíduo** da requisição anterior e
+frescor rotulado como indisponível. Transições rápidas global → barbours → apice
+→ global terminam no estado global sem resíduo do escopo, e escopos distintos
+geram chaves de cache distintas.
+
+Diálogos: quadrante abre com a regra, a **fronteira inclusiva** (`ROAS ≥ 8,0x`), a
+origem das duas referências, os agregados rotulados como universo, os destaques
+separados e o **frescor real**; fecha por Escape e por backdrop, com foco
+retornando ao acionador. Ponto: nome acessível com produto, marca, quadrante e
+métricas; abre o detalhe do ponto e **não** o do quadrante; teclado abre o mesmo
+que o mouse; CTA frio verificado como `/brand/barbours?brands=barbours`. Faixas:
+as duas presentes, **inclusive a de `count = 0`**, com explicações distintas e
+cada uma declarando o que **não** é; `ROAS = 0` plotado em quadrante, nunca em
+faixa. Mobile: a matriz abre **no shell único**, sem aninhar diálogo, e navegar
+para o quadrante troca o conteúdo do mesmo shell.
+
+Erro: bloco explícito, **zero dado ou timestamp antigo**, retry consultando a
+rede e o frescor aparecendo só depois do sucesso. Resto da página sem regressão:
+fila, Pareto, LTV, seis âncoras e a ordenação da fila (PF1/V3-1A) funcionando.
+
+Higiene: **zero erro de aplicação, zero erro de hidratação, zero request de
+escrita, nenhum host além do local**, e nenhuma resposta 4xx/5xx além do único
+500 que o próprio QA injeta.
+
+### 25.5 Correção consolidada — uma rodada, um finding real
+
+O QA encontrou um **fallback silencioso**: exigir que a marca estivesse no
+universo ML aprendido fazia `?brands=apice` cair no escopo **global**, e a tela
+mostrava o portfólio inteiro como se o filtro não existisse. Corrigido: o
+parâmetro é encaminhado sempre que tiver forma de `brand_key`, e **quem decide o
+escopo ML é a API** — `apice` devolve `ml_scope_brands: []`, que é o estado
+correto. A allowlist de **forma** fica no cliente só para não encaminhar lixo de
+URL; a allowlist de **valor** é do backend. Após a correção, os cinco checks de
+J3 passaram.
+
+**Dois findings classificados nesta rodada como fora do V3-1B — o primeiro foi
+depois corrigido na rodada terminal (§26.2), o segundo segue aceito como dívida:**
+
+1. `TableScrollHint.tsx:82` renderiza `text-[11px]` — abaixo do piso de 12px, em
+   tablet e mobile. É `aria-hidden="true"` (dica decorativa de rolagem),
+   **preexistente** desde `2f302c0` e compartilhado por **nove** componentes.
+   Corrigi-lo aqui mexeria em telas fora deste gate.
+2. A mensagem de 422 do `resolve_brands` **ecoa o valor inválido** e lista as
+   marcas válidas — comportamento preexistente do helper compartilhado, em JSON,
+   sem vetor de HTML.
+
+Uma terceira reprovação foi classificada nesta rodada como **asserção minha**, não
+defeito, porque `fmtBrl` abrevia (`R$ 1,8K`) e o check procurava `1.816,73` literal.
+**Essa classificação estava errada e foi revertida na rodada terminal:** o defeito
+era da aplicação — as duas medianas apareciam como `R$ 2K`, visualmente idênticas.
+Ver §26.3.
+
+### 25.6 Validações
+
+**1067 testes, 1067 aprovados** — maior que os 989 da base `6a5c957`, porque
+`7b1b451` trouxe as suítes de Oráculo/OAuth; nenhuma suíte registrada foi
+removida. `typecheck` limpo, `build` compilando, `git diff --check` limpo.
+Detector Impeccable nos arquivos visuais: **os 3 `gray-on-color` já
+pré-classificados como falsos positivos, zero finding novo** —
+`OpportunityMatrix.tsx` limpo.
+
+Nenhum backend, API, SQL, migration, pipeline, banco, endpoint ou dependência.
+Nada do OAuth/Oráculo além de preservar o que já estava em `main`.
+
+---
+
+## 26. Gate V3-1B — rodada terminal pré-versionamento (21/08/2026)
+
+**Estado: `V3-1B TECNICAMENTE CONCLUÍDO — QA VISUAL FINAL 96/96 APROVADAS,
+AGUARDANDO VERSIONAMENTO. V3-2 e V3-3 não iniciados.`** Zero commit, push ou
+deploy. **O V3-1B não está versionado**: esta seção descreve o estado imediatamente
+anterior ao commit.
+
+### 26.1 Índice normalizado sem perder trabalho
+
+O índice estava parcialmente preparado, misturando arquivos de rodadas diferentes.
+Foi esvaziado com `git restore --staged` nos **sete caminhos rastreados
+explicitamente** — nunca por glob, `reset --hard`, `checkout`, `clean` ou `restore`
+de conteúdo, que apagariam a árvore de trabalho em vez do índice.
+
+**Prova de que nada mudou:** SHA-256 dos dez arquivos do V3-1B **idênticos** antes e
+depois; `git diff --cached` vazio; os mesmos sete arquivos seguem `M` e os três novos
+seguem `??`; **zero stash residual**; os 13 módulos e 9 testes do Oráculo/OAuth
+intactos.
+
+### 26.2 Piso tipográfico de 12px na dica de rolagem
+
+O `TableScrollHint` renderizava a dica em `text-[11px]`, abaixo do piso de 12px que o
+V3 declara. Na rodada anterior isso foi classificado como dívida preexistente **fora**
+do gate — o componente é compartilhado por nove telas. A revisão determinou o
+contrário: **o piso é contrato, e o componente aparece dentro do V3-1B**. Corrigido
+com **uma linha**, `text-[11px]` → `text-xs`, sem tocar texto, `aria-hidden`, cor,
+espaçamento, lógica ou API.
+
+Medido em navegador real, nos três viewports:
+
+| rota | mobile 390×844 | tablet 1024×768 | desktop 1440×900 |
+|---|---|---|---|
+| `/inteligencia` | 1 dica **visível a 12px** | 1 dica no DOM a 12px, oculta por `sm:hidden` | dica ausente (tabela não rola) |
+| `/canais` | 4 dicas **visíveis a 12px** | 4 no DOM a 12px, ocultas | ausentes |
+| `/financeiro` | 3 dicas **visíveis a 12px** | 1 no DOM a 12px, oculta | ausentes |
+
+Em todos os casos: `text-align: center`, `rgb(148,163,184)` (slate-400),
+`padding-top: 4px`, **uma única linha**, zero estouro do contêiner, zero overflow
+horizontal de página e zero erro de aplicação. Alinhamento, cor e espaçamento são os
+mesmos de antes — só o tamanho subiu.
+
+O teste `scroll-hint.test.ts` passou a provar isso estaticamente: ausência de
+`text-[11px]`, **nenhum** `text-[Npx]` abaixo de 12 em ponto algum do componente,
+presença da classe de 12px, e a semântica preservada (`aria-hidden`, texto idêntico,
+API pública inalterada, dica ainda condicionada a `edges.canScrollRight`).
+
+### 26.3 Referência é limiar, não manchete
+
+A rodada anterior classificou a reprovação de `J2.mediana-muda` como asserção errada
+do harness. **A classificação estava errada.** Uma sonda dirigida em navegador provou
+o defeito na aplicação:
+
+```
+GLOBAL   Referências: ROAS 8,0x · GMV R$ 2K
+BARBOURS Referências: ROAS 8,0x · GMV R$ 2K     ← mediana 1.816,73
+universo barbours: 721 · escopos pedidos: ["all","barbours"]
+```
+
+A requisição estava corretamente escopada — universo e pontos mudavam. O que não
+mudava era **a referência exibida**: `fmtBrl` abrevia, e 2.207,05 e 1.816,73 caem os
+dois em `R$ 2K`. O diálogo afirma que a mediana "muda quando o escopo muda", e a tela
+mostrava o contrário.
+
+Corrigido com `moedaExata`, moeda pt-BR com duas casas, aplicada **somente às
+referências** — cabeçalho da matriz, `figcaption`, regra do quadrante, origem das
+referências e leitura do ponto. Manchete continua abreviada: perder casas decimais num
+KPI é economia de espaço, mas perder casas decimais num **limiar** apaga a informação
+que ele existe para dar. Nada de mediana, classificação ou agregado é recalculado no
+frontend — a correção é de formatação.
+
+Depois dela: `global=GMV R$ 2.207,05` × `escopo=GMV R$ 1.816,73`.
+
+### 26.4 Reconciliação da contagem do QA
+
+A rodada anterior reportou 88 de 96. As oito não-aprovações se decompõem assim:
+
+| origem | qtd. | o que era | destino |
+|---|---|---|---|
+| **defeito de aplicação, corrigido na própria rodada** | 5 | os cinco checks de `J3` antes da correção do escopo `brands=apice` (fallback silencioso para global) | corrigido; §25.5 |
+| **defeito de aplicação, corrigido na rodada terminal** | 2 | tipografia a 11px em tablet e mobile (`J1.tablet.fonte-12`, `J1.mobile.fonte-12`) | corrigido; §26.2 |
+| **classificação errada, revertida** | 1 | `J2.mediana-muda` foi chamada de asserção do harness; era defeito real de aplicação | corrigido; §26.3 |
+
+O harness também tinha **dois defeitos próprios**, encontrados ao verificar a
+contagem, e nenhum dos dois mascarava problema da aplicação:
+
+1. `refGlobal` lia `innerText` **sem normalizar** e o regex exigia espaço comum, mas
+   `toLocaleString` emite **espaço não-quebrável** entre `R$` e o número — o mesmo
+   check no escopo passava porque ali o texto era normalizado. Corrigido com `\s` e
+   normalização nas duas pontas.
+2. `H.total-requests` era telemetria, não verificação, e contava a própria URL da API
+   como navegação, o que tornava a guarda circular. Virou
+   `H.sem-tempestade-de-requisicoes`, com as navegações restritas ao host da app.
+
+As outras quatro entradas informativas (`J2.ref-global`, `J3.chip-apice`,
+`J4.requisicoes`, `J7.titulo`) também deixaram de ser registro e passaram a ter
+veredito, porque todas tinham expectativa determinada. **Nenhum número vivo foi
+congelado:** `J2.mediana-muda` compara a referência global com a do escopo e exige
+centavos, em vez de fixar o valor.
+
+**Resultado final: 96 verificações, 96 aprovadas.** Nenhuma não-aprovação remanescente.
+
+Duas baterias **complementares**, contadas separadamente e não somadas às 96, cobriram
+vãos que o harness deixava: a **dica de rolagem** em três rotas × três viewports
+(§26.2) e os **drill-downs em tablet 1024×768** — quadrante, ponto e faixa vazia, com
+`Escape`, devolução de foco, abertura por teclado, referência com centavos, zero
+overflow e zero erro: **13 verificações, 13 aprovadas**. J6/J7/J8 rodavam só em
+desktop e J9 só em mobile; o tablet não tinha drill-down exercitado.
+
+Amostras do fechamento: `J2.ref-global` = `GMV R$ 2.207,05`; `J2.mediana-muda` =
+`global=GMV R$ 2.207,05 escopo=GMV R$ 1.816,73`; `J4.requisicoes` =
+`["all","barbours","apice","all"]`, uma por escopo, na ordem, sem duplicata;
+`H.sem-tempestade-de-requisicoes` = 14 requisições de API em 13 navegações, pico 10×
+contra limite 14; `J1.*.fonte-12` = menor fonte **12px** nos três viewports.
+
+### 26.5 Dívida preexistente registrada, não corrigida
+
+A mensagem de **422** do `resolve_brands` **ecoa o valor inválido** recebido e lista as
+marcas válidas. É comportamento preexistente do helper compartilhado, **não é falha do
+V3-1B** e não conta como não-aprovação do QA. Aceita nesta rodada porque a resposta é
+**JSON**, não executa HTML, e não expõe stack, SQL nem DSN. Fica registrada aqui como
+dívida separada, para tratamento em gate próprio de backend.

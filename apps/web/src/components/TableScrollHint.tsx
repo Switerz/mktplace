@@ -79,7 +79,7 @@ export default function TableScrollHint({ children, className = "" }: Props) {
         />
       )}
       {edges.canScrollRight && (
-        <p aria-hidden="true" className="sm:hidden text-center text-[11px] text-slate-400 pt-1">
+        <p aria-hidden="true" className="sm:hidden text-center text-xs text-slate-400 pt-1">
           ← arraste para ver mais →
         </p>
       )}
