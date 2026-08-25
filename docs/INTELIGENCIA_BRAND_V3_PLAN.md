@@ -1,12 +1,15 @@
 # Gate V3 — Inteligência e Marca 360 (desenho)
 
-**Status:** **V3-0, V3-1A, PF1 e V3-BE VERSIONADOS** (`309b6bf`, `e675948`,
-`45fa3f8`, `26434c8`), com o contrato do V3-BE **confirmado em produção**.
-**V3-1B TECNICAMENTE CONCLUÍDO** — matriz definitiva implementada, integrada a
-`7b1b451` e com **QA visual final de 96/96** em navegador real — **aguardando
-versionamento**. **V3-2 e V3-3 não iniciados.** Nenhum pipeline ou migration foi
-tocado em nenhum momento; o V3-BE foi a única etapa que alterou backend, e o fez
-de forma aditiva.
+**Status:** **V3-0, V3-1A, PF1, V3-BE e V3-1B VERSIONADOS** (`309b6bf`,
+`e675948`, `45fa3f8`, `26434c8`, `2d7ecdf`), com o contrato do V3-BE
+**confirmado em produção**. **V3-2 (Marca 360) e V3-3 (QA visual integrado)
+TECNICAMENTE CONCLUÍDOS E VERSIONADOS no commit de fechamento do Gate V3 — PUBLICAÇÃO E SMOKE PÓS-DEPLOY PENDENTES**: o QA integrado
+rodou em navegador real nos três viewports, com **248 de 260 verificações
+aprovadas**, e as 12 restantes são quatro dívidas preexistentes de componentes
+compartilhados, demonstradas em outras rotas (§28.6). Base integrada até
+`76f361b`. **Todas as seis fases do Gate V3 estão fechadas tecnicamente.**
+Nenhum pipeline ou migration foi tocado em nenhum momento; o V3-BE foi a única
+etapa que alterou backend, e o fez de forma aditiva.
 **Data:** 18/08/2026. **Base:** `origin/main` = `3998af5`.
 **Escopo:** frontend de `/inteligencia` e `/brand/[brand]`, e o fluxo de drill-down
 entre Inteligência, Marca, Canais e Produtos.
@@ -1319,19 +1322,21 @@ processo. A dependência foi resolvida pelo **BE6**, entregue no V3-BE.
 | **V3-0** | Este desenho, corrigido nos sete findings | — | **CONCLUÍDO — DESENHO APROVADO** pelo proprietário em 18/08/2026 |
 | **V3-1A** — fundação da Inteligência ✅ **VERSIONADO E PUBLICADO (`e675948`)** | Cabeçalho de regimes (ML fotografia × TikTok 30 dias); **rituária** derivada do payload; remoção das duas falsas affordances (`<span>` de botão e hover de linha); concentração Pareto com diálogo **só de agregados** + CTA para `/produtos`; **wiring da querystring canônica `/produtos?channels=ml&brands=…&pareto_bucket=…` (§9.2)** e de `lens` em `/inteligencia`; listas e fila honestamente truncadas ("amostra capada"); fila com lentes substituindo as três tabelas; LTV filtrável; os 13 estados; tipografia ≥12px; bloco 3 **como listas/faixas**, sem matriz | **payload atual** | 5 tabelas → 1; zero falsa affordance; rituária visível; nenhuma contagem apresentada como total; `/produtos` reproduzível por URL na forma canônica; `lens` com allowlist e sem propagação pela sidebar; suíte + typecheck + build verdes |
 | **contrato backend** ✅ **VERSIONADO NO V3-BE (`26434c8`) E CONFIRMADO EM PRODUÇÃO** | **BE6** `opportunity_map` — universo + `total_count` + as duas referências com origem + quadrantes com fronteiras + agregados completos + destaques com `item_id` e `returned_count` + **as duas faixas** (§15.1); **BE3** contagens verdadeiras; **BE4** frescor do snapshot; **BE5** `available_months` (§15.2). **BE1 e BE2 saíram** (§15.0) | — | contratos aceitos e servidos; nenhum campo entregue sem consumidor |
-| **V3-1B** — conclusão da Inteligência ✅ **TECNICAMENTE CONCLUÍDO — QA VISUAL FINAL 96/96, AGUARDANDO VERSIONAMENTO** | **Matriz 2×2 definitiva**: quatro quadrantes com fronteiras `>=` explícitas, as duas referências exibidas com origem, **agregados do universo separados dos pontos de destaque**, e as **duas faixas** (`sem_ads` e `roas_indisponivel_com_investimento`) como blocos distintos; contagens verdadeiras substituindo "ao menos N"; etiqueta de frescor com timestamp | **BE6** (matriz), BE3, BE4 | nenhuma afirmação de cobertura sem `total_count`; nenhum eixo derivado de `product_status`; pontos truncados **nunca** rotulados como "todos os produtos"; desperdício com Ads visível na sua própria faixa |
-| **V3-2** — Marca 360 ⏳ **NÃO INICIADO (desbloqueado pelo BE5)** | Contêiner de regime mensal cercado + nota de não-sobreposição; `ctx_from=inteligencia` com `ctx_focus` próprio (§9.1); remoção de Demographics; **competências reais** via `available_months`; sinalização de mock no cabeçalho do bloco; guarda de identidade do `brandDetail`; drill-downs de canal e produto **sem benchmark entre superfícies** | V3-1A/B (produtor do contexto) **e obrigatoriamente BE5** | dois regimes inequívocos; nenhuma seção sem etiqueta de período; **zero import de módulo mock**; volta à evidência reconstruindo marca + foco, sem repropagar `ctx_*` |
-| **V3-3** — QA integrado ⏳ **NÃO INICIADO** | a11y (foco, nome acessível, contraste, ≥12px), responsivo em desktop/tablet/mobile, os 13 estados, matriz de drill-down acionamento a acionamento, regressões | V3-1, V3-2 | zero scroll horizontal de página; zero elemento clicável sem affordance e sem nome acessível; zero par de blocos com vazio desproporcional |
+| **V3-1B** — conclusão da Inteligência ✅ **VERSIONADO (`2d7ecdf`), QA VISUAL FINAL 96/96** | **Matriz 2×2 definitiva**: quatro quadrantes com fronteiras `>=` explícitas, as duas referências exibidas com origem, **agregados do universo separados dos pontos de destaque**, e as **duas faixas** (`sem_ads` e `roas_indisponivel_com_investimento`) como blocos distintos; contagens verdadeiras substituindo "ao menos N"; etiqueta de frescor com timestamp | **BE6** (matriz), BE3, BE4 | nenhuma afirmação de cobertura sem `total_count`; nenhum eixo derivado de `product_status`; pontos truncados **nunca** rotulados como "todos os produtos"; desperdício com Ads visível na sua própria faixa |
+| **V3-2** — Marca 360 ✅ **IMPLEMENTADO — AGUARDANDO REVISÃO (§27)** | Contêiner de regime mensal cercado + nota de não-sobreposição; `ctx_from=inteligencia` com `ctx_focus` próprio (§9.1); remoção de Demographics; **competências reais** via `available_months`; sinalização de mock no cabeçalho do bloco; guarda de identidade do `brandDetail`; drill-downs de canal e produto **sem benchmark entre superfícies** | V3-1A/B (produtor do contexto) **e obrigatoriamente BE5** | dois regimes inequívocos; nenhuma seção sem etiqueta de período; **zero import de módulo mock**; volta à evidência reconstruindo marca + foco, sem repropagar `ctx_*` |
+| **V3-3** — QA integrado ✅ **EXECUTADO EM NAVEGADOR REAL — 248/260, AGUARDANDO REVISÃO (§28)** | a11y (foco, nome acessível, contraste, ≥12px), responsivo em desktop/tablet/mobile, os 13 estados, matriz de drill-down acionamento a acionamento, regressões | V3-1, V3-2 | zero scroll horizontal de página; zero elemento clicável sem affordance e sem nome acessível; zero par de blocos com vazio desproporcional |
 
 **Dependências que não podem ser contornadas:** a matriz sem BE6 não existe (degrada
 para listas, §7.3.1); a Marca sem BE5 não pode ser aceita como "competências sem
 mock". **As duas foram entregues e versionadas no V3-BE (`26434c8`)**, então nenhuma
 delas bloqueia mais nada.
 
-**V3-1A, PF1 e V3-BE estão versionados** (registro do V3-1A em §20; QA em §20.9;
-patch de acessibilidade em §22; V3-BE em §23). **O V3-1B está tecnicamente
-concluído, com QA visual final de 96/96, e aguarda versionamento** (§25 e §26).
-**V3-2 e V3-3 não foram iniciados.**
+**V3-1A, PF1, V3-BE e V3-1B estão versionados** (registro do V3-1A em §20; QA em
+§20.9; patch de acessibilidade em §22; V3-BE em §23; V3-1B em §24, §25 e §26,
+versionado em `2d7ecdf`). **O V3-2 (§27) e o V3-3 (§28) foram tecnicamente
+concluídos e versionados no commit de fechamento do Gate V3** — nenhuma fase
+permanece aberta do ponto de vista técnico. O que resta é **publicação e smoke
+pós-deploy**, que não são deste gate.
 
 ---
 
@@ -2360,10 +2365,11 @@ Nada do OAuth/Oráculo além de preservar o que já estava em `main`.
 
 ## 26. Gate V3-1B — rodada terminal pré-versionamento (21/08/2026)
 
-**Estado: `V3-1B TECNICAMENTE CONCLUÍDO — QA VISUAL FINAL 96/96 APROVADAS,
-AGUARDANDO VERSIONAMENTO. V3-2 e V3-3 não iniciados.`** Zero commit, push ou
-deploy. **O V3-1B não está versionado**: esta seção descreve o estado imediatamente
-anterior ao commit.
+**Estado ao fim desta rodada: `V3-1B TECNICAMENTE CONCLUÍDO — QA VISUAL FINAL
+96/96 APROVADAS, AGUARDANDO VERSIONAMENTO`.** Esta seção descreve o estado
+imediatamente anterior ao commit; o **versionamento ocorreu depois, em
+`2d7ecdf`** (*feat(web): adiciona matriz de oportunidades na inteligencia*, 12
+arquivos). O V3-3 segue não iniciado.
 
 ### 26.1 Índice normalizado sem perder trabalho
 
@@ -2479,3 +2485,556 @@ marcas válidas. É comportamento preexistente do helper compartilhado, **não �
 V3-1B** e não conta como não-aprovação do QA. Aceita nesta rodada porque a resposta é
 **JSON**, não executa HTML, e não expõe stack, SQL nem DSN. Fica registrada aqui como
 dívida separada, para tratamento em gate próprio de backend.
+
+---
+
+## 27. Gate V3-2 Task 1/2 — Marca 360 implementada (21/08/2026)
+
+**Estado: `IMPLEMENTADO — AGUARDANDO REVISÃO`.** Base: `2d7ecdf` (V3-1B já
+versionado). Zero commit, push ou deploy. **V3-3 não iniciado**, e o QA visual
+integrado é dele — o que houve aqui foi inspeção local durante a implementação,
+não fechamento de QA.
+
+### 27.1 A história que a página passou a contar
+
+Dez seções em coluna única viraram uma sequência com regime temporal explícito
+em cada bloco: **chegada → situação → evolução → o que mudou → competência
+mensal → conteúdo/produtos → evidência → próxima ação**.
+
+| # | Bloco | Regime | O que mudou |
+|---|---|---|---|
+| 1 | Cabeçalho + `BrandArrivalBanner` | herda | banner passa a nomear a origem ("chegou de Inteligência por…") |
+| 2 | Situação da marca | **intervalo global** | os quatro KPIs, com a ressalva de que a classificação de sinais por canal é de Canais e não é recalculada aqui |
+| 3 | Evolução e mix | **intervalo global** | GMV diário + **mix por marketplace** (barras), com borda âmbar quando a série é de exemplo |
+| 4 | O que mudou | **global vs anterior** | decomposição do GMV por canal contra a janela equivalente |
+| 5 | `TikTok Shop · análise mensal` | **competência** | contêiner cercado, com seletor, KPIs, mix de superfície, funil, conteúdo, produtos e limitações |
+| 6 | Últimos 7 dias | **intervalo global** | etiqueta de intervalo; `Sem dado` em vez de travessão mudo |
+| 7 | Próximos passos | — | três destinos frios, com filtros compatíveis preservados |
+
+### 27.2 A fronteira entre os dois regimes (defeito M1)
+
+O regime passou a ser propriedade **do contêiner**, não de cada card. Três
+mecanismos, e nenhum deles é decorativo:
+
+1. **Formatação distinta e não intercambiável.** Intervalo é
+   `01/08/2026 – 31/08/2026` (`fmtPeriodo`); competência é `ago/2026`
+   (`fmtCompetencia`). Um teste afirma que a competência **não** casa com o
+   padrão `dd/mm/aaaa`, para que as duas nunca convirjam por descuido.
+2. **Etiqueta em todo bloco analítico.** Os blocos globais carregam
+   `intervalo global <período>`; os de dentro do contêiner carregam
+   `competência <mês>`. Optei por isso em vez da faixa *sticky* do wireframe
+   §10.4: a etiqueta por bloco cumpre o mesmo objetivo — nunca perder a
+   referência temporal ao rolar — e é estritamente mais informativa, porque
+   sobrevive a captura de tela e a leitor de tela. O contêiner mensal **não
+   contém** a expressão "intervalo global" em nenhum ponto do markup.
+3. **Nota neutra de não-sobreposição.** `periodRegimeRelation` compara início e
+   fim do mês com o intervalo (comparação lexicográfica de ISO, que é
+   cronológica) e devolve a nota só quando não há interseção. Sobreposição
+   parcial conta como sobreposição. Não é erro, não tem cor de erro, e não
+   bloqueia nada.
+
+### 27.3 Competência real e URL compartilhável (defeito M2, BE5)
+
+`available_months` entrou no contrato TypeScript de `BrandDetail` como campo
+aditivo com default `[]`. A página **não importa mais `mock-daily`** e não
+conhece `AVAILABLE_MONTHS`.
+
+| Situação | Comportamento |
+|---|---|
+| `ref_month` ausente | competência **mais recente realmente disponível** |
+| válida e na lista | selecionada |
+| válida e **fora** da lista | **preservada**, com vazio explícito nomeando o mês e listando as competências que têm dado |
+| inválida (`2026-13`), vazia ou repetida | ignorada com segurança, cai na mais recente |
+| troca de marca pelos pills | competência **preservada**, `ctx_*` **descartado** |
+| navegação pela sidebar | nada de quente viaja: `ref_month` está fora de `FILTER_QUERY_KEYS` |
+
+**Ordem deliberada: a URL manda.** Uma competência bem formada nunca é trocada
+em silêncio, mesmo sem dado — trocar esconderia do analista que o mês pedido não
+existe para aquela marca. Só a ausência de pedido cai na mais recente.
+
+`available_months` só existe **depois** da resposta, então a primeira leitura sai
+sem competência e o endpoint serve o próprio padrão; se a mais recente com dado
+for outra, ela é adotada e a chave muda. É a mesma leitura com outra chave —
+**nenhum endpoint novo, nenhum fetch novo**. A adoção é **por derivação**:
+`available_months` entra no estado, `resolveRefMonth` passa a devolver
+`available[0]`, e a mudança de identidade dispara a segunda leitura — no máximo
+uma, porque na rodada seguinte a competência já consta na lista e a resolução
+converge. Não há helper de adoção (§27.10).
+
+**Fallback sintético.** Continua existindo, encapsulado em
+`lib/brand/demo-series.ts` como `buildDemoSeries` + `DEMO_SERIES_WARNING`
+("dados de exemplo — não usar para decisão"), e diferenciado por borda âmbar nos
+dois cartões do bloco global. O nome do símbolo importado é a primeira coisa que
+alguém lê ao auditar a página; `generateDailyData` de um módulo `mock-daily`
+parecia detalhe de implementação.
+
+### 27.4 Frescor mensal com identidade própria (defeito M6)
+
+`brandDetailRequestKey(brand, month)` — e **nada mais**. A chave global
+(`brand|channels|from|to|compare`) ficou **intocada**: os dois fetches têm
+gatilhos diferentes, e misturá-los faria a troca de intervalo global invalidar
+dado mensal que continua válido.
+
+- `computeRequestStatus` (o mesmo do PF1/U4) separa `loading`, `error` e `fresh`;
+- `displayDetail = detailStatus.fresh ? brandDetail : null` — a proteção inteira
+  está em sair daqui, e é isso que o painel recebe;
+- os **três** desfechos registram a chave resolvida: sucesso, resposta nula e
+  rejeição. Sem o terceiro, uma rejeição deixaria o painel em skeleton para
+  sempre;
+- guarda `ignore` nos dois efeitos, com `cleanup` nos dois;
+- **o diálogo mensal fecha quando `detailRequestKey` muda** — um detalhe que
+  sobrevivesse à troca mostraria evidência de outra identidade.
+
+**Quatro estados, mutuamente exclusivos**, na ordem de decisão:
+`loading` → `error` → `empty` → `ready`. A rodada terminal (§27.10) reduziu
+cinco para quatro e mudou de lado o significado de `null`; a redação anterior
+desta seção afirmava que uma falha de `apiFetch` era "indisponibilidade
+concluída sem payload", e isso era falso.
+
+### 27.5 Contexto quente da Inteligência (§9.1)
+
+`brand-arrival-context.ts` virou **união discriminada por origem**:
+
+| | `ctx_from=canais` | `ctx_from=inteligencia` |
+|---|---|---|
+| motivo | `ctx_signal` ∈ 5 sinais | **`ctx_focus`** ∈ 6 focos |
+| canal | validado contra o filtro **e** contra o sinal | validado contra o filtro **e derivado do foco** |
+| retorno | `/canais?brands&channels` | `/inteligencia?brands[&lens]#âncora` |
+| rótulo | "Voltar à evidência em Canais" | "Voltar à evidência em Inteligência" |
+
+O canal **não é parâmetro do produtor** de Inteligência: é derivado do foco,
+porque no contrato cada foco nasce de uma fonte de um único marketplace. Deixá-lo
+aberto permitiria montar um par impossível. Uma URL que traz **as duas** chaves
+de motivo é ambígua sobre a própria origem e é descartada nas duas direções, por
+uma guarda de **presença** e não de "valor único válido" (§27.10).
+
+**Produtores realmente conectados** — e só onde o dado demonstra o foco:
+
+| Produtor | Foco | Por que é demonstrável |
+|---|---|---|
+| CTA do diálogo da fila de evidências | `desperdicio_ads` / `escala_ads` / `venda_organica` | mapeamento **exato**: as três lentes SÃO as três listas do payload |
+| Linha da tabela de LTV | `ltv` | a própria linha é a evidência de recorrência da marca |
+| Ponto de destaque da matriz, quadrante `escalar` | `escala_ads` | identidade de população: o quadrante exige ROAS ≥ referência, a mesma da lista `scale` |
+
+**Ficaram FRIOS, de propósito:** os quadrantes `reduzir_parar`, `monitorar` e
+`testar_investimento` — `desperdicio_ads` é `ad_spend_no_sales`, e um ponto do
+quadrante inferior tem ROAS medido, podendo ter venda. Mapeá-lo seria inventar
+classificação para produzir contexto. "Próximos destinos" também segue frio: o
+próprio bloco se anuncia como navegação limpa.
+
+`concentracao` e `produto_tiktok` estão **allowlistados no consumidor sem
+produtor nesta rodada** — o Pareto abre `/produtos` e o painel TikTok não tem
+drill-down. A URL é entrada compartilhável e editável à mão, então o consumidor
+tem de tratá-los; criar um CTA novo só para ter produtor seria inverter a regra.
+
+**Evidência na Marca, auditada foco a foco:** os três focos de Ads e
+`produto_tiktok` têm âncora real (`marca-periodo` e `marca-produtos-tiktok`);
+`concentracao` e `ltv` **não existem nesta tela** e declaram a limitação em vez
+de prometer navegação. Nenhuma descrição contém dígito.
+
+**Achado corrigido na implementação:** o retorno à Inteligência **não pode**
+passar por `mergeFilteredHref`. Dois motivos independentes, cada um suficiente:
+`/inteligencia` não é filter-aware, e o `split("?")` daquela função jogaria
+`#fila-evidencias` dentro do valor de `lens`
+(`lens=parar%23fila-evidencias`) — quebrando a lente **e** perdendo a âncora. A
+decisão ficou isolada e testada em `returnPreservesGlobalFilters`, com um teste
+que reproduz o dano evitado.
+
+A âncora `produtos-tiktok` foi acrescentada ao painel TikTok do bloco 5 da
+Inteligência, para que o retorno mandado pelo contrato aterrisse de fato.
+
+### 27.6 Drill-downs da Marca (§9, linhas B6 e B8)
+
+Dois acionamentos novos, no **shell único** `KpiDrilldownDialog`, compostos com
+as primitives do G2 — nenhum shell, registry ou modal novo.
+
+- **Funil da superfície:** impressões → CTR → visitas → CVR → itens → GMV, só da
+  própria superfície e da própria marca. **Zero mediana, p75 ou benchmark entre
+  superfícies**: vídeo, live e product card são superfícies heterogêneas, e sem
+  regra de negócio documentada que demonstre comparabilidade, a mediana das três
+  não é referência. CTA: **"Abrir TikTok Shop em Canais"**, com a ressalva de que
+  a superfície específica **não viaja** (§27.10).
+- **Produto TikTok:** GMV, pedidos, vídeos e GMV/1k views. `gpm` vem **pronto**
+  do backend; quando é `null`, a linha diz ausência — a divisão não é
+  reconstruída aqui. CTA: Produtos na aba TikTok, com a ressalva explícita de que
+  **a competência não viaja**, porque `/produtos` não consome `ref_month`.
+
+`monthly-drilldown.ts` devolve dados **semânticos** (`{kind:"value"}` ×
+`{kind:"missing"}`), e é o componente que formata. Assim `null ≠ zero` fica
+testável no nível certo: um formatador que recebesse `number` já teria apagado a
+diferença antes do teste. Zero medido continua zero (CVR 0%, GMV R$ 0,00);
+`null` vira "Sem dado".
+
+Nenhuma linha inteira é clicável, e o `hover` de linha foi **removido** de todas
+as tabelas — linha sem ação não deve parecer clicável. O acionamento é botão com
+nome acessível (`Detalhe do funil da superfície Vídeo em ago/2026`) e alvo
+`min-h-11 min-w-11`.
+
+### 27.7 O que saiu, e o que não entrou
+
+**Demographics foi removido**: as sete colunas `viewers_pct_*`/`followers_pct_*`
+são 100% nulas na fonte, e a seção exibia sete traços. No lugar, uma nota
+compacta dentro do contêiner mensal — o card grande e vazio não sobrou. A palavra
+"Demographics" continua existindo **uma vez**, dentro da nota que explica a
+remoção: apagar o card não é apagar a informação.
+
+**Não entrou:** Ads na Marca (o contrato mensal não traz investimento de mídia),
+margem, CMV, afiliados, share de atribuição, benchmark competitivo, ranking novo,
+previsão e recomendação por threshold. Nenhuma métrica comercial é recalculada no
+frontend; a única divisão é ticket médio = GMV/pedidos, guardada por `> 0`.
+
+**Dívida preexistente que este gate FECHOU** na sua própria superfície: os onze
+`text-[10px]` e dois `text-[11px]` da página (defeito M7) — a Marca agora tem
+piso de 12px, afirmado por teste nos dois arquivos do gate.
+
+### 27.8 Arquivos
+
+**Criados** — quatro módulos puros e um componente:
+
+| Arquivo | Papel |
+|---|---|
+| `src/lib/brand/ref-month.ts` | contrato da competência: parse, resolução, rótulo, chave de requisição, estado do painel, relação entre regimes |
+| `src/lib/brand/period-changes.ts` | decomposição por canal e mix por marketplace, com `null ≠ zero` |
+| `src/lib/brand/monthly-drilldown.ts` | conteúdo semântico dos dois detalhes mensais |
+| `src/lib/brand/demo-series.ts` | encapsula e rotula o fallback sintético |
+| `src/components/brand/TikTokMonthlyPanel.tsx` | o contêiner do regime mensal |
+
+**Alterados:** `app/brand/[brand]/page.tsx` (reescrita),
+`src/lib/brand-arrival-context.ts` (união discriminada),
+`src/components/BrandArrivalBanner.tsx` (copy e CTA por origem),
+`app/inteligencia/page.tsx` (três produtores + âncora),
+`src/lib/inteligencia/lens.ts` (âncora `produtos-tiktok`),
+`src/lib/api-client.ts` (`available_months`),
+`tests/brand-arrival-context.test.ts` (o teste de "único produtor" passou a
+descrever os dois), `package.json` (registro do teste novo).
+
+### 27.9 Validações
+
+**1155 testes, 1155 aprovados** (1069 antes + 86 do V3-2), `typecheck` limpo,
+`build` compilando, `git diff --check` limpo, `package-lock.json` intocado,
+**zero dependência nova**, nada fora de `apps/web/` e `docs/`, e scan de
+secrets/token/DSN/IP privado/PII/caminho pessoal em 2.722 linhas **sem
+ocorrência**.
+
+Detector Impeccable: os três `gray-on-color` da Inteligência seguem sendo os
+falsos positivos já pré-classificados (ternários), e o painel mensal recebeu um
+`ai-color-palette` por usar violeta em cabeçalho — **também falso positivo**,
+porque violeta é o mundo visual incumbente do projeto (89 usos de `bg-violet-50`,
+79 de `text-violet-700`). O tom foi alinhado ao token estabelecido
+(`text-violet-800`) em vez de inventar um novo.
+
+**Zero backend, endpoint, SQL, migration, pipeline, banco ou deploy.** O único
+arquivo de API lido foi `schemas/performance.py`, e apenas para provar que
+`available_months` existe no contrato real.
+### 27.10 Rodada de correção terminal — cinco findings (22/08/2026)
+
+Revisão do próprio V3-2 antes do V3-3. Base `2d7ecdf`, zero commit.
+
+**FINDING 1 (bloqueador) — `available_months = []` fabricava `ready` com zeros.**
+O wiring usava `monthAvailable: resolucao.available || !resolucao.hasAvailable`.
+A intenção era não declarar "sem dado" antes da primeira resposta; o efeito real
+era outro: numa resposta **fresca** de marca sem histórico, o backend devolve 200
+com `available_months = []` **e agregados zerados**, e `hasAvailable === false`
+fazia `monthAvailable === true` → `ready`. A tela exibia GMV R$ 0,00, zero pedido
+e zero cliente como se fossem medidas. Corrigido para `monthAvailable:
+resolucao.available` — a pergunta é só uma, e o caso "ainda não se sabe" já era
+coberto por `loading`, que tem precedência. O vazio ganhou **duas copies**: sem
+histórico ("esta marca não tem histórico no TikTok Shop", sem seletor, porque não
+há mês para escolher) e mês sem dado (competência preservada + lista das que têm
+dado). Quando a URL não pediu competência e a lista veio vazia, `refMonth` é
+`null` e o nome vem do `ref_month` **ecoado pela resposta**, não de um travessão.
+
+**FINDING 2 (bloqueador) — falha era rotulada como `unavailable`, sem retry.**
+`apiFetch` devolve `null` para HTTP não-2xx, falha de rede, JSON inválido e
+qualquer exceção capturada. Logo `null` é **falha de leitura**, e não existe hoje
+caso demonstrado de "concluiu corretamente sem payload". A copy "a consulta
+concluiu sem payload" era semanticamente falsa e o estado não oferecia
+recuperação. Agora, no `.then`, `d === null` registra a chave, encerra o loading
+e marca `error = true`; o `.catch` segue fazendo o mesmo para uma rejeição
+futura. O estado de erro oferece **"Tentar novamente"**, e o retry volta à rede
+porque o PF1 não cacheia `null` (`isCacheableApiResult`). **`unavailable` foi
+removido do contrato**, em vez de mantido como distinção inventada: não havia
+gatilho demonstrável, e a distinção custava o retry ao usuário. Nenhuma segunda
+requisição automática, nenhum endpoint novo, e nenhuma afirmação sobre timeout —
+`apiFetch` não o distingue.
+
+**FINDING 3 (alto) — `available_months` sem identidade de marca.** A lista era um
+`useState<string[]>` solto. Ao trocar de marca pelos pills, o seletor seguia
+oferecendo os meses da marca anterior durante o loading, e se a leitura da marca
+nova falhasse a lista antiga **permanecia** — um furo na mesma proteção de
+frescor que o payload mensal já tinha. Agora a disponibilidade é
+`{ brand, months, servedMonth }`, e o consumo passa por
+`availabilityForBrand(availability, brand)`: sem coincidência de marca, não há
+lista. Uma falha **não** sobrescreve a disponibilidade, então um retry da mesma
+marca continua enxergando a própria lista, e uma marca nova sem resposta
+simplesmente não tem nenhuma. `ref_month` escolhido explicitamente continua no
+href dos pills; `ctx_*` continua descartado.
+
+**FINDING 4 (médio) — chave estrangeira aceita em uma origem.** `ctx_from=canais`
+não rejeitava `ctx_focus`, e no ramo de Inteligência o teste era
+`readSingle(ctx_signal) != null` — que devolve `null` para parâmetro
+**repetido**, deixando passar exatamente o caso mais suspeito
+(`?ctx_signal=a&ctx_signal=b`). Nasceu `hasParam`, que responde **presença** e
+não "valor único válido": uma ocorrência, várias, valor vazio ou inválido contam
+todas. Canais rejeita qualquer `ctx_focus`; Inteligência rejeita qualquer
+`ctx_signal`. Parâmetro próprio repetido segue inválido, e os dois caminhos
+válidos seguem idênticos.
+
+**FINDING 5 (médio) — superfície chamada de canal, e CTA sem a dimensão.**
+`channel_funnel` entrega VIDEO, LIVE e PRODUCT_CARD, que são **superfícies do
+TikTok Shop**, não marketplaces. O detalhe dizia "benchmark entre canais" e o CTA
+"Comparar canais em Canais", mas `/canais?channels=tiktok` abre a visão do
+marketplace e não preserva a superfície. A copy passou a dizer "superfície", o
+CTA virou **"Abrir TikTok Shop em Canais"**, e uma ressalva curta declara que a
+superfície específica não viaja. Nenhum parâmetro, filtro ou endpoint de
+superfície foi criado; os nomes internos de campo continuam os do contrato, para
+não ampliar o diff sem ganho de leitura.
+
+**FINDING 6 — `latestToAdopt` era helper morto com teste que dava falsa prova.**
+Existia, era testado isoladamente e **não era importado pela página**; o relatório
+anterior atribuía a ele um comportamento que na verdade acontecia por derivação.
+Escolhida a opção mais simples e com menos estado: **helper e teste removidos**, e
+o teste que ficou no lugar prova a derivação real — `resolveRefMonth` muda de
+`null` para `available[0]`, a identidade da requisição muda, e a resolução
+converge na rodada seguinte (no máximo uma adoção, sem loop).
+
+**Autorrevisão.** Busca nos onze arquivos funcionais, sobre o código sem
+comentários, pelos nove padrões da rodada: **zero ocorrência real**. As quatro
+correspondências brutas foram classificadas e descartadas —
+`useState<string[]>` é o `brandUniverse` da Inteligência, `unavailable` casa
+apenas com `unavailableNote` do contexto de chegada (outro conceito, do Gate G3),
+"Comparar canais" é o CTA de **marketplaces** do bloco "Próximos passos", e
+`hasData` é derivação própria da Inteligência.
+
+**Validações:** **1155 testes, 1155 aprovados** (86 no arquivo do V3-2, +24 nesta
+rodada), `typecheck` limpo, `build` compilando, `git diff --check` limpo,
+`package-lock.json` intocado, zero dependência nova, zero arquivo em `apps/api`,
+`pipelines`, `db` ou migrations, e scan de secrets/DSN/token/IP privado/PII/
+caminho pessoal **sem ocorrência**. Nenhum navegador foi aberto: o QA visual é do
+V3-3, **não iniciado**.
+
+---
+
+## 28. Gate V3-3 — QA visual integrado (22/08/2026)
+
+**Estado: `V3-3 PASS — TECNICAMENTE CONCLUÍDO E VERSIONADO no commit de
+fechamento do Gate V3; PUBLICAÇÃO E SMOKE PÓS-DEPLOY PENDENTES`.** O veredito da primeira rodada era **`PASS WITH ISSUE`**, por
+12 reprovações de acessibilidade em componentes compartilhados; o patch terminal
+do §28.9 as fechou, e o veredito passa a **`PASS`**.
+Base integrada por `git merge --ff-only` até **`76f361b`**. Zero commit, push ou
+deploy; nenhum backend, endpoint, SQL, migration, pipeline ou banco.
+
+### 28.1 Integração da base
+
+`origin/main` tinha avançado com `76f361b` (*docs(data): define contrato de custos
+de afiliados*), que **acrescenta um único arquivo** —
+`docs/UNIT_ECONOMICS_SOURCE_CONTRACTS.md`, 1.159 linhas — e não intersecta
+nenhum dos 16 caminhos do V3-2. Fast-forward feito com a árvore suja, sem stash,
+reset, restore, checkout, clean, rebase ou commit temporário.
+
+**Prova de que nada se perdeu:** SHA-256 dos **16/16** arquivos byte-idênticos
+antes e depois, `git diff --stat` idêntico, stage vazio, e o documento de Unit
+Economics entrou **somente como base** (`git status` limpo para ele).
+
+### 28.2 Ambiente, e o que é prova de quê
+
+| camada | como | o que prova |
+|---|---|---|
+| **backend real** | API do worktree do V3 servindo `marts.*` no Neon, build de produção do Next em `localhost:3201`, Chromium 149 do cache | happy path e tudo que o dado real alcança |
+| **fixture declarada** | `page.route` sobre `/brand-detail` ou `/daily`, anotada em cada verificação | somente os estados que o backend não produz sob demanda |
+
+Duas coisas do ambiente merecem registro, porque falsearam a primeira execução:
+
+1. **a API precisa ser a do worktree do V3.** Subir a de `mktplace` (HEAD
+   `a5bbbdd`, anterior ao V3-BE) devolvia `available_months` ausente e
+   `/inteligencia` com 7 chaves e sem `opportunity_map`. Não era defeito do
+   produto — era a versão errada do backend;
+2. **CORS.** A allowlist é `http://localhost:3000` por padrão, e servir a página
+   em `127.0.0.1:3201` fazia o navegador bloquear **toda** leitura. Resolvido com
+   `CORS_ORIGINS` no ambiente do processo de QA e servindo a página por
+   `localhost`. **Nenhum arquivo de backend foi tocado.**
+
+Confirmado no contrato real: `available_months` com **11 competências**
+(`2026-08` … `2025-10`), `/inteligencia` com **13 chaves**, `opportunity_map`
+`available` com universo 1.650, 40 destaques, 4 quadrantes e 2 faixas,
+`ml_snapshot_refreshed_at` real.
+
+### 28.3 Resultado
+
+**Três viewports** — 1440×900, 1024×768, 390×844.
+
+| camada | verificações | aprovadas |
+|---|---|---|
+| backend real (J1–J9, J15, J16, higiene) | 115 | **115** |
+| fixture declarada (J4, J10–J14, partial) | 76 | **76** |
+| acessibilidade + qualidade visual (3 viewports) | 69 | 57 |
+| patch terminal de a11y compartilhada (§28.9) | 154 | **154** |
+| **total** | **414** | **402** |
+
+As **12 não-aprovações são 4 dívidas preexistentes × 3 viewports**, todas em
+componentes **compartilhados** e todas demonstradas em outras rotas — §28.6.
+
+### 28.4 Jornadas
+
+`J1` matriz, quadrantes, faixas, lentes reproduzíveis pela URL, universo 1.650,
+total verdadeiro 674 ao lado da lista capada, referências com moeda exata,
+colapso no mobile · `J2` acionamento **real** da Inteligência (linha de LTV),
+querystring com quatro identificadores e **zero dígito**, banner nomeando a
+origem, retorno a `#ltv` sem `ctx_*`, sidebar limpa · `J3` acesso direto sem
+banner e sem espaço reservado · `J4` Canais compatível, e TikTok aceitando
+**somente** `custo_alto` e `sem_dado` · `J5` **nove** contextos forjados, todos
+descartados sem banner, sem mensagem técnica e sem erro de console · `J6` os dois
+regimes provados por mudança cruzada: trocar o intervalo global **não** mexe em
+`ref_month`, e trocar a competência **não** mexe em `date_from/date_to` · `J7`
+adoção da competência mais recente em **uma** leitura extra, sem loop · `J8`
+`ready`, cinco blocos, troca entre competências e **back/forward** · `J9` mês
+válido fora da lista: preservado, `empty` nomeado, competências existentes
+listadas, zero bloco renderizado · `J10` marca sem histórico (fixture): copy
+própria, sem seletor, zeros do payload **não** exibidos · `J11` três modos de
+falha (500, rede, JSON inválido): `error` com retry ≥44px que volta à rede e
+recupera, sem polling · `J12` transição entre marcas com atraso: skeleton,
+`aria-busy`, zero dado e zero mês da marca anterior · `J13` demonstração
+rotulada, borda âmbar medida (`rgb(253,230,138)`), decomposição suprimida · `J14`
+superfície (fixture, porque o funil real está vazio nas cinco marcas): copy de
+superfície, sem benchmark, `null`≠zero, CTA "Abrir TikTok Shop em Canais" com a
+ressalva · `J15` produto com dado real · `J16` pills descartando `ctx_*` e
+preservando `ref_month`.
+
+**Higiene:** zero erro de console, zero hydration mismatch, zero unhandled
+rejection, zero request de escrita, zero host além de `localhost:3201` e
+`localhost:8080`, zero 4xx/5xx não injetado, e pico de leitura por URL **≤ uma
+por navegação**.
+
+### 28.5 Findings reais e a rodada única de correção
+
+| # | finding | classe | correção |
+|---|---|---|---|
+| 1 | `ref_month` usava `router.replace`: a escolha explícita de competência **não entrava no histórico**, e `back` a pulava (de `mai/2026` direto para a URL sem `ref_month`) | necessário | `router.push`. É o que a lente da Inteligência já fazia via `<Link>`; `replace` continua certo para materializar filtro padrão, onde ninguém escolheu nada |
+| 2 | **ponto decimal** em interface pt-BR: `CVR 0.00%`, GPM `R$ 2.35`, share `54.0%` — nove `toFixed` crus, exatamente o defeito que o V3-1A fechou na Inteligência | necessário | `decBr`/`pctBr`/`roasBr`; zero `toFixed` restante |
+| 3 | `PeriodSelector` com alvo de **32px** — controle **primário** do regime mensal | necessário | `min-h-11 min-w-11`; `/produtos?channels=tiktok` remedido e **também** corrigido, sem regressão |
+| 4 | "← Voltar para Canais" com **16px** de altura | necessário | `min-h-11` |
+| 5 | salto de heading **2→4**: `DailyChart` emite `h2` próprio, e havia um `h4` meu duplicando o título por cima | necessário | título duplicado removido, "Mix por marketplace" promovido a `h3` — **zero salto** nos três viewports |
+| 6 | barra do mix por marketplace: cor sem texto nem `aria-hidden` | necessário | `aria-hidden="true"` (o valor e o share já estão em texto ao lado) |
+| 7 | nome do produto quebrando em **até 13 linhas** numa coluna de 114px no mobile | cosmético | `min-w-[180px]`: a tabela já rola, então só a rolagem se desloca; nada truncado |
+
+**Regressão que eu mesmo introduzi e corrigi na mesma rodada:** o `min-w-11` do
+`PeriodSelector` fez o botão encolher dentro do flex e o `justify-center` passou a
+**recortar** o rótulo em telas estreitas. `shrink-0` resolveu, e é coerente com o
+`overflow-x-auto` que aquele contêiner já declarava.
+
+**Seis defeitos do harness**, corrigidos sem tocar produto, e que valem registro
+porque quase viraram finding falso: `[aria-pressed]` casando os chips de marca
+além das lentes; rótulos de KPI em **caixa alta** por CSS; `/NaN/i` casando
+"Fi**nan**ceiro" no menu; clique sem `scrollIntoViewIfNeeded`; métrica de loop
+medida por execução em vez de por navegação; e — o mais instrutivo — a contagem
+de `[role="dialog"]` **sem `:visible`**, que acusava "modal sobre modal" onde o
+segundo nó é o `MobileDrawer` do shell, permanentemente no DOM e oculto.
+
+### 28.6 Dívidas preexistentes, classificadas e NÃO corrigidas
+
+Todas em componentes **compartilhados**, todas fora das duas páginas do gate, e
+todas demonstradas em outras rotas — corrigi-las mudaria telas que este gate não
+audita:
+
+| dívida | onde mais aparece |
+|---|---|
+| `DailyChart`: rótulos de eixo a **10px** | `/` e `/produtos` |
+| `DailyChart`: `svg` sem `role`/`aria-label` | `/` |
+| `DailyChart`: pontos coloridos da legenda sem `aria-hidden` | idem |
+| `MarketplaceFilter` (36px) e `DateRangeFilter` (32px) | `/` (18 alvos), `/canais` (35), `/produtos` (10) |
+
+Portanto, com honestidade: **o piso de 12px e o alvo de 44px valem para o markup
+próprio das duas páginas do V3**, não para esses três componentes. O 422 do
+`resolve_brands` (§26.5) segue registrado e não corrigido.
+
+### 28.7 Verdade dos estados
+
+| estado | origem da prova |
+|---|---|
+| `loading` | fixture com atraso (J12) — skeleton + `aria-busy`, nunca vazio |
+| `fresh/live` | backend real (J8) |
+| demonstração (mock) | fixture (J13) — rotulada, e **não** contamina o painel mensal |
+| `partial` | fixture — 200 com seções vazias continua `ready`, com cada bloco declarando o vazio |
+| `empty` sem histórico | fixture (J10) |
+| `empty` mês indisponível | **backend real** (J9) |
+| `error` | fixture (J11) — 500, rede e JSON inválido |
+| `stale` | backend real — `displayDetail` sai de `fresh`; nada de outra chave aparece |
+| `timeout` | **não aplicável**: `apiFetch` não distingue timeout de falha; a tela não afirma que distingue |
+| `null` ≠ `zero` | ambos — `CTR Sem dado` ao lado de `CVR 0,00%` e `Visitas 0` |
+| canal sem cobertura | backend real — mix diz "Sem dado", nunca 0% |
+| contexto ausente / inválido | backend real (J3, J5) |
+
+### 28.8 Validações
+
+**1157 testes, 1157 aprovados** (+2 nesta rodada), `typecheck` limpo, `build`
+compilando, `git diff --check` limpo, `package-lock.json` sem diff, `package.json`
+só com o registro do teste, **zero dependência nova**, zero arquivo em
+`apps/api`, `pipelines`, `db` ou migrations, e scan de secrets/DSN/token/IP
+privado/PII/caminho pessoal em 3.201 linhas **sem ocorrência**. Detector
+Impeccable: os 3 `gray-on-color` pré-classificados da Inteligência e 1
+`ai-color-palette` de cabeçalho violeta — falso positivo, porque violeta é o mundo
+visual incumbente do projeto.
+
+Servidores encerrados, portas liberadas, e **nenhum artefato no repositório**:
+scripts, screenshots e logs ficaram em `%TEMP%`.
+### 28.9 Patch terminal de acessibilidade compartilhada (22/08/2026)
+
+As 12 reprovações da §28.6 estavam em componentes que **aparecem diretamente**
+nas páginas validadas, e por isso foram fechadas antes do versionamento. Não é
+funcionalidade nova, não é métrica, e não é um V3-3.1: é o mesmo gate encerrando
+o que mediu.
+
+| # | finding | correção |
+|---|---|---|
+| A1 | `DailyChart` com ticks de **10px** | `fontSize: 12` numa constante nomeada; `interval="preserveStartEnd"` + `minTickGap={28}` no eixo X, porque o passo fixo de 6 colidia a 12px; eixo Y de 68 → **80px**, senão o valor monetário encostava na borda |
+| A2 | gráfico sem semântica | `<div role="img">` com `aria-label` derivado do dado + `aria-describedby` apontando para um parágrafo `sr-only`. Por especificação a subárvore de um `role="img"` é apresentacional, então o `<svg>` do Recharts **não** gera segundo anúncio — sem `aria-hidden` nele e **sem `suppressHydrationWarning`** |
+| A3 | legenda dependia da cor | o `<Legend>` do Recharts saiu e deu lugar a uma `<ul>` própria, **fora** do `role="img"` (dentro dele o texto nunca seria lido); marcador com `aria-hidden="true"`, nome da série em texto, e só séries **ativas** entram |
+| A4 | `MarketplaceFilter` a **36px** | `min-h-11 min-w-11` + `shrink-0`; a faixa transborda e o `overflow-x-auto` que ela já declarava rola |
+| A5 | `DateRangeFilter` a **32px** | presets com `min-h-11 min-w-11 shrink-0`; nos campos de data o alvo é o próprio `<input>`; no toggle de comparação o alvo é o **`<label>`**, que é quem recebe o clique — crescer o `<input>` a 44px desenharia uma caixa gigante sem ganho de alcance |
+
+**Dois componentes além dos três nomeados**, ambos com finding demonstrável:
+
+- **`ChannelMixChart`** ainda renderizava **11px** na mesma página de Marca, ao
+  lado do `DailyChart` já corrigido. Manter 11px ali tornaria falsa a afirmação
+  de piso de 12px na página. Corrigido, com o eixo Y de 52 → 60px;
+- **`GerencialHeader`**: com os controles a 44px, a faixa *sticky* passou de ~29%
+  para **32%** do viewport no tablet. Conforme a instrução do patch, o que cedeu
+  foi **espaçamento** — `py-2` → `py-1.5` e `gap-3` → `gap-x-3 gap-y-1.5` no
+  wrap —, nunca o alvo. `top-0` e o comportamento do V2-4 seguem intactos.
+
+**Regressão introduzida e corrigida na mesma rodada:** o `min-w-11` fazia o botão
+encolher dentro do flex e o `justify-center` passava a **recortar** o rótulo em
+telas estreitas. `shrink-0` resolveu, nos três seletores.
+
+**Medição no navegador — 9 rotas × 3 viewports, 154 verificações, 154
+aprovadas.** Rotas: `/`, `/canais`, `/financeiro`, `/regioes`, `/qualidade`,
+`/pedidos`, `/brand/barbours`, `/produtos?channels=tiktok` e `/inteligencia`.
+Em todas: **zero controle compartilhado abaixo de 44×44px**, zero overflow
+horizontal de página, zero rótulo recortado, faixa rolando só quando precisa, e
+**zero erro de console ou hidratação em 27 carregamentos**.
+
+No gráfico: **ticks a 12px** nos três viewports, **zero colisão** no eixo X,
+nenhum valor do eixo Y cortado, **uma** representação acessível com nome e
+descrição, legenda textual com marcador decorativo, e tooltip preservado.
+`/produtos?channels=tiktok` confirmou que o `PeriodSelector` do V3-2 não
+regrediu — passou a 44px também ali.
+
+**Dois defeitos do próprio harness**, corrigidos sem tocar produto: colisão de
+eixo medida numa lista única misturava rótulos de **dois** gráficos distintos; e
+o teste de recorte usava `scrollWidth > clientWidth` sem exigir `overflow`
+contido, acusando como corte o **wrapping** legítimo dos cartões de KPI da
+Gerencial (`overflow: visible`, zero transbordo real).
+
+**Regressões estáticas:** 12 contratos novos em
+`tests/a11y-target-44.test.ts` — nenhum tick abaixo de 12px, largura de eixo,
+representação única, nome e descrição derivados do dado, legenda textual,
+marcador decorativo, 44px nos três seletores, `aria-pressed`/labels/validação de
+data intactos, ausência de `suppressHydrationWarning`, nenhum `onClick` em
+elemento sem semântica de controle, e zero dependência nova. **Nenhum arquivo de
+teste novo foi criado**, e o `package.json` não mudou neste patch.
+
+**Dívidas que permanecem, e não bloqueiam:** o 422 do `resolve_brands` ecoando o
+valor inválido; `timeout` indistinguível de falha genérica no contrato de
+`apiFetch`; o funil de superfície sem dado real, validado por fixture; e a
+densidade horizontal dos cartões de KPI da Gerencial em ≤1024px, que **quebra
+linha** sem cortar nada — fora do escopo deste patch.

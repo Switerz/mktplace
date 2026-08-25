@@ -30,6 +30,9 @@ import { decBr, pctBr, roasBr } from "@/lib/inteligencia/format";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import { computeRequestStatus } from "@/lib/request-freshness";
 import {
+  buildInteligenciaArrivalParams, focusForEvidenceKind, focusForQuadrant,
+} from "@/lib/brand-arrival-context";
+import {
   BRAND_ALL, brandLabel, brandScopeLabel, filterByBrand, mlBrandsFromPayload, parseBrandSelection,
 } from "@/lib/inteligencia/brands";
 import {
@@ -584,7 +587,11 @@ function InteligenciaPageInner() {
 
             {/* TikTok: etiqueta e teto próprios; sem ROAS/Ads, que o contrato
                 do TikTok não entrega, e sem drill-down sem evidência. */}
-            <SectionCard title="Produtos TikTok em destaque" regime={REGIME_TK}>
+            <SectionCard
+              id={INTELIGENCIA_ANCHORS.produtosTiktok}
+              title="Produtos TikTok em destaque"
+              regime={REGIME_TK}
+            >
               {tkRows.length === 0 ? (
                 <p className="px-6 py-8 text-center text-sm text-slate-500">Sem dados TikTok na janela de 30 dias.</p>
               ) : (
@@ -692,8 +699,11 @@ function InteligenciaPageInner() {
                             </td>
                             <td className="px-4 py-3 text-right">
                               <Link
-                                href={`/brand/${r.brand}?brands=${r.brand}`}
-                                aria-label={`Abrir a visão da marca ${brandLabel(r.brand)}`}
+                                // Contexto QUENTE (V3-2): a propria linha e' a
+                                // evidencia de recorrencia/LTV da marca, entao o
+                                // foco `ltv` e' demonstravel pelo dado exibido.
+                                href={`/brand/${r.brand}?brands=${r.brand}&${buildInteligenciaArrivalParams("ltv", r.brand)}`}
+                                aria-label={`Abrir a visão da marca ${brandLabel(r.brand)} pela evidência de LTV`}
                                 className="inline-flex items-center justify-center min-h-11 px-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
                               >
                                 Abrir
@@ -799,6 +809,8 @@ function InteligenciaPageInner() {
         {dialog?.kind === "point" && oppMap && (() => {
           const h = dialog.highlight;
           const leitura = readPoint(h, oppMap, moedaExata, roasBr);
+          // "" quando o quadrante nao sustenta foco: CTA frio.
+          const focoDoPonto = buildInteligenciaArrivalParams(focusForQuadrant(h.quadrant), h.brand);
           return (
             <div className="flex flex-col gap-4">
               <DrilldownContextLine leading={`${brandLabel(h.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
@@ -818,12 +830,16 @@ function InteligenciaPageInner() {
                 note="Fotografia ML sem janela temporal. As duas referências descrevem o portfólio do escopo atual; não são metas."
               />
               <Link
-                // Link FRIO, de proposito. O plano reserva o contexto QUENTE de
-                // chegada ao V3-2, e so' "com wiring real": a pagina de Marca nao tem
-                // hoje nenhum consumidor de foco vindo da Inteligencia, e emitir
-                // contexto que ninguem le seria divida sem retorno. O filtro de
-                // marca, sim, viaja.
-                href={`/brand/${h.brand}?brands=${h.brand}`}
+                // V3-2: o consumidor de foco existe, e o CTA esquenta APENAS
+                // quando o quadrante prova a populacao. `escalar` exige ROAS >=
+                // referencia, a mesma da lista `scale` que forma `escala_ads`,
+                // logo todo ponto dali pertence aquele foco. Os outros tres
+                // quadrantes seguem FRIOS: `focusForQuadrant` devolve null e
+                // `buildInteligenciaArrivalParams` devolve "" — inventar
+                // classificacao para produzir contexto seria pior que nao ter.
+                href={`/brand/${h.brand}?brands=${h.brand}${
+                  focoDoPonto ? `&${focoDoPonto}` : ""
+                }`}
                 aria-label={`Abrir a visão da marca ${brandLabel(h.brand)} a partir deste produto`}
                 className="self-start inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
               >
@@ -973,8 +989,12 @@ function InteligenciaPageInner() {
             </ul>
             <DataQualityNote note="Fotografia ML sem janela temporal, e sem CMV — não há margem real por produto. O detalhe usa a linha já carregada; ele não é compartilhável por identificador de produto nesta fase." />
             <DrilldownCta
-              href={`/brand/${dialog.item.brand}?brands=${dialog.item.brand}`}
-              ariaLabel={`Abrir a visão da marca ${brandLabel(dialog.item.brand)}`}
+              // Mapeamento EXATO lente -> foco: as tres lentes SAO as tres
+              // listas do payload, e os tres focos sao essas mesmas listas.
+              href={`/brand/${dialog.item.brand}?brands=${dialog.item.brand}&${
+                buildInteligenciaArrivalParams(focusForEvidenceKind(dialog.item.kind), dialog.item.brand)
+              }`}
+              ariaLabel={`Abrir a visão da marca ${brandLabel(dialog.item.brand)} com o contexto desta evidência`}
             >
               Abrir marca {brandLabel(dialog.item.brand)} →
             </DrilldownCta>

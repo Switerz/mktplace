@@ -71,7 +71,10 @@ export default function DateRangeFilter({
                 type="button"
                 aria-pressed={active}
                 onClick={() => selectPreset(opt.value)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
+                // 44x44px no runtime. `shrink-0` impede que o flex comprima o
+                // botao abaixo do alvo: a faixa transborda e o `overflow-x-auto`
+                // do proprio grupo rola, que e' o comportamento ja declarado ali.
+                className={`inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-3 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
                   active ? "bg-violet-600 text-white shadow" : "text-violet-700 hover:bg-violet-50"
                 }`}
               >
@@ -80,13 +83,21 @@ export default function DateRangeFilter({
             );
           })}
         </div>
+        {/*
+          O alvo aqui e' o LABEL, nao a caixinha: clicar em qualquer ponto do
+          rotulo alterna o controle, entao `min-h-11` no label da uma area
+          interativa real de 44px de altura. Aumentar o `<input>` a 44px
+          desenharia uma caixa de selecao gigante sem ganho de alcance — e o
+          que nao se faz e' o inverso, crescer so' o visual e deixar a area
+          menor. `px-2` garante largura util junto ao texto.
+        */}
         {!hideCompare && (
-          <label className="flex items-center gap-1.5 text-xs text-slate-600 font-medium ml-1 select-none cursor-pointer">
+          <label className="inline-flex items-center gap-2 min-h-11 px-2 text-xs text-slate-600 font-medium ml-1 select-none cursor-pointer">
             <input
               type="checkbox"
               checked={compare}
               onChange={(e) => onCompareChange(e.target.checked)}
-              className="rounded border-violet-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              className="w-4 h-4 shrink-0 rounded border-violet-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
             />
             Comparar com período anterior
           </label>
@@ -95,6 +106,9 @@ export default function DateRangeFilter({
       {showCustom && (
         <div className="flex flex-col gap-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap min-w-0">
+            {/* Nos campos de data o alvo e' o proprio `<input>`, que abre o
+                seletor nativo: `min-h-11` vai nele, nao no label. Limites
+                `min`/`max` e a validacao de intervalo seguem intocados. */}
             <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
               De
               <input
@@ -102,7 +116,7 @@ export default function DateRangeFilter({
                 value={dateFrom}
                 max={dateTo < todayIso ? dateTo : todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom: e.target.value, dateTo })}
-                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
+                className="min-h-11 border border-violet-200 rounded-lg px-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
               />
             </label>
             <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
@@ -113,7 +127,7 @@ export default function DateRangeFilter({
                 min={dateFrom}
                 max={todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom, dateTo: e.target.value })}
-                className="border border-violet-200 rounded-lg px-2 py-1 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
+                className="min-h-11 border border-violet-200 rounded-lg px-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
               />
             </label>
           </div>

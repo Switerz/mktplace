@@ -1,7 +1,9 @@
 "use client";
 
 import type { BrandArrivalContext } from "@/lib/brand-arrival-context";
-import { RETURN_CTA_LABEL, buildReturnHref } from "@/lib/brand-arrival-context";
+import {
+  buildReturnHref, originLabel, returnCtaLabel, returnPreservesGlobalFilters,
+} from "@/lib/brand-arrival-context";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
@@ -38,7 +40,11 @@ export default function BrandArrivalBanner({ ctx, periodLabel, buildHref }: Prop
       className="bg-violet-50/60 border border-violet-100 rounded-2xl p-4 flex flex-col gap-2"
     >
       <div>
-        <p className="text-xs font-semibold text-violet-700 uppercase tracking-wider">Você chegou aqui por</p>
+        {/* A origem é nomeada: "chegou por X" sem dizer DE ONDE deixa o
+            analista sem saber para onde voltar nem que evidência esperar. */}
+        <p className="text-xs font-semibold text-violet-700 uppercase tracking-wider">
+          Você chegou de {originLabel(ctx)} por
+        </p>
         <p className="text-sm text-slate-700">{ctx.description}</p>
       </div>
 
@@ -56,9 +62,17 @@ export default function BrandArrivalBanner({ ctx, periodLabel, buildHref }: Prop
             {ctx.sectionLabel} ↓
           </DrilldownCta>
         )}
-        {/* Retorno à evidência: filtros globais preservados por buildHref;
-            marca/canal do contexto vencem, e nenhum `ctx_*` é repropagado. */}
-        <DrilldownCta href={buildHref(buildReturnHref(ctx))}>{RETURN_CTA_LABEL} →</DrilldownCta>
+        {/* Retorno à evidência. Canais é filter-aware, então os filtros globais
+            são preservados por buildHref e marca/canal do contexto vencem. O
+            retorno à Inteligência vai DIRETO: aquela rota não herda filtro
+            global, e o href tem âncora, que mergeFilteredHref destruiria (ver
+            `returnPreservesGlobalFilters`). Nenhum `ctx_*` é repropagado nos
+            dois casos. */}
+        <DrilldownCta
+          href={returnPreservesGlobalFilters(ctx) ? buildHref(buildReturnHref(ctx)) : buildReturnHref(ctx)}
+        >
+          {returnCtaLabel(ctx)} →
+        </DrilldownCta>
       </div>
 
       {/* Quando HÁ evidência, a ressalva de escopo continua visível, mas em tom

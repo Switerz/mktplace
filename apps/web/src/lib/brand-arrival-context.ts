@@ -17,13 +17,19 @@
 // - `ctx_*` NÃO entra em FILTER_QUERY_KEYS (nav-links.ts): é exatamente isso
 //   que faz a navegação pela sidebar descartar o contexto e impede que ele
 //   contamine outras telas.
-// - Nesta primeira implementação, `ctx_from` aceita SÓ `canais` — o único
-//   produtor real hoje. Propagação transitiva desde a Gerencial é dívida
-//   futura registrada no §8; não se cria enum sem wiring.
+// - Gate V3-2: `ctx_from` passa a ter DOIS valores, e o contrato vira uma
+//   UNIÃO DISCRIMINADA POR ORIGEM. Canais continua idêntico, com `ctx_signal`;
+//   Inteligência entra com `ctx_focus`, enum próprio. Reaproveitar
+//   `ctx_signal` com outro significado seria mapeamento semanticamente falso:
+//   os cinco sinais de Canais são sinais da matriz marca × canal, e as
+//   categorias da Inteligência (desperdício, escala, orgânico, concentração,
+//   LTV, produto TikTok) não são esses sinais. Propagação transitiva desde a
+//   Gerencial segue sendo dívida futura do §8; não se cria enum sem wiring.
 
-/** Origem da jornada. Único valor suportado nesta fase (ver §8). */
+/** Origem da jornada — união discriminada a partir do Gate V3-2. */
 export const CTX_FROM_CANAIS = "canais";
-export type BrandArrivalFrom = typeof CTX_FROM_CANAIS;
+export const CTX_FROM_INTELIGENCIA = "inteligencia";
+export type BrandArrivalFrom = typeof CTX_FROM_CANAIS | typeof CTX_FROM_INTELIGENCIA;
 
 /** Sinais reais da matriz marca × canal (contrato de `canais-channel-metrics`
  * / `performance_service`). Nenhum sinal novo é inventado aqui. */
@@ -80,6 +86,139 @@ export function isSignalCompatibleWithChannel(signal: ArrivalSignal, channel: Ar
  * "Período selecionado" (KPIs de GMV/Pedidos/Ticket/Ad Spend + gráfico diário).
  * Id adicionado no Gate G3; nenhuma seção foi criada para receber âncora. */
 export const SECTION_PERIOD = "marca-periodo";
+
+/** Âncora dos produtos TikTok DENTRO do contêiner mensal (Gate V3-2). Única
+ * seção da Marca com evidência de produto TikTok; não foi criada para receber
+ * âncora — ela já existia como "Top 5 Produtos". */
+export const SECTION_MENSAL_PRODUTOS = "marca-produtos-tiktok";
+
+// ---------------------------------------------------------------------------
+// Gate V3-2 — origem `inteligencia`
+// ---------------------------------------------------------------------------
+
+/**
+ * Focos allowlisted da Inteligência.
+ *
+ * Cada um espelha UM bloco real do payload de `/inteligencia` (§9.1):
+ * `desperdicio_ads`←`urgent`, `escala_ads`←`scale`,
+ * `venda_organica`←`organic`, `concentracao`←`pareto`, `ltv`←`ltv`,
+ * `produto_tiktok`←`tk_products`. `signals` é agregado de suporte, sem produto
+ * para navegar, e por isso não gera foco. Nenhum foco foi criado sem bloco que
+ * o produza.
+ */
+export const ARRIVAL_FOCUSES = [
+  "desperdicio_ads", "escala_ads", "venda_organica", "concentracao", "ltv", "produto_tiktok",
+] as const;
+export type ArrivalFocus = (typeof ARRIVAL_FOCUSES)[number];
+
+/**
+ * Canal semanticamente necessário de cada foco.
+ *
+ * Cada foco nasce de uma fonte de UM marketplace, então o canal é exigido nos
+ * seis casos — o que preserva a validação já existente contra os canais
+ * filtrados: chegar com foco de ML numa página sem ML no filtro descarta o
+ * contexto, e isso é correto. Um `ctx_channel` que não seja o do foco também
+ * descarta: a URL é entrada não confiável.
+ */
+const FOCUS_CHANNEL: Record<ArrivalFocus, ArrivalChannel> = {
+  desperdicio_ads: "ml",
+  escala_ads: "ml",
+  venda_organica: "ml",
+  concentracao: "ml",
+  ltv: "ml",
+  produto_tiktok: "tiktok",
+};
+
+export const isFocus = (v: string): v is ArrivalFocus =>
+  (ARRIVAL_FOCUSES as readonly string[]).includes(v);
+
+/** `true` quando o canal é o do foco no contrato vigente. */
+export function isFocusCompatibleWithChannel(focus: ArrivalFocus, channel: ArrivalChannel): boolean {
+  return FOCUS_CHANNEL[focus] === channel;
+}
+
+interface FocusMeta {
+  description: string;
+  section: string | null;
+  sectionLabel: string | null;
+  unavailableNote: string | null;
+  /** Lente da fila de evidências no retorno, ou `null` quando o retorno é
+   * apenas âncora (os focos que não têm lente correspondente). */
+  returnLens: "parar" | "escalar" | "testar" | null;
+  /** Âncora do bloco de origem na Inteligência. */
+  returnAnchor: string;
+}
+
+/**
+ * Mapa foco → o que a Marca REALMENTE evidencia, auditado bloco a bloco.
+ *
+ * Mesma disciplina do mapa de sinais de Canais: onde a Marca não tem a
+ * evidência, ela declara a limitação em vez de prometer. Concentração (Pareto)
+ * e LTV não existem nesta tela — dizer "veja abaixo" seria mentira de
+ * navegação. Nenhuma descrição contém número.
+ */
+const FOCUS_META: Record<ArrivalFocus, FocusMeta> = {
+  desperdicio_ads: {
+    description: "desperdício de investimento em Ads no Mercado Livre",
+    section: SECTION_PERIOD,
+    sectionLabel: "Ver GMV e investimento do intervalo",
+    unavailableNote:
+      "Esta página mostra GMV e investimento da marca no intervalo global. A classificação " +
+      "produto a produto (ad spend sem venda) fica na fila de evidências da Inteligência.",
+    returnLens: "parar",
+    returnAnchor: "fila-evidencias",
+  },
+  escala_ads: {
+    description: "oportunidade de escalar Ads no Mercado Livre",
+    section: SECTION_PERIOD,
+    sectionLabel: "Ver GMV e investimento do intervalo",
+    unavailableNote:
+      "Esta página mostra GMV e investimento da marca no intervalo global. O ROAS por produto e a " +
+      "referência do portfólio ficam na Inteligência.",
+    returnLens: "escalar",
+    returnAnchor: "fila-evidencias",
+  },
+  venda_organica: {
+    description: "venda orgânica sem investimento em Ads no Mercado Livre",
+    section: SECTION_PERIOD,
+    sectionLabel: "Ver GMV e investimento do intervalo",
+    unavailableNote:
+      "Esta página mostra GMV e investimento da marca no intervalo global. Quais produtos vendem sem " +
+      "Ads é classificação da fotografia ML, na Inteligência.",
+    returnLens: "testar",
+    returnAnchor: "fila-evidencias",
+  },
+  concentracao: {
+    description: "concentração de receita no portfólio do Mercado Livre",
+    section: null,
+    sectionLabel: null,
+    unavailableNote:
+      "A concentração Pareto do portfólio não existe nesta página — ela vive na Inteligência. " +
+      "Aqui a marca é lida por intervalo global e por competência mensal do TikTok.",
+    returnLens: null,
+    returnAnchor: "concentracao",
+  },
+  ltv: {
+    description: "recorrência e valor do cliente da marca",
+    section: null,
+    sectionLabel: null,
+    unavailableNote:
+      "Recorrência e LTV não existem nesta página — são leitura cross-company e vivem na Inteligência. " +
+      "Esta tela não tem dimensão de comprador.",
+    returnLens: null,
+    returnAnchor: "ltv",
+  },
+  produto_tiktok: {
+    description: "produto em destaque no TikTok Shop",
+    section: SECTION_MENSAL_PRODUTOS,
+    sectionLabel: "Ver produtos do TikTok na competência",
+    unavailableNote:
+      "Os produtos aqui são da COMPETÊNCIA MENSAL selecionada; a lista da Inteligência é uma janela " +
+      "de 30 dias. Períodos diferentes, portanto números diferentes — e nenhum dos dois traz Ads.",
+    returnLens: null,
+    returnAnchor: "produtos-tiktok",
+  },
+};
 
 export interface ArrivalSignalMeta {
   /** Descrição humana allowlisted (texto fixo do código, nunca da URL). */
@@ -144,22 +283,37 @@ const SIGNAL_META: Record<ArrivalSignal, ArrivalSignalMeta> = {
   },
 };
 
-export interface BrandArrivalContext {
-  from: BrandArrivalFrom;
-  signal: ArrivalSignal;
+/** Parte comum das duas origens — tudo que o banner precisa sem saber de onde
+ * o usuário veio. */
+export interface BrandArrivalCommon {
   channel: ArrivalChannel;
   channelLabel: string;
   brand: string;
-  /** Descrição humana do sinal (do código, allowlisted). */
+  /** Descrição humana do motivo (do código, allowlisted). Nunca contém número. */
   description: string;
   /** Âncora da seção com evidência real, ou `null`. */
   section: string | null;
   sectionLabel: string | null;
   /** Limitação quando não há evidência nesta página, ou `null`. */
   unavailableNote: string | null;
-  /** `true` quando a Marca realmente evidencia o sinal. */
+  /** `true` quando a Marca realmente evidencia o motivo. */
   hasEvidence: boolean;
 }
+
+/** Chegada por Canais — contrato original, inalterado. */
+export interface CanaisArrivalContext extends BrandArrivalCommon {
+  from: typeof CTX_FROM_CANAIS;
+  signal: ArrivalSignal;
+}
+
+/** Chegada pela Inteligência (Gate V3-2) — enum próprio, nunca `ctx_signal`. */
+export interface InteligenciaArrivalContext extends BrandArrivalCommon {
+  from: typeof CTX_FROM_INTELIGENCIA;
+  focus: ArrivalFocus;
+}
+
+/** União discriminada por `from`. */
+export type BrandArrivalContext = CanaisArrivalContext | InteligenciaArrivalContext;
 
 /** Leitor mínimo de querystring — compatível com `URLSearchParams` e com o
  * `ReadonlyURLSearchParams` do Next, sem depender de nenhum tipo do Next. */
@@ -184,6 +338,22 @@ function readSingle(params: ParamReader, key: string): string | null {
 }
 
 /**
+ * PRESENÇA do parâmetro — qualquer ocorrência, com qualquer valor.
+ *
+ * Deliberadamente distinta de `readSingle`, que responde "há exatamente um
+ * valor?" e devolve `null` tanto para ausente quanto para repetido. Usar
+ * `readSingle(x) != null` como teste de presença tem um furo exato: uma chave
+ * ESTRANGEIRA repetida (`?ctx_signal=a&ctx_signal=b` numa URL de Inteligência)
+ * devolveria `null` e passaria pela guarda, exatamente o caso mais suspeito.
+ * Aqui, uma ocorrência, várias, valor vazio ou valor inválido contam todos como
+ * presentes.
+ */
+function hasParam(params: ParamReader, key: string): boolean {
+  if (typeof params.getAll === "function") return params.getAll(key).length > 0;
+  return params.get(key) != null;
+}
+
+/**
  * Faz parse e valida o contexto de chegada. Devolve `null` (contexto
  * ignorado) em qualquer inconsistência — nunca lança, nunca erro na UI.
  *
@@ -197,38 +367,72 @@ export function parseBrandArrivalContext(
   selectedChannels: readonly string[],
 ): BrandArrivalContext | null {
   const from = readSingle(params, "ctx_from");
-  const signal = readSingle(params, "ctx_signal");
   const channel = readSingle(params, "ctx_channel");
   const brand = readSingle(params, "ctx_brand");
 
-  // Todos obrigatórios: contexto parcial não é contexto.
-  if (!from || !signal || !channel || !brand) return null;
-  if (from !== CTX_FROM_CANAIS) return null;
-  if (!isSignal(signal) || !isChannel(channel) || !isBrand(brand)) return null;
+  // Marca, canal e origem são obrigatórios nas duas origens: contexto parcial
+  // não é contexto. O motivo é lido pela chave da origem correspondente.
+  if (!from || !channel || !brand) return null;
+  if (!isChannel(channel) || !isBrand(brand)) return null;
 
   // Compatibilidade com a página atual: marca da rota e canal no filtro.
   // Troca de marca (pills) ou de canal (filtro) descarta o contexto.
   if (brand !== routeBrand) return null;
   if (!selectedChannels.includes(channel)) return null;
 
-  // Compatibilidade sinal × canal: a URL é entrada não confiável, então um
-  // sinal impossível para o canal (ex.: `roas_forte` no TikTok, que não tem
-  // Ads no contrato) nunca é anunciado — contexto ignorado em silêncio.
-  if (!isSignalCompatibleWithChannel(signal, channel)) return null;
+  // A união é discriminada, e isso vale nas DUAS direções: cada origem rejeita
+  // a chave de motivo da outra. Uma URL com as duas famílias é ambígua sobre a
+  // própria origem, e ambiguidade nunca vira escolha silenciosa.
+  if (from === CTX_FROM_CANAIS) {
+    if (hasParam(params, "ctx_focus")) return null;
+    const signal = readSingle(params, "ctx_signal");
+    if (!signal || !isSignal(signal)) return null;
+    // Compatibilidade sinal × canal: a URL é entrada não confiável, então um
+    // sinal impossível para o canal (ex.: `roas_forte` no TikTok, que não tem
+    // Ads no contrato) nunca é anunciado — contexto ignorado em silêncio.
+    if (!isSignalCompatibleWithChannel(signal, channel)) return null;
 
-  const meta = SIGNAL_META[signal];
-  return {
-    from,
-    signal,
-    channel,
-    channelLabel: CHANNEL_LABEL[channel],
-    brand,
-    description: meta.description,
-    section: meta.section,
-    sectionLabel: meta.sectionLabel,
-    unavailableNote: meta.unavailableNote,
-    hasEvidence: meta.section != null,
-  };
+    const meta = SIGNAL_META[signal];
+    return {
+      from: CTX_FROM_CANAIS,
+      signal,
+      channel,
+      channelLabel: CHANNEL_LABEL[channel],
+      brand,
+      description: meta.description,
+      section: meta.section,
+      sectionLabel: meta.sectionLabel,
+      unavailableNote: meta.unavailableNote,
+      hasEvidence: meta.section != null,
+    };
+  }
+
+  if (from === CTX_FROM_INTELIGENCIA) {
+    if (hasParam(params, "ctx_signal")) return null;
+    const focus = readSingle(params, "ctx_focus");
+    if (!focus || !isFocus(focus)) return null;
+    // Mesma guarda da origem Canais: o canal do foco é fixo no contrato, e um
+    // par foco × canal impossível (ex.: `produto_tiktok` com `ctx_channel=ml`)
+    // nunca é anunciado.
+    if (!isFocusCompatibleWithChannel(focus, channel)) return null;
+
+    const meta = FOCUS_META[focus];
+    return {
+      from: CTX_FROM_INTELIGENCIA,
+      focus,
+      channel,
+      channelLabel: CHANNEL_LABEL[channel],
+      brand,
+      description: meta.description,
+      section: meta.section,
+      sectionLabel: meta.sectionLabel,
+      unavailableNote: meta.unavailableNote,
+      hasEvidence: meta.section != null,
+    };
+  }
+
+  // Origem desconhecida (ex.: `gerencial`) ⇒ contexto ignorado, sem erro.
+  return null;
 }
 
 /**
@@ -270,10 +474,101 @@ export function buildArrivalParams(
  * Href de retorno à evidência de origem. Preserva os filtros globais atuais
  * (via `buildHref`/`mergeFilteredHref` do chamador) e fixa marca/canal do
  * contexto; NUNCA repropaga `ctx_*` — voltar não é "chegar quente".
+ *
+ * Para a Inteligência o retorno reconstrói **marca + lente/âncora** (§9.2):
+ * os três focos que vêm da fila voltam para a lente correspondente; os outros
+ * três voltam para a âncora do bloco que os produziu, porque não há lente
+ * para eles.
  */
 export function buildReturnHref(ctx: BrandArrivalContext): string {
+  if (ctx.from === CTX_FROM_INTELIGENCIA) {
+    const meta = FOCUS_META[ctx.focus];
+    const lens = meta.returnLens ? `&lens=${meta.returnLens}` : "";
+    return `/inteligencia?brands=${ctx.brand}${lens}#${meta.returnAnchor}`;
+  }
   return `/canais?brands=${ctx.brand}&channels=${ctx.channel}`;
 }
 
-/** Rótulo do CTA de retorno. */
+/**
+ * `true` quando o href de retorno DEVE passar por `mergeFilteredHref`.
+ *
+ * Só Canais. Dois motivos independentes, e cada um sozinho já bastaria:
+ *
+ * 1. `/inteligencia` **não é filter-aware** (`FILTER_AWARE_PAGES`): injetar
+ *    `channels`/`date_from`/`compare` nela seria propagar filtro para uma tela
+ *    de semântica própria, exatamente o que o contrato de navegação proíbe;
+ * 2. o retorno da Inteligência tem **âncora**, e `mergeFilteredHref` faz
+ *    `split("?")` e joga o resto num `URLSearchParams` — o `#fila-evidencias`
+ *    viraria parte do valor de `lens` (`lens=parar%23fila-evidencias`),
+ *    quebrando a lente E perdendo a âncora. O href de retorno da Inteligência
+ *    já está completo e vai direto.
+ */
+export function returnPreservesGlobalFilters(ctx: BrandArrivalContext): boolean {
+  return ctx.from === CTX_FROM_CANAIS;
+}
+
+/** Rótulo do CTA de retorno para Canais (mantido para compatibilidade). */
 export const RETURN_CTA_LABEL = "Voltar à evidência em Canais";
+export const RETURN_CTA_LABEL_INTELIGENCIA = "Voltar à evidência em Inteligência";
+
+/** Rótulo do CTA de retorno conforme a origem. */
+export function returnCtaLabel(ctx: BrandArrivalContext): string {
+  return ctx.from === CTX_FROM_INTELIGENCIA ? RETURN_CTA_LABEL_INTELIGENCIA : RETURN_CTA_LABEL;
+}
+
+/** Rótulo humano da origem, para a copy do banner. */
+export function originLabel(ctx: BrandArrivalContext): string {
+  return ctx.from === CTX_FROM_INTELIGENCIA ? "Inteligência" : "Canais";
+}
+
+/**
+ * Sufixo de querystring do contexto quente da Inteligência.
+ *
+ * Espelha `buildArrivalParams` de Canais: só identificadores, e a mesma guarda
+ * do lado do produtor — nunca emitir um contexto que o consumidor recusaria.
+ * O canal não é parâmetro: ele é **derivado do foco**, porque no contrato cada
+ * foco nasce de uma fonte de um único marketplace. Deixá-lo aberto permitiria
+ * ao produtor montar um par impossível.
+ */
+export function buildInteligenciaArrivalParams(
+  focus: ArrivalFocus | null,
+  brand: string,
+): string {
+  if (!focus || !isFocus(focus) || !isBrand(brand)) return "";
+  const qs = new URLSearchParams({
+    ctx_from: CTX_FROM_INTELIGENCIA,
+    ctx_focus: focus,
+    ctx_channel: FOCUS_CHANNEL[focus],
+    ctx_brand: brand,
+  });
+  return qs.toString();
+}
+
+/**
+ * Foco a emitir a partir da lente da fila de evidências.
+ *
+ * Mapeamento EXATO, não aproximação: as três lentes são as três listas do
+ * payload, e os três focos são exatamente essas listas (§9.1) —
+ * `parar`←`urgent`, `escalar`←`scale`, `testar`←`organic`.
+ */
+export function focusForEvidenceKind(kind: "parar" | "escalar" | "testar"): ArrivalFocus {
+  return kind === "parar" ? "desperdicio_ads" : kind === "escalar" ? "escala_ads" : "venda_organica";
+}
+
+/**
+ * Foco a emitir a partir do quadrante da matriz de oportunidades — ou `null`.
+ *
+ * Só `escalar` produz foco, e por identidade de população demonstrável: o
+ * quadrante exige GMV acima da mediana **e** ROAS ≥ referência, e a referência
+ * de ROAS é a mesma da lista `scale`, logo todo ponto de `escalar` pertence à
+ * população de `escala_ads`.
+ *
+ * `reduzir_parar` NÃO vira `desperdicio_ads`: aquele foco é
+ * `product_status = 'ad_spend_no_sales'`, e um ponto do quadrante inferior tem
+ * ROAS medido — pode ter venda. Mapeá-lo seria inventar classificação só para
+ * produzir contexto. `monitorar` e `testar_investimento` também não têm foco
+ * demonstrável. Nesses casos o CTA continua FRIO, e isso é a resposta certa.
+ */
+export function focusForQuadrant(quadrant: string): ArrivalFocus | null {
+  return quadrant === "escalar" ? "escala_ads" : null;
+}

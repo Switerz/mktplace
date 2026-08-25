@@ -63,8 +63,14 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
         ) : null}
       </div>
 
-      <div className="sticky top-0 z-30 -mx-6 px-6 py-2 bg-[#f8f7ff]/95 backdrop-blur supports-[backdrop-filter]:bg-[#f8f7ff]/80 border-b border-violet-100/70">
-        <div className="flex items-start justify-between gap-3 flex-wrap">{children}</div>
+      {/* Com os controles compartilhados a 44x44px, esta faixa passou de ~29%
+          para 32% do viewport no tablet. O ajuste e de ESPACAMENTO — padding
+          vertical e gap entre linhas quando os filtros embrulham —, nunca do
+          alvo: reduzir o botao para preservar a altura da faixa desfaria
+          exatamente o que este patch corrige. `top-0` e o comportamento do
+          V2-4 seguem intactos. */}
+      <div className="sticky top-0 z-30 -mx-6 px-6 py-1.5 bg-[#f8f7ff]/95 backdrop-blur supports-[backdrop-filter]:bg-[#f8f7ff]/80 border-b border-violet-100/70">
+        <div className="flex items-start justify-between gap-x-3 gap-y-1.5 flex-wrap">{children}</div>
       </div>
     </>
   );

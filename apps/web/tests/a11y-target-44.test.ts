@@ -230,3 +230,148 @@ test("regressão: nenhum acionável do V3-1A declara altura fixa abaixo de 44px"
     }
   }
 });
+// ═══════════════════════════════════════════════════════════════════════════
+// Patch terminal do Gate V3-3 — acessibilidade dos COMPARTILHADOS
+//
+// O QA integrado do V3-3 fechou funcionalmente, mas com 12 reprovacoes de
+// acessibilidade em componentes usados por sete rotas. Estes contratos existem
+// para que o proximo gate nao os reintroduza. A medicao final e' no navegador;
+// isto aqui e' a rede de seguranca estatica.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CHART = src("src/components/DailyChart.tsx");
+const MIX = src("src/components/ChannelMixChart.tsx");
+const MKT = src("src/components/MarketplaceFilter.tsx");
+const DRF = src("src/components/DateRangeFilter.tsx");
+const PER = src("src/components/PeriodSelector.tsx");
+
+/** Fonte sem comentarios: as asserções de contagem e de AUSENCIA precisam
+ * olhar markup, nao a prosa que explica a decisao. Um comentario que cita
+ * `role="img"` ou `<Legend>` reprovaria justamente o arquivo correto. */
+const semCom = (t: string) => t
+  .replace(/\/\*[\s\S]*?\*\//g, " ")
+  .split(/\r?\n/)
+  .map((l) => l.replace(/(^|\s)\/\/.*$/, "$1"))
+  .join("\n");
+const CHART_CODIGO = semCom(CHART);
+
+test("V33 nenhum grafico renderiza tick abaixo de 12px", () => {
+  for (const [nome, src] of [["DailyChart", CHART], ["ChannelMixChart", MIX]] as const) {
+    for (const m of src.matchAll(/fontSize:\s*(\d+)/g)) {
+      assert.ok(Number(m[1]) >= 12, `${nome} renderiza texto a ${m[1]}px`);
+    }
+    assert.doesNotMatch(src, /fontSize:\s*1[01]/, nome);
+  }
+  // o piso vive numa constante nomeada, para nao voltar por descuido
+  assert.match(CHART, /const TICK = \{ fontSize: 12/);
+});
+
+test("V33 o eixo Y ganhou largura junto com a fonte, para nao cortar o valor", () => {
+  // a 12px o rotulo monetario e' mais largo; largura antiga cortava
+  assert.match(CHART, /width=\{80\}/);
+  assert.match(MIX, /width=\{60\}/);
+});
+
+test("V33 o grafico tem UMA representacao acessivel, com nome e descricao", () => {
+  assert.match(CHART, /role="img"/);
+  assert.match(CHART, /aria-label=\{nomeAcessivel\}/);
+  assert.match(CHART, /aria-describedby=\{descId\}/);
+  assert.equal((CHART_CODIGO.match(/role="img"/g) ?? []).length, 1, "exatamente uma representacao");
+  // o nome e a descricao sao derivados do dado, nao fixos
+  assert.match(CHART, /Gráfico de GMV diário/);
+  assert.match(CHART, /Séries exibidas/);
+  // sem gambiarra de hidratacao
+  assert.doesNotMatch(CHART_CODIGO, /suppressHydrationWarning/);
+});
+
+test("V33 a descricao distingue ausencia de zero e nao anuncia serie inativa", () => {
+  assert.match(CHART, /sem ponto na série, e não é desenhado como zero/);
+  assert.match(CHART, /zero medido é desenhado na linha de base/);
+  // a legenda sai de `legenda`, que sai de `activeSeries` — nunca de uma lista fixa
+  assert.match(CHART, /const legenda = activeSeries\.length > 0/);
+  assert.match(CHART, /legenda\.map\(\(l\) => l\.nome\)\.join\(", "\)/);
+});
+
+test("V33 a legenda e textual e o marcador colorido e decorativo", () => {
+  assert.match(CHART, /aria-label="Séries do gráfico"/);
+  assert.match(CHART, /aria-hidden="true"[\s\S]{0,120}backgroundColor: l\.cor/);
+  // o nome da serie esta em TEXTO, ao lado do marcador
+  assert.match(CHART, /\{l\.nome\}/);
+  // o Legend automatico saiu: ele nao garantia nem o texto fora do role=img
+  // nem o aria-hidden no icone
+  assert.doesNotMatch(CHART_CODIGO, /<Legend/);
+  assert.doesNotMatch(CHART_CODIGO, /Legend,/, "Legend saiu tambem do import");
+});
+
+test("V33 MarketplaceFilter cumpre 44x44px sem comprimir", () => {
+  assert.match(MKT, /min-h-11 min-w-11/);
+  assert.match(MKT, /shrink-0/, "sem shrink-0 o flex comprime o alvo e recorta o rotulo");
+  assert.match(MKT, /overflow-x-auto/, "a faixa rola em vez de encolher o alvo");
+  assert.doesNotMatch(MKT, /py-2 rounded-lg/, "o padding vertical antigo saiu");
+});
+
+test("V33 DateRangeFilter cumpre 44px em preset, comparacao e datas", () => {
+  // o slice tem de comecar no grupo de presets e terminar no toggle de
+  // comparacao — `indexOf("hideCompare")` casava primeiro na interface Props,
+  // acima, e devolvia uma faixa vazia
+  const presets = DRF.slice(DRF.indexOf('aria-label="Presets de período"'),
+    DRF.indexOf("O alvo aqui e' o LABEL"));
+  assert.match(presets, /min-h-11 min-w-11/);
+  assert.match(presets, /shrink-0/);
+  // o alvo do checkbox e o LABEL, que e' o que recebe o clique
+  assert.match(DRF, /<label className="inline-flex items-center gap-2 min-h-11 px-2/);
+  // e os campos de data crescem no proprio input
+  assert.equal((DRF.match(/className="min-h-11 border border-violet-200/g) ?? []).length, 2);
+});
+
+test("V33 aria-pressed, labels e validacao de data seguem intactos", () => {
+  assert.equal((MKT.match(/aria-pressed=/g) ?? []).length, 2, "Todos + os tres canais");
+  assert.match(DRF, /aria-pressed=\{active\}/);
+  assert.match(DRF, /role="group"[\s\S]{0,80}aria-label="Presets de período"/);
+  assert.match(MKT, /aria-label="Filtro de marketplaces"/);
+  // labels dos inputs preservados
+  assert.match(DRF, />\s*De\s*</);
+  assert.match(DRF, />\s*Até\s*</);
+  assert.match(DRF, /Comparar com período anterior/);
+  // limites e validacao
+  assert.match(DRF, /max=\{dateTo < todayIso \? dateTo : todayIso\}/);
+  assert.match(DRF, /min=\{dateFrom\}/);
+  assert.match(DRF, /validateDateRange\(next\.dateFrom, next\.dateTo\)/);
+});
+
+test("V33 PeriodSelector segue no contrato de 44px do V3-2", () => {
+  assert.match(PER, /min-h-11 min-w-11/);
+  assert.match(PER, /shrink-0/);
+});
+
+test("V33 nenhum onClick em elemento sem semantica de controle", () => {
+  for (const [nome, src] of [["DailyChart", CHART], ["ChannelMixChart", MIX], ["MarketplaceFilter", MKT],
+                             ["DateRangeFilter", DRF], ["PeriodSelector", PER]] as const) {
+    for (const m of src.matchAll(/<(\w+)[^>]*\sonClick=/g)) {
+      assert.ok(["button", "a", "input", "label", "select"].includes(m[1]),
+        `${nome}: onClick em <${m[1]}>`);
+    }
+  }
+});
+
+test("V33 o sticky da Gerencial cede espacamento, nunca o alvo", () => {
+  const hdr = src("src/components/gerencial/GerencialHeader.tsx");
+  assert.match(hdr, /sticky top-0 z-30/, "comportamento do V2-4 preservado");
+  assert.match(hdr, /py-1\.5/, "padding vertical reduzido");
+  assert.match(hdr, /gap-x-3 gap-y-1\.5/, "gap entre linhas reduzido no wrap");
+  // e nenhuma altura fixa que pudesse encolher os controles
+  assert.doesNotMatch(hdr, /max-h-|h-\[\d+px\]/);
+});
+
+test("V33 o patch nao trouxe dependencia nova", () => {
+  const pkg = JSON.parse(src("package.json")) as {
+    dependencies: Record<string, string>; devDependencies: Record<string, string>;
+  };
+  assert.equal(Object.keys(pkg.dependencies).length, 7);
+  assert.equal(Object.keys(pkg.devDependencies).length, 8);
+  assert.ok("recharts" in pkg.dependencies, "o grafico continua no Recharts ja instalado");
+  // nada de biblioteca de acessibilidade ou de grafico nova
+  for (const proibida of ["@axe-core/react", "victory", "chart.js", "d3", "@visx/visx"]) {
+    assert.ok(!(proibida in pkg.dependencies) && !(proibida in pkg.devDependencies), proibida);
+  }
+});
