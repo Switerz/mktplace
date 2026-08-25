@@ -3125,3 +3125,113 @@ componente que este patch autorizava tocar. Não foi alterado.
 2. aguardar a **publicação automática** do frontend na Vercel;
 3. só então executar o **smoke terminal**, que é o que pode declarar o `PASS`
    final do Gate V3.
+
+## 30. Gate V3 — smoke terminal pós-republicação: `PASS` (25/08/2026)
+
+O Gate V3 está **encerrado como `PASS`**. Esta seção registra o que foi medido, em
+duas tentativas, e por que a primeira reprovou.
+
+### 30.1 Os dois patches terminais
+
+Dois commits fecharam as pendências que o smoke de 25/08 havia levantado:
+
+| commit | o que fez |
+|---|---|
+| `a893a2b` | uniformiza as contagens do drill-down — `contagemExata` nas duas contagens do diálogo de quadrante, `fmtNumber` global intocado |
+| `aa6e245` | preserva o foco nas transições internas da matriz — prop opcional `focusResetKey` no `KpiDrilldownDialog` |
+
+O `aa6e245` corrigiu um diagnóstico que eu mesmo havia errado antes: **não existiam
+dois shells de diálogo**. O segundo `role="dialog"` que aparecia no DOM era o
+`MobileDrawer` da navegação, sempre montado e oculto. O `KpiDrilldownDialog`
+continua sendo um só; o que faltava era que o efeito de foco dependia apenas de
+`open`, e `dialog.kind` mudava de `matrix` para `quadrant`, `band` ou `point` com
+`open` ainda `true`. O botão acionador era desmontado e o foco caía no
+`document.body`. A prop `focusResetKey` dá ao segundo efeito um gatilho por
+**conteúdo**, sem recapturar `previousFocusRef` e sem executar cleanup de `inert`
+ou de `overflow` — quem não passa a prop preserva o comportamento anterior, e
+`app/page.tsx`, `app/canais/page.tsx` e `app/brand/[brand]/page.tsx` não passam.
+
+### 30.2 Primeira tentativa — `NO-GO` por texto sem acento
+
+O smoke terminal de 25/08 no domínio canônico
+`https://mktplace-gobeaute.vercel.app` mediu **128 verificações, 121 aprovadas**.
+O único achado real de produto acionou um item do stop-loss: a nota de referência
+chegava **sem acentuação**.
+
+A causa foi medida, não inferida. O `reference_note` vinha sem acentos direto do
+payload da API; o frontend **não tem fallback** para esse texto, e
+`apps/api/app/services/gold_service.py` já continha a string acentuada desde
+`84c9d5f`. Logo, o serviço no Render estava rodando uma revisão **anterior** a
+`84c9d5f`. Nenhuma linha de código precisava mudar: o menor patch era republicar
+o backend. A documentação **não** foi alterada naquela rodada.
+
+Das outras seis não-aprovações, nenhuma era defeito do produto: quatro eram um
+falso positivo do detector de texto cortado, que marcava elementos `sr-only`
+(`clientWidth: 1`, `nowrap` — é assim que o `sr-only` do Tailwind é implementado),
+e duas eram falha do instrumento na navegação mobile pós-fechamento, porque a
+navegação do desktop também está no DOM, oculta, antes dos links do drawer.
+Reexecutada com escopo no diálogo visível: **6/6 aprovadas**, chegando a
+`/canais` com `inert=false`, `overflow=""` e zero diálogo visível.
+
+### 30.3 Segunda tentativa — `PASS`
+
+O proprietário **republicou manualmente o backend no Render** a partir da `main`
+atual. O reteste focal, ainda estritamente read-only, sem interceptação, fixture
+ou mock:
+
+**Fase 1, um GET no endpoint de Inteligência** (25/08/2026, 18:49 −03:00, HTTP
+200): `reference_note` **idêntico** ao contrato, com `ê`, `ó` e `ã` presentes;
+`total_count = 1650`, `returned_count = 40`, quadrantes `escalar 493/10`,
+`testar_investimento 187/10`, `monitorar 57/10`, `reduzir_parar 162/10`.
+
+**Fase 2, confirmação visual focal — 31 verificações, 31 aprovadas** em
+1440×900 e 390×844:
+
+| contrato | desktop | mobile |
+|---|---|---|
+| nota acentuada, texto exato | ok | ok |
+| universo do cabeçalho `1.650` | ok | ok |
+| declaração `1.650` e `40` | ok | ok |
+| quadrante `493` e `10`, zero K/M | ok | ok |
+| nenhuma mensagem de fallback | ok | ok |
+| zero erro de console e de hidratação | ok | ok |
+| zero overflow horizontal | ok | ok |
+
+Contraprova de foco no mobile, uma transição matriz → quadrante: foco em
+`Fechar detalhes`, **nunca** em `body`, exatamente **um** diálogo visível (o
+drawer oculto não conta), `inert=true` e `overflow=hidden` durante a transição;
+Escape fecha, restaura `inert=false` e `overflow=""` e devolve o foco ao
+acionador original `"Abrir a matriz de oportunidades em tela cheia"`.
+
+Hosts observados: `mktplace-gobeaute.vercel.app` e `mktplace-api.onrender.com`.
+Somente `GET`. Zero 5xx.
+
+### 30.4 Leitura honesta da revisão publicada
+
+Nem a Vercel nem o Render expõem o SHA publicado — `/health` devolve apenas
+`{"status":"ok"}`. Portanto: **comportamento do frontend compatível com
+`aa6e245`** (contagens exatas de `a893a2b` e correção de foco de `aa6e245`
+presentes e medidas) e **backend servindo a nota acentuada de `84c9d5f`**. Nada
+disso é afirmação de SHA publicado.
+
+### 30.5 O que continua fora do escopo
+
+Duas dívidas seguem **abertas e não corrigidas**, e o `PASS` do Gate V3 não as
+cobre:
+
+1. as quatro ocorrências de `gray-on-color` apontadas pelo detector de design —
+   `src/components/KpiDrilldownDialog.tsx:142` (o `text-slate-500` do botão de
+   fechar) e `app/inteligencia/page.tsx` nas linhas 364, 378 e 657;
+2. o **422** do `resolve_brands`, que ecoa o valor de marca inválido recebido
+   (§26.5).
+
+**Não verificado neste reteste:** os estados `empty`, `unavailable` e `error` da
+Inteligência. Produção estava saudável e a rodada proibia interceptação, então
+não havia gatilho legítimo para provocá-los sem fabricar estado. O `loading` foi
+verificado de forma real — skeleton com `role="status"`/`aria-busy="true"`,
+rótulo "Carregando inteligência…", sem texto de vazio durante o voo da
+requisição e sem universo exibido como `0` em nenhum instante. Os outros três
+seguem cobertos apenas pelo QA integrado do V3-3, com interceptação declarada.
+
+**UE3 não foi iniciado.** O `PASS` é do Gate V3 e não afirma nada sobre o
+restante do produto.
