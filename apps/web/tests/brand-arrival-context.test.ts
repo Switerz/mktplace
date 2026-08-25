@@ -290,18 +290,27 @@ test("null ≠ zero: ausência de contexto é null, nunca um objeto 'vazio'", ()
 // Regressões estáticas de wiring
 // ---------------------------------------------------------------------------
 
-test("Canais é o ÚNICO produtor de ctx_* e a Marca o único consumidor", () => {
+test("Canais segue produzindo ctx_* e a Marca segue sendo a única consumidora", () => {
+  // Atualizado no Gate V3-2: a Inteligência passou a ser um SEGUNDO produtor,
+  // com `ctx_focus` próprio (nunca `ctx_signal`). O contrato de Canais continua
+  // idêntico letra por letra — é isso que este teste protege.
   const canais = read("src/components/ChannelComparisonDialogContent.tsx");
   assert.match(canais, /buildArrivalParams\(row\.signals, row\.channel, row\.brand\)/);
   assert.match(canais, /DrilldownCta href=\{buildHref\(brandHref\)\}/);
+  assert.doesNotMatch(canais, /ctx_focus|buildInteligenciaArrivalParams/, "Canais não emite a outra origem");
 
   const marca = read("app/brand/[brand]/page.tsx");
   assert.match(marca, /parseBrandArrivalContext\(searchParams, brand, filters\.channels\)/);
   assert.match(marca, /<BrandArrivalBanner ctx=\{arrivalCtx\}/);
 
-  // nenhuma outra tela produz ou consome ctx_*
+  // o segundo produtor existe de fato — o enum não foi criado sem wiring
+  const intel = read("app/inteligencia/page.tsx");
+  assert.match(intel, /buildInteligenciaArrivalParams\(/);
+  assert.doesNotMatch(intel, /ctx_signal/, "a Inteligência nunca reusa o sinal de Canais");
+
+  // nenhuma tela ALÉM dessas duas produz ctx_*, e nenhuma além da Marca consome
   for (const f of ["app/page.tsx", "app/canais/page.tsx", "app/financeiro/page.tsx", "src/lib/filters/nav-links.ts"]) {
-    assert.doesNotMatch(read(f), /ctx_from|ctx_signal|ctx_channel|ctx_brand/, f);
+    assert.doesNotMatch(read(f), /ctx_from|ctx_signal|ctx_focus|ctx_channel|ctx_brand/, f);
   }
 });
 

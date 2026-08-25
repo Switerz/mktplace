@@ -89,22 +89,26 @@ export default function ChannelMixChart({ data }: Props) {
         <CartesianGrid strokeDasharray="3 3" stroke="#f1f0ff" vertical={false} />
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: "#64748b" }}
+          // Piso de 12px do V3: este grafico divide a pagina de Marca com o
+          // DailyChart, e era o unico que ainda renderizava 11px.
+          tick={{ fontSize: 12, fill: "#64748b" }}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
+          minTickGap={24}
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "#64748b" }}
+          tick={{ fontSize: 12, fill: "#64748b" }}
           tickLine={false}
           axisLine={false}
           tickFormatter={fmtK}
-          width={52}
+          // 52px cabia o rotulo a 11px; a 12px precisa de folga para nao cortar
+          width={60}
         />
         <Tooltip content={<CustomTooltip />} />
         <Legend
           iconType="square"
-          wrapperStyle={{ fontSize: 11, paddingTop: 8, color: "#64748b" }}
+          wrapperStyle={{ fontSize: 12, paddingTop: 8, color: "#64748b" }}
         />
         <Area
           type="monotone"

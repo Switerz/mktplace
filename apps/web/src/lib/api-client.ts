@@ -1419,6 +1419,20 @@ export interface BrandDetail {
   daily: BrandDetailDayRow[];
   top_creators: BrandDetailCreator[];
   top_produtos: BrandDetailProduto[];
+  /**
+   * BE5 — competencias com dado REAL para esta marca, `YYYY-MM` decrescente,
+   * sem duplicidade, `[]` para marca sem historico.
+   *
+   * E' a unica fonte legitima da lista do seletor mensal: `fetchBrandDetail`
+   * devolve apenas o mes pedido, e a colecao `daily` da resposta so' tem dias
+   * desse mes — nao existe como derivar dela as outras competencias. Antes do
+   * BE5 a lista vinha de `AVAILABLE_MONTHS` do mock, o que tornava meses reais
+   * fora da lista inalcancaveis (defeito M2 do desenho).
+   *
+   * Campo ADITIVO: o default `[]` mantem compativel qualquer resposta antiga
+   * que nao o traga.
+   */
+  available_months: string[];
 }
 
 export function fetchBrandDetail(
@@ -1876,5 +1890,3 @@ export function fetchRegioesTrend(
     apiFetch<RegioesTrendData>(`/api/v1/regioes/trend?${qs.toString()}`)
   );
 }
-
-

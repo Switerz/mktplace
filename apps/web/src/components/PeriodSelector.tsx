@@ -21,7 +21,11 @@ export default function PeriodSelector({ value, onChange, months = AVAILABLE_MON
           <button
             key={m.value}
             onClick={() => onChange(m.value)}
-            className={`px-3 py-1.5 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
+            // `min-h-11 min-w-11` fecha o contrato de 44x44px do V3: este e o
+            // controle PRIMARIO do regime mensal da Marca 360, e media 32px de
+            // altura. So o alvo cresce — rotulo, cor, estado e API seguem iguais,
+            // e `/produtos`, o outro consumidor, foi remedido depois da mudanca.
+            className={`inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-3 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
               value === m.value
                 ? "bg-violet-600 text-white shadow"
                 : "text-violet-700 hover:bg-violet-50"

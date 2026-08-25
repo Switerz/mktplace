@@ -20,8 +20,17 @@ interface Props {
   onChange: (v: MarketplaceSelection) => void;
 }
 
+/**
+ * `min-h-11 min-w-11` fecha o contrato de 44x44px do V3 — os quatro botoes
+ * mediam 36px de altura, e este filtro aparece em sete rotas.
+ *
+ * `shrink-0` e' obrigatorio junto: sem ele o botao encolhe dentro do flex do
+ * container e o `justify-center` passa a RECORTAR o rotulo em telas estreitas.
+ * Com ele a faixa transborda e o `overflow-x-auto` que o container ja declarava
+ * rola — o alvo nunca cai abaixo de 44px para caber.
+ */
 const BASE_BTN =
-  "px-4 py-2 rounded-lg text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1";
+  "inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-4 rounded-lg text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1";
 const ACTIVE_BTN = "bg-violet-600 text-white shadow";
 const INACTIVE_BTN = "text-violet-700 hover:bg-violet-50";
 

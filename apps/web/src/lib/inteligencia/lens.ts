@@ -101,6 +101,10 @@ export const INTELIGENCIA_ANCHORS = {
   oportunidades: "oportunidades",
   concentracao: "concentracao",
   produtos: "produtos-midia",
+  /** Painel TikTok DENTRO do bloco 5 — ancora propria porque o retorno frio
+   * de `ctx_focus=produto_tiktok` aponta para ele, nao para o bloco inteiro
+   * (que comeca com as duas listas ML). */
+  produtosTiktok: "produtos-tiktok",
   fila: "fila-evidencias",
   ltv: "ltv",
 } as const;
