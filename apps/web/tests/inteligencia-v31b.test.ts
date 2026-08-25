@@ -598,3 +598,28 @@ test("V3F a nota de referencia continua vindo do backend, acentuada", () => {
   assert.match(py, /"Referências descritivas do portfólio no escopo atual; não são metas comerciais\."/);
   assert.doesNotMatch(py, /"Referencias descritivas do portfolio no escopo atual; nao sao metas comerciais\."/);
 });
+test("V3F o dialogo do quadrante usa contagem exata, nao K/M", () => {
+  const PAGE_SRC = src(PAGE);
+  // as duas contagens do par universo x destaques
+  assert.match(PAGE_SRC, /label="Produtos no quadrante \(universo\)"[\s\S]{0,80}value=\{contagemExata\(q\?\.count \?\? 0\)\}/);
+  assert.match(PAGE_SRC, /referenceLabel="Destaques plotados"[\s\S]{0,90}referenceValue=\{contagemExata\(q\?\.returned_count \?\? 0\)\}/);
+  assert.doesNotMatch(PAGE_SRC, /value=\{fmtNumber\(q\?\.count \?\? 0\)\}/);
+  assert.doesNotMatch(PAGE_SRC, /referenceValue=\{fmtNumber\(q\?\.returned_count \?\? 0\)\}/);
+
+  // comportamento: os numeros que o dialogo vai renderizar
+  assert.equal(contagemExata(1650), "1.650");
+  assert.equal(contagemExata(40), "40");
+  assert.doesNotMatch(contagemExata(1650), /1[.,]6K/);
+  assert.doesNotMatch(contagemExata(40), /[KM]/);
+
+  // o dialogo continua no shell compartilhado
+  assert.match(PAGE_SRC, /<KpiDrilldownDialog/);
+  assert.equal((PAGE_SRC.match(/<KpiDrilldownDialog/g) ?? []).length, 1, "um unico shell");
+
+  // e os OUTROS usos de fmtNumber na pagina seguem intactos
+  for (const alvo of [
+    "fmtNumber(r.orders)", "nullable(r.total_buyers, fmtNumber)",
+    "nullable(r.at_risk_or_churned, fmtNumber)", "fmtNumber(b?.count ?? 0)",
+    "fmtNumber(oppMap.total_count)", "fmtNumber(dialog.share.n_products)",
+  ]) assert.ok(PAGE_SRC.includes(alvo), alvo);
+});

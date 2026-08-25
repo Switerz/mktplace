@@ -21,7 +21,7 @@ import TableScrollHint from "@/components/TableScrollHint";
 import OpportunityMatrix from "@/components/inteligencia/OpportunityMatrix";
 import {
   BAND_META, QUADRANT_META, freshnessLabel, isSample, matrixState,
-  moedaExata, readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
+  contagemExata, moedaExata, readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
   type BandKey, type QuadrantKey,
 } from "@/lib/inteligencia/opportunity";
 import { fetchInteligencia, type InteligenciaData, type LtvRow, type OpportunityHighlight } from "@/lib/api-client";
@@ -768,11 +768,15 @@ function InteligenciaPageInner() {
                 <strong>Regra:</strong> {meta.regra(roasBr(oppMap.roas_reference), gmvRef)}.{" "}
                 Fronteiras altas são inclusivas. {meta.leitura}
               </p>
+              {/* Mesmo contrato de contagem auditável do cabeçalho da matriz: o
+                  diálogo é onde se confere que N destaques saem de M produtos, e
+                  `fmtNumber` abreviava os dois para K/M. Só estas duas contagens
+                  mudam — dinheiro, ROAS e os outros usos da página seguem iguais. */}
               <DrilldownMetricPair
                 label="Produtos no quadrante (universo)"
-                value={fmtNumber(q?.count ?? 0)}
+                value={contagemExata(q?.count ?? 0)}
                 referenceLabel="Destaques plotados"
-                referenceValue={fmtNumber(q?.returned_count ?? 0)}
+                referenceValue={contagemExata(q?.returned_count ?? 0)}
               />
               <DrilldownMetricPair
                 label="GMV do quadrante"
