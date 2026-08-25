@@ -138,7 +138,11 @@ def test_m02_head_unico_em_todas_as_revisoes():
     duplicados = {p: f for p, f in filhos.items() if p is not None and len(f) > 1}
     assert not duplicados, f"branch na cadeia: {duplicados}"
     heads = [r for r in revisoes if r not in filhos]
-    assert heads == ["011"], f"head deveria ser unico e igual a 011, veio {heads}"
+    # Head avancado de 011 para 012 pelo Gate UE2-B, que acrescentou
+    # marts.fact_tiktok_affiliate_cost_order_monthly. O pino literal e' proposital:
+    # forca uma revisao consciente a cada migration nova, em vez de aceitar
+    # qualquer head em silencio.
+    assert heads == ["012"], f"head deveria ser unico e igual a 012, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

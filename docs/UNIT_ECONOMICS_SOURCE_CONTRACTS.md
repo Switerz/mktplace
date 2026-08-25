@@ -941,7 +941,9 @@ Regra final, sem contradição:
 
 **[FATO] Fotografia estável:** `max(updated_at)` no início e ao fim da auditoria = `2026-08-21T00:03:27.454607`, com 2.122.887 linhas nas duas leituras. Nenhuma consulta desta fase leu além desse limite.
 
-### 18.8 Contrato futuro — desenho, sem implementação
+### 18.8 Contrato do fato — especificação executável canônica
+
+⚠️ **[FATO] Estado desde o UE2-B Task 1/2:** esta especificação foi **implementada localmente**, com migration **não aplicada**. A §18.8 continua sendo a **única** especificação executável — divergência entre código e §18.8 é defeito do código. O estado de implementação, as decisões que a §18.8.7 delegou e o que a validação local **não** cobriu estão na **§19**.
 
 **[RECOMENDAÇÃO]** Dois objetos **separados**, nunca a mesma tabela nem a mesma coluna.
 
@@ -1082,10 +1084,98 @@ Ordem correta, em duas etapas sobre a **mesma fotografia**:
 | Rastreabilidade | `source_run_id` da execução que o avançou |
 | Momento do avanço | **somente após** staging materializada, escrita no destino concluída **e** reconciliação aprovada |
 | Rollback | execução revertida ou sem publicação **não avança** o watermark |
-| Nenhuma chave tocada | comportamento explícito: o watermark **pode** avançar (nada mudou de fato), mas isso precisa ser decisão declarada, não efeito colateral |
+| Nenhuma chave tocada | comportamento explícito: o watermark **pode** avançar (nada mudou de fato), mas isso precisa ser decisão declarada, não efeito colateral. **Sem caminho de atalho:** o no-op atravessa o mesmo lock, a mesma fotografia e a mesma reconciliação (§18.8.8) |
 | Primeira carga | ausência de watermark **exige backfill integral**; nunca tratar "sem watermark" como "desde o início da janela" |
+| Representação da ausência | **ausência de LINHA**, nunca linha com coluna nula. `last_successful_upper_bound` e `source_run_id` são `NOT NULL`: uma linha meio-preenchida seria um terceiro estado, e "sem watermark" e "watermark desconhecido" acabariam tratados como a mesma coisa |
+| Avanço observável | o resultado é **medido, não presumido**: `cutoff > atual` → atualiza exatamente uma linha e reporta **avançado**; `cutoff = atual` → **no-op idempotente**, reporta **inalterado** e **não** toca `source_run_id` (o run_id gravado continua sendo o da execução que de fato moveu o watermark); `cutoff < atual` → **FALHA**, nunca publica. `rowcount` diferente de 1 falha. Nenhuma mensagem pode dizer "avançado" quando nada mudou |
 
 **Nenhuma decisão de tabela ou arquitetura é tomada nesta correção documental.**
+
+#### 18.8.8 Serialização da execução — o lock vem antes do watermark
+
+⚠️ **[FATO] Acrescentado na correção terminal do UE2-B.** O desenho anterior lia o watermark numa conexão read-only e só tomava o advisory lock no momento de publicar. Isso é insuficiente, e a afirmação anterior de que "não corromperia o destino" **era falsa**.
+
+**O modo de falha concreto:** duas execuções leem o **mesmo** watermark, abrem fotografias diferentes e publicam em qualquer ordem. A execução com a fotografia **mais antiga** pode publicar por último e sobrescrever o fato com dados velhos, enquanto o `ON CONFLICT` monotônico preserva o watermark **novo**. O estado final — **watermark novo com fato antigo** — é o pior possível: o incremental seguinte nunca releria a janela perdida, e o dado ficaria errado permanentemente, sem nenhum sinal de erro.
+
+⚠️ **[FATO] A primeira correção deste defeito usou `pg_advisory_xact_lock` e criou um segundo defeito. A ordem canônica está na §18.8.10.** O lock de transação amarrava a exclusão mútua a uma transação gravável aberta desde o passo 1, que ficava **ociosa** durante toda a leitura da fonte — e o destino encerra sessões ociosas em transação. O princípio abaixo permanece; o mecanismo mudou.
+
+**Princípio invariante:** o advisory lock é adquirido **antes de qualquer leitura de estado, abertura de snapshot ou acesso a dados**, e o watermark autoritativo é lido **depois** dele. Com isso, duas execuções aplicáveis nunca observam o mesmo watermark, e uma fotografia antiga não pode publicar depois de uma nova: a segunda execução só vê o watermark já avançado, e o avanço falha se o cutoff dela for **menor** que o registrado.
+
+**O `WHERE` monotônico permanece como defesa em profundidade, não como substituto.** Ele protege a coluna do watermark; não protegia — e não protege — o fato.
+
+**Execução sem `--apply`:** **zero** advisory lock, **zero** DDL/DML, **zero** staging. Quando ocorre, a leitura do watermark é read-only e **não é autoritativa** — sem lock ela pode envelhecer no mesmo instante.
+
+⚠️ **[FATO] `full` sem `--apply` NÃO toca o destino, nem para ler.** `full` ignora o watermark por definição, então ler o state era **dependência indevida**: fazia o diagnóstico do backfill inicial depender de uma tabela que só existe **depois** da migration — impossível justamente no primeiro `full`, quando o preflight é mais necessário. Em `full` dry-run, `watermark = None` por construção e a única conexão aberta é a fotografia read-only da fonte.
+
+`incremental` sem `--apply` continua lendo o state em read-only e continua **falhando** quando a linha ou a tabela não existe. Nunca cai silenciosamente para `full`: tratar "sem state" como "lê a história inteira" transformaria erro de configuração em **backfill acidental**.
+
+#### 18.8.9 Ordem canônica — advisory lock de SESSÃO
+
+⚠️ **[FATO] `statement_timeout` é POR STATEMENT e não produz teto acumulado.** `read_source_snapshot` executa **sete** consultas sequenciais (prova de sessão, limites, tipos, população, chaves, recomposição, totais). Reduzir `SOURCE_STATEMENT_TIMEOUT` de 600 s para 180 s **não** limitaria a 180 s o tempo em que a transação gravável do destino ficaria aberta — limitaria cada consulta isoladamente, e sete consultas de até 180 s excedem com folga os 300 s de `idle_in_transaction_session_timeout`. A recomendação anterior de "180 s deixa 120 s de margem" **estava errada** e foi retirada.
+
+A correção é estrutural, não paramétrica: **eliminar a transação ociosa**, em vez de tentar caber nela.
+
+**Ordem obrigatória para execuções com escrita. UMA SÓ conexão com o destino:**
+
+```
+ 1. abrir a UNICA conexao do destino, em AUTOCOMMIT
+ 2. adquirir pg_advisory_lock(K) com lock_timeout finito   <- lock de SESSAO
+ 3. ler o watermark autoritativo sob o lock, SEM transacao aberta
+ 4. determinar o lower bound
+ 5. abrir a fotografia read-only REPEATABLE READ na fonte
+ 6. ler a fonte inteira dentro da fotografia
+ 7. validar integralmente EM MEMORIA          <- destino ainda intocado
+ 8. confirmar que ESTA sessao esta viva e ainda detem o lock
+ 9. desligar o autocommit NA MESMA conexao -> transacao gravavel
+10. reler o watermark (FOR UPDATE) e confirmar que NAO mudou
+11. staging, publicacao, reconciliacao e watermark na MESMA transacao
+12. commit unico
+13. devolver a conexao ao autocommit
+14. finally: liberar o advisory lock de sessao e fechar a conexao
+```
+
+| Propriedade | Como é garantida |
+|---|---|
+| **Zero transação ociosa** | A conexão começa em `autocommit`; o psycopg2 não abre transação implícita, então a sessão nunca fica em `idle in transaction` durante a leitura da fonte. A transação gravável existe apenas dos passos 9 a 12 |
+| **Sessão única** | O advisory lock pertence à **sessão**. Lock e publicação na mesma conexão tornam "o lock está vivo" e "posso escrever" a **mesma condição**. Se a conexão cai, perdem-se os dois juntos, e não existe segunda conexão para onde escapar — `_neon_writable` foi **removida** do módulo, então não há função capaz de abrir outra |
+| **Exclusão mútua preservada** | Locks consultivos de **sessão** e de **transação** compartilham o mesmo espaço de chaves e o mesmo gestor de locks — diferem só em *quando* são liberados. Logo `pg_advisory_lock(K)` e `pg_advisory_xact_lock(K)` **conflitam entre si**, e versão antiga e nova não se sobrepõem durante o rollout |
+| **Espera finita** | `lock_timeout` de sessão na aquisição (em autocommit não há transação a que prender um `SET LOCAL`) e `SET LOCAL lock_timeout` na transação gravável. Não é `0` e não toca `idle_in_transaction_session_timeout`. Zero loop, retry, sleep ou backoff |
+| **Zero DDL/DML se a fonte falhar** | Os passos 7 e 8 rodam antes do 9: dado inválido, ou lock perdido, nunca chegam a abrir transação. Não é rollback — é ausência de transação |
+| **Liberação em todos os caminhos** | `finally` chama `pg_advisory_unlock`, que **nunca levanta** (rodaria com exceção em voo e mascararia a causa). Fechar a conexão libera o lock no próprio servidor |
+
+⚠️ **[FATO] Correção factual — o que o `FOR UPDATE` protege, e o que NÃO protege.** Uma versão anterior desta seção afirmava que a releitura do watermark "adquire lock de linha no `sync_state`" e que isso fechava a janela de queda da conexão. **Era falso em duas frentes:**
+
+1. `read_watermark` era um `SELECT` **simples**, sem `FOR UPDATE` — não adquiria lock de linha nenhum.
+2. A publicação rodava numa **segunda** conexão, então a queda da conexão do lock liberaria o lock no servidor enquanto a outra seguia perfeitamente capaz de escrever.
+
+Além disso, mesmo **com** `FOR UPDATE` o problema não estaria resolvido: `FOR UPDATE` trava a **linha existente**, e na **primeira carga** a linha do `sync_state` ainda não existe — não há tupla a travar.
+
+O desenho atual não depende disso. `FOR UPDATE` **foi** adicionado à releitura e é defesa complementar sobre linha existente; quem garante a exclusão mútua — inclusive na primeira carga, quando não há linha — é o **advisory lock de sessão mantido na mesma conexão que publica**.
+
+**[FATO] Nenhuma proteção do destino foi desligada.** `idle_in_transaction_session_timeout` não foi alterado e nenhum `SET ... = 0` foi usado.
+
+**[FATO] `SOURCE_STATEMENT_TIMEOUT` permanece em 600 s.** Depois desta correção ele voltou a ser exclusivamente um limite de proteção da **fonte**, sem relação com o timeout do destino. Alterá-lo passaria a exigir justificativa como limite da fonte — e a medição disponível (43,63 s para a leitura integral) não sustenta apertá-lo.
+
+#### 18.8.10 Fonte completamente vazia — e o que NÃO é fonte vazia
+
+⚠️ **[FATO] `MAX(updated_at) IS NULL` NÃO significa fonte vazia.** Pode ser tabela vazia **ou** tabela com linhas e `updated_at` nulo. Tratar os dois como equivalentes seria catastrófico no `full`, que esvazia o destino quando a fonte está vazia: uma coluna de watermark momentaneamente nula apagaria o fato inteiro.
+
+A captura inicial obtém, na **mesma** consulta e fotografia, `COUNT(*)`, `COUNT(updated_at)` e `MAX(updated_at)`, **antes** de qualquer filtro de marca ou de `transaction_type` e antes de qualquer escrita:
+
+| Observação | Decisão |
+|---|---|
+| `total = 0` | fonte **comprovadamente** vazia (a consulta executou; timeout, permissão ou falha de conexão levantam exceção e nunca chegam aqui) |
+| `total > 0` e `count(updated_at) < total` | **FALHA de contrato** — watermark técnico não pode ter nulo |
+| `total > 0` e `max(updated_at)` nulo | **FALHA** — isto não é fonte vazia |
+| `total > 0`, todos não nulos, `max` válido | segue |
+
+**Semântica por modo, com fonte comprovadamente vazia:**
+
+- **`incremental` → FALHA explícita.** Não se infere hard delete total: "a fonte esvaziou" e "a janela não mudou" são indistinguíveis para o incremental, e apagar o fato com base nessa ambiguidade destruiria a história por causa de um `TRUNCATE` acidental a montante ou de uma réplica apontada para o banco errado. Fato e watermark ficam intactos; a orientação é confirmar operacionalmente e então rodar `full`.
+- **`full` com `--apply` → esvazia o fato e REMOVE a linha do state**, na mesma transação e sob o mesmo lock. Nenhum cutoff é fabricado, nenhum `now()` é usado, nenhum watermark é gravado. A próxima execução incremental falha e exige `full`.
+- **`full` sem `--apply` → apenas diagnostica** que o `full` esvaziaria o fato.
+
+**Caso distinto:** fonte **não** vazia com zero marca allowlisted. Aqui existe cutoff válido, o `full` esvazia o fato pela via normal de publicação e o watermark **avança** para o cutoff global. Nada é fabricado.
 
 ### 18.9 Critério de aceite — três fronteiras
 
@@ -1112,7 +1202,11 @@ Validada **dentro da fotografia** (§18.8.3), antes de qualquer materialização
 9. **`source_row_count`** igual à contagem de transações filtradas — competência, marca allowlisted, `transaction_type` allowlisted, dentro da fotografia.
 10. **Conjunto de chaves** `(ref_month, brand)` idêntico nos dois lados.
 11. **Nulls** — nenhum componente nulo onde a fonte tem a chave presente.
-12. **Cutoff utilizado** — `max(updated_at)` na staging igual ao `current_upper_bound` capturado.
+12. **Cutoff utilizado** — nenhuma linha da staging tem `source_max_updated_at` **acima** do `current_upper_bound` capturado, e o cutoff usado fica registrado na execução.
+
+    ⚠️ **[FATO] Correção da redação anterior, feita no UE2-B.** Este item exigia igualdade estrita — `max(updated_at)` na staging **igual** ao cutoff. **Igualdade estrita não é invariante**, e a diferença é legítima: o cutoff é o teto do snapshot sobre a tabela **inteira** (§18.8.3 passo b, deliberadamente sem filtro, para que a validação de tipos não fique cega a linhas acima de um teto filtrado), enquanto a staging cobre apenas marcas allowlisted e `transaction_type` allowlisted. Se a linha que detém o `max(updated_at)` global pertencer a uma marca fora de escopo, a staging fica **legitimamente abaixo** do cutoff, e o critério original reprovaria uma execução correta.
+
+    O que **é** invariante — e o que de fato prova a fotografia — é que nada na staging está **acima** do cutoff: estar acima significaria leitura fora do snapshot.
 13. **Reconciliação integral por chave** — cada `(ref_month, brand)` confere por inteiro, não por delta.
 
 #### Fronteira C — staging × destino
@@ -1126,6 +1220,17 @@ Comparadas **no mesmo grão mensal**:
 18. **Sinal preservado** — nenhum valor teve o sinal alterado entre staging e destino (§18.5.1).
 19. **`source_run_id` e cutoff** gravados na linha publicada.
 20. **Watermark avançado somente após o sucesso** de todas as fronteiras (§18.8.7).
+
+⚠️ **[FATO] O ESCOPO da fronteira C depende do modo — correção terminal do UE2-B.** No `incremental` a staging contém **somente as chaves tocadas**, enquanto o destino guarda toda a história. Comparar staging contra o destino **inteiro** faria `destino EXCEPT staging` encontrar, **por construção**, cada linha histórica não tocada: o critério reprovaria toda execução correta e era, na prática, inexecutável.
+
+| Modo | Comparação |
+|---|---|
+| `full` | staging × **destino inteiro** — a staging cobre todas as chaves, então qualquer linha sobrando é defeito (hard delete não reparado) |
+| `incremental` | staging × **projeção do destino restrita às chaves da staging**, via semijoin explícito por `(ref_month, brand)`. Nunca lista de valores interpolada no texto do SQL |
+
+O mesmo escopo se aplica à verificação de `NaN`: no `incremental`, um `NaN` numa linha histórica não tocada não foi introduzido por aquela execução e não pode ser corrigido por ela — verificar o destino inteiro faria toda execução futura falhar por um defeito antigo, sem ação possível. A verificação de **sinal** já é corretamente escopada nos dois modos, porque faz `JOIN` pelas chaves da staging.
+
+**[FATO] Igualdade de chaves não basta: a cardinalidade é obrigatória.** Uma linha **duplicada** no destino para uma chave **tocada** tem a mesma chave, então nenhum `EXCEPT` de chaves a encontraria. Só a contagem (`linhas_no_escopo = linhas_na_staging`) revela.
 
 **[FATO] `transaction_type` não é verificável na fronteira C.** O fato mensal proposto não armazena essa coluna — sua prova pertence à **fronteira A**. Staging e destino continuam reconciliados no grão mensal, mas não podem provar uma coluna que não guardam, e **não se deve adicioná-la ao fato só para satisfazer um teste**.
 
@@ -1157,3 +1262,221 @@ Comparadas **no mesmo grão mensal**:
 | L13 | Linhagem de `gold.tiktok_settlements_summary` | Aberta — bloqueia o produto de dado nº 2 |
 | R14 | Publicar mês como definitivo | Mitigado pela política de reafirmação (§18.8) |
 | R15 | Alguém somar as duas competências | Mitigado por objetos e nomes separados |
+
+---
+
+## 19. UE2-B Task 1/2 — implementação local do fato
+
+⚠️ **[FATO] Nada foi aplicado em banco.** Esta task produziu código, uma migration **não aplicada** e validação **local**. Nenhum DDL, DML, backfill, deploy, Scheduler ou API foi executado. A aplicação é escopo da Task 2/2.
+
+**A §18.8 continua sendo a única especificação executável.** Esta seção registra o **estado de implementação** e as decisões que a §18.8.7 deixou explicitamente para o UE2-B tomar. Divergência entre código e §18.8 é defeito do código.
+
+### 19.1 Artefatos
+
+| Artefato | Papel |
+|---|---|
+| `apps/api/alembic/versions/012_create_fact_tiktok_affiliate_cost_order_monthly.py` | Cria `marts.fact_tiktok_affiliate_cost_order_monthly`, o índice `idx_ftacom_brand_ref_month` e `marts.fact_tiktok_affiliate_cost_order_monthly_sync_state`. Head Alembic único e linear: `012 <- 011` |
+| `pipelines/sync_tiktok_affiliate_cost_order_monthly.py` | Sync com modos `full` / `incremental`, `--apply` obrigatório para escrever |
+| `pipelines/tests/test_sync_tiktok_affiliate_cost_order_monthly.py` | 134 testes, zero acesso real a banco. Concorrência e transação usam um `Recorder` **compartilhado** entre as conexões falsas, para que a ordem relativa dos eventos das duas conexões seja observável |
+
+### 19.2 Decisões que a §18.8.7 delegou ao UE2-B
+
+| Requisito §18.8.7 | Decisão tomada |
+|---|---|
+| Armazenamento durável | Tabela `marts.fact_tiktok_affiliate_cost_order_monthly_sync_state`, no **mesmo banco do destino** — o watermark comita na **mesma transação** da publicação, então não pode viver em outro engine |
+| Identificação | PK `(source_table, target_table)` — um watermark por par, conforme exigido |
+| Tipo do valor | `TIMESTAMP` **sem** timezone. Nenhuma conversão |
+| Rastreabilidade | Coluna `source_run_id`, `NOT NULL` |
+| Momento do avanço | Dentro da transação de publicação, **após** staging materializada, escrita concluída e fronteiras B e C aprovadas |
+| Rollback | `ROLLBACK` integral reverte destino **e** watermark juntos, por estarem na mesma transação |
+| Nenhuma chave tocada | **DECLARADO: o watermark pode avançar**, e nada é publicado. Não avançar faria a janela crescer indefinidamente relendo o mesmo intervalo vazio. **Sem atalho:** o no-op atravessa o mesmo lock, a mesma fotografia e a mesma reconciliação |
+| Primeira carga | `incremental` sem watermark **falha** com instrução de rodar `full`. Nunca trata ausência como janela móvel |
+| Leitura autoritativa | **Sob `--apply`, lida DEPOIS do advisory lock, na mesma transação** (§18.8.8). A leitura read-only do modo diagnóstico não é autoritativa |
+| Ausência | **Ausência de LINHA.** `last_successful_upper_bound` e `source_run_id` são `NOT NULL` |
+
+### 19.3 Correção terminal — os seis findings
+
+⚠️ **[FATO] Uma afirmação anterior desta seção estava ERRADA e foi removida.** Dizia que watermark monotônico via `ON CONFLICT` bastava e que a concorrência "não corromperia o destino". É falso: o `ON CONFLICT` protege a **coluna do watermark**, não o **fato**. Duas execuções podiam observar o mesmo watermark e a mais antiga sobrescrever o fato depois da mais nova, deixando **watermark novo com fato antigo** — estado em que o incremental seguinte nunca releria a janela perdida.
+
+| # | Defeito | Correção |
+|---|---|---|
+| **F1** | Watermark lido fora da transação e lock só na publicação → concorrência podia sobrescrever dado novo com dado velho | Uma transação gravável; **lock primeiro**, watermark depois (§18.8.8). `publish_in_transaction` não toma lock nem comita — a transação é do orquestrador |
+| **F2** | Reconciliação incremental comparava staging parcial com destino **inteiro** → `destino EXCEPT staging` reprovava por construção | Escopo por modo: `full` × destino inteiro, `incremental` × **projeção por semijoin** nas chaves da staging. Somada a prova de **cardinalidade**, que é a única que pega duplicata na mesma chave |
+| **F3** | `full` com fonte vazia retornava "nada publicado" e deixava dados fantasma | `full` esvazia o fato e **remove a linha** do state, atomicamente, sem fabricar cutoff. `incremental` **falha** — não infere hard delete total |
+| **F4** | Schema permitia nulo em campos que só existem após publicação válida | `NOT NULL` em `source_row_count`, `source_max_updated_at`, `source_run_id` (fato) e em `last_successful_upper_bound`, `source_run_id` (state). Só os **três componentes financeiros** seguem anuláveis |
+| **F5** | `MAX(updated_at) IS NULL` era tratado como fonte vazia | `capture_source_bounds` obtém `COUNT(*)`, `COUNT(updated_at)` e `MAX(updated_at)` na mesma consulta; `updated_at` nulo em fonte não vazia é **falha de contrato** (§18.8.10) |
+| **F6** | `advance_watermark` sempre declarava sucesso | Resultado **medido**: `avancado` / `inalterado` / falha; `rowcount` obrigatoriamente 1; relatório nunca diz "avançado" quando nada mudou |
+
+**[FATO] Decisões que permaneceram, reconfirmadas.** `full` com zero chave allowlisted **e fonte não vazia** esvazia o fato pela via normal de publicação e avança para o cutoff global válido — caso distinto da fonte vazia, porque aqui existe cutoff e nada é fabricado. A validação de `transaction_type` continua **sem** filtro de marca, seguindo a §18.8.6 literalmente: um tipo novo em marca fora de escopo também falha a execução. É o lado seguro, mas é ruído possível — se se mostrar inviável, a correção é **mudança de contrato**, não liberdade de implementação.
+
+### 19.4 O que a validação local cobriu — e o que não cobriu
+
+**Cobriu:** 134 testes focais passando; `pipelines/` completa com **2646 passed, 1 failed**; `apps/api/tests` com **680 passed, 43 failed, 8 skipped**. A única falha de `pipelines/` é **pré-existente e alheia** (`test_sync_tiktok_serving.py::test_j09_...` afirma `sum(0.1 ×10) != 1.0`, que deixou de valer porque o `sum()` do Python ≥3.12 usa somatório compensado — o arquivo tem zero referências a este módulo, e **não foi corrigido nesta task**). As 43 de `apps/api` são testes de integração que tentam `psycopg2.connect()` real, sem banco no ambiente — **baseline idêntico** ao de antes desta correção. `compileall` limpo; head Alembic único em `012`; `git diff --check` limpo; scan de segredos limpo.
+
+⚠️ **NÃO cobriu, por desenho desta task:**
+
+- **A migration não foi aplicada.** Nenhum `CREATE TABLE` foi executado, então nenhum `CHECK`, PK ou índice foi validado pelo Postgres. Um erro de sintaxe SQL só aparecerá na Task 2/2.
+- **Nenhum SQL foi executado contra a fonte.** As consultas de agregação, `unnest` de chaves, `EXCEPT` e `SIGN(...) IS DISTINCT FROM` foram verificadas como **texto e forma**, nunca como plano ou resultado. Que a semântica de `SUM` sobre `->>` preserve nulo é comportamento documentado do Postgres, **não medido aqui**.
+- **O isolamento `REPEATABLE READ` da réplica não foi verificado.** O módulo o **exige e comprova em tempo de execução** (`assert_snapshot_session`), mas se a réplica ou um pooler rebaixar o nível, isso só será descoberto na primeira execução real.
+- **O comportamento real do advisory lock não foi exercitado.** Os testes provam a **ordem** das chamadas e que a segunda execução não observa o watermark antes do lock; um lock real *bloqueia*, e um teste não pode bloquear — a espera é modelada como exceção. Contenção verdadeira só na Task 2/2.
+- ⚠️ **A duração da transação gravável aberta não foi medida.** Ver §19.5: é o risco novo que esta correção introduz.
+- **Nenhum valor de negócio foi medido.** Não há número de custo de afiliado produzido por esta task.
+
+### 19.5 Dívida técnica registrada
+
+⚠️ **[FATO] RISCO NOVO, introduzido por esta correção — transação gravável aberta durante toda a leitura da fonte.** A serialização exigida pela §18.8.8 obriga o lock a ser adquirido **antes** da leitura do watermark e mantido até o commit. Consequência: a transação do Neon fica aberta — e **ociosa** — durante toda a leitura do Data Mart, cujo `statement_timeout` é de 600 s.
+
+Se o Neon impuser `idle_in_transaction_session_timeout` **menor** que a duração da leitura da fonte, a transação será encerrada pelo servidor e a execução falhará. Nenhuma escrita parcial resulta disso — o rollback é integral —, mas o sync ficaria inoperante.
+
+**Não medi esse parâmetro**, porque esta task não acessa banco, e **não adicionei** um `SET LOCAL idle_in_transaction_session_timeout` especulativo: mascarar um travamento real com uma configuração que não consigo validar é pior que a falha explícita. **Verificação obrigatória na Task 2/2**, antes de qualquer `--apply`: medir `idle_in_transaction_session_timeout` no Neon e o tempo real da leitura integral da fonte. Se houver conflito, a decisão é de contrato — reduzir a janela lida, ou fixar o timeout de sessão explicitamente.
+
+**[FATO]** O módulo importa `_get_neon_url`, `_get_datamart_url`, `sanitize_error_message`, `sanitize_run_id`, `validate_identifier` e `validate_qualified` de `pipelines/sync_tiktok_serving.py`, em vez de duplicá-los — duplicar as regexes de sanitização garantiria que as duas cópias divergissem, e a atrasada vazaria topologia. **Custo:** este módulo focal passa a depender do import daquele sync, que executa `ZoneInfo("America/Sao_Paulo")` no nível de módulo. **Correção sugerida, fora do escopo desta task:** extrair esses helpers para `pipelines/common/` e reapontar os dois módulos.
+
+---
+
+## 20. UE2-B Task 2/2 Fase A — preflight real read-only
+
+⚠️ **[FATO] Veredito: GO COM RESTRIÇÃO. Escrita NÃO autorizada.** Executado em 2026-08-22. Nenhum DDL, DML, migration, backfill, advisory lock real, deploy, API, UI, Scheduler ou Airflow. Alembic permaneceu em `011` e as duas tabelas de destino continuam inexistentes, verificado **antes e depois** do preflight.
+
+### 20.1 A restrição — o risco previsto na §19.5 se confirmou
+
+**[FATO] `idle_in_transaction_session_timeout` do Neon = `5min` (300 s), contra `SOURCE_STATEMENT_TIMEOUT = 600 s`.**
+
+A serialização da §18.8.8 obriga a transação gravável do Neon a ficar aberta — e **ociosa** — durante toda a leitura da fonte. A configuração do Neon **não cobre** o limite teórico que o próprio módulo permite: uma leitura que se aproxime de 600 s teria a transação encerrada pelo servidor, com o advisory lock liberado no meio. Não há escrita parcial (rollback integral), mas o sync ficaria inoperante.
+
+| Grandeza | Valor |
+|---|---|
+| Duração medida do `full` dry-run | **43,63 s** |
+| Janela ociosa do Neon no `apply` ≈ leitura da fonte | ≈ 44 s |
+| `idle_in_transaction_session_timeout` (Neon) | 300 s |
+| Margem **hoje** | ≈ 256 s (6,9× de folga) |
+| Limite **teórico** permitido por `SOURCE_STATEMENT_TIMEOUT` | 600 s |
+| Margem no pior caso | **−300 s (negativa)** |
+
+A margem real é confortável; a **configuração** não é segura. O critério de GO exige `idle timeout = 0` ou `idle timeout > pior caso + 60 s`, e nenhum dos dois se verifica.
+
+**[RECOMENDAÇÃO] Menor correção explícita, a decidir antes da Fase B — não implementada aqui:** reduzir `SOURCE_STATEMENT_TIMEOUT` de 600 s para **180 s**, o que limita o pior caso a 180 s e deixa 120 s de margem sob os 300 s do Neon, mantendo 4× de folga sobre os 43,63 s medidos. É a alteração de **uma constante**, sem mudança de arquitetura. A alternativa — lock consultivo de **sessão** (`pg_advisory_lock`) em vez de lock de transação, permitindo abrir a transação gravável só depois da leitura da fonte — resolve o problema de forma estrutural, mas é mudança de desenho e só se justifica se a fonte algum dia precisar de mais de 180 s.
+
+### 20.2 Correção estreita aplicada nesta fase
+
+`_run_diagnostic` deixou de ler o state no Neon em modo `full` (ver §18.8.8). **Prova empírica, não apenas teste com fake:** o dry-run canônico foi executado com `DATABASE_URL` **deliberadamente ausente** do ambiente e concluiu com `exit 0`. Se tivesse tocado o Neon, `_get_neon_url` teria levantado erro. Corrigida também a afirmação factual anterior de "lock como primeira ação": o `SET LOCAL statement_timeout` o precede — a redação correta é que o lock precede **qualquer leitura de estado, abertura de snapshot ou acesso a dados**.
+
+### 20.3 Contrato da fonte — medido
+
+| Fato | Valor |
+|---|---|
+| `silver.stg_tiktok_payments_by_order` | acessível, `SELECT` concedido |
+| Fotografia | `isolation = repeatable read`, `read_only = on` — **confirmado dentro da transação** |
+| Tipos de `order_create_time` / `updated_at` | `timestamp without time zone`, precisão 6 — conforme §18.8.1 |
+| `COUNT(*)` | 2.129.049 |
+| `COUNT(updated_at)` | 2.129.049 — **zero nulos** |
+| `MAX(updated_at)` | 2026-08-22 00:04:12.593829 (mín. 2026-03-12 20:21:21) |
+| `order_create_time` | 2025-06-04 12:06:03 a 2026-08-20 20:22:50 |
+| `transaction_id` único | **sim**, 2.129.049 distintos em 2.129.049 linhas |
+| Nulos em `transaction_id`, `order_create_time`, `brand`, `fee_breakdown` | **zero em todos** |
+| `transaction_type` | **um único valor: `ORDER`** (2.129.049). Nada fora da allowlist |
+| Marcas | 8 distintas; as **5 oficiais todas presentes**; fora de escopo: `gocase` 79.629, `azbuy` 24.662, `denavita` 4.746 |
+| Excluídas pela allowlist | 109.037 |
+| População do fato | **2.020.012** |
+| Chaves de competência | **70** `(ref_month, brand)` |
+
+**[FATO] As três chaves financeiras estão presentes em 100% da população** — e a **chave proibida `affiliate_commission_amount` também**, em 100%. O risco de dupla contagem é real e concreto, não teórico: o guardrail `assert_no_forbidden_component` é o que impede que ela entre no cálculo. Sua presença foi medida; ela **nunca foi somada**.
+
+### 20.4 Sinais e nulos — medidos
+
+| Componente | nulos | zeros | positivos | negativos | NaN | Soma assinada |
+|---|---|---|---|---|---|---|
+| `affiliate_creator_commission` | 0 | 1.038.581 | **0** | 981.431 | 0 | **−5.504.405,93** |
+| `affiliate_partner_commission` | 0 | 1.689.042 | **0** | 330.970 | 0 | **−3.056.314,20** |
+| `affiliate_ads_commission` | 0 | 1.728.438 | **0** | 291.574 | 0 | **−722.584,32** |
+
+⚠️ **[FATO] Nenhum nulo e nenhum positivo na população atual.** A distinção nulo × zero está implementada e testada, mas **não é exercitada por estes dados** — a chave JSON está sempre presente. Igualmente, a semântica de crédito/reversão (§18.5.1) não tem nenhuma ocorrência hoje. Ambas seguem corretas por contrato, e ambas permanecem **não observadas na prática**.
+
+**Contraprova independente:** as três somas acima foram medidas por consulta escrita à parte e conferem **exatamente** com a fronteira B do dry-run, incluindo `source_row_count = 2.020.012`.
+
+### 20.5 Plano de consulta
+
+**[FATO] As três consultas mais caras fazem `Seq Scan`; nenhum índice é usado.**
+
+| Consulta | Estratégia | Custo estimado | Linhas est. |
+|---|---|---|---|
+| Descoberta de chaves | `HashAggregate` ← `Seq Scan` | 512.589 | 2.019.790 |
+| Recomposição mensal | `HashAggregate` ← `Hash Semi Join` ← `Seq Scan` + `Function Scan` (70) | 582.693 | 706.927 |
+| Totais de detalhe | `Aggregate` ← `Gather` ← `Hash Semi Join` ← **`Parallel Seq Scan`** | 465.121 | 294.553 |
+
+O `Function Scan` de 70 linhas confirma que as chaves entram por `unnest` parametrizado, nunca interpoladas. **Risco de timeout:** baixo hoje (43,63 s contra 600 s = 7,3%), mas o custo é **linear no tamanho da tabela** — sem índice, cada execução relê tudo. Com a fonte a 2,1 M linhas isso é aceitável; convém reavaliar antes de dobrar de tamanho.
+
+**Concorrência:** na fonte, 41 sessões, 1 ativa, 0 em transação, **0 locks na tabela fonte** por outras sessões. No Neon, 5 sessões, nenhuma ativa ou em transação, **0 advisory locks** no servidor.
+
+---
+
+## 21. UE2-B — correção transacional terminal (advisory lock de sessão)
+
+⚠️ **[FATO] A restrição da §20.1 foi eliminada estruturalmente — e a recomendação que eu havia dado para resolvê-la estava errada.** Nenhuma migration, DDL, DML, backfill, advisory lock real, commit, push ou deploy. Alembic permanece em `011`.
+
+### 21.1 O finding — confirmado
+
+Eu havia recomendado reduzir `SOURCE_STATEMENT_TIMEOUT` de 600 s para 180 s, afirmando que isso deixaria "120 s de margem" sob os 300 s de `idle_in_transaction_session_timeout` do Neon. **Está errado.** `statement_timeout` é aplicado **a cada statement**, e `read_source_snapshot` executa **sete** consultas sequenciais. Sete statements de até 180 s não têm teto acumulado de 180 s — têm teto de 1.260 s. A afirmação só valeria se o snapshot fosse um único statement, ou se existisse um deadline acumulado comprovado. Nenhum dos dois existe.
+
+A correção certa não é paramétrica: é **eliminar a transação ociosa**, não tentar caber nela.
+
+### 21.2 Antes e depois
+
+| | Antes (§18.8.8, `pg_advisory_xact_lock`) | Depois (§18.8.9, `pg_advisory_lock`) |
+|---|---|---|
+| Lock | de **transação** | de **sessão**, em conexão dedicada em `autocommit` |
+| Transação gravável | aberta do passo 1 até o commit | aberta só dos passos 8 a 11 |
+| Durante a leitura da fonte | transação gravável **ociosa** (exposta aos 300 s) | **nenhuma transação gravável existe** |
+| Validação em memória | dentro da publicação | passo 7, **antes** de abrir a transação |
+| Se a fonte falhar | rollback de transação já aberta | nenhuma transação chegou a existir |
+| Espera pelo lock | indefinida | `lock_timeout` finito, fail-fast |
+| Liberação | implícita no fim da transação | `pg_advisory_unlock` em `finally`; queda da conexão libera no servidor |
+
+### 21.3 Semântica do lock e rollout
+
+Locks consultivos de **sessão** e de **transação** compartilham o mesmo espaço de chaves e o mesmo gestor de locks; diferem apenas em *quando* são liberados. Portanto `pg_advisory_lock(K)` e `pg_advisory_xact_lock(K)` **conflitam entre si** — uma execução da versão antiga e uma da nova não podem se sobrepor durante o rollout. A chave permanece a mesma (`ADVISORY_LOCK_KEY`), deliberadamente.
+
+⚠️ **A janela residual descrita aqui na primeira redação NÃO estava fechada, e a explicação dada estava errada.** Ver §21.7.
+
+### 21.7 Terceira correção — sessão única elimina a janela residual
+
+**[FATO] O que estava errado.** Esta seção afirmava que a releitura do watermark adquiria lock de linha no `sync_state` e assim fechava a janela de queda da conexão de lock. Duas falsidades:
+
+1. `read_watermark` era `SELECT` **simples**, sem `FOR UPDATE` — nenhum lock de linha era adquirido.
+2. A publicação rodava numa **segunda** conexão. O advisory lock pertence à sessão: a queda da conexão do lock o liberaria no servidor, enquanto a outra conexão continuava capaz de escrever. "Perder o lock numa conexão e seguir escrevendo pela outra" era possível.
+
+E `FOR UPDATE`, mesmo se presente, não bastaria: ele trava **linha existente**, e na **primeira carga** a linha do `sync_state` não existe.
+
+**[FATO] A correção.** Uma só conexão com o destino, do início ao fim. Ela adquire o lock, lê o watermark em autocommit, atravessa a leitura da fonte sem transação aberta, confirma que ainda detém o lock (`assert_still_holding_lock`, via `pg_locks` comparado a `pg_backend_pid()`), e só então desliga o autocommit **nela mesma** para publicar.
+
+| Consequência | Por quê |
+|---|---|
+| Não há como perder o lock e continuar escrevendo | Lock e escrita vivem na mesma sessão: caem juntos |
+| A próxima operação após uma queda **falha** | Não existe reconexão, retry ou segunda conexão — `_neon_writable` foi removida do módulo |
+| Primeira carga deixa de ser caso especial | A proteção é o advisory lock, não um lock de linha que não existiria |
+| A janela ociosa continua inexistente | A transação gravável só nasce depois de a fonte estar lida e validada |
+
+`FOR UPDATE` **foi** adicionado à releitura, e a documentação agora declara com precisão o que ele cobre: linha existente, como defesa complementar — nunca como o mecanismo de exclusão mútua.
+
+**Validação:** **168 testes focais** (antes 160), incluindo prova de conexão única, identidade de sessão entre lock e publicação, `autocommit` desligado só após snapshot e validação, confirmação de posse do lock, queda de conexão sem abertura de segunda, `FOR UPDATE` presente apenas na releitura, e primeira carga sem linha permanecendo serializada. Suítes: **335 passed, 1 failed** (a pré-existente do somatório em Python ≥3.12, fora de escopo).
+
+### 21.4 Comportamento por classe de falha
+
+| Falha | Consequência |
+|---|---|
+| Aquisição do lock (timeout ou conexão) | Erro sanitizado, exit 2. Zero conexão gravável, zero escrita |
+| `incremental` sem watermark | Recusa **sob o lock**, antes de abrir a fotografia. Nunca cai para `full` |
+| Leitura da fonte (tipos, nulos, duplicidade, marca, fonte vazia em `incremental`) | Falha no passo 6 ou 7. **A transação gravável nem é aberta** — zero DDL/DML por construção, não por rollback. Lock liberado |
+| Watermark divergente no passo 9 | Rollback integral, nada publicado, lock liberado |
+| Publicação, reconciliação ou watermark | Rollback integral (fato **e** watermark juntos), lock liberado |
+| Sucesso | Commit único, e só **depois** o unlock |
+
+### 21.5 Validação
+
+**160 testes focais passando** (antes 143), com 17 novos cobrindo os requisitos desta correção. Suítes: focais + `test_s3_migrations` + serving = **327 passed, 1 failed** — a falha é a pré-existente de somatório do Python ≥3.12 em `test_sync_tiktok_serving.py`, **classificada separadamente e não corrigida aqui**. `compileall` exit 0; `git diff --check` limpo; scan de DSN, IP, segredos e caminhos pessoais limpo nos arquivos de produção.
+
+⚠️ **O dry-run real de confirmação NÃO pôde ser executado.** A VPN caiu entre a Fase A e esta correção, e o Data Mart ficou inalcançável (o Neon segue acessível). A execução falhou na conexão com a **fonte**, com a mensagem sanitizada de categoria fixa — sem host, IP ou porta. Isso ainda confirma que o `full` dry-run não depende do Neon (a execução passou do ponto em que o código pré-correção teria falhado por `DATABASE_URL` ausente), mas **não** reconfirma população, chaves nem duração. Os números de população (2.020.012), chaves (70) e duração (43,63 s) continuam sendo os da §20, medidos sobre o caminho de diagnóstico, que esta correção não altera em substância — a troca de lock afeta apenas `_run_apply`.
+
+### 21.6 `SOURCE_STATEMENT_TIMEOUT`
+
+**Mantido em 600 s, deliberadamente.** Depois desta correção ele voltou a ser exclusivamente um limite de proteção da **fonte**, sem relação com o timeout do destino. Apertá-lo exigiria justificativa como limite da fonte, e a única medição disponível (43,63 s para a leitura integral de 2,1 M linhas) não a sustenta. Um teste fixa o valor para que qualquer alteração futura seja consciente.
