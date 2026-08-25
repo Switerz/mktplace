@@ -1778,6 +1778,11 @@ requisições que **carregam o envelope `_meta` da era 2026-07-28**:
 3. **`GET` e `DELETE` respondem `405`** (operações de sessão do transporte 2025,
    inaplicáveis ao modo stateless).
 
+Sobre `/sse`: o blueprint previa **410 Gone**, que era o comportamento do
+`mcp-handler`. Com o SDK direto **nenhuma rota `/sse` ou `/message` foi criada** —
+logo o Next devolve **404**. Isso é mais restritivo e satisfaz "nenhum transporte
+SSE paralelo"; há teste garantindo que esses diretórios não existem.
+
 ### 25.5-bis Leg 2025-06-18 — contrato do servidor, medido
 
 Medido em 25/08/2026 contra o SDK instalado, o handler real e um cliente MCP
@@ -1917,18 +1922,77 @@ scope ou permissions recebidos, e-mail, nome, IP, user-agent, cookie, Client
 ID/Secret, authorization code, refresh token, DSN, mensagem bruta da `jose` ou
 do Auth0, corpo, argumentos de tool ou resposta de tool.
 
-**Estado: versionado por este gate; ainda não confirmado em produção.** A
-publicação depende do deployment automático da Vercel disparado pelo push —
-nenhum deploy manual foi executado. Depois que o deployment ficar `Ready`, será
-feita **exatamente uma** nova tentativa manual de conexão do conector; o evento
-dessa tentativa decide o ramo seguinte. **A causa da falha continua
-desconhecida** e nenhuma correção de OAuth, audience, issuer, scope ou protocolo
-foi aplicada por hipótese — este gate entrega instrumentação, e só.
+**Estado registrado no fechamento do OM2-E, preservado como histórico.** A
+conexão foi estabelecida depois disto e a causa deixou de ser desconhecida — o
+estado corrente está em [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
-Sobre `/sse`: o blueprint previa **410 Gone**, que era o comportamento do
-`mcp-handler`. Com o SDK direto **nenhuma rota `/sse` ou `/message` foi criada** —
-logo o Next devolve **404**. Isso é mais restritivo e satisfaz "nenhum transporte
-SSE paralelo"; há teste garantindo que esses diretórios não existem.
+> **Estado: versionado por este gate; ainda não confirmado em produção.** A
+> publicação depende do deployment automático da Vercel disparado pelo push —
+> nenhum deploy manual foi executado. Depois que o deployment ficar `Ready`, será
+> feita **exatamente uma** nova tentativa manual de conexão do conector; o evento
+> dessa tentativa decide o ramo seguinte. **A causa da falha continua
+> desconhecida** e nenhuma correção de OAuth, audience, issuer, scope ou protocolo
+> foi aplicada por hipótese — este gate entrega instrumentação, e só.
+
+### 25.5-quater Gate OM3 — acesso corporativo automático (versionado, NÃO publicado no Auth0)
+
+Modelo antes: cada pessoa precisava existir no Auth0 **e** receber role manual
+com `oracle:read`. Modelo depois: uma **Post-Login Action (trigger v3)** concede
+`oracle:read` automaticamente a quem autentica pelo Google com e-mail
+**verificado** em `gocase.com` ou `gobeaute.com.br`, vindo de um OAuth Client do
+Oráculo. Qualquer outra situação é negada com `api.access.deny()`.
+
+**Achado de auditoria que viabiliza a decisão:** `effectiveScopes`
+([oauth.ts](../apps/web/src/server/oracle/oauth.ts)) une os claims `permissions`
+e `scope`. Logo `api.accessToken.addScope("oracle:read")` autoriza **sem depender
+de RBAC** — evitando credencial M2M, rate limit da Management API e o atraso de
+um login que a atribuição de role via Management API teria (ela não afeta o
+primeiro token).
+
+Código em
+[infra/auth0/actions/oracle-corporate-access.js](../infra/auth0/actions/oracle-corporate-access.js);
+runbook de publicação, rollout multi-organização, onboarding, offboarding e
+rotação em [ORACLE_AUTH0_ACCESS_RUNBOOK.md](ORACLE_AUTH0_ACCESS_RUNBOOK.md);
+**34 testes puros** em `apps/web/tests/oracle-auth0-action.test.ts`, cobrindo os
+dois domínios, normalização de caixa, vizinhos maliciosos (`evilgocase.com`,
+`gocase.com.evil.example`, `sub.gocase.com`, `gocase.com.br`), Gmail pessoal,
+e-mail ausente/não verificado/malformado, conexão não-Google, cliente fora da
+allowlist, audience divergente, precedência do hosted domain, paridade entre
+login inicial e refresh, e ausência de scope de escrita.
+
+**Login inicial e refresh, um único handler.** O Post-Login executa nos dois
+fluxos, distinguíveis por `event.transaction.protocol === "oauth2-refresh-token"`
+— valor documentado pelo Auth0. **Não existe `onExecuteCredentialsExchange`**:
+aquele é o trigger de Client Credentials/M2M, cujo evento não carrega
+`event.user`; usá-lo misturaria contratos e não cobriria refresh. A política não
+ramifica por protocolo, de propósito — um refresh não pode ser caminho para
+escapar da regra do login inicial.
+
+**Hosted domain vem de `event.user.idp_tenant_domain`**, que é onde o Auth0
+mapeia o claim `hd` do Google. É a fonte primária: se estiver presente e
+divergir do domínio do e-mail, nega — e um fallback coincidente
+(`app_metadata.hd`, `connection.metadata.hd`) **não pode mascarar** essa
+divergência, por isso os fallbacks só são consultados quando a primária está
+ausente. Ausência não reprova sozinha: contas Google pessoais não têm `hd`, e
+quem as barra é a checagem de domínio.
+
+**Comparação por igualdade, jamais `endsWith`** — `endsWith("gocase.com")`
+aceitaria `evilgocase.com`. Há teste dedicado a essa armadilha.
+
+**Isolamento:** cliente fora da allowlist sai da Action sem `deny` e sem
+`addScope` — nenhum login de outra aplicação do tenant é afetado.
+
+**Estado: política versionada no commit de fechamento deste gate; a Action NÃO
+foi publicada nem aplicada no Auth0.** Versionar o código não o coloca em vigor.
+Não há ferramenta autenticada de Auth0 nesta sessão e nenhuma foi instalada; o
+agente entregou código, testes e procedimento, e parou antes da mutação externa.
+**Enquanto a Action não for publicada pelo proprietário, o acesso continua
+dependendo de role manual**, e as validações multiusuário — segundo colaborador
+corporativo sem role prévia, contraprova com conta externa — seguem pendentes.
+
+**Offboarding continua exigindo revogação de grant** — não por causa do refresh,
+que a Action cobre, mas porque um access token **já emitido** vive até `exp`,
+independentemente de política ou bloqueio posteriores.
 
 ### 25.6 Fronteira de acesso — matriz provada
 
