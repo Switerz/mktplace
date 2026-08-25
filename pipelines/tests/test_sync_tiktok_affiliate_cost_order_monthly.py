@@ -1447,6 +1447,68 @@ def test_f6_where_monotonico_permanece_como_defesa():
     assert "last_successful_upper_bound < %(wm)s" in conn.sqls()[0]
 
 
+def test_f6_relatorio_do_apply_exibe_o_watermark_persistido(monkeypatch, capsys):
+    """Comportamental de ponta a ponta: o valor impresso após `--apply` tem de
+    ser o MESMO que foi persistido em `sync_state`.
+
+    Regressão real: `watermark_novo` nascia dentro de `relatorio["publicacao"]`
+    e `_print_report` o lia do topo, então a primeira carga imprimiu
+    `avancado para None` enquanto o `sync_state` tinha o cutoff correto. Este
+    teste compara a saída com o valor que o `UPDATE`/`INSERT` do state recebeu,
+    em vez de procurar uma string qualquer."""
+    rec, neon, dm = _apply_env(monkeypatch, watermark=ANTERIOR)
+    relatorio = sync.run("full", "run:1", apply=True)
+    sync._print_report(relatorio)
+
+    # valor efetivamente enviado ao sync_state
+    gravados = [p for lb, k, s, p in rec.log
+                if k == "execute" and classify(s) in ("state_update", "state_insert")]
+    assert len(gravados) == 1
+    persistido = gravados[0]["wm"]
+    assert persistido == CUTOFF
+
+    out = capsys.readouterr().out
+    linha = next(l for l in out.splitlines()
+                 if l.startswith("watermark...........:"))
+    assert linha == f"watermark...........: avancado para {persistido}"
+    # escopado à linha do watermark: o dump da fronteira A legitimamente contém
+    # `'lower_bound': None`, porque `full` não tem limite inferior.
+    assert "None" not in linha
+    assert "valor nao propagado" not in linha
+    # e nada de credencial ou topologia em nenhuma parte da saída
+    for proibido in ("postgresql://", "password", "127.0.0.1", "@"):
+        assert proibido not in out
+
+
+def test_f6_relatorio_nao_fabrica_valor_quando_nao_propagado(capsys):
+    """Se o watermark avançou mas o valor não chegou ao relatório, a saída diz
+    isso — não imprime `None` como se fosse o valor persistido."""
+    sync._print_report({
+        "mode": "full", "run_id": "r", "applied": True,
+        "watermark": sync.WATERMARK_ADVANCED, "resultado": "publicado",
+    })
+    out = capsys.readouterr().out
+    assert "valor nao propagado" in out
+    assert "avancado para None" not in out
+
+
+def test_f6_dry_run_nao_anuncia_watermark_persistido(monkeypatch, capsys):
+    """Diagnóstico não escreve, logo não pode anunciar avanço de watermark."""
+    rec = Recorder()
+    neon = FakeConn("neon", rec, neon_rules(), neon_rowcounts())
+    dm = FakeConn("dm", rec, dm_rules())
+    _wire(monkeypatch, neon, dm)
+
+    relatorio = sync.run("incremental", "run:1", apply=False)
+    sync._print_report(relatorio)
+    out = capsys.readouterr().out
+    assert "watermark" not in out.split("resultado")[0].replace(
+        "watermark anterior", "")
+    assert "avancado" not in out
+    assert relatorio.get("watermark") is None
+    assert "watermark_novo" not in relatorio
+
+
 def test_f6_relatorio_nao_diz_avancado_quando_inalterado(capsys):
     sync._print_report({
         "mode": "incremental", "run_id": "r", "applied": True,

@@ -1470,6 +1470,15 @@ def _run_apply(mode: str, run_id: str) -> dict:
                         cur, snapshot, mode, run_id, watermark
                     )
                     relatorio["watermark"] = relatorio["publicacao"]["watermark"]
+                    # `watermark_novo` nasce dentro de `publicacao`; sem propagar,
+                    # `_print_report` (que le do topo) imprimia "avancado para
+                    # None" apesar de o valor persistido estar correto. Somente
+                    # presente quando o watermark de fato avancou — no-op nao
+                    # fabrica valor.
+                    if "watermark_novo" in relatorio["publicacao"]:
+                        relatorio["watermark_novo"] = (
+                            relatorio["publicacao"]["watermark_novo"]
+                        )
                     relatorio["resultado"] = "publicado"
 
                 neon.commit()                                                # 12
@@ -1615,10 +1624,18 @@ def _print_report(relatorio: dict) -> None:
         print(f"apagadas............: {pub['deleted']}")
         print(f"publicadas..........: {pub['published']}")
         print(f"checks..............: {pub['checks']}")
-    # Nunca dizer "advanced_to" quando nada mudou (F6).
+    # Nunca dizer "advanced_to" quando nada mudou (F6), e nunca anunciar um
+    # valor que nao existe: se o watermark avancou mas o valor nao chegou ao
+    # relatorio, isso e' defeito do relatorio e e' dito como tal, em vez de
+    # imprimir "None" como se fosse o valor persistido.
     estado = relatorio.get("watermark")
     if estado == WATERMARK_ADVANCED:
-        print(f"watermark...........: avancado para {relatorio.get('watermark_novo')}")
+        novo = relatorio.get("watermark_novo")
+        if novo:
+            print(f"watermark...........: avancado para {novo}")
+        else:
+            print("watermark...........: avancado (valor nao propagado ao "
+                  "relatorio; consulte sync_state)")
     elif estado == WATERMARK_UNCHANGED:
         print("watermark...........: inalterado (cutoff igual ao registrado)")
     elif estado is not None:

@@ -1480,3 +1480,71 @@ E `FOR UPDATE`, mesmo se presente, não bastaria: ele trava **linha existente**,
 ### 21.6 `SOURCE_STATEMENT_TIMEOUT`
 
 **Mantido em 600 s, deliberadamente.** Depois desta correção ele voltou a ser exclusivamente um limite de proteção da **fonte**, sem relação com o timeout do destino. Apertá-lo exigiria justificativa como limite da fonte, e a única medição disponível (43,63 s para a leitura integral de 2,1 M linhas) não a sustenta. Um teste fixa o valor para que qualquer alteração futura seja consciente.
+
+---
+
+## 22. Primeira materialização — 25/08/2026
+
+**[FATO]** A migration `012` foi aplicada e a **primeira carga full** foi executada **uma única vez**. Esta seção registra os números efetivamente publicados.
+
+### 22.1 O que foi executado
+
+| Item | Valor |
+|---|---|
+| Migration | `012`, aplicada em **25/08/2026**, `011 → 012`, uma única tentativa de upgrade, head único e linear |
+| Objetos criados | `marts.fact_tiktok_affiliate_cost_order_monthly`, `..._sync_state`, índice `idx_ftacom_brand_ref_month` — e nada mais; nenhuma tabela preexistente alterada |
+| Carga | `--mode full --apply`, **uma única execução**, zero retry |
+| `source_run_id` | **`ue2b-first-full-20260825`** |
+| Cutoff publicado | **`2026-08-25 00:11:55.377962`** |
+| Chaves publicadas | **70** `(ref_month, brand)` |
+| Marcas | **5** — as oficiais de `BRANDS_IN_SCOPE` |
+| Competências | **2025-06** a **2026-08** |
+| `source_row_count` agregado | **2.046.208** |
+
+### 22.2 Os três componentes — valores publicados
+
+| Componente | Valor |
+|---|---|
+| `affiliate_creator_commission` | **−R$ 5.504.405,93** |
+| `affiliate_partner_commission` | **−R$ 3.110.478,68** |
+| `affiliate_ads_commission` | **−R$ 738.193,33** |
+
+⚠️ **[FATO] O sinal negativo é o sinal da FONTE, não margem.** Estes valores vêm assinados de `fee_breakdown` e foram publicados **exatamente como vieram** — nenhum `abs()`, nenhuma inversão, nenhuma normalização. Negativo aqui significa débito na perspectiva do repasse; **não** é resultado, não é margem e não é lucro.
+
+**[FATO] Os três componentes continuam separados, e não existe `affiliate_cost_total`** — nem na tabela, nem em nenhuma consulta. Qual subconjunto constitui "custo de afiliado" segue sendo o ponto aberto **P2** (§18.11), e enquanto ele estiver aberto nenhum total agregado pode ser materializado nem apresentado.
+
+**[FATO] Não há retorno de afiliado disponível.** Não existe receita atribuída a afiliado nesta fonte, logo ROAS, ROI ou qualquer razão de retorno são **inderiváveis** — não por falta de implementação, mas por falta de numerador.
+
+### 22.3 Reconciliação
+
+Leitura **pós-commit independente**, com a fonte relida no mesmo cutoff:
+
+| Prova | Resultado |
+|---|---|
+| Três somas: fonte × fato | **idênticas ao centavo** nas três |
+| `source_row_count` × linhas da fonte | 2.046.208 = 2.046.208 |
+| Chaves / marcas / competências | 70 = 70; 5 = 5; 2025-06..2026-08 idêntico |
+| `EXCEPT` bidirecional | **(0, 0)** |
+| PK duplicada / chave nula / `NaN` | 0 / 0 / 0 |
+| `ref_month` = primeiro dia do mês | todas |
+| Sinais preservados | sim, nos três |
+| Watermark em `sync_state` | igual ao cutoff **e** igual a `MAX(source_max_updated_at)` do fato |
+| `source_run_id` / `synced_at` | presentes em todas as 70 linhas |
+| Advisory lock / sessões `idle in transaction` | liberado / 0 |
+
+### 22.4 Por que 2.157.804 e 2.046.208 são ambos corretos
+
+⚠️ **[FATO] Dois números diferentes aparecem no relatório da carga, e a diferença não é divergência.**
+
+- **2.157.804** — `COUNT(*)` da fonte inteira, e também o total de `transaction_type = ORDER`. Como `ORDER` é o **único** tipo presente na tabela, esses dois números coincidem. É a população **global observada**.
+- **2.046.208** — a população **allowlisted**, após filtrar `brand IN BRANDS_IN_SCOPE`. É este o número materializado em `source_row_count`.
+
+A diferença de **111.596 linhas** são marcas fora de escopo (`gocase`, `azbuy`, `denavita`), que a Torre não publica. Qualquer comparação futura entre o fato e a fonte precisa aplicar a allowlist de marcas, ou encontrará essa lacuna e a interpretará como perda de dado.
+
+### 22.5 Correção do relatório do watermark
+
+**[FATO]** A execução real imprimiu `watermark: avancado para None`. Era defeito **exclusivamente de relatório**: `watermark_novo` era gravado em `relatorio["publicacao"]` e `_print_report` o lia do topo de `relatorio`. **O valor persistido estava correto** — confirmado pela leitura pós-commit, e o `NOT NULL` da coluna impediria nulo de qualquer forma. Corrigido em commit separado, sem tocar transação, watermark, cutoff, staging, reconciliação ou SQL. O relatório passou também a **nunca fabricar valor**: se o watermark avançar e o valor não chegar ao relatório, a saída diz isso em vez de imprimir `None`.
+
+### 22.6 Restrições que seguem valendo para o consumo
+
+A §18.10 permanece integralmente em vigor. Antes de expor em API ou em Canais: rótulo com a competência ("custo de afiliados por mês do pedido"), aviso fixo de revisão pós-fechamento, **três componentes sempre separados**, nenhum total agregado enquanto P2 estiver aberto, nenhuma inferência de retorno, e `N/A` para marca sem TikTok distinto de `N/D` para competência sem carga — nunca zero.
