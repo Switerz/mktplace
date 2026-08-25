@@ -2154,8 +2154,12 @@ HIGHLIGHT_LIMIT_PER_QUADRANT = 10
 HIGHLIGHT_ORDER = "ad_spend_desc_gmv_desc_brand_item"
 QUADRANT_KEYS = ("escalar", "testar_investimento", "monitorar", "reduzir_parar")
 BAND_KEYS = ("sem_ads", "roas_indisponivel_com_investimento")
+# Nota ACENTUADA: o texto e' renderizado direto na interface pt-BR, e sem acento
+# destoava de todo o resto da tela — o smoke de producao pegou isso. Somente a
+# REDACAO muda: o campo, a chave do payload e os dois pontos que a produzem
+# seguem identicos, e o frontend continua sem normalizar nada.
 OPPORTUNITY_REFERENCE_NOTE = (
-    "Referencias descritivas do portfolio no escopo atual; nao sao metas comerciais."
+    "Referências descritivas do portfólio no escopo atual; não são metas comerciais."
 )
 
 

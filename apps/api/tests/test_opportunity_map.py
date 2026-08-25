@@ -474,7 +474,10 @@ def test_o34_referencias_sao_descritivas_e_declaradas():
     assert m["roas_reference"] == 8.0
     assert m["gmv_reference"] == 2207.05
     assert m["gmv_reference_basis_count"] == 1392
-    assert "nao sao metas" in m["reference_note"]
+    # texto ACENTUADO desde o patch terminal de formatacao: a nota vai crua
+    # para a interface pt-BR, e o frontend nao normaliza
+    assert "não são metas" in m["reference_note"]
+    assert "Referências descritivas do portfólio" in m["reference_note"]
     assert m["highlight_limit_per_quadrant"] == 10
     assert m["highlight_order"] == "ad_spend_desc_gmv_desc_brand_item"
 

@@ -144,6 +144,32 @@ export function matrixState(map: OpportunityMap | null | undefined, mlScope: rea
   return "available";
 }
 
+/**
+ * Contagem inteira EXATA em pt-BR — `1650` → `"1.650"`.
+ *
+ * O smoke de produção pegou duas incoerências na mesma tela: o universo saía
+ * como `1.6K`, porque `fmtNumber` abrevia a partir de mil, e a declaração de
+ * amostra saía como `1650`, crua, sem separador de milhar. Uma abreviava ao lado
+ * de um `40` exato; a outra ignorava o pt-BR que o resto da tela usa.
+ *
+ * Contagem de universo e de amostra é número AUDITÁVEL: o leitor precisa poder
+ * conferir que 40 destaques saem de 1.650 produtos, e `1.6K` perde cinquenta
+ * produtos de precisão justamente onde a precisão é o argumento.
+ *
+ * `fmtNumber` segue INTOCADO — a abreviação dele é deliberada nas manchetes de
+ * outras superfícies, e mudá-la globalmente mexeria em telas fora deste gate.
+ * Este helper é estreito de propósito: contagem, nunca dinheiro, nunca taxa.
+ *
+ * Sem casa decimal em nenhum ramo: contagem fracionária não existe, então um
+ * valor não-inteiro que chegue aqui é arredondado em vez de exibir `1.650,4`.
+ */
+export function contagemExata(value: number): string {
+  return Math.round(value).toLocaleString("pt-BR", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
 /** `true` quando os pontos exibidos são só uma amostra do universo classificado. */
 export function isSample(map: OpportunityMap): boolean {
   return map.returned_count < map.total_count;
@@ -153,16 +179,19 @@ export function isSample(map: OpportunityMap): boolean {
  * A frase que separa universo de amostra. O plano exige que a UI declare, quando
  * `returned_count < total_count`, que os agregados cobrem o universo e os pontos
  * são apenas destaques.
+ *
+ * Os três ramos usam `contagemExata`: são exatamente as contagens que o leitor
+ * precisa poder conferir.
  */
 export function sampleDeclaration(map: OpportunityMap): string {
   if (map.total_count === 0) return "Nenhum produto classificado neste escopo.";
   if (!isSample(map)) {
-    return `Todos os ${map.total_count} produtos classificados estão plotados.`;
+    return `Todos os ${contagemExata(map.total_count)} produtos classificados estão plotados.`;
   }
   return (
-    `Os agregados de cada quadrante cobrem o universo completo de ${map.total_count} `
-    + `produtos. Os ${map.returned_count} pontos plotados são destaques — no máximo `
-    + `${map.highlight_limit_per_quadrant} por quadrante —, nunca todos os produtos.`
+    `Os agregados de cada quadrante cobrem o universo completo de ${contagemExata(map.total_count)} `
+    + `produtos. Os ${contagemExata(map.returned_count)} pontos plotados são destaques — no máximo `
+    + `${contagemExata(map.highlight_limit_per_quadrant)} por quadrante —, nunca todos os produtos.`
   );
 }
 

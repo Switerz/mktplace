@@ -1,10 +1,12 @@
 "use client";
 
-import { fmtBrl, fmtNumber } from "@/lib/formatters";
+// `fmtNumber` saiu daqui: as nove contagens deste componente passaram a usar
+// `contagemExata`. Dinheiro segue com `fmtBrl`, que abrevia de propósito.
+import { fmtBrl } from "@/lib/formatters";
 import { brandLabel } from "@/lib/inteligencia/brands";
 import { decBr, roasBr } from "@/lib/inteligencia/format";
 import {
-  BAND_KEYS, BAND_META, isSample, labelledPoints, matrixState, plotPoints,
+  BAND_KEYS, BAND_META, contagemExata, isSample, labelledPoints, matrixState, plotPoints,
   moedaExata, pointRadius, QUADRANT_KEYS, QUADRANT_META, sampleDeclaration,
   type BandKey, type QuadrantKey,
 } from "@/lib/inteligencia/opportunity";
@@ -73,9 +75,9 @@ export default function OpportunityMatrix({
       <div className="flex flex-col gap-2">
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <p className="text-xs text-slate-500 tabular-nums">
-            Universo classificado: <strong className="text-slate-800">{fmtNumber(map.total_count)}</strong>{" "}
+            Universo classificado: <strong className="text-slate-800">{contagemExata(map.total_count)}</strong>{" "}
             produtos · destaques plotados:{" "}
-            <strong className="text-slate-800">{fmtNumber(map.returned_count)}</strong>
+            <strong className="text-slate-800">{contagemExata(map.returned_count)}</strong>
           </p>
           <p className="text-xs text-slate-500">
             Referências: ROAS {roasBr(map.roas_reference)} ·{" "}
@@ -93,7 +95,7 @@ export default function OpportunityMatrix({
           </p>
           <p className="text-xs text-amber-800 mt-1">
             Sem nenhum produto com venda, não existe eixo de volume — e sem eixo de
-            volume não existem quatro quadrantes. Os {fmtNumber(map.unclassified_count)}{" "}
+            volume não existem quatro quadrantes. Os {contagemExata(map.unclassified_count)}{" "}
             produtos com investimento e ROAS medido ficam sem classificação em vez de
             serem empurrados para um quadrante inventado. As duas faixas abaixo
             continuam válidas, porque não dependem do eixo de GMV.
@@ -121,7 +123,7 @@ export default function OpportunityMatrix({
               aria-label="Abrir a matriz de oportunidades em tela cheia"
               className="sm:hidden inline-flex items-center justify-center min-h-11 px-4 rounded-xl border border-violet-200 bg-violet-50 text-sm font-semibold text-violet-700 hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:opacity-50"
             >
-              Abrir a matriz ({fmtNumber(map.returned_count)} destaques)
+              Abrir a matriz ({contagemExata(map.returned_count)} destaques)
             </button>
           )}
         </>
@@ -142,19 +144,19 @@ export default function OpportunityMatrix({
                   type="button"
                   onClick={() => onOpenQuadrant(k)}
                   disabled={disabled}
-                  aria-label={`Detalhe do quadrante ${meta.label}: ${fmtNumber(q?.count ?? 0)} produtos no universo`}
+                  aria-label={`Detalhe do quadrante ${meta.label}: ${contagemExata(q?.count ?? 0)} produtos no universo`}
                   className="w-full text-left min-h-11 rounded-xl border border-slate-200 bg-white px-3 py-2.5 hover:border-violet-300 hover:bg-violet-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:pointer-events-none disabled:opacity-50"
                 >
                   <span className="flex items-center gap-2 flex-wrap">
                     <span className={`w-2.5 h-2.5 rounded-full inline-block ${meta.dot}`} aria-hidden="true" />
                     <span className="text-sm font-semibold text-slate-800">{meta.label}</span>
                     <span className="text-xs text-slate-500 tabular-nums ml-auto">
-                      {fmtNumber(q?.count ?? 0)} produtos
+                      {contagemExata(q?.count ?? 0)} produtos
                     </span>
                   </span>
                   <span className="block mt-1 text-xs text-slate-500 tabular-nums">
                     {fmtBrl(q?.gmv ?? 0)} de GMV · {fmtBrl(q?.ad_spend ?? 0)} de Ads ·{" "}
-                    {fmtNumber(q?.returned_count ?? 0)} destaque
+                    {contagemExata(q?.returned_count ?? 0)} destaque
                     {(q?.returned_count ?? 0) === 1 ? "" : "s"} plotado
                     {(q?.returned_count ?? 0) === 1 ? "" : "s"}
                   </span>
@@ -180,13 +182,13 @@ export default function OpportunityMatrix({
                   type="button"
                   onClick={() => onOpenBand(k)}
                   disabled={disabled}
-                  aria-label={`Detalhe da faixa ${meta.label}: ${fmtNumber(b?.count ?? 0)} produtos`}
+                  aria-label={`Detalhe da faixa ${meta.label}: ${contagemExata(b?.count ?? 0)} produtos`}
                   className={`w-full text-left min-h-11 rounded-xl border px-3 py-2.5 hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:pointer-events-none disabled:opacity-50 ${meta.chip}`}
                 >
                   <span className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-semibold">{meta.label}</span>
                     <span className="text-xs tabular-nums ml-auto">
-                      {fmtNumber(b?.count ?? 0)} produtos
+                      {contagemExata(b?.count ?? 0)} produtos
                     </span>
                   </span>
                   <span className="block mt-1 text-xs tabular-nums opacity-90">
@@ -223,7 +225,10 @@ function Plano({
         referência de GMV{" "}
         {map.gmv_reference == null ? "indisponível" : moedaExata(map.gmv_reference)}. O
         tamanho do ponto é proporcional ao investimento em Ads. Estão plotados{" "}
-        {map.returned_count} destaques de um universo de {map.total_count} produtos.
+        {/* mesmo contrato de contagem auditável do cabeçalho: quem ouve a
+            descrição precisa do número exato, não de uma interpolação crua */}
+        {contagemExata(map.returned_count)} destaques de um universo de{" "}
+        {contagemExata(map.total_count)} produtos.
       </figcaption>
 
       <div className="relative w-full">

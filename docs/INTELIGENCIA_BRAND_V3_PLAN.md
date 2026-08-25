@@ -3,7 +3,10 @@
 **Status:** **V3-0, V3-1A, PF1, V3-BE e V3-1B VERSIONADOS** (`309b6bf`,
 `e675948`, `45fa3f8`, `26434c8`, `2d7ecdf`), com o contrato do V3-BE
 **confirmado em produção**. **V3-2 (Marca 360) e V3-3 (QA visual integrado)
-TECNICAMENTE CONCLUÍDOS E VERSIONADOS no commit de fechamento do Gate V3 — PUBLICAÇÃO E SMOKE PÓS-DEPLOY PENDENTES**: o QA integrado
+TECNICAMENTE CONCLUÍDOS E VERSIONADOS**. O smoke de produção fechou como
+**`PASS WITH ISSUE`**, com três achados **cosméticos** de formatação — todos
+**corrigidos no patch terminal do §29**. **Publicação do patch e smoke terminal
+seguem pendentes**, e o `PASS` final não é declarado antes dele: o QA integrado
 rodou em navegador real nos três viewports, com **248 de 260 verificações
 aprovadas**, e as 12 restantes são quatro dívidas preexistentes de componentes
 compartilhados, demonstradas em outras rotas (§28.6). Base integrada até
@@ -3038,3 +3041,87 @@ valor inválido; `timeout` indistinguível de falha genérica no contrato de
 `apiFetch`; o funil de superfície sem dado real, validado por fixture; e a
 densidade horizontal dos cartões de KPI da Gerencial em ≤1024px, que **quebra
 linha** sem cortar nada — fora do escopo deste patch.
+
+---
+
+## 29. Gate V3 — patch terminal de formatação, pós-publicação (25/08/2026)
+
+**Estado: `TRÊS ACHADOS COSMÉTICOS CORRIGIDOS — PUBLICAÇÃO DO PATCH E SMOKE
+TERMINAL PENDENTES`.** O `PASS` final do Gate V3 **não** é declarado aqui: ele
+depende do novo smoke, depois de o backend ir ao Render e o frontend à Vercel.
+
+### 29.1 O que o smoke de produção encontrou
+
+O smoke de `267bc2b` (§28) fechou como **`PASS WITH ISSUE`**: zero regressão
+funcional, zero erro de console, zero hydration error, zero overflow, contextos
+corretos e contratos de acessibilidade cumpridos — e **três incoerências de
+formatação**, todas cosméticas, todas na mesma tela:
+
+| # | o que aparecia | por quê |
+|---|---|---|
+| 1 | `Universo classificado: 1.6K produtos` | `fmtNumber` abrevia a partir de mil, e abreviava ao lado de um `40` exato |
+| 2 | `1650 produtos`, duas vezes | `sampleDeclaration` interpolava o número **cru**, sem o separador pt-BR que o resto da tela usa |
+| 3 | `Referencias descritivas do portfolio…` | a nota vem do backend **sem acentos** e é renderizada direto na interface pt-BR |
+
+Nenhuma delas era dado falso — `1.6K` e `1650` representam 1650 com verdade. O
+problema é de leitura: **contagem de universo e de amostra é número auditável**,
+e o leitor precisa poder conferir que 40 destaques saem de 1.650 produtos.
+
+### 29.2 `contagemExata` — o helper, e por que não mexer no global
+
+Nasceu em `lib/inteligencia/opportunity.ts`, o módulo que já é dono do contrato
+da matriz. Contrato: `0` → `"0"`, `40` → `"40"`, `1650` → `"1.650"`, `1_000_000`
+→ `"1.000.000"`; **sem K/M** e **sem casa decimal** — contagem fracionária não
+existe, então um valor não-inteiro é arredondado em vez de exibir `1.650,4`.
+
+**`fmtNumber` ficou intocado**, de propósito: a abreviação dele é deliberada nas
+manchetes de outras superfícies, e alterá-la globalmente mexeria em telas fora
+deste gate. O helper é estreito: contagem, **nunca** dinheiro, **nunca** taxa —
+`fmtBrl` e `roasBr` seguem exatamente como estavam.
+
+Aplicado em **onze** pontos, todos do mesmo contrato: universo e destaques do
+cabeçalho, produtos sem classificação, acionamento no mobile, contagem e
+destaques de cada quadrante, contagem de cada faixa, os dois nomes acessíveis, e
+os **três ramos** de `sampleDeclaration`.
+
+**Décimo primeiro e décimo caso, achados só no navegador:** a descrição
+`sr-only` do plano cartesiano interpolava `map.returned_count` e
+`map.total_count` **crus**. A busca estática por `fmtNumber` não os pegava, e
+quem depende de leitor de tela é justamente quem mais precisa do número exato.
+
+### 29.3 A nota do backend
+
+`OPPORTUNITY_REFERENCE_NOTE` passou a
+*"Referências descritivas do portfólio no escopo atual; não são metas
+comerciais."* **Somente a redação estática mudou**: o campo, a chave do payload
+e os dois pontos que a produzem seguem idênticos, e o **frontend continua sem
+normalizar nada** — o backend permanece a fonte da nota. Nenhum endpoint, schema
+ou formato de payload foi alterado.
+
+### 29.4 Validação
+
+Backend: `test_opportunity_map` **59 passed**, contratos relacionados **320
+passed**, `compileall` limpo nos dois módulos alterados. Frontend:
+`inteligencia-v31b` **49/49** (seis contratos novos), suíte **1250/1250**,
+`typecheck` limpo, `build` compilando, `git diff --check` limpo,
+`package-lock.json` sem diff, `package.json` **sem alteração**, **zero
+dependência nova**, e scan de secrets/DSN/IP/PII/caminhos em 150 linhas
+adicionadas **sem ocorrência**.
+
+QA local em navegador real, três viewports (1440×900, 768×1024, 390×844):
+**49 verificações, 49 aprovadas** — `1.650` no universo e na declaração, **zero**
+ocorrência de `1650` cru ou `1.6K`, nota acentuada servida pelo backend local,
+referências ainda exatas (`ROAS 8,0x`, `R$ 2.230,10`), matriz, diálogos, foco,
+Escape, responsividade e acessibilidade sem regressão, e zero erro de console,
+hidratação ou overflow.
+
+**Observação de escopo, deixada para o proprietário:** o diálogo do quadrante
+ainda exibe o universo por `fmtNumber` em `app/inteligencia/page.tsx`, fora do
+componente que este patch autorizava tocar. Não foi alterado.
+
+### 29.5 O que falta
+
+1. publicar o **backend** no Render — a nota acentuada é mudança de servidor;
+2. aguardar a **publicação automática** do frontend na Vercel;
+3. só então executar o **smoke terminal**, que é o que pode declarar o `PASS`
+   final do Gate V3.

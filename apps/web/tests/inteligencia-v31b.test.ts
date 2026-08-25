@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import {
   axisPosition, BAND_KEYS, BAND_META, freshnessLabel, isSample, labelledPoints,
   matrixState, plotPoints, pointRadius, QUADRANT_KEYS, QUADRANT_META,
-  readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
+  contagemExata, readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
 } from "../src/lib/inteligencia/opportunity.ts";
 import type { OpportunityMap } from "../src/lib/api-client.ts";
 
@@ -34,7 +34,7 @@ function mapa(over: Partial<OpportunityMap> = {}): OpportunityMap {
     roas_reference: 8,
     gmv_reference: 2000,
     gmv_reference_basis_count: 800,
-    reference_note: "Referencias descritivas; nao sao metas comerciais.",
+    reference_note: "Referências descritivas do portfólio no escopo atual; não são metas comerciais.",
     unclassified_count: 0,
     highlight_limit_per_quadrant: 10,
     highlight_order: "ad_spend_desc_gmv_desc_brand_item",
@@ -95,7 +95,9 @@ test("V31B: quando returned_count < total_count a UI declara que os pontos sao d
   const m = mapa({ total_count: 1650, returned_count: 40 });
   assert.equal(isSample(m), true);
   const t = sampleDeclaration(m);
-  assert.match(t, /1650/, "cita o universo");
+  // `1.650`, nao `1650`: a asserção antiga codificava o defeito que o smoke
+  // de produção pegou — contagem auditável em pt-BR (ver V3F)
+  assert.match(t, /1\.650/, "cita o universo com separador de milhar");
   assert.match(t, /40/, "cita os destaques");
   assert.match(t, /destaques/i);
   assert.match(t, /nunca todos os produtos/i);
@@ -502,4 +504,97 @@ test("V31B CTA: o ponto abre a Marca preservando filtro e sem nenhum ctx_*", () 
     assert.ok(!/item_id/.test(h), `identificador de produto na URL: ${h}`);
     assert.ok(!/gmv|ad_spend|ad_roas|title|R\$|%/.test(h), `metrica ou texto livre na URL: ${h}`);
   }
+});
+// ═══════════════════════════════════════════════════════════════════════════
+const MATRIZ_SRC = src(MATRIZ);
+
+// Patch terminal de formatacao (pos-smoke de producao)
+//
+// O smoke pegou tres incoerencias cosmeticas na mesma tela: o universo saia
+// abreviado (`1.6K`), a declaracao de amostra saia crua (`1650`) e a nota do
+// backend vinha sem acento. Estes contratos existem para que nenhuma volte.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("V3F contagemExata: inteiro pt-BR, sem K/M e sem casa decimal", () => {
+  assert.equal(contagemExata(0), "0");
+  assert.equal(contagemExata(40), "40");
+  assert.equal(contagemExata(1650), "1.650");
+  assert.equal(contagemExata(1_000_000), "1.000.000");
+  // limites vizinhos do ponto em que `fmtNumber` abreviaria
+  assert.equal(contagemExata(999), "999");
+  assert.equal(contagemExata(1000), "1.000");
+  for (const v of [0, 40, 999, 1000, 1650, 1_000_000]) {
+    assert.doesNotMatch(contagemExata(v), /[KM]/, String(v));
+    assert.doesNotMatch(contagemExata(v), /,/, `${v} nao pode ter casa decimal`);
+  }
+  // contagem fracionaria nao existe: arredonda em vez de exibir "1.650,4"
+  assert.equal(contagemExata(1650.4), "1.650");
+  assert.equal(contagemExata(1650.6), "1.651");
+});
+
+test("V3F sampleDeclaration usa contagem exata nos tres ramos", () => {
+  const amostra = sampleDeclaration(mapa({ total_count: 1650, returned_count: 40 }));
+  assert.match(amostra, /universo completo de 1\.650 produtos/);
+  assert.match(amostra, /Os 40 pontos plotados/);
+  assert.doesNotMatch(amostra, /1650/, "nunca cru");
+  assert.doesNotMatch(amostra, /1\.6K/, "nunca abreviado");
+
+  const todos = sampleDeclaration(mapa({ total_count: 1650, returned_count: 1650 }));
+  assert.match(todos, /Todos os 1\.650 produtos classificados/);
+  assert.doesNotMatch(todos, /1650|1\.6K/);
+
+  assert.match(sampleDeclaration(mapa({ total_count: 0, returned_count: 0 })), /Nenhum produto classificado/);
+});
+
+test("V3F a matriz nao usa mais fmtNumber para contagem", () => {
+  assert.doesNotMatch(MATRIZ_SRC, /fmtNumber\(/, "nenhuma contagem abreviada no componente");
+  assert.match(MATRIZ_SRC, /import \{ fmtBrl \} from "@\/lib\/formatters"/, "dinheiro segue com fmtBrl");
+  // as nove contagens do componente passaram ao helper
+  // 11 usos: as nove contagens visuais mais as duas da descricao sr-only do
+  // plano, que o QA local pegou ainda cruas
+  assert.equal((MATRIZ_SRC.match(/contagemExata\(/g) ?? []).length, 11);
+  assert.match(MATRIZ_SRC, /\{contagemExata\(map\.returned_count\)\} destaques de um universo de/);
+  for (const alvo of [
+    "contagemExata(map.total_count)", "contagemExata(map.returned_count)",
+    "contagemExata(map.unclassified_count)", "contagemExata(q?.count ?? 0)",
+    "contagemExata(q?.returned_count ?? 0)", "contagemExata(b?.count ?? 0)",
+  ]) assert.ok(MATRIZ_SRC.includes(alvo), alvo);
+  // e o dinheiro NAO foi tocado
+  assert.match(MATRIZ_SRC, /fmtBrl\(q\?\.gmv \?\? 0\)/);
+  assert.match(MATRIZ_SRC, /fmtBrl\(b\?\.gmv \?\? 0\)/);
+});
+
+test("V3F fmtNumber global permanece inalterado", () => {
+  const f = src("src/lib/formatters.ts");
+  assert.match(f, /if \(value >= 1_000_000\) return `\$\{\(value \/ 1_000_000\)\.toFixed\(1\)\}M`;/);
+  assert.match(f, /if \(value >= 1_000\) return `\$\{\(value \/ 1_000\)\.toFixed\(1\)\}K`;/);
+  // `fmtNumber(1650)` = "1.7K": a abreviacao de manchete segue deliberada, e e'
+  // exatamente por isso que a contagem auditavel precisou de helper proprio.
+  assert.match(f, /return value\.toLocaleString\("pt-BR"\);/);
+});
+
+test("V3F o patch nao mexeu em metrica, referencia, quadrante nem faixa", () => {
+  const m = mapa({ total_count: 1650, returned_count: 40 });
+  // referencias e limites intactos
+  assert.equal(m.roas_reference, 8);
+  assert.equal(m.gmv_reference, 2000, "default do fixture, intocado pelo patch");
+  assert.equal(m.highlight_limit_per_quadrant, 10);
+  assert.equal(m.quadrants.length, 4);
+  assert.equal(m.bands.length, 2);
+  // nada de recalculo no frontend
+  const opp = src(OPP);
+  assert.doesNotMatch(opp, /PERCENTILE|percentile|function median|calcMedian/);
+  assert.doesNotMatch(opp, /(gmv_reference|roas_reference|total_count|returned_count)\s*=(?![=>])/);
+  // o helper e' de contagem: nao formata dinheiro nem taxa
+  const corpo = opp.slice(opp.indexOf("export function contagemExata"));
+  assert.doesNotMatch(corpo.slice(0, 220), /currency|BRL|%/);
+});
+
+test("V3F a nota de referencia continua vindo do backend, acentuada", () => {
+  // o frontend RENDERIZA o campo, sem normalizar nem reescrever
+  assert.match(MATRIZ_SRC, /\{map\.reference_note\}/);
+  assert.doesNotMatch(MATRIZ_SRC, /reference_note\s*=|normalize|replace\(/);
+  const py = readFileSync(new URL("../../api/app/services/gold_service.py", import.meta.url), "utf8");
+  assert.match(py, /"Referências descritivas do portfólio no escopo atual; não são metas comerciais\."/);
+  assert.doesNotMatch(py, /"Referencias descritivas do portfolio no escopo atual; nao sao metas comerciais\."/);
 });
