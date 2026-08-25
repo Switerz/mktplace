@@ -273,7 +273,7 @@ E de `registry.npmjs.org/@modelcontextprotocol/server/latest`: versão `2.0.0`,
 | **`authInfo`** | **`extra.authInfo` → `ctx.http?.authInfo`** |
 | Assinatura do handler | 2.1.0: `createMcpHandler(initialize, options)` (objeto único). |
 | Shims 1.x | 2.1.0 removeu `basePath`, `streamableHttpEndpoint`, `redisUrl`. |
-| Spec implementada | 2026-07-28, stateless, com `_meta` por request e `server/discover`. |
+| Spec implementada | **Duas eras.** Leg moderno 2026-07-28 (stateless, `_meta` por request, `server/discover`) **e** leg 2025 (`legacy: 'stateless'`, o padrão de `createMcpHandler`), que atende `initialize`/`notifications/initialized` até 2025-06-18. Ver §25.5-bis. |
 
 ### 5.3 Resolução da divergência do handoff
 
@@ -1756,18 +1756,25 @@ permitiu testar a matriz fail-closed de forma determinista, sem mutar
 `process.env` entre testes — que na primeira tentativa produziu exatamente o
 teste intermitente que se esperaria.
 
-### 25.5 Achados de protocolo (2026-07-28)
+### 25.5 Achados de protocolo (leg moderno 2026-07-28)
 
-Três comportamentos reais, verificados contra o SDK instalado, que **corrigem
-suposições do blueprint**:
+> **CORREÇÃO — 25/08/2026.** A redação original desta seção afirmava os três
+> itens abaixo como propriedades **do endpoint**. Eles são propriedades do
+> **leg moderno apenas**. O endpoint serve as duas eras, e ler isto como regra
+> geral produziu um diagnóstico errado de "incompatibilidade de protocolo com
+> o Claude.ai". O comportamento real do leg 2025 está em **§25.5-bis**.
 
-1. **Não existe handshake `initialize`.** Chamá-lo devolve `-32601 Method not
-   found`. A era 2026-07-28 é stateless: cada requisição carrega o envelope
-   `_meta` (`protocolVersion`, `clientInfo`, `clientCapabilities`) e a descoberta
-   é feita por **`server/discover`**, que responde `supportedVersions` e
-   `capabilities`.
-2. **O header `Mcp-Method` é obrigatório** e precisa concordar com o `method` do
-   corpo; a divergência é rejeitada com `-32020`.
+Três comportamentos reais, verificados contra o SDK instalado, válidos para
+requisições que **carregam o envelope `_meta` da era 2026-07-28**:
+
+1. **Não existe handshake `initialize` nesse leg.** Chamá-lo *com o envelope*
+   devolve `-32601 Method not found`. A era 2026-07-28 é stateless: cada
+   requisição carrega `_meta` (`protocolVersion`, `clientInfo`,
+   `clientCapabilities`) e a descoberta é feita por **`server/discover`**, que
+   responde `supportedVersions` e `capabilities`.
+2. **O header `Mcp-Method` é obrigatório** *quando o envelope está presente*, e
+   precisa concordar com o `method` do corpo; a divergência é rejeitada com
+   `-32020`.
 3. **`GET` e `DELETE` respondem `405`** (operações de sessão do transporte 2025,
    inaplicáveis ao modo stateless).
 
@@ -1775,6 +1782,217 @@ Sobre `/sse`: o blueprint previa **410 Gone**, que era o comportamento do
 `mcp-handler`. Com o SDK direto **nenhuma rota `/sse` ou `/message` foi criada** —
 logo o Next devolve **404**. Isso é mais restritivo e satisfaz "nenhum transporte
 SSE paralelo"; há teste garantindo que esses diretórios não existem.
+
+### 25.5-bis Leg 2025-06-18 — contrato do servidor, medido
+
+Medido em 25/08/2026 contra o SDK instalado, o handler real e um cliente MCP
+oficial sobre HTTP; testes em `oracle-route.test.ts` (seção "lifecycle
+2025-06-18") e `oracle-protocol.test.ts` (P11).
+
+> **ESCOPO DESTA SEÇÃO.** Tudo abaixo descreve o comportamento do **servidor**
+> diante de um fluxo claim-less 2025-06-18 reproduzido com o **cliente
+> oficial**. **Não é observação do Claude.ai** — nenhum tráfego do conector
+> real foi capturado. A hipótese falsificada é especificamente *"o servidor não
+> implementa `initialize`/2025-06-18"*; isto **não** exclui uma falha de
+> transporte específica do cliente real, que só pode ser descartada observando
+> o HTTP da tentativa verdadeira.
+
+`@modelcontextprotocol/server@2.0.0` **serve as duas eras simultaneamente**:
+
+```
+core/src/constants.ts
+LATEST_PROTOCOL_VERSION     = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26",
+                               "2024-11-05", "2024-10-07"]
+```
+
+`createMcpHandler(factory, options)` aceita `legacy?: 'stateless' | 'reject'`, e
+**`'stateless'` é o padrão quando a opção é omitida** — que é exatamente como
+`handler.ts` a invoca. O roteamento é feito por `isLegacyRequest`: uma
+requisição **sem** o envelope `_meta` de 2026 vai para o leg 2025.
+
+Consequências, todas verificadas:
+
+| Comportamento | Resultado real |
+|---|---|
+| `initialize` com `protocolVersion: 2025-06-18`, sem `_meta` e sem headers proprietários | **200** com `InitializeResult`: `protocolVersion: "2025-06-18"`, `capabilities.tools`, `serverInfo` |
+| `notifications/initialized` | **202**, corpo vazio (sem `result` fabricado) |
+| `tools/list` | **200**, exatamente 5 tools, **zero** chamada ao backend |
+| `tools/call` | executa a tool; **único** ponto que alcança o FastAPI |
+| Tool fora da allowlist | `-32602`, sanitizado, sem stack nem host interno |
+| `Mcp-Method` / `Mcp-Name` / `_meta` | **não são exigidos** nesse leg |
+| `MCP-Protocol-Version` (header padrão da spec) | aceito; não confundir com os headers proprietários |
+| `protocolVersion` não suportado | servidor **contrapropõe** a sua versão (comportamento de spec), nunca ecoa a inválida |
+| Fronteira fail-closed, 401/403, allowlist de backend | **idênticas** ao leg moderno — o caminho claim-less não afrouxa nada |
+
+**Portanto o `/api/mcp` implementa o ciclo 2025-06-18.** Nenhuma troca de
+pacote, adapter ou reescrita de protocolo é necessária para isso, e nenhuma foi
+feita.
+
+**O que isto NÃO conclui.** Que a conexão do Claude.ai falha por outra razão —
+isso continua sem evidência. A falha real pode estar em autenticação,
+autorização ou em alguma interação de transporte em produção que este teste não
+reproduz. A evidência que falta é uma só: **o status HTTP da primeira chamada a
+`/api/mcp` depois do `Success Exchange`**. Enquanto ele não existir, nenhuma
+alteração de Auth0, de configuração ou de protocolo é justificável.
+
+### 25.5-ter Observabilidade sanitizada (OM2-E) — versionada, não confirmada em produção
+
+Como o OM2-D ficou inconclusivo por falta desse status, o OM2-E torna a falha
+observável em vez de adivinhar a causa. Cada requisição a `/api/mcp` faz
+**exatamente uma tentativa de emissão** de um evento terminal, em
+`src/server/oracle/observability.ts`:
+
+```json
+{"event":"oracle_mcp_request","correlation_id":"<uuid>","phase":"environment|authentication|authorization|protocol",
+ "outcome":"allowed|denied|completed|failed","http_status":200,"http_method":"GET|POST|DELETE|OTHER",
+ "jsonrpc_method":"initialize|notifications/initialized|tools/list|tools/call|unknown",
+ "failure_category":"none|environment_denied|bearer_missing|token_malformed_or_opaque|jwt_verification_failed|insufficient_scope|unexpected_redirect|rate_limited|protocol_rejected|internal_error",
+ "duration_ms":12}
+```
+
+Matriz de classificação:
+
+| Fronteira | `phase` | `outcome` | `failure_category` | `http_status` |
+|---|---|---|---|---|
+| Ambiente/config negou | `environment` | `denied` | `environment_denied` | 404 |
+| Sem header, sem esquema `Bearer` ou credencial vazia | `authentication` | `denied` | `bearer_missing` | 401 |
+| Bearer sem exatamente três segmentos | `authentication` | `denied` | `token_malformed_or_opaque` | 401 |
+| Bearer com três segmentos que não verifica | `authentication` | `denied` | `jwt_verification_failed` | 401 |
+| Token verificado, sem `oracle:read` | `authorization` | `denied` | `insufficient_scope` | 403 |
+| Lifecycle concluído | `protocol` | `completed` | `none` | **2xx apenas** |
+| Redirect inesperado | `protocol` | `failed` | `unexpected_redirect` | 3xx |
+| Rate limit | `protocol` | `failed` | `rate_limited` | 429 |
+| Rejeição de transporte | `protocol` | `failed` | `protocol_rejected` | demais 4xx |
+| Erro recebido como `Response` | `protocol` | `failed` | `internal_error` | 5xx exato |
+| Exceção relançada, sem `Response` | `protocol` | `failed` | `internal_error` | **`null`** |
+
+Três precisões que valem registro, porque a versão anterior errava nelas:
+
+- **`http_status: null` significa uma coisa só — nenhuma `Response` foi
+  observada por esta camada.** O caminho terminou em exceção relançada, e quem
+  produz o status final é a camada acima (Next/Vercel). Não é status zero nem
+  "desconhecido convertido em 500": fabricar 500 afirmaria que este código viu
+  uma resposta que nunca existiu. Um 5xx **recebido** como `Response` registra o
+  status exato, e nunca `null`.
+- **Só 2xx é sucesso.** Antes, `status < 400` fazia um 3xx passar por
+  `completed`. O endpoint MCP nunca redireciona, então um 3xx indica proxy ou
+  reescrita no caminho — é sinal, não sucesso.
+- **`jsonrpc_method` é sempre `unknown` em qualquer negação anterior à
+  autenticação.** O corpo não é lido na negação de ambiente nem no 401/403:
+  inspecionar payload não autenticado só para enriquecer um log contradiria o
+  próprio OAuth-first. Depois do bearer validado, e só então, o método volta a
+  ser identificado — sob o mesmo teto de 64 KiB.
+
+**`token_malformed_or_opaque` × `jwt_verification_failed` é a distinção que
+decide o ramo 401** — separa "o Auth0 devolveu um token opaco" de "o JWT chegou
+mas não passou". Nenhuma sub-causa da verificação (assinatura, issuer,
+audience, expiração, JWKS) é distinguida: seria granularidade desnecessária
+antes de saber sequer se o ramo é 401.
+
+**Garantias.** Schema fechado em nove campos, e **apenas `http_status` admite
+`null`**; `correlation_id` sempre gerado no servidor (valor vindo do cliente é
+ignorado); `jsonrpc_method` só por allowlist, com método desconhecido nunca
+registrado pelo nome cru; **`http_method` também é vocabulário fechado** —
+`GET`/`POST`/`DELETE`/`OTHER`, normalizado uma única vez, de modo que um verbo
+fora da allowlist (`PATCH`, `PUT`, sintético) colapsa em `OTHER` e nunca aparece
+cru; extração do corpo por `request.clone()` sob teto de 64 KiB baseado em
+`content-length`, **somente após a autenticação**, resolvendo para `unknown` em
+qualquer anomalia; resposta ao cliente byte-equivalente, sem header novo; logger
+que lança não altera a rota; zero dependência, endpoint, tool ou chamada
+adicional a backend, Auth0, JWKS ou banco.
+
+**Contrato de entrega, com precisão.** Cada requisição faz **exatamente uma
+tentativa de emissão** e persiste **no máximo um** evento. Com um logger
+funcional, isso significa exatamente um evento entregue — é o que a suíte
+verifica, com logger injetado. Mas logging é **best-effort por decisão
+explícita**: falha do logger ou do provedor não pode afetar a rota, então uma
+falha de entrega resulta em **zero evento persistido**, nunca em erro. Não há
+retry nem fallback — perder um log é preferível a degradar a resposta. Portanto
+"um evento por requisição" descreve o caminho feliz, não uma garantia absoluta
+de persistência.
+
+O handler MCP passou a ser criado **dentro** do `try`: se a própria fábrica
+falhasse, a requisição sairia sem sequer tentar emitir. A lacuna foi fechada
+junto com estas correções.
+
+**Nunca registrado:** `Authorization`, access token ou qualquer segmento dele,
+tamanho do token, header/payload do JWT, `kid`, `iss`, `aud`, `sub`, `azp`,
+scope ou permissions recebidos, e-mail, nome, IP, user-agent, cookie, Client
+ID/Secret, authorization code, refresh token, DSN, mensagem bruta da `jose` ou
+do Auth0, corpo, argumentos de tool ou resposta de tool.
+
+**Estado registrado no fechamento do OM2-E, preservado como histórico.** A
+conexão foi estabelecida depois disto e a causa deixou de ser desconhecida — o
+estado corrente está em [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
+> **Estado: versionado por este gate; ainda não confirmado em produção.** A
+> publicação depende do deployment automático da Vercel disparado pelo push —
+> nenhum deploy manual foi executado. Depois que o deployment ficar `Ready`, será
+> feita **exatamente uma** nova tentativa manual de conexão do conector; o evento
+> dessa tentativa decide o ramo seguinte. **A causa da falha continua
+> desconhecida** e nenhuma correção de OAuth, audience, issuer, scope ou protocolo
+> foi aplicada por hipótese — este gate entrega instrumentação, e só.
+
+### 25.5-quater Gate OM3 — acesso corporativo automático (versionado, NÃO publicado no Auth0)
+
+Modelo antes: cada pessoa precisava existir no Auth0 **e** receber role manual
+com `oracle:read`. Modelo depois: uma **Post-Login Action (trigger v3)** concede
+`oracle:read` automaticamente a quem autentica pelo Google com e-mail
+**verificado** em `gocase.com` ou `gobeaute.com.br`, vindo de um OAuth Client do
+Oráculo. Qualquer outra situação é negada com `api.access.deny()`.
+
+**Achado de auditoria que viabiliza a decisão:** `effectiveScopes`
+([oauth.ts](../apps/web/src/server/oracle/oauth.ts)) une os claims `permissions`
+e `scope`. Logo `api.accessToken.addScope("oracle:read")` autoriza **sem depender
+de RBAC** — evitando credencial M2M, rate limit da Management API e o atraso de
+um login que a atribuição de role via Management API teria (ela não afeta o
+primeiro token).
+
+Código em
+[infra/auth0/actions/oracle-corporate-access.js](../infra/auth0/actions/oracle-corporate-access.js);
+runbook de publicação, rollout multi-organização, onboarding, offboarding e
+rotação em [ORACLE_AUTH0_ACCESS_RUNBOOK.md](ORACLE_AUTH0_ACCESS_RUNBOOK.md);
+**34 testes puros** em `apps/web/tests/oracle-auth0-action.test.ts`, cobrindo os
+dois domínios, normalização de caixa, vizinhos maliciosos (`evilgocase.com`,
+`gocase.com.evil.example`, `sub.gocase.com`, `gocase.com.br`), Gmail pessoal,
+e-mail ausente/não verificado/malformado, conexão não-Google, cliente fora da
+allowlist, audience divergente, precedência do hosted domain, paridade entre
+login inicial e refresh, e ausência de scope de escrita.
+
+**Login inicial e refresh, um único handler.** O Post-Login executa nos dois
+fluxos, distinguíveis por `event.transaction.protocol === "oauth2-refresh-token"`
+— valor documentado pelo Auth0. **Não existe `onExecuteCredentialsExchange`**:
+aquele é o trigger de Client Credentials/M2M, cujo evento não carrega
+`event.user`; usá-lo misturaria contratos e não cobriria refresh. A política não
+ramifica por protocolo, de propósito — um refresh não pode ser caminho para
+escapar da regra do login inicial.
+
+**Hosted domain vem de `event.user.idp_tenant_domain`**, que é onde o Auth0
+mapeia o claim `hd` do Google. É a fonte primária: se estiver presente e
+divergir do domínio do e-mail, nega — e um fallback coincidente
+(`app_metadata.hd`, `connection.metadata.hd`) **não pode mascarar** essa
+divergência, por isso os fallbacks só são consultados quando a primária está
+ausente. Ausência não reprova sozinha: contas Google pessoais não têm `hd`, e
+quem as barra é a checagem de domínio.
+
+**Comparação por igualdade, jamais `endsWith`** — `endsWith("gocase.com")`
+aceitaria `evilgocase.com`. Há teste dedicado a essa armadilha.
+
+**Isolamento:** cliente fora da allowlist sai da Action sem `deny` e sem
+`addScope` — nenhum login de outra aplicação do tenant é afetado.
+
+**Estado: política versionada no commit de fechamento deste gate; a Action NÃO
+foi publicada nem aplicada no Auth0.** Versionar o código não o coloca em vigor.
+Não há ferramenta autenticada de Auth0 nesta sessão e nenhuma foi instalada; o
+agente entregou código, testes e procedimento, e parou antes da mutação externa.
+**Enquanto a Action não for publicada pelo proprietário, o acesso continua
+dependendo de role manual**, e as validações multiusuário — segundo colaborador
+corporativo sem role prévia, contraprova com conta externa — seguem pendentes.
+
+**Offboarding continua exigindo revogação de grant** — não por causa do refresh,
+que a Action cobre, mas porque um access token **já emitido** vive até `exp`,
+independentemente de política ou bloqueio posteriores.
 
 ### 25.6 Fronteira de acesso — matriz provada
 
@@ -2883,6 +3101,10 @@ mantendo `deepEqual`.
 O transporte 2026-07-28 exige, além do `Mcp-Method`, o header **`Mcp-Name`**
 concordando com `params.name` em `tools/call` — divergência é rejeitada com
 `-32020`. Mesma família da regra já registrada no §25.5.
+
+> **CORREÇÃO — 25/08/2026.** Exigência **do leg moderno**, isto é, de quem manda
+> o envelope `_meta` de 2026. No leg 2025 — o do Claude.ai — `tools/call`
+> funciona **sem** `Mcp-Name`, com teste dedicado. Ver §25.5-bis.
 
 ### 30.11 O que continua fora
 
