@@ -8,6 +8,14 @@ interface KpiDrilldownDialogProps {
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  /**
+   * Identidade do CONTEUDO exibido, para consumidores que trocam o conteudo
+   * sem fechar o dialogo — a Inteligencia navega da matriz para quadrante,
+   * faixa ou produto dentro deste mesmo shell. Quando muda com o dialogo
+   * aberto, o foco volta ao botao de fechar. Opcional de proposito: quem nao
+   * passa a prop mantem exatamente o comportamento anterior.
+   */
+  focusResetKey?: string;
 }
 
 /** Mesmo seletor/padrao de focus trap do MobileDrawer (Gate U1) — reaproveita
@@ -21,7 +29,7 @@ const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), [tabindex]:not([tab
  * de `#app-shell-root`, para que o `inert` aplicado ao shell enquanto aberto
  * nunca alcance o proprio dialogo (ver comentario em AppShell.tsx).
  */
-export default function KpiDrilldownDialog({ open, onClose, title, children }: KpiDrilldownDialogProps) {
+export default function KpiDrilldownDialog({ open, onClose, title, children, focusResetKey }: KpiDrilldownDialogProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -46,6 +54,21 @@ export default function KpiDrilldownDialog({ open, onClose, title, children }: K
       previousFocusRef.current?.focus();
     };
   }, [open]);
+
+  // O dialogo nao fecha entre um conteudo e outro: a Inteligencia troca
+  // `dialog.kind` da matriz para quadrante, faixa ou produto com `open` ainda
+  // true. O botao acionador que estava dentro do painel e' desmontado e o foco
+  // cai no `document.body` — o efeito acima nao roda, porque `open` nao mudou.
+  //
+  // Este efeito cuida SO do foco. Nao captura `previousFocusRef` (o destino do
+  // fechamento definitivo continua sendo quem abriu o dialogo, nao um botao
+  // intermediario), nao mexe em `inert` nem em `overflow`, e nao tem cleanup —
+  // por isso a transicao interna nao desfaz nada do que o efeito de abertura
+  // montou.
+  useEffect(() => {
+    if (!open || focusResetKey === undefined) return;
+    closeButtonRef.current?.focus();
+  }, [open, focusResetKey]);
 
   // Escape fecha; Tab/Shift+Tab prendem o foco dentro do painel.
   useEffect(() => {

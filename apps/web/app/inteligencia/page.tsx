@@ -309,6 +309,20 @@ function InteligenciaPageInner() {
       ? `${dialog.highlight.title ?? dialog.highlight.item_id} · ${brandLabel(dialog.highlight.brand)}`
     : `${dialog.item.title ?? "Produto"} · ${brandLabel(dialog.item.brand)}`;
 
+  // Identidade do conteúdo do diálogo, não da abertura. Abaixo de 640 a matriz
+  // mora dentro do diálogo, e clicar num quadrante, faixa ou ponto troca
+  // `dialog.kind` sem fechá-lo: o botão clicado é desmontado e, sem esta chave,
+  // o foco cairia no `document.body`. O título não serve como chave porque
+  // depende do escopo e pode repetir entre conteúdos.
+  const dialogFocusKey = dialog == null ? "fechado"
+    : dialog.kind === "priority" ? `priority:${dialog.priority.kind}`
+    : dialog.kind === "bucket" ? `bucket:${dialog.brand}:${dialog.share.bucket}`
+    : dialog.kind === "quadrant" ? `quadrant:${dialog.key}`
+    : dialog.kind === "band" ? `band:${dialog.key}`
+    : dialog.kind === "matrix" ? "matrix"
+    : dialog.kind === "point" ? `point:${dialog.highlight.item_id}`
+    : `evidence:${dialog.item.kind}:${dialog.item.brand}:${dialog.item.title}`;
+
   return (
     <PageContainer>
       {/* ---------------- Bloco 1 — cabeçalho e regimes ---------------- */}
@@ -754,7 +768,7 @@ function InteligenciaPageInner() {
       )}
 
       {/* ---------------- Diálogo único (contrato §3 do G2) ---------------- */}
-      <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle}>
+      <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle} focusResetKey={dialogFocusKey}>
         {/* ---- V3-1B: quadrante. Regra, fronteiras, origem de cada
              referência, agregados do UNIVERSO e quantos destaques. ---- */}
         {dialog?.kind === "quadrant" && oppMap && (() => {
