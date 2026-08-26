@@ -12,11 +12,11 @@ Legenda de disponibilidade:
 
 | KPI | DefiniÃ§Ã£o | FÃ³rmula | Granularidade | TikTok | ML |
 |---|---|---|---|---|---|
-| Faturamento bruto (GMV) | Soma dos valores brutos dos pedidos antes de descontos e taxas | `SUM(total_amount)` | dia/mÃªs/brand | âœ… `gmv` | âœ… `gmv` |
+| Faturamento bruto (GMV) | Soma dos valores brutos dos pedidos antes de descontos e taxas | `SUM(total_amount)` | dia/mÃªs/brand | âœ… `gmv` (ver §TikTok â€” GMV comercial) | âœ… `gmv` |
 | Faturamento lÃ­quido | GMV menos taxas e descontos | `gmv - total_fees - descontos` | dia/brand | âœ… `total_settlement` | â“ (verificar ml_billing) |
 | Pedidos | Contagem de pedidos | `COUNT(order_id)` | dia/brand | âœ… `orders` | âœ… `paid_orders` |
 | Unidades vendidas | Soma de itens vendidos | `SUM(quantity)` | dia/brand | âœ… `items_sold` | âœ… `total_units` |
-| Ticket mÃ©dio | GMV / pedidos | `gmv / orders` | dia/brand | âœ… `avg_ticket` | âœ… `avg_ticket` |
+| Ticket mÃ©dio | GMV / pedidos, **da mesma populaÃ§Ã£o** | `gmv / orders` | dia/brand | âœ… `avg_ticket` (ver §TikTok â€” GMV comercial) | âœ… `avg_ticket` |
 | Receita por SKU | GMV atribuÃ­do a cada SKU | join com gold.tiktok_product_daily / ml_produto_diario | dia/sku | âœ… | âœ… |
 | Crescimento dia contra dia | VariaÃ§Ã£o % do GMV vs dia anterior | `(gmv_hoje - gmv_ontem) / gmv_ontem` | dia/brand | ðŸ”¶ | ðŸ”¶ |
 | Crescimento MoM | VariaÃ§Ã£o % do GMV vs mÃªs anterior | `gmv_mom_pct` | mÃªs/brand | ðŸ”¶ | âœ… `gmv_mom_pct` |
@@ -54,6 +54,76 @@ Legenda de disponibilidade:
 
 ---
 
+## TikTok â€” GMV comercial (Gate DQ-TK1, 2026-08-25)
+
+Contrato vigente do headline TikTok. Substitui o Gate R2/R2.1.
+
+**Headline** â€” `gmv` = `SUM(total_amount)` dos pedidos da **populaÃ§Ã£o comercial**
+em `raw.tiktok_shop_orders`, dedup por `order_id`.
+
+- **Inclui o frete pago pelo comprador.** DecisÃ£o do dono do nÃºmero: Ã© valor
+  faturado, serÃ¡ descontado no DRE, mas compÃµe o bruto.
+- **PopulaÃ§Ã£o comercial** (`COMMERCIAL_ORDER_STATUSES`): `COMPLETED`,
+  `DELIVERED`, `IN_TRANSIT`, `AWAITING_COLLECTION`, `AWAITING_SHIPMENT`.
+- **Fora** (`NON_COMMERCIAL_ORDER_STATUSES`): `UNPAID`, `CANCELLED`, `ON_HOLD`.
+- `AWAITING_COLLECTION`/`AWAITING_SHIPMENT` entraram com prova dupla: 100% com
+  `paid_at` preenchido em 01â€“24/08/2026 (3.876/3.876 e 4/4, contra 0/611 em
+  `UNPAID`), e o contrato de status em `data_contracts.md` Â§2 que descreve
+  `AWAITING_SHIPMENT` como "Pago, aguardando envio pelo seller".
+- **Ressalva de `ON_HOLD`**: o dado mostra 4/4 com `paid_at` â€” a exclusÃ£o Ã©
+  decisÃ£o de negÃ³cio, nÃ£o do dado. Volume imaterial (R$ 384,42 em 24 dias).
+  Revisar se crescer.
+
+**Pedidos e ticket** â€” `orders` Ã© a contagem da **mesma** populaÃ§Ã£o comercial;
+`avg_ticket` = `gmv / orders` dessa mesma populaÃ§Ã£o. O relatÃ³rio de conteÃºdo da
+Gold continua exposto como `content_orders` e **nunca** Ã© denominador do ticket
+comercial â€” era o que o Gate R2.1 fazia, e em 24/08/2026 produziu um ticket de
+R$ 8,64 contra os R$ 47 tÃ­picos.
+
+**ResÃ­duo conhecido de 0,19%** â€” `total_amount` fica R$ 76.297,53 acima de
+`sub_total + shipping_fee` em 01â€“24/08 (0,90% do GMV). `handling_fee` explica
+R$ 60.269,26; a identidade `total_amount = sub_total + shipping_fee +
+handling_fee` fecha em 146.861 de 149.784 pedidos (98,05%). Sobram
+**R$ 16.028,27 (0,19% do GMV)** em 2.923 pedidos sem coluna que os explique.
+Aceito como parte do total da plataforma. **NÃ£o ratear e nÃ£o explicar
+artificialmente.**
+
+**Mix de conteÃºdo tem base prÃ³pria** â€” `gmv_video + gmv_live + gmv_card` mede
+atribuiÃ§Ã£o de conteÃºdo, nÃ£o pedido/dia, e **nÃ£o fecha com o headline** (em
+ago/2026 ficou 0,65% a 4,75% acima, por marca). Shares usam a soma dos trÃªs
+como denominador e se chamam "mix de conteÃºdo" â€” **nunca** "share das vendas
+totais".
+
+**Cancelamento: MEDIDO na Raw** â€” `canceled_orders` Ã© a contagem de
+pedidos com status `CANCELLED` na Raw deduplicada por `order_id` (37.598 em
+01â€”24/08/2026). Nunca lido da Gold, que grava 0 literal em 120/120 linhas
+do mesmo perÃ­odo â€” um zero comprovadamente falso. `CANCELLED`
+segue fora de `gmv` e de `orders`.
+
+**Taxa de cancelamento** â€” `cancel_rate_pct` =
+`canceled / (comercial + canceled) * 100`, arredondada em 2 casas. Mesmo
+contrato jÃ¡ adotado pela Torre. Denominador zero => **NULL**: sem pedido
+resolvido no dia nÃ£o existe taxa, e 0% seria uma afirmaÃ§Ã£o falsa.
+
+**Devolvidos, reembolsados e taxa de problemas = NULL** â€” nÃ£o existe
+nenhum status de devoluÃ§Ã£o ou reembolso em toda a histÃ³ria da Raw, e
+`problem_rate` depende dos dois. NÃ£o sÃ£o dÃ­vida futura: sÃ£o
+ausÃªncia de fonte hoje, e ausÃªncia nunca vira zero. DerivÃ¡-los apenas
+do cancelamento mudaria a definiÃ§Ã£o dos indicadores.
+
+**Dias recentes sÃ£o provisÃ³rios** â€” o status de um pedido amadurece por dias
+(mediana 5,1 atÃ© `DELIVERED`, p90 8,3; estabiliza em ~8 dias). A janela recente
+Ã© **reafirmada** a cada rodada pelo lookback de 10 dias
+(`MIN_INCREMENTAL_LOOKBACK_DAYS`, piso no conector + `--days 10` no
+orquestrador). Nunca reduzir. Em 24/08/2026, sÃ³ 37,5% dos pedidos do dia
+estavam maduros.
+
+**SÃ©rie histÃ³rica precisa ser recalculada integralmente** â€” a mudanÃ§a de
+definiÃ§Ã£o eleva o GMV em **~+5,89%** (medido em 01â€“24/08/2026: 7.978.785,08 â†’
+8.449.073,43). ComparaÃ§Ãµes mÃªs a mÃªs sÃ£o invÃ¡lidas atÃ© o backfill completo.
+
+---
+
 ## TikTok â€” KPIs especÃ­ficos de conteÃºdo
 
 | KPI | DefiniÃ§Ã£o | Coluna | DisponÃ­vel |
@@ -61,7 +131,7 @@ Legenda de disponibilidade:
 | GMV via vÃ­deo | Receita gerada por vÃ­deos | `gmv_video` | âœ… |
 | GMV via live | Receita gerada em lives | `gmv_live` | âœ… |
 | GMV via card | Receita via vitrine/card | `gmv_card` | âœ… |
-| % GMV vÃ­deo | gmv_video / gmv | `pct_gmv_video` | âœ… |
+| % mix de conteÃºdo vÃ­deo | `gmv_video / (gmv_video + gmv_live + gmv_card)` â€” **base prÃ³pria, nunca `gmv`** | `pct_gmv_video` | âœ… |
 | VÃ­deos ativos | VÃ­deos com pelo menos 1 venda | `active_videos` | âœ… |
 | Criadores ativos | Criadores com pelo menos 1 venda | `active_video_creators` | âœ… |
 | GPM | GMV per 1000 views | `gpm` | âœ… |
@@ -78,11 +148,11 @@ Legenda de disponibilidade:
 
 | KPI | DefiniÃ§Ã£o | FÃ³rmula | Granularidade | TikTok | ML |
 |---|---|---|---|---|---|
-| Pedidos cancelados | â€” | â€” | dia/brand | âœ… `canceled` | âœ… `cancelled_orders` |
-| Taxa de cancelamento | cancelados / total | â€” | dia/brand | ðŸ”¶ | âœ… `cancel_rate_pct` |
-| Pedidos devolvidos | â€” | â€” | dia/brand | âœ… `returned` | â“ |
-| Pedidos reembolsados | â€” | â€” | dia/brand | âœ… `refunded` | â“ |
-| Taxa de problemas | (cancelados + devolvidos + reembolsados) / total | â€” | dia/brand | âœ… `problem_rate` | â“ |
+| Pedidos cancelados | Pedidos com status CANCELLED | COUNT(order_id) na Raw deduplicada | dia/brand | âœ… `canceled_orders` (medido na **Raw**, nao na Gold) | âœ… `cancelled_orders` |
+| Taxa de cancelamento | Cancelados sobre os pedidos colocados que se resolveram | `canceled / (comercial + canceled) * 100`, 2 casas, NULL se denominador = 0 | dia/brand | âœ… `cancel_rate_pct` | âœ… `cancel_rate_pct` |
+| Pedidos devolvidos | â€” | â€” | dia/brand | âŒ **NULL** - nenhum status de devolucao na Raw | â“ |
+| Pedidos reembolsados | â€” | â€” | dia/brand | âŒ **NULL** - nenhum status de reembolso na Raw | â“ |
+| Taxa de problemas | (cancelados + devolvidos + reembolsados) / total | â€” | dia/brand | âŒ **NULL** - depende de devolucao/reembolso, sem fonte | â“ |
 | Tempo mÃ©dio entrega | Horas/dias mÃ©dios da criaÃ§Ã£o Ã  entrega | â€” | dia/brand | âœ… `avg_delivery_hours` | âœ… `avg_delivery_days` |
 | Pedidos entregues | â€” | â€” | dia/brand | âœ… `delivered_orders` | âœ… `delivered_shipments` |
 | Taxa nÃ£o entregue | â€” | â€” | dia/brand | â“ | âœ… `not_delivered_rate_pct` |

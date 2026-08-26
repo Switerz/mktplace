@@ -39,6 +39,105 @@ def test_tiktok_transform_mapeia_brand_valido_para_loja_id():
     assert canonical["new_buyers"] is None
 
 
+def test_tiktok_transform_cancelados_medidos_passam_com_a_taxa():
+    """Gate DQ-TK1: cancelamento TEM fonte (COUNT de CANCELLED na Raw
+    deduplicada). O valor medido e a taxa derivada atravessam o transform."""
+    row = {
+        "date": date(2026, 8, 5),
+        "brand": "kokeshi",
+        "gmv": 1000.0,
+        "orders": 15,
+        "canceled_orders": 4,
+        "cancel_rate_pct": 21.05,
+    }
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["canceled_orders"] == 4
+    assert canonical["cancel_rate_pct"] == 21.05
+
+
+def test_tiktok_transform_zero_falso_da_gold_nunca_atravessa():
+    """Devolvido/reembolsado/problem_rate nao tem fonte. Mesmo que a fonte
+    insista em mandar 0 — a Gold grava 0 literal em 120/120 linhas de
+    ago/2026 — o transform forca None: um 0 aqui seria indistinguivel de
+    'nao houve devolucao', o que nao se pode afirmar."""
+    row = {
+        "date": date(2026, 8, 5),
+        "brand": "kokeshi",
+        "gmv": 1000.0,
+        "orders": 15,
+        # a fonte manda 0 nos tres — nenhum pode passar adiante
+        "returned_orders": 0,
+        "refunded_orders": 0,
+        "problem_rate": 0.0,
+    }
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["returned_orders"] is None
+    assert canonical["refunded_orders"] is None
+    assert canonical["problem_rate"] is None
+
+
+def test_tiktok_transform_cancel_rate_pct_nao_e_sobrescrito_por_none():
+    """Regressao especifica: havia uma chave `cancel_rate_pct: None` duplicada
+    depois da atribuicao real, e em Python a ultima vence — o valor medido era
+    descartado em silencio."""
+    row = {
+        "date": date(2026, 8, 5),
+        "brand": "kokeshi",
+        "gmv": 1000.0,
+        "orders": 15,
+        "cancel_rate_pct": 33.33,
+    }
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["cancel_rate_pct"] == 33.33
+
+
+def test_tiktok_transform_taxa_ausente_continua_none():
+    """Denominador zero no conector => NULL; o transform nao inventa 0."""
+    row = {"date": date(2026, 8, 5), "brand": "kokeshi", "gmv": 0.0, "orders": 0}
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["cancel_rate_pct"] is None
+    assert canonical["canceled_orders"] is None
+
+
+def test_tiktok_transform_conteudo_passa_intacto_sem_ratear_para_fechar():
+    """Gate DQ-TK1: gmv_video+live+card tem base propria e NAO fecha com o
+    headline. O transform nao ajusta, nao rateia e nao escala."""
+    row = {
+        "date": date(2026, 8, 5),
+        "brand": "kokeshi",
+        "gmv": 1000.0,
+        "orders": 15,
+        "gmv_video": 400.0,
+        "gmv_live": 300.0,
+        "gmv_card": 350.0,
+    }
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["gmv_video"] == 400.0
+    assert canonical["gmv_live"] == 300.0
+    assert canonical["gmv_card"] == 350.0
+    soma_conteudo = (
+        canonical["gmv_video"] + canonical["gmv_live"] + canonical["gmv_card"]
+    )
+    # a divergencia com o headline sobrevive ao transform, de proposito
+    assert soma_conteudo == 1050.0
+    assert canonical["gmv"] == 1000.0
+
+
+def test_tiktok_transform_nao_mapeia_content_orders_para_o_canonico():
+    """`content_orders` existe no conector para rastreabilidade, mas nao tem
+    coluna no fato canonico e NUNCA pode ocupar `orders` (que e' comercial)."""
+    row = {
+        "date": date(2026, 8, 5),
+        "brand": "kokeshi",
+        "gmv": 1000.0,
+        "orders": 15,
+        "content_orders": 19,
+    }
+    canonical = tiktok_brand_daily.transform(row)
+    assert canonical["orders"] == 15
+    assert "content_orders" not in canonical
+
+
 def test_tiktok_transform_brand_fora_do_escopo_retorna_none():
     row = {"date": date(2026, 6, 1), "brand": "azbuy", "gmv": 100.0}
     assert tiktok_brand_daily.transform(row) is None

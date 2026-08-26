@@ -54,11 +54,18 @@ def transform(row: dict) -> Optional[dict]:
         "conversion_rate": row.get("conversion_rate"),
 
         # Operacional
+        # Gate DQ-TK1: cancelamento TEM fonte — o conector conta CANCELLED na
+        # Raw deduplicada (37.598 pedidos em 01-24/08/2026) e deriva a taxa.
+        # Passthrough do valor MEDIDO, nunca da Gold (que grava 0 literal).
         "canceled_orders": row.get("canceled_orders"),
-        "returned_orders": row.get("returned_orders"),
-        "refunded_orders": row.get("refunded_orders"),
-        "problem_rate": row.get("problem_rate"),
-        "cancel_rate_pct": None,      # não disponível diretamente
+        "cancel_rate_pct": row.get("cancel_rate_pct"),
+        # Devolvido/reembolsado/taxa-de-problema NÃO têm fonte: a Raw não tem
+        # nenhum status de devolução ou reembolso, e problem_rate depende dos
+        # dois. Forçados a None AQUI TAMBÉM, e não só no conector: um 0 vindo
+        # da fonte nunca atravessa, mesmo que a Gold volte a mandá-lo.
+        "returned_orders": None,
+        "refunded_orders": None,
+        "problem_rate": None,
         "delivered_orders": row.get("delivered_orders"),
         "avg_delivery_hours": row.get("avg_delivery_hours"),
         "avg_delivery_days": None,    # TikTok usa horas, não dias
@@ -73,14 +80,22 @@ def transform(row: dict) -> Optional[dict]:
         "ctr_pct": None,
         "cpc": None,
 
-        # TikTok-específico: conteúdo — passthrough absoluto de
-        # gold.tiktok_brand_daily (Gate R2.1: preservados; não são KPIs de
-        # GMV a serem removidos). Ressalva: a Gold calcula essa quebra por
-        # canal com base no GMV externo antigo (próximo de total_amount),
-        # não no GMV corrigido (sub_total) — gmv_video+gmv_live+gmv_card
-        # não necessariamente somam ao novo `gmv` deste dict. Não recomputar
-        # essa quebra a partir de raw.tiktok_shop_orders (não há coluna de
-        # canal na Raw) — ver seção "Gate R2" do documento-base.
+        # TikTok-específico: conteúdo — passthrough ABSOLUTO de
+        # gold.tiktok_brand_daily, sem rateio, escala ou ajuste.
+        #
+        # Gate DQ-TK1: a soma destes três é "GMV atribuído a conteúdo" e tem
+        # BASE PRÓPRIA. Ela NÃO fecha com `gmv` e não deve fechar: mede
+        # atribuição de conteúdo (vídeo/live/card) enquanto `gmv` mede
+        # pedido/dia. Em ago/2026 a soma ficou 0,65% (rituaria) a 4,75%
+        # (apice) ACIMA do GMV comercial.
+        #
+        # Regra de consumo, obrigatória a jusante:
+        #  - share de vídeo/live/card usa (gmv_video+gmv_live+gmv_card) como
+        #    denominador — NUNCA `gmv`;
+        #  - esse percentual é "mix de conteúdo", NUNCA "share das vendas
+        #    totais";
+        #  - não recomputar a quebra a partir de raw.tiktok_shop_orders: não
+        #    existe coluna de canal na Raw.
         "gmv_video": row.get("gmv_video"),
         "gmv_live": row.get("gmv_live"),
         "gmv_card": row.get("gmv_card"),

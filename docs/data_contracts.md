@@ -151,11 +151,11 @@ Alimentada das gold tables do Data Mart. Granularidade: `date Ã— loja_id Ã�
 | repeat_buyer_rate_pct | numeric | null | `repeat_buyer_rate_pct` |
 | visitors | bigint | `visitors` | null |
 | conversion_rate | numeric | `conversion_rate` | null |
-| canceled_orders | bigint | `canceled` | `cancelled_orders` |
-| returned_orders | bigint | `returned` | null |
-| refunded_orders | bigint | `refunded` | null |
-| problem_rate | numeric | `problem_rate` | null |
-| cancel_rate_pct | numeric | null | `cancel_rate_pct` |
+| canceled_orders | bigint | **contagem Raw deduplicada de `CANCELLED`** (Gate DQ-TK1; NÃO da Gold) | `cancelled_orders` |
+| returned_orders | bigint | **NULL** â€” nenhum status de devoluÃ§Ã£o existe na Raw | null |
+| refunded_orders | bigint | **NULL** â€” nenhum status de reembolso existe na Raw | null |
+| problem_rate | numeric | **NULL** â€” depende de devoluÃ§Ã£o/reembolso, que nÃ£o tÃªm fonte | null |
+| cancel_rate_pct | numeric | **derivado**: `canceled / (comercial + canceled) Ã— 100`, 2 casas, NULL se denominador = 0 | `cancel_rate_pct` |
 | ad_spend | numeric | null | `ad_spend` |
 | ad_revenue | numeric | null | `ad_revenue` |
 | ad_impressions | bigint | null | `ad_impressions` |
@@ -239,16 +239,24 @@ Registra cada execuÃ§Ã£o de sync.
 
 ### TikTok Shop â†’ CanÃ´nico
 
-| raw_status (TikTok) | status_canonico | DescriÃ§Ã£o | Volume real |
-|---|---|---|---|
-| COMPLETED | delivered | Pedido entregue e finalizado | 1.141.634 |
-| CANCELLED | cancelled | Pedido cancelado | 331.201 |
-| DELIVERED | delivered | Entregue (ainda nÃ£o fechado) | 202.991 |
-| UNPAID | pending | Aguardando pagamento | 86.764 |
-| IN_TRANSIT | shipped | Em trÃ¢nsito para entrega | 76.672 |
-| AWAITING_COLLECTION | shipped | Aguardando coleta pela transportadora | 57.112 |
-| AWAITING_SHIPMENT | processing | Pago, aguardando envio pelo seller | 1.584 |
-| ON_HOLD | on_hold | Pedido retido (fraude/revisÃ£o) | 115 |
+| raw_status (TikTok) | status_canonico | DescriÃ§Ã£o | Volume real | PopulaÃ§Ã£o comercial (Gate DQ-TK1) |
+|---|---|---|---|---|
+| COMPLETED | delivered | Pedido entregue e finalizado | 1.141.634 | âœ… entra no GMV |
+| CANCELLED | cancelled | Pedido cancelado | 331.201 | âŒ venda desfeita |
+| DELIVERED | delivered | Entregue (ainda nÃ£o fechado) | 202.991 | âœ… entra no GMV |
+| UNPAID | pending | Aguardando pagamento | 86.764 | âŒ 0% com `paid_at` |
+| IN_TRANSIT | shipped | Em trÃ¢nsito para entrega | 76.672 | âœ… entra no GMV |
+| AWAITING_COLLECTION | shipped | Aguardando coleta pela transportadora | 57.112 | âœ… 100% com `paid_at` |
+| AWAITING_SHIPMENT | processing | Pago, aguardando envio pelo seller | 1.584 | âœ… 100% com `paid_at` |
+| ON_HOLD | on_hold | Pedido retido (fraude/revisÃ£o) | 115 | âŒ decisÃ£o de negÃ³cio (o dado mostra 100% pago) |
+
+> **Gate DQ-TK1 (2026-08-25)** â€” a coluna "PopulaÃ§Ã£o comercial" Ã© o contrato de
+> `COMMERCIAL_ORDER_STATUSES` em `pipelines/connectors/tiktok/connector.py`. Os
+> oito status acima sÃ£o os Ãºnicos conhecidos: **um status novo, ou nulo, bloqueia
+> a carga** em `fetch()` antes de qualquer upsert, para nunca mais produzir GMV
+> silenciosamente incompleto. Foi assim que `AWAITING_COLLECTION` (3.876 pedidos,
+> R$ 187.962,33 sÃ³ em agosto/2026) ficou fora do GMV entre o Gate R2 e este.
+> DefiniÃ§Ã£o completa do headline em `kpi_dictionary.md` Â§"TikTok â€” GMV comercial".
 
 ### Mercado Livre â†’ CanÃ´nico
 
@@ -287,8 +295,8 @@ Registra cada execuÃ§Ã£o de sync.
 | Taxa de conversão | ✅ | ❌ | ✅ shop-stats |
 | Novos compradores | ❌ | ✅ | ✅ shop-stats |
 | Taxa de recompra | âŒ | âœ… | âŒ |
-| Cancelamentos | âœ… | âœ… | âŒ |
-| DevoluÃ§Ãµes | âœ… | âŒ | âŒ |
+| Cancelamentos | âœ… **pela Raw** (COUNT de CANCELLED deduplicado; a Gold gravava 0 falso) | âœ… | âŒ |
+| DevoluÃ§Ãµes / reembolsos | âŒ **indisponivel => NULL** (nenhum status de devolucao/reembolso na Raw) | âŒ | âŒ |
 | Tempo de entrega | âœ… (horas) | âœ… (dias) | âŒ |
 | Investimento mídia | ❓ (investigar) | ✅ | ✅ ads CSV, média diária |
 | ROAS | ❓ (investigar) | ✅ | 🔶 ads CSV |
