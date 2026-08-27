@@ -1548,3 +1548,370 @@ A diferença de **111.596 linhas** são marcas fora de escopo (`gocase`, `azbuy`
 ### 22.6 Restrições que seguem valendo para o consumo
 
 A §18.10 permanece integralmente em vigor. Antes de expor em API ou em Canais: rótulo com a competência ("custo de afiliados por mês do pedido"), aviso fixo de revisão pós-fechamento, **três componentes sempre separados**, nenhum total agregado enquanto P2 estiver aberto, nenhuma inferência de retorno, e `N/A` para marca sem TikTok distinto de `N/D` para competência sem carga — nunca zero.
+
+
+---
+
+## 23. UE3 Task 1/3 — contrato de exposição em Canais
+
+⚠️ **[FATO] Nada foi implementado.** Esta seção é desenho read-only. Zero código, zero escrita em banco, zero migration, zero deploy. A implementação é a Task 2/3.
+
+### 23.1 O que a fact realmente tem — medido em 2026-08-27
+
+| Fato | Valor |
+|---|---|
+| Grão / PK | `(ref_month, brand)`, **70 linhas, zero duplicidade** |
+| Competências | **15 meses**, `2025-06-01` a `2026-08-01` |
+| Marcas | 5 — `apice, barbours, kokeshi, lescent, rituaria` |
+| `source_row_count` agregado | 2.046.208 |
+| `source_run_id` | **um único**: `ue2b-first-full-20260825` |
+| `synced_at` | `2026-08-25 19:33:26 UTC` (idêntico em todas as linhas) |
+| Watermark (`sync_state`) | `2026-08-25 00:11:55.377962` |
+| `NaN` / nulos nos três componentes | **zero em ambos** |
+
+**Sinais medidos — todos os valores são zero ou negativos, nenhum positivo:**
+
+| Componente | zeros | negativos | soma | mín. |
+|---|---|---|---|---|
+| `affiliate_creator_commission` | 8 | 62 | −5.504.405,93 | −746.997,01 |
+| `affiliate_partner_commission` | 10 | 60 | −3.110.478,68 | −417.817,17 |
+| `affiliate_ads_commission` | 3 | 67 | −738.193,33 | −121.052,62 |
+
+⚠️ **[FATO] Duas armadilhas de cobertura que o desenho tem de tratar, não esconder:**
+
+1. **Os dois primeiros meses não têm as cinco marcas.** `2025-06` tem **1/5** e `2025-07` tem **4/5**; os outros treze têm 5/5. Não é defeito — as marcas entraram no TikTok em datas diferentes —, mas significa que `2025-06` **não é comparável** com `2026-03`, e uma soma que os misture sem dizer isso é enganosa.
+2. **`2026-08` tem `creator_commission` exatamente `0`**, enquanto `partner` e `ads` são não-nulos no mesmo mês. Combinado com a medição do DQ-TK1 (26.196 linhas novas, todas com creator zero), isso indica que **a comissão de criador do mês corrente ainda não está registrada na fonte** — não que ela não exista. Exibir "R$ 0,00" ali, sem marcar o mês como aberto, afirmaria algo que o dado não sustenta.
+
+### 23.2 Atualização automática — NÃO EXISTE
+
+**[FATO] A primeira carga existe; a atualização automática não.** `pipelines/sync_tiktok_affiliate_cost_order_monthly.py` **não é referenciado por nenhum orquestrador**: não aparece em `pipelines/ops/orchestrate.py`, não está em `full_daily`, não está no Scheduler. A única menção fora do próprio módulo e de seu teste é um comentário em `apps/api/tests/test_s3_migrations.py`.
+
+Consequência direta para a UI: `synced_at` é **congelado em 2026-08-25** e vai envelhecer indefinidamente. O bloco **precisa** de estado de frescor visível desde o primeiro dia — não como refinamento futuro, mas porque o dado nasce parado. Integrar o incremental ao Scheduler é pré-requisito operacional da Task 2/3 ou decisão explícita de manter carga manual.
+
+### 23.3 Sobreposição dos três componentes — NÃO PROVADA
+
+**[FATO] O contrato §18.8.2 prova que os três vêm de chaves JSON **distintas** de `fee_breakdown`, e isso é tudo que ele prova.** Não existe documento que estabeleça que os três são economicamente **disjuntos** — que `partner` não contenha parte de `creator`, por exemplo.
+
+Há evidência de que a fonte **usa representações sobrepostas**: `affiliate_commission_amount` e `affiliate_commission_amount_before_pit` são a MESMA comissão antes e depois de PIT, e somar as duas contaria o mesmo custo duas vezes — é por isso que a primeira é proibida (§18.8.2). Se a fonte sobrepõe nesse eixo, não se pode presumir que não sobreponha em outro.
+
+**Limitação registrada.** Reforça a regra de não somar automaticamente: a soma dos três não é apenas "uma decisão comercial pendente" (P2) — é **aritmeticamente não validada**.
+
+### 23.4 Mapa API → frontend (medido)
+
+| Camada | Artefato |
+|---|---|
+| Endpoint | `GET /canais` → `apps/api/app/routers/performance.py:321`, `response_model=CanaisResponse` |
+| Filtros | `ResolvedFilters` (`channels`, `mkt_ids`, `brands`, `period`, `compare_period`) via `Depends(filters_query)` |
+| Período | `EffectivePeriod{start, end, ref_month}` — **`ref_month` só é preenchido quando o período resolve para UM mês calendário** |
+| Service | `perf_svc.get_canais(db, channels, year, month, brand_keys, period, compare_period)` |
+| Resposta | `ref_month, marketplace, kpis, brands, channel_rows, channel_medians, date_from, date_to, compare_*, filters, refreshed_at` |
+| Frontend | `apps/web/app/canais/page.tsx` consome `fetchCanais` de `apps/web/src/lib/api-client.ts` |
+| Frescor | `requestKey` (useMemo) × `resolvedKey` (state) → `dataIsFresh`; estado "protegido" (`displayKpis` etc.) vira `null` quando não fresco |
+| Estados atuais na página | `"Carregando dados de canais..."`, `"N/D"`, `"Sem dados de canal no período e filtros selecionados."` |
+
+**`EffectivePeriod.ref_month` é o gancho central deste contrato.** Ele já distingue, na arquitetura existente, "um mês calendário" de "intervalo arbitrário" — exatamente a fronteira que a competência mensal exige. Nada novo precisa ser inventado para isso.
+
+#### Guardrails existentes — e por que o caminho aditivo não os viola
+
+Dois testes já proíbem campos de afiliados, e ambos são **estreitos**:
+
+| Teste | Escopo real |
+|---|---|
+| `apps/api/tests/test_canais_channel_rows.py:359` — `test_nenhum_campo_de_desconto_ou_afiliado_no_payload` | itera **somente** `result["channel_rows"]`. Não alcança `kpis`, `brands` nem o topo |
+| `apps/web/tests/canais-channel-metrics.test.ts:49` | valida **somente** as 5 chaves de `CHANNEL_SIGNAL_LABEL` |
+
+**Decisão: bloco NOVO de topo em `CanaisResponse`, e nunca em `channel_rows`.** Três razões convergentes:
+
+1. o guardrail de `channel_rows` é **intencional** e deve continuar valendo;
+2. `channel_rows` é a tabela de **comparação entre canais com sinais** — pôr ali um custo que só um canal tem convidaria exatamente ao ranking que este gate proíbe;
+3. `kpis` é plano e orientado ao **período**; custo de afiliado é **mensal** e tem disponibilidade **por canal**. Misturar os dois grãos no mesmo objeto perderia a competência.
+
+**Nenhum endpoint novo.** `/canais` já recebe canal, marca e período e já devolve `refreshed_at`; a extensão é aditiva e limpa. Criar `/canais/afiliados` duplicaria resolução de filtros e abriria a porta para os dois divergirem.
+
+### 23.5 Contrato proposto (tipos, sem implementação)
+
+⚠️ **[FATO] Quatro dimensões ORTOGONAIS, não um enum único.** A primeira redação desta seção tinha um `AffiliateDataStatus` que misturava disponibilidade, alinhamento de período, cobertura de marca e frescor num só valor mutuamente exclusivo. Isso é errado: essas condições são **independentes** e coexistem. Um bloco pode ser, ao mesmo tempo, `available` + `complete_month` + `incomplete_brand_coverage` + `manual_snapshot` — e com o enum único era preciso escolher qual verdade contar, escondendo as outras três.
+
+```
+# 1. A fonte tem dado para este canal/escopo?
+AvailabilityStatus = Literal[
+    "available",
+    "unavailable_no_source",   # ML/Shopee: fonte equivalente NAO confirmada
+    "no_eligible_brand",       # filtro de marca nao intersecta as marcas com dado
+    "error",                   # falha ao ler a fact
+]
+
+# 2. O periodo pedido fecha competencia mensal?
+PeriodStatus = Literal[
+    "complete_month",          # exatamente um mes calendario, fechado
+    "complete_months",         # varios meses calendario, todos fechados
+    "partial_month",           # mes corrente, ou watermark antes do fim do mes
+    "not_month_aligned",       # filtro diario ou intervalo que nao fecha mes
+]
+
+# 3. A competencia tem as cinco marcas na fact?
+CoverageStatus = Literal[
+    "complete",
+    "incomplete_brand_coverage",
+    "unknown",
+]
+
+# 4. Quao recente e' a fotografia? (ver 23.5.2 — NAO ha limiar temporal ainda)
+FreshnessStatus = Literal[
+    "manual_snapshot",         # carga manual, sem rotina: o estado de HOJE
+    "fresh",                   # somente apos UE2-C definir SLA
+    "stale",                   # somente apos UE2-C definir SLA
+    "unknown",
+]
+
+# Retorno: indisponibilidade TIPADA, nunca so' texto livre (ver 23.5.3)
+ReturnAvailability = Literal["unavailable_no_attributed_revenue"]
+```
+
+```
+AffiliateCostRow:
+    channel: str                                  # "tiktok" | "mercadolivre" | "shopee"
+    brand: str
+    ref_month: str                                # "YYYY-MM", SEMPRE explicito
+    creator_commission_signed: float | None        # lancamento contabil ASSINADO
+    partner_commission_signed: float | None        # lancamento contabil ASSINADO
+    affiliate_ads_commission_signed: float | None   # lancamento contabil ASSINADO
+    coverage_status: CoverageStatus                # cobertura DESTA competencia
+    brands_present_in_month: int                   # quantas das 5 tem linha no mes
+
+AffiliateChannelStatus:
+    channel: str
+    availability_status: AvailabilityStatus
+    reason_note: str                               # curta, sem numero fabricado
+
+AffiliateCostsBlock:
+    # --- as quatro dimensoes, independentes ---
+    availability_status: AvailabilityStatus        # agregado do escopo
+    period_status: PeriodStatus
+    coverage_status: CoverageStatus                # pior caso entre as competencias
+    freshness_status: FreshnessStatus
+
+    # --- dado ---
+    rows: list[AffiliateCostRow]                   # UMA linha por (canal, marca, competencia)
+    channels: list[AffiliateChannelStatus]         # todos os canais do filtro, inclusive indisponiveis
+    months_included: list[str]                     # METADADO de auditoria; ver 23.5.4
+
+    # --- frescor PROPRIO do bloco; ver 23.5.2 ---
+    affiliate_refreshed_at: str | None             # MAX(synced_at) da fact NO ESCOPO retornado
+    source_watermark: str | None                   # last_successful_upper_bound do sync_state
+
+    # --- retorno: indisponibilidade tipada ---
+    return_availability: ReturnAvailability
+    return_note: str
+
+    # --- notas ---
+    source_note: str
+    limitation_note: str
+
+CanaisResponse:
+    ...campos atuais, INALTERADOS...
+    affiliate_costs: AffiliateCostsBlock | None    # aditivo
+```
+
+#### 23.5.1 Nomes dizem que o valor é assinado
+
+Os três campos terminam em `_signed` de propósito. O nome carrega a semântica: quem consumir `creator_commission_signed` sabe que recebe um **lançamento contábil assinado** da fonte, não uma magnitude de custo já normalizada. `abs()` é **proibido** em todo o caminho — API e interface (§18.5.1). Ver §23.9 para a regra completa de sinal.
+
+#### 23.5.2 Frescor é do bloco, não de `/canais`
+
+**[FATO] `affiliate_refreshed_at` e `source_watermark` NÃO reutilizam o `refreshed_at` geral de `/canais`.** São grandezas diferentes:
+
+| Campo | Origem | Significa |
+|---|---|---|
+| `refreshed_at` (existente) | pipeline diário de `/canais` | quando os KPIs de canais foram atualizados |
+| `affiliate_refreshed_at` | **`MAX(synced_at)` da fact, no escopo retornado** | quando esta fotografia de afiliados foi gravada |
+| `source_watermark` | `last_successful_upper_bound` do `sync_state` | até que ponto da fonte a fotografia leu |
+
+Reutilizar o `refreshed_at` geral classificaria como recente um dado congelado em 2026-08-25 só porque `/canais` respondeu agora — exatamente o erro que este campo existe para impedir.
+
+⚠️ **`freshness_status` é `manual_snapshot` hoje, e não há limiar de `stale`.** Não existe SLA nem rotina para esta carga (§23.2), então qualquer prazo que eu escolhesse seria inventado. `fresh` e `stale` só passam a ser atribuíveis **depois** da frente **UE2-C** (§23.10.1). Até então a interface mostra a **data da fotografia**, sem adjetivo de qualidade.
+
+#### 23.5.3 Retorno: indisponibilidade tipada, sem campo numérico
+
+`return_availability` é enum de **um único valor** — `unavailable_no_attributed_revenue` — e `return_note` traz a explicação legível. A interface declara a indisponibilidade **sem interpretar texto livre**.
+
+**NÃO existem, e não devem ser criados:** `return_amount`, `roi`, `roas`, `attributed_revenue` (nem nulo), nem qualquer campo numérico de retorno. O enum de um valor é deliberado: cria o lugar para *declarar ausência* sem criar o lugar para *guardar número*.
+
+#### 23.5.4 `months_included` é metadado, não convite a somar
+
+Serve para auditoria — dizer quais competências entraram no escopo. **Não** acompanha nenhum agregado multimensal, porque nenhum é devolvido (§23.7).
+
+### 23.6 Os comportamentos decididos
+
+| # | Situação | Comportamento |
+|---|---|---|
+| 1 | **Mês completo** | `period_status="complete_month"`, `availability_status="available"`, `rows` com uma linha por `(canal, marca)`, `months_included=["YYYY-MM"]` |
+| 2 | **Vários meses completos** | `period_status="complete_months"`. **Uma linha por marca × competência**, cada competência auditável isoladamente. **Nenhum agregado multimensal** (§23.7) |
+| 3 | **Mês parcial** | `period_status="partial_month"`, **`rows=[]`**. Nenhuma prévia numérica, nenhum rateio, nenhum zero. Só estado + explicação |
+| 4 | **Filtro diário / intervalo não alinhado** | `period_status="not_month_aligned"`, **`rows=[]`**. Idem: sem número, sem rateio |
+| 5 | **Ausência de linha × zero medido** | Ausência → a chave **não aparece** em `rows`. Zero medido → linha presente com `0`. Nunca um pelo outro |
+| 6 | **TikTok × ML/Shopee** | TikTok `available`; ML e Shopee **`unavailable_no_source`**. É "Dados indisponíveis", **nunca** "Não aplicável" — não há prova de que afiliados não existam nesses canais, só ausência de fonte medida |
+| 7 | **Múltiplos canais** | `channels` lista **todos** os canais do filtro com seu `availability_status`. Canal sem dado aparece indisponível, **não desaparece** |
+| 8 | **Múltiplas marcas** | Uma linha por `(canal, marca, competência)`. Agregação entre marcas é da UI e declara quais marcas entraram |
+| 9 | **Cobertura de marca incompleta** | `coverage_status="incomplete_brand_coverage"` **junto com** `available` e `complete_month` — as dimensões coexistem. `brands_present_in_month` diz quantas das 5 |
+| 10 | **Fotografia manual** | `freshness_status="manual_snapshot"`, com `affiliate_refreshed_at` e `source_watermark` preenchidos. Sem adjetivo temporal |
+| 11 | **Erro da fonte de afiliados** | `availability_status="error"`, `rows=[]`, `affiliate_refreshed_at=None`. **O restante de `/canais` é preservado** (§23.8) |
+| 12 | **Nenhuma marca elegível** | `availability_status="no_eligible_brand"`, `rows=[]`. Distinto de erro e de zero |
+
+**Regra final de período — sem contradição.** Valor numérico existe **apenas** para mês(es) calendário **completo(s)**. Mês parcial e intervalo não alinhado devolvem `rows=[]`: nenhuma prévia, nenhum rateio, nenhum zero de preenchimento.
+
+⚠️ **Isto resolve diretamente a armadilha de `2026-08`.** Enquanto agosto/2026 estiver aberto ou em maturação, ele **não pode** exibir `creator = R$ 0,00` como conclusão — e com `rows=[]` não exibe número algum. A primeira redação desta seção dizia "valor exibido com marca visual distinta", o que contradizia a própria regra 11 do gate; a regra agora é uma só.
+
+**Nenhuma razão sobre GMV** enquanto a Fase C do contrato comercial TikTok estiver aberta (auditoria da fonte BLOCKED, ver `docs/dq_tk1_refresh_runbook.md` §5). O bloco expõe valores absolutos assinados e nada mais.
+
+#### 23.6.1 Duas regras de agregação de estado (para a Task 2/3)
+
+Não redesenham o contrato — fixam como as dimensões se combinam quando o escopo tem mais de uma competência ou mais de um canal.
+
+**1. `coverage_status` geral é CONSERVADOR.** Com várias competências no escopo, o `coverage_status` do bloco é `incomplete_brand_coverage` se **qualquer** competência estiver incompleta. Os metadados por competência — `coverage_status` e `brands_present_in_month` de cada `AffiliateCostRow` — permanecem a **evidência detalhada**, e é neles que a interface diz *quais* competências estão incompletas.
+
+O motivo é assimetria de dano: rotular como completo um escopo que contém `2025-06` (1/5 marcas) esconderia a lacuna; rotular como incompleto um escopo com uma única competência incompleta apenas convida a olhar o detalhe. O erro conservador é recuperável, o otimista não.
+
+**2. Em filtro multicanal, cada entrada de `channels` é AUTORITATIVA.** O `availability_status` agregado do bloco nunca sobrescreve o status por canal, e **disponibilidade do TikTok jamais transforma ML ou Shopee em disponíveis**. A interface lê o status de cada canal na sua própria entrada; o agregado serve apenas para decidir se o bloco tem algo a mostrar.
+
+Sem esta regra, um escopo com TikTok disponível poderia render um bloco `available` que a interface leria como "os três canais têm dado" — precisamente a inferência que o item 6 da §23.6 proíbe.
+
+### 23.7 Nenhuma soma — nem entre componentes, nem entre meses
+
+Três proibições distintas, todas em vigor:
+
+1. **Sem soma dos três componentes.** Nenhum `affiliate_cost_total`, em nenhum nível. Qual subconjunto constitui "custo de afiliado" é o ponto aberto **P2**, e a ausência de sobreposição entre eles **não está provada** (§23.3) — a soma não é só decisão comercial pendente, é aritmeticamente não validada.
+2. **Sem agregado multimensal.** Vários meses devolvem linhas separadas por competência. Nenhum `total`, nenhuma média, nenhum campo derivado de somar competências. Cada competência permanece auditável individualmente.
+3. **Sem campo derivado.** Nenhum percentual, razão, índice ou composição calculada a partir dos três componentes.
+
+Se a UI algum dia precisar somar, soma explicitamente, declara **quais competências e quais componentes** entraram, e assume a decisão. O contrato de dados não a toma por ela.
+
+### 23.8 Isolamento de falha
+
+**[FATO] Falha na consulta de afiliados NÃO derruba `/canais`.** O bloco é aditivo e opcional: em erro, devolve `availability_status="error"` com `rows=[]`, e `kpis`, `brands`, `channel_rows`, `channel_medians` e `refreshed_at` seguem intactos no payload.
+
+Isso é requisito de contrato, não detalhe de implementação: `/canais` serve KPIs que a operação usa hoje, e um bloco novo — alimentado por uma fact com carga manual — não pode virar ponto único de falha de uma página que funciona.
+
+### 23.9 Sinal contábil — dois níveis, e uma pré-condição
+
+**[FATO] A fact preserva lançamentos assinados, e todos os 210 valores observados são zero ou negativos** (§23.1). Nenhum positivo.
+
+**Nível 1 — API / contrato de dados.** Preserva o valor assinado da fonte, sem exceção. Os nomes (`*_signed`) tornam isso explícito. `abs()` **proibido**.
+
+**Nível 2 — interface.** Não pode chamar silenciosamente um valor negativo de "custo positivo". Até a **confirmação formal da convenção contábil** pelo dono do número:
+
+- o título do bloco é **"Impacto de afiliados no resultado"**, com **sinal preservado** (`-R$ 958.842,36`);
+- **não** se usa o título simples "Custo de afiliados" — ele afirmaria uma convenção que ninguém confirmou;
+- valor **positivo** futuro é tratado como **reversão ou sinal desconhecido**, rotulado como tal e sinalizado para revisão — **nunca** convertido automaticamente em custo.
+
+⚠️ **Pré-condição registrada.** Usar o título "Custo de afiliados" e exibir magnitude positiva exige **decisão contratual explícita** sobre a convenção de sinal — documentada, com o dono do número, e refletida aqui. A transformação, se aprovada, será uma regra nomeada e testada, **nunca** um `abs()` genérico aplicado no caminho.
+
+### 23.10 Desenho da interface
+
+Bloco novo em `/canais`, reaproveitando a arquitetura existente — **sem novo shell, sem novo modal, sem nova rota**.
+
+**Mês completo (2026-03):**
+
+```
+┌─ Impacto de afiliados no resultado ────────── competência: 2026-03 ─────────┐
+│  Fotografia de 25/08/2026 19:33 · carga manual, sem rotina automática        │
+│  Fonte lida até 25/08/2026 00:11                                            │
+│                                                                             │
+│  TikTok Shop                                                                │
+│    Comissão de criadores          -R$ 958.842,36                             │
+│    Comissão de parceiro afiliado  -R$ 472.490,24                             │
+│    Comissão de afiliados/Ads      -R$  94.838,13                             │
+│                                                                             │
+│  Mercado Livre    Dados indisponíveis · fonte equivalente não confirmada     │
+│  Shopee           Dados indisponíveis · fonte equivalente não confirmada     │
+│                                                                             │
+│  Retorno de afiliados: indisponível — não há receita atribuída a afiliado    │
+│  no grão necessário, então não existe numerador para calcular retorno.       │
+│                                                                             │
+│  Valores com o sinal da fonte. Os três são exibidos separadamente e não      │
+│  somados: qual subconjunto constitui "custo de afiliado" é decisão aberta,   │
+│  e a ausência de sobreposição entre eles não está provada.                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Mês parcial (agosto/2026, em aberto) — nenhum número:**
+
+```
+┌─ Impacto de afiliados no resultado ────────── competência: 2026-08 ─────────┐
+│  Competência em aberto. Os valores ainda maturam na fonte e não são          │
+│  exibidos: um número parcial pareceria comparável a um mês fechado.          │
+│  Selecione um mês completo para ver os lançamentos.                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Regras de apresentação:
+
+- **Competência no cabeçalho**, nunca em nota de pé. Vários meses → uma seção por competência, **sem linha de total**.
+- **Três lançamentos sempre separados.** Nenhum total, subtotal, ou barra de composição que sugira partes de um todo.
+- **Sinal preservado** conforme §23.9. Título "Impacto de afiliados no resultado" até a convenção ser confirmada.
+- **Zero medido × ausência × indisponível**: `R$ 0,00` só para zero medido em competência **completa**; `Dados indisponíveis` para ausência de fonte; nada para período não elegível. Nunca no mesmo pixel.
+- **As quatro dimensões podem aparecer juntas**: um mês completo e disponível pode carregar, ao mesmo tempo, aviso de cobertura incompleta (2025-06: 1/5 marcas) e aviso de fotografia manual.
+- **Frescor**: exibe a **data da fotografia** (`affiliate_refreshed_at`) e até onde a fonte foi lida (`source_watermark`). **Sem** adjetivo "atualizado"/"desatualizado" antes da UE2-C.
+- **Estado protegido**: o bloco lê `displayAffiliateCosts`, `null` quando `resolvedKey !== requestKey`, igual a `displayKpis`. Nunca o estado bruto.
+- **Sem ranking entre canais.** Ordem fixa e declarada (TikTok, ML, Shopee), nunca por valor.
+- **Drill-down**: reaproveita o mecanismo existente por marca; nenhum shell novo.
+- **Vocabulário proibido**: "retorno"/"ROI"/"ROAS" acompanhados de número; "share de vendas"; "margem"; "total de afiliados"; "custo" como rótulo de valor assinado antes da §23.9.
+
+### 23.11 Plano da Task 2/3 — API e frontend, e só isso
+
+1. `apps/api/app/schemas/performance.py` — acrescentar os quatro enums ortogonais, `ReturnAvailability`, `AffiliateCostRow`, `AffiliateChannelStatus`, `AffiliateCostsBlock`; campo aditivo `affiliate_costs` em `CanaisResponse`. **Nenhum campo existente alterado ou removido.**
+2. `apps/api/app/services/performance_service.py` — função dedicada que lê `marts.fact_tiktok_affiliate_cost_order_monthly` por marca e pelas competências derivadas do `EffectivePeriod`; devolve o bloco com as quatro dimensões, `affiliate_refreshed_at = MAX(synced_at)` do escopo e `source_watermark` do `sync_state`. Colunas explícitas, nunca `SELECT *`. Envolvida de modo que falha devolva `error` **sem** derrubar o resto (§23.8). `channel_rows` **intocado**.
+3. `apps/web/src/lib/api-client.ts` — tipos espelhados e mapeamento; sem novo fetch.
+4. `apps/web/app/canais/page.tsx` — bloco novo lendo estado protegido; nenhum componente existente alterado além da inclusão.
+
+⚠️ **A Task 2/3 NÃO toca `full_daily`, `orchestrate.py` nem o Scheduler.** Integração operacional é a frente **UE2-C** (§23.12), separada de propósito: misturar API/frontend com alteração da rotina diária juntaria dois riscos de natureza diferente na mesma mudança.
+
+### 23.12 UE2-C — frente operacional separada (não iniciada)
+
+Escopo próprio, fora do UE3:
+
+1. integrar `pipelines/sync_tiktok_affiliate_cost_order_monthly.py --mode incremental` à rotina;
+2. definir **frequência** da carga;
+3. definir **SLA** de frescor;
+4. definir o **backfill integral periódico** exigido pela §18.8.5 (hard delete não é detectável por watermark);
+5. **somente então** habilitar a classificação temporal `fresh`/`stale` no `freshness_status`.
+
+Até a UE2-C concluir, `freshness_status` é `manual_snapshot` e a interface mostra data, não adjetivo.
+
+### 23.13 Aceite da Task 3/3 (testes)
+
+| # | Teste |
+|---|---|
+| 1 | lançamento negativo aparece com **sinal preservado**; nenhum `abs()` no caminho |
+| 2 | **zero medido** em competência completa exibe `R$ 0,00`, distinto de indisponível |
+| 3 | `None`/ausência de linha → chave não aparece; **nunca** `0` |
+| 4 | ML e Shopee → `unavailable_no_source` e **"Dados indisponíveis"**; nunca "Não aplicável" |
+| 5 | **mês parcial → `rows=[]`**, nenhuma prévia numérica, nenhum zero |
+| 6 | **intervalo não alinhado → `rows=[]`**, sem rateio |
+| 7 | vários meses → uma linha por marca × competência; **nenhum agregado multimensal**; `months_included` presente como metadado |
+| 8 | as quatro dimensões são **independentes**: um caso `available` + `complete_month` + `incomplete_brand_coverage` + `manual_snapshot` é representável e exibido por inteiro |
+| 9 | `affiliate_refreshed_at` = `MAX(synced_at)` do escopo; **não** é o `refreshed_at` de `/canais` |
+| 10 | `source_watermark` vem do `sync_state` e é **distinto** de `affiliate_refreshed_at` |
+| 11 | `freshness_status` nunca é `fresh` ou `stale` antes da UE2-C |
+| 12 | `return_availability` é enum tipado; **não** existe `return_amount`, `roi`, `roas` nem receita atribuída |
+| 13 | **nenhuma soma** dos três componentes em payload ou UI |
+| 14 | falha na consulta de afiliados → bloco em `error` e **resto de `/canais` intacto** |
+| 15 | `requestKey`/`resolvedKey`: bloco vira `null` quando não fresco; troca de filtro em voo não vaza resultado velho |
+| 16 | "retorno", "ROI", "ROAS" nunca aparecem acompanhados de número |
+| 17 | título é "Impacto de afiliados no resultado"; **não** "Custo de afiliados" enquanto a convenção não for confirmada |
+| 18 | **zero regressão**: `channel_rows`, `channel_medians`, sinais e KPIs byte-equivalentes; `test_nenhum_campo_de_desconto_ou_afiliado_no_payload` continua **verde** |
+| 19 | acessibilidade (alvo ≥ 44px, contraste, tipografia ≥ 12px) e responsividade |
+| 20 | fonte indisponível → nenhum número fabricado |
+
+### 23.14 Riscos e decisões abertas
+
+| # | Item | Estado |
+|---|---|---|
+| A | **Convenção de sinal não confirmada** | **Aberto.** Pré-condição para o título "Custo de afiliados" e para qualquer magnitude positiva (§23.9) |
+| B | **Sem atualização automática** — `synced_at` congelado em 2026-08-25 | **Aberto.** Escopo da **UE2-C** (§23.12), não da Task 2/3 |
+| C | **Sobreposição dos três componentes não provada** (§23.3) | **Aberto.** Reforça a proibição de somar; precisa do dono do número |
+| D | **P2** — qual subconjunto é "custo de afiliado" | **Aberto.** Bloqueia qualquer total |
+| E | **`2026-08` com creator zero** — provável atraso de registro | **Aberto**, mas **neutralizado na UI**: mês em aberto devolve `rows=[]` |
+| F | **Fase C do contrato TikTok** (auditoria BLOCKED por host key) | **Aberto.** Bloqueia qualquer razão sobre GMV |
+| G | Fonte de afiliados para ML/Shopee | **Não investigada.** Enquanto não houver prova, é "indisponível", nunca "não aplicável" |
+| H | Backfill integral periódico (§18.8.5) | **Aberto.** Escopo da UE2-C |
