@@ -12,6 +12,7 @@ Mart (so' consulta o Neon).
 """
 import re
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,11 @@ class FakeCursor:
             return {"m": self.conn.tiktok_channel_efficiency_max}
         if "ref_month) AS m FROM marts." in sql:
             return {"m": self.conn.shopee_produtos_max}
+        # Gate UE2-C: watermark do sync de afiliados. Ramo EXPLICITO — o
+        # fallback estrito abaixo so' cobre `AS m`, e sem este ramo a consulta
+        # cairia no `{"n": 0}` e o teste ficaria verde sem exercitar nada.
+        if "last_successful_upper_bound AS w" in sql:
+            return {"w": self.conn.affiliate_watermark}
         for marker, value in self.conn.bug8_scalars:
             if marker in sql:
                 return {"n": value}
@@ -88,7 +94,8 @@ class FakeConn:
     def __init__(self, last_run=None, last_success=None, daily_freshness_rows=None,
                  tiktok_produtos_max=_UNSET, ml_produtos_max=_UNSET, shopee_produtos_max=_UNSET,
                  bug8_scalars=None,
-                 ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET):
+                 ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET,
+                 affiliate_watermark=_UNSET):
         self.executed = []
         self.closed = False
         self.last_run = last_run or {}
@@ -112,6 +119,12 @@ class FakeConn:
         self.tiktok_channel_efficiency_max = (
             TODAY - timedelta(days=1) if tiktok_channel_efficiency_max is _UNSET
             else tiktok_channel_efficiency_max)
+        # Gate UE2-C: `last_successful_upper_bound` e' TIMESTAMP WITHOUT TIME
+        # ZONE — naive de proposito. O default e' o lote de ontem, que e' o
+        # estado saudavel para uma execucao das 06:00 de hoje.
+        self.affiliate_watermark = (
+            datetime.combine(TODAY - timedelta(days=1), dt_time(21, 3))
+            if affiliate_watermark is _UNSET else affiliate_watermark)
         self.bug8_scalars = bug8_scalars or [
             ("HAVING COUNT(*) > 1", 0), ("IS NULL", 0), ("gmv < 0", 0),
             ("IS DISTINCT FROM 100", 0), ("ROUND(canceled_orders::numeric", 0),
@@ -1213,7 +1226,11 @@ def test_s3_as_regras_das_fontes_antigas_nao_mudaram():
     por_nome = {s.source_name: (s.exec_threshold_hours, s.critical) for s in hc.EXPECTED_SOURCES}
     for nome, alvo in esperado.items():
         assert por_nome[nome] == alvo, nome
-    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 2
+    # +2 do Gate S3 (ml_cross_company, tiktok_channel_efficiency) e +1 do Gate
+    # UE2-C (custo de afiliado do TikTok). O objetivo do teste continua sendo o
+    # mesmo: provar que nenhuma REGRA das fontes antigas mudou ao acrescentar
+    # fontes novas.
+    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 3
 
 
 # --- 13. o fake responde explicitamente, sem fallback generico --------------

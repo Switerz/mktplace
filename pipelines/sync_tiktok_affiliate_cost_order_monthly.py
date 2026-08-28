@@ -129,8 +129,9 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
@@ -222,6 +223,80 @@ _RUN_ID_PREFIX = "sync_tiktok_affiliate_cost_order_monthly"
 #: Resultados possiveis de `advance_watermark`.
 WATERMARK_ADVANCED = "avancado"
 WATERMARK_UNCHANGED = "inalterado"
+
+# ---------------------------------------------------------------------------
+# UE2-C — automacao: modo `auto`, auditoria e frescor (contrato 25)
+# ---------------------------------------------------------------------------
+
+#: Fuso OPERACIONAL. Todo raciocinio sobre dia e mes acontece aqui, nunca em UTC:
+#: entre 21h e 00h BRT o UTC ja virou o dia, e no dia 1 virou o mes.
+APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+
+#: Nome canonico em `audit.source_sync_run.source_name`. Escrito em TODA execucao
+#: real, qualquer modo — e' a entrada de `EXPECTED_SOURCES` do health check e
+#: prova que o job rodou.
+CANONICAL_AUDIT_SOURCE = "tiktok_affiliate_cost_order_monthly"
+
+#: Marcador auditavel do `full`. Criado no INICIO de toda execucao full, nao no
+#: sucesso: gravar so' quando termina bem seria marcador, nao auditoria, e
+#: esconderia exatamente as tentativas de full que falharam.
+FULL_AUDIT_SOURCE = CANONICAL_AUDIT_SOURCE + "_full"
+
+#: `marts.dim_marketplace`: 1=tiktok. Mesma convencao de sync_produtos.py,
+#: daily_performance.py e sync_serving_snapshots.py.
+AUDIT_MARKETPLACE_ID = 1
+
+MODE_FULL = "full"
+MODE_INCREMENTAL = "incremental"
+MODE_AUTO = "auto"
+MODES = (MODE_FULL, MODE_INCREMENTAL, MODE_AUTO)
+
+#: Idade maxima da ultima execucao bem-sucedida para o dado ser considerado
+#: fresco. Mesmo limiar que o health check ja usa para fontes diarias.
+FRESHNESS_MAX_EXECUTION_AGE_HOURS = 30
+
+#: A partir de quantos lotes de atraso o alerta ESCALA. Nao e' o limiar de
+#: `stale` — um lote ja e' stale.
+FRESHNESS_ESCALATION_LATE_BATCHES = 2
+
+FRESHNESS_FRESH = "fresh"
+FRESHNESS_STALE = "stale"
+FRESHNESS_UNKNOWN = "unknown"
+
+#: Status aceitos por `audit.source_sync_run.status` no fim de uma execucao.
+#: `running` nao entra: e' estado inicial, nunca resultado final.
+AUDIT_STATUS_FINAIS = ("success", "failed")
+
+# --- Estado da PUBLICACAO. Existe para que a auditoria nunca minta ---------
+#
+# Sem isto, uma falha ao FINALIZAR a auditoria (que acontece DEPOIS do commit)
+# caia no `except` externo e marcasse `failed` — afirmando que os dados nao
+# foram publicados quando eles ja estavam no destino. No `full`, isso ainda
+# faria a obrigacao mensal parecer nao atendida e provocaria outra reconstrucao.
+PUBLICACAO_NAO_TENTADA = "nao_tentada"
+PUBLICACAO_COMMIT_CONFIRMADO = "commit_confirmado"
+PUBLICACAO_INDETERMINADA = "indeterminada"
+PUBLICACAO_ROLLBACK_CONFIRMADO = "rollback_confirmado"
+
+
+def pode_marcar_failed(publicacao: str) -> bool:
+    """`failed` so' e' honesto quando se PROVA que nada foi publicado.
+
+    Dois estados provam isso: a transacao gravavel nunca chegou a tentar o
+    commit, ou o rollback foi confirmado. `commit_confirmado` e
+    `indeterminada` NAO provam — no primeiro os dados estao la, e no segundo
+    ninguem sabe.
+    """
+    return publicacao in (PUBLICACAO_NAO_TENTADA, PUBLICACAO_ROLLBACK_CONFIRMADO)
+
+
+class AuditoriaIncompleta(RuntimeError):
+    """Fact publicada, auditoria nao finalizada.
+
+    Falha operacional real — o exit code precisa refleti-la —, mas NAO e' falha
+    de publicacao: os dados estao no destino e as linhas de auditoria ficam em
+    `running`, que e' exatamente o residuo observavel desse estado.
+    """
 
 #: Busca a chave proibida na sua forma CITADA. Sem as aspas de fechamento o
 #: padrao casaria com `affiliate_commission_amount_before_pit`, que e' legitimo,
@@ -1312,6 +1387,304 @@ def wipe_fact(cur) -> dict:
 # Orquestracao
 # ---------------------------------------------------------------------------
 
+def operational_month(momento: datetime) -> tuple[int, int]:
+    """Mes operacional `(ano, mes)` em `America/Sao_Paulo`.
+
+    `momento` deve ser timezone-aware. Converter e' obrigatorio: as 22h de 31/08
+    em BRT ja sao 01/09 em UTC, e usar UTC faria a obrigacao mensal virar um dia
+    antes da hora.
+    """
+    if momento.tzinfo is None:
+        raise ValueError("operational_month exige datetime timezone-aware")
+    local = momento.astimezone(APP_TIMEZONE)
+    return (local.year, local.month)
+
+
+def decide_effective_mode(cur, requested_mode: str,
+                          agora: datetime) -> tuple[str, dict]:
+    """Resolve `auto` -> `full` | `incremental` consultando SOMENTE a auditoria.
+
+    **Precisa ser chamada com o advisory lock ja adquirido.** Decidir antes do
+    lock abriria corrida: duas execucoes leriam a mesma ausencia de full no mes e
+    ambas escolheriam `full`, e a segunda reconstruiria o destino em cima da
+    primeira. Como a decisao roda na MESMA conexao que detem o lock, isso e'
+    impossivel por construcao, nao por disciplina.
+
+    A obrigacao mensal so' e' consumida por um `full` que:
+      1. tenha `source_name = FULL_AUDIT_SOURCE`;
+      2. tenha `status = 'success'`;
+      3. tenha `finished_at` dentro do mes operacional BRT corrente.
+
+    `running`, `failed`, ausencia de linha ou sucesso de mes anterior **nao**
+    consomem — por isso a consulta filtra `status = 'success'` e nao usa
+    `started_at`. Nada aqui olha `today.day`, arquivo, memoria do processo,
+    contagem da fact ou `error_message`.
+    """
+    if requested_mode != MODE_AUTO:
+        return requested_mode, {
+            "requested_mode": requested_mode,
+            "effective_mode": requested_mode,
+            "razao": "modo explicito; nenhuma decisao automatica",
+            "mes_operacional": None,
+            "full_mensal": "nao avaliado",
+        }
+
+    ano, mes = operational_month(agora)
+    cur.execute(
+        """
+        SELECT MAX(finished_at)
+        FROM audit.source_sync_run
+        WHERE source_name = %s
+          AND status = 'success'
+          AND finished_at IS NOT NULL
+          AND (finished_at AT TIME ZONE 'America/Sao_Paulo') >= %s
+          AND (finished_at AT TIME ZONE 'America/Sao_Paulo') < %s
+        """,
+        (FULL_AUDIT_SOURCE, date(ano, mes, 1), _proximo_mes(ano, mes)),
+    )
+    linha = cur.fetchone()
+    ultimo = linha[0] if linha else None
+
+    if ultimo is not None:
+        return MODE_INCREMENTAL, {
+            "requested_mode": MODE_AUTO,
+            "effective_mode": MODE_INCREMENTAL,
+            "razao": "full mensal ja atendido neste mes operacional",
+            "mes_operacional": f"{ano:04d}-{mes:02d}",
+            "full_mensal": "atendido",
+            "ultimo_full_success": str(ultimo),
+        }
+
+    return MODE_FULL, {
+        "requested_mode": MODE_AUTO,
+        "effective_mode": MODE_FULL,
+        "razao": (
+            "sem full com status success no mes operacional corrente; "
+            "falha, running ou sucesso de mes anterior nao consomem a obrigacao"
+        ),
+        "mes_operacional": f"{ano:04d}-{mes:02d}",
+        "full_mensal": "devido",
+    }
+
+
+def _proximo_mes(ano: int, mes: int) -> date:
+    return date(ano + 1, 1, 1) if mes == 12 else date(ano, mes + 1, 1)
+
+
+def audit_source_names(effective_mode: str) -> tuple[str, ...]:
+    """Nomes de auditoria de UMA execucao real.
+
+    `full` grava DUAS linhas — a canonica, que o health check observa, e a
+    especifica, que prova o ciclo do full inclusive quando ele falha.
+    """
+    if effective_mode == MODE_FULL:
+        return (CANONICAL_AUDIT_SOURCE, FULL_AUDIT_SOURCE)
+    return (CANONICAL_AUDIT_SOURCE,)
+
+
+def _audit_start(conn, source_names: tuple[str, ...]) -> list[int]:
+    """Insere todas as linhas como `running` numa UNICA transacao de auditoria.
+
+    Atomico de proposito: se a segunda falhasse depois de a primeira comitar,
+    existiria um `full` com a linha canonica e sem o marcador — e o mes seguinte
+    poderia se declarar atendido por uma execucao que ninguem consegue auditar.
+    Falha aqui faz rollback e o chamador aborta ANTES de ler a fonte e antes de
+    qualquer escrita na fact.
+    """
+    cur = conn.cursor()
+    try:
+        ids = []
+        for nome in source_names:
+            cur.execute(
+                """
+                INSERT INTO audit.source_sync_run
+                    (source_name, marketplace_id, status, started_at)
+                VALUES (%s, %s, 'running', NOW())
+                RETURNING sync_run_id
+                """,
+                (nome, AUDIT_MARKETPLACE_ID),
+            )
+            ids.append(cur.fetchone()[0])
+        conn.commit()
+        return ids
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def _audit_finish(conn, run_ids: list[int], status: str, *,
+                  extracted: int | None = None, loaded: int | None = None,
+                  min_ref_month: date | None = None,
+                  max_ref_month: date | None = None,
+                  error: str | None = None) -> None:
+    """Finaliza TODAS as linhas com o mesmo resultado factual, numa transacao.
+
+    As duas linhas de um `full` nunca podem divergir: uma dizendo `success` e a
+    outra `running` produziria uma obrigacao mensal consumida por uma execucao
+    cujo ciclo canonico ninguem viu terminar.
+
+    Cada UPDATE precisa atingir EXATAMENTE uma linha. `rowcount == 0` significa
+    que o id nao existe — e um `full` cuja linha `_full` sumiu terminaria com
+    metade do ciclo registrado. `rowcount > 1` significa que o predicado pegou
+    mais de uma linha, o que a PK torna impossivel e por isso denuncia defeito.
+    Qualquer um dos dois derruba a transacao inteira: ou as duas linhas
+    terminam, ou nenhuma.
+    """
+    if status not in AUDIT_STATUS_FINAIS:
+        raise ValueError(
+            f"status final invalido: {status!r}; aceitos: {AUDIT_STATUS_FINAIS}"
+        )
+    cur = conn.cursor()
+    try:
+        for run_id in run_ids:
+            cur.execute(
+                """
+                UPDATE audit.source_sync_run SET
+                    finished_at = NOW(), status = %s,
+                    rows_extracted = %s, rows_loaded = %s,
+                    source_min_date = %s, source_max_date = %s,
+                    error_message = %s
+                WHERE sync_run_id = %s
+                """,
+                (status, extracted, loaded, min_ref_month, max_ref_month,
+                 error, run_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    "auditoria nao atingiu exatamente uma linha "
+                    f"(rowcount={cur.rowcount}); a transacao inteira sera "
+                    "desfeita para nao deixar o ciclo pela metade"
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def _neon_audit(url: str):
+    """Conexao de auditoria — INDEPENDENTE da conexao que publica a fact.
+
+    E' o que permite registrar `failed` mesmo quando a transacao da fact sofreu
+    rollback. Esta conexao nunca participa do DML da fact.
+    """
+    return psycopg2.connect(url, connect_timeout=10)
+
+
+def published_ref_month_bounds(relatorio_publicacao: dict | None,
+                               snapshot) -> tuple[date | None, date | None]:
+    """MIN/MAX de `ref_month` PUBLICADO, ou `(None, None)`.
+
+    Devolve `(None, None)` quando nada foi publicado, em vez de fabricar uma
+    data — mesmo principio de `source_date_bounds` em `sync_serving_snapshots`.
+    Nao e' o watermark: `ref_month` e' competencia comercial e o watermark e'
+    atualizacao tecnica; sao dimensoes diferentes e nenhuma coluna daqui carrega
+    a outra.
+    """
+    if not relatorio_publicacao or not relatorio_publicacao.get("published"):
+        return (None, None)
+    meses = [r["ref_month"] for r in snapshot.rows if r.get("ref_month")]
+    if not meses:
+        return (None, None)
+    return (min(meses), max(meses))
+
+
+def _metricas_da_execucao(relatorio: dict, snapshot) -> tuple:
+    """`(extracted, loaded, min_ref_month, max_ref_month)` para a auditoria.
+
+    O `full` sobre fonte comprovadamente vazia esvazia a fact e NAO passa por
+    `publish_in_transaction` — logo nao existe `relatorio["publicacao"]`. Sem
+    este ramo, `rows_loaded` iria a NULL, que significa "nao se sabe", quando o
+    fato conhecido e' **zero**. Zero medido e ausencia de medicao sao estados
+    diferentes, e a auditoria precisa distinguir os dois.
+
+    Nem mes nem watermark sao fabricados: `source_min/max_date` ficam nulos
+    porque nada foi publicado.
+    """
+    if getattr(snapshot, "source_empty", False):
+        return (0, 0, None, None)
+    pub = relatorio.get("publicacao") or {}
+    min_rm, max_rm = published_ref_month_bounds(pub, snapshot)
+    return (snapshot.boundary_a.get("linhas_lidas"), pub.get("published"),
+            min_rm, max_rm)
+
+
+def classify_affiliate_freshness(
+    last_success_finished_at: datetime | None,
+    watermark: datetime | None,
+    agora: datetime,
+) -> dict:
+    """Contrato de frescor da UE2-C (25.8). FUNCAO PURA — zero I/O.
+
+    Duas grandezas de TIPO diferente, e a diferenca importa:
+
+    - `last_success_finished_at` vem de `audit.source_sync_run.finished_at`,
+      que e' `TIMESTAMPTZ` — timezone-aware. **Convertido** para BRT.
+    - `watermark` e' `last_successful_upper_bound`, `TIMESTAMP WITHOUT TIME
+      ZONE` — **naive**. NAO e' convertido nem rotulado como BRT: entra apenas
+      a parte de data ja armazenada.
+
+    A comparacao entre as duas datas e' operacionalmente defensavel porque o
+    lote observado fecha perto das 21h, longe da virada do dia — evidencia
+    empirica (25.1), nao fuso embutido na coluna.
+    """
+    if last_success_finished_at is None or watermark is None:
+        return {
+            "status": FRESHNESS_UNKNOWN,
+            "motivo": ("sem execucao bem-sucedida registrada"
+                       if last_success_finished_at is None
+                       else "sem watermark persistido"),
+            "execution_recent": None,
+            "watermark_current": None,
+            "late_batches": None,
+            "expected_batch_date": None,
+            "watermark_date": None,
+        }
+
+    if last_success_finished_at.tzinfo is None:
+        raise ValueError("finished_at da auditoria deve ser timezone-aware")
+    if agora.tzinfo is None:
+        # Subtrair aware de naive levantaria TypeError la' embaixo, com uma
+        # mensagem que nao explica nada. Falhar aqui nomeia o defeito.
+        raise ValueError("`agora` deve ser timezone-aware")
+
+    idade_h = (agora - last_success_finished_at).total_seconds() / 3600.0
+    execution_recent = idade_h <= FRESHNESS_MAX_EXECUTION_AGE_HOURS
+
+    d_exec = last_success_finished_at.astimezone(APP_TIMEZONE).date()
+    expected_batch_date = d_exec - timedelta(days=1)
+    watermark_date = watermark.date()
+
+    watermark_current = watermark_date >= expected_batch_date
+    late_batches = max(0, (expected_batch_date - watermark_date).days)
+
+    if execution_recent and watermark_current:
+        status, motivo = FRESHNESS_FRESH, "execucao recente e fonte no lote esperado"
+    elif not execution_recent and not watermark_current:
+        status, motivo = FRESHNESS_STALE, "execucao antiga e fonte atrasada"
+    elif not execution_recent:
+        status, motivo = FRESHNESS_STALE, "execucao mais velha que o limite"
+    else:
+        status, motivo = FRESHNESS_STALE, (
+            "job executou, mas a fonte nao avancou ate o lote esperado"
+        )
+
+    return {
+        "status": status,
+        "motivo": motivo,
+        "execution_recent": execution_recent,
+        "watermark_current": watermark_current,
+        "late_batches": late_batches,
+        "escalate": late_batches >= FRESHNESS_ESCALATION_LATE_BATCHES,
+        "expected_batch_date": expected_batch_date,
+        "watermark_date": watermark_date,
+        "execution_age_hours": round(idade_h, 2),
+    }
+
+
 def resolve_lower_bound(mode: str, watermark: datetime | None) -> datetime | None:
     """`full` ignora o watermark por definicao. `incremental` sem watermark NAO
     inventa janela: exige backfill integral, e falha dizendo isso.
@@ -1371,7 +1744,7 @@ def assert_empty_source_allowed(mode: str) -> None:
         )
 
 
-def _run_apply(mode: str, run_id: str) -> dict:
+def _run_apply(mode: str, run_id: str | None) -> dict:
     """Execucao com escrita. Lock de SESSAO; transacao gravavel curta e no fim.
 
     Ordem obrigatoria (18.8.9). UMA SO conexao com o destino, do inicio ao fim:
@@ -1421,9 +1794,38 @@ def _run_apply(mode: str, run_id: str) -> dict:
     """
     relatorio = {"mode": mode, "run_id": run_id, "applied": True}
     neon = _neon_session(_get_neon_url())                                    # 1
+    audit_conn = None
+    audit_ids: list[int] = []
+    efetivo = mode
+    publicacao = PUBLICACAO_NAO_TENTADA
     try:
         acquire_advisory_lock(neon)                                          # 2
         relatorio["lock"] = f"pg_advisory_lock({ADVISORY_LOCK_KEY}) de sessao"
+
+        # 2b (UE2-C) — DECISAO DO MODO, sob o lock e na MESMA conexao que o
+        # detem. Antes da auditoria, antes da fonte, antes de qualquer escrita.
+        cur = neon.cursor()
+        try:
+            efetivo, decisao = decide_effective_mode(
+                cur, mode, datetime.now(timezone.utc)
+            )
+        finally:
+            cur.close()
+        relatorio["decisao_modo"] = decisao
+        relatorio["effective_mode"] = efetivo
+        if run_id is None:
+            run_id = default_run_id(efetivo)
+            relatorio["run_id"] = run_id
+
+        # 2c (UE2-C) — AUDITORIA aberta antes de ler a fonte. Conexao propria:
+        # e' o que permite registrar `failed` mesmo com a fact em rollback.
+        # Falha aqui aborta sem tocar fonte nem destino.
+        audit_conn = _neon_audit(_get_neon_url())
+        audit_ids = _audit_start(audit_conn, audit_source_names(efetivo))
+        relatorio["auditoria"] = {
+            "source_names": list(audit_source_names(efetivo)),
+            "sync_run_ids": list(audit_ids),
+        }
 
         cur = neon.cursor()
         try:
@@ -1431,7 +1833,7 @@ def _run_apply(mode: str, run_id: str) -> dict:
         finally:
             cur.close()
         relatorio["watermark_anterior"] = str(watermark)
-        lower_bound = resolve_lower_bound(mode, watermark)                    # 4
+        lower_bound = resolve_lower_bound(efetivo, watermark)                 # 4
 
         datamart = _datamart_snapshot(_get_datamart_url())                    # 5
         try:
@@ -1439,7 +1841,7 @@ def _run_apply(mode: str, run_id: str) -> dict:
             relatorio["fronteira_a"] = snapshot.boundary_a
             relatorio["chaves"] = len(snapshot.rows)
             relatorio["validacao_em_memoria"] = validate_snapshot_in_memory(  # 7
-                snapshot, mode
+                snapshot, efetivo
             )
 
             # 8 — a conexao continua utilizavel E ainda detem o lock? Se caiu,
@@ -1467,7 +1869,7 @@ def _run_apply(mode: str, run_id: str) -> dict:
                     )
                 else:
                     relatorio["publicacao"] = publish_in_transaction(         # 11
-                        cur, snapshot, mode, run_id, watermark
+                        cur, snapshot, efetivo, run_id, watermark
                     )
                     relatorio["watermark"] = relatorio["publicacao"]["watermark"]
                     # `watermark_novo` nasce dentro de `publicacao`; sem propagar,
@@ -1481,10 +1883,20 @@ def _run_apply(mode: str, run_id: str) -> dict:
                         )
                     relatorio["resultado"] = "publicado"
 
+                # A janela em que o resultado e' desconhecido comeca AQUI: se
+                # `commit()` levantar (queda de rede no meio do commit), nao ha
+                # como saber se o servidor efetivou ou nao.
+                publicacao = PUBLICACAO_INDETERMINADA
                 neon.commit()                                                # 12
+                publicacao = PUBLICACAO_COMMIT_CONFIRMADO
                 cur.close()
             except Exception:
-                neon.rollback()
+                # Rollback SO' se o commit nem chegou a ser tentado. Depois de
+                # um `commit()` que levantou, o rollback nao esclarece nada e
+                # pode levantar por cima da excecao original.
+                if publicacao == PUBLICACAO_NAO_TENTADA:
+                    neon.rollback()
+                    publicacao = PUBLICACAO_ROLLBACK_CONFIRMADO
                 raise
             finally:
                 # 13 — devolve a conexao ao estado em que o unlock roda sem abrir
@@ -1495,15 +1907,55 @@ def _run_apply(mode: str, run_id: str) -> dict:
             # Read-only: `rollback` e' o encerramento correto, nada a confirmar.
             datamart.rollback()
             datamart.close()
+
+        # 15 (UE2-C) — auditoria de SUCESSO, depois do commit da fact.
+        relatorio["publicacao_estado"] = publicacao
+        extracted, loaded, min_rm, max_rm = _metricas_da_execucao(
+            relatorio, snapshot
+        )
+        try:
+            _audit_finish(
+                audit_conn, audit_ids, "success",
+                extracted=extracted, loaded=loaded,
+                min_ref_month=min_rm, max_ref_month=max_rm,
+            )
+        except Exception as exc_audit:
+            # A fact JA foi comitada. Nao existe rollback honesto, e marcar
+            # `failed` afirmaria que os dados nao foram publicados — falso, e
+            # no `full` faria a obrigacao mensal parecer nao atendida,
+            # provocando outra reconstrucao. As linhas ficam em `running`, que
+            # e' o residuo observavel correto deste estado.
+            relatorio["auditoria"]["estado"] = "incompleta"
+            raise AuditoriaIncompleta(
+                "dados publicados, auditoria incompleta: as linhas de "
+                f"auditoria permanecem em 'running'. Causa: "
+                f"{sanitize_error_message(exc_audit)}"
+            ) from None
         return relatorio
+    except Exception as exc:
+        # `failed` SO' quando se prova que nada foi publicado. Depois de commit
+        # confirmado — ou com resultado indeterminado — as linhas ficam em
+        # `running` de proposito: e' o unico registro honesto de "nao se sabe".
+        if (audit_conn is not None and audit_ids
+                and not isinstance(exc, AuditoriaIncompleta)
+                and pode_marcar_failed(publicacao)):
+            try:
+                _audit_finish(audit_conn, audit_ids, "failed",
+                              error=sanitize_error_message(exc))
+            except Exception:
+                # Nao mascara a falha original com a falha de registra-la.
+                pass
+        raise
     finally:
         # 14 — liberado em sucesso e em toda classe de falha. Fechar a conexao
         # tambem libera o lock no servidor, porque ele e' de sessao.
         release_advisory_lock(neon)
         neon.close()
+        if audit_conn is not None:
+            audit_conn.close()
 
 
-def _run_diagnostic(mode: str, run_id: str) -> dict:
+def _run_diagnostic(mode: str, run_id: str | None) -> dict:
     """Execucao sem escrita. Zero advisory lock, zero DDL/DML, zero staging.
 
     `full` NAO toca o Neon. Nem para ler.
@@ -1528,10 +1980,36 @@ def _run_diagnostic(mode: str, run_id: str) -> dict:
     isso nada desta funcao pode escrever.
     """
     relatorio = {"mode": mode, "run_id": run_id, "applied": False}
+
+    # `auto` no diagnostico: RESOLVE o modo lendo a auditoria em read-only, para
+    # dizer o que faria. Sem lock e sem auditoria — nenhuma linha e' criada
+    # aqui, e a decisao NAO e' autoritativa, exatamente como o watermark lido
+    # sem lock nao e'.
+    if mode == MODE_AUTO:
+        neon = _neon_readonly(_get_neon_url())
+        try:
+            cur = neon.cursor()
+            mode, decisao = decide_effective_mode(
+                cur, MODE_AUTO, datetime.now(timezone.utc)
+            )
+            cur.close()
+        finally:
+            neon.close()
+        decisao["autoritativa"] = False
+        decisao["observacao"] = (
+            "decisao simulada sem advisory lock; no --apply ela ocorre sob o lock"
+        )
+        relatorio["decisao_modo"] = decisao
+        relatorio["effective_mode"] = mode
+        if run_id is None:
+            run_id = default_run_id(mode)
+        relatorio["run_id"] = run_id
+        relatorio["mode"] = mode
+
     if mode == "full":
         watermark = None
         relatorio["watermark_anterior"] = "nao consultado (full ignora watermark)"
-        relatorio["neon"] = "nao acessado"
+        relatorio.setdefault("neon", "nao acessado")
     else:
         neon = _neon_readonly(_get_neon_url())
         try:
@@ -1568,7 +2046,7 @@ def _run_diagnostic(mode: str, run_id: str) -> dict:
         datamart.close()
 
 
-def run(mode: str, run_id: str, apply: bool) -> dict:
+def run(mode: str, run_id: str | None, apply: bool) -> dict:
     return _run_apply(mode, run_id) if apply else _run_diagnostic(mode, run_id)
 
 
@@ -1589,12 +2067,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--mode", choices=("full", "incremental"), required=True,
+        "--mode", choices=MODES, required=True,
         help=(
             "full: le a historia inteira, reconstroi o destino e REPARA hard "
             "delete; obrigatorio na primeira carga e periodicamente. "
             "incremental: usa o watermark para descobrir chaves tocadas e "
-            "recalcula cada uma por inteiro; cego a hard delete."
+            "recalcula cada uma por inteiro; cego a hard delete. "
+            "auto: modo do full_daily — escolhe full se nao houver full com "
+            "status success no mes operacional BRT corrente, senao "
+            "incremental; a decisao ocorre SOB o advisory lock."
         ),
     )
     p.add_argument(
@@ -1607,8 +2088,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _print_report(relatorio: dict) -> None:
     print(f"modo................: {relatorio['mode']}")
+    if "decisao_modo" in relatorio:
+        d = relatorio["decisao_modo"]
+        print(f"modo solicitado.....: {d.get('requested_mode')}")
+        print(f"modo efetivo........: {d.get('effective_mode')}")
+        print(f"mes operacional.....: {d.get('mes_operacional')}")
+        print(f"full mensal.........: {d.get('full_mensal')}")
+        print(f"razao da decisao....: {d.get('razao')}")
     print(f"run_id..............: {relatorio['run_id']}")
     print(f"aplicado............: {relatorio['applied']}")
+    if "auditoria" in relatorio:
+        a = relatorio["auditoria"]
+        print(f"auditoria...........: {a['source_names']} ids={a['sync_run_ids']}")
     if "lock" in relatorio:
         print(f"advisory lock.......: {relatorio['lock']}")
     print(f"watermark anterior..: {relatorio.get('watermark_anterior')}")
@@ -1647,7 +2138,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.apply:
         print("MODO DIAGNOSTICO (sem --apply): nenhuma escrita sera feita.")
-    run_id = sanitize_run_id(args.run_id) if args.run_id else default_run_id(args.mode)
+    # `run_id` explicito e' preservado (apos sanitizacao). Sem ele, o default e'
+    # adiado quando o modo e' `auto`: rotular a execucao de "auto" seria falso —
+    # o modo efetivo so' existe depois da decisao sob o lock, e e' ele que o
+    # `run_id` precisa refletir. `_run_apply` completa; o diagnostico rotula com
+    # o modo que de fato simulou.
+    if args.run_id:
+        run_id = sanitize_run_id(args.run_id)
+    elif args.mode == MODE_AUTO and args.apply:
+        run_id = None
+    else:
+        run_id = default_run_id(args.mode)
     try:
         relatorio = run(args.mode, run_id, args.apply)
     except Exception as exc:  # noqa: BLE001 — fronteira do CLI

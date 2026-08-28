@@ -326,7 +326,8 @@ def dm_rules(total=10, com=None, mx=CUTOFF, tipos=None, rows=None, totais=None,
 
 
 def neon_rules(watermark=ANTERIOR, chaves=None, staging_max=CUTOFF,
-               except_n=0, sign_n=0, nan_n=0, lock_held=1, watermark_seq=None):
+               except_n=0, sign_n=0, nan_n=0, lock_held=1, watermark_seq=None,
+               full_success_no_mes=None):
     """Regras da conexão única do destino.
 
     A ordem importa: `pg_locks` e `faltando_no_destino` vêm antes dos padrões
@@ -339,6 +340,10 @@ def neon_rules(watermark=ANTERIOR, chaves=None, staging_max=CUTOFF,
     return [
         (r"pg_advisory_unlock", {"liberado": True}),
         (r"FROM\s+pg_locks", {"n": lock_held}),
+        # UE2-C: consulta da decisao `auto`, feita SOB o lock na conexao
+        # principal. Vem antes dos padroes genericos, senao outra regra
+        # capturaria. `(None,)` = nenhum full com success no mes -> full devido.
+        (r"FROM audit\.source_sync_run", (full_success_no_mes,)),
         (r"pg_advisory_lock", {"pg_advisory_lock": ""}),
         # Casa tanto a leitura autoritativa quanto a releitura com FOR UPDATE.
         (r"SELECT last_successful_upper_bound AS wm", wm),
@@ -362,7 +367,7 @@ def neon_rowcounts(fact_delete=1, fact_insert=1, state=1):
     ]
 
 
-def _wire(monkeypatch, neon, dm):
+def _wire(monkeypatch, neon, dm, audit=None):
     """Liga as fábricas do módulo às conexões falsas.
 
     O evento `open` é registrado AQUI, no instante em que o módulo pede a
@@ -377,6 +382,32 @@ def _wire(monkeypatch, neon, dm):
     monkeypatch.setattr(sync, "_neon_session", lambda url: neon.mark_open())
     monkeypatch.setattr(sync, "_neon_readonly", lambda url: neon.mark_open())
     monkeypatch.setattr(sync, "_datamart_snapshot", lambda url: dm.mark_open())
+    # UE2-C: a auditoria abre conexao PROPRIA. Sem ligar aqui, o modulo cairia
+    # no `psycopg2.connect` real e o teste tentaria resolver o host "neon".
+    # Default construido aqui para que TODO chamador de `_wire` fique coberto —
+    # quem precisa observar a auditoria passa a sua.
+    if audit is None:
+        audit = FakeConn("audit", neon.rec, audit_rules(), audit_rowcounts())
+    monkeypatch.setattr(sync, "_neon_audit", lambda url: audit.mark_open())
+
+
+def audit_rules():
+    """Regras da conexao de AUDITORIA (UE2-C).
+
+    `_audit_start` faz `INSERT ... RETURNING sync_run_id` e le `fetchone()[0]`;
+    a `Seq` devolve ids distintos para as duas linhas de um `full`.
+    """
+    return [
+        (r"INSERT INTO audit\.source_sync_run", Seq((9001,), (9002,))),
+        (r"UPDATE audit\.source_sync_run", None),
+    ]
+
+
+def audit_rowcounts():
+    """`_audit_finish` exige `rowcount == 1` por UPDATE (F3): ou as duas linhas
+    de um `full` terminam, ou nenhuma. Sem isto o fake devolveria 0 e toda
+    execucao com `--apply` acabaria em `AuditoriaIncompleta`."""
+    return [(r"UPDATE audit\.source_sync_run", 1)]
 
 
 #: SQL que só existe se algo foi efetivamente escrito no destino.
@@ -398,7 +429,8 @@ _UNSET = object()
 
 
 def _apply_env(monkeypatch, watermark=ANTERIOR, lock_wm=_UNSET,
-               neon_kw=None, dm_kw=None, rowcounts=None, lock_held=1):
+               neon_kw=None, dm_kw=None, rowcounts=None, lock_held=1,
+               retornar_audit=False):
     """Ambiente de uma execução `--apply`: **UMA** conexão de destino, um Recorder.
 
     A sessão única é o ponto do desenho: a mesma conexão adquire o lock, lê o
@@ -419,7 +451,10 @@ def _apply_env(monkeypatch, watermark=ANTERIOR, lock_wm=_UNSET,
     neon = FakeConn("neon", rec, neon_rules(**neon_kw),
                     neon_rowcounts() if rowcounts is None else rowcounts)
     dm = FakeConn("dm", rec, dm_rules(**(dm_kw or {})))
-    _wire(monkeypatch, neon, dm)
+    audit = FakeConn("audit", rec, audit_rules(), audit_rowcounts())
+    _wire(monkeypatch, neon, dm, audit)
+    if retornar_audit:
+        return rec, neon, dm, audit
     return rec, neon, dm
 
 
@@ -506,22 +541,57 @@ def test_f1_conexao_comeca_em_autocommit_sem_transacao_ociosa(monkeypatch):
     assert "rollback" not in conn.kinds()
 
 
-def test_f1_nao_existe_segunda_fabrica_de_conexao_gravavel():
-    """Garantia ESTRUTURAL: sem função para abrir uma segunda conexão gravável,
-    o defeito não volta por descuido. `_neon_writable` foi removida."""
+def test_f1_nao_existe_segunda_fabrica_de_conexao_gravavel_na_fact():
+    """Garantia ESTRUTURAL: nenhuma segunda conexão pode escrever na FACT.
+
+    A UE2-C acrescentou `_neon_audit`, que é gravável — e precisa ser, porque
+    registrar `failed` tem de sobreviver ao rollback da transação da fact. O
+    guardrail não foi afrouxado: continua proibindo as fábricas antigas, e o
+    teste seguinte prova que a auditoria só toca `audit.source_sync_run`.
+    """
     assert not hasattr(sync, "_neon_writable")
     assert not hasattr(sync, "_neon_lock_session")
     fabricas = sorted(n for n in dir(sync)
                       if n.startswith("_neon") and callable(getattr(sync, n)))
-    assert fabricas == ["_neon_readonly", "_neon_session"]
+    assert fabricas == ["_neon_audit", "_neon_readonly", "_neon_session"]
+
+
+def test_ue2c_auditoria_nunca_toca_a_fact_nem_o_state():
+    """A conexão de auditoria é gravável, então precisa de prova de escopo.
+
+    Verificação ESTRUTURAL no corpo das duas funções: elas só podem referenciar
+    `audit.source_sync_run`. Se alguém, um dia, publicar a fact por esta
+    conexão, o commit independente da auditoria quebraria a atomicidade entre
+    fato e watermark — e este teste falha antes disso chegar a produção.
+    """
+    import inspect
+    proibido = ("fact_tiktok_affiliate_cost_order_monthly", "stg_ftacom_publish",
+                "sync_state", "DELETE FROM", "pg_advisory")
+    for fn in (sync._audit_start, sync._audit_finish):
+        corpo = inspect.getsource(fn)
+        assert "audit.source_sync_run" in corpo
+        for p in proibido:
+            assert p not in corpo, f"{fn.__name__} referencia {p!r}"
 
 
 def test_f1_apply_abre_exatamente_uma_conexao_de_destino(monkeypatch):
+    """UMA conexao de DESTINO (fact + lock + watermark), mais a de auditoria.
+
+    A UE2-C acrescentou `audit`, que e' gravavel mas so' toca
+    `audit.source_sync_run` — provado em
+    `test_ue2c_auditoria_nunca_toca_a_fact_nem_o_state`. O que este teste
+    protege continua sendo o invariante original: existe uma unica conexao
+    `neon`, e e' nela que o lock, o watermark e a publicacao acontecem.
+    """
     rec, neon, dm = _apply_env(monkeypatch)
     sync.run("incremental", "run:1", apply=True)
-    assert [(lb, k) for lb, k, _, _ in rec.log if k == "open"] == [
-        ("neon", "open"), ("dm", "open")
-    ]
+    aberturas = [lb for lb, k, _, _ in rec.log if k == "open"]
+    assert aberturas.count("neon") == 1
+    assert aberturas.count("dm") == 1
+    assert aberturas.count("audit") == 1
+    # a ordem tambem importa: destino primeiro (lock), depois auditoria,
+    # depois a fonte — a auditoria abre ANTES de qualquer leitura da fonte.
+    assert aberturas == ["neon", "audit", "dm"]
 
 
 def test_f1_mesma_sessao_detem_o_lock_e_publica(monkeypatch):
@@ -2123,6 +2193,10 @@ def test_modulo_nao_introduz_dependencia_nova():
     permitidos = {
         "__future__", "argparse", "re", "sys", "dataclasses", "datetime",
         "decimal", "psycopg2", "psycopg2.extras",
+        # UE2-C: `zoneinfo` e' BIBLIOTECA PADRAO desde o Python 3.9 — nao e'
+        # dependencia nova, e o fuso operacional precisa ser explicito em vez de
+        # herdado do relogio do SO.
+        "zoneinfo",
         "pipelines.connectors.tiktok.connector", "pipelines.sync_tiktok_serving",
     }
     assert importados <= permitidos, importados - permitidos

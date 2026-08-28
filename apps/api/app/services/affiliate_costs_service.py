@@ -23,8 +23,9 @@ O QUE ESTE MODULO NAO FAZ, E POR QUE
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -411,6 +412,93 @@ def _scope_sql(brand_sql: str):
         LEFT JOIN recorte r ON r.ref_month = c.ref_month
         ORDER BY c.ref_month, r.brand
     """)
+
+
+# ---------------------------------------------------------------------------
+# UE2-C — classificacao de frescor. IMPLEMENTADA E TESTADA, AINDA NAO PUBLICADA.
+# ---------------------------------------------------------------------------
+
+APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+
+#: Idade maxima da ultima execucao bem-sucedida. Espelha
+#: `FRESHNESS_MAX_EXECUTION_AGE_HOURS` do sync; um teste trava a igualdade.
+FRESHNESS_MAX_EXECUTION_AGE_HOURS = 30
+FRESHNESS_ESCALATION_LATE_BATCHES = 2
+
+
+def classify_freshness(
+    last_success_finished_at: datetime | None,
+    watermark: datetime | None,
+    agora: datetime,
+) -> dict:
+    """Contrato de frescor da UE2-C (§25.8). FUNCAO PURA — zero I/O.
+
+    ⚠️ **NAO CONECTADA AO PAYLOAD PUBLICO.** `build_affiliate_costs_block`
+    continua devolvendo `manual_snapshot` quando a fact e' lida. A ativacao —
+    trocar `manual_snapshot` por `fresh`/`stale` na resposta — e' Task 3/3, e
+    depende de evidencia de execucoes agendadas reais. Publicar antes disso
+    afirmaria uma rotina que ainda nao existe.
+
+    Contraparte canonica:
+    `pipelines/sync_tiktok_affiliate_cost_order_monthly.classify_affiliate_freshness`.
+    Os dois vivem em arvores que nao se importam (a API nao importa
+    `pipelines`), e um teste compara os dois sobre a MESMA tabela de casos para
+    que nao possam divergir em silencio.
+
+    Duas grandezas de TIPO diferente, e a diferenca importa:
+      - `last_success_finished_at` e' `TIMESTAMPTZ` — aware, CONVERTIDO para BRT;
+      - `watermark` e' `TIMESTAMP WITHOUT TIME ZONE` — naive, entra apenas como
+        `DATE(...)`, sem conversao e sem rotulo de fuso.
+    """
+    if last_success_finished_at is None or watermark is None:
+        return {
+            "status": "unknown",
+            "motivo": ("sem execucao bem-sucedida registrada"
+                       if last_success_finished_at is None
+                       else "sem watermark persistido"),
+            "execution_recent": None,
+            "watermark_current": None,
+            "late_batches": None,
+            "expected_batch_date": None,
+            "watermark_date": None,
+        }
+
+    if last_success_finished_at.tzinfo is None:
+        raise ValueError("finished_at da auditoria deve ser timezone-aware")
+    if agora.tzinfo is None:
+        raise ValueError("`agora` deve ser timezone-aware")
+
+    idade_h = (agora - last_success_finished_at).total_seconds() / 3600.0
+    execution_recent = idade_h <= FRESHNESS_MAX_EXECUTION_AGE_HOURS
+
+    d_exec = last_success_finished_at.astimezone(APP_TIMEZONE).date()
+    expected_batch_date = d_exec - timedelta(days=1)
+    watermark_date = watermark.date()
+    watermark_current = watermark_date >= expected_batch_date
+    late_batches = max(0, (expected_batch_date - watermark_date).days)
+
+    if execution_recent and watermark_current:
+        status, motivo = "fresh", "execucao recente e fonte no lote esperado"
+    elif not execution_recent and not watermark_current:
+        status, motivo = "stale", "execucao antiga e fonte atrasada"
+    elif not execution_recent:
+        status, motivo = "stale", "execucao mais velha que o limite"
+    else:
+        status, motivo = "stale", (
+            "job executou, mas a fonte nao avancou ate o lote esperado"
+        )
+
+    return {
+        "status": status,
+        "motivo": motivo,
+        "execution_recent": execution_recent,
+        "watermark_current": watermark_current,
+        "late_batches": late_batches,
+        "escalate": late_batches >= FRESHNESS_ESCALATION_LATE_BATCHES,
+        "expected_batch_date": expected_batch_date,
+        "watermark_date": watermark_date,
+        "execution_age_hours": round(idade_h, 2),
+    }
 
 
 def safe_affiliate_costs_block(

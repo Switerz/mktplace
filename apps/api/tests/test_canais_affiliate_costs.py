@@ -741,3 +741,136 @@ def test_manual_snapshot_somente_com_fotografia_lida():
         TODOS, date(2026, 3, 1), date(2026, 3, 31), today=HOJE)
     assert b["freshness_status"] == "manual_snapshot"
     assert b["affiliate_refreshed_at"] is not None
+
+
+# ===========================================================================
+# UE2-C — frescor IMPLEMENTADO, ainda NAO PUBLICADO (Task 2/3)
+# ===========================================================================
+
+def _aware(dia, hora=9):
+    """`finished_at` da auditoria: TIMESTAMPTZ. 09:00 UTC = 06:00 BRT."""
+    from datetime import datetime, timezone
+    return datetime(2026, 8, dia, hora, 0, tzinfo=timezone.utc)
+
+
+def _naive(dia, hora=21, minuto=3):
+    """Watermark: TIMESTAMP WITHOUT TIME ZONE."""
+    from datetime import datetime
+    return datetime(2026, 8, dia, hora, minuto)
+
+
+def test_frescor_execucao_recente_e_lote_esperado_e_fresh():
+    v = acs.classify_freshness(_aware(28), _naive(27), _aware(28, 12))
+    assert v["status"] == "fresh"
+    assert v["late_batches"] == 0
+
+
+def test_frescor_um_lote_atrasado_ja_e_stale():
+    v = acs.classify_freshness(_aware(28), _naive(26), _aware(28, 12))
+    assert v["status"] == "stale"
+    assert v["execution_recent"] is True      # o job rodou...
+    assert v["watermark_current"] is False    # ...mas a fonte nao avancou
+    assert v["late_batches"] == 1
+    assert v["escalate"] is False
+
+
+def test_frescor_dois_lotes_escalam_o_alerta():
+    v = acs.classify_freshness(_aware(28), _naive(25), _aware(28, 12))
+    assert v["late_batches"] == 2 and v["escalate"] is True
+
+
+def test_frescor_execucao_antiga_e_stale():
+    assert acs.classify_freshness(_aware(25), _naive(24),
+                                  _aware(28, 12))["status"] == "stale"
+
+
+def test_frescor_watermark_a_frente_nunca_produz_atraso_negativo():
+    v = acs.classify_freshness(_aware(28), _naive(28), _aware(28, 12))
+    assert v["status"] == "fresh"
+    assert v["late_batches"] == 0
+
+
+def test_frescor_sem_auditoria_ou_watermark_e_unknown():
+    assert acs.classify_freshness(None, _naive(27), _aware(28))["status"] == "unknown"
+    assert acs.classify_freshness(_aware(28), None, _aware(28))["status"] == "unknown"
+
+
+def test_frescor_recusa_finished_at_ingenuo():
+    from datetime import datetime
+    with pytest.raises(ValueError):
+        acs.classify_freshness(datetime(2026, 8, 28, 9, 0), _naive(27),
+                               _aware(28, 12))
+
+
+def test_frescor_nao_converte_o_watermark_naive():
+    """O watermark e' TIMESTAMP WITHOUT TIME ZONE: so' a parte de data entra,
+    sem conversao e sem rotulo de fuso."""
+    import inspect
+    src = inspect.getsource(acs.classify_freshness)
+    assert "watermark.astimezone" not in src
+    assert "watermark_date = watermark.date()" in src
+
+
+# --- a parte que prova o que AINDA NAO acontece ---------------------------
+
+def test_bloco_publico_continua_em_manual_snapshot():
+    db = FakeSession([_fact_row(date(2026, 3, 1), "apice")])
+    b = acs.build_affiliate_costs_block(
+        db, TODOS, date(2026, 3, 1), date(2026, 3, 31), today=HOJE)
+    assert b["freshness_status"] == "manual_snapshot"
+
+
+def test_nenhum_caminho_publico_devolve_fresh_ou_stale():
+    """Varre TODOS os estados do bloco: nenhum pode expor `fresh`/`stale`
+    enquanto a Task 3/3 nao comprovar a rotina."""
+    cenarios = [
+        ("mes completo", FakeSession([_fact_row(date(2026, 3, 1), "apice")]),
+         TODOS, date(2026, 3, 1), date(2026, 3, 31), {}),
+        ("mes parcial", FakeSession([]), TODOS,
+         date(2026, 8, 1), date(2026, 8, 31), {}),
+        ("desalinhado", FakeSession([]), TODOS,
+         date(2026, 6, 15), date(2026, 7, 14), {}),
+        ("sem tiktok", FakeSession([]), [perf_svc.ML_ID, perf_svc.SHOPEE_ID],
+         date(2026, 3, 1), date(2026, 3, 31), {}),
+        ("marcas vazias", FakeSession([]), TODOS,
+         date(2026, 3, 1), date(2026, 3, 31), {"brand_keys": []}),
+        ("mes ausente", FakeSession([_mes_ausente(date(2026, 3, 1))]), TODOS,
+         date(2026, 3, 1), date(2026, 3, 31), {}),
+    ]
+    for nome, db, mkts, ini, fim, kw in cenarios:
+        b = acs.build_affiliate_costs_block(db, mkts, ini, fim, today=HOJE, **kw)
+        assert b["freshness_status"] in ("manual_snapshot", "unknown"), nome
+        assert b["freshness_status"] not in ("fresh", "stale"), nome
+
+    erro = acs.safe_affiliate_costs_block(
+        FakeSession(explode=True), TODOS,
+        date(2026, 3, 1), date(2026, 3, 31), today=HOJE)
+    assert erro["freshness_status"] == "unknown"
+
+
+def test_a_classificacao_nao_esta_ligada_ao_payload():
+    """Prova ESTRUTURAL: `build_affiliate_costs_block` nao chama a funcao."""
+    import inspect
+    src = inspect.getsource(acs.build_affiliate_costs_block)
+    assert "classify_freshness" not in src
+    assert '"freshness_status": "manual_snapshot"' in src
+
+
+def test_schema_publico_nao_ganhou_campo_novo():
+    from app.schemas.performance import AffiliateCostsBlock
+    assert len(AffiliateCostsBlock.model_fields) == 13
+
+
+def test_falha_da_fonte_de_afiliados_nao_derruba_o_resto_de_canais():
+    from tests.test_canais_channel_rows import FakeMappingSession, _row
+
+    linhas = [_row("barbours", perf_svc.TIKTOK_ID, gmv=1000, orders=10)]
+    payload = perf_svc.get_canais(FakeMappingSession([linhas]), "tiktok", 2026, 5)
+    payload["affiliate_costs"] = acs.safe_affiliate_costs_block(
+        FakeSession(explode=True), [perf_svc.TIKTOK_ID],
+        date(2026, 5, 1), date(2026, 5, 31), today=HOJE)
+
+    validado = CanaisResponse.model_validate(payload)
+    assert validado.channel_rows
+    assert validado.affiliate_costs.availability_status == "error"
+    assert validado.affiliate_costs.freshness_status == "unknown"

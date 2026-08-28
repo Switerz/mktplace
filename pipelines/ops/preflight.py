@@ -384,6 +384,121 @@ def check_tiktok_product_content_columns() -> CheckResult:
 # PostgreSQL local (populado manualmente por apps/api/etl/load_shopee_products.py
 # a partir dos XLSX — esse passo NAO faz parte desta automacao, ver runbook),
 # nao dos arquivos XLSX diretamente nem do RDS.
+#: Relacoes que o sync de afiliados exige — destino, estado e auditoria (Neon).
+_AFFILIATE_NEON_RELATIONS = (
+    "marts.fact_tiktok_affiliate_cost_order_monthly",
+    "marts.fact_tiktok_affiliate_cost_order_monthly_sync_state",
+    "audit.source_sync_run",
+)
+_AFFILIATE_SOURCE_RELATION = "silver.stg_tiktok_payments_by_order"
+
+
+def check_affiliate_cost_relations() -> CheckResult:
+    """Existencia das relacoes do sync de afiliados, nos DOIS bancos.
+
+    `to_regclass` nao le linha nenhuma. Confere o destino e o `sync_state` da
+    migration 012 e a `audit.source_sync_run` da migration 003 — sem esta
+    ultima o sync abortaria ao abrir a auditoria, depois de o step ja ter
+    comecado. Do lado da fonte, so' a existencia da relacao.
+    """
+    label = "Afiliados TikTok (migrations 012/003 + fonte)"
+    neon_url = os.environ.get("DATABASE_URL", "")
+    dm_url = os.environ.get("DATAMART_DATABASE_URL", "")
+    if not neon_url or not dm_url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+
+    faltando: list[str] = []
+    try:
+        conn = psycopg2.connect(neon_url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            for rel in _AFFILIATE_NEON_RELATIONS:
+                cur.execute("SELECT to_regclass(%s)", (rel,))
+                if cur.fetchone()[0] is None:
+                    faltando.append(rel)
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao no Neon "
+                           f"({sanitize_url(neon_url)}) — {type(e).__name__}")
+
+    try:
+        conn = psycopg2.connect(dm_url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute("SELECT to_regclass(%s)", (_AFFILIATE_SOURCE_RELATION,))
+            if cur.fetchone()[0] is None:
+                faltando.append(_AFFILIATE_SOURCE_RELATION)
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao no Data Mart "
+                           f"({sanitize_url(dm_url)}) — {type(e).__name__}")
+
+    if faltando:
+        nomes = ", ".join(faltando)
+        return CheckResult(label, False,
+                           f"{label}: {len(faltando)} relacao(oes) ausente(s) ({nomes})")
+    return CheckResult(label, True,
+                       f"{label}: {len(_AFFILIATE_NEON_RELATIONS)} relacoes no Neon "
+                       "e a fonte no Data Mart existem")
+
+
+def check_affiliate_cost_source_not_empty() -> CheckResult:
+    """Fonte tem ao menos uma linha com `updated_at`, sem varrer 2,1 milhoes.
+
+    Duas provas BARATAS, ambas com `LIMIT 1` — nenhum `COUNT(*)` integral, que
+    seria scan completo a cada execucao do `full_daily`. As validacoes profundas
+    (grao, tipos, NaN, reconciliacao) continuam dentro do proprio sync.
+
+    Fonte vazia BLOQUEIA de proposito: no caminho automatizado, um `full` sobre
+    fonte vazia esvaziaria a fact. Se a fonte realmente deve estar vazia, isso e'
+    decisao operacional explicita, com `--mode full --apply` manual.
+    """
+    label = "Afiliados TikTok (fonte nao vazia)"
+    url = os.environ.get("DATAMART_DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT 1 FROM {_AFFILIATE_SOURCE_RELATION} LIMIT 1"  # noqa: S608
+            )
+            tem_linha = cur.fetchone() is not None
+            cur.execute(
+                f"SELECT 1 FROM {_AFFILIATE_SOURCE_RELATION} "  # noqa: S608
+                "WHERE updated_at IS NOT NULL LIMIT 1"
+            )
+            tem_updated = cur.fetchone() is not None
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — "
+                           f"{type(e).__name__}")
+
+    if not tem_linha:
+        return CheckResult(label, False,
+                           f"{label}: fonte VAZIA — bloqueado. O caminho "
+                           "automatizado nunca esvazia a fact sozinho; confirme "
+                           "operacionalmente e rode --mode full --apply manual")
+    if not tem_updated:
+        return CheckResult(label, False,
+                           f"{label}: nenhuma linha com `updated_at` — o "
+                           "incremental nao teria watermark utilizavel")
+    return CheckResult(label, True, f"{label}: fonte tem linhas com `updated_at`")
+
+
 SOURCE_CHECKS = {
     "tiktok_daily": (check_rds, check_neon),
     "ml_daily": (check_rds, check_neon),
@@ -416,6 +531,14 @@ SOURCE_CHECKS = {
     # `sync_produtos_tiktok` passa a escrever as duas colunas da migration 011;
     # sem elas o INSERT falharia no meio da carga.
     "produtos_tiktok_s3": (check_rds, check_neon, check_tiktok_product_content_columns),
+    # Gate UE2-C Task 2/3: custo de afiliado do TikTok por coorte de pedido.
+    # Data Mart (fonte, via VPN) e Neon (destino + auditoria) sao ambos
+    # obrigatorios; mais a existencia das relacoes das migrations 012 e 003 e
+    # uma prova BARATA de que a fonte nao esta vazia.
+    "tiktok_affiliate_cost_order_monthly": (
+        check_rds, check_neon, check_affiliate_cost_relations,
+        check_affiliate_cost_source_not_empty,
+    ),
 }
 
 

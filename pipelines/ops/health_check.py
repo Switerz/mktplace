@@ -81,6 +81,8 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import psycopg2
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
 
 from pipelines.reconciliation.diagnose_bug8_neon import (  # noqa: E402
@@ -90,6 +92,10 @@ from pipelines.reconciliation.diagnose_bug8_neon import (  # noqa: E402
     _sanitize_url,
 )
 from pipelines.reconciliation.monitor_bug8_invariants import check_db_invariants  # noqa: E402
+# UE2-C: o contrato de frescor de afiliados vive no modulo que OWNS o watermark.
+# Importar em vez de reimplementar e' o que impede health check e sync de
+# divergirem sobre o que significa "fresco".
+from pipelines import sync_tiktok_affiliate_cost_order_monthly as sync_afiliados  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -159,7 +165,39 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     # divirjam.
     ExpectedSource("ml_cross_company", "daily", 30),
     ExpectedSource("tiktok_channel_efficiency", "daily", 30),
+    # Gate UE2-C Task 2/3 (2026-08-28): custo de afiliado do TikTok. CRITICO e
+    # com o mesmo contrato de 30h das outras fontes diarias criticas, porque o
+    # step correspondente roda TODO dia em `full_daily` e e' `critical=True`.
+    #
+    # E' o nome CANONICO — escrito em toda execucao real, qualquer modo. O
+    # segundo nome de auditoria (`..._full`) NAO entra aqui de proposito: ele
+    # marca o ciclo do full, que e' MENSAL, e cobrar 30h dele reprovaria o
+    # pipeline todo dia. A obrigacao mensal e' verificada pelo proprio sync.
+    ExpectedSource(sync_afiliados.CANONICAL_AUDIT_SOURCE, "daily", 30),
 )
+
+@dataclass
+class AffiliateWatermarkStatus:
+    """Frescor do custo de afiliado — DUAS dimensoes, nunca colapsadas.
+
+    Um job que roda todo dia sobre uma fonte parada nao e' dado fresco, e um
+    watermark atual com job morto ha tres dias tambem nao. Por isso as duas
+    condicoes aparecem separadas no relatorio, alem do veredito combinado.
+    """
+    source_name: str
+    status: str                 # fresh | stale | unknown
+    reason: str
+    last_success_at: str | None
+    execution_age_hours: float | None
+    execution_recent: bool | None
+    watermark_date: str | None
+    expected_batch_date: str | None
+    watermark_current: bool | None
+    late_batches: int | None
+    escalate: bool
+    stale: bool
+    critical: bool = True
+
 
 @dataclass
 class SourceStatus:
@@ -414,6 +452,103 @@ def run_bug8_check(conn) -> dict:
     return {"ok": not problems, "problems": problems}
 
 
+def fetch_affiliate_watermark_status(conn, now: datetime | None = None
+                                     ) -> AffiliateWatermarkStatus:
+    """Frescor do custo de afiliado: execucao canonica x avanco da fonte.
+
+    Le `audit.source_sync_run` (execucao) e o `sync_state` (watermark) e delega
+    a classificacao para `classify_affiliate_freshness`, no modulo do sync —
+    contrato unico, sem copia divergente aqui.
+
+    NAO usa `MAX(ref_month)` da fact como frescor: `ref_month` e' competencia
+    comercial e o watermark e' atualizacao tecnica. Um mes comercial pode ficar
+    parado por semanas com a fonte perfeitamente em dia, e vice-versa.
+    """
+    now = now or _now()
+    nome = sync_afiliados.CANONICAL_AUDIT_SOURCE
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT MAX(finished_at) AS t FROM audit.source_sync_run
+        WHERE source_name = %s AND status = 'success'
+        """,
+        (nome,),
+    )
+    linha = cur.fetchone()
+    ultimo_sucesso = linha["t"] if linha else None
+
+    watermark = None
+    try:
+        cur.execute(
+            f"""
+            SELECT last_successful_upper_bound AS w
+            FROM {sync_afiliados.SYNC_STATE_TABLE}
+            WHERE target_table = %s
+            """,  # noqa: S608 — identificador constante do modulo do sync
+            (sync_afiliados.TARGET_TABLE,),
+        )
+        linha = cur.fetchone()
+        # `.get`: antes da primeira carga a linha nao existe, e ausencia
+        # LEGITIMA de watermark e' `unknown` — nunca um KeyError que derrube o
+        # relatorio por uma fonte que ainda nao foi ativada.
+        watermark = linha.get("w") if linha else None
+    except psycopg2.Error:
+        # FAIL-CLOSED. Erro de BANCO ao ler o watermark nao e' "sem watermark":
+        # permissao revogada, relacao ausente, schema incompativel e conexao
+        # abortada sao problemas que precisam aparecer, nao virar `unknown`
+        # silencioso — que e' justamente o estado nao-critico de "ainda nao
+        # ativado". Confundir os dois esconderia uma quebra real atras de uma
+        # espera legitima.
+        cur.close()
+        rollback = getattr(conn, "rollback", None)
+        if callable(rollback):
+            rollback()      # devolve a transacao ao estado utilizavel
+        return AffiliateWatermarkStatus(
+            source_name=nome,
+            status="error",
+            # Categoria FIXA: nada de SQL, DSN, host, usuario ou mensagem bruta
+            # do driver.
+            reason="falha de banco ao ler o watermark do sync de afiliados",
+            last_success_at=ultimo_sucesso.isoformat() if ultimo_sucesso else None,
+            execution_age_hours=None, execution_recent=None,
+            watermark_date=None, expected_batch_date=None,
+            watermark_current=None, late_batches=None, escalate=True,
+            stale=True, critical=True,
+        )
+    # Excecao que NAO e' de banco (bug de codigo) propaga: esconder defeito
+    # nosso atras de "erro de fonte" e' exatamente o que nao se pode fazer.
+    cur.close()
+
+    v = sync_afiliados.classify_affiliate_freshness(ultimo_sucesso, watermark, now)
+    return AffiliateWatermarkStatus(
+        source_name=nome,
+        status=v["status"],
+        reason=v["motivo"],
+        last_success_at=ultimo_sucesso.isoformat() if ultimo_sucesso else None,
+        execution_age_hours=v.get("execution_age_hours"),
+        execution_recent=v["execution_recent"],
+        watermark_date=str(v["watermark_date"]) if v["watermark_date"] else None,
+        expected_batch_date=(str(v["expected_batch_date"])
+                             if v["expected_batch_date"] else None),
+        watermark_current=v["watermark_current"],
+        late_batches=v["late_batches"],
+        escalate=bool(v.get("escalate")),
+        # `unknown` nao reprova NESTA dimensao — e so' nesta.
+        #
+        # A ausencia de watermark nao acrescenta uma SEGUNDA reprovacao, mas
+        # tambem nao neutraliza a primeira: a execucao continua sendo cobrada
+        # pela entrada canonica em `EXPECTED_SOURCES`, que e' `critical=True` e
+        # fica `stale` enquanto nao houver sucesso registrado. No pre-piloto
+        # real — nenhuma execucao, nenhum watermark — o resultado correto e'
+        # `affiliate_watermark.status="unknown"` com `stale=False` E
+        # `ok_critical=False`, vindo da dimensao de execucao. Uma rotina ja
+        # declarada critica nao pode deixar o health check verde antes da
+        # primeira execucao comprovada.
+        stale=(v["status"] == sync_afiliados.FRESHNESS_STALE),
+    )
+
+
 def build_report(conn, now: datetime | None = None) -> dict:
     """`now` e' lido UMA UNICA vez aqui (ou recebido do chamador) e
     repassado para as duas dimensoes de frescor — evita que
@@ -425,10 +560,11 @@ def build_report(conn, now: datetime | None = None) -> dict:
     sources = fetch_source_statuses(conn, now=now)
     data_freshness = fetch_data_freshness(conn, today=now.date())
     bug8 = run_bug8_check(conn)
+    afiliados = fetch_affiliate_watermark_status(conn, now=now)
 
     exec_stale = [s for s in sources if s.stale]
     data_stale = [d for d in data_freshness if d.stale]
-    ok = not exec_stale and not data_stale and bug8["ok"]
+    ok = not exec_stale and not data_stale and bug8["ok"] and not afiliados.stale
 
     # Gate B1: ok_critical ignora fontes/entradas critical=False (hoje, so'
     # Shopee) — e' isso que `main()` usa para o exit code. `ok` continua
@@ -436,7 +572,9 @@ def build_report(conn, now: datetime | None = None) -> dict:
     # o exit code sozinho.
     exec_stale_critical = [s for s in exec_stale if s.critical]
     data_stale_critical = [d for d in data_stale if d.critical]
-    ok_critical = not exec_stale_critical and not data_stale_critical and bug8["ok"]
+    afiliados_critico_stale = afiliados.stale and afiliados.critical
+    ok_critical = (not exec_stale_critical and not data_stale_critical
+                   and bug8["ok"] and not afiliados_critico_stale)
 
     return {
         "ok": ok,
@@ -444,6 +582,7 @@ def build_report(conn, now: datetime | None = None) -> dict:
         "sources": [asdict(s) for s in sources],
         "data_freshness": [asdict(d) for d in data_freshness],
         "bug8_invariants": bug8,
+        "affiliate_watermark": asdict(afiliados),
     }
 
 

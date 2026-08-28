@@ -52,9 +52,10 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 # ser MAIOR que a soma dos timeouts individuais dos steps de
 # pipelines.ops.orchestrate.PIPELINES["full_daily"] (3600s no Gate C1, que
 # removeu os steps Shopee diarios — ver PIPELINES["shopee_manual_refresh"], um
-# pipeline MANUAL separado, nunca agendado; 6600s desde o Checkpoint O1 Task 2/2
-# (2026-08-17), que somou os tres steps de serving: 600+600+1800=3000s), com
-# margem para overhead de
+# pipeline MANUAL separado, nunca agendado; 6600s no Checkpoint O1 Task 2/2
+# (2026-08-17), que somou os tres steps de serving: 600+600+1800=3000s; 7500s no
+# Gate S3 Task 2/3; e 7800s desde o Gate UE2-C Task 2/3 (2026-08-28), que somou
+# o step de custo de afiliado do TikTok, 300s), com margem para overhead de
 # spawn de processo Python + imports pandas/sqlalchemy + latencia de rede
 # VPN/Neon entre passos — senao o lock externo mataria o processo pai ANTES
 # que os timeouts internos por step tivessem chance de proteger as fontes
@@ -70,7 +71,7 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 # vale para a TaskKey serving_refresh (orcamento interno 3000s, Checkpoint O1
 # Task 2/2): MANUAL, sem entrada em PROPOSED_SCHEDULE, e compartilhando o LOCK
 # do full_daily para que as duas nunca se sobreponham.
-EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de 2400s (~36%) sobre 6600s
+EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de 1200s (15,38%) sobre os 7800s atuais
 
 # ExecutionTimeLimit do PROPRIO Task Scheduler (hard-limit independente do
 # -TimeoutSeconds do run_with_lock.ps1) precisa ficar ACIMA de

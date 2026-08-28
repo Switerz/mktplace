@@ -267,6 +267,33 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # que cada tela depende e antes do health_check.
         *(_snapshot_step(t, SNAPSHOT_SOURCE_DEPENDENCY[t])
           for t in sync_serving_snapshots.TARGET_ORDER),
+        # Gate UE2-C Task 2/3 (2026-08-28): custo de afiliado do TikTok por
+        # coorte de pedido, que `/canais` ja le em producao.
+        #
+        # `depends_on=()` e' DELIBERADO e significa ausencia de dependencia
+        # LOGICA, nao paralelismo — o orquestrador continua sequencial e este
+        # step so' roda quando chega a vez dele nesta tupla. Nenhum step alimenta
+        # a fonte: `silver.stg_tiktok_payments_by_order` e' EXTERNA a este
+        # repositorio (nao ha uma unica escrita nossa nela) e chega em lote
+        # diario observado perto de 21:02-21:04 BRT. Amarrar em `daily_tiktok`
+        # seria vinculo falso: aquele step escreve `raw`/`gold`, nunca a Silver
+        # de pagamentos.
+        #
+        # `--mode auto` decide full x incremental SOB o advisory lock, dentro do
+        # proprio sync: o full e' devido enquanto nao houver full com status
+        # `success` no mes operacional BRT corrente. Wrapper que decidisse antes
+        # do lock abriria corrida entre duas execucoes.
+        #
+        # `critical=True` pela mesma razao dos steps de serving: `/canais` esta
+        # em producao lendo esta fact, e um step nao-critico esconderia
+        # defasagem indefinida. Consequencia assumida: VPN fora deixa o step em
+        # BLOCKED e, por ser critico, o pipeline inteiro sai FAILED/exit 1 — o
+        # que fica preservado e' o snapshot publicado, nao o resultado verde.
+        #
+        # 300 s: o diagnostico mede 20-21 s no incremental e 101 s no full, e
+        # 300 s e' o maior envelope que ainda deixa a margem do orcamento acima
+        # dos 15% exigidos (7.800 s contra 9.000 s do lock externo = 15,38%).
+        Step("tiktok_affiliate_cost_order_monthly", "pipelines.sync_tiktok_affiliate_cost_order_monthly", ("--mode", "auto", "--apply"), timeout_seconds=300, preflight_source="tiktok_affiliate_cost_order_monthly", critical=True),
         # Sempre roda por ultimo, mesmo se algo anterior falhou/bloqueou —
         # e' o resumo do estado real, precisa rodar para reportar a falha.
         # always_run + ser o ULTIMO item desta tupla e' o que garante
@@ -324,9 +351,11 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
 # (produtos ml, tiktok) + 180 (health_check) = 3600s (~1h) ate o Gate C1, e
 # 6600s (~1h50) no Checkpoint O1 Task 2/2 (2026-08-17), que somou os tres
 # steps de serving: 600 (serving_ml) + 600 (serving_tiktok_brand) + 1800
-# (serving_tiktok_creator) = 3000s; e 7500s (~2h05) desde o Gate S3 Task 2/3
+# (serving_tiktok_creator) = 3000s; 7500s (~2h05) no Gate S3 Task 2/3
 # (2026-08-18), que somou 300 (serving_ml_cross_company, quatro linhas) + 600
-# (serving_tiktok_channel_efficiency, ~4.7 mil linhas) = 900s. O creator recebe o triplo dos outros porque
+# (serving_tiktok_channel_efficiency, ~4.7 mil linhas) = 900s; e 7800s (~2h10)
+# desde o Gate UE2-C Task 2/3 (2026-08-28), que somou 300
+# (tiktok_affiliate_cost_order_monthly) — os TREZE steps atuais. O creator recebe o triplo dos outros porque
 # reescreve 66.347 linhas numa janela de 90 dias, contra 360 do ML e 450 do
 # brand (medido em 17/08/2026). Caiu de 7200s para 3600s no Gate C1
 # (2026-07-16), que removeu os 3 steps Shopee diarios (900*3=2700s) +

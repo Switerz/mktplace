@@ -2918,3 +2918,289 @@ diferente; ou **vínculo falso com `daily_tiktok`**.
 | F | Comentário defasado em `schedule_plan.py` ("6600s") | Sincronizar na Task 2/3 |
 | G | Dependência de VPN; `full_daily` exige notebook ligado e usuário logado | Dívida operacional preexistente, fora desta frente |
 | H | Convenção contábil do sinal e sobreposição dos componentes | **Seguem abertas**, fora do escopo da UE2-C; retorno de afiliados **continua indisponível** |
+
+---
+
+## 26. UE2-C Task 2/3 — automação implementada, NÃO executada
+
+⚠️ **UE2-C não está concluída.** Esta seção registra código e testes prontos
+para revisão. **Nada foi executado:** zero `--apply`, zero escrita em banco,
+zero alteração do Task Scheduler, zero atualização do checkout operacional, zero
+deploy. **A Task 3/3 não foi iniciada.**
+
+### 26.1 Modo `auto` e a obrigação mensal durável
+
+O CLI passou a aceitar `--mode auto`, e é ele que o `full_daily` usa.
+`full` e `incremental` explícitos preservam o comportamento anterior.
+
+**A decisão acontece SOB o advisory lock**, nesta ordem exata dentro de
+`_run_apply`:
+
+```
+1. abre a única conexão do destino (autocommit)
+2. adquire pg_advisory_lock(912120012)          <- lock de sessão
+3. DECIDE o modo efetivo, na MESMA conexão      <- UE2-C
+4. abre a auditoria e insere as linhas running  <- UE2-C
+5. lê o watermark autoritativo
+6. abre a fotografia REPEATABLE READ da fonte
+7. lê e valida em memória
+8. transação gravável curta: staging, publicação, watermark
+9. commit único
+10. finaliza a auditoria
+```
+
+Um wrapper que decidisse **antes** do lock abriria corrida: duas execuções
+leriam a mesma ausência de full no mês, ambas escolheriam `full`, e a segunda
+reconstruiria o destino em cima da primeira. Um teste estrutural (AST sobre o
+corpo da função) trava as posições relativas de lock, decisão, auditoria, fonte
+e publicação.
+
+**A obrigação mensal só é consumida** por uma linha
+`tiktok_affiliate_cost_order_monthly_full` com `status='success'` e
+`finished_at` dentro do mês operacional **BRT**. `failed`, `running`, ausência
+ou sucesso de mês anterior **não consomem** — e a prova está no próprio SQL, que
+filtra `status = 'success'`, delimita o mês por `AT TIME ZONE
+'America/Sao_Paulo'` e não toca `started_at`, `error_message` nem contagem.
+Nada de `today.day == 1`, arquivo temporário ou memória de processo.
+
+O `run_id` default reflete o **modo efetivo**, nunca "auto" — rotular a execução
+com o modo pedido seria falso. `--run-id` explícito é preservado após
+sanitização.
+
+### 26.2 Auditoria — duas linhas no `full`, criadas no início
+
+| Modo | Linhas | Ciclo |
+|---|---|---|
+| `incremental` | uma, canônica | `running` → `success` \| `failed` |
+| `full` | **duas** (canônica + `_full`) | ambas `running` → ambas com o mesmo resultado |
+
+As duas são inseridas **numa única transação de auditoria** e finalizadas
+**noutra única transação** — se a segunda falhasse depois de a primeira comitar,
+existiria um `full` sem marcador auditável, e o mês seguinte poderia se declarar
+atendido por uma execução que ninguém consegue auditar.
+
+**A conexão de auditoria é independente da conexão da fact.** É isso que permite
+registrar `failed` sobrevivendo ao rollback da publicação. Um teste estrutural
+prova que `_audit_start`/`_audit_finish` só referenciam `audit.source_sync_run`
+— jamais a fact, a staging, o `sync_state` ou o advisory lock.
+
+**Semântica das colunas, sem significado falso:** `rows_extracted` = linhas
+lidas da fonte; `rows_loaded` = linhas publicadas; `source_min_date`/
+`source_max_date` = MIN/MAX de `ref_month` **publicado**, e `(None, None)`
+quando nada foi publicado; `error_message` só recebe erro sanitizado. O
+watermark **não vai para coluna nenhuma** daqui — `_audit_finish` sequer aceita
+o parâmetro, e um teste trava isso.
+
+**Full sobre fonte vazia** não passa por `publish_in_transaction`, então
+`rows_loaded` iria a `NULL` — que significa "não se sabe" — quando o fato
+conhecido é **zero**. Registra-se `rows_extracted=0` e **`rows_loaded=0`**, com
+`source_min_date`/`source_max_date` nulos, e as **duas** linhas recebem
+exatamente os mesmos valores. Nem mês nem watermark são fabricados.
+
+**Máquina de estados da publicação.** A auditoria só pode dizer `failed`
+quando se **prova** que nada foi publicado. O estado é rastreado explicitamente:
+
+| Estado | Quando | Auditoria |
+|---|---|---|
+| `nao_tentada` | falha antes de a transação gravável chegar ao commit | **`failed`** — nada publicado |
+| `rollback_confirmado` | falha na transação, rollback efetuado | **`failed`** — nada publicado |
+| `commit_confirmado` | `commit()` retornou | **nunca `failed`** |
+| `indeterminada` | `commit()` levantou — ninguém sabe se o servidor efetivou | **nem `failed` nem `success`** |
+
+**Falha ao FINALIZAR a auditoria depois do commit** não marca `failed`: isso
+afirmaria que os dados não foram publicados — falso, e no `full` faria a
+obrigação mensal parecer não atendida, provocando **outra reconstrução**. As
+linhas ficam em `running`, que é o resíduo observável correto, e o erro sobe
+como `AuditoriaIncompleta` com mensagem sanitizada. **Nenhum rollback é
+encenado** — o commit já aconteceu.
+
+**Commit indeterminado** também não recebe rollback: depois de um `commit()` que
+levantou, o rollback não esclarece nada e pode levantar por cima da exceção
+original. `running` é o único registro honesto de "não se sabe".
+
+**Ao INICIAR** → aborta antes da fonte e antes de qualquer escrita. Não se
+publica carga que não pode ser observada.
+
+**Atualização integral.** Cada `UPDATE` da auditoria exige `rowcount == 1`;
+`0` (id inexistente) ou `>1` derrubam a transação inteira, para que as duas
+linhas de um `full` nunca terminem pela metade. `status` só aceita
+`success`/`failed`.
+
+Diagnóstico sem `--apply` cria **zero** linha. Preflight `BLOCKED` também —
+o processo nem chega a abrir. **Zero retry**, como no resto do módulo.
+
+### 26.3 Preflight
+
+Fonte `tiktok_affiliate_cost_order_monthly` registrada, com quatro checks
+estritamente read-only: Data Mart, Neon, existência das relações das migrations
+012 e 003, e prova **barata** de que a fonte não está vazia — duas consultas com
+`LIMIT 1`, **nenhum `COUNT(*)` integral** sobre 2,1 milhões de linhas. As
+validações profundas continuam dentro do sync.
+
+**Fonte vazia BLOQUEIA de propósito.** No caminho automatizado, um `full` sobre
+fonte vazia esvaziaria a fact. Se a fonte realmente deve estar vazia, isso é
+decisão operacional explícita, com `--mode full --apply` manual.
+
+### 26.4 `full_daily` — 13 steps
+
+Um único step novo, `tiktok_affiliate_cost_order_monthly`, **entre os snapshots
+e o `health_check`**, que continua comprovadamente o último (posição na tupla +
+`always_run=True`, travado por teste).
+
+| Campo | Valor |
+|---|---|
+| `module` | `pipelines.sync_tiktok_affiliate_cost_order_monthly` |
+| `args` | `("--mode", "auto", "--apply")` |
+| `timeout_seconds` | **300** |
+| `preflight_source` | `tiktok_affiliate_cost_order_monthly` |
+| `depends_on` | `()` — ausência de dependência **lógica**, não paralelismo |
+| `critical` | `True` |
+| `always_run` | `False` |
+
+**Consequência assumida e testada:** VPN fora deixa o step em `BLOCKED`; como ele
+é crítico, `compute_overall_status` devolve **`FAILED`** e o `full_daily` sai com
+**exit 1**. O que fica preservado é o snapshot publicado, não o resultado verde.
+
+Nenhum pipeline novo, nenhuma TaskKey nova, nenhuma entrada nova no Scheduler,
+nenhum Airflow, nenhum retry, nenhum segundo agendamento.
+
+### 26.5 Orçamento
+
+| Grandeza | Antes | Agora |
+|---|---|---|
+| Orçamento interno do `full_daily` | 7.500 s | **7.800 s** |
+| Timeout externo do lock | 9.000 s | 9.000 s |
+| `ExecutionTimeLimit` | 9.600 s | 9.600 s |
+| Margem | 1.500 s (20,0 %) | **1.200 s (15,38 %)** |
+
+Acima do invariante estrito de 15 %. Sincronizados: o comentário de
+`orchestrate.py`, o comentário e a constante de `schedule_plan.py` (que ainda
+diziam **6.600 s**), e os testes que fixavam **7.500** em
+`test_ops_orchestrate.py`, `test_ops_s3_wiring.py` e `test_ops_schedule_plan.py`.
+`SOURCE_STATEMENT_TIMEOUT = 600 s` **não mudou**: é proteção por statement da
+fonte, não o envelope do step.
+
+### 26.6 Health check
+
+Uma entrada em `EXPECTED_SOURCES` com o nome **canônico**, 30 h, `critical=True`.
+O nome `_full` **não** entra: ele marca um ciclo mensal, e cobrar 30 h dele
+reprovaria o pipeline todo dia.
+
+Mais uma verificação nova, `affiliate_watermark`, que separa as duas dimensões:
+execução (última canônica `success`) e avanço da fonte (`sync_state`). O
+relatório distingue *job não executou/falhou*, *job executou mas a fonte não
+avançou*, *ambos saudáveis* e *desconhecido*.
+
+**Fail-closed, e a distinção importa:**
+
+| Situação | Estado | Reprova **nesta dimensão**? |
+|---|---|---|
+| Consulta OK, **sem linha** de watermark | `unknown` | **Não** — não há o que avaliar |
+| **Erro de banco** ao ler o watermark | **`error`** | **Sim** — `stale=True`, `critical=True` |
+| Erro que **não é** de banco | propaga | bug de código não vira "erro de fonte" |
+
+⚠️ **`unknown` não reprova NESTA dimensão — e só nesta.** A frase "unknown não
+reprova antes do piloto", usada numa redação anterior, era **enganosa**: ela
+sugeria que o health check ficaria verde antes da primeira execução, e não fica.
+
+As duas dimensões são **ortogonais** e nenhuma sobrescreve a outra:
+
+| Dimensão | Onde | O que mede | Decide `ok_critical`? |
+|---|---|---|---|
+| **Execução** | entrada canônica em `EXPECTED_SOURCES` | houve execução bem-sucedida nas últimas 30 h? | **Sim** |
+| **Watermark** | `affiliate_watermark` | a fonte avançou até o lote esperado? | Só quando é `error` |
+
+**No pré-piloto real** — nenhuma execução registrada, nenhuma linha de
+watermark — o resultado correto é:
+
+- `affiliate_watermark.status == "unknown"` e `stale == false`;
+- a entrada canônica em `sources` com `stale=true` e `critical=true`;
+- **`ok_critical == false`**.
+
+Isso é intencional. Uma rotina já declarada `critical=True` **não pode** deixar o
+health check verde antes da sua primeira execução comprovada. O `unknown` do
+watermark não acrescenta uma segunda reprovação, mas também **não neutraliza** a
+da execução. Quatro testes integrados de `build_report` fixam exatamente esse
+comportamento, incluindo a contraprova de execução saudável com watermark
+ausente.
+
+Converter erro técnico em `unknown` mascararia permissão revogada, relação
+ausente, schema incompatível e conexão abortada — justamente atrás do estado
+não-crítico que significa "ainda não ativado". A mensagem do estado `error` é
+**categoria fixa**: nada de SQL, DSN, host, usuário ou texto bruto do driver. A
+transação é restaurada antes de o relatório seguir.
+
+O contrato de frescor vive no módulo que **owns** o watermark, e o health check
+o **importa** em vez de reimplementar.
+
+### 26.7 Frescor — implementado, ainda não publicado
+
+```
+D_exec              = data BRT do finished_at (TIMESTAMPTZ) da última execução canônica success
+watermark_date      = DATE(last_successful_upper_bound)     -- naive, sem conversão
+expected_batch_date = D_exec − 1 dia
+fresh   ⇔ idade ≤ 30 h  E  watermark_date >= expected_batch_date
+stale   ⇔ qualquer uma falha
+unknown ⇔ falta auditoria ou watermark
+atraso_em_lotes = max(0, expected_batch_date − watermark_date)
+```
+
+Um lote de atraso **já é** `stale`; dois escalam o **alerta**. `max(0, …)`
+impede atraso negativo quando uma execução manual ultrapassa o lote mínimo.
+
+**A resposta pública continua em `manual_snapshot`.**
+`build_affiliate_costs_block` **não chama** a função de classificação — há teste
+estrutural provando isso, e outro varrendo os seis estados do bloco mais o
+caminho de erro para garantir que **nenhum** devolve `fresh`/`stale`. Schema
+público intocado (13 campos), frontend intocado, zero mudança visual.
+
+Existem duas implementações — uma em `pipelines`, outra em `apps/api` — porque
+as duas árvores não se importam. **Um teste compara as duas sobre a mesma tabela
+de casos**, para que não possam divergir em silêncio.
+
+### 26.8 Validação executada
+
+| Verificação | Resultado |
+|---|---|
+| Testes focais novos (`test_ue2c_automacao_afiliados.py`) | **52 passed** |
+| Focais da API de afiliados | **70 passed** |
+| Suíte `pipelines/` | **2.854 passed, 1 failed** |
+| Baseline `pipelines/` | 2.800 passed, 1 failed |
+| **Comparação por node ID** | **idêntica — novas: [], sumidas: []** |
+| Suíte `apps/api/tests` | **760 passed, 43 failed, 8 skipped** |
+| Baseline `apps/api` | 747 passed, 43 failed |
+| **Comparação por node ID** | **idêntica — novas: [], sumidas: []** |
+| `compileall` dos módulos alterados | OK |
+| Startup/import da API | OK; `/canais` registrada; bloco com 13 campos |
+
+A única falha de `pipelines/` é `test_j09_fracionarios_pequenos_nao_perdem_precisao`,
+**pré-existente** (soma de fracionários no Python 3.14) e fora desta frente. As
+43 de `apps/api` são as falhas ambientais de sempre.
+
+### 26.9 O que NÃO foi feito, e continua pendente
+
+- **Nenhuma execução.** Zero `--apply`, zero escrita, zero Scheduler, zero
+  deploy, zero atualização do checkout operacional.
+- **`manual_snapshot` ainda é o estado público.**
+- **O full mensal nunca foi observado** — a decisão `auto` foi provada por teste,
+  nunca contra o Postgres real.
+- **A auditoria nunca foi comprovada em Postgres real** — os INSERT/UPDATE em
+  `audit.source_sync_run` rodaram apenas contra fakes.
+- **A latência real do step automatizado não foi medida.**
+- **Task 3/3 não iniciada.**
+
+### 26.10 Ajustes de contrato feitos em testes existentes
+
+Três guardrails legítimos mudaram, e nenhum foi afrouxado sem substituto:
+
+1. **`test_f1_nao_existe_segunda_fabrica_de_conexao_gravavel`** proibia qualquer
+   segunda fábrica de conexão. `_neon_audit` **é** gravável, e precisa ser. O
+   teste passou a fixar a lista exata das três fábricas, e ganhou um **teste
+   novo** provando que a auditoria só toca `audit.source_sync_run` — mais
+   específico do que o anterior, não menos.
+2. **Allowlist de imports** passou a aceitar `zoneinfo`, **biblioteca padrão**
+   desde o Python 3.9. Não é dependência nova; o intento do teste (nenhuma
+   dependência de terceiros) continua intacto.
+3. **Listas de ordem dos steps** (12 → 13) e **contagem de `EXPECTED_SOURCES`**
+   (10 → 11) atualizadas, preservando as asserções de que as regras das fontes
+   antigas não mudaram.

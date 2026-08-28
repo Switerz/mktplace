@@ -845,8 +845,29 @@ Referências:
 
 ## Gate UE2-C — atualização automática do custo de afiliados
 
-**Estado em 28/08/2026: Task 1/3 (auditoria e blueprint) CONCLUÍDA. UE2-C NÃO
-implementada.** Read-only e documental: zero escrita, zero `--apply`, zero
+**Estado em 28/08/2026: Task 2/3 IMPLEMENTADA E VALIDADA LOCALMENTE. UE2-C NÃO
+concluída; Task 3/3 não iniciada.**
+
+A automação existe em código e testes, e **não foi executada**: zero `--apply`,
+zero escrita em banco, **Scheduler real inalterado**, **checkout operacional
+inalterado**, zero deploy. Entregue: modo `--mode auto` decidindo full ×
+incremental **sob o advisory lock**; obrigação mensal **durável** em
+`audit.source_sync_run` (duas linhas no full, criadas no início para que
+tentativas fracassadas também fiquem auditáveis, e consumida só por `success`
+dentro do mês BRT); preflight próprio com provas baratas (`LIMIT 1`, sem
+`COUNT(*)` integral); step no `full_daily` com `timeout=300` e orçamento de
+7.500 → **7.800 s** (margem 15,38 %); entrada no health check mais verificação
+que separa *job parado* de *fonte parada*; e o contrato de frescor em código.
+
+**`manual_snapshot` continua sendo o estado público** — `build_affiliate_costs_block`
+não chama a classificação, e há teste estrutural mais uma varredura dos seis
+estados provando que nenhum caminho devolve `fresh`/`stale`. Suítes conferidas
+por node ID contra a baseline: `pipelines` 2.854 passed com a **mesma** falha
+pré-existente, `apps/api` 760 passed com as **mesmas** 43 ambientais — zero
+regressão. **Pendentes:** full mensal nunca observado, auditoria nunca
+comprovada em Postgres real, latência do step nunca medida. Detalhes na **§26**.
+
+Contexto anterior — **Task 1/3 (auditoria e blueprint) concluída.** Read-only e documental: zero escrita, zero `--apply`, zero
 alteração de Scheduler, zero código. Blueprint na **§25** de
 [UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md).
 
