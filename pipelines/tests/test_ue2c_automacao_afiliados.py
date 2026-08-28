@@ -57,7 +57,15 @@ def _codigo(alvo) -> str:
 # ===========================================================================
 
 class CurDecisao:
-    """Cursor que responde a consulta da decisao e registra o SQL."""
+    """Cursor que responde a consulta da decisao e registra o SQL.
+
+    Devolve MAPPING, nao tupla: `decide_effective_mode` roda no cursor de
+    `_neon_session` (--apply) ou de `_neon_readonly` (diagnostico), e os dois
+    conectam com `cursor_factory=RealDictCursor`. Enquanto este fake devolvia
+    `(self.ultimo_full,)` a suite inteira passava e `auto` falhava em 100% das
+    execucoes reais com `KeyError: 0`. A chave e' o alias do SQL — nao a chave
+    implicita `"max"` — para que renomear o alias quebre o teste.
+    """
 
     def __init__(self, ultimo_full=None, recorder=None):
         self.ultimo_full = ultimo_full
@@ -69,7 +77,7 @@ class CurDecisao:
         self._last = (sql, params)
 
     def fetchone(self):
-        return (self.ultimo_full,)
+        return {"ultimo_full": self.ultimo_full}
 
     def close(self):
         pass
@@ -213,6 +221,108 @@ def test_modos_explicitos_nao_consultam_a_auditoria():
         assert efetivo == modo
         assert cur.sqls == [], "modo explicito nao pode consultar a auditoria"
         assert d["full_mensal"] == "nao avaliado"
+
+
+# ---------------------------------------------------------------------------
+# REGRESSAO — contrato mapping do cursor da decisao (hotfix 2026-08-28)
+#
+# `decide_effective_mode` lia `linha[0]`. `_neon_session` e `_neon_readonly`
+# conectam com `cursor_factory=RealDictCursor`, entao a linha e' mapping e o
+# acesso posicional levantava `KeyError: 0` em 100% das execucoes de `auto` —
+# diagnostico e `--apply`. Os 255 testes passavam porque `CurDecisao.fetchone`
+# devolvia tupla. Os testes abaixo fixam o contrato real do cursor.
+# ---------------------------------------------------------------------------
+
+class LinhaMapping(dict):
+    """Mapping ESTRITO, no lugar de `psycopg2.extras.RealDictRow`.
+
+    Acesso por indice inteiro LEVANTA em vez de funcionar. E' isso que faz um
+    `linha[0]` reintroduzido falhar aqui, e nao apenas em producao — que foi
+    exatamente o que aconteceu.
+    """
+
+    def __getitem__(self, chave):
+        if isinstance(chave, int) and not isinstance(chave, bool):
+            raise AssertionError(
+                "acesso posicional em cursor mapping: RealDictRow levantaria "
+                "KeyError, e a producao falhava exatamente assim"
+            )
+        return super().__getitem__(chave)
+
+
+class CurDecisaoEstrito(CurDecisao):
+    """`CurDecisao` cujo `fetchone` devolve o mapping estrito."""
+
+    def fetchone(self):
+        return LinhaMapping(ultimo_full=self.ultimo_full)
+
+
+def test_decisao_le_por_chave_em_cursor_mapping_estrito():
+    """Sem full no mes: `auto` -> `full`, lendo por chave num mapping que
+    proibe indice."""
+    cur = CurDecisaoEstrito(ultimo_full=None)
+    modo, d = sync.decide_effective_mode(cur, sync.MODE_AUTO, _agora())
+    assert modo == sync.MODE_FULL
+    assert d["full_mensal"] == "devido"
+    assert d["mes_operacional"] == "2026-08"
+
+
+def test_decisao_le_por_chave_com_full_no_mes_em_cursor_estrito():
+    """Com full success no mes BRT: `auto` -> `incremental`, mesmo cursor
+    estrito. Cobre o ramo que consome o valor, nao so' o ramo do None."""
+    quando = datetime(2026, 8, 3, 9, 5, tzinfo=timezone.utc)
+    cur = CurDecisaoEstrito(ultimo_full=quando)
+    modo, d = sync.decide_effective_mode(cur, sync.MODE_AUTO, _agora())
+    assert modo == sync.MODE_INCREMENTAL
+    assert d["full_mensal"] == "atendido"
+    assert d["ultimo_full_success"] == str(quando)
+
+
+def test_o_agregado_da_decisao_tem_alias_explicito():
+    """Sem `AS ultimo_full` a leitura dependeria da chave implicita `"max"`,
+    que e' detalhe do servidor e nao contrato deste modulo."""
+    cur = CurDecisao(ultimo_full=None)
+    sync.decide_effective_mode(cur, sync.MODE_AUTO, _agora())
+    sql, _ = cur.sqls[0]
+    assert "MAX(finished_at) AS ultimo_full" in sql
+
+
+def test_a_chave_lida_e_exatamente_o_alias_do_sql():
+    """Amarra as duas pontas: renomear o alias no SQL sem renomear a leitura
+    — ou o contrario — quebra aqui, e nao em producao."""
+    cur = CurDecisao(ultimo_full=None)
+    sync.decide_effective_mode(cur, sync.MODE_AUTO, _agora())
+    sql, _ = cur.sqls[0]
+    alias = re.search(r"MAX\(finished_at\)\s+AS\s+(\w+)", sql).group(1)
+
+    class CurSoOAlias(CurDecisao):
+        """Devolve APENAS a chave do alias: qualquer outra chave levanta."""
+
+        def fetchone(self):
+            return LinhaMapping({alias: self.ultimo_full})
+
+    modo, _d = sync.decide_effective_mode(
+        CurSoOAlias(ultimo_full=None), sync.MODE_AUTO, _agora()
+    )
+    assert modo == sync.MODE_FULL
+
+
+def test_fake_da_decisao_devolve_mapping_como_a_producao():
+    """Guarda contra a regressao do PROPRIO fake: se ele voltar a ser tupla,
+    o defeito volta a ficar invisivel."""
+    linha = CurDecisao(ultimo_full=None).fetchone()
+    assert isinstance(linha, dict)
+    assert not isinstance(linha, tuple)
+    assert "ultimo_full" in linha
+
+
+def test_cursor_de_auditoria_permanece_tupla():
+    """`_neon_audit` NAO usa `RealDictCursor` e `_audit_start` le por indice.
+    Converter este fake para mapping quebraria a producao no sentido oposto —
+    a auditoria e' o unico caminho tupla deste modulo, de proposito."""
+    assert isinstance(ConnAudit().cursor().fetchone(), tuple)
+    fonte = inspect.getsource(sync._neon_audit)
+    assert "cursor_factory" not in fonte
 
 
 def test_decisao_ocorre_depois_do_lock_e_antes_da_fonte():
@@ -688,6 +798,14 @@ class _CurFact:
             raise RuntimeError("publicacao falhou antes do commit")
 
     def fetchone(self):
+        # Nunca consumido: `_apply_com_estado` substitui por monkeypatch TODAS as
+        # funcoes deste caminho que leriam linha (`read_watermark`,
+        # `assert_still_holding_lock`, `assert_watermark_unchanged`,
+        # `publish_in_transaction`, `wipe_fact`, `decide_effective_mode`, os dois
+        # helpers de advisory lock). Provado por sonda: trocar este retorno por
+        # `raise` mantem os 83 testes passando. Fica como tupla de propriedade
+        # nenhuma — mudar para mapping seria cosmetico e sugeriria falsamente que
+        # o contrato deste fake foi verificado contra producao.
         return (None,)
 
     def close(self):

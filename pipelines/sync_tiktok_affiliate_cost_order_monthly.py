@@ -1432,7 +1432,7 @@ def decide_effective_mode(cur, requested_mode: str,
     ano, mes = operational_month(agora)
     cur.execute(
         """
-        SELECT MAX(finished_at)
+        SELECT MAX(finished_at) AS ultimo_full
         FROM audit.source_sync_run
         WHERE source_name = %s
           AND status = 'success'
@@ -1442,8 +1442,14 @@ def decide_effective_mode(cur, requested_mode: str,
         """,
         (FULL_AUDIT_SOURCE, date(ano, mes, 1), _proximo_mes(ano, mes)),
     )
+    # Este cursor vem de `_neon_session` (--apply) ou `_neon_readonly`
+    # (diagnostico), e AMBOS conectam com `cursor_factory=RealDictCursor`: a
+    # linha e' mapping, nunca tupla. `linha[0]` levantava `KeyError: 0` em 100%
+    # das execucoes reais de `auto` — e o guarda `if linha` nao protegia, porque
+    # `MAX()` sem `GROUP BY` sempre devolve exatamente uma linha. O alias
+    # explicito existe para nao depender da chave implicita `"max"`.
     linha = cur.fetchone()
-    ultimo = linha[0] if linha else None
+    ultimo = linha["ultimo_full"] if linha else None
 
     if ultimo is not None:
         return MODE_INCREMENTAL, {
