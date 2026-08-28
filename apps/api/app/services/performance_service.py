@@ -895,6 +895,17 @@ def get_daily(
 # Canais
 # ---------------------------------------------------------------------------
 
+def canais_period_bounds(
+    period: EffectivePeriod | None, year: int, month: int,
+) -> tuple[date, date]:
+    """Janela efetiva de /canais. Extraida para que a rota componha blocos
+    adicionais sobre EXATAMENTE o mesmo intervalo que `get_canais` consultou —
+    duas resolucoes independentes divergiriam calada."""
+    if period is not None:
+        return period.start, period.end
+    return _month_bounds(year, month)
+
+
 def get_canais(
     db: Session, marketplace: str, year: int, month: int, *,
     brand_keys: list[str] | None = None,
@@ -902,10 +913,7 @@ def get_canais(
     compare_period: EffectivePeriod | None = None,
 ) -> dict:
     mkt_ids = parse_marketplace_param(marketplace)
-    if period is not None:
-        start, end = period.start, period.end
-    else:
-        start, end = _month_bounds(year, month)
+    start, end = canais_period_bounds(period, year, month)
 
     params: dict = {"start": start, "end": end, "mkt_ids": mkt_ids}
     brand_filter = _brand_filter_sql(brand_keys, params)
@@ -1106,6 +1114,8 @@ def get_canais(
         "compare_date_to": compare_period.end if compare_period is not None else None,
         "filters": {"channels": marketplace, "brands": brand_keys},
         "refreshed_at": refreshed_at,
+        # `affiliate_costs` NAO e' montado aqui: o bloco de afiliados (§23) e'
+        # composto na rota, sobre esta resposta. Ver `canais_period_bounds`.
     }
 
 

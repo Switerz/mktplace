@@ -904,6 +904,86 @@ export interface CanaisChannelMedian {
   brands_with_data: number;
 }
 
+// --- Bloco "Impacto de afiliados no resultado" (contrato §23) -------------
+// Quatro dimensoes ORTOGONAIS. Um enum unico misturaria "nao ha fonte",
+// "periodo nao fecha mes", "faltam marcas" e "quao velho e o dado" — quatro
+// perguntas distintas que a tela precisa responder ao mesmo tempo.
+
+/** Existe fonte utilizavel para este canal/recorte? */
+export type AffiliateAvailabilityStatus =
+  | "available"
+  | "unavailable_no_source"
+  | "no_eligible_brand"
+  | "error";
+
+/** O periodo pedido fecha competencia(s) mensal(is) passada(s)? */
+export type AffiliatePeriodStatus =
+  | "complete_month"
+  | "complete_months"
+  | "partial_month"
+  | "not_month_aligned";
+
+/** Todas as marcas esperadas estao presentes na competencia? */
+export type AffiliateCoverageStatus =
+  | "complete"
+  | "incomplete_brand_coverage"
+  | "unknown";
+
+/** Quao atual e' o dado. `manual_snapshot` enquanto a carga nao for rotina. */
+export type AffiliateFreshnessStatus =
+  | "manual_snapshot"
+  | "fresh"
+  | "stale"
+  | "unknown";
+
+/**
+ * Indisponibilidade de retorno em campo TIPADO, nao em texto livre: a tela
+ * decide o que renderizar sem interpretar prosa. Nao existe — e nao deve
+ * passar a existir — nenhum campo NUMERICO de retorno, ROI ou ROAS de
+ * afiliado: sem receita atribuida nao ha numerador.
+ */
+export type AffiliateReturnAvailability = "unavailable_no_attributed_revenue";
+
+export interface AffiliateCostRow {
+  channel: string;
+  brand: string;
+  /** Competencia `YYYY-MM`. Grao mensal — nunca rateado para dias. */
+  ref_month: string;
+  // Valores ASSINADOS, como na fonte. `null` = sem medicao; `0` = medido zero.
+  // Os tres NAO devem ser somados: qual subconjunto constitui "custo de
+  // afiliado" e' decisao aberta, e a ausencia de sobreposicao nao esta provada.
+  creator_commission_signed: number | null;
+  partner_commission_signed: number | null;
+  affiliate_ads_commission_signed: number | null;
+  coverage_status: AffiliateCoverageStatus;
+  brands_present_in_month: number | null;
+}
+
+export interface AffiliateChannelStatus {
+  channel: string;
+  /** AUTORITATIVO por canal: o status do bloco nunca o sobrescreve. */
+  availability_status: AffiliateAvailabilityStatus;
+  reason_note: string;
+}
+
+export interface AffiliateCostsBlock {
+  availability_status: AffiliateAvailabilityStatus;
+  period_status: AffiliatePeriodStatus;
+  coverage_status: AffiliateCoverageStatus;
+  freshness_status: AffiliateFreshnessStatus;
+  rows: AffiliateCostRow[];
+  channels: AffiliateChannelStatus[];
+  months_included: string[];
+  /** Frescor PROPRIO do bloco — nunca o `refreshedAt` geral da pagina. */
+  affiliate_refreshed_at: string | null;
+  /** Ate onde a fonte foi lida. Grandeza distinta de `affiliate_refreshed_at`. */
+  source_watermark: string | null;
+  return_availability: AffiliateReturnAvailability;
+  return_note: string;
+  source_note: string;
+  limitation_note: string;
+}
+
 /**
  * Semente do mock: SO os valores de origem. Os campos derivados do mix de
  * conteudo (`tiktok_*_pct`, `tiktok_content_gmv_base`,
@@ -998,6 +1078,7 @@ export function fetchCanais(
 ): Promise<{
   kpis: CanaisKpis; brands: CanaisBrandRow[];
   channelRows: CanaisChannelRow[]; channelMedians: CanaisChannelMedian[];
+  affiliateCosts: AffiliateCostsBlock | null;
   live: boolean; meta: ResponseMeta;
 }> {
   const marketplace = serializeMarketplaceSelection(selection);
@@ -1006,6 +1087,7 @@ export function fetchCanais(
     interface ApiResp {
       kpis: CanaisKpis; brands: CanaisBrandRow[];
       channel_rows?: CanaisChannelRow[]; channel_medians?: CanaisChannelMedian[];
+      affiliate_costs?: AffiliateCostsBlock | null;
       date_from?: string | null; date_to?: string | null;
       compare_date_from?: string | null; compare_date_to?: string | null;
       refreshed_at?: string | null;
@@ -1025,6 +1107,9 @@ export function fetchCanais(
       live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands,
       channelRows: raw.channel_rows ?? [],
       channelMedians: raw.channel_medians ?? [],
+      // `?? null`: bloco AUSENTE na resposta (API antiga) e' distinto de bloco
+      // presente em qualquer estado. Nao se fabrica um bloco vazio aqui.
+      affiliateCosts: raw.affiliate_costs ?? null,
     };
   }
 
@@ -1089,7 +1174,12 @@ export function fetchCanais(
 
     // Modo demonstracao (API offline): dados mock nao modelam Ads/Custo/Frete
     // por canal — a matriz comparativa fica vazia em vez de inventar valores.
-    return { live: false, meta: EMPTY_META, kpis, brands, channelRows: [], channelMedians: [] };
+    // `affiliateCosts: null` pela mesma razao: custo de afiliado e' contabil e
+    // um valor inventado no mock poderia ser lido como medicao real.
+    return {
+      live: false, meta: EMPTY_META, kpis, brands,
+      channelRows: [], channelMedians: [], affiliateCosts: null,
+    };
   });
 }
 

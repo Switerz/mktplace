@@ -20,6 +20,7 @@ from app.schemas.performance import (
 from app.services import executive_summary_service
 from app.services import gold_service as svc
 from app.services import performance_service as perf_svc
+from app.services.affiliate_costs_service import safe_affiliate_costs_block
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
 
@@ -324,10 +325,27 @@ def canais(
     db: Session = Depends(get_db),
 ):
     year, month = _year_month_for_service(filters.period)
-    return perf_svc.get_canais(
-        _require_db(db), filters.channels, year, month,
+    sessao = _require_db(db)
+    resposta = perf_svc.get_canais(
+        sessao, filters.channels, year, month,
         brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
     )
+    # Bloco ADITIVO de afiliados (§23), composto AQUI e nao dentro de
+    # `get_canais`: o corpo historico da resposta e as consultas que o produzem
+    # ficam inalterados.
+    #
+    # ISSO NAO E' ISOLAMENTO DE LATENCIA. A chamada abaixo e' SINCRONA e roda
+    # antes da resposta HTTP: `/canais` ganhou trabalho adicional, e o tempo do
+    # bloco soma ao tempo da rota. O que fica isolado e' o corpo historico
+    # (nenhuma consulta de `get_canais` mudou) e a FALHA (`safe_...` nao levanta
+    # por erro esperado de banco — devolve o bloco em `error` e o resto do
+    # payload permanece valido).
+    inicio, fim = perf_svc.canais_period_bounds(filters.period, year, month)
+    resposta["affiliate_costs"] = safe_affiliate_costs_block(
+        sessao, perf_svc.parse_marketplace_param(filters.channels),
+        inicio, fim, brand_keys=filters.brands,
+    )
+    return resposta
 
 
 @router.get("/financeiro", response_model=FinanceiroResponse)

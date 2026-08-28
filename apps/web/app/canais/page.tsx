@@ -9,6 +9,7 @@ import {
   type CanaisBrandRow,
   type CanaisChannelRow,
   type CanaisChannelMedian,
+  type AffiliateCostsBlock,
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
@@ -16,6 +17,8 @@ import { mergeFilteredHref } from "@/lib/filters/nav-links";
 import KpiCard from "@/components/KpiCard";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import ChannelComparisonDialogContent from "@/components/ChannelComparisonDialogContent";
+import AffiliateCostsPanel from "@/components/AffiliateCostsPanel";
+import { resolveBlockPhase } from "@/lib/canais-affiliate-costs";
 import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import BrandFilter from "@/components/BrandFilter";
@@ -178,6 +181,7 @@ function CanaisPageInner() {
   const [brands, setBrands] = useState<CanaisBrandRow[]>([]);
   const [channelRows, setChannelRows] = useState<CanaisChannelRow[]>([]);
   const [channelMedians, setChannelMedians] = useState<CanaisChannelMedian[]>([]);
+  const [affiliateCosts, setAffiliateCosts] = useState<AffiliateCostsBlock | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -211,6 +215,7 @@ function CanaisPageInner() {
         setBrands(r.brands);
         setChannelRows(r.channelRows);
         setChannelMedians(r.channelMedians);
+        setAffiliateCosts(r.affiliateCosts);
         setIsLive(r.live);
         setRefreshedAt(r.meta.refreshedAt);
         setResolvedKey(key);
@@ -241,6 +246,15 @@ function CanaisPageInner() {
   const displayBrands = dataIsFresh ? brands : [];
   const displayChannelRows = dataIsFresh ? channelRows : [];
   const displayChannelMedians = dataIsFresh ? channelMedians : [];
+  // O bloco de afiliados obedece a MESMA guarda de frescor: um custo contabil
+  // do filtro anterior exibido sob o filtro novo seria pior que ausencia.
+  const displayAffiliateCosts = dataIsFresh ? affiliateCosts : null;
+  // Quatro fases EXPLICITAS em vez de `loading = !dataIsFresh`, que colapsava
+  // "carregando" e "terminou em erro" no mesmo skeleton — e o painel pulsava
+  // para sempre depois de uma falha.
+  const affiliatePhase = resolveBlockPhase({
+    loading, error: error !== null, requestKey, resolvedKey,
+  });
 
   const buildHref = useMemo(() => (href: string) => mergeFilteredHref(href, searchParams), [searchParams]);
 
@@ -639,7 +653,7 @@ function CanaisPageInner() {
           <h2 className="text-sm font-semibold text-slate-700">Comparativo entre Canais — Ads, Custo e Frete</h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Marca × marketplace — mesmas métricas já validadas na aba Financeiro, lado a lado para comparar oportunidades.
-            Não inclui desconto nem comissão de afiliados (ver docs/sections/canais_audit.md, seção 14).
+            Não inclui desconto nem comissão de afiliados — afiliados aparecem em bloco próprio, por competência mensal (ver docs/sections/canais_audit.md, seção 14).
           </p>
         </div>
         <TableScrollHint>
@@ -741,6 +755,23 @@ function CanaisPageInner() {
             Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
           </span>
         </div>
+      </div>
+
+      {/* ── Impacto de afiliados no resultado (UE3, contrato §23) ──
+          Bloco SEPARADO da matriz acima de proposito: o grao e' competencia
+          mensal x marca, nao dia, e os tres lancamentos nao se somam — nao
+          cabem como colunas da comparacao diaria por canal. */}
+      {/* `key={requestKey}`: na troca de filtro o painel REMONTA, e o estado
+          local do diálogo volta a `false`. Sem isso, um diálogo aberto durante
+          a troca continuaria aberto e reapareceria com o payload novo — ou,
+          pior, com o antigo ainda em tela. Nao altera o shell
+          `KpiDrilldownDialog`, que segue generico. */}
+      <div id="afiliados" className="scroll-mt-24">
+        <AffiliateCostsPanel
+          key={requestKey}
+          block={displayAffiliateCosts}
+          phase={affiliatePhase}
+        />
       </div>
 
       {/* ── Tabela: Mix do GMV de conteudo do TikTok por marca ── */}

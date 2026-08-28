@@ -423,12 +423,12 @@ Esta subseção guarda **apenas as evidências**. O algoritmo, os guardrails e a
 
 **[FATO]** `updated_at` é **watermark técnico**, nunca competência: o incremental é keyed nele porque uma janela móvel sobre `order_create_time` perderia 34,0% das revisões.
 
-**[FATO] Estado do desenho após o UE1-C:**
+**[HISTÓRICO] Estado do desenho no checkpoint do UE1-C:**
 
-- A Gold é **comparador inválido** para esta métrica (§18.3) — reconciliá-la **não é** pré-requisito.
-- O fato comercial está **READY COM RESTRIÇÃO** (§18.6).
-- Continua **NÃO IMPLEMENTADO**.
-- A implementação depende dos guardrails da **§18.8** — snapshot consistente, validação de `transaction_type` e persistência de watermark —, não de reconciliar a Gold.
+- A Gold é **comparador inválido** para esta métrica (§18.3) — reconciliá-la **não é** pré-requisito. **→ Continua valendo.**
+- O fato comercial está **READY COM RESTRIÇÃO** (§18.6). **→ Continua valendo.**
+- *(À época)* Continua **NÃO IMPLEMENTADO**. **→ Superado: o fato foi materializado no UE2-B (§22) e exposto na UI pelo UE3 (§24), versionado no fechamento de 27/08/2026. Ainda não publicado.**
+- A implementação depende dos guardrails da **§18.8** — snapshot consistente, validação de `transaction_type` e persistência de watermark —, não de reconciliar a Gold. **→ Os três guardrails foram implementados (§19) e exercidos na primeira carga (§22).**
 
 ---
 
@@ -522,7 +522,13 @@ Esta subseção guarda **apenas as evidências**. O algoritmo, os guardrails e a
 
 ## 9. Contratos de métrica candidatos
 
-### C1 — Custo de afiliado do TikTok — **READY COM RESTRIÇÃO** (§18.6) · **NÃO IMPLEMENTADO**
+### C1 — Custo de afiliado do TikTok — **READY COM RESTRIÇÃO** (§18.6) · **IMPLEMENTADO E VERSIONADO, NÃO PUBLICADO**
+
+> **Estado em 27/08/2026:** o contrato abaixo foi **implementado e versionado**:
+> fato materializado e reconciliado no UE2-B (§22), API e UI entregues e
+> validadas no UE3 (§24), versionadas no fechamento desta data. **Ainda não
+> publicado em produção.** A restrição do §18.6 e todas as regras do contrato
+> seguem vigentes.
 
 ```
 grão            : mês × marca                    (PK do fato: ref_month, brand)
@@ -580,14 +586,14 @@ proibido        : usar vendas_consolidada_produto_v2 antes de reconciliar sua re
 
 ## 10. O que pode ir à UI
 
-⚠️ **Distinção que vale para toda esta seção:** *READY para implementar o fato* **≠** *fato implementado* **≠** *API disponível* **≠** *UI disponível*. Nada do que segue está no ar.
+⚠️ **Distinção que vale para toda esta seção:** *READY para implementar o fato* **≠** *fato implementado* **≠** *API disponível* **≠** *UI disponível*. **Nada do que segue está no ar** — e aqui "**no ar**" significa **publicado em produção**, não ausência de implementação: o custo de afiliados **está implementado localmente** (fato, API e UI), como a linha abaixo registra.
 
-**[RECOMENDAÇÃO]** Um item já publicável e um habilitado após implementação:
+**[RECOMENDAÇÃO]** Um item já publicável e um implementado e versionado, aguardando publicação:
 
 | Item | Estado | Depende de |
 |---|---|---|
 | **Receita atribuída a Ads ÷ GMV** (C2) | **Publicável hoje** — indicador isolado, sem composição, com ressalvas de janela e rateio | nada |
-| **Custo de afiliados por mês do pedido** — três componentes separados (C1) | **READY COM RESTRIÇÃO / NÃO IMPLEMENTADO** — habilitado só depois de existirem fato (UE2-B) e API (UE3), obedecendo §18.10 | UE2-B → UE3 |
+| **Custo de afiliados por mês do pedido** — três componentes separados (C1) | **IMPLEMENTADO E VERSIONADO, NÃO PUBLICADO.** Camada por camada: **UE2-B** — migration 012 aplicada, fato materializado e primeira carga reconciliada (§22); **UE3** — API e interface implementadas, **QA integrada `PASS`** e versionamento no fechamento de 27/08/2026 (§24). Obedece §18.10: os três componentes seguem separados e não somados. Publicação depende do Render (backend) e da Vercel (frontend); **smoke e latência Render→Neon pendentes**. **Retorno continua indisponível** (sem receita atribuída no grão) e **UE2-C não foi iniciada**, então o frescor exibido é `manual_snapshot` | UE2-B ✔ → UE3 ✔ (falta publicar) |
 
 **[FATO]** Nada mais tem fonte que sustente exibição.
 
@@ -671,22 +677,45 @@ proibido        : usar vendas_consolidada_produto_v2 antes de reconciliar sua re
 - L0, L2, L1 como pedidos formais; P1–P5 respondidas.
 - **Critério de saída:** cada lacuna vira DISPONÍVEL com data, ou BLOQUEADO definitivo.
 
-### UE2-B — Fato mensal de custo de afiliado do TikTok — **PRÓXIMO GATE IMPLEMENTÁVEL**
+### Estado atual do roadmap — 27/08/2026
 
-- **Estado: READY COM RESTRIÇÃO · NÃO INICIADO.** Desenho completo em §18.8; critério de aceite em §18.9.
+**Leia esta subseção antes do bloco histórico abaixo.** O planejamento original
+foi **superado pelos fatos** e é preservado apenas como registro.
+
+| Gate | Estado atual |
+|---|---|
+| **UE2-B** | **CONCLUÍDO.** Migration 012 aplicada, fato materializado e primeira carga reconciliada (§22) |
+| **UE3** | **TECNICAMENTE CONCLUÍDO — `PASS`.** API, interface e QA integrada (§24), **versionado no fechamento de 27/08/2026**. **Ainda não publicado** — depende do Render (backend) e da Vercel (frontend) |
+| **UE2-C** | **NÃO INICIADA.** Rotina e SLA de atualização da fact; por isso o frescor é `manual_snapshot` (§23.12) |
+| **UE2-A** | Não iniciado — segue dependendo de L2 |
+| **UE4** | Não iniciado |
+| **UE5** | Não iniciado |
+
+---
+
+#### ⏳ Bloco histórico — checkpoint anterior à implementação
+
+> **Este bloco descreve o planejamento de antes da implementação e NÃO é o
+> estado atual.** Foi **superado** pela primeira materialização registrada na
+> **§22** e pela implementação e QA do UE3 registradas na **§24**. Preservado
+> porque documenta o raciocínio das revisões 1, 2 e 3.
+
+##### UE2-B — Fato mensal de custo de afiliado do TikTok — *(à época: próximo gate implementável)*
+
+- *(À época)* **Estado: READY COM RESTRIÇÃO · NÃO INICIADO.** Desenho completo em §18.8; critério de aceite em §18.9. **→ Hoje: concluído, ver §22.**
 - Não depende de terceiros nem de reconciliar a Gold. Depende dos requisitos obrigatórios de implementação: snapshot consistente (§18.8.3), guardrail de `transaction_type` (§18.8.6) e persistência de watermark (§18.8.7).
-- **Restrições que acompanham o gate:** revisão retroativa exige reafirmação de mês publicado; fuso de `order_create_time` não demonstrável; sem `affiliate_cost_total` (P2).
+- **Restrições que acompanham o gate:** revisão retroativa exige reafirmação de mês publicado; fuso de `order_create_time` não demonstrável; sem `affiliate_cost_total` (P2). **→ As três continuam valendo.**
 
-### UE2-A — CMV de marketplace *(depende de L2)*
+##### UE2-A — CMV de marketplace *(depende de L2)*
 
 - **Risco principal:** universo da tabela ≠ universo da Torre (§7.1). Reconciliar receita **antes** de qualquer uso do custo.
 - **Critério de saída:** os 8 itens da §7.2.
 
-### UE3 — API e Canais *(depende de UE2-B)*
+##### UE3 — API e Canais *(à época: dependente de UE2-B)* **→ Hoje: concluído, ver §24.**
 
-### UE4 — Unit economics por listing *(depende de UE2-A + P4; começar por ML)*
+##### UE4 — Unit economics por listing *(depende de UE2-A + P4; começar por ML)*
 
-### UE5 — QA integrado
+##### UE5 — QA integrado
 
 **[RECOMENDAÇÃO — atualizada na revisão 3]** O custo de afiliado do TikTok por **coorte de pedido** volta a ser o menor gate implementável (§18.6), mas por fundamento diferente do da revisão 1: não por reconciliar com a Gold — que é comparador inválido —, e sim por **auditabilidade interna** contra a fonte transacional. A reconciliação externa que a revisão 1 celebrava nunca foi válida.
 
@@ -1554,7 +1583,7 @@ A §18.10 permanece integralmente em vigor. Antes de expor em API ou em Canais: 
 
 ## 23. UE3 Task 1/3 — contrato de exposição em Canais
 
-⚠️ **[FATO] Nada foi implementado.** Esta seção é desenho read-only. Zero código, zero escrita em banco, zero migration, zero deploy. A implementação é a Task 2/3.
+⚠️ **[HISTÓRICO] No checkpoint da Task 1/3, nada havia sido implementado.** Esta seção é o desenho read-only daquele momento: zero código, zero escrita em banco, zero migration, zero deploy. **O estado atual da implementação e da QA está na §24** — a Task 2/3 implementou este contrato e a Task 3/3 o validou como `PASS`. As regras de verdade descritas aqui **continuam vigentes**; apenas o "nada foi implementado" deixou de valer.
 
 ### 23.1 O que a fact realmente tem — medido em 2026-08-27
 
@@ -1586,7 +1615,9 @@ A §18.10 permanece integralmente em vigor. Antes de expor em API ou em Canais: 
 
 **[FATO] A primeira carga existe; a atualização automática não.** `pipelines/sync_tiktok_affiliate_cost_order_monthly.py` **não é referenciado por nenhum orquestrador**: não aparece em `pipelines/ops/orchestrate.py`, não está em `full_daily`, não está no Scheduler. A única menção fora do próprio módulo e de seu teste é um comentário em `apps/api/tests/test_s3_migrations.py`.
 
-Consequência direta para a UI: `synced_at` é **congelado em 2026-08-25** e vai envelhecer indefinidamente. O bloco **precisa** de estado de frescor visível desde o primeiro dia — não como refinamento futuro, mas porque o dado nasce parado. Integrar o incremental ao Scheduler é pré-requisito operacional da Task 2/3 ou decisão explícita de manter carga manual.
+Consequência direta para a UI: `synced_at` é **congelado em 2026-08-25** e vai envelhecer indefinidamente. O bloco **precisa** de estado de frescor visível desde o primeiro dia — não como refinamento futuro, mas porque o dado nasce parado.
+
+**Resolução tomada na Task 2/3.** A alternativa registrada acima era: integrar o incremental ao Scheduler **ou** decidir explicitamente por carga manual. **Optou-se pela segunda.** A implementação segue com `manual_snapshot`, exibe **carimbos próprios** (`affiliate_refreshed_at` e `source_watermark`, grandezas distintas), e **não inventa `fresh`/`stale`** — qualquer limiar seria arbitrário sem rotina nem SLA. Automação e SLA ficam para a **UE2-C**, que **não foi iniciada** (§23.12). Nada foi integrado ao Scheduler, ao `full_daily` ou a qualquer orquestrador.
 
 ### 23.3 Sobreposição dos três componentes — NÃO PROVADA
 
@@ -1903,6 +1934,19 @@ Até a UE2-C concluir, `freshness_status` é `manual_snapshot` e a interface mos
 | 19 | acessibilidade (alvo ≥ 44px, contraste, tipografia ≥ 12px) e responsividade |
 | 20 | fonte indisponível → nenhum número fabricado |
 
+### 23.15 Estado da implementação (Task 2/3)
+
+Implementada. O registro factual — arquivos, decisões que este contrato não
+fixava, validação executada e o que ficou sem validar — está na **§24**.
+
+**Uma decisão da §23.11 foi revista durante a implementação.** O plano dizia
+montar o bloco dentro de `get_canais`; ele é montado **na rota**, sobre a
+resposta já produzida. Motivo medido: dentro do serviço, o bloco acrescentava
+duas consultas às que `get_canais` já emitia e quebrava 17 testes existentes.
+Ver §24.1. A mudança isola o **contrato histórico** e a **falha** — **não** a
+latência: a composição é síncrona e `/canais` ganhou trabalho adicional. Nenhuma
+outra regra deste contrato mudou.
+
 ### 23.14 Riscos e decisões abertas
 
 | # | Item | Estado |
@@ -1915,3 +1959,337 @@ Até a UE2-C concluir, `freshness_status` é `manual_snapshot` e a interface mos
 | F | **Fase C do contrato TikTok** (auditoria BLOCKED por host key) | **Aberto.** Bloqueia qualquer razão sobre GMV |
 | G | Fonte de afiliados para ML/Shopee | **Não investigada.** Enquanto não houver prova, é "indisponível", nunca "não aplicável" |
 | H | Backfill integral periódico (§18.8.5) | **Aberto.** Escopo da UE2-C |
+
+---
+
+## 24. UE3 Task 2/3 — implementação em Canais (registro factual)
+
+Implementação do contrato §23. Nenhum endpoint novo, nenhuma migration,
+nenhuma dependência nova, nenhum arquivo em `pipelines/`, `db/` ou `alembic`.
+
+### 24.1 A decisão de arquitetura que mudou durante a implementação
+
+O plano da §23.11 previa montar o bloco **dentro de `get_canais`**. Foi
+implementado assim primeiro, e a suíte revelou o problema: `get_canais` passou
+a emitir duas consultas extras na mesma sessão, e **17 testes existentes**
+(`test_canais_channel_rows.py`, `test_canais_content_mix.py`) quebraram com
+`IndexError` — os fakes deles entregam resultados por ordem de chamada.
+
+Isso não era problema de fixture: era o sintoma de que o bloco havia sido
+enxertado dentro do contrato de um serviço que já funcionava. A composição foi
+movida para a **rota**:
+
+```python
+resposta = perf_svc.get_canais(sessao, ...)          # intocado
+inicio, fim = perf_svc.canais_period_bounds(filters.period, year, month)
+resposta["affiliate_costs"] = safe_affiliate_costs_block(sessao, ..., inicio, fim, ...)
+return resposta
+```
+
+**O que essa mudança isola — e o que NÃO isola.**
+
+| Dimensão | Estado |
+|---|---|
+| Contrato histórico de `get_canais` | **Isolado.** O serviço não conhece o bloco e emite exatamente uma consulta |
+| Falha esperada de banco | **Isolada semanticamente.** `safe_...` devolve o bloco em `error`; `kpis`, `brands` e `channel_rows` permanecem válidos |
+| **Latência** | **NÃO isolada.** `safe_affiliate_costs_block` é chamada de forma **síncrona**, antes da resposta HTTP. `/canais` ganhou trabalho adicional e o tempo do bloco soma ao tempo da rota |
+
+Não há cache, thread, fila nem timeout próprio — nenhum deles foi introduzido.
+A medição real do custo está na §24.6.
+
+Consequências medidas:
+
+- `get_canais` volta a emitir **exatamente uma** consulta, e não devolve a
+  chave `affiliate_costs` (teste
+  `test_get_canais_nao_produz_o_bloco_nem_consulta_a_fact`);
+- os 17 testes existentes voltaram a passar **sem serem editados** — a
+  invariância de `channel_rows` fica provada por construção, não por asserção;
+- `canais_period_bounds` foi extraída para que rota e serviço resolvam a janela
+  pela **mesma** regra; duas resoluções independentes divergiriam caladas.
+
+`performance_service` não importa mais `affiliate_costs_service`, então o
+import circular que existia na primeira versão deixou de existir e os imports
+de `TIKTOK_ID`/`ML_ID`/`SHOPEE_ID` subiram para o topo do módulo.
+
+### 24.2 Arquivos
+
+| Arquivo | Natureza |
+|---|---|
+| `apps/api/app/schemas/performance.py` | 5 aliases `Literal` + 3 modelos; `affiliate_costs: Optional[...] = None` em `CanaisResponse` (aditivo) |
+| `apps/api/app/services/affiliate_costs_service.py` | **novo** — `classify_period` (pura), `build_affiliate_costs_block`, `safe_affiliate_costs_block` |
+| `apps/api/app/routers/performance.py` | composição do bloco na rota `/canais` |
+| `apps/api/app/services/performance_service.py` | `canais_period_bounds` extraída; `get_canais` sem o bloco |
+| `apps/web/src/lib/api-client.ts` | 5 tipos + `affiliateCosts` nas **duas** rotas (real e mock) |
+| `apps/web/src/lib/canais-affiliate-costs.ts` | **novo** — módulo puro de apresentação |
+| `apps/web/src/components/AffiliateCostsPanel.tsx` | **novo** — bloco, reusa `KpiDrilldownDialog` |
+| `apps/web/app/canais/page.tsx` | estado + `displayAffiliateCosts` + render |
+
+### 24.3 Decisões de implementação que o contrato não fixava
+
+1. **`formatSignedBrl` não reusa `fmtBrl`.** `fmtBrl` abrevia para `R$ 1.2M`, e
+   um custo contábil abreviado não reconcilia com relatório nenhum. O bloco usa
+   valor integral, com centavos e com o sinal da fonte.
+2. **Cobertura medida sobre a competência, não sobre o recorte.** A CTE conta
+   `COUNT(DISTINCT brand)` **sem** o filtro de marca. Com filtro de uma marca, a
+   cobertura continua dizendo quantas marcas a competência tem — filtrar
+   mostraria "1 de 5" sempre.
+3. **`channels` segue autoritativo mesmo em `error`.** Só o TikTok entra em
+   `error`; ML e Shopee permanecem `unavailable_no_source`, porque não ficaram
+   indisponíveis por causa dessa falha.
+4. **`displayAffiliateCosts = dataIsFresh ? affiliateCosts : null`.** O bloco
+   obedece à mesma guarda de frescor dos outros estados da página: custo
+   contábil do filtro anterior exibido sob o filtro novo é pior que ausência.
+5. **`affiliateCosts: raw.affiliate_costs ?? null`.** Bloco ausente na resposta
+   (API antiga) é estado distinto de bloco presente em qualquer status. O
+   cliente não fabrica bloco vazio.
+6. **Rota mock devolve `affiliateCosts: null`.** Um valor inventado no modo
+   demonstração poderia ser lido como medição real.
+7. **A nota da matriz comparativa foi corrigida.** Ela dizia "Não inclui
+   desconto nem comissão de afiliados"; agora aponta que afiliados aparecem em
+   bloco próprio, por competência mensal. A matriz de fato continua sem eles.
+
+### 24.4 O que continua não existindo, por decisão
+
+`affiliate_cost_total`; soma dos três componentes em qualquer nível;
+`<tfoot>` de total; agregado multimensal; razão sobre GMV; `return_amount`;
+ROI; ROAS de afiliado; receita atribuída; `abs()`/`Math.abs()`; rateio de mês
+para dia; preenchimento de marca ausente com zero; número em período parcial ou
+desalinhado.
+
+### 24.5 Validação executada
+
+| Verificação | Resultado |
+|---|---|
+| Testes focais backend (`test_canais_affiliate_costs.py`) | **40 passed** |
+| Suíte completa `apps/api` | **720 passed, 43 failed** |
+| Baseline da suíte em `HEAD` limpo (`git archive`) | **680 passed, 43 failed** |
+| Delta de regressão | **zero** — as 43 falhas são idênticas à baseline |
+| `compileall app tests` | OK |
+| Startup/import da app | OK; `/api/v1/performance/canais` registrada; bloco com 13 campos |
+| Nomes de campo proibidos nos 3 modelos | zero |
+| Testes focais frontend | **33 passed** |
+| `npm test` | **1290 passed, 0 failed** |
+| `npm run typecheck` | OK |
+| `npm run build` | OK |
+| `git diff --check` | limpo |
+| Scan de secrets/PII (11 arquivos, 12 padrões) | zero achados |
+| `package-lock.json` | sem diff |
+| Dependências novas | zero |
+| Arquivos em `pipelines/`, `db/`, `alembic` | zero |
+
+**As 43 falhas pré-existentes** não têm relação com esta frente: testes de
+router sem banco esperam `503`, mas `psycopg2` estoura `UnicodeDecodeError` ao
+decodificar a mensagem de erro de conexão em cp1252 no Windows pt-BR. Falham
+igualmente no `HEAD` limpo. Não foram tocadas.
+
+### 24.6 O que NÃO foi validado nesta task
+
+- **QA visual.** Nenhuma tela foi aberta em navegador. Layout, contraste,
+  responsividade e comportamento real do diálogo são a Task 3/3.
+- **Resposta com banco real.** Todos os testes usam sessão falsa. A consulta
+  não foi executada contra o Neon, então plano de execução e latência do bloco
+  são desconhecidos.
+- **Convenção de sinal** (§23.14-A) segue aberta: a UI exibe o sinal da fonte
+  sem afirmar o que ele significa.
+
+### 24.7 Rodada de correção pré-QA (27/08/2026)
+
+Dez achados corrigidos antes do QA visual. Os quatro de maior consequência:
+
+**F1 — a afirmação de isolamento estava larga demais.** O texto anterior dizia
+que o bloco não entrava no "caminho crítico". Falso: `safe_affiliate_costs_block`
+é chamada **de forma síncrona** antes da resposta HTTP. O que está isolado é o
+contrato histórico e a falha — nunca a latência. A consulta da fact e a do
+watermark foram **fundidas em uma só** (o watermark virou subconsulta escalar),
+caindo de dois round-trips para um. Medição na §24.8.
+
+**F3 — competência inteiramente ausente sumia da análise.** A CTE de cobertura
+só conhecia meses **presentes** na fact. Um mês solicitado com zero linhas não
+aparecia, e o agregado podia se declarar `complete` escondendo o buraco. A
+consulta passou a materializar as competências **pedidas** (`UNNEST` + `LEFT
+JOIN`), de modo que um mês ausente retorna com `brand IS NULL` e
+`brands_present_in_month = 0`. Essa linha é metainformação: **nunca** vira linha
+monetária. O discriminador é `brands_present_in_month == 0` — e não "zero linhas
+retornadas" —, o que separa corretamente **mês ausente** de **recorte de marca
+vazio**: no segundo caso a competência existe e a cobertura segue dizendo 5.
+
+**F2 — fuso operacional.** `date.today()` lia o relógio do SO. Trocado por
+`today_brt()` (helper já existente em `app/deps/period.py`). A fronteira medida
+em teste: `2026-09-01T02:30Z` é **31/08 em BRT** e **01/09 em UTC** — pelo
+relógio errado, agosto teria "fechado" quase um dia antes da hora.
+
+**F5 — frescor afirmado onde não havia leitura.** O painel dizia "Carga manual
+sem registro de data" mesmo quando nenhuma fotografia fora consultada (só
+ML/Shopee, consulta falha, período parcial). Agora `freshness_status` só é
+`manual_snapshot` no caminho em que a fact foi de fato lida; todo bloco vazio sai
+como `unknown`, e `describeFreshness` devolve `null`.
+
+Os demais: **F4** removeu `exc_info=True` do erro esperado (o traceback de
+`SQLAlchemyError` carrega o SQL e, conforme o driver, parâmetros de conexão);
+**F6** trocou `loading = !dataIsFresh` por quatro fases explícitas
+(`resolveBlockPhase`), acabando com o skeleton eterno após erro terminal;
+**F7** remonta o painel via `key={requestKey}`, fechando o diálogo na troca de
+filtro sem tocar no shell `KpiDrilldownDialog`; **F8** adicionou teste que invoca
+a função da rota de verdade; **F9** passou a converter instantes com offset para
+BRT e a rotulá-los, mantendo data pura sem deslocamento e recusando carimbar
+fuso em timestamp sem offset; **F10** removeu `sm:min-h-0` do botão de detalhe.
+
+### 24.8 Preflight read-only contra o Neon (27/08/2026)
+
+Somente `SELECT`/`EXPLAIN`, sessão em `READ ONLY`, zero escrita.
+
+| Medida | Valor |
+|---|---|
+| Linhas na fact | **70** |
+| Competências distintas | **15** |
+| Índices | PK `btree (ref_month, brand)` e `idx_ftacom_brand_ref_month btree (brand, ref_month)` |
+| Round-trips do bloco | **1** (era 2 antes da fusão) |
+| `Execution Time` — 1 competência | **0,864 ms** |
+| `Execution Time` — 12 competências | **0,208 ms** |
+| `Execution Time` — 12 competências + filtro de marca | **0,185 ms** |
+| Buffers | `shared hit=5` |
+
+**Índice não é usado, e está certo.** O plano faz `Seq Scan`. A tabela inteira
+cabe em 2 páginas: para 70 linhas o planejador não tem motivo para percorrer
+índice. Isso não é sintoma de problema, e o crescimento é de ~5 linhas por mês.
+
+**A latência medida é rede, não consulta.** Da máquina de desenvolvimento:
+
+| Consulta (mesma conexão, 5 execuções) | min | mediana | máx |
+|---|---|---|---|
+| `SELECT 1` (RTT puro) | 231,66 ms | **232,29 ms** | 233,05 ms |
+| `SELECT count(*)` na fact | 232,04 ms | 232,21 ms | 235,44 ms |
+| Consulta do bloco, 12 competências | 232,86 ms | **234,06 ms** | 236,72 ms |
+
+O custo da consulta **acima do RTT** é de **+1,78 ms**, e **99,2%** do tempo
+medido é ida-e-volta de rede desta máquina até o Neon.
+
+**Conclusão, limitada à evidência.** O **plano e a execução no Postgres não
+apresentam risco material no volume atual**: 0,2 ms de servidor sobre 70 linhas,
+`shared hit=5`, sem hazard de escala. O bloco **adiciona uma consulta e um
+round-trip síncrono** a `/canais`. **Localmente**, o impacto medido foi de
+aproximadamente **um RTT — cerca de 230,79 ms** (§24.9). **Render→Neon ainda não
+foi medido**, e portanto **o impacto em produção permanece pendente de smoke
+pós-publicação**. Não há indício de problema de desempenho; o que não se pode
+fazer ainda é a afirmação ampla sobre produção. Nenhum cache, thread, endpoint ou
+timeout foi introduzido.
+
+**O que essa medição NÃO diz.** Os ~233 ms são o RTT **desta máquina**, não o de
+produção. O RTT real Render→Neon não foi medido e só pode ser medido depois de
+publicar. A conclusão defensável é sobre o **marginal**: uma ida-e-volta a mais,
+de custo de servidor desprezível.
+
+**Achado colateral, com consequência na UI.** Os dois carimbos têm tipos
+**diferentes** no banco: `synced_at` é `timestamp with time zone` (serializa
+`...+00:00`) e `last_successful_upper_bound` é `timestamp without time zone`
+(sem offset). Por isso o `formatTimestamp` tem três casos: converte e rotula
+`BRT` o que tem offset, e se recusa a carimbar fuso no que não tem. As duas
+formas reais estão fixadas em teste.
+
+### 24.9 Task 3/3 — QA integrada (27/08/2026)
+
+Executada com backend local lendo o **Neon real** (somente `SELECT`/`EXPLAIN`) e
+frontend servido pelo build de produção. Zero escrita, zero deploy, zero commit.
+
+**Uma correção, consolidada em rodada única.** O skeleton do bloco renderizava
+uma região `aria-busy="true"` **sem nenhum texto**: um leitor de tela anunciava
+"ocupado" sem dizer do quê. Medido por comparação direta — as outras três regiões
+de carregamento de `/canais` mantêm o heading durante o load
+(`Mix do GMV de conteúdo do TikTok`, `Mercado Livre`, `Shopee`), e só a de
+afiliados vinha vazia. O título passou a ser renderizado no skeleton, com a
+animação restrita ao invólucro das barras de placeholder. Nenhuma regra de
+contrato, fonte ou métrica foi tocada.
+
+**Um candidato descartado com prova.** O detector acusou uma requisição ao abrir
+o diálogo. Ela é um **prefetch RSC do Next** para `<Link href="/brand/...">` das
+**tabelas de marca** (`A < TD < TR < TBODY < TABLE`), não do painel — que não tem
+âncora alguma. Rolar a página **sem abrir o diálogo** dispara cinco prefetches
+iguais. Comportamento pré-existente, fora do escopo. O que importava foi
+verificado e passou: **zero requisição de dados** ao abrir, e os 15 valores do
+diálogo são exatamente os já presentes na tabela.
+
+#### Cenários read-only executados contra dados reais
+
+| # | Cenário | Resultado medido |
+|---|---|---|
+| A | 2026-07 completo, todos os canais | 5 linhas (1 por marca), 3 lançamentos separados e negativos, `complete`, TikTok `available`, ML/Shopee `unavailable_no_source` |
+| B | Só ML+Shopee | `rows=[]`, TikTok ausente da lista, nenhuma disponibilidade herdada, frescor `unknown` |
+| C | 2026-08 parcial | `partial_month`, `rows=[]`, `months_included=[]`, zero número |
+| D | 2026-06-15..07-14 | `not_month_aligned`, `rows=[]`, nenhum rateio |
+| E | 2025-06 | `incomplete_brand_coverage`, **1 marca** (kokeshi), as outras 4 ausentes e **não** preenchidas com zero |
+| F | 2025-01 (anterior ao mínimo da fact) | `rows=[]`, competência **listada** em `months_included`, cobertura incompleta, nota declarando ausência ≠ custo zero, nenhum timestamp inventado |
+| G | 2025-06..2025-08 | 10 linhas; por competência **1 / 4 / 5** marcas; agregado geral **conservador** = incompleto; nenhum total multimensal |
+| + | 2026-07 filtrado por `apice` | 1 linha, `brands_present_in_month=5` — cobertura é da **competência**, não do recorte |
+| H | Falha controlada (monkeypatch, sem tocar o banco) | HTTP 200; `kpis`, `brands`, `channel_rows`, `channel_medians` e `refreshed_at` **byte-idênticos** ao baseline; bloco em `error`; nota fixa; zero vazamento de SQL/DSN/host/driver; requisição seguinte volta a `available` |
+
+**Ausência vs. zero, medido.** Nos payloads reais: **15 componentes com valor
+exatamente `0`** (zero medido, exibido `R$ 0,00`) e **0 valores `null`**. As três
+colunas **são** `nullable` no banco, então o caminho de ausência por coluna é
+alcançável — hoje apenas não ocorre. A ausência que de fato aparece nos dados é de
+outra natureza e foi verificada: **competência inteira ausente** (cenário F) e
+**marca ausente dentro da competência** (E e G) — expressas como **linha
+inexistente**, nunca como zero.
+
+#### QA visual — 1440×900, 1024×768 e 390×844
+
+Navegador real (Chromium), **zero falha e zero aviso nos três viewports**.
+Verificado em cada um: título exato e posicionado após a matriz comparativa;
+três componentes separados com sinal da fonte e duas casas; nenhum `Total`,
+`ROI`, `ROAS`, margem ou `<tfoot>`; ML/Shopee como **"Dados indisponíveis"** e
+nunca "Não aplicável"; os seis recortes de período; zero overflow horizontal
+(tabela com rolagem local — 595px de tabela em 356px de área no mobile); nenhum
+texto cortado; todo alvo interativo ≥ 44×44; nenhum glifo < 12px; heading `H2`;
+tabela com `<caption>` acessível; zero erro de console, zero *hydration warning*,
+nenhum host inesperado, nenhuma requisição duplicada e nenhum segredo no DOM.
+
+Diálogo (desktop e mobile): abre no `KpiDrilldownDialog` existente, foco inicial
+em "Fechar detalhes", *focus trap* efetivo após 12 `Tab`, `Escape` fecha, foco
+devolvido ao acionador, **zero requisição de dados ao abrir**. Na troca de filtro
+com o diálogo aberto: fecha, nenhum valor antigo reaparece, e a reabertura não
+mostra estado anterior. Com resposta atrasada em 2,5s, **nenhum dos 15 valores do
+filtro anterior piscou** em 10 amostras.
+
+**Limitação honesta do cenário de erro no navegador.** `apiFetch` nunca rejeita —
+degrada para o caminho mock —, então o estado que o navegador exercita ao
+derrubar a rota é o ramo `bloco === null` ("Dados de afiliado indisponíveis"),
+não a fase `unavailable`. Ambos foram verificados quanto ao que o F6 exigia: **sem
+skeleton eterno, sem `aria-busy` e sem número antigo**. A fase `unavailable` em
+si é coberta por teste unitário e é alcançável apenas quando `fetchCanais`
+rejeita.
+
+#### Latência — decomposta, sem extrapolação
+
+| Camada | Medida |
+|---|---|
+| Execução no Postgres | **0,202 ms** (`Buffers: shared hit=5`, 70 linhas) |
+| RTT desta máquina → Neon (`SELECT 1`) | **232,13 ms** (mediana de 10) |
+| Consulta do bloco | **233,22 ms** = RTT **+1,10 ms** |
+| Endpoint `/canais` **com** consulta do bloco | **1174,90 ms** (mediana de 10) |
+| Endpoint `/canais` **sem** consulta do bloco (só ML+Shopee) | **944,12 ms** |
+| **Delta atribuível ao bloco** | **+230,79 ms** — praticamente um RTT exato |
+| Consultas do bloco por request | **1** (verificado por espião no `_scope_sql`) |
+
+O delta bate com um RTT (232,13 ms) e o trabalho de servidor é 0,2 ms: o bloco
+custa **exatamente uma ida-e-volta**. O RTT acima é **desta máquina** e **não é
+extrapolável** para Render→Neon, que só poderá ser medido após publicação futura.
+
+#### Estado que permanece
+
+`manual_snapshot` — a carga da fact segue manual e a **UE2-C não foi iniciada**.
+Retorno de afiliados **segue indisponível** (não há receita atribuída no grão).
+A **convenção contábil do sinal permanece aberta** (§23.14-A): a UI exibe o sinal
+da fonte sem afirmar o que ele significa. **Nenhum deploy foi realizado.**
+
+### 24.10 Versionamento — 27/08/2026
+
+O Gate UE3 foi **versionado neste fechamento**, em um único commit com os 14
+arquivos da frente. **Nenhum deploy manual foi executado.**
+
+O bloco **não deve ser considerado disponível em produção**: o **backend depende
+de publicação manual no Render** e o **frontend, da publicação automática da
+Vercel** — que o push pode acionar, mas isso **não foi validado aqui**. **Smoke
+de produção e medição de latência Render→Neon continuam pendentes**, e é só por
+eles que a conclusão ampla de desempenho da §24.8 poderá ser fechada.
+
+Nada mais mudou de estado: **UE2-C não iniciada**, frescor em `manual_snapshot`,
+retorno **indisponível** e convenção contábil do sinal **aberta**.

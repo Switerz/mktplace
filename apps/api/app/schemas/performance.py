@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -379,6 +379,97 @@ class CanaisChannelMedian(BaseModel):
     brands_with_data: int
 
 
+# ---------------------------------------------------------------------------
+# Impacto de afiliados no resultado — contrato §23 de
+# docs/UNIT_ECONOMICS_SOURCE_CONTRACTS.md
+#
+# QUATRO DIMENSOES ORTOGONAIS, nao um enum unico. Disponibilidade, alinhamento
+# de periodo, cobertura de marca e frescor sao INDEPENDENTES e coexistem: um
+# bloco pode ser `available` + `complete_month` + `incomplete_brand_coverage` +
+# `manual_snapshot` ao mesmo tempo. Com um enum mutuamente exclusivo seria
+# preciso escolher qual verdade contar, escondendo as outras tres.
+# ---------------------------------------------------------------------------
+
+#: A fonte tem dado para este canal/escopo?
+AvailabilityStatus = Literal[
+    "available",
+    "unavailable_no_source",   # ML/Shopee: fonte equivalente NAO confirmada
+    "no_eligible_brand",       # filtro de marca nao intersecta as marcas com dado
+    "error",                   # falha esperada ao ler a fact
+]
+
+#: O periodo pedido fecha competencia mensal?
+PeriodStatus = Literal[
+    "complete_month",          # exatamente um mes calendario, fechado
+    "complete_months",         # varios meses calendario, todos fechados
+    "partial_month",           # mes corrente, ou intervalo dentro de um mes
+    "not_month_aligned",       # nao fecha mes(es) calendario
+]
+
+#: A competencia tem as cinco marcas na fact?
+CoverageStatus = Literal["complete", "incomplete_brand_coverage", "unknown"]
+
+#: Quao recente e' a fotografia. `fresh`/`stale` SO passam a ser atribuiveis
+#: depois da frente UE2-C (§23.12) definir rotina e SLA: hoje a carga e' manual
+#: e qualquer limiar temporal seria inventado.
+FreshnessStatus = Literal["manual_snapshot", "fresh", "stale", "unknown"]
+
+#: Indisponibilidade TIPADA do retorno. Enum de UM valor, deliberado: cria o
+#: lugar para DECLARAR ausencia sem criar o lugar para GUARDAR numero. Nao
+#: existe `return_amount`, `roi`, `roas` nem receita atribuida.
+ReturnAvailability = Literal["unavailable_no_attributed_revenue"]
+
+
+class AffiliateCostRow(BaseModel):
+    """Um lancamento por (canal, marca, competencia).
+
+    Os tres campos terminam em `_signed` de proposito: o nome carrega a
+    semantica de LANCAMENTO CONTABIL ASSINADO, nao de magnitude de custo ja
+    normalizada. `abs()` e' proibido em todo o caminho (§18.5.1, §23.9).
+    """
+    channel: str
+    brand: str
+    ref_month: str                                     # "YYYY-MM", sempre explicito
+    creator_commission_signed: Optional[float] = None
+    partner_commission_signed: Optional[float] = None
+    affiliate_ads_commission_signed: Optional[float] = None
+    coverage_status: CoverageStatus = "unknown"
+    brands_present_in_month: Optional[int] = None
+
+
+class AffiliateChannelStatus(BaseModel):
+    """Status POR CANAL. Autoritativo: o agregado do bloco nunca o sobrescreve,
+    e disponibilidade do TikTok jamais torna ML/Shopee disponiveis (§23.6.1)."""
+    channel: str
+    availability_status: AvailabilityStatus
+    reason_note: str
+
+
+class AffiliateCostsBlock(BaseModel):
+    availability_status: AvailabilityStatus
+    period_status: PeriodStatus
+    coverage_status: CoverageStatus
+    freshness_status: FreshnessStatus
+
+    rows: list[AffiliateCostRow] = Field(default_factory=list)
+    channels: list[AffiliateChannelStatus] = Field(default_factory=list)
+    #: METADADO de auditoria — diz quais competencias entraram no escopo. NAO
+    #: acompanha agregado multimensal, porque nenhum e' devolvido (§23.7).
+    months_included: list[str] = Field(default_factory=list)
+
+    #: MAX(synced_at) da fact no escopo retornado. NAO reutiliza o
+    #: `refreshed_at` geral de /canais: reutiliza-lo classificaria como recente
+    #: um dado congelado so' porque a rota respondeu agora (§23.5.2).
+    affiliate_refreshed_at: Optional[str] = None
+    #: `last_successful_upper_bound` do sync_state — ate onde a fonte foi lida.
+    source_watermark: Optional[str] = None
+
+    return_availability: ReturnAvailability = "unavailable_no_attributed_revenue"
+    return_note: str
+    source_note: str
+    limitation_note: str
+
+
 class CanaisResponse(BaseModel):
     ref_month: Optional[str] = None
     marketplace: str
@@ -391,7 +482,11 @@ class CanaisResponse(BaseModel):
     compare_date_from: Optional[date] = None
     compare_date_to: Optional[date] = None
     filters: Optional[FiltersEcho] = None
+    #: Frescor do pipeline diario de /canais. Permanece INDEPENDENTE do frescor
+    #: do bloco de afiliados (`affiliate_costs.affiliate_refreshed_at`).
     refreshed_at: Optional[str] = None
+    #: ADITIVO e opcional (§23). `None` quando o bloco nao foi montado.
+    affiliate_costs: Optional[AffiliateCostsBlock] = None
 
 
 class ProdutoShopeeRow(BaseModel):
