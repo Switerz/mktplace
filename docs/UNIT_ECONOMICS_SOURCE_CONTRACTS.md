@@ -427,7 +427,7 @@ Esta subseção guarda **apenas as evidências**. O algoritmo, os guardrails e a
 
 - A Gold é **comparador inválido** para esta métrica (§18.3) — reconciliá-la **não é** pré-requisito. **→ Continua valendo.**
 - O fato comercial está **READY COM RESTRIÇÃO** (§18.6). **→ Continua valendo.**
-- *(À época)* Continua **NÃO IMPLEMENTADO**. **→ Superado: o fato foi materializado no UE2-B (§22) e exposto na UI pelo UE3 (§24), versionado no fechamento de 27/08/2026. Ainda não publicado.**
+- *(À época)* Continua **NÃO IMPLEMENTADO**. **→ Superado: o fato foi materializado no UE2-B (§22) e exposto na UI pelo UE3 (§24), versionado no fechamento de 27/08/2026. O "ainda não publicado" desta linha era o estado daquele checkpoint e foi superado pela publicação e pelo smoke da §24.11 (`PASS WITH ISSUE`).**
 - A implementação depende dos guardrails da **§18.8** — snapshot consistente, validação de `transaction_type` e persistência de watermark —, não de reconciliar a Gold. **→ Os três guardrails foram implementados (§19) e exercidos na primeira carga (§22).**
 
 ---
@@ -522,13 +522,14 @@ Esta subseção guarda **apenas as evidências**. O algoritmo, os guardrails e a
 
 ## 9. Contratos de métrica candidatos
 
-### C1 — Custo de afiliado do TikTok — **READY COM RESTRIÇÃO** (§18.6) · **IMPLEMENTADO E VERSIONADO, NÃO PUBLICADO**
+### C1 — Custo de afiliado do TikTok — **READY COM RESTRIÇÃO** (§18.6) · **IMPLEMENTADO, VERSIONADO E PUBLICADO — `PASS WITH ISSUE`**
 
-> **Estado em 27/08/2026:** o contrato abaixo foi **implementado e versionado**:
-> fato materializado e reconciliado no UE2-B (§22), API e UI entregues e
-> validadas no UE3 (§24), versionadas no fechamento desta data. **Ainda não
-> publicado em produção.** A restrição do §18.6 e todas as regras do contrato
-> seguem vigentes.
+> **Estado em 27/08/2026:** o contrato abaixo foi **implementado, versionado e
+> publicado**: fato materializado e reconciliado no UE2-B (§22), API e UI
+> entregues e validadas no UE3 (§24), e **smoke pós-publicação `PASS WITH
+> ISSUE`** com comportamento compatível com `8760f96` (§24.11). A restrição do
+> §18.6 e todas as regras do contrato seguem vigentes. **UE2-C não iniciada** e
+> **retorno indisponível.**
 
 ```
 grão            : mês × marca                    (PK do fato: ref_month, brand)
@@ -593,7 +594,7 @@ proibido        : usar vendas_consolidada_produto_v2 antes de reconciliar sua re
 | Item | Estado | Depende de |
 |---|---|---|
 | **Receita atribuída a Ads ÷ GMV** (C2) | **Publicável hoje** — indicador isolado, sem composição, com ressalvas de janela e rateio | nada |
-| **Custo de afiliados por mês do pedido** — três componentes separados (C1) | **IMPLEMENTADO E VERSIONADO, NÃO PUBLICADO.** Camada por camada: **UE2-B** — migration 012 aplicada, fato materializado e primeira carga reconciliada (§22); **UE3** — API e interface implementadas, **QA integrada `PASS`** e versionamento no fechamento de 27/08/2026 (§24). Obedece §18.10: os três componentes seguem separados e não somados. Publicação depende do Render (backend) e da Vercel (frontend); **smoke e latência Render→Neon pendentes**. **Retorno continua indisponível** (sem receita atribuída no grão) e **UE2-C não foi iniciada**, então o frescor exibido é `manual_snapshot` | UE2-B ✔ → UE3 ✔ (falta publicar) |
+| **Custo de afiliados por mês do pedido** — três componentes separados (C1) | **IMPLEMENTADO, VERSIONADO E PUBLICADO — smoke `PASS WITH ISSUE`.** Camada por camada: **UE2-B** — migration 012 aplicada, fato materializado e primeira carga reconciliada (§22); **UE3** — API e interface implementadas, **QA integrada `PASS`**, versionamento em 27/08/2026 e **backend publicado no Render + frontend publicado pela Vercel**, com smoke read-only confirmando **comportamento compatível com `8760f96`** (§24.11). Obedece §18.10: os três componentes seguem separados e não somados. **Retorno continua indisponível** (sem receita atribuída no grão) e **UE2-C não foi iniciada**, então o frescor exibido é `manual_snapshot` | UE2-B ✔ → UE3 ✔ (publicado) |
 
 **[FATO]** Nada mais tem fonte que sustente exibição.
 
@@ -685,7 +686,7 @@ foi **superado pelos fatos** e é preservado apenas como registro.
 | Gate | Estado atual |
 |---|---|
 | **UE2-B** | **CONCLUÍDO.** Migration 012 aplicada, fato materializado e primeira carga reconciliada (§22) |
-| **UE3** | **TECNICAMENTE CONCLUÍDO — `PASS`.** API, interface e QA integrada (§24), **versionado no fechamento de 27/08/2026**. **Ainda não publicado** — depende do Render (backend) e da Vercel (frontend) |
+| **UE3** | **CONCLUÍDO, VERSIONADO E PUBLICADO.** API, interface e QA integrada (§24), versionado em 27/08/2026, backend publicado no Render e frontend pela Vercel. **Smoke pós-publicação `PASS WITH ISSUE`** (§24.11) |
 | **UE2-C** | **NÃO INICIADA.** Rotina e SLA de atualização da fact; por isso o frescor é `manual_snapshot` (§23.12) |
 | **UE2-A** | Não iniciado — segue dependendo de L2 |
 | **UE4** | Não iniciado |
@@ -2168,11 +2169,12 @@ medido é ida-e-volta de rede desta máquina até o Neon.
 apresentam risco material no volume atual**: 0,2 ms de servidor sobre 70 linhas,
 `shared hit=5`, sem hazard de escala. O bloco **adiciona uma consulta e um
 round-trip síncrono** a `/canais`. **Localmente**, o impacto medido foi de
-aproximadamente **um RTT — cerca de 230,79 ms** (§24.9). **Render→Neon ainda não
-foi medido**, e portanto **o impacto em produção permanece pendente de smoke
-pós-publicação**. Não há indício de problema de desempenho; o que não se pode
-fazer ainda é a afirmação ampla sobre produção. Nenhum cache, thread, endpoint ou
-timeout foi introduzido.
+aproximadamente **um RTT — cerca de 230,79 ms** (§24.9). A **latência total do
+endpoint em produção foi verificada na §24.11** — mediana de 423 ms no cenário
+com o bloco. O que **continua não isolado** é o **RTT interno Render→Neon**:
+medi-lo exigiria instrumentação interna do serviço, e por isso a parcela do bloco
+dentro daquele total **não é atribuível causalmente**. Não há indício de problema
+de desempenho. Nenhum cache, thread, endpoint ou timeout foi introduzido.
 
 **O que essa medição NÃO diz.** Os ~233 ms são o RTT **desta máquina**, não o de
 produção. O RTT real Render→Neon não foi medido e só pode ser medido depois de
@@ -2271,7 +2273,9 @@ rejeita.
 
 O delta bate com um RTT (232,13 ms) e o trabalho de servidor é 0,2 ms: o bloco
 custa **exatamente uma ida-e-volta**. O RTT acima é **desta máquina** e **não é
-extrapolável** para Render→Neon, que só poderá ser medido após publicação futura.
+extrapolável** para Render→Neon. A publicação e a latência total do endpoint em
+produção foram verificadas na **§24.11**; o **RTT interno Render→Neon continua
+não isolado**, porque exigiria instrumentação interna do serviço.
 
 #### Estado que permanece
 
@@ -2282,14 +2286,122 @@ da fonte sem afirmar o que ele significa. **Nenhum deploy foi realizado.**
 
 ### 24.10 Versionamento — 27/08/2026
 
-O Gate UE3 foi **versionado neste fechamento**, em um único commit com os 14
-arquivos da frente. **Nenhum deploy manual foi executado.**
+> ⏳ **Estado no checkpoint imediatamente após o versionamento.** Descreve o
+> momento do commit, **antes** da publicação, e foi **superado pelo smoke da
+> §24.11**. Preservado como registro do que era verdade naquele instante.
 
-O bloco **não deve ser considerado disponível em produção**: o **backend depende
-de publicação manual no Render** e o **frontend, da publicação automática da
-Vercel** — que o push pode acionar, mas isso **não foi validado aqui**. **Smoke
-de produção e medição de latência Render→Neon continuam pendentes**, e é só por
-eles que a conclusão ampla de desempenho da §24.8 poderá ser fechada.
+O Gate UE3 foi **versionado neste fechamento**, em um único commit com os 14
+arquivos da frente. **Nenhum deploy manual foi executado pelo agente.**
+
+*(À época)* O bloco ainda não podia ser considerado disponível em produção: o
+backend dependia de publicação manual no Render e o frontend, da publicação
+automática da Vercel — que o push pode acionar, mas isso não foi validado
+naquela rodada. Smoke de produção e latência ainda estavam pendentes.
+**→ Hoje: ambos publicados e o smoke executado (§24.11, `PASS WITH ISSUE`).**
 
 Nada mais mudou de estado: **UE2-C não iniciada**, frescor em `manual_snapshot`,
 retorno **indisponível** e convenção contábil do sinal **aberta**.
+
+### 24.11 Smoke pós-publicação em produção — 27/08/2026 · `PASS WITH ISSUE`
+
+Backend publicado **manualmente pelo proprietário** no Render; frontend
+publicado pelo **fluxo automático da Vercel**. Smoke estritamente read-only:
+somente `GET`. Zero deploy, zero escrita, zero commit pelo agente.
+
+#### Comportamento compatível com `8760f96`
+
+Não há SHA publicado visível em nenhuma das duas plataformas, então a
+classificação é **comportamental**: o `openapi.json` de produção publica os
+contratos que **só existem** nesse commit — `CanaisResponse.affiliate_costs`, os
+modelos `AffiliateCostsBlock` (13 campos), `AffiliateCostRow` e
+`AffiliateChannelStatus`, e as **quatro dimensões ortogonais** com os enums
+exatos, incluindo `return_availability` como enum de **um único valor de
+indisponibilidade**. Nenhum campo agregador em nenhum dos três modelos.
+
+#### Cenários de API executados contra produção
+
+| # | Cenário | Resultado |
+|---|---|---|
+| B1 | 2026-07 completo, todos os canais | HTTP 200; `available` · `complete_month` · `manual_snapshot`; **5 linhas TikTok**; ML/Shopee `unavailable_no_source`; `channel_rows` com 14 entradas preservadas |
+| B2 | Só ML+Shopee | `rows=[]`; TikTok ausente da lista; `freshness=unknown`; nenhum carimbo herdado |
+| B3 | Mês corrente parcial | `partial_month`; `rows=[]`; `months_included=[]`; nenhuma ausência virou `R$ 0,00` |
+| B4 | 2025-06 | **1 marca real** (kokeshi), `brands_present_in_month=1`, `incomplete_brand_coverage`; as outras 4 **não** fabricadas |
+| B5 | 2025-01 | `rows=[]`; competência **listada**; cobertura incompleta; nota declarando ausência ≠ zero; **nenhum carimbo inventado** |
+
+`affiliate_refreshed_at` = `2026-08-25T19:33:26+00:00` e `source_watermark` =
+`2026-08-25T00:11:55` — **próprios e distintos entre si**, e distintos do
+`refreshed_at` geral da rota (`2026-08-05T18:53:53`). Nenhum vazamento de SQL,
+DSN, host, driver ou PII em nenhum payload.
+
+#### Latência TOTAL observada em produção
+
+Após aquecimento descartado, 10 chamadas sequenciais por cenário:
+
+| Cenário | mín | mediana | p95 | máx | payload | erros |
+|---|---|---|---|---|---|---|
+| B1 — mês completo, todos os canais | 406 ms | **423 ms** | 810 ms | 810 ms | ~17,2 KB | 0 |
+| B2 — só ML+Shopee | 389 ms | 410 ms | 464 ms | 464 ms | ~12,4 KB | 0 |
+| Mês parcial, todos os canais | 396 ms | 424 ms | 456 ms | 456 ms | ~16,0 KB | 0 |
+
+**Limite da atribuição causal.** Os três cenários têm **workloads diferentes** —
+filtros e períodos distintos produzem consultas e volumes distintos em **toda** a
+rota, não só no bloco. A diferença entre eles **não é o custo do bloco** e não
+foi instrumentada causalmente. O **RTT Render→Neon não foi medido**: não há
+acesso à instrumentação interna do serviço. A afirmação sustentada é apenas:
+**"produção respondeu com mediana de 423 ms no cenário com o bloco"**.
+
+A única evidência causal disponível continua sendo a **local** (§24.8): execução
+de ~0,202 ms no Postgres, **uma** consulta adicional verificada por espião, e
+impacto local equivalente a um RTT da máquina de medição.
+
+#### Navegador real — 1440×900 e 390×844
+
+Bloco presente com título exato; três componentes separados; **sinal da fonte
+preservado**; duas casas decimais; nenhum total, margem, ROI, ROAS ou retorno
+numérico; TikTok com dado e ML/Shopee como **"Dados indisponíveis"** (nunca "Não
+aplicável"); `manual_snapshot` apresentado como *"Carga manual gravada em… Sem
+atualização automática"*, **sem jamais dizer "fresco" ou "atualizado agora"**;
+avisos de retorno indisponível e de **sobreposição não provada** visíveis;
+nenhuma ausência exibida como `R$ 0,00`. Tabela com rolagem local no mobile,
+zero overflow horizontal, tipografia ≥ 12px, alvos ≥ 44×44, zero *hydration
+warning*, zero exceção de página e **nenhum host além dos dois canônicos**.
+
+Diálogo: abre no `KpiDrilldownDialog`, foco inicial em "Fechar detalhes", focus
+trap efetivo, `Escape` fecha, foco devolvido ao acionador, **zero fetch de dados
+ao abrir**; a troca de filtro fecha o diálogo e o conteúdo antigo não reaparece.
+
+Estados verificados com **dado real de produção**, sem fixture: cobertura
+incompleta, competência ausente, período parcial e ML+Shopee sem TikTok.
+**Interceptação foi usada em um único ponto**, declarado: o estado transitório de
+`loading` (atraso de 3 s na resposta), que não se reproduz deterministicamente —
+ali confirmou-se `aria-busy`, heading acessível e ausência de número.
+
+#### Coerência API × interface
+
+Os **15 valores** de B1 foram comparados um a um entre o JSON e a tela: todos
+**idênticos**. A interface **não recalcula, não inverte sinal, não aplica
+`abs()`, não soma componentes, não completa marca ausente e não cria retorno** —
+a soma dos três componentes foi buscada no texto e **não aparece**.
+
+> Nota de método: a primeira comparação acusou divergência nos 15 valores. Era
+> defeito do harness — `Intl.NumberFormat("pt-BR")` separa `R$` dos dígitos com
+> **U+00A0** (espaço não separável), tipografia correta que impede o símbolo de
+> quebrar linha longe do número, enquanto a string esperada usava espaço comum.
+> Normalizado, a identidade é exata.
+
+#### A única ressalva — por que `PASS WITH ISSUE`
+
+Em **uma** das execuções apareceu no console do desktop um
+`Failed to load resource: 404`, **sem URL capturada**. Não reproduziu em **seis
+tentativas** posteriores — quatro cargas limpas, um diagnóstico dedicado e um
+*replay* da sequência completa de desktop —, todas com **zero respostas ≥ 400**.
+Nenhuma delas era de `/canais` nem do bloco, e o bloco renderizou corretamente,
+com os 15 valores, em **todas** as execuções. Classificação: **observação
+intermitente, não reproduzível e não atribuível a esta frente**. Não bloqueia,
+mas fica registrada em vez de ser omitida.
+
+#### O que continua aberto
+
+**UE2-C não iniciada** — por isso `manual_snapshot`. **Retorno indisponível.**
+**Convenção contábil do sinal aberta** (§23.14-A). **RTT Render→Neon nunca
+medido.**
