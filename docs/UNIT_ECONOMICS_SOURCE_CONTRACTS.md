@@ -2405,3 +2405,516 @@ mas fica registrada em vez de ser omitida.
 **UE2-C não iniciada** — por isso `manual_snapshot`. **Retorno indisponível.**
 **Convenção contábil do sinal aberta** (§23.14-A). **RTT Render→Neon nunca
 medido.**
+
+---
+
+## 25. UE2-C Task 1/3 — blueprint da atualização automática
+
+⚠️ **[DESENHO] Nada foi implementado.** Esta seção é auditoria read-only e
+blueprint. Zero escrita em banco, zero `--apply`, zero alteração de Scheduler,
+zero código. **UE2-C não está implementada.**
+
+### 25.1 O achado que muda o desenho: a fonte é EXTERNA e roda em lote único
+
+**[FATO — medido em 2026-08-28]** `silver.stg_tiktok_payments_by_order`
+**não é escrita por nenhum pipeline deste repositório**. Uma busca por todas as
+referências encontra exatamente duas: o próprio sync (que a lê) e este documento.
+A tabela pertence à mesma linhagem externa de `gold.tiktok_brand_daily`, cuja
+transformação já era conhecida por **não estar versionada em repositório nosso**
+(§4).
+
+Consequência direta e não óbvia: **não existe step do `full_daily` depois do qual
+a fonte fique madura.** `daily_tiktok` alimenta `raw.tiktok_shop_orders`, não a
+Silver de pagamentos. Declarar `depends_on=("daily_tiktok",)` criaria um
+**contrato falso** — pareceria haver garantia de ordem onde não há relação causal
+alguma.
+
+**[FATO] A fonte avança em UM lote diário, em janela apertadíssima.** Distribuição
+de `updated_at` por hora BRT nos últimos 14 dias:
+
+| Hora BRT | Linhas |
+|---|---|
+| 21h | **104.922** |
+| 01h | 1 |
+
+Dez dias consecutivos confirmam a regularidade:
+
+| Dia (BRT) | Linhas | Primeiro | Último |
+|---|---|---|---|
+| 2026-08-18 | 8.693 | 21:02:30 | 21:03:01 |
+| 2026-08-19 | 4.669 | 21:02:27 | 21:03:05 |
+| 2026-08-20 | 6.955 | 21:03:00 | 21:03:27 |
+| 2026-08-21 | 6.162 | 21:03:41 | 21:04:12 |
+| 2026-08-22 | 7.761 | 21:02:29 | 21:03:11 |
+| 2026-08-23 | 9.022 | 21:02:42 | 21:03:34 |
+| 2026-08-24 | 11.972 | 21:02:35 | 21:11:55 |
+| 2026-08-25 | 6.787 | 21:02:14 | 21:02:51 |
+| 2026-08-26 | 3.972 | 21:03:04 | 21:03:14 |
+| 2026-08-27 | 3.649 | 21:03:26 | 21:03:51 |
+
+O lote inteiro cabe em **~30 a 90 segundos**, sempre entre **21:02 e 21:12 BRT**.
+É esse relógio — e não uma preferência nossa — que define a cadência viável.
+
+### 25.2 Estado real medido (read-only, 2026-08-28)
+
+| Grandeza | Valor |
+|---|---|
+| Linhas na fonte | 2.172.212 |
+| `MAX(updated_at)` da fonte | **2026-08-28 00:03:51** (= 27/08 21:03 BRT) |
+| `MIN(updated_at)` da fonte | 2026-03-12 20:21:21 |
+| `updated_at` nulos | **0** |
+| Watermark persistido | **2026-08-25 00:11:55** (= 24/08 21:11 BRT) |
+| `MAX(synced_at)` da fact | 2026-08-25 19:33:26 |
+| Linhas da fonte além do watermark | **14.408** |
+| Chaves que o incremental recalcularia | **12** (número do próprio módulo) |
+| `transaction_type` distintos | **só `ORDER`** — 2.172.212, zero tipo desconhecido |
+| Marcas na fonte | 8 — as 5 da allowlist + `gocase`, `azbuy`, `denavita` fora dela |
+| Competências na fact | 15 (2025-06 a 2026-08), 70 chaves, **um único `source_run_id`** |
+| Cobertura incompleta | 2025-06 (1/5) e 2025-07 (4/5) |
+
+**Reconciliação fonte × fact no cutoff do watermark: ZERO divergências em 70
+chaves.** A verificação reusou `_component_sql()` e `_filtro_populacao()` **do
+próprio módulo**, para que a auditoria não medisse uma coisa e o pipeline outra.
+A fact reproduz exatamente a fonte no ponto em que parou — a defasagem é de
+atualização, não de corretude.
+
+**Deriva acumulada em 3 lotes não aplicados** (simulação read-only do que o
+incremental faria agora, cutoff `2026-08-28 00:03:51`): **13 valores mudariam**,
+em duas competências.
+
+| Componente | Soma dos deltas |
+|---|---|
+| `creator` | **+0,00** |
+| `partner` | **−19.368,01** |
+| `ads` | **−5.915,20** |
+
+Confirmado de forma independente pelo agregado do próprio módulo em modo
+diagnóstico: `partner` sai de −3.110.478,68 para **−3.129.846,69** e `ads` de
+−738.193,33 para **−744.108,53** — exatamente os deltas acima. `creator`
+permanece **−5.504.405,93**.
+
+**Dois fatos com consequência de desenho:**
+
+1. **`creator` nunca revisa.** Ele lê
+   `affiliate_commission_amount_before_pit` — valor *antes* de PIT, que por
+   definição não muda depois. `partner` e `ads` revisam.
+2. **Mês fechado NÃO congela.** Julho/2026 — competência encerrada — teve
+   `partner` alterado em três marcas (apice −12,64; barbours −6,38;
+   kokeshi −15,45). A revisão retroativa é real e alcança competências passadas.
+
+**Maturação medida** (atraso `updated_at − order_create_time`, últimos 90 dias):
+**p50 = 8,24 dias · p90 = 12,45 · p99 = 107,21 · máximo = 248,25**. A cauda é
+longa: revisão continua chegando meses depois.
+
+### 25.3 O mecanismo existente, auditado
+
+| Aspecto | Comportamento |
+|---|---|
+| Modos | `full` (história inteira, reconstrói o destino, **repara hard delete**) e `incremental` (usa watermark, recalcula por inteiro cada chave tocada) |
+| Fonte → destino | `silver.stg_tiktok_payments_by_order` (Data Mart, VPN) → `marts.fact_tiktok_affiliate_cost_order_monthly` (Neon) |
+| Watermark | `last_successful_upper_bound` em tabela própria de `sync_state`; `incremental` **sem** watermark **falha** em vez de virar backfill acidental |
+| Janela tocada | chaves `(ref_month, brand)` com `updated_at > watermark`, cada uma **recalculada integralmente** |
+| Lock | `pg_advisory_lock` de **sessão**, chave `912120012`, `lock_timeout=30s`; releitura do watermark `FOR UPDATE` + `assert_watermark_unchanged` |
+| Transação | UMA conexão de destino do início ao fim; transação gravável **curta e no fim**; fato e watermark commitados juntos |
+| Fonte vazia | `incremental` **recusa** (não infere hard delete total); só `full` age |
+| Hard delete | reparado **apenas** pelo `full`; o incremental é estruturalmente cego |
+| Reconciliação | três fronteiras — snapshot, detalhe×agregado, `EXCEPT` bidirecional + chaves + sinais + anti-NaN |
+| Códigos de saída | `0` sucesso, `2` falha; mensagem sanitizada em `stderr` |
+| Sanitização | `sanitize_error_message`; sem SQL, DSN, host ou credencial |
+| Duração **medida** | diagnóstico `incremental` **20–21 s**; diagnóstico `full` **101 s** |
+| VPN | obrigatória para a fonte; o Neon é público |
+| Concorrência | protegida pelo advisory lock de sessão + watermark sob `FOR UPDATE` |
+| Retry | **nenhum, por design** — "não agenda, não dorme, não repete e não tenta de novo" |
+| `audit.source_sync_run` | **não registra** — zero ocorrências no módulo |
+
+### 25.4 Ponto de integração — contratos reais, lidos no código
+
+**1. Depois de qual step a fonte está madura? De nenhum.** Confirmado por busca
+exaustiva: `silver.stg_tiktok_payments_by_order` tem exatamente duas referências
+no repositório — o sync que a lê e este documento. Nenhum step a alimenta.
+
+**`depends_on=()` significa ausência de dependência LÓGICA de outro step, não
+execução paralela.** O orquestrador roda os steps em sequência, na ordem da
+tupla; `depends_on` só condiciona a execução ao sucesso de um step anterior.
+Declarar `depends_on=("daily_tiktok",)` criaria **vínculo falso**: `daily_tiktok`
+escreve `raw`/`gold`, nunca a Silver de pagamentos.
+
+**Posição:** após a ingestão e **antes do `health_check`** — que é sempre o
+último, por posição na tupla mais `always_run=True`.
+
+**2. `critical=True`**, mesma razão dos steps de serving: `/canais` já lê esta
+fact em produção.
+
+**3. BLOCKED do step × FAILED do pipeline — a distinção que faltava.**
+
+A redação anterior dizia "VPN fora → BLOCKED, não FAILED". **Isso estava
+enganoso.** O contrato real, lido em `compute_overall_status()`:
+
+```python
+has_critical_failure = any(
+    critical_by_name.get(step_name, True) and status in ("FAILED", "BLOCKED")
+    for step_name, status in results.items()
+)
+if has_critical_failure:
+    return "FAILED"
+```
+
+Três camadas que **não** podem ser confundidas:
+
+| Camada | Valor com VPN fora |
+|---|---|
+| 1. Causa/status do **step** | **`BLOCKED`** — o preflight impede a execução; o comando não roda; zero escrita e zero tentativa do sync são consumidas |
+| 2. Resultado operacional do **pipeline** | **`STATUS GERAL: FAILED`** e **exit code 1**, porque o step é `critical=True` e `BLOCKED` crítico entra no mesmo ramo que `FAILED` |
+| 3. Estado dos **dados** | **Snapshot anterior preservado e disponível** — nada foi escrito, e `/canais` continua servindo a fotografia publicada |
+
+**Não é verdade que "VPN fora não reprova o `full_daily`".** Reprova. O que
+`BLOCKED` preserva é a *causa* (infraestrutura, não defeito do sync) e a
+*integridade dos dados*, nunca o resultado verde do pipeline.
+
+**4. Orçamento — e um conflito aritmético que precisa de decisão.**
+
+O invariante está **versionado** em `pipelines/tests/test_ops_s3_wiring.py`:
+
+```python
+def test_f24_orcamento_interno_cabe_no_timeout_externo():
+    EXTERNO = 9000
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7500
+    margem = EXTERNO - orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
+    assert margem > 0.15 * orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
+```
+
+**DECISÃO FECHADA: `timeout_seconds=300`.**
+
+| Grandeza | Valor decidido |
+|---|---|
+| `timeout_seconds` do step | **300 s** |
+| Orçamento interno do `full_daily` | 7.500 → **7.800 s** |
+| Timeout externo do lock | **9.000 s** (preservado) |
+| `ExecutionTimeLimit` do Task Scheduler | **9.600 s** (preservado) |
+| Margem interna | **1.200 s** |
+| Margem relativa | **1.200 / 7.800 = 15,38 %** → satisfaz o invariante estrito `> 15 %` |
+
+Como a aritmética se comporta em torno da decisão:
+
+| `timeout` do step | Orçamento | Margem | Mínimo exigido | Invariante |
+|---|---|---|---|---|
+| 0 (hoje) | 7.500 | 1.500 | 1.125 | OK |
+| 240 | 7.740 | 1.260 | 1.161 | OK |
+| **300 (decidido)** | **7.800** | **1.200** | **1.170** | **OK — 15,38 %** |
+| 326 (máximo) | 7.826 | 1.174 | 1.173,9 | OK (limite) |
+| 400 | 7.900 | 1.100 | 1.185 | QUEBRA |
+
+**Por que 300 s:** o diagnóstico incremental mede 20–21 s e o `full`, 101 s — o
+envelope dá **~14× o incremental** e **~3× o full**. Ampliar os timeouts externos
+seria alteração operacional maior e desnecessária, tocando o contrato do Task
+Scheduler para resolver um problema que 300 s já resolvem.
+
+**`SOURCE_STATEMENT_TIMEOUT = 600 s` permanece inalterado** e não se confunde com
+isto: é proteção **por statement da fonte** (§18.8.x). Os 300 s são o **envelope
+externo do step no orquestrador**. Se o processo exceder 300 s, o step **falha
+explicitamente** e o **snapshot anterior permanece preservado** — não há
+publicação parcial, porque a transação de publicação é curta e no fim.
+
+**A Task 2/3 deverá sincronizar** as constantes e comentários hoje presos em
+**7.500 s** (`test_f24`, `test_f25`) e em **6.600 s** (comentário defasado de
+`schedule_plan.py`, que já não corresponde ao orçamento atual).
+
+**5–6. Colisões e cobertura do lock.**
+
+| Risco | Avaliação |
+|---|---|
+| Ingestão TikTok | **Nenhuma** — escreve `raw`/`gold`, não a Silver nem esta fact |
+| Serving | **Nenhuma** — outros destinos |
+| Operação manual | Coberta pelo advisory lock de sessão `912120012` |
+| Backfill (`full`) | Coberta pelo mesmo lock — `full` e `incremental` disputam a mesma chave |
+| Scheduler | Coberto pelo lock externo da TaskKey `full_daily` |
+| Lote upstream das ~21:03 | **Não coberto por lock nosso** — nem precisa: o snapshot `REPEATABLE READ` garante leitura consistente ainda que coincidisse |
+
+**7. Checkout do Scheduler.** O módulo já existe lá. A integração exigirá
+atualizar o checkout por causa da edição de `orchestrate.py` — e essa atualização
+é **Task 3/3**, não 2/3.
+
+### 25.5 Cadência — 06:00 é escolha operacional, não SLA
+
+**A concentração em 21:02–21:04 BRT foi observada por dez dias. Isso é
+evidência, não contrato.** Não existe SLA do time que mantém a fonte, e este
+documento **não afirma garantia de upstream que não existe**.
+
+- **06:00 BRT é escolha operacional baseada na evidência atual**: é o ponto mais
+  distante das duas bordas observadas (~9 h depois do lote, ~15 h antes do
+  próximo). Se o horário da fonte mudar, **isso aparece via watermark e frescor**
+  — o contrato de §25.6 detecta, sem depender de aviso do upstream.
+- **Fonte não avançou:** `cutoff == watermark` → `WATERMARK_UNCHANGED`, zero linha
+  publicada, **`success`**. Um dia sem revisão é normal e precisa ser registrado
+  como execução bem-sucedida (§25.7).
+- **VPN fora:** step `BLOCKED`, pipeline `FAILED`, snapshot preservado (§25.4-3).
+- **Contingência manual:** TaskKey reutilizando o **lock lógico `full_daily`**,
+  como `serving_refresh` faz.
+- **Zero retry automático** — convenção do módulo, mantida.
+
+### 25.6 Full mensal — obrigação DURÁVEL, não gatilho de calendário
+
+`today.day == 1` **não serve**: se notebook, VPN ou Scheduler falharem no dia 1, o
+full sumiria até o mês seguinte. Contrato durável:
+
+1. O `full` é **devido** enquanto não existir **evidência persistida** de full
+   bem-sucedido para o **mês operacional corrente** (mês BRT).
+2. **Falha ou `BLOCKED` não consomem a obrigação.** Só `success` consome.
+3. **Somente full concluído e reconciliado** marca o mês como atendido.
+4. Atendido o mês, as execuções seguintes voltam ao **incremental**.
+5. O mês seguinte cria **nova obrigação**.
+6. O `full` continua sendo **história integral** — é a única defesa contra hard
+   delete, e por isso não pode ser trocado por lookback maior.
+
+**Persistência escolhida — sem migration.** O schema real de
+`audit.source_sync_run` (migration 003) é:
+
+```
+sync_run_id SERIAL PK · source_name VARCHAR(100) NOT NULL · marketplace_id INT
+loja_id INT · started_at TIMESTAMPTZ · finished_at TIMESTAMPTZ
+status VARCHAR(20) CHECK IN ('running','success','failed')
+rows_extracted INT · rows_loaded INT · error_message TEXT
+source_min_date DATE · source_max_date DATE
+```
+
+`source_name` é **texto livre, sem FK e sem enum** — logo **dois nomes distintos
+são compatíveis com o schema atual, sem migration alguma**.
+
+**Desenho proposto — dois nomes, ambos escritos:**
+
+| `source_name` | Quando a linha é CRIADA | Para que serve |
+|---|---|---|
+| `tiktok_affiliate_cost_order_monthly` | em **toda** execução real, qualquer modo | entrada em `EXPECTED_SOURCES` do health check (30 h), prova que **o job rodou** |
+| `tiktok_affiliate_cost_order_monthly_full` | em **toda** execução `full`, **antes** da escrita | auditoria do **ciclo completo** do full — inclusive das tentativas que falharem |
+
+**A linha `_full` é criada no início, não no sucesso.** Escrevê-la só ao terminar
+bem serviria de marcador de sucesso, mas **esconderia tentativas de full que
+falharam** — e uma tentativa fracassada é exatamente o que se precisa enxergar.
+
+| Modo | Linhas de auditoria | Ciclo |
+|---|---|---|
+| `incremental` | **uma**, canônica | `running` → `success` \| `failed` |
+| `full` | **duas**, canônica + `_full` | ambas `running` → ambas com **o mesmo resultado factual**, `success` \| `failed` |
+
+Regras de atomicidade das duas linhas do `full`:
+
+- **Iniciadas na MESMA transação de auditoria**, para que nunca exista só uma.
+- **Finalizadas na MESMA transação de auditoria**, pelo mesmo motivo.
+- **Falha ao iniciar qualquer uma aborta antes do sync** — não se publica carga
+  que não pode ser observada.
+- **Falha ao finalizar depois do commit** pode deixar ambas em `running`, e isso
+  deve ser reportado honestamente como **"dados possivelmente publicados,
+  auditoria incompleta"** — nunca encenado como rollback.
+
+**A obrigação mensal é consumida SOMENTE se existir**, cumulativamente:
+
+1. linha com `source_name = "tiktok_affiliate_cost_order_monthly_full"`;
+2. `status = "success"`;
+3. `finished_at` dentro do **mês operacional corrente em `America/Sao_Paulo`**.
+
+`failed`, `running`, ausência da linha ou preflight `BLOCKED` **não consomem** a
+obrigação. Nenhuma coluna é usada com significado falso.
+
+**Por que não a variante do enunciado** (o health check considerar "o mais
+recente entre os dois nomes"): ela exigiria generalizar `EXPECTED_SOURCES` de
+`source_name: str` para um conjunto de nomes, mudando uma estrutura compartilhada
+por **dez** fontes existentes. O desenho acima obtém o mesmo resultado
+**sem tocar** no health check — o nome canônico já é escrito em todo modo, então
+a frescura de execução continua sendo uma consulta a um único nome. Se a
+generalização for preferida na Task 2/3, ela é possível; apenas não é necessária.
+
+**Proibições respeitadas:** o modo **não** vai em `error_message`; o full **não**
+é inferido por contagem de linhas; a evidência é **persistida em banco**, não em
+memória ou arquivo temporário; **nenhuma migration** é proposta.
+
+**Stop-loss registrado:** se, na Task 2/3, a decisão de full mensal exigir
+qualquer coluna nova, **pare e reporte** — não invente persistência.
+
+### 25.7 Contrato de `audit.source_sync_run`
+
+Segue o padrão já estabelecido em `sync_serving_snapshots.py`, `sync_produtos.py`
+e `daily_performance.py`: `_audit_start` insere `running` e comita; `_audit_finish`
+atualiza e comita; **a conexão de auditoria é separada da de dados**.
+
+| Situação | Registro |
+|---|---|
+| Preflight `BLOCKED` | **Nenhuma linha** — o sync não chegou a iniciar |
+| Dry-run / diagnóstico (sem `--apply`) | **Nenhuma linha** |
+| Execução real iniciada | `running`, `started_at = NOW()` |
+| Sucesso com watermark **avançado** | `success` |
+| Sucesso com watermark **inalterado** | **`success` também** — prova que o job rodou e encontrou a fonte sem avanço |
+| Falha após o início | `failed`, `error_message` **sanitizada** |
+| Retry | **nenhum** |
+
+**Identificação:** `marketplace_id = 1` (TikTok, pela convenção
+`MARKETPLACE_LABELS` do health check); `source_name` conforme a tabela da §25.6.
+
+**Semântica das colunas — sem significado falso:**
+
+| Coluna | Significado adotado |
+|---|---|
+| `rows_extracted` | linhas lidas da fonte no snapshot (`linhas_lidas`) |
+| `rows_loaded` | linhas efetivamente publicadas na fact (`published`) |
+| `source_min_date` / `source_max_date` | **MIN/MAX de `ref_month`** das linhas publicadas; **`(None, None)`** quando nada foi publicado — mesmo princípio de `source_date_bounds`, que devolve `(None, None)` em vez de fabricar data |
+| `error_message` | somente mensagem sanitizada de falha — **nunca** o modo |
+| watermark | **não vai para nenhuma coluna daqui** — já tem tabela própria |
+
+**Duas transações distintas, deliberadamente:**
+
+1. **Publicação do fato e do watermark** — uma única conexão gravável, transação
+   curta no fim, fato e watermark commitados **juntos**. Preservada intacta: a
+   conexão de auditoria **não participa** do DML da fact.
+2. **Auditoria operacional** — conexão independente, commit próprio. É o que
+   permite a auditoria **sobreviver ao rollback do fato** e registrar `failed`.
+
+**Dois modos de falha, tratados honestamente:**
+
+- **Falha ao INICIAR a auditoria → aborta antes de escrever.** Não se publica uma
+  carga que não pode ser observada.
+- **Falha ao FINALIZAR a auditoria depois do commit** → a linha permanece
+  `running` com `finished_at` nulo. Estado real: **"dados publicados, auditoria
+  incompleta"**. Deve ser dito assim, e **nunca** encenado como rollback: o
+  commit do fato já aconteceu e desfazê-lo seria mentira. O resíduo `running` é
+  observável pelo health check, que compara o último status com o último
+  `success`.
+
+### 25.8 Contrato de frescor — quatro estados EXAUSTIVOS
+
+O desenho anterior deixava um buraco: exigia dois lotes parados para declarar
+`stale`, então **um lote de atraso ficava sem classificação**. Corrigido:
+
+| Estado | Condição |
+|---|---|
+| `unknown` | auditoria insuficiente **ou** watermark ausente |
+| `manual_snapshot` | **estado atual**, preservado até a Task 3/3 comprovar a rotina |
+| `fresh` | **as duas** condições: (1) última execução `success` há **≤ 30 h**; (2) `watermark_date >= expected_batch_date` |
+| `stale` | **qualquer uma** das duas condições de `fresh` falha |
+
+Os quatro cobrem todo o espaço: sem dado → `unknown`; em transição →
+`manual_snapshot`; com dado, ou as duas condições valem (`fresh`) ou não valem
+(`stale`). **Um lote de atraso já é `stale`.**
+
+**Lote esperado — e uma distinção de tipo que não pode ser borrada.**
+
+⚠️ **O watermark é `TIMESTAMP WITHOUT TIME ZONE`** (migration 012):
+`last_successful_upper_bound` é **naive**. Ele **não carrega fuso**, e por isso
+este contrato **não o converte nem o rotula como BRT**. `finished_at` da
+auditoria, ao contrário, é `TIMESTAMPTZ` — esse **sim** é timezone-aware e **deve**
+ser convertido para `America/Sao_Paulo`.
+
+- `D_exec` = **data BRT** do `finished_at` da última execução **canônica**
+  `success` (conversão legítima: a coluna é aware).
+- `watermark_date = DATE(last_successful_upper_bound)` — apenas a **parte de data
+  já armazenada**, sem conversão e sem rótulo de fuso.
+- `expected_batch_date = D_exec − 1 dia`.
+- Comparação: **`watermark_date >= expected_batch_date`** — sempre `>=`, **nunca
+  igualdade**. Uma execução manual mais tarde no dia D pode alcançar o lote de D e
+  continua válida.
+
+**Por que comparar datas de tipos diferentes é defensável aqui, e onde está o
+limite:** o lote observado fecha perto das 21 h, **longe da fronteira de
+meia-noite** em qualquer das duas leituras, então a parte de data do watermark é
+operacionalmente estável. Isso é **evidência empírica** (§25.1), **não** timezone
+embutido na coluna. Se o horário do lote migrar para perto da virada do dia, esta
+premissa deixa de valer e o contrato precisa ser revisto — e é o próprio frescor
+que dará o sinal.
+
+Conferindo com o dado real: `last_successful_upper_bound = 2026-08-25 00:11:55`
+(naive) → `watermark_date = 2026-08-25`. Uma execução canônica em 25/08 às 06:00
+BRT dá `D_exec = 2026-08-25` e `expected_batch_date = 2026-08-24`;
+`2026-08-25 >= 2026-08-24` → **satisfeito**.
+
+**Contando "dois lotes sem avanço"** — nem idade do processo, nem idade da fact:
+
+```
+atraso_em_lotes = max(0, expected_batch_date − watermark_date)
+```
+
+O **`max(0, …)` é obrigatório**: uma execução manual pode avançar o watermark
+**além** do mínimo esperado, e isso jamais pode produzir atraso negativo.
+
+| `atraso_em_lotes` | Leitura |
+|---|---|
+| 0 | em dia → `fresh` (se a execução também estiver ≤ 30 h) |
+| ≥ 1 | **`stale`** |
+| ≥ 2 | `stale` **+ ALERTA/ESCALONAMENTO** |
+
+Dois lotes é limiar de **escalonamento**, jamais condição para começar a chamar
+o dado de `stale`.
+
+**Execução recente com fonte parada NÃO é fresh** — é exatamente o caso
+`atraso_em_lotes ≥ 1` com execução dentro de 30 h: a condição (1) passa, a (2)
+falha, e o resultado é `stale`. É por isso que as duas condições existem.
+
+**Falha não derruba `/canais`:** `safe_affiliate_costs_block` já garante (§24).
+**A UI preserva a última fotografia e avisa que está desatualizada** — `stale`
+mostra os valores com aviso explícito, em vez de esconder o dado.
+
+### 25.9 Observabilidade
+
+- **Step** `sync_afiliados_tiktok` no `full_daily`, `critical=True`,
+  `depends_on=()`, `preflight_source` próprio para a VPN, timeout conforme
+  §25.4-4.
+- **Health check:** uma entrada em `EXPECTED_SOURCES` com o **nome canônico**,
+  `exec_threshold_hours=30`, `critical=True`. Mais um check de cobertura medindo
+  `atraso_em_lotes`.
+- **Métricas mínimas por execução:** início/fim; modo; cutoff; watermark
+  anterior/novo; chaves tocadas; linhas publicadas; resultado do `EXCEPT`;
+  duração; status.
+- **Alertas:** falha do step; **`atraso_em_lotes >= 2`**; **cobertura incompleta
+  nova** (competência que era 5/5 e deixou de ser).
+- **Distinção obrigatória:** *fonte sem avanço* (job `success`, watermark igual)
+  × *job quebrado* (`failed`/exit 2). Hoje quem olha só `synced_at` não separa os
+  dois.
+
+### 25.10 Plano — Tasks 2/3 e 3/3
+
+**Task 2/3 — implementação SEM execução operacional.**
+
+Integrar o step ao `full_daily`; implementar a decisão incremental/full mensal
+durável (§25.6); adicionar preflight; registrar auditoria (§25.7); integrar ao
+health check; implementar a classificação de frescor **em código e testes**
+(§25.8). **A resposta pública permanece `manual_snapshot`.**
+
+Restrições: **zero `--apply`**, **zero atualização do checkout operacional**,
+**zero execução do Scheduler**, **zero ativação de `fresh`/`stale`** na resposta.
+
+Arquivos prováveis: `pipelines/ops/orchestrate.py`, `pipelines/ops/preflight.py`,
+`pipelines/ops/health_check.py`, `pipelines/ops/schedule_plan.py` (comentário
+defasado), `pipelines/sync_tiktok_affiliate_cost_order_monthly.py`,
+`apps/api/app/services/affiliate_costs_service.py`,
+`apps/web/src/lib/canais-affiliate-costs.ts`, mais testes em `pipelines/tests/`
+(incluindo a atualização de `test_f24`/`test_f25`) e `apps/api/tests/`.
+
+**Task 3/3 — ativação controlada**, nesta ordem: (1) preflight real; (2) **um
+único** piloto autorizado com `--apply`; (3) reconciliação completa; (4)
+comprovação da auditoria; (5) atualização coordenada do checkout operacional;
+(6) observação de execução **agendada** real; (7) comprovação do comportamento
+com **fonte sem avanço**; (8) comprovação controlada de **falha/`BLOCKED`**; (9)
+**somente após evidência suficiente**, trocar `manual_snapshot` por
+`fresh`/`stale`; (10) QA focal da API e da interface.
+
+**Falhas devem ser simuladas por injeção/fakes** sempre que possível — nada de
+escritas artificiais só para testar.
+
+### 25.11 Stop-loss
+
+**Pare e reporte, sem implementar**, se qualquer solução exigir: mudança no
+cálculo dos três componentes; soma dos componentes; `abs()`; alteração de grão;
+mudança da **migration 012 já aplicada**; alteração do significado do watermark;
+nova dependência; retry/backoff; Airflow; novo Scheduler; migration nova não
+prevista; alteração da interface **além** do estado de frescor; leitura de fonte
+diferente; ou **vínculo falso com `daily_tiktok`**.
+
+### 25.12 Riscos e bloqueios
+
+| # | Item | Estado |
+|---|---|---|
+| A | **Fonte externa sem SLA contratual** — outro time, transformação não versionada; 21:02–21:04 é evidência de 10 dias, não garantia | **Aberto** |
+| B | **Hard delete só o `full` repara** | Mitigado pelo full mensal durável (§25.6) |
+| C | **Cauda de revisão de 248 dias** | Aceito: o incremental recalcula por inteiro cada chave tocada |
+| D | **Módulo não registra em `audit.source_sync_run`** | **Pré-requisito** da Task 2/3 (§25.7) |
+| E | Dimensionamento do step × invariante `test_f24` | **Decidido:** `timeout=300`, orçamento 7.800 s, margem 15,38 % (§25.4-4). A Task 2/3 sincroniza as constantes de 7.500 e o comentário de 6.600 |
+| F | Comentário defasado em `schedule_plan.py` ("6600s") | Sincronizar na Task 2/3 |
+| G | Dependência de VPN; `full_daily` exige notebook ligado e usuário logado | Dívida operacional preexistente, fora desta frente |
+| H | Convenção contábil do sinal e sobreposição dos componentes | **Seguem abertas**, fora do escopo da UE2-C; retorno de afiliados **continua indisponível** |

@@ -843,6 +843,76 @@ Referências:
 - [Arquitetura](architecture.md)
 - [Dicionário de KPIs](kpi_dictionary.md)
 
+## Gate UE2-C — atualização automática do custo de afiliados
+
+**Estado em 28/08/2026: Task 1/3 (auditoria e blueprint) CONCLUÍDA. UE2-C NÃO
+implementada.** Read-only e documental: zero escrita, zero `--apply`, zero
+alteração de Scheduler, zero código. Blueprint na **§25** de
+[UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md).
+
+**O achado que redefine o desenho:** `silver.stg_tiktok_payments_by_order`
+**não é escrita por nenhum pipeline deste repositório** — é fonte externa, da
+mesma linhagem não versionada de `gold.tiktok_brand_daily`. Logo **não existe
+step do `full_daily` depois do qual ela fique madura**, e declarar dependência de
+`daily_tiktok` seria contrato falso. A fonte avança em **um lote diário entre
+21:02 e 21:04 BRT** — 104.922 linhas na faixa das 21h contra 1 fora dela, em 14
+dias, com dez dias consecutivos confirmando. É esse relógio que define a cadência
+viável, e por isso o `full_daily` das **06:00 BRT** é o ponto mais estável: ~9 h
+depois do lote e ~15 h antes do próximo.
+
+**Estado medido:** fonte com 2.172.212 linhas e `MAX(updated_at)` em 27/08 21:03
+BRT; watermark parado em 24/08 21:11 BRT; **14.408 linhas** e **12 chaves** de
+deriva. **A reconciliação fonte × fact no cutoff do watermark deu ZERO
+divergências em 70 chaves** — a defasagem é de atualização, não de corretude. Três
+lotes não aplicados mudariam 13 valores: `partner` −19.368,01 e `ads` −5.915,20,
+com **`creator` em +0,00** (lê o valor *antes* de PIT, que não revisa). **Mês
+fechado não congela:** julho/2026 teve `partner` alterado em três marcas.
+Maturação p50 8,2 dias, p90 12,5, **p99 107 e máximo 248** — por isso lookback
+maior **não substitui** o `full` periódico, que é o único que repara hard delete.
+
+**Proposta:** incremental diário no `full_daily` (`critical=True`,
+`depends_on=()` porque nada o alimenta), `full` mensal como **obrigação durável**
+— devida até existir full bem-sucedido no mês, e falha ou `BLOCKED` **não**
+consomem a obrigação —, zero retry. Duração medida em diagnóstico: **20–21 s** o
+incremental, **101 s** o full. O checkout do Scheduler **já contém o módulo**.
+
+**Correção de contrato:** VPN fora deixa o step em `BLOCKED`, mas o step é
+`critical=True` e `compute_overall_status()` transforma `BLOCKED` crítico em
+**`STATUS GERAL: FAILED` com exit 1** — o snapshot anterior é que fica preservado,
+não o resultado verde do pipeline. **Dimensionamento decidido:** `timeout=300` para
+o step, orçamento do `full_daily` de 7.500 → **7.800 s**, timeout externo mantido
+em 9.000 s e `ExecutionTimeLimit` em 9.600 s — margem de **1.200 s = 15,38 %**,
+acima do invariante estrito de 15 % fixado em `test_f24`. São ~14× o incremental
+medido e ~3× o full. `SOURCE_STATEMENT_TIMEOUT = 600 s` **não muda**: é proteção
+por statement da fonte, não o envelope do step. **Nenhum arquivo de código foi
+alterado**; a Task 2/3 sincronizará as constantes hoje presas em 7.500 e o
+comentário defasado de 6.600.
+
+**Frescor: quatro estados exaustivos.** `fresh` exige execução ≤ 30 h **E**
+`watermark_date >= expected_batch_date`, comparado por `>=` e **nunca** por
+igualdade; **qualquer uma das duas falhando já é `stale`** — inclusive **um só**
+lote de atraso. O **watermark é `TIMESTAMP WITHOUT TIME ZONE`**, então o contrato
+usa apenas `DATE(last_successful_upper_bound)`, **sem converter nem rotular como
+BRT**; quem é convertido para BRT é o `finished_at` da auditoria, que é
+`TIMESTAMPTZ`. O atraso usa `max(0, …)`, porque execução manual pode ultrapassar o
+lote mínimo esperado e isso nunca pode virar atraso negativo. Dois lotes é limiar de
+**escalonamento de alerta**, não condição para começar a chamar de stale. Uma
+execução recente com fonte parada **não pode** parecer dado fresco.
+**`manual_snapshot` permanece** até o piloto da Task 3/3. **Pré-requisito
+descoberto:** o módulo **não registra** em `audit.source_sync_run`; o schema real
+(migration 003) tem `source_name` como texto livre, então **dois nomes distintos**
+— um canônico e um criado em **toda** execução `full` (não só nas bem-sucedidas,
+para que tentativas fracassadas também fiquem auditáveis) — resolvem a obrigação
+mensal **sem migration e sem mexer no health check**. A obrigação só é consumida
+por linha `_full` com `status='success'` e `finished_at` dentro do mês BRT
+corrente.
+
+**Fora do escopo da UE2-C, e sem mudança:** os **três componentes continuam
+separados e não somáveis automaticamente** (a ausência de sobreposição entre eles
+segue não provada), o **retorno de afiliados continua indisponível** e a
+**convenção contábil do sinal permanece aberta**. Esta frente trata apenas de
+atualização e frescor.
+
 ## Gate UE3 — impacto de afiliados na aba Canais
 
 **Estado em 27/08/2026: Gate UE3 CONCLUÍDO, VERSIONADO E PUBLICADO. Smoke
