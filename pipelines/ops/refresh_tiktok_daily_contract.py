@@ -81,7 +81,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -896,15 +896,132 @@ def _insert_rows(cur, rows: list[dict], cols=WRITE_COLUMNS) -> int:
     return len(rows)
 
 
+def target_numeric_scales(cur) -> dict:
+    """Escalas NUMERIC realmente declaradas em `TARGET_TABLE`.
+
+    Lidas do `information_schema`, NUNCA hardcoded: quem decide para qual escala
+    o PostgreSQL converte a fotografia e' o schema, nao este modulo. Escala
+    espalhada no codigo divergiria do banco no dia de uma migration.
+
+    Levanta ANTES de qualquer DELETE/INSERT se codigo e schema divergirem —
+    coluna da allowlist ausente, deixou de ser `numeric`, escala nula/invalida,
+    ou coluna de escrita que virou `numeric` sem entrar em `DECIMAL_COLUMNS`.
+    Nos quatro casos a reconciliacao seria calculada sobre premissa falsa.
+    Mesmo contrato de `sync_produtos.ml_target_numeric_scales`.
+    """
+    sch, tab = TARGET_TABLE.split(".")
+    cur.execute(
+        "SELECT column_name, data_type, numeric_precision, numeric_scale "
+        "FROM information_schema.columns "
+        "WHERE table_schema = %(s)s AND table_name = %(t)s",
+        {"s": sch, "t": tab},
+    )
+    schema = {r["column_name"]: r for r in cur.fetchall()}
+
+    escalas, problemas = {}, []
+    for col in DECIMAL_COLUMNS:
+        info = schema.get(col)
+        if info is None:
+            problemas.append(f"{col}: coluna numerica esperada ausente no destino")
+            continue
+        if info["data_type"] != "numeric":
+            problemas.append(
+                f"{col}: esperado numeric, schema declara {info['data_type']}")
+            continue
+        escala = info["numeric_scale"]
+        if (escala is None or isinstance(escala, bool)
+                or not isinstance(escala, int) or escala < 0):
+            problemas.append(f"{col}: numeric_scale invalida ({escala!r})")
+            continue
+        escalas[col] = escala
+
+    # O inverso importa igual: coluna de escrita que virou numeric com escala
+    # sem entrar em DECIMAL_COLUMNS ficaria comparada crua contra o destino
+    # arredondado — a divergencia voltaria por outra porta.
+    for col in WRITE_COLUMNS:
+        info = schema.get(col)
+        if info is None:
+            problemas.append(f"{col}: coluna de escrita ausente no destino")
+        elif (info["data_type"] == "numeric" and info["numeric_scale"] is not None
+                and col not in DECIMAL_COLUMNS):
+            problemas.append(
+                f"{col}: numeric(scale={info['numeric_scale']}) no schema mas "
+                "fora de DECIMAL_COLUMNS")
+
+    if problemas:
+        raise RefreshError(
+            "schema do destino incompativel com o codigo, nada foi escrito: "
+            + "; ".join(problemas))
+    return escalas
+
+
+def _quantiza(valor, escala: int):
+    """Reproduz a conversao para `NUMERIC(p,s)` do PostgreSQL.
+
+    `ROUND_HALF_UP` e' "ties away from zero", exatamente a regra do PostgreSQL,
+    e NAO o meio-par que `round()` do Python usa por default: sem isso 0.005 e
+    -0.005 divergiriam do destino.
+
+    Zero tolerancia, zero epsilon, zero passagem por float. `None` preservado.
+    """
+    if valor is None:
+        return None
+    if isinstance(valor, float):
+        raise RefreshError(
+            "valor float em coluna numeric: o arredondamento binario nao e' "
+            "reproduzivel de forma exata — a fonte precisa entregar Decimal")
+    if not isinstance(valor, Decimal):
+        # int e afins passam intactos: nao ha' arredondamento a reproduzir.
+        return valor
+    return valor.quantize(Decimal(1).scaleb(-escala), rounding=ROUND_HALF_UP)
+
+
+def project_to_target(rows: list[dict], escalas: dict) -> list[dict]:
+    """COPIA da fotografia com as colunas NUMERIC na escala do destino.
+
+    Nao muta `rows`: a fotografia original continua sendo a que alimenta o
+    INSERT e o backup. Projetar o que foi inserido seria mentir para si mesmo;
+    o que se projeta e' o LADO ESPERADO da comparacao.
+    """
+    projetadas = []
+    for r in rows:
+        novo = dict(r)
+        for col, escala in escalas.items():
+            if col in novo:
+                novo[col] = _quantiza(novo[col], escala)
+        projetadas.append(novo)
+    return projetadas
+
+
 def publish_in_transaction(cur, snapshot: SourceSnapshot) -> dict:
-    """DELETE + INSERT (44 colunas) + reconciliacao, na transacao do chamador."""
+    """DELETE + INSERT (44 colunas) + reconciliacao, na transacao do chamador.
+
+    Gate DQ-D1: a reconciliacao compara o destino relido contra a fotografia
+    PROJETADA nos tipos do destino. Motivo medido em 28/08/2026: o refresh
+    reprovou com `esperado-destino=1008 destino-esperado=1008` — mesmas chaves,
+    valores diferentes. A causa foi escala, provada coluna a coluna:
+    `avg_delivery_hours` (numeric scale 2) divergia em 1.006 chaves e
+    `conversion_rate` (scale 4) em 570, totalizando exatamente 1.008 chaves
+    distintas. O maior delta observado foi 0,0049987... e 0,00004980..., ambos
+    abaixo de meio digito da ultima casa — arredondamento, nunca valor diferente.
+
+    O que NAO mudou: o EXCEPT bidirecional continua exato e sobre as 44 colunas,
+    sem tolerancia nem epsilon. Diferenca acima do arredondamento declarado
+    segue reprovando e provocando rollback.
+    """
     resultado = {}
+    # Schema conferido ANTES do primeiro DML: incompatibilidade aborta com a
+    # janela intacta.
+    escalas = target_numeric_scales(cur)
+    resultado["escalas_destino"] = dict(sorted(escalas.items()))
+
     resultado["deleted"] = _delete_window(cur, snapshot.date_from, snapshot.date_to)
     resultado["inserted"] = _insert_rows(cur, snapshot.canonical_rows, WRITE_COLUMNS)
     destino = read_target_window(cur, snapshot.date_from, snapshot.date_to,
                                  WRITE_COLUMNS)
+    esperado = project_to_target(snapshot.canonical_rows, escalas)
     resultado["reconciliacao"] = reconcile(
-        destino, snapshot.canonical_rows, snapshot.date_from, snapshot.date_to
+        destino, esperado, snapshot.date_from, snapshot.date_to
     )
     return resultado
 

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pipelines.common.config import settings
 from pipelines.common.logging import get_logger
+from pipelines.common.operational_calendar import closed_window
 from pipelines.connectors.shopee._parser import parse_brand
 from pipelines.connectors.shopee._parser_ads import parse_brand_ads
 from pipelines.connectors.shopee._parser_shop_stats import parse_brand_shop_stats
@@ -55,14 +56,18 @@ def fetch(date_from: date, date_to: date) -> list[dict]:
 
 def fetch_incremental(days_back: int = 3) -> list[dict]:
     """Ãšltimos N dias â€” para sync diÃ¡rio incremental."""
-    today = date.today()
-    return fetch(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch(inicio, fim)
 
 
 def fetch_backfill(days_back: int = 150) -> list[dict]:
     """Backfill histÃ³rico â€” padrÃ£o 150 dias (~5 meses, cobrindo jan-mai 2026)."""
-    today = date.today()
-    return fetch(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch(inicio, fim)
 
 
 # --- Shop stats (Fase 2: funil â€” visitantes, conversÃ£o, novos compradores) ---
@@ -93,13 +98,17 @@ def fetch_shop_stats(date_from: date, date_to: date) -> list[dict]:
 
 
 def fetch_shop_stats_incremental(days_back: int = 3) -> list[dict]:
-    today = date.today()
-    return fetch_shop_stats(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch_shop_stats(inicio, fim)
 
 
 def fetch_shop_stats_backfill(days_back: int = 150) -> list[dict]:
-    today = date.today()
-    return fetch_shop_stats(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch_shop_stats(inicio, fim)
 
 
 # --- Ads (Fase 3: spend, revenue, impressÃµes, clicks â€” mÃ©dias diÃ¡rias do perÃ­odo) ---
@@ -127,12 +136,16 @@ def fetch_ads(date_from: date, date_to: date) -> list[dict]:
 
 
 def fetch_ads_incremental(days_back: int = 3) -> list[dict]:
-    today = date.today()
-    return fetch_ads(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch_ads(inicio, fim)
 
 
 def fetch_ads_backfill(days_back: int = 150) -> list[dict]:
-    today = date.today()
-    return fetch_ads(today - timedelta(days=days_back), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
+    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(days_back)
+    return fetch_ads(inicio, fim)
 
 

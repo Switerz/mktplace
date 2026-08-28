@@ -30,6 +30,57 @@ MARCAS = list(tk.BRANDS_IN_SCOPE)
 # Fakes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Schema REAL do destino, medido em marts.fact_marketplace_daily_performance.
+# Gate DQ-D1: `target_numeric_scales` le o information_schema antes de qualquer
+# DML, entao todo teste de --apply precisa de um schema para responder. As
+# escalas abaixo sao as declaradas no banco, nao inventadas.
+# ---------------------------------------------------------------------------
+ESCALAS_REAIS = {
+    "gmv": (18, 2), "avg_ticket": (14, 2), "repeat_buyer_rate_pct": (8, 4),
+    "conversion_rate": (8, 4), "problem_rate": (8, 4), "cancel_rate_pct": (8, 4),
+    "avg_delivery_hours": (10, 2), "avg_delivery_days": (10, 2),
+    "ad_spend": (14, 2), "ad_revenue": (14, 2), "roas": (10, 4),
+    "acos_pct": (8, 4), "ctr_pct": (8, 4), "cpc": (10, 4),
+    "gmv_video": (18, 2), "gmv_live": (18, 2), "gmv_card": (18, 2),
+    "total_settlement": (18, 2), "total_fees": (14, 2), "avg_fee_pct": (8, 4),
+    "avg_settlement_pct": (8, 4), "seller_shipping_cost": (14, 2),
+    "shipping_pct_of_gmv": (8, 4), "target_revenue": (18, 2),
+    "target_attainment_pct": (8, 4), "projected_month_revenue": (18, 2),
+    "data_quality_score": (5, 2),
+}
+
+TIPOS_NAO_NUMERIC = {
+    "date": "date", "loja_id": "integer", "marketplace_id": "integer",
+    "empresa_id": "integer", "orders": "bigint", "units_sold": "bigint",
+    "unique_buyers": "bigint", "new_buyers": "bigint", "repeat_buyers": "bigint",
+    "visitors": "integer", "canceled_orders": "bigint",
+    "returned_orders": "bigint", "refunded_orders": "bigint",
+    "delivered_orders": "bigint", "ad_impressions": "bigint",
+    "ad_clicks": "bigint", "source_updated_at": "timestamp with time zone",
+}
+
+SCHEMA_PAT = r"information_schema\.columns"
+
+
+def schema_rows(escalas=None, tipos=None):
+    """Linhas que o information_schema devolveria para o destino."""
+    escalas = ESCALAS_REAIS if escalas is None else escalas
+    tipos = TIPOS_NAO_NUMERIC if tipos is None else tipos
+    out = []
+    for col, (prec, esc) in escalas.items():
+        out.append({"column_name": col, "data_type": "numeric",
+                    "numeric_precision": prec, "numeric_scale": esc})
+    for col, tp in tipos.items():
+        out.append({"column_name": col, "data_type": tp,
+                    "numeric_precision": None, "numeric_scale": None})
+    return out
+
+
+def regra_schema(escalas=None, tipos=None):
+    return (SCHEMA_PAT, schema_rows(escalas, tipos))
+
+
 class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
@@ -75,6 +126,12 @@ class FakeCursor:
 
 class FakeConn:
     def __init__(self, rules=(), rowcounts=(), explode_on=None):
+        # Gate DQ-D1: a regra de information_schema entra por default, no FIM da
+        # lista, para que um teste que declare a sua propria (schema quebrado,
+        # coluna ausente, escala invalida) continue vencendo pela ordem.
+        rules = tuple(rules)
+        if not any(SCHEMA_PAT in p for p, _ in rules):
+            rules = rules + (regra_schema(),)
         self.log = []
         self.rules = list(rules)
         self.rowcounts = list(rowcounts)

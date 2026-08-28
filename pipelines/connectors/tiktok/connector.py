@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from pipelines.common.db import datamart_query
 from pipelines.common.logging import get_logger
+from pipelines.common.operational_calendar import closed_window
 
 logger = get_logger(__name__)
 
@@ -298,10 +299,12 @@ def fetch_incremental(days_back: int = MIN_INCREMENTAL_LOOKBACK_DAYS) -> list[di
             "janelas curtas congelam dias ainda imaturos.",
             days_back, effective_days,
         )
-    today = date.today()
-    return fetch(today - timedelta(days=effective_days), today)
+    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA inclusiva
+    # da janela e' a mesma de antes — apenas o teto desceu um dia.
+    inicio, fim = closed_window(effective_days)
+    return fetch(inicio, fim)
 
 
 def fetch_backfill(days_back: int = 90) -> list[dict]:
-    today = date.today()
-    return fetch(today - timedelta(days=days_back), today)
+    inicio, fim = closed_window(days_back)
+    return fetch(inicio, fim)

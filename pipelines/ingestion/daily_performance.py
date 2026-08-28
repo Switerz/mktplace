@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from pipelines.common.db import local_session
 from pipelines.common.logging import get_logger
+from pipelines.common.operational_calendar import assert_closed_day, last_closed_date
 from pipelines.connectors.mercadolivre import connector as ml_connector
 from pipelines.connectors.shopee import connector as shopee_connector
 from pipelines.connectors.tiktok import connector as tiktok_connector
@@ -301,6 +302,38 @@ def _log_quality_checks(
 _DATE_WINDOW_ALLOWED_SOURCES = ("tiktok", "shopee-stats", "ml")
 
 
+class ClosedDayViolation(ValueError):
+    """Linha canonica com data posterior ao ultimo dia fechado.
+
+    Erro proprio (e nao `ValueError` generico) para que o orquestrador e os
+    testes distingam "a fonte devolveu dia aberto" de qualquer outro problema
+    de validacao de janela.
+    """
+
+
+def _assert_canonical_rows_closed(rows: list[dict], source: str,
+                                  agora=None) -> None:
+    """Bloqueia se QUALQUER linha canonica passar do ultimo dia fechado.
+
+    Nao filtra e nao descarta: levanta. Uma linha de D0 aqui significa conector
+    mal-comportado, e silenciar isso reintroduziria o defeito que o Gate DQ-D1
+    corrige.
+    """
+    fechado = last_closed_date(agora)
+    futuras = [r for r in rows if r.get("date") is not None and r["date"] > fechado]
+    if not futuras:
+        return
+    datas = sorted({r["date"] for r in futuras})
+    raise ClosedDayViolation(
+        f"source={source!r}: {len(futuras)} linha(s) canonica(s) com data "
+        f"posterior ao ultimo dia fechado ({fechado.isoformat()}) em "
+        f"America/Sao_Paulo — datas: "
+        f"{', '.join(d.isoformat() for d in datas[:5])}"
+        f"{' ...' if len(datas) > 5 else ''}. Carregamento bloqueado ANTES do "
+        "upsert; nenhuma linha foi descartada silenciosamente."
+    )
+
+
 def _resolve_date_window(
     source: str, mode: str, date_from: str | None, date_to: str | None
 ) -> tuple[date, date] | None:
@@ -325,8 +358,12 @@ def _resolve_date_window(
     parsed_to = date.fromisoformat(date_to)
     if parsed_from > parsed_to:
         raise ValueError(f"--date-from ({parsed_from}) não pode ser posterior a --date-to ({parsed_to}).")
-    if parsed_to > date.today():
-        raise ValueError(f"--date-to ({parsed_to}) não pode estar no futuro (hoje: {date.today()}).")
+    # Gate DQ-D1: o teto e' o ultimo dia FECHADO em America/Sao_Paulo, nao o dia
+    # corrente. Validado AQUI, antes de qualquer I/O — nenhuma sessao de escrita,
+    # registro em audit.source_sync_run ou consulta a fonte e' tocado se falhar.
+    # `date.today()` era duplamente errado: aceitava D0 e usava o fuso do
+    # processo (num worker UTC, entre 21h e 00h no Brasil ja seria o dia seguinte).
+    assert_closed_day(parsed_to, rotulo="--date-to")
     return parsed_from, parsed_to
 
 
@@ -407,6 +444,18 @@ def run(
 
         canonical_rows = transform_fn(raw_rows)
         logger.info("%d linhas transformadas (de %d extraídas)", len(canonical_rows), rows_extracted)
+
+        # Gate DQ-D1 — SEGUNDA DEFESA, independente da primeira.
+        #
+        # A validacao da janela protege o que ESTE modulo pede. Isto protege
+        # contra o que a FONTE devolve: um conector mal-comportado (ou uma
+        # `fetch()` chamada com janela propria) pode trazer linha de D0 mesmo
+        # com a janela correta. Sem esta barreira, o UPSERT publicaria o dia
+        # aberto — foi assim que nove linhas parciais de 28/08/2026 entraram.
+        #
+        # BLOQUEIA, nao filtra: descartar em silencio esconderia um conector
+        # quebrado e faria a contagem carregada divergir da extraida sem aviso.
+        _assert_canonical_rows_closed(canonical_rows, source)
 
         check_results = quality.run_all(canonical_rows)
         has_critical = quality.has_critical_failure(check_results)
