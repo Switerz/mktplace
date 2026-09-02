@@ -3204,3 +3204,118 @@ Três guardrails legítimos mudaram, e nenhum foi afrouxado sem substituto:
 3. **Listas de ordem dos steps** (12 → 13) e **contagem de `EXPECTED_SOURCES`**
    (10 → 11) atualizadas, preservando as asserções de que as regras das fontes
    antigas não mudaram.
+
+---
+
+## 27. UE8-I1 — descontos do pedido TikTok: implementado, NADA executado
+
+### 27.1 Estado
+
+**IMPLEMENTADO, VALIDADO LOCALMENTE E VERSIONADO NESTE COMMIT.**
+
+- migration `013` **escrita, NÃO aplicada**. A tabela
+  `marts.fact_tiktok_order_discounts_daily` **não existe no Neon**;
+- sync escrito, **nunca executado com `--apply`**;
+- **zero carga**, zero escrita em Data Mart ou Neon;
+- **UE8-I2 não começou**: piloto, backfill e medição de duração são daquele gate;
+- **nenhum timeout de step e nenhuma alteração de Scheduler** foram definidos;
+- API, frontend e `full_daily` intocados.
+
+### 27.2 O que a tabela é, e o que não é
+
+Grão `(ref_date, brand)`, competência **comercial** (`created_at::date` do
+pedido). Dois descontos com **financiadores diferentes**, deliberadamente sem
+total:
+
+| Coluna | Fórmula | Financiador |
+|---|---|---|
+| `seller_discount_signed` | `-SUM(seller_discount)` | **marca** — reduz receita |
+| `platform_subsidy_amount` | `SUM(platform_discount)` | **TikTok** — não reduz receita |
+
+**Não é** receita econômica (depende de refunds e settlement), **não é** caixa
+(pertence à competência do statement), **não é** margem (faltam CMV e Shop Ads) e
+**não é** maturidade financeira. As três continuam separadas e bloqueadas.
+
+### 27.3 Limites que precisam sobreviver à leitura
+
+1. **A fonte é snapshot mutável.** `raw.tiktok_shop_orders` tem
+   `uk_tiktok_orders UNIQUE (order_id)`: uma linha por pedido, atualizada em
+   lugar, sem histórico de versões. A tabela **nunca fica madura** — um dia
+   fechado pode mudar retroativamente. Medido: julho/2026 perdeu 8 pedidos e
+   R$ 660,25 entre 28/08 e 01/09.
+2. **Cobertura observada não é prova de ingestão completa.**
+   `coverage_status = "complete"` significa apenas que a grade **observada**
+   (data × marca com ao menos um pedido) está completa. Não existe manifesto por
+   data × marca; `audit.source_sync_run` guarda janela, não grade.
+3. **Marca ausente na janela não bloqueia sozinha.** Ausência de vendas e buraco
+   de ingestão são indistinguíveis com as fontes atuais: o sync registra
+   `warn` em `audit.data_quality_check` e segue.
+4. **`full` e `backfill` ainda não foram medidos.** O `full` lerá ~2,7 milhões de
+   pedidos numa réplica que já cancelou consultas por `conflict with recovery`.
+   Nenhuma afirmação sobre duração foi feita.
+
+### 27.4 Correção pré-piloto — oito findings
+
+A primeira versão foi **segurada antes do piloto**. Dois findings fariam a
+carga inicial falhar; os demais produziriam auditoria incorreta ou lock
+persistente.
+
+| # | Defeito | Correção |
+|---|---|---|
+| F1 | `NON_COMMERCIAL_ORDER_STATUSES` inclui `CANCELLED`, que tem população própria → **dupla contagem** no fechamento | `UNPAID_ON_HOLD_STATUSES` **derivada** (nunca copiada) da constante do conector |
+| F2 | `SUM(...) FILTER` de população vazia devolve **NULL** contra colunas `NOT NULL` | `CASE WHEN COUNT(*) FILTER (...) = 0 THEN 0::numeric ELSE ... END` nos 6 monetários. **Sem `COALESCE`** — ele não distinguiria população vazia de nulo de origem, e o segundo **tem** de bloquear |
+| F3 | `PUBLICACAO_INDETERMINADA` existia mas nunca era atribuída | marcada **antes** de `commit()`. Commit que levanta: zero rollback, zero `failed`, auditorias em `running`, log sanitizado, nenhuma nova tentativa |
+| F4 | advisory lock **de sessão** podia vazar ao devolver a conexão ao pool | trocado por **`pg_advisory_xact_lock`**; `SQL_UNLOCK` e o `finally` de unlock removidos. Liberado pelo commit ou rollback do PostgreSQL |
+| F5 | `--mode full --date-from ... --apply` gravaria `_full` + `success` **sem reconstruir histórico** | janela explícita **bloqueada em `--apply`**, antes do lock, da auditoria e de qualquer conexão. Continua permitida em dry-run |
+| F6 | um só campo de procedência para **dois relógios distintos** | `source_max_updated_at = MAX(updated_at_tiktok)` (TikTok) e `raw_max_updated_at = MAX(updated_at)` (nossa ingestão). `synced_at` é o terceiro |
+| F7 | `failed_rows` ficava **zero** quando uma marca inteira sumia | dois checks separados: `ftodd_cobertura_chaves_observadas` e `ftodd_cobertura_marcas_do_escopo`, ambos `warn`, com contagem honesta |
+| F8 | `build_quality_checks` chamava `last_closed_date()` de novo | recebe o **mesmo teto** que resolveu a janela; na fronteira da meia-noite BRT não diverge |
+
+**Correção factual da migration:** a afirmação de que `updated_at` só existe
+desde 2026-03-12 foi **removida** — é verdade para
+`raw.tiktok_payments_by_order`, não para `raw.tiktok_shop_orders`. O preflight
+desta tabela mediu, sobre 2.692.671 pedidos deduplicados: `updated_at` com
+mínimo **2026-06-12** e `updated_at_tiktok` com mínimo **2025-06-06**, **zero
+nulos nos dois**. A medição não se estende a outras tabelas.
+
+**CHECKs de sinal mantidos.** Uma mudança de convenção de sinal na fonte
+**bloqueará a carga** e exigirá nova arbitragem. Não relaxar automaticamente.
+
+### 27.5 Dry-run real, read-only
+
+Uma execução do CLI sem `--apply`, contra a fonte real, com `DATABASE_URL`
+apontado para um sentinela inválido — qualquer tentativa de abrir sessão
+gravável falharia em vez de escrever.
+
+| Métrica | Valor |
+|---|---|
+| Janela | 2026-08-22 → **2026-08-31** (D−1 respeitado) |
+| Linhas produzidas | **50** = 10 dias × 5 marcas |
+| Pedidos comerciais | 66.078 |
+| Cancelados | **17.774** |
+| `UNPAID`/`ON_HOLD` | 1.024 |
+| Status desconhecido | **0** |
+| `coverage_status` | `complete`, 0 chaves ausentes, 0 marcas ausentes |
+| Checks de qualidade | **7/7 `pass`** |
+| Escrita | **zero** — Neon, `source_sync_run` e `data_quality_check` intocados |
+
+O fechamento `comercial + cancelado + unpaid/on_hold + desconhecido =
+total_dedup` passou **com 17.774 cancelados reais** — é a prova de campo do F1:
+com a tupla antiga, o fechamento teria quebrado e a execução abortado.
+
+**O dry-run encontrou um bug que os fakes não pegariam:** `updated_at_tiktok`
+estava no `SELECT` externo mas **não na projeção da CTE `raw_dedup`**. Corrigido
+antes da segunda execução, que passou.
+
+### 27.6 Arquivos
+
+| Arquivo | Estado |
+|---|---|
+| `apps/api/alembic/versions/013_create_fact_tiktok_order_discounts_daily.py` | novo — **não aplicado** |
+| `pipelines/sync_tiktok_order_discounts_daily.py` | novo — **nunca executado com `--apply`** |
+| `pipelines/tests/test_sync_tiktok_order_discounts_daily.py` | novo, **80 testes** |
+| `apps/api/tests/test_s3_migrations.py` | pino do head 012 → 013 |
+| `docs/UNIT_ECONOMICS_SOURCE_CONTRACTS.md` | esta seção |
+
+**UE8-I2 não iniciado.** A tabela não existe no Neon; nenhuma carga foi feita;
+nenhum timeout de step ou alteração de Scheduler foi definido.
