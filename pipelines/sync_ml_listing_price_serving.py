@@ -43,12 +43,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
+
+# Regra CANONICA de classificacao de codigo de barras, compartilhada com o
+# importador de referencia (Gate PMA-2R). Reutilizada, nunca reimplementada: o
+# defeito que derrubou a primeira carga foi exatamente a assimetria entre os dois
+# lados — a referencia classificava, a observacao nao.
+from pipelines.pma.reference_contract import classify_gtin
 
 # Helpers de seguranca REUTILIZADOS do sync de serving, nunca reimplementados:
 # duplicar as regexes de sanitizacao garantiria que as duas copias divergissem, e
@@ -87,6 +93,20 @@ ALLOWED_BRANDS = ("barbours", "kokeshi", "lescent", "rituaria")
 
 #: Dominio de status observado na fonte.
 ALLOWED_LISTING_STATUS = ("active", "paused", "under_review", "inactive")
+
+#: Comprimentos de EAN de CONSUMIDOR aceitos no destino.  (Gate PMA-2R)
+#: Espelha `pipelines/pma/reference_contract.CONSUMER_EAN_LENGTHS` — um teste de
+#: equivalencia trava as duas contra a regra canonica `classify_gtin`, para que
+#: observacao e referencia nunca divirjam.
+ALLOWED_GTIN_LENGTHS = (8, 12, 13)
+
+GTIN_KIND_CONSUMER = "consumer_ean"
+GTIN_KIND_ABSENT = "absent"
+GTIN_KIND_DUN14 = "dun14"
+GTIN_KIND_INVALID = "invalid"
+#: As quatro classificacoes que `classify_gtin` pode devolver.
+GTIN_KINDS = (GTIN_KIND_CONSUMER, GTIN_KIND_ABSENT, GTIN_KIND_DUN14,
+              GTIN_KIND_INVALID)
 
 CURRENCY = "BRL"
 
@@ -140,6 +160,10 @@ class SourceSnapshot:
     date_from: date
     date_to: date
     aggregates: dict
+    #: Contagens AGREGADAS por classificacao de GTIN (Gate PMA-2R). Nunca
+    #: contem codigo bruto — so quantos cairam em cada classe. Default vazio
+    #: para nao quebrar construcoes que nao passam a metrica.
+    gtin_metrics: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +311,9 @@ def build_source_query() -> str:
                i.seller_id                       AS seller_id,
                h.item_id                         AS item_id,
                a.seller_sku                      AS seller_sku,
-               a.gtin                            AS gtin,
+               -- BRUTO. Normalizado em Python por `normalize_gtin_in_rows`
+               -- antes de qualquer validacao ou escrita (Gate PMA-2R).
+               a.gtin                            AS gtin_raw,
                i.title                           AS listing_title,
                i.permalink                       AS permalink,
                h.price                           AS advertised_price,
@@ -437,6 +463,58 @@ def compare_aggregates(fonte: dict, recomputado: dict) -> list[str]:
     return problemas
 
 
+def normalize_gtin_in_rows(rows: list[dict]) -> dict:
+    """Normaliza `gtin_raw` -> `gtin` pela regra CANONICA.  (Gate PMA-2R)
+
+    POR QUE ISSO EXISTE
+    -------------------
+    A primeira tentativa de carga falhou com `value too long for type character
+    varying(14)`. Causa medida: 15 de 903 itens tem no atributo `GTIN` do ML um
+    valor de 26 DIGITOS — dois EAN-13 concatenados num unico campo pelo cadastro
+    do anuncio. O `regexp_replace(...,'\\D','','g')` da fonte remove separadores
+    e entrega os 26 digitos. 429 linhas da janela de 30 dias eram afetadas.
+
+    O SCHEMA NAO ESTAVA ERRADO, e nao foi alterado: `CHECK (gtin ~
+    '^[0-9]{8,14}$')` reprovaria 26 digitos de qualquer forma — o erro de largura
+    so disparou primeiro. Alargar a coluna seria a correcao ERRADA: guardaria a
+    concatenacao de dois EAN como se fosse um GTIN.
+
+    O defeito era uma ASSIMETRIA de contrato: o lado da REFERENCIA ja
+    classificava com `classify_gtin` (foi assim que os 3 DUN-14 da Barbours
+    viraram NULL), e o lado da OBSERVACAO nao classificava nada. Aqui a mesma
+    regra canonica passa a valer nos dois lados — nenhuma regra nova, nenhuma
+    copia.
+
+    CONTRATO
+    --------
+    8, 12 ou 13 digitos -> valor normalizado (somente digitos);
+    14 digitos (DUN)    -> NULL;
+    26 digitos          -> NULL;
+    qualquer outro       -> NULL;
+    ausente/vazio        -> NULL.
+
+    A LINHA E' SEMPRE PRESERVADA. GTIN invalido nao descarta a observacao de
+    preco: `seller_sku` continua disponivel e o anuncio permanece elegivel ao
+    match secundario por SKU unico na marca.
+
+    NAO SEPARA os dois EAN concatenados e NAO escolhe um deles: escolher seria
+    adivinhar qual produto o anuncio representa.
+
+    O valor BRUTO e a `note` da classificacao sao DESCARTADOS aqui — nao vao
+    para a staging, para o destino nem para o log. Devolve somente CONTAGENS
+    agregadas por classificacao.
+    """
+    contagem = {k: 0 for k in GTIN_KINDS}
+    for r in rows:
+        bruto = r.pop("gtin_raw", None)
+        classificado = classify_gtin(bruto)
+        r["gtin"] = classificado.value
+        contagem[classificado.kind] = contagem.get(classificado.kind, 0) + 1
+    contagem["gtin_null_total"] = sum(1 for r in rows if r["gtin"] is None)
+    contagem["gtin_valido"] = contagem[GTIN_KIND_CONSUMER]
+    return contagem
+
+
 def validate_rows(rows: list[dict], date_from: date, date_to: date) -> dict:
     """Fronteira de entrada: contrato da fonte antes de qualquer escrita."""
     if len(rows) > MAX_ROWS_PER_WINDOW:
@@ -491,6 +569,33 @@ def validate_rows(rows: list[dict], date_from: date, date_to: date) -> dict:
         # Vazio nao e' chave de match: se o atributo nao existe, tem de ser NULO.
         if r["seller_sku"] is not None and not str(r["seller_sku"]).strip():
             raise SyncError("seller_sku vazio: use NULO para atributo ausente.")
+
+        # --- GTIN: fronteira de DOMINIO, nao so de formato  (Gate PMA-2R) ----
+        # Esta trava e' o que faltava: a versao anterior contava `gtin` nulo mas
+        # nunca verificava o dominio do nao-nulo, entao 26 digitos atravessavam
+        # o diagnostico e estouravam no INSERT. Agora uma regressao que deixe
+        # passar 14, 26 ou qualquer outro comprimento falha AQUI — na leitura,
+        # antes de a transacao gravavel do destino ser aberta.
+        if "gtin_raw" in r:
+            raise SyncError(
+                "gtin_raw presente na linha: `normalize_gtin_in_rows` nao rodou. "
+                "Validar antes de normalizar deixaria valor bruto chegar ao "
+                "destino."
+            )
+        gtin = r["gtin"]
+        if gtin is not None:
+            if not isinstance(gtin, str) or not gtin.isdigit():
+                raise SyncError(
+                    "gtin nao-nulo com caractere nao numerico apos a "
+                    "normalizacao: contrato de dominio violado."
+                )
+            if len(gtin) not in ALLOWED_GTIN_LENGTHS:
+                raise SyncError(
+                    f"gtin nao-nulo com {len(gtin)} digitos apos a normalizacao: "
+                    f"o dominio aceito e' {ALLOWED_GTIN_LENGTHS} (EAN de "
+                    f"consumidor). DUN-14 e codigos concatenados precisam virar "
+                    f"NULO, nunca ser persistidos."
+                )
     return {
         "rows": len(rows),
         "distinct_keys": len(chaves),
@@ -517,6 +622,13 @@ def read_source(datamart_conn, date_from: date, date_to: date) -> SourceSnapshot
         cur.execute(build_source_query(), params)
         rows = [dict(r) for r in cur.fetchall()]
 
+        # ORDEM OBRIGATORIA: normalizar ANTES de validar. O contrario deixaria
+        # `gtin_raw` chegar a staging, e foi assim que 26 digitos estouraram o
+        # `varchar(14)` na primeira tentativa. `validate_rows` recusa a linha se
+        # `gtin_raw` ainda existir, o que torna a ordem verificavel e nao apenas
+        # convencionada.
+        gtin_metricas = normalize_gtin_in_rows(rows)
+
         validate_rows(rows, date_from, date_to)
         recomputado = aggregates_from_rows(rows)
         problemas = compare_aggregates(agregado, recomputado)
@@ -525,7 +637,7 @@ def read_source(datamart_conn, date_from: date, date_to: date) -> SourceSnapshot
                 "detalhe divergiu do agregado na MESMA fotografia da fonte: "
                 + "; ".join(problemas)
             )
-        return SourceSnapshot(rows, date_from, date_to, agregado)
+        return SourceSnapshot(rows, date_from, date_to, agregado, gtin_metricas)
     finally:
         cur.close()
         # Encerra a transacao de leitura sem escrever nada. `rollback` numa sessao
@@ -704,6 +816,7 @@ def run_diagnostic(date_from: date, date_to: date) -> dict:
         "mode": "diagnostic", "applied": False,
         "window": (date_from, date_to),
         "source": snapshot.aggregates,
+        "gtin_metrics": snapshot.gtin_metrics,
         "validation": validate_rows(snapshot.rows, date_from, date_to),
         "target": destino,
     }
@@ -726,6 +839,7 @@ def run_apply(date_from: date, date_to: date, run_id: str) -> dict:
         "mode": "apply", "applied": True, "run_id": run_id,
         "window": (date_from, date_to),
         "source": snapshot.aggregates,
+        "gtin_metrics": snapshot.gtin_metrics,
         "publish": publicado,
     }
 
@@ -773,6 +887,14 @@ def _print_report(rel: dict) -> None:
           f"marcas={src['brand_count']} datas={src['min_ref_date']}..{src['max_ref_date']}")
     print(f"  original_price nao-nulo={src['original_price_not_null']} "
           f"(nulo = sem promocao, NUNCA zero)")
+    g = rel.get("gtin_metrics") or {}
+    if g:
+        print(f"  GTIN (contagens agregadas, zero codigo bruto): "
+              f"valido={g.get('gtin_valido', 0)} "
+              f"ausente_na_origem={g.get('absent', 0)} "
+              f"dun14_para_nulo={g.get('dun14', 0)} "
+              f"invalido_para_nulo={g.get('invalid', 0)} "
+              f"nulo_total={g.get('gtin_null_total', 0)}")
     if rel["mode"] == "diagnostic":
         v = rel["validation"]
         print(f"  validacao: chaves distintas={v['distinct_keys']} "

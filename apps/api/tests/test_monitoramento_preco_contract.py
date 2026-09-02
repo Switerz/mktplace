@@ -180,6 +180,33 @@ def test_dun_de_14_digitos_nao_e_tratado_como_ean():
     assert pm.consumer_ean_or_none("7901128400051") == "7901128400051"
 
 
+def test_regra_de_ean_e_equivalente_nos_tres_lados():
+    """Gate PMA-2R — referencia, sync e API tem de concordar sobre EAN.
+
+    A carga do PMA-2 falhou porque o lado da OBSERVACAO nao classificava o
+    codigo: 26 digitos (dois EAN-13 concatenados) chegavam ao `varchar(14)`. A
+    referencia ja classificava. Este teste trava os TRES lados contra a mesma
+    regra, para que a assimetria nao volte.
+    """
+    from pipelines.pma import reference_contract as rc
+    from pipelines import sync_ml_listing_price_serving as sync
+
+    # A tupla canonica e' uma so, espelhada nos outros dois.
+    assert rc.CONSUMER_EAN_LENGTHS == (8, 12, 13)
+    assert pm.CONSUMER_EAN_LENGTHS == rc.CONSUMER_EAN_LENGTHS
+    assert sync.ALLOWED_GTIN_LENGTHS == rc.CONSUMER_EAN_LENGTHS
+
+    # E as duas implementacoes concordam valor a valor.
+    casos = ("12345670", "012345678905", "7901128400051",
+             "79087907006940", "7901128400051" + "7901128400068",
+             "", "123", "790-1128.400 051")
+    for bruto in casos:
+        canonico = rc.classify_gtin(bruto).value
+        assert pm.consumer_ean_or_none(bruto) == canonico, bruto
+    assert rc.classify_gtin(None).value is None
+    assert pm.consumer_ean_or_none(None) is None
+
+
 def test_dun_nao_bloqueia_o_match_secundario_por_sku():
     """Regra 7 do gate: DUN invalida o GTIN, nao a linha."""
     refs = [_ref("barbours", "BB03038", None, "54.90")]

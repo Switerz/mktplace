@@ -331,6 +331,227 @@ def test_variations_vazia_nao_e_usada():
     assert "stg_ml_item_variations" not in sql
 
 
+# ---------------------------------------------------------------------------
+# Gate PMA-2R — normalizacao de GTIN
+# ---------------------------------------------------------------------------
+# A primeira tentativa de carga falhou com `value too long for type character
+# varying(14)`: 15 de 903 itens tem 26 DIGITOS no atributo GTIN do ML (dois
+# EAN-13 concatenados), afetando 429 linhas da janela. O schema NAO estava
+# errado — o CHECK `^[0-9]{8,14}$` reprovaria 26 digitos de qualquer forma. O
+# defeito era a assimetria: a referencia classificava com `classify_gtin`, a
+# observacao nao classificava nada.
+
+def _linha_gtin(bruto, sku="BB1"):
+    r = _row()
+    del r["gtin"]
+    r["gtin_raw"] = bruto
+    r["seller_sku"] = sku
+    return r
+
+
+def test_ean8_ean12_ean13_sao_preservados():
+    rows = [_linha_gtin("12345670"), _linha_gtin("012345678905"),
+            _linha_gtin("7901128400051")]
+    m = s.normalize_gtin_in_rows(rows)
+    assert [r["gtin"] for r in rows] == ["12345670", "012345678905",
+                                         "7901128400051"]
+    assert m["gtin_valido"] == 3
+    assert m["gtin_null_total"] == 0
+
+
+def test_pontuacao_e_espaco_sao_normalizados():
+    rows = [_linha_gtin(" 790-1128.400 051 ")]
+    s.normalize_gtin_in_rows(rows)
+    assert rows[0]["gtin"] == "7901128400051"
+
+
+def test_valor_ausente_vira_nulo():
+    rows = [_linha_gtin(None), _linha_gtin(""), _linha_gtin("   ")]
+    m = s.normalize_gtin_in_rows(rows)
+    assert all(r["gtin"] is None for r in rows)
+    assert m[s.GTIN_KIND_ABSENT] == 3
+    assert m["gtin_null_total"] == 3
+
+
+def test_dun14_vira_nulo():
+    rows = [_linha_gtin("79087907006940")]
+    m = s.normalize_gtin_in_rows(rows)
+    assert rows[0]["gtin"] is None
+    assert m[s.GTIN_KIND_DUN14] == 1
+
+
+def test_26_digitos_concatenados_viram_nulo():
+    """O caso real que derrubou a primeira carga."""
+    concatenado = "7901128400051" + "7901128400068"
+    assert len(concatenado) == 26
+    rows = [_linha_gtin(concatenado)]
+    m = s.normalize_gtin_in_rows(rows)
+    assert rows[0]["gtin"] is None
+    assert m[s.GTIN_KIND_INVALID] == 1
+
+
+def test_linha_com_26_digitos_e_preservada_com_sku():
+    """A observacao de preco nao se perde: so o GTIN vira nulo."""
+    rows = [_linha_gtin("7901128400051" + "7901128400068", sku="BB03038")]
+    s.normalize_gtin_in_rows(rows)
+    assert len(rows) == 1
+    assert rows[0]["gtin"] is None
+    # SKU intacto -> match secundario por SKU unico na marca continua possivel.
+    assert rows[0]["seller_sku"] == "BB03038"
+    assert rows[0]["advertised_price"] is not None
+    assert rows[0]["price_captured_at"] is not None
+    # E a linha passa a validacao.
+    assert s.validate_rows(rows, date(2026, 9, 2), date(2026, 9, 2))["rows"] == 1
+
+
+def test_nenhum_dos_dois_ean_concatenados_e_escolhido():
+    """Escolher um seria adivinhar qual produto o anuncio representa."""
+    a, b = "7901128400051", "7901128400068"
+    rows = [_linha_gtin(a + b)]
+    s.normalize_gtin_in_rows(rows)
+    assert rows[0]["gtin"] not in (a, b)
+    assert rows[0]["gtin"] is None
+
+
+def test_valor_bruto_e_descartado_da_linha():
+    """`gtin_raw` nao pode sobreviver: nao vai a staging, destino nem log."""
+    rows = [_linha_gtin("79087907006940")]
+    s.normalize_gtin_in_rows(rows)
+    assert "gtin_raw" not in rows[0]
+    assert "79087907006940" not in repr(rows[0])
+
+
+def test_metricas_sao_agregadas_e_sem_codigo_bruto():
+    rows = [_linha_gtin("7901128400051"), _linha_gtin(None),
+            _linha_gtin("79087907006940"),
+            _linha_gtin("7901128400051" + "7901128400068")]
+    m = s.normalize_gtin_in_rows(rows)
+    assert m[s.GTIN_KIND_CONSUMER] == 1
+    assert m[s.GTIN_KIND_ABSENT] == 1
+    assert m[s.GTIN_KIND_DUN14] == 1
+    assert m[s.GTIN_KIND_INVALID] == 1
+    assert m["gtin_null_total"] == 3
+    assert m["gtin_valido"] == 1
+    # Nenhum valor da metrica e' texto: sao contagens.
+    assert all(isinstance(v, int) for v in m.values())
+    for bruto in ("7901128400051", "79087907006940"):
+        assert bruto not in repr(m)
+
+
+def test_validate_rows_recusa_gtin_fora_do_dominio():
+    """A trava que faltava: dominio, nao so formato.
+
+    Uma regressao que deixe passar 14, 26 ou outro comprimento tem de falhar no
+    DIAGNOSTICO, antes de qualquer transacao gravavel.
+    """
+    for ruim in ("79087907006940", "7901128400051" + "7901128400068",
+                 "1234567", "123456789012345"):
+        r = _row()
+        r["gtin"] = ruim
+        erro = None
+        try:
+            s.validate_rows([r], date(2026, 9, 2), date(2026, 9, 2))
+        except s.SyncError as exc:
+            erro = str(exc)
+        assert erro is not None, ruim
+        assert "digitos apos a normalizacao" in erro
+        # A mensagem NAO ecoa o codigo.
+        assert ruim not in erro
+
+
+def test_validate_rows_recusa_gtin_nao_numerico():
+    r = _row()
+    r["gtin"] = "790112840005X"
+    erro = None
+    try:
+        s.validate_rows([r], date(2026, 9, 2), date(2026, 9, 2))
+    except s.SyncError as exc:
+        erro = str(exc)
+    assert erro is not None and "nao numerico" in erro
+
+
+def test_validate_rows_recusa_gtin_raw_residual():
+    """Validar antes de normalizar tem de falhar alto, nao passar silencioso."""
+    r = _linha_gtin("7901128400051")
+    erro = None
+    try:
+        s.validate_rows([r], date(2026, 9, 2), date(2026, 9, 2))
+    except s.SyncError as exc:
+        erro = str(exc)
+    assert erro is not None and "normalize_gtin_in_rows" in erro
+
+
+def test_gtin_nulo_e_aceito():
+    r = _row()
+    r["gtin"] = None
+    assert s.validate_rows([r], date(2026, 9, 2), date(2026, 9, 2))["gtin_null"] == 1
+
+
+def test_normalizacao_precede_validacao_no_codigo():
+    """Prova de ORDEM em `read_source`, nao apenas convencao."""
+    texto = MODULE_PATH.read_text(encoding="utf-8")
+    corpo = texto[texto.index("def read_source"):]
+    corpo = corpo[:corpo.index("return SourceSnapshot")]
+    i_norm = corpo.index("normalize_gtin_in_rows(rows)")
+    i_val = corpo.index("validate_rows(rows")
+    assert i_norm < i_val, "normalizar tem de vir antes de validar"
+
+
+def test_sql_da_fonte_entrega_bruto_nao_gtin_final():
+    """O SELECT EXTERNO produz `gtin_raw`, nunca `gtin`.
+
+    O alias interno do `LATERAL` continua `gtin` — e' escopo local da subconsulta
+    e nao vira coluna do resultado. O que importa e' a coluna que chega ao
+    Python: ela tem de ser a bruta, para forcar a classificacao.
+    """
+    sql = " ".join(s.build_source_query().split()).lower()
+    assert "a.gtin as gtin_raw" in sql
+    assert "a.gtin as gtin," not in sql
+    # E o nome final `gtin` nao esta entre as colunas do resultado do SQL.
+    externo = sql[:sql.index("from ")]
+    assert "as gtin_raw" in externo
+    assert "as gtin," not in externo
+
+
+def test_regra_de_gtin_e_a_canonica_compartilhada():
+    """Equivalencia com a referencia: uma regra, dois lados.
+
+    Se alguem reimplementar a classificacao no sync, este teste reprova — foi a
+    divergencia entre os dois lados que causou a falha da primeira carga.
+    """
+    from pipelines.pma import reference_contract as rc
+
+    assert s.ALLOWED_GTIN_LENGTHS == rc.CONSUMER_EAN_LENGTHS
+    assert set(s.GTIN_KINDS) == {"consumer_ean", "absent", "dun14", "invalid"}
+    # E o sync usa a funcao canonica, nao uma copia.
+    texto = MODULE_PATH.read_text(encoding="utf-8")
+    assert "from pipelines.pma.reference_contract import classify_gtin" in texto
+    assert "def classify_gtin" not in texto
+
+    # Mesma entrada, mesma saida nos dois lados.
+    for bruto in ("12345670", "012345678905", "7901128400051",
+                  "79087907006940", "7901128400051" + "7901128400068",
+                  None, "", "123"):
+        rows = [_linha_gtin(bruto)]
+        s.normalize_gtin_in_rows(rows)
+        assert rows[0]["gtin"] == rc.classify_gtin(bruto).value, bruto
+
+
+def test_normalizacao_nao_abre_conexao_nem_escreve():
+    """A normalizacao e' pura: roda sobre linhas em memoria."""
+    import ast
+
+    texto = MODULE_PATH.read_text(encoding="utf-8")
+    arvore = ast.parse(texto)
+    alvo = next(n for n in arvore.body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "normalize_gtin_in_rows")
+    for filho in ast.walk(alvo):
+        if isinstance(filho, ast.Call):
+            nome = getattr(filho.func, "id", None) or getattr(filho.func, "attr", "")
+            assert nome in ("classify_gtin", "pop", "get", "sum", "items"), nome
+
+
 def test_price_captured_at_vem_do_historico_de_preco():
     """F2: a captura do PRECO vem de `h.extracted_at`, nunca de `i.updated_at`."""
     sql = " ".join(s.build_source_query().split()).lower()

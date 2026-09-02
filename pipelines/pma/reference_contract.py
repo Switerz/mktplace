@@ -139,6 +139,18 @@ COLUMN_ALIASES = {
 #:   `valor`        = preco final * quantidade -> total de linha de pedido.
 IGNORED_COLUMNS = ("preco final", "quantidade", "valor")
 
+#: Comprimentos de EAN de CONSUMIDOR. Fonte UNICA da verdade (Gate PMA-2R).
+#:
+#: Estava inline dentro de `classify_gtin` e replicada em
+#: `apps/api/app/services/pma_match.CONSUMER_EAN_LENGTHS`. O sync de observacao
+#: nao tinha nenhuma copia — e essa ausencia foi o defeito que derrubou a
+#: primeira carga (26 digitos chegando ao `varchar(14)`). Agora e' constante
+#: nomeada aqui, consumida por `classify_gtin`, espelhada pelo sync e confrontada
+#: por teste de equivalencia nos tres lados.
+#:
+#: 14 digitos NAO entra: e' DUN de caixa, nao unidade de consumo.
+CONSUMER_EAN_LENGTHS = (8, 12, 13)
+
 _NON_DIGIT = re.compile(r"\D")
 _WS = re.compile(r"\s+")
 _NON_ALNUM = re.compile(r"[^a-z0-9 ]")
@@ -233,7 +245,7 @@ def classify_gtin(raw: object) -> GtinClassification:
             f"caixa): {digitos}. Match primario por GTIN indisponivel; a linha "
             f"permanece elegivel a match secundario por SKU unico na marca.",
         )
-    if len(digitos) in (8, 12, 13):
+    if len(digitos) in CONSUMER_EAN_LENGTHS:
         return GtinClassification(digitos, "consumer_ean")
     return GtinClassification(
         None, "invalid", f"codigo com {len(digitos)} digitos nao e' EAN valido: {digitos}."
