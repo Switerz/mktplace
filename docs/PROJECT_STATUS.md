@@ -1054,6 +1054,49 @@ No navegador, o estado terminal exercitado ao derrubar a rota é o ramo "bloco a
 verificados quanto ao que importava (sem skeleton eterno, sem `aria-busy`, sem número
 antigo). **Nenhum deploy, commit ou push foi realizado.**
 
+## Gate PMA — monitoramento de preços próprios
+
+**Estado em 02/09/2026: `FRONTEND PUBLICADO; BACKEND READY FOR OWNER DEPLOY`.**
+
+Frente nova, iniciada e concluída tecnicamente em 02/09/2026. Compara o **preço
+anunciado** das lojas próprias no Mercado Livre com o **preço sugerido de
+revenda (PDV)** das tabelas B2B. Detalhes, contratos e números em
+[monitoramento_precos_proprios.md](monitoramento_precos_proprios.md).
+
+| Camada | Estado |
+|---|---|
+| Código versionado | ✅ `7bd81e7` em `main` |
+| Migrations 013/014 no Neon | ✅ aplicadas, `alembic_version = 014` |
+| Dado publicado | ✅ 25.559 linhas ML + 221 de referência B2B |
+| Endpoint reconciliado contra o Neon | ✅ KPIs fecham em 855 |
+| Tela `/monitoramento-preco` | ✅ 1377/1377 testes, typecheck e build limpos |
+| Frontend na Vercel | ✅ HTTP 200 em produção (deploy automático) |
+| **Backend no Render** | ❌ **NÃO PUBLICADO** — rota ausente do `openapi.json` |
+| Smoke de produção | ⚠️ parcial: tela responde, chamada à API 404 |
+| QA em navegador real | ❌ não executado — sem driver na sessão |
+
+**O bloqueio.** A tela está no ar, mas o Render roda uma revisão anterior e não
+expõe `/api/v1/performance/monitoramento-preco`. O bundle da Vercel aponta para
+`https://mktplace-api.onrender.com`, então **em produção a tela renderiza o
+estado de erro, não os dados**. Não houve acesso real ao Render nesta sessão:
+nenhum token, nenhuma CLI, nenhum deploy hook e nenhum `render.yaml` — o serviço
+é configurado pelo painel. **Ação do proprietário: publicar `7bd81e7` no Render
+e reexecutar o smoke.** É o mesmo padrão de deploy manual já registrado nos
+gates V3, UE3 e S2/S3.
+
+**O que a frente deliberadamente não faz.** É observacional: não automatiza
+preço, não emite alerta ou notificação, não fiscaliza revendedor e não tem
+workflow jurídico. A comparação usa **PDV**, que **não é PMA** — a referência
+não tem vigência declarada na origem, então não existe comparação histórica. O
+preço observado é só o anunciado; como o checkout se compõe de produto + frete
+− cupom, **a direção do desvio é indeterminada** e a tela diz isso.
+
+**Duas limitações materiais abertas.** As 3 linhas ambíguas da Rituária
+(`RT01016` duplicado; EAN `7901128300047` em dois SKUs com PDV divergente) estão
+**marcadas, não resolvidas por adivinhação** — exige decisão de Trade/pricing na
+origem. E o QA em navegador real nos três viewports, com `console` e hidratação,
+**não foi executado** e não deve ser declarado aprovado.
+
 ## Entregas recentes relevantes
 
 - Gold regional criada no Data Mart e sincronizada com o Neon.
@@ -1068,6 +1111,7 @@ antigo). **Nenhum deploy, commit ou push foi realizado.**
 - Mercado Livre recomposto, publicado e reconciliado; fase XLSX × Torre encerrada com erro agregado de 1,3743%.
 - Backfill por janela exata implementado para evitar alterações fora do período aprovado.
 - Decisão futura Data Mart × Neon registrada formalmente.
+- Monitoramento de preços próprios entregue e versionado em `7bd81e7` (02/09/2026): tela `/monitoramento-preco` publicada na Vercel, endpoint reconciliado contra o Neon (855 anúncios, KPIs fechando), **backend pendente de publicação manual no Render**.
 - Revamp de UI/UX (U0–U6) publicado na Vercel (commit `9fcf72a`, Production Ready) e auditado como GO COM RESTRIÇÃO: domínio canônico `https://mktplace-gobeaute.vercel.app` no ar, bundle apontando para o backend público e CORS validado (03/08/2026).
 
 ## Decisões pendentes

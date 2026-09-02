@@ -1,6 +1,6 @@
 # Monitoramento de preços próprios — estado real
 
-**Última atualização:** 2026-09-02 (Gate PMA-2R)
+**Última atualização:** 2026-09-02 (Gate PMA-3/4)
 
 > Este documento separa deliberadamente **código versionado**, **migration
 > aplicada**, **dado publicado**, **backend publicado**, **frontend publicado** e
@@ -11,16 +11,32 @@
 
 | Camada | Estado | Evidência |
 |---|---|---|
-| Código versionado | ✅ `e5322d0` em `main` | migration 014, sync, importador, endpoint, testes |
+| Código versionado | ✅ `7bd81e7` em `main` | migration 014, sync, importador, endpoint, tela, 58 testes de tela |
 | Migration no Neon | ✅ **aplicada**, `alembic_version = 014` | 012 → 014 numa execução |
 | Dado ML publicado | ✅ **25.559 linhas** | janela 2026-08-03..2026-09-01 |
 | Referência B2B publicada | ✅ **221 linhas**, 1 snapshot | 5 marcas |
-| Endpoint reconciliado | ✅ contra o Neon real | KPIs fecham em 855 |
-| Tela `/monitoramento-preco` | ❌ **NÃO EXISTE** | não implementada |
-| Backend publicado no Render | ❌ **NÃO PUBLICADO** nesta rodada | — |
-| Frontend publicado na Vercel | ❌ **NÃO PUBLICADO** | não há tela |
-| Smoke de produção | ❌ **NÃO EXECUTADO** | depende dos deploys |
+| Endpoint reconciliado | ✅ contra o Neon real | KPIs fecham em 855; conferido linha a linha |
+| Tela `/monitoramento-preco` | ✅ **implementada** | 1377/1377 testes, typecheck limpo, build 8,18 kB |
+| Frontend publicado na Vercel | ✅ **publicado** | `mktplace-gobeaute.vercel.app/monitoramento-preco` → HTTP 200 |
+| Backend publicado no Render | ❌ **NÃO PUBLICADO** | rota ausente do `openapi.json` de produção |
+| Smoke de produção | ⚠️ **parcial** | frontend responde; a chamada à API 404 porque o Render está defasado |
+| QA em navegador real | ❌ **NÃO EXECUTADO** | sem driver de navegador na sessão |
 | Automação (Scheduler) | ❌ **NÃO EXISTE** | sync 100% manual |
+
+### Bloqueio de produção — leia antes de usar a tela
+
+A tela está publicada na Vercel, mas **o backend em
+`https://mktplace-api.onrender.com` roda uma revisão anterior** e não expõe
+`/api/v1/performance/monitoramento-preco` (confirmado no `openapi.json` de
+produção: a rota não está lá). O build da Vercel aponta para esse host, então
+em produção a tela renderiza **o estado de erro**, não os dados.
+
+Não houve acesso real ao Render nesta sessão: nenhum token, nenhuma CLI
+(`render` ausente do PATH), nenhum deploy hook no `.env` e nenhum
+`render.yaml` no repositório — o serviço é configurado pelo painel. O deploy
+do backend é, portanto, **READY FOR OWNER DEPLOY**: publicar a revisão
+`7bd81e7` (o endpoint já estava em `e5322d0`; qualquer revisão de `main` a
+partir dela serve) e reexecutar o smoke.
 
 ## O que é este monitoramento
 
@@ -145,6 +161,82 @@ Match: 143 por GTIN, 12 por SKU único na marca, 700 sem match.
 O desvio concentra-se na Rituária. `below_reference` é **potencial desvio de
 preço** que exige **revisão humana** — nunca infração.
 
+## Tela `/monitoramento-preco`
+
+Rota client-side em `apps/web/app/monitoramento-preco/page.tsx`, no grupo
+**Inteligência** da navegação. Ela **apresenta** o que a API entrega e nada mais:
+não deriva match, não recalcula status comercial, não trata `NULL` como R$ 0, não
+esconde ambiguidade e não sugere sanção, punição ou obrigação legal.
+
+**Camadas de código**
+
+| Arquivo | Papel |
+|---|---|
+| `src/lib/monitoramento-preco-contract.ts` | tipos fiéis ao schema Python, montagem do query string, `MonitoramentoPrecoError`. Sem dependência de runtime — é isso que permite testá-lo com `node --test`. |
+| `src/lib/monitoramento-preco.ts` | formatação pt-BR, rótulos, paginação, allowlist de domínio do link. Puro. |
+| `src/lib/api-client.ts` | `fetchMonitoramentoPreco` — 24ª assinatura pública de `fetchX`. |
+| `app/monitoramento-preco/page.tsx` | composição, filtros, tabela, paginação, drill-down, estados. |
+
+**Decisões que a tela carrega**
+
+1. **`ref_date` nunca é enviado.** O backend recusa o parâmetro com 422. O
+   construtor de query o omite por construção, e há teste fixando isso.
+2. **Ausência de dado imprime `—`, nunca `R$ 0,00` nem `0%`.** `shipping_amount`,
+   `seller_coupon_amount`, `platform_subsidy_amount` e `checkout_price` são
+   `NULL` em 100% das 855 linhas hoje (`coverage_status = advertised_only`), e a
+   tela diz isso em texto, não por omissão.
+3. **Zero notação compacta.** Nenhum `K`, `M`, `mil` ou `mi` — são contagens de
+   anúncios e valores em reais, onde arredondar apaga a informação.
+4. **A diferença preserva o sinal.** `fmtDiferenca` não usa `Math.abs`: um
+   anúncio R$ 90,10 abaixo do PDV mostra `−R$ 90,10`.
+5. **O filtro de situação altera só a tabela.** Marca e busca alteram os KPIs
+   também. Isso preserva o denominador — filtrar por "abaixo da referência" não
+   faz o total virar 18. A tela declara essa regra abaixo dos KPIs.
+6. **O link do anúncio passa por allowlist** de esquema HTTPS e domínio do
+   Mercado Livre; qualquer outra coisa não vira link.
+7. **Guarda de frescor** por `requestKey` + `AbortController`: resposta de
+   requisição vencida é descartada em vez de sobrescrever a tela.
+
+## QA — o que foi e o que não foi verificado
+
+**Verificado com backend local ligado ao Neon em leitura (porta 8099) e
+frontend do build final (`next start`, porta 3100):**
+
+- `/monitoramento-preco` → HTTP 200; shell servido com `lang="pt-BR"`.
+- Reconciliação API × Neon, em D−1 = 2026-09-01:
+  `monitored_count` 855 = 855 linhas no Neon; `inactive_count` 194 = 194
+  não-ativos; 661 ativos = 138 comparáveis + 523 sem referência + 0 ambíguos;
+  soma dos seis status = 855. Por marca: barbours 309, kokeshi 219, lescent 145,
+  rituária 182 — idênticas em API e banco.
+- Uma linha `below_reference` conferida campo a campo contra o banco, incluindo
+  `difference_amount` = anunciado − sugerido (−90,10 conferido).
+- Paginação real: 500 + 355 = 855, 855 `item_id` distintos, sem repetição.
+- Filtros: `brand=rituaria` → 182; `status=below_reference` → tabela 18 e KPI
+  ainda 855 (denominador preservado); busca sem resultado → 0.
+- `ref_date` recusado com 422 **sem ecoar a entrada**, inclusive para
+  `<script>x</script>`.
+- Nenhum `seller_id` no payload; os quatro campos de composição vêm `NULL`.
+- Alvos de toque `min-h-[44px]` e `focus-visible:ring-2` em todos os selects,
+  input e botões; nenhum texto abaixo de 12px (`text-xs` é o piso, zero
+  `text-[NNpx]`); tabela larga dentro de `TableScrollHint`; drill-down reusa
+  `KpiDrilldownDialog`, que tem `role="dialog"`, `aria-modal`, trap de Tab,
+  Escape, retorno de foco e lock de scroll do body.
+- 1377/1377 testes (58 novos), `tsc --noEmit` limpo, build `○
+  /monitoramento-preco 8,18 kB / 117 kB`.
+
+**NÃO verificado — não havia driver de navegador nesta sessão** (o Playwright
+MCP não está autorizado e a sessão é não interativa, logo não há como rodar o
+fluxo de OAuth). Fica pendente, e **não deve ser declarado aprovado**:
+
+- renderização real nos viewports 1440×900, 1024×768 e 390×844;
+- ausência de overflow horizontal medida em layout renderizado;
+- `console error` e `hydration warning` em execução real;
+- comportamento de teclado do diálogo exercitado de fato (trap, Escape, retorno
+  de foco) — só a existência do código foi conferida;
+- estados `stale_observation`, `non_comparable_reference_ambiguous` e vazio,
+  que hoje não ocorrem naturalmente no dado (0 linhas cada) e cuja checagem
+  ficou restrita a teste unitário, sem interceptação de rede.
+
 ## Escopo de marcas
 
 - **Comparáveis:** barbours, kokeshi, rituaria
@@ -222,12 +314,13 @@ Scheduler, nenhum step no `full_daily`.
    workflow jurídico, sem enforcement de revendedor, sem notificação a
    revendedor.
 
-## Próximo gate — PMA-3
+## Próximo gate
 
-1. Implementar a tela `/monitoramento-preco` sobre o contrato já reconciliado
-   (nenhum endpoint novo é necessário).
-2. QA nos três viewports (1440×900, 1024×768, 390×844) e acessibilidade.
-3. Deploy do backend no Render e do frontend na Vercel.
-4. Smoke de produção com reconciliação dirigida contra o Neon.
-5. Só depois: avaliar agendamento do sync, com observação de duas execuções
+1. **Publicar o backend no Render** (revisão `7bd81e7`) e reexecutar o smoke —
+   é o único bloqueio para a tela ficar utilizável em produção.
+2. **QA em navegador real** nos três viewports, com `console` e hidratação
+   observados, cobrindo os estados que hoje não têm dado.
+3. **Resolver as 3 linhas ambíguas da Rituária** na tabela de origem — decisão
+   de Trade/pricing, não de engenharia.
+4. Só depois: avaliar agendamento do sync, com observação de duas execuções
    manuais consecutivas com `EXCEPT` (0,0) antes de qualquer automação.
