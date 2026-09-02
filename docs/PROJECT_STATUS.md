@@ -1056,46 +1056,71 @@ antigo). **Nenhum deploy, commit ou push foi realizado.**
 
 ## Gate PMA — monitoramento de preços próprios
 
-**Estado em 02/09/2026: `FRONTEND PUBLICADO; BACKEND READY FOR OWNER DEPLOY`.**
+**Estado em 02/09/2026: `GATE ENCERRADO — PASS WITH ISSUE`. A tela está
+utilizável em produção.**
 
-Frente nova, iniciada e concluída tecnicamente em 02/09/2026. Compara o **preço
-anunciado** das lojas próprias no Mercado Livre com o **preço sugerido de
-revenda (PDV)** das tabelas B2B. Detalhes, contratos e números em
+Frente nova, aberta e encerrada em 02/09/2026. Compara o **preço anunciado** das
+lojas próprias no Mercado Livre com o **preço sugerido de revenda (PDV)** das
+tabelas B2B. Detalhes, contratos, números e o registro completo do QA em
 [monitoramento_precos_proprios.md](monitoramento_precos_proprios.md).
 
 | Camada | Estado |
 |---|---|
-| Código versionado | ✅ `7bd81e7` em `main` |
+| Código versionado | ✅ `d772fe8` em `main` |
 | Migrations 013/014 no Neon | ✅ aplicadas, `alembic_version = 014` |
 | Dado publicado | ✅ 25.559 linhas ML + 221 de referência B2B |
-| Endpoint reconciliado contra o Neon | ✅ KPIs fecham em 855 |
-| Tela `/monitoramento-preco` | ✅ 1377/1377 testes, typecheck e build limpos |
-| Frontend na Vercel | ✅ HTTP 200 em produção (deploy automático) |
-| **Backend no Render** | ❌ **NÃO PUBLICADO** — rota ausente do `openapi.json` |
-| Smoke de produção | ⚠️ parcial: tela responde, chamada à API 404 |
-| QA em navegador real | ❌ não executado — sem driver na sessão |
+| **Backend no Render** | ✅ **publicado manualmente pelo proprietário** |
+| **Frontend na Vercel** | ✅ **publicado** pelo fluxo automático do push |
+| API em produção | ✅ **HTTP 200**; contrato idêntico ao versionado |
+| Reconciliação API × UI × Neon | ✅ fecha nos três lados: 855 = 855 = 855 |
+| QA em navegador real (3 viewports) | ✅ **127 de 128** verificações |
+| Smoke de produção | ⚠️ **PASS WITH ISSUE** — `favicon.ico` 404, pré-existente |
 
-**O bloqueio.** A tela está no ar, mas o Render roda uma revisão anterior e não
-expõe `/api/v1/performance/monitoramento-preco`. O bundle da Vercel aponta para
-`https://mktplace-api.onrender.com`, então **em produção a tela renderiza o
-estado de erro, não os dados**. Não houve acesso real ao Render nesta sessão:
-nenhum token, nenhuma CLI, nenhum deploy hook e nenhum `render.yaml` — o serviço
-é configurado pelo painel. **Ação do proprietário: publicar `7bd81e7` no Render
-e reexecutar o smoke.** É o mesmo padrão de deploy manual já registrado nos
-gates V3, UE3 e S2/S3.
+**Reconciliação nos três lados**, D−1 = 2026-09-01: monitorados 855, comparáveis
+138, abaixo 18, na/acima 120, sem referência 523, ambíguos 0, stale 0, inativos
+194. A soma dos seis status fecha em 855, igual à contagem no Neon e igual ao que
+a UI exibe. Por marca: 309/219/145/182 idênticos em API e banco. A baseline
+anterior foi reproduzida integralmente — o dado não mudou entre as rodadas.
+
+**QA real em Chromium** nos viewports 1440×900, 1024×768 e 390×844, contra o
+payload de produção e **sem nenhuma fixture**: KPIs iguais à API, aviso
+observacional com as 6 ressalvas, zero termo de sanção, paginação cobrindo as 855
+sem duplicidade, filtro de situação preservando o denominador, ausência impressa
+como travessão e nunca como zero, zero notação compacta, 513 alvos todos ≥44×44,
+6.565 nós de texto todos ≥12px, focus trap/Escape/devolução de foco no
+drill-down, zero hydration warning e zero requisição 4xx/5xx inesperada.
+
+**Um defeito real foi encontrado pelo navegador e corrigido.** A página inteira
+rolava na horizontal nos três viewports (`scrollWidth` 1766 contra 1440;
+`scrollTo(9999,0)` deslocava 326px de fato). Causa: as 12 colunas em
+`whitespace-nowrap` dão à tabela min-content de ~1587px, e o overflow escapava do
+`overflow-x-auto` do `TableScrollHint`. Corrigido em `d772fe8` com
+`overflow-hidden` no wrapper da tabela — o padrão que `/pedidos` já usava —, com
+teste de regressão, e reverificado depois do redeploy: **excesso 0px nos três
+viewports**. As outras rotas da Torre já mediam 0px, o que descartou dívida do
+shell.
+
+**A ressalva do `PASS WITH ISSUE`:** `GET /favicon.ico` responde **404** e gera
+um erro de console no primeiro carregamento. **Não é defeito desta frente** — não
+existe favicon versionado no projeto e a resposta é 404 em qualquer rota da
+Torre. Corrigir alteraria todas as rotas e ficou fora deste escopo.
 
 **O que a frente deliberadamente não faz.** É observacional: não automatiza
-preço, não emite alerta ou notificação, não fiscaliza revendedor e não tem
-workflow jurídico. A comparação usa **PDV**, que **não é PMA** — a referência
-não tem vigência declarada na origem, então não existe comparação histórica. O
-preço observado é só o anunciado; como o checkout se compõe de produto + frete
-− cupom, **a direção do desvio é indeterminada** e a tela diz isso.
+preço, não emite alerta ou notificação, não fiscaliza revendedor, não aplica
+sanção e não tem workflow jurídico. A comparação usa **PDV**, que **não é PMA**;
+a referência não tem vigência declarada na origem, então **não existe comparação
+histórica**. Cobertura é `advertised_only`: só o preço anunciado, sem frete,
+cupom, subsídio ou checkout — e como o checkout se compõe de produto + frete −
+cupom, **a direção do desvio é indeterminada**, o que a tela declara em texto.
 
-**Duas limitações materiais abertas.** As 3 linhas ambíguas da Rituária
+**Limitações que seguem abertas.** Somente Mercado Livre — Shopee e TikTok não
+têm catálogo confiável de preço anunciado e Amazon não tem fonte na Torre.
+Lescent é monitorada e não tem tabela B2B. As **3 linhas ambíguas da Rituária**
 (`RT01016` duplicado; EAN `7901128300047` em dois SKUs com PDV divergente) estão
 **marcadas, não resolvidas por adivinhação** — exige decisão de Trade/pricing na
-origem. E o QA em navegador real nos três viewports, com `console` e hidratação,
-**não foi executado** e não deve ser declarado aprovado.
+origem. Os estados `stale_observation` e `non_comparable_reference_ambiguous` têm
+0 linhas hoje e **não foram exercitados em tela**, só em teste unitário. O sync é
+**100% manual**: nenhuma entrada no Scheduler, nenhum step no `full_daily`.
 
 ## Entregas recentes relevantes
 
@@ -1111,7 +1136,7 @@ origem. E o QA em navegador real nos três viewports, com `console` e hidrataç�
 - Mercado Livre recomposto, publicado e reconciliado; fase XLSX × Torre encerrada com erro agregado de 1,3743%.
 - Backfill por janela exata implementado para evitar alterações fora do período aprovado.
 - Decisão futura Data Mart × Neon registrada formalmente.
-- Monitoramento de preços próprios entregue e versionado em `7bd81e7` (02/09/2026): tela `/monitoramento-preco` publicada na Vercel, endpoint reconciliado contra o Neon (855 anúncios, KPIs fechando), **backend pendente de publicação manual no Render**.
+- Monitoramento de preços próprios **encerrado como PASS WITH ISSUE** em `d772fe8` (02/09/2026): backend publicado manualmente no Render, frontend na Vercel, API 200, reconciliação API × UI × Neon fechando em 855, QA real em três viewports (127/128) e um defeito de rolagem lateral encontrado pelo navegador e corrigido; ressalva única é o `favicon.ico` 404, pré-existente da Torre.
 - Revamp de UI/UX (U0–U6) publicado na Vercel (commit `9fcf72a`, Production Ready) e auditado como GO COM RESTRIÇÃO: domínio canônico `https://mktplace-gobeaute.vercel.app` no ar, bundle apontando para o backend público e CORS validado (03/08/2026).
 
 ## Decisões pendentes

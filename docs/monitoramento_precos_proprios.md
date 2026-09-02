@@ -1,6 +1,6 @@
 # Monitoramento de preços próprios — estado real
 
-**Última atualização:** 2026-09-02 (Gate PMA-3/4)
+**Última atualização:** 2026-09-02 (Gate PMA-4F — encerrado)
 
 > Este documento separa deliberadamente **código versionado**, **migration
 > aplicada**, **dado publicado**, **backend publicado**, **frontend publicado** e
@@ -11,32 +11,29 @@
 
 | Camada | Estado | Evidência |
 |---|---|---|
-| Código versionado | ✅ `7bd81e7` em `main` | migration 014, sync, importador, endpoint, tela, 58 testes de tela |
+| Código versionado | ✅ `d772fe8` em `main` | migration 014, sync, importador, endpoint, tela, 59 testes de tela |
 | Migration no Neon | ✅ **aplicada**, `alembic_version = 014` | 012 → 014 numa execução |
 | Dado ML publicado | ✅ **25.559 linhas** | janela 2026-08-03..2026-09-01 |
 | Referência B2B publicada | ✅ **221 linhas**, 1 snapshot | 5 marcas |
-| Endpoint reconciliado | ✅ contra o Neon real | KPIs fecham em 855; conferido linha a linha |
-| Tela `/monitoramento-preco` | ✅ **implementada** | 1377/1377 testes, typecheck limpo, build 8,18 kB |
-| Frontend publicado na Vercel | ✅ **publicado** | `mktplace-gobeaute.vercel.app/monitoramento-preco` → HTTP 200 |
-| Backend publicado no Render | ❌ **NÃO PUBLICADO** | rota ausente do `openapi.json` de produção |
-| Smoke de produção | ⚠️ **parcial** | frontend responde; a chamada à API 404 porque o Render está defasado |
-| QA em navegador real | ❌ **NÃO EXECUTADO** | sem driver de navegador na sessão |
+| **Backend publicado no Render** | ✅ **publicado** — deploy manual do proprietário | rota presente no `openapi.json`; GET 200 |
+| **Frontend publicado na Vercel** | ✅ **publicado** — deploy automático do push | `mktplace-gobeaute.vercel.app/monitoramento-preco` |
+| Contrato em produção | ✅ **idêntico ao versionado** | 6/19/8/34 campos nas quatro classes |
+| Reconciliação API × UI × Neon | ✅ fecha nos três lados | 855 = 855 = 855 |
+| QA em navegador real | ✅ **executado** nos 3 viewports | 127 de 128 verificações |
+| Smoke de produção | ⚠️ **PASS WITH ISSUE** | única ressalva: `favicon.ico` 404, pré-existente da Torre |
 | Automação (Scheduler) | ❌ **NÃO EXISTE** | sync 100% manual |
 
-### Bloqueio de produção — leia antes de usar a tela
+### Gate PMA encerrado como PASS WITH ISSUE
 
-A tela está publicada na Vercel, mas **o backend em
-`https://mktplace-api.onrender.com` roda uma revisão anterior** e não expõe
-`/api/v1/performance/monitoramento-preco` (confirmado no `openapi.json` de
-produção: a rota não está lá). O build da Vercel aponta para esse host, então
-em produção a tela renderiza **o estado de erro**, não os dados.
+A tela está **utilizável em produção**. O proprietário publicou o backend
+manualmente no Render — o mesmo padrão de deploy manual já registrado nos
+gates V3, UE3 e S2/S3 — e a Vercel publicou o frontend pelo fluxo automático
+do push.
 
-Não houve acesso real ao Render nesta sessão: nenhum token, nenhuma CLI
-(`render` ausente do PATH), nenhum deploy hook no `.env` e nenhum
-`render.yaml` no repositório — o serviço é configurado pelo painel. O deploy
-do backend é, portanto, **READY FOR OWNER DEPLOY**: publicar a revisão
-`7bd81e7` (o endpoint já estava em `e5322d0`; qualquer revisão de `main` a
-partir dela serve) e reexecutar o smoke.
+A única ressalva é `GET /favicon.ico` respondendo **404**, o que produz um erro
+de console no primeiro carregamento. **Não é defeito desta frente**: não existe
+favicon versionado no projeto e a resposta é 404 em qualquer rota da Torre.
+Corrigir isso alteraria todas as rotas e está fora deste escopo.
 
 ## O que é este monitoramento
 
@@ -197,45 +194,115 @@ esconde ambiguidade e não sugere sanção, punição ou obrigação legal.
 7. **Guarda de frescor** por `requestKey` + `AbortController`: resposta de
    requisição vencida é descartada em vez de sobrescrever a tela.
 
-## QA — o que foi e o que não foi verificado
+## QA e smoke de produção — executados
 
-**Verificado com backend local ligado ao Neon em leitura (porta 8099) e
-frontend do build final (`next start`, porta 3100):**
+### Fase 1 — backend no Render (somente GET e SELECT)
 
-- `/monitoramento-preco` → HTTP 200; shell servido com `lang="pt-BR"`.
-- Reconciliação API × Neon, em D−1 = 2026-09-01:
-  `monitored_count` 855 = 855 linhas no Neon; `inactive_count` 194 = 194
-  não-ativos; 661 ativos = 138 comparáveis + 523 sem referência + 0 ambíguos;
-  soma dos seis status = 855. Por marca: barbours 309, kokeshi 219, lescent 145,
-  rituária 182 — idênticas em API e banco.
-- Uma linha `below_reference` conferida campo a campo contra o banco, incluindo
-  `difference_amount` = anunciado − sugerido (−90,10 conferido).
-- Paginação real: 500 + 355 = 855, 855 `item_id` distintos, sem repetição.
-- Filtros: `brand=rituaria` → 182; `status=below_reference` → tabela 18 e KPI
-  ainda 855 (denominador preservado); busca sem resultado → 0.
-- `ref_date` recusado com 422 **sem ecoar a entrada**, inclusive para
-  `<script>x</script>`.
-- Nenhum `seller_id` no payload; os quatro campos de composição vêm `NULL`.
-- Alvos de toque `min-h-[44px]` e `focus-visible:ring-2` em todos os selects,
-  input e botões; nenhum texto abaixo de 12px (`text-xs` é o piso, zero
-  `text-[NNpx]`); tabela larga dentro de `TableScrollHint`; drill-down reusa
-  `KpiDrilldownDialog`, que tem `role="dialog"`, `aria-modal`, trap de Tab,
-  Escape, retorno de foco e lock de scroll do body.
-- 1377/1377 testes (58 novos), `tsc --noEmit` limpo, build `○
-  /monitoramento-preco 8,18 kB / 117 kB`.
+- `/api/v1/performance/monitoramento-preco` **presente** no `openapi.json` de
+  produção; GET **200** nas duas páginas.
+- **Contrato idêntico ao versionado**, comparado campo a campo contra
+  `apps/api/app/schemas/monitoramento_preco.py`: 6 chaves de topo, 19 de
+  `meta`, 8 de `kpis` e 34 por linha — zero campo a mais ou a menos.
+- `observed_ref_date = 2026-09-01`, igual a D−1 em America/Sao_Paulo e igual a
+  `max(ref_date)` no Neon. **Zero linhas** com `observed_at` em D0 ou futuro;
+  todas as 855 na mesma data.
+- Nenhum `seller_id` nem qualquer campo de PII no payload.
+- `shipping_amount`, `seller_coupon_amount`, `platform_subsidy_amount` e
+  `checkout_price` **NULL em 855/855**; `coverage_status` só `advertised_only`.
+- `ref_date` oculto continua **422 com mensagem fixa e sem eco**, inclusive
+  para `<script>x</script>` e para valor vazio.
 
-**NÃO verificado — não havia driver de navegador nesta sessão** (o Playwright
-MCP não está autorizado e a sessão é não interativa, logo não há como rodar o
-fluxo de OAuth). Fica pendente, e **não deve ser declarado aprovado**:
+### Reconciliação API × Neon (read-only), D−1 = 2026-09-01
 
-- renderização real nos viewports 1440×900, 1024×768 e 390×844;
-- ausência de overflow horizontal medida em layout renderizado;
-- `console error` e `hydration warning` em execução real;
-- comportamento de teclado do diálogo exercitado de fato (trap, Escape, retorno
-  de foco) — só a existência do código foi conferida;
-- estados `stale_observation`, `non_comparable_reference_ambiguous` e vazio,
-  que hoje não ocorrem naturalmente no dado (0 linhas cada) e cuja checagem
-  ficou restrita a teste unitário, sem interceptação de rede.
+| Medida | API | Neon | |
+|---|---|---|---|
+| monitorados | 855 | 855 | igual |
+| inativos | 194 | 194 | igual |
+| ativos = comparáveis + sem ref. + ambíguos | 138+523+0 = 661 | 661 | igual |
+| barbours / kokeshi / lescent / rituária | 309/219/145/182 | 309/219/145/182 | igual |
+| referência B2B | — | 221 linhas, 1 snapshot | — |
+
+Soma dos seis status = 855 = `monitored_count`. A baseline anterior foi
+**reproduzida integralmente** — 855/138/18/120/523/0/0/194 — porque o dado não
+mudou entre as rodadas. Uma linha `below_reference` foi conferida campo a campo
+contra o banco, incluindo `difference_amount` = anunciado − sugerido (−90,10).
+
+### Fase 2 — QA em navegador real (Chromium)
+
+**128 verificações por rodada, nos três viewports (1440×900, 1024×768,
+390×844): 127 aprovadas, 1 reprovada** — o `favicon.ico` descrito acima.
+
+Aprovado nos três viewports, contra o payload real de produção:
+
+- tela fora do estado de erro; KPIs **iguais à API** nos seis cartões e nos
+  dois indicadores de qualidade (ambíguos 0, stale 0);
+- título, breadcrumb e link na navegação lateral;
+- aviso observacional com as **6 ressalvas**; **zero** termo de sanção
+  ("severidade", "infração", "violação", "punir", "sanção", "denúncia",
+  "ilegal");
+- tabela com 500 linhas e 12 colunas; moeda pt-BR; **sinal negativo
+  preservado** (`−R$`); percentual formatado;
+- **zero notação compacta** (K/M/mil/mi) na tabela e nos KPIs;
+- ausência impressa como travessão em 1.087 ocorrências; nas 272 linhas sem
+  referência, sugerido/diferença/percentual são todos `—`, **nunca zero**;
+- as 10 linhas que mostram `R$ 0,00` na diferença são **zero medido**, com
+  anunciado igual ao sugerido e situação "Na ou acima" — não valor fabricado;
+- truncamento honesto: "Exibindo 500 de 855 anúncios";
+- **paginação cobre as 855 sem duplicidade**: 500 + 355 = 855 `item_id`
+  distintos, rótulos "1–500 de 855 · página 1 de 2" → "501–855 de 855 · página
+  2 de 2", botões no estado certo na última página;
+- filtro de marca altera tabela **e** KPI (182/182); filtro de situação altera
+  **só** a tabela (18) e mantém o KPI em 855, **preservando o denominador**;
+- busca por item retorna 1 linha; busca sem resultado cai no **estado vazio
+  real, sem fixture**; "Limpar filtros" restaura marca, situação e busca;
+- a tabela **não tem link solto** — o link do anúncio fica no detalhe, com
+  `https`, domínio do Mercado Livre, `rel="noopener noreferrer"` e
+  `target="_blank"`;
+- drill-down: foco inicial em "Fechar detalhes", `aria-modal="true"`, **focus
+  trap** retendo Tab e Shift+Tab, **Escape** fecha e o **foco volta** ao botão
+  "Analisar";
+- **513 alvos** medidos, nenhum abaixo de 44×44; **6.565 nós de texto**, nenhum
+  abaixo de 12px;
+- **zero overflow horizontal da página**, com a tabela rolando internamente
+  (1587px de conteúdo em 1150/734/356px de container);
+- **zero hydration warning**, zero exceção de página, zero requisição 4xx/5xx
+  inesperada.
+
+**Nenhum estado usou fixture ou interceptação.** Tudo foi exercitado com o
+payload real. Os estados `stale_observation` e
+`non_comparable_reference_ambiguous` têm 0 linhas no dado de hoje e por isso
+**não foram exercitados em tela** — só há cobertura de teste unitário. Isso
+permanece aberto.
+
+### Defeito encontrado e corrigido — rolagem lateral da página
+
+O smoke reprovou em algo que só um navegador real mede: **a página inteira
+rolava na horizontal** nos três viewports.
+
+| Viewport | `documentElement.scrollWidth` | excesso | deslocamento real |
+|---|---|---|---|
+| 1440×900 | 1766 | 326px | 326px |
+| 1024×768 | 1766 | 742px | 742px |
+| 390×844 | 1518 | 1128px | 1128px |
+
+`window.scrollTo(9999, 0)` deslocava a viewport de fato, expondo fundo vazio à
+direita. As outras rotas da Torre medem **excesso 0px** no mesmo viewport, o
+que descartou dívida do shell: as tabelas delas são mais estreitas e não
+expunham o problema.
+
+**Causa:** as 12 colunas em `whitespace-nowrap` dão à tabela um min-content de
+~1587px, e esse overflow escapava do `overflow-x-auto` do `TableScrollHint`,
+propagando por toda a cadeia até o `body`.
+
+**Correção (`d772fe8`):** `overflow-hidden` no wrapper branco da tabela — o
+mesmo padrão que `/pedidos` já usa. Uma classe. A rolagem interna da tabela
+continua intacta e o `TableScrollHint` segue sendo quem rola. Uma primeira
+hipótese — `min-w-0` na `section`, por flex item com `min-width: auto` — foi
+testada, **não mudou nada** e foi revertida em vez de mantida inerte. Há teste
+de regressão fixando o recorte no wrapper.
+
+Depois do redeploy da Vercel, o smoke afetado foi reexecutado: **excesso 0px
+nos três viewports**.
 
 ## Escopo de marcas
 
@@ -314,13 +381,14 @@ Scheduler, nenhum step no `full_daily`.
    workflow jurídico, sem enforcement de revendedor, sem notificação a
    revendedor.
 
-## Próximo gate
+## Próximo passo
 
-1. **Publicar o backend no Render** (revisão `7bd81e7`) e reexecutar o smoke —
-   é o único bloqueio para a tela ficar utilizável em produção.
-2. **QA em navegador real** nos três viewports, com `console` e hidratação
-   observados, cobrindo os estados que hoje não têm dado.
-3. **Resolver as 3 linhas ambíguas da Rituária** na tabela de origem — decisão
+O Gate PMA está encerrado. O que segue aberto **não** é bloqueio desta tela:
+
+1. **Resolver as 3 linhas ambíguas da Rituária** na tabela de origem — decisão
    de Trade/pricing, não de engenharia.
-4. Só depois: avaliar agendamento do sync, com observação de duas execuções
-   manuais consecutivas com `EXCEPT` (0,0) antes de qualquer automação.
+2. **Exercitar em tela os estados `stale_observation` e
+   `non_comparable_reference_ambiguous`** quando o dado real os produzir.
+3. **`favicon.ico` da Torre** — 404 em todas as rotas, dívida pré-existente.
+4. Avaliar agendamento do sync, com observação de duas execuções manuais
+   consecutivas com `EXCEPT` (0,0) antes de qualquer automação.
