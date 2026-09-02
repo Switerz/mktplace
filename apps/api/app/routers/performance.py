@@ -10,6 +10,7 @@ from app.deps.filters import (
 )
 from app.deps.period import EffectivePeriod, resolve_period, today_brt
 from app.schemas.executive_summary import ExecutiveSummaryResponse
+from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -19,7 +20,9 @@ from app.schemas.performance import (
 )
 from app.services import executive_summary_service
 from app.services import gold_service as svc
+from app.services import monitoramento_preco_service as mp_svc
 from app.services import performance_service as perf_svc
+from app.services import pma_match
 from app.services.affiliate_costs_service import safe_affiliate_costs_block
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
@@ -465,4 +468,145 @@ def debug_raw_tempo_real(db: Session = Depends(get_db)):
     gold.tiktok_shop_hourly para o uso em tempo real.
     """
     return svc.diagnose_raw_tempo_real(_require_db(db))
+
+
+# ---------------------------------------------------------------------------
+# Gate PMA-1A — monitoramento de precos proprios (MVP observacional)
+# ---------------------------------------------------------------------------
+
+#: Resposta FIXA para inconsistencia da camada de serving (PMA-1A-R, F7).
+#: Nao carrega o texto da excecao: ele descreve estado interno e vai ao log.
+ERRO_SERVING_INCONSISTENTE = (
+    "Dados de monitoramento de preco indisponiveis: inconsistencia na camada de "
+    "serving. Acione o time de dados."
+)
+
+
+@router.get("/monitoramento-preco", response_model=MonitoramentoPrecoResponse)
+def monitoramento_preco(
+    marketplace: str = Query(
+        "ml",
+        description=(
+            "Canal. Neste MVP somente 'ml': e' o unico canal com fonte de PRECO "
+            "ANUNCIADO. Shopee tem apenas preco transacional de export de pedido, "
+            "TikTok nao tem preco no catalogo e Amazon nao tem fonte na Torre. "
+            "Qualquer outro valor e' recusado com 422."
+        ),
+    ),
+    # SEM `max_length` nestes tres, DELIBERADAMENTE (PMA-1A-R, F6).
+    #
+    # O validador nativo do FastAPI/Pydantic recusa com 422, mas o corpo do erro
+    # INCLUI o valor recusado (`{"input": "<o payload>", "ctx": {"max_length":
+    # 120}}`). Foi medido: um `brand` de 200 caracteres voltava com os 200
+    # caracteres na resposta. Isso e' exatamente o eco que F6 proibe — e com HTML,
+    # DSN ou IP no payload, o eco e' pior que o excesso de tamanho.
+    #
+    # O teto continua existindo e continua na BORDA: e' aplicado no corpo do
+    # endpoint, por `monitoramento_preco_service`, que devolve uma mensagem
+    # CONSTANTE. O tamanho maximo aceito esta documentado aqui, na descricao,
+    # para nao desaparecer do OpenAPI.
+    brand: Optional[str] = Query(
+        None,
+        description=(
+            "Marca(s) separadas por virgula, ou 'all'. Escopo monitorado: "
+            "barbours, kokeshi, lescent, rituaria. 'apice' e 'yenzah' tem tabela "
+            "de referencia B2B mas nao tem catalogo proprio no Mercado Livre "
+            "(out_of_scope_no_ml_catalog) e sao recusadas com 422. "
+            "Maximo de 120 caracteres."
+        ),
+    ),
+    status: Optional[str] = Query(
+        None,
+        description=(
+            "Status de comparacao, separados por virgula: below_reference, "
+            "at_or_above_reference, no_reference, "
+            "non_comparable_reference_ambiguous, inactive_listing, "
+            "stale_observation. Os KPIs NAO respondem a este filtro — eles "
+            "descrevem sempre o conjunto completo, para preservar o denominador. "
+            "Maximo de 240 caracteres."
+        ),
+    ),
+    product_query: Optional[str] = Query(
+        None,
+        description=(
+            "Busca por titulo do anuncio, seller_sku, GTIN ou item_id. "
+            "Maximo de 120 caracteres."
+        ),
+    ),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    # Parametro OCULTO, recebido como texto so para poder ser RECUSADO (PMA-1B).
+    #
+    # Sem ele, o FastAPI ignoraria `?ref_date=...` em silencio e responderia 200,
+    # fazendo o consumidor acreditar que o filtro historico foi aplicado. Tipado
+    # como `str` de proposito: `date` faria o FastAPI VALIDAR o valor e devolver
+    # um 422 proprio — que ecoa a entrada no corpo (o mesmo defeito medido em
+    # `max_length` no PMA-1A-R). Como `str`, nada e' interpretado nem convertido,
+    # e qualquer conteudo recebe a MESMA mensagem fixa.
+    #
+    # `include_in_schema=False` mantem o parametro fora do OpenAPI: ele nao e'
+    # uma opcao, e' uma armadilha fechada.
+    ref_date: Optional[str] = Query(None, include_in_schema=False),
+    db: Session = Depends(get_db),
+):
+    """MVP OBSERVACIONAL do preco anunciado das lojas PROPRIAS no Mercado Livre.
+
+    Compara o PRECO ANUNCIADO proprio contra o PRECO SUGERIDO DE REVENDA (PDV)
+    das tabelas B2B. NAO e' fiscalizacao de revendedor, NAO implementa a politica
+    de PMA e NAO produz sancao: `policy_status` e'
+    `not_applicable_to_own_store_monitoring`.
+
+    A referencia e' PDV, nao PMA — o PDV foi medido como markup aritmetico sobre
+    o preco de atacado, com razao que varia por marca, e nao tem vigencia
+    declarada (`validity_status = 'missing'`).
+
+    Cobertura `advertised_only`: sem frete, cupom de vitrine, subsidio de
+    plataforma nem preco de checkout. Esses quatro campos vem NULOS, nunca zero.
+    Como o preco de checkout se compoe de `produto + frete - cupom`, e o frete
+    ELEVA enquanto o cupom REDUZ, a direcao liquida do desvio e' INDETERMINADA:
+    a comparacao e' PARCIAL e a diferenca pode mudar de valor e de sinal quando
+    esses componentes forem considerados.
+
+    MODO `latest` SOMENTE: nao ha parametro de data. A comparacao usa a ultima
+    observacao elegivel, com D-1 (America/Sao_Paulo) como teto. Comparacao
+    historica esta fora do MVP porque a referencia nao tem vigencia — casar um
+    preco antigo com a referencia de hoje produziria uma conclusao que a fonte
+    nao sustenta. O historico diario continua armazenado para evolucao futura.
+
+    Sem limiar comercial aprovado nao existe severidade: os unicos fatos sao
+    `difference_amount` e `difference_pct`. "Abaixo da referencia" e' um POTENCIAL
+    DESVIO DE PRECO que exige REVISAO HUMANA, nunca uma infracao.
+
+    Enviar `ref_date` e' RECUSADO com 422 — nunca ignorado em silencio.
+
+    Le exclusivamente `marts.*` no Neon.
+    """
+    # PRIMEIRA coisa do corpo: antes de `_require_db`, antes do servico e antes
+    # de qualquer consulta. Recusar cedo garante que uma requisicao com filtro
+    # historico nao toque o banco.
+    if ref_date is not None:
+        raise HTTPException(422, mp_svc.ERRO_REF_DATE_NAO_SUPORTADO)
+
+    sessao = _require_db(db)
+    try:
+        return mp_svc.get_monitoramento_preco(
+            sessao,
+            marketplace=marketplace,
+            brand=brand,
+            status=status,
+            product_query=product_query,
+            limit=limit,
+            offset=offset,
+        )
+    except mp_svc.MonitoramentoPrecoError as exc:
+        # Recusa de CONTRATO: erro do cliente. A mensagem e' constante e nao
+        # reflete nenhum caractere da entrada recusada.
+        raise HTTPException(422, str(exc))
+    except pma_match.PmaMatchError:
+        # INCONSISTENCIA DA NOSSA CAMADA DE DADOS, nao erro do cliente: NaN num
+        # preco, escala acima do teto, `ref_date` em D0 que o sync proibiu
+        # publicar, formato interno invalido. Nao e' recuperavel mudando a
+        # requisicao, logo nao pode ser 422. A mensagem devolvida e' FIXA — o
+        # texto da excecao fica no log do servidor, nunca na resposta.
+        raise HTTPException(500, ERRO_SERVING_INCONSISTENTE)
 
