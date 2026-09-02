@@ -453,7 +453,14 @@ export default function MonitoramentoPrecoPage() {
         )}
 
         {estado.fresh && linhas.length > 0 && (
-          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm">
+          // `overflow-hidden` corta a propagacao horizontal: as 12 colunas em
+          // `whitespace-nowrap` dao a tabela um min-content de ~1587px, e sem
+          // isso o overflow escapa do `overflow-x-auto` do TableScrollHint e a
+          // PAGINA INTEIRA passa a rolar na lateral — medido em producao em
+          // 1440/1024/390. E' o mesmo padrao que /pedidos ja usa; as outras
+          // rotas nao expunham o problema porque as tabelas delas sao mais
+          // estreitas. A rolagem interna da tabela continua funcionando.
+          <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             {truncamento && (
               <p className="text-xs text-slate-600 px-4 pt-4">{truncamento}</p>
             )}

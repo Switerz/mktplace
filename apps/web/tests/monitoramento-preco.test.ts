@@ -645,3 +645,24 @@ test("linha do payload tipa os quatro campos de checkout como anulaveis", () => 
   assert.equal(fmtMoeda(row.checkout_price), INDISPONIVEL);
   assert.equal(row.observed_effective_amount, row.advertised_price);
 });
+
+
+test("o wrapper da tabela corta o overflow horizontal da pagina", async () => {
+  // Regressao medida em producao no Gate PMA-4F: as 12 colunas em
+  // `whitespace-nowrap` dao a tabela um min-content de ~1587px. Sem
+  // `overflow-hidden` neste wrapper o overflow escapa do `overflow-x-auto` do
+  // TableScrollHint e a pagina inteira rola na lateral nos tres viewports
+  // (1440 -> scrollWidth 1766; 390 -> 1518). O recorte tem que ficar no
+  // wrapper, nao no TableScrollHint, que precisa seguir rolavel.
+  const pagina = await lerCodigo(PAGE);
+  const wrapper = pagina.match(
+    /<div className="bg-white border border-violet-100 rounded-2xl shadow-sm[^"]*">\s*\{truncamento/,
+  );
+  assert.ok(wrapper, "o wrapper da tabela mudou de forma; revise o recorte");
+  assert.ok(
+    wrapper[0].includes("overflow-hidden"),
+    "o wrapper da tabela precisa de overflow-hidden para nao vazar rolagem lateral",
+  );
+  // O TableScrollHint segue sendo quem rola: o recorte nao o substitui.
+  assert.ok(pagina.includes("<TableScrollHint>"), "a tabela continua no TableScrollHint");
+});
