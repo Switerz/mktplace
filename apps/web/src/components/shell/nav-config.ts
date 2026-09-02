@@ -40,7 +40,12 @@ export const NAV_SECTIONS: NavSection[] = [
   },
   {
     label: "Inteligência",
-    pages: [{ href: "/inteligencia", label: "Ações ML + TikTok" }],
+    pages: [
+      { href: "/inteligencia", label: "Ações ML + TikTok" },
+      // Gate PMA-3. Observacional: compara o preco anunciado das lojas
+      // proprias no ML com o preco sugerido de revenda das tabelas B2B.
+      { href: "/monitoramento-preco", label: "Monitoramento de preços" },
+    ],
   },
   {
     label: "Operações",

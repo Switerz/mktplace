@@ -26,8 +26,30 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     "/pedidos/tiktok",
     "/pedidos/ml",
     "/inteligencia",
+    // Gate PMA-3 — unica rota acrescentada desde o Gate U1. Nenhuma removida
+    // nem renomeada; o pino literal continua exigindo revisao consciente.
+    "/monitoramento-preco",
     "/operacoes",
   ]);
+});
+
+test("Gate PMA-3: /monitoramento-preco fica em Inteligencia, habilitada, sem badge", () => {
+  const inteligencia = NAV_SECTIONS.find((s) => s.label === "Inteligência")!;
+  const rotulos = inteligencia.pages.map((p) => p.label);
+  assert.deepEqual(rotulos, ["Ações ML + TikTok", "Monitoramento de preços"]);
+  const pma = inteligencia.pages.find((p) => p.href === "/monitoramento-preco")!;
+  assert.equal(pma.disabled, undefined);
+  assert.equal(pma.badge, undefined);
+  // O rotulo NAO usa "PMA": a referencia e' preco sugerido de revenda.
+  assert.ok(!/\bPMA\b/.test(pma.label));
+});
+
+test("Gate PMA-3: rota ativa e titulo da topbar", () => {
+  assert.equal(isNavItemActive("/monitoramento-preco", "/monitoramento-preco"), true);
+  assert.equal(getRouteTitle("/monitoramento-preco"), "Monitoramento de preços");
+  // Nao rouba a rota de /inteligencia.
+  assert.equal(isNavItemActive("/inteligencia", "/monitoramento-preco"), false);
+  assert.equal(getRouteTitle("/inteligencia"), "Ações ML + TikTok");
 });
 
 test("TikTok Shop e Mercado Livre em Pedidos continuam desabilitados com badge 'Em breve'", () => {

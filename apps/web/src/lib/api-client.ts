@@ -1980,3 +1980,45 @@ export function fetchRegioesTrend(
     apiFetch<RegioesTrendData>(`/api/v1/regioes/trend?${qs.toString()}`)
   );
 }
+
+// ---------------------------------------------------------------------------
+// Monitoramento de precos proprios (Gate PMA-3)
+// ---------------------------------------------------------------------------
+// Contrato e montagem de query vivem em `monitoramento-preco-contract.ts`
+// (sem dependencias, testavel por `node --test`). Reexportados aqui para
+// que os consumidores continuem importando de um lugar so.
+export * from "./monitoramento-preco-contract";
+import {
+  buildMonitoramentoPrecoQuery,
+  MonitoramentoPrecoError,
+  type MonitoramentoPrecoParams,
+  type MonitoramentoPrecoResponse,
+} from "./monitoramento-preco-contract";
+
+/**
+ * Busca o monitoramento de precos. LEVANTA em falha, de proposito.
+ *
+ * `apiFetch` devolve `null` em erro, o que colapsa "indisponivel" com "vazio".
+ * Aqui os dois estados sao distintos e a tela precisa separa-los: filtro que
+ * nao casa e' EMPTY; API fora do ar e' ERROR. Nunca ha fallback em mock.
+ */
+export async function fetchMonitoramentoPreco(
+  params: MonitoramentoPrecoParams = {},
+  signal?: AbortSignal,
+): Promise<MonitoramentoPrecoResponse> {
+  const qs = buildMonitoramentoPrecoQuery(params);
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_URL}/api/v1/performance/monitoramento-preco?${qs.toString()}`,
+      { signal },
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new MonitoramentoPrecoError("Nao foi possivel contatar a API.", null);
+  }
+  if (!res.ok) {
+    throw new MonitoramentoPrecoError(`A API respondeu ${res.status}.`, res.status);
+  }
+  return (await res.json()) as MonitoramentoPrecoResponse;
+}
