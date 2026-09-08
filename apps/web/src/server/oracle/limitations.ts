@@ -81,15 +81,16 @@ export function scopeWarningToLimitation(
   channelLabel: string,
 ): Limitation {
   const escopos: Record<string, string> = {
-    shopee_produtos_fonte_imatura: "competencia em maturacao",
+    shopee_produtos_maturacao_insuficiente: "competencia em maturacao",
     shopee_produtos_nenhuma_linha_elegivel: "sem produto concluido",
     shopee_produtos_carga_ausente: "carga ausente",
-    shopee_produtos_carga_defasada: "carga defasada",
-    shopee_produtos_fonte_nao_cobre_competencia: "fonte nao cobre a competencia",
+    shopee_produtos_carga_atras_da_diaria: "mart atras da diaria",
+    shopee_produtos_fonte_nunca_carregada: "competencia nunca carregada",
     shopee_produtos_cobertura_de_marcas: "cobertura de marcas incompleta",
     shopee_produtos_elegibilidade_parcial: "elegibilidade parcial",
-    shopee_produtos_maturidade_nao_medida: "maturidade nao medida",
-    shopee_produtos_fonte_sem_auditoria: "auditoria de carga ausente",
+    shopee_produtos_maturacao_nao_medida: "maturacao nao medida",
+    shopee_produtos_historico_de_carga_ausente: "historico de carga ausente",
+    shopee_produtos_indice_invalido: "indice de maturacao invalido",
   };
   const detalhe = escopos[warning.code] ?? "qualidade do escopo";
   return {

@@ -33,31 +33,32 @@ class Settings(BaseSettings):
     metabase_database_id: int = 43
 
     # -----------------------------------------------------------------------
-    # Gate SH-API-2D — piso de maturidade dos Produtos Shopee.
+    # Gate SH-API-2D — limiar heuristico do indice operacional de maturacao
+    # dos Produtos Shopee.
     #
-    # `shopee_maturity_floor` e' a razao minima
-    #     SUM(gmv) de marts.fact_shopee_product_monthly
+    # O INDICE e:
+    #     SUM(gmv) de marts.fact_shopee_product_monthly      (GMV concluido)
     #   / SUM(gmv) de marts.fact_marketplace_daily_performance (Shopee)
-    # abaixo da qual a competencia e' declarada MATERIALMENTE IMATURA: a
-    # planilha de Pedidos ainda nao concluiu os pedidos que a diaria (shop
-    # stats) ja' contabilizou.
     #
-    # NAO e' um numero arbitrario nem uma lista de meses. Foi MEDIDO em 30
-    # pares marca x competencia no Neon (2026-01..2026-08, ver
-    # docs/runbook_sync_produtos.md):
-    #   - meses fechados e maduros : razao entre 1,0047 e 1,1234 (30 pares)
-    #   - competencia imatura      : razao entre 0,6643 e 0,7700
-    #   - competencia sem conclusao: razao 0,0000
-    # Qualquer piso dentro de (0,7700 ; 1,0047) separa os dois regimes; 0,99
-    # e' o default provisorio por ficar dentro dessa faixa e coincidir com o
-    # piso medido de forma independente na silver do Data Mart (0,9987).
-    # E' um PARAMETRO, sobrescrevivel por variavel de ambiente sem deploy de
-    # codigo, e deve ser revisto quando houver mais meses fechados.
+    # NAO e percentual de conclusao, share nem completude. Numerador e
+    # denominador vem de POPULACOES DIFERENTES — subtotal de item no mart de
+    # Produtos contra GMV liquido do shop stats na diaria — e por isso o indice
+    # passa de 1,00 em meses fechados, o que num percentual seria absurdo.
+    # Serve para separar REGIME maduro de regime imaturo, nada mais.
     #
-    # A razao e' > 1 de forma sistematica porque o subtotal do item (Produtos)
-    # e' maior que o GMV liquido do shop stats (diaria) — sao definicoes
-    # diferentes de proposito. O piso mede REGIME, nunca equivalencia.
-    shopee_maturity_floor: float = Field(default=0.99, gt=0.0, le=2.0)
+    # O limiar e HEURISTICO e configuravel por variavel de ambiente
+    # (SHOPEE_MATURATION_THRESHOLD), sem deploy de codigo. Nao e meta, nem
+    # constante de negocio, nem SLA. Foi escolhido por cair dentro da faixa
+    # VAZIA entre os dois regimes medidos em 30 pares marca x competencia no
+    # Neon (2026-01..2026-08, ver docs/runbook_sync_produtos.md):
+    #   - meses fechados e maduros : indice entre 1,0047 e 1,1234 (30 pares)
+    #   - competencia imatura      : indice entre 0,6643 e 0,7700
+    #   - competencia sem conclusao: indice 0,0000
+    # Qualquer limiar dentro de (0,7700 ; 1,0047) separa os dois regimes; 0,99
+    # e o default provisorio por ficar nessa faixa e coincidir com o valor
+    # medido de forma independente na silver do Data Mart (0,9987). Deve ser
+    # revisto quando houver mais meses fechados.
+    shopee_maturation_threshold: float = Field(default=0.99, gt=0.0, le=2.0)
 
     @property
     def datamart_url(self) -> str:

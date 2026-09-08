@@ -27,6 +27,18 @@ function readSource(...segments: string[]): string {
   );
 }
 
+/**
+ * Fonte SEM comentarios. Asserção por substring sobre o arquivo inteiro é uma
+ * armadilha conhecida deste repo: o comentário que EXPLICA por que um termo
+ * foi banido contém o próprio termo, e o teste reprova a documentação em vez
+ * do código. Aqui a pergunta é sempre "o código executável usa isto?".
+ */
+function readCode(...segments: string[]): string {
+  return readSource(...segments)
+    .replace(/\/\*[\s\S]*?\*\//g, " ")   // blocos /* ... */ e JSDoc
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");  // linha // ... (preserva "http://")
+}
+
 // ---------------------------------------------------------------------------
 // Selos de referencia
 // ---------------------------------------------------------------------------
@@ -36,8 +48,8 @@ const SELO_MADURO = {
   channel: "shopee",
   brand: null,
   ref_month: "2024-02",
-  source_status: "source_covered",
-  load_status: "load_current",
+  source_status: "source_ever_loaded",
+  load_status: "load_present",
   eligibility_status: "eligible",
   maturity_status: "mature",
   coverage_status: "coverage_ok",
@@ -46,9 +58,12 @@ const SELO_MADURO = {
   definitive: true,
   measured: {
     rows_present: 472, eligible_rows: 472, excluded_zero_gmv: 0,
-    completed_gmv: 1000, reference_gmv: 980, completed_share: 1.0204,
-    maturity_floor: 0.99, brands_present: 5, brands_expected: 5,
-    source_covered_from: "2024-01-01", source_covered_through: "2024-03-01",
+    completed_gmv: 1000, reference_gmv: 980, maturation_index: 1.0204,
+    maturation_threshold: 0.99,
+    maturation_index_note: "Indice operacional de maturacao: nao e percentual de conclusao.",
+    brands_present: 5, brands_expected: 5,
+    source_first_loaded_window_start: "2024-01-01",
+    source_last_loaded_window_end: "2024-03-01",
     daily_max_date: "2024-02-29",
   },
   warnings: [],
@@ -57,20 +72,20 @@ const SELO_MADURO = {
 /** Competencia em maturacao E com carga defasada — dois eixos ao mesmo tempo. */
 const SELO_IMATURO = {
   ...SELO_MADURO,
-  load_status: "load_stale",
+  load_status: "load_behind_daily",
   maturity_status: "materially_immature",
   definitive: false,
-  measured: { ...SELO_MADURO.measured, completed_share: 0.754 },
+  measured: { ...SELO_MADURO.measured, maturation_index: 0.754 },
   warnings: [
     {
-      code: "shopee_produtos_carga_defasada",
+      code: "shopee_produtos_carga_atras_da_diaria",
       severity: "warning",
-      message: "A diaria ja registrou vendas desta competencia em datas posteriores a ultima publicacao do mart de Produtos.",
+      message: "A diaria ja registrou vendas desta competencia em datas posteriores a ultima publicacao do mart de Produtos: ha venda conhecida que o mart ainda nao viu.",
     },
     {
-      code: "shopee_produtos_fonte_imatura",
+      code: "shopee_produtos_maturacao_insuficiente",
       severity: "critical",
-      message: "Competencia materialmente imatura: o GMV concluido cobre 75.4% do GMV que a diaria ja registrou (piso 99%). Os numeros por produto vao SUBIR quando os pedidos em transito forem concluidos. Nao use como definitivo.",
+      message: "Competencia materialmente imatura: indice operacional de maturacao 0.7540, abaixo do limiar heuristico 0.9900. Os numeros por produto vao SUBIR conforme os pedidos em transito forem concluidos. Nao use como definitivo.",
     },
   ],
 };
@@ -130,9 +145,9 @@ test("produtos: competencia imatura chega ao modelo como campo estruturado", asy
   const sq = res.structuredContent.data.scope_quality;
   assert.equal(sq.definitive, false);
   assert.equal(sq.maturity_status, "materially_immature");
-  assert.equal(sq.load_status, "load_stale");
-  assert.equal(sq.completed_share, 0.754);
-  assert.equal(sq.maturity_floor, 0.99);
+  assert.equal(sq.load_status, "load_behind_daily");
+  assert.equal(sq.maturation_index, 0.754);
+  assert.equal(sq.maturation_threshold, 0.99);
   assert.equal(sq.ref_month, "2024-02");
 });
 
@@ -240,6 +255,97 @@ test("qualidade: competencia madura nao gera limitacao de escopo", async () => {
   const lims = res.structuredContent.data.limitations as Array<{ topic: string }>;
   assert.ok(!lims.some((l) => l.topic.startsWith("shopee_produtos_")));
   assert.equal(res.structuredContent.data.produtos_shopee_scope.definitive, true);
+});
+
+// ---------------------------------------------------------------------------
+// Gate SH-API-2D-R/V — semantica dos nomes
+// ---------------------------------------------------------------------------
+
+test("indice >1 atravessa o MCP sem truncamento", async () => {
+  // Truncar em 1,00 apagaria justamente o sinal de que numerador e
+  // denominador sao populacoes diferentes — e faria o numero parecer um
+  // percentual, que e a leitura que este gate veio proibir.
+  const res = await call("torre_produtos_prioritarios",
+    { canal: "shopee", mes: "2024-02", limite: 2 }, shopeeRoute(SELO_MADURO));
+  assert.equal(res.structuredContent.data.scope_quality.maturation_index, 1.0204);
+});
+
+test("o indice viaja acompanhado da explicacao de que nao e percentual", async () => {
+  const res = await call("torre_produtos_prioritarios",
+    { canal: "shopee", mes: "2024-02", limite: 2 }, shopeeRoute(SELO_MADURO));
+  const sq = res.structuredContent.data.scope_quality;
+  assert.ok(sq.maturation_index_note, "indice sem nota explicativa");
+  assert.match(sq.maturation_index_note, /nao e percentual|não é percentual/i);
+});
+
+test("nenhuma superficie do cliente chama o indice de share, percentual ou completude", () => {
+  for (const arquivo of [
+    ["src", "components", "ScopeQualityBanner.tsx"],
+    ["src", "lib", "api-client.ts"],
+    ["src", "server", "oracle", "tools.ts"],
+    ["src", "server", "oracle", "upstream.ts"],
+  ]) {
+    const code = readCode(...arquivo);
+    for (const proibido of ["completed_share", "maturity_floor", "percentual de conclus"]) {
+      assert.ok(!code.includes(proibido),
+        `${arquivo.join("/")} ainda usa "${proibido}" em codigo executavel`);
+    }
+  }
+});
+
+test("a faixa nao formata o indice por conta propria (nao pode virar '%')", () => {
+  // O numero so chega a tela dentro da mensagem do backend, que ja carrega a
+  // explicacao. Se a faixa formatasse sozinha, poderia exibi-lo como "75,4%".
+  const code = readCode("src", "components", "ScopeQualityBanner.tsx");
+  assert.ok(!code.includes("maturation_index"),
+    "a faixa nao deve ler o indice diretamente");
+  assert.ok(!/toFixed|toLocaleString\(.*percent/i.test(code),
+    "a faixa nao deve formatar numero de maturacao");
+});
+
+test("nenhum estado temporal sobrou nos nomes de load/source", () => {
+  const src = readSource("src", "lib", "api-client.ts");
+  for (const proibido of ['"load_current"', '"load_stale"', '"source_covered"']) {
+    assert.ok(!src.includes(proibido), `tipo ainda declara ${proibido}`);
+  }
+  assert.ok(src.includes('"load_present"') && src.includes('"load_behind_daily"'));
+  assert.ok(src.includes('"source_ever_loaded"') && src.includes('"source_never_loaded"'));
+});
+
+test("a linha de publicacao nomeia os dois relogios", () => {
+  // 34 dias ao lado de qualquer palavra que soe a "atual" exige dizer QUAL
+  // relogio esta sendo lido.
+  const src = readSource("src", "components", "ScopeQualityBanner.tsx");
+  assert.match(src, /Publicado no mart em/);
+  assert.match(src, /não da última atualização do dado na Shopee/);
+});
+
+test("o titulo nunca chama uma competencia de atual/atualizada", () => {
+  const code = readCode("src", "components", "ScopeQualityBanner.tsx");
+  const headline = code.slice(code.indexOf("function headline"), code.indexOf("function publicationLine"));
+  assert.ok(headline.length > 100, "recorte do titulo vazio — ancoras mudaram");
+  for (const proibido of ["atualizado", "atualizada", "em dia", "atual "]) {
+    assert.ok(!headline.includes(proibido), `titulo usa "${proibido}"`);
+  }
+});
+
+test("readCode remove comentario mas preserva codigo", () => {
+  // Sem esta prova, os testes de termo banido poderiam passar por um regex
+  // que apaga o arquivo inteiro — verde e inutil.
+  const src = readSource("src", "components", "ScopeQualityBanner.tsx");
+  const code = readCode("src", "components", "ScopeQualityBanner.tsx");
+  assert.ok(src.includes("percentual de conclus"), "fixture: o comentario existe");
+  assert.ok(!code.includes("percentual de conclus"), "comentario nao foi removido");
+  assert.ok(code.includes("export default function ScopeQualityBanner"), "codigo foi apagado");
+  assert.ok(code.includes("load_behind_daily"), "literal de codigo foi apagado");
+});
+
+test("todo texto novo da faixa tem piso de 12px", () => {
+  // text-xs = 12px. Nenhum tamanho abaixo disso na faixa.
+  const src = readSource("src", "components", "ScopeQualityBanner.tsx");
+  const menores = src.match(/text-\[(\d+)px\]/g) ?? [];
+  const abaixo = menores.filter((m) => Number(m.replace(/\D/g, "")) < 12);
+  assert.deepEqual(abaixo, [], `tamanhos abaixo de 12px: ${abaixo.join(", ")}`);
 });
 
 // ---------------------------------------------------------------------------

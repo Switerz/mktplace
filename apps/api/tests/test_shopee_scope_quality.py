@@ -46,7 +46,7 @@ class FakeSession:
         return FakeResult(self._row)
 
 
-FLOOR = float(settings.shopee_maturity_floor)
+THRESHOLD = float(settings.shopee_maturation_threshold)
 TODAY = date(2026, 9, 8)
 PUB = datetime(2026, 8, 5, 14, 29, 3, tzinfo=timezone.utc)
 
@@ -65,7 +65,7 @@ def row(**over) -> dict:
         "last_sync_finished_at": PUB,
         "source_min_date": date(2026, 1, 1),
         "source_max_date": date(2026, 8, 1),
-        "covers_ref_month": True,
+        "ever_loaded": True,
     }
     base.update(over)
     return base
@@ -82,8 +82,8 @@ def q(**over):
 
 def test_escopo_saudavel_e_definitivo_nos_seis_eixos():
     r, _ = q()
-    assert r["source_status"] == "source_covered"
-    assert r["load_status"] == "load_current"
+    assert r["source_status"] == "source_ever_loaded"
+    assert r["load_status"] == "load_present"
     assert r["eligibility_status"] == "eligible"
     assert r["maturity_status"] == "mature"
     assert r["coverage_status"] == "coverage_ok"
@@ -96,7 +96,7 @@ def test_payload_valida_contra_o_schema_publicado():
     r, _ = q()
     modelo = perf_schemas.ScopeQuality.model_validate(r)
     assert modelo.ref_month == "2026-06"
-    assert modelo.measured.maturity_floor == FLOOR
+    assert modelo.measured.maturation_threshold == THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -108,25 +108,25 @@ def test_fonte_coberta_vem_de_qualquer_execucao_historica_nao_da_ultima():
     # coberto por uma execucao anterior. `covers_ref_month` (bool_or sobre
     # TODAS as execucoes) e quem responde — nunca a janela da ultima.
     r, _ = q(source_min_date=date(2026, 7, 1), source_max_date=date(2026, 8, 1),
-             covers_ref_month=True)
-    assert r["source_status"] == "source_covered"
+             ever_loaded=True)
+    assert r["source_status"] == "source_ever_loaded"
 
 
 def test_fonte_nao_coberta_bloqueia_definitivo_mesmo_com_tudo_mais_ok():
-    r, _ = q(covers_ref_month=False)
-    assert r["source_status"] == "source_not_covered"
+    r, _ = q(ever_loaded=False)
+    assert r["source_status"] == "source_never_loaded"
     assert r["definitive"] is False
     assert r["maturity_status"] == "mature"      # o eixo vizinho nao muda
-    assert "shopee_produtos_fonte_nao_cobre_competencia" in _codes(r)
+    assert "shopee_produtos_fonte_nunca_carregada" in _codes(r)
 
 
 def test_sem_auditoria_a_fonte_e_indeterminada_e_nao_bloqueia_mes_maduro():
     # Ausencia de historico de execucao NAO e evidencia de ausencia de fonte:
     # a maturidade medida contra a diaria ja e evidencia propria.
-    r, _ = q(covers_ref_month=None, source_min_date=None, source_max_date=None)
-    assert r["source_status"] == "source_unknown"
+    r, _ = q(ever_loaded=None, source_min_date=None, source_max_date=None)
+    assert r["source_status"] == "source_history_unknown"
     assert r["definitive"] is True
-    assert "shopee_produtos_fonte_sem_auditoria" in _codes(r)
+    assert "shopee_produtos_historico_de_carga_ausente" in _codes(r)
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +143,8 @@ def test_carga_defasada_e_provada_pela_diaria_nao_por_idade_absoluta():
     # A diaria mediu 2026-08-31, posterior a publicacao do mart (2026-08-05):
     # existe venda conhecida que o mart comprovadamente nao viu.
     r, _ = q(daily_max_date=date(2026, 8, 31))
-    assert r["load_status"] == "load_stale"
-    assert "shopee_produtos_carga_defasada" in _codes(r)
+    assert r["load_status"] == "load_behind_daily"
+    assert "shopee_produtos_carga_atras_da_diaria" in _codes(r)
 
 
 def test_mes_fechado_publicado_ha_muito_tempo_nao_e_defasado():
@@ -152,7 +152,7 @@ def test_mes_fechado_publicado_ha_muito_tempo_nao_e_defasado():
     # idade nao e defasagem. `load_age_days` continua exposto para quem quiser
     # decidir diferente.
     r, _ = q(daily_max_date=date(2026, 6, 30))
-    assert r["load_status"] == "load_current"
+    assert r["load_status"] == "load_present"
     assert r["load_age_days"] == 34
 
 
@@ -202,22 +202,22 @@ def test_escopo_sem_linha_nenhuma_nao_emite_o_aviso_de_100pct_excluido():
 # ---------------------------------------------------------------------------
 
 def test_share_exatamente_no_piso_e_maduro():
-    r, _ = q(prod_gmv=FLOOR * 1000.0, daily_gmv=1000.0)
+    r, _ = q(prod_gmv=THRESHOLD * 1000.0, daily_gmv=1000.0)
     assert r["maturity_status"] == "mature"
 
 
 def test_share_logo_abaixo_do_piso_e_imaturo():
-    r, _ = q(prod_gmv=(FLOOR - 0.01) * 1000.0, daily_gmv=1000.0)
+    r, _ = q(prod_gmv=(THRESHOLD - 0.01) * 1000.0, daily_gmv=1000.0)
     assert r["maturity_status"] == "materially_immature"
     assert r["definitive"] is False
-    assert _sev(r, "shopee_produtos_fonte_imatura") == "critical"
+    assert _sev(r, "shopee_produtos_maturacao_insuficiente") == "critical"
 
 
 def test_aviso_de_imaturidade_diz_para_onde_o_numero_vai_se_mover():
     # Sem direcao o aviso e inutil para decidir: o leitor precisa saber que os
     # numeros SOBEM, senao pode interpretar imaturidade como queda de venda.
     r, _ = q(prod_gmv=700.0, daily_gmv=1000.0)
-    assert "SUBIR" in _msg(r, "shopee_produtos_fonte_imatura")
+    assert "SUBIR" in _msg(r, "shopee_produtos_maturacao_insuficiente")
 
 
 def test_share_acima_de_um_e_maduro_porque_as_definicoes_diferem():
@@ -225,7 +225,7 @@ def test_share_acima_de_um_e_maduro_porque_as_definicoes_diferem():
     # > 1 e o regime NORMAL de um mes fechado, nao um erro.
     r, _ = q(prod_gmv=1120.0, daily_gmv=1000.0)
     assert r["maturity_status"] == "mature"
-    assert r["measured"]["completed_share"] == 1.12
+    assert r["measured"]["maturation_index"] == 1.12
 
 
 def test_sem_carga_a_maturidade_e_indeterminada_e_nao_imatura():
@@ -233,16 +233,16 @@ def test_sem_carga_a_maturidade_e_indeterminada_e_nao_imatura():
     # se sabe. Atribuir imaturidade aqui mandaria o leitor cobrar o time errado.
     r, _ = q(rows_present=0, eligible_rows=0, prod_gmv=0.0)
     assert r["maturity_status"] == "maturity_unknown"
-    assert r["measured"]["completed_share"] is None
+    assert r["measured"]["maturation_index"] is None
     assert "nao ha linha de produto carregada" in _msg(
-        r, "shopee_produtos_maturidade_nao_medida")
+        r, "shopee_produtos_maturacao_nao_medida")
 
 
 def test_sem_referencia_na_diaria_a_maturidade_e_indeterminada():
     r, _ = q(daily_gmv=0.0)
     assert r["maturity_status"] == "maturity_unknown"
-    assert r["measured"]["completed_share"] is None
-    assert "diaria" in _msg(r, "shopee_produtos_maturidade_nao_medida")
+    assert r["measured"]["maturation_index"] is None
+    assert "diaria" in _msg(r, "shopee_produtos_maturacao_nao_medida")
 
 
 def test_maturidade_indeterminada_nunca_vira_definitivo():
@@ -252,7 +252,7 @@ def test_maturidade_indeterminada_nunca_vira_definitivo():
 
 def test_piso_exposto_no_payload_para_o_veredito_ser_auditavel():
     r, _ = q()
-    assert r["measured"]["maturity_floor"] == FLOOR
+    assert r["measured"]["maturation_threshold"] == THRESHOLD
     assert r["measured"]["completed_gmv"] == 1000.0
     assert r["measured"]["reference_gmv"] == 1000.0
 
@@ -281,16 +281,16 @@ def test_sem_marca_esperada_a_cobertura_e_indeterminada():
 def test_eixos_degradam_ao_mesmo_tempo_sem_um_apagar_o_outro():
     r, _ = q(rows_present=200, eligible_rows=0, prod_gmv=0.0,
              daily_gmv=1000.0, daily_max_date=date(2026, 8, 31),
-             brands_present=2, brands_expected=5, covers_ref_month=True)
-    assert r["source_status"] == "source_covered"
-    assert r["load_status"] == "load_stale"
+             brands_present=2, brands_expected=5, ever_loaded=True)
+    assert r["source_status"] == "source_ever_loaded"
+    assert r["load_status"] == "load_behind_daily"
     assert r["eligibility_status"] == "no_eligible_rows"
     assert r["maturity_status"] == "materially_immature"
     assert r["coverage_status"] == "coverage_below_expected"
     # quatro problemas simultaneos, quatro avisos — nenhum engolido
-    assert {"shopee_produtos_carga_defasada",
+    assert {"shopee_produtos_carga_atras_da_diaria",
             "shopee_produtos_nenhuma_linha_elegivel",
-            "shopee_produtos_fonte_imatura",
+            "shopee_produtos_maturacao_insuficiente",
             "shopee_produtos_cobertura_de_marcas"} <= set(_codes(r))
 
 
@@ -343,7 +343,7 @@ def test_consulta_vazia_nao_inventa_estado_bom():
     r = svc.get_shopee_scope_quality(db, None, 2026, 6, today=TODAY)
     assert r["definitive"] is False
     assert r["load_status"] == "load_absent"
-    assert r["source_status"] == "source_unknown"
+    assert r["source_status"] == "source_history_unknown"
     assert r["maturity_status"] == "maturity_unknown"
 
 
@@ -357,10 +357,10 @@ def test_ref_month_de_dezembro_fecha_a_janela_no_dia_31():
 # Propagacao para as rotas
 # ---------------------------------------------------------------------------
 
-def test_o_piso_e_parametro_de_configuracao_nao_literal_no_service():
+def test_o_limiar_e_parametro_de_configuracao_nao_literal_no_service():
     import inspect
     fonte = inspect.getsource(svc.get_shopee_scope_quality)
-    assert "settings.shopee_maturity_floor" in fonte
+    assert "settings.shopee_maturation_threshold" in fonte
     assert "0.99" not in fonte
     # e nenhum mes fica gravado na regra
     for proibido in ("2026-07", "2026-08", "julho", "agosto"):
@@ -401,6 +401,135 @@ def test_status_desconhecido_e_recusado_pelo_schema():
     r["maturity_status"] = "provavelmente_ok"
     with pytest.raises(Exception):
         perf_schemas.ScopeQuality.model_validate(r)
+
+
+# ---------------------------------------------------------------------------
+# Gate SH-API-2D-R/V — indice operacional de maturacao
+# ---------------------------------------------------------------------------
+
+def test_indice_maior_que_um_nao_e_truncado():
+    # Truncar em 1,00 apagaria o sinal de que numerador e denominador sao
+    # populacoes diferentes, e faria o numero parecer percentual.
+    r, _ = q(prod_gmv=1123.4, daily_gmv=1000.0)
+    assert r["measured"]["maturation_index"] == 1.1234
+    assert r["maturity_status"] == "mature"
+
+
+def test_indice_negativo_e_erro_e_nunca_vira_veredito():
+    r, _ = q(prod_gmv=-1.0, daily_gmv=1000.0)
+    assert r["maturity_status"] == "maturity_unknown"
+    assert r["measured"]["maturation_index"] is None
+    assert r["definitive"] is False
+    assert _sev(r, "shopee_produtos_indice_invalido") == "critical"
+
+
+def test_referencia_negativa_e_erro():
+    r, _ = q(prod_gmv=1000.0, daily_gmv=-5.0)
+    assert r["maturity_status"] == "maturity_unknown"
+    assert "shopee_produtos_indice_invalido" in _codes(r)
+
+
+def test_nan_e_erro_e_nao_passa_como_numero():
+    # 'NaN' >= limiar e False em Python, entao sem a guarda o mes viraria
+    # "imaturo" — um veredito inventado a partir de lixo.
+    r, _ = q(prod_gmv=float("nan"), daily_gmv=1000.0)
+    assert r["maturity_status"] == "maturity_unknown"
+    assert "shopee_produtos_indice_invalido" in _codes(r)
+
+
+def test_entrada_invalida_nao_emite_aviso_de_imaturidade():
+    # Os dois avisos sao mutuamente exclusivos: dizer "imatura" sobre uma
+    # entrada que nem foi calculada seria afirmar o que nao se mediu.
+    r, _ = q(prod_gmv=float("nan"), daily_gmv=1000.0)
+    assert "shopee_produtos_maturacao_insuficiente" not in _codes(r)
+    assert "shopee_produtos_maturacao_nao_medida" not in _codes(r)
+
+
+def test_funcao_pura_do_indice_levanta_em_entrada_impossivel():
+    import pytest as _pytest
+    with _pytest.raises(svc.ScopeQualityInputError):
+        svc.compute_maturation_index(-1.0, 10.0)
+    with _pytest.raises(svc.ScopeQualityInputError):
+        svc.compute_maturation_index(10.0, float("nan"))
+    assert svc.compute_maturation_index(10.0, 0.0) is None
+    assert svc.compute_maturation_index(12.0, 10.0) == 1.2
+
+
+def test_o_indice_sempre_viaja_com_a_explicacao():
+    # Proibicao do gate: nunca expor o valor bruto sem dizer o que ele e.
+    r, _ = q()
+    nota = r["measured"]["maturation_index_note"]
+    assert "percentual de conclusao" in nota
+    assert "ACIMA de 1,00" in nota
+
+
+def test_aviso_de_imaturidade_carrega_indice_limiar_e_explicacao():
+    r, _ = q(prod_gmv=754.0, daily_gmv=1000.0)
+    msg = _msg(r, "shopee_produtos_maturacao_insuficiente")
+    assert "0.7540" in msg                    # indice, com 4 casas
+    assert "limiar heuristico" in msg
+    assert "percentual de conclusao" in msg   # a explicacao acompanha
+    assert "SUBIR" in msg
+    assert "%" not in msg.replace("%", "", 0) or "0.7540" in msg
+
+
+def test_nenhuma_mensagem_formata_o_indice_como_percentual():
+    for kwargs in ({"prod_gmv": 754.0, "daily_gmv": 1000.0},
+                   {"prod_gmv": 0.0, "daily_gmv": 1000.0}):
+        r, _ = q(**kwargs)
+        for w in r["warnings"]:
+            assert "%" not in w["message"], f"{w['code']} formata como %: {w['message']}"
+
+
+# ---------------------------------------------------------------------------
+# Gate SH-API-2D-R/V — nomes nao-temporais
+# ---------------------------------------------------------------------------
+
+def test_carga_presente_nao_afirma_frescor():
+    # `load_present` e ausencia de evidencia de atraso, nunca prova de estar
+    # em dia: um mart publicado ha 34 dias continua `load_present` para um mes
+    # fechado, e o nome nao pode dizer "atual".
+    r, _ = q(daily_max_date=date(2026, 6, 30))
+    assert r["load_status"] == "load_present"
+    assert r["load_age_days"] == 34
+    assert "current" not in r["load_status"]
+    assert "atual" not in r["load_status"]
+
+
+def test_carga_atras_da_diaria_declara_a_propria_evidencia():
+    r, _ = q(daily_max_date=date(2026, 8, 31))
+    assert r["load_status"] == "load_behind_daily"
+    assert "diaria" in _msg(r, "shopee_produtos_carga_atras_da_diaria")
+
+
+def test_historico_da_fonte_nao_afirma_que_a_fonte_esta_atualizada():
+    r, _ = q(ever_loaded=True)
+    assert r["source_status"] == "source_ever_loaded"
+    # nenhum aviso e emitido, e o nome nao promete frescor
+    assert not any(w["code"].startswith("shopee_produtos_fonte") for w in r["warnings"])
+
+
+def test_nunca_carregada_e_diferente_de_historico_desconhecido():
+    nunca, _ = q(ever_loaded=False)
+    desconhecido, _ = q(ever_loaded=None)
+    assert nunca["source_status"] == "source_never_loaded"
+    assert desconhecido["source_status"] == "source_history_unknown"
+    assert nunca["definitive"] is False          # contradicao explicita bloqueia
+    assert desconhecido["definitive"] is True    # indeterminacao nao bloqueia
+
+
+def test_o_service_nao_usa_mais_vocabulario_temporal_nos_estados():
+    import inspect
+    fonte = inspect.getsource(svc.get_shopee_scope_quality)
+    for proibido in ('"load_current"', '"load_stale"', '"source_covered"',
+                     '"completed_share"', '"maturity_floor"'):
+        assert proibido not in fonte, proibido
+
+
+def test_loaded_at_e_rotulado_como_publicacao_no_mart():
+    import inspect
+    fonte = inspect.getsource(svc.get_shopee_scope_quality)
+    assert "publicacao NO MART" in fonte or "publicacao do mart" in fonte
 
 
 # ---------------------------------------------------------------------------

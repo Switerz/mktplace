@@ -104,14 +104,20 @@ const scopeQualityOutSchema = z.object({
   eligibility_status: z.string(),
   maturity_status: z.string(),
   coverage_status: z.string(),
-  /** Ultima publicacao do mart neste escopo. */
+  /** Ultima publicacao NO MART. Nao e a atualizacao do dado na Shopee. */
   loaded_at: z.string().nullable(),
   load_age_days: z.number().nullable(),
   /** false = NAO apresentar como numero fechado. */
   definitive: z.boolean(),
-  /** Participacao do GMV concluido sobre a referencia. null = nao medido. */
-  completed_share: z.number().nullable(),
-  maturity_floor: z.number().nullable(),
+  /**
+   * Indice OPERACIONAL de maturacao. NAO e percentual de conclusao: valores
+   * > 1 sao normais. Sempre citar `maturation_index_note` ao mencionar o
+   * numero. null = nao medido, nunca 0.
+   */
+  maturation_index: z.number().nullable(),
+  /** Limiar heuristico configuravel, nao meta. */
+  maturation_threshold: z.number().nullable(),
+  maturation_index_note: z.string().nullable(),
   rows_present: z.number().nullable(),
   eligible_rows: z.number().nullable(),
 });
@@ -136,8 +142,9 @@ type UpstreamScopeQuality = {
   load_age_days?: number | null;
   definitive: boolean;
   measured: {
-    completed_share?: number | null;
-    maturity_floor?: number | null;
+    maturation_index?: number | null;
+    maturation_threshold?: number | null;
+    maturation_index_note?: string | null;
     rows_present?: number | null;
     eligible_rows?: number | null;
   };
@@ -157,8 +164,9 @@ function toScopeQualityOut(q: UpstreamScopeQuality): ScopeQualityOut {
     loaded_at: q.loaded_at ?? null,
     load_age_days: numOrNull(q.load_age_days),
     definitive: q.definitive,
-    completed_share: numOrNull(q.measured.completed_share),
-    maturity_floor: numOrNull(q.measured.maturity_floor),
+    maturation_index: numOrNull(q.measured.maturation_index),
+    maturation_threshold: numOrNull(q.measured.maturation_threshold),
+    maturation_index_note: q.measured.maturation_index_note ?? null,
     rows_present: numOrNull(q.measured.rows_present),
     eligible_rows: numOrNull(q.measured.eligible_rows),
   };

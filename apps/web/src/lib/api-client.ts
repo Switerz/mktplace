@@ -773,8 +773,20 @@ export function fetchProdutosMLSummary(params: {
 // NAO e sinal verde: a UI trata `null` como "nao verificado".
 // ---------------------------------------------------------------------------
 
-export type SourceStatus = "source_covered" | "source_not_covered" | "source_unknown";
-export type LoadStatus = "load_absent" | "load_stale" | "load_current";
+/**
+ * Historico de carga, NAO frescor: diz se ALGUMA execucao ja carregou a
+ * competencia. Nunca afirma que a fonte esta atualizada.
+ */
+export type SourceStatus =
+  | "source_ever_loaded"
+  | "source_never_loaded"
+  | "source_history_unknown";
+/**
+ * Presenca da carga, NAO frescor. `load_present` e ausencia de evidencia de
+ * atraso, jamais prova de estar em dia; `load_behind_daily` declara a
+ * evidencia (a diaria tem dias posteriores a publicacao do mart).
+ */
+export type LoadStatus = "load_absent" | "load_behind_daily" | "load_present";
 export type EligibilityStatus = "no_eligible_rows" | "partially_eligible" | "eligible";
 export type MaturityStatus = "mature" | "materially_immature" | "maturity_unknown";
 export type CoverageStatus = "coverage_ok" | "coverage_below_expected" | "coverage_unknown";
@@ -791,13 +803,22 @@ export interface ScopeQualityMeasured {
   excluded_zero_gmv: number;
   completed_gmv: number;
   reference_gmv: number;
-  /** null = nao medido. NUNCA tratar como 0. */
-  completed_share: number | null;
-  maturity_floor: number;
+  /**
+   * Indice OPERACIONAL de maturacao = completed_gmv / reference_gmv.
+   * NAO e percentual de conclusao, share nem completude: numerador e
+   * denominador vem de populacoes diferentes, entao valores > 1 sao normais
+   * em meses fechados e NUNCA devem ser truncados nem formatados como "%".
+   * `null` = nao medido, jamais 0. Exibir sempre com `maturation_index_note`.
+   */
+  maturation_index: number | null;
+  /** Limiar HEURISTICO configuravel no backend, nao meta nem SLA. */
+  maturation_threshold: number;
+  /** Explicacao obrigatoria do indice; sem ela o numero e mal lido. */
+  maturation_index_note: string;
   brands_present: number;
   brands_expected: number;
-  source_covered_from: string | null;
-  source_covered_through: string | null;
+  source_first_loaded_window_start: string | null;
+  source_last_loaded_window_end: string | null;
   daily_max_date: string | null;
 }
 
@@ -810,7 +831,10 @@ export interface ScopeQuality {
   eligibility_status: EligibilityStatus;
   maturity_status: MaturityStatus;
   coverage_status: CoverageStatus;
-  /** Ultima publicacao do mart neste escopo. */
+  /**
+   * Ultima publicacao NO MART neste escopo. E o relogio da publicacao, nunca
+   * o da atualizacao do dado na Shopee — sao dois relogios distintos.
+   */
   loaded_at: string | null;
   load_age_days: number | null;
   definitive: boolean;

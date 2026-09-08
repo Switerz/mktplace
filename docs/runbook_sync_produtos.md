@@ -1076,9 +1076,9 @@ competência com o mesmo peso. Três exemplos medidos em 08/09/2026:
 
 | Competência | O que a Torre mostrava | O que era verdade |
 |---|---|---|
-| 2026-07 | R$ 5.512.907,44, sem ressalva | GMV concluído cobria **75,4%** do que a diária já registrava |
+| 2026-07 | R$ 5.512.907,44, sem ressalva | o mart estava materialmente atrás da diária |
 | 2026-08 | tela vazia | **188 linhas carregadas**, todas com GMV = 0 (nenhum pedido concluído) |
-| 2026-09 | tela vazia | fonte **nunca extraída** para o mês; diária já tem até 07/09 |
+| 2026-09 | tela vazia | competência **nunca carregada**; diária já tem até 07/09 |
 
 Nos três casos o número exibido estava aritmeticamente correto. O que faltava
 era o **regime**: número certo com regime errado é número errado para quem
@@ -1088,68 +1088,124 @@ decide.
 
 Um único estado mutuamente exclusivo esconde o eixo que importa — foi
 exatamente o defeito F5 do Gate SH-API-2B-R2, em que `maturation_pending`
-encobria `load_stale`. O contrato tem seis eixos independentes:
+encobria a defasagem da carga. O contrato tem seis eixos independentes:
 
-| Eixo | Pergunta | Fonte durável (Neon) |
-|---|---|---|
-| `source_status` | alguma carga bem-sucedida cobriu esta competência? | `audit.source_sync_run` |
-| `load_status` | há linhas, e são mais novas que o último dia já medido pela diária? | `fact_shopee_product_monthly` × `fact_marketplace_daily_performance` |
-| `eligibility_status` | quantas linhas sobrevivem ao filtro de exibição (`gmv > 0`)? | `fact_shopee_product_monthly` |
-| `maturity_status` | o GMV concluído já alcançou o regime dos meses fechados? | razão contra a diária vs. piso medido |
-| `coverage_status` | todas as marcas que venderam na diária aparecem no mart? | as duas fatos |
-| `loaded_at` | quando o mart foi publicado neste escopo? | `MAX(ingested_at)`, com fallback no último sync |
+| Eixo | Pergunta exata | Valores | Fonte durável (Neon) |
+|---|---|---|---|
+| `source_status` | **alguma** execução já carregou esta competência? | `source_ever_loaded` · `source_never_loaded` · `source_history_unknown` | `audit.source_sync_run` |
+| `load_status` | há linhas, e existe evidência de que estão atrás da diária? | `load_present` · `load_behind_daily` · `load_absent` | as duas fatos |
+| `eligibility_status` | quantas linhas sobrevivem ao filtro de exibição (`gmv > 0`)? | `eligible` · `partially_eligible` · `no_eligible_rows` | `fact_shopee_product_monthly` |
+| `maturity_status` | o índice operacional de maturação alcançou o limiar? | `mature` · `materially_immature` · `maturity_unknown` | índice vs. limiar |
+| `coverage_status` | todas as marcas que venderam na diária aparecem no mart? | `coverage_ok` · `coverage_below_expected` · `coverage_unknown` | as duas fatos |
+| `loaded_at` | quando o **mart** foi publicado neste escopo? | timestamp + `load_age_days` | `MAX(ingested_at)`, fallback no último sync |
 
 `definitive` é um **atalho de renderização** derivado dos eixos, nunca a fonte
 da verdade. `definitive = false` não significa "número errado": significa "não
 use como definitivo sem ler os eixos".
 
-### O piso de maturidade — medido, não arbitrado
+### Nomenclatura — por que estes nomes (Gate SH-API-2D-R/V)
 
-`maturity_share = SUM(gmv) de Produtos ÷ SUM(gmv) da diária Shopee`, no mesmo
-par marca × competência. Medido em 30 pares (2026-01..2026-08, Neon,
-somente leitura):
+A primeira versão usava nomes que afirmavam mais do que o contrato media. Três
+correções, todas de significado e não de estilo:
 
-| Regime | Faixa observada |
+**`source_ever_loaded`, não `source_covered`.** O `bool_or(...)` sobre
+`audit.source_sync_run` responde "esta competência já foi carregada alguma
+vez?". "Coberta" sugere que a fonte está em dia — o eixo não mede isso e não
+pode afirmar. Um mês carregado uma única vez em fevereiro responde
+`source_ever_loaded` para sempre, mesmo que a Shopee tenha mudado tudo depois.
+
+**`load_present`, não `load_current`.** "Current"/"atual" é uma afirmação
+**temporal**. O eixo mede presença de linhas mais ausência de evidência de
+atraso — não frescor. O mart publicado em 05/08/2026 aparecia como
+`load_current` para julho 34 dias depois: verdadeiro pela definição interna,
+enganoso como palavra. A assimetria é deliberada: `load_present` é *ausência
+de evidência de atraso*, nunca prova de estar em dia.
+
+**`load_behind_daily`, não `load_stale`.** "Stale" também é temporal e não diz
+o que foi medido. O nome novo declara a própria evidência: a diária registrou
+dias **desta** competência em datas posteriores à publicação do mart, logo
+existe venda conhecida que o mart comprovadamente não viu.
+
+### O índice operacional de maturação
+
+```
+maturation_index = SUM(gmv) de marts.fact_shopee_product_monthly
+                 ÷ SUM(gmv) de marts.fact_marketplace_daily_performance (Shopee)
+```
+no mesmo par marca × competência.
+
+**Não é percentual de conclusão, share nem completude.** Numerador e
+denominador vêm de **populações diferentes**: o numerador soma subtotais de
+item do mart de Produtos; o denominador é o GMV líquido do shop stats na
+diária. Por isso o índice **passa de 1,00** em meses fechados — o que seria
+absurdo num percentual e é o regime **normal** aqui. Valores > 1 são permitidos
+e **nunca truncados**: truncar apagaria justamente o sinal de que as duas
+populações não são equivalentes.
+
+O índice serve para uma coisa só: **separar regime maduro de regime imaturo**.
+Nunca para afirmar "X% dos pedidos foram concluídos".
+
+Medido em 30 pares marca × competência (2026-01..2026-08, Neon, somente
+leitura):
+
+| Regime | Faixa do índice |
 |---|---|
 | meses fechados e maduros (jan–jun, 5 marcas) | **1,0047 a 1,1234** |
 | competência em maturação (julho, 5 marcas) | **0,6643 a 0,7700** |
 | competência sem conclusão (agosto, 5 marcas) | **0,0000** |
 
-Qualquer piso dentro de **(0,7700 ; 1,0047)** separa os regimes sem erro. O
-default é `0,99` — dentro dessa faixa, e coincidente com o piso medido de forma
-independente na `silver` do Data Mart (0,9987) no Gate SH-API-2C-R3.
+**O limiar 0,99 é heurístico e configurável**, não meta, SLA nem constante de
+negócio. Vive em `Settings.shopee_maturation_threshold`
+(`apps/api/app/config.py`), sobrescrevível por `SHOPEE_MATURATION_THRESHOLD`
+**sem deploy de código**. Foi escolhido por cair dentro da faixa **vazia**
+entre os dois regimes — qualquer valor em (0,7700 ; 1,0047) separa igualmente
+bem — e por coincidir com o valor medido de forma independente na `silver` do
+Data Mart (0,9987) no Gate SH-API-2C-R3. Deve ser revisto quando houver mais
+meses fechados.
 
-Duas propriedades que precisam ficar registradas:
+**O valor bruto nunca é exibido sozinho.** Toda superfície que mostra o número
+carrega junto `maturation_index_note`, que explica que não é percentual. A
+faixa da tela nem lê o campo diretamente: o número chega dentro da mensagem já
+formada pelo backend, justamente para não poder ser renderizado como "%".
 
-1. **A razão é > 1 nos meses fechados, e isso é o normal.** O subtotal do item
-   (Produtos) é maior que o GMV líquido do shop stats (diária) — são
-   definições diferentes de propósito. O piso mede **regime**, jamais
-   equivalência entre as duas fontes.
-2. **O backfill proposto não quebra o piso.** Ápice maio cairia de 1,0782 para
-   1,0361 e Barbours maio de 1,0758 para 1,0266 — os dois seguem acima de 1,00
-   e classificados como maduros.
+**Entrada impossível é erro, não veredito.** GMV negativo ou `NaN` levanta
+`ScopeQualityInputError` em `compute_maturation_index`; o chamador degrada para
+`maturity_status = maturity_unknown` com aviso **crítico**
+`shopee_produtos_indice_invalido`, e nenhum veredito de maturação é emitido.
+Sem essa guarda, `NaN >= limiar` é `False` em Python e o mês viraria "imaturo"
+— um veredito inventado a partir de lixo. A degradação é preferida a uma
+exceção que derrubaria a página inteira de Produtos por causa de uma linha.
 
-O piso vive em `Settings.shopee_maturity_floor` (`apps/api/app/config.py`),
-sobrescrevível por variável de ambiente **sem deploy de código**. Nenhuma
-superfície (API, tela, MCP) grava o valor literal nem qualquer lista de meses:
-trocar o mês muda a medição, nunca o código. Há teste que reprova a
-reintrodução de `0.99`, `2026-07` ou `2026-08` no service e nas telas.
+### Os dois relógios
+
+`loaded_at` é o carimbo da **publicação no mart** (`MAX(ingested_at)`, com
+fallback no último sync bem-sucedido quando o escopo não tem linha). **Nunca**
+é a data de atualização do dado na Shopee. São dois relógios distintos e
+nenhuma superfície pode confundi-los:
+
+- Um mart publicado há 34 dias pode conter um mês fechado perfeito.
+- O mesmo mart, para o mês corrente, pode não ter visto a venda de ontem — e é
+  exatamente isso que `load_behind_daily` detecta.
+
+Por isso a faixa escreve, por extenso: *"Publicado no mart em 05/08/2026, há 34
+dias — esta é a data da publicação no mart, não da última atualização do dado
+na Shopee."* Nenhum título usa "atual", "atualizado" ou "em dia" — há teste que
+reprova a reintrodução dessas palavras.
 
 ### Estado atual medido (08/09/2026)
 
-| Competência | fonte | carga | elegibilidade | maturidade | cobertura | share | definitivo |
+| Competência | fonte | carga | elegibilidade | maturação | cobertura | índice | definitivo |
 |---|---|---|---|---|---|---|---|
-| 2026-01..06 | coberta | atual | parcial | **madura** | ok | 1,0249–1,1098 | **sim** |
-| 2026-07 | coberta | atual | parcial | **imatura** | ok | 0,7540 | não |
-| 2026-08 | coberta | **defasada** | **nenhuma elegível** | **imatura** | ok | 0,0000 | não |
-| 2026-09 | **não coberta** | **ausente** | nenhuma elegível | não medida | **abaixo** | N/D | não |
+| 2026-01..06 | `ever_loaded` | `present` | parcial | **madura** | ok | 1,0249–1,1098 | **sim** |
+| 2026-07 | `ever_loaded` | `present` | parcial | **imatura** | ok | 0,7540 | não |
+| 2026-08 | `ever_loaded` | **`behind_daily`** | **nenhuma elegível** | **imatura** | ok | 0,0000 | não |
+| 2026-09 | **`never_loaded`** | **`absent`** | nenhuma elegível | não medida | **abaixo** | N/D | não |
 
 Elegibilidade "parcial" nos meses fechados é esperada e apenas informativa
 (9 a 30 linhas com GMV = 0 em ~470–500), não bloqueia `definitive`.
 
 O mart de Produtos foi publicado pela última vez em **05/08/2026** — 34 dias
-antes desta medição. Esse número agora aparece na tela e no MCP: "está certo" e
-"está certo e foi publicado há 34 dias" levam a decisões diferentes.
+antes desta medição.
 
 ### Onde o selo aparece
 
@@ -1163,21 +1219,37 @@ antes desta medição. Esse número agora aparece na tela e no MCP: "está certo
 | `torre_produtos_prioritarios` | `data.scope_quality` + `limitations` + aviso no resumo textual |
 | `torre_qualidade_dados` | `data.produtos_shopee_scope` + `limitations` + aviso no resumo textual |
 
-Três regras de honestidade valem em todas elas:
+Quatro regras de honestidade valem em todas elas:
 
 - **Ausência de selo não é aprovação.** `null` significa "não medido" (canal
   que ainda não publica o selo; janela que não é uma competência única) e a UI
   não renderiza nada — em vez de renderizar um "ok" que ninguém apurou.
-- **Todos os avisos aparecem**, não só o mais grave, senão a carga defasada
-  volta a se esconder atrás da imaturidade.
+- **Todos os avisos aparecem**, não só o mais grave, senão a carga atrás da
+  diária volta a se esconder atrás da maturação.
 - **Status desconhecido é recusado no schema**, na API e no MCP. Um estado novo
   quebra o consumidor em vez de ser repassado ao modelo, que trataria
   `provavelmente_ok` como aprovação.
+- **O índice nunca viaja sem a nota.** Nem na API, nem no MCP, nem na tela.
 
 As limitações do MCP são **derivadas dos avisos do backend**, nunca de uma
 lista local — `src/server/oracle/limitations.ts` proíbe explicitamente duplicar
 o que a resposta já informa, para o conector não contradizer o mart quando a
 medição mudar.
+
+### Códigos de aviso
+
+| Código | Severidade | Significado |
+|---|---|---|
+| `shopee_produtos_fonte_nunca_carregada` | critical | nenhuma execução bem-sucedida carregou esta competência |
+| `shopee_produtos_historico_de_carga_ausente` | warning | não há execução registrada; histórico indeterminado |
+| `shopee_produtos_carga_ausente` | critical | zero linhas no mart |
+| `shopee_produtos_carga_atras_da_diaria` | warning | a diária tem dias posteriores à publicação do mart |
+| `shopee_produtos_nenhuma_linha_elegivel` | critical | há linhas, todas com GMV = 0 |
+| `shopee_produtos_elegibilidade_parcial` | info | parte das linhas fora da exibição por GMV = 0 |
+| `shopee_produtos_indice_invalido` | critical | entrada impossível; nenhum veredito emitido |
+| `shopee_produtos_maturacao_insuficiente` | critical | índice abaixo do limiar heurístico |
+| `shopee_produtos_maturacao_nao_medida` | warning | sem carga, ou sem referência na diária |
+| `shopee_produtos_cobertura_de_marcas` | warning | menos marcas no mart que na diária |
 
 ### Por que não houve migration
 
@@ -1188,27 +1260,29 @@ As três tabelas necessárias já existiam no Neon. Em particular
 
 Uma armadilha medida durante a implementação: a carga é **incremental**, então
 a última execução cobre apenas a janela que ela atualizou (07..08/2026).
-Perguntar "a última execução cobriu?" reprovava **todos** os meses fechados
-como fonte ausente. A pergunta correta é histórica — `bool_or(...)` sobre todas
-as execuções bem-sucedidas.
+Perguntar "a última execução carregou?" reprovava **todos** os meses fechados.
+A pergunta correta é histórica — `bool_or(...)` sobre todas as execuções
+bem-sucedidas — e é por isso que o eixo se chama `source_ever_loaded`.
 
 `audit.data_quality_check` (viva: 1.029 linhas, 14 checks distintos) é o
 destino natural caso se queira **histórico** do selo no futuro; também não
-exige migration. Nada foi escrito nesta rodada.
+exige migration. Nada foi escrito.
 
 ### Proposta de backfill — restrita a Ápice/maio e Barbours/maio
 
-**Não executada nesta rodada.** Escopo derivado da deduplicação fail-closed do
-Gate SH-API-2A-R e reconciliado no Gate SH-API-2C-R3 (candidato × local ×
-Neon, com paridade perfeita entre os dois destinos):
+**Não executada.** Escopo derivado da deduplicação fail-closed do Gate
+SH-API-2A-R e reconciliado no Gate SH-API-2C-R3 (candidato × local × Neon, com
+paridade perfeita entre os dois destinos):
 
-| Escopo | Δ GMV | Δ chaves | Efeito no share |
+| Escopo | Δ GMV | Δ chaves | Efeito no índice |
 |---|---|---|---|
 | `apice` / 2026-05 | −23.292,43 | 0 | 1,0782 → 1,0361 (segue madura) |
 | `barbours` / 2026-05 | −80.987,03 | 0 | 1,0758 → 1,0266 (segue madura) |
 
 Ambos são **reduções**: removem duplicação de snapshot sobreposto, não
-acrescentam venda. Nenhuma chave nova, nenhuma chave removida.
+acrescentam venda. Nenhuma chave nova, nenhuma chave removida. Os dois seguem
+acima de 1,00 depois da correção, então o backfill não muda o veredito de
+regime — o que é o resultado esperado para uma remoção de duplicata.
 
 Deliberadamente **fora** desta proposta:
 
@@ -1217,7 +1291,7 @@ Deliberadamente **fora** desta proposta:
   **materialmente imaturas**. Backfillar um mês que ainda vai mudar sozinho
   troca um número provisório por outro número provisório e consome a janela de
   revisão sem reduzir risco.
-- Qualquer competência a partir de 2026-08: `load_status = load_stale` ou
+- Qualquer competência a partir de 2026-08: `load_behind_daily` ou
   `load_absent`. O passo correto ali é **re-executar a carga**, não corrigir
   retroativamente uma carga que nem chegou.
 
@@ -1227,10 +1301,11 @@ Pré-condições para executar, todas já implementadas e nenhuma satisfeita hoj
    `--target neon`, ambos com identidade comprovada e reconciliação idêntica.
 2. Os dois XLSX fora do padrão em `shopee/barbours/` retirados da pasta (a
    triagem fail-closed aborta a marca inteira enquanto eles estiverem lá).
-3. Credencial de escrita explícita — `--apply` segue **bloqueado** em `main()`.
+3. Credencial de escrita explícita — `--apply` segue **bloqueado** em `main()`,
+   retornando `EXIT_VALIDATION_REFUSED` antes de qualquer I/O.
 
 Depois do backfill, o selo é a verificação: os dois escopos devem permanecer
-`mature` e `definitive`. Se qualquer um cair abaixo do piso, o backfill não é
+`mature` e `definitive`. Se qualquer um cair abaixo do limiar, o backfill não é
 o que se esperava e deve ser revertido pela tabela de backup durável.
 
 ## Histórico de decisões
@@ -1258,3 +1333,4 @@ o que se esperava e deve ser revertido pela tabela de backup durável.
 | 2026-07-16 | Gate C1 (retry do Gate B6.1c revela achado operacional, não bug): execução real de `full_daily` (~18min) falhou por `daily_shopee_orders` estourar seu timeout de 900s num arquivo Shopee grande — causa raiz era rodar ingestão **manual** (Shopee só muda com upload de export novo) todo dia dentro de um pipeline de cadência **automática diária**, não um timeout pequeno demais. `orchestrate.py::PIPELINES` separado em dois pipelines independentes: `full_daily` (ml/tiktok/regional/produtos ml-tiktok/health_check, orçamento 7200s→3600s) e `shopee_manual_refresh` (novo, manual, nunca agendado: Shopee orders/stats/ads críticos + produtos Shopee + Bug 8 + health_check, orçamento 3780s). `health_check.py::EXPECTED_SOURCES` — `shopee_daily`/`shopee-stats_daily`/`shopee-ads_daily` (execução) marcados `critical=False`, mesmo padrão do Gate B4 para `shopee_product_monthly`, evitando que `ok_critical` reprove só por Shopee ter saído da cadência diária. `run_task.ps1` ganha `TaskKey "shopee_manual_refresh"` reaproveitando o mesmo `Invoke-ResolvedTask`/lock/timeout/log, com lock separado. `schedule_plan.py` só atualiza comentários de orçamento (7200s→3600s); `EXTERNAL_LOCK_TIMEOUT_SECONDS`/`TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS` (9000s/9600s) e a lógica de criação/ativação **não foram alterados**; `PROPOSED_SCHEDULE` continua com 1 única tarefa (`full_daily`), nenhuma tarefa Shopee é proposta. Scheduler segue **Disabled** até o Gate C3 (depois do Gate C2 — rodar `full_daily` sem Shopee via `run_task.ps1`, observado estável). 1.427→1.451 testes pytest (+24) e 13→19 testes Pester em `run_task.tests.ps1` (+6), todos passando. Nenhuma execução real de `full_daily`/`shopee_manual_refresh`/banco/scheduler/commit/deploy neste gate. |
 | 2026-09-08 | Gate SH-API-2A-R (implementação fail-closed da deduplicação de Produtos Shopee): `apps/api/etl/load_shopee_products.py` ganha `ID do pedido` no `COL_MAP` (obrigatório), `_classify_order_file`/`_plan_brand_snapshots`/`_select_current_snapshot` e a regra de snapshot vigente por pedido aplicada ANTES do filtro `status == "Concluído"`. Quatro formatos de nome aceitos; instante de export, `Order.toship`, sufixo `(1)`, parte ausente/duplicada e janela ambígua **abortam a carga inteira** antes de qualquer leitura de arquivo ou conexão. Ordenação `(janela_fim, janela_início)` DESC, validada contra `max(file_id)` do Data Mart em 13.720/13.720 pedidos sobrepostos. mtime/ctime/ordem do glob nunca usados. 38 testes novos (incl. contraprova dos R$ 971.946,52 que a ordenação por nome removeria); suíte `etl/tests` 135→174 passando, zero falhas; `apps/api/tests` com as MESMAS 45 falhas pré-existentes por node ID (zero novas). Deduplicação **não aplicada em produção**: nenhum backfill, nenhuma escrita em banco, nenhuma migration, nenhum commit/push. Sidecar fora de escopo; `units_sold` da fato diária pendente. Triagem aborta hoje em `barbours` por 2 arquivos fora do padrão — ação do operador documentada na seção nova. |
 | 2026-09-08 | Gate SH-API-2D (contrato de qualidade de escopo dos Produtos Shopee): seis eixos ortogonais (`source_status`, `load_status`, `eligibility_status`, `maturity_status`, `coverage_status`, `loaded_at`) derivados de tres tabelas que **ja existiam** no Neon — `marts.fact_shopee_product_monthly`, `marts.fact_marketplace_daily_performance` e `audit.source_sync_run`. **Sem migration, sem escrita em banco, sem backfill.** Piso de maturidade MEDIDO em 30 pares marca x competencia (maduros 1,0047–1,1234; imaturos 0,6643–0,7700; sem conclusao 0,0000) e exposto como parametro `Settings.shopee_maturity_floor` (default 0,99), nunca literal em API/tela/MCP — ha teste que reprova a reintroducao de `0.99`/`2026-07`/`2026-08`. Propagado a 5 superficies: `/produtos/shopee`, `/produtos/shopee/summary` (que **nunca** preenchia `refreshed_at`), `/quality`, tela de Produtos (faixa antes dos cards A/B/C/D), tela de Qualidade, `torre_produtos_prioritarios` e `torre_qualidade_dados` (campo estruturado + limitacoes derivadas do backend + aviso no resumo textual). Tres achados corrigidos pela validacao contra o Neon real: cobertura da fonte e HISTORICA (a ultima execucao cobre so' 07..08/2026 e reprovava todos os meses fechados); sem carga a maturidade e' `maturity_unknown`, nunca `materially_immature`; `source_unknown` nao bloqueia um mes com maturidade medida. Validacao: 38 testes pytest novos + 19 `node --test` novos; `apps/api/tests` **1095 passed / 0 failed** com `.env` carregado (as 43 falhas do worktree sao ausencia de `.env`, node IDs identicos a baseline em 9a81cc1); `etl/tests` 257 passed; web 1478/1478; `tsc --noEmit` com **zero** erro novo. Backfill proposto e NAO executado, restrito a `apice`/2026-05 (−23.292,43) e `barbours`/2026-05 (−80.987,03); `kokeshi`/2026-08 e `rituaria`/2026-07 excluidos por imaturidade medida. |
+| 2026-09-08 | Gate SH-API-2D-R/V (correcao semantica, QA e integracao linear): a primeira versao usava nomes que afirmavam mais do que o contrato media. `source_covered` -> **`source_ever_loaded`** (o eixo responde "ja foi carregada alguma vez?", nunca "a fonte esta em dia"); `load_current` -> **`load_present`** ("current" e afirmacao temporal, e o mart publicado em 05/08 aparecia como `load_current` para julho 34 dias depois); `load_stale` -> **`load_behind_daily`** (declara a evidencia medida em vez de um adjetivo temporal). `completed_share` -> **`maturation_index`** e `maturity_floor` -> **`maturation_threshold`**: a razao NAO e percentual de conclusao, share nem completude — numerador (subtotal de item do mart) e denominador (GMV liquido do shop stats) sao populacoes diferentes, valores > 1 sao o regime normal de mes fechado e NUNCA sao truncados. Novo campo obrigatorio `maturation_index_note` acompanha o numero em toda superficie; a faixa da tela nem le o indice diretamente, para nao poder exibi-lo como "%". Entrada impossivel (GMV negativo, NaN) levanta `ScopeQualityInputError` e degrada para `maturity_unknown` com aviso critico `shopee_produtos_indice_invalido` — sem a guarda, `NaN >= limiar` e False e o mes viraria "imaturo", um veredito inventado a partir de lixo. `loaded_at` explicitado como publicacao NO MART, com os dois relogios nomeados por extenso na tela; nenhum titulo usa "atual"/"atualizado"/"em dia" (ha teste que reprova). Os tres `text-[11px]` novos viraram `text-xs` (piso de 12px). Integracao LINEAR: worktree limpa sobre origin/main 6b9bb94 + cherry-pick de a18cea5 sem conflito (22/22 blobs identicos), correcoes em commit separado — sem merge no branch antigo. Zero backfill, zero escrita em banco, zero migration. |

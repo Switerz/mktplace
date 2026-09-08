@@ -49,7 +49,7 @@ def quality_result(**over) -> FakeResult:
         "rows_present": 0, "eligible_rows": 0, "prod_gmv": 0, "brands_present": 0,
         "loaded_at": None, "daily_gmv": 0, "brands_expected": 0,
         "daily_max_date": None, "last_sync_finished_at": None,
-        "source_min_date": None, "source_max_date": None, "covers_ref_month": None,
+        "source_min_date": None, "source_max_date": None, "ever_loaded": None,
     }
     row.update(over)
     return FakeResult([row])

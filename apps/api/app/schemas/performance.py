@@ -206,12 +206,23 @@ class ScopeQualityMeasured(BaseModel):
     excluded_zero_gmv: int
     completed_gmv: float
     reference_gmv: float
-    completed_share: Optional[float] = None
-    maturity_floor: float
+    #: Indice OPERACIONAL de maturacao = completed_gmv / reference_gmv.
+    #: NAO e percentual de conclusao, share nem completude: as duas populacoes
+    #: sao diferentes e valores > 1 sao normais em meses fechados (nunca
+    #: truncados). `None` = nao medido. Sempre exibir junto de
+    #: `maturation_index_note`.
+    maturation_index: Optional[float] = None
+    #: Limiar HEURISTICO configuravel (SHOPEE_MATURATION_THRESHOLD), nao meta.
+    maturation_threshold: float
+    #: Explicacao obrigatoria do indice — nenhuma superficie deve mostrar o
+    #: valor bruto sem ela.
+    maturation_index_note: str
     brands_present: int
     brands_expected: int
-    source_covered_from: Optional[str] = None
-    source_covered_through: Optional[str] = None
+    #: Extremos da janela ja carregada por alguma execucao bem-sucedida.
+    #: Dizem o que ja foi carregado, jamais que a fonte esta atualizada.
+    source_first_loaded_window_start: Optional[str] = None
+    source_last_loaded_window_end: Optional[str] = None
     daily_max_date: Optional[str] = None
 
 
@@ -220,12 +231,21 @@ class ScopeQuality(BaseModel):
     brand: Optional[str] = None
     ref_month: str
     # Seis eixos ORTOGONAIS — nunca colapsar num unico rotulo.
-    source_status: Literal["source_covered", "source_not_covered", "source_unknown"]
-    load_status: Literal["load_absent", "load_stale", "load_current"]
+    #: Historico de carga, NAO frescor: diz se alguma execucao ja carregou
+    #: esta competencia. Nunca afirma que a fonte esta atualizada.
+    source_status: Literal[
+        "source_ever_loaded", "source_never_loaded", "source_history_unknown"
+    ]
+    #: Presenca da carga, NAO frescor. `load_present` e ausencia de evidencia
+    #: de atraso, nunca prova de estar em dia; `load_behind_daily` declara a
+    #: evidencia que o produziu (a diaria tem dias posteriores a publicacao).
+    load_status: Literal["load_absent", "load_behind_daily", "load_present"]
     eligibility_status: Literal["no_eligible_rows", "partially_eligible", "eligible"]
     maturity_status: Literal["mature", "materially_immature", "maturity_unknown"]
     coverage_status: Literal["coverage_ok", "coverage_below_expected", "coverage_unknown"]
-    #: Ultima publicacao do mart neste escopo (MAX(ingested_at)).
+    #: Ultima publicacao NO MART neste escopo (MAX(ingested_at)). E o relogio
+    #: da publicacao, jamais o da atualizacao do dado na Shopee — sao dois
+    #: relogios distintos e nenhuma superficie pode confundi-los.
     loaded_at: Optional[str] = None
     load_age_days: Optional[int] = None
     #: Atalho de renderizacao. Falso NAO significa "numero errado": significa

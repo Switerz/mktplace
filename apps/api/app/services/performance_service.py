@@ -1895,44 +1895,86 @@ def _pareto_buckets_from_rows(rows) -> list[dict]:
 #
 # Problema que isto resolve: ate aqui a tela, a API e o MCP apresentavam
 # QUALQUER competencia como definitiva. Julho/2026 era servido com R$ 5,5 mi
-# sem nenhum sinal de que a fonte ainda nao havia concluido ~27% do GMV que a
-# diaria ja tinha contabilizado; agosto/2026 era servido com zero produtos
-# elegiveis sem dizer que havia 188 linhas carregadas e nenhuma concluida.
-# Numero certo com regime errado e numero errado para quem decide.
+# sem nenhum sinal de que o mart de Produtos estava materialmente atras da
+# diaria; agosto/2026 era servido com zero produtos elegiveis sem dizer que
+# havia 188 linhas carregadas e nenhuma concluida. Numero certo com regime
+# errado e numero errado para quem decide.
 #
 # SEIS EIXOS ORTOGONAIS, nao um estado unico mutuamente exclusivo. Sao
 # independentes porque a realidade e independente: uma competencia pode
-# simultaneamente ter fonte coberta, carga presente, elegibilidade parcial,
-# maturidade insuficiente e cobertura de marcas incompleta. Colapsar isso num
-# unico rotulo esconde o eixo que importa (foi exatamente o defeito F5 do
-# Gate SH-API-2B-R2).
+# simultaneamente ter historico de carga, linhas presentes, elegibilidade
+# parcial, maturacao insuficiente e cobertura de marcas incompleta. Colapsar
+# isso num unico rotulo esconde o eixo que importa (defeito F5 do Gate
+# SH-API-2B-R2).
 #
-#   1. source_status      a fonte (planilha de Pedidos) chegou a cobrir a
-#                         competencia? -> audit.source_sync_run
-#   2. load_status        o mart tem linhas, e elas sao mais novas que o
-#                         ultimo dia ja medido pela diaria?
+#   1. source_status      ALGUMA execucao ja carregou esta competencia?
+#                         -> audit.source_sync_run. NAO diz que a fonte esta
+#                            atualizada: e historico, nao frescor.
+#   2. load_status        ha linhas no mart, e existe evidencia de que elas
+#                         estao atras da diaria?
 #   3. eligibility_status quantas linhas sobrevivem ao filtro de exibicao
 #                         (gmv > 0)?
-#   4. maturity_status    o GMV concluido ja alcancou o regime dos meses
-#                         fechados? -> razao contra a diaria vs piso medido
+#   4. maturity_status    o indice operacional de maturacao alcancou o limiar?
 #   5. coverage_status    todas as marcas que venderam na diaria aparecem no
 #                         mart?
-#   6. loaded_at          quando o mart foi publicado pela ultima vez neste
-#                         escopo (MAX(ingested_at)), com a idade em dias
+#   6. loaded_at          quando o MART foi publicado pela ultima vez neste
+#                         escopo (MAX(ingested_at)), com a idade em dias.
+#                         E o relogio da PUBLICACAO NO MART, nunca o da
+#                         atualizacao do dado na Shopee.
 #
 # Tudo e DERIVADO de tres tabelas que ja existem no Neon
 # (marts.fact_shopee_product_monthly, marts.fact_marketplace_daily_performance
 # e audit.source_sync_run). Nenhuma migration, nenhuma escrita, nenhuma lista
 # de meses hardcoded: trocar o mes muda a medicao, nunca o codigo.
+#
+# ---------------------------------------------------------------------------
+# NOMENCLATURA (Gate SH-API-2D-R/V) — por que estes nomes e nao os obvios
+# ---------------------------------------------------------------------------
+#
+# `source_ever_loaded` e NAO `source_covered`
+#     A pergunta respondida por `bool_or(...)` sobre audit.source_sync_run e
+#     "esta competencia ja foi carregada alguma vez?". "Coberta" sugere que a
+#     fonte esta em dia, o que este eixo nao mede e nao pode afirmar. Um mes
+#     carregado uma unica vez em fevereiro responde `source_ever_loaded` para
+#     sempre, mesmo que a Shopee tenha mudado tudo depois.
+#
+# `load_present` e NAO `load_current`
+#     "Current"/"atual" e uma afirmacao TEMPORAL. Este eixo nao mede frescor:
+#     mede presenca de linhas mais a ausencia de evidencia de atraso. O mart
+#     publicado em 05/08/2026 aparecia como `load_current` para julho 34 dias
+#     depois — verdadeiro pela definicao interna, enganoso como palavra.
+#
+# `load_behind_daily` e NAO `load_stale`
+#     "Stale" tambem e temporal e nao diz o que foi medido. O nome novo declara
+#     a propria evidencia: a diaria registrou dias DESTA competencia em datas
+#     posteriores a publicacao do mart, entao existe venda conhecida que o mart
+#     comprovadamente nao viu. Note a assimetria deliberada: `load_present` e
+#     ausencia de evidencia de atraso, nunca prova de estar em dia.
+#
+# `maturation_index` e NAO `completed_share`
+#     A razao NAO e um percentual de conclusao, nem completude, nem share.
+#     Numerador e denominador vem de populacoes diferentes: o numerador e a
+#     soma de subtotais de item do mart de Produtos; o denominador e o GMV
+#     liquido do shop stats na diaria. Por isso ela passa de 1,00 nos meses
+#     fechados (1,0047 a 1,1234 nos 30 pares medidos) — o que seria absurdo
+#     num percentual e e o regime NORMAL aqui. E um INDICE OPERACIONAL: serve
+#     para separar regime maduro de regime imaturo, nunca para afirmar "X% dos
+#     pedidos foram concluidos".
+#
+# `maturation_threshold` e NAO `maturity_floor`
+#     0,99 e um LIMIAR HEURISTICO configuravel
+#     (`Settings.shopee_maturation_threshold`), escolhido por cair dentro da
+#     faixa vazia entre os dois regimes medidos (0,7700 ; 1,0047). Nao e uma
+#     constante de negocio nem uma meta.
 # ---------------------------------------------------------------------------
 
-SOURCE_COVERED = "source_covered"
-SOURCE_NOT_COVERED = "source_not_covered"
-SOURCE_UNKNOWN = "source_unknown"
+SOURCE_EVER_LOADED = "source_ever_loaded"
+SOURCE_NEVER_LOADED = "source_never_loaded"
+SOURCE_HISTORY_UNKNOWN = "source_history_unknown"
 
 LOAD_ABSENT = "load_absent"
-LOAD_STALE = "load_stale"
-LOAD_CURRENT = "load_current"
+LOAD_BEHIND_DAILY = "load_behind_daily"
+LOAD_PRESENT = "load_present"
 
 ELIGIBILITY_NONE = "no_eligible_rows"
 ELIGIBILITY_PARTIAL = "partially_eligible"
@@ -1947,6 +1989,25 @@ COVERAGE_BELOW = "coverage_below_expected"
 COVERAGE_UNKNOWN = "coverage_unknown"
 
 SHOPEE_PRODUTOS_SYNC_SOURCE = "shopee_product_monthly"
+
+#: Frase curta que acompanha o indice em QUALQUER superficie que mostre o
+#: numero. O gate proibe expor o valor bruto sem esta explicacao: sozinho,
+#: "0,754" e lido como "75,4% concluido", que e' falso.
+MATURATION_INDEX_NOTE = (
+    "Indice operacional de maturacao: GMV concluido do mart de Produtos "
+    "dividido pelo GMV da diaria. As duas populacoes sao diferentes, entao em "
+    "meses fechados o indice fica ACIMA de 1,00. NAO e percentual de "
+    "conclusao. Serve para separar regime maduro de imaturo contra um limiar "
+    "heuristico configuravel."
+)
+
+
+class ScopeQualityInputError(ValueError):
+    """Entrada impossivel para o indice de maturacao (GMV negativo, NaN).
+
+    Existe para que numero invalido nunca vire VEREDITO. O chamador degrada
+    para `maturity_unknown` com aviso critico — jamais para `mature`."""
+
 
 _SCOPE_QUALITY_SQL = """
     WITH scope AS (
@@ -1972,16 +2033,17 @@ _SCOPE_QUALITY_SQL = """
     ),
     sync AS (
         -- A carga da fonte e INCREMENTAL: cada execucao cobre so a janela que
-        -- ela atualizou. Perguntar "a ULTIMA execucao cobriu esta
-        -- competencia?" reprova todos os meses fechados, que foram cobertos
+        -- ela atualizou. Perguntar "a ULTIMA execucao carregou esta
+        -- competencia?" reprova todos os meses fechados, que foram carregados
         -- por execucoes anteriores (medido: a ultima carga cobriu 07..08/2026,
         -- e isso marcaria 01..06/2026 como fonte ausente, o que e falso). A
-        -- pergunta certa e historica: ALGUMA execucao bem-sucedida cobriu?
+        -- pergunta certa e historica: ALGUMA execucao bem-sucedida carregou?
+        -- Isso NAO diz que a fonte esta atualizada — so que ja passou por aqui.
         SELECT MAX(finished_at)      AS finished_at,
                MIN(source_min_date)  AS source_min_date,
                MAX(source_max_date)  AS source_max_date,
                bool_or(source_min_date <= :ref_month
-                       AND source_max_date >= :ref_month) AS covers_ref_month
+                       AND source_max_date >= :ref_month) AS ever_loaded
           FROM audit.source_sync_run
          WHERE source_name = :sync_source
            AND status = 'success'
@@ -1992,7 +2054,7 @@ _SCOPE_QUALITY_SQL = """
            k.finished_at      AS last_sync_finished_at,
            k.source_min_date  AS source_min_date,
            k.source_max_date  AS source_max_date,
-           k.covers_ref_month AS covers_ref_month
+           k.ever_loaded      AS ever_loaded
       FROM scope s
      CROSS JOIN daily d
       LEFT JOIN sync k ON TRUE
@@ -2001,6 +2063,22 @@ _SCOPE_QUALITY_SQL = """
 
 def _warn(code: str, severity: str, message: str) -> dict:
     return {"code": code, "severity": severity, "message": message}
+
+
+def compute_maturation_index(completed_gmv: float, reference_gmv: float) -> float | None:
+    """Indice operacional de maturacao. `None` quando nao ha referencia.
+
+    NAO e percentual: valores > 1 sao normais e NUNCA sao truncados — truncar
+    apagaria justamente o sinal de que as duas populacoes sao diferentes.
+    Entrada impossivel levanta em vez de virar veredito."""
+    for nome, v in (("completed_gmv", completed_gmv), ("reference_gmv", reference_gmv)):
+        if v != v:                                   # NaN nunca compara igual a si
+            raise ScopeQualityInputError(f"{nome} e NaN")
+        if v < 0:
+            raise ScopeQualityInputError(f"{nome} negativo ({v})")
+    if reference_gmv == 0:
+        return None
+    return round(completed_gmv / reference_gmv, 4)
 
 
 def get_shopee_scope_quality(
@@ -2053,37 +2131,41 @@ def get_shopee_scope_quality(
     last_sync = row.get("last_sync_finished_at")
     src_min = row.get("source_min_date")
     src_max = row.get("source_max_date")
-    covers = row.get("covers_ref_month")
+    ever_loaded = row.get("ever_loaded")
 
-    # --- eixo 1: fonte -----------------------------------------------------
-    # `covers` vem de bool_or sobre TODAS as execucoes bem-sucedidas. Vira NULL
-    # quando nao ha execucao registrada, ou quando as que existem nao gravaram
-    # janela — nos dois casos a cobertura e indeterminada, nunca "nao coberta".
-    if covers is None:
-        source_status = SOURCE_UNKNOWN
-    elif covers:
-        source_status = SOURCE_COVERED
+    # --- eixo 1: historico da fonte ---------------------------------------
+    # Responde "ja foi carregada alguma vez?", nunca "esta atualizada?".
+    # `ever_loaded` vem de bool_or sobre TODAS as execucoes bem-sucedidas: vira
+    # NULL quando nao ha execucao registrada, ou quando as que existem nao
+    # gravaram janela — nos dois casos o historico e indeterminado, jamais
+    # "nunca carregada".
+    if ever_loaded is None:
+        source_status = SOURCE_HISTORY_UNKNOWN
+    elif ever_loaded:
+        source_status = SOURCE_EVER_LOADED
     else:
-        source_status = SOURCE_NOT_COVERED
+        source_status = SOURCE_NEVER_LOADED
 
     # --- eixo 6: publicacao do mart ---------------------------------------
     # `loaded_at` do proprio escopo e a verdade preferida; o ultimo sync bem
-    # sucedido e o fallback quando o escopo nao tem linha nenhuma.
+    # sucedido e o fallback quando o escopo nao tem linha nenhuma. Nos DOIS
+    # casos o carimbo e da publicacao NO MART, nunca da atualizacao na Shopee.
     published = loaded_at or last_sync
     load_age_days = (today - published.date()).days if published is not None else None
 
-    # --- eixo 2: carga -----------------------------------------------------
-    # "defasada" nao e idade absoluta (um mes fechado carregado ha 60 dias
-    # pode estar perfeito). E uma comparacao PROVADA: a diaria ja mediu dias
-    # desta competencia que sao posteriores a publicacao do mart, entao existe
+    # --- eixo 2: presenca da carga ----------------------------------------
+    # NAO mede frescor. `load_present` e ausencia de evidencia de atraso, nunca
+    # prova de estar em dia — por isso o nome nao e temporal.
+    # `load_behind_daily` declara a evidencia que o produziu: a diaria mediu
+    # dias desta competencia posteriores a publicacao do mart, entao existe
     # venda conhecida que o mart comprovadamente nao viu.
     if rows_present == 0:
         load_status = LOAD_ABSENT
     elif (daily_max_date is not None and published is not None
           and daily_max_date > published.date()):
-        load_status = LOAD_STALE
+        load_status = LOAD_BEHIND_DAILY
     else:
-        load_status = LOAD_CURRENT
+        load_status = LOAD_PRESENT
 
     # --- eixo 3: elegibilidade --------------------------------------------
     if rows_present == 0 or eligible_rows == 0:
@@ -2093,21 +2175,32 @@ def get_shopee_scope_quality(
     else:
         eligibility_status = ELIGIBILITY_FULL
 
-    # --- eixo 4: maturidade ------------------------------------------------
-    floor = float(settings.shopee_maturity_floor)
-    if rows_present == 0 or daily_gmv <= 0:
+    # --- eixo 4: maturacao -------------------------------------------------
+    threshold = float(settings.shopee_maturation_threshold)
+    indice_invalido = None
+    if rows_present == 0:
         # Sem linha carregada nao da para distinguir "pedidos ainda nao
         # concluidos" de "nunca carregamos este mes": as duas hipoteses dao
-        # share 0. Declarar imaturidade aqui atribuiria a fonte um defeito que
+        # indice 0. Declarar imaturidade aqui atribuiria a fonte um defeito que
         # pode ser da carga — `load_absent` ja diz exatamente o que se sabe.
-        # Sem denominador tampouco ha regime a declarar. NUNCA vira "maduro"
-        # por omissao nem "imaturo" por zero: N/D e o estado honesto.
-        completed_share = None
+        maturation_index = None
         maturity_status = MATURITY_UNKNOWN
     else:
-        completed_share = round(prod_gmv / daily_gmv, 4)
-        maturity_status = (MATURITY_MATURE if completed_share >= floor
-                           else MATURITY_IMMATURE)
+        try:
+            maturation_index = compute_maturation_index(prod_gmv, daily_gmv)
+        except ScopeQualityInputError as e:
+            # Entrada impossivel NUNCA vira veredito: degrada para "nao sei"
+            # com aviso critico, em vez de derrubar a pagina inteira de
+            # Produtos por causa de uma linha com valor invalido.
+            indice_invalido = str(e)
+            maturation_index = None
+            maturity_status = MATURITY_UNKNOWN
+        else:
+            if maturation_index is None:
+                maturity_status = MATURITY_UNKNOWN
+            else:
+                maturity_status = (MATURITY_MATURE if maturation_index >= threshold
+                                   else MATURITY_IMMATURE)
 
     # --- eixo 5: cobertura de marcas ---------------------------------------
     if brands_expected == 0:
@@ -2119,25 +2212,27 @@ def get_shopee_scope_quality(
 
     # --- avisos ------------------------------------------------------------
     warnings: list[dict] = []
-    if source_status == SOURCE_NOT_COVERED:
+    if source_status == SOURCE_NEVER_LOADED:
         warnings.append(_warn(
-            "shopee_produtos_fonte_nao_cobre_competencia", "critical",
-            "Nenhuma carga bem-sucedida da fonte de Pedidos cobriu esta "
+            "shopee_produtos_fonte_nunca_carregada", "critical",
+            "Nenhuma execucao bem-sucedida da fonte de Pedidos carregou esta "
             "competencia: os produtos deste mes ainda nao foram extraidos."))
-    elif source_status == SOURCE_UNKNOWN:
+    elif source_status == SOURCE_HISTORY_UNKNOWN:
         warnings.append(_warn(
-            "shopee_produtos_fonte_sem_auditoria", "warning",
+            "shopee_produtos_historico_de_carga_ausente", "warning",
             "Nao ha execucao bem-sucedida registrada para a fonte de Produtos "
-            "Shopee: a cobertura da fonte nao pode ser comprovada."))
+            "Shopee: nao da para comprovar se esta competencia ja foi "
+            "carregada alguma vez."))
     if load_status == LOAD_ABSENT:
         warnings.append(_warn(
             "shopee_produtos_carga_ausente", "critical",
             "Nenhuma linha de produto carregada para esta competencia."))
-    elif load_status == LOAD_STALE:
+    elif load_status == LOAD_BEHIND_DAILY:
         warnings.append(_warn(
-            "shopee_produtos_carga_defasada", "warning",
+            "shopee_produtos_carga_atras_da_diaria", "warning",
             "A diaria ja registrou vendas desta competencia em datas "
-            "posteriores a ultima publicacao do mart de Produtos."))
+            "posteriores a ultima publicacao do mart de Produtos: ha venda "
+            "conhecida que o mart ainda nao viu."))
     if eligibility_status == ELIGIBILITY_NONE and rows_present > 0:
         warnings.append(_warn(
             "shopee_produtos_nenhuma_linha_elegivel", "critical",
@@ -2149,13 +2244,20 @@ def get_shopee_scope_quality(
             "shopee_produtos_elegibilidade_parcial", "info",
             f"{rows_present - eligible_rows} de {rows_present} linhas ficaram "
             f"fora da exibicao por GMV = 0."))
-    if maturity_status == MATURITY_IMMATURE:
+    if indice_invalido is not None:
         warnings.append(_warn(
-            "shopee_produtos_fonte_imatura", "critical",
-            f"Competencia materialmente imatura: o GMV concluido cobre "
-            f"{completed_share:.1%} do GMV que a diaria ja registrou "
-            f"(piso {floor:.0%}). Os numeros por produto vao SUBIR quando os "
-            f"pedidos em transito forem concluidos. Nao use como definitivo."))
+            "shopee_produtos_indice_invalido", "critical",
+            f"Indice operacional de maturacao NAO calculado: entrada invalida "
+            f"({indice_invalido}). Nenhum veredito de maturacao foi emitido "
+            f"para esta competencia."))
+    elif maturity_status == MATURITY_IMMATURE:
+        warnings.append(_warn(
+            "shopee_produtos_maturacao_insuficiente", "critical",
+            f"Competencia materialmente imatura: indice operacional de "
+            f"maturacao {maturation_index:.4f}, abaixo do limiar heuristico "
+            f"{threshold:.4f}. {MATURATION_INDEX_NOTE} Os numeros por produto "
+            f"vao SUBIR conforme os pedidos em transito forem concluidos. Nao "
+            f"use como definitivo."))
     elif maturity_status == MATURITY_UNKNOWN:
         # O motivo importa: "nada carregado" e "sem referencia na diaria" sao
         # problemas diferentes, com donos diferentes. Um aviso generico faria
@@ -2163,8 +2265,8 @@ def get_shopee_scope_quality(
         motivo = ("nao ha linha de produto carregada" if rows_present == 0
                   else "a diaria nao registrou GMV nesta competencia")
         warnings.append(_warn(
-            "shopee_produtos_maturidade_nao_medida", "warning",
-            f"Maturidade nao medida: {motivo}."))
+            "shopee_produtos_maturacao_nao_medida", "warning",
+            f"Maturacao nao medida: {motivo}."))
     if coverage_status == COVERAGE_BELOW:
         warnings.append(_warn(
             "shopee_produtos_cobertura_de_marcas", "warning",
@@ -2177,11 +2279,11 @@ def get_shopee_scope_quality(
         load_status != LOAD_ABSENT
         and eligibility_status != ELIGIBILITY_NONE
         and maturity_status == MATURITY_MATURE
-        # `source_unknown` NAO bloqueia: um mes cuja maturidade foi medida
-        # diretamente contra a diaria ja tem evidencia propria, e a auditoria
-        # de execucoes pode nao ter historico tao antigo. So a contradicao
-        # explicita (a fonte declara nao cobrir) bloqueia.
-        and source_status != SOURCE_NOT_COVERED
+        # `source_history_unknown` NAO bloqueia: um mes cuja maturacao foi
+        # medida diretamente contra a diaria ja tem evidencia propria, e a
+        # auditoria de execucoes pode nao ter historico tao antigo. So a
+        # contradicao explicita (nenhuma execucao carregou) bloqueia.
+        and source_status != SOURCE_NEVER_LOADED
     )
 
     return {
@@ -2193,6 +2295,8 @@ def get_shopee_scope_quality(
         "eligibility_status": eligibility_status,
         "maturity_status": maturity_status,
         "coverage_status": coverage_status,
+        #: Publicacao NO MART (MAX(ingested_at)) — nunca a atualizacao do dado
+        #: na Shopee. Sao dois relogios distintos.
         "loaded_at": published.isoformat() if published is not None else None,
         "load_age_days": load_age_days,
         "definitive": definitive,
@@ -2202,12 +2306,14 @@ def get_shopee_scope_quality(
             "excluded_zero_gmv": max(rows_present - eligible_rows, 0),
             "completed_gmv": prod_gmv,
             "reference_gmv": daily_gmv,
-            "completed_share": completed_share,
-            "maturity_floor": floor,
+            "maturation_index": maturation_index,
+            "maturation_threshold": threshold,
+            #: Acompanha o indice em toda superficie que mostrar o numero.
+            "maturation_index_note": MATURATION_INDEX_NOTE,
             "brands_present": brands_present,
             "brands_expected": brands_expected,
-            "source_covered_from": src_min.isoformat() if src_min else None,
-            "source_covered_through": src_max.isoformat() if src_max else None,
+            "source_first_loaded_window_start": src_min.isoformat() if src_min else None,
+            "source_last_loaded_window_end": src_max.isoformat() if src_max else None,
             "daily_max_date": daily_max_date.isoformat() if daily_max_date else None,
         },
         "warnings": warnings,
