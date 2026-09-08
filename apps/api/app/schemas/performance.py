@@ -470,6 +470,109 @@ class AffiliateCostsBlock(BaseModel):
     limitation_note: str
 
 
+# ---------------------------------------------------------------------------
+# Descontos e subsidios do pedido TikTok — contrato §28 de
+# docs/UNIT_ECONOMICS_SOURCE_CONTRACTS.md (UE8-I3)
+#
+# Reusa `AvailabilityStatus`, `PeriodStatus` e `CoverageStatus` acima: as
+# perguntas sao as MESMAS, e duplicar os enums criaria dois vocabularios para o
+# mesmo conceito. So o frescor e' proprio, porque a semantica difere.
+# ---------------------------------------------------------------------------
+
+#: Idade da CARGA. Enum PROPRIO, distinto de `FreshnessStatus`: aquele tem
+#: `manual_snapshot`, que existe porque a carga de afiliados nao tem rotina.
+#: Aqui a pergunta e' outra e mais estreita — "ha quanto tempo o sync rodou?" —,
+#: com um limiar medido (30 h).
+#:
+#: Os nomes falam de CARGA (`_load`), nao de dado, de proposito.
+#: `recent_load` diz SOMENTE que o sync rodou ha pouco. NAO diz que o dado e'
+#: atual, estavel, maduro ou fechado: `raw.tiktok_shop_orders` e' snapshot
+#: mutavel e pode ser revisada retroativamente a qualquer momento.
+DiscountFreshnessStatus = Literal[
+    "recent_load",             # carga ha no maximo 30 h
+    "stale_load",              # idade acima do limiar
+    "unknown",                 # ausente, naive, ou a frente do relogio
+]
+
+#: Como a grade esperada de cobertura foi construida. Hoje so' existe um valor,
+#: e ele e' EXPLICITO no payload de proposito: sem isso o consumidor teria de
+#: adivinhar o universo, e "faltam 5 chaves" nao significa nada sem saber de
+#: quantas. `observed_grid` = (dias com atividade) x (marcas com atividade),
+#: a MESMA definicao de `_coverage` no sync versionado.
+CoverageBasis = Literal["observed_grid"]
+
+
+class TikTokOrderDiscountRow(BaseModel):
+    """Um agregado por marca, na janela efetiva.
+
+    OS DOIS DESCONTOS TEM FINANCIADORES DIFERENTES e nunca sao somados:
+    `seller_discount_signed` sai do bolso da marca e reduz a receita dela;
+    `platform_subsidy_amount` e' ressarcido pelo TikTok e NAO a reduz. Nao
+    existe — e nao deve passar a existir — `total_discount`.
+
+    `_signed` no nome carrega a semantica: o valor sai com o sinal da fonte.
+    `abs()` e' proibido em todo o caminho, e a unica inversao de sinal do
+    sistema acontece no sync (§28), nunca aqui.
+
+    Cancelados ficam em campos SEPARADOS: sao populacao disjunta dos comerciais
+    e misturar as duas inventaria venda que nao houve.
+    """
+    brand: str
+    commercial_orders: int
+    official_gmv: Optional[float] = None
+    full_product_value: Optional[float] = None
+    seller_discount_signed: Optional[float] = None
+    platform_subsidy_amount: Optional[float] = None
+    cancelled_orders: int
+    cancelled_seller_discount_signed: Optional[float] = None
+    cancelled_platform_subsidy_amount: Optional[float] = None
+    #: Percentuais sobre `full_product_value` — NUNCA sobre `official_gmv`, que
+    #: ja e' liquido dos descontos e produziria uma taxa sem significado.
+    #: Sinais preservados: a taxa da marca e' <= 0, a da plataforma >= 0.
+    seller_discount_rate: Optional[float] = None
+    platform_subsidy_rate: Optional[float] = None
+
+
+class TikTokOrderDiscountsBlock(BaseModel):
+    availability_status: AvailabilityStatus
+    period_status: PeriodStatus
+    #: `complete` significa "grade OBSERVADA completa", NUNCA "ingestao
+    #: comprovadamente completa". Ausencia de venda e falha de ingestao seguem
+    #: indistinguiveis com as fontes atuais.
+    coverage_status: CoverageStatus
+    coverage_basis: CoverageBasis = "observed_grid"
+    #: Os tres numeros da grade observada, para que "faltam N" seja auditavel.
+    coverage_expected_keys: int = 0
+    coverage_present_keys: int = 0
+    coverage_missing_keys: int = 0
+    freshness_status: DiscountFreshnessStatus
+    rows: list[TikTokOrderDiscountRow] = Field(default_factory=list)
+
+    #: Janela EFETIVA — ja com D0 excluido, quando o filtro o alcancava.
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    #: Dias distintos COM DADO na fato dentro da janela. Nao e' o tamanho da
+    #: janela: um dia sem pedido nao vira linha e nao entra nesta contagem.
+    date_count: int = 0
+
+    #: `MAX(synced_at)` da fotografia consultada. NAO reutiliza o `refreshed_at`
+    #: geral de /canais, que diria "recente" so' porque a rota respondeu agora.
+    discounts_refreshed_at: Optional[str] = None
+    #: `MAX(ref_date)` do ESCOPO EFETIVO — mesma janela, mesmas marcas, mesmo
+    #: teto D-1. NUNCA o maximo da fato inteira: sob filtro de marca, o maximo
+    #: global afirmaria que a selecao esta atualizada ate uma data que aquela
+    #: marca nao alcancou.
+    source_max_date: Optional[str] = None
+    #: `MAX(source_max_updated_at)` no escopo. Timestamp NAIVE da fonte: sai sem
+    #: rotulo de fuso, porque a origem nao declara um.
+    source_max_updated_at: Optional[str] = None
+
+    seller_note: str
+    subsidy_note: str
+    limitation_note: str
+    warnings: list[str] = Field(default_factory=list)
+
+
 class CanaisResponse(BaseModel):
     ref_month: Optional[str] = None
     marketplace: str
@@ -487,6 +590,9 @@ class CanaisResponse(BaseModel):
     refreshed_at: Optional[str] = None
     #: ADITIVO e opcional (§23). `None` quando o bloco nao foi montado.
     affiliate_costs: Optional[AffiliateCostsBlock] = None
+    #: ADITIVO e opcional (§28, UE8-I3). `None` quando o bloco nao foi montado.
+    #: Independente de `affiliate_costs`: grao, fonte e frescor sao outros.
+    tiktok_order_discounts: Optional[TikTokOrderDiscountsBlock] = None
 
 
 class ProdutoShopeeRow(BaseModel):

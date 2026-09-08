@@ -2342,9 +2342,43 @@ Limitações abertas: **199 chaves `(data, marca)`** da grade observada sem linh
 nenhum timeout de step definido; **`full_daily` e Scheduler intocados** — a
 carga foi manual.
 
-**UE8-I3 NÃO INICIADO.** Os descontos **não estão expostos na aba Canais**;
-API, contrato e UI seguem sem alteração. Detalhes em
-[UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md) §28.
+**UE8-I3 — 08/09/2026: IMPLEMENTADO, CORRIGIDO, COM QA LOCAL APROVADO E
+VERSIONADO. NÃO PUBLICADO.** O bloco "Descontos e subsídios do pedido — TikTok
+Shop" existe em código: campo **aditivo** `tiktok_order_discounts` em
+`GET /canais` (nenhum endpoint novo, nenhum campo existente alterado,
+`affiliate_costs` idêntico), serviço isolado com **uma consulta por request**,
+painel na aba Canais e drill-down reusando o shell genérico.
+
+Os **dois componentes seguem separados** — desconto financiado pela marca
+(negativo) e subsídio financiado pelo TikTok (positivo) —, com as taxas sempre
+sobre `full_product_value`, nunca sobre o GMV. **Não existe `total_discount`**,
+e não há margem, lucro, receita líquida, caixa ou retorno. Cancelados só no
+drill-down, em seção separada. **D0 nunca aparece.**
+
+A rodada de correção **UE8-I3-R/V** ajustou três contratos semânticos antes de
+o bloco virar público: a **cobertura** passou a usar a **grade observada** do
+sync — `(dias com atividade) × (marcas com atividade)` —, reconciliando nas
+**199** lacunas do UE8-I2 em vez das 224 de uma grade de calendário;
+`source_max_date` passou a ser o máximo do **escopo filtrado**, nunca o global;
+e o frescor virou **`recent_load` / `stale_load` / `unknown`**, que falam da
+CARGA e não do dado, com `synced_at` no futuro caindo em `unknown`.
+
+Reconciliação API × Neon: **244 comparações em 8 recortes, zero divergência ao
+centavo**. `EXPLAIN`: **0,53 a 4,49 ms** no banco — a meta de p95 < 150 ms é
+cumprida com duas ordens de grandeza de folga; os ~160 ms medidos localmente
+são RTT (`SELECT 1` custa 157,7 ms pela mesma conexão) e **não se extrapolam
+para Render→Neon**. QA em Chromium nos dois viewports **aprovado**.
+
+⚠️ **Os descontos NÃO estão disponíveis em produção** — o código está
+versionado, mas **não houve deploy**, e o **smoke Render→Neon continua
+pendente**. **`recent_load` significa carga recente, não dado estável**: a
+fonte pode ser revisada retroativamente. **199 chaves (dia × marca) sem linha**
+no histórico, na grade observada — nunca convertidas em zero, e `complete`
+jamais prova ingestão. **Scheduler não iniciado** e otimização do `INSERT` do
+sync ainda pendente. A frente **Avoe é paralela** e não integra este bloco.
+
+Detalhes em [UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md)
+§28 (carga) e §29 (exposição).
 
 ## Próximas prioridades
 

@@ -1071,6 +1071,77 @@ function withContentMix(seed: CanaisMockSeed): CanaisBrandRow {
 
 const CANAIS_MOCK_BRANDS: CanaisBrandRow[] = CANAIS_MOCK_SEED.map(withContentMix);
 
+// --- Bloco "Descontos e subsidios do pedido — TikTok Shop" (contrato §28) --
+// Reusa os mesmos tres enums do bloco de afiliados: disponibilidade, periodo e
+// cobertura respondem as MESMAS perguntas. So o frescor e' proprio.
+
+/**
+ * Idade da CARGA — nao do dado. O sufixo `_load` e' deliberado.
+ *
+ * `recent_load` diz SOMENTE que o sync rodou ha pouco. NAO diz que o dado e'
+ * atual, estavel, maduro ou fechado: a fonte e' um retrato do pedido e pode
+ * ser revisada retroativamente. `unknown` cobre carimbo ausente, sem fuso, ou
+ * a frente do relogio da aplicacao.
+ */
+export type DiscountFreshnessStatus =
+  | "recent_load"
+  | "stale_load"
+  | "unknown";
+
+/**
+ * Universo da grade de cobertura. Explicito no payload porque "faltam N
+ * chaves" nao significa nada sem saber de quantas, nem de qual grade.
+ */
+export type DiscountCoverageBasis = "observed_grid";
+
+export interface TikTokOrderDiscountRow {
+  brand: string;
+  commercial_orders: number;
+  // Valores ASSINADOS, como na fonte. `null` = sem medicao; `0` = medido zero.
+  // Os DOIS descontos NAO devem ser somados: `seller_discount_signed` sai do
+  // bolso da marca e reduz a receita dela; `platform_subsidy_amount` e'
+  // ressarcido pelo TikTok e NAO a reduz. Nao existe `total_discount`.
+  official_gmv: number | null;
+  full_product_value: number | null;
+  seller_discount_signed: number | null;
+  platform_subsidy_amount: number | null;
+  // Populacao DISJUNTA dos comerciais. Nunca somar com os campos acima.
+  cancelled_orders: number;
+  cancelled_seller_discount_signed: number | null;
+  cancelled_platform_subsidy_amount: number | null;
+  /** Percentual sobre `full_product_value`, negativo. Nunca sobre o GMV. */
+  seller_discount_rate: number | null;
+  /** Percentual sobre `full_product_value`, positivo. Nunca sobre o GMV. */
+  platform_subsidy_rate: number | null;
+}
+
+export interface TikTokOrderDiscountsBlock {
+  availability_status: AffiliateAvailabilityStatus;
+  period_status: AffiliatePeriodStatus;
+  /** `complete` = grade OBSERVADA completa, nunca ingestao comprovada. */
+  coverage_status: AffiliateCoverageStatus;
+  coverage_basis: DiscountCoverageBasis;
+  coverage_expected_keys: number;
+  coverage_present_keys: number;
+  coverage_missing_keys: number;
+  freshness_status: DiscountFreshnessStatus;
+  rows: TikTokOrderDiscountRow[];
+  /** Janela EFETIVA, ja com D0 removido. */
+  date_from: string | null;
+  date_to: string | null;
+  /** Dias COM DADO na janela — nao e' o tamanho da janela. */
+  date_count: number;
+  /** Frescor PROPRIO do bloco — nunca o `refreshedAt` geral da pagina. */
+  discounts_refreshed_at: string | null;
+  source_max_date: string | null;
+  /** Timestamp NAIVE da fonte: sem fuso declarado, nao recebe rotulo. */
+  source_max_updated_at: string | null;
+  seller_note: string;
+  subsidy_note: string;
+  limitation_note: string;
+  warnings: string[];
+}
+
 export function fetchCanais(
   selection: MarketplaceSelection,
   period?: string,
@@ -1079,6 +1150,7 @@ export function fetchCanais(
   kpis: CanaisKpis; brands: CanaisBrandRow[];
   channelRows: CanaisChannelRow[]; channelMedians: CanaisChannelMedian[];
   affiliateCosts: AffiliateCostsBlock | null;
+  tiktokOrderDiscounts: TikTokOrderDiscountsBlock | null;
   live: boolean; meta: ResponseMeta;
 }> {
   const marketplace = serializeMarketplaceSelection(selection);
@@ -1088,6 +1160,7 @@ export function fetchCanais(
       kpis: CanaisKpis; brands: CanaisBrandRow[];
       channel_rows?: CanaisChannelRow[]; channel_medians?: CanaisChannelMedian[];
       affiliate_costs?: AffiliateCostsBlock | null;
+      tiktok_order_discounts?: TikTokOrderDiscountsBlock | null;
       date_from?: string | null; date_to?: string | null;
       compare_date_from?: string | null; compare_date_to?: string | null;
       refreshed_at?: string | null;
@@ -1110,6 +1183,7 @@ export function fetchCanais(
       // `?? null`: bloco AUSENTE na resposta (API antiga) e' distinto de bloco
       // presente em qualquer estado. Nao se fabrica um bloco vazio aqui.
       affiliateCosts: raw.affiliate_costs ?? null,
+      tiktokOrderDiscounts: raw.tiktok_order_discounts ?? null,
     };
   }
 
@@ -1176,9 +1250,13 @@ export function fetchCanais(
     // por canal — a matriz comparativa fica vazia em vez de inventar valores.
     // `affiliateCosts: null` pela mesma razao: custo de afiliado e' contabil e
     // um valor inventado no mock poderia ser lido como medicao real.
+    // `tiktokOrderDiscounts: null` idem — desconto de marca e subsidio de
+    // plataforma sao dinheiro de donos diferentes, e um mock seria lido como
+    // medicao.
     return {
       live: false, meta: EMPTY_META, kpis, brands,
       channelRows: [], channelMedians: [], affiliateCosts: null,
+      tiktokOrderDiscounts: null,
     };
   });
 }

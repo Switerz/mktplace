@@ -24,6 +24,9 @@ from app.services import monitoramento_preco_service as mp_svc
 from app.services import performance_service as perf_svc
 from app.services import pma_match
 from app.services.affiliate_costs_service import safe_affiliate_costs_block
+from app.services.tiktok_order_discounts_service import (
+    safe_tiktok_order_discounts_block,
+)
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
 
@@ -343,10 +346,20 @@ def canais(
     # (nenhuma consulta de `get_canais` mudou) e a FALHA (`safe_...` nao levanta
     # por erro esperado de banco — devolve o bloco em `error` e o resto do
     # payload permanece valido).
+    #
+    # A janela e os ids de canal sao resolvidos UMA UNICA VEZ e reusados pelos
+    # dois blocos: duas resolucoes independentes divergiriam caladas.
     inicio, fim = perf_svc.canais_period_bounds(filters.period, year, month)
+    mkt_ids = perf_svc.parse_marketplace_param(filters.channels)
     resposta["affiliate_costs"] = safe_affiliate_costs_block(
-        sessao, perf_svc.parse_marketplace_param(filters.channels),
-        inicio, fim, brand_keys=filters.brands,
+        sessao, mkt_ids, inicio, fim, brand_keys=filters.brands,
+    )
+    # Bloco ADITIVO de descontos do pedido TikTok (§28, UE8-I3). Mesmo padrao:
+    # composto AQUI, por wrapper seguro, DEPOIS de `affiliate_costs` e sem
+    # tocar em nada que ja estava na resposta. Os dois blocos sao independentes
+    # — grao, fonte e frescor diferentes — e a falha de um nao afeta o outro.
+    resposta["tiktok_order_discounts"] = safe_tiktok_order_discounts_block(
+        sessao, mkt_ids, inicio, fim, brand_keys=filters.brands,
     )
     return resposta
 

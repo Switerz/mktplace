@@ -3467,9 +3467,229 @@ Sete checks em `audit.data_quality_check`: `ftodd_fechamento_populacoes`,
 5. **Nenhum timeout de step definido e nenhuma alteração de Scheduler.** A carga
    foi manual; `full_daily` está intocado.
 
-### 28.8 O que este gate NÃO fez
+### 28.8 O que o UE8-I2 não fez
 
-- **UE8-I3 não iniciado.** Os descontos **não estão expostos em `/canais`**, e
-  nenhuma alteração foi feita em API, contrato ou UI.
 - Nada foi declarado sobre **retorno de afiliados**.
 - Zero backfill, zero incremental, zero segunda tentativa, zero deploy.
+- **UE8-I3 não havia começado** naquele momento. Começou depois — ver §29.
+
+---
+
+## 29. UE8-I3 — descontos TikTok na aba Canais
+
+### 29.1 Estado
+
+**IMPLEMENTADO, CORRIGIDO E COM QA LOCAL APROVADO. VERSIONADO; NÃO PUBLICADO.**
+
+Três contratos semânticos foram corrigidos na rodada **UE8-I3-R/V**, antes de
+o bloco virar contrato público — ver §29.11.
+
+- UE8-I2 **concluído** (§28): a fato existe e está carregada;
+- contrato de API, serviço, rota, frontend, testes e QA **implementados**;
+- **zero commit, zero push, zero deploy** nesta rodada;
+- **os descontos ainda NÃO estão disponíveis em produção**;
+- Scheduler **não iniciado**; a carga da fato continua manual;
+- otimização do `INSERT` do sync (2.081 round-trips) continua **pendente**;
+- a frente **Avoe é paralela** e não integra este bloco — a migration `015`
+  foi aplicada no Neon durante esta rodada por aquela frente, e não foi tocada
+  aqui.
+
+### 29.2 O contrato exposto
+
+Campo **aditivo e opcional** `tiktok_order_discounts` em `CanaisResponse`.
+**Nenhum campo existente mudou**, e `affiliate_costs` continua idêntico.
+Não há endpoint novo: o bloco é composto dentro de `GET /canais`.
+
+Reusa `AvailabilityStatus`, `PeriodStatus` e `CoverageStatus` do §23 — as
+perguntas são as mesmas, e duplicar os enums criaria dois vocabulários para o
+mesmo conceito. Só o frescor é próprio:
+
+```
+DiscountFreshnessStatus = Literal["recent_load", "stale_load", "unknown"]
+CoverageBasis           = Literal["observed_grid"]
+```
+
+⚠️ **Os nomes falam da CARGA, não do dado.** `recent_load` diz SOMENTE que o
+sync rodou há no máximo 30 h. Não diz que o dado é atual, estável, maduro ou
+fechado — a fonte é um retrato do pedido e pode ser revisada retroativamente.
+A frase renderizada é literal:
+
+> *"Carga recente — isso não significa dado estável; a fonte pode ser
+> revisada."*
+
+`unknown` cobre três defeitos distintos, todos reais: carimbo **ausente**,
+**naive** (a coluna é `TIMESTAMPTZ`; um naive significa mudança de tipo) e
+**à frente do relógio** — idade negativa passaria trivialmente por "recente" e
+esconderia justamente a inconsistência entre banco e aplicação.
+
+### 29.3 As duas taxas — fórmulas congeladas
+
+```
+seller_discount_rate   = seller_discount_signed   / full_product_value × 100
+platform_subsidy_rate  = platform_subsidy_amount  / full_product_value × 100
+```
+
+| Regra | Razão |
+|---|---|
+| Denominador é **sempre** `full_product_value` | `official_gmv` já é líquido dos descontos; a razão sobre ele não teria significado |
+| A taxa da marca sai **negativa** | é o sinal que identifica quem financiou |
+| A taxa da plataforma sai **positiva** | idem |
+| Denominador zero ou nulo → taxa **`null`** | não existe taxa sem base; zero seria medição inventada |
+| **Nunca `abs()`**, nunca nova inversão | a única inversão do sistema está no sync |
+| **Nunca somar as duas** | financiadores diferentes |
+
+Medido em agosto/2026: a marca financiou de **−33,86%** (barbours) a
+**−41,57%** (lescent) do valor cheio; o TikTok subsidiou de **+2,32%**
+(lescent) a **+6,72%** (barbours). Os dois intervalos não se comunicam, e o
+número que interessa depende de qual caixa se está olhando.
+
+### 29.4 Componentes — separados, nunca somados
+
+A tabela por marca mostra `full_product_value`, `official_gmv`,
+**Desconto financiado pela marca** e **Subsídio financiado pelo TikTok**, mais
+as duas taxas. Os rótulos nomeiam o **financiador**, não só o tipo: "desconto"
+e "subsídio" sozinhos convidariam a somar.
+
+**Não existe `total_discount`**, não existe `<tfoot>` de total, e não há
+margem, lucro, receita líquida, caixa, retorno nem valor "recuperado".
+
+**Cancelados só no drill-down**, em seção com separador visual próprio e
+título "Pedidos cancelados (contexto separado)". São população disjunta dos
+comerciais.
+
+### 29.5 D0 e período
+
+A janela vem de `canais_period_bounds` — a **mesma** que `get_canais` usou —
+resolvida uma única vez na rota. O teto é `last_closed_date` em
+America/São_Paulo, sempre.
+
+Quando o filtro alcança D0, o dia é removido **internamente**: HTTP continua
+200, `period_status` vira `partial_month` e o payload traz o aviso literal
+*"O dia de hoje foi excluído: os pedidos ainda estão entrando e o número
+mudaria sozinho."* Janela inteiramente em D0/futuro devolve `rows: []`,
+`date_count: 0` e **nenhum dado antigo** — nunca 4xx.
+
+Diferença deliberada em relação ao bloco mensal de afiliados: lá um período
+parcial **suprime** os valores, porque o grão é mensal e meio mês pareceria
+comparável a um mês fechado. **Aqui o grão é diário**, então `period_status`
+DESCREVE o período e não bloqueia a consulta.
+
+### 29.6 Cobertura — grade OBSERVADA, idêntica à do sync
+
+A grade esperada é o produto **(dias com atividade) × (marcas com atividade)**,
+derivado da própria fotografia e respeitando o filtro. É **exatamente** a
+definição de `_coverage` em
+`pipelines/sync_tiktok_order_discounts_daily.py` — um teste compara as duas
+sobre a mesma entrada sintética, para que não possam divergir em silêncio.
+
+No histórico integral, o bloco reporta **2.081 de 2.280 chaves presentes, 199
+ausentes** — o mesmo 199 que o sync registrou no UE8-I2 (§28.7).
+
+Três números vão no payload, porque *"faltam N"* não significa nada sem saber
+de quantas nem de qual grade:
+
+| Campo | Histórico integral |
+|---|---|
+| `coverage_basis` | `observed_grid` |
+| `coverage_expected_keys` | 2.280 |
+| `coverage_present_keys` | 2.081 |
+| `coverage_missing_keys` | **199** |
+
+⚠️ **`complete` significa "grade observada completa", JAMAIS "ingestão
+comprovadamente completa".** Ausência de venda e falha de ingestão continuam
+indistinguíveis com as fontes atuais. Por isso o limite acompanha também o
+estado completo na tela — sem ele, o leitor concluiria ingestão comprovada:
+
+> *"Cobertura medida sobre a grade observada (dias × marcas com atividade);
+> não é prova de ingestão completa."*
+
+Nenhuma chave ausente é preenchida com zero.
+
+### 29.7 Isolamento de falha
+
+`safe_tiktok_order_discounts_block` captura **somente** `SQLAlchemyError` e
+devolve o bloco em `error` com nota fixa e sanitizada; `/canais` responde 200
+com o corpo histórico intacto. Erro de programação (`KeyError`, `TypeError`,
+`AttributeError`) **sobe** — um `except Exception` amplo esconderia bug sob
+"erro de fonte". O log é uma categoria fixa, sem `exc_info`, sem SQL, host,
+DSN ou credencial. Provado nos dois sentidos: a falha de um bloco não derruba
+o vizinho.
+
+### 29.8 Reconciliação e desempenho
+
+**244 comparações API × Neon em 8 recortes, zero divergência, ao centavo** —
+agosto/2026 completo, setembro até D−1, uma marca, cinco marcas, histórico
+integral, filtro sem TikTok, filtro de marca vazio e período incluindo D0.
+Os agregados do histórico batem exatamente com os publicados no §28, e a
+cobertura reconcilia nas **199** lacunas da grade observada.
+
+Contraprova de `source_max_date`: com a janela recortada em 06/09 e filtro
+`barbours`, o bloco reporta **2026-09-06** enquanto o máximo global da fato
+segue **2026-09-07**. Nenhuma marca real está atrasada hoje — as cinco chegam
+a 07/09 —, então o cenário foi produzido pelo recorte, sem tocar o banco.
+
+`EXPLAIN (ANALYZE, BUFFERS)`, **uma consulta por request**:
+
+| Recorte | Execution Time |
+|---|---|
+| uma marca, agosto | **0,53 ms** |
+| agosto/2026, 5 marcas | **1,44 ms** |
+| histórico integral | **4,49 ms** |
+
+A meta de **p95 < 150 ms no banco** é cumprida com folga de duas ordens de
+grandeza. A latência medida do notebook (~160 ms) é **RTT de rede**, provada
+por contraprova: `SELECT 1` — consulta com trabalho zero — custa **157,7 ms**
+mediana pela mesma conexão. **Essa medição local não se extrapola para
+Render→Neon**; a real pertence ao smoke pós-deploy.
+
+Nenhum índice foi criado: o plano não mostra necessidade no volume atual
+(2.081 linhas). A varredura mais cara é o `Seq Scan` de `marcas_conhecidas`,
+0,15 ms sobre 46 buffers.
+
+### 29.9 QA
+
+Backend **95 testes** focais + **18** de composição de rota. Frontend **68**
+testes. `apps/api` **1006 passed** com as **mesmas 43 falhas ambientais** da
+baseline, comparadas por node ID — zero regressão. `npm test` **1459 passed**,
+typecheck e build limpos, `package-lock.json` intocado e **zero dependência
+nova**.
+
+QA em Chromium real, **1440×900 e 390×844**: zero overflow horizontal de
+página, tabela rolando dentro do próprio container no mobile, zero erro de
+console, zero hydration warning, somente GET, alvos ≥ 44 px, texto ≥ 12 px,
+foco inicial no diálogo, foco preso, Escape fechando, foco retornando ao
+acionador, e **zero requisição de dados ao abrir o drill-down**.
+
+Achado registrado e **alheio a este bloco**: `/canais` devolve 404 em
+`/favicon.ico` — não existe `public/` nem `app/favicon.ico` no projeto. É
+pré-existente e estrutural.
+
+### 29.10 Limitações
+
+1. **Não é fechamento financeiro.** Não é receita econômica, caixa nem margem.
+2. **A fonte muda.** `current_snapshot` é idade da carga, não estabilidade.
+3. **199 chaves sem linha** no histórico integral, na grade observada — o
+   mesmo número do sync. Ausência de venda e lacuna de ingestão continuam
+   indistinguíveis, e `complete` nunca prova ingestão.
+4. **`source_max_updated_at` é naive** e sai sem rótulo de fuso.
+5. **A rota limita o intervalo a 366 dias** (guarda pré-existente de
+   `/canais`): o histórico integral não é pedível por HTTP, só pelo serviço.
+6. **Publicado no repositório, não em produção.** O deploy não faz parte deste
+   gate, e o smoke **Render→Neon continua pendente** — a latência medida
+   localmente é RTT e não se extrapola.
+
+### 29.11 Correção terminal — UE8-I3-R/V
+
+Três contratos semânticos foram corrigidos **antes** de o bloco virar contrato
+público. Nenhum era defeito de cálculo; os três eram afirmações erradas.
+
+| # | Defeito | Correção |
+|---|---|---|
+| 1 | O serving media cobertura sobre **dias de calendário × marcas conhecidas** (224 lacunas) enquanto o sync usava a **grade observada** (199). O mesmo `CoverageStatus` significava universos diferentes na carga e na exposição | Serving adotou a definição versionada do sync. Histórico integral passou a reportar **199**, reconciliado. Payload ganhou `coverage_basis`, `coverage_expected_keys`, `coverage_present_keys` e `coverage_missing_keys` |
+| 2 | `source_max_date` vinha do **máximo global da fato** mesmo com a resposta filtrada por marca — afirmava que a seleção estava atualizada até uma data que a marca não alcançou | Passou a ser o máximo do **escopo efetivo**: mesma janela, mesmas marcas, mesmo teto D−1. Com contraprova por marca |
+| 3 | `current_snapshot` sugeria propriedade do **dado**, quando a medição é da **carga** | Enum trocado para `recent_load` / `stale_load` / `unknown`, com `synced_at` no futuro classificado como `unknown` em vez de "recente" |
+
+A distinção entre *"o filtro não casa marca alguma"* (`no_eligible_brand`) e
+*"a marca existe, mas não vendeu nesta janela"* (`available` com grade vazia)
+foi preservada: a contagem de marcas conhecidas continua no SQL, mas **não
+participa** da cobertura.

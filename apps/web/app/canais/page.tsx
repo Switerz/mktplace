@@ -10,6 +10,7 @@ import {
   type CanaisChannelRow,
   type CanaisChannelMedian,
   type AffiliateCostsBlock,
+  type TikTokOrderDiscountsBlock,
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
@@ -18,6 +19,7 @@ import KpiCard from "@/components/KpiCard";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import ChannelComparisonDialogContent from "@/components/ChannelComparisonDialogContent";
 import AffiliateCostsPanel from "@/components/AffiliateCostsPanel";
+import TiktokOrderDiscountsPanel from "@/components/TiktokOrderDiscountsPanel";
 import { resolveBlockPhase } from "@/lib/canais-affiliate-costs";
 import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
@@ -182,6 +184,8 @@ function CanaisPageInner() {
   const [channelRows, setChannelRows] = useState<CanaisChannelRow[]>([]);
   const [channelMedians, setChannelMedians] = useState<CanaisChannelMedian[]>([]);
   const [affiliateCosts, setAffiliateCosts] = useState<AffiliateCostsBlock | null>(null);
+  const [tiktokOrderDiscounts, setTiktokOrderDiscounts] =
+    useState<TikTokOrderDiscountsBlock | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -216,6 +220,7 @@ function CanaisPageInner() {
         setChannelRows(r.channelRows);
         setChannelMedians(r.channelMedians);
         setAffiliateCosts(r.affiliateCosts);
+        setTiktokOrderDiscounts(r.tiktokOrderDiscounts);
         setIsLive(r.live);
         setRefreshedAt(r.meta.refreshedAt);
         setResolvedKey(key);
@@ -249,6 +254,9 @@ function CanaisPageInner() {
   // O bloco de afiliados obedece a MESMA guarda de frescor: um custo contabil
   // do filtro anterior exibido sob o filtro novo seria pior que ausencia.
   const displayAffiliateCosts = dataIsFresh ? affiliateCosts : null;
+  // Mesma guarda de frescor: um desconto do filtro anterior exibido sob o
+  // filtro novo seria pior que ausencia.
+  const displayTiktokOrderDiscounts = dataIsFresh ? tiktokOrderDiscounts : null;
   // Quatro fases EXPLICITAS em vez de `loading = !dataIsFresh`, que colapsava
   // "carregando" e "terminou em erro" no mesmo skeleton — e o painel pulsava
   // para sempre depois de uma falha.
@@ -770,6 +778,23 @@ function CanaisPageInner() {
         <AffiliateCostsPanel
           key={requestKey}
           block={displayAffiliateCosts}
+          phase={affiliatePhase}
+        />
+      </div>
+
+      {/* ── Descontos e subsidios do pedido — TikTok Shop (UE8-I3, §28) ──
+          Bloco SEPARADO do de afiliados: outra fonte, outro grao (dia x marca)
+          e outro frescor. Os dois componentes tem financiadores diferentes e
+          nao se somam, entao nao cabem como colunas de nenhuma tabela acima.
+          `key={requestKey}`: na troca de filtro o painel REMONTA e o dialogo
+          volta a fechado — sem isso, um dialogo aberto durante a troca
+          reapareceria com o payload novo, ou pior, com o antigo em tela.
+          Reusa `affiliatePhase`: a fase e' da REQUISICAO de /canais, uma so'
+          para os dois blocos, e duplica-la abriria espaco para divergirem. */}
+      <div id="descontos-tiktok" className="scroll-mt-24">
+        <TiktokOrderDiscountsPanel
+          key={requestKey}
+          block={displayTiktokOrderDiscounts}
           phase={affiliatePhase}
         />
       </div>
