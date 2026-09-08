@@ -3782,6 +3782,12 @@ Um smoke aprovado não converte nenhuma destas ressalvas em garantia:
 
 ### 30.1 Estado
 
+> **ATIVA desde 08/09/2026.** Piloto executado, reconciliado e Scheduler
+> reabilitado. Ver §30.10 a §30.14.
+
+*(O bloco abaixo é o estado no fechamento da Task 1/2, preservado como
+registro histórico.)*
+
 **IMPLEMENTADA E VALIDADA LOCALMENTE. NÃO EXECUTADA.**
 
 - **zero execução**: nenhum sync, nenhum `full_daily`, nenhum banco escrito
@@ -3962,3 +3968,153 @@ imediato. Corrigido com acesso por nome e `AS fact_max_ref_date` explícito.
 5. **Reconciliar** a carga.
 6. **Observar uma execução agendada.**
 7. **Confirmar `recent_load`** depois da primeira execução automática.
+
+
+### 30.10 Task 2/2 — correção do health check
+
+Dois defeitos de contrato, corrigidos **antes** de qualquer ativação
+(`68222af`). Nenhuma constante mudou.
+
+**Erro de banco falhava ABERTO.** `psycopg2.Error` devolvia `unknown` com
+`stale=False`: Neon indisponível deixava a cobertura **verde**. "Não consegui
+verificar" não é evidência de saúde. Agora é `error` com `stale=True`,
+`critical=True`, mensagem fixa e sanitizada, e `ok_critical` cai. Bug de
+programação continua propagando. Os testes passaram a exercitar o caminho
+**integrado via `build_report`**, que é quem decide o exit code do step.
+
+`error` ≠ `unknown`: ausência de execução é fato conhecido (pré-piloto segue
+`unknown`, sem reprovar aqui); falha de leitura é cegueira, e cegueira reprova.
+
+**"Fonte parada" era causa inferida.** O estado afirmava que a fonte havia
+parado de produzir — mas ausência de vendas e lacuna de ingestão são
+indistinguíveis com as fontes atuais. `fonte_atrasada` virou
+**`competencia_ausente`** e `job_atrasado` virou **`execucao_atrasada`**:
+ambos descrevem o que foi medido, não uma causa.
+
+### 30.11 Checkout operacional
+
+`C:\Users\Notebook\Desktop\mktplace` atualizado de `76e92fc` para
+`68222af`, **exclusivamente** por `git merge --ff-only`. Os **nove resíduos**
+existentes (2 modificados, 7 não rastreados) tiveram SHA-256 registrado antes
+e conferido depois: **idênticos byte a byte**. Zero colisão com os 32 caminhos
+trazidos, stage vazio, zero stash/reset/restore/clean.
+
+### 30.12 Preflight e piloto
+
+Preflight real: **6/6 OK** em 8,6 s — Data Mart e Neon acessíveis, as três
+relações do Neon e a fonte no Data Mart existentes, Alembic **015**, fonte não
+vazia e advisory lock livre.
+
+**Modo previsto antes de executar, e confirmado:** `_full success` no mês BRT
+= 1 (obrigação cumprida no UE8-I2) e `_backfill success` em 7 dias = 0
+(devida) → `auto` deveria escolher **`backfill`**. Escolheu.
+
+| | |
+|---|---|
+| Modo solicitado → efetivo | `auto` → **`backfill`** |
+| Janela | **2026-06-10 → 2026-09-07** (90 dias fechados) |
+| `rows_extracted` · `rows_loaded` | 699.912 · **450** |
+| Duração | **257,5 s** no CLI · 251,0 s na auditoria |
+| `publicacao` · exit code | `commit_confirmado` · **0** |
+| `run_id` | `3008651bd6b941db9271afe516b6189e` |
+
+Uma execução, **zero retry**.
+
+### 30.13 Reconciliação
+
+**3.619 verificações.** Grão, chaves e `EXCEPT` fonte × destino **(0, 0)**;
+450 linhas com o `run_id` do piloto; a fato segue com 2.081 linhas e **dois**
+`source_run_id` (o full do UE8-I2 fora da janela, o backfill dentro); zero
+`UPDATE` (recarga é DELETE+INSERT); zero nulo proibido; zero `NaN`; zero
+coluna de total; sinais corretos; `max(ref_date)` = 2026-09-07; **zero linha
+de D0 ou futuro**; zero advisory lock residual; sete checks DQ, todos `pass`.
+
+**Onze divergências apareceram na comparação com a fonte LIVE, e são deriva
+pós-snapshot — não erro de publicação.** A prova tem três partes:
+
+1. estão **confinadas ao último dia** (07/09) e **exclusivamente** a campos de
+   cancelado. Os outros 89 dias batem, e **nenhum campo comercial** divergiu;
+2. a direção é **monotônica**: 4 marcas com cancelados crescendo, **0**
+   diminuindo — assinatura de maturação de status;
+3. a fonte **ainda estava mudando**: duas leituras separadas por 45 s deram
+   1.141 e 1.174 cancelados em 07/09, sem nada ter sido publicado entre elas.
+   O destino ficou em 1.122, congelado no instante do snapshot.
+
+A reconciliação **autoritativa** é o `EXCEPT` bidirecional dentro da
+transação, que passou. A comparação com a fonte live é observação posterior, e
+divergir nela é o comportamento esperado de uma fonte mutável.
+
+### 30.14 Health check e Scheduler
+
+As duas dimensões do UE8 ficaram **verdes**: execução com último sucesso há
+**0,3 h**, e cobertura operacional `ok` — janela publicada até 2026-09-07 e
+competência na fato até 2026-09-07, contra o último dia fechado 2026-09-07.
+
+O `health_check` sai `exit 1` por **fontes alheias ao UE8**, todas
+preexistentes: `ml_produto_ranking` (126,9 h) e
+`tiktok_affiliate_cost_order_monthly` (126,8 h), críticas, mais
+`shopee-ads_daily` e `shopee_product_monthly`, conhecidas e não-críticas.
+
+**O Scheduler já estava HABILITADO**, ao contrário do que a documentação
+afirmava. O XML de referência tem `<Enabled>false</Enabled>`, mas a definição
+efetivamente importada **omitiu** esse elemento — e a ausência default para
+`true`. A `<Description>` da tarefa ainda dizia "NAO ativada". O proprietário
+confirmou que a ingestão automática é desejada.
+
+Estado final, conferido no Windows:
+
+| Campo | Valor |
+|---|---|
+| State · Enabled | **Ready · True** |
+| Trigger | 06:00 diário — **comprovado** por execução real (log de 01/09 às 06:00:02) |
+| Ação · TaskKey | `run_task.ps1` · `full_daily` |
+| Checkout | `C:\Users\Notebook\Desktop\mktplace` |
+| Lock externo | **9.600 s** (`run_task.ps1`) |
+| `ExecutionTimeLimit` | **PT2H50M (10.200 s)** — era PT2H40M |
+| MultipleInstancesPolicy | `IgnoreNew` |
+| StartWhenAvailable | `true` |
+| NextRunTime | **09/09/2026 06:00:00** |
+
+Trigger, ação, principal, `IgnoreNew` e `StartWhenAvailable` foram
+**preservados**; só `ExecutionTimeLimit` mudou. Nenhum "Run now" foi
+disparado.
+
+### 30.15 ⚠️ A carga em lote NÃO está em lote — dívida com prazo
+
+O piloto expôs um defeito na otimização da Task 1/2: **ela não teve efeito**.
+
+Medição direta contra o Neon, com `executemany` de tamanhos crescentes:
+
+| Linhas | Tempo | Por linha |
+|---|---|---|
+| 1 | 158 ms | 158 ms |
+| 50 | 8,2 s | 165 ms |
+| 450 | 72,2 s | 161 ms |
+| 2.081 | 324,6 s | 156 ms |
+
+**O custo por linha é constante e igual ao RTT** — ou seja, continua havendo
+**um round-trip por linha**. A causa: `executemany_mode = EXECUTEMANY_VALUES`
+só reescreve para multi-values quando o statement é um construto `insert()` do
+Core. `SQL_STAGING_INSERT` é um `text()` cru, e para `text()` o SQLAlchemy cai
+no `cursor.executemany()` do psycopg2, que é um laço de `execute`.
+
+Consequência, com o RTT observado variando entre 157 ms e 350 ms:
+
+| Modo | Linhas | Projeção | 300 s? |
+|---|---|---|---|
+| incremental | 50 | 8–18 s | ok |
+| backfill | 450 | 71–158 s | ok |
+| **full** | **2.081** | **327–728 s** | **ESTOURA** |
+
+**O próximo `full` é devido em 1º de outubro** (a obrigação mensal de setembro
+foi cumprida). Até lá, `auto` escolherá `incremental` ou `backfill`, ambos
+dentro do envelope — a execução de 09/09 será **incremental**, verificada pelo
+predicado real.
+
+A correção **não foi feita nesta rodada** de propósito: mudar o caminho de
+publicação sem poder validá-lo com um novo `--apply` trocaria um risco datado
+e conhecido por um risco imediato e não validado. O caminho provável é
+`psycopg2.extras.execute_values`, que já tem precedente no repositório.
+
+**O timeout de 300 s não foi reduzido** — uma única execução não é base para
+estreitá-lo, e o defeito acima o torna apertado, não folgado.

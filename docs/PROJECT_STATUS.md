@@ -2388,6 +2388,38 @@ no histórico, na grade observada — nunca convertidas em zero, e `complete`
 jamais prova ingestão. **Scheduler não iniciado** e otimização do `INSERT` do
 sync ainda pendente. A frente **Avoe é paralela** e não integra este bloco.
 
+**UE8-I4 — 08/09/2026: AUTOMAÇÃO ATIVA.** Piloto executado, reconciliado e
+Scheduler reabilitado. `auto` escolheu **`backfill`** (previsto antes de rodar
+pelo predicado real), janela 2026-06-10 → 2026-09-07, **450 linhas**, 257,5 s,
+`commit_confirmado`, exit 0, **zero retry**. Reconciliação: **3.619
+verificações**, `EXCEPT` fonte × destino **(0,0)**, zero D0/futuro, zero nulo
+proibido, sete checks DQ `pass`. As 11 divergências contra a fonte live são
+**deriva pós-snapshot provada** — confinadas ao último dia, só em cancelados,
+monotônicas, e a fonte subiu de 1.141 para 1.174 entre duas leituras a 45 s
+sem nada ter sido publicado.
+
+**Checkout operacional** atualizado `76e92fc` → `68222af` por `--ff-only`, com
+os **nove resíduos idênticos byte a byte**. **Scheduler**: `Ready`,
+`Enabled=true`, 06:00 diário (**horário comprovado** por execução real de
+01/09 às 06:00:02), `ExecutionTimeLimit` PT2H40M → **PT2H50M**, lock externo
+9.600 s, `IgnoreNew`, `StartWhenAvailable`, **NextRunTime 09/09 06:00**.
+Health check do UE8 **verde nas duas dimensões**; o `exit 1` vem de fontes
+alheias e preexistentes (`ml_produto_ranking` e
+`tiktok_affiliate_cost_order_monthly`, ~127 h).
+
+⚠️ **O Scheduler JÁ ESTAVA habilitado** — o XML de referência tem
+`Enabled=false`, mas a definição importada omitiu o elemento, e a ausência
+default para `true`. A documentação que afirmava o contrário está corrigida.
+
+⚠️ **DÍVIDA COM PRAZO: a carga em lote não está em lote.** Medição direta dá
+**156–165 ms por linha, constante e igual ao RTT** — `EXECUTEMANY_VALUES` não
+se aplica a `text()` cru. Projeção: incremental 8–18 s e backfill 71–158 s
+cabem nos 300 s; o **`full` de 2.081 linhas levaria 327–728 s e ESTOURARIA**.
+O próximo full é devido em **1º de outubro**; até lá `auto` escolhe
+incremental ou backfill. Corrigir antes disso.
+
+*(Estado anterior, no fechamento da Task 1/2, preservado abaixo.)*
+
 **UE8-I4 Task 1/2 — 08/09/2026: AUTOMAÇÃO IMPLEMENTADA E VALIDADA
 LOCALMENTE, NÃO EXECUTADA.** O `full_daily` passou a ter **14 steps**: entrou
 `tiktok_order_discounts_daily` (`--mode auto --apply`, timeout 300 s,
