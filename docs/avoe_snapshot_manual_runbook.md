@@ -13,7 +13,7 @@ leitura no AVH-4B-S Task 1/2 · exibido no AVH-4B-S Task 2/2 · 2026-09-08
 > | snapshot `sync_run_id = 285` (7 metas + 24 canais) | **PRESERVADO, intocado** |
 > | **AVH-4B-S Task 1/2** — contrato, serviço, rota e testes | **CONCLUÍDO** |
 > | **AVH-4B-S Task 2/2** — página e QA de navegador | **CONCLUÍDO** |
-> | deploy do backend no Render | **PENDENTE — ação do proprietário** |
+> | deploy do backend no Render | **CONCLUÍDO e validado em produção** (§14.10) |
 >
 > A auditoria histórica do run 285 tem `rows_extracted = 31` e
 > `rows_loaded = 31`, e **não será reescrita**. A população original lida
@@ -785,9 +785,9 @@ e comparado com `SELECT` diretos:
 
 ## 14. Página de referências externas — AVH-4B-S Task 2/2
 
-**Estado: CONCLUÍDO.** Página read-only, sem migration, sem snapshot, sem
-automação e sem escrita em banco. **O deploy do backend no Render é ação do
-proprietário** (§14.9).
+**Estado: CONCLUÍDO E EM PRODUÇÃO.** Página read-only, sem migration, sem
+snapshot, sem automação e sem escrita em banco. O deploy do backend no Render
+foi feito pelo proprietário e está validado (§14.10).
 
 ### 14.1 Rota e navegação
 
@@ -911,7 +911,7 @@ o banco não foi tocado nesses casos.
 14 textos abaixo de 12px e 12 alvos abaixo de 44px, medidos em `/canais`, que
 este gate não alterou. Não foi introduzida aqui e não foi corrigida aqui.
 
-### 14.9 Como o proprietário publica o backend no Render
+### 14.9 Como publicar o backend no Render (feito em 2026-09-08)
 
 O frontend já está publicado pelo pipeline normal. O **backend** precisa de uma
 ação sua, porque este gate não faz deploy:
@@ -935,3 +935,43 @@ ação sua, porque este gate não faz deploy:
 
 Enquanto o deploy não acontecer, a página mostra o estado de erro em produção,
 com o texto factual e o botão de nova tentativa. Nenhuma outra rota é afetada.
+
+### 14.10 Validação em produção — 2026-09-08
+
+Feita **somente em leitura**, depois do deploy do backend. Zero escrita, zero
+migration, zero execução de snapshot.
+
+**Endpoint** `GET /api/v1/performance/avoe-snapshot` na API pública: HTTP 200 em
+1,25 s, e 17 verificações aprovadas —
+
+| Verificação | Resultado |
+|---|---|
+| `meta.status` | `available` |
+| `sync_run_id` / `sync_run_status` | `285` / `success` |
+| `targets_count` / `channel_rows_count` | 7 / 24, iguais ao tamanho dos arrays |
+| `is_official_torre_source` | `false` |
+| `currency_status` | `assumed_unconfirmed` |
+| `sync_run_link_method` | `audit_time_window` |
+| soma das metas | **R$ 45.000.000,00** |
+| soma informada dos canais | **R$ 1.401.246,15** |
+| `is_proxy` / `definition_status` | todos `true` / `unconfirmed` |
+| canais oficiais na resposta | nenhum |
+| limitações | sem automação, sem realizado, não substitui KPI |
+| PII / identificador operacional | nenhum |
+
+**CORS**: o cabeçalho `access-control-allow-origin` volta com a origem do
+frontend de produção. Vale registrar o modo de falha: `localhost` e
+`127.0.0.1` são origens **diferentes** para o navegador, e uma origem fora da
+allowlist derruba a página para o estado de erro mesmo com a API no ar — foi o
+que aconteceu na primeira rodada do QA local.
+
+**Página** `/referencias-externas/avoe` em produção, em desktop 1440 e mobile
+390: 18 verificações por viewport, todas aprovadas — título, selo, `#285`,
+auditoria `success`, vínculo temporal, moeda assumida, **7 linhas de meta e 24
+de canal**, o rótulo "Valor informado pela Avoe", os cinco avisos
+obrigatórios, as notas de cobertura, ausência de `tfoot` e de total, nenhum
+cabeçalho chamado GMV/Receita/Realizado/Atingimento/Margem, **zero overflow
+horizontal**, os três filtros e **zero erro de console ou hidratação**.
+
+**Regressão**: `/canais` não menciona Avoe no conteúdo, o link de navegação
+existe e o grupo `Referências externas` aparece na barra lateral.
