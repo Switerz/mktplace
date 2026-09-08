@@ -1,7 +1,8 @@
 # Snapshots manuais da Avoe — fonte, contrato e runbook
 
 Gate AVH-4A · corrigido no AVH-4A-R · aplicado no AVH-4B-P · corrigido no
-AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
+AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2, AVH-4A-H1-R3 e AVH-4A-H1-D1 · servido em
+leitura no AVH-4B-S Task 1/2 · 2026-09-08
 
 > **Estado por etapa — não usar a frase genérica "AVH-4B não iniciado".**
 >
@@ -10,7 +11,8 @@ AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
 > | **AVH-4B-P** — piloto: migration + primeiro snapshot | **CONCLUÍDO** |
 > | migration `015` no Neon | **APLICADA** |
 > | snapshot `sync_run_id = 285` (7 metas + 24 canais) | **PRESERVADO, intocado** |
-> | **AVH-4B-S** — serving, API e frontend | **NÃO INICIADO** |
+> | **AVH-4B-S Task 1/2** — contrato, serviço, rota e testes | **CONCLUÍDO** |
+> | **AVH-4B-S Task 2/2** — tela e QA de navegador | **NÃO INICIADO** |
 >
 > A auditoria histórica do run 285 tem `rows_extracted = 31` e
 > `rows_loaded = 31`, e **não será reescrita**. A população original lida
@@ -18,8 +20,11 @@ AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
 > semântica adotada no AVH-4A-H1, uma execução equivalente hoje registraria
 > `rows_extracted = 4.837` e `rows_loaded = 31` (§8.5).
 >
-> Nada foi escrito no Data Mart, nada foi escrito na Avoe, e nenhuma API ou
-> tela consome estas tabelas.
+> Nada foi escrito no Data Mart e nada foi escrito na Avoe. Desde o
+> **AVH-4B-S Task 1/2** existe **uma** rota de leitura consumindo estas tabelas
+> — `GET /api/v1/performance/avoe-snapshot`, descrita em §13. Ela é aditiva e
+> read-only: nenhum contrato existente mudou, e nenhuma métrica da Avoe entra
+> em `/overview`, `/canais` ou qualquer outro endpoint. **Não há tela.**
 >
 > Três rodadas de hotfix, todas **sem tocar nos dados publicados**: o
 > **AVH-4A-H1** corrigiu o caminho de commit indeterminado, a mensagem após
@@ -30,8 +35,10 @@ AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
 > e proibiu qualquer exceção crua de driver de sobreviver na cadeia; o
 > **AVH-4A-H1-R3** passou a classificar as mutações de auditoria pela **fase**
 > (um commit tentado que levanta é indeterminado para sempre, e nenhum rollback
-> posterior o rebaixa). Ver a matriz em §8.2.1, a semântica das mutações em
-> §8.2.2 e as métricas em §8.5.
+> posterior o rebaixa); o **AVH-4A-H1-D1** trocou a denylist do sanitizador por
+> uma regra fail-closed — texto de exceção externa nunca é ecoado — e alinhou
+> comentários, docstrings e runbook ao código. Ver a matriz em §8.2.1, a
+> semântica das mutações em §8.2.2 e as métricas em §8.5.
 
 ---
 
@@ -299,23 +306,32 @@ reversão, nem auditoria.
 Interrupção do operador não é desfecho operacional da publicação, e convertê-la
 em um deles seria inventar um estado.
 
-Todos os códigos de saída da CLI:
+A CLI tem **exatamente nove resultados**: um sucesso, sete falhas tipadas e um
+fallback não classificado.
 
 ```
+sucesso
 0   sucesso, no-op ou dry-run
-2   FALHA DE CONTRATO
-3   FALHA / FALHA ao conectar no destino
+
+falhas tipadas da maquina de estados
 4   FALHA NA PUBLICACAO (nada gravado)
 5   PUBLICACAO INDETERMINADA
 6   AUDITORIA INCOMPLETA (publicacao confirmada)
 7   AUDITORIA INICIAL INCOMPLETA (publicacao NAO tentada)
 8   PUBLICACAO NAO CONFIRMADA, AUDITORIA INCOMPLETA (nada publicado)
 9   PUBLICACAO INDETERMINADA (auditoria tambem NAO confirmada)
-10  ESTADO NAO CLASSIFICADO (nao se afirma publicacao, reversao nem auditoria)
 11  REVERSAO NAO CONFIRMADA (commit nunca tentado; fim da transacao nao observado)
+
+fallback
+10  ESTADO NAO CLASSIFICADO (nao se afirma publicacao, reversao nem auditoria)
 ```
 
-Nenhum desses rótulos contém "rollback" ou "revertido".
+**Os exits 2 e 3 ficam fora da máquina de estados.** O `2` é falha de contrato
+do snapshot e o `3` é falha de credencial ou de conexão: ambos acontecem antes
+de qualquer transação existir, então não há publicação, reversão nem auditoria
+sobre a qual afirmar coisa alguma.
+
+Nenhum dos rótulos contém "rollback" ou "revertido".
 
 #### Estado 4 — reversão não confirmada
 
@@ -324,40 +340,54 @@ O que ele **sabe** é que o `commit()` nunca foi tentado. O que ele **não pode
 dizer**: "rollback aplicado", "dados seguros", nem "nada gravado" sem
 qualificação.
 
-O que o importador faz: encerra a conexão para forçar o fim da transação (e
-registra se esse encerramento foi confirmado), grava na auditoria apenas a nota
-de indeterminação — nunca `failed`, que afirmaria um fim que ninguém observou —
-e sai com 11 mandando reconciliar em leitura. Nenhum retry.
+O que o importador faz: **tenta** encerrar a conexão para forçar o fim da
+transação e registra o resultado dessa tentativa em `conexao_encerrada` —
+`True` se o `close()` retornou, `False` se ele também levantou. A mensagem
+acompanha o atributo; nunca se afirma incondicionalmente que a conexão foi
+encerrada. Na auditoria grava apenas a nota de indeterminação — nunca `failed`,
+que afirmaria um fim que ninguém observou — e sai com 11 mandando reconciliar
+em leitura. Nenhum retry.
+
+A falha do `close()` **não substitui nem esconde a classificação principal**: o
+desfecho continua `ReversaoNaoConfirmada` com exit 11, e a causa original segue
+identificada.
 
 Quatro afirmações que o importador **não** faz:
 
-- **nunca converte uma exceção crua de driver em mensagem, cadeia ou
-  traceback.** A exceção do psycopg2 carrega DSN, host, usuário, parâmetros e
-  SQL no próprio texto e nos frames. Todo desfecho sai por `_levanta()`, que
-  zera `__cause__`, `__context__` e o traceback de origem: só a mensagem já
-  sanitizada viaja. O importador também não emite log — não há logger para
-  vazar;
+- **nunca reproduz o texto de uma exceção externa.** A regra é **fail-closed**:
+  de uma exceção de driver ou biblioteca sobra apenas o nome da classe, passado
+  por allowlist de caracteres, e a mensagem fixa `<mensagem externa
+  suprimida>`. Só o texto de `SnapshotImportError` — construído dentro do
+  próprio importador — é preservado. Isso vale para a mensagem *aparentemente*
+  inofensiva também: julgar isso em tempo de execução não é auditável, e a
+  denylist anterior (`postgres://`, `password`, `apikey`, `eyJ`) deixava passar
+  DSN em outra caixa, `host=`/`user=`/`dbname=` em key-value, caminho de
+  arquivo, SQL com parâmetros e `DETAIL` de constraint com valor de linha.
+  Todo desfecho sai por `_levanta()`, que zera `__cause__`, `__context__` e o
+  traceback de origem, então nada disso chega a stderr, a
+  `audit.source_sync_run` ou a `traceback.format_exception`. O importador
+  também não emite log — não há logger para vazar;
 
 - **"rollback aplicado" só aparece quando o `rollback()` retornou.** A frase é
   construída dentro de `publish()`, no ramo que a comprova. Se o próprio
   rollback levantar, a mensagem passa a dizer que a reversão **não** foi
-  confirmada — e continua verdadeira sobre o essencial: nada foi publicado,
-  porque o commit nunca chegou a ser tentado. Nenhum rótulo da CLI contém essa
-  frase, em nenhum dos sete desfechos;
+  confirmada — e o desfecho passa a ser o estado 4. Nenhum rótulo da CLI contém
+  essa frase, em nenhuma das sete falhas tipadas;
 - **nunca marca `failed` num run cujo commit retornou**, nem num run cujo
-  commit ficou indeterminado. Um registro que ficou `running` é a declaração
-  honesta de "não sei";
-- **nunca chama de "commit indeterminado" uma falha pré-commit.** O desfecho 3
-  é explícito: os dados estão seguros, o que ficou aberto é a auditoria.
+  commit ficou indeterminado, nem num run cuja reversão não foi confirmada. Um
+  registro que ficou `running` é a declaração honesta de "não sei";
+- **nunca chama de "commit indeterminado" uma falha pré-commit.** O estado 3 é
+  explícito: a transação de dados foi revertida com confirmação, e o que ficou
+  aberto é a auditoria.
 
 Se você encontrar um run `running` desta fonte, o procedimento é: contar as
 linhas das duas tabelas para aquela `captured_at` e comparar com o relatório do
 dry-run. Se as linhas estiverem lá, a publicação aconteceu e o que falta é
 apenas fechar o registro de auditoria; se não estiverem, a captura pode ser
 reimportada normalmente (o caminho de idempotência cobre os dois casos sem
-sobrescrever nada). Nos desfechos 3 e 5 vale a mesma leitura, com uma ressalva:
-ali o próprio registro de auditoria pode estar sem nota, então o único árbitro
-é a contagem nas tabelas de snapshot.
+sobrescrever nada). Nos estados 3, 4 e 6 vale a mesma leitura, com uma
+ressalva: ali o próprio registro de auditoria pode estar sem nota, então o
+único árbitro é a contagem nas tabelas de snapshot.
 
 ### 8.2.2 As quatro faces de cada mutação de auditoria
 
@@ -555,7 +585,7 @@ executado, e o snapshot já publicado não foi alterado nem reprocessado.
 
 | # | Passo | Resultado |
 |---|---|---|
-| 1 | `pytest pipelines/tests/test_avoe_snapshot_import.py` | **158 passaram** (96 antes do H1: +12 no H1, +17 no H1-R, +24 no H1-R2, +9 no H1-R3) |
+| 1 | `pytest pipelines/tests/test_avoe_snapshot_import.py` | **169 passaram** (96 antes do H1: +12 no H1, +17 no H1-R, +24 no H1-R2, +9 no H1-R3, +11 no H1-D1) |
 | 2 | `pytest pipelines/tests` na árvore modificada | 1 falha, o resto passando |
 | 3 | `pytest pipelines/tests` na árvore limpa de `origin/main`, mesmo ambiente | **a mesma 1 falha** |
 | 4 | comparação por node ID (limpa × modificada) | **zero removido**; só o arquivo Avoe cresce |
@@ -575,3 +605,175 @@ chamadas, status escritos na auditoria e o `ResultadoAuditoria` de cada mutaçã
 Somam-se a elas as contraprovas de vazamento (`str`, `repr`,
 `traceback.format_exception`, stderr real da CLI, logger, `__cause__` e
 `__context__`) e as de propagação de `KeyboardInterrupt` e `SystemExit`.
+
+
+## 13. Serving read-only — AVH-4B-S Task 1/2
+
+**Estado: CONCLUÍDO.** Contrato, serviço, rota e testes existem. **Task 2/2
+(tela e QA de navegador) não iniciada.** Nenhuma migration acompanha esta
+etapa, nenhum snapshot foi executado e nada foi escrito no banco.
+
+### 13.1 Rota
+
+```
+GET /api/v1/performance/avoe-snapshot
+```
+
+Sem parâmetro, de propósito: o contrato é "a última captura **válida**". Filtro
+por marca, canal ou competência é escopo de tela, não de serving. Segue a
+convenção kebab-case das rotas existentes sob `/api/v1/performance`.
+
+Arquivos: [apps/api/app/schemas/avoe_snapshot.py](../apps/api/app/schemas/avoe_snapshot.py),
+[apps/api/app/services/avoe_snapshot_service.py](../apps/api/app/services/avoe_snapshot_service.py),
+rota adicionada em [apps/api/app/routers/performance.py](../apps/api/app/routers/performance.py).
+
+### 13.2 Fonte e grão
+
+| Bloco | Tabela | Grão | Chave |
+|---|---|---|---|
+| `targets` | `marts.proxy_avoe_brand_monthly_target_snapshot` | competência × marca × captura | `(source, captured_at, ref_month, brand)` |
+| `extra_channels` | `marts.proxy_avoe_extra_channel_monthly_snapshot` | competência × marca × canal × captura | `(source, captured_at, ref_month, brand, channel)` |
+
+Os dois blocos são lidos com o **mesmo** `source` e o **mesmo** `captured_at`.
+Uma captura só é servida se as duas tabelas concordarem no `captured_at`, no
+`snapshot_id` e no `import_run_id` — zero mistura entre capturas.
+
+### 13.3 Envelope da resposta
+
+Quatro blocos: `meta`, `targets`, `extra_channels`, `limitations`.
+
+`meta` traz `status` (`available`/`unavailable`), `source` (`avoe_hub`),
+`source_kind` (`external_manual_snapshot`), `is_official_torre_source` (fixo em
+`false`), `captured_at`, `snapshot_id`, `sync_run_id`, `sync_run_status`,
+`sync_run_link_method`, `targets_count`, `channel_rows_count`,
+`target_ref_months`, `channel_ref_months`, `currency`, `currency_status`,
+`refreshed_at` (instante desta resposta, distinto de `captured_at`),
+`captured_age_days`, `unavailable_reason` e `warnings`.
+
+Não existe campo de realizado, atingimento, margem, variação ou GMV. Cruzar
+meta com realizado exige contrato próprio e uma definição aprovada de
+realizado; nenhuma das duas existe.
+
+`import_run_id`, `source_file` e `source_file_hash` **não** são expostos: são
+operacionais e de sistema de arquivos. `snapshot_id` é exposto porque é
+proveniência — hash de conteúdo dos arquivos da captura.
+
+### 13.4 Seleção da captura
+
+Candidatas ordenadas da mais nova para a mais antiga (teto de 10). A primeira
+que passa em **todas** as validações é servida; uma captura mais nova mas
+inválida é **ignorada** em favor da anterior que se sustenta.
+
+Motivos de recusa, todos fail-closed:
+
+| `unavailable_reason` | Quando |
+|---|---|
+| `no_snapshot_published` | nenhuma captura nas tabelas |
+| `targets_and_channels_capture_mismatch` | a captura existe em só uma das duas tabelas |
+| `capture_incomplete` | candidata sem `captured_at` |
+| `capture_mixes_multiple_imports` | mais de um `snapshot_id`/`import_run_id` sob a mesma captura, ou os dois blocos com `snapshot_id` diferente |
+| `duplicate_grain_in_capture` | contagem de linhas diverge das combinações distintas da chave |
+| `audit_run_not_conclusive` | nenhum ou mais de um run `success` associável |
+| `serving_inconsistent` | moeda não única na captura |
+
+Sem captura válida: **HTTP 200**, `status = "unavailable"`, arrays vazios,
+`unavailable_reason` factual. Nenhuma outra rota é afetada.
+
+### 13.5 A ligação com a auditoria é temporal — limitação medida
+
+`audit.source_sync_run` **não tem coluna de ligação** com as tabelas de
+snapshot: não existe `captured_at`, `snapshot_id` nem `import_run_id` lá.
+Verificado no Neon em 2026-09-08.
+
+A única associação possível sem migration é a janela
+`[started_at, finished_at]` do run contra o `imported_at` das linhas. O serviço
+é fail-closed: aceita a captura apenas quando **exatamente um** run `success`
+cobre a janela. Zero runs — o caso de um run que ficou `running`, com
+`finished_at` nulo — ou mais de um derrubam para `audit_run_not_conclusive`.
+Assim um snapshot cujo run está `running`, `failed` ou indeterminado nunca é
+servido.
+
+O método viaja na resposta, em `meta.sync_run_link_method = "audit_time_window"`,
+e num aviso. **Recomendação para a Task 2/2 ou para uma rodada de migration
+própria:** acrescentar `captured_at` (ou `snapshot_id`) a
+`audit.source_sync_run`, ou uma tabela de ligação, para que a associação passe
+a ser estrutural.
+
+### 13.6 Consultas e cardinalidade
+
+No máximo **quatro** consultas, todas parametrizadas, número independente do
+volume — zero N+1:
+
+1. candidatas a captura com os agregados de validação das duas tabelas;
+2. runs de auditoria desta fonte (teto de 200, mais novo primeiro);
+3. metas da captura escolhida;
+4. canais da captura escolhida.
+
+Sem captura publicada, roda **uma** consulta e as duas últimas são puladas.
+
+Cardinalidade medida no Neon em 2026-09-08: 7 linhas de meta (todas em
+`2026-08-01`) e 24 de canal (6 canais × 3 competências: `2026-06-01`,
+`2026-07-01`, `2026-08-01`), zero duplicidade de chave em ambas.
+
+### 13.7 Ausência nunca é zero
+
+`reported_amount` é `Optional[float]`: `null` significa "a Avoe não informou" e
+**jamais** é substituído por `0.0`. Zero informado continua chegando como
+`0.0`. Os dois estados são distinguíveis no JSON. O mesmo vale para
+`brand_key`, `currency_warning` e `source_recorded_at`.
+
+### 13.8 Limitações declaradas no próprio contrato
+
+O bloco `limitations` afirma, em campos booleanos: `manual_snapshot: true`,
+`automated_refresh: false`, `channel_amount_definition_confirmed: false`,
+`currency_confirmed: false`, `provides_realized_amount: false`,
+`provides_attainment_or_margin: false`, `replaces_canonical_torre_kpi: false`.
+
+Os avisos em `meta.warnings` repetem isso em texto para o operador: fonte
+externa e manual, moeda assumida, canal proxy com definição não confirmada,
+ausência de realizado, ausência de automação e o método temporal do
+`sync_run_id`.
+
+### 13.9 Separação da Torre canônica
+
+- o serviço não consulta `gold.`, `raw.` nem `silver.` — o backend no Render
+  não alcança o Data Mart;
+- não consulta `fact_marketplace_daily_performance`, `dim_loja`,
+  `dim_marketplace` nem qualquer objeto canônico;
+- a allowlist da tabela de canais **exclui** TikTok, Mercado Livre e Shopee por
+  CHECK, o que impede soma acidental com o GMV oficial;
+- teste dedicado varre o OpenAPI e falha se qualquer schema que não seja da
+  Avoe passar a mencionar `avoe`, `proxy_avoe`, `reported_amount` ou
+  `target_amount`.
+
+### 13.10 Validação executada
+
+| # | Passo | Resultado |
+|---|---|---|
+| 1 | `pytest apps/api/tests/test_avoe_snapshot_contract.py` | **46 passaram** |
+| 2 | `pytest apps/api/tests` (com a mudança) | 43 falhas, 1.052 passaram |
+| 3 | `pytest apps/api/tests` na árvore limpa de `origin/main` | **as mesmas 43 falhas**, 1.006 passaram |
+| 4 | node ID (limpa × modificada) | 1.057 → 1.103; **zero removido**, 46 adicionados, todos no arquivo Avoe |
+| 5 | reconciliação real read-only contra o Neon | **APROVADA** (§13.11) |
+
+As 43 falhas são pré-existentes em `origin/main` e alheias a esta frente:
+dependem de banco local e de Data Mart, indisponíveis no ambiente da rodada.
+Zero falha nova, zero falha desaparecida.
+
+### 13.11 Reconciliação read-only com o snapshot 285
+
+Sessão `SET TRANSACTION READ ONLY`, serviço executado contra o Neon de verdade
+e comparado com `SELECT` diretos:
+
+- `status = available`, `captured_at` do endpoint igual ao `max(captured_at)` de
+  **ambas** as tabelas;
+- **7 metas** e **24 canais**, iguais às contagens da tabela para aquela
+  captura;
+- soma das metas e soma informada dos canais idênticas **ao centavo**;
+- comparação **linha a linha por chave**: mesmas chaves e mesmos valores ao
+  centavo nos dois blocos, zero divergência;
+- `snapshot_id` do endpoint igual ao da tabela; nenhuma linha de outra captura;
+- `sync_run_id = 285`, `status = success`, e o histórico **31/31 preservado**;
+- nulos e zeros preservados exatamente como no banco;
+- ao final: sessão ainda read-only, zero lock exclusivo em `marts`, contagens
+  inalteradas (7 e 24) e um único run desta fonte. **Zero escrita.**
