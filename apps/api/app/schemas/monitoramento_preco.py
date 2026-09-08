@@ -21,14 +21,34 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+#: PARTICAO COMERCIAL — cinco valores que somam `monitored_count`.
+#: Gate PMA-H1: `stale_observation` SAIU daqui. Era um status comercial e
+#: substituia a classificacao, de modo que um sync atrasado zerava os cinco
+#: cartoes comerciais e a tela aparentava "nenhum desvio". Frescor virou
+#: dimensao propria, em `FreshnessStatus`.
 ComparisonStatus = Literal[
     "below_reference",
     "at_or_above_reference",
     "no_reference",
     "non_comparable_reference_ambiguous",
     "inactive_listing",
-    "stale_observation",
 ]
+
+#: QUALIDADE TRANSVERSAL — sobreposta a `ComparisonStatus`, nunca no lugar dele.
+#:   fresh       observacao de D-1;
+#:   stale       o modo `latest` caiu num dia anterior porque o sync atrasou;
+#:   historical  o consumidor ESCOLHEU um dia anterior (nao e' atraso);
+#:   unavailable nao ha observacao materializada para responder.
+FreshnessStatus = Literal["fresh", "stale", "historical", "unavailable"]
+
+#: Modos publicos do endpoint.
+QueryMode = Literal["latest", "selected_date"]
+
+#: Base da referencia usada na comparacao. Um unico valor, e' contrato: a
+#: comparacao SEMPRE usa o snapshot PDV mais recente disponivel, inclusive numa
+#: data historica. Nao existe "snapshot vigente na data" porque a origem nao
+#: declara vigencia.
+ReferenceBasis = Literal["latest_available_snapshot"]
 
 MatchMethod = Literal["brand_gtin_exact", "brand_sku_exact_unique"]
 
@@ -55,18 +75,33 @@ class MonitoramentoPrecoMeta(BaseModel):
     timezone: str
     currency: str
     marketplace: Literal["ml"]
-    #: Sempre `latest`. Nao existe modo historico: ver F3 do PMA-1A-R.
-    mode: Literal["latest"]
+    #: `latest` (maior observacao <= D-1) ou `selected_date` (dia pedido).
+    mode: QueryMode
     #: Ultima publicacao do sync para `observed_ref_date`.
     refreshed_at: Optional[str] = None
-    #: Maior `ref_date` publicada. NAO e' "hoje": o sync publica no maximo D-1.
+    #: O que o cliente PEDIU em `observed_date`. Nulo no modo `latest`.
+    requested_observed_date: Optional[str] = None
+    #: A data efetivamente USADA. Nula quando a data pedida nao tem observacao
+    #: materializada — nunca substituida pela mais proxima, porque aproximar
+    #: responderia outra pergunta.
     observed_ref_date: Optional[str] = None
-    #: D-1 do dia operacional — a UNICA data que sustenta comparacao (F4).
-    #: Se `observed_ref_date` for anterior a esta, toda linha vem
-    #: `stale_observation`.
+    #: D-1 do dia operacional: o teto do que e' consultavel.
     eligible_ref_date: Optional[str] = None
+    #: Datas observadas MATERIALIZADAS, <= D-1, mais recentes primeiro. Sem
+    #: calendario sintetico: dia que o sync nao publicou nao aparece.
+    available_observed_dates: list[str] = []
+    #: Teto defensivo aplicado a lista acima.
+    available_observed_dates_limit: int
+    #: Dias entre `observed_ref_date` e `eligible_ref_date`. Zero = em dia.
+    #: Nulo quando nao ha observacao. Nunca negativo.
+    lag_days: Optional[int] = None
+    freshness_status: FreshnessStatus
     reference_snapshot_id: Optional[str] = None
     reference_captured_at: Optional[str] = None
+    reference_basis: ReferenceBasis
+    #: A frase que declara as DUAS datas e a ausencia de vigencia historica.
+    #: Nula quando falta uma das duas — sem data nao ha afirmacao a fazer.
+    comparison_basis_text: Optional[str] = None
     reference_type: ReferenceType
     policy_status: PolicyStatus
     validity_status: ValidityStatus
@@ -81,14 +116,28 @@ class MonitoramentoPrecoMeta(BaseModel):
 
 
 class MonitoramentoPrecoKpis(BaseModel):
+    """Duas dimensoes independentes  (Gate PMA-H1).
+
+    COMERCIAL — particao: `below + at_or_above + no_reference + ambiguous +
+    inactive == monitored_count`, sempre, verificado em teste.
+    `comparable_count == below + at_or_above`, por definicao.
+
+    QUALIDADE — sobreposta: `fresh + stale + historical == monitored_count`
+    tambem, mas cruzando a particao comercial. Uma linha `below_reference` num
+    dia atrasado conta nas duas dimensoes. Antes, `stale_count` competia com os
+    contadores comerciais e os zerava.
+    """
+
     monitored_count: int
     comparable_count: int
     below_reference_count: int
     at_or_above_reference_count: int
     no_reference_count: int
     ambiguous_reference_count: int
-    stale_count: int
     inactive_count: int
+    fresh_count: int
+    stale_count: int
+    historical_count: int
 
 
 class MonitoramentoPrecoRow(BaseModel):
@@ -142,6 +191,10 @@ class MonitoramentoPrecoRow(BaseModel):
     match_quality: MatchQuality
     reference_candidate_count: int
     comparison_status: ComparisonStatus
+    #: Frescor da linha, ao LADO do status comercial. Todas as linhas de uma
+    #: resposta compartilham a mesma `ref_date`, logo o mesmo frescor; viaja na
+    #: linha para que a UI possa marca-la sem perder o veredito comercial.
+    freshness_status: FreshnessStatus
     limitations: list[str]
 
 

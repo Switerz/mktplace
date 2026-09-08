@@ -18,6 +18,7 @@
  */
 import type {
   ComparisonStatus,
+  FreshnessStatus,
   MatchMethod,
   MatchQuality,
   MonitoramentoPrecoKpis,
@@ -37,8 +38,19 @@ export const STATUS_LABELS: Record<ComparisonStatus, string> = {
   no_reference: "Sem referência B2B",
   non_comparable_reference_ambiguous: "Referência ambígua",
   inactive_listing: "Anúncio inativo",
-  stale_observation: "Observação desatualizada",
 };
+
+/** Gate PMA-H1 — frescor e' dimensao propria, com rotulo proprio. */
+export const FRESHNESS_LABELS: Record<FreshnessStatus, string> = {
+  fresh: "Em dia",
+  stale: "Sincronização atrasada",
+  historical: "Consulta retrospectiva",
+  unavailable: "Sem observação",
+};
+
+export function freshnessLabel(f: FreshnessStatus): string {
+  return FRESHNESS_LABELS[f] ?? f;
+}
 
 /** Ordem de exibicao no filtro — a mesma do contrato do backend. */
 export const STATUS_ORDER: ComparisonStatus[] = [
@@ -47,7 +59,6 @@ export const STATUS_ORDER: ComparisonStatus[] = [
   "no_reference",
   "non_comparable_reference_ambiguous",
   "inactive_listing",
-  "stale_observation",
 ];
 
 /**
@@ -61,7 +72,6 @@ export const STATUS_TONE: Record<ComparisonStatus, "attention" | "neutral" | "mu
   no_reference: "muted",
   non_comparable_reference_ambiguous: "muted",
   inactive_listing: "muted",
-  stale_observation: "muted",
 };
 
 export function statusLabel(status: ComparisonStatus): string {
@@ -287,6 +297,8 @@ export function buildMonitoramentoRequestKey(params: {
   brand: string;
   status: string;
   productQuery: string;
+  /** Gate PMA-H1: a data observada FAZ PARTE da identidade da requisicao. */
+  observedDate?: string;
   limit: number;
   offset: number;
 }): string {
@@ -295,6 +307,9 @@ export function buildMonitoramentoRequestKey(params: {
     params.brand || "all",
     params.status || "all",
     params.productQuery.trim() || "-",
+    // Sem isto, trocar a data reusaria a resposta da data anterior e a guarda
+    // de frescor descartaria a nova por achar que a chave nao mudou.
+    params.observedDate || "latest",
     String(params.limit),
     String(params.offset),
   ].join("|");
@@ -409,18 +424,30 @@ export function buildQualidadeViews(kpis: MonitoramentoPrecoKpis): KpiView[] {
     },
     {
       chave: "stale",
-      rotulo: "Observação desatualizada",
+      rotulo: "Observação atrasada",
       valor: kpis.stale_count,
-      detalhe: "Observação anterior ao último dia elegível",
-      status: "stale_observation",
+      detalhe:
+        "Linhas de um dia anterior ao último elegível. Sobrepõe os cartões " +
+        "comerciais — não os substitui.",
+      qualidade: true,
+    },
+    {
+      chave: "historical",
+      rotulo: "Consulta retrospectiva",
+      valor: kpis.historical_count,
+      detalhe: "Data observada escolhida deliberadamente. Não é atraso.",
       qualidade: true,
     },
   ];
 }
 
 /**
- * Prova de fechamento: a soma dos seis status tem de dar `monitored_count`.
- * Exposta para a tela poder afirmar isso ao operador, e testada.
+ * Prova de fechamento da PARTICAO COMERCIAL: os CINCO status somam
+ * `monitored_count`.
+ *
+ * Gate PMA-H1: `stale_count` saiu desta soma. Ele conta FRESCOR, que e'
+ * sobreposto — incluir os dois na mesma conta faria uma linha atrasada e
+ * abaixo da referencia contar duas vezes.
  */
 export function statusFecha(kpis: MonitoramentoPrecoKpis): boolean {
   const soma =
@@ -428,9 +455,16 @@ export function statusFecha(kpis: MonitoramentoPrecoKpis): boolean {
     kpis.at_or_above_reference_count +
     kpis.no_reference_count +
     kpis.ambiguous_reference_count +
-    kpis.stale_count +
     kpis.inactive_count;
   return soma === kpis.monitored_count;
+}
+
+/** Fechamento da dimensao de FRESCOR, tambem em `monitored_count`. */
+export function frescorFecha(kpis: MonitoramentoPrecoKpis): boolean {
+  return (
+    kpis.fresh_count + kpis.stale_count + kpis.historical_count ===
+    kpis.monitored_count
+  );
 }
 
 /** Titulo do drill-down de uma linha, sem vazar nada sensivel. */

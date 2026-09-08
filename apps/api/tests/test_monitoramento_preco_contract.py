@@ -13,6 +13,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from app.services import pma_match as pm
 
 SERVICE_PATH = Path(__file__).resolve().parents[1] / "app" / "services" / "monitoramento_preco_service.py"
@@ -55,8 +57,11 @@ def _listing(brand, item_id, sku, gtin, price, status="active", ref_date=REF_DAT
     }
 
 
-def _one(listing, refs, hoje=HOJE):
-    return pm.compare_all([listing], refs, hoje)[0]
+def _one(listing, refs, hoje=HOJE, freshness=None):
+    """Uma linha comparada. `freshness` default = `fresh`, como no modo latest
+    em dia; os testes de Gate PMA-H1 passam `stale`/`historical` explicitamente."""
+    fr = freshness or pm.FRESHNESS_FRESH
+    return pm.compare_all([listing], refs, hoje, fr)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -303,32 +308,86 @@ def test_anuncio_inativo_nao_recebe_veredito_de_preco():
         assert linha["difference_amount"] is None
 
 
-def test_observacao_vencida_precede_qualquer_veredito():
+def test_observacao_atrasada_NAO_apaga_o_veredito_comercial():
+    """Gate PMA-H1 — o defeito central que este gate corrige.
+
+    Antes, observacao anterior a D-1 devolvia `stale_observation` em
+    `comparison_status` e anulava a diferenca. Com o sync atrasado TODA linha
+    virava stale, os cinco cartoes comerciais iam a zero e a tela aparentava
+    "nenhum desvio de preco" quando o que havia era atraso de pipeline.
+
+    Agora o veredito comercial e' calculado SEMPRE; o atraso viaja em
+    `freshness_status` e nas `limitations`.
+    """
     refs = [_ref("barbours", "BB03038", None, "54.90")]
     antiga = _listing("barbours", "MLB16", "BB03038", None, "10",
                       ref_date=date(2026, 8, 1))
-    linha = _one(antiga, refs)
-    assert linha["comparison_status"] == pm.STATUS_STALE
-    assert linha["difference_amount"] is None
+    linha = _one(antiga, refs, freshness=pm.FRESHNESS_STALE)
+    assert linha["comparison_status"] == pm.STATUS_BELOW
+    assert linha["freshness_status"] == pm.FRESHNESS_STALE
+    # A diferenca EXISTE e e' medida: 10.00 - 54.90.
+    assert linha["difference_amount"] == Decimal("-44.90")
+    assert linha["suggested_retail_amount"] == Decimal("54.90")
+    # E o atraso e' declarado na linha, nao escondido.
+    assert any("NAO descreve o preco de hoje" in x for x in linha["limitations"])
 
 
-def test_somente_d_menos_1_sustenta_comparacao():
-    """F4: a tolerancia que aceitava D-2 foi REMOVIDA. Fronteiras exatas."""
+def test_data_historica_avisa_retrospectividade_sem_inventar_vigencia():
     refs = [_ref("barbours", "BB03038", None, "54.90")]
-    esperado = {
-        1: pm.STATUS_BELOW,   # D-1 -> elegivel
-        2: pm.STATUS_STALE,   # D-2 -> vencida (antes era aceita como fresca)
-        3: pm.STATUS_STALE,
-        30: pm.STATUS_STALE,
-    }
-    for delta, alvo_status in esperado.items():
+    antiga = _listing("barbours", "MLB17", "BB03038", None, "10",
+                      ref_date=date(2026, 8, 1))
+    linha = _one(antiga, refs, freshness=pm.FRESHNESS_HISTORICAL)
+    assert linha["comparison_status"] == pm.STATUS_BELOW
+    assert linha["freshness_status"] == pm.FRESHNESS_HISTORICAL
+    texto = " ".join(linha["limitations"])
+    assert "retrospectiva" in texto
+    assert "nao declara a vigencia historica" in texto
+    # NUNCA afirma que a referencia valia naquele dia.
+    assert "valia" not in texto
+    assert "vigente em" not in texto
+
+
+def test_frescor_separa_atraso_de_consulta_retrospectiva():
+    """A MESMA data e' `stale` no modo latest e `historical` quando escolhida.
+
+    E' o que impede rotular de defeito de pipeline um uso legitimo da tela.
+    """
+    tres = date.fromordinal(HOJE.toordinal() - 3)
+    assert pm.classify_freshness(tres, HOJE, selected=False) == pm.FRESHNESS_STALE
+    assert pm.classify_freshness(tres, HOJE, selected=True) == pm.FRESHNESS_HISTORICAL
+    # D-1 e' fresh nos dois modos: escolher o dia mais recente nao e' historico.
+    d1 = pm.last_eligible_date(HOJE)
+    assert pm.classify_freshness(d1, HOJE, selected=False) == pm.FRESHNESS_FRESH
+    assert pm.classify_freshness(d1, HOJE, selected=True) == pm.FRESHNESS_FRESH
+    # Sem observacao: `unavailable`, nunca `fresh`.
+    assert pm.classify_freshness(None, HOJE, selected=False) == pm.FRESHNESS_UNAVAILABLE
+    assert pm.classify_freshness(None, HOJE, selected=True) == pm.FRESHNESS_UNAVAILABLE
+
+
+def test_lag_days_mede_defasagem_sem_inventar_zero():
+    d1 = pm.last_eligible_date(HOJE)
+    assert pm.lag_days(d1, HOJE) == 0
+    assert pm.lag_days(date.fromordinal(d1.toordinal() - 5), HOJE) == 5
+    # Ausencia de observacao NAO e' zero dia de atraso.
+    assert pm.lag_days(None, HOJE) is None
+
+
+def test_stale_saiu_da_particao_comercial_mas_sobrevive_como_alias():
+    assert pm.STATUS_STALE not in pm.COMMERCIAL_STATUSES
+    assert len(pm.COMMERCIAL_STATUSES) == 5
+    # Continua ACEITO no filtro `status`, como alias depreciado de frescor:
+    # link antigo nao pode quebrar em silencio.
+    assert pm.STATUS_STALE in pm.COMPARISON_STATUSES
+    assert set(pm.FRESHNESS_STATUSES) == {"fresh", "stale", "historical",
+                                          "unavailable"}
+
+
+def test_d_menos_1_e_a_fronteira_do_frescor_sem_tolerancia():
+    """F4 preservado: nao existe tolerancia que trate D-2 como fresco."""
+    for delta, esperado in {1: pm.FRESHNESS_FRESH, 2: pm.FRESHNESS_STALE,
+                            3: pm.FRESHNESS_STALE, 30: pm.FRESHNESS_STALE}.items():
         alvo = date.fromordinal(HOJE.toordinal() - delta)
-        linha = _one(_listing("barbours", "X", "BB03038", None, "10", ref_date=alvo), refs)
-        assert linha["comparison_status"] == alvo_status, (delta, linha["comparison_status"])
-        if alvo_status == pm.STATUS_STALE:
-            assert linha["difference_amount"] is None
-            assert linha["difference_pct"] is None
-            assert linha["suggested_retail_amount"] is None
+        assert pm.classify_freshness(alvo, HOJE, selected=False) == esperado, delta
 
 
 def test_classificacao_da_data_tem_tres_estados():
@@ -396,17 +455,58 @@ def test_kpis_fecham_com_o_total():
     rows = pm.compare_all(listings, refs, HOJE)
     k = pm.build_kpis(rows)
     assert k["monitored_count"] == 6
-    assert k["below_reference_count"] == 1
+    # Gate PMA-H1: a linha F (ref_date de julho) NAO e' mais engolida por
+    # `stale_observation` — ela recebe seu veredito comercial normalmente e passa
+    # a contar em `below_reference`, que vai de 1 para 2.
+    assert k["below_reference_count"] == 2
     assert k["at_or_above_reference_count"] == 1
-    assert k["comparable_count"] == 2
+    assert k["comparable_count"] == 3
     assert k["ambiguous_reference_count"] == 1
     assert k["no_reference_count"] == 1
     assert k["inactive_count"] == 1
-    assert k["stale_count"] == 1
-    soma = (k["below_reference_count"] + k["at_or_above_reference_count"]
+    # A PARTICAO COMERCIAL fecha exatamente em monitored_count.
+    assert (k["below_reference_count"] + k["at_or_above_reference_count"]
             + k["no_reference_count"] + k["ambiguous_reference_count"]
-            + k["stale_count"] + k["inactive_count"])
-    assert soma == k["monitored_count"]
+            + k["inactive_count"]) == k["monitored_count"]
+    assert k["comparable_count"] == (k["below_reference_count"]
+                                     + k["at_or_above_reference_count"])
+
+
+def test_frescor_soma_o_total_e_SOBREPOE_a_particao_comercial():
+    """Gate PMA-H1: as duas dimensoes fecham no mesmo total, cruzadas.
+
+    Uma linha `below_reference` num dia atrasado conta nos DOIS lados. Antes,
+    `stale_count` competia com os contadores comerciais e os zerava.
+    """
+    refs = [_ref("kokeshi", "KS06004", "7908790700922", "100.00")]
+    listings = [
+        _listing("kokeshi", "A", "KS06004", "7908790700922", "90"),
+        _listing("kokeshi", "B", "KS06004", "7908790700922", "110"),
+        _listing("lescent", "C", "ZZ", None, "10"),
+    ]
+    rows = pm.compare_all(listings, refs, HOJE, pm.FRESHNESS_STALE)
+    k = pm.build_kpis(rows)
+    assert k["monitored_count"] == 3
+    assert k["stale_count"] == 3          # frescor: todas atrasadas
+    assert k["fresh_count"] == 0
+    assert k["historical_count"] == 0
+    # ...E o veredito comercial continua completo, sobreposto:
+    assert k["below_reference_count"] == 1
+    assert k["at_or_above_reference_count"] == 1
+    assert k["no_reference_count"] == 1
+    assert k["comparable_count"] == 2
+    # As duas dimensoes fecham no mesmo total.
+    assert (k["fresh_count"] + k["stale_count"]
+            + k["historical_count"]) == k["monitored_count"]
+    assert (k["below_reference_count"] + k["at_or_above_reference_count"]
+            + k["no_reference_count"] + k["ambiguous_reference_count"]
+            + k["inactive_count"]) == k["monitored_count"]
+    # A soma ANTIGA incluia `stale_count` DENTRO da particao comercial. Com
+    # frescor sobreposto ela passa a contar em dobro — e e' exatamente por isso
+    # que `stale` nao podia continuar sendo categoria comercial.
+    assert (k["below_reference_count"] + k["at_or_above_reference_count"]
+            + k["no_reference_count"] + k["ambiguous_reference_count"]
+            + k["stale_count"] + k["inactive_count"]) > k["monitored_count"]
 
 
 def test_nao_existe_severidade_no_payload():
@@ -526,7 +626,12 @@ def test_as_duas_pks_cobrem_todas_as_consultas():
     for sql in _queries():
         baixo = " ".join(sql.lower().split())
         if "fact_marketplace_listing_price_daily" in baixo:
-            assert ("ref_date =" in baixo or "max(ref_date)" in baixo), baixo
+            # `ref_date <=` (lista de datas disponiveis) tambem e' prefixo de PK:
+            # varredura ordenada por range, nao acesso aleatorio. Aceito ao lado
+            # da igualdade e do agregado.
+            assert ("ref_date =" in baixo
+                    or "ref_date <=" in baixo
+                    or "max(ref_date)" in baixo), baixo
         elif "fact_suggested_price_reference_snapshot" in baixo:
             assert ("snapshot_id =" in baixo
                     or "group by snapshot_id" in baixo), baixo
@@ -706,16 +811,32 @@ class FakeSession:
     """Session de mentira: responde por trecho da consulta. Registra tudo."""
 
     def __init__(self, listings, referencias, ref_date=REF_DATE,
-                 synced_at="2026-09-03T09:03:00+00:00"):
+                 synced_at="2026-09-03T09:03:00+00:00", available=None):
         self.listings = listings
         self.referencias = referencias
         self.ref_date = ref_date
         self.synced_at = synced_at
+        #: Gate PMA-H1 — datas OBSERVADAS materializadas. `None` = so a
+        #: `ref_date` corrente, que e' o caso comum de um serving com um dia.
+        self.available = ([ref_date] if available is None else list(available))
         self.executed: list[tuple[str, dict]] = []
 
     def execute(self, sql, params=None):
         texto = " ".join(str(sql).lower().split())
         self.executed.append((texto, params or {}))
+        # ORDEM IMPORTA: as duas consultas do Gate PMA-H1 tambem leem
+        # `fact_marketplace_listing_price_daily`, e sem estes dois branches ANTES
+        # do generico elas devolveriam a lista de anuncios — o fake responderia
+        # "existe" para qualquer data e a lista de datas viria com objetos de
+        # anuncio. Cada uma casa pelo seu texto distintivo.
+        if "select distinct ref_date" in texto:
+            teto = (params or {}).get("eligible")
+            datas = [d for d in self.available if teto is None or d <= teto]
+            return _Result([{"ref_date": d}
+                            for d in sorted(datas, reverse=True)])
+        if "select 1 as existe" in texto:
+            pedida = (params or {}).get("ref_date")
+            return _Result([{"existe": 1}] if pedida in self.available else [])
         if "max(ref_date)" in texto:
             return _Result([{"ref_date": self.ref_date}])
         if "max(synced_at)" in texto:
@@ -726,7 +847,13 @@ class FakeSession:
         if "from marts.fact_suggested_price_reference_snapshot" in texto:
             return _Result(list(self.referencias))
         if "from marts.fact_marketplace_listing_price_daily" in texto:
-            return _Result(list(self.listings))
+            # Respeita a data pedida: o servico consulta UMA `ref_date`, e um
+            # fake que devolvesse tudo esconderia o filtro.
+            pedida = (params or {}).get("ref_date")
+            if pedida is None:
+                return _Result(list(self.listings))
+            return _Result([li for li in self.listings
+                            if li.get("ref_date") == pedida])
         return _Result([])
 
 
@@ -1187,19 +1314,35 @@ def test_serving_com_data_no_dia_corrente_falha_fechado():
     assert "inconsistente" in erro
 
 
-def test_observacao_anterior_a_d_menos_1_vem_toda_stale():
-    """Pipeline atrasado aparece como atraso, nao como veredito de preco."""
+def test_latest_atrasado_CONTINUA_mostrando_as_comparacoes():
+    """Gate PMA-H1 — o comportamento que o gate exige.
+
+    Pipeline atrasado aparece como ATRASO (banner + freshness + lag_days) e NAO
+    apaga as comparacoes. Antes, este mesmo cenario devolvia comparable_count=0
+    e below_reference_count=0: a tela dizia "nenhum desvio" por causa de um
+    problema de pipeline.
+    """
     svc = _servico()
     listings, refs = _cenario(n_abaixo=3, n_acima=2)
     for li in listings:
         li["ref_date"] = date(2026, 8, 20)
     db = FakeSession(listings, refs, ref_date=date(2026, 8, 20))
     saida = svc.get_monitoramento_preco(db, today=HOJE)
-    assert saida["kpis"]["stale_count"] == 5
-    assert saida["kpis"]["comparable_count"] == 0
-    assert saida["kpis"]["below_reference_count"] == 0
-    assert all(r["difference_amount"] is None for r in saida["rows"])
-    assert any("anteriores a" in a for a in saida["meta"]["warnings"])
+    k = saida["kpis"]
+    # Frescor: tudo atrasado, e o atraso e' QUANTIFICADO.
+    assert k["stale_count"] == 5
+    assert k["fresh_count"] == 0
+    assert saida["meta"]["freshness_status"] == "stale"
+    assert saida["meta"]["mode"] == "latest"
+    assert saida["meta"]["lag_days"] == (date(2026, 9, 2) - date(2026, 8, 20)).days
+    # ...E as comparacoes comerciais CONTINUAM VISIVEIS.
+    assert k["comparable_count"] == 5
+    assert k["below_reference_count"] == 3
+    assert k["at_or_above_reference_count"] == 2
+    assert all(r["difference_amount"] is not None for r in saida["rows"])
+    assert all(r["freshness_status"] == "stale" for r in saida["rows"])
+    # Banner de defasagem presente e explicito.
+    assert any("DEFASAGEM" in a for a in saida["meta"]["warnings"])
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1433,16 @@ def test_http_500_em_inconsistencia_de_serving_com_corpo_fixo():
 
     listings, refs = _cenario()
     # `ref_date` do serving em D0: o sync proibe publicar isso.
-    cli = _client(FakeSession(listings, refs, ref_date=HOJE))
+    #
+    # D0 vem do RELOGIO REAL, nao da constante `HOJE` do modulo. A borda HTTP
+    # nao injeta `today` — o servico chama `today_operacional()` —, entao fixar
+    # `HOJE` aqui fazia o teste depender da data em que ele rodava: escrito em
+    # 03/09 ele passava, e a partir de 04/09 `HOJE` virou uma data apenas
+    # ATRASADA (stale), nunca D0, o guarda fail-closed deixou de ser exercitado
+    # e o teste passou a falhar para sempre. Medido em 08/09/2026.
+    from app.services import monitoramento_preco_service as _svc
+    d0_real = _svc.today_operacional()
+    cli = _client(FakeSession(listings, refs, ref_date=d0_real))
     try:
         r = cli.get(ROTA)
         assert r.status_code == 500, (r.status_code, r.text)
@@ -1421,8 +1573,15 @@ def test_ref_date_nao_aparece_no_openapi():
     op = app.openapi()["paths"][ROTA]["get"]
     nomes = [p["name"] for p in op["parameters"]]
     assert "ref_date" not in nomes, nomes
+    # Gate PMA-H1: `observed_date` e' PUBLICO e documentado — ao contrario de
+    # `ref_date`, que segue sendo armadilha fechada fora do schema.
     assert nomes == ["marketplace", "brand", "status", "product_query",
-                     "limit", "offset"], nomes
+                     "observed_date", "limit", "offset"], nomes
+    doc = next(p for p in op["parameters"] if p["name"] == "observed_date")
+    texto = doc["description"]
+    assert "YYYY-MM-DD" in texto
+    assert "latest_available_snapshot" in texto
+    assert "sem cair para o dia anterior" in texto
 
 
 def test_ref_date_e_oculto_e_recebido_como_texto():
@@ -1475,3 +1634,314 @@ def test_valores_monetarios_saem_como_float_e_nulo_permanece_nulo():
     for campo in ("shipping_amount", "seller_coupon_amount",
                   "platform_subsidy_amount", "checkout_price"):
         assert linha[campo] is None, campo
+
+
+# ---------------------------------------------------------------------------
+# 12. Gate PMA-H1 — data observada, modos e frescor transversal
+# ---------------------------------------------------------------------------
+
+def _sessao_multi_data(datas, n_abaixo=2, n_acima=1):
+    """Serving com varias datas observadas materializadas."""
+    refs = [_ref("kokeshi", "KS06004", "7908790700922", "100.00")]
+    listings = []
+    for d in datas:
+        for i in range(n_abaixo):
+            listings.append(_listing("kokeshi", f"B{d.isoformat()}{i}",
+                                     "KS06004", "7908790700922",
+                                     str(90 - i), ref_date=d))
+        for i in range(n_acima):
+            listings.append(_listing("kokeshi", f"A{d.isoformat()}{i}",
+                                     "KS06004", "7908790700922",
+                                     str(110 + i), ref_date=d))
+    return FakeSession(listings, refs, ref_date=max(datas),
+                       available=list(datas)), refs
+
+
+# --- modo latest -----------------------------------------------------------
+
+def test_latest_em_dia_e_fresh_sem_banner_de_defasagem():
+    d1 = pm.last_eligible_date(HOJE)
+    db, _ = _sessao_multi_data([d1])
+    saida = _servico().get_monitoramento_preco(db, today=HOJE)
+    m = saida["meta"]
+    assert m["mode"] == "latest"
+    assert m["requested_observed_date"] is None
+    assert m["observed_ref_date"] == d1.isoformat()
+    assert m["freshness_status"] == "fresh"
+    assert m["lag_days"] == 0
+    assert not any("DEFASAGEM" in a for a in m["warnings"])
+    assert saida["kpis"]["fresh_count"] == saida["kpis"]["monitored_count"]
+
+
+def test_latest_nunca_escolhe_silenciosamente_outro_dia():
+    """O modo latest usa a MAIOR data; nao ha fallback escondido para D-2."""
+    d1 = pm.last_eligible_date(HOJE)
+    d3 = date.fromordinal(d1.toordinal() - 2)
+    db, _ = _sessao_multi_data([d3, d1])
+    saida = _servico().get_monitoramento_preco(db, today=HOJE)
+    assert saida["meta"]["observed_ref_date"] == d1.isoformat()
+    assert all(r["ref_date"] == d1.isoformat() for r in saida["rows"])
+
+
+# --- modo selected_date ----------------------------------------------------
+
+def test_data_historica_existente_responde_exatamente_aquele_dia():
+    d1 = pm.last_eligible_date(HOJE)
+    antiga = date.fromordinal(d1.toordinal() - 4)
+    db, _ = _sessao_multi_data([antiga, d1])
+    saida = _servico().get_monitoramento_preco(
+        db, observed_date=antiga.isoformat(), today=HOJE)
+    m = saida["meta"]
+    assert m["mode"] == "selected_date"
+    assert m["requested_observed_date"] == antiga.isoformat()
+    assert m["observed_ref_date"] == antiga.isoformat()
+    assert m["freshness_status"] == "historical"
+    assert m["lag_days"] == 4
+    # Comparacoes PRESENTES, nao apagadas por ser data antiga.
+    assert saida["kpis"]["comparable_count"] == 3
+    assert all(r["ref_date"] == antiga.isoformat() for r in saida["rows"])
+    assert all(r["freshness_status"] == "historical" for r in saida["rows"])
+    # E NAO e' chamada de stale.
+    assert saida["kpis"]["stale_count"] == 0
+    assert not any("DEFASAGEM" in a for a in m["warnings"])
+    assert any("RETROSPECTIVA" in a for a in m["warnings"])
+
+
+def test_data_historica_usa_a_referencia_ATUAL_e_declara_isso():
+    """A referencia e sempre o snapshot mais recente, e o texto diz as DUAS
+    datas sem afirmar vigencia historica."""
+    d1 = pm.last_eligible_date(HOJE)
+    antiga = date.fromordinal(d1.toordinal() - 4)
+    db, _ = _sessao_multi_data([antiga, d1])
+    saida = _servico().get_monitoramento_preco(
+        db, observed_date=antiga.isoformat(), today=HOJE)
+    m = saida["meta"]
+    assert m["reference_basis"] == "latest_available_snapshot"
+    assert m["validity_status"] == "missing"
+    # O snapshot e o de 02/09, independente da data observada.
+    assert m["reference_captured_at"].startswith("2026-09-02")
+    texto = m["comparison_basis_text"]
+    assert texto is not None
+    assert antiga.strftime("%d/%m/%Y") in texto
+    assert "02/09/2026" in texto
+    assert "referencia sugerida ao consumidor (PDV)" in texto
+    assert "nao declara a vigencia historica" in texto
+    # A frase obrigatoria e o PRIMEIRO aviso.
+    assert m["warnings"][0] == texto
+
+
+def test_data_valida_sem_observacao_devolve_200_vazio_tipado():
+    """Nao e 404 e NAO cai para o dia anterior: a pergunta era sobre ESTE dia."""
+    d1 = pm.last_eligible_date(HOJE)
+    vazia = date.fromordinal(d1.toordinal() - 10)
+    db, _ = _sessao_multi_data([d1])
+    saida = _servico().get_monitoramento_preco(
+        db, observed_date=vazia.isoformat(), today=HOJE)
+    m = saida["meta"]
+    assert m["mode"] == "selected_date"
+    assert m["requested_observed_date"] == vazia.isoformat()
+    # A data USADA e NULA, nunca substituida pela mais proxima.
+    assert m["observed_ref_date"] is None
+    assert m["freshness_status"] == "unavailable"
+    assert m["lag_days"] is None
+    assert saida["rows"] == []
+    assert saida["total_count"] == 0
+    assert saida["kpis"]["monitored_count"] == 0
+    assert saida["kpis"]["comparable_count"] == 0
+    assert any("Ausencia nao" in a for a in m["warnings"])
+    # Sem observacao nao ha as duas datas, logo nao ha frase de base.
+    assert m["comparison_basis_text"] is None
+
+
+# --- recusas: D0, futuro, formato, payload ---------------------------------
+
+def test_d0_e_futuro_sao_recusados_com_mensagem_de_intervalo():
+    svc = _servico()
+    db, _ = _sessao_multi_data([pm.last_eligible_date(HOJE)])
+    for alvo in (HOJE, date.fromordinal(HOJE.toordinal() + 1),
+                 date(2099, 12, 31)):
+        with pytest.raises(svc.MonitoramentoPrecoError) as e:
+            svc.get_monitoramento_preco(db, observed_date=alvo.isoformat(),
+                                        today=HOJE)
+        assert str(e.value) == svc.ERRO_OBSERVED_DATE_FUTURA
+        # A recusa NAO ecoa a data pedida.
+        assert alvo.isoformat() not in str(e.value)
+
+
+def test_formato_invalido_recusado_sem_eco():
+    svc = _servico()
+    db, _ = _sessao_multi_data([pm.last_eligible_date(HOJE)])
+    for bruto in ("07/09/2026", "20260907", "2026-9-7", "ontem",
+                  "2026-02-30", "2026-13-01", "2026-09-07T00:00:00"):
+        with pytest.raises(svc.MonitoramentoPrecoError) as e:
+            svc.get_monitoramento_preco(db, observed_date=bruto, today=HOJE)
+        assert str(e.value) == svc.ERRO_OBSERVED_DATE_FORMATO
+        assert bruto not in str(e.value)
+
+
+def test_string_vazia_em_observed_date_e_ausencia_nao_erro():
+    svc = _servico()
+    db, _ = _sessao_multi_data([pm.last_eligible_date(HOJE)])
+    saida = svc.get_monitoramento_preco(db, observed_date="", today=HOJE)
+    assert saida["meta"]["mode"] == "latest"
+    assert saida["meta"]["requested_observed_date"] is None
+
+
+def test_payload_malicioso_em_observed_date_nao_e_ecoado():
+    svc = _servico()
+    db, _ = _sessao_multi_data([pm.last_eligible_date(HOJE)])
+    venenos = [
+        "<script>alert(1)</script>",
+        "2026-09-07 OR 1=1",
+        "postgresql://u:p@203.0.113.1:5432/db",  # RFC 5737, faixa de documentacao
+        "../../etc/passwd",
+        "A" * 5000,
+        "2026-09-07\n\rInjected: header",
+    ]
+    for veneno in venenos:
+        with pytest.raises(svc.MonitoramentoPrecoError) as e:
+            svc.get_monitoramento_preco(db, observed_date=veneno, today=HOJE)
+        msg = str(e.value)
+        assert msg == svc.ERRO_OBSERVED_DATE_FORMATO
+        for fragmento in ("script", "OR 1=1", "postgresql", "passwd", "AAAA",
+                          "Injected"):
+            assert fragmento not in msg, fragmento
+
+
+def test_recusa_de_observed_date_acontece_ANTES_de_consultar_o_banco():
+    svc = _servico()
+    db, _ = _sessao_multi_data([pm.last_eligible_date(HOJE)])
+    db.executed.clear()
+    with pytest.raises(svc.MonitoramentoPrecoError):
+        svc.get_monitoramento_preco(db, observed_date="nao-e-data", today=HOJE)
+    assert db.executed == [], db.executed
+
+
+# --- lista de datas disponiveis -------------------------------------------
+
+def test_lista_de_datas_e_decrescente_materializada_e_sem_futuro():
+    d1 = pm.last_eligible_date(HOJE)
+    datas = [date.fromordinal(d1.toordinal() - k) for k in (0, 1, 3, 7)]
+    db, _ = _sessao_multi_data(datas)
+    saida = _servico().get_monitoramento_preco(db, today=HOJE)
+    lista = saida["meta"]["available_observed_dates"]
+    assert lista == sorted(lista, reverse=True)
+    # Somente datas MATERIALIZADAS: os dias -2 e -4..-6 nao existem e nao aparecem.
+    assert lista == [d.isoformat() for d in sorted(datas, reverse=True)]
+    assert all(x <= d1.isoformat() for x in lista)
+    assert HOJE.isoformat() not in lista
+    assert (saida["meta"]["available_observed_dates_limit"]
+            == _servico().MAX_AVAILABLE_DATES)
+
+
+def test_lista_de_datas_nao_inventa_calendario():
+    """Buraco de sync e buraco: nao ha generate_series preenchendo dia ausente."""
+    svc = _servico()
+    for sql in svc.ALL_QUERIES:
+        baixo = sql.lower()
+        assert "generate_series" not in baixo
+        assert "interval" not in baixo
+
+
+def test_teto_da_lista_de_datas_vai_como_parametro_nomeado():
+    d1 = pm.last_eligible_date(HOJE)
+    db, _ = _sessao_multi_data([d1])
+    _servico().get_monitoramento_preco(db, today=HOJE)
+    consulta = next((p for t, p in db.executed
+                     if "select distinct ref_date" in t), None)
+    assert consulta is not None
+    assert consulta["max_dates"] == _servico().MAX_AVAILABLE_DATES
+    assert consulta["eligible"] == d1
+
+
+# --- filtros, busca e paginacao DENTRO da data selecionada -----------------
+
+def test_paginacao_e_filtros_ficam_dentro_da_data_selecionada():
+    d1 = pm.last_eligible_date(HOJE)
+    antiga = date.fromordinal(d1.toordinal() - 4)
+    db, _ = _sessao_multi_data([antiga, d1], n_abaixo=4, n_acima=2)
+    svc = _servico()
+    saida = svc.get_monitoramento_preco(
+        db, observed_date=antiga.isoformat(), limit=2, offset=0, today=HOJE)
+    assert saida["returned_count"] == 2
+    assert saida["total_count"] == 6            # so as 6 linhas daquele dia
+    assert saida["truncated"] is True
+    assert all(r["ref_date"] == antiga.isoformat() for r in saida["rows"])
+    # Segunda pagina continua na MESMA data e nao repete linha.
+    p2 = svc.get_monitoramento_preco(
+        db, observed_date=antiga.isoformat(), limit=2, offset=2, today=HOJE)
+    assert all(r["ref_date"] == antiga.isoformat() for r in p2["rows"])
+    assert not ({r["item_id"] for r in p2["rows"]}
+                & {r["item_id"] for r in saida["rows"]})
+    # Filtro de status tambem fica dentro da data.
+    so_abaixo = svc.get_monitoramento_preco(
+        db, observed_date=antiga.isoformat(), status="below_reference",
+        today=HOJE)
+    assert so_abaixo["total_count"] == 4
+    assert all(r["comparison_status"] == "below_reference"
+               for r in so_abaixo["rows"])
+    # KPIs NAO respondem ao filtro de status: o denominador se preserva.
+    assert so_abaixo["kpis"]["monitored_count"] == 6
+
+
+# --- alias depreciado ------------------------------------------------------
+
+def test_status_stale_observation_virou_filtro_de_frescor_e_avisa():
+    """Link antigo com status=stale_observation nao pode quebrar em silencio."""
+    svc = _servico()
+    d1 = pm.last_eligible_date(HOJE)
+    atrasada = date.fromordinal(d1.toordinal() - 3)
+    db, _ = _sessao_multi_data([atrasada])
+    saida = svc.get_monitoramento_preco(db, status="stale_observation",
+                                        today=HOJE)
+    assert saida["meta"]["freshness_status"] == "stale"
+    # O alias SELECIONA as linhas atrasadas em vez de recusar ou devolver vazio.
+    assert saida["total_count"] == saida["kpis"]["monitored_count"] == 3
+    assert all(r["freshness_status"] == "stale" for r in saida["rows"])
+    # E nenhuma linha carrega stale_observation como status comercial.
+    assert all(r["comparison_status"] != "stale_observation"
+               for r in saida["rows"])
+    assert any("DEPRECIADO" in a for a in saida["meta"]["warnings"])
+
+
+def test_alias_depreciado_nao_seleciona_nada_quando_esta_em_dia():
+    svc = _servico()
+    d1 = pm.last_eligible_date(HOJE)
+    db, _ = _sessao_multi_data([d1])
+    saida = svc.get_monitoramento_preco(db, status="stale_observation",
+                                        today=HOJE)
+    assert saida["meta"]["freshness_status"] == "fresh"
+    assert saida["total_count"] == 0             # nada atrasado a selecionar
+    assert saida["kpis"]["monitored_count"] == 3    # denominador preservado
+
+
+# --- borda HTTP ------------------------------------------------------------
+
+def test_http_observed_date_invalido_e_422_com_corpo_fixo():
+    svc = _servico()
+    d1 = pm.last_eligible_date(HOJE)
+    db, _ = _sessao_multi_data([d1])
+    cli = _client(db)
+    try:
+        r = cli.get(ROTA, params={"observed_date": "<script>x</script>"})
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert r.json()["detail"] == svc.ERRO_OBSERVED_DATE_FORMATO
+        assert "script" not in r.text
+    finally:
+        _limpa_overrides()
+
+
+def test_http_ref_date_continua_recusado_e_aponta_observed_date():
+    svc = _servico()
+    d1 = pm.last_eligible_date(HOJE)
+    db, _ = _sessao_multi_data([d1])
+    cli = _client(db)
+    try:
+        r = cli.get(ROTA, params={"ref_date": "2026-08-01"})
+        assert r.status_code == 422
+        detalhe = r.json()["detail"]
+        assert detalhe == svc.ERRO_REF_DATE_NAO_SUPORTADO
+        assert "observed_date" in detalhe
+        assert "2026-08-01" not in r.text
+    finally:
+        _limpa_overrides()

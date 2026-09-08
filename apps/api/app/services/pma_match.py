@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
 # Contrato — DUPLICADO POR FRONTEIRA, com teste de identidade
@@ -58,18 +59,51 @@ OUT_OF_SCOPE_BRANDS = tuple(b for b in REFERENCE_BRANDS if b not in MONITORED_BR
 
 QUALITY_MISSING_PRICE = "missing_suggested_price"
 
-# --- status de comparacao -------------------------------------------------
+# --- status COMERCIAL: particao exclusiva que fecha em monitored_count -----
+# Gate PMA-H1: `stale_observation` SAIU desta particao. Antes ele era um status
+# comercial e SUBSTITUIA a classificacao: com o sync atrasado, toda linha virava
+# `stale_observation`, os cinco contadores comerciais iam a zero e a tela
+# aparentava "nenhum desvio" quando o que havia era atraso de pipeline. Atraso e'
+# QUALIDADE do dado, nao veredito de preco — e as duas coisas sao ortogonais.
 STATUS_BELOW = "below_reference"
 STATUS_AT_OR_ABOVE = "at_or_above_reference"
 STATUS_NO_REFERENCE = "no_reference"
 STATUS_AMBIGUOUS = "non_comparable_reference_ambiguous"
 STATUS_INACTIVE = "inactive_listing"
+
+#: A particao comercial. Toda linha recebe EXATAMENTE um destes, e a soma dos
+#: cinco contadores e' `monitored_count` — verificado em teste.
+COMMERCIAL_STATUSES = (
+    STATUS_BELOW, STATUS_AT_OR_ABOVE, STATUS_NO_REFERENCE,
+    STATUS_AMBIGUOUS, STATUS_INACTIVE,
+)
+
+# --- frescor: QUALIDADE TRANSVERSAL, sobreposta a qualquer status comercial -
+#: Observacao e' de D-1: sustenta leitura como "hoje".
+FRESHNESS_FRESH = "fresh"
+#: O modo `latest` caiu numa observacao anterior a D-1 porque o sync esta
+#: atrasado. As comparacoes continuam validas PARA AQUELE DIA e continuam
+#: visiveis; o que muda e' o aviso de defasagem.
+FRESHNESS_STALE = "stale"
+#: O consumidor ESCOLHEU uma data anterior. Nao e' atraso — e' consulta
+#: retrospectiva deliberada, e por isso NAO se chama `stale`.
+FRESHNESS_HISTORICAL = "historical"
+#: Nao existe observacao para responder (serving vazio, ou data sem materializacao).
+FRESHNESS_UNAVAILABLE = "unavailable"
+
+FRESHNESS_STATUSES = (
+    FRESHNESS_FRESH, FRESHNESS_STALE, FRESHNESS_HISTORICAL,
+    FRESHNESS_UNAVAILABLE,
+)
+
+#: DEPRECIADO — alias de compatibilidade. Era um status comercial; agora e'
+#: aceito no parametro `status` apenas como FILTRO DE FRESCOR
+#: (`freshness_status == 'stale'`), para nao quebrar em silencio link antigo ou
+#: bookmark. Nunca aparece em `row.comparison_status`.
 STATUS_STALE = "stale_observation"
 
-COMPARISON_STATUSES = (
-    STATUS_BELOW, STATUS_AT_OR_ABOVE, STATUS_NO_REFERENCE,
-    STATUS_AMBIGUOUS, STATUS_INACTIVE, STATUS_STALE,
-)
+#: O que o parametro `status` aceita: a particao comercial + o alias depreciado.
+COMPARISON_STATUSES = COMMERCIAL_STATUSES + (STATUS_STALE,)
 
 #: Rotulo de escopo de MARCA (nao de linha): marca com referencia B2B mas sem
 #: catalogo ML proprio. Vive em `meta.warnings`, nunca como status de linha —
@@ -159,6 +193,38 @@ def normalize_brand_key(raw: object) -> str | None:
 def last_eligible_date(today: date) -> date:
     """O UNICO dia que sustenta comparacao: D-1 em America/Sao_Paulo."""
     return today - timedelta(days=1)
+
+
+def classify_freshness(ref_date: date | None, today: date,
+                       *, selected: bool) -> str:
+    """Frescor de uma resposta. ORTOGONAL ao status comercial (Gate PMA-H1).
+
+    `selected` diz se o consumidor PEDIU aquela data. E' o que separa atraso de
+    consulta retrospectiva: a mesma `ref_date` de tres dias atras e' `stale`
+    quando o modo `latest` caiu nela por falta de dado mais novo, e `historical`
+    quando foi escolhida de proposito. Chamar as duas de `stale` misturaria uma
+    falha de pipeline com um uso legitimo da tela.
+
+    D0/futuro NAO e' classificado aqui: `classify_observation_date` continua
+    tratando isso como inconsistencia do serving, fail-closed.
+    """
+    if ref_date is None:
+        return FRESHNESS_UNAVAILABLE
+    if selected:
+        return (FRESHNESS_FRESH if ref_date == last_eligible_date(today)
+                else FRESHNESS_HISTORICAL)
+    return (FRESHNESS_FRESH if ref_date == last_eligible_date(today)
+            else FRESHNESS_STALE)
+
+
+def lag_days(ref_date: date | None, today: date) -> int | None:
+    """Dias entre a observacao e D-1. `None` quando nao ha observacao.
+
+    Zero significa em dia. Nunca negativo: D0/futuro e' barrado antes daqui.
+    """
+    if ref_date is None:
+        return None
+    return (last_eligible_date(today) - ref_date).days
 
 
 def classify_observation_date(ref_date: date, today: date) -> str:
@@ -297,22 +363,31 @@ def _dec(valor: object) -> Decimal | None:
     return d
 
 
-def compare_listing(listing: dict, index: ReferenceIndex, today: date) -> dict:
+def compare_listing(listing: dict, index: ReferenceIndex, today: date,
+                    freshness: str = FRESHNESS_FRESH) -> dict:
     """Uma linha do payload: anuncio + referencia resolvida + diferenca.
 
-    PRECEDENCIA DOS STATUS, do mais fundamental ao mais especifico:
+    PRECEDENCIA DO STATUS COMERCIAL, do mais fundamental ao mais especifico:
       0. data em D0/futuro   — FAIL-CLOSED: levanta `PmaMatchError`, porque o
          sync proibe contratualmente publicar o dia corrente (F4);
-      1. `stale_observation`  — observacao anterior a D-1; nenhum veredito de
-         preco pode ser apresentado como fato sobre ela;
-      2. `inactive_listing`   — anuncio nao exibido publicamente; comparar
+      1. `inactive_listing`   — anuncio nao exibido publicamente; comparar
          geraria ruido sobre uma vitrine que nao existe;
-      3. `non_comparable_reference_ambiguous` — referencia nao resolvivel;
-      4. `no_reference`       — nenhuma referencia encontrada;
-      5. `below_reference` / `at_or_above_reference`.
+      2. `non_comparable_reference_ambiguous` — referencia nao resolvivel;
+      3. `no_reference`       — nenhuma referencia encontrada;
+      4. `below_reference` / `at_or_above_reference`.
 
-    Nos casos 1 a 4 os campos de referencia e de diferenca ficam NULOS, nunca
+    Nos casos 1 a 3 os campos de referencia e de diferenca ficam NULOS, nunca
     zero: zero afirmaria "diferenca medida igual a zero", que e' falso.
+
+    FRESCOR NAO ENTRA NESTA PRECEDENCIA  (Gate PMA-H1)
+    --------------------------------------------------
+    `freshness` chega decidido pelo servico e e' apenas ESTAMPADO na linha, em
+    `freshness_status`. Antes, uma observacao anterior a D-1 devolvia
+    `comparison_status = stale_observation` e voltava CEDO, apagando a
+    classificacao comercial: com o sync atrasado a tela mostrava zero em todos os
+    cartoes comerciais, como se nao houvesse desvio. A comparacao de um dia
+    anterior continua VALIDA para aquele dia — o que ela nao sustenta e' ser lida
+    como "hoje", e isso e' dito no aviso, nao apagando o dado.
     """
     ref_date = listing.get("ref_date")
     if not isinstance(ref_date, date):
@@ -382,6 +457,10 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date) -> dict:
         "match_quality": match.quality,
         "reference_candidate_count": match.candidate_count,
         "comparison_status": None,
+        # Gate PMA-H1: qualidade TRANSVERSAL, na propria linha. Fica ao lado do
+        # status comercial em vez de substitui-lo, e permite a UI marcar a linha
+        # sem perder o veredito.
+        "freshness_status": freshness,
         "limitations": [],
     }
 
@@ -399,14 +478,23 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date) -> dict:
         "anunciado, e nao tem vigencia declarada",
     ]
 
-    if situacao == OBS_STALE:
-        linha["comparison_status"] = STATUS_STALE
-        linha["limitations"] = limites + [
-            f"observacao de {ref_date.isoformat()} anterior a "
+    # Gate PMA-H1: a defasagem/retrospectividade entra como LIMITACAO da linha,
+    # nunca como status comercial. A classificacao comercial abaixo roda sempre.
+    if freshness == FRESHNESS_STALE:
+        atraso = lag_days(ref_date, today)
+        limites = limites + [
+            f"observacao de {ref_date.isoformat()}, {atraso} dia(s) atras de "
             f"{last_eligible_date(today).isoformat()} (D-1 do dia operacional "
-            f"{today.isoformat()}): nenhum veredito de preco e' afirmado"
+            f"{today.isoformat()}): a comparacao vale para aquele dia e NAO "
+            f"descreve o preco de hoje. Verifique a ultima execucao do sync."
         ]
-        return linha
+    elif freshness == FRESHNESS_HISTORICAL:
+        limites = limites + [
+            f"consulta retrospectiva: preco anunciado de {ref_date.isoformat()} "
+            f"comparado a referencia PDV mais recente disponivel HOJE. A origem "
+            f"nao declara a vigencia historica dessa referencia, portanto este "
+            f"resultado pode mudar se uma nova referencia for importada."
+        ]
 
     if listing.get("listing_status") != "active":
         linha["comparison_status"] = STATUS_INACTIVE
@@ -458,7 +546,8 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date) -> dict:
     return linha
 
 
-def compare_all(listings: list[dict], references: list[dict], today: date) -> list[dict]:
+def compare_all(listings: list[dict], references: list[dict], today: date,
+                freshness: str = FRESHNESS_FRESH) -> list[dict]:
     """Compara o conjunto inteiro. Recusa escala acima do teto, nunca trunca."""
     if len(listings) > MAX_LISTING_ROWS:
         raise PmaMatchError(
@@ -467,47 +556,106 @@ def compare_all(listings: list[dict], references: list[dict], today: date) -> li
             f"(855 anuncios). Recusado em vez de truncado."
         )
     index = ReferenceIndex.build(references)
-    return [compare_listing(li, index, today) for li in listings]
+    return [compare_listing(li, index, today, freshness) for li in listings]
 
 
 def build_kpis(rows: list[dict]) -> dict:
-    """KPIs a partir das linhas ja comparadas. Cada um com denominador explicito.
+    """KPIs das linhas comparadas. Cada um com denominador explicito.
 
-    `monitored_count` conta TODAS as observacoes da janela; `comparable_count`
-    conta somente as que produziram veredito. A soma dos demais nao e' obrigada a
-    fechar com `monitored_count` por acidente: ela fecha por construcao, e o
-    teste verifica.
+    DUAS DIMENSOES INDEPENDENTES  (Gate PMA-H1)
+    -------------------------------------------
+    Comercial: os cinco contadores de `COMMERCIAL_STATUSES` formam PARTICAO e
+    somam exatamente `monitored_count`. `stale_count` saiu dessa soma.
+
+    Qualidade: `fresh_count`/`stale_count`/`historical_count` contam FRESCOR e
+    tambem somam `monitored_count`, mas SOBREPOSTOS a particao comercial — uma
+    linha `below_reference` num dia atrasado conta nos dois lados. Antes,
+    `stale_count` competia com os contadores comerciais e zerava todos eles.
     """
     def n(*status: str) -> int:
         alvo = set(status)
         return sum(1 for r in rows if r["comparison_status"] in alvo)
 
-    comparaveis = n(STATUS_BELOW, STATUS_AT_OR_ABOVE)
+    def f(*status: str) -> int:
+        alvo = set(status)
+        return sum(1 for r in rows if r.get("freshness_status") in alvo)
+
     return {
         "monitored_count": len(rows),
-        "comparable_count": comparaveis,
+        # comparable_count = below + at_or_above, por definicao.
+        "comparable_count": n(STATUS_BELOW, STATUS_AT_OR_ABOVE),
         "below_reference_count": n(STATUS_BELOW),
         "at_or_above_reference_count": n(STATUS_AT_OR_ABOVE),
         "no_reference_count": n(STATUS_NO_REFERENCE),
         "ambiguous_reference_count": n(STATUS_AMBIGUOUS),
-        "stale_count": n(STATUS_STALE),
         "inactive_count": n(STATUS_INACTIVE),
+        # --- qualidade transversal, sobreposta ---
+        "fresh_count": f(FRESHNESS_FRESH),
+        "stale_count": f(FRESHNESS_STALE),
+        "historical_count": f(FRESHNESS_HISTORICAL),
     }
 
 
-def build_warnings(rows: list[dict], today: date) -> list[str]:
+def comparison_basis_text(observed: date | None,
+                          reference_captured_at: object | None) -> str | None:
+    """A frase OBRIGATORIA que declara as duas datas e a ausencia de vigencia.
+
+    Gate PMA-H1, Fase B0. Texto fixo, sem vocabulario de politica e sem afirmar
+    que a referencia valia na data observada. `None` quando falta uma das duas
+    datas — sem data nao existe afirmacao a fazer.
+    """
+    if observed is None or reference_captured_at is None:
+        return None
+    cap = reference_captured_at
+    if isinstance(cap, str):
+        # `captured_at` chega como `datetime` do Postgres, mas tambem como
+        # string ISO quando o valor ja passou por uma camada de serializacao.
+        # Aceitar as duas formas evita que a frase obrigatoria desapareca por
+        # um detalhe de tipo — o texto e' contrato, nao enfeite.
+        try:
+            cap = datetime.fromisoformat(cap)
+        except ValueError:
+            return None
+    if isinstance(cap, datetime):
+        if cap.tzinfo is not None:
+            cap = cap.astimezone(ZoneInfo(TIMEZONE_NAME))
+        cap = cap.date()
+    elif not isinstance(cap, date):
+        return None
+    return (
+        f"Preco anunciado em {observed.strftime('%d/%m/%Y')} comparado a "
+        f"referencia sugerida ao consumidor (PDV) capturada em "
+        f"{cap.strftime('%d/%m/%Y')}. A origem nao declara a vigencia historica "
+        f"dessa referencia."
+    )
+
+
+def build_warnings(rows: list[dict], today: date,
+                   *, freshness: str = FRESHNESS_FRESH,
+                   observed: date | None = None,
+                   reference_captured_at: object | None = None) -> list[str]:
     """Avisos de escopo e cobertura. Texto observacional, sem vocabulario de politica."""
-    avisos = [
+    avisos = []
+    base = comparison_basis_text(observed, reference_captured_at)
+    if base:
+        # PRIMEIRO aviso: e' a base da leitura, nao uma nota de pe de pagina.
+        avisos.append(base)
+    avisos += [
         "MVP observacional: compara preco anunciado das lojas PROPRIAS contra o "
         "preco sugerido de revenda (PDV) das tabelas B2B. Nao e' fiscalizacao de "
         "revendedor e nao aplica politica de preco.",
         "A referencia e' preco sugerido de revenda (PDV), medido como markup "
         "aritmetico sobre o preco de atacado, com razao que varia por marca. Nao "
         "e' preco minimo anunciado.",
+        # Gate PMA-H1: a consulta retrospectiva passou a EXISTIR, com contrato
+        # explicito. O que continua verdade e' que a referencia nao tem vigencia
+        # — logo o resultado historico e' "preco daquele dia contra a referencia
+        # de hoje", e nunca "a referencia valia naquele dia".
         "Sem vigencia declarada na origem (validity_status=missing): a unica nocao "
         "de tempo da referencia e' a data de captura do snapshot, e ela NAO e' "
-        "vigencia. Por isso a comparacao roda somente sobre a ultima observacao "
-        "elegivel, nunca retrospectivamente.",
+        "vigencia. Numa data historica, a comparacao usa a referencia mais "
+        "recente disponivel hoje (reference_basis=latest_available_snapshot) e "
+        "pode mudar se uma nova referencia PDV for importada.",
         # PMA-1A-R, F8 — a direcao liquida e' indeterminada, nao conservadora.
         "Cobertura advertised_only: sem frete, cupom de vitrine, subsidio de "
         "plataforma ou preco de checkout. Esses campos vem nulos, nunca zero. "
@@ -517,8 +665,10 @@ def build_warnings(rows: list[dict], today: date) -> list[str]:
         "componentes forem considerados.",
         "Sem limiar comercial aprovado nao ha severidade: os unicos fatos sao "
         "difference_amount e difference_pct.",
-        "Somente observacoes de D-1 (America/Sao_Paulo) sustentam comparacao; "
-        "datas anteriores aparecem como stale_observation.",
+        "Frescor e' qualidade TRANSVERSAL, nao categoria comercial: uma "
+        "observacao atrasada ou historica continua classificada em abaixo/ "
+        "no-ou-acima/sem-referencia/inativo, e o atraso viaja em "
+        "freshness_status e lag_days.",
     ]
     if NO_REFERENCE_BRANDS:
         avisos.append(
@@ -531,12 +681,24 @@ def build_warnings(rows: list[dict], today: date) -> list[str]:
             f"({BRAND_SCOPE_OUT_OF_SCOPE}), fora do escopo desta tela: "
             + ", ".join(OUT_OF_SCOPE_BRANDS)
         )
-    vencidas = sum(1 for r in rows if r["comparison_status"] == STATUS_STALE)
-    if vencidas:
+    atraso = lag_days(observed, today)
+    if freshness == FRESHNESS_STALE and atraso:
         avisos.append(
-            f"{vencidas} observacoes anteriores a "
+            f"DEFASAGEM: a observacao mais recente disponivel e' de "
+            f"{observed.isoformat()}, {atraso} dia(s) atras de "
             f"{last_eligible_date(today).isoformat()} (D-1 do dia operacional "
-            f"{today.isoformat()}): verifique a ultima execucao do sync antes de "
-            f"ler os numeros."
+            f"{today.isoformat()}). As comparacoes abaixo valem para aquele dia "
+            f"e NAO descrevem o preco de hoje. Verifique a ultima execucao do "
+            f"sync de precos."
+        )
+    elif freshness == FRESHNESS_HISTORICAL:
+        avisos.append(
+            f"CONSULTA RETROSPECTIVA: data observada {observed.isoformat()} "
+            f"escolhida deliberadamente. Nao e' defasagem do pipeline."
+        )
+    elif freshness == FRESHNESS_UNAVAILABLE:
+        avisos.append(
+            "Nao existe observacao materializada para a data pedida: nenhum "
+            "numero e' apresentado. Ausencia nao e' zero."
         )
     return avisos

@@ -533,6 +533,28 @@ def monitoramento_preco(
             "Maximo de 120 caracteres."
         ),
     ),
+    # Gate PMA-H1 — data OBSERVADA, parametro publico e opcional.
+    #
+    # Tipado como `str`, nao `date`, pelo MESMO motivo de `ref_date`: o validador
+    # nativo do FastAPI devolveria 422 com `{"input": "<o payload>"}`, ecoando a
+    # entrada. Como `str`, a validacao acontece no servico e a mensagem e' FIXA.
+    observed_date: Optional[str] = Query(
+        None,
+        description=(
+            "Data OBSERVADA do preco anunciado, no formato YYYY-MM-DD. Omitido: "
+            "usa a maior observacao disponivel <= D-1 (modo latest) e informa a "
+            "defasagem, se houver. Informado: consulta EXATAMENTE aquele dia "
+            "(modo selected_date), sem cair para o dia anterior. O teto e' D-1 em "
+            "America/Sao_Paulo; D0 e futuro sao recusados com 422. Data valida "
+            "sem observacao devolve 200 com estado vazio. As datas realmente "
+            "disponiveis vem em meta.available_observed_dates. "
+            "IMPORTANTE: numa data historica a referencia usada e' o snapshot PDV "
+            "mais recente disponivel HOJE (reference_basis="
+            "latest_available_snapshot) — a origem nao declara vigencia "
+            "historica, e o resultado pode mudar se uma nova referencia for "
+            "importada."
+        ),
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     # Parametro OCULTO, recebido como texto so para poder ser RECUSADO (PMA-1B).
@@ -567,11 +589,22 @@ def monitoramento_preco(
     a comparacao e' PARCIAL e a diferenca pode mudar de valor e de sinal quando
     esses componentes forem considerados.
 
-    MODO `latest` SOMENTE: nao ha parametro de data. A comparacao usa a ultima
-    observacao elegivel, com D-1 (America/Sao_Paulo) como teto. Comparacao
-    historica esta fora do MVP porque a referencia nao tem vigencia — casar um
-    preco antigo com a referencia de hoje produziria uma conclusao que a fonte
-    nao sustenta. O historico diario continua armazenado para evolucao futura.
+    DOIS MODOS (Gate PMA-H1). Sem `observed_date`: modo `latest`, a maior
+    observacao disponivel com D-1 (America/Sao_Paulo) como teto — e, se ela
+    estiver atrasada, os dados APARECEM com a defasagem declarada em
+    `meta.lag_days`/`meta.freshness_status`, nunca com os cartoes zerados. Com
+    `observed_date=YYYY-MM-DD`: modo `selected_date`, exatamente aquele dia, sem
+    cair para o anterior.
+
+    Numa data historica a referencia e' o snapshot PDV mais recente disponivel
+    HOJE (`reference_basis = latest_available_snapshot`). A resposta NAO afirma
+    que essa referencia valia naquele dia — `validity_status = 'missing'` — e
+    diz isso em `meta.comparison_basis_text` e nas `limitations` de cada linha.
+
+    FRESCOR E' TRANSVERSAL: `comparison_status` traz a particao comercial de
+    cinco valores que fecha em `monitored_count`, e `freshness_status`
+    (fresh/stale/historical/unavailable) viaja em paralelo. `stale_observation`
+    saiu da particao e sobrevive apenas como alias depreciado no filtro `status`.
 
     Sem limiar comercial aprovado nao existe severidade: os unicos fatos sao
     `difference_amount` e `difference_pct`. "Abaixo da referencia" e' um POTENCIAL
@@ -595,6 +628,7 @@ def monitoramento_preco(
             brand=brand,
             status=status,
             product_query=product_query,
+            observed_date=observed_date,
             limit=limit,
             offset=offset,
         )

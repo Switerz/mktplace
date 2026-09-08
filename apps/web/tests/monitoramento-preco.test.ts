@@ -32,6 +32,8 @@ import {
   matchLabel,
   matchQualityLabel,
   statusFecha,
+  frescorFecha,
+  freshnessLabel,
   statusLabel,
   urlAnuncioSegura,
 } from "../src/lib/monitoramento-preco.ts";
@@ -203,23 +205,32 @@ test("captura do preco NAO e' rotulada como BRT", async () => {
 // 4. Os seis status
 // ---------------------------------------------------------------------------
 
-test("os seis status tem rotulo em portugues", () => {
-  assert.equal(STATUS_ORDER.length, 6);
+test("os CINCO status comerciais tem rotulo em portugues", () => {
+  // Gate PMA-H1: `stale_observation` saiu da particao comercial. Eram seis;
+  // agora sao cinco, e frescor tem rotulos proprios.
+  assert.equal(STATUS_ORDER.length, 5);
   assert.deepEqual(STATUS_ORDER, [
     "below_reference",
     "at_or_above_reference",
     "no_reference",
     "non_comparable_reference_ambiguous",
     "inactive_listing",
-    "stale_observation",
   ]);
   assert.equal(statusLabel("below_reference"), "Abaixo da referência");
   assert.equal(statusLabel("at_or_above_reference"), "Na ou acima da referência");
   assert.equal(statusLabel("no_reference"), "Sem referência B2B");
   assert.equal(statusLabel("non_comparable_reference_ambiguous"), "Referência ambígua");
   assert.equal(statusLabel("inactive_listing"), "Anúncio inativo");
-  assert.equal(statusLabel("stale_observation"), "Observação desatualizada");
   for (const s of STATUS_ORDER) assert.ok(STATUS_LABELS[s]);
+});
+
+test("frescor tem rotulos proprios, fora da particao comercial", () => {
+  assert.equal(freshnessLabel("fresh"), "Em dia");
+  assert.equal(freshnessLabel("stale"), "Sincronização atrasada");
+  assert.equal(freshnessLabel("historical"), "Consulta retrospectiva");
+  assert.equal(freshnessLabel("unavailable"), "Sem observação");
+  // E `stale_observation` NAO e' mais um status comercial rotulavel.
+  assert.ok(!(STATUS_ORDER as string[]).includes("stale_observation"));
 });
 
 test("rotulos de match traduzidos, com fallback para qualidade", () => {
@@ -250,8 +261,10 @@ const KPIS_REAIS: MonitoramentoPrecoKpis = {
   at_or_above_reference_count: 120,
   no_reference_count: 523,
   ambiguous_reference_count: 0,
-  stale_count: 0,
   inactive_count: 194,
+  fresh_count: 855,
+  stale_count: 0,
+  historical_count: 0,
 };
 
 test("KPIs saem do backend sem recalculo", () => {
@@ -273,17 +286,36 @@ test("todo KPI expoe denominador", () => {
 
 test("ambiguos e desatualizados sao indicadores de QUALIDADE, separados", () => {
   const q = buildQualidadeViews(KPIS_REAIS);
-  assert.deepEqual(q.map((v) => v.chave), ["ambiguous", "stale"]);
+  // Gate PMA-H1: `historical` entrou como terceiro indicador de qualidade.
+  assert.deepEqual(q.map((v) => v.chave), ["ambiguous", "stale", "historical"]);
   assert.ok(q.every((v) => v.qualidade === true));
   // E nao entram na lista de KPIs de negocio.
   const negocio = buildKpiViews(KPIS_REAIS).map((v) => v.chave);
   assert.ok(!negocio.includes("ambiguous"));
   assert.ok(!negocio.includes("stale"));
+  assert.ok(!negocio.includes("historical"));
+  // Os cartoes de frescor NAO abrem um status comercial: eles nao filtram por
+  // `comparison_status`, porque frescor nao e' um valor dele.
+  const frescor = q.filter((v) => v.chave === "stale" || v.chave === "historical");
+  assert.ok(frescor.every((v) => v.status === undefined));
 });
 
-test("a soma dos seis status fecha com monitored_count", () => {
+test("a soma dos CINCO status comerciais fecha com monitored_count", () => {
   assert.equal(statusFecha(KPIS_REAIS), true);
   assert.equal(statusFecha({ ...KPIS_REAIS, inactive_count: 193 }), false);
+});
+
+test("a dimensao de frescor tambem fecha, SOBREPOSTA a comercial", () => {
+  // Serving em dia: tudo fresh.
+  assert.equal(frescorFecha(KPIS_REAIS), true);
+  // Sync atrasado: as MESMAS 855 linhas viram stale, e a particao comercial
+  // continua intacta — e' isso que o Gate PMA-H1 garante.
+  const atrasado = { ...KPIS_REAIS, fresh_count: 0, stale_count: 855 };
+  assert.equal(frescorFecha(atrasado), true);
+  assert.equal(statusFecha(atrasado), true);
+  assert.equal(atrasado.below_reference_count, 18);
+  // Frescor incoerente reprova.
+  assert.equal(frescorFecha({ ...KPIS_REAIS, stale_count: 5 }), false);
 });
 
 test("nenhuma severidade comercial e' criada", async () => {
@@ -362,8 +394,10 @@ test("troca de filtro volta ao offset zero", async () => {
   assert.ok(onChanges.length >= 2, "filtros de marca e situacao");
   for (const oc of onChanges) {
     if (oc.includes("setBuscaInput")) continue; // digitar nao dispara requisicao
-    assert.ok(oc.includes("trocaFiltro"), oc);
+    // `trocaData` e' o equivalente da data: zera o offset e sincroniza a URL.
+    assert.ok(oc.includes("trocaFiltro") || oc.includes("trocaData"), oc);
   }
+  assert.ok(/const trocaData[\s\S]{0,200}setOffset\(0\)/.test(pagina));
   assert.ok(/limparFiltros[\s\S]{0,200}setOffset\(0\)/.test(pagina));
 });
 
@@ -613,8 +647,13 @@ test("colunas obrigatorias da tabela estao presentes", async () => {
 
 test("cabecalho declara canal, data observada e frescor", async () => {
   const pagina = await ler(PAGE);
-  for (const t of ["Mercado Livre", "Data observada", "Dados atualizados em",
-                   "Referência capturada em", "Modo observacional"]) {
+  // Gate PMA-H1: os tres instantes ganharam nomes inequivocos. "Dados
+  // atualizados em" ficava ao lado de duas outras datas e nao dizia QUAL —
+  // agora e' "Sync executado em", ao lado de "Preço observado em" e
+  // "Referência PDV capturada em".
+  for (const t of ["Mercado Livre", "Data observada", "Preço observado em",
+                   "Referência PDV capturada em", "Sync executado em",
+                   "Modo observacional"]) {
     assert.ok(pagina.includes(t), t);
   }
 });
@@ -665,4 +704,135 @@ test("o wrapper da tabela corta o overflow horizontal da pagina", async () => {
   );
   // O TableScrollHint segue sendo quem rola: o recorte nao o substitui.
   assert.ok(pagina.includes("<TableScrollHint>"), "a tabela continua no TableScrollHint");
+});
+
+
+// ---------------------------------------------------------------------------
+// Gate PMA-H1 — data observada, URL, banners e frescor transversal
+// ---------------------------------------------------------------------------
+
+test("query envia observed_date somente quando pedido", () => {
+  const semData = buildMonitoramentoPrecoQuery({});
+  assert.equal(semData.get("observed_date"), null);
+  const comData = buildMonitoramentoPrecoQuery({ observedDate: "2026-09-01" });
+  assert.equal(comData.get("observed_date"), "2026-09-01");
+  // `ref_date` NUNCA e enviado: o backend responde 422 fixo a ele.
+  assert.equal(comData.get("ref_date"), null);
+  assert.equal(semData.get("ref_date"), null);
+});
+
+test("chave de requisicao muda com a data observada", () => {
+  const base = { brand: "", status: "", productQuery: "", limit: 500, offset: 0 };
+  const latest = buildMonitoramentoRequestKey(base);
+  const dia = buildMonitoramentoRequestKey({ ...base, observedDate: "2026-09-01" });
+  const outro = buildMonitoramentoRequestKey({ ...base, observedDate: "2026-08-31" });
+  // Sem isto, trocar a data reusaria a resposta anterior e a guarda de frescor
+  // descartaria a nova por achar que a chave nao mudou.
+  assert.notEqual(latest, dia);
+  assert.notEqual(dia, outro);
+  // Omitir a data e o modo `latest`, e e estavel.
+  assert.equal(latest, buildMonitoramentoRequestKey(base));
+});
+
+test("seletor de data existe, e alimentado pelo backend e nao inventa dia", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(pagina.includes("Data observada"));
+  assert.ok(pagina.includes("Mais recente disponível"));
+  // As opcoes vem SOMENTE de `available_observed_dates`.
+  assert.ok(/meta\?\.available_observed_dates \?\? \[\]/.test(pagina));
+  // Nao ha input de data livre nem calendario sintetico.
+  assert.ok(!pagina.includes('type="date"'));
+  assert.ok(!pagina.toLowerCase().includes("generate"));
+});
+
+test("a data observada vive na URL e volta dela", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(pagina.includes('const PARAM_DATA = "observed_date"'));
+  // Le no primeiro render...
+  assert.ok(/function dataInicialDaUrl[\s\S]{0,400}window\.location\.search/.test(pagina));
+  // ...e escreve ao trocar, sem recarregar a pagina.
+  assert.ok(/function sincronizaUrl[\s\S]{0,400}history\.replaceState/.test(pagina));
+  // Valor fora do formato e IGNORADO em vez de mandado ao backend.
+  assert.ok(/RE_DATA\.test\(bruto\)/.test(pagina));
+});
+
+test("limpar filtros NAO teleporta o operador para outro dia", async () => {
+  const pagina = await ler(PAGE);
+  const i = pagina.indexOf("const limparFiltros");
+  // Recorta ATE o fim do callback. Uma janela fixa por caracteres invadiria a
+  // funcao seguinte (`trocaData`) e o teste passaria a medir o vizinho errado.
+  const fim = pagina.indexOf("}, []);", i);
+  const trecho = pagina.slice(i, fim);
+  // A data define QUAL dia esta na tela; nao e um filtro de conteudo.
+  assert.ok(!trecho.includes("setObservedDate"));
+  assert.ok(!trecho.includes("trocaData"));
+});
+
+test("banner de defasagem aparece no stale e mantem as comparacoes", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(/freshness_status === "stale"/.test(pagina));
+  assert.ok(pagina.includes("Sincronização atrasada em"));
+  assert.ok(pagina.includes("não descrevem o preço de hoje"));
+  // O banner e um aviso, NAO um substituto dos cartoes: a renderizacao dos
+  // KPIs nao esta condicionada ao frescor em nenhum ponto.
+  assert.ok(!/freshness_status === "stale"[\s\S]{0,400}kpiViews/.test(pagina));
+  assert.ok(pagina.includes("role=\"status\""));
+});
+
+test("data historica mostra aviso retrospectivo e NAO se chama stale", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(/freshness_status === "historical"/.test(pagina));
+  assert.ok(pagina.includes("Consulta retrospectiva"));
+  assert.ok(pagina.includes("mais recente disponível hoje"));
+  assert.ok(pagina.includes("Não é defasagem do pipeline"));
+  // O bloco historico nao usa vocabulario de atraso.
+  const i = pagina.indexOf('freshness_status === "historical"');
+  const trecho = pagina.slice(i, i + 1400);
+  assert.ok(!trecho.includes("atrasada"));
+  assert.ok(!trecho.includes("Sincronização atrasada"));
+});
+
+test("nenhuma vigencia historica e inventada na tela", async () => {
+  const [pagina, lib] = await Promise.all([lerCodigo(PAGE), lerCodigo(LIB)]);
+  for (const texto of [pagina, lib]) {
+    const baixo = texto.toLowerCase();
+    // A origem nao declara vigencia; a tela nao pode afirma-la.
+    for (const proibido of ["vigente em", "vigência em", "valia em",
+                            "vigorava", "em vigor em"]) {
+      assert.ok(!baixo.includes(proibido), proibido);
+    }
+  }
+  // E o texto correto ESTA presente.
+  assert.ok(pagina.includes("não declara a vigência histórica"));
+});
+
+test("estado vazio tipado quando a data nao tem observacao", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(/freshness_status === "unavailable"/.test(pagina));
+  assert.ok(pagina.includes("Sem observação para"));
+  // Ausencia nao e zero, e o texto diz isso.
+  assert.ok(pagina.includes("ausência não é zero"));
+});
+
+test("referencia e chamada de PDV, nunca de preco B2B", async () => {
+  const [pagina, lib] = await Promise.all([ler(PAGE), ler(LIB)]);
+  for (const texto of [pagina, lib]) {
+    // "preço B2B" era ambiguo: sugeria preco de atacado. O correto e
+    // "referencia sugerida ao consumidor (PDV), extraida das tabelas B2B".
+    assert.ok(!/pre[çc]o B2B/i.test(texto));
+  }
+  assert.ok(pagina.includes("Referência PDV capturada em"));
+  // A frase-base do backend e renderizada, nao reescrita no frontend.
+  assert.ok(pagina.includes("meta.comparison_basis_text"));
+});
+
+test("frescor tem tom visual proprio, sem virar severidade", async () => {
+  const pagina = await ler(PAGE);
+  assert.ok(pagina.includes("TONE_FRESCOR"));
+  const i = pagina.indexOf("const TONE_FRESCOR");
+  const trecho = pagina.slice(i, i + 400);
+  for (const proibido of ["critico", "grave", "erro", "alerta-vermelho",
+                          "red-6", "red-7"]) {
+    assert.ok(!trecho.toLowerCase().includes(proibido), proibido);
+  }
 });

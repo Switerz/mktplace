@@ -47,6 +47,7 @@ import {
   matchLabel,
   matchQualityLabel,
   statusLabel,
+  freshnessLabel,
   tituloLinha,
   urlAnuncioSegura,
 } from "@/lib/monitoramento-preco";
@@ -57,6 +58,39 @@ import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import { computeRequestStatus } from "@/lib/request-freshness";
 
 const LIMITE = MONITORAMENTO_PRECO_MAX_LIMIT;
+
+/** Gate PMA-H1 — a data observada vive na URL, para o link ser compartilhavel. */
+const PARAM_DATA = "observed_date";
+const RE_DATA = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Le a data da URL no primeiro render. Usa `window.location` em vez de
+ * `useSearchParams` de proposito: `useSearchParams` exige fronteira de Suspense
+ * na renderizacao estatica do App Router, e esta tela nao precisa disso.
+ *
+ * Valor fora do formato e' IGNORADO em vez de enviado: mandar lixo ao backend
+ * so' renderizaria um 422 para um erro que e' do proprio link.
+ */
+function dataInicialDaUrl(): string {
+  if (typeof window === "undefined") return "";
+  const bruto = new URLSearchParams(window.location.search).get(PARAM_DATA);
+  return bruto && RE_DATA.test(bruto) ? bruto : "";
+}
+
+function sincronizaUrl(data: string) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (data) url.searchParams.set(PARAM_DATA, data);
+  else url.searchParams.delete(PARAM_DATA);
+  window.history.replaceState(null, "", url.toString());
+}
+
+const TONE_FRESCOR: Record<string, string> = {
+  fresh: "bg-emerald-50 text-emerald-800 border-emerald-200",
+  stale: "bg-amber-50 text-amber-900 border-amber-300",
+  historical: "bg-sky-50 text-sky-900 border-sky-200",
+  unavailable: "bg-slate-50 text-slate-600 border-slate-200",
+};
 
 const TONE_CLASS: Record<"attention" | "neutral" | "muted", string> = {
   attention: "bg-amber-50 text-amber-800 border-amber-200",
@@ -78,11 +112,13 @@ export default function MonitoramentoPrecoPage() {
   const buscaId = useId();
   const marcaId = useId();
   const situacaoId = useId();
+  const dataId = useId();
 
   const [brand, setBrand] = useState("");
   const [status, setStatus] = useState("");
   const [buscaInput, setBuscaInput] = useState("");
   const [productQuery, setProductQuery] = useState("");
+  const [observedDate, setObservedDate] = useState<string>(dataInicialDaUrl);
   const [offset, setOffset] = useState(0);
 
   const [dados, setDados] = useState<MonitoramentoPrecoResponse | null>(null);
@@ -94,8 +130,16 @@ export default function MonitoramentoPrecoPage() {
   const [linhaAberta, setLinhaAberta] = useState<MonitoramentoPrecoRow | null>(null);
 
   const requestKey = useMemo(
-    () => buildMonitoramentoRequestKey({ brand, status, productQuery, limit: LIMITE, offset }),
-    [brand, status, productQuery, offset],
+    () =>
+      buildMonitoramentoRequestKey({
+        brand,
+        status,
+        productQuery,
+        observedDate,
+        limit: LIMITE,
+        offset,
+      }),
+    [brand, status, productQuery, observedDate, offset],
   );
 
   // Guarda de frescor: uma resposta antiga que chegue depois de uma nova
@@ -114,6 +158,7 @@ export default function MonitoramentoPrecoPage() {
         brand: brand || undefined,
         status: status || undefined,
         productQuery: productQuery || undefined,
+        observedDate: observedDate || undefined,
         limit: LIMITE,
         offset,
       },
@@ -174,6 +219,15 @@ export default function MonitoramentoPrecoPage() {
     setStatus("");
     setBuscaInput("");
     setProductQuery("");
+    // A DATA nao e' um filtro de conteudo: ela define QUAL dia esta na tela.
+    // "Limpar filtros" nao pode teleportar o operador para outro dia.
+  }, []);
+
+  /** Troca da data observada: volta a pagina 1 e reflete na URL. */
+  const trocaData = useCallback((valor: string) => {
+    setOffset(0);
+    setObservedDate(valor);
+    sincronizaUrl(valor);
   }, []);
 
   const temFiltro = brand !== "" || status !== "" || productQuery !== "";
@@ -211,24 +265,42 @@ export default function MonitoramentoPrecoPage() {
             <dd className="font-semibold text-slate-800">Mercado Livre</dd>
           </div>
           <div>
-            <dt className="text-slate-500 text-xs uppercase tracking-wide">Data observada</dt>
+            <dt className="text-slate-500 text-xs uppercase tracking-wide">
+              Preço observado em
+            </dt>
             <dd className="font-semibold text-slate-800">
               {fmtData(meta?.observed_ref_date)}
+              {meta && (
+                <span
+                  className={`ml-2 inline-block text-xs font-semibold border rounded-full px-2 py-0.5 align-middle ${TONE_FRESCOR[meta.freshness_status] ?? TONE_FRESCOR.unavailable}`}
+                >
+                  {freshnessLabel(meta.freshness_status)}
+                </span>
+              )}
             </dd>
           </div>
           <div>
-            <dt className="text-slate-500 text-xs uppercase tracking-wide">Dados atualizados em</dt>
-            <dd className="font-semibold text-slate-800">
-              {fmtInstanteBrt(meta?.refreshed_at)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500 text-xs uppercase tracking-wide">Referência capturada em</dt>
+            <dt className="text-slate-500 text-xs uppercase tracking-wide">
+              Referência PDV capturada em
+            </dt>
             <dd className="font-semibold text-slate-800">
               {fmtInstanteBrt(meta?.reference_captured_at)}
             </dd>
           </div>
+          <div>
+            <dt className="text-slate-500 text-xs uppercase tracking-wide">Sync executado em</dt>
+            <dd className="font-semibold text-slate-800">
+              {fmtInstanteBrt(meta?.refreshed_at)}
+            </dd>
+          </div>
         </dl>
+
+        {/* A frase que declara as DUAS datas e a ausencia de vigencia. */}
+        {meta?.comparison_basis_text && (
+          <p className="text-xs text-slate-600 mt-3 border-t border-violet-100 pt-3">
+            {meta.comparison_basis_text}
+          </p>
+        )}
         {meta && (
           <p className="text-xs text-slate-500 mt-3">
             Marcas monitoradas: {meta.monitored_brands.map(brandLabel).join(", ")}.
@@ -242,6 +314,72 @@ export default function MonitoramentoPrecoPage() {
           </p>
         )}
       </section>
+
+      {/* ---------------- defasagem ou retrospectiva ---------------- */}
+      {/*
+        Gate PMA-H1: antes, um sync atrasado zerava os cartoes comerciais e a
+        tela nao dizia por que. Agora o atraso e' um BANNER, os numeros
+        continuam visiveis, e a data escolhida deliberadamente NAO e' chamada de
+        atraso.
+      */}
+      {meta?.freshness_status === "stale" && (
+        <section
+          role="status"
+          aria-label="Aviso de defasagem dos dados"
+          className="bg-amber-50 border border-amber-300 rounded-2xl p-4 mb-4"
+        >
+          <p className="text-sm font-semibold text-amber-900">
+            Sincronização atrasada em {fmtContagem(meta.lag_days ?? 0)} dia(s).
+          </p>
+          <p className="text-xs text-amber-800 mt-1">
+            A observação mais recente disponível é de{" "}
+            <strong>{fmtData(meta.observed_ref_date)}</strong>, e o último dia
+            elegível seria <strong>{fmtData(meta.eligible_ref_date)}</strong>. As
+            comparações abaixo valem para o dia observado e{" "}
+            <strong>não descrevem o preço de hoje</strong>. Verifique a última
+            execução do sync de preços.
+          </p>
+        </section>
+      )}
+
+      {meta?.freshness_status === "historical" && (
+        <section
+          role="status"
+          aria-label="Aviso de consulta retrospectiva"
+          className="bg-sky-50 border border-sky-200 rounded-2xl p-4 mb-4"
+        >
+          <p className="text-sm font-semibold text-sky-900">
+            Consulta retrospectiva — {fmtData(meta.observed_ref_date)}
+          </p>
+          <p className="text-xs text-sky-900 mt-1">
+            O preço anunciado é o daquele dia. A referência usada é o snapshot
+            PDV <strong>mais recente disponível hoje</strong>, capturado em{" "}
+            <strong>{fmtInstanteBrt(meta.reference_captured_at)}</strong>.{" "}
+            <strong>
+              A origem não declara a vigência histórica dessa referência
+            </strong>
+            , portanto este resultado pode mudar se uma nova referência PDV for
+            importada. Não é defasagem do pipeline.
+          </p>
+        </section>
+      )}
+
+      {meta?.freshness_status === "unavailable" && (
+        <section
+          role="status"
+          aria-label="Sem observação para a data escolhida"
+          className="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-4"
+        >
+          <p className="text-sm font-semibold text-slate-800">
+            Sem observação para{" "}
+            {fmtData(meta.requested_observed_date) || INDISPONIVEL}.
+          </p>
+          <p className="text-xs text-slate-600 mt-1">
+            Esse dia não foi sincronizado. Nenhum número é apresentado —
+            ausência não é zero. Escolha uma das datas disponíveis no seletor.
+          </p>
+        </section>
+      )}
 
       {/* ---------------- aviso de escopo ---------------- */}
       <section
@@ -321,6 +459,30 @@ export default function MonitoramentoPrecoPage() {
         className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 mb-4"
       >
         <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-col">
+            <label htmlFor={dataId} className="text-xs text-slate-500 mb-1">
+              Data observada
+            </label>
+            <select
+              id={dataId}
+              value={observedDate}
+              onChange={(e) => trocaData(e.target.value)}
+              className="border border-slate-300 rounded-lg px-3 min-h-[44px] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            >
+              {/*
+                "Mais recente" e' o modo `latest`: acompanha o sync. As demais
+                opcoes vem SOMENTE de `available_observed_dates` — datas
+                materializadas. A tela nao oferece dia que devolveria vazio.
+              */}
+              <option value="">Mais recente disponível</option>
+              {(meta?.available_observed_dates ?? []).map((d) => (
+                <option key={d} value={d}>
+                  {fmtData(d)}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="flex flex-col">
             <label htmlFor={marcaId} className="text-xs text-slate-500 mb-1">
               Marca
