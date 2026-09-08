@@ -33,13 +33,23 @@ AUDITORIA DURAVEL (FINDING 9, alternativa A)
 proprio: `running` antes da transacao de dados, `success`/`failed` depois. Uma
 tentativa revertida deixa rastro, ao contrario do desenho anterior. Se o commit
 dos dados ficar INDETERMINADO (excecao no proprio commit), o registro NAO e'
-marcado `failed` — permanece `running` com mensagem explicita, porque afirmar
-falha seria afirmar mais do que se sabe.
+marcado `failed`: tenta-se gravar nele a nota `INDETERMINADO:`, porque afirmar
+falha seria afirmar mais do que se sabe. Se essa propria gravacao nao for
+confirmada, nem o conteudo da linha e' afirmado.
 
 ZERO RETRY
 ----------
 Falha nao e' repetida automaticamente. O operador le' o erro sanitizado, decide
 e roda de novo.
+
+MENSAGEM DE ERRO FAIL-CLOSED (Gate AVH-4A-H1-D1)
+------------------------------------------------
+`_sanitize_erro` nao ecoa o texto de excecao externa em nenhuma hipotese: de
+uma excecao de driver ou biblioteca sobra apenas o nome da classe. So' a
+mensagem de `SnapshotImportError`, construida dentro deste modulo, e'
+preservada. Nada de DSN, host, usuario, caminho, SQL, `params` ou `DETAIL`
+chega a stderr, a `audit.source_sync_run`, a `__cause__`/`__context__` ou ao
+traceback — que tambem e' zerado por `_levanta`.
 
 CREDENCIAL
 ----------
@@ -123,12 +133,13 @@ class SnapshotImportError(RuntimeError):
 # nao desfaz um commit possivelmente aplicado. Por isso o commit vive FORA do
 # bloco que faz rollback.
 #
-# A AUDITORIA e' um eixo independente (Gate AVH-4A-H1-R). Ela pode falhar em
-# tres momentos, e cada combinacao com o estado dos dados tem seu proprio
-# desfecho e sua propria mensagem:
+# A AUDITORIA e' um eixo independente (Gate AVH-4A-H1-R). Cada combinacao dela
+# com o estado dos dados tem seu proprio desfecho e sua propria mensagem:
 #
 #   audit_start falhou              -> publicacao NAO tentada
-#   audit_finish(failed) falhou     -> dados seguros, auditoria incompleta
+#   rollback dos dados levantou     -> reversao NAO confirmada
+#   audit_finish(failed) falhou     -> dados revertidos (reversao confirmada),
+#                                      auditoria incompleta
 #   audit_mark_indeterminate falhou -> indeterminado, auditoria nao confirmada
 #   audit_finish(success) falhou    -> publicado, auditoria incompleta
 #
@@ -150,12 +161,13 @@ class AuditoriaInicialIncompleta(SnapshotImportError):
 
 
 class PublicacaoNaoConfirmada(SnapshotImportError):
-    """Falha COMPROVADAMENTE anterior ao commit. Nada foi publicado.
+    """Falha COMPROVADAMENTE anterior ao commit, com reversao CONFIRMADA.
 
-    O atributo `rollback_confirmado` diz se o `rollback()` da conexao de dados
-    retornou. Ele pode ser False: um rollback que levanta nao publica nada (o
-    commit nunca foi tentado), mas tambem nao autoriza a frase "rollback
-    aplicado".
+    `rollback_confirmado` e' SEMPRE True nesta classe e nas suas subclasses:
+    ela so' e' levantada depois de o `rollback()` da conexao de dados ter
+    retornado. Um rollback que levanta nao chega aqui — ele produz
+    `ReversaoNaoConfirmada`, que nao e' subclasse desta justamente para nao
+    herdar a garantia de "nada publicado".
     """
 
     rollback_confirmado = True
@@ -193,8 +205,12 @@ class ReversaoNaoConfirmada(SnapshotImportError):
     processo NAO pode afirmar que a transacao terminou. O que se sabe e' so'
     que o `commit()` nunca foi tentado. Se a reversao chegou ao servidor, se a
     conexao morreu, ou se a transacao ficou pendurada ate' o servidor derrubar,
-    nada disso foi observado. A conexao e' encerrada para forcar o fim da
-    transacao, e mesmo esse encerramento e' registrado como confirmado ou nao.
+    nada disso foi observado.
+
+    O encerramento da conexao e' TENTADO para forcar o fim da transacao, e o
+    resultado dessa tentativa fica em `conexao_encerrada`: True se o `close()`
+    retornou, False se ele tambem levantou. A mensagem acompanha o atributo —
+    nunca se afirma incondicionalmente que a conexao foi encerrada.
     """
 
     conexao_encerrada = False
@@ -204,8 +220,13 @@ class AuditoriaIncompleta(SnapshotImportError):
     """Publicacao CONFIRMADA, auditoria nao finalizada.
 
     Os dados estao publicados (ou o no-op esta concluido) e a transacao de
-    dados ja terminou. O que falhou foi so' o fechamento do registro em
-    `audit.source_sync_run`, que permanece `running`.
+    dados ja terminou — isso e' certo. O que falhou foi so' o fechamento do
+    registro em `audit.source_sync_run`.
+
+    O estado da LINHA depende de `resultado_auditoria`: se o `UPDATE` foi
+    revertido (`revertida`), ela permanece `running`; se a mutacao ficou
+    `indeterminada`, nao se afirma em que estado ela ficou. Nao se pode dizer
+    que ela permanece `running` nos dois casos.
     """
 
 
@@ -213,13 +234,18 @@ class AuditoriaIncompleta(SnapshotImportError):
 # Mutacoes de auditoria: quatro resultados possiveis (Gate AVH-4A-H1-R2)
 # --------------------------------------------------------------------------
 # Uma excecao vinda de `audit_*` NAO diz, sozinha, o que ficou persistido. O
-# que separa os casos e' o que aconteceu DEPOIS da falha:
+# que separa os casos e' a FASE em que a falha aconteceu e, quando ela e'
+# anterior ao commit, o que o rollback devolveu:
 #
 #   nao_tentada    a mutacao nem chegou a ser emitida
-#   confirmada     o commit da auditoria retornou
-#   revertida      a mutacao falhou e o rollback da auditoria RETORNOU
-#   indeterminada  a mutacao ou o commit falhou e o rollback tambem nao
-#                  retornou; nao se sabe o que ficou na linha
+#   confirmada     o commit da auditoria RETORNOU
+#   revertida      a mutacao falhou ANTES do commit e o rollback da auditoria
+#                  RETORNOU; o conteudo anterior da linha permanece
+#   indeterminada  duas origens, e nas duas nada se afirma sobre a linha:
+#                    (a) falha pre-commit em que o rollback tambem NAO
+#                        retornou;
+#                    (b) commit TENTADO que levantou — e ai' e' permanente,
+#                        independentemente de qualquer rollback posterior
 #
 # Isto NAO e' uma transacao distribuida entre dados e auditoria. Sao dois
 # recursos independentes, e o processo apenas se recusa a afirmar sobre um o
@@ -232,7 +258,20 @@ AUDIT_INDETERMINADA = "indeterminada"
 
 
 class ResultadoAuditoria:
-    """Desfecho observado de UMA mutacao de auditoria."""
+    """Desfecho observado de UMA mutacao de auditoria.
+
+    `estado` e' um dos quatro `AUDIT_*`. `indeterminada` cobre duas origens
+    distintas, e em nenhuma delas o conteudo da linha e' afirmavel:
+
+      (a) a mutacao falhou ANTES do commit e o `rollback()` da conexao de
+          auditoria tambem nao retornou;
+      (b) o `commit()` da auditoria foi TENTADO e levantou. Este caso e'
+          permanente: nenhum rollback e' tentado depois, e um rollback que
+          retornasse nao rebaixaria o resultado para `revertida`, porque nao
+          desfaz um commit possivelmente aplicado.
+
+    `detalhe` guarda so' texto que passou por `_sanitize_erro`.
+    """
 
     __slots__ = ("mutacao", "estado", "detalhe")
 
@@ -336,14 +375,47 @@ def _commit_ou_indeterminado(neon_conn, saida: dict, no_op: bool) -> None:
     saida["estado"] = PUBLICACAO_CONFIRMADA
 
 
+MENSAGEM_EXTERNA_SUPRIMIDA = "<mensagem externa suprimida>"
+MAX_ERRO = 400
+MAX_NOME_CLASSE = 64
+
+
+def _nome_seguro(exc: BaseException) -> str:
+    """Nome da classe reduzido a `[A-Za-z0-9_]` e truncado.
+
+    O nome da classe e' a unica coisa que se aproveita de uma excecao externa,
+    e mesmo ele passa por allowlist: nada de modulo, caminho ou pontuacao que
+    pudesse carregar contexto.
+    """
+    nome = "".join(c for c in type(exc).__name__
+                   if c.isascii() and (c.isalnum() or c == "_"))
+    return nome[:MAX_NOME_CLASSE] or "Excecao"
+
+
 def _sanitize_erro(exc: BaseException) -> str:
-    """Mensagem curta e sem segredo, para auditoria e stderr."""
-    texto = f"{type(exc).__name__}: {exc}"
-    for proibido in ("postgres://", "postgresql://", "password", "apikey", "eyJ"):
-        if proibido in texto:
-            texto = f"{type(exc).__name__}: <mensagem suprimida por conter segredo>"
-            break
-    return texto.replace("\n", " ")[:400]
+    """FAIL-CLOSED: texto de excecao externa NUNCA e' ecoado (Gate H1-D1).
+
+    So' `SnapshotImportError` tem a mensagem preservada, porque ela e'
+    construida aqui dentro, a partir de literais deste modulo e de campos que
+    ele controla (`sync_run_id`, contagens, nomes de tabela) — e o que ela
+    embute de origem externa ja passou por esta funcao.
+
+    Qualquer outra excecao — driver, biblioteca, defeito de programacao —
+    contribui apenas com o nome da classe. O texto dela pode trazer DSN em
+    qualquer caixa, `host=`/`user=`/`dbname=` em formato key-value, caminho de
+    arquivo, SQL, `params`, `DETAIL` de constraint com valor de linha ou
+    qualquer outra coisa; nenhuma denylist da conta disso, e uma mensagem
+    externa aparentemente inofensiva tambem nao e' repetida, porque essa
+    avaliacao nao pode ser feita em tempo de execucao.
+
+    Espaco em branco e' normalizado (inclui `\\n` e `\\r`) e o resultado e'
+    truncado em `MAX_ERRO`.
+    """
+    if isinstance(exc, SnapshotImportError):
+        texto = f"{_nome_seguro(exc)}: {exc}"
+    else:
+        texto = f"{_nome_seguro(exc)}: {MENSAGEM_EXTERNA_SUPRIMIDA}"
+    return " ".join(texto.split())[:MAX_ERRO]
 
 
 # --------------------------------------------------------------------------
@@ -939,6 +1011,11 @@ def build_parser() -> argparse.ArgumentParser:
 # FINDING 3 — a unica tabela de desfechos da CLI. Cada linha afirma SOMENTE o
 # que o estado comprova. Subclasses vem antes das bases: o despacho e' por
 # `isinstance` na ordem em que a tupla esta escrita.
+#
+# A CLI tem NOVE resultados, e so' nove: um sucesso (0), as sete falhas
+# tipadas desta tabela e o fallback nao classificado (10). Os exits 2 e 3
+# ficam FORA da maquina de estados — sao falha de contrato do snapshot e falha
+# de credencial/conexao, ambas anteriores a qualquer transacao.
 #
 # A frase "rollback aplicado" NAO aparece em rotulo nenhum. Ela e' construida
 # dentro de `publish()`, e so' quando o `rollback()` retornou de fato.

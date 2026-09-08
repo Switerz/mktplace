@@ -1,7 +1,7 @@
 # Snapshots manuais da Avoe — fonte, contrato e runbook
 
 Gate AVH-4A · corrigido no AVH-4A-R · aplicado no AVH-4B-P · corrigido no
-AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
+AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2, AVH-4A-H1-R3 e AVH-4A-H1-D1 · 2026-09-08
 
 > **Estado por etapa — não usar a frase genérica "AVH-4B não iniciado".**
 >
@@ -30,8 +30,10 @@ AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
 > e proibiu qualquer exceção crua de driver de sobreviver na cadeia; o
 > **AVH-4A-H1-R3** passou a classificar as mutações de auditoria pela **fase**
 > (um commit tentado que levanta é indeterminado para sempre, e nenhum rollback
-> posterior o rebaixa). Ver a matriz em §8.2.1, a semântica das mutações em
-> §8.2.2 e as métricas em §8.5.
+> posterior o rebaixa); o **AVH-4A-H1-D1** trocou a denylist do sanitizador por
+> uma regra fail-closed — texto de exceção externa nunca é ecoado — e alinhou
+> comentários, docstrings e runbook ao código. Ver a matriz em §8.2.1, a
+> semântica das mutações em §8.2.2 e as métricas em §8.5.
 
 ---
 
@@ -299,23 +301,32 @@ reversão, nem auditoria.
 Interrupção do operador não é desfecho operacional da publicação, e convertê-la
 em um deles seria inventar um estado.
 
-Todos os códigos de saída da CLI:
+A CLI tem **exatamente nove resultados**: um sucesso, sete falhas tipadas e um
+fallback não classificado.
 
 ```
+sucesso
 0   sucesso, no-op ou dry-run
-2   FALHA DE CONTRATO
-3   FALHA / FALHA ao conectar no destino
+
+falhas tipadas da maquina de estados
 4   FALHA NA PUBLICACAO (nada gravado)
 5   PUBLICACAO INDETERMINADA
 6   AUDITORIA INCOMPLETA (publicacao confirmada)
 7   AUDITORIA INICIAL INCOMPLETA (publicacao NAO tentada)
 8   PUBLICACAO NAO CONFIRMADA, AUDITORIA INCOMPLETA (nada publicado)
 9   PUBLICACAO INDETERMINADA (auditoria tambem NAO confirmada)
-10  ESTADO NAO CLASSIFICADO (nao se afirma publicacao, reversao nem auditoria)
 11  REVERSAO NAO CONFIRMADA (commit nunca tentado; fim da transacao nao observado)
+
+fallback
+10  ESTADO NAO CLASSIFICADO (nao se afirma publicacao, reversao nem auditoria)
 ```
 
-Nenhum desses rótulos contém "rollback" ou "revertido".
+**Os exits 2 e 3 ficam fora da máquina de estados.** O `2` é falha de contrato
+do snapshot e o `3` é falha de credencial ou de conexão: ambos acontecem antes
+de qualquer transação existir, então não há publicação, reversão nem auditoria
+sobre a qual afirmar coisa alguma.
+
+Nenhum dos rótulos contém "rollback" ou "revertido".
 
 #### Estado 4 — reversão não confirmada
 
@@ -324,40 +335,54 @@ O que ele **sabe** é que o `commit()` nunca foi tentado. O que ele **não pode
 dizer**: "rollback aplicado", "dados seguros", nem "nada gravado" sem
 qualificação.
 
-O que o importador faz: encerra a conexão para forçar o fim da transação (e
-registra se esse encerramento foi confirmado), grava na auditoria apenas a nota
-de indeterminação — nunca `failed`, que afirmaria um fim que ninguém observou —
-e sai com 11 mandando reconciliar em leitura. Nenhum retry.
+O que o importador faz: **tenta** encerrar a conexão para forçar o fim da
+transação e registra o resultado dessa tentativa em `conexao_encerrada` —
+`True` se o `close()` retornou, `False` se ele também levantou. A mensagem
+acompanha o atributo; nunca se afirma incondicionalmente que a conexão foi
+encerrada. Na auditoria grava apenas a nota de indeterminação — nunca `failed`,
+que afirmaria um fim que ninguém observou — e sai com 11 mandando reconciliar
+em leitura. Nenhum retry.
+
+A falha do `close()` **não substitui nem esconde a classificação principal**: o
+desfecho continua `ReversaoNaoConfirmada` com exit 11, e a causa original segue
+identificada.
 
 Quatro afirmações que o importador **não** faz:
 
-- **nunca converte uma exceção crua de driver em mensagem, cadeia ou
-  traceback.** A exceção do psycopg2 carrega DSN, host, usuário, parâmetros e
-  SQL no próprio texto e nos frames. Todo desfecho sai por `_levanta()`, que
-  zera `__cause__`, `__context__` e o traceback de origem: só a mensagem já
-  sanitizada viaja. O importador também não emite log — não há logger para
-  vazar;
+- **nunca reproduz o texto de uma exceção externa.** A regra é **fail-closed**:
+  de uma exceção de driver ou biblioteca sobra apenas o nome da classe, passado
+  por allowlist de caracteres, e a mensagem fixa `<mensagem externa
+  suprimida>`. Só o texto de `SnapshotImportError` — construído dentro do
+  próprio importador — é preservado. Isso vale para a mensagem *aparentemente*
+  inofensiva também: julgar isso em tempo de execução não é auditável, e a
+  denylist anterior (`postgres://`, `password`, `apikey`, `eyJ`) deixava passar
+  DSN em outra caixa, `host=`/`user=`/`dbname=` em key-value, caminho de
+  arquivo, SQL com parâmetros e `DETAIL` de constraint com valor de linha.
+  Todo desfecho sai por `_levanta()`, que zera `__cause__`, `__context__` e o
+  traceback de origem, então nada disso chega a stderr, a
+  `audit.source_sync_run` ou a `traceback.format_exception`. O importador
+  também não emite log — não há logger para vazar;
 
 - **"rollback aplicado" só aparece quando o `rollback()` retornou.** A frase é
   construída dentro de `publish()`, no ramo que a comprova. Se o próprio
   rollback levantar, a mensagem passa a dizer que a reversão **não** foi
-  confirmada — e continua verdadeira sobre o essencial: nada foi publicado,
-  porque o commit nunca chegou a ser tentado. Nenhum rótulo da CLI contém essa
-  frase, em nenhum dos sete desfechos;
+  confirmada — e o desfecho passa a ser o estado 4. Nenhum rótulo da CLI contém
+  essa frase, em nenhuma das sete falhas tipadas;
 - **nunca marca `failed` num run cujo commit retornou**, nem num run cujo
-  commit ficou indeterminado. Um registro que ficou `running` é a declaração
-  honesta de "não sei";
-- **nunca chama de "commit indeterminado" uma falha pré-commit.** O desfecho 3
-  é explícito: os dados estão seguros, o que ficou aberto é a auditoria.
+  commit ficou indeterminado, nem num run cuja reversão não foi confirmada. Um
+  registro que ficou `running` é a declaração honesta de "não sei";
+- **nunca chama de "commit indeterminado" uma falha pré-commit.** O estado 3 é
+  explícito: a transação de dados foi revertida com confirmação, e o que ficou
+  aberto é a auditoria.
 
 Se você encontrar um run `running` desta fonte, o procedimento é: contar as
 linhas das duas tabelas para aquela `captured_at` e comparar com o relatório do
 dry-run. Se as linhas estiverem lá, a publicação aconteceu e o que falta é
 apenas fechar o registro de auditoria; se não estiverem, a captura pode ser
 reimportada normalmente (o caminho de idempotência cobre os dois casos sem
-sobrescrever nada). Nos desfechos 3 e 5 vale a mesma leitura, com uma ressalva:
-ali o próprio registro de auditoria pode estar sem nota, então o único árbitro
-é a contagem nas tabelas de snapshot.
+sobrescrever nada). Nos estados 3, 4 e 6 vale a mesma leitura, com uma
+ressalva: ali o próprio registro de auditoria pode estar sem nota, então o
+único árbitro é a contagem nas tabelas de snapshot.
 
 ### 8.2.2 As quatro faces de cada mutação de auditoria
 
@@ -555,7 +580,7 @@ executado, e o snapshot já publicado não foi alterado nem reprocessado.
 
 | # | Passo | Resultado |
 |---|---|---|
-| 1 | `pytest pipelines/tests/test_avoe_snapshot_import.py` | **158 passaram** (96 antes do H1: +12 no H1, +17 no H1-R, +24 no H1-R2, +9 no H1-R3) |
+| 1 | `pytest pipelines/tests/test_avoe_snapshot_import.py` | **169 passaram** (96 antes do H1: +12 no H1, +17 no H1-R, +24 no H1-R2, +9 no H1-R3, +11 no H1-D1) |
 | 2 | `pytest pipelines/tests` na árvore modificada | 1 falha, o resto passando |
 | 3 | `pytest pipelines/tests` na árvore limpa de `origin/main`, mesmo ambiente | **a mesma 1 falha** |
 | 4 | comparação por node ID (limpa × modificada) | **zero removido**; só o arquivo Avoe cresce |

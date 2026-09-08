@@ -1146,6 +1146,7 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         self.conn.sqls.append(" ".join(sql.split())[:90])
+        self.conn.parametros.append(params)
         self.rowcount = self.conn.rowcount_padrao
         baixo = " ".join(sql.lower().split())
         if "returning sync_run_id" in baixo:
@@ -1190,6 +1191,7 @@ class _FakeConn:
         self.fechada = False
         self.fechamentos_tentados = 0
         self.sqls: list[str] = []
+        self.parametros: list = []
         self.cursores_pedidos = 0
         self.commits = 0
         self.commits_tentados = 0
@@ -1987,7 +1989,7 @@ def test_hr_indeterminado_com_marcacao_falha_nao_vaza_segredo():
             raise AssertionError("deveria ser indeterminada com auditoria nao confirmada")
         assert "postgres://" not in msg
         assert "senha" not in msg
-        assert "suprimida por conter segredo" in msg
+        assert si.MENSAGEM_EXTERNA_SUPRIMIDA in msg
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -2419,10 +2421,19 @@ _SEGREDOS = ("postgres://", "postgresql://", "s3nh4-secreta", "usuario_tecnico",
 
 
 def _traceback_do_produto(exc: BaseException) -> str:
-    """Traceback formatado, sem os quadros deste arquivo de teste."""
-    quadros = [q for q in traceback.extract_tb(exc.__traceback__)
-               if "test_avoe_snapshot_import" not in q.filename]
-    return "".join(traceback.format_list(quadros))
+    """Traceback do produto: funcao, linha e codigo-fonte de cada quadro.
+
+    Descarta os quadros deste arquivo de teste (nao sao produto) e o nome do
+    arquivo de cada quadro (e' o caminho do checkout, nao dado de excecao — num
+    clone sob `C:\\Users\\...` ele poluiria a varredura de caminho). O que fica
+    e' exatamente onde um SQL ou DSN embutido no codigo apareceria.
+    """
+    partes = []
+    for q in traceback.extract_tb(exc.__traceback__):
+        if "test_avoe_snapshot_import" in q.filename:
+            continue
+        partes.append(f"{q.name}:{q.lineno} {q.line}")
+    return "\n".join(partes)
 
 
 def _texto_de_um_erro(exc: BaseException) -> str:
@@ -2544,7 +2555,7 @@ def test_r2_excecao_realista_de_driver_nao_vaza_por_nenhuma_superficie():
             dados, _AuditDriver(), r, execute_values=_fake_execute_values))
         assert isinstance(exc, si.PublicacaoIndeterminadaAuditoriaNaoConfirmada)
         _sem_segredo(_texto_de_um_erro(exc), "cadeia completa")
-        assert "suprimida por conter segredo" in str(exc)
+        assert si.MENSAGEM_EXTERNA_SUPRIMIDA in str(exc)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -3315,8 +3326,9 @@ def test_r3_falha_de_close_nao_esconde_a_classificacao_principal():
             assert dados.fechamentos_tentados == 1
             msg = str(exc)
             assert trecho in msg
-            # A causa principal (a falha original) continua visivel.
-            assert "falha simulada no destino" in msg
+            # A causa principal continua identificada pelo tipo — o texto
+            # externo e' suprimido (Gate H1-D1).
+            assert "RuntimeError: " + si.MENSAGEM_EXTERNA_SUPRIMIDA in msg
             assert "REVERSAO NAO FOI CONFIRMADA" in msg
             if falhar_close:
                 assert "a conexao de dados foi encerrada para forcar" not in msg
@@ -3384,4 +3396,280 @@ def test_r3_commit_perdido_nao_vaza_segredo_em_nenhuma_superficie():
     assert exc.resultado.estado == si.AUDIT_INDETERMINADA
     assert exc.__cause__ is None and exc.__context__ is None
     _sem_segredo(_texto_de_um_erro(exc), "commit perdido da auditoria")
-    assert "suprimida por conter segredo" in str(exc)
+    assert si.MENSAGEM_EXTERNA_SUPRIMIDA in str(exc)
+
+
+# ===========================================================================
+# AVH-4A-H1-D1 — sanitizacao fail-closed
+#
+# Denylist e' inauditavel: basta a mensagem do driver vir em outra caixa, em
+# formato key-value, com caminho, com SQL, com params ou com o DETAIL de uma
+# constraint para o texto passar. O contrato agora e' o inverso: mensagem
+# externa NUNCA e' ecoada, e nem a inofensiva, porque essa avaliacao nao pode
+# ser feita em tempo de execucao.
+# ===========================================================================
+
+def _externa(nome, texto):
+    """Fabrica uma excecao externa com nome e texto arbitrarios."""
+    return type(nome, (RuntimeError,), {})(texto)
+
+
+# Cada cenario e' (rotulo, excecao, marcadores que nao podem sobreviver).
+def _cenarios_externos():
+    # Montado em partes, para que nenhum literal com forma de DSN exista neste
+    # arquivo — o alvo do teste e' o sanitizador, nao o scanner de segredos.
+    dsn_maiusculo = ("POSTGRESQL" + "://USUARIO_TECNICO:" + "S3NH4"
+                     + "@DB.INTERNO:5432/TORRE?SSLMODE=REQUIRE")
+    return [
+        ("dsn_maiusculo",
+         _externa("OperationalError", f"FATAL: {dsn_maiusculo} recusou"),
+         ("POSTGRESQL://", "USUARIO_TECNICO", "S3NH4", "DB.INTERNO", "SSLMODE")),
+        ("dsn_key_value",
+         _externa("OperationalError",
+                  "could not connect: host=db.interno.gocase user=torre_rw "
+                  "dbname=neondb port=5432 sslmode=require"),
+         ("host=", "user=", "dbname=", "db.interno.gocase", "torre_rw")),
+        ("caminho_windows",
+         _externa("FileNotFoundError",
+                  r"nao achei C:\Users\Notebook\Desktop\mktplace\.env.local"),
+         (r"C:\Users", "Notebook", ".env.local")),
+        ("sql_e_params",
+         _externa("ProgrammingError",
+                  "syntax error at or near \"VALUES\"\n"
+                  "LINE 1: INSERT INTO marts.proxy_avoe_brand_monthly_target_"
+                  "snapshot (brand) VALUES ('Kokeshi')\n"
+                  "params=('avoe_hub', Decimal('9557070.49'))"),
+         # Marcadores especificos DESTA mensagem: "VALUES" solto casaria com
+         # `execute_values`, que e' identificador do produto, nao vazamento.
+         ("syntax error", "VALUES ('Kokeshi')", "params=('avoe_hub'",
+          "Kokeshi", "9557070.49")),
+        ("detail_de_constraint",
+         _externa("UniqueViolation",
+                  "duplicate key value violates unique constraint "
+                  "\"pk_proxy_avoe_brand_monthly_target_snapshot\"\n"
+                  "DETAIL:  Key (source, captured_at, ref_month, brand)="
+                  "(avoe_hub, 2026-09-01 15:32:34.32+00, 2026-08-01, Kokeshi) "
+                  "already exists."),
+         ("DETAIL", "Key (", "already exists", "Kokeshi", "2026-09-01")),
+        ("multiline",
+         _externa("InternalError", "linha 1\nlinha 2\r\nlinha 3\ttabulada"),
+         ("linha 1", "linha 2", "linha 3", "tabulada")),
+        ("aparentemente_inofensiva",
+         _externa("ValueError", "conversao falhou"),
+         ("conversao falhou",)),
+    ]
+
+
+def test_d1_sanitize_nunca_ecoa_texto_externo():
+    for rotulo, exc, marcadores in _cenarios_externos():
+        saida = si._sanitize_erro(exc)
+        assert saida == f"{type(exc).__name__}: {si.MENSAGEM_EXTERNA_SUPRIMIDA}", \
+            f"{rotulo}: {saida!r}"
+        for m in marcadores:
+            assert m.lower() not in saida.lower(), f"{rotulo} vazou {m!r}"
+        # Nome da classe preservado, e so' ele.
+        assert type(exc).__name__ in saida
+        assert "\n" not in saida and "\r" not in saida and "\t" not in saida
+        assert len(saida) <= si.MAX_ERRO
+
+
+def test_d1_sanitize_preserva_mensagem_interna():
+    interna = si.SnapshotImportError(
+        "marts.proxy_avoe_extra_channel_monthly_snapshot: 24 linhas no destino "
+        "para a captura contra 31 lidas.")
+    saida = si._sanitize_erro(interna)
+    assert "24 linhas no destino" in saida
+    assert "31 lidas" in saida
+    assert si.MENSAGEM_EXTERNA_SUPRIMIDA not in saida
+    # Todas as subclasses da maquina de estados tambem sao internas.
+    for classe in [k for k, _, _ in si.DESFECHOS] + [si.MutacaoAuditoriaFalhou]:
+        if classe is si.MutacaoAuditoriaFalhou:
+            alvo = classe(si.ResultadoAuditoria("audit_start", si.AUDIT_REVERTIDA,
+                                                "detalhe interno"))
+        else:
+            alvo = classe("texto interno reconhecivel")
+        assert "interno" in si._sanitize_erro(alvo), classe.__name__
+
+
+def test_d1_sanitize_normaliza_e_trunca():
+    interna = si.SnapshotImportError("a\nb\r\nc\td   e" + "x" * 1000)
+    saida = si._sanitize_erro(interna)
+    assert saida.startswith("SnapshotImportError: a b c d e")
+    assert len(saida) == si.MAX_ERRO
+    assert "\n" not in saida and "\r" not in saida and "\t" not in saida
+
+
+def test_d1_sanitize_nao_depende_de_palavra_alguma():
+    """Sem denylist: nao ha lista de termos proibidos no codigo."""
+    fonte = Path("pipelines/avoe/snapshot_import.py").read_text(encoding="utf-8")
+    arvore = ast.parse(fonte)
+    alvo = [n for n in ast.walk(arvore)
+            if isinstance(n, ast.FunctionDef) and n.name == "_sanitize_erro"][0]
+    corpo = ast.unparse(alvo)
+    for termo in ("postgres://", "postgresql://", "password", "apikey", "eyJ"):
+        assert termo not in corpo, f"denylist remanescente: {termo}"
+    # A decisao e' por TIPO, nao por conteudo.
+    assert "isinstance(exc, SnapshotImportError)" in corpo
+
+
+def test_d1_nome_da_classe_passa_por_allowlist():
+    exotica = type("Classe.Com/Ponto e espaco\nquebra", (RuntimeError,), {})("x")
+    nome = si._nome_seguro(exotica)
+    assert nome == "ClasseComPontoeespacoquebra"
+    assert all(c.isalnum() or c == "_" for c in nome)
+    longa = type("Z" * 300, (RuntimeError,), {})("x")
+    assert len(si._nome_seguro(longa)) == si.MAX_NOME_CLASSE
+    anonima = type("!!!", (RuntimeError,), {})("x")
+    assert si._nome_seguro(anonima) == "Excecao"
+
+
+def test_d1_nenhuma_superficie_ecoa_texto_externo_no_fluxo_real():
+    """Cada cenario externo, injetado no commit dos dados, em todas as vias."""
+    base = _tmp()
+    try:
+        r = _resultado_padrao(base)
+        for rotulo, exc_externa, marcadores in _cenarios_externos():
+            class _ConnExterna(_FakeConn):
+                def commit(self, _e=exc_externa):
+                    self.commits_tentados += 1
+                    raise _e
+
+            dados = _ConnExterna(existentes=_existentes_de(r))
+            capturada = _erro_de(lambda: si.apply_with_audit(
+                dados, _AuditFake(), r, execute_values=_fake_execute_values))
+            assert isinstance(capturada, si.PublicacaoIndeterminada), rotulo
+            assert capturada.__cause__ is None and capturada.__context__ is None
+            texto = _texto_de_um_erro(capturada)
+            for m in marcadores:
+                assert m.lower() not in texto.lower(), f"{rotulo} vazou {m!r}"
+            assert si.MENSAGEM_EXTERNA_SUPRIMIDA in str(capturada)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_d1_stderr_real_da_cli_nao_ecoa_texto_externo():
+    base = _tmp()
+    d = _snapshot_padrao(base)
+    r = sc.read_snapshot(d)
+    publish_real = si.publish
+    conectar_real = si._neon_writable
+    url_antes = os.environ.get("DATABASE_URL")
+    stderr_antes = sys.stderr
+    try:
+        os.environ["DATABASE_URL"] = "dsn-de-teste-nao-usado"
+        for rotulo, exc_externa, marcadores in _cenarios_externos():
+            class _ConnExterna(_FakeConn):
+                def commit(self, _e=exc_externa):
+                    self.commits_tentados += 1
+                    raise _e
+
+            conexoes = [_ConnExterna(existentes=_existentes_de(r)), _AuditFake()]
+            si._neon_writable = lambda _u, _c=conexoes: _c.pop(0)
+            si.publish = lambda conn, res, execute_values=None: publish_real(
+                conn, res, execute_values=_fake_execute_values)
+            capturado = io.StringIO()
+            sys.stderr = capturado
+            try:
+                codigo = si.main(["--snapshot-dir", str(d), "--apply"])
+            finally:
+                sys.stderr = stderr_antes
+            texto = capturado.getvalue()
+            assert codigo == 5, f"{rotulo}: exit {codigo}"
+            for m in marcadores:
+                assert m.lower() not in texto.lower(), \
+                    f"{rotulo} vazou {m!r} em stderr"
+            assert si.MENSAGEM_EXTERNA_SUPRIMIDA in texto
+    finally:
+        si.publish = publish_real
+        si._neon_writable = conectar_real
+        if url_antes is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = url_antes
+        sys.stderr = stderr_antes
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_d1_texto_externo_nao_chega_a_auditoria():
+    """O `error_message` gravado em audit.source_sync_run tambem e' sanitizado."""
+    base = _tmp()
+    try:
+        r = _resultado_padrao(base)
+        vazando = _externa(
+            "OperationalError",
+            "host=db.interno.gocase user=torre_rw dbname=neondb: recusado")
+
+        class _ConnExterna(_FakeConn):
+            def cursor(self):
+                self.cursores_pedidos += 1
+                cur = _FakeCursor(self)
+                original = cur.execute
+
+                def _execute(sql, params=None, _o=original):
+                    _o(sql, params)
+                    if "insert into marts.proxy_avoe" in " ".join(sql.lower().split()):
+                        raise vazando
+
+                cur.execute = _execute
+                return cur
+
+        dados, aud = _ConnExterna(), _AuditFake()
+        _erro_de(lambda: si.apply_with_audit(
+            dados, aud, r, execute_values=_fake_execute_values))
+        assert aud.status_escritos == ["failed"]
+        # Todo SQL que a auditoria emitiu, mais os parametros que passaram.
+        gravado = " ".join(aud.sqls) + " " + repr(aud.parametros)
+        for m in ("host=", "user=", "dbname=", "db.interno.gocase", "torre_rw"):
+            assert m.lower() not in gravado.lower(), f"auditoria gravou {m!r}"
+        assert si.MENSAGEM_EXTERNA_SUPRIMIDA in repr(aud.parametros)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# FINDING 2 — documentacao concorda com o codigo
+# ---------------------------------------------------------------------------
+
+def test_d1_rollback_confirmado_e_sempre_true_na_classe_certa():
+    assert si.PublicacaoNaoConfirmada.rollback_confirmado is True
+    assert si.AuditoriaIncompletaSemPublicacao.rollback_confirmado is True
+    # E o estado de rollback falho e' outra classe, fora dessa hierarquia.
+    assert not issubclass(si.ReversaoNaoConfirmada, si.PublicacaoNaoConfirmada)
+    assert si.ReversaoNaoConfirmada.conexao_encerrada is False
+    doc = si.PublicacaoNaoConfirmada.__doc__
+    assert "SEMPRE True" in doc
+    assert "ReversaoNaoConfirmada" in doc
+
+
+def test_d1_docstrings_concordam_com_o_codigo():
+    doc_ai = si.AuditoriaIncompleta.__doc__
+    assert "revertida" in doc_ai and "indeterminada" in doc_ai
+    assert "Nao se pode dizer" in doc_ai
+
+    doc_ra = si.ResultadoAuditoria.__doc__
+    assert "(a)" in doc_ra and "(b)" in doc_ra
+    assert "permanente" in doc_ra
+
+    doc_rev = si.ReversaoNaoConfirmada.__doc__
+    assert "TENTADO" in doc_rev
+    assert "conexao_encerrada" in doc_rev
+    assert "nunca se afirma incondicionalmente" in doc_rev
+
+    doc_awa = si.apply_with_audit.__doc__
+    assert "ReversaoNaoConfirmada" in doc_awa
+
+
+def test_d1_a_cli_declara_exatamente_nove_resultados():
+    # 1 sucesso + 7 falhas tipadas + 1 fallback = 9.
+    assert len(si.DESFECHOS) == 7
+    codigos = sorted(c for _, c, _ in si.DESFECHOS)
+    assert codigos == [4, 5, 6, 7, 8, 9, 11]
+    assert si.DESFECHO_NAO_CLASSIFICADO[0] == 10
+    resultados = {0} | set(codigos) | {si.DESFECHO_NAO_CLASSIFICADO[0]}
+    assert len(resultados) == 9
+    # Os exits 2 e 3 ficam FORA da maquina: contrato e conexao.
+    assert 2 not in resultados and 3 not in resultados
+    fonte = Path("pipelines/avoe/snapshot_import.py").read_text(encoding="utf-8")
+    assert "NOVE resultados" in fonte
+    assert "FALHA DE CONTRATO" in fonte and "return 2" in fonte
+    assert "FALHA ao conectar no destino" in fonte and "return 3" in fonte
