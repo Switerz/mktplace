@@ -10,11 +10,14 @@ monitor_bug8_invariants, nao duplicadas).
 Usa conexoes falsas — nenhum banco real e' tocado. Nunca depende do Data
 Mart (so' consulta o Neon).
 """
+import contextlib
+import io
 import re
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from pathlib import Path
 
+import psycopg2
 import pytest
 
 import pipelines.ops.health_check as hc
@@ -28,6 +31,55 @@ def by_name(statuses, name):
     return next(s for s in statuses if s.source_name == name)
 
 
+# ---------------------------------------------------------------------------
+# Gate AVH-4C — fixtures da dimensao `avoe_snapshot`
+# ---------------------------------------------------------------------------
+# As duas consultas da Avoe sao as do SERVICO (`SQL_CANDIDATAS` e
+# `SQL_RUNS_AUDITORIA`), traduzidas para psycopg2. Estes construtores produzem
+# o MESMO formato de linha que aquele SQL devolve — e' isso que permite ao
+# health check usar `_valida_captura`/`_associa_run` do servico sem adaptador.
+
+def avoe_cand(dias_captura=3, metas=7, canais=24, snapshot_id="c8f6be83" + "0" * 24,
+              importado=None, **over):
+    """Uma candidata a captura, VALIDA por default."""
+    captura = NOW - timedelta(days=dias_captura)
+    imp = importado if importado is not None else captura + timedelta(days=1)
+    linha = {
+        "captured_at": captura,
+        "targets_count": metas,
+        "target_snapshots": 1,
+        "target_imports": 1,
+        "target_grao": metas,
+        "target_imp_min": imp,
+        "target_imp_max": imp,
+        "target_snapshot_id": snapshot_id,
+        "currency_code": "BRL",
+        "currency_status": "assumed_unconfirmed",
+        "moedas": 1,
+        "status_moeda": 1,
+        "channel_rows_count": canais,
+        "channel_snapshots": 1,
+        "channel_imports": 1,
+        "channel_grao": canais,
+        "channel_imp_min": imp,
+        "channel_imp_max": imp,
+        "channel_snapshot_id": snapshot_id,
+    }
+    linha.update(over)
+    return linha
+
+
+def avoe_run(sync_run_id=285, status="success", cand=None, dias_captura=3):
+    """Um run de auditoria que COBRE a janela de `imported_at` da candidata."""
+    c = cand if cand is not None else avoe_cand(dias_captura=dias_captura)
+    return {
+        "sync_run_id": sync_run_id,
+        "status": status,
+        "started_at": c["target_imp_min"] - timedelta(seconds=2),
+        "finished_at": c["target_imp_max"] + timedelta(seconds=2),
+    }
+
+
 class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
@@ -39,6 +91,10 @@ class FakeCursor:
         self.conn.executed.append(norm)
         self._last_sql = norm
         self._last_params = params
+        # Gate AVH-4C: falha de leitura injetada, para exercitar o ramo
+        # `error` da dimensao da Avoe sem tocar banco.
+        if self.conn.avoe_erro and "proxy_avoe" in norm:
+            raise psycopg2.Error("falha simulada na leitura da Avoe")
 
     def fetchone(self):
         sql = self._last_sql
@@ -73,6 +129,8 @@ class FakeCursor:
             return self.conn.discounts_last_run
         if "MAX(ref_date) AS fact_max_ref_date" in sql:
             return {"fact_max_ref_date": self.conn.discounts_fact_max}
+        # Gate AVH-4C: as duas consultas da Avoe usam `fetchall`, nunca
+        # `fetchone`. Cair aqui significa consulta nova sem ramo.
         for marker, value in self.conn.bug8_scalars:
             if marker in sql:
                 return {"n": value}
@@ -89,6 +147,13 @@ class FakeCursor:
         sql = self._last_sql
         if "marketplace_id, MAX(date)" in sql:
             return self.conn.daily_freshness_rows
+        # Gate AVH-4C. Ramos EXPLICITOS, e as duas consultas vem do SERVICO —
+        # os marcadores conferem que e' o SQL dele, nao uma copia local.
+        if "WITH capturas AS" in sql and "proxy_avoe" in sql:
+            return self.conn.avoe_candidatas
+        if ("sync_run_id, status, started_at, finished_at" in sql
+                and "audit.source_sync_run" in sql):
+            return self.conn.avoe_runs
         return []
 
     def close(self):
@@ -104,9 +169,19 @@ class FakeConn:
                  bug8_scalars=None,
                  ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET,
                  affiliate_watermark=_UNSET,
-                 discounts_last_run=_UNSET, discounts_fact_max=_UNSET):
+                 discounts_last_run=_UNSET, discounts_fact_max=_UNSET,
+                 avoe_candidatas=_UNSET, avoe_runs=_UNSET, avoe_erro=False):
         self.executed = []
         self.closed = False
+        # Gate AVH-4C: estado SAUDAVEL por default — captura valida de 3 dias
+        # com um run `success` que cobre o `imported_at`. Mesma convencao das
+        # outras dimensoes: o default nao deve reprovar nada, para que cada
+        # teste isole UMA divergencia.
+        self.avoe_candidatas = (
+            [avoe_cand(dias_captura=3)] if avoe_candidatas is _UNSET
+            else avoe_candidatas)
+        self.avoe_runs = [avoe_run()] if avoe_runs is _UNSET else avoe_runs
+        self.avoe_erro = avoe_erro
         self.last_run = last_run or {}
         self.last_success = last_success or {}
         self.daily_freshness_rows = daily_freshness_rows if daily_freshness_rows is not None else [
@@ -1613,3 +1688,390 @@ def test_i4a_bug_de_programacao_continua_propagando():
 
     with pytest.raises(TypeError):
         hc.fetch_discounts_coverage_status(ConnBug(), now=NOW)
+
+
+# ===========================================================================
+# Gate AVH-4C — obsolescencia do snapshot manual da Avoe
+#
+# A dimensao existe para que uma captura esquecida apareca como esquecida. Ela
+# NUNCA pode reprovar `ok_critical` — e' o que decide o exit code e, por
+# consequencia, se o step `health_check` derruba o `full_daily`.
+# ===========================================================================
+
+def _avoe(conn=None, **kw):
+    c = conn if conn is not None else all_fresh_conn(**kw)
+    return hc.fetch_avoe_snapshot_status(c, now=NOW)
+
+
+# --- estados por idade -----------------------------------------------------
+
+def test_avoe_captura_recente_e_disponivel():
+    s = _avoe(avoe_candidatas=[avoe_cand(dias_captura=3)])
+    assert s.status == "available_manual_snapshot"
+    assert s.stale is False
+    assert s.critical is False
+    assert s.serving_available is True
+    assert s.capture_age_days == 3
+    assert s.targets_count == 7 and s.channel_rows_count == 24
+    assert s.sync_run_id == 285
+    assert s.sync_run_link_method == "audit_time_window"
+    assert s.unavailable_reason is None
+    assert s.source_name == "avoe_manual_snapshot"
+    assert "nao e' SLA da fonte" in s.reason
+    assert "depende de acao humana" in s.reason
+
+
+def test_avoe_quinze_dias_envelhecendo():
+    cand = avoe_cand(dias_captura=15)
+    s = _avoe(avoe_candidatas=[cand], avoe_runs=[avoe_run(cand=cand)])
+    assert s.status == "aging_manual_snapshot"
+    assert s.capture_age_days == 15
+    # Warning: aparece, mas nao e' critico.
+    assert s.stale is True
+    assert s.critical is False
+    assert s.serving_available is True, "a captura continua valida; so' envelheceu"
+    assert f"limiar operacional de {hc.AVOE_AGING_DAYS}" in s.reason
+
+
+def test_avoe_trinta_e_um_dias_obsoleto():
+    cand = avoe_cand(dias_captura=31)
+    s = _avoe(avoe_candidatas=[cand], avoe_runs=[avoe_run(cand=cand)])
+    assert s.status == "stale_manual_snapshot"
+    assert s.capture_age_days == 31
+    assert s.stale is True
+    assert s.critical is False
+    assert f"limiar operacional de {hc.AVOE_STALE_DAYS}" in s.reason
+
+
+def test_avoe_fronteiras_exatas_dos_limiares():
+    """13/14 e 29/30 — o limiar e' inclusivo, e a virada e' onde se espera."""
+    for dias, esperado in ((13, "available_manual_snapshot"),
+                           (14, "aging_manual_snapshot"),
+                           (29, "aging_manual_snapshot"),
+                           (30, "stale_manual_snapshot")):
+        cand = avoe_cand(dias_captura=dias)
+        s = _avoe(avoe_candidatas=[cand], avoe_runs=[avoe_run(cand=cand)])
+        assert s.status == esperado, f"{dias} dias -> {s.status}"
+
+
+def test_avoe_limiares_viajam_na_resposta_como_operacionais():
+    s = _avoe()
+    assert s.aging_threshold_days == hc.AVOE_AGING_DAYS == 14
+    assert s.stale_threshold_days == hc.AVOE_STALE_DAYS == 30
+    # E o codigo declara que nao sao SLA.
+    fonte = MODULE_PATH.read_text(encoding="utf-8")
+    assert "NAO SLA" in fonte or "nao SLA" in fonte
+    assert "nunca acordou cadencia" in fonte
+
+
+def test_avoe_limiar_de_obsoleto_bate_com_o_da_tela():
+    """30 dias aqui e 30 dias no selo "captura antiga" da tela. Um so' numero."""
+    contrato = (MODULE_PATH.parents[2] / "apps" / "web" / "src" / "lib"
+                / "avoe-snapshot-contract.ts")
+    texto = contrato.read_text(encoding="utf-8")
+    achado = re.search(r"DIAS_PARA_CAPTURA_ANTIGA\s*=\s*(\d+)", texto)
+    assert achado, "constante da tela nao encontrada"
+    assert int(achado.group(1)) == hc.AVOE_STALE_DAYS
+
+
+# --- ausencia e invalidez --------------------------------------------------
+
+def test_avoe_sem_nenhuma_captura():
+    s = _avoe(avoe_candidatas=[], avoe_runs=[])
+    assert s.status == "unavailable"
+    assert s.unavailable_reason == "no_snapshot_published"
+    assert s.stale is True and s.critical is False
+    assert s.serving_available is False
+    # Nada inventado: sem contagem, sem idade, sem captura.
+    assert s.captured_at is None
+    assert s.capture_age_days is None
+    assert s.targets_count is None and s.channel_rows_count is None
+    assert s.sync_run_id is None
+    assert "exportacao manual" in s.reason
+
+
+def test_avoe_captura_mais_nova_invalida_usa_a_anterior_valida():
+    """Publicacao parcial na captura nova nao derruba a anterior que se sustenta."""
+    nova = avoe_cand(dias_captura=1, canais=0, snapshot_id="ff" + "0" * 30)
+    velha = avoe_cand(dias_captura=5)
+    s = _avoe(avoe_candidatas=[nova, velha],
+              avoe_runs=[avoe_run(cand=velha)])
+    assert s.status == "available_manual_snapshot"
+    assert s.capture_age_days == 5, "escolheu a captura VALIDA, nao a mais nova"
+    assert s.serving_available is True
+
+
+def test_avoe_max_captured_at_sozinho_nao_e_saude():
+    """Existe MAX(captured_at), mas a captura nao passa na validacao."""
+    for quebra in ({"channel_rows_count": 0},          # publicacao parcial
+                   {"target_snapshots": 2},            # mistura de imports
+                   {"channel_snapshot_id": "zz" + "0" * 30},
+                   {"target_grao": 6},                 # grao duplicado
+                   {"moedas": 2}):                     # moeda nao unica
+        cand = avoe_cand(dias_captura=2, **quebra)
+        s = _avoe(avoe_candidatas=[cand], avoe_runs=[avoe_run(cand=cand)])
+        assert s.status == "unavailable", quebra
+        assert s.serving_available is False
+        assert s.unavailable_reason is not None
+        assert "nao basta" in s.reason
+
+
+def test_avoe_metas_e_canais_precisam_ser_da_mesma_captura():
+    """Metas numa captura e canais em outra: nenhuma das duas e' servida."""
+    so_metas = avoe_cand(dias_captura=2, canais=0, channel_grao=0)
+    so_canais = avoe_cand(dias_captura=4, metas=0, target_grao=0)
+    s = _avoe(avoe_candidatas=[so_metas, so_canais],
+              avoe_runs=[avoe_run(cand=so_metas), avoe_run(sync_run_id=286, cand=so_canais)])
+    assert s.status == "unavailable"
+    assert s.unavailable_reason == "targets_and_channels_capture_mismatch"
+
+
+# --- auditoria nao conclusiva ---------------------------------------------
+
+def test_avoe_auditoria_running_nao_e_servida():
+    """`finished_at` nulo nao casa com nada, de proposito."""
+    cand = avoe_cand(dias_captura=2)
+    run = avoe_run(cand=cand, status="running")
+    run["finished_at"] = None
+    s = _avoe(avoe_candidatas=[cand], avoe_runs=[run])
+    assert s.status == "unavailable"
+    assert s.unavailable_reason == "audit_run_not_conclusive"
+    assert s.stale is True and s.critical is False
+    # A ultima execucao `success` nao existe, e isso e' dito sem inventar.
+    assert s.last_success_at is None
+
+
+def test_avoe_auditoria_failed_nao_e_servida():
+    cand = avoe_cand(dias_captura=2)
+    s = _avoe(avoe_candidatas=[cand],
+              avoe_runs=[avoe_run(cand=cand, status="failed")])
+    assert s.status == "unavailable"
+    assert s.unavailable_reason == "audit_run_not_conclusive"
+
+
+def test_avoe_auditoria_ambigua_nao_e_servida():
+    """Dois runs `success` cobrindo a mesma janela: fail-closed."""
+    cand = avoe_cand(dias_captura=2)
+    s = _avoe(avoe_candidatas=[cand],
+              avoe_runs=[avoe_run(sync_run_id=285, cand=cand),
+                         avoe_run(sync_run_id=286, cand=cand)])
+    assert s.status == "unavailable"
+    assert s.unavailable_reason == "audit_run_not_conclusive"
+
+
+def test_avoe_ultima_execucao_success_e_medida_a_parte_da_captura():
+    """Existe execucao `success`, mas nenhuma captura servivel."""
+    cand = avoe_cand(dias_captura=2, target_snapshots=2)   # invalida
+    run = avoe_run(cand=cand)
+    s = _avoe(avoe_candidatas=[cand], avoe_runs=[run])
+    assert s.status == "unavailable"
+    assert s.last_success_at == run["finished_at"].isoformat(), \
+        "a execucao existiu e e' reportada, mesmo sem captura servivel"
+
+
+# --- erro de leitura ------------------------------------------------------
+
+def test_avoe_erro_de_leitura_falha_fechado_mas_nao_critico():
+    s = _avoe(avoe_erro=True)
+    assert s.status == "error"
+    assert s.stale is True, "cegueira nao e' evidencia de saude"
+    assert s.critical is False, "nem cegueira sobre a Avoe derruba o dia"
+    assert s.serving_available is False
+    assert s.captured_at is None and s.capture_age_days is None
+
+
+def test_avoe_mensagem_de_erro_e_sanitizada():
+    s = _avoe(avoe_erro=True)
+    baixo = s.reason.lower()
+    for proibido in ("select", "insert", "postgres://", "psycopg2", "password",
+                     "senha", "host=", "traceback", "proxy_avoe",
+                     "falha simulada"):
+        assert proibido not in baixo, proibido
+    assert "nao consegui verificar" in baixo
+
+
+def test_avoe_defeito_de_codigo_continua_propagando():
+    """`psycopg2.Error` e' tratado; bug nosso, nao — esconder seria pior."""
+    class ConnQuebrada(FakeConn):
+        def cursor(self, cursor_factory=None):
+            raise TypeError("defeito de programacao")
+
+    with pytest.raises(TypeError):
+        hc.fetch_avoe_snapshot_status(ConnQuebrada(), now=NOW)
+
+
+# --- integracao no relatorio ---------------------------------------------
+
+def test_avoe_entra_no_relatorio_como_dimensao_propria():
+    report = hc.build_report(all_fresh_conn(), now=NOW)
+    assert "avoe_snapshot" in report
+    a = report["avoe_snapshot"]
+    assert a["source_name"] == "avoe_manual_snapshot"
+    assert a["status"] == "available_manual_snapshot"
+    assert a["critical"] is False
+    # E nao contaminou nenhuma das dimensoes existentes.
+    nomes_exec = {s["source_name"] for s in report["sources"]}
+    assert "avoe_manual_snapshot" not in nomes_exec
+    assert not any("avoe" in d["reason"].lower() for d in report["data_freshness"])
+
+
+def test_avoe_obsoleta_derruba_ok_mas_nunca_ok_critical():
+    cand = avoe_cand(dias_captura=45)
+    report = hc.build_report(
+        all_fresh_conn(avoe_candidatas=[cand], avoe_runs=[avoe_run(cand=cand)]),
+        now=NOW)
+    assert report["avoe_snapshot"]["status"] == "stale_manual_snapshot"
+    assert report["ok"] is False, "aparece como ATENCAO no status geral"
+    assert report["ok_critical"] is True, "nunca reprova o status critico"
+
+
+def test_avoe_indisponivel_nunca_reprova_ok_critical():
+    report = hc.build_report(
+        all_fresh_conn(avoe_candidatas=[], avoe_runs=[]), now=NOW)
+    assert report["avoe_snapshot"]["status"] == "unavailable"
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+
+
+def test_avoe_erro_nunca_reprova_ok_critical():
+    report = hc.build_report(all_fresh_conn(avoe_erro=True), now=NOW)
+    assert report["avoe_snapshot"]["status"] == "error"
+    assert report["ok"] is False
+    assert report["ok_critical"] is True
+
+
+def test_full_daily_nao_falha_exclusivamente_por_avoe():
+    """O exit code do processo — que o step do full_daily consome — segue 0."""
+    for kw in ({"avoe_candidatas": [], "avoe_runs": []},
+               {"avoe_erro": True},
+               {"avoe_candidatas": [avoe_cand(dias_captura=99)],
+                "avoe_runs": [avoe_run(cand=avoe_cand(dias_captura=99))]}):
+        report = hc.build_report(all_fresh_conn(**kw), now=NOW)
+        assert report["ok_critical"] is True, kw
+        # `main()` decide o exit code por `ok_critical`.
+        assert (0 if report["ok_critical"] else 1) == 0, kw
+
+
+def test_fontes_criticas_existentes_permanecem_intactas():
+    """Nenhuma fonte esperada foi adicionada, removida ou tornada nao critica."""
+    nomes = [s.source_name for s in hc.EXPECTED_SOURCES]
+    assert "avoe_manual_snapshot" not in nomes, \
+        "a Avoe e' dimensao propria, nao entra em EXPECTED_SOURCES"
+    nao_criticas = {s.source_name for s in hc.EXPECTED_SOURCES if not s.critical}
+    assert nao_criticas == {
+        "shopee_daily", "shopee-stats_daily", "shopee-ads_daily",
+        "shopee_product_monthly",
+    }, nao_criticas
+    # E as criticas continuam criticas.
+    for nome in ("ml_daily", "tiktok_daily", "tiktok_product_daily",
+                 "ml_produto_ranking", "ml_cross_company",
+                 "tiktok_channel_efficiency"):
+        assert by_name(hc.EXPECTED_SOURCES, nome).critical is True
+
+
+def test_avoe_nao_altera_o_veredito_das_outras_dimensoes():
+    """Mesma conexao, com e sem a Avoe saudavel: o resto do relatorio e' igual."""
+    saudavel = hc.build_report(all_fresh_conn(), now=NOW)
+    quebrada = hc.build_report(all_fresh_conn(avoe_erro=True), now=NOW)
+    for chave in ("sources", "data_freshness", "bug8_invariants",
+                  "affiliate_watermark", "discounts_coverage"):
+        assert saudavel[chave] == quebrada[chave], chave
+
+
+def test_saida_humana_declara_o_estado_e_a_natureza_da_fonte():
+    report = hc.build_report(all_fresh_conn(), now=NOW)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hc._print_human(report)
+    texto = buf.getvalue()
+    assert "Obsolescencia do snapshot manual da Avoe (nao critico)" in texto
+    assert "limiares OPERACIONAIS (nao SLA da fonte)" in texto
+    assert "nunca reprova o status critico nem o full_daily" in texto
+    assert "avoe_manual_snapshot" in texto
+
+
+def test_saida_humana_marca_cada_estado_como_conhecido():
+    for kw, marca in (
+        ({"avoe_candidatas": [avoe_cand(dias_captura=20)],
+          "avoe_runs": [avoe_run(cand=avoe_cand(dias_captura=20))]},
+         "ENVELHECENDO-CONHECIDO"),
+        ({"avoe_candidatas": [avoe_cand(dias_captura=40)],
+          "avoe_runs": [avoe_run(cand=avoe_cand(dias_captura=40))]},
+         "OBSOLETO-CONHECIDO"),
+        ({"avoe_candidatas": [], "avoe_runs": []}, "INDISPONIVEL-CONHECIDO"),
+        ({"avoe_erro": True}, "LEITURA-FALHOU-CONHECIDO"),
+    ):
+        report = hc.build_report(all_fresh_conn(**kw), now=NOW)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hc._print_human(report)
+        assert marca in buf.getvalue(), kw
+
+
+# --- reuso das regras do serving ------------------------------------------
+
+def test_as_regras_de_validacao_sao_as_do_servico():
+    """Nao ha validacao reimplementada aqui: sao as funcoes do endpoint."""
+    from app.services import avoe_snapshot_service as svc
+    assert hc.avoe_svc is svc
+    fonte = MODULE_PATH.read_text(encoding="utf-8")
+    assert "avoe_svc._valida_captura" in fonte
+    assert "avoe_svc._associa_run" in fonte
+    assert "avoe_svc.SQL_CANDIDATAS" in fonte
+    assert "avoe_svc.SQL_RUNS_AUDITORIA" in fonte
+    # E os nomes de fonte tambem vem de la, nunca digitados de novo.
+    assert 'source_name="avoe_manual_snapshot"' not in fonte
+    assert "avoe_svc.AUDIT_SOURCE_NAME" in fonte
+    assert "avoe_svc.SOURCE" in fonte
+
+
+def test_a_consulta_executada_e_a_do_servico():
+    conn = all_fresh_conn()
+    hc.fetch_avoe_snapshot_status(conn, now=NOW)
+    from app.services import avoe_snapshot_service as svc
+    esperadas = [" ".join(hc._sql_para_psycopg2(s).split())
+                 for s in (svc.SQL_CANDIDATAS, svc.SQL_RUNS_AUDITORIA)]
+    for sql in esperadas:
+        assert sql in conn.executed, sql[:80]
+
+
+def test_reported_amount_nao_entra_na_avaliacao_de_saude():
+    conn = all_fresh_conn()
+    hc.fetch_avoe_snapshot_status(conn, now=NOW)
+    for sql in conn.executed:
+        if "proxy_avoe" in sql or "audit.source_sync_run" in sql:
+            assert "reported_amount" not in sql, sql[:100]
+    # E a dimensao nao tem campo de valor.
+    campos = set(hc.AvoeSnapshotStatus.__dataclass_fields__)
+    for proibido in ("reported_amount", "target_amount", "valor", "amount"):
+        assert not any(proibido in c for c in campos), proibido
+
+
+def test_traducao_de_sql_para_psycopg2():
+    assert hc._sql_para_psycopg2("SELECT :a, :b_c FROM t") == \
+        "SELECT %(a)s, %(b_c)s FROM t"
+    # Fail-closed: `%` e `::` tornariam a traducao insegura.
+    with pytest.raises(ValueError):
+        hc._sql_para_psycopg2("SELECT x FROM t WHERE y LIKE '%a'")
+    with pytest.raises(ValueError):
+        hc._sql_para_psycopg2("SELECT x::text FROM t WHERE a = :a")
+
+
+def test_dimensao_nao_escreve_nada():
+    conn = all_fresh_conn()
+    hc.fetch_avoe_snapshot_status(conn, now=NOW)
+    for sql in conn.executed:
+        baixo = sql.lower()
+        for proibido in ("insert into", "update ", "delete from", "truncate",
+                         "create ", "alter ", "drop "):
+            assert proibido not in baixo, proibido
+
+
+def test_dimensao_nao_expoe_infraestrutura_nem_segredo():
+    for kw in ({}, {"avoe_candidatas": [], "avoe_runs": []}, {"avoe_erro": True}):
+        s = _avoe(**kw)
+        texto = " ".join(str(v) for v in s.__dict__.values()).lower()
+        for proibido in ("postgres://", "postgresql://", "password", "senha",
+                         "apikey", "host=", "user=", "dbname=", "onrender",
+                         "neon.tech", "amazonaws"):
+            assert proibido not in texto, f"{kw}: {proibido}"

@@ -61,6 +61,26 @@ devolve DOIS campos:
     manual defasado nunca faz `python -m pipelines.ops.health_check`
     retornar exit 1 sozinho.
 
+OBSOLESCENCIA DO SNAPSHOT MANUAL DA AVOE (Gate AVH-4C, 2026-09-08)
+------------------------------------------------------------------
+Dimensao propria, `avoe_snapshot`, e NUNCA critica — nem em `error`. A Avoe e'
+fonte externa, de terceiro, com carga manual e sem cadencia acordada com a
+Torre; uma exportacao que ninguem fez nao e' quebra de pipeline nosso. O estado
+aparece no relatorio e derruba `ok` (visibilidade), jamais `ok_critical`, de
+modo que o step `health_check` do `full_daily` nunca falha por causa dela. E' a
+mesma politica dos Gates B4/C1 para o Shopee manual, pelo mesmo motivo: evitar
+alarme-fadiga sobre um gap conhecido e aceito.
+
+Tres coisas medidas SEPARADAMENTE, porque divergem: a ultima EXECUCAO `success`
+do importador, a IDADE da captura na origem (`captured_at` — reimportar o mesmo
+arquivo nao a rejuvenesce) e a DISPONIBILIDADE pelo criterio do serving. As
+regras de validacao vem importadas de `app.services.avoe_snapshot_service`, nao
+reescritas: existir `MAX(captured_at)` nao e' saude, e health check e tela nao
+podem discordar sobre o que e' captura valida.
+
+Os limiares (`AVOE_AGING_DAYS`, `AVOE_STALE_DAYS`) sao OPERACIONAIS NOSSOS, nao
+SLA da fonte — ver o comentario na definicao deles.
+
 Nenhuma escrita em nenhum banco. Nenhum alerta externo (e-mail/WhatsApp/
 webhook) — so' saida para o operador e exit code para automacao externa.
 O JSON traz um campo `reason` por fonte/tabela explicando a causa do
@@ -76,6 +96,7 @@ import argparse
 import contextlib
 import io
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
@@ -100,11 +121,41 @@ from pipelines import sync_tiktok_affiliate_cost_order_monthly as sync_afiliados
 # modulo do sync. Importar em vez de reescrever e' o que impede health check e
 # sync de divergirem sobre qual fonte cobrar e ate que dia.
 from pipelines import sync_tiktok_order_discounts_daily as sync_descontos  # noqa: E402
+# AVH-4C: as REGRAS de "qual captura da Avoe e' valida" vivem no servico que
+# serve a API. Importar as mesmas funcoes puras — em vez de reescrever a
+# validacao aqui — e' o que impede health check e tela de discordarem sobre
+# disponibilidade. O `sys.path.insert` acima e' o que torna `app.*` importavel.
+from app.services import avoe_snapshot_service as avoe_svc  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 MARKETPLACE_LABELS = {1: "tiktok", 2: "ml", 3: "shopee"}
 DAILY_DATA_FRESHNESS_THRESHOLD_DAYS = 3
+
+# ---------------------------------------------------------------------------
+# Obsolescencia do snapshot manual da Avoe (Gate AVH-4C)
+# ---------------------------------------------------------------------------
+# LIMIARES OPERACIONAIS NOSSOS, NAO SLA.
+#
+# A Avoe nunca acordou cadencia, janela de atualizacao ou prazo de exportacao
+# com a Torre. Nao existe compromisso da fonte para cobrar. Estes numeros sao
+# escolha de OPERACAO, para que uma captura esquecida apareca como esquecida em
+# vez de passar por atual — e podem ser mudados por decisao nossa, sem negociar
+# com ninguem.
+#
+# `AVOE_STALE_DAYS` e' 30 porque a tela ja usa 30 para o selo "captura antiga"
+# (`DIAS_PARA_CAPTURA_ANTIGA` em `apps/web/src/lib/avoe-snapshot-contract.ts`,
+# Gate AVH-4B-S). Operacao e tela dizendo "antiga" em dias diferentes seria
+# ruido puro. `AVOE_AGING_DAYS` e' o aviso ANTES disso: 14 dias da tempo de
+# alguem exportar de novo antes de a tela comecar a alertar o usuario final.
+AVOE_AGING_DAYS = 14
+AVOE_STALE_DAYS = 30
+
+#: Mensagem FIXA de falha de leitura. Nada de SQL, DSN, host ou texto de driver.
+AVOE_ERRO_LEITURA = (
+    "nao foi possivel ler o estado do snapshot da Avoe (falha na consulta "
+    "read-only); 'nao consegui verificar' nao e' evidencia de que esta atual"
+)
 
 
 @dataclass(frozen=True)
@@ -752,6 +803,224 @@ def fetch_discounts_coverage_status(conn, now: datetime | None = None
     )
 
 
+# ---------------------------------------------------------------------------
+# Dimensao `avoe_snapshot` — Gate AVH-4C
+# ---------------------------------------------------------------------------
+
+def _sql_para_psycopg2(sql: str) -> str:
+    """`:nome` (SQLAlchemy) -> `%(nome)s` (psycopg2). Nada mais e' tocado.
+
+    O SQL e' o do SERVICO, importado, nao uma copia: e' isso que impede a
+    consulta do health check de divergir da consulta que alimenta a tela.
+    Aqui so' a sintaxe de parametro nomeado muda.
+
+    FALHA FECHADO se o SQL de origem ganhar `%` (que o psycopg2 interpretaria
+    como placeholder) ou `::` (cast que a regex de `:nome` estragaria). Melhor
+    quebrar na hora do que traduzir errado em silencio.
+    """
+    if "%" in sql:
+        raise ValueError("SQL do servico ganhou '%': traducao para psycopg2 insegura")
+    if "::" in sql:
+        raise ValueError("SQL do servico ganhou '::': traducao para psycopg2 insegura")
+    return re.sub(r":([a-z_][a-z0-9_]*)", r"%(\1)s", sql)
+
+
+@dataclass(frozen=True)
+class AvoeSnapshotStatus:
+    """Obsolescencia do snapshot MANUAL da Avoe — dimensao propria e NAO critica.
+
+    POR QUE `critical=False` SEMPRE
+    -------------------------------
+    A Avoe e' fonte externa, de terceiro, com carga manual e sem cadencia
+    acordada. Nenhum estado dela — nem `error` — pode reprovar `ok_critical`,
+    que e' o que decide o exit code deste processo e, por consequencia, se o
+    step `health_check` derruba o `full_daily`. Uma exportacao que ninguem fez
+    nao e' quebra de pipeline nosso, e transformar isso em falha diaria seria o
+    mesmo alarme-fadiga que os Gates B4 e C1 corrigiram para o Shopee manual.
+
+    O estado APARECE, e aparece como ATENCAO no `ok` geral. So' nao derruba o
+    dia.
+
+    O QUE E' MEDIDO, E SEPARADO
+    ---------------------------
+    Tres coisas que podem divergir, e por isso nao sao colapsadas:
+
+      - `last_success_at`: quando o IMPORTADOR rodou com sucesso pela ultima
+        vez. Pode existir sem captura servivel;
+      - `captured_at` + `capture_age_days`: a idade do DADO na origem. E' o que
+        envelhece, e o importador rodar de novo sobre o mesmo arquivo nao o
+        rejuvenesce;
+      - `serving_available`: se a captura passa nas MESMAS validacoes que a API
+        usa. Existir `MAX(captured_at)` nao basta.
+
+    ESTADOS
+    -------
+      available_manual_snapshot  captura valida, ate `AVOE_AGING_DAYS` dias;
+      aging_manual_snapshot      captura valida, mas passando do limiar operacional;
+      stale_manual_snapshot      captura valida e velha (o mesmo limiar da tela);
+      unavailable                nenhuma captura passa na validacao do serving;
+      error                      a leitura falhou.
+    """
+    source_name: str
+    #: available_manual_snapshot | aging_manual_snapshot | stale_manual_snapshot
+    #: | unavailable | error
+    status: str
+    reason: str
+    #: Ultima execucao `success` do importador, independente de captura servivel.
+    last_success_at: str | None
+    #: Captura que o serving usaria — metas e canais na MESMA `captured_at`.
+    captured_at: str | None
+    capture_age_days: int | None
+    targets_count: int | None
+    channel_rows_count: int | None
+    sync_run_id: int | None
+    #: Como o run foi associado a captura. Divida conhecida: ver AVH-4B-S §13.5.
+    sync_run_link_method: str | None
+    #: O veredito do SERVING, calculado com as funcoes dele.
+    serving_available: bool
+    #: Motivo tecnico da indisponibilidade, no vocabulario do serving.
+    unavailable_reason: str | None
+    aging_threshold_days: int
+    stale_threshold_days: int
+    stale: bool
+    #: NUNCA True. Ver o docstring: a Avoe nao pode derrubar o full_daily.
+    critical: bool = False
+
+
+def _avoe_indisponivel(status: str, reason: str, *, last_success_at=None,
+                       unavailable_reason=None) -> AvoeSnapshotStatus:
+    """Estado sem captura servivel. Nenhuma contagem inventada — tudo `None`."""
+    return AvoeSnapshotStatus(
+        source_name=avoe_svc.AUDIT_SOURCE_NAME,
+        status=status,
+        reason=reason,
+        last_success_at=last_success_at,
+        captured_at=None,
+        capture_age_days=None,
+        targets_count=None,
+        channel_rows_count=None,
+        sync_run_id=None,
+        sync_run_link_method=None,
+        serving_available=False,
+        unavailable_reason=unavailable_reason,
+        aging_threshold_days=AVOE_AGING_DAYS,
+        stale_threshold_days=AVOE_STALE_DAYS,
+        stale=True,
+    )
+
+
+def fetch_avoe_snapshot_status(conn, now: datetime | None = None
+                               ) -> AvoeSnapshotStatus:
+    """Obsolescencia do snapshot da Avoe. Duas consultas, ambas read-only.
+
+    A escolha da captura usa `avoe_svc._valida_captura` e
+    `avoe_svc._associa_run` — as MESMAS funcoes puras que o endpoint usa. Nao
+    ha regra reimplementada aqui: se a API considera uma captura invalida, esta
+    dimensao considera tambem, por construcao.
+
+    `reported_amount` nao e' lido em ponto algum: o valor informado pela Avoe
+    nao e' criterio de saude, e usa-lo transformaria "a agencia digitou zero"
+    em "a fonte esta doente".
+    """
+    now = now or _now()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            _sql_para_psycopg2(avoe_svc.SQL_CANDIDATAS),
+            {"source": avoe_svc.SOURCE,
+             "max_capturas": avoe_svc.MAX_CAPTURAS_AVALIADAS},
+        )
+        candidatas = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            _sql_para_psycopg2(avoe_svc.SQL_RUNS_AUDITORIA),
+            {"source_name": avoe_svc.AUDIT_SOURCE_NAME,
+             "max_runs": avoe_svc.MAX_RUNS_AUDITORIA},
+        )
+        runs = [dict(r) for r in cur.fetchall()]
+    except psycopg2.Error:
+        # FALHA FECHADO, mas NAO critico: cegueira sobre uma fonte manual e
+        # nao canonica vira ATENCAO, nunca exit 1.
+        return _avoe_indisponivel("error", AVOE_ERRO_LEITURA)
+    finally:
+        cur.close()
+
+    sucessos = [r["finished_at"] for r in runs
+                if r["status"] == avoe_svc.STATUS_AUDITORIA_CONCLUSIVO
+                and r["finished_at"] is not None]
+    ultimo_sucesso = max(sucessos).isoformat() if sucessos else None
+
+    if not candidatas:
+        return _avoe_indisponivel(
+            "unavailable",
+            "nenhuma captura publicada nas tabelas de snapshot; a proxima "
+            "depende de exportacao manual e de uma execucao do importador",
+            last_success_at=ultimo_sucesso,
+            unavailable_reason="no_snapshot_published",
+        )
+
+    # Da mais nova para a mais antiga, exatamente como o serving: uma captura
+    # mais nova e invalida NAO derruba a anterior que se sustenta.
+    escolhida = run = None
+    motivo = "no_snapshot_published"
+    for cand in candidatas:
+        falha = avoe_svc._valida_captura(cand)
+        if falha is not None:
+            motivo = falha
+            continue
+        associado = avoe_svc._associa_run(cand, runs)
+        if associado is None:
+            motivo = "audit_run_not_conclusive"
+            continue
+        escolhida, run = cand, associado
+        break
+
+    if escolhida is None:
+        return _avoe_indisponivel(
+            "unavailable",
+            f"nenhuma captura passa na validacao usada pelo serving "
+            f"({motivo}); existir MAX(captured_at) nao basta",
+            last_success_at=ultimo_sucesso,
+            unavailable_reason=motivo,
+        )
+
+    idade = (now - escolhida["captured_at"]).days
+    metas = int(escolhida["targets_count"])
+    canais = int(escolhida["channel_rows_count"])
+
+    if idade >= AVOE_STALE_DAYS:
+        status = "stale_manual_snapshot"
+        veredito = (f"captura com {idade} dias, acima do limiar operacional de "
+                    f"{AVOE_STALE_DAYS}")
+    elif idade >= AVOE_AGING_DAYS:
+        status = "aging_manual_snapshot"
+        veredito = (f"captura com {idade} dias, acima do limiar operacional de "
+                    f"{AVOE_AGING_DAYS}")
+    else:
+        status = "available_manual_snapshot"
+        veredito = f"captura com {idade} dias, dentro do limiar operacional"
+
+    return AvoeSnapshotStatus(
+        source_name=avoe_svc.AUDIT_SOURCE_NAME,
+        status=status,
+        reason=(f"{veredito} (nao e' SLA da fonte); {metas} metas e {canais} "
+                f"linhas de canal na mesma captura, run #{run['sync_run_id']} "
+                f"'{run['status']}'; fonte externa e manual, a proxima captura "
+                f"depende de acao humana"),
+        last_success_at=ultimo_sucesso,
+        captured_at=escolhida["captured_at"].isoformat(),
+        capture_age_days=idade,
+        targets_count=metas,
+        channel_rows_count=canais,
+        sync_run_id=int(run["sync_run_id"]),
+        sync_run_link_method="audit_time_window",
+        serving_available=True,
+        unavailable_reason=None,
+        aging_threshold_days=AVOE_AGING_DAYS,
+        stale_threshold_days=AVOE_STALE_DAYS,
+        stale=status != "available_manual_snapshot",
+    )
+
+
 def build_report(conn, now: datetime | None = None) -> dict:
     """`now` e' lido UMA UNICA vez aqui (ou recebido do chamador) e
     repassado para as duas dimensoes de frescor — evita que
@@ -765,11 +1034,12 @@ def build_report(conn, now: datetime | None = None) -> dict:
     bug8 = run_bug8_check(conn)
     afiliados = fetch_affiliate_watermark_status(conn, now=now)
     descontos = fetch_discounts_coverage_status(conn, now=now)
+    avoe = fetch_avoe_snapshot_status(conn, now=now)
 
     exec_stale = [s for s in sources if s.stale]
     data_stale = [d for d in data_freshness if d.stale]
     ok = (not exec_stale and not data_stale and bug8["ok"]
-          and not afiliados.stale and not descontos.stale)
+          and not afiliados.stale and not descontos.stale and not avoe.stale)
 
     # Gate B1: ok_critical ignora fontes/entradas critical=False (hoje, so'
     # Shopee) — e' isso que `main()` usa para o exit code. `ok` continua
@@ -779,9 +1049,16 @@ def build_report(conn, now: datetime | None = None) -> dict:
     data_stale_critical = [d for d in data_stale if d.critical]
     afiliados_critico_stale = afiliados.stale and afiliados.critical
     descontos_critico_stale = descontos.stale and descontos.critical
+    # AVH-4C: a Avoe entra pelo MESMO padrao `stale and critical`, e como
+    # `critical` e' False por construcao a parcela e' sempre False. Escrever a
+    # conjuncao em vez de omitir a fonte e' deliberado: se algum dia alguem
+    # marcar a Avoe como critica, o efeito aparece aqui em vez de ficar
+    # silenciosamente fora da conta.
+    avoe_critico_stale = avoe.stale and avoe.critical
     ok_critical = (not exec_stale_critical and not data_stale_critical
                    and bug8["ok"] and not afiliados_critico_stale
-                   and not descontos_critico_stale)
+                   and not descontos_critico_stale
+                   and not avoe_critico_stale)
 
     return {
         "ok": ok,
@@ -791,6 +1068,7 @@ def build_report(conn, now: datetime | None = None) -> dict:
         "bug8_invariants": bug8,
         "affiliate_watermark": asdict(afiliados),
         "discounts_coverage": asdict(descontos),
+        "avoe_snapshot": asdict(avoe),
     }
 
 
@@ -818,6 +1096,23 @@ def _print_human(report: dict) -> None:
              "competencia_ausente": "COMPETENCIA-AUSENTE",
              "error": "LEITURA-FALHOU"}
     print(f"[{marca.get(d['status'], d['status'])}] {d['source_name']}: {d['reason']}")
+
+    a = report["avoe_snapshot"]
+    print("\n=== Obsolescencia do snapshot manual da Avoe (nao critico) ===")
+    marca_avoe = {
+        "available_manual_snapshot": "OK",
+        "aging_manual_snapshot": "ENVELHECENDO-CONHECIDO",
+        "stale_manual_snapshot": "OBSOLETO-CONHECIDO",
+        "unavailable": "INDISPONIVEL-CONHECIDO",
+        "error": "LEITURA-FALHOU-CONHECIDO",
+    }
+    print(f"[{marca_avoe.get(a['status'], a['status'])}] {a['source_name']}: "
+          f"{a['reason']}")
+    print(f"  limiares OPERACIONAIS (nao SLA da fonte): aviso em "
+          f"{a['aging_threshold_days']} dias, obsoleto em "
+          f"{a['stale_threshold_days']} dias")
+    print("  fonte externa e manual: nunca reprova o status critico nem o "
+          "full_daily")
 
     print("\n=== Invariantes do Bug 8 (Shopee) ===")
     if report["bug8_invariants"]["ok"]:

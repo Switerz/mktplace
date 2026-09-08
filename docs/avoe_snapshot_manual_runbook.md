@@ -14,6 +14,7 @@ leitura no AVH-4B-S Task 1/2 · exibido no AVH-4B-S Task 2/2 · 2026-09-08
 > | **AVH-4B-S Task 1/2** — contrato, serviço, rota e testes | **CONCLUÍDO** |
 > | **AVH-4B-S Task 2/2** — página e QA de navegador | **CONCLUÍDO** |
 > | deploy do backend no Render | **CONCLUÍDO e validado em produção** (§14.10) |
+> | **AVH-4C** — obsolescência no health check operacional | **CONCLUÍDO** (§15) |
 >
 > A auditoria histórica do run 285 tem `rows_extracted = 31` e
 > `rows_loaded = 31`, e **não será reescrita**. A população original lida
@@ -975,3 +976,144 @@ horizontal**, os três filtros e **zero erro de console ou hidratação**.
 
 **Regressão**: `/canais` não menciona Avoe no conteúdo, o link de navegação
 existe e o grupo `Referências externas` aparece na barra lateral.
+
+
+## 15. Obsolescência no health check — AVH-4C
+
+**Estado: CONCLUÍDO.** Dimensão de observabilidade. Não automatiza a carga, não
+cria migration, não executa snapshot e não escreve em banco.
+
+### 15.1 A dimensão
+
+`pipelines/ops/health_check.py` ganhou a dimensão **`avoe_snapshot`**, presente
+no JSON e na saída humana ao lado das existentes. A próxima captura **continua
+dependendo de ação humana** — esta rodada só torna visível quando ela não
+aconteceu.
+
+Três coisas medidas **separadamente**, porque divergem:
+
+| Campo | O que é |
+|---|---|
+| `last_success_at` | última execução `success` do importador. Pode existir sem captura servível |
+| `captured_at` + `capture_age_days` | idade do dado **na origem**. Reimportar o mesmo arquivo não a rejuvenesce |
+| `serving_available` + `unavailable_reason` | se a captura passa nas **mesmas** validações que a API usa |
+
+Também viajam `targets_count`, `channel_rows_count`, `sync_run_id`,
+`sync_run_link_method`, `aging_threshold_days` e `stale_threshold_days`.
+
+### 15.2 Estados
+
+| Estado | Quando |
+|---|---|
+| `available_manual_snapshot` | captura válida, idade < 14 dias |
+| `aging_manual_snapshot` | captura válida, 14 a 29 dias |
+| `stale_manual_snapshot` | captura válida, 30 dias ou mais |
+| `unavailable` | nenhuma captura passa na validação do serving |
+| `error` | a leitura falhou |
+
+Na saída humana os quatro estados não-OK aparecem como `-CONHECIDO`
+(`ENVELHECENDO-CONHECIDO`, `OBSOLETO-CONHECIDO`, `INDISPONIVEL-CONHECIDO`,
+`LEITURA-FALHOU-CONHECIDO`), o mesmo vocabulário que o Shopee manual já usa.
+
+### 15.3 Limites operacionais — **não são SLA**
+
+**14 dias** para aviso e **30 dias** para obsoleto. São escolha de **operação
+nossa**, não compromisso da Avoe: a fonte nunca acordou cadência, janela de
+atualização ou prazo de exportação com a Torre, e portanto não há SLA para
+cobrar. Podem ser mudados por decisão nossa, sem negociar com ninguém.
+
+A justificativa dos números vem do contrato já publicado, não de suposição:
+
+- **30** é o mesmo valor de `DIAS_PARA_CAPTURA_ANTIGA` em
+  `apps/web/src/lib/avoe-snapshot-contract.ts` (Gate AVH-4B-S), que já governa
+  o selo "captura antiga" na tela. Operação e tela dizendo "antiga" em dias
+  diferentes seria ruído puro — há teste que lê a constante do TypeScript e
+  falha se os dois divergirem;
+- **14** é o aviso *antes* disso, para dar tempo de alguém exportar de novo
+  antes de a tela começar a alertar o usuário final.
+
+### 15.4 Nunca crítico
+
+`critical=False` **sempre**, inclusive em `error`. A Avoe é fonte externa, de
+terceiro, com carga manual: uma exportação que ninguém fez não é quebra de
+pipeline nosso.
+
+Efeito prático:
+
+- a dimensão **derruba `ok`** (o status geral, que já inclui os gaps manuais
+  conhecidos do Shopee) — é isso que a torna visível;
+- **nunca derruba `ok_critical`**, que decide o exit code do processo e,
+  portanto, se o step `health_check` reprova o `full_daily`.
+
+É a mesma política dos Gates B4 e C1 para o Shopee manual, pelo mesmo motivo:
+evitar alarme-fadiga sobre um gap conhecido e aceito. A conjunção
+`avoe.stale and avoe.critical` está escrita explicitamente em `build_report`,
+em vez de a fonte ser omitida da conta — se algum dia alguém marcar a Avoe como
+crítica, o efeito aparece ali em vez de ficar silencioso.
+
+### 15.5 Fail-closed, e sem regra duplicada
+
+As regras de "qual captura é válida" **não** foram reescritas: a dimensão
+importa `_valida_captura` e `_associa_run` de
+`app.services.avoe_snapshot_service` e executa o **próprio SQL do serviço**
+(`SQL_CANDIDATAS`, `SQL_RUNS_AUDITORIA`), traduzido de `:nome` para `%(nome)s`
+por um helper que **falha fechado** se o SQL de origem ganhar `%` ou `::`. Se a
+API considera uma captura inválida, o health check considera também, por
+construção — e um teste prova que a função usada é a do serviço.
+
+Consequências:
+
+- **existir `MAX(captured_at)` não é saúde.** Publicação parcial, mistura de
+  imports, grão duplicado ou moeda não única → `unavailable`;
+- **metas e canais precisam ser da mesma captura.** Metas numa e canais em
+  outra → `targets_and_channels_capture_mismatch`;
+- **auditoria não conclusiva → `unavailable`.** Um run `running` (com
+  `finished_at` nulo, o caso do commit indeterminado), `failed`, ausente ou
+  ambíguo nunca é servido como saudável;
+- **uma captura mais nova e inválida não derruba a anterior válida** — mesma
+  ordem de avaliação do serving;
+- **erro de leitura → `error` com `stale=True`.** "Não consegui verificar" não
+  é evidência de que está atual. A mensagem é **fixa e sanitizada**: nada de
+  SQL, DSN, host, credencial ou texto de driver. Defeito de código (que não é
+  `psycopg2.Error`) continua propagando;
+- **`reported_amount` não é lido em ponto algum.** O valor informado pela Avoe
+  não é critério de saúde, e usá-lo transformaria "a agência digitou zero" em
+  "a fonte está doente".
+
+### 15.6 Validação executada
+
+| # | Passo | Resultado |
+|---|---|---|
+| 1 | `pytest pipelines/tests/test_ops_health_check.py` | **156 passaram** (124 antes; +32) |
+| 2 | `pytest pipelines/tests` na árvore integrada | 3.503 passaram, 1 falha |
+| 3 | `pytest pipelines/tests` na árvore limpa de `origin/main` | 3.471 passaram, **a mesma 1 falha** |
+| 4 | node ID (limpa × integrada) | 3.472 → 3.504; **zero removido**, 32 adicionados, todos no arquivo do health check |
+| 5 | `compileall` | sem erro |
+| 6 | leitura real read-only contra o snapshot 285 | **APROVADA**, 17 verificações |
+
+A falha é `test_sync_tiktok_serving.py::test_j09_fracionarios_pequenos_nao_perdem_precisao`,
+pré-existente e alheia (asserção de precisão de ponto flutuante), idêntica nas
+duas árvores.
+
+**Leitura real**: sessão `SET TRANSACTION READ ONLY`, `status =
+available_manual_snapshot`, `capture_age_days = 7`, `sync_run_id = 285`, 7 metas
+e 24 canais, `captured_at` igual ao `MAX` da tabela, auditoria histórica
+**31/31 preservada**, e ao final metas (7), canais (24) e o run único
+inalterados. **Zero escrita.**
+
+No relatório completo real, `ok_critical` veio `False` — por
+`ml_produto_ranking`, `tiktok_affiliate_cost_order_monthly`,
+`fact_ml_produto_ranking` e a dimensão de afiliados, **não** pela Avoe, que
+contribuiu `stale and critical = False`.
+
+### 15.7 O que esta rodada não fez
+
+- **não automatizou a carga.** A próxima captura depende de alguém exportar o
+  snapshot e rodar o importador. Esta dimensão só avisa;
+- **não alterou tabela, migration, API, frontend nem Scheduler**;
+- **não criou alerta externo.** O health check não manda e-mail, WhatsApp nem
+  webhook — a saída é para o operador e para o exit code. Encaminhar isso para
+  um canal é decisão de operação, não deste gate;
+- **não resolveu o vínculo temporal** com `audit.source_sync_run`, que segue
+  como dívida separada (§13.5): a ligação continua por janela de tempo, e a
+  correção estrutural exige migration própria.
