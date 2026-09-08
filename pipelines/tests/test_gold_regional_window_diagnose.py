@@ -717,8 +717,18 @@ def test_main_diagnose_shopee_window_chama_run_diagnose_shopee_window_cli(monkey
 
 
 def test_main_diagnose_flag_ainda_funciona_apos_adicionar_terceira_flag(monkeypatch):
-    monkeypatch.setattr(loader, "run_diagnose_cli", lambda: 0)
+    # Gate DQ-D2: `run_diagnose_cli` passou a receber `date_to`. Sem `--date-to`
+    # na linha de comando o valor chega None e o teto D-1 e' resolvido dentro
+    # da funcao - este teste tambem fixa esse default.
+    visto = {}
+
+    def _fake(date_to=None):
+        visto["date_to"] = date_to
+        return 0
+
+    monkeypatch.setattr(loader, "run_diagnose_cli", _fake)
     assert loader.main(["--diagnose"]) == 0
+    assert visto == {"date_to": None}
 
 
 # ---------------------------------------------------------------------------

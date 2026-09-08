@@ -83,6 +83,7 @@ from typing import Optional
 import psycopg2
 
 from pipelines.common.config import settings
+from pipelines.common.operational_calendar import last_closed_date
 from pipelines.ingestion.gold_regional import window_write_conn
 from pipelines.ingestion.gold_regional import write_conn
 from pipelines.ingestion.gold_regional.write_conn import (
@@ -169,7 +170,13 @@ class MarketplaceFreshness:
     marketplace: str  # "ml" | "shopee"
     marketplace_id: int
     max_date_gold: Optional[date]
-    max_date_source: Optional[date]
+    #: MAX da fonte SEM teto. Observabilidade pura: aparece no diagnostico para
+    #: explicar por que a carga parou onde parou, e nunca autoriza publicacao.
+    max_date_source_global: Optional[date]
+    #: MAX REAL das linhas da fonte com data <= teto. Medido pelo banco, nunca
+    #: derivado por `min()`. Pode ser None (fonte vazia, ou fonte inteira acima
+    #: do teto) - e None significa "nada elegivel", nao "carregar D-1".
+    max_date_source_eligible: Optional[date]
     estimated_new_rows: int
     will_update: bool
 
@@ -183,6 +190,10 @@ class DiagnoseReport:
 @dataclass
 class IncrementalLoadResult:
     no_op: bool = False
+    #: Teto INCLUSIVO efetivamente aplicado. Viaja no resultado para que a
+    #: mensagem da CLI e a auditoria digam QUAL janela foi publicada, em vez de
+    #: deixar o teto implicito no relogio do processo.
+    date_to: Optional[date] = None
     rows_inserted: int = 0
     marketplaces_updated: list = field(default_factory=list)  # list[str], ex.: ["ml"]
     shopee_gmv_staging: Optional[Decimal] = None
@@ -589,15 +600,43 @@ def execute_first_load(write_url: str) -> LoadResult:
 SQL_MAX_DATE_GOLD_BY_MARKETPLACE = (
     "SELECT marketplace_id, MAX(date) AS max_date FROM gold.marketplace_region_daily GROUP BY marketplace_id"
 )
-SQL_MAX_DATE_SHOPEE_SOURCE = "SELECT MAX(order_created_at::date) FROM silver.stg_shopee_order_item_snapshots"
-SQL_MAX_DATE_ML_SOURCE = "SELECT MAX(date_created::date) FROM raw.ml_orders WHERE status IN ('paid', 'cancelled')"
+# Cada consulta devolve DOIS maximos numa unica ida ao banco:
+#
+#   max_global   - MAX sem teto. SOMENTE observabilidade. Nunca autoriza carga.
+#   max_eligible - MAX real das linhas <= :date_to. E o unico que decide carga,
+#                  janela e no-op.
+#
+# Por que nao `min(max_global, teto)`: com lacuna na fonte esse min() ANUNCIA
+# uma data que nao existe. Fonte so com 05/09 e 08/09, teto 07/09 ->
+# min(08/09, 07/09) = 07/09, e nao ha uma unica linha em 07/09. O FILTER mede a
+# fonte em vez de aritmetizar sobre ela: devolve 05/09, que e a verdade.
+#
+# `%(date_to)s` e parametro nomeado do psycopg2. Nenhuma destas duas consultas
+# tem `%` literal, entao nao ha o conflito de escape que o comentario do bloco
+# acima descreve para as strings com ILIKE de cancelamento.
+SQL_MAX_DATE_SHOPEE_SOURCE = (
+    "SELECT MAX(order_created_at::date) AS max_global, "
+    "MAX(order_created_at::date) FILTER (WHERE order_created_at::date <= %(date_to)s) AS max_eligible "
+    "FROM silver.stg_shopee_order_item_snapshots"
+)
+SQL_MAX_DATE_ML_SOURCE = (
+    "SELECT MAX(date_created::date) AS max_global, "
+    "MAX(date_created::date) FILTER (WHERE date_created::date <= %(date_to)s) AS max_eligible "
+    "FROM raw.ml_orders WHERE status IN ('paid', 'cancelled')"
+)
 
 
-def _shopee_incremental_select(min_date: date) -> str:
+def _shopee_incremental_select(min_date: date, date_to: date) -> str:
     """SELECT puro (sem INSERT) das linhas de staging Shopee, restrito a
-    `order_date > min_date`. Mesma lógica de dedup/UF/GMV de
-    SQL_INSERT_SHOPEE_STAGING — revisar as duas juntas se uma mudar."""
+    `min_date < order_date <= date_to`. Mesma lógica de dedup/UF/GMV de
+    SQL_INSERT_SHOPEE_STAGING — revisar as duas juntas se uma mudar.
+
+    Gate DQ-D2: `date_to` é OBRIGATÓRIO e posicional. Deixá-lo opcional
+    permitiria que um chamador futuro esquecesse o teto e voltasse à fronteira
+    superior aberta — silenciosamente, porque o SQL continuaria válido. Sem
+    default, o esquecimento é um TypeError na chamada."""
     min_date_literal = min_date.isoformat()
+    date_to_literal = date_to.isoformat()
     return f"""
     WITH shopee_winning_file AS (
         SELECT DISTINCT ON (brand, order_id) brand, order_id, file_id
@@ -641,6 +680,7 @@ def _shopee_incremental_select(min_date: date) -> str:
         JOIN shopee_brand_loja bl ON bl.brand = o.brand
         LEFT JOIN shopee_uf_map m ON m.delivery_state = o.delivery_state
         WHERE o.order_date > '{min_date_literal}'::date
+          AND o.order_date <= '{date_to_literal}'::date
     )
     SELECT
         date, marketplace_id, loja_id, uf,
@@ -662,10 +702,14 @@ def _shopee_incremental_select(min_date: date) -> str:
     """
 
 
-def _ml_incremental_select(min_date: date) -> str:
+def _ml_incremental_select(min_date: date, date_to: date) -> str:
     """SELECT puro (sem INSERT) das linhas de staging ML, restrito a
-    `order_date > min_date`. Mesma lógica de SQL_INSERT_ML_STAGING."""
+    `min_date < order_date <= date_to`. Mesma lógica de SQL_INSERT_ML_STAGING.
+
+    Gate DQ-D2: `date_to` é OBRIGATÓRIO e posicional — ver
+    `_shopee_incremental_select`."""
     min_date_literal = min_date.isoformat()
+    date_to_literal = date_to.isoformat()
     return f"""
     WITH ml_orders AS (
         SELECT brand, order_id, status, shipping_id, total_amount,
@@ -673,6 +717,7 @@ def _ml_incremental_select(min_date: date) -> str:
         FROM raw.ml_orders
         WHERE status IN ('paid', 'cancelled')
           AND date_created::date > '{min_date_literal}'::date
+          AND date_created::date <= '{date_to_literal}'::date
     ),
     ml_shipments AS (
         SELECT brand, shipment_id, receiver_state FROM raw.ml_shipments
@@ -720,11 +765,24 @@ def _ml_incremental_select(min_date: date) -> str:
     """
 
 
-def _shopee_gmv_source_recalc_incremental(min_date: date) -> str:
+def _shopee_gmv_source_recalc_incremental(min_date: date, date_to: date) -> str:
     """Reconciliação de GMV Shopee escopada à MESMA janela incremental do
-    staging (`order_date > min_date`) — nunca a fonte inteira (que sempre
-    divergiria do staging incremental, que só tem as linhas novas)."""
+    staging — nunca a fonte inteira (que sempre divergiria do staging
+    incremental, que só tem as linhas novas).
+
+    JANELA, IDÊNTICA À DO STAGING  (Gate DQ-D2-R2)
+    ----------------------------------------------
+        min_date < order_date <= date_to
+
+    O piso é exclusivo e o teto é INCLUSIVO, exatamente como em
+    `_shopee_incremental_select`. `date_to` é OBRIGATÓRIO e sem default de
+    propósito: antes deste gate esta consulta tinha fronteira superior ABERTA
+    enquanto o staging já era limitado pelo teto. Com D0 na fonte — o cenário
+    que motivou o teto — o staging ia até D−1 e este total incluía D0, a
+    comparação acusava divergência FALSA e a carga fazia rollback. Um default
+    aqui permitiria a volta silenciosa da fronteira aberta."""
     min_date_literal = min_date.isoformat()
+    date_to_literal = date_to.isoformat()
     return f"""
     WITH shopee_winning_file AS (
         SELECT DISTINCT ON (brand, order_id) brand, order_id, file_id
@@ -742,15 +800,27 @@ def _shopee_gmv_source_recalc_incremental(min_date: date) -> str:
     SELECT COALESCE(SUM(CASE WHEN order_status NOT ILIKE '%cancel%' THEN order_amount ELSE 0 END), 0)
     FROM shopee_per_order
     WHERE order_date > '{min_date_literal}'::date
+      AND order_date <= '{date_to_literal}'::date
     """
 
 
-def _ml_gmv_source_recalc_incremental(min_date: date) -> str:
-    """Reconciliação de GMV ML escopada à mesma janela incremental."""
+def _ml_gmv_source_recalc_incremental(min_date: date, date_to: date) -> str:
+    """Reconciliação de GMV ML escopada à MESMA janela incremental do staging.
+
+    JANELA, IDÊNTICA À DO STAGING  (Gate DQ-D2-R2)
+    ----------------------------------------------
+        min_date < date_created::date <= date_to
+
+    Piso exclusivo, teto INCLUSIVO — igual a `_ml_incremental_select`.
+    `date_to` é OBRIGATÓRIO e sem default: ver a mesma justificativa em
+    `_shopee_gmv_source_recalc_incremental`. A população elegível continua
+    sendo exclusivamente `status = 'paid'`, inalterada por este gate."""
     min_date_literal = min_date.isoformat()
+    date_to_literal = date_to.isoformat()
     return (
         "SELECT COALESCE(SUM(total_amount), 0) FROM raw.ml_orders "
-        f"WHERE status = 'paid' AND date_created::date > '{min_date_literal}'::date"
+        f"WHERE status = 'paid' AND date_created::date > '{min_date_literal}'::date "
+        f"AND date_created::date <= '{date_to_literal}'::date"
     )
 
 
@@ -764,14 +834,87 @@ _SUPPORTED_MARKETPLACES = (
 )
 
 
-def diagnose_incremental_load(read_url: str) -> DiagnoseReport:
+class IncrementalCeilingError(ValueError):
+    """`date_to` acima de D-1 no incremental. Erro do CHAMADOR, nao da fonte.
+
+    Distinto de `InvalidWindowError`, que pertence aos modos de janela Shopee e
+    aceita qualquer `date_to <= hoje` — inclusive D0. Este teto e' mais estrito
+    de proposito: o incremental alimenta a Torre, e a Torre nao publica o dia
+    corrente.
+    """
+
+
+def _e_incremental(args) -> bool:
+    """A execucao vai cair no incremental?
+
+    `--incremental` e' flag explicita, mas o dispatch de `main()` tambem cai no
+    incremental quando NENHUM outro modo foi escolhido. As duas formas precisam
+    aceitar `--date-to`, senao `--date-to` sozinho (sem `--incremental`) seria
+    recusado apesar de ser exatamente a execucao que o teto governa.
+    """
+    outros = (args.diagnose, args.diagnose_shopee_window,
+              args.refresh_shopee_window, args.restore_shopee_window,
+              args.validate_shopee_window_write_path)
+    return bool(getattr(args, "incremental", False)) or not any(outros)
+
+
+def resolve_incremental_date_to(date_to: Optional[date] = None,
+                                agora: Optional[datetime] = None) -> date:
+    """Teto INCLUSIVO da carga incremental. Default = D-1 em America/Sao_Paulo.
+
+    Gate DQ-D2. Antes disto o incremental nao tinha teto algum: os
+    `incremental_select` filtravam apenas `date > max_date_gold`, com fronteira
+    superior ABERTA. Medido em 08/09/2026, `gold.ml_gestao_diaria` alcancava
+    08/09 e a carga teria publicado o dia corrente parcial em
+    `gold.marketplace_region_daily`.
+
+    O default vem de `last_closed_date()` — o MESMO calendario operacional que
+    ML, TikTok e Shopee Daily ja usam, em America/Sao_Paulo. Nao e'
+    `date.today()`: entre 21h e 00h BRT o UTC ja virou o dia, e o processo roda
+    em UTC.
+
+    Recusa `date_to > D-1` em vez de rebaixar em silencio: quem pediu D0 pediu
+    algo que o contrato da Torre nao publica, e receber D-1 de volta sem aviso
+    faria a resposta mentir sobre a pergunta.
+    """
+    fechado = last_closed_date(agora)
+    if date_to is None:
+        return fechado
+    # `type(...) is not date` e nao `isinstance`: `datetime` HERDA de `date`, e
+    # um `datetime` passaria o isinstance carregando hora e fuso para dentro de
+    # uma comparacao de dia fechado. O contrato desta funcao e `date` exato.
+    # A mensagem nao ecoa o valor recebido - so o nome do tipo.
+    if type(date_to) is not date:
+        raise IncrementalCeilingError(
+            "date_to do incremental precisa ser um datetime.date exato "
+            "(YYYY-MM-DD); recebido "
+            f"{type(date_to).__name__}. datetime nao e aceito: hora e fuso "
+            "nao tem significado num teto de dia fechado."
+        )
+    if date_to > fechado:
+        raise IncrementalCeilingError(
+            f"date_to ({date_to.isoformat()}) e' posterior ao ultimo dia fechado "
+            f"({fechado.isoformat()}) em America/Sao_Paulo. A Gold regional nao "
+            f"publica o dia corrente nem o futuro."
+        )
+    return date_to
+
+
+def diagnose_incremental_load(read_url: str,
+                              date_to: Optional[date] = None) -> DiagnoseReport:
     """Somente leitura — NUNCA abre conexão de escrita, nunca cria staging,
     nunca insere. Sessão explicitamente `readonly=True` (mesmo padrão de
     `write_conn._connect_readonly`), então mesmo um bug aqui não conseguiria
     escrever. Para cada marketplace suportado, calcula o `MAX(date)` já
     carregado em `gold.marketplace_region_daily` vs. o `MAX(date)`
     disponível na fonte, e uma estimativa de quantas linhas de grão
-    (date x marketplace x loja x uf) a carga incremental inseriria."""
+    (date x marketplace x loja x uf) a carga incremental inseriria.
+
+    Gate DQ-D2: aplica o MESMO teto da carga, para que o diagnose responda
+    sobre a janela que seria realmente publicada. Um diagnose sem teto diria
+    `will_update=True` para uma fonte que so' tem D0 — e a carga, com teto,
+    encontraria staging vazio."""
+    teto = resolve_incremental_date_to(date_to)
     conn = psycopg2.connect(read_url, connect_timeout=15)
     conn.set_session(readonly=True, autocommit=True)
     try:
@@ -781,21 +924,28 @@ def diagnose_incremental_load(read_url: str) -> DiagnoseReport:
 
             marketplaces: list[MarketplaceFreshness] = []
             for marketplace, marketplace_id, max_date_source_sql, incremental_select_fn in _SUPPORTED_MARKETPLACES:
-                cur.execute(max_date_source_sql)
-                (max_date_source,) = cur.fetchone()
+                cur.execute(max_date_source_sql, {"date_to": teto})
+                max_date_source_global, max_date_source_eligible = cur.fetchone()
                 max_date_gold = max_date_gold_by_mkt.get(marketplace_id)
 
+                # Decide SEMPRE pelo elegivel, medido pelo banco. O global fica
+                # no relatorio para diferenciar "fonte parada" de "fonte cheia
+                # de dia aberto".
                 estimated_new_rows = 0
-                will_update = max_date_source is not None and (max_date_gold is None or max_date_source > max_date_gold)
+                will_update = max_date_source_eligible is not None and (
+                    max_date_gold is None or max_date_source_eligible > max_date_gold
+                )
                 if will_update:
                     min_date = max_date_gold or date.min
-                    cur.execute(_wrap_count(incremental_select_fn(min_date)))
+                    cur.execute(_wrap_count(incremental_select_fn(min_date, teto)))
                     (estimated_new_rows,) = cur.fetchone()
                     will_update = estimated_new_rows > 0
 
                 marketplaces.append(MarketplaceFreshness(
                     marketplace=marketplace, marketplace_id=marketplace_id,
-                    max_date_gold=max_date_gold, max_date_source=max_date_source,
+                    max_date_gold=max_date_gold,
+                    max_date_source_global=max_date_source_global,
+                    max_date_source_eligible=max_date_source_eligible,
                     estimated_new_rows=estimated_new_rows, will_update=will_update,
                 ))
     finally:
@@ -804,7 +954,8 @@ def diagnose_incremental_load(read_url: str) -> DiagnoseReport:
     return DiagnoseReport(marketplaces=marketplaces, any_update_needed=any(m.will_update for m in marketplaces))
 
 
-def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
+def execute_incremental_load(write_url: str,
+                             date_to: Optional[date] = None) -> IncrementalLoadResult:
     """Carga incremental (Gate 6C): para cada marketplace com dado novo na
     fonte, insere SOMENTE as linhas novas (`date` > `MAX(date)` já
     carregado para aquele marketplace). Um marketplace sem novidade (ex.:
@@ -817,7 +968,20 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
     marketplaces efetivamente incluídos nesta rodada), validação pós-
     insert (zero TikTok), commit só no final, ROLLBACK completo em
     qualquer exceção, sem retry automático. NUNCA usa TRUNCATE/DELETE/
-    UPDATE — só INSERT das linhas novas."""
+    UPDATE — só INSERT das linhas novas.
+
+    TETO SUPERIOR  (Gate DQ-D2)
+    ---------------------------
+    `date_to` é INCLUSIVO e o default é D-1 em America/Sao_Paulo. Antes deste
+    gate a fronteira superior era ABERTA: com `raw.ml_orders` alcançando o dia
+    corrente, a carga publicava D0 parcial na Gold regional.
+
+    Como esta carga é APPEND-ONLY (só INSERT das linhas acima do watermark),
+    o teto não precisa de DELETE escopado: nada fora da janela é tocado porque
+    nada fora da janela é escrito. E a reexecução é idempotente por
+    construção — na segunda vez `max_date_gold` já alcançou o teto e o
+    predicado de novidade dá `no_op`."""
+    teto = resolve_incremental_date_to(date_to)
     conn = psycopg2.connect(write_url, connect_timeout=15)
     conn.autocommit = False
     try:
@@ -837,23 +1001,36 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
                 to_load: list[tuple[str, str]] = []
                 min_dates: dict[str, date] = {}
                 for marketplace, marketplace_id, max_date_source_sql, incremental_select_fn in _SUPPORTED_MARKETPLACES:
-                    cur.execute(max_date_source_sql)
-                    (max_date_source,) = cur.fetchone()
+                    cur.execute(max_date_source_sql, {"date_to": teto})
+                    _max_global, max_date_source_eligible = cur.fetchone()
                     min_date = max_date_gold_by_mkt.get(marketplace_id) or date.min
-                    if max_date_source is not None and max_date_source > min_date:
+                    # Comparar com o MAX cru da fonte faria um marketplace que
+                    # so avancou em D0 entrar em `to_load`, produzir staging
+                    # vazia e levantar `NothingToLoadError` - transformando
+                    # "nada novo abaixo do teto", que e a VERDADE, numa falha.
+                    #
+                    # E comparar com `min(fonte, teto)` seria pior ainda: com
+                    # lacuna na fonte, esse min() aponta um dia que nao existe.
+                    # O elegivel vem medido do banco; None significa ausencia.
+                    if (max_date_source_eligible is not None
+                            and max_date_source_eligible > min_date):
                         min_dates[marketplace] = min_date
-                        to_load.append((marketplace, incremental_select_fn(min_date)))
+                        to_load.append((marketplace, incremental_select_fn(min_date, teto)))
 
                 if not to_load:
                     conn.commit()  # nada foi alterado; só fecha a transação de leitura limpa
-                    return IncrementalLoadResult(no_op=True)
+                    return IncrementalLoadResult(no_op=True, date_to=teto)
 
                 # 1. Staging (só das linhas novas dos marketplaces com novidade)
                 cur.execute(SQL_CREATE_STAGING)
                 for _, select_sql in to_load:
                     cur.execute(f"INSERT INTO stg_marketplace_region_daily ({_STAGING_INSERT_COLUMNS}) {select_sql}")
 
-                # 2. Validações pré-insert (recalculadas, escopo incremental)
+                # 2. Validações pré-insert (recalculadas, escopo incremental).
+                # As reconciliações de GMV leem a FONTE e por isso recebem o
+                # teto explicitamente: staging e fonte precisam da MESMA janela
+                # `min_date < data <= teto`. As outras validações leem o próprio
+                # staging, que já nasce limitado pela janela.
                 cur.execute(SQL_VALIDATE_ROWCOUNT)
                 (row_count,) = cur.fetchone()
                 if row_count == 0:
@@ -882,7 +1059,8 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
                 if "shopee" in marketplaces_updated:
                     cur.execute(SQL_SHOPEE_GMV_STAGING)
                     (shopee_gmv_staging,) = cur.fetchone()
-                    cur.execute(_shopee_gmv_source_recalc_incremental(min_dates["shopee"]))
+                    cur.execute(_shopee_gmv_source_recalc_incremental(
+                        min_dates["shopee"], teto))
                     (shopee_gmv_source,) = cur.fetchone()
                     if abs(shopee_gmv_staging - shopee_gmv_source) > GMV_RECONCILIATION_TOLERANCE:
                         raise LoadValidationError(
@@ -894,7 +1072,8 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
                 if "ml" in marketplaces_updated:
                     cur.execute(SQL_ML_GMV_STAGING)
                     (ml_gmv_staging,) = cur.fetchone()
-                    cur.execute(_ml_gmv_source_recalc_incremental(min_dates["ml"]))
+                    cur.execute(_ml_gmv_source_recalc_incremental(
+                        min_dates["ml"], teto))
                     (ml_gmv_source,) = cur.fetchone()
                     if abs(ml_gmv_staging - ml_gmv_source) > GMV_RECONCILIATION_TOLERANCE:
                         raise LoadValidationError(
@@ -917,6 +1096,7 @@ def execute_incremental_load(write_url: str) -> IncrementalLoadResult:
             conn.commit()
             return IncrementalLoadResult(
                 no_op=False,
+                date_to=teto,
                 rows_inserted=rows_inserted,
                 marketplaces_updated=marketplaces_updated,
                 shopee_gmv_staging=shopee_gmv_staging,
@@ -2769,21 +2949,29 @@ def _print_write_preflight(report: write_conn.PreflightReport, label: str) -> No
             print(f"    - {reason}")
 
 
-def run_diagnose_cli() -> int:
+def run_diagnose_cli(date_to: Optional[date] = None) -> int:
     read_url = settings.datamart_url
     if not read_url:
         print("DATAMART_DATABASE_URL não configurado — diagnose abortado.", file=sys.stderr)
         return 2
     try:
-        report = diagnose_incremental_load(read_url)
+        teto = resolve_incremental_date_to(date_to)
+    except IncrementalCeilingError as exc:
+        print(f"diagnose bloqueado: {exc}", file=sys.stderr)
+        return 2
+    try:
+        report = diagnose_incremental_load(read_url, date_to=teto)
     except Exception as exc:  # noqa: BLE001
         print(f"diagnose falhou: {sanitize_error_message(exc)}", file=sys.stderr)
         return 3
 
     print("=== Diagnose Gold Regional (somente leitura) ===")
+    print(f"  teto superior INCLUSIVO: {teto.isoformat()} (D-1 America/Sao_Paulo)")
     for m in report.marketplaces:
         print(
-            f"  {m.marketplace}: max_date_gold={m.max_date_gold} max_date_source={m.max_date_source} "
+            f"  {m.marketplace}: max_date_gold={m.max_date_gold} "
+            f"max_date_source_global={m.max_date_source_global} "
+            f"max_date_source_eligible={m.max_date_source_eligible} "
             f"estimated_new_rows={m.estimated_new_rows} will_update={m.will_update}"
         )
     print(f"\nPrecisa atualizar: {report.any_update_needed}")
@@ -2844,7 +3032,19 @@ def run_diagnose_shopee_window_cli(date_from: date, date_to: date) -> int:
     return 0
 
 
-def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH, repo_root: Path = REPO_ROOT) -> int:
+def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH,
+                        repo_root: Path = REPO_ROOT,
+                        date_to: Optional[date] = None) -> int:
+    # Resolve e VALIDA o teto antes de qualquer conexao: um `date_to` em D0 nao
+    # deve nem chegar a abrir o preflight de escrita.
+    try:
+        teto = resolve_incremental_date_to(date_to)
+    except IncrementalCeilingError as exc:
+        print(f"--incremental bloqueado: {exc}", file=sys.stderr)
+        return 2
+    print(f"Teto superior INCLUSIVO desta carga: {teto.isoformat()} "
+          f"(D-1 em America/Sao_Paulo).")
+
     write_url, err = _resolve_write_url(secret_path, repo_root)
     if err:
         print(f"--incremental bloqueado: {err}", file=sys.stderr)
@@ -2857,16 +3057,26 @@ def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH, repo_root
         return 3
 
     try:
-        result = execute_incremental_load(write_url)
+        result = execute_incremental_load(write_url, date_to=teto)
     except Exception as exc:  # noqa: BLE001
         print(f"carga incremental falhou: {sanitize_error_message(exc)}", file=sys.stderr)
         return 4
 
     if result.no_op:
-        print("NO_OP: nenhum marketplace tem data nova na fonte além do que já está em gold.marketplace_region_daily.")
+        # Vazio LEGITIMO, nao falha: pode nao haver nada novo, ou o novo pode
+        # estar todo acima do teto. Os dois casos sao exito com zero linha.
+        print(
+            "NO_OP: nenhum marketplace tem data nova na fonte ATE o teto "
+            f"{result.date_to.isoformat()} além do que já está em "
+            "gold.marketplace_region_daily."
+        )
         return 0
 
-    print(f"Carga incremental OK: {result.rows_inserted} linha(s) inserida(s). Marketplaces atualizados: {result.marketplaces_updated}.")
+    print(
+        f"Carga incremental OK: {result.rows_inserted} linha(s) inserida(s) "
+        f"até {result.date_to.isoformat()} (inclusive). "
+        f"Marketplaces atualizados: {result.marketplaces_updated}."
+    )
     return 0
 
 
@@ -3186,7 +3396,15 @@ def main(argv: Optional[list[str]] = None) -> int:
              "Requer .env.gold-window-write.local. Não substitui o piloto real de --refresh-shopee-window.",
     )
     parser.add_argument("--date-from", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Início da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window/--validate-shopee-window-write-path.")
-    parser.add_argument("--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD", help="Fim da janela (inclusive) — obrigatório com --diagnose-shopee-window/--refresh-shopee-window/--validate-shopee-window-write-path.")
+    parser.add_argument(
+        "--date-to", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD",
+        help="Fim da janela (INCLUSIVE). Obrigatório com "
+             "--diagnose-shopee-window/--refresh-shopee-window/"
+             "--validate-shopee-window-write-path. OPCIONAL com --incremental e "
+             "--diagnose (Gate DQ-D2): define o teto superior da carga; omitido, "
+             "o teto é D-1 em America/Sao_Paulo. Uma data posterior a D-1 é "
+             "RECUSADA — a Gold regional não publica o dia corrente.",
+    )
     parser.add_argument(
         "--audit-path", type=Path, default=None,
         help="Caminho absoluto do .json de backup — destino (--refresh-shopee-window) ou origem "
@@ -3214,12 +3432,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.validate_shopee_window_write_path and (args.date_from is None or args.date_to is None):
         parser.error("--validate-shopee-window-write-path requer --date-from e --date-to")
 
-    if (args.date_from is not None or args.date_to is not None) and not (
-        args.diagnose_shopee_window or args.refresh_shopee_window or args.validate_shopee_window_write_path
-    ):
+    _modos_janela_shopee = (
+        args.diagnose_shopee_window or args.refresh_shopee_window
+        or args.validate_shopee_window_write_path
+    )
+    # Gate DQ-D2: `--date-to` passou a valer para `--incremental` e
+    # `--diagnose`. `--date-from` NAO: o inicio do incremental e' o watermark da
+    # Gold, nao uma escolha do chamador. Aceitar `--date-from` ali criaria uma
+    # janela MEIO aplicada — o usuario pediria um inicio que o SQL ignora.
+    if args.date_from is not None and not _modos_janela_shopee:
         parser.error(
-            "--date-from/--date-to só são válidos junto com --diagnose-shopee-window, "
-            "--refresh-shopee-window ou --validate-shopee-window-write-path"
+            "--date-from só é válido junto com --diagnose-shopee-window, "
+            "--refresh-shopee-window ou --validate-shopee-window-write-path. "
+            "Em --incremental/--diagnose o início da janela é o MAX(date) já "
+            "carregado por marketplace, não um parâmetro"
+        )
+    if args.date_to is not None and not (_modos_janela_shopee or args.diagnose
+                                         or _e_incremental(args)):
+        parser.error(
+            "--date-to só é válido junto com --incremental, --diagnose, "
+            "--diagnose-shopee-window, --refresh-shopee-window ou "
+            "--validate-shopee-window-write-path"
         )
 
     if args.audit_path is not None and not (args.refresh_shopee_window or args.restore_shopee_window):
@@ -3238,7 +3471,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # try/except, nunca uma substituta para o tratamento interno.
     try:
         if args.diagnose:
-            return run_diagnose_cli()
+            return run_diagnose_cli(args.date_to)
         if args.diagnose_shopee_window:
             return run_diagnose_shopee_window_cli(args.date_from, args.date_to)
         if args.refresh_shopee_window:
@@ -3247,7 +3480,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return run_restore_shopee_window_cli(args.audit_path, args.expected_backup_sha256)
         if args.validate_shopee_window_write_path:
             return run_validate_shopee_window_write_path_cli(args.date_from, args.date_to)
-        return run_incremental_cli()
+        return run_incremental_cli(date_to=args.date_to)
     except Exception as exc:  # noqa: BLE001
         print(f"falha inesperada e não tratada: {sanitize_error_message(exc)}", file=sys.stderr)
         return 1

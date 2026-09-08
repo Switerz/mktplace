@@ -63,7 +63,7 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 # de pipelines.ops.orchestrate, para nao dar a este modulo nenhuma
 # dependencia transitiva de subprocess) — ver
 # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-# (3600s) e o teste que trava os dois valores em sincronia. O mesmo
+# (7800s) e o teste que trava os dois valores em sincronia. O mesmo
 # EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e' reaproveitado pela TaskKey
 # shopee_manual_refresh em scripts/run_task.ps1 (orcamento interno 3780s,
 # tambem cabe com folga) — essa TaskKey nao e' agendada aqui (ver

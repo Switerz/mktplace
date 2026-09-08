@@ -13,9 +13,43 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
 
     . $script
 
-    It "conhece exatamente as duas TaskKeys desde o Gate C1 (full_daily, shopee_manual_refresh)" {
+    It "conhece exatamente as TRES TaskKeys (full_daily, serving_refresh, shopee_manual_refresh)" {
+        # Inventario FIXO de proposito, nunca "duas ou mais": uma TaskKey nova
+        # muda o que o operador pode disparar e o que compete pelo mesmo lock,
+        # e tem de passar por revisao explicita aqui.
+        #
+        # `serving_refresh` entrou no Checkpoint O1 Task 2/2 (2026-08-17) e este
+        # teste ficou fixado em duas chaves desde entao — vermelho em silencio
+        # ate o Gate DQ-D2-R.
         $known = (Get-TaskDefinitions).Keys | Sort-Object
-        ($known -join ",") | Should Be "full_daily,shopee_manual_refresh"
+        ($known -join ",") | Should Be "full_daily,serving_refresh,shopee_manual_refresh"
+    }
+
+    It "resolve serving_refresh com lock COMPARTILHADO do full_daily, timeout e modulo corretos" {
+        $inv = Resolve-TaskInvocation -TaskKey "serving_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        # Lock compartilhado e DESENHO, nao descuido: as duas TaskKeys mexem nas
+        # mesmas fontes e no mesmo destino, e compartilhar o lock torna a
+        # sobreposicao impossivel por construcao.
+        $inv.LockName | Should Be "full_daily"
+        $inv.TimeoutSeconds | Should Be 9000
+        $inv.WorkingDirectory | Should Be $repoRoot
+        ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline serving_refresh"
+    }
+
+    It "serving_refresh nao afrouxa o lock do full_daily nem passa flag insegura" {
+        $inv = Resolve-TaskInvocation -TaskKey "serving_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $fullInv = Resolve-TaskInvocation -TaskKey "full_daily" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        # MESMO lock que o full_daily (ao contrario de shopee_manual_refresh).
+        $inv.LockName | Should Be $fullInv.LockName
+        $inv.TimeoutSeconds | Should Be $fullInv.TimeoutSeconds
+        ($inv.ModuleArgs -join " ") | Should Not Match "--skip-lock"
+        ($inv.ModuleArgs -join " ") | Should Not Match "--force"
+    }
+
+    It "shopee_manual_refresh continua com lock SEPARADO das outras duas" {
+        $shopee = Resolve-TaskInvocation -TaskKey "shopee_manual_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $shopee.LockName | Should Be "shopee_manual_refresh"
+        $shopee.LockName | Should Not Be "full_daily"
     }
 
     It "resolve full_daily com lock/timeout/modulo corretos" {
@@ -308,7 +342,14 @@ Invoke-ResolvedTask -Invocation `$invocation
     It "nunca usa -SimulateStopProcessFailure em Invoke-ResolvedTask (flag e' SOMENTE para testes de run_with_lock.ps1)" {
         $source = Get-Content $script -Raw
         $invokeResolvedTaskBody = $source.Substring($source.IndexOf("function Invoke-ResolvedTask"))
-        $invokeResolvedTaskBody = $invokeResolvedTaskBody.Substring(0, $invokeResolvedTaskBody.IndexOf("`n}`n"))
+        # Recorte por REGEX multilinha, nao por IndexOf de "`n}`n": o arquivo esta
+        # em CRLF, entao a busca por LF-}-LF devolvia -1 e o Substring estourava
+        # com "comprimento nao pode ser menor que zero". Era um teste que
+        # dependia do fim de linha do checkout, nao do codigo sob teste.
+        $fecho = [regex]::Match($invokeResolvedTaskBody, "(?m)^\}\s*$")
+        if ($fecho.Success) {
+            $invokeResolvedTaskBody = $invokeResolvedTaskBody.Substring(0, $fecho.Index)
+        }
         $invokeResolvedTaskBody | Should Not Match "SimulateStopProcessFailure"
     }
 }

@@ -75,8 +75,8 @@ function Get-TaskDefinitions {
     # TimeoutSeconds=9000 (2h30) tem que ficar MAIOR que a soma dos
     # timeouts individuais dos steps internos de cada pipeline (ver
     # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    # = 6600s desde o Checkpoint O1 Task 2/2, que somou 3000s dos tres steps
-    # de serving aos 3600s do Gate C1;
+    # = 7800s, que somou 3000s dos tres steps de serving ao orcamento
+    # anterior; margem de 1200s (15,38%) sobre os 9000s do lock externo;
     # SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3780s; e
     # SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3000s), com
     # margem: senao este timeout EXTERNO mataria o processo pai antes que
