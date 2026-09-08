@@ -579,13 +579,15 @@ test("PF1 escopo: as funcoes sem cache continuam sem cache e fetchMonthly segue 
   assert.ok(/withCache\(`monthly:\$\{marketplace\}`/.test(corpoDe("fetchMonthly")), "fetchMonthly intocada, mesmo sem consumidor");
 });
 
-test("PF1 escopo: as 24 assinaturas publicas de fetchX nao mudaram", () => {
+test("PF1 escopo: as 25 assinaturas publicas de fetchX nao mudaram", () => {
   const assinaturas = [...CLIENT_SRC.matchAll(/^export (?:async )?function (fetch\w+)/gm)].map((m) => m[1]);
-  // 23 -> 24 pelo Gate PMA-3, que acrescentou `fetchMonitoramentoPreco`. O pino
-  // literal e' proposital: forca revisao consciente a cada funcao nova, em vez
-  // de aceitar qualquer superficie publica em silencio.
-  assert.equal(assinaturas.length, 24, "nenhuma funcao publica foi adicionada ou removida");
+  // 23 -> 24 pelo Gate PMA-3, que acrescentou `fetchMonitoramentoPreco`;
+  // 24 -> 25 pelo Gate AVH-4B-S Task 2/2, que acrescentou `fetchAvoeSnapshot`.
+  // O pino literal e' proposital: forca revisao consciente a cada funcao nova,
+  // em vez de aceitar qualquer superficie publica em silencio.
+  assert.equal(assinaturas.length, 25, "nenhuma funcao publica foi adicionada ou removida");
   assert.ok(assinaturas.includes("fetchMonitoramentoPreco"));
+  assert.ok(assinaturas.includes("fetchAvoeSnapshot"));
   // nenhuma delas passou a receber parametro de cache/refresh
   for (const nome of assinaturas) {
     const i = CLIENT_SRC.indexOf(`export function ${nome}`) >= 0

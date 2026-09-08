@@ -2100,3 +2100,41 @@ export async function fetchMonitoramentoPreco(
   }
   return (await res.json()) as MonitoramentoPrecoResponse;
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot manual da Avoe (Gate AVH-4B-S)
+// ---------------------------------------------------------------------------
+// Tipos, textos e formatadores vivem em `avoe-snapshot-contract.ts` (sem
+// dependencias, testavel por `node --test`). Reexportados aqui para que os
+// consumidores continuem importando de um lugar so.
+export * from "./avoe-snapshot-contract";
+import {
+  AvoeSnapshotError,
+  type AvoeSnapshotResponse,
+} from "./avoe-snapshot-contract";
+
+/**
+ * Busca o ultimo snapshot valido da Avoe. LEVANTA em falha, de proposito.
+ *
+ * `apiFetch` devolve `null` em erro, o que colapsaria "API fora" com "sem
+ * captura". Aqui os dois estados sao diferentes e a tela precisa separa-los:
+ * sem captura e' HTTP 200 com `status = 'unavailable'`; API fora e' ERROR.
+ * Nunca ha fallback em mock.
+ *
+ * Sem parametro: o contrato do endpoint e' "a ultima captura valida".
+ */
+export async function fetchAvoeSnapshot(
+  signal?: AbortSignal,
+): Promise<AvoeSnapshotResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/v1/performance/avoe-snapshot`, { signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new AvoeSnapshotError("Nao foi possivel contatar a API.", null);
+  }
+  if (!res.ok) {
+    throw new AvoeSnapshotError(`A API respondeu ${res.status}.`, res.status);
+  }
+  return (await res.json()) as AvoeSnapshotResponse;
+}

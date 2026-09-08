@@ -2,7 +2,7 @@
 
 Gate AVH-4A · corrigido no AVH-4A-R · aplicado no AVH-4B-P · corrigido no
 AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2, AVH-4A-H1-R3 e AVH-4A-H1-D1 · servido em
-leitura no AVH-4B-S Task 1/2 · 2026-09-08
+leitura no AVH-4B-S Task 1/2 · exibido no AVH-4B-S Task 2/2 · 2026-09-08
 
 > **Estado por etapa — não usar a frase genérica "AVH-4B não iniciado".**
 >
@@ -12,7 +12,8 @@ leitura no AVH-4B-S Task 1/2 · 2026-09-08
 > | migration `015` no Neon | **APLICADA** |
 > | snapshot `sync_run_id = 285` (7 metas + 24 canais) | **PRESERVADO, intocado** |
 > | **AVH-4B-S Task 1/2** — contrato, serviço, rota e testes | **CONCLUÍDO** |
-> | **AVH-4B-S Task 2/2** — tela e QA de navegador | **NÃO INICIADO** |
+> | **AVH-4B-S Task 2/2** — página e QA de navegador | **CONCLUÍDO** |
+> | deploy do backend no Render | **PENDENTE — ação do proprietário** |
 >
 > A auditoria histórica do run 285 tem `rows_extracted = 31` e
 > `rows_loaded = 31`, e **não será reescrita**. A população original lida
@@ -24,7 +25,10 @@ leitura no AVH-4B-S Task 1/2 · 2026-09-08
 > **AVH-4B-S Task 1/2** existe **uma** rota de leitura consumindo estas tabelas
 > — `GET /api/v1/performance/avoe-snapshot`, descrita em §13. Ela é aditiva e
 > read-only: nenhum contrato existente mudou, e nenhuma métrica da Avoe entra
-> em `/overview`, `/canais` ou qualquer outro endpoint. **Não há tela.**
+> em `/overview`, `/canais` ou qualquer outro endpoint. Desde a **Task 2/2**
+> existe também **uma** página que a consome — `/referencias-externas/avoe`,
+> descrita em §14 —, em grupo de navegação próprio e sem número nenhum da Avoe
+> nas telas oficiais.
 >
 > Três rodadas de hotfix, todas **sem tocar nos dados publicados**: o
 > **AVH-4A-H1** corrigiu o caminho de commit indeterminado, a mensagem após
@@ -777,3 +781,157 @@ e comparado com `SELECT` diretos:
 - nulos e zeros preservados exatamente como no banco;
 - ao final: sessão ainda read-only, zero lock exclusivo em `marts`, contagens
   inalteradas (7 e 24) e um único run desta fonte. **Zero escrita.**
+
+
+## 14. Página de referências externas — AVH-4B-S Task 2/2
+
+**Estado: CONCLUÍDO.** Página read-only, sem migration, sem snapshot, sem
+automação e sem escrita em banco. **O deploy do backend no Render é ação do
+proprietário** (§14.9).
+
+### 14.1 Rota e navegação
+
+```
+/referencias-externas/avoe
+```
+
+Grupo de navegação **próprio**, `Referências externas`, com um item (`Avoe
+Hub`). Não é um item dentro de Cockpits nem de Inteligência: a separação na
+navegação é a primeira barreira contra alguém ler estes números como oficiais.
+Os números **não** aparecem em `/canais` nem na Gerencial.
+
+Arquivos: [apps/web/app/referencias-externas/avoe/page.tsx](../apps/web/app/referencias-externas/avoe/page.tsx),
+[apps/web/src/lib/avoe-snapshot-contract.ts](../apps/web/src/lib/avoe-snapshot-contract.ts),
+`fetchAvoeSnapshot` em [apps/web/src/lib/api-client.ts](../apps/web/src/lib/api-client.ts),
+grupo em [apps/web/src/components/shell/nav-config.ts](../apps/web/src/components/shell/nav-config.ts).
+
+### 14.2 Quatro blocos
+
+1. **Proveniência** — fonte Avoe Hub com selo permanente "Fonte externa e
+   manual", `captured_at` em horário de São Paulo, idade da captura,
+   `sync_run_id`, status da auditoria, o vínculo temporal declarado, o
+   `snapshot_id` rotulado como hash de conteúdo, as contagens de metas e canais,
+   e a moeda com o estado "assumida (BRL), não confirmada".
+2. **Avisos** — lista simples, **sem acordeão e sem tooltip**. Começa pelos
+   cinco textos que a tela é obrigada a dizer (não é KPI, sem automação,
+   definição não confirmada, moeda assumida, sem realizado) e acrescenta todos
+   os `warnings` e `notes` da API que ainda não estejam cobertos, deduplicados
+   por texto normalizado. Um aviso novo do backend aparece mesmo que esta versão
+   da tela não o conheça. Abaixo, as **notas de cobertura** documentadas no §6:
+   Denavita/GoCase como referência externa com atingimento não calculável, e a
+   cobertura parcial da Ápice.
+3. **Metas** — competência, marca, meta, moeda com selo `assumida` e a data de
+   registro na origem.
+4. **Canais adicionais** — competência, marca, canal com selo `proxy`, **"Valor
+   informado pela Avoe"**, dias cobertos, cobertura (`Mês parcial`/`Mês
+   completo`) e a janela de datas.
+
+### 14.3 Filtros
+
+Três filtros **client-side**, sobre as linhas já recebidas: competência, marca
+e canal. O de canal só existe na tabela de canais — metas não têm canal, e um
+filtro de canal reduzir a lista de metas seria mentira.
+
+Nenhuma nova chamada à API e nenhuma agregação entre linhas: o filtro devolve
+um subconjunto das mesmas referências de objeto, na ordem recebida. Provado por
+teste (contagem de requisições = 1 antes e depois de filtrar) e no QA.
+
+### 14.4 Estados
+
+| Estado | O que a tela mostra |
+|---|---|
+| `loading` | `aria-busy` + `aria-live`, texto "Carregando o último snapshot…", nenhuma tabela |
+| `available` | os quatro blocos completos |
+| `unavailable` | HTTP **200**, o `unavailable_reason` em texto humano, **nenhuma tabela e nenhum filtro**, e a frase "ausência de captura não é o mesmo que valores iguais a zero" |
+| `error` | `role="alert"`, texto factual ("a consulta é somente leitura e nada foi alterado"), botão "Tentar novamente" de 44px, **sem** código HTTP e **sem** detalhe técnico |
+| listas vazias após filtro | "Nenhuma linha para os filtros escolhidos" — estado de filtro, não de indisponibilidade |
+| captura antiga | a partir de **30 dias**, aviso próprio no topo da proveniência; a tabela continua sendo exibida |
+
+`unavailable` vem do **contrato** (`meta.status`), não de lista vazia: um 200
+com `available` e arrays vazios continua `available`, porque é dado real vazio.
+
+### 14.5 null versus zero
+
+`null` → **"Não informado"**, com marcador próprio no DOM. Zero informado →
+**"R$ 0,00"**. Nenhum caminho converte um no outro, e não existe `?? 0` nem
+`|| 0` na página — há teste que falha se aparecer. O mesmo vale para
+`brand_key`, `currency_warning` e `source_recorded_at`.
+
+Valores monetários saem **integrais, com centavos**, sem abreviação em K/M: o
+`fmtBrl` do projeto abrevia acima de mil, e isso apagaria o centavo que a
+reconciliação com o snapshot usa.
+
+### 14.6 Nenhum total, atingimento, margem ou comparação
+
+Não existe função de soma, `reduce`, `calcMoM`, total, subtotal, `tfoot`, linha
+de total, atingimento, margem, variação ou comparação — nem no contrato do
+frontend, nem na página. A tabela de canais fecha com a frase que explica a
+ausência: somar estes valores entre si ou com o GMV oficial produziria um
+número que não existe em fonte nenhuma.
+
+O valor de canal se chama **"Valor informado pela Avoe"** e nunca GMV, receita,
+venda, resultado, faturamento ou realizado. Os termos aparecem na tela apenas
+dentro das frases que **negam** a existência deles — e o QA valida isso nos
+cabeçalhos, não no texto corrido, justamente para não apagar a negação.
+
+### 14.7 A UI só apresenta
+
+Nenhuma regra do backend é reimplementada. A página não conhece
+`max(captured_at)`, `started_at`, `finished_at`, `import_run_id`,
+`source_file` nem `source_file_hash` — há teste que falha se algum aparecer. Os
+tipos do contrato do frontend foram conferidos campo a campo contra o OpenAPI
+local.
+
+### 14.8 Validação executada
+
+| # | Passo | Resultado |
+|---|---|---|
+| 1 | `node --test tests/avoe-snapshot.test.ts` | **46 passaram** |
+| 2 | `npm test` (suíte web completa) | **1.505 passaram, 0 falharam** |
+| 3 | `npm run typecheck` | sem erro |
+| 4 | `npm run build` | compilou; a rota sai como estática, 4 kB |
+| 5 | QA de navegador (desktop 1440, tablet 768, mobile 390) | **216 verificações, 0 falhas** |
+| 6 | reconciliação da API com o snapshot 285 | aprovada |
+
+Dois pinos literais foram atualizados **conscientemente**, como o precedente do
+Gate PMA-3 exige: a lista de grupos e rotas de `nav-config.test.ts` e a
+contagem de `fetchX` públicas em `request-freshness.test.ts` (24 → 25).
+
+QA cobriu: navegação, filtros nos três viewports, rolagem interna das tabelas,
+**zero overflow horizontal da página**, texto ≥ 12px e alvos ≥ 44×44 **no
+conteúdo da página**, teclado e foco, os cinco estados, null versus zero,
+legibilidade dos avisos, moeda assumida, ausência de total consolidado e zero
+erro de console ou hidratação.
+
+O estado `available` usou a **API real em leitura**; `unavailable`, `error`,
+captura antiga e o par null/zero usaram **interceptação de rota no navegador** —
+o banco não foi tocado nesses casos.
+
+**Dívida pré-existente registrada, fora desta tela:** a navegação do shell tem
+14 textos abaixo de 12px e 12 alvos abaixo de 44px, medidos em `/canais`, que
+este gate não alterou. Não foi introduzida aqui e não foi corrigida aqui.
+
+### 14.9 Como o proprietário publica o backend no Render
+
+O frontend já está publicado pelo pipeline normal. O **backend** precisa de uma
+ação sua, porque este gate não faz deploy:
+
+1. abra o serviço da **API** no dashboard do Render (o mesmo que serve
+   `/api/v1/performance/*`);
+2. em **Manual Deploy**, escolha **Deploy latest commit** e confirme que o SHA
+   é o do commit desta frente ou posterior;
+3. **não é necessário** rodar migration: a `015` já está aplicada no Neon desde
+   o AVH-4B-P, e este gate não traz nenhuma;
+4. **não é necessária** variável de ambiente nova: o endpoint usa a
+   `DATABASE_URL` que já existe;
+5. quando o deploy terminar, valide com
+   `GET /api/v1/performance/avoe-snapshot` — a resposta esperada é HTTP 200 com
+   `meta.status = "available"`, `sync_run_id = 285`, `targets_count = 7` e
+   `channel_rows_count = 24`;
+6. abra `/referencias-externas/avoe` na Torre. Se a página mostrar o estado de
+   erro, o deploy da API ainda não propagou; se mostrar `unavailable`, a API
+   está no ar e o que falta é dado — nesse caso o `unavailable_reason` na tela
+   diz o motivo.
+
+Enquanto o deploy não acontecer, a página mostra o estado de erro em produção,
+com o texto factual e o botão de nova tentativa. Nenhuma outra rota é afetada.

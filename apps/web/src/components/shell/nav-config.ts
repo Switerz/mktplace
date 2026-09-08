@@ -51,6 +51,14 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "Operações",
     pages: [{ href: "/operacoes", label: "Criadores + Alertas" }],
   },
+  // Gate AVH-4B-S — grupo PROPRIO, e nao um item dentro de Cockpits ou
+  // Inteligência, de proposito: o que vive aqui e' dado de terceiro, com carga
+  // manual, que nao e' KPI da Torre. A separacao na navegacao e' a primeira
+  // barreira contra alguem ler estes numeros como oficiais.
+  {
+    label: "Referências externas",
+    pages: [{ href: "/referencias-externas/avoe", label: "Avoe Hub" }],
+  },
 ];
 
 /**

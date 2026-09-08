@@ -5,10 +5,18 @@ import assert from "node:assert/strict";
 import { NAV_SECTIONS, isNavItemActive, getRouteTitle } from "../src/components/shell/nav-config.ts";
 import { buildPreservedQuery, hrefForPage } from "../src/lib/filters/nav-links.ts";
 
-test("NAV_SECTIONS mantem os 4 grupos existentes, na ordem original", () => {
+test("NAV_SECTIONS mantem os grupos existentes, na ordem original", () => {
   assert.deepEqual(
     NAV_SECTIONS.map((s) => s.label),
-    ["Cockpits", "Pedidos", "Inteligência", "Operações"],
+    [
+      "Cockpits",
+      "Pedidos",
+      "Inteligência",
+      "Operações",
+      // Gate AVH-4B-S — unico grupo acrescentado desde o Gate U1. Fica no fim
+      // e isolado de proposito: dado de terceiro, carga manual, nao e' KPI.
+      "Referências externas",
+    ],
   );
 });
 
@@ -26,10 +34,13 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     "/pedidos/tiktok",
     "/pedidos/ml",
     "/inteligencia",
-    // Gate PMA-3 — unica rota acrescentada desde o Gate U1. Nenhuma removida
-    // nem renomeada; o pino literal continua exigindo revisao consciente.
+    // Gate PMA-3 — primeira rota acrescentada desde o Gate U1. Nenhuma
+    // removida nem renomeada; o pino literal continua exigindo revisao
+    // consciente.
     "/monitoramento-preco",
     "/operacoes",
+    // Gate AVH-4B-S Task 2/2 — referencias externas da Avoe.
+    "/referencias-externas/avoe",
   ]);
 });
 
