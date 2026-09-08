@@ -5,8 +5,17 @@ A dependencia que bloqueava o PMA-1A-R foi resolvida: `origin/main` avancou para
 `down_revision="012"`). Integrada por fast-forward, a `014` deste gate pousa
 sobre ela sem ramificar.
 
+HEAD GLOBAL x REVISAO DO PMA (Gate AVH-4A)
+------------------------------------------
+A migration do PMA continua sendo a `014` — nada aqui foi renumerado. O que
+mudou e' o head GLOBAL da arvore Alembic, que avancou de `014` para `015` pela
+frente Avoe (`015_create_avoe_proxy_snapshots.py`, `down_revision="014"`). Por
+isso `HEAD_ESPERADO` vale "015" enquanto `REVISAO_PMA` permanece "014": o
+primeiro pina o topo da arvore, o segundo pina a identidade desta frente. A
+cadeia segue LINEAR e sem branch.
+
 Estes testes travam quatro coisas:
-  1. a cadeia continua LINEAR com head unico em `014`;
+  1. a cadeia continua LINEAR com head unico, hoje em `015`;
   2. a `013` da UE8 NAO foi alterada por esta frente;
   3. a `014` cria exatamente os dois objetos do serving de precos, e o downgrade
      remove exatamente os mesmos, na ordem inversa;
@@ -25,7 +34,7 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 
 #: Head esperado. Pino LITERAL, como em `test_s3_migrations.py`: forca revisao
 #: consciente a cada migration nova, em vez de aceitar qualquer head.
-HEAD_ESPERADO = "014"
+HEAD_ESPERADO = "015"
 
 #: A migration deste gate.
 REVISAO_PMA = "014"

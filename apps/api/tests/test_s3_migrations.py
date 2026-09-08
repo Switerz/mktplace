@@ -140,13 +140,16 @@ def test_m02_head_unico_em_todas_as_revisoes():
     heads = [r for r in revisoes if r not in filhos]
     # Head avancado de 011 para 012 pelo Gate UE2-B, que acrescentou
     # marts.fact_tiktok_affiliate_cost_order_monthly; de 012 para 013 pelo
-    # Gate UE8-I1, que acrescentou marts.fact_tiktok_order_discounts_daily; e de
-    # 013 para 014 pelo Gate PMA-1B, que acrescentou
-    # marts.fact_marketplace_listing_price_daily e
-    # marts.fact_suggested_price_reference_snapshot. O pino literal e'
+    # Gate UE8-I1, que acrescentou marts.fact_tiktok_order_discounts_daily; de
+    # 013 para 014 pelo Gate PMA-1B, que criou as tabelas do PMA
+    # (marts.fact_marketplace_listing_price_daily e
+    # marts.fact_suggested_price_reference_snapshot); e de 014 para 015 pelo
+    # Gate AVH-4A, que cria as duas tabelas de snapshots proxy da Avoe
+    # (marts.proxy_avoe_brand_monthly_target_snapshot e
+    # marts.proxy_avoe_extra_channel_monthly_snapshot). O pino literal e'
     # proposital: forca uma revisao consciente a cada migration nova, em vez de
     # aceitar qualquer head em silencio.
-    assert heads == ["014"], f"head deveria ser unico e igual a 014, veio {heads}"
+    assert heads == ["015"], f"head deveria ser unico e igual a 015, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
