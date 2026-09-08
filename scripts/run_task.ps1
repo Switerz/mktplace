@@ -72,18 +72,24 @@ function Get-TaskDefinitions {
     # independentes de proposito (uma automatica, outra manual), nao
     # amarradas uma a outra.
     #
-    # TimeoutSeconds=9000 (2h30) tem que ficar MAIOR que a soma dos
+    # TimeoutSeconds=9600 (2h40) tem que ficar MAIOR que a soma dos
     # timeouts individuais dos steps internos de cada pipeline (ver
     # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    # = 7800s, que somou 3000s dos tres steps de serving ao orcamento
-    # anterior; margem de 1200s (15,38%) sobre os 9000s do lock externo;
+    # = 8100s desde o Gate UE8-I4 Task 1/2, que somou 300s do step de
+    # descontos do pedido TikTok; margem de 1500s (18,5%);
     # SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3780s; e
     # SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = 3000s), com
     # margem: senao este timeout EXTERNO mataria o processo pai antes que
     # os timeouts internos por step tivessem chance de proteger as fontes
-    # independentes seguintes. Os dois pipelines reaproveitam o mesmo
-    # 9000s por simplicidade — ambos os orcamentos internos cabem com
+    # independentes seguintes. Os tres pipelines reaproveitam o mesmo
+    # 9600s por simplicidade — todos os orcamentos internos cabem com
     # folga.
+    #
+    # Subiu de 9000 para 9600 no Gate UE8-I4 Task 1/2 (2026-09-08) por
+    # ARITMETICA, nao por preferencia: a regra do projeto e' `margem > 15%
+    # do orcamento interno`, e com 9000/7800 a folga era de apenas 30s —
+    # qualquer step novo acima de 26s quebraria a regra. Mantido em
+    # sincronia com schedule_plan.EXTERNAL_LOCK_TIMEOUT_SECONDS por teste.
     # TERCEIRA TaskKey desde o Checkpoint O1 Task 2/2 (2026-08-17):
     #   - "serving_refresh": so' os tres steps de serving (ML, TikTok brand,
     #     TikTok creator), MANUAL, NUNCA agendada (sem entrada em
@@ -101,9 +107,9 @@ function Get-TaskDefinitions {
     #     "shopee_manual_refresh", que tem lock separado porque mexe em fontes
     #     disjuntas (Shopee) e pode legitimamente rodar em paralelo.
     return @{
-        "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
-        "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
-        "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9000; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
+        "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
+        "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
+        "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
     }
 }
 

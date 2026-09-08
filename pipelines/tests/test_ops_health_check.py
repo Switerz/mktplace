@@ -65,6 +65,14 @@ class FakeCursor:
         # cairia no `{"n": 0}` e o teste ficaria verde sem exercitar nada.
         if "last_successful_upper_bound AS w" in sql:
             return {"w": self.conn.affiliate_watermark}
+        # Gate UE8-I4: as duas leituras da cobertura de descontos. Ramos
+        # EXPLICITOS pela mesma razao dos de cima — e ambos devolvem DICT,
+        # porque a conexao real usa `RealDictCursor`. Foi este fake que pegou o
+        # acesso por posicao que teria quebrado em toda execucao de producao.
+        if "finished_at, source_max_date" in sql:
+            return self.conn.discounts_last_run
+        if "MAX(ref_date) AS fact_max_ref_date" in sql:
+            return {"fact_max_ref_date": self.conn.discounts_fact_max}
         for marker, value in self.conn.bug8_scalars:
             if marker in sql:
                 return {"n": value}
@@ -95,7 +103,8 @@ class FakeConn:
                  tiktok_produtos_max=_UNSET, ml_produtos_max=_UNSET, shopee_produtos_max=_UNSET,
                  bug8_scalars=None,
                  ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET,
-                 affiliate_watermark=_UNSET):
+                 affiliate_watermark=_UNSET,
+                 discounts_last_run=_UNSET, discounts_fact_max=_UNSET):
         self.executed = []
         self.closed = False
         self.last_run = last_run or {}
@@ -125,6 +134,16 @@ class FakeConn:
         self.affiliate_watermark = (
             datetime.combine(TODAY - timedelta(days=1), dt_time(21, 3))
             if affiliate_watermark is _UNSET else affiliate_watermark)
+        # Gate UE8-I4: estado SAUDAVEL por default — a ultima execucao publicou
+        # ate D-1 e a fato tem competencia ate D-1. `source_max_date` e
+        # `ref_date` sao DATE (competencia), nunca timestamp tecnico.
+        self.discounts_last_run = (
+            {"finished_at": NOW - timedelta(hours=6),
+             "source_max_date": TODAY - timedelta(days=1)}
+            if discounts_last_run is _UNSET else discounts_last_run)
+        self.discounts_fact_max = (
+            TODAY - timedelta(days=1)
+            if discounts_fact_max is _UNSET else discounts_fact_max)
         self.bug8_scalars = bug8_scalars or [
             ("HAVING COUNT(*) > 1", 0), ("IS NULL", 0), ("gmv < 0", 0),
             ("IS DISTINCT FROM 100", 0), ("ROUND(canceled_orders::numeric", 0),
@@ -1226,11 +1245,11 @@ def test_s3_as_regras_das_fontes_antigas_nao_mudaram():
     por_nome = {s.source_name: (s.exec_threshold_hours, s.critical) for s in hc.EXPECTED_SOURCES}
     for nome, alvo in esperado.items():
         assert por_nome[nome] == alvo, nome
-    # +2 do Gate S3 (ml_cross_company, tiktok_channel_efficiency) e +1 do Gate
-    # UE2-C (custo de afiliado do TikTok). O objetivo do teste continua sendo o
-    # mesmo: provar que nenhuma REGRA das fontes antigas mudou ao acrescentar
-    # fontes novas.
-    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 3
+    # +2 do Gate S3 (ml_cross_company, tiktok_channel_efficiency), +1 do Gate
+    # UE2-C (custo de afiliado do TikTok) e +1 do Gate UE8-I4 (descontos do
+    # pedido TikTok). O objetivo do teste continua sendo o mesmo: provar que
+    # nenhuma REGRA das fontes antigas mudou ao acrescentar fontes novas.
+    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 4
 
 
 # --- 13. o fake responde explicitamente, sem fallback generico --------------
@@ -1275,3 +1294,242 @@ def test_s3_as_duas_fontes_aparecem_no_relatorio_final():
         assert fonte in nomes
     assert S3_LABEL_ML in labels
     assert S3_LABEL_TK in labels
+
+
+# ===========================================================================
+# Gate UE8-I4 Task 1/2 — descontos TikTok: EXECUCAO e COBERTURA, separadas
+# ===========================================================================
+
+import pipelines.sync_tiktok_order_discounts_daily as _sync_desc
+
+NOME_DESC = _sync_desc.CANONICAL_AUDIT_SOURCE
+D1 = TODAY - timedelta(days=1)
+
+
+def _conn_desc(**kw):
+    """Conn com TODAS as fontes frescas, exceto o que o teste sobrescrever."""
+    conn = FakeConn(**kw)
+    for fonte in (s.source_name for s in hc.EXPECTED_SOURCES):
+        conn.last_success.setdefault(fonte, NOW - timedelta(hours=2))
+        conn.last_run.setdefault(fonte, {
+            "started_at": NOW - timedelta(hours=3),
+            "finished_at": NOW - timedelta(hours=2),
+            "status": "success", "error_message": None,
+        })
+    return conn
+
+
+# --- dimensao 1: EXECUCAO ---------------------------------------------------
+
+def test_i4_a_fonte_canonica_esta_em_expected_sources():
+    por_nome = {s.source_name: s for s in hc.EXPECTED_SOURCES}
+    assert NOME_DESC in por_nome
+    e = por_nome[NOME_DESC]
+    assert e.exec_threshold_hours == 30
+    assert e.critical is True
+    assert e.cadence == "daily"
+
+
+def test_i4_os_nomes_derivados_NAO_entram_em_expected_sources():
+    """`_full` e `_backfill` marcam ciclos MENSAL e SEMANAL; cobrar 30h deles
+    reprovaria o pipeline todo dia."""
+    nomes = {s.source_name for s in hc.EXPECTED_SOURCES}
+    assert _sync_desc.FULL_AUDIT_SOURCE not in nomes
+    assert _sync_desc.BACKFILL_AUDIT_SOURCE not in nomes
+
+
+def test_i4_execucao_antiga_reprova_ok_critical():
+    conn = _conn_desc()
+    conn.last_success[NOME_DESC] = NOW - timedelta(hours=31)
+    conn.last_run[NOME_DESC] = {
+        "started_at": NOW - timedelta(hours=32),
+        "finished_at": NOW - timedelta(hours=31),
+        "status": "success", "error_message": None,
+    }
+    rel = hc.build_report(conn, now=NOW)
+    assert rel["ok_critical"] is False
+    assert by_name(hc.fetch_source_statuses(conn, now=NOW), NOME_DESC).stale
+
+
+def test_i4_execucao_dentro_de_30h_nao_reprova():
+    conn = _conn_desc()
+    conn.last_success[NOME_DESC] = NOW - timedelta(hours=29)
+    assert not by_name(hc.fetch_source_statuses(conn, now=NOW), NOME_DESC).stale
+
+
+def test_i4_sem_execucao_nenhuma_a_dimensao_de_EXECUCAO_reprova():
+    """Pre-piloto: a rotina e' critica, entao o verde nao pode vir antes da
+    primeira execucao comprovada."""
+    conn = _conn_desc()
+    conn.last_success[NOME_DESC] = None
+    conn.last_run[NOME_DESC] = None
+    rel = hc.build_report(conn, now=NOW)
+    assert rel["ok_critical"] is False
+
+
+# --- dimensao 2: COBERTURA OPERACIONAL -------------------------------------
+
+def test_i4_cobertura_ok_quando_job_e_fonte_estao_em_d_menos_1():
+    conn = _conn_desc()
+    c = hc.fetch_discounts_coverage_status(conn, now=NOW)
+    assert c.status == "ok"
+    assert c.stale is False
+    assert c.source_max_date == D1.isoformat()
+    assert c.fact_max_ref_date == D1.isoformat()
+    assert c.job_lag_days == 0
+
+
+def test_i4_job_parado_e_diferente_de_fonte_parada():
+    """O ponto do finding: um numero unico confundiria os dois."""
+    parado = _conn_desc(discounts_last_run={
+        "finished_at": NOW - timedelta(days=5),
+        "source_max_date": TODAY - timedelta(days=6),
+    })
+    c = hc.fetch_discounts_coverage_status(parado, now=NOW)
+    assert c.status == "job_atrasado"
+    assert c.stale is True
+    assert "JOB parou" in c.reason
+
+    fonte = _conn_desc(discounts_fact_max=TODAY - timedelta(days=5))
+    c2 = hc.fetch_discounts_coverage_status(fonte, now=NOW)
+    assert c2.status == "fonte_atrasada"
+    assert c2.stale is True
+    assert "FONTE parou" in c2.reason
+
+
+def test_i4_fato_vazia_e_fonte_atrasada_nao_ok():
+    conn = _conn_desc(discounts_fact_max=None)
+    c = hc.fetch_discounts_coverage_status(conn, now=NOW)
+    assert c.status == "fonte_atrasada"
+    assert c.stale is True
+
+
+def test_i4_pre_piloto_sem_auditoria_e_unknown_e_NAO_reprova_esta_dimensao():
+    conn = _conn_desc(discounts_last_run=None)
+    c = hc.fetch_discounts_coverage_status(conn, now=NOW)
+    assert c.status == "unknown"
+    assert c.stale is False, "unknown nao reprova NESTA dimensao"
+
+
+def test_i4_pre_piloto_nao_esconde_a_falha_da_dimensao_de_EXECUCAO():
+    """`unknown` na cobertura + sem execucao = `ok_critical` False, vindo da
+    dimensao de EXECUCAO. Uma rotina critica nao fica verde antes do piloto."""
+    conn = _conn_desc(discounts_last_run=None)
+    conn.last_success[NOME_DESC] = None
+    conn.last_run[NOME_DESC] = None
+    rel = hc.build_report(conn, now=NOW)
+    assert rel["discounts_coverage"]["status"] == "unknown"
+    assert rel["discounts_coverage"]["stale"] is False
+    assert rel["ok_critical"] is False
+
+
+def test_i4_cobertura_atrasada_reprova_ok_critical():
+    conn = _conn_desc(discounts_fact_max=TODAY - timedelta(days=9))
+    rel = hc.build_report(conn, now=NOW)
+    assert rel["discounts_coverage"]["stale"] is True
+    assert rel["ok_critical"] is False
+
+
+def test_i4_um_dia_de_folga_e_o_tolerado():
+    assert hc.DISCOUNTS_COVERAGE_MAX_LAG_DAYS == 1
+    # exatamente no limite: nao reprova
+    conn = _conn_desc(discounts_fact_max=TODAY - timedelta(days=2))
+    assert hc.fetch_discounts_coverage_status(conn, now=NOW).stale is False
+    # um dia alem: reprova
+    conn2 = _conn_desc(discounts_fact_max=TODAY - timedelta(days=3))
+    assert hc.fetch_discounts_coverage_status(conn2, now=NOW).stale is True
+
+
+def test_i4_as_duas_dimensoes_sao_independentes():
+    """Execucao OK com cobertura atrasada, e o inverso — nenhuma mascara a
+    outra."""
+    exec_ok_cob_ruim = _conn_desc(discounts_fact_max=TODAY - timedelta(days=9))
+    r1 = hc.build_report(exec_ok_cob_ruim, now=NOW)
+    assert not by_name(hc.fetch_source_statuses(exec_ok_cob_ruim, now=NOW),
+                       NOME_DESC).stale
+    assert r1["discounts_coverage"]["stale"] is True
+    assert r1["ok_critical"] is False
+
+    cob_ok_exec_ruim = _conn_desc()
+    cob_ok_exec_ruim.last_success[NOME_DESC] = NOW - timedelta(hours=40)
+    r2 = hc.build_report(cob_ok_exec_ruim, now=NOW)
+    assert r2["discounts_coverage"]["stale"] is False
+    assert r2["ok_critical"] is False
+
+
+# --- o que a cobertura NAO usa ---------------------------------------------
+
+def test_i4_nao_usa_carimbo_tecnico_como_competencia():
+    """`source_max_updated_at`/`raw_max_updated_at` dizem QUANDO a linha foi
+    tocada, nao ate quando ha venda medida."""
+    corpo = MODULE_PATH.read_text(encoding="utf-8")
+    trecho = corpo.split("def fetch_discounts_coverage_status")[1] \
+        .split("\ndef ")[0]
+    assert "source_max_updated_at" not in trecho
+    assert "raw_max_updated_at" not in trecho
+    assert "observed_grid" not in trecho
+    assert "coverage_status" not in trecho
+
+
+def test_i4_a_cobertura_usa_o_calendario_do_proprio_sync():
+    """Dois calendarios divergiriam na fronteira da meia-noite BRT."""
+    trecho = MODULE_PATH.read_text(encoding="utf-8") \
+        .split("def fetch_discounts_coverage_status")[1].split("\ndef ")[0]
+    assert "sync_descontos.last_closed_date(now)" in trecho
+
+
+def test_i4_a_cobertura_nao_le_o_data_mart_nem_faz_count_integral():
+    conn = _conn_desc()
+    hc.fetch_discounts_coverage_status(conn, now=NOW)
+    sql = " ".join(conn.executed)
+    assert "raw." not in sql and "silver." not in sql and "gold." not in sql
+    assert "COUNT(*)" not in sql
+
+
+def test_i4_agregado_tem_alias_explicito():
+    """`RealDictCursor` em producao: `MAX(ref_date)` sem `AS` viria na chave
+    'max', e o acesso por nome levantaria KeyError em toda execucao real."""
+    conn = _conn_desc()
+    hc.fetch_discounts_coverage_status(conn, now=NOW)
+    assert any("MAX(ref_date) AS fact_max_ref_date" in q for q in conn.executed)
+
+
+def test_i4_a_cobertura_aparece_no_relatorio_final():
+    conn = _conn_desc()
+    rel = hc.build_report(conn, now=NOW)
+    assert "discounts_coverage" in rel
+    d = rel["discounts_coverage"]
+    assert d["source_name"] == NOME_DESC
+    for campo in ("status", "reason", "source_max_date", "fact_max_ref_date",
+                  "last_closed_date", "job_lag_days", "source_lag_days",
+                  "stale", "critical"):
+        assert campo in d, campo
+
+
+def test_i4_a_saida_humana_mostra_a_cobertura(capsys):
+    conn = _conn_desc(discounts_fact_max=TODAY - timedelta(days=9))
+    hc._print_human(hc.build_report(conn, now=NOW))
+    saida = capsys.readouterr().out
+    assert "Cobertura operacional dos descontos TikTok" in saida
+    assert "FONTE-ATRASADA" in saida
+
+
+def test_i4_falha_de_banco_na_cobertura_nao_derruba_o_relatorio():
+    class ConnQueExplode(FakeConn):
+        def cursor(self):
+            cur = super().cursor()
+            original = cur.execute
+
+            def explode(sql, params=None):
+                if "source_max_date" in sql:
+                    raise hc.psycopg2.Error("indisponivel")
+                return original(sql, params)
+
+            cur.execute = explode
+            return cur
+
+    conn = ConnQueExplode()
+    c = hc.fetch_discounts_coverage_status(conn, now=NOW)
+    assert c.status == "unknown"
+    assert c.stale is False
+    assert "segredo" not in c.reason

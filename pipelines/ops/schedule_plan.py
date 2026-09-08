@@ -63,28 +63,36 @@ RUN_TASK_SCRIPT = rf"{REPO_ROOT}\scripts\run_task.ps1"
 # de pipelines.ops.orchestrate, para nao dar a este modulo nenhuma
 # dependencia transitiva de subprocess) — ver
 # pipelines/ops/orchestrate.py:FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-# (7800s) e o teste que trava os dois valores em sincronia. O mesmo
-# EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e' reaproveitado pela TaskKey
+# (8100s) e o teste que trava os dois valores em sincronia. O mesmo
+# EXTERNAL_LOCK_TIMEOUT_SECONDS e' reaproveitado pela TaskKey
 # shopee_manual_refresh em scripts/run_task.ps1 (orcamento interno 3780s,
 # tambem cabe com folga) — essa TaskKey nao e' agendada aqui (ver
 # PROPOSED_SCHEDULE, abaixo), so' existe para uso manual do operador. O mesmo
 # vale para a TaskKey serving_refresh (orcamento interno 3000s, Checkpoint O1
 # Task 2/2): MANUAL, sem entrada em PROPOSED_SCHEDULE, e compartilhando o LOCK
 # do full_daily para que as duas nunca se sobreponham.
-EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000  # 2h30 (PT2H30M) — margem de 1200s (15,38%) sobre os 7800s atuais
+#
+# Gate UE8-I4 Task 1/2 (2026-09-08): 9000 -> 9600s, e a elevacao NAO e'
+# preferencia — e' aritmetica. A regra e' `margem > 15% do orcamento interno`.
+# Com lock 9000s e orcamento 7800s a folga era de 30s (1200 contra 1170
+# exigidos), entao um step novo de T segundos so' caberia se
+# `9000 - (7800+T) > 0,15*(7800+T)`, ou seja `T < 26s`. Nenhum envelope util
+# cabia. Com o step de descontos (300s) o orcamento vai a 8100s, e 9600s
+# devolve margem de 1500s (18,5%).
+EXTERNAL_LOCK_TIMEOUT_SECONDS = 9600  # 2h40 (PT2H40M) — margem de 1500s (18,5%) sobre os 8100s atuais
 
 # ExecutionTimeLimit do PROPRIO Task Scheduler (hard-limit independente do
 # -TimeoutSeconds do run_with_lock.ps1) precisa ficar ACIMA de
-# EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s), nao igual — depois que o
+# EXTERNAL_LOCK_TIMEOUT_SECONDS, nao igual — depois que o
 # run_with_lock.ps1 detecta seu proprio timeout, ele ainda gasta tempo
 # chamando Stop-Process, aguardando ate 30s a confirmacao real de termino
-# do processo filho, e gravando os logs finais antes de sair. Se
-# ExecutionTimeLimit fosse igual a 9000s, o Task Scheduler poderia matar o
-# WRAPPER no meio dessa limpeza, antes de ele decidir se o lock deve ou
-# nao ser removido (ver run_with_lock.ps1:removeLockOnExit) — deixando um
-# lock em estado inconsistente. 9600s (PT2H40M) da' 600s de margem para
-# Stop-Process + espera de ate 30s + escrita dos logs.
-TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS = 9600  # 2h40 (PT2H40M) — margem de 600s sobre os 9000s do lock
+# do processo filho, e gravando os logs finais antes de sair. Se fossem
+# iguais, o Task Scheduler poderia matar o WRAPPER no meio dessa limpeza,
+# antes de ele decidir se o lock deve ou nao ser removido (ver
+# run_with_lock.ps1:removeLockOnExit) — deixando um lock em estado
+# inconsistente. Os 600s dessa margem de limpeza sao PRESERVADOS na subida do
+# Gate UE8-I4 Task 1/2: 9600 -> 10200s (PT2H50M), acompanhando o lock.
+TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS = 10200  # 2h50 (PT2H50M) — margem de 600s sobre os 9600s do lock
 
 
 @dataclass(frozen=True)

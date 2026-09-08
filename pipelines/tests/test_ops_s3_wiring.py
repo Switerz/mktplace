@@ -62,10 +62,14 @@ def por_nome(pipeline="full_daily"):
 #: Gate UE2-C Task 2/3 (2026-08-28): entre os snapshots e o health_check.
 UE2C = ["tiktok_affiliate_cost_order_monthly"]
 
+#: Gate UE8-I4 Task 1/2 (2026-09-08): descontos do pedido TikTok, depois do
+#: UE2C e ANTES do health_check.
+UE8I4 = ["tiktok_order_discounts_daily"]
 
-def test_f01_full_daily_tem_13_steps_na_ordem_exata():
+
+def test_f01_full_daily_tem_14_steps_na_ordem_exata():
     assert [s.name for s in orch.PIPELINES["full_daily"]] == (
-        INGESTAO + SERVING_O1 + SNAPSHOTS + UE2C + ["health_check"])
+        INGESTAO + SERVING_O1 + SNAPSHOTS + UE2C + UE8I4 + ["health_check"])
 
 
 def test_ue2c_step_fica_antes_do_health_check_que_segue_sendo_o_ultimo():
@@ -73,7 +77,11 @@ def test_ue2c_step_fica_antes_do_health_check_que_segue_sendo_o_ultimo():
     step global, senao ele reportaria um estado anterior ao do proprio dia."""
     nomes = [s.name for s in orch.PIPELINES["full_daily"]]
     assert nomes[-1] == "health_check"
-    assert nomes[-2] == "tiktok_affiliate_cost_order_monthly"
+    # Gate UE8-I4: o step de descontos entrou DEPOIS do de afiliados, entao o
+    # de afiliados passou a ser o antepenultimo. O invariante que importa —
+    # health_check por ultimo — nao mudou.
+    assert nomes[-2] == "tiktok_order_discounts_daily"
+    assert nomes[-3] == "tiktok_affiliate_cost_order_monthly"
     assert orch.PIPELINES["full_daily"][-1].always_run is True
 
 
@@ -258,16 +266,20 @@ def test_f23_timeout_do_step_vem_da_spec_do_modulo():
 
 
 def test_f24_orcamento_interno_cabe_no_timeout_externo():
-    EXTERNO = 9000
-    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7800
+    # Gate UE8-I4 Task 1/2: 7800 -> 8100 (orcamento) e 9000 -> 9600 (lock). A
+    # subida do lock foi obrigatoria: com 9000/7800 a folga era de 30s, e
+    # qualquer step novo acima de 26s quebraria a regra de 15%.
+    EXTERNO = 9600
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 8100
     assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS < EXTERNO
     margem = EXTERNO - orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
     assert margem > 0.15 * orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
 
 
-def test_f25_orcamento_e_a_soma_real_dos_doze_steps():
+def test_f25_orcamento_e_a_soma_real_dos_catorze_steps():
     soma = sum(s.timeout_seconds for s in orch.PIPELINES["full_daily"])
-    assert soma == orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7800
+    assert soma == orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 8100
+    assert len(orch.PIPELINES["full_daily"]) == 14
 
 
 def test_f26_os_outros_dois_pipelines_nao_mudaram():

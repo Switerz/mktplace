@@ -33,6 +33,27 @@ MIGRATION_SRC = MIGRATION.read_text(encoding="utf-8")
 SYNC_SRC = SYNC_PATH.read_text(encoding="utf-8")
 
 
+def lote_staging(conn) -> list[dict]:
+    """A LISTA de parametros do INSERT de staging — uma unica chamada.
+
+    Desde o Gate UE8-I4 Task 1/2 a carga e' em lote (`executemany`), entao o
+    parametro e' uma lista de dicts, nao um dict por chamada. Este helper
+    tambem PROVA a mudanca: se alguem voltar ao laco de INSERTs individuais, o
+    `assert` de chamada unica falha aqui, em um lugar so'.
+    """
+    chamadas = [p for p, q in zip(conn.params, conn.sql)
+                if "INSERT INTO stg_ftodd" in q]
+    assert len(chamadas) == 1, (
+        f"esperado 1 INSERT de staging em lote, houve {len(chamadas)} — "
+        "o laco de INSERTs individuais voltou"
+    )
+    lote = chamadas[0]
+    assert isinstance(lote, list), (
+        f"o parametro do staging deveria ser uma LISTA de dicts, veio {type(lote)}"
+    )
+    return lote
+
+
 def apenas_codigo(fonte: str) -> str:
     """Fonte sem comentarios e sem docstrings.
 
@@ -424,8 +445,7 @@ def test_18_zero_comercial_com_atividade_publica_linha_com_zero():
     conn = FakeConn({"so_staging": FakeResult(
         [{"so_staging": 0, "so_destino": 0}])})
     assert sync.publish_in_transaction(conn, s, "run") == 1
-    inserido = next(p for p, q in zip(conn.params, conn.sql)
-                    if "INSERT INTO stg_ftodd" in q)
+    inserido = lote_staging(conn)[0]
     assert inserido["commercial_orders"] == 0
 
 
@@ -469,8 +489,7 @@ def test_22_procedencia_anulavel_atravessa_o_caminho():
     conn = FakeConn({"so_staging": FakeResult(
         [{"so_staging": 0, "so_destino": 0}])})
     sync.publish_in_transaction(conn, s, "run")
-    inserido = next(p for p, q in zip(conn.params, conn.sql)
-                    if "INSERT INTO stg_ftodd" in q)
+    inserido = lote_staging(conn)[0]
     assert inserido["source_max_updated_at"] is None
     assert inserido["raw_max_updated_at"] is None
     assert "source_max_updated_at             TIMESTAMP," in MIGRATION_SRC
@@ -761,8 +780,7 @@ def test_f2b_apenas_unpaid_produz_zero_comercial_medido():
     conn = FakeConn({"so_staging": FakeResult(
         [{"so_staging": 0, "so_destino": 0}])})
     sync.publish_in_transaction(conn, s, "run")
-    ins = next(p for p, q in zip(conn.params, conn.sql)
-               if "INSERT INTO stg_ftodd" in q)
+    ins = lote_staging(conn)[0]
     assert ins["commercial_orders"] == 0
     for campo in ("official_gmv", "full_product_value",
                   "seller_discount_signed", "platform_subsidy_amount"):
@@ -776,8 +794,7 @@ def test_f2c_comercial_sem_cancelados_produz_zero_cancelado():
     conn = FakeConn({"so_staging": FakeResult(
         [{"so_staging": 0, "so_destino": 0}])})
     sync.publish_in_transaction(conn, s, "run")
-    ins = next(p for p, q in zip(conn.params, conn.sql)
-               if "INSERT INTO stg_ftodd" in q)
+    ins = lote_staging(conn)[0]
     assert ins["cancelled_orders"] == 0
     assert ins["cancelled_seller_discount_signed"] == Decimal("0")
     assert ins["cancelled_platform_subsidy_amount"] == Decimal("0")
@@ -987,3 +1004,127 @@ def test_f8c_dry_run_propaga_o_mesmo_teto():
     corpo = SYNC_CODE.split("def run_dry")[1].split("def run_apply")[0]
     assert "teto = last_closed_date(instante)" in corpo
     assert "build_quality_checks(snapshot, {}, mode, teto)" in corpo
+
+
+# ===========================================================================
+# Gate UE8-I4 Task 1/2 — carga em LOTE (era um INSERT por linha)
+# ===========================================================================
+
+def _conn_ok():
+    return FakeConn({"so_staging": FakeResult([{"so_staging": 0, "so_destino": 0}])})
+
+
+def test_i4_uma_unica_chamada_de_carga_para_N_linhas():
+    """O ganho inteiro esta aqui: 1 round-trip, nao N.
+
+    O full publica 2.081 linhas; com um INSERT por linha, ~320 s dos 347 s
+    medidos no piloto eram latencia de rede ate o Neon.
+    """
+    linhas = [linha(brand=m) for m in ("apice", "barbours", "kokeshi")]
+    s = snap(rows=linhas)
+    conn = _conn_ok()
+    assert sync.publish_in_transaction(conn, s, "run") == 3
+    lote = lote_staging(conn)          # ja' garante chamada UNICA e lista
+    assert len(lote) == 3
+
+
+def test_i4_zero_insert_individual_no_codigo():
+    corpo = SYNC_CODE.split("def publish_in_transaction")[1].split("\ndef ")[0]
+    assert "for r in snapshot.rows:" not in corpo, "laco de INSERT individual voltou"
+    assert "conn.execute(SQL_STAGING_INSERT, parametros)" in corpo
+
+
+def test_i4_parametros_preservados_linha_a_linha():
+    """Nenhum valor, sinal ou None se perde na troca para lote."""
+    linhas = [
+        linha(brand="apice", com=10, gmv=Decimal("100.11"), fpv=Decimal("200.22"),
+              sd=Decimal("-50.33"), ps=Decimal("7.44"),
+              canc=2, csd=Decimal("-3.55"), cps=Decimal("0.66")),
+        linha(brand="barbours", com=0, canc=0,
+              gmv=Decimal("0"), fpv=Decimal("0"), sd=Decimal("0"),
+              ps=Decimal("0"), csd=Decimal("0"), cps=Decimal("0"),
+              upd=None, raw_upd=None),
+    ]
+    s = snap(rows=linhas)
+    conn = _conn_ok()
+    sync.publish_in_transaction(conn, s, "run-abc")
+    lote = lote_staging(conn)
+
+    assert [p["brand"] for p in lote] == ["apice", "barbours"]
+    a, b = lote
+    assert a["seller_discount_signed"] == Decimal("-50.33")
+    assert a["platform_subsidy_amount"] == Decimal("7.44")
+    assert a["cancelled_seller_discount_signed"] == Decimal("-3.55")
+    assert b["official_gmv"] == Decimal("0")
+    # `None` de procedencia continua `None`, nunca vira zero.
+    assert b["source_max_updated_at"] is None
+    assert b["raw_max_updated_at"] is None
+    # O run_id vai em TODAS as linhas.
+    assert {p["source_run_id"] for p in lote} == {"run-abc"}
+    # As chaves do lote sao exatamente as colunas do destino, sem sobra.
+    assert set(a) == set(sync.TARGET_COLUMNS)
+
+
+def test_i4_ordem_do_lote_espelha_a_do_snapshot():
+    linhas = [linha(brand=m) for m in ("rituaria", "apice", "kokeshi")]
+    conn = _conn_ok()
+    sync.publish_in_transaction(conn, snap(rows=linhas), "run")
+    assert [p["brand"] for p in lote_staging(conn)] == \
+        ["rituaria", "apice", "kokeshi"]
+
+
+def test_i4_zero_interpolacao_de_valor_no_sql():
+    sql = str(sync.SQL_STAGING_INSERT)
+    assert ":ref_date" in sql and ":source_run_id" in sql
+    for literal in ("apice", "-50.33", "2026-"):
+        assert literal not in sql
+
+
+def test_i4_staging_continua_temp_on_commit_drop():
+    assert "CREATE TEMP TABLE" in str(sync.SQL_STAGING_CREATE)
+    assert "ON COMMIT DROP" in str(sync.SQL_STAGING_CREATE)
+
+
+def test_i4_ordem_preservada_staging_delete_insert_except():
+    conn = _conn_ok()
+    sync.publish_in_transaction(conn, snap(rows=[linha()]), "run")
+    marcos = [i for i, q in enumerate(conn.sql)]
+    def pos(frag):
+        return next(i for i, q in enumerate(conn.sql) if frag in q)
+    assert marcos  # sanity
+    assert (pos("CREATE TEMP TABLE") < pos("INSERT INTO stg_ftodd")
+            < pos("DELETE FROM") < pos("INSERT INTO marts.")
+            < pos("EXCEPT"))
+
+
+def test_i4_except_bidirecional_continua_bloqueando():
+    conn = FakeConn({"so_staging": FakeResult(
+        [{"so_staging": 1, "so_destino": 0}])})
+    with pytest.raises(sync.DiscountSyncError, match="EXCEPT bidirecional"):
+        sync.publish_in_transaction(conn, snap(rows=[linha()]), "run")
+
+
+def test_i4_lote_vazio_levanta_antes_de_qualquer_delete():
+    """DELETE sem INSERT esvaziaria a janela. A guarda vem ANTES do DELETE."""
+    s = snap(rows=[])
+    conn = _conn_ok()
+    with pytest.raises(sync.DiscountSyncError, match="sem nenhuma linha"):
+        sync.publish_in_transaction(conn, s, "run")
+    assert not any("DELETE FROM" in q for q in conn.sql)
+
+
+def test_i4_resultado_identico_ao_caminho_anterior():
+    """O contrato observavel nao mudou: mesmas colunas, mesmos valores, mesma
+    contagem devolvida — so' o numero de round-trips."""
+    linhas = [linha(brand=m, com=i + 1) for i, m in enumerate(("apice", "lescent"))]
+    s = snap(rows=linhas)
+    conn = _conn_ok()
+    devolvido = sync.publish_in_transaction(conn, s, "run")
+    lote = lote_staging(conn)
+    assert devolvido == len(linhas) == len(lote)
+    for original, publicado in zip(linhas, lote):
+        assert publicado["brand"] == original.brand
+        assert publicado["commercial_orders"] == original.commercial_orders
+        assert publicado["official_gmv"] == original.official_gmv
+        assert publicado["seller_discount_signed"] == original.seller_discount_signed
+        assert publicado["platform_subsidy_amount"] == original.platform_subsidy_amount

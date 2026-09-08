@@ -499,6 +499,208 @@ def check_affiliate_cost_source_not_empty() -> CheckResult:
     return CheckResult(label, True, f"{label}: fonte tem linhas com `updated_at`")
 
 
+#: Relacoes que o sync de descontos exige no Neon — destino (migration 013) e
+#: as DUAS tabelas de auditoria (migration 003). O sync grava `source_sync_run`
+#: ANTES de ler a fonte e `data_quality_check` DEPOIS do commit: faltando
+#: qualquer uma, o step falharia com o dado ja publicado e a auditoria
+#: incompleta. Nao ha `sync_state` aqui — este sync nao tem um.
+_DISCOUNTS_NEON_RELATIONS = (
+    "marts.fact_tiktok_order_discounts_daily",
+    "audit.source_sync_run",
+    "audit.data_quality_check",
+)
+_DISCOUNTS_SOURCE_RELATION = "raw.tiktok_shop_orders"
+
+#: Mesma chave de `pipelines.sync_tiktok_order_discounts_daily.ADVISORY_LOCK_KEY`.
+#: Duplicada aqui de proposito: o preflight nao importa o modulo do sync (nao
+#: deve carregar SQLAlchemy nem abrir engine so' para diagnosticar), e um teste
+#: trava os dois valores em sincronia.
+_DISCOUNTS_ADVISORY_LOCK_KEY = 912130013
+
+#: Versoes Alembic em que a migration 013 ja esta aplicada. `013` e' o piso;
+#: as posteriores a contem. Uma versao FORA desta lista significa banco em
+#: estado que este sync nao conhece — bloqueia em vez de arriscar.
+_DISCOUNTS_MIN_ALEMBIC = "013"
+
+
+def check_discounts_relations() -> CheckResult:
+    """Existencia das relacoes do sync de descontos, nos DOIS bancos.
+
+    `to_regclass` nao le linha nenhuma. Do lado do Neon confere destino e as
+    duas tabelas de auditoria; do lado do Data Mart, so' a existencia da fonte.
+    """
+    label = "Descontos TikTok (migrations 013/003 + fonte)"
+    neon_url = os.environ.get("DATABASE_URL", "")
+    dm_url = os.environ.get("DATAMART_DATABASE_URL", "")
+    if not neon_url or not dm_url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+
+    faltando: list[str] = []
+    try:
+        conn = psycopg2.connect(neon_url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            for rel in _DISCOUNTS_NEON_RELATIONS:
+                cur.execute("SELECT to_regclass(%s)", (rel,))
+                if cur.fetchone()[0] is None:
+                    faltando.append(rel)
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao no Neon "
+                           f"({sanitize_url(neon_url)}) — {type(e).__name__}")
+
+    try:
+        conn = psycopg2.connect(dm_url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute("SELECT to_regclass(%s)", (_DISCOUNTS_SOURCE_RELATION,))
+            if cur.fetchone()[0] is None:
+                faltando.append(_DISCOUNTS_SOURCE_RELATION)
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao no Data Mart "
+                           f"({sanitize_url(dm_url)}) — {type(e).__name__}")
+
+    if faltando:
+        return CheckResult(label, False,
+                           f"{label}: {len(faltando)} relacao(oes) ausente(s) "
+                           f"({', '.join(faltando)})")
+    return CheckResult(label, True,
+                       f"{label}: {len(_DISCOUNTS_NEON_RELATIONS)} relacoes no Neon "
+                       "e a fonte no Data Mart existem")
+
+
+def check_discounts_alembic_version() -> CheckResult:
+    """A migration 013 esta aplicada no Neon.
+
+    Complementa `to_regclass`: uma tabela criada a mao, fora da cadeia, passaria
+    naquele check e falharia aqui. Le UMA linha de `alembic_version`.
+    """
+    label = "Descontos TikTok (Alembic >= 013)"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute("SELECT version_num FROM alembic_version")
+            versoes = [r[0] for r in cur.fetchall()]
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — "
+                           f"{type(e).__name__}")
+
+    if len(versoes) != 1:
+        return CheckResult(label, False,
+                           f"{label}: {len(versoes)} head(s) em alembic_version — "
+                           "cadeia sem head unico")
+    atual = versoes[0]
+    # Comparacao LEXICOGRAFICA sobre os identificadores zero-padded do projeto
+    # ("001".."015"): funciona enquanto forem numericos de 3 digitos, e o teste
+    # trava o formato. Nao usa `int()` porque um id nao-numerico futuro deve
+    # bloquear em vez de levantar.
+    if not (atual.isdigit() and len(atual) == 3 and atual >= _DISCOUNTS_MIN_ALEMBIC):
+        return CheckResult(label, False,
+                           f"{label}: head '{atual}' anterior a "
+                           f"{_DISCOUNTS_MIN_ALEMBIC} ou fora do formato conhecido")
+    return CheckResult(label, True, f"{label}: head {atual}")
+
+
+def check_discounts_source_not_empty() -> CheckResult:
+    """Fonte tem ao menos uma linha, sem varrer 2,7 milhoes.
+
+    Prova BARATA com `LIMIT 1` — nenhum `COUNT(*)` integral, que seria scan
+    completo a cada execucao do `full_daily`. As validacoes profundas (grao,
+    status, fechamento de populacoes, sinais) continuam dentro do sync.
+
+    Fonte vazia BLOQUEIA de proposito: no caminho automatizado, um `full` sobre
+    fonte vazia tentaria esvaziar a fact. O sync ja aborta nesse caso, mas
+    bloquear antes evita abrir auditoria e adquirir lock para nada.
+    """
+    label = "Descontos TikTok (fonte nao vazia)"
+    url = os.environ.get("DATAMART_DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT 1 FROM {_DISCOUNTS_SOURCE_RELATION} LIMIT 1"  # noqa: S608
+            )
+            tem_linha = cur.fetchone() is not None
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — "
+                           f"{type(e).__name__}")
+
+    if not tem_linha:
+        return CheckResult(label, False,
+                           f"{label}: fonte VAZIA — bloqueado. O caminho "
+                           "automatizado nunca esvazia a fact sozinho")
+    return CheckResult(label, True, f"{label}: fonte tem ao menos uma linha")
+
+
+def check_discounts_advisory_lock_free() -> CheckResult:
+    """Nenhuma outra execucao do sync detem o advisory lock.
+
+    O lock e' TRANSACIONAL (`pg_advisory_xact_lock`), entao aparecer aqui
+    significa execucao viva concorrente — nao residuo de sessao morta. O sync
+    esperaria no lock ate o timeout do step; bloquear antes transforma uma
+    espera silenciosa num BLOCKED explicito.
+
+    Le `pg_locks`, que nao toca dado de negocio.
+    """
+    label = "Descontos TikTok (advisory lock livre)"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return CheckResult(label, False, f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            # `pg_advisory_xact_lock(bigint)` guarda a chave em (classid, objid)
+            # como os 32 bits altos e baixos; para chave que cabe em 32 bits,
+            # classid = 0 e objid = chave.
+            cur.execute(
+                "SELECT COUNT(*) FROM pg_locks "
+                "WHERE locktype = 'advisory' AND classid = 0 AND objid = %s",
+                (_DISCOUNTS_ADVISORY_LOCK_KEY,),
+            )
+            tomados = cur.fetchone()[0]
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult(label, False,
+                           f"{label}: falha de conexao ({sanitize_url(url)}) — "
+                           f"{type(e).__name__}")
+
+    if tomados:
+        return CheckResult(label, False,
+                           f"{label}: {tomados} sessao(oes) ja detem o lock — "
+                           "outra execucao do sync esta em andamento")
+    return CheckResult(label, True, f"{label}: livre")
+
+
 SOURCE_CHECKS = {
     "tiktok_daily": (check_rds, check_neon),
     "ml_daily": (check_rds, check_neon),
@@ -538,6 +740,15 @@ SOURCE_CHECKS = {
     "tiktok_affiliate_cost_order_monthly": (
         check_rds, check_neon, check_affiliate_cost_relations,
         check_affiliate_cost_source_not_empty,
+    ),
+    # Gate UE8-I4 Task 1/2: descontos e subsidios do pedido TikTok. Data Mart
+    # (fonte, via VPN) e Neon (destino + auditoria) sao ambos obrigatorios;
+    # mais as relacoes das migrations 013/003, a versao Alembic, uma prova
+    # BARATA de que a fonte nao esta vazia e o advisory lock livre.
+    "tiktok_order_discounts_daily": (
+        check_rds, check_neon, check_discounts_relations,
+        check_discounts_alembic_version, check_discounts_source_not_empty,
+        check_discounts_advisory_lock_free,
     ),
 }
 

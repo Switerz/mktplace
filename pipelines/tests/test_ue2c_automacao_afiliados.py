@@ -561,19 +561,30 @@ def test_step_configurado_conforme_o_contrato():
 
 
 def test_step_fica_antes_do_health_check_que_continua_ultimo():
+    """O invariante deste gate e' a POSICAO RELATIVA: depois da ingestao e
+    antes do health_check. O Gate UE8-I4 inseriu o step de descontos ENTRE os
+    dois, entao o de afiliados deixou de ser o penultimo — o que nao pode
+    mudar e' ele preceder o health_check, que segue por ultimo."""
     nomes = [s.name for s in orch.PIPELINES["full_daily"]]
     assert nomes[-1] == "health_check"
-    assert nomes.index(FONTE) == len(nomes) - 2
+    assert nomes.index("daily_tiktok") < nomes.index(FONTE) < nomes.index("health_check")
 
 
 def test_orcamento_e_margem():
-    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7800
-    assert sp.EXTERNAL_LOCK_TIMEOUT_SECONDS == 9000
-    assert sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS == 9600
+    # Gate UE8-I4 Task 1/2: +300s do step de descontos levaram o orcamento de
+    # 7800 para 8100, e o lock de 9000 para 9600. A subida do lock foi
+    # ARITMETICAMENTE obrigatoria: com 9000/7800 a folga era de 30s sobre os
+    # 15% exigidos, entao nenhum step acima de 26s caberia.
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 8100
+    assert sp.EXTERNAL_LOCK_TIMEOUT_SECONDS == 9600
+    assert sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS == 10200
     margem = sp.EXTERNAL_LOCK_TIMEOUT_SECONDS - orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    assert margem == 1200
+    assert margem == 1500
     assert margem > 0.15 * orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS
-    assert round(margem / orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS * 100, 2) == 15.38
+    assert round(margem / orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS * 100, 2) == 18.52
+    # A margem de LIMPEZA pos-timeout continua em 600s.
+    assert (sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS
+            - sp.EXTERNAL_LOCK_TIMEOUT_SECONDS) == 600
 
 
 def test_outros_pipelines_e_agendamento_intactos():

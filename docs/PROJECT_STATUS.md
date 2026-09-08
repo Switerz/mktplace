@@ -2388,8 +2388,37 @@ no histórico, na grade observada — nunca convertidas em zero, e `complete`
 jamais prova ingestão. **Scheduler não iniciado** e otimização do `INSERT` do
 sync ainda pendente. A frente **Avoe é paralela** e não integra este bloco.
 
+**UE8-I4 Task 1/2 — 08/09/2026: AUTOMAÇÃO IMPLEMENTADA E VALIDADA
+LOCALMENTE, NÃO EXECUTADA.** O `full_daily` passou a ter **14 steps**: entrou
+`tiktok_order_discounts_daily` (`--mode auto --apply`, timeout 300 s,
+`critical=True`, **zero retry**), depois de `daily_tiktok` — que é o step que
+grava `raw.tiktok_shop_orders`, a fonte real do sync — e antes do
+`health_check`, que segue sendo o último. Preflight próprio com seis checks
+read-only, em que **fonte vazia BLOQUEIA** e nenhum usa `COUNT(*)` integral.
+Health check ganhou **duas dimensões independentes**: execução (30 h, crítica)
+e cobertura operacional, que distingue **job parado** de **fonte parada** e
+fica `unknown` no pré-piloto sem esconder a reprovação da execução.
+
+A publicação virou **carga em lote**: os 347 s do piloto eram
+**2.081 round-trips** ao Neon, não trabalho de banco. Mesmo SQL, mesmos binds,
+mesma staging, mesmo `EXCEPT` bidirecional — só um `executemany`.
+
+O **timeout externo subiu de 9000 para 9600 s por aritmética, não
+preferência**: a regra é margem > 15% do orçamento, e com 9000/7800 a folga era
+de 30 s, o que só permitiria um step abaixo de 26 s. Orçamento 7800 → 8100 s,
+margem 18,5%, `ExecutionTimeLimit` 9600 → 10200 s com os mesmos 600 s de
+limpeza.
+
+⚠️ **NADA foi executado:** zero sync, zero banco, zero `full_daily`, zero
+Scheduler (segue `Enabled=false`), zero deploy. **O checkout operacional NÃO
+foi atualizado** — enquanto não for, uma execução agendada rodaria o código
+antigo, sem o step. A **duração real do lote é pendente da Task 2/2**, e
+`stale_load` continua sendo o estado esperado até a ativação. Suíte
+`pipelines` **3454/3454**, `apps/api` com as mesmas 43 falhas ambientais da
+baseline, **API e frontend intactos**.
+
 Detalhes em [UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md)
-§28 (carga) e §29 (exposição).
+§28 (carga), §29 (exposição) e §30 (automação).
 
 ## Próximas prioridades
 

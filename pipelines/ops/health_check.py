@@ -96,6 +96,10 @@ from pipelines.reconciliation.monitor_bug8_invariants import check_db_invariants
 # Importar em vez de reimplementar e' o que impede health check e sync de
 # divergirem sobre o que significa "fresco".
 from pipelines import sync_tiktok_affiliate_cost_order_monthly as sync_afiliados  # noqa: E402
+# UE8-I4: mesmo motivo — o nome canonico de auditoria e o teto D-1 vivem no
+# modulo do sync. Importar em vez de reescrever e' o que impede health check e
+# sync de divergirem sobre qual fonte cobrar e ate que dia.
+from pipelines import sync_tiktok_order_discounts_daily as sync_descontos  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -174,6 +178,16 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     # marca o ciclo do full, que e' MENSAL, e cobrar 30h dele reprovaria o
     # pipeline todo dia. A obrigacao mensal e' verificada pelo proprio sync.
     ExpectedSource(sync_afiliados.CANONICAL_AUDIT_SOURCE, "daily", 30),
+    # Gate UE8-I4 Task 1/2 (2026-09-08): descontos e subsidios do pedido
+    # TikTok. CRITICO e com o mesmo contrato de 30h, porque o step roda TODO
+    # dia em `full_daily` e e' `critical=True` la.
+    #
+    # E' o nome CANONICO, escrito em toda execucao real, qualquer modo. Os dois
+    # nomes derivados (`..._full` e `..._backfill`) NAO entram aqui de
+    # proposito: marcam ciclos MENSAL e SEMANAL, e cobrar 30h deles reprovaria
+    # o pipeline todo dia. Essas obrigacoes duraveis sao verificadas dentro do
+    # proprio sync, sob o advisory lock.
+    ExpectedSource(sync_descontos.CANONICAL_AUDIT_SOURCE, "daily", 30),
 )
 
 @dataclass
@@ -549,6 +563,159 @@ def fetch_affiliate_watermark_status(conn, now: datetime | None = None
     )
 
 
+#: Quantos dias fechados de atraso a cobertura tolera antes de reprovar.
+#: `1` porque a janela do sync SEMPRE termina em D-1: se o job rodou hoje,
+#: `source_max_date` e' D-1 e o atraso e' zero. Um dia de folga cobre a
+#: execucao de madrugada que atravessa a meia-noite BRT.
+DISCOUNTS_COVERAGE_MAX_LAG_DAYS = 1
+
+
+@dataclass(frozen=True)
+class DiscountsCoverageStatus:
+    """Cobertura OPERACIONAL dos descontos — dimensao INDEPENDENTE da execucao.
+
+    Duas perguntas que um unico numero confundiria:
+
+      - **job parado**: nao ha execucao `success`, ou o `source_max_date` dela
+        ficou para tras do ultimo dia fechado;
+      - **fonte parada**: o job roda e a janela alcanca D-1, mas a fato nao tem
+        linha nos dias recentes — a fonte parou de produzir.
+
+    `source_max_date` vem de `audit.source_sync_run` (o teto da janela
+    publicada), e `fact_max_ref_date` de `MAX(ref_date)` na fato (a competencia
+    que de fato existe). NENHUM dos dois e' `source_max_updated_at` ou
+    `raw_max_updated_at`: aqueles sao carimbos TECNICOS de quando a linha foi
+    tocada, nao competencia comercial, e usa-los aqui trocaria "ate quando ha
+    venda medida" por "quando alguem mexeu no registro".
+
+    `unknown` NAO reprova nesta dimensao — e so' nesta. No pre-piloto, sem
+    nenhuma execucao registrada, o resultado correto e' `status="unknown"` com
+    `stale=False` AQUI e `ok_critical=False` vindo da dimensao de EXECUCAO, que
+    cobra a entrada canonica em `EXPECTED_SOURCES`. Uma rotina ja declarada
+    critica nao pode deixar o health check verde antes da primeira execucao.
+    """
+    source_name: str
+    status: str                    # ok | job_atrasado | fonte_atrasada | unknown
+    reason: str
+    last_success_at: str | None
+    source_max_date: str | None
+    fact_max_ref_date: str | None
+    last_closed_date: str | None
+    job_lag_days: int | None
+    source_lag_days: int | None
+    stale: bool
+    critical: bool = True
+
+
+def fetch_discounts_coverage_status(conn, now: datetime | None = None
+                                    ) -> DiscountsCoverageStatus:
+    """Cobertura operacional dos descontos. Duas leituras baratas.
+
+    Le a ultima execucao `success` da fonte CANONICA em `audit.source_sync_run`
+    e `MAX(ref_date)` da fato. O teto de comparacao e' o ultimo dia fechado
+    resolvido pelo MESMO calendario que o sync usa (`last_closed_date`), nunca
+    um calculo proprio — dois calendarios divergiriam na fronteira da
+    meia-noite BRT.
+    """
+    now = now or _now()
+    nome = sync_descontos.CANONICAL_AUDIT_SOURCE
+    fechado = sync_descontos.last_closed_date(now)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT finished_at, source_max_date
+              FROM audit.source_sync_run
+             WHERE source_name = %s AND status = 'success'
+               AND finished_at IS NOT NULL
+             ORDER BY finished_at DESC
+             LIMIT 1
+            """,
+            (nome,),
+        )
+        linha = cur.fetchone()
+        # `AS fact_max_ref_date` e' OBRIGATORIO: a conexao de producao usa
+        # `RealDictCursor` (ver diagnose_bug8_neon._neon_readonly), e um
+        # agregado sem alias viria na chave "max". Indexar por posicao aqui
+        # levantaria `KeyError` em toda execucao real.
+        cur.execute(
+            f"SELECT MAX(ref_date) AS fact_max_ref_date "  # noqa: S608
+            f"FROM {sync_descontos.TARGET_TABLE}"
+        )
+        fact_max = cur.fetchone()["fact_max_ref_date"]
+    except psycopg2.Error:
+        # Falha ESPERADA de banco: reporta sem numero inventado. Bug de codigo
+        # (nao `psycopg2.Error`) propaga — esconder defeito nosso atras de
+        # "erro de fonte" e' exatamente o que nao se pode fazer.
+        cur.close()
+        return DiscountsCoverageStatus(
+            source_name=nome, status="unknown",
+            reason="falha ao ler auditoria/fato de descontos",
+            last_success_at=None, source_max_date=None, fact_max_ref_date=None,
+            last_closed_date=fechado.isoformat(), job_lag_days=None,
+            source_lag_days=None, stale=False,
+        )
+    cur.close()
+
+    # Acesso por NOME, nunca por posicao — `RealDictCursor` em producao.
+    finished_at = linha["finished_at"] if linha else None
+    source_max = linha["source_max_date"] if linha else None
+
+    if source_max is None:
+        return DiscountsCoverageStatus(
+            source_name=nome, status="unknown",
+            reason=("sem execucao bem-sucedida com janela registrada — "
+                    "cobertura indeterminada (a EXECUCAO e' cobrada a parte)"),
+            last_success_at=finished_at.isoformat() if finished_at else None,
+            source_max_date=None,
+            fact_max_ref_date=fact_max.isoformat() if fact_max else None,
+            last_closed_date=fechado.isoformat(), job_lag_days=None,
+            source_lag_days=None, stale=False,
+        )
+
+    job_lag = (fechado - source_max).days
+    fonte_lag = (fechado - fact_max).days if fact_max else None
+
+    if job_lag > DISCOUNTS_COVERAGE_MAX_LAG_DAYS:
+        status, motivo, stale = (
+            "job_atrasado",
+            (f"a ultima execucao publicou ate {source_max.isoformat()}, "
+             f"{job_lag} dia(s) atras do ultimo dia fechado "
+             f"({fechado.isoformat()}) — o JOB parou de avancar"),
+            True,
+        )
+    elif fonte_lag is None:
+        status, motivo, stale = (
+            "fonte_atrasada",
+            "a fato nao tem nenhuma linha — a fonte nao produziu competencia alguma",
+            True,
+        )
+    elif fonte_lag > DISCOUNTS_COVERAGE_MAX_LAG_DAYS:
+        status, motivo, stale = (
+            "fonte_atrasada",
+            (f"o job alcancou {source_max.isoformat()}, mas a competencia mais "
+             f"recente na fato e' {fact_max.isoformat()}, {fonte_lag} dia(s) "
+             f"atras de {fechado.isoformat()} — a FONTE parou de produzir"),
+            True,
+        )
+    else:
+        status, motivo, stale = (
+            "ok",
+            (f"janela publicada ate {source_max.isoformat()} e competencia na "
+             f"fato ate {fact_max.isoformat()}, contra {fechado.isoformat()}"),
+            False,
+        )
+
+    return DiscountsCoverageStatus(
+        source_name=nome, status=status, reason=motivo,
+        last_success_at=finished_at.isoformat() if finished_at else None,
+        source_max_date=source_max.isoformat(),
+        fact_max_ref_date=fact_max.isoformat() if fact_max else None,
+        last_closed_date=fechado.isoformat(),
+        job_lag_days=job_lag, source_lag_days=fonte_lag, stale=stale,
+    )
+
+
 def build_report(conn, now: datetime | None = None) -> dict:
     """`now` e' lido UMA UNICA vez aqui (ou recebido do chamador) e
     repassado para as duas dimensoes de frescor — evita que
@@ -561,10 +728,12 @@ def build_report(conn, now: datetime | None = None) -> dict:
     data_freshness = fetch_data_freshness(conn, today=now.date())
     bug8 = run_bug8_check(conn)
     afiliados = fetch_affiliate_watermark_status(conn, now=now)
+    descontos = fetch_discounts_coverage_status(conn, now=now)
 
     exec_stale = [s for s in sources if s.stale]
     data_stale = [d for d in data_freshness if d.stale]
-    ok = not exec_stale and not data_stale and bug8["ok"] and not afiliados.stale
+    ok = (not exec_stale and not data_stale and bug8["ok"]
+          and not afiliados.stale and not descontos.stale)
 
     # Gate B1: ok_critical ignora fontes/entradas critical=False (hoje, so'
     # Shopee) — e' isso que `main()` usa para o exit code. `ok` continua
@@ -573,8 +742,10 @@ def build_report(conn, now: datetime | None = None) -> dict:
     exec_stale_critical = [s for s in exec_stale if s.critical]
     data_stale_critical = [d for d in data_stale if d.critical]
     afiliados_critico_stale = afiliados.stale and afiliados.critical
+    descontos_critico_stale = descontos.stale and descontos.critical
     ok_critical = (not exec_stale_critical and not data_stale_critical
-                   and bug8["ok"] and not afiliados_critico_stale)
+                   and bug8["ok"] and not afiliados_critico_stale
+                   and not descontos_critico_stale)
 
     return {
         "ok": ok,
@@ -583,6 +754,7 @@ def build_report(conn, now: datetime | None = None) -> dict:
         "data_freshness": [asdict(d) for d in data_freshness],
         "bug8_invariants": bug8,
         "affiliate_watermark": asdict(afiliados),
+        "discounts_coverage": asdict(descontos),
     }
 
 
@@ -602,6 +774,12 @@ def _print_human(report: dict) -> None:
         else:
             flag = "ATRASADO-CRITICO" if d["critical"] else "ATRASADO-CONHECIDO"
         print(f"[{flag}] {d['reason']}")
+
+    d = report["discounts_coverage"]
+    print("\n=== Cobertura operacional dos descontos TikTok ===")
+    marca = {"ok": "OK", "unknown": "INDETERMINADO",
+             "job_atrasado": "JOB-ATRASADO", "fonte_atrasada": "FONTE-ATRASADA"}
+    print(f"[{marca.get(d['status'], d['status'])}] {d['source_name']}: {d['reason']}")
 
     print("\n=== Invariantes do Bug 8 (Shopee) ===")
     if report["bug8_invariants"]["ok"]:

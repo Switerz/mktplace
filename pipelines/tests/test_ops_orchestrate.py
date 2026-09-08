@@ -149,10 +149,11 @@ def test_default_executor_propaga_timeout_individual_do_step(monkeypatch):
 def test_timeout_budget_individual_soma_menos_que_o_recomendado_externo():
     """O orcamento somado dos timeouts individuais tem que caber com
     margem dentro do timeout externo documentado em scripts/run_task.ps1
-    (9000s) — se um dia a soma dos steps ultrapassar isso, o lock externo
-    mataria o processo pai antes dos timeouts internos protegerem as
-    fontes independentes. Vale para os DOIS pipelines (Gate C1)."""
-    RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS = 9000
+    (9600s desde o Gate UE8-I4 Task 1/2) — se um dia a soma dos steps
+    ultrapassar isso, o lock externo mataria o processo pai antes dos timeouts
+    internos protegerem as fontes independentes. Vale para os DOIS pipelines
+    (Gate C1)."""
+    RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS = 9600
     for budget in (orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS, orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS):
         assert budget < RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS
         margin = RECOMMENDED_EXTERNAL_LOCK_TIMEOUT_SECONDS - budget
@@ -412,6 +413,9 @@ def test_full_daily_contem_exatamente_as_fontes_recorrentes_na_ordem_correta():
         # Gate UE2-C Task 2/3 (2026-08-28): depois da ingestao e ANTES do
         # health_check, como todo step que publica dado que uma tela le.
         "tiktok_affiliate_cost_order_monthly",
+        # Gate UE8-I4 Task 1/2 (2026-09-08): mesma regra, e com dependencia de
+        # FONTE REAL em `daily_tiktok` — ver os testes dedicados no fim.
+        "tiktok_order_discounts_daily",
         "health_check",
     ]
 
@@ -958,7 +962,9 @@ def test_24_nenhuma_referencia_a_airflow_ou_dag():
 
 
 def test_27_orcamento_interno_dos_tres_pipelines_cabe_no_timeout_externo():
-    EXTERNO = 9000
+    # Gate UE8-I4 Task 1/2: 9000 -> 9600. A aritmetica que tornou a subida
+    # obrigatoria esta em test_ops_schedule_plan.
+    EXTERNO = 9600
     for budget in (orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS,
                    orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS,
                    orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS):
@@ -967,7 +973,8 @@ def test_27_orcamento_interno_dos_tres_pipelines_cabe_no_timeout_externo():
 
 
 def test_27_orcamento_do_full_daily_e_a_soma_real_incluindo_serving():
-    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 7800
+    # 7800 -> 8100 no Gate UE8-I4 Task 1/2 (+300 do step de descontos).
+    assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 8100
     assert orch.SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3000
 
 
@@ -1039,3 +1046,123 @@ def test_28_shopee_manual_refresh_ficou_intacto():
     assert names == ["daily_shopee_orders", "daily_shopee_stats", "daily_shopee_ads",
                      "sync_produtos_shopee", "monitor_bug8", "health_check"]
     assert orch.SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS == 3780
+
+
+# ===========================================================================
+# Gate UE8-I4 Task 1/2 — step de descontos do pedido TikTok
+# ===========================================================================
+
+def test_i4_step_existe_com_modulo_args_timeout_e_preflight():
+    p = _por_nome()
+    s = p["tiktok_order_discounts_daily"]
+    assert s.module == "pipelines.sync_tiktok_order_discounts_daily"
+    assert s.args == ("--mode", "auto", "--apply")
+    assert s.timeout_seconds == 300
+    assert s.preflight_source == "tiktok_order_discounts_daily"
+
+
+def test_i4_depende_do_step_que_grava_a_fonte_real():
+    """`daily_tiktok` e' quem escreve `raw.tiktok_shop_orders`, que e' a
+    `SOURCE_TABLE` deste sync. A dependencia e' de FONTE, nao de ordem."""
+    import pipelines.sync_tiktok_order_discounts_daily as sync
+    p = _por_nome()
+    assert p["tiktok_order_discounts_daily"].depends_on == ("daily_tiktok",)
+    assert sync.SOURCE_TABLE == "raw.tiktok_shop_orders"
+    fonte = _por_nome()["daily_tiktok"]
+    assert fonte.module == "pipelines.ingestion.daily_performance"
+    assert "tiktok" in fonte.args
+
+
+def test_i4_posicao_depois_de_daily_tiktok_e_antes_do_health_check():
+    nomes = [s.name for s in orch.PIPELINES["full_daily"]]
+    assert (nomes.index("daily_tiktok")
+            < nomes.index("tiktok_order_discounts_daily")
+            < nomes.index("health_check"))
+    assert nomes[-1] == "health_check", "health check tem de ser o ultimo"
+
+
+def test_i4_e_critico_e_nao_roda_sempre():
+    s = _por_nome()["tiktok_order_discounts_daily"]
+    assert s.critical is True
+    assert s.always_run is False
+
+
+def test_i4_blocked_critico_derruba_o_pipeline_para_failed():
+    """Consequencia ASSUMIDA de `critical=True`: VPN fora -> BLOCKED -> FAILED."""
+    resultados = {s.name: "SUCCESS" for s in orch.PIPELINES["full_daily"]}
+    resultados["tiktok_order_discounts_daily"] = "BLOCKED"
+    assert orch.compute_overall_status("full_daily", resultados) == "FAILED"
+
+
+def test_i4_failed_critico_tambem_derruba_o_pipeline():
+    resultados = {s.name: "SUCCESS" for s in orch.PIPELINES["full_daily"]}
+    resultados["tiktok_order_discounts_daily"] = "FAILED"
+    assert orch.compute_overall_status("full_daily", resultados) == "FAILED"
+
+
+def test_i4_nao_foi_rebaixado_silenciosamente_para_nao_critico():
+    """Se alguem marcar `critical=False` para "nao incomodar", o pipeline
+    passaria a sair DEGRADED (exit 0) com a fact defasada. Trava explicita."""
+    resultados = {s.name: "SUCCESS" for s in orch.PIPELINES["full_daily"]}
+    resultados["tiktok_order_discounts_daily"] = "FAILED"
+    assert orch.compute_overall_status("full_daily", resultados) != "DEGRADED"
+
+
+def test_i4_fonte_bloqueada_pula_o_step_sem_executar():
+    """`daily_tiktok` sem SUCCESS -> SKIPPED, e o comando nunca roda."""
+    executados = []
+
+    def executor(step):
+        executados.append(step.name)
+        return 1 if step.name == "daily_tiktok" else 0
+
+    res = orch.run_pipeline("full_daily", executor=executor,
+                            preflight_fn=lambda _s: (True, []))
+    assert res["daily_tiktok"] == "FAILED"
+    assert res["tiktok_order_discounts_daily"] == "SKIPPED"
+    assert "tiktok_order_discounts_daily" not in executados
+
+
+def test_i4_zero_retry_o_step_e_executado_uma_unica_vez():
+    contagem = {}
+
+    def executor(step):
+        contagem[step.name] = contagem.get(step.name, 0) + 1
+        return 0
+
+    orch.run_pipeline("full_daily", executor=executor,
+                      preflight_fn=lambda _s: (True, []))
+    assert contagem["tiktok_order_discounts_daily"] == 1
+
+
+def test_i4_preflight_bloqueado_impede_a_execucao_do_comando():
+    executados = []
+
+    def executor(step):
+        executados.append(step.name)
+        return 0
+
+    def preflight(source):
+        return (source != "tiktok_order_discounts_daily", [])
+
+    res = orch.run_pipeline("full_daily", executor=executor,
+                            preflight_fn=preflight)
+    assert res["tiktok_order_discounts_daily"] == "BLOCKED"
+    assert "tiktok_order_discounts_daily" not in executados
+
+
+def test_i4_nao_ha_janela_explicita_nos_args():
+    """Janela explicita com --apply e' recusada pelo proprio sync; passa-la
+    aqui faria o step falhar sempre."""
+    s = _por_nome()["tiktok_order_discounts_daily"]
+    assert "--date-from" not in s.args
+    assert "--date-to" not in s.args
+
+
+def test_i4_o_step_de_afiliados_nao_mudou():
+    """A ponte nova nao pode ter mexido no vizinho."""
+    a = _por_nome()["tiktok_affiliate_cost_order_monthly"]
+    assert a.args == ("--mode", "auto", "--apply")
+    assert a.timeout_seconds == 300
+    assert a.depends_on == ()
+    assert a.critical is True

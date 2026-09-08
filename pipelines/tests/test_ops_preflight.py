@@ -919,3 +919,227 @@ def test_preflight_de_serving_nao_depende_de_shopee_nem_de_pg_local():
         assert preflight.check_shopee_orders_files not in checks
         assert preflight.check_shopee_stats_files not in checks
         assert preflight.check_shopee_ads_files not in checks
+
+
+# ===========================================================================
+# Gate UE8-I4 Task 1/2 — preflight dos descontos do pedido TikTok
+# ===========================================================================
+
+class _CursorDescontos:
+    """Cursor roteado por trecho de SQL — baratissimo e sem banco."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._sql = ""
+
+    def execute(self, sql, params=None):
+        self._sql = " ".join(sql.split())
+        self.conn.executed.append(self._sql)
+        if self.conn.raise_on_execute:
+            raise self.conn.raise_on_execute
+
+    def fetchone(self):
+        s = self._sql
+        if "to_regclass" in s:
+            return (None,) if self.conn.faltando else ("existe",)
+        if "FROM pg_locks" in s:
+            return (self.conn.locks,)
+        if "LIMIT 1" in s:
+            return (1,) if self.conn.fonte_tem_linha else None
+        return (1,)
+
+    def fetchall(self):
+        if "FROM alembic_version" in self._sql:
+            return [(v,) for v in self.conn.alembic]
+        return []
+
+    def close(self):
+        pass
+
+
+class _ConnDescontos:
+    def __init__(self, faltando=False, fonte_tem_linha=True, locks=0,
+                 alembic=("015",), raise_on_execute=None):
+        self.executed = []
+        self.faltando = faltando
+        self.fonte_tem_linha = fonte_tem_linha
+        self.locks = locks
+        self.alembic = alembic
+        self.raise_on_execute = raise_on_execute
+        self.readonly_sessions = []
+
+    def cursor(self):
+        return _CursorDescontos(self)
+
+    def set_session(self, readonly=None):
+        self.readonly_sessions.append(readonly)
+
+    def close(self):
+        pass
+
+
+def _ligar(monkeypatch, **kw):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@neon.example:5432/db")
+    monkeypatch.setenv("DATAMART_DATABASE_URL",
+                       "postgresql://u:p@dm.example:5432/dm")
+    conns = []
+
+    def _connect(url, connect_timeout=5):
+        c = _ConnDescontos(**kw)
+        conns.append(c)
+        return c
+
+    monkeypatch.setattr(preflight.psycopg2, "connect", _connect)
+    return conns
+
+
+_CHECKS_I4 = ("check_discounts_relations", "check_discounts_alembic_version",
+              "check_discounts_source_not_empty",
+              "check_discounts_advisory_lock_free")
+
+
+def test_i4_a_fonte_esta_registrada_com_os_seis_checks():
+    nomes = [c.__name__ for c in
+             preflight.SOURCE_CHECKS["tiktok_order_discounts_daily"]]
+    assert nomes == ["check_rds", "check_neon", *_CHECKS_I4]
+
+
+def test_i4_relacoes_presentes_aprovam(monkeypatch):
+    _ligar(monkeypatch)
+    r = preflight.check_discounts_relations()
+    assert r.ok, r.detail
+
+
+def test_i4_relacao_ausente_bloqueia(monkeypatch):
+    _ligar(monkeypatch, faltando=True)
+    r = preflight.check_discounts_relations()
+    assert not r.ok
+    assert "ausente" in r.detail
+
+
+def test_i4_as_relacoes_conferidas_sao_destino_e_as_DUAS_auditorias():
+    assert preflight._DISCOUNTS_NEON_RELATIONS == (
+        "marts.fact_tiktok_order_discounts_daily",
+        "audit.source_sync_run",
+        "audit.data_quality_check",
+    )
+    assert preflight._DISCOUNTS_SOURCE_RELATION == "raw.tiktok_shop_orders"
+
+
+def test_i4_fonte_com_linha_aprova(monkeypatch):
+    _ligar(monkeypatch, fonte_tem_linha=True)
+    assert preflight.check_discounts_source_not_empty().ok
+
+
+def test_i4_fonte_VAZIA_bloqueia(monkeypatch):
+    """Exigencia explicita do gate: fonte vazia BLOQUEIA."""
+    _ligar(monkeypatch, fonte_tem_linha=False)
+    r = preflight.check_discounts_source_not_empty()
+    assert not r.ok
+    assert "VAZIA" in r.detail
+
+
+def test_i4_nao_usa_count_integral_na_fonte(monkeypatch):
+    """COUNT(*) seria scan completo de 2,7 milhoes a cada full_daily."""
+    conns = _ligar(monkeypatch)
+    preflight.check_discounts_source_not_empty()
+    sql = " ".join(q for c in conns for q in c.executed)
+    assert "LIMIT 1" in sql
+    assert "COUNT(*)" not in sql
+
+
+def test_i4_alembic_015_aprova(monkeypatch):
+    _ligar(monkeypatch, alembic=("015",))
+    assert preflight.check_discounts_alembic_version().ok
+
+
+def test_i4_alembic_013_aprova_e_e_o_piso(monkeypatch):
+    _ligar(monkeypatch, alembic=("013",))
+    assert preflight.check_discounts_alembic_version().ok
+    assert preflight._DISCOUNTS_MIN_ALEMBIC == "013"
+
+
+def test_i4_alembic_anterior_a_013_bloqueia(monkeypatch):
+    _ligar(monkeypatch, alembic=("012",))
+    r = preflight.check_discounts_alembic_version()
+    assert not r.ok
+    assert "anterior" in r.detail
+
+
+def test_i4_head_duplicado_bloqueia(monkeypatch):
+    _ligar(monkeypatch, alembic=("013", "014"))
+    r = preflight.check_discounts_alembic_version()
+    assert not r.ok
+    assert "head" in r.detail
+
+
+def test_i4_head_nao_numerico_bloqueia(monkeypatch):
+    """Um id fora do formato do projeto deve BLOQUEAR, nao levantar."""
+    _ligar(monkeypatch, alembic=("abc123",))
+    r = preflight.check_discounts_alembic_version()
+    assert not r.ok
+    assert "formato" in r.detail
+
+
+def test_i4_advisory_lock_livre_aprova(monkeypatch):
+    _ligar(monkeypatch, locks=0)
+    assert preflight.check_discounts_advisory_lock_free().ok
+
+
+def test_i4_advisory_lock_tomado_bloqueia(monkeypatch):
+    _ligar(monkeypatch, locks=1)
+    r = preflight.check_discounts_advisory_lock_free()
+    assert not r.ok
+    assert "lock" in r.detail
+
+
+def test_i4_a_chave_do_lock_bate_com_a_do_sync():
+    """Duas constantes, um teste que as trava: o preflight nao importa o modulo
+    do sync (nao deve carregar SQLAlchemy so' para diagnosticar)."""
+    import pipelines.sync_tiktok_order_discounts_daily as sync
+    assert preflight._DISCOUNTS_ADVISORY_LOCK_KEY == sync.ADVISORY_LOCK_KEY
+
+
+def test_i4_todos_os_checks_usam_sessao_somente_leitura(monkeypatch):
+    conns = _ligar(monkeypatch)
+    for nome in _CHECKS_I4:
+        getattr(preflight, nome)()
+    assert conns
+    assert all(c.readonly_sessions == [True] for c in conns)
+
+
+def test_i4_nenhum_check_escreve(monkeypatch):
+    conns = _ligar(monkeypatch)
+    for nome in _CHECKS_I4:
+        getattr(preflight, nome)()
+    sql = " ".join(q for c in conns for q in c.executed).upper()
+    for proibido in ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ",
+                     "TRUNCATE"):
+        assert proibido not in sql, proibido
+
+
+def test_i4_variavel_ausente_bloqueia_sem_conectar(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATAMART_DATABASE_URL", raising=False)
+    for nome in _CHECKS_I4:
+        r = getattr(preflight, nome)()
+        assert not r.ok
+        assert "nao configurad" in r.detail
+
+
+def test_i4_mensagens_sanitizadas_nunca_expoem_credencial(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL",
+                       "postgresql://usr:S3nha@neon.example:5432/db")
+    monkeypatch.setenv("DATAMART_DATABASE_URL",
+                       "postgresql://usr:S3nha@dm.example:5432/dm")
+
+    def _explode(url, connect_timeout=5):
+        raise RuntimeError("boom com segredo")
+
+    monkeypatch.setattr(preflight.psycopg2, "connect", _explode)
+    for nome in _CHECKS_I4:
+        r = getattr(preflight, nome)()
+        assert not r.ok
+        assert "S3nha" not in r.detail
+        assert "usr" not in r.detail
+        assert "boom" not in r.detail

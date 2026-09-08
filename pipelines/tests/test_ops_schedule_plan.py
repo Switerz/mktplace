@@ -207,9 +207,12 @@ def test_xml_configura_execution_time_limit_maior_que_o_timeout_do_lock():
     de termino do filho, e escrita dos logs finais. Se fossem iguais, o
     Task Scheduler poderia matar o wrapper no meio dessa limpeza."""
     xml_text = sp.render_task_scheduler_xml(sp.PROPOSED_SCHEDULE[0])
-    assert "<ExecutionTimeLimit>PT2H40M</ExecutionTimeLimit>" in xml_text
-    assert sp.EXTERNAL_LOCK_TIMEOUT_SECONDS == 9000
-    assert sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS == 9600
+    # Gate UE8-I4 Task 1/2: 9000->9600 no lock e 9600->10200 no
+    # ExecutionTimeLimit. A margem de LIMPEZA (600s) e' preservada; o que
+    # motivou a subida foi a margem de ORCAMENTO, no teste abaixo.
+    assert "<ExecutionTimeLimit>PT2H50M</ExecutionTimeLimit>" in xml_text
+    assert sp.EXTERNAL_LOCK_TIMEOUT_SECONDS == 9600
+    assert sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS == 10200
     assert sp.TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS > sp.EXTERNAL_LOCK_TIMEOUT_SECONDS
 
 
@@ -222,12 +225,19 @@ def test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps():
     Checkpoint O1 Task 2/2, mais serving_ml_cross_company=300+
     serving_tiktok_channel_efficiency=600 do Gate S3, mais
     tiktok_affiliate_cost_order_monthly=300 do Gate UE2-C, mais
+    tiktok_order_discounts_daily=300 do Gate UE8-I4, mais
     health_check=180), com margem; e o
-    ExecutionTimeLimit do Task Scheduler (9600s) tem que ficar acima do timeout
+    ExecutionTimeLimit do Task Scheduler (10200s) tem que ficar acima do timeout
     do lock, com margem adicional para a limpeza pos-timeout (Stop-Process +
-    espera + logs)."""
+    espera + logs).
+
+    Gate UE8-I4 Task 1/2: o orcamento foi de 7800 para 8100s. O lock TEVE de
+    subir junto (9000 -> 9600), e a aritmetica e' a prova: com lock em 9000 e
+    orcamento em 7800 a folga era de 30s (1200 contra 1170 exigidos), entao um
+    step de T segundos so' caberia se `9000-(7800+T) > 0,15*(7800+T)`, ou seja
+    `T < 26s`. Nenhum envelope util cabia."""
     import pipelines.ops.orchestrate as orch
-    internal_budget_seconds = 7800
+    internal_budget_seconds = 8100
     assert orch.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == internal_budget_seconds, (
         "orcamento hardcoded neste teste saiu de sincronia com a soma real "
         "dos timeouts de PIPELINES['full_daily'] — atualize os dois numeros juntos"

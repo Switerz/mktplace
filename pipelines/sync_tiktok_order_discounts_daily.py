@@ -616,22 +616,38 @@ def publish_in_transaction(conn, snapshot: SourceSnapshot, run_id: str) -> int:
     conn.execute(text(f"SET LOCAL statement_timeout = {TARGET_STATEMENT_TIMEOUT_MS}"))
     conn.execute(SQL_STAGING_CREATE)
 
-    for r in snapshot.rows:
-        conn.execute(SQL_STAGING_INSERT, {
-            "ref_date": r.ref_date,
-            "brand": r.brand,
-            "commercial_orders": r.commercial_orders,
-            "official_gmv": r.official_gmv,
-            "full_product_value": r.full_product_value,
-            "seller_discount_signed": r.seller_discount_signed,
-            "platform_subsidy_amount": r.platform_subsidy_amount,
-            "cancelled_orders": r.cancelled_orders,
-            "cancelled_seller_discount_signed": r.cancelled_seller_discount_signed,
-            "cancelled_platform_subsidy_amount": r.cancelled_platform_subsidy_amount,
-            "source_max_updated_at": r.source_max_updated_at,
-            "raw_max_updated_at": r.raw_max_updated_at,
-            "source_run_id": run_id,
-        })
+    # UMA chamada para as N linhas (`executemany` do driver), nao N chamadas.
+    # O full publica 2.081 linhas, e o laco anterior custava um round-trip ao
+    # Neon POR LINHA: dos 347 s medidos no piloto, ~320 s eram rede, nao
+    # trabalho de banco. Nada mais muda -- mesmo SQL parametrizado, mesmos
+    # binds, mesma staging, mesma transacao, zero interpolacao de valor.
+    parametros = [{
+        "ref_date": r.ref_date,
+        "brand": r.brand,
+        "commercial_orders": r.commercial_orders,
+        "official_gmv": r.official_gmv,
+        "full_product_value": r.full_product_value,
+        "seller_discount_signed": r.seller_discount_signed,
+        "platform_subsidy_amount": r.platform_subsidy_amount,
+        "cancelled_orders": r.cancelled_orders,
+        "cancelled_seller_discount_signed": r.cancelled_seller_discount_signed,
+        "cancelled_platform_subsidy_amount": r.cancelled_platform_subsidy_amount,
+        "source_max_updated_at": r.source_max_updated_at,
+        "raw_max_updated_at": r.raw_max_updated_at,
+        "source_run_id": run_id,
+    } for r in snapshot.rows]
+
+    # Guarda defensiva: `validate_contract` ja aborta com janela vazia, entao
+    # esta lista nunca deveria chegar vazia. Um `executemany` com lista vazia
+    # levantaria no driver e o erro apontaria para o lugar errado -- e, pior,
+    # o DELETE abaixo esvaziaria a janela sem substituto.
+    if not parametros:
+        raise DiscountSyncError(
+            "publicacao chamada sem nenhuma linha: a validacao de contrato "
+            "deveria ter abortado antes. DELETE sem INSERT esvaziaria a "
+            "janela no destino."
+        )
+    conn.execute(SQL_STAGING_INSERT, parametros)
 
     janela = {"date_from": snapshot.window.date_from,
               "date_to": snapshot.window.date_to}

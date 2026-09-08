@@ -3774,3 +3774,191 @@ Um smoke aprovado não converte nenhuma destas ressalvas em garantia:
 6. **Proibido somar os dois financiadores.** Não existe `total_discount`.
 7. **O 404 de `/favicon.ico`** em `/canais` é pré-existente e **fora do escopo**
    desta frente.
+
+
+---
+
+## 30. UE8-I4 Task 1/2 — automação dos descontos TikTok
+
+### 30.1 Estado
+
+**IMPLEMENTADA E VALIDADA LOCALMENTE. NÃO EXECUTADA.**
+
+- **zero execução**: nenhum sync, nenhum `full_daily`, nenhum banco escrito
+  nesta rodada;
+- **Scheduler não alterado** — continua `Enabled=false`;
+- **checkout operacional não atualizado**: o Task Scheduler aponta para
+  `C:\Users\Notebook\Desktop\mktplace`, e este trabalho foi feito no
+  worktree `unit-economics-audit`. Enquanto o checkout operacional não for
+  atualizado, uma execução agendada rodaria **o código antigo, sem o step**;
+- **execução agendada não observada**;
+- **duração real pendente** — a medição do lote otimizado é da Task 2/2;
+- **`stale_load` é o estado esperado** até a ativação: a carga segue manual e o
+  rótulo expira em 30 h por contrato, não por defeito;
+- **Task 2/2 pendente.**
+
+### 30.2 Publicação em LOTE — o que os 347 s eram
+
+O piloto do UE8-I2 levou **347 s** para publicar 2.081 linhas. A causa não era
+o banco: era **um round-trip ao Neon por linha**. O laço de `INSERT` individual
+virou **uma única chamada** com a lista de parâmetros (`executemany` do
+driver).
+
+O que **não** mudou: mesmo SQL parametrizado, mesmos binds, zero interpolação
+de valor, mesma staging `TEMP ... ON COMMIT DROP`, mesmo `DELETE` da janela,
+mesmo `INSERT` explícito do staging, mesmo `EXCEPT` bidirecional antes do
+commit, mesma transação, mesmos `TARGET_COLUMNS`, mesmos sinais, mesmos `NULL`,
+mesmo `source_run_id`, mesmos dois relógios. Nenhuma fórmula, nenhum grão,
+nenhum total.
+
+Uma **guarda nova**: lista vazia levanta **antes** do `DELETE`. Sem ela, um
+`executemany` vazio levantaria no driver depois de a janela já ter sido
+apagada, e o erro apontaria para o lugar errado.
+
+Provado por teste: uma chamada para N linhas, parâmetros preservados linha a
+linha (inclusive `None` de procedência, que **não** vira zero), ordem
+espelhando o snapshot, `run_id` em todas as linhas, chaves exatamente iguais a
+`TARGET_COLUMNS`, ordem staging → DELETE → INSERT → EXCEPT intacta, `EXCEPT`
+divergente ainda bloqueando, e resultado idêntico ao caminho anterior.
+
+### 30.3 Preflight
+
+Fonte nova `tiktok_order_discounts_daily`, com seis checks — todos
+**read-only** e baratos:
+
+| Check | O que prova |
+|---|---|
+| `check_rds` · `check_neon` | conectividade dos dois bancos (`SELECT 1`) |
+| `check_discounts_relations` | `to_regclass` do destino (013) + **as duas** tabelas de auditoria (003) no Neon, e da fonte no Data Mart |
+| `check_discounts_alembic_version` | head único e `>= 013` — pega tabela criada à mão, fora da cadeia |
+| `check_discounts_source_not_empty` | `SELECT 1 ... LIMIT 1`; **fonte vazia BLOQUEIA** |
+| `check_discounts_advisory_lock_free` | `pg_locks` sem a chave do sync — outra execução viva vira BLOCKED explícito em vez de espera silenciosa |
+
+**Nenhum `COUNT(*)` integral**: varreria 2,7 milhões de linhas a cada
+`full_daily`. As validações profundas (grão, status, fechamento de populações,
+sinais) continuam dentro do sync. Todas as mensagens são sanitizadas — provado
+por teste que injeta credencial e confirma que ela não aparece.
+
+### 30.4 Step no `full_daily`
+
+```
+Step("tiktok_order_discounts_daily",
+     "pipelines.sync_tiktok_order_discounts_daily",
+     ("--mode", "auto", "--apply"),
+     timeout_seconds=300,
+     preflight_source="tiktok_order_discounts_daily",
+     depends_on=("daily_tiktok",),
+     critical=True)
+```
+
+**`depends_on=("daily_tiktok",)` é dependência de FONTE REAL**, confirmada no
+código: `daily_tiktok` é o step que grava `raw.tiktok_shop_orders`, que é
+exatamente a `SOURCE_TABLE` do sync. Contraste deliberado com o step irmão de
+afiliados, cujo `depends_on=()` existe porque a fonte dele
+(`silver.stg_tiktok_payments_by_order`) é **externa** a este repositório.
+
+Posição: **depois** de `daily_tiktok` e **antes** do `health_check`, que segue
+sendo o último step global. `always_run=False`, **zero retry** — o orquestrador
+não reexecuta step algum, e este em particular não pode ser reexecutado às
+cegas: um commit indeterminado deixa as auditorias em `running` de propósito.
+
+**`critical=True`, com a consequência assumida e testada:** VPN fora deixa o
+step em `BLOCKED` e, por ser crítico, `compute_overall_status` devolve `FAILED`
+e o pipeline sai com exit 1. Um teste específico impede o rebaixamento
+silencioso para não-crítico — que faria o pipeline sair `DEGRADED`, exit 0, com
+a fact defasada em silêncio.
+
+### 30.5 Timeout e orçamento — a subida do lock foi aritmética
+
+Os **347 s** do piloto **não** servem como referência: continham o problema dos
+INSERTs individuais. As medições que valem, do UE8-I3: incremental **4,2 s**,
+backfill **15,7 s**, leitura do full **20 s**. O envelope adotado é **300 s** —
+o mesmo do step irmão de afiliados, conservador até a medição da Task 2/2.
+
+A regra do projeto é `margem > 15% do orçamento interno`. Com o lock em
+**9000 s** e o orçamento em **7800 s**, a folga era de **30 s** (1200 contra
+1170 exigidos). Um step de `T` segundos só caberia se
+`9000 − (7800+T) > 0,15 × (7800+T)`, isto é **`T < 26 s`** — nenhum envelope
+útil cabia. Por isso, e só por isso, o timeout externo subiu:
+
+| Constante | Antes | Agora |
+|---|---|---|
+| Orçamento interno (`full_daily`) | 7800 s | **8100 s** |
+| Timeout externo do lock | 9000 s (PT2H30M) | **9600 s (PT2H40M)** |
+| Margem de orçamento | 1200 s (15,38%) | **1500 s (18,5%)** |
+| `ExecutionTimeLimit` | 9600 s (PT2H40M) | **10200 s (PT2H50M)** |
+| Margem de limpeza | 600 s | **600 s** (preservada) |
+
+Sincronizados: `orchestrate.py`, `schedule_plan.py`, `scripts/run_task.ps1`,
+comentários e testes. Os quatro números são travados por testes em três
+arquivos.
+
+### 30.6 Health check — duas dimensões independentes
+
+**1. Execução.** Entrada nova em `EXPECTED_SOURCES` com a fonte **canônica**,
+limite de **30 h**, `critical=True`. Os nomes derivados (`_full`, `_backfill`)
+**não** entram: marcam ciclos mensal e semanal, e cobrar 30 h deles reprovaria
+o pipeline todo dia. Essas obrigações duráveis são verificadas dentro do sync,
+sob o advisory lock.
+
+**2. Cobertura operacional.** `fetch_discounts_coverage_status` distingue duas
+coisas que um número único confundiria:
+
+- **job parado** — não há execução `success`, ou o `source_max_date` dela ficou
+  atrás do último dia fechado;
+- **fonte parada** — o job roda e a janela alcança D−1, mas `MAX(ref_date)` na
+  fact não avançou: a fonte deixou de produzir.
+
+O teto de comparação vem de `last_closed_date` **do próprio módulo do sync** —
+dois calendários divergiriam na fronteira da meia-noite BRT. Tolerância de
+**1 dia**, porque a janela sempre termina em D−1.
+
+**O que a cobertura NÃO usa,** e um teste garante: `source_max_updated_at` e
+`raw_max_updated_at` (carimbos **técnicos** de quando a linha foi tocada, não
+competência comercial) e `observed_grid` (que não prova ingestão). Timestamp
+naive continua sem rótulo de fuso.
+
+**Pré-piloto:** sem auditoria, a cobertura é `unknown` com `stale=False` — e
+isso **não esconde** a falha da dimensão de execução, que reprova
+`ok_critical` porque a fonte canônica é crítica e não tem sucesso registrado.
+Uma rotina declarada crítica não fica verde antes da primeira execução.
+
+### 30.7 Validação
+
+| Suíte | Resultado |
+|---|---|
+| `pipelines/tests` completa | **3454 passed, ZERO falha** |
+| Focais: sync · preflight · orchestrate · health · schedule | 90 · 101 · 129 · 117 · 33 |
+| `apps/api` | 1006 passed, **mesmas 43 falhas ambientais** da baseline, por node ID |
+| `compileall` · `git diff --check` | exit 0 · exit 0 |
+
+**API e frontend intactos:** zero arquivo sob `apps/`, zero migration, zero
+Avoe, zero lockfile. Os 13 arquivos tocados são todos de `pipelines/` e
+`scripts/`.
+
+Scan de secrets/PII: as únicas DSN no diff são fixtures sintéticas
+(`u:p@neon.example`, `usr:S3nha@dm.example`) em arquivos de **teste**, que
+existem para provar que a sanitização as remove. Zero em código de produção,
+zero caminho pessoal.
+
+### 30.8 Um defeito real que o teste pegou
+
+A primeira versão de `fetch_discounts_coverage_status` lia a linha por
+**posição** (`linha[0]`, `linha[1]`). A conexão de produção usa
+**`RealDictCursor`** (`diagnose_bug8_neon._neon_readonly`), então as linhas
+voltam como `dict` — o acesso por posição teria levantado `KeyError` em **toda
+execução real**, e o agregado sem `AS` viria na chave `"max"`. O fake do
+health check, que devolve `dict` porque a produção devolve `dict`, reprovou de
+imediato. Corrigido com acesso por nome e `AS fact_max_ref_date` explícito.
+
+### 30.9 Pendente para a Task 2/2
+
+1. **Atualizar o checkout operacional** — sem isso o Scheduler roda o código
+   antigo, sem o step.
+2. **Executar o preflight real** contra os dois bancos.
+3. **Piloto controlado** de `full_daily`, ou do step isolado.
+4. **Medir a duração real** do lote otimizado e, só então, decidir se 300 s é
+   o envelope definitivo.
+5. **Reconciliar** a carga.
+6. **Observar uma execução agendada.**
+7. **Confirmar `recent_load`** depois da primeira execução automática.

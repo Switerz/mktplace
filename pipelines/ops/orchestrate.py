@@ -294,6 +294,40 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # 300 s e' o maior envelope que ainda deixa a margem do orcamento acima
         # dos 15% exigidos (7.800 s contra 9.000 s do lock externo = 15,38%).
         Step("tiktok_affiliate_cost_order_monthly", "pipelines.sync_tiktok_affiliate_cost_order_monthly", ("--mode", "auto", "--apply"), timeout_seconds=300, preflight_source="tiktok_affiliate_cost_order_monthly", critical=True),
+        # Gate UE8-I4 Task 1/2 (2026-09-08): descontos e subsidios do pedido
+        # TikTok, que `/canais` ja le em producao desde o UE8-I3 (PASS).
+        #
+        # `depends_on=("daily_tiktok",)` e' dependencia de FONTE REAL, nao de
+        # ordem: `daily_tiktok` e' o step que grava `raw.tiktok_shop_orders`,
+        # que e' exatamente a fonte deste sync (`SOURCE_TABLE`). Publicar
+        # descontos sobre uma raw que nao foi atualizada nesta execucao
+        # produziria um snapshot coerente porem velho, sem nada indicando isso.
+        # Contraste deliberado com o step de afiliados logo acima, cujo
+        # `depends_on=()` existe porque a fonte dele
+        # (`silver.stg_tiktok_payments_by_order`) e' EXTERNA a este repositorio.
+        #
+        # Posicao: depois de `daily_tiktok` (a fonte) e antes do `health_check`
+        # (que precisa reportar o resultado deste step na mesma execucao).
+        #
+        # `--mode auto` decide full x backfill x incremental SOB o advisory
+        # lock, dentro do proprio sync. Zero retry: o orquestrador nao reexecuta
+        # step algum, e este em particular NAO pode ser reexecutado as cegas —
+        # um commit indeterminado deixa as auditorias em `running` de proposito.
+        #
+        # `critical=True`: `/canais` esta em producao lendo esta fact, e um step
+        # nao-critico esconderia defasagem indefinida atras de um DEGRADED.
+        # Consequencia ASSUMIDA e verificada em teste: VPN fora deixa o step em
+        # BLOCKED e, por ser critico, `compute_overall_status` devolve FAILED e
+        # o pipeline sai com exit 1. O que se preserva nesse caso e' o snapshot
+        # ja publicado — a carga e' atomica —, nunca o resultado verde.
+        #
+        # 300 s: mesmo envelope do step irmao de afiliados. As medicoes do
+        # UE8-I3 dao incremental 4,2 s, backfill 15,7 s e leitura do full 20 s;
+        # a publicacao passou a ser em LOTE nesta task, entao os 347 s do piloto
+        # (dominados por 2.081 round-trips) nao valem mais como referencia. A
+        # duracao real otimizada so' sera medida na Task 2/2 — 300 s e' envelope
+        # conservador ate la, nao uma estimativa.
+        Step("tiktok_order_discounts_daily", "pipelines.sync_tiktok_order_discounts_daily", ("--mode", "auto", "--apply"), timeout_seconds=300, preflight_source="tiktok_order_discounts_daily", depends_on=("daily_tiktok",), critical=True),
         # Sempre roda por ultimo, mesmo se algo anterior falhou/bloqueou —
         # e' o resumo do estado real, precisa rodar para reportar a falha.
         # always_run + ser o ULTIMO item desta tupla e' o que garante
@@ -353,9 +387,20 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
 # steps de serving: 600 (serving_ml) + 600 (serving_tiktok_brand) + 1800
 # (serving_tiktok_creator) = 3000s; 7500s (~2h05) no Gate S3 Task 2/3
 # (2026-08-18), que somou 300 (serving_ml_cross_company, quatro linhas) + 600
-# (serving_tiktok_channel_efficiency, ~4.7 mil linhas) = 900s; e 7800s (~2h10)
-# desde o Gate UE2-C Task 2/3 (2026-08-28), que somou 300
-# (tiktok_affiliate_cost_order_monthly) — os TREZE steps atuais. O creator recebe o triplo dos outros porque
+# (serving_tiktok_channel_efficiency, ~4.7 mil linhas) = 900s; 7800s (~2h10) no
+# Gate UE2-C Task 2/3 (2026-08-28), que somou 300
+# (tiktok_affiliate_cost_order_monthly); e 8100s (~2h15) desde o Gate UE8-I4
+# Task 1/2 (2026-09-08), que somou 300 (tiktok_order_discounts_daily) — os
+# CATORZE steps atuais.
+#
+# Esse ultimo passo EXIGIU elevar o timeout externo, e a aritmetica e' a
+# prova: a regra do projeto e' `margem > 15% do orcamento` (ver
+# test_execution_time_limit_e_maior_que_o_orcamento_interno_dos_steps). Com o
+# lock em 9000s e orcamento 7800s, a margem era 1200s contra os 1170s exigidos
+# — folga de 30s. Um step de T segundos precisa de
+# `9000 - (7800+T) > 0.15*(7800+T)`, ou seja `T < 26s`: NENHUM envelope util
+# cabia. O lock subiu para 9600s (margem 1500s = 18,5% sobre 8100s) e o
+# ExecutionTimeLimit para 10200s, preservando os 600s de limpeza. O creator recebe o triplo dos outros porque
 # reescreve 66.347 linhas numa janela de 90 dias, contra 360 do ML e 450 do
 # brand (medido em 17/08/2026). Caiu de 7200s para 3600s no Gate C1
 # (2026-07-16), que removeu os 3 steps Shopee diarios (900*3=2700s) +
