@@ -9,6 +9,7 @@ from app.deps.filters import (
     ResolvedFilters, filters_query, filters_query_default_days, resolve_brands,
 )
 from app.deps.period import EffectivePeriod, resolve_period, today_brt
+from app.schemas.avoe_snapshot import AvoeSnapshotResponse
 from app.schemas.executive_summary import ExecutiveSummaryResponse
 from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
 from app.schemas.performance import (
@@ -18,6 +19,7 @@ from app.schemas.performance import (
     ProdutosShopeeResponse, ProdutosShopeeSummaryResponse,
     QualityResponse, TempoRealResponse, TrendResponse,
 )
+from app.services import avoe_snapshot_service as avoe_svc
 from app.services import executive_summary_service
 from app.services import gold_service as svc
 from app.services import monitoramento_preco_service as mp_svc
@@ -656,4 +658,42 @@ def monitoramento_preco(
         # requisicao, logo nao pode ser 422. A mensagem devolvida e' FIXA — o
         # texto da excecao fica no log do servidor, nunca na resposta.
         raise HTTPException(500, ERRO_SERVING_INCONSISTENTE)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot manual da Avoe — Gate AVH-4B-S Task 1/2
+# ---------------------------------------------------------------------------
+
+#: Resposta FIXA para inconsistencia da camada de serving da Avoe. Nao carrega
+#: o texto da excecao: ele descreve estado interno e vai ao log do servidor.
+ERRO_AVOE_SERVING_INCONSISTENTE = (
+    "Snapshot da Avoe indisponivel: inconsistencia na camada de serving. "
+    "Acione o time de dados."
+)
+
+
+@router.get("/avoe-snapshot", response_model=AvoeSnapshotResponse)
+def avoe_snapshot(db: Session = Depends(get_db)):
+    """Ultima captura VALIDA do snapshot manual da Avoe.
+
+    SEM PARAMETRO, de proposito: o contrato e' "a ultima captura valida", e
+    filtro por marca, canal ou competencia seria escopo da tela, nao do
+    serving. Uma captura mais nova mas invalida e' ignorada em favor da
+    anterior que se sustenta.
+
+    FONTE EXTERNA E MANUAL. Nao e' KPI da Torre, nao substitui
+    `fact_marketplace_daily_performance` e nao entra em `/overview` nem em
+    `/canais`. A propria resposta declara isso em `meta.is_official_torre_source`
+    e nos avisos.
+
+    Ausencia de captura valida NAO e' erro: devolve 200 com
+    `status = 'unavailable'`, arrays vazios e `unavailable_reason` factual.
+    """
+    try:
+        return avoe_svc.get_avoe_snapshot(db)
+    except avoe_svc.AvoeSnapshotError:
+        # Inconsistencia da nossa camada, nao erro do cliente: contagem
+        # agregada divergindo das linhas lidas, sessao ausente. Nao e'
+        # recuperavel mudando a requisicao, logo nao pode ser 422.
+        raise HTTPException(500, ERRO_AVOE_SERVING_INCONSISTENTE)
 
