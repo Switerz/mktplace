@@ -62,6 +62,7 @@ class FakeExecutor:
         self.mart, self.fail_on = mart, fail_on
         self.fail_rollback, self.count_override = fail_rollback, count_override
         self.calls: list[str] = []
+        self.backup_committed = False
         self._snapshot: dict | None = None
         self._staging: pd.DataFrame | None = None
         self._scopes = None
@@ -74,7 +75,12 @@ class FakeExecutor:
         self.calls.append("begin"); self._snapshot = dict(self.mart.rows); self._maybe_fail("begin")
 
     def backup_scope(self, scopes):
+        # Gate SH-API-2E1: o backup roda ANTES de begin(), em transacao propria,
+        # e so' conta como feito depois de commitado.
         self.calls.append("backup"); self._scopes = scopes; self._maybe_fail("backup")
+        self._snapshot = dict(self.mart.rows)
+        self.backup_committed = True
+        return {"table": "bkp_fake", "rows": len(self.mart.rows), "checksum": "fake"}
 
     def delete_scope(self, scopes):
         self.calls.append("delete")
@@ -167,8 +173,11 @@ def _row(brand="apice", month="2026-05", sku="S1", prod="Produto A",
             "unique_buyers": 1, "avg_price": gmv / units if units else None}
 
 
-def _staging(rows, scopes):
-    return bf.Staging(rows=pd.DataFrame(rows), scopes=scopes)
+def _staging(rows, scopes=None):
+    # Gate SH-API-2E1: `apply_scoped_replace` agora exige a allowlist COMPLETA.
+    # Testes que nao estao exercitando a allowlist usam o par autorizado.
+    return bf.Staging(rows=pd.DataFrame(rows),
+                      scopes=list(bf.AUTHORIZED_SCOPES) if scopes is None else scopes)
 
 
 # ---------------------------------------------------------------------------
@@ -227,40 +236,43 @@ def test_04_falha_entre_delete_e_insert_faz_rollback_integral(monkeypatch):
     original = {k: dict(v) for k, v in mart.rows.items()}
     ex = FakeExecutor(mart, fail_on="insert")
 
-    code = bf.apply_scoped_replace(_staging([_row(sku="S1")], [("apice", "2026-05")]),
+    code = bf.apply_scoped_replace(_staging([_row(sku="S1")]),
                                    executor=ex)
 
     assert code == bf.EXIT_ROLLED_BACK
     assert mart.rows == original
-    assert ex.calls == ["begin", "backup", "delete", "insert", "rollback"]
+    # Gate SH-API-2E1: o backup e COMMITADO antes de a transacao de mutacao
+    # abrir. Por isso "backup" precede "begin" — se caisse dentro da mesma
+    # transacao, o rollback levaria o backup junto.
+    assert ex.calls == ["backup", "begin", "delete", "insert", "rollback"]
     assert "commit" not in ex.calls
 
 
 def test_04b_rollback_que_tambem_falha_devolve_indeterminado(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES", "1")
     ex = FakeExecutor(FakeMart([_row()]), fail_on="insert", fail_rollback=True)
-    code = bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+    code = bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert code == bf.EXIT_INDETERMINATE
 
 
 def test_04c_commit_que_falha_devolve_indeterminado(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES", "1")
     ex = FakeExecutor(FakeMart(), fail_on="commit")
-    code = bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+    code = bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert code == bf.EXIT_INDETERMINATE
 
 
 def test_04d_contagem_pos_insert_divergente_faz_rollback(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES", "1")
     ex = FakeExecutor(FakeMart(), count_override=99)
-    code = bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+    code = bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert code == bf.EXIT_ROLLED_BACK
 
 
 def test_04e_apply_sem_variavel_de_consentimento_e_recusado():
     ex = FakeExecutor(FakeMart())
     with pytest.raises(bf.BackfillValidationError):
-        bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+        bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert ex.calls == []
 
 
@@ -270,7 +282,7 @@ def test_04e_apply_sem_variavel_de_consentimento_e_recusado():
 
 def test_05_staging_vazia_com_destino_nao_vazio_bloqueia():
     before = pd.DataFrame([_row(sku="S1"), _row(sku="S2")])
-    rec = bf.reconcile(before, _staging([], [("apice", "2026-05")]),
+    rec = bf.reconcile(before, _staging([]),
                        compared_target=bf.TARGET_LOCAL)
     with pytest.raises(bf.BackfillValidationError) as ei:
         bf.assert_reconciliation_sane(rec)
@@ -282,7 +294,7 @@ def test_05b_nao_da_para_validar_destino_sem_ter_comparado():
     """Guarda central do Gate SH-API-2B-R: sem ler banco, a validacao de
     'staging vazia com destino nao vazio' e' impossivel — e recusa dizer que
     passou."""
-    rec = bf.reconcile(None, _staging([], [("apice", "2026-05")]))
+    rec = bf.reconcile(None, _staging([]))
     assert rec.compared is False
     with pytest.raises(bf.BackfillValidationError) as ei:
         bf.assert_reconciliation_sane(rec)
@@ -372,7 +384,7 @@ def test_09b_dry_run_real_compara_banco_e_candidato():
         [("apice", "2026-05")], target=bf.TARGET_LOCAL, engine_factory=factory,
         env=LOCAL_ENV)
     assert len(before) == 2
-    st = _staging([_row(sku="S1", gmv=Decimal("100.00"))], [("apice", "2026-05")])
+    st = _staging([_row(sku="S1", gmv=Decimal("100.00"))])
     rec = bf.reconcile(before, st, compared_target=bf.TARGET_LOCAL)
 
     assert rec.compared is True and rec.compared_target == "local"
@@ -543,9 +555,9 @@ def test_13_arquivo_rejeitado_impede_qualquer_escrita(tmp_path, monkeypatch):
 def test_14_hash_alterado_entre_dry_run_e_apply_bloquearia(tmp_path):
     """A staging declara o hash de cada arquivo aceito. Comparar os mapas de
     hash de duas execucoes detecta troca de arquivo entre o dry-run e o apply."""
-    a = bf.Staging(rows=pd.DataFrame([_row()]), scopes=[("apice", "2026-05")],
+    a = bf.Staging(rows=pd.DataFrame([_row()]), scopes=list(bf.AUTHORIZED_SCOPES),
                    file_hashes={"apice/Order.all.20260501_20260531.xlsx": "aaa"})
-    b = bf.Staging(rows=pd.DataFrame([_row()]), scopes=[("apice", "2026-05")],
+    b = bf.Staging(rows=pd.DataFrame([_row()]), scopes=list(bf.AUTHORIZED_SCOPES),
                    file_hashes={"apice/Order.all.20260501_20260531.xlsx": "bbb"})
     assert a.file_hashes != b.file_hashes
     mudou = [k for k in a.file_hashes if a.file_hashes[k] != b.file_hashes.get(k)]
@@ -559,8 +571,26 @@ def test_15_modo_e_obrigatorio_e_apply_produtivo_esta_bloqueado(capsys):
     ns = bf.build_parser().parse_args(["--scope", "apice:2026-05", "--offline-dry-run"])
     assert ns.mode == "offline-dry-run"
 
+    # Gate SH-API-2E1: um unico escopo agora e' recusado pela ALLOWLIST antes
+    # de chegar a barreira final — e a mensagem tem de dizer o que falta, nao
+    # so' "bloqueado".
     code = bf.main(["--scope", "apice:2026-05", "--apply"])
     assert code == bf.EXIT_VALIDATION_REFUSED
+    err = capsys.readouterr().err
+    assert "PARCIAL recusada" in err and "barbours:2026-05" in err
+
+    # Com a allowlist completa, --target e consentimento, a barreira final
+    # continua bloqueando a escrita.
+    import os as _os
+    _os.environ[bf.CONSENT_ENV] = "1"
+    _os.environ["BACKFILL_NEON_RW_URL"] = "postgresql://u@remoto.example/db"
+    try:
+        code2 = bf.main(["--scope", "apice:2026-05", "--scope", "barbours:2026-05",
+                         "--apply", "--target", "neon"])
+    finally:
+        _os.environ.pop(bf.CONSENT_ENV, None)
+        _os.environ.pop("BACKFILL_NEON_RW_URL", None)
+    assert code2 == bf.EXIT_VALIDATION_REFUSED
     assert "APPLY PRODUTIVO BLOQUEADO" in capsys.readouterr().err
 
 
@@ -614,6 +644,15 @@ class WriteConn:
 
         class R:
             def scalar(self_inner): return outer._count
+
+            # Gate SH-API-2E1: o backup confere contagem+checksum via
+            # .mappings().first(). O fake devolve o MESMO par para origem e
+            # copia, entao o backup "confere" — os testes de divergencia usam
+            # um fake proprio que devolve pares diferentes.
+            def mappings(self_inner): return self_inner
+
+            def first(self_inner):
+                return {"n": outer._count, "checksum": "fake-checksum"}
         return R()
 
     def inserts(self):
@@ -625,17 +664,22 @@ def test_15e_executor_produtivo_backup_duravel_delete_escopado_nunca_truncate():
 
     conn = WriteConn()
     ex = bf.ScopedReplaceExecutor(
-        conn, clock=lambda: datetime.datetime(2026, 9, 8, 12, 0, 0))
-    escopo = [("apice", "2026-05")]
-    ex.begin(); ex.backup_scope(escopo); ex.delete_scope(escopo)
+        conn, target="neon",
+        clock=lambda: datetime.datetime(2026, 9, 8, 12, 0, 0))
+    escopo = list(bf.AUTHORIZED_SCOPES)
+    # Ordem do Gate SH-API-2E1: backup COMMITADO primeiro, depois a transacao
+    # de mutacao.
+    ex.backup_scope(escopo); ex.begin(); ex.delete_scope(escopo)
 
     todos = " ".join(conn.sqls).upper()
-    assert "CREATE TABLE MARTS.FACT_SHOPEE_PRODUCT_MONTHLY_BKP_20260908_120000" in todos
+    assert "CREATE TABLE MARTS.FACT_SHOPEE_PRODUCT_MONTHLY_BKP_NEON_20260908_120000" in todos
+    assert "SELECT *" not in todos          # colunas sempre explicitas
     assert "TEMP" not in todos
     assert "TRUNCATE" not in todos
     delete = [s for s in conn.sqls if s.strip().upper().startswith("DELETE")]
     assert len(delete) == 1
-    assert "IN ((:b0, :m0))" in delete[0]
+    # dois escopos autorizados -> dois pares parametrizados, nunca literais
+    assert "IN ((:b0, :m0), (:b1, :m1))" in delete[0]
     # F2: BEGIN nao e' SQL textual — e' conn.begin()
     assert "BEGIN" not in todos
     assert conn.events[0] == "begin"
@@ -647,7 +691,7 @@ def test_15e_executor_produtivo_backup_duravel_delete_escopado_nunca_truncate():
 
 def test_f1_insert_rows_emite_exatamente_um_insert_com_params():
     conn = WriteConn(count=3)
-    ex = bf.ScopedReplaceExecutor(conn)
+    ex = bf.ScopedReplaceExecutor(conn, target="neon")
     ex.begin()
     linhas = pd.DataFrame([_row(sku="S1"), _row(sku="S2"), _row(sku="S3")])
     ex.insert_rows(linhas)
@@ -663,7 +707,7 @@ def test_f1_insert_rows_emite_exatamente_um_insert_com_params():
 
 def test_f1_staging_vazia_nao_emite_insert():
     conn = WriteConn()
-    ex = bf.ScopedReplaceExecutor(conn)
+    ex = bf.ScopedReplaceExecutor(conn, target="neon")
     ex.begin()
     ex.insert_rows(pd.DataFrame(columns=["brand", "ref_month", "sku_ref_key",
                                          "product_name", "gmv"]))
@@ -672,7 +716,7 @@ def test_f1_staging_vazia_nao_emite_insert():
 
 def test_f1_colunas_tecnicas_nao_vao_para_o_insert():
     conn = WriteConn(count=1)
-    ex = bf.ScopedReplaceExecutor(conn)
+    ex = bf.ScopedReplaceExecutor(conn, target="neon")
     ex.begin()
     linhas = pd.DataFrame([{**_row(sku="S1"), "_snap_end": "20260531"}])
     ex.insert_rows(linhas)
@@ -686,20 +730,20 @@ def test_f1_colunas_tecnicas_nao_vao_para_o_insert():
 
 def test_f2_commit_e_rollback_usam_a_transacao_e_nao_sql_textual():
     conn = WriteConn()
-    ex = bf.ScopedReplaceExecutor(conn)
+    ex = bf.ScopedReplaceExecutor(conn, target="neon")
     ex.begin(); ex.commit()
     assert conn.events == ["begin", "commit"]
     assert not any("COMMIT" in s.upper() for s in conn.sqls)
 
     conn2 = WriteConn()
-    ex2 = bf.ScopedReplaceExecutor(conn2)
+    ex2 = bf.ScopedReplaceExecutor(conn2, target="neon")
     ex2.begin(); ex2.rollback()
     assert conn2.events == ["begin", "rollback"]
     assert not any("ROLLBACK" in s.upper() for s in conn2.sqls)
 
 
 def test_f2_commit_sem_transacao_aberta_e_recusado():
-    ex = bf.ScopedReplaceExecutor(WriteConn())
+    ex = bf.ScopedReplaceExecutor(WriteConn(), target="neon")
     with pytest.raises(bf.BackfillValidationError):
         ex.commit()
     with pytest.raises(bf.BackfillValidationError):
@@ -719,14 +763,14 @@ def test_f2_keyboardinterrupt_e_systemexit_propagam(monkeypatch, sinal):
 
     ex.insert_rows = boom
     with pytest.raises(sinal):
-        bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+        bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert "rollback" in ex.calls      # tentou desfazer antes de propagar
 
 
 def test_f2_erro_operacional_continua_virando_exit_code(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES", "1")
     ex = FakeExecutor(FakeMart([_row()]), fail_on="insert")
-    code = bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+    code = bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert code == bf.EXIT_ROLLED_BACK
 
 
@@ -738,7 +782,7 @@ def test_f3_plano_declara_backup_duravel_e_nunca_temp():
     """A palavra TEMP aparece de proposito no COMENTARIO ("nunca TEMP") e na
     lista `never`. O que o teste proibe e' um COMANDO `CREATE TEMP TABLE` — por
     isso compara so' a parte executavel de cada passo, antes do `--`."""
-    plano = bf.plan_scoped_replace(_staging([_row()], [("apice", "2026-05")]))
+    plano = bf.plan_scoped_replace(_staging([_row()]))
 
     comandos = [s.split("--")[0].strip().upper() for s in plano["steps"]]
     for c in comandos:
@@ -882,7 +926,7 @@ def test_15f_delete_antes_do_backup_e_recusado():
             class R:
                 def scalar(self_inner): return 0
             return R()
-    ex = bf.ScopedReplaceExecutor(Conn())
+    ex = bf.ScopedReplaceExecutor(Conn(), target="neon")
     with pytest.raises(bf.BackfillValidationError) as ei:
         ex.delete_scope([("apice", "2026-05")])
     assert "sequencia invalida" in str(ei.value)
@@ -892,7 +936,7 @@ def test_15b_plano_do_scoped_replace_nao_contem_comando_truncate():
     """Nenhum PASSO e' um TRUNCATE. A palavra aparece de proposito no
     comentario do DELETE ("-- nunca TRUNCATE") e na lista `never`; o que o
     teste proibe e' um comando."""
-    plano = bf.plan_scoped_replace(_staging([_row()], [("apice", "2026-05")]))
+    plano = bf.plan_scoped_replace(_staging([_row()]))
 
     for passo in plano["steps"]:
         comando = passo.split("--")[0].strip().upper()
@@ -912,14 +956,14 @@ def test_15b_plano_do_scoped_replace_nao_contem_comando_truncate():
 # ---------------------------------------------------------------------------
 
 def test_staging_duplicada_na_chave_real_e_recusada():
-    st = _staging([_row(sku="S1"), _row(sku="S1")], [("apice", "2026-05")])
+    st = _staging([_row(sku="S1"), _row(sku="S1")])
     with pytest.raises(bf.BackfillValidationError) as ei:
         bf.assert_staging_unique(st)
     assert "chave real" in str(ei.value)
 
 
 def test_staging_com_par_fora_do_escopo_e_recusada():
-    st = _staging([_row(month="2026-06")], [("apice", "2026-05")])
+    st = _staging([_row(month="2026-06")])
     with pytest.raises(bf.BackfillValidationError) as ei:
         bf.assert_staging_within_scope(st)
     assert "fora do escopo" in str(ei.value)
@@ -1022,7 +1066,7 @@ def test_2c_valueerror_apos_begin_e_antes_do_commit_faz_rollback_confirmado(monk
     ex.insert_rows = explode
 
     code = bf.apply_scoped_replace(
-        _staging([_row(sku="S1")], [("apice", "2026-05")]), executor=ex)
+        _staging([_row(sku="S1")]), executor=ex)
 
     assert code == bf.EXIT_ROLLED_BACK
     assert code != bf.EXIT_INDETERMINATE
@@ -1042,7 +1086,7 @@ def test_2c_qualquer_excecao_comum_gera_rollback_e_nunca_indeterminate(monkeypat
         raise erro("falha comum")
 
     ex.delete_scope = explode
-    code = bf.apply_scoped_replace(_staging([_row()], [("apice", "2026-05")]), executor=ex)
+    code = bf.apply_scoped_replace(_staging([_row()]), executor=ex)
     assert code == bf.EXIT_ROLLED_BACK
     assert "commit" not in ex.calls
 
@@ -1053,7 +1097,7 @@ def test_2c_indeterminate_so_quando_o_proprio_rollback_falha(monkeypatch):
     monkeypatch.setenv("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES", "1")
     ex = FakeExecutor(FakeMart([_row()]), fail_on="insert", fail_rollback=True)
     assert bf.apply_scoped_replace(
-        _staging([_row()], [("apice", "2026-05")]), executor=ex) == bf.EXIT_INDETERMINATE
+        _staging([_row()]), executor=ex) == bf.EXIT_INDETERMINATE
 
 
 def test_2c_codigo_nao_usa_except_baseexception():

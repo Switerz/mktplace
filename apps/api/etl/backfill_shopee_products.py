@@ -635,15 +635,27 @@ def apply_scoped_replace(staging: Staging, *, executor) -> int:
       EXIT_ROLLED_BACK   — falhou ANTES do commit e o rollback foi CONFIRMADO
       EXIT_INDETERMINATE — o rollback tambem falhou, OU o commit foi tentado e
                            o resultado e' desconhecido. Nunca se alega rollback
-                           depois de um commit possivelmente realizado."""
-    if os.environ.get("I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES") != "1":
+                           depois de um commit possivelmente realizado.
+
+    ZERO RETRY, por desenho. Uma unica tentativa: qualquer falha vira exit
+    code e para. Retry automatico aqui seria especialmente perigoso porque o
+    caso ambiguo (`EXIT_INDETERMINATE`) e' justamente aquele em que nao se sabe
+    se a escrita foi aplicada — repetir poderia duplicar o efeito. A decisao de
+    repetir e' humana, depois de inspecionar o destino e o backup."""
+    if os.environ.get(CONSENT_ENV) != "1":
         raise BackfillValidationError(
-            "apply exige I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES=1 "
-            "(nada foi escrito)"
+            f"apply exige {CONSENT_ENV}=1 (nada foi escrito)"
         )
+    # Porta 1 tambem aqui, e nao so' na CLI: quem chamar esta funcao por outro
+    # caminho (script, notebook, teste) passa pela MESMA allowlist.
+    assert_scopes_authorized(list(staging.scopes))
+
+    # Backup COMMITADO antes de abrir a transacao de mutacao. Se o backup
+    # falhar, nada e' apagado e a excecao propaga — nunca se segue sem ele.
+    executor.backup_scope(staging.scopes)
+
     executor.begin()
     try:
-        executor.backup_scope(staging.scopes)
         executor.delete_scope(staging.scopes)
         executor.insert_rows(staging.rows)
         gravadas = executor.count_scope(staging.scopes)
@@ -709,11 +721,21 @@ class ScopedReplaceExecutor:
     aberta (injetada) — nunca cria a sua propria, para que quem chama seja
     obrigado a decidir explicitamente qual banco esta' sendo escrito."""
 
-    def __init__(self, connection, *, table: str = TABLE, clock=None) -> None:
+    def __init__(self, connection, *, target: str, table: str = TABLE,
+                 clock=None) -> None:
+        # `target` e OBRIGATORIO (Gate SH-API-2E1): as colunas do INSERT e o
+        # nome do backup dependem dele. Sem destino declarado o executor nao
+        # sabe se `ingested_at` existe, e essa e' exatamente a coluna que
+        # difere entre os dois bancos.
+        if target not in TARGETS:
+            raise BackfillUsageError(f"alvo desconhecido: {target!r}")
         self.conn = connection
+        self.target = target
         self.table = table
         self._clock = clock or (lambda: __import__("datetime").datetime.now())
         self.backup_table: str | None = None
+        self.backup_committed = False
+        self.backup_fingerprint: dict | None = None
         self.emitted: list[str] = []          # trilha sanitizada, nao executavel
         self._trans = None                    # handle da transacao SQLAlchemy
 
@@ -733,32 +755,98 @@ class ScopedReplaceExecutor:
         self._trail("conn.begin()")
         self._trans = self.conn.begin()
 
-    def backup_scope(self, scopes):
+    def backup_scope(self, scopes) -> dict:
+        """Backup DURAVEL, em transacao PROPRIA, COMMITADO antes da mutacao.
+
+        Tres mudancas do Gate SH-API-2E1, cada uma fechando um modo de falha
+        real:
+
+        1. Transacao propria e commit imediato. Antes o backup vivia na mesma
+           transacao do DELETE — se ela caisse, o backup caia junto, e o
+           "backup" nao protegia de nada. Agora, se a mutacao morrer ou o
+           processo for morto, a tabela de backup ja esta no disco.
+        2. Colunas EXPLICITAS, nunca `SELECT *`. Os dois destinos tem schemas
+           diferentes (14 x 15 colunas) e `SELECT *` produziria backups com
+           formatos distintos, impossiveis de comparar entre si.
+        3. Contagem e CHECKSUM conferidos contra a origem antes de qualquer
+           DELETE. Um backup que existe mas nao confere e' pior que nenhum:
+           passa confianca falsa na hora de restaurar.
+        """
         pred, params = _scope_predicate(scopes)
+        cols = insert_columns(self.target)
         stamp = self._clock().strftime("%Y%m%d_%H%M%S")
-        self.backup_table = f"{BACKUP_PREFIX}{stamp}"
-        # Tabela REAL e nomeada — sobrevive a sessao. Nunca TEMP.
-        self._exec(
-            f"CREATE TABLE {self.backup_table} AS "
-            f"SELECT * FROM {self.table} WHERE {pred}", params)
+        nome = backup_table_name(self.target, stamp, table=self.table)
+        lista = ", ".join(cols)
+
+        trans = self.conn.begin()
+        try:
+            # Tabela REAL e nomeada — sobrevive a sessao. Nunca TEMP.
+            self._exec(f"CREATE TABLE {nome} AS "
+                       f"SELECT {lista} FROM {self.table} WHERE {pred}", params)
+
+            origem = self._exec(
+                fingerprint_sql(self.table, cols, pred), params).mappings().first()
+            copia = self._exec(
+                fingerprint_sql(nome, cols, "TRUE")).mappings().first()
+
+            if int(origem["n"]) != int(copia["n"]) or origem["checksum"] != copia["checksum"]:
+                raise BackfillValidationError(
+                    f"backup NAO confere com a origem "
+                    f"(linhas {origem['n']} x {copia['n']}); nada foi apagado")
+            trans.commit()
+        except (KeyboardInterrupt, SystemExit):
+            # Ordem de encerramento: tenta desfazer e PROPAGA, igual ao resto
+            # do modulo. Nunca vira exit code.
+            try:
+                trans.rollback()
+            except OPERATIONAL_ERRORS:
+                pass
+            raise
+        except OPERATIONAL_ERRORS:
+            # Backup que falhou nao pode deixar tabela pela metade nem
+            # transacao aberta. Propaga sempre: sem backup nao ha mutacao.
+            try:
+                trans.rollback()
+            except OPERATIONAL_ERRORS:
+                pass
+            raise
+
+        self.backup_table = nome
+        self.backup_committed = True
+        self.backup_fingerprint = {"rows": int(origem["n"]),
+                                   "checksum": origem["checksum"]}
+        self._trail("trans.commit()  -- backup duravel, ANTES da mutacao")
+        return {"table": nome, "target": self.target,
+                "rows": int(origem["n"]), "checksum": origem["checksum"],
+                "retention_days": BACKUP_RETENTION_DAYS}
 
     def delete_scope(self, scopes):
-        if not self.backup_table:
+        if not self.backup_table or not self.backup_committed:
             raise BackfillValidationError(
-                "delete_scope antes de backup_scope: sequencia invalida "
+                "delete_scope sem backup COMMITADO: sequencia invalida "
                 "(nada foi apagado)")
         pred, params = _scope_predicate(scopes)
         # Sempre filtrado por escopo. Nunca TRUNCATE, nunca DELETE aberto.
         self._exec(f"DELETE FROM {self.table} WHERE {pred}", params)
 
     def insert_rows(self, rows: pd.DataFrame):
-        """UM unico executemany. A trilha e' registrada sem executar SQL."""
+        """UM unico executemany, com colunas EXPLICITAS do destino.
+
+        As colunas vem de `insert_columns(target)`, nunca do DataFrame: uma
+        coluna a mais na staging (ou a menos) mudaria o INSERT silenciosamente.
+        `ingested_at` e' preenchido por NOW() do proprio banco no Neon e nao
+        existe no local — por isso os parametros carregam so' `DATA_COLS`."""
         if rows.empty:
             return
-        cols = [c for c in rows.columns if not c.startswith("_")]
-        placeholders = ", ".join(f":{c}" for c in cols)
-        sql = f"INSERT INTO {self.table} ({', '.join(cols)}) VALUES ({placeholders})"
-        registros = rows[cols].to_dict("records")
+        faltando = [c for c in DATA_COLS if c not in rows.columns]
+        if faltando:
+            raise BackfillValidationError(
+                f"staging sem as colunas obrigatorias {faltando} (nada foi escrito)")
+
+        sql = insert_sql(self.target, table=self.table)
+        if self.target == TARGET_LOCAL:
+            assert_no_ingested_at_in_local_sql(sql)
+        registros = rows[list(DATA_COLS)].to_dict("records")
         self._trail(sql)                       # so' trilha — nao executa
         self.conn.execute(sqlalchemy_text(sql), registros)   # unica execucao
 
@@ -784,6 +872,393 @@ class ScopedReplaceExecutor:
         self._trans = None
 
 
+# ===========================================================================
+# Gate SH-API-2E1 — habilitacao TECNICA do caminho de escrita
+# ===========================================================================
+#
+# Nada aqui executa escrita. O que este bloco entrega e' o CONTRATO que uma
+# escrita futura tera' de satisfazer, com cada porta implementada e testada.
+# `main()` continua recusando `--apply` (ver AVISO no fim do modulo).
+#
+# Principio: toda porta e' FAIL-CLOSED e independente. Nenhuma delas infere
+# outra. "Passou na identidade" nao implica "e' primary"; "e' primary" nao
+# implica "tem SSL". Um preflight que deduz condicao a partir de outra e' um
+# preflight que mente quando o ambiente muda.
+# ---------------------------------------------------------------------------
+
+# --- Allowlist EXATA -------------------------------------------------------
+#
+# Esta operacao existe para remover duplicata de snapshot sobreposto em DOIS
+# escopos medidos, e para mais nada. A allowlist e' uma tupla literal e o
+# comando recusa qualquer conjunto diferente — inclusive um SUBCONJUNTO. Nao
+# aceitar subconjunto e' deliberado: rodar so' `apice` deixaria o par medido
+# pela metade e a reconciliacao total nao fecharia contra o valor esperado.
+AUTHORIZED_SCOPES: tuple[tuple[str, str], ...] = (
+    ("apice", "2026-05"),
+    ("barbours", "2026-05"),
+)
+
+# Escopos que JA foram considerados e reprovados por medicao. Estao nomeados
+# para que a recusa cite o motivo em vez de dizer so' "nao autorizado" — quem
+# tentar rodar precisa entender por que aquele mes especifico e' pior, nao
+# apenas que a lista nao o contem.
+EXPLICITLY_REJECTED: dict[tuple[str, str], str] = {
+    ("rituaria", "2026-07"): (
+        "competencia medida como materialmente imatura: o backfill trocaria "
+        "um numero provisorio por outro provisorio"),
+    ("kokeshi", "2026-08"): (
+        "competencia sem nenhum pedido concluido e com carga atras da diaria: "
+        "o passo correto e' recarregar, nao corrigir retroativamente"),
+}
+
+
+class ScopeNotAuthorizedError(BackfillUsageError):
+    """O conjunto de escopos pedido nao e' EXATAMENTE o autorizado."""
+
+
+def assert_scopes_authorized(scopes: list[tuple[str, str]]) -> None:
+    """Porta 1. Exige o conjunto autorizado, exato, sem sobra nem falta."""
+    if not scopes:
+        raise ScopeNotAuthorizedError(
+            "execucao SEM escopo e' recusada: --apply exige os dois --scope "
+            "explicitos (nada foi escrito)")
+    if len(scopes) != len(set(scopes)):
+        raise ScopeNotAuthorizedError(
+            "escopo repetido na linha de comando (nada foi escrito)")
+
+    pedido, autorizado = set(scopes), set(AUTHORIZED_SCOPES)
+
+    for s in sorted(pedido - autorizado):
+        motivo = EXPLICITLY_REJECTED.get(s)
+        alvo = f"{s[0]}:{s[1]}"
+        if motivo:
+            raise ScopeNotAuthorizedError(
+                f"escopo {alvo} RECUSADO — {motivo} (nada foi escrito)")
+        raise ScopeNotAuthorizedError(
+            f"escopo {alvo} nao esta na allowlist desta operacao "
+            f"(autorizados: {_fmt_scopes(AUTHORIZED_SCOPES)}; nada foi escrito)")
+
+    faltando = autorizado - pedido
+    if faltando:
+        raise ScopeNotAuthorizedError(
+            f"execucao PARCIAL recusada: falta {_fmt_scopes(sorted(faltando))}. "
+            f"A expectativa medida e' do par completo; rodar metade nao fecha a "
+            f"reconciliacao total (nada foi escrito)")
+
+
+def _fmt_scopes(scopes) -> str:
+    return ", ".join(f"{b}:{m}" for b, m in scopes)
+
+
+# --- Expectativa MEDIDA, usada como trava ----------------------------------
+#
+# Numeros do Gate ADMIN-SH-RO-1 (candidato x local x Neon, paridade perfeita).
+# Sao CONTRATO DE VERIFICACAO, nunca alvo a ser forcado: se a staging de hoje
+# nao reproduzir estes deltas, a premissa mudou (arquivo novo, arquivo
+# retirado, regra de dedup alterada) e a escrita e' bloqueada para reanalise.
+EXPECTED_GMV_DELTA: dict[tuple[str, str], Decimal] = {
+    ("apice", "2026-05"): Decimal("-23292.43"),
+    ("barbours", "2026-05"): Decimal("-80987.03"),
+}
+EXPECTED_TOTAL_GMV_DELTA = Decimal("-104279.46")
+EXPECTED_KEYS_ADDED = 0
+EXPECTED_KEYS_REMOVED = 0
+#: Centavos. A soma vem de agregacao em ponto flutuante rio acima; exigir
+#: igualdade exata transformaria ruido de arredondamento em bloqueio falso.
+DELTA_TOLERANCE = Decimal("0.01")
+#: O indice operacional de maturacao tem de continuar acima do limiar depois
+#: da correcao (medido: 1,0782 -> 1,0361 e 1,0758 -> 1,0266).
+MATURATION_THRESHOLD_AFTER = Decimal("0.99")
+
+
+class ExpectationMismatchError(BackfillValidationError):
+    """A medicao de hoje divergiu da expectativa. Bloqueia antes de escrever."""
+
+
+def assert_expected_delta(*, gmv_delta_por_escopo: dict[tuple[str, str], Decimal],
+                          keys_added: int, keys_removed: int) -> None:
+    """Porta 10. Compara a reconciliacao de hoje com o que foi medido.
+
+    Divergencia NAO e' ajustada nem tolerada: e' bloqueio. O objetivo desta
+    operacao e' remover duplicata conhecida — se o delta mudou, o que seria
+    removido tambem mudou, e ninguem mediu isso."""
+    problemas = []
+    for escopo, esperado in EXPECTED_GMV_DELTA.items():
+        obtido = gmv_delta_por_escopo.get(escopo)
+        if obtido is None:
+            problemas.append(f"{_fmt_scopes([escopo])}: sem delta medido")
+            continue
+        if abs(obtido - esperado) > DELTA_TOLERANCE:
+            problemas.append(
+                f"{_fmt_scopes([escopo])}: delta {obtido} != esperado {esperado} "
+                f"(tolerancia {DELTA_TOLERANCE})")
+
+    extras = set(gmv_delta_por_escopo) - set(EXPECTED_GMV_DELTA)
+    if extras:
+        problemas.append(f"delta medido em escopo nao autorizado: {_fmt_scopes(sorted(extras))}")
+
+    total = sum(gmv_delta_por_escopo.values(), Decimal("0"))
+    if abs(total - EXPECTED_TOTAL_GMV_DELTA) > DELTA_TOLERANCE:
+        problemas.append(f"total {total} != esperado {EXPECTED_TOTAL_GMV_DELTA}")
+
+    if keys_added != EXPECTED_KEYS_ADDED:
+        problemas.append(f"{keys_added} chave(s) adicionada(s); esperado {EXPECTED_KEYS_ADDED}")
+    if keys_removed != EXPECTED_KEYS_REMOVED:
+        problemas.append(f"{keys_removed} chave(s) removida(s); esperado {EXPECTED_KEYS_REMOVED}")
+
+    if problemas:
+        raise ExpectationMismatchError(
+            "expectativa medida NAO reproduzida (nada foi escrito): "
+            + "; ".join(problemas))
+
+
+# --- Colunas EXPLICITAS por destino ----------------------------------------
+#
+# `SELECT *` entre local e Neon e' proibido no modulo inteiro: os dois destinos
+# tem schemas DIFERENTES (medido — 14 colunas no local, 15 no Neon). Um
+# `INSERT ... SELECT *` desalinharia silenciosamente na primeira divergencia.
+# Cada destino declara suas colunas aqui, e todo SQL as enumera.
+DATA_COLS: tuple[str, ...] = (
+    "ref_month", "brand", "sku_ref", "sku_ref_key", "product_name",
+    "variation_name", "gmv", "units_sold", "completed_orders",
+    "canceled_orders", "cancel_rate_pct", "unique_buyers", "avg_price",
+)
+
+#: So' existe no Neon. Semantica: instante de PUBLICACAO/REPUBLICACAO do mart.
+#: NUNCA a data do dado na fonte — republicar um mes fechado move este carimbo
+#: sem que nenhuma venda tenha mudado. E' exatamente o que a Torre exibe como
+#: "publicado no mart em ...".
+INGESTED_AT_COL = "ingested_at"
+
+TARGET_COLS: dict[str, tuple[str, ...]] = {
+    TARGET_LOCAL: DATA_COLS,
+    TARGET_NEON: DATA_COLS + (INGESTED_AT_COL,),
+}
+
+
+def insert_columns(target: str) -> tuple[str, ...]:
+    """Colunas do INSERT no destino. `ingested_at` NUNCA aparece no local."""
+    if target not in TARGET_COLS:
+        raise BackfillUsageError(f"alvo desconhecido: {target!r}")
+    return TARGET_COLS[target]
+
+
+def insert_sql(target: str, *, table: str = TABLE) -> str:
+    """INSERT com colunas explicitas. No Neon, `ingested_at` e' preenchido
+    pelo BANCO (NOW()), nunca por valor vindo da staging: o carimbo tem de ser
+    o instante real da publicacao naquele destino, e a staging nao sabe disso."""
+    cols = insert_columns(target)
+    valores = []
+    for c in cols:
+        valores.append("NOW()" if c == INGESTED_AT_COL else f":{c}")
+    return (f"INSERT INTO {table} ({', '.join(cols)}) "
+            f"VALUES ({', '.join(valores)})")
+
+
+def assert_no_ingested_at_in_local_sql(sql: str) -> None:
+    """Trava de regressao: qualquer SQL destinado ao local que mencione
+    `ingested_at` e' um bug — a coluna nao existe la e o comando falharia no
+    meio da transacao, depois do DELETE."""
+    if INGESTED_AT_COL in sql:
+        raise BackfillValidationError(
+            f"SQL do destino 'local' menciona {INGESTED_AT_COL}, que so' existe "
+            f"no Neon (nada foi executado)")
+
+
+# --- Credencial dedicada de escrita ----------------------------------------
+#
+# Variaveis SEPARADAS das de leitura. Reaproveitar a URL read-only para
+# escrever esconderia o momento em que a operacao deixou de ser segura; e
+# reaproveitar DATABASE_URL faria o backfill herdar a credencial da aplicacao.
+_WRITE_ENV = {
+    TARGET_LOCAL: "BACKFILL_LOCAL_RW_URL",
+    TARGET_NEON: "BACKFILL_NEON_RW_URL",
+}
+CONSENT_ENV = "I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES"
+
+
+class WriteGuardError(BackfillValidationError):
+    """Uma porta do caminho de escrita reprovou. Nada foi escrito."""
+
+
+def resolve_write_url(target: str, *, env=None) -> str:
+    """Porta 3. URL de ESCRITA dedicada, validada por classe de host.
+
+    Recusa explicitamente reaproveitar `DATABASE_URL` e as variaveis
+    read-only. Nunca devolve nem imprime a URL em mensagem de erro."""
+    env = os.environ if env is None else env
+    if target not in TARGETS:
+        raise BackfillUsageError(f"alvo desconhecido: {target!r}")
+
+    var = _WRITE_ENV[target]
+    url = env.get(var, "")
+    if not url:
+        raise WriteGuardError(
+            f"escrita em '{target}' exige {var} definida explicitamente. "
+            f"DATABASE_URL e as variaveis read-only sao recusadas de proposito "
+            f"(nada foi escrito)")
+    ro = env.get(_TARGET_ENV[target], "")
+    if ro and url == ro:
+        raise WriteGuardError(
+            f"{var} tem o MESMO valor de {_TARGET_ENV[target]}: a credencial de "
+            f"escrita precisa ser dedicada, nao a de leitura (nada foi escrito)")
+
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower()
+    if not host:
+        raise WriteGuardError(f"{var} sem host reconhecivel")
+    is_local = host in _LOCAL_HOSTS
+    if target == TARGET_LOCAL and not is_local:
+        raise WriteGuardError(f"{var} aponta para host REMOTO com alvo 'local'")
+    if target == TARGET_NEON and is_local:
+        raise WriteGuardError(f"{var} aponta para LOCALHOST com alvo 'neon'")
+    return url
+
+
+# --- Primary gravavel e SSL ------------------------------------------------
+
+WRITE_PREFLIGHT_SQL = """
+SELECT pg_is_in_recovery()                              AS in_recovery,
+       current_setting('transaction_read_only')         AS tx_readonly,
+       has_table_privilege(current_user, :tabela, 'INSERT') AS pode_insert,
+       has_table_privilege(current_user, :tabela, 'DELETE') AS pode_delete,
+       has_schema_privilege(current_user, :schema, 'CREATE') AS pode_criar_backup
+"""
+
+
+def assert_writable_primary(conn, target: str, *, table: str = TABLE) -> dict:
+    """Porta 6. O destino tem de ser PRIMARY gravavel, com privilegio real.
+
+    `pg_is_in_recovery()` verdadeiro significa replica: escrever la falha no
+    meio da transacao, depois do backup. Privilegio e' consultado, nunca
+    testado por DML de mentira — tentar um INSERT para "ver se da" ja e' a
+    escrita que este preflight existe para evitar."""
+    schema, _, _tab = table.partition(".")
+    row = conn.execute(sqlalchemy_text(WRITE_PREFLIGHT_SQL),
+                       {"tabela": table, "schema": schema}).mappings().first()
+    if row is None:
+        raise WriteGuardError(f"preflight de escrita em '{target}' nao retornou linha")
+
+    if row["in_recovery"]:
+        raise WriteGuardError(
+            f"destino '{target}' esta EM RECOVERY (replica): nao e' primary "
+            f"gravavel (nada foi escrito)")
+    if str(row["tx_readonly"]).lower() == "on":
+        raise WriteGuardError(
+            f"destino '{target}' esta com transaction_read_only=on "
+            f"(nada foi escrito)")
+    for chave, rotulo in (("pode_insert", "INSERT"), ("pode_delete", "DELETE"),
+                          ("pode_criar_backup", "CREATE no schema (backup)")):
+        if not row[chave]:
+            raise WriteGuardError(
+                f"a credencial de escrita nao tem privilegio de {rotulo} no "
+                f"destino '{target}' (nada foi escrito)")
+    return {"target": target, "primary": True, "privileges_ok": True}
+
+
+def _dbapi_connection(conn):
+    """Desce ate a conexao DBAPI real, sem assumir a versao do SQLAlchemy."""
+    for atributo in ("driver_connection", "dbapi_connection", "connection"):
+        candidato = getattr(getattr(conn, "connection", conn), atributo, None)
+        if candidato is not None and hasattr(candidato, "info"):
+            return candidato
+    return getattr(conn, "connection", conn)
+
+
+def assert_ssl_required(conn, target: str) -> None:
+    """Porta 7. SSL obrigatorio no Neon.
+
+    Medido no Gate ADMIN-SH-RO-1: `pg_stat_ssl` descreve a perna
+    proxy->compute do Neon e responde FALSO mesmo com a conexao do cliente
+    cifrada. A verdade do lado do cliente e' `connection.info.ssl_in_use`."""
+    if target != TARGET_NEON:
+        return
+    info = getattr(_dbapi_connection(conn), "info", None)
+    if info is None or not getattr(info, "ssl_in_use", False):
+        raise WriteGuardError(
+            "conexao de escrita com o Neon SEM SSL confirmado pelo cliente "
+            "(nada foi escrito)")
+
+
+# --- Advisory lock ---------------------------------------------------------
+#
+# Chave DETERMINISTICA derivada do nome da tabela: duas execucoes simultaneas
+# do backfill disputam a mesma chave, em qualquer maquina, sem combinar nada.
+ADVISORY_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(f"backfill:{TABLE}".encode("utf-8")).digest()[:8],
+    "big", signed=True)
+
+
+def acquire_advisory_lock(conn, *, key: int = ADVISORY_LOCK_KEY) -> None:
+    """Porta 8. Lock de SESSAO, nao de transacao.
+
+    Precisa ser de sessao porque o backup e a mutacao sao transacoes
+    SEPARADAS: um lock de transacao seria liberado no commit do backup e
+    deixaria a janela mais perigosa desprotegida.
+
+    `pg_try_advisory_lock` (nao `pg_advisory_lock`): falha na hora se outra
+    execucao esta em curso, em vez de ficar pendurada. Esperar em silencio e'
+    uma forma de retry — e retry aqui e' proibido."""
+    obtido = conn.execute(sqlalchemy_text("SELECT pg_try_advisory_lock(:k) AS ok"),
+                          {"k": key}).scalar()
+    if not obtido:
+        raise WriteGuardError(
+            f"advisory lock {key} ja' esta tomado: outra execucao do backfill "
+            f"esta em curso (nada foi escrito, nada foi aguardado)")
+
+
+def release_advisory_lock(conn, *, key: int = ADVISORY_LOCK_KEY) -> bool:
+    return bool(conn.execute(sqlalchemy_text("SELECT pg_advisory_unlock(:k) AS ok"),
+                             {"k": key}).scalar())
+
+
+# --- Backup duravel por destino e por execucao -----------------------------
+#
+# Contrato:
+#   - contem SOMENTE as duas competencias autorizadas (mesmo predicado do
+#     DELETE — o backup nao pode cobrir menos do que a mutacao apaga);
+#   - nome deterministico e VALIDADO (nunca interpolacao livre de identificador);
+#   - colunas EXPLICITAS do destino (jamais SELECT *);
+#   - contagem e checksum conferidos contra a origem ANTES de qualquer DELETE;
+#   - COMMITADO em transacao propria, antes da mutacao — se a transacao de
+#     mutacao morrer ou o processo cair, o backup sobrevive;
+#   - retencao documentada.
+BACKUP_RETENTION_DAYS = 90
+BACKUP_NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]{0,62}$")
+
+
+def backup_table_name(target: str, stamp: str, *, table: str = TABLE) -> str:
+    """Nome deterministico: <tabela>_bkp_<destino>_<carimbo>.
+
+    Inclui o DESTINO porque local e Neon sao execucoes independentes e cada um
+    tem o seu backup; sem isso, dois backups da mesma execucao colidiriam ao
+    serem comparados. O resultado e' validado contra `BACKUP_NAME_RE` — o nome
+    entra numa DDL, e identificador nunca deve ser interpolado sem validacao."""
+    if target not in TARGETS:
+        raise BackfillUsageError(f"alvo desconhecido: {target!r}")
+    if not re.fullmatch(r"\d{8}_\d{6}", stamp):
+        raise BackfillValidationError(
+            f"carimbo de backup invalido: {stamp!r} (esperado YYYYMMDD_HHMMSS)")
+    nome = f"{table}_bkp_{target}_{stamp}"
+    if not BACKUP_NAME_RE.fullmatch(nome):
+        raise BackfillValidationError(f"nome de backup invalido: {nome!r}")
+    return nome
+
+
+def fingerprint_sql(source: str, cols: tuple[str, ...], predicate: str) -> str:
+    """Contagem + checksum sobre COLUNAS EXPLICITAS, em ordem deterministica.
+
+    Aplicado a origem e ao backup, o mesmo texto prova fidelidade. `concat_ws`
+    com separador de unidade (0x1F) evita que valores adjacentes se fundam e
+    produzam colisao; `ORDER BY linha` torna o agregado independente da ordem
+    fisica das linhas."""
+    projecao = ", ".join(f"COALESCE({c}::text, '\\N')" for c in cols)
+    return (f"SELECT count(*) AS n, "
+            f"md5(coalesce(string_agg(linha, '|' ORDER BY linha), '')) AS checksum "
+            f"FROM (SELECT concat_ws(chr(31), {projecao}) AS linha "
+            f"FROM {source} WHERE {predicate}) t")
+
+
 # ---------------------------------------------------------------------------
 # Orquestracao XLSX -> local -> Neon (desenho; NAO executado)
 # ---------------------------------------------------------------------------
@@ -791,6 +1266,130 @@ class ScopedReplaceExecutor:
 STATUS_OK = "OK"
 STATUS_PARTIAL = "PARTIAL"
 STATUS_REFUSED = "REFUSED"
+
+
+# --- Cadeia de preflight de escrita ----------------------------------------
+#
+# AS DEZ PORTAS, na ordem. Cada uma e' independente e fail-closed; a ordem
+# existe para que o custo cresca aos poucos — o que da para reprovar sem tocar
+# no banco reprova ANTES de abrir conexao.
+WRITE_GATES: tuple[str, ...] = (
+    "1. dois --scope explicitos, exatamente a allowlist",
+    "2. flag de consentimento no ambiente",
+    "3. credencial de escrita DEDICADA (nunca a read-only, nunca DATABASE_URL)",
+    "4. --target confirmado explicitamente (local|neon), nunca inferido",
+    "5. identidade do banco comprovada (EXPECT_DB + tabela presente)",
+    "6. primary gravavel (nao em recovery, tx nao read-only, privilegio real)",
+    "7. SSL confirmado pelo cliente no Neon",
+    "8. advisory lock de sessao adquirido sem espera",
+    "9. backup duravel CRIADO, CONFERIDO e COMMITADO",
+    "10. reconciliacao previa bate com a expectativa medida",
+)
+
+
+def assert_write_preconditions(
+    *, scopes, target, conn=None, env=None,
+    gmv_delta_por_escopo=None, keys_added=None, keys_removed=None,
+    backup_committed=False,
+) -> dict:
+    """Roda as dez portas na ordem e devolve o laudo. Levanta na primeira que
+    reprovar; nunca acumula falhas para "decidir depois".
+
+    `conn` opcional: sem conexao, as portas 5-8 nao podem ser avaliadas e o
+    laudo as marca como `nao_avaliada` — jamais como aprovadas. Isso permite
+    testar as portas offline sem que a ausencia vire falso verde."""
+    env = os.environ if env is None else env
+    laudo: dict[str, str] = {}
+
+    assert_scopes_authorized(list(scopes))
+    laudo["1_allowlist"] = "ok"
+
+    if env.get(CONSENT_ENV) != "1":
+        raise WriteGuardError(
+            f"porta 2: consentimento ausente ({CONSENT_ENV}=1 obrigatorio; "
+            f"nada foi escrito)")
+    laudo["2_consentimento"] = "ok"
+
+    resolve_write_url(target, env=env)          # levanta se ausente/duplicada
+    laudo["3_credencial_dedicada"] = "ok"
+
+    if target not in TARGETS:
+        raise BackfillUsageError(f"porta 4: --target invalido: {target!r}")
+    laudo["4_target_confirmado"] = target
+
+    if conn is None:
+        for porta in ("5_identidade", "6_primary", "7_ssl", "8_advisory_lock"):
+            laudo[porta] = "nao_avaliada"
+    else:
+        assert_target_identity(conn, target, env=env)
+        laudo["5_identidade"] = "ok"
+        assert_writable_primary(conn, target)
+        laudo["6_primary"] = "ok"
+        assert_ssl_required(conn, target)
+        laudo["7_ssl"] = "ok" if target == TARGET_NEON else "nao_aplicavel"
+        acquire_advisory_lock(conn)
+        laudo["8_advisory_lock"] = "adquirido"
+
+    laudo["9_backup"] = "commitado" if backup_committed else "pendente"
+
+    if gmv_delta_por_escopo is None:
+        laudo["10_expectativa"] = "nao_avaliada"
+    else:
+        assert_expected_delta(gmv_delta_por_escopo=gmv_delta_por_escopo,
+                              keys_added=keys_added or 0,
+                              keys_removed=keys_removed or 0)
+        laudo["10_expectativa"] = "ok"
+    return laudo
+
+
+# --- Estados parciais entre os dois destinos -------------------------------
+#
+# Local e Neon sao DOIS bancos, com DUAS transacoes independentes. Nao existe
+# transacao distribuida aqui e o modulo nao encena uma. O que existe e' uma
+# ordem obrigatoria (local primeiro) e uma tabela de estados possiveis, cada um
+# com a acao correta — porque um estado parcial sem nome vira "deu erro" e
+# alguem repete o comando inteiro.
+PARTIAL_STATES: dict[str, dict[str, str]] = {
+    "LOCAL_OK_NEON_FALHOU": {
+        "significado": "local commitado e validado; Neon nao aplicou",
+        "visivel_para_o_usuario": "a Torre continua servindo o dado ANTIGO "
+                                  "(a Torre le o Neon)",
+        "acao": "repetir SOMENTE a propagacao local -> Neon, com novo backup "
+                "no Neon; nunca reprocessar XLSX nem reescrever o local",
+        "backup_util": "o backup do Neon daquela tentativa, se chegou a ser "
+                       "commitado",
+    },
+    "NEON_OK_LOCAL_FALHOU": {
+        "significado": "estado PROIBIDO por contrato — a ordem impede que o "
+                       "Neon seja escrito antes do local",
+        "visivel_para_o_usuario": "a Torre mostraria dado que a fonte local "
+                                  "nao tem: divergencia silenciosa",
+        "acao": "se ocorrer, e' bug de orquestracao: restaurar o Neon pelo "
+                "backup e investigar antes de qualquer nova tentativa",
+        "backup_util": "backup do Neon (restauracao imediata)",
+    },
+    "COMMIT_INDETERMINADO": {
+        "significado": "o commit foi enviado e a resposta se perdeu; nao se "
+                       "sabe se foi aplicado",
+        "visivel_para_o_usuario": "indeterminado ate inspecao",
+        "acao": "NAO repetir. Inspecionar o destino contra o backup (contagem "
+                "e checksum) e so' entao decidir",
+        "backup_util": "e' o unico jeito de saber o que havia antes",
+    },
+}
+
+
+def describe_partial_state(*, local: str, neon: str) -> dict:
+    """Traduz o par de resultados no estado nomeado e na acao correta."""
+    if local == STATUS_OK and neon == STATUS_OK:
+        return {"estado": STATUS_OK, "acao": "nenhuma"}
+    if local == "INDETERMINATE" or neon == "INDETERMINATE":
+        return {"estado": "COMMIT_INDETERMINADO", **PARTIAL_STATES["COMMIT_INDETERMINADO"]}
+    if local == STATUS_OK and neon != STATUS_OK:
+        return {"estado": "LOCAL_OK_NEON_FALHOU", **PARTIAL_STATES["LOCAL_OK_NEON_FALHOU"]}
+    if neon == STATUS_OK and local != STATUS_OK:
+        return {"estado": "NEON_OK_LOCAL_FALHOU", **PARTIAL_STATES["NEON_OK_LOCAL_FALHOU"]}
+    return {"estado": STATUS_REFUSED, "acao": "nada foi escrito"}
 
 
 def plan_local_then_neon(scopes: list[tuple[str, str]]) -> dict:
@@ -802,26 +1401,42 @@ def plan_local_then_neon(scopes: list[tuple[str, str]]) -> dict:
     como sucesso nem como falha total."""
     return {
         "scopes": list(scopes),
+        "gates": list(WRITE_GATES),
         "ordem": [
-            "1. XLSX -> scoped replace no LOCAL (transacao 1, backup duravel)",
-            "2. validar LOCAL pos-commit (contagem, chave real, escopo)",
-            "3. LOCAL -> scoped replace dos MESMOS escopos no NEON (transacao 2, backup duravel)",
-            "4. validar NEON contra LOCAL (paridade de chaves e agregados por escopo)",
-            "5. registrar auditoria das DUAS etapas (run_id comum)",
+            "1. preflight das 10 portas no LOCAL",
+            "2. backup duravel do LOCAL, conferido e COMMITADO (transacao propria)",
+            "3. XLSX -> scoped replace no LOCAL (transacao de mutacao, separada)",
+            "4. validar LOCAL pos-commit (contagem, chave real, escopo)",
+            "5. preflight das 10 portas no NEON",
+            "6. backup duravel do NEON, conferido e COMMITADO (transacao propria)",
+            "7. LOCAL -> scoped replace dos MESMOS escopos no NEON (transacao de mutacao)",
+            "8. validar NEON contra LOCAL (paridade de chaves e agregados por escopo)",
+            "9. registrar auditoria das DUAS etapas (run_id comum)",
         ],
+        "estados_parciais": PARTIAL_STATES,
+        "atomicidade": "NAO existe transacao distribuida entre local e Neon. "
+                       "Sao dois commits independentes e o estado parcial e' "
+                       "um resultado possivel, nomeado e com acao definida.",
+        "retry": "ZERO retry automatico em qualquer etapa. A repeticao e' "
+                 "decisao humana, depois de inspecionar destino e backup.",
         "proibido": [
             "aplicar somente no NEON deixando o LOCAL antigo",
             "TRUNCATE de tabela inteira",
             "transacao distribuida ficticia entre os dois bancos",
             "backup em TEMP TABLE (morre com a sessao)",
+            "backup na MESMA transacao da mutacao (cai junto com ela)",
+            "SELECT * entre local e Neon (schemas diferentes)",
+            "ingested_at no SQL do destino local (a coluna nao existe la)",
             "UPSERT como unico mecanismo",
+            "retry automatico de qualquer etapa",
         ],
         "resultados_possiveis": {
             STATUS_OK: "as duas etapas commitaram e validaram",
             STATUS_PARTIAL: "LOCAL commitado, NEON falhou -> retry SOMENTE da etapa 3-4",
             STATUS_REFUSED: "validacao reprovou antes de qualquer escrita",
         },
-        "retry_partial": "somente a propagacao LOCAL -> NEON, nunca reprocessar XLSX",
+        "retry_partial": "decisao HUMANA; se autorizada, somente a propagacao "
+                         "LOCAL -> NEON, nunca reprocessar XLSX",
         "lock": {
             "nome": LOCK_NAME,
             "compartilhado_com": ["sync_produtos_shopee", "full_daily",
@@ -1156,10 +1771,38 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.mode == "apply":
-        print("APPLY PRODUTIVO BLOQUEADO: o executor real (backup duravel, "
-              "DELETE escopado, INSERT, validacao, commit/rollback) esta' "
-              "implementado como interface e coberto por fake, mas nao foi "
-              "habilitado. Nada foi escrito.", file=sys.stderr)
+        # As portas que NAO precisam de banco sao avaliadas de verdade, para
+        # que um escopo errado receba a recusa ESPECIFICA em vez de um
+        # "bloqueado" generico. Nenhuma conexao e' aberta aqui: o objetivo e'
+        # tornar os guardrails observaveis sem escrever nada.
+        try:
+            # Lista vazia vai direto para a porta 1, que tem a mensagem certa
+            # ("execucao SEM escopo"), em vez do erro de uso generico.
+            scopes_pedidos = parse_scopes(args.scope) if args.scope else []
+        except BackfillUsageError as e:
+            print(f"ERRO DE USO: {e}", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            assert_scopes_authorized(scopes_pedidos)
+            if args.target is None:
+                raise WriteGuardError(
+                    "porta 4: --apply exige --target local|neon explicito "
+                    "(o destino nunca e' inferido; nada foi escrito)")
+            laudo = assert_write_preconditions(
+                scopes=scopes_pedidos, target=args.target, conn=None)
+        except (ScopeNotAuthorizedError, WriteGuardError,
+                ExpectationMismatchError, BackfillValidationError) as e:
+            print(f"APPLY RECUSADO: {e}", file=sys.stderr)
+            return EXIT_VALIDATION_REFUSED
+
+        for porta, estado in laudo.items():
+            print(f"  porta {porta}: {estado}", file=sys.stderr)
+        print("APPLY PRODUTIVO BLOQUEADO: as portas offline passaram, mas a "
+              "execucao nao foi habilitada neste gate. As portas 5-8 (identidade, "
+              "primary, SSL, advisory lock) exigem conexao e NAO foram avaliadas; "
+              "as portas 9-10 (backup commitado, expectativa medida) dependem da "
+              "execucao. Nenhuma conexao gravavel foi aberta e nada foi escrito.",
+              file=sys.stderr)
         return EXIT_VALIDATION_REFUSED
 
     try:

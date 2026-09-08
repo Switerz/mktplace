@@ -1308,6 +1308,159 @@ Depois do backfill, o selo é a verificação: os dois escopos devem permanecer
 `mature` e `definitive`. Se qualquer um cair abaixo do limiar, o backfill não é
 o que se esperava e deve ser revertido pela tabela de backup durável.
 
+## Caminho de escrita do backfill Shopee — habilitado tecnicamente, NÃO executado (Gate SH-API-2E1)
+
+O comando existe, todas as portas estão implementadas e testadas, e `--apply`
+**continua bloqueado** na barreira final. Nada foi escrito, nenhuma conexão
+gravável foi aberta, nenhum backup real foi criado.
+
+### Comando futuro (exemplo)
+
+```bash
+# 1. Consentimento e credenciais DEDICADAS de escrita (nunca as read-only,
+#    nunca DATABASE_URL). Fora do .env versionado.
+export I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES=1
+export BACKFILL_LOCAL_RW_URL=...        # host tem de ser localhost
+export BACKFILL_NEON_RW_URL=...         # host tem de ser remoto, com SSL
+export BACKFILL_LOCAL_EXPECT_DB=...     # nome do banco esperado
+export BACKFILL_NEON_EXPECT_DB=...
+
+# 2. LOCAL primeiro, sempre. Os dois --scope são obrigatórios.
+python -m etl.backfill_shopee_products --apply --target local \
+    --scope apice:2026-05 --scope barbours:2026-05
+
+# 3. Só depois do local commitado e validado, o Neon.
+python -m etl.backfill_shopee_products --apply --target neon \
+    --scope apice:2026-05 --scope barbours:2026-05
+```
+
+Exit codes: `0` ok · `2` recusado na validação (nada escrito) · `3` rollback
+confirmado · `4` **indeterminado** (exige inspeção humana) · `5` erro de uso.
+
+### As dez portas
+
+Cada uma é fail-closed e **independente** — nenhuma infere outra. "Passou na
+identidade" não implica "é primary"; "é primary" não implica "tem SSL". Um
+preflight que deduz uma condição a partir de outra mente quando o ambiente muda.
+
+| # | Porta | Bloqueia quando |
+|---|---|---|
+| 1 | allowlist exata | falta um `--scope`, sobra um, repete, ou não é o par autorizado |
+| 2 | consentimento | `I_UNDERSTAND_THIS_REWRITES_SHOPEE_PRODUCT_SCOPES` ≠ `1` |
+| 3 | credencial dedicada | `BACKFILL_*_RW_URL` ausente, igual à read-only, ou com classe de host errada |
+| 4 | destino confirmado | `--target` ausente — o destino nunca é inferido |
+| 5 | identidade do banco | `EXPECT_DB` não bate, ou a tabela não existe |
+| 6 | primary gravável | `pg_is_in_recovery()`, `transaction_read_only=on`, ou sem privilégio real |
+| 7 | SSL no Neon | `connection.info.ssl_in_use` falso |
+| 8 | advisory lock | outra execução em curso — falha na hora, **não espera** |
+| 9 | backup durável | não criado, não conferido ou não commitado |
+| 10 | expectativa medida | o delta de hoje diverge do medido |
+
+Privilégio é **consultado** (`has_table_privilege`), nunca testado com DML: um
+`INSERT` de mentira para "ver se dá" já é a escrita que o preflight existe para
+evitar. Há teste que reprova qualquer DML no preflight.
+
+### Allowlist
+
+Autorizado, e só: **`apice:2026-05`** e **`barbours:2026-05`**.
+
+Recusado com o motivo medido junto:
+
+| Escopo | Motivo |
+|---|---|
+| `rituaria:2026-07` | competência materialmente imatura — trocaria um número provisório por outro |
+| `kokeshi:2026-08` | zero pedido concluído e carga atrás da diária — o passo certo é recarregar |
+| qualquer outro | fora da allowlist |
+| execução sem escopo | recusada |
+| execução ampla (marca inteira) | recusada |
+| **subconjunto** (só `apice`) | recusado — metade do par não fecha a reconciliação total |
+
+### Expectativa medida (contrato de verificação, não alvo)
+
+| Escopo | Δ GMV esperado |
+|---|---|
+| `apice` / 2026-05 | −23.292,43 |
+| `barbours` / 2026-05 | −80.987,03 |
+| **total** | **−104.279,46** |
+
+Mais: **zero** chave adicionada, **zero** removida, e o índice operacional de
+maturação continua acima de 0,99 depois da correção (1,0782 → 1,0361 e
+1,0758 → 1,0266).
+
+Divergência **bloqueia** — os valores nunca são forçados. Se o delta de hoje
+não reproduz o medido, a premissa mudou (arquivo novo, arquivo retirado, regra
+de dedup alterada) e ninguém mediu o novo efeito. Tolerância de R$ 0,01, só
+para ruído de arredondamento.
+
+### Backup durável
+
+Um backup **por destino e por execução**, com nome determinístico
+`marts.fact_shopee_product_monthly_bkp_<destino>_<YYYYMMDD_HHMMSS>`, validado
+contra regex antes de entrar na DDL (identificador nunca é interpolado sem
+validação; carimbo fora do formato é recusado).
+
+Contrato:
+
+1. **Somente as duas competências autorizadas** — o mesmo predicado
+   parametrizado do `DELETE`. O backup nunca cobre menos do que a mutação apaga.
+2. **Colunas explícitas**, jamais `SELECT *`. Os dois destinos têm schemas
+   diferentes (14 colunas no local, 15 no Neon) e `SELECT *` produziria backups
+   de formatos distintos, impossíveis de comparar.
+3. **Contagem e checksum** conferidos contra a origem antes de qualquer
+   `DELETE`: `md5(string_agg(...))` sobre as colunas explícitas em ordem
+   determinística, com separador `chr(31)` para não fundir valores adjacentes.
+   Divergência aborta e desfaz.
+4. **Commitado em transação própria, antes da mutação.** Antes o backup vivia
+   na mesma transação do `DELETE` — se ela caísse, o backup caía junto, e não
+   protegia de nada. Agora, se a mutação morrer ou o processo for morto, a
+   tabela de backup já está no disco.
+5. **Retenção: 90 dias** (`BACKUP_RETENTION_DAYS`). Remoção manual e explícita
+   depois disso; nenhuma limpeza automática.
+
+`delete_scope` recusa rodar sem backup **commitado** — não basta ter sido
+criado.
+
+### `ingested_at`
+
+Existe **somente no Neon**. Significa instante de **publicação/republicação do
+mart** — nunca a data do dado na fonte. Republicar um mês fechado move esse
+carimbo sem que nenhuma venda tenha mudado; é exatamente o que a Torre mostra
+como "publicado no mart em ...".
+
+- **Não aparece no SQL do local**: a coluna não existe lá, e um SQL que a
+  mencionasse falharia no meio da transação, depois do `DELETE`. Há trava de
+  regressão (`assert_no_ingested_at_in_local_sql`).
+- **No Neon é preenchido pelo banco** (`NOW()`), nunca por valor vindo da
+  staging: o carimbo tem de ser o instante real da publicação naquele destino,
+  e a staging não sabe disso.
+
+### Estados parciais — sem encenar atomicidade distribuída
+
+Local e Neon são **dois bancos, duas transações independentes**. Não existe
+transação distribuída aqui e o módulo não finge que existe.
+
+| Estado | O usuário vê | Ação correta |
+|---|---|---|
+| **LOCAL_OK_NEON_FALHOU** | a Torre continua servindo o dado **antigo** (a Torre lê o Neon) | repetir **somente** a propagação local → Neon, com novo backup no Neon; nunca reprocessar XLSX |
+| **NEON_OK_LOCAL_FALHOU** | a Torre mostraria dado que a fonte local não tem — divergência silenciosa | **proibido por contrato** (a ordem impede). Se ocorrer, é bug de orquestração: restaurar o Neon pelo backup e investigar |
+| **COMMIT_INDETERMINADO** | indeterminado até inspeção | **não repetir**. Inspecionar o destino contra o backup (contagem e checksum) e só então decidir |
+
+### Zero retry
+
+Nenhuma etapa tem retry automático. O caso ambíguo (`EXIT_INDETERMINATE`) é
+justamente aquele em que não se sabe se a escrita foi aplicada — repetir
+poderia duplicar o efeito. A decisão de repetir é humana, depois de inspecionar
+destino e backup. Há teste que conta as chamadas e reprova qualquer etapa
+executada mais de uma vez.
+
+### Pré-condições operacionais ainda não satisfeitas
+
+1. Os dois XLSX fora do padrão em `shopee/barbours/` precisam sair da pasta —
+   a triagem fail-closed aborta a marca inteira enquanto estiverem lá.
+2. As credenciais `BACKFILL_*_RW_URL` não existem; precisam ser provisionadas
+   como role dedicada de escrita.
+3. `--apply` continua bloqueado no código: habilitar é decisão de outro gate.
+
 ## Histórico de decisões
 
 | Data | Decisão |
@@ -1334,3 +1487,4 @@ o que se esperava e deve ser revertido pela tabela de backup durável.
 | 2026-09-08 | Gate SH-API-2A-R (implementação fail-closed da deduplicação de Produtos Shopee): `apps/api/etl/load_shopee_products.py` ganha `ID do pedido` no `COL_MAP` (obrigatório), `_classify_order_file`/`_plan_brand_snapshots`/`_select_current_snapshot` e a regra de snapshot vigente por pedido aplicada ANTES do filtro `status == "Concluído"`. Quatro formatos de nome aceitos; instante de export, `Order.toship`, sufixo `(1)`, parte ausente/duplicada e janela ambígua **abortam a carga inteira** antes de qualquer leitura de arquivo ou conexão. Ordenação `(janela_fim, janela_início)` DESC, validada contra `max(file_id)` do Data Mart em 13.720/13.720 pedidos sobrepostos. mtime/ctime/ordem do glob nunca usados. 38 testes novos (incl. contraprova dos R$ 971.946,52 que a ordenação por nome removeria); suíte `etl/tests` 135→174 passando, zero falhas; `apps/api/tests` com as MESMAS 45 falhas pré-existentes por node ID (zero novas). Deduplicação **não aplicada em produção**: nenhum backfill, nenhuma escrita em banco, nenhuma migration, nenhum commit/push. Sidecar fora de escopo; `units_sold` da fato diária pendente. Triagem aborta hoje em `barbours` por 2 arquivos fora do padrão — ação do operador documentada na seção nova. |
 | 2026-09-08 | Gate SH-API-2D (contrato de qualidade de escopo dos Produtos Shopee): seis eixos ortogonais (`source_status`, `load_status`, `eligibility_status`, `maturity_status`, `coverage_status`, `loaded_at`) derivados de tres tabelas que **ja existiam** no Neon — `marts.fact_shopee_product_monthly`, `marts.fact_marketplace_daily_performance` e `audit.source_sync_run`. **Sem migration, sem escrita em banco, sem backfill.** Piso de maturidade MEDIDO em 30 pares marca x competencia (maduros 1,0047–1,1234; imaturos 0,6643–0,7700; sem conclusao 0,0000) e exposto como parametro `Settings.shopee_maturity_floor` (default 0,99), nunca literal em API/tela/MCP — ha teste que reprova a reintroducao de `0.99`/`2026-07`/`2026-08`. Propagado a 5 superficies: `/produtos/shopee`, `/produtos/shopee/summary` (que **nunca** preenchia `refreshed_at`), `/quality`, tela de Produtos (faixa antes dos cards A/B/C/D), tela de Qualidade, `torre_produtos_prioritarios` e `torre_qualidade_dados` (campo estruturado + limitacoes derivadas do backend + aviso no resumo textual). Tres achados corrigidos pela validacao contra o Neon real: cobertura da fonte e HISTORICA (a ultima execucao cobre so' 07..08/2026 e reprovava todos os meses fechados); sem carga a maturidade e' `maturity_unknown`, nunca `materially_immature`; `source_unknown` nao bloqueia um mes com maturidade medida. Validacao: 38 testes pytest novos + 19 `node --test` novos; `apps/api/tests` **1095 passed / 0 failed** com `.env` carregado (as 43 falhas do worktree sao ausencia de `.env`, node IDs identicos a baseline em 9a81cc1); `etl/tests` 257 passed; web 1478/1478; `tsc --noEmit` com **zero** erro novo. Backfill proposto e NAO executado, restrito a `apice`/2026-05 (−23.292,43) e `barbours`/2026-05 (−80.987,03); `kokeshi`/2026-08 e `rituaria`/2026-07 excluidos por imaturidade medida. |
 | 2026-09-08 | Gate SH-API-2D-R/V (correcao semantica, QA e integracao linear): a primeira versao usava nomes que afirmavam mais do que o contrato media. `source_covered` -> **`source_ever_loaded`** (o eixo responde "ja foi carregada alguma vez?", nunca "a fonte esta em dia"); `load_current` -> **`load_present`** ("current" e afirmacao temporal, e o mart publicado em 05/08 aparecia como `load_current` para julho 34 dias depois); `load_stale` -> **`load_behind_daily`** (declara a evidencia medida em vez de um adjetivo temporal). `completed_share` -> **`maturation_index`** e `maturity_floor` -> **`maturation_threshold`**: a razao NAO e percentual de conclusao, share nem completude — numerador (subtotal de item do mart) e denominador (GMV liquido do shop stats) sao populacoes diferentes, valores > 1 sao o regime normal de mes fechado e NUNCA sao truncados. Novo campo obrigatorio `maturation_index_note` acompanha o numero em toda superficie; a faixa da tela nem le o indice diretamente, para nao poder exibi-lo como "%". Entrada impossivel (GMV negativo, NaN) levanta `ScopeQualityInputError` e degrada para `maturity_unknown` com aviso critico `shopee_produtos_indice_invalido` — sem a guarda, `NaN >= limiar` e False e o mes viraria "imaturo", um veredito inventado a partir de lixo. `loaded_at` explicitado como publicacao NO MART, com os dois relogios nomeados por extenso na tela; nenhum titulo usa "atual"/"atualizado"/"em dia" (ha teste que reprova). Os tres `text-[11px]` novos viraram `text-xs` (piso de 12px). Integracao LINEAR: worktree limpa sobre origin/main 6b9bb94 + cherry-pick de a18cea5 sem conflito (22/22 blobs identicos), correcoes em commit separado — sem merge no branch antigo. Zero backfill, zero escrita em banco, zero migration. |
+| 2026-09-08 | Gate SH-API-2E1 (prepara o backfill maduro de maio; NADA executado): `--apply` habilitado TECNICAMENTE e ainda BLOQUEADO na barreira final. Dez portas fail-closed e independentes (allowlist exata, consentimento, credencial dedicada de escrita, destino confirmado, identidade, primary gravavel, SSL no Neon, advisory lock de sessao sem espera, backup commitado, expectativa medida). Allowlist EXATA `apice:2026-05` + `barbours:2026-05` — subconjunto tambem e' recusado, porque metade do par nao fecha a reconciliacao total; `rituaria:2026-07` e `kokeshi:2026-08` recusados COM o motivo medido na mensagem. Backup redesenhado: transacao PROPRIA commitada ANTES da mutacao (antes caia junto com o rollback e nao protegia de nada), colunas explicitas por destino (nunca `SELECT *`, os schemas tem 14 x 15 colunas), nome deterministico validado por regex antes de entrar na DDL, contagem + checksum md5 conferidos contra a origem, retencao de 90 dias. `ingested_at` tratado explicitamente: so' existe no Neon, e' instante de PUBLICACAO (nunca data da fonte), preenchido por NOW() do banco e com trava de regressao que reprova sua presenca em SQL do local. Tres estados parciais nomeados com acao definida, sem encenar atomicidade distribuida; ZERO retry, com teste que conta chamadas. Expectativa medida vira TRAVA: -23.292,43 + -80.987,03 = -104.279,46, zero chave adicionada/removida, maturacao acima de 0,99 — divergencia bloqueia, valores nunca sao forcados. 77 testes novos; etl/tests 257 -> 334. Zero escrita, zero conexao gravavel, zero backup real, zero migration, zero deploy. |
