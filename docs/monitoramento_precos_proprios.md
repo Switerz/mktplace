@@ -392,3 +392,206 @@ O Gate PMA está encerrado. O que segue aberto **não** é bloqueio desta tela:
 3. **`favicon.ico` da Torre** — 404 em todas as rotas, dívida pré-existente.
 4. Avaliar agendamento do sync, com observação de duas execuções manuais
    consecutivas com `EXCEPT` (0,0) antes de qualquer automação.
+
+
+---
+
+# Gate PMA-H1 + D08-R — data observada em produção (2026-09-08)
+
+Commit funcional: `e7fa7f99da15e6c499374481558d3b66bd3a1817` —
+`feat(pricing): permite consulta por data observada`. Publicado no Render pelo
+proprietário e na Vercel automaticamente; contrato confirmado no OpenAPI de
+produção antes do smoke.
+
+## O que mudou no contrato
+
+Existem agora **dois modos**, e o nome do parâmetro deixou de ser ambíguo.
+
+| | Sem `observed_date` | Com `observed_date=YYYY-MM-DD` |
+|---|---|---|
+| `meta.mode` | `latest` | `selected_date` |
+| dia usado | maior observação ≤ D−1 | **exatamente** o dia pedido |
+| dia atrasado | mostra os dados e declara a defasagem | — |
+| dia sem observação | — | HTTP 200 com estado vazio tipado |
+| D0 / futuro | — | 422 com mensagem fixa, sem eco |
+
+`ref_date` continua recusado com 422, agora por **ambiguidade**: o nome não
+separa a data OBSERVADA do preço da data de CAPTURA da referência, e as duas
+viajam no payload. A mensagem aponta `observed_date` como substituto.
+
+Numa data histórica a referência é o snapshot PDV **mais recente disponível
+hoje** — `reference_basis = latest_available_snapshot` —, e a resposta **não
+afirma** que essa referência valia naquele dia: `validity_status` segue
+`missing`. A frase obrigatória viaja em `meta.comparison_basis_text` e nas
+`limitations` de cada linha.
+
+## Frescor deixou de ser categoria comercial
+
+Este era o defeito central. `stale_observation` era um `comparison_status` e
+**substituía** a classificação: com o sync atrasado, toda linha virava
+`stale_observation`, os cinco cartões comerciais iam a zero e a tela aparentava
+"nenhum desvio de preço" quando o que havia era atraso de pipeline.
+
+Medido no serving real em 2026-09-08, antes da correção do dado: 855 anúncios,
+sync parado em 02/09 com D−1 em 07/09, e a tela dizia `comparable_count = 0`.
+Depois: `comparable_count = 134`, `below_reference_count = 16`. Os números
+sempre existiram; o modelo os escondia.
+
+Agora são duas dimensões ortogonais:
+
+- **`comparison_status`** — partição comercial de **cinco** valores
+  (`below_reference`, `at_or_above_reference`, `no_reference`,
+  `non_comparable_reference_ambiguous`, `inactive_listing`) que fecha
+  exatamente em `monitored_count`;
+- **`freshness_status`** — `fresh` / `stale` / `historical` / `unavailable`,
+  sobreposto, na linha e no `meta`, com `lag_days` medindo a defasagem em dias
+  (nulo, nunca zero, quando não há observação).
+
+`stale` e `historical` são estados distintos de propósito: a **mesma** data é
+`stale` quando o modo `latest` caiu nela por falta de dado mais novo e
+`historical` quando foi escolhida. Chamar as duas de atraso confundiria falha
+de pipeline com uso legítimo da tela.
+
+**Compatibilidade:** `?status=stale_observation` não quebra. Passou a ser
+filtro de **frescor** (`freshness_status == stale`) e a resposta declara a
+depreciação em `warnings`, com o seletor de data como caminho novo.
+
+## Cutoff real por fonte após o D08-R
+
+Teto imutável do gate: **2026-09-07**. Nenhuma fonte publicou 08/09.
+
+| Fonte | Máximo publicado | Limitado por |
+|---|---|---|
+| Shopee Daily (orders + shop-stats) | **2026-09-07** | cutoff do gate |
+| Shopee Ads | — | **BLOQUEADA**, ver abaixo |
+| Shopee Raw | 20 arquivos do lote 01–08/09 | arquivo íntegro arquivado |
+| Shopee Silver / Gold | 2026-08-24 | sem executor oficial versionado |
+| ML Daily | **2026-09-07** | cutoff do gate (fonte alcança 08/09) |
+| ML serving (`fact_ml_gestao_diaria`) | **2026-09-07** | `min(D−1, source_max)` |
+| ML produtos / ranking | 2026-09-03 | **BLOQUEADO**, ver abaixo |
+| TikTok Daily | **2026-09-07** | cutoff do gate (fonte alcança 08/09) |
+| TikTok produtos | 2026-09-06 | máximo real da fonte |
+| TikTok brand | 2026-09-06 | máximo real da fonte |
+| TikTok creator | 2026-09-06 | máximo real da fonte |
+| TikTok channel efficiency | 2026-09-07 | `min(D−1, source_max)` |
+| Regional | 2026-09-01 | **BLOQUEADO**, ver abaixo |
+| **PMA serving** | **2026-09-07** | cutoff do gate |
+
+`serving_refresh` resolve `min(D−1, source_max)` **por target, isolado**. É o
+que faz `creator` parar em 06/09 sem receber um 07/09 fabricado, enquanto `ml`
+é limitado por D−1 contra uma fonte que já tem 08/09.
+
+## Bloqueios — ausência declarada, nunca zero
+
+**Shopee Ads — BLOQUEADA.** O parser de Ads não tem grão diário: agrega o
+total do período e divide por `num_days`, onde as datas vêm do **cabeçalho do
+próprio CSV**, não da janela pedida no CLI. O arquivo entregue declara
+`Período,01/09/2026 - 08/09/2026` = 8 dias, com 08/09 parcial. A taxa
+publicada seria 11.710,93/dia; a real está em [11.710,93 ; 13.383,92] — **até
+14,3% de subestimação**, e não determinável a partir do arquivo, que só traz o
+total. Nenhum parâmetro de CLI corrige o denominador. `ad_spend` ficou **NULO**
+nas 35 chaves de 01–07/09 — ausência preservada como ausência.
+
+Para desbloquear: exportar Ads com `Período` terminando em D−1.
+
+**ML produtos / ranking — BLOQUEADO.** `gold.ml_produto_ranking` tem
+`max(last_sale) = 2026-09-08`, e o ramo ML de `sync_produtos` **não tem
+predicado de data nenhum** — lê a tabela inteira com `WHERE brand IN (...)`.
+Não existe janela temporal segura, e rodar traria D0 em bloco.
+
+**Regional — BLOQUEADO.** `gold.ml_gestao_diaria` alcança 08/09 e
+`--incremental` não aceita teto: `run_incremental_cli(secret_path, repo_root)`
+não tem parâmetro de data. `--date-from`/`--date-to` pertencem aos modos de
+janela Shopee, não ao incremental. Mantido em 01/09.
+
+**Silver / Gold Shopee — sem executor oficial versionado.**
+`pipelines/staging/shopee/build_sql.py` só monta e escreve texto. A Raw pôde
+ser carregada com o arquivo íntegro porque **não há propagação automática
+Raw → Silver**: `shopee_batch_window.py` declara na própria linha 43 que nunca
+lê `raw.shopee_ingestion_file` — ele lê `silver.stg_shopee_order_item_snapshots`.
+O caminho está cortado na origem, não apenas com teto.
+
+Risco registrado para quem construir o runner Silver: `_validate_shopee_window`
+rejeita apenas `date_to > today`, ou seja **aceitaria 08/09**. Seria ali o
+ponto de vazamento de D0.
+
+## Lacuna de cobertura em 2026-09-07
+
+O último dia observado tem **546 anúncios em 3 marcas**, contra 859 em 4 marcas
+nos dias anteriores: **`barbours` não foi capturada em 07/09**. A fonte
+`silver.stg_ml_item_price_history` tem o mesmo padrão (546 linhas em 07/09
+contra 859 em 06/09 e 860 em 08/09), então a lacuna é da captura, não da carga.
+
+A captura de preço é **pontual, não retroativa**: reprocessar depois não
+recupera 07/09. Quem abrir a tela em `latest` verá um denominador menor e
+`barbours` ausente — isso é dado honesto, não erro de publicação.
+
+## Smoke de produção — 67/67
+
+Executado contra o Render publicado, somente GET: `latest`;
+`observed_date=2026-08-30`; data válida sem observação; D0; D+1; futuro
+distante; `ref_date` depreciado; paginação em duas páginas sem sobreposição;
+filtro por marca; filtro comercial; alias `stale_observation`.
+
+Confirmado: o OpenAPI de produção traz `observed_date` público e `ref_date`
+fora do schema; o enum de `comparison_status` tem exatamente os **cinco**
+valores comerciais; `meta` traz `freshness_status`, `lag_days`,
+`available_observed_dates` e `reference_basis`; `kpis` traz
+`fresh_count`/`stale_count`/`historical_count`; a linha traz
+`freshness_status`. Data histórica usa exatamente o dia pedido, sem fallback.
+Nenhuma recusa ecoa a entrada. Nulo continua distinto de zero: os quatro
+campos de checkout nulos, 35 linhas sem referência com diferença nula, 12
+diferenças negativas preservadas com sinal.
+
+## QA em navegador real — 51/51
+
+Chrome do sistema via Playwright em venv isolado (sem tocar as dependências do
+projeto), contra o **frontend e o backend de produção**, em 1440×900,
+1024×768 e 390×844.
+
+Aprovado: zero overflow horizontal nos três viewports; zero erro de console
+relevante; zero *hydration warning*; seletor "Data observada" alimentado por
+`available_observed_dates` com 37 opções e **nenhuma ≥ 08/09**; troca de data
+refletida na URL nos dois sentidos; banner retrospectivo aparecendo e
+desaparecendo pelo `aria-label`; a visão histórica **não** usa o vocabulário de
+atraso; cartões comerciais com valor na visão histórica; troca rápida de datas
+com a última escolha vencendo; filtro de marca preservando a data na URL; foco
+por teclado alcançando elemento interativo com indicação visual; estado vazio
+declarado com "ausência não é zero"; data inválida na URL ignorada em vez de
+enviada ao backend.
+
+O único 404 de console é o `favicon.ico` já registrado como dívida
+pré-existente nesta mesma página.
+
+## Achados desta rodada
+
+1. **A frase-base é renderizada sem acentos.** `comparison_basis_text` foi
+   escrita ASCII-only no backend: a tela mostra "Preco anunciado em 07/09/2026
+   comparado a referencia sugerida ao consumidor (PDV) capturada em 02/09/2026.
+   A origem nao declara a vigencia historica dessa referencia." É texto
+   voltado ao usuário, em português, sem acentuação. Cosmético e visível;
+   pendente de correção.
+2. **Os cartões de qualidade de frescor aparecem com zero** quando não se
+   aplicam ("Consulta retrospectiva: 0" no modo `latest`). É o mesmo
+   comportamento do cartão de referência ambígua, que já existia — decisão de
+   design, não defeito.
+3. **Um teste apodrecia com o calendário.**
+   `test_http_500_em_inconsistencia_de_serving_com_corpo_fixo` fixava
+   `HOJE = 2026-09-03` para simular D0, mas a borda HTTP não injeta `today`.
+   Escrito em 03/09 passava; de 04/09 em diante `HOJE` virou apenas uma data
+   atrasada, o guarda *fail-closed* de D0 deixou de ser exercitado e o teste
+   falhava para sempre. Corrigido em `e7fa7f9`: D0 vem do relógio real.
+
+## Limitações que seguem abertas
+
+1. **Shopee Ads sem `ad_spend`** de 28/08 a 07/09 — bloqueio de contrato, não
+   ausência de dado. Depende de export com período terminando em D−1.
+2. **ML produtos/ranking e Regional** sem teto superior nos jobs oficiais.
+   Enquanto as fontes alcançarem D0, os dois seguem bloqueados.
+3. **Silver/Gold Shopee** sem executor versionado.
+4. **07/09 sem `barbours`** no PMA, irrecuperável por reprocesso.
+5. `validity_status = missing` continua sendo a verdade da referência PDV: a
+   comparação histórica é "preço daquele dia contra a referência de hoje", e
+   **nunca** "a referência valia naquele dia".
+6. Sem limiar comercial aprovado não há severidade: os únicos fatos seguem
+   sendo `difference_amount` e `difference_pct`.
