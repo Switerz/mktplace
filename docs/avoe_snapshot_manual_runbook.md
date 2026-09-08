@@ -1,16 +1,37 @@
 # Snapshots manuais da Avoe — fonte, contrato e runbook
 
-Gate AVH-4A · corrigido no AVH-4A-R · 2026-09-08
+Gate AVH-4A · corrigido no AVH-4A-R · aplicado no AVH-4B-P · corrigido no
+AVH-4A-H1, AVH-4A-H1-R, AVH-4A-H1-R2 e AVH-4A-H1-R3 · 2026-09-08
 
-> **Estado: NÃO PUBLICADO E NÃO OPERACIONAL.**
-> Esta rodada entregou a fundação: especificação DDL, migration, contrato de
-> leitura, importador e testes. **Nada foi aplicado no Neon, no Data Mart ou em
-> produção, e não há API nem tela.**
+> **Estado por etapa — não usar a frase genérica "AVH-4B não iniciado".**
 >
-> O que **foi** executado, num **PostgreSQL 16.14 descartável** criado fora do
-> repositório e destruído no fim: a cadeia Alembic até `015`, o `downgrade`, o
-> `upgrade` de volta, o primeiro `--apply` com o snapshot real, um segundo
-> `--apply` com run id diferente, e os três casos negativos. Ver §11.
+> | Etapa | Estado |
+> |---|---|
+> | **AVH-4B-P** — piloto: migration + primeiro snapshot | **CONCLUÍDO** |
+> | migration `015` no Neon | **APLICADA** |
+> | snapshot `sync_run_id = 285` (7 metas + 24 canais) | **PRESERVADO, intocado** |
+> | **AVH-4B-S** — serving, API e frontend | **NÃO INICIADO** |
+>
+> A auditoria histórica do run 285 tem `rows_extracted = 31` e
+> `rows_loaded = 31`, e **não será reescrita**. A população original lida
+> naquele snapshot era de **4.837 linhas** (19 metas + 4.818 diárias). Sob a
+> semântica adotada no AVH-4A-H1, uma execução equivalente hoje registraria
+> `rows_extracted = 4.837` e `rows_loaded = 31` (§8.5).
+>
+> Nada foi escrito no Data Mart, nada foi escrito na Avoe, e nenhuma API ou
+> tela consome estas tabelas.
+>
+> Três rodadas de hotfix, todas **sem tocar nos dados publicados**: o
+> **AVH-4A-H1** corrigiu o caminho de commit indeterminado, a mensagem após
+> commit confirmado e a semântica de `rows_extracted`; o **AVH-4A-H1-R** fechou
+> os caminhos em que uma falha da própria auditoria ainda podia produzir uma
+> afirmação falsa; o **AVH-4A-H1-R2** acrescentou o estado de reversão não
+> confirmada, modelou cada mutação de auditoria com quatro resultados possíveis
+> e proibiu qualquer exceção crua de driver de sobreviver na cadeia; o
+> **AVH-4A-H1-R3** passou a classificar as mutações de auditoria pela **fase**
+> (um commit tentado que levanta é indeterminado para sempre, e nenhum rollback
+> posterior o rebaixa). Ver a matriz em §8.2.1, a semântica das mutações em
+> §8.2.2 e as métricas em §8.5.
 
 ---
 
@@ -234,24 +255,154 @@ e decide.
 ### 8.2.1 Semântica real da auditoria
 
 `audit.source_sync_run` é escrito numa **conexão independente, com commit
-próprio** (`source_name = 'avoe_manual_snapshot'`):
-
-1. `running` **antes** da transação de dados;
-2. `success` ou `failed` **depois**.
-
-Isso significa que **uma tentativa revertida deixa rastro** — o desenho anterior,
-de transação única, perdia o registro no rollback e só conseguia gravar sucessos.
-Verificado no PostgreSQL descartável: a variante de conteúdo divergente produziu
+próprio** (`source_name = 'avoe_manual_snapshot'`): `running` **antes** da
+transação de dados, e o fechamento **depois**. Isso significa que **uma
+tentativa revertida deixa rastro** — o desenho anterior, de transação única,
+perdia o registro no rollback e só conseguia gravar sucessos. Verificado no
+PostgreSQL descartável: a variante de conteúdo divergente produziu
 `sync_run_id = 3` com `status = failed` e mensagem sanitizada.
 
 Garantias adicionais: o `UPDATE` da auditoria exige `rowcount == 1`; `status` é
 validado contra `{running, success, failed}`; a mensagem passa pelo sanitizador
 que suprime qualquer texto contendo DSN, senha, apikey ou JWT.
 
-**Commit indeterminado não é marcado `failed`.** Se a exceção acontecer no
-próprio `commit` dos dados, não se sabe se algo foi gravado — o registro
-permanece `running` com `error_message` começando em `INDETERMINADO:`. Afirmar
-`failed` seria afirmar que nada entrou, e isso não se sabe.
+#### Matriz de desfechos (AVH-4A-H1, fechada no AVH-4A-H1-R)
+
+O commit dos dados fica **fora** do bloco que faz `rollback()`, de propósito:
+uma exceção no próprio `commit` não prova que o banco deixou de gravar, e um
+rollback depois dela não desfaz um commit que pode ter sido aplicado.
+
+O estado dos **dados** tem três valores (`nao_confirmada`, `confirmada`,
+`indeterminada`), mas a **auditoria** é um eixo independente que pode falhar em
+quatro momentos distintos. O cruzamento dá sete desfechos, cada um com seu exit
+code e sua mensagem:
+
+| # | Estado | Dados | Auditoria | Exceção | Saída |
+|---|---|---|---|---|---|
+| 1 | `audit_start` falhou | **não tentados** — `publish()` nem foi chamado | não iniciada; se a mutação foi revertida, a linha não existe; se ficou indeterminada, nada se afirma | `AuditoriaInicialIncompleta` | 7 |
+| 2 | Falha pré-commit | rollback **confirmado**, nada publicado | `failed`, `rows_loaded = 0` | `PublicacaoNaoConfirmada` | 4 |
+| 3 | Falha pré-commit **+** `audit_finish(failed)` falhou | rollback confirmado, nada publicado | incompleta | `AuditoriaIncompletaSemPublicacao` | 8 |
+| 4 | Falha pré-commit **+** o próprio `rollback()` levantou | commit **nunca tentado**; fim da transação **não observado**; conexão encerrada | só a nota de indeterminação; **nunca** `failed` | `ReversaoNaoConfirmada` | 11 |
+| 5 | Exceção **no** commit | desconhecidos, **nenhum rollback** | `running` + nota `INDETERMINADO:` | `PublicacaoIndeterminada` | 5 |
+| 6 | Exceção no commit **+** a marcação falhou | desconhecidos, nenhum rollback | desconhecida; a nota pode não existir | `PublicacaoIndeterminadaAuditoriaNaoConfirmada` | 9 |
+| 7 | Commit confirmado | publicados (ou no-op) | `success` | — | 0 |
+| 8 | Commit confirmado **+** `audit_finish(success)` falhou | publicados (ou no-op), nenhum rollback posterior | incompleta | `AuditoriaIncompleta` | 6 |
+
+Os estados 1, 3, 6 e 8 se desdobram conforme o resultado da mutação de
+auditoria (§8.2.2): a mensagem muda, o exit code não.
+
+**Zero retry automático** em todos. Qualquer coisa fora dessa tabela sai com
+**10** e a mensagem `ESTADO NAO CLASSIFICADO` — que não afirma publicação, nem
+reversão, nem auditoria.
+
+`KeyboardInterrupt` e `SystemExit` **não** entram nessa máquina: sobem crus.
+Interrupção do operador não é desfecho operacional da publicação, e convertê-la
+em um deles seria inventar um estado.
+
+Todos os códigos de saída da CLI:
+
+```
+0   sucesso, no-op ou dry-run
+2   FALHA DE CONTRATO
+3   FALHA / FALHA ao conectar no destino
+4   FALHA NA PUBLICACAO (nada gravado)
+5   PUBLICACAO INDETERMINADA
+6   AUDITORIA INCOMPLETA (publicacao confirmada)
+7   AUDITORIA INICIAL INCOMPLETA (publicacao NAO tentada)
+8   PUBLICACAO NAO CONFIRMADA, AUDITORIA INCOMPLETA (nada publicado)
+9   PUBLICACAO INDETERMINADA (auditoria tambem NAO confirmada)
+10  ESTADO NAO CLASSIFICADO (nao se afirma publicacao, reversao nem auditoria)
+11  REVERSAO NAO CONFIRMADA (commit nunca tentado; fim da transacao nao observado)
+```
+
+Nenhum desses rótulos contém "rollback" ou "revertido".
+
+#### Estado 4 — reversão não confirmada
+
+É o único caminho em que o processo não sabe se a transação de dados terminou.
+O que ele **sabe** é que o `commit()` nunca foi tentado. O que ele **não pode
+dizer**: "rollback aplicado", "dados seguros", nem "nada gravado" sem
+qualificação.
+
+O que o importador faz: encerra a conexão para forçar o fim da transação (e
+registra se esse encerramento foi confirmado), grava na auditoria apenas a nota
+de indeterminação — nunca `failed`, que afirmaria um fim que ninguém observou —
+e sai com 11 mandando reconciliar em leitura. Nenhum retry.
+
+Quatro afirmações que o importador **não** faz:
+
+- **nunca converte uma exceção crua de driver em mensagem, cadeia ou
+  traceback.** A exceção do psycopg2 carrega DSN, host, usuário, parâmetros e
+  SQL no próprio texto e nos frames. Todo desfecho sai por `_levanta()`, que
+  zera `__cause__`, `__context__` e o traceback de origem: só a mensagem já
+  sanitizada viaja. O importador também não emite log — não há logger para
+  vazar;
+
+- **"rollback aplicado" só aparece quando o `rollback()` retornou.** A frase é
+  construída dentro de `publish()`, no ramo que a comprova. Se o próprio
+  rollback levantar, a mensagem passa a dizer que a reversão **não** foi
+  confirmada — e continua verdadeira sobre o essencial: nada foi publicado,
+  porque o commit nunca chegou a ser tentado. Nenhum rótulo da CLI contém essa
+  frase, em nenhum dos sete desfechos;
+- **nunca marca `failed` num run cujo commit retornou**, nem num run cujo
+  commit ficou indeterminado. Um registro que ficou `running` é a declaração
+  honesta de "não sei";
+- **nunca chama de "commit indeterminado" uma falha pré-commit.** O desfecho 3
+  é explícito: os dados estão seguros, o que ficou aberto é a auditoria.
+
+Se você encontrar um run `running` desta fonte, o procedimento é: contar as
+linhas das duas tabelas para aquela `captured_at` e comparar com o relatório do
+dry-run. Se as linhas estiverem lá, a publicação aconteceu e o que falta é
+apenas fechar o registro de auditoria; se não estiverem, a captura pode ser
+reimportada normalmente (o caminho de idempotência cobre os dois casos sem
+sobrescrever nada). Nos desfechos 3 e 5 vale a mesma leitura, com uma ressalva:
+ali o próprio registro de auditoria pode estar sem nota, então o único árbitro
+é a contagem nas tabelas de snapshot.
+
+### 8.2.2 As quatro faces de cada mutação de auditoria
+
+Uma exceção vinda de `audit_start`, `audit_finish` ou `audit_mark_indeterminate`
+**não diz, sozinha, o que ficou persistido**. O que separa os casos é o que
+aconteceu depois da falha — e é isso que `ResultadoAuditoria` registra:
+
+| Resultado | Quando | O que se pode afirmar da linha |
+|---|---|---|
+| `nao_tentada` | a mutação nem chegou a ser emitida | nada mudou |
+| `confirmada` | o `commit()` da auditoria **retornou** | o novo conteúdo está lá |
+| `revertida` | a mutação falhou **antes do commit** e o `rollback()` da auditoria **retornou** | o conteúdo **anterior** permanece |
+| `indeterminada` | (a) falhou antes do commit **e** o rollback também não retornou; ou (b) o **commit foi tentado e levantou** | **nada** — o conteúdo não é observável |
+
+**A classificação vem da fase, não do rollback.** Se o `commit()` da auditoria
+foi tentado e levantou, o resultado é `indeterminada` **para sempre**: nenhum
+rollback é tentado depois, e um rollback que retornasse não rebaixaria o
+resultado para `revertida`. É a mesma regra da transação de dados — um rollback
+não desfaz um commit que pode ter sido aplicado, e o fato de ele retornar não
+prova nada sobre a linha. O caso real que isso cobre: o servidor aplica o
+commit e a **confirmação se perde no caminho de volta**.
+
+Toda exceção da máquina carrega um `resultado_auditoria`. O padrão é
+`nao_tentada`, verdadeiro para o que `publish()` levanta sozinho, antes de
+qualquer interação com a auditoria.
+
+Consequências diretas nas mensagens:
+
+- `audit_start` indeterminado: a publicação não começa, e o texto diz que não se
+  afirma se a linha de run existe nem com que status — em vez de garantir que
+  ela não foi criada;
+- `audit_finish` revertido: aí sim dá para dizer que o run permanece `running`,
+  porque a reversão foi observada;
+- `audit_finish` indeterminado: o texto **não** diz "ficou running"; diz que o
+  estado do registro não pode ser afirmado;
+- `audit_mark_indeterminate` indeterminado: não se afirma nem que a nota existe,
+  nem que não existe.
+
+Qualquer resultado incerto exige **reconciliação em leitura** antes de nova
+execução, e a mensagem diz isso explicitamente.
+
+Isto **não** é uma transação distribuída. Dados e auditoria são dois recursos
+independentes, com conexões e commits próprios — numa execução bem-sucedida são
+1 commit de dados e 2 de auditoria (o `start` e o `finish`). O processo apenas
+se recusa a afirmar sobre um recurso o que só observou no outro.
 
 As colunas `marketplace_id` e `loja_id` ficam NULL de propósito: os canais
 adicionais não existem em `marts.dim_marketplace` e duas das marcas não existem
@@ -273,10 +424,22 @@ ficam **fora** da comparação.
 
 ### 8.4 Rollback e recuperação
 
-Qualquer exceção dispara `rollback()` da transação inteira — inclusive falha de
-import do driver, que é feito **dentro** do `try` justamente por isso. Não há
-estado parcial possível: ou as duas tabelas recebem a captura, ou nenhuma
-recebe.
+Qualquer exceção **anterior ao commit** dispara `rollback()` da transação
+inteira — inclusive falha de import do driver, que é feito **dentro** do `try`
+justamente por isso. Não há estado parcial possível: ou as duas tabelas recebem
+a captura, ou nenhuma recebe.
+
+A partir do `commit`, rollback deixa de existir como recurso. Exceção no próprio
+`commit` é **indeterminada** e exceção depois dele é **auditoria incompleta**;
+em nenhum dos dois o importador tenta reverter, porque não há o que reverter com
+segurança. Ver a matriz de desfechos em §8.2.1.
+
+O `rollback()` em si é chamado dentro de um guard: se ele levantar, o desfecho
+deixa de ser `PublicacaoNaoConfirmada` e passa a ser `ReversaoNaoConfirmada`
+(estado 4, exit 11) — classe própria, **não** subclasse da outra, justamente
+para que nenhum consumidor herde a garantia de "nada publicado". A frase
+"rollback aplicado" existe em exatamente um ponto do código, no ramo em que o
+`rollback()` retornou.
 
 Se for necessário desfazer uma captura já comitada, **não há caminho pelo
 importador** (não existe DELETE). A remoção é operação manual deliberada, fora
@@ -285,6 +448,38 @@ um obstáculo a contornar.
 
 Reverter o schema: `alembic downgrade 014` remove apenas os dois objetos criados
 pela `015`. Nenhum objeto oficial é tocado.
+
+### 8.5 `rows_extracted` e `rows_loaded` (corrigido no AVH-4A-H1)
+
+Os dois campos de `audit.source_sync_run` medem coisas diferentes, e usar o
+mesmo número nos dois escondia justamente o que a auditoria deveria mostrar: a
+razão de agregação.
+
+| Campo | O que é | Sob a semântica corrigida |
+|---|---|---|
+| `rows_extracted` | linhas **lidas** dos arquivos do snapshot | **4.837** |
+| `rows_loaded` | linhas **gravadas** nas tabelas de destino | **31** |
+
+A queda de 4.818 para 24 não é perda: as diárias de canal são agregadas para o
+grão mensal por marca × canal, e as metas fora da competência corrente são
+descartadas pela regra de versão. Com os dois campos iguais a 31, essa
+transformação ficava invisível na auditoria.
+
+#### Os três números, sem ambiguidade
+
+1. **Registro histórico real do snapshot 285** (o que está gravado hoje em
+   `audit.source_sync_run`):
+   `rows_extracted = 31`, `rows_loaded = 31`.
+2. **População original lida pelo importador** naquele snapshot:
+   19 linhas de metas + 4.818 linhas de canais = **4.837 linhas**.
+3. **Execução equivalente futura**, pela semântica corrigida no AVH-4A-H1:
+   `rows_extracted = 4.837`, `rows_loaded = 31`.
+
+O snapshot 285 e sua auditoria histórica **não serão reescritos**. O `31` do
+item 1 permanece: `audit.source_sync_run` é o rastro do que aquela execução
+declarou, e alterá-lo seria falsear auditoria. Os dados publicados continuam
+corretos — as 7 metas e os 24 canais são exatamente os esperados, e nada nas
+tabelas de snapshot depende desses contadores.
 
 ## 9. Substituição futura pela credencial técnica
 
@@ -345,7 +540,38 @@ foram acessados.
 | 11 | canal desconhecido (`TEMU` sintético) junto de dados válidos | **snapshot inteiro recusado**, exit 2, zero INSERT |
 | 12 | auditoria | 3 registros: `success` (31 linhas), `success` (no-op, 0), `failed` (0, mensagem sanitizada) |
 
-O que **não** foi validado em banco real: o caminho de commit indeterminado
-(§8.2.1) — ele exige uma falha no próprio `commit`, que não é reproduzível sem
-injetar defeito no driver. Está coberto apenas por contraprova com conexão
-falsa.
+O que **não** foi validado em banco real: todos os desfechos de falha exigem que
+o `commit`, o `rollback`, o `close` ou uma mutação de auditoria levante, e nada
+disso é reproduzível sem injetar defeito no driver. A cobertura é por conexão
+falsa percorrendo o fluxo real de `apply_with_audit()`, com **spies diretos**
+contando cada chamada de `publish`, `commit`, `rollback`, `audit_start`,
+`audit_finish` e `audit_mark_indeterminate`. As provas em AST ficaram como
+complemento, não como prova principal.
+
+## 12. Validação executada nos hotfixes (H1, H1-R, H1-R2)
+
+Rodadas **sem banco**: nenhuma conexão foi aberta, nenhum `--apply` foi
+executado, e o snapshot já publicado não foi alterado nem reprocessado.
+
+| # | Passo | Resultado |
+|---|---|---|
+| 1 | `pytest pipelines/tests/test_avoe_snapshot_import.py` | **158 passaram** (96 antes do H1: +12 no H1, +17 no H1-R, +24 no H1-R2, +9 no H1-R3) |
+| 2 | `pytest pipelines/tests` na árvore modificada | 1 falha, o resto passando |
+| 3 | `pytest pipelines/tests` na árvore limpa de `origin/main`, mesmo ambiente | **a mesma 1 falha** |
+| 4 | comparação por node ID (limpa × modificada) | **zero removido**; só o arquivo Avoe cresce |
+| 5 | `compileall` de `pipelines/avoe` e do arquivo de testes | sem erro |
+
+A falha é `test_sync_tiktok_serving.py::test_j09_fracionarios_pequenos_nao_perdem_precisao`,
+com node ID e assertion idênticos nas duas árvores
+(`assert sum(0.1 for _ in range(10)) != 1.0` → `assert 1.0 != 1.0`, linha 1114):
+uma hipótese de precisão de ponto flutuante que não se sustenta neste
+interpretador. É **pré-existente e alheia** a esta frente, pelo critério
+completo — mesmo node ID, mesmo traceback, nenhuma falha nova, nenhuma falha
+desaparecida.
+
+Contraprovas comportamentais: cada linha da matriz de §8.2.1 é exercitada de
+ponta a ponta com falha injetada, conferindo exit code, contagem exata de
+chamadas, status escritos na auditoria e o `ResultadoAuditoria` de cada mutação.
+Somam-se a elas as contraprovas de vazamento (`str`, `repr`,
+`traceback.format_exception`, stderr real da CLI, logger, `__cause__` e
+`__context__`) e as de propagação de `KeyboardInterrupt` e `SystemExit`.
