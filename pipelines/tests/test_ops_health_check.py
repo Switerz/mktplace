@@ -1379,29 +1379,42 @@ def test_i4_cobertura_ok_quando_job_e_fonte_estao_em_d_menos_1():
     assert c.job_lag_days == 0
 
 
-def test_i4_job_parado_e_diferente_de_fonte_parada():
-    """O ponto do finding: um numero unico confundiria os dois."""
+def test_i4_execucao_atrasada_e_diferente_de_competencia_ausente():
+    """Os dois continuam distintos — o que mudou foi o NOME do segundo, que
+    afirmava uma causa ("fonte parada") que a evidencia nao sustenta."""
     parado = _conn_desc(discounts_last_run={
         "finished_at": NOW - timedelta(days=5),
         "source_max_date": TODAY - timedelta(days=6),
     })
     c = hc.fetch_discounts_coverage_status(parado, now=NOW)
-    assert c.status == "job_atrasado"
+    assert c.status == "execucao_atrasada"
     assert c.stale is True
-    assert "JOB parou" in c.reason
+    assert "a ultima execucao publicou ate" in c.reason
 
-    fonte = _conn_desc(discounts_fact_max=TODAY - timedelta(days=5))
-    c2 = hc.fetch_discounts_coverage_status(fonte, now=NOW)
-    assert c2.status == "fonte_atrasada"
+    ausente = _conn_desc(discounts_fact_max=TODAY - timedelta(days=5))
+    c2 = hc.fetch_discounts_coverage_status(ausente, now=NOW)
+    assert c2.status == "competencia_ausente"
     assert c2.stale is True
-    assert "FONTE parou" in c2.reason
+    assert c2.status != c.status
 
 
-def test_i4_fato_vazia_e_fonte_atrasada_nao_ok():
+def test_i4_competencia_ausente_NAO_afirma_causa():
+    """Finding B: as fontes atuais nao distinguem ausencia de vendas de lacuna
+    de ingestao, entao nem o nome do estado nem o texto podem escolher uma."""
+    c = hc.fetch_discounts_coverage_status(
+        _conn_desc(discounts_fact_max=TODAY - timedelta(days=5)), now=NOW)
+    assert "fonte parou" not in c.reason.lower()
+    assert "fonte_atrasada" != c.status
+    assert "nao distinguem ausencia de vendas de lacuna de ingestao" in c.reason
+    assert hc.DISCOUNTS_COVERAGE_MISSING_NOTE in c.reason
+
+
+def test_i4_fato_vazia_e_competencia_ausente_nao_ok():
     conn = _conn_desc(discounts_fact_max=None)
     c = hc.fetch_discounts_coverage_status(conn, now=NOW)
-    assert c.status == "fonte_atrasada"
+    assert c.status == "competencia_ausente"
     assert c.stale is True
+    assert hc.DISCOUNTS_COVERAGE_MISSING_NOTE in c.reason
 
 
 def test_i4_pre_piloto_sem_auditoria_e_unknown_e_NAO_reprova_esta_dimensao():
@@ -1511,25 +1524,92 @@ def test_i4_a_saida_humana_mostra_a_cobertura(capsys):
     hc._print_human(hc.build_report(conn, now=NOW))
     saida = capsys.readouterr().out
     assert "Cobertura operacional dos descontos TikTok" in saida
-    assert "FONTE-ATRASADA" in saida
+    assert "COMPETENCIA-AUSENTE" in saida
 
 
-def test_i4_falha_de_banco_na_cobertura_nao_derruba_o_relatorio():
-    class ConnQueExplode(FakeConn):
+class _ConnQueExplode(FakeConn):
+    """Falha SOMENTE na leitura da cobertura — o resto do relatorio segue."""
+
+    def cursor(self):
+        cur = super().cursor()
+        original = cur.execute
+
+        def explode(sql, params=None):
+            if "source_max_date" in sql:
+                raise hc.psycopg2.Error(
+                    "FATAL: senha S3nha para host prod-db.internal")
+            return original(sql, params)
+
+        cur.execute = explode
+        return cur
+
+
+# --- Finding A: erro de banco FALHA FECHADO --------------------------------
+
+def test_i4a_erro_de_banco_vira_status_error_e_stale():
+    """Antes devolvia `unknown` com `stale=False`: o Neon indisponivel deixava
+    a cobertura VERDE. "Nao consegui verificar" nao e' evidencia de saude."""
+    c = hc.fetch_discounts_coverage_status(_ConnQueExplode(), now=NOW)
+    assert c.status == "error"
+    assert c.stale is True
+    assert c.critical is True
+
+
+def test_i4a_a_mensagem_de_erro_e_fixa_e_sanitizada():
+    c = hc.fetch_discounts_coverage_status(_ConnQueExplode(), now=NOW)
+    assert c.reason == hc.DISCOUNTS_COVERAGE_ERROR_NOTE
+    for vazamento in ("S3nha", "prod-db", "FATAL", "SELECT", "source_max_date"):
+        assert vazamento not in c.reason, vazamento
+
+
+def test_i4a_erro_reprova_ok_critical_VIA_build_report():
+    """Integrado, nao so' na funcao isolada: e' `build_report` que decide o
+    exit code do step `health_check`."""
+    rel = hc.build_report(_ConnQueExplode(), now=NOW)
+    assert rel["discounts_coverage"]["status"] == "error"
+    assert rel["discounts_coverage"]["stale"] is True
+    assert rel["ok_critical"] is False
+    assert rel["ok"] is False
+
+
+def test_i4a_erro_na_cobertura_nao_apaga_o_resto_do_relatorio():
+    """Falha fechado NAO significa relatorio truncado: as outras dimensoes
+    continuam sendo reportadas."""
+    rel = hc.build_report(_ConnQueExplode(), now=NOW)
+    assert rel["sources"], "as fontes sumiram do relatorio"
+    assert "data_freshness" in rel and "bug8_invariants" in rel
+    assert "affiliate_watermark" in rel
+
+
+def test_i4a_saida_humana_marca_a_leitura_falha(capsys):
+    hc._print_human(hc.build_report(_ConnQueExplode(), now=NOW))
+    saida = capsys.readouterr().out
+    assert "LEITURA-FALHOU" in saida
+    assert "S3nha" not in saida and "prod-db" not in saida
+
+
+def test_i4a_erro_e_DIFERENTE_de_unknown():
+    """Ausencia de execucao e' fato conhecido (`unknown`, nao reprova aqui);
+    falha de leitura e' cegueira (`error`, reprova)."""
+    pre_piloto = hc.fetch_discounts_coverage_status(
+        _conn_desc(discounts_last_run=None), now=NOW)
+    cego = hc.fetch_discounts_coverage_status(_ConnQueExplode(), now=NOW)
+    assert pre_piloto.status == "unknown" and pre_piloto.stale is False
+    assert cego.status == "error" and cego.stale is True
+
+
+def test_i4a_bug_de_programacao_continua_propagando():
+    """`except psycopg2.Error` e' estreito de proposito: um `TypeError` nosso
+    nao pode virar "erro de fonte"."""
+    class ConnBug(FakeConn):
         def cursor(self):
             cur = super().cursor()
-            original = cur.execute
 
             def explode(sql, params=None):
-                if "source_max_date" in sql:
-                    raise hc.psycopg2.Error("indisponivel")
-                return original(sql, params)
+                raise TypeError("bug de programacao")
 
             cur.execute = explode
             return cur
 
-    conn = ConnQueExplode()
-    c = hc.fetch_discounts_coverage_status(conn, now=NOW)
-    assert c.status == "unknown"
-    assert c.stale is False
-    assert "segredo" not in c.reason
+    with pytest.raises(TypeError):
+        hc.fetch_discounts_coverage_status(ConnBug(), now=NOW)

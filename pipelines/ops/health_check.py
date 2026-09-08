@@ -570,16 +570,38 @@ def fetch_affiliate_watermark_status(conn, now: datetime | None = None
 DISCOUNTS_COVERAGE_MAX_LAG_DAYS = 1
 
 
+#: Mensagem FIXA e sanitizada quando a leitura da cobertura falha. Nunca
+#: interpola SQL, DSN, host, credencial nem texto de driver.
+DISCOUNTS_COVERAGE_ERROR_NOTE = (
+    "nao foi possivel ler a auditoria/fato de descontos para avaliar a "
+    "cobertura — estado desconhecido, tratado como falha"
+)
+
+#: Texto FIXO de competencia ausente. Nao afirma qual e' a causa: as fontes
+#: atuais nao distinguem ausencia de vendas de lacuna de ingestao.
+DISCOUNTS_COVERAGE_MISSING_NOTE = (
+    "O job alcancou a janela esperada, mas nao ha competencia recente na "
+    "fato; as fontes atuais nao distinguem ausencia de vendas de lacuna de "
+    "ingestao."
+)
+
+
 @dataclass(frozen=True)
 class DiscountsCoverageStatus:
     """Cobertura OPERACIONAL dos descontos — dimensao INDEPENDENTE da execucao.
 
-    Duas perguntas que um unico numero confundiria:
+    Tres estados FACTUAIS, nunca uma causa inferida:
 
-      - **job parado**: nao ha execucao `success`, ou o `source_max_date` dela
-        ficou para tras do ultimo dia fechado;
-      - **fonte parada**: o job roda e a janela alcanca D-1, mas a fato nao tem
-        linha nos dias recentes — a fonte parou de produzir.
+      - **`execucao_atrasada`**: o `source_max_date` da ultima execucao
+        `success` ficou para tras do ultimo dia fechado. Isso e' verificavel:
+        a janela publicada nao avancou;
+      - **`competencia_ausente`**: o job alcancou a janela esperada, mas
+        `MAX(ref_date)` na fato nao tem competencia recente. **NAO** se afirma
+        "fonte parada": com as fontes atuais, ausencia de vendas e lacuna de
+        ingestao sao indistinguiveis — e o nome do estado nao pode escolher uma
+        das duas;
+      - **`error`**: a leitura falhou. FALHA FECHADO (`stale=True`), porque
+        "nao consegui verificar" nao e' evidencia de saude.
 
     `source_max_date` vem de `audit.source_sync_run` (o teto da janela
     publicada), e `fact_max_ref_date` de `MAX(ref_date)` na fato (a competencia
@@ -588,14 +610,17 @@ class DiscountsCoverageStatus:
     tocada, nao competencia comercial, e usa-los aqui trocaria "ate quando ha
     venda medida" por "quando alguem mexeu no registro".
 
-    `unknown` NAO reprova nesta dimensao — e so' nesta. No pre-piloto, sem
-    nenhuma execucao registrada, o resultado correto e' `status="unknown"` com
-    `stale=False` AQUI e `ok_critical=False` vindo da dimensao de EXECUCAO, que
-    cobra a entrada canonica em `EXPECTED_SOURCES`. Uma rotina ja declarada
-    critica nao pode deixar o health check verde antes da primeira execucao.
+    `unknown` (pre-piloto, sem execucao registrada) NAO reprova nesta dimensao
+    — e so' nesta. O resultado correto e' `status="unknown"` com `stale=False`
+    AQUI e `ok_critical=False` vindo da dimensao de EXECUCAO, que cobra a
+    entrada canonica em `EXPECTED_SOURCES`. Uma rotina ja declarada critica nao
+    pode deixar o health check verde antes da primeira execucao. `error` e'
+    diferente de `unknown`: ausencia de execucao e' um fato conhecido; falha de
+    leitura e' cegueira, e cegueira reprova.
     """
     source_name: str
-    status: str                    # ok | job_atrasado | fonte_atrasada | unknown
+    #: ok | execucao_atrasada | competencia_ausente | unknown | error
+    status: str
     reason: str
     last_success_at: str | None
     source_max_date: str | None
@@ -644,16 +669,23 @@ def fetch_discounts_coverage_status(conn, now: datetime | None = None
         )
         fact_max = cur.fetchone()["fact_max_ref_date"]
     except psycopg2.Error:
-        # Falha ESPERADA de banco: reporta sem numero inventado. Bug de codigo
-        # (nao `psycopg2.Error`) propaga — esconder defeito nosso atras de
-        # "erro de fonte" e' exatamente o que nao se pode fazer.
+        # FALHA FECHADO. Antes isto devolvia `unknown` com `stale=False`, e o
+        # efeito pratico era perverso: o Neon indisponivel — ou a auditoria
+        # inacessivel — deixava a dimensao de cobertura VERDE. "Nao consegui
+        # verificar" nao e' evidencia de saude; e' cegueira, e cegueira sobre
+        # uma rotina critica tem de reprovar.
+        #
+        # Mensagem FIXA e sanitizada: nada de SQL, DSN, host, credencial ou
+        # texto de driver. Bug de codigo (que nao e' `psycopg2.Error`) continua
+        # PROPAGANDO — esconder defeito nosso atras de "erro de fonte" e'
+        # exatamente o que nao se pode fazer.
         cur.close()
         return DiscountsCoverageStatus(
-            source_name=nome, status="unknown",
-            reason="falha ao ler auditoria/fato de descontos",
+            source_name=nome, status="error",
+            reason=DISCOUNTS_COVERAGE_ERROR_NOTE,
             last_success_at=None, source_max_date=None, fact_max_ref_date=None,
             last_closed_date=fechado.isoformat(), job_lag_days=None,
-            source_lag_days=None, stale=False,
+            source_lag_days=None, stale=True, critical=True,
         )
     cur.close()
 
@@ -677,25 +709,29 @@ def fetch_discounts_coverage_status(conn, now: datetime | None = None
     fonte_lag = (fechado - fact_max).days if fact_max else None
 
     if job_lag > DISCOUNTS_COVERAGE_MAX_LAG_DAYS:
+        # Estado FACTUAL e verificavel: a janela publicada nao avancou.
         status, motivo, stale = (
-            "job_atrasado",
+            "execucao_atrasada",
             (f"a ultima execucao publicou ate {source_max.isoformat()}, "
              f"{job_lag} dia(s) atras do ultimo dia fechado "
-             f"({fechado.isoformat()}) — o JOB parou de avancar"),
+             f"({fechado.isoformat()})"),
             True,
         )
     elif fonte_lag is None:
         status, motivo, stale = (
-            "fonte_atrasada",
-            "a fato nao tem nenhuma linha — a fonte nao produziu competencia alguma",
+            "competencia_ausente",
+            f"a fato nao tem nenhuma linha. {DISCOUNTS_COVERAGE_MISSING_NOTE}",
             True,
         )
     elif fonte_lag > DISCOUNTS_COVERAGE_MAX_LAG_DAYS:
+        # NAO se diz "fonte parada": ausencia de vendas e lacuna de ingestao
+        # sao indistinguiveis com as fontes atuais, e o nome do estado nao pode
+        # escolher uma das duas causas.
         status, motivo, stale = (
-            "fonte_atrasada",
-            (f"o job alcancou {source_max.isoformat()}, mas a competencia mais "
-             f"recente na fato e' {fact_max.isoformat()}, {fonte_lag} dia(s) "
-             f"atras de {fechado.isoformat()} — a FONTE parou de produzir"),
+            "competencia_ausente",
+            (f"competencia mais recente na fato e' {fact_max.isoformat()}, "
+             f"{fonte_lag} dia(s) atras de {fechado.isoformat()}. "
+             f"{DISCOUNTS_COVERAGE_MISSING_NOTE}"),
             True,
         )
     else:
@@ -778,7 +814,9 @@ def _print_human(report: dict) -> None:
     d = report["discounts_coverage"]
     print("\n=== Cobertura operacional dos descontos TikTok ===")
     marca = {"ok": "OK", "unknown": "INDETERMINADO",
-             "job_atrasado": "JOB-ATRASADO", "fonte_atrasada": "FONTE-ATRASADA"}
+             "execucao_atrasada": "EXECUCAO-ATRASADA",
+             "competencia_ausente": "COMPETENCIA-AUSENTE",
+             "error": "LEITURA-FALHOU"}
     print(f"[{marca.get(d['status'], d['status'])}] {d['source_name']}: {d['reason']}")
 
     print("\n=== Invariantes do Bug 8 (Shopee) ===")

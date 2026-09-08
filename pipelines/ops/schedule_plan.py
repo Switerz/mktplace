@@ -203,7 +203,7 @@ def render_task_scheduler_xml(task: ScheduledTask) -> str:
         proprio timeout, o Task Scheduler mata o processo de qualquer
         jeito). Calculado a partir de
         TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS (9600s/PT2H40M) —
-        deliberadamente MAIOR que EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s,
+        deliberadamente MAIOR que EXTERNAL_LOCK_TIMEOUT_SECONDS (9600s,
         o -TimeoutSeconds do proprio run_with_lock.ps1), com 600s de
         margem para o wrapper terminar Stop-Process + espera de ate 30s
         pela confirmacao real de termino do processo filho + escrita dos

@@ -417,7 +417,7 @@ FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step in PI
 
 # Soma dos timeouts individuais de serving_refresh = 600 + 600 + 1800 = 3000s
 # (~50min). Pipeline MANUAL de contingencia, sem tarefa agendada — reaproveita
-# o mesmo EXTERNAL_LOCK_TIMEOUT_SECONDS (9000s) e o mesmo LOCK do full_daily.
+# o mesmo EXTERNAL_LOCK_TIMEOUT_SECONDS (9600s) e o mesmo LOCK do full_daily.
 SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step in PIPELINES["serving_refresh"])
 
 # Soma dos timeouts individuais de shopee_manual_refresh = 900*3 (orders,
