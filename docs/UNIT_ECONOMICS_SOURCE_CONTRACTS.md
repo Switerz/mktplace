@@ -3479,7 +3479,9 @@ Sete checks em `audit.data_quality_check`: `ftodd_fechamento_populacoes`,
 
 ### 29.1 Estado
 
-**IMPLEMENTADO, CORRIGIDO E COM QA LOCAL APROVADO. VERSIONADO; NÃO PUBLICADO.**
+> ## **ENCERRADO COMO `PASS` EM 08/09/2026.**
+>
+> Publicado e validado em produção. Ver §29.12 para o smoke pós-publicação.
 
 Três contratos semânticos foram corrigidos na rodada **UE8-I3-R/V**, antes de
 o bloco virar contrato público — ver §29.11.
@@ -3693,3 +3695,82 @@ A distinção entre *"o filtro não casa marca alguma"* (`no_eligible_brand`) e
 *"a marca existe, mas não vendeu nesta janela"* (`available` com grade vazia)
 foi preservada: a contagem de marcas conhecidas continua no SQL, mas **não
 participa** da cobertura.
+
+
+### 29.12 Smoke de produção — UE8-I3-D: `PASS`
+
+**Publicação:** backend no Render **publicado manualmente pelo proprietário**;
+frontend publicado pelo **fluxo automático da Vercel**.
+
+**Revisão publicada, provada por conteúdo** — o Render não expõe o SHA:
+`origin/main` era exatamente `9a81cc1`, e o `/openapi.json` servido em produção
+saiu **byte-idêntico** ao gerado localmente naquele commit: 28 rotas de cada
+lado, zero rota exclusiva, zero schema exclusivo, **zero definição divergente**.
+O bundle da Vercel carrega as strings novas (com escape `\xed`).
+
+**API × Neon — 383 comparações, zero divergência ao centavo**, em oito
+recortes: agosto/2026 completo, setembro até D−1, uma marca, cinco marcas, só
+TikTok em 12 meses, filtro sem TikTok, período incluindo D0 e janela só em D0.
+Conferidos por marca os oito monetários, as duas contagens e **as duas taxas
+recalculadas do zero** sobre `full_product_value`.
+
+| Verificação | Resultado |
+|---|---|
+| Cobertura | `observed_grid` em todos os recortes; `complete` nos testados por HTTP |
+| `source_max_date` | restrito ao escopo — sob filtro de marca nunca devolve o máximo global |
+| `date_to` acima de D−1 | **zero** em todos os recortes |
+| Linhas na fato após D−1 | **zero** |
+| Sinais | marca ≤ 0 e plataforma ≥ 0 em 5/5 marcas, na API e **na tela** |
+| Soma dos financiadores | **ausente** de todo campo e de toda a tela |
+| `total_discount` | ausente do payload; no OpenAPI só na frase que o proíbe |
+
+**Frescor não foi forçado.** A idade real da carga era **1,8 h** e a API
+devolveu `recent_load`. O teste aceitaria `stale_load` se passasse de 30 h — e
+**passará**, porque a carga ainda é manual.
+
+**QA em Chromium real**, 1440×900 e 390×844, ambos aprovados: zero overflow
+horizontal, tabela rolando dentro do próprio container no mobile, zero
+hydration warning, somente GET, alvos ≥ 44 px, texto ≥ 12 px, diálogo com foco
+inicial, trap, Escape e retorno ao acionador, cancelados só no drill-down em
+seção separada, e **zero requisição de dados ao abrir o diálogo**. Sem TikTok
+no filtro o painel aparece, declara a fonte e **nunca exibe R$ 0,00 fabricado**.
+
+**Isolamento — 84 verificações.** Comparado com o que `get_canais` produz
+sozinho contra o mesmo Neon: `kpis`, `brands`, `channel_rows`,
+`channel_medians`, datas, `filters` e `refreshed_at` **idênticos**;
+`affiliate_costs` com o contrato original intacto e mantendo o enum ANTIGO de
+frescor; payload = históricos **+ exatamente um** campo novo; **nenhum** KPI ou
+campo de ML/Shopee recebeu valor de desconto; `channel_rows` sem coluna de
+desconto ou subsídio.
+
+**Latência observada, sem atribuição causal:** `GET /canais` com mediana de
+**476 ms** (min 422, máx 502) em nove chamadas; página carregada em 358 ms e
+bloco com dado em 873 ms. Esses números somam rede do notebook, CDN,
+Render→Neon e o fetch client-side. **Não existe contraprova sem o bloco em
+produção**, então não se afirma quanto do total é dele.
+
+**Descoberto no smoke, pré-existente e alheio ao bloco:** `date_to` além de hoje
+é recusado com **422** por guarda global de `/canais`, então o corte interno de
+D0 só é exercitável com `date_to = hoje`; e a rota limita o intervalo a **366
+dias**, o que torna o histórico integral — e suas 199 lacunas — inobservável
+por HTTP.
+
+**A automação não havia começado nesse checkpoint.** A carga continuava manual.
+
+### 29.13 Limites que sobrevivem ao `PASS`
+
+Um smoke aprovado não converte nenhuma destas ressalvas em garantia:
+
+1. **`complete` não comprova ingestão integral.** Mede a grade observada, nada
+   além disso.
+2. **`observed_grid` não detecta dia inteiramente ausente.** Se nenhuma marca
+   vendeu — ou nenhuma foi ingerida — naquele dia, o dia simplesmente não entra
+   na grade, e a cobertura segue `complete`. É o preço de não fabricar grade.
+3. **As 199 lacunas históricas continuam ambíguas** entre "não vendeu" e
+   "lacuna de ingestão", e nunca viram zero.
+4. **A fonte é mutável** e pode ser revisada retroativamente. `recent_load` é
+   idade de carga, não estabilidade de dado.
+5. **Nada aqui é margem, receita líquida ou caixa.**
+6. **Proibido somar os dois financiadores.** Não existe `total_discount`.
+7. **O 404 de `/favicon.ico`** em `/canais` é pré-existente e **fora do escopo**
+   desta frente.

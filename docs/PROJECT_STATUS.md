@@ -2342,8 +2342,10 @@ Limitações abertas: **199 chaves `(data, marca)`** da grade observada sem linh
 nenhum timeout de step definido; **`full_daily` e Scheduler intocados** — a
 carga foi manual.
 
-**UE8-I3 — 08/09/2026: IMPLEMENTADO, CORRIGIDO, COM QA LOCAL APROVADO E
-VERSIONADO. NÃO PUBLICADO.** O bloco "Descontos e subsídios do pedido — TikTok
+**UE8-I3 — 08/09/2026: `PASS`. PUBLICADO E VALIDADO EM PRODUÇÃO.**
+Backend publicado **manualmente pelo proprietário** no Render; frontend pelo
+fluxo automático da Vercel. Revisão provada **por conteúdo** — o `/openapi.json`
+de produção saiu byte-idêntico ao gerado em `9a81cc1`. O bloco "Descontos e subsídios do pedido — TikTok
 Shop" existe em código: campo **aditivo** `tiktok_order_discounts` em
 `GET /canais` (nenhum endpoint novo, nenhum campo existente alterado,
 `affiliate_costs` idêntico), serviço isolado com **uma consulta por request**,
@@ -2369,9 +2371,18 @@ cumprida com duas ordens de grandeza de folga; os ~160 ms medidos localmente
 são RTT (`SELECT 1` custa 157,7 ms pela mesma conexão) e **não se extrapolam
 para Render→Neon**. QA em Chromium nos dois viewports **aprovado**.
 
-⚠️ **Os descontos NÃO estão disponíveis em produção** — o código está
-versionado, mas **não houve deploy**, e o **smoke Render→Neon continua
-pendente**. **`recent_load` significa carga recente, não dado estável**: a
+**Smoke de produção `PASS`:** **383 comparações API × Neon sem divergência ao
+centavo** em oito recortes; cobertura em `observed_grid`; `source_max_date`
+restrito ao escopo; **zero D0/futuro**; sinais e denominador corretos na API e
+na tela; **84 verificações de isolamento** provando os campos históricos de
+`/canais` intocados e `affiliate_costs` idêntico. QA em Chromium aprovado em
+1440×900 e 390×844. Latência observada: `GET /canais` com **mediana de 476 ms**
+e bloco com dado em 873 ms — números que somam rede, CDN, Render→Neon e fetch
+client-side, **sem contraprova e portanto sem atribuição causal**.
+
+⚠️ **A carga ainda é MANUAL.** `recent_load` mede idade de carga, não
+estabilidade: como não há rotina, ele **expira corretamente para `stale_load`
+após 30 h**. A automação **não havia sido iniciada** nesse checkpoint. **`recent_load` significa carga recente, não dado estável**: a
 fonte pode ser revisada retroativamente. **199 chaves (dia × marca) sem linha**
 no histórico, na grade observada — nunca convertidas em zero, e `complete`
 jamais prova ingestão. **Scheduler não iniciado** e otimização do `INSERT` do
