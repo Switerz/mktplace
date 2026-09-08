@@ -760,6 +760,71 @@ export function fetchProdutosMLSummary(params: {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Gate SH-API-2D — selo de qualidade do escopo (marca x competencia).
+//
+// SEIS EIXOS ORTOGONAIS. Nao colapsar em booleano na UI: cada eixo tem dono e
+// acao diferentes. `definitive` existe so como atalho de renderizacao para o
+// caso comum ("posso mostrar isto como numero fechado?"), nunca como
+// substituto dos eixos.
+//
+// Todos os campos sao opcionais no consumo porque a API pode nao ter medido
+// (janela sem competencia unica, canal fora do filtro). Ausencia de medicao
+// NAO e sinal verde: a UI trata `null` como "nao verificado".
+// ---------------------------------------------------------------------------
+
+export type SourceStatus = "source_covered" | "source_not_covered" | "source_unknown";
+export type LoadStatus = "load_absent" | "load_stale" | "load_current";
+export type EligibilityStatus = "no_eligible_rows" | "partially_eligible" | "eligible";
+export type MaturityStatus = "mature" | "materially_immature" | "maturity_unknown";
+export type CoverageStatus = "coverage_ok" | "coverage_below_expected" | "coverage_unknown";
+
+export interface ScopeQualityWarning {
+  code: string;
+  severity: "info" | "warning" | "critical";
+  message: string;
+}
+
+export interface ScopeQualityMeasured {
+  rows_present: number;
+  eligible_rows: number;
+  excluded_zero_gmv: number;
+  completed_gmv: number;
+  reference_gmv: number;
+  /** null = nao medido. NUNCA tratar como 0. */
+  completed_share: number | null;
+  maturity_floor: number;
+  brands_present: number;
+  brands_expected: number;
+  source_covered_from: string | null;
+  source_covered_through: string | null;
+  daily_max_date: string | null;
+}
+
+export interface ScopeQuality {
+  channel: string;
+  brand: string | null;
+  ref_month: string;
+  source_status: SourceStatus;
+  load_status: LoadStatus;
+  eligibility_status: EligibilityStatus;
+  maturity_status: MaturityStatus;
+  coverage_status: CoverageStatus;
+  /** Ultima publicacao do mart neste escopo. */
+  loaded_at: string | null;
+  load_age_days: number | null;
+  definitive: boolean;
+  measured: ScopeQualityMeasured;
+  warnings: ScopeQualityWarning[];
+}
+
+/** Aviso mais grave do selo, ou null. Ordem: critical > warning > info. */
+export function topScopeWarning(q: ScopeQuality | null | undefined): ScopeQualityWarning | null {
+  if (!q || q.warnings.length === 0) return null;
+  const ordem = { critical: 0, warning: 1, info: 2 } as const;
+  return [...q.warnings].sort((a, b) => ordem[a.severity] - ordem[b.severity])[0];
+}
+
 export interface ProdutosChannelSummary {
   ref_month: string;
   total_gmv: number;
@@ -769,6 +834,12 @@ export interface ProdutosChannelSummary {
   brand: string | null;
   buckets: ParetoSummaryBucket[];
   avg_price_weighted: number | null;
+  /**
+   * Gate SH-API-2D. Preenchido pela Shopee; `null` nos canais que ainda nao
+   * publicam o selo — a tela nao pode ler ausencia como aprovacao.
+   */
+  quality?: ScopeQuality | null;
+  refreshed_at?: string | null;
 }
 
 export function fetchProdutosTikTokSummary(params: { brand?: string; period?: string } = {}): Promise<ProdutosChannelSummary | null> {
@@ -1428,12 +1499,24 @@ export function fetchQuality(
   selection: MarketplaceSelection,
   period?: string,
   filters?: GlobalFilterParams,
-): Promise<{ kpis: QualityKpis; brands: QualityBrandRow[]; live: boolean; meta: ResponseMeta }> {
+): Promise<{
+  kpis: QualityKpis;
+  brands: QualityBrandRow[];
+  live: boolean;
+  meta: ResponseMeta;
+  /**
+   * Gate SH-API-2D. `undefined`/`null` = a API nao mediu (janela sem
+   * competencia unica, ou Shopee fora do filtro de canais) e o modo demo nunca
+   * mede. Ausencia NAO e aprovacao.
+   */
+  produtosShopeeQuality?: ScopeQuality | null;
+}> {
   interface ApiResp {
     kpis: QualityKpis; brands: QualityBrandRow[];
     date_from?: string | null; date_to?: string | null;
     compare_date_from?: string | null; compare_date_to?: string | null;
     refreshed_at?: string | null;
+    produtos_shopee_quality?: ScopeQuality | null;
   }
   const marketplace = serializeMarketplaceSelection(selection);
   const qs = buildFilterQuery(marketplace, period, filters);
@@ -1441,7 +1524,12 @@ export function fetchQuality(
     const raw = await apiFetch<ApiResp>(
       `/api/v1/performance/quality?${qs.toString()}`
     );
-    if (raw) return { live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands: raw.brands };
+    if (raw) {
+      return {
+        live: true, meta: metaFromResponse(raw), kpis: raw.kpis, brands: raw.brands,
+        produtosShopeeQuality: raw.produtos_shopee_quality ?? null,
+      };
+    }
 
     const showTk = isMarketplaceSelected(selection, "tiktok");
     const showMl = isMarketplaceSelected(selection, "ml");

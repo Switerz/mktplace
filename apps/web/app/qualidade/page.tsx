@@ -5,6 +5,7 @@ import {
   fetchQuality,
   type QualityKpis,
   type QualityBrandRow,
+  type ScopeQuality,
 } from "@/lib/api-client";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
@@ -23,6 +24,7 @@ import TableScrollHint from "@/components/TableScrollHint";
 import { buildQualityRequestKey } from "@/lib/quality-request-key";
 import { computeRequestStatus } from "@/lib/request-freshness";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import ScopeQualityBanner from "@/components/ScopeQualityBanner";
 import {
   TIKTOK_UNAVAILABLE_QUALITY_METRICS,
   TIKTOK_QUALITY_UNAVAILABLE_NOTE,
@@ -78,6 +80,12 @@ function QualityPageInner() {
     [filters.channels, filters.brands, filters.dateFrom, filters.dateTo, filters.compare, retryKey],
   );
 
+  // Gate SH-API-2D: qualidade do MART DE PRODUTOS Shopee. E uma fonte
+  // diferente da diaria que alimenta o resto desta tela, com ciclo de
+  // maturacao proprio — por isso vive num estado separado e nunca herda a
+  // conclusao das metricas operacionais.
+  const [produtosShQuality, setProdutosShQuality] = useState<ScopeQuality | null>(null);
+
   useEffect(() => {
     // Ignora a resposta se os filtros mudarem antes dela chegar.
     let ignore = false;
@@ -90,6 +98,7 @@ function QualityPageInner() {
         if (ignore) return;
         setKpis(result.kpis);
         setBrands(result.brands);
+        setProdutosShQuality(result.produtosShopeeQuality ?? null);
         setIsLive(result.live);
         setRefreshedAt(result.meta.refreshedAt);
         setResolvedKey(key);
@@ -98,6 +107,9 @@ function QualityPageInner() {
       .catch(() => {
         if (ignore) return;
         setError("Falha ao carregar dados de qualidade. Verifique a conexão.");
+        // Falha nao pode deixar na tela um selo antigo descrevendo um escopo
+        // que NAO foi medido nesta requisicao.
+        setProdutosShQuality(null);
         // A chave precisa ser marcada como resolvida MESMO na falha — senao
         // `computeRequestStatus` nunca sai de "loading" (resolvedKey nunca
         // bate com requestKey) e a falha da requisicao atual nunca vira
@@ -542,6 +554,25 @@ function QualityPageInner() {
               <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 11–14%</span>
               <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;14%</span>
               <span className="ml-auto text-[10px] text-slate-400">Compradores ML: soma diária por dia — não é comprador único do período (mesma pessoa pode ser contada em mais de um dia)</span>
+            </div>
+          </div>
+        )}
+
+        {/* Gate SH-API-2D — confiabilidade do MART DE PRODUTOS Shopee.
+            Fica FORA do bloco `hasShQuality` de proposito: aquele bloco depende
+            de haver metrica operacional na diaria, e a pergunta "posso confiar
+            nos numeros por produto deste mes?" continua valendo mesmo quando
+            nao ha cancelamento nenhum para exibir. */}
+        {produtosShQuality && (
+          <div id="qualidade-produtos-shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-orange-50">
+              <h2 className="text-sm font-semibold text-slate-700">Produtos Shopee — confiabilidade da competência</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Competência {produtosShQuality.ref_month} · fonte distinta da diária, com maturação própria
+              </p>
+            </div>
+            <div className="pb-4">
+              <ScopeQualityBanner quality={produtosShQuality} />
             </div>
           </div>
         )}

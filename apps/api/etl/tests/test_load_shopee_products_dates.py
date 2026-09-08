@@ -18,6 +18,7 @@ def _write_orders_xlsx(path, order_dates):
     wb = openpyxl.Workbook()
     ws = wb.active
     header = [
+        "ID do pedido",
         "Data de criação do pedido",
         "Nº de referência do SKU principal",
         "Nome do Produto",
@@ -29,7 +30,7 @@ def _write_orders_xlsx(path, order_dates):
     ]
     ws.append(header)
     for i, d in enumerate(order_dates):
-        ws.append([d, f"SKU{i}", "Produto Teste", None, 1, "10,00", "Concluído", f"user{i}"])
+        ws.append([f"PED-{i}", d, f"SKU{i}", "Produto Teste", None, 1, "10,00", "Concluído", f"user{i}"])
     wb.save(path)
 
 

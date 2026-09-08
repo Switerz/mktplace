@@ -7,6 +7,7 @@ Uso:
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -67,6 +68,10 @@ BRANDS = ["apice", "barbours", "kokeshi", "lescent", "rituaria"]
 
 # Mapeamento colunas XLSX → nomes internos
 COL_MAP = {
+    # Chave do pedido — obrigatoria desde o Gate SH-API-2A-R: e' o que
+    # permite escolher UM snapshot logico por pedido antes do filtro de
+    # status. Cabecalho real conferido nos exports (coluna 0 de 65).
+    "ID do pedido": "order_id",
     "Data de criação do pedido": "order_date",
     "Nº de referência do SKU principal": "sku_ref",
     "Nome do Produto": "product_name",
@@ -127,11 +132,238 @@ DO UPDATE SET
 # ---------------------------------------------------------------------------
 
 def _find_xlsx(brand_dir: Path) -> list[Path]:
-    """Devolve todos os XLSX com 'order' no nome (case-insensitive)."""
+    """Devolve todos os XLSX com 'order' no nome (case-insensitive).
+
+    Deliberadamente AMPLO: a triagem do que e' um export aceito e'
+    responsabilidade de _classify_order_file/_plan_brand_snapshots, que
+    ABORTAM diante de nome desconhecido em vez de ignora-lo. Um glob
+    estreito aqui esconderia o arquivo inesperado (fail-open); manter o
+    glob amplo e reprovar depois e' o que torna a carga fail-closed.
+    """
     return [
         p for p in brand_dir.glob("*.xlsx")
         if re.search(r"order", p.name, re.IGNORECASE)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Snapshot logico do export (Gate SH-API-2A-R) — fail-closed
+# ---------------------------------------------------------------------------
+#
+# Um export Shopee de pedidos identifica no nome o PERIODO exportado, nunca
+# o INSTANTE da extracao. Os quatro padroes abaixo foram levantados nos 214
+# arquivos reais de shopee/{marca}/ (descobertos, nao inventados por teste).
+# Inventario conferido no Gate SH-API-2B: 214 .xlsx com "order" no nome, dos
+# quais 213 sao Order.all; 212 aceitos (12+8+46+146), 2 rejeitados, 0 copias
+# byte-identicas:
+#
+#   Order.all.YYYYMMDD_YYYYMMDD.xlsx                                  (12)
+#   Order.all.YYYYMMDD_YYYYMMDD_part_N_of_M.xlsx                       (8)
+#   Order.all.order_creation_date.YYYYMMDD_YYYYMMDD.xlsx              (46)
+#   Order.all.order_creation_date.YYYYMMDD_YYYYMMDD_part_N_of_M.xlsx (146)
+#
+# O snapshot LOGICO e' (marca, janela_inicio, janela_fim); as partes sao
+# pedacos complementares dele — verificado no Data Mart: os 27 grupos
+# multi-arquivo do manifesto sao compostos EXCLUSIVAMENTE de partes, e
+# nenhum pedido aparece em duas partes do mesmo snapshot.
+#
+# Ordenacao de snapshots: (janela_fim, janela_inicio) DESC. Validada contra
+# o precedente `max(file_id)` do Data Mart em 13.720 de 13.720 pedidos
+# sobrepostos (3.527 deles decididos pelo desempate em janela_inicio).
+#
+# POR QUE FAIL-CLOSED: existe uma segunda convencao observada no historico
+# — `Order.all.20260717T155433Z.xlsx`, que carrega o INSTANTE do export e
+# nao uma janela. Ordenar esse nome como se fosse janela elegeria o
+# snapshot ERRADO e removeria 18.924 pedidos concluidos (R$ 971.946,52,
+# medido no Gate SH-API-2A). Como nada no nome de um arquivo com janela
+# revela quando ele foi extraido, nao existe ordem entre os dois formatos.
+# Este modulo portanto RECUSA a carga inteira diante de qualquer nome fora
+# dos quatro padroes, em vez de adivinhar. mtime, ctime e a ordem do glob
+# nunca sao usados como ordem.
+
+_SNAPSHOT_NAME_RE = re.compile(
+    r"^Order\.all\.(?:order_creation_date\.)?"
+    r"(?P<start>\d{8})_(?P<end>\d{8})"
+    r"(?:_part_(?P<part>\d+)_of_(?P<total>\d+))?"
+    r"\.xlsx$"
+)
+
+
+class ShopeeSnapshotError(ValueError):
+    """Population de arquivos que nao pode ser reduzida a snapshots
+    logicos ordenaveis com seguranca.
+
+    Levantada na Fase A (so' arquivos/memoria), ANTES de
+    _get_local_pg_url()/create_engine() — nenhuma conexao e' aberta e
+    nenhuma transacao de escrita comeca. Aborta a carga de TODAS as
+    marcas, nao so' a que falhou: uma marca com population ambigua
+    invalida o conjunto, porque a alternativa seria publicar um mes
+    parcial.
+
+    A mensagem contem apenas marca, categoria do erro, e nome de arquivo
+    ou contagem — nunca conteudo de celula, nunca order_id, nunca dado de
+    comprador. Nunca encadeada (__cause__/__context__ None), mesmo padrao
+    das demais excecoes deste modulo."""
+
+
+def _classify_order_file(filename: str) -> dict:
+    """Funcao pura: classifica UM nome de arquivo de export de pedidos.
+
+    `kind` e' um de:
+      window_single — Order.all com janela, sem partes
+      window_part   — Order.all com janela e part_N_of_M valido
+      unsupported   — qualquer outro nome (instante THHMMSSZ, Order.toship,
+                      sufixo "(1)", N/M invalidos, janela invertida)
+
+    `exact_copy` e `ambiguous` NAO sao decididos aqui: dependem do
+    conjunto da marca (hash dos irmaos, completude das partes) e sao
+    resolvidos em _plan_brand_snapshots."""
+    m = _SNAPSHOT_NAME_RE.match(filename)
+    if m is None:
+        return {"kind": "unsupported", "filename": filename}
+
+    start, end = m.group("start"), m.group("end")
+    if end < start:
+        return {"kind": "unsupported", "filename": filename}
+
+    if m.group("part") is None:
+        return {"kind": "window_single", "start": start, "end": end,
+                "part": None, "total": None, "filename": filename}
+
+    part, total = int(m.group("part")), int(m.group("total"))
+    if total < 1 or part < 1 or part > total:
+        return {"kind": "unsupported", "filename": filename}
+
+    return {"kind": "window_part", "start": start, "end": end,
+            "part": part, "total": total, "filename": filename}
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _plan_brand_snapshots(brand: str, files: list[Path], *,
+                          hasher=_sha256_file) -> dict[str, tuple[str, str]]:
+    """Reduz a population de arquivos de uma marca a um mapa
+    `nome do arquivo -> (janela_inicio, janela_fim)`.
+
+    Pura a menos do `hasher` (injetavel nos testes), que so' e' chamado
+    quando ha' mais de um arquivo inteiro para a mesma janela. Aborta com
+    ShopeeSnapshotError se a population nao for reduzivel com seguranca.
+    Arquivo descartado por ser copia byte-identica de um irmao
+    simplesmente nao aparece no mapa (exact_copy)."""
+    if not files:
+        raise ShopeeSnapshotError(f"population vazia: brand={brand}") from None
+
+    classified = [(p, _classify_order_file(p.name)) for p in files]
+
+    unsupported = sorted(c["filename"] for _, c in classified
+                         if c["kind"] == "unsupported")
+    if unsupported:
+        raise ShopeeSnapshotError(
+            f"convencao de nome desconhecida (carga abortada, nada foi escrito): "
+            f"brand={brand} arquivos={len(unsupported)} exemplos={unsupported[:3]}"
+        ) from None
+
+    groups: dict[tuple[str, str], list[tuple[Path, dict]]] = {}
+    for p, c in classified:
+        groups.setdefault((c["start"], c["end"]), []).append((p, c))
+
+    accepted: dict[str, tuple[str, str]] = {}
+    for (start, end), members in sorted(groups.items()):
+        window = f"{start}_{end}"
+        parts = [(p, c) for p, c in members if c["kind"] == "window_part"]
+        singles = [(p, c) for p, c in members if c["kind"] == "window_single"]
+
+        if parts and singles:
+            raise ShopeeSnapshotError(
+                f"snapshot ambiguo: mesma janela com arquivo particionado e nao "
+                f"particionado (carga abortada, nada foi escrito): brand={brand} "
+                f"janela={window} partes={len(parts)} inteiros={len(singles)}"
+            ) from None
+
+        if parts:
+            totals = {c["total"] for _, c in parts}
+            if len(totals) > 1:
+                raise ShopeeSnapshotError(
+                    f"snapshot ambiguo: partes declaram totais divergentes (carga "
+                    f"abortada, nada foi escrito): brand={brand} janela={window} "
+                    f"totais={sorted(totals)}"
+                ) from None
+            total = totals.pop()
+            numbers = [c["part"] for _, c in parts]
+            duplicated = sorted({n for n in numbers if numbers.count(n) > 1})
+            if duplicated:
+                raise ShopeeSnapshotError(
+                    f"snapshot ambiguo: numero de parte repetido (carga abortada, "
+                    f"nada foi escrito): brand={brand} janela={window} "
+                    f"partes={duplicated}"
+                ) from None
+            missing = sorted(set(range(1, total + 1)) - set(numbers))
+            if missing:
+                raise ShopeeSnapshotError(
+                    f"snapshot incompleto: parte ausente (carga abortada, nada foi "
+                    f"escrito): brand={brand} janela={window} esperadas={total} "
+                    f"ausentes={missing}"
+                ) from None
+            for p, _ in parts:
+                accepted[p.name] = (start, end)
+            continue
+
+        if len(singles) == 1:
+            accepted[singles[0][0].name] = (start, end)
+            continue
+
+        # Mais de um arquivo inteiro para a mesma janela: so' e' aceitavel se
+        # forem copias byte a byte (exact_copy), reduzidas a uma. Hashes
+        # divergentes significam exports diferentes que o nome nao sabe
+        # ordenar: abortar, nunca concatenar nem escolher arbitrariamente.
+        digests: dict[str, list[Path]] = {}
+        for p, _ in singles:
+            digests.setdefault(hasher(p), []).append(p)
+        if len(digests) > 1:
+            raise ShopeeSnapshotError(
+                f"snapshot ambiguo: {len(singles)} arquivos inteiros divergentes "
+                f"para a mesma janela (carga abortada, nada foi escrito): "
+                f"brand={brand} janela={window} conteudos_distintos={len(digests)}"
+            ) from None
+        keep = sorted(next(iter(digests.values())), key=lambda p: p.name)[0]
+        accepted[keep.name] = (start, end)
+
+    return accepted
+
+
+def _select_current_snapshot(df: pd.DataFrame, *, brand: str) -> pd.DataFrame:
+    """Funcao pura: mantem, para cada pedido, TODAS as linhas do snapshot
+    logico vencedor — o de maior (janela_fim, janela_inicio).
+
+    Roda ANTES de qualquer filtro comercial de status: snapshots do mesmo
+    pedido podem apresentar estados diferentes, e filtrar antes de
+    escolher inverteria o resultado. Nunca escolhe uma linha isolada do
+    pedido, nunca deduplica por pedido+SKU (SKU repetido legitimamente no
+    mesmo pedido existe) e nunca usa ordem do glob, mtime ou ctime."""
+    if df.empty:
+        return df
+
+    missing_key = int(df["order_id"].isna().sum() +
+                      (df["order_id"].astype(str).str.strip() == "").sum())
+    if missing_key:
+        raise ShopeeSnapshotError(
+            f"ID do pedido ausente em linhas do export (carga abortada, nada foi "
+            f"escrito): brand={brand} linhas={missing_key}"
+        ) from None
+
+    rank = pd.Series(
+        list(zip(df["_snap_end"].tolist(), df["_snap_start"].tolist())),
+        index=df.index, dtype="object",
+    )
+    keyed = df.assign(_snap_rank=rank)
+    winner = keyed.groupby(["brand", "order_id"], sort=False)["_snap_rank"].transform("max")
+    return keyed.loc[keyed["_snap_rank"] == winner].drop(columns=["_snap_rank"])
 
 
 _EMPTY_NUMERIC_TOKENS = {"", "-", "N/A", "NA", "NULL", "NONE"}
@@ -376,7 +608,7 @@ def _clean_int(series: pd.Series, *, column: str, brand: str,
     return pd.Series(values, index=series.index, dtype="int64")
 
 
-_REQUIRED_COLS = ("order_date", "product_name", "status", "qty", "subtotal")
+_REQUIRED_COLS = ("order_id", "order_date", "product_name", "status", "qty", "subtotal")
 _OPTIONAL_COLS = ("sku_ref", "variation_name", "buyer_username")
 
 
@@ -389,6 +621,22 @@ def _load_brand(brand: str) -> pd.DataFrame:
     files = _find_xlsx(brand_dir)
     if not files:
         raise ShopeeProductInputError(f"nenhum arquivo Order encontrado: brand={brand}") from None
+
+    # Gate SH-API-2A-R: TODA a population e' classificada e reduzida a
+    # snapshots logicos ANTES de qualquer pd.read_excel. Nome desconhecido,
+    # parte ausente ou janela ambigua abortam aqui.
+    #
+    # Garantia exata (corrigida no Gate SH-API-2B): aborta antes de INTERPRETAR
+    # qualquer workbook com pandas/openpyxl e antes de abrir conexao com banco.
+    # NAO e' "antes de qualquer leitura de arquivo": _plan_brand_snapshots pode
+    # fazer leitura BINARIA (SHA-256) de candidatos da mesma janela, e apenas
+    # deles, para decidir se sao copias byte-identicas.
+    accepted = _plan_brand_snapshots(brand, files)
+    files = [f for f in files if f.name in accepted]
+    if not files:
+        raise ShopeeProductInputError(
+            f"nenhum arquivo Order aceito apos triagem de snapshot: brand={brand}"
+        ) from None
 
     frames = []
     for f in sorted(files):
@@ -442,6 +690,12 @@ def _load_brand(brand: str) -> pd.DataFrame:
         # nunca persistida no banco (removida antes do return).
         df["_source_file"] = f.name
         df["_source_row"] = df.index + 2
+        # Identidade do snapshot logico do arquivo (Gate SH-API-2A-R).
+        # Strings YYYYMMDD: comparaveis lexicograficamente na ordem
+        # cronologica, sem parse de data nem dependencia de locale.
+        snap_start, snap_end = accepted[f.name]
+        df["_snap_start"] = snap_start
+        df["_snap_end"] = snap_end
         frames.append(df)
 
     df = pd.concat(frames, ignore_index=True)
@@ -465,6 +719,20 @@ def _load_brand(brand: str) -> pd.DataFrame:
     df = df.drop(columns=["_source_file", "_source_row"])
     df["status"] = df["status"].fillna("").str.strip()
     df["brand"] = brand
+
+    # Gate SH-API-2A-R: deduplicacao por snapshot vigente. Roda AQUI —
+    # depois de `brand` existir e ANTES de _aggregate, que e' onde o
+    # filtro `status == "Concluído"` acontece. A ordem importa: escolher o
+    # snapshot depois do filtro inverteria o resultado, porque o mesmo
+    # pedido aparece com estados diferentes em snapshots de idades
+    # diferentes.
+    before = len(df)
+    df = _select_current_snapshot(df, brand=brand)
+    dropped = before - len(df)
+    if dropped:
+        print(f"  snapshot vigente: {dropped} linhas de snapshots superados descartadas.")
+    # Colunas tecnicas nunca chegam ao contrato publico.
+    df = df.drop(columns=["_snap_start", "_snap_end"])
 
     # ref_month = primeiro dia do mês
     df["ref_month"] = df["order_date"].dt.to_period("M").dt.to_timestamp()

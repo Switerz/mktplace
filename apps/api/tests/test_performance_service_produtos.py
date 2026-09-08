@@ -27,6 +27,33 @@ class FakeResult:
     def fetchall(self):
         return self._rows
 
+    # Gate SH-API-2D: get_shopee_scope_quality le por .mappings().first().
+    # O fake tem de devolver um MAPPING de verdade (dict), nao um objeto de
+    # atributos: `dict(row)` sobre um FakeRow levantaria em producao e passaria
+    # aqui, que e exatamente o modo de falha "255 testes verdes, runtime
+    # quebrado" ja documentado no projeto.
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+    def all(self):
+        return list(self._rows)
+
+
+def quality_result(**over) -> FakeResult:
+    """Resposta da consulta de qualidade de escopo (a 3a de cada rota Shopee).
+    O default e o escopo VAZIO — quem quiser outro regime sobrescreve."""
+    row = {
+        "rows_present": 0, "eligible_rows": 0, "prod_gmv": 0, "brands_present": 0,
+        "loaded_at": None, "daily_gmv": 0, "brands_expected": 0,
+        "daily_max_date": None, "last_sync_finished_at": None,
+        "source_min_date": None, "source_max_date": None, "covers_ref_month": None,
+    }
+    row.update(over)
+    return FakeResult([row])
+
 
 class FakeSession:
     """Retorna, em ordem, um FakeResult por chamada a .execute()."""
@@ -43,7 +70,7 @@ def test_get_produtos_shopee_fonte_vazia_retorna_lista_vazia():
     # product_name) — SQL puro, sem consolidacao entre linhas (ver Bug 9).
     # variation_name e atributo descritivo, nao parte da chave: count + rows,
     # igual ao padrao de ML/TikTok.
-    db = FakeSession([FakeResult([FakeCountRow(0)]), FakeResult([])])
+    db = FakeSession([FakeResult([FakeCountRow(0)]), FakeResult([]), quality_result()])
     result = perf_svc.get_produtos_shopee(db, brand=None, year=2026, month=6)
     assert result["total"] == 0
     assert result["items"] == []
@@ -56,7 +83,7 @@ def test_get_produtos_shopee_com_linha_serializa_campos():
         gmv=1000.0, units_sold=10, completed_orders=8, canceled_orders=2,
         cancel_rate_pct=20.0, unique_buyers=7, avg_price=100.0, pareto_bucket="A_top50",
     )
-    db = FakeSession([FakeResult([FakeCountRow(1)]), FakeResult([row])])
+    db = FakeSession([FakeResult([FakeCountRow(1)]), FakeResult([row]), quality_result()])
     result = perf_svc.get_produtos_shopee(db, brand="kokeshi", year=2026, month=6)
     assert result["total"] == 1
     assert result["items"][0]["brand"] == "kokeshi"
@@ -168,6 +195,7 @@ def test_get_produtos_shopee_summary_avg_price_weighted():
     db = FakeSession([
         FakeResult([FakeRow(total_count=2, eligible_count=2, eligible_units=10)]),
         FakeResult([FakeRow(pareto_bucket="A_top50", count=2, gmv=1500.0)]),
+        quality_result(),
     ])
     result = perf_svc.get_produtos_shopee_summary(db, brand=None, year=2026, month=6)
     assert result["avg_price_weighted"] == 150.0

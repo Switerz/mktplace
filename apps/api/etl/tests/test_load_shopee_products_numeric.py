@@ -144,7 +144,7 @@ def test_clean_numeric_invalido_interrompe_antes_de_qualquer_zero():
     processamento inteiro — nenhuma Series parcial com 0.0 é devolvida."""
     series, files, rows = _series(
         ["1098.30", "lixo_nao_numerico", "50.00"],
-        files=["Order.all.A.xlsx", "Order.all.A.xlsx", "Order.all.A.xlsx"],
+        files=["Order.all.20260801_20260831.xlsx", "Order.all.20260801_20260831.xlsx", "Order.all.20260801_20260831.xlsx"],
         rows=[2, 3, 4],
     )
     with pytest.raises(mod.ShopeeNumericParseError) as excinfo:
@@ -152,7 +152,7 @@ def test_clean_numeric_invalido_interrompe_antes_de_qualquer_zero():
                             source_files=files, source_rows=rows)
     message = str(excinfo.value)
     assert "apice" in message
-    assert "Order.all.A.xlsx" in message
+    assert "Order.all.20260801_20260831.xlsx" in message
     assert "linha=3" in message
     assert "Subtotal do produto" in message
     assert "lixo_nao_numerico" not in message
@@ -274,6 +274,7 @@ def test_load_brand_propaga_erro_antes_de_qualquer_dropna_ou_agregacao(tmp_path,
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
     header = [
+        "ID do pedido",
         "Data de criação do pedido", "Nº de referência do SKU principal",
         "Nome do Produto", "Nome da variação", "Quantidade",
         "Subtotal do produto", "Status do pedido", "Nome de usuário (comprador)",
@@ -281,7 +282,7 @@ def test_load_brand_propaga_erro_antes_de_qualquer_dropna_ou_agregacao(tmp_path,
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(header)
-    ws.append(["2026-01-05 10:00", "SKU1", "Produto A", None, "1", "lixo_nao_numerico", "Concluído", "u1"])
+    ws.append(["PED-1", "2026-01-05 10:00", "SKU1", "Produto A", None, "1", "lixo_nao_numerico", "Concluído", "u1"])
     wb.save(brand_dir / "Order.all.20260101_20260131.xlsx")
 
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
@@ -359,7 +360,7 @@ def test_parse_qty_int_formato_us_e_rejeitado():
 def test_clean_int_invalido_interrompe_com_contexto_sanitizado():
     series, files, rows = _series(
         ["2", "1.5", "3"],
-        files=["Order.all.A.xlsx"] * 3,
+        files=["Order.all.20260801_20260831.xlsx"] * 3,
         rows=[2, 3, 4],
     )
     with pytest.raises(mod.ShopeeNumericParseError) as excinfo:
@@ -367,7 +368,7 @@ def test_clean_int_invalido_interrompe_com_contexto_sanitizado():
                         source_files=files, source_rows=rows)
     message = str(excinfo.value)
     assert "apice" in message
-    assert "Order.all.A.xlsx" in message
+    assert "Order.all.20260801_20260831.xlsx" in message
     assert "linha=3" in message
     assert "Quantidade" in message
     assert "1.5" not in message
@@ -397,6 +398,7 @@ def test_load_brand_qty_invalida_propaga_antes_de_agregacao(tmp_path, monkeypatc
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
     header = [
+        "ID do pedido",
         "Data de criação do pedido", "Nº de referência do SKU principal",
         "Nome do Produto", "Nome da variação", "Quantidade",
         "Subtotal do produto", "Status do pedido", "Nome de usuário (comprador)",
@@ -404,7 +406,7 @@ def test_load_brand_qty_invalida_propaga_antes_de_agregacao(tmp_path, monkeypatc
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(header)
-    ws.append(["2026-01-05 10:00", "SKU1", "Produto A", None, "1.5", "100.00", "Concluído", "u1"])
+    ws.append(["PED-1", "2026-01-05 10:00", "SKU1", "Produto A", None, "1.5", "100.00", "Concluído", "u1"])
     wb.save(brand_dir / "Order.all.20260101_20260131.xlsx")
 
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
@@ -455,6 +457,7 @@ def test_modulo_importa_e_roda_no_ambiente_real_sem_pipelines():
 
 def _write_valid_order_xlsx(path, buyer="u1"):
     header = [
+        "ID do pedido",
         "Data de criação do pedido", "Nº de referência do SKU principal",
         "Nome do Produto", "Nome da variação", "Quantidade",
         "Subtotal do produto", "Status do pedido", "Nome de usuário (comprador)",
@@ -462,7 +465,7 @@ def _write_valid_order_xlsx(path, buyer="u1"):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(header)
-    ws.append(["2026-01-05 10:00", "SKU1", "Produto A", None, "2", "100.00", "Concluído", buyer])
+    ws.append(["PED-1", "2026-01-05 10:00", "SKU1", "Produto A", None, "2", "100.00", "Concluído", buyer])
     wb.save(path)
 
 
@@ -497,6 +500,7 @@ def test_main_nao_chama_create_engine_quando_load_brand_falha(tmp_path, monkeypa
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
     header = [
+        "ID do pedido",
         "Data de criação do pedido", "Nº de referência do SKU principal",
         "Nome do Produto", "Nome da variação", "Quantidade",
         "Subtotal do produto", "Status do pedido", "Nome de usuário (comprador)",
@@ -504,7 +508,7 @@ def test_main_nao_chama_create_engine_quando_load_brand_falha(tmp_path, monkeypa
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(header)
-    ws.append(["2026-01-05 10:00", "SKU1", "Produto A", None, "1", "lixo_nao_numerico", "Concluído", "u1"])
+    ws.append(["PED-1", "2026-01-05 10:00", "SKU1", "Produto A", None, "1", "lixo_nao_numerico", "Concluído", "u1"])
     wb.save(brand_dir / "Order.all.20260101_20260131.xlsx")
 
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
