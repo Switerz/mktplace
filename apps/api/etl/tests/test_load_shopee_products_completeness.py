@@ -22,6 +22,7 @@ import pytest
 from etl import load_shopee_products as mod
 
 ORDERS_HEADER = [
+    "ID do pedido",
     "Data de criação do pedido", "Nº de referência do SKU principal",
     "Nome do Produto", "Nome da variação", "Quantidade",
     "Subtotal do produto", "Status do pedido", "Nome de usuário (comprador)",
@@ -32,13 +33,14 @@ def _write_valid_order_xlsx(path, buyer="u1"):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(ORDERS_HEADER)
-    ws.append(["2026-01-05 10:00", "SKU1", "Produto A", None, "2", "100.00", "Concluído", buyer])
+    ws.append(["PED-1", "2026-01-05 10:00", "SKU1", "Produto A", None, "2", "100.00", "Concluído", buyer])
     wb.save(path)
 
 
 def _write_order_xlsx_missing_column(path, missing_column):
     header = [c for c in ORDERS_HEADER if c != missing_column]
     row_by_header = {
+        "ID do pedido": "PED-1",
         "Data de criação do pedido": "2026-01-05 10:00",
         "Nº de referência do SKU principal": "SKU1",
         "Nome do Produto": "Produto A",
@@ -109,7 +111,7 @@ def test_load_brand_sem_arquivo_levanta_erro_controlado(tmp_path, monkeypatch):
 def test_load_brand_arquivo_corrompido_levanta_erro_sanitizado(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_corrupted_xlsx(brand_dir / "Order.all.corrompido.xlsx")
+    _write_corrupted_xlsx(brand_dir / "Order.all.20260501_20260531.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -117,7 +119,7 @@ def test_load_brand_arquivo_corrompido_levanta_erro_sanitizado(tmp_path, monkeyp
 
     message = str(excinfo.value)
     assert "apice" in message
-    assert "Order.all.corrompido.xlsx" in message
+    assert "Order.all.20260501_20260531.xlsx" in message
 
 
 def test_load_brand_dois_arquivos_um_valido_um_corrompido_falha_por_completo(tmp_path, monkeypatch):
@@ -126,21 +128,21 @@ def test_load_brand_dois_arquivos_um_valido_um_corrompido_falha_por_completo(tmp
     silenciosamente só o válido."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.A_valido.xlsx")
-    _write_corrupted_xlsx(brand_dir / "Order.all.B_corrompido.xlsx")
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260201_20260228.xlsx")
+    _write_corrupted_xlsx(brand_dir / "Order.all.20260401_20260430.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
         mod._load_brand("apice")
 
-    assert "Order.all.B_corrompido.xlsx" in str(excinfo.value)
+    assert "Order.all.20260401_20260430.xlsx" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("missing_column", ["Quantidade", "Subtotal do produto", "Data de criação do pedido", "Nome do Produto", "Status do pedido"])
+@pytest.mark.parametrize("missing_column", ["ID do pedido", "Quantidade", "Subtotal do produto", "Data de criação do pedido", "Nome do Produto", "Status do pedido"])
 def test_load_brand_coluna_obrigatoria_ausente_levanta_erro(tmp_path, monkeypatch, missing_column):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.xlsx", missing_column)
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260101_20260131.xlsx", missing_column)
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -155,7 +157,7 @@ def test_load_brand_coluna_opcional_ausente_nao_levanta_erro(tmp_path, monkeypat
     contrato inalterado."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.xlsx", missing_column)
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260101_20260131.xlsx", missing_column)
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     df = mod._load_brand("apice")
@@ -175,8 +177,8 @@ def test_load_brand_arquivo_incompleto_nao_e_mascarado_por_arquivo_valido(tmp_pa
     rejeitado mesmo com A perfeitamente válido na mesma marca."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.A_valido.xlsx")
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.B_incompleto.xlsx", missing_column)
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260201_20260228.xlsx")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260301_20260331.xlsx", missing_column)
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -184,7 +186,7 @@ def test_load_brand_arquivo_incompleto_nao_e_mascarado_por_arquivo_valido(tmp_pa
 
     message = str(excinfo.value)
     assert "apice" in message
-    assert "Order.all.B_incompleto.xlsx" in message
+    assert "Order.all.20260301_20260331.xlsx" in message
     assert mod.COL_MAP[missing_column] in message  # mensagem usa o nome interno (ex.: "qty"), não o header XLSX
 
 
@@ -198,8 +200,8 @@ def test_load_brand_arquivo_incompleto_detectado_mesmo_processado_primeiro(tmp_p
     processado depois dele."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.A_incompleto.xlsx", missing_column)
-    _write_valid_order_xlsx(brand_dir / "Order.all.B_valido.xlsx")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260601_20260630.xlsx", missing_column)
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260701_20260731.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -207,7 +209,7 @@ def test_load_brand_arquivo_incompleto_detectado_mesmo_processado_primeiro(tmp_p
 
     message = str(excinfo.value)
     assert "apice" in message
-    assert "Order.all.A_incompleto.xlsx" in message
+    assert "Order.all.20260601_20260630.xlsx" in message
     assert mod.COL_MAP[missing_column] in message  # mensagem usa o nome interno (ex.: "qty"), não o header XLSX
 
 
@@ -216,7 +218,7 @@ def test_load_brand_nunca_retorna_none(tmp_path, monkeypatch):
     um DataFrame; todo caminho de falha levanta, nunca retorna None."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.xlsx")
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260101_20260131.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     df = mod._load_brand("apice")
@@ -246,7 +248,7 @@ def test_main_sem_arquivos_para_uma_marca_nao_chama_create_engine(tmp_path, monk
 def test_main_arquivo_ilegivel_nao_chama_create_engine(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_corrupted_xlsx(brand_dir / "Order.all.xlsx")
+    _write_corrupted_xlsx(brand_dir / "Order.all.20260101_20260131.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
     pg_url_calls, engine_calls = _patch_db_tracking(monkeypatch)
@@ -261,8 +263,8 @@ def test_main_arquivo_ilegivel_nao_chama_create_engine(tmp_path, monkeypatch):
 def test_main_dois_arquivos_um_valido_um_corrompido_nao_carrega_so_o_valido(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.A_valido.xlsx")
-    _write_corrupted_xlsx(brand_dir / "Order.all.B_corrompido.xlsx")
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260201_20260228.xlsx")
+    _write_corrupted_xlsx(brand_dir / "Order.all.20260401_20260430.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
     pg_url_calls, engine_calls = _patch_db_tracking(monkeypatch)
@@ -282,8 +284,8 @@ def test_main_arquivo_incompleto_mascarado_por_valido_nao_chama_create_engine(tm
     existindo ao lado do incompleto."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.A_valido.xlsx")
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.B_incompleto.xlsx", missing_column)
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260201_20260228.xlsx")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260301_20260331.xlsx", missing_column)
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
     pg_url_calls, engine_calls = _patch_db_tracking(monkeypatch)
@@ -291,7 +293,7 @@ def test_main_arquivo_incompleto_mascarado_por_valido_nao_chama_create_engine(tm
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
         mod.main()
 
-    assert "Order.all.B_incompleto.xlsx" in str(excinfo.value)
+    assert "Order.all.20260301_20260331.xlsx" in str(excinfo.value)
     assert pg_url_calls == []
     assert engine_calls == []
 
@@ -299,7 +301,7 @@ def test_main_arquivo_incompleto_mascarado_por_valido_nao_chama_create_engine(tm
 def test_main_falta_quantidade_nao_chama_create_engine(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.xlsx", "Quantidade")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260101_20260131.xlsx", "Quantidade")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
     pg_url_calls, engine_calls = _patch_db_tracking(monkeypatch)
@@ -314,7 +316,7 @@ def test_main_falta_quantidade_nao_chama_create_engine(tmp_path, monkeypatch):
 def test_main_falta_subtotal_nao_chama_create_engine(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.xlsx", "Subtotal do produto")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260101_20260131.xlsx", "Subtotal do produto")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
     pg_url_calls, engine_calls = _patch_db_tracking(monkeypatch)
@@ -350,7 +352,7 @@ def test_main_quatro_de_cinco_marcas_preparadas_nao_chama_create_engine(tmp_path
     for brand in brands[:-1]:
         brand_dir = tmp_path / brand
         brand_dir.mkdir()
-        _write_valid_order_xlsx(brand_dir / "Order.all.xlsx")
+        _write_valid_order_xlsx(brand_dir / "Order.all.20260101_20260131.xlsx")
     (tmp_path / brands[-1]).mkdir()  # rituaria: pasta existe, sem arquivo
 
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
@@ -371,7 +373,7 @@ def test_main_todas_as_marcas_validas_ainda_chama_create_engine(tmp_path, monkey
     quebrou o fluxo de sucesso."""
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_valid_order_xlsx(brand_dir / "Order.all.xlsx")
+    _write_valid_order_xlsx(brand_dir / "Order.all.20260101_20260131.xlsx")
 
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
     monkeypatch.setattr(mod, "BRANDS", ["apice"])
@@ -392,7 +394,7 @@ def test_main_todas_as_marcas_validas_ainda_chama_create_engine(tmp_path, monkey
 def test_load_brand_arquivo_corrompido_nao_encadeia_cause_nem_context(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_corrupted_xlsx(brand_dir / "Order.all.xlsx")
+    _write_corrupted_xlsx(brand_dir / "Order.all.20260101_20260131.xlsx")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -407,7 +409,7 @@ def test_load_brand_arquivo_corrompido_traceback_formatado_sem_conteudo_bruto(tm
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
     conteudo_bruto = b"BYTES_FICTICIOS_SENSIVEIS_NUNCA_DEVEM_VAZAR"
-    (brand_dir / "Order.all.xlsx").write_bytes(conteudo_bruto)
+    (brand_dir / "Order.all.20260101_20260131.xlsx").write_bytes(conteudo_bruto)
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:
@@ -421,7 +423,7 @@ def test_load_brand_arquivo_corrompido_traceback_formatado_sem_conteudo_bruto(tm
 def test_load_brand_coluna_ausente_nao_encadeia_cause_nem_context(tmp_path, monkeypatch):
     brand_dir = tmp_path / "apice"
     brand_dir.mkdir()
-    _write_order_xlsx_missing_column(brand_dir / "Order.all.xlsx", "Subtotal do produto")
+    _write_order_xlsx_missing_column(brand_dir / "Order.all.20260101_20260131.xlsx", "Subtotal do produto")
     monkeypatch.setattr(mod, "SHOPEE_ROOT", tmp_path)
 
     with pytest.raises(mod.ShopeeProductInputError) as excinfo:

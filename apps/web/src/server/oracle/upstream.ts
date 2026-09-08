@@ -173,6 +173,50 @@ export const produtosTiktokContract = z.object({
   ),
 });
 
+/**
+ * Gate SH-API-2D — selo de qualidade do escopo (marca x competencia).
+ *
+ * `nullish()` em todo o bloco de proposito: um upstream que ainda nao publica
+ * o selo continua valido (o conector degrada para "nao medido"), mas quando o
+ * selo VEM ele e' validado de verdade — os status sao enums fechados, entao um
+ * estado novo no backend quebra aqui em vez de vazar como string opaca para o
+ * modelo, que trataria "provavelmente_ok" como se fosse "ok".
+ */
+export const scopeQualityContract = z.object({
+  channel: z.string(),
+  brand: z.string().nullish(),
+  ref_month: refMonth,
+  source_status: z.enum(["source_covered", "source_not_covered", "source_unknown"]),
+  load_status: z.enum(["load_absent", "load_stale", "load_current"]),
+  eligibility_status: z.enum(["no_eligible_rows", "partially_eligible", "eligible"]),
+  maturity_status: z.enum(["mature", "materially_immature", "maturity_unknown"]),
+  coverage_status: z.enum(["coverage_ok", "coverage_below_expected", "coverage_unknown"]),
+  loaded_at: optStamp,
+  load_age_days: optNum,
+  definitive: z.boolean(),
+  measured: z.object({
+    rows_present: optNum,
+    eligible_rows: optNum,
+    excluded_zero_gmv: optNum,
+    completed_gmv: optNum,
+    reference_gmv: optNum,
+    completed_share: optNum,
+    maturity_floor: optNum,
+    brands_present: optNum,
+    brands_expected: optNum,
+    source_covered_from: z.string().nullish(),
+    source_covered_through: z.string().nullish(),
+    daily_max_date: z.string().nullish(),
+  }),
+  warnings: z.array(
+    z.object({
+      code: z.string(),
+      severity: z.enum(["info", "warning", "critical"]),
+      message: z.string(),
+    }),
+  ),
+});
+
 export const produtosShopeeContract = z.object({
   ...productCommon,
   ref_month: refMonth,
@@ -188,6 +232,7 @@ export const produtosShopeeContract = z.object({
       pareto_bucket: z.string().nullish(),
     }),
   ),
+  quality: scopeQualityContract.nullish(),
 });
 
 // ---------------------------------------------------------------------------
@@ -209,6 +254,7 @@ export const qualityContract = z.object({
   }),
   filters: optFilters,
   refreshed_at: optStamp,
+  produtos_shopee_quality: scopeQualityContract.nullish(),
 });
 
 /** Overview usado apenas para extrair frescor na tool de qualidade. */

@@ -66,6 +66,39 @@ export const ML_PRODUCTS_CUMULATIVE: Limitation = {
     "O ranking de produtos do Mercado Livre e' cumulativo e nao tem competencia mensal. Nao e' possivel recortar por mes, e o valor nao corresponde a um periodo especifico.",
 };
 
+/**
+ * Gate SH-API-2D — traduz um aviso do selo de escopo em Limitation.
+ *
+ * Deliberadamente uma FUNCAO e nao uma lista de constantes: o texto vem do
+ * backend, que e' quem mede. Duplicar aqui as frases de imaturidade criaria
+ * exatamente o que o cabecalho deste arquivo proibe — uma lista rigida que
+ * pode contradizer o backend. O unico conhecimento local e o mapeamento de
+ * codigo para escopo legivel, e ele degrada sozinho para um escopo generico
+ * quando o backend inventar um codigo novo (nunca descarta o aviso).
+ */
+export function scopeWarningToLimitation(
+  warning: { code: string; severity: string; description?: string; message?: string },
+  channelLabel: string,
+): Limitation {
+  const escopos: Record<string, string> = {
+    shopee_produtos_fonte_imatura: "competencia em maturacao",
+    shopee_produtos_nenhuma_linha_elegivel: "sem produto concluido",
+    shopee_produtos_carga_ausente: "carga ausente",
+    shopee_produtos_carga_defasada: "carga defasada",
+    shopee_produtos_fonte_nao_cobre_competencia: "fonte nao cobre a competencia",
+    shopee_produtos_cobertura_de_marcas: "cobertura de marcas incompleta",
+    shopee_produtos_elegibilidade_parcial: "elegibilidade parcial",
+    shopee_produtos_maturidade_nao_medida: "maturidade nao medida",
+    shopee_produtos_fonte_sem_auditoria: "auditoria de carga ausente",
+  };
+  const detalhe = escopos[warning.code] ?? "qualidade do escopo";
+  return {
+    topic: warning.code,
+    scope: `Produtos — ${channelLabel} (${detalhe})`,
+    description: warning.description ?? warning.message ?? warning.code,
+  };
+}
+
 /** O dia corrente e' sempre parcial. */
 export const CURRENT_DAY_PARTIAL: Limitation = {
   topic: "dia_corrente",

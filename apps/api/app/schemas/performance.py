@@ -179,6 +179,62 @@ class QualityBrandRow(BaseModel):
     shopee_return_rate_pct: Optional[float] = None
 
 
+# ---------------------------------------------------------------------------
+# Gate SH-API-2D — contrato de qualidade de escopo (Produtos Shopee).
+#
+# Todos os campos sao ADITIVOS. Nenhuma resposta existente muda de nome, tipo
+# ou valor: quem ja consumia `total_gmv`, `items` ou `eligible_count` continua
+# lendo exatamente a mesma coisa. O que muda e que agora existe um lugar
+# ONDE OLHAR antes de tratar o numero como definitivo.
+#
+# Os literais dos status sao fechados de proposito: um consumidor (tela, MCP,
+# integracao) tem de quebrar no schema se a API inventar um estado novo, em
+# vez de renderizar uma string desconhecida como se fosse normal.
+# ---------------------------------------------------------------------------
+
+class ScopeQualityWarning(BaseModel):
+    code: str
+    severity: Literal["info", "warning", "critical"]
+    message: str
+
+
+class ScopeQualityMeasured(BaseModel):
+    """Os numeros crus que sustentam cada status. Existem para que o veredito
+    seja AUDITAVEL: quem discorda do rotulo consegue refazer a conta."""
+    rows_present: int
+    eligible_rows: int
+    excluded_zero_gmv: int
+    completed_gmv: float
+    reference_gmv: float
+    completed_share: Optional[float] = None
+    maturity_floor: float
+    brands_present: int
+    brands_expected: int
+    source_covered_from: Optional[str] = None
+    source_covered_through: Optional[str] = None
+    daily_max_date: Optional[str] = None
+
+
+class ScopeQuality(BaseModel):
+    channel: str
+    brand: Optional[str] = None
+    ref_month: str
+    # Seis eixos ORTOGONAIS — nunca colapsar num unico rotulo.
+    source_status: Literal["source_covered", "source_not_covered", "source_unknown"]
+    load_status: Literal["load_absent", "load_stale", "load_current"]
+    eligibility_status: Literal["no_eligible_rows", "partially_eligible", "eligible"]
+    maturity_status: Literal["mature", "materially_immature", "maturity_unknown"]
+    coverage_status: Literal["coverage_ok", "coverage_below_expected", "coverage_unknown"]
+    #: Ultima publicacao do mart neste escopo (MAX(ingested_at)).
+    loaded_at: Optional[str] = None
+    load_age_days: Optional[int] = None
+    #: Atalho de renderizacao. Falso NAO significa "numero errado": significa
+    #: "nao use como definitivo sem ler os eixos".
+    definitive: bool
+    measured: ScopeQualityMeasured
+    warnings: list[ScopeQualityWarning] = []
+
+
 class QualityResponse(BaseModel):
     ref_month: Optional[str] = None
     marketplace: str
@@ -190,6 +246,9 @@ class QualityResponse(BaseModel):
     compare_date_to: Optional[date] = None
     filters: Optional[FiltersEcho] = None
     refreshed_at: Optional[str] = None
+    #: Gate SH-API-2D. `None` = nao medido (a janela nao e uma competencia
+    #: unica, ou a Shopee nao esta no filtro de canais) — nunca "esta tudo bem".
+    produtos_shopee_quality: Optional[ScopeQuality] = None
 
 
 class FinanceiroKpis(BaseModel):
@@ -624,6 +683,8 @@ class ProdutosShopeeResponse(BaseModel):
     limit: int
     offset: int
     items: list[ProdutoShopeeRow]
+    quality: Optional[ScopeQuality] = None
+    refreshed_at: Optional[str] = None
 
 
 class ProdutoMLRow(BaseModel):
@@ -731,6 +792,8 @@ class ProdutosShopeeSummaryResponse(BaseModel):
     brand: Optional[str] = None
     buckets: list[ParetoBucketSummary]
     avg_price_weighted: Optional[float] = None
+    quality: Optional[ScopeQuality] = None
+    refreshed_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import PeriodSelector from "@/components/PeriodSelector";
 import ProductMarketplaceTabs from "@/components/ProductMarketplaceTabs";
 import ProductFilterBar, { ProductSelect } from "@/components/ProductFilterBar";
 import ProductParetoSummary from "@/components/ProductParetoSummary";
+import ScopeQualityBanner from "@/components/ScopeQualityBanner";
 import ProductCount from "@/components/ProductCount";
 import ProductExportButton from "@/components/ProductExportButton";
 import MercadoLivreProductTable from "@/components/MercadoLivreProductTable";
@@ -590,6 +591,15 @@ function ProdutosPageInner() {
                 total: shDisplayData?.total ?? null, offset: shOffset, limit: PAGE_SIZE,
               })}
             </p>
+
+            {/* Gate SH-API-2D: o selo vem ANTES dos cards A/B/C/D de proposito.
+                Quem le a tela de cima para baixo tem de saber que a competencia
+                esta em maturacao antes de olhar o Pareto, nao depois de ja ter
+                tirado conclusao dos numeros. */}
+            <ScopeQualityBanner
+              quality={shDisplaySummary?.quality}
+              loading={shSummaryAvail === "loading"}
+            />
 
             <ProductParetoSummary
               buckets={shDisplaySummary?.buckets ?? null}

@@ -720,6 +720,519 @@ ocorrência real até aqui).
 
 ---
 
+## Snapshot vigente dos exports Shopee — regra fail-closed (Gate SH-API-2A-R)
+
+`apps/api/etl/load_shopee_products.py` deduplica os exports XLSX **por pedido**
+antes de qualquer filtro comercial. Sem isso, um pedido presente em dois exports
+sobrepostos era somado duas vezes em `marts.fact_shopee_product_monthly` e na tela
+`/produtos/shopee`.
+
+**Regra canônica**, nesta ordem obrigatória:
+
+1. classificar e reduzir TODA a population de arquivos a snapshots lógicos;
+2. agrupar por `brand + ID do pedido`;
+3. escolher UM snapshot vencedor por pedido — o de maior `(janela_fim, janela_início)`;
+4. manter TODAS as linhas daquele pedido no snapshot vencedor;
+5. **só então** aplicar `status == "Concluído"`;
+6. **só então** agregar por produto/variação/mês.
+
+A ordem dos passos 3 e 5 não é estética: o mesmo pedido aparece com estados
+diferentes em snapshots de idades diferentes, e filtrar antes de escolher
+inverte o resultado.
+
+**Snapshot lógico** = `(marca, janela_início, janela_fim)`. As partes
+`part_N_of_M` são pedaços complementares do mesmo snapshot, nunca versões
+concorrentes: exige-se a série completa de 1 a M, sem número repetido e com M
+consistente.
+
+**Formatos ACEITOS** — 212 arquivos, de um total de 214 `.xlsx` com "order" no
+nome (213 são `Order.all`; 2 rejeitados; 0 cópias byte-idênticas):
+
+| Padrão | Ocorrências |
+|---|---|
+| `Order.all.YYYYMMDD_YYYYMMDD.xlsx` | 12 |
+| `Order.all.YYYYMMDD_YYYYMMDD_part_N_of_M.xlsx` | 8 |
+| `Order.all.order_creation_date.YYYYMMDD_YYYYMMDD.xlsx` | 46 |
+| `Order.all.order_creation_date.YYYYMMDD_YYYYMMDD_part_N_of_M.xlsx` | 146 |
+
+**Formatos REJEITADOS — abortam a carga inteira, antes de interpretar qualquer
+workbook com pandas/openpyxl e antes de abrir conexão com banco.** A triagem
+pode fazer leitura **binária** de candidatos da mesma janela, e apenas deles,
+para comparar SHA-256 e decidir se são cópias idênticas:
+
+| Caso | Exemplo real | Motivo |
+|---|---|---|
+| Instante de export | `Order.all.20260717T155433Z.xlsx` | Carrega o INSTANTE, não a janela — não é ordenável contra um nome com janela |
+| Outro tipo de export | `Order.toship.order_creation_date.20260805_20260805.xlsx` | Não é `Order.all`; é um subconjunto (a enviar) |
+| Sufixo de cópia | `Order.all.order_creation_date.20260805_20260805 (1).xlsx` | O sufixo não estabelece ordem temporal |
+| Parte ausente / N,M inválidos / número repetido / totais divergentes | — | Snapshot incompleto ou ambíguo |
+| Dois arquivos inteiros divergentes na mesma janela | — | Só cópia byte a byte é reduzida a uma (`exact_copy`); hash diferente aborta |
+
+**Por que fail-closed.** O formato de instante existiu de verdade no histórico
+(`kokeshi`, ingerido em 17/07). Seu nome carrega `20260717`, maior que a
+`janela_fim` `20260630` do mensal de junho — mas o mensal é o snapshot
+POSTERIOR. Ordenar pelo nome elegeria o snapshot errado e removeria 18.924
+pedidos concluídos, R$ 971.946,52 (medido no Gate SH-API-2A), quase 10× a
+inflação que a correção remove. Como nada no nome de um arquivo com janela
+revela quando ele foi extraído, os dois formatos não têm ordem entre si — então
+a carga recusa em vez de adivinhar.
+
+**Nunca usados como ordem:** `mtime`, `ctime`, ordem do `glob`.
+**Nunca usados como chave de dedup:** `pedido + SKU` (SKU repetido legitimamente
+no mesmo pedido existe), `DISTINCT row_sha256` como regra principal (não resolve
+snapshot cujo status amadureceu).
+
+### Estado (não confundir com produção)
+
+- **A duplicação NÃO foi corrigida em produção.** O código está implementado e
+  testado; nenhum backfill foi executado, nenhuma escrita em banco foi feita.
+  O valor da inflação depende da população declarada — não use um número único:
+
+  | | Valor | População que o produz |
+  |---|---|---|
+  | **Confirmado** | R$ 104.728,27 | manifesto histórico do Data Mart (208 arquivos), reproduzido ao centavo por consulta |
+  | **Condicionado** | R$ 104.304,98 | população do disco hoje (212 aceitos) — não contém o export de instante que gera os R$ 423,29 de kokeshi/2026-06 |
+  | **Sob arbitragem, agora resolvido** | R$ 224.617,79 | rituária/2026-07, do export cruzado `20260707_20260806` que existe no disco e não no manifesto — arbitrado como CONFIRMADO legítimo (Gate SH-API-2B) |
+
+  População recomendada após a arbitragem: **212 arquivos aceitos**, delta total
+  esperado **R$ 328.922,77** (ver Gate SH-API-2B).
+- **Sidecar de manifesto: não implementado.** Foi avaliado no Gate SH-API-2A como
+  a alternativa robusta (declarar o instante de extração no depósito dos
+  arquivos) e ficou fora do escopo desta rodada. A regra por janela é
+  **transitória** enquanto a API Shopee é investigada.
+- **`units_sold` de `fact_marketplace_daily_performance` continua pendente**:
+  duplicação confirmada em 14.705 unidades (6 datas, 19 linhas marca×dia), pelo
+  mesmo mecanismo em `pipelines/connectors/shopee/_parser.py`. Não tocado nesta
+  rodada — a coluna não é exposta em nenhuma rota pública e o arquivo divergia de
+  `origin/main` em outras branches.
+- **GMV, pedidos e ticket oficiais não mudam.** `gmv` de
+  `fact_marketplace_daily_performance` é escrito por shop-stats (Gate R2.1); o
+  patch de orders não inclui a coluna. `orders` é contagem distinta, imune; e
+  `avg_ticket` é derivado de `gmv / orders` em tempo de serving.
+- **API Shopee segue em shadow/investigação** e não substitui nenhuma carga
+  manual. Cobertura atual: 4 de 5 marcas (`kokeshi` ausente).
+
+### Camadas: o que já está corrigido e o que não está (Gate SH-API-2B)
+
+| Camada | Estado |
+|---|---|
+| Algoritmo (regra de snapshot, fail-closed) | **implementado e testado** |
+| População aprovada | **212 arquivos**, declarados por nome+SHA-256 no dry-run |
+| Arquivos inconclusivos | **nenhum** — os 2 rejeitados de `barbours` foram arbitrados e provados irrelevantes para Produtos |
+| Dry-run **offline** | **disponível** — `--offline-dry-run`: arquivos e memória apenas, zero conexão. Campos "antes" e deltas saem como **N/D**, nunca zero |
+| Dry-run **contra banco** | **implementado, NÃO exercitado** — `--dry-run --target local\|neon`: query parametrizada, sessão `READ ONLY` e **preflight de identidade** (nome do banco declarado em `BACKFILL_*_EXPECT_DB` + impressão digital estrutural do schema `marts`). `DATABASE_URL` genérico é recusado. Em 2026-09-08 as duas execuções retornaram **BLOCKED (exit 5)**: nenhuma credencial `BACKFILL_*_RO_URL` está provisionada |
+| Executor de escrita | **adapter implementado** (`ScopedReplaceExecutor`: backup em tabela real e nomeada, `DELETE` escopado, `INSERT`, contagem, commit/rollback), coberto por teste de contrato — **`--apply` BLOQUEADO em `main()`** |
+| Backfill | **NOT READY** — nunca executado contra banco algum; o caminho local→Neon está desenhado e testado com fakes, não exercitado |
+| Mart **local** | **não corrigido** |
+| **Neon** | **não corrigido** |
+| Tela de Produtos | **serve os dados antigos** |
+| API Shopee | continua em **shadow**, não substitui carga manual |
+| `units_sold` da fato diária | **fora deste gate**, duplicação de 14.705 unidades pendente |
+
+
+### Credencial read-only dedicada — INEXISTENTE (Gate SH-API-2C-R)
+
+Com autorização do proprietário, as conexões configuradas do projeto foram
+localizadas e **diagnosticadas** (somente `SELECT`, transação `READ ONLY`,
+encerrada com rollback). Nenhum valor foi impresso ou persistido.
+
+| Verificação | Serving (Neon) | PostgreSQL local |
+|---|---|---|
+| Conecta | sim | sim |
+| `transaction_read_only=on` | sim (forçado pela sessão) | sim (forçado) |
+| Role superuser | não | **SIM** |
+| createdb/createrole/replication/bypassrls | **SIM** | **SIM** |
+| INSERT/UPDATE/DELETE/TRUNCATE em `marts.fact_shopee_product_monthly` | **SIM** | **SIM** |
+| CREATE no schema `marts` | **SIM** | **SIM** |
+| SSL ativo | **não comprovado** | n/a |
+| Veredito | **REPROVADO** | **REPROVADO** |
+
+```
+BLOCKED — DEDICATED_READONLY_ROLE_MISSING
+```
+
+As duas credenciais existentes são **graváveis**. Reatribuí-las a
+`BACKFILL_*_RO_URL` seria tratar credencial de escrita como read-only —
+exatamente o que o contrato proíbe. As três reconciliações reais seguem
+pendentes.
+
+**Proposta para rodada administrativa separada** (não executada aqui; nenhuma
+role foi criada, nenhum privilégio concedido):
+
+```sql
+-- em CADA destino, executado por quem tem autoridade administrativa
+CREATE ROLE shopee_produtos_ro LOGIN PASSWORD '<gerada, fora do repo>';
+ALTER  ROLE shopee_produtos_ro NOSUPERUSER NOCREATEDB NOCREATEROLE
+                               NOREPLICATION NOBYPASSRLS;
+ALTER  ROLE shopee_produtos_ro SET default_transaction_read_only = on;
+GRANT  CONNECT ON DATABASE <banco> TO shopee_produtos_ro;
+GRANT  USAGE   ON SCHEMA  marts    TO shopee_produtos_ro;
+GRANT  SELECT  ON marts.fact_shopee_product_monthly TO shopee_produtos_ro;
+-- nenhum INSERT/UPDATE/DELETE/TRUNCATE, nenhum CREATE, nada em outros schemas
+```
+
+No destino remoto, exigir SSL na role (`hostssl` no pg_hba ou equivalente do
+provedor) e confirmar `pg_stat_ssl.ssl = true` na sessão.
+
+### Drift de schema entre os dois destinos (medido, Gate SH-API-2C-R)
+
+`marts.fact_shopee_product_monthly` tem **15 colunas no serving e 14 no
+local** — o serving tem `ingested_at` a mais; nenhum tipo divergente nas 14
+comuns. Consequências:
+
+1. qualquer propagação local → Neon precisa ser **explícita em colunas**; um
+   `INSERT ... SELECT *` desalinharia. O `ScopedReplaceExecutor` já monta a
+   lista de colunas a partir da staging, então está correto — mas a etapa
+   local→Neon precisa tratar `ingested_at` deliberadamente;
+2. `ingested_at` do serving é candidata natural a alimentar `refreshed_at`,
+   hoje nulo na tela de Produtos.
+
+Escala dos schemas (sinal, não gate): serving com 123 schemas e 54 tabelas em
+`marts`; local com 9 e 16. **A regra anterior "o local não tem a tabela de
+serving" foi REFUTADA** — o local tem — e foi removida do código.
+
+### Reconciliação contra banco — BLOQUEADA (Gate SH-API-2C, 2026-09-08)
+
+As três reconciliações reais (candidato × local, candidato × Neon, local × Neon)
+**não foram executadas**: nenhuma das quatro variáveis read-only está
+provisionada na sessão.
+
+```
+BLOCKED — READONLY_TARGETS_NOT_PROVISIONED
+```
+
+Para habilitar, o proprietário define as quatro **na mesma sessão** que executa
+o dry-run (valores omitidos aqui de propósito):
+
+```powershell
+$env:BACKFILL_LOCAL_RO_URL   = "<DSN read-only do PostgreSQL local>"
+$env:BACKFILL_LOCAL_EXPECT_DB= "<nome do banco local esperado>"
+$env:BACKFILL_NEON_RO_URL    = "<DSN read-only do Neon serving>"
+$env:BACKFILL_NEON_EXPECT_DB = "<nome do banco Neon esperado>"
+```
+
+Requisitos da credencial: role **sem** privilégio de escrita nas tabelas de
+`marts`, SSL obrigatório no destino remoto, e nenhuma conexão a primary
+gravável. `DATABASE_URL` e qualquer credencial gravável **não** são aceitos —
+o código recusa.
+
+Depois, com a raiz isolada dos 212 aprovados:
+
+```
+python -m etl.backfill_shopee_products --scope apice:2026-05 --scope barbours:2026-05   --scope kokeshi:2026-08 --scope rituaria:2026-07   --source-root <raiz-isolada> --dry-run --target local
+```
+(idem com `--target neon`.)
+
+### Piso de maturidade — MEDIDO, não arbitrado (Gate SH-API-2B-R2)
+
+Participação do GMV `Concluído` sobre o GMV não-cancelado, por competência,
+sobre a população deduplicada do Data Mart:
+
+| Competência | share | leitura |
+|---|---|---|
+| 2026-01 a 2026-04 | 1,0000 | estável |
+| 2026-05 | 0,9987 | estável |
+| 2026-06 | 0,9993 | estável |
+| **2026-07** | **0,7324** | **parcialmente imatura** |
+| **2026-08** | **0,0007** | **materialmente imatura** |
+
+O mínimo observado entre os seis meses historicamente estáveis é **0,9987**.
+Qualquer piso de reconciliação deve sair daí — a proposta é **0,99**, e a
+decisão do valor final é do proprietário. Sem piso medido, o eixo de maturidade
+fica `maturity_unknown`; o código **não arbitra** um número.
+
+Consequência que não estava registrada: **julho também está imaturo** (73,2%).
+O valor publicado de Produtos para 2026-07 representa ~73% do GMV não-cancelado
+da competência.
+
+### Estados de frescor — quatro eixos ORTOGONAIS (Gate SH-API-2B-R2)
+
+A versão anterior colapsava tudo num único estado mutuamente exclusivo, e
+`maturation_pending` **escondia** `load_stale`. Corrigido: `classify_scope`
+devolve quatro eixos independentes, porque as condições são independentes.
+
+| Eixo | Valores |
+|---|---|
+| `source_status` | `source_present` · `source_absent` |
+| `load_status` | `load_current` · `load_stale` · `load_absent` |
+| `eligibility_status` | `eligible` · `partially_eligible` · `no_eligible_rows` |
+| `maturity_status` | `source_mature` · `source_materially_immature` · `maturity_unknown` |
+| `coverage_status` | `coverage_ok` · `coverage_below_allowlist` |
+
+**2026-08 registra simultaneamente**, conforme evidência: `load_stale` (destino
+defasado ante o candidato mais recente) **e** presença física no Neon (188
+chaves) **e** `no_eligible_rows` (cobertura analítica inadequada) **e**
+`source_materially_immature` (share 0,0007 contra piso 0,99) **e**
+`coverage_below_allowlist` (4 de 5 marcas). Nenhum desses esconde o outro.
+
+Os alertas continuam **blueprint** — `QUALITY_ALERT_BLUEPRINT` é uma estrutura
+de dados, **não** está conectada ao health check nem a `torre_qualidade_dados`.
+
+### Estados de frescor (versão anterior, superada — mantida por rastreabilidade)
+
+`classify_scope_freshness` nomeia cada situação de um par (marca, competência).
+A fórmula comercial **não mudou** — o que mudou é que a tela vazia deixa de
+poder passar por "sem dados" ou por "saudável":
+
+| Estado | Quando | Alerta |
+|---|---|---|
+| `source_missing` | nenhum arquivo-fonte para o escopo | sim |
+| `load_stale` | destino vazio (ou defasado) com Shopee Daily > 0 | sim |
+| `present_but_not_eligible` | linhas existem, nenhuma elegível, **mês corrente** | sim, se a diária for material |
+| `maturation_pending` | linhas existem, nenhuma elegível, **mês fechado** | sim |
+| `complete` | elegíveis > 0 e carga em dia; ou mês genuinamente sem venda | não |
+
+**2026-08 cai em `maturation_pending`** — 188 chaves presentes, 0 elegíveis,
+Shopee Daily com GMV material. Nunca `complete`, nunca "sem dados".
+
+`refreshed_at` deve vir de `audit.source_sync_run` — **nunca** de `NOW()` da
+requisição, **nunca** da data da competência. Hoje o campo simplesmente não é
+preenchido pelos endpoints de Produtos.
+
+Quatro alertas no blueprint (`QUALITY_ALERT_BLUEPRINT`), todos em **health_check
+e `torre_qualidade_dados`**, todos `critico_para_exit=False`: fonte manual pode
+ser não crítica para o exit code, mas nunca silenciosa para o usuário.
+
+### Arquitetura de escrita local → Neon (desenhada, não executada)
+
+Ordem obrigatória: XLSX → scoped replace no **local** (transação 1, backup
+durável) → validar local pós-commit → local → scoped replace dos **mesmos
+escopos** no **Neon** (transação 2, backup durável) → validar Neon contra local
+→ auditar as duas etapas com `run_id` comum.
+
+**São dois bancos, portanto dois commits.** Não existe transação distribuída
+aqui, e o estado parcial é um resultado nomeado:
+
+| Resultado | Significado |
+|---|---|
+| `OK` | as duas etapas commitaram e validaram |
+| `PARTIAL` | local commitado, Neon falhou → retry **somente** da propagação local→Neon, nunca reprocessar XLSX |
+| `REFUSED` | validação reprovou antes de qualquer escrita |
+
+Proibido por contrato (com teste): aplicar **somente no Neon** deixando o local
+antigo (`assert_not_neon_only`), `TRUNCATE` de tabela inteira, backup em `TEMP
+TABLE` (morre com a sessão e não é backup operacional), e UPSERT como único
+mecanismo. Concorrência com `sync_produtos_shopee`, `full_daily` e
+`shopee_manual_refresh` deve ser impedida por lock compartilhado; quem não
+adquirir, **aborta** — nunca espera indefinidamente.
+
+### Incidente de frescor de Produtos Shopee (2026-09-08, read-only)
+
+Sintoma relatado: Shopee diária completa até 31/08, Produtos Shopee com 0 linhas
+em 2026-08 e 2026-09, `refreshed_at` nulo, zero warnings.
+
+Classificação formal: **`maturation_pending`** (mês fechado, presença física,
+zero elegíveis, diária material). **Não é ausência de dados.** `/produtos/shopee/summary?ref_month=2026-08`
+devolve `total_count=188`, `eligible_count=0`, `excluded_zero_gmv_count=188`:
+as 188 chaves de agosto **existem** no Neon, todas com `gmv=0`, e o filtro de
+elegibilidade `gmv > 0` esvazia a tela.
+
+**Causa raiz (comprovada):** `_aggregate` só soma GMV de `status == "Concluído"`,
+e os exports XLSX de agosto disponíveis hoje quase não têm pedidos concluídos —
+maturação da fonte manual. O loader corrigido, rodado em memória sobre o disco
+atual, produz para 2026-08: apice 75 chaves / GMV 0,00 / 0 concluídos / 408
+cancelados; kokeshi 102 / 3.311,08 / 87 / 8.441; lescent 41 / 98,61 / 1 / 838;
+rituária 43 / 78,60 / 1 / 450. Ou seja: o mart está **correto para a fonte que
+tem** — a fonte é que ainda não amadureceu.
+
+**`refreshed_at` nulo é lacuna de contrato, não falha de carga:**
+`get_produtos_shopee_summary` nunca preenche o campo. `_max_refreshed_at` existe,
+mas serve outros endpoints e lê `MAX(ingested_at)` da **fato diária**. Deve
+futuramente vir da auditoria real da carga/sync — nunca da data da competência e
+nunca de `NOW()` da requisição.
+
+**Falha de observabilidade (separada do incidente de dados):** `/operacoes`
+devolve `alertas: []` e `/quality` de 2026-08 mostra Shopee normalmente
+(cancel_rate 11,94%, 2.784 pedidos de apice) enquanto Produtos/agosto está
+vazio. Nada avisa. Três alertas propostos, **não implementados**:
+
+1. último mês fechado com Shopee diária > 0 **e** Produtos Shopee = 0;
+2. `MAX(ref_month)` de Produtos Shopee atrás do último mês fechado;
+3. cobertura de marcas na competência abaixo da allowlist esperada.
+
+Os três devem aparecer **tanto no health check quanto em
+`torre_qualidade_dados`**. Fonte manual pode ser não crítica para o exit code,
+mas **nunca silenciosa para o usuário**.
+
+### Ação exigida do operador antes da próxima carga
+
+Hoje a triagem **aborta em `barbours`**: dois arquivos fora do padrão convivem em
+`shopee/barbours/`. As outras 4 marcas passam (21, 116, 18 e 17 arquivos
+aceitos). Para destravar, retirar da pasta da marca:
+
+- `Order.all.order_creation_date.20260805_20260805 (1).xlsx`
+- `Order.toship.order_creation_date.20260805_20260805.xlsx`
+
+Retirar significa mover para fora de `shopee/{marca}/` (nunca apagar: os exports
+são evidência). Se a janela 05/08 de `barbours` precisar existir, baixar de novo
+o export como `Order.all.order_creation_date.20260805_20260805.xlsx`.
+
+## Contrato de qualidade do escopo — Produtos Shopee (Gate SH-API-2D)
+
+### O problema que este contrato resolve
+
+Até este gate, a tela de Produtos, a API e o MCP apresentavam **qualquer**
+competência com o mesmo peso. Três exemplos medidos em 08/09/2026:
+
+| Competência | O que a Torre mostrava | O que era verdade |
+|---|---|---|
+| 2026-07 | R$ 5.512.907,44, sem ressalva | GMV concluído cobria **75,4%** do que a diária já registrava |
+| 2026-08 | tela vazia | **188 linhas carregadas**, todas com GMV = 0 (nenhum pedido concluído) |
+| 2026-09 | tela vazia | fonte **nunca extraída** para o mês; diária já tem até 07/09 |
+
+Nos três casos o número exibido estava aritmeticamente correto. O que faltava
+era o **regime**: número certo com regime errado é número errado para quem
+decide.
+
+### Os seis eixos (ortogonais, nunca um rótulo único)
+
+Um único estado mutuamente exclusivo esconde o eixo que importa — foi
+exatamente o defeito F5 do Gate SH-API-2B-R2, em que `maturation_pending`
+encobria `load_stale`. O contrato tem seis eixos independentes:
+
+| Eixo | Pergunta | Fonte durável (Neon) |
+|---|---|---|
+| `source_status` | alguma carga bem-sucedida cobriu esta competência? | `audit.source_sync_run` |
+| `load_status` | há linhas, e são mais novas que o último dia já medido pela diária? | `fact_shopee_product_monthly` × `fact_marketplace_daily_performance` |
+| `eligibility_status` | quantas linhas sobrevivem ao filtro de exibição (`gmv > 0`)? | `fact_shopee_product_monthly` |
+| `maturity_status` | o GMV concluído já alcançou o regime dos meses fechados? | razão contra a diária vs. piso medido |
+| `coverage_status` | todas as marcas que venderam na diária aparecem no mart? | as duas fatos |
+| `loaded_at` | quando o mart foi publicado neste escopo? | `MAX(ingested_at)`, com fallback no último sync |
+
+`definitive` é um **atalho de renderização** derivado dos eixos, nunca a fonte
+da verdade. `definitive = false` não significa "número errado": significa "não
+use como definitivo sem ler os eixos".
+
+### O piso de maturidade — medido, não arbitrado
+
+`maturity_share = SUM(gmv) de Produtos ÷ SUM(gmv) da diária Shopee`, no mesmo
+par marca × competência. Medido em 30 pares (2026-01..2026-08, Neon,
+somente leitura):
+
+| Regime | Faixa observada |
+|---|---|
+| meses fechados e maduros (jan–jun, 5 marcas) | **1,0047 a 1,1234** |
+| competência em maturação (julho, 5 marcas) | **0,6643 a 0,7700** |
+| competência sem conclusão (agosto, 5 marcas) | **0,0000** |
+
+Qualquer piso dentro de **(0,7700 ; 1,0047)** separa os regimes sem erro. O
+default é `0,99` — dentro dessa faixa, e coincidente com o piso medido de forma
+independente na `silver` do Data Mart (0,9987) no Gate SH-API-2C-R3.
+
+Duas propriedades que precisam ficar registradas:
+
+1. **A razão é > 1 nos meses fechados, e isso é o normal.** O subtotal do item
+   (Produtos) é maior que o GMV líquido do shop stats (diária) — são
+   definições diferentes de propósito. O piso mede **regime**, jamais
+   equivalência entre as duas fontes.
+2. **O backfill proposto não quebra o piso.** Ápice maio cairia de 1,0782 para
+   1,0361 e Barbours maio de 1,0758 para 1,0266 — os dois seguem acima de 1,00
+   e classificados como maduros.
+
+O piso vive em `Settings.shopee_maturity_floor` (`apps/api/app/config.py`),
+sobrescrevível por variável de ambiente **sem deploy de código**. Nenhuma
+superfície (API, tela, MCP) grava o valor literal nem qualquer lista de meses:
+trocar o mês muda a medição, nunca o código. Há teste que reprova a
+reintrodução de `0.99`, `2026-07` ou `2026-08` no service e nas telas.
+
+### Estado atual medido (08/09/2026)
+
+| Competência | fonte | carga | elegibilidade | maturidade | cobertura | share | definitivo |
+|---|---|---|---|---|---|---|---|
+| 2026-01..06 | coberta | atual | parcial | **madura** | ok | 1,0249–1,1098 | **sim** |
+| 2026-07 | coberta | atual | parcial | **imatura** | ok | 0,7540 | não |
+| 2026-08 | coberta | **defasada** | **nenhuma elegível** | **imatura** | ok | 0,0000 | não |
+| 2026-09 | **não coberta** | **ausente** | nenhuma elegível | não medida | **abaixo** | N/D | não |
+
+Elegibilidade "parcial" nos meses fechados é esperada e apenas informativa
+(9 a 30 linhas com GMV = 0 em ~470–500), não bloqueia `definitive`.
+
+O mart de Produtos foi publicado pela última vez em **05/08/2026** — 34 dias
+antes desta medição. Esse número agora aparece na tela e no MCP: "está certo" e
+"está certo e foi publicado há 34 dias" levam a decisões diferentes.
+
+### Onde o selo aparece
+
+| Superfície | Campo |
+|---|---|
+| `GET /produtos/shopee` | `quality`, `refreshed_at` |
+| `GET /produtos/shopee/summary` | `quality`, `refreshed_at` (antes **nunca** preenchido) |
+| `GET /quality` | `produtos_shopee_quality` |
+| Tela de Produtos, aba Shopee | faixa **antes** dos cards A/B/C/D |
+| Tela de Qualidade | bloco próprio, fora do bloco de métricas operacionais |
+| `torre_produtos_prioritarios` | `data.scope_quality` + `limitations` + aviso no resumo textual |
+| `torre_qualidade_dados` | `data.produtos_shopee_scope` + `limitations` + aviso no resumo textual |
+
+Três regras de honestidade valem em todas elas:
+
+- **Ausência de selo não é aprovação.** `null` significa "não medido" (canal
+  que ainda não publica o selo; janela que não é uma competência única) e a UI
+  não renderiza nada — em vez de renderizar um "ok" que ninguém apurou.
+- **Todos os avisos aparecem**, não só o mais grave, senão a carga defasada
+  volta a se esconder atrás da imaturidade.
+- **Status desconhecido é recusado no schema**, na API e no MCP. Um estado novo
+  quebra o consumidor em vez de ser repassado ao modelo, que trataria
+  `provavelmente_ok` como aprovação.
+
+As limitações do MCP são **derivadas dos avisos do backend**, nunca de uma
+lista local — `src/server/oracle/limitations.ts` proíbe explicitamente duplicar
+o que a resposta já informa, para o conector não contradizer o mart quando a
+medição mudar.
+
+### Por que não houve migration
+
+As três tabelas necessárias já existiam no Neon. Em particular
+`audit.source_sync_run` já é escrita por `pipelines/sync_produtos.py`
+(`source_name = 'shopee_product_monthly'`, `marketplace_id = 3`) com
+`source_min_date`/`source_max_date`, e é ela que responde `source_status`.
+
+Uma armadilha medida durante a implementação: a carga é **incremental**, então
+a última execução cobre apenas a janela que ela atualizou (07..08/2026).
+Perguntar "a última execução cobriu?" reprovava **todos** os meses fechados
+como fonte ausente. A pergunta correta é histórica — `bool_or(...)` sobre todas
+as execuções bem-sucedidas.
+
+`audit.data_quality_check` (viva: 1.029 linhas, 14 checks distintos) é o
+destino natural caso se queira **histórico** do selo no futuro; também não
+exige migration. Nada foi escrito nesta rodada.
+
+### Proposta de backfill — restrita a Ápice/maio e Barbours/maio
+
+**Não executada nesta rodada.** Escopo derivado da deduplicação fail-closed do
+Gate SH-API-2A-R e reconciliado no Gate SH-API-2C-R3 (candidato × local ×
+Neon, com paridade perfeita entre os dois destinos):
+
+| Escopo | Δ GMV | Δ chaves | Efeito no share |
+|---|---|---|---|
+| `apice` / 2026-05 | −23.292,43 | 0 | 1,0782 → 1,0361 (segue madura) |
+| `barbours` / 2026-05 | −80.987,03 | 0 | 1,0758 → 1,0266 (segue madura) |
+
+Ambos são **reduções**: removem duplicação de snapshot sobreposto, não
+acrescentam venda. Nenhuma chave nova, nenhuma chave removida.
+
+Deliberadamente **fora** desta proposta:
+
+- `kokeshi` / 2026-08 (+3.311,08, +39 chaves) e `rituaria` / 2026-07
+  (+45.279,42, +2 chaves): as duas competências estão medidas como
+  **materialmente imaturas**. Backfillar um mês que ainda vai mudar sozinho
+  troca um número provisório por outro número provisório e consome a janela de
+  revisão sem reduzir risco.
+- Qualquer competência a partir de 2026-08: `load_status = load_stale` ou
+  `load_absent`. O passo correto ali é **re-executar a carga**, não corrigir
+  retroativamente uma carga que nem chegou.
+
+Pré-condições para executar, todas já implementadas e nenhuma satisfeita hoje:
+
+1. `apps/api/etl/backfill_shopee_products.py --dry-run --target local` e
+   `--target neon`, ambos com identidade comprovada e reconciliação idêntica.
+2. Os dois XLSX fora do padrão em `shopee/barbours/` retirados da pasta (a
+   triagem fail-closed aborta a marca inteira enquanto eles estiverem lá).
+3. Credencial de escrita explícita — `--apply` segue **bloqueado** em `main()`.
+
+Depois do backfill, o selo é a verificação: os dois escopos devem permanecer
+`mature` e `definitive`. Se qualquer um cair abaixo do piso, o backfill não é
+o que se esperava e deve ser revertido pela tabela de backup durável.
+
 ## Histórico de decisões
 
 | Data | Decisão |
@@ -743,3 +1256,5 @@ ocorrência real até aqui).
 | 2026-07-23 | Gate C2 (rodada manual observada de `full_daily` via `run_task.ps1`, pós-sync regional): sete steps `SUCCESS` (`daily_ml`, `daily_tiktok`, `gold_regional_incremental`, `sync_region_if_needed` `NO_OP`/paridade 37.282 linhas, `sync_produtos_ml`, `sync_produtos_tiktok`, `health_check`), `STATUS GERAL: OK`, `ok_critical=true` (`ok=false` só pelos alertas Shopee não-críticos já conhecidos), zero steps Shopee, lock liberado, logs preservados. Timeout externo (124) da ferramenta de acompanhamento não é o exit code do pipeline — o subprocesso terminou sozinho e liberou o lock normalmente. Dois avisos não-bloqueantes registrados como dívida: `UnicodeEncodeError` do logger (cp1252 vs. "→") em `daily_ml`/`daily_tiktok`, e o aviso já conhecido do TikTok sobre pedidos com `order_status` nulo/fora da allowlist (regras já reconciliadas no Gate R2). Task Scheduler `mktplace_full_daily` reconfirmado **Disabled** nesta rodada via `schtasks`/`Get-ScheduledTask` (não presumido); horário 06:00 segue como hipótese não confirmada. GO apenas para revisar/preparar a ativação do Scheduler — não autoriza habilitar a task. Nenhuma execução real de `full_daily`/`health_check`/`shopee_manual_refresh`, correção de código, alteração do Scheduler ou commit/push neste gate. |
 | 2026-07-24 | Gate C3 (primeira execução agendada real do `full_daily`, task habilitada no Gate anterior): disparo automático pelo Task Scheduler às 06:00:01, `LastTaskResult=0`, sem nenhuma intervenção manual. Sete steps `SUCCESS` (`daily_ml`, `daily_tiktok`, `gold_regional_incremental`, `sync_region_if_needed` — desta vez com sync real 37.282→37.851 linhas e backup, não `NO_OP` como no Gate C2 —, `sync_produtos_ml`, `sync_produtos_tiktok`, `health_check`), `STATUS GERAL: OK`, `ok_critical=true`, zero steps Shopee, lock liberado, logs preservados. Mesmos dois avisos não-bloqueantes do Gate C2 (`UnicodeEncodeError` do logger, aviso TikTok de status nulo/fora da allowlist), sem nova investigação. Task Scheduler segue **Habilitado**, próxima execução 25/07 06:00. Ciclo de fechamento operacional e automação **encerrado** com este gate. Nenhuma alteração de código/task/horário/credenciais/`.env` nesta rodada — só observação read-only. |
 | 2026-07-16 | Gate C1 (retry do Gate B6.1c revela achado operacional, não bug): execução real de `full_daily` (~18min) falhou por `daily_shopee_orders` estourar seu timeout de 900s num arquivo Shopee grande — causa raiz era rodar ingestão **manual** (Shopee só muda com upload de export novo) todo dia dentro de um pipeline de cadência **automática diária**, não um timeout pequeno demais. `orchestrate.py::PIPELINES` separado em dois pipelines independentes: `full_daily` (ml/tiktok/regional/produtos ml-tiktok/health_check, orçamento 7200s→3600s) e `shopee_manual_refresh` (novo, manual, nunca agendado: Shopee orders/stats/ads críticos + produtos Shopee + Bug 8 + health_check, orçamento 3780s). `health_check.py::EXPECTED_SOURCES` — `shopee_daily`/`shopee-stats_daily`/`shopee-ads_daily` (execução) marcados `critical=False`, mesmo padrão do Gate B4 para `shopee_product_monthly`, evitando que `ok_critical` reprove só por Shopee ter saído da cadência diária. `run_task.ps1` ganha `TaskKey "shopee_manual_refresh"` reaproveitando o mesmo `Invoke-ResolvedTask`/lock/timeout/log, com lock separado. `schedule_plan.py` só atualiza comentários de orçamento (7200s→3600s); `EXTERNAL_LOCK_TIMEOUT_SECONDS`/`TASK_SCHEDULER_EXECUTION_TIME_LIMIT_SECONDS` (9000s/9600s) e a lógica de criação/ativação **não foram alterados**; `PROPOSED_SCHEDULE` continua com 1 única tarefa (`full_daily`), nenhuma tarefa Shopee é proposta. Scheduler segue **Disabled** até o Gate C3 (depois do Gate C2 — rodar `full_daily` sem Shopee via `run_task.ps1`, observado estável). 1.427→1.451 testes pytest (+24) e 13→19 testes Pester em `run_task.tests.ps1` (+6), todos passando. Nenhuma execução real de `full_daily`/`shopee_manual_refresh`/banco/scheduler/commit/deploy neste gate. |
+| 2026-09-08 | Gate SH-API-2A-R (implementação fail-closed da deduplicação de Produtos Shopee): `apps/api/etl/load_shopee_products.py` ganha `ID do pedido` no `COL_MAP` (obrigatório), `_classify_order_file`/`_plan_brand_snapshots`/`_select_current_snapshot` e a regra de snapshot vigente por pedido aplicada ANTES do filtro `status == "Concluído"`. Quatro formatos de nome aceitos; instante de export, `Order.toship`, sufixo `(1)`, parte ausente/duplicada e janela ambígua **abortam a carga inteira** antes de qualquer leitura de arquivo ou conexão. Ordenação `(janela_fim, janela_início)` DESC, validada contra `max(file_id)` do Data Mart em 13.720/13.720 pedidos sobrepostos. mtime/ctime/ordem do glob nunca usados. 38 testes novos (incl. contraprova dos R$ 971.946,52 que a ordenação por nome removeria); suíte `etl/tests` 135→174 passando, zero falhas; `apps/api/tests` com as MESMAS 45 falhas pré-existentes por node ID (zero novas). Deduplicação **não aplicada em produção**: nenhum backfill, nenhuma escrita em banco, nenhuma migration, nenhum commit/push. Sidecar fora de escopo; `units_sold` da fato diária pendente. Triagem aborta hoje em `barbours` por 2 arquivos fora do padrão — ação do operador documentada na seção nova. |
+| 2026-09-08 | Gate SH-API-2D (contrato de qualidade de escopo dos Produtos Shopee): seis eixos ortogonais (`source_status`, `load_status`, `eligibility_status`, `maturity_status`, `coverage_status`, `loaded_at`) derivados de tres tabelas que **ja existiam** no Neon — `marts.fact_shopee_product_monthly`, `marts.fact_marketplace_daily_performance` e `audit.source_sync_run`. **Sem migration, sem escrita em banco, sem backfill.** Piso de maturidade MEDIDO em 30 pares marca x competencia (maduros 1,0047–1,1234; imaturos 0,6643–0,7700; sem conclusao 0,0000) e exposto como parametro `Settings.shopee_maturity_floor` (default 0,99), nunca literal em API/tela/MCP — ha teste que reprova a reintroducao de `0.99`/`2026-07`/`2026-08`. Propagado a 5 superficies: `/produtos/shopee`, `/produtos/shopee/summary` (que **nunca** preenchia `refreshed_at`), `/quality`, tela de Produtos (faixa antes dos cards A/B/C/D), tela de Qualidade, `torre_produtos_prioritarios` e `torre_qualidade_dados` (campo estruturado + limitacoes derivadas do backend + aviso no resumo textual). Tres achados corrigidos pela validacao contra o Neon real: cobertura da fonte e HISTORICA (a ultima execucao cobre so' 07..08/2026 e reprovava todos os meses fechados); sem carga a maturidade e' `maturity_unknown`, nunca `materially_immature`; `source_unknown` nao bloqueia um mes com maturidade medida. Validacao: 38 testes pytest novos + 19 `node --test` novos; `apps/api/tests` **1095 passed / 0 failed** com `.env` carregado (as 43 falhas do worktree sao ausencia de `.env`, node IDs identicos a baseline em 9a81cc1); `etl/tests` 257 passed; web 1478/1478; `tsc --noEmit` com **zero** erro novo. Backfill proposto e NAO executado, restrito a `apice`/2026-05 (−23.292,43) e `barbours`/2026-05 (−80.987,03); `kokeshi`/2026-08 e `rituaria`/2026-07 excluidos por imaturidade medida. |

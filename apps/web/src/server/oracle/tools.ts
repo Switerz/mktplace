@@ -15,6 +15,7 @@ import {
 import { toolError } from "./errors.ts";
 import {
   ALWAYS_APPLICABLE, ML_COMMISSION_MISSING, ML_PRODUCTS_CUMULATIVE,
+  scopeWarningToLimitation,
   REGIONAL_COVERAGE, TIKTOK_CANCEL_NOT_MEASURED, TIKTOK_SETTLEMENT_DIRECTIONAL,
   type Limitation,
 } from "./limitations.ts";
@@ -83,6 +84,84 @@ function envelopeSchema<T extends z.ZodType>(data: T) {
     }),
     data,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Gate SH-API-2D — selo de qualidade do escopo, exposto ao modelo.
+//
+// Por que o selo tem de sair no `data` e nao so em `limitations`: o modelo usa
+// `limitations` como ressalva textual, mas decide com os CAMPOS. Sem
+// `definitive`/`maturity_status` estruturados, um mes em maturacao seria
+// resumido como "vendeu R$ X" com uma nota de rodape que o modelo pode nao
+// repassar. Com o campo, "posso tratar como definitivo?" tem resposta binaria.
+// ---------------------------------------------------------------------------
+
+const scopeQualityOutSchema = z.object({
+  ref_month: z.string(),
+  brand: z.string().nullable(),
+  source_status: z.string(),
+  load_status: z.string(),
+  eligibility_status: z.string(),
+  maturity_status: z.string(),
+  coverage_status: z.string(),
+  /** Ultima publicacao do mart neste escopo. */
+  loaded_at: z.string().nullable(),
+  load_age_days: z.number().nullable(),
+  /** false = NAO apresentar como numero fechado. */
+  definitive: z.boolean(),
+  /** Participacao do GMV concluido sobre a referencia. null = nao medido. */
+  completed_share: z.number().nullable(),
+  maturity_floor: z.number().nullable(),
+  rows_present: z.number().nullable(),
+  eligible_rows: z.number().nullable(),
+});
+
+type ScopeQualityOut = z.infer<typeof scopeQualityOutSchema>;
+
+/**
+ * Forma do selo como ele chega do upstream (ja validado por
+ * `scopeQualityContract`). Declarado com nome proprio porque DOIS pontos o
+ * consomem — a tool de produtos e a de qualidade — e ambos precisam de
+ * `warnings`, que e a fonte das limitacoes.
+ */
+type UpstreamScopeQuality = {
+  ref_month: string;
+  brand?: string | null;
+  source_status: string;
+  load_status: string;
+  eligibility_status: string;
+  maturity_status: string;
+  coverage_status: string;
+  loaded_at?: string | null;
+  load_age_days?: number | null;
+  definitive: boolean;
+  measured: {
+    completed_share?: number | null;
+    maturity_floor?: number | null;
+    rows_present?: number | null;
+    eligible_rows?: number | null;
+  };
+  warnings?: Array<{ code: string; severity: string; message: string }> | null;
+};
+
+/** Achata o selo do upstream no formato de saida. */
+function toScopeQualityOut(q: UpstreamScopeQuality): ScopeQualityOut {
+  return {
+    ref_month: q.ref_month,
+    brand: q.brand ?? null,
+    source_status: q.source_status,
+    load_status: q.load_status,
+    eligibility_status: q.eligibility_status,
+    maturity_status: q.maturity_status,
+    coverage_status: q.coverage_status,
+    loaded_at: q.loaded_at ?? null,
+    load_age_days: numOrNull(q.load_age_days),
+    definitive: q.definitive,
+    completed_share: numOrNull(q.measured.completed_share),
+    maturity_floor: numOrNull(q.measured.maturity_floor),
+    rows_present: numOrNull(q.measured.rows_present),
+    eligible_rows: numOrNull(q.measured.eligible_rows),
+  };
 }
 
 const limitationSchema = z.object({
@@ -462,6 +541,11 @@ const produtosOutput = envelopeSchema(
         action_signal: z.string().nullable(),
       }),
     ),
+    /**
+     * `null` = este canal ainda nao publica selo de escopo (ML, TikTok).
+     * Ausencia de selo NAO significa escopo confiavel.
+     */
+    scope_quality: scopeQualityOutSchema.nullable(),
     limitations: z.array(limitationSchema),
   }),
 );
@@ -508,6 +592,7 @@ export const produtosTool: OracleTool = {
     }>;
     let totalCount: number;
     let refreshedAt: string | null;
+    let scopeQuality: ScopeQualityOut | null = null;
     const limitations: Limitation[] = [];
 
     if (input.canal === "ml") {
@@ -570,6 +655,19 @@ export const produtosTool: OracleTool = {
       });
       totalCount = payload.total;
       refreshedAt = payload.refreshed_at ?? null;
+
+      // Gate SH-API-2D. As limitacoes vem do BACKEND (que mede), nunca de uma
+      // lista local: `limitations.ts` proibe explicitamente duplicar aqui algo
+      // que a resposta ja informa, justamente para o conector nao contradizer
+      // o mart quando a medicao mudar.
+      const q = (payload as { quality?: unknown }).quality;
+      if (q) {
+        const selo = q as UpstreamScopeQuality;
+        scopeQuality = toScopeQualityOut(selo);
+        for (const w of selo.warnings ?? []) {
+          limitations.push(scopeWarningToLimitation(w, input.canal));
+        }
+      }
     }
 
     const env = buildEnvelope({
@@ -593,12 +691,21 @@ export const produtosTool: OracleTool = {
         temporal_scope: input.canal === "ml" ? ("cumulativo" as const) : ("mensal" as const),
         ref_month: refMonth,
         items,
+        scope_quality: scopeQuality,
         limitations,
       },
     });
 
     const scopeLabel = refMonth ? ` — competencia ${refMonth}` : " — base cumulativa";
-    return ok(`Produtos prioritarios: ${input.canal}${scopeLabel} (top ${input.limite}).`, env);
+    // O resumo textual TEM de carregar o veredito: e a unica parte da resposta
+    // que sempre chega ao usuario final, mesmo quando o modelo nao le o `data`.
+    const seloLabel = scopeQuality && !scopeQuality.definitive
+      ? " ATENCAO: competencia NAO definitiva — ver data.scope_quality antes de usar."
+      : "";
+    return ok(
+      `Produtos prioritarios: ${input.canal}${scopeLabel} (top ${input.limite}).${seloLabel}`,
+      env,
+    );
   },
 };
 
@@ -628,6 +735,14 @@ const qualidadeOutput = envelopeSchema(
         note: z.string().nullable(),
       }),
     ),
+    /**
+     * Gate SH-API-2D — confiabilidade do MART DE PRODUTOS Shopee na
+     * competencia dos indicadores. Fonte DISTINTA da diaria que alimenta
+     * `quality_indicators`, com ciclo de maturacao proprio: uma competencia
+     * pode ter cancelamento otimo na diaria e produtos ainda em maturacao.
+     * `null` = nao medido (nunca "esta tudo bem").
+     */
+    produtos_shopee_scope: scopeQualityOutSchema.nullable(),
     limitations: z.array(limitationSchema),
   }),
 );
@@ -640,6 +755,7 @@ export const qualidadeTool: OracleTool = {
       "Use ANTES de confiar em qualquer numero, e para responder 'os dados estao atualizados?', 'ate quando temos dado?', 'posso confiar nisso?', ou quando o usuario questionar uma divergencia.",
       "ATENCAO: esta e' uma resposta COMPOSTA de duas janelas distintas — o frescor olha o mes corrente (freshness.checked_period) e os indicadores de qualidade olham o mes fechado anterior (quality_indicators_checked_period). Por isso meta.period e' nulo: nao existe uma janela unica.",
       "Para o TikTok Shop o cancelamento NAO e' mensurado — vem como 0 e e' marcado com measured=false. Nunca leia isso como 0% de cancelamento.",
+      "Inclui `data.produtos_shopee_scope`: a confiabilidade do mart de PRODUTOS da Shopee na competencia dos indicadores — fonte distinta da diaria. Se `definitive` vier false, os numeros por produto daquele mes ainda vao mudar.",
       "NAO devolve GMV, ranking nem receita: e' uma tool de metadados.",
     ].join(" "),
     inputSchema: qualidadeInput,
@@ -716,6 +832,20 @@ export const qualidadeTool: OracleTool = {
     const limitations: Limitation[] = [...ALWAYS_APPLICABLE];
     if (!tiktokMeasured) limitations.push(TIKTOK_CANCEL_NOT_MEASURED);
 
+    // Gate SH-API-2D. Esta tool existe para ser chamada ANTES de confiar em
+    // qualquer numero — entao o regime do mart de Produtos precisa estar aqui,
+    // e nao so na tool de produtos. Sem isso era possivel perguntar "posso
+    // confiar nos dados?", receber 0,3% de cancelamento, e concluir que sim
+    // sobre uma competencia cujo mart de Produtos cobria ~73% do GMV.
+    const seloProdutosSh = quality.produtos_shopee_quality ?? null;
+    let produtosShopeeScope: ScopeQualityOut | null = null;
+    if (seloProdutosSh) {
+      produtosShopeeScope = toScopeQualityOut(seloProdutosSh);
+      for (const w of seloProdutosSh.warnings ?? []) {
+        limitations.push(scopeWarningToLimitation(w, "shopee"));
+      }
+    }
+
     const env = buildEnvelope({
       // Resposta COMPOSTA: nao existe janela unica, entao nao afirmamos uma.
       period: null,
@@ -749,12 +879,18 @@ export const qualidadeTool: OracleTool = {
         },
         quality_indicators_checked_period: asWindow(indicatorsPeriod),
         quality_indicators: indicators,
+        produtos_shopee_scope: produtosShopeeScope,
         limitations,
       },
     });
 
+    // O resumo textual precisa dizer que ha ressalva: e a parte da resposta
+    // que sempre chega ao usuario, mesmo quando o modelo nao le o `data`.
+    const seloLabel = produtosShopeeScope && !produtosShopeeScope.definitive
+      ? ` ATENCAO: o mart de Produtos da Shopee NAO e definitivo em ${produtosShopeeScope.ref_month} — ver data.produtos_shopee_scope.`
+      : "";
     return ok(
-      `Frescor (${freshnessPeriod.start} a ${freshnessPeriod.end}) e indicadores de qualidade (${indicatorsPeriod.start} a ${indicatorsPeriod.end}).`,
+      `Frescor (${freshnessPeriod.start} a ${freshnessPeriod.end}) e indicadores de qualidade (${indicatorsPeriod.start} a ${indicatorsPeriod.end}).${seloLabel}`,
       env,
     );
   },
