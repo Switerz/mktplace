@@ -3207,9 +3207,14 @@ Três guardrails legítimos mudaram, e nenhum foi afrouxado sem substituto:
 
 ---
 
-## 27. UE8-I1 — descontos do pedido TikTok: implementado, NADA executado
+## 27. UE8-I1 — descontos do pedido TikTok: implementação
 
-### 27.1 Estado
+> ⚠️ **ESTADO SUPERADO PELO §28 (UE8-I2, 08/09/2026).** O checkpoint abaixo está
+> preservado como registro histórico do que era verdade no fechamento do UE8-I1.
+> **Hoje a migration `013` ESTÁ aplicada, a tabela EXISTE no Neon e a primeira
+> carga full FOI executada.** Leia o §28 para o estado corrente.
+
+### 27.1 Estado no fechamento do UE8-I1 — histórico, superado
 
 **IMPLEMENTADO, VALIDADO LOCALMENTE E VERSIONADO NESTE COMMIT.**
 
@@ -3220,6 +3225,8 @@ Três guardrails legítimos mudaram, e nenhum foi afrouxado sem substituto:
 - **UE8-I2 não começou**: piloto, backfill e medição de duração são daquele gate;
 - **nenhum timeout de step e nenhuma alteração de Scheduler** foram definidos;
 - API, frontend e `full_daily` intocados.
+
+*(Fim do checkpoint histórico. Correção factual no §28.)*
 
 ### 27.2 O que a tabela é, e o que não é
 
@@ -3317,5 +3324,152 @@ antes da segunda execução, que passou.
 | `apps/api/tests/test_s3_migrations.py` | pino do head 012 → 013 |
 | `docs/UNIT_ECONOMICS_SOURCE_CONTRACTS.md` | esta seção |
 
-**UE8-I2 não iniciado.** A tabela não existe no Neon; nenhuma carga foi feita;
-nenhum timeout de step ou alteração de Scheduler foi definido.
+**UE8-I2 não iniciado** *(afirmação do fechamento do UE8-I1, hoje superada —
+o UE8-I2 foi executado em 08/09/2026; ver §28)*. A tabela não existe no Neon;
+nenhuma carga foi feita; nenhum timeout de step ou alteração de Scheduler
+foi definido.
+
+
+---
+
+## 28. UE8-I2 — primeira carga full dos descontos TikTok
+
+### 28.1 Estado — CORRIGE O §27
+
+**EXECUTADO COM SUCESSO em 08/09/2026.**
+
+| Afirmação do §27 | Fato hoje |
+|---|---|
+| "migration `013` escrita, **NÃO aplicada**" | **APLICADA** — entrou junto no upgrade `012 → 014` feito pela frente PMA |
+| "a tabela **não existe no Neon**" | **EXISTE**: `marts.fact_tiktok_order_discounts_daily`; head Alembic **aplicado no Neon** = `014` |
+| "sync **nunca executado com `--apply`**" | **EXECUTADO UMA VEZ**, `--mode auto --apply`, `run_id 4e604d94b0e54ea0bf70fc6c1c8bfb9f` |
+| "**zero carga**" | **2.081 linhas publicadas** |
+
+Schema conferido contra a migration antes da carga: 14 colunas, `PRIMARY KEY
+(ref_date, brand)`, **15 CHECKs** nome por nome, dois índices, zero coluna ou
+índice inesperado.
+
+### 28.2 A carga
+
+`auto` resolveu para **`full`** — provado executando o predicado real
+`decide_effective_mode` contra a auditoria, não inferido do destino vazio:
+zero execução `success` da fonte canônica e zero `_full success` no mês BRT.
+
+| | |
+|---|---|
+| Modo solicitado → efetivo | `auto` → **`full`** |
+| Janela | **2025-06-04 → 2026-09-07** (D−1) |
+| Linhas publicadas | **2.081** = chaves `(ref_date, brand)` distintas |
+| Dias · marcas | 456 dias · **5 marcas**, nenhuma ausente |
+| `rows_extracted` | 2.764.560 pedidos deduplicados |
+| Duração | **346,8 s** no CLI; 340,8 s medidos na auditoria |
+| `publicacao` | **`commit_confirmado`** — não indeterminado |
+| Exit code | 0 |
+
+### 28.3 Fotografia coerente sobre fonte mutável
+
+`raw.tiktok_shop_orders` é **snapshot mutável e continuou mudando durante toda a
+operação**: em 90 minutos, 8.684 linhas foram reescritas, 7.497 delas de pedidos
+criados até 07/09, em rajadas a cada ~8-10 minutos, alcançando o histórico e não
+apenas a cauda.
+
+Isso **não invalida a carga**, e a razão é estrutural, não estatística:
+
+- `read_source` executa `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` e
+  `SET TRANSACTION READ ONLY` **antes** da consulta, e faz **uma única** consulta
+  agregada;
+- as linhas são **materializadas** numa lista Python dentro dessa transação;
+- `publish_in_transaction` recebe **esse mesmo objeto**; a staging temporária é
+  preenchida **só** a partir dele, por `VALUES`, nunca por `SELECT` da fonte;
+- `DELETE` e `INSERT` usam a **mesma janela** do snapshot;
+- **`EXCEPT` bidirecional** staging × destino roda **antes do commit**; qualquer
+  linha sobrando de qualquer lado desfaz a transação inteira;
+- **nenhuma segunda leitura da fonte** participa da publicação — a sessão do
+  Data Mart é encerrada logo após a leitura.
+
+Essas nove propriedades foram verificadas por AST e por texto no arquivo
+versionado, com comentários e docstrings removidos: **46 invariantes, todas
+aprovadas.** Prosa não conta como prova.
+
+**A deriva posterior da fonte não é erro e não pede recarga.** Medida ~1 minuto
+depois do commit: +18 pedidos comerciais, +32 cancelados, +R$ 1.696,95 de GMV,
+com o total deduplicado e as 2.081 chaves **inalterados**. É maturação de status
+em lugar — pedidos saindo de `UNPAID`/`ON_HOLD`. **A fonte não ficou estável, e
+não se afirma que tenha ficado.**
+
+### 28.4 Componentes — separados, nunca somados
+
+Os dois descontos têm **financiadores diferentes** (§27.2) e permanecem em
+colunas distintas. Não existe `total_discount`.
+
+| Componente | Valor publicado |
+|---|---|
+| `official_gmv` | 109.022.394,18 |
+| `full_product_value` | 182.770.336,17 |
+| `seller_discount_signed` | **−67.299.329,91** |
+| `platform_subsidy_amount` | **+10.995.181,23** |
+| `cancelled_seller_discount_signed` | **−18.926.931,38** |
+| `cancelled_platform_subsidy_amount` | **+3.409.695,75** |
+| `commercial_orders` | 2.146.344 |
+| `cancelled_orders` | 612.877 |
+
+**Estes valores não são fechamento financeiro.** Não são receita econômica, não
+são caixa, não são margem e não medem maturidade financeira. São o pedido no
+momento da fotografia.
+
+### 28.5 Reconciliação
+
+**Autoritativa** — `EXCEPT` bidirecional staging × destino dentro da transação:
+**(0, 0)**. Não houvesse zerado, a carga teria sido desfeita.
+
+No destino: 2.081 linhas, 2.081 chaves distintas, **zero PK duplicada**, um
+**único `source_run_id`** (prova de que toda a tabela vem da mesma fotografia),
+`ref_date` de 2025-06-04 a 2026-09-07, **zero linha ≥ 08/09**, zero nulo em
+coluna `NOT NULL`, zero `NaN`, zero violação de sinal, 15 CHECKs ativos,
+`n_tup_ins = 2081` com `n_tup_upd = 0` e `n_tup_del = 0`.
+
+Os oito agregados do destino batem **ao centavo** com a fotografia diagnóstica
+do preflight — as duas leituras caíram na mesma pausa entre rajadas do escritor.
+Isso é corroboração, não a garantia: a garantia é o `EXCEPT`.
+
+### 28.6 Auditoria
+
+| `sync_run_id` | fonte | status | `rows_extracted` | `rows_loaded` |
+|---|---|---|---|---|
+| 283 | `tiktok_order_discounts_daily` | **success** | 2.764.560 | 2.081 |
+| 284 | `tiktok_order_discounts_daily_full` | **success** | 2.764.560 | 2.081 |
+
+Mesmo `started_at` e `finished_at` nas duas: é a **mesma execução factual**.
+`error_message` nulo, zero linha `running` desta fonte, **nenhuma linha
+`_backfill`** — o modo efetivo foi `full`. Nenhuma auditoria antiga foi apagada
+ou reescrita: o módulo não tem `DELETE` nem `TRUNCATE` contra `audit.*`.
+
+Sete checks em `audit.data_quality_check`: `ftodd_fechamento_populacoes`,
+`ftodd_dominio_status`, `ftodd_monetario_obrigatorio`, `ftodd_sinais` e
+`ftodd_teto_d_menos_1` **pass**; `ftodd_cobertura_marcas_do_escopo` **pass**;
+`ftodd_cobertura_chaves_observadas` **warn**, 199 `failed_rows`.
+
+### 28.7 Limitações
+
+1. **199 chaves `(data, marca)` da grade observada não têm linha** — WARN, não
+   FAIL, e **não foram convertidas em zero**. A grade esperada é o produto
+   cartesiano `(dias observados) × (marcas observadas)`, derivada da própria
+   fotografia. **Não existe manifesto por data × marca**, e
+   `audit.source_sync_run` guarda janela, não grade: ausência de vendas e buraco
+   de ingestão continuam indistinguíveis. `coverage_status = complete` significa
+   "grade observada completa", nunca "ingestão completa".
+2. **A fonte é mutável e segue mudando.** Cada execução publica a fotografia
+   daquele instante. Recarga integral da janela, nunca UPSERT.
+3. **Não é fechamento financeiro** (§28.4).
+4. Os dois relógios de procedência (`source_max_updated_at`,
+   `raw_max_updated_at`) são técnicos, naive, sem rótulo BRT, e **nenhum prova
+   maturidade**.
+5. **Nenhum timeout de step definido e nenhuma alteração de Scheduler.** A carga
+   foi manual; `full_daily` está intocado.
+
+### 28.8 O que este gate NÃO fez
+
+- **UE8-I3 não iniciado.** Os descontos **não estão expostos em `/canais`**, e
+  nenhuma alteração foi feita em API, contrato ou UI.
+- Nada foi declarado sobre **retorno de afiliados**.
+- Zero backfill, zero incremental, zero segunda tentativa, zero deploy.

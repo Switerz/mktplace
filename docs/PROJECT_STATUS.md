@@ -2305,6 +2305,47 @@ continua inexistente e nao comprovado.**
 
 Registro completo em [SERVING_AIRFLOW_PLAN.md §35](SERVING_AIRFLOW_PLAN.md).
 
+## Gate UE8 — descontos do pedido TikTok
+
+**08/09/2026 — `UE8-I2 CONCLUÍDO`: primeira carga full publicada em produção.**
+
+`marts.fact_tiktok_order_discounts_daily` **existe e está carregada**. A
+migration `013` **está aplicada** — entrou junto no upgrade `012 → 014` feito
+pela frente PMA. Registros anteriores que diziam "migration não aplicada" ou
+"a tabela não existe no Neon" estão **superados**.
+
+Uma única execução de `--mode auto --apply`, sem retry: `auto` resolveu para
+**`full`** (provado pelo predicado real `decide_effective_mode`, não inferido do
+destino vazio), janela **2025-06-04 → 2026-09-07** (D−1), **2.081 linhas** em
+456 dias × 5 marcas, 2.764.560 pedidos deduplicados lidos, **346,8 s**,
+`publicacao = commit_confirmado`, exit 0. `EXCEPT` bidirecional staging ×
+destino **(0, 0)**; zero PK duplicada; **zero linha de 08/09**; um único
+`source_run_id`. Auditoria: duas linhas `success` (canônica e `_full`) da mesma
+execução, zero `running`, sete checks de qualidade — seis `pass` e um `warn`.
+
+**A fonte é mutável e continuou mudando durante a operação** — 8.684 linhas
+reescritas em 90 minutos, alcançando o histórico. A publicação é válida porque
+`read_source` lê **uma única fotografia** em `REPEATABLE READ` + `READ ONLY`,
+materializa as linhas e publica **só a partir delas**, com `EXCEPT` bidirecional
+antes do commit; nenhuma segunda leitura da fonte participa. Nove propriedades
+estruturais verificadas no código versionado por AST — 46 invariantes, todas
+aprovadas. **Não se afirma que a fonte ficou estável**: a deriva medida logo
+após o commit (+18 comerciais, +32 cancelados, chaves inalteradas) é maturação
+de status, não erro, e não justifica recarga.
+
+Os **dois descontos permanecem separados** — financiadores diferentes, e não
+existe `total_discount`. **Estes valores não são receita econômica, caixa nem
+margem.**
+
+Limitações abertas: **199 chaves `(data, marca)`** da grade observada sem linha
+(WARN, não convertidas em zero — não existe manifesto por data × marca);
+nenhum timeout de step definido; **`full_daily` e Scheduler intocados** — a
+carga foi manual.
+
+**UE8-I3 NÃO INICIADO.** Os descontos **não estão expostos na aba Canais**;
+API, contrato e UI seguem sem alteração. Detalhes em
+[UNIT_ECONOMICS_SOURCE_CONTRACTS.md](UNIT_ECONOMICS_SOURCE_CONTRACTS.md) §28.
+
 ## Próximas prioridades
 
 1. **Gate S3 Task 3/3 (operacao controlada), sob autorizacao separada.** A ordem e'
