@@ -49,34 +49,75 @@ class _Res:
 
 class FakeTrans:
     def __init__(self, conn): self.conn = conn
-    def commit(self): self.conn.eventos.append("trans.commit")
-    def rollback(self): self.conn.eventos.append("trans.rollback")
+
+    def commit(self):
+        self.conn.eventos.append("trans.commit")
+        self.conn._em_transacao = False
+
+    def rollback(self):
+        self.conn.eventos.append("trans.rollback")
+        self.conn._em_transacao = False
 
 
 class FakeConn:
-    """Conexao gravavel falsa. Responde ao preflight e registra tudo."""
+    """Conexao gravavel falsa que MODELA O SQLAlchemy 2.0.
+
+    Gate SH-API-2E3-H1: a versao anterior deste fake tinha `begin()`
+    permissivo — devolvia transacao nova sempre, sem reclamar. Os 43 testes
+    passaram e o runtime falhou SEMPRE, porque no SQLAlchemy 2.0 real:
+
+      - o primeiro `execute()` faz AUTOBEGIN;
+      - `begin()` com transacao ativa levanta `InvalidRequestError`.
+
+    Agora o fake reproduz as duas regras. Um fake mais permissivo que o
+    original nao e' um dublê: e' um teste que mente.
+    """
 
     def __init__(self, *, db="neondb", tem_produtos=1, in_recovery=False,
                  tx_readonly="off", privs=True, ssl=True, lock=True,
-                 backup_confere=True):
+                 backup_confere=True, rollback_falha=False):
         self.cfg = locals()
         self.eventos, self.sqls = [], []
         self.fechada = False
         self.connection = type("C", (), {"info": type("I", (), {"ssl_in_use": ssl})()})()
         self._md5 = 0
+        self._em_transacao = False
+        self._rollback_falha = rollback_falha
         # `count_scope` tem de refletir o que foi REALMENTE inserido: um numero
         # fixo faria a validacao pos-insert de `apply_scoped_replace` reprovar
         # (ou aprovar) por acidente, e o teste mediria o fake, nao o codigo.
         self.inseridas = 0
         self.linhas_backup = 0
 
+    # --- semantica de transacao do SQLAlchemy 2.0 -------------------------
+    def in_transaction(self):
+        return self._em_transacao
+
     def begin(self):
+        if self._em_transacao:
+            # Mesma classe e mesma mensagem do SQLAlchemy real.
+            from sqlalchemy.exc import InvalidRequestError
+            raise InvalidRequestError(
+                "This connection has already initialized a SQLAlchemy "
+                "Transaction() object via begin() or autobegin; can't call "
+                "begin() here unless rollback() or commit() is called first.")
         self.eventos.append("conn.begin")
+        self._em_transacao = True
         return FakeTrans(self)
+
+    def rollback(self):
+        """Rollback no nivel da CONEXAO — e' o que encerra o autobegin."""
+        self.eventos.append("conn.rollback")
+        if self._rollback_falha:
+            raise RuntimeError("rollback do preflight falhou")
+        self._em_transacao = False
 
     def execute(self, stmt, params=None):
         sql = str(stmt)
         self.sqls.append(sql)
+        if not self._em_transacao:
+            self.eventos.append("autobegin")
+            self._em_transacao = True
         c = self.cfg
         if "pg_try_advisory_lock" in sql:
             self.eventos.append("lock.acquire")
@@ -584,3 +625,210 @@ def test_um_unico_ponto_do_modulo_abre_conexao_gravavel():
     # `create_engine` sem readonly so' aparece nessa funcao
     bloco = fonte.split("def _default_writable_engine")[1].split("\ndef ")[0]
     assert "create_engine" in bloco
+
+
+# ---------------------------------------------------------------------------
+# Gate SH-API-2E3-H1 — autobegin do SQLAlchemy 2.0
+# ---------------------------------------------------------------------------
+#
+# Defeito medido no Gate SH-API-2E4: os SELECTs do preflight abrem transacao
+# IMPLICITA (autobegin), e o `begin()` explicito do executor entao levanta
+# `InvalidRequestError`. O apply real morria com exit 2 sem criar backup.
+
+
+def test_o_fake_reproduz_o_autobegin_do_sqlalchemy():
+    """Prova que o duble e ESTRITO. Sem isto, os testes abaixo passariam por
+    permissividade do fake — foi exatamente assim que o defeito escapou."""
+    from sqlalchemy.exc import InvalidRequestError
+    conn = FakeConn()
+    assert conn.in_transaction() is False
+    conn.execute("SELECT 1")
+    assert conn.in_transaction() is True, "execute() deveria fazer autobegin"
+    with pytest.raises(InvalidRequestError):
+        conn.begin()
+    conn.rollback()
+    assert conn.in_transaction() is False
+    conn.begin()
+    assert conn.in_transaction() is True
+
+
+def test_preflight_deixa_transacao_ativa_e_o_helper_a_encerra():
+    conn = FakeConn()
+    conn.execute("SELECT pg_is_in_recovery()")
+    assert conn.in_transaction() is True
+    assert bf.close_preflight_transaction(conn) is True
+    assert conn.in_transaction() is False
+    assert conn.eventos.count("conn.rollback") == 1
+
+
+def test_sem_transacao_ativa_o_helper_nao_faz_rollback_desnecessario():
+    conn = FakeConn()
+    assert conn.in_transaction() is False
+    assert bf.close_preflight_transaction(conn) is False
+    assert "conn.rollback" not in conn.eventos
+
+
+def test_helper_levanta_se_a_transacao_persistir_depois_do_rollback():
+    class Teimosa:
+        def in_transaction(self): return True
+        def rollback(self): pass
+
+    with pytest.raises(bf.PreflightTransactionError) as ei:
+        bf.close_preflight_transaction(Teimosa())
+    assert "nada foi criado nem mutado" in str(ei.value)
+
+
+def test_sequencia_final_preflight_lock_rollback_begin(raiz, monkeypatch, capsys):
+    """A ordem que o gate exige, provada pelo main() real."""
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    espiao = Espiao(conn)
+    monkeypatch.setattr(bf, "_default_writable_engine", espiao)
+
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_OK
+    e = conn.eventos
+    assert e[0] == "autobegin"
+    assert e.index("lock.acquire") > e.index("autobegin")
+    assert e.index("conn.rollback") > e.index("lock.acquire")
+    assert e.index("conn.begin") > e.index("conn.rollback")
+    assert e.index("conn.begin") < e.index("backup.create")
+    # o lock de SESSAO sobreviveu ao rollback: nao foi reobtido
+    assert e.count("lock.acquire") == 1
+    assert e.index("lock.release") > e.index("mutacao.insert")
+    # duas transacoes EXPLICITAS: backup e publicacao
+    assert e.count("conn.begin") == 2
+    assert e.count("trans.commit") == 2
+    assert "transacao implicita do preflight: encerrada" in capsys.readouterr().err
+
+
+def test_executor_consegue_backup_e_publicacao_depois_do_rollback(raiz, monkeypatch):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_OK
+    for etapa in ("backup.create", "mutacao.delete", "mutacao.insert"):
+        assert conn.eventos.count(etapa) == 1, etapa
+
+
+def test_o_executor_nunca_reaproveita_transacao_implicita():
+    """O executor abre transacao EXPLICITA. Se encontrar uma implicita aberta,
+    tem de levantar — nunca herda-la silenciosamente."""
+    from sqlalchemy.exc import InvalidRequestError
+    conn = FakeConn()
+    conn.execute("SELECT 1")
+    ex = bf.ScopedReplaceExecutor(conn, target="neon")
+    with pytest.raises(InvalidRequestError):
+        ex.begin()
+
+
+def test_falha_no_rollback_nao_chama_o_executor_e_libera_tudo(raiz, monkeypatch, capsys):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn(rollback_falha=True)
+    espiao = Espiao(conn)
+    monkeypatch.setattr(bf, "_default_writable_engine", espiao)
+    chamou = []
+    monkeypatch.setattr(bf, "apply_scoped_replace",
+                        lambda st, *, executor: chamou.append(1))
+
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_VALIDATION_REFUSED
+    assert chamou == [], "executor foi chamado apesar da falha no rollback"
+    for etapa in ("backup.create", "mutacao.delete", "mutacao.insert"):
+        assert etapa not in conn.eventos
+    assert "lock.release" in conn.eventos
+    assert conn.fechada and espiao.engines[0].descartada
+    err = capsys.readouterr().err
+    assert "APPLY RECUSADO" in err
+    assert "postgresql://" not in err and "gravador" not in err
+
+
+def test_falha_no_rollback_nao_gera_retry(raiz, monkeypatch):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn(rollback_falha=True)
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    bf.main(_args("neon", raiz))
+    assert conn.eventos.count("conn.rollback") == 1
+    assert conn.eventos.count("lock.acquire") == 1
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+def test_interrupcao_apos_o_rollback_continua_propagando_com_cleanup(
+        raiz, monkeypatch, exc):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+
+    def interrompe(st, *, executor):
+        raise exc()
+
+    monkeypatch.setattr(bf, "apply_scoped_replace", interrompe)
+    with pytest.raises(exc):
+        bf.main(_args("neon", raiz))
+    assert "conn.rollback" in conn.eventos
+    assert "lock.release" in conn.eventos
+    assert conn.fechada
+
+
+# ---------------------------------------------------------------------------
+# Prova com Connection REAL do SQLAlchemy (engine descartavel, zero dependencia)
+# ---------------------------------------------------------------------------
+
+def _engine_descartavel():
+    """SQLite em memoria: `Connection` REAL do SQLAlchemy, mesma semantica de
+    autobegin, sem servidor e sem dependencia nova (sqlite3 e stdlib).
+    Nenhuma conexao gravavel a local ou Neon e aberta."""
+    from sqlalchemy import create_engine
+    return create_engine("sqlite+pysqlite:///:memory:")
+
+
+def test_autobegin_e_real_no_sqlalchemy_nao_so_no_fake():
+    from sqlalchemy import text
+    from sqlalchemy.exc import InvalidRequestError
+    eng = _engine_descartavel()
+    try:
+        with eng.connect() as conn:
+            assert conn.in_transaction() is False
+            conn.execute(text("SELECT 1"))
+            assert conn.in_transaction() is True
+            with pytest.raises(InvalidRequestError):
+                conn.begin()
+    finally:
+        eng.dispose()
+
+
+def test_helper_resolve_o_autobegin_numa_connection_real():
+    from sqlalchemy import text
+    eng = _engine_descartavel()
+    try:
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            assert conn.in_transaction() is True
+            assert bf.close_preflight_transaction(conn) is True
+            assert conn.in_transaction() is False
+            trans = conn.begin()
+            assert conn.in_transaction() is True
+            trans.rollback()
+    finally:
+        eng.dispose()
+
+
+def test_helper_e_idempotente_numa_connection_real():
+    eng = _engine_descartavel()
+    try:
+        with eng.connect() as conn:
+            assert bf.close_preflight_transaction(conn) is False
+            assert bf.close_preflight_transaction(conn) is False
+    finally:
+        eng.dispose()
+
+
+def test_o_fix_nao_mexeu_em_formula_allowlist_deltas_nem_maturidade():
+    from decimal import Decimal
+    assert bf.AUTHORIZED_SCOPES == (("apice", "2026-05"), ("barbours", "2026-05"))
+    assert bf.EXPECTED_GMV_DELTA[("apice", "2026-05")] == Decimal("-23292.43")
+    assert bf.EXPECTED_GMV_DELTA[("barbours", "2026-05")] == Decimal("-80987.03")
+    assert bf.EXPECTED_TOTAL_GMV_DELTA == Decimal("-104279.46")
+    assert bf.MATURATION_THRESHOLD_AFTER == Decimal("0.99")
+    assert (bf.EXIT_OK, bf.EXIT_VALIDATION_REFUSED, bf.EXIT_ROLLED_BACK,
+            bf.EXIT_INDETERMINATE, bf.EXIT_USAGE) == (0, 2, 3, 4, 5)
+    assert bf.insert_columns("local") == bf.DATA_COLS
+    assert bf.INGESTED_AT_COL in bf.insert_columns("neon")

@@ -1268,6 +1268,50 @@ bem-sucedidas — e é por isso que o eixo se chama `source_ever_loaded`.
 destino natural caso se queira **histórico** do selo no futuro; também não
 exige migration. Nada foi escrito.
 
+### Autobegin do SQLAlchemy 2.0 — por que o primeiro `--apply` real falhou
+
+Na primeira execução real (Gate SH-API-2E4) o apply no banco local terminou com
+**exit 2**, `InvalidRequestError`, **sem criar backup e sem escrever nada**.
+
+Causa: no SQLAlchemy 2.0 o primeiro `conn.execute(...)` faz **autobegin**. As
+portas 5–8 do preflight (identidade, primary, SSL, advisory lock) são consultas
+na conexão, então ao fim do preflight a conexão já está em transação. O
+`ScopedReplaceExecutor.begin()` seguinte então levanta:
+
+```
+InvalidRequestError: This connection has already initialized a SQLAlchemy
+Transaction() object via begin() or autobegin
+```
+
+Correção (Gate SH-API-2E3-H1): `close_preflight_transaction(conn)`, chamado
+**depois** de adquirir o advisory lock e **antes** de entregar a conexão ao
+executor. Se `conn.in_transaction()` for verdadeiro, faz `conn.rollback()` e
+confirma que a transação fechou; se persistir, levanta e o apply para em exit 2
+sem criar backup nem mutar.
+
+Duas propriedades sustentam a ordem escolhida:
+
+1. **O advisory lock é de sessão** (`pg_try_advisory_lock`), não de transação.
+   Sobrevive ao rollback, então a janela protegida não se abre em momento
+   nenhum. Fosse `pg_advisory_xact_lock`, este rollback soltaria o lock.
+2. **O preflight só leu.** Não há nada a preservar no rollback.
+
+O executor **não** reaproveita transação implícita: ele continua dono de duas
+transações explícitas e separadas (backup e publicação). Há teste que prova que
+`ScopedReplaceExecutor.begin()` levanta se encontrar uma transação aberta.
+
+**Por que os 43 testes do Gate SH-API-2E3 não pegaram isso:** o `FakeConn`
+tinha `begin()` permissivo — devolvia transação nova sempre, sem reclamar.
+Testes verdes, runtime quebrado em 100% das execuções. É a mesma armadilha do
+caso `cursor_factory` já registrado neste projeto. O fake agora modela o
+SQLAlchemy 2.0: `execute()` faz autobegin e `begin()` com transação ativa
+levanta `InvalidRequestError`. Há ainda prova com `Connection` **real** do
+SQLAlchemy (engine descartável em SQLite de memória — stdlib, sem dependência
+nova e sem abrir conexão gravável a local ou Neon).
+
+Contraprova medida: desligando a chamada do helper, **11 testes falham**,
+incluindo todo o caminho feliz.
+
 ### Proposta de backfill — restrita a Ápice/maio e Barbours/maio
 
 **Não executada.** Escopo derivado da deduplicação fail-closed do Gate
@@ -1487,4 +1531,5 @@ executada mais de uma vez.
 | 2026-09-08 | Gate SH-API-2A-R (implementação fail-closed da deduplicação de Produtos Shopee): `apps/api/etl/load_shopee_products.py` ganha `ID do pedido` no `COL_MAP` (obrigatório), `_classify_order_file`/`_plan_brand_snapshots`/`_select_current_snapshot` e a regra de snapshot vigente por pedido aplicada ANTES do filtro `status == "Concluído"`. Quatro formatos de nome aceitos; instante de export, `Order.toship`, sufixo `(1)`, parte ausente/duplicada e janela ambígua **abortam a carga inteira** antes de qualquer leitura de arquivo ou conexão. Ordenação `(janela_fim, janela_início)` DESC, validada contra `max(file_id)` do Data Mart em 13.720/13.720 pedidos sobrepostos. mtime/ctime/ordem do glob nunca usados. 38 testes novos (incl. contraprova dos R$ 971.946,52 que a ordenação por nome removeria); suíte `etl/tests` 135→174 passando, zero falhas; `apps/api/tests` com as MESMAS 45 falhas pré-existentes por node ID (zero novas). Deduplicação **não aplicada em produção**: nenhum backfill, nenhuma escrita em banco, nenhuma migration, nenhum commit/push. Sidecar fora de escopo; `units_sold` da fato diária pendente. Triagem aborta hoje em `barbours` por 2 arquivos fora do padrão — ação do operador documentada na seção nova. |
 | 2026-09-08 | Gate SH-API-2D (contrato de qualidade de escopo dos Produtos Shopee): seis eixos ortogonais (`source_status`, `load_status`, `eligibility_status`, `maturity_status`, `coverage_status`, `loaded_at`) derivados de tres tabelas que **ja existiam** no Neon — `marts.fact_shopee_product_monthly`, `marts.fact_marketplace_daily_performance` e `audit.source_sync_run`. **Sem migration, sem escrita em banco, sem backfill.** Piso de maturidade MEDIDO em 30 pares marca x competencia (maduros 1,0047–1,1234; imaturos 0,6643–0,7700; sem conclusao 0,0000) e exposto como parametro `Settings.shopee_maturity_floor` (default 0,99), nunca literal em API/tela/MCP — ha teste que reprova a reintroducao de `0.99`/`2026-07`/`2026-08`. Propagado a 5 superficies: `/produtos/shopee`, `/produtos/shopee/summary` (que **nunca** preenchia `refreshed_at`), `/quality`, tela de Produtos (faixa antes dos cards A/B/C/D), tela de Qualidade, `torre_produtos_prioritarios` e `torre_qualidade_dados` (campo estruturado + limitacoes derivadas do backend + aviso no resumo textual). Tres achados corrigidos pela validacao contra o Neon real: cobertura da fonte e HISTORICA (a ultima execucao cobre so' 07..08/2026 e reprovava todos os meses fechados); sem carga a maturidade e' `maturity_unknown`, nunca `materially_immature`; `source_unknown` nao bloqueia um mes com maturidade medida. Validacao: 38 testes pytest novos + 19 `node --test` novos; `apps/api/tests` **1095 passed / 0 failed** com `.env` carregado (as 43 falhas do worktree sao ausencia de `.env`, node IDs identicos a baseline em 9a81cc1); `etl/tests` 257 passed; web 1478/1478; `tsc --noEmit` com **zero** erro novo. Backfill proposto e NAO executado, restrito a `apice`/2026-05 (−23.292,43) e `barbours`/2026-05 (−80.987,03); `kokeshi`/2026-08 e `rituaria`/2026-07 excluidos por imaturidade medida. |
 | 2026-09-08 | Gate SH-API-2D-R/V (correcao semantica, QA e integracao linear): a primeira versao usava nomes que afirmavam mais do que o contrato media. `source_covered` -> **`source_ever_loaded`** (o eixo responde "ja foi carregada alguma vez?", nunca "a fonte esta em dia"); `load_current` -> **`load_present`** ("current" e afirmacao temporal, e o mart publicado em 05/08 aparecia como `load_current` para julho 34 dias depois); `load_stale` -> **`load_behind_daily`** (declara a evidencia medida em vez de um adjetivo temporal). `completed_share` -> **`maturation_index`** e `maturity_floor` -> **`maturation_threshold`**: a razao NAO e percentual de conclusao, share nem completude — numerador (subtotal de item do mart) e denominador (GMV liquido do shop stats) sao populacoes diferentes, valores > 1 sao o regime normal de mes fechado e NUNCA sao truncados. Novo campo obrigatorio `maturation_index_note` acompanha o numero em toda superficie; a faixa da tela nem le o indice diretamente, para nao poder exibi-lo como "%". Entrada impossivel (GMV negativo, NaN) levanta `ScopeQualityInputError` e degrada para `maturity_unknown` com aviso critico `shopee_produtos_indice_invalido` — sem a guarda, `NaN >= limiar` e False e o mes viraria "imaturo", um veredito inventado a partir de lixo. `loaded_at` explicitado como publicacao NO MART, com os dois relogios nomeados por extenso na tela; nenhum titulo usa "atual"/"atualizado"/"em dia" (ha teste que reprova). Os tres `text-[11px]` novos viraram `text-xs` (piso de 12px). Integracao LINEAR: worktree limpa sobre origin/main 6b9bb94 + cherry-pick de a18cea5 sem conflito (22/22 blobs identicos), correcoes em commit separado — sem merge no branch antigo. Zero backfill, zero escrita em banco, zero migration. |
+| 2026-09-09 | Gate SH-API-2E3-H1 (corrige o defeito que impedia o --apply real; NADA executado): no SQLAlchemy 2.0 o primeiro `conn.execute()` faz AUTOBEGIN, entao os SELECTs das portas 5-8 deixavam a conexao em transacao e o `begin()` explicito do executor levantava `InvalidRequestError` — o apply real do Gate SH-API-2E4 morreu com exit 2 sem criar backup e sem escrever nada (fail-closed funcionou). Novo helper `close_preflight_transaction(conn)`, chamado DEPOIS do advisory lock e ANTES de entregar a conexao ao executor: faz rollback se houver transacao implicita e confirma que fechou; se persistir, levanta `PreflightTransactionError` -> exit 2 sanitizado, sem backup e sem mutacao, com lock/conexao/engine liberados no finally. A ordem e deliberada: o advisory lock e de SESSAO e sobrevive ao rollback. O executor NAO reaproveita transacao implicita — segue dono de duas transacoes explicitas (backup e publicacao). Causa da falha escapar aos 43 testes do gate anterior: o `FakeConn` tinha `begin()` permissivo (mesma armadilha do `cursor_factory`); agora modela autobegin e levanta em begin aninhado, com prova adicional numa `Connection` REAL do SQLAlchemy (SQLite de memoria, zero dependencia). Contraprova: desligando o helper, 11 testes falham. 15 testes novos; etl/tests 377 -> 392. Formulas, SQL, allowlist, escopos, deltas, exit codes e maturidade INALTERADOS. Zero --apply, zero conexao gravavel, zero role, zero backup, zero escrita, zero migration, zero dependencia. |
 | 2026-09-08 | Gate SH-API-2E1 (prepara o backfill maduro de maio; NADA executado): `--apply` habilitado TECNICAMENTE e ainda BLOQUEADO na barreira final. Dez portas fail-closed e independentes (allowlist exata, consentimento, credencial dedicada de escrita, destino confirmado, identidade, primary gravavel, SSL no Neon, advisory lock de sessao sem espera, backup commitado, expectativa medida). Allowlist EXATA `apice:2026-05` + `barbours:2026-05` — subconjunto tambem e' recusado, porque metade do par nao fecha a reconciliacao total; `rituaria:2026-07` e `kokeshi:2026-08` recusados COM o motivo medido na mensagem. Backup redesenhado: transacao PROPRIA commitada ANTES da mutacao (antes caia junto com o rollback e nao protegia de nada), colunas explicitas por destino (nunca `SELECT *`, os schemas tem 14 x 15 colunas), nome deterministico validado por regex antes de entrar na DDL, contagem + checksum md5 conferidos contra a origem, retencao de 90 dias. `ingested_at` tratado explicitamente: so' existe no Neon, e' instante de PUBLICACAO (nunca data da fonte), preenchido por NOW() do banco e com trava de regressao que reprova sua presenca em SQL do local. Tres estados parciais nomeados com acao definida, sem encenar atomicidade distribuida; ZERO retry, com teste que conta chamadas. Expectativa medida vira TRAVA: -23.292,43 + -80.987,03 = -104.279,46, zero chave adicionada/removida, maturacao acima de 0,99 — divergencia bloqueia, valores nunca sao forcados. 77 testes novos; etl/tests 257 -> 334. Zero escrita, zero conexao gravavel, zero backup real, zero migration, zero deploy. |

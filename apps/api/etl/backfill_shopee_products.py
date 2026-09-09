@@ -1757,6 +1757,46 @@ QUALITY_ALERT_BLUEPRINT = (
 # ---------------------------------------------------------------------------
 
 
+class PreflightTransactionError(BackfillValidationError):
+    """A transacao implicita do preflight nao pode ser encerrada.
+
+    Sem isso o executor nao consegue abrir a propria transacao, e insistir
+    deixaria o backup e a mutacao dentro de uma transacao que ninguem
+    declarou. Nada e' criado nem mutado."""
+
+
+def close_preflight_transaction(conn) -> bool:
+    """Encerra a transacao IMPLICITA aberta pelos SELECTs de preflight.
+
+    CAUSA (medida no Gate SH-API-2E4): no SQLAlchemy 2.0 o primeiro
+    `conn.execute(...)` faz AUTOBEGIN. As portas 5-8 sao consultas, entao ao
+    fim do preflight a conexao ja esta em transacao — e o
+    `ScopedReplaceExecutor.begin()` seguinte levanta
+    `InvalidRequestError: This connection has already initialized a
+    SQLAlchemy Transaction() object via begin() or autobegin`.
+
+    O rollback e' seguro e deliberado nesta posicao:
+      - o preflight so' LEU; nao ha nada a preservar;
+      - o advisory lock e' de SESSAO (`pg_try_advisory_lock`), nao de
+        transacao, portanto SOBREVIVE ao rollback. Fosse
+        `pg_advisory_xact_lock`, este rollback soltaria o lock e abriria
+        justamente a janela que ele existe para fechar;
+      - o executor continua dono de transacoes EXPLICITAS e separadas para
+        backup e publicacao. Nada aqui reaproveita transacao implicita.
+
+    Devolve True se havia transacao e ela foi encerrada; False se nao havia.
+    Levanta `PreflightTransactionError` se a conexao continuar em transacao."""
+    tinha = bool(conn.in_transaction())
+    if tinha:
+        conn.rollback()
+    if conn.in_transaction():
+        raise PreflightTransactionError(
+            "a transacao implicita do preflight continua aberta depois do "
+            "rollback: o executor nao pode abrir a propria transacao "
+            "(nada foi criado nem mutado)")
+    return tinha
+
+
 def _default_writable_engine(url: str):  # pragma: no cover - requer banco real
     """Engine GRAVAVEL. Isolada numa funcao propria para que os testes possam
     substitui-la e para que exista um unico ponto no modulo capaz de abrir
@@ -1887,6 +1927,14 @@ def run_apply(args, *, env=None, engine_factory=None) -> int:
               else "  porta 7_ssl: nao_aplicavel", file=sys.stderr)
         print("  porta 8_advisory_lock: adquirido", file=sys.stderr)
 
+        # Encerra a transacao IMPLICITA que os SELECTs do preflight abriram
+        # (autobegin do SQLAlchemy 2.0). Depois do lock, de proposito: o lock
+        # e' de sessao e sobrevive ao rollback, entao a janela protegida nao
+        # se abre em momento nenhum.
+        encerrou = close_preflight_transaction(conn)
+        print(f"  transacao implicita do preflight: "
+              f"{'encerrada' if encerrou else 'nao havia'}", file=sys.stderr)
+
         # O lock fica na MESMA sessao que faz backup e mutacao — por isso o
         # executor recebe esta `conn`, e nao uma nova. Um lock numa conexao e
         # a escrita em outra protegeria a coisa errada.
@@ -1897,7 +1945,8 @@ def run_apply(args, *, env=None, engine_factory=None) -> int:
         # excecao PROPAGA. Nunca vira exit code — transformar interrupcao em
         # codigo de saida faria o processo mentir sobre o proprio estado.
         raise
-    except (WriteGuardError, BackfillIdentityError) as e:
+    except (WriteGuardError, BackfillIdentityError,
+            PreflightTransactionError) as e:
         print(f"APPLY RECUSADO: {_sanitize(e)}", file=sys.stderr)
         codigo = EXIT_VALIDATION_REFUSED
     except OPERATIONAL_ERRORS as e:
