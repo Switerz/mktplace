@@ -2506,6 +2506,53 @@ Estão registrados como backlog, mas não são frentes ativas agora:
 
 Fonte: [Backlog técnico](backlog.md).
 
+## Gate SH-API-2E — backfill maduro de Produtos Shopee: `SUCCESS` (09/09/2026)
+
+**Encerrado.** Maio/2026 de Ápice e Barbours foi corrigido em produção, nos dois
+destinos (PostgreSQL local e Neon), removendo a duplicação de snapshot
+sobreposto identificada no Gate SH-API-2A.
+
+| Escopo | Antes | Depois | Delta | Índice (Neon) | Selo |
+|---|---|---|---|---|---|
+| `apice:2026-05` | 120 / 597.211,15 | 120 / **573.918,72** | −23.292,43 | 1,0782 → **1,0361** | `mature` |
+| `barbours:2026-05` | 158 / 1.770.371,67 | 158 / **1.689.384,64** | −80.987,03 | 1,0758 → **1,0266** | `mature` |
+| **total** | | | **−R$ 104.279,46** | | |
+
+Zero chave comercial adicionada ou removida; `EXCEPT` bidirecional zero contra a
+staging e entre local e Neon; invariante fora dos escopos inalterada
+(3.353 linhas / R$ 30.841.404,46). Uma única tentativa por destino, zero retry.
+Três backups duráveis preservados, com checksum conferido antes e depois da
+remoção das roles temporárias; restauração disponível por escopo.
+
+### O que este gate **não** significa
+
+- **Julho e agosto de 2026 continuam provisórios e NÃO foram backfillados.**
+  Ambos permanecem classificados como `materially_immature` e **não
+  definitivos** na API, na tela e em `/quality`. Julho tem 502 linhas /
+  R$ 5.512.907,44 e agosto tem 188 linhas com GMV zero; os dois mantêm carimbo
+  de publicação de 05/08/2026. Corrigi-los exigiria recarregar a fonte, não
+  backfill — um mês que ainda vai mudar sozinho não se corrige retroativamente.
+- **A Shopee continua parcialmente manual.** Produtos Shopee depende de exports
+  XLSX baixados à mão e de uma execução manual do loader; `sync_produtos_shopee`
+  segue `critical=False` no `full_daily` justamente por esse gap. Este gate
+  corrigiu **uma competência de duas marcas**, não a cadeia de ingestão.
+- **A automação futura permanece na frente DAG**, sem data. Nada aqui alterou
+  Scheduler, pipeline ou cadência.
+
+### O que ficou instalado como capacidade
+
+- Contrato de qualidade de escopo com seis eixos ortogonais, servido pela API,
+  pela tela de Produtos, por `/quality` e pelos dois tools do Oráculo — é o que
+  distingue "carregado", "elegível", "maduro" e "publicado em".
+- CLI de backfill com dez portas fail-closed, backup durável commitado antes da
+  mutação, reconciliação contra expectativa medida e zero retry.
+- Três defeitos de plataforma fechados com contraprova: autobegin do SQLAlchemy
+  2.0, `NaN` do pandas gravado como texto, e `USAGE` na sequence não implicado
+  por `INSERT` na tabela.
+
+Detalhes operacionais, checksums e procedimento de restauração em
+[runbook_sync_produtos.md](runbook_sync_produtos.md).
+
 ## Regra de atualização
 
 Este documento deve ser atualizado somente quando ocorrer pelo menos um dos eventos abaixo:
