@@ -666,14 +666,22 @@ def test_apply_com_escopo_nao_autorizado_nao_toca_no_executor(monkeypatch):
 # CLI — dry-run continua read-only e --apply continua bloqueado
 # ---------------------------------------------------------------------------
 
-def test_apply_continua_bloqueado_mesmo_com_tudo_valido(capsys, monkeypatch):
+def test_apply_sem_source_root_e_recusado_sem_abrir_conexao(capsys, monkeypatch):
+    """Gate SH-API-2E3: com o caminho real ligado, a porta que sobra aqui e a
+    da ORIGEM. Nenhuma conexao pode ser aberta — a fabrica de engine e
+    substituida por uma que explode se for chamada."""
     for k, v in ENV_OK.items():
         monkeypatch.setenv(k, v)
+
+    def proibido(url):                                  # pragma: no cover
+        raise AssertionError("abriu conexao gravavel antes dos guardrails")
+
+    monkeypatch.setattr(bf, "_default_writable_engine", proibido)
     code = bf.main(["--apply", "--target", "neon",
                     "--scope", "apice:2026-05", "--scope", "barbours:2026-05"])
     assert code == bf.EXIT_VALIDATION_REFUSED
     err = capsys.readouterr().err
-    assert "APPLY PRODUTIVO BLOQUEADO" in err
+    assert "--source-root explicito" in err
     assert "nada foi escrito" in err
 
 

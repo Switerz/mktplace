@@ -579,8 +579,10 @@ def test_15_modo_e_obrigatorio_e_apply_produtivo_esta_bloqueado(capsys):
     err = capsys.readouterr().err
     assert "PARCIAL recusada" in err and "barbours:2026-05" in err
 
-    # Com a allowlist completa, --target e consentimento, a barreira final
-    # continua bloqueando a escrita.
+    # Gate SH-API-2E3: a barreira incondicional saiu e o caminho real esta
+    # ligado. Com a allowlist completa e consentimento, mas SEM --source-root,
+    # a recusa passa a ser da porta de origem — nunca um "bloqueado" generico,
+    # e continua sem abrir conexao.
     import os as _os
     _os.environ[bf.CONSENT_ENV] = "1"
     _os.environ["BACKFILL_NEON_RW_URL"] = "postgresql://u@remoto.example/db"
@@ -591,7 +593,7 @@ def test_15_modo_e_obrigatorio_e_apply_produtivo_esta_bloqueado(capsys):
         _os.environ.pop(bf.CONSENT_ENV, None)
         _os.environ.pop("BACKFILL_NEON_RW_URL", None)
     assert code2 == bf.EXIT_VALIDATION_REFUSED
-    assert "APPLY PRODUTIVO BLOQUEADO" in capsys.readouterr().err
+    assert "--source-root explicito" in capsys.readouterr().err
 
 
 def test_15c_apply_somente_no_neon_e_recusado_pelo_contrato():

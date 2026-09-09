@@ -1741,6 +1741,207 @@ QUALITY_ALERT_BLUEPRINT = (
 # CLI
 # ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Gate SH-API-2E3 — orquestracao do --apply na CLI
+# ===========================================================================
+#
+# Ate aqui o caminho de escrita existia como BIBLIOTECA coberta por fakes e
+# nunca era alcancado por `main()`: a CLI recusava `--apply` com um `return`
+# incondicional. Este bloco liga as duas pontas sem afrouxar nenhuma porta.
+#
+# Ordem deliberada, do mais barato ao mais caro. Tudo que da para reprovar sem
+# tocar em disco reprova antes de ler arquivo; tudo que da para reprovar sem
+# banco reprova antes de abrir conexao. Uma conexao gravavel so' e' aberta
+# depois que argumentos, allowlist, origem, consentimento e credencial ja
+# passaram.
+# ---------------------------------------------------------------------------
+
+
+def _default_writable_engine(url: str):  # pragma: no cover - requer banco real
+    """Engine GRAVAVEL. Isolada numa funcao propria para que os testes possam
+    substitui-la e para que exista um unico ponto no modulo capaz de abrir
+    conexao de escrita — auditavel por leitura."""
+    from sqlalchemy import create_engine
+    return create_engine(url)
+
+
+#: Excecoes cujas mensagens foram ESCRITAS para nao vazar nada (nunca contem
+#: DSN, host, usuario, senha, SQL nem parametros). Só estas sao impressas na
+#: integra; qualquer outra e' reduzida ao nome da classe.
+SAFE_TO_PRINT = (
+    ScopeNotAuthorizedError, WriteGuardError, ExpectationMismatchError,
+    BackfillIdentityError, BackfillUsageError, BackfillValidationError,
+)
+
+
+def _sanitize(e: BaseException) -> str:
+    """Texto seguro para stderr.
+
+    Uma excecao do driver carrega o SQL e os parametros — e os parametros do
+    INSERT sao linhas do mart. Imprimir `str(e)` de qualquer excecao seria um
+    vazamento silencioso, entao o default e' o NOME DA CLASSE e nada mais."""
+    if isinstance(e, SAFE_TO_PRINT):
+        return str(e)
+    return f"{type(e).__name__} (detalhe omitido para nao vazar dado/credencial)"
+
+
+def run_apply(args, *, env=None, engine_factory=None) -> int:
+    """Executa o backfill num UNICO destino. Nunca nos dois.
+
+    Cada chamada trata `--target local` OU `--target neon`. Nao existe comando
+    que atualize os dois bancos: sao transacoes independentes, o estado parcial
+    e' possivel e nomeado, e esconder isso atras de um comando unico venderia
+    uma atomicidade que nao existe."""
+    env = os.environ if env is None else env
+    factory = engine_factory or _default_writable_engine
+
+    # -- FASE 1: argumentos, allowlist, origem e credencial. Zero I/O gravavel.
+    try:
+        # `parse_scopes` deduplica em silencio (contrato dele, usado tambem
+        # pelos dry-runs). Numa ESCRITA, `--scope` repetido e' invocacao
+        # ambigua: o operador digitou algo que nao queria, e deduplicar
+        # esconderia isso. A checagem e feita no argumento CRU, antes do parse,
+        # sem alterar o contrato de `parse_scopes`.
+        crus = [s.strip() for s in (args.scope or [])]
+        if len(crus) != len(set(crus)):
+            repetidos = sorted({s for s in crus if crus.count(s) > 1})
+            raise ScopeNotAuthorizedError(
+                f"--scope repetido na linha de comando: {', '.join(repetidos)}. "
+                f"Uma escrita nao aceita invocacao ambigua (nada foi escrito)")
+        scopes = parse_scopes(args.scope) if args.scope else []
+        assert_scopes_authorized(scopes)                       # porta 1
+
+        if args.target is None:
+            raise WriteGuardError(
+                "porta 4: --apply exige --target local|neon explicito "
+                "(o destino nunca e' inferido; nada foi escrito)")
+        if not args.source_root:
+            # O default (`loader.SHOPEE_ROOT`) e' a pasta de trabalho, onde
+            # arquivo novo aparece sem aviso. Uma escrita tem de declarar de
+            # ONDE veio o dado; herdar a pasta padrao torna a origem implicita.
+            raise WriteGuardError(
+                "--apply exige --source-root explicito: a origem do dado nao "
+                "pode ser herdada da pasta padrao (nada foi escrito)")
+        root = resolve_source_root(args.source_root)
+
+        laudo = assert_write_preconditions(                    # portas 2, 3, 4
+            scopes=scopes, target=args.target, conn=None, env=env)
+        url = resolve_write_url(args.target, env=env)
+    # ORDEM DE CAPTURA IMPORTA: `ScopeNotAuthorizedError` e
+    # `BackfillIdentityError` herdam de `BackfillUsageError`, e
+    # `WriteGuardError`/`ExpectationMismatchError` de `BackfillValidationError`.
+    # Se `BackfillUsageError` viesse primeiro, uma violacao de ALLOWLIST sairia
+    # como erro de uso (5) em vez de recusa de guardrail (2) — o operador leria
+    # "digitei errado" onde a verdade e' "esta operacao nao esta autorizada".
+    except (ScopeNotAuthorizedError, BackfillIdentityError, WriteGuardError,
+            ExpectationMismatchError, BackfillValidationError) as e:
+        print(f"APPLY RECUSADO: {_sanitize(e)}", file=sys.stderr)
+        return EXIT_VALIDATION_REFUSED
+    except BackfillUsageError as e:
+        # Sobra aqui o erro de uso de verdade: --scope malformado, source-root
+        # inexistente, alvo desconhecido.
+        print(f"ERRO DE USO: {_sanitize(e)}", file=sys.stderr)
+        return EXIT_USAGE
+
+    for porta, estado in laudo.items():
+        print(f"  porta {porta}: {estado}", file=sys.stderr)
+
+    # -- FASE 2: staging (arquivos e memoria). Ainda sem banco.
+    try:
+        staging = build_staging(scopes, root)
+        assert_staging_unique(staging)
+        assert_staging_within_scope(staging)
+    except (loader.ShopeeSnapshotError, loader.ShopeeProductInputError) as e:
+        print(f"VALIDACAO RECUSADA (triagem de arquivos): {_sanitize(e)}", file=sys.stderr)
+        return EXIT_VALIDATION_REFUSED
+    except BackfillValidationError as e:
+        print(f"VALIDACAO RECUSADA: {_sanitize(e)}", file=sys.stderr)
+        return EXIT_VALIDATION_REFUSED
+
+    # -- FASE 3: conexao GRAVAVEL. Primeira e unica.
+    #
+    # A ABERTURA fica no seu proprio try: a excecao de conexao do driver
+    # costuma carregar host, usuario e banco na mensagem, e deixa-la propagar
+    # imprimiria um traceback com esses dados. Falha aqui e' problema de
+    # configuracao/ambiente, nao de guardrail -> EXIT_USAGE.
+    try:
+        engine = factory(url)
+        conn = engine.connect()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except OPERATIONAL_ERRORS as e:
+        print(f"ERRO DE CONFIGURACAO: nao foi possivel abrir conexao gravavel "
+              f"com o destino '{args.target}': {_sanitize(e)}", file=sys.stderr)
+        return EXIT_USAGE
+
+    lock_tomado = False
+    try:
+        assert_target_identity(conn, args.target, env=env)     # porta 5
+        assert_writable_primary(conn, args.target)             # porta 6
+        assert_ssl_required(conn, args.target)                 # porta 7
+        acquire_advisory_lock(conn)                            # porta 8
+        lock_tomado = True
+        print("  porta 5_identidade: ok", file=sys.stderr)
+        print("  porta 6_primary: ok", file=sys.stderr)
+        print("  porta 7_ssl: ok" if args.target == TARGET_NEON
+              else "  porta 7_ssl: nao_aplicavel", file=sys.stderr)
+        print("  porta 8_advisory_lock: adquirido", file=sys.stderr)
+
+        # O lock fica na MESMA sessao que faz backup e mutacao — por isso o
+        # executor recebe esta `conn`, e nao uma nova. Um lock numa conexao e
+        # a escrita em outra protegeria a coisa errada.
+        executor = ScopedReplaceExecutor(conn, target=args.target)
+        codigo = apply_scoped_replace(staging, executor=executor)  # portas 9-10
+    except (KeyboardInterrupt, SystemExit):
+        # Ordem de encerramento: o `finally` abaixo libera lock e conexao, e a
+        # excecao PROPAGA. Nunca vira exit code — transformar interrupcao em
+        # codigo de saida faria o processo mentir sobre o proprio estado.
+        raise
+    except (WriteGuardError, BackfillIdentityError) as e:
+        print(f"APPLY RECUSADO: {_sanitize(e)}", file=sys.stderr)
+        codigo = EXIT_VALIDATION_REFUSED
+    except OPERATIONAL_ERRORS as e:
+        # Chega aqui, sobretudo, a falha do BACKUP (porta 9), que propaga de
+        # `apply_scoped_replace` depois de desfazer a propria transacao. Nada
+        # foi mutado: e' recusa de guardrail, nao rollback de mutacao.
+        print(f"APPLY RECUSADO (guardrail de backup ou preflight): "
+              f"{_sanitize(e)}", file=sys.stderr)
+        codigo = EXIT_VALIDATION_REFUSED
+    finally:
+        # Liberacao SEMPRE, inclusive em interrupcao. O lock e' de sessao: se a
+        # conexao fechar sem liberar, o Postgres solta sozinho, mas depender
+        # disso deixaria a janela aberta enquanto o pool nao recicla.
+        if lock_tomado:
+            try:
+                release_advisory_lock(conn)
+            except OPERATIONAL_ERRORS:
+                print("  aviso: falha ao liberar o advisory lock; a sessao sera "
+                      "encerrada e o Postgres o libera no fim dela",
+                      file=sys.stderr)
+        try:
+            conn.close()
+        except OPERATIONAL_ERRORS:
+            pass
+        try:
+            engine.dispose()
+        except (AttributeError, *OPERATIONAL_ERRORS):
+            pass
+
+    # ZERO RETRY: qualquer codigo diferente de 0 encerra aqui. Nao ha segunda
+    # tentativa em nenhuma hipotese — o caso indeterminado e' justamente aquele
+    # em que repetir poderia duplicar o efeito.
+    rotulo = {
+        EXIT_OK: "APPLY CONCLUIDO e commitado",
+        EXIT_ROLLED_BACK: "APPLY revertido: rollback CONFIRMADO, nada mudou",
+        EXIT_INDETERMINATE: ("APPLY INDETERMINADO: o commit pode ou nao ter "
+                             "sido aplicado. NAO repita. Inspecione o destino "
+                             "contra a tabela de backup (contagem e checksum)"),
+        EXIT_VALIDATION_REFUSED: "APPLY RECUSADO: nada foi escrito",
+    }.get(codigo, f"APPLY terminou com codigo {codigo}")
+    print(f"{rotulo} (destino: {args.target}; sem retry)", file=sys.stderr)
+    return codigo
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m etl.backfill_shopee_products",
@@ -1771,39 +1972,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.mode == "apply":
-        # As portas que NAO precisam de banco sao avaliadas de verdade, para
-        # que um escopo errado receba a recusa ESPECIFICA em vez de um
-        # "bloqueado" generico. Nenhuma conexao e' aberta aqui: o objetivo e'
-        # tornar os guardrails observaveis sem escrever nada.
-        try:
-            # Lista vazia vai direto para a porta 1, que tem a mensagem certa
-            # ("execucao SEM escopo"), em vez do erro de uso generico.
-            scopes_pedidos = parse_scopes(args.scope) if args.scope else []
-        except BackfillUsageError as e:
-            print(f"ERRO DE USO: {e}", file=sys.stderr)
-            return EXIT_USAGE
-        try:
-            assert_scopes_authorized(scopes_pedidos)
-            if args.target is None:
-                raise WriteGuardError(
-                    "porta 4: --apply exige --target local|neon explicito "
-                    "(o destino nunca e' inferido; nada foi escrito)")
-            laudo = assert_write_preconditions(
-                scopes=scopes_pedidos, target=args.target, conn=None)
-        except (ScopeNotAuthorizedError, WriteGuardError,
-                ExpectationMismatchError, BackfillValidationError) as e:
-            print(f"APPLY RECUSADO: {e}", file=sys.stderr)
-            return EXIT_VALIDATION_REFUSED
-
-        for porta, estado in laudo.items():
-            print(f"  porta {porta}: {estado}", file=sys.stderr)
-        print("APPLY PRODUTIVO BLOQUEADO: as portas offline passaram, mas a "
-              "execucao nao foi habilitada neste gate. As portas 5-8 (identidade, "
-              "primary, SSL, advisory lock) exigem conexao e NAO foram avaliadas; "
-              "as portas 9-10 (backup commitado, expectativa medida) dependem da "
-              "execucao. Nenhuma conexao gravavel foi aberta e nada foi escrito.",
-              file=sys.stderr)
-        return EXIT_VALIDATION_REFUSED
+        # Gate SH-API-2E3: o caminho real. `run_apply` roda as dez portas na
+        # ordem, abre UMA conexao gravavel so' depois que as offline passaram,
+        # e trata um unico destino por chamada.
+        return run_apply(args)
 
     try:
         scopes = parse_scopes(args.scope)
