@@ -176,9 +176,10 @@ class FakeConn:
     """Conexao falsa que responde as consultas de preflight."""
 
     def __init__(self, *, in_recovery=False, tx_readonly="off", privs=True,
-                 ssl=True, lock=True, db="neondb", tem_produtos=1, tem_serving=1):
+                 ssl=True, lock=True, db="neondb", tem_produtos=1, tem_serving=1,
+                 seq_usage=True):
         self.cfg = dict(in_recovery=in_recovery, tx_readonly=tx_readonly,
-                        privs=privs, lock=lock, db=db,
+                        privs=privs, lock=lock, db=db, seq_usage=seq_usage,
                         tem_produtos=tem_produtos, tem_serving=tem_serving)
         self.connection = type("C", (), {"info": type("I", (), {"ssl_in_use": ssl})()})()
         self.sqls = []
@@ -191,6 +192,10 @@ class FakeConn:
             return _Escalar(cfg["lock"])
         if "pg_advisory_unlock" in sql:
             return _Escalar(True)
+        if "pg_get_serial_sequence" in sql:
+            return _Mapping(FakeRow(seq="marts.fact_shopee_product_monthly_id_seq"))
+        if "has_sequence_privilege" in sql:
+            return _Mapping(FakeRow(ok=cfg["seq_usage"]))
         if "pg_is_in_recovery" in sql:
             return _Mapping(FakeRow(in_recovery=cfg["in_recovery"],
                                     tx_readonly=cfg["tx_readonly"],

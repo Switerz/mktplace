@@ -75,7 +75,7 @@ class FakeConn:
 
     def __init__(self, *, db="neondb", tem_produtos=1, in_recovery=False,
                  tx_readonly="off", privs=True, ssl=True, lock=True,
-                 backup_confere=True, rollback_falha=False):
+                 backup_confere=True, rollback_falha=False, seq_usage=True):
         self.cfg = locals()
         self.eventos, self.sqls = [], []
         self.fechada = False
@@ -83,6 +83,9 @@ class FakeConn:
         self._md5 = 0
         self._em_transacao = False
         self._rollback_falha = rollback_falha
+        #: Parametros REAIS entregues ao driver no INSERT — e sobre eles que os
+        #: testes de normalizacao asseguram, nao sobre a staging.
+        self.insert_params = None
         # `count_scope` tem de refletir o que foi REALMENTE inserido: um numero
         # fixo faria a validacao pos-insert de `apply_scoped_replace` reprovar
         # (ou aprovar) por acidente, e o teste mediria o fake, nao o codigo.
@@ -128,6 +131,13 @@ class FakeConn:
         if "current_database" in sql:
             return _Res(linha={"db": c["db"], "tem_produtos": c["tem_produtos"],
                                "tem_serving": 1})
+        if "pg_get_serial_sequence" in sql:
+            # A tabela real tem `id` com DEFAULT nextval(...): o fake tem de
+            # dizer que existe sequence, senao a porta 6b vira "nao_aplicavel"
+            # e o teste passaria mascarando a ausencia de privilegio.
+            return _Res(linha={"seq": "marts.fact_shopee_product_monthly_id_seq"})
+        if "has_sequence_privilege" in sql:
+            return _Res(linha={"ok": c["seq_usage"]})
         if "pg_is_in_recovery" in sql:
             return _Res(linha={"in_recovery": c["in_recovery"],
                                "tx_readonly": c["tx_readonly"],
@@ -146,6 +156,7 @@ class FakeConn:
             return _Res()
         if sql.strip().upper().startswith("INSERT"):
             self.eventos.append("mutacao.insert")
+            self.insert_params = params
             self.inseridas = len(params) if isinstance(params, list) else 1
             return _Res()
         if sql.strip().upper().startswith("SELECT COUNT"):
@@ -832,3 +843,220 @@ def test_o_fix_nao_mexeu_em_formula_allowlist_deltas_nem_maturidade():
             bf.EXIT_INDETERMINATE, bf.EXIT_USAGE) == (0, 2, 3, 4, 5)
     assert bf.insert_columns("local") == bf.DATA_COLS
     assert bf.INGESTED_AT_COL in bf.insert_columns("neon")
+
+
+# ---------------------------------------------------------------------------
+# Gate SH-API-2E3-H2 — normalizacao de ausentes e privilegio da sequence
+# ---------------------------------------------------------------------------
+#
+# Dois defeitos medidos no apply real (Gate SH-API-2E4-R):
+#   1. o NaN do pandas nao vira NULL: o psycopg2 o adapta para 'NaN'::float e o
+#      Postgres ACEITA isso num varchar, gravando a STRING "NaN";
+#   2. INSERT na tabela nao implica USAGE na sequence do `id`, e o INSERT
+#      falhava DEPOIS do backup commitado e do DELETE executado.
+
+
+def _staging_com_ausentes():
+    """Staging com a MESMA forma da real: NaN em texto e em numerico."""
+    import numpy as np
+    linhas = []
+    for i, marca in enumerate(("apice", "barbours")):
+        base = {c: 1 for c in bf.DATA_COLS}
+        base["gmv"] = 1.0            # float: a coluna recebe inf no teste
+        base.update(brand=marca, ref_month="2026-05", sku_ref=f"S{i}",
+                    sku_ref_key=f"K{i}", product_name=f"P{i}",
+                    variation_name=float("nan"),          # ausente em VARCHAR
+                    avg_price=np.float64("nan"),          # ausente em NUMERIC
+                    units_sold=0, completed_orders=0)     # zeros preservados
+        linhas.append(base)
+    return pd.DataFrame(linhas)
+
+
+def test_parametros_do_insert_chegam_sem_nan_ao_driver(raiz, monkeypatch):
+    """A prova e' sobre o que o DRIVER recebe, nao sobre a staging."""
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    monkeypatch.setattr(bf, "build_staging",
+                        lambda scopes, root: bf.Staging(rows=_staging_com_ausentes(),
+                                                        scopes=scopes))
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_OK
+
+    params = conn.insert_params
+    assert isinstance(params, list) and len(params) == 2
+    for reg in params:
+        assert reg["variation_name"] is None, "NaN de texto nao virou None"
+        assert reg["avg_price"] is None, "NaN numerico nao virou None"
+        for k, v in reg.items():
+            assert v != "NaN", f"{k} chegou como a string 'NaN'"
+            assert not (isinstance(v, float) and v != v), f"{k} ainda e NaN"
+        # zeros e strings continuam intactos
+        assert reg["units_sold"] == 0 and reg["completed_orders"] == 0
+        assert isinstance(reg["brand"], str) and reg["brand"]
+
+
+def test_normalizacao_ocorre_ANTES_do_driver_no_insert_rows():
+    """Teste estrutural: `insert_rows` normaliza e valida antes do execute."""
+    import inspect
+    fonte = inspect.getsource(bf.ScopedReplaceExecutor.insert_rows)
+    i_norm = fonte.index("normalize_records")
+    i_val = fonte.index("assert_bind_params_clean")
+    i_exec = fonte.index("self.conn.execute")
+    assert i_norm < i_val < i_exec, "ordem normalizar -> validar -> executar quebrada"
+
+
+@pytest.mark.parametrize("entrada", [
+    None, float("nan"), "np.float64-nan", "pd.NaT", "pd.NA", "Decimal-NaN",
+])
+def test_marcadores_de_ausencia_viram_none(entrada):
+    import numpy as np
+    from decimal import Decimal
+    mapa = {"np.float64-nan": np.float64("nan"), "pd.NaT": pd.NaT,
+            "pd.NA": pd.NA, "Decimal-NaN": Decimal("NaN")}
+    v = mapa.get(entrada, entrada)
+    assert bf.normalize_missing(v) is None
+
+
+@pytest.mark.parametrize("rotulo", ["zero_int", "zero_float", "false",
+                                    "string_vazia", "string_nan", "decimal",
+                                    "timestamp", "numpy_int"])
+def test_valores_validos_sao_preservados(rotulo):
+    import numpy as np
+    from decimal import Decimal
+    mapa = {"zero_int": 0, "zero_float": 0.0, "false": False, "string_vazia": "",
+            "string_nan": "NaN", "decimal": Decimal("12.34"),
+            "timestamp": pd.Timestamp("2026-05-01"), "numpy_int": np.int64(7)}
+    v = mapa[rotulo]
+    saida = bf.normalize_missing(v)
+    assert saida is not None
+    assert saida == v and type(saida) is type(v)
+
+
+@pytest.mark.parametrize("rotulo", ["inf", "-inf", "numpy_inf", "decimal_inf"])
+def test_infinitos_sao_recusados_nunca_convertidos(rotulo):
+    import numpy as np
+    from decimal import Decimal
+    mapa = {"inf": float("inf"), "-inf": float("-inf"),
+            "numpy_inf": np.float64("inf"), "decimal_inf": Decimal("Infinity")}
+    with pytest.raises(bf.NonFiniteValueError):
+        bf.normalize_missing(mapa[rotulo])
+
+
+def test_infinito_e_recusado_ANTES_de_delete_e_insert(raiz, monkeypatch):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    df = _staging_com_ausentes()
+    df.loc[0, "gmv"] = float("inf")
+    monkeypatch.setattr(bf, "build_staging",
+                        lambda scopes, root: bf.Staging(rows=df, scopes=scopes))
+    codigo = bf.main(_args("neon", raiz))
+    assert codigo in (bf.EXIT_ROLLED_BACK, bf.EXIT_VALIDATION_REFUSED)
+    assert "mutacao.insert" not in conn.eventos
+
+
+def test_a_trava_reprova_marcador_nao_normalizado():
+    with pytest.raises(bf.BackfillValidationError) as ei:
+        bf.assert_bind_params_clean([{"variation_name": float("nan")}])
+    assert "nada foi escrito" in str(ei.value)
+
+
+def test_a_trava_aceita_none_de_verdade():
+    bf.assert_bind_params_clean([{"variation_name": None, "gmv": 0, "b": False}])
+
+
+def test_normalizacao_nao_usa_pd_isna_indiscriminado():
+    """`pd.isna` sobre lista/dict devolve VETOR e quebra num `if`. O modulo
+    protege escalares antes de chamar."""
+    for container in ([1, 2], (1, 2), {"a": 1}, {1, 2}):
+        assert bf.normalize_missing(container) is container
+
+
+# --- porta 6b: USAGE na sequence -------------------------------------------
+
+def test_sem_usage_na_sequence_recusa_sem_backup_nem_mutacao(raiz, monkeypatch, capsys):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn(seq_usage=False)
+    espiao = Espiao(conn)
+    monkeypatch.setattr(bf, "_default_writable_engine", espiao)
+
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_VALIDATION_REFUSED
+    for etapa in ("backup.create", "mutacao.delete", "mutacao.insert"):
+        assert etapa not in conn.eventos, f"{etapa} ocorreu sem USAGE na sequence"
+    # A porta 6b vem ANTES da 8: sem USAGE, o lock nem chega a ser tomado —
+    # nao ha o que liberar, e a recusa e mais barata. A conexao, sim, fecha.
+    assert "lock.acquire" not in conn.eventos
+    assert "lock.release" not in conn.eventos
+    assert conn.fechada and espiao.engines[0].descartada
+    err = capsys.readouterr().err
+    assert "USAGE na sequence" in err
+    assert "postgresql://" not in err and "gravador" not in err
+
+
+def test_com_usage_na_sequence_o_fluxo_segue_ate_o_executor(raiz, monkeypatch, capsys):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn(seq_usage=True)
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_OK
+    assert "porta 6b_sequence_usage: ok" in capsys.readouterr().err
+    for etapa in ("backup.create", "mutacao.delete", "mutacao.insert"):
+        assert etapa in conn.eventos
+
+
+def test_a_porta_da_sequence_vem_antes_do_lock_e_do_backup(raiz, monkeypatch):
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    bf.main(_args("neon", raiz))
+    i_seq = next(i for i, s in enumerate(conn.sqls) if "has_sequence_privilege" in s)
+    i_lock = next(i for i, s in enumerate(conn.sqls) if "pg_try_advisory_lock" in s)
+    i_bkp = next(i for i, s in enumerate(conn.sqls) if s.strip().upper().startswith("CREATE TABLE"))
+    # sequence -> lock -> backup: o privilegio e conferido antes de tomar o
+    # lock, entao uma credencial insuficiente nem disputa a chave.
+    assert i_seq < i_lock < i_bkp
+
+
+def test_sequence_descoberta_pelo_default_nao_por_nome_fixo():
+    import inspect
+    assert "pg_get_serial_sequence" in bf.SEQUENCE_PRIVILEGE_SQL
+    assert "has_sequence_privilege" in bf.SEQUENCE_USAGE_SQL
+    # O nome da sequence NUNCA e fixo: vem do DEFAULT da coluna. A comparacao e
+    # sobre o CODIGO — a docstring cita o nome de proposito, ao explicar o
+    # defeito, e uma assercao sobre o arquivo inteiro reprovaria a documentacao
+    # em vez do codigo (armadilha ja conhecida neste repo).
+    corpo = inspect.getsource(bf.assert_sequence_privilege)
+    doc = bf.assert_sequence_privilege.__doc__ or ""
+    codigo = corpo.replace(doc, "")
+    assert "pg_get_serial_sequence" in bf.SEQUENCE_PRIVILEGE_SQL
+    assert "fact_shopee_product_monthly_id_seq" not in codigo
+    assert "fact_shopee_product_monthly_id_seq" not in bf.SEQUENCE_PRIVILEGE_SQL
+    assert "fact_shopee_product_monthly_id_seq" in doc, "a docstring deve citar o caso real"
+
+
+def test_tabela_sem_sequence_e_nao_aplicavel():
+    class SemSeq:
+        def execute(self, stmt, params=None):
+            return _Res(linha={"seq": None})
+    assert bf.assert_sequence_privilege(SemSeq(), "neon") == "nao_aplicavel"
+
+
+def test_privilegios_minimos_documentam_a_sequence():
+    fonte = Path(bf.__file__).read_text(encoding="utf-8")
+    assert "GRANT USAGE ON SEQUENCE" in fonte
+    assert "6b." in " ".join(bf.WRITE_GATES)
+    # e continua proibindo o que nunca foi necessario
+    for proibido in ("UPDATE", "TRUNCATE", "REFERENCES"):
+        assert proibido in fonte
+
+
+def test_contraprovas_do_autobegin_continuam_valendo(raiz, monkeypatch):
+    """O H1 nao pode ter sido desfeito por este gate."""
+    _env(monkeypatch, ENV_NEON)
+    conn = FakeConn()
+    monkeypatch.setattr(bf, "_default_writable_engine", Espiao(conn))
+    assert bf.main(_args("neon", raiz)) == bf.EXIT_OK
+    e = conn.eventos
+    assert e[0] == "autobegin"
+    assert e.index("conn.rollback") > e.index("lock.acquire")
+    assert e.index("conn.begin") > e.index("conn.rollback")
+    assert e.count("lock.acquire") == 1

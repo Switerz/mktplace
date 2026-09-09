@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import re
 import sys
@@ -846,7 +847,13 @@ class ScopedReplaceExecutor:
         sql = insert_sql(self.target, table=self.table)
         if self.target == TARGET_LOCAL:
             assert_no_ingested_at_in_local_sql(sql)
-        registros = rows[list(DATA_COLS)].to_dict("records")
+
+        # Gate SH-API-2E3-H2: normalizar ANTES do driver, validar DEPOIS de
+        # normalizar. As duas etapas sao separadas para que um caminho futuro
+        # que esqueca a primeira ainda seja reprovado pela segunda.
+        registros = normalize_records(rows[list(DATA_COLS)].to_dict("records"))
+        assert_bind_params_clean(registros)
+
         self._trail(sql)                       # so' trilha — nao executa
         self.conn.execute(sqlalchemy_text(sql), registros)   # unica execucao
 
@@ -1065,11 +1072,118 @@ def assert_no_ingested_at_in_local_sql(sql: str) -> None:
             f"no Neon (nada foi executado)")
 
 
+# --- Normalizacao de ausentes antes do driver -------------------------------
+#
+# CAUSA (medida no Gate SH-API-2E4-R): o `NaN` do pandas NAO equivale a NULL
+# para o psycopg2. Ele e' adaptado para o literal `'NaN'::float`, e o Postgres
+# ACEITA isso numa coluna `character varying` — gravando a STRING "NaN" em vez
+# de NULL. Na staging de maio, 153 de 278 linhas tinham `variation_name` como
+# NaN e 3 tinham `avg_price` NaN. Nenhuma das dez portas pegaria: contagem,
+# chaves e GMV fecham perfeitamente enquanto o conteudo e' corrompido.
+#
+# Por isso a normalizacao acontece AQUI, no ultimo ponto antes do driver, e
+# vem acompanhada de uma validacao que reprova qualquer marcador remanescente.
+
+#: Tipos que NUNCA sao marcador de ausencia, mesmo tendo valor "falsy".
+#: `bool` vem antes de `int` de proposito (bool e' subclasse de int) para que
+#: False seja preservado, e nao confundido com ausencia.
+_NUNCA_AUSENTE = (str, bytes, bool, int)
+#: Containers nao sao escalares. `pd.isna` sobre eles devolve VETOR, e usar
+#: isso num `if` levanta "truth value of an array is ambiguous" — o motivo de
+#: nao existir nenhum `pd.isna()` indiscriminado neste modulo.
+_NAO_ESCALAR = (list, tuple, set, dict, frozenset)
+
+
+class NonFiniteValueError(BackfillValidationError):
+    """Valor infinito nos parametros. Recusado, nunca convertido em silencio.
+
+    +inf/-inf nao sao "ausencia": sao numero fora de faixa, quase sempre
+    divisao por zero rio acima. Virar NULL esconderia o defeito; virar zero
+    inventaria dado. A unica resposta honesta e' parar."""
+
+
+def _e_ausente(v) -> bool:
+    """True somente para marcador ESCALAR de ausencia: None, float/NumPy NaN,
+    pandas NaT, pandas NA, Decimal('NaN')."""
+    if v is None:
+        return True
+    if isinstance(v, Decimal):
+        return v.is_nan()
+    if isinstance(v, _NUNCA_AUSENTE):
+        return False
+    if isinstance(v, _NAO_ESCALAR):
+        return False
+    if hasattr(v, "__len__"):          # ndarray, Series, etc: nao e' escalar
+        return False
+    try:
+        r = pd.isna(v)
+    except (TypeError, ValueError):
+        return False
+    return r is True or (isinstance(r, bool) and r) or str(r) == "True"
+
+
+def _e_nao_finito(v) -> bool:
+    """True para +inf/-inf, em float, NumPy ou Decimal."""
+    if isinstance(v, Decimal):
+        return v.is_infinite()
+    if isinstance(v, _NUNCA_AUSENTE) or isinstance(v, _NAO_ESCALAR):
+        return False
+    if hasattr(v, "__len__"):
+        return False
+    try:
+        return math.isinf(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def normalize_missing(v):
+    """Marcador de ausencia -> None. Infinito -> levanta. Resto: intocado."""
+    if _e_nao_finito(v):
+        raise NonFiniteValueError(
+            "valor nao finito (+inf/-inf) nos parametros do INSERT: e' numero "
+            "fora de faixa, nao ausencia (nada foi escrito)")
+    return None if _e_ausente(v) else v
+
+
+def normalize_records(registros: list[dict]) -> list[dict]:
+    """Aplica `normalize_missing` a cada valor, preservando ordem e chaves."""
+    return [{k: normalize_missing(v) for k, v in reg.items()} for reg in registros]
+
+
+def assert_bind_params_clean(registros: list[dict]) -> None:
+    """Ultima trava antes do driver: nenhum marcador nem numero nao finito.
+
+    Existe separada de `normalize_records` de proposito. A normalizacao pode
+    ser burlada por um caminho novo que esqueca de chama-la; esta validacao e'
+    a rede que reprova o INSERT em vez de deixar passar `'NaN'` para o banco."""
+    for i, reg in enumerate(registros):
+        for k, v in reg.items():
+            if _e_nao_finito(v):
+                raise NonFiniteValueError(
+                    f"parametro nao finito em {k} (linha {i}) (nada foi escrito)")
+            if v is not None and _e_ausente(v):
+                raise BackfillValidationError(
+                    f"marcador de ausencia NAO normalizado em {k} (linha {i}): "
+                    f"tipo {type(v).__name__}. Chegaria ao SQL como texto/NaN, "
+                    f"nunca como NULL (nada foi escrito)")
+
+
 # --- Credencial dedicada de escrita ----------------------------------------
 #
 # Variaveis SEPARADAS das de leitura. Reaproveitar a URL read-only para
 # escrever esconderia o momento em que a operacao deixou de ser segura; e
 # reaproveitar DATABASE_URL faria o backfill herdar a credencial da aplicacao.
+#
+# PRIVILEGIOS MINIMOS da credencial de escrita (Gate SH-API-2E3-H2):
+#
+#   GRANT CONNECT ON DATABASE <db> TO <role>;
+#   GRANT USAGE ON SCHEMA marts TO <role>;
+#   GRANT SELECT, INSERT, DELETE ON marts.fact_shopee_product_monthly TO <role>;
+#   GRANT CREATE ON SCHEMA marts TO <role>;          -- so' para o backup
+#   GRANT USAGE ON SEQUENCE marts.fact_shopee_product_monthly_id_seq TO <role>;
+#
+# NUNCA: UPDATE, TRUNCATE, REFERENCES, superuser, createdb, createrole,
+# replication, bypassrls nem membership em outra role.
 _WRITE_ENV = {
     TARGET_LOCAL: "BACKFILL_LOCAL_RW_URL",
     TARGET_NEON: "BACKFILL_NEON_RW_URL",
@@ -1154,6 +1268,46 @@ def assert_writable_primary(conn, target: str, *, table: str = TABLE) -> dict:
                 f"a credencial de escrita nao tem privilegio de {rotulo} no "
                 f"destino '{target}' (nada foi escrito)")
     return {"target": target, "primary": True, "privileges_ok": True}
+
+
+#: Descoberta a partir do DEFAULT da coluna, nunca por nome fixo: se o schema
+#: mudar o nome da sequence, o preflight acompanha em vez de checar a errada.
+SEQUENCE_PRIVILEGE_SQL = """
+SELECT pg_get_serial_sequence(:tabela, :coluna) AS seq
+"""
+SEQUENCE_USAGE_SQL = """
+SELECT has_sequence_privilege(current_user, :seq, 'USAGE') AS ok
+"""
+#: A coluna cujo DEFAULT consome a sequence.
+SEQUENCE_COLUMN = "id"
+
+
+def assert_sequence_privilege(conn, target: str, *, table: str = TABLE,
+                              coluna: str = SEQUENCE_COLUMN) -> str:
+    """Porta 6b. `INSERT` na tabela NAO implica `USAGE` na sequence.
+
+    CAUSA (medida no Gate SH-API-2E4-R): `id` tem
+    `DEFAULT nextval('marts.fact_shopee_product_monthly_id_seq')`. Um INSERT
+    que omite `id` chama `nextval`, e isso exige USAGE na SEQUENCE — privilegio
+    separado do da tabela. A role temporaria tinha SELECT/INSERT/DELETE e mesmo
+    assim o INSERT falhou por permissao, depois do backup ja commitado e do
+    DELETE ja executado. Verificar aqui move a recusa para ANTES de qualquer
+    escrita.
+
+    Devolve 'ok' ou 'nao_aplicavel' (tabela sem sequence no default)."""
+    row = conn.execute(sqlalchemy_text(SEQUENCE_PRIVILEGE_SQL),
+                       {"tabela": table, "coluna": coluna}).mappings().first()
+    seq = row["seq"] if row else None
+    if not seq:
+        return "nao_aplicavel"
+    r = conn.execute(sqlalchemy_text(SEQUENCE_USAGE_SQL), {"seq": seq}).mappings().first()
+    if not (r and r["ok"]):
+        raise WriteGuardError(
+            f"a credencial de escrita nao tem USAGE na sequence que alimenta "
+            f"'{coluna}' no destino '{target}'. O INSERT chamaria nextval e "
+            f"falharia DEPOIS do backup e do DELETE. Conceda "
+            f"GRANT USAGE ON SEQUENCE <sequence do id> (nada foi escrito)")
+    return "ok"
 
 
 def _dbapi_connection(conn):
@@ -1280,6 +1434,7 @@ WRITE_GATES: tuple[str, ...] = (
     "4. --target confirmado explicitamente (local|neon), nunca inferido",
     "5. identidade do banco comprovada (EXPECT_DB + tabela presente)",
     "6. primary gravavel (nao em recovery, tx nao read-only, privilegio real)",
+    "6b. USAGE na SEQUENCE do id (INSERT na tabela NAO implica esse privilegio)",
     "7. SSL confirmado pelo cliente no Neon",
     "8. advisory lock de sessao adquirido sem espera",
     "9. backup duravel CRIADO, CONFERIDO e COMMITADO",
@@ -1318,13 +1473,15 @@ def assert_write_preconditions(
     laudo["4_target_confirmado"] = target
 
     if conn is None:
-        for porta in ("5_identidade", "6_primary", "7_ssl", "8_advisory_lock"):
+        for porta in ("5_identidade", "6_primary", "6b_sequence_usage",
+                      "7_ssl", "8_advisory_lock"):
             laudo[porta] = "nao_avaliada"
     else:
         assert_target_identity(conn, target, env=env)
         laudo["5_identidade"] = "ok"
         assert_writable_primary(conn, target)
         laudo["6_primary"] = "ok"
+        laudo["6b_sequence_usage"] = assert_sequence_privilege(conn, target)
         assert_ssl_required(conn, target)
         laudo["7_ssl"] = "ok" if target == TARGET_NEON else "nao_aplicavel"
         acquire_advisory_lock(conn)
@@ -1918,11 +2075,13 @@ def run_apply(args, *, env=None, engine_factory=None) -> int:
     try:
         assert_target_identity(conn, args.target, env=env)     # porta 5
         assert_writable_primary(conn, args.target)             # porta 6
+        estado_seq = assert_sequence_privilege(conn, args.target)   # porta 6b
         assert_ssl_required(conn, args.target)                 # porta 7
         acquire_advisory_lock(conn)                            # porta 8
         lock_tomado = True
         print("  porta 5_identidade: ok", file=sys.stderr)
         print("  porta 6_primary: ok", file=sys.stderr)
+        print(f"  porta 6b_sequence_usage: {estado_seq}", file=sys.stderr)
         print("  porta 7_ssl: ok" if args.target == TARGET_NEON
               else "  porta 7_ssl: nao_aplicavel", file=sys.stderr)
         print("  porta 8_advisory_lock: adquirido", file=sys.stderr)

@@ -1312,6 +1312,95 @@ nova e sem abrir conexão gravável a local ou Neon).
 Contraprova medida: desligando a chamada do helper, **11 testes falham**,
 incluindo todo o caminho feliz.
 
+### Dois defeitos do apply real (Gate SH-API-2E3-H2)
+
+Na primeira execução real que chegou à mutação (Gate SH-API-2E4-R), o apply
+local terminou com **exit 3** — rollback confirmado, nada escrito. A
+reconciliação encontrou **duas** causas independentes.
+
+#### 1. `NaN` do pandas não equivale a `NULL` no psycopg2
+
+O psycopg2 adapta `float('nan')` para o literal `'NaN'::float`, e o PostgreSQL
+**aceita** isso numa coluna `character varying` — gravando a **string `"NaN"`**
+em vez de `NULL`. Na staging de maio: **153 de 278** linhas com
+`variation_name` ausente e **3** com `avg_price` ausente, todas como `NaN`
+float, não `None`.
+
+Se o INSERT tivesse sucedido, o backfill teria introduzido corrupção em 55% das
+linhas do escopo — e **nenhuma das dez portas pegaria**, porque contagem,
+chaves e GMV fecham perfeitamente enquanto o conteúdo é corrompido. Hoje, nos
+dois destinos, essas 153 linhas estão corretamente `NULL` e a string `'NaN'`
+não aparece uma única vez na tabela.
+
+Correção: `normalize_records` converte `None`, `NaN` (float e NumPy), `NaT`,
+`pd.NA` e `Decimal('NaN')` para `None`, no último ponto antes do driver.
+`assert_bind_params_clean` é a rede seguinte: reprova qualquer marcador
+remanescente, para o caso de um caminho futuro esquecer a normalização.
+
+Preservados intactos: `0`, `0.0`, `False`, string vazia, a string literal
+`"NaN"`, `Decimal` válido, timestamps e inteiros NumPy. **`+inf`/`-inf` são
+recusados**, nunca convertidos: não são ausência, são número fora de faixa
+(quase sempre divisão por zero rio acima). Virar `NULL` esconderia o defeito;
+virar zero inventaria dado.
+
+Nenhum `pd.isna()` indiscriminado: sobre lista/dict ele devolve **vetor**, e
+usar isso num `if` levanta *"truth value of an array is ambiguous"*. O código
+protege escalares antes de chamar.
+
+#### 2. `INSERT` na tabela não implica `USAGE` na sequence
+
+`marts.fact_shopee_product_monthly.id` tem
+`DEFAULT nextval('marts.fact_shopee_product_monthly_id_seq')` nos **dois**
+destinos. Um `INSERT` que omite `id` chama `nextval`, e isso exige **`USAGE` na
+sequence** — privilégio separado do da tabela. A role temporária tinha
+`SELECT/INSERT/DELETE` e o `INSERT` falhou por permissão **depois** do backup
+já commitado e do `DELETE` já executado.
+
+Correção: nova **porta 6b**, que descobre a sequence pelo
+`pg_get_serial_sequence` do próprio `DEFAULT` (nunca por nome fixo) e exige
+`has_sequence_privilege(..., 'USAGE')`. Ela roda **antes** do advisory lock e
+do backup, então uma credencial insuficiente nem disputa a chave. Ausência de
+`USAGE` → **exit 2 sanitizado**, sem backup e sem mutação.
+
+#### Privilégios mínimos da credencial de escrita
+
+```sql
+GRANT CONNECT ON DATABASE <db> TO <role>;
+GRANT USAGE ON SCHEMA marts TO <role>;
+GRANT SELECT, INSERT, DELETE ON marts.fact_shopee_product_monthly TO <role>;
+GRANT CREATE ON SCHEMA marts TO <role>;          -- só para o backup
+GRANT USAGE ON SEQUENCE marts.fact_shopee_product_monthly_id_seq TO <role>;
+```
+
+**Nunca:** `UPDATE`, `TRUNCATE`, `REFERENCES`, superuser, `createdb`,
+`createrole`, `replication`, `bypassrls`, nem membership em outra role.
+
+#### Maturidade: o denominador do local é outro
+
+O índice operacional de maturação divide o GMV de Produtos pelo GMV da diária.
+A `fact_marketplace_daily_performance` **local** não tem os mesmos dados de
+maio que a do Neon: medido no local, o índice de maio dá **0,9988 (apice)** e
+**0,9979 (barbours)**, contra 1,0782 e 1,0758 no Neon.
+
+Consequência operacional: os índices esperados após a correção (1,0361 e
+1,0266) foram derivados da **diária do Neon** e só valem lá.
+
+- **No local**, validar: contagens, chaves, delta de GMV, backup e **conteúdo**
+  (incluindo `variation_name` como `NULL`, não `"NaN"`).
+- **No Neon**, validar tudo isso **mais** o selo `mature` e o índice final.
+
+O selo `mature` final é validado **somente no Neon** — é ele que a Torre lê.
+
+#### Por que os testes não pegaram antes
+
+O `FakeConn` respondia a qualquer parâmetro e a qualquer consulta de
+privilégio. Um dublê mais permissivo que o original não é dublê: é um teste que
+mente. Agora o fake modela a sequence (`pg_get_serial_sequence` +
+`has_sequence_privilege`) e **guarda os parâmetros reais do `INSERT`** — as
+asserções de normalização são sobre o que o **driver recebe**, não sobre a
+staging. Contraprovas medidas: desligando a normalização, 2 testes falham;
+desligando a porta 6b, 3 falham.
+
 ### Proposta de backfill — restrita a Ápice/maio e Barbours/maio
 
 **Não executada.** Escopo derivado da deduplicação fail-closed do Gate
@@ -1531,5 +1620,6 @@ executada mais de uma vez.
 | 2026-09-08 | Gate SH-API-2A-R (implementação fail-closed da deduplicação de Produtos Shopee): `apps/api/etl/load_shopee_products.py` ganha `ID do pedido` no `COL_MAP` (obrigatório), `_classify_order_file`/`_plan_brand_snapshots`/`_select_current_snapshot` e a regra de snapshot vigente por pedido aplicada ANTES do filtro `status == "Concluído"`. Quatro formatos de nome aceitos; instante de export, `Order.toship`, sufixo `(1)`, parte ausente/duplicada e janela ambígua **abortam a carga inteira** antes de qualquer leitura de arquivo ou conexão. Ordenação `(janela_fim, janela_início)` DESC, validada contra `max(file_id)` do Data Mart em 13.720/13.720 pedidos sobrepostos. mtime/ctime/ordem do glob nunca usados. 38 testes novos (incl. contraprova dos R$ 971.946,52 que a ordenação por nome removeria); suíte `etl/tests` 135→174 passando, zero falhas; `apps/api/tests` com as MESMAS 45 falhas pré-existentes por node ID (zero novas). Deduplicação **não aplicada em produção**: nenhum backfill, nenhuma escrita em banco, nenhuma migration, nenhum commit/push. Sidecar fora de escopo; `units_sold` da fato diária pendente. Triagem aborta hoje em `barbours` por 2 arquivos fora do padrão — ação do operador documentada na seção nova. |
 | 2026-09-08 | Gate SH-API-2D (contrato de qualidade de escopo dos Produtos Shopee): seis eixos ortogonais (`source_status`, `load_status`, `eligibility_status`, `maturity_status`, `coverage_status`, `loaded_at`) derivados de tres tabelas que **ja existiam** no Neon — `marts.fact_shopee_product_monthly`, `marts.fact_marketplace_daily_performance` e `audit.source_sync_run`. **Sem migration, sem escrita em banco, sem backfill.** Piso de maturidade MEDIDO em 30 pares marca x competencia (maduros 1,0047–1,1234; imaturos 0,6643–0,7700; sem conclusao 0,0000) e exposto como parametro `Settings.shopee_maturity_floor` (default 0,99), nunca literal em API/tela/MCP — ha teste que reprova a reintroducao de `0.99`/`2026-07`/`2026-08`. Propagado a 5 superficies: `/produtos/shopee`, `/produtos/shopee/summary` (que **nunca** preenchia `refreshed_at`), `/quality`, tela de Produtos (faixa antes dos cards A/B/C/D), tela de Qualidade, `torre_produtos_prioritarios` e `torre_qualidade_dados` (campo estruturado + limitacoes derivadas do backend + aviso no resumo textual). Tres achados corrigidos pela validacao contra o Neon real: cobertura da fonte e HISTORICA (a ultima execucao cobre so' 07..08/2026 e reprovava todos os meses fechados); sem carga a maturidade e' `maturity_unknown`, nunca `materially_immature`; `source_unknown` nao bloqueia um mes com maturidade medida. Validacao: 38 testes pytest novos + 19 `node --test` novos; `apps/api/tests` **1095 passed / 0 failed** com `.env` carregado (as 43 falhas do worktree sao ausencia de `.env`, node IDs identicos a baseline em 9a81cc1); `etl/tests` 257 passed; web 1478/1478; `tsc --noEmit` com **zero** erro novo. Backfill proposto e NAO executado, restrito a `apice`/2026-05 (−23.292,43) e `barbours`/2026-05 (−80.987,03); `kokeshi`/2026-08 e `rituaria`/2026-07 excluidos por imaturidade medida. |
 | 2026-09-08 | Gate SH-API-2D-R/V (correcao semantica, QA e integracao linear): a primeira versao usava nomes que afirmavam mais do que o contrato media. `source_covered` -> **`source_ever_loaded`** (o eixo responde "ja foi carregada alguma vez?", nunca "a fonte esta em dia"); `load_current` -> **`load_present`** ("current" e afirmacao temporal, e o mart publicado em 05/08 aparecia como `load_current` para julho 34 dias depois); `load_stale` -> **`load_behind_daily`** (declara a evidencia medida em vez de um adjetivo temporal). `completed_share` -> **`maturation_index`** e `maturity_floor` -> **`maturation_threshold`**: a razao NAO e percentual de conclusao, share nem completude — numerador (subtotal de item do mart) e denominador (GMV liquido do shop stats) sao populacoes diferentes, valores > 1 sao o regime normal de mes fechado e NUNCA sao truncados. Novo campo obrigatorio `maturation_index_note` acompanha o numero em toda superficie; a faixa da tela nem le o indice diretamente, para nao poder exibi-lo como "%". Entrada impossivel (GMV negativo, NaN) levanta `ScopeQualityInputError` e degrada para `maturity_unknown` com aviso critico `shopee_produtos_indice_invalido` — sem a guarda, `NaN >= limiar` e False e o mes viraria "imaturo", um veredito inventado a partir de lixo. `loaded_at` explicitado como publicacao NO MART, com os dois relogios nomeados por extenso na tela; nenhum titulo usa "atual"/"atualizado"/"em dia" (ha teste que reprova). Os tres `text-[11px]` novos viraram `text-xs` (piso de 12px). Integracao LINEAR: worktree limpa sobre origin/main 6b9bb94 + cherry-pick de a18cea5 sem conflito (22/22 blobs identicos), correcoes em commit separado — sem merge no branch antigo. Zero backfill, zero escrita em banco, zero migration. |
+| 2026-09-09 | Gate SH-API-2E3-H2 (fecha os dois defeitos do apply real; NADA executado): (1) o `NaN` do pandas NAO vira NULL — o psycopg2 o adapta para `'NaN'::float` e o Postgres ACEITA num varchar, gravando a STRING "NaN". Na staging de maio eram 153 de 278 linhas em `variation_name` e 3 em `avg_price`; teria corrompido 55% do escopo sem nenhuma das dez portas perceber, porque contagem, chaves e GMV fecham. Novo `normalize_records` (None/NaN float e NumPy/NaT/pd.NA/Decimal NaN -> None) no ultimo ponto antes do driver, mais `assert_bind_params_clean` como rede. Preservados 0, 0.0, False, string vazia, a string literal "NaN", Decimal valido, timestamps e int NumPy; +inf/-inf RECUSADOS (nao sao ausencia, sao numero fora de faixa). Zero `pd.isna()` indiscriminado — sobre container ele devolve vetor e quebra num `if`. (2) INSERT na tabela nao implica USAGE na SEQUENCE: `id` tem `DEFAULT nextval(...)` nos dois destinos, e o INSERT falhou por permissao DEPOIS do backup commitado e do DELETE. Nova porta 6b descobre a sequence pelo `pg_get_serial_sequence` do proprio DEFAULT (nunca por nome fixo) e exige `has_sequence_privilege('USAGE')` ANTES do lock e do backup -> exit 2 sanitizado, sem backup e sem mutacao. Privilegios minimos documentados no modulo, incluindo `GRANT USAGE ON SEQUENCE`. Registrado tambem que a diaria LOCAL tem denominador diferente (indice de maio 0,9988/0,9979 no local contra 1,0782/1,0758 no Neon): o local valida contagens/chaves/delta/backup/CONTEUDO e o selo `mature` final e validado SOMENTE no Neon. Fakes deixaram de mascarar: modelam a sequence e guardam os parametros REAIS do INSERT. Contraprovas: sem a normalizacao 2 testes falham; sem a porta 6b, 3 falham. 26 testes novos; etl/tests 392 -> 418. Backup local de 20260909 preservado e intocado. Zero --apply, zero conexao gravavel, zero role, zero backup novo, zero escrita, zero migration, zero dependencia. |
 | 2026-09-09 | Gate SH-API-2E3-H1 (corrige o defeito que impedia o --apply real; NADA executado): no SQLAlchemy 2.0 o primeiro `conn.execute()` faz AUTOBEGIN, entao os SELECTs das portas 5-8 deixavam a conexao em transacao e o `begin()` explicito do executor levantava `InvalidRequestError` — o apply real do Gate SH-API-2E4 morreu com exit 2 sem criar backup e sem escrever nada (fail-closed funcionou). Novo helper `close_preflight_transaction(conn)`, chamado DEPOIS do advisory lock e ANTES de entregar a conexao ao executor: faz rollback se houver transacao implicita e confirma que fechou; se persistir, levanta `PreflightTransactionError` -> exit 2 sanitizado, sem backup e sem mutacao, com lock/conexao/engine liberados no finally. A ordem e deliberada: o advisory lock e de SESSAO e sobrevive ao rollback. O executor NAO reaproveita transacao implicita — segue dono de duas transacoes explicitas (backup e publicacao). Causa da falha escapar aos 43 testes do gate anterior: o `FakeConn` tinha `begin()` permissivo (mesma armadilha do `cursor_factory`); agora modela autobegin e levanta em begin aninhado, com prova adicional numa `Connection` REAL do SQLAlchemy (SQLite de memoria, zero dependencia). Contraprova: desligando o helper, 11 testes falham. 15 testes novos; etl/tests 377 -> 392. Formulas, SQL, allowlist, escopos, deltas, exit codes e maturidade INALTERADOS. Zero --apply, zero conexao gravavel, zero role, zero backup, zero escrita, zero migration, zero dependencia. |
 | 2026-09-08 | Gate SH-API-2E1 (prepara o backfill maduro de maio; NADA executado): `--apply` habilitado TECNICAMENTE e ainda BLOQUEADO na barreira final. Dez portas fail-closed e independentes (allowlist exata, consentimento, credencial dedicada de escrita, destino confirmado, identidade, primary gravavel, SSL no Neon, advisory lock de sessao sem espera, backup commitado, expectativa medida). Allowlist EXATA `apice:2026-05` + `barbours:2026-05` — subconjunto tambem e' recusado, porque metade do par nao fecha a reconciliacao total; `rituaria:2026-07` e `kokeshi:2026-08` recusados COM o motivo medido na mensagem. Backup redesenhado: transacao PROPRIA commitada ANTES da mutacao (antes caia junto com o rollback e nao protegia de nada), colunas explicitas por destino (nunca `SELECT *`, os schemas tem 14 x 15 colunas), nome deterministico validado por regex antes de entrar na DDL, contagem + checksum md5 conferidos contra a origem, retencao de 90 dias. `ingested_at` tratado explicitamente: so' existe no Neon, e' instante de PUBLICACAO (nunca data da fonte), preenchido por NOW() do banco e com trava de regressao que reprova sua presenca em SQL do local. Tres estados parciais nomeados com acao definida, sem encenar atomicidade distribuida; ZERO retry, com teste que conta chamadas. Expectativa medida vira TRAVA: -23.292,43 + -80.987,03 = -104.279,46, zero chave adicionada/removida, maturacao acima de 0,99 — divergencia bloqueia, valores nunca sao forcados. 77 testes novos; etl/tests 257 -> 334. Zero escrita, zero conexao gravavel, zero backup real, zero migration, zero deploy. |
