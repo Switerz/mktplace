@@ -626,6 +626,48 @@ fonte serve para velocidade, nao para nivel.
 
 ### 8.8 Estado operacional
 
+### 8.8.1 Piso historico do modo `full`: 2025-08-01 (Gate FULL-1C-H1)
+
+O modo `full` comeca em **01/08/2025**, e nao no primeiro envio (22/05/2025).
+
+A razao e' cobertura da FONTE, nao escolha de janela comercial. Medido em
+15/09/2026 sobre 550.239 pedidos, cruzando `api.ml_orders` com
+`api.ml_order_line_items` na mesma populacao que o sync usa:
+
+| mes | pedidos pagos | **pagos SEM line item** |
+|---|---:|---:|
+| 2025-04 | 100 | 0 |
+| **2025-05** | 720 | **338** |
+| **2025-06** | 945 | **190** |
+| **2025-07** | 1.964 | **802** |
+| 2025-08 em diante (14 meses) | — | **0** |
+
+Total: **1.330 pedidos pagos sem item, todos anteriores a 01/08/2025; zero em ou
+depois dessa data.** Cancelados e demais status tambem tem zero ocorrencia apos
+o piso, entao a fronteira nao esta escondendo o problema em outra populacao.
+
+O buraco e' **intermitente**, nao um inicio de ingestao: 21 e 22/07/2025 estao
+limpos, 23 a 27/07 quebrados, 28/07 em diante limpos. O ultimo dia com falha e'
+27/07/2025. O piso foi alinhado ao mes seguinte, quatro dias depois, como margem
+deliberada contra reaparecimento pontual.
+
+**Mai-jul/2025 ficam INDISPONIVEIS por incompletude da fonte.** Nao sao meses com
+zero: sao meses que nao podem ser medidos. A regra "pedido pago exige unidade"
+continua **BLOQUEANTE** e nao foi rebaixada para aviso -- ausencia de item e'
+ausencia de medicao, nunca venda de zero unidade. `ck_fmfd_unidade_exige_pedido_pago`
+recusaria a linha de qualquer forma.
+
+O piso so' pode ser REDUZIDO depois que a fonte for reparada **e** o diagnostico
+`full` reconciliar na janela ampliada. Baixa-lo sem isso faz o `full` voltar a
+falhar na primeira execucao, como ocorreu no FULL-1C.
+
+Diagnostico `full` apos o piso (read-only, 33 s, janela 2025-08-01 a 2026-09-14):
+3.649 linhas agregadas, 76.014 por anuncio, 544.569 pedidos elegiveis fechando
+exatamente em 519.644 pagos + 24.635 cancelados + 290 outros, **zero pedido sem
+line item, zero divergencia de alocacao, zero envio duplicado e zero warning**.
+
+### 8.8 Estado operacional
+
 - Migration `016` criada e **NAO aplicada**.
 - Sync `pipelines/sync_ml_fulfillment_daily.py` criado; **zero `--apply`
   executado**, zero backfill.

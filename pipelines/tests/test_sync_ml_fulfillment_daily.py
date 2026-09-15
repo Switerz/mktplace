@@ -15,6 +15,7 @@ from pipelines import sync_ml_fulfillment_daily as mod
 from pipelines.sync_ml_fulfillment_daily import (
     ADVISORY_LOCK_KEY,
     BACKFILL_DAYS_BACK,
+    FULL_SOURCE_COMPLETE_FROM_DATE,
     CLASSE_FULL,
     CLASSE_NON_FULL,
     CLASSE_UNKNOWN,
@@ -651,3 +652,106 @@ def test_conexao_de_lock_usa_autocommit():
     """Abrir transacao so' para segurar o lock recriaria o problema."""
     fonte = inspect.getsource(mod._default_lock_connection)
     assert 'isolation_level="AUTOCOMMIT"' in fonte
+
+
+# ---------------------------------------------------------------------------
+# Piso historico do modo full — Gate FULL-1C-H1
+# ---------------------------------------------------------------------------
+#
+# O `full` comeca em 01/08/2025 porque a FONTE so' tem cobertura integral de
+# line items a partir dai. Medido em 15/09/2026 sobre 550.239 pedidos: 1.330
+# pedidos PAGOS sem item em mai-jul/2025, zero nos 14 meses seguintes.
+
+#: Ultimo dia medido com pedido pago sem line item. O piso tem de ficar DEPOIS.
+ULTIMO_DIA_COM_FALHA_NA_FONTE = date(2025, 7, 27)
+
+#: Pedidos pagos sem item por mes, medidos na fonte.
+PAGOS_SEM_ITEM_POR_MES = {"2025-05": 338, "2025-06": 190, "2025-07": 802}
+
+
+def test_full_comeca_exatamente_em_2025_08_01():
+    assert FULL_SOURCE_COMPLETE_FROM_DATE == date(2025, 8, 1)
+    assert resolve_window(MODE_FULL, AGORA).date_from == date(2025, 8, 1)
+
+
+def test_piso_fica_depois_da_ultima_falha_medida_na_fonte():
+    """CONTRAPROVA do item 12: reverter para 2025-05-01 reprova aqui.
+
+    O piso nao e' um numero escolhido: e' posterior ao ultimo dia em que a fonte
+    falhou. Baixa-lo sem reparar a fonte faz o `full` voltar a quebrar na
+    primeira execucao -- exatamente o que o FULL-1C encontrou.
+    """
+    assert FULL_SOURCE_COMPLETE_FROM_DATE > ULTIMO_DIA_COM_FALHA_NA_FONTE
+    # E o valor antigo NAO satisfaz a invariante.
+    assert not date(2025, 5, 1) > ULTIMO_DIA_COM_FALHA_NA_FONTE
+
+
+def test_2025_07_31_fica_fora_da_janela_full():
+    w = resolve_window(MODE_FULL, AGORA)
+    assert date(2025, 7, 31) < w.date_from
+
+
+def test_2025_08_01_fica_dentro_da_janela_full():
+    w = resolve_window(MODE_FULL, AGORA)
+    assert w.date_from <= date(2025, 8, 1) <= w.date_to
+
+
+def test_meses_incompletos_ficam_fora_da_populacao_publicada():
+    """Mai-jul/2025 sao INDISPONIVEIS, nao meses com zero."""
+    w = resolve_window(MODE_FULL, AGORA)
+    for mes in ("2025-05", "2025-06", "2025-07"):
+        ano, m = (int(x) for x in mes.split("-"))
+        # Nenhum dia desses meses cabe na janela publicada.
+        assert date(ano, m, 1) < w.date_from
+        assert PAGOS_SEM_ITEM_POR_MES[mes] > 0   # e a razao esta medida
+
+
+def test_pedido_pago_sem_unidade_ANTES_do_cutoff_nao_chega_a_validacao():
+    """Item 4: o dado ruim nao e' tolerado -- ele nao entra na janela.
+
+    A guarda continua bloqueante; o que muda e' que a linha de mai-jul/2025
+    nunca e' lida, porque a janela do `full` comeca depois.
+    """
+    w = resolve_window(MODE_FULL, AGORA)
+    assert date(2025, 5, 5) < w.date_from      # o caso real que quebrou o full
+
+
+def test_pedido_pago_sem_unidade_NO_cutoff_ou_depois_continua_bloqueando():
+    """Item 5: a regra NAO foi rebaixada para warning."""
+    for dia in (date(2025, 8, 1), date(2026, 8, 1)):
+        s = mk_snapshot([mk_row(ref_date=dia, paid_orders=9, paid_units=0)])
+        with pytest.raises(MLFulfillmentSyncError, match="discordam"):
+            validate_contract(s)
+
+
+def test_ausencia_de_unidade_nunca_vira_zero():
+    """Item 11: nada no modulo converte unidade ausente em zero de venda."""
+    s = mk_snapshot([mk_row(paid_orders=1, paid_units=0)])
+    with pytest.raises(MLFulfillmentSyncError):
+        validate_contract(s)
+    # E o caminho inverso tambem e' recusado: unidade sem pedido pago.
+    s = mk_snapshot([mk_row(paid_orders=0, paid_units=5, eligible_orders=1,
+                            cancelled_orders=1, other_orders=0)])
+    with pytest.raises(MLFulfillmentSyncError, match="discordam"):
+        validate_contract(s)
+
+
+def test_incremental_e_backfill_nao_mudaram():
+    """Item 6: o hotfix toca SO' o piso do full."""
+    assert INCREMENTAL_DAYS_BACK == 15
+    assert BACKFILL_DAYS_BACK == 45
+    assert resolve_window(MODE_INCREMENTAL, AGORA).date_from == date(2026, 8, 30)
+    assert resolve_window(MODE_BACKFILL, AGORA).date_from == date(2026, 7, 31)
+
+
+def test_teto_d_menos_1_preservado_em_todos_os_modos():
+    for modo in (MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL):
+        assert resolve_window(modo, AGORA).date_to == date(2026, 9, 14)
+
+
+def test_obrigacao_mensal_continua_exigindo_full():
+    """Item 8: backfill e full seguem com auditoria propria."""
+    assert audit_sources_for_mode(MODE_FULL) == (
+        "ml_fulfillment_daily", "ml_fulfillment_daily_full")
+    assert audit_sources_for_mode(MODE_BACKFILL) == (
+        "ml_fulfillment_daily", "ml_fulfillment_daily_backfill")

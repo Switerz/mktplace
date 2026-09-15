@@ -118,6 +118,20 @@ Daqui saem os numeros, e nao de um palpite redondo:
 A cauda nao cabe no incremental: por isso ele e' COMBINADO com backfill semanal e
 full mensal, com obrigacao durável em `audit.source_sync_run`.
 
+PISO HISTORICO: 2025-08-01, POR COBERTURA DA FONTE (FULL-1C-H1)
+-----------------------------------------------------------------
+O modo `full` comeca em 01/08/2025, nao no primeiro envio. Antes disso a fonte
+tem 1.330 pedidos PAGOS sem nenhuma linha em `api.ml_order_line_items` -- 338 em
+maio, 190 em junho e 802 em julho de 2025 -- e zero em todos os 14 meses
+seguintes.
+
+Esses meses ficam INDISPONIVEIS por incompletude, e nao publicados como zero. A
+regra "pedido pago exige unidade" continua BLOQUEANTE: ausencia de item e'
+ausencia de medicao, nunca venda de zero unidade.
+
+O piso volta a baixar quando a fonte for reparada e o diagnostico `full`
+reconciliar na janela ampliada -- nunca antes.
+
 Esta maturacao nao e' teorica. Entre a medicao do FULL-1A (15/09) e a revisao do
 FULL-1A-R, um pedido de agosto migrou de `paid` para `cancelled` e o GMV Full de
 agosto caiu R$ 66,00 sozinho. Um dia "fechado" continua se mexendo.
@@ -219,9 +233,32 @@ MODES = (MODE_DIAGNOSTIC, MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL, MODE_AUTO)
 INCREMENTAL_DAYS_BACK = 15
 BACKFILL_DAYS_BACK = 45
 
-#: Primeiro dia com envio classificavel em `api.ml_shipments` (22/05/2025),
-#: arredondado para o inicio do mes.
-FULL_MIN_DATE = date(2025, 5, 1)
+#: Piso do modo `full`: primeira data a partir da qual a FONTE tem cobertura
+#: integral de `api.ml_order_line_items`.
+#:
+#: NAO e' a data do primeiro envio (22/05/2025) nem o inicio do negocio. E' o
+#: ponto medido a partir do qual toda venda paga tem item, e portanto unidade.
+#: Medido em 15/09/2026 sobre 550.239 pedidos:
+#:
+#:     2025-05    338 pedidos pagos sem line item
+#:     2025-06    190
+#:     2025-07    802   (ultimo dia com falha: 27/07/2025)
+#:     2025-08+     0   -- zero em 14 meses consecutivos
+#:
+#: O buraco e' INTERMITENTE, nao um inicio de ingestao: 21 e 22/07 estao limpos,
+#: 23 a 27/07 quebrados, 28/07 em diante limpos. Por isso o piso e' alinhado ao
+#: mes seguinte (01/08), quatro dias depois da ultima falha -- margem
+#: deliberada contra reaparecimento pontual.
+#:
+#: Mai-jul/2025 ficam INDISPONIVEIS por incompletude da fonte. Nao sao meses com
+#: zero: sao meses que nao podem ser medidos. Publicar essa janela gravaria
+#: venda paga com zero unidade, que `ck_fmfd_unidade_exige_pedido_pago` recusa --
+#: e com razao, porque unidade ausente nao e' unidade nula.
+#:
+#: Este piso so' pode ser REDUZIDO depois que a fonte for reparada E o modo full
+#: reconciliar em diagnostico para a janela ampliada. Baixa-lo sem isso faz o
+#: full voltar a falhar na primeira execucao.
+FULL_SOURCE_COMPLETE_FROM_DATE = date(2025, 8, 1)
 
 #: `marketplace_id` do Mercado Livre em `dim.dim_marketplace`.
 AUDIT_MARKETPLACE_ID = 1
@@ -306,7 +343,7 @@ def resolve_window(mode: str, agora: datetime | None = None,
     elif mode == MODE_BACKFILL:
         inicio, fim = closed_window(BACKFILL_DAYS_BACK, agora)
     elif mode == MODE_FULL:
-        inicio, fim = FULL_MIN_DATE, last_closed_date(agora)
+        inicio, fim = FULL_SOURCE_COMPLETE_FROM_DATE, last_closed_date(agora)
     else:
         raise MLFulfillmentSyncError(f"modo sem janela definida: {mode!r}")
     return Window(inicio, fim)
