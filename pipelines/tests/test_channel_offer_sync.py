@@ -138,11 +138,41 @@ def _codigo_executavel(modulo) -> str:
     )
 
 
-def test_modulo_nao_contem_escrita_nem_ddl():
+def test_modulo_nao_contem_ddl_nem_escrita_alem_do_delete_de_escopo():
+    """Gate PMA-2C2-R: o DELETE de escopo passou a existir como CONSTANTE.
+
+    Ele e' o contrato de substituicao e precisa ser revisavel. O que continua
+    proibido e' tudo o mais — e, principalmente, EXECUTAR qualquer um deles,
+    coberto pelos dois testes seguintes.
+    """
     executavel = _codigo_executavel(cos).upper()
-    for proibido in ("CREATE TABLE", "INSERT INTO", "UPDATE ", "DELETE FROM",
-                     "TRUNCATE", "COPY ", "DROP "):
+    for proibido in ("CREATE TABLE", "INSERT INTO", "UPDATE ", "TRUNCATE",
+                     "COPY ", "DROP "):
         assert proibido not in executavel, proibido
+    # o DELETE existe, e somente dentro da constante nomeada
+    assert executavel.count("DELETE FROM") == 1
+    assert "SQL_DELETE_SCOPE" in _codigo_executavel(cos)
+
+
+def test_o_delete_de_escopo_nao_e_executado_por_caminho_nenhum():
+    """A constante existe; nenhuma chamada a executa nesta rodada."""
+    import ast
+    import pathlib
+    arvore = ast.parse(pathlib.Path(cos.__file__).read_text(encoding="utf-8"))
+    for no in ast.walk(arvore):
+        if not isinstance(no, ast.Call):
+            continue
+        if getattr(no.func, "attr", None) != "execute":
+            continue
+        for arg in no.args:
+            nome = getattr(arg, "id", None)
+            assert nome != "SQL_DELETE_SCOPE", "o DELETE foi executado"
+
+
+def test_as_unicas_conexoes_do_modulo_sao_read_only():
+    codigo = _codigo_executavel(cos)
+    assert codigo.count("psycopg2.connect") == 1
+    assert "readonly=True" in codigo
 
 
 def test_a_varredura_enxerga_o_codigo_e_nao_so_a_documentacao():

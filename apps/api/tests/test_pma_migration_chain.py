@@ -610,6 +610,26 @@ def test_017_impede_colisao_entre_pai_e_modelo():
     assert "ck_fcoo_tiktok_sem_modelo" in ddl
 
 
+def test_017_shop_account_e_obrigatorio_porque_e_o_escopo():
+    """Gate PMA-2C2-R: linha sem conta ficaria fora do DELETE de escopo.
+
+    O DELETE que troca uma fotografia filtra por
+    (marketplace, observed_date, shop_account). Uma conta NULA nunca casaria
+    nesse predicado: a linha seria invisivel ao publisher e viva na tela.
+    """
+    ddl = _ddl_017()
+    assert "shop_account             TEXT         NOT NULL" in ddl
+    assert "shop_account             TEXT             NULL" not in ddl
+
+
+def test_017_indexa_exatamente_o_predicado_da_substituicao():
+    ddl = _ddl_017()
+    assert ("idx_fcoo_escopo ON marts.fact_channel_offer_observation "
+            "(marketplace, observed_date, shop_account)") in ddl
+    # o parcial antigo por conta saiu: com NOT NULL o predicado perdeu sentido
+    assert "idx_fcoo_conta_data" not in ddl
+
+
 def test_017_restringe_o_dominio_dos_enums():
     ddl = _ddl_017()
     for check in ("ck_fcoo_marketplace", "ck_fcoo_snapshot_status",

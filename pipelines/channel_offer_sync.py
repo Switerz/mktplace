@@ -20,8 +20,15 @@ O QUE `--diagnose` FAZ
 ---------------------
 Le, transforma e RECONCILIA. Abre as duas conexoes em `READ ONLY` de verdade
 (`SET TRANSACTION READ ONLY` na sessao, nao apenas convencao), monta os registros
-que a futura tabela receberia e prova as particoes do PMA-2B-R2. Nao existe
-INSERT, UPDATE, DELETE, COPY, CREATE nem TRUNCATE em nenhum caminho deste modulo.
+que a futura tabela receberia e prova as particoes do PMA-2B-R2.
+
+Desde o Gate PMA-2C2-R o modulo CARREGA o SQL de substituicao
+(`SQL_DELETE_SCOPE`) como constante, para que o contrato de publicacao seja
+revisavel e testavel. Ele nao e' EXECUTADO por caminho nenhum nesta rodada:
+`--apply` e' recusado antes de qualquer conexao, `assert_apply_authorized` exige
+a revisao 017 carimbada E a relacao existente, e as duas unicas conexoes que o
+modulo abre sao `READ ONLY` impostas pelo servidor. NAO ha `CREATE TABLE`,
+`INSERT`, `UPDATE`, `TRUNCATE` nem `COPY` em lugar algum.
 
 O ML NAO PASSA POR AQUI
 -----------------------
@@ -271,7 +278,10 @@ def build_shopee_records(rows, clocks: dict) -> list[dict]:
             "seller_sku": row.get("seller_sku"),
             "gtin": pm.consumer_ean_or_none(row.get("gtin")),
             "listing_title": row.get("listing_title"),
-            "shop_account": conta or None,
+            # NUNCA nulo: uma linha sem conta ficaria fora do DELETE de
+            # escopo e viraria orfa permanente. `canonical_account` levanta
+            # se nao houver conta, em vez de gravar um orfao silencioso.
+            "shop_account": canonical_account(dom.MARKETPLACE_SHOPEE, conta),
             "observation_mode": dom.OBSERVATION_MODE_SNAPSHOT_CURRENT,
             "snapshot_status": estado,
             "account_watermark_at": relogio.watermark_at if relogio else None,
@@ -322,7 +332,8 @@ def build_tiktok_records(rows, snapshot_day: date, clocks: dict) -> list[dict]:
             # explicita em vez de invisivel.
             "gtin": None,
             "listing_title": row.get("listing_title"),
-            "shop_account": row.get("shop_account"),
+            "shop_account": canonical_account(dom.MARKETPLACE_TIKTOK,
+                                              row.get("shop_account")),
             "observation_mode": dom.OBSERVATION_MODE_DAILY_SERIES,
             "snapshot_status": dom.SNAPSHOT_CURRENT,
             "account_watermark_at": relogio.watermark_at if relogio else None,
@@ -827,6 +838,241 @@ def audit_outcome(commit_state: str, rows_found_after: int | None) -> str:
     if rows_found_after is None:
         return "needs_manual_reconciliation"
     return "published" if rows_found_after > 0 else "failed"
+
+
+# ---------------------------------------------------------------------------
+# EXCLUSAO MUTUA  (Gate PMA-2C2-R, fase 2)
+# ---------------------------------------------------------------------------
+#: Chave EXCLUSIVA desta frente. Conferida contra todas as chaves versionadas
+#: do repositorio antes de ser escolhida:
+#:
+#:      906120006  911120011  912120012  912130013  913120001
+#:      913120013 (pma/reference_import)   913120041 (avoe/snapshot_import)
+#:      914120014  916140016  564738291056  987654321123
+#:      -2966686022110071898 (backfill shopee, derivada de sha256)
+#:
+#: 917120017 nao colide com nenhuma. O sufixo 017 amarra a chave a revisao que
+#: cria a tabela, para que a proxima frente enxergue o pareamento.
+CHANNEL_OFFER_ADVISORY_LOCK_KEY = 917_120_017
+
+#: Chaves de TODAS as demais frentes, versionadas aqui para que o teste de
+#: colisao seja executavel e nao uma promessa de comentario.
+OTHER_TRACK_ADVISORY_LOCK_KEYS = (
+    906_120_006, 911_120_011, 912_120_012, 912_130_013, 913_120_001,
+    913_120_013, 913_120_041, 914_120_014, 916_140_016,
+    564738291056, 987654321123, -2966686022110071898,
+)
+
+
+class ChannelSyncLockUnavailable(ChannelSyncError):
+    """Outra execucao ja' detem o lock. Encerra imediatamente, sem esperar."""
+
+
+def try_acquire_publication_lock(conn) -> bool:
+    """Lock de SESSAO, fail-fast. `pg_try_advisory_lock`, nunca a variante que espera.
+
+    Duas escolhas que importam:
+
+    - `pg_try_advisory_lock` e nao `pg_advisory_lock`: a versao bloqueante
+      enfileiraria a segunda execucao, e duas cargas em fila publicariam
+      fotografias em sequencia — a segunda sobrescrevendo a primeira com dados
+      lidos ANTES dela. Falhar na hora e' o comportamento correto.
+    - lock de SESSAO e nao `_xact_`: ele precisa sobreviver ao COMMIT dos dados
+      para cobrir tambem a auditoria posterior. Um lock transacional cairia no
+      commit e deixaria a janela aberta justamente no trecho em que outra
+      execucao poderia comecar a ler.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)",
+                    (CHANNEL_OFFER_ADVISORY_LOCK_KEY,))
+        return bool(cur.fetchone()[0])
+
+
+def release_publication_lock(conn) -> bool:
+    """Libera o lock. Chamado SOMENTE se a aquisicao teve sucesso, e na MESMA
+    conexao: um advisory lock de sessao pertence a conexao que o tomou, e
+    liberar de outra e' no-op silencioso."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_unlock(%s)",
+                    (CHANNEL_OFFER_ADVISORY_LOCK_KEY,))
+        return bool(cur.fetchone()[0])
+
+
+# ---------------------------------------------------------------------------
+# ESCOPO DA FOTOGRAFIA  (Gate PMA-2C2-R, fase 4)
+# ---------------------------------------------------------------------------
+#: Canal sem contas proprias usa o proprio nome como escopo canonico. Nao e'
+#: sentinela de dado: e' o identificador da unica conta que aquele canal tem.
+#: `build_tiktok_records` ja' grava `shop_account = 'tiktok'` por isso.
+def canonical_account(marketplace: str, shop_account=None) -> str:
+    if shop_account:
+        texto = str(shop_account).strip()
+        if texto:
+            return texto
+    if marketplace == dom.MARKETPLACE_TIKTOK:
+        return dom.MARKETPLACE_TIKTOK
+    raise ChannelSyncError("oferta sem conta: escopo de substituicao indefinido")
+
+
+@dataclass(frozen=True)
+class PublicationScope:
+    """Unidade de substituicao: o que um DELETE apaga e um INSERT repoe.
+
+    E' `(marketplace, observed_date, shop_account)` — a conta ENTRA porque as
+    quatro contas da Shopee carregam de forma independente. Sem ela, uma conta
+    que nao executou teria sua fotografia apagada pela carga de outra.
+    """
+
+    marketplace: str
+    observed_date: date
+    shop_account: str
+
+    @staticmethod
+    def of(record: dict) -> "PublicationScope":
+        return PublicationScope(
+            marketplace=record["marketplace"],
+            observed_date=record["observed_date"],
+            shop_account=canonical_account(record["marketplace"],
+                                           record.get("shop_account")),
+        )
+
+
+def scopes_of(records) -> set:
+    return {PublicationScope.of(r) for r in records}
+
+
+# ---------------------------------------------------------------------------
+# ANTIRREGRESSAO DE WATERMARK  (Gate PMA-2C2-R, fase 3)
+# ---------------------------------------------------------------------------
+REFUSE_WATERMARK_REGRESSION = "watermark_regression"
+REFUSE_WATERMARK_UNKNOWN = "incoming_watermark_unknown"
+REFUSE_SCOPE_WITHOUT_ACCOUNT = "scope_without_account"
+
+
+def _aware(instante):
+    """Instante timezone-aware. Ingenuo e' tratado como UTC — assumir o fuso da
+    maquina faria a comparacao mudar conforme quem roda o sync."""
+    if instante is None:
+        return None
+    if instante.tzinfo is None:
+        return instante.replace(tzinfo=timezone.utc)
+    return instante
+
+
+def check_watermark_progress(incoming: dict, published: dict):
+    """Compara o relogio DA FOTOGRAFIA, escopo a escopo.
+
+    `incoming` e `published` sao `{PublicationScope: watermark}`.
+
+    O relogio e' `account_watermark_at` — o fim da carga da conta — e NUNCA o
+    `observed_at` individual da oferta. Uma unica linha pode ter carimbo de 18
+    dias atras sem que a fotografia seja velha; usar o carimbo da linha como
+    relogio confundiria item nao revisto com execucao antiga.
+
+    Devolve `(escopos_permitidos, PublishDecision_de_recusa_ou_None)`.
+    """
+    permitidos = set()
+    for escopo, relogio_novo in incoming.items():
+        relogio_velho = _aware(published.get(escopo))
+        relogio_novo = _aware(relogio_novo)
+        if relogio_velho is None:
+            # Nada publicado neste escopo: qualquer relogio avanca.
+            permitidos.add(escopo)
+            continue
+        if relogio_novo is None:
+            # Desconhecido NAO supera conhecido: publicar apagaria uma
+            # fotografia datada e a substituiria por outra sem data.
+            return permitidos, PublishDecision(PUBLISH_REFUSE,
+                                               REFUSE_WATERMARK_UNKNOWN)
+        if relogio_novo < relogio_velho:
+            return permitidos, PublishDecision(PUBLISH_REFUSE,
+                                               REFUSE_WATERMARK_REGRESSION)
+        # Igual e' rerun idempotente; maior avanca. Os dois publicam.
+        permitidos.add(escopo)
+    return permitidos, None
+
+
+@dataclass(frozen=True)
+class PublicationPlan:
+    """O que uma unica transacao fara'. Montado ANTES de qualquer mutacao.
+
+    `scopes_to_replace` inclui escopos SAUDAVEIS COM ZERO OFERTAS: para eles o
+    DELETE roda e nenhum INSERT o segue, e o resultado e' `rows_loaded = 0` com
+    execucao bem-sucedida. E' assim que "a conta existe e hoje nao tem oferta"
+    se distingue de "nao conseguimos olhar": a segunda nem aparece aqui.
+    """
+
+    marketplace: str
+    scopes_to_replace: tuple
+    records: tuple
+    decision: PublishDecision
+
+    @property
+    def rows_loaded(self) -> int:
+        return len(self.records)
+
+
+def build_publication_plan(
+    *,
+    marketplace: str,
+    records,
+    healthy_scopes,
+    incoming_watermarks: dict,
+    published_watermarks: dict,
+    channel_enabled: bool,
+    operator_override: bool = False,
+    source_available: bool = True,
+) -> PublicationPlan:
+    """Decide e planeja. Nao abre conexao, nao escreve, nao le relogio.
+
+    A ordem das guardas e' deliberada: flag, fonte, escopo, watermark. A
+    regressao e' checada ANTES de qualquer DELETE/INSERT ser montado, entao uma
+    execucao recusada nao chega perto de tocar linha existente.
+    """
+    if marketplace not in CHANNEL_MARKETPLACES:
+        raise ChannelSyncError("canal fora da fato multicanal")
+
+    vazio = PublicationPlan(marketplace, (), (), PublishDecision(PUBLISH_ALLOW))
+
+    def recusa(motivo):
+        return PublicationPlan(marketplace, (), (),
+                               PublishDecision(PUBLISH_REFUSE, motivo))
+
+    if not channel_enabled and not operator_override:
+        return recusa(REFUSE_FLAG_OFF)
+    if not source_available:
+        # Fonte indisponivel NAO vira fotografia vazia: nenhum escopo entra em
+        # `scopes_to_replace`, entao nada e' apagado e o snapshot anterior fica.
+        return recusa(REFUSE_SOURCE_UNAVAILABLE)
+    if not healthy_scopes:
+        return recusa(REFUSE_NO_ACCOUNT_RAN)
+
+    saudaveis = set(healthy_scopes)
+    for r in records:
+        if PublicationScope.of(r) not in saudaveis:
+            raise ChannelSyncError("oferta fora dos escopos saudaveis declarados")
+
+    permitidos, recusado = check_watermark_progress(
+        {e: incoming_watermarks.get(e) for e in saudaveis}, published_watermarks)
+    if recusado is not None:
+        return PublicationPlan(marketplace, (), (), recusado)
+
+    alvo = tuple(sorted(permitidos, key=lambda e: (e.shop_account,
+                                                   str(e.observed_date))))
+    manter = tuple(r for r in records if PublicationScope.of(r) in permitidos)
+    return PublicationPlan(marketplace, alvo, manter,
+                           PublishDecision(PUBLISH_ALLOW))
+
+
+#: SQL da substituicao. As duas sentencas rodam na MESMA transacao: separar o
+#: DELETE do INSERT em commits distintos deixaria uma janela em que a tela
+#: mostraria a fotografia vazia.
+SQL_DELETE_SCOPE = f"""
+DELETE FROM {TARGET_TABLE}
+ WHERE marketplace   = %(marketplace)s
+   AND observed_date = %(observed_date)s
+   AND shop_account  = %(shop_account)s
+"""
 
 
 def build_cli() -> argparse.ArgumentParser:

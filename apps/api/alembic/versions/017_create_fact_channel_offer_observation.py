@@ -72,6 +72,18 @@ caminho nenhum: afirmar que um item sumiu exige fotografia completa da conta, e
 a captura atual nao a registra. O valor fica no CHECK para quando a evidencia
 existir; ninguem o fabrica agora.
 
+O ESCOPO DA SUBSTITUICAO E' (marketplace, observed_date, shop_account)
+-----------------------------------------------------------------------
+Trocar uma fotografia e' apagar esse escopo e reinserir. A conta ENTRA no
+escopo porque as quatro contas da Shopee carregam de forma independente: sem
+ela, a carga de uma conta apagaria a fotografia de outra que nem executou.
+
+Um escopo SAUDAVEL que hoje nao tem oferta tem seu DELETE executado e nenhum
+INSERT depois — resultado `rows_loaded = 0` com execucao bem-sucedida. Isso e'
+diferente de fonte indisponivel, que nao entra na lista de escopos saudaveis e
+portanto nao sofre DELETE nenhum: a fotografia anterior permanece. Nao existe
+linha sentinela representando "zero ofertas".
+
 NENHUM DADO PESSOAL
 --------------------
 Nao ha comprador, pedido, pagamento, CPF, endereco ou telefone. As unicas
@@ -141,10 +153,18 @@ def upgrade() -> None:
             -- de EAN, e os modelos da Shopee tambem nao.
             gtin                     TEXT             NULL,
             listing_title            TEXT             NULL,
-            -- Conta de loja na origem. Na Shopee e' 1:1 com a marca hoje, mas
-            -- existe como coluna propria porque e' ELA que define o relogio de
-            -- carga, e uma conta futura com duas marcas nao quebraria a chave.
-            shop_account             TEXT             NULL,
+            -- Conta de loja na origem, e ESCOPO da substituicao.
+            --
+            -- NOT NULL por correcao, nao por estilo (Gate PMA-2C2-R): o DELETE
+            -- que troca uma fotografia filtra por
+            -- (marketplace, observed_date, shop_account). Uma linha com conta
+            -- NULA nunca casaria nesse predicado e ficaria orfa para sempre —
+            -- invisivel ao publisher e viva na tela.
+            --
+            -- Canal sem contas proprias usa o proprio nome como conta canonica
+            -- ('tiktok'), que e' o identificador da unica conta que ele tem, e
+            -- nao uma sentinela de dado ausente.
+            shop_account             TEXT         NOT NULL,
 
             -- ---------------------------------------------------------------
             -- OBSERVACAO E FRESCOR
@@ -317,10 +337,14 @@ def upgrade() -> None:
         f"CREATE INDEX idx_fcoo_canal_data_situacao ON {QUALIFICADA} "
         f"(marketplace, observed_date, is_active, product_type)"
     )
-    # Relogio e frescor por CONTA — parcial, porque o TikTok nao usa conta.
+    # ESCOPO da substituicao — exatamente o predicado do DELETE que troca uma
+    # fotografia. Sem ele, cada troca varreria a tabela inteira. Substituiu o
+    # indice parcial por conta: com `shop_account NOT NULL` o predicado parcial
+    # perdeu sentido, e liderar por `marketplace` serve tanto o DELETE quanto a
+    # leitura por canal.
     op.execute(
-        f"CREATE INDEX idx_fcoo_conta_data ON {QUALIFICADA} "
-        f"(shop_account, observed_date) WHERE shop_account IS NOT NULL"
+        f"CREATE INDEX idx_fcoo_escopo ON {QUALIFICADA} "
+        f"(marketplace, observed_date, shop_account)"
     )
     # Casamento por EAN — parcial: o TikTok nao tem GTIN e os modelos da Shopee
     # tampouco, entao um indice total desperdicaria a maior parte das linhas.
@@ -333,7 +357,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Remove SOMENTE o que o upgrade criou, na ordem inversa. Nenhuma tabela de
     # outra frente e' tocada: a 016 do Full e a 014 do PMA permanecem intactas.
-    for indice in ("idx_fcoo_gtin", "idx_fcoo_conta_data",
+    for indice in ("idx_fcoo_gtin", "idx_fcoo_escopo",
                    "idx_fcoo_canal_data_situacao", "idx_fcoo_canal_data_marca"):
         op.execute(f"DROP INDEX IF EXISTS {SCHEMA}.{indice}")
     op.execute(f"DROP TABLE IF EXISTS {QUALIFICADA}")
