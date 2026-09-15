@@ -635,6 +635,21 @@ def monitoramento_preco(
     if ref_date is not None:
         raise HTTPException(422, mp_svc.ERRO_REF_DATE_NAO_SUPORTADO)
 
+    # Gate PMA-2C1A — portao do canal, TAMBEM antes de `_require_db`.
+    #
+    # O servico ja' tem a mesma guarda, mas aqui ela precisa vir antes da
+    # dependencia de banco por um motivo concreto: `_require_db` levanta 503
+    # quando nao ha sessao, e um canal DESLIGADO nao precisa de banco nenhum
+    # para responder. Sem este desvio, `marketplace=shopee` viraria erro de
+    # infraestrutura em vez do estado `unavailable` estruturado que o contrato
+    # promete — e um erro no lugar do estado e' exatamente o que o gate proibiu.
+    try:
+        canal_pedido = mp_svc.normalize_marketplace(marketplace)
+    except mp_svc.MonitoramentoPrecoError as exc:
+        raise HTTPException(422, str(exc))
+    if not mp_svc.channel_enabled(canal_pedido):
+        return mp_svc.unavailable_response(canal_pedido)
+
     sessao = _require_db(db)
     try:
         return mp_svc.get_monitoramento_preco(

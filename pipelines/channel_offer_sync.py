@@ -1,0 +1,727 @@
+"""Gate PMA-2C1A — sync das ofertas de Shopee e TikTok: Data Mart -> Neon.
+
+    Data Mart (read-only)  ->  este CLI  ->  marts.* no Neon  ->  API
+
+Mesma arquitetura de `sync_ml_listing_price_serving.py`: o backend no Render nao
+consulta o Data Mart, e este CLI e' a unica travessia.
+
+INERTE NESTA RODADA
+-------------------
+`--apply` e' RECUSADO enquanto a migration da tabela destino nao existir. O head
+Alembic e' 015 em todas as refs e `marts.fact_channel_offer_observation` nao
+existe no Neon (verificado por `to_regclass`). A recusa nao e' um lembrete: e'
+uma barreira que consulta o estado real do banco antes de qualquer escrita.
+
+Nao ha `CREATE TABLE` em runtime. Criar o destino a partir do sync tiraria o
+schema do controle do Alembic e produziria duas fontes de verdade sobre a forma
+da tabela — exatamente o que a serializacao da migration quer evitar.
+
+O QUE `--diagnose` FAZ
+---------------------
+Le, transforma e RECONCILIA. Abre as duas conexoes em `READ ONLY` de verdade
+(`SET TRANSACTION READ ONLY` na sessao, nao apenas convencao), monta os registros
+que a futura tabela receberia e prova as particoes do PMA-2B-R2. Nao existe
+INSERT, UPDATE, DELETE, COPY, CREATE nem TRUNCATE em nenhum caminho deste modulo.
+
+O ML NAO PASSA POR AQUI
+-----------------------
+`marts.fact_marketplace_listing_price_daily` continua sendo a fonte unica do
+Mercado Livre. Uma oferta nunca existe nas duas fatos, e `CHANNEL_MARKETPLACES`
+e' a fronteira que garante isso.
+
+ESTADO DA FOTOGRAFIA, POR CONTA
+-------------------------------
+As quatro contas da Shopee terminam a carga em lotes distintos — medido: janela
+de 16,5s entre a primeira e a ultima. Concluir `stale` comparando com o
+`MAX(ingested_at)` GLOBAL marcaria 572 linhas como atrasadas quando somente 3
+realmente estao. Por isso o watermark e' SEMPRE por conta.
+
+E `absent` so' e' afirmavel com fotografia COMPLETA da conta: carga parcial
+produz `partial_load` e conta que nao executou produz `account_did_not_run`.
+`absent` afirma remocao; os outros dois afirmam desconhecimento, e confundi-los
+apagaria um item do monitoramento por causa de uma falha de coleta.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
+                       / "apps" / "api"))
+
+from app.services import pma_domain as dom  # noqa: E402
+from app.services import pma_match as pm  # noqa: E402
+
+TARGET_TABLE = "marts.fact_channel_offer_observation"
+REFERENCE_TABLE = "marts.fact_suggested_price_reference_snapshot"
+
+#: Revisao Alembic que criara o destino. Ainda NAO existe.
+#:
+#: E' **017**, e nao 016: a frente Full ja' reservou a 016
+#: (`016_create_fact_ml_fulfillment_daily.py`, `down_revision = "015"`, cria
+#: `marts.fact_ml_fulfillment_daily`), hoje como arquivo nao versionado na
+#: worktree `gate-full-1a`. O PMA nao pode usar o mesmo numero: duas revisoes
+#: com o mesmo id, ou duas com `down_revision = "015"`, produziriam heads
+#: concorrentes e o Alembic recusaria o upgrade.
+#:
+#: Portanto a migration do PMA sera' `017` com `down_revision = "016"`, criada
+#: SOMENTE depois que a 016 de Full for integrada. Nada disso acontece nesta
+#: rodada — nem o arquivo 017 e' criado.
+#:
+#: Enquanto `alembic_version` nao alcancar este valor, `--apply` e' recusado.
+REQUIRED_MIGRATION = "017"
+
+#: Revisao de Full que precisa entrar ANTES. Registrada aqui para que a
+#: dependencia entre frentes fique explicita no codigo, e nao so' num relatorio.
+BLOCKING_MIGRATION_OWNED_BY_OTHER_TRACK = "016"
+
+CHANNEL_MARKETPLACES = dom.CHANNEL_OFFER_MARKETPLACES
+
+EXIT_OK = 0
+EXIT_REFUSED = 2
+EXIT_USAGE = 5
+
+#: Colunas do registro, na ordem do futuro INSERT. Explicitar a tupla evita
+#: `SELECT *` e evita que uma coluna nova entre sem passar por revisao.
+RECORD_COLUMNS = (
+    "observed_date", "observed_at", "marketplace", "brand", "offer_key",
+    "parent_item_id", "model_id", "seller_sku", "gtin", "listing_title",
+    "shop_account", "observation_mode", "snapshot_status", "account_watermark_at",
+    "batch_id", "is_active", "product_type", "product_type_source",
+    "observed_price", "observed_price_source", "list_price", "promo_context",
+    "promo_id", "promo_discount_pct", "business_scope",
+)
+
+#: Campos que NUNCA podem entrar no contrato. Nome de cliente, endereco, CPF,
+#: telefone, e-mail: nada disso e' necessario para comparar preco com PDV, e o
+#: teste `test_nenhuma_pii_no_contrato` trava a lista.
+FORBIDDEN_FIELD_TOKENS = (
+    "cpf", "cnpj", "telefone", "phone", "email", "endereco", "address",
+    "buyer", "cliente", "customer", "recipient", "destinatario", "cep",
+)
+
+
+class ChannelSyncError(RuntimeError):
+    """Recusa do sync. Mensagem sempre FIXA: nunca carrega DSN, host ou SQL."""
+
+
+class ApplyNotAuthorizedError(ChannelSyncError):
+    """`--apply` pedido sem a migration do destino."""
+
+
+@dataclass
+class AccountClock:
+    """Relogio de UMA conta. `watermark_at` e' o fim da carga DESTA conta."""
+
+    marketplace: str
+    account: str
+    watermark_at: datetime | None
+    rows_seen: int = 0
+    batch_id: str | None = None
+    complete: bool = True
+
+    def snapshot_status_for(self, row_ingested_at: datetime | None) -> str:
+        """Estado de UMA linha contra o relogio da PROPRIA conta.
+
+        Nunca compara com o maximo global — ver o cabecalho do modulo.
+        """
+        if self.watermark_at is None:
+            return dom.SNAPSHOT_ACCOUNT_DID_NOT_RUN
+        if not self.complete:
+            # Fotografia parcial NAO pode produzir `absent`: a linha pode
+            # simplesmente nao ter sido coletada nesta passada.
+            return dom.SNAPSHOT_PARTIAL_LOAD
+        if row_ingested_at is None:
+            return dom.SNAPSHOT_STALE
+        return (dom.SNAPSHOT_CURRENT if row_ingested_at >= self.watermark_at
+                else dom.SNAPSHOT_STALE)
+
+
+@dataclass
+class DiagnoseReport:
+    marketplace: str
+    observed_date: date | None = None
+    records: list = field(default_factory=list)
+    clocks: list = field(default_factory=list)
+    counts: dict = field(default_factory=dict)
+    reasons: dict = field(default_factory=dict)
+    warnings: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Conexoes — as duas READ ONLY de verdade
+# ---------------------------------------------------------------------------
+def _read_only(url: str):
+    """Conexao com transacao READ ONLY imposta pelo servidor.
+
+    `SET TRANSACTION READ ONLY` faz o PostgreSQL recusar qualquer escrita, o que
+    e' mais forte que confiar em nao escrevermos. Se algum caminho tentar um
+    INSERT por engano, o banco aborta em vez de gravar.
+    """
+    conn = psycopg2.connect(url, connect_timeout=30)
+    conn.set_session(readonly=True, autocommit=False)
+    with conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+    return conn
+
+
+def _sanitize(exc: BaseException) -> str:
+    """Mensagem segura. O texto do driver carrega host, usuario e SQL."""
+    return f"falha de origem ({type(exc).__name__}); detalhe suprimido do log"
+
+
+# ---------------------------------------------------------------------------
+# Barreira do --apply
+# ---------------------------------------------------------------------------
+def assert_apply_authorized(conn) -> None:
+    """Recusa `--apply` enquanto o destino nao existir. Consulta o banco real.
+
+    Duas provas independentes, ambas obrigatorias: a revisao Alembic carimbada e
+    a existencia fisica da relacao. Uma so' nao basta — um `stamp` manual
+    passaria a primeira sem criar a tabela, e uma tabela criada a mao passaria a
+    segunda sem estar sob controle do Alembic.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM alembic_version")
+        carimbadas = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT to_regclass(%s)", (TARGET_TABLE,))
+        existe = cur.fetchone()[0]
+    if REQUIRED_MIGRATION not in carimbadas:
+        raise ApplyNotAuthorizedError(
+            "publicacao nao autorizada: a migration do destino ainda nao foi "
+            "aplicada. Esta rodada e' inerte por decisao de gate — a revisao "
+            "precisa ser serializada com as demais frentes antes de existir."
+        )
+    if existe is None:
+        raise ApplyNotAuthorizedError(
+            "publicacao nao autorizada: a relacao de destino nao existe. Este "
+            "CLI nao cria tabela em runtime; o schema pertence ao Alembic."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Transformacao — PURA e deterministica
+# ---------------------------------------------------------------------------
+def _decimal_or_none(valor) -> Decimal | None:
+    if valor is None:
+        return None
+    try:
+        dec = Decimal(str(valor))
+    except Exception:
+        return None
+    return dec if dec.is_finite() else None
+
+
+def build_shopee_records(rows, clocks: dict) -> list[dict]:
+    """Pai SEM variacao vira oferta; pai COM variacao e' container.
+
+    Cada linha de entrada ja' chega decidida por `has_model`: `is_model=False`
+    so' aparece para pais sem variacao, e `is_model=True` para modelos. Um pai
+    com variacao NUNCA gera registro, e por isso 659 pais + 371 modelos viram
+    692 ofertas, nao 1.030.
+    """
+    registros = []
+    for row in rows:
+        if not row["is_model"] and row.get("has_model"):
+            continue  # container: quem vira oferta sao os modelos dele
+        conta = row.get("shop_account") or ""
+        relogio = clocks.get(conta)
+        offer_key = dom.build_offer_key(
+            dom.MARKETPLACE_SHOPEE,
+            item_id=row["item_id"],
+            model_id=row.get("model_id") if row["is_model"] else None,
+            has_model=bool(row["is_model"]),
+        )
+        tipo, fonte = dom.classify_product_type(
+            dom.MARKETPLACE_SHOPEE,
+            channel_kit_flag=bool(row.get("is_kit")),
+            internal_is_kit=row.get("internal_is_kit"),
+            internal_has_bom=row.get("internal_has_bom"),
+            seller_sku=row.get("seller_sku"),
+            title=row.get("listing_title"),
+        )
+        estado = (relogio.snapshot_status_for(row.get("ingested_at"))
+                  if relogio else dom.SNAPSHOT_ACCOUNT_DID_NOT_RUN)
+        registros.append({
+            # `observed_date` e' o dia da FOTOGRAFIA (watermark da conta), nao o
+            # dia em que a linha foi tocada pela ultima vez.
+            #
+            # Isso importa: os modelos carregam `ingested_at` que recua ate
+            # 2026-08-28. Datar cada linha pelo proprio carimbo espalharia uma
+            # unica execucao por NOVE datas diferentes, e a pergunta "como estava
+            # o catalogo no dia X" deixaria de ter resposta — a fotografia
+            # ficaria fatiada entre particoes.
+            #
+            # O carimbo proprio da linha nao se perde: vive em `observed_at`, e
+            # `snapshot_status` diz se ela foi revista nesta passada.
+            "observed_date": dom.observed_date_from(
+                relogio.watermark_at if relogio else row.get("ingested_at")),
+            "observed_at": row.get("ingested_at"),
+            "marketplace": dom.MARKETPLACE_SHOPEE,
+            "brand": pm.normalize_brand_key(row.get("brand")),
+            "offer_key": offer_key,
+            "parent_item_id": str(row["item_id"]),
+            "model_id": str(row["model_id"]) if row["is_model"] else None,
+            "seller_sku": row.get("seller_sku"),
+            "gtin": pm.consumer_ean_or_none(row.get("gtin")),
+            "listing_title": row.get("listing_title"),
+            "shop_account": conta or None,
+            "observation_mode": dom.OBSERVATION_MODE_SNAPSHOT_CURRENT,
+            "snapshot_status": estado,
+            "account_watermark_at": relogio.watermark_at if relogio else None,
+            "batch_id": relogio.batch_id if relogio else None,
+            "is_active": bool(row.get("is_active")),
+            "product_type": tipo,
+            "product_type_source": fonte,
+            "observed_price": _decimal_or_none(row.get("current_price")),
+            "observed_price_source": dom.OBSERVED_PRICE_SOURCE[dom.MARKETPLACE_SHOPEE],
+            "list_price": _decimal_or_none(row.get("original_price")),
+            "promo_context": dom.promo_context_for(dom.MARKETPLACE_SHOPEE),
+            "promo_id": row.get("promotion_id"),
+            "promo_discount_pct": _decimal_or_none(row.get("discount_pct")),
+            "business_scope": dom.business_scope_for(row.get("brand")),
+        })
+    return registros
+
+
+def build_tiktok_records(rows, snapshot_day: date, clocks: dict) -> list[dict]:
+    """TikTok e' serie diaria idempotente por `snapshot_date`.
+
+    O dia vem da FONTE. Nao ha calendario sintetico e nao ha aproximacao: se o
+    dia pedido nao existe, o chamador recebe vazio e a API responde
+    `unavailable` — nunca a observacao mais proxima.
+    """
+    registros = []
+    for row in rows:
+        relogio = clocks.get(row.get("shop_account") or dom.MARKETPLACE_TIKTOK)
+        tipo, fonte = dom.classify_product_type(
+            dom.MARKETPLACE_TIKTOK,
+            internal_is_kit=row.get("internal_is_kit"),
+            internal_has_bom=row.get("internal_has_bom"),
+            seller_sku=row.get("seller_sku"),
+            title=row.get("listing_title"),
+        )
+        registros.append({
+            "observed_date": snapshot_day,
+            "observed_at": row.get("fetched_at"),
+            "marketplace": dom.MARKETPLACE_TIKTOK,
+            "brand": pm.normalize_brand_key(row.get("brand")),
+            "offer_key": dom.build_offer_key(dom.MARKETPLACE_TIKTOK,
+                                             sku_id=row["sku_id"]),
+            "parent_item_id": str(row.get("product_id") or ""),
+            "model_id": None,
+            "seller_sku": row.get("seller_sku"),
+            # O inventario do TikTok nao tem coluna de EAN — medido no PMA-2A-R.
+            # O campo existe no contrato e vem NULO, para que a ausencia seja
+            # explicita em vez de invisivel.
+            "gtin": None,
+            "listing_title": row.get("listing_title"),
+            "shop_account": row.get("shop_account"),
+            "observation_mode": dom.OBSERVATION_MODE_DAILY_SERIES,
+            "snapshot_status": dom.SNAPSHOT_CURRENT,
+            "account_watermark_at": relogio.watermark_at if relogio else None,
+            "batch_id": relogio.batch_id if relogio else None,
+            "is_active": bool(row.get("is_active")),
+            "product_type": tipo,
+            "product_type_source": fonte,
+            "observed_price": _decimal_or_none(row.get("sale_price")),
+            "observed_price_source": dom.OBSERVED_PRICE_SOURCE[dom.MARKETPLACE_TIKTOK],
+            # Sem preco de tabela na fonte. NUNCA cair para o preco praticado:
+            # isso faria toda oferta parecer "sem desconto".
+            "list_price": None,
+            "promo_context": dom.promo_context_for(dom.MARKETPLACE_TIKTOK),
+            "promo_id": None,
+            "promo_discount_pct": None,
+            "business_scope": dom.business_scope_for(row.get("brand")),
+        })
+    return registros
+
+
+def assert_no_pii(records) -> None:
+    """Nenhuma chave do registro pode sugerir dado pessoal."""
+    for registro in records[:1]:
+        for chave in registro:
+            baixo = chave.lower()
+            for token in FORBIDDEN_FIELD_TOKENS:
+                if token in baixo:
+                    raise ChannelSyncError(
+                        "campo com aparencia de dado pessoal no contrato"
+                    )
+
+
+def assert_offer_keys_unique(records) -> None:
+    """A PK nao pode colidir. Pai e modelo nunca produzem a mesma chave."""
+    vistas = set()
+    for r in records:
+        chave = (r["observed_date"], r["marketplace"], r["brand"], r["offer_key"])
+        if chave in vistas:
+            raise ChannelSyncError("colisao de chave de oferta na transformacao")
+        vistas.add(chave)
+
+
+def summarize(records, index, internal_index=None) -> tuple[dict, dict]:
+    """Aplica a politica P2 e devolve `(contagens, motivos)` reconciliados."""
+    contagens = {k: 0 for k in (
+        "observed_offers", "active_offers", "inactive_offers", "eligible_offers",
+        "excluded_by_product_type", "comparable_offers", "below_reference",
+        "at_or_above_reference", "distinct_b2b_products",
+    )}
+    contagens.update({t: 0 for t in dom.PRODUCT_TYPES})
+    motivos = {r: 0 for r in dom.NON_COMPARABLE_REASONS}
+    referencias = set()
+    for r in records:
+        if r["business_scope"] != dom.BUSINESS_SCOPE_IN:
+            continue  # out_of_business_scope nunca entra em KPI principal
+        contagens["observed_offers"] += 1
+        if not r["is_active"]:
+            contagens["inactive_offers"] += 1
+            continue
+        contagens["active_offers"] += 1
+        contagens[r["product_type"]] += 1
+        if dom.is_excluded_from_comparison(r["product_type"]):
+            contagens["excluded_by_product_type"] += 1
+            continue
+        contagens["eligible_offers"] += 1
+        resultado = pm.resolve_match(
+            {"brand": r["brand"], "gtin": r["gtin"], "seller_sku": r["seller_sku"]},
+            index, internal_index=internal_index,
+        )
+        if resultado.ambiguous:
+            motivos[dom.REASON_AMBIGUOUS] += 1
+            continue
+        if resultado.reference is None:
+            motivos[dom.REASON_REFERENCE_MISSING] += 1
+            continue
+        status, razao = dom.compare_to_reference(
+            r["observed_price"], resultado.reference.get("suggested_retail_amount"))
+        if status is None:
+            motivos[razao] += 1
+            continue
+        contagens["comparable_offers"] += 1
+        contagens[status] += 1
+        referencias.add(id(resultado.reference))
+    contagens["distinct_b2b_products"] = len(referencias)
+    dom.assert_partition(
+        observed=contagens["observed_offers"],
+        active=contagens["active_offers"],
+        inactive=contagens["inactive_offers"],
+        product_type_counts=contagens,
+        eligible=contagens["eligible_offers"],
+        excluded_by_product_type=contagens["excluded_by_product_type"],
+        comparable=contagens["comparable_offers"],
+        reason_counts=motivos,
+    )
+    if (contagens["below_reference"] + contagens["at_or_above_reference"]
+            != contagens["comparable_offers"]):
+        raise ChannelSyncError("below + at_or_above != comparable")
+    return contagens, motivos
+
+
+# ---------------------------------------------------------------------------
+# ADAPTADORES DE LEITURA REAL  (Gate PMA-2C1A-R, fases 5 e 6)
+# ---------------------------------------------------------------------------
+# Colunas EXPLICITAS em toda consulta. `SELECT *` traria colunas que nao
+# passaram por revisao — e, na Shopee, traria `inflated_current_price` e
+# `inflated_original_price`, que o contrato proibe. A lista tambem e' a defesa
+# contra PII: nenhuma coluna de comprador, pedido ou endereco e' nomeada.
+#
+# Nenhum adaptador toca `*_orders`, `*_order_items`, `*_payments` nem qualquer
+# relacao de comprador ou criador.
+
+SQL_SHOPEE_ACCOUNT_CLOCKS = """
+WITH observacoes AS (
+    SELECT shop_account, ingested_at
+      FROM silver.stg_shopee_products
+     WHERE NOT has_model
+    UNION ALL
+    SELECT shop_account, ingested_at
+      FROM silver.stg_shopee_product_models
+)
+SELECT shop_account,
+       max(ingested_at) AS watermark_at,
+       count(*)         AS rows_seen
+  FROM observacoes
+ GROUP BY shop_account
+"""
+
+#: Pais SEM variacao. `has_model = false` separa oferta de container: o pai COM
+#: variacao nao aparece aqui e nunca vira registro.
+SQL_SHOPEE_SIMPLE_PARENTS = """
+SELECT p.shop_account,
+       p.brand,
+       p.item_id,
+       p.item_sku        AS seller_sku,
+       p.gtin_code       AS gtin,
+       p.item_name       AS listing_title,
+       p.item_status,
+       p.is_kit,
+       p.current_price,
+       p.original_price,
+       p.currency,
+       p.has_promotion,
+       p.promotion_id,
+       p.discount_pct,
+       p.ingested_at
+  FROM silver.stg_shopee_products p
+ WHERE NOT p.has_model
+"""
+
+#: Modelos. O preco vem do MODELO (`m.current_price`) — provado na fase 2:
+#: 371/371 preenchidos, todos positivos, `current <= original` em 371/371.
+#: O pai COM variacao tem preco NULO em 338/338, entao herdar dele seria herdar
+#: NULL. `is_kit`, `item_status` e a promocao vem do pai porque o modelo nao os
+#: possui; `current_price` e `original_price` NUNCA vem do pai.
+SQL_SHOPEE_MODELS = """
+SELECT p.shop_account,
+       m.brand,
+       m.item_id,
+       m.model_id,
+       m.model_sku        AS seller_sku,
+       p.item_name        AS parent_title,
+       m.model_name,
+       p.item_status,
+       m.is_active        AS model_is_active,
+       p.is_kit,
+       m.current_price,
+       m.original_price,
+       m.currency,
+       p.has_promotion,
+       p.promotion_id,
+       p.discount_pct,
+       m.ingested_at
+  FROM silver.stg_shopee_product_models m
+  JOIN silver.stg_shopee_products p
+    ON p.item_id = m.item_id AND p.brand = m.brand
+ WHERE p.has_model
+"""
+
+#: A data vem da FONTE. Sem D-1 fabricado e sem aproximacao para o dia mais
+#: proximo: data inexistente devolve vazio e a API responde `unavailable`.
+SQL_TIKTOK_SNAPSHOT_DATES = """
+SELECT DISTINCT snapshot_date
+  FROM silver.stg_tiktok_inventory
+ ORDER BY snapshot_date DESC
+"""
+
+SQL_TIKTOK_OFFERS = """
+SELECT i.brand,
+       i.snapshot_date,
+       i.sku_id,
+       i.product_id,
+       i.seller_sku,
+       i.product_title   AS listing_title,
+       i.product_status,
+       i.is_active,
+       i.sale_price,
+       i.currency,
+       i.fetched_at
+  FROM silver.stg_tiktok_inventory i
+ WHERE i.snapshot_date = %(snapshot_date)s
+"""
+
+#: Cadastro interno, para `internal_is_kit` / `internal_has_bom`. SO' o sync o
+#: le — a API nunca consulta o Data Mart.
+SQL_INTERNAL_PRODUCT_MAP = """
+SELECT lower(trim(marca))  AS brand,
+       upper(trim(codigo)) AS codigo,
+       produto_sk,
+       ambiguo
+  FROM gold.map_produto_codigo_gobeauty
+ WHERE codigo IS NOT NULL
+"""
+
+SQL_INTERNAL_PRODUCT_DIM = """
+SELECT produto_sk, is_kit, ean FROM gold.dim_produto_gobeauty
+"""
+
+SQL_INTERNAL_BOM_KEYS = """
+SELECT DISTINCT kit_sk FROM gold.bridge_kit_componente_gobeauty
+"""
+
+
+def _rows(conn, sql, params=None):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, params or {})
+        return [dict(r) for r in cur.fetchall()]
+
+
+def load_internal_catalog(conn) -> dict:
+    """Autoridade interna de kit. Chave ambigua e' DESCARTADA, nunca desempatada."""
+    mapa, ambiguas = {}, set()
+    for linha in _rows(conn, SQL_INTERNAL_PRODUCT_MAP):
+        chave = (linha["brand"], linha["codigo"])
+        if linha["ambiguo"]:
+            ambiguas.add(chave)
+            continue
+        mapa[chave] = linha["produto_sk"]
+    dim = {r["produto_sk"]: r for r in _rows(conn, SQL_INTERNAL_PRODUCT_DIM)}
+    bom = {r["kit_sk"] for r in _rows(conn, SQL_INTERNAL_BOM_KEYS)}
+    return {"map": mapa, "ambiguous": ambiguas, "dim": dim, "bom": bom}
+
+
+def _internal_signals(catalogo, brand, seller_sku):
+    """`(internal_is_kit, internal_has_bom)`; `(None, None)` se indisponivel.
+
+    `None` NAO e' `False`: significa que o cadastro nao respondeu, e e' isso que
+    separa `no_kit_signal` de `product_type_unknown`.
+    """
+    if not catalogo:
+        return None, None
+    marca = pm.normalize_brand_key(brand)
+    codigo = pm.normalize_sku_key(seller_sku)
+    if marca is None or codigo is None:
+        return None, None
+    chave = (marca, codigo)
+    if chave in catalogo["ambiguous"]:
+        return None, None
+    produto_sk = catalogo["map"].get(chave)
+    if produto_sk is None:
+        return None, None
+    return (bool(catalogo["dim"].get(produto_sk, {}).get("is_kit")),
+            produto_sk in catalogo["bom"])
+
+
+def load_shopee_account_clocks(conn) -> dict:
+    """Um relogio por CONTA. Jamais um `MAX(ingested_at)` global.
+
+    Medido: as quatro contas terminam a carga numa janela de 16,5s. Comparar
+    cada linha com o maximo GLOBAL classifica como atrasada toda linha das
+    contas que terminaram antes da ultima — 404 contra 125 reais, 3x a mais.
+
+    O watermark cobre as DUAS tabelas da conta (pais sem variacao e modelos),
+    porque elas nao terminam juntas: medido, a de modelos fecha ~25s depois da
+    de pais em toda conta (apice 09:06:45 -> 09:07:10). Usar so' o maximo dos
+    pais deixaria o watermark cedo demais e marcaria como `current` modelos que
+    na verdade nao foram revistos.
+    """
+    relogios = {}
+    for linha in _rows(conn, SQL_SHOPEE_ACCOUNT_CLOCKS):
+        conta = linha["shop_account"]
+        relogios[conta] = AccountClock(
+            marketplace=dom.MARKETPLACE_SHOPEE,
+            account=conta,
+            watermark_at=linha["watermark_at"],
+            rows_seen=linha["rows_seen"],
+            batch_id=None,
+            complete=True,
+        )
+    return relogios
+
+
+def fetch_shopee_offers(conn, catalogo=None) -> list:
+    """Le a fonte auditada no formato que `build_shopee_records` espera."""
+    linhas = []
+    for p in _rows(conn, SQL_SHOPEE_SIMPLE_PARENTS):
+        interno_kit, interno_bom = _internal_signals(
+            catalogo, p["brand"], p["seller_sku"])
+        linhas.append({
+            "is_model": False, "has_model": False,
+            "shop_account": p["shop_account"], "brand": p["brand"],
+            "item_id": p["item_id"], "model_id": None,
+            "seller_sku": p["seller_sku"], "gtin": p["gtin"],
+            "listing_title": p["listing_title"],
+            "is_kit": bool(p["is_kit"]),
+            "internal_is_kit": interno_kit, "internal_has_bom": interno_bom,
+            "is_active": str(p["item_status"] or "").strip().lower() == "normal",
+            "current_price": p["current_price"],
+            "original_price": p["original_price"],
+            "currency": p["currency"],
+            "promotion_id": p["promotion_id"],
+            "discount_pct": p["discount_pct"],
+            "ingested_at": p["ingested_at"],
+        })
+    for m in _rows(conn, SQL_SHOPEE_MODELS):
+        interno_kit, interno_bom = _internal_signals(
+            catalogo, m["brand"], m["seller_sku"])
+        linhas.append({
+            "is_model": True, "has_model": True,
+            "shop_account": m["shop_account"], "brand": m["brand"],
+            "item_id": m["item_id"], "model_id": m["model_id"],
+            "seller_sku": m["seller_sku"],
+            # Modelo nao tem EAN — medido: 0 de 371. Vem nulo em vez de herdar
+            # o do pai, que tambem nao existe para item com variacao.
+            "gtin": None,
+            "listing_title": " ".join(
+                x for x in (m["parent_title"], m["model_name"]) if x),
+            "is_kit": bool(m["is_kit"]),
+            "internal_is_kit": interno_kit, "internal_has_bom": interno_bom,
+            "is_active": (str(m["item_status"] or "").strip().lower() == "normal"
+                          and bool(m["model_is_active"])),
+            # Preco do PROPRIO modelo — ver SQL_SHOPEE_MODELS.
+            "current_price": m["current_price"],
+            "original_price": m["original_price"],
+            "currency": m["currency"],
+            "promotion_id": m["promotion_id"],
+            "discount_pct": m["discount_pct"],
+            "ingested_at": m["ingested_at"],
+        })
+    return linhas
+
+
+def latest_tiktok_snapshot(conn):
+    datas = _rows(conn, SQL_TIKTOK_SNAPSHOT_DATES)
+    return datas[0]["snapshot_date"] if datas else None
+
+
+def tiktok_snapshot_exists(conn, dia) -> bool:
+    """Data pedida existe? NUNCA se aproxima para a mais proxima."""
+    return any(linha["snapshot_date"] == dia
+               for linha in _rows(conn, SQL_TIKTOK_SNAPSHOT_DATES))
+
+
+def fetch_tiktok_offers(conn, snapshot_day, catalogo=None) -> list:
+    linhas = []
+    for o in _rows(conn, SQL_TIKTOK_OFFERS, {"snapshot_date": snapshot_day}):
+        interno_kit, interno_bom = _internal_signals(
+            catalogo, o["brand"], o["seller_sku"])
+        linhas.append({
+            "brand": o["brand"], "sku_id": o["sku_id"],
+            "product_id": o["product_id"], "seller_sku": o["seller_sku"],
+            "listing_title": o["listing_title"],
+            "internal_is_kit": interno_kit, "internal_has_bom": interno_bom,
+            "is_active": bool(o["is_active"]),
+            "sale_price": o["sale_price"], "currency": o["currency"],
+            "fetched_at": o["fetched_at"],
+            "shop_account": dom.MARKETPLACE_TIKTOK,
+        })
+    return linhas
+
+
+def build_cli() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="channel_offer_sync",
+        description=("Diagnostico das ofertas de Shopee e TikTok. A publicacao "
+                     "permanece BLOQUEADA ate a migration do destino existir."),
+    )
+    parser.add_argument("--marketplace", choices=list(CHANNEL_MARKETPLACES),
+                        required=True)
+    parser.add_argument("--diagnose", action="store_true", default=True,
+                        help="somente leitura (padrao e unico modo disponivel)")
+    parser.add_argument("--apply", action="store_true",
+                        help="RECUSADO enquanto a migration do destino nao existir")
+    parser.add_argument("--observed-date", default=None,
+                        help="YYYY-MM-DD; sem aproximacao para o dia mais proximo")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_cli().parse_args(argv)
+    if args.apply:
+        # A barreira do banco roda em `assert_apply_authorized`; esta aqui
+        # existe para que nem a conexao seja aberta numa rodada inerte.
+        print("RECUSADO: --apply nao esta autorizado nesta rodada. A migration "
+              f"{REQUIRED_MIGRATION} do destino ainda nao existe e este CLI nao "
+              "cria tabela em runtime.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"diagnose: marketplace={args.marketplace} (somente leitura)")
+    return EXIT_OK
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
