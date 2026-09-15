@@ -1,0 +1,442 @@
+"""Barreiras estruturais do pacote de expedicao.
+
+Estes testes nao exercitam logica de negocio: eles impedem que uma edicao futura
+reintroduza um defeito ja diagnosticado (PII no SELECT, relogio dentro da
+transformacao, DELETE global, NO_OP por watermark, historico integral por
+pedido, marca dentro da identidade, chave de lock colidindo com outra frente).
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+from pathlib import Path
+
+import pytest
+
+from pipelines.expedicao import cli, publisher, shopee_extract, transform
+from pipelines.expedicao.contract import (
+    ADVISORY_LOCK_KEYS,
+    ALERT_EVENT_TABLE_FUTURE,
+    FILA_TABLE,
+    KNOWN_FOREIGN_LOCK_KEYS,
+    MARKETPLACE_ID,
+    MIN_BASELINE_SAMPLE,
+    OPERATIONAL_AGE_LIMIT,
+    PII_FORBIDDEN_TOKENS,
+    REGISTRY_SQL,
+    RUN_TABLE,
+    SHOPEE_ALLOWED_SOURCE_COLUMNS,
+    SLOW_BASELINE_FACTOR,
+    Channel,
+    DeadlineStatus,
+    FreshnessStatus,
+    OperationalAgeStatus,
+    RunStatus,
+    SourceHealth,
+    TimestampQuality,
+)
+
+PACOTE = Path(transform.__file__).parent
+REPO = PACOTE.parents[1]
+
+
+# ---------------------------------------------------------------------------
+# Helpers de inspecao estrutural
+# ---------------------------------------------------------------------------
+# Um `grep` no texto do arquivo acusaria a propria docstring que EXPLICA o
+# defeito — e obrigaria a documentar menos para o teste passar. A analise vai na
+# arvore sintatica: importa o que o codigo faz, nao o que ele descreve.
+def _arvore(modulo) -> ast.Module:
+    return ast.parse(Path(modulo.__file__).read_text(encoding="utf-8"))
+
+
+def _docstrings(arvore: ast.Module) -> set[str]:
+    encontradas = set()
+    for no in ast.walk(arvore):
+        if isinstance(
+            no, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            texto = ast.get_docstring(no, clean=False)
+            if texto is not None:
+                encontradas.add(texto)
+    return encontradas
+
+
+def literais_de_texto(modulo) -> list[str]:
+    """Strings do codigo, sem docstrings. Comentarios nem chegam ao AST.
+
+    f-string vira `JoinedStr` e seus pedacos literais aparecem como `Constant`
+    separados: `f"DELETE FROM {T} WHERE channel = %s"` se quebraria em
+    `'DELETE FROM '` e `' WHERE channel = %s'`. Por isso a f-string e devolvida
+    inteira, pelo `unparse`, e seus fragmentos sao suprimidos.
+    """
+    arvore = _arvore(modulo)
+    docs = _docstrings(arvore)
+
+    fragmentos: set[int] = set()
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.JoinedStr):
+            for filho in ast.walk(no):
+                if filho is not no:
+                    fragmentos.add(id(filho))
+
+    saida: list[str] = []
+    for no in ast.walk(arvore):
+        if id(no) in fragmentos:
+            continue
+        if isinstance(no, ast.JoinedStr):
+            saida.append(ast.unparse(no))
+        elif (
+            isinstance(no, ast.Constant)
+            and isinstance(no.value, str)
+            and no.value not in docs
+        ):
+            saida.append(no.value)
+    return saida
+
+
+def chamadas_de_relogio(modulo) -> list[str]:
+    """Chamadas reais a relogio: `datetime.now`, `date.today`, `utcnow`."""
+    achadas = []
+    for no in ast.walk(_arvore(modulo)):
+        if isinstance(no, ast.Call):
+            nome = ast.unparse(no.func)
+            if nome.endswith(("datetime.now", "date.today", "utcnow")):
+                achadas.append(nome)
+    return achadas
+
+
+def nomes_definidos(modulo) -> set[str]:
+    return {
+        no.name
+        for no in ast.walk(_arvore(modulo))
+        if isinstance(no, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+MODULOS = [cli, publisher, shopee_extract, transform]
+
+
+# ---------------------------------------------------------------------------
+# PII
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "sql",
+    [
+        shopee_extract.SHOPEE_BACKLOG_SQL,
+        shopee_extract.SHOPEE_WATERMARK_SQL,
+        shopee_extract.SHOPEE_BASELINE_SQL,
+        REGISTRY_SQL,
+    ],
+)
+def test_sql_nao_contem_termo_de_pii(sql):
+    shopee_extract.assert_no_pii_in_sql(sql, PII_FORBIDDEN_TOKENS)
+
+
+def test_select_da_shopee_e_lista_fechada():
+    # Igualdade, nao continencia: coluna nova so passa se for declarada.
+    assert set(shopee_extract.SHOPEE_SELECT_COLUMNS) == set(
+        SHOPEE_ALLOWED_SOURCE_COLUMNS
+    )
+
+
+def test_select_nao_usa_asterisco():
+    # `SELECT *` traria buyer_cpf_id, recipient_address e o resto do comprador.
+    assert "*" not in shopee_extract.SHOPEE_BACKLOG_SQL
+
+
+def test_nenhum_modulo_do_pacote_menciona_pii():
+    for arquivo in sorted(PACOTE.glob("*.py")):
+        texto = arquivo.read_text(encoding="utf-8").lower()
+        # O proprio contrato declara a denylist; ele e a excecao legitima.
+        if arquivo.name in {"contract.py", "shopee_extract.py", "audit.py"}:
+            continue
+        achados = sorted(t for t in PII_FORBIDDEN_TOKENS if t in texto)
+        assert not achados, f"{arquivo.name} menciona PII: {achados}"
+
+
+def test_colunas_publicadas_nao_tem_campo_de_comprador():
+    for coluna in publisher.FILA_COLUMNS + publisher.SUMMARY_COLUMNS:
+        for token in PII_FORBIDDEN_TOKENS:
+            assert token not in coluna.lower(), f"coluna {coluna} parece PII"
+
+
+def test_chave_nao_carrega_pii():
+    for coluna in publisher.FILA_PRIMARY_KEY + publisher.SUMMARY_PRIMARY_KEY:
+        for token in PII_FORBIDDEN_TOKENS:
+            assert token not in coluna.lower()
+
+
+# ---------------------------------------------------------------------------
+# Chave da fila — EXP-1A-R2
+# ---------------------------------------------------------------------------
+def test_pk_da_fila_espelha_a_chave_da_origem():
+    """`pk_shopee_orders` e UNIQUE em `(shop_account, order_sn)`."""
+    assert publisher.FILA_PRIMARY_KEY == (
+        "channel", "shop_account", "marketplace_order_id",
+    )
+
+
+def test_marca_nao_faz_parte_da_identidade():
+    """Corrigir a marca de uma conta nao pode criar um pedido novo."""
+    assert "brand" not in publisher.FILA_PRIMARY_KEY
+    # Mas continua sendo publicada como atributo.
+    assert "brand" in publisher.FILA_COLUMNS
+
+
+def test_pk_do_resumo_e_por_conta_e_hora():
+    assert publisher.SUMMARY_PRIMARY_KEY == ("channel", "shop_account", "snapshot_hour")
+    assert "brand" not in publisher.SUMMARY_PRIMARY_KEY
+
+
+# ---------------------------------------------------------------------------
+# Determinismo temporal
+# ---------------------------------------------------------------------------
+def test_transform_nao_le_relogio():
+    """`datetime.now()` / `date.today()` tornariam o resultado irreproduzivel e
+    adotariam o fuso do processo (BRT no notebook, UTC no worker)."""
+    assert chamadas_de_relogio(transform) == []
+
+
+def test_extract_nao_le_relogio():
+    assert chamadas_de_relogio(shopee_extract) == []
+
+
+def test_baseline_termina_no_instante_injetado():
+    sql = shopee_extract.SHOPEE_BASELINE_SQL.lower()
+    assert "%(effective_at)s" in sql
+    assert "now()" not in sql
+
+
+def test_relogio_so_no_cli():
+    assert len(chamadas_de_relogio(cli)) == 1
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        transform.classify_deadline,
+        transform.classify_age,
+        transform.classify_freshness,
+        transform.build_fila_shopee,
+        transform.build_account_summaries,
+        transform.snapshot_hour,
+    ],
+)
+def test_funcoes_recebem_effective_at(func):
+    assert "effective_at" in inspect.signature(func).parameters
+
+
+# ---------------------------------------------------------------------------
+# NO_OP por watermark nao pode voltar (EXP-1A-R)
+# ---------------------------------------------------------------------------
+def test_nao_existe_no_op_por_watermark():
+    definidos = nomes_definidos(cli)
+    assert "decide_run_mode" not in definidos
+    assert "RunMode" not in definidos
+    assert "source_advanced" in definidos
+
+
+def test_nenhum_modulo_declara_no_op():
+    for modulo in MODULOS:
+        for literal in literais_de_texto(modulo):
+            assert "no_op" not in literal.lower(), (
+                f"{Path(modulo.__file__).name} carrega literal de NO_OP: {literal!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Historico integral removido (EXP-1A-R2)
+# ---------------------------------------------------------------------------
+def test_historico_integral_por_pedido_nao_existe():
+    """~1.000 pedidos/hora dariam ~8,8 milhoes de linhas/ano copiando o mesmo
+    estado. A auditoria individual futura registra TRANSICOES, nao copias."""
+    assert not hasattr(transform, "build_historico")
+    assert not hasattr(publisher, "HISTORICO_COLUMNS")
+    assert not hasattr(publisher, "HISTORICO_CONFLICT_SQL")
+
+
+def test_nenhuma_referencia_ativa_a_fila_historico():
+    for arquivo in sorted(PACOTE.glob("*.py")):
+        texto = arquivo.read_text(encoding="utf-8")
+        assert "expedicao_fila_historico" not in texto, arquivo.name
+
+
+def test_tabela_de_evento_de_alerta_fica_como_evolucao_futura():
+    assert ALERT_EVENT_TABLE_FUTURE == "marts.expedicao_alert_event"
+    # Declarada no contrato, mas NAO usada por publisher nem transform.
+    for modulo in (publisher, transform):
+        assert "expedicao_alert_event" not in Path(
+            modulo.__file__
+        ).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Migration — nenhuma criada por esta frente
+# ---------------------------------------------------------------------------
+def test_nenhuma_migration_criada_por_expedicao():
+    """A 016 esta reservada para a frente Full; Expedicao usa a proxima linear
+    somente depois que a de Full for integrada."""
+    versions = REPO / "apps" / "api" / "alembic" / "versions"
+    arquivos = sorted(p.name for p in versions.glob("*.py"))
+    assert arquivos[-1].startswith("015_"), f"head inesperado: {arquivos[-1]}"
+    for nome in arquivos:
+        conteudo = (versions / nome).read_text(encoding="utf-8")
+        assert "expedicao" not in conteudo.lower(), (
+            f"{nome} menciona expedicao — esta frente nao cria migration"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Lock
+# ---------------------------------------------------------------------------
+def test_chaves_de_lock_nao_colidem_com_outras_frentes():
+    for canal, chave in ADVISORY_LOCK_KEYS.items():
+        assert chave not in KNOWN_FOREIGN_LOCK_KEYS, f"{canal} colide: {chave}"
+
+
+def test_cada_canal_tem_chave_distinta():
+    chaves = list(ADVISORY_LOCK_KEYS.values())
+    assert len(chaves) == len(set(chaves))
+
+
+def test_lock_e_de_sessao_e_nao_transacional():
+    sqls = literais_de_texto(publisher)
+    assert any("pg_try_advisory_lock" in s for s in sqls)
+    assert any("pg_advisory_unlock" in s for s in sqls)
+    assert not any("pg_advisory_xact_lock" in s for s in sqls)
+
+
+# ---------------------------------------------------------------------------
+# Publicacao por canal
+# ---------------------------------------------------------------------------
+def test_delete_e_sempre_restrito_ao_canal():
+    assert "WHERE channel = %s" in publisher.DELETE_CANAL_SQL
+    deletes = [s for s in literais_de_texto(publisher) if "DELETE FROM" in s.upper()]
+    assert len(deletes) == 1, f"mais de um DELETE no publisher: {deletes}"
+    assert "WHERE channel" in deletes[0]
+
+
+def test_resumo_so_sobrescreve_observacao_mais_nova():
+    sql = publisher.SUMMARY_CONFLICT_SQL
+    assert "ON CONFLICT (channel, shop_account, snapshot_hour)" in sql
+    assert "WHERE EXCLUDED.observed_at >" in sql
+    # `DO NOTHING` congelaria a primeira leitura da hora.
+    assert "DO UPDATE" in sql
+    assert "DO NOTHING" not in sql
+
+
+def test_resumo_tem_todos_os_campos_do_contrato():
+    obrigatorios = {
+        "refresh_batch_id", "channel", "shop_account", "brand", "snapshot_hour",
+        "observed_at", "source_watermark_at", "source_advanced", "backlog_count",
+        "overdue_count", "due_within_24h_count", "on_time_count",
+        "deadline_unavailable_count", "over_48h_count", "slow_count",
+        "zombie_count", "stalled_count", "run_status", "ingested_at",
+    }
+    assert set(publisher.SUMMARY_COLUMNS) == obrigatorios
+
+
+def test_fila_carrega_o_lote():
+    assert "refresh_batch_id" in publisher.FILA_COLUMNS
+    assert "refresh_batch_id" in publisher.SUMMARY_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# Dominios
+# ---------------------------------------------------------------------------
+def test_dominios_completos():
+    assert {s.value for s in DeadlineStatus} == {
+        "overdue", "due_within_24h", "on_time", "unavailable",
+    }
+    assert {s.value for s in OperationalAgeStatus} == {
+        "within_48h", "over_48h", "unknown",
+    }
+    assert {s.value for s in FreshnessStatus} == {
+        "fresh", "stale", "critical", "unknown",
+    }
+    assert {s.value for s in RunStatus} == {"success", "failed"}
+    assert TimestampQuality.VERIFIED.value == "verified"
+
+
+def test_saude_da_fonte_cobre_os_seis_estados():
+    assert {s.value for s in SourceHealth} == {
+        "healthy",
+        "account_missing",
+        "unexpected_account",
+        "registry_ambiguous",
+        "watermark_missing",
+        "source_unavailable",
+    }
+
+
+def test_so_healthy_autoriza_publicacao():
+    assert SourceHealth.HEALTHY.can_publish is True
+    for doente in SourceHealth:
+        if doente is not SourceHealth.HEALTHY:
+            assert doente.can_publish is False
+
+
+def test_anomalias_sao_flags_separadas():
+    """Um `stalled_reason` singular obrigaria a escolher uma causa."""
+    assert "is_slow_vs_baseline" in publisher.FILA_COLUMNS
+    assert "is_source_zombie" in publisher.FILA_COLUMNS
+    assert "is_stalled" in publisher.FILA_COLUMNS
+    assert "stalled_reason" not in publisher.FILA_COLUMNS
+    # No resumo as tres contagens sao independentes.
+    for c in ("slow_count", "zombie_count", "stalled_count"):
+        assert c in publisher.SUMMARY_COLUMNS
+
+
+def test_limite_de_48h_nao_depende_do_p50():
+    assert OPERATIONAL_AGE_LIMIT.total_seconds() == 48 * 3600
+    assert SLOW_BASELINE_FACTOR == 2.0
+    assert MIN_BASELINE_SAMPLE >= 1
+    texto = Path(transform.__file__).read_text(encoding="utf-8")
+    corpo = texto.split("def classify_age")[1].split("\ndef ")[0]
+    assert "BASELINE" not in corpo.upper()
+
+
+def test_marketplace_id_segue_a_dimensao_do_neon():
+    """Conferido em `marts.dim_marketplace` por leitura read-only."""
+    assert MARKETPLACE_ID[Channel.TIKTOKSHOP] == 1
+    assert MARKETPLACE_ID[Channel.MERCADOLIVRE] == 2
+    assert MARKETPLACE_ID[Channel.SHOPEE] == 3
+
+
+def test_nomes_de_tabela_no_schema_marts():
+    for tabela in (FILA_TABLE, RUN_TABLE, ALERT_EVENT_TABLE_FUTURE):
+        assert tabela.startswith("marts.")
+
+
+def test_backlog_nao_tem_corte_temporal():
+    sql = shopee_extract.SHOPEE_BACKLOG_SQL.lower()
+    assert "create_time >" not in sql
+    assert "interval" not in sql
+
+
+def test_baseline_exclui_cancelados():
+    """46 de 23.755 (0,19%) tinham pickup preenchido e status cancelado."""
+    assert "CANCELLED" in shopee_extract.BASELINE_EXCLUDED_STATUSES
+    assert "excluded_statuses" in shopee_extract.SHOPEE_BASELINE_SQL
+    # TO_RETURN NAO e excluido: o despacho aconteceu e a devolucao e posterior.
+    assert "TO_RETURN" not in shopee_extract.BASELINE_EXCLUDED_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+def test_registry_le_as_duas_dimensoes_e_respeita_ativo():
+    sql = REGISTRY_SQL.lower()
+    assert "marts.dim_seller_account" in sql
+    assert "marts.dim_loja" in sql
+    assert "sa.ativo and l.ativo" in sql
+    assert "marketplace_id = %(marketplace_id)s" in sql
+
+
+def test_shop_ids_nao_estao_no_codigo_de_producao():
+    """As contas vivem no registry. Hardcode faria o codigo divergir do Neon."""
+    for arquivo in sorted(PACOTE.glob("*.py")):
+        texto = arquivo.read_text(encoding="utf-8")
+        for shop_id in ("1609671923", "1579330222", "1593864538", "1457734799"):
+            assert shop_id not in texto, f"{arquivo.name} hardcoda {shop_id}"
