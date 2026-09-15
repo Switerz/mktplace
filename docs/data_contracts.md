@@ -472,3 +472,198 @@ Grão: uma linha física por anúncio no CSV de ads. Sem PII. Mantém a limitaç
 1. **Nunca deduplicar** por `order_id`/data entre arquivos — grão é por linha física de arquivo, não por evento de negócio.
 2. **Nunca** usar `DATAMART_DATABASE_URL` para escrever nestas tabelas — Gate 2 exige uma credencial dedicada (`DATAMART_SHOPEE_WRITE_URL`), distinta da de leitura.
 3. `raw_payload` é a fonte da verdade dos valores originais; qualquer campo técnico (file_id, source_row_number, hashes, timestamps) fica **fora** do payload.
+
+## 8. Fulfillment Mercado Livre (Gates FULL-1A / FULL-1A-R — 2026-09-15, migration NAO aplicada)
+
+### 8.1 Definicao canonica
+
+    Full         = api.ml_shipments.logistic_type = 'fulfillment'
+    Nao-Full     = logistic_type presente e diferente de 'fulfillment'
+    Desconhecido = envio ausente OU logistic_type nulo
+
+`unknown` e' classe PROPRIA e nunca e' somada a nao-Full. Pedido sem envio
+classificado por omissao seria uma afirmacao que ninguem mediu.
+
+`logistic_type_original` preserva o rotulo bruto da fonte, inclusive os extintos.
+Medido em `api.ml_shipments`:
+
+| rotulo | envios | primeiro | ultimo |
+|---|---:|---|---|
+| `fulfillment` | 336.088 | 22/05/2025 | vigente |
+| `cross_docking` | 116.510 | 01/09/2025 | vigente |
+| `xd_drop_off` | 51.643 | 01/09/2025 | 10/03/2026 |
+| `self_service` | 9.927 | 22/05/2025 | 20/03/2026 |
+| `drop_off` | 3.389 | 25/05/2025 | 30/09/2025 |
+
+Serie longa DEVE agrupar Full contra todo o resto. Em novembro/2025,
+`xd_drop_off` sozinho tinha 14.696 envios contra 794 de `cross_docking`: olhar
+so' os dois rotulos vigentes apagaria 62% do mes. Nao ha CHECK de dominio fechado
+na coluna — modalidade nova do ML entra como nao-Full, com rotulo preservado, em
+vez de derrubar a carga.
+
+### 8.2 Fonte, grao e join
+
+    api.ml_orders (brand, shipping_id) -> api.ml_shipments (brand, shipment_id)
+
+Sempre PEDIDO -> ENVIO. Cardinalidade medida em agosto/2026: 59.123 pedidos pagos
+entram e 59.123 saem, sem multiplicacao. A direcao inversa MULTIPLICA — 4.821
+packs carregam de 2 a 8 pedidos no mesmo `shipping_id`.
+
+`brand` faz parte da chave: 17 `shipment_id` de agosto/2026 aparecem em duas
+marcas distintas.
+
+Unidades vem de `api.ml_order_line_items`, nunca de `shipping_items`. Medido: o
+caminho errado devolve 67.725 unidades contra 60.916 reais, 11,2% de inflacao.
+
+### 8.3 GMV
+
+    paid_gmv = SUM(api.ml_orders.total_amount) WHERE status = 'paid'
+
+Competencia: `date_created` do PEDIDO. Frete fora. `cancelled` e
+`partially_refunded` fora.
+
+### 8.4 GMV por listing — alocacao deterministica
+
+`api.ml_order_line_items` fecha com `total_amount` em 59.123 de 59.123 pedidos
+pagos de agosto/2026, diferenca total de R$ 0,00. O grao e' naturalmente 1:1:
+257.681 pedidos entre maio e agosto/2026 tem EXATAMENTE uma linha cada, porque o
+ML quebra compra multi-item em pedidos distintos amarrados por `pack_id`.
+
+Por isso `marts.fact_ml_fulfillment_listing_daily` publica GMV por listing sem
+nenhum rateio. O sync BLOQUEIA a publicacao se a alocacao deixar de fechar.
+
+### 8.5 Reconciliacao de agosto/2026 e a divergencia aberta
+
+GMV reconcilia com a planilha do stakeholder nos 8 valores por marca, ao inteiro
+(total Full 3.649.773, nao-Full 877.706, share 80,61%). Cancelamento Full
+reconcilia (4,0798% -> 4,07% truncado, que e' a convencao da planilha).
+
+**Divergencia ABERTA, nao reconciliada:** cancelamento nao-Full. A planilha mostra
+4,26%; o Data Mart produz 4,3594% (4,36%). Diferenca de 0,10 p.p., equivalente a
+11 pedidos. Hipoteses testadas e descartadas: maturacao (explica no maximo 0,04
+p.p.), denominador alternativo (nenhuma das 4 variantes testadas da 4,26%) e
+exclusao dos 8 pedidos orfaos (leva a 4,36%, nao a 4,26%). **Permanece
+divergencia.** As fixtures fixam 4,36%, nunca 4,26%.
+
+**Deriva medida (FULL-1A-R):** entre 15/09 e a revisao, um pedido de agosto
+migrou de paid para cancelled e o GMV Full caiu de 3.649.773,48 para
+3.649.707,48 — R$ 66,00 sozinho, num mes ja' "fechado". As fixtures sao o
+snapshot RATIFICADO da reconciliacao, nao uma verdade imutavel: a maturacao
+continua atuando, e e' exatamente por isso que o incremental e' combinado com
+backfill e full.
+
+### 8.6 Grao oficial dos shares — RATIFICADO
+
+Decisao de negocio ratificada no FULL-1A-R: **o grao oficial dos tres shares e' o
+PEDIDO PAGO**, a mesma populacao do GMV.
+
+| metrica | OFICIAL (pedido pago) | historico (grao do envio) |
+|---|---:|---:|
+| share_full_gmv | **80,61%** | — |
+| share_full_orders | **81,88%** | 81,18% |
+| share_full_units | **82,05%** | 81,98% |
+
+81,18% e 81,98% foram medidos no grao do ENVIO, populacao diferente (inclui
+envio cancelado e atribui o pack inteiro). **Nao sao KPI e nao sao comparaveis**
+com os oficiais. Ficam registrados apenas como procedencia, e nenhum teste exige
+que o codigo os reproduza — faze-lo obrigaria o join multiplicador.
+
+### 8.6.1 Populacoes: todo status tem casa
+
+    eligible_orders = paid_orders + cancelled_orders + other_orders
+
+other_orders e' coluna propria desde o FULL-1A-R. Antes, os 21 pedidos Full e
+16 nao-Full em partially_refunded existiam apenas como resto aritmetico
+invisivel. Agora ha ck_fmfd_populacoes_fecham travando a soma EXATA: status
+novo do ML nao consegue desaparecer em silencio.
+
+partially_refunded fica FORA do GMV, e isso **nao e' decisao pelo nome**: e' o
+contrato canonico ja' vigente na Torre — db/seeds/03_status_canonico.sql mapeia
+para o canonico returned, e docs/MARKETPLACE_DATA_QUALITY_CHECKPOINT.md
+registra a regra e a limitacao conhecida (o pedido INTEIRO sai, nao so' a parcela
+reembolsada, ~0,1% do GMV).
+
+unknown fica fora do DENOMINADOR dos shares: nao e' Full nem nao-Full, e
+conta-lo faria uma lacuna de dado parecer queda operacional. Continua somando nos
+totais absolutos.
+
+### 8.6.2 Coorte temporal: UMA ref_date
+
+ref_date = criacao do PEDIDO, para **todas** as metricas da linha, inclusive
+handling e delivery.
+
+O FULL-1A media os tempos no grao do ENVIO com a data do ENVIO, dando duas
+semanticas a uma coluna de chave. Corrigido: a amostra agora e' o PEDIDO da
+coorte, medido do date_created dele ate' os eventos do envio dele.
+
+Medido em agosto/2026 apos a correcao:
+
+| classe | handling | delivery | cobertura handling | cobertura delivery |
+|---|---:|---:|---:|---:|
+| full | 28,67 h | 2,65 d | 97,3% | 96,5% |
+| non_full | 71,83 h | 4,89 d | 97,1% | 96,0% |
+| unknown | — | — | 0% | 0% |
+
+Zero negativos, zero outliers acima de 30 d de handling ou 60 d de entrega
+(p99 de handling: 185 h Full, 281 h nao-Full). sample_count mede a **censura**:
+os ~3% sem evento sao pedidos que ainda nao despacharam ou nao entregaram, nunca
+tempo zero. ck_fmfd_amostras_cabem_na_coorte impede a amostra de exceder a
+coorte — a assinatura de um retorno ao grao do envio.
+
+Serie por data do evento logistico, se necessaria, sera OUTRA fato.
+
+### 8.7 Fora deste contrato
+
+Nao ha aqui estoque, cobertura em dias nem ruptura. O Gate FULL-0R mediu
+correlacao de **-0,006** entre a variacao diaria de
+`api.ml_item_stock_history.available_quantity` e as unidades vendidas em listings
+exclusivamente Full; em 23,1% dos dias com venda o campo nao se move e em 14,6%
+ele sobe. O campo e' *proxy operacional do estoque disponivel/anunciado do
+listing*, nao estoque fisico, e nenhuma metrica foi construida sobre ele.
+
+`sold_quantity`, no mesmo teste, correlaciona **0,886** com as vendas reais: a
+fonte serve para velocidade, nao para nivel.
+
+### 8.8 Estado operacional
+
+- Migration `016` criada e **NAO aplicada**.
+- Sync `pipelines/sync_ml_fulfillment_daily.py` criado; **zero `--apply`
+  executado**, zero backfill.
+- Janela de releitura derivada da maturacao medida de cancelamento (jun-ago/2026,
+  8.124 casos): p50 0,05 d, p90 4,85 d, p99 14,62 d, maximo 44,12 d. Dai
+  `INCREMENTAL_DAYS_BACK = 15` e `BACKFILL_DAYS_BACK = 45`. A cauda nao cabe no
+  incremental, entao ele e' combinado com backfill semanal e full mensal.
+- API: `GET /api/v1/performance/ml-fulfillment`, aditiva, `load_mode =
+  manual_snapshot`.
+- **Sem automacao**: Scheduler e Airflow nao integrados. **Sem frontend.**
+
+### 8.9 Atomicidade e concorrencia (FULL-1A-R)
+
+Ordem travada, com contraprova em teste para cada elo:
+
+    lock de sessao (autocommit) -> decide modo -> auditoria running
+      -> LE FONTE (sem transacao gravavel aberta)
+      -> valida -> abre transacao gravavel
+      -> reconcilia antes -> DELETE -> INSERT -> EXCEPT -> reconcilia depois
+      -> marca indeterminada -> COMMIT -> auditoria success
+    finally: unlock -> close
+
+- **Lock de SESSAO** (pg_advisory_lock), nao transacional. O FULL-1A usava
+  pg_advisory_xact_lock na conexao de publicacao e mantinha essa transacao
+  aberta durante a leitura do Data Mart: ate' 600 s de idle in transaction no
+  Neon por trabalho que nem tocava o Neon.
+- **A transacao gravavel so' nasce depois de a fonte estar lida e validada.**
+- **EXCEPT bidirecional roda ANTES do commit** — e' o unico ponto em que a
+  divergencia ainda pode ser desfeita. Depois do commit seria relatorio de
+  estrago, nao reconciliacao.
+- **Commit indeterminado**: sem rollback, sem retry, e a linha de auditoria
+  permanece running. failed afirmaria que nada foi publicado, o que e' falso
+  quando o servidor pode ter efetivado; running preso e' alarme honesto.
+- **Auditoria que falha APOS commit confirmado nao vira failed.** A publicacao
+  ocorreu; o resultado sai com audit_status = nao_registrada_apos_commit.
+- **Fonte indisponivel** (SourceUnavailableError, subclasse propria) nunca
+  chega perto do DELETE. Janela legitimamente vazia e' publicavel — mas so' se o
+  destino tambem estiver vazio: leitura vazia com destino populado e' RECUSADA,
+  para que falha de fonte nao apague historico.
+- **rows_extracted** = pedidos elegiveis (grao do pedido); **rows_loaded** =
+  linhas da fato agregada. Linhas de listing nao entram em nenhum dos dois.

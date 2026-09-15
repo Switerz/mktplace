@@ -12,6 +12,7 @@ from app.deps.period import EffectivePeriod, resolve_period, today_brt
 from app.schemas.avoe_snapshot import AvoeSnapshotResponse
 from app.schemas.executive_summary import ExecutiveSummaryResponse
 from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
+from app.schemas.ml_fulfillment import MLFulfillmentResponse
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -29,8 +30,18 @@ from app.services.affiliate_costs_service import safe_affiliate_costs_block
 from app.services.tiktok_order_discounts_service import (
     safe_tiktok_order_discounts_block,
 )
+from app.services.ml_fulfillment_service import (
+    MLFulfillmentUnavailable,
+    get_ml_fulfillment_block,
+)
 
 router = APIRouter(prefix="/api/v1/performance", tags=["performance"])
+
+#: Corpo do 503 da superficie Full do ML. Constante, sanitizada e sem detalhe de
+#: infraestrutura: o cliente sabe que a secao caiu, nao por que nem onde.
+ERRO_ML_FULFILLMENT_INDISPONIVEL = (
+    "Superficie Full do Mercado Livre indisponivel no momento."
+)
 
 MARKETPLACE_QUERY_DESCRIPTION = (
     "Canal(is) de marketplace: 'all' (padrao), um canal isolado "
@@ -697,3 +708,30 @@ def avoe_snapshot(db: Session = Depends(get_db)):
         # recuperavel mudando a requisicao, logo nao pode ser 422.
         raise HTTPException(500, ERRO_AVOE_SERVING_INCONSISTENTE)
 
+
+@router.get("/ml-fulfillment", response_model=MLFulfillmentResponse)
+def ml_fulfillment(
+    filters: ResolvedFilters = Depends(filters_query),
+    db: Session = Depends(get_db),
+):
+    """Modalidade logistica do Mercado Livre: Full, nao-Full e desconhecido.
+
+    Bloco ADITIVO (Gate FULL-1A). NAO mede estoque: nao ha aqui
+    disponibilidade, cobertura em dias nem ruptura. "Full" e' a modalidade do
+    ENVIO (`logistic_type = 'fulfillment'`), nunca estoque no Full.
+
+    Le apenas as fatos ja' materializadas em `marts`. Nenhuma consulta ao Data
+    Mart acontece durante o request.
+    """
+    try:
+        return get_ml_fulfillment_block(
+            _require_db(db),
+            filters.period.start,
+            filters.period.end,
+            brands=filters.brands,
+        )
+    except MLFulfillmentUnavailable:
+        # Mensagem FIXA, nunca o texto da excecao. O servico ja' sanitiza, mas
+        # ecoar o texto da excecao deixaria o corpo da resposta a merce de
+        # qualquer mensagem futura que passasse por ali -- inclusive de driver.
+        raise HTTPException(503, ERRO_ML_FULFILLMENT_INDISPONIVEL)

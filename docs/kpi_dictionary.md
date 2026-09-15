@@ -219,3 +219,50 @@ definiÃ§Ã£o eleva o GMV em **~+5,89%** (medido em 01â€“24/08/2026: 7.97
 | ROAS | derivado | ✅ | ✅ Financeiro | `ad_revenue / ad_spend` — ad_revenue da Shopee é estimado |
 | Frete seller (R$) | `Order.all*.xlsx` | ✅ | ✅ Financeiro | `seller_shipping_cost` |
 | Ad impressions / CTR | ads CSV | ✅ | ❌ não exibido ainda | disponível em `fact_marketplace_daily_performance` |
+
+## Mercado Livre — Fulfillment (Gate FULL-1A, 2026-09-15)
+
+Fonte unica: `marts.fact_ml_fulfillment_daily` e
+`marts.fact_ml_fulfillment_listing_daily`. Contrato completo em
+`docs/data_contracts.md` secao 8. **Nenhum KPI aqui mede estoque.**
+
+| KPI | Formula | Grao | Ausencia |
+|---|---|---|---|
+| **`share_full_gmv`** (principal) | `paid_gmv(full) / paid_gmv(total)` | marca x dia | `NULL` se denominador 0 |
+| `share_full_orders` | `paid_orders(full) / paid_orders(total)` | marca x dia | `NULL` se denominador 0 |
+| `share_full_units` | `paid_units(full) / paid_units(total)` | marca x dia | `NULL` se denominador 0 |
+| `cancellation_rate` | `cancelled_orders / eligible_orders` | marca x classe x dia | `NULL` se denominador 0 |
+| `handling_avg` | `handling_seconds_sum / handling_sample_count` | **pedido** x classe | `NULL` se amostra 0 |
+| `delivery_avg` | `delivery_seconds_sum / delivery_sample_count` | **pedido** x classe | `NULL` se amostra 0 |
+| `listings_by_class` | `full_only` / `mixed` / `non_full_only` na janela | listing x janela | listing sem venda nao classifica |
+| `migration_opportunity` | `paid_gmv` nao-Full por listing | listing x janela | listing so-Full nao e oportunidade |
+
+Definicoes, filtros e limitacoes:
+
+- **Competencia:** `date_created` do PEDIDO, para TODAS as metricas — inclusive
+  `handling` e `delivery` (corrigido no FULL-1A-R; antes usavam a data do envio).
+  Uma `ref_date`, uma coorte.
+- **Denominador dos shares:** `full + non_full`. `unknown` fica FORA — nao e Full
+  nem nao-Full, e conta-lo faria uma lacuna de dado parecer queda operacional.
+- **`sample_count` mede CENSURA:** pedido ainda sem despacho ou sem entrega fica
+  fora da amostra, nunca entra como tempo zero. Em agosto: 97,3% de cobertura de
+  handling e 96,5% de delivery no Full.
+- **Elegivel:** todos os status criados no dia (denominador do cancelamento).
+- **Pago:** `status = 'paid'` (populacao de GMV e unidades). Frete fora.
+- **Media nunca e' armazenada pronta:** a fato guarda soma e amostra, para que a
+  reagregacao entre dias e marcas continue correta.
+- **`NULL` nunca e' renderizado como zero.** Denominador zero significa "nao ha o
+  que dividir", nao "zero de Full".
+- **Refresh:** `manual_snapshot`. Sem Scheduler e sem Airflow neste gate.
+
+Valores de referencia — agosto/2026, no grao publicado pela fato:
+
+    share_full_gmv      80,61%      (reconcilia com a planilha, 8/8 marcas)
+    share_full_orders   81,88%      OFICIAL (81,18% e grao de ENVIO, nao e KPI)
+    share_full_units    82,05%      OFICIAL (81,98% e grao de ENVIO, nao e KPI)
+    cancelamento Full       4,0798% (reconcilia: 4,07% truncado)
+    cancelamento nao-Full   4,3594% (planilha mostra 4,26% — DIVERGENCIA ABERTA)
+    handling            28,67 h Full x 71,83 h nao-Full   (coorte do pedido)
+    entrega             2,65 d Full x 4,89 d nao-Full     (coorte do pedido)
+    partially_refunded  21 Full + 16 nao-Full, em other_orders, fora do GMV
+    listings            276 so-Full, 223 mistos, 90 so-nao-Full

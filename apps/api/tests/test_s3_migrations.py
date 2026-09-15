@@ -146,10 +146,14 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # marts.fact_suggested_price_reference_snapshot); e de 014 para 015 pelo
     # Gate AVH-4A, que cria as duas tabelas de snapshots proxy da Avoe
     # (marts.proxy_avoe_brand_monthly_target_snapshot e
-    # marts.proxy_avoe_extra_channel_monthly_snapshot). O pino literal e'
-    # proposital: forca uma revisao consciente a cada migration nova, em vez de
-    # aceitar qualquer head em silencio.
-    assert heads == ["015"], f"head deveria ser unico e igual a 015, veio {heads}"
+    # marts.proxy_avoe_extra_channel_monthly_snapshot); e de 015 para 016 pelo
+    # Gate FULL-1A, que cria as duas fatos da superficie Full do Mercado Livre
+    # (marts.fact_ml_fulfillment_daily e
+    # marts.fact_ml_fulfillment_listing_daily) -- nenhuma delas com coluna de
+    # estoque, por decisao do gate FULL-0R. O pino literal e' proposital: forca
+    # uma revisao consciente a cada migration nova, em vez de aceitar qualquer
+    # head em silencio.
+    assert heads == ["016"], f"head deveria ser unico e igual a 016, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

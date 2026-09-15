@@ -34,7 +34,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 
 #: Head esperado. Pino LITERAL, como em `test_s3_migrations.py`: forca revisao
 #: consciente a cada migration nova, em vez de aceitar qualquer head.
-HEAD_ESPERADO = "015"
+#: Avancado para 016 pelo Gate FULL-1A (fatos da superficie Full do ML).
+HEAD_ESPERADO = "016"
 
 #: A migration deste gate.
 REVISAO_PMA = "014"
