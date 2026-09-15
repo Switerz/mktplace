@@ -60,6 +60,31 @@ class Settings(BaseSettings):
     # revisto quando houver mais meses fechados.
     shopee_maturation_threshold: float = Field(default=0.99, gt=0.0, le=2.0)
 
+    # ------------------------------------------------------------------
+    # Gate PMA-2C1A — feature flags do monitoramento multicanal
+    # ------------------------------------------------------------------
+    # As TRES nascem DESLIGADAS e permanecem assim nesta rodada. Elas nao sao
+    # "configuracao": sao a fronteira entre o que ja' esta publicado e o que
+    # ainda nao tem migration.
+    #
+    # `marts.fact_channel_offer_observation` NAO EXISTE no Neon (verificado por
+    # leitura: `to_regclass` devolve NULL, e o head Alembic e' 015 em todas as
+    # refs). Com a flag desligada o servico devolve estado `unavailable`
+    # ESTRUTURADO sem emitir uma unica consulta — nao ha SELECT contra tabela
+    # inexistente, nao ha 500, e nao ha fallback para o ML. Um fallback
+    # silencioso seria pior que o erro: responderia sobre outro canal a pergunta
+    # que o cliente fez sobre este.
+    pma_shopee_enabled: bool = Field(default=False)
+    pma_tiktok_enabled: bool = Field(default=False)
+
+    # Troca a metrica do ML de `v1_all_active` para `v2_product_type_aware`
+    # (politica P2). Efeito medido e congelado em teste: comparaveis 139 -> 135,
+    # na/acima 121 -> 117, abaixo 18 -> 18, com quatro anuncios da Rituaria
+    # migrando para `kit_composition_missing`. E' evolucao DELIBERADA da
+    # metrica publicada, nao correcao de defeito, portanto nao pode ligar
+    # sozinha: ativacao e' decisao de negocio, fora desta rodada.
+    pma_ml_metric_v2_enabled: bool = Field(default=False)
+
     @property
     def datamart_url(self) -> str:
         if self.datamart_database_url:

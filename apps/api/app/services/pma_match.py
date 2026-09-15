@@ -113,10 +113,21 @@ BRAND_SCOPE_OUT_OF_SCOPE = "out_of_scope_no_ml_catalog"
 # --- metodo e qualidade do match ------------------------------------------
 MATCH_GTIN = "brand_gtin_exact"
 MATCH_SKU = "brand_sku_exact_unique"
+#: Gate PMA-2C1A — TERCEIRO metodo: SKU do canal -> produto interno -> EAN do
+#: produto -> referencia. Existe porque o TikTok nao tem coluna de EAN e os
+#: modelos da Shopee tambem nao: sem esta ponte, 39 ofertas de TikTok e 3 da
+#: Shopee ficariam eternamente sem referencia apesar de o produto ser conhecido.
+#:
+#: DESLIGADO PARA O ML, de proposito. Medido tres vezes no PMA-2B-R: o ganho no
+#: ML e' exatamente ZERO comparaveis — ele apenas redistribuiria o texto do
+#: motivo em 84 linhas ja' publicadas. Ganho nulo nao paga risco de contrato,
+#: entao o ML nao recebe `internal_index` e este ramo nunca executa la'.
+MATCH_INTERNAL = "brand_internal_product_ean"
 MATCH_NONE = None
 
 QUALITY_PRIMARY = "primary_gtin_exact"
 QUALITY_SECONDARY = "secondary_sku_unique_in_brand"
+QUALITY_TERTIARY = "tertiary_internal_product_unique"
 QUALITY_AMBIGUOUS = "ambiguous_multiple_candidates"
 QUALITY_UNMATCHED = "unmatched"
 
@@ -296,6 +307,45 @@ class ReferenceIndex:
 
 
 @dataclass(frozen=True)
+class InternalProductIndex:
+    """Ponte SKU do canal -> produto interno -> EAN.  (Gate PMA-2C1A)
+
+    Construida a partir de `gold.map_produto_codigo_gobeauty` e
+    `gold.map_produto_fonte_gobeauty`, ambas medidas 1:1 no PMA-2B-R: 5.409 e
+    5.837 chaves `(marca, codigo)`, ZERO com mais de um `produto_sk`. Quando
+    mesmo assim houver mais de um candidato, a chave e' registrada como ambigua
+    e o metodo RECUSA — nunca desempata.
+
+    `ean_by_product` guarda o EAN ja' normalizado para EAN de consumidor, ou
+    `None` quando o cadastro tem lixo ('0', sufixo '-OLD', 17 caracteres). Essa
+    distincao vira motivo proprio na tela, para virar pauta de cadastro em vez
+    de sumir dentro de "sem referencia".
+    """
+
+    product_by_key: dict[tuple[str, str], str]
+    ean_by_product: dict[str, str | None]
+    ambiguous_keys: frozenset[tuple[str, str]] = frozenset()
+
+    @staticmethod
+    def build(rows, ean_rows) -> "InternalProductIndex":
+        """`rows`: (brand, codigo, produto_sk). `ean_rows`: (produto_sk, ean)."""
+        candidatos: dict[tuple[str, str], set[str]] = {}
+        for brand, codigo, produto_sk in rows:
+            marca = normalize_brand_key(brand)
+            chave_cod = normalize_sku_key(codigo)
+            if marca is None or chave_cod is None or not produto_sk:
+                continue
+            candidatos.setdefault((marca, chave_cod), set()).add(str(produto_sk))
+        ambiguas = frozenset(k for k, v in candidatos.items() if len(v) > 1)
+        produto = {k: next(iter(v)) for k, v in candidatos.items() if len(v) == 1}
+        eans: dict[str, str | None] = {}
+        for produto_sk, ean in ean_rows:
+            if produto_sk:
+                eans[str(produto_sk)] = consumer_ean_or_none(ean)
+        return InternalProductIndex(produto, eans, ambiguas)
+
+
+@dataclass(frozen=True)
 class MatchResult:
     reference: dict | None
     method: str | None
@@ -304,7 +354,8 @@ class MatchResult:
     candidate_count: int
 
 
-def resolve_match(listing: dict, index: ReferenceIndex) -> MatchResult:
+def resolve_match(listing: dict, index: ReferenceIndex,
+                  *, internal_index: "InternalProductIndex | None" = None) -> MatchResult:
     """Resolve a referencia de UM anuncio. Ordem obrigatoria do gate.
 
     1. marca normalizada + GTIN exato (chave PRIMARIA);
@@ -345,6 +396,26 @@ def resolve_match(listing: dict, index: ReferenceIndex) -> MatchResult:
             return MatchResult(
                 None, MATCH_SKU, QUALITY_AMBIGUOUS, True, len(candidatos)
             )
+
+    # 3. TERCEIRO metodo, so' quando o chamador fornece o indice interno. O ML
+    #    nao fornece, entao daqui para baixo nada executa para ele e o contrato
+    #    publicado permanece identico. Ver MATCH_INTERNAL.
+    if internal_index is not None and sku is not None:
+        if (marca, sku) in internal_index.ambiguous_keys:
+            return MatchResult(None, MATCH_INTERNAL, QUALITY_AMBIGUOUS, True, 2)
+        produto_sk = internal_index.product_by_key.get((marca, sku))
+        if produto_sk is not None:
+            ean_interno = internal_index.ean_by_product.get(produto_sk)
+            if ean_interno is not None:
+                candidatos = index.by_gtin.get((marca, ean_interno), [])
+                if len(candidatos) == 1:
+                    return MatchResult(
+                        candidatos[0], MATCH_INTERNAL, QUALITY_TERTIARY, False, 1
+                    )
+                if len(candidatos) > 1:
+                    return MatchResult(
+                        None, MATCH_INTERNAL, QUALITY_AMBIGUOUS, True, len(candidatos)
+                    )
 
     return MatchResult(None, MATCH_NONE, QUALITY_UNMATCHED, False, 0)
 
