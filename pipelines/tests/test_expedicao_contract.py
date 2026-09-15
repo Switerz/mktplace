@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pipelines.expedicao import cli, publisher, shopee_extract, transform
+from pipelines.expedicao import audit, cli, contract, publisher, shopee_extract, transform
 from pipelines.expedicao.contract import (
     ADVISORY_LOCK_KEYS,
     ALERT_EVENT_TABLE_FUTURE,
@@ -37,7 +37,6 @@ from pipelines.expedicao.contract import (
 )
 
 PACOTE = Path(transform.__file__).parent
-REPO = PACOTE.parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -272,19 +271,129 @@ def test_tabela_de_evento_de_alerta_fica_como_evolucao_futura():
 
 
 # ---------------------------------------------------------------------------
-# Migration — nenhuma criada por esta frente
+# Schema — o pacote nunca cria nem altera estrutura
 # ---------------------------------------------------------------------------
-def test_nenhuma_migration_criada_por_expedicao():
-    """A 016 esta reservada para a frente Full; Expedicao usa a proxima linear
-    somente depois que a de Full for integrada."""
-    versions = REPO / "apps" / "api" / "alembic" / "versions"
-    arquivos = sorted(p.name for p in versions.glob("*.py"))
-    assert arquivos[-1].startswith("015_"), f"head inesperado: {arquivos[-1]}"
-    for nome in arquivos:
-        conteudo = (versions / nome).read_text(encoding="utf-8")
-        assert "expedicao" not in conteudo.lower(), (
-            f"{nome} menciona expedicao — esta frente nao cria migration"
+#: Verbos de DDL que o pacote nunca pode executar. O refresh publica DADO em
+#: tabelas que a migration criou; ele nunca cria as proprias tabelas.
+DDL_PROIBIDO = (
+    "create table",
+    "alter table",
+    "drop table",
+    "create schema",
+    "drop schema",
+    "create index",
+    "drop index",
+    "truncate",
+)
+
+#: Operacoes de DML que o pacote esta contratado a executar. Qualquer verbo
+#: fora desta lista num literal SQL e ampliacao de escopo silenciosa.
+DML_CONTRATADO = (
+    "select",
+    "insert into",
+    "delete from",
+    "on conflict",
+    "do update set",
+)
+
+#: Nomes de funcao que so fazem sentido para quem versiona schema.
+ALEMBIC_PROIBIDO = {"upgrade", "downgrade", "stamp", "revision", "op"}
+
+#: Modulos de PRODUCAO do pacote (os testes ficam de fora).
+MODULOS_PRODUCAO = [contract, shopee_extract, transform, publisher, audit, cli]
+
+
+def _sql_literais(modulo) -> list[str]:
+    """Literais que parecem SQL executavel — docstrings e comentarios fora.
+
+    `literais_de_texto` ja exclui docstrings pelo AST, e comentarios nem chegam
+    a virar no de AST. Um `grep` ingenuo acusaria a propria docstring que
+    EXPLICA por que o DDL nao existe aqui, e obrigaria a documentar menos para
+    o teste passar.
+    """
+    candidatos = []
+    for literal in literais_de_texto(modulo):
+        baixo = literal.lower()
+        if any(v in baixo for v in (*DML_CONTRATADO, *DDL_PROIBIDO)):
+            candidatos.append(literal)
+    return candidatos
+
+
+@pytest.mark.parametrize("modulo", MODULOS_PRODUCAO, ids=lambda m: Path(m.__file__).name)
+def test_pacote_expedicao_nao_executa_ddl_ou_alembic(modulo):
+    """Invariante DURAVEL: o pacote publica dado, nunca versiona schema.
+
+    Substitui um teste anterior que fixava o head do Alembic em `015`. Aquela
+    premissa era transitoria — quebrou legitimamente quando a frente Full
+    integrou a `016` — e afirmava algo sobre o REPOSITORIO INTEIRO, que outras
+    frentes tem todo o direito de mudar. Prender a ausencia de `017`/`018` teria
+    o mesmo defeito, so que com validade mais longa.
+
+    O que e realmente invariante e o comportamento DESTE pacote: ele nao importa
+    Alembic, nao chama `upgrade`/`downgrade`/`stamp`, nao executa DDL e nao cria
+    schema sozinho. Isso continua verdadeiro em qualquer head futuro.
+
+    A ausencia de migration NESTE PR e verificada na entrega, por
+    `git diff --name-only origin/main...HEAD`, nao por teste permanente.
+    """
+    arvore = _arvore(modulo)
+    nome = Path(modulo.__file__).name
+
+    # 1. Nenhum import de Alembic.
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.Import):
+            for alias in no.names:
+                assert not alias.name.split(".")[0] == "alembic", (
+                    f"{nome} importa alembic"
+                )
+        elif isinstance(no, ast.ImportFrom):
+            assert not (no.module or "").split(".")[0] == "alembic", (
+                f"{nome} importa de alembic"
+            )
+
+    # 2. Nenhuma chamada a verbo de versionamento de schema.
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.Call):
+            alvo = ast.unparse(no.func)
+            ultimo = alvo.split(".")[-1]
+            assert ultimo not in ALEMBIC_PROIBIDO, (
+                f"{nome} chama {alvo!r}, que versiona schema"
+            )
+            assert not alvo.startswith("command."), (
+                f"{nome} chama {alvo!r} (alembic.command)"
+            )
+
+    # 3. Nenhum DDL nas constantes SQL executaveis.
+    for literal in _sql_literais(modulo):
+        baixo = literal.lower()
+        achados = sorted(v for v in DDL_PROIBIDO if v in baixo)
+        assert not achados, f"{nome} carrega DDL executavel {achados}: {literal[:80]!r}"
+
+
+def test_publisher_so_executa_o_dml_contratado():
+    """O publisher toca exatamente o DML do contrato: um DELETE por canal, os
+    INSERTs e o UPSERT do resumo. Nada alem disso."""
+    for literal in _sql_literais(publisher):
+        baixo = literal.lower()
+        assert any(v in baixo for v in DML_CONTRATADO), (
+            f"SQL fora do DML contratado: {literal[:80]!r}"
         )
+
+
+def test_cli_nao_cria_tabela_automaticamente():
+    """`--apply` para quando as tabelas nao existem; nunca as cria.
+
+    Auto-criacao transformaria uma migration revisada num efeito colateral de
+    execucao — e o schema de producao passaria a nascer em runtime.
+    """
+    for literal in _sql_literais(cli):
+        baixo = literal.lower()
+        assert not any(v in baixo for v in DDL_PROIBIDO), (
+            f"CLI carrega DDL: {literal[:80]!r}"
+        )
+    nomes = nomes_definidos(cli)
+    for suspeito in ("create_tables", "ensure_schema", "criar_tabelas", "migrate"):
+        assert suspeito not in nomes, f"CLI define {suspeito}"
 
 
 # ---------------------------------------------------------------------------
