@@ -35,7 +35,20 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: Head esperado. Pino LITERAL, como em `test_s3_migrations.py`: forca revisao
 #: consciente a cada migration nova, em vez de aceitar qualquer head.
 #: Avancado para 016 pelo Gate FULL-1A (fatos da superficie Full do ML).
-HEAD_ESPERADO = "016"
+#: Avancado para 017 pelo Gate PMA-2C2 (observacao multicanal de precos).
+HEAD_ESPERADO = "017"
+
+#: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
+#: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta
+#: RESERVADA para a Expedicao Shopee, que este gate nao pode criar.
+REVISAO_FULL = "016"
+ARQUIVO_FULL = "016_create_fact_ml_fulfillment_daily.py"
+
+REVISAO_PMA_MULTICANAL = "017"
+ARQUIVO_PMA_MULTICANAL = "017_create_fact_channel_offer_observation.py"
+TABELA_PMA_MULTICANAL = "marts.fact_channel_offer_observation"
+
+REVISAO_RESERVADA_EXPEDICAO = "018"
 
 #: A migration deste gate.
 REVISAO_PMA = "014"
@@ -440,3 +453,207 @@ def test_ddl_versionado_continua_existindo_como_especificacao():
     corpo = _sem_comentario_sql(texto)
     assert "down_revision" not in corpo
     assert "def upgrade" not in corpo
+
+
+# ---------------------------------------------------------------------------
+# Gate PMA-2C2 — a 017 e o mapa de propriedade das revisoes
+# ---------------------------------------------------------------------------
+#
+# Estes testes asserem sobre o SQL RENDERIZADO, nao sobre o texto-fonte, pela
+# mesma razao ja' documentada em `_sql_estrutural`: a docstring da 017 cita
+# deliberadamente "CPF, endereco ou telefone" para declarar que essas colunas
+# NAO existem. Varrer prosa junto com estrutura reprovaria a documentacao.
+#
+# E a 017 monta seus CHECKs por f-string, entao extrair `ast.Constant` nao
+# bastaria: e' preciso EXECUTAR `upgrade`/`downgrade` com um `op` falso que
+# apenas coleta as strings. Nada toca banco.
+
+
+def _fonte_017() -> str:
+    return (VERSIONS / ARQUIVO_PMA_MULTICANAL).read_text(encoding="utf-8")
+
+
+def _render_017() -> tuple[list[str], list[str]]:
+    """`(statements do upgrade, statements do downgrade)`, sem banco."""
+    import importlib.util
+    import sys
+    import types
+
+    coletado = {"up": [], "down": []}
+    fase = {"atual": "up"}
+    falso = types.ModuleType("alembic")
+    falso.op = types.SimpleNamespace(
+        execute=lambda sql: coletado[fase["atual"]].append(str(sql)))
+    anterior = sys.modules.get("alembic")
+    sys.modules["alembic"] = falso
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_m017", VERSIONS / ARQUIVO_PMA_MULTICANAL)
+        modulo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modulo)
+        modulo.upgrade()
+        fase["atual"] = "down"
+        modulo.downgrade()
+    finally:
+        if anterior is not None:
+            sys.modules["alembic"] = anterior
+        else:
+            sys.modules.pop("alembic", None)
+    return coletado["up"], coletado["down"]
+
+
+def _ddl_017() -> str:
+    """Todo o DDL do upgrade, SEM comentario `--`."""
+    up, _ = _render_017()
+    return _sem_comentario_sql("\n".join(up))
+
+
+def test_017_existe_e_aponta_para_016():
+    """A cadeia 015 -> 016 -> 017 e' linear e nao ramifica."""
+    migracoes = _migrations()
+    assert REVISAO_PMA_MULTICANAL in migracoes
+    info = migracoes[REVISAO_PMA_MULTICANAL]
+    assert info["down_revision"] == REVISAO_FULL
+    assert info["file"] == ARQUIVO_PMA_MULTICANAL
+
+
+def test_016_continua_pertencendo_ao_full():
+    """O PMA nao pode ocupar o numero de outra frente."""
+    migracoes = _migrations()
+    assert migracoes[REVISAO_FULL]["file"] == ARQUIVO_FULL
+    assert migracoes[REVISAO_FULL]["down_revision"] == "015"
+    fonte = (VERSIONS / ARQUIVO_FULL).read_text(encoding="utf-8")
+    assert "fact_ml_fulfillment_daily" in fonte
+    assert TABELA_PMA_MULTICANAL not in fonte
+
+
+def test_017_pertence_ao_pma_e_nao_a_expedicao():
+    ddl = _ddl_017().lower()
+    assert TABELA_PMA_MULTICANAL in ddl
+    assert "fulfillment" not in ddl
+    for termo in ("expedic", "shipping_label", "picking"):
+        assert termo not in ddl, termo
+
+
+def test_018_continua_reservada_e_nao_existe():
+    """Expedicao Shopee e' a 018. Este gate nao pode cria-la."""
+    nomes = {a.name for a in VERSIONS.glob("*.py")}
+    assert not any(n.startswith(REVISAO_RESERVADA_EXPEDICAO) for n in nomes)
+    assert REVISAO_RESERVADA_EXPEDICAO not in _migrations()
+
+
+def test_017_cria_somente_a_tabela_do_pma_multicanal():
+    ddl = _ddl_017()
+    assert ddl.count("CREATE TABLE") == 1
+    assert TABELA_PMA_MULTICANAL in ddl
+    for alheia in ("fact_ml_fulfillment_daily",
+                   "fact_marketplace_listing_price_daily",
+                   "fact_suggested_price_reference_snapshot"):
+        assert alheia not in ddl, alheia
+
+
+def test_017_nao_carrega_nem_semeia_dado():
+    ddl = _ddl_017().upper()
+    for dml in ("INSERT INTO", "UPDATE ", "DELETE FROM", "COPY ", "SELECT "):
+        assert dml not in ddl, dml
+
+
+def test_017_nao_usa_if_not_exists_no_upgrade():
+    """`IF NOT EXISTS` esconderia uma tabela preexistente com outro formato."""
+    up, _ = _render_017()
+    assert "IF NOT EXISTS" not in _sem_comentario_sql("\n".join(up)).upper()
+
+
+def test_017_pk_e_o_grao_provado():
+    """`brand` NAO entra: offer_key ja' e' unico por canal e por data."""
+    ddl = _ddl_017()
+    assert "PRIMARY KEY (observed_date, marketplace, offer_key)" in ddl
+    assert "PRIMARY KEY (observed_date, marketplace, brand" not in ddl
+
+
+def test_017_separa_competencia_de_instante():
+    ddl = _ddl_017()
+    assert "observed_date            DATE         NOT NULL" in ddl
+    assert "observed_at              TIMESTAMPTZ" in ddl
+    assert "account_watermark_at     TIMESTAMPTZ" in ddl
+
+
+def test_017_dinheiro_e_numerico_com_guarda_contra_nan():
+    """Em PostgreSQL 'NaN'::numeric >= 0 e' TRUE: o CHECK precisa ser explicito."""
+    ddl = _ddl_017()
+    assert "NUMERIC(14,4)" in ddl
+    for coluna in ("observed_price", "list_price"):
+        assert f"CHECK ({coluna} IS NULL OR" in ddl, coluna
+    assert ddl.count("'NaN'::numeric") >= 3
+
+
+def test_017_ausencia_permanece_nula_e_nunca_zero():
+    ddl = _ddl_017()
+    for coluna in ("observed_price", "list_price", "batch_id", "model_id",
+                   "gtin", "promo_id", "promo_discount_pct",
+                   "account_watermark_at"):
+        assert coluna in ddl, coluna
+    assert "batch_id                 TEXT             NULL" in ddl
+    assert "DEFAULT 0" not in ddl
+
+
+def test_017_nao_tem_coluna_de_pii():
+    ddl = _ddl_017().lower()
+    for termo in ("cpf", "cnpj", "buyer", "customer", "endereco", "telefone",
+                  "email", "recipient", "comprador"):
+        assert termo not in ddl, termo
+
+
+def test_017_impede_colisao_entre_pai_e_modelo():
+    ddl = _ddl_017()
+    assert "ck_fcoo_model_key_shape" in ddl
+    assert "ck_fcoo_tiktok_sem_modelo" in ddl
+
+
+def test_017_restringe_o_dominio_dos_enums():
+    ddl = _ddl_017()
+    for check in ("ck_fcoo_marketplace", "ck_fcoo_snapshot_status",
+                  "ck_fcoo_product_type", "ck_fcoo_promo_context",
+                  "ck_fcoo_business_scope", "ck_fcoo_pt_source",
+                  "ck_fcoo_price_source", "ck_fcoo_obs_mode"):
+        assert check in ddl, check
+
+
+def test_017_nao_admite_o_mercado_livre():
+    """O ML vive na 014. Uma oferta nunca existe nas duas fatos."""
+    ddl = _ddl_017()
+    assert "marketplace IN ('shopee', 'tiktok')" in ddl
+    assert "'ml'" not in ddl
+
+
+def test_017_downgrade_remove_somente_o_que_criou():
+    up, down = _render_017()
+    junto = "\n".join(down)
+    assert junto.count("DROP TABLE") == 1
+    assert TABELA_PMA_MULTICANAL in junto
+    for alheia in ("fulfillment", "listing_price_daily", "reference_snapshot"):
+        assert alheia not in junto, alheia
+    indices_criados = sum(1 for s in up if "CREATE INDEX" in s)
+    assert junto.count("DROP INDEX") == indices_criados
+
+
+def test_017_bate_com_o_contrato_do_sync():
+    """Toda coluna de `RECORD_COLUMNS` precisa existir na tabela."""
+    import sys
+    sys.path.insert(0, str(REPO))
+    from pipelines import channel_offer_sync as cos
+
+    ddl = _ddl_017()
+    for coluna in cos.RECORD_COLUMNS:
+        assert coluna in ddl, coluna
+    assert cos.REQUIRED_MIGRATION == REVISAO_PMA_MULTICANAL
+    assert cos.BLOCKING_MIGRATION_OWNED_BY_OTHER_TRACK == REVISAO_FULL
+    assert cos.OFFER_IDENTITY == ("observed_date", "marketplace", "offer_key")
+
+
+def test_017_a_renderizacao_nao_passa_por_vacuidade():
+    """Contraprova: o `op` falso precisa ter coletado DDL de verdade."""
+    up, down = _render_017()
+    assert len(up) >= 20
+    assert len(down) >= 5
+    assert any("CREATE TABLE" in s for s in up)

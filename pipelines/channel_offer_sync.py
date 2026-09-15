@@ -355,11 +355,30 @@ def assert_no_pii(records) -> None:
                     )
 
 
+#: Chave FISICA da observacao. `brand` NAO entra.  (Gate PMA-2C2, fase 2)
+#:
+#: Medido na fonte: `item_id` da Shopee e' unico sozinho (321/321), o par
+#: `(item_id, model_id)` tambem (371/371), e o `sku_id` do TikTok idem
+#: (1203/1203) — nenhum deles carrega duas marcas, nem ao longo dos 36 dias da
+#: serie. Conta e marca sao 1:1 estrito na Shopee: zero contas com mais de uma
+#: marca, zero marcas em mais de uma conta.
+#:
+#: Por isso `brand` e' ATRIBUTO, nao identidade. A diferenca e' pratica: com a
+#: marca na chave, corrigir a marca de uma oferta criaria uma linha nova e
+#: deixaria a antiga orfa na mesma fotografia. Como atributo, a correcao
+#: atualiza a linha existente.
+OFFER_IDENTITY = ("observed_date", "marketplace", "offer_key")
+
+
 def assert_offer_keys_unique(records) -> None:
-    """A PK nao pode colidir. Pai e modelo nunca produzem a mesma chave."""
+    """A PK nao pode colidir. Pai e modelo nunca produzem a mesma chave.
+
+    A tupla verificada e' exatamente `OFFER_IDENTITY`, a mesma da PK fisica:
+    incluir `brand` aqui deixaria passar uma colisao que o banco recusaria.
+    """
     vistas = set()
     for r in records:
-        chave = (r["observed_date"], r["marketplace"], r["brand"], r["offer_key"])
+        chave = tuple(r[c] for c in OFFER_IDENTITY)
         if chave in vistas:
             raise ChannelSyncError("colisao de chave de oferta na transformacao")
         vistas.add(chave)
@@ -691,6 +710,123 @@ def fetch_tiktok_offers(conn, snapshot_day, catalogo=None) -> list:
             "shop_account": dom.MARKETPLACE_TIKTOK,
         })
     return linhas
+
+
+# ---------------------------------------------------------------------------
+# GARANTIAS DE PUBLICACAO  (Gate PMA-2C2, fase 4)
+# ---------------------------------------------------------------------------
+# A decisao de publicar e' uma FUNCAO PURA. Ela nao abre conexao, nao escreve e
+# nao depende de relogio: recebe o estado observado e devolve permitir/recusar
+# com um motivo nomeado. Assim cada garantia vira um teste comportamental em vez
+# de um comentario de boas intencoes.
+#
+# O executor que um dia usar esta decisao continua barrado por
+# `assert_apply_authorized`, que exige a revisao 017 carimbada E a relacao
+# existente. Esta funcao decide SE se deve publicar; aquela decide SE E' POSSIVEL.
+
+PUBLISH_ALLOW = "allow"
+PUBLISH_REFUSE = "refuse"
+
+REFUSE_FLAG_OFF = "channel_flag_disabled"
+REFUSE_EMPTY_HEALTHY = "healthy_channel_returned_zero_offers"
+REFUSE_SOURCE_UNAVAILABLE = "source_unavailable"
+REFUSE_OLDER_THAN_PUBLISHED = "older_snapshot_than_published"
+REFUSE_NO_ACCOUNT_RAN = "no_account_executed"
+
+PUBLISH_REFUSE_REASONS = (
+    REFUSE_FLAG_OFF,
+    REFUSE_EMPTY_HEALTHY,
+    REFUSE_SOURCE_UNAVAILABLE,
+    REFUSE_OLDER_THAN_PUBLISHED,
+    REFUSE_NO_ACCOUNT_RAN,
+)
+
+
+@dataclass(frozen=True)
+class PublishDecision:
+    """Resultado da decisao. `reason` e' None somente quando `action` permite."""
+
+    action: str
+    reason: str | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.action == PUBLISH_ALLOW
+
+
+def plan_publication(
+    *,
+    marketplace: str,
+    channel_enabled: bool,
+    operator_override: bool = False,
+    source_available: bool = True,
+    accounts_that_ran: int = 0,
+    record_count: int = 0,
+    snapshot_date=None,
+    published_snapshot_date=None,
+) -> PublishDecision:
+    """Decide se esta fotografia pode ser publicada.
+
+    As recusas existem porque cada uma delas, se ignorada, produziria um dado
+    que MENTE em vez de faltar:
+
+    - flag desligada: publicar criaria dado que a tela nao mostra e ninguem
+      confere. O `operator_override` existe para a carga-piloto, que e' um
+      comando operacional explicito, nunca o caminho automatico.
+    - fonte indisponivel: publicar zero linhas apagaria a fotografia anterior e
+      a tela diria "nenhuma oferta" quando o certo e' "nao conseguimos olhar".
+    - canal saudavel com zero ofertas: e' o caso simetrico e mais traicoeiro —
+      a fonte respondeu, mas vazia. Preservar a fotografia antiga a faria passar
+      por atual. Recusar mantem a data anterior visivelmente velha.
+    - fotografia mais antiga que a publicada: reprocessar um dia velho nao pode
+      rebaixar o que ja' esta publicado.
+    - nenhuma conta executou: todo `snapshot_status` seria
+      `account_did_not_run`, o que e' desconhecimento, nao observacao.
+    """
+    if marketplace not in CHANNEL_MARKETPLACES:
+        raise ChannelSyncError("canal fora da fato multicanal")
+
+    if not channel_enabled and not operator_override:
+        return PublishDecision(PUBLISH_REFUSE, REFUSE_FLAG_OFF)
+    if not source_available:
+        return PublishDecision(PUBLISH_REFUSE, REFUSE_SOURCE_UNAVAILABLE)
+    if accounts_that_ran <= 0:
+        return PublishDecision(PUBLISH_REFUSE, REFUSE_NO_ACCOUNT_RAN)
+    if record_count <= 0:
+        return PublishDecision(PUBLISH_REFUSE, REFUSE_EMPTY_HEALTHY)
+    if (snapshot_date is not None and published_snapshot_date is not None
+            and snapshot_date < published_snapshot_date):
+        return PublishDecision(PUBLISH_REFUSE, REFUSE_OLDER_THAN_PUBLISHED)
+    return PublishDecision(PUBLISH_ALLOW)
+
+
+#: Estados do commit. `indeterminate` existe porque uma queda de conexao DEPOIS
+#: do COMMIT e' indistinguivel de uma queda ANTES: repetir cegamente poderia
+#: duplicar, e marcar como falha poderia rotular de `failed` um dado que ja'
+#: esta publicado. O tratamento e' reconciliar por leitura, nunca retry cego.
+COMMIT_COMMITTED = "committed"
+COMMIT_ROLLED_BACK = "rolled_back"
+COMMIT_INDETERMINATE = "indeterminate"
+COMMIT_STATES = (COMMIT_COMMITTED, COMMIT_ROLLED_BACK, COMMIT_INDETERMINATE)
+
+
+def audit_outcome(commit_state: str, rows_found_after: int | None) -> str:
+    """Traduz o estado do commit + a releitura em veredito de auditoria.
+
+    A regra que importa: auditoria posterior NUNCA pode marcar como `failed`
+    um dado que a releitura encontrou publicado. Foi assim que o backfill da
+    Shopee quase reportou perda de dado que existia.
+    """
+    if commit_state not in COMMIT_STATES:
+        raise ChannelSyncError("estado de commit desconhecido")
+    if commit_state == COMMIT_COMMITTED:
+        return "published"
+    if commit_state == COMMIT_ROLLED_BACK:
+        return "failed"
+    # indeterminado: a releitura decide, e nunca se repete a escrita as cegas
+    if rows_found_after is None:
+        return "needs_manual_reconciliation"
+    return "published" if rows_found_after > 0 else "failed"
 
 
 def build_cli() -> argparse.ArgumentParser:

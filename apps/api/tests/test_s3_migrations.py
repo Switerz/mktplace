@@ -153,7 +153,10 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # estoque, por decisao do gate FULL-0R. O pino literal e' proposital: forca
     # uma revisao consciente a cada migration nova, em vez de aceitar qualquer
     # head em silencio.
-    assert heads == ["016"], f"head deveria ser unico e igual a 016, veio {heads}"
+    # Gate PMA-2C2: head avancado de 016 (Full ML) para 017 (PMA multicanal).
+    # O pino e' LITERAL de proposito — forca revisao consciente a cada
+    # migration nova, em vez de aceitar qualquer head que apareca.
+    assert heads == ["017"], f"head deveria ser unico e igual a 017, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

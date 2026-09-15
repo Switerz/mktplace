@@ -479,3 +479,105 @@ def test_nenhuma_funcao_do_modulo_abre_conexao_gravavel():
     assert codigo.count("psycopg2.connect") == 1, "so' `_read_only` conecta"
     assert "set_session(readonly=True" in codigo.replace(" ", "").replace(
         "set_session(readonly=True", "set_session(readonly=True")
+
+
+# ---------------------------------------------------------------------------
+# Garantias de publicacao  (Gate PMA-2C2, fase 4)
+# ---------------------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+BASE = dict(marketplace="shopee", channel_enabled=True, source_available=True,
+            accounts_that_ran=4, record_count=692,
+            snapshot_date=date(2026, 9, 15))
+
+
+def test_publicacao_permitida_no_caso_saudavel():
+    assert cos.plan_publication(**BASE).allowed is True
+
+
+def test_flag_desligada_impede_publicacao():
+    d = cos.plan_publication(**{**BASE, "channel_enabled": False})
+    assert not d.allowed and d.reason == cos.REFUSE_FLAG_OFF
+
+
+def test_override_operacional_explicito_libera_a_carga_piloto():
+    """Comando operacional explicito e' a UNICA excecao, nunca o automatico."""
+    d = cos.plan_publication(**{**BASE, "channel_enabled": False,
+                                "operator_override": True})
+    assert d.allowed is True
+
+
+def test_fonte_indisponivel_nao_apaga_o_snapshot_anterior():
+    d = cos.plan_publication(**{**BASE, "source_available": False,
+                                "record_count": 0})
+    assert not d.allowed and d.reason == cos.REFUSE_SOURCE_UNAVAILABLE
+
+
+def test_canal_saudavel_com_zero_ofertas_e_recusado():
+    """Publicar vazio apagaria a fotografia; preservar a antiga a faria passar
+    por atual. A saida certa e' recusar e deixar a data anterior visivelmente
+    velha."""
+    d = cos.plan_publication(**{**BASE, "record_count": 0})
+    assert not d.allowed and d.reason == cos.REFUSE_EMPTY_HEALTHY
+
+
+def test_nenhuma_conta_executou_e_recusado():
+    d = cos.plan_publication(**{**BASE, "accounts_that_ran": 0})
+    assert not d.allowed and d.reason == cos.REFUSE_NO_ACCOUNT_RAN
+
+
+def test_fotografia_mais_antiga_nao_sobrescreve_a_mais_nova():
+    d = cos.plan_publication(**{**BASE, "snapshot_date": date(2026, 9, 10),
+                                "published_snapshot_date": date(2026, 9, 15)})
+    assert not d.allowed and d.reason == cos.REFUSE_OLDER_THAN_PUBLISHED
+
+
+def test_republicar_o_mesmo_dia_continua_permitido():
+    """Rerun idempotente: mesma PK, upsert, sem duplicar."""
+    d = cos.plan_publication(**{**BASE, "snapshot_date": date(2026, 9, 15),
+                                "published_snapshot_date": date(2026, 9, 15)})
+    assert d.allowed is True
+
+
+def test_o_ml_nunca_passa_pelo_publisher_multicanal():
+    with pytest.raises(cos.ChannelSyncError):
+        cos.plan_publication(**{**BASE, "marketplace": "ml"})
+
+
+def test_commit_confirmado_e_publicado():
+    assert cos.audit_outcome(cos.COMMIT_COMMITTED, None) == "published"
+
+
+def test_rollback_e_falha():
+    assert cos.audit_outcome(cos.COMMIT_ROLLED_BACK, 0) == "failed"
+
+
+def test_commit_indeterminado_nao_vira_retry_cego():
+    """Sem releitura, o veredito e' reconciliacao manual — nunca repetir."""
+    assert cos.audit_outcome(
+        cos.COMMIT_INDETERMINATE, None) == "needs_manual_reconciliation"
+
+
+def test_auditoria_nao_marca_como_failed_dado_que_esta_publicado():
+    """Queda de conexao DEPOIS do commit nao pode rotular o dado de perdido."""
+    assert cos.audit_outcome(cos.COMMIT_INDETERMINATE, 692) == "published"
+    assert cos.audit_outcome(cos.COMMIT_INDETERMINATE, 0) == "failed"
+
+
+def test_estado_de_commit_desconhecido_falha_alto():
+    with pytest.raises(cos.ChannelSyncError):
+        cos.audit_outcome("talvez", 1)
+
+
+def test_todas_as_razoes_de_recusa_sao_alcancaveis():
+    alcancadas = set()
+    for mudanca in ({"channel_enabled": False},
+                    {"source_available": False},
+                    {"accounts_that_ran": 0},
+                    {"record_count": 0},
+                    {"snapshot_date": date(2026, 9, 1),
+                     "published_snapshot_date": date(2026, 9, 15)}):
+        d = cos.plan_publication(**{**BASE, **mudanca})
+        alcancadas.add(d.reason)
+    assert alcancadas == set(cos.PUBLISH_REFUSE_REASONS)
