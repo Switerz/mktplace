@@ -63,6 +63,15 @@ export function canalLabel(m: Marketplace | string): string {
 }
 
 /**
+ * Nome do canal com a preposicao certa. "de Mercado Livre" e' agramatical, e
+ * o texto publicado sempre disse "do Mercado Livre" — a comparacao com o
+ * controle pegou a regressao.
+ */
+export function canalComPreposicao(m: Marketplace | string): string {
+  return m === "ml" ? "do Mercado Livre" : `da ${canalLabel(m)}`;
+}
+
+/**
  * CAPACIDADE do canal no frontend. FAIL-CLOSED.
  *
  * O Mercado Livre e' publicado e nao tem flag. Shopee e TikTok dependem de
@@ -113,6 +122,39 @@ export const PRODUCT_TYPE_LABELS: Record<ProductType, string> = {
 export function productTypeLabel(t: ProductType | null | undefined): string {
   if (!t) return INDISPONIVEL;
   return PRODUCT_TYPE_LABELS[t] ?? t;
+}
+
+/**
+ * Gate PMA-2C4B-R — rotulo de ESCOPO de negocio, por linha.
+ *
+ * Gocase e Denavita aparecem no TikTok e continuam VISIVEIS: o backend as
+ * grava, as conta em `monitored_offers` e as declara em
+ * `meta.out_of_scope_offer_count`. O que faltava era a tela DIZER isso. Uma
+ * linha de marca fora do escopo sem rotulo faz o operador ler 223 ofertas de
+ * capinha de celular como se fossem do monitoramento de beleza.
+ */
+export function foraDoEscopo(
+  linha: Pick<MonitoramentoPrecoRow, "business_scope">,
+): boolean {
+  return linha.business_scope === "out_of_business_scope";
+}
+
+export const ROTULO_FORA_DE_ESCOPO = "Fora do escopo";
+
+/**
+ * Opcoes do filtro de ESCOPO. `monitoradas` manda a lista de marcas que a
+ * propria API declarou monitoradas — filtro do SERVIDOR, entao total e
+ * paginacao continuam corretos. Sem isto, as linhas fora do escopo ficariam
+ * visiveis e nao haveria como estreitar a tabela por uma dimensao que o
+ * operador ve na coluna Marca.
+ */
+export type EscopoFiltro = "todos" | "monitoradas";
+
+export function marcaParaEscopo(
+  escopo: EscopoFiltro,
+  monitoradas: string[],
+): string {
+  return escopo === "monitoradas" ? monitoradas.join(",") : "";
 }
 
 export const PRODUCT_TYPE_ORDER: ProductType[] = [

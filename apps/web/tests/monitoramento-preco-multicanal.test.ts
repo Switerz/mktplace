@@ -23,10 +23,15 @@ import {
   buildMonitoramentoRequestKey,
   canaisDisponiveis,
   canalHabilitado,
+  canalComPreposicao,
   canalLabel,
   coberturaPorConta,
   filtrosDoCanal,
   fmtPrecoObservado,
+  foraDoEscopo,
+  marcaParaEscopo,
+  PRODUCT_TYPE_ORDER,
+  ROTULO_FORA_DE_ESCOPO,
   politicaDataView,
   productTypeLabel,
   resumoCobertura,
@@ -378,6 +383,91 @@ test("23. a pagina nunca constroi URL a partir de offer_key", async () => {
     "o link tem de passar pela allowlist do canal");
   const alvo = codigo.slice(codigo.indexOf("linkAnuncio"));
   assert.ok(/noopener/.test(codigo) && /noreferrer/.test(codigo), alvo.slice(0, 80));
+});
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4B-R — dimensao visivel tem de ser filtravel
+// ---------------------------------------------------------------------------
+
+test("R1. marca fora do escopo e' ROTULADA, nunca exibida em silencio", async () => {
+  assert.equal(foraDoEscopo(linha({ business_scope: "out_of_business_scope" })), true);
+  assert.equal(foraDoEscopo(linha({ business_scope: "in_scope" })), false);
+  // O ML nao modela escopo de negocio: nulo nao vira "fora".
+  assert.equal(foraDoEscopo(linha({ business_scope: null })), false);
+
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("foraDoEscopo(row)"),
+    "a linha da tabela precisa do rotulo");
+  assert.ok(codigo.includes("foraDoEscopo(linhaAberta)"),
+    "o dialogo precisa do rotulo");
+  assert.ok(codigo.includes("ROTULO_FORA_DE_ESCOPO"));
+});
+
+test("R2. o escopo vira filtro do SERVIDOR, com total e paginacao corretos", () => {
+  const monitoradas = ["apice", "barbours", "kokeshi", "lescent", "rituaria"];
+  assert.equal(marcaParaEscopo("todos", monitoradas), "",
+    "sem filtro, a fotografia inteira — inclusive fora do escopo");
+  assert.equal(marcaParaEscopo("monitoradas", monitoradas),
+    "apice,barbours,kokeshi,lescent,rituaria",
+    "a API ja' aceita lista de marcas: o filtro e' do servidor, nao da pagina");
+  // Lista vazia nao pode virar um `brand=` que o backend recusaria.
+  assert.equal(marcaParaEscopo("monitoradas", []), "");
+});
+
+test("R3. marca escolhida a mao vence o escopo", async () => {
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("brand || marcaParaEscopo(escopo"),
+    "o pedido explicito do operador e' mais especifico que o escopo");
+});
+
+test("R4. o filtro de tipo oferece os QUATRO estados, nao so' os ativos", async () => {
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("const tiposDoCanal = PRODUCT_TYPE_ORDER;"),
+    "filtrar as opcoes por `product_type_counts` esconderia do filtro um tipo "
+    + "que existe apenas entre as INATIVAS — visivel na coluna e inalcancavel");
+  assert.ok(!codigo.includes("product_type_counts?.[tp] ?? 0) > 0"));
+  assert.equal(PRODUCT_TYPE_ORDER.length, 4);
+});
+
+test("R5. toda dimensao visivel tem filtro correspondente", async () => {
+  const codigo = await lerCodigo(PAGE);
+  // Marca -> select de marca; conta -> select de conta; tipo -> select de tipo;
+  // situacao -> select de situacao; escopo -> select de escopo.
+  for (const controle of ["marcaId", "contaId", "tipoId", "situacaoId", "escopoId"]) {
+    assert.ok(codigo.includes(`id={${controle}}`), `falta o controle ${controle}`);
+  }
+  // As opcoes de conta saem da API, nunca de lista fixa no frontend.
+  assert.ok(codigo.includes("contasDoFiltro.map"));
+  assert.ok(codigo.includes("meta?.monitored_brands ?? []).map"));
+});
+
+test("R7. o que e' novo fica ESCOPADO aos canais; o ML nao ganha nada", async () => {
+  const codigo = await lerCodigo(PAGE);
+  // Subtitulo publicado do ML, palavra por palavra.
+  assert.ok(codigo.includes(
+    "Compara os preços anunciados das lojas próprias no Mercado Livre com o "
+    + "preço sugerido de revenda (PDV) das tabelas B2B."),
+    "o subtitulo do ML e' contrato publicado");
+  // O chip de politica de data nao aparece no ML.
+  assert.ok(codigo.includes('meta && marketplace !== "ml" &&'),
+    "o chip de teto de data e' so' dos canais novos");
+  // O sublabel de frescor por linha so' existe onde o frescor VARIA por linha.
+  assert.ok(codigo.includes('meta?.date_policy === "snapshot_current" &&'),
+    "no ML todas as linhas compartilham o frescor da resposta");
+  // Preposicao: "do Mercado Livre", nunca "de Mercado Livre".
+  assert.equal(canalComPreposicao("ml"), "do Mercado Livre");
+  assert.equal(canalComPreposicao("shopee"), "da Shopee");
+  assert.equal(canalComPreposicao("tiktok"), "da TikTok Shop");
+  assert.ok(!codigo.includes("de {canalLabel(marketplace)}"),
+    "concordancia: 'de Mercado Livre' e' agramatical");
+});
+
+
+test("R6. trocar de canal e limpar filtros tambem zeram o escopo", async () => {
+  const codigo = await lerCodigo(PAGE);
+  const trechos = codigo.split("setEscopo(\"todos\")");
+  assert.ok(trechos.length >= 3,
+    "o escopo precisa ser zerado na troca de canal E em limpar filtros");
 });
 
 // ---------------------------------------------------------------------------

@@ -975,3 +975,39 @@ canal novo — nenhum dado do canal anterior sobrevive à troca.
 - Marca fora do escopo (`gocase`, `denavita`) aparece nas linhas mas não é
   filtrável — a allowlist de `brand` cobre as cinco marcas de beleza.
 - A publicação continua manual: não há Scheduler chamando o publisher.
+
+## Revisão terminal (PMA-2C4B-R/V)
+
+**Marca fora do escopo — regra definida.** Gocase e Denavita são *formalmente*
+fora do escopo: o backend declara por linha (`business_scope`) e em agregado
+(`meta.out_of_scope_offer_count`), e já as exclui de `eligible_offers` e da
+cobertura. A tela passou a:
+
+- **rotular** cada linha com o chip "Fora do escopo", na tabela e no diálogo —
+  antes elas apareciam sem qualquer indicação, e 223 ofertas de fora do produto
+  podiam ser lidas como monitoramento de beleza;
+- oferecer um filtro de **Escopo** ("Todas as marcas da fotografia" /
+  "Somente marcas monitoradas"), traduzido para a lista de marcas que a própria
+  API declara monitoradas — filtro **do servidor**, então total e paginação
+  continuam corretos. Medido: 1.208 → 985.
+
+Limitação registrada: isolar *somente* as marcas fora do escopo exigiria que o
+backend aceitasse `gocase`/`denavita` em `brand`, hoje recusadas com 422. É
+mudança de backend e ficou fora deste PR de frontend.
+
+**Filtro de tipo.** Passou a oferecer os quatro estados sempre.
+`product_type_counts` conta apenas as **ativas**, e filtrar as opções por ele
+esconderia do filtro um tipo existente só entre as inativas — visível na coluna
+e inalcançável.
+
+**Paridade do Mercado Livre.** A comparação controle × branch nos três viewports
+mostrou quatro mudanças indevidas na tela do ML, todas revertidas: o subtítulo
+publicado, o chip de teto de data, o sublabel de frescor por linha e uma
+concordância errada ("de Mercado Livre"). Após a correção, colunas, filtros,
+linhas, primeira linha e overflow são **idênticos** ao controle nos três
+viewports, e a única diferença de texto é o título dinâmico.
+
+**Diálogo — lacuna pré-existente.** O diálogo de detalhe não prende o foco nem
+fecha com Escape. Medido idêntico no controle (`origin/main`, só ML), portanto
+não é regressão deste PR; na branch o foco ao menos volta para quem abriu, o
+que no controle não acontece. Fica registrado para um gate de acessibilidade.
