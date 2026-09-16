@@ -347,3 +347,58 @@ Tipar como número compilaria e produziria `NaN` em produção.
     anúncios            271 só-Full · 222 mistos · 90 só-não-Full
 
 Validados na tela contra a API local, com o Neon já publicado.
+
+
+## Shopee - FBS: desempenho por pedido (Gate FULL-SH-1A-R, 2026-09-16)
+
+Mede **por onde o pedido saiu**: fulfillment da Shopee (`fbs`) contra envio
+pelo proprio vendedor (`seller`). A classe vem de `fulfillment_flag`,
+**observada em cada pedido** - nunca da configuracao atual do anuncio.
+
+### KPIs
+
+| KPI | formula | denominador |
+|---|---|---|
+| `gross_gmv` | `SUM(item_total)` dos itens de pedidos nao cancelados | - |
+| `share_fbs_gmv` | `gmv(fbs) / gmv(fbs+seller)` | so as duas classes |
+| `share_fbs_orders` | `eligible(fbs) / eligible(fbs+seller)` | idem |
+| `share_fbs_units` | `units(fbs) / units(fbs+seller)` | idem |
+| `cancellation_rate` | `cancelled / created` | **todos os criados** |
+| handling medio | `handling_seconds_sum / handling_sample_count` | amostra censurada |
+
+Shares sao calculados em `Decimal`, **sem arredondamento** - quem formata
+decide a precisao.
+
+### Referencia de agosto/2026 (definicao ratificada)
+
+| marca | GMV total | GMV FBS | share FBS |
+|---|---:|---:|---:|
+| barbours | 944.358,30 | 762.898,83 | 80,7849% |
+| lescent | 320.670,05 | 192.639,90 | 60,0742% |
+| rituaria | 413.010,35 | 235.269,61 | 56,9646% |
+| apice | 275.234,00 | 0,00 | **0%** |
+| kokeshi | - | - | **fora da cobertura** |
+
+Os valores diferem das referencias do FULL-SH-0 em exatamente o GMV de
+`to_return`, que a definicao ratificada **inclui** no bruto: +604,42 (apice),
++1.946,64 (barbours), +595,55 (lescent), +48,93 (rituaria). Removendo os
+recortes, a identidade e **0,00 em todas as marcas**.
+
+### Valores SUBSTITUIDOS - nao usar
+
+Os numeros do FULL-SH-0 baseados em `total_amount` estao **obsoletos** e nao
+devem continuar em documentacao, teste ou tela:
+
+    barbours  GMV FBS 685.209,36  seller 169.702,59  share 80,15%   OBSOLETO
+    lescent   GMV FBS 179.482,57  seller 126.792,77  share 58,60%   OBSOLETO
+    rituaria  GMV FBS 214.282,35  seller 168.540,35  share 55,97%   OBSOLETO
+
+`total_amount` mede **1,6% a 9,4% abaixo** do canonico da Torre.
+
+### Limitacoes declaradas
+
+- Serie comeca em **2026-01-01**.
+- **Kokeshi fora da API** - a maior marca Shopee por volume nao aparece.
+- **Sem entrega e sem devolucao** na API: handling vai ate a **coleta**.
+- GMV e **bruto**, inclui `to_return` e `unpaid`.
+- Total das quatro contas = "Shopee - cobertura API", nunca "Shopee total".

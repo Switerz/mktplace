@@ -709,3 +709,126 @@ Ordem travada, com contraprova em teste para cada elo:
   para que falha de fonte nao apague historico.
 - **rows_extracted** = pedidos elegiveis (grao do pedido); **rows_loaded** =
   linhas da fato agregada. Linhas de listing nao entram em nenhum dos dois.
+
+
+## 9. FBS Shopee (Gate FULL-SH-1A-R - 2026-09-16, migration 019 NAO aplicada)
+
+`marts.fact_shopee_fbs_daily`. Grao: **`ref_date x brand x shop_account x fbs_class`**.
+
+### Duas coisas diferentes com o mesmo nome
+
+| | o que e | onde vive | serve para |
+|---|---|---|---|
+| **FBS do pedido** | modalidade **observada na venda** | `fulfillment_flag` em Shopee Orders | esta fato |
+| **FBS do catalogo** | **configuracao atual** do anuncio | `is_fulfillment_by_shopee` | gate FULL-SH-2 |
+
+**Retroagir a flag de catalogo a pedidos historicos e PROIBIDO.** A distancia
+entre as duas foi medida no FULL-SH-0: **333 de 587 itens vendidos (56,7%)**
+aparecem em pedidos FBS *e* seller. O modo de atendimento e decidido por
+pedido, nao por anuncio.
+
+A flag de catalogo tambem nao e estoque: 77 itens marcados FBS estao com
+estoque zero, e nenhum item nao-FBS tem `reserved_stock` > 0.
+
+### Classes - dominio fechado
+
+    fulfilled_by_shopee        -> fbs
+    fulfilled_by_local_seller  -> seller
+
+Nao ha terceira classe. Em 262.411 pedidos `fulfillment_flag` tem exatamente
+dois valores e **zero nulos**. Valor novo ou NULL **falha a carga**; nao existe
+`unknown` aqui, ao contrario do Full ML, onde o envio pode faltar.
+
+### GMV - bruto de pedidos nao cancelados
+
+    gross_gmv = SUM(silver.stg_shopee_order_items.item_total)
+                dos itens de pedidos com order_status <> 'cancelled'
+
+Equivale ao **"Subtotal do produto"** da planilha e a regra canonica de
+`pipelines/connectors/shopee/_parser.py`.
+
+**`total_amount` e proibido** em GMV, share e qualquer KPI financeiro.
+Reconciliacao de agosto/2026:
+
+| marca | `fact_marketplace_daily` | `SUM(item_total)` | `total_amount` |
+|---|---:|---:|---:|
+| apice | 272.290,25 | 274.629,58 | 267.846,90 |
+| barbours | 943.379,47 | 942.411,66 | **854.911,95** (-9,38%) |
+| lescent | 315.796,22 | 320.074,50 | 306.275,34 |
+| rituaria | 406.143,19 | 412.961,42 | **382.822,70** (-5,74%) |
+
+A diferenca de **0,1% a 1,7%** contra o `fact_marketplace_daily_performance`
+e **fotografia**: cobertura, cutoff e maturacao de status diferentes entre as
+duas esteiras. No **universo comum** (mesmos pedidos, mesmo cutoff, XLSX
+deduplicado pelo arquivo mais recente) a identidade e praticamente exata:
+**0,00** em apice, lescent e rituaria; **R$ 77,91 e 1 unidade** em barbours.
+
+### Elegibilidade - so `cancelled` sai
+
+`to_return` e `unpaid` **permanecem no GMV bruto** e ganham colunas proprias
+(`to_return_orders`, `to_return_gmv`, `unpaid_orders`, `unpaid_gmv`). Sao
+publicados, nunca subtraidos em silencio.
+
+**Este numero e GMV BRUTO.** Nao e receita liquida nem realizada.
+
+`is_sale` **nao pode ser usado**: aquele predicado exclui `to_return` e
+`unpaid`.
+
+Denominadores:
+
+- shares -> `gross_gmv` / `eligible_orders` / `gross_units` das duas classes;
+- taxa de cancelamento -> **`created_orders`** (todos os criados, cancelados
+  inclusive);
+- devolucao -> metrica separada, nunca deducao do GMV.
+
+### Zero x ausencia
+
+| situacao | resultado |
+|---|---|
+| conta coberta, denominador > 0, sem GMV FBS | **0%** |
+| denominador = 0 | **NULL** |
+| conta ou marca fora da cobertura | **nao informado** - nunca 0% |
+
+Apice em agosto/2026: **share FBS = 0%** (vendeu R$ 275.234,00, nenhum FBS).
+Kokeshi: **fora da cobertura**, sem share.
+
+### Handling - pagamento ate COLETA
+
+    handling = pickup_done_time - pay_time
+
+**A API da Shopee nao tem data real de entrega.** `delivered_date` so existe
+no export XLSX, que nao entra neste contrato. Nao ha coluna de entrega nesta
+fato, e a ausencia e deliberada.
+
+Soma + amostra (`handling_seconds_sum`, `handling_sample_count`), nunca media
+isolada. Pedido sem `pickup_done_time` fica **fora da amostra** - nunca entra
+como tempo zero.
+
+### Cobertura - quatro contas, e Kokeshi nao esta aqui
+
+`apice`, `barbours`, `lescent`, `rituaria`.
+
+**Kokeshi nao existe na esteira API** (zero linhas) e **nao pode ser suprida
+pelo XLSX** nesta fato: sao contratos distintos. Ela e a maior marca Shopee
+por volume - 466.748 pedidos na planilha - e por isso a ausencia precisa
+acompanhar todo payload.
+
+A soma das quatro contas e **"Shopee - cobertura API"**, nunca "Shopee total".
+
+### Serie e competencia
+
+- Disponivel a partir de **2026-01-01**.
+- `ref_date` = `created_date_brt` (criacao do pedido, America/Sao_Paulo).
+- Publicacao fecha em **D-1**.
+
+### PII
+
+Nenhuma coluna de comprador, documento, telefone ou endereco. A fonte tem
+`recipient_address` em 100% dos pedidos e `buyer_username` em 99,9%; nada
+disso e lido, agregado ou publicado.
+
+### Proximo gate
+
+**FULL-SH-2** - snapshot diario do catalogo (FBS configurado, `available_stock`,
+`reserved_stock`). O catalogo e UPSERT sem historico: cada dia sem snapshot e
+um dia perdido para sempre.
