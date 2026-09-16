@@ -1,4 +1,4 @@
-# Contrato do refresh de expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1 / 1E / 1F
+# Contrato da Expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1 / 1E / 1F / 1F-P / 2A
 
 **Estado: EM PRODUCAO desde 16/09/2026 (EXP-1E).** Migration `018`
 aplicada, quatro contas cadastradas, primeiro `--apply` publicado: 985 pedidos,
@@ -11,11 +11,12 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | Frente | Estado |
 |---|---|
 | Migration `018` | **aplicada** no Neon em 16/09/2026 (`016` = Full ML, `017` = PMA) |
-| Tabelas em producao | criadas e populadas (985 pedidos, 4 resumos) |
+| Tabelas em producao | criadas e populadas; `expedicao_refresh_run` acumula 4 linhas por hora |
 | Registry (`marts.dim_seller_account`) | **4 contas ativas** (Kokeshi fora: nao existe na fonte) |
 | Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** uma vez (EXP-1E) |
-| Refresh publicado | 1 (manual, batch `5f4cc96b-2534-4723-979f-36233926c9f7`) |
-| API / UI / MCP | nao iniciados |
+| Refresh publicado | 2 (manuais; ultimo batch `6ace44e2-208e-4724-a04a-d424317b2b2e`, run #315) |
+| API read-only | **implementada** (EXP-2A), flag `expedicao_api_enabled` DESLIGADA |
+| UI / MCP | nao iniciados |
 | ML / TikTok / calendario | fora deste gate |
 | `schedule_plan.py` / Airflow | **nao integrados** — nenhum agendamento criado |
 
@@ -417,6 +418,157 @@ implementacao.
   `classify_freshness` sem o tratamento de carimbo futuro. Ela e contexto, nao
   veredito, e mexer nela mudaria dado ja publicado; se um dia `ingested_at`
   aparecer adiantado nas linhas, vira gate proprio.
+
+---
+
+## API read-only da Expedicao (EXP-2A)
+
+**Estado: implementada, flag DESLIGADA.** `expedicao_api_enabled` nasce `false`;
+com ela off o servico devolve `availability=unavailable` sem emitir uma unica
+consulta.
+
+### Endpoints
+
+| Rota | Serve |
+|---|---|
+| `GET /api/v1/expedicao` | resumo do canal + por conta, frescor, cobertura e uma pagina da fila — tudo do MESMO batch |
+| `GET /api/v1/expedicao/trend` | serie horaria por conta, para tendencia |
+
+Somente `GET`. Nao existe `POST`, `PATCH` nem `DELETE`, e o servico so' emite
+`SELECT`.
+
+### Parametros
+
+| Parametro | Onde | Regra |
+|---|---|---|
+| `brands` | ambos | CSV, ate 50 itens de ate 64 caracteres |
+| `accounts` | ambos | CSV, mesma regra |
+| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`. Varias combinam com E logico |
+| `order_by` | principal | `criticidade` (padrao), `deadline`, `oldest` |
+| `limit` / `offset` | principal | 1..500 / >= 0 |
+| `include_queue` | principal | `false` devolve so' o resumo |
+| `window_hours` | tendencia | 1..336, default 48 |
+
+Filtros e ordenacao passam por **allowlist**: o cliente escolhe uma CHAVE, nunca
+escreve a clausula. Valor invalido vira 422 com mensagem FIXA — a entrada nao e'
+ecoada, para que um payload com script nao volte renderizado.
+
+### Grao
+
+| Bloco | Grao |
+|---|---|
+| `totals` | canal, no batch vigente (soma das contas — NAO e' linha materializada) |
+| `accounts` | `(shop_account)` no batch vigente |
+| `queue` | um pedido |
+| `freshness` | `(brand)`, da observacao mais recente |
+| `trend.points` | `(shop_account, snapshot_hour)` |
+
+`trend` **nunca soma horas diferentes**: o mesmo pedido continua no backlog de
+uma hora para a outra, e somar dois pontos o contaria duas vezes.
+
+### Frescor — de onde vem o veredito
+
+`freshness` sai da observacao **mais recente** de `expedicao_source_freshness`,
+por marca, via `DISTINCT ON (brand) ... ORDER BY check_timestamp DESC, check_id
+DESC`. O `check_id` desempata as quatro linhas de um mesmo lote, que compartilham
+o timestamp do commit.
+
+E' **proibido** agregar o pior valor historico. O historico guarda as quatro
+linhas `fail`/`high` de 16/09 18:41, gravadas com a semantica antiga (pior pedido
+do backlog); servi-las como estado atual ressuscitaria o defeito do EXP-1E.
+
+Linha de auditoria **sem** `measures="source_watermark_only"` e' antiga: o
+servico ignora o veredito dela e deriva o estado do watermark do batch servido,
+com os limites do contrato (8h / 24h, inclusivos; futuro e nulo -> `unknown`).
+
+| Campo | Mede |
+|---|---|
+| `freshness`, `source_age_hours` | a FONTE foi lida recentemente (watermark da conta) |
+| `oldest_row_age_hours` | ha quanto tempo a linha mais velha do backlog nao e relida — **contexto**, nunca veredito |
+| `deadline_status`, `over_48h_count` | atraso do PEDIDO — situacao operacional, nao frescor |
+
+### `load_mode = manual_snapshot`
+
+**Nao existe agendamento.** Toda fotografia veio de alguem executando o refresh
+a mao. `limitations.snapshot_age_hours` diz ha quanto tempo, e
+`limitations.no_automation` e' sempre `true`. O consumidor deve exibir isso: um
+painel que nao mostra a idade do dado convida a decidir sobre estado vencido.
+
+`source_advanced=false` e' METADADO: significa "a fonte nao avancou desde a
+leitura anterior", nao falha. O estado e' recomputado por relogio a cada
+execucao justamente porque a fonte pode ficar parada.
+
+### Cobertura e Kokeshi
+
+`coverage` compara conjuntos, nao continencia: `expected_accounts` vem do
+registry, `observed_accounts` da fotografia, e as diferencas viram
+`missing_accounts` / `unexpected_accounts`. Conta que some da fonte aparece como
+**faltando**, nao como silencio.
+
+`brands_not_covered` lista **Kokeshi**: ela existe em `marts.dim_loja` e **nao
+existe em `raw.shopee_orders`** (medido no EXP-1E). Nao e' conta faltando — e'
+marca fora do alcance desta fonte, e por isso nunca entra em
+`missing_accounts`.
+
+### Politica de identificadores
+
+**`marketplace_order_id` (o `order_sn` da Shopee) NAO e' servido.**
+
+Esta API **nao tem autenticacao**: nenhum router declara dependencia de auth, o
+CORS e' aberto conforme configuracao e a instancia do Render e' publica. Um
+identificador que permite localizar o pedido no painel do marketplace nao vai
+numa rota assim.
+
+Um hash **sem chave** tambem nao resolveria: o espaco de `order_sn` e' curto e
+enumeravel, e uma tabela arco-iris o reverte. Por isso `order_ref` e'
+**HMAC-SHA256 truncado**, com chave em `expedicao_order_ref_secret`:
+
+* segredo **vazio** (default) -> `order_ref = null` e
+  `limitations.order_identifier_withheld = true`;
+* segredo configurado -> valor opaco, estavel entre execucoes, inutil sem a chave.
+
+Servir o identificador real e' decisao de **controle de acesso**, nao de
+serving: exige autenticacao na API, e isso e' outro gate.
+
+### Consistencia do batch
+
+Antes de montar a resposta o servico exige: um unico `refresh_batch_id` na fila,
+um unico `effective_at`, resumos do MESMO lote, um unico `snapshot_hour` e
+`observed_at == effective_at`. Qualquer divergencia falha FECHADA com
+`availability=unavailable` e `unavailable_reason=inconsistent_batch`. Combinar
+fila nova com resumo velho mostraria um backlog que a tendencia nao explica.
+
+### Estados de erro
+
+| Situacao | Resposta |
+|---|---|
+| flag desligada | 200 · `unavailable` · `feature_flag_disabled` |
+| nenhuma fotografia publicada | 200 · `unavailable` · `no_snapshot_published` |
+| batch inconsistente | 200 · `unavailable` · `inconsistent_batch` |
+| filtro/ordenacao/janela invalidos | 422 com mensagem fixa |
+| banco indisponivel | 503 |
+
+`unavailable` responde **200**, nao 500: o cliente perguntou algo valido e a
+resposta e' "existe, mas nao ha o que servir". Nenhuma colecao some do payload e
+nenhuma medida ausente vira zero — totais ficam `null`.
+
+### Indices usados
+
+`pk_expedicao_fila_atual (channel, shop_account, marketplace_order_id)` cobre o
+recorte por canal e o desempate da paginacao; `idx_efa_acao (channel,
+deadline_status, brand)` atende o filtro por situacao de prazo com marca;
+`idx_efa_over_48h` e `idx_efa_stalled` sao parciais e atendem esses dois
+filtros; `idx_err_tendencia (channel, brand, snapshot_hour DESC)` serve a
+tendencia.
+
+### Limitacoes
+
+* Fotografia manual: envelhece ate alguem rodar o refresh.
+* O watermark mede **leitura**, nao chegada de pedido novo: um carregador que
+  reescreve linhas antigas mantem o alerta verde.
+* Sem identificador de pedido enquanto a API nao tiver autenticacao.
+* Somente Shopee. ML, TikTok e o calendario de dias uteis estao fora.
+* Sem UI, sem MCP, sem alerta externo — a API nao notifica ninguem.
 
 ---
 
