@@ -173,8 +173,15 @@ test("o fundo fica inerte enquanto aberto e volta ao normal ao fechar", async ()
 test("o dialogo e' portalizado para fora do shell que recebe `inert`", async () => {
   const src = await ler(DIALOGO);
   assert.ok(src.includes("createPortal("));
-  assert.ok(src.includes("document.body,"),
-    "portalizar DENTRO do shell faria o `inert` alcancar o proprio dialogo");
+  // O container e' o ULTIMO argumento do `createPortal`. Conferir so' a
+  // PRESENCA de "document.body," nao basta: `getElementById("app-shell-root")
+  // ?? document.body` contem a mesma substring e portalizaria o dialogo DENTRO
+  // do no' que recebe `inert` — ai' o proprio dialogo ficaria inerte e nada
+  // nele receberia foco. Por isso o container e' fixado por INTEIRO.
+  const container = /<\/div>,\r?\n\s*(.+),\r?\n\s*\);/.exec(src)?.[1]?.trim();
+  assert.equal(container, "document.body",
+    "o container do portal precisa ser `document.body` e nada mais: qualquer no' " +
+    "dentro de #app-shell-root herdaria o `inert` e travaria o proprio dialogo");
 });
 
 // ---------------------------------------------------------------------------
