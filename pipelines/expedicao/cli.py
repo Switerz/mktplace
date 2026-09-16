@@ -88,6 +88,7 @@ from pipelines.expedicao.contract import (
     MARKETPLACE_ID,
     RUN_TABLE,
     Channel,
+    FreshnessStatus,
     RegistryError,
     SourceUnhealthy,
 )
@@ -636,6 +637,28 @@ def _falhar_auditoria(auditoria, run_id, exc, publicado, extraidas, log) -> None
 _ORDEM_FRESCOR = {"fresh": 0, "stale": 1, "critical": 2, "unknown": 3}
 
 
+def _frescor_da_fonte(watermark, effective_at) -> str:
+    """Frescor do watermark, com carimbo do FUTURO tratado como desconhecido.
+
+    `classify_freshness` compara `effective_at - watermark <= 8h`, e idade
+    NEGATIVA satisfaz essa condicao: um watermark adiantado sairia `fresh`. Seria
+    o MESMO defeito que este gate corrige — sinal quebrado se apresentando como
+    saudavel. O relogio do Data Mart e o de quem roda a CLI sao maquinas
+    diferentes, e `ingested_at` e escrito pelo carregador: divergencia acontece.
+
+    `unknown` e a unica resposta honesta. A partir de um carimbo impossivel nao
+    da para afirmar que a fonte esta fresca NEM que esta velha — `critical`
+    seria tao inventado quanto `fresh`.
+
+    A comparacao e estrita de proposito: qualquer tolerancia seria um threshold
+    novo, e o contrato so define 8h e 24h. Se skew de segundos gerar `warn` na
+    operacao, a tolerancia vira decisao de contrato, nao de implementacao.
+    """
+    if watermark is None or watermark > effective_at:
+        return FreshnessStatus.UNKNOWN.value
+    return transform.classify_freshness(watermark, effective_at).value
+
+
 def _freshness_por_marca(fila, resumos, effective_at) -> dict[str, dict]:
     """Frescor da FONTE por marca, medido pelo WATERMARK DA CONTA.
 
@@ -689,15 +712,17 @@ def _freshness_por_marca(fila, resumos, effective_at) -> dict[str, dict]:
     saida: dict[str, dict] = {}
     for marca, contas in por_marca.items():
         estados = [
-            transform.classify_freshness(c["source_watermark_at"], effective_at).value
-            for c in contas
+            _frescor_da_fonte(c["source_watermark_at"], effective_at) for c in contas
         ]
         pior = max(estados, key=lambda e: _ORDEM_FRESCOR[e])
 
         # Carimbo reportado: o mais ANTIGO entre as contas da marca. `None`
         # vence, porque conta sem carimbo e' o caso mais grave.
+        # Carimbo do futuro tambem invalida o reportado: exibir um instante
+        # impossivel como "ultima leitura" sugeriria que houve leitura.
         carimbos = [c["source_watermark_at"] for c in contas]
-        watermark = None if any(w is None for w in carimbos) else min(carimbos)
+        invalido = any(w is None or w > effective_at for w in carimbos)
+        watermark = None if invalido else min(carimbos)
 
         saida[marca] = {
             # (1) VEREDITO: a fonte esta atualizada? So o watermark responde.

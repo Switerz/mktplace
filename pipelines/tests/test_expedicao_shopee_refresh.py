@@ -1139,3 +1139,26 @@ def test_sanitizacao_remove_credencial():
 def test_source_name_identifica_canal():
     assert audit_mod.source_name_for(Channel.SHOPEE) == "expedicao_shopee"
     assert audit_mod.source_name_for(Channel.MERCADOLIVRE) == "expedicao_mercadolivre"
+
+
+# ===========================================================================
+# EXP-1F-R/V — compatibilidade do payload do alerta
+# ===========================================================================
+def test_payload_anterior_continua_legivel():
+    """Os quatro campos do payload antigo seguem presentes: leitor antigo nao quebra."""
+    conn = FakeConn()
+    audit_mod.record_freshness(
+        conn, 3,
+        {"apice": {
+            "freshness": "fresh", "source_watermark": AGORA, "source_age_hours": 0.5,
+            "accounts": 1, "open_orders": 7, "oldest_row_age_hours": 240.0,
+        }},
+    )
+    import json as _json
+    detalhe = _json.loads(
+        [p for s, p in conn.executed if "data_quality_check" in s][0][6]
+    )
+    for campo in ("brand", "freshness", "open_orders", "source_watermark"):
+        assert campo in detalhe, f"campo do payload antigo sumiu: {campo}"
+    for campo in ("source_age_hours", "accounts", "oldest_row_age_hours", "measures"):
+        assert campo in detalhe, f"campo novo ausente: {campo}"
