@@ -17,16 +17,110 @@
  *  - inventar vigencia para a referencia B2B.
  */
 import type {
+  AccountClock,
   ComparisonStatus,
   FreshnessStatus,
+  Marketplace,
   MatchMethod,
   MatchQuality,
   MonitoramentoPrecoKpis,
+  MonitoramentoPrecoMeta,
   MonitoramentoPrecoRow,
+  ProductType,
 } from "./monitoramento-preco-contract";
 
 /** Marcador unico de valor indisponivel. NUNCA "R$ 0,00", nunca "0%". */
 export const INDISPONIVEL = "—";
+
+/**
+ * Gate PMA-2C4B — preco que a fonte NAO observou.
+ *
+ * Separado de `INDISPONIVEL` de proposito: o travessao diz "nao temos esse
+ * campo"; aqui sabemos exatamente o que aconteceu — a fotografia rodou e nao
+ * trouxe preco para aquela oferta. Nunca "R$ 0,00", que afirmaria um preco.
+ */
+export const PRECO_NAO_OBSERVADO = "Não observado";
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4B — canais
+// ---------------------------------------------------------------------------
+
+export interface CanalView {
+  id: Marketplace;
+  rotulo: string;
+  /** Nome curto para caber em chip e titulo. */
+  curto: string;
+}
+
+export const CANAIS: readonly CanalView[] = [
+  { id: "ml", rotulo: "Mercado Livre", curto: "Mercado Livre" },
+  { id: "shopee", rotulo: "Shopee", curto: "Shopee" },
+  { id: "tiktok", rotulo: "TikTok Shop", curto: "TikTok Shop" },
+];
+
+export function canalLabel(m: Marketplace | string): string {
+  return CANAIS.find((c) => c.id === m)?.rotulo ?? String(m);
+}
+
+/**
+ * CAPACIDADE do canal no frontend. FAIL-CLOSED.
+ *
+ * O Mercado Livre e' publicado e nao tem flag. Shopee e TikTok dependem de
+ * DUAS chaves independentes: esta, que decide se o botao existe, e a do
+ * backend (`PMA_SHOPEE_ENABLED` / `PMA_TIKTOK_ENABLED`), que decide se ha o que
+ * servir. Ligar so' uma das duas nao expoe o canal — ligar so' o frontend
+ * mostraria um botao que devolve envelope `unavailable`, e ligar so' o backend
+ * nao cria botao nenhum. A ativacao e' COORDENADA, de proposito.
+ *
+ * Ausencia da variavel resolve `false`. So' a string exata `"true"` liga.
+ * As referencias a `process.env` sao literais porque o Next as substitui em
+ * tempo de build; uma leitura dinamica nao chegaria ao bundle do navegador.
+ */
+export function canalHabilitado(m: Marketplace): boolean {
+  if (m === "ml") return true;
+  if (m === "shopee") return process.env.NEXT_PUBLIC_PMA_SHOPEE_ENABLED === "true";
+  if (m === "tiktok") return process.env.NEXT_PUBLIC_PMA_TIKTOK_ENABLED === "true";
+  return false;
+}
+
+/** Canais que a tela pode oferecer AGORA. O ML sempre esta' aqui. */
+export function canaisDisponiveis(): CanalView[] {
+  return CANAIS.filter((c) => canalHabilitado(c.id));
+}
+
+/**
+ * Filtros que fazem sentido no canal. O ML nao modela conta de loja nem
+ * `product_type` materializado, e o backend recusa os dois com 422 — mandar
+ * assim mesmo transformaria uma limitacao conhecida num erro de borda.
+ */
+export function filtrosDoCanal(m: Marketplace): {
+  conta: boolean;
+  tipoDeProduto: boolean;
+} {
+  const canal = m !== "ml";
+  return { conta: canal, tipoDeProduto: canal };
+}
+
+export const PRODUCT_TYPE_LABELS: Record<ProductType, string> = {
+  kit_confirmed: "Kit confirmado",
+  kit_suspected: "Possível kit",
+  no_kit_signal: "Sem sinal de kit",
+  // NAO e' "produto simples confirmado": a diferenca e' entre nao ter
+  // encontrado evidencia e ter evidencia de ausencia.
+  product_type_unknown: "Sinal de kit desconhecido",
+};
+
+export function productTypeLabel(t: ProductType | null | undefined): string {
+  if (!t) return INDISPONIVEL;
+  return PRODUCT_TYPE_LABELS[t] ?? t;
+}
+
+export const PRODUCT_TYPE_ORDER: ProductType[] = [
+  "kit_confirmed",
+  "kit_suspected",
+  "no_kit_signal",
+  "product_type_unknown",
+];
 
 // ---------------------------------------------------------------------------
 // Rotulos
@@ -294,22 +388,34 @@ export function avisoTruncamento(
 // ---------------------------------------------------------------------------
 
 export function buildMonitoramentoRequestKey(params: {
+  /**
+   * Gate PMA-2C4B: o CANAL faz parte da identidade. Sem ele, trocar de canal
+   * reusaria a chave anterior e a guarda de frescor descartaria a resposta
+   * nova por achar que nada mudou — a tela ficaria com os dados do canal
+   * antigo sob o titulo do novo.
+   */
+  marketplace: Marketplace;
   brand: string;
   status: string;
   productQuery: string;
   /** Gate PMA-H1: a data observada FAZ PARTE da identidade da requisicao. */
   observedDate?: string;
+  /** So' existem nos canais novos; no ML entram como `all`. */
+  shopAccount?: string;
+  productType?: string;
   limit: number;
   offset: number;
 }): string {
   return [
-    "ml",
+    params.marketplace,
     params.brand || "all",
     params.status || "all",
     params.productQuery.trim() || "-",
     // Sem isto, trocar a data reusaria a resposta da data anterior e a guarda
     // de frescor descartaria a nova por achar que a chave nao mudou.
     params.observedDate || "latest",
+    params.shopAccount || "all",
+    params.productType || "all",
     String(params.limit),
     String(params.offset),
   ].join("|");
@@ -329,10 +435,30 @@ const DOMINIOS_ML = [
 ];
 
 /**
- * Devolve a URL somente se for HTTPS e de dominio do Mercado Livre.
+ * Gate PMA-2C4B — allowlist POR MARKETPLACE. Um permalink de Shopee num item
+ * de ML (ou o contrario) nao vira link: dominio errado e' sinal de payload
+ * errado, e abrir mesmo assim levaria o operador para fora do que a tela diz
+ * estar mostrando.
+ *
+ * A fato dos canais nao guarda URL, entao hoje `permalink` vem nulo em Shopee e
+ * TikTok e a tela mostra texto sem link. A allowlist existe para quando a
+ * origem passar a fornecer — e NUNCA se constroi URL a partir de `offer_key`,
+ * que produziria link quebrado com aparencia de link bom.
+ */
+const DOMINIOS_POR_CANAL: Record<Marketplace, string[]> = {
+  ml: DOMINIOS_ML,
+  shopee: ["shopee.com.br"],
+  tiktok: ["tiktok.com", "shop.tiktok.com"],
+};
+
+/**
+ * Devolve a URL somente se for HTTPS e de dominio do canal informado.
  * Qualquer outra coisa devolve `null`, e a tela mostra texto sem link.
  */
-export function urlAnuncioSegura(permalink: string | null | undefined): string | null {
+export function urlAnuncioSegura(
+  permalink: string | null | undefined,
+  marketplace: Marketplace = "ml",
+): string | null {
   if (!permalink) return null;
   let u: URL;
   try {
@@ -342,7 +468,8 @@ export function urlAnuncioSegura(permalink: string | null | undefined): string |
   }
   if (u.protocol !== "https:") return null;
   const host = u.hostname.toLowerCase();
-  const ok = DOMINIOS_ML.some((d) => host === d || host.endsWith(`.${d}`));
+  const permitidos = DOMINIOS_POR_CANAL[marketplace] ?? [];
+  const ok = permitidos.some((d) => host === d || host.endsWith(`.${d}`));
   return ok ? u.toString() : null;
 }
 
@@ -361,7 +488,20 @@ export interface KpiView {
   qualidade?: boolean;
 }
 
-export function buildKpiViews(kpis: MonitoramentoPrecoKpis): KpiView[] {
+/**
+ * Gate PMA-2C4B — o detalhe do cartao nomeava o Mercado Livre em QUALQUER
+ * canal. Com a Shopee na tela, "Anúncios próprios no Mercado Livre" sobre 692
+ * ofertas da Shopee era simplesmente falso. O texto do ML fica intacto como
+ * padrao: quem nao passa o canal continua vendo o que ja' estava publicado.
+ */
+function escopoDoCanal(m: Marketplace): string {
+  return m === "ml" ? "no Mercado Livre" : `na ${canalLabel(m)}`;
+}
+
+export function buildKpiViews(
+  kpis: MonitoramentoPrecoKpis,
+  marketplace: Marketplace = "ml",
+): KpiView[] {
   const total = kpis.monitored_count;
   const de = (n: number) => `${fmtContagem(n)} de ${fmtContagem(total)} monitorados`;
   return [
@@ -369,7 +509,7 @@ export function buildKpiViews(kpis: MonitoramentoPrecoKpis): KpiView[] {
       chave: "monitored",
       rotulo: "Anúncios monitorados",
       valor: total,
-      detalhe: "Anúncios próprios no Mercado Livre na data observada",
+      detalhe: `Anúncios próprios ${escopoDoCanal(marketplace)} na data observada`,
     },
     {
       chave: "comparable",
@@ -471,4 +611,167 @@ export function frescorFecha(kpis: MonitoramentoPrecoKpis): boolean {
 export function tituloLinha(row: MonitoramentoPrecoRow): string {
   const nome = row.listing_title || row.product_name || row.item_id;
   return nome;
+}
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4B — politica de data, frescor e cobertura
+// ---------------------------------------------------------------------------
+
+export interface PoliticaDataView {
+  /** Rotulo curto do teto, para o seletor de data. */
+  tetoRotulo: string;
+  /** Frase que explica o teto DESTE canal. */
+  explicacao: string;
+  /** Aviso de fotografia ainda mutavel; nulo quando nao se aplica. */
+  avisoMutavel: string | null;
+}
+
+/**
+ * Texto da politica de data DO CANAL. O do Mercado Livre e' o publicado e nao
+ * muda; o dos canais novos NUNCA reutiliza a frase de D-1, porque o teto deles
+ * e' o proprio dia operacional e chamar isso de "dia fechado" seria falso.
+ */
+export function politicaDataView(
+  meta: Pick<
+    MonitoramentoPrecoMeta,
+    "date_policy" | "eligible_ref_date" | "snapshot_mutability"
+  > | null,
+): PoliticaDataView {
+  if (meta?.date_policy === "snapshot_current") {
+    const teto = meta.eligible_ref_date;
+    return {
+      tetoRotulo: teto ? `até ${fmtData(teto)} (hoje)` : "até hoje",
+      explicacao:
+        "Fotografia do estado corrente das vitrines: o dia de hoje já é " +
+        "consultável, porque a observação é derivada do relógio de carga de " +
+        "cada conta. Datas futuras não são observáveis.",
+      avisoMutavel:
+        meta.snapshot_mutability === "mutable_operational_snapshot"
+          ? "Fotografia do dia corrente: é o estado observado até o relógio de " +
+            "cada conta e AINDA PODE MUDAR hoje se a origem recarregar. Não é " +
+            "período fechado nem contagem definitiva do dia."
+          : null,
+    };
+  }
+  const teto = meta?.eligible_ref_date;
+  return {
+    tetoRotulo: teto ? `até ${fmtData(teto)} (D−1)` : "até D−1",
+    explicacao:
+      "Série diária: apenas um dia fechado sustenta a comparação, então o " +
+      "teto é D−1 no fuso America/Sao_Paulo. O dia corrente e o futuro não " +
+      "são publicáveis pelo sync.",
+    avisoMutavel: null,
+  };
+}
+
+/**
+ * As quatro situacoes de qualidade que a tela precisa distinguir. Sao
+ * ORTOGONAIS ao status comercial e nunca o substituem.
+ */
+export type SituacaoFrescor =
+  | "fotografia_em_dia"
+  | "oferta_nao_revista"
+  | "fotografia_atrasada"
+  | "consulta_historica"
+  | "sem_observacao";
+
+/**
+ * Classifica o frescor de UMA linha combinando os dois niveis.
+ *
+ * A distincao que importa: com a fotografia em dia, uma linha `stale` significa
+ * que AQUELA OFERTA nao foi revista na carga — nao que o pipeline atrasou. Na
+ * Shopee ha modelo com carimbo de ate 18 dias dentro de uma carga de hoje.
+ * Mandar "verificar o sync" nesse caso apontaria o operador para o lugar errado.
+ */
+export function situacaoFrescor(
+  linha: Pick<MonitoramentoPrecoRow, "freshness_status">,
+  frescorDaFotografia: FreshnessStatus,
+): SituacaoFrescor {
+  if (linha.freshness_status === "historical") return "consulta_historica";
+  if (linha.freshness_status === "unavailable") return "sem_observacao";
+  if (linha.freshness_status === "stale") {
+    return frescorDaFotografia === "stale"
+      ? "fotografia_atrasada"
+      : "oferta_nao_revista";
+  }
+  return "fotografia_em_dia";
+}
+
+export const SITUACAO_FRESCOR_LABELS: Record<SituacaoFrescor, string> = {
+  fotografia_em_dia: "Revista nesta fotografia",
+  oferta_nao_revista: "Não revista nesta fotografia",
+  fotografia_atrasada: "Fotografia atrasada",
+  consulta_historica: "Consulta retrospectiva",
+  sem_observacao: "Sem observação",
+};
+
+export function situacaoFrescorLabel(s: SituacaoFrescor): string {
+  return SITUACAO_FRESCOR_LABELS[s] ?? s;
+}
+
+/**
+ * Preco ANUNCIADO da oferta. `null` vira "Não observado", nunca "R$ 0,00":
+ * zero afirmaria um preco que ninguem viu.
+ */
+export function fmtPrecoObservado(valor: number | null | undefined): string {
+  if (valor == null || Number.isNaN(valor)) return PRECO_NAO_OBSERVADO;
+  return fmtMoeda(valor);
+}
+
+/** A linha tem preco observado? Sem ele nao ha diferenca a apresentar. */
+export function temPrecoObservado(
+  linha: Pick<MonitoramentoPrecoRow, "advertised_price">,
+): boolean {
+  return linha.advertised_price != null && !Number.isNaN(linha.advertised_price);
+}
+
+export interface CoberturaContaView {
+  conta: string;
+  ofertas: number | null;
+  revistas: number | null;
+  naoRevistas: number | null;
+  relogio: string;
+}
+
+/**
+ * Cobertura por CONTA de loja, direto de `meta.account_clocks`. Nada e'
+ * somado aqui alem do que a API ja' entrega por conta — a tela apresenta.
+ */
+export function coberturaPorConta(
+  relogios: AccountClock[] | null | undefined,
+): CoberturaContaView[] {
+  return (relogios ?? []).map((r) => ({
+    conta: r.account,
+    ofertas: r.offers ?? null,
+    revistas: r.current_offers ?? null,
+    naoRevistas: r.stale_offers ?? null,
+    relogio: fmtInstanteBrt(r.account_watermark_at ?? r.refreshed_at ?? null),
+  }));
+}
+
+/**
+ * Resumo de cobertura: contas observadas e ofertas fora do escopo de negocio.
+ * `esperadas` vem do que a API devolveu — a tela nao mantem lista propria de
+ * contas, que ficaria desatualizada em silencio quando a origem mudar.
+ */
+export function resumoCobertura(
+  meta: Pick<
+    MonitoramentoPrecoMeta,
+    "account_clocks" | "out_of_scope_offer_count" | "snapshot_status_counts"
+  > | null,
+): {
+  contasObservadas: number;
+  ofertasForaDeEscopo: number;
+  revistas: number | null;
+  naoRevistas: number | null;
+} {
+  const relogios = meta?.account_clocks ?? [];
+  const contagem = meta?.snapshot_status_counts ?? {};
+  const temContagem = Object.keys(contagem).length > 0;
+  return {
+    contasObservadas: relogios.length,
+    ofertasForaDeEscopo: meta?.out_of_scope_offer_count ?? 0,
+    revistas: temContagem ? (contagem.current ?? 0) : null,
+    naoRevistas: temContagem ? (contagem.stale ?? 0) : null,
+  };
 }
