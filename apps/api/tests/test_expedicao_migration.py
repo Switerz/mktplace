@@ -410,11 +410,33 @@ def test_stalled_nunca_e_soma_de_slow_e_zombie():
     assert "stalled_count = slow_count + zombie_count" not in ddl
 
 
-def test_guarda_de_nan_nos_numericos():
-    """`'NaN'::numeric >= 0` e' VERDADEIRO em PostgreSQL: teto sozinho nao basta."""
+#: Os tres valores que `NUMERIC` aceita e que NAO sao numero. Medido em
+#: PostgreSQL 16.14: `'NaN' >= 0` e `'Infinity' >= 0` sao TRUE, e
+#: `'Infinity' <> 'NaN'` tambem — logo nem um teto nem uma guarda so' de NaN
+#: barram os tres.
+NAO_FINITOS = ("NaN", "Infinity", "-Infinity")
+
+
+@pytest.mark.parametrize("coluna", ["hours_open", "hours_overdue"])
+@pytest.mark.parametrize("valor", NAO_FINITOS)
+def test_duracao_recusa_valor_nao_finito(coluna, valor):
+    """Cada um dos tres e' recusado EXPLICITAMENTE, em cada coluna de duracao."""
+    assert f"{coluna} <> '{valor}'::numeric" in _ddl_upgrade(), (coluna, valor)
+
+
+@pytest.mark.parametrize("coluna", ["hours_open", "hours_overdue"])
+def test_duracao_nao_converte_invalido_em_null_ou_zero(coluna):
+    """O valor invalido e' RECUSADO, nunca substituido.
+
+    `NULL` em `hours_open` significa "sem marco inicial" e zero significaria
+    "aberto agora": converter um valor corrompido para um desses inventaria um
+    fato que a fonte nao sustenta.
+    """
     ddl = _ddl_upgrade()
-    for coluna in ("hours_open", "hours_overdue"):
-        assert f"{coluna} <> 'NaN'::numeric" in ddl, coluna
+    assert f"COALESCE({coluna}" not in ddl
+    assert f"{coluna} DEFAULT" not in ddl.upper()
+    # A protecao e' CHECK (recusa), nao trigger nem default (correcao).
+    assert f"ck_efa_{coluna}_finito CHECK (" in ddl
 
 
 def test_contagens_do_resumo_sao_nao_negativas():

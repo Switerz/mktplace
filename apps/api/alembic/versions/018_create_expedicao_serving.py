@@ -211,12 +211,36 @@ def upgrade() -> None:
         )
     """)
 
-    # Guarda de NaN: `'NaN'::numeric >= 0` e' VERDADEIRO em PostgreSQL, entao um
-    # teto numerico sozinho nao barraria um NaN vindo de float corrompido.
+    # Duracao tem de ser FINITA. `NUMERIC` aceita tres valores que nao sao
+    # numero: `NaN`, `Infinity` e `-Infinity` — os tres invalidos para "horas em
+    # aberto" e "horas de estouro".
+    #
+    # Medido em PostgreSQL 16.14 antes de escrever este CHECK:
+    #
+    #     'NaN'::numeric >= 0        -> TRUE   (teto nao barra)
+    #     'Infinity'::numeric >= 0   -> TRUE   (teto nao barra)
+    #     '-Infinity'::numeric >= 0  -> FALSE
+    #     'Infinity'  <> 'NaN'       -> TRUE   (guarda so' de NaN nao barra)
+    #     '-Infinity' <> 'NaN'       -> TRUE   (idem)
+    #
+    # Ou seja: nem um teto numerico nem uma guarda so' de NaN bastam. Os tres
+    # sao recusados EXPLICITAMENTE. Uma expressao de faixa
+    # (`> '-Infinity' AND < 'Infinity'`) funcionaria por acidente — em NUMERIC,
+    # `NaN > '-Infinity'` e' TRUE e `NaN < 'Infinity'` e' FALSE — mas depende de
+    # uma ordenacao contraintuitiva e seria fragil de ler. A enumeracao diz o
+    # que quer dizer.
+    #
+    # O valor invalido e' RECUSADO, nunca convertido para NULL ou zero: `NULL`
+    # em `hours_open` significa "sem marco inicial" e zero significaria "aberto
+    # agora". Silenciar um valor corrompido como um desses dois inventaria um
+    # fato que a fonte nao sustenta.
     for coluna in ("hours_open", "hours_overdue"):
         op.execute(
-            f"ALTER TABLE {FILA_Q} ADD CONSTRAINT ck_efa_{coluna}_finito "
-            f"CHECK ({coluna} IS NULL OR {coluna} <> 'NaN'::numeric)"
+            f"ALTER TABLE {FILA_Q} ADD CONSTRAINT ck_efa_{coluna}_finito CHECK ("
+            f"{coluna} IS NULL OR ("
+            f"{coluna} <> 'NaN'::numeric"
+            f" AND {coluna} <> 'Infinity'::numeric"
+            f" AND {coluna} <> '-Infinity'::numeric))"
         )
 
     # Fatos da FONTE Shopee, nao convencao interna: todas as colunas de data de
