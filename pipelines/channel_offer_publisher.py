@@ -129,6 +129,19 @@ SQL_INSERT_OFFERS = (
     + ") VALUES %s"
 )
 
+#: Tamanho da pagina do INSERT.
+#:
+#: 500 e' uma escolha, nao um acaso: deixa a Shopee (692 ofertas) em 2 paginas e
+#: o TikTok (1.208) em 3, mantendo o comando enviado ao servidor num tamanho que
+#: ele parseia sem esforco e sem multiplicar idas e voltas.
+#:
+#: Deliberadamente NAO e' "uma pagina do tamanho da carga". Isso resolveria o
+#: numero de hoje e voltaria a quebrar quando o catalogo crescer: um unico
+#: comando com dezenas de milhares de tuplas vira problema de memoria no lado do
+#: driver e de tempo de parse no servidor. A contagem tem de estar certa em
+#: qualquer volume, nao so' enquanto couber numa pagina.
+INSERT_PAGE_SIZE = 500
+
 #: Reconciliacao ANTES do commit: conta o que a propria transacao enxerga.
 SQL_COUNT_SCOPE = f"""
 SELECT count(*) AS n
@@ -254,6 +267,47 @@ def _linha_para_tupla(registro: dict) -> tuple:
     return tuple(registro[coluna] for coluna in cos.RECORD_COLUMNS)
 
 
+def insert_offers_paged(cur, registros) -> int:
+    """INSERT paginado com contagem ACUMULADA e conferida pagina a pagina.
+
+    Por que existe (Gate PMA-2C3C): `execute_values` pagina POR DENTRO, com
+    `page_size=100` por padrao, e emite um `execute` por pagina. Ao fim da
+    chamada `cur.rowcount` vale apenas a ULTIMA pagina. Foi assim que o piloto
+    do PMA-2C3B caiu: 692 ofertas viraram 6 paginas de 100 mais uma de 92, a
+    guarda leu 92, comparou com 692 e desfez uma transacao que estava correta.
+    O mesmo aconteceria com as 1.208 do TikTok (12x100 + 8).
+
+    Aqui a paginacao e' EXPLICITA. Cada chamada recebe uma pagina ja' fatiada e
+    `page_size=len(pagina)`, de modo que `execute_values` emita exatamente um
+    `execute` e o `rowcount` observado seja, sem ambiguidade, o daquela pagina.
+    O total e' a SOMA do que o driver informou — nunca um comprimento de lista
+    assumido como sucesso.
+
+    Contrato:
+      * lista vazia devolve 0 sem emitir nenhum `execute`;
+      * `rowcount` None, -1 ou diferente do tamanho da pagina levanta na hora,
+        antes do commit — ausencia de confirmacao nao vira confirmacao;
+      * nao chama `commit` nem `rollback`, nao abre conexao: um erro em
+        qualquer pagina sobe e derruba a transacao inteira do chamador.
+    """
+    total = 0
+    for inicio in range(0, len(registros), INSERT_PAGE_SIZE):
+        pagina = registros[inicio:inicio + INSERT_PAGE_SIZE]
+        execute_values(
+            cur, SQL_INSERT_OFFERS,
+            [_linha_para_tupla(r) for r in pagina],
+            page_size=len(pagina),
+        )
+        informado = cur.rowcount
+        if informado != len(pagina):
+            raise PublisherError(
+                f"o driver informou {informado} linha(s) numa pagina de "
+                f"{len(pagina)}; a carga nao pode ser confirmada"
+            )
+        total += informado
+    return total
+
+
 def execute_plan(target_conn, plan: cos.PublicationPlan) -> tuple[int, dict]:
     """DELETE por escopo + INSERT, na MESMA transacao. NAO comita.
 
@@ -277,17 +331,28 @@ def execute_plan(target_conn, plan: cos.PublicationPlan) -> tuple[int, dict]:
                 "shop_account": escopo.shop_account,
             })
 
-        # 2. Insere. Escopo saudavel com zero ofertas passa por aqui sem nada:
-        #    o DELETE dele ja' rodou, e o resultado e' `rows_loaded = 0`.
-        inseridas = 0
-        if plan.records:
-            execute_values(
-                cur, SQL_INSERT_OFFERS,
-                [_linha_para_tupla(r) for r in plan.records],
-            )
-            inseridas = cur.rowcount if cur.rowcount is not None else 0
+        # 2. Insere em paginas EXPLICITAS, somando o que o driver confirma em
+        #    cada uma. Escopo saudavel com zero ofertas passa por aqui sem
+        #    nada: o DELETE dele ja' rodou, e o resultado e' `rows_loaded = 0`.
+        esperado = len(plan.records)
+        inseridas = insert_offers_paged(cur, plan.records)
 
-        # 3. Reconcilia ANTES do commit, dentro da propria transacao.
+        # 3. PRIMEIRA defesa: o total CONFIRMADO pelo driver bate com o plano.
+        #    Antes esta guarda lia `cur.rowcount` depois de um `execute_values`
+        #    paginado por dentro e comparava a ultima pagina com o total; agora
+        #    compara soma com soma.
+        if inseridas != esperado:
+            raise PublisherError(
+                f"o INSERT confirmou {inseridas} linhas e o plano tinha "
+                f"{esperado}"
+            )
+
+        # 4. SEGUNDA defesa, independente da primeira: o que a propria
+        #    transacao enxerga nos escopos publicados. Ela cobre o que uma
+        #    contagem de driver nao cobre — linha gravada em escopo que nao era
+        #    o seu, DELETE que varreu alem do proprio escopo, regra do banco
+        #    que redirecionou a linha. As duas so' concordam se a fotografia
+        #    estiver inteira E no lugar certo.
         por_escopo = {}
         for escopo in plan.scopes_to_replace:
             cur.execute(SQL_COUNT_SCOPE, {
@@ -297,18 +362,13 @@ def execute_plan(target_conn, plan: cos.PublicationPlan) -> tuple[int, dict]:
             })
             por_escopo[escopo] = cur.fetchone()[0]
 
-    esperado = len(plan.records)
     visto = sum(por_escopo.values())
     if visto != esperado:
         raise PublisherError(
             f"reconciliacao pre-commit divergiu: a transacao enxerga {visto} "
             f"linhas nos escopos publicados e o plano tinha {esperado}"
         )
-    if inseridas and inseridas != esperado:
-        raise PublisherError(
-            f"INSERT relatou {inseridas} linhas e o plano tinha {esperado}"
-        )
-    return esperado, por_escopo
+    return inseridas, por_escopo
 
 
 def run_publication(
