@@ -85,6 +85,25 @@ class Settings(BaseSettings):
     # sozinha: ativacao e' decisao de negocio, fora desta rodada.
     pma_ml_metric_v2_enabled: bool = Field(default=False)
 
+    # ------------------------------------------------------------------
+    # Gate EXP-2A — API read-only da Expedicao
+    # ------------------------------------------------------------------
+    # Nasce DESLIGADA. A camada de dados esta publicada, mas expor a superficie
+    # e decisao separada: com a flag off o servico devolve `unavailable`
+    # ESTRUTURADO sem emitir uma unica consulta.
+    expedicao_api_enabled: bool = Field(default=False)
+
+    # Chave do identificador OPACO de pedido. Vazia por default, e vazia
+    # significa NAO PUBLICAR: `order_ref` sai nulo.
+    #
+    # Esta API nao tem autenticacao (nenhum router declara dependencia de auth).
+    # `order_sn` permite consultar o pedido no painel do marketplace, entao nao
+    # vai cru numa rota publica. Hash SEM chave tambem nao serve: o espaco de
+    # `order_sn` e curto e enumeravel, e uma tabela arco-iris o reverte. Com
+    # segredo configurado o valor vira HMAC-SHA256 truncado — estavel entre
+    # execucoes e inutil para quem nao tem a chave.
+    expedicao_order_ref_secret: str = ""
+
     @property
     def datamart_url(self) -> str:
         if self.datamart_database_url:
