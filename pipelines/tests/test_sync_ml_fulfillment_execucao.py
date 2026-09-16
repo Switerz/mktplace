@@ -101,6 +101,74 @@ class FakeResult:
         return iter(self._linhas)
 
 
+class CursorDBAPIFiel:
+    """Cursor DBAPI fiel o bastante para `execute_values` REAL dirigi-lo.
+
+    `psycopg2.extras.execute_values` usa exatamente tres coisas do cursor:
+    `connection.encoding` (para codificar o SQL), `mogrify(template, args)` por
+    LINHA e `execute(sql)` por PAGINA. Este fake implementa as tres -- e o
+    `mogrify` usa `psycopg2.extensions.adapt`, a adaptacao de verdade, nao uma
+    interpolacao caseira.
+
+    Por que nao um lambda permissivo: um stub que engolisse tudo provaria apenas
+    que a funcao foi chamada. Aqui `execute_values` roda de verdade, e cada
+    `execute` registrado E' uma pagina -- e' assim que a contagem de round-trips
+    vira prova.
+    """
+
+    def __init__(self, conexao):
+        self.connection = conexao
+        self.paginas: list[bytes] = []
+        self.linhas_mogrificadas = 0
+        self.falhar_na_pagina: int | None = None
+
+    def mogrify(self, template, args):
+        import psycopg2.extensions as ext
+        self.linhas_mogrificadas += 1
+        partes = []
+        for a in args:
+            partes.append(b"NULL" if a is None else ext.adapt(a).getquoted())
+        corpo = b"(" + b",".join(partes) + b")"
+        assert template.count(b"%s") if isinstance(template, bytes) else True
+        return corpo
+
+    def execute(self, sql, args=None):
+        if self.falhar_na_pagina is not None and \
+                len(self.paginas) == self.falhar_na_pagina:
+            raise RuntimeError(
+                f"falha injetada na pagina {self.falhar_na_pagina} "
+                "em postgresql://u:p@10.0.0.1/db")
+        self.paginas.append(sql)
+
+    # `execute_values` nunca chama estes, mas um cursor de verdade os tem.
+    def close(self):
+        pass
+
+
+class ConexaoDBAPIFiel:
+    """Conexao DBAPI minima: so' o que `execute_values` consulta."""
+
+    encoding = "UTF8"
+
+    def __init__(self):
+        self.cursores: list[CursorDBAPIFiel] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self):
+        c = CursorDBAPIFiel(self)
+        self.cursores.append(c)
+        return c
+
+    # Existem para que um commit/rollback indevido do helper seja DETECTADO,
+    # nao silenciosamente ignorado.
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
 class FakeConn:
     def __init__(self, origem, trace, respostas=None, falhar_em=None):
         self.origem = origem
@@ -109,6 +177,9 @@ class FakeConn:
         self.respostas = respostas or {}
         self.falhar_em = falhar_em
         self.closed = 0
+        # `.connection` e' por onde `_inserir_em_lote` obtem o cursor DBAPI da
+        # MESMA transacao. Um fake sem isso nao exercitaria o caminho real.
+        self.connection = ConexaoDBAPIFiel()
 
     def execute(self, sql, params=None):
         texto = str(sql)
@@ -977,3 +1048,304 @@ def test_real_o_lock_pertence_a_conexao_que_o_adquiriu(conexoes_reais):
     assert _unlock(b) is False, "b nao detem o lock; nao deveria liberar"
     assert _try_lock(b) is False, "o lock de a continua de pe"
     assert _unlock(a) is True
+
+
+# ---------------------------------------------------------------------------
+# Carga em lote das stagings — Gate FULL-1C-H2
+# ---------------------------------------------------------------------------
+#
+# O piloto FULL-1C-R morreu publicando 76.014 linhas uma a uma. Medido contra
+# Postgres local: `executemany(4.000)` custa 0,94x o laco explicito de
+# `execute()` -- e' o mesmo laco. Com RTT de 173 ms ao Neon, 76.014 round-trips
+# = 3,7 h. `execute_values` com paginas de 500 faz 153.
+
+from pipelines.sync_ml_fulfillment_daily import (   # noqa: E402
+    STAGING_PAGE_SIZE,
+    _inserir_em_lote,
+    _STAGINGS_PERMITIDAS,
+)
+
+
+class ConnParaLote:
+    """Conexao SQLAlchemy minima: so' expoe `.connection`."""
+
+    def __init__(self, falhar_na_pagina=None):
+        self.connection = ConexaoDBAPIFiel()
+        self._falhar = falhar_na_pagina
+
+    def cursor_usado(self):
+        return self.connection.cursores[-1]
+
+    def preparar(self):
+        # `_inserir_em_lote` cria o cursor; para injetar falha, interceptamos.
+        orig = self.connection.cursor
+
+        def cursor():
+            c = orig()
+            c.falhar_na_pagina = self._falhar
+            return c
+        self.connection.cursor = cursor
+        return self
+
+
+COLS3 = ("a", "b", "c")
+
+
+def linhas(n, valor=1):
+    return [(date(2026, 8, 1), f"item{i}", Decimal(str(valor))) for i in range(n)]
+
+
+def test_page_size_e_500_e_documentado():
+    assert STAGING_PAGE_SIZE == 500
+
+
+@pytest.mark.parametrize("n,paginas_esperadas", [
+    (0, 0),                    # lista vazia
+    (1, 1),                    # uma linha
+    (499, 1),
+    (500, 1),                  # batch exato
+    (501, 2),                  # batch + 1
+    (1000, 2),
+    (3649, 8),                 # fato agregada real
+    (76014, 153),              # fato de listing real
+])
+def test_numero_de_paginas_e_teto_por_lote(n, paginas_esperadas):
+    """CONTRAPROVA do gargalo: round-trips caem de O(linhas) para O(paginas)."""
+    conn = ConnParaLote()
+    escritas = _inserir_em_lote(conn, "stg_fmfd", COLS3, linhas(n))
+    assert escritas == n
+    if n == 0:
+        assert conn.connection.cursores == []      # nem cursor e' aberto
+        return
+    cur = conn.cursor_usado()
+    assert len(cur.paginas) == paginas_esperadas
+    assert cur.linhas_mogrificadas == n
+
+
+def test_76014_linhas_no_maximo_153_paginas():
+    """O teto que o gate fixou para page_size 500."""
+    conn = ConnParaLote()
+    _inserir_em_lote(conn, "stg_fmfld", COLS3, linhas(76014))
+    assert len(conn.cursor_usado().paginas) <= 153
+
+
+def test_ganho_de_round_trips_contra_o_caminho_antigo():
+    """Antes: ~1 round-trip por linha. Depois: 1 por pagina."""
+    conn = ConnParaLote()
+    n = 76014
+    _inserir_em_lote(conn, "stg_fmfld", COLS3, linhas(n))
+    paginas = len(conn.cursor_usado().paginas)
+    assert n / paginas >= 400, "o lote nao esta amortizando o round-trip"
+
+
+def test_helper_nunca_faz_commit_nem_rollback():
+    """Quem controla a transacao e' `publish_in_transaction`, nao o helper."""
+    conn = ConnParaLote()
+    _inserir_em_lote(conn, "stg_fmfd", COLS3, linhas(1200))
+    assert conn.connection.commits == 0
+    assert conn.connection.rollbacks == 0
+
+
+def test_staging_fora_da_lista_e_recusada():
+    """O nome da tabela vai para o SQL; a lista fechada e' o que protege."""
+    conn = ConnParaLote()
+    with pytest.raises(MLFulfillmentSyncError, match="staging nao permitida"):
+        _inserir_em_lote(conn, "stg_fmfd; DROP TABLE x", COLS3, linhas(1))
+    assert conn.connection.cursores == []
+    assert set(_STAGINGS_PERMITIDAS) == {"stg_fmfd", "stg_fmfld"}
+
+
+def test_aridade_incorreta_e_recusada_antes_do_driver():
+    conn = ConnParaLote()
+    ruins = [(date(2026, 8, 1), "x", Decimal("1")), (date(2026, 8, 1), "y")]
+    with pytest.raises(MLFulfillmentSyncError, match="aridade|valor"):
+        _inserir_em_lote(conn, "stg_fmfd", COLS3, ruins)
+    assert conn.connection.cursores == []      # nada chegou ao driver
+
+
+@pytest.mark.parametrize("ruim", [
+    Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity"),
+    float("nan"), float("inf"), float("-inf"),
+])
+def test_nan_e_infinito_sao_recusados_antes_do_driver(ruim):
+    """NaN atravessa `>= 0` em silencio no Postgres -- barrar aqui da erro util."""
+    conn = ConnParaLote()
+    dados = [(date(2026, 8, 1), "x", ruim)]
+    with pytest.raises(MLFulfillmentSyncError, match="nao finito"):
+        _inserir_em_lote(conn, "stg_fmfd", COLS3, dados)
+    assert conn.connection.cursores == []
+
+
+def test_decimal_finito_e_aceito():
+    conn = ConnParaLote()
+    assert _inserir_em_lote(conn, "stg_fmfd", COLS3,
+                            [(date(2026, 8, 1), "x", Decimal("0"))]) == 1
+
+
+def test_null_e_preservado_como_null():
+    conn = ConnParaLote()
+    _inserir_em_lote(conn, "stg_fmfd", COLS3, [(None, "x", None)])
+    corpo = b"".join(conn.cursor_usado().paginas)
+    assert corpo.count(b"NULL") == 2
+
+
+def test_tipos_reais_passam_por_adaptacao_do_driver():
+    """Decimal, date e str viram literais via `adapt`, nao concatenacao."""
+    conn = ConnParaLote()
+    _inserir_em_lote(conn, "stg_fmfd", COLS3,
+                     [(date(2026, 8, 1), "barbours", Decimal("10.55"))])
+    corpo = b"".join(conn.cursor_usado().paginas)
+    assert b"'2026-08-01'" in corpo
+    assert b"'barbours'" in corpo
+    assert b"10.55" in corpo
+
+
+def test_valores_nunca_sao_interpolados_no_texto_do_sql():
+    """O SQL montado por nos tem UM `%s`; os valores vem do driver."""
+    import inspect
+    fonte = inspect.getsource(_inserir_em_lote)
+    assert 'VALUES %s' in fonte
+    assert "f\"INSERT INTO {staging}" in fonte or 'INSERT INTO {staging}' in fonte
+    # Nenhum valor de linha aparece formatado no SQL.
+    assert 'linhas[' not in fonte.split('sql =')[1].split('\n')[0]
+
+
+def test_falha_na_primeira_pagina_propaga_e_nao_vira_retry():
+    conn = ConnParaLote(falhar_na_pagina=0).preparar()
+    with pytest.raises(RuntimeError):
+        _inserir_em_lote(conn, "stg_fmfd", COLS3, linhas(1500))
+    assert len(conn.cursor_usado().paginas) == 0
+    assert conn.connection.commits == 0
+
+
+def test_falha_em_pagina_intermediaria_propaga():
+    conn = ConnParaLote(falhar_na_pagina=2).preparar()
+    with pytest.raises(RuntimeError):
+        _inserir_em_lote(conn, "stg_fmfd", COLS3, linhas(2000))
+    # Parou na pagina 2: duas escreveram, a transacao inteira sera desfeita
+    # por quem controla (publish_in_transaction).
+    assert len(conn.cursor_usado().paginas) == 2
+    assert conn.connection.rollbacks == 0      # nao e' o helper que desfaz
+
+
+def test_as_duas_stagings_usam_a_mesma_conexao(stub_read_source):
+    """Uma transacao so': ambas passam pela conexao de publicacao."""
+    amb = Ambiente()
+    stub_read_source(trace=amb.trace)
+    run_apply(MODE_INCREMENTAL, AGORA, **amb.kwargs())
+    # O cursor DBAPI sai de `conn_pub.connection`, nunca de outra.
+    assert len(amb.conn_pub.connection.cursores) >= 1
+    for c in (amb.conn_lock, amb.conn_audit, amb.conn_dm):
+        assert c.connection.cursores == []
+
+
+def test_ordem_das_colunas_bate_com_o_insert_final():
+    """`_COLS` alimenta staging, INSERT final e EXCEPT -- nao podem divergir."""
+    assert mod._LISTA == ", ".join(mod._COLS)
+    assert mod._LISTA_L == ", ".join(mod._COLS_L)
+    assert len(mod._COLS) == 18
+    assert len(mod._COLS_L) == 9
+
+
+# ---------------------------------------------------------------------------
+# Lote contra PostgreSQL REAL (descartavel) — Gate FULL-1C-H2
+# ---------------------------------------------------------------------------
+#
+# Os testes acima usam cursor fiel e provam a CONTAGEM de paginas. Estes provam
+# que os tipos sobrevivem a ida e volta por um servidor de verdade.
+#
+# Reutiliza `FULL_LOCK_TEST_DSN` -- mesmo Postgres local descartavel. Sem a
+# variavel, pula. NUNCA aponta para Neon ou Data Mart.
+#
+# ESCOPO: tabela TEMP, `ON COMMIT DROP`, sempre com rollback ao final.
+
+
+@pytest.fixture
+def conn_real():
+    """Connection SQLAlchemy em transacao, com a staging temporaria criada."""
+    if not _dsn_local():
+        pytest.skip("defina FULL_LOCK_TEST_DSN para a prova em Postgres real")
+    sa = pytest.importorskip("sqlalchemy")
+    dsn = _dsn_local()
+    if dsn.startswith("postgresql://"):
+        dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
+    eng = sa.create_engine(dsn)
+    conn = eng.connect()
+    conn.execute(sa.text("""
+        CREATE TEMP TABLE stg_fmfd (
+            a DATE, b TEXT, c NUMERIC, d BIGINT, e BOOLEAN, f TIMESTAMP
+        ) ON COMMIT DROP
+    """))
+    try:
+        yield conn
+    finally:
+        conn.rollback()        # nada e' commitado, nunca
+        conn.close()
+        eng.dispose()
+
+
+COLS_REAL = ("a", "b", "c", "d", "e", "f")
+
+
+@requer_pg
+def test_real_tipos_sobrevivem_a_ida_e_volta(conn_real):
+    import sqlalchemy as sa
+    linha = (date(2026, 8, 1), "barbours", Decimal("3649773.48"), 48411, True,
+             datetime(2026, 8, 1, 12, 34, 56))
+    assert _inserir_em_lote(conn_real, "stg_fmfd", COLS_REAL, [linha]) == 1
+
+    r = conn_real.execute(sa.text("SELECT a,b,c,d,e,f FROM stg_fmfd")).one()
+    assert r[0] == date(2026, 8, 1)
+    assert r[1] == "barbours"
+    assert r[2] == Decimal("3649773.48")      # centavo preservado
+    assert r[3] == 48411
+    assert r[4] is True
+    assert r[5] == datetime(2026, 8, 1, 12, 34, 56)
+
+
+@requer_pg
+def test_real_null_chega_como_null(conn_real):
+    import sqlalchemy as sa
+    _inserir_em_lote(conn_real, "stg_fmfd", COLS_REAL,
+                     [(None, "x", None, None, None, None)])
+    n = conn_real.execute(sa.text(
+        "SELECT count(*) FROM stg_fmfd WHERE a IS NULL AND c IS NULL "
+        "AND d IS NULL AND e IS NULL AND f IS NULL")).scalar()
+    assert n == 1
+
+
+@requer_pg
+def test_real_volume_com_paginacao(conn_real):
+    """4.000 linhas em 8 paginas, todas gravadas."""
+    import sqlalchemy as sa
+    dados = [(date(2026, 8, 1), f"m{i}", Decimal("1.01"), i, i % 2 == 0,
+              datetime(2026, 8, 1)) for i in range(4000)]
+    assert _inserir_em_lote(conn_real, "stg_fmfd", COLS_REAL, dados) == 4000
+    assert conn_real.execute(sa.text("SELECT count(*) FROM stg_fmfd")).scalar() == 4000
+    soma = conn_real.execute(sa.text("SELECT sum(c) FROM stg_fmfd")).scalar()
+    assert soma == Decimal("4040.00")          # 4000 x 1,01, sem perda
+
+
+@requer_pg
+def test_real_helper_fica_na_transacao_da_connection(conn_real):
+    """PROVA transacional: o rollback da Connection desfaz o lote."""
+    import sqlalchemy as sa
+    _inserir_em_lote(conn_real, "stg_fmfd", COLS_REAL,
+                     [(date(2026, 8, 1), "x", Decimal("1"), 1, True,
+                       datetime(2026, 8, 1))])
+    assert conn_real.execute(sa.text("SELECT count(*) FROM stg_fmfd")).scalar() == 1
+    conn_real.rollback()
+    # Apos o rollback a TEMP some junto (ON COMMIT DROP so' cai no commit, mas o
+    # rollback desfaz a criacao dela nesta transacao): consultar tem de falhar.
+    with pytest.raises(Exception):
+        conn_real.execute(sa.text("SELECT count(*) FROM stg_fmfd")).scalar()
+
+
+@requer_pg
+def test_real_falha_de_tipo_propaga_do_driver(conn_real):
+    """Erro do banco sobe intacto, sem virar retry."""
+    with pytest.raises(Exception) as exc:
+        _inserir_em_lote(conn_real, "stg_fmfd", COLS_REAL,
+                         [(date(2026, 8, 1), "x", Decimal("1"),
+                           "nao-e-bigint", True, datetime(2026, 8, 1))])
+    assert "retry" not in str(exc.value).lower()

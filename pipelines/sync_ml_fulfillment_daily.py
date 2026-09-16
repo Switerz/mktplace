@@ -158,7 +158,9 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
+from psycopg2.extras import execute_values
 from sqlalchemy import text
 
 from pipelines.common.db import DataMartSession, LocalSession
@@ -266,6 +268,26 @@ AUDIT_MARKETPLACE_ID = 1
 AUDIT_SOURCE = "ml_fulfillment_daily"
 AUDIT_SOURCE_BACKFILL = "ml_fulfillment_daily_backfill"
 AUDIT_SOURCE_FULL = "ml_fulfillment_daily_full"
+
+#: Linhas por round-trip na carga das stagings.
+#:
+#: MEDIDO no piloto FULL-1C-R: o caminho anterior usava `executemany`, que no
+#: psycopg2 e' um LACO -- um round-trip por linha. Comprovado contra Postgres
+#: local: `executemany(4.000)` custa 0,94x o laco explicito de `execute()`, ou
+#: seja, sao a mesma coisa.
+#:
+#: Com o Neon em us-west-2 e RTT medido de 173 ms, as 76.014 linhas da fato de
+#: listing exigiam 76.014 round-trips = 3,7 h. O piloto foi morto aos 15 min
+#: ainda no `INSERT INTO stg_fmfld`, com o servidor em `idle in transaction`
+#: esperando o cliente.
+#:
+#: Com `execute_values` e paginas de 500: 153 round-trips = ~26 s. A fato
+#: agregada cai de 3.649 para 8 paginas.
+#:
+#: 500 e' deliberado: grande o bastante para amortizar o RTT, pequeno o bastante
+#: para o statement montado caber com folga e para o erro do driver apontar uma
+#: pagina, nao a carga inteira.
+STAGING_PAGE_SIZE = 500
 
 TARGET_STATEMENT_TIMEOUT_MS = 600_000
 SOURCE_STATEMENT_TIMEOUT_MS = 600_000
@@ -791,9 +813,7 @@ _COLS_L = ("ref_date", "brand", "item_id", "fulfillment_class",
            "source_run_id")
 
 _LISTA = ", ".join(_COLS)
-_BINDS = ", ".join(f":{c}" for c in _COLS)
 _LISTA_L = ", ".join(_COLS_L)
-_BINDS_L = ", ".join(f":{c}" for c in _COLS_L)
 
 SQL_STAGING_CREATE = text(f"""
     CREATE TEMP TABLE stg_fmfd (LIKE {FACT_TABLE} INCLUDING DEFAULTS)
@@ -803,9 +823,9 @@ SQL_STAGING_CREATE_L = text(f"""
     CREATE TEMP TABLE stg_fmfld (LIKE {LISTING_TABLE} INCLUDING DEFAULTS)
         ON COMMIT DROP
 """)
-SQL_STAGING_INSERT = text(f"INSERT INTO stg_fmfd ({_LISTA}) VALUES ({_BINDS})")
-SQL_STAGING_INSERT_L = text(
-    f"INSERT INTO stg_fmfld ({_LISTA_L}) VALUES ({_BINDS_L})")
+#: Removidos no FULL-1C-H2: a carga das stagings passou para `_inserir_em_lote`
+#: com `execute_values`. O INSERT de uma linha por vez sobrevivia apenas como
+#: alvo de `executemany`, que era exatamente o gargalo.
 
 SQL_DELETE_JANELA = text(
     f"DELETE FROM {FACT_TABLE} WHERE ref_date BETWEEN :date_from AND :date_to")
@@ -853,6 +873,69 @@ SQL_RECONCILIA_DESTINO = text(f"""
 """)
 
 
+#: Unicas stagings que `_inserir_em_lote` aceita. O nome da tabela entra no SQL
+#: por interpolacao (nao ha bind para identificador), entao a lista fechada e' o
+#: que impede qualquer caminho de dado virar nome de objeto.
+_STAGINGS_PERMITIDAS = ("stg_fmfd", "stg_fmfld")
+
+
+def _valor_finito(v) -> bool:
+    """Rejeita NaN e infinito em `Decimal` e `float`.
+
+    Os dois atravessam `>= 0` em silencio no Postgres, e a 016 tem CHECK contra
+    NaN justamente por isso. Barrar aqui faz o erro apontar a linha de origem em
+    vez de um nome de constraint.
+    """
+    if isinstance(v, Decimal):
+        return v.is_finite()
+    if isinstance(v, float):
+        return v == v and v not in (float("inf"), float("-inf"))
+    return True
+
+
+def _inserir_em_lote(conn, staging: str, colunas: tuple[str, ...],
+                     linhas: list[tuple]) -> int:
+    """Carrega `linhas` na staging em paginas de `STAGING_PAGE_SIZE`.
+
+    Usa o cursor DBAPI da PROPRIA conexao (`conn.connection.cursor()`), que
+    compartilha a transacao da `Connection` SQLAlchemy -- verificado: escrita
+    pelo cursor e' visivel a Connection e o rollback dela desfaz as duas. Nao ha
+    conexao paralela, e este helper NUNCA chama commit ou rollback: quem controla
+    a transacao e' `publish_in_transaction`.
+
+    Excecoes do driver sobem intactas, para a maquina de estados de `run_apply`
+    decidir. Nao ha retry aqui.
+    """
+    if staging not in _STAGINGS_PERMITIDAS:
+        raise MLFulfillmentSyncError(
+            f"staging nao permitida: {staging!r}. Apenas "
+            f"{_STAGINGS_PERMITIDAS} podem ser carregadas."
+        )
+    if not linhas:
+        return 0
+
+    esperado = len(colunas)
+    for i, linha in enumerate(linhas):
+        if len(linha) != esperado:
+            raise MLFulfillmentSyncError(
+                f"linha {i} de {staging} tem {len(linha)} valor(es); a tabela "
+                f"espera {esperado}. Ordem e aridade das colunas divergiram."
+            )
+        for j, v in enumerate(linha):
+            if not _valor_finito(v):
+                raise MLFulfillmentSyncError(
+                    f"valor nao finito ({v!r}) em {staging}.{colunas[j]}, "
+                    f"linha {i}. NaN e infinito nao podem chegar ao banco."
+                )
+
+    # `%s` unico: `execute_values` expande a lista de tuplas e o psycopg2 adapta
+    # cada valor. Nenhum dado e' interpolado no texto do SQL.
+    sql = f"INSERT INTO {staging} ({', '.join(colunas)}) VALUES %s"
+    cur = conn.connection.cursor()
+    execute_values(cur, sql, linhas, page_size=STAGING_PAGE_SIZE)
+    return len(linhas)
+
+
 def publish_in_transaction(conn, snapshot: SourceSnapshot, run_id: str) -> int:
     """Staging -> DELETE da janela -> INSERT -> EXCEPT. UMA transacao.
 
@@ -886,30 +969,23 @@ def publish_in_transaction(conn, snapshot: SourceSnapshot, run_id: str) -> int:
             )
         return 0
 
-    conn.execute(SQL_STAGING_INSERT, [{
-        "ref_date": r.ref_date, "brand": r.brand,
-        "fulfillment_class": r.fulfillment_class,
-        "logistic_type_original": r.logistic_type_original,
-        "eligible_orders": r.eligible_orders, "paid_orders": r.paid_orders,
-        "cancelled_orders": r.cancelled_orders, "other_orders": r.other_orders,
-        "paid_gmv": r.paid_gmv, "paid_units": r.paid_units,
-        "handling_seconds_sum": r.handling_seconds_sum,
-        "handling_sample_count": r.handling_sample_count,
-        "delivery_seconds_sum": r.delivery_seconds_sum,
-        "delivery_sample_count": r.delivery_sample_count,
-        "unmatched_orders": r.unmatched_orders,
-        "missing_shipping_items": r.missing_shipping_items,
-        "source_updated_at": r.source_updated_at, "source_run_id": run_id,
-    } for r in snapshot.rows])
+    # Tuplas na ORDEM de `_COLS` / `_COLS_L` -- as mesmas listas usadas no
+    # INSERT final e no EXCEPT, entao a ordem nao pode divergir entre elas.
+    _inserir_em_lote(conn, "stg_fmfd", _COLS, [(
+        r.ref_date, r.brand, r.fulfillment_class, r.logistic_type_original,
+        r.eligible_orders, r.paid_orders, r.cancelled_orders, r.other_orders,
+        r.paid_gmv, r.paid_units,
+        r.handling_seconds_sum, r.handling_sample_count,
+        r.delivery_seconds_sum, r.delivery_sample_count,
+        r.unmatched_orders, r.missing_shipping_items,
+        r.source_updated_at, run_id,
+    ) for r in snapshot.rows])
 
-    if snapshot.listing_rows:
-        conn.execute(SQL_STAGING_INSERT_L, [{
-            "ref_date": r.ref_date, "brand": r.brand, "item_id": r.item_id,
-            "fulfillment_class": r.fulfillment_class,
-            "logistic_type_original": r.logistic_type_original,
-            "paid_orders": r.paid_orders, "paid_gmv": r.paid_gmv,
-            "paid_units": r.paid_units, "source_run_id": run_id,
-        } for r in snapshot.listing_rows])
+    _inserir_em_lote(conn, "stg_fmfld", _COLS_L, [(
+        r.ref_date, r.brand, r.item_id, r.fulfillment_class,
+        r.logistic_type_original, r.paid_orders, r.paid_gmv, r.paid_units,
+        run_id,
+    ) for r in snapshot.listing_rows])
 
     conn.execute(SQL_DELETE_JANELA, janela)
     conn.execute(SQL_INSERT_DO_STAGING)
