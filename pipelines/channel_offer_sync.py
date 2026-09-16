@@ -1093,14 +1093,20 @@ def build_cli() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    """Diagnostico aqui; publicacao DELEGADA ao executor.
+
+    Gate PMA-2C3A-R: `--apply` deixou de ser uma recusa estrutural. Ele nao e'
+    reimplementado aqui — delega para `channel_offer_publisher`, que detem o
+    executor aprovado. Duas implementacoes do mesmo fluxo divergiriam.
+    """
     args = build_cli().parse_args(argv)
     if args.apply:
-        # A barreira do banco roda em `assert_apply_authorized`; esta aqui
-        # existe para que nem a conexao seja aberta numa rodada inerte.
-        print("RECUSADO: --apply nao esta autorizado nesta rodada. A migration "
-              f"{REQUIRED_MIGRATION} do destino ainda nao existe e este CLI nao "
-              "cria tabela em runtime.", file=sys.stderr)
-        return EXIT_REFUSED
+        from pipelines import channel_offer_publisher as publisher
+
+        repassados = ["--marketplace", args.marketplace, "--apply"]
+        if getattr(args, "observed_date", None):
+            repassados += ["--observed-date", args.observed_date]
+        return publisher.main(repassados)
     print(f"diagnose: marketplace={args.marketplace} (somente leitura)")
     return EXIT_OK
 

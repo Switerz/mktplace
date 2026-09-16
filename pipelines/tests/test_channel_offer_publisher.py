@@ -551,7 +551,35 @@ def test_a_cli_nao_publica_sem_apply(capsys):
     assert "dry-run" in capsys.readouterr().out
 
 
-def test_a_cli_recusa_apply_enquanto_a_017_nao_estiver_aplicada(capsys):
+def test_a_cli_apply_alcanca_o_executor(monkeypatch, capsys):
+    """Gate PMA-2C3A-R: `--apply` deixou de ser recusa incondicional.
+
+    Antes, este teste afirmava que a CLI sempre recusava — e por isso
+    `run_publication` era inalcancavel por caminho produtivo. Agora ele afirma
+    o contrario: `--apply` chega ao executor. A recusa que sobra vem da
+    PRECONDICAO real (migration 017 e relacao), verificada contra o banco.
+    """
+    alcancou = []
+
+    def falso_run_apply(args, **kwargs):
+        alcancou.append(args.marketplace)
+        return pub.PublicationOutcome(
+            pub.STATE_PUBLISHED, cos.PublishDecision(cos.PUBLISH_ALLOW),
+            rows_extracted=3, rows_loaded=3)
+
+    monkeypatch.setattr(pub, "run_apply", falso_run_apply)
+    assert pub.main(["--marketplace", "shopee", "--apply"]) == pub.EXIT_OK
+    assert alcancou == ["shopee"]
+    assert "PUBLICADO" in capsys.readouterr().out
+
+
+def test_a_cli_recusa_quando_a_precondicao_do_banco_falha(monkeypatch, capsys):
+    """A recusa continua existindo — mas vinda do banco, nao de um `return`."""
+    def explode(args, **kwargs):
+        raise cos.ApplyNotAuthorizedError(
+            "publicacao nao autorizada: a relacao de destino nao existe")
+
+    monkeypatch.setattr(pub, "run_apply", explode)
     assert pub.main(["--marketplace", "shopee", "--apply"]) == pub.EXIT_REFUSED
     assert "RECUSADO" in capsys.readouterr().err
 

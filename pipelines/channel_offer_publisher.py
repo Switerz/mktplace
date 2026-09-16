@@ -36,8 +36,9 @@ ORDEM OPERACIONAL, E ELA E' O CONTRATO
 
 O passo 3 nao e' detalhe: ler antes do lock permitiria que duas execucoes
 lessem a mesma fonte e publicassem em sequencia, a segunda sobrescrevendo a
-primeira com dados igualmente velhos. `assert_source_read_after_lock` trava
-essa ordem, e um teste a viola de proposito para provar que a guarda pega.
+primeira com dados igualmente velhos. `SourceGate` trava essa ordem — toda
+leitura passa por `gate.read`, que levanta se `mark_locked` ainda nao foi
+chamado — e um mutante que inverte a ordem faz o teste falhar.
 
 AUDITORIA EM CONEXAO INDEPENDENTE
 ----------------------------------
@@ -67,6 +68,11 @@ from datetime import datetime, timezone
 from psycopg2.extras import execute_values
 
 from pipelines import channel_offer_sync as cos
+
+#: O dominio vem POR `cos`, nao por import direto: e' `channel_offer_sync` que
+#: poe `apps/api` no `sys.path`, e um import direto aqui resolveria contra o
+#: checkout errado quando este modulo e' carregado primeiro.
+dom = cos.dom
 
 #: Nome do processo em `audit.source_sync_run.source_name`. Segue a convencao
 #: dos demais (`shopee_daily`, `tiktok_daily`, `ml_daily`).
@@ -439,6 +445,209 @@ def _auditar_silencioso(audit_conn, sync_run_id, status, rows_loaded, detalhe):
 
 
 # ---------------------------------------------------------------------------
+# FIACAO OPERACIONAL  (Gate PMA-2C3A-R)
+# ---------------------------------------------------------------------------
+# O gate anterior entregou o executor mas deixou a CLI recusando `--apply`
+# incondicionalmente: nenhum caminho produtivo alcancava `run_publication`.
+# Este bloco fecha a fiacao.
+#
+# TRES CONEXOES, TRES PAPEIS, ZERO FALLBACK
+# ------------------------------------------
+#     fonte     Data Mart, READ ONLY imposta pelo servidor
+#     destino   Neon, GRAVAVEL — e' ela que detem o advisory lock
+#     auditoria Neon, conexao PROPRIA com commit proprio
+#
+# Nenhuma cai para a outra. Se a auditoria nao abrir, a publicacao nao comeca:
+# publicar sem rastro seria pior que nao publicar. As credenciais sao as
+# canonicas do repositorio (`DATABASE_URL`, `DATAMART_DATABASE_URL`); nenhuma
+# variavel nova e' inventada.
+
+EXIT_FAILED = 1
+
+#: Contas do canal na fotografia JA' PUBLICADA. Serve para responder "quem
+#: deixou de aparecer": conta que existia e sumiu da fonte nao executou, e a
+#: fotografia dela precisa ser preservada, nao apagada.
+SQL_PUBLISHED_ACCOUNTS = f"""
+SELECT DISTINCT shop_account
+  FROM {cos.TARGET_TABLE}
+ WHERE marketplace = %(marketplace)s
+   AND observed_date = (SELECT max(observed_date)
+                          FROM {cos.TARGET_TABLE}
+                         WHERE marketplace = %(marketplace)s)
+"""
+
+#: Watermark JA' PUBLICADO por escopo. E' contra ele que a regressao e' medida.
+SQL_PUBLISHED_WATERMARKS = f"""
+SELECT observed_date, shop_account, max(account_watermark_at) AS watermark_at
+  FROM {cos.TARGET_TABLE}
+ WHERE marketplace = %(marketplace)s
+ GROUP BY observed_date, shop_account
+"""
+
+
+@dataclass(frozen=True)
+class AccountStates:
+    """As quatro situacoes de conta, separadas.
+
+    `healthy_empty` e `unavailable` NAO podem se confundir: a primeira apaga a
+    propria fotografia (a conta existe e hoje nao tem oferta), a segunda nao
+    apaga nada (nao conseguimos olhar). `did_not_run` e' a terceira: a conta
+    existia na fotografia publicada e sumiu da fonte.
+    """
+
+    healthy_with_offers: frozenset = frozenset()
+    healthy_empty: frozenset = frozenset()
+    unavailable: frozenset = frozenset()
+    did_not_run: frozenset = frozenset()
+
+    @property
+    def healthy(self) -> frozenset:
+        """Somente estas entram em `healthy_scopes` e sofrem DELETE."""
+        return self.healthy_with_offers | self.healthy_empty
+
+    def as_report(self) -> dict:
+        return {
+            "healthy_with_offers": sorted(self.healthy_with_offers),
+            "healthy_empty": sorted(self.healthy_empty),
+            "unavailable": sorted(self.unavailable),
+            "did_not_run": sorted(self.did_not_run),
+        }
+
+
+def classify_accounts(*, accounts_in_source, accounts_with_offers,
+                      accounts_published, source_available: bool) -> AccountStates:
+    """Separa as quatro situacoes. Funcao PURA — nao le banco.
+
+    `source_available=False` joga TODAS as contas conhecidas em `unavailable`:
+    sem fonte, nao se sabe nada sobre nenhuma, e nenhuma pode ser apagada.
+    """
+    fonte = frozenset(accounts_in_source)
+    com_oferta = frozenset(accounts_with_offers)
+    publicadas = frozenset(accounts_published)
+
+    if not source_available:
+        return AccountStates(unavailable=fonte | publicadas)
+
+    desconhecidas = com_oferta - fonte
+    if desconhecidas:
+        # Oferta de uma conta que o relogio nao conhece: o escopo dela nao teria
+        # watermark para validar regressao. Falhar alto e' melhor que publicar
+        # sem relogio.
+        raise PublisherError("oferta de conta ausente do relogio da fonte")
+
+    return AccountStates(
+        healthy_with_offers=com_oferta,
+        healthy_empty=fonte - com_oferta,
+        # Estava na fotografia publicada e sumiu da fonte: nao executou.
+        did_not_run=publicadas - fonte,
+    )
+
+
+def _writable(url: str):
+    """Conexao GRAVAVEL de destino. E' ela que detem o advisory lock.
+
+    O lock precisa viver na MESMA sessao que escreve: um lock tomado noutra
+    conexao nao protegeria nada. Por isso o destino nao pode ser `_read_only`.
+    """
+    import psycopg2
+
+    conn = psycopg2.connect(url, connect_timeout=30)
+    conn.set_session(readonly=False, autocommit=False)
+    return conn
+
+
+def published_accounts(target_conn, marketplace: str) -> frozenset:
+    """Contas da ultima fotografia publicada. Vazio na primeira execucao."""
+    with target_conn.cursor() as cur:
+        cur.execute(SQL_PUBLISHED_ACCOUNTS, {"marketplace": marketplace})
+        return frozenset(linha[0] for linha in cur.fetchall() if linha[0])
+
+
+def published_watermarks(target_conn, marketplace: str) -> dict:
+    """Watermark publicado por escopo, para a guarda de regressao."""
+    publicado = {}
+    with target_conn.cursor() as cur:
+        cur.execute(SQL_PUBLISHED_WATERMARKS, {"marketplace": marketplace})
+        for observed_date, shop_account, watermark_at in cur.fetchall():
+            escopo = cos.PublicationScope(marketplace, observed_date, shop_account)
+            publicado[escopo] = watermark_at
+    return publicado
+
+
+def collect_snapshot(gate: SourceGate, source_conn, marketplace: str,
+                     observed_date=None):
+    """Le a fonte e monta os registros. SO' roda depois do lock.
+
+    Toda leitura passa por `gate.read`, que levanta se o lock ainda nao foi
+    adquirido. A guarda esta aqui, e nao so' no chamador, porque e' aqui que a
+    ordem pode ser quebrada por um refactor distraido.
+    """
+    catalogo = gate.read("catalogo_interno",
+                         lambda: cos.load_internal_catalog(source_conn))
+    if marketplace == "shopee":
+        relogios = gate.read(
+            "relogios_shopee",
+            lambda: cos.load_shopee_account_clocks(source_conn))
+        linhas = gate.read(
+            "ofertas_shopee",
+            lambda: cos.fetch_shopee_offers(source_conn, catalogo))
+        registros = cos.build_shopee_records(linhas, relogios)
+        return registros, relogios, frozenset(relogios)
+
+    dia = observed_date or gate.read(
+        "snapshot_tiktok", lambda: cos.latest_tiktok_snapshot(source_conn))
+    if dia is None:
+        raise PublisherError("a fonte do TikTok nao tem snapshot publicado")
+    if observed_date is not None and not gate.read(
+            "data_existe", lambda: cos.tiktok_snapshot_exists(source_conn, dia)):
+        # Data inexistente NAO vira a mais proxima: a pergunta era sobre ESTE dia.
+        raise PublisherError("a data pedida nao existe na fonte do TikTok")
+    linhas = gate.read(
+        "ofertas_tiktok",
+        lambda: cos.fetch_tiktok_offers(source_conn, dia, catalogo))
+    relogios = {
+        cos.canonical_account("tiktok"): cos.AccountClock(
+            marketplace="tiktok", account=cos.canonical_account("tiktok"),
+            watermark_at=max((l["fetched_at"] for l in linhas
+                              if l.get("fetched_at")), default=None),
+            rows_seen=len(linhas)),
+    }
+    registros = cos.build_tiktok_records(linhas, dia, relogios)
+    return registros, relogios, frozenset(relogios)
+
+
+def _incoming_watermarks(registros, relogios, marketplace: str) -> dict:
+    """Watermark DA FOTOGRAFIA por escopo. Nunca o `observed_at` da oferta."""
+    por_escopo = {}
+    for registro in registros:
+        escopo = cos.PublicationScope.of(registro)
+        por_escopo.setdefault(escopo, registro.get("account_watermark_at"))
+    return por_escopo
+
+
+def _scopes_for_empty_accounts(contas_vazias, marketplace, relogios,
+                               observed_date_default):
+    """Escopo de conta saudavel SEM oferta.
+
+    Sem isso, uma conta que esvaziou nao teria escopo — e sua fotografia
+    antiga sobreviveria passando por atual. O `observed_date` vem do relogio
+    da PROPRIA conta.
+    """
+    escopos, watermarks = set(), {}
+    for conta in contas_vazias:
+        relogio = relogios.get(conta)
+        instante = relogio.watermark_at if relogio else None
+        dia = dom.observed_date_from(instante) or observed_date_default
+        if dia is None:
+            raise PublisherError(
+                "conta saudavel sem oferta e sem relogio: escopo indefinido")
+        escopo = cos.PublicationScope(marketplace, dia, conta)
+        escopos.add(escopo)
+        watermarks[escopo] = instante
+    return escopos, watermarks
+
+
+# ---------------------------------------------------------------------------
 # CLI operacional
 # ---------------------------------------------------------------------------
 def build_cli():
@@ -446,29 +655,165 @@ def build_cli():
 
     parser = argparse.ArgumentParser(
         prog="channel_offer_publisher",
-        description=("Publica a fotografia multicanal. `--apply` exige a "
-                     "migration 017 aplicada E a relacao existente."),
+        description=("Publica a fotografia multicanal de Shopee e TikTok. "
+                     "Sem `--apply` nada e' escrito."),
     )
     parser.add_argument("--marketplace", choices=list(cos.CHANNEL_MARKETPLACES),
                         required=True)
     parser.add_argument("--apply", action="store_true",
-                        help="publica de verdade; sem isso, nada e' escrito")
+                        help="publica de verdade; exige a migration 017 aplicada")
     parser.add_argument("--operator-override", action="store_true",
                         help=("comando operacional EXPLICITO para a carga "
                               "piloto com a feature flag desligada"))
+    parser.add_argument("--observed-date", default=None,
+                        help="YYYY-MM-DD; sem aproximacao para o dia mais proximo")
     return parser
 
 
-def main(argv=None) -> int:  # pragma: no cover — exercitado por teste de CLI
+#: Mensagem de cada desfecho e o codigo de saida correspondente. A tabela e'
+#: dado, nao `if` espalhado: assim o teste consegue afirmar a matriz inteira.
+OUTCOME_EXIT = {
+    STATE_PUBLISHED: EXIT_OK,
+    STATE_REFUSED: EXIT_REFUSED,
+    STATE_LOCK_UNAVAILABLE: EXIT_LOCKED,
+    STATE_ROLLED_BACK: EXIT_FAILED,
+    STATE_INDETERMINATE: EXIT_INDETERMINATE,
+}
+
+
+def run_apply(args, *, connect_target=None, connect_audit=None,
+              connect_source=None) -> PublicationOutcome:
+    """Fluxo operacional completo. As fabricas sao injetaveis SO' para teste.
+
+    Ordem, e ela e' o contrato:
+
+        destino -> precondicao (017 + relacao) -> LOCK -> fonte -> plano ->
+        run_publication -> libera tudo em `finally`
+
+    A precondicao roda ANTES do lock porque uma instalacao sem a tabela nao
+    deve nem disputar o lock com quem esta publicando de verdade.
+    """
+    import os
+
+    abrir_destino = connect_target or (lambda: _writable(os.environ["DATABASE_URL"]))
+    abrir_auditoria = connect_audit or (lambda: _writable(os.environ["DATABASE_URL"]))
+    abrir_fonte = connect_source or (
+        lambda: cos._read_only(os.environ["DATAMART_DATABASE_URL"]))
+
+    destino = auditoria = fonte = None
+    try:
+        destino = abrir_destino()
+        # Recusa sanitizada: sem a 017 aplicada ou sem a relacao, nada comeca.
+        cos.assert_apply_authorized(destino)
+
+        auditoria = abrir_auditoria()
+        fonte = abrir_fonte()
+
+        def build_plan(gate):
+            registros, relogios, contas_na_fonte = collect_snapshot(
+                gate, fonte, args.marketplace, args.observed_date)
+            contas_com_oferta = frozenset(
+                r["shop_account"] for r in registros if r.get("shop_account"))
+            estados = classify_accounts(
+                accounts_in_source=contas_na_fonte,
+                accounts_with_offers=contas_com_oferta,
+                accounts_published=published_accounts(destino, args.marketplace),
+                source_available=True,
+            )
+            entrando = _incoming_watermarks(registros, relogios, args.marketplace)
+            dia_padrao = registros[0]["observed_date"] if registros else None
+            vazios, wm_vazios = _scopes_for_empty_accounts(
+                estados.healthy_empty, args.marketplace, relogios, dia_padrao)
+            entrando.update(wm_vazios)
+            saudaveis = set(cos.scopes_of(registros)) | vazios
+            print(f"contas: {estados.as_report()}")
+            return cos.build_publication_plan(
+                marketplace=args.marketplace,
+                records=registros,
+                healthy_scopes=saudaveis,
+                incoming_watermarks=entrando,
+                published_watermarks=published_watermarks(destino,
+                                                          args.marketplace),
+                channel_enabled=False,
+                operator_override=bool(args.operator_override),
+                source_available=True,
+            )
+
+        return run_publication(
+            target_conn=destino, audit_conn=auditoria,
+            build_plan=build_plan,
+            rows_extracted_of=lambda plano: len(plano.records),
+        )
+    finally:
+        # Fecha na ordem inversa da abertura. Cada `close` e' isolado: uma
+        # conexao morta nao pode impedir que as outras fechem.
+        for conexao in (fonte, auditoria, destino):
+            if conexao is None:
+                continue
+            try:
+                conexao.close()
+            except Exception:
+                pass
+
+
+def main(argv=None) -> int:
     args = build_cli().parse_args(argv)
+
     if not args.apply:
-        print(f"dry-run: marketplace={args.marketplace}; nada sera escrito.")
+        # Modo diagnostico: NAO adquire lock, NAO escreve auditoria e NAO toca
+        # na tabela de destino. Ele existe para conferir a fonte sem disputar
+        # nada com quem esta publicando.
+        print(f"dry-run: marketplace={args.marketplace}; nenhuma conexao de "
+              "destino e' aberta, nenhum lock e' adquirido, nada e' escrito.")
         return EXIT_OK
-    print("RECUSADO: a publicacao real depende da migration "
-          f"{cos.REQUIRED_MIGRATION} aplicada e da relacao {cos.TARGET_TABLE} "
-          "existente. Rode `assert_apply_authorized` contra o destino antes.",
-          file=sys.stderr)
-    return EXIT_REFUSED
+
+    try:
+        desfecho = run_apply(args)
+    except cos.ChannelSyncError as exc:
+        # Recusa de contrato, ja' sanitizada na origem.
+        print(f"RECUSADO: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (KeyboardInterrupt, SystemExit):
+        # Propaga DEPOIS do cleanup do `finally` de `run_apply`. Engolir uma
+        # interrupcao faria o operador achar que a execucao terminou.
+        raise
+    except Exception as exc:
+        print(f"FALHA: {_detalhe(exc)}", file=sys.stderr)
+        return EXIT_FAILED
+
+    _relata(desfecho)
+    return OUTCOME_EXIT[desfecho.state]
+
+
+def _relata(desfecho: PublicationOutcome) -> None:
+    """Uma linha honesta por desfecho. Nada de DSN, host, SQL ou traceback."""
+    if desfecho.state == STATE_PUBLISHED:
+        print(f"PUBLICADO: {desfecho.rows_loaded} ofertas em "
+              f"{len(desfecho.scopes_replaced)} escopo(s); "
+              f"lidas {desfecho.rows_extracted}.")
+        if not desfecho.audit_complete:
+            # NAO rebaixa o desfecho: os dados estao publicados. O defeito e'
+            # do registro, e precisa de conserto manual.
+            print("AVISO: os dados estao publicados, mas a auditoria ficou "
+                  "INCOMPLETA. Verifique audit.source_sync_run "
+                  f"(sync_run_id={desfecho.sync_run_id}).", file=sys.stderr)
+        return
+    if desfecho.state == STATE_REFUSED:
+        print(f"RECUSADO: {desfecho.decision.reason}; nenhuma linha foi tocada.",
+              file=sys.stderr)
+        return
+    if desfecho.state == STATE_LOCK_UNAVAILABLE:
+        print("OCUPADO: outra execucao detem o lock; nada foi lido nem escrito.",
+              file=sys.stderr)
+        return
+    if desfecho.state == STATE_ROLLED_BACK:
+        print(f"FALHOU: {desfecho.detail}; a transacao foi desfeita e nenhuma "
+              "fotografia mudou.", file=sys.stderr)
+        return
+    print(f"INDETERMINADO: {desfecho.detail}. NAO reexecute as cegas: "
+          "confira audit.source_sync_run "
+          f"(sync_run_id={desfecho.sync_run_id}) e a propria tabela antes de "
+          "decidir.", file=sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

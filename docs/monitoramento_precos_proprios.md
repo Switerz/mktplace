@@ -595,3 +595,125 @@ pré-existente nesta mesma página.
    **nunca** "a referência valia naquele dia".
 6. Sem limiar comercial aprovado não há severidade: os únicos fatos seguem
    sendo `difference_amount` e `difference_pct`.
+
+---
+
+# Runbook operacional — publicação multicanal (Shopee e TikTok)
+
+> **Gate PMA-2C3A-R.** O Mercado Livre **não** passa por aqui: ele continua em
+> `marts.fact_marketplace_listing_price_daily`, publicado por
+> `pipelines/sync_ml_listing_price_serving.py`.
+
+## Precondições
+
+A publicação **só é possível** quando as duas condições valem no Neon:
+
+1. `alembic_version = 017` — a migration `017_create_fact_channel_offer_observation`
+   aplicada;
+2. `marts.fact_channel_offer_observation` existente.
+
+`assert_apply_authorized` verifica **as duas** contra o banco real antes de
+qualquer coisa. Um `stamp` manual sem DDL falha na segunda; uma tabela criada à
+mão falha na primeira. O CLI não cria tabela em runtime — o schema pertence ao
+Alembic.
+
+Credenciais: `DATABASE_URL` (Neon) e `DATAMART_DATABASE_URL` (Data Mart). Nenhuma
+variável nova.
+
+## Comando de diagnóstico (read-only)
+
+```bash
+python -m pipelines.channel_offer_publisher --marketplace shopee
+python -m pipelines.channel_offer_sync --marketplace tiktok
+```
+
+Não abre conexão de destino, **não adquire o advisory lock**, não escreve
+auditoria e não toca na tabela de destino. Serve para conferir a fonte sem
+disputar nada com quem está publicando.
+
+## Comando de publicação
+
+```bash
+python -m pipelines.channel_offer_publisher --marketplace shopee --apply
+```
+
+Enquanto as feature flags estiverem desligadas, a carga-piloto exige comando
+operacional **explícito**:
+
+```bash
+python -m pipelines.channel_offer_publisher --marketplace shopee --apply --operator-override
+```
+
+`--operator-override` é a única forma de publicar com a flag do canal desligada.
+Ele não existe para uso rotineiro.
+
+## Ordem que o comando executa
+
+```
+conexão de destino → precondição (017 + relação)
+  → pg_try_advisory_lock(917120017), fail-fast
+  → SÓ ENTÃO lê a fonte e classifica as contas
+  → PublicationPlan imutável
+  → valida account_watermark_at por marketplace e conta
+  → DELETE por escopo + INSERT na MESMA transação
+  → reconcilia ANTES do commit → commit → auditoria
+  → libera o lock em TODOS os desfechos
+```
+
+## Exit codes
+
+| código | desfecho | significado |
+|---:|---|---|
+| **0** | `published` | commit confirmado. Se a auditoria falhou depois, sai **0 mesmo assim** com aviso em stderr — os dados estão publicados |
+| **1** | `rolled_back` | falha antes do commit; a transação foi desfeita e nenhuma fotografia mudou |
+| **2** | `refused` | precondição ou plano recusou; **nenhuma linha foi tocada** |
+| **3** | `lock_unavailable` | outra execução detém o lock; nada foi lido nem escrito |
+| **4** | `indeterminate` | o commit foi tentado e levantou; o estado dos dados é **desconhecido** |
+| **5** | uso | argumento inválido |
+
+## Publicação indeterminada (exit 4)
+
+O commit foi enviado e a conexão caiu. Isso é **indistinguível** de uma queda
+antes do commit, então o estado dos dados não é conhecido.
+
+O que o processo faz: mantém `audit.source_sync_run` em `running` com
+`error_message` começando por `INDETERMINADO:`. **Não** marca `failed` — isso
+afirmaria que nada foi gravado. **Não** tenta rollback — ele não desfaria um
+commit possivelmente aplicado.
+
+O que o operador faz:
+
+1. anote o `sync_run_id` da mensagem;
+2. leia a tabela para o escopo da execução:
+
+```sql
+SELECT observed_date, shop_account, count(*)
+  FROM marts.fact_channel_offer_observation
+ WHERE marketplace = 'shopee'
+ GROUP BY observed_date, shop_account
+ ORDER BY observed_date DESC;
+```
+
+3. se as linhas estão lá, o commit passou — feche o registro como `success`;
+4. se não estão, o commit não passou — feche como `failed` e só então reexecute.
+
+## Proibição de retry cego
+
+**Nenhum desfecho é repetido automaticamente, e `indeterminate` nunca deve ser
+reexecutado sem a leitura acima.** Repetir afirma que nada foi gravado — e é
+exatamente isso que não se sabe. A guarda de regressão de watermark recusaria
+uma reexecução mais antiga, mas ela não substitui a conferência: uma reexecução
+com o mesmo watermark é aceita como rerun idempotente e sobrescreveria a
+fotografia sem que ninguém tivesse verificado o que havia lá.
+
+## Estados de conta
+
+| estado | o que acontece com a fotografia anterior |
+|---|---|
+| saudável com ofertas | apagada e reposta |
+| **saudável com zero ofertas** | **apagada**; `rows_loaded = 0`, execução bem-sucedida |
+| indisponível | **preservada** — a conta nem entra nos escopos saudáveis |
+| não executou | **preservada** — estava na fotografia publicada e sumiu da fonte |
+
+Fonte indisponível **nunca** vira fotografia vazia, e não existe linha sentinela
+representando "zero ofertas".
