@@ -116,6 +116,70 @@ def test_paginacao_explicita_e_soma_por_pagina(quantidade, paginas_esperadas):
     assert sum(cur.paginas) == quantidade
 
 
+def test_registros_precisam_ser_sequencia_e_generator_falha_alto():
+    """Um generator nao pode ser aceito em silencio.
+
+    O helper depende de `len()` e de fatiamento, entao hoje um generator morre
+    no `len()` antes de qualquer SQL. A trava existe para o futuro: se alguem
+    reescrever o laco para consumir o iteravel preguicosamente, o generator
+    seria esgotado pela primeira pagina e as seguintes viriam vazias — carga
+    parcial em silencio, que e' exatamente a classe de defeito deste gate.
+    """
+    cur = CursorFiel()
+    with pytest.raises(TypeError):
+        pub.insert_offers_paged(cur, (r for r in _registros(600)))
+    assert cur.paginas == []
+
+
+@pytest.mark.parametrize("quantidade", [1, 499, 500, 501, 692, 1208])
+def test_nenhuma_pagina_vazia_e_nenhum_page_size_zero(monkeypatch, quantidade):
+    """Pagina vazia nunca acontece, e `page_size` nunca e' zero.
+
+    Nao e' preciosismo: `_paginate` do psycopg2 com `page_size=0` faz
+    `for i in range(0)` e nunca consome o iterador, entao rende pagina vazia
+    PARA SEMPRE. O sintoma seria travamento, nao excecao — pior de diagnosticar
+    que um erro. O fatiamento atual torna isso impossivel; este teste mantem
+    assim.
+    """
+    vistos = []
+    real = pub.execute_values
+
+    def espia(cur, sql, argslist, *a, **kw):
+        vistos.append((len(argslist), kw.get("page_size")))
+        real(cur, sql, argslist, *a, **kw)
+
+    monkeypatch.setattr(pub, "execute_values", espia)
+    pub.insert_offers_paged(CursorFiel(), _registros(quantidade))
+    assert vistos, "nenhuma pagina foi emitida"
+    assert all(n > 0 for n, _ in vistos), vistos
+    assert all(ps == n for n, ps in vistos), vistos
+
+
+def test_a_lista_original_nao_e_mutada():
+    """O fatiamento nao pode consumir nem reordenar o que o plano entregou."""
+    registros = _registros(692)
+    copia = list(registros)
+    pub.insert_offers_paged(CursorFiel(), registros)
+    assert registros == copia
+    assert len(registros) == 692
+
+
+def test_mesmo_sql_em_todas_as_paginas(monkeypatch):
+    """SQL identico pagina a pagina: uma variacao mudaria colunas ou ordem."""
+    sqls = []
+    real = pub.execute_values
+
+    def espia(cur, sql, argslist, *a, **kw):
+        sqls.append(sql)
+        real(cur, sql, argslist, *a, **kw)
+
+    monkeypatch.setattr(pub, "execute_values", espia)
+    pub.insert_offers_paged(CursorFiel(), _registros(1208))
+    assert len(sqls) == 3
+    assert len(set(sqls)) == 1
+    assert sqls[0] is pub.SQL_INSERT_OFFERS
+
+
 def test_lista_vazia_nao_emite_execute():
     cur = CursorFiel()
     assert pub.insert_offers_paged(cur, []) == 0
