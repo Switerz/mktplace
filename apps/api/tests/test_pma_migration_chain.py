@@ -37,7 +37,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: Avancado para 016 pelo Gate FULL-1A (fatos da superficie Full do ML).
 #: Avancado para 017 pelo Gate PMA-2C2 (observacao multicanal de precos).
 #: Avancado para 018 pelo Gate EXP-1C (serving da Expedicao Shopee).
-HEAD_ESPERADO = "018"
+#: Avancado para 019 pelo Gate FULL-SH-1A-R (desempenho FBS da Shopee).
+HEAD_ESPERADO = "019"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta
@@ -50,6 +51,12 @@ ARQUIVO_PMA_MULTICANAL = "017_create_fact_channel_offer_observation.py"
 TABELA_PMA_MULTICANAL = "marts.fact_channel_offer_observation"
 
 REVISAO_RESERVADA_EXPEDICAO = "018"
+
+#: 019 e' do Gate FULL-SH-1A-R: marts.fact_shopee_fbs_daily. Nao confundir com
+#: a 018: aquela e' a fila de Expedicao, esta e' desempenho FBS por pedido.
+REVISAO_SHOPEE_FBS = "019"
+ARQUIVO_SHOPEE_FBS = "019_create_fact_shopee_fbs_daily.py"
+TABELA_SHOPEE_FBS = "marts.fact_shopee_fbs_daily"
 
 #: A migration deste gate.
 REVISAO_PMA = "014"

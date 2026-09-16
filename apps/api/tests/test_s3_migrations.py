@@ -159,7 +159,11 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # marts.expedicao_refresh_run). O pino e' LITERAL de proposito — forca
     # revisao consciente a cada migration nova, em vez de aceitar qualquer head
     # que apareca.
-    assert heads == ["018"], f"head deveria ser unico e igual a 018, veio {heads}"
+    # Gate FULL-SH-1A-R: head avancado de 018 para 019, que cria
+    # marts.fact_shopee_fbs_daily -- desempenho FBS da Shopee classificado
+    # pela modalidade OBSERVADA em cada pedido (`fulfillment_flag`), nunca
+    # pela flag de catalogo.
+    assert heads == ["019"], f"head deveria ser unico e igual a 019, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
