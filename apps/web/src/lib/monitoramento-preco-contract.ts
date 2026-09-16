@@ -15,6 +15,83 @@
 // backend. O frontend so apresenta.
 
 /**
+ * Gate PMA-2C4B — os TRES canais que a API serve.
+ *
+ * `ml` e' o unico publicado em producao; `shopee` e `tiktok` dependem de flag
+ * no backend E de capacidade no frontend, as duas desligadas por padrao.
+ */
+export type Marketplace = "ml" | "shopee" | "tiktok";
+
+export const MARKETPLACES: readonly Marketplace[] = ["ml", "shopee", "tiktok"];
+
+/** Guarda de runtime: um valor fora do contrato NAO vira requisicao. */
+export function isMarketplace(valor: unknown): valor is Marketplace {
+  return typeof valor === "string" && (MARKETPLACES as readonly string[]).includes(valor);
+}
+
+/**
+ * POLITICA DE DATA, escolhida pelo contrato da FONTE — nunca global.
+ *   closed_day        Mercado Livre: serie diaria, teto D-1, D0 recusado;
+ *   snapshot_current  Shopee/TikTok: fotografia do estado corrente, D0 normal.
+ */
+export type DatePolicy = "closed_day" | "snapshot_current";
+
+/**
+ * O que a fotografia servida ainda pode fazer.
+ *   mutable_operational_snapshot  e' do dia corrente e pode mudar hoje se a
+ *                                 origem recarregar. NAO e' periodo fechado,
+ *                                 definitivo nem completo;
+ *   settled_snapshot              o dia ja' virou; aquela fotografia nao muda.
+ */
+export type SnapshotMutability = "mutable_operational_snapshot" | "settled_snapshot";
+
+/** Tipo de produto MATERIALIZADO pelo publisher. Nunca reclassificado aqui. */
+export type ProductType =
+  | "kit_confirmed"
+  | "kit_suspected"
+  | "no_kit_signal"
+  | "product_type_unknown";
+
+export type BusinessScope = "in_scope" | "out_of_business_scope";
+
+/**
+ * Por que uma oferta elegivel nao foi comparada. Vive AO LADO de
+ * `comparison_status`, nunca no lugar dele.
+ */
+export type NonComparableReason =
+  | "reference_missing_for_product"
+  | "sku_not_in_internal_catalog"
+  | "product_without_ean"
+  | "product_ean_not_consumer"
+  | "ambiguous_multiple_candidates"
+  | "invalid_reference_price"
+  | "invalid_channel_price";
+
+export type MetricVersion = "v1_all_active" | "v2_product_type_aware";
+export type ObservationMode = "daily_series" | "snapshot_current";
+export type PromoContext = "available" | "unavailable";
+export type Availability = "available" | "unavailable";
+
+/**
+ * Relogio de UMA conta de loja. O Mercado Livre publica um so'; a Shopee
+ * publica um por conta, porque suas quatro contas terminam em lotes distintos
+ * e um MAX() global marcaria as tres primeiras como atrasadas.
+ *
+ * Os campos de contagem so' existem nos canais novos — no ML vem ausentes, e
+ * ausente aqui significa "este canal nao tem esse conceito".
+ */
+export interface AccountClock {
+  account: string;
+  observed_at: string | null;
+  refreshed_at: string | null;
+  account_watermark_at?: string | null;
+  offers?: number;
+  current_offers?: number;
+  stale_offers?: number;
+  snapshot_status?: string | null;
+}
+
+/**
  * PARTICAO COMERCIAL — cinco valores que somam `monitored_count`.
  *
  * Gate PMA-H1: `stale_observation` SAIU daqui. Era um status comercial e
@@ -54,7 +131,7 @@ export type MatchQuality =
 export interface MonitoramentoPrecoMeta {
   timezone: string;
   currency: string;
-  marketplace: "ml";
+  marketplace: Marketplace;
   /** `latest` (maior observacao <= D-1) ou `selected_date` (dia pedido). */
   mode: QueryMode;
   refreshed_at: string | null;
@@ -66,9 +143,12 @@ export interface MonitoramentoPrecoMeta {
    * pergunta.
    */
   observed_ref_date: string | null;
-  /** D-1 do dia operacional: o teto do que e' consultavel. */
+  /**
+   * Teto do que e' consultavel NESTE canal: D-1 sob `closed_day`, o proprio
+   * dia operacional sob `snapshot_current`. Nao e' sempre D-1.
+   */
   eligible_ref_date: string | null;
-  /** Datas MATERIALIZADAS, <= D-1, mais recentes primeiro. Sem calendario. */
+  /** Datas MATERIALIZADAS ate o teto, mais recentes primeiro. Sem calendario. */
   available_observed_dates: string[];
   available_observed_dates_limit: number;
   /** Dias entre a observacao e D-1. Zero = em dia. Nulo = sem observacao. */
@@ -92,6 +172,57 @@ export interface MonitoramentoPrecoMeta {
   out_of_scope_brands: Record<string, string>;
   order_by: string;
   warnings: string[];
+
+  // ---------------- Gate PMA-2C1A / 2C4A: multicanal -------------------
+  metric_version: MetricVersion;
+  observation_mode: ObservationMode;
+  promo_context: PromoContext;
+  /** `unavailable` quando o canal e' reconhecido mas nao ha o que servir. */
+  availability: Availability;
+  unavailable_reason: string | null;
+  /** Alias de `observed_ref_date` com o nome comum aos tres canais. */
+  observed_date: string | null;
+  /** Instante da captura do PRECO. Nao e' a atualizacao cadastral. */
+  observed_at: string | null;
+  /** Conceito dos canais novos. Vem VAZIO no ML. */
+  snapshot_status_counts: Record<string, number>;
+  product_type_counts: Record<string, number>;
+  account_clocks: AccountClock[];
+
+  // ---------------- Gate PMA-2C4A: politica de data --------------------
+  date_policy: DatePolicy;
+  /** Nulo quando nao ha fotografia. */
+  snapshot_mutability: SnapshotMutability | null;
+  /**
+   * Ofertas de marca fora do escopo de beleza: aparecem na tabela e NAO entram
+   * em `eligible_offers` nem na cobertura. Explicito para que a diferenca
+   * entre `total_count` e `metrics.monitored_offers` seja reconciliavel.
+   */
+  out_of_scope_offer_count: number;
+}
+
+/**
+ * Bloco multicanal, SEPARADO de `kpis`. `kpis` mantem a forma publicada do ML;
+ * `metrics` e' o vocabulario dos tres canais.
+ */
+export interface MonitoramentoPrecoMetrics {
+  monitored_offers: number;
+  active_offers: number;
+  inactive_offers: number;
+  kit_confirmed: number;
+  kit_suspected: number;
+  no_kit_signal: number;
+  product_type_unknown: number;
+  eligible_offers: number;
+  comparable_offers: number;
+  below_reference: number;
+  at_or_above_reference: number;
+  /** Motivo -> contagem. Soma com `comparable_offers` em `eligible_offers`. */
+  non_comparable_reasons: Record<string, number>;
+  /** NULO quando nada foi medido. Zero afirmaria "medimos e deu 0%". */
+  coverage_rate: number | null;
+  distinct_b2b_products: number;
+  b2b_reach: number | null;
 }
 
 export interface MonitoramentoPrecoKpis {
@@ -125,10 +256,17 @@ export interface MonitoramentoPrecoRow {
   observed_at: string | null;
   /** Alteracao do CADASTRO. NUNCA e' horario de preco. */
   listing_metadata_updated_at: string | null;
-  advertised_price: number;
+  /**
+   * Gate PMA-2C4B — passou a admitir NULO. A fato dos canais permite
+   * `observed_price IS NULL` ("nao observamos preco"), e o Mercado Livre NUNCA
+   * produz nulo aqui. `null` NAO e' zero: a tela mostra "Nao observado" e nao
+   * calcula diferenca.
+   */
+  advertised_price: number | null;
   original_price: number | null;
 
-  observed_effective_amount: number;
+  /** Segue `advertised_price`, inclusive na ausencia. */
+  observed_effective_amount: number | null;
   /** Sempre null neste MVP: a fonte do ML nao fornece. NULL != 0. */
   shipping_amount: number | null;
   seller_coupon_amount: number | null;
@@ -149,14 +287,54 @@ export interface MonitoramentoPrecoRow {
   match_quality: MatchQuality;
   reference_candidate_count: number;
   comparison_status: ComparisonStatus;
-  /** Frescor da linha, ao LADO do status comercial. */
+  /**
+   * Por que a oferta elegivel nao foi comparada. `no_reference` cobre tres
+   * causas distintas, e este campo e' o que as separa — sem ele, "nao casou" e
+   * "preco nao observado" ficariam indistinguiveis.
+   */
+  non_comparable_reason: NonComparableReason | null;
+  /**
+   * Frescor da linha, ao LADO do status comercial. E' o PIOR de dois niveis: a
+   * fotografia ser a mais recente E esta oferta ter sido revista dentro dela.
+   */
   freshness_status: FreshnessStatus;
   limitations: string[];
+
+  // ---------------- Gate PMA-2C4A: campos de CANAL ---------------------
+  // Todos MATERIALIZADOS na fato. Nulos no Mercado Livre, que nao os modela —
+  // e nulo aqui significa "este canal nao tem esse conceito", nao "faltou".
+  /** Identidade da oferta no canal. Igual a `item_id`. */
+  offer_key: string | null;
+  /** Conta de loja na origem, e escopo da substituicao na publicacao. */
+  shop_account: string | null;
+  parent_item_id: string | null;
+  model_id: string | null;
+  observed_date: string | null;
+  date_policy: DatePolicy | null;
+  /** Decidido pelo publisher. NUNCA reclassificado no frontend. */
+  product_type: ProductType | null;
+  product_type_source: string | null;
+  /** Frescor da OFERTA como o publisher a carimbou na carga. */
+  snapshot_status: string | null;
+  /** Fim da carga da PROPRIA conta. */
+  account_watermark_at: string | null;
+  /** Coluna de ORIGEM do preco: `current_price` na Shopee, `sale_price` no TikTok. */
+  observed_price_source: string | null;
+  list_price: number | null;
+  promo_context: PromoContext | null;
+  promo_id: string | null;
+  promo_discount_pct: number | null;
+  business_scope: BusinessScope | null;
+  batch_id: string | null;
+  source_run_id: string | null;
 }
 
 export interface MonitoramentoPrecoResponse {
   meta: MonitoramentoPrecoMeta;
+  /** Bloco PUBLICADO do ML — forma inalterada. */
   kpis: MonitoramentoPrecoKpis;
+  /** Bloco multicanal, separado. Ver `MonitoramentoPrecoMetrics`. */
+  metrics: MonitoramentoPrecoMetrics;
   rows: MonitoramentoPrecoRow[];
   returned_count: number;
   total_count: number;
@@ -164,13 +342,20 @@ export interface MonitoramentoPrecoResponse {
 }
 
 export interface MonitoramentoPrecoParams {
-  /** Neste MVP so `ml` — o unico canal com fonte de preco anunciado. */
-  marketplace?: "ml";
+  /** `ml` (padrao), `shopee` ou `tiktok`. */
+  marketplace?: Marketplace;
   brand?: string;
   status?: string;
   productQuery?: string;
   /** Data OBSERVADA, YYYY-MM-DD. Omitida = modo `latest`. */
   observedDate?: string;
+  /**
+   * Conta de loja. So' se aplica a `shopee` e `tiktok`: a fato do ML nao
+   * modela conta, e o backend recusa com 422 em vez de ignorar.
+   */
+  shopAccount?: string;
+  /** Tipo de produto materializado. Tambem so' nos canais novos. */
+  productType?: string;
   limit?: number;
   offset?: number;
 }
@@ -182,12 +367,20 @@ export function buildMonitoramentoPrecoQuery(
   params: MonitoramentoPrecoParams,
 ): URLSearchParams {
   const qs = new URLSearchParams();
-  qs.set("marketplace", params.marketplace ?? "ml");
+  // Um valor fora do contrato nunca vira requisicao: cai para `ml`, que e' o
+  // canal publicado. Enviar lixo faria o backend responder 422 sobre um erro
+  // que nasceu aqui.
+  qs.set("marketplace", isMarketplace(params.marketplace) ? params.marketplace : "ml");
   if (params.brand) qs.set("brand", params.brand);
   if (params.status) qs.set("status", params.status);
   if (params.productQuery) qs.set("product_query", params.productQuery);
   // Gate PMA-H1: a data OBSERVADA e' o parametro publico de data.
   if (params.observedDate) qs.set("observed_date", params.observedDate);
+  // Gate PMA-2C4B — filtros exclusivos dos canais novos. Nao sao enviados para
+  // o ML: la' o backend os recusa com 422, e mandar assim mesmo transformaria
+  // uma limitacao conhecida num erro de borda.
+  if (params.shopAccount) qs.set("shop_account", params.shopAccount);
+  if (params.productType) qs.set("product_type", params.productType);
   if (params.limit != null) qs.set("limit", String(params.limit));
   if (params.offset != null) qs.set("offset", String(params.offset));
   // `ref_date` NUNCA e' enviado: o nome e' ambiguo entre a data observada e a

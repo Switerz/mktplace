@@ -22,6 +22,7 @@ import {
   type MonitoramentoPrecoResponse,
   type MonitoramentoPrecoRow,
   type ComparisonStatus,
+  type Marketplace,
 } from "@/lib/api-client";
 import {
   AVISO_OBSERVACIONAL,
@@ -50,6 +51,24 @@ import {
   freshnessLabel,
   tituloLinha,
   urlAnuncioSegura,
+  // Gate PMA-2C4B — multicanal
+  PRODUCT_TYPE_ORDER,
+  canaisDisponiveis,
+  canalComPreposicao,
+  canalLabel,
+  coberturaPorConta,
+  filtrosDoCanal,
+  fmtPrecoObservado,
+  politicaDataView,
+  foraDoEscopo,
+  marcaParaEscopo,
+  productTypeLabel,
+  resumoCobertura,
+  ROTULO_FORA_DE_ESCOPO,
+  situacaoFrescor,
+  situacaoFrescorLabel,
+  temPrecoObservado,
+  type EscopoFiltro,
 } from "@/lib/monitoramento-preco";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
@@ -114,6 +133,16 @@ export default function MonitoramentoPrecoPage() {
   const situacaoId = useId();
   const dataId = useId();
 
+  const canalId = useId();
+  const contaId = useId();
+  const tipoId = useId();
+  const escopoId = useId();
+
+  // O Mercado Livre continua sendo o padrao: e' o unico canal publicado.
+  const [marketplace, setMarketplace] = useState<Marketplace>("ml");
+  const [shopAccount, setShopAccount] = useState("");
+  const [escopo, setEscopo] = useState<EscopoFiltro>("todos");
+  const [productType, setProductType] = useState("");
   const [brand, setBrand] = useState("");
   const [status, setStatus] = useState("");
   const [buscaInput, setBuscaInput] = useState("");
@@ -129,17 +158,27 @@ export default function MonitoramentoPrecoPage() {
 
   const [linhaAberta, setLinhaAberta] = useState<MonitoramentoPrecoRow | null>(null);
 
+  // O escopo e' traduzido para a dimensao que a API ja' aceita: a lista de
+  // marcas monitoradas. Uma marca escolhida a mao pelo operador vence o escopo
+  // — ela e' mais especifica, e sobrepo-la seria ignorar o pedido dele.
+  // Le de `dados` e nao de `meta`, que so' e' derivado mais abaixo.
+  const marcaEfetiva =
+    brand || marcaParaEscopo(escopo, dados?.meta?.monitored_brands ?? []);
+
   const requestKey = useMemo(
     () =>
       buildMonitoramentoRequestKey({
-        brand,
+        marketplace,
+        brand: marcaEfetiva,
         status,
         productQuery,
         observedDate,
+        shopAccount,
+        productType,
         limit: LIMITE,
         offset,
       }),
-    [brand, status, productQuery, observedDate, offset],
+    [marketplace, marcaEfetiva, status, productQuery, observedDate, shopAccount, productType, offset],
   );
 
   // Guarda de frescor: uma resposta antiga que chegue depois de uma nova
@@ -155,10 +194,15 @@ export default function MonitoramentoPrecoPage() {
 
     fetchMonitoramentoPreco(
       {
-        brand: brand || undefined,
+        marketplace,
+        brand: marcaEfetiva || undefined,
         status: status || undefined,
         productQuery: productQuery || undefined,
         observedDate: observedDate || undefined,
+        // Estes dois so' existem nos canais novos. No ML o backend os recusa
+        // com 422, entao nem sao montados na query.
+        shopAccount: shopAccount || undefined,
+        productType: productType || undefined,
         limit: LIMITE,
         offset,
       },
@@ -205,6 +249,42 @@ export default function MonitoramentoPrecoPage() {
     aplicar();
   }, []);
 
+  /**
+   * Troca de canal. Zera a paginacao e LIMPA os filtros da selecao anterior.
+   *
+   * Nao e' higiene: as dimensoes sao diferentes por canal. `apice` e' marca
+   * valida na Shopee e recusada com 422 no ML; `shop_account` e `product_type`
+   * nao existem no ML; e uma data D0 escolhida na Shopee esta acima do teto
+   * D-1 do ML. Carregar qualquer um desses para o canal novo produziria 422
+   * sobre uma escolha que o operador nem fez.
+   *
+   * `setDados(null)` e' deliberado: sem ele, os KPIs e a tabela do canal
+   * anterior ficariam na tela sob o titulo do canal novo enquanto a requisicao
+   * corre. A guarda de frescor ja' impede a resposta ATRASADA de sobrescrever
+   * a atual; isto impede o dado ANTIGO de parecer o novo.
+   */
+  const trocaCanal = useCallback(
+    (novo: Marketplace) => {
+      setMarketplace((atual) => {
+        if (atual === novo) return atual;
+        setOffset(0);
+        setBrand("");
+        setStatus("");
+        setBuscaInput("");
+        setProductQuery("");
+        setShopAccount("");
+        setProductType("");
+        setEscopo("todos");
+        setObservedDate("");
+        sincronizaUrl("");
+        setDados(null);
+        setLinhaAberta(null);
+        return novo;
+      });
+    },
+    [],
+  );
+
   const submeterBusca = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
@@ -219,6 +299,9 @@ export default function MonitoramentoPrecoPage() {
     setStatus("");
     setBuscaInput("");
     setProductQuery("");
+    setShopAccount("");
+    setProductType("");
+    setEscopo("todos");
     // A DATA nao e' um filtro de conteudo: ela define QUAL dia esta na tela.
     // "Limpar filtros" nao pode teleportar o operador para outro dia.
   }, []);
@@ -230,13 +313,19 @@ export default function MonitoramentoPrecoPage() {
     sincronizaUrl(valor);
   }, []);
 
-  const temFiltro = brand !== "" || status !== "" || productQuery !== "";
+  const temFiltro =
+    brand !== "" ||
+    status !== "" ||
+    productQuery !== "" ||
+    shopAccount !== "" ||
+    productType !== "" ||
+    escopo !== "todos";
 
   const meta = dados?.meta ?? null;
   const kpis = dados?.kpis ?? null;
   const linhas = estado.fresh && dados ? dados.rows : [];
 
-  const kpiViews = kpis ? buildKpiViews(kpis) : [];
+  const kpiViews = kpis ? buildKpiViews(kpis, marketplace) : [];
   const qualidadeViews = kpis ? buildQualidadeViews(kpis) : [];
   const paginacao = dados
     ? calcPaginacao(dados.total_count, dados.returned_count, LIMITE, offset)
@@ -245,14 +334,73 @@ export default function MonitoramentoPrecoPage() {
     ? avisoTruncamento(dados.truncated, dados.returned_count, dados.total_count)
     : null;
 
-  const linkAnuncio = linhaAberta ? urlAnuncioSegura(linhaAberta.permalink) : null;
+  const linkAnuncio = linhaAberta
+    ? urlAnuncioSegura(linhaAberta.permalink, marketplace)
+    : null;
+
+  // ---- Gate PMA-2C4B: vistas multicanal -----------------------------------
+  const canais = canaisDisponiveis();
+  const filtros = filtrosDoCanal(marketplace);
+  const politica = politicaDataView(meta);
+  const cobertura = resumoCobertura(meta);
+  const contas = coberturaPorConta(meta?.account_clocks);
+  const canalIndisponivel = meta?.availability === "unavailable";
+  const contasDoFiltro = contas.map((c) => c.conta);
+  // Os QUATRO estados, sempre. `product_type_counts` conta so' as ATIVAS, e
+  // filtrar as opcoes por ele esconderia do filtro um tipo que existe apenas
+  // entre as inativas — visivel na coluna e inalcancavel pelo filtro, que e'
+  // exatamente o defeito que este gate proibe.
+  const tiposDoCanal = PRODUCT_TYPE_ORDER;
 
   return (
     <PageContainer>
       <PageHeader
-        title="Monitoramento de preços"
-        subtitle="Compara os preços anunciados das lojas próprias no Mercado Livre com o preço sugerido de revenda (PDV) das tabelas B2B."
+        title={`Monitoramento de preços — ${canalLabel(marketplace)}`}
+        subtitle={
+          marketplace === "ml"
+            ? // Texto PUBLICADO do Mercado Livre — inalterado.
+              "Compara os preços anunciados das lojas próprias no Mercado Livre com o preço sugerido de revenda (PDV) das tabelas B2B."
+            : `Compara os preços anunciados das lojas próprias na ${canalLabel(marketplace)} com o preço sugerido de revenda (PDV) das tabelas B2B.`
+        }
       />
+
+      {/* ---------------- seletor de canal ----------------
+          So' aparece quando ha mais de um canal habilitado. Com Shopee e
+          TikTok desligados — o padrao — a tela fica exatamente como estava. */}
+      {canais.length > 1 && (
+        <section
+          aria-label="Canal"
+          className="bg-white border border-violet-100 rounded-2xl shadow-sm p-3 mb-4"
+        >
+          <div
+            role="group"
+            aria-labelledby={canalId}
+            className="flex flex-wrap items-center gap-2"
+          >
+            <span id={canalId} className="text-xs text-slate-500 mr-1">
+              Canal
+            </span>
+            {canais.map((c) => {
+              const ativo = c.id === marketplace;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => trocaCanal(c.id)}
+                  aria-current={ativo ? "true" : undefined}
+                  className={`min-h-[44px] min-w-[44px] px-4 rounded-lg border text-sm font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                    ativo
+                      ? "bg-violet-600 border-violet-600 text-white"
+                      : "bg-white border-slate-300 text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  {c.rotulo}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* ---------------- contexto e frescor ---------------- */}
       <section
@@ -262,7 +410,17 @@ export default function MonitoramentoPrecoPage() {
         <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
           <div>
             <dt className="text-slate-500 text-xs uppercase tracking-wide">Canal</dt>
-            <dd className="font-semibold text-slate-800">Mercado Livre</dd>
+            <dd className="font-semibold text-slate-800">
+              {canalLabel(marketplace)}
+              {/* A politica de data e' do CANAL e viaja no payload. So' os
+                  canais novos a exibem: no ML o teto D-1 ja' era conhecido e
+                  acrescentar o chip mudaria uma tela publicada. */}
+              {meta && marketplace !== "ml" && (
+                <span className="ml-2 inline-block text-xs font-normal text-slate-500 align-middle">
+                  {politica.tetoRotulo}
+                </span>
+              )}
+            </dd>
           </div>
           <div>
             <dt className="text-slate-500 text-xs uppercase tracking-wide">
@@ -294,6 +452,58 @@ export default function MonitoramentoPrecoPage() {
             </dd>
           </div>
         </dl>
+
+        {/* Gate PMA-2C4B — D0 NAO e' periodo fechado. O aviso vem antes da
+            frase de base da comparacao porque muda como TUDO abaixo se le'. */}
+        {politica.avisoMutavel && (
+          <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
+            {politica.avisoMutavel}
+          </p>
+        )}
+
+        {/* Canal reconhecido, porem sem nada publicado. Nao e' erro. */}
+        {canalIndisponivel && (
+          <p className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mt-3">
+            Este canal está reconhecido, mas não há fotografia publicada para
+            esta consulta. Nenhum dado de outro canal é exibido no lugar.
+          </p>
+        )}
+
+        {/* Cobertura por CONTA: so' os canais publicam mais de um relogio. */}
+        {contas.length > 0 && meta?.date_policy === "snapshot_current" && (
+          <div className="mt-3 border-t border-violet-100 pt-3">
+            <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">
+              Cobertura por conta — {cobertura.contasObservadas} observada(s)
+              {cobertura.revistas != null && (
+                <> · {fmtContagem(cobertura.revistas)} oferta(s) revista(s),{" "}
+                  {fmtContagem(cobertura.naoRevistas ?? 0)} não revista(s)</>
+              )}
+              {cobertura.ofertasForaDeEscopo > 0 && (
+                <> · {fmtContagem(cobertura.ofertasForaDeEscopo)} fora do escopo
+                  de beleza, sem entrar em nenhum denominador</>
+              )}
+            </p>
+            <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+              {contas.map((c) => (
+                <li
+                  key={c.conta}
+                  className="border border-slate-200 rounded-lg px-3 py-2"
+                >
+                  <span className="font-semibold text-slate-800">{c.conta}</span>
+                  <span className="block text-slate-600">
+                    {c.ofertas == null ? INDISPONIVEL : fmtContagem(c.ofertas)} oferta(s)
+                    {c.revistas != null && (
+                      <> · {fmtContagem(c.revistas)} revista(s)</>
+                    )}
+                  </span>
+                  <span className="block text-slate-500">
+                    carga: {c.relogio}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* A frase que declara as DUAS datas e a ausencia de vigencia. */}
         {meta?.comparison_basis_text && (
@@ -521,6 +731,78 @@ export default function MonitoramentoPrecoPage() {
             </select>
           </div>
 
+          {/* Gate PMA-2C4B — dimensoes que so' existem nos canais novos. No
+              Mercado Livre nem sao renderizadas: o backend as recusa com 422, e
+              oferecer um controle que so' produz erro seria pior que omiti-lo. */}
+          {filtros.conta && contasDoFiltro.length > 0 && (
+            <div className="flex flex-col">
+              <label htmlFor={contaId} className="text-xs text-slate-500 mb-1">
+                Conta de loja
+              </label>
+              <select
+                id={contaId}
+                value={shopAccount}
+                onChange={(e) => trocaFiltro(() => setShopAccount(e.target.value))}
+                className="border border-slate-300 rounded-lg px-3 min-h-[44px] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              >
+                <option value="">Todas as contas</option>
+                {contasDoFiltro.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Gate PMA-2C4B-R — ESCOPO. Existe porque Gocase e Denavita
+              aparecem na coluna Marca do TikTok e nao estao em
+              `monitored_brands`: sem este controle, o operador veria linhas
+              que nao consegue estreitar por dimensao nenhuma. O filtro e' do
+              SERVIDOR (manda a lista de marcas monitoradas), entao total e
+              paginacao continuam corretos. */}
+          {filtros.tipoDeProduto && (meta?.out_of_scope_offer_count ?? 0) > 0 && (
+            <div className="flex flex-col">
+              <label htmlFor={escopoId} className="text-xs text-slate-500 mb-1">
+                Escopo
+              </label>
+              <select
+                id={escopoId}
+                value={escopo}
+                onChange={(e) =>
+                  trocaFiltro(() => setEscopo(e.target.value as EscopoFiltro))
+                }
+                className="border border-slate-300 rounded-lg px-3 min-h-[44px] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              >
+                <option value="todos">
+                  Todas as marcas da fotografia
+                </option>
+                <option value="monitoradas">Somente marcas monitoradas</option>
+              </select>
+            </div>
+          )}
+
+          {filtros.tipoDeProduto && tiposDoCanal.length > 0 && (
+            <div className="flex flex-col">
+              <label htmlFor={tipoId} className="text-xs text-slate-500 mb-1">
+                Tipo de produto
+              </label>
+              <select
+                id={tipoId}
+                value={productType}
+                onChange={(e) => trocaFiltro(() => setProductType(e.target.value))}
+                className="border border-slate-300 rounded-lg px-3 min-h-[44px] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              >
+                <option value="">Todos os tipos</option>
+                {tiposDoCanal.map((tp) => (
+                  <option key={tp} value={tp}>
+                    {productTypeLabel(tp)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <form onSubmit={submeterBusca} className="flex flex-col grow min-w-[220px]">
             <label htmlFor={buscaId} className="text-xs text-slate-500 mb-1">
               Buscar por título, SKU, EAN ou item
@@ -629,8 +911,9 @@ export default function MonitoramentoPrecoPage() {
             <TableScrollHint>
               <table className="w-full text-sm">
                 <caption className="sr-only">
-                  Anúncios próprios do Mercado Livre com preço anunciado e preço
-                  sugerido de revenda, ordenados pela maior diferença negativa.
+                  Anúncios próprios {canalComPreposicao(marketplace)} com preço
+                  anunciado e preço sugerido de revenda, ordenados pela maior
+                  diferença negativa.
                 </caption>
                 <thead>
                   <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
@@ -642,6 +925,9 @@ export default function MonitoramentoPrecoPage() {
                     <th scope="col" className="px-4 py-3 font-semibold text-right">Preço sugerido</th>
                     <th scope="col" className="px-4 py-3 font-semibold text-right">Diferença</th>
                     <th scope="col" className="px-4 py-3 font-semibold text-right">Diferença %</th>
+                    {filtros.tipoDeProduto && (
+                      <th scope="col" className="px-4 py-3 font-semibold">Tipo</th>
+                    )}
                     <th scope="col" className="px-4 py-3 font-semibold">Situação</th>
                     <th scope="col" className="px-4 py-3 font-semibold">Match</th>
                     <th scope="col" className="px-4 py-3 font-semibold">Captura do preço</th>
@@ -664,15 +950,31 @@ export default function MonitoramentoPrecoPage() {
                           {listingStatusLabel(row.listing_status)}
                         </span>
                       </td>
-                      <td className="px-4 py-3 whitespace-nowrap">{brandLabel(row.brand)}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {brandLabel(row.brand)}
+                        {/* A linha e' valida e fica visivel, mas o operador
+                            precisa saber que ela nao entra em elegiveis nem na
+                            cobertura. Sem o rotulo, 223 ofertas de fora do
+                            produto passariam por monitoramento de beleza. */}
+                        {foraDoEscopo(row) && (
+                          <span className="ml-2 inline-block text-xs font-semibold border border-slate-300 text-slate-600 rounded-full px-2 py-0.5 align-middle">
+                            {ROTULO_FORA_DE_ESCOPO}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 whitespace-nowrap text-slate-600 text-xs">
                         {row.item_id}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-slate-600 text-xs">
                         {row.seller_sku ?? INDISPONIVEL}
                       </td>
-                      <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
-                        {fmtMoeda(row.advertised_price)}
+                      <td
+                        className={`px-4 py-3 text-right tabular-nums whitespace-nowrap ${
+                          temPrecoObservado(row) ? "" : "text-slate-500 italic"
+                        }`}
+                      >
+                        {/* `null` vira "Não observado", nunca R$ 0,00. */}
+                        {fmtPrecoObservado(row.advertised_price)}
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
                         {fmtMoeda(row.suggested_retail_amount)}
@@ -689,6 +991,13 @@ export default function MonitoramentoPrecoPage() {
                       <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
                         {fmtPercentual(row.difference_pct)}
                       </td>
+                      {filtros.tipoDeProduto && (
+                        <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
+                          {/* MATERIALIZADO pelo publisher. A tela nao
+                              reclassifica kit — apenas traduz o rotulo. */}
+                          {productTypeLabel(row.product_type)}
+                        </td>
+                      )}
                       <td className="px-4 py-3">
                         <StatusBadge status={row.comparison_status} />
                       </td>
@@ -697,6 +1006,22 @@ export default function MonitoramentoPrecoPage() {
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
                         {fmtCapturaPreco(row.observed_at)}
+                        {/* Frescor da LINHA, distinto do da fotografia: com a
+                            fotografia em dia, `stale` quer dizer que ESTA
+                            oferta nao foi revista — nao que o sync atrasou. */}
+                        {/* So' sob `snapshot_current`: la' o frescor VARIA por
+                            oferta dentro da mesma carga. No ML todas as linhas
+                            compartilham o frescor da resposta, que ja' aparece
+                            no cabecalho — repetir por linha mudaria a tela
+                            publicada sem acrescentar informacao. */}
+                        {meta?.date_policy === "snapshot_current" &&
+                          row.freshness_status !== "fresh" && (
+                          <span className="block text-xs text-slate-500">
+                            {situacaoFrescorLabel(
+                              situacaoFrescor(row, meta.freshness_status),
+                            )}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <button
@@ -759,7 +1084,14 @@ export default function MonitoramentoPrecoPage() {
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <dt className="text-xs text-slate-500">Marca</dt>
-                <dd className="font-semibold">{brandLabel(linhaAberta.brand)}</dd>
+                <dd className="font-semibold">
+                  {brandLabel(linhaAberta.brand)}
+                  {foraDoEscopo(linhaAberta) && (
+                    <span className="ml-2 inline-block text-xs font-semibold border border-slate-300 text-slate-600 rounded-full px-2 py-0.5 align-middle">
+                      {ROTULO_FORA_DE_ESCOPO}
+                    </span>
+                  )}
+                </dd>
               </div>
               <div>
                 <dt className="text-xs text-slate-500">Item</dt>
@@ -789,7 +1121,7 @@ export default function MonitoramentoPrecoPage() {
                 <div>
                   <dt className="text-xs text-slate-500">Preço anunciado</dt>
                   <dd className="font-semibold tabular-nums">
-                    {fmtMoeda(linhaAberta.advertised_price)}
+                    {fmtPrecoObservado(linhaAberta.advertised_price)}
                   </dd>
                 </div>
                 <div>
@@ -883,12 +1215,13 @@ export default function MonitoramentoPrecoPage() {
                   rel="noopener noreferrer"
                   className="inline-block bg-violet-600 text-white rounded-lg px-4 py-3 min-h-[44px] text-sm font-semibold hover:bg-violet-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
                 >
-                  Abrir anúncio no Mercado Livre
+                  Abrir anúncio {marketplace === "ml" ? "no" : "na"}{" "}
+                  {canalLabel(marketplace)}
                 </a>
               ) : (
                 <p className="text-xs text-slate-500">
-                  Link do anúncio indisponível ou fora dos domínios reconhecidos do
-                  Mercado Livre.
+                  Link do anúncio indisponível ou fora dos domínios reconhecidos
+                  {" "}{canalComPreposicao(marketplace)}.
                 </p>
               )}
             </div>

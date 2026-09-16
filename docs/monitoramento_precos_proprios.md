@@ -870,3 +870,144 @@ para o ML.
   `non_comparable_reason = invalid_channel_price`, porque a partição comercial
   tem cinco valores congelados por teste e tipados no frontend. Hoje o caso não
   ocorre: as 8 ofertas sem preço do TikTok são todas inativas.
+
+---
+
+# Gate PMA-2C4B — frontend multicanal (2026-09-16)
+
+O backend passou a servir Shopee e TikTok no PMA-2C4A, mas a tela só entendia
+`ml`: `meta.marketplace` era tipado como literal `"ml"` e `advertised_price`
+como `number`. Este gate adaptou `/monitoramento-preco` aos três contratos.
+
+## Seletor de canal e ativação coordenada
+
+O seletor só aparece quando há mais de um canal **disponível**, e disponível
+depende de **duas** chaves independentes:
+
+| | quem decide | efeito de ligar sozinho |
+|---|---|---|
+| `PMA_SHOPEE_ENABLED` / `PMA_TIKTOK_ENABLED` | backend | não cria botão nenhum |
+| `NEXT_PUBLIC_PMA_SHOPEE_ENABLED` / `NEXT_PUBLIC_PMA_TIKTOK_ENABLED` | frontend | botão que devolve envelope `unavailable` |
+
+As quatro nascem **desligadas**, e a ausência da variável resolve `false` — só a
+string exata `"true"` liga. A ativação é **coordenada de propósito**: nenhuma
+das duas sozinha expõe o canal. Este gate não tocou `.env`, Render nem Vercel.
+
+Com tudo desligado — o estado de produção — a tela é exatamente a de antes:
+Mercado Livre, sem seletor, sem coluna de tipo, sem filtro de conta.
+
+## Duas políticas de data na tela
+
+| | Mercado Livre | Shopee e TikTok |
+|---|---|---|
+| teto exibido | `até DD/MM (D−1)` | `até DD/MM (hoje)` |
+| D0 | recusado | permitido |
+| aviso | nenhum | *"Fotografia do dia corrente … AINDA PODE MUDAR hoje se a origem recarregar. Não é período fechado nem contagem definitiva do dia."* |
+
+A frase de D−1 **nunca** é reutilizada nos canais novos — há teste que varre o
+texto renderizado e reprova se `D−1` aparecer numa resposta `snapshot_current`.
+
+## Frescor em dois níveis
+
+A tela distingue quatro situações, e a da linha é o **pior** dos dois níveis:
+
+| situação | quando | o que a linha diz |
+|---|---|---|
+| Revista nesta fotografia | fotografia em dia, oferta `current` | nada extra |
+| Não revista nesta fotografia | fotografia em dia, oferta `stale` | o preço é o da última vez em que foi vista — **não** manda verificar o sync |
+| Fotografia atrasada | fotografia `stale` | atraso real, em dias |
+| Consulta retrospectiva | dia escolhido | não é atraso |
+
+Na Shopee de 2026-09-16 são 238 ofertas revistas e 454 não revistas dentro da
+mesma carga de hoje — há modelo com carimbo de até 18 dias.
+
+## Preço ausente
+
+`advertised_price` nulo vira **"Não observado"**, nunca `R$ 0,00`. A diferença
+não é calculada (a API já a manda nula) e a linha não é classificada como
+abaixo nem acima da referência. Medido no QA: zero células de preço anunciado
+exibindo `R$ 0,00`. Um `R$ 0,00` na coluna **Diferença** é medição legítima —
+preço anunciado igual ao sugerido — e continua sendo exibido.
+
+## Cobertura por conta
+
+Sob `snapshot_current`, o bloco de contexto lista cada conta com ofertas,
+quantas foram revistas e o horário da carga, direto de `meta.account_clocks`.
+Nada é somado na tela. Ofertas de marca fora do escopo de beleza aparecem na
+tabela e são declaradas em `meta.out_of_scope_offer_count`: não entram em
+`eligible_offers` nem na cobertura.
+
+## Kits
+
+`product_type` vem **materializado** do publisher e é apenas traduzido:
+kit confirmado · possível kit · sem sinal de kit · sinal de kit desconhecido.
+O frontend **não reclassifica kit**. `product_type_unknown` é rotulado como
+"sinal de kit desconhecido", jamais como "produto simples".
+
+## Links externos
+
+Allowlist **por marketplace**, sempre HTTPS, com `noopener noreferrer`. Um
+permalink de Shopee numa linha de ML não vira link. A fato dos canais não
+guarda URL, então hoje Shopee e TikTok mostram texto sem link — e a URL
+**nunca** é construída a partir de `offer_key`.
+
+## QA medido (Chromium, backend local read-only)
+
+| viewport | overflow | alvo < 44px | fonte mínima | linhas |
+|---|---:|---:|---:|---:|
+| 1440×900 | 0px | 0 | 12px | 500 |
+| 1024×768 | 0px | 0 | 12px | 500 |
+| 390×844 | 0px | 0 | 12px | 500 |
+
+Medições **restritas ao `<main>`**: a navegação lateral do shell tem alvos de
+36px e rótulos de 9–10px, condição pré-existente e fora desta tela. Único erro
+de console: `404 /favicon.ico`, que o projeto não publica desde antes deste
+gate.
+
+Na troca de canal, o instante imediato mostra **0 linhas** sob o título do
+canal novo — nenhum dado do canal anterior sobrevive à troca.
+
+## Limitações
+
+- **Os canais continuam desligados em produção.** Este gate não ativou nada.
+- `available_observed_dates` dos canais tem uma única data: só há uma
+  fotografia publicada. A lista cresce conforme o publisher rodar.
+- Marca fora do escopo (`gocase`, `denavita`) aparece nas linhas mas não é
+  filtrável — a allowlist de `brand` cobre as cinco marcas de beleza.
+- A publicação continua manual: não há Scheduler chamando o publisher.
+
+## Revisão terminal (PMA-2C4B-R/V)
+
+**Marca fora do escopo — regra definida.** Gocase e Denavita são *formalmente*
+fora do escopo: o backend declara por linha (`business_scope`) e em agregado
+(`meta.out_of_scope_offer_count`), e já as exclui de `eligible_offers` e da
+cobertura. A tela passou a:
+
+- **rotular** cada linha com o chip "Fora do escopo", na tabela e no diálogo —
+  antes elas apareciam sem qualquer indicação, e 223 ofertas de fora do produto
+  podiam ser lidas como monitoramento de beleza;
+- oferecer um filtro de **Escopo** ("Todas as marcas da fotografia" /
+  "Somente marcas monitoradas"), traduzido para a lista de marcas que a própria
+  API declara monitoradas — filtro **do servidor**, então total e paginação
+  continuam corretos. Medido: 1.208 → 985.
+
+Limitação registrada: isolar *somente* as marcas fora do escopo exigiria que o
+backend aceitasse `gocase`/`denavita` em `brand`, hoje recusadas com 422. É
+mudança de backend e ficou fora deste PR de frontend.
+
+**Filtro de tipo.** Passou a oferecer os quatro estados sempre.
+`product_type_counts` conta apenas as **ativas**, e filtrar as opções por ele
+esconderia do filtro um tipo existente só entre as inativas — visível na coluna
+e inalcançável.
+
+**Paridade do Mercado Livre.** A comparação controle × branch nos três viewports
+mostrou quatro mudanças indevidas na tela do ML, todas revertidas: o subtítulo
+publicado, o chip de teto de data, o sublabel de frescor por linha e uma
+concordância errada ("de Mercado Livre"). Após a correção, colunas, filtros,
+linhas, primeira linha e overflow são **idênticos** ao controle nos três
+viewports, e a única diferença de texto é o título dinâmico.
+
+**Diálogo — lacuna pré-existente.** O diálogo de detalhe não prende o foco nem
+fecha com Escape. Medido idêntico no controle (`origin/main`, só ML), portanto
+não é regressão deste PR; na branch o foco ao menos volta para quem abriu, o
+que no controle não acontece. Fica registrado para um gate de acessibilidade.
