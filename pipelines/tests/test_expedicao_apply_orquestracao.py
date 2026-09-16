@@ -87,7 +87,7 @@ class ConexaoFake:
     def __init__(self, papel: str, roteador):
         self.papel = papel
         self._roteador = roteador
-        self.autocommit = False
+        self._autocommit = False
         self.fechada = False
         self.em_transacao = False
         self.sqls: list[str] = []
@@ -102,6 +102,23 @@ class ConexaoFake:
         self.commit_que_falha = 1
 
     # -- protocolo psycopg2 -------------------------------------------------
+    @property
+    def autocommit(self):
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, valor):
+        """Espelha a regra REAL do psycopg2.
+
+        Trocar o modo com transacao aberta levanta
+        `set_session cannot be used inside a transaction`. Um fake que aceitasse
+        isso em silencio deixaria passar um `--apply` que morre em 100% das
+        execucoes reais — foi exatamente o que aconteceu antes desta trava.
+        """
+        if self.em_transacao and valor != self._autocommit:
+            raise ErroDeUso("set_session cannot be used inside a transaction")
+        self._autocommit = valor
+
     def cursor(self, *_, **__):
         if self.fechada:
             raise ErroDeUso("cursor() em conexao fechada")
@@ -132,6 +149,19 @@ class ConexaoFake:
 
     def set_session(self, **_):
         pass
+
+    @property
+    def rollbacks_da_publicacao(self) -> int:
+        """Rollbacks depois do lock.
+
+        O preflight encerra a propria leitura com um rollback antes do lock;
+        conta-lo como reversao de publicacao esconderia o que os testes querem
+        medir.
+        """
+        if "try_lock" not in self.eventos:
+            return 0
+        corte = self.eventos.index("try_lock")
+        return self.eventos[corte:].count("rollback")
 
     # -- roteamento ---------------------------------------------------------
     def responder(self, sql: str, params):
@@ -369,9 +399,12 @@ def test_batch_id_nao_deriva_de_relogio_canal_nem_effective_at():
 # ===========================================================================
 def test_lock_adquirido_antes_de_ler_a_fonte(cenario):
     cenario.rodar()
-    assert cenario.target.eventos[0] == "try_lock"
-    assert cenario.ordem.index("abrir:target") < cenario.ordem.index("abrir:source")
-    assert "try_lock" in cenario.target.eventos[: cenario.target.eventos.index("commit")]
+    o = cenario.ordem
+    assert o.index("preflight") < o.index("abrir:source")
+    assert cenario.target.eventos.index("try_lock") < cenario.target.eventos.index("commit")
+    assert o.index("abrir:target") < o.index("abrir:source")
+    # o unico evento antes do lock e o rollback que encerra a leitura do preflight
+    assert cenario.target.eventos[: cenario.target.eventos.index("try_lock")] == ["rollback"]
 
 
 def test_lock_usa_a_chave_do_canal(cenario):
@@ -390,12 +423,21 @@ def test_lock_ocupado_para_sem_ler_fonte_sem_auditar_e_sem_apagar():
     assert "unlock" not in c.target.eventos
 
 
-def test_lock_liberado_mesmo_quando_a_publicacao_falha():
+def test_lock_nao_mascara_a_excecao_e_morre_com_a_conexao():
+    """Com transacao aberta o `unlock` explicito nao roda — e tudo bem.
+
+    O `COMMIT` que falha deixa a transacao aberta, e trocar o modo da conexao
+    ali levanta no psycopg2. Se a liberacao propagasse esse erro, ele
+    SUBSTITUIRIA o `IndeterminateCommit` e o desfecho viraria exit 1 — que o
+    runbook le como "fila anterior intacta", afirmacao que ninguem pode fazer
+    depois de um commit sem resposta. O lock e de SESSAO: morre com a conexao,
+    que o orquestrador fecha no proprio `finally`.
+    """
     c = _novo()
     c.target.falha_no_commit = RuntimeError("queda de rede")
-    assert c.rodar() == cli.EXIT_COMMIT_INDETERMINADO
-    assert "unlock" in c.target.eventos
-    assert c.target.lock_segurado is False
+    assert c.rodar() == cli.EXIT_COMMIT_INDETERMINADO   # nao mascarado
+    assert "unlock" not in c.target.eventos
+    assert c.target.fechada, "a conexao precisa fechar para o lock cair"
 
 
 # ===========================================================================
@@ -513,7 +555,7 @@ def test_delete_e_inserts_na_mesma_transacao_com_um_unico_commit(cenario):
     eventos = [e for e in cenario.ordem if e in ("delete",) or e.startswith("insert_")]
     assert eventos[0] == "delete"
     assert cenario.target.commits == 1
-    assert cenario.target.rollbacks == 0
+    assert cenario.target.rollbacks_da_publicacao == 0
 
 
 def test_falha_antes_do_commit_reverte_e_audita_failed():
@@ -523,7 +565,7 @@ def test_falha_antes_do_commit_reverte_e_audita_failed():
         raise RuntimeError("erro de copy")
 
     assert c.rodar(execute_values=falhar) == cli.EXIT_FALHA
-    assert c.target.rollbacks == 1
+    assert c.target.rollbacks_da_publicacao == 1
     assert c.target.commits == 0
     assert "audit_finish:failed" in c.ordem
 
@@ -532,7 +574,7 @@ def test_commit_indeterminado_nao_reverte_nao_repete_e_nao_marca_auditoria():
     c = _novo()
     c.target.falha_no_commit = RuntimeError("conexao caiu no COMMIT")
     assert c.rodar() == cli.EXIT_COMMIT_INDETERMINADO
-    assert c.target.rollbacks == 0
+    assert c.target.rollbacks_da_publicacao == 0
     assert not any(e.startswith("audit_finish") for e in c.ordem)
     assert c.ordem.count("delete") == 1
 
@@ -545,7 +587,7 @@ def test_auditoria_pos_commit_incompleta_nao_reverte_nem_marca_failed():
     codigo = c.rodar()
     assert codigo == cli.EXIT_AUDITORIA_INCOMPLETA
     assert c.target.commits == 1          # o dado ESTA publicado
-    assert c.target.rollbacks == 0
+    assert c.target.rollbacks_da_publicacao == 0
     assert "audit_finish:failed" not in c.ordem
     texto = " ".join(c.mensagens).lower()
     assert "commitada" in texto and "reversao" in texto
@@ -568,8 +610,10 @@ def test_keyboard_interrupt_propaga_depois_do_cleanup():
 
     with pytest.raises(KeyboardInterrupt):
         c.rodar(execute_values=interromper)
+    # a interrupcao chega com transacao aberta: o `unlock` explicito nao roda,
+    # mas o fechamento da conexao derruba o lock de sessao.
     assert c.target.fechada and c.source.fechada and c.audit.fechada
-    assert "unlock" in c.target.eventos
+    assert c.target.commits == 0
 
 
 def test_system_exit_propaga_depois_do_cleanup():
@@ -678,3 +722,88 @@ def test_publicacao_usa_as_tabelas_do_contrato(cenario):
     juntas = " ".join(cenario.target.sqls)
     assert FILA_TABLE in juntas
     assert RUN_TABLE in juntas
+
+
+# ===========================================================================
+# Contraprova do bug encontrado no PostgreSQL descartavel
+# ===========================================================================
+def test_preflight_nao_deixa_transacao_aberta_para_o_lock(cenario):
+    """`channel_lock` troca o modo da conexao logo depois do preflight.
+
+    O preflight roda com `autocommit=False`, entao seu SELECT abre transacao. Se
+    ela ficar aberta, o psycopg2 recusa a troca de modo e o `--apply` morre antes
+    de adquirir o lock — em toda execucao, nao numa borda rara.
+    """
+    assert cenario.rodar() == cli.EXIT_OK
+    assert cenario.target.rollbacks >= 1, "preflight nao encerrou a leitura"
+    assert "try_lock" in cenario.target.eventos
+
+
+def test_falha_na_liberacao_do_lock_nao_derruba_publicacao_bem_sucedida():
+    """Liberar o lock e cleanup: falhar ali nao invalida o que foi publicado."""
+    c = _novo()
+    original = c.target.responder
+
+    def quebrar_unlock(sql, params):
+        if "pg_advisory_unlock" in sql:
+            raise RuntimeError("queda ao liberar o lock")
+        return original(sql, params)
+
+    c.target.responder = quebrar_unlock
+    assert c.rodar() == cli.EXIT_OK
+    assert c.target.commits == 1
+
+
+def test_log_que_quebra_nao_altera_o_desfecho():
+    """Escrever a mensagem nao decide nada.
+
+    Num job agendado com a saida fechada, `BrokenPipeError` em stderr nao pode
+    transformar uma publicacao commitada numa excecao sem exit code.
+    """
+    c = _novo()
+
+    def log_que_quebra(_msg):
+        raise BrokenPipeError("stderr fechado")
+
+    assert c.rodar(log=log_que_quebra) == cli.EXIT_OK
+    assert c.target.commits == 1
+
+
+def test_nenhuma_falha_posterior_ao_commit_devolve_exit_de_falha_anterior():
+    """Exit 1 significa "fila anterior intacta"; depois do commit isso e falso.
+
+    Vale para qualquer falha alcancavel depois da publicacao — aqui, a
+    auditoria. O guard do handler generico repete a regra para o que vier a ser
+    adicionado depois do commit no futuro.
+    """
+    import ast
+    from pathlib import Path
+
+    c = _novo()
+    c.audit.falha_no_commit = RuntimeError("auditoria fora do ar")
+    c.audit.commit_que_falha = 2
+    assert c.rodar() == cli.EXIT_AUDITORIA_INCOMPLETA
+    assert c.target.commits == 1
+
+    # o handler generico tambem respeita a regra, por inspecao estrutural
+    arvore = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(arvore)
+              if isinstance(n, ast.FunctionDef) and n.name == "run_apply")
+    guardas = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Name) and n.test.id == "publicado"
+        and any(isinstance(x, ast.Return)
+                and isinstance(x.value, ast.Name)
+                and x.value.id == "EXIT_AUDITORIA_INCOMPLETA"
+                for x in ast.walk(n))
+    ]
+    assert guardas, "handler generico perdeu o guard de `publicado`"
+
+
+def test_mensagens_do_apply_vao_para_stderr(capsys):
+    """Falha em stdout some num `2>` do agendador."""
+    cli._log_stderr("mensagem de teste")
+    capturado = capsys.readouterr()
+    assert capturado.err.strip() == "mensagem de teste"
+    assert capturado.out == ""

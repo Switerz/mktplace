@@ -156,6 +156,16 @@ def _agora_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _log_stderr(msg: str) -> None:
+    """Sink das mensagens do `--apply`: stderr.
+
+    O resultado produtivo deste comando sao as linhas publicadas e as de
+    auditoria, nao o texto do terminal. Mandar falha para stdout faria um
+    redirecionamento `2>` do agendador perder justamente o que importa.
+    """
+    print(msg, file=sys.stderr)
+
+
 def _uuid4() -> str:
     """UUIDv4 por TENTATIVA REAL de publicacao.
 
@@ -281,6 +291,13 @@ def preflight_target(conn) -> None:
     e deixaria uma auditoria iniciada sem motivo.
 
     Nada aqui e' impresso — nem banco, nem usuario, nem host.
+
+    O `rollback()` no fim NAO e' cosmetico. O target abre com `autocommit=False`,
+    entao este SELECT inicia uma transacao; `channel_lock`, logo em seguida,
+    precisa passar a conexao para `autocommit=True`, e o psycopg2 recusa isso
+    dentro de uma transacao aberta (`set_session cannot be used inside a
+    transaction`). Sem encerrar a leitura aqui, TODA execucao de `--apply`
+    morreria antes de adquirir o lock. Nao ha o que commitar: e leitura.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -292,6 +309,7 @@ def preflight_target(conn) -> None:
             (FILA_TABLE, RUN_TABLE),
         )
         linha = cur.fetchone()
+    conn.rollback()
 
     if linha is None:
         raise PreflightFalhou("preflight do target nao retornou linha")
@@ -400,7 +418,7 @@ def run_apply(
     open_audit=open_audit_default,
     uuid_factory=_uuid4,
     execute_values=None,
-    log=print,
+    log=_log_stderr,
 ) -> int:
     """Executa UMA publicacao e devolve o exit code. Nunca faz retry.
 
@@ -409,10 +427,20 @@ def run_apply(
     fluxo real sem abrir conexao.
     """
     if channel is not Channel.SHOPEE:
-        log(f"canal {channel.value} ainda nao suportado pelo --apply.")
+        avisar(f"canal {channel.value} ainda nao suportado pelo --apply.")
         return EXIT_PRECONDICAO
 
     marketplace_id = MARKETPLACE_ID[channel]
+
+    def avisar(msg: str) -> None:
+        """Escrever a mensagem nunca decide o desfecho.
+
+        Um `BrokenPipeError` em stderr — comum em job agendado com a saida
+        fechada — nao pode transformar uma publicacao commitada numa excecao sem
+        exit code.
+        """
+        with suppress(Exception):
+            log(msg)
 
     target = source = auditoria = None
     run_id: int | None = None
@@ -525,14 +553,14 @@ def run_apply(
                     auditoria, marketplace_id, _freshness_por_marca(fila, resumos)
                 )
             except Exception as exc:  # noqa: BLE001 — pos-commit: nunca vira failed
-                log(
+                avisar(
                     "publicacao COMMITADA e auditoria incompleta (nenhuma reversao "
                     f"ocorreu): {audit_mod.sanitize_error_message(exc)}"
                 )
                 return EXIT_AUDITORIA_INCOMPLETA
 
         vazia = " (fotografia vazia)" if linhas == 0 else ""
-        log(
+        avisar(
             f"publicado{vazia}: {linhas} pedido(s), "
             f"{contas_registradas} conta(s), batch {batch_id}"
         )
@@ -559,8 +587,17 @@ def run_apply(
         return EXIT_FONTE_NAO_PUBLICAVEL
 
     except Exception as exc:  # noqa: BLE001 — fronteira do orquestrador
+        if publicado:
+            # Falha DEPOIS do commit — por exemplo na liberacao do lock. Exit 1
+            # diria "falha anterior ao commit, fila anterior intacta", que seria
+            # mentira: a fila nova ja esta publicada.
+            avisar(
+                "publicacao COMMITADA e finalizacao incompleta (nenhuma reversao "
+                f"ocorreu): {audit_mod.sanitize_error_message(exc)}"
+            )
+            return EXIT_AUDITORIA_INCOMPLETA
         _falhar_auditoria(auditoria, run_id, exc, publicado, extraidas, log)
-        log(f"FALHA: {audit_mod.sanitize_error_message(exc)}")
+        avisar(f"FALHA: {audit_mod.sanitize_error_message(exc)}")
         return EXIT_FALHA
 
     finally:
