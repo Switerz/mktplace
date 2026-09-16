@@ -807,3 +807,332 @@ def test_mensagens_do_apply_vao_para_stderr(capsys):
     capturado = capsys.readouterr()
     assert capturado.err.strip() == "mensagem de teste"
     assert capturado.out == ""
+
+
+# ===========================================================================
+# EXP-1F — o alerta de frescor mede a FONTE, nao o pedido
+# ===========================================================================
+def _resumo(marca, *, conta=None, watermark, backlog=0):
+    return {
+        "brand": marca,
+        "shop_account": conta or marca,
+        "source_watermark_at": watermark,
+        "backlog_count": backlog,
+    }
+
+
+def _linha(marca, *, ingested_at):
+    return {"brand": marca, "source_ingested_at": ingested_at}
+
+
+def test_contraprova_do_piloto_fonte_fresca_com_pedido_antigo_nao_reprova():
+    """Reproduz o EXP-1E: watermark a 0,55h e linha de 240h no backlog.
+
+    A versao anterior agregava o pior `source_freshness_status` das LINHAS e
+    marcava `critical`/`fail` mesmo com a fonte recem-lida. As quatro marcas
+    nasceram vermelhas no primeiro piloto real, e alerta permanente e alerta
+    ignorado.
+    """
+    fila = [
+        _linha("rituaria", ingested_at=AGORA - timedelta(hours=240)),
+        _linha("barbours", ingested_at=AGORA - timedelta(hours=168)),
+        _linha("barbours", ingested_at=AGORA - timedelta(minutes=30)),
+    ]
+    resumos = [
+        _resumo("rituaria", watermark=AGORA - timedelta(minutes=33), backlog=75),
+        _resumo("barbours", watermark=AGORA - timedelta(minutes=33), backlog=609),
+    ]
+    saida = cli._freshness_por_marca(fila, resumos, AGORA)
+
+    assert saida["rituaria"]["freshness"] == "fresh"
+    assert saida["barbours"]["freshness"] == "fresh"
+    # a idade da linha continua VISIVEL; so nao decide mais
+    assert saida["rituaria"]["oldest_row_age_hours"] == pytest.approx(240.0)
+    assert saida["barbours"]["oldest_row_age_hours"] == pytest.approx(168.0)
+    assert saida["rituaria"]["source_age_hours"] == pytest.approx(0.55)
+
+
+def test_watermark_antigo_reprova_a_fonte_mesmo_com_backlog_recem_lido():
+    """O caso que o alerta existe para pegar: a fonte parou."""
+    fila = [_linha("apice", ingested_at=AGORA - timedelta(minutes=5))]
+    resumos = [_resumo("apice", watermark=AGORA - timedelta(hours=72), backlog=1)]
+    saida = cli._freshness_por_marca(fila, resumos, AGORA)
+    assert saida["apice"]["freshness"] == "critical"
+    assert saida["apice"]["source_age_hours"] == pytest.approx(72.0)
+
+
+def test_watermark_nulo_e_fail_closed():
+    """Conta sem carimbo vira `unknown`: nao sei nunca se apresenta como fresco."""
+    saida = cli._freshness_por_marca([], [_resumo("apice", watermark=None)], AGORA)
+    assert saida["apice"]["freshness"] == "unknown"
+    assert saida["apice"]["source_watermark"] is None
+    assert saida["apice"]["source_age_hours"] is None
+
+
+@pytest.mark.parametrize(
+    ("horas", "esperado"),
+    [
+        (0.0, "fresh"), (7.99, "fresh"), (8.0, "fresh"),
+        (8.01, "stale"), (23.99, "stale"), (24.0, "stale"),
+        (24.01, "critical"), (240.0, "critical"),
+    ],
+)
+def test_fronteira_exata_do_threshold_do_contrato(horas, esperado):
+    """8h e 24h, inclusivos — os mesmos limites de `classify_freshness`."""
+    resumos = [_resumo("apice", watermark=AGORA - timedelta(hours=horas))]
+    assert cli._freshness_por_marca([], resumos, AGORA)["apice"]["freshness"] == esperado
+
+
+def test_thresholds_vem_do_contrato_e_nao_sao_redefinidos():
+    from pipelines.expedicao.contract import (
+        FRESHNESS_FRESH_LIMIT,
+        FRESHNESS_STALE_LIMIT,
+    )
+
+    assert FRESHNESS_FRESH_LIMIT == timedelta(hours=8)
+    assert FRESHNESS_STALE_LIMIT == timedelta(hours=24)
+
+
+def test_marca_com_varias_contas_usa_o_PIOR_watermark():
+    """Conta parada nao pode se esconder atras de conta atualizada."""
+    resumos = [
+        _resumo("apice", conta="apice_a",
+                watermark=AGORA - timedelta(hours=1), backlog=10),
+        _resumo("apice", conta="apice_b",
+                watermark=AGORA - timedelta(hours=50), backlog=5),
+    ]
+    saida = cli._freshness_por_marca([], resumos, AGORA)
+    assert saida["apice"]["freshness"] == "critical"
+    assert saida["apice"]["accounts"] == 2
+    assert saida["apice"]["open_orders"] == 15
+    assert saida["apice"]["source_watermark"] == AGORA - timedelta(hours=50)
+
+
+def test_conta_sem_carimbo_contamina_a_marca_inteira():
+    resumos = [
+        _resumo("apice", conta="apice_a", watermark=AGORA - timedelta(hours=1)),
+        _resumo("apice", conta="apice_b", watermark=None),
+    ]
+    saida = cli._freshness_por_marca([], resumos, AGORA)
+    assert saida["apice"]["freshness"] == "unknown"
+    assert saida["apice"]["source_watermark"] is None
+
+
+def test_marcas_sao_isoladas_entre_si():
+    fila = [_linha("apice", ingested_at=AGORA - timedelta(hours=300))]
+    resumos = [
+        _resumo("apice", watermark=AGORA - timedelta(hours=1), backlog=3),
+        _resumo("barbours", watermark=AGORA - timedelta(hours=99), backlog=7),
+    ]
+    saida = cli._freshness_por_marca(fila, resumos, AGORA)
+    assert saida["apice"]["freshness"] == "fresh"
+    assert saida["barbours"]["freshness"] == "critical"
+    assert saida["barbours"]["oldest_row_age_hours"] is None
+    assert saida["apice"]["open_orders"] == 3
+
+
+def test_conta_sem_backlog_continua_aparecendo_no_alerta():
+    """Fila vazia nao pode apagar a marca do relatorio de frescor."""
+    saida = cli._freshness_por_marca(
+        [], [_resumo("apice", watermark=AGORA - timedelta(hours=99))], AGORA)
+    assert saida["apice"]["freshness"] == "critical"
+    assert saida["apice"]["open_orders"] == 0
+
+
+def test_registro_agregado_distingue_os_tres_conceitos():
+    """Fonte desatualizada, pedido antigo e atraso operacional sao distintos."""
+    fila = [_linha("apice", ingested_at=AGORA - timedelta(hours=200))]
+    resumos = [_resumo("apice", watermark=AGORA - timedelta(hours=2), backlog=1)]
+    d = cli._freshness_por_marca(fila, resumos, AGORA)["apice"]
+    assert d["freshness"] == "fresh"
+    assert d["source_age_hours"] == pytest.approx(2.0)
+    assert d["oldest_row_age_hours"] == pytest.approx(200.0)
+    assert not {"overdue", "over_48h", "deadline_status", "is_stalled"} & set(d)
+
+
+def test_freshness_por_marca_nao_le_o_status_das_linhas_da_fila():
+    """Trava estrutural: a regressao do EXP-1E nao pode voltar em silencio."""
+    import ast
+    from pathlib import Path
+
+    arvore = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(arvore)
+              if isinstance(n, ast.FunctionDef) and n.name == "_freshness_por_marca")
+    lidos = {
+        n.slice.value
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Subscript)
+        and isinstance(n.slice, ast.Constant)
+        and isinstance(n.slice.value, str)
+    }
+    assert "source_freshness_status" not in lidos, (
+        "o alerta voltou a agregar o status por pedido em vez do watermark"
+    )
+    assert "source_watermark_at" in lidos, "o veredito precisa vir do watermark"
+
+
+def test_alerta_de_frescor_chega_a_auditoria_com_o_veredito_do_watermark(cenario):
+    """Fluxo inteiro: fonte fresca publica e NAO gera alerta de fonte falhada."""
+    assert cenario.rodar() == cli.EXIT_OK
+    checks = [
+        p for s, p in zip(cenario.audit.sqls, cenario.audit.params)
+        if "data_quality_check" in s and p
+    ]
+    frescor = [p for p in checks if p[0] == "expedicao_source_freshness"]
+    assert frescor, "nenhum registro de frescor gravado"
+    assert all(p[3] == "pass" for p in frescor), [p[3] for p in frescor]
+    assert all('"measures": "source_watermark_only"' in p[6] for p in frescor)
+
+
+# ===========================================================================
+# EXP-1F-R/V — carimbo do futuro, ordem e blindagem do calculo
+# ===========================================================================
+def test_watermark_no_futuro_nao_pode_sair_fresco():
+    """Idade negativa satisfaz `<= 8h`: sem tratamento, carimbo adiantado virava
+    `fresh`. E o mesmo defeito que o EXP-1F corrige — sinal quebrado se
+    apresentando como saudavel."""
+    resumos = [_resumo("apice", watermark=AGORA + timedelta(days=3), backlog=5)]
+    d = cli._freshness_por_marca([], resumos, AGORA)["apice"]
+    assert d["freshness"] == "unknown"
+    assert d["freshness"] != "fresh"
+    assert d["source_watermark"] is None, (
+        "instante impossivel nao pode ser exibido como ultima leitura"
+    )
+
+
+@pytest.mark.parametrize("segundos", [1, 60, 3600, 86400])
+def test_qualquer_adiantamento_vira_unknown(segundos):
+    resumos = [_resumo("apice", watermark=AGORA + timedelta(seconds=segundos))]
+    assert cli._freshness_por_marca([], resumos, AGORA)["apice"]["freshness"] == "unknown"
+
+
+def test_watermark_exatamente_igual_ao_effective_at_e_fresco():
+    """Fronteira do zero: idade 0 e leitura instantanea, nao carimbo invalido."""
+    resumos = [_resumo("apice", watermark=AGORA)]
+    d = cli._freshness_por_marca([], resumos, AGORA)["apice"]
+    assert d["freshness"] == "fresh"
+    assert d["source_age_hours"] == pytest.approx(0.0)
+
+
+def test_conta_com_carimbo_futuro_contamina_a_marca():
+    resumos = [
+        _resumo("apice", conta="a", watermark=AGORA - timedelta(hours=1)),
+        _resumo("apice", conta="b", watermark=AGORA + timedelta(hours=5)),
+    ]
+    d = cli._freshness_por_marca([], resumos, AGORA)["apice"]
+    assert d["freshness"] == "unknown"
+    assert d["source_watermark"] is None
+
+
+def test_resultado_independe_da_ORDEM_dos_resumos():
+    """Agregacao conservadora nao pode depender de quem chegou primeiro."""
+    import itertools
+
+    contas = [
+        _resumo("apice", conta="a", watermark=AGORA - timedelta(hours=1), backlog=10),
+        _resumo("apice", conta="b", watermark=AGORA - timedelta(hours=50), backlog=5),
+        _resumo("apice", conta="c", watermark=AGORA - timedelta(hours=9), backlog=2),
+    ]
+    vistos = {
+        tuple(sorted(cli._freshness_por_marca([], list(p), AGORA)["apice"].items(),
+                     key=lambda kv: kv[0]))
+        for p in itertools.permutations(contas)
+    }
+    assert len(vistos) == 1, "o resultado mudou com a ordem das linhas"
+    d = dict(next(iter(vistos)))
+    assert d["freshness"] == "critical"
+    assert d["source_watermark"] == AGORA - timedelta(hours=50)
+    assert d["open_orders"] == 17
+
+
+def test_resultado_independe_da_ORDEM_das_linhas_da_fila():
+    import itertools
+
+    linhas = [
+        _linha("apice", ingested_at=AGORA - timedelta(hours=h)) for h in (3, 200, 40)
+    ]
+    resumos = [_resumo("apice", watermark=AGORA - timedelta(hours=1), backlog=3)]
+    idades = {
+        cli._freshness_por_marca(list(p), resumos, AGORA)["apice"]["oldest_row_age_hours"]
+        for p in itertools.permutations(linhas)
+    }
+    assert idades == {200.0}
+
+
+def test_remover_o_watermark_do_calculo_reprova():
+    """Blindagem: se o veredito deixar de olhar o watermark, o teste cai.
+
+    A inspecao vai nas CHAVES realmente lidas e nas funcoes realmente chamadas.
+    `ast.unparse` do corpo inteiro traria a docstring junto — e a docstring
+    EXPLICA o defeito citando `source_freshness_status`, entao o teste acusaria a
+    propria documentacao e obrigaria a documentar menos.
+    """
+    import ast
+    from pathlib import Path
+
+    arvore = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    alvos = {"_freshness_por_marca", "_frescor_da_fonte"}
+    funcoes = [n for n in ast.walk(arvore)
+               if isinstance(n, ast.FunctionDef) and n.name in alvos]
+    assert len(funcoes) == 2, [f.name for f in funcoes]
+
+    chaves, chamadas = set(), set()
+    for fn in funcoes:
+        for no in ast.walk(fn):
+            if (isinstance(no, ast.Subscript) and isinstance(no.slice, ast.Constant)
+                    and isinstance(no.slice.value, str)):
+                chaves.add(no.slice.value)
+            if isinstance(no, ast.Call):
+                chamadas.add(ast.unparse(no.func))
+
+    assert "source_watermark_at" in chaves, "o veredito precisa ler o watermark"
+    assert "transform.classify_freshness" in chamadas
+    assert "source_freshness_status" not in chaves, (
+        "o alerta voltou a agregar o status por pedido"
+    )
+    assert "source_ingested_at" in chaves, "a idade da linha segue medida como contexto"
+
+
+def test_nenhum_campo_de_pedido_ou_pii_entra_no_alerta():
+    """O alerta e agregado por marca: nada identifica pedido nem comprador.
+
+    O conjunto de chaves e FECHADO de proposito — campo novo obriga a revisar
+    aqui antes de vazar para a auditoria. `open_orders` e contagem; identificador
+    de pedido nunca entra.
+    """
+    fila = [_linha("apice", ingested_at=AGORA - timedelta(hours=2))]
+    resumos = [_resumo("apice", watermark=AGORA - timedelta(hours=1), backlog=1)]
+    d = cli._freshness_por_marca(fila, resumos, AGORA)["apice"]
+
+    assert set(d) == {
+        "freshness", "source_watermark", "source_age_hours",
+        "accounts", "open_orders", "oldest_row_age_hours",
+    }
+    # o unico texto e o proprio estado, de dominio fechado
+    textos = [v for v in d.values() if isinstance(v, str)]
+    assert textos == [d["freshness"]]
+    assert d["freshness"] in {"fresh", "stale", "critical", "unknown"}
+    assert isinstance(d["open_orders"], int)
+
+
+def test_measures_reflete_o_calculo_real():
+    """`measures` afirma que o veredito veio do watermark; tem de ser verdade."""
+    import ast
+    from pathlib import Path
+
+    from pipelines.expedicao import audit as audit_mod
+
+    arvore = ast.parse(Path(audit_mod.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(arvore)
+              if isinstance(n, ast.FunctionDef) and n.name == "record_freshness")
+    corpo = ast.unparse(fn)
+    assert '"measures": "source_watermark_only"' in corpo or \
+           "'measures': 'source_watermark_only'" in corpo
+    # o veredito gravado sai de `freshness`, que vem do watermark
+    assert 'dados["freshness"]' in corpo or "dados['freshness']" in corpo
+    assert "oldest_row_age_hours" in corpo
+    # e a idade da linha NAO participa da escolha de status/severity
+    escolha = [ast.unparse(n) for n in ast.walk(fn)
+               if isinstance(n, ast.Assign)
+               and "status" in ast.unparse(n).split("=")[0]]
+    assert not any("oldest_row" in e for e in escolha), escolha

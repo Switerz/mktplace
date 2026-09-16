@@ -1,16 +1,20 @@
-# Contrato do refresh de expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1
+# Contrato do refresh de expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1 / 1E / 1F
 
-**Estado: CODIGO PRONTO, PRODUCAO NAO TOCADA.** A migration `018` existe
-versionada mas **nao foi aplicada**; o registry **nao foi cadastrado**; nenhum
-`--apply` real foi executado; nenhuma linha foi publicada.
+**Estado: EM PRODUCAO desde 16/09/2026 (EXP-1E).** Migration `018`
+aplicada, quatro contas cadastradas, primeiro `--apply` publicado: 985 pedidos,
+quatro resumos, auditoria #314 `success`. Nenhum agendamento existe — toda
+execucao e manual.
+
+O EXP-1F corrigiu a semantica do alerta `expedicao_source_freshness`, que nascia
+permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 
 | Frente | Estado |
 |---|---|
-| Migration `018` | **versionada**, nao aplicada (`016` = Full ML, `017` = PMA) |
-| Tabelas em producao | **nao existem** — a `018` ainda nao rodou no Neon |
-| Registry (`marts.dim_seller_account`) | **vazio** — DML abaixo e plano, nao executado |
-| Orquestracao do `--apply` | **implementada e testada** (EXP-1D-H1), nunca executada contra banco real |
-| Refresh publicado | nenhum |
+| Migration `018` | **aplicada** no Neon em 16/09/2026 (`016` = Full ML, `017` = PMA) |
+| Tabelas em producao | criadas e populadas (985 pedidos, 4 resumos) |
+| Registry (`marts.dim_seller_account`) | **4 contas ativas** (Kokeshi fora: nao existe na fonte) |
+| Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** uma vez (EXP-1E) |
+| Refresh publicado | 1 (manual, batch `5f4cc96b-2534-4723-979f-36233926c9f7`) |
 | API / UI / MCP | nao iniciados |
 | ML / TikTok / calendario | fora deste gate |
 | `schedule_plan.py` / Airflow | **nao integrados** — nenhum agendamento criado |
@@ -55,7 +59,7 @@ perder o historico da chave. `REGISTRY_SQL` exige `sa.ativo AND l.ativo`.
 
 **Os `shop_id` nao estao no codigo** — ha teste que falha se alguem hardcodar.
 
-### DML necessario antes do primeiro apply — PLANO, nao executado
+### DML de cadastro das contas — EXECUTADO em 16/09/2026 (EXP-1E)
 
 ```sql
 -- Kokeshi (loja_id 3) NAO entra: nao ha ingestao Shopee para ela.
@@ -299,6 +303,120 @@ DELETE. Aguardar. Se ninguem estiver rodando, procurar sessao orfa em
    `audit.source_sync_run` para conferir o lote publicado.
 
 Nada disso ocorreu ate aqui.
+
+---
+
+## Alerta `expedicao_source_freshness` — definicao operacional (EXP-1F)
+
+### Tres idades que nao podem ser a mesma coisa
+
+| Conceito | Timestamp | Onde vive | Responde |
+|---|---|---|---|
+| **Fonte desatualizada** | `source_watermark_at` (= `MAX(ingested_at)` da conta) | `expedicao_refresh_run` e este alerta | a fonte foi lida recentemente? |
+| **Pedido antigo no backlog** | `source_ingested_at` da linha | `expedicao_fila_atual.source_freshness_status` | ha quanto tempo ESTA linha nao e relida? |
+| **Atraso operacional** | `created_at` / `paid_at` / `dispatch_deadline` | `deadline_status`, `operational_age_status`, `hours_open` | o pedido esta atrasado para o cliente? |
+
+O instante do snapshot e `effective_at`, lido uma unica vez na CLI e injetado em
+tudo — nenhuma dessas medidas chama relogio por conta propria.
+
+### Definicao
+
+`expedicao_source_freshness` mede **so o primeiro conceito**: o frescor da
+FONTE. Ele responde "o Data Mart parou de atualizar esta conta?" e nada mais.
+
+### Calculo
+
+1. para cada conta esperada, `classify_freshness(source_watermark_at, effective_at)`;
+   carimbo **no futuro** (`watermark > effective_at`) nao passa por aqui: vira
+   `unknown` direto — ver abaixo;
+2. agrupa as contas por marca;
+3. o veredito da marca e o **pior** estado entre suas contas;
+4. o carimbo reportado e o **mais antigo** entre elas (`None` vence);
+5. `freshness -> status/severity`: `fresh -> pass/low`, `stale -> warn/medium`,
+   `critical -> fail/high`, `unknown -> warn/medium`.
+
+### Granularidade
+
+Uma linha por **marca**, por execucao. Nunca um agregado global: um unico numero
+para o canal esconderia uma conta parada atras de outra atualizada — foi assim
+que a planilha antiga ficou 43 dias defasada sem alarme. Uma marca com varias
+contas agrega pelo pior, nunca pela media.
+
+### Threshold
+
+Os do contrato, **inalterados**: `FRESHNESS_FRESH_LIMIT = 8h`,
+`FRESHNESS_STALE_LIMIT = 24h`, ambos inclusivos (`<=`). O EXP-1F nao criou
+threshold novo; mudou apenas **qual timestamp** e medido.
+
+### O que o registro carrega
+
+```json
+{
+  "brand": "rituaria",
+  "freshness": "fresh",
+  "source_watermark": "2026-09-16T18:07:49Z",
+  "source_age_hours": 0.55,
+  "accounts": 1,
+  "open_orders": 75,
+  "oldest_row_age_hours": 240.0,
+  "measures": "source_watermark_only"
+}
+```
+
+`oldest_row_age_hours` fica visivel de proposito, mas e **contexto**: nao entra
+no veredito. `measures` existe para que quem ler o registro saiba, sem abrir
+codigo, que o julgamento veio do watermark.
+
+`failed_rows` recebe `open_orders` apenas quando o status nao e `pass`, para
+dimensionar o impacto de uma fonte parada. Com a fonte fresca ele e zero,
+mesmo havendo backlog.
+
+### Por que mudou (defeito do EXP-1E)
+
+A versao anterior agregava o pior `source_freshness_status` das **linhas** da
+fila. Esse campo mede a idade da linha ingerida, e um backlog legitimo sempre
+contem pedido cuja linha nao e relida ha mais de 24h — medimos **240h** na
+rituaria e **168h** na barbours com o watermark das contas a **0,55h**. As
+quatro marcas nasceram `fail`/`high` no primeiro piloto real, com a fonte
+saudavel e `source_health = healthy`.
+
+Alerta permanentemente vermelho e alerta ignorado. `FreshnessStatus` ja dizia no
+contrato "idade do DADO, nao do pedido, medida por conta": a implementacao e que
+divergia do proprio contrato.
+
+### Carimbo no futuro (EXP-1F-R/V)
+
+`classify_freshness` compara `effective_at - watermark <= 8h`, e idade
+**negativa** satisfaz essa condicao: sem tratamento, um watermark adiantado
+sairia `fresh`. Seria o mesmo defeito que esta secao corrige — sinal quebrado se
+apresentando como saudavel. O relogio do Data Mart e o de quem roda a CLI sao
+maquinas diferentes, e `ingested_at` e escrito pelo carregador.
+
+Comportamento: `watermark > effective_at` vira **`unknown`**, e o carimbo
+reportado vira nulo. A partir de um instante impossivel nao da para afirmar que
+a fonte esta fresca nem que esta velha — `critical` seria tao inventado quanto
+`fresh`. `source_age_hours` fica negativo de proposito: e a evidencia de por que
+o estado e `unknown`.
+
+A comparacao e **estrita**, sem tolerancia: qualquer margem seria um threshold
+novo, e o contrato so define 8h e 24h. Se skew de poucos segundos comecar a
+gerar `warn` na operacao, definir a tolerancia e decisao de contrato, nao de
+implementacao.
+
+### Limitacoes conhecidas
+
+* O watermark e `MAX(ingested_at)` da conta na fonte. Se o carregador reescrever
+  linhas antigas sem trazer novidade, o watermark avanca e o alerta fica verde —
+  ele mede **leitura**, nao chegada de pedido novo.
+* Marca sem nenhuma conta esperada nao gera linha. Conta esperada ausente da
+  fonte nao chega aqui: `extract` ja bloqueia com `account_missing` e a
+  publicacao inteira e recusada (exit 3).
+* O alerta nao diz nada sobre atraso operacional. Backlog vencido se acompanha
+  por `overdue_count` e `over_48h_count` em `expedicao_refresh_run`.
+* A coluna `source_freshness_status` POR PEDIDO continua usando
+  `classify_freshness` sem o tratamento de carimbo futuro. Ela e contexto, nao
+  veredito, e mexer nela mudaria dado ja publicado; se um dia `ingested_at`
+  aparecer adiantado nas linhas, vira gate proprio.
 
 ---
 

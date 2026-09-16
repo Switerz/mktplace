@@ -225,23 +225,49 @@ def record_observation(
 def record_freshness(
     conn,
     marketplace_id: int,
-    por_marca: dict[str, tuple[str, int, datetime | None]],
+    por_marca: dict[str, dict],
 ) -> None:
-    """Uma linha POR MARCA.
+    """Uma linha POR MARCA, medindo o FRESCOR DA FONTE.
 
     Agregado global esconderia conta parada atras de conta atualizada — o
     defeito que deixou a planilha de expedicao 43 dias defasada sem alarme.
     `loja_id` fica nulo aqui: a resolucao para `marts.dim_loja` acontece na
     publicacao e a marca ja identifica a linha em `details`.
+
+    O VEREDITO VEM SO DO WATERMARK
+    -------------------------------
+    `freshness` responde "a fonte foi lida recentemente?" e nada mais. As duas
+    outras idades vao no mesmo registro, com nome proprio, para que ninguem
+    volte a confundi-las:
+
+      * `oldest_row_age_hours` — ha quanto tempo a linha mais velha do backlog
+        nao e' relida. Cresce sozinha num backlog legitimo; por isso e' CONTEXTO
+        e nunca reprova a fonte (era exatamente esse o defeito do EXP-1E).
+      * atraso operacional do pedido (`overdue`, `over_48h`) NAO entra aqui:
+        vive em `marts.expedicao_refresh_run`, que e' onde a torre o consome.
+
+    `failed_rows` recebe `open_orders` apenas para dimensionar o impacto quando
+    a FONTE falha; com a fonte fresca ele e' zero mesmo havendo backlog.
     """
-    for marca, (estado, linhas, watermark) in sorted(por_marca.items()):
+    for marca, dados in sorted(por_marca.items()):
+        estado = dados["freshness"]
+        linhas = int(dados.get("open_orders", 0))
+        watermark = dados.get("source_watermark")
         status, severity = _FRESHNESS_TO_STATUS.get(estado, ("warn", "medium"))
         detalhe = json.dumps(
             {
                 "brand": marca,
+                # (1) a fonte esta desatualizada?
                 "freshness": estado,
-                "open_orders": linhas,
                 "source_watermark": watermark.isoformat() if watermark else None,
+                "source_age_hours": dados.get("source_age_hours"),
+                "accounts": dados.get("accounts"),
+                # tamanho do backlog: contexto
+                "open_orders": linhas,
+                # (2) pedido antigo no backlog — informativo, nao e veredito
+                "oldest_row_age_hours": dados.get("oldest_row_age_hours"),
+                # (3) atraso operacional nao mora aqui; ver expedicao_refresh_run
+                "measures": "source_watermark_only",
             },
             ensure_ascii=False,
             sort_keys=True,
