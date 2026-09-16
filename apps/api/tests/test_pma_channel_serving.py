@@ -1,0 +1,508 @@
+"""Gate PMA-2C4A — serving multicanal de Shopee e TikTok.
+
+O que estes testes travam, em uma frase: o Mercado Livre continua lendo as
+tabelas legadas sob teto D-1, os canais novos leem SOMENTE
+`marts.fact_channel_offer_observation` sob teto do dia corrente, e nenhum dos
+dois cai para o outro quando nao tem resposta.
+
+A `SessaoFake` responde por TRECHO DA CONSULTA e registra tudo o que recebeu.
+Nao e' um dublê permissivo: os testes verificam QUAIS tabelas foram tocadas, e
+e' assim que "sem fallback" vira prova em vez de intencao.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from app.services import monitoramento_preco_service as mp
+from app.services import pma_domain as dom
+from app.services import pma_match as pm
+
+HOJE = date(2026, 9, 16)
+D0 = date(2026, 9, 16)
+D1 = date(2026, 9, 15)
+CARGA = datetime(2026, 9, 16, 12, 4, 12, tzinfo=timezone.utc)
+
+
+class _Result:
+    def __init__(self, linhas):
+        self._linhas = linhas
+
+    def mappings(self):
+        return iter(self._linhas)
+
+
+def oferta(**over) -> dict:
+    """Uma linha da fato, com TODAS as colunas que o serving le."""
+    base = {
+        "observed_date": D0, "marketplace": "shopee", "offer_key": "ITEM-1",
+        "parent_item_id": "ITEM-1", "model_id": None, "brand": "barbours",
+        "shop_account": "barbours", "seller_sku": "SKU-1", "gtin": None,
+        "listing_title": "Shampoo 300ml", "observation_mode": "snapshot_current",
+        "observed_at": CARGA, "snapshot_status": dom.SNAPSHOT_CURRENT,
+        "account_watermark_at": CARGA, "is_active": True,
+        "product_type": dom.PRODUCT_NO_KIT_SIGNAL,
+        "product_type_source": dom.SOURCE_CHANNEL_FLAG,
+        "observed_price": Decimal("50.00"),
+        "observed_price_source": "current_price", "list_price": None,
+        "promo_context": "available", "promo_id": None,
+        "promo_discount_pct": None, "business_scope": dom.BUSINESS_SCOPE_IN,
+        "batch_id": None, "source_run_id": None, "synced_at": CARGA,
+    }
+    base.update(over)
+    return base
+
+
+def referencia(**over) -> dict:
+    base = {
+        "brand": "barbours", "reference_row_id": "R1", "source_sku": "SKU-1",
+        "source_gtin": None, "product_name": "Shampoo 300ml",
+        "wholesale_amount": Decimal("30.00"),
+        "suggested_retail_amount": Decimal("60.00"),
+        "reference_type": pm.REFERENCE_TYPE, "validity_status": pm.VALIDITY_STATUS,
+        "quality_status": "ok", "captured_at": "2026-09-02T12:00:00+00:00",
+    }
+    base.update(over)
+    return base
+
+
+class SessaoFake:
+    """Responde por trecho da consulta e REGISTRA as tabelas tocadas."""
+
+    def __init__(self, ofertas=None, referencias=None, listings_ml=None,
+                 datas=None):
+        self.ofertas = list(ofertas or [])
+        self.referencias = list(referencias or [])
+        self.listings_ml = list(listings_ml or [])
+        self.datas = list(datas) if datas is not None else (
+            sorted({o["observed_date"] for o in self.ofertas}, reverse=True))
+        self.executadas: list[tuple[str, dict]] = []
+
+    # -- o que interessa aos testes -----------------------------------------
+    @property
+    def tabelas(self) -> set:
+        alvo = set()
+        for texto, _ in self.executadas:
+            for t in ("fact_channel_offer_observation",
+                      "fact_marketplace_listing_price_daily",
+                      "fact_suggested_price_reference_snapshot"):
+                if t in texto:
+                    alvo.add(t)
+        return alvo
+
+    def execute(self, sql, params=None):
+        texto = " ".join(str(sql).lower().split())
+        p = params or {}
+        self.executadas.append((texto, p))
+
+        if "fact_channel_offer_observation" in texto:
+            if "max(observed_date)" in texto:
+                teto = p.get("ceiling")
+                elegiveis = [d for d in self.datas if teto is None or d <= teto]
+                return _Result([{"observed_date":
+                                 max(elegiveis) if elegiveis else None}])
+            if "select distinct observed_date" in texto:
+                teto = p.get("ceiling")
+                return _Result([{"observed_date": d} for d in self.datas
+                                if teto is None or d <= teto])
+            if "select 1 as existe" in texto:
+                return _Result([{"existe": 1}]
+                               if p.get("observed_date") in self.datas else [])
+            if "group by shop_account" in texto:
+                contas: dict = {}
+                for o in self.ofertas:
+                    if o["observed_date"] != p.get("observed_date"):
+                        continue
+                    c = contas.setdefault(o["shop_account"], {
+                        "shop_account": o["shop_account"],
+                        "account_watermark_at": o["account_watermark_at"],
+                        "observed_at": o["observed_at"],
+                        "refreshed_at": o["synced_at"],
+                        "offers": 0, "current_offers": 0, "stale_offers": 0})
+                    c["offers"] += 1
+                    if o["snapshot_status"] == dom.SNAPSHOT_CURRENT:
+                        c["current_offers"] += 1
+                    elif o["snapshot_status"] == dom.SNAPSHOT_STALE:
+                        c["stale_offers"] += 1
+                return _Result(sorted(contas.values(),
+                                      key=lambda x: x["shop_account"]))
+            # a consulta de ofertas, com os filtros opcionais
+            linhas = [o for o in self.ofertas
+                      if o["marketplace"] == p.get("marketplace")
+                      and o["observed_date"] == p.get("observed_date")]
+            if p.get("brand_filter"):
+                linhas = [o for o in linhas if o["brand"] in p["brands"]]
+            if p.get("account_filter"):
+                linhas = [o for o in linhas if o["shop_account"] in p["accounts"]]
+            if p.get("product_type_filter"):
+                linhas = [o for o in linhas
+                          if o["product_type"] in p["product_types"]]
+            if p.get("has_query"):
+                alvo = p["query_like"].strip("%").lower()
+                linhas = [o for o in linhas if alvo in " ".join(
+                    str(o.get(c) or "") for c in
+                    ("listing_title", "seller_sku", "gtin", "offer_key")).lower()]
+            return _Result(sorted(linhas, key=lambda o: (o["brand"],
+                                                         o["offer_key"])))
+
+        if "group by snapshot_id" in texto:
+            return _Result([{"snapshot_id": "snap-1",
+                             "captured_at": "2026-09-02T12:00:00+00:00"}])
+        if "fact_suggested_price_reference_snapshot" in texto:
+            return _Result(list(self.referencias))
+        if "select distinct ref_date" in texto:
+            return _Result([{"ref_date": D1}])
+        if "select 1 as existe" in texto:
+            return _Result([{"existe": 1}] if p.get("ref_date") == D1 else [])
+        if "max(ref_date)" in texto:
+            return _Result([{"ref_date": D1}])
+        if "max(synced_at)" in texto:
+            return _Result([{"synced_at": CARGA}])
+        if "fact_marketplace_listing_price_daily" in texto:
+            return _Result(list(self.listings_ml))
+        raise AssertionError(f"consulta inesperada: {texto[:120]}")
+
+
+@pytest.fixture(autouse=True)
+def flags_ligadas(monkeypatch):
+    """As flags nascem DESLIGADAS; cada teste que precisa delas as liga aqui,
+    no processo, jamais na configuracao implantada."""
+    monkeypatch.setattr(mp.settings, "pma_shopee_enabled", True)
+    monkeypatch.setattr(mp.settings, "pma_tiktok_enabled", True)
+
+
+def servir(sessao, canal="shopee", **kw) -> dict:
+    return mp.get_monitoramento_preco(sessao, marketplace=canal, today=HOJE, **kw)
+
+
+# ---------------------------------------------------------------------------
+# 1 a 3 — cada canal na SUA tabela, sem fallback
+# ---------------------------------------------------------------------------
+def test_ml_continua_nas_tabelas_legadas_e_no_teto_d1():
+    s = SessaoFake(listings_ml=[])
+    saida = mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE)
+    assert "fact_channel_offer_observation" not in s.tabelas
+    assert "fact_marketplace_listing_price_daily" in s.tabelas
+    assert saida["meta"]["date_policy"] == pm.POLICY_CLOSED_DAY
+    assert saida["meta"]["eligible_ref_date"] == D1.isoformat()
+
+
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_canal_le_somente_a_fato_multicanal(canal):
+    s = SessaoFake(ofertas=[oferta(marketplace=canal,
+                                   observation_mode="snapshot_current")])
+    servir(s, canal)
+    assert "fact_channel_offer_observation" in s.tabelas
+    assert "fact_marketplace_listing_price_daily" not in s.tabelas
+
+
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_canal_sem_dado_nao_cai_para_o_ml(canal):
+    """Vazio HONESTO: nenhuma consulta a tabela do ML, nenhuma linha de la'."""
+    s = SessaoFake(ofertas=[], datas=[])
+    saida = servir(s, canal)
+    assert "fact_marketplace_listing_price_daily" not in s.tabelas
+    assert saida["rows"] == [] and saida["total_count"] == 0
+    assert saida["meta"]["marketplace"] == canal
+    assert saida["meta"]["availability"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# 4 a 7 — politica de data
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_canal_aceita_d0(canal):
+    s = SessaoFake(ofertas=[oferta(marketplace=canal)])
+    saida = servir(s, canal, observed_date=D0.isoformat())
+    assert saida["meta"]["observed_date"] == D0.isoformat()
+    assert saida["meta"]["snapshot_mutability"] == mp.SNAPSHOT_MUTABLE
+    assert saida["total_count"] == 1
+
+
+def test_ml_continua_recusando_d0():
+    with pytest.raises(mp.MonitoramentoPrecoError):
+        mp.normalize_observed_date(D0.isoformat(), HOJE, pm.POLICY_CLOSED_DAY)
+
+
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_data_futura_recusada_tambem_no_canal(canal):
+    with pytest.raises(mp.MonitoramentoPrecoError):
+        mp.normalize_observed_date("2026-09-17", HOJE,
+                                   pm.POLICY_SNAPSHOT_CURRENT)
+
+
+def test_sem_d0_usa_o_maior_disponivel_e_marca_stale():
+    """Nao ha fotografia de hoje: serve a de ontem e DIZ que esta atrasada."""
+    s = SessaoFake(ofertas=[oferta(observed_date=D1,
+                                   snapshot_status=dom.SNAPSHOT_CURRENT)],
+                   datas=[D1])
+    saida = servir(s)
+    assert saida["meta"]["observed_date"] == D1.isoformat()
+    assert saida["meta"]["freshness_status"] == pm.FRESHNESS_STALE
+    assert saida["meta"]["lag_days"] == 1
+    assert saida["meta"]["snapshot_mutability"] == mp.SNAPSHOT_SETTLED
+
+
+def test_d0_sem_nenhuma_oferta_corrente_nao_e_fresh():
+    """Frescor sai do WATERMARK materializado, nao da igualdade de data."""
+    s = SessaoFake(ofertas=[oferta(snapshot_status=dom.SNAPSHOT_STALE)])
+    saida = servir(s)
+    assert saida["meta"]["observed_date"] == D0.isoformat()
+    assert saida["meta"]["freshness_status"] == pm.FRESHNESS_STALE
+    assert saida["rows"][0]["freshness_status"] == pm.FRESHNESS_STALE
+
+
+def test_data_valida_sem_observacao_devolve_vazio_tipado():
+    s = SessaoFake(ofertas=[oferta()], datas=[D0])
+    saida = servir(s, observed_date="2026-09-10")
+    assert saida["total_count"] == 0
+    assert saida["meta"]["availability"] == "unavailable"
+    assert saida["meta"]["unavailable_reason"] == dom.UNAVAILABLE_NO_OBSERVATION
+    assert saida["meta"]["requested_observed_date"] == "2026-09-10"
+    assert saida["meta"]["observed_ref_date"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9 a 11 — filtros, paginacao e KPIs
+# ---------------------------------------------------------------------------
+def _muitas(n=7):
+    return [oferta(offer_key=f"IT-{i:02d}", seller_sku=f"SKU-{i:02d}",
+                   brand="barbours" if i % 2 else "kokeshi",
+                   shop_account="barbours" if i % 2 else "kokeshi")
+            for i in range(n)]
+
+
+def test_filtros_por_marca_conta_tipo_e_busca():
+    s = SessaoFake(ofertas=_muitas())
+    assert servir(s, brand="kokeshi")["total_count"] == 4
+    assert servir(s, shop_account="barbours")["total_count"] == 3
+    assert servir(s, product_type="no_kit_signal")["total_count"] == 7
+    assert servir(s, product_query="SKU-03")["total_count"] == 1
+
+
+def test_filtro_de_marca_recusa_marca_fora_da_allowlist_do_canal():
+    s = SessaoFake(ofertas=_muitas())
+    with pytest.raises(mp.MonitoramentoPrecoError):
+        servir(s, brand="marca-que-nao-existe")
+
+
+def test_ml_recusa_filtros_que_nao_se_aplicam_a_ele():
+    s = SessaoFake(listings_ml=[])
+    for kw in ({"shop_account": "apice"}, {"product_type": "kit_confirmed"}):
+        with pytest.raises(mp.MonitoramentoPrecoError):
+            mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE, **kw)
+
+
+def test_paginacao_nao_repete_nem_perde():
+    s = SessaoFake(ofertas=_muitas(7))
+    vistos = []
+    for off in (0, 3, 6):
+        pg = servir(s, limit=3, offset=off)
+        vistos += [r["offer_key"] for r in pg["rows"]]
+        assert pg["total_count"] == 7
+    assert len(vistos) == 7 and len(set(vistos)) == 7
+
+
+def test_kpis_nao_dependem_do_tamanho_da_pagina():
+    s = SessaoFake(ofertas=_muitas(7))
+    a, b = servir(s, limit=1), servir(s, limit=500)
+    assert a["metrics"] == b["metrics"] and a["kpis"] == b["kpis"]
+    assert a["returned_count"] == 1 and b["returned_count"] == 7
+
+
+def test_filtro_de_situacao_altera_a_tabela_e_nao_o_denominador():
+    s = SessaoFake(ofertas=[oferta(offer_key="A"),
+                            oferta(offer_key="B", is_active=False)])
+    cheio, filtrado = servir(s), servir(s, status="inactive_listing")
+    assert cheio["total_count"] == 2 and filtrado["total_count"] == 1
+    assert filtrado["metrics"] == cheio["metrics"]
+    assert filtrado["kpis"] == cheio["kpis"]
+
+
+# ---------------------------------------------------------------------------
+# 12 a 16 — tipo de produto, kits, precos e referencia
+# ---------------------------------------------------------------------------
+def test_particao_de_product_type_e_exaustiva_sobre_as_ativas():
+    s = SessaoFake(ofertas=[
+        oferta(offer_key="A", product_type=dom.PRODUCT_KIT_CONFIRMED),
+        oferta(offer_key="B", product_type=dom.PRODUCT_KIT_SUSPECTED),
+        oferta(offer_key="C", product_type=dom.PRODUCT_NO_KIT_SIGNAL),
+        oferta(offer_key="D", product_type=dom.PRODUCT_TYPE_UNKNOWN),
+        oferta(offer_key="E", product_type=dom.PRODUCT_NO_KIT_SIGNAL,
+               is_active=False),
+    ])
+    m = servir(s)["metrics"]
+    contagem = servir(s)["meta"]["product_type_counts"]
+    assert sum(contagem.values()) == m["active_offers"] == 4
+    assert m["monitored_offers"] == 5
+
+
+def test_o_tipo_de_produto_vem_materializado_e_nao_e_reclassificado():
+    """Titulo grita KIT, mas o publisher gravou `no_kit_signal`: vale o gravado."""
+    s = SessaoFake(ofertas=[oferta(listing_title="KIT completo 3 pecas",
+                                   seller_sku="KIT-999",
+                                   product_type=dom.PRODUCT_NO_KIT_SIGNAL)])
+    saida = servir(s)
+    assert saida["rows"][0]["product_type"] == dom.PRODUCT_NO_KIT_SIGNAL
+    assert saida["meta"]["product_type_counts"][dom.PRODUCT_KIT_SUSPECTED] == 0
+
+
+def test_kits_saem_do_denominador_mas_nao_do_monitoramento():
+    s = SessaoFake(ofertas=[
+        oferta(offer_key="A", product_type=dom.PRODUCT_KIT_CONFIRMED),
+        oferta(offer_key="B", product_type=dom.PRODUCT_NO_KIT_SIGNAL),
+    ], referencias=[referencia()])
+    m = servir(s)["metrics"]
+    assert m["monitored_offers"] == 2 and m["active_offers"] == 2
+    assert m["eligible_offers"] == 1
+    assert m["kit_confirmed"] == 1
+
+
+def test_marca_fora_do_escopo_conta_como_monitorada_e_sai_do_denominador():
+    s = SessaoFake(ofertas=[
+        oferta(offer_key="A", marketplace="tiktok", brand="barbours",
+               shop_account="tiktok"),
+        oferta(offer_key="B", marketplace="tiktok", brand="gocase",
+               shop_account="tiktok",
+               business_scope=dom.BUSINESS_SCOPE_OUT),
+    ])
+    saida = servir(s, "tiktok")
+    assert saida["total_count"] == 2
+    assert saida["meta"]["out_of_scope_offer_count"] == 1
+    assert saida["metrics"]["monitored_offers"] == 2
+    assert saida["metrics"]["eligible_offers"] == 1
+
+
+def test_preco_nulo_e_permitido_e_nunca_vira_zero():
+    s = SessaoFake(ofertas=[oferta(observed_price=None, is_active=False)])
+    linha = servir(s)["rows"][0]
+    assert linha["advertised_price"] is None
+    assert linha["observed_effective_amount"] is None
+    assert linha["comparison_status"] == pm.STATUS_INACTIVE
+
+
+def test_preco_nulo_em_oferta_ativa_nao_e_comparado_e_declara_o_motivo():
+    s = SessaoFake(ofertas=[oferta(observed_price=None)],
+                   referencias=[referencia()])
+    saida = servir(s)
+    linha = saida["rows"][0]
+    assert linha["advertised_price"] is None
+    assert linha["difference_amount"] is None and linha["difference_pct"] is None
+    assert linha["non_comparable_reason"] == dom.REASON_INVALID_CHANNEL_PRICE
+    assert saida["metrics"]["non_comparable_reasons"][
+        dom.REASON_INVALID_CHANNEL_PRICE] == 1
+    assert saida["metrics"]["comparable_offers"] == 0
+
+
+@pytest.mark.parametrize("ruim", [Decimal("NaN"), float("inf"), float("-inf")])
+def test_preco_nao_finito_e_recusado_e_nunca_comparado(ruim):
+    s = SessaoFake(ofertas=[oferta(observed_price=ruim)],
+                   referencias=[referencia()])
+    linha = servir(s)["rows"][0]
+    assert linha["advertised_price"] is None
+    assert linha["difference_pct"] is None
+    assert linha["non_comparable_reason"] == dom.REASON_INVALID_CHANNEL_PRICE
+
+
+def test_referencia_ausente_e_referencia_ambigua_sao_distinguidas():
+    s = SessaoFake(
+        ofertas=[oferta(offer_key="A", seller_sku="SEM-REF"),
+                 oferta(offer_key="B", seller_sku="DUP")],
+        referencias=[referencia(reference_row_id="R1", source_sku="DUP"),
+                     referencia(reference_row_id="R2", source_sku="DUP")],
+    )
+    por_chave = {r["offer_key"]: r for r in servir(s)["rows"]}
+    assert por_chave["A"]["comparison_status"] == pm.STATUS_NO_REFERENCE
+    assert por_chave["A"]["non_comparable_reason"] == dom.REASON_REFERENCE_MISSING
+    assert por_chave["B"]["comparison_status"] == pm.STATUS_AMBIGUOUS
+    assert por_chave["B"]["non_comparable_reason"] == dom.REASON_AMBIGUOUS
+
+
+def test_comparacao_real_produz_diferenca_e_status():
+    s = SessaoFake(ofertas=[oferta(observed_price=Decimal("50.00"))],
+                   referencias=[referencia(
+                       suggested_retail_amount=Decimal("60.00"))])
+    linha = servir(s)["rows"][0]
+    assert linha["comparison_status"] == pm.STATUS_BELOW
+    assert linha["difference_amount"] == -10.0
+    assert linha["suggested_retail_amount"] == 60.0
+
+
+# ---------------------------------------------------------------------------
+# 17 a 22 — flags, PII, schema, erro e SQL
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_flag_desligada_nao_consulta_a_tabela_nova(canal, monkeypatch):
+    monkeypatch.setattr(mp.settings, "pma_shopee_enabled", False)
+    monkeypatch.setattr(mp.settings, "pma_tiktok_enabled", False)
+    s = SessaoFake(ofertas=[oferta(marketplace=canal)])
+    saida = servir(s, canal)
+    assert s.executadas == []
+    assert saida["meta"]["unavailable_reason"] == dom.UNAVAILABLE_CHANNEL_DISABLED
+
+
+@pytest.mark.parametrize("canal", ["shopee", "tiktok"])
+def test_flag_ligada_serve_o_dado_real(canal):
+    s = SessaoFake(ofertas=[oferta(marketplace=canal)])
+    saida = servir(s, canal)
+    assert saida["meta"]["availability"] == "available"
+    assert saida["total_count"] == 1
+
+
+def test_nenhuma_coluna_de_pii_e_selecionada():
+    proibidos = ("cpf", "cnpj", "telefone", "phone", "email", "endereco",
+                 "address", "buyer", "customer", "recipient", "destinatario",
+                 "cep")
+    for sql in (mp.SQL_CHANNEL_OFFERS, mp.SQL_CHANNEL_ACCOUNT_CLOCKS,
+                mp.SQL_CHANNEL_LATEST_OBSERVED_DATE,
+                mp.SQL_CHANNEL_AVAILABLE_DATES, mp.SQL_CHANNEL_DATE_EXISTS):
+        baixo = sql.lower()
+        assert "select *" not in baixo, sql[:120]
+        for token in proibidos:
+            assert token not in baixo, (token, sql[:120])
+
+
+def test_resposta_valida_contra_o_schema_publicado():
+    from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
+
+    s = SessaoFake(ofertas=[oferta(offer_key="A"),
+                            oferta(offer_key="B", observed_price=None,
+                                   is_active=False)],
+                   referencias=[referencia()])
+    MonitoramentoPrecoResponse(**servir(s))
+
+
+def test_recusa_nao_ecoa_a_entrada():
+    s = SessaoFake(ofertas=[oferta()])
+    veneno = "<script>alert(1)</script> postgresql://u:p@10.0.0.1/db"
+    for kw in ({"brand": veneno}, {"shop_account": veneno},
+               {"product_type": veneno}, {"observed_date": veneno}):
+        with pytest.raises(mp.MonitoramentoPrecoError) as erro:
+            servir(s, **kw)
+        assert veneno not in str(erro.value)
+        assert "10.0.0.1" not in str(erro.value)
+
+
+def test_todo_filtro_viaja_por_parametro_nomeado():
+    """Nenhum valor de usuario e' interpolado no texto da consulta."""
+    s = SessaoFake(ofertas=_muitas())
+    servir(s, brand="kokeshi", shop_account="kokeshi",
+           product_type="no_kit_signal", product_query="SKU-03")
+    for texto, params in s.executadas:
+        assert "kokeshi" not in texto, texto[:140]
+        assert "SKU-03" not in texto and "sku-03" not in texto, texto[:140]
+    alvo = [p for t, p in s.executadas if "fact_channel_offer_observation" in t
+            and "brands" in p][0]
+    assert alvo["brands"] == ["kokeshi"]
+    assert alvo["accounts"] == ["kokeshi"]
+    assert alvo["query_like"] == "%SKU-03%"
+
+
+def test_a_politica_de_data_nao_e_global():
+    assert mp.date_policy_for("ml") == pm.POLICY_CLOSED_DAY
+    assert mp.date_policy_for("shopee") == pm.POLICY_SNAPSHOT_CURRENT
+    assert mp.date_policy_for("tiktok") == pm.POLICY_SNAPSHOT_CURRENT
+    assert pm.date_ceiling(HOJE, pm.POLICY_CLOSED_DAY) == D1
+    assert pm.date_ceiling(HOJE, pm.POLICY_SNAPSHOT_CURRENT) == D0

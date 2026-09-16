@@ -69,6 +69,31 @@ ProductType = Literal[
 ]
 BusinessScope = Literal["in_scope", "out_of_business_scope"]
 
+#: Gate PMA-2C4A — POLITICA DE DATA do canal, declarada no payload.
+#:   closed_day        Mercado Livre: serie diaria, teto D-1, D0 inconsistente;
+#:   snapshot_current  Shopee/TikTok: fotografia do estado corrente, D0 normal.
+DatePolicy = Literal["closed_day", "snapshot_current"]
+
+#: O que a fotografia servida AINDA pode fazer.
+#:   mutable_operational_snapshot  e' do dia corrente e pode mudar hoje se a
+#:                                 origem recarregar. NAO e' periodo fechado,
+#:                                 definitivo nem completo;
+#:   settled_snapshot              o dia ja' virou; aquela fotografia nao muda.
+SnapshotMutability = Literal["mutable_operational_snapshot", "settled_snapshot"]
+
+#: Por que uma oferta elegivel nao pode ser comparada. Vive AO LADO de
+#: `comparison_status`, nunca no lugar dele: a particao comercial tem cinco
+#: valores e e' congelada por teste.
+NonComparableReason = Literal[
+    "reference_missing_for_product",
+    "sku_not_in_internal_catalog",
+    "product_without_ean",
+    "product_ean_not_consumer",
+    "ambiguous_multiple_candidates",
+    "invalid_reference_price",
+    "invalid_channel_price",
+]
+
 ReferenceType = Literal["suggested_retail_pdv"]
 PolicyStatus = Literal["not_applicable_to_own_store_monitoring"]
 
@@ -154,6 +179,17 @@ class MonitoramentoPrecoMeta(BaseModel):
     #: Um relogio por CONTA. A Shopee carrega em quatro lotes distintos e um
     #: MAX() global marcaria as tres primeiras contas inteiras como atrasadas.
     account_clocks: list[dict] = []
+
+    # ---------------- Gate PMA-2C4A: ADITIVOS --------------------------
+    #: Politica de data em vigor nesta resposta. O ML continua `closed_day`.
+    date_policy: DatePolicy = "closed_day"
+    #: Nulo quando nao ha fotografia. `mutable_operational_snapshot` avisa que
+    #: o numero e' verdadeiro para o instante, nao para o dia fechado.
+    snapshot_mutability: Optional[SnapshotMutability] = None
+    #: Ofertas de marca fora do escopo de beleza que aparecem na tabela e NAO
+    #: entram em denominador nenhum. Explicito para que a diferenca entre
+    #: `total_count` e `metrics.monitored_offers` seja reconciliavel.
+    out_of_scope_offer_count: int = 0
 
 
 class MonitoramentoPrecoKpis(BaseModel):
@@ -246,11 +282,17 @@ class MonitoramentoPrecoRow(BaseModel):
     #: Ultima alteracao do CADASTRO do anuncio. Viaja com nome inequivoco e
     #: NUNCA e' apresentada como horario do preco.
     listing_metadata_updated_at: Optional[str] = None
-    advertised_price: float
+    #: Gate PMA-2C4A — passou a admitir NULO. A fato dos canais permite
+    #: `observed_price IS NULL` ("nao observamos preco"), e o Mercado Livre
+    #: NUNCA produz nulo aqui: nenhuma resposta de ML muda de valor. Descartar a
+    #: linha esconderia a oferta; devolver 0.0 afirmaria um preco que ninguem
+    #: observou.
+    advertised_price: Optional[float] = None
     original_price: Optional[float] = None
 
     # --- aproximacao do preco efetivo, declarada como incompleta ---
-    observed_effective_amount: float
+    #: Segue `advertised_price`, inclusive na ausencia.
+    observed_effective_amount: Optional[float] = None
     shipping_amount: Optional[float] = None
     seller_coupon_amount: Optional[float] = None
     platform_subsidy_amount: Optional[float] = None
@@ -272,11 +314,46 @@ class MonitoramentoPrecoRow(BaseModel):
     match_quality: MatchQuality
     reference_candidate_count: int
     comparison_status: ComparisonStatus
+    #: Por que a oferta elegivel nao foi comparada. Nulo quando ela FOI
+    #: comparada, ou quando o motivo nao se aplica.
+    non_comparable_reason: Optional[NonComparableReason] = None
     #: Frescor da linha, ao LADO do status comercial. Todas as linhas de uma
     #: resposta compartilham a mesma `ref_date`, logo o mesmo frescor; viaja na
     #: linha para que a UI possa marca-la sem perder o veredito comercial.
     freshness_status: FreshnessStatus
     limitations: list[str]
+
+    # ---------------- Gate PMA-2C4A: campos de CANAL -------------------
+    # Todos MATERIALIZADOS na fato. Vem nulos no Mercado Livre, que nao os
+    # modela — e nulo aqui significa "este canal nao tem esse conceito", nao
+    # "o valor faltou".
+    #: Identidade da oferta no canal: `item_id` na Shopee sem variacao,
+    #: `item_id:model_id` no modelo, `sku_id` no TikTok. Igual a `item_id`.
+    offer_key: Optional[str] = None
+    #: Conta de loja na origem, e ESCOPO da substituicao na publicacao.
+    shop_account: Optional[str] = None
+    parent_item_id: Optional[str] = None
+    model_id: Optional[str] = None
+    observed_date: Optional[str] = None
+    date_policy: Optional[DatePolicy] = None
+    #: Decidido pelo publisher com autoridades que a API nao alcanca (flag
+    #: nativa do canal, cadastro interno, BOM). Nunca reclassificado aqui.
+    product_type: Optional[ProductType] = None
+    product_type_source: Optional[str] = None
+    #: Frescor da OFERTA, como o publisher o carimbou na carga.
+    snapshot_status: Optional[str] = None
+    #: Fim da carga da PROPRIA conta.
+    account_watermark_at: Optional[str] = None
+    #: Coluna de ORIGEM do preco: `current_price` na Shopee, `sale_price` no
+    #: TikTok. Viaja com o dado para que uma troca de fonte nao passe despercebida.
+    observed_price_source: Optional[str] = None
+    list_price: Optional[float] = None
+    promo_context: Optional[PromoContext] = None
+    promo_id: Optional[str] = None
+    promo_discount_pct: Optional[float] = None
+    business_scope: Optional[BusinessScope] = None
+    batch_id: Optional[str] = None
+    source_run_id: Optional[str] = None
 
 
 class MonitoramentoPrecoResponse(BaseModel):

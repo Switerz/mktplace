@@ -33,6 +33,10 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
+# `pma_domain` tambem e' stdlib-only e NAO importa este modulo: sem ciclo. O
+# import existe para que os valores de `snapshot_status` tenham UMA definicao.
+from app.services import pma_domain as dom
+
 # ---------------------------------------------------------------------------
 # Contrato — DUPLICADO POR FRONTEIRA, com teste de identidade
 # ---------------------------------------------------------------------------
@@ -136,6 +140,26 @@ MAX_LISTING_ROWS = 50_000
 MAX_REFERENCE_ROWS = 20_000
 
 # --- frescor: SOMENTE D-1 sustenta comparacao  (PMA-1A-R, F4) ---------------
+#: Gate PMA-2C4A — POLITICA DE DATA, escolhida pelo CONTRATO DA FONTE.
+#:
+#: `closed_day` e' a politica do Mercado Livre: a fonte e' serie diaria e so' um
+#: dia FECHADO sustenta comparacao, entao o teto e' D-1 e D0 e' inconsistencia.
+#:
+#: `snapshot_current` e' a politica da Shopee e do TikTok: a fonte e' fotografia
+#: do estado corrente, publicada no proprio dia a partir do watermark da conta.
+#: D0 e' o caso NORMAL, nao um defeito. Futuro continua proibido nas duas.
+#:
+#: A politica nao e' global: cada canal traz a sua. Aplicar `snapshot_current` ao
+#: ML transformaria uma inconsistencia detectavel em dado servido.
+POLICY_CLOSED_DAY = "closed_day"
+POLICY_SNAPSHOT_CURRENT = "snapshot_current"
+DATE_POLICIES = (POLICY_CLOSED_DAY, POLICY_SNAPSHOT_CURRENT)
+
+#: Observacao do PROPRIO dia sob `snapshot_current`. Nao e' "eligible" porque
+#: nao descreve um periodo fechado: e' fotografia operacional ainda MUTAVEL —
+#: a mesma conta pode recarregar e mudar o numero antes do dia virar.
+OBS_CURRENT_SNAPSHOT = "current_snapshot"
+
 #: Observacao de D-1 (dia operacional America/Sao_Paulo) — elegivel.
 OBS_ELIGIBLE = "eligible"
 #: Observacao anterior a D-1 — `stale_observation`, sem diferenca e sem veredito.
@@ -206,8 +230,36 @@ def last_eligible_date(today: date) -> date:
     return today - timedelta(days=1)
 
 
+def date_ceiling(today: date, policy: str = POLICY_CLOSED_DAY) -> date:
+    """Maior data CONSULTAVEL sob a politica do canal.
+
+    `closed_day` -> D-1. `snapshot_current` -> o proprio dia operacional.
+    Em nenhuma das duas o futuro e' consultavel: o teto nunca passa de `today`.
+    """
+    if policy == POLICY_SNAPSHOT_CURRENT:
+        return today
+    return last_eligible_date(today)
+
+
+def is_mutable_snapshot(ref_date: date | None, today: date,
+                        policy: str = POLICY_CLOSED_DAY) -> bool:
+    """A fotografia servida ainda pode mudar hoje?
+
+    Verdadeiro SO' para o dia corrente sob `snapshot_current`: a conta pode
+    recarregar e reescrever o proprio escopo antes de o dia virar. Um dia
+    anterior ja' nao muda, e sob `closed_day` D0 nem e' servivel.
+
+    Existe para que a tela nunca apresente D0 como periodo fechado, definitivo
+    ou completo — o numero e' verdadeiro para o instante, nao para o dia.
+    """
+    if ref_date is None or policy != POLICY_SNAPSHOT_CURRENT:
+        return False
+    return ref_date >= today
+
+
 def classify_freshness(ref_date: date | None, today: date,
-                       *, selected: bool) -> str:
+                       *, selected: bool,
+                       policy: str = POLICY_CLOSED_DAY) -> str:
     """Frescor de uma resposta. ORTOGONAL ao status comercial (Gate PMA-H1).
 
     `selected` diz se o consumidor PEDIU aquela data. E' o que separa atraso de
@@ -221,24 +273,50 @@ def classify_freshness(ref_date: date | None, today: date,
     """
     if ref_date is None:
         return FRESHNESS_UNAVAILABLE
+    teto = date_ceiling(today, policy)
     if selected:
-        return (FRESHNESS_FRESH if ref_date == last_eligible_date(today)
-                else FRESHNESS_HISTORICAL)
-    return (FRESHNESS_FRESH if ref_date == last_eligible_date(today)
-            else FRESHNESS_STALE)
+        return FRESHNESS_FRESH if ref_date == teto else FRESHNESS_HISTORICAL
+    return FRESHNESS_FRESH if ref_date == teto else FRESHNESS_STALE
 
 
-def lag_days(ref_date: date | None, today: date) -> int | None:
+def channel_row_freshness(snapshot_status: str | None, *,
+                          selected: bool = False) -> str:
+    """Frescor de UMA oferta sob `snapshot_current`, pelo valor MATERIALIZADO.
+
+    O publisher ja' decidiu, na carga, se aquela oferta foi revista nesta
+    fotografia (`current`) ou se carrega carimbo antigo (`stale`) — na Shopee ha
+    modelo com `observed_at` de 18 dias atras dentro de uma carga de hoje.
+    Recalcular isso aqui produziria uma segunda regra que poderia divergir da
+    persistida; por isso o valor e' TRADUZIDO, nao refeito.
+
+    Consulta retrospectiva marca a linha inteira como `historical`: o dia foi
+    escolhido, nao sofrido, e chamar isso de atraso confundiria uso legitimo da
+    tela com falha de pipeline.
+    """
+    if selected:
+        return FRESHNESS_HISTORICAL
+    if snapshot_status == dom.SNAPSHOT_CURRENT:
+        return FRESHNESS_FRESH
+    if snapshot_status == dom.SNAPSHOT_STALE:
+        return FRESHNESS_STALE
+    # `absent`, `account_did_not_run`, `partial_load` e o desconhecido: a fonte
+    # nao afirma frescor, e inventar `fresh` seria pior que admitir a ausencia.
+    return FRESHNESS_UNAVAILABLE
+
+
+def lag_days(ref_date: date | None, today: date,
+             policy: str = POLICY_CLOSED_DAY) -> int | None:
     """Dias entre a observacao e D-1. `None` quando nao ha observacao.
 
     Zero significa em dia. Nunca negativo: D0/futuro e' barrado antes daqui.
     """
     if ref_date is None:
         return None
-    return (last_eligible_date(today) - ref_date).days
+    return (date_ceiling(today, policy) - ref_date).days
 
 
-def classify_observation_date(ref_date: date, today: date) -> str:
+def classify_observation_date(ref_date: date, today: date,
+                              policy: str = POLICY_CLOSED_DAY) -> str:
     """Classifica a data observada em elegivel / vencida / INVALIDA.
 
     Fronteiras exatas, sem tolerancia:
@@ -247,6 +325,14 @@ def classify_observation_date(ref_date: date, today: date) -> str:
         ref_date >= D0   -> `invalid`   (o sync proibe D0 e futuro; se apareceu,
                                          a camada de serving esta inconsistente)
     """
+    if policy == POLICY_SNAPSHOT_CURRENT:
+        # Fotografia do estado corrente: D0 e' o caso normal. Futuro continua
+        # invalido — nenhuma fonte observa o que ainda nao aconteceu.
+        if ref_date > today:
+            return OBS_INVALID
+        if ref_date == today:
+            return OBS_CURRENT_SNAPSHOT
+        return OBS_STALE
     limite = last_eligible_date(today)
     if ref_date == limite:
         return OBS_ELIGIBLE
@@ -421,21 +507,26 @@ def resolve_match(listing: dict, index: ReferenceIndex,
 
 
 def _dec(valor: object) -> Decimal | None:
-    """Converte para Decimal preservando NULO. NULO NUNCA VIRA ZERO."""
+    """Converte para Decimal preservando NULO. NULO NUNCA VIRA ZERO.
+
+    Recusa TODO valor nao finito, nao so' NaN. `Infinity` passava por
+    `is_nan()` e so' estourava la' na frente, no `quantize` da diferenca, com
+    um `InvalidOperation` cru — erro de infraestrutura no lugar do estado
+    tipado que o contrato promete.
+    """
     if valor is None:
         return None
-    if isinstance(valor, Decimal):
-        if valor.is_nan():
-            raise PmaMatchError("valor NaN recusado: NaN nao e' um preco.")
-        return valor
-    d = Decimal(str(valor))
-    if d.is_nan():
-        raise PmaMatchError("valor NaN recusado: NaN nao e' um preco.")
+    d = valor if isinstance(valor, Decimal) else Decimal(str(valor))
+    if not d.is_finite():
+        raise PmaMatchError(
+            "valor nao finito recusado: NaN e infinito nao sao preco.")
     return d
 
 
 def compare_listing(listing: dict, index: ReferenceIndex, today: date,
-                    freshness: str = FRESHNESS_FRESH) -> dict:
+                    freshness: str = FRESHNESS_FRESH, *,
+                    policy: str = POLICY_CLOSED_DAY,
+                    allow_missing_price: bool = False) -> dict:
     """Uma linha do payload: anuncio + referencia resolvida + diferenca.
 
     PRECEDENCIA DO STATUS COMERCIAL, do mais fundamental ao mais especifico:
@@ -464,15 +555,33 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
     if not isinstance(ref_date, date):
         raise PmaMatchError("ref_date ausente ou invalido na observacao.")
 
-    anunciado = _dec(listing.get("advertised_price"))
-    if anunciado is None:
+    if allow_missing_price:
+        # Canal: um preco impossivel e' tratado como preco NAO OBSERVADO. A 017
+        # ja' proibe NaN por CHECK, entao isto e' defesa de borda — e derrubar a
+        # resposta inteira por uma linha ruim seria pior que marca-la.
+        try:
+            anunciado = _dec(listing.get("advertised_price"))
+        except PmaMatchError:
+            anunciado = None
+    else:
+        anunciado = _dec(listing.get("advertised_price"))
+    if anunciado is None and not allow_missing_price:
+        # Caminho do ML: a fato dele nao admite preco nulo, e uma linha assim
+        # so' poderia vir de escrita fora do contrato.
         raise PmaMatchError("advertised_price ausente: observacao invalida.")
 
-    situacao = classify_observation_date(ref_date, today)
+    situacao = classify_observation_date(ref_date, today, policy)
     if situacao == OBS_INVALID:
         # Fail-closed. Nao existe caminho que apresente D0 como observacao
         # valida: o sync recusa publicar o dia corrente, entao uma linha assim
         # so pode ter vindo de escrita fora do contrato.
+        if policy == POLICY_SNAPSHOT_CURRENT:
+            # Sob `snapshot_current` D0 e' legitimo; so' o FUTURO chega aqui.
+            raise PmaMatchError(
+                "observacao com data posterior ao dia operacional corrente: "
+                "nenhuma fonte observa o que ainda nao aconteceu, portanto a "
+                "camada de serving esta inconsistente."
+            )
         raise PmaMatchError(
             "observacao com data igual ou posterior ao dia operacional corrente: "
             "o sync proibe publicar o dia corrente e o futuro, portanto a camada "
@@ -528,6 +637,12 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         "match_quality": match.quality,
         "reference_candidate_count": match.candidate_count,
         "comparison_status": None,
+        # Gate PMA-2C4A — motivo ADITIVO, do vocabulario de `pma_domain`. O
+        # `comparison_status` continua com os mesmos cinco valores da particao
+        # comercial (congelada em teste e tipada no frontend); o motivo mora
+        # aqui, ao lado, para que `non_comparable_reasons` seja CONTADO em vez
+        # de re-deduzido do status.
+        "non_comparable_reason": None,
         # Gate PMA-H1: qualidade TRANSVERSAL, na propria linha. Fica ao lado do
         # status comercial em vez de substitui-lo, e permite a UI marcar a linha
         # sem perder o veredito.
@@ -574,8 +689,27 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         ]
         return linha
 
+    if anunciado is None:
+        # Chega aqui somente com `allow_missing_price` e oferta ATIVA. Hoje o
+        # caso nao ocorre — as 8 ofertas sem preco do TikTok sao todas inativas
+        # e saem no ramo acima —, mas a fato PERMITE o nulo e servir tem de
+        # continuar honesto se ele aparecer numa oferta ativa.
+        #
+        # O status fica em `no_reference` porque nao ha sexto valor disponivel:
+        # a particao comercial e' congelada por teste e tipada no frontend. O
+        # que distingue este caso do "sem referencia" de verdade e'
+        # `non_comparable_reason` e a limitacao textual.
+        linha["comparison_status"] = STATUS_NO_REFERENCE
+        linha["non_comparable_reason"] = dom.REASON_INVALID_CHANNEL_PRICE
+        linha["limitations"] = limites + [
+            "preco nao observado nesta fotografia: a ausencia NAO e' zero e "
+            "nenhuma comparacao foi feita"
+        ]
+        return linha
+
     if match.ambiguous:
         linha["comparison_status"] = STATUS_AMBIGUOUS
+        linha["non_comparable_reason"] = dom.REASON_AMBIGUOUS
         linha["limitations"] = limites + [
             f"{match.candidate_count} linhas de referencia disputam a mesma chave "
             f"dentro da marca: ambiguidade marcada, nunca resolvida por escolha "
@@ -591,12 +725,14 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
             else "nenhuma linha de referencia casou por GTIN nem por SKU unico na marca"
         )
         linha["comparison_status"] = STATUS_NO_REFERENCE
+        linha["non_comparable_reason"] = dom.REASON_REFERENCE_MISSING
         linha["limitations"] = limites + [detalhe]
         return linha
 
     sugerido = _dec(ref.get("suggested_retail_amount"))
     if sugerido is None or sugerido == 0:
         linha["comparison_status"] = STATUS_NO_REFERENCE
+        linha["non_comparable_reason"] = dom.REASON_INVALID_REFERENCE_PRICE
         linha["limitations"] = limites + [
             "referencia sem valor utilizavel: ausencia nao e' zero"
         ]
@@ -618,7 +754,10 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
 
 
 def compare_all(listings: list[dict], references: list[dict], today: date,
-                freshness: str = FRESHNESS_FRESH) -> list[dict]:
+                freshness: str = FRESHNESS_FRESH, *,
+                policy: str = POLICY_CLOSED_DAY,
+                allow_missing_price: bool = False,
+                row_freshness: dict | None = None) -> list[dict]:
     """Compara o conjunto inteiro. Recusa escala acima do teto, nunca trunca."""
     if len(listings) > MAX_LISTING_ROWS:
         raise PmaMatchError(
@@ -627,7 +766,17 @@ def compare_all(listings: list[dict], references: list[dict], today: date,
             f"(855 anuncios). Recusado em vez de truncado."
         )
     index = ReferenceIndex.build(references)
-    return [compare_listing(li, index, today, freshness) for li in listings]
+    return [
+        compare_listing(
+            li, index, today,
+            # `row_freshness` permite frescor POR LINHA, que e' o caso da
+            # Shopee: a carga e' de hoje e ainda assim ha oferta com carimbo
+            # antigo. Sem ele, o frescor da resposta contaminaria cada linha.
+            (row_freshness or {}).get(id(li), freshness),
+            policy=policy, allow_missing_price=allow_missing_price,
+        )
+        for li in listings
+    ]
 
 
 def build_kpis(rows: list[dict]) -> dict:
