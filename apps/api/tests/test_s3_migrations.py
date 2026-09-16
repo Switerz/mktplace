@@ -154,9 +154,12 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # uma revisao consciente a cada migration nova, em vez de aceitar qualquer
     # head em silencio.
     # Gate PMA-2C2: head avancado de 016 (Full ML) para 017 (PMA multicanal).
-    # O pino e' LITERAL de proposito — forca revisao consciente a cada
-    # migration nova, em vez de aceitar qualquer head que apareca.
-    assert heads == ["017"], f"head deveria ser unico e igual a 017, veio {heads}"
+    # Gate EXP-1C: head avancado de 017 para 018, que cria o serving da
+    # Expedicao Shopee (marts.expedicao_fila_atual e
+    # marts.expedicao_refresh_run). O pino e' LITERAL de proposito — forca
+    # revisao consciente a cada migration nova, em vez de aceitar qualquer head
+    # que apareca.
+    assert heads == ["018"], f"head deveria ser unico e igual a 018, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
