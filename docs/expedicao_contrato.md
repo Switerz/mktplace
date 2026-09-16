@@ -1,22 +1,22 @@
-# Contrato do refresh de expedicao — Gates EXP-1A / R / R2
+# Contrato do refresh de expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1
 
-**Estado: INERTE.** Nenhuma tabela criada, nenhuma migration, nenhum refresh
-publicado. `--apply` para com mensagem explicita porque as tabelas nao existem.
+**Estado: CODIGO PRONTO, PRODUCAO NAO TOCADA.** A migration `018` existe
+versionada mas **nao foi aplicada**; o registry **nao foi cadastrado**; nenhum
+`--apply` real foi executado; nenhuma linha foi publicada.
 
 | Frente | Estado |
 |---|---|
-| Migration | **nao criada** — a `016` esta reservada para a frente Full |
-| Tabelas em producao | nao existem |
+| Migration `018` | **versionada**, nao aplicada (`016` = Full ML, `017` = PMA) |
+| Tabelas em producao | **nao existem** — a `018` ainda nao rodou no Neon |
+| Registry (`marts.dim_seller_account`) | **vazio** — DML abaixo e plano, nao executado |
+| Orquestracao do `--apply` | **implementada e testada** (EXP-1D-H1), nunca executada contra banco real |
 | Refresh publicado | nenhum |
 | API / UI / MCP | nao iniciados |
 | ML / TikTok / calendario | fora deste gate |
-| `schedule_plan.py` / Airflow | nao integrados |
+| `schedule_plan.py` / Airflow | **nao integrados** — nenhum agendamento criado |
 
-**Head Alembic: `015`.** A worktree `gate-full-1a` tem
-`016_create_fact_ml_fulfillment_daily.py` ainda **nao commitada** (cria
-`marts.fact_ml_fulfillment_daily` e `marts.fact_ml_fulfillment_listing_daily`).
-Expedicao usa a **proxima revisao linear depois que a de Full for integrada** —
-nunca a 016.
+A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
+016 -> 017 -> 018`, raiz unica, head unico.
 
 ---
 
@@ -191,6 +191,114 @@ publicada. `error_message` permanece exclusiva de erro sanitizado.
 `accounts_recorded`, `backlog_count`, `expected/observed/unexpected_accounts`,
 `source_health`, `source_advanced` e `empty_photograph` vao para
 `audit.data_quality_check.details`.
+
+---
+
+## Runbook do `--apply` (EXP-1D-H1)
+
+### Precondicoes EXTERNAS
+
+O comando **nao** cria nada por conta propria. Antes do primeiro `--apply`:
+
+1. aplicar a migration `018` no Neon (`alembic upgrade head`);
+2. cadastrar as quatro contas com o DML da secao *Registry*;
+3. exportar `DATABASE_URL` (Neon, gravavel) e `DATAMART_DATABASE_URL` (Data
+   Mart, hot standby — **exige VPN**).
+
+Faltando qualquer uma delas o comando **para antes de tocar na fila**. Nao ha
+fallback: sem a variavel configurada ele falha, nao adivinha um banco.
+
+### Comandos
+
+```bash
+# Leitura. Nao abre conexao gravavel, nao registra em audit.source_sync_run.
+python -m pipelines.expedicao.cli --channel shopee --diagnose
+
+# Publicacao. A flag E a confirmacao: nao existe segunda flag nem variavel de
+# desbloqueio.
+python -m pipelines.expedicao.cli --channel shopee --apply
+```
+
+Rode `--diagnose` antes do primeiro `--apply` e confira os agregados por conta
+contra o caso de referencia abaixo.
+
+### Ordem de execucao
+
+`config -> target -> preflight -> lock -> registry -> batch_id -> auditoria ->
+fonte -> extracao -> validacao -> fila/resumos -> publicacao -> auditoria final
+-> release`.
+
+O **lock vem antes da leitura** da fonte: travar depois de ler abriria uma janela
+em que outro processo publica no intervalo, e a fotografia descreveria um estado
+que ja' mudou. A **auditoria comeca antes da fonte**, em conexao independente,
+para que falha de leitura deixe rastro que o rollback da publicacao nao apaga.
+
+### Exit codes
+
+| Codigo | Significado | O que fazer |
+|---|---|---|
+| `0` | publicado (inclusive fotografia vazia) | nada |
+| `1` | falha generica **anterior ao commit** | fila anterior intacta; investigar e reexecutar |
+| `2` | advisory lock ocupado | outro refresh do canal esta rodando; **nao** forcar, aguardar |
+| `3` | fonte nao publicavel / registry ambiguo | fila anterior **preservada**; corrigir a fonte ou o registry |
+| `4` | **commit indeterminado** | ver procedimento proprio abaixo |
+| `5` | publicado, auditoria incompleta | o dado **esta** no ar; reconciliar so' a auditoria |
+| `6` | precondicao ausente (env, schema `018`, replica, registry vazio) | providenciar a precondicao |
+
+### Fila vazia nao e' fonte doente
+
+Sao dois desfechos **diferentes** e nao podem ser lidos como um so':
+
+* **fonte saudavel, backlog zero** -> a fotografia vazia **e publicada**: a fila
+  do canal e' limpa, nenhum pedido e' inserido e os quatro resumos por conta vao
+  com `backlog_count = 0`. Exit `0`. Sem isso, um dia realmente zerado manteria a
+  fila de ontem no ar e a torre mostraria pendencia ja' expedida.
+* **fonte nao saudavel** (`account_missing`, `unexpected_account`,
+  `registry_ambiguous`, `watermark_missing`, `source_unavailable`) -> **zero
+  DELETE e zero INSERT**, fila anterior preservada. Exit `3`.
+
+Na auditoria, `empty_photograph` em `audit.data_quality_check.details` separa os
+dois sem ambiguidade.
+
+### Commit indeterminado (exit 4)
+
+O `COMMIT` nao respondeu conclusivamente. O estado da publicacao e'
+**desconhecido**: pode ter sido aplicada.
+
+* **Nao** houve rollback e **nao** deve haver retry cego — repetir duplica ou
+  apaga trabalho as cegas.
+* A execucao em `audit.source_sync_run` fica em `running`, que e' o estado
+  honesto de "nao se sabe como terminou". Marca-la `success` ou `failed` seria
+  afirmar o que nao se sabe.
+* Procedimento: consultar `marts.expedicao_fila_atual` e
+  `marts.expedicao_refresh_run` pelo `refresh_batch_id` da execucao (ele aparece
+  na mensagem) e so' entao decidir entre reexecutar ou apenas fechar a
+  auditoria.
+
+### Auditoria incompleta (exit 5)
+
+O dado **esta publicado**. A mensagem diz explicitamente que **nenhuma reversao
+ocorreu**. Reconciliar apenas `audit.source_sync_run` e
+`audit.data_quality_check`; nao mexer na fila.
+
+### Lock ocupado (exit 2)
+
+Advisory lock de **sessao** (`pg_try_advisory_lock`), chave por canal, adquirido
+em autocommit e liberado no `finally`. Exit `2` significa que outro refresh do
+mesmo canal esta em andamento: nao houve leitura da fonte, nem auditoria, nem
+DELETE. Aguardar. Se ninguem estiver rodando, procurar sessao orfa em
+`pg_locks`; nao existe flag para ignorar o lock.
+
+### Sequencia do piloto futuro (ainda NAO executada)
+
+1. `alembic upgrade head` no Neon (aplica a `018`);
+2. DML das quatro contas;
+3. `--diagnose` e conferencia contra o caso de referencia;
+4. **um unico** `--apply`;
+5. leitura de `marts.expedicao_fila_atual`, `marts.expedicao_refresh_run` e
+   `audit.source_sync_run` para conferir o lote publicado.
+
+Nada disso ocorreu ate aqui.
 
 ---
 

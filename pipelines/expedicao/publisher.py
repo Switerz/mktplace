@@ -180,11 +180,29 @@ def channel_lock(neon_conn, channel: Channel, *, blocking: bool = False):
                 )
         yield
     finally:
+        # A LIBERACAO E CLEANUP e nunca pode SUBSTITUIR a excecao que trouxe o
+        # fluxo ate aqui. Se a interrupcao chegou no meio da publicacao, a
+        # transacao esta aberta e `autocommit = True` levanta
+        # `set_session cannot be used inside a transaction` — medido contra o
+        # psycopg2: um KeyboardInterrupt saia daqui como ProgrammingError, e um
+        # `IndeterminateCommit` saia como falha generica, que o runbook le como
+        # "fila anterior intacta". Os dois eram afirmacoes falsas.
+        #
+        # O lock e de SESSAO: quando a liberacao explicita nao acontece, ele
+        # morre junto com a conexao, que o orquestrador fecha no proprio
+        # `finally`. Perder a liberacao explicita custa uma conexao; mascarar a
+        # excecao custa o diagnostico.
         if adquirido:
-            neon_conn.autocommit = True
-            with neon_conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (chave,))
-        neon_conn.autocommit = autocommit_anterior
+            try:
+                neon_conn.autocommit = True
+                with neon_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (chave,))
+            except Exception:  # noqa: BLE001, S110 — ver comentario acima
+                pass
+        try:
+            neon_conn.autocommit = autocommit_anterior
+        except Exception:  # noqa: BLE001, S110 — idem
+            pass
 
 
 def publish_channel(
