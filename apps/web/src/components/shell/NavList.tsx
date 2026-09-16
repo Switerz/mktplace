@@ -1,5 +1,7 @@
 import Link from "next/link";
-import { NAV_SECTIONS, isNavItemActive } from "./nav-config";
+import { expedicaoHabilitado } from "@/lib/expedicao-contract";
+
+import { isNavItemActive, navSections } from "./nav-config";
 
 interface NavListProps {
   pathname: string;
@@ -14,7 +16,9 @@ interface NavListProps {
 export default function NavList({ pathname, hrefFor }: NavListProps) {
   return (
     <nav aria-label="Navegação principal" className="flex flex-col gap-5">
-      {NAV_SECTIONS.map((section) => (
+      {navSections(
+        expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
+      ).map((section) => (
         <div key={section.label} className="flex flex-col gap-1">
           <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-2">
             {section.label}
