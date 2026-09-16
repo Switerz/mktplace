@@ -3,6 +3,8 @@
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 
+import { alvoDoFocusTrap, FOCUSABLE_SELECTOR } from "@/lib/focus-trap";
+
 interface KpiDrilldownDialogProps {
   open: boolean;
   onClose: () => void;
@@ -17,10 +19,6 @@ interface KpiDrilldownDialogProps {
    */
   focusResetKey?: string;
 }
-
-/** Mesmo seletor/padrao de focus trap do MobileDrawer (Gate U1) — reaproveita
- * a convencao ja validada em vez de inventar uma nova. */
-const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * Dialogo generico de drill-down agregado, reutilizado pelos 4 KPIs da
@@ -84,22 +82,17 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
       const panel = panelRef.current;
       if (!panel) return;
       const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-      if (focusables.length === 0) return;
+      const active = document.activeElement as HTMLElement | null;
 
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-
-      if (e.shiftKey) {
-        if (active === first || !panel.contains(active)) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (active === last || !panel.contains(active)) {
-          e.preventDefault();
-          first.focus();
-        }
+      const alvo = alvoDoFocusTrap<HTMLElement>({
+        focusables,
+        active,
+        dentroDoPainel: !!active && panel.contains(active),
+        shiftKey: e.shiftKey,
+      });
+      if (alvo) {
+        e.preventDefault();
+        alvo.focus();
       }
     }
 

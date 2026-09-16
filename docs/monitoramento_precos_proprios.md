@@ -1011,3 +1011,46 @@ viewports, e a única diferença de texto é o título dinâmico.
 fecha com Escape. Medido idêntico no controle (`origin/main`, só ML), portanto
 não é regressão deste PR; na branch o foco ao menos volta para quem abriu, o
 que no controle não acontece. Fica registrado para um gate de acessibilidade.
+
+## Diálogo: a contradição PMA-4F × PMA-2C4B, resolvida (PMA-2C4B-H1)
+
+**Não houve regressão. A medição do PMA-2C4B é que estava errada.**
+
+`MobileDrawer` renderiza `role="dialog"` no shell **mesmo fechado** — só com
+`aria-hidden="true"` — e vem antes no DOM do portal do `KpiDrilldownDialog`.
+Um `document.querySelector('[role="dialog"]')` devolve o **drawer**, não o
+diálogo. Daí os dois sintomas falsos: "o foco não está dentro" (estava, mas
+dentro do outro nó) e "Escape não fechou" (fechou, mas o seletor continuava
+achando o drawer).
+
+Medido em Chromium real, com o alvo desambiguado (`role="dialog"` que **não**
+está `aria-hidden`), nos três canais e nos três viewports:
+
+| verificação | ml | shopee | tiktok |
+|---|---|---|---|
+| `role` + `aria-modal` | ok | ok | ok |
+| nome acessível ligado ao título | ok | ok | ok |
+| foco inicial dentro | ok | ok | ok |
+| fundo com `inert` | ok | ok | ok |
+| Tab não escapa / dá a volta | ok | ok | ok |
+| Shift+Tab não escapa | ok | ok | ok |
+| Escape fecha + foco volta | ok | ok | ok |
+| botão fecha + foco volta | ok | ok | ok |
+
+O Mercado Livre tem dois focáveis ("Fechar detalhes" e "Abrir anúncio") e o
+ciclo de Tab fecha entre eles; Shopee e TikTok têm um só, porque a fato dos
+canais não guarda URL.
+
+**Histórico.** O componente tem dois commits: `8150408` (2026-07-24), que já
+nasceu com Escape, `shiftKey` e `previousFocusRef`, e `aa6e245` (2026-08-25),
+que **acrescentou** preservação de foco na navegação interna. A garantia nunca
+foi removida.
+
+**O que mudou neste gate.** A regra do trap saiu de dentro do `.tsx` para
+`src/lib/focus-trap.ts` — o type-stripping do Node não processa JSX, então
+antes ela só era verificável abrindo um navegador. Em `.ts` puro virou teste no
+mesmo runner dos demais, sem dependência nova. O comportamento é idêntico,
+reconferido em Chromium depois da extração.
+
+**O drawer fechado não é armadilha de teclado**: tem 14 focáveis no markup, mas
+0 alcançáveis (`offsetParent === null`) — fora da ordem de tabulação.
