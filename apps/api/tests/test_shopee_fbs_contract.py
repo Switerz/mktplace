@@ -100,9 +100,16 @@ class FakeDB:
         self.observadas = observadas if observadas is not None else [
             {"shop_account": c, "brand": c} for c in svc.EXPECTED_ACCOUNTS]
 
+    def rollback(self):
+        """Fecha transacao implicita antes do SET TRANSACTION. Registrado para
+        que a ORDEM (rollback -> SET -> consultas) possa ser verificada."""
+        self.executado.append("ROLLBACK")
+
     def execute(self, sql, params=None):
         t = str(getattr(sql, "text", sql))
         self.executado.append(t)
+        if "SET TRANSACTION" in t:
+            return FakeResult([])
         if "MIN(ref_date) AS source_min_date" in t:
             return FakeResult([self.limites])
         if "effective_date_from" in t:
@@ -585,3 +592,22 @@ def test_servico_le_apenas_a_fato_publicada():
     assert svc.FACT_TABLE == "marts.fact_shopee_fbs_daily"
     for proibida in ("silver.", "raw.", "gold.", "stg_shopee"):
         assert proibida not in SERVICE_CODE, proibida
+
+
+def test_snapshot_coerente_e_fixado_antes_de_qualquer_consulta_em_execucao():
+    """Verifica a ORDEM REAL da execucao, nao apenas o texto do fonte.
+
+    `SET TRANSACTION` so' e' aceito antes de qualquer query: se uma consulta
+    escapar para antes dele, o PostgreSQL recusa e a resposta perde o snapshot
+    unico. Gate FULL-SH-1C-R/V.
+    """
+    db = FakeDB(classe=[_linha()])
+    _bloco(db)
+    assert db.executado[0] == "ROLLBACK", db.executado[:2]
+    assert "SET TRANSACTION" in db.executado[1], db.executado[:3]
+    assert "REPEATABLE READ" in db.executado[1]
+    assert "READ ONLY" in db.executado[1]
+    # Nenhuma consulta a fato antes do snapshot.
+    for cmd in db.executado[2:]:
+        assert "SET TRANSACTION" not in cmd
+    assert any("fact_shopee_fbs_daily" in c for c in db.executado[2:])

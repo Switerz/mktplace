@@ -199,6 +199,25 @@ SQL_LIMITES_FATO = text(f"""
       FROM {FACT_TABLE}
 """)
 
+#: UM SNAPSHOT PARA A RESPOSTA INTEIRA.
+#:
+#: A resposta e' montada com SETE consultas. No default do PostgreSQL
+#: (READ COMMITTED) cada statement enxerga um snapshot NOVO -- e o pipeline
+#: publica com DELETE + INSERT da janela numa transacao. Se ela commitar entre
+#: a consulta de `by_class` e a de `daily`, a resposta mistura dois instantes:
+#: medido em PostgreSQL 16, `totals` devolveu 1500 enquanto `daily` devolveu
+#: 3000 na MESMA resposta. A tela mostraria FBS + seller sem fechar o total, e
+#: ninguem saberia por que.
+#:
+#: `REPEATABLE READ` fixa o snapshot na primeira leitura e o mantem ate' o fim
+#: da transacao. `READ ONLY` e' defesa em profundidade: mesmo que alguem
+#: acrescente uma escrita por engano neste caminho, o banco recusa.
+#:
+#: O escopo e' a TRANSACAO, nao a sessao nem a aplicacao: nenhuma configuracao
+#: global e' alterada, e a proxima transacao volta ao default do projeto.
+SQL_SNAPSHOT_COERENTE = text(
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
 SQL_CONTAS_OBSERVADAS = text(f"""
     SELECT DISTINCT shop_account, brand
       FROM {FACT_TABLE}
@@ -320,6 +339,13 @@ def get_shopee_fbs_block(
     }
 
     try:
+        # PRIMEIRO comando da transacao: `SET TRANSACTION` so' e' aceito antes
+        # de qualquer query. O rollback fecha transacao implicita que tenha
+        # sobrado e garante que este seja o inicio -- e' seguro porque este
+        # caminho nunca escreve.
+        db.rollback()
+        db.execute(SQL_SNAPSHOT_COERENTE)
+
         por_classe = [dict(r) for r in
                       db.execute(SQL_POR_CLASSE, params).mappings().all()]
         por_marca = [dict(r) for r in
