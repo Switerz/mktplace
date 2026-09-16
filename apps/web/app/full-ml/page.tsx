@@ -65,11 +65,20 @@ const METRICAS: { key: MetricaSerie; label: string }[] = [
   { key: "units", label: "Unidades" },
 ];
 
-/** Alvo minimo de toque e foco visivel — o mesmo contrato do Gate V3-1A. */
-const CONTROLE =
-  "min-h-11 px-3 rounded-lg border border-slate-300 bg-white text-sm " +
-  "text-slate-800 focus-visible:outline focus-visible:outline-2 " +
+/** Alvo minimo de toque e foco visivel — o mesmo contrato do Gate V3-1A.
+ *  Sem cor: so' geometria, borda e anel de foco. */
+const CONTROLE_BASE =
+  "min-h-11 px-3 rounded-lg border text-sm " +
+  "focus-visible:outline focus-visible:outline-2 " +
   "focus-visible:outline-offset-2 focus-visible:outline-violet-600";
+
+/** Aparencia neutra do controle. NAO sobreponha outra cor de fundo ou de
+ *  texto a esta constante: utilities do Tailwind competem pela ordem do
+ *  stylesheet gerado, nao pela ordem no atributo `class`. Concatenar
+ *  `bg-violet-600 text-white` aqui fazia `bg-white` vencer e `text-white`
+ *  perder, rendendo branco-sobre-branco no botao selecionado. Para variar a
+ *  cor, parta de `CONTROLE_BASE` e declare a paleta inteira em cada ramo. */
+const CONTROLE = `${CONTROLE_BASE} border-slate-300 bg-white text-slate-800`;
 
 function hojeIsoBrt(): string {
   // `sv-SE` devolve YYYY-MM-DD; o fuso e' explicito porque o dia operacional da
@@ -400,10 +409,10 @@ function FullMLPageInner() {
                     aria-pressed={metrica === m.key}
                     onClick={() => setMetrica(m.key)}
                     className={
-                      `${CONTROLE} font-medium ` +
+                      `${CONTROLE_BASE} font-medium ` +
                       (metrica === m.key
-                        ? "bg-violet-600 text-white border-violet-600"
-                        : "hover:bg-slate-50")
+                        ? "border-violet-600 bg-violet-600 text-white"
+                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50")
                     }
                   >
                     {m.label}

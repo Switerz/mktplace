@@ -458,6 +458,57 @@ test("todo controle interativo declara alvo minimo de 44px", () => {
     }
   }
 });
+test("controle colorido nao sobrepoe cor a constante neutra", () => {
+  // Achado do Gate FULL-1D-R/V, medido em navegador real (1440x900, 1024x768
+  // e 390x844): `CONTROLE` trazia `bg-white text-slate-800` e o botao de
+  // metrica selecionado concatenava `bg-violet-600 text-white` por cima.
+  // Utilities do Tailwind competem pela ordem do stylesheet GERADO, nao pela
+  // ordem no atributo `class`: `bg-white` venceu `bg-violet-600` e
+  // `text-white` venceu `text-slate-800`. O contraste medido foi 1.00:1 —
+  // branco sobre branco. O estado ativo ficava invisivel, e nenhum teste de
+  // classe pegava, porque as duas classes ESTAVAM la.
+  // A base sem cor existe para tornar essa sobreposicao impossivel.
+  assert.ok(PAGE.includes("const CONTROLE_BASE ="), "a base sem cor precisa existir");
+
+  const base = PAGE.split("const CONTROLE_BASE =")[1].split(";")[0];
+  assert.ok(!/\bbg-/.test(base), "CONTROLE_BASE nao pode fixar cor de fundo");
+  assert.ok(!/\btext-(white|slate-\d)/.test(base), "CONTROLE_BASE nao pode fixar cor de texto");
+
+  // Extrai cada `className={...}` com chaves balanceadas. Regex nao serve:
+  // arrow functions e template literals aninhados quebram `[^}]*`.
+  const expressoes: string[] = [];
+  let i = 0;
+  while ((i = PAGE.indexOf("className={", i)) !== -1) {
+    let j = i + "className={".length;
+    let prof = 1;
+    while (j < PAGE.length && prof > 0) {
+      if (PAGE[j] === "{") prof++;
+      else if (PAGE[j] === "}") prof--;
+      j++;
+    }
+    expressoes.push(PAGE.slice(i, j));
+    i = j;
+  }
+  assert.ok(expressoes.length > 0, "a tela precisa ter className dinamico");
+
+  for (const expr of expressoes) {
+    // `\bCONTROLE\b` nao casa dentro de `CONTROLE_BASE`: `_` e' word char.
+    if (!/\bCONTROLE\b/.test(expr)) continue;
+    const semHover = expr.replace(/hover:bg-[\w-]+/g, "");
+    assert.ok(!/\bbg-/.test(semHover),
+      `cor de fundo sobreposta a CONTROLE: ${expr.slice(0, 120)}`);
+    assert.ok(!/\btext-white\b/.test(semHover),
+      `text-white sobreposto a CONTROLE: ${expr.slice(0, 120)}`);
+  }
+
+  // O ramo selecionado precisa declarar a paleta inteira, e nao herda-la.
+  const ativo = PAGE.match(/\?\s*"([^"]*violet-600[^"]*)"/);
+  assert.ok(ativo, "o estado selecionado precisa de um ramo explicito");
+  for (const exigida of ["bg-violet-600", "text-white", "border-violet-600"]) {
+    assert.ok(ativo![1].includes(exigida),
+      `o ramo selecionado precisa declarar ${exigida}`);
+  }
+});
 test("foco visivel em todo controle", () => {
   assert.match(PAGE, /focus-visible:outline-2/);
   assert.match(TREND, /focus-visible:outline-2/);
