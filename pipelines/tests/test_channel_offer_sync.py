@@ -81,10 +81,23 @@ def test_apply_so_autoriza_com_as_DUAS_provas():
     cos.assert_apply_authorized(conn)  # nao levanta
 
 
-def test_cli_recusa_apply_sem_abrir_conexao(capsys):
-    codigo = cos.main(["--marketplace", "shopee", "--apply"])
-    assert codigo == cos.EXIT_REFUSED
-    assert "RECUSADO" in capsys.readouterr().err
+def test_cli_delega_apply_ao_publisher(monkeypatch):
+    """Gate PMA-2C3A-R: `--apply` nao e' mais recusado aqui — e' DELEGADO.
+
+    Reimplementar o fluxo neste modulo criaria duas versoes do mesmo caminho,
+    que divergiriam. O executor mora em `channel_offer_publisher`.
+    """
+    from pipelines import channel_offer_publisher as publisher
+
+    recebidos = {}
+
+    def falso(argv):
+        recebidos["argv"] = argv
+        return publisher.EXIT_OK
+
+    monkeypatch.setattr(publisher, "main", falso)
+    assert cos.main(["--marketplace", "shopee", "--apply"]) == publisher.EXIT_OK
+    assert recebidos["argv"] == ["--marketplace", "shopee", "--apply"]
 
 
 def test_cli_diagnose_e_o_modo_padrao():
