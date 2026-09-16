@@ -957,7 +957,12 @@ def test_kpis_nao_respondem_ao_filtro_de_status():
 def test_marketplace_fora_do_escopo_e_recusado_sem_ecoar_a_entrada():
     svc = _servico()
     listings, refs = _cenario()
-    for canal in ("shopee", "tiktok", "amazon", "'; DROP TABLE x; --"):
+    # Gate PMA-2C1A: `shopee` e `tiktok` viraram canais RECONHECIDOS do dominio.
+    # Com a flag desligada eles respondem 200 + availability=unavailable, e isso
+    # e' coberto em `test_canal_reconhecido_responde_unavailable_em_vez_de_recusar`.
+    # O que este teste trava continua igual: canal DESCONHECIDO e' recusado e a
+    # mensagem nao ecoa um caractere da entrada.
+    for canal in ("amazon", "magalu", "'; DROP TABLE x; --", "<script>x</script>"):
         erro = None
         try:
             svc.get_monitoramento_preco(
@@ -968,6 +973,24 @@ def test_marketplace_fora_do_escopo_e_recusado_sem_ecoar_a_entrada():
         assert erro is not None, canal
         assert canal not in erro, canal
         assert "ml" in erro
+
+
+def test_canal_reconhecido_responde_unavailable_em_vez_de_recusar():
+    """Gate PMA-2C1A: reconhecer nao e' servir.
+
+    422 diria "esse canal nao existe"; 200 + `availability=unavailable` diz
+    "existe, mas ainda nao foi publicado". A ausencia de linhas jamais pode ser
+    lida como ausencia de desvio, e por isso `coverage_rate` vem NULO.
+    """
+    svc = _servico()
+    for canal in ("shopee", "tiktok"):
+        resposta = svc.get_monitoramento_preco(
+            FakeSession([], []), marketplace=canal, today=HOJE
+        )
+        assert resposta["meta"]["availability"] == "unavailable"
+        assert resposta["meta"]["marketplace"] == canal
+        assert resposta["rows"] == []
+        assert resposta["metrics"]["coverage_rate"] is None
 
 
 def test_marca_fora_do_escopo_e_recusada_com_a_razao_certa():
@@ -1029,7 +1052,8 @@ def test_erro_de_contrato_nao_vaza_sql_dsn_host_nem_credencial():
     listings, refs = _cenario()
     mensagens = []
     for kwargs in (
-        {"marketplace": "shopee"}, {"brand": "apice"}, {"status": "xyz"},
+        # canal reconhecido nao e' mais recusa: trocado por um desconhecido
+        {"marketplace": "amazon"}, {"brand": "apice"}, {"status": "xyz"},
         {"limit": 0}, {"offset": -5}, {"product_query": "x" * 200},
     ):
         try:
@@ -1173,7 +1197,7 @@ def test_mensagens_de_recusa_sao_constantes_do_modulo():
     }
     listings, refs = _cenario()
     vistas = set()
-    for kwargs in ({"marketplace": "shopee"}, {"brand": "apice"},
+    for kwargs in ({"marketplace": "amazon"}, {"brand": "apice"},
                    {"brand": "x" * 200}, {"status": "xyz"},
                    {"status": "y" * 400}, {"product_query": "z" * 500},
                    {"limit": 0}, {"offset": -1}):
@@ -1411,7 +1435,7 @@ def test_http_422_em_recusa_de_contrato_sem_eco():
     cli = _client(FakeSession(listings, refs, ref_date=d1))
     try:
         for parametro, payload in (
-            ("marketplace", "shopee"),
+            ("marketplace", "amazon"),
             ("brand", "apice"),
             ("status", "infracao"),
             ("brand", "<script>alert(1)</script>"),

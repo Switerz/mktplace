@@ -59,6 +59,16 @@ MatchQuality = Literal[
     "unmatched",
 ]
 
+#: Gate PMA-2C1A — dimensoes do contrato multicanal.
+MetricVersion = Literal["v1_all_active", "v2_product_type_aware"]
+ObservationMode = Literal["daily_series", "snapshot_current"]
+PromoContext = Literal["available", "unavailable"]
+Availability = Literal["available", "unavailable"]
+ProductType = Literal[
+    "kit_confirmed", "kit_suspected", "no_kit_signal", "product_type_unknown"
+]
+BusinessScope = Literal["in_scope", "out_of_business_scope"]
+
 ReferenceType = Literal["suggested_retail_pdv"]
 PolicyStatus = Literal["not_applicable_to_own_store_monitoring"]
 
@@ -74,7 +84,12 @@ CoverageStatus = Literal["advertised_only"]
 class MonitoramentoPrecoMeta(BaseModel):
     timezone: str
     currency: str
-    marketplace: Literal["ml"]
+    # Gate PMA-2C1A: era `Literal["ml"]`. Com o dominio aceitando tres canais,
+    # o literal estreito fazia a resposta de `shopee`/`tiktok` — legitima, com
+    # `availability=unavailable` — falhar na validacao do response_model e sair
+    # como HTTP 500. Um 500 aqui seria exatamente o que o gate proibiu: erro no
+    # lugar de estado estruturado.
+    marketplace: Literal["ml", "shopee", "tiktok"]
     #: `latest` (maior observacao <= D-1) ou `selected_date` (dia pedido).
     mode: QueryMode
     #: Ultima publicacao do sync para `observed_ref_date`.
@@ -114,6 +129,32 @@ class MonitoramentoPrecoMeta(BaseModel):
     order_by: str
     warnings: list[str]
 
+    # ---- Gate PMA-2C1A: ADITIVOS. Nenhum campo acima mudou. ----------------
+    #: Versao LOGICA da metrica. O ML publicado e' `v1_all_active`; a troca para
+    #: `v2_product_type_aware` muda comparaveis de 139 para 135 e por isso viaja
+    #: versionada em vez de mudar em silencio.
+    metric_version: MetricVersion = "v1_all_active"
+    #: A Shopee NUNCA devolve `daily_series`: e' estado corrente mutavel.
+    observation_mode: ObservationMode = "daily_series"
+    #: Se o canal permite AFIRMAR promocao. O TikTok nao permite, e isso nao
+    #: impede comparar preco observado com PDV.
+    promo_context: PromoContext = "available"
+    #: `unavailable` quando o canal e' reconhecido mas ainda nao publicado.
+    #: Nunca 500, nunca fallback para outro canal.
+    availability: Availability = "available"
+    unavailable_reason: Optional[str] = None
+    #: Alias de `observed_ref_date` com o nome comum aos tres canais.
+    observed_date: Optional[str] = None
+    #: Instante da captura do PRECO. Nao e' a atualizacao cadastral.
+    observed_at: Optional[str] = None
+    #: Conceito da Shopee. Vem VAZIO no ML: a fato dele nao modela esse estado,
+    #: e inventar "current: 862" afirmaria algo que a fonte nao diz.
+    snapshot_status_counts: dict[str, int] = {}
+    product_type_counts: dict[str, int] = {}
+    #: Um relogio por CONTA. A Shopee carrega em quatro lotes distintos e um
+    #: MAX() global marcaria as tres primeiras contas inteiras como atrasadas.
+    account_clocks: list[dict] = []
+
 
 class MonitoramentoPrecoKpis(BaseModel):
     """Duas dimensoes independentes  (Gate PMA-H1).
@@ -138,6 +179,46 @@ class MonitoramentoPrecoKpis(BaseModel):
     fresh_count: int
     stale_count: int
     historical_count: int
+
+
+class MonitoramentoPrecoMetrics(BaseModel):
+    """Metricas multicanal, SEPARADAS de `kpis`.  (Gate PMA-2C1A, fase 7)
+
+    `kpis` continua sendo o bloco PUBLICADO do ML e nao muda de forma: renomear
+    seus campos quebraria a tela em producao. As metricas novas — que falam de
+    OFERTAS, tipo de produto e elegibilidade — vivem aqui, num bloco proprio.
+
+    A particao e' exaustiva e verificada em teste:
+        observed_offers = active_offers + inactive_offers
+        active_offers   = kit_confirmed + kit_suspected + no_kit_signal
+                          + product_type_unknown
+        eligible_offers = active_offers - kit_confirmed - kit_suspected
+        comparable_offers + soma(non_comparable_reasons) = eligible_offers
+        below_reference + at_or_above_reference = comparable_offers
+
+    `coverage_rate` e `b2b_reach` sao `Optional[float]` e vem NULOS quando o
+    denominador e' zero. Zero por cento afirmaria uma medicao que nao existe.
+
+    `distinct_b2b_products` e `b2b_reach` sao leitura de CATALOGO: dizem quantos
+    produtos B2B o canal alcanca, e nunca sao denominador de conformidade.
+    """
+
+    monitored_offers: int
+    active_offers: int
+    inactive_offers: int
+    kit_confirmed: int
+    kit_suspected: int
+    no_kit_signal: int
+    product_type_unknown: int
+    eligible_offers: int
+    comparable_offers: int
+    below_reference: int
+    at_or_above_reference: int
+    #: Motivo -> contagem. Soma com `comparable_offers` em `eligible_offers`.
+    non_comparable_reasons: dict[str, int] = {}
+    coverage_rate: Optional[float] = None
+    distinct_b2b_products: int = 0
+    b2b_reach: Optional[float] = None
 
 
 class MonitoramentoPrecoRow(BaseModel):
@@ -200,7 +281,10 @@ class MonitoramentoPrecoRow(BaseModel):
 
 class MonitoramentoPrecoResponse(BaseModel):
     meta: MonitoramentoPrecoMeta
+    #: Bloco PUBLICADO do ML — forma inalterada.
     kpis: MonitoramentoPrecoKpis
+    #: Bloco multicanal NOVO, separado. Ver `MonitoramentoPrecoMetrics`.
+    metrics: MonitoramentoPrecoMetrics
     rows: list[MonitoramentoPrecoRow]
     returned_count: int
     total_count: int

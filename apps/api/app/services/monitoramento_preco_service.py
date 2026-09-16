@@ -57,6 +57,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.services import pma_domain as dom
 from app.services import pma_match as pm
 
 TZ = ZoneInfo(pm.TIMEZONE_NAME)
@@ -85,11 +87,19 @@ _ORDER_BY = "difference_pct"
 # nao reflete um caractere do que veio.
 
 ERRO_MARKETPLACE = (
-    "marketplace fora do escopo deste MVP. O unico canal aceito e' 'ml': e' o "
-    "unico com fonte de preco anunciado. Shopee tem somente preco transacional "
-    "de export de pedido, TikTok nao tem preco no catalogo e Amazon nao tem "
-    "fonte na Torre."
+    "marketplace nao reconhecido. Os canais do dominio sao 'ml', 'shopee' e "
+    "'tiktok'. Um canal reconhecido cuja publicacao ainda nao foi liberada "
+    "responde 200 com availability=unavailable, nao 422."
 )
+
+#: Aviso do envelope indisponivel. Diz o que NAO foi feito, para que a
+#: ausencia de linhas nunca seja lida como "nenhum desvio encontrado".
+AVISO_CANAL_INDISPONIVEL = (
+    "Canal reconhecido, porem ainda nao publicado: nenhuma observacao foi "
+    "consultada. Contagens zeradas significam ausencia de fonte, nao ausencia "
+    "de desvio; coverage_rate vem nulo justamente para nao afirmar 0%."
+)
+
 ERRO_BRAND_INVALIDA = (
     "parametro brand invalido. Aceita 'all', ou marcas separadas por virgula "
     "entre: barbours, kokeshi, lescent, rituaria. As marcas apice e yenzah tem "
@@ -267,12 +277,209 @@ def today_operacional(agora: datetime | None = None) -> date:
 
 
 def normalize_marketplace(valor: str | None) -> str:
-    """Valida o canal na borda. O MVP aceita somente `ml`. Nao ecoa a entrada."""
+    """Valida o canal na borda. Nao ecoa a entrada.
+
+    Gate PMA-2C1A: o dominio passou a conhecer `shopee` e `tiktok`. Conhecer
+    NAO e' servir — um canal conhecido cuja flag esteja desligada devolve 200
+    com estado `unavailable` estruturado, e nao 422. A distincao importa: 422
+    diz "voce pediu algo que nao existe" e 200+unavailable diz "existe, mas
+    ainda nao esta publicado". Um canal desconhecido continua 422.
+    """
     if valor is None or valor == "":
         return pm.MARKETPLACE_ML
-    if str(valor).strip().lower() not in pm.SUPPORTED_MARKETPLACES:
+    escolhido = str(valor).strip().lower()
+    if escolhido not in dom.ALL_MARKETPLACES:
         raise MonitoramentoPrecoError(ERRO_MARKETPLACE)
-    return str(valor).strip().lower()
+    return escolhido
+
+
+def channel_enabled(marketplace: str) -> bool:
+    """Flags do PMA-2C1A. O ML nao tem flag: ja' esta publicado."""
+    if marketplace == pm.MARKETPLACE_ML:
+        return True
+    if marketplace == dom.MARKETPLACE_SHOPEE:
+        return bool(settings.pma_shopee_enabled)
+    if marketplace == dom.MARKETPLACE_TIKTOK:
+        return bool(settings.pma_tiktok_enabled)
+    return False
+
+
+def active_metric_version(marketplace: str) -> str:
+    """Versao logica da metrica em vigor para o canal.
+
+    O ML publicado e' `v1_all_active` e so' muda por decisao explicita. Os
+    canais novos ja' nascem em `v2_product_type_aware`: nao ha metrica
+    publicada deles para preservar.
+    """
+    if marketplace == pm.MARKETPLACE_ML:
+        return (dom.METRIC_VERSION_V2 if settings.pma_ml_metric_v2_enabled
+                else dom.METRIC_VERSION_V1)
+    return dom.METRIC_VERSION_V2
+
+
+def unavailable_response(marketplace: str) -> dict:
+    """Envelope publico de canal desligado. Nao recebe sessao de banco.
+
+    Existe como funcao PUBLICA para que a rota possa responder antes de exigir
+    a dependencia de banco: um canal desligado nao precisa de conexao, e fazer
+    `_require_db` primeiro transformaria o estado `unavailable` num 503.
+    """
+    return _unavailable_envelope(marketplace, dom.UNAVAILABLE_CHANNEL_DISABLED)
+
+
+def _metrics_zeradas() -> dict:
+    """Bloco `metrics` sem nenhuma observacao.
+
+    As CONTAGENS sao zero — e' verdade, nao ha linha alguma. As TAXAS sao None:
+    `coverage_rate = 0.0` afirmaria "medimos a cobertura e ela e' 0%", que e'
+    falso quando nada foi medido.
+    """
+    return {
+        "monitored_offers": 0, "active_offers": 0, "inactive_offers": 0,
+        "kit_confirmed": 0, "kit_suspected": 0, "no_kit_signal": 0,
+        "product_type_unknown": 0, "eligible_offers": 0, "comparable_offers": 0,
+        "below_reference": 0, "at_or_above_reference": 0,
+        "non_comparable_reasons": {r: 0 for r in dom.NON_COMPARABLE_REASONS},
+        "coverage_rate": None, "distinct_b2b_products": 0, "b2b_reach": None,
+    }
+
+
+def _metrics_do_ml(comparadas: list[dict], contagem_tipos: dict,
+                   versao: str, tipo_por_linha: dict) -> dict:
+    """Traduz a particao COMERCIAL do ML para o vocabulario multicanal.
+
+    Reusa as linhas ja' comparadas por `pma_match` — nao ha segundo matcher que
+    possa divergir do primeiro.
+
+    NUMERADOR E DENOMINADOR VEM DA MESMA VERSAO
+    -------------------------------------------
+    Este e' o ponto delicado. Em `v1_all_active` toda oferta ativa e' elegivel e
+    os comparaveis sao os 139 publicados. Em `v2_product_type_aware` os kits
+    saem do denominador (339) E do numerador (135). Misturar os dois — 139 sobre
+    339 — produziria 41%, uma taxa que nao pertence a nenhuma das versoes e que
+    ninguem conseguiria reconciliar depois.
+    """
+    ativos = [r for r in comparadas if r["comparison_status"] != pm.STATUS_INACTIVE]
+    inativos = len(comparadas) - len(ativos)
+
+    if versao == dom.METRIC_VERSION_V2:
+        elegiveis_linhas = [
+            r for r in ativos
+            if not dom.is_excluded_from_comparison(
+                tipo_por_linha.get(id(r), dom.PRODUCT_TYPE_UNKNOWN))
+        ]
+        elegiveis = dom.eligible_offers(
+            active=len(ativos),
+            kit_confirmed=contagem_tipos[dom.PRODUCT_KIT_CONFIRMED],
+            kit_suspected=contagem_tipos[dom.PRODUCT_KIT_SUSPECTED],
+        )
+    else:
+        # v1 publicado: nenhuma exclusao por tipo de produto.
+        elegiveis_linhas = ativos
+        elegiveis = len(ativos)
+
+    abaixo = sum(1 for r in elegiveis_linhas
+                 if r["comparison_status"] == pm.STATUS_BELOW)
+    acima = sum(1 for r in elegiveis_linhas
+                if r["comparison_status"] == pm.STATUS_AT_OR_ABOVE)
+    ambiguas = sum(1 for r in elegiveis_linhas
+                   if r["comparison_status"] == pm.STATUS_AMBIGUOUS)
+    sem_ref = sum(1 for r in elegiveis_linhas
+                  if r["comparison_status"] == pm.STATUS_NO_REFERENCE)
+    referencias = {r.get("reference_row_id") for r in elegiveis_linhas
+                   if r.get("reference_row_id") is not None}
+    return {
+        "monitored_offers": len(comparadas),
+        "active_offers": len(ativos),
+        "inactive_offers": inativos,
+        "kit_confirmed": contagem_tipos[dom.PRODUCT_KIT_CONFIRMED],
+        "kit_suspected": contagem_tipos[dom.PRODUCT_KIT_SUSPECTED],
+        "no_kit_signal": contagem_tipos[dom.PRODUCT_NO_KIT_SIGNAL],
+        "product_type_unknown": contagem_tipos[dom.PRODUCT_TYPE_UNKNOWN],
+        "eligible_offers": elegiveis,
+        "comparable_offers": abaixo + acima,
+        "below_reference": abaixo,
+        "at_or_above_reference": acima,
+        "non_comparable_reasons": {
+            dom.REASON_REFERENCE_MISSING: sem_ref,
+            dom.REASON_AMBIGUOUS: ambiguas,
+        },
+        "coverage_rate": dom.coverage_rate(abaixo + acima, elegiveis),
+        "distinct_b2b_products": len(referencias),
+        "b2b_reach": None,
+    }
+
+
+def _unavailable_envelope(marketplace: str, reason: str) -> dict:
+    """Resposta ESTRUTURADA quando nao ha o que servir.
+
+    Nenhuma consulta e' emitida antes de chegar aqui: com a flag desligada, a
+    tabela `marts.fact_channel_offer_observation` — que ainda NAO existe, pois
+    o head Alembic e' 015 — nunca e' tocada. Sem erro SQL, sem 500, e sem cair
+    para o ML: responder sobre outro canal seria responder outra pergunta.
+
+    Os KPIs vem ZERADOS e `coverage_rate` vem NULO. Zero em contagem e' honesto
+    ("nao ha linha alguma"); zero em taxa afirmaria "medimos e deu 0%", que e'
+    falso — por isso a taxa e' None.
+    """
+    # `kpis` mantem a FORMA PUBLICADA do ML mesmo aqui: o consumidor nao deve
+    # precisar de dois parsers conforme o canal esteja ligado ou nao.
+    kpis = {k: 0 for k in (
+        "monitored_count", "comparable_count", "below_reference_count",
+        "at_or_above_reference_count", "no_reference_count",
+        "ambiguous_reference_count", "inactive_count", "fresh_count",
+        "stale_count", "historical_count",
+    )}
+    return {
+        "meta": {
+            "timezone": pm.TIMEZONE_NAME,
+            "currency": pm.CURRENCY,
+            "marketplace": marketplace,
+            "metric_version": active_metric_version(marketplace),
+            "observation_mode": dom.observation_mode_for(marketplace),
+            "promo_context": dom.promo_context_for(marketplace),
+            "availability": "unavailable",
+            "unavailable_reason": reason,
+            "mode": MODE_LATEST,
+            "observed_date": None,
+            "observed_at": None,
+            "requested_observed_date": None,
+            "observed_ref_date": None,
+            "available_observed_dates": [],
+            "available_observed_dates_limit": MAX_AVAILABLE_DATES,
+            "snapshot_status_counts": {},
+            "product_type_counts": {},
+            "account_clocks": [],
+            "reference_snapshot_id": None,
+            "reference_captured_at": None,
+            "reference_basis": REFERENCE_BASIS,
+            "comparison_basis_text": None,
+            # Frescor DESCONHECIDO, nao "fresco": nada foi observado.
+            "freshness_status": pm.FRESHNESS_UNAVAILABLE,
+            "lag_days": None,
+            "refreshed_at": None,
+            "eligible_ref_date": None,
+            "reference_type": pm.REFERENCE_TYPE,
+            "policy_status": pm.POLICY_STATUS,
+            "validity_status": pm.VALIDITY_STATUS,
+            "coverage_status": pm.COVERAGE_STATUS,
+            # Escopo de BELEZA. Gocase e Denavita aparecem no TikTok mas nao
+            # entram em denominador nenhum — nem como "sem referencia", o que as
+            # faria parecer falha de casamento em vez de fora do produto.
+            "monitored_brands": list(dom.BEAUTY_SCOPE_BRANDS),
+            "comparable_brands": [],
+            "no_reference_brands": [],
+            "out_of_scope_brands": {},
+            "order_by": _ORDER_BY,
+            "warnings": [AVISO_CANAL_INDISPONIVEL],
+        },
+        "kpis": kpis,
+        "metrics": _metrics_zeradas(),
+        "rows": [],
+        "returned_count": 0,
+        "total_count": 0,
+        "truncated": False,
+    }
 
 
 def normalize_brands(valor: str | None) -> list[str]:
@@ -430,6 +637,14 @@ def get_monitoramento_preco(
     `today` existe apenas para fixar o dia operacional em teste.
     """
     canal = normalize_marketplace(marketplace)
+
+    # Gate PMA-2C1A — PORTAO. Fica aqui, ANTES de normalizar o resto e antes de
+    # `db` ser tocado, porque a garantia que interessa e' negativa: com a flag
+    # desligada nenhuma consulta e' emitida. `marts.fact_channel_offer_observation`
+    # nao existe (head Alembic 015), e uma consulta a ela viraria erro SQL.
+    if canal != pm.MARKETPLACE_ML and not channel_enabled(canal):
+        return _unavailable_envelope(canal, dom.UNAVAILABLE_CHANNEL_DISABLED)
+
     marcas = normalize_brands(brand)
     filtros_status = normalize_status(status)
     consulta = normalize_product_query(product_query)
@@ -475,6 +690,7 @@ def get_monitoramento_preco(
         referencias = _rows(db, SQL_REFERENCES, {"snapshot_id": snapshot_id})
 
     comparadas = pm.compare_all(listings, referencias, dia, frescor)
+    versao_metrica = active_metric_version(canal)
 
     # KPIs SEMPRE do conjunto completo do filtro estrutural (canal/marca/busca),
     # antes do filtro de status: um KPI que respondesse ao filtro de status
@@ -517,6 +733,57 @@ def get_monitoramento_preco(
     total = len(visiveis)
     pagina = visiveis[off:off + lim]
 
+    # ---- Gate PMA-2C1A: dimensao de tipo de produto -------------------------
+    # Classifica com as autoridades REALMENTE disponiveis nesta camada. A API le
+    # exclusivamente `marts.*`; o cadastro interno e a BOM vivem no Data Mart e
+    # o backend nao os consulta. Sobram `seller_sku` e `listing_title`, que so'
+    # levantam SUSPEITA — por isso o ML nao produz `no_kit_signal` aqui, e o que
+    # nao tem sinal cai em `product_type_unknown`, que permanece ELEGIVEL.
+    #
+    # CONTRATO PUBLICADO (Gate PMA-2C1A-R, fase 1). Para o ML, hoje:
+    #
+    #     kit_confirmed        0     impossivel: nao ha flag nativa
+    #     kit_suspected      354     prefixo de SKU ou titulo
+    #     no_kit_signal        0     nenhuma autoridade estruturada nesta camada
+    #     product_type_unknown 339   elegiveis, porem SEM SINAL de kit
+    #
+    # Os 339 `unknown` sao a fila de revisao, e 135 deles sao comparaveis. Uma
+    # medicao offline com o cadastro interno dava 290/49 e apenas 5 comparaveis
+    # `unknown`; esse recorte NAO e' servivel — a API nao consulta o Data Mart —
+    # e foi descartado do contrato para que a mesma oferta nao tenha dois
+    # rotulos conforme quem pergunta.
+    #
+    # A tela deve rotular `product_type_unknown` como "sem sinal de kit", jamais
+    # como "produto simples confirmado": a diferenca e' entre nao ter encontrado
+    # evidencia e ter evidencia de ausencia.
+    contagem_tipos: dict[str, int] = {t: 0 for t in dom.PRODUCT_TYPES}
+    tipo_por_linha: dict[int, str] = {}
+    for linha in comparadas:
+        if linha["comparison_status"] == pm.STATUS_INACTIVE:
+            continue
+        tipo, _ = dom.classify_product_type(
+            canal,
+            seller_sku=linha.get("seller_sku"),
+            title=linha.get("listing_title"),
+        )
+        contagem_tipos[tipo] += 1
+        tipo_por_linha[id(linha)] = tipo
+
+    observado_em = None
+    for linha in comparadas:
+        atual = linha.get("observed_at")
+        if atual is not None and (observado_em is None or atual > observado_em):
+            observado_em = atual
+
+    relogios = []
+    if observado is not None:
+        relogios.append({
+            "account": canal,
+            "observed_at": _serialize(observado_em),
+            "refreshed_at": _serialize(refreshed_at),
+            "snapshot_status": None,
+        })
+
     return {
         "meta": {
             "timezone": pm.TIMEZONE_NAME,
@@ -550,10 +817,38 @@ def get_monitoramento_preco(
             "out_of_scope_brands": {
                 b: pm.BRAND_SCOPE_OUT_OF_SCOPE for b in pm.OUT_OF_SCOPE_BRANDS
             },
+            # ---- Gate PMA-2C1A: campos ADITIVOS -------------------------
+            # Nenhum campo acima mudou de nome, tipo ou valor. Estes sao novos
+            # e o teste de regressao do payload v1 verifica exatamente isso:
+            # cada chave preexistente mantem o valor que ja' tinha.
+            "metric_version": versao_metrica,
+            "observation_mode": dom.observation_mode_for(canal),
+            "promo_context": dom.promo_context_for(canal),
+            "availability": "available",
+            "unavailable_reason": None,
+            # Alias explicito de `observed_ref_date` com o nome que os canais
+            # novos usam, para que a tela leia um campo so' nos tres canais.
+            "observed_date": _serialize(observado),
+            # Instante em que o PRECO foi capturado — o maior entre as linhas.
+            # NAO e' a atualizacao cadastral do anuncio.
+            "observed_at": _serialize(observado_em),
+            # `snapshot_status` e' conceito da Shopee (carga por conta,
+            # sobrescrita, sem tombstone). A fato do ML nao carrega essa coluna,
+            # entao o dicionario vem VAZIO em vez de inventar "current: 862":
+            # afirmar um estado que a fonte nao modela seria pior que omiti-lo.
+            "snapshot_status_counts": {},
+            "product_type_counts": contagem_tipos,
+            # Relogios por CONTA. O ML tem uma unica travessia diaria, entao
+            # publica um relogio so'; a Shopee publicara um por conta, porque
+            # suas quatro contas terminam em lotes distintos e um MAX() global
+            # marcaria as tres primeiras como atrasadas.
+            "account_clocks": relogios,
             "order_by": _ORDER_BY,
             "warnings": avisos,
         },
         "kpis": kpis,
+        "metrics": _metrics_do_ml(comparadas, contagem_tipos,
+                                  versao_metrica, tipo_por_linha),
         "rows": [_serialize_row(r) for r in pagina],
         "returned_count": len(pagina),
         "total_count": total,
