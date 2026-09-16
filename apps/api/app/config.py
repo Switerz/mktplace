@@ -104,6 +104,23 @@ class Settings(BaseSettings):
     # execucoes e inutil para quem nao tem a chave.
     expedicao_order_ref_secret: str = ""
 
+    # ------------------------------------------------------------------
+    # Gate FULL-SH-1C — superficie de desempenho FBS da Shopee
+    # ------------------------------------------------------------------
+    # NASCE DESLIGADA e permanece assim nesta rodada. A fato
+    # `marts.fact_shopee_fbs_daily` JA' existe e esta publicada (migration 019,
+    # 1.648 linhas), mas a superficie ainda nao foi revisada por quem decide o
+    # que a Torre afirma -- e ela afirma algo delicado: um total de Shopee que
+    # NAO inclui Kokeshi, a maior marca por volume.
+    #
+    # Com a flag desligada o endpoint devolve estado `unavailable`
+    # ESTRUTURADO, em 200, SEM emitir uma unica consulta. Nao ha 404 (a rota
+    # existe), nao ha 500 (nada quebrou) e nao ha fallback para outro canal.
+    #
+    # `bool` do Pydantic aceita "1"/"true"/"yes"; a ausencia da variavel cai no
+    # default False. Ligar e' decisao de negocio, fora deste gate.
+    shopee_fbs_enabled: bool = Field(default=False)
+
     @property
     def datamart_url(self) -> str:
         if self.datamart_database_url:

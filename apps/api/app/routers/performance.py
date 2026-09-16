@@ -1,9 +1,10 @@
-﻿from datetime import date
-from typing import Literal, Optional
+﻿from datetime import date, timedelta
+from typing import Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.deps.filters import (
     ResolvedFilters, filters_query, filters_query_default_days, resolve_brands,
@@ -13,6 +14,10 @@ from app.schemas.avoe_snapshot import AvoeSnapshotResponse
 from app.schemas.executive_summary import ExecutiveSummaryResponse
 from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
 from app.schemas.ml_fulfillment import MLFulfillmentResponse
+from app.schemas.shopee_fbs import (
+    ShopeeFbsResponse,
+    ShopeeFbsUnavailableResponse,
+)
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -30,6 +35,7 @@ from app.services.affiliate_costs_service import safe_affiliate_costs_block
 from app.services.tiktok_order_discounts_service import (
     safe_tiktok_order_discounts_block,
 )
+from app.services import shopee_fbs_service as shopee_fbs_svc
 from app.services.ml_fulfillment_service import (
     MLFulfillmentUnavailable,
     get_ml_fulfillment_block,
@@ -777,3 +783,137 @@ def ml_fulfillment(
         # ecoar o texto da excecao deixaria o corpo da resposta a merce de
         # qualquer mensagem futura que passasse por ali -- inclusive de driver.
         raise HTTPException(503, ERRO_ML_FULFILLMENT_INDISPONIVEL)
+
+
+# ---------------------------------------------------------------------------
+# Gate FULL-SH-1C — desempenho FBS da Shopee. READ-ONLY, atras de feature flag.
+# ---------------------------------------------------------------------------
+
+#: Resposta FIXA quando a fato esta indisponivel. Nao carrega o texto da
+#: excecao: ele descreve estado interno e vai ao log do servidor.
+ERRO_SHOPEE_FBS_INDISPONIVEL = (
+    "Desempenho FBS da Shopee indisponivel: a fato nao pode ser lida agora. "
+    "Acione o time de dados."
+)
+ERRO_SHOPEE_FBS_CONTRATO = (
+    "Desempenho FBS da Shopee indisponivel: a fonte devolveu classe fora do "
+    "dominio autorizado. Acione o time de dados."
+)
+MOTIVO_SHOPEE_FBS_DESLIGADO = (
+    "Superficie de FBS da Shopee ainda nao habilitada. A fato existe e esta "
+    "publicada, mas a cobertura e' PARCIAL (quatro contas da esteira API; "
+    "Kokeshi fora) e a ativacao e' decisao de negocio."
+)
+
+#: Politica de data PROPRIA desta superficie, e o motivo de nao reusar
+#: `resolve_period`: aquele resolvedor barra apenas datas FUTURAS, aceitando
+#: D0. Aqui D0 nao pode entrar, porque a fato so' materializa dias FECHADOS --
+#: pedir hoje devolveria uma janela vazia que pareceria queda operacional.
+#: O endpoint do Full ML NAO e' alterado por este gate.
+MAX_RANGE_DAYS_SHOPEE_FBS = 366
+DEFAULT_DAYS_SHOPEE_FBS = 30
+
+
+def _shopee_fbs_periodo(
+    date_from: Optional[date],
+    date_to: Optional[date],
+    hoje: date,
+) -> tuple[date, date, date]:
+    """Resolve e valida a janela. Devolve (from, to, last_closed).
+
+    Toda recusa e' 422 com mensagem FIXA -- nenhuma delas ecoa o valor
+    recebido, para que entrada maliciosa nao volte no corpo da resposta.
+    """
+    last_closed = hoje - timedelta(days=1)
+
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(422, "date_from e date_to devem ser informados juntos.")
+
+    if date_from is None:
+        date_to = last_closed
+        date_from = last_closed - timedelta(days=DEFAULT_DAYS_SHOPEE_FBS - 1)
+        return date_from, date_to, last_closed
+
+    if date_from > date_to:
+        raise HTTPException(422, "date_from nao pode ser posterior a date_to.")
+    if (date_to - date_from).days + 1 > MAX_RANGE_DAYS_SHOPEE_FBS:
+        raise HTTPException(
+            422,
+            f"Intervalo maximo permitido e de {MAX_RANGE_DAYS_SHOPEE_FBS} dias.")
+    if date_to > last_closed:
+        # Cobre D0 E futuro na MESMA regra: a fato so' publica dia fechado.
+        raise HTTPException(
+            422,
+            "date_to nao pode ser posterior ao ultimo dia fechado (D-1). "
+            "Esta superficie publica apenas dias fechados.")
+    return date_from, date_to, last_closed
+
+
+def _shopee_fbs_lista(valores: Optional[list[str]], rotulo: str,
+                      dominio: tuple[str, ...]) -> Optional[list[str]]:
+    """Normaliza e valida contra o dominio. Valor fora da allowlist e' 422 e
+    NUNCA e' ecoado -- a mensagem diz o que era esperado, nao o que veio."""
+    if not valores:
+        return None
+    limpos = [v.strip().lower() for v in valores if v and v.strip()]
+    if not limpos:
+        return None
+    if any(v not in dominio for v in limpos):
+        raise HTTPException(
+            422,
+            f"{rotulo} invalido. Valores aceitos: {', '.join(sorted(dominio))}.")
+    return sorted(set(limpos))
+
+
+@router.get(
+    "/shopee-fbs",
+    response_model=Union[ShopeeFbsResponse, ShopeeFbsUnavailableResponse],
+)
+def shopee_fbs(
+    date_from: Optional[date] = Query(None, description="Inicio, inclusivo."),
+    date_to: Optional[date] = Query(None, description="Fim, inclusivo. Teto D-1."),
+    brands: Optional[list[str]] = Query(None, description="Marcas cobertas pela esteira API."),
+    accounts: Optional[list[str]] = Query(None, description="Contas da esteira API."),
+    db: Session = Depends(get_db),
+):
+    """Desempenho FBS da Shopee: fulfillment da Shopee contra envio pelo vendedor.
+
+    COBERTURA PARCIAL, e a resposta diz isso. A esteira API cobre apice,
+    barbours, lescent e rituaria. **Kokeshi nao esta na API** e nao e' suprida
+    por planilha aqui -- o agregado e' "Shopee (cobertura API)", nunca
+    "Shopee total".
+
+    O valor e' **GMV BRUTO de pedidos nao cancelados**: inclui `to_return` e
+    `unpaid` (publicados tambem em coluna propria) e exclui cancelados. Nao e'
+    receita liquida nem realizada.
+
+    Le apenas `marts.fact_shopee_fbs_daily`. Nenhuma consulta ao Data Mart
+    acontece durante o request.
+    """
+    # FLAG PRIMEIRO: com ela desligada nenhuma consulta e' emitida, e nem
+    # sequer exigimos sessao de banco. 200 com estado explicito -- "desligado"
+    # precisa ser distinguivel de "quebrado".
+    if not settings.shopee_fbs_enabled:
+        return ShopeeFbsUnavailableResponse(
+            scope_label=shopee_fbs_svc.SCOPE_LABEL,
+            unavailable_reason=MOTIVO_SHOPEE_FBS_DESLIGADO,
+        )
+
+    df, dt, last_closed = _shopee_fbs_periodo(date_from, date_to, today_brt())
+    marcas = _shopee_fbs_lista(
+        brands, "brands", tuple(shopee_fbs_svc.EXPECTED_BRANDS))
+    contas = _shopee_fbs_lista(
+        accounts, "accounts", tuple(shopee_fbs_svc.EXPECTED_ACCOUNTS))
+
+    try:
+        return shopee_fbs_svc.get_shopee_fbs_block(
+            _require_db(db), df, dt,
+            brands=marcas, accounts=contas,
+            last_closed_date=last_closed,
+        )
+    except shopee_fbs_svc.ShopeeFbsContractError:
+        # Contrato da FONTE quebrado (classe desconhecida). Nao e' erro do
+        # cliente: mudar a requisicao nao resolve, logo nao pode ser 422.
+        raise HTTPException(503, ERRO_SHOPEE_FBS_CONTRATO)
+    except shopee_fbs_svc.ShopeeFbsUnavailable:
+        raise HTTPException(503, ERRO_SHOPEE_FBS_INDISPONIVEL)
