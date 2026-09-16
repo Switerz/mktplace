@@ -327,6 +327,8 @@ FONTE. Ele responde "o Data Mart parou de atualizar esta conta?" e nada mais.
 ### Calculo
 
 1. para cada conta esperada, `classify_freshness(source_watermark_at, effective_at)`;
+   carimbo **no futuro** (`watermark > effective_at`) nao passa por aqui: vira
+   `unknown` direto — ver abaixo;
 2. agrupa as contas por marca;
 3. o veredito da marca e o **pior** estado entre suas contas;
 4. o carimbo reportado e o **mais antigo** entre elas (`None` vence);
@@ -382,6 +384,25 @@ Alerta permanentemente vermelho e alerta ignorado. `FreshnessStatus` ja dizia no
 contrato "idade do DADO, nao do pedido, medida por conta": a implementacao e que
 divergia do proprio contrato.
 
+### Carimbo no futuro (EXP-1F-R/V)
+
+`classify_freshness` compara `effective_at - watermark <= 8h`, e idade
+**negativa** satisfaz essa condicao: sem tratamento, um watermark adiantado
+sairia `fresh`. Seria o mesmo defeito que esta secao corrige — sinal quebrado se
+apresentando como saudavel. O relogio do Data Mart e o de quem roda a CLI sao
+maquinas diferentes, e `ingested_at` e escrito pelo carregador.
+
+Comportamento: `watermark > effective_at` vira **`unknown`**, e o carimbo
+reportado vira nulo. A partir de um instante impossivel nao da para afirmar que
+a fonte esta fresca nem que esta velha — `critical` seria tao inventado quanto
+`fresh`. `source_age_hours` fica negativo de proposito: e a evidencia de por que
+o estado e `unknown`.
+
+A comparacao e **estrita**, sem tolerancia: qualquer margem seria um threshold
+novo, e o contrato so define 8h e 24h. Se skew de poucos segundos comecar a
+gerar `warn` na operacao, definir a tolerancia e decisao de contrato, nao de
+implementacao.
+
 ### Limitacoes conhecidas
 
 * O watermark e `MAX(ingested_at)` da conta na fonte. Se o carregador reescrever
@@ -392,6 +413,10 @@ divergia do proprio contrato.
   publicacao inteira e recusada (exit 3).
 * O alerta nao diz nada sobre atraso operacional. Backlog vencido se acompanha
   por `overdue_count` e `over_48h_count` em `expedicao_refresh_run`.
+* A coluna `source_freshness_status` POR PEDIDO continua usando
+  `classify_freshness` sem o tratamento de carimbo futuro. Ela e contexto, nao
+  veredito, e mexer nela mudaria dado ja publicado; se um dia `ingested_at`
+  aparecer adiantado nas linhas, vira gate proprio.
 
 ---
 
