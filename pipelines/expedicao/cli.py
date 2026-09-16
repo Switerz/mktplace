@@ -550,7 +550,9 @@ def run_apply(
                     accounts_recorded=contas_registradas,
                 )
                 audit_mod.record_freshness(
-                    auditoria, marketplace_id, _freshness_por_marca(fila, resumos)
+                    auditoria,
+                    marketplace_id,
+                    _freshness_por_marca(fila, resumos, effective_at),
                 )
             except Exception as exc:  # noqa: BLE001 — pos-commit: nunca vira failed
                 avisar(
@@ -634,30 +636,80 @@ def _falhar_auditoria(auditoria, run_id, exc, publicado, extraidas, log) -> None
 _ORDEM_FRESCOR = {"fresh": 0, "stale": 1, "critical": 2, "unknown": 3}
 
 
-def _freshness_por_marca(fila, resumos) -> dict[str, tuple[str, int, datetime | None]]:
-    """`{marca: (pior_frescor, pedidos_abertos, watermark)}`.
+def _freshness_por_marca(fila, resumos, effective_at) -> dict[str, dict]:
+    """Frescor da FONTE por marca, medido pelo WATERMARK DA CONTA.
 
-    Itera os RESUMOS, nao a fila: ha' uma linha de resumo por conta esperada,
-    inclusive com backlog zero. Iterar a fila faria uma conta parada sumir do
-    relatorio de frescor justamente quando ela precisa aparecer.
+    TRES IDADES DIFERENTES, QUE NAO PODEM SER A MESMA COISA
+    --------------------------------------------------------
+    1. `source_watermark_at` — quando a conta INTEIRA foi lida pela ultima vez.
+       Responde "a fonte esta atualizada?". E o unico insumo do veredito deste
+       alerta.
+    2. `source_ingested_at` de cada pedido — quando AQUELA LINHA foi relida.
+       Um pedido parado no backlog nao e' relido enquanto nada nele muda, entao
+       essa idade cresce sozinha. Entra aqui so' como CONTEXTO.
+    3. `hours_open` / `deadline_status` — ha quanto tempo o PEDIDO espera
+       expedicao. E atraso operacional, vive no resumo e nao neste alerta.
+
+    POR QUE A VERSAO ANTERIOR ESTAVA ERRADA (EXP-1E)
+    ------------------------------------------------
+    Ela agregava o pior `source_freshness_status` das LINHAS da fila, ou seja, a
+    idade (2). Backlog legitimo sempre tem pedido cuja linha nao e' relida ha
+    mais de 24h — medimos 240h na rituaria com a fonte a 0,55h de idade. As
+    quatro marcas nasceram `fail`/`high` no primeiro piloto. Alerta permanente
+    e' alerta ignorado: foi assim que a planilha antiga ficou 43 dias defasada
+    sem ninguem perceber. `FreshnessStatus` ja dizia no contrato "idade do DADO,
+    nao do pedido, medida por conta" — a implementacao e' que divergia.
+
+    AGREGACAO POR MARCA
+    -------------------
+    Uma marca pode ter mais de uma conta. O veredito e' o PIOR estado entre as
+    contas dela, nunca a media nem a melhor: uma conta parada nao pode se
+    esconder atras de outra atualizada. Carimbo ausente vira `unknown`, que e' o
+    pior — "nao sei" nunca se apresenta como "fresco".
+
+    Os limites sao os do contrato (`classify_freshness`: 8h / 24h). Nenhum
+    threshold novo e' criado aqui.
     """
-    pior: dict[str, str] = {}
-    abertos: dict[str, int] = {}
+    # Contexto (2): idade da linha mais velha do backlog, por marca. NAO decide.
+    linha_mais_velha: dict[str, float] = {}
     for linha in fila:
+        idade = transform.hours_between(linha["source_ingested_at"], effective_at)
+        if idade is None:
+            continue
         marca = linha["brand"]
-        estado = linha["source_freshness_status"]
-        abertos[marca] = abertos.get(marca, 0) + 1
-        if _ORDEM_FRESCOR.get(estado, 3) > _ORDEM_FRESCOR.get(pior.get(marca, "fresh"), 3):
-            pior[marca] = estado
+        if idade > linha_mais_velha.get(marca, -1.0):
+            linha_mais_velha[marca] = idade
 
-    saida: dict[str, tuple[str, int, datetime | None]] = {}
+    # Agrupa primeiro, decide depois: com as contas da marca em maos o "pior"
+    # fica explicito, em vez de emergir da ordem em que os resumos chegaram.
+    por_marca: dict[str, list[dict]] = {}
     for resumo in resumos:
-        marca = resumo["brand"]
-        saida[marca] = (
-            pior.get(marca, "unknown"),
-            abertos.get(marca, 0),
-            resumo["source_watermark_at"],
-        )
+        por_marca.setdefault(resumo["brand"], []).append(resumo)
+
+    saida: dict[str, dict] = {}
+    for marca, contas in por_marca.items():
+        estados = [
+            transform.classify_freshness(c["source_watermark_at"], effective_at).value
+            for c in contas
+        ]
+        pior = max(estados, key=lambda e: _ORDEM_FRESCOR[e])
+
+        # Carimbo reportado: o mais ANTIGO entre as contas da marca. `None`
+        # vence, porque conta sem carimbo e' o caso mais grave.
+        carimbos = [c["source_watermark_at"] for c in contas]
+        watermark = None if any(w is None for w in carimbos) else min(carimbos)
+
+        saida[marca] = {
+            # (1) VEREDITO: a fonte esta atualizada? So o watermark responde.
+            "freshness": pior,
+            "source_watermark": watermark,
+            "source_age_hours": transform.hours_between(watermark, effective_at),
+            "accounts": len(contas),
+            # tamanho do backlog — contexto, nunca veredito
+            "open_orders": sum(int(c["backlog_count"]) for c in contas),
+            # (2) pedido antigo no backlog — informativo, NAO reprova a fonte
+            "oldest_row_age_hours": linha_mais_velha.get(marca),
+        }
     return saida
 
 

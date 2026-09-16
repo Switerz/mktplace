@@ -1076,17 +1076,50 @@ def test_observacao_registra_source_advanced_como_metadado():
 
 
 def test_freshness_gera_uma_linha_por_marca():
+    """Uma linha por marca, e o veredito vem do watermark da FONTE (EXP-1F).
+
+    `open_orders` dimensiona o impacto; nao e criterio. Marca com backlog grande
+    e fonte fresca sai `pass` — era o oposto disso que reprovava as quatro
+    marcas no primeiro piloto.
+    """
     conn = FakeConn()
     audit_mod.record_freshness(
         conn, 3,
         {
-            "apice": (FreshnessStatus.FRESH.value, 281, AGORA),
-            "barbours": (FreshnessStatus.CRITICAL.value, 514, AGORA),
+            "apice": {
+                "freshness": FreshnessStatus.FRESH.value,
+                "source_watermark": AGORA,
+                "source_age_hours": 0.55,
+                "accounts": 1,
+                "open_orders": 281,
+                "oldest_row_age_hours": 240.0,
+            },
+            "barbours": {
+                "freshness": FreshnessStatus.CRITICAL.value,
+                "source_watermark": AGORA - timedelta(hours=72),
+                "source_age_hours": 72.0,
+                "accounts": 1,
+                "open_orders": 514,
+                "oldest_row_age_hours": 168.0,
+            },
         },
     )
     inserts = [p for s, p in conn.executed if "data_quality_check" in s]
     assert len(inserts) == 2
-    assert any(p[3] == "fail" for p in inserts)
+    por_status = {p[3] for p in inserts}
+    assert por_status == {"pass", "fail"}
+
+    apice = next(p for p in inserts if '"brand": "apice"' in p[6])
+    assert apice[3] == "pass"
+    assert apice[5] == 0, "fonte fresca nao pode contar linhas como falha"
+    assert '"oldest_row_age_hours": 240.0' in apice[6], (
+        "a idade da linha tem de continuar visivel, so nao decide"
+    )
+    assert '"measures": "source_watermark_only"' in apice[6]
+
+    barbours = next(p for p in inserts if '"brand": "barbours"' in p[6])
+    assert barbours[3] == "fail"
+    assert barbours[5] == 514, "fonte parada dimensiona o impacto pelo backlog"
 
 
 def test_falha_de_auditoria_apos_commit_nao_marca_failed():
