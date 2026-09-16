@@ -254,6 +254,76 @@ def test_d0_sem_nenhuma_oferta_corrente_nao_e_fresh():
     assert saida["rows"][0]["freshness_status"] == pm.FRESHNESS_STALE
 
 
+def test_linha_stale_em_d0_nao_reporta_atraso_negativo():
+    """Gate PMA-2C4A-R — o finding que a revisao pegou.
+
+    A fotografia e' de HOJE e a oferta carrega `snapshot_status = stale`: nao ha
+    atraso de pipeline, foi a OFERTA que nao foi revista nesta carga. O texto
+    antigo dizia "-1 dia(s) atras de D-1", que erra tres vezes de uma so' vez —
+    numero negativo, teto de outro canal e um diagnostico mandando conferir um
+    sync que esta em dia. Na Shopee sao 454 linhas nessa situacao.
+    """
+    s = SessaoFake(ofertas=[oferta(snapshot_status=dom.SNAPSHOT_STALE,
+                                   observed_at=datetime(2026, 8, 28, 16, 40,
+                                                        tzinfo=timezone.utc))])
+    linha = servir(s)["rows"][0]
+    assert linha["freshness_status"] == pm.FRESHNESS_STALE
+    texto = " ".join(linha["limitations"])
+    assert "-1 dia" not in texto
+    assert "dia(s) atras" not in texto
+    assert "D-1" not in texto
+    assert "NAO foi revista nesta carga" in texto
+    assert "nao indica atraso do sync" in texto
+    assert "2026-08-28" in texto          # cita a ultima observacao real
+
+
+def test_fotografia_atrasada_do_canal_reporta_atraso_positivo():
+    """Quando a fotografia REALMENTE esta atrasada, o atraso e' positivo e
+    aponta o publisher — nao o sync do Mercado Livre."""
+    s = SessaoFake(ofertas=[oferta(observed_date=date(2026, 9, 14),
+                                   snapshot_status=dom.SNAPSHOT_CURRENT)],
+                   datas=[date(2026, 9, 14)])
+    saida = servir(s)
+    assert saida["meta"]["lag_days"] == 2
+    # Gate PMA-2C4A-R, segundo finding: a oferta foi carimbada `current` NAQUELA
+    # carga, mas a carga e' de dois dias atras. Se a linha se declarasse `fresh`
+    # aqui, o mesmo payload traria dois vereditos sobre o mesmo dado.
+    assert saida["meta"]["freshness_status"] == pm.FRESHNESS_STALE
+    assert saida["rows"][0]["freshness_status"] == pm.FRESHNESS_STALE
+    texto = " ".join(saida["rows"][0]["limitations"])
+    assert "2 dia(s) atras do dia operacional" in texto
+    assert "publisher" in texto
+    assert "D-1" not in texto
+
+
+def test_o_texto_de_atraso_do_ml_permanece_palavra_por_palavra():
+    """O ML e' contrato publicado: a frase nao pode ser reescrita de carona."""
+    from app.services.pma_match import ReferenceIndex, compare_listing
+
+    linha = compare_listing(
+        {"ref_date": date(2026, 9, 13), "advertised_price": Decimal("10"),
+         "brand": "kokeshi", "marketplace": "ml", "item_id": "X",
+         "listing_status": "active"},
+        ReferenceIndex.build([]), HOJE, pm.FRESHNESS_STALE)
+    assert any(
+        l == ("observacao de 2026-09-13, 2 dia(s) atras de 2026-09-15 "
+              "(D-1 do dia operacional 2026-09-16): a comparacao vale para "
+              "aquele dia e NAO descreve o preco de hoje. Verifique a ultima "
+              "execucao do sync.")
+        for l in linha["limitations"]), linha["limitations"]
+
+
+def test_consulta_retrospectiva_marca_a_linha_como_historical():
+    """Dia ESCOLHIDO nao e' atraso: a linha inteira vira `historical`, mesmo
+    que o `snapshot_status` gravado seja `current`."""
+    s = SessaoFake(ofertas=[oferta(observed_date=date(2026, 9, 14),
+                                   snapshot_status=dom.SNAPSHOT_CURRENT)],
+                   datas=[date(2026, 9, 14), D0])
+    saida = servir(s, observed_date="2026-09-14")
+    assert saida["meta"]["freshness_status"] == pm.FRESHNESS_HISTORICAL
+    assert saida["rows"][0]["freshness_status"] == pm.FRESHNESS_HISTORICAL
+
+
 def test_data_valida_sem_observacao_devolve_vazio_tipado():
     s = SessaoFake(ofertas=[oferta()], datas=[D0])
     saida = servir(s, observed_date="2026-09-10")

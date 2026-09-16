@@ -1058,12 +1058,11 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
 
     # ---- comparacao: MESMO matcher do ML, com a politica do canal ----------
     listings = [_channel_listing(r) for r in linhas]
-    por_linha = {}
-    for origem, destino in zip(linhas, listings):
-        por_linha[id(destino)] = (
-            pm.FRESHNESS_HISTORICAL if frescor == pm.FRESHNESS_HISTORICAL
-            else pm.channel_row_freshness(origem["snapshot_status"])
-        )
+    por_linha = {
+        id(destino): pm.channel_row_freshness(origem["snapshot_status"],
+                                              snapshot_freshness=frescor)
+        for origem, destino in zip(linhas, listings)
+    }
     comparadas = pm.compare_all(
         listings, referencias, hoje,
         policy=politica, allow_missing_price=True, row_freshness=por_linha,

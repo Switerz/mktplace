@@ -280,21 +280,28 @@ def classify_freshness(ref_date: date | None, today: date,
 
 
 def channel_row_freshness(snapshot_status: str | None, *,
-                          selected: bool = False) -> str:
-    """Frescor de UMA oferta sob `snapshot_current`, pelo valor MATERIALIZADO.
+                          snapshot_freshness: str = FRESHNESS_FRESH) -> str:
+    """Frescor de UMA oferta sob `snapshot_current`: o PIOR dos dois niveis.
 
-    O publisher ja' decidiu, na carga, se aquela oferta foi revista nesta
-    fotografia (`current`) ou se carrega carimbo antigo (`stale`) — na Shopee ha
-    modelo com `observed_at` de 18 dias atras dentro de uma carga de hoje.
-    Recalcular isso aqui produziria uma segunda regra que poderia divergir da
-    persistida; por isso o valor e' TRADUZIDO, nao refeito.
+    Sao duas perguntas independentes, e a linha so' e' fresca se ambas o forem:
 
-    Consulta retrospectiva marca a linha inteira como `historical`: o dia foi
-    escolhido, nao sofrido, e chamar isso de atraso confundiria uso legitimo da
-    tela com falha de pipeline.
+      1. a FOTOGRAFIA e' a mais recente possivel? (`snapshot_freshness`)
+      2. esta OFERTA foi revista dentro dela?     (`snapshot_status`)
+
+    Uma oferta carimbada `current` numa fotografia de dois dias atras nao e'
+    fresca: ela foi revista NAQUELA carga, nao hoje. Deixar o nivel da linha
+    responder sozinho faria a linha se declarar `fresh` enquanto a resposta a
+    declara `stale` — dois vereditos sobre o mesmo dado, no mesmo payload.
+
+    O valor da oferta e' TRADUZIDO do que o publisher gravou, nunca refeito:
+    recalcula-lo aqui criaria uma segunda regra que poderia divergir da
+    persistida. Na Shopee ha modelo com `observed_at` de 18 dias atras dentro de
+    uma carga de hoje, e e' o publisher quem sabe disso.
     """
-    if selected:
-        return FRESHNESS_HISTORICAL
+    if snapshot_freshness != FRESHNESS_FRESH:
+        # `historical` (dia escolhido) ou `stale` (fotografia atrasada)
+        # contaminam toda linha, inclusive a que foi revista naquela carga.
+        return snapshot_freshness
     if snapshot_status == dom.SNAPSHOT_CURRENT:
         return FRESHNESS_FRESH
     if snapshot_status == dom.SNAPSHOT_STALE:
@@ -667,13 +674,40 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
     # Gate PMA-H1: a defasagem/retrospectividade entra como LIMITACAO da linha,
     # nunca como status comercial. A classificacao comercial abaixo roda sempre.
     if freshness == FRESHNESS_STALE:
-        atraso = lag_days(ref_date, today)
-        limites = limites + [
-            f"observacao de {ref_date.isoformat()}, {atraso} dia(s) atras de "
-            f"{last_eligible_date(today).isoformat()} (D-1 do dia operacional "
-            f"{today.isoformat()}): a comparacao vale para aquele dia e NAO "
-            f"descreve o preco de hoje. Verifique a ultima execucao do sync."
-        ]
+        atraso = lag_days(ref_date, today, policy)
+        if policy == POLICY_SNAPSHOT_CURRENT and atraso <= 0:
+            # A FOTOGRAFIA e' do dia; foi ESTA OFERTA que nao foi revista nela.
+            # O texto de atraso de pipeline nao serve aqui: ele reportaria
+            # "-1 dia(s) atras de D-1" — um numero negativo, um teto que nao e'
+            # o deste canal e um diagnostico que manda conferir um sync que nao
+            # esta atrasado. Na Shopee sao 454 ofertas nessa situacao, porque ha
+            # modelo com carimbo de ate 18 dias dentro de uma carga de hoje.
+            visto = listing.get("price_captured_at")
+            quando = f" (ultima observacao: {visto})" if visto else ""
+            limites = limites + [
+                f"a fotografia e' de {ref_date.isoformat()}, mas esta oferta "
+                f"NAO foi revista nesta carga{quando}: o preco exibido e' o da "
+                f"ultima vez em que ela foi observada, nao o de agora. Isso nao "
+                f"indica atraso do sync."
+            ]
+        elif policy == POLICY_SNAPSHOT_CURRENT:
+            limites = limites + [
+                f"a fotografia servida e' de {ref_date.isoformat()}, "
+                f"{atraso} dia(s) atras do dia operacional "
+                f"{today.isoformat()}: nao ha fotografia de hoje, e a "
+                f"comparacao vale para aquele dia. Verifique a ultima execucao "
+                f"do publisher."
+            ]
+        else:
+            # Texto do Mercado Livre — INALTERADO, palavra por palavra. E'
+            # contrato publicado, e reescreve-lo aqui mudaria o payload de um
+            # canal que este gate nao deve tocar.
+            limites = limites + [
+                f"observacao de {ref_date.isoformat()}, {atraso} dia(s) atras de "
+                f"{last_eligible_date(today).isoformat()} (D-1 do dia operacional "
+                f"{today.isoformat()}): a comparacao vale para aquele dia e NAO "
+                f"descreve o preco de hoje. Verifique a ultima execucao do sync."
+            ]
     elif freshness == FRESHNESS_HISTORICAL:
         limites = limites + [
             f"consulta retrospectiva: preco anunciado de {ref_date.isoformat()} "
