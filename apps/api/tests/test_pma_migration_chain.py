@@ -36,7 +36,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: consciente a cada migration nova, em vez de aceitar qualquer head.
 #: Avancado para 016 pelo Gate FULL-1A (fatos da superficie Full do ML).
 #: Avancado para 017 pelo Gate PMA-2C2 (observacao multicanal de precos).
-HEAD_ESPERADO = "017"
+#: Avancado para 018 pelo Gate EXP-1C (serving da Expedicao Shopee).
+HEAD_ESPERADO = "018"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta
@@ -535,11 +536,22 @@ def test_017_pertence_ao_pma_e_nao_a_expedicao():
         assert termo not in ddl, termo
 
 
-def test_018_continua_reservada_e_nao_existe():
-    """Expedicao Shopee e' a 018. Este gate nao pode cria-la."""
-    nomes = {a.name for a in VERSIONS.glob("*.py")}
-    assert not any(n.startswith(REVISAO_RESERVADA_EXPEDICAO) for n in nomes)
-    assert REVISAO_RESERVADA_EXPEDICAO not in _migrations()
+def test_018_pertence_a_expedicao_e_pousa_na_017():
+    """A 018 e' da Expedicao Shopee — criada pelo Gate EXP-1C.
+
+    Substitui `test_018_continua_reservada_e_nao_existe`, que afirmava que a 018
+    NAO existia. Aquela premissa era transitoria por construcao: ela guardava o
+    numero enquanto o gate do PMA corria, e deixou de valer no instante em que a
+    frente dona do numero o ocupou. O que continua invariante e' a PROPRIEDADE
+    do numero: se a 018 existir, ela e' da Expedicao e pousa na 017.
+    """
+    migracoes = _migrations()
+    if REVISAO_RESERVADA_EXPEDICAO not in migracoes:
+        return  # ainda nao criada; o mapa de propriedade segue valendo
+    info = migracoes[REVISAO_RESERVADA_EXPEDICAO]
+    assert info["down_revision"] == REVISAO_PMA_MULTICANAL
+    assert info["file"].startswith(f"{REVISAO_RESERVADA_EXPEDICAO}_")
+    assert "expedicao" in info["file"], info["file"]
 
 
 def test_017_cria_somente_a_tabela_do_pma_multicanal():
