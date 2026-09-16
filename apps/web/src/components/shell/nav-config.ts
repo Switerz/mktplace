@@ -49,7 +49,17 @@ export const NAV_SECTIONS: NavSection[] = [
   },
   {
     label: "Operações",
-    pages: [{ href: "/operacoes", label: "Criadores + Alertas" }],
+    pages: [
+      { href: "/operacoes", label: "Criadores + Alertas" },
+      // Gate FULL-1D. Rota PROPRIA, e nao /operacoes/full-ml, porque
+      // `isNavItemActive` casa por prefixo: um filho de /operacoes deixaria os
+      // dois itens ativos ao mesmo tempo.
+      //
+      // Mede MODALIDADE LOGISTICA do envio, nao posicao de estoque nem
+      // expedicao -- por isso nao entra no grupo de Pedidos nem se mistura com
+      // a frente de Expedicao.
+      { href: "/full-ml", label: "Full Mercado Livre" },
+    ],
   },
   // Gate AVH-4B-S — grupo PROPRIO, e nao um item dentro de Cockpits ou
   // Inteligência, de proposito: o que vive aqui e' dado de terceiro, com carga

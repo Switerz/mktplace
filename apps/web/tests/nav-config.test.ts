@@ -39,6 +39,11 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     // consciente.
     "/monitoramento-preco",
     "/operacoes",
+    // Gate FULL-1D — superficie de modalidade logistica do Mercado Livre.
+    // Rota de TOPO, e nao filha de /operacoes: `isNavItemActive` casa por
+    // prefixo, e um filho deixaria os dois itens ativos ao mesmo tempo.
+    // Nao e estoque nem expedicao; mede por onde o pedido foi enviado.
+    "/full-ml",
     // Gate AVH-4B-S Task 2/2 — referencias externas da Avoe.
     "/referencias-externas/avoe",
   ]);

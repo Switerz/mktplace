@@ -266,3 +266,84 @@ Valores de referencia — agosto/2026, no grao publicado pela fato:
     entrega             2,65 d Full x 4,89 d nao-Full     (coorte do pedido)
     partially_refunded  21 Full + 16 nao-Full, em other_orders, fora do GMV
     listings            276 so-Full, 223 mistos, 90 so-nao-Full
+
+
+## Mercado Livre — Full: superfície servida (Gate FULL-1D, 2026-09-16)
+
+O Full do Mercado Livre deixou de ser apenas fato materializada e passou a ser
+**tela**: `/full-ml`, no grupo Operações da navegação.
+
+### O que a superfície é, e o que não é
+
+Mede **modalidade logística do envio** — por onde o pedido saiu. **Não mede
+estoque.** Não há disponibilidade, cobertura em dias nem ruptura, e a ausência é
+decisão medida: o Gate FULL-0R provou correlação de −0,006 entre a variação
+diária de `available_quantity` e as vendas em anúncios exclusivamente Full.
+
+Também **não é expedição**: a frente de Expedição (migration 018) trata de outro
+objeto e vive em outro lugar.
+
+### As três classes
+
+| classe | significado |
+|---|---|
+| `full` | `logistic_type = 'fulfillment'` |
+| `non_full` | qualquer outra modalidade registrada — **não é sinônimo de cross-docking** |
+| `unknown` | envio ausente ou `logistic_type` nulo |
+
+`unknown` fica **fora do denominador** dos três shares: não é Full nem não-Full,
+e contá-lo faria uma lacuna de dado parecer queda operacional. Continua somando
+nos totais absolutos e aparece em alerta próprio na tela.
+
+A composição real do `non_full` fica no bloco por tipo logístico, com o rótulo
+bruto preservado — inclusive `xd_drop_off`, `self_service` e `drop_off`, extintos
+em 2026.
+
+### Métricas exibidas
+
+Todas vêm prontas da API. **A tela não recalcula nada** — a única divisão feita
+no cliente é o share **diário** da série, porque a API entrega o share agregado
+do período, e ela usa a mesma regra do backend (denominador `full + non_full`).
+
+`share_full_gmv` · `share_full_orders` · `share_full_units` · GMV, pedidos e
+unidades por classe · `cancellation_rate` por classe · `handling` e `delivery`
+com o tamanho da amostra · classificação de anúncios (só-Full / mistos /
+só-não-Full) · maior GMV fora do Full por anúncio.
+
+`sample_count` é **censura**, não decoração: pedido ainda sem despacho ou sem
+entrega fica fora da amostra, nunca entra como tempo zero.
+
+### Fonte, janela e limites
+
+- Fonte: `marts.fact_ml_fulfillment_daily` e `..._listing_daily`, via
+  `GET /api/v1/performance/ml-fulfillment`.
+- Série publicada: **01/08/2025 em diante**.
+- **Maio a julho de 2025 não são cobertos** e a tela diz isso: a fonte tem 1.330
+  pedidos pagos sem item nesse intervalo, e publicá-los gravaria venda sem
+  unidade.
+- **Teto de 366 dias por consulta** (`MAX_RANGE_DAYS`, guardrail global da
+  Torre). A fato publica mais de 400 dias: o histórico completo existe e precisa
+  ser consultado em janelas. A tela barra a janela inválida **antes** da
+  requisição, para o corpo técnico do 422 nunca chegar ao usuário.
+- **D0 e futuro bloqueados**: a fato só publica até D−1.
+
+### Estado operacional
+
+`load_mode = manual_snapshot`, e a tela exibe isso em aviso permanente. **A
+automação diária e o rebuild periódico pertencem à frente de DAG e ainda não
+existem** — o dado só avança quando alguém executa o sync.
+
+### Dinheiro chega como string
+
+O backend serializa `Decimal` como **string** (`"4526767.38"`). Os tipos do
+frontend refletem isso, e a conversão acontece num único ponto (`parseGmv`).
+Tipar como número compilaria e produziria `NaN` em produção.
+
+### Referência de agosto/2026
+
+    share_full_gmv      80,61%
+    share_full_orders   81,88%
+    share_full_units    82,05%
+    anúncios            271 só-Full · 222 mistos · 90 só-não-Full
+
+Validados na tela contra a API local, com o Neon já publicado.
