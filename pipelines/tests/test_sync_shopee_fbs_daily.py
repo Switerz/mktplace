@@ -512,3 +512,122 @@ def test_preflight_mede_o_contrato_antes_de_agregar():
     for medida in ("flag_nula", "flag_fora_dominio", "pedidos_duplicados",
                    "item_total_nulo", "quantidade_invalida", "contas"):
         assert medida in sql
+
+
+# ---------------------------------------------------------------------------
+# GRAO: o join pedido x itens NAO pode multiplicar metrica de pedido
+#
+# Este e' o ponto critico da fato. `silver.stg_shopee_order_items` tem UMA
+# linha por item; `stg_shopee_orders` tem uma por pedido. Um join ingenuo
+# faria um pedido de 3 itens contar 3 vezes em created_orders, 3 vezes em
+# cancelled_orders e somar o handling 3 vezes.
+#
+# A defesa e' estrutural: os itens sao PRE-AGREGADOS por (shop_account,
+# order_sn) na CTE `itn` ANTES do join, o que torna a relacao 1:1. Os testes
+# abaixo travam essa estrutura -- uma refatoracao que mova o SUM para o join
+# principal quebra aqui.
+#
+# Verificado tambem em PostgreSQL 16 descartavel no gate FULL-SH-1A-R/V, com
+# pedido de 3 itens, cancelado de 2 itens, to_return de 4 itens e pedido sem
+# item nenhum. Resultado medido: created=4 (nao 10), cancelled=1 (nao 2),
+# to_return=1 (nao 4), handling=21600s (nao 64800s), amostra=1 (nao 3).
+# ---------------------------------------------------------------------------
+
+def test_grao_itens_sao_pre_agregados_por_pedido_antes_do_join():
+    sql = mod.SQL_AGREGA.text
+    # A CTE dos itens existe e agrega por pedido.
+    assert "itn AS (" in sql, "os itens precisam de CTE propria"
+    # Ate' o fechamento da CTE (`),`), e nao ate' o primeiro ")" -- que fica
+    # dentro de `sum(i.item_total)`.
+    itn = sql.split("itn AS (")[1].split("),")[0]
+    assert "sum(i.item_total)" in itn and "sum(i.quantity)" in itn
+    assert "GROUP BY 1, 2" in itn, (
+        "a CTE de itens precisa agregar por (shop_account, order_sn) -- sem "
+        "isso o join vira 1:N e multiplica as metricas de pedido")
+    # E o join usa a CTE ja' agregada, nao a tabela crua.
+    j = sql.split("j AS (")[1].split("SELECT\n")[0]
+    assert "LEFT JOIN itn t" in j, "o join tem de ser com a CTE agregada"
+    assert "stg_shopee_order_items" not in j, (
+        "a tabela crua de itens nao pode ser joinada direto no grao do pedido")
+
+
+def test_grao_contagens_de_pedido_nao_somam_itens():
+    """Toda contagem de populacao e' `count(*)` sobre o grao do pedido."""
+    sql = mod.SQL_AGREGA.text
+    for coluna in ("created_orders", "eligible_orders", "cancelled_orders",
+                   "to_return_orders", "unpaid_orders", "handling_sample_count"):
+        # A expressao pode ocupar varias linhas (`count(*) FILTER (...)`),
+        # entao inspeciona o texto que PRECEDE o alias, recortado a partir da
+        # virgula que separa a expressao anterior.
+        assert f"AS {coluna}" in sql, f"{coluna} nao encontrada no SELECT"
+        antes = sql.split(f"AS {coluna}")[0]
+        trecho = antes[antes.rfind(",", 0, len(antes) - 1) + 1:]
+        assert "count(*)" in trecho, (
+            f"{coluna} tem de ser count(*) de PEDIDOS, nunca sum() de itens: "
+            f"{trecho.strip()[:80]}")
+        assert "sum(" not in trecho, f"{coluna} nao pode somar item"
+
+
+def test_grao_gmv_e_unidades_permanecem_metricas_de_item():
+    """Valor e quantidade vem dos itens -- pre-agregados, mas de item."""
+    sql = mod.SQL_AGREGA.text
+    assert "sum(gmv) FILTER" in sql, "GMV soma o valor pre-agregado do pedido"
+    assert "sum(un)  FILTER" in sql or "sum(un) FILTER" in sql
+
+
+def test_grao_handling_contribui_uma_vez_por_pedido():
+    """`handling_seconds_sum` soma sobre `j`, que tem uma linha por pedido."""
+    sql = mod.SQL_AGREGA.text
+    bloco = sql.split("handling_seconds_sum")[0]
+    # A expressao do handling usa os carimbos do PEDIDO, nunca do item.
+    assert "pickup_done_time - pay_time" in sql
+    assert "i.pickup_done_time" not in sql and "i.pay_time" not in sql
+    # E a amostra e' count(*), ja' coberto acima -- aqui travamos o par.
+    assert sql.count("pickup_done_time IS NOT NULL AND pay_time IS NOT NULL") == 2
+
+
+def test_grao_pedido_sem_item_nao_e_eliminado():
+    """LEFT JOIN + COALESCE: pedido sem item vira GMV zero, nunca linha ausente.
+
+    Medido no descartavel: o pedido G1 (lescent, sem item) publicou
+    eligible_orders=1, gross_gmv=0, gross_units=0 e ainda contou no handling.
+    """
+    sql = mod.SQL_AGREGA.text
+    assert "LEFT JOIN itn" in sql, "INNER JOIN eliminaria pedido sem item"
+    assert "COALESCE(t.gmv, 0)" in sql
+    assert "COALESCE(t.un, 0)" in sql
+
+
+def test_grao_contraprova_aritmetica_dos_quatro_casos():
+    """Reproduz, na camada de agregacao Python, os quatro casos exigidos pelo
+    gate FULL-SH-1A-R/V. Os numeros sao os MEDIDOS no PostgreSQL 16 real.
+
+        A1 completed FBS, 3 itens, pay+pickup  -> GMV 600, 6 un, handling 21600
+        B1 cancelled FBS, 2 itens              -> fora do GMV, conta 1 pedido
+        C1 to_return FBS, 4 itens, sem pickup  -> GMV 100, fora da amostra
+        D1 unpaid    FBS, 1 item,  sem pay     -> GMV 50,  fora da amostra
+    """
+    linha = _linha(
+        classe="fbs",
+        criados=4,      # A1 + B1 + C1 + D1 -- NAO os 10 itens
+        elegiveis=3,    # A1 + C1 + D1
+        cancelados=1,   # B1, apesar de ter 2 itens
+        to_return=1,    # C1, apesar de ter 4 itens
+        unpaid=1,       # D1
+        gmv="750.00",   # 600 + 100 + 50
+        unidades=11,    # 6 + 4 + 1
+        to_return_gmv="100.00", unpaid_gmv="50.00",
+        h_sum=21600,    # so' A1: 6h. Nao 3x6h.
+        h_n=1,          # so' A1
+    )
+    s = mod.summarize(_snap([linha]))
+    assert s["created_orders"] == 4
+    assert s["eligible_orders"] == 3
+    assert s["cancelled_orders"] == 1
+    assert s["gross_gmv"] == "750.00"
+    assert s["gross_units"] == 11
+    assert s["handling_sample_count"] == 1
+    # Cancelamento no denominador proprio: 1 de 4 criados.
+    assert s["cancellation_rate"] == Decimal(1) / Decimal(4)
+    # E as invariantes da linha passam pelo validador.
+    mod.validate_contract(_snap([linha]))
