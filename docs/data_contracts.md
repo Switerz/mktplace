@@ -832,3 +832,140 @@ disso e lido, agregado ou publicado.
 **FULL-SH-2** - snapshot diario do catalogo (FBS configurado, `available_stock`,
 `reserved_stock`). O catalogo e UPSERT sem historico: cada dia sem snapshot e
 um dia perdido para sempre.
+
+
+## 10. API de FBS Shopee (Gate FULL-SH-1C - 2026-09-16, ATRAS DE FEATURE FLAG)
+
+`GET /api/v1/performance/shopee-fbs`. Somente GET. Le exclusivamente
+`marts.fact_shopee_fbs_daily` - nenhuma consulta ao Data Mart, a `silver` ou a
+API da Shopee acontece durante o request.
+
+### Feature flag
+
+`SHOPEE_FBS_ENABLED`, **default false**. Com a flag desligada o endpoint
+devolve **200** com `status = "unavailable"` e **nao emite uma unica
+consulta** - nao ha 404 (a rota existe), nao ha 500 (nada quebrou) e nao ha
+fallback para outro canal. Ligar e' decisao de negocio.
+
+### Filtros
+
+| parametro | dominio |
+|---|---|
+| `date_from` / `date_to` | inclusivos; ate' **366 dias**; teto **D-1** |
+| `brands` | apice, barbours, lescent, rituaria |
+| `accounts` | apice, barbours, lescent, rituaria |
+
+Sem filtro, a consulta cobre **exatamente as quatro contas da allowlist** -
+nunca "tudo que estiver na tabela".
+
+Valor fora do dominio -> **422 tipado**, e a mensagem diz o dominio esperado
+**sem ecoar a entrada**.
+
+### Politica de data: `closed_day`
+
+A fato publica apenas dias FECHADOS. **D0 e futuro sao recusados pela MESMA
+regra** (`date_to > D-1` -> 422), e `meta.d0_materialized` e' sempre `false`.
+
+Isto **diverge do Full ML**, que usa o `resolve_period` compartilhado e barra
+apenas datas futuras, aceitando D0. A Shopee exige regra propria porque a fato
+nao materializa D0: pedir hoje devolveria janela vazia, que na tela pareceria
+queda operacional. **O endpoint do Full ML nao foi alterado.**
+
+### Semantica financeira
+
+`gross_gmv` = **GMV bruto de pedidos nao cancelados**.
+
+| | |
+|---|---|
+| `to_return` | **DENTRO** do bruto, e publicado em `to_return_gmv` |
+| `unpaid` | **DENTRO** do bruto, e publicado em `unpaid_gmv` |
+| `cancelled` | **FORA** do GMV, mas no denominador do cancelamento |
+
+O texto viaja no payload (`meta.gmv_definition`) e diz explicitamente que
+**nao e' receita liquida nem realizada**. Nenhum campo se chama apenas
+"receita" ou "revenue".
+
+### Agregacao
+
+Medidas aditivas sao somadas; razoes so' depois:
+
+    share_fbs_*        = medida(fbs) / medida(fbs + seller)
+    cancellation_rate  = cancelled_orders / created_orders
+    handling medio     = SUM(handling_seconds_sum) / SUM(handling_sample_count)
+
+**Nunca** media de shares diarios nem de taxas diarias. Medido em agosto/2026:
+share agregado **0,60964777** contra media dos shares diarios **0,59762923** -
+a diferenca e' exatamente o peso que a media simples perderia.
+
+O bloco `daily` publica **apenas medidas aditivas**, sem share por dia:
+publicar share diario convidaria a promedia-lo.
+
+Zero x ausencia:
+
+| situacao | resultado |
+|---|---|
+| denominador > 0, numerador FBS zero | **0.0** |
+| denominador = 0 | **null** |
+| conta/marca fora da cobertura | ausente de `by_*`, presente em `missing_accounts` / `brands_not_covered` |
+
+### Cobertura
+
+`meta.scope_label` = **"Shopee - cobertura API"**, nunca "Shopee total".
+
+`expected_accounts` - `observed_accounts` - `missing_accounts` -
+`unexpected_accounts` viajam sempre. Conta esperada sem linha entra em
+`missing_accounts` **e gera warning**; conta fora da allowlist entra em
+`unexpected_accounts` com aviso de contrato quebrado.
+
+**Kokeshi** esta em `brands_not_covered` e **nao e' suprida por XLSX** - o
+servico nao le `silver` nem os snapshots de planilha.
+
+### Frescor - tres relogios
+
+| campo | mede |
+|---|---|
+| `source_watermark_at` | ingestao na silver que entrou na fato |
+| `refreshed_at` | nossa publicacao no Neon |
+| `source_max_date` | ultimo dia FECHADO materializado |
+| `closed_days_behind` | atraso da SERIE contra D-1 |
+
+Publicacao recente **nao mascara** serie antiga: republicar o mesmo periodo
+move `refreshed_at` sem mover `source_max_date`, e `freshness` fica `stale` se
+qualquer um dos dois estourar, ou se `closed_days_behind > 1`.
+
+O frescor vem dos **metadados da fato**, nunca de contar auditorias: o pipeline
+grava **dois rotulos por execucao** (`shopee_fbs_daily` e `..._full`, ids 316 e
+317, mesmo `started_at` e `finished_at`). Conta-los diria "duas cargas" onde
+houve uma.
+
+`load_mode = manual_snapshot` e `no_automation = true`.
+
+### Handling
+
+`pay_time -> pickup_done_time`. **Nao e' entrega**: a API da Shopee nao expoe
+data real de entrega, e nao ha campo de entrega nem de devolucao neste
+contrato. `sample_count` e `coverage_ratio` medem a censura; media **null**
+quando a amostra e' zero.
+
+### Seguranca
+
+Allowlist explicita de colunas, **nunca `SELECT *`**; todo filtro
+parametrizado (`= ANY(:brands)`), nenhum valor interpolado no SQL. Zero
+`order_sn`, `buyer_*`, CPF, endereco, item bruto, JSON cru ou
+`external_seller_id`. Erros sao mensagens FIXAS - nunca o texto da excecao.
+
+### Performance
+
+Medido em EXPLAIN ANALYZE (sessao read-only), tabela de 328 kB / 1.648 linhas:
+
+| cenario | acesso | tempo |
+|---|---|---|
+| 30 dias | `ix_fsfd_ref_date` | 0,40 ms |
+| 366 dias | Seq Scan (por custo) | 1,11 ms |
+| filtro por marca | `ix_fsfd_brand_ref_date` | 3,56 ms |
+| filtro por conta | Seq Scan (por custo) | 0,58 ms |
+| agrupamento diario | Seq Scan (por custo) | 1,59 ms |
+
+Os indices sao usados quando o filtro e' seletivo; nos demais o planejador
+prefere Seq Scan **por custo**, nao por falta de indice. Nenhum indice novo e'
+necessario.

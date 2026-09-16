@@ -402,3 +402,48 @@ devem continuar em documentacao, teste ou tela:
 - **Sem entrega e sem devolucao** na API: handling vai ate a **coleta**.
 - GMV e **bruto**, inclui `to_return` e `unpaid`.
 - Total das quatro contas = "Shopee - cobertura API", nunca "Shopee total".
+
+
+## Shopee - FBS: API de leitura (Gate FULL-SH-1C, 2026-09-16)
+
+`GET /api/v1/performance/shopee-fbs`, **atras de `SHOPEE_FBS_ENABLED`
+(default false)**.
+
+### Formulas servidas
+
+| KPI | formula |
+|---|---|
+| `gross_gmv` | SUM(gross_gmv) dos dias da janela |
+| `share_fbs_gmv` | gmv(fbs) / gmv(fbs+seller), **apos** somar |
+| `share_fbs_orders` | eligible(fbs) / eligible(fbs+seller) |
+| `share_fbs_units` | units(fbs) / units(fbs+seller) |
+| `cancellation_rate` | cancelled_orders / **created_orders** |
+| handling medio | SUM(seconds_sum) / SUM(sample_count) |
+| `coverage_ratio` | sample_count / eligible_orders |
+
+### Quebras publicadas
+
+`by_class` (fbs, seller) - `by_brand` - `by_account` (com watermark proprio
+por conta) - `daily` (por dia e classe, **so' medidas aditivas**).
+
+### Reconciliacao API x Neon - agosto/2026
+
+| marca | GMV total | share FBS | to_return |
+|---|---:|---:|---:|
+| barbours | 944.358,30 | 0,807848917 | 1.946,64 |
+| lescent | 320.670,05 | 0,600741791 | 595,55 |
+| rituaria | 413.010,35 | 0,569645797 | 48,93 |
+| apice | 275.234,00 | **0,0** | 604,42 |
+| kokeshi | - | **fora da cobertura** | - |
+
+52 verificacoes API x SQL, todas iguais. FBS + seller fecha GMV, pedidos e
+unidades.
+
+### Limitacoes declaradas no payload
+
+- Cobertura PARCIAL: quatro contas; **Kokeshi fora da API**.
+- Carga **manual**, sem DAG nem agenda.
+- `closed_day`: D0 nao materializado, projetado nem fabricado.
+- Serie a partir de **2026-01-01**.
+- Handling vai ate' a **coleta**; sem entrega e sem devolucao.
+- GMV e' **bruto**, inclui `to_return` e `unpaid`.
