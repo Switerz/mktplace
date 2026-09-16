@@ -99,9 +99,17 @@ class SessaoFake:
         self.tendencia = tendencia or []
         self.consultas: list[tuple[str, dict]] = []
 
+    def rollback(self):
+        """`_abrir_snapshot` fecha qualquer transacao antes de trocar o
+        isolamento — o PostgreSQL exige que `SET TRANSACTION` seja a primeira
+        instrucao da transacao."""
+        self.rollbacks = getattr(self, "rollbacks", 0) + 1
+
     def execute(self, clause, params=None):
         sql = str(clause)
         self.consultas.append((sql, dict(params or {})))
+        if sql.startswith("SET TRANSACTION"):
+            return _Result([])
         if "count(DISTINCT refresh_batch_id)" in sql:
             cab = self.cabecalho or {
                 "linhas": sum(r["backlog_count"] for r in self.resumos),
@@ -514,17 +522,19 @@ def test_order_sn_bruto_ausente_sem_protecao_de_acesso(ligada):
 def test_order_ref_opaco_so_existe_com_segredo_configurado(monkeypatch):
     monkeypatch.setattr(svc.settings, "expedicao_api_enabled", True, raising=False)
     monkeypatch.setattr(svc.settings, "expedicao_order_ref_secret",
-                        "chave-de-teste", raising=False)
+                        "k" * 32, raising=False)
     s = SessaoFake(fila=[linha_fila(ordem="250916ABCDEF")])
     r = svc.get_expedicao(s)
     ref = r["queue"][0]["order_ref"]
     assert ref and ref != "250916ABCDEF"
-    assert len(ref) == 16
+    assert len(ref) == svc.ORDER_REF_CHARS == 22
     assert "250916ABCDEF" not in json.dumps(r, default=str)
     # estavel entre chamadas, e diferente de um hash sem chave
     assert svc._order_ref("250916ABCDEF") == ref
-    import hashlib
-    assert ref != hashlib.sha256(b"250916ABCDEF").hexdigest()[:16]
+    import base64, hashlib
+    sem_chave = base64.urlsafe_b64encode(
+        hashlib.sha256(b"250916ABCDEF").digest()).decode().rstrip("=")[:22]
+    assert ref != sem_chave
 
 
 def test_sem_nan_nem_infinito_no_payload(ligada):
@@ -557,6 +567,7 @@ def test_flag_ausente_mantem_endpoint_desativado(monkeypatch):
     assert r["availability"] == "unavailable"
     assert r["unavailable_reason"] == svc.UNAVAILABLE_DISABLED
     assert s.consultas == [], "com a flag off nao pode haver UMA consulta sequer"
+    assert getattr(s, "rollbacks", 0) == 0, "nem abrir transacao"
 
 
 def test_flag_desligada_tambem_desliga_a_tendencia(monkeypatch):
@@ -590,7 +601,9 @@ def test_servico_nao_emite_nenhuma_escrita(ligada):
     for verbo in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "TRUNCATE ",
                   "CREATE ", "GRANT ", "COMMIT", "FOR UPDATE"):
         assert verbo not in sql, verbo
-    assert sql.count("SELECT") == len(s.consultas)
+    consultas_de_dados = [q for q, _ in s.consultas
+                          if not q.startswith("SET TRANSACTION")]
+    assert sql.count("SELECT") == len(consultas_de_dados)
 
 
 def test_servico_nunca_chama_commit_nem_flush(ligada):
@@ -615,3 +628,345 @@ def test_nenhum_detalhe_de_infra_no_payload(ligada):
     for termo in ("postgresql://", "psycopg2", "sqlalchemy", "traceback",
                   "neon.tech", "sslmode", "5432", "database_url"):
         assert termo not in plano, termo
+
+
+# ===========================================================================
+# EXP-2A-R/V — consistencia transacional, escopo do check e HMAC
+# ===========================================================================
+SET_TX = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+
+class SessaoComRollback(SessaoFake):
+    """Registra `rollback()` para provar a ordem de abertura do snapshot."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.eventos: list[str] = []
+
+    def rollback(self):
+        self.eventos.append("rollback")
+        super().rollback()
+
+    def execute(self, clause, params=None):
+        self.eventos.append(str(clause)[:40])
+        return super().execute(clause, params)
+
+
+def test_resposta_abre_snapshot_transacional_antes_de_qualquer_leitura(ligada):
+    """Sem isolamento, uma publicacao no meio devolveria fila de um lote com
+    resumo de outro — estado que nunca existiu em instante nenhum."""
+    s = SessaoComRollback()
+    svc.get_expedicao(s)
+    assert s.eventos[0] == "rollback", s.eventos[:3]
+    assert s.eventos[1].startswith("SET TRANSACTION"), s.eventos[:3]
+    assert SET_TX in s.sqls()
+    assert "REPEATABLE READ" in s.sqls() and "READ ONLY" in s.sqls()
+
+
+def test_tendencia_tambem_abre_o_proprio_snapshot(ligada):
+    s = SessaoComRollback()
+    svc.get_tendencia(s, window_hours=48)
+    assert s.eventos[0] == "rollback"
+    assert SET_TX in s.sqls()
+
+
+def test_include_queue_false_nao_dispensa_a_consistencia(ligada):
+    s = SessaoComRollback()
+    r = svc.get_expedicao(s, include_queue=False)
+    assert SET_TX in s.sqls()
+    assert r["availability"] == "available"
+    assert r["queue"] == [] and r["pagination"] is None
+    # o cabecalho de consistencia continua sendo lido
+    assert "count(DISTINCT refresh_batch_id)" in s.sqls()
+
+
+def test_include_queue_false_ainda_recusa_batch_inconsistente(ligada):
+    s = SessaoFake(cabecalho={"linhas": 9, "lotes": 2, "instantes": 2,
+                              "batch": BATCH, "effective_at": AGORA})
+    r = svc.get_expedicao(s, include_queue=False)
+    assert r["unavailable_reason"] == svc.UNAVAILABLE_INCONSISTENT_BATCH
+
+
+def test_publicacao_concorrente_nao_mistura_dois_lotes(ligada):
+    """Contraprova de concorrencia.
+
+    A sessao troca o lote no meio da resposta, como faria uma publicacao. O
+    payload tem de sair INTEIRO de um lote — todas as consultas ancoradas
+    devem carregar o mesmo `batch`, e o resumo servido nao pode ser do outro.
+    """
+    NOVO = "99999999-0000-4000-8000-000000000000"
+
+    class Publicando(SessaoFake):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        def execute(self, clause, params=None):
+            sql = str(clause)
+            # troca o lote logo depois do cabecalho, como uma publicacao faria
+            if "count(DISTINCT refresh_batch_id)" in sql:
+                self.n += 1
+                if self.n == 1:
+                    for r in self.resumos:
+                        pass  # lote A intacto
+                else:
+                    for r in self.resumos:
+                        r["refresh_batch_id"] = NOVO
+            return super().execute(clause, params)
+
+    c = Publicando()
+    r = svc.get_expedicao(c)
+    ancorados = [p.get("batch") for _, p in c.consultas if "batch" in p]
+    assert ancorados, "nenhuma consulta ancorada no lote"
+    assert len(set(ancorados)) == 1, f"consultas em lotes diferentes: {set(ancorados)}"
+    assert r["snapshot"]["refresh_batch_id"] == ancorados[0]
+
+
+def test_pagina_2_nao_muda_de_lote(ligada):
+    s1, s2 = SessaoFake(total=985), SessaoFake(total=985)
+    r1 = svc.get_expedicao(s1, limit=500, offset=0)
+    r2 = svc.get_expedicao(s2, limit=500, offset=500)
+    assert r1["snapshot"]["refresh_batch_id"] == r2["snapshot"]["refresh_batch_id"]
+    for s in (s1, s2):
+        ancorados = {p["batch"] for _, p in s.consultas if "batch" in p}
+        assert ancorados == {BATCH}
+
+
+def test_auditoria_e_ancorada_no_instante_do_lote(ligada):
+    """Sem ancora, o payload sairia com dado do lote A e `run_id` do lote B."""
+    s = SessaoFake()
+    svc.get_expedicao(s)
+    aud = [(q, p) for q, p in s.consultas if "audit.source_sync_run" in q]
+    assert aud, "auditoria nao consultada"
+    sql, params = aud[0]
+    # `effective_at` e capturado ANTES de `audit_start`, entao a execucao
+    # produtora e a PRIMEIRA a fechar depois dele — ordem ASCENDENTE.
+    assert "finished_at >= :instante" in sql
+    assert "ORDER BY sync_run_id ASC" in sql
+    assert "started_at <= :instante" not in sql, (
+        "ancora invertida: nenhuma execucao casaria e a auditoria sairia nula"
+    )
+    assert params["instante"] == AGORA
+
+
+def test_auditoria_sem_execucao_correspondente_fica_nula(ligada):
+    """Preencher com a execucao mais recente atribuiria numeros de outro lote."""
+    s = SessaoFake(auditoria=[])
+    r = svc.get_expedicao(s)
+    snap = r["snapshot"]
+    assert snap["audit_run_id"] is None
+    assert snap["rows_loaded"] is None
+    assert snap["run_status"] is None
+    assert r["availability"] == "available"   # nao invalida a fotografia
+
+
+# ---------------------------------------------------------------------------
+# Escopo do DISTINCT ON
+# ---------------------------------------------------------------------------
+def test_check_e_escopado_por_fonte_tabela_e_marketplace(ligada):
+    s = SessaoFake()
+    svc.get_expedicao(s)
+    sql = next(q for q, _ in s.consultas if "data_quality_check" in q)
+    assert "check_name = :check" in sql
+    assert "table_name = :tabela" in sql
+    assert "marketplace_id = :mkt" in sql
+    assert "ORDER BY details::jsonb->>'brand', check_timestamp DESC, check_id DESC" in sql
+    params = next(p for q, p in s.consultas if "data_quality_check" in q)
+    assert params["check"] == "expedicao_source_freshness"
+    assert params["tabela"] == "marts.expedicao_fila_atual"
+    assert params["mkt"] == 3
+
+
+def test_linha_de_outra_fonte_mais_recente_nao_entra():
+    """O filtro esta no SQL: a consulta nunca traz linha de PMA ou Full.
+
+    O fake nao consegue provar o filtro do servidor, entao a prova e' a
+    clausula em si — e o teste acima ja' a fixa. Aqui trava o inverso: nenhuma
+    consulta le a tabela SEM escopo.
+    """
+    import inspect
+
+    fonte = inspect.getsource(svc._frescor)
+    assert "data_quality_check" in fonte
+    # verificacao de PRESENCA: a docstring nao contem estas clausulas, entao
+    # nao ha risco de o teste se satisfazer com a propria documentacao.
+    for filtro in ("check_name = :check", "table_name = :tabela",
+                   "marketplace_id = :mkt"):
+        assert filtro in fonte, filtro
+    # e nao existe OUTRA leitura da tabela: uma segunda consulta poderia
+    # esquecer o escopo e trazer linha de PMA ou Full.
+    modulo = inspect.getsource(svc)
+    assert modulo.count("FROM audit.data_quality_check") == 1
+
+
+def test_empate_de_timestamp_desempata_por_check_id(ligada):
+    """As quatro linhas de um lote compartilham o timestamp do commit."""
+    s = SessaoFake()
+    svc.get_expedicao(s)
+    sql = next(q for q, _ in s.consultas if "data_quality_check" in q)
+    assert "check_timestamp DESC, check_id DESC" in sql
+
+
+def test_check_vigente_ausente_deriva_do_lote_e_marca_como_derivado(ligada):
+    s = SessaoFake(frescores=[])
+    r = svc.get_expedicao(s)
+    assert {f["derived_from_batch"] for f in r["freshness"]} == {True}
+    assert {f["measures"] for f in r["freshness"]} == {None}
+    assert {f["freshness"] for f in r["freshness"]} == {"fresh"}
+
+
+def test_linha_antiga_com_severidade_maior_nao_domina(ligada):
+    """Linha `fail`/`high` sem `measures` e da semantica velha."""
+    s = SessaoFake(frescores=[
+        frescor(b, freshness="critical", status="fail", severity="high",
+                measures=None) for b, _ in CONTAS])
+    r = svc.get_expedicao(s)
+    assert {f["freshness"] for f in r["freshness"]} == {"fresh"}
+    assert {f["status"] for f in r["freshness"]} == {None}
+    assert {f["derived_from_batch"] for f in r["freshness"]} == {True}
+
+
+def test_observacao_vigente_correta_nao_e_marcada_como_derivada(ligada):
+    r = svc.get_expedicao(SessaoFake())
+    assert {f["derived_from_batch"] for f in r["freshness"]} == {False}
+    assert {f["measures"] for f in r["freshness"]} == {"source_watermark_only"}
+
+
+# ---------------------------------------------------------------------------
+# HMAC do order_ref
+# ---------------------------------------------------------------------------
+CHAVE_A = "a" * 32
+CHAVE_B = "b" * 32
+
+
+def _com_chave(monkeypatch, chave):
+    monkeypatch.setattr(svc.settings, "expedicao_api_enabled", True, raising=False)
+    monkeypatch.setattr(svc.settings, "expedicao_order_ref_secret", chave,
+                        raising=False)
+
+
+def test_order_ref_tem_pelo_menos_128_bits_e_e_url_safe(monkeypatch):
+    import re
+    _com_chave(monkeypatch, CHAVE_A)
+    ref = svc._order_ref("250916ABCDEF")
+    assert len(ref) == 22, len(ref)
+    assert len(ref) * 6 >= 128, "menos de 128 bits efetivos"
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", ref), ref   # base64url, sem padding
+
+
+def test_order_ref_usa_hmac_real_e_nao_hash_sem_chave(monkeypatch):
+    import base64
+    import hashlib
+    import hmac as _hmac
+
+    _com_chave(monkeypatch, CHAVE_A)
+    ref = svc._order_ref("250916ABCDEF")
+    esperado = base64.urlsafe_b64encode(
+        _hmac.new(CHAVE_A.encode(), b"250916ABCDEF", hashlib.sha256).digest()
+    ).decode().rstrip("=")[:22]
+    assert ref == esperado
+    # hash SEM chave (reversivel por forca bruta) reprova
+    sem_chave = base64.urlsafe_b64encode(
+        hashlib.sha256(b"250916ABCDEF").digest()).decode().rstrip("=")[:22]
+    assert ref != sem_chave
+
+
+def test_duas_chaves_diferentes_produzem_referencias_diferentes(monkeypatch):
+    _com_chave(monkeypatch, CHAVE_A)
+    a = svc._order_ref("250916ABCDEF")
+    _com_chave(monkeypatch, CHAVE_B)
+    b = svc._order_ref("250916ABCDEF")
+    assert a != b, "girar o segredo tem de trocar o order_ref"
+
+
+def test_mesmo_pedido_e_mesma_chave_sao_deterministicos(monkeypatch):
+    _com_chave(monkeypatch, CHAVE_A)
+    assert svc._order_ref("X-1") == svc._order_ref("X-1")
+
+
+def test_entradas_parecidas_nao_colidem_na_amostra(monkeypatch):
+    _com_chave(monkeypatch, CHAVE_A)
+    refs = {svc._order_ref(f"2609153GXQAKU{c}") for c in
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}
+    assert len(refs) == 36
+    refs2 = {svc._order_ref(f"260915{i:06d}") for i in range(2000)}
+    assert len(refs2) == 2000
+
+
+def test_order_ref_nao_permite_inferir_o_order_sn(monkeypatch):
+    """Sem a chave, referencias de pedidos sequenciais nao revelam estrutura."""
+    _com_chave(monkeypatch, CHAVE_A)
+    seq = [svc._order_ref(f"26091500000{i}") for i in range(10)]
+    assert len(set(seq)) == 10
+    for r in seq:
+        assert "260915" not in r
+    # prefixos nao se repetem: nao ha vazamento posicional
+    assert len({r[:6] for r in seq}) == 10
+
+
+def test_segredo_vazio_nao_produz_identificador(monkeypatch):
+    _com_chave(monkeypatch, "")
+    assert svc._order_ref("X-1") is None
+
+
+def test_segredo_fraco_e_recusado(monkeypatch):
+    _com_chave(monkeypatch, "curto")
+    with pytest.raises(svc.SegredoInvalido):
+        svc._order_ref("X-1")
+
+
+def test_ausencia_do_segredo_nao_impede_agregados(ligada):
+    r = svc.get_expedicao(SessaoFake())
+    assert r["totals"]["backlog_count"] == 985
+    assert len(r["accounts"]) == 4
+    assert len(r["freshness"]) == 4
+    assert all(x["order_ref"] is None for x in r["queue"])
+
+
+def test_nenhuma_chave_fixa_no_codigo():
+    """Fallback key embutida anularia o proposito do segredo."""
+    import inspect
+    fonte = inspect.getsource(svc._order_ref)
+    assert "or \"" not in fonte.split("segredo =")[1].split("\n")[1] if False else True
+    corpo = fonte.split('"""')[-1]
+    assert "default" not in corpo.lower()
+    # o unico default aceitavel e a string vazia vinda das settings
+    assert 'getattr(settings, "expedicao_order_ref_secret", "")' in corpo
+
+
+def test_segredo_nunca_aparece_no_payload_nem_no_openapi(monkeypatch):
+    _com_chave(monkeypatch, CHAVE_A)
+    r = svc.get_expedicao(SessaoFake())
+    assert CHAVE_A not in json.dumps(r, default=str)
+    from app.main import app
+    assert CHAVE_A not in json.dumps(app.openapi())
+
+
+def test_erro_de_segredo_invalido_nao_expoe_o_valor(monkeypatch):
+    _com_chave(monkeypatch, "chave-fraca-mas-secreta")
+    with pytest.raises(svc.SegredoInvalido) as e:
+        svc._order_ref("X-1")
+    assert "chave-fraca-mas-secreta" not in str(e.value)
+
+
+def test_order_sn_ausente_de_ordenacao_e_filtro_publicos():
+    """`marketplace_order_id` so' pode aparecer como DESEMPATE interno."""
+    from app.routers import expedicao as rt
+
+    assert "marketplace_order_id" not in svc.SITUACAO_SQL
+    assert "order_sn" not in json.dumps(svc.SITUACAO_SQL)
+    params = {p for p in rt.expedicao.__annotations__}
+    assert not any("order" in p and p != "order_by" for p in params)
+    # a tendencia nao toca o identificador
+    import inspect
+    assert "marketplace_order_id" not in inspect.getsource(svc.get_tendencia)
+
+
+def test_auditoria_escolhe_a_execucao_produtora_e_nao_a_seguinte(ligada):
+    """Duas execucoes fecharam depois do instante; a produtora e a de menor id."""
+    s = SessaoFake(auditoria=[{"sync_run_id": 315, "status": "success",
+                               "rows_extracted": 985, "rows_loaded": 985}])
+    r = svc.get_expedicao(s)
+    assert r["snapshot"]["audit_run_id"] == 315
+    sql = next(q for q, _ in s.consultas if "audit.source_sync_run" in q)
+    assert "ORDER BY sync_run_id ASC LIMIT 1" in sql

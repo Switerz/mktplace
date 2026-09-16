@@ -28,6 +28,7 @@ a mais recente, por marca.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -45,6 +46,22 @@ from app.schemas.expedicao import (
 
 CHANNEL = "shopee"
 CHECK_FRESHNESS = "expedicao_source_freshness"
+#: Shopee. Escopa o check para que nenhuma linha de PMA, Full ou de outra fonte
+#: entre no `DISTINCT ON`, por mais recente que seja.
+MARKETPLACE_ID = 3
+
+#: Tamanho minimo do segredo do `order_ref`. Abaixo disso a chave nao resiste a
+#: busca exaustiva.
+SEGREDO_MIN_BYTES = 32
+
+#: 22 caracteres base64url = 132 bits efetivos, acima dos 128 exigidos.
+ORDER_REF_CHARS = 22
+
+
+class SegredoInvalido(RuntimeError):
+    """`expedicao_order_ref_secret` configurado com valor fraco demais."""
+
+
 FILA = "marts.expedicao_fila_atual"
 RUN = "marts.expedicao_refresh_run"
 
@@ -116,15 +133,31 @@ def _order_ref(order_sn: str) -> Optional[str]:
     CHAVE tambem nao resolve: o espaco de `order_sn` e' curto e enumeravel, e
     uma tabela arco-iris o reverte em minutos.
 
-    Com `expedicao_order_ref_secret` configurado, devolve um HMAC truncado —
-    estavel entre execucoes, inutil para quem nao tem a chave. Sem segredo,
-    devolve `None`: o default e' NAO publicar.
+    Com `expedicao_order_ref_secret` configurado devolve HMAC-SHA256 em
+    base64url, 132 bits efetivos. Sem segredo devolve `None`: o default e' NAO
+    publicar, e a ausencia do identificador nao impede nenhum agregado.
+
+    O QUE `order_ref` NAO E'
+    ------------------------
+    Nao concede acesso ao pedido, nao substitui autenticacao e nao pode ser
+    trocado pelo `order_sn` nesta API — nao existe rota de resolucao reversa.
+    Girar o segredo troca TODOS os `order_ref`: ele e' estavel para correlacao
+    dentro de uma configuracao, nunca um identificador perene.
     """
     segredo = getattr(settings, "expedicao_order_ref_secret", "") or ""
     if not segredo:
         return None
-    return hmac.new(segredo.encode("utf-8"), order_sn.encode("utf-8"),
-                    hashlib.sha256).hexdigest()[:16]
+    bruto = segredo.encode("utf-8")
+    if len(bruto) < SEGREDO_MIN_BYTES:
+        # Segredo fraco da' a ILUSAO de protecao, que e' pior que nao ter
+        # identificador nenhum: o consumidor confia num valor reversivel.
+        raise SegredoInvalido(
+            f"expedicao_order_ref_secret precisa de ao menos "
+            f"{SEGREDO_MIN_BYTES} bytes."
+        )
+    digest = hmac.new(bruto, order_sn.encode("utf-8"), hashlib.sha256).digest()
+    texto = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return texto[:ORDER_REF_CHARS]
 
 
 def _horas(inicio: Optional[datetime], fim: Optional[datetime]) -> Optional[float]:
@@ -195,6 +228,26 @@ def _linhas(db, sql: str, params: dict) -> list[dict]:
     return [dict(r) for r in db.execute(text(sql), params).mappings()]
 
 
+def _abrir_snapshot(db) -> None:
+    """Uma unica fotografia do BANCO para todas as consultas da resposta.
+
+    O payload e' montado com varias consultas — cabecalho do lote, resumos,
+    fila, contagem, auditoria, frescor, registry. Sem isolamento, uma publicacao
+    concorrente entre duas delas devolveria fila do lote novo com resumo do
+    antigo: um estado que nunca existiu em instante nenhum.
+
+    `REPEATABLE READ` congela o instante na primeira consulta de dados; todas as
+    seguintes leem dele. `READ ONLY` e' o cinto: mesmo que alguem acrescente um
+    INSERT aqui um dia, o servidor recusa.
+
+    O `rollback()` antes garante que a transacao ainda nao comecou — o PostgreSQL
+    exige que `SET TRANSACTION` seja a primeira instrucao dela. Numa sessao
+    recem-aberta por `get_db` e' um no-op.
+    """
+    db.rollback()
+    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+
+
 # ---------------------------------------------------------------------------
 # Fotografia vigente
 # ---------------------------------------------------------------------------
@@ -244,13 +297,33 @@ def _carregar_snapshot(db) -> tuple[Optional[dict], Optional[str]]:
             "linhas": cab["linhas"], "resumos": resumos}, None
 
 
-def _auditoria(db, batch: str) -> dict:
+def _auditoria(db, effective_at: datetime) -> dict:
+    """A execucao que produziu ESTE lote.
+
+    `audit.source_sync_run` nao guarda `refresh_batch_id`, entao a ancora e'
+    temporal: a PRIMEIRA execucao que terminou em ou depois do `effective_at`
+    desta fotografia.
+
+    A ordem dos instantes na CLI e' `effective_at` -> `audit_start` ->
+    publicacao -> `audit_finish`. Ou seja, `effective_at` vem ANTES de
+    `started_at`, e a execucao produtora e' a primeira a fechar depois dele.
+    Execucoes posteriores tambem satisfazem `finished_at >= effective_at`, e por
+    isso a ordenacao e' ASCENDENTE: a menor `sync_run_id` que cumpre a condicao
+    e' a que gerou este lote.
+
+    Sem essa ancora bastaria uma publicacao concorrente para o payload sair com
+    o dado do lote A e o `run_id` da execucao B. Se nada casar, os campos ficam
+    NULOS: preenche-los com a execucao mais recente seria atribuir a esta
+    fotografia numeros de outra.
+    """
     linhas = _linhas(db, """
         SELECT sync_run_id, status, rows_extracted, rows_loaded
         FROM audit.source_sync_run
-        WHERE source_name = :fonte AND status <> 'running'
-        ORDER BY sync_run_id DESC LIMIT 1
-    """, {"fonte": f"expedicao_{CHANNEL}"})
+        WHERE source_name = :fonte
+          AND status <> 'running'
+          AND finished_at >= :instante
+        ORDER BY sync_run_id ASC LIMIT 1
+    """, {"fonte": f"expedicao_{CHANNEL}", "instante": effective_at})
     return linhas[0] if linhas else {}
 
 
@@ -265,11 +338,15 @@ def _frescor(db) -> list[dict]:
     return _linhas(db, """
         SELECT DISTINCT ON (details::jsonb->>'brand')
                details::jsonb->>'brand' AS brand,
-               status, severity, check_timestamp, details::jsonb AS detalhe
+               status, severity, check_timestamp, check_id,
+               details::jsonb AS detalhe
         FROM audit.data_quality_check
-        WHERE check_name = :check AND details IS NOT NULL
+        WHERE check_name = :check
+          AND table_name = :tabela
+          AND marketplace_id = :mkt
+          AND details IS NOT NULL
         ORDER BY details::jsonb->>'brand', check_timestamp DESC, check_id DESC
-    """, {"check": CHECK_FRESHNESS})
+    """, {"check": CHECK_FRESHNESS, "tabela": FILA, "mkt": MARKETPLACE_ID})
 
 
 def _monta_frescor(bruto: list[dict], resumos: list[dict],
@@ -321,6 +398,10 @@ def _monta_frescor(bruto: list[dict], resumos: list[dict],
             "accounts": contas_n,
             "observed_at": observado,
             "measures": det.get("measures") if atual else None,
+            # Marca EXPLICITA de que o estado nao veio da auditoria vigente:
+            # foi derivado do watermark deste lote porque a linha e antiga
+            # (semantica do EXP-1E) ou nao existe.
+            "derived_from_batch": not atual,
         })
     return saida
 
@@ -398,13 +479,14 @@ def get_expedicao(
     if not habilitado():
         return _indisponivel(UNAVAILABLE_DISABLED)
 
+    _abrir_snapshot(db)
     snap, motivo = _carregar_snapshot(db)
     if snap is None:
         return _indisponivel(motivo or UNAVAILABLE_NO_SNAPSHOT)
 
     resumos = snap["resumos"]
     effective_at = snap["effective_at"]
-    aud = _auditoria(db, snap["batch"])
+    aud = _auditoria(db, effective_at)
 
     medidas = ("backlog_count", "overdue_count", "due_within_24h_count",
                "on_time_count", "deadline_unavailable_count", "over_48h_count",
@@ -524,6 +606,7 @@ def get_tendencia(db, *, window_hours: int = JANELA_PADRAO_HORAS,
     if not habilitado():
         return _indisponivel(UNAVAILABLE_DISABLED, tendencia=True)
 
+    _abrir_snapshot(db)
     janela = max(1, min(int(window_hours), JANELA_MAX_HORAS))
     onde = ["channel = :canal",
             "snapshot_hour >= date_trunc('hour', now()) - make_interval(hours => :janela)"]

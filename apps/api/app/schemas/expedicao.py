@@ -122,6 +122,10 @@ class FrescorMarca(BaseModel):
     #: O que a linha realmente mediu. `source_watermark_only` e' a semantica
     #: corrigida; ausente significa linha antiga, que a API nao serve como atual.
     measures: Optional[str] = None
+    #: `true` quando NAO havia observacao vigente com a semantica correta e o
+    #: estado foi derivado do watermark deste lote. Fica explicito para que
+    #: ninguem confunda estado auditado com estado inferido.
+    derived_from_batch: bool = False
 
 
 class ResumoConta(BaseModel):
