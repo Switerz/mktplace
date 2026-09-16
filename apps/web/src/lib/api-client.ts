@@ -11,6 +11,7 @@ import {
 } from "./marketplace-filter";
 import { buildRegioesQueryParams } from "./regioes-query";
 import { computeContentMix } from "./tiktok-content-mix";
+import type { MLFulfillmentResponse } from "./ml-fulfillment";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -2249,4 +2250,65 @@ export async function fetchAvoeSnapshot(
     throw new AvoeSnapshotError(`A API respondeu ${res.status}.`, res.status);
   }
   return (await res.json()) as AvoeSnapshotResponse;
+}
+
+
+// ---------------------------------------------------------------------------
+// Full Mercado Livre — Gate FULL-1D
+// ---------------------------------------------------------------------------
+//
+// Mede MODALIDADE LOGISTICA do envio, nao posicao de estoque. Os tipos moram em
+// `@/lib/ml-fulfillment` porque a tela consome a maior parte deles sem passar
+// por aqui; este arquivo so acrescenta o transporte.
+
+export class MLFulfillmentError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "MLFulfillmentError";
+    this.status = status;
+  }
+}
+
+/**
+ * Busca a superficie Full do ML.
+ *
+ * `query` ja vem montada por `buildQuery` de `@/lib/ml-fulfillment`, que e onde
+ * a validacao de janela vive -- inclusive o teto de 366 dias, barrado ANTES da
+ * requisicao para o usuario nunca ver o corpo tecnico do 422.
+ *
+ * O 422 que escapar (janela valida no cliente e recusada no servidor) vira
+ * mensagem propria: o corpo do Pydantic ecoa o valor recebido e nao deve
+ * chegar a tela.
+ */
+export async function fetchMLFulfillment(
+  query: string,
+  signal?: AbortSignal,
+): Promise<MLFulfillmentResponse> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_URL}/api/v1/performance/ml-fulfillment?${query}`,
+      { signal },
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new MLFulfillmentError("Nao foi possivel contatar a API.", null);
+  }
+  if (res.status === 422) {
+    throw new MLFulfillmentError(
+      "Periodo ou filtro invalido para esta consulta.",
+      422,
+    );
+  }
+  if (res.status === 503) {
+    throw new MLFulfillmentError(
+      "Superficie Full do Mercado Livre indisponivel no momento.",
+      503,
+    );
+  }
+  if (!res.ok) {
+    throw new MLFulfillmentError(`A API respondeu ${res.status}.`, res.status);
+  }
+  return (await res.json()) as MLFulfillmentResponse;
 }
