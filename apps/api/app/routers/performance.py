@@ -581,6 +581,31 @@ def monitoramento_preco(
             "importada."
         ),
     ),
+    # Gate PMA-2C4A — filtros dos canais novos. SEM `max_length`, pelo mesmo
+    # motivo dos tres acima: o validador nativo ecoaria o valor recusado. O teto
+    # e' aplicado no servico, com mensagem CONSTANTE.
+    shop_account: Optional[str] = Query(
+        None,
+        description=(
+            "Conta(s) de loja separadas por virgula, ou 'all'. So' se aplica a "
+            "marketplace=shopee e marketplace=tiktok: a fato do Mercado Livre "
+            "nao modela conta de loja, e pedi-lo com marketplace=ml e' recusado "
+            "com 422 em vez de ignorado. As contas presentes na fotografia vem "
+            "em meta.account_clocks. Maximo de 120 caracteres."
+        ),
+    ),
+    product_type: Optional[str] = Query(
+        None,
+        description=(
+            "Tipo(s) de produto separados por virgula, ou 'all', entre: "
+            "kit_confirmed, kit_suspected, no_kit_signal, product_type_unknown. "
+            "So' se aplica a marketplace=shopee e marketplace=tiktok, onde o "
+            "valor e' MATERIALIZADO na fato pelo publisher; no Mercado Livre ele "
+            "e' derivado em tempo de consulta e o filtro e' recusado com 422. "
+            "`product_type_unknown` significa SEM SINAL de kit, nunca 'produto "
+            "simples confirmado'. Maximo de 120 caracteres."
+        ),
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     # Parametro OCULTO, recebido como texto so para poder ser RECUSADO (PMA-1B).
@@ -670,6 +695,8 @@ def monitoramento_preco(
             status=status,
             product_query=product_query,
             observed_date=observed_date,
+            shop_account=shop_account,
+            product_type=product_type,
             limit=limit,
             offset=offset,
         )

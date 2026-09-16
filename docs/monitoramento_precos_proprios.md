@@ -717,3 +717,156 @@ fotografia sem que ninguém tivesse verificado o que havia lá.
 
 Fonte indisponível **nunca** vira fotografia vazia, e não existe linha sentinela
 representando "zero ofertas".
+
+---
+
+# Gate PMA-2C4A — serving multicanal de Shopee e TikTok (2026-09-16)
+
+O piloto do PMA-2C3D publicou 1.900 ofertas em
+`marts.fact_channel_offer_observation`, mas o endpoint não as exibia: o serviço
+só consultava as tabelas legadas do Mercado Livre. Este gate ligou a leitura.
+
+## Duas políticas de data, escolhidas pelo contrato da fonte
+
+Não existe um teto global. Cada canal traz a sua política, e `meta.date_policy`
+a declara no payload.
+
+| | Mercado Livre | Shopee e TikTok |
+|---|---|---|
+| política | `closed_day` | `snapshot_current` |
+| fonte | série diária | fotografia do estado corrente |
+| teto consultável | **D−1** em America/Sao_Paulo | **dia operacional corrente (D0)** |
+| D0 | inconsistência: recusado com 422, e uma linha em D0 faz o serving falhar fechado | caso **normal** |
+| futuro | recusado | recusado |
+
+A razão é o contrato de cada fonte. O ML é série diária: só um dia fechado
+sustenta comparação, e uma linha em D0 só poderia vir de escrita fora do
+contrato. Shopee e TikTok publicam fotografia derivada do watermark da conta no
+próprio dia — para eles, exigir D−1 significaria nunca servir o que acabou de
+ser publicado.
+
+**D0 não é período fechado.** `meta.snapshot_mutability` vale
+`mutable_operational_snapshot` enquanto a fotografia é do dia corrente: o número
+é verdadeiro para o instante observado, não para o dia, e pode mudar hoje se a
+origem recarregar. Um aviso em `meta.warnings` diz isso em português. Quando o
+dia vira, passa a `settled_snapshot`.
+
+**D0 permitido não é automaticamente `fresh`.** O frescor sai do watermark
+materializado, não da igualdade de datas: se a fotografia do dia não tiver
+nenhuma oferta com `snapshot_status = current`, a resposta vem `stale`. Por
+linha, `freshness_status` traduz o `snapshot_status` que o publisher gravou —
+na Shopee medimos 238 ofertas `current` e 454 `stale` dentro da mesma carga de
+hoje, porque há modelo com carimbo de até 18 dias atrás.
+
+## Fontes físicas
+
+| canal | tabela de observação | tabela de referência |
+|---|---|---|
+| `ml` | `marts.fact_marketplace_listing_price_daily` | `marts.fact_suggested_price_reference_snapshot` |
+| `shopee`, `tiktok` | `marts.fact_channel_offer_observation` | a mesma |
+
+A tabela de referência é comum aos três porque a referência é do **produto**,
+não do canal. As duas fatos **nunca aparecem na mesma consulta** — há teste de
+contrato que varre o texto de todas as consultas e reprova se isso acontecer.
+É a prova estrutural de que não existe fallback entre canais: um canal sem dado
+devolve 200 com estado vazio tipado, nunca linha do outro.
+
+O plano medido usa `idx_fcoo_escopo`:
+
+```
+Bitmap Heap Scan on fact_channel_offer_observation
+  Recheck Cond: ((marketplace = 'shopee') AND (observed_date = '2026-09-16'))
+  ->  Bitmap Index Scan on idx_fcoo_escopo
+```
+
+## Números reconciliados contra o Neon (snapshot de 2026-09-16)
+
+| | Shopee | TikTok |
+|---|---:|---:|
+| `total_count` / `monitored_offers` | 692 | 1.208 |
+| ativas / inativas | 593 / 99 | 909 / 299 |
+| contas / marcas | 4 / 4 | 1 / 7 |
+| fora do escopo de beleza | 0 | 223 |
+| elegíveis | 308 | 350 |
+| comparáveis | 150 | 102 |
+| cobertura | 48,7% | 29,1% |
+| `snapshot_status` | 238 current, 454 stale | 1.208 current |
+
+API e SQL direto batem em todos esses campos, com `EXCEPT` bidirecional 0/0
+entre as chaves paginadas e as da tabela.
+
+## Semântica dos campos
+
+Mapeamento explícito, sem inferência por nome:
+
+| fato | payload |
+|---|---|
+| `offer_key` | `item_id` e `offer_key` (idênticos) |
+| `observed_date` | `ref_date`, `observed_date` e `meta.observed_date` |
+| `observed_price` | `advertised_price` — preço **anunciado** na vitrine |
+| `observed_at` | `observed_at` — instante da observação da linha |
+| `is_active` | `listing_status` (`active` / `inactive`) |
+| `list_price` | `original_price` e `list_price` |
+| `product_type` | `product_type` — **materializado**, nunca reclassificado |
+| `account_watermark_at` | `account_watermark_at` e `meta.account_clocks[]` |
+| `snapshot_status` | `snapshot_status` e `freshness_status` da linha |
+| `business_scope` | `business_scope` e `meta.out_of_scope_offer_count` |
+
+`product_type` vem do publisher, que decidiu com autoridades que a API não
+alcança — flag nativa do canal, cadastro interno, BOM. Reclassificar aqui, com
+apenas SKU e título, daria dois rótulos à mesma oferta conforme quem pergunta.
+
+Não há `permalink`: a fato não guarda URL, e derivá-la do `offer_key` produziria
+link quebrado com aparência de link bom.
+
+## Denominadores
+
+`monitored_offers` conta **todas** as ofertas do canal, inclusive as de marca
+fora do escopo de beleza (Gocase e Denavita, no TikTok): elas existem e a
+auditoria de cobertura precisa vê-las. O que elas não fazem é entrar em
+`eligible_offers` nem na taxa de cobertura.
+
+`eligible_offers` = ativas − `kit_confirmed` − `kit_suspected` − fora de escopo.
+É `v2_product_type_aware`, e numerador e denominador saem da mesma versão.
+`product_type_counts` conta as **ativas**, como no ML, e é o que mantém a
+identidade `eligible = active − kits` aritmeticamente verdadeira.
+
+O filtro `status` altera **somente a tabela**; KPIs e `metrics` descrevem sempre
+o conjunto do filtro estrutural, preservando o denominador.
+
+## Filtros novos
+
+`shop_account` e `product_type` valem **apenas** para Shopee e TikTok. Pedidos
+com `marketplace=ml` são recusados com 422 e mensagem fixa — nunca ignorados em
+silêncio, que era o defeito do antigo `ref_date`.
+
+A allowlist de `brand` passou a ser por canal: o ML mantém as quatro marcas
+publicadas; os canais aceitam as cinco de `BEAUTY_SCOPE_BRANDS`. Marca fora de
+escopo (`gocase`, `denavita`) aparece nas linhas mas não é filtrável — limitação
+conhecida.
+
+## Feature flags
+
+`PMA_SHOPEE_ENABLED` e `PMA_TIKTOK_ENABLED` continuam **desligadas por padrão**,
+e este gate não tocou a configuração do Render nem da Vercel. Com a flag
+desligada nenhuma consulta é emitida e a resposta é 200 com KPIs zerados e
+`coverage_rate` nulo. Com a flag ligada, o dado real é servido e não há fallback
+para o ML.
+
+## Limitações abertas
+
+- **O frontend ainda não consome estes canais.** `monitoramento-preco-contract.ts`
+  tipa `meta.marketplace` como `"ml"` e `advertised_price` como `number`. O
+  schema da API passou a admitir `advertised_price` nulo (a fato permite, e o ML
+  nunca produz nulo), então nenhuma resposta de ML muda — mas exibir Shopee ou
+  TikTok exige um gate de frontend.
+- **`observed_date` histórico ainda não existe para os canais**: há uma única
+  fotografia publicada. `available_observed_dates` cresce conforme o publisher
+  rodar.
+- **A publicação continua manual.** Não há Scheduler nem Airflow chamando o
+  `channel_offer_publisher`; cada fotografia veio de execução operacional
+  explícita.
+- **Preço nulo em oferta ativa** cai em `comparison_status = no_reference` com
+  `non_comparable_reason = invalid_channel_price`, porque a partição comercial
+  tem cinco valores congelados por teste e tipados no frontend. Hoje o caso não
+  ocorre: as 8 ofertas sem preço do TikTok são todas inativas.

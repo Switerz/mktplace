@@ -75,6 +75,65 @@ MAX_BRAND_PARAM_CHARS = 120
 MAX_STATUS_PARAM_CHARS = 240
 MAX_PRODUCT_QUERY_CHARS = 120
 
+#: Gate PMA-2C4A — tetos e recusas dos filtros NOVOS. Mensagens FIXAS, sem eco.
+MAX_ACCOUNT_PARAM_CHARS = 120
+MAX_PRODUCT_TYPE_PARAM_CHARS = 120
+
+#: Conta de loja aceita letras, digitos, hifen e sublinhado. O formato e'
+#: validado, mas nao ha allowlist fixa: contas sao cadastro da origem e mudam
+#: sem release da API. O valor viaja por PARAMETRO ate o driver.
+_ACCOUNT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+ERRO_ACCOUNT_INVALIDA = (
+    "parametro shop_account invalido. Aceita 'all', ou contas separadas por "
+    "virgula usando apenas letras minusculas, digitos, hifen e sublinhado. "
+    "As contas presentes na fotografia vem em meta.account_clocks."
+)
+ERRO_ACCOUNT_TAMANHO = (
+    f"parametro shop_account excede o tamanho maximo de "
+    f"{MAX_ACCOUNT_PARAM_CHARS} caracteres."
+)
+ERRO_PRODUCT_TYPE_INVALIDO = (
+    "parametro product_type invalido. Aceita 'all', ou valores separados por "
+    "virgula entre: kit_confirmed, kit_suspected, no_kit_signal, "
+    "product_type_unknown."
+)
+#: O ML nao tem conta de loja nem `product_type` materializado. Ignorar o
+#: filtro devolveria um numero certo sob uma pergunta errada — a mesma falha
+#: que `ref_date` tinha antes de virar 422.
+ERRO_ACCOUNT_NAO_SUPORTADO = (
+    "parametro shop_account nao se aplica ao Mercado Livre: a fato dele nao "
+    "modela conta de loja. Use-o com marketplace=shopee ou marketplace=tiktok."
+)
+ERRO_PRODUCT_TYPE_NAO_SUPORTADO = (
+    "parametro product_type nao se aplica ao Mercado Livre: o tipo de produto "
+    "dele e' derivado em tempo de consulta, nao materializado. Use-o com "
+    "marketplace=shopee ou marketplace=tiktok."
+)
+ERRO_PRODUCT_TYPE_TAMANHO = (
+    f"parametro product_type excede o tamanho maximo de "
+    f"{MAX_PRODUCT_TYPE_PARAM_CHARS} caracteres."
+)
+#: A recusa de data dos canais nomeia o teto CERTO. A mensagem do ML continua
+#: intacta, palavra por palavra: ela e' contrato publicado.
+ERRO_OBSERVED_DATE_FUTURA_SNAPSHOT = (
+    "parametro observed_date fora do intervalo aceito: o teto e' o dia "
+    "operacional corrente em America/Sao_Paulo. O futuro nao e' observavel. "
+    "Veja meta.eligible_ref_date."
+)
+
+#: Rotulo da fotografia do proprio dia. Ela NAO e' periodo fechado, definitivo
+#: nem completo: a conta pode recarregar e reescrever o escopo antes de o dia
+#: virar. O nome diz isso para que a tela nao prometa conclusao.
+SNAPSHOT_MUTABLE = "mutable_operational_snapshot"
+SNAPSHOT_SETTLED = "settled_snapshot"
+
+AVISO_SNAPSHOT_MUTAVEL = (
+    "fotografia do dia corrente: e' o estado operacional observado ate o "
+    "watermark de cada conta e AINDA PODE MUDAR hoje se a origem recarregar. "
+    "Nao e' periodo fechado nem contagem definitiva do dia."
+)
+
 _ORDER_BY = "difference_pct"
 
 # ---------------------------------------------------------------------------
@@ -248,6 +307,87 @@ SELECT 1 AS existe
  LIMIT 1
 """
 
+
+# ---------------------------------------------------------------------------
+# Gate PMA-2C4A — fonte fisica dos canais Shopee e TikTok
+# ---------------------------------------------------------------------------
+#: A fato publicada pelo `channel_offer_publisher` (migration 017). E' a UNICA
+#: tabela consultada para `shopee` e `tiktok`; o Mercado Livre nunca a toca, e
+#: nenhum canal cai para a tabela do outro. Um fallback silencioso entre elas
+#: responderia sobre um canal a pergunta feita sobre outro.
+CHANNEL_TABLE = "marts.fact_channel_offer_observation"
+
+#: Colunas lidas, NOMEADAS uma a uma. Sem `SELECT *`: uma coluna nova na fato
+#: nao deve vazar para o payload sem decisao. A fato nao tem comprador, pedido,
+#: CPF, endereco nem telefone — as unicas colunas textuais livres sao titulo do
+#: anuncio, SKU do vendedor e conta de loja.
+SQL_CHANNEL_LATEST_OBSERVED_DATE = f"""
+SELECT max(observed_date) AS observed_date
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date <= :ceiling
+"""
+
+SQL_CHANNEL_AVAILABLE_DATES = f"""
+SELECT DISTINCT observed_date
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date <= :ceiling
+ ORDER BY observed_date DESC
+ LIMIT :max_dates
+"""
+
+SQL_CHANNEL_DATE_EXISTS = f"""
+SELECT 1 AS existe
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date = :observed_date
+ LIMIT 1
+"""
+
+#: Ordenacao por `offer_key` dentro da marca. `offer_key` e' unico por
+#: (observed_date, marketplace) — e' a PK da fato —, portanto a ordenacao e'
+#: TOTAL e a paginacao nunca repete nem perde linha entre paginas.
+SQL_CHANNEL_OFFERS = f"""
+SELECT observed_date, marketplace, offer_key, parent_item_id, model_id,
+       brand, shop_account, seller_sku, gtin, listing_title,
+       observation_mode, observed_at, snapshot_status, account_watermark_at,
+       is_active, product_type, product_type_source,
+       observed_price, observed_price_source, list_price,
+       promo_context, promo_id, promo_discount_pct, business_scope,
+       batch_id, source_run_id, synced_at
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date = :observed_date
+   AND (:brand_filter = FALSE OR brand = ANY(:brands))
+   AND (:account_filter = FALSE OR shop_account = ANY(:accounts))
+   AND (:product_type_filter = FALSE OR product_type = ANY(:product_types))
+   AND (:has_query = FALSE OR (
+            coalesce(listing_title, '') ILIKE :query_like
+         OR coalesce(seller_sku, '') ILIKE :query_like
+         OR coalesce(gtin, '') ILIKE :query_like
+         OR offer_key ILIKE :query_like
+   ))
+ ORDER BY brand, offer_key
+"""
+
+#: Um relogio por CONTA. A Shopee carrega em quatro lotes distintos e um MAX()
+#: global marcaria as tres primeiras contas inteiras como atrasadas.
+SQL_CHANNEL_ACCOUNT_CLOCKS = f"""
+SELECT shop_account,
+       max(account_watermark_at) AS account_watermark_at,
+       max(observed_at)          AS observed_at,
+       max(synced_at)            AS refreshed_at,
+       count(*)                  AS offers,
+       count(*) FILTER (WHERE snapshot_status = :status_current) AS current_offers,
+       count(*) FILTER (WHERE snapshot_status = :status_stale)   AS stale_offers
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date = :observed_date
+ GROUP BY shop_account
+ ORDER BY shop_account
+"""
+
 #: Todo o texto de consulta deste modulo. Os testes de contrato varrem esta
 #: tupla — nao um regex sobre o arquivo —, de modo que uma consulta nova nao
 #: escapa da varredura por ficar fora do padrao textual.
@@ -255,6 +395,9 @@ ALL_QUERIES = (
     SQL_LATEST_REF_DATE, SQL_LAST_SYNCED_AT, SQL_LATEST_SNAPSHOT,
     SQL_LISTINGS, SQL_REFERENCES,
     SQL_AVAILABLE_OBSERVED_DATES, SQL_OBSERVED_DATE_EXISTS,
+    # Gate PMA-2C4A — as consultas dos canais entram na MESMA varredura.
+    SQL_CHANNEL_LATEST_OBSERVED_DATE, SQL_CHANNEL_AVAILABLE_DATES,
+    SQL_CHANNEL_DATE_EXISTS, SQL_CHANNEL_OFFERS, SQL_CHANNEL_ACCOUNT_CLOCKS,
 )
 
 #: Gate PMA-H1 — os dois modos publicos.
@@ -471,6 +614,9 @@ def _unavailable_envelope(marketplace: str, reason: str) -> dict:
             "no_reference_brands": [],
             "out_of_scope_brands": {},
             "order_by": _ORDER_BY,
+            "date_policy": date_policy_for(marketplace),
+            "snapshot_mutability": None,
+            "out_of_scope_offer_count": 0,
             "warnings": [AVISO_CANAL_INDISPONIVEL],
         },
         "kpis": kpis,
@@ -564,7 +710,8 @@ def resolve_observed_ref_date(db: Session, canal: str, hoje: date) -> date | Non
     return maior
 
 
-def normalize_observed_date(valor: str | None, hoje: date) -> date | None:
+def normalize_observed_date(valor: str | None, hoje: date,
+                           policy: str = pm.POLICY_CLOSED_DAY) -> date | None:
     """Valida `observed_date` na borda. Recusa com mensagem FIXA, SEM eco.
 
     Recebido como TEXTO de proposito: se fosse tipado como `date` no FastAPI, o
@@ -586,9 +733,14 @@ def normalize_observed_date(valor: str | None, hoje: date) -> date | None:
     except ValueError:
         # Sintaxe certa, calendario errado: 2026-02-30, 2026-13-01.
         raise MonitoramentoPrecoError(ERRO_OBSERVED_DATE_FORMATO) from None
-    if pedida > pm.last_eligible_date(hoje):
-        # D0 e futuro. O sync proibe publica-los, logo nao ha o que consultar.
-        raise MonitoramentoPrecoError(ERRO_OBSERVED_DATE_FUTURA)
+    if pedida > pm.date_ceiling(hoje, policy):
+        # Sob `closed_day`: D0 e futuro — o sync proibe publica-los. Sob
+        # `snapshot_current`: somente o futuro, que nenhuma fonte observa.
+        raise MonitoramentoPrecoError(
+            ERRO_OBSERVED_DATE_FUTURA_SNAPSHOT
+            if policy == pm.POLICY_SNAPSHOT_CURRENT
+            else ERRO_OBSERVED_DATE_FUTURA
+        )
     return pedida
 
 
@@ -612,6 +764,447 @@ def observed_date_exists(db: Session, canal: str, quando: date) -> bool:
                       {"marketplace": canal, "ref_date": quando}))
 
 
+
+# ---------------------------------------------------------------------------
+# Gate PMA-2C4A — politica de data POR CANAL
+# ---------------------------------------------------------------------------
+def date_policy_for(marketplace: str) -> str:
+    """A politica vem do CONTRATO DA FONTE, nunca de uma chave global.
+
+    O Mercado Livre e' serie diaria: so' um dia fechado sustenta comparacao, e
+    D0 continua sendo inconsistencia detectavel. Shopee e TikTok sao fotografia
+    do estado corrente, derivada do watermark da conta no proprio dia: para eles
+    D0 e' o caso normal.
+
+    Trocar isto por um teto unico destruiria uma das duas garantias — ou o ML
+    passaria a servir D0 como se fosse dia fechado, ou os canais novos nunca
+    serviriam a fotografia que acabaram de publicar.
+    """
+    if marketplace in dom.CHANNEL_OFFER_MARKETPLACES:
+        return pm.POLICY_SNAPSHOT_CURRENT
+    return pm.POLICY_CLOSED_DAY
+
+
+def channel_brand_allowlist(marketplace: str) -> tuple:
+    """Marcas aceitas no filtro `brand`, por canal.
+
+    O ML mantem as quatro de `pm.MONITORED_BRANDS` — mexer nisso mudaria uma
+    recusa publicada. Shopee e TikTok tem catalogo proprio com marcas que o ML
+    nao tem (`apice` entre elas), e recusar 422 numa marca que a fato REALMENTE
+    contem seria negar um filtro legitimo.
+    """
+    if marketplace in dom.CHANNEL_OFFER_MARKETPLACES:
+        return dom.BEAUTY_SCOPE_BRANDS
+    return pm.MONITORED_BRANDS
+
+
+def normalize_brands_for(valor, marketplace: str) -> list:
+    """`normalize_brands` com a allowlist do canal. Recusa sem ecoar a entrada."""
+    if valor is None or str(valor).strip() in ("", "all"):
+        return []
+    bruto = str(valor)
+    if len(bruto) > MAX_BRAND_PARAM_CHARS:
+        raise MonitoramentoPrecoError(ERRO_BRAND_TAMANHO)
+    permitidas = channel_brand_allowlist(marketplace)
+    pedidas = [b.strip().lower() for b in bruto.split(",") if b.strip()]
+    if not pedidas or set(pedidas) - set(permitidas):
+        raise MonitoramentoPrecoError(ERRO_BRAND_INVALIDA)
+    return pedidas
+
+
+def normalize_accounts(valor) -> list:
+    """Filtro por conta de loja. Aceita apenas o formato, nunca uma allowlist
+    fixa: as contas sao cadastro da origem e mudam sem release da API.
+
+    O valor vai por PARAMETRO para o driver — nunca interpolado no texto SQL.
+    """
+    if valor is None or str(valor).strip() in ("", "all"):
+        return []
+    bruto = str(valor)
+    if len(bruto) > MAX_ACCOUNT_PARAM_CHARS:
+        raise MonitoramentoPrecoError(ERRO_ACCOUNT_TAMANHO)
+    pedidas = [a.strip().lower() for a in bruto.split(",") if a.strip()]
+    if not pedidas or any(not _ACCOUNT_RE.match(a) for a in pedidas):
+        raise MonitoramentoPrecoError(ERRO_ACCOUNT_INVALIDA)
+    return pedidas
+
+
+def normalize_product_types(valor) -> list:
+    """Filtro pelos quatro estados de `product_type`, do dominio versionado."""
+    if valor is None or str(valor).strip() in ("", "all"):
+        return []
+    bruto = str(valor)
+    if len(bruto) > MAX_PRODUCT_TYPE_PARAM_CHARS:
+        raise MonitoramentoPrecoError(ERRO_PRODUCT_TYPE_TAMANHO)
+    pedidos = [t.strip().lower() for t in bruto.split(",") if t.strip()]
+    if not pedidos or set(pedidos) - set(dom.PRODUCT_TYPES):
+        raise MonitoramentoPrecoError(ERRO_PRODUCT_TYPE_INVALIDO)
+    return pedidos
+
+
+def resolve_channel_observed_date(db, canal: str, hoje: date):
+    """Maior `observed_date` <= teto operacional. D0 permitido, futuro nunca.
+
+    Nao ha fail-closed em D0 aqui — sob `snapshot_current` ele e' o caso normal.
+    O filtro `<= :ceiling` vive no SQL, entao uma linha futura (que a 017 nao
+    impede fisicamente) jamais e' escolhida, mesmo que exista.
+    """
+    linhas = _rows(db, SQL_CHANNEL_LATEST_OBSERVED_DATE, {
+        "marketplace": canal,
+        "ceiling": pm.date_ceiling(hoje, pm.POLICY_SNAPSHOT_CURRENT),
+    })
+    maior = linhas[0]["observed_date"] if linhas else None
+    return maior if isinstance(maior, date) else None
+
+
+def _channel_listing(linha: dict) -> dict:
+    """Traduz UMA linha da fato para a forma que `pma_match` consome.
+
+    MAPEAMENTO EXPLICITO, campo a campo — nada inferido por nome:
+
+        offer_key            -> item_id      (identidade da oferta no canal)
+        observed_date        -> ref_date     (dia da fotografia)
+        observed_price       -> advertised_price  (preco ANUNCIADO na vitrine)
+        observed_at          -> price_captured_at (instante da observacao)
+        is_active            -> listing_status ('active' / 'inactive')
+        list_price           -> original_price     (preco "de", quando o canal o publica)
+
+    `is_active` e' booleano na fato e string no matcher: a traducao e' feita
+    aqui, uma vez, em vez de o matcher aprender um segundo formato.
+
+    NAO ha permalink: a fato nao guarda URL, e inventar uma a partir do
+    `offer_key` produziria link quebrado com aparencia de link bom.
+    """
+    return {
+        "marketplace": linha["marketplace"],
+        "brand": linha["brand"],
+        "item_id": linha["offer_key"],
+        "seller_sku": linha["seller_sku"],
+        "gtin": linha["gtin"],
+        "listing_title": linha["listing_title"],
+        "permalink": None,
+        "listing_status": "active" if linha["is_active"] else "inactive",
+        "currency": pm.CURRENCY,
+        "ref_date": linha["observed_date"],
+        "advertised_price": linha["observed_price"],
+        "original_price": linha["list_price"],
+        "price_captured_at": linha["observed_at"],
+        "listing_metadata_updated_at": None,
+    }
+
+
+#: Campos da fato que viajam ADITIVAMENTE na linha do payload. Todos existem
+#: materializados; nenhum e' recalculado aqui.
+_CHANNEL_ROW_EXTRA = (
+    "offer_key", "shop_account", "parent_item_id", "model_id",
+    "product_type", "product_type_source", "snapshot_status",
+    "account_watermark_at", "observed_price_source", "list_price",
+    "promo_context", "promo_id", "promo_discount_pct", "business_scope",
+    "batch_id", "source_run_id",
+)
+
+
+def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
+                      fora_de_escopo: set) -> dict:
+    """KPIs multicanal a partir dos valores MATERIALIZADOS na fato.
+
+    `product_type` NAO e' reclassificado: o publisher ja' decidiu com as
+    autoridades que so' ele alcanca (flag nativa do canal, cadastro interno,
+    BOM). Reclassificar aqui, com apenas SKU e titulo, produziria um segundo
+    rotulo para a mesma oferta conforme quem pergunta.
+
+    O denominador e' `v2_product_type_aware`: elegiveis = ativas menos kits
+    confirmados e suspeitos. Numerador e denominador saem da MESMA versao.
+
+    ESCOPO DE NEGOCIO SAI DO DENOMINADOR, NAO DO MONITORAMENTO
+    ----------------------------------------------------------
+    Gocase e Denavita aparecem no TikTok e continuam CONTADAS em
+    `monitored_offers`, `active_offers` e na particao de `product_type` — sao
+    ofertas reais e a auditoria de cobertura precisa ve-las. O que elas nao
+    fazem e' entrar em `eligible_offers` nem na taxa de cobertura: nao sao do
+    produto, e infla-las no denominador faria a cobertura parecer pior do que e'.
+    """
+    ativos = [r for r in linhas if r["comparison_status"] != pm.STATUS_INACTIVE]
+    inativos = len(linhas) - len(ativos)
+    elegiveis_linhas = [
+        r for r in ativos
+        if id(r) not in fora_de_escopo
+        and not dom.is_excluded_from_comparison(
+            tipo_por_linha.get(id(r), dom.PRODUCT_TYPE_UNKNOWN))
+    ]
+    elegiveis = len(elegiveis_linhas)
+
+    abaixo = sum(1 for r in elegiveis_linhas
+                 if r["comparison_status"] == pm.STATUS_BELOW)
+    acima = sum(1 for r in elegiveis_linhas
+                if r["comparison_status"] == pm.STATUS_AT_OR_ABOVE)
+
+    # Motivos CONTADOS do campo que a linha ja' carrega, nunca re-deduzidos do
+    # status: `no_reference` cobre tres causas distintas e colapsa-las apagaria
+    # a diferenca entre "nao casou" e "preco nao observado".
+    motivos = {r: 0 for r in dom.NON_COMPARABLE_REASONS}
+    for r in elegiveis_linhas:
+        motivo = r.get("non_comparable_reason")
+        if motivo in motivos:
+            motivos[motivo] += 1
+
+    referencias = {r.get("reference_row_id") for r in elegiveis_linhas
+                   if r.get("reference_row_id") is not None}
+    return {
+        "monitored_offers": len(linhas),
+        "active_offers": len(ativos),
+        "inactive_offers": inativos,
+        "kit_confirmed": contagem[dom.PRODUCT_KIT_CONFIRMED],
+        "kit_suspected": contagem[dom.PRODUCT_KIT_SUSPECTED],
+        "no_kit_signal": contagem[dom.PRODUCT_NO_KIT_SIGNAL],
+        "product_type_unknown": contagem[dom.PRODUCT_TYPE_UNKNOWN],
+        "eligible_offers": elegiveis,
+        "comparable_offers": abaixo + acima,
+        "below_reference": abaixo,
+        "at_or_above_reference": acima,
+        "non_comparable_reasons": motivos,
+        "coverage_rate": dom.coverage_rate(abaixo + acima, elegiveis),
+        "distinct_b2b_products": len(referencias),
+        "b2b_reach": None,
+    }
+
+def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
+                   tipos_pedidos, filtros_status, consulta, lim, off) -> dict:
+    """Serving de Shopee e TikTok. LE SOMENTE `CHANNEL_TABLE`.
+
+    Nenhuma consulta deste caminho toca `LISTING_TABLE`: o ML nao e' consultado
+    para responder sobre outro canal, e a ausencia de dado aqui NUNCA cai para
+    la'. O unico cruzamento e' com a tabela de REFERENCIA B2B, que e' comum aos
+    tres canais por definicao — a referencia e' do produto, nao do canal.
+    """
+    politica = pm.POLICY_SNAPSHOT_CURRENT
+    teto = pm.date_ceiling(hoje, politica)
+
+    disponiveis = [
+        r["observed_date"] for r in _rows(db, SQL_CHANNEL_AVAILABLE_DATES, {
+            "marketplace": canal, "ceiling": teto,
+            "max_dates": MAX_AVAILABLE_DATES,
+        }) if isinstance(r["observed_date"], date)
+    ]
+
+    if pedida is None:
+        modo = MODE_LATEST
+        observado = resolve_channel_observed_date(db, canal, hoje)
+    else:
+        modo = MODE_SELECTED
+        # NUNCA cair para o dia anterior: a pergunta era sobre ESTE dia.
+        existe = bool(_rows(db, SQL_CHANNEL_DATE_EXISTS, {
+            "marketplace": canal, "observed_date": pedida}))
+        observado = pedida if existe else None
+
+    if observado is None:
+        # Estado vazio HONESTO: o canal esta ligado, a tabela foi consultada e
+        # nao ha fotografia para esta pergunta. Diferente de flag desligada, e
+        # por isso o motivo e' outro.
+        motivo = (dom.UNAVAILABLE_NO_OBSERVATION if pedida is not None
+                  else dom.UNAVAILABLE_HISTORY_NOT_STARTED)
+        vazio = _unavailable_envelope(canal, motivo)
+        vazio["meta"]["mode"] = modo
+        vazio["meta"]["requested_observed_date"] = _serialize(pedida)
+        vazio["meta"]["available_observed_dates"] = [
+            _serialize(d) for d in disponiveis]
+        vazio["meta"]["eligible_ref_date"] = _serialize(teto)
+        vazio["meta"]["date_policy"] = politica
+        vazio["meta"]["snapshot_mutability"] = None
+        return vazio
+
+    linhas = _rows(db, SQL_CHANNEL_OFFERS, {
+        "marketplace": canal,
+        "observed_date": observado,
+        "brand_filter": bool(marcas),
+        "brands": marcas or list(channel_brand_allowlist(canal)),
+        "account_filter": bool(contas),
+        "accounts": contas or [""],
+        "product_type_filter": bool(tipos_pedidos),
+        "product_types": tipos_pedidos or [""],
+        "has_query": bool(consulta),
+        "query_like": f"%{consulta}%",
+    })
+
+    relogios_brutos = _rows(db, SQL_CHANNEL_ACCOUNT_CLOCKS, {
+        "marketplace": canal, "observed_date": observado,
+        "status_current": dom.SNAPSHOT_CURRENT, "status_stale": dom.SNAPSHOT_STALE,
+    })
+
+    snapshot = _rows(db, SQL_LATEST_SNAPSHOT, {})
+    snapshot_id = snapshot[0]["snapshot_id"] if snapshot else None
+    reference_captured_at = snapshot[0]["captured_at"] if snapshot else None
+    referencias = (_rows(db, SQL_REFERENCES, {"snapshot_id": snapshot_id})
+                   if snapshot_id is not None else [])
+
+    # ---- frescor: pelo CONTRATO e pelo WATERMARK, nao pela igualdade de data.
+    # Estar em D0 nao basta para dizer `fresh`: se a fotografia daquele dia nao
+    # tem nenhuma oferta com `snapshot_status = current`, o que existe e' uma
+    # carga inteiramente carimbada de antes, e chama-la de fresca mentiria.
+    contagem_snapshot: dict = {}
+    for r in linhas:
+        chave = r["snapshot_status"]
+        contagem_snapshot[chave] = contagem_snapshot.get(chave, 0) + 1
+    algum_corrente = contagem_snapshot.get(dom.SNAPSHOT_CURRENT, 0) > 0
+
+    if pedida is not None and observado != teto:
+        frescor = pm.FRESHNESS_HISTORICAL
+    elif observado == teto and algum_corrente:
+        frescor = pm.FRESHNESS_FRESH
+    else:
+        frescor = pm.FRESHNESS_STALE
+    atraso = pm.lag_days(observado, hoje, politica)
+    mutavel = pm.is_mutable_snapshot(observado, hoje, politica)
+
+    # ---- comparacao: MESMO matcher do ML, com a politica do canal ----------
+    listings = [_channel_listing(r) for r in linhas]
+    por_linha = {
+        id(destino): pm.channel_row_freshness(origem["snapshot_status"],
+                                              snapshot_freshness=frescor)
+        for origem, destino in zip(linhas, listings)
+    }
+    comparadas = pm.compare_all(
+        listings, referencias, hoje,
+        policy=politica, allow_missing_price=True, row_freshness=por_linha,
+    )
+
+    # ---- campos aditivos + tipo de produto MATERIALIZADO -------------------
+    contagem_tipos = {t: 0 for t in dom.PRODUCT_TYPES}
+    tipo_por_linha = {}
+    ids_fora_de_escopo = set()
+    for origem, linha in zip(linhas, comparadas):
+        for campo in _CHANNEL_ROW_EXTRA:
+            linha[campo] = origem[campo]
+        linha["observed_date"] = origem["observed_date"]
+        linha["date_policy"] = politica
+        tipo = origem["product_type"]
+        tipo_por_linha[id(linha)] = tipo
+        # A particao de `product_type` conta as ATIVAS, como no Mercado Livre:
+        # o mesmo campo precisa significar a mesma coisa nos tres canais. E' o
+        # que mantem `eligible = active - kit_confirmed - kit_suspected`
+        # aritmeticamente verdadeiro — contar kit inativo aqui quebraria essa
+        # identidade e o denominador deixaria de reconciliar.
+        if linha["comparison_status"] != pm.STATUS_INACTIVE:
+            contagem_tipos[tipo] += 1
+        if origem["business_scope"] != dom.BUSINESS_SCOPE_IN:
+            ids_fora_de_escopo.add(id(linha))
+    fora_de_escopo = len(ids_fora_de_escopo)
+
+    kpis = pm.build_kpis(comparadas)
+    metricas = _metrics_do_canal(comparadas, tipo_por_linha, contagem_tipos,
+                                 ids_fora_de_escopo)
+
+    avisos = pm.build_warnings(
+        comparadas, hoje, freshness=frescor, observed=observado,
+        reference_captured_at=reference_captured_at,
+    )
+    if mutavel:
+        avisos.insert(0, AVISO_SNAPSHOT_MUTAVEL)
+    if fora_de_escopo:
+        avisos.append(
+            f"{fora_de_escopo} oferta(s) de marca fora do escopo de beleza sao "
+            f"monitoradas e aparecem na tabela, mas NAO entram em "
+            f"eligible_offers nem na taxa de cobertura."
+        )
+
+    # ---- filtro de situacao: altera SOMENTE a tabela, nunca os KPIs --------
+    if filtros_status:
+        alvo = set(filtros_status)
+        quer_stale = pm.STATUS_STALE in alvo
+        comerciais = alvo - {pm.STATUS_STALE}
+        visiveis = [
+            r for r in comparadas
+            if (r["comparison_status"] in comerciais)
+            or (quer_stale and r.get("freshness_status") == pm.FRESHNESS_STALE)
+        ]
+    else:
+        visiveis = comparadas
+
+    # Ordenacao TOTAL: diferenca, depois marca, depois `offer_key` — que e'
+    # unico dentro de (observed_date, marketplace) por ser parte da PK. Sem o
+    # desempate final, duas linhas de mesma diferenca poderiam trocar de lugar
+    # entre paginas e a paginacao perderia ou repetiria uma delas.
+    visiveis.sort(
+        key=lambda r: (r["difference_pct"] is None,
+                       r["difference_pct"] if r["difference_pct"] is not None else 0,
+                       r["brand"] or "", r["offer_key"] or "")
+    )
+    total = len(visiveis)
+    pagina = visiveis[off:off + lim]
+
+    relogios = [{
+        "account": r["shop_account"],
+        "observed_at": _serialize(r["observed_at"]),
+        "refreshed_at": _serialize(r["refreshed_at"]),
+        "account_watermark_at": _serialize(r["account_watermark_at"]),
+        "offers": r["offers"],
+        "current_offers": r["current_offers"],
+        "stale_offers": r["stale_offers"],
+        "snapshot_status": (dom.SNAPSHOT_CURRENT if r["current_offers"]
+                            else dom.SNAPSHOT_STALE),
+    } for r in relogios_brutos]
+
+    refreshed_at = max((r["refreshed_at"] for r in relogios_brutos
+                        if r["refreshed_at"] is not None), default=None)
+    observado_em = max((r["observed_at"] for r in relogios_brutos
+                        if r["observed_at"] is not None), default=None)
+
+    return {
+        "meta": {
+            "timezone": pm.TIMEZONE_NAME,
+            "currency": pm.CURRENCY,
+            "marketplace": canal,
+            "mode": modo,
+            "refreshed_at": _serialize(refreshed_at),
+            "requested_observed_date": _serialize(pedida),
+            "observed_ref_date": _serialize(observado),
+            "eligible_ref_date": _serialize(teto),
+            "available_observed_dates": [_serialize(d) for d in disponiveis],
+            "available_observed_dates_limit": MAX_AVAILABLE_DATES,
+            "lag_days": atraso,
+            "freshness_status": frescor,
+            "reference_snapshot_id": snapshot_id,
+            "reference_captured_at": _serialize(reference_captured_at),
+            "reference_basis": REFERENCE_BASIS,
+            "comparison_basis_text": pm.comparison_basis_text(
+                observado, reference_captured_at),
+            "reference_type": pm.REFERENCE_TYPE,
+            "policy_status": pm.POLICY_STATUS,
+            "validity_status": pm.VALIDITY_STATUS,
+            "coverage_status": pm.COVERAGE_STATUS,
+            "monitored_brands": list(channel_brand_allowlist(canal)),
+            "comparable_brands": list(pm.COMPARABLE_BRANDS),
+            "no_reference_brands": list(pm.NO_REFERENCE_BRANDS),
+            "out_of_scope_brands": {
+                b: pm.BRAND_SCOPE_OUT_OF_SCOPE for b in pm.OUT_OF_SCOPE_BRANDS
+            },
+            "metric_version": active_metric_version(canal),
+            "observation_mode": dom.observation_mode_for(canal),
+            "promo_context": dom.promo_context_for(canal),
+            "availability": "available",
+            "unavailable_reason": None,
+            "observed_date": _serialize(observado),
+            "observed_at": _serialize(observado_em),
+            "snapshot_status_counts": contagem_snapshot,
+            "product_type_counts": contagem_tipos,
+            "account_clocks": relogios,
+            "order_by": _ORDER_BY,
+            # ---- Gate PMA-2C4A: campos ADITIVOS -------------------------
+            "date_policy": politica,
+            "snapshot_mutability": (SNAPSHOT_MUTABLE if mutavel
+                                    else SNAPSHOT_SETTLED),
+            "out_of_scope_offer_count": fora_de_escopo,
+            "warnings": avisos,
+        },
+        "kpis": kpis,
+        "metrics": metricas,
+        "rows": [_serialize_row(r) for r in pagina],
+        "returned_count": len(pagina),
+        "total_count": total,
+        "truncated": (off + len(pagina)) < total,
+    }
+
+
 def get_monitoramento_preco(
     db: Session,
     *,
@@ -620,6 +1213,8 @@ def get_monitoramento_preco(
     status: str | None = None,
     product_query: str | None = None,
     observed_date: str | None = None,
+    shop_account: str | None = None,
+    product_type: str | None = None,
     limit: int | None = None,
     offset: int | None = None,
     today: date | None = None,
@@ -645,12 +1240,30 @@ def get_monitoramento_preco(
     if canal != pm.MARKETPLACE_ML and not channel_enabled(canal):
         return _unavailable_envelope(canal, dom.UNAVAILABLE_CHANNEL_DISABLED)
 
-    marcas = normalize_brands(brand)
+    politica = date_policy_for(canal)
+    marcas = normalize_brands_for(brand, canal)
+    contas = normalize_accounts(shop_account)
+    tipos_pedidos = normalize_product_types(product_type)
     filtros_status = normalize_status(status)
     consulta = normalize_product_query(product_query)
     lim, off = normalize_pagination(limit, offset)
     dia = today or today_operacional()
-    pedida = normalize_observed_date(observed_date, dia)
+    pedida = normalize_observed_date(observed_date, dia, politica)
+
+    # Gate PMA-2C4A — BIFURCACAO EXPLICITA, sem fallback. Shopee e TikTok leem
+    # `CHANNEL_TABLE` e nada mais; o ML continua no caminho abaixo, palavra por
+    # palavra como estava. Nenhum dos dois consulta a tabela do outro.
+    if canal in dom.CHANNEL_OFFER_MARKETPLACES:
+        return _serve_channel(
+            db, canal, hoje=dia, pedida=pedida, marcas=marcas, contas=contas,
+            tipos_pedidos=tipos_pedidos, filtros_status=filtros_status,
+            consulta=consulta, lim=lim, off=off,
+        )
+
+    if contas:
+        raise MonitoramentoPrecoError(ERRO_ACCOUNT_NAO_SUPORTADO)
+    if tipos_pedidos:
+        raise MonitoramentoPrecoError(ERRO_PRODUCT_TYPE_NAO_SUPORTADO)
 
     disponiveis = available_observed_dates(db, canal, dia)
 
@@ -844,6 +1457,14 @@ def get_monitoramento_preco(
             # marcaria as tres primeiras como atrasadas.
             "account_clocks": relogios,
             "order_by": _ORDER_BY,
+            # ---- Gate PMA-2C4A: politica DECLARADA, nao presumida --------
+            # O ML segue em `closed_day`. Explicitar no dicionario evita que o
+            # valor dependa do default do schema: o servico e' consumido
+            # diretamente em teste, sem passar pelo `response_model`.
+            "date_policy": pm.POLICY_CLOSED_DAY,
+            "snapshot_mutability": (
+                SNAPSHOT_SETTLED if observado is not None else None),
+            "out_of_scope_offer_count": 0,
             "warnings": avisos,
         },
         "kpis": kpis,

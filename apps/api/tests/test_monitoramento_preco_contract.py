@@ -594,6 +594,11 @@ def test_servico_le_apenas_as_duas_tabelas_de_marts():
     assert tabelas == {
         "marts.fact_marketplace_listing_price_daily",
         "marts.fact_suggested_price_reference_snapshot",
+        # Gate PMA-2C4A — a fato dos canais. A tabela de REFERENCIA continua
+        # comum aos tres canais (a referencia e' do produto, nao do canal); as
+        # duas FATOS nunca aparecem na mesma consulta, e e' isso que impede
+        # fallback silencioso de um canal para o outro.
+        "marts.fact_channel_offer_observation",
     }, tabelas
 
 
@@ -605,6 +610,19 @@ def test_servico_nao_tem_escrita():
             assert verbo not in baixo, (verbo, sql[:120])
 
 
+def test_nenhuma_consulta_mistura_as_duas_fatos():
+    """Gate PMA-2C4A — a fato do ML e a dos canais nunca sao lidas juntas.
+
+    Prova ESTRUTURAL de que nao existe fallback entre canais: se a mesma
+    consulta tocasse as duas, uma resposta de Shopee poderia carregar linha de
+    Mercado Livre sem que nada no payload denunciasse.
+    """
+    for sql in _queries():
+        tem_ml = "fact_marketplace_listing_price_daily" in sql
+        tem_canal = "fact_channel_offer_observation" in sql
+        assert not (tem_ml and tem_canal), sql[:160]
+
+
 def test_servico_nao_interpola_valor_no_sql():
     """Valores sempre por parametro nomeado. Interpolacao seria injecao."""
     for sql in _queries():
@@ -614,7 +632,8 @@ def test_servico_nao_interpola_valor_no_sql():
     fonte = SERVICE_PATH.read_text(encoding="utf-8")
     for bloco in re.findall(r'SQL_[A-Z_]+\s*=\s*f?"""(.*?)"""', fonte, re.S):
         for chave in re.findall(r"\{([^}]*)\}", bloco):
-            assert chave in ("LISTING_TABLE", "REFERENCE_TABLE"), chave
+            assert chave in ("LISTING_TABLE", "REFERENCE_TABLE",
+                             "CHANNEL_TABLE"), chave
 
 
 def test_as_duas_pks_cobrem_todas_as_consultas():
@@ -635,6 +654,15 @@ def test_as_duas_pks_cobrem_todas_as_consultas():
         elif "fact_suggested_price_reference_snapshot" in baixo:
             assert ("snapshot_id =" in baixo
                     or "group by snapshot_id" in baixo), baixo
+        elif "fact_channel_offer_observation" in baixo:
+            # Gate PMA-2C4A — PK = (observed_date, marketplace, offer_key).
+            # Toda consulta filtra por marketplace e por data (igualdade, range
+            # ou agregado); `idx_fcoo_escopo` cobre o resto. Nenhum acesso
+            # aleatorio, nenhum indice novo.
+            assert "marketplace = :marketplace" in baixo, baixo
+            assert ("observed_date =" in baixo
+                    or "observed_date <=" in baixo
+                    or "max(observed_date)" in baixo), baixo
         else:
             raise AssertionError(f"consulta sem tabela reconhecida: {baixo}")
 
@@ -1600,7 +1628,8 @@ def test_ref_date_nao_aparece_no_openapi():
     # Gate PMA-H1: `observed_date` e' PUBLICO e documentado — ao contrario de
     # `ref_date`, que segue sendo armadilha fechada fora do schema.
     assert nomes == ["marketplace", "brand", "status", "product_query",
-                     "observed_date", "limit", "offset"], nomes
+                     "observed_date", "shop_account", "product_type",
+                     "limit", "offset"], nomes
     doc = next(p for p in op["parameters"] if p["name"] == "observed_date")
     texto = doc["description"]
     assert "YYYY-MM-DD" in texto
