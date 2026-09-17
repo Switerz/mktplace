@@ -12,6 +12,7 @@ import {
 import { buildRegioesQueryParams } from "./regioes-query";
 import { computeContentMix } from "./tiktok-content-mix";
 import type { MLFulfillmentResponse } from "./ml-fulfillment";
+import type { ShopeeFbsPayload } from "./shopee-fbs";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -2311,4 +2312,53 @@ export async function fetchMLFulfillment(
     throw new MLFulfillmentError(`A API respondeu ${res.status}.`, res.status);
   }
   return (await res.json()) as MLFulfillmentResponse;
+}
+
+
+/**
+ * Gate FULL-SH-1D — desempenho FBS da Shopee.
+ *
+ * O endpoint responde 200 em DOIS formatos: o payload completo, ou
+ * `{status:"unavailable"}` quando a flag do BACKEND esta desligada. Os dois
+ * sao respostas validas, e quem chama precisa distinguir "desligado" de
+ * "quebrado" — por isso `unavailable` nao vira excecao.
+ */
+export class ShopeeFbsError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "ShopeeFbsError";
+    this.status = status;
+  }
+}
+
+export async function fetchShopeeFbs(
+  query: string,
+  signal?: AbortSignal,
+): Promise<ShopeeFbsPayload> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_URL}/api/v1/performance/shopee-fbs?${query}`,
+      { signal },
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ShopeeFbsError("Nao foi possivel contatar a API.", null);
+  }
+  if (res.status === 422) {
+    // Mensagem PROPRIA: o corpo tecnico do 422 descreve o parametro recebido
+    // e nao deve chegar a tela.
+    throw new ShopeeFbsError(
+      "Periodo ou filtro invalido para esta consulta.",
+      422,
+    );
+  }
+  if (!res.ok) {
+    throw new ShopeeFbsError(
+      "A superficie de FBS da Shopee esta indisponivel no momento.",
+      res.status,
+    );
+  }
+  return (await res.json()) as ShopeeFbsPayload;
 }

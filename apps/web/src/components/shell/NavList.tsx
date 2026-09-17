@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { NAV_SECTIONS, isNavItemActive } from "./nav-config";
+import { isNavItemActive, navSectionsShopeeFbs } from "./nav-config";
+import { shopeeFbsEnabled } from "@/lib/shopee-fbs-flag";
 
 interface NavListProps {
   pathname: string;
@@ -14,7 +15,10 @@ interface NavListProps {
 export default function NavList({ pathname, hrefFor }: NavListProps) {
   return (
     <nav aria-label="Navegação principal" className="flex flex-col gap-5">
-      {NAV_SECTIONS.map((section) => (
+      {/* Gate FULL-SH-1D: o item de Full Shopee so' aparece com a flag ligada.
+          Esconder o menu e' a SEGUNDA barreira -- a rota ja' devolve 404 por
+          conta propria, porque a URL direta continuaria acessivel. */}
+      {navSectionsShopeeFbs(shopeeFbsEnabled()).map((section) => (
         <div key={section.label} className="flex flex-col gap-1">
           <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-2">
             {section.label}

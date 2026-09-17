@@ -97,3 +97,34 @@ export function getRouteTitle(pathname: string): string {
   }
   return "Torre de Controle";
 }
+
+
+/**
+ * Gate FULL-SH-1D — item da tela Full Shopee, atras de
+ * `NEXT_PUBLIC_SHOPEE_FBS_ENABLED`.
+ *
+ * Entra em "Operações" e e' rota de TOPO, nao filha de `/operacoes`:
+ * `isNavItemActive` casa por prefixo, e um filho deixaria os dois itens
+ * ativos ao mesmo tempo — o mesmo motivo que levou o Full ML para rota
+ * propria.
+ *
+ * O rotulo diz "Shopee" e nao apenas "Full": a Torre ja' tem "Full Mercado
+ * Livre", e duas entradas chamadas "Full" seriam indistinguiveis no menu.
+ */
+export const SHOPEE_FBS_NAV: NavPage = {
+  href: "/full-shopee",
+  label: "Full Shopee",
+};
+
+/**
+ * FAIL-CLOSED: so' a string exata "true" liga, e esconder o item e' a SEGUNDA
+ * barreira — a primeira e' a propria rota, que devolve 404 com a flag
+ * desligada. Esconder apenas o menu deixaria a URL direta acessivel, e nem a
+ * aplicacao nem a API tem autenticacao.
+ */
+export function navSectionsShopeeFbs(enabled: boolean): NavSection[] {
+  if (!enabled) return NAV_SECTIONS;
+  return NAV_SECTIONS.map((s) =>
+    s.label === "Operações" ? { ...s, pages: [...s.pages, SHOPEE_FBS_NAV] } : s,
+  );
+}
