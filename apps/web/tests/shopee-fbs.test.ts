@@ -45,7 +45,8 @@ import {
 import {
   SHOPEE_FBS_NAV,
   NAV_SECTIONS,
-  navSectionsShopeeFbs,
+  getRouteTitle,
+  navSections,
 } from "../src/components/shell/nav-config.ts";
 
 const RAIZ = join(import.meta.dirname, "..");
@@ -153,10 +154,10 @@ test("flag ausente, vazia ou diferente de 'true' mantem a tela desligada", () =>
 });
 
 test("item de navegacao so' existe com a flag ligada", () => {
-  const desligado = navSectionsShopeeFbs(false);
+  const desligado = navSections({ shopeeFbs: false });
   assert.equal(JSON.stringify(desligado), JSON.stringify(NAV_SECTIONS),
     "com a flag off a navegacao e' identica a original");
-  const ligado = navSectionsShopeeFbs(true);
+  const ligado = navSections({ shopeeFbs: true });
   const hrefs = ligado.flatMap((s) => s.pages.map((p) => p.href));
   assert.ok(hrefs.includes("/full-shopee"));
   const ops = ligado.find((s) => s.label === "Operações");
@@ -169,7 +170,7 @@ test("a rota e' de topo, para nao colidir com /operacoes por prefixo", () => {
 });
 
 test("NavList consulta a flag, nao a lista fixa", () => {
-  assert.match(NAVLIST, /navSectionsShopeeFbs\(shopeeFbsEnabled\(\)\)/);
+  assert.match(NAVLIST, /shopeeFbs: shopeeFbsEnabled\(\)/);
   assert.ok(!/\bNAV_SECTIONS\.map\b/.test(NAVLIST),
     "a lista fixa nao pode ser usada direto: ignoraria a flag");
 });
@@ -627,13 +628,13 @@ test("/full-ml continua intacto e separado", () => {
   assert.ok(!CLIENT.includes("full-ml"));
   assert.ok(!CLIENT.includes("ml-fulfillment"));
   // As duas rotas coexistem na navegacao com a flag ligada.
-  const hrefs = navSectionsShopeeFbs(true).flatMap((s) => s.pages.map((p) => p.href));
+  const hrefs = navSections({ shopeeFbs: true }).flatMap((s) => s.pages.map((p) => p.href));
   assert.ok(hrefs.includes("/full-ml") && hrefs.includes("/full-shopee"));
 });
 
 test("nenhuma rota existente foi removida ou renomeada", () => {
   const antes = NAV_SECTIONS.flatMap((s) => s.pages.map((p) => p.href));
-  const depois = navSectionsShopeeFbs(true).flatMap((s) => s.pages.map((p) => p.href));
+  const depois = navSections({ shopeeFbs: true }).flatMap((s) => s.pages.map((p) => p.href));
   for (const h of antes) assert.ok(depois.includes(h), `rota sumiu: ${h}`);
   assert.equal(depois.length, antes.length + 1);
 });
@@ -661,4 +662,71 @@ test("a flag e' lida por acesso LITERAL a process.env", () => {
   // O parametro existe SO' para teste e nao pode ser o caminho padrao.
   assert.ok(!/function shopeeFbsEnabled\(env: NodeJS\.ProcessEnv = process\.env\)/.test(flagSrc),
     "o default de parametro impede a substituicao estatica do Next");
+});
+
+
+// ---------------------------------------------------------------------------
+// Flags independentes — Gate FULL-SH-1D-R/V
+// ---------------------------------------------------------------------------
+
+test("as duas flags sao independentes: a matriz completa", () => {
+  // O risco que isto trava: duas funcoes separadas partindo de NAV_SECTIONS se
+  // ignoram, e ligar uma frente esconderia a outra. Uma funcao so', com as
+  // duas flags, faz elas COMPOREM.
+  const href = (f: Parameters<typeof navSections>[0]) =>
+    navSections(f).flatMap((s) => s.pages.map((p) => p.href));
+
+  const nenhuma = href({ expedicao: false, shopeeFbs: false });
+  assert.ok(!nenhuma.includes("/expedicao"));
+  assert.ok(!nenhuma.includes("/full-shopee"));
+  assert.ok(nenhuma.includes("/full-ml"), "Full ML nao depende de flag");
+
+  const soExp = href({ expedicao: true, shopeeFbs: false });
+  assert.ok(soExp.includes("/expedicao"), "Expedicao precisa aparecer");
+  assert.ok(!soExp.includes("/full-shopee"),
+    "ligar a Expedicao NAO pode revelar o Full Shopee");
+
+  const soShopee = href({ expedicao: false, shopeeFbs: true });
+  assert.ok(soShopee.includes("/full-shopee"));
+  assert.ok(!soShopee.includes("/expedicao"),
+    "ligar o Full Shopee NAO pode revelar a Expedicao");
+
+  const ambas = href({ expedicao: true, shopeeFbs: true });
+  assert.ok(ambas.includes("/expedicao") && ambas.includes("/full-shopee"));
+  assert.equal(ambas.length, nenhuma.length + 2, "dois itens distintos");
+  assert.equal(new Set(ambas).size, ambas.length, "nenhum item duplicado");
+});
+
+test("navSections aceita o booleano legado da Expedicao", () => {
+  // O chamador original passava um unico booleano. Quebrar essa forma seria
+  // remover funcionalidade da Expedicao para resolver o conflito.
+  const legado = navSections(true).flatMap((s) => s.pages.map((p) => p.href));
+  assert.ok(legado.includes("/expedicao"));
+  assert.ok(!legado.includes("/full-shopee"));
+  assert.deepEqual(navSections(false), NAV_SECTIONS);
+  assert.deepEqual(navSections(), NAV_SECTIONS);
+});
+
+test("getRouteTitle reconhece as DUAS rotas novas", () => {
+  const nav = fonte("src/components/shell/nav-config.ts");
+  assert.match(nav, /navSections\(\{ expedicao: true, shopeeFbs: true \}\)/);
+  // E o titulo resolve de fato.
+  assert.equal(getRouteTitle("/full-shopee"), "Full Shopee");
+  assert.equal(getRouteTitle("/expedicao"), "Expedição Shopee");
+  assert.equal(getRouteTitle("/full-ml"), "Full Mercado Livre");
+});
+
+test("a Expedicao continua registrada e intacta", () => {
+  // Prova de que a resolucao do conflito nao removeu funcionalidade alheia.
+  const pkg = JSON.parse(fonte("package.json"));
+  const testes = pkg.scripts.test.split(" ").filter((t: string) => t.startsWith("tests/"));
+  assert.ok(testes.includes("tests/expedicao.test.ts"), "teste da Expedicao sumiu");
+  assert.ok(testes.includes("tests/shopee-fbs.test.ts"));
+  assert.equal(new Set(testes).size, testes.length, "teste duplicado no script");
+
+  const nav = fonte("src/components/shell/nav-config.ts");
+  assert.match(nav, /EXPEDICAO_NAV/);
+  assert.match(nav, /href: "\/expedicao"/);
+  const navlist = fonte("src/components/shell/NavList.tsx");
+  assert.match(navlist, /expedicaoHabilitado\(process\.env\.NEXT_PUBLIC_EXPEDICAO_ENABLED\)/);
 });

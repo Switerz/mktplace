@@ -592,6 +592,42 @@ test("PF1 escopo: as 27 assinaturas publicas de fetchX nao mudaram", () => {
   assert.ok(assinaturas.includes("fetchAvoeSnapshot"));
   assert.ok(assinaturas.includes("fetchMLFulfillment"));
   assert.ok(assinaturas.includes("fetchShopeeFbs"));
+
+  // O NUMERO sozinho passaria se alguem removesse um cliente e adicionasse
+  // outro no mesmo commit. O conjunto NOMINAL congelado reprova a remocao,
+  // que e' o risco real quando duas frentes tocam este arquivo ao mesmo
+  // tempo (Gate FULL-SH-1D-R/V, integracao com a Expedicao).
+  const ESPERADAS = [
+    "fetchAvoeSnapshot",
+    "fetchBrandDetail",
+    "fetchBrands",
+    "fetchCanais",
+    "fetchExecutiveSummary",
+    "fetchFinanceiro",
+    "fetchInteligencia",
+    "fetchMLFulfillment",
+    "fetchMonitoramentoPreco",
+    "fetchMonthly",
+    "fetchOperacoes",
+    "fetchOverview",
+    "fetchPedidos",
+    "fetchProdutosML",
+    "fetchProdutosMLSummary",
+    "fetchProdutosShopee",
+    "fetchProdutosShopeeSummary",
+    "fetchProdutosTikTok",
+    "fetchProdutosTikTokSummary",
+    "fetchQuality",
+    "fetchRegioesByBrand",
+    "fetchRegioesByUf",
+    "fetchRegioesSummary",
+    "fetchRegioesTrend",
+    "fetchShopeeFbs",
+    "fetchTempoReal",
+    "fetchTrend",
+  ];
+  assert.deepEqual([...assinaturas].sort(), ESPERADAS,
+    "um cliente desapareceu, foi renomeado ou surgiu sem revisao");
   // nenhuma delas passou a receber parametro de cache/refresh
   for (const nome of assinaturas) {
     const i = CLIENT_SRC.indexOf(`export function ${nome}`) >= 0
