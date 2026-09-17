@@ -1054,3 +1054,56 @@ reconferido em Chromium depois da extração.
 
 **O drawer fechado não é armadilha de teclado**: tem 14 focáveis no markup, mas
 0 alcançáveis (`offsetParent === null`) — fora da ordem de tabulação.
+
+## A barreira do `--apply` e a data da CLI (PMA-2C4D1-H1)
+
+A publicação autorizada de 17/09/2026 foi recusada por dois defeitos no
+publisher. Nenhum deles tinha a ver com os dados — a fotografia candidata
+estava correta e continua pendente de publicação.
+
+### `alembic_version` guarda o head, não o histórico
+
+`assert_apply_authorized` exigia que `"017"` fosse **uma das linhas** de
+`alembic_version`. Essa tabela guarda somente a revisão corrente. Quando a 018
+(Expedição) e a 019 (Shopee FBS) entraram, o head virou `"019"` e a 017 — que
+nunca foi revertida e continua aplicada — sumiu da tabela. A barreira passou a
+recusar para sempre, com a mensagem de que "a migration ainda não foi
+aplicada".
+
+A guarda agora pergunta se a 017 é **ancestral** do head, percorrendo o grafo
+real de `down_revision`. Aceita head 017, 018, 019 e qualquer descendente
+futuro; recusa head anterior à 017, revisão desconhecida, `alembic_version`
+vazia ou ausente, mais de um head, ciclo, `down_revision` não linear e falha
+ao ler o grafo. Não há comparação lexical nem numérica de identificadores: que
+"018" seja maior que "017" não prova parentesco.
+
+O grafo é lido **dos arquivos versionados**, por `ast`, e não via
+`alembic.script.ScriptDirectory`. O motivo é concreto: o módulo põe `apps/api`
+no `sys.path`, e ali existe `apps/api/alembic/` com `__init__.py`. Dentro do
+processo do publisher, `import alembic` resolve para esse diretório e sombreia
+o pacote instalado — `alembic.script` e `alembic.config` deixam de existir.
+Foi medido. Ler `down_revision` dos próprios arquivos usa o mesmo dado, sem
+import, sem dependência nova e sem executar a migration.
+
+**A prova física continua obrigatória** e independente: `to_regclass` sobre um
+identificador constante e versionado. Um `stamp` manual passaria na primeira
+prova sem criar a tabela; uma tabela criada à mão passaria na segunda sem estar
+sob o Alembic. As duas juntas, sempre.
+
+### `--observed-date` comparava texto com data
+
+O argparse entregava `str` e o driver devolve `datetime.date`;
+`tiktok_snapshot_exists` comparava os dois com `==`. Uma data existente era
+recusada como inexistente. A normalização agora acontece **na fronteira da
+CLI**, com `type=`, usando `strptime("%Y-%m-%d")` — e não `date.fromisoformat`,
+que a partir do 3.11 aceitaria `20260917` e até data com hora. Formato inválido
+derruba o parser antes de qualquer conexão, lock ou auditoria, com mensagem
+constante que não ecoa o que foi digitado. Sem a flag, o comportamento canônico
+é o de antes. A Shopee segue ignorando o parâmetro: o contrato dela é
+`snapshot_current`, sem série por dia.
+
+### O que este hotfix NÃO fez
+
+Nenhuma fotografia foi publicada. A de 17/09 continua pendente de autorização
+e de uma nova execução controlada. Nenhuma flag foi ligada, nenhuma migration
+criada ou alterada, nenhum dado escrito.
