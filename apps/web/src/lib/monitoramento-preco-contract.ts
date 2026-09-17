@@ -167,6 +167,24 @@ export interface MonitoramentoPrecoMeta {
   /** So `advertised_only`: sem frete, cupom, subsidio ou checkout. */
   coverage_status: "advertised_only";
   monitored_brands: string[];
+  /**
+   * Gate PMA-2C4D3-H2 — marcas que ESTA fotografia contém, por marketplace e
+   * `observed_date`, calculadas antes de qualquer filtro ou paginação.
+   *
+   * É a fonte do seletor de marca. `monitored_brands` responde outra coisa —
+   * o escopo de monitoramento do negócio — e vem igual para Shopee e TikTok,
+   * com Kokeshi incluída; usá-la no filtro oferecia Kokeshi na Shopee e
+   * respondia "0", lido como "Kokeshi não tem anúncios".
+   *
+   * Opcional porque backend e frontend são publicados separadamente: durante a
+   * janela entre os dois deploys a resposta antiga não traz o campo.
+   */
+  observed_brands?: string[];
+  /**
+   * `monitored_brands` menos `observed_brands`. NÃO é zero anúncio: é ausência
+   * de observação nesta fotografia. Também opcional, pelo mesmo motivo.
+   */
+  monitored_unobserved_brands?: string[];
   comparable_brands: string[];
   no_reference_brands: string[];
   out_of_scope_brands: Record<string, string>;

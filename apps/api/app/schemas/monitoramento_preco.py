@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 #: PARTICAO COMERCIAL — cinco valores que somam `monitored_count`.
 #: Gate PMA-H1: `stale_observation` SAIU daqui. Era um status comercial e
@@ -147,6 +147,26 @@ class MonitoramentoPrecoMeta(BaseModel):
     validity_status: ValidityStatus
     coverage_status: CoverageStatus
     monitored_brands: list[str]
+    #: Gate PMA-2C4D3-H2 — as marcas que ESTA fotografia realmente contem,
+    #: por `marketplace` + `observed_date`.
+    #:
+    #: Existe porque `monitored_brands` responde outra pergunta — o escopo de
+    #: monitoramento do NEGOCIO — e volta igual para Shopee e TikTok, incluindo
+    #: Kokeshi, que a fonte da Shopee nao devolve. Montar um filtro com aquela
+    #: lista oferecia Kokeshi na Shopee e respondia "0", que se le como "Kokeshi
+    #: nao tem anuncios" em vez de "nao observamos Kokeshi aqui".
+    #:
+    #: Calculado ANTES de marca, situacao, busca, conta, tipo e paginacao.
+    #: Inclui marcas fora do escopo comercial que tenham observacao — e' o caso
+    #: de gocase e denavita no TikTok. Ordenado pelo banco, sem duplicata.
+    #:
+    #: `default=[]` de proposito: o frontend e' publicado separado do backend e
+    #: precisa tolerar a resposta antiga durante a janela entre os dois deploys.
+    observed_brands: list[str] = Field(default_factory=list)
+    #: `monitored_brands` menos `observed_brands`, preservando aquela ordem.
+    #: NAO significa zero anuncio nem zero venda: significa que esta fotografia
+    #: nao tem observacao da marca. Nenhum motivo e' inferido.
+    monitored_unobserved_brands: list[str] = Field(default_factory=list)
     comparable_brands: list[str]
     no_reference_brands: list[str]
     #: marca -> rotulo de escopo (`out_of_scope_no_ml_catalog`).

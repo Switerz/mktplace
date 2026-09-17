@@ -11,7 +11,7 @@ e' assim que "sem fallback" vira prova em vez de intencao.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -128,6 +128,16 @@ class SessaoFake:
                         c["stale_offers"] += 1
                 return _Result(sorted(contas.values(),
                                       key=lambda x: x["shop_account"]))
+            if "group by brand" in texto:
+                # Gate PMA-2C4D3-H2 — cobertura observada. O fake aplica SO'
+                # marketplace + observed_date, como a consulta real: se algum
+                # filtro de usuario vazasse para ca', o teste que prova a
+                # independencia da cobertura falharia, e e' esse o ponto.
+                marcas = sorted({
+                    o["brand"] for o in self.ofertas
+                    if o["marketplace"] == p.get("marketplace")
+                    and o["observed_date"] == p.get("observed_date")})
+                return _Result([{"brand": b} for b in marcas])
             # a consulta de ofertas, com os filtros opcionais
             linhas = [o for o in self.ofertas
                       if o["marketplace"] == p.get("marketplace")
@@ -161,6 +171,12 @@ class SessaoFake:
         if "max(synced_at)" in texto:
             return _Result([{"synced_at": CARGA}])
         if "fact_marketplace_listing_price_daily" in texto:
+            if "group by brand" in texto:
+                # Cobertura observada do ML, tambem sem filtro de usuario.
+                return _Result([{"brand": b} for b in sorted(
+                    {l["brand"] for l in self.listings_ml
+                     if l.get("ref_date") == p.get("ref_date")}
+                    or {l["brand"] for l in self.listings_ml})])
             return _Result(list(self.listings_ml))
         raise AssertionError(f"consulta inesperada: {texto[:120]}")
 
@@ -171,6 +187,14 @@ def flags_ligadas(monkeypatch):
     no processo, jamais na configuracao implantada."""
     monkeypatch.setattr(mp.settings, "pma_shopee_enabled", True)
     monkeypatch.setattr(mp.settings, "pma_tiktok_enabled", True)
+
+
+def _listing_ml(brand, item_id="ML-1", ref_date=None):
+    """Linha minima da fato do ML, no formato que `compare_all` consome."""
+    return {"ref_date": ref_date or D1, "marketplace": "ml", "brand": brand,
+            "item_id": item_id, "seller_sku": item_id, "gtin": None,
+            "title": "Produto", "advertised_price": Decimal("10"),
+            "listing_status": "active"}
 
 
 def servir(sessao, canal="shopee", **kw) -> dict:
@@ -576,3 +600,238 @@ def test_a_politica_de_data_nao_e_global():
     assert mp.date_policy_for("tiktok") == pm.POLICY_SNAPSHOT_CURRENT
     assert pm.date_ceiling(HOJE, pm.POLICY_CLOSED_DAY) == D1
     assert pm.date_ceiling(HOJE, pm.POLICY_SNAPSHOT_CURRENT) == D0
+
+
+# ---------------------------------------------------------------------------
+# Gate PMA-2C4D3-H2 — cobertura OBSERVADA por canal e data
+#
+# `monitored_brands` responde "o que o negocio monitora" e volta igual para
+# Shopee e TikTok, com Kokeshi incluida. A Shopee nao observa Kokeshi: montar o
+# filtro com aquela lista oferecia a marca e respondia "0", que se le como
+# "Kokeshi nao tem anuncios". `observed_brands` responde outra pergunta — o que
+# ESTA fotografia contem — e e' a fonte do filtro.
+# ---------------------------------------------------------------------------
+
+def _ofertas_shopee_reais():
+    """Quatro marcas observadas; Kokeshi ausente, como a fonte real."""
+    return [oferta(marketplace="shopee", brand=b, shop_account=b,
+                   offer_key="SH-" + b)
+            for b in ["apice", "barbours", "lescent", "rituaria"]]
+
+
+def _ofertas_tiktok_reais():
+    """Sete marcas, duas delas fora do escopo comercial."""
+    dentro = ["apice", "barbours", "kokeshi", "lescent", "rituaria"]
+    fora = ["gocase", "denavita"]
+    linhas = [oferta(marketplace="tiktok", brand=b, shop_account="tiktok",
+                     observation_mode="daily_series", offer_key="TK-" + b,
+                     business_scope=dom.BUSINESS_SCOPE_IN) for b in dentro]
+    linhas += [oferta(marketplace="tiktok", brand=b, shop_account="tiktok",
+                      observation_mode="daily_series", offer_key="TK-" + b,
+                      business_scope=dom.BUSINESS_SCOPE_OUT) for b in fora]
+    return linhas
+
+
+def test_h2_shopee_observa_quatro_marcas_e_kokeshi_fica_de_fora():
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    meta = servir(s, "shopee")["meta"]
+    assert meta["observed_brands"] == ["apice", "barbours", "lescent", "rituaria"]
+    assert "kokeshi" not in meta["observed_brands"]
+    # E a ausencia e' DECLARADA, nao silenciosa.
+    assert "kokeshi" in meta["monitored_unobserved_brands"]
+
+
+def test_h2_tiktok_observa_sete_marcas_inclusive_fora_do_escopo():
+    s = SessaoFake(ofertas=_ofertas_tiktok_reais())
+    meta = servir(s, "tiktok")["meta"]
+    assert len(meta["observed_brands"]) == 7
+    for b in ("gocase", "denavita"):
+        assert b in meta["observed_brands"], (
+            "marca fora do escopo comercial que TEM observacao continua "
+            "selecionavel; esconde-la apagaria linhas visiveis da tabela")
+    assert meta["monitored_unobserved_brands"] == []
+
+
+def test_h2_cobertura_nao_encolhe_com_filtro_de_marca():
+    """O ponto do contrato: a cobertura e' anterior aos filtros."""
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    meta = servir(s, "shopee", brand="barbours")["meta"]
+    assert meta["observed_brands"] == ["apice", "barbours", "lescent", "rituaria"]
+
+
+def test_h2_cobertura_nao_encolhe_com_conta_tipo_ou_busca():
+    esperado = ["apice", "barbours", "lescent", "rituaria"]
+    for kw in ({"shop_account": "barbours"},
+               {"product_type": dom.PRODUCT_NO_KIT_SIGNAL},
+               {"product_query": "Shampoo"}):
+        s = SessaoFake(ofertas=_ofertas_shopee_reais())
+        assert servir(s, "shopee", **kw)["meta"]["observed_brands"] == esperado, kw
+
+
+def test_h2_busca_sem_resultado_nao_apaga_a_cobertura():
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    saida = servir(s, "shopee", product_query="zzzz-nao-existe")
+    assert saida["total_count"] == 0
+    assert saida["meta"]["observed_brands"] == [
+        "apice", "barbours", "lescent", "rituaria"], (
+        "a tabela pode ficar vazia; a COBERTURA da fotografia nao muda")
+
+
+def test_h2_paginacao_nao_encolhe_a_cobertura():
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    a = servir(s, "shopee", limit=1, offset=0)["meta"]["observed_brands"]
+    s2 = SessaoFake(ofertas=_ofertas_shopee_reais())
+    b = servir(s2, "shopee", limit=1, offset=3)["meta"]["observed_brands"]
+    assert a == b == ["apice", "barbours", "lescent", "rituaria"]
+
+
+def test_h2_historico_tem_cobertura_propria_da_data():
+    """D-1 nao herda a cobertura de D0, nem o contrario."""
+    ontem = [oferta(marketplace="shopee", brand=b, shop_account=b,
+                    observed_date=D1, offer_key="OLD-" + b)
+             for b in ["barbours", "rituaria"]]
+    s = SessaoFake(ofertas=_ofertas_shopee_reais() + ontem, datas=[D0, D1])
+    hoje = servir(s, "shopee")["meta"]
+    assert hoje["observed_brands"] == ["apice", "barbours", "lescent", "rituaria"]
+    s2 = SessaoFake(ofertas=_ofertas_shopee_reais() + ontem, datas=[D0, D1])
+    antes = servir(s2, "shopee", observed_date=D1.isoformat())["meta"]
+    assert antes["observed_brands"] == ["barbours", "rituaria"]
+    assert "apice" in antes["monitored_unobserved_brands"]
+
+
+def test_h2_canal_sem_linhas_devolve_listas_vazias():
+    s = SessaoFake(ofertas=[], datas=[])
+    meta = servir(s, "shopee")["meta"]
+    assert meta["observed_brands"] == []
+    assert meta["monitored_unobserved_brands"] == []
+
+
+def test_h2rv_ml_sem_fotografia_nao_declara_ausencia():
+    """Achado da revisao terminal do PR #20.
+
+    O ML nao passa por `_unavailable_envelope`: quando a data pedida nao tem
+    fotografia ele segue pelo caminho normal, com `observed_date: null` e
+    `availability: available`. A diferenca `monitoradas - observadas` devolvia
+    entao as QUATRO marcas, e a tela afirmava "Sem observacao nesta fotografia"
+    sobre uma fotografia que nao existe — a mesma afirmacao que o envelope dos
+    canais recusa a fazer. Medido em producao antes da correcao com
+    `GET ?marketplace=ml&observed_date=2026-01-05`.
+    """
+    s = SessaoFake(listings_ml=[])
+    sem_foto = (D1 - timedelta(days=3)).isoformat()
+    meta = mp.get_monitoramento_preco(
+        s, marketplace="ml", today=HOJE, observed_date=sem_foto)["meta"]
+    assert meta["observed_date"] is None, "pre-condicao: sem fotografia"
+    assert meta["observed_brands"] == []
+    assert meta["monitored_unobserved_brands"] == [], (
+        "sem fotografia nao ha ausencia de observacao a declarar")
+
+
+def test_h2rv_ml_com_fotografia_continua_declarando_a_ausencia():
+    """Contraprova do teste acima: o guarda nao pode calar o caso legitimo."""
+    s = SessaoFake(listings_ml=[_listing_ml("barbours")])
+    meta = mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE)["meta"]
+    assert meta["observed_date"] is not None
+    assert meta["observed_brands"] == ["barbours"]
+    assert "kokeshi" in meta["monitored_unobserved_brands"], (
+        "com fotografia, a marca monitorada e ausente continua sendo declarada")
+
+
+def test_h2_cobertura_sem_duplicata_e_com_ordem_estavel():
+    muitas = []
+    for b in ["rituaria", "apice", "barbours", "apice", "rituaria", "lescent"]:
+        muitas.append(oferta(marketplace="shopee", brand=b, shop_account=b,
+                             offer_key="SH-" + b + "-" + str(len(muitas))))
+    s = SessaoFake(ofertas=muitas)
+    obs = servir(s, "shopee")["meta"]["observed_brands"]
+    assert obs == sorted(set(obs)), "ordenado e sem repeticao"
+    s2 = SessaoFake(ofertas=muitas)
+    assert servir(s2, "shopee")["meta"]["observed_brands"] == obs
+
+
+def test_h2_nao_observada_nao_e_zero_nem_carrega_motivo_inventado():
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    meta = servir(s, "shopee")["meta"]
+    # A lista e' de NOMES. Nenhuma contagem, nenhum motivo — o servico nao sabe
+    # por que a fonte nao devolveu a marca, e inventar seria pior que calar.
+    assert isinstance(meta["monitored_unobserved_brands"], list)
+    assert all(isinstance(b, str) for b in meta["monitored_unobserved_brands"])
+
+
+def test_h2_a_consulta_de_cobertura_nao_recebe_filtro_de_usuario():
+    """Contraprova estrutural: se a cobertura receber os filtros do usuario,
+    ela deixa de ser cobertura."""
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    servir(s, "shopee", brand="barbours", shop_account="barbours",
+           product_query="Shampoo")
+    cobertura = [(t, p) for t, p in s.executadas if "group by brand" in t]
+    assert len(cobertura) == 1, "uma unica consulta de cobertura, sem N+1"
+    _, params = cobertura[0]
+    assert set(params) == {"marketplace", "observed_date"}, (
+        "a cobertura so' pode ser escopada por canal e data; veio "
+        + str(set(params)))
+
+
+def test_h2_uma_consulta_de_cobertura_por_requisicao_sem_loop_por_marca():
+    s = SessaoFake(ofertas=_ofertas_tiktok_reais())
+    servir(s, "tiktok")
+    n = sum(1 for t, _ in s.executadas if "group by brand" in t)
+    assert n == 1, "esperava 1 consulta de cobertura, houve " + str(n)
+
+
+def test_h2rv_o_where_da_cobertura_escopa_por_canal_E_por_data():
+    """Achado da revisao terminal do PR #20 — lacuna de contraprova.
+
+    `SessaoFake` despacha pelo TEXTO da consulta e filtra pelos PARAMETROS, de
+    modo que a clausula WHERE do SQL nunca e' exercitada: apagar
+    `marketplace = :marketplace` da cobertura mantinha a suite inteira verde.
+    Em producao isso nao levantaria erro — devolveria as marcas de TODOS os
+    canais naquela data, e a Shopee voltaria a oferecer Kokeshi, pela porta dos
+    fundos. Este teste le o SQL, nao o fake.
+    """
+    import re
+
+    def clausula_where(sql: str) -> str:
+        m = re.search(r"\bWHERE\b(.*?)\bGROUP BY\b", sql, re.S | re.I)
+        assert m, "SQL de cobertura sem WHERE ... GROUP BY: " + sql
+        return m.group(1)
+
+    canal = clausula_where(mp.SQL_CHANNEL_OBSERVED_BRANDS)
+    assert "marketplace = :marketplace" in canal, (
+        "sem o canal no WHERE a cobertura mistura marketplaces")
+    assert "observed_date = :observed_date" in canal, (
+        "sem a data no WHERE a cobertura mistura fotografias")
+
+    ml = clausula_where(mp.SQL_OBSERVED_BRANDS)
+    assert "marketplace = :marketplace" in ml
+    assert "ref_date = :ref_date" in ml
+
+    # Nenhum filtro do usuario pode entrar aqui, nem como coluna nem como bind.
+    for where in (canal, ml):
+        for proibido in ("brand_filter", "brands", "shop_account", "account",
+                         "product_type", "query", "limit", "offset", "status"):
+            assert proibido not in where.lower(), (
+                "filtro de usuario na cobertura: " + proibido)
+        # `brand` so' pode aparecer no GROUP BY / ORDER BY, nunca no WHERE.
+        assert "brand" not in where.lower()
+
+    for sql in (mp.SQL_CHANNEL_OBSERVED_BRANDS, mp.SQL_OBSERVED_BRANDS):
+        assert "GROUP BY brand" in sql and "ORDER BY brand" in sql, (
+            "a cobertura precisa sair agrupada e ordenada pelo banco")
+
+
+def test_h2_monitored_brands_continua_intacto():
+    """Compatibilidade: o campo antigo nao mudou de valor nem de semantica."""
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    meta = servir(s, "shopee")["meta"]
+    assert meta["monitored_brands"] == list(mp.channel_brand_allowlist("shopee"))
+    assert "kokeshi" in meta["monitored_brands"], (
+        "o escopo do negocio nao encolheu; quem mudou foi a fonte do FILTRO")
+
+
+def test_h2_a_cobertura_usa_bind_parameters_e_nao_interpolacao():
+    fonte = mp.SQL_CHANNEL_OBSERVED_BRANDS + mp.SQL_OBSERVED_BRANDS
+    assert ":marketplace" in fonte and ":observed_date" in fonte
+    assert ":ref_date" in mp.SQL_OBSERVED_BRANDS
+    for proibido in ("format(", "% (", "' +", '" +'):
+        assert proibido not in fonte, proibido

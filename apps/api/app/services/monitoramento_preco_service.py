@@ -371,6 +371,39 @@ SELECT observed_date, marketplace, offer_key, parent_item_id, model_id,
  ORDER BY brand, offer_key
 """
 
+#: Gate PMA-2C4D3-H2 — COBERTURA OBSERVADA do canal, por fotografia.
+#:
+#: `monitored_brands` responde "o que o negocio monitora" e e' igual para Shopee
+#: e TikTok — inclusive Kokeshi, que a fonte da Shopee nao devolve. Usar aquela
+#: lista para montar o filtro fazia a tela oferecer Kokeshi na Shopee e
+#: responder "0", que se le como "Kokeshi nao tem anuncios" em vez de "nao
+#: observamos Kokeshi aqui".
+#:
+#: Esta consulta responde outra pergunta: "que marcas ESTA fotografia contem".
+#: Ela e' escopada por `marketplace` + `observed_date` e NAO recebe nenhum dos
+#: filtros do usuario — nem marca, nem conta, nem tipo, nem busca, nem
+#: paginacao. E' um `GROUP BY` sobre o mesmo indice que as demais consultas do
+#: canal ja usam; nao ha loop por marca nem N+1.
+SQL_CHANNEL_OBSERVED_BRANDS = f"""
+SELECT brand
+  FROM {CHANNEL_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date = :observed_date
+ GROUP BY brand
+ ORDER BY brand
+"""
+
+#: A mesma pergunta para o Mercado Livre, que vive noutra fato e usa `ref_date`.
+#: Igualmente sem filtro de usuario e sem paginacao.
+SQL_OBSERVED_BRANDS = f"""
+SELECT brand
+  FROM {LISTING_TABLE}
+ WHERE marketplace = :marketplace
+   AND ref_date = :ref_date
+ GROUP BY brand
+ ORDER BY brand
+"""
+
 #: Um relogio por CONTA. A Shopee carrega em quatro lotes distintos e um MAX()
 #: global marcaria as tres primeiras contas inteiras como atrasadas.
 SQL_CHANNEL_ACCOUNT_CLOCKS = f"""
@@ -398,6 +431,8 @@ ALL_QUERIES = (
     # Gate PMA-2C4A — as consultas dos canais entram na MESMA varredura.
     SQL_CHANNEL_LATEST_OBSERVED_DATE, SQL_CHANNEL_AVAILABLE_DATES,
     SQL_CHANNEL_DATE_EXISTS, SQL_CHANNEL_OFFERS, SQL_CHANNEL_ACCOUNT_CLOCKS,
+    # Gate PMA-2C4D3-H2
+    SQL_CHANNEL_OBSERVED_BRANDS, SQL_OBSERVED_BRANDS,
 )
 
 #: Gate PMA-H1 — os dois modos publicos.
@@ -610,6 +645,11 @@ def _unavailable_envelope(marketplace: str, reason: str) -> dict:
             # entram em denominador nenhum — nem como "sem referencia", o que as
             # faria parecer falha de casamento em vez de fora do produto.
             "monitored_brands": list(dom.BEAUTY_SCOPE_BRANDS),
+            # Gate PMA-2C4D3-H2 — sem fotografia nao ha cobertura a declarar.
+            # Vazio de proposito, e NAO a lista monitorada: dizer que tudo esta
+            # "monitorado e nao observado" afirmaria uma leitura que nao houve.
+            "observed_brands": [],
+            "monitored_unobserved_brands": [],
             "comparable_brands": [],
             "no_reference_brands": [],
             "out_of_scope_brands": {},
@@ -1031,6 +1071,19 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
         "status_current": dom.SNAPSHOT_CURRENT, "status_stale": dom.SNAPSHOT_STALE,
     })
 
+    # ---- Gate PMA-2C4D3-H2: cobertura observada desta fotografia ------------
+    # Consulta propria, com os MESMOS `marketplace` e `observed_date` das linhas
+    # e NENHUM filtro do usuario. Nao se deriva de `linhas` de proposito:
+    # `linhas` ja passou por marca, conta, tipo e busca, e e' paginada adiante —
+    # uma cobertura tirada dali encolheria junto com o filtro e mentiria.
+    observadas = [r["brand"] for r in _rows(db, SQL_CHANNEL_OBSERVED_BRANDS, {
+        "marketplace": canal, "observed_date": observado,
+    })]
+    monitoradas = list(channel_brand_allowlist(canal))
+    # Monitorada e nao observada NAO e' zero anuncio: e' ausencia de observacao
+    # nesta fotografia. A diferenca preserva a ordem de `monitored_brands`.
+    nao_observadas = [b for b in monitoradas if b not in set(observadas)]
+
     snapshot = _rows(db, SQL_LATEST_SNAPSHOT, {})
     snapshot_id = snapshot[0]["snapshot_id"] if snapshot else None
     reference_captured_at = snapshot[0]["captured_at"] if snapshot else None
@@ -1172,7 +1225,11 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
             "policy_status": pm.POLICY_STATUS,
             "validity_status": pm.VALIDITY_STATUS,
             "coverage_status": pm.COVERAGE_STATUS,
-            "monitored_brands": list(channel_brand_allowlist(canal)),
+            "monitored_brands": monitoradas,
+            # Gate PMA-2C4D3-H2 — cobertura REAL desta fotografia, ordenada
+            # pelo banco e sem duplicata (vem de `GROUP BY brand`).
+            "observed_brands": observadas,
+            "monitored_unobserved_brands": nao_observadas,
             "comparable_brands": list(pm.COMPARABLE_BRANDS),
             "no_reference_brands": list(pm.NO_REFERENCE_BRANDS),
             "out_of_scope_brands": {
@@ -1297,6 +1354,29 @@ def get_monitoramento_preco(
             "has_query": bool(consulta),
             "query_like": f"%{consulta}%",
         })
+
+    # ---- Gate PMA-2C4D3-H2: cobertura observada do ML ----------------------
+    # Mesmo contrato dos canais: consulta propria, escopada por `ref_date`, sem
+    # nenhum filtro do usuario. Nao sai de `listings`, que ja veio filtrada por
+    # marca e busca.
+    ml_monitoradas = list(pm.MONITORED_BRANDS)
+    ml_observadas: list[str] = []
+    # Gate PMA-2C4D3-H2-R/V — sem fotografia, AMBAS ficam vazias.
+    #
+    # O ML nao passa por `_unavailable_envelope` quando a data pedida nao
+    # tem fotografia: ele segue por este caminho com `observed_date: null` e
+    # `availability: available`. Calcular a diferenca aqui devolvia as quatro
+    # marcas como monitoradas-e-nao-observadas, e a tela dizia "Sem
+    # observacao NESTA FOTOGRAFIA" sobre uma fotografia que nao existe —
+    # exatamente a afirmacao que o envelope de indisponivel recusa a fazer
+    # nos canais. Medido: GET ml&observed_date=2026-01-05 devolvia as quatro.
+    ml_nao_observadas: list[str] = []
+    if observado is not None:
+        ml_observadas = [r["brand"] for r in _rows(db, SQL_OBSERVED_BRANDS, {
+            "marketplace": canal, "ref_date": observado,
+        })]
+        ml_nao_observadas = [b for b in ml_monitoradas
+                             if b not in set(ml_observadas)]
 
     referencias: list[dict] = []
     if snapshot_id is not None:
@@ -1424,7 +1504,10 @@ def get_monitoramento_preco(
             "policy_status": pm.POLICY_STATUS,
             "validity_status": pm.VALIDITY_STATUS,
             "coverage_status": pm.COVERAGE_STATUS,
-            "monitored_brands": list(pm.MONITORED_BRANDS),
+            "monitored_brands": ml_monitoradas,
+            # Gate PMA-2C4D3-H2 — mesma semantica dos canais.
+            "observed_brands": ml_observadas,
+            "monitored_unobserved_brands": ml_nao_observadas,
             "comparable_brands": list(pm.COMPARABLE_BRANDS),
             "no_reference_brands": list(pm.NO_REFERENCE_BRANDS),
             "out_of_scope_brands": {
