@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   buildMonitoramentoPrecoQuery,
   isMarketplace,
+  mensagemDeFalha,
   MARKETPLACES,
   type MonitoramentoPrecoRow,
 } from "../src/lib/monitoramento-preco-contract.ts";
@@ -641,8 +642,13 @@ test("H2-1. o filtro de marca sai de observed_brands, nao de monitored_brands", 
   const codigo = await ler(PAGE);
   assert.ok(codigo.includes("marcasDoFiltro.map"),
     "o select precisa consumir a cobertura");
-  assert.ok(/const marcasDoFiltro = meta\?\.observed_brands \?\? meta\?\.monitored_brands/
+  assert.ok(/const marcasDaCobertura = meta\?\.observed_brands \?\? meta\?\.monitored_brands/
     .test(codigo), "a cobertura vem primeiro; o campo antigo e' so' a queda");
+  // Gate PMA-2C4D3-H3 — `marcasDoFiltro` passou a ser a cobertura MAIS a marca
+  // escolhida, para o controle nao se esvaziar quando a carga falha. A origem
+  // continua sendo a cobertura, e e' isso que este teste trava.
+  assert.ok(/const marcasDoFiltro =\s*\n?\s*brand && !marcasDaCobertura\.includes\(brand\)/
+    .test(codigo), "o filtro deriva da cobertura, nunca de lista fixa");
   const bloco = codigo.split("htmlFor={marcaId}")[1].split("</select>")[0];
   assert.ok(!bloco.includes("monitored_brands"),
     "o select nao pode voltar a ler o escopo de monitoramento direto");
@@ -717,7 +723,7 @@ test("H2-8. marcas fora do escopo comercial seguem selecionaveis se observadas",
   // Gocase e Denavita TEM linhas no TikTok. Some-las do filtro deixaria linhas
   // visiveis sem dimensao de filtragem — o que o gate R5 ja proibia.
   const codigo = await ler(PAGE);
-  const bloco = codigo.split("const marcasDoFiltro")[1].split("\n\n")[0];
+  const bloco = codigo.split("const marcasDaCobertura")[1].split("\n\n")[0];
   for (const proibido of ["business_scope", "in_scope", "out_of_business_scope",
                           "escopo ===", "filter("]) {
     assert.ok(!bloco.includes(proibido),
@@ -737,4 +743,79 @@ test("H2-9. toda marca observavel tem rotulo proprio", () => {
   }
   assert.equal(brandLabel("gocase"), "Gocase");
   assert.equal(brandLabel("denavita"), "Denavita");
+});
+
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4D3-H3 — falha de carga nao pode virar tela muda nem detalhe
+// tecnico, e nao pode descartar o filtro que a pessoa escolheu.
+// ---------------------------------------------------------------------------
+
+test("H3-1. o alerta de falha nao expoe status HTTP nem jargao", () => {
+  for (const status of [400, 404, 422, 500, 502, 503, null]) {
+    const texto = mensagemDeFalha(status);
+    assert.ok(texto.length > 0, `status ${status} sem mensagem`);
+    for (const vazamento of ["422", "400", "404", "500", "502", "503",
+                             "HTTP", "status", "API", "endpoint", "payload",
+                             "Traceback", "null", "undefined"]) {
+      assert.ok(!texto.includes(vazamento),
+        `a mensagem de ${status} expoe "${vazamento}": ${texto}`);
+    }
+  }
+});
+
+test("H3-2. cada familia de falha tem redacao propria e acionavel", () => {
+  assert.notEqual(mensagemDeFalha(422), mensagemDeFalha(500));
+  assert.notEqual(mensagemDeFalha(null), mensagemDeFalha(500));
+  assert.match(mensagemDeFalha(422), /filtros/i);
+  assert.match(mensagemDeFalha(null), /conex/i);
+  assert.match(mensagemDeFalha(503), /indispon/i);
+});
+
+test("H3-3. a pagina renderiza a mensagem amigavel, nao o erro cru", async () => {
+  const codigo = await lerCodigo(PAGE);
+  const alerta = codigo.split('role="alert"')[1].split("</div>")[0];
+  assert.ok(alerta.includes("mensagemDeFalha(erroStatus)"),
+    "o alerta precisa usar a traducao amigavel");
+  assert.ok(!/\{erro\}/.test(alerta),
+    "o alerta nao pode imprimir a mensagem de diagnostico");
+});
+
+test("H3-4. falha de carga NAO limpa a marca escolhida", async () => {
+  const codigo = await lerCodigo(PAGE);
+  const captura = codigo.split(".catch((err: unknown)")[1].split("});")[0];
+  assert.ok(!captura.includes("setBrand"),
+    "erro de rede/API nao prova que a marca deixou de ser observavel");
+  assert.ok(!captura.includes("setObservedDate"),
+    "erro tambem nao pode descartar a data escolhida");
+});
+
+test("H3-5. a marca escolhida continua listada quando a cobertura nao veio", async () => {
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("[...marcasDaCobertura, brand]"),
+    "sem isto o <select> cai sozinho para 'Todas' e parece descartar o filtro");
+});
+
+test("H3-6. a limpeza automatica so' ocorre com COBERTURA nova", async () => {
+  const codigo = await lerCodigo(PAGE);
+  const efeito = codigo.split("if (!brand || !meta?.observed_brands) return;")[1];
+  assert.ok(efeito !== undefined,
+    "a guarda que exige cobertura recebida precisa continuar existindo");
+  assert.ok(efeito.split("}, [")[0].includes("setBrand(\"\")"),
+    "a limpeza continua acontecendo quando a cobertura prova a saida");
+});
+
+test("H3-7. o fallback de compatibilidade segue intacto", async () => {
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("meta?.observed_brands ?? meta?.monitored_brands ?? []"),
+    "a janela entre os dois deploys continua coberta");
+});
+
+test("H3-8. exatamente um canal pressionado continua garantido", async () => {
+  const codigo = await lerCodigo(PAGE);
+  assert.ok(codigo.includes("aria-pressed={ativo}"),
+    "o estado dos tres botoes continua explicito");
+  assert.ok(!codigo.includes("aria-pressed={true}")
+    && !codigo.includes("aria-pressed={false}"),
+    "nenhum botao pode ter estado fixo");
 });

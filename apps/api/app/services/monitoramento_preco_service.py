@@ -114,6 +114,24 @@ ERRO_PRODUCT_TYPE_TAMANHO = (
     f"parametro product_type excede o tamanho maximo de "
     f"{MAX_PRODUCT_TYPE_PARAM_CHARS} caracteres."
 )
+#: Gate PMA-2C4D3-H3 — marca aceita o mesmo FORMATO das contas: o slug e' dado
+#: da origem, nao enum de release. A autoridade sobre QUAIS marcas existem e' a
+#: fotografia, verificada depois; aqui so' se prova que a entrada e' um slug.
+_BRAND_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+#: Gate PMA-2C4D3-H3 — recusa de PERTENCIMENTO, separada da recusa de formato.
+#:
+#: Mensagem FIXA e sem eco, como as demais: nao nomeia a marca pedida nem
+#: enumera as aceitas, porque a lista muda a cada fotografia e uma mensagem que
+#: a repetisse viraria contrato implicito. Quem precisa da lista le
+#: `meta.observed_brands`, que e' a mesma fonte usada para validar.
+ERRO_BRAND_NAO_OBSERVADA = (
+    "parametro brand invalido para esta fotografia. Aceita 'all', ou marcas "
+    "separadas por virgula que estejam presentes na fotografia consultada. "
+    "As marcas observadas vem em meta.observed_brands; as monitoradas que esta "
+    "fotografia nao devolveu, em meta.monitored_unobserved_brands."
+)
+
 #: A recusa de data dos canais nomeia o teto CERTO. A mensagem do ML continua
 #: intacta, palavra por palavra: ela e' contrato publicado.
 ERRO_OBSERVED_DATE_FUTURA_SNAPSHOT = (
@@ -838,18 +856,55 @@ def channel_brand_allowlist(marketplace: str) -> tuple:
     return pm.MONITORED_BRANDS
 
 
-def normalize_brands_for(valor, marketplace: str) -> list:
-    """`normalize_brands` com a allowlist do canal. Recusa sem ecoar a entrada."""
+def normalize_brand_slugs(valor) -> list:
+    """Gate PMA-2C4D3-H3 — validacao SINTATICA do filtro `brand`, so' isso.
+
+    Substitui `normalize_brands_for`, que decidia pertencimento por uma
+    allowlist estatica. Aquela lista respondia "o que o negocio monitora" e
+    divergia da fotografia: `gocase` e `denavita` sao observadas no TikTok,
+    apareciam no filtro da tela (que sai de `observed_brands`) e a API as
+    recusava com 422. Quem decide pertencimento agora e' a cobertura, em
+    `assert_brands_observed`, depois que a fotografia foi resolvida.
+
+    Esta funcao roda ANTES de qualquer consulta filtrada e e' o que barra
+    payload hostil: normaliza caixa e espaco, aplica o teto de tamanho e exige
+    o formato de slug. Nada aqui e' interpolado em SQL — o valor segue por
+    parametro ate o driver, como em `normalize_accounts`.
+    """
     if valor is None or str(valor).strip() in ("", "all"):
         return []
     bruto = str(valor)
     if len(bruto) > MAX_BRAND_PARAM_CHARS:
         raise MonitoramentoPrecoError(ERRO_BRAND_TAMANHO)
-    permitidas = channel_brand_allowlist(marketplace)
     pedidas = [b.strip().lower() for b in bruto.split(",") if b.strip()]
-    if not pedidas or set(pedidas) - set(permitidas):
+    if not pedidas or any(not _BRAND_RE.match(b) for b in pedidas):
         raise MonitoramentoPrecoError(ERRO_BRAND_INVALIDA)
     return pedidas
+
+
+def assert_brands_observed(pedidas, observadas, *, fora_de_escopo=()) -> None:
+    """Gate PMA-2C4D3-H3 — validacao de PERTENCIMENTO contra a cobertura.
+
+    `observadas` e' `meta.observed_brands`: a mesma consulta de cobertura que a
+    resposta ja faz, reaproveitada. Nao ha consulta por marca nem N+1.
+
+    Sem fotografia, `observadas` chega vazia e QUALQUER marca pedida e'
+    recusada — de proposito. A alternativa seria servir 200 com zero linhas,
+    que se le como "essa marca nao tem anuncio" quando o que houve foi ausencia
+    de observacao. Era exatamente o defeito da Kokeshi na Shopee.
+
+    `fora_de_escopo` tem PRECEDENCIA e existe para nao perder informacao: no
+    ML, `apice` e `yenzah` tem tabela de referencia B2B mas nao tem catalogo
+    proprio, e `ERRO_BRAND_INVALIDA` diz exatamente isso — e' contrato
+    publicado. Dizer apenas "nao observada" seria verdade, e seria pior.
+    Os canais NAO passam essa colecao: la' `apice` e' observada de verdade.
+    """
+    if not pedidas:
+        return
+    if set(pedidas) & set(fora_de_escopo):
+        raise MonitoramentoPrecoError(ERRO_BRAND_INVALIDA)
+    if set(pedidas) - set(observadas):
+        raise MonitoramentoPrecoError(ERRO_BRAND_NAO_OBSERVADA)
 
 
 def normalize_accounts(valor) -> list:
@@ -1038,6 +1093,10 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
         observado = pedida if existe else None
 
     if observado is None:
+        # Gate PMA-2C4D3-H3 — sem fotografia nao ha cobertura, e sem cobertura
+        # nenhuma marca e' filtravel. Recusar aqui evita servir 200 com zero
+        # linhas, que se leria como "essa marca nao tem anuncio".
+        assert_brands_observed(marcas, [])
         # Estado vazio HONESTO: o canal esta ligado, a tabela foi consultada e
         # nao ha fotografia para esta pergunta. Diferente de flag desligada, e
         # por isso o motivo e' outro.
@@ -1053,11 +1112,31 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
         vazio["meta"]["snapshot_mutability"] = None
         return vazio
 
+    # ---- Gate PMA-2C4D3-H2: cobertura observada desta fotografia ------------
+    # Consulta propria, com os MESMOS `marketplace` e `observed_date` das linhas
+    # e NENHUM filtro do usuario. Nao se deriva de `linhas` de proposito:
+    # `linhas` ja passou por marca, conta, tipo e busca, e e' paginada adiante —
+    # uma cobertura tirada dali encolheria junto com o filtro e mentiria.
+    #
+    # Gate PMA-2C4D3-H3 — subiu para ANTES da consulta de ofertas porque agora
+    # ela tambem e' a autoridade do filtro de marca. Continua sendo UMA consulta
+    # por requisicao, reaproveitada pelos dois usos.
+    observadas = [r["brand"] for r in _rows(db, SQL_CHANNEL_OBSERVED_BRANDS, {
+        "marketplace": canal, "observed_date": observado,
+    })]
+
+    # Gate PMA-2C4D3-H3 — a marca pedida vale se ESTA fotografia a contem.
+    # Antes a decisao saia de `channel_brand_allowlist`, que e' escopo de
+    # monitoramento e nao cobertura: `gocase` e `denavita` sao observadas no
+    # TikTok, a tela as oferecia (porque o filtro sai de `observed_brands`) e a
+    # API as recusava com 422.
+    assert_brands_observed(marcas, observadas)
+
     linhas = _rows(db, SQL_CHANNEL_OFFERS, {
         "marketplace": canal,
         "observed_date": observado,
         "brand_filter": bool(marcas),
-        "brands": marcas or list(channel_brand_allowlist(canal)),
+        "brands": marcas or list(observadas),
         "account_filter": bool(contas),
         "accounts": contas or [""],
         "product_type_filter": bool(tipos_pedidos),
@@ -1071,14 +1150,6 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
         "status_current": dom.SNAPSHOT_CURRENT, "status_stale": dom.SNAPSHOT_STALE,
     })
 
-    # ---- Gate PMA-2C4D3-H2: cobertura observada desta fotografia ------------
-    # Consulta propria, com os MESMOS `marketplace` e `observed_date` das linhas
-    # e NENHUM filtro do usuario. Nao se deriva de `linhas` de proposito:
-    # `linhas` ja passou por marca, conta, tipo e busca, e e' paginada adiante —
-    # uma cobertura tirada dali encolheria junto com o filtro e mentiria.
-    observadas = [r["brand"] for r in _rows(db, SQL_CHANNEL_OBSERVED_BRANDS, {
-        "marketplace": canal, "observed_date": observado,
-    })]
     monitoradas = list(channel_brand_allowlist(canal))
     # Monitorada e nao observada NAO e' zero anuncio: e' ausencia de observacao
     # nesta fotografia. A diferenca preserva a ordem de `monitored_brands`.
@@ -1298,7 +1369,11 @@ def get_monitoramento_preco(
         return _unavailable_envelope(canal, dom.UNAVAILABLE_CHANNEL_DISABLED)
 
     politica = date_policy_for(canal)
-    marcas = normalize_brands_for(brand, canal)
+    # Gate PMA-2C4D3-H3 — so' o FORMATO aqui, e ainda antes de qualquer
+    # consulta filtrada: e' esta linha que barra payload hostil. O
+    # pertencimento e' decidido mais adiante, contra a cobertura da fotografia
+    # resolvida, que so' existe depois de a data ser resolvida.
+    marcas = normalize_brand_slugs(brand)
     contas = normalize_accounts(shop_account)
     tipos_pedidos = normalize_product_types(product_type)
     filtros_status = normalize_status(status)
@@ -1344,21 +1419,13 @@ def get_monitoramento_preco(
         s = _rows(db, SQL_LAST_SYNCED_AT, {"marketplace": canal, "ref_date": observado})
         refreshed_at = s[0]["synced_at"] if s else None
 
-    listings: list[dict] = []
-    if observado is not None:
-        listings = _rows(db, SQL_LISTINGS, {
-            "marketplace": canal,
-            "ref_date": observado,
-            "brand_filter": bool(marcas),
-            "brands": marcas or list(pm.MONITORED_BRANDS),
-            "has_query": bool(consulta),
-            "query_like": f"%{consulta}%",
-        })
-
     # ---- Gate PMA-2C4D3-H2: cobertura observada do ML ----------------------
     # Mesmo contrato dos canais: consulta propria, escopada por `ref_date`, sem
     # nenhum filtro do usuario. Nao sai de `listings`, que ja veio filtrada por
     # marca e busca.
+    #
+    # Gate PMA-2C4D3-H3 — subiu para ANTES de `listings`, pelo mesmo motivo do
+    # caminho dos canais: e' ela que autoriza o filtro de marca.
     ml_monitoradas = list(pm.MONITORED_BRANDS)
     ml_observadas: list[str] = []
     # Gate PMA-2C4D3-H2-R/V — sem fotografia, AMBAS ficam vazias.
@@ -1377,6 +1444,24 @@ def get_monitoramento_preco(
         })]
         ml_nao_observadas = [b for b in ml_monitoradas
                              if b not in set(ml_observadas)]
+
+    # Gate PMA-2C4D3-H3 — mesma autoridade dos canais. Sem fotografia,
+    # `ml_observadas` esta vazia e qualquer marca pedida e' recusada.
+    # `OUT_OF_SCOPE_BRANDS` vem junto para preservar a razao publicada de
+    # `apice` e `yenzah`, que e' mais informativa que "nao observada".
+    assert_brands_observed(marcas, ml_observadas,
+                           fora_de_escopo=pm.OUT_OF_SCOPE_BRANDS)
+
+    listings: list[dict] = []
+    if observado is not None:
+        listings = _rows(db, SQL_LISTINGS, {
+            "marketplace": canal,
+            "ref_date": observado,
+            "brand_filter": bool(marcas),
+            "brands": marcas or list(ml_observadas),
+            "has_query": bool(consulta),
+            "query_like": f"%{consulta}%",
+        })
 
     referencias: list[dict] = []
     if snapshot_id is not None:

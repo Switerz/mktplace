@@ -414,3 +414,29 @@ export class MonitoramentoPrecoError extends Error {
     this.status = status;
   }
 }
+
+/**
+ * Gate PMA-2C4D3-H3 — texto que a PESSOA lê quando a carga falha.
+ *
+ * O `message` do erro é diagnóstico ("A API respondeu 422.") e ia direto para
+ * a tela: número de status não diz nada a quem opera e é detalhe de
+ * implementação. O `status` continua existindo no erro, para log e para
+ * decidir a redação — só não aparece.
+ *
+ * Nenhuma variante ecoa a resposta do servidor nem o filtro pedido.
+ */
+export function mensagemDeFalha(status: number | null): string {
+  if (status === null) {
+    return "Não foi possível falar com o servidor. Verifique a conexão e tente novamente.";
+  }
+  if (status === 422 || status === 400) {
+    return "Esta combinação de filtros não pôde ser consultada. Ajuste os filtros e tente novamente.";
+  }
+  if (status === 404) {
+    return "Não há monitoramento publicado para esta consulta.";
+  }
+  if (status >= 500) {
+    return "O serviço de monitoramento está indisponível no momento. Tente novamente em alguns instantes.";
+  }
+  return "Não foi possível carregar o monitoramento de preços. Tente novamente.";
+}

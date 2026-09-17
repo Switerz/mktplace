@@ -18,6 +18,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   fetchMonitoramentoPreco,
   MonitoramentoPrecoError,
+  mensagemDeFalha,
   MONITORAMENTO_PRECO_MAX_LIMIT,
   type MonitoramentoPrecoResponse,
   type MonitoramentoPrecoRow,
@@ -153,6 +154,9 @@ export default function MonitoramentoPrecoPage() {
   const [dados, setDados] = useState<MonitoramentoPrecoResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
+  // Gate PMA-2C4D3-H3 — o status fica guardado para ESCOLHER a redacao, nunca
+  // para ser exibido. `erro` continua existindo como diagnostico.
+  const [erroStatus, setErroStatus] = useState<number | null>(null);
   const [resolvedKey, setResolvedKey] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
 
@@ -191,6 +195,7 @@ export default function MonitoramentoPrecoPage() {
     const controller = new AbortController();
     setLoading(true);
     setErro(null);
+    setErroStatus(null);
 
     fetchMonitoramentoPreco(
       {
@@ -212,6 +217,7 @@ export default function MonitoramentoPrecoPage() {
         if (latestKey.current !== requestKey) return;
         setDados(res);
         setErro(null);
+        setErroStatus(null);
         setResolvedKey(requestKey);
         setLoading(false);
       })
@@ -219,11 +225,20 @@ export default function MonitoramentoPrecoPage() {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (latestKey.current !== requestKey) return;
         // Sem fallback em mock: indisponibilidade e' declarada.
+        //
+        // Gate PMA-2C4D3-H3 — `setBrand` NAO e' chamado aqui. Falha de rede ou
+        // de API nao e' prova de que a marca deixou de ser observavel; limpar a
+        // selecao faria o operador perder o filtro por um problema que nao e'
+        // dele. A limpeza automatica so' acontece quando uma COBERTURA nova
+        // chega e prova que a marca saiu — no efeito mais abaixo.
         setDados(null);
         setErro(
           err instanceof MonitoramentoPrecoError
             ? err.message
             : "Falha inesperada ao carregar o monitoramento.",
+        );
+        setErroStatus(
+          err instanceof MonitoramentoPrecoError ? err.status : null,
         );
         setResolvedKey(requestKey);
         setLoading(false);
@@ -334,7 +349,18 @@ export default function MonitoramentoPrecoPage() {
   // janela entre os dois deploys a resposta ainda nao traz o campo. Sem cair
   // para `monitored_brands`, o filtro ficaria VAZIO nessa janela — pior que o
   // defeito que estamos corrigindo.
-  const marcasDoFiltro = meta?.observed_brands ?? meta?.monitored_brands ?? [];
+  const marcasDaCobertura = meta?.observed_brands ?? meta?.monitored_brands ?? [];
+  // Gate PMA-2C4D3-H3 — a marca escolhida continua LISTADA mesmo quando a
+  // cobertura nao veio (falha de carga zera `dados`, e com ela `meta`).
+  //
+  // Sem isto, a lista ficava vazia, o `<select>` nao achava a opcao escolhida e
+  // caia sozinho para "Todas as monitoradas": a tela parecia ter descartado o
+  // filtro do operador, embora o estado ainda o guardasse. O controle passa a
+  // mostrar o que a pessoa pediu ate que uma cobertura nova diga outra coisa.
+  const marcasDoFiltro =
+    brand && !marcasDaCobertura.includes(brand)
+      ? [...marcasDaCobertura, brand]
+      : marcasDaCobertura;
   const naoObservadas = meta?.monitored_unobserved_brands ?? [];
 
   // Marca escolhida que deixou de existir na cobertura (troca de data, ou
@@ -905,9 +931,13 @@ export default function MonitoramentoPrecoPage() {
             <h2 className="text-sm font-semibold text-rose-800">
               Monitoramento de preços indisponível
             </h2>
+            {/* Gate PMA-2C4D3-H3 — texto para a PESSOA. Antes vinha `{erro}`,
+                que e' diagnostico ("A API respondeu 422.") e expunha o status
+                HTTP a quem opera. O status continua no estado, escolhendo a
+                redacao; nao aparece. */}
             <p className="text-xs text-slate-600 mt-2">
-              {erro} Nenhum dado é exibido: a tela não substitui a medição real por
-              estimativa.
+              {mensagemDeFalha(erroStatus)} Nenhum dado é exibido: a tela não
+              substitui a medição real por estimativa.
             </p>
             <button
               type="button"
