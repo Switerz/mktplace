@@ -163,6 +163,30 @@ def test_recusa_quando_o_grafo_nao_pode_ser_lido(tmp_path):
         cos.assert_apply_authorized(Conexao(), versions_dir=tmp_path / "nao_existe")
 
 
+def test_o_carregador_recusa_na_ORIGEM_e_nao_devolve_grafo_de_consolacao(tmp_path):
+    """Exige a recusa em `load_migration_graph`, nao so' la' na frente.
+
+    Exercicio de mutacao: trocar o `raise` do diretorio ausente por
+    `return {"017": None}` fazia o teste acima continuar verde — a barreira
+    quebrava depois, em "head nao pertence a cadeia", e o veredito final era o
+    mesmo pelo motivo errado. Um fallback permissivo no carregador precisa
+    falhar AQUI.
+    """
+    vazio = tmp_path / "sem_revisoes"
+    vazio.mkdir()
+    with pytest.raises(cos.MigrationGraphError):
+        cos.load_migration_graph(vazio)
+    with pytest.raises(cos.MigrationGraphError):
+        cos.load_migration_graph(tmp_path / "nao_existe")
+    # E nao pode devolver dicionario nenhum nesses casos.
+    for alvo in (vazio, tmp_path / "nao_existe"):
+        try:
+            resultado = cos.load_migration_graph(alvo)
+        except cos.MigrationGraphError:
+            continue
+        pytest.fail(f"devolveu {resultado!r} em vez de recusar")
+
+
 def test_recusa_down_revision_nao_linear(tmp_path):
     """Ponto de merge (tupla) torna a ancestralidade ambigua — recusa."""
     d = tmp_path / "versions"
@@ -372,3 +396,113 @@ def test_a_data_nao_volta_a_ser_reconvertida_para_texto():
     for forma in ("str(observed_date", "observed_date.isoformat(",
                   "f\"{observed_date"):
         assert forma not in corpo, forma
+
+
+# ---------------------------------------------------------------------------
+# Forma das declaracoes: `Assign` E `AnnAssign`
+#
+# As 19 revisoes de hoje usam `revision = "017"`. O template do Alembic 1.18,
+# que gera a PROXIMA, usa `revision: str = "020"`. Um parser que so' lesse
+# `Assign` perderia a revisao nova, o head deixaria de existir no grafo e a
+# barreira recusaria — exatamente o apagao que este modulo corrige.
+# ---------------------------------------------------------------------------
+
+def _escreve(d: Path, nome: str, corpo: str) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / nome).write_text(corpo, encoding="utf-8")
+
+
+def test_le_revisao_no_formato_anotado_do_template_atual(tmp_path):
+    d = tmp_path / "versions"
+    _escreve(d, "a.py", 'revision: str = "a"\ndown_revision: str | None = None\n')
+    _escreve(d, "b.py", 'revision: str = "b"\ndown_revision: str | None = "a"\n')
+    g = cos.load_migration_graph(d)
+    assert g == {"a": None, "b": "a"}
+    assert cos.migration_is_ancestor("a", "b", g) is True
+
+
+def test_cadeia_mista_assign_e_annassign(tmp_path):
+    """O caso real do proximo deploy: 19 antigas + uma nova pelo template."""
+    d = tmp_path / "versions"
+    _escreve(d, "017.py", 'revision = "017"\ndown_revision = "016"\n')
+    _escreve(d, "016.py", 'revision = "016"\ndown_revision = None\n')
+    _escreve(d, "020.py",
+             'from typing import Sequence, Union\n'
+             'revision: str = "020"\n'
+             'down_revision: Union[str, Sequence[str], None] = "017"\n')
+    g = cos.load_migration_graph(d)
+    assert cos.migration_is_ancestor("017", "020", g) is True
+    assert cos.migration_is_ancestor("017", "016", g) is False
+
+
+def test_anotacao_sem_valor_e_recusada(tmp_path):
+    d = tmp_path / "versions"
+    _escreve(d, "a.py", "revision: str\ndown_revision: str | None = None\n")
+    with pytest.raises(cos.MigrationGraphError):
+        cos.load_migration_graph(d)
+
+
+def test_o_parser_acompanha_o_template_do_alembic_instalado():
+    """Ancora no template REAL: se ele mudar de forma, este teste avisa.
+
+    Gera um par de revisoes com a mesma sintaxe que `alembic revision`
+    produziria hoje e exige que o grafo as enxergue.
+    """
+    import re
+    import sys
+
+    # O pacote `alembic` pode estar sombreado por `apps/api/alembic` conforme o
+    # sys.path; localizar o template pelo alembic REAL, no disco.
+    spec = None
+    for caminho in sys.path:
+        cand = Path(caminho) / "alembic" / "templates" / "generic" / "script.py.mako"
+        if cand.exists():
+            spec = cand
+            break
+    if spec is None:
+        import importlib.metadata as md
+        for f in md.files("alembic") or []:
+            if f.name == "script.py.mako" and "generic" in str(f):
+                spec = Path(md.distribution("alembic").locate_file(f))
+                break
+    if spec is None or not spec.exists():
+        pytest.skip("template do alembic nao localizavel neste ambiente")
+
+    texto = spec.read_text(encoding="utf-8")
+    linha_rev = next(l for l in texto.splitlines() if l.startswith("revision"))
+    linha_down = next(l for l in texto.splitlines() if l.startswith("down_revision"))
+    # Substitui a interpolacao mako por literais.
+    corpo = (re.sub(r"\$\{[^}]+\}", '"NOVA"', linha_rev) + "\n"
+             + re.sub(r"\$\{[^}]+\}", '"RAIZ"', linha_down) + "\n")
+    raiz = 'revision = "RAIZ"\ndown_revision = None\n'
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "versions"
+        _escreve(d, "raiz.py", raiz)
+        _escreve(d, "nova.py", "from typing import Sequence, Union\n" + corpo)
+        g = cos.load_migration_graph(d)
+        assert "NOVA" in g, (
+            "o template do Alembic instalado gera uma forma que o parser nao "
+            f"enxerga: {linha_rev!r}"
+        )
+        assert cos.migration_is_ancestor("RAIZ", "NOVA", g) is True
+
+
+# ---------------------------------------------------------------------------
+# O caminho das migrations nao depende do diretorio de trabalho
+# ---------------------------------------------------------------------------
+
+def test_o_grafo_e_encontrado_de_qualquer_cwd(tmp_path, monkeypatch):
+    """Ancorado em `__file__`, nao no CWD: o operador roda de onde quiser."""
+    esperado = cos.load_migration_graph()
+    monkeypatch.chdir(tmp_path)
+    assert cos.load_migration_graph() == esperado
+    monkeypatch.chdir(Path(cos.__file__).resolve().parents[2])
+    assert cos.load_migration_graph() == esperado
+
+
+def test_migrations_dir_aponta_para_dentro_do_repositorio():
+    esperado = Path(cos.__file__).resolve().parents[1] / "apps" / "api" / "alembic" / "versions"
+    assert cos.MIGRATIONS_DIR == esperado
+    assert cos.MIGRATIONS_DIR.is_dir(), "o diretorio precisa existir no checkout"

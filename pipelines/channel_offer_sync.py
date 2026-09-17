@@ -228,18 +228,38 @@ def load_migration_graph(versions_dir=None) -> dict:
             ) from exc
         achados: dict = {}
         for no in arvore.body:
-            if not isinstance(no, ast.Assign):
+            # Duas formas, porque as duas aparecem de verdade:
+            #   `revision = "017"`          -> Assign     (as 19 revisoes de hoje)
+            #   `revision: str = "020"`     -> AnnAssign  (o template do Alembic
+            #                                  1.18 gera assim, e a PROXIMA
+            #                                  revisao criada por `alembic
+            #                                  revision` vira nesse formato)
+            # Ler so' `Assign` faria o grafo perder a revisao nova e a barreira
+            # recusaria de novo — o mesmo apagao que este modulo acaba de
+            # corrigir.
+            if isinstance(no, ast.Assign):
+                nomes = [a.id for a in no.targets if isinstance(a, ast.Name)]
+                valor = no.value
+            elif isinstance(no, ast.AnnAssign) and isinstance(no.target, ast.Name):
+                nomes = [no.target.id]
+                valor = no.value  # `revision: str` sem valor deixa `value` None
+            else:
                 continue
-            for alvo in no.targets:
-                if isinstance(alvo, ast.Name) and alvo.id in ("revision",
-                                                              "down_revision"):
-                    try:
-                        achados[alvo.id] = ast.literal_eval(no.value)
-                    except ValueError as exc:
-                        raise MigrationGraphError(
-                            "grafo de migrations indisponivel: uma revisao "
-                            "declara identificador nao literal."
-                        ) from exc
+            for nome in nomes:
+                if nome not in ("revision", "down_revision"):
+                    continue
+                if valor is None:
+                    raise MigrationGraphError(
+                        "grafo de migrations indisponivel: uma revisao declara "
+                        "identificador sem valor."
+                    )
+                try:
+                    achados[nome] = ast.literal_eval(valor)
+                except ValueError as exc:
+                    raise MigrationGraphError(
+                        "grafo de migrations indisponivel: uma revisao "
+                        "declara identificador nao literal."
+                    ) from exc
         rev = achados.get("revision")
         down = achados.get("down_revision", "__ausente__")
         if not isinstance(rev, str) or not rev:
