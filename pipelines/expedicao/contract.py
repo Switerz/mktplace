@@ -461,6 +461,18 @@ ML_SOURCE_COHORT_MAX_AGE = timedelta(days=7)
 #: deteccao de `SOURCE_STALE` atrasada em exatamente a margem declarada.
 ML_INGESTION_TIMESTAMPS = frozenset({"extracted_at"})
 
+#: Os APELIDOS sob os quais o carimbo de ingestao viaja fora do SELECT.
+#:
+#: O watermark sai do SQL como `max_extracted_at` e chega ao codigo como o
+#: campo `SourceWatermark.max_ingested_at` — mesmo instante, tres nomes. A
+#: barreira estrutural precisa conhecer os apelidos: sem isto ela protege a
+#: coluna `extracted_at` e deixa o alias passar, e o watermark foi justamente
+#: um dos tres pontos que tinham o defeito do EXP-3B1.
+#:
+#: Medido na revisao EXP-3B1-H1-R/V: trocar o normalizador do watermark para o
+#: de negocio passava nos 75 testes sem nenhum reprovar.
+ML_INGESTION_TIMESTAMP_ALIASES = frozenset({"max_extracted_at", "max_ingested_at"})
+
 #: CARIMBO DE NEGOCIO (`date_created`, `date_ready_to_ship`, `order_created_at`):
 #: vem da API do Mercado Livre, gravado naive em UTC-4.
 #:

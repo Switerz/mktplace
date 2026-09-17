@@ -887,18 +887,54 @@ def test_extracted_at_nunca_passa_pelo_normalizador_de_negocio():
     """Barreira estrutural contra a regressao que este gate corrigiu."""
     from pipelines.expedicao.contract import (
         ML_BUSINESS_TIMESTAMPS,
+        ML_INGESTION_TIMESTAMP_ALIASES,
         ML_INGESTION_TIMESTAMPS,
     )
 
+    # Os APELIDOS entram aqui. Sem eles a barreira protegia a coluna
+    # `extracted_at` e deixava passar o watermark, que viaja como
+    # `max_ingested_at` — e o watermark foi um dos tres pontos com o defeito.
+    ingestao = ML_INGESTION_TIMESTAMPS | ML_INGESTION_TIMESTAMP_ALIASES
     erros = []
     for arquivo in ("transform.py", "ml_extract.py", "cli.py"):
         caminho = RAIZ / "pipelines" / "expedicao" / arquivo
         for funcao, coluna in _chamadas_de_normalizacao(caminho):
-            if coluna in ML_INGESTION_TIMESTAMPS and funcao != "normalizar_ingestao_ml":
+            if coluna in ingestao and funcao != "normalizar_ingestao_ml":
                 erros.append(f"{arquivo}: {coluna} passou por {funcao}")
             if coluna in ML_BUSINESS_TIMESTAMPS and funcao != "normalizar_negocio_ml":
                 erros.append(f"{arquivo}: {coluna} passou por {funcao}")
     assert not erros, "; ".join(erros)
+
+
+def test_todo_carimbo_normalizado_tem_convencao_declarada():
+    """Nenhuma chamada de normalizacao escapa da barreira por nome nao listado.
+
+    A versao anterior so' reprovava nomes que estivessem nos conjuntos; um nome
+    fora deles passava em silencio — foi exatamente assim que o watermark
+    (`max_ingested_at`) ficou sem protecao.
+    """
+    from pipelines.expedicao.contract import (
+        ML_BUSINESS_TIMESTAMPS,
+        ML_INGESTION_TIMESTAMP_ALIASES,
+        ML_INGESTION_TIMESTAMPS,
+    )
+
+    conhecidos = (
+        ML_INGESTION_TIMESTAMPS | ML_INGESTION_TIMESTAMP_ALIASES | ML_BUSINESS_TIMESTAMPS
+    )
+    orfas = []
+    for arquivo in ("transform.py", "ml_extract.py", "cli.py"):
+        caminho = RAIZ / "pipelines" / "expedicao" / arquivo
+        for funcao, coluna in _chamadas_de_normalizacao(caminho):
+            # `bruto` e o parametro dos proprios normalizadores.
+            if coluna in ("bruto",):
+                continue
+            if coluna not in conhecidos:
+                orfas.append(f"{arquivo}: {coluna} (via {funcao})")
+    assert not orfas, (
+        "carimbo normalizado sem convencao declarada no contrato: "
+        + "; ".join(orfas)
+    )
 
 
 def test_a_convencao_cobre_todas_as_colunas_temporais_do_select():
