@@ -144,14 +144,43 @@ def test_select_nao_usa_asterisco():
     assert "*" not in shopee_extract.SHOPEE_BACKLOG_SQL
 
 
+def _codigo_sem_comentario(caminho) -> str:
+    """Fonte do modulo SEM comentarios e SEM docstrings, em minusculas.
+
+    A versao anterior varria o texto cru e por isso reprovava o comentario que
+    EXPLICA a defesa — dizer "nunca `SELECT *`, que traria receiver_address"
+    virava violacao. Pior: para conviver com isso, `shopee_extract.py` e
+    `audit.py` ficaram isentos por arquivo INTEIRO, entao uma coluna de
+    comprador de verdade no codigo deles passaria batido.
+
+    Varrendo so' o codigo, a explicacao e' livre e a isencao por arquivo deixa
+    de ser necessaria: sobra apenas `contract.py`, que declara a denylist.
+    """
+    arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+    for no in ast.walk(arvore):
+        # Docstring e o primeiro Expr/Constant str do corpo; remove-lo evita
+        # que a prosa do modulo entre na varredura.
+        corpo = getattr(no, "body", None)
+        if isinstance(corpo, list) and corpo:
+            primeiro = corpo[0]
+            if (
+                isinstance(primeiro, ast.Expr)
+                and isinstance(primeiro.value, ast.Constant)
+                and isinstance(primeiro.value.value, str)
+            ):
+                corpo.pop(0)
+    # `ast.unparse` reconstroi so' os nos: comentarios nunca sao nos.
+    return ast.unparse(arvore).lower()
+
+
 def test_nenhum_modulo_do_pacote_menciona_pii():
     for arquivo in sorted(PACOTE.glob("*.py")):
-        texto = arquivo.read_text(encoding="utf-8").lower()
         # O proprio contrato declara a denylist; ele e a excecao legitima.
-        if arquivo.name in {"contract.py", "shopee_extract.py", "audit.py"}:
+        if arquivo.name == "contract.py":
             continue
-        achados = sorted(t for t in PII_FORBIDDEN_TOKENS if t in texto)
-        assert not achados, f"{arquivo.name} menciona PII: {achados}"
+        codigo = _codigo_sem_comentario(arquivo)
+        achados = sorted(t for t in PII_FORBIDDEN_TOKENS if t in codigo)
+        assert not achados, f"{arquivo.name} menciona PII no CODIGO: {achados}"
 
 
 def test_colunas_publicadas_nao_tem_campo_de_comprador():

@@ -311,6 +311,12 @@ class ExtractionResult:
     #: porque o resumo tem grao por `shop_account` e o registry so conhece o
     #: `external_seller_id`.
     account_shop_names: dict[str, str] | None = None
+    #: Contagens do FUNIL de exclusao, por canal que tenha filtro alem do
+    #: status. Existe porque exclusao silenciosa e indistinguivel de fonte
+    #: vazia: o ML descarta Full e registro congelado, e quem le a fila precisa
+    #: ver quantas linhas cada filtro tirou. Shopee nao preenche (nao filtra
+    #: nada alem do status) e continua com `None`.
+    diagnostics: dict[str, int] | None = None
 
     @property
     def backlog_count(self) -> int:
@@ -346,3 +352,112 @@ class SourceUnhealthy(RuntimeError):
     Falha fechada: preserva a fila anterior em vez de apaga-la com base numa
     leitura em que nao se pode confiar.
     """
+
+
+# ---------------------------------------------------------------------------
+# Mercado Livre (EXP-3B1) — o que NAO e igual a Shopee
+# ---------------------------------------------------------------------------
+#: Unidade operacional do ML e o SHIPMENT, nao o pedido. Medido em 17/09/2026:
+#: 77 pedidos historicos tem mais de um shipment. Usar `order_id` como
+#: identidade colidiria nesses casos e apagaria um dos despachos.
+#:
+#: `(brand, shipment_id)` e UNIQUE na fonte (0 duplicatas em 521.548 linhas) e
+#: marca <-> seller_id e 1:1, entao (channel, shop_account, marketplace_order_id)
+#: da 018 comporta o grao de shipment sem colisao e sem perda.
+#: RESSALVA MEDIDA: `shipment_id` sozinho NAO e unico — repete entre marcas em
+#: 117 casos. A marca (via shop_account) faz parte da identidade, nao e enfeite.
+ML_OPERATIONAL_UNIT = "shipment"
+
+#: ALLOWLIST POSITIVA das modalidades operadas pelo VENDEDOR.
+#:
+#: Nao e `!= 'fulfillment'`: uma modalidade nova do Mercado Livre entraria
+#: sozinha na fila por negacao, sem ninguem decidir. Aqui ela fica de fora ate
+#: ser classificada, e `unmapped_logistic_type_count` a torna visivel.
+#:
+#: Dominio real medido na fonte (17/09/2026, historico completo de 521.548
+#: shipments): fulfillment 339.556, cross_docking 117.120, xd_drop_off 51.643,
+#: self_service 9.927, drop_off 3.389. Nenhum outro valor, nenhum nulo.
+ML_SELLER_MANAGED_LOGISTIC_TYPES = frozenset(
+    {"cross_docking", "xd_drop_off", "drop_off", "self_service"}
+)
+
+#: FULL. Fica FORA da fila do vendedor: o estoque ja esta no armazem do Mercado
+#: Livre e quem separa, embala e despacha e o proprio ML. Os substatus medidos
+#: (`in_warehouse`, `in_packing_list`, `ready_to_pack`, `packed`) sao operacao
+#: do armazem deles. Cobrar isso da expedicao do vendedor seria culpar a
+#: operacao por trabalho que ela nao executa. Pertence a superficie de Full.
+ML_FULFILLMENT_LOGISTIC_TYPE = "fulfillment"
+
+#: Dominio FECHADO. Qualquer valor fora daqui bloqueia a publicacao.
+ML_KNOWN_LOGISTIC_TYPES = ML_SELLER_MANAGED_LOGISTIC_TYPES | {
+    ML_FULFILLMENT_LOGISTIC_TYPE
+}
+
+#: Status do shipment que ABRE a fila.
+ML_BACKLOG_SHIPMENT_STATUS = "ready_to_ship"
+
+#: Status do PEDIDO exigido. `paid` e o unico que representa venda viva.
+ML_BACKLOG_ORDER_STATUS = "paid"
+
+#: COORTE CONFIAVEL DA FONTE — derivada de medicao, nao escolhida.
+#:
+#: O extrator do ML nao vive neste repositorio (a ingestao e externa, via
+#: Airflow), entao a janela NAO pode ser provada por codigo. O que pode ser
+#: provado e o COMPORTAMENTO, linha a linha, por `extracted_at`.
+#:
+#: Medicao de 17/09/2026, nas quatro marcas:
+#:   - shipments criados ha menos de 3 dias: pior atraso de releitura
+#:     67,69h / 67,99h / 67,93h / 67,69h (mediana ~32h);
+#:   - criados entre 3 e 7 dias: pior atraso 163,73h / 163,88h / 163,73h /
+#:     163,80h — ou seja <= 6,83 dias, com dispersao de 0,15h entre marcas;
+#:   - cobertura de releitura por idade do registro: 100% ate 7 dias,
+#:     despencando para 2,5% na faixa de 7 a 15 dias e 0% acima disso.
+#:
+#: Logo: um registro NAO relido ha mais de 7 dias esta provadamente FORA da
+#: janela ativa do extrator, e o estado gravado nele e uma fotografia velha —
+#: nao evidencia de que o pedido continua parado na operacao.
+#:
+#: A margem e estreita: 168h de limiar contra 163,88h observados, ou seja 4,12h.
+#: Um atraso do extrator empurra registros VIVOS para fora da coorte. O erro e
+#: conservador (some da fila em vez de inventar backlog), e
+#: `stale_source_record_count` mede exatamente quantos sairam.
+ML_SOURCE_COHORT_MAX_AGE = timedelta(days=7)
+
+#: Offset aparente dos carimbos naive do ML. NAO e contrato oficial.
+#:
+#: Medido como o MINIMO de `extracted_at - date_created` sobre milhares de
+#: linhas de 2 dias: exatamente 4,00h em `raw.ml_orders` e exatamente 4,00h em
+#: `raw.ml_shipments` (medianas 4,14h e 4,12h). O minimo e o piso do lag de
+#: extracao, entao um piso de 4h significa offset de 4h.
+#:
+#: Como a fonte grava `timestamp without time zone`, a convencao NAO esta
+#: declarada em lugar nenhum: e inferencia medida. Por isso as linhas do ML
+#: saem com `timestamp_quality = 'assumed'`, nunca `verified`.
+#:
+#: PERGUNTA ABERTA AO TIME: confirmar contra a documentacao oficial da API do
+#: Mercado Livre se `date_created`/`date_ready_to_ship` vem com offset -04:00 e
+#: se o extrator descarta o fuso ao gravar. Enquanto nao houver resposta, o
+#: valor abaixo e a melhor evidencia disponivel — e esta em UM lugar so.
+ML_SOURCE_UTC_OFFSET = timedelta(hours=-4)
+
+#: Colunas que o SELECT do ML pode conter. Lista FECHADA, comparada por
+#: igualdade. Nenhuma coluna de comprador, destinatario ou endereco.
+ML_ALLOWED_SOURCE_COLUMNS = frozenset(
+    {
+        "seller_id",
+        "brand",
+        "shipment_id",
+        "order_id",
+        "shipment_status",
+        "substatus",
+        "logistic_type",
+        "order_status",
+        "order_created_at",
+        "date_created",
+        "date_ready_to_ship",
+        "date_shipped",
+        "date_cancelled",
+        "tracking_method",
+        "extracted_at",
+    }
+)
