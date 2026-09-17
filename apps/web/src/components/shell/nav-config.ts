@@ -72,6 +72,29 @@ export const NAV_SECTIONS: NavSection[] = [
 ];
 
 /**
+ * Gate EXP-2B — item da Expedicao, atras de `NEXT_PUBLIC_EXPEDICAO_ENABLED`.
+ *
+ * Entra em "Operações" e NAO em "Pedidos": mede o que ainda nao saiu, e nao o
+ * pedido em si. Nao vira filho de `/operacoes` porque `isNavItemActive` casa
+ * por prefixo — dois itens ficariam ativos ao mesmo tempo, o mesmo motivo que
+ * levou o Full ML para rota propria.
+ */
+export const EXPEDICAO_NAV: NavPage = { href: "/expedicao", label: "Expedição Shopee" };
+
+/**
+ * FAIL-CLOSED: so' a string exata "true" liga. Esconder o item e' a SEGUNDA
+ * barreira — a primeira e' a propria rota, que devolve 404 com a flag
+ * desligada. Esconder so' o menu deixaria a URL direta acessivel, e a API nao
+ * tem autenticacao.
+ */
+export function navSections(expedicaoEnabled: boolean): NavSection[] {
+  if (!expedicaoEnabled) return NAV_SECTIONS;
+  return NAV_SECTIONS.map((s) =>
+    s.label === "Operações" ? { ...s, pages: [...s.pages, EXPEDICAO_NAV] } : s,
+  );
+}
+
+/**
  * Mesma regra que o AppNav ja usava inline: a Gerencial tambem fica ativa em
  * qualquer /brand/[brand], porque o drill-down de marca parte dela — e' a
  * "associacao visual" que o Gate U1 pede para preservar.
@@ -88,7 +111,11 @@ export function isNavItemActive(pageHref: string, pathname: string): boolean {
  */
 export function getRouteTitle(pathname: string): string {
   if (pathname.startsWith("/brand/")) return "Gerencial";
-  for (const section of NAV_SECTIONS) {
+  // `navSections(true)` e nao `NAV_SECTIONS`: quem esta NA rota da Expedicao ja
+  // passou pelo guard, entao a flag e necessariamente `true`. Resolver o titulo
+  // pela lista sem o item deixaria a topbar dizendo "Torre de Controle" numa
+  // pagina que tem nome proprio.
+  for (const section of navSections(true)) {
     for (const page of section.pages) {
       if (page.disabled) continue;
       const matches = page.href === "/" ? pathname === "/" : pathname.startsWith(page.href);

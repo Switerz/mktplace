@@ -1,4 +1,4 @@
-# Contrato da Expedicao — Gates EXP-1A / R / R2 / 1C / 1D-H1 / 1E / 1F / 1F-P / 2A
+# Contrato da Expedicao — Gates EXP-1A ... 1F-P / 2A / 2B
 
 **Estado: EM PRODUCAO desde 16/09/2026 (EXP-1E).** Migration `018`
 aplicada, quatro contas cadastradas, primeiro `--apply` publicado: 985 pedidos,
@@ -16,7 +16,8 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** uma vez (EXP-1E) |
 | Refresh publicado | 2 (manuais; ultimo batch `6ace44e2-208e-4724-a04a-d424317b2b2e`, run #315) |
 | API read-only | **implementada** (EXP-2A), flag `expedicao_api_enabled` DESLIGADA |
-| UI / MCP | nao iniciados |
+| Tela (frontend) | **implementada** (EXP-2B), flag `NEXT_PUBLIC_EXPEDICAO_ENABLED` DESLIGADA |
+| MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | `schedule_plan.py` / Airflow | **nao integrados** — nenhum agendamento criado |
 
@@ -569,6 +570,128 @@ tendencia.
 * Sem identificador de pedido enquanto a API nao tiver autenticacao.
 * Somente Shopee. ML, TikTok e o calendario de dias uteis estao fora.
 * Sem UI, sem MCP, sem alerta externo — a API nao notifica ninguem.
+
+---
+
+## Tela da Expedicao (EXP-2B)
+
+**Estado: implementada, DESLIGADA.** `NEXT_PUBLIC_EXPEDICAO_ENABLED` nasce
+ausente, e ausente significa `false`. A rota devolve **404** e o item de menu nao
+existe.
+
+### Rota e superficie
+
+`/expedicao` consome exclusivamente `GET /api/v1/expedicao` e
+`GET /api/v1/expedicao/trend`. Nao ha outra chamada, nao ha escrita e nao ha
+calculo operacional refeito no cliente: toda classificacao ja vem do pipeline, e
+refaze-la faria dois consumidores verem coisas diferentes da mesma fotografia.
+
+Blocos: cabecalho com os relogios e avisos, cartoes de KPI, frescor e cobertura
+por marca, backlog por conta, evolucao horaria por conta e fila paginada com
+filtros.
+
+### Os tres relogios
+
+| Campo | Mede | Onde aparece |
+|---|---|---|
+| `snapshot_age_hours` | ha quanto tempo a FOTOGRAFIA foi publicada | cabecalho |
+| `source_age_hours` | ha quanto tempo a FONTE foi lida | tabela de frescor |
+| `oldest_row_age_hours` | idade do pedido mais antigo do backlog | tabela de frescor, como CONTEXTO |
+
+Sao colunas separadas com rotulos distintos de proposito. Pedido antigo **nao**
+significa fonte desatualizada — confundir os dois fez as quatro marcas nascerem
+vermelhas no primeiro piloto (EXP-1E).
+
+`source_advanced` aparece rotulado como **metadado** e nao altera veredito
+nenhum.
+
+### Limiar de 48h
+
+O cartao se chama **"Acima de 48h (limiar interno da Torre)"** e carrega a
+ressalva no proprio cartao: e' limiar operacional **interno**, nao SLA do
+marketplace nem promessa ao cliente. O prazo contratual aparece em "Vencidos" e
+"Vence em 24h", que vem do `ship_by_date` da Shopee. Sao dimensoes ortogonais —
+medimos 206 pedidos com mais de 48h ainda dentro do prazo nativo.
+
+Nao existe cartao "entre 24h e 48h": essa interseccao nao existe no contrato, e
+calcula-la na tela seria agregacao que a API nao fez.
+
+### Cobertura e Kokeshi
+
+Conta esperada ausente vira aviso de **conta faltando**; conta observada sem
+cadastro vira **conta inesperada**. Sao avisos diferentes.
+
+**Kokeshi** aparece so' como marca **fora do escopo**, com o texto explicito de
+que e' ausencia de cobertura e nao backlog zero. Ela nao entra em denominador,
+nao aparece na tabela de contas e nunca e' exibida como zero.
+
+### Carga manual
+
+`load_mode = manual_snapshot` e o aviso **"Sem automacao: a fotografia so' avanca
+quando alguem executa o refresh manualmente"** ficam sempre visiveis. Acima de
+6h a tela acrescenta um aviso de fotografia antiga, sem alterar numero nenhum.
+
+### Identificadores
+
+A tela **nao recebe e nao exibe** `order_sn`. `order_ref` e' opaco e opcional:
+
+* quando a API o omite (default), a coluna de referencia simplesmente **nao
+  aparece** — nada de coluna vazia nem de mensagem sugerindo erro;
+* quando vem, e' texto monoespacado e **nunca vira link** para o marketplace;
+* a tela nao tenta reconstruir nem inferir o identificador real.
+
+### Estados cobertos
+
+carregando · fotografia vazia · fila vazia por filtro · 422 · 5xx/rede · backend
+desligado (`feature_flag_disabled`) · sem fotografia publicada · batch
+inconsistente · fotografia antiga · frescor desconhecido · cobertura parcial ·
+serie de tendencia vazia, parcial e com erro.
+
+Batch inconsistente **nao mostra numero parcial**: os KPIs e a fila so'
+renderizam nos estados `ok` e `fila vazia por filtro`.
+
+### Flags coordenadas
+
+| Flag | Onde | Default | Estado |
+|---|---|---|---|
+| `NEXT_PUBLIC_EXPEDICAO_ENABLED` | Vercel (frontend) | ausente = `false` | **desligada** |
+| `expedicao_api_enabled` | Render (API) | `False` | **desligada** |
+
+As duas precisam ser ligadas **em conjunto e nessa ordem**: primeiro a API,
+depois a tela. Ligar so' a tela produz `unavailable` em toda requisicao; ligar
+so' a API expoe a rota HTTP sem que ninguem a use — e a API **nao tem
+autenticacao**.
+
+Fail-closed em duas camadas: a rota chama `notFound()` no SERVIDOR antes de
+qualquer render, e o item de menu so' entra com a flag ligada. Esconder apenas o
+menu deixaria a URL direta acessivel.
+
+### Risco: API sem autenticacao
+
+Mesmo sem PII e sem `order_sn`, o payload carrega backlog, atrasos, contas,
+marcas, transportadora e ritmo da operacao. **Ativacao produtiva proibida ate
+decisao explicita sobre acesso.** A tela existir nao muda isso: a barreira e' a
+flag, e ligar a tela sem resolver autenticacao publica informacao operacional.
+
+### Ativacao e rollback (procedimento futuro, NAO executado)
+
+Ativar:
+1. decidir o controle de acesso da Torre — gate proprio, ainda nao feito;
+2. definir `expedicao_api_enabled=true` no Render e conferir `GET /api/v1/expedicao`;
+3. definir `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel e **refazer o build**
+   (a variavel e' inlinada em tempo de build);
+4. conferir a tela contra o payload do mesmo `refresh_batch_id`.
+
+Rollback: remover `NEXT_PUBLIC_EXPEDICAO_ENABLED` e refazer o build — a rota
+volta a 404 e o menu some. Depois desligar `expedicao_api_enabled`. Nenhum dado
+e' apagado; a fotografia publicada segue no banco.
+
+### Limitacoes
+
+* Somente Shopee. ML, TikTok e calendario de dias uteis estao fora.
+* A tela nao notifica ninguem: nao ha alerta externo, e-mail nem MCP.
+* Sem automacao: a fotografia envelhece ate alguem rodar o refresh.
+* A tendencia depende de quantas fotografias existirem; hoje sao duas horas.
 
 ---
 
