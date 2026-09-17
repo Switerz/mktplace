@@ -325,6 +325,29 @@ export default function MonitoramentoPrecoPage() {
   const kpis = dados?.kpis ?? null;
   const linhas = estado.fresh && dados ? dados.rows : [];
 
+  // ---- Gate PMA-2C4D3-H2: o filtro de marca sai da COBERTURA ---------------
+  // `observed_brands` diz o que esta fotografia contem; `monitored_brands` diz
+  // o que o negocio monitora, e vem igual para Shopee e TikTok — por isso a
+  // Shopee oferecia Kokeshi e respondia "0".
+  //
+  // O `??` nao e' decoracao: backend e frontend sao publicados separados, e na
+  // janela entre os dois deploys a resposta ainda nao traz o campo. Sem cair
+  // para `monitored_brands`, o filtro ficaria VAZIO nessa janela — pior que o
+  // defeito que estamos corrigindo.
+  const marcasDoFiltro = meta?.observed_brands ?? meta?.monitored_brands ?? [];
+  const naoObservadas = meta?.monitored_unobserved_brands ?? [];
+
+  // Marca escolhida que deixou de existir na cobertura (troca de data, ou
+  // troca de canal com a resposta antiga ainda em tela) e' limpa: manter o
+  // filtro exibiria "0" pela razao errada.
+  useEffect(() => {
+    if (!brand || !meta?.observed_brands) return;
+    if (!meta.observed_brands.includes(brand)) {
+      setBrand("");
+      setOffset(0);
+    }
+  }, [brand, meta?.observed_brands]);
+
   const kpiViews = kpis ? buildKpiViews(kpis, marketplace) : [];
   const qualidadeViews = kpis ? buildQualidadeViews(kpis) : [];
   const paginacao = dados
@@ -520,6 +543,15 @@ export default function MonitoramentoPrecoPage() {
         {meta && (
           <p className="text-xs text-slate-500 mt-3">
             Marcas monitoradas: {meta.monitored_brands.map(brandLabel).join(", ")}.
+            {/* Gate PMA-2C4D3-H2 — a ausencia e' DECLARADA, e declarada como
+                ausencia de observacao. Antes, Kokeshi aparecia no filtro da
+                Shopee e devolvia "0", que se le como "Kokeshi nao vende".
+                Nenhum nome e' fixo no codigo: a lista vem da API. */}
+            {naoObservadas.length > 0 && (
+              <> Sem observação nesta fotografia:{" "}
+                {naoObservadas.map(brandLabel).join(", ")} — a fonte deste canal
+                não devolveu essas marcas, o que não significa zero anúncios.</>
+            )}
             {meta.no_reference_brands.length > 0 && (
               <> Sem tabela de referência: {meta.no_reference_brands.map(brandLabel).join(", ")}.</>
             )}
@@ -717,7 +749,7 @@ export default function MonitoramentoPrecoPage() {
               className="border border-slate-300 rounded-lg px-3 min-h-[44px] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
             >
               <option value="">Todas as monitoradas</option>
-              {(meta?.monitored_brands ?? []).map((b) => (
+              {marcasDoFiltro.map((b) => (
                 <option key={b} value={b}>
                   {brandLabel(b)}
                 </option>

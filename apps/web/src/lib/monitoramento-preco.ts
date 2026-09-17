@@ -245,6 +245,11 @@ export const BRAND_LABELS: Record<string, string> = {
   lescent: "Lescent",
   rituaria: "Rituária",
   yenzah: "Yenzah",
+  // Gate PMA-2C4D3-H2 — fora do escopo de beleza, mas OBSERVADAS no TikTok e
+  // por isso selecionáveis no filtro. Sem rótulo, o seletor mostrava cinco
+  // marcas capitalizadas e duas em minúsculas; o `?? brand` escondia a falta.
+  gocase: "Gocase",
+  denavita: "Denavita",
 };
 
 export function brandLabel(brand: string): string {

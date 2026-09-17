@@ -1107,3 +1107,56 @@ constante que não ecoa o que foi digitado. Sem a flag, o comportamento canônic
 Nenhuma fotografia foi publicada. A de 17/09 continua pendente de autorização
 e de uma nova execução controlada. Nenhuma flag foi ligada, nenhuma migration
 criada ou alterada, nenhum dado escrito.
+
+## Cobertura observada por canal (PMA-2C4D3-H2)
+
+`monitored_brands` responde **o que o negócio monitora**. Ele volta igual para
+Shopee e TikTok — `apice, barbours, kokeshi, lescent, rituaria` — porque é o
+escopo comercial, não a cobertura da fonte. A Shopee não devolve Kokeshi: usar
+aquela lista para montar o filtro oferecia a marca e respondia `0`, que se lê
+como "Kokeshi não tem anúncios" em vez de "não observamos Kokeshi aqui".
+
+O contrato ganhou dois campos que respondem a **outra** pergunta:
+
+| campo | significado |
+|---|---|
+| `observed_brands` | as marcas que **esta** fotografia contém, por `marketplace` + `observed_date` |
+| `monitored_unobserved_brands` | `monitored_brands` menos `observed_brands` |
+
+`observed_brands` é calculado **antes** de marca, situação, busca, conta, tipo e
+paginação — é um `GROUP BY brand` escopado só por canal e data. Inclui marcas
+fora do escopo comercial que tenham observação, como gocase e denavita no
+TikTok: escondê-las deixaria linhas visíveis sem dimensão de filtragem.
+
+**`monitored_unobserved_brands` nunca significa zero anúncios nem zero vendas.**
+Significa que a fonte daquele canal não devolveu a marca naquela fotografia.
+Nenhum motivo é inferido — o serviço não sabe por quê, e inventar seria pior do
+que calar.
+
+Cobertura medida em 17/09/2026: ML `barbours, kokeshi, lescent, rituaria`;
+Shopee `apice, barbours, lescent, rituaria`; TikTok as sete, incluindo gocase e
+denavita.
+
+**Desempenho.** `EXPLAIN (ANALYZE)` em produção mostra `Index Only Scan` sobre
+`idx_fcoo_canal_data_marca (marketplace, observed_date, brand)`, com
+`Heap Fetches: 0` e 1,5–3 ms. O índice já existia e serve exatamente esta
+consulta — **nenhum índice novo foi criado**. Uma consulta por requisição, sem
+laço por marca e sem N+1.
+
+### Ordem de publicação
+
+Render e Vercel são publicados separadamente, então os campos novos chegam à
+API antes de chegarem à tela. O frontend tolera a resposta antiga: o tipo
+declara os dois campos como opcionais e o filtro cai para `monitored_brands`
+quando `observed_brands` não vem — sem essa queda, o seletor ficaria **vazio**
+durante a janela, o que é pior que o defeito corrigido.
+
+1. publicar o **backend** no Render;
+2. validar os campos novos — `observed_brands` e `monitored_unobserved_brands`
+   presentes nos três canais, e Kokeshi aparecendo em
+   `monitored_unobserved_brands` da Shopee;
+3. publicar o **frontend** na Vercel;
+4. executar o smoke da tela nos três canais.
+
+Publicar na ordem inversa não quebra a página — só mantém o defeito por mais
+tempo, porque o filtro continua caindo para `monitored_brands`.

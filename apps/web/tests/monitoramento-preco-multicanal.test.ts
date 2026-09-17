@@ -24,6 +24,7 @@ import {
   canaisDisponiveis,
   canalHabilitado,
   canalComPreposicao,
+  brandLabel,
   canalLabel,
   coberturaPorConta,
   filtrosDoCanal,
@@ -438,7 +439,13 @@ test("R5. toda dimensao visivel tem filtro correspondente", async () => {
   }
   // As opcoes de conta saem da API, nunca de lista fixa no frontend.
   assert.ok(codigo.includes("contasDoFiltro.map"));
-  assert.ok(codigo.includes("meta?.monitored_brands ?? []).map"));
+  // Gate PMA-2C4D3-H2: as de marca tambem saem da API, mas agora da COBERTURA
+  // (`observed_brands`) e nao do escopo de monitoramento. A intencao do teste
+  // — nada de lista fixa no frontend — e' a mesma; mudou a fonte.
+  assert.ok(codigo.includes("marcasDoFiltro.map"));
+  assert.ok(codigo.includes("meta?.observed_brands ?? meta?.monitored_brands"),
+    "a derivacao precisa vir da API, com queda para o campo antigo enquanto o "
+    + "backend novo nao estiver publicado");
 });
 
 test("R7. o que e' novo fica ESCOPADO aos canais; o ML nao ganha nada", async () => {
@@ -623,4 +630,111 @@ test("H1-7. as demais frases de cobertura continuam em todos os canais", async (
     + "condicionada ao ML");
   assert.ok(codigo.includes("comparison_basis_text"),
     "a frase das duas datas continua vindo do servidor, por canal");
+});
+
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4D3-H2 — cobertura observada por canal
+// ---------------------------------------------------------------------------
+
+test("H2-1. o filtro de marca sai de observed_brands, nao de monitored_brands", async () => {
+  const codigo = await ler(PAGE);
+  assert.ok(codigo.includes("marcasDoFiltro.map"),
+    "o select precisa consumir a cobertura");
+  assert.ok(/const marcasDoFiltro = meta\?\.observed_brands \?\? meta\?\.monitored_brands/
+    .test(codigo), "a cobertura vem primeiro; o campo antigo e' so' a queda");
+  const bloco = codigo.split("htmlFor={marcaId}")[1].split("</select>")[0];
+  assert.ok(!bloco.includes("monitored_brands"),
+    "o select nao pode voltar a ler o escopo de monitoramento direto");
+});
+
+test("H2-2. a cobertura NAO e' derivada das linhas da pagina", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("const marcasDoFiltro")[1].split(";")[0];
+  for (const proibido of ["rows", "linhas", "dados.rows", "map((r)"]) {
+    assert.ok(!bloco.includes(proibido),
+      `a cobertura nao pode sair das linhas (${proibido}) — a resposta e' paginada`);
+  }
+});
+
+test("H2-3. nenhuma marca e' fixada no codigo do frontend", async () => {
+  const codigo = await ler(PAGE);
+  // O texto de ausencia usa a lista da API. Kokeshi nao pode virar constante.
+  const bloco = codigo.split("Sem observação nesta fotografia")[1].split("</p>")[0];
+  assert.ok(bloco.includes("naoObservadas.map"),
+    "a frase precisa enumerar o que a API devolveu");
+  for (const marca of ["kokeshi", "Kokeshi"]) {
+    assert.ok(!bloco.includes(marca), "marca fixa no codigo vira mentira amanha");
+  }
+});
+
+test("H2-4. a ausencia e' apresentada como ausencia, nunca como zero", async () => {
+  const codigo = await ler(PAGE);
+  const i = codigo.indexOf("Sem observação nesta fotografia");
+  assert.ok(i > 0, "a frase existe");
+  const frase = codigo.slice(i, i + 320);
+  assert.ok(/não significa zero anúncios/.test(frase),
+    "precisa dizer explicitamente que nao e' zero");
+  assert.ok(/não devolveu essas marcas/.test(frase),
+    "precisa atribuir a ausencia a FONTE, nao ao desempenho da marca");
+});
+
+test("H2-5. marca que saiu da cobertura e' limpa", async () => {
+  const codigo = await ler(PAGE);
+  assert.ok(/if \(!meta\.observed_brands\.includes\(brand\)\)/.test(codigo),
+    "trocar data pode invalidar a marca escolhida; manter exibiria 0 pela "
+    + "razao errada");
+  const efeito = codigo.split("if (!meta.observed_brands.includes(brand))")[1]
+    .split("}")[0];
+  assert.ok(efeito.includes("setBrand(\"\")") && efeito.includes("setOffset(0)"),
+    "limpar a marca tambem reinicia a paginacao");
+});
+
+test("H2-6. trocar de canal continua limpando marca e data", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("const trocaCanal")[1].split("},")[0];
+  for (const limpeza of ['setBrand("")', 'setObservedDate("")', "setOffset(0)"]) {
+    assert.ok(bloco.includes(limpeza), `a troca de canal precisa fazer ${limpeza}`);
+  }
+});
+
+test("H2-7. o frontend tolera payload ANTIGO, sem os campos novos", async () => {
+  const contrato = await ler(CONTRATO);
+  // Ancorado no INICIO da linha: sem isso, `observed_brands?:` casaria dentro
+  // de `monitored_unobserved_brands?:` e o teste passaria mesmo com o campo
+  // declarado obrigatorio — foi o que a mutacao M8 revelou.
+  assert.ok(/^\s*observed_brands\?: string\[\];$/m.test(contrato),
+    "opcional no tipo: o backend e' publicado antes e o frontend depois");
+  assert.ok(/^\s*monitored_unobserved_brands\?: string\[\];$/m.test(contrato));
+  const codigo = await ler(PAGE);
+  assert.ok(codigo.includes("meta?.observed_brands ?? meta?.monitored_brands ?? []"),
+    "sem a queda, o filtro ficaria VAZIO na janela entre os dois deploys");
+  assert.ok(codigo.includes("meta?.monitored_unobserved_brands ?? []"),
+    "a frase de ausencia nao pode quebrar quando o campo nao existe");
+});
+
+test("H2-8. marcas fora do escopo comercial seguem selecionaveis se observadas", async () => {
+  // Gocase e Denavita TEM linhas no TikTok. Some-las do filtro deixaria linhas
+  // visiveis sem dimensao de filtragem — o que o gate R5 ja proibia.
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("const marcasDoFiltro")[1].split("\n\n")[0];
+  for (const proibido of ["business_scope", "in_scope", "out_of_business_scope",
+                          "escopo ===", "filter("]) {
+    assert.ok(!bloco.includes(proibido),
+      `a cobertura nao filtra por escopo comercial (${proibido})`);
+  }
+  assert.ok(codigo.includes("escopoId"), "o escopo continua sendo filtro proprio");
+});
+
+test("H2-9. toda marca observavel tem rotulo proprio", () => {
+  // Gocase e Denavita entraram no filtro do TikTok ao virarem selecionaveis.
+  // Sem rotulo, o `?? brand` as exibia em minusculas ao lado das capitalizadas,
+  // e o fallback escondia a falta em vez de denuncia-la.
+  for (const marca of ["apice", "barbours", "kokeshi", "lescent", "rituaria",
+                       "gocase", "denavita"]) {
+    assert.notEqual(brandLabel(marca), marca,
+      `a marca ${marca} aparece no filtro e precisa de rotulo proprio`);
+  }
+  assert.equal(brandLabel("gocase"), "Gocase");
+  assert.equal(brandLabel("denavita"), "Denavita");
 });
