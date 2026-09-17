@@ -286,6 +286,19 @@ class SourceHealth(str, Enum):
     REGISTRY_AMBIGUOUS = "registry_ambiguous"
     WATERMARK_MISSING = "watermark_missing"
     SOURCE_UNAVAILABLE = "source_unavailable"
+    #: A conta EXISTE na fonte e tem carimbo, mas o carimbo esta FORA da coorte
+    #: de confiabilidade: o extrator parou de rele-la.
+    #:
+    #: Existe por causa do Mercado Livre, e o motivo e' especifico. No Shopee a
+    #: fonte parada ainda devolve as linhas do ultimo estado conhecido, e o
+    #: alerta de frescor sinaliza o atraso. No ML o filtro de coorte REMOVE
+    #: essas linhas — entao conta parada produziria `backlog = 0` e o publisher
+    #: apagaria a fila anterior com base em silencio. E' exatamente o desfecho
+    #: que `is_empty_photograph` existe para impedir.
+    #:
+    #: NAO e' persistido em lugar nenhum (a 018 nao guarda `source_health`),
+    #: entao o valor novo nao exige migration.
+    SOURCE_STALE = "source_stale"
 
     @property
     def can_publish(self) -> bool:

@@ -382,12 +382,18 @@ def test_conta_inesperada_bloqueia():
 
 
 def test_conta_saudavel_e_conta_desatualizada_nao_se_contaminam():
-    """Watermark e POR CONTA: uma conta parada nao pode se esconder atras da outra."""
+    """Watermark e POR CONTA: uma conta atrasada nao se esconde atras da outra.
+
+    As duas ficam DENTRO da coorte de 7 dias — senao a publicacao inteira
+    bloquearia por `SOURCE_STALE`, que e' outro teste. O ponto aqui e' que o
+    frescor de cada conta e classificado separadamente: `fresh` para uma,
+    `critical` para a outra, sem media nem maximo global.
+    """
     conn = FakeConn(_fonte(
         [linha(seller_id=2227056661), linha(seller_id=2532564723)],
         [
             _wm(2227056661, "kokeshi", datetime(2026, 9, 17, 13, 30)),
-            _wm(2532564723, "barbours", datetime(2026, 6, 1, 0, 0)),
+            _wm(2532564723, "barbours", datetime(2026, 9, 14, 12, 0)),
         ],
     ))
     r = ml_extract.extract(conn, AGORA, frozenset({"2227056661", "2532564723"}))
@@ -498,3 +504,197 @@ def test_cli_aceita_mercadolivre_apenas_no_diagnose():
     assert args.channel == "mercadolivre"
     assert args.diagnose is True
     assert args.apply is False
+
+
+# ---------------------------------------------------------------------------
+# EXP-3B1-R/V — fonte parada x fila vazia legitima
+# ---------------------------------------------------------------------------
+def test_conta_com_extracao_parada_recusa_publicacao():
+    """BLOCKER encontrado na revisao: conta parada NAO pode virar fila vazia.
+
+    O filtro de coorte remove justamente as linhas que o extrator deixou de
+    reler. Sem esta barreira, a conta saia `healthy` com `backlog = 0`, o
+    publisher faria `DELETE WHERE channel='mercadolivre'` e inseriria zero
+    linhas — apagando a fila anterior com base em silencio da fonte.
+    """
+    parada = datetime(2026, 5, 2, 0, 0)  # 4,5 meses atras
+    conn = FakeConn(_fonte(
+        [linha(extracted_at=parada), linha(shipment_id=4568, extracted_at=parada)],
+        [_wm(2227056661, "kokeshi", parada)],
+    ))
+    r = ml_extract.extract(conn, AGORA, frozenset({"2227056661"}))
+    assert r.source_health is SourceHealth.SOURCE_STALE
+    assert r.source_health.can_publish is False
+    assert r.backlog_rows == []
+    assert r.is_empty_photograph is False, (
+        "fonte parada nunca pode ser lida como fotografia vazia legitima"
+    )
+
+
+def test_conta_saudavel_sem_backlog_e_fila_vazia_LEGITIMA():
+    """Caso Rituaria: 100% FULL no ML, entao zero shipment seller-managed.
+
+    Fonte recente + zero candidatos = fotografia vazia legitima, que e' coisa
+    diferente de fonte ausente e PODE ser publicada.
+    """
+    conn = FakeConn(_fonte([], [
+        _wm(1366932565, "rituaria", datetime(2026, 9, 17, 13, 30))
+    ]))
+    r = ml_extract.extract(conn, AGORA, frozenset({"1366932565"}))
+    assert r.source_health is SourceHealth.HEALTHY
+    assert r.source_health.can_publish is True
+    assert r.backlog_count == 0
+    assert r.is_empty_photograph is True
+
+
+def test_conta_so_com_full_tambem_e_vazia_legitima():
+    """Rituaria de verdade: ha shipments, mas todos sao Full."""
+    conn = FakeConn(_fonte(
+        [linha(seller_id=1366932565, brand="rituaria",
+               logistic_type="fulfillment")],
+        [_wm(1366932565, "rituaria", datetime(2026, 9, 17, 13, 30))],
+    ))
+    r = ml_extract.extract(conn, AGORA, frozenset({"1366932565"}))
+    assert r.source_health is SourceHealth.HEALTHY
+    assert r.backlog_count == 0
+    assert r.diagnostics["fulfillment_excluded_count"] == 1
+    assert r.diagnostics["candidate_count"] == 1
+
+
+def test_uma_conta_parada_bloqueia_o_canal_inteiro():
+    """Nao se publica metade do canal: o DELETE e' por `channel`, nao por conta."""
+    conn = FakeConn(_fonte(
+        [linha()],
+        [
+            _wm(2227056661, "kokeshi", datetime(2026, 9, 17, 13, 30)),
+            _wm(2532564723, "barbours", datetime(2026, 5, 2, 0, 0)),
+        ],
+    ))
+    r = ml_extract.extract(conn, AGORA, frozenset({"2227056661", "2532564723"}))
+    assert r.source_health is SourceHealth.SOURCE_STALE
+    assert "2532564723" in r.detail
+    assert "2227056661" not in r.detail
+
+
+def test_detalhe_da_fonte_parada_nao_vaza_payload():
+    """A mensagem carrega conta e limite, nunca linha de pedido."""
+    parada = datetime(2026, 5, 2, 0, 0)
+    conn = FakeConn(_fonte(
+        [linha(extracted_at=parada)], [_wm(2227056661, "kokeshi", parada)]
+    ))
+    r = ml_extract.extract(conn, AGORA, frozenset({"2227056661"}))
+    for proibido in ("4567", "ready_for_pickup", "Normal", "2000"):
+        assert proibido not in r.detail
+
+
+# ---------------------------------------------------------------------------
+# EXP-3B1-R/V — fronteiras do limiar e virada de data
+# ---------------------------------------------------------------------------
+def test_fronteira_exata_das_168_horas():
+    """Exatamente no limite ainda esta DENTRO; um segundo alem, fora."""
+    limite = AGORA - ML_SOURCE_COHORT_MAX_AGE
+    assert ml_extract.is_stale_source_record(limite, AGORA) is False
+    assert ml_extract.is_stale_source_record(
+        limite - timedelta(seconds=1), AGORA
+    ) is True
+
+
+def test_fronteira_com_carimbo_naive_da_fonte():
+    """O mesmo instante, escrito como a fonte escreve (naive UTC-4)."""
+    limite_utc = AGORA - ML_SOURCE_COHORT_MAX_AGE
+    naive = (limite_utc + ML_SOURCE_UTC_OFFSET).replace(tzinfo=None)
+    assert ml_extract.is_stale_source_record(naive, AGORA) is False
+    assert ml_extract.is_stale_source_record(
+        naive - timedelta(hours=1), AGORA
+    ) is True
+
+
+def test_offset_fixo_atravessa_virada_de_ano_sem_saltar():
+    """Offset FIXO: nao ha horario de verao no Brasil desde 2019.
+
+    O teste existe para travar a decisao: se alguem trocar o offset fixo por
+    um fuso com DST, estas duas datas passariam a divergir em 1h e a fronteira
+    da coorte se moveria sozinha no meio do verao.
+    """
+    inverno = datetime(2026, 7, 15, 12, 0)
+    verao = datetime(2026, 1, 15, 12, 0)
+    d_inverno = transform.normalizar_carimbo_ml(inverno) - inverno.replace(
+        tzinfo=timezone.utc
+    )
+    d_verao = transform.normalizar_carimbo_ml(verao) - verao.replace(
+        tzinfo=timezone.utc
+    )
+    assert d_inverno == d_verao == timedelta(hours=4)
+
+
+def test_virada_de_data_nao_muda_o_dia_errado():
+    """23:30 naive vira 03:30 do dia seguinte em UTC — e isso e' correto."""
+    assert transform.normalizar_carimbo_ml(
+        datetime(2026, 9, 17, 23, 30)
+    ) == datetime(2026, 9, 18, 3, 30, tzinfo=timezone.utc)
+
+
+def test_normalizacao_nao_desloca_linha_viva_para_fora_da_coorte():
+    """A conversao move o carimbo 4h para FRENTE, nunca para tras.
+
+    Se ela deslocasse para tras, uma linha recem-relida poderia cair fora da
+    coorte. Medindo o sinal do deslocamento o risco fica travado.
+    """
+    bruto = datetime(2026, 9, 17, 14, 0)
+    convertido = transform.normalizar_carimbo_ml(bruto)
+    assert convertido > bruto.replace(tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# EXP-3B1-R/V — encerramento da fila e relogio
+# ---------------------------------------------------------------------------
+def test_sql_exclui_despachado_e_cancelado():
+    """O fechamento e' do SQL; o teste trava o predicado."""
+    assert "s.date_shipped IS NULL" in ml_extract.ML_BACKLOG_SQL
+    assert "s.date_cancelled IS NULL" in ml_extract.ML_BACKLOG_SQL
+    assert "s.status = %(shipment_status)s" in ml_extract.ML_BACKLOG_SQL
+    assert "o.status = %(order_status)s" in ml_extract.ML_BACKLOG_SQL
+
+
+def test_relogio_sem_marco_nao_vira_idade_silenciosa():
+    """Sem marco nenhum, a idade e' UNKNOWN — nao vira `within_48h` por omissao."""
+    x = transform.build_fila_ml(
+        [linha(date_ready_to_ship=None, order_created_at=None)],
+        REGISTRY, AGORA, "lote-1",
+    )[0]
+    assert x["operational_age_status"] == OperationalAgeStatus.UNKNOWN.value
+    assert x["hours_open"] is None
+    assert x["is_source_zombie"] is False
+
+
+# ---------------------------------------------------------------------------
+# EXP-3B1-R/V — isolamento entre os extratores
+# ---------------------------------------------------------------------------
+def test_extrator_do_ml_nao_le_a_fonte_da_shopee():
+    for sql in (ml_extract.ML_BACKLOG_SQL, ml_extract.ML_WATERMARK_SQL):
+        assert "shopee" not in sql.lower()
+        assert "order_sn" not in sql.lower()
+
+
+def test_extrator_da_shopee_nao_le_a_fonte_do_ml():
+    from pipelines.expedicao import shopee_extract
+
+    for sql in (shopee_extract.SHOPEE_BACKLOG_SQL,
+                shopee_extract.SHOPEE_WATERMARK_SQL):
+        assert "ml_shipments" not in sql.lower()
+        assert "shipment_id" not in sql.lower()
+
+
+def test_canal_invalido_e_recusado_pelo_parser():
+    from pipelines.expedicao import cli
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--channel", "magalu", "--diagnose"])
+
+
+def test_nenhum_canal_novo_entra_por_fallback():
+    from pipelines.expedicao import cli
+
+    parser = cli.build_parser()
+    acao = next(a for a in parser._actions if a.dest == "channel")
+    assert set(acao.choices) == {"shopee", "mercadolivre"}

@@ -318,6 +318,27 @@ def extract(
             f"contas sem carimbo de extracao: {sem_carimbo}",
         )
 
+    # PRECONDICAO DE PUBLICACAO, nao metadado de frescor.
+    #
+    # No Shopee o watermark so' descreve a idade do dado: fonte parada ainda
+    # devolve as linhas do ultimo estado conhecido. Aqui NAO — o filtro de
+    # coorte remove justamente as linhas que o extrator deixou de reler. Uma
+    # conta parada sairia com `backlog = 0` e o publisher apagaria a fila
+    # anterior por silencio, confundindo "tudo foi despachado" com "a fonte
+    # sumiu". Bloquear aqui preserva a fotografia anterior.
+    paradas = sorted(
+        c
+        for c in expected_accounts
+        if is_stale_source_record(carimbos.get(c), effective_at, max_age)
+    )
+    if paradas:
+        return _resultado(
+            SourceHealth.SOURCE_STALE,
+            f"contas fora da coorte de {max_age.days}d (extracao parada): "
+            f"{paradas}. Publicar apagaria a fila anterior com base em "
+            "silencio da fonte.",
+        )
+
     fila, diagnostico = classify_candidates(
         fetch_candidates(conn), effective_at, max_age=max_age
     )

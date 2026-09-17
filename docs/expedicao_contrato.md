@@ -942,3 +942,68 @@ diagnostico imprime o funil inteiro:
   rastreavel e a API da Torre nao tem autenticacao.
 * A fila so' e' confiavel dentro da janela que o extrator externo atualiza.
 * O canal nao publica: `--apply` e' recusado por codigo neste gate.
+
+## A fila do ML e um RECORTE OPERACIONAL CONFIAVEL, nao o backlog completo
+
+Isto precisa estar dito sem rodeio, porque o numero da tela sera lido como "o
+que falta despachar":
+
+* **A fila publicada NAO e o backlog completo do Mercado Livre.** E o recorte
+  que a fonte ainda esta relendo.
+* **A fonte externa nao tem janela contratada.** O extrator vive fora deste
+  repositorio; a janela de 7 dias foi DERIVADA do comportamento medido, nao
+  acordada com ninguem. Se o extrator mudar de janela, a coorte muda junto e
+  este contrato precisa ser remedido.
+* **Pode existir backlog antigo de verdade fora do recorte.** Dos 1.569
+  candidatos seller-managed, 678 ficaram de fora por congelamento. Parte deles
+  pode ter sido despachada ha meses e parte pode estar genuinamente parada — a
+  fonte parou de reler e por isso **nao se pode afirmar nem um nem outro**.
+  Nenhum dos dois desfechos e inventado: eles saem da fila e entram em
+  `stale_source_record_count`.
+
+O diagnostico imprime o funil inteiro exatamente para que esse desconto fique
+visivel toda vez, em vez de virar um numero pequeno que parece operacao em dia.
+
+## Fonte parada NAO e fila vazia (`SOURCE_STALE`)
+
+Achado da revisao EXP-3B1-R/V, corrigido antes do merge.
+
+O filtro de coorte remove justamente as linhas que o extrator deixou de reler.
+Sem barreira, uma conta cuja extracao parou sairia `healthy` com
+`backlog_count = 0`, o publisher faria `DELETE WHERE channel = 'mercadolivre'`
+e inseriria zero linhas — **apagando a fila anterior com base em silencio da
+fonte**. E a mesma confusao entre "tudo foi despachado" e "a fonte sumiu" que o
+contrato do Shopee ja proibia.
+
+Agora, se o watermark de QUALQUER conta esperada estiver fora da coorte, a
+extracao devolve `SourceHealth.SOURCE_STALE`, `can_publish` e' False e a
+publicacao inteira e' recusada — a fotografia anterior fica preservada, sem
+`DELETE` e sem `INSERT`. O bloqueio e do CANAL, nao da conta: o `DELETE` do
+publisher e por `channel`, entao publicar so' as contas saudaveis apagaria as
+outras.
+
+`SOURCE_STALE` nao e persistido em lugar nenhum (a `018` nao guarda
+`source_health`), entao o estado novo **nao exige migration**.
+
+**Distincao que precisa continuar valendo:** conta com fonte recente e zero
+shipment aberto e' **fotografia vazia legitima** (`is_empty_photograph`), nao
+fonte doente. E o caso da Rituaria, 100% FULL no Mercado Livre. Ha teste para
+cada um dos dois lados.
+
+## Precondicoes do EXP-3B2 (registry e piloto)
+
+Nenhuma destas foi feita neste gate, e nenhuma pode ser feita pelo pipeline:
+
+1. **Cadastrar as contas do ML** em `marts.dim_seller_account`. Hoje so' existe
+   `marketplace_id = 3` (Shopee). O pipeline **nao cria conta implicitamente**:
+   conta observada sem cadastro bloqueia a publicacao (`UNEXPECTED_ACCOUNT`).
+2. **Revalidar `marketplace_id` e os `seller_id`** no gate operacional. Os
+   valores medidos aqui sao de 17/09/2026 e servem de referencia, nao de
+   cadastro.
+3. **Kokeshi entra** na cobertura do ML se a conta estiver ativa e saudavel.
+4. **Rituaria precisa poder existir com backlog zero** sem ser lida como fonte
+   ausente.
+5. **Decisao do responsavel** sobre publicar uma fila sem prazo.
+
+Enquanto isso nao existir, `--apply --channel mercadolivre` continua recusado
+por codigo.

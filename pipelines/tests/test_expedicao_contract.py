@@ -497,7 +497,11 @@ def test_dominios_completos():
     assert TimestampQuality.VERIFIED.value == "verified"
 
 
-def test_saude_da_fonte_cobre_os_seis_estados():
+def test_saude_da_fonte_cobre_os_sete_estados():
+    # `source_stale` entrou no EXP-3B1-R/V, por causa do Mercado Livre: a conta
+    # existe e tem carimbo, mas o carimbo caiu fora da coorte de confiabilidade.
+    # No Shopee isso seria apenas frescor ruim; no ML o filtro de coorte REMOVE
+    # as linhas, entao publicar apagaria a fila anterior por silencio da fonte.
     assert {s.value for s in SourceHealth} == {
         "healthy",
         "account_missing",
@@ -505,6 +509,7 @@ def test_saude_da_fonte_cobre_os_seis_estados():
         "registry_ambiguous",
         "watermark_missing",
         "source_unavailable",
+        "source_stale",
     }
 
 
