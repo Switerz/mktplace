@@ -255,9 +255,9 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
         # entao TODA linha e' `unavailable`. A coluna existe para deixar isso
         # visivel no diagnostico em vez de sumir da tela.
         bucket["sem_prazo"] += 1
-        marco = transform.normalizar_carimbo_ml(linha.get("date_ready_to_ship"))
+        marco = transform.normalizar_negocio_ml(linha.get("date_ready_to_ship"))
         if marco is None:
-            marco = transform.normalizar_carimbo_ml(linha.get("order_created_at"))
+            marco = transform.normalizar_negocio_ml(linha.get("order_created_at"))
         horas = transform.hours_between(marco, effective_at)
         if transform.classify_age(marco, effective_at).value == "over_48h":
             bucket["over_48h"] += 1
@@ -269,7 +269,7 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
         "diagnostico": diagnostico,
         "por_conta": por_conta,
         "watermarks": {
-            w.external_seller_id: transform.normalizar_carimbo_ml(w.max_ingested_at)
+            w.external_seller_id: transform.normalizar_ingestao_ml(w.max_ingested_at)
             for w in watermarks
         },
     }
@@ -301,7 +301,7 @@ def format_diagnose_ml(resultado: dict) -> str:
             f"{b['over_48h']:>5} {b['source_zombie']:>6} {b['sem_prazo']:>8}"
         )
     linhas.append("")
-    linhas.append("  watermark por conta (UTC, convencao ASSUMIDA -04:00):")
+    linhas.append("  watermark por conta (extracted_at, ja em UTC):")
     for conta, carimbo in sorted(resultado["watermarks"].items()):
         linhas.append(f"    {conta:<16} {carimbo.isoformat() if carimbo else 'ausente'}")
     return "\n".join(linhas)

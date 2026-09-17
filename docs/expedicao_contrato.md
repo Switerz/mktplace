@@ -1007,3 +1007,77 @@ Nenhuma destas foi feita neste gate, e nenhuma pode ser feita pelo pipeline:
 
 Enquanto isso nao existir, `--apply --channel mercadolivre` continua recusado
 por codigo.
+
+## Convencao de fuso — POR COLUNA (corrigido no EXP-3B2-H1)
+
+`raw.ml_shipments` guarda **dois relogios diferentes em colunas do mesmo tipo**
+(`timestamp without time zone`). Inferir o fuso pelo TIPO da coluna erra metade
+delas.
+
+| Coluna | Origem | Convencao | Normalizador |
+|---|---|---|---|
+| `extracted_at` | relogio do job de ingestao | **UTC** | `normalizar_ingestao_ml` |
+| `date_created` | API do Mercado Livre | **UTC-4** | `normalizar_negocio_ml` |
+| `date_ready_to_ship` | API do Mercado Livre | **UTC-4** | `normalizar_negocio_ml` |
+| `order_created_at` | API do Mercado Livre | **UTC-4** | `normalizar_negocio_ml` |
+| `date_shipped`, `date_cancelled` | API do Mercado Livre | — | nunca normalizados: sao PREDICADO do SQL, e a fila so' contem shipment com os dois nulos |
+
+Prova, ancorando cada coluna no `now()` do servidor (que e' `timestamptz`, logo
+tem fuso conhecido):
+
+```
+now() - max(ml_shipments.extracted_at) = 0,144h  -> UTC
+now() - max(ml_orders.extracted_at)    = 0,232h  -> UTC
+now() - max(date_created)              = 4,250h  -> UTC-4
+```
+
+### O erro que isto corrige
+
+O EXP-3A mediu `min(extracted_at - date_created) = 4,00h` e concluiu "a fonte
+grava UTC-4". **A medicao estava certa e a conclusao errada:** a diferenca entre
+DOIS carimbos nao fixa o fuso de NENHUM deles — e compativel com infinitos pares.
+So uma ancora de fuso conhecido resolve.
+
+O EXP-3B1 aplicou o offset a todas as colunas, inclusive `extracted_at`. O
+EXP-3B2-P mediu o estrago na fonte viva:
+
+| Sintoma | Antes | Depois |
+|---|---|---|
+| idade do watermark | **-3,79h** (futuro) | +0,16h a +0,41h |
+| `source_ingested_at` no futuro | 12 linhas | 0 |
+| coorte efetiva | 7 dias + 4h | 7 dias |
+| linhas na fila | 910 | **889** |
+| deteccao de `SOURCE_STALE` | atrasada 4h | no limiar |
+
+As 21 linhas a menos sao as que entravam **apenas** pelo offset indevido: ficavam
+entre 7d e 7d04h de congelamento e passavam por dentro da margem de 4,12h que o
+proprio contrato declarava.
+
+### Por que duas funcoes e nao uma configuravel
+
+Duas colunas, duas regras, duas funcoes pequenas. Uma funcao generica com
+parametro de fuso convidaria o proximo a passar o offset errado no lugar errado
+— foi exatamente assim que o defeito nasceu. O nome da constante tambem mudou:
+`ML_SOURCE_UTC_OFFSET` sugeria "toda a fonte"; agora e' `ML_BUSINESS_UTC_OFFSET`.
+
+`ML_INGESTION_TIMESTAMPS` e `ML_BUSINESS_TIMESTAMPS` declaram a que coluna cada
+regra pertence, e um teste por AST reprova qualquer chamada que cruze as duas.
+
+### Carimbo com fuso falha FECHADO
+
+As duas funcoes levantam `ValueError` se receberem carimbo `aware`. A versao
+anterior convertia em silencio; parecia defensivo e nao era — se a fonte passar
+a gravar `timestamptz`, a conversao silenciosa apaga o sinal de que o contrato
+mudou, justo onde ele precisa ser visto.
+
+### O que NAO mudou
+
+`timestamp_quality` continua **`assumed`**: a convencao de negocio segue sendo
+inferencia medida, nao contrato oficial do Mercado Livre. `dispatch_deadline` e
+`hours_overdue` continuam nulos e `deadline_status` continua `unavailable` — nada
+aqui cria prazo. A Shopee nao foi tocada: e' `timestamptz`, `verified`, e nenhum
+normalizador do ML aparece no caminho dela.
+
+**PERGUNTA ABERTA AO TIME (inalterada):** confirmar na documentacao oficial da
+API do Mercado Livre se `date_created` / `date_ready_to_ship` vem com offset
+`-04:00` e se o extrator descarta o fuso ao gravar.

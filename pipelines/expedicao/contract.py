@@ -436,22 +436,48 @@ ML_BACKLOG_ORDER_STATUS = "paid"
 #: `stale_source_record_count` mede exatamente quantos sairam.
 ML_SOURCE_COHORT_MAX_AGE = timedelta(days=7)
 
-#: Offset aparente dos carimbos naive do ML. NAO e contrato oficial.
+#: CONVENCAO DE FUSO — POR COLUNA, nunca por tipo.
 #:
-#: Medido como o MINIMO de `extracted_at - date_created` sobre milhares de
-#: linhas de 2 dias: exatamente 4,00h em `raw.ml_orders` e exatamente 4,00h em
-#: `raw.ml_shipments` (medianas 4,14h e 4,12h). O minimo e o piso do lag de
-#: extracao, entao um piso de 4h significa offset de 4h.
+#: `raw.ml_shipments` guarda DOIS RELOGIOS diferentes em colunas que tem o mesmo
+#: tipo (`timestamp without time zone`). Inferir o fuso pelo tipo da coluna,
+#: como o EXP-3B1 fazia, erra metade delas.
 #:
-#: Como a fonte grava `timestamp without time zone`, a convencao NAO esta
-#: declarada em lugar nenhum: e inferencia medida. Por isso as linhas do ML
-#: saem com `timestamp_quality = 'assumed'`, nunca `verified`.
+#: Prova (EXP-3B2-P), ancorando cada coluna no `now()` do servidor, que e
+#: `timestamptz` e portanto tem fuso conhecido:
+#:
+#:     now() - max(ml_shipments.extracted_at) = 0,144h  -> UTC
+#:     now() - max(ml_orders.extracted_at)    = 0,232h  -> UTC
+#:     now() - max(date_created)              = 4,250h  -> UTC-4
+#:
+#: O EXP-3A media `min(extracted_at - date_created) = 4,00h` e concluiu "a fonte
+#: grava UTC-4". A medicao estava certa e a conclusao errada: a diferenca entre
+#: DOIS carimbos nao fixa o fuso de NENHUM deles — e compativel com infinitos
+#: pares. So uma ancora de fuso conhecido resolve.
+#:
+#: CARIMBO DE INGESTAO (`extracted_at`): relogio do job que escreve na tabela.
+#: Ja esta em UTC. Aplicar offset nele joga o watermark 4h no FUTURO — foi o
+#: que o EXP-3B2-P mediu: idade de watermark -3,79h, 12 linhas com
+#: `source_ingested_at` futuro, 20 de 910 linhas entrando fora da coorte e a
+#: deteccao de `SOURCE_STALE` atrasada em exatamente a margem declarada.
+ML_INGESTION_TIMESTAMPS = frozenset({"extracted_at"})
+
+#: CARIMBO DE NEGOCIO (`date_created`, `date_ready_to_ship`, `order_created_at`):
+#: vem da API do Mercado Livre, gravado naive em UTC-4.
+#:
+#: Continua sendo INFERENCIA MEDIDA, nao contrato oficial — por isso as linhas
+#: do ML saem com `timestamp_quality = 'assumed'`, nunca `verified`.
 #:
 #: PERGUNTA ABERTA AO TIME: confirmar contra a documentacao oficial da API do
-#: Mercado Livre se `date_created`/`date_ready_to_ship` vem com offset -04:00 e
-#: se o extrator descarta o fuso ao gravar. Enquanto nao houver resposta, o
-#: valor abaixo e a melhor evidencia disponivel — e esta em UM lugar so.
-ML_SOURCE_UTC_OFFSET = timedelta(hours=-4)
+#: Mercado Livre se esses campos vem com offset -04:00 e se o extrator descarta
+#: o fuso ao gravar.
+ML_BUSINESS_TIMESTAMPS = frozenset(
+    {"date_created", "date_ready_to_ship", "order_created_at"}
+)
+
+#: Offset dos carimbos de NEGOCIO. O nome diz a que se aplica de proposito: o
+#: antigo `ML_SOURCE_UTC_OFFSET` sugeria "toda a fonte" e foi exatamente assim
+#: que `extracted_at` acabou convertido junto.
+ML_BUSINESS_UTC_OFFSET = timedelta(hours=-4)
 
 #: Colunas que o SELECT do ML pode conter. Lista FECHADA, comparada por
 #: igualdade. Nenhuma coluna de comprador, destinatario ou endereco.
