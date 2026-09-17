@@ -19,7 +19,7 @@ from pipelines.expedicao.contract import (
     ML_KNOWN_LOGISTIC_TYPES,
     ML_SELLER_MANAGED_LOGISTIC_TYPES,
     ML_SOURCE_COHORT_MAX_AGE,
-    ML_SOURCE_UTC_OFFSET,
+    ML_BUSINESS_UTC_OFFSET,
     Channel,
     DeadlineStatus,
     OperationalAgeStatus,
@@ -121,12 +121,11 @@ def test_registro_congelado_nao_vira_backlog_vivo():
 
 
 def test_fronteira_da_coorte_usa_o_limiar_do_contrato():
-    # `extracted_at` em UTC-4; o limiar mede contra `effective_at` em UTC.
-    dentro = AGORA - ML_SOURCE_COHORT_MAX_AGE + timedelta(hours=1)
-    fora = AGORA - ML_SOURCE_COHORT_MAX_AGE - timedelta(hours=1)
+    """`extracted_at` chega NAIVE e ja em UTC (EXP-3B2-H1)."""
+    dentro = (AGORA - ML_SOURCE_COHORT_MAX_AGE + timedelta(hours=1)).replace(tzinfo=None)
+    fora = (AGORA - ML_SOURCE_COHORT_MAX_AGE - timedelta(hours=1)).replace(tzinfo=None)
     assert ml_extract.is_stale_source_record(dentro, AGORA) is False
     assert ml_extract.is_stale_source_record(fora, AGORA) is True
-
 
 def test_extracted_at_ausente_conta_como_fora_da_coorte():
     assert ml_extract.is_stale_source_record(None, AGORA) is True
@@ -157,26 +156,31 @@ def test_exclusoes_aparecem_todas_no_diagnostico():
 # ---------------------------------------------------------------------------
 def test_normalizacao_de_carimbo_aplica_o_offset_medido():
     bruto = datetime(2026, 9, 17, 14, 0)  # naive, convencao da fonte
-    saida = transform.normalizar_carimbo_ml(bruto)
+    saida = transform.normalizar_negocio_ml(bruto)
     assert saida == datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
     assert saida.tzinfo is timezone.utc
     # o offset vem do contrato, nao de um literal solto aqui
-    assert bruto - ML_SOURCE_UTC_OFFSET == saida.replace(tzinfo=None)
+    assert bruto - ML_BUSINESS_UTC_OFFSET == saida.replace(tzinfo=None)
 
 
 def test_normalizacao_preserva_carimbo_que_ja_tem_fuso():
-    """Se a fonte passar a gravar timestamptz, o helper para de somar offset."""
-    ciente = datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
-    assert transform.normalizar_carimbo_ml(ciente) == ciente
+    """EXP-3B2-H1 inverteu isto: aware agora FALHA FECHADO.
 
+    Antes o helper convertia em silencio. Parecia defensivo e nao era — se a
+    fonte passar a gravar `timestamptz`, a conversao silenciosa apaga o sinal
+    de que o contrato da fonte mudou, justo onde ele precisa ser visto.
+    """
+    ciente = datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        transform.normalizar_ingestao_ml(ciente)
 
 def test_normalizacao_de_nulo_e_nulo():
-    assert transform.normalizar_carimbo_ml(None) is None
+    assert transform.normalizar_negocio_ml(None) is None
 
 
 def test_offset_do_ml_nao_e_o_da_shopee():
     """Shopee e' timestamptz (verified); usar o fuso dela erraria em 4h."""
-    assert ML_SOURCE_UTC_OFFSET == timedelta(hours=-4)
+    assert ML_BUSINESS_UTC_OFFSET == timedelta(hours=-4)
 
 
 def test_conversao_de_fuso_acontece_em_um_unico_ponto():
@@ -198,7 +202,7 @@ def test_conversao_de_fuso_acontece_em_um_unico_ponto():
                 usos.append(kw.value.value)
     assert usos == [], (
         f"offset literal em transform.py: {usos}. A conversao do ML deve usar "
-        "ML_SOURCE_UTC_OFFSET, definido uma unica vez no contrato."
+        "ML_BUSINESS_UTC_OFFSET, definido uma unica vez no contrato."
     )
 
 
@@ -400,10 +404,10 @@ def test_conta_saudavel_e_conta_desatualizada_nao_se_contaminam():
     assert r.source_health is SourceHealth.HEALTHY
     assert r.account_watermarks["2227056661"] != r.account_watermarks["2532564723"]
     fresco = transform.classify_freshness(
-        transform.normalizar_carimbo_ml(r.account_watermarks["2227056661"]), AGORA
+        transform.normalizar_negocio_ml(r.account_watermarks["2227056661"]), AGORA
     )
     velho = transform.classify_freshness(
-        transform.normalizar_carimbo_ml(r.account_watermarks["2532564723"]), AGORA
+        transform.normalizar_negocio_ml(r.account_watermarks["2532564723"]), AGORA
     )
     assert fresco.value == "fresh"
     assert velho.value == "critical"
@@ -592,22 +596,24 @@ def test_detalhe_da_fonte_parada_nao_vaza_payload():
 # ---------------------------------------------------------------------------
 def test_fronteira_exata_das_168_horas():
     """Exatamente no limite ainda esta DENTRO; um segundo alem, fora."""
-    limite = AGORA - ML_SOURCE_COHORT_MAX_AGE
+    limite = (AGORA - ML_SOURCE_COHORT_MAX_AGE).replace(tzinfo=None)
     assert ml_extract.is_stale_source_record(limite, AGORA) is False
     assert ml_extract.is_stale_source_record(
         limite - timedelta(seconds=1), AGORA
     ) is True
 
-
 def test_fronteira_com_carimbo_naive_da_fonte():
-    """O mesmo instante, escrito como a fonte escreve (naive UTC-4)."""
+    """O carimbo de INGESTAO ja e UTC: nenhum offset entra na fronteira.
+
+    Antes este teste construia o naive como `limite + offset de negocio`, que
+    era justamente o defeito corrigido no EXP-3B2-H1.
+    """
     limite_utc = AGORA - ML_SOURCE_COHORT_MAX_AGE
-    naive = (limite_utc + ML_SOURCE_UTC_OFFSET).replace(tzinfo=None)
+    naive = limite_utc.replace(tzinfo=None)
     assert ml_extract.is_stale_source_record(naive, AGORA) is False
     assert ml_extract.is_stale_source_record(
         naive - timedelta(hours=1), AGORA
     ) is True
-
 
 def test_offset_fixo_atravessa_virada_de_ano_sem_saltar():
     """Offset FIXO: nao ha horario de verao no Brasil desde 2019.
@@ -618,10 +624,10 @@ def test_offset_fixo_atravessa_virada_de_ano_sem_saltar():
     """
     inverno = datetime(2026, 7, 15, 12, 0)
     verao = datetime(2026, 1, 15, 12, 0)
-    d_inverno = transform.normalizar_carimbo_ml(inverno) - inverno.replace(
+    d_inverno = transform.normalizar_negocio_ml(inverno) - inverno.replace(
         tzinfo=timezone.utc
     )
-    d_verao = transform.normalizar_carimbo_ml(verao) - verao.replace(
+    d_verao = transform.normalizar_negocio_ml(verao) - verao.replace(
         tzinfo=timezone.utc
     )
     assert d_inverno == d_verao == timedelta(hours=4)
@@ -629,7 +635,7 @@ def test_offset_fixo_atravessa_virada_de_ano_sem_saltar():
 
 def test_virada_de_data_nao_muda_o_dia_errado():
     """23:30 naive vira 03:30 do dia seguinte em UTC — e isso e' correto."""
-    assert transform.normalizar_carimbo_ml(
+    assert transform.normalizar_negocio_ml(
         datetime(2026, 9, 17, 23, 30)
     ) == datetime(2026, 9, 18, 3, 30, tzinfo=timezone.utc)
 
@@ -641,7 +647,7 @@ def test_normalizacao_nao_desloca_linha_viva_para_fora_da_coorte():
     coorte. Medindo o sinal do deslocamento o risco fica travado.
     """
     bruto = datetime(2026, 9, 17, 14, 0)
-    convertido = transform.normalizar_carimbo_ml(bruto)
+    convertido = transform.normalizar_negocio_ml(bruto)
     assert convertido > bruto.replace(tzinfo=timezone.utc)
 
 
@@ -698,3 +704,270 @@ def test_nenhum_canal_novo_entra_por_fallback():
     parser = cli.build_parser()
     acao = next(a for a in parser._actions if a.dest == "channel")
     assert set(acao.choices) == {"shopee", "mercadolivre"}
+
+
+# ---------------------------------------------------------------------------
+# EXP-3B2-H1 — convencao de fuso POR COLUNA
+# ---------------------------------------------------------------------------
+def test_extracted_at_e_utc_e_nao_sofre_offset():
+    """O caso exato que o EXP-3B2-P mediu na fonte viva.
+
+    20:45 naive de `extracted_at` e 20:45Z. Se levar -04:00 vira 00:45Z do dia
+    SEGUINTE — watermark no futuro.
+    """
+    bruto = datetime(2026, 9, 17, 20, 45, 0)
+    saida = transform.normalizar_ingestao_ml(bruto)
+    assert saida == datetime(2026, 9, 17, 20, 45, tzinfo=timezone.utc)
+    assert saida != datetime(2026, 9, 18, 0, 45, tzinfo=timezone.utc)
+
+
+def test_date_created_e_utc_menos_4():
+    """16:45 em UTC-4 e 20:45Z."""
+    assert transform.normalizar_negocio_ml(
+        datetime(2026, 9, 17, 16, 45, 0)
+    ) == datetime(2026, 9, 17, 20, 45, tzinfo=timezone.utc)
+
+
+def test_date_ready_to_ship_segue_a_convencao_de_negocio():
+    """Mesma coluna de origem (API do ML), mesma convencao."""
+    bruto = datetime(2026, 9, 17, 16, 45, 0)
+    assert (transform.normalizar_negocio_ml(bruto)
+            == transform.normalizar_negocio_ml(datetime(2026, 9, 17, 16, 45, 0)))
+    x = transform.build_fila_ml(
+        [linha(date_ready_to_ship=bruto, order_created_at=bruto,
+               extracted_at=datetime(2026, 9, 17, 20, 45, 0))],
+        REGISTRY, AGORA, "lote-1",
+    )[0]
+    assert x["created_at"] == datetime(2026, 9, 17, 20, 45, tzinfo=timezone.utc)
+    assert x["source_ingested_at"] == datetime(2026, 9, 17, 20, 45, tzinfo=timezone.utc)
+
+
+def test_as_duas_convencoes_diferem_em_exatamente_quatro_horas():
+    bruto = datetime(2026, 9, 17, 12, 0, 0)
+    ing = transform.normalizar_ingestao_ml(bruto)
+    neg = transform.normalizar_negocio_ml(bruto)
+    assert neg - ing == timedelta(hours=4)
+
+
+def test_watermark_nunca_fica_no_futuro():
+    """Carimbo de ingestao recente nao pode produzir idade negativa."""
+    recente = (AGORA - timedelta(minutes=8)).replace(tzinfo=None)
+    wm = transform.normalizar_ingestao_ml(recente)
+    idade = (AGORA - wm).total_seconds() / 3600
+    assert wm <= AGORA, f"watermark no futuro: {wm} > {AGORA}"
+    assert idade >= 0, f"source_age_hours negativo: {idade}"
+    assert idade == pytest.approx(8 / 60, abs=1e-6)
+
+
+def test_source_age_hours_nao_fica_negativo_na_fila():
+    recente = (AGORA - timedelta(minutes=5)).replace(tzinfo=None)
+    x = transform.build_fila_ml(
+        [linha(extracted_at=recente)], REGISTRY, AGORA, "lote-1"
+    )[0]
+    idade = (AGORA - x["source_ingested_at"]).total_seconds() / 3600
+    assert idade >= 0, f"idade negativa: {idade}"
+    assert x["source_freshness_status"] == "fresh"
+
+
+def test_stale_usa_extracted_at_em_utc_sem_tolerancia_de_quatro_horas():
+    """Registro 7d02h atras esta FORA. Com o bug antigo entraria."""
+    fora = (AGORA - ML_SOURCE_COHORT_MAX_AGE - timedelta(hours=2)).replace(tzinfo=None)
+    assert ml_extract.is_stale_source_record(fora, AGORA) is True
+    # a 4h do limite, do lado de dentro, continua dentro
+    dentro = (AGORA - ML_SOURCE_COHORT_MAX_AGE + timedelta(hours=4)).replace(tzinfo=None)
+    assert ml_extract.is_stale_source_record(dentro, AGORA) is False
+
+
+def test_fronteira_exata_da_coorte_em_utc():
+    limite = (AGORA - ML_SOURCE_COHORT_MAX_AGE).replace(tzinfo=None)
+    assert ml_extract.is_stale_source_record(limite, AGORA) is False
+    assert ml_extract.is_stale_source_record(
+        limite - timedelta(seconds=1), AGORA
+    ) is True
+
+
+def test_registro_na_faixa_de_quatro_horas_nao_entra_por_offset():
+    """A faixa que o bug antigo deixava passar: entre 7d e 7d04h."""
+    for horas in (0.5, 1, 2, 3, 3.9):
+        alem = (AGORA - ML_SOURCE_COHORT_MAX_AGE
+                - timedelta(hours=horas)).replace(tzinfo=None)
+        assert ml_extract.is_stale_source_record(alem, AGORA) is True, (
+            f"registro {horas}h alem do limite entrou na coorte"
+        )
+        fila, diag = ml_extract.classify_candidates([linha(extracted_at=alem)], AGORA)
+        assert fila == []
+        assert diag["stale_source_record_count"] == 1
+
+
+def test_nulos_continuam_seguros():
+    assert transform.normalizar_ingestao_ml(None) is None
+    assert transform.normalizar_negocio_ml(None) is None
+    assert ml_extract.is_stale_source_record(None, AGORA) is True
+
+
+def test_aware_inesperado_falha_fechado_nas_duas_funcoes():
+    """Sem dupla conversao silenciosa: se a fonte virar timestamptz, levanta."""
+    ciente = datetime(2026, 9, 17, 20, 45, tzinfo=timezone.utc)
+    for fn in (transform.normalizar_ingestao_ml, transform.normalizar_negocio_ml):
+        with pytest.raises(ValueError) as erro:
+            fn(ciente)
+        assert "COM fuso" in str(erro.value)
+
+
+def test_deadline_continua_indisponivel_apos_a_correcao():
+    x = transform.build_fila_ml([linha()], REGISTRY, AGORA, "lote-1")[0]
+    assert x["dispatch_deadline"] is None
+    assert x["deadline_status"] == DeadlineStatus.UNAVAILABLE.value
+    assert x["deadline_source"] == "unavailable"
+    assert x["hours_overdue"] is None
+
+
+def test_shopee_nao_muda_com_a_correcao():
+    """A Shopee e timestamptz: nada aqui toca o caminho dela."""
+    import inspect
+
+    from pipelines.expedicao import shopee_extract
+
+    fonte_shopee = inspect.getsource(transform.build_fila_shopee)
+    assert "normalizar_ingestao_ml" not in fonte_shopee
+    assert "normalizar_negocio_ml" not in fonte_shopee
+    assert "ML_BUSINESS_UTC_OFFSET" not in fonte_shopee
+    assert "ML_" not in inspect.getsource(shopee_extract.fetch_backlog)
+
+
+def test_shopee_continua_verified_e_sem_conversao():
+    pago = datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc)
+    criado = datetime(2026, 9, 16, 9, 0, tzinfo=timezone.utc)
+    x = transform.build_fila_shopee(
+        [{
+            "shop_id": "1609671923", "shop_account": "loja", "order_sn": "X1",
+            "order_status": "READY_TO_SHIP", "create_time": criado, "pay_time": pago,
+            "ship_by_date": None, "pickup_done_time": None,
+            "shipping_carrier": "J&T", "ingested_at": pago,
+        }],
+        {"1609671923": SellerAccount("1609671923", 1, "apice")},
+        {}, AGORA, "lote-sh",
+    )[0]
+    assert x["timestamp_quality"] == TimestampQuality.VERIFIED.value
+    assert x["created_at"] == criado, "carimbo da Shopee foi convertido"
+    assert x["source_ingested_at"] == pago
+
+
+# ---------------------------------------------------------------------------
+# Barreira ESTRUTURAL: cada coluna so pode usar o normalizador dela
+# ---------------------------------------------------------------------------
+def _chamadas_de_normalizacao(caminho: Path):
+    """(funcao, coluna) para cada `normalizar_*_ml(linha.get("coluna"))`."""
+    arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+    achados = []
+    for no in ast.walk(arvore):
+        if not isinstance(no, ast.Call):
+            continue
+        nome = getattr(no.func, "attr", None) or getattr(no.func, "id", None)
+        if nome not in ("normalizar_ingestao_ml", "normalizar_negocio_ml"):
+            continue
+        for arg in no.args:
+            coluna = None
+            if isinstance(arg, ast.Call):
+                sub = getattr(arg.func, "attr", None)
+                if sub == "get" and arg.args and isinstance(arg.args[0], ast.Constant):
+                    coluna = arg.args[0].value
+            elif isinstance(arg, ast.Subscript) and isinstance(arg.slice, ast.Constant):
+                coluna = arg.slice.value
+            elif isinstance(arg, ast.Name):
+                coluna = arg.id
+            elif isinstance(arg, ast.Attribute):
+                coluna = arg.attr
+            if coluna:
+                achados.append((nome, coluna))
+    return achados
+
+
+def test_extracted_at_nunca_passa_pelo_normalizador_de_negocio():
+    """Barreira estrutural contra a regressao que este gate corrigiu."""
+    from pipelines.expedicao.contract import (
+        ML_BUSINESS_TIMESTAMPS,
+        ML_INGESTION_TIMESTAMP_ALIASES,
+        ML_INGESTION_TIMESTAMPS,
+    )
+
+    # Os APELIDOS entram aqui. Sem eles a barreira protegia a coluna
+    # `extracted_at` e deixava passar o watermark, que viaja como
+    # `max_ingested_at` — e o watermark foi um dos tres pontos com o defeito.
+    ingestao = ML_INGESTION_TIMESTAMPS | ML_INGESTION_TIMESTAMP_ALIASES
+    erros = []
+    for arquivo in ("transform.py", "ml_extract.py", "cli.py"):
+        caminho = RAIZ / "pipelines" / "expedicao" / arquivo
+        for funcao, coluna in _chamadas_de_normalizacao(caminho):
+            if coluna in ingestao and funcao != "normalizar_ingestao_ml":
+                erros.append(f"{arquivo}: {coluna} passou por {funcao}")
+            if coluna in ML_BUSINESS_TIMESTAMPS and funcao != "normalizar_negocio_ml":
+                erros.append(f"{arquivo}: {coluna} passou por {funcao}")
+    assert not erros, "; ".join(erros)
+
+
+def test_todo_carimbo_normalizado_tem_convencao_declarada():
+    """Nenhuma chamada de normalizacao escapa da barreira por nome nao listado.
+
+    A versao anterior so' reprovava nomes que estivessem nos conjuntos; um nome
+    fora deles passava em silencio — foi exatamente assim que o watermark
+    (`max_ingested_at`) ficou sem protecao.
+    """
+    from pipelines.expedicao.contract import (
+        ML_BUSINESS_TIMESTAMPS,
+        ML_INGESTION_TIMESTAMP_ALIASES,
+        ML_INGESTION_TIMESTAMPS,
+    )
+
+    conhecidos = (
+        ML_INGESTION_TIMESTAMPS | ML_INGESTION_TIMESTAMP_ALIASES | ML_BUSINESS_TIMESTAMPS
+    )
+    orfas = []
+    for arquivo in ("transform.py", "ml_extract.py", "cli.py"):
+        caminho = RAIZ / "pipelines" / "expedicao" / arquivo
+        for funcao, coluna in _chamadas_de_normalizacao(caminho):
+            # `bruto` e o parametro dos proprios normalizadores.
+            if coluna in ("bruto",):
+                continue
+            if coluna not in conhecidos:
+                orfas.append(f"{arquivo}: {coluna} (via {funcao})")
+    assert not orfas, (
+        "carimbo normalizado sem convencao declarada no contrato: "
+        + "; ".join(orfas)
+    )
+
+
+def test_a_convencao_cobre_todas_as_colunas_temporais_do_select():
+    """Nenhuma coluna de tempo do SELECT fica sem convencao declarada."""
+    from pipelines.expedicao.contract import (
+        ML_BUSINESS_TIMESTAMPS,
+        ML_INGESTION_TIMESTAMPS,
+    )
+
+    temporais = {
+        c for c in ml_extract.ML_SELECT_COLUMNS
+        if c.startswith("date_") or c.endswith("_at")
+    }
+    declaradas = ML_INGESTION_TIMESTAMPS | ML_BUSINESS_TIMESTAMPS
+    # `date_shipped` e `date_cancelled` sao predicados do SQL, nunca
+    # normalizados nem publicados: a fila so contem shipment com os dois nulos.
+    predicados = {"date_shipped", "date_cancelled"}
+    assert temporais - declaradas - predicados == set()
+    assert ML_INGESTION_TIMESTAMPS.isdisjoint(ML_BUSINESS_TIMESTAMPS)
+
+
+def test_offset_de_negocio_nao_se_aplica_a_ingestao():
+    from pipelines.expedicao.contract import (
+        ML_BUSINESS_UTC_OFFSET,
+        ML_INGESTION_TIMESTAMPS,
+    )
+
+    assert ML_BUSINESS_UTC_OFFSET == timedelta(hours=-4)
+    assert "extracted_at" in ML_INGESTION_TIMESTAMPS
+    fonte = (RAIZ / "pipelines" / "expedicao" / "transform.py").read_text(
+        encoding="utf-8"
+    )
+    corpo = fonte.split("def normalizar_ingestao_ml")[1].split("def normalizar_negocio_ml")[0]
+    assert "ML_BUSINESS_UTC_OFFSET" not in corpo, (
+        "o normalizador de ingestao nao pode usar o offset de negocio"
+    )
