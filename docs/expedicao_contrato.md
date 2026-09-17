@@ -748,3 +748,262 @@ fronteira com a fonte parada: e a prova de que recomputar a cada execucao
 importa.
 
 Baseline exclui `CANCELLED` com pickup preenchido: 46 de 23.755 (0,19%).
+
+---
+
+# Mercado Livre — nucleo do canal (EXP-3B1)
+
+**Estado: NUCLEO IMPLEMENTADO, NADA PUBLICADO.** Extrator, transformacao,
+allowlist de modalidade e coorte de confiabilidade existem e estao cobertos por
+teste. `--apply --channel mercadolivre` e' **bloqueado por codigo**; so'
+`--diagnose` roda. Publicar e' o EXP-3B2.
+
+> **"Mercado Livre implementado" NAO significa Expedicao multicanal concluida.**
+> O canal nasce SEM prazo de despacho, o TikTok nao existe ainda, e a frente so'
+> fecha com Shopee + ML + TikTok.
+
+## Fonte e grao
+
+| | Valor |
+|---|---|
+| Fonte | `raw.ml_shipments` JOIN `raw.ml_orders` ON `(brand, order_id)` |
+| Unidade | **shipment**, nao pedido |
+| Chave | `(channel, shop_account = seller_id, marketplace_order_id = shipment_id)` |
+| Conta | `seller_id` (1 por marca, medido) |
+| Marca | resolvida pelo registry, nunca pelo texto `brand` da fonte |
+
+`(brand, shipment_id)` e' UNIQUE na fonte (0 duplicatas em 521.548 linhas).
+**`shipment_id` sozinho NAO e' unico** — repete entre marcas em 117 casos —,
+por isso a conta faz parte da identidade. 77 pedidos historicos tem mais de um
+shipment; usar `order_id` como identidade apagaria um dos despachos.
+
+Validado contra o DDL real da `018` em PostgreSQL descartavel: a PK comporta
+dois shipments do mesmo pedido, rejeita duplicata real e aceita o mesmo
+`shipment_id` em marcas diferentes. **Nenhuma migration nova e' necessaria.**
+
+## Modalidades — allowlist POSITIVA
+
+| Modalidade | Entra? | Volume historico |
+|---|---|---|
+| `cross_docking` | **sim** | 117.120 |
+| `xd_drop_off` | **sim** | 51.643 |
+| `self_service` | **sim** | 9.927 |
+| `drop_off` | **sim** | 3.389 |
+| `fulfillment` (FULL) | **NAO** | 339.556 |
+
+Nao e' `!= 'fulfillment'`: por negacao, uma modalidade nova do Mercado Livre
+entraria sozinha na fila sem ninguem decidir. Modalidade desconhecida
+**bloqueia a publicacao inteira** (`SourceUnhealthy`), como o
+`UNEXPECTED_ACCOUNT` do Shopee.
+
+**Full pertence a superficie de Full, nao a Expedicao.** No FULL o estoque ja
+esta no armazem do ML e quem separa, embala e despacha e' o proprio marketplace;
+os substatus medidos (`in_warehouse`, `in_packing_list`, `ready_to_pack`,
+`packed`) sao operacao deles. Cobrar isso do vendedor seria culpar a operacao
+por trabalho que ela nao executa.
+
+## Abertura e encerramento da fila
+
+**Abre:** `shipment.status = 'ready_to_ship'` **e** `order.status = 'paid'` **e**
+modalidade na allowlist **e** registro dentro da coorte confiavel.
+
+**Fecha:** `date_shipped` preenchido, `date_cancelled` preenchido, ou o status
+deixar de ser `ready_to_ship`.
+
+**Relogio:** `date_ready_to_ship` (100% preenchido na coorte) — quando a
+responsabilidade do vendedor comeca. `date_created` incluiria o tempo de
+pagamento e processamento do proprio Mercado Livre.
+
+**Shipment sem pedido:** o JOIN os exclui. Medidos 89 no historico.
+
+## Coorte confiavel da fonte
+
+O extrator do ML **nao vive neste repositorio** (ingestao externa, via Airflow).
+A janela nao pode ser provada por codigo; o COMPORTAMENTO pode, linha a linha,
+por `extracted_at`.
+
+Medicao de 17/09/2026, nas quatro marcas:
+
+| Recorte | Pior atraso de releitura |
+|---|---|
+| criados ha menos de 3 dias | 67,69h / 67,99h / 67,93h / 67,69h |
+| criados entre 3 e 7 dias | 163,73h / 163,88h / 163,73h / 163,80h |
+
+Cobertura de releitura por idade do registro: **100% ate 7 dias**, 2,5% de 7 a
+15 dias, 0% acima. O histograma da fila tem um vale de apenas 21 registros na
+faixa de 20 a 40 dias, separando a populacao viva de 1.951 registros congelados.
+
+**Limiar: 7 dias de `extracted_at`.** Um registro nao relido ha mais disso esta
+provadamente fora da janela ativa — o estado gravado nele e' fotografia velha,
+nao evidencia de pedido parado na operacao.
+
+**Risco declarado:** a margem e' de 4,12h (168h de limiar contra 163,88h
+observados). Um atraso do extrator empurra registros VIVOS para fora da coorte.
+O erro e' conservador — some da fila em vez de inventar backlog — e
+`stale_source_record_count` mede exatamente quantos sairam.
+
+## Timezone — INFERIDO, nao contratado
+
+A fonte grava `timestamp without time zone`; a convencao nao esta declarada em
+lugar nenhum do schema. Medido como o MINIMO de `extracted_at - carimbo` sobre
+milhares de linhas de dois dias: **exatamente 4,00h** em `raw.ml_orders` e
+**exatamente 4,00h** em `raw.ml_shipments` (medianas 4,14h e 4,12h). O minimo e'
+o piso do lag de extracao, entao um piso de 4h significa offset de 4h.
+
+Por isso as linhas do ML saem com `timestamp_quality = 'assumed'`, nunca
+`verified`. A conversao vive num unico ponto
+(`transform.normalizar_carimbo_ml`), com o offset em `ML_SOURCE_UTC_OFFSET`; um
+teste por AST reprova offset literal espalhado pelo modulo.
+
+**PERGUNTA ABERTA AO TIME:** confirmar contra a documentacao oficial da API do
+Mercado Livre se `date_created` / `date_ready_to_ship` vem com offset `-04:00` e
+se o extrator descarta o fuso ao gravar. Ate la, o valor e' a melhor evidencia
+disponivel — e nao o fuso da Shopee, que erraria em 4 horas.
+
+## AUSENCIA DE PRAZO
+
+O Mercado Livre **nao entrega prazo operacional de despacho** no armazem:
+`estimated_handling_hours` 0% preenchido em 190.025 linhas,
+`estimated_delivery_limit` 0% na janela de 30 dias, e os JSONB `carrier_info`,
+`quotation` e `threshold_cancellation` VAZIOS. `date_handling` e' inicio de
+manuseio (media 0,30h APOS a criacao); `estimated_delivery_date` e' promessa de
+ENTREGA ao comprador, outra coisa.
+
+Entao, para todo o canal:
+
+* `dispatch_deadline = NULL`;
+* `deadline_status = unavailable`;
+* `deadline_source = unavailable`;
+* `hours_overdue = NULL` (zero diria "no prazo, sem atraso" onde nao ha prazo);
+* **nada** e' classificado como `overdue`, `due_within_24h` ou `on_time`.
+
+Continuam disponiveis, porque dependem so' do relogio: idade (`hours_open`),
+faixa de 48h (`operational_age_status`) e `is_stalled`.
+
+`is_slow_vs_baseline` sai **False**: exige p50 por conta com amostra minima de
+100, e a coorte de 7 dias nao a sustenta. `is_stalled` fica valendo so' pelo
+zumbi — declarado, nao silencioso.
+
+**Caminho para o prazo oficial:** reextrair
+`shipping_option.estimated_handling_limit` da API do Mercado Livre e
+materializar a coluna. E' gate proprio; enquanto nao existir, a tela do ML nao
+pode mostrar colunas de prazo.
+
+## Cobertura por marca e conta
+
+Contas do ML **nao estao cadastradas**: `marts.dim_seller_account` so' tem
+`marketplace_id = 3` (Shopee). Cadastra-las e' precondicao EXTERNA do EXP-3B2.
+
+| Marca | `seller_id` | Fila (coorte + allowlist) |
+|---|---|---|
+| kokeshi | 2227056661 | 797 |
+| barbours | 2532564723 | 63 |
+| lescent | 2579732860 | 31 |
+| rituaria | 1366932565 | **0** |
+
+**Kokeshi ENTRA no ML** — diferente da Shopee, onde nao existe na fonte.
+**Rituaria tem zero** porque e' 100% FULL no Mercado Livre: fila vazia legitima,
+que a maquina de `SourceHealth` distingue de fonte ausente.
+
+## Funil medido (17/09/2026)
+
+| Etapa | Linhas |
+|---|---|
+| shipments (total) | 521.548 |
+| `status = ready_to_ship` | 5.659 |
+| + nao despachado / nao cancelado | 5.659 |
+| + pedido `paid` | 5.531 |
+| + seller-managed (allowlist) | **1.569** |
+| + coorte confiavel (menos de 7d) | **891** |
+
+Dois de cada tres candidatos sao descartados. Mostrar so' o numero final
+esconderia isso, e um numero pequeno pareceria operacao em dia — por isso o
+diagnostico imprime o funil inteiro:
+`candidate_count`, `seller_managed_count`, `fulfillment_excluded_count`,
+`stale_source_record_count`, `unmapped_logistic_type_count`, `queue_count`.
+
+## Diferenca entre Expedicao seller-managed e Full
+
+| | Expedicao (este contrato) | Full |
+|---|---|---|
+| Quem despacha | o vendedor | o Mercado Livre |
+| Modalidades | cross_docking, xd_drop_off, drop_off, self_service | fulfillment |
+| Onde aparece | `/expedicao` | superficie de Full |
+| Acao do operador | separar, embalar, despachar | nenhuma |
+
+## Limitacoes
+
+* Sem prazo: metade do painel da Shopee nao existe aqui.
+* Sem `is_slow_vs_baseline`.
+* Sem `paid_at`: a fonte nao expoe carimbo de pagamento do pedido
+  (`date_closed` e' fechamento, nao pagamento).
+* `carrier` carrega `tracking_method` (a MODALIDADE de rastreio).
+  `tracking_number` **nao** e' extraido: e' identificador publicamente
+  rastreavel e a API da Torre nao tem autenticacao.
+* A fila so' e' confiavel dentro da janela que o extrator externo atualiza.
+* O canal nao publica: `--apply` e' recusado por codigo neste gate.
+
+## A fila do ML e um RECORTE OPERACIONAL CONFIAVEL, nao o backlog completo
+
+Isto precisa estar dito sem rodeio, porque o numero da tela sera lido como "o
+que falta despachar":
+
+* **A fila publicada NAO e o backlog completo do Mercado Livre.** E o recorte
+  que a fonte ainda esta relendo.
+* **A fonte externa nao tem janela contratada.** O extrator vive fora deste
+  repositorio; a janela de 7 dias foi DERIVADA do comportamento medido, nao
+  acordada com ninguem. Se o extrator mudar de janela, a coorte muda junto e
+  este contrato precisa ser remedido.
+* **Pode existir backlog antigo de verdade fora do recorte.** Dos 1.569
+  candidatos seller-managed, 678 ficaram de fora por congelamento. Parte deles
+  pode ter sido despachada ha meses e parte pode estar genuinamente parada — a
+  fonte parou de reler e por isso **nao se pode afirmar nem um nem outro**.
+  Nenhum dos dois desfechos e inventado: eles saem da fila e entram em
+  `stale_source_record_count`.
+
+O diagnostico imprime o funil inteiro exatamente para que esse desconto fique
+visivel toda vez, em vez de virar um numero pequeno que parece operacao em dia.
+
+## Fonte parada NAO e fila vazia (`SOURCE_STALE`)
+
+Achado da revisao EXP-3B1-R/V, corrigido antes do merge.
+
+O filtro de coorte remove justamente as linhas que o extrator deixou de reler.
+Sem barreira, uma conta cuja extracao parou sairia `healthy` com
+`backlog_count = 0`, o publisher faria `DELETE WHERE channel = 'mercadolivre'`
+e inseriria zero linhas — **apagando a fila anterior com base em silencio da
+fonte**. E a mesma confusao entre "tudo foi despachado" e "a fonte sumiu" que o
+contrato do Shopee ja proibia.
+
+Agora, se o watermark de QUALQUER conta esperada estiver fora da coorte, a
+extracao devolve `SourceHealth.SOURCE_STALE`, `can_publish` e' False e a
+publicacao inteira e' recusada — a fotografia anterior fica preservada, sem
+`DELETE` e sem `INSERT`. O bloqueio e do CANAL, nao da conta: o `DELETE` do
+publisher e por `channel`, entao publicar so' as contas saudaveis apagaria as
+outras.
+
+`SOURCE_STALE` nao e persistido em lugar nenhum (a `018` nao guarda
+`source_health`), entao o estado novo **nao exige migration**.
+
+**Distincao que precisa continuar valendo:** conta com fonte recente e zero
+shipment aberto e' **fotografia vazia legitima** (`is_empty_photograph`), nao
+fonte doente. E o caso da Rituaria, 100% FULL no Mercado Livre. Ha teste para
+cada um dos dois lados.
+
+## Precondicoes do EXP-3B2 (registry e piloto)
+
+Nenhuma destas foi feita neste gate, e nenhuma pode ser feita pelo pipeline:
+
+1. **Cadastrar as contas do ML** em `marts.dim_seller_account`. Hoje so' existe
+   `marketplace_id = 3` (Shopee). O pipeline **nao cria conta implicitamente**:
+   conta observada sem cadastro bloqueia a publicacao (`UNEXPECTED_ACCOUNT`).
+2. **Revalidar `marketplace_id` e os `seller_id`** no gate operacional. Os
+   valores medidos aqui sao de 17/09/2026 e servem de referencia, nao de
+   cadastro.
+3. **Kokeshi entra** na cobertura do ML se a conta estiver ativa e saudavel.
+4. **Rituaria precisa poder existir com backlog zero** sem ser lida como fonte
+   ausente.
+5. **Decisao do responsavel** sobre publicar uma fila sem prazo.
+
+Enquanto isso nao existir, `--apply --channel mercadolivre` continua recusado
+por codigo.

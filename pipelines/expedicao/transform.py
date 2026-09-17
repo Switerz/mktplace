@@ -33,6 +33,7 @@ from pipelines.expedicao.contract import (
     FRESHNESS_FRESH_LIMIT,
     FRESHNESS_STALE_LIMIT,
     MIN_BASELINE_SAMPLE,
+    ML_SOURCE_UTC_OFFSET,
     OPERATIONAL_AGE_LIMIT,
     SLOW_BASELINE_FACTOR,
     SOURCE_ZOMBIE_AGE,
@@ -271,6 +272,124 @@ def build_fila_shopee(
                 ).value,
                 # Shopee: todas as colunas de data sao timestamptz.
                 "timestamp_quality": TimestampQuality.VERIFIED.value,
+            }
+        )
+    return saida
+
+
+
+# ---------------------------------------------------------------------------
+# Mercado Livre (EXP-3B1)
+# ---------------------------------------------------------------------------
+def normalizar_carimbo_ml(bruto: datetime | None) -> datetime | None:
+    """Carimbo naive do Mercado Livre -> aware em UTC. PONTO UNICO.
+
+    A fonte grava `timestamp without time zone`, entao a convencao nao esta
+    declarada em lugar nenhum do schema. `ML_SOURCE_UTC_OFFSET` carrega a
+    evidencia medida (-04:00) e o raciocinio; aqui so' se aplica.
+
+    Existe uma funcao so' para isto de proposito. Espalhar `timedelta(hours=-4)`
+    pelo codigo faria a correcao do offset — quando o time confirmar a convencao
+    oficial — virar uma cacada por literais, e um lugar esquecido produziria
+    duas idades diferentes para o mesmo pedido.
+
+    Carimbo que ja chega com fuso e devolvido convertido, nao reinterpretado:
+    se a fonte um dia passar a gravar `timestamptz`, este helper deixa de somar
+    offset sozinho em vez de errar por 4 horas.
+    """
+    if bruto is None:
+        return None
+    if bruto.tzinfo is not None:
+        return bruto.astimezone(timezone.utc)
+    return (bruto - ML_SOURCE_UTC_OFFSET).replace(tzinfo=timezone.utc)
+
+
+def build_fila_ml(
+    linhas: list[dict],
+    registry: dict[str, SellerAccount],
+    effective_at: datetime,
+    refresh_batch_id: str = "",
+) -> list[dict]:
+    """Shipments do ML -> linhas de `marts.expedicao_fila_atual`.
+
+    Tres diferencas em relacao ao Shopee, todas medidas no EXP-3A/3B1:
+
+    1. A IDENTIDADE e o shipment. `marketplace_order_id` recebe `shipment_id`,
+       nao `order_id`: 77 pedidos historicos tem mais de um shipment e usar o
+       pedido colidiria neles. `(brand, shipment_id)` e UNIQUE na fonte.
+
+    2. NAO HA PRAZO. `dispatch_deadline` sai nulo e `deadline_status` sai
+       `unavailable`. Nada aqui deriva prazo de `date_ready_to_ship`, de
+       `date_created` nem de SLA fixo — o marketplace nao promete despacho no
+       dado que temos, e fabricar a promessa criaria "vencido" imaginario.
+
+    3. O RELOGIO parte de `date_ready_to_ship` (100% preenchido na coorte), que
+       e quando a responsabilidade do vendedor comeca. `date_created` inclui o
+       tempo de pagamento e processamento do proprio Mercado Livre.
+
+    Sem `baselines`: `is_slow_vs_baseline` exige p50 de duracao ate o despacho
+    por conta, e a coorte confiavel do ML (7 dias) nao sustenta a amostra minima
+    de 100 do contrato. A flag sai False e `is_stalled` fica valendo so' pelo
+    zumbi — declarado, nao silencioso.
+    """
+    _require_aware(effective_at, "effective_at")
+    saida: list[dict] = []
+    for linha in linhas:
+        seller_id = str(linha["seller_id"])
+        conta = registry.get(seller_id)
+        if conta is None:
+            raise RegistryError(
+                f"conta Mercado Livre {seller_id} ausente do registry; "
+                "o refresh nao infere marca por texto."
+            )
+
+        criado = normalizar_carimbo_ml(linha.get("order_created_at"))
+        pronto = normalizar_carimbo_ml(linha.get("date_ready_to_ship"))
+        extraido = normalizar_carimbo_ml(linha.get("extracted_at"))
+
+        # O marco do ML e' o `date_ready_to_ship`; a criacao do pedido so'
+        # sustenta a idade quando o carimbo de prontidao falta.
+        marco = pronto if pronto is not None else criado
+        horas_aberto = hours_between(marco, effective_at)
+        zumbi = is_source_zombie(horas_aberto)
+
+        saida.append(
+            {
+                "effective_at": effective_at,
+                "refresh_batch_id": refresh_batch_id,
+                "channel": Channel.MERCADOLIVRE.value,
+                # IDENTIDADE: (channel, shop_account, marketplace_order_id).
+                # `shipment_id` NAO e unico sozinho — repete entre marcas em 117
+                # casos medidos —, entao a conta faz parte da chave.
+                "shop_account": str(linha["seller_id"]),
+                "marketplace_order_id": str(linha["shipment_id"]),
+                "brand": conta.brand_key,
+                "created_at": criado,
+                # A fonte nao expoe carimbo de pagamento do pedido; `date_closed`
+                # e' fechamento, nao pagamento. Melhor nulo que um proxy errado.
+                "paid_at": None,
+                "dispatch_deadline": None,
+                "deadline_source": DEADLINE_SOURCE_UNAVAILABLE,
+                "deadline_status": DeadlineStatus.UNAVAILABLE.value,
+                "operational_age_status": classify_age(marco, effective_at).value,
+                "is_slow_vs_baseline": False,
+                "is_source_zombie": zumbi,
+                "is_stalled": zumbi,
+                "hours_open": horas_aberto,
+                # Sem prazo nao ha atraso contra prazo. Zero aqui seria mentira
+                # aritmetica: diria "no prazo, sem atraso" onde nao ha prazo.
+                "hours_overdue": None,
+                "logistic_type": linha.get("logistic_type"),
+                # MODALIDADE de rastreio, nao numero de rastreio: o numero e
+                # identificador publicamente rastreavel e a API nao tem auth.
+                "carrier": linha.get("tracking_method"),
+                "source_ingested_at": extraido,
+                "source_freshness_status": classify_freshness(
+                    extraido, effective_at
+                ).value,
+                # Convencao de fuso INFERIDA por medicao, nao declarada pela
+                # fonte nem confirmada pela documentacao oficial.
+                "timestamp_quality": TimestampQuality.ASSUMED.value,
             }
         )
     return saida

@@ -82,7 +82,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pipelines.expedicao import audit as audit_mod
-from pipelines.expedicao import shopee_extract, transform
+from pipelines.expedicao import ml_extract, shopee_extract, transform
 from pipelines.expedicao.contract import (
     FILA_TABLE,
     MARKETPLACE_ID,
@@ -223,6 +223,89 @@ def diagnose(conn, effective_at: datetime) -> dict:
         "watermarks": {w.external_seller_id: w.max_ingested_at for w in watermarks},
         "baselines": baselines,
     }
+
+
+def diagnose_ml(conn, effective_at: datetime) -> dict:
+    """Agregados do Mercado Livre. Sem ID de shipment, sem PII, sem escrita.
+
+    Devolve o FUNIL inteiro, nao so' a fila: quantos candidatos existiam,
+    quantos sairam por Full e quantos sairam por registro congelado. Mostrar
+    apenas o numero final esconderia que 2 de cada 3 candidatos foram
+    descartados, e um numero pequeno pareceria operacao em dia.
+    """
+    candidatos = ml_extract.fetch_candidates(conn)
+    fila, diagnostico = ml_extract.classify_candidates(candidatos, effective_at)
+    watermarks = ml_extract.fetch_watermarks(conn)
+
+    por_conta: dict[str, dict] = {}
+    for linha in fila:
+        conta = str(linha["seller_id"])
+        bucket = por_conta.setdefault(
+            conta,
+            {
+                "marca": str(linha.get("brand") or "?"),
+                "aguardando": 0,
+                "over_48h": 0,
+                "source_zombie": 0,
+                "sem_prazo": 0,
+            },
+        )
+        bucket["aguardando"] += 1
+        # TODO do contrato, nao omissao: o ML nao entrega prazo de despacho,
+        # entao TODA linha e' `unavailable`. A coluna existe para deixar isso
+        # visivel no diagnostico em vez de sumir da tela.
+        bucket["sem_prazo"] += 1
+        marco = transform.normalizar_carimbo_ml(linha.get("date_ready_to_ship"))
+        if marco is None:
+            marco = transform.normalizar_carimbo_ml(linha.get("order_created_at"))
+        horas = transform.hours_between(marco, effective_at)
+        if transform.classify_age(marco, effective_at).value == "over_48h":
+            bucket["over_48h"] += 1
+        if transform.is_source_zombie(horas):
+            bucket["source_zombie"] += 1
+
+    return {
+        "effective_at": effective_at,
+        "diagnostico": diagnostico,
+        "por_conta": por_conta,
+        "watermarks": {
+            w.external_seller_id: transform.normalizar_carimbo_ml(w.max_ingested_at)
+            for w in watermarks
+        },
+    }
+
+
+def format_diagnose_ml(resultado: dict) -> str:
+    """Saida legivel. Agregados por CONTA — nenhum `shipment_id` impresso."""
+    d = resultado["diagnostico"]
+    linhas = [
+        "DIAGNOSTICO expedicao/mercadolivre (read-only, nada publicado)",
+        f"  effective_at: {resultado['effective_at'].isoformat()}",
+        "",
+        "  FUNIL DE EXCLUSAO",
+        f"    candidatos (ready_to_ship + pedido pago) : {d['candidate_count']}",
+        f"    seller-managed (fora Full)               : {d['seller_managed_count']}",
+        f"    excluidos por Full (armazem do ML)       : {d['fulfillment_excluded_count']}",
+        f"    excluidos por registro congelado         : {d['stale_source_record_count']}",
+        f"    modalidade nao mapeada                   : {d['unmapped_logistic_type_count']}",
+        f"    FILA                                     : {d['queue_count']}",
+        "",
+        "  SEM PRAZO: o Mercado Livre nao entrega prazo de despacho no armazem.",
+        "  Nenhuma linha e' classificada como vencida, a vencer ou no prazo.",
+        "",
+        "  conta            marca        aguard  >48h  zumbi  s/prazo",
+    ]
+    for conta, b in sorted(resultado["por_conta"].items()):
+        linhas.append(
+            f"  {conta:<16} {b['marca']:<12} {b['aguardando']:>6} "
+            f"{b['over_48h']:>5} {b['source_zombie']:>6} {b['sem_prazo']:>8}"
+        )
+    linhas.append("")
+    linhas.append("  watermark por conta (UTC, convencao ASSUMIDA -04:00):")
+    for conta, carimbo in sorted(resultado["watermarks"].items()):
+        linhas.append(f"    {conta:<16} {carimbo.isoformat() if carimbo else 'ausente'}")
+    return "\n".join(linhas)
+
 
 
 def format_diagnose(resultado: dict) -> str:
@@ -427,11 +510,6 @@ def run_apply(
     Toda dependencia externa entra por parametro para que o teste exercite o
     fluxo real sem abrir conexao.
     """
-    if channel is not Channel.SHOPEE:
-        avisar(f"canal {channel.value} ainda nao suportado pelo --apply.")
-        return EXIT_PRECONDICAO
-
-    marketplace_id = MARKETPLACE_ID[channel]
 
     def avisar(msg: str) -> None:
         """Escrever a mensagem nunca decide o desfecho.
@@ -442,6 +520,33 @@ def run_apply(
         """
         with suppress(Exception):
             log(msg)
+
+    # GUARDA DE CANAL — depois de `avisar` existir, nao antes.
+    #
+    # A versao anterior chamava `avisar` acima da propria definicao. Nunca
+    # disparou porque `--channel` so' aceitava shopee, entao o branch era
+    # inalcancavel; ao abrir o argumento para o ML o defeito latente virou
+    # `UnboundLocalError`. Fica aqui, e ainda assim ANTES de qualquer conexao.
+    if channel is Channel.MERCADOLIVRE:
+        # EXP-3B1 entrega o NUCLEO do Mercado Livre: extrator, transformacao,
+        # allowlist de modalidade e coorte de confiabilidade, tudo coberto por
+        # teste. Publicar e' gate proprio (EXP-3B2), e depende de duas
+        # precondicoes EXTERNAS que ainda nao existem: as contas do ML em
+        # `marts.dim_seller_account` (hoje so' ha' marketplace_id = 3) e a
+        # decisao do responsavel sobre publicar uma fila SEM prazo.
+        avisar(
+            "canal mercadolivre: --apply bloqueado no EXP-3B1. O nucleo esta "
+            "implementado e testado; publicar e' o EXP-3B2, que exige cadastrar "
+            "as contas do ML no registry e decidir sobre fila sem prazo. "
+            "Use --diagnose."
+        )
+        return EXIT_PRECONDICAO
+
+    if channel is not Channel.SHOPEE:
+        avisar(f"canal {channel.value} ainda nao suportado pelo --apply.")
+        return EXIT_PRECONDICAO
+
+    marketplace_id = MARKETPLACE_ID[channel]
 
     target = source = auditoria = None
     run_id: int | None = None
@@ -751,8 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--channel", default=Channel.SHOPEE.value,
-        choices=[Channel.SHOPEE.value],
-        help="canal a processar; hoje somente shopee",
+        choices=[Channel.SHOPEE.value, Channel.MERCADOLIVRE.value],
+        help=(
+            "canal a processar. `shopee` diagnostica e publica; "
+            "`mercadolivre` so' diagnostica (nucleo do EXP-3B1, sem piloto)"
+        ),
     )
     p.add_argument(
         "--diagnose", action="store_true",
@@ -822,11 +930,16 @@ def _run_diagnose(canal: Channel, effective_at: datetime) -> int:
     # servidor recusa. Nao depende de disciplina de quem edita a query.
     conn.set_session(readonly=True, autocommit=True)
     try:
-        resultado = diagnose(conn, effective_at)
+        if canal is Channel.MERCADOLIVRE:
+            resultado = diagnose_ml(conn, effective_at)
+            saida = format_diagnose_ml(resultado)
+        else:
+            resultado = diagnose(conn, effective_at)
+            saida = format_diagnose(resultado)
     finally:
         conn.close()
 
-    print(format_diagnose(resultado))
+    print(saida)
     print()
     print(f"  marketplace_id (audit): {MARKETPLACE_ID[canal]}")
     print("  nenhuma linha publicada; nenhum registro em audit.source_sync_run.")
