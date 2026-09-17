@@ -172,8 +172,11 @@ export default function ExpedicaoClient() {
     );
   }, []);
 
+  // `div`, nao `main`: o landmark `main` e do AppShell (um por pagina). Dois
+  // `main` quebram a navegacao por landmarks no leitor de tela — mesmo
+  // motivo do `h2` no cabecalho abaixo.
   return (
-    <main className="mx-auto flex max-w-[1400px] flex-col gap-4 p-4" aria-busy={carregando}>
+    <div className="mx-auto flex max-w-[1400px] flex-col gap-4 p-4" aria-busy={carregando}>
       <header className="flex flex-col gap-2">
         {/* h2, nao h1: o `h1` da pagina e do shell (Topbar). Dois h1 quebram
             a arvore de cabecalhos para leitor de tela. */}
@@ -521,6 +524,6 @@ export default function ExpedicaoClient() {
           </Cartao>
         </>
       )}
-    </main>
+    </div>
   );
 }

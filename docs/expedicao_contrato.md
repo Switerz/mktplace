@@ -1,9 +1,14 @@
-# Contrato da Expedicao — Gates EXP-1A ... 1F-P / 2A / 2B
+# Contrato da Expedicao — Gates EXP-1A ... 1F-P / 2A / 2B / 2C0 / 2C1
 
-**Estado: EM PRODUCAO desde 16/09/2026 (EXP-1E).** Migration `018`
-aplicada, quatro contas cadastradas, primeiro `--apply` publicado: 985 pedidos,
-quatro resumos, auditoria #314 `success`. Nenhum agendamento existe — toda
-execucao e manual.
+**Estado: ATIVA EM PRODUCAO desde 17/09/2026 (EXP-2C1-P).** As duas flags estao
+LIGADAS: a API serve `availability=available` e `/expedicao` responde 200 com a
+tela real. Migration `018` aplicada, quatro contas cadastradas.
+
+**A carga continua MANUAL.** Nenhum agendamento existe: `load_mode =
+manual_snapshot` e `no_automation = true` na propria resposta da API. A
+fotografia so' avanca quando alguem executa o `--apply` — o batch vigente depende
+de execucao manual, e entre duas execucoes a tela envelhece. A Expedicao **nao**
+e' tempo real e **nao** e' automatizada.
 
 O EXP-1F corrigiu a semantica do alerta `expedicao_source_freshness`, que nascia
 permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
@@ -13,13 +18,15 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | Migration `018` | **aplicada** no Neon em 16/09/2026 (`016` = Full ML, `017` = PMA) |
 | Tabelas em producao | criadas e populadas; `expedicao_refresh_run` acumula 4 linhas por hora |
 | Registry (`marts.dim_seller_account`) | **4 contas ativas** (Kokeshi fora: nao existe na fonte) |
-| Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** uma vez (EXP-1E) |
-| Refresh publicado | 2 (manuais; ultimo batch `6ace44e2-208e-4724-a04a-d424317b2b2e`, run #315) |
-| API read-only | **implementada** (EXP-2A), flag `expedicao_api_enabled` DESLIGADA |
-| Tela (frontend) | **implementada** (EXP-2B), flag `NEXT_PUBLIC_EXPEDICAO_ENABLED` DESLIGADA |
+| Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** (EXP-1E, 1F-P, 2C1-P) |
+| Refresh publicado | 3, todos **manuais** (ultimo: batch `494c2441-52b3-48bf-afea-dbea850effe7`, auditoria #319 `success`, 821 pedidos) |
+| API read-only | **implementada e ATIVA** (EXP-2A), `EXPEDICAO_API_ENABLED=true` no Render |
+| Tela (frontend) | **implementada e ATIVA** (EXP-2B), `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel |
+| Autenticacao | **inexistente** — API publica por decisao temporaria (EXP-2C0/2C1-P); divida registrada |
+| `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio, identificador do pedido nao e' servido |
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
-| `schedule_plan.py` / Airflow | **nao integrados** — nenhum agendamento criado |
+| `schedule_plan.py` / Airflow | **nao integrados** — automacao por DAG segue PENDENTE |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -176,7 +183,7 @@ auditoria depois do commit nunca marca `failed`.
 
 ---
 
-## Consumo futuro (API/MCP, nao implementados)
+## Consumo (tela e API ATIVAS; MCP nao implementado)
 
 | Superficie | Le | Mostra |
 |---|---|---|
@@ -295,7 +302,7 @@ mesmo canal esta em andamento: nao houve leitura da fonte, nem auditoria, nem
 DELETE. Aguardar. Se ninguem estiver rodando, procurar sessao orfa em
 `pg_locks`; nao existe flag para ignorar o lock.
 
-### Sequencia do piloto futuro (ainda NAO executada)
+### Sequencia do piloto — EXECUTADA em 16/09/2026 (EXP-1E)
 
 1. `alembic upgrade head` no Neon (aplica a `018`);
 2. DML das quatro contas;
@@ -304,7 +311,8 @@ DELETE. Aguardar. Se ninguem estiver rodando, procurar sessao orfa em
 5. leitura de `marts.expedicao_fila_atual`, `marts.expedicao_refresh_run` e
    `audit.source_sync_run` para conferir o lote publicado.
 
-Nada disso ocorreu ate aqui.
+Executada integralmente. Os refreshes seguintes (EXP-1F-P e EXP-2C1-P) repetiram
+apenas os passos 4 e 5 — e continuam sendo **execucoes manuais**, uma a uma.
 
 ---
 
@@ -424,9 +432,14 @@ implementacao.
 
 ## API read-only da Expedicao (EXP-2A)
 
-**Estado: implementada, flag DESLIGADA.** `expedicao_api_enabled` nasce `false`;
-com ela off o servico devolve `availability=unavailable` sem emitir uma unica
-consulta.
+**Estado: implementada e ATIVA em producao (EXP-2C1-P).**
+`EXPEDICAO_API_ENABLED=true` no Render; a API devolve `availability=available`.
+A flag continua nascendo `false` no codigo: com ela off o servico devolve
+`availability=unavailable` sem emitir uma unica consulta, e esse continua sendo
+o caminho de rollback.
+
+**A API e' publica e nao tem autenticacao** — decisao temporaria aceita pelo
+responsavel no EXP-2C1-P. Por isso `order_ref` segue desativado.
 
 ### Endpoints
 
@@ -575,9 +588,18 @@ tendencia.
 
 ## Tela da Expedicao (EXP-2B)
 
-**Estado: implementada, DESLIGADA.** `NEXT_PUBLIC_EXPEDICAO_ENABLED` nasce
-ausente, e ausente significa `false`. A rota devolve **404** e o item de menu nao
-existe.
+**Estado: implementada e ATIVA em producao (EXP-2C1-P).**
+`NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel, com rebuild feito — a variavel e'
+inlinada em tempo de build. `/expedicao` responde **200** e o item de menu
+aparece.
+
+O fail-closed continua valendo no codigo: a variavel nasce ausente, ausente
+significa `false`, e nesse estado a rota volta a **404** com o menu sem o item.
+Qualquer valor diferente da string exata `"true"` resolve `false`.
+
+A tela declara **um unico landmark `main`** — o do `AppShell`. Ela abria um
+segundo, corrigido no EXP-2C1-H1; `apps/web/tests/landmark-main.test.ts` trava a
+invariante.
 
 ### Rota e superficie
 
@@ -652,10 +674,11 @@ renderizam nos estados `ok` e `fila vazia por filtro`.
 
 ### Flags coordenadas
 
-| Flag | Onde | Default | Estado |
+| Flag | Onde | Default no codigo | Estado em producao |
 |---|---|---|---|
-| `NEXT_PUBLIC_EXPEDICAO_ENABLED` | Vercel (frontend) | ausente = `false` | **desligada** |
-| `expedicao_api_enabled` | Render (API) | `False` | **desligada** |
+| `NEXT_PUBLIC_EXPEDICAO_ENABLED` | Vercel (frontend) | ausente = `false` | **`true`** (EXP-2C1-P) |
+| `EXPEDICAO_API_ENABLED` | Render (API) | `False` | **`true`** (EXP-2C1-P) |
+| `expedicao_order_ref_secret` | Render (API) | `""` | **vazia** — `order_ref` desativado |
 
 As duas precisam ser ligadas **em conjunto e nessa ordem**: primeiro a API,
 depois a tela. Ligar so' a tela produz `unavailable` em toda requisicao; ligar
@@ -666,21 +689,30 @@ Fail-closed em duas camadas: a rota chama `notFound()` no SERVIDOR antes de
 qualquer render, e o item de menu so' entra com a flag ligada. Esconder apenas o
 menu deixaria a URL direta acessivel.
 
-### Risco: API sem autenticacao
+### Risco ACEITO: API sem autenticacao
 
 Mesmo sem PII e sem `order_sn`, o payload carrega backlog, atrasos, contas,
-marcas, transportadora e ritmo da operacao. **Ativacao produtiva proibida ate
-decisao explicita sobre acesso.** A tela existir nao muda isso: a barreira e' a
-flag, e ligar a tela sem resolver autenticacao publica informacao operacional.
+marcas, transportadora e ritmo da operacao. O EXP-2C0 mediu que a Torre **nao
+tem autenticacao** fora de `/api/mcp` (Auth0).
 
-### Ativacao e rollback (procedimento futuro, NAO executado)
+**O responsavel aceitou explicitamente a exposicao publica temporaria desses
+dados no EXP-2C1-P.** Autenticacao ficou como **divida futura** e nao bloqueia a
+operacao atual; enquanto nao existir, `order_ref` permanece desativado e o
+identificador do pedido nao e' servido.
 
-Ativar:
-1. decidir o controle de acesso da Torre — gate proprio, ainda nao feito;
-2. definir `expedicao_api_enabled=true` no Render e conferir `GET /api/v1/expedicao`;
-3. definir `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel e **refazer o build**
-   (a variavel e' inlinada em tempo de build);
-4. conferir a tela contra o payload do mesmo `refresh_batch_id`.
+### Ativacao e rollback
+
+Ativacao EXECUTADA em 17/09/2026 (EXP-2C1-P), nesta ordem:
+1. republicacao da fotografia pelo `--apply` manual;
+2. `EXPEDICAO_API_ENABLED=true` no Render + deploy manual do backend, conferindo
+   `GET /api/v1/expedicao`;
+3. `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel e **rebuild** (a variavel e'
+   inlinada em tempo de build);
+4. conferencia da tela contra o payload do mesmo `refresh_batch_id`.
+
+O EXP-2C1-S validou o resultado em producao (129 asserções, 3 viewports) e
+registrou um unico achado — o landmark `main` duplicado, corrigido no
+EXP-2C1-H1.
 
 Rollback: remover `NEXT_PUBLIC_EXPEDICAO_ENABLED` e refazer o build — a rota
 volta a 404 e o menu some. Depois desligar `expedicao_api_enabled`. Nenhum dado
@@ -690,8 +722,12 @@ e' apagado; a fotografia publicada segue no banco.
 
 * Somente Shopee. ML, TikTok e calendario de dias uteis estao fora.
 * A tela nao notifica ninguem: nao ha alerta externo, e-mail nem MCP.
-* Sem automacao: a fotografia envelhece ate alguem rodar o refresh.
-* A tendencia depende de quantas fotografias existirem; hoje sao duas horas.
+* **Sem automacao: a fotografia envelhece ate alguem rodar o refresh.** Nao ha
+  DAG nem Scheduler; a automacao segue pendente.
+* A tendencia depende de quantas fotografias existirem.
+* Kokeshi continua **fora da cobertura** — declarada em `brands_not_covered`,
+  nunca como zero.
+* `order_ref` desativado enquanto a API nao tiver autenticacao.
 
 ---
 
