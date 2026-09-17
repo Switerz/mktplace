@@ -835,3 +835,301 @@ def test_h2_a_cobertura_usa_bind_parameters_e_nao_interpolacao():
     assert ":ref_date" in mp.SQL_OBSERVED_BRANDS
     for proibido in ("format(", "% (", "' +", '" +'):
         assert proibido not in fonte, proibido
+
+
+# ---------------------------------------------------------------------------
+# Gate PMA-2C4D3-H3 — a COBERTURA autoriza o filtro de marca.
+#
+# Antes, quem autorizava era `channel_brand_allowlist`, que responde "o que o
+# negocio monitora". `gocase` e `denavita` sao observadas no TikTok, a tela as
+# oferecia (o filtro sai de `observed_brands`) e a API as recusava com 422.
+# ---------------------------------------------------------------------------
+def _tiktok_com_marcas_fora_da_allowlist():
+    """Fotografia do TikTok como a producao: sete marcas, duas fora do escopo
+    de monitoramento."""
+    linhas = []
+    for marca in ("apice", "barbours", "denavita", "gocase", "kokeshi",
+                  "lescent", "rituaria"):
+        for i in range(2):
+            linhas.append(oferta(marketplace="tiktok", brand=marca,
+                                 shop_account=marca,
+                                 offer_key=f"TK-{marca}-{i}"))
+    return linhas
+
+
+def test_h3_marca_observada_fora_da_allowlist_e_filtravel():
+    for marca in ("gocase", "denavita"):
+        s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+        saida = servir(s, "tiktok", brand=marca)
+        assert saida["meta"]["observed_brands"].count(marca) == 1
+        assert saida["total_count"] == 2, (marca, saida["total_count"])
+        assert {r["brand"] for r in saida["rows"]} == {marca}
+
+
+def test_h3_contagem_filtrada_bate_com_a_fotografia():
+    """O filtro devolve o que a fato tem daquela marca, nao um subconjunto."""
+    s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+    total = servir(s, "tiktok")["total_count"]
+    soma = 0
+    for marca in servir(SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist()),
+                        "tiktok")["meta"]["observed_brands"]:
+        s2 = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+        soma += servir(s2, "tiktok", brand=marca)["total_count"]
+    assert soma == total, (soma, total)
+
+
+def test_h3_marca_sintetica_e_aceita_sem_editar_allowlist():
+    """Prova que a autoridade e' a fotografia: uma marca que NAO existe em
+    nenhuma constante do codigo passa a ser filtravel por estar observada."""
+    inventada = "marca-que-nao-existe-no-codigo"
+    assert inventada not in mp.channel_brand_allowlist("tiktok")
+    assert inventada not in pm.MONITORED_BRANDS
+    linhas = [oferta(marketplace="tiktok", brand=inventada,
+                     shop_account="x", offer_key="TK-INV-1")]
+    s = SessaoFake(ofertas=linhas)
+    saida = servir(s, "tiktok", brand=inventada)
+    assert saida["total_count"] == 1
+    assert inventada in saida["meta"]["observed_brands"]
+
+
+def test_h3_marca_monitorada_e_nao_observada_e_recusada_sem_eco():
+    """Kokeshi na Shopee: recusa FIXA, nunca 200 com zero.
+
+    Devolver zero se le como "Kokeshi nao tem anuncio". Era o defeito de
+    origem desta familia de gates.
+    """
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    erro = None
+    try:
+        servir(s, "shopee", brand="kokeshi")
+    except mp.MonitoramentoPrecoError as exc:
+        erro = str(exc)
+    assert erro == mp.ERRO_BRAND_NAO_OBSERVADA
+    assert "kokeshi" not in erro.lower()
+    meta = servir(SessaoFake(ofertas=_ofertas_shopee_reais()), "shopee")["meta"]
+    assert "kokeshi" in meta["monitored_unobserved_brands"]
+    assert "kokeshi" not in meta["observed_brands"]
+
+
+def test_h3_marca_inexistente_e_recusada_sem_eco():
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    erro = None
+    try:
+        servir(s, "shopee", brand="marcaquenaoexiste")
+    except mp.MonitoramentoPrecoError as exc:
+        erro = str(exc)
+    assert erro == mp.ERRO_BRAND_NAO_OBSERVADA
+    assert "marcaquenaoexiste" not in erro
+
+
+def test_h3_payload_hostil_e_recusado_antes_de_qualquer_consulta_filtrada():
+    """A validacao SINTATICA roda antes de o banco ser tocado pelo filtro."""
+    # `BARBOURS ` NAO entra aqui: caixa e espaco normalizam para `barbours`,
+    # que e' observada de verdade na Shopee. Normalizar nao e' contornar — o
+    # contorno esta coberto por `test_h3_caixa_e_espaco_nao_contornam_a_
+    # cobertura`, onde a marca normalizada continua NAO observada.
+    hostis = ("<script>alert(1)</script>", "a' OR 1=1 --", "DROP TABLE x",
+              "barbours; DELETE", "../../etc/passwd", "rituária",
+              "\x00", "a" * 200, "marca\nnova")
+    for payload in hostis:
+        s = SessaoFake(ofertas=_ofertas_shopee_reais())
+        erro = None
+        try:
+            servir(s, "shopee", brand=payload)
+        except mp.MonitoramentoPrecoError as exc:
+            erro = str(exc)
+        assert erro in (mp.ERRO_BRAND_INVALIDA, mp.ERRO_BRAND_TAMANHO,
+                        mp.ERRO_BRAND_NAO_OBSERVADA), (payload[:30], erro)
+        for pedaco in ("script", "DROP", "DELETE", "passwd", "OR 1=1"):
+            assert pedaco not in erro, payload[:30]
+
+
+def test_h3_normalizacao_de_caixa_e_espaco_continua_valendo():
+    """Caixa e espaco NORMALIZAM, como em `normalize_accounts`: a marca
+    autorizada segue autorizada escrita de qualquer jeito."""
+    for variante in ("BARBOURS", " barbours ", "Barbours"):
+        s = SessaoFake(ofertas=_ofertas_shopee_reais())
+        direto = servir(SessaoFake(ofertas=_ofertas_shopee_reais()),
+                        "shopee", brand="barbours")["total_count"]
+        assert servir(s, "shopee", brand=variante)["total_count"] == direto
+
+
+def test_h3_caixa_e_espaco_nao_contornam_a_cobertura():
+    """`GOCASE` normaliza para `gocase`; na Shopee segue nao observada."""
+    for variante in ("GOCASE", " gocase ", "GoCase"):
+        s = SessaoFake(ofertas=_ofertas_shopee_reais())
+        erro = None
+        try:
+            servir(s, "shopee", brand=variante)
+        except mp.MonitoramentoPrecoError as exc:
+            erro = str(exc)
+        assert erro == mp.ERRO_BRAND_NAO_OBSERVADA, variante
+
+
+def test_h3_data_sem_fotografia_nao_fabrica_cobertura():
+    s = SessaoFake(ofertas=[], datas=[])
+    erro = None
+    try:
+        servir(s, "shopee", brand="barbours", observed_date="2026-01-05")
+    except mp.MonitoramentoPrecoError as exc:
+        erro = str(exc)
+    assert erro == mp.ERRO_BRAND_NAO_OBSERVADA
+    # E sem marca, o envelope honesto continua sendo servido.
+    vazio = servir(SessaoFake(ofertas=[], datas=[]), "shopee",
+                   observed_date="2026-01-05")
+    assert vazio["meta"]["observed_brands"] == []
+    assert vazio["meta"]["monitored_unobserved_brands"] == []
+
+
+def test_h3_marca_nao_vaza_entre_canais():
+    """`gocase` e' observada no TikTok e NAO na Shopee: o canal decide."""
+    s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+    assert servir(s, "tiktok", brand="gocase")["total_count"] == 2
+    s2 = SessaoFake(ofertas=_ofertas_shopee_reais())
+    try:
+        servir(s2, "shopee", brand="gocase")
+        assert False, "gocase nao pode ser aceita na Shopee"
+    except mp.MonitoramentoPrecoError as exc:
+        assert str(exc) == mp.ERRO_BRAND_NAO_OBSERVADA
+
+
+def test_h3_cobertura_continua_invariante_com_o_filtro_novo():
+    base = servir(SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist()),
+                  "tiktok")["meta"]["observed_brands"]
+    for kw in ({"brand": "gocase"}, {"brand": "denavita"},
+               {"shop_account": "gocase"}, {"product_query": "zzz"},
+               {"limit": 1, "offset": 0}, {"limit": 1, "offset": 10}):
+        s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+        assert servir(s, "tiktok", **kw)["meta"]["observed_brands"] == base, kw
+
+
+def test_h3_uma_consulta_de_cobertura_mesmo_com_filtro_de_marca():
+    """A validacao REAPROVEITA a consulta de cobertura: sem N+1, sem consulta
+    por marca."""
+    s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+    servir(s, "tiktok", brand="gocase")
+    n = sum(1 for t, _ in s.executadas if "group by brand" in t)
+    assert n == 1, f"esperava 1 consulta de cobertura, houve {n}"
+
+
+def test_h3_a_cobertura_e_o_filtro_continuam_por_bind_parameter():
+    s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist())
+    servir(s, "tiktok", brand="gocase")
+    for texto, params in s.executadas:
+        assert "gocase" not in texto, "valor de marca interpolado no SQL"
+    filtradas = [(t, p) for t, p in s.executadas if p and "brands" in p]
+    assert filtradas, "nenhuma consulta recebeu o filtro"
+    assert any("gocase" in (p.get("brands") or []) for _, p in filtradas)
+
+
+def test_h3_flag_desligada_continua_fail_closed_mesmo_com_marca(monkeypatch):
+    """Canal desligado recusa ANTES de tocar o banco — inclusive com `brand`."""
+    monkeypatch.setattr(mp.settings, "pma_shopee_enabled", False)
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    saida = servir(s, "shopee", brand="gocase")
+    assert saida["meta"]["unavailable_reason"] == dom.UNAVAILABLE_CHANNEL_DISABLED
+    assert s.executadas == [], "flag desligada nao pode emitir consulta"
+
+
+def test_h3_ml_preserva_a_razao_publicada_de_fora_de_escopo():
+    """`apice` e `yenzah` tem razao PROPRIA no ML, mais informativa que
+    "nao observada". Trocar por ela seria perder contrato publicado."""
+    for marca in ("apice", "yenzah"):
+        s = SessaoFake(listings_ml=[_listing_ml("barbours")])
+        erro = None
+        try:
+            mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE,
+                                       brand=marca)
+        except mp.MonitoramentoPrecoError as exc:
+            erro = str(exc)
+        assert erro == mp.ERRO_BRAND_INVALIDA, marca
+        assert pm.BRAND_SCOPE_OUT_OF_SCOPE in erro
+
+
+def test_h3_ml_marca_monitorada_ausente_da_fotografia_e_recusada():
+    s = SessaoFake(listings_ml=[_listing_ml("barbours")])
+    erro = None
+    try:
+        mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE,
+                                   brand="kokeshi")
+    except mp.MonitoramentoPrecoError as exc:
+        erro = str(exc)
+    assert erro == mp.ERRO_BRAND_NAO_OBSERVADA
+
+
+def test_h3_sem_filtro_nada_muda():
+    """Compatibilidade: a resposta sem `brand` e' identica a de antes."""
+    a = servir(SessaoFake(ofertas=_ofertas_shopee_reais()), "shopee")
+    b = servir(SessaoFake(ofertas=_ofertas_shopee_reais()), "shopee",
+               brand="all")
+    assert a["total_count"] == b["total_count"]
+    assert a["meta"]["observed_brands"] == b["meta"]["observed_brands"]
+    assert a["meta"]["monitored_brands"] == b["meta"]["monitored_brands"]
+
+
+def test_h3_a_cobertura_e_pedida_SEMPRE_para_o_canal_servido():
+    """Lacuna exposta pela mutacao M9 da Fase 6.
+
+    `SessaoFake` despacha pelo TEXTO da consulta e, no ramo do ML, filtra
+    `listings_ml` so' por `ref_date`. Trocar `canal` por um literal na consulta
+    de cobertura do ML mantinha a suite inteira verde. Em producao isso serviria
+    a cobertura de OUTRO canal — e a autoridade do filtro de marca passaria a
+    ser a fotografia errada. Aqui se afirma o PARAMETRO emitido, nao o retorno
+    do fake.
+    """
+    for canal, kw in (("shopee", {}), ("tiktok", {})):
+        s = SessaoFake(ofertas=_tiktok_com_marcas_fora_da_allowlist()
+                       if canal == "tiktok" else _ofertas_shopee_reais())
+        servir(s, canal, **kw)
+        cobertura = [(t, pr) for t, pr in s.executadas if "group by brand" in t]
+        assert cobertura, f"{canal}: nenhuma consulta de cobertura"
+        for _, pr in cobertura:
+            assert pr.get("marketplace") == canal, (canal, pr)
+
+    s = SessaoFake(listings_ml=[_listing_ml("barbours")])
+    mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE)
+    cobertura = [(t, pr) for t, pr in s.executadas if "group by brand" in t]
+    assert cobertura, "ml: nenhuma consulta de cobertura"
+    for _, pr in cobertura:
+        assert pr.get("marketplace") == "ml", pr
+
+
+def test_h3_marca_malformada_e_recusada_SEM_emitir_consulta():
+    """Lacuna exposta pela mutacao M10 da Fase 6.
+
+    Sem a checagem de formato, o payload hostil chegava ate a validacao de
+    cobertura e era recusado la' — a suite ficava verde e o contrato "rejeitado
+    ANTES da consulta filtrada" deixava de valer. O que prova a ordem nao e' a
+    mensagem: e' o banco nao ter sido tocado.
+    """
+    malformados = ("<script>alert(1)</script>", "a' OR 1=1 --", "DROP TABLE x",
+                   "../../etc/passwd", "rituária", "marca\nnova", "\x00",
+                   "barbours; DELETE")
+    for payload in malformados:
+        s = SessaoFake(ofertas=_ofertas_shopee_reais())
+        erro = None
+        try:
+            servir(s, "shopee", brand=payload)
+        except mp.MonitoramentoPrecoError as exc:
+            erro = str(exc)
+        assert erro == mp.ERRO_BRAND_INVALIDA, (payload[:24], erro)
+        assert s.executadas == [], (
+            f"{payload[:24]!r} chegou ao banco: {len(s.executadas)} consulta(s)")
+
+
+def test_h3_marca_bem_formada_mas_nao_observada_falha_DEPOIS_da_cobertura():
+    """Contraprova do teste acima: a recusa de pertencimento e' outra coisa.
+
+    Aqui a consulta de cobertura DEVE ter sido emitida — e' ela que decide.
+    """
+    s = SessaoFake(ofertas=_ofertas_shopee_reais())
+    erro = None
+    try:
+        servir(s, "shopee", brand="kokeshi")
+    except mp.MonitoramentoPrecoError as exc:
+        erro = str(exc)
+    assert erro == mp.ERRO_BRAND_NAO_OBSERVADA
+    assert any("group by brand" in t for t, _ in s.executadas), (
+        "a cobertura precisa ter sido consultada para decidir")
+    assert not any(pr.get("brand_filter") for _, pr in s.executadas if pr), (
+        "nenhuma consulta FILTRADA pode ter sido emitida antes da recusa")
