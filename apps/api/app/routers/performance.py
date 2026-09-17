@@ -540,11 +540,18 @@ def monitoramento_preco(
     brand: Optional[str] = Query(
         None,
         description=(
-            "Marca(s) separadas por virgula, ou 'all'. Escopo monitorado: "
-            "barbours, kokeshi, lescent, rituaria. 'apice' e 'yenzah' tem tabela "
-            "de referencia B2B mas nao tem catalogo proprio no Mercado Livre "
-            "(out_of_scope_no_ml_catalog) e sao recusadas com 422. "
-            "Maximo de 120 caracteres."
+            "Marca(s) separadas por virgula, ou 'all'. "
+            "Gate PMA-2C4D3-H3: a marca vale quando esta em "
+            "`meta.observed_brands` da fotografia resolvida para o `marketplace` "
+            "e a data consultados — nao ha allowlist fixa, porque a lista muda a "
+            "cada fotografia. Marca ausente dessa cobertura e' recusada com 422, "
+            "inclusive quando e' monitorada: 'nao observada' nao e' zero anuncio, "
+            "e servir zero se leria como ausencia de anuncio. As monitoradas que "
+            "a fotografia nao devolveu vem em `meta.monitored_unobserved_brands`. "
+            "No Mercado Livre, 'apice' e 'yenzah' tem tabela de referencia B2B "
+            "mas nao tem catalogo proprio (out_of_scope_no_ml_catalog) e mantem "
+            "essa recusa especifica; nos demais canais elas podem ser observadas "
+            "e, entao, sao aceitas. Maximo de 120 caracteres."
         ),
     ),
     status: Optional[str] = Query(

@@ -1160,3 +1160,80 @@ durante a janela, o que é pior que o defeito corrigido.
 
 Publicar na ordem inversa não quebra a página — só mantém o defeito por mais
 tempo, porque o filtro continua caindo para `monitored_brands`.
+
+
+## Gate PMA-2C4D3-H3 — a cobertura autoriza o filtro de marca
+
+O gate anterior fez o seletor da tela sair de `observed_brands`, mas o
+parâmetro `brand` continuou validado contra `channel_brand_allowlist`, que
+responde outra pergunta — o escopo de monitoramento do negócio. As duas listas
+divergem: `gocase` e `denavita` são **observadas** no TikTok e não estão no
+escopo monitorado. Resultado em produção: a tela oferecia as duas e a API as
+recusava com 422.
+
+**Regra atual, única:** uma marca é filtrável quando está em
+`meta.observed_brands` da fotografia resolvida para aquele `marketplace` e
+aquela data. Não há allowlist fixa — a lista muda a cada fotografia, como já
+acontecia com `shop_account`.
+
+A validação tem duas etapas, com responsabilidades separadas:
+
+| etapa | o que decide | quando roda |
+|---|---|---|
+| `normalize_brand_slugs` | **formato**: teto de tamanho, caixa, espaço e o padrão de slug | antes de qualquer consulta |
+| `assert_brands_observed` | **pertencimento**, contra `observed_brands` | depois de a fotografia ser resolvida |
+
+A primeira é o que barra payload hostil, e é por isso que ela vem antes do
+banco ser tocado. A segunda reaproveita a consulta de cobertura que a resposta
+já fazia: uma consulta por requisição, sem laço por marca e sem N+1.
+
+### Mudança de contrato público
+
+Dois casos que respondiam **200 com zero** passam a responder **422 com
+mensagem fixa**:
+
+| caso | antes | depois |
+|---|---|---|
+| marca monitorada mas não observada (ex.: Kokeshi na Shopee) | 200, `total_count: 0` | **422** |
+| marca pedida sobre data sem fotografia | 200, envelope vazio | **422** |
+
+A razão é a mesma nos dois: zero linhas se lê como *"essa marca não tem
+anúncio"*, quando o que houve foi **ausência de observação**. Era exatamente o
+defeito de origem desta família de gates.
+
+Em sentido oposto, um caso que respondia 422 passa a responder 200: marca
+observada fora do escopo monitorado, como `gocase` e `denavita` no TikTok.
+
+**Consumidores:** na data da mudança, os únicos consumidores versionados do
+endpoint são a própria API e a tela `/monitoramento-preco`. Não há MCP, job,
+painel ou integração que dependa do 200-com-zero. A mudança foi adotada
+deliberadamente, e não em silêncio.
+
+### Exceção do Mercado Livre
+
+`apice` e `yenzah` têm tabela de referência B2B mas não têm catálogo próprio no
+ML, e a recusa delas por lá tem mensagem própria
+(`out_of_scope_no_ml_catalog`), mais informativa que "não observada". Essa razão
+é **contrato publicado** e foi preservada. A exceção é estreita: vale só no
+caminho do ML, e nos canais essas marcas são aceitas quando observadas — `apice`
+tem 225 anúncios na Shopee e 247 no TikTok.
+
+### Falha de carga na tela
+
+Qualquer 4xx/5xx futuro deixa de virar detalhe técnico: o alerta usa
+`mensagemDeFalha(status)`, que escolhe a redação **pelo** status sem exibi-lo.
+A falha também não descarta mais a marca escolhida, e a marca escolhida
+continua listada no controle enquanto a cobertura não vem — antes o `<select>`
+caía sozinho para "Todas as monitoradas" e parecia ter descartado o filtro do
+operador. A limpeza automática segue valendo apenas quando uma cobertura nova
+prova que a marca deixou de ser observável.
+
+### Limitação conhecida
+
+A consulta de cobertura e a consulta de ofertas são dois `SELECT` na mesma
+transação, sob `READ COMMITTED` — isolamento padrão. Cada statement tira o
+próprio snapshot, então uma publicação que confirme **entre** os dois pode
+fazer a cobertura e as linhas discordarem por instantes: uma marca autorizada
+pode voltar sem linhas, ou uma recém-chegada ser recusada. Não produz número
+errado e se resolve ao recarregar. Fechar isso exigiria elevar o isolamento da
+requisição, o que é decisão de política de sessão e não deste gate.
