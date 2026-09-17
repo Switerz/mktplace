@@ -11,7 +11,7 @@ e' assim que "sem fallback" vira prova em vez de intencao.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -187,6 +187,14 @@ def flags_ligadas(monkeypatch):
     no processo, jamais na configuracao implantada."""
     monkeypatch.setattr(mp.settings, "pma_shopee_enabled", True)
     monkeypatch.setattr(mp.settings, "pma_tiktok_enabled", True)
+
+
+def _listing_ml(brand, item_id="ML-1", ref_date=None):
+    """Linha minima da fato do ML, no formato que `compare_all` consome."""
+    return {"ref_date": ref_date or D1, "marketplace": "ml", "brand": brand,
+            "item_id": item_id, "seller_sku": item_id, "gtin": None,
+            "title": "Produto", "advertised_price": Decimal("10"),
+            "listing_status": "active"}
 
 
 def servir(sessao, canal="shopee", **kw) -> dict:
@@ -698,6 +706,37 @@ def test_h2_canal_sem_linhas_devolve_listas_vazias():
     assert meta["monitored_unobserved_brands"] == []
 
 
+def test_h2rv_ml_sem_fotografia_nao_declara_ausencia():
+    """Achado da revisao terminal do PR #20.
+
+    O ML nao passa por `_unavailable_envelope`: quando a data pedida nao tem
+    fotografia ele segue pelo caminho normal, com `observed_date: null` e
+    `availability: available`. A diferenca `monitoradas - observadas` devolvia
+    entao as QUATRO marcas, e a tela afirmava "Sem observacao nesta fotografia"
+    sobre uma fotografia que nao existe — a mesma afirmacao que o envelope dos
+    canais recusa a fazer. Medido em producao antes da correcao com
+    `GET ?marketplace=ml&observed_date=2026-01-05`.
+    """
+    s = SessaoFake(listings_ml=[])
+    sem_foto = (D1 - timedelta(days=3)).isoformat()
+    meta = mp.get_monitoramento_preco(
+        s, marketplace="ml", today=HOJE, observed_date=sem_foto)["meta"]
+    assert meta["observed_date"] is None, "pre-condicao: sem fotografia"
+    assert meta["observed_brands"] == []
+    assert meta["monitored_unobserved_brands"] == [], (
+        "sem fotografia nao ha ausencia de observacao a declarar")
+
+
+def test_h2rv_ml_com_fotografia_continua_declarando_a_ausencia():
+    """Contraprova do teste acima: o guarda nao pode calar o caso legitimo."""
+    s = SessaoFake(listings_ml=[_listing_ml("barbours")])
+    meta = mp.get_monitoramento_preco(s, marketplace="ml", today=HOJE)["meta"]
+    assert meta["observed_date"] is not None
+    assert meta["observed_brands"] == ["barbours"]
+    assert "kokeshi" in meta["monitored_unobserved_brands"], (
+        "com fotografia, a marca monitorada e ausente continua sendo declarada")
+
+
 def test_h2_cobertura_sem_duplicata_e_com_ordem_estavel():
     muitas = []
     for b in ["rituaria", "apice", "barbours", "apice", "rituaria", "lescent"]:
@@ -738,6 +777,47 @@ def test_h2_uma_consulta_de_cobertura_por_requisicao_sem_loop_por_marca():
     servir(s, "tiktok")
     n = sum(1 for t, _ in s.executadas if "group by brand" in t)
     assert n == 1, "esperava 1 consulta de cobertura, houve " + str(n)
+
+
+def test_h2rv_o_where_da_cobertura_escopa_por_canal_E_por_data():
+    """Achado da revisao terminal do PR #20 — lacuna de contraprova.
+
+    `SessaoFake` despacha pelo TEXTO da consulta e filtra pelos PARAMETROS, de
+    modo que a clausula WHERE do SQL nunca e' exercitada: apagar
+    `marketplace = :marketplace` da cobertura mantinha a suite inteira verde.
+    Em producao isso nao levantaria erro — devolveria as marcas de TODOS os
+    canais naquela data, e a Shopee voltaria a oferecer Kokeshi, pela porta dos
+    fundos. Este teste le o SQL, nao o fake.
+    """
+    import re
+
+    def clausula_where(sql: str) -> str:
+        m = re.search(r"\bWHERE\b(.*?)\bGROUP BY\b", sql, re.S | re.I)
+        assert m, "SQL de cobertura sem WHERE ... GROUP BY: " + sql
+        return m.group(1)
+
+    canal = clausula_where(mp.SQL_CHANNEL_OBSERVED_BRANDS)
+    assert "marketplace = :marketplace" in canal, (
+        "sem o canal no WHERE a cobertura mistura marketplaces")
+    assert "observed_date = :observed_date" in canal, (
+        "sem a data no WHERE a cobertura mistura fotografias")
+
+    ml = clausula_where(mp.SQL_OBSERVED_BRANDS)
+    assert "marketplace = :marketplace" in ml
+    assert "ref_date = :ref_date" in ml
+
+    # Nenhum filtro do usuario pode entrar aqui, nem como coluna nem como bind.
+    for where in (canal, ml):
+        for proibido in ("brand_filter", "brands", "shop_account", "account",
+                         "product_type", "query", "limit", "offset", "status"):
+            assert proibido not in where.lower(), (
+                "filtro de usuario na cobertura: " + proibido)
+        # `brand` so' pode aparecer no GROUP BY / ORDER BY, nunca no WHERE.
+        assert "brand" not in where.lower()
+
+    for sql in (mp.SQL_CHANNEL_OBSERVED_BRANDS, mp.SQL_OBSERVED_BRANDS):
+        assert "GROUP BY brand" in sql and "ORDER BY brand" in sql, (
+            "a cobertura precisa sair agrupada e ordenada pelo banco")
 
 
 def test_h2_monitored_brands_continua_intacto():

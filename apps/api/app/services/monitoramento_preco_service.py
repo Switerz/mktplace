@@ -1359,13 +1359,24 @@ def get_monitoramento_preco(
     # Mesmo contrato dos canais: consulta propria, escopada por `ref_date`, sem
     # nenhum filtro do usuario. Nao sai de `listings`, que ja veio filtrada por
     # marca e busca.
+    ml_monitoradas = list(pm.MONITORED_BRANDS)
     ml_observadas: list[str] = []
+    # Gate PMA-2C4D3-H2-R/V — sem fotografia, AMBAS ficam vazias.
+    #
+    # O ML nao passa por `_unavailable_envelope` quando a data pedida nao
+    # tem fotografia: ele segue por este caminho com `observed_date: null` e
+    # `availability: available`. Calcular a diferenca aqui devolvia as quatro
+    # marcas como monitoradas-e-nao-observadas, e a tela dizia "Sem
+    # observacao NESTA FOTOGRAFIA" sobre uma fotografia que nao existe —
+    # exatamente a afirmacao que o envelope de indisponivel recusa a fazer
+    # nos canais. Medido: GET ml&observed_date=2026-01-05 devolvia as quatro.
+    ml_nao_observadas: list[str] = []
     if observado is not None:
         ml_observadas = [r["brand"] for r in _rows(db, SQL_OBSERVED_BRANDS, {
             "marketplace": canal, "ref_date": observado,
         })]
-    ml_monitoradas = list(pm.MONITORED_BRANDS)
-    ml_nao_observadas = [b for b in ml_monitoradas if b not in set(ml_observadas)]
+        ml_nao_observadas = [b for b in ml_monitoradas
+                             if b not in set(ml_observadas)]
 
     referencias: list[dict] = []
     if snapshot_id is not None:
