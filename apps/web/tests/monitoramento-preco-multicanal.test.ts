@@ -549,3 +549,78 @@ test("28. o contrato tipa os tres canais e o preco anulavel", async () => {
   assert.ok(!/:\s*any\b/.test(codigo), "o contrato nao pode usar `any`");
   assert.ok(!/as\s+unknown\s+as/.test(codigo), "cast duplo silencia incompatibilidade");
 });
+
+// ---------------------------------------------------------------------------
+// Gate PMA-2C4D3-H1 — estado do seletor e copy por canal
+// ---------------------------------------------------------------------------
+
+test("H1-1. cada botao do seletor declara `aria-pressed`, nao so' o ativo", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("seletor de canal")[1].split("</section>")[0];
+  assert.ok(bloco.includes("aria-pressed={ativo}"),
+    "os tres botoes precisam expor o estado; `aria-current` so' marcava o ativo "
+    + "e deixava os inativos sem atributo nenhum");
+  // Procura o ATRIBUTO, nao a palavra: o comentario do codigo explica por que
+  // `aria-current` saiu, e citar o nome ali nao pode reprovar o teste.
+  assert.ok(!/aria-current=/.test(bloco),
+    "um estado so': `aria-current` junto com `aria-pressed` e' redundante");
+});
+
+test("H1-2. exatamente um canal fica pressionado, e ele vem de `marketplace`", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("seletor de canal")[1].split("</section>")[0];
+  // `ativo` e' a unica fonte do estado, e compara o id do canal com o ativo.
+  assert.ok(/const ativo = c\.id === marketplace/.test(bloco),
+    "o pressionado precisa ser derivado do canal ativo, nao de indice ou ordem");
+  assert.equal((bloco.match(/aria-pressed=/g) ?? []).length, 1,
+    "um unico ponto de verdade para o estado, dentro do map");
+});
+
+test("H1-3. o estado nao depende so' de cor", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("seletor de canal")[1].split("</section>")[0];
+  const temCor = /bg-violet-600/.test(bloco);
+  assert.ok(temCor, "a cor continua existindo — ela e' reforco, nao substituto");
+  assert.ok(bloco.includes("aria-pressed"),
+    "mas precisa haver estado programatico ALEM da cor");
+});
+
+test("H1-4. o nome acessivel e o alvo de 44px do seletor sao preservados", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("seletor de canal")[1].split("</section>")[0];
+  assert.ok(bloco.includes("aria-labelledby={canalId}"),
+    "o grupo continua rotulado");
+  assert.ok(bloco.includes("min-h-[44px]") && bloco.includes("min-w-[44px]"),
+    "o alvo de toque nao pode encolher");
+  assert.ok(bloco.includes("focus-visible:ring-2"), "o foco continua visivel");
+});
+
+test("H1-5. a frase de escopo do Mercado Livre NAO aparece nos outros canais", async () => {
+  const codigo = await ler(PAGE);
+  const i = codigo.indexOf("Fora do escopo por não terem catálogo próprio");
+  assert.ok(i > 0, "a frase existe");
+  const antes = codigo.slice(Math.max(0, i - 400), i);
+  assert.ok(/marketplace === "ml" &&/.test(antes),
+    "a clausula precisa estar condicionada ao ML: `out_of_scope_brands` volta "
+    + "igual nos tres canais e cita o catalogo do Mercado Livre");
+});
+
+test("H1-6. a frase de escopo contradiz o dado fora do ML, e por isso e' escondida", async () => {
+  // Apice esta em `out_of_scope_brands` (sem catalogo no ML) E TEM 225 anuncios
+  // na Shopee, onde e' uma das quatro contas. Mostrar "fora do escopo" ali
+  // seria afirmar o contrario do que a propria tabela mostra.
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("Marcas monitoradas:")[1].split("</p>")[0];
+  assert.ok(bloco.includes('marketplace === "ml"'),
+    "a condicao precisa estar no mesmo paragrafo da lista de marcas");
+});
+
+test("H1-7. as demais frases de cobertura continuam em todos os canais", async () => {
+  const codigo = await ler(PAGE);
+  const bloco = codigo.split("Marcas monitoradas:")[1].split("</p>")[0];
+  assert.ok(!bloco.includes('marketplace === "ml" && meta.no_reference_brands'),
+    "'sem tabela de referencia' vale para todos os canais e nao pode ser "
+    + "condicionada ao ML");
+  assert.ok(codigo.includes("comparison_basis_text"),
+    "a frase das duas datas continua vindo do servidor, por canal");
+});
