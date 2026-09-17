@@ -141,11 +141,26 @@ test("o AppShell e o UNICO lugar do app que declara o landmark `main`", () => {
 test("toda rota compoe exatamente um landmark `main`", () => {
   // Invariante de composicao, nao de arquivo: RootLayout embrulha tudo com
   // AppShell, entao o total por rota e (1 do shell) + (0 das paginas).
-  const layout = readFileSync(join(RAIZ, "app/layout.tsx"), "utf8");
-  assert.ok(
-    layout.includes("<AppShell>{children}</AppShell>"),
-    "o RootLayout precisa continuar embrulhando as rotas no AppShell",
-  );
+  //
+  // Tambem por AST: casar o texto `<AppShell>{children}</AppShell>` aprovaria
+  // a mesma frase dentro de um comentario e reprovaria uma quebra de linha do
+  // formatador — ruido nos dois sentidos.
+  const layout = arvore("app/layout.tsx");
+  let embrulha = false;
+  const procurar = (no: ts.Node): void => {
+    if (ts.isJsxElement(no) && no.openingElement.tagName.getText(layout) === "AppShell") {
+      embrulha ||= no.children.some(
+        (filho) =>
+          ts.isJsxExpression(filho) &&
+          filho.expression !== undefined &&
+          ts.isIdentifier(filho.expression) &&
+          filho.expression.text === "children",
+      );
+    }
+    ts.forEachChild(no, procurar);
+  };
+  procurar(layout);
+  assert.ok(embrulha, "o RootLayout precisa continuar embrulhando as rotas no AppShell");
   assert.equal(TODOS.length, 1, `landmarks declarados: ${JSON.stringify(TODOS)}`);
   assert.equal(TODOS[0]?.arquivo, APP_SHELL);
 });
