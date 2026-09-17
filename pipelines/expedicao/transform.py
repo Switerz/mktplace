@@ -33,7 +33,7 @@ from pipelines.expedicao.contract import (
     FRESHNESS_FRESH_LIMIT,
     FRESHNESS_STALE_LIMIT,
     MIN_BASELINE_SAMPLE,
-    ML_SOURCE_UTC_OFFSET,
+    ML_BUSINESS_UTC_OFFSET,
     OPERATIONAL_AGE_LIMIT,
     SLOW_BASELINE_FACTOR,
     SOURCE_ZOMBIE_AGE,
@@ -281,27 +281,55 @@ def build_fila_shopee(
 # ---------------------------------------------------------------------------
 # Mercado Livre (EXP-3B1)
 # ---------------------------------------------------------------------------
-def normalizar_carimbo_ml(bruto: datetime | None) -> datetime | None:
-    """Carimbo naive do Mercado Livre -> aware em UTC. PONTO UNICO.
+def _recusar_aware(bruto: datetime, funcao: str) -> None:
+    """Carimbo com fuso onde se espera naive falha FECHADO.
 
-    A fonte grava `timestamp without time zone`, entao a convencao nao esta
-    declarada em lugar nenhum do schema. `ML_SOURCE_UTC_OFFSET` carrega a
-    evidencia medida (-04:00) e o raciocinio; aqui so' se aplica.
+    A versao anterior convertia em silencio. Parecia defensivo e nao era: se a
+    fonte passar a gravar `timestamptz`, a conversao silenciosa esconde a
+    mudanca de contrato justamente no ponto em que ela precisa ser vista — e
+    uma reinterpretacao errada aqui desloca a idade de TODA linha do canal.
+    """
+    if bruto.tzinfo is not None:
+        raise ValueError(
+            f"{funcao} recebeu carimbo COM fuso ({bruto.isoformat()}). A fonte "
+            "do Mercado Livre grava `timestamp without time zone`; um carimbo "
+            "aware significa que o contrato da fonte mudou e a convencao por "
+            "coluna precisa ser remedida antes de publicar."
+        )
 
-    Existe uma funcao so' para isto de proposito. Espalhar `timedelta(hours=-4)`
-    pelo codigo faria a correcao do offset — quando o time confirmar a convencao
-    oficial — virar uma cacada por literais, e um lugar esquecido produziria
-    duas idades diferentes para o mesmo pedido.
 
-    Carimbo que ja chega com fuso e devolvido convertido, nao reinterpretado:
-    se a fonte um dia passar a gravar `timestamptz`, este helper deixa de somar
-    offset sozinho em vez de errar por 4 horas.
+def normalizar_ingestao_ml(bruto: datetime | None) -> datetime | None:
+    """`extracted_at` -> UTC. NAO aplica offset: o carimbo JA esta em UTC.
+
+    `extracted_at` e o relogio do job de ingestao, nao um carimbo da API do
+    Mercado Livre. Medido no EXP-3B2-P contra o `now()` do servidor:
+    `now() - max(extracted_at)` = 0,144h em `ml_shipments` e 0,232h em
+    `ml_orders` — ou seja, o proprio UTC com o lag da ultima carga.
+
+    Aplicar -04:00 aqui, como o EXP-3B1 fazia, joga o watermark 4h no FUTURO:
+    idade negativa, 12 linhas com `source_ingested_at` futuro, 20 de 910 linhas
+    entrando fora da coorte e `SOURCE_STALE` detectado 4h tarde demais.
     """
     if bruto is None:
         return None
-    if bruto.tzinfo is not None:
-        return bruto.astimezone(timezone.utc)
-    return (bruto - ML_SOURCE_UTC_OFFSET).replace(tzinfo=timezone.utc)
+    _recusar_aware(bruto, "normalizar_ingestao_ml")
+    return bruto.replace(tzinfo=timezone.utc)
+
+
+def normalizar_negocio_ml(bruto: datetime | None) -> datetime | None:
+    """`date_created` / `date_ready_to_ship` / `order_created_at` -> UTC.
+
+    Esses vem da API do Mercado Livre, gravados naive em UTC-4. Medido contra o
+    `now()` do servidor: `now() - max(date_created)` = 4,250h.
+
+    O offset vive em `ML_BUSINESS_UTC_OFFSET`, com o nome dizendo a que se
+    aplica. Espalhar `timedelta(hours=-4)` pelo codigo faria a correcao — quando
+    o time confirmar a convencao oficial — virar uma cacada por literais.
+    """
+    if bruto is None:
+        return None
+    _recusar_aware(bruto, "normalizar_negocio_ml")
+    return (bruto - ML_BUSINESS_UTC_OFFSET).replace(tzinfo=timezone.utc)
 
 
 def build_fila_ml(
@@ -343,9 +371,11 @@ def build_fila_ml(
                 "o refresh nao infere marca por texto."
             )
 
-        criado = normalizar_carimbo_ml(linha.get("order_created_at"))
-        pronto = normalizar_carimbo_ml(linha.get("date_ready_to_ship"))
-        extraido = normalizar_carimbo_ml(linha.get("extracted_at"))
+        # Convencao POR COLUNA: negocio vem da API do ML em UTC-4;
+        # ingestao e o relogio do job de carga, ja em UTC.
+        criado = normalizar_negocio_ml(linha.get("order_created_at"))
+        pronto = normalizar_negocio_ml(linha.get("date_ready_to_ship"))
+        extraido = normalizar_ingestao_ml(linha.get("extracted_at"))
 
         # O marco do ML e' o `date_ready_to_ship`; a criacao do pedido so'
         # sustenta a idade quando o carimbo de prontidao falta.

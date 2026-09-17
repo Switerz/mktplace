@@ -56,7 +56,7 @@ from pipelines.expedicao.contract import (
     SourceWatermark,
 )
 from pipelines.expedicao.shopee_extract import _require_aware, assert_no_pii_in_sql
-from pipelines.expedicao.transform import normalizar_carimbo_ml
+from pipelines.expedicao.transform import normalizar_ingestao_ml
 
 #: Colunas extraidas, na ordem do SELECT. Espelha a lista fechada do contrato.
 ML_SELECT_COLUMNS = (
@@ -174,7 +174,7 @@ def is_stale_source_record(
     shipment — uma decidindo a coorte, outra decidindo a faixa de 48h.
     """
     _require_aware(effective_at, "effective_at")
-    carimbo = normalizar_carimbo_ml(extracted_at)
+    carimbo = normalizar_ingestao_ml(extracted_at)
     if carimbo is None:
         return True
     return (effective_at - carimbo) > max_age
