@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from psycopg2.extras import execute_values
 
@@ -710,6 +710,36 @@ def _scopes_for_empty_accounts(contas_vazias, marketplace, relogios,
 # ---------------------------------------------------------------------------
 # CLI operacional
 # ---------------------------------------------------------------------------
+#: Mensagem CONSTANTE de data invalida. Nao ecoa o texto recebido: o valor do
+#: operador nao precisa aparecer em log para ele saber o que digitou.
+MSG_DATA_INVALIDA = "data invalida; use exatamente o formato YYYY-MM-DD"
+
+
+def data_observada(texto):
+    """Converte o argumento da CLI em `datetime.date`, na FRONTEIRA.
+
+    Existe porque o argparse entrega TEXTO e o driver devolve `datetime.date`:
+    `cos.tiktok_snapshot_exists` compara os dois com `==`, e
+    `date(2026, 9, 17) == "2026-09-17"` e' False. O resultado era uma recusa
+    ("a data pedida nao existe na fonte") para uma data que existia — medido no
+    PMA-2C4D1.
+
+    `strptime` com `%Y-%m-%d` de proposito, e nao `date.fromisoformat`: a
+    partir do 3.11 o `fromisoformat` aceita `20260917` e ate' data com hora, e
+    o contrato aqui e' UMA forma so'. Nada de timezone, nada de formato
+    regional, nada de coercao silenciosa.
+    """
+    from datetime import datetime as _dt
+
+    if isinstance(texto, date):
+        return texto
+    try:
+        return _dt.strptime(texto, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        import argparse
+        raise argparse.ArgumentTypeError(MSG_DATA_INVALIDA)
+
+
 def build_cli():
     import argparse
 
@@ -725,7 +755,9 @@ def build_cli():
     parser.add_argument("--operator-override", action="store_true",
                         help=("comando operacional EXPLICITO para a carga "
                               "piloto com a feature flag desligada"))
-    parser.add_argument("--observed-date", default=None,
+    # `type=` roda no parse, ANTES de qualquer conexao, lock ou auditoria: uma
+    # data malformada derruba a CLI sem tocar em banco.
+    parser.add_argument("--observed-date", default=None, type=data_observada,
                         help="YYYY-MM-DD; sem aproximacao para o dia mais proximo")
     return parser
 

@@ -51,10 +51,12 @@ apagaria um item do monitoramento por causa de uma falha de coleta.
 from __future__ import annotations
 
 import argparse
+import ast
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -68,21 +70,20 @@ from app.services import pma_match as pm  # noqa: E402
 TARGET_TABLE = "marts.fact_channel_offer_observation"
 REFERENCE_TABLE = "marts.fact_suggested_price_reference_snapshot"
 
-#: Revisao Alembic que criara o destino. Ainda NAO existe.
+#: Revisao Alembic que cria o destino (`marts.fact_channel_offer_observation`),
+#: com `down_revision = "016"`, da frente Full.
 #:
-#: E' **017**, e nao 016: a frente Full ja' reservou a 016
-#: (`016_create_fact_ml_fulfillment_daily.py`, `down_revision = "015"`, cria
-#: `marts.fact_ml_fulfillment_daily`), hoje como arquivo nao versionado na
-#: worktree `gate-full-1a`. O PMA nao pode usar o mesmo numero: duas revisoes
-#: com o mesmo id, ou duas com `down_revision = "015"`, produziriam heads
-#: concorrentes e o Alembic recusaria o upgrade.
-#:
-#: Portanto a migration do PMA sera' `017` com `down_revision = "016"`, criada
-#: SOMENTE depois que a 016 de Full for integrada. Nada disso acontece nesta
-#: rodada — nem o arquivo 017 e' criado.
-#:
-#: Enquanto `alembic_version` nao alcancar este valor, `--apply` e' recusado.
+#: A 017 precisa estar APLICADA — o que nao quer dizer "carimbada como head".
+#: `alembic_version` guarda SO' o head corrente, nao o historico: depois que a
+#: 018 (expedicao) e a 019 (Shopee FBS) entraram, o head virou "019" e a 017
+#: sumiu da tabela sem nunca ter sido revertida. Por isso a barreira pergunta
+#: se a 017 e' ANCESTRAL do head, e nao se ela E' o head.
 REQUIRED_MIGRATION = "017"
+
+#: Diretorio das migrations versionadas. Caminho CONSTANTE, derivado da posicao
+#: deste modulo no repositorio — nunca de CLI, ambiente ou banco.
+MIGRATIONS_DIR = (Path(__file__).resolve().parents[1]
+                  / "apps" / "api" / "alembic" / "versions")
 
 #: Revisao de Full que precisa entrar ANTES. Registrada aqui para que a
 #: dependencia entre frentes fique explicita no codigo, e nao so' num relatorio.
@@ -120,6 +121,10 @@ class ChannelSyncError(RuntimeError):
 
 class ApplyNotAuthorizedError(ChannelSyncError):
     """`--apply` pedido sem a migration do destino."""
+
+
+class MigrationGraphError(ChannelSyncError):
+    """O grafo de migrations nao pode ser determinado com seguranca."""
 
 
 @dataclass
@@ -186,24 +191,179 @@ def _sanitize(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 # Barreira do --apply
 # ---------------------------------------------------------------------------
-def assert_apply_authorized(conn) -> None:
-    """Recusa `--apply` enquanto o destino nao existir. Consulta o banco real.
+def load_migration_graph(versions_dir=None) -> dict:
+    """`revision -> down_revision`, lido dos arquivos versionados por AST.
 
-    Duas provas independentes, ambas obrigatorias: a revisao Alembic carimbada e
-    a existencia fisica da relacao. Uma so' nao basta — um `stamp` manual
-    passaria a primeira sem criar a tabela, e uma tabela criada a mao passaria a
-    segunda sem estar sob controle do Alembic.
+    POR QUE NAO `alembic.script.ScriptDirectory`
+    --------------------------------------------
+    A linha 62 deste modulo poe `apps/api` no `sys.path`, e ali existe o
+    diretorio `apps/api/alembic/` com um `__init__.py`. Dentro do processo do
+    publisher, `import alembic` resolve para ESSE diretorio e sombreia o pacote
+    instalado: `alembic.script` e `alembic.config` passam a nao existir. Foi
+    medido — `ModuleNotFoundError: No module named 'alembic.script'`.
+
+    Ler o `down_revision` declarado nos proprios arquivos usa exatamente o dado
+    que o Alembic usaria, sem import nenhum, sem dependencia nova e sem
+    executar o modulo da migration (`ast.parse` nao roda codigo).
+    """
+    raiz = Path(versions_dir) if versions_dir is not None else MIGRATIONS_DIR
+    if not raiz.is_dir():
+        raise MigrationGraphError(
+            "grafo de migrations indisponivel: o diretorio de revisoes nao foi "
+            "encontrado. Sem o grafo a autorizacao nao pode ser decidida."
+        )
+    grafo: dict = {}
+    arquivos = sorted(p for p in raiz.glob("*.py") if p.name != "__init__.py")
+    if not arquivos:
+        raise MigrationGraphError(
+            "grafo de migrations indisponivel: nenhuma revisao encontrada."
+        )
+    for caminho in arquivos:
+        try:
+            arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as exc:
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: uma revisao nao pode ser "
+                "lida."
+            ) from exc
+        achados: dict = {}
+        for no in arvore.body:
+            # Duas formas, porque as duas aparecem de verdade:
+            #   `revision = "017"`          -> Assign     (as 19 revisoes de hoje)
+            #   `revision: str = "020"`     -> AnnAssign  (o template do Alembic
+            #                                  1.18 gera assim, e a PROXIMA
+            #                                  revisao criada por `alembic
+            #                                  revision` vira nesse formato)
+            # Ler so' `Assign` faria o grafo perder a revisao nova e a barreira
+            # recusaria de novo — o mesmo apagao que este modulo acaba de
+            # corrigir.
+            if isinstance(no, ast.Assign):
+                nomes = [a.id for a in no.targets if isinstance(a, ast.Name)]
+                valor = no.value
+            elif isinstance(no, ast.AnnAssign) and isinstance(no.target, ast.Name):
+                nomes = [no.target.id]
+                valor = no.value  # `revision: str` sem valor deixa `value` None
+            else:
+                continue
+            for nome in nomes:
+                if nome not in ("revision", "down_revision"):
+                    continue
+                if valor is None:
+                    raise MigrationGraphError(
+                        "grafo de migrations indisponivel: uma revisao declara "
+                        "identificador sem valor."
+                    )
+                try:
+                    achados[nome] = ast.literal_eval(valor)
+                except ValueError as exc:
+                    raise MigrationGraphError(
+                        "grafo de migrations indisponivel: uma revisao "
+                        "declara identificador nao literal."
+                    ) from exc
+        rev = achados.get("revision")
+        down = achados.get("down_revision", "__ausente__")
+        if not isinstance(rev, str) or not rev:
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: uma revisao nao declara "
+                "`revision` como texto."
+            )
+        if down == "__ausente__" or not (down is None or isinstance(down, str)):
+            # Uma tupla em `down_revision` e' ponto de merge: a cadeia deixa de
+            # ser linear e a ancestralidade vira ambigua. Recusa-se.
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: `down_revision` ausente ou "
+                "nao linear."
+            )
+        if rev in grafo:
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: identificador de revisao "
+                "duplicado."
+            )
+        grafo[rev] = down
+    return grafo
+
+
+def migration_is_ancestor(required: str, head: str, grafo: dict) -> bool:
+    """`required` esta na cadeia de `head`, descendo por `down_revision`?
+
+    Percorre o grafo REAL. Nao compara texto nem numero: "018" ser maior que
+    "017" nao prova nada, e uma revisao com id nao numerico quebraria qualquer
+    comparacao desse tipo.
+    """
+    if head not in grafo:
+        raise MigrationGraphError(
+            "grafo de migrations indisponivel: a revisao carimbada no banco "
+            "nao pertence a cadeia versionada."
+        )
+    visitadas = set()
+    atual = head
+    while atual is not None:
+        if atual == required:
+            return True
+        if atual in visitadas:
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: ciclo na cadeia de revisoes."
+            )
+        visitadas.add(atual)
+        if atual not in grafo:
+            raise MigrationGraphError(
+                "grafo de migrations indisponivel: a cadeia referencia uma "
+                "revisao que nao existe."
+            )
+        atual = grafo[atual]
+    return False
+
+
+def assert_apply_authorized(conn, *, versions_dir=None) -> None:
+    """Recusa `--apply` enquanto o destino nao estiver pronto. Le o banco real.
+
+    Duas provas independentes, ambas obrigatorias:
+
+    1. a 017 esta APLICADA — isto e', e' o head carimbado OU ancestral dele no
+       grafo real de `down_revision`. `alembic_version` guarda so' o head, e
+       nao o historico: exigir igualdade com o head fazia a barreira recusar
+       para sempre assim que a 018 entrasse, mesmo com a 017 aplicada. Foi
+       exatamente o que aconteceu no PMA-2C4D1;
+    2. a relacao fisica existe.
+
+    Uma so' nao basta: um `stamp` manual passaria a primeira sem criar a
+    tabela, e uma tabela criada a mao passaria a segunda sem estar sob
+    controle do Alembic.
+
+    Fail-closed: qualquer duvida sobre o grafo, sobre o head ou sobre a relacao
+    recusa. Todas as mensagens sao CONSTANTES — nenhuma interpola valor vindo
+    do banco, da CLI ou do driver.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT version_num FROM alembic_version")
-        carimbadas = [r[0] for r in cur.fetchall()]
+        # `to_regclass` antes do SELECT: consultar uma tabela inexistente
+        # levantaria e abortaria a transacao do chamador.
+        cur.execute("SELECT to_regclass('alembic_version')")
+        tem_controle = cur.fetchone()[0]
+        carimbadas = []
+        if tem_controle is not None:
+            cur.execute("SELECT version_num FROM alembic_version")
+            carimbadas = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT to_regclass(%s)", (TARGET_TABLE,))
         existe = cur.fetchone()[0]
-    if REQUIRED_MIGRATION not in carimbadas:
+
+    if tem_controle is None or not carimbadas:
+        raise ApplyNotAuthorizedError(
+            "publicacao nao autorizada: o destino nao esta sob controle de "
+            "migration. O schema pertence ao Alembic, e este CLI nao o cria."
+        )
+    if len(carimbadas) > 1:
+        # Varios heads significam cadeia bifurcada. Escolher um seria arbitrar
+        # sobre o schema, e isso nao cabe ao publisher.
+        raise ApplyNotAuthorizedError(
+            "publicacao nao autorizada: o destino tem mais de uma revisao "
+            "carimbada. A cadeia precisa ser resolvida antes de publicar."
+        )
+    if not migration_is_ancestor(REQUIRED_MIGRATION, carimbadas[0],
+                                 load_migration_graph(versions_dir)):
         raise ApplyNotAuthorizedError(
             "publicacao nao autorizada: a migration do destino ainda nao foi "
-            "aplicada. Esta rodada e' inerte por decisao de gate — a revisao "
-            "precisa ser serializada com as demais frentes antes de existir."
+            "aplicada. A revisao exigida nao esta na ancestralidade do head "
+            "carimbado."
         )
     if existe is None:
         raise ApplyNotAuthorizedError(

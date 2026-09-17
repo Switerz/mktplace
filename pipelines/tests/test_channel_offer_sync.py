@@ -18,12 +18,28 @@ AGORA = datetime(2026, 9, 15, 9, 7, 1, tzinfo=timezone.utc)
 
 
 class CursorFalso:
-    def __init__(self, respostas):
-        self._respostas = list(respostas)
+    """Responde pelo SQL recebido, NAO pela ordem da chamada.
+
+    Um fake posicional amarra o teste a uma sequencia de queries: acrescentar
+    uma pergunta a barreira quebrava os cinco testes desta secao sem que o
+    COMPORTAMENTO tivesse mudado. Despachar por padrao de SQL testa o contrato,
+    nao a coreografia.
+    """
+
+    def __init__(self, conexao):
+        self._c = conexao
         self._atual = None
 
     def execute(self, sql, params=None):
-        self._atual = self._respostas.pop(0)
+        texto = " ".join(sql.split())
+        if "to_regclass('alembic_version')" in texto:
+            self._atual = [(("alembic_version" if self._c.tem_controle else None),)]
+        elif "FROM alembic_version" in texto:
+            self._atual = [(r,) for r in self._c.revisoes]
+        elif "to_regclass(%s)" in texto:
+            self._atual = [(self._c.relacao,)]
+        else:  # pragma: no cover - qualquer query nova precisa ser declarada
+            raise AssertionError(f"query nao prevista pelo fake: {texto[:60]}")
 
     def fetchall(self):
         return self._atual
@@ -39,14 +55,17 @@ class CursorFalso:
 
 
 class ConexaoFalsa:
-    """Modela o Neon nas duas perguntas da barreira, nesta ordem."""
+    """Modela o Neon nas perguntas da barreira, em qualquer ordem."""
 
-    def __init__(self, revisoes, relacao):
-        self._respostas = [[(r,) for r in revisoes], [(relacao,)]]
+    def __init__(self, revisoes, relacao, tem_controle=True):
+        self.revisoes = list(revisoes)
+        self.relacao = relacao
+        #: `alembic_version` existe? Falso modela um banco fora do Alembic.
+        self.tem_controle = tem_controle
         self.escreveu = False
 
     def cursor(self):
-        return CursorFalso(self._respostas)
+        return CursorFalso(self)
 
 
 # ---------------------------------------------------------------------------
