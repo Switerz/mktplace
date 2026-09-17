@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { expedicaoHabilitado } from "@/lib/expedicao-contract";
+import { shopeeFbsEnabled } from "@/lib/shopee-fbs-flag";
 
 import { isNavItemActive, navSections } from "./nav-config";
 
@@ -16,9 +17,17 @@ interface NavListProps {
 export default function NavList({ pathname, hrefFor }: NavListProps) {
   return (
     <nav aria-label="Navegação principal" className="flex flex-col gap-5">
-      {navSections(
-        expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
-      ).map((section) => (
+      {/* Cada item responde SO' a propria flag: ligar uma nao revela a outra
+          tela. Esconder o menu e' a SEGUNDA barreira -- cada rota ja' devolve
+          404 por conta propria, porque a URL direta continuaria acessivel.
+
+          Acesso LITERAL a `process.env.NEXT_PUBLIC_*`: o Next substitui por
+          analise estatica do texto, e ler de uma variavel deixaria o valor
+          `undefined` no browser. */}
+      {navSections({
+        expedicao: expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
+        shopeeFbs: shopeeFbsEnabled(),
+      }).map((section) => (
         <div key={section.label} className="flex flex-col gap-1">
           <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-2">
             {section.label}

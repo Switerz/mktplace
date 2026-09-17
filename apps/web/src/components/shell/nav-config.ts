@@ -82,15 +82,49 @@ export const NAV_SECTIONS: NavSection[] = [
 export const EXPEDICAO_NAV: NavPage = { href: "/expedicao", label: "Expedição Shopee" };
 
 /**
- * FAIL-CLOSED: so' a string exata "true" liga. Esconder o item e' a SEGUNDA
- * barreira — a primeira e' a propria rota, que devolve 404 com a flag
+ * Gate FULL-SH-1D — item da tela Full Shopee, atras de
+ * `NEXT_PUBLIC_SHOPEE_FBS_ENABLED`.
+ *
+ * Entra em "Operações" e e' rota de TOPO, nao filha de `/operacoes`:
+ * `isNavItemActive` casa por prefixo, e um filho deixaria os dois itens
+ * ativos ao mesmo tempo — o mesmo motivo que levou o Full ML para rota
+ * propria.
+ *
+ * O rotulo diz "Shopee" e nao apenas "Full": a Torre ja' tem "Full Mercado
+ * Livre", e duas entradas chamadas "Full" seriam indistinguiveis no menu.
+ */
+export const SHOPEE_FBS_NAV: NavPage = {
+  href: "/full-shopee",
+  label: "Full Shopee",
+};
+
+/**
+ * Itens opcionais, cada um atras da PROPRIA flag.
+ *
+ * Uma funcao so', e nao uma por frente: duas funcoes partindo de
+ * `NAV_SECTIONS` se ignorariam -- ligar a Expedicao devolveria uma lista SEM
+ * o Full Shopee, e vice-versa. Aqui as flags sao independentes e compoem.
+ *
+ * FAIL-CLOSED: so' a string exata "true" liga, e esconder o item e' a SEGUNDA
+ * barreira -- a primeira e' a propria rota, que devolve 404 com a flag
  * desligada. Esconder so' o menu deixaria a URL direta acessivel, e a API nao
  * tem autenticacao.
  */
-export function navSections(expedicaoEnabled: boolean): NavSection[] {
-  if (!expedicaoEnabled) return NAV_SECTIONS;
+export interface NavFlags {
+  expedicao?: boolean;
+  shopeeFbs?: boolean;
+}
+
+export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
+  // `boolean` aceito por compatibilidade com o chamador original da
+  // Expedicao, que passava um unico booleano.
+  const f: NavFlags = typeof flags === "boolean" ? { expedicao: flags } : flags;
+  const extras: NavPage[] = [];
+  if (f.expedicao) extras.push(EXPEDICAO_NAV);
+  if (f.shopeeFbs) extras.push(SHOPEE_FBS_NAV);
+  if (!extras.length) return NAV_SECTIONS;
   return NAV_SECTIONS.map((s) =>
-    s.label === "Operações" ? { ...s, pages: [...s.pages, EXPEDICAO_NAV] } : s,
+    s.label === "Operações" ? { ...s, pages: [...s.pages, ...extras] } : s,
   );
 }
 
@@ -111,11 +145,14 @@ export function isNavItemActive(pageHref: string, pathname: string): boolean {
  */
 export function getRouteTitle(pathname: string): string {
   if (pathname.startsWith("/brand/")) return "Gerencial";
-  // `navSections(true)` e nao `NAV_SECTIONS`: quem esta NA rota da Expedicao ja
-  // passou pelo guard, entao a flag e necessariamente `true`. Resolver o titulo
-  // pela lista sem o item deixaria a topbar dizendo "Torre de Controle" numa
-  // pagina que tem nome proprio.
-  for (const section of navSections(true)) {
+  // Com AS DUAS flags ligadas, e nao `NAV_SECTIONS`: quem esta NA rota ja
+  // passou pelo guard dela, entao a flag correspondente e necessariamente
+  // `true`. Resolver o titulo por uma lista sem o item deixaria a topbar
+  // dizendo "Torre de Controle" numa pagina que tem nome proprio.
+  //
+  // Isto NAO revela tela nenhuma: `getRouteTitle` so' traduz um pathname em
+  // rotulo. Quem decide se a rota existe e' o guard de cada page.
+  for (const section of navSections({ expedicao: true, shopeeFbs: true })) {
     for (const page of section.pages) {
       if (page.disabled) continue;
       const matches = page.href === "/" ? pathname === "/" : pathname.startsWith(page.href);
@@ -124,3 +161,4 @@ export function getRouteTitle(pathname: string): string {
   }
   return "Torre de Controle";
 }
+
