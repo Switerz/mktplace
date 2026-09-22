@@ -234,6 +234,34 @@ snapshot inteiro).
 O contrato do campo `total_global` para exports em formato US **não é escopo
 deste gate** e continua aberto.
 
+#### Reconciliação local completa (22/09/2026, offline)
+
+| item | resultado |
+| --- | --- |
+| arquivos → snapshots | 124 → **19** |
+| linhas de SKU lidas | 599.168 |
+| linhas após deduplicação | **570.075** (−29.093, −4,86%) |
+| pedidos presentes em >1 snapshot | **22.046** |
+| janela | 2026-01-01 .. 2026-09-15 (258 dias) |
+| determinismo em duas ordens de arquivos | **idêntico** |
+| campos inválidos sobreviventes | **0** |
+
+Agregados do resultado deduplicado: `orders` 471.762 · `gmv` 24.539.521,29 ·
+`units_sold` 510.335 · `canceled_orders` 68.425 · `returned_orders` 3.229 ·
+`delivered_orders` 336.235 · `total_fees` 6.162.198,13 · `total_settlement`
+23.460.332,94 · `seller_shipping_cost` 5.486.316,16 · `unique_buyers` 450.023.
+
+Invariantes: nenhum agregado negativo · 0 dias com GMV negativo · 0 dias com
+`orders ≤ 0` · `units_sold ≥ orders` · `total_fees / gmv` 25,11% ·
+`total_settlement / gmv` 95,60% · `seller_shipping / gmv` 22,36%.
+
+🔑 **Não há ΔGMV a reportar para a Kokeshi, e a razão importa:** o parser
+**atual** não produz número nenhum nessa marca — ele levanta
+`ShopeeNumericParseError` ao agregar, que é o defeito dos runs #226 e #297. A
+regra nova é a primeira a agregar a Kokeshi inteira com sucesso. A comparação
+"antes × depois" existe para as outras quatro marcas (§7.1 e §7.2); aqui o
+"antes" é uma exceção, não um valor.
+
 ### 7.4 Caminho incremental
 
 `fetch_incremental(days_back=3)` lê os mesmos arquivos e passa pela mesma
@@ -255,10 +283,12 @@ Também continuam abertos, e **fora** deste gate:
 
 - o **contrato do `total_global` em formato US** (§7.3) — hoje rejeitado por
   desenho; a deduplicação só evita encostar nele quando o snapshot ruim perde;
-- a **reconciliação agregada da Kokeshi** contra o parser atual, que não pôde ser
-  concluída porque o caminho antigo levanta nessa marca. Ela não é necessária
-  para validar a regra: o diagnóstico focal já mostra qual snapshot vence e que a
-  diferença entre eles é de status.
+- a **comparação numérica "antes × depois" da Kokeshi**, impossível por
+  construção: o parser atual levanta nessa marca em vez de produzir um valor
+  (§7.3). A leitura completa pela regra nova foi feita e está reconciliada
+  internamente;
+- a **validação da Kokeshi contra fonte externa**, que só existirá quando a
+  marca entrar na API (gate SH-AUTO-7).
 
 ---
 
