@@ -294,10 +294,20 @@ def test_conexao_de_producao_e_aberta_em_autocommit():
     exatamente o que o lock de sessão existe para evitar.
 
     Medido em 22/09/2026: com `AUTOCOMMIT` o servidor reporta a sessão como
-    `idle` depois de um SELECT; sem ele, `idle in transaction`."""
-    fonte = inspect.getsource(L._default_connect)
-    assert 'isolation_level="AUTOCOMMIT"' in fonte
-    assert "execution_options" in fonte
+    `idle` depois de um SELECT; sem ele, `idle in transaction`.
+
+    ⚠️ Lê a função no ARQUIVO, não em `L._default_connect`: a guarda de
+    isolamento de `conftest.py` substitui esse atributo para impedir que
+    qualquer teste abra a conexão de produção, e `inspect.getsource` no atributo
+    devolveria a fonte da guarda."""
+    arvore = ast.parse(FONTE_LOCK.read_text(encoding="utf-8"))
+    funcao = next(
+        n for n in ast.walk(arvore)
+        if isinstance(n, ast.FunctionDef) and n.name == "_default_connect"
+    )
+    corpo = ast.dump(funcao)
+    assert "AUTOCOMMIT" in corpo
+    assert "execution_options" in corpo
 
 
 def test_a_aquisicao_e_a_primeira_coisa_que_toca_a_conexao():

@@ -1,7 +1,8 @@
 """Gate SD2-C — testes focais do patch parcial de Shopee Orders no Daily.
 
-Nenhum teste abre conexao real de banco: `local_session` e' monkeypatchado e os
-conectores/transforms sao substituidos por fakes.
+Nenhum teste abre conexao real de banco: `local_session` e o advisory lock da
+fato diaria sao monkeypatchados e os conectores/transforms sao substituidos por
+fakes. O lock em si roda de verdade — o que e' dublê e' a conexao.
 
 Os testes de preservacao NAO conferem apenas o texto do SQL: `_aplicar_set()`
 interpreta as atribuicoes reais do `DO UPDATE SET` e as aplica sobre uma linha
@@ -16,6 +17,8 @@ from datetime import date
 import pytest
 
 from pipelines.ingestion import daily_performance as dp
+from pipelines.ingestion.fato_diaria_lock import fato_diaria_lock as _lock_real
+from pipelines.tests.conexoes_lock import ConexaoDeLock
 
 TABELA = "marts.fact_marketplace_daily_performance"
 
@@ -266,6 +269,17 @@ def _upserts_usados(monkeypatch, source):
         yield _SessaoQueRegistra(registro)
 
     monkeypatch.setattr(dp, "local_session", _fake_session)
+    # Gate SH-AUTO-1: `run()` adquire o advisory lock antes de tudo. O lock roda
+    # DE VERDADE aqui — so' a conexao e' dublê. Sem isto o teste abriria conexao
+    # real com o banco de `DATABASE_URL`, que num ambiente com `.env` e' o Neon
+    # de producao: um teste focal de SQL passaria a depender de rede e a tocar
+    # producao sem que o nome do arquivo sugerisse nada disso.
+    monkeypatch.setattr(
+        dp, "fato_diaria_lock",
+        lambda marketplace_id: _lock_real(
+            marketplace_id, connect=lambda: ConexaoDeLock(livre=True)
+        ),
+    )
 
     linha = {"date": date(2026, 8, 14), "loja_id": 3, "marketplace_id": 3,
              "empresa_id": 1}
