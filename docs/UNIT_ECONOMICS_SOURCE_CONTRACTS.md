@@ -537,11 +537,13 @@ fonte           : silver.stg_tiktok_payments_by_order, via VPN operacional (NUNC
 grão da fonte   : transaction_id (único, confirmado)
 allowlist       : BRANDS_IN_SCOPE — 3 das 8 marcas ficam fora
 competência     : order_create_time (estável por pedido; timezone NÃO demonstrável)
-transaction_type: allowlist ['ORDER']; tipo novo = falha de contrato
-componentes     : creator  = SUM(affiliate_commission_amount_before_pit)
+transaction_type: contribui ['ORDER']; 6 tipos reconhecidos e fora do escopo;
+                  OITAVO tipo (ou NULL) = falha de contrato          (18.8.2.1)
+componentes     : creator  = SUM(affiliate_commission_amount)        (18.8.2.1)
                   partner  = SUM(affiliate_partner_commission_amount)
                   ads      = SUM(affiliate_ads_commission_amount)
-PROIBIDO        : somar affiliate_commission_amount (duplicata de before_pit)
+                  -- COLUNAS TIPADAS da silver; o JSONB saiu em 18/09/2026
+PROIBIDO        : ler fee_breakdown/tax_breakdown ou chave *_before_pit
 PROIBIDO        : publicar affiliate_cost_total antes de P2
 sinal           : assinado; NUNCA abs() — ver 18.5.1 (debito/zero/credito)
 null vs zero    : NULL = chave ausente; 0 = medido
@@ -1002,7 +1004,9 @@ marts.fact_tiktok_affiliate_cost_order_monthly     -- competencia COMERCIAL
 grao / PK    : (ref_month, brand)
 competencia  : mes de order_create_time            -- timestamp SEM timezone (18.8.1)
 populacao    : coorte de pedido; BRANDS_IN_SCOPE; transaction_type allowlist ['ORDER']
-negocio      : affiliate_creator_commission  numeric   -- before_pit, ASSINADO
+             : seis tipos RECONHECIDOS e fora do escopo (18.8.2.1)
+fonte        : COLUNAS TIPADAS da silver -- o JSONB saiu em 18/09/2026 (18.8.2.1)
+negocio      : affiliate_creator_commission  numeric   -- affiliate_commission_amount, ASSINADO
                affiliate_partner_commission  numeric   -- ASSINADO
                affiliate_ads_commission      numeric   -- ASSINADO
                source_row_count              bigint
@@ -1010,9 +1014,40 @@ auditoria    : source_max_updated_at  timestamp        -- watermark TECNICO, sem
                synced_at              timestamptz NOT NULL DEFAULT now()
                source_run_id          varchar(64)
 PROIBIDO     : affiliate_cost_total (P2)
-PROIBIDO     : somar affiliate_commission_amount junto de before_pit
+PROIBIDO     : ler fee_breakdown/tax_breakdown ou qualquer chave *_before_pit
 CHECK        : (<> 'NaN') em cada numeric; SEM check de sinal
 ```
+
+#### 18.8.2.1 Fonte tipada e os seis tipos reconhecidos — Gate UE-9C2E4-B (22/09/2026)
+
+⚠️ **[FATO] Esta seção substitui duas regras anteriores desta mesma §18.8:** a de que o fato lê chaves de `fee_breakdown`, e a que proibia `affiliate_commission_amount`. As duas deixaram de ser corretas, por medição — não por preferência.
+
+**O que aconteceu.** Em 18/09/2026 o commit `ea6a90aa` do repositório `goca-se/airflow` ("silver deixa de repetir os JSONB do raw") removeu `fee_breakdown`, `tax_breakdown` e os demais JSONB de `silver.stg_tiktok_payments_by_order`, achatando o payload em colunas numéricas. A verificação de consumidores registrada naquele commit foi feita **dentro do repositório do Airflow**; este fato vive em `mktplace` e era invisível a ela. A partir dali o sync passou a referenciar coluna inexistente. A quebra ficou **mascarada** atrás do guardrail de `transaction_type` (§18.8.6), que falha antes — o sync está parado desde 19/09/2026 11:56 UTC.
+
+**Decisão 1 — a fonte passa a ser a coluna tipada.** `COMPONENT_SOURCE_COLUMNS` mapeia cada componente para a coluna da Silver; nenhum SQL do módulo pode referenciar JSONB. `validate_source_schema` valida `REQUIRED_SOURCE_COLUMNS` por catálogo **antes de qualquer leitura de dado**, para que a próxima mudança de forma produza mensagem contratual em vez de `UndefinedColumn`.
+
+**Decisão 2 — `affiliate_commission_amount` passa a ser a comissão de criador canônica**, no lugar de `affiliate_commission_amount_before_pit`. A proibição anterior nascia da premissa, correta à época, de que as duas chaves carregam o mesmo valor. **A premissa caiu.** Medido na Raw em 22/09/2026, `BRANDS_IN_SCOPE`, `transaction_type = 'ORDER'`:
+
+| Linhas | `affiliate_commission_amount` | `affiliate_commission_amount_before_pit` |
+|---:|---:|---:|
+| 1.503.661 (concordam) | −2.623.375,32 | **−2.623.375,32** (idêntico) |
+| 729.999 (divergem) | −3.916.631,43 | **0,00** |
+
+Primeira linha divergente em `updated_at = 2026-07-21`; ainda chegam linhas concordantes em 22/09 — **as duas formas coexistem, não há data de corte limpa**. Manter `before_pit` deixaria de contabilizar **R$ 3.916.631,43** de custo de afiliado já hoje, e o número continuaria caindo à medida que a base fosse reingerida — **sem erro e sem alarme**. `FORBIDDEN_SQL_TOKENS` passa a proibir `_before_pit` exatamente por isso.
+
+**Impacto da troca de regra: nenhum em mês fechado.** Reconciliação read-only de 22/09/2026, candidata nova contra a fato publicada, 75 chaves `(ref_month, brand)`, mesmo conjunto dos dois lados:
+
+- **57 chaves (76%) com delta exatamente 0,00** — toda a série de 2025-06 a 2026-05, mês a mês, marca a marca;
+- 18 chaves com delta, **todas em 2026-06..2026-09**, somando −1.310.163,98 — meses ainda em maturação, com transações novas e revisadas;
+- nenhuma chave aparece ou desaparece.
+
+**Decisão 3 — os seis tipos fora de `ORDER` são reconhecidos e excluídos.** `LOGISTICS_REIMBURSEMENT`, `PLATFORM_REIMBURSEMENT`, `THIRD_PARTY_FINANCING`, `GMV_PAYMENT_FOR_TIKTOK_ADS`, `PROMOTION_ADJUSTMENT` e `DEDUCTIONS_INCURRED_BY_SELLER`. Medido em 22/09/2026 sobre 2.390.477 linhas: nos seis, os **três componentes de afiliado são exatamente 0,00** — não nulos — e `order_id` é nulo em **100%** das linhas. A população declarada deste fato é a coorte de **pedido**; transação sem pedido não pertence a ela. Incluí-los mudaria os três valores publicados em **R$ 0,00** e corromperia apenas `source_row_count`.
+
+Reconhecer não é ignorar: `validate_excluded_components_are_zero` **falha a execução** se qualquer um deles passar a carregar componente de afiliado diferente de zero — porque aí a premissa da exclusão caiu e continuar filtrando em silêncio esconderia custo real. Um **oitavo** tipo, ou `NULL`, continua falhando fechado (§18.8.6).
+
+**[LIMITAÇÃO] O estado de 15/09/2026 não é reconstruível.** A reingestão reescreveu `updated_at` em ~1,4 milhão de linhas, então filtrar `updated_at <= 2026-09-15` na fonte de hoje devolve uma população **estritamente menor** do que a que existia naquela data. Por isso **não é possível decompor** a variação da fonte entre "correção da dupla contagem" e "revisão comercial normal" — qualquer número que separasse as duas parcelas seria inventado. O que *é* demonstrável está acima: a troca de regra é idêntica onde as duas chaves concordam, e a fato publicada é reproduzida ao centavo em todos os meses fechados.
+
+**[FATO] Nada foi republicado neste gate.** A fato permanece com o conteúdo de 15/09. A substituição do que está publicado é decisão de um gate produtivo separado.
 
 **[FATO] `updated_at` é exclusivamente watermark técnico.** Não é competência comercial nem financeira, e não deve aparecer em nenhuma agregação de negócio.
 
@@ -1085,15 +1120,24 @@ Ordem correta, em duas etapas sobre a **mesma fotografia**:
                       FROM fonte
                       WHERE updated_at >= previous_successful_upper_bound
                         AND updated_at <= current_upper_bound
-   se tipos_na_janela contiver NULL ou qualquer valor fora da allowlist:
+   se tipos_na_janela contiver NULL ou qualquer valor fora dos SETE
+   CONHECIDOS (18.8.2.1):
         FALHAR a execucao, com erro sanitizado (nome do valor inesperado,
         contagem; nunca identificador individual)
         e NAO avancar o watermark
 
-2. FILTRAR  -- somente depois da validacao passar
+1b. VALIDAR os EXCLUIDOS -- ainda antes do filtro comercial
+   se qualquer um dos seis tipos fora do escopo tiver componente de
+   afiliado diferente de ZERO:
+        FALHAR — a exclusao deles vale PORQUE os componentes sao zero;
+        com valor, filtra-los em silencio esconderia custo real
+
+2. FILTRAR  -- somente depois das validacoes passarem
    aplicar transaction_type IN ('ORDER') na descoberta de chaves
    e no recalculo integral
 ```
+
+⚠️ **[FATO] Reconhecer não é incluir.** Desde o Gate UE-9C2E4-B a allowlist de **contribuição** continua sendo exatamente `['ORDER']`. O que mudou é que os seis tipos medidos em produção passaram a ser **reconhecidos** (§18.8.2.1): eles não derrubam mais a execução, mas também não entram na população. Um **oitavo** valor — ou `NULL` — continua falhando fechado, pela mesma razão de sempre.
 
 **[RECOMENDAÇÃO] Onde mais essa validação é obrigatória:**
 
