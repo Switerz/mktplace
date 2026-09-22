@@ -58,6 +58,8 @@ def _sem_conexao_real_no_lock(monkeypatch):
         )
 
     monkeypatch.setattr(fato_diaria_lock, "_default_connect", recusar)
+
+
 @pytest.fixture(autouse=True)
 def _sem_conexao_real_na_expedicao(monkeypatch):
     """Nenhum teste pode abrir as conexoes de producao da Expedicao.
@@ -81,13 +83,13 @@ def _sem_conexao_real_na_expedicao(monkeypatch):
     ML, a guarda deixou de disparar e a MESMA linha passou a abrir o Neon e a
     publicar a fila inteira, com o relogio fixo da fixture.
 
-    `_run_diagnose` e `_run_reconcile` constroem a conexao inline e nao aceitam
-    injecao nenhuma: para eles nao ha uso legitimo dentro da suite, entao a
-    guarda simplesmente recusa.
-
     Saida legitima para quem precisa exercitar o fluxo: injetar as tres
     fabricas, como faz `test_expedicao_ml_apply.py`, ou aponta-las para um
     PostgreSQL descartavel.
+
+    Esta guarda cobre `run_apply`. Quem fecha `_run_diagnose` e `_run_reconcile`
+    e' a barreira por DESTINO, mais abaixo - o comentario no fim desta funcao
+    explica por que elas nao podem ser substituidas aqui.
     """
     try:
         from pipelines.expedicao import cli
@@ -121,57 +123,91 @@ def _sem_conexao_real_na_expedicao(monkeypatch):
     monkeypatch.setattr(cli.run_apply, "__kwdefaults__", amarrados)
 
     # `_run_diagnose` e `_run_reconcile` constroem a conexao inline e nao
-    # aceitam injecao. NAO sao substituidos aqui: ha testes legitimos que
-    # leem o CODIGO-FONTE delas (`inspect.getsource`) para provar que abrem
+    # aceitam injecao. NAO sao substituidos aqui: ha testes legitimos que leem
+    # o CODIGO-FONTE delas (`inspect.getsource`) para provar que abrem
     # read-only e nao publicam - trocar a funcao faria esses testes lerem a
-    # guarda em vez do alvo. Quem as fecha e' a barreira de DSN abaixo, que
-    # pega qualquer caminho ate' producao, inclusive os que ainda nao
-    # existem.
-#: Variaveis que apontam para producao. Uma conexao para qualquer uma delas
-#: dentro da suite e' sempre um defeito.
-ENV_DE_PRODUCAO = ("DATABASE_URL", "DATAMART_DATABASE_URL")
+    # guarda em vez do alvo. Quem as fecha e' a barreira por DESTINO abaixo,
+    # que pega qualquer caminho ate' um banco remoto, inclusive os que ainda
+    # nao existem.
 
 
-def dsns_de_producao(ambiente):
-    """As DSNs de producao presentes no ambiente. Vazio = nada a bloquear."""
-    return {v for v in (ambiente.get(k) for k in ENV_DE_PRODUCAO) if v}
+#: Hosts que a suite pode alcancar. Tudo o mais e' recusado por default.
+#: PostgreSQL descartavel dos testes de integracao sobe em localhost, entao a
+#: lista cobre o uso legitimo inteiro. Host vazio = socket unix local.
+HOSTS_LOCAIS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+
+def host_do_destino(args, kwargs):
+    """O host que uma chamada a `psycopg2.connect` alcancaria.
+
+    Entende as TRES formas: DSN em URL (`postgresql://...`), DSN em palavras-
+    chave (`host=... dbname=...`) e kwargs soltos (`connect(host=...)`). Quem
+    faz o trabalho e' `parse_dsn` do proprio psycopg2 - comparar substring
+    seria fragil e daria falso negativo para qualquer host novo.
+
+    Devolve `None` quando a DSN nao e' decifravel, e o chamador trata isso como
+    NAO local: na duvida, recusa.
+    """
+    from psycopg2.extensions import parse_dsn
+
+    campos = {}
+    bruto = args[0] if args else kwargs.get("dsn")
+    if bruto is not None:
+        if not isinstance(bruto, str):
+            return None
+        try:
+            campos = parse_dsn(bruto)
+        except Exception:  # noqa: BLE001 - indecifravel e' tratado como remoto
+            return None
+    for chave in ("hostaddr", "host"):
+        if kwargs.get(chave):
+            campos[chave] = kwargs[chave]
+    host = campos.get("hostaddr") or campos.get("host") or ""
+    if host:
+        return host
+    # Sem host explicito o libpq NAO vai direto ao socket local: ele consulta
+    # `PGHOSTADDR`/`PGHOST` antes. Ignorar isso deixaria `connect("dbname=d")`
+    # alcancar um servidor remoto sem que nenhuma DSN mencionasse o host.
+    import os
+
+    return os.environ.get("PGHOSTADDR") or os.environ.get("PGHOST") or ""
+
+
+def destino_e_local(args, kwargs):
+    host = host_do_destino(args, kwargs)
+    return host is not None and host in HOSTS_LOCAIS
 
 
 @pytest.fixture(autouse=True)
 def _sem_conexao_com_producao(monkeypatch):
-    """Ultima linha: nenhuma conexao para uma DSN de producao, por nenhum caminho.
+    """Ultima linha: a suite so' alcanca banco LOCAL, por qualquer caminho.
 
-    As guardas por funcao fecham as portas CONHECIDAS. Esta fecha a porta pelo
-    DESTINO, que e' o que de fato importa: qualquer `psycopg2.connect` cuja DSN
-    seja a de `DATABASE_URL` ou `DATAMART_DATABASE_URL` e' recusado, venha de
-    onde vier - inclusive de um caminho criado depois desta guarda.
+    As guardas por funcao fecham as portas conhecidas. Esta fecha pelo DESTINO,
+    que e' o que importa: qualquer `psycopg2.connect` para um host que nao seja
+    local e' recusado, venha de onde vier - inclusive de um caminho criado
+    depois desta guarda, e inclusive quando o `.env` nao esta' presente.
 
-    Bloquear por DSN, e nao `psycopg2.connect` inteiro, e' deliberado: os testes
-    de integracao legitimos usam PostgreSQL descartavel, cuja DSN e' outra, e
-    seguem funcionando. Numa maquina sem `.env` o conjunto e' vazio e a guarda
-    nao faz nada - o que tambem explica por que ela nao substitui as demais:
-    e' justamente na maquina COM `.env` que o incidente acontece.
+    E' default-deny de proposito. Uma lista do que e' PROIBIDO envelhece: basta
+    um host novo, ou a mesma DSN escrita de outro jeito, para passar batido. Uma
+    lista do que e' PERMITIDO so' envelhece para o lado seguro - um destino
+    legitimo novo falha em voz alta e entra aqui de forma deliberada.
+
+    Integracao legitima usa PostgreSQL descartavel em localhost e nao e'
+    afetada (ver `banco_descartavel.py`).
     """
-    import os
-
-    proibidas = dsns_de_producao(os.environ)
-    if not proibidas:
-        return
-
     try:
         import psycopg2
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - sem o driver nao ha o que proteger
         return
 
     original = psycopg2.connect
 
     def connect(*args, **kwargs):
-        dsn = args[0] if args else (kwargs.get("dsn") or kwargs.get("dbname"))
-        if dsn in proibidas:
+        if not destino_e_local(args, kwargs):
             raise ConexaoRealBloqueada(
-                "um teste tentou conectar numa DSN de PRODUCAO "
-                "(DATABASE_URL/DATAMART_DATABASE_URL). Testes de integracao "
-                "usam PostgreSQL descartavel; testes focais injetam dubles. "
+                "um teste tentou conectar num banco que NAO e' local. A suite "
+                "so' alcanca localhost - testes focais injetam dubles e testes "
+                "de integracao usam PostgreSQL descartavel. "
                 "Ver pipelines/tests/conftest.py."
             )
         return original(*args, **kwargs)
