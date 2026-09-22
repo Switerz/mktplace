@@ -493,6 +493,9 @@ PMA_EXIT_STATUS = {
 #: documentado no runbook — necessidade de uma vez, nao custo recorrente.
 PMA_ML_LOOKBACK_DAYS = 3
 
+#: Os steps que PUBLICAM. O `health_check` nao entra: ele diagnostica.
+PMA_CANAIS: tuple[str, ...] = ("pma_ml", "pma_shopee", "pma_tiktok")
+
 PMA_REFRESH_STEPS: tuple[Step, ...] = (
     Step("pma_ml", "pipelines.sync_ml_listing_price_serving",
          ("--apply", "--lookback-days", str(PMA_ML_LOOKBACK_DAYS)),
@@ -506,6 +509,13 @@ PMA_REFRESH_STEPS: tuple[Step, ...] = (
          ("--marketplace", "tiktok", "--apply"),
          timeout_seconds=900, preflight_source="pma_tiktok",
          critical=False, exit_status_map=PMA_EXIT_STATUS),
+    # Gate PMA-2C5B-R2 — ULTIMO e SEMPRE, como no `full_daily`. `always_run`
+    # o faz rodar mesmo depois de recusa, lock ou bloqueio nos canais: e'
+    # justamente nesses desfechos que saber o frescor da fotografia importa.
+    # `critical=False` porque a defasagem hoje e' gap conhecido; quem decide o
+    # exit code deste pipeline sao os canais, nao o diagnostico.
+    Step("health_check", "pipelines.ops.health_check", ("--json",),
+         timeout_seconds=180, always_run=True, critical=False),
 )
 
 PIPELINES["pma_refresh"] = PMA_REFRESH_STEPS
@@ -613,6 +623,18 @@ def compute_overall_status(name: str, results: dict[str, str]) -> str:
     if results and all(status == "BLOCKED" for status in results.values()):
         return "BLOCKED"
 
+    # Gate PMA-2C5B-R2 — `INDETERMINATE` tem PRECEDENCIA sobre tudo o mais.
+    #
+    # E' o unico desfecho em que nao se sabe o que foi gravado, e o unico que
+    # exige reconciliacao humana ANTES de qualquer reexecucao. Deixa-lo
+    # dissolvido num `DEGRADED` — que existe para "gap conhecido, siga o dia" —
+    # esconderia exatamente o estado que nao pode ser ignorado.
+    #
+    # Nenhum pipeline preexistente produz este status: so' steps com
+    # `exit_status_map` o emitem, e so' o `pma_refresh` tem um.
+    if any(status == "INDETERMINATE" for status in results.values()):
+        return "INDETERMINATE"
+
     has_critical_failure = any(
         critical_by_name.get(step_name, True) and status in NON_SUCCESS_STATUSES
         for step_name, status in results.items()
@@ -628,6 +650,44 @@ def compute_overall_status(name: str, results: dict[str, str]) -> str:
         return "DEGRADED"
 
     return "OK"
+
+
+#: Gate PMA-2C5B-R2 — pipelines com politica de exit PROPRIA.
+#:
+#: Ficam listados EXPLICITAMENTE: a regra geral (`FAILED`/`BLOCKED` -> 1) e' o
+#: contrato dos pipelines existentes e nao pode mudar de significado porque um
+#: pipeline novo precisou de outra coisa.
+PIPELINES_COM_EXIT_ESTRITO = frozenset({"pma_refresh"})
+
+
+def exit_code_do_pipeline(nome: str, results: dict[str, str],
+                          overall: str) -> int:
+    """Exit code, com politica ESTRITA para o `pma_refresh`.
+
+    A regra geral do orquestrador trata `DEGRADED` como exit 0, e isso e'
+    correto para o `full_daily`: um gap nao-critico ja conhecido nao deve fazer
+    a carga do dia "falhar" todo dia. No `pma_refresh` a leitura e' outra.
+
+    `critical=False` existe ali para que um canal ruim nao impeca a TENTATIVA
+    dos outros — e' politica de CONTINUIDADE. Nao e' declaracao de que a
+    execucao foi bem-sucedida. Quem le o exit code e' o Task Scheduler, e para
+    ele exit 0 significa "a fotografia do dia esta publicada". Um `DEGRADED`
+    com dois canais publicados e um recusado nao e' isso.
+
+    Por isso, aqui, SO' tres publicacoes confirmadas devolvem 0. Recusa, lock,
+    falha, indeterminado, bloqueio de preflight ou sucesso parcial — todos
+    devolvem 1. O relatorio continua distinguindo os desfechos entre si; o que
+    o exit code carrega e' apenas "publicou tudo" ou "nao publicou tudo".
+    """
+    if nome not in PIPELINES_COM_EXIT_ESTRITO:
+        return 1 if overall in ("FAILED", "BLOCKED") else 0
+
+    # So' os CANAIS contam. O `health_check` e' diagnostico e roda sempre; ele
+    # reportar defasagem conhecida nao pode impedir que uma execucao que
+    # publicou os tres canais devolva 0.
+    publicados = {canal for canal in PMA_CANAIS
+                  if results.get(canal) == "SUCCESS"}
+    return 0 if publicados == set(PMA_CANAIS) else 1
 
 
 def main() -> int:
@@ -654,7 +714,10 @@ def main() -> int:
     # tentado — Gate PMA-2C5B). DEGRADED (so' gap nao-critico conhecido, ex.:
     # Shopee manual) e OK retornam exit 0: o pipeline nao deve "falhar" todo dia
     # por um gap ja conhecido.
-    return 1 if overall in ("FAILED", "BLOCKED") else 0
+    #
+    # Gate PMA-2C5B-R2: o `pma_refresh` tem politica PROPRIA (ver
+    # `exit_code_do_pipeline`). Os demais pipelines nao mudam de semantica.
+    return exit_code_do_pipeline(args.pipeline, results, overall)
 
 
 if __name__ == "__main__":

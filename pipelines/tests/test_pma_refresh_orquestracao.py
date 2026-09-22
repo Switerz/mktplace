@@ -34,7 +34,9 @@ def test_os_tres_canais_estao_na_ordem_ml_shopee_tiktok():
     janela de recomposicao, e deixa-lo primeiro evita que uma janela longa
     atrase as duas fotografias de D0."""
     assert [s.name for s in orch.PIPELINES["pma_refresh"]] == [
-        "pma_ml", "pma_shopee", "pma_tiktok"]
+        "pma_ml", "pma_shopee", "pma_tiktok", "health_check"]
+    assert orch.PMA_CANAIS == ("pma_ml", "pma_shopee", "pma_tiktok"), (
+        "o health_check nao publica e nao entra na conta do exit code")
 
 
 def test_os_tres_canais_sao_nao_criticos():
@@ -55,14 +57,17 @@ def test_nenhum_canal_depende_de_outro():
 def test_cada_canal_tem_preflight_proprio():
     fontes = {s.name: s.preflight_source for s in orch.PIPELINES["pma_refresh"]}
     assert fontes == {"pma_ml": "pma_ml", "pma_shopee": "pma_shopee",
-                      "pma_tiktok": "pma_tiktok"}
+                      "pma_tiktok": "pma_tiktok", "health_check": None}
     from pipelines.ops import preflight as pf
     for fonte in fontes.values():
+        if fonte is None:
+            continue
         assert fonte in pf.SOURCE_CHECKS, f"preflight {fonte} nao registrado"
 
 
 def test_usa_os_publishers_canonicos_sem_duplicar_regra():
     modulos = {s.name: s.module for s in orch.PIPELINES["pma_refresh"]}
+    assert modulos["health_check"] == "pipelines.ops.health_check"
     assert modulos["pma_ml"] == "pipelines.sync_ml_listing_price_serving"
     assert modulos["pma_shopee"] == "pipelines.channel_offer_publisher"
     assert modulos["pma_tiktok"] == "pipelines.channel_offer_publisher"
@@ -70,6 +75,7 @@ def test_usa_os_publishers_canonicos_sem_duplicar_regra():
 
 def test_cada_canal_publica_o_seu_marketplace_com_apply():
     args = {s.name: s.args for s in orch.PIPELINES["pma_refresh"]}
+    assert "--apply" not in args["health_check"], "diagnostico nao publica"
     assert args["pma_shopee"] == ("--marketplace", "shopee", "--apply")
     assert args["pma_tiktok"] == ("--marketplace", "tiktok", "--apply")
     assert args["pma_ml"][0] == "--apply"
@@ -128,14 +134,27 @@ def test_shopee_e_tiktok_nao_recebem_janela_nem_data():
 # ---------------------------------------------------------------------------
 
 def _roda(codigos: dict[str, int], preflight_ok=True):
+    """`health_check` ganha 0 por default: os testes desta secao falam sobre os
+    CANAIS, e o diagnostico nao deve virar ruido em cada caso."""
     def executor(step):
-        return codigos[step.name]
+        return codigos.get(step.name, 0)
 
     def preflight(_fonte):
         return (preflight_ok, [])
 
     return orch.run_pipeline("pma_refresh", executor=executor,
                              preflight_fn=preflight)
+
+
+def _canais(resultados: dict[str, str]) -> dict[str, str]:
+    """So' os steps que PUBLICAM. O `health_check` roda sempre e teria SUCCESS
+    em todo caso, poluindo qualquer comparacao de conjunto."""
+    return {k: v for k, v in resultados.items() if k in orch.PMA_CANAIS}
+
+
+def _exit(resultados: dict[str, str]) -> int:
+    agregado = orch.compute_overall_status("pma_refresh", resultados)
+    return orch.exit_code_do_pipeline("pma_refresh", resultados, agregado)
 
 
 @pytest.mark.parametrize("codigo,esperado", [
@@ -148,7 +167,8 @@ def _roda(codigos: dict[str, int], preflight_ok=True):
 ])
 def test_cada_exit_code_vira_o_status_certo(codigo, esperado):
     r = _roda({"pma_ml": codigo, "pma_shopee": codigo, "pma_tiktok": codigo})
-    assert set(r.values()) == {esperado}
+    assert set(_canais(r).values()) == {esperado}
+    assert _exit(r) == (0 if esperado == "SUCCESS" else 1)
 
 
 def test_exit_code_desconhecido_vira_failed_e_nao_sucesso():
@@ -160,14 +180,16 @@ def test_exit_code_desconhecido_vira_failed_e_nao_sucesso():
 
 def test_recusa_NUNCA_vira_sucesso():
     r = _roda({"pma_ml": 2, "pma_shopee": 2, "pma_tiktok": 2})
-    assert "SUCCESS" not in r.values()
+    assert "SUCCESS" not in _canais(r).values()
     assert orch.compute_overall_status("pma_refresh", r) == "DEGRADED"
+    assert _exit(r) == 1, "tres recusas nao podem sair 0"
 
 
 def test_lock_ocupado_nao_e_falha_mas_tambem_nao_e_sucesso():
     r = _roda({"pma_ml": 3, "pma_shopee": 3, "pma_tiktok": 3})
-    assert set(r.values()) == {"LOCKED"}
+    assert set(_canais(r).values()) == {"LOCKED"}
     assert orch.compute_overall_status("pma_refresh", r) == "DEGRADED"
+    assert _exit(r) == 1, "lock ocupado e' seguro, mas nao publicou"
 
 
 def test_indeterminado_aparece_com_nome_proprio():
@@ -215,7 +237,7 @@ def test_nenhum_canal_e_silenciosamente_ignorado():
     """Todo step precisa aparecer no resultado, com status proprio. Um canal
     ausente do dicionario seria indistinguivel de um canal que passou."""
     r = _roda({"pma_ml": 0, "pma_shopee": 2, "pma_tiktok": 3})
-    assert set(r) == {"pma_ml", "pma_shopee", "pma_tiktok"}
+    assert set(r) == {"pma_ml", "pma_shopee", "pma_tiktok", "health_check"}
     assert "SKIPPED" not in r.values()
 
 
@@ -240,17 +262,24 @@ def test_um_canal_bloqueado_nao_bloqueia_os_outros():
 # 5. Status agregado
 # ---------------------------------------------------------------------------
 
-def test_tudo_publicado_e_ok():
+def test_tudo_publicado_e_ok_e_o_UNICO_exit_zero():
     r = _roda({"pma_ml": 0, "pma_shopee": 0, "pma_tiktok": 0})
     assert orch.compute_overall_status("pma_refresh", r) == "OK"
+    assert _exit(r) == 0
 
 
-@pytest.mark.parametrize("codigo", [1, 2, 3, 4])
-def test_um_canal_ruim_rebaixa_para_degraded_e_nunca_para_failed(codigo):
-    """`critical=False` e' o que garante isolamento: o pipeline nao 'falha'
-    porque um canal recusou."""
+@pytest.mark.parametrize("codigo,agregado", [
+    (1, "DEGRADED"), (2, "DEGRADED"), (3, "DEGRADED"), (4, "INDETERMINATE"),
+])
+def test_um_canal_ruim_nao_derruba_os_outros_mas_derruba_o_exit(codigo, agregado):
+    """Gate PMA-2C5B-R2: `critical=False` controla CONTINUIDADE, nao sucesso.
+
+    O pipeline segue tentando os outros canais — e o exit code diz a verdade:
+    a fotografia do dia NAO esta completa."""
     r = _roda({"pma_ml": codigo, "pma_shopee": 0, "pma_tiktok": 0})
-    assert orch.compute_overall_status("pma_refresh", r) == "DEGRADED"
+    assert orch.compute_overall_status("pma_refresh", r) == agregado
+    assert r["pma_shopee"] == "SUCCESS" and r["pma_tiktok"] == "SUCCESS"
+    assert _exit(r) == 1, "sucesso parcial nunca pode sair 0"
 
 
 def test_todos_bloqueados_e_blocked_e_nao_degraded():
@@ -258,8 +287,12 @@ def test_todos_bloqueados_e_blocked_e_nao_degraded():
     reconciliado. Esse estado merece nome proprio."""
     r = orch.run_pipeline("pma_refresh", executor=lambda s: 0,
                           preflight_fn=lambda _f: (False, []))
-    assert set(r.values()) == {"BLOCKED"}
-    assert orch.compute_overall_status("pma_refresh", r) == "BLOCKED"
+    # O health_check nao tem preflight, entao executa e tem SUCCESS: o
+    # agregado BLOCKED e' sobre os CANAIS, que e' o que importa.
+    canais = {k: v for k, v in r.items() if k in orch.PMA_CANAIS}
+    assert set(canais.values()) == {"BLOCKED"}
+    assert orch.compute_overall_status("pma_refresh", canais) == "BLOCKED"
+    assert _exit(r) == 1
 
 
 def test_blocked_parcial_nao_vira_blocked_agregado():

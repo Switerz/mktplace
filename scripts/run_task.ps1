@@ -132,7 +132,7 @@ function Get-TaskDefinitions {
         "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
         "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
         "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
-        "pma_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 2700; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "pma_refresh") }
+        "pma_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 3600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "pma_refresh") }
     }
 }
 

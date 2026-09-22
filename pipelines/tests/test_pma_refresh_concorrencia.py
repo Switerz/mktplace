@@ -218,5 +218,5 @@ def test_a_segunda_invocacao_nao_e_retentada():
 
     orch.run_pipeline("pma_refresh", executor=executor,
                       preflight_fn=lambda _f: (True, []))
-    assert chamadas == ["pma_ml", "pma_shopee", "pma_tiktok"], (
-        "cada canal e' tentado UMA vez")
+    assert chamadas == ["pma_ml", "pma_shopee", "pma_tiktok", "health_check"], (
+        "cada canal e' tentado UMA vez, e o diagnostico roda por ultimo")

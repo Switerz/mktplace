@@ -1312,9 +1312,39 @@ Os dois publishers falam o mesmo vocabulário, e o orquestrador traduz com uma
 reexecutar.
 
 Status agregado: `OK` (tudo publicado), `DEGRADED` (algum canal não publicou —
-os três são `critical=False`, então um canal nunca derruba os outros), `BLOCKED`
-(**nenhum** canal chegou a ser tentado, tipicamente VPN fora) e `FAILED`
-(reservado a step crítico, que o `pma_refresh` não tem).
+os três são `critical=False`, então um canal nunca derruba os outros),
+**`INDETERMINATE`** (algum canal teve commit indeterminado — tem precedência
+sobre `DEGRADED`), `BLOCKED` (**nenhum** canal chegou a ser tentado,
+tipicamente VPN fora) e `FAILED` (reservado a step crítico, que o `pma_refresh`
+não tem).
+
+### Exit code — política exclusiva do `pma_refresh` (Gate PMA-2C5B-R2)
+
+| resultado | exit |
+|---|---:|
+| ML + Shopee + TikTok publicados | **0** |
+| sucesso parcial | 1 |
+| algum `REFUSED` | 1 |
+| algum `LOCKED` | 1 |
+| algum `FAILED` | 1 |
+| algum `INDETERMINATE` | 1 |
+| todos bloqueados no preflight | 1 |
+| zero canal publicado | 1 |
+
+**`critical=False` governa continuidade, não sucesso.** Ele existe para que um
+canal ruim não impeça a *tentativa* dos outros; não é declaração de que a
+execução deu certo. Quem lê o exit code é o Task Scheduler, e para ele 0
+significa *"a fotografia do dia está publicada"* — duas publicações e uma recusa
+não são isso.
+
+A regra geral do orquestrador (`DEGRADED` → 0) **continua valendo para os
+demais pipelines**: no `full_daily`, um gap não-crítico já conhecido não deve
+fazer a carga do dia falhar todo dia. A política estrita vive em
+`PIPELINES_COM_EXIT_ESTRITO`, que lista `pma_refresh` e mais nada.
+
+O **`health_check` não entra na conta**: ele é o último step, roda sempre — até
+quando todos os canais foram bloqueados — e diagnostica. Três canais publicados
+valem 0 mesmo que ele reporte defasagem conhecida de outra fonte.
 
 **Publicação concluída com auditoria incompleta sai 0 de propósito** — os dados
 *estão* publicados e o defeito é do registro. Quem denuncia isso é o health
