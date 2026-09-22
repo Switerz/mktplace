@@ -381,7 +381,13 @@ def test_22_taskkey_serving_refresh_existe_e_roda_o_pipeline_certo():
 
 def test_22_as_taskkeys_sao_exatamente_tres():
     defs = _task_definitions_via_powershell()
-    assert set(defs) == {"full_daily", "shopee_manual_refresh", "serving_refresh"}
+    # Gate PMA-2C5B acrescentou a TaskKey `pma_refresh` ao wrapper. Ela
+    # NAO foi registrada no Task Scheduler e NAO tem entrada em
+    # PROPOSED_SCHEDULE — existe para que o diagnostico manual e a
+    # primeira publicacao usem o mesmo lock/timeout/log da futura
+    # execucao agendada.
+    assert set(defs) == {"full_daily", "shopee_manual_refresh",
+                         "serving_refresh", "pma_refresh"}
 
 
 def test_23_serving_refresh_usa_o_lock_do_full_daily():

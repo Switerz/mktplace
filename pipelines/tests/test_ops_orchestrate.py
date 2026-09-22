@@ -261,11 +261,18 @@ def test_pipelines_antigos_de_2_tarefas_nao_existem_mais():
     assert "produtos_and_monitor" not in orch.PIPELINES
 
 
-def test_pipelines_disponiveis_sao_exatamente_os_tres_conhecidos():
+def test_pipelines_disponiveis_sao_exatamente_os_quatro_conhecidos():
     """Gate C1: full_daily + shopee_manual_refresh. Checkpoint O1 Task 2/2
-    (2026-08-17): serving_refresh, a TaskKey MANUAL de contingencia — nenhum
-    quarto pipeline, e nenhuma task Shopee ou de serving agendada por engano."""
-    assert set(orch.PIPELINES) == {"full_daily", "shopee_manual_refresh", "serving_refresh"}
+    (2026-08-17): serving_refresh, a TaskKey MANUAL de contingencia. Gate
+    PMA-2C5B (2026-09-22): pma_refresh, pipeline PROPRIO do monitoramento de
+    precos — separado de `full_daily` para poder ser diagnosticado, executado e
+    DESLIGADO sem mexer na ingestao do dia.
+
+    O inventario continua FECHADO: nenhum quinto pipeline, e nenhuma task
+    Shopee, de serving ou de PMA agendada por engano."""
+    assert set(orch.PIPELINES) == {
+        "full_daily", "shopee_manual_refresh", "serving_refresh", "pma_refresh",
+    }
 
 
 # ---------------------------------------------------------------------------
