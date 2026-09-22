@@ -403,12 +403,10 @@ def test_conta_saudavel_e_conta_desatualizada_nao_se_contaminam():
     r = ml_extract.extract(conn, AGORA, frozenset({"2227056661", "2532564723"}))
     assert r.source_health is SourceHealth.HEALTHY
     assert r.account_watermarks["2227056661"] != r.account_watermarks["2532564723"]
-    fresco = transform.classify_freshness(
-        transform.normalizar_negocio_ml(r.account_watermarks["2227056661"]), AGORA
-    )
-    velho = transform.classify_freshness(
-        transform.normalizar_negocio_ml(r.account_watermarks["2532564723"]), AGORA
-    )
+    # `fetch_watermarks` normaliza na fronteira (EXP-3B2-H2): o carimbo ja
+    # chega aware, e reprocessa-lo levantaria de proposito.
+    fresco = transform.classify_freshness(r.account_watermarks["2227056661"], AGORA)
+    velho = transform.classify_freshness(r.account_watermarks["2532564723"], AGORA)
     assert fresco.value == "fresh"
     assert velho.value == "critical"
 
