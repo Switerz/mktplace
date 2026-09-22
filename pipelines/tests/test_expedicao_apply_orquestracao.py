@@ -697,7 +697,15 @@ def test_reconcile_nao_publica():
     import inspect
 
     fonte = inspect.getsource(cli._run_reconcile)
-    assert "readonly=True" in fonte
+    # AS DUAS conexoes, contadas: `"readonly=True" in fonte` era verdadeiro
+    # so pela conexao da FONTE, entao tirar o readonly do DESTINO passava
+    # batido (achado da bateria do EXP-3B2-H2-R/V).
+    assert fonte.count("set_session(readonly=True") == 2, (
+        "as DUAS conexoes precisam abrir read-only"
+    )
+    assert "readonly=False" not in fonte
+    assert "target.set_session(readonly=True" in fonte
+    assert "source.set_session(readonly=True" in fonte
     assert "publish_channel" not in fonte
     assert "channel_lock" not in fonte
     arvore = ast.parse(inspect.getsource(cli.reconcile_channel))

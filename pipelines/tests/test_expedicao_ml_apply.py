@@ -158,6 +158,10 @@ def wm(ext, marca, quando=datetime(2026, 9, 22, 17, 30)):
 
 WATERMARKS_OK = [wm(e, c.brand_key) for e, c in REGISTRY_ML.items()]
 
+#: Watermarks coerentes com um batch publicado em 10/09.
+WM_PASSADO = [wm(e, c.brand_key, datetime(2026, 9, 10, 11, 30))
+              for e, c in REGISTRY_ML.items()]
+
 
 #: Resposta do `preflight_target`: primary gravavel com a 018 aplicada.
 PREFLIGHT_OK = [{
@@ -222,10 +226,30 @@ def test_mercadolivre_tem_adaptador_e_shopee_tambem():
 
 
 def test_canal_sem_adaptador_nao_publica():
-    """ALLOWLIST: TikTok existe no enum e NAO publica."""
+    """ALLOWLIST: TikTok existe no enum e NAO publica.
+
+    A versao anterior chamava `run_apply` SEM injetar conexao: sem
+    DATABASE_URL o preflight levantava e devolvia o mesmo exit code, entao o
+    teste passava por falta de ambiente, nao pela allowlist. A bateria de
+    mutacoes do EXP-3B2-H2-R/V expos isso — desligar a guarda nao reprovava
+    nada. Agora o destino e injetado e a MENSAGEM tambem e verificada.
+    """
     assert Channel.TIKTOKSHOP not in cli.ADAPTADORES
-    r = cli.run_apply(Channel.TIKTOKSHOP, AGORA, log=lambda _m: None)
+    alvo = FakeTarget()
+    alvo.respostas = [PREFLIGHT_OK, []]
+    msgs = []
+    r = cli.run_apply(
+        Channel.TIKTOKSHOP, AGORA,
+        open_target=lambda: alvo,
+        open_source=lambda: FakeSource([], []),
+        open_audit=lambda: FakeTarget(),
+        uuid_factory=lambda: BATCH,
+        execute_values=lambda cur, sql, args: cur.execute(sql),
+        log=msgs.append,
+    )
     assert r == cli.EXIT_PRECONDICAO
+    assert any("ainda nao suportado" in m for m in msgs), msgs
+    assert alvo.deletes == 0 and alvo.inserts == 0 and alvo.commits == 0
 
 
 def test_registry_vazio_bloqueia_antes_da_auditoria():
@@ -386,15 +410,21 @@ def test_candidata_vazia_inesperada_nao_passa_por_fonte_doente():
 # ---------------------------------------------------------------------------
 # Reconciliacao deterministica
 # ---------------------------------------------------------------------------
-def _publicado_fake(linhas_fila, efetivo=AGORA, batch=BATCH):
-    """Respostas do destino: primeiro o cabecalho, depois as linhas."""
+def _publicado_fake(linhas_fila, efetivo=AGORA, batch=BATCH, ingestao=None):
+    """Respostas do destino: primeiro o cabecalho, depois as linhas.
+
+    `ingestao` sobrescreve `source_ingested_at` no PUBLICADO — e assim que se
+    simula "a fonte releu esta linha depois do apply".
+    """
     cabecalho = [{"refresh_batch_id": batch, "effective_at": efetivo}]
     corpo = [
         {"channel": x["channel"], "shop_account": x["shop_account"],
          "marketplace_order_id": x["marketplace_order_id"],
          "brand": x["brand"], "deadline_status": x["deadline_status"],
          "operational_age_status": x["operational_age_status"],
-         "is_stalled": x["is_stalled"], "logistic_type": x["logistic_type"]}
+         "is_stalled": x["is_stalled"], "logistic_type": x["logistic_type"],
+         "source_ingested_at": (ingestao if ingestao is not None
+                                else x["source_ingested_at"])}
         for x in linhas_fila
     ]
     return [cabecalho, corpo]
@@ -411,38 +441,46 @@ def test_reconciliacao_usa_o_effective_at_do_batch_publicado():
     )
     assert r["effective_at"] == AGORA
     assert r["publicadas"] == r["recomputadas"] == r["chaves_comuns"] == 2
+    assert r["comparaveis"] == 2
+    assert r["mutadas_na_fonte"] == 0
     assert r["campos_divergentes"] == 0
-    assert r["fingerprint_comuns_igual"] is True
+    assert r["veredito"] == "deterministico_no_subconjunto_comparavel"
 
 
 def test_reconciliacao_nao_exige_hash_igual_entre_instantes_diferentes():
     """A ancora e o effective_at publicado, nao o relogio de agora.
 
-    A mesma fonte, reconciliada em `AGORA`, bate. Se a reconciliacao usasse o
-    relogio corrente, a idade reclassificaria e o hash divergiria sozinho — foi
-    o que o EXP-3B2-P2 mediu (over_48h 269 -> 358 em 33 minutos).
+    Se a reconciliacao usasse o relogio corrente, a idade reclassificaria e o
+    hash divergiria sozinho — foi o que o EXP-3B2-P2 mediu (over_48h 269 -> 358
+    em 33 minutos).
     """
-    linhas = [linha(700001, date_ready_to_ship=datetime(2026, 9, 22, 13, 0))]
-    no_publicado = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
-    muito_depois = AGORA + timedelta(days=10)
+    # O `effective_at` publicado fica no PASSADO distante de proposito: se a
+    # reconciliacao usasse `now()` em vez dele, a linha mudaria de faixa e a
+    # divergencia apareceria. Com `AGORA` colado no relogio real a mutacao
+    # passava despercebida — achado da bateria do EXP-3B2-H2-R/V.
+    passado = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+    linhas = [linha(700001,
+                    date_ready_to_ship=datetime(2026, 9, 10, 7, 0),
+                    order_created_at=datetime(2026, 9, 10, 6, 0),
+                    extracted_at=datetime(2026, 9, 10, 11, 30))]
+    no_publicado = transform.build_fila_ml(linhas, REGISTRY_ML, passado, BATCH)
+    muito_depois = passado + timedelta(days=10)
     no_futuro = transform.build_fila_ml(linhas, REGISTRY_ML, muito_depois, BATCH)
     assert (no_publicado[0]["operational_age_status"]
             != no_futuro[0]["operational_age_status"]), (
         "o cenario precisa de uma linha que MUDE de faixa com o tempo"
     )
-    alvo = FakeTarget(respostas=_publicado_fake(no_publicado))
+    alvo = FakeTarget(respostas=_publicado_fake(no_publicado, efetivo=passado))
     r = cli.reconcile_channel(
-        alvo, FakeSource(linhas, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        alvo, FakeSource(linhas, WM_PASSADO), Channel.MERCADOLIVRE,
         open_registry=lambda _c, _m: (REGISTRY_ML, []),
     )
-    assert r["campos_divergentes"] == 0, (
-        "reconciliar no effective_at publicado tem que bater mesmo com o "
-        "relogio ja adiantado"
-    )
+    assert r["campos_divergentes"] == 0
+    assert r["comparaveis"] == 1
 
 
-def test_reconciliacao_falha_fechada_em_drift_material():
-    """Mesma chave, mesmo instante, classificacao diferente: levanta."""
+def test_drift_DETERMINISTICO_falha_fechada():
+    """Mesma chave, MESMA entrada, mesmo instante, classificacao diferente."""
     linhas = [linha(700001)]
     fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
     corrompido = _publicado_fake(fila)
@@ -453,7 +491,53 @@ def test_reconciliacao_falha_fechada_em_drift_material():
             alvo, FakeSource(linhas, WATERMARKS_OK), Channel.MERCADOLIVRE,
             open_registry=lambda _c, _m: (REGISTRY_ML, []),
         )
-    assert "DRIFT MATERIAL" in str(erro.value)
+    assert "DRIFT DETERMINISTICO" in str(erro.value)
+    assert "source_ingested_at identico" in str(erro.value)
+
+
+def test_mutacao_da_MESMA_chave_na_fonte_NAO_e_drift():
+    """Item 4d/4e da revisao: o achado que esta versao corrige.
+
+    A linha foi RELIDA pelo job de ingestao depois do apply e a modalidade
+    mudou de verdade. A entrada e OUTRA, entao a saida ser outra nao prova nada
+    contra o transform. A versao anterior chamava isso de "DRIFT MATERIAL" —
+    alarme falso em operacao normal, que ensina a ignorar o alarme.
+    """
+    antes = [linha(700001, logistic_type="cross_docking")]
+    fila = transform.build_fila_ml(antes, REGISTRY_ML, AGORA, BATCH)
+    # a fonte releu: conteudo diferente E `extracted_at` avancado
+    depois = [linha(700001, logistic_type="xd_drop_off",
+                    extracted_at=datetime(2026, 9, 22, 17, 55))]
+    alvo = FakeTarget(respostas=_publicado_fake(fila))
+    r = cli.reconcile_channel(
+        alvo, FakeSource(depois, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        open_registry=lambda _c, _m: (REGISTRY_ML, []),
+    )
+    assert r["mutadas_na_fonte"] == 1
+    assert r["comparaveis"] == 0
+    assert r["campos_divergentes"] == 0
+    assert r["veredito"] == "inconclusivo_sem_linha_comparavel", (
+        "sem linha comparavel o resultado e INCONCLUSIVO, nunca 'equivalente'"
+    )
+
+
+def test_mutacao_e_drift_convivem_e_sao_separados():
+    """Uma linha relida e outra intacta: so a intacta sustenta veredito."""
+    linhas = [linha(700001), linha(700002)]
+    fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
+    # 700001 foi relida (mutacao); 700002 continua igual (comparavel)
+    depois = [linha(700001, logistic_type="drop_off",
+                    extracted_at=datetime(2026, 9, 22, 17, 55)),
+              linha(700002)]
+    r = cli.reconcile_channel(
+        FakeTarget(respostas=_publicado_fake(fila)),
+        FakeSource(depois, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        open_registry=lambda _c, _m: (REGISTRY_ML, []),
+    )
+    assert r["mutadas_na_fonte"] == 1
+    assert r["comparaveis"] == 1
+    assert r["campos_divergentes"] == 0
+    assert r["veredito"] == "deterministico_no_subconjunto_comparavel"
 
 
 def test_reconciliacao_nao_imprime_identificador_de_pedido():
@@ -468,23 +552,67 @@ def test_reconciliacao_nao_imprime_identificador_de_pedido():
             open_registry=lambda _c, _m: (REGISTRY_ML, []),
         )
     assert "700001" not in str(erro.value)
+    assert "880000" not in str(erro.value)
 
 
-def test_reconciliacao_conta_churn_sem_reprovar():
-    """Chave so' de um lado e churn da fonte: reportado, nao fatal."""
+def test_churn_pequeno_e_contado_sem_reprovar():
     publicadas = [linha(700001), linha(700002)]
     fila = transform.build_fila_ml(publicadas, REGISTRY_ML, AGORA, BATCH)
     agora_na_fonte = [linha(700002), linha(700003)]  # 1 saiu, 1 entrou
-    alvo = FakeTarget(respostas=_publicado_fake(fila))
     r = cli.reconcile_channel(
-        alvo, FakeSource(agora_na_fonte, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        FakeTarget(respostas=_publicado_fake(fila)),
+        FakeSource(agora_na_fonte, WATERMARKS_OK), Channel.MERCADOLIVRE,
         open_registry=lambda _c, _m: (REGISTRY_ML, []),
     )
     assert r["somente_publicadas"] == 1
     assert r["somente_recomputadas"] == 1
-    assert r["chaves_comuns"] == 1
+    assert r["chaves_comuns"] == r["comparaveis"] == 1
     assert r["campos_divergentes"] == 0
-    assert r["fingerprint_comuns_igual"] is True
+
+
+def test_churn_TOTAL_e_inconclusivo_e_nao_falso_verde():
+    """Item 4g: nenhuma chave sobrevive. Nao ha o que comparar."""
+    publicadas = [linha(700001), linha(700002)]
+    fila = transform.build_fila_ml(publicadas, REGISTRY_ML, AGORA, BATCH)
+    outra_fonte = [linha(800001), linha(800002)]
+    r = cli.reconcile_channel(
+        FakeTarget(respostas=_publicado_fake(fila)),
+        FakeSource(outra_fonte, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        open_registry=lambda _c, _m: (REGISTRY_ML, []),
+    )
+    assert r["chaves_comuns"] == 0
+    assert r["comparaveis"] == 0
+    assert r["veredito"] == "inconclusivo_sem_linha_comparavel"
+    assert r["fingerprint_publicado"] != r["fingerprint_recomputado"]
+
+
+def test_batch_substituido_nao_mistura_cabecalho_e_linhas():
+    """Item 4g/4h: dois lotes na fila e inconsistencia, nao ambiguidade."""
+    alvo = FakeTarget(respostas=[[
+        {"refresh_batch_id": "a", "effective_at": AGORA},
+        {"refresh_batch_id": "b", "effective_at": AGORA},
+    ]])
+    with pytest.raises(SourceUnhealthy) as erro:
+        cli.reconcile_channel(
+            alvo, FakeSource([], WATERMARKS_OK), Channel.MERCADOLIVRE,
+            open_registry=lambda _c, _m: (REGISTRY_ML, []),
+        )
+    assert "lotes simultaneos" in str(erro.value)
+
+
+def test_leitura_do_destino_usa_snapshot_repeatable_read():
+    """Item 4h: cabecalho e linhas saem do MESMO snapshot."""
+    linhas = [linha(700001)]
+    fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
+    alvo = FakeTarget(respostas=_publicado_fake(fila))
+    cli.reconcile_channel(
+        alvo, FakeSource(linhas, WATERMARKS_OK), Channel.MERCADOLIVRE,
+        open_registry=lambda _c, _m: (REGISTRY_ML, []),
+    )
+    isolamento = [s for s in alvo.sqls if "isolation level" in s.lower()]
+    assert isolamento, "nenhum SET TRANSACTION emitido"
+    assert "repeatable read" in isolamento[0].lower()
+    assert "read only" in isolamento[0].lower()
 
 
 def test_reconciliacao_recusa_fonte_stale():
@@ -510,19 +638,6 @@ def test_reconciliacao_recusa_canal_sem_fotografia():
         )
 
 
-def test_reconciliacao_recusa_dois_lotes_simultaneos():
-    alvo = FakeTarget(respostas=[[
-        {"refresh_batch_id": "a", "effective_at": AGORA},
-        {"refresh_batch_id": "b", "effective_at": AGORA},
-    ]])
-    with pytest.raises(SourceUnhealthy) as erro:
-        cli.reconcile_channel(
-            alvo, FakeSource([], WATERMARKS_OK), Channel.MERCADOLIVRE,
-            open_registry=lambda _c, _m: (REGISTRY_ML, []),
-        )
-    assert "lotes simultaneos" in str(erro.value)
-
-
 def test_fingerprint_e_independente_de_ordem():
     fila = transform.build_fila_ml(
         [linha(700001), linha(700002), linha(700003)], REGISTRY_ML, AGORA, BATCH)
@@ -539,6 +654,12 @@ def test_reconciliacao_nao_escreve_e_nao_toma_lock():
     )
     assert alvo.deletes == 0 and alvo.inserts == 0 and alvo.commits == 0
     assert not any("advisory" in s.lower() for s in alvo.sqls)
+
+
+def test_source_ingested_at_e_lido_do_destino_mas_nao_comparado():
+    """O discriminador nao pode virar campo comparado: mutacao viraria drift."""
+    assert "source_ingested_at" in cli.COLUNAS_PUBLICADAS
+    assert "source_ingested_at" not in cli.CAMPOS_RECONCILIADOS
 
 
 # ---------------------------------------------------------------------------

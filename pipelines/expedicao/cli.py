@@ -573,6 +573,17 @@ CAMPOS_RECONCILIADOS = (
     "logistic_type",
 )
 
+#: Colunas lidas do destino. Alem dos campos comparados, traz
+#: `source_ingested_at`, que NAO e comparado: e o DISCRIMINADOR entre
+#: mutacao da fonte e drift do codigo. Ver `reconcile_channel`.
+COLUNAS_PUBLICADAS = (
+    "channel",
+    "shop_account",
+    "marketplace_order_id",
+    *CAMPOS_RECONCILIADOS,
+    "source_ingested_at",
+)
+
 
 def fingerprint_fila(linhas: list[dict]) -> str:
     """Impressao INDEPENDENTE DE ORDEM da fila.
@@ -595,37 +606,52 @@ def fingerprint_fila(linhas: list[dict]) -> str:
 
 
 def published_snapshot(target, channel: Channel) -> dict:
-    """Le do destino a fotografia publicada do canal.
+    """Le do destino a fotografia publicada do canal, em UM snapshot.
 
-    Devolve `effective_at`, `refresh_batch_id` e as linhas com os campos
-    reconciliados. Um canal com mais de um batch na fila e' inconsistencia, nao
-    ambiguidade a resolver: levanta.
+    As duas consultas (cabecalho e linhas) correm dentro de
+    `REPEATABLE READ, READ ONLY`. Em READ COMMITTED elas poderiam cair de lados
+    diferentes de uma republicacao e a reconciliacao compararia o cabecalho de
+    um lote com as linhas de outro — divergencia inventada pela leitura.
+
+    Um canal com mais de um batch na fila e inconsistencia, nao ambiguidade a
+    resolver: levanta.
     """
-    with target.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT refresh_batch_id, effective_at "
-            f"FROM {FILA_TABLE} WHERE channel = %s",
-            (channel.value,),
-        )
-        lotes = [dict(r) if not isinstance(r, dict) else r for r in cur.fetchall()]
-    if not lotes:
-        return {"effective_at": None, "refresh_batch_id": None, "linhas": []}
-    if len(lotes) > 1:
-        raise SourceUnhealthy(
-            f"fila de {channel.value} tem {len(lotes)} lotes simultaneos; "
-            "a substituicao por canal deveria deixar exatamente um."
-        )
-    cabecalho = lotes[0]
-    colunas = ["channel", "shop_account", "marketplace_order_id", *CAMPOS_RECONCILIADOS]
-    with target.cursor() as cur:
-        cur.execute(
-            f"SELECT {', '.join(colunas)} FROM {FILA_TABLE} WHERE channel = %s",
-            (channel.value,),
-        )
-        linhas = [dict(r) for r in cur.fetchall()]
+    autocommit_anterior = getattr(target, "autocommit", None)
+    if autocommit_anterior:
+        target.autocommit = False
+    try:
+        with target.cursor() as cur:
+            cur.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            )
+            cur.execute(
+                "SELECT DISTINCT refresh_batch_id, effective_at "
+                f"FROM {FILA_TABLE} WHERE channel = %s",
+                (channel.value,),
+            )
+            lotes = [dict(r) for r in cur.fetchall()]
+            if not lotes:
+                return {"effective_at": None, "refresh_batch_id": None, "linhas": []}
+            if len(lotes) > 1:
+                raise SourceUnhealthy(
+                    f"fila de {channel.value} tem {len(lotes)} lotes simultaneos; "
+                    "a substituicao por canal deveria deixar exatamente um."
+                )
+            cur.execute(
+                f"SELECT {', '.join(COLUNAS_PUBLICADAS)} FROM {FILA_TABLE} "
+                "WHERE channel = %s",
+                (channel.value,),
+            )
+            linhas = [dict(r) for r in cur.fetchall()]
+    finally:
+        with suppress(Exception):
+            target.rollback()
+        if autocommit_anterior:
+            with suppress(Exception):
+                target.autocommit = True
     return {
-        "effective_at": cabecalho["effective_at"],
-        "refresh_batch_id": cabecalho["refresh_batch_id"],
+        "effective_at": lotes[0]["effective_at"],
+        "refresh_batch_id": lotes[0]["refresh_batch_id"],
         "linhas": linhas,
     }
 
@@ -645,22 +671,45 @@ def reconcile_channel(
     as 21:52, e `over_48h` saltou de 269 para 358 em 33 minutos. Duas causas
     independentes: a fonte muda (shipment entra e sai de `ready_to_ship`) e o
     RELOGIO muda (a idade reclassifica sozinha). Exigir hashes iguais entre o
-    dry-run e o apply reprovaria toda execucao saudavel — e, pior, empurraria
+    dry-run e o apply reprovaria toda execucao saudavel — e, pior, ensinaria
     quem opera a afrouxar o criterio no meio de um incidente.
 
-    A ancora certa e' o `effective_at` DO BATCH PUBLICADO. `build_fila_*` e'
-    funcao pura de (linhas, registry, effective_at): recomputando no mesmo
-    instante, a classificacao e' reproduzivel e o unico residuo e' o churn da
-    fonte entre a publicacao e a leitura.
+    A ancora e o `effective_at` DO BATCH PUBLICADO. `build_fila_*` e funcao pura
+    de (linhas, registry, effective_at): recomputando no mesmo instante, a
+    classificacao e reproduzivel.
 
-    DRIFT MATERIAL vs CHURN
-    -----------------------
-    Para uma chave presente nos DOIS lados, todo campo classificado tem que
-    bater. Divergencia ali nao e' churn: e' o codigo dando dois vereditos para
-    a mesma linha no mesmo instante — falha FECHADA.
+    AS TRES DIFERENCAS, QUE NAO SAO A MESMA COISA
+    ----------------------------------------------
+    1. CHURN de chave — o shipment entrou ou saiu de `ready_to_ship` entre a
+       publicacao e esta leitura. Contado, reportado, nunca fatal.
 
-    Chave so' de um lado e' churn da fonte: contado e reportado, nunca
-    silenciado, e nunca confundido com erro de classificacao.
+    2. MUTACAO DA MESMA CHAVE NA FONTE — a linha foi RELIDA pelo job de
+       ingestao depois da publicacao e o conteudo dela mudou de verdade
+       (substatus avancou, modalidade corrigida, prontidao recarimbada). A
+       entrada e OUTRA, entao a saida ser outra nao prova nada contra o
+       transform. Contado, reportado, nunca fatal.
+
+    3. DRIFT DETERMINISTICO — mesma chave, MESMA entrada, mesmo instante, e
+       ainda assim classificacao diferente. Isso e o codigo se contradizendo.
+       Falha FECHADA.
+
+    O discriminador entre (2) e (3) esta no proprio dado: `source_ingested_at`
+    e o carimbo de quando AQUELA linha foi lida da fonte, e o publicado guarda
+    o valor que valia no apply. Se o publicado e o recomputado carregam o MESMO
+    `source_ingested_at`, a linha nao foi relida no intervalo — a entrada e
+    identica e a comparacao e legitima. Se diferem, a fonte releu, e comparar
+    classificacao seria comparar coisas diferentes.
+
+    A revisao EXP-3B2-H2-R/V encontrou exatamente esse defeito: sem o
+    discriminador, mudar `logistic_type` na fonte entre o apply e o reconcile
+    era reportado como "DRIFT MATERIAL". Alarme falso em operacao normal ensina
+    a ignorar o alarme.
+
+    O QUE ESTE RESULTADO PROVA — E O QUE NAO PROVA
+    -----------------------------------------------
+    Prova determinismo SOBRE O SUBCONJUNTO COMPARAVEL. `comparaveis == 0`
+    significa INCONCLUSIVO, nao "equivalente": nao houve uma linha sequer com
+    entrada identica para comparar. O campo `veredito` diz qual dos dois e.
     """
     publicado = published_snapshot(target, channel)
     if publicado["effective_at"] is None:
@@ -697,47 +746,54 @@ def reconcile_channel(
     rec = {chave(x): x for x in recomputada}
     comuns = set(pub) & set(rec)
 
-    divergentes = []
+    comparaveis, mutadas, divergentes = 0, 0, []
     for k in sorted(comuns):
+        if pub[k].get("source_ingested_at") != rec[k].get("source_ingested_at"):
+            # A fonte releu esta linha depois do apply: entrada diferente.
+            mutadas += 1
+            continue
+        comparaveis += 1
         for campo in CAMPOS_RECONCILIADOS:
             a, b = pub[k].get(campo), rec[k].get(campo)
             if a != b:
                 # A chave NAO entra na mensagem: e identificador operacional.
                 divergentes.append(f"{campo}: publicado={a!r} recomputado={b!r}")
 
-    resultado = {
+    if divergentes:
+        raise SourceUnhealthy(
+            f"DRIFT DETERMINISTICO na reconciliacao de {channel.value}: "
+            f"{len(divergentes)} campo(s) classificados de forma diferente para a "
+            f"MESMA chave, com a MESMA entrada (source_ingested_at identico) e o "
+            f"MESMO effective_at. Exemplos: {sorted(set(divergentes))[:3]}"
+        )
+
+    duplicadas = len(publicado["linhas"]) - len(pub)
+    if duplicadas:
+        raise SourceUnhealthy(
+            f"fila de {channel.value} tem {duplicadas} chave(s) duplicada(s) "
+            "no destino."
+        )
+
+    return {
         "channel": channel.value,
         "effective_at": efetivo,
         "refresh_batch_id": publicado["refresh_batch_id"],
         "publicadas": len(pub),
         "recomputadas": len(rec),
         "chaves_comuns": len(comuns),
+        "comparaveis": comparaveis,
+        "mutadas_na_fonte": mutadas,
         "somente_publicadas": len(set(pub) - set(rec)),
         "somente_recomputadas": len(set(rec) - set(pub)),
-        "campos_divergentes": len(divergentes),
-        "amostra_divergencias": sorted(set(divergentes))[:5],
+        "campos_divergentes": 0,
+        "duplicadas": duplicadas,
         "fingerprint_publicado": fingerprint_fila(publicado["linhas"]),
         "fingerprint_recomputado": fingerprint_fila(recomputada),
-        "fingerprint_comuns_igual": (
-            fingerprint_fila([pub[k] for k in sorted(comuns)])
-            == fingerprint_fila([rec[k] for k in sorted(comuns)])
+        "veredito": (
+            "deterministico_no_subconjunto_comparavel" if comparaveis
+            else "inconclusivo_sem_linha_comparavel"
         ),
-        "duplicadas": len(publicado["linhas"]) - len(pub),
     }
-
-    if divergentes:
-        raise SourceUnhealthy(
-            f"DRIFT MATERIAL na reconciliacao de {channel.value}: "
-            f"{len(divergentes)} campo(s) classificados de forma diferente para a "
-            f"MESMA chave no MESMO effective_at. Exemplos: "
-            f"{sorted(set(divergentes))[:3]}"
-        )
-    if resultado["duplicadas"]:
-        raise SourceUnhealthy(
-            f"fila de {channel.value} tem {resultado['duplicadas']} chave(s) "
-            "duplicada(s) no destino."
-        )
-    return resultado
 
 def run_apply(
     channel: Channel,
@@ -1217,20 +1273,26 @@ def format_reconcile(r: dict) -> str:
         f"  effective_at do batch : {r['effective_at']}",
         f"  batch                 : {r['refresh_batch_id']}",
         "",
-        f"  linhas publicadas     : {r['publicadas']}",
-        f"  linhas recomputadas   : {r['recomputadas']}",
+        f"  publicadas            : {r['publicadas']}",
+        f"  recomputadas          : {r['recomputadas']}",
         f"  chaves em comum       : {r['chaves_comuns']}",
-        f"  so no publicado       : {r['somente_publicadas']}  (churn da fonte)",
-        f"  so no recomputado     : {r['somente_recomputadas']}  (churn da fonte)",
-        f"  campos divergentes    : {r['campos_divergentes']}",
+        "",
+        "  AS TRES DIFERENCAS, que nao sao a mesma coisa:",
+        f"    churn de chave      : {r['somente_publicadas']} sairam, "
+        f"{r['somente_recomputadas']} entraram",
+        f"    mutadas na fonte    : {r['mutadas_na_fonte']}  "
+        "(relidas apos o apply: entrada diferente, nao comparaveis)",
+        f"    comparaveis         : {r['comparaveis']}  "
+        "(mesma entrada: e sobre estas que o veredito fala)",
+        f"    divergencias        : {r['campos_divergentes']}",
         "",
         f"  fingerprint publicado  : {r['fingerprint_publicado']}",
         f"  fingerprint recomputado: {r['fingerprint_recomputado']}",
-        f"  hashes das chaves COMUNS batem: {r['fingerprint_comuns_igual']}",
+        f"  VEREDITO               : {r['veredito']}",
         "",
-        "  Os dois fingerprints so coincidem se a fonte nao mudou entre a",
-        "  publicacao e esta leitura. O que PRECISA bater e o das chaves em",
-        "  comum: mesma chave, mesmo instante, mesma classificacao.",
+        "  Os dois fingerprints so coincidem se NADA mudou na fonte entre a",
+        "  publicacao e esta leitura. Diferenca entre eles e churn ou mutacao,",
+        "  nao defeito. O que reprova e divergencia sobre linha COMPARAVEL.",
     ])
 
 def _run_diagnose(canal: Channel, effective_at: datetime) -> int:
