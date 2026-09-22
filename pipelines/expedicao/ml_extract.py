@@ -127,14 +127,25 @@ GROUP BY o.seller_id, s.brand
 
 
 def fetch_watermarks(conn) -> list[SourceWatermark]:
-    """Watermark por conta (`seller_id`), com a marca como nome da conta."""
+    """Watermark por conta (`seller_id`), com a marca como nome da conta.
+
+    O carimbo sai daqui JA NORMALIZADO para UTC. Esta e a fronteira entre a
+    linha crua do banco e o dominio: `SourceWatermark` alimenta
+    `build_account_summaries` (que publica `source_watermark_at`) e o alerta
+    de frescor, e os dois comparam com `effective_at`, que e aware.
+
+    A Shopee entrega `timestamptz` e sempre foi aware. O ML entregava naive,
+    e a comparacao morria com `can't compare offset-naive and offset-aware
+    datetimes` DEPOIS do commit: publicacao feita, auditoria incompleta,
+    exit 5. Medido no ensaio ponta a ponta do EXP-3B2-H2.
+    """
     with conn.cursor() as cur:
         cur.execute(ML_WATERMARK_SQL)
         return [
             SourceWatermark(
                 external_seller_id=str(row["seller_id"]),
                 shop_account=str(row["brand"]),
-                max_ingested_at=row["max_extracted_at"],
+                max_ingested_at=normalizar_ingestao_ml(row["max_extracted_at"]),
             )
             for row in cur.fetchall()
         ]
@@ -179,6 +190,19 @@ def is_stale_source_record(
         return True
     return (effective_at - carimbo) > max_age
 
+
+
+def _fora_da_coorte_utc(
+    carimbo: datetime | None, effective_at: datetime, max_age: timedelta
+) -> bool:
+    """Idem `is_stale_source_record`, mas para carimbo JA em UTC.
+
+    O watermark ja passou pela normalizacao na fronteira; reprocessa-lo faria
+    `normalizar_ingestao_ml` levantar, porque a funcao recusa aware de
+    proposito (EXP-3B2-H1)."""
+    if carimbo is None:
+        return True
+    return (effective_at - carimbo) > max_age
 
 def classify_candidates(
     linhas: list[dict],
@@ -329,7 +353,7 @@ def extract(
     paradas = sorted(
         c
         for c in expected_accounts
-        if is_stale_source_record(carimbos.get(c), effective_at, max_age)
+        if _fora_da_coorte_utc(carimbos.get(c), effective_at, max_age)
     )
     if paradas:
         return _resultado(
