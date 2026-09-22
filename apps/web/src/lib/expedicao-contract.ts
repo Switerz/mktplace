@@ -81,6 +81,61 @@ export function expedicaoHabilitado(valor: string | undefined | null): boolean {
   return valor === "true";
 }
 
+/**
+ * Flag SEPARADA para o Mercado Livre, com o mesmo parser fail-closed.
+ *
+ * Nao substitui `NEXT_PUBLIC_EXPEDICAO_ENABLED`, que continua controlando a
+ * rota inteira: sao duas decisoes distintas, e amarrar as duas na mesma flag
+ * obrigaria a derrubar a Shopee para adiar o ML.
+ */
+export function expedicaoMlHabilitado(valor: string | undefined | null): boolean {
+  return valor === "true";
+}
+
+// ---------------------------------------------------------------------------
+// Canais
+// ---------------------------------------------------------------------------
+export const CANAIS = ["shopee", "mercadolivre"] as const;
+export type Canal = (typeof CANAIS)[number];
+
+/** Canal historico da tela. Omitir `channel` na API significa exatamente isto. */
+export const CANAL_PADRAO: Canal = "shopee";
+
+export const ROTULO_CANAL: Record<Canal, string> = {
+  shopee: "Shopee",
+  mercadolivre: "Mercado Livre",
+};
+
+/**
+ * Canal vindo da URL -> canal servivel. Fora da allowlist, ou ML com a flag
+ * desligada, cai no padrao. A tela nunca pede um canal que nao pode mostrar.
+ */
+export function sanitizarCanal(
+  valor: string | undefined | null,
+  mlHabilitado: boolean,
+): Canal {
+  if (valor === "mercadolivre" && mlHabilitado) return "mercadolivre";
+  return CANAL_PADRAO;
+}
+
+/**
+ * O Mercado Livre NAO publica prazo de despacho — medido no EXP-3A, os campos
+ * candidatos estao 0% preenchidos na fonte. Entao `overdue`, `due_within_24h` e
+ * `on_time` sao ZERO por ausencia de dado, nao por desempenho. Exibir "0
+ * vencidos" para o ML seria uma afirmacao que ninguem mediu.
+ */
+export const SEM_PRAZO_ML =
+  "O Mercado Livre nao publica prazo de despacho: nao ha vencidos nem 'no " +
+  "prazo' a medir. Zero aqui seria engano, entao a tela mostra N/D.";
+
+export const ROTULO_SEM_PRAZO = "Prazo indisponível";
+export const VALOR_SEM_PRAZO = "N/D";
+
+/** O canal tem prazo contratual publicado pela fonte? */
+export function canalTemPrazo(canal: Canal): boolean {
+  return canal === "shopee";
+}
+
 // ---------------------------------------------------------------------------
 // Tipos do payload (espelham os schemas da API)
 // ---------------------------------------------------------------------------
@@ -235,6 +290,7 @@ export interface RespostaTendencia {
 // Filtros e URL
 // ---------------------------------------------------------------------------
 export interface Filtros {
+  channel: Canal;
   brands: string[];
   accounts: string[];
   situacao: Situacao[];
@@ -244,6 +300,7 @@ export interface Filtros {
 }
 
 export const FILTROS_PADRAO: Filtros = {
+  channel: CANAL_PADRAO,
   brands: [],
   accounts: [],
   situacao: [],
@@ -275,8 +332,16 @@ export function sanitizarJanela(valor: number): number {
   return Math.min(JANELA_MAX_HORAS, Math.max(1, Math.trunc(valor)));
 }
 
+/**
+ * `channel` so' entra quando NAO e' o canal historico.
+ *
+ * Omitir `channel` significa `shopee` na API, entao a requisicao da Shopee sai
+ * byte a byte igual a de antes deste gate — o que mantem a tela atual
+ * verificavelmente intacta enquanto a flag do ML estiver desligada.
+ */
 export function construirQuery(f: Filtros): string {
   const p = new URLSearchParams();
+  if (f.channel !== CANAL_PADRAO) p.set("channel", f.channel);
   if (f.brands.length) p.set("brands", f.brands.join(","));
   if (f.accounts.length) p.set("accounts", f.accounts.join(","));
   const sit = sanitizarSituacoes(f.situacao);
@@ -296,9 +361,65 @@ export function chaveDaRequisicao(f: Filtros): string {
   return construirQuery(f);
 }
 
+/**
+ * Query da tendencia, com o MESMO canal da fila.
+ *
+ * Existe para que as duas requisicoes nao possam divergir de canal: o grafico
+ * de uma loja embaixo da fila de outra e' pior que grafico nenhum.
+ */
+export function queryDaTendencia(janela: number, canal: Canal): string {
+  const p = new URLSearchParams();
+  if (canal !== CANAL_PADRAO) p.set("channel", canal);
+  p.set("window_hours", String(sanitizarJanela(janela)));
+  return p.toString();
+}
+
+/**
+ * Situacoes que dependem de PRAZO CONTRATUAL. Num canal sem prazo elas voltam
+ * vazias por construcao — filtrar por "vencidos" no Mercado Livre nao devolve
+ * zero pedidos vencidos, devolve zero porque a pergunta nao existe la'.
+ *
+ * `deadline_unavailable` NAO entra: no ML ela e' o backlog inteiro, e e' uma
+ * pergunta legitima.
+ */
+export const SITUACOES_DE_PRAZO: readonly Situacao[] = [
+  "overdue",
+  "due_within_24h",
+  "on_time",
+];
+
+/**
+ * Troca de canal. O que atravessa e o que NAO atravessa, decidido campo a
+ * campo em vez de por descuido:
+ *
+ * - `accounts` NAO atravessa. A identidade da conta e' do canal: nome da loja
+ *   na Shopee, `seller_id` no Mercado Livre. Levar `apice` para o ML, ou
+ *   `2227056661` para a Shopee, produz uma tela vazia que parece backlog zero
+ *   e e' filtro incompativel.
+ * - `brands` ATRAVESSA. Marca e' a mesma entidade nos dois canais, e o recorte
+ *   por marca e' uma intencao do operador que sobrevive a troca. Marca que so'
+ *   existe num canal devolve vazio — e' resultado, nao incoerencia.
+ * - situacoes de PRAZO e ordenacao por prazo caem quando o canal de destino
+ *   nao publica prazo: manter uma pergunta que a fonte nao responde exibiria
+ *   vazio como se fosse resposta.
+ * - `offset` volta a zero, como em qualquer troca de recorte.
+ */
+export function aplicarCanal(atual: Filtros, canal: Canal): Filtros {
+  const perdePrazo = !canalTemPrazo(canal);
+  return aplicarFiltro(atual, {
+    channel: canal,
+    accounts: [],
+    situacao: perdePrazo
+      ? atual.situacao.filter((s) => !SITUACOES_DE_PRAZO.includes(s))
+      : atual.situacao,
+    orderBy: perdePrazo && atual.orderBy === "deadline" ? "criticidade" : atual.orderBy,
+  });
+}
+
 /** Trocar filtro reinicia a pagina: manter o offset mostraria pagina vazia. */
 export function aplicarFiltro(atual: Filtros, mudanca: Partial<Filtros>): Filtros {
   const mudouRecorte =
+    mudanca.channel !== undefined ||
     mudanca.brands !== undefined ||
     mudanca.accounts !== undefined ||
     mudanca.situacao !== undefined ||
@@ -316,6 +437,7 @@ export function aplicarFiltro(atual: Filtros, mudanca: Partial<Filtros>): Filtro
 // ---------------------------------------------------------------------------
 export type EstadoTela =
   | "carregando"
+  | "canal_desligado"
   | "ok"
   | "fotografia_vazia"
   | "fila_vazia_por_filtro"
@@ -341,6 +463,10 @@ export function estadoDaTela(e: EntradaEstado): EstadoTela {
     switch (e.resposta.unavailable_reason) {
       case "feature_flag_disabled":
         return "indisponivel_backend";
+      case "channel_disabled":
+        // O BACKEND ainda nao expoe este canal. E' diferente de "sem
+        // fotografia": nao ha o que republicar, ha uma flag a ligar.
+        return "canal_desligado";
       case "inconsistent_batch":
         return "batch_inconsistente";
       default:
@@ -365,6 +491,11 @@ export interface Kpi {
   /** `true` pinta o cartao como alerta. Nunca inventa severidade. */
   alerta: boolean;
   nota?: string;
+  /**
+   * Texto que substitui o numero quando a medida NAO EXISTE na fonte —
+   * "N/D", nunca "0". Zero e' uma medicao; ausencia nao e'.
+   */
+  valorTexto?: string;
 }
 
 /**
@@ -376,25 +507,52 @@ export interface Kpi {
  * OPERACIONAL (`over_48h`) sao dimensoes ortogonais e nao se recortam. Inventar
  * a interseccao aqui seria calculo que a API nao fez.
  */
-export function montarKpis(t: Totais | null, frescor: FrescorMarca[]): Kpi[] {
+export function montarKpis(
+  t: Totais | null,
+  frescor: FrescorMarca[],
+  canal: Canal = CANAL_PADRAO,
+): Kpi[] {
   const v = (n: number | undefined | null) => (typeof n === "number" ? n : null);
   const emAlerta = frescor.filter(
     (f) => f.freshness === "critical" || f.freshness === "unknown",
   ).length;
+  const temPrazo = canalTemPrazo(canal);
+  // Sem prazo na fonte, `overdue` e `due_within_24h` valem zero por AUSENCIA de
+  // dado. Publicar "0 vencidos" leria como operacao impecavel; o cartao mostra
+  // N/D e diz por que. Nunca alerta: nao ha medicao para alarmar.
+  const prazo = (chave: string, rotulo: string, valor: number | null, alerta: boolean): Kpi =>
+    temPrazo
+      ? { chave, rotulo, valor, alerta }
+      : {
+          chave,
+          rotulo,
+          valor: null,
+          alerta: false,
+          valorTexto: VALOR_SEM_PRAZO,
+          nota: SEM_PRAZO_ML,
+        };
   return [
     { chave: "backlog", rotulo: "Backlog total", valor: v(t?.backlog_count), alerta: false },
-    {
-      chave: "overdue",
-      rotulo: "Vencidos (prazo Shopee)",
-      valor: v(t?.overdue_count),
-      alerta: (t?.overdue_count ?? 0) > 0,
-    },
-    {
-      chave: "due24h",
-      rotulo: "Vence em 24h",
-      valor: v(t?.due_within_24h_count),
-      alerta: false,
-    },
+    prazo(
+      "overdue",
+      temPrazo ? "Vencidos (prazo Shopee)" : "Vencidos",
+      v(t?.overdue_count),
+      (t?.overdue_count ?? 0) > 0,
+    ),
+    prazo("due24h", "Vence em 24h", v(t?.due_within_24h_count), false),
+    ...(temPrazo
+      ? []
+      : [
+          {
+            chave: "sem_prazo",
+            rotulo: ROTULO_SEM_PRAZO,
+            valor: v(t?.deadline_unavailable_count),
+            alerta: false,
+            nota:
+              "Pedidos sem prazo de despacho publicado pela fonte. E' o backlog" +
+              " inteiro do canal, nao uma anomalia.",
+          } as Kpi,
+        ]),
     {
       chave: "over48h",
       rotulo: ROTULO_LIMIAR_48H,

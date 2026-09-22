@@ -13,11 +13,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   AVISO_SEM_AUTOMACAO,
+  CANAIS,
   EXPLICACAO_LIMIAR_48H,
   FILTROS_PADRAO,
   JANELA_PADRAO_HORAS,
   ORDENACOES,
+  ROTULO_CANAL,
   SITUACOES,
+  aplicarCanal,
   aplicarFiltro,
   avisosDeCobertura,
   chaveDaRequisicao,
@@ -31,7 +34,10 @@ import {
   montarSeries,
   mostrarColunaReferencia,
   paginaAtual,
+  queryDaTendencia,
+  sanitizarCanal,
   sanitizarJanela,
+  type Canal,
   type Filtros,
   type Ordenacao,
   type RespostaExpedicao,
@@ -40,6 +46,21 @@ import {
 } from "@/lib/expedicao-contract";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+
+/**
+ * Flag do Mercado Livre.
+ *
+ * A comparacao esta ESCRITA AQUI, e nao atras de `expedicaoMlHabilitado(...)`,
+ * por um motivo medido: o Next substitui `process.env.NEXT_PUBLIC_*` por um
+ * literal em tempo de build, entao `"" === "true"` dobra para `false` e o
+ * minificador ELIMINA o seletor do bundle. Com a chamada de funcao o
+ * compilador nao consegue dobrar, e a marcacao viajava para o navegador mesmo
+ * desligada — inerte, mas enviada.
+ *
+ * A regra continua sendo uma so': `expedicaoMlHabilitado` e' identica a esta
+ * comparacao, e ha teste amarrando as duas.
+ */
+const ML_LIGADO = process.env.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true";
 
 const ROTULO_SITUACAO: Record<Situacao, string> = {
   overdue: "Vencidos",
@@ -92,7 +113,57 @@ export default function ExpedicaoClient() {
   const chaveVigente = useRef(chave);
   chaveVigente.current = chave;
 
+  /**
+   * A URL so' pode ser lida DEPOIS da montagem — ler `window.location` durante
+   * o render faria o HTML do servidor divergir do cliente.
+   *
+   * Isso cria um problema proprio: sem esperar por essa leitura, abrir
+   * `?channel=mercadolivre` disparava PRIMEIRO uma requisicao de Shopee e
+   * pintava um quadro escrito "Expedição — Shopee" antes de virar ML. Uma
+   * requisicao desperdicada e, pior, um instante em que o operador le' numeros
+   * de uma loja sob o titulo de outra.
+   *
+   * `urlPronta` segura as duas buscas ate' a URL ser resolvida. Com a flag
+   * desligada ela ja' nasce `true`: nao ha URL a consultar, e o comportamento
+   * fica identico ao de antes deste gate.
+   */
+  const [urlPronta, setUrlPronta] = useState(!ML_LIGADO);
+
+  const lerCanalDaUrl = useCallback(() => {
+    const daUrl = new URLSearchParams(window.location.search).get("channel");
+    return sanitizarCanal(daUrl, ML_LIGADO);
+  }, []);
+
   useEffect(() => {
+    if (!ML_LIGADO) return;
+    const canal = lerCanalDaUrl();
+    setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    setUrlPronta(true);
+  }, [lerCanalDaUrl]);
+
+  // Voltar/avancar do navegador pode trocar a URL sem remontar o componente.
+  // Sem isto, o endereco diria um canal e a tela mostraria outro.
+  useEffect(() => {
+    if (!ML_LIGADO) return;
+    const aoVoltar = () => {
+      const canal = lerCanalDaUrl();
+      setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    };
+    window.addEventListener("popstate", aoVoltar);
+    return () => window.removeEventListener("popstate", aoVoltar);
+  }, [lerCanalDaUrl]);
+
+  /** Troca de canal: estado, URL e pagina, sempre juntos. */
+  const trocarCanal = useCallback((canal: Canal) => {
+    setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    const url = new URL(window.location.href);
+    if (canal === FILTROS_PADRAO.channel) url.searchParams.delete("channel");
+    else url.searchParams.set("channel", canal);
+    window.history.replaceState(null, "", url.toString());
+  }, []);
+
+  useEffect(() => {
+    if (!urlPronta) return;
     const minhaChave = chave;
     let vivo = true;
     setCarregando(true);
@@ -117,13 +188,25 @@ export default function ExpedicaoClient() {
     return () => {
       vivo = false;
     };
-  }, [chave, filtros]);
+  }, [chave, filtros, urlPronta]);
+
+  // A tendencia carrega a MESMA chave de canal da fila, e a resposta que chega
+  // com chave antiga e' descartada: sem isso, trocar de canal podia deixar o
+  // grafico de um marketplace embaixo da fila do outro.
+  const chaveTendencia = useMemo(
+    () => queryDaTendencia(janela, filtros.channel),
+    [janela, filtros.channel],
+  );
+  const chaveTendVigente = useRef(chaveTendencia);
+  chaveTendVigente.current = chaveTendencia;
 
   useEffect(() => {
+    if (!urlPronta) return;
+    const minhaChave = chaveTendencia;
     let vivo = true;
     setCarregandoTendencia(true);
     setErroTendencia(false);
-    fetch(`${API}/api/v1/expedicao/trend?window_hours=${sanitizarJanela(janela)}`, {
+    fetch(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
       headers: { Accept: "application/json" },
     })
       .then(async (r) => {
@@ -131,25 +214,25 @@ export default function ExpedicaoClient() {
         return (await r.json()) as RespostaTendencia;
       })
       .then((json) => {
-        if (!vivo) return;
+        if (!vivo || chaveTendVigente.current !== minhaChave) return;
         setTendencia(json);
         setCarregandoTendencia(false);
       })
       .catch(() => {
-        if (!vivo) return;
+        if (!vivo || chaveTendVigente.current !== minhaChave) return;
         setErroTendencia(true);
         setCarregandoTendencia(false);
       });
     return () => {
       vivo = false;
     };
-  }, [janela]);
+  }, [chaveTendencia, urlPronta]);
 
   const temFiltro =
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
   const estado = estadoDaTela({ carregando, erroHttp, resposta: dados, temFiltro });
   const relogios = dados ? montarRelogios(dados) : null;
-  const kpis = montarKpis(dados?.totals ?? null, dados?.freshness ?? []);
+  const kpis = montarKpis(dados?.totals ?? null, dados?.freshness ?? [], filtros.channel);
   const frescor = montarFrescor(dados?.freshness ?? []);
   const avisos = avisosDeCobertura(dados?.coverage ?? null);
   const series = montarSeries(tendencia?.points ?? []);
@@ -180,7 +263,36 @@ export default function ExpedicaoClient() {
       <header className="flex flex-col gap-2">
         {/* h2, nao h1: o `h1` da pagina e do shell (Topbar). Dois h1 quebram
             a arvore de cabecalhos para leitor de tela. */}
-        <h2 className="text-xl font-semibold text-slate-900">Expedição — Shopee</h2>
+        <h2 className="text-xl font-semibold text-slate-900">
+          Expedição — {ROTULO_CANAL[filtros.channel]}
+        </h2>
+        {ML_LIGADO && (
+          <div
+            role="radiogroup"
+            aria-label="Canal da fotografia"
+            className="flex flex-wrap gap-2"
+          >
+            {CANAIS.map((c) => {
+              const ativo = filtros.channel === c;
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  role="radio"
+                  aria-checked={ativo}
+                  onClick={() => trocarCanal(c)}
+                  className={`min-h-[44px] min-w-[44px] rounded border px-4 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 ${
+                    ativo
+                      ? "border-sky-600 bg-sky-50 font-semibold text-sky-900"
+                      : "border-slate-300 bg-white text-slate-700"
+                  }`}
+                >
+                  {ROTULO_CANAL[c]}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <p className="text-sm text-slate-600">
           Fotografia de {dataCurta(relogios?.efetivoEm ?? null)} ·{" "}
           {relogios?.snapshotAgeHours !== null && relogios?.snapshotAgeHours !== undefined
@@ -221,6 +333,13 @@ export default function ExpedicaoClient() {
           Carregando fotografia…
         </p>
       )}
+      {estado === "canal_desligado" && (
+        <p role="status" className="rounded border border-slate-300 bg-slate-50 px-3 py-6 text-sm text-slate-700">
+          Este canal ainda não está disponível na API. A fotografia existe, mas a
+          exposição depende de uma ativação coordenada.
+        </p>
+      )}
+
       {estado === "indisponivel_backend" && (
         <p role="alert" className="rounded border border-slate-300 bg-slate-50 p-4 text-sm">
           A API de Expedição está desligada. Nada a exibir.
@@ -265,7 +384,7 @@ export default function ExpedicaoClient() {
               >
                 <p className="text-xs text-slate-600">{k.rotulo}</p>
                 <p className="text-2xl font-semibold text-slate-900">
-                  {k.valor === null ? "—" : k.valor.toLocaleString("pt-BR")}
+                  {k.valorTexto ?? (k.valor === null ? "—" : k.valor.toLocaleString("pt-BR"))}
                 </p>
                 {k.nota && <p className="mt-1 text-[12px] leading-snug text-slate-500">{k.nota}</p>}
               </div>
