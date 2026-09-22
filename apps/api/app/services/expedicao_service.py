@@ -147,6 +147,10 @@ class Canal:
     marketplace_id: int
     marcas_sem_cobertura: tuple[str, ...]
     notas: tuple[str, ...]
+    #: Coluna do REGISTRY que carrega a mesma identidade que a fotografia
+    #: publica em `shop_account`. E' o que permite comparar ESPERADO com
+    #: OBSERVADO sem misturar dominios — ver `_identidade_da_conta`.
+    identidade_no_registry: str
 
     @property
     def fonte_auditoria(self) -> str:
@@ -158,6 +162,10 @@ CANAIS: dict[str, Canal] = {
     "shopee": Canal(
         slug="shopee",
         marketplace_id=3,
+        # `raw.shopee_orders.shop_account` e' o nome da loja, que coincide com
+        # o `brand_key`. O `external_seller_id` do registry e' o `shop_id`
+        # numerico, que a fotografia NAO publica.
+        identidade_no_registry="brand",
         marcas_sem_cobertura=MARCAS_SEM_COBERTURA,
         notas=(
             NOTA_SEM_AGENDAMENTO,
@@ -169,6 +177,9 @@ CANAIS: dict[str, Canal] = {
     "mercadolivre": Canal(
         slug="mercadolivre",
         marketplace_id=2,
+        # A fila do ML publica o `seller_id` em `shop_account`, e o registry o
+        # guarda em `external_seller_id`. Sao a MESMA entidade.
+        identidade_no_registry="external_seller_id",
         # A Kokeshi E' coberta aqui. Lista vazia, nao a da Shopee.
         marcas_sem_cobertura=(),
         notas=(
@@ -511,8 +522,29 @@ def _classificar(idade_h: Optional[float], watermark: Optional[datetime]) -> str
     return "critical"
 
 
+def _identidade_da_conta(canal: Canal, linha_registry: dict) -> str:
+    """A identidade da conta, no MESMO dominio que `shop_account` da fotografia.
+
+    Antes, `expected_accounts` trazia MARCAS e `observed_accounts` trazia
+    `shop_account`. Na Shopee os dois coincidem por acidente — o nome da loja e'
+    o da marca — e a inconsistencia passava despercebida. No Mercado Livre sao
+    dominios diferentes: marca de um lado, `seller_id` do outro. Comparar
+    conjuntos assim nunca acusaria conta faltando, porque nada nunca se cruza.
+
+    Cada canal declara QUAL coluna do registry carrega a identidade que a
+    fotografia publica; aqui so' se le' essa coluna.
+    """
+    return str(linha_registry[canal.identidade_no_registry])
+
+
 def _cobertura(db, canal: Canal, resumos: list[dict],
                effective_at: datetime) -> dict:
+    """Conjuntos ESPERADO x OBSERVADO, os dois no dominio da CONTA.
+
+    A cobertura por MARCA continua existindo, e em campo proprio:
+    `brands_not_covered`. Misturar as duas coisas para preservar compatibilidade
+    aparente foi justamente o defeito corrigido aqui.
+    """
     esperadas = _linhas(db, """
         SELECT sa.external_seller_id, l.brand_key AS brand, sa.account_name
         FROM marts.dim_seller_account sa
@@ -520,18 +552,18 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
         WHERE sa.marketplace_id = :mkt AND sa.ativo AND l.ativo
         ORDER BY l.brand_key
     """, {"mkt": canal.marketplace_id})
-    marcas_esperadas = [r["brand"] for r in esperadas]
-    observadas = {r["shop_account"]: r for r in resumos}
+    esperadas_por_conta = {_identidade_da_conta(canal, r): r for r in esperadas}
+    observadas = {str(r["shop_account"]): r for r in resumos}
 
-    # O registry chaveia por `external_seller_id` e a fotografia por
-    # `shop_account`. A marca e' o unico elo 1:1 entre os dois nesta camada.
-    esperadas_por_marca = {r["brand"]: r for r in esperadas}
     contas = []
-    for marca in sorted(set(marcas_esperadas) | {r["brand"] for r in resumos}):
-        r = next((x for x in resumos if x["brand"] == marca), None)
+    for conta in sorted(set(esperadas_por_conta) | set(observadas)):
+        r = observadas.get(conta)
+        registro = esperadas_por_conta.get(conta)
         contas.append({
-            "shop_account": r["shop_account"] if r else marca,
-            "brand": marca,
+            "shop_account": conta,
+            # A marca vem do que a fotografia publicou; se a conta nao foi
+            # observada, vem do registry. Nunca e' derivada da identidade.
+            "brand": r["brand"] if r else (registro or {}).get("brand", conta),
             "observed": r is not None,
             "backlog_count": r["backlog_count"] if r else None,
             "source_watermark_at": r["source_watermark_at"] if r else None,
@@ -540,15 +572,13 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
             "source_advanced": r["source_advanced"] if r else None,
         })
 
-    marcas_obs = {r["brand"] for r in resumos}
-    faltando = sorted(set(esperadas_por_marca) - marcas_obs)
-    inesperadas = sorted(marcas_obs - set(esperadas_por_marca))
     return {
-        "expected_accounts": sorted(marcas_esperadas),
+        "expected_accounts": sorted(esperadas_por_conta),
         "observed_accounts": sorted(observadas),
-        "missing_accounts": faltando,
-        "unexpected_accounts": inesperadas,
+        "missing_accounts": sorted(set(esperadas_por_conta) - set(observadas)),
+        "unexpected_accounts": sorted(set(observadas) - set(esperadas_por_conta)),
         "accounts": contas,
+        # Cobertura de MARCAS vive aqui, e so' aqui.
         "brands_not_covered": list(canal.marcas_sem_cobertura),
     }
 

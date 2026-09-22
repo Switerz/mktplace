@@ -543,3 +543,121 @@ def test_rota_do_ml_desligado_devolve_envelope_e_nao_consulta(ligada):
     assert corpo["availability"] == "unavailable"
     assert corpo["unavailable_reason"] == "channel_disabled"
     assert s.consultas == []
+
+
+# ===========================================================================
+# 10. Identidade canonica da conta na cobertura (EXP-3C1-R/V)
+# ===========================================================================
+def _cobertura_de(sessao, canal):
+    return svc.get_expedicao(sessao, channel=canal, include_queue=False)["coverage"]
+
+
+def test_esperado_e_observado_sao_o_MESMO_dominio_no_ml(ml_ligado):
+    """O defeito que este gate corrigiu.
+
+    Antes, `expected_accounts` trazia MARCAS e `observed_accounts` trazia
+    `shop_account`. Na Shopee coincidiam por acidente; no ML sao dominios
+    diferentes, e comparar os conjuntos nunca acusaria nada.
+    """
+    c = _cobertura_de(sessao_ml(), "mercadolivre")
+    sellers = {sa for sa, _b, _n in CONTAS_ML}
+    assert set(c["expected_accounts"]) == sellers
+    assert set(c["observed_accounts"]) == sellers
+    assert c["missing_accounts"] == [] and c["unexpected_accounts"] == []
+
+
+def test_cobertura_do_ml_nao_mistura_marca_com_conta(ml_ligado):
+    c = _cobertura_de(sessao_ml(), "mercadolivre")
+    marcas = {b for _sa, b, _n in CONTAS_ML}
+    for campo in ("expected_accounts", "observed_accounts",
+                  "missing_accounts", "unexpected_accounts"):
+        assert not (set(c[campo]) & marcas), f"{campo} carrega marca"
+        assert all(v.isdigit() for v in c[campo]), f"{campo} nao e' seller_id"
+
+
+def test_shopee_continua_com_o_nome_da_loja_nos_dois_conjuntos(ligada):
+    c = _cobertura_de(SessaoFake(), "shopee")
+    assert c["expected_accounts"] == c["observed_accounts"]
+    assert set(c["expected_accounts"]) == {"apice", "barbours", "lescent", "rituaria"}
+
+
+@pytest.mark.parametrize("canal", ["shopee", "mercadolivre"])
+def test_os_quatro_conjuntos_vivem_no_dominio_da_conta(ml_ligado, canal):
+    """Invariante do contrato, valido nos dois canais."""
+    s = sessao_ml() if canal == "mercadolivre" else SessaoFake()
+    c = _cobertura_de(s, canal)
+    contas = {x["shop_account"] for x in c["accounts"]}
+    for campo in ("expected_accounts", "observed_accounts",
+                  "missing_accounts", "unexpected_accounts"):
+        assert set(c[campo]) <= contas, f"{campo} saiu do dominio da conta"
+
+
+def test_duas_contas_da_mesma_marca_nao_se_encobrem_no_ml(ml_ligado):
+    """O caso que a comparacao por MARCA escondia.
+
+    Duas contas da mesma marca, uma delas ausente da fotografia: comparando
+    marcas, o conjunto observado conteria `kokeshi` e nada faltaria. Comparando
+    contas, a que sumiu aparece em `missing_accounts` — que e' o ponto inteiro
+    de existir um conjunto ESPERADO.
+    """
+    registry = [
+        {"external_seller_id": "111", "brand": "kokeshi", "account_name": "ML A"},
+        {"external_seller_id": "222", "brand": "kokeshi", "account_name": "ML B"},
+    ]
+    s = sessao_ml(registry=registry,
+                  resumos=[resumo_ml("111", "kokeshi", 5)])
+    c = _cobertura_de(s, "mercadolivre")
+    assert c["expected_accounts"] == ["111", "222"]
+    assert c["observed_accounts"] == ["111"]
+    assert c["missing_accounts"] == ["222"], "a conta ausente tem de ser acusada"
+    assert c["unexpected_accounts"] == []
+
+
+def test_conta_do_ml_fora_do_registry_e_acusada(ml_ligado):
+    s = sessao_ml(registry=[{"external_seller_id": sa, "brand": b,
+                             "account_name": f"ML {b}"}
+                            for sa, b, _n in CONTAS_ML[:3]])
+    c = _cobertura_de(s, "mercadolivre")
+    assert c["unexpected_accounts"] == ["2579732860"]
+    assert c["missing_accounts"] == []
+
+
+def test_conta_faltando_marca_a_saude_do_snapshot(ml_ligado):
+    s = sessao_ml(registry=[{"external_seller_id": sa, "brand": b,
+                             "account_name": f"ML {b}"}
+                            for sa, b, _n in CONTAS_ML]
+                  + [{"external_seller_id": "999", "brand": "nova",
+                      "account_name": "ML nova"}])
+    r = svc.get_expedicao(s, channel="mercadolivre", include_queue=False)
+    assert r["coverage"]["missing_accounts"] == ["999"]
+    assert r["snapshot"]["source_health"] == "account_missing"
+
+
+def test_conta_nao_observada_traz_a_marca_do_registry(ml_ligado):
+    s = sessao_ml(registry=[{"external_seller_id": sa, "brand": b,
+                             "account_name": f"ML {b}"}
+                            for sa, b, _n in CONTAS_ML]
+                  + [{"external_seller_id": "999", "brand": "nova",
+                      "account_name": "ML nova"}])
+    c = _cobertura_de(s, "mercadolivre")
+    ausente = next(x for x in c["accounts"] if x["shop_account"] == "999")
+    assert ausente["observed"] is False
+    assert ausente["brand"] == "nova", "a marca vem do registry, nao da identidade"
+    assert ausente["backlog_count"] is None
+
+
+def test_brands_not_covered_segue_no_campo_de_MARCAS(ml_ligado):
+    """A cobertura por marca nao foi removida — mudou de lugar nenhum."""
+    sh = _cobertura_de(SessaoFake(), "shopee")
+    ml = _cobertura_de(sessao_ml(), "mercadolivre")
+    assert sh["brands_not_covered"] == ["kokeshi"]
+    assert ml["brands_not_covered"] == []
+
+
+def test_identidade_declarada_por_canal():
+    assert svc.CANAIS["shopee"].identidade_no_registry == "brand"
+    assert svc.CANAIS["mercadolivre"].identidade_no_registry == "external_seller_id"
+    linha = {"external_seller_id": "2227056661", "brand": "kokeshi"}
+    assert svc._identidade_da_conta(svc.CANAIS["shopee"], linha) == "kokeshi"
+    assert svc._identidade_da_conta(
+        svc.CANAIS["mercadolivre"], linha) == "2227056661"

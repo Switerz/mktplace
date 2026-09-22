@@ -219,12 +219,55 @@ def test_prazo_indisponivel_e_do_ml_e_nao_contamina_a_shopee(sessao):
 
 
 def test_cobertura_usa_o_registry_do_canal(sessao):
-    sh = svc.get_expedicao(sessao, include_queue=False)
-    ml = svc.get_expedicao(sessao, channel="mercadolivre", include_queue=False)
-    assert sh["coverage"]["missing_accounts"] == []
-    assert ml["coverage"]["missing_accounts"] == []
-    assert "kokeshi" in ml["coverage"]["expected_accounts"]
-    assert "kokeshi" not in sh["coverage"]["expected_accounts"]
+    """Os conjuntos vivem no dominio da CONTA, e a marca tem campo proprio.
+
+    Na Shopee a conta e' o nome da loja; no ML e' o `seller_id`. Em nenhum dos
+    dois os conjuntos carregam marca - foi exatamente essa mistura que o
+    EXP-3C1-R/V corrigiu.
+    """
+    sh = svc.get_expedicao(sessao, include_queue=False)["coverage"]
+    ml = svc.get_expedicao(sessao, channel="mercadolivre",
+                           include_queue=False)["coverage"]
+    assert sh["missing_accounts"] == [] and sh["unexpected_accounts"] == []
+    assert ml["missing_accounts"] == [] and ml["unexpected_accounts"] == []
+
+    assert set(sh["expected_accounts"]) == set(sh["observed_accounts"])
+    assert set(sh["expected_accounts"]) == {s for s, _b, _n in CONTAS_SH}
+
+    assert set(ml["expected_accounts"]) == set(ml["observed_accounts"])
+    assert set(ml["expected_accounts"]) == {s for s, _b, _n in CONTAS_ML}
+    assert all(v.isdigit() for v in ml["expected_accounts"])
+    # a marca da Kokeshi aparece no ML, mas no campo de MARCAS
+    assert "kokeshi" in {c["brand"] for c in ml["accounts"]}
+    assert "kokeshi" not in ml["expected_accounts"]
+    assert ml["brands_not_covered"] == []
+    assert sh["brands_not_covered"] == ["kokeshi"]
+
+
+def test_conta_do_registry_sem_fotografia_e_acusada_pelo_seller_id(sessao, engine):
+    """Regressao: com a comparacao por marca isto nunca seria acusado."""
+    from sqlalchemy import text
+
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO marts.dim_seller_account (marketplace_id,"
+                       " loja_id, external_seller_id, account_name, ativo)"
+                       " VALUES (2, :l, '999999999', 'ML kokeshi 2', true)"
+                       " ON CONFLICT DO NOTHING"), {"l": LOJAS["kokeshi"]})
+    sessao.rollback()
+    try:
+        ml = svc.get_expedicao(sessao, channel="mercadolivre",
+                               include_queue=False)
+        assert ml["coverage"]["missing_accounts"] == ["999999999"]
+        assert ml["snapshot"]["source_health"] == "account_missing"
+        # a marca kokeshi CONTINUA observada pela outra conta: comparar marcas
+        # teria dito que nao falta nada.
+        observadas = ml["coverage"]["accounts"]
+        assert "kokeshi" in {c["brand"] for c in observadas if c["observed"]}
+    finally:
+        with engine.begin() as c:
+            c.execute(text("DELETE FROM marts.dim_seller_account"
+                           " WHERE external_seller_id = '999999999'"))
+        sessao.rollback()
 
 
 def test_tendencia_isolada_por_canal(sessao):

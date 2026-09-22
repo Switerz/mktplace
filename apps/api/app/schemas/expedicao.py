@@ -92,6 +92,9 @@ class Cobertura(BaseModel):
     `missing_accounts` em vez de silencio.
     """
 
+    #: Os quatro conjuntos abaixo estao SEMPRE no dominio da CONTA, no mesmo
+    #: formato de `shop_account`: nome da loja na Shopee, `seller_id` no Mercado
+    #: Livre. Comparar marca com conta nunca acusaria conta faltando.
     expected_accounts: list[str]
     observed_accounts: list[str]
     missing_accounts: list[str]
