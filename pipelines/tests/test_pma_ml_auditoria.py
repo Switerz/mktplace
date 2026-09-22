@@ -22,7 +22,7 @@ import pytest
 
 from pipelines import sync_ml_listing_price_serving as ml
 from pipelines.tests.postgres_descartavel import (
-    DDL_AUDITORIA, MOTIVO_SEM_POSTGRES, cluster_descartavel, postgres_disponivel,
+    DDL_AUDITORIA, MOTIVO_SEM_POSTGRES, cluster_da_sessao, postgres_disponivel,
 )
 
 DE = date(2026, 9, 19)
@@ -338,7 +338,7 @@ def test_zero_retry_na_auditoria():
 @pytest.mark.skipif(not postgres_disponivel(), reason=MOTIVO_SEM_POSTGRES)
 def test_o_check_da_tabela_recusa_status_inventado():
     import psycopg2
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         conn = psycopg2.connect(url)
         try:
             with conn.cursor() as cur:
@@ -359,7 +359,7 @@ def test_o_check_da_tabela_recusa_status_inventado():
 def test_o_ciclo_running_para_success_persiste_no_servidor():
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         conn = psycopg2.connect(url, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cur:
@@ -384,7 +384,7 @@ def test_o_ciclo_running_para_success_persiste_no_servidor():
 def test_a_nota_de_indeterminado_deixa_o_registro_em_running():
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         conn = psycopg2.connect(url, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cur:

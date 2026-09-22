@@ -25,7 +25,7 @@ import pytest
 
 from pipelines.ops import orchestrate as orch
 from pipelines.tests.postgres_descartavel import (
-    MOTIVO_SEM_POSTGRES, cluster_descartavel, postgres_disponivel,
+    MOTIVO_SEM_POSTGRES, cluster_da_sessao, postgres_disponivel,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -115,7 +115,7 @@ def test_o_preflight_de_cada_canal_checa_o_lock_certo():
 def test_segunda_sessao_nao_obtem_o_lock_dos_canais():
     """`pg_try_advisory_lock` e' fail-fast: a segunda desiste em vez de esperar."""
     import psycopg2
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         a = psycopg2.connect(url)
         b = psycopg2.connect(url)
         try:
@@ -137,7 +137,7 @@ def test_o_preflight_ve_o_lock_tomado_e_bloqueia():
     import os
 
     import psycopg2
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         segurando = psycopg2.connect(url)
         try:
             with segurando.cursor() as cur:
@@ -165,7 +165,7 @@ def test_lock_livre_nao_bloqueia():
     """Contraprova: sem o lock tomado, o mesmo check aprova."""
     import os
 
-    with cluster_descartavel() as url:
+    with cluster_da_sessao() as url:
         from pipelines.ops import preflight as pf
         antes = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = url
