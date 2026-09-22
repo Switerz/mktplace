@@ -104,6 +104,11 @@ _CLASSES = (
     ("state_delete", r"DELETE FROM \S*_sync_state"),
     ("isolation", r"transaction_isolation"),
     ("bounds", r"COUNT\(updated_at\)"),
+    # UE-9C2E4-B: as duas consultas abaixo tambem tem `GROUP BY
+    # transaction_type`; precisam vir ANTES de `types`, senao seriam
+    # classificadas como ele.
+    ("source_schema", r"information_schema\.columns"),
+    ("excluded_zero", r"AS soma_affiliate_"),
     ("types", r"GROUP BY transaction_type"),
     ("population", r"nulo_transaction_id"),
     ("touched_keys", r"DISTINCT DATE_TRUNC"),
@@ -298,25 +303,47 @@ def _totais(**over):
     return base
 
 
+def _catalogo_completo():
+    """Catalogo que satisfaz `REQUIRED_SOURCE_COLUMNS`, como a Silver tipada."""
+    return [{"column_name": c} for c in sync.REQUIRED_SOURCE_COLUMNS]
+
+
+def _excluidos_zerados():
+    """Uma linha por tipo excluido, com os tres componentes em zero — que e' o
+    estado medido em producao e a premissa da exclusao."""
+    return [
+        {"transaction_type": t, "n": 1}
+        | {f"soma_{c}": Decimal("0") for c in sync.COMPONENT_SOURCE_COLUMNS.values()}
+        for t in sync.TRANSACTION_TYPE_EXCLUDED
+    ]
+
+
 def dm_rules(total=10, com=None, mx=CUTOFF, tipos=None, rows=None, totais=None,
-             keys=None, populacao=None):
-    """Regras do lado Data Mart. A ordem importa: `recompute` (com GROUP BY) tem
-    de ser testada antes de `detail_totals` (sem GROUP BY)."""
+             keys=None, populacao=None, catalogo=None, excluidos=None):
+    """Regras do lado Data Mart. A ordem importa duas vezes: `recompute` (com
+    GROUP BY ref_month) antes de `detail_totals` (sem GROUP BY), e as consultas
+    de catalogo/excluidos antes de `GROUP BY transaction_type`, que casaria com
+    a de excluidos."""
     com = total if com is None else com
     tipos = tipos if tipos is not None else [{"transaction_type": "ORDER", "n": total}]
     rows = rows if rows is not None else [_linha_agregada()]
     totais = totais if totais is not None else _totais()
     keys = keys if keys is not None else [{"ref_month": JULHO, "brand": "apice"}]
+    catalogo = catalogo if catalogo is not None else _catalogo_completo()
+    excluidos = excluidos if excluidos is not None else _excluidos_zerados()
     pop = populacao or {
         "lidas": total, "nulo_transaction_id": 0, "nulo_order_create_time": 0,
-        "nulo_brand": 0, "nulo_fee_breakdown": 0, "fora_da_fotografia": 0,
+        "nulo_brand": 0, "fora_da_fotografia": 0,
         "transaction_ids_distintos": total, "marcas_distintas": 5,
+        "moeda_inesperada": 0, "moedas_distintas": 1,
     }
     return [
         (r"transaction_isolation",
          {"isolation": "repeatable read", "read_only": "on"}),
+        (r"information_schema\.columns", catalogo),
         (r"COUNT\(updated_at\)",
          {"total": total, "com_updated_at": com, "max_updated_at": mx}),
+        (r"AS soma_affiliate_", excluidos),
         (r"GROUP BY transaction_type", tipos),
         (r"nulo_transaction_id", pop),
         (r"DISTINCT DATE_TRUNC", keys),
@@ -824,7 +851,7 @@ def test_f1_erro_na_fonte_libera_o_lock_e_nao_abre_conexao_gravavel(monkeypatch)
     rollback: a transação gravável nem chega a existir."""
     rec, neon, dm = _apply_env(
         monkeypatch, dm_kw={"tipos": [{"transaction_type": "ADJUST", "n": 2}]})
-    with pytest.raises(RuntimeError, match="transaction_type fora da allowlist"):
+    with pytest.raises(RuntimeError, match="transaction_type DESCONHECIDO"):
         sync.run("incremental", "run:1", apply=True)
     assert sem_escrita(rec)
     assert "neon.autocommit_off" not in events(rec)
@@ -1756,40 +1783,96 @@ def test_allowlist_de_transaction_type_e_somente_order():
     assert sync.TRANSACTION_TYPE_ALLOWLIST == ("ORDER",)
 
 
-def test_tres_componentes_com_as_chaves_json_do_contrato():
+def test_tres_componentes_com_as_colunas_tipadas_do_contrato():
+    """UE-9C2E4-B: a fonte passou a ser coluna tipada, não chave de JSONB."""
     assert sync.COMPONENT_COLUMNS == (
         "affiliate_creator_commission",
         "affiliate_partner_commission",
         "affiliate_ads_commission",
     )
-    assert sync.COMPONENT_JSON_KEYS == {
-        "affiliate_creator_commission": "affiliate_commission_amount_before_pit",
+    assert sync.COMPONENT_SOURCE_COLUMNS == {
+        "affiliate_creator_commission": "affiliate_commission_amount",
         "affiliate_partner_commission": "affiliate_partner_commission_amount",
         "affiliate_ads_commission": "affiliate_ads_commission_amount",
     }
+    assert not hasattr(sync, "COMPONENT_JSON_KEYS")
 
 
-def test_guardrail_acusa_chave_proibida():
-    with pytest.raises(RuntimeError, match="proibida"):
+def test_os_sete_tipos_conhecidos_e_a_particao_entre_eles():
+    assert sync.TRANSACTION_TYPE_EXCLUDED == (
+        "DEDUCTIONS_INCURRED_BY_SELLER",
+        "GMV_PAYMENT_FOR_TIKTOK_ADS",
+        "LOGISTICS_REIMBURSEMENT",
+        "PLATFORM_REIMBURSEMENT",
+        "PROMOTION_ADJUSTMENT",
+        "THIRD_PARTY_FINANCING",
+    )
+    assert len(sync.TRANSACTION_TYPE_KNOWN) == 7
+    assert set(sync.TRANSACTION_TYPE_KNOWN) == (
+        set(sync.TRANSACTION_TYPE_ALLOWLIST) | set(sync.TRANSACTION_TYPE_EXCLUDED)
+    )
+    # Reconhecer nao e' incluir: so' ORDER contribui.
+    assert set(sync.TRANSACTION_TYPE_ALLOWLIST).isdisjoint(
+        sync.TRANSACTION_TYPE_EXCLUDED)
+
+
+@pytest.mark.parametrize("token", ["fee_breakdown", "tax_breakdown", "_before_pit"])
+def test_guardrail_acusa_token_proibido(token):
+    with pytest.raises(RuntimeError, match="token proibido"):
+        sync.assert_no_forbidden_component(f"SELECT {token} FROM x")
+
+
+def test_guardrail_acusa_o_json_que_quebrou_em_setembro():
+    """A forma exata que o módulo usava até 18/09/2026 e que deixou de existir."""
+    with pytest.raises(RuntimeError, match="token proibido"):
         sync.assert_no_forbidden_component(
-            "SUM((fee_breakdown->>'affiliate_commission_amount')::numeric)"
+            "SUM((fee_breakdown->>'affiliate_commission_amount_before_pit')::numeric)"
         )
 
 
-def test_guardrail_nao_acusa_falso_positivo_em_before_pit():
-    """`affiliate_commission_amount` é prefixo de
-    `affiliate_commission_amount_before_pit`. Um padrão sem as aspas de
-    fechamento acusaria falso positivo em toda execução e o guardrail seria
-    desligado por inútil."""
-    sync.assert_no_forbidden_component(
-        "SUM((fee_breakdown->>'affiliate_commission_amount_before_pit')::numeric)"
-    )
+def test_guardrail_aprova_a_coluna_tipada():
+    sync.assert_no_forbidden_component("SUM(affiliate_commission_amount)")
 
 
-def test_component_sql_usa_before_pit_e_nunca_a_chave_nua():
+def test_component_sql_le_coluna_tipada_sem_json_e_sem_abs():
     sql = sync._component_sql()
-    assert "affiliate_commission_amount_before_pit" in sql
-    assert "'affiliate_commission_amount'" not in sql
+    for coluna, origem in sync.COMPONENT_SOURCE_COLUMNS.items():
+        assert f"SUM({origem}) AS {coluna}" in sql
+    assert "fee_breakdown" not in sql
+    assert "->>" not in sql
+    assert "_before_pit" not in sql
+    assert "abs(" not in sql.lower()
+    # Sem COALESCE: nulo em TODAS as linhas tem de virar NULL, nunca 0.
+    assert "COALESCE" not in sql.upper()
+
+
+def test_component_sql_nomeia_todo_agregado():
+    """Sem `AS`, o RealDictCursor de produção devolveria chave `sum` repetida e o
+    módulo leria o componente errado — defeito que fake com tupla não pega."""
+    sql = sync._component_sql()
+    assert sql.count(" AS ") == len(sync.COMPONENT_COLUMNS)
+
+
+def test_nenhum_sql_do_modulo_referencia_fee_breakdown():
+    """Contraprova de regressão: varre o fonte inteiro, não só o SQL montado."""
+    fonte = Path(sync.__file__).read_text(encoding="utf-8")
+    codigo = [
+        ln for ln in fonte.splitlines()
+        if "fee_breakdown" in ln and not ln.strip().startswith("#")
+        and "FORBIDDEN_SQL_TOKENS" not in ln
+    ]
+    # O que sobrar tem de ser docstring/comentário explicando o histórico,
+    # nunca SQL executável.
+    for ln in codigo:
+        assert "SELECT" not in ln.upper() and "SUM(" not in ln.upper(), ln
+
+
+def test_component_sql_usa_a_coluna_tipada_e_nunca_a_chave_antiga():
+    """UE-9C2E4-B inverteu esta asserção: `before_pit` passou a ser o campo
+    PROIBIDO, porque chega zerado na reingestão desde 18/09/2026."""
+    sql = sync._component_sql()
+    assert "affiliate_commission_amount" in sql
+    assert "affiliate_commission_amount_before_pit" not in sql
 
 
 def test_component_sql_nao_converte_nulo_em_zero():
@@ -1885,8 +1968,9 @@ def test_validate_transaction_types_nao_aplica_filtro_comercial():
 def _populacao(**overrides):
     base = {
         "lidas": 10, "nulo_transaction_id": 0, "nulo_order_create_time": 0,
-        "nulo_brand": 0, "nulo_fee_breakdown": 0, "fora_da_fotografia": 0,
+        "nulo_brand": 0, "fora_da_fotografia": 0,
         "transaction_ids_distintos": 10, "marcas_distintas": 5,
+        "moeda_inesperada": 0, "moedas_distintas": 1,
     }
     base.update(overrides)
     return FakeConn("dm", None, [(r"nulo_transaction_id", base)]).cursor()
@@ -1897,11 +1981,128 @@ def test_validate_read_population_aprova_populacao_limpa():
 
 
 @pytest.mark.parametrize("campo", [
-    "transaction_id", "order_create_time", "brand", "fee_breakdown",
+    "transaction_id", "order_create_time", "brand",
 ])
 def test_validate_read_population_reprova_nulo_em_campo_chave(campo):
     with pytest.raises(RuntimeError, match=rf"{campo} nulo em 4"):
         sync.validate_read_population(_populacao(**{f"nulo_{campo}": 4}), CUTOFF)
+
+
+def test_validate_read_population_reprova_moeda_estranha():
+    """O fato publica numeric sem unidade: duas moedas na mesma coluna somariam
+    grandezas diferentes."""
+    with pytest.raises(RuntimeError, match=r"moeda diferente de BRL em 3"):
+        sync.validate_read_population(
+            _populacao(moeda_inesperada=3, moedas_distintas=2), CUTOFF)
+
+
+def test_validate_read_population_nao_pergunta_por_fee_breakdown():
+    cur = _populacao()
+    sync.validate_read_population(cur, CUTOFF)
+    assert "fee_breakdown" not in cur.conn.sqls()[0]
+
+
+# ---------------------------------------------------------------------------
+# UE-9C2E4-B — fronteira A.0 (forma da fonte) e A.3b (excluídos em zero)
+# ---------------------------------------------------------------------------
+
+def _cur_catalogo(colunas):
+    return FakeConn("dm", None, [
+        (r"information_schema\.columns", [{"column_name": c} for c in colunas]),
+    ]).cursor()
+
+
+def test_validate_source_schema_aprova_a_silver_tipada():
+    presentes = sync.validate_source_schema(
+        _cur_catalogo(sync.REQUIRED_SOURCE_COLUMNS))
+    assert set(sync.REQUIRED_SOURCE_COLUMNS) <= set(presentes)
+
+
+@pytest.mark.parametrize("ausente", sync.REQUIRED_SOURCE_COLUMNS)
+def test_validate_source_schema_reprova_coluna_obrigatoria_ausente(ausente):
+    restantes = [c for c in sync.REQUIRED_SOURCE_COLUMNS if c != ausente]
+    with pytest.raises(RuntimeError, match=r"contrato da fonte violado") as e:
+        sync.validate_source_schema(_cur_catalogo(restantes))
+    assert ausente in str(e.value)
+
+
+def test_validate_source_schema_reprova_fonte_inexistente():
+    with pytest.raises(RuntimeError, match=r"nao existe ou nao e' visivel"):
+        sync.validate_source_schema(_cur_catalogo([]))
+
+
+def test_validate_source_schema_nao_exige_fee_breakdown():
+    """A ausência do JSONB é o estado ESPERADO desde 18/09/2026, não um defeito."""
+    assert "fee_breakdown" not in sync.REQUIRED_SOURCE_COLUMNS
+    sync.validate_source_schema(_cur_catalogo(sync.REQUIRED_SOURCE_COLUMNS))
+
+
+def _cur_excluidos(linhas):
+    return FakeConn("dm", None, [(r"AS soma_affiliate_", linhas)]).cursor()
+
+
+def test_excluded_components_aprova_quando_tudo_zero():
+    observado = sync.validate_excluded_components_are_zero(
+        _cur_excluidos(_excluidos_zerados()), CUTOFF)
+    assert set(observado) == set(sync.TRANSACTION_TYPE_EXCLUDED)
+
+
+@pytest.mark.parametrize("tipo", sync.TRANSACTION_TYPE_EXCLUDED)
+def test_excluded_components_reprova_componente_nao_zero(tipo):
+    """Contraprova por tipo: a exclusão vale porque os componentes são zero. Se
+    um deles passar a ter valor, filtrar em silêncio esconderia custo real."""
+    linhas = [
+        dict(linha) for linha in _excluidos_zerados()
+        if linha["transaction_type"] != tipo
+    ]
+    linhas.append(
+        {"transaction_type": tipo, "n": 5}
+        | {f"soma_{c}": Decimal("0") for c in sync.COMPONENT_SOURCE_COLUMNS.values()}
+        | {"soma_affiliate_commission_amount": Decimal("-12.34")}
+    )
+    with pytest.raises(RuntimeError, match=r"componente de afiliado") as e:
+        sync.validate_excluded_components_are_zero(_cur_excluidos(linhas), CUTOFF)
+    assert f"{tipo}.affiliate_commission_amount=-12.34" in str(e.value)
+
+
+def test_excluded_components_aceita_nulo_como_ausencia_de_valor():
+    """Tipo sem nenhuma linha no período devolve SUM nulo — não é violação."""
+    linhas = [
+        {"transaction_type": sync.TRANSACTION_TYPE_EXCLUDED[0], "n": 0}
+        | {f"soma_{c}": None for c in sync.COMPONENT_SOURCE_COLUMNS.values()}
+    ]
+    sync.validate_excluded_components_are_zero(_cur_excluidos(linhas), CUTOFF)
+
+
+def test_excluded_components_nao_filtra_por_marca():
+    """Mesma razão de `validate_transaction_types`: a leitura literal do
+    contrato, e o lado seguro — componente não zero em marca fora de escopo
+    também reprova."""
+    cur = _cur_excluidos(_excluidos_zerados())
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    sql = cur.conn.sqls()[0]
+    assert "brand = ANY" not in sql
+    assert "transaction_type = ANY" in sql
+
+
+def test_excluded_components_nomeia_todo_agregado():
+    cur = _cur_excluidos(_excluidos_zerados())
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    sql = cur.conn.sqls()[0]
+    for col in sync.COMPONENT_SOURCE_COLUMNS.values():
+        assert f"AS soma_{col}" in sql
+
+
+@pytest.mark.parametrize("valor", ["-12.34", "0.01", "999999.99"])
+def test_excluded_components_reprova_qualquer_sinal(valor):
+    """Positivo ou negativo: o que reprova é ser diferente de zero."""
+    linhas = [
+        {"transaction_type": "LOGISTICS_REIMBURSEMENT", "n": 1}
+        | {f"soma_{c}": Decimal("0") for c in sync.COMPONENT_SOURCE_COLUMNS.values()}
+        | {"soma_affiliate_ads_commission_amount": Decimal(valor)}
+    ]
+    with pytest.raises(RuntimeError, match="componente de afiliado"):
+        sync.validate_excluded_components_are_zero(_cur_excluidos(linhas), CUTOFF)
 
 
 def test_validate_read_population_reprova_transaction_id_duplicado():
