@@ -490,12 +490,52 @@ def test_logistic_type_do_ml_e_preenchido_e_o_da_shopee_nao():
     assert ml["logistic_type"] in ML_SELLER_MANAGED_LOGISTIC_TYPES
 
 
-def test_cli_recusa_apply_do_mercadolivre():
-    """Nenhum caminho deste gate chega ao publisher."""
+def test_cli_recusa_apply_de_canal_sem_adaptador():
+    """A trava de allowlist do apply sobreviveu ao PR #24 - so mudou de alvo.
+
+    Ate' o #24 este teste mirava o MERCADOLIVRE, porque ele nao tinha
+    adaptador: `run_apply` devolvia EXIT_PRECONDICAO antes de abrir qualquer
+    conexao, e chamar sem injetar fabrica era inofensivo. O #24 deu adaptador
+    ao ML; a guarda deixou de disparar e a MESMA linha passou a abrir o Neon e
+    a PUBLICAR a fila inteira com o relogio fixo desta fixture - foi o
+    incidente EXP-3B2-I1, cinco publicacoes nao autorizadas em producao.
+
+    O invariante que o teste sempre quis proteger continua de pe'. Ele e'
+    verificado aqui contra um canal que de fato nao tem adaptador, com as tres
+    fabricas injetadas e com a prova de que NENHUMA foi chamada - porque o
+    valor do teste esta' justamente em a recusa vir ANTES da conexao.
+    """
     from pipelines.expedicao import cli
 
-    codigo = cli.run_apply(Channel.MERCADOLIVRE, AGORA)
+    aberturas = []
+
+    def nao_deve_abrir(nome):
+        def _abrir():
+            aberturas.append(nome)
+            raise AssertionError(f"a recusa deveria vir antes de abrir {nome}")
+
+        return _abrir
+
+    codigo = cli.run_apply(
+        Channel.TIKTOKSHOP,
+        AGORA,
+        open_target=nao_deve_abrir("target"),
+        open_source=nao_deve_abrir("source"),
+        open_audit=nao_deve_abrir("audit"),
+    )
     assert codigo == cli.EXIT_PRECONDICAO
+    assert aberturas == [], "a recusa tem de vir ANTES de qualquer conexao"
+
+
+def test_mercadolivre_passou_a_ter_adaptador_no_pr24():
+    """Contraprova do que mudou: o ML nao e' mais barrado pela allowlist.
+
+    Deixa explicito, ao lado do teste acima, por que ele trocou de canal.
+    """
+    from pipelines.expedicao import cli
+
+    assert Channel.MERCADOLIVRE in cli.ADAPTADORES
+    assert Channel.TIKTOKSHOP not in cli.ADAPTADORES
 
 
 def test_cli_aceita_mercadolivre_apenas_no_diagnose():
