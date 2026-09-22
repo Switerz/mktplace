@@ -106,10 +106,33 @@ function Get-TaskDefinitions {
     #     vez de disputar a mesma janela de dados. E' o oposto do desenho de
     #     "shopee_manual_refresh", que tem lock separado porque mexe em fontes
     #     disjuntas (Shopee) e pode legitimamente rodar em paralelo.
+    #
+    #   - "pma_refresh" (Gate PMA-2C5B, 2026-09-22): as tres fotografias de
+    #     preco (ML, Shopee, TikTok). NENHUMA tarefa foi registrada no Task
+    #     Scheduler por este gate, e nao ha entrada em schedule_plan.py: a
+    #     TaskKey existe para que a primeira publicacao controlada e o
+    #     diagnostico manual usem o MESMO wrapper de lock/timeout/log que a
+    #     execucao agendada usara' depois. Ativar o agendamento e' outro gate.
+    #
+    #     Lock = "full_daily" DE PROPOSITO, pela mesma razao do
+    #     "serving_refresh": os publishers do PMA leem as MESMAS fontes do Data
+    #     Mart que o `full_daily` carrega, e compartilhar o lock logico torna a
+    #     sobreposicao manual x agendada impossivel ANTES de qualquer conexao
+    #     ao banco. Isso importa mais aqui que nos outros: o sync do ML usa
+    #     `pg_advisory_xact_lock`, que ESPERA em vez de desistir — sem o lock
+    #     logico, uma execucao concorrente ficaria pendurada ate o timeout do
+    #     step em vez de sair limpa.
+    #
+    #     Os publishers de Shopee e TikTok tem alem disso o proprio
+    #     `pg_try_advisory_lock(917120017)`, fail-fast: mesmo que o lock logico
+    #     fosse contornado, a segunda execucao sairia com exit 3 sem ler nem
+    #     escrever nada. Sao duas camadas com propositos distintos — a logica
+    #     evita a disputa, a do Postgres garante a exclusao.
     return @{
         "full_daily" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "full_daily") }
         "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
         "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
+        "pma_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 3600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "pma_refresh") }
     }
 }
 
