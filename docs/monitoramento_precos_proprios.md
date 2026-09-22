@@ -1353,9 +1353,13 @@ check, não o exit code.
 ### Comandos de diagnóstico e operação manual futura
 
 ```
-# Diagnóstico, sem escrever nada e sem tomar lock
+# Ensaio de UM canal: lê a fonte, monta a candidata, roda as guardas.
+# Sem lock, sem auditoria, sem conexão gravável, sem escrita.
 python -m pipelines.channel_offer_publisher --marketplace shopee
 python -m pipelines.sync_ml_listing_price_serving        # sem --apply
+
+# Ensaio do PIPELINE inteiro, na mesma ordem da execução real.
+python -m pipelines.ops.orchestrate --pipeline pma_refresh --dry-run
 
 # Preflight de um canal, somente leitura
 python -m pipelines.ops.preflight --source pma_shopee
@@ -1366,6 +1370,109 @@ python -m pipelines.sync_ml_listing_price_serving --apply --lookback-days 7
 # O pipeline inteiro, pelo mesmo wrapper de lock/timeout/log da futura tarefa
 powershell -NoProfile -NonInteractive -File scripts/run_task.ps1 -TaskKey pma_refresh
 ```
+
+### Ensaio (`--dry-run`) — capacidade declarada, nunca inferida
+
+Antes do gate PMA-2C5C-H1 não havia ensaio. O caminho sem `--apply` dos canais
+era um `print` e um `return 0`: não lia a fonte, não montava candidata e não
+exercia guarda nenhuma. Ele **produzia a sensação de cobertura sem a
+cobertura**, e foi por isso que o PMA-2C5C terminou em
+`ORCHESTRATOR_DRY_RUN_UNAVAILABLE` em vez de aprovar o pipeline.
+
+O ensaio agora percorre o mesmo caminho do `--apply` até o ponto exato em que a
+escrita começaria:
+
+| etapa | ensaio | apply |
+|---|---|---|
+| conexão com a fonte | `SET TRANSACTION READ ONLY` | `SET TRANSACTION READ ONLY` |
+| advisory lock | **não toma** | `pg_try_advisory_lock` |
+| auditoria (`audit.source_sync_run`) | **não abre** | abre e fecha |
+| leitura da fonte | `collect_snapshot` | `collect_snapshot` |
+| montagem da candidata | mesmas fórmulas | mesmas fórmulas |
+| `assert_no_pii` / `assert_offer_keys_unique` | **roda** | roda |
+| `PublicationPlan`, DELETE/INSERT, COMMIT | **não existe** | executa |
+
+A candidata sai de `collect_snapshot`, a **mesma função** que a publicação usa.
+Não há segunda implementação das fórmulas: se os dois caminhos divergirem, o
+teste de equivalência de fingerprint falha.
+
+**A capacidade é declarada por step, não deduzida.** Cada `Step` carrega
+`dry_run_args`; `None` significa *"este step não sabe ensaiar"*, e não *"remova
+`--apply` e torça"*. Uma remoção genérica de `--apply` seria correta hoje e
+silenciosamente errada no dia em que um step publicar por outro caminho — uma
+variável de ambiente, um default, um subcomando. Declarar os argumentos exatos
+transforma a capacidade numa afirmação de quem escreveu o step, verificável em
+teste.
+
+Por isso `--dry-run` é **fail-closed**: pedir ensaio de um pipeline cujos steps
+não o declaram **recusa antes de abrir qualquer subprocesso**, e não há
+fallback para o modo normal depois da recusa.
+
+```
+$ python -m pipelines.ops.orchestrate --pipeline full_daily --dry-run
+RECUSADO: o pipeline 'full_daily' nao suporta --dry-run: 14 step(s) sem modo
+ensaio declarado (...). Nada foi executado.
+```
+
+Hoje só `pma_refresh` declara o modo. `full_daily`, `serving_refresh` e
+`shopee_manual_refresh` **não** — habilitar o que não foi verificado seria pior
+que não habilitar.
+
+O ensaio do ML usa o **mesmo `--lookback-days 3`** do apply. Com outra janela,
+o ensaio mediria um universo diferente do que a publicação escreveria, e
+deixaria de ser ensaio. O log carrega `mode=dry_run` em cada linha e nunca
+afirma publicação — há teste que quebra se a palavra aparecer.
+
+### Preço ausente × preço zero — a reconciliação dos 337
+
+Durante o PMA-2C5C dois números verdadeiros pareceram se contradizer:
+
+- **337 preços nulos** em `silver.stg_shopee_products`;
+- **0 preços ausentes** na candidata da Shopee.
+
+Eles não se contradizem: **medem populações diferentes**, e a leitura só fecha
+quando a dimensão é nomeada.
+
+O grão da Shopee é **pai XOR variação**. Um pai `has_model = true` é um
+*container*: quem vira oferta são as variações dele, e o preço vive na
+variação. O campo `current_price` do container é nulo **por definição da
+fonte**, não por ausência de dado. `build_shopee_records` o exclui na primeira
+linha do laço:
+
+```python
+if not row["is_model"] and row.get("has_model"):
+    continue  # container: quem vira oferta sao os modelos dele
+```
+
+A aritmética fecha exatamente (medição de 2026-09-22):
+
+| população | contagem |
+|---|---|
+| pais em `stg_shopee_products` | 662 |
+| — dos quais **sem** variação (viram oferta) | 325 |
+| — dos quais **com** variação (containers, excluídos) | **337** |
+| variações em `stg_shopee_product_models` (viram oferta) | 370 |
+| **candidata** = 325 + 370 | **695** |
+| preços ausentes **na candidata** | **0** |
+
+Os 337 nulos são, linha a linha, os 337 containers. Nenhuma oferta real perdeu
+preço; nenhum container foi promovido a oferta.
+
+**Nulo nunca vira zero, em nenhum ponto do caminho.** `_decimal_or_none`
+devolve `None` para ausência e o resto do pipeline o propaga: `observed_price`
+nulo significa *não observado*, e um `0` significa *observado valendo zero* —
+uma promoção gratuita. O relatório do ensaio conta os dois em **campos
+separados** (`prices_absent` e `prices_zero`); somá-los apagaria exatamente a
+distinção que o contrato existe para preservar. O fingerprint da candidata
+também os distingue, porque um hash que os igualasse não detectaria a troca que
+mais importa.
+
+> **Ao relatar contagens de preço da Shopee, nomeie a população.** "337 nulos"
+> só é verdade sobre *pais em `stg_shopee_products`*; sobre a *candidata* o
+> número é 0. Os dois sem a dimensão produzem a contradição de novo.
+
+Isso **não** exigiu decisão de negócio: a regra já estava no contrato do grão,
+e por isso o gate não parou em `PRICE_NULL_CONTRACT_REQUIRED`.
 
 ### Concorrência — duas camadas, propósitos distintos
 
