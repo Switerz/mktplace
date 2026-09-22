@@ -374,6 +374,48 @@ export function queryDaTendencia(janela: number, canal: Canal): string {
   return p.toString();
 }
 
+/**
+ * Situacoes que dependem de PRAZO CONTRATUAL. Num canal sem prazo elas voltam
+ * vazias por construcao — filtrar por "vencidos" no Mercado Livre nao devolve
+ * zero pedidos vencidos, devolve zero porque a pergunta nao existe la'.
+ *
+ * `deadline_unavailable` NAO entra: no ML ela e' o backlog inteiro, e e' uma
+ * pergunta legitima.
+ */
+export const SITUACOES_DE_PRAZO: readonly Situacao[] = [
+  "overdue",
+  "due_within_24h",
+  "on_time",
+];
+
+/**
+ * Troca de canal. O que atravessa e o que NAO atravessa, decidido campo a
+ * campo em vez de por descuido:
+ *
+ * - `accounts` NAO atravessa. A identidade da conta e' do canal: nome da loja
+ *   na Shopee, `seller_id` no Mercado Livre. Levar `apice` para o ML, ou
+ *   `2227056661` para a Shopee, produz uma tela vazia que parece backlog zero
+ *   e e' filtro incompativel.
+ * - `brands` ATRAVESSA. Marca e' a mesma entidade nos dois canais, e o recorte
+ *   por marca e' uma intencao do operador que sobrevive a troca. Marca que so'
+ *   existe num canal devolve vazio — e' resultado, nao incoerencia.
+ * - situacoes de PRAZO e ordenacao por prazo caem quando o canal de destino
+ *   nao publica prazo: manter uma pergunta que a fonte nao responde exibiria
+ *   vazio como se fosse resposta.
+ * - `offset` volta a zero, como em qualquer troca de recorte.
+ */
+export function aplicarCanal(atual: Filtros, canal: Canal): Filtros {
+  const perdePrazo = !canalTemPrazo(canal);
+  return aplicarFiltro(atual, {
+    channel: canal,
+    accounts: [],
+    situacao: perdePrazo
+      ? atual.situacao.filter((s) => !SITUACOES_DE_PRAZO.includes(s))
+      : atual.situacao,
+    orderBy: perdePrazo && atual.orderBy === "deadline" ? "criticidade" : atual.orderBy,
+  });
+}
+
 /** Trocar filtro reinicia a pagina: manter o offset mostraria pagina vazia. */
 export function aplicarFiltro(atual: Filtros, mudanca: Partial<Filtros>): Filtros {
   const mudouRecorte =

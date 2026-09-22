@@ -19,6 +19,8 @@ import {
   ROTULO_CANAL,
   SEM_PRAZO_ML,
   VALOR_SEM_PRAZO,
+  SITUACOES_DE_PRAZO,
+  aplicarCanal,
   aplicarFiltro,
   avisosDeCobertura,
   canalTemPrazo,
@@ -430,4 +432,93 @@ test("o menu continua atras da flag original", () => {
 test("o contrato documenta por que o ML nao tem prazo", () => {
   assert.match(CONTRATO, /0% preenchidos/);
   assert.match(SEM_PRAZO_ML, /N\/D/);
+});
+
+
+// ---------------------------------------------------------------------------
+// 10. Troca de canal: o que atravessa e o que nao atravessa (EXP-3C2-R/V)
+// ---------------------------------------------------------------------------
+const CHEIO = aplicarFiltro(FILTROS_PADRAO, {
+  brands: ["kokeshi", "apice"],
+  accounts: ["apice"],
+  situacao: ["overdue", "over_48h", "deadline_unavailable"],
+  orderBy: "deadline",
+  offset: 300,
+});
+
+test("conta NAO atravessa a troca de canal", () => {
+  // `apice` e' nome de loja da Shopee; no ML a conta e' seller_id. Levar uma
+  // para a outra devolve tela vazia que parece backlog zero.
+  assert.deepEqual(aplicarCanal(CHEIO, "mercadolivre").accounts, []);
+  const doMl = aplicarFiltro(FILTROS_PADRAO, {
+    channel: "mercadolivre",
+    accounts: ["2227056661"],
+  });
+  assert.deepEqual(aplicarCanal(doMl, "shopee").accounts, []);
+});
+
+test("marca ATRAVESSA: e' a mesma entidade nos dois canais", () => {
+  assert.deepEqual(aplicarCanal(CHEIO, "mercadolivre").brands, ["kokeshi", "apice"]);
+});
+
+test("situacao de PRAZO cai ao entrar num canal sem prazo", () => {
+  const ml = aplicarCanal(CHEIO, "mercadolivre");
+  for (const s of SITUACOES_DE_PRAZO) {
+    assert.ok(!ml.situacao.includes(s), s);
+  }
+  // as que continuam fazendo sentido ficam
+  assert.ok(ml.situacao.includes("over_48h"));
+  assert.ok(ml.situacao.includes("deadline_unavailable"));
+});
+
+test("voltando para a Shopee, as situacoes de prazo nao sao inventadas de volta", () => {
+  const ml = aplicarCanal(CHEIO, "mercadolivre");
+  const volta = aplicarCanal(ml, "shopee");
+  assert.ok(!volta.situacao.includes("overdue"), "nao reaparece o que o usuario perdeu");
+  assert.ok(volta.situacao.includes("over_48h"));
+});
+
+test("ordenar por prazo cai num canal sem prazo", () => {
+  assert.equal(aplicarCanal(CHEIO, "mercadolivre").orderBy, "criticidade");
+  assert.equal(aplicarCanal(CHEIO, "shopee").orderBy, "deadline");
+});
+
+test("troca de canal volta para a primeira pagina", () => {
+  assert.equal(aplicarCanal(CHEIO, "mercadolivre").offset, 0);
+});
+
+test("trocar para o MESMO canal nao destroi o recorte", () => {
+  // o cliente so' chama `aplicarCanal` quando o canal muda; esta e' a rede de
+  // seguranca caso alguem remova essa guarda
+  const igual = aplicarCanal(CHEIO, "shopee");
+  assert.deepEqual(igual.brands, CHEIO.brands);
+  assert.equal(igual.orderBy, "deadline");
+});
+
+// ---------------------------------------------------------------------------
+// 11. Deep link: nenhuma requisicao antes de a URL ser resolvida
+// ---------------------------------------------------------------------------
+test("as duas buscas esperam a URL ser lida", () => {
+  const guardas = CLIENTE.match(/if \(!urlPronta\) return;/g) ?? [];
+  assert.equal(guardas.length, 2, "fila E tendencia precisam esperar");
+});
+
+test("com a flag desligada nao ha espera: comportamento identico ao de antes", () => {
+  assert.match(CLIENTE, /useState\(!ML_LIGADO\)/);
+});
+
+test("urlPronta entra nas dependencias dos dois efeitos", () => {
+  assert.match(CLIENTE, /\[chave, filtros, urlPronta\]/);
+  assert.match(CLIENTE, /\[chaveTendencia, urlPronta\]/);
+});
+
+test("voltar/avancar do navegador ressincroniza o canal", () => {
+  assert.match(CLIENTE, /addEventListener\("popstate"/);
+  assert.match(CLIENTE, /removeEventListener\("popstate"/);
+});
+
+test("a troca de canal usa aplicarCanal, nao aplicarFiltro cru", () => {
+  assert.doesNotMatch(CLIENTE, /aplicarFiltro\(f, \{ channel/);
+  const usos = CLIENTE.match(/aplicarCanal\(f, canal\)/g) ?? [];
+  assert.ok(usos.length >= 3, "montagem, popstate e seletor");
 });

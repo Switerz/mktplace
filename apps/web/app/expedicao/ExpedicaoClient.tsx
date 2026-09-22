@@ -20,6 +20,7 @@ import {
   ORDENACOES,
   ROTULO_CANAL,
   SITUACOES,
+  aplicarCanal,
   aplicarFiltro,
   avisosDeCobertura,
   chaveDaRequisicao,
@@ -112,21 +113,49 @@ export default function ExpedicaoClient() {
   const chaveVigente = useRef(chave);
   chaveVigente.current = chave;
 
-  // A URL e' lida DEPOIS da montagem, nunca durante o render: ler
-  // `window.location` no render faria o HTML do servidor divergir do cliente e
-  // o React reclamaria de hidratacao.
+  /**
+   * A URL so' pode ser lida DEPOIS da montagem — ler `window.location` durante
+   * o render faria o HTML do servidor divergir do cliente.
+   *
+   * Isso cria um problema proprio: sem esperar por essa leitura, abrir
+   * `?channel=mercadolivre` disparava PRIMEIRO uma requisicao de Shopee e
+   * pintava um quadro escrito "Expedição — Shopee" antes de virar ML. Uma
+   * requisicao desperdicada e, pior, um instante em que o operador le' numeros
+   * de uma loja sob o titulo de outra.
+   *
+   * `urlPronta` segura as duas buscas ate' a URL ser resolvida. Com a flag
+   * desligada ela ja' nasce `true`: nao ha URL a consultar, e o comportamento
+   * fica identico ao de antes deste gate.
+   */
+  const [urlPronta, setUrlPronta] = useState(!ML_LIGADO);
+
+  const lerCanalDaUrl = useCallback(() => {
+    const daUrl = new URLSearchParams(window.location.search).get("channel");
+    return sanitizarCanal(daUrl, ML_LIGADO);
+  }, []);
+
   useEffect(() => {
     if (!ML_LIGADO) return;
-    const daUrl = new URLSearchParams(window.location.search).get("channel");
-    const canal = sanitizarCanal(daUrl, ML_LIGADO);
-    if (canal !== FILTROS_PADRAO.channel) {
-      setFiltros((f) => aplicarFiltro(f, { channel: canal }));
-    }
-  }, []);
+    const canal = lerCanalDaUrl();
+    setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    setUrlPronta(true);
+  }, [lerCanalDaUrl]);
+
+  // Voltar/avancar do navegador pode trocar a URL sem remontar o componente.
+  // Sem isto, o endereco diria um canal e a tela mostraria outro.
+  useEffect(() => {
+    if (!ML_LIGADO) return;
+    const aoVoltar = () => {
+      const canal = lerCanalDaUrl();
+      setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    };
+    window.addEventListener("popstate", aoVoltar);
+    return () => window.removeEventListener("popstate", aoVoltar);
+  }, [lerCanalDaUrl]);
 
   /** Troca de canal: estado, URL e pagina, sempre juntos. */
   const trocarCanal = useCallback((canal: Canal) => {
-    setFiltros((f) => (f.channel === canal ? f : aplicarFiltro(f, { channel: canal })));
+    setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
     const url = new URL(window.location.href);
     if (canal === FILTROS_PADRAO.channel) url.searchParams.delete("channel");
     else url.searchParams.set("channel", canal);
@@ -134,6 +163,7 @@ export default function ExpedicaoClient() {
   }, []);
 
   useEffect(() => {
+    if (!urlPronta) return;
     const minhaChave = chave;
     let vivo = true;
     setCarregando(true);
@@ -158,7 +188,7 @@ export default function ExpedicaoClient() {
     return () => {
       vivo = false;
     };
-  }, [chave, filtros]);
+  }, [chave, filtros, urlPronta]);
 
   // A tendencia carrega a MESMA chave de canal da fila, e a resposta que chega
   // com chave antiga e' descartada: sem isso, trocar de canal podia deixar o
@@ -171,6 +201,7 @@ export default function ExpedicaoClient() {
   chaveTendVigente.current = chaveTendencia;
 
   useEffect(() => {
+    if (!urlPronta) return;
     const minhaChave = chaveTendencia;
     let vivo = true;
     setCarregandoTendencia(true);
@@ -195,7 +226,7 @@ export default function ExpedicaoClient() {
     return () => {
       vivo = false;
     };
-  }, [chaveTendencia]);
+  }, [chaveTendencia, urlPronta]);
 
   const temFiltro =
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
