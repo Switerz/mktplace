@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # e decisao separada: com a flag off o servico devolve `unavailable`
     # ESTRUTURADO sem emitir uma unica consulta.
     expedicao_api_enabled: bool = Field(default=False)
+    #: Exposicao do Mercado Livre na Expedicao (EXP-3C1). Separada da
+    #: flag geral para que ligar a Expedicao nao exponha o ML sem
+    #: querer, e para que adiar o ML nao exija derrubar a Shopee.
+    expedicao_ml_api_enabled: bool = Field(default=False)
 
     # Chave do identificador OPACO de pedido. Vazia por default, e vazia
     # significa NAO PUBLICAR: `order_ref` sai nulo.

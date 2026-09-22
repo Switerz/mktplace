@@ -25,6 +25,7 @@ _MSG_ORDEM = "Ordenacao invalida. Valores aceitos: " + ", ".join(
 _MSG_JANELA = (
     f"Janela invalida. Informe entre 1 e {svc.JANELA_MAX_HORAS} horas.")
 _MSG_LISTA = "Lista invalida: use valores separados por virgula, sem vazios."
+_MSG_CANAL = "Canal invalido. Valores aceitos: " + ", ".join(sorted(svc.CANAIS))
 
 
 def _require_db(db: Session) -> Session:
@@ -60,6 +61,25 @@ def accounts_query(
     return _lista(accounts)
 
 
+def channel_query(
+    channel: Optional[str] = Query(
+        None,
+        description="Canal da fotografia: shopee ou mercadolivre. "
+                    "Omitido = shopee, o canal historico desta rota."),
+) -> str:
+    """Canal por ALLOWLIST, com default para nao quebrar quem ja' consome.
+
+    A mensagem de erro lista os canais ACEITOS e nunca repete o que o cliente
+    mandou: ecoar a entrada devolveria um payload arbitrario renderizado para
+    outro consumidor.
+    """
+    if channel is None:
+        return svc.CANAL_PADRAO
+    if channel not in svc.CANAIS:
+        raise HTTPException(422, _MSG_CANAL)
+    return channel
+
+
 def situacoes_query(
     situacao: Optional[str] = Query(
         None,
@@ -76,6 +96,7 @@ def situacoes_query(
 @router.get("", response_model=ExpedicaoResponse)
 @router.get("/", response_model=ExpedicaoResponse, include_in_schema=False)
 def expedicao(
+    channel: str = Depends(channel_query),
     brands: Optional[list[str]] = Depends(brands_query),
     accounts: Optional[list[str]] = Depends(accounts_query),
     situacao: Optional[list[str]] = Depends(situacoes_query),
@@ -89,13 +110,15 @@ def expedicao(
     if order_by not in svc.ORDENACOES:
         raise HTTPException(422, _MSG_ORDEM)
     return svc.get_expedicao(
-        _require_db(db), brands=brands, accounts=accounts, situacoes=situacao,
-        order_by=order_by, limit=limit, offset=offset, include_queue=include_queue,
+        _require_db(db), channel=channel, brands=brands, accounts=accounts,
+        situacoes=situacao, order_by=order_by, limit=limit, offset=offset,
+        include_queue=include_queue,
     )
 
 
 @router.get("/trend", response_model=TendenciaResponse)
 def trend(
+    channel: str = Depends(channel_query),
     window_hours: int = Query(svc.JANELA_PADRAO_HORAS, description=_MSG_JANELA),
     brands: Optional[list[str]] = Depends(brands_query),
     accounts: Optional[list[str]] = Depends(accounts_query),
@@ -105,5 +128,6 @@ def trend(
     if window_hours < 1 or window_hours > svc.JANELA_MAX_HORAS:
         raise HTTPException(422, _MSG_JANELA)
     return svc.get_tendencia(
-        _require_db(db), window_hours=window_hours, brands=brands, accounts=accounts,
+        _require_db(db), channel=channel, window_hours=window_hours,
+        brands=brands, accounts=accounts,
     )

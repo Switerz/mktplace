@@ -67,6 +67,8 @@ SituacaoOperacional = Literal[
 Availability = Literal["available", "unavailable"]
 
 UNAVAILABLE_DISABLED = "feature_flag_disabled"
+#: Canal conhecido, porem ainda nao exposto (flag propria do ML).
+UNAVAILABLE_CHANNEL_DISABLED = "channel_disabled"
 UNAVAILABLE_NO_SNAPSHOT = "no_snapshot_published"
 UNAVAILABLE_INCONSISTENT_BATCH = "inconsistent_batch"
 
