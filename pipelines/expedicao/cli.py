@@ -788,6 +788,16 @@ def reconcile_channel(
         publicado["resumos"],
         expected_accounts=contas_canonicas,
     )
+    # Levantar AQUI, e nao depois da comparacao: a incoerencia interna do
+    # publicado e' um fato sobre o banco, independente da fonte. Deixar o
+    # laco de comparacao rodar primeiro faria um 'DRIFT DETERMINISTICO'
+    # ganhar a corrida e esconder a causa verdadeira.
+    if incoerencias_publicado:
+        raise LoteIncoerente(
+            f"a fotografia PUBLICADA de {channel.value} nao fecha consigo mesma: "
+            + "; ".join(incoerencias_publicado)
+        )
+
     recomputados = transform.build_account_summaries(
         recomputada,
         efetivo,
@@ -834,12 +844,6 @@ def reconcile_channel(
         raise SourceUnhealthy(
             f"fila de {channel.value} tem {duplicadas} chave(s) duplicada(s) "
             "no destino."
-        )
-
-    if incoerencias_publicado:
-        raise LoteIncoerente(
-            f"a fotografia PUBLICADA de {channel.value} nao fecha consigo mesma: "
-            + "; ".join(incoerencias_publicado)
         )
 
     # Comparar o backlog publicado com o recomputado so' tem sentido quando a

@@ -792,3 +792,37 @@ def test_conta_registrada_com_carimbo_NULO_nao_publica():
     assert SourceHealth.SOURCE_STALE.value not in junto, (
         "conta sem carimbo nao e' a mesma coisa que conta parada"
     )
+
+
+def test_incoerencia_do_publicado_ganha_do_drift_no_diagnostico():
+    """Qual erro vence quando a fotografia esta' incoerente E divergente.
+
+    A incoerencia interna e' um fato sobre o BANCO e nao depende de reler a
+    fonte; o drift e' uma comparacao contra uma recomputacao. Se o laco de
+    comparacao rodasse primeiro, o operador leria 'DRIFT DETERMINISTICO' e iria
+    investigar o transform - quando o problema e' que a fila e o resumo
+    publicados nao fecham entre si.
+    """
+    linhas = [linha(700001), linha(700002)]
+    fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
+
+    respostas = _publicado_fake(fila)
+    # (a) drift: o publicado carrega uma classificacao diferente da recomputada
+    respostas[1][0]["deadline_status"] = "overdue"
+    # (b) incoerencia: resumos zerados, como no incidente
+    zerados = transform.build_account_summaries(
+        fila, AGORA, channel=Channel.MERCADOLIVRE.value, refresh_batch_id=BATCH,
+        accounts={e: (c.brand_key, c.brand_key) for e, c in REGISTRY_ML.items()},
+        watermarks={e: AGORA for e in REGISTRY_ML}, source_advanced=False,
+    )
+    respostas[2] = [{c: r[c] for c in cli.COLUNAS_RESUMO_PUBLICADO} for r in zerados]
+
+    with pytest.raises(LoteIncoerente) as erro:
+        cli.reconcile_channel(
+            FakeTarget(respostas=respostas),
+            FakeSource(linhas, WATERMARKS_OK), Channel.MERCADOLIVRE,
+            open_registry=lambda _c, _m: (REGISTRY_ML, []),
+        )
+    texto = str(erro.value)
+    assert "nao fecha consigo mesma" in texto
+    assert "DRIFT" not in texto, "a incoerencia interna tem de vir primeiro"
