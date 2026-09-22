@@ -474,7 +474,8 @@ def test_entrada_com_script_nao_e_ecoada():
 def test_situacao_invalida_nao_vira_sql(ligada):
     s = SessaoFake()
     with pytest.raises(KeyError):
-        svc._pagina_da_fila(s, BATCH, brands=None, accounts=None,
+        svc._pagina_da_fila(s, svc.CANAIS["shopee"], BATCH, brands=None,
+                            accounts=None,
                             situacoes=["'; DROP TABLE x; --"],
                             order_by="criticidade", limit=10, offset=0)
 

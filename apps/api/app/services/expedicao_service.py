@@ -32,6 +32,7 @@ import base64
 import hashlib
 import hmac
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -39,16 +40,13 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.schemas.expedicao import (
+    UNAVAILABLE_CHANNEL_DISABLED,
     UNAVAILABLE_DISABLED,
     UNAVAILABLE_INCONSISTENT_BATCH,
     UNAVAILABLE_NO_SNAPSHOT,
 )
 
-CHANNEL = "shopee"
 CHECK_FRESHNESS = "expedicao_source_freshness"
-#: Shopee. Escopa o check para que nenhuma linha de PMA, Full ou de outra fonte
-#: entre no `DISTINCT ON`, por mais recente que seja.
-MARKETPLACE_ID = 3
 
 #: Tamanho minimo do segredo do `order_ref`. Abaixo disso a chave nao resiste a
 #: busca exaustiva.
@@ -116,13 +114,121 @@ JANELA_MAX_HORAS = 24 * 14
 JANELA_PADRAO_HORAS = 48
 PONTOS_MAX = 2000
 
-#: Marcas que a torre acompanha e que ESTA fonte nao cobre. Medido no EXP-1E:
-#: Kokeshi existe em `marts.dim_loja` e nao existe em `raw.shopee_orders`.
+#: Marcas que a torre acompanha e que a fonte da SHOPEE nao cobre. Medido no
+#: EXP-1E: Kokeshi existe em `marts.dim_loja` e nao existe em
+#: `raw.shopee_orders`. No Mercado Livre a Kokeshi E' coberta — por isso a lista
+#: e' POR CANAL: publicar a lacuna da Shopee no payload do ML afirmaria um
+#: buraco que nao existe.
 MARCAS_SEM_COBERTURA = ("kokeshi",)
+
+NOTA_SEM_AGENDAMENTO = (
+    "Nenhum agendamento existe: a fotografia so' avanca quando alguem executa"
+    " o refresh manualmente."
+)
+NOTA_SEM_IDENTIFICADOR = (
+    "Identificador do pedido nao e' servido: esta API nao tem autenticacao."
+)
+NOTA_FRESCOR = (
+    "freshness mede o watermark da CONTA; oldest_row_age_hours e' contexto e"
+    " nao reprova a fonte."
+)
+
+
+@dataclass(frozen=True)
+class Canal:
+    """Tudo o que muda de um canal para o outro, reunido num lugar so'.
+
+    Sem isto, `channel = 'shopee'` fica espalhado por sete consultas, e basta
+    uma ficar para tras para o payload de um canal servir a fila do outro. Com
+    o objeto, esquecer o filtro vira erro de argumento, nao dado errado.
+    """
+
+    slug: str
+    marketplace_id: int
+    marcas_sem_cobertura: tuple[str, ...]
+    notas: tuple[str, ...]
+    #: Coluna do REGISTRY que carrega a mesma identidade que a fotografia
+    #: publica em `shop_account`. E' o que permite comparar ESPERADO com
+    #: OBSERVADO sem misturar dominios — ver `_identidade_da_conta`.
+    identidade_no_registry: str
+
+    @property
+    def fonte_auditoria(self) -> str:
+        """Nome em `audit.source_sync_run`, como a CLI o grava."""
+        return f"expedicao_{self.slug}"
+
+
+CANAIS: dict[str, Canal] = {
+    "shopee": Canal(
+        slug="shopee",
+        marketplace_id=3,
+        # `raw.shopee_orders.shop_account` e' o nome da loja, que coincide com
+        # o `brand_key`. O `external_seller_id` do registry e' o `shop_id`
+        # numerico, que a fotografia NAO publica.
+        identidade_no_registry="brand",
+        marcas_sem_cobertura=MARCAS_SEM_COBERTURA,
+        notas=(
+            NOTA_SEM_AGENDAMENTO,
+            "Kokeshi nao e' coberta por esta fonte (ausente em raw.shopee_orders).",
+            NOTA_SEM_IDENTIFICADOR,
+            NOTA_FRESCOR,
+        ),
+    ),
+    "mercadolivre": Canal(
+        slug="mercadolivre",
+        marketplace_id=2,
+        # A fila do ML publica o `seller_id` em `shop_account`, e o registry o
+        # guarda em `external_seller_id`. Sao a MESMA entidade.
+        identidade_no_registry="external_seller_id",
+        # A Kokeshi E' coberta aqui. Lista vazia, nao a da Shopee.
+        marcas_sem_cobertura=(),
+        notas=(
+            NOTA_SEM_AGENDAMENTO,
+            # Medido no EXP-3A: os campos candidatos a prazo estao 0% preenchidos
+            # na fonte. Derivar um prazo produziria "vencido" onde o marketplace
+            # nunca prometeu nada, e a Torre perderia o direito de ser acreditada.
+            "Mercado Livre nao publica prazo de despacho: deadline_status e'"
+            " sempre 'unavailable' e a ausencia nao indica atraso.",
+            "A unidade operacional do Mercado Livre e' o SHIPMENT, nao o pedido.",
+            "A conta e' identificada pelo seller_id; a marca vem do registry.",
+            NOTA_SEM_IDENTIFICADOR,
+            NOTA_FRESCOR,
+        ),
+    ),
+}
+
+#: Canal historico desta API. Continua sendo o default para nao quebrar quem ja'
+#: consome a rota sem informar `channel`.
+CANAL_PADRAO = "shopee"
+
+#: Compatibilidade com quem importava os nomes antigos.
+CHANNEL = CANAL_PADRAO
+MARKETPLACE_ID = CANAIS[CANAL_PADRAO].marketplace_id
 
 
 def habilitado() -> bool:
     return bool(getattr(settings, "expedicao_api_enabled", False))
+
+
+def canal_habilitado(canal: Canal) -> bool:
+    """A Shopee segue a flag geral; o ML tem a sua, default `false`.
+
+    Sao duas decisoes diferentes: "a Expedicao esta no ar" e "o Mercado Livre
+    ja' pode ser mostrado". Amarrar as duas na mesma flag obrigaria a derrubar a
+    Shopee para adiar o ML, ou a expor o ML sem querer ao ligar a Expedicao.
+    """
+    if canal.slug == "mercadolivre":
+        return bool(getattr(settings, "expedicao_ml_api_enabled", False))
+    return True
+
+
+def resolver_canal(slug: Optional[str]) -> Canal:
+    """Slug -> canal, por ALLOWLIST. `None` cai no canal historico.
+
+    Levanta `KeyError` para slug desconhecido; quem traduz em 422 e' a borda,
+    que tambem garante que a entrada do cliente nunca volte ecoada.
+    """
+    return CANAIS[slug or CANAL_PADRAO]
 
 
 def _order_ref(order_sn: str) -> Optional[str]:
@@ -180,11 +286,11 @@ def _num(valor: Any) -> Optional[float]:
     return f
 
 
-def _indisponivel(motivo: str, *, tendencia: bool = False) -> dict:
+def _indisponivel(canal: Canal, motivo: str, *, tendencia: bool = False) -> dict:
     envelope = {
         "availability": "unavailable",
         "unavailable_reason": motivo,
-        "channel": CHANNEL,
+        "channel": canal.slug,
         # As colecoes vao VAZIAS e as medidas vao NULAS. Colecao ausente do dict
         # deixaria o consumidor decidir o default; total ausente virando zero
         # afirmaria uma medicao que nao houve.
@@ -195,7 +301,7 @@ def _indisponivel(motivo: str, *, tendencia: bool = False) -> dict:
         "coverage": None,
         "queue": [],
         "pagination": None,
-        "limitations": _limitacoes(None),
+        "limitations": _limitacoes(canal, None),
     }
     if tendencia:
         envelope["window_hours"] = 0
@@ -204,21 +310,15 @@ def _indisponivel(motivo: str, *, tendencia: bool = False) -> dict:
     return envelope
 
 
-def _limitacoes(idade_h: Optional[float], extras: Optional[list[str]] = None) -> dict:
-    notas = [
-        "Nenhum agendamento existe: a fotografia so' avanca quando alguem executa"
-        " o refresh manualmente.",
-        "Kokeshi nao e' coberta por esta fonte (ausente em raw.shopee_orders).",
-        "Identificador do pedido nao e' servido: esta API nao tem autenticacao.",
-        "freshness mede o watermark da CONTA; oldest_row_age_hours e' contexto e"
-        " nao reprova a fonte.",
-    ]
+def _limitacoes(canal: Canal, idade_h: Optional[float],
+                extras: Optional[list[str]] = None) -> dict:
+    notas = list(canal.notas)
     notas.extend(extras or [])
     return {
         "no_automation": True,
         "load_mode": "manual_snapshot",
         "snapshot_age_hours": idade_h,
-        "brands_not_covered": list(MARCAS_SEM_COBERTURA),
+        "brands_not_covered": list(canal.marcas_sem_cobertura),
         "order_identifier_withheld": _order_ref("x") is None,
         "notes": notas,
     }
@@ -251,7 +351,7 @@ def _abrir_snapshot(db) -> None:
 # ---------------------------------------------------------------------------
 # Fotografia vigente
 # ---------------------------------------------------------------------------
-def _carregar_snapshot(db) -> tuple[Optional[dict], Optional[str]]:
+def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]:
     """Identidade do batch vigente, ou o motivo de nao servir.
 
     Falha FECHADA: mais de um batch ou mais de um `effective_at` na fila
@@ -265,7 +365,7 @@ def _carregar_snapshot(db) -> tuple[Optional[dict], Optional[str]]:
                min(refresh_batch_id) AS batch,
                min(effective_at) AS effective_at
         FROM {FILA} WHERE channel = :canal
-    """, {"canal": CHANNEL})[0]
+    """, {"canal": canal.slug})[0]
 
     if not cab["linhas"] and not cab["lotes"]:
         return None, UNAVAILABLE_NO_SNAPSHOT
@@ -280,7 +380,7 @@ def _carregar_snapshot(db) -> tuple[Optional[dict], Optional[str]]:
                observed_at
         FROM {RUN} WHERE channel = :canal AND refresh_batch_id = :batch
         ORDER BY brand, shop_account
-    """, {"canal": CHANNEL, "batch": cab["batch"]})
+    """, {"canal": canal.slug, "batch": cab["batch"]})
 
     if not resumos:
         # Fila publicada sem o resumo do mesmo lote: os dois vao na MESMA
@@ -297,7 +397,7 @@ def _carregar_snapshot(db) -> tuple[Optional[dict], Optional[str]]:
             "linhas": cab["linhas"], "resumos": resumos}, None
 
 
-def _auditoria(db, effective_at: datetime) -> dict:
+def _auditoria(db, canal: Canal, effective_at: datetime) -> dict:
     """A execucao que produziu ESTE lote.
 
     `audit.source_sync_run` nao guarda `refresh_batch_id`, entao a ancora e'
@@ -323,11 +423,11 @@ def _auditoria(db, effective_at: datetime) -> dict:
           AND status <> 'running'
           AND finished_at >= :instante
         ORDER BY sync_run_id ASC LIMIT 1
-    """, {"fonte": f"expedicao_{CHANNEL}", "instante": effective_at})
+    """, {"fonte": canal.fonte_auditoria, "instante": effective_at})
     return linhas[0] if linhas else {}
 
 
-def _frescor(db) -> list[dict]:
+def _frescor(db, canal: Canal) -> list[dict]:
     """A observacao MAIS RECENTE por marca. Nunca o pior historico.
 
     `DISTINCT ON` com `ORDER BY brand, check_timestamp DESC, check_id DESC`
@@ -346,7 +446,8 @@ def _frescor(db) -> list[dict]:
           AND marketplace_id = :mkt
           AND details IS NOT NULL
         ORDER BY details::jsonb->>'brand', check_timestamp DESC, check_id DESC
-    """, {"check": CHECK_FRESHNESS, "tabela": FILA, "mkt": MARKETPLACE_ID})
+    """, {"check": CHECK_FRESHNESS, "tabela": FILA,
+          "mkt": canal.marketplace_id})
 
 
 def _monta_frescor(bruto: list[dict], resumos: list[dict],
@@ -421,26 +522,48 @@ def _classificar(idade_h: Optional[float], watermark: Optional[datetime]) -> str
     return "critical"
 
 
-def _cobertura(db, resumos: list[dict], effective_at: datetime) -> dict:
+def _identidade_da_conta(canal: Canal, linha_registry: dict) -> str:
+    """A identidade da conta, no MESMO dominio que `shop_account` da fotografia.
+
+    Antes, `expected_accounts` trazia MARCAS e `observed_accounts` trazia
+    `shop_account`. Na Shopee os dois coincidem por acidente — o nome da loja e'
+    o da marca — e a inconsistencia passava despercebida. No Mercado Livre sao
+    dominios diferentes: marca de um lado, `seller_id` do outro. Comparar
+    conjuntos assim nunca acusaria conta faltando, porque nada nunca se cruza.
+
+    Cada canal declara QUAL coluna do registry carrega a identidade que a
+    fotografia publica; aqui so' se le' essa coluna.
+    """
+    return str(linha_registry[canal.identidade_no_registry])
+
+
+def _cobertura(db, canal: Canal, resumos: list[dict],
+               effective_at: datetime) -> dict:
+    """Conjuntos ESPERADO x OBSERVADO, os dois no dominio da CONTA.
+
+    A cobertura por MARCA continua existindo, e em campo proprio:
+    `brands_not_covered`. Misturar as duas coisas para preservar compatibilidade
+    aparente foi justamente o defeito corrigido aqui.
+    """
     esperadas = _linhas(db, """
         SELECT sa.external_seller_id, l.brand_key AS brand, sa.account_name
         FROM marts.dim_seller_account sa
         JOIN marts.dim_loja l ON l.loja_id = sa.loja_id
         WHERE sa.marketplace_id = :mkt AND sa.ativo AND l.ativo
         ORDER BY l.brand_key
-    """, {"mkt": 3})
-    marcas_esperadas = [r["brand"] for r in esperadas]
-    observadas = {r["shop_account"]: r for r in resumos}
+    """, {"mkt": canal.marketplace_id})
+    esperadas_por_conta = {_identidade_da_conta(canal, r): r for r in esperadas}
+    observadas = {str(r["shop_account"]): r for r in resumos}
 
-    # O registry chaveia por `external_seller_id` e a fotografia por
-    # `shop_account`. A marca e' o unico elo 1:1 entre os dois nesta camada.
-    esperadas_por_marca = {r["brand"]: r for r in esperadas}
     contas = []
-    for marca in sorted(set(marcas_esperadas) | {r["brand"] for r in resumos}):
-        r = next((x for x in resumos if x["brand"] == marca), None)
+    for conta in sorted(set(esperadas_por_conta) | set(observadas)):
+        r = observadas.get(conta)
+        registro = esperadas_por_conta.get(conta)
         contas.append({
-            "shop_account": r["shop_account"] if r else marca,
-            "brand": marca,
+            "shop_account": conta,
+            # A marca vem do que a fotografia publicou; se a conta nao foi
+            # observada, vem do registry. Nunca e' derivada da identidade.
+            "brand": r["brand"] if r else (registro or {}).get("brand", conta),
             "observed": r is not None,
             "backlog_count": r["backlog_count"] if r else None,
             "source_watermark_at": r["source_watermark_at"] if r else None,
@@ -449,16 +572,14 @@ def _cobertura(db, resumos: list[dict], effective_at: datetime) -> dict:
             "source_advanced": r["source_advanced"] if r else None,
         })
 
-    marcas_obs = {r["brand"] for r in resumos}
-    faltando = sorted(set(esperadas_por_marca) - marcas_obs)
-    inesperadas = sorted(marcas_obs - set(esperadas_por_marca))
     return {
-        "expected_accounts": sorted(marcas_esperadas),
+        "expected_accounts": sorted(esperadas_por_conta),
         "observed_accounts": sorted(observadas),
-        "missing_accounts": faltando,
-        "unexpected_accounts": inesperadas,
+        "missing_accounts": sorted(set(esperadas_por_conta) - set(observadas)),
+        "unexpected_accounts": sorted(set(observadas) - set(esperadas_por_conta)),
         "accounts": contas,
-        "brands_not_covered": list(MARCAS_SEM_COBERTURA),
+        # Cobertura de MARCAS vive aqui, e so' aqui.
+        "brands_not_covered": list(canal.marcas_sem_cobertura),
     }
 
 
@@ -468,6 +589,7 @@ def _cobertura(db, resumos: list[dict], effective_at: datetime) -> dict:
 def get_expedicao(
     db,
     *,
+    channel: Optional[str] = None,
     brands: Optional[list[str]] = None,
     accounts: Optional[list[str]] = None,
     situacoes: Optional[list[str]] = None,
@@ -476,17 +598,22 @@ def get_expedicao(
     offset: int = 0,
     include_queue: bool = True,
 ) -> dict:
+    canal = resolver_canal(channel)
     if not habilitado():
-        return _indisponivel(UNAVAILABLE_DISABLED)
+        return _indisponivel(canal, UNAVAILABLE_DISABLED)
+    if not canal_habilitado(canal):
+        # Canal CONHECIDO e ainda nao exposto. Nao e' 422: o consumidor pediu
+        # algo valido, e o envelope diz por que nao veio dado.
+        return _indisponivel(canal, UNAVAILABLE_CHANNEL_DISABLED)
 
     _abrir_snapshot(db)
-    snap, motivo = _carregar_snapshot(db)
+    snap, motivo = _carregar_snapshot(db, canal)
     if snap is None:
-        return _indisponivel(motivo or UNAVAILABLE_NO_SNAPSHOT)
+        return _indisponivel(canal, motivo or UNAVAILABLE_NO_SNAPSHOT)
 
     resumos = snap["resumos"]
     effective_at = snap["effective_at"]
-    aud = _auditoria(db, effective_at)
+    aud = _auditoria(db, canal, effective_at)
 
     medidas = ("backlog_count", "overdue_count", "due_within_24h_count",
                "on_time_count", "deadline_unavailable_count", "over_48h_count",
@@ -494,7 +621,7 @@ def get_expedicao(
     totais = {m: sum(int(r[m]) for r in resumos) for m in medidas}
 
     saude = "healthy"
-    cobertura = _cobertura(db, resumos, effective_at)
+    cobertura = _cobertura(db, canal, resumos, effective_at)
     if cobertura["missing_accounts"]:
         saude = "account_missing"
     elif cobertura["unexpected_accounts"]:
@@ -505,9 +632,9 @@ def get_expedicao(
     resposta = {
         "availability": "available",
         "unavailable_reason": None,
-        "channel": CHANNEL,
+        "channel": canal.slug,
         "snapshot": {
-            "channel": CHANNEL,
+            "channel": canal.slug,
             "refresh_batch_id": snap["batch"],
             "effective_at": effective_at,
             "snapshot_hour": resumos[0]["snapshot_hour"],
@@ -532,16 +659,16 @@ def get_expedicao(
              "snapshot_hour": r["snapshot_hour"]}
             for r in resumos
         ],
-        "freshness": _monta_frescor(_frescor(db), resumos, effective_at),
+        "freshness": _monta_frescor(_frescor(db, canal), resumos, effective_at),
         "coverage": cobertura,
         "queue": [],
         "pagination": None,
-        "limitations": _limitacoes(idade_snapshot),
+        "limitations": _limitacoes(canal, idade_snapshot),
     }
 
     if include_queue:
         fila, total = _pagina_da_fila(
-            db, snap["batch"], brands=brands, accounts=accounts,
+            db, canal, snap["batch"], brands=brands, accounts=accounts,
             situacoes=situacoes, order_by=order_by, limit=limit, offset=offset)
         resposta["queue"] = fila
         resposta["pagination"] = {
@@ -551,11 +678,16 @@ def get_expedicao(
     return resposta
 
 
-def _pagina_da_fila(db, batch: str, *, brands, accounts, situacoes,
+def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes,
                     order_by: str, limit: int, offset: int) -> tuple[list[dict], int]:
-    """Filtros e ordenacao por ALLOWLIST; valores sempre parametrizados."""
+    """Filtros e ordenacao por ALLOWLIST; valores sempre parametrizados.
+
+    `channel` e `refresh_batch_id` entram JUNTOS no filtro: o batch ja' seria
+    suficiente hoje, mas um lote com o mesmo id em dois canais serviria a fila
+    errada, e o custo de manter o canal explicito e' zero.
+    """
     onde = ["channel = :canal", "refresh_batch_id = :batch"]
-    params: dict[str, Any] = {"canal": CHANNEL, "batch": batch}
+    params: dict[str, Any] = {"canal": canal.slug, "batch": batch}
 
     if brands:
         onde.append("brand = ANY(:brands)")
@@ -594,7 +726,8 @@ def _pagina_da_fila(db, batch: str, *, brands, accounts, situacoes,
 # ---------------------------------------------------------------------------
 # Tendencia
 # ---------------------------------------------------------------------------
-def get_tendencia(db, *, window_hours: int = JANELA_PADRAO_HORAS,
+def get_tendencia(db, *, channel: Optional[str] = None,
+                  window_hours: int = JANELA_PADRAO_HORAS,
                   brands: Optional[list[str]] = None,
                   accounts: Optional[list[str]] = None) -> dict:
     """Serie horaria POR CONTA.
@@ -603,14 +736,17 @@ def get_tendencia(db, *, window_hours: int = JANELA_PADRAO_HORAS,
     `(shop_account, snapshot_hour)` como o pipeline materializou. Somar duas
     horas contaria o mesmo pedido duas vezes — ele continua no backlog.
     """
+    canal = resolver_canal(channel)
     if not habilitado():
-        return _indisponivel(UNAVAILABLE_DISABLED, tendencia=True)
+        return _indisponivel(canal, UNAVAILABLE_DISABLED, tendencia=True)
+    if not canal_habilitado(canal):
+        return _indisponivel(canal, UNAVAILABLE_CHANNEL_DISABLED, tendencia=True)
 
     _abrir_snapshot(db)
     janela = max(1, min(int(window_hours), JANELA_MAX_HORAS))
     onde = ["channel = :canal",
             "snapshot_hour >= date_trunc('hour', now()) - make_interval(hours => :janela)"]
-    params: dict[str, Any] = {"canal": CHANNEL, "janela": janela}
+    params: dict[str, Any] = {"canal": canal.slug, "janela": janela}
     if brands:
         onde.append("brand = ANY(:brands)")
         params["brands"] = list(brands)
@@ -637,11 +773,11 @@ def get_tendencia(db, *, window_hours: int = JANELA_PADRAO_HORAS,
     return {
         "availability": "available",
         "unavailable_reason": None,
-        "channel": CHANNEL,
+        "channel": canal.slug,
         "window_hours": janela,
         "from_hour": min(horas) if horas else None,
         "to_hour": max(horas) if horas else None,
         "points": pontos,
         "truncated": truncado,
-        "limitations": _limitacoes(None),
+        "limitations": _limitacoes(canal, None),
     }
