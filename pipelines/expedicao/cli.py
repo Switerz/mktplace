@@ -75,9 +75,12 @@ METADADO DE FRESCOR (`source_advanced`), nunca como condicao para pular.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,7 +92,9 @@ from pipelines.expedicao.contract import (
     RUN_TABLE,
     Channel,
     FreshnessStatus,
+    ExtractionResult,
     RegistryError,
+    SellerAccount,
     SourceUnhealthy,
 )
 from pipelines.expedicao.publisher import (
@@ -268,9 +273,10 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
         "effective_at": effective_at,
         "diagnostico": diagnostico,
         "por_conta": por_conta,
+        # `fetch_watermarks` ja devolve em UTC: normalizar de novo levantaria,
+        # porque a funcao recusa carimbo aware de proposito (EXP-3B2-H1).
         "watermarks": {
-            w.external_seller_id: transform.normalizar_ingestao_ml(w.max_ingested_at)
-            for w in watermarks
+            w.external_seller_id: w.max_ingested_at for w in watermarks
         },
     }
 
@@ -493,6 +499,246 @@ def open_audit_default():
 # ---------------------------------------------------------------------------
 # Orquestracao do --apply
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Adaptadores por canal (EXP-3B2-H2)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class AdaptadorDeCanal:
+    """O que muda de um canal para o outro — e SO isso.
+
+    Lock, auditoria, publicacao atomica, ausencia de retry e o tratamento de
+    excecao sao os MESMOS para todos os canais, de proposito: um segundo
+    caminho de publicacao seria uma segunda chance de errar em cada uma dessas
+    garantias.
+
+    `load_registry` e o mesmo objeto para os dois canais: ele le
+    `marts.dim_seller_account` parametrizado por `marketplace_id` e nao conhece
+    Shopee nenhuma. Vive em `shopee_extract` por ordem de nascimento; mover o
+    modulo agora inflaria este diff sem mudar comportamento.
+    """
+
+    load_registry: Callable[..., tuple[dict[str, SellerAccount], list[str]]]
+    extract: Callable[..., ExtractionResult]
+    build_fila: Callable[..., list[dict]]
+
+
+def _fila_shopee(source, extracao, registry, effective_at, batch_id) -> list[dict]:
+    """Shopee precisa do p50 por conta para `is_slow_vs_baseline`."""
+    baselines = shopee_extract.fetch_baselines(source, effective_at)
+    return transform.build_fila_shopee(
+        extracao.backlog_rows, registry, baselines, effective_at, batch_id
+    )
+
+
+def _fila_ml(source, extracao, registry, effective_at, batch_id) -> list[dict]:
+    """O ML nao tem baseline: a coorte de 7 dias nao sustenta amostra de 100.
+
+    `source` entra na assinatura para manter a forma do adaptador; o build do
+    ML nao precisa reabrir a fonte.
+    """
+    del source
+    return transform.build_fila_ml(
+        extracao.backlog_rows, registry, effective_at, batch_id
+    )
+
+
+#: ALLOWLIST de canais publicaveis. Canal ausente daqui nao publica, e a
+#: ausencia e' explicita — nao depende de ninguem lembrar de escrever um `if`.
+ADAPTADORES: dict[Channel, AdaptadorDeCanal] = {
+    Channel.SHOPEE: AdaptadorDeCanal(
+        load_registry=shopee_extract.load_registry,
+        extract=shopee_extract.extract,
+        build_fila=_fila_shopee,
+    ),
+    Channel.MERCADOLIVRE: AdaptadorDeCanal(
+        load_registry=shopee_extract.load_registry,
+        extract=ml_extract.extract,
+        build_fila=_fila_ml,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Reconciliacao DETERMINISTICA (EXP-3B2-H2)
+# ---------------------------------------------------------------------------
+#: Campos classificados que, para a MESMA chave e o MESMO `effective_at`, tem
+#: que bater exatamente. Divergencia aqui nao e' churn da fonte: e' o codigo
+#: classificando a mesma linha de dois jeitos.
+CAMPOS_RECONCILIADOS = (
+    "brand",
+    "deadline_status",
+    "operational_age_status",
+    "is_stalled",
+    "logistic_type",
+)
+
+
+def fingerprint_fila(linhas: list[dict]) -> str:
+    """Impressao INDEPENDENTE DE ORDEM da fila.
+
+    Ordenar por chave antes de somar evita que a mesma fotografia produza dois
+    hashes so' porque o SELECT devolveu em outra ordem.
+    """
+    itens = sorted(
+        "|".join(
+            [
+                str(x["channel"]),
+                str(x["shop_account"]),
+                str(x["marketplace_order_id"]),
+                *(str(x.get(c)) for c in CAMPOS_RECONCILIADOS),
+            ]
+        )
+        for x in linhas
+    )
+    return hashlib.sha256("\n".join(itens).encode()).hexdigest()
+
+
+def published_snapshot(target, channel: Channel) -> dict:
+    """Le do destino a fotografia publicada do canal.
+
+    Devolve `effective_at`, `refresh_batch_id` e as linhas com os campos
+    reconciliados. Um canal com mais de um batch na fila e' inconsistencia, nao
+    ambiguidade a resolver: levanta.
+    """
+    with target.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT refresh_batch_id, effective_at "
+            f"FROM {FILA_TABLE} WHERE channel = %s",
+            (channel.value,),
+        )
+        lotes = [dict(r) if not isinstance(r, dict) else r for r in cur.fetchall()]
+    if not lotes:
+        return {"effective_at": None, "refresh_batch_id": None, "linhas": []}
+    if len(lotes) > 1:
+        raise SourceUnhealthy(
+            f"fila de {channel.value} tem {len(lotes)} lotes simultaneos; "
+            "a substituicao por canal deveria deixar exatamente um."
+        )
+    cabecalho = lotes[0]
+    colunas = ["channel", "shop_account", "marketplace_order_id", *CAMPOS_RECONCILIADOS]
+    with target.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(colunas)} FROM {FILA_TABLE} WHERE channel = %s",
+            (channel.value,),
+        )
+        linhas = [dict(r) for r in cur.fetchall()]
+    return {
+        "effective_at": cabecalho["effective_at"],
+        "refresh_batch_id": cabecalho["refresh_batch_id"],
+        "linhas": linhas,
+    }
+
+
+def reconcile_channel(
+    target,
+    source,
+    channel: Channel,
+    *,
+    open_registry=None,
+) -> dict:
+    """Reconcilia o PUBLICADO contra uma recomputacao no MESMO instante.
+
+    POR QUE NAO SE EXIGE FINGERPRINT IGUAL ENTRE DOIS INSTANTES
+    -----------------------------------------------------------
+    Medido no EXP-3B2-P2: a candidata do ML foi de 888 linhas as 21:19 para 885
+    as 21:52, e `over_48h` saltou de 269 para 358 em 33 minutos. Duas causas
+    independentes: a fonte muda (shipment entra e sai de `ready_to_ship`) e o
+    RELOGIO muda (a idade reclassifica sozinha). Exigir hashes iguais entre o
+    dry-run e o apply reprovaria toda execucao saudavel — e, pior, empurraria
+    quem opera a afrouxar o criterio no meio de um incidente.
+
+    A ancora certa e' o `effective_at` DO BATCH PUBLICADO. `build_fila_*` e'
+    funcao pura de (linhas, registry, effective_at): recomputando no mesmo
+    instante, a classificacao e' reproduzivel e o unico residuo e' o churn da
+    fonte entre a publicacao e a leitura.
+
+    DRIFT MATERIAL vs CHURN
+    -----------------------
+    Para uma chave presente nos DOIS lados, todo campo classificado tem que
+    bater. Divergencia ali nao e' churn: e' o codigo dando dois vereditos para
+    a mesma linha no mesmo instante — falha FECHADA.
+
+    Chave so' de um lado e' churn da fonte: contado e reportado, nunca
+    silenciado, e nunca confundido com erro de classificacao.
+    """
+    publicado = published_snapshot(target, channel)
+    if publicado["effective_at"] is None:
+        raise SourceUnhealthy(
+            f"nao ha fotografia publicada de {channel.value} para reconciliar."
+        )
+
+    efetivo = publicado["effective_at"]
+    adaptador = ADAPTADORES.get(channel)
+    if adaptador is None:
+        raise PreflightFalhou(f"canal {channel.value} sem adaptador de reconciliacao.")
+
+    carregar = open_registry or adaptador.load_registry
+    registry, problemas = carregar(target, MARKETPLACE_ID[channel])
+    if problemas:
+        raise SourceUnhealthy(f"registry ambiguo: {problemas}")
+    if not registry:
+        raise PreflightFalhou(f"registry sem conta ativa para {channel.value}.")
+
+    extracao = adaptador.extract(source, efetivo, frozenset(registry))
+    if not extracao.source_health.can_publish:
+        raise SourceUnhealthy(
+            f"fonte em '{extracao.source_health.value}' na reconciliacao: "
+            f"{extracao.detail}"
+        )
+    recomputada = adaptador.build_fila(
+        source, extracao, registry, efetivo, publicado["refresh_batch_id"]
+    )
+
+    def chave(x):
+        return (x["channel"], str(x["shop_account"]), str(x["marketplace_order_id"]))
+
+    pub = {chave(x): x for x in publicado["linhas"]}
+    rec = {chave(x): x for x in recomputada}
+    comuns = set(pub) & set(rec)
+
+    divergentes = []
+    for k in sorted(comuns):
+        for campo in CAMPOS_RECONCILIADOS:
+            a, b = pub[k].get(campo), rec[k].get(campo)
+            if a != b:
+                # A chave NAO entra na mensagem: e identificador operacional.
+                divergentes.append(f"{campo}: publicado={a!r} recomputado={b!r}")
+
+    resultado = {
+        "channel": channel.value,
+        "effective_at": efetivo,
+        "refresh_batch_id": publicado["refresh_batch_id"],
+        "publicadas": len(pub),
+        "recomputadas": len(rec),
+        "chaves_comuns": len(comuns),
+        "somente_publicadas": len(set(pub) - set(rec)),
+        "somente_recomputadas": len(set(rec) - set(pub)),
+        "campos_divergentes": len(divergentes),
+        "amostra_divergencias": sorted(set(divergentes))[:5],
+        "fingerprint_publicado": fingerprint_fila(publicado["linhas"]),
+        "fingerprint_recomputado": fingerprint_fila(recomputada),
+        "fingerprint_comuns_igual": (
+            fingerprint_fila([pub[k] for k in sorted(comuns)])
+            == fingerprint_fila([rec[k] for k in sorted(comuns)])
+        ),
+        "duplicadas": len(publicado["linhas"]) - len(pub),
+    }
+
+    if divergentes:
+        raise SourceUnhealthy(
+            f"DRIFT MATERIAL na reconciliacao de {channel.value}: "
+            f"{len(divergentes)} campo(s) classificados de forma diferente para a "
+            f"MESMA chave no MESMO effective_at. Exemplos: "
+            f"{sorted(set(divergentes))[:3]}"
+        )
+    if resultado["duplicadas"]:
+        raise SourceUnhealthy(
+            f"fila de {channel.value} tem {resultado['duplicadas']} chave(s) "
+            "duplicada(s) no destino."
+        )
+    return resultado
+
 def run_apply(
     channel: Channel,
     effective_at: datetime,
@@ -527,22 +773,15 @@ def run_apply(
     # disparou porque `--channel` so' aceitava shopee, entao o branch era
     # inalcancavel; ao abrir o argumento para o ML o defeito latente virou
     # `UnboundLocalError`. Fica aqui, e ainda assim ANTES de qualquer conexao.
-    if channel is Channel.MERCADOLIVRE:
-        # EXP-3B1 entrega o NUCLEO do Mercado Livre: extrator, transformacao,
-        # allowlist de modalidade e coorte de confiabilidade, tudo coberto por
-        # teste. Publicar e' gate proprio (EXP-3B2), e depende de duas
-        # precondicoes EXTERNAS que ainda nao existem: as contas do ML em
-        # `marts.dim_seller_account` (hoje so' ha' marketplace_id = 3) e a
-        # decisao do responsavel sobre publicar uma fila SEM prazo.
-        avisar(
-            "canal mercadolivre: --apply bloqueado no EXP-3B1. O nucleo esta "
-            "implementado e testado; publicar e' o EXP-3B2, que exige cadastrar "
-            "as contas do ML no registry e decidir sobre fila sem prazo. "
-            "Use --diagnose."
-        )
-        return EXIT_PRECONDICAO
-
-    if channel is not Channel.SHOPEE:
+    # A trava incondicional do Mercado Livre saiu no EXP-3B2-H2. O que impede
+    # uma publicacao indevida agora sao as MESMAS barreiras do Shopee, todas
+    # fail-closed e todas medidas: registry vazio ou ambiguo levanta antes de
+    # abrir auditoria, `SOURCE_STALE` recusa antes do DELETE, modalidade
+    # desconhecida bloqueia a fila inteira e o lock impede segunda execucao.
+    #
+    # O canal continua em ALLOWLIST: canal sem adaptador nao publica.
+    adaptador = ADAPTADORES.get(channel)
+    if adaptador is None:
         avisar(f"canal {channel.value} ainda nao suportado pelo --apply.")
         return EXIT_PRECONDICAO
 
@@ -559,7 +798,7 @@ def run_apply(
 
         # Lock ANTES de ler os insumos que serao publicados.
         with channel_lock(target, channel, blocking=False):
-            registry, problemas = shopee_extract.load_registry(target, marketplace_id)
+            registry, problemas = adaptador.load_registry(target, marketplace_id)
             if not registry and not problemas:
                 # PRECONDICAO externa, nao defeito de dado: nada foi tentado
                 # contra a fonte, e abrir uma execucao de auditoria aqui
@@ -583,7 +822,7 @@ def run_apply(
             # `problemas` (registry ambiguo) entra aqui de proposito: `extract` ja
             # classifica isso como REGISTRY_AMBIGUOUS, e reimplementar a decisao
             # criaria uma segunda definicao de "registry confiavel".
-            extracao = shopee_extract.extract(
+            extracao = adaptador.extract(
                 source, effective_at, esperadas, registry_problems=problemas
             )
             extraidas = extracao.backlog_count
@@ -605,9 +844,8 @@ def run_apply(
                     "apenas sumiu da leitura"
                 )
 
-            baselines = shopee_extract.fetch_baselines(source, effective_at)
-            fila = transform.build_fila_shopee(
-                extracao.backlog_rows, registry, baselines, effective_at, batch_id
+            fila = adaptador.build_fila(
+                source, extracao, registry, effective_at, batch_id
             )
 
             contas = {ext: (nomes[ext], registry[ext].brand_key) for ext in esperadas}
@@ -873,6 +1111,14 @@ def build_parser() -> argparse.ArgumentParser:
             "migration 018 aplicada e o registry cadastrado."
         ),
     )
+
+    p.add_argument(
+        "--reconcile", action="store_true",
+        help=(
+            "READ-ONLY: recomputa a candidata no MESMO effective_at do batch "
+            "publicado e compara. Nao toma lock, nao escreve, nao republica."
+        ),
+    )
     return p
 
 
@@ -881,11 +1127,13 @@ def main(argv: list[str] | None = None) -> int:
     # por SystemExit aqui, sem ler segredo, abrir conexao ou tocar auditoria.
     args = build_parser().parse_args(argv)
 
-    if args.apply and args.diagnose:
-        print("--apply e --diagnose sao mutuamente exclusivos.", file=sys.stderr)
+    escolhidos = [args.apply, args.diagnose, args.reconcile]
+    if sum(bool(x) for x in escolhidos) > 1:
+        print("--apply, --diagnose e --reconcile sao mutuamente exclusivos.",
+              file=sys.stderr)
         return EXIT_FALHA
-    if not args.apply and not args.diagnose:
-        print("informe --diagnose ou --apply.", file=sys.stderr)
+    if not any(escolhidos):
+        print("informe --diagnose, --reconcile ou --apply.", file=sys.stderr)
         return EXIT_FALHA
 
     from dotenv import load_dotenv  # noqa: PLC0415
@@ -907,12 +1155,83 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_FALHA
 
+    if args.reconcile:
+        print("MODO RECONCILIACAO: read-only, sem lock e sem escrita.")
+        try:
+            return _run_reconcile(canal)
+        except Exception as exc:  # noqa: BLE001 — fronteira do CLI
+            print(
+                f"FALHA (reconcile/{canal.value}): "
+                f"{audit_mod.sanitize_error_message(exc)}",
+                file=sys.stderr,
+            )
+            return EXIT_FONTE_NAO_PUBLICAVEL
+
     print(
         f"MODO APPLY ({canal.value}): publicacao transacional, sem retry. "
         f"effective_at={effective_at.isoformat()}"
     )
     return run_apply(canal, effective_at)
 
+
+
+def _run_reconcile(canal: Channel) -> int:
+    """READ-ONLY: abre as duas fontes sem permissao de escrita e compara.
+
+    O destino entra com `readonly=True` de proposito. A reconciliacao existe
+    para CONFERIR a publicacao, e uma conexao gravavel aqui daria a ela o
+    poder de consertar o que deveria apenas denunciar.
+    """
+    import os  # noqa: PLC0415
+
+    import psycopg2  # noqa: PLC0415
+    from psycopg2.extras import RealDictCursor  # noqa: PLC0415
+
+    alvo = os.environ.get(ENV_TARGET, "")
+    fonte = os.environ.get(ENV_SOURCE, "")
+    if not alvo or not fonte:
+        print("DATABASE_URL e DATAMART_DATABASE_URL sao obrigatorias.",
+              file=sys.stderr)
+        return EXIT_FALHA
+
+    target = psycopg2.connect(alvo, cursor_factory=RealDictCursor,
+                              connect_timeout=CONNECT_TIMEOUT_SECONDS)
+    target.set_session(readonly=True, autocommit=True)
+    source = psycopg2.connect(fonte, cursor_factory=RealDictCursor,
+                              connect_timeout=CONNECT_TIMEOUT_SECONDS)
+    source.set_session(readonly=True, autocommit=True)
+    try:
+        r = reconcile_channel(target, source, canal)
+    finally:
+        target.close()
+        source.close()
+
+    print(format_reconcile(r))
+    return EXIT_OK
+
+
+def format_reconcile(r: dict) -> str:
+    """Saida legivel. Nenhum `shipment_id` nem `order_sn` impresso."""
+    return "\n".join([
+        f"RECONCILIACAO {r['channel']} (read-only)",
+        f"  effective_at do batch : {r['effective_at']}",
+        f"  batch                 : {r['refresh_batch_id']}",
+        "",
+        f"  linhas publicadas     : {r['publicadas']}",
+        f"  linhas recomputadas   : {r['recomputadas']}",
+        f"  chaves em comum       : {r['chaves_comuns']}",
+        f"  so no publicado       : {r['somente_publicadas']}  (churn da fonte)",
+        f"  so no recomputado     : {r['somente_recomputadas']}  (churn da fonte)",
+        f"  campos divergentes    : {r['campos_divergentes']}",
+        "",
+        f"  fingerprint publicado  : {r['fingerprint_publicado']}",
+        f"  fingerprint recomputado: {r['fingerprint_recomputado']}",
+        f"  hashes das chaves COMUNS batem: {r['fingerprint_comuns_igual']}",
+        "",
+        "  Os dois fingerprints so coincidem se a fonte nao mudou entre a",
+        "  publicacao e esta leitura. O que PRECISA bater e o das chaves em",
+        "  comum: mesma chave, mesmo instante, mesma classificacao.",
+    ])
 
 def _run_diagnose(canal: Channel, effective_at: datetime) -> int:
     import os  # noqa: PLC0415

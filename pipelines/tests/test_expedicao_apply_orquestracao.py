@@ -679,10 +679,34 @@ def test_sem_retry_uma_execucao_um_desfecho():
 # Estrutura: nenhuma porta dos fundos
 # ===========================================================================
 def test_nao_existe_segunda_flag_de_desbloqueio():
-    """`--apply` E a confirmacao. Qualquer outro gesto vira habito e some."""
-    acoes = {a.dest for a in cli.build_parser()._actions}
-    assert acoes == {"help", "channel", "diagnose", "apply"}
+    """`--apply` E a confirmacao. Qualquer outro gesto vira habito e some.
 
+    `--reconcile` entrou no EXP-3B2-H2 e NAO e porta dos fundos: abre as duas
+    conexoes com `readonly=True`, nao toma lock e nao chama `publish_channel`.
+    O teste segue fechado por IGUALDADE — flag nova so passa se for declarada
+    aqui, de proposito.
+    """
+    acoes = {a.dest for a in cli.build_parser()._actions}
+    assert acoes == {"help", "channel", "diagnose", "apply", "reconcile"}
+
+
+
+def test_reconcile_nao_publica():
+    """A unica flag que publica continua sendo `--apply`."""
+    import ast
+    import inspect
+
+    fonte = inspect.getsource(cli._run_reconcile)
+    assert "readonly=True" in fonte
+    assert "publish_channel" not in fonte
+    assert "channel_lock" not in fonte
+    arvore = ast.parse(inspect.getsource(cli.reconcile_channel))
+    proibidas = {"publish_channel", "channel_lock", "commit"}
+    chamadas = {
+        (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+        for n in ast.walk(arvore) if isinstance(n, ast.Call)
+    }
+    assert not (chamadas & proibidas), chamadas & proibidas
 
 def test_nenhuma_variavel_de_ambiente_de_desbloqueio():
     import ast
