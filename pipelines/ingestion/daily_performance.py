@@ -21,6 +21,11 @@ from pipelines.common.operational_calendar import assert_closed_day, last_closed
 from pipelines.connectors.mercadolivre import connector as ml_connector
 from pipelines.connectors.shopee import connector as shopee_connector
 from pipelines.connectors.tiktok import connector as tiktok_connector
+from pipelines.ingestion.fato_diaria_lock import (
+    EXIT_CODE_LOCK_UNAVAILABLE,
+    FatoDiariaLockUnavailable,
+    fato_diaria_lock,
+)
 from pipelines.quality import checks as quality
 from pipelines.transforms import ml_gestao_diaria as ml_transform
 from pipelines.transforms import shopee_ads_daily as shopee_ads_transform
@@ -431,83 +436,92 @@ def run(
     else:
         logger.info("Iniciando sync: source=%s mode=%s", source, mode)
 
-    with local_session() as session:
-        sync_run_id = _start_sync_run(session, f"{source}_daily", marketplace_id)
-
-    try:
-        if window is not None:
-            raw_rows = connector_fetch(window[0], window[1])
-        else:
-            kwargs = {"days_back": days_back} if mode == "backfill" else {}
-            raw_rows = fetch_fn(**kwargs)
-        rows_extracted = len(raw_rows)
-
-        canonical_rows = transform_fn(raw_rows)
-        logger.info("%d linhas transformadas (de %d extraídas)", len(canonical_rows), rows_extracted)
-
-        # Gate DQ-D1 — SEGUNDA DEFESA, independente da primeira.
-        #
-        # A validacao da janela protege o que ESTE modulo pede. Isto protege
-        # contra o que a FONTE devolve: um conector mal-comportado (ou uma
-        # `fetch()` chamada com janela propria) pode trazer linha de D0 mesmo
-        # com a janela correta. Sem esta barreira, o UPSERT publicaria o dia
-        # aberto — foi assim que nove linhas parciais de 28/08/2026 entraram.
-        #
-        # BLOQUEIA, nao filtra: descartar em silencio esconderia um conector
-        # quebrado e faria a contagem carregada divergir da extraida sem aviso.
-        _assert_canonical_rows_closed(canonical_rows, source)
-
-        check_results = quality.run_all(canonical_rows)
-        has_critical = quality.has_critical_failure(check_results)
-
+    # 🔒 Gate SH-AUTO-1 — exclusao mutua ANTES de qualquer leitura ou
+    # auditoria. A posicao importa tanto quanto o lock: adquirido aqui, um
+    # segundo escritor nao chega a abrir linha em `audit.source_sync_run`
+    # (que commita na hora e ficaria `running` orfa) e nao chega a ler a
+    # fonte — a fotografia que ele publicaria ja' nasceria concorrente.
+    # Ocupado, levanta `FatoDiariaLockUnavailable` e o processo sai com
+    # `EXIT_CODE_LOCK_UNAVAILABLE`. Sem espera, sem retry. Ver o contrato em
+    # pipelines/ingestion/fato_diaria_lock.py.
+    with fato_diaria_lock(marketplace_id):
         with local_session() as session:
-            _log_quality_checks(session, check_results, marketplace_id)
+            sync_run_id = _start_sync_run(session, f"{source}_daily", marketplace_id)
 
-        if has_critical:
-            critical = [r for r in check_results if r.status == "fail" and r.severity == "critical"]
-            msg = "; ".join(f"{r.name}: {r.details}" for r in critical)
-            logger.error("Checks críticos falharam — abortando carga: %s", msg)
+        try:
+            if window is not None:
+                raw_rows = connector_fetch(window[0], window[1])
+            else:
+                kwargs = {"days_back": days_back} if mode == "backfill" else {}
+                raw_rows = fetch_fn(**kwargs)
+            rows_extracted = len(raw_rows)
+
+            canonical_rows = transform_fn(raw_rows)
+            logger.info("%d linhas transformadas (de %d extraídas)", len(canonical_rows), rows_extracted)
+
+            # Gate DQ-D1 — SEGUNDA DEFESA, independente da primeira.
+            #
+            # A validacao da janela protege o que ESTE modulo pede. Isto protege
+            # contra o que a FONTE devolve: um conector mal-comportado (ou uma
+            # `fetch()` chamada com janela propria) pode trazer linha de D0 mesmo
+            # com a janela correta. Sem esta barreira, o UPSERT publicaria o dia
+            # aberto — foi assim que nove linhas parciais de 28/08/2026 entraram.
+            #
+            # BLOQUEIA, nao filtra: descartar em silencio esconderia um conector
+            # quebrado e faria a contagem carregada divergir da extraida sem aviso.
+            _assert_canonical_rows_closed(canonical_rows, source)
+
+            check_results = quality.run_all(canonical_rows)
+            has_critical = quality.has_critical_failure(check_results)
+
+            with local_session() as session:
+                _log_quality_checks(session, check_results, marketplace_id)
+
+            if has_critical:
+                critical = [r for r in check_results if r.status == "fail" and r.severity == "critical"]
+                msg = "; ".join(f"{r.name}: {r.details}" for r in critical)
+                logger.error("Checks críticos falharam — abortando carga: %s", msg)
+                with local_session() as session:
+                    _finish_sync_run(
+                        session, sync_run_id, "failed",
+                        rows_extracted, 0, None, None, msg,
+                    )
+                return
+
+            rows_loaded = 0
+            source_dates = [r["date"] for r in canonical_rows if r.get("date")]
+            if source == "shopee-stats":
+                upsert_sql = PATCH_SHOP_STATS_SQL
+            elif source == "shopee-ads":
+                upsert_sql = PATCH_ADS_SQL
+            elif source == "shopee":
+                # Gate SD2-C: orders escreve só as colunas de que é fonte; ver a
+                # nota em PATCH_SHOPEE_ORDERS_SQL. TikTok e ML seguem no UPSERT_SQL.
+                upsert_sql = PATCH_SHOPEE_ORDERS_SQL
+            else:
+                upsert_sql = UPSERT_SQL
+
+            with local_session() as session:
+                for row in canonical_rows:
+                    session.execute(upsert_sql, row)
+                    rows_loaded += 1
+                _finish_sync_run(
+                    session, sync_run_id, "success",
+                    rows_extracted, rows_loaded,
+                    min(source_dates) if source_dates else None,
+                    max(source_dates) if source_dates else None,
+                )
+
+            logger.info("Sync concluído: %d linhas carregadas", rows_loaded)
+
+        except Exception as exc:
+            logger.exception("Erro inesperado durante sync: %s", exc)
             with local_session() as session:
                 _finish_sync_run(
                     session, sync_run_id, "failed",
-                    rows_extracted, 0, None, None, msg,
+                    0, 0, None, None, str(exc),
                 )
-            return
-
-        rows_loaded = 0
-        source_dates = [r["date"] for r in canonical_rows if r.get("date")]
-        if source == "shopee-stats":
-            upsert_sql = PATCH_SHOP_STATS_SQL
-        elif source == "shopee-ads":
-            upsert_sql = PATCH_ADS_SQL
-        elif source == "shopee":
-            # Gate SD2-C: orders escreve só as colunas de que é fonte; ver a
-            # nota em PATCH_SHOPEE_ORDERS_SQL. TikTok e ML seguem no UPSERT_SQL.
-            upsert_sql = PATCH_SHOPEE_ORDERS_SQL
-        else:
-            upsert_sql = UPSERT_SQL
-
-        with local_session() as session:
-            for row in canonical_rows:
-                session.execute(upsert_sql, row)
-                rows_loaded += 1
-            _finish_sync_run(
-                session, sync_run_id, "success",
-                rows_extracted, rows_loaded,
-                min(source_dates) if source_dates else None,
-                max(source_dates) if source_dates else None,
-            )
-
-        logger.info("Sync concluído: %d linhas carregadas", rows_loaded)
-
-    except Exception as exc:
-        logger.exception("Erro inesperado durante sync: %s", exc)
-        with local_session() as session:
-            _finish_sync_run(
-                session, sync_run_id, "failed",
-                0, 0, None, None, str(exc),
-            )
-        raise
+            raise
 
 
 if __name__ == "__main__":
@@ -521,10 +535,23 @@ if __name__ == "__main__":
     parser.add_argument("--date-to", default=None, metavar="YYYY-MM-DD",
                         help="Data final exata (só --mode backfill; source em tiktok/shopee-stats/ml)")
     args = parser.parse_args()
-    run(
-        source=args.source,
-        mode=args.mode,
-        days_back=args.days,
-        date_from=args.date_from,
-        date_to=args.date_to,
-    )
+    # Lock ocupado NAO e' erro generico: sai com EXIT_CODE_LOCK_UNAVAILABLE (75,
+    # `EX_TEMPFAIL`) para que o log do orquestrador distinga "outra esteira
+    # estava publicando" de "o step quebrou". O orquestrador nao reexecuta step
+    # nenhum, entao o codigo e' sinal para quem le, nao gatilho de retry.
+    #
+    # `raise SystemExit` e nao `sys.exit(...)` dentro de `except`: encadear o
+    # traceback da excecao original aqui nao acrescenta nada — a mensagem de
+    # `FatoDiariaLockUnavailable` ja diz tudo — e poluiria o stderr do step com
+    # um traceback que parece defeito.
+    try:
+        run(
+            source=args.source,
+            mode=args.mode,
+            days_back=args.days,
+            date_from=args.date_from,
+            date_to=args.date_to,
+        )
+    except FatoDiariaLockUnavailable as exc:
+        logger.error("%s", exc)
+        raise SystemExit(EXIT_CODE_LOCK_UNAVAILABLE) from None
