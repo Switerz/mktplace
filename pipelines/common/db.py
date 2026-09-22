@@ -23,6 +23,17 @@ _datamart_engine = _make_engine(settings.datamart_url)
 DataMartSession = sessionmaker(bind=_datamart_engine) if _datamart_engine is not None else None
 
 
+def local_engine():
+    """Engine do banco local (escrita).
+
+    Existe para quem precisa de uma conexao DEDICADA, fora do ciclo de
+    `local_session()` — hoje so' o advisory lock de sessao da fato diaria, que
+    tem de sobreviver aos varios `commit()` do fluxo de ingestao e por isso nao
+    pode viver dentro de uma sessao que abre e fecha.
+    """
+    return _local_engine
+
+
 @contextmanager
 def local_session():
     session = LocalSession()

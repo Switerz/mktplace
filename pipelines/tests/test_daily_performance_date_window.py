@@ -15,6 +15,8 @@ from datetime import date, timedelta
 import pytest
 
 from pipelines.ingestion import daily_performance
+from pipelines.ingestion.fato_diaria_lock import fato_diaria_lock as _lock_real
+from pipelines.tests.conexoes_lock import ConexaoDeLock
 
 
 class _FakeResult:
@@ -43,8 +45,19 @@ def _fake_local_session():
 
 @pytest.fixture(autouse=True)
 def _no_real_db(monkeypatch):
-    """Garante que nenhum teste deste arquivo abre conexão real de banco."""
+    """Garante que nenhum teste deste arquivo abre conexão real de banco.
+
+    Gate SH-AUTO-1: o advisory lock da fato diária roda DE VERDADE aqui — só a
+    conexão é dublê. Substituir o contextmanager inteiro por um no-op faria
+    estes testes deixarem de enxergar a ordem em que o lock é adquirido, que é
+    metade do contrato.
+    """
     monkeypatch.setattr(daily_performance, "local_session", _fake_local_session)
+    monkeypatch.setattr(
+        daily_performance,
+        "fato_diaria_lock",
+        lambda marketplace_id: _lock_real(marketplace_id, connect=lambda: ConexaoDeLock(livre=True)),
+    )
 
 
 # ---------------------------------------------------------------------------
