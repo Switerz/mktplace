@@ -1474,6 +1474,112 @@ mais importa.
 Isso **não** exigiu decisão de negócio: a regra já estava no contrato do grão,
 e por isso o gate não parou em `PRICE_NULL_CONTRACT_REQUIRED`.
 
+### Publicação e saúde global são eixos distintos
+
+O ensaio operacional de 2026-09-22 (gate PMA-2C5C-O) terminou com os três
+canais em `SUCCESS`, zero escrita e candidatas reconciliadas — e o agregado
+exibido foi **`DEGRADED`**. A causa não era o PMA: o `health_check` saiu 1 por
+**dez itens críticos atrasados, nenhum deles do PMA** (`tiktok_product_daily`,
+`ml_produto_ranking`, `ml_cross_company`, `tiktok_channel_efficiency`,
+`tiktok_affiliate_cost_order_monthly`, `tiktok_order_discounts_daily`, mais
+dois blocos de frescor).
+
+Isso é mais grave que um rótulo feio. Quem lê `DEGRADED` conclui que a
+publicação teve problema, e o passo natural é reexecutar — **reexecutar canal
+já commitado é a única coisa que este pipeline não pode induzir**.
+
+O `pma_refresh` passa a reportar **dois eixos nomeados**, com o exit code
+amarrado a um só:
+
+```
+STATUS PMA: OK (mode=dry_run)
+STATUS SAUDE GLOBAL: DEGRADED
+EXIT: 0
+```
+
+| canais do PMA | saúde global | `STATUS PMA` | exit |
+|---|---|---|---:|
+| 3 `SUCCESS` | `OK` | `OK` | 0 |
+| 3 `SUCCESS` | `DEGRADED` | `OK` | 0 |
+| 3 `SUCCESS` | `FAILED` | `OK` (saúde reportada à parte) | 0 |
+| algum `REFUSED`/`LOCKED`/`FAILED` | qualquer | `DEGRADED` | 1 |
+| algum `INDETERMINATE` | qualquer | `INDETERMINATE` | 1 |
+| zero canal válido | qualquer | `BLOCKED` (ou o desfecho único) | 1 |
+
+O `health_check` **continua sendo o último step, continua `always_run` e
+continua visível** — o que ele deixou de fazer é decidir o exit code da
+publicação. Quando a saúde não está `OK` e a publicação está, a saída diz
+explicitamente que os itens atrasados não pertencem ao PMA e que não se deve
+reexecutar os publishers.
+
+A regra geral do orquestrador (`DEGRADED` → 0) segue intacta para
+`full_daily`, `serving_refresh` e `shopee_manual_refresh`, que continuam
+imprimindo `STATUS GERAL` e nada mais.
+
+### Causa do atraso: só com evidência
+
+O mesmo ensaio expôs um diagnóstico errado. O `health_check` reportava
+`fonte_atrasada` para Shopee e TikTok — *"a última execução teve sucesso,
+então a fonte é que não avançou"* — deduzido **apenas** do último status em
+`audit.source_sync_run`. Na mesma execução o preflight mediu a fonte em
+**2026-09-22** contra fotografia de **2026-09-17**: a fonte tinha avançado
+cinco dias, e quem não rodou foi o publisher. A mensagem mandava o operador
+investigar o sistema errado.
+
+O health check lê **só o Neon**. Sem o watermark da fonte ele não tem como
+distinguir "o publisher não rodou" de "a fonte não avançou". A taxonomia
+passou a separar **estado** de **causa**, e a causa exige evidência:
+
+| evidência | `status` | `cause` |
+|---|---|---|
+| fotografia velha, fonte **não medida** | `snapshot_stale` | `not_determined` |
+| watermark da fonte **mais novo** que a fotografia | `snapshot_stale` | `publisher_not_executed` |
+| watermark medido e **também atrasado** | `snapshot_stale` | `source_stale` |
+| sem fotografia alguma | `fotografia_ausente` | `not_determined` |
+| commit indeterminado (precedência) | `auditoria_incompleta` | `not_determined` |
+
+`publisher_nao_executado`, `fonte_atrasada`, `execucao_recusada` e
+`lock_ocupado` **deixaram de existir como causa**. O fato de auditoria
+continua no relatório (`last_run_status`, `last_run_at`) como *observação* —
+apenas não é mais promovido a explicação.
+
+`fetch_pma_channel_status` aceita `source_watermarks` opcional e **não abre
+conexão nova**: quem já tem o watermark (o preflight, por exemplo) injeta;
+quem não tem recebe `not_determined`. O relatório expõe `source_watermark`
+justamente para que `not_determined` não seja lido como "sem problema".
+
+### ML — a primeira carga é separada da rotina
+
+O `pma_refresh` roda o ML com **`--lookback-days 3`**, e esse é o custo
+recorrente correto: medido, 100% das linhas de
+`silver.stg_ml_item_price_history` têm `extracted_at::date = ref_date`, a
+fonte não tem maturação, e 3 dias cobrem dois dias consecutivos sem execução.
+
+O estado medido em 2026-09-22 é outro problema:
+
+| medida | valor |
+|---|---|
+| `max(ref_date)` publicado em `marts.fact_marketplace_listing_price_daily` | **2026-09-14** |
+| `max(ref_date)` na fonte | **2026-09-22** |
+| janela que o lookback 3 alcança (D−1 como teto) | 2026-09-19..21 |
+| linhas do destino nessa janela | **0** |
+
+O lookback recorrente de 3 dias **não alcança 15–18/09**. Fechar o buraco
+exige uma execução avulsa de **`--lookback-days 7`**, cobrindo
+**2026-09-15..21**, feita **uma vez**, em gate próprio e com autorização.
+
+Três consequências deliberadas:
+
+1. **O `pma_refresh` recorrente nunca altera o próprio lookback.** Não há
+   override, não há detecção automática de buraco, não há "se o destino está
+   atrás, amplie a janela". Uma janela que muda sozinha transforma o custo
+   diário em algo imprevisível e esconde o buraco em vez de denunciá-lo — e
+   quem precisa saber que houve buraco é uma pessoa, não o próprio pipeline.
+2. **A primeira publicação é canal por canal**, em gate próprio, sob
+   autorização, com reconciliação entre cada uma.
+3. **Depois dela, a automação volta ao lookback 3** — sem alteração de
+   código, porque o 3 nunca saiu de `PMA_ML_LOOKBACK_DAYS`.
+
 ### Concorrência — duas camadas, propósitos distintos
 
 1. **Lock lógico** (`run_task.ps1`, `Lock = "full_daily"`) impede a disputa
@@ -1490,11 +1596,17 @@ O preflight de cada canal lê `pg_locks` e transforma "lock tomado" num
 ### Health check
 
 `python -m pipelines.ops.health_check` ganhou a seção **Frescor da FOTOGRAFIA
-de preços por canal**, que distingue seis causas — porque pedem seis ações
-diferentes:
+de preços por canal**.
 
-`fotografia_ausente` · `publisher_nao_executado` · `fonte_atrasada` ·
-`execucao_recusada` · `lock_ocupado` · `auditoria_incompleta`
+> **Atualizado no gate PMA-2C5D0.** A versão original listava seis *causas*
+> (`publisher_nao_executado`, `fonte_atrasada`, `execucao_recusada`,
+> `lock_ocupado`, …), quatro delas deduzidas do último status de auditoria.
+> Essa dedução se provou errada em produção. A taxonomia atual separa
+> **estado** de **causa** e exige evidência — ver *Causa do atraso: só com
+> evidência*, acima.
+
+Estados: `ok` · `fotografia_ausente` · `snapshot_stale` ·
+`auditoria_incompleta` · `leitura_falhou`
 
 Limites: ML stale quando anterior a D−2; Shopee e TikTok quando anteriores a
 D−1. **O frescor sai de `observed_date`/`ref_date`, nunca de `synced_at`**: uma
