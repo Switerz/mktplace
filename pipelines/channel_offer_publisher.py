@@ -61,6 +61,7 @@ sanitizada, decide, e roda de novo.
 """
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -185,12 +186,36 @@ class SourceGate:
 
     lock_acquired: bool = False
     reads: list = field(default_factory=list)
+    #: Gate PMA-2C5C-H1 — portao de DIAGNOSTICO, onde nao existe caminho de
+    #: escrita. A invariante "ler so' depois do lock" protege a publicacao: sem
+    #: ela, duas execucoes leriam a mesma fonte e a segunda sobrescreveria a
+    #: primeira. No diagnostico nao ha lock, nao ha transacao de destino e nao
+    #: ha o que sobrescrever — exigir o lock ali obrigaria o dry-run a tomar
+    #: exatamente o lock que ele promete nao tomar.
+    #:
+    #: E' um campo separado, e nao um `mark_locked()` mentiroso, para que
+    #: `lock_acquired` continue significando o que diz. `assert_publishable`
+    #: recusa um gate de diagnostico, e ha teste provando.
+    diagnose_only: bool = False
+
+    @classmethod
+    def for_diagnose(cls) -> "SourceGate":
+        return cls(diagnose_only=True)
 
     def mark_locked(self) -> None:
+        if self.diagnose_only:
+            raise PublisherError(
+                "gate de diagnostico nao adquire lock de publicacao")
         self.lock_acquired = True
 
+    def assert_publishable(self) -> None:
+        """Recusa publicar por um gate de diagnostico. Fail-closed."""
+        if self.diagnose_only:
+            raise PublisherError(
+                "gate de diagnostico nao pode publicar: modo somente leitura")
+
     def read(self, rotulo: str, funcao):
-        if not self.lock_acquired:
+        if not (self.lock_acquired or self.diagnose_only):
             raise SourceReadBeforeLockError(
                 "leitura da fonte tentada antes do advisory lock"
             )
@@ -386,6 +411,10 @@ def run_publication(
     qualquer leitura feita antes do lock.
     """
     gate = SourceGate()
+    # Fail-closed: um gate de diagnostico NUNCA chega ate' aqui. A
+    # checagem e' barata e fecha o caminho que um refactor poderia abrir
+    # sem perceber.
+    gate.assert_publishable()
     sync_run_id = None
 
     # --- 2. LOCK, antes de qualquer leitura --------------------------------
@@ -848,15 +877,116 @@ def run_apply(args, *, connect_target=None, connect_audit=None,
                 pass
 
 
+def run_diagnose(args, *, connect_source=None) -> dict:
+    """Gate PMA-2C5C-H1 — o ensaio REAL, pelas funcoes canonicas do apply.
+
+    Ate' aqui este caminho era um `print` e um `return 0`: nao lia a fonte, nao
+    montava candidata e nao exercia guarda nenhuma. Um ensaio que nao ensaia da'
+    a sensacao de cobertura sem a cobertura, e foi o que fez o PMA-2C5C terminar
+    em `ORCHESTRATOR_DRY_RUN_UNAVAILABLE`.
+
+    A candidata sai de `collect_snapshot` — a MESMA funcao que `run_apply` usa.
+    Nao ha segunda implementacao das formulas: se as duas divergirem, o teste de
+    equivalencia falha.
+
+    O que este caminho NAO faz, e o que o torna seguro:
+      * nao abre conexao gravavel — so' `cos._read_only`, que executa
+        `SET TRANSACTION READ ONLY` na sessao;
+      * nao adquire o advisory lock (o gate de diagnostico recusa `mark_locked`);
+      * nao abre auditoria;
+      * nao monta `PublicationPlan`, nao chama DELETE/INSERT e nao commita.
+    """
+    marketplace = args.marketplace
+    fabrica = connect_source or (
+        lambda: cos._read_only(os.environ["DATAMART_DATABASE_URL"]))
+    gate = SourceGate.for_diagnose()
+    source_conn = fabrica()
+    try:
+        registros, relogios, contas = collect_snapshot(
+            gate, source_conn, marketplace,
+            observed_date=getattr(args, "observed_date", None))
+    finally:
+        try:
+            source_conn.close()
+        except Exception:  # noqa: BLE001 — fechar nunca derruba o diagnostico
+            pass
+
+    # As MESMAS guardas de pre-publicacao. Se uma delas recusa aqui, ela
+    # recusaria no apply — e' esse o ponto do ensaio.
+    cos.assert_no_pii(registros)
+    cos.assert_offer_keys_unique(registros)
+
+    datas = sorted({r["observed_date"] for r in registros})
+    situacoes: dict = {}
+    for r in registros:
+        situacoes[r["snapshot_status"]] = situacoes.get(r["snapshot_status"], 0) + 1
+    return {
+        "mode": "dry_run",
+        "marketplace": marketplace,
+        "observed_dates": [str(d) for d in datas],
+        "rows": len(registros),
+        "accounts": sorted({r["shop_account"] for r in registros}),
+        "brands": sorted({r["brand"] for r in registros}),
+        "statuses": situacoes,
+        # `observed_price` nulo e' AUSENCIA DE OBSERVACAO, nunca zero. Os dois
+        # sao contados separados de proposito: somar um no outro apagaria a
+        # distincao que o contrato inteiro existe para preservar.
+        "prices_absent": sum(1 for r in registros
+                             if r.get("observed_price") is None),
+        "prices_zero": sum(1 for r in registros
+                           if r.get("observed_price") is not None
+                           and r["observed_price"] == 0),
+        "fingerprint": candidate_fingerprint(registros),
+        "scopes": sorted(str(e) for e in cos.scopes_of(registros)),
+        "accounts_seen": sorted(contas),
+    }
+
+
+def candidate_fingerprint(registros) -> str:
+    """Impressao da candidata: agregado ordenado, sem valor solto de linha.
+
+    `None` e `Decimal("0")` produzem textos DIFERENTES de proposito — um
+    fingerprint que os igualasse nao detectaria justamente a troca que mais
+    importa.
+    """
+    import hashlib
+
+    partes = sorted(
+        f"{r['offer_key']}|"
+        f"{'' if r.get('observed_price') is None else r['observed_price']}"
+        for r in registros)
+    return hashlib.md5("\n".join(partes).encode("utf-8")).hexdigest()
+
+
+def _relata_diagnostico(rel: dict) -> None:
+    """Uma linha honesta. NUNCA diz 'publicado' — nada foi publicado."""
+    print(f"mode=dry_run marketplace={rel['marketplace']}: "
+          f"CANDIDATA VALIDADA, nada foi escrito.")
+    print(f"  observed_date={rel['observed_dates']} linhas={rel['rows']}")
+    print(f"  contas={rel['accounts']} marcas={rel['brands']}")
+    print(f"  situacoes={rel['statuses']}")
+    print(f"  preco ausente={rel['prices_absent']} (nao observado) "
+          f"| preco zero={rel['prices_zero']}")
+    print(f"  fingerprint={rel['fingerprint']}")
+
+
 def main(argv=None) -> int:
     args = build_cli().parse_args(argv)
 
     if not args.apply:
-        # Modo diagnostico: NAO adquire lock, NAO escreve auditoria e NAO toca
-        # na tabela de destino. Ele existe para conferir a fonte sem disputar
-        # nada com quem esta publicando.
-        print(f"dry-run: marketplace={args.marketplace}; nenhuma conexao de "
-              "destino e' aberta, nenhum lock e' adquirido, nada e' escrito.")
+        # Gate PMA-2C5C-H1 — ensaio REAL: le a fonte, monta a candidata e roda
+        # as guardas, sem lock, sem auditoria e sem conexao gravavel.
+        try:
+            rel = run_diagnose(args)
+        except cos.ChannelSyncError as exc:
+            print(f"mode=dry_run RECUSADO: {exc}", file=sys.stderr)
+            return EXIT_REFUSED
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"mode=dry_run FALHA: {_detalhe(exc)}", file=sys.stderr)
+            return EXIT_FAILED
+        _relata_diagnostico(rel)
         return EXIT_OK
 
     try:

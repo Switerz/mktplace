@@ -186,22 +186,59 @@ def test_o_main_nao_tem_mais_recusa_incondicional():
 
 
 def test_modo_diagnostico_nunca_alcanca_o_executor(monkeypatch, capsys):
+    """O ensaio agora le a fonte — e continua sem tocar o executor."""
     tocou = []
     monkeypatch.setattr(pub, "run_apply",
                         lambda *a, **k: tocou.append(True))
+    monkeypatch.setattr(pub, "run_diagnose",
+                        lambda args, **k: {
+                            "mode": "dry_run", "marketplace": args.marketplace,
+                            "observed_dates": ["2026-09-22"], "rows": 1,
+                            "accounts": ["apice"], "brands": ["apice"],
+                            "statuses": {"current": 1}, "prices_absent": 0,
+                            "prices_zero": 0, "fingerprint": "f" * 32,
+                            "scopes": [], "accounts_seen": ["apice"]})
     assert pub.main(["--marketplace", "shopee"]) == pub.EXIT_OK
-    assert tocou == []
+    assert tocou == [], "o executor de publicacao nao pode ser alcancado"
     saida = capsys.readouterr().out
-    assert "dry-run" in saida
-    assert "nenhum lock" in saida
+    assert "mode=dry_run" in saida
+    assert "nada foi escrito" in saida
+
+
+class _FonteDuble:
+    """Conexao de FONTE falsa. Nao tem cursor, commit nem caminho de escrita."""
+
+    def close(self):
+        pass
 
 
 def test_diagnostico_nao_abre_conexao_de_destino(monkeypatch):
-    abertas = []
+    """Gate PMA-2C5C-H1 — o ensaio percorre a leitura e mesmo assim nao abre
+    conexao de destino.
+
+    A fonte e' injetada no lugar de `_read_only`: sem isso o teste alcancaria o
+    Data Mart do ambiente, e e' a guarda do `conftest` que o impede. Um teste
+    que precisa de credencial para provar que nao escreve prova o contrario do
+    que promete.
+    """
+    destinos, fontes = [], []
     monkeypatch.setattr(pub, "_writable",
-                        lambda url: abertas.append(url))
-    pub.main(["--marketplace", "tiktok"])
-    assert abertas == []
+                        lambda url: destinos.append(url))
+    monkeypatch.setattr(pub, "audit_start",
+                        lambda *a, **k: destinos.append("audit_start"))
+    monkeypatch.setattr(cos, "_read_only",
+                        lambda url: (fontes.append(url), _FonteDuble())[1])
+    monkeypatch.setattr(cos, "load_internal_catalog", lambda c: {})
+    monkeypatch.setattr(cos, "latest_tiktok_snapshot",
+                        lambda c: date(2026, 9, 22))
+    monkeypatch.setattr(cos, "fetch_tiktok_offers", lambda c, d, cat: [])
+    monkeypatch.setenv("DATAMART_DATABASE_URL", "postgresql://fonte/injetada")
+
+    assert pub.main(["--marketplace", "tiktok"]) == pub.EXIT_OK
+    assert destinos == [], (
+        "nem conexao de destino nem abertura de auditoria sao permitidas")
+    assert fontes == ["postgresql://fonte/injetada"], (
+        "o ensaio precisa ter REALMENTE aberto a fonte somente-leitura")
 
 
 def test_o_sync_delega_apply_ao_publisher(monkeypatch):
