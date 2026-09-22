@@ -1,0 +1,167 @@
+# Contrato de deduplicação dos exports `Order.all` da Shopee
+
+**Gate SH-AUTO-1B.** Código em
+[`pipelines/connectors/shopee/_snapshots.py`](../pipelines/connectors/shopee/_snapshots.py),
+integrado em `parse_brand`.
+
+Este gate entregou **somente código, testes e esta documentação**. Nenhuma
+execução de pipeline, refresh manual, backfill, escrita em banco, DAG,
+Connection ou migration.
+
+---
+
+## 1. O defeito
+
+`parse_brand` lia **todos** os `Order.all*.xlsx` da pasta da marca e empilhava as
+linhas num lote único; `_aggregate_daily` agrupava por `order_id` e **somava**
+`subtotal` e `qty` linha a linha. Um pedido presente em dois exports com janelas
+sobrepostas era contado **duas vezes**.
+
+O dedup que já existia cobria apenas os campos *order-level* (`total_global`,
+`commission_net`, `service_fee_net`, `freight_est`), por `max()` — e `max()`
+também está errado como regra de escolha, porque **mistura campos de instantes
+diferentes**: pega o maior valor de cada export, não o valor de um export.
+
+Pedidos presentes em mais de um arquivo, medidos em 01–24/08/2026:
+
+| marca | pedidos duplicados |
+| --- | --- |
+| kokeshi | 10.161 |
+| barbours | 1.007 |
+| lescent | 478 |
+| rituária | 369 |
+| ápice | 294 |
+
+---
+
+## 2. A unidade é o snapshot, não o arquivo
+
+Um export grande vem partido em `_part_N_of_M`. As partes são pedaços do **mesmo
+retrato** e nunca competem entre si: são reagrupadas antes de qualquer escolha.
+Tratar `part_3_of_8` como candidato concorrente de `part_4_of_8` descartaria 7/8
+do export.
+
+Padrões reais encontrados na pasta de produção (22/09/2026):
+
+| padrão | exemplo | tratamento |
+| --- | --- | --- |
+| simples | `Order.all.20260805_20260805.xlsx` | 1 snapshot |
+| com prefixo novo | `Order.all.order_creation_date.20260901_20260908.xlsx` | 1 snapshot |
+| multipart | `..._part_1_of_8.xlsx` … `_part_8_of_8.xlsx` | 1 snapshot, 8 arquivos |
+| download duplicado | `...20260805_20260805 (1).xlsx` | snapshot próprio; empata na janela → **recusa** |
+| outro relatório | `Order.toship...` | fora do glob, ignorado |
+
+**Cobertura multipart medida: 100% completa** em todas as 5 marcas — nenhum
+export com parte faltando, repetida ou com total divergente.
+
+---
+
+## 3. A regra do vencedor
+
+```
+chave_de_ordem = (date_to, date_from)   # do NOME do arquivo
+```
+
+O snapshot com maior chave vence. Por pedido, mantém-se **todas as linhas do
+snapshot vencedor** e descartam-se **integralmente** as do mesmo pedido nos
+perdedores.
+
+**Por que `date_to` primeiro:** não se exporta pedido de um dia que ainda não
+aconteceu, então um export mais recente tem `date_to` maior. Com o mesmo teto, a
+janela que começa depois é a mais estreita e mais recente — caso real
+`0805..0810` × `0810..0810`, presente nas cinco marcas.
+
+### 3.1 Por que a regra se sustenta — medido, não suposto
+
+Medição de 22/09/2026 sobre os arquivos reais:
+
+- **Onde há divergência de conteúdo, ela é exclusivamente de status.** Nos três
+  pares sobrepostos da ápice em agosto/setembro: 50/50, 56/56 e 108/108 pedidos
+  divergentes, **todos** por status; quantidade e número de SKUs idênticos em
+  100%. Em todos, o snapshot de `date_to` maior é o de status mais maduro — que
+  é o que se quer publicar.
+- **O único par em que a ordenação por janela discorda do `mtime`**
+  (`20260401..20260501` × `20260501..20260531`, ápice e barbours) tem conteúdo
+  **idêntico** nos pedidos em comum: **386/386** e **1.025/1.025**. Os dois
+  saíram da mesma carga histórica de 19/06, então a escolha é indiferente e a
+  discordância **não tem consequência observável**.
+
+### 3.2 O que é proibido como autoridade
+
+| fonte | por que não |
+| --- | --- |
+| `Path.stat().st_mtime` | não sobrevive a cópia de pasta, backup ou `git clone`; nos arquivos reais é só o instante do **download** — os exports de abril e maio da barbours têm o **mesmo** mtime (17:03), então nem desempata |
+| ordem do `glob` / lexicográfica | acidente do sistema de arquivos |
+| ordem das linhas | idem |
+| `max()` campo a campo | mistura instantes: status novo + valor antigo é um número que não existe em export nenhum |
+
+### 3.3 Por que não há metadado melhor — inventário completo
+
+| fonte | conteúdo |
+| --- | --- |
+| nome do arquivo | janela, partes, sufixo `(1)` do navegador — **nenhuma data de exportação** |
+| `docProps/core.xml` | `dcterms:created` **fixo em `2006-09-16T00:00:00Z`**, hardcoded pela biblioteca `Go Excelize` que a Shopee usa |
+| datas dos membros do zip | zeradas (`1980-00-00`) |
+| colunas da planilha | 64 colunas, todas do pedido — **nenhuma marca de geração do export** |
+
+A janela do nome é o **único** metadado ordenável e estável entre máquinas.
+
+---
+
+## 4. Recusas fail-closed
+
+| situação | erro | por quê |
+| --- | --- | --- |
+| parte faltando, repetida ou total divergente | `SnapshotIncompleto` | um export 7/8 publicado como inteiro perde um oitavo do faturamento sem nenhum sinal |
+| dois snapshots com a **mesma** janela | `SnapshotAmbiguo` | sem desempate confiável; escolher pela ordem do `glob` faria o número publicado depender do sistema de arquivos |
+| nome sem `YYYYMMDD_YYYYMMDD` | `NomeDeExportInvalido` | arquivo inordenável na agregação reintroduz a dupla contagem pela porta dos fundos |
+
+**Como resolver um `SnapshotAmbiguo`:** remova da pasta o arquivo que não deve
+valer, ou renomeie-o para fora do padrão `Order.all*.xlsx`. Não existe regra
+automática correta — o nome não carrega a informação necessária.
+
+---
+
+## 5. Semântica da escolha
+
+Para cada pedido, o snapshot vencedor fornece **tudo**: status, devolução, datas,
+comprador, itens e campos financeiros. Consequências que são intencionais:
+
+- `subtotal` e `qty` vêm **só** do vencedor;
+- não existe "status novo + itens antigos";
+- se o vencedor tem **menos** SKUs, os SKUs que só existiam no antigo **somem** —
+  o vendedor removeu o item do pedido;
+- snapshot mais novo com valor **menor** é normal: um cancelamento tira o pedido
+  do GMV;
+- pedido presente uma única vez sai **exatamente** como antes deste gate.
+
+---
+
+## 6. Relação com `raw.shopee_ingestion_file`
+
+A frente Raw (Data Mart) já resolve o mesmo problema com metadado melhor:
+`file_id`, `file_sha256`, `source_modified_at` e a auditoria de monotonicidade
+`file_id × raw_ingested_at`. `gold_regional` escolhe o `file_id` vencedor.
+
+Esta deduplicação **não** usa nada disso, e a razão é de arquitetura: o parser do
+`shopee_manual_refresh` lê **arquivos do disco local**, sem acesso ao Data Mart, e
+o Gate SH-AUTO-1B é estritamente local. Quando a fatia manual for substituída
+pela API (SH-AUTO-2 em diante), esta regra sai junto com o parser.
+
+`parse_filename_part` de `pipelines/ingestion/shopee_raw/inventory.py` tem a
+mesma semântica de agrupamento, mas **não é importado**: aquele módulo importa
+`connectors.shopee.connector`, e importá-lo daqui fecharia um ciclo. A expressão
+regular é duplicada de propósito e travada por teste
+(`test_contraprova_regex_de_parte_bate_com_a_do_inventario_raw`), para que o
+drift apareça no CI e não no número publicado.
+
+---
+
+## 7. O que continua bloqueado
+
+Esta correção **não autoriza backfill**. Ela torna o backfill *possível* sem
+inflação, mas o impacto agregado sobre o histórico já publicado precisa ser
+revisado e aprovado antes de qualquer reprocessamento amplo — a projeção está na
+seção de reconciliação do PR.
+
+O caminho incremental de 3 dias segue seguro, como já era.
