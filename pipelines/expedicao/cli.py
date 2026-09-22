@@ -93,9 +93,15 @@ from pipelines.expedicao.contract import (
     Channel,
     FreshnessStatus,
     ExtractionResult,
+    LoteIncoerente,
     RegistryError,
     SellerAccount,
     SourceUnhealthy,
+)
+from pipelines.expedicao.coerencia import (
+    CAMPOS_DE_PRAZO,
+    CAMPOS_TRANSVERSAIS,
+    problemas_do_lote,
 )
 from pipelines.expedicao.publisher import (
     IndeterminateCommit,
@@ -584,6 +590,18 @@ COLUNAS_PUBLICADAS = (
     "source_ingested_at",
 )
 
+#: Colunas do RESUMO lidas do destino para reconciliar (EXP-3B2-H3). Sao as
+#: mesmas que `problemas_do_lote` confere, para que a coerencia interna do que
+#: esta' publicado possa ser julgada sem reler a fonte.
+COLUNAS_RESUMO_PUBLICADO = (
+    "channel",
+    "shop_account",
+    "brand",
+    "backlog_count",
+    *CAMPOS_DE_PRAZO,
+    *CAMPOS_TRANSVERSAIS,
+)
+
 
 def fingerprint_fila(linhas: list[dict]) -> str:
     """Impressao INDEPENDENTE DE ORDEM da fila.
@@ -631,7 +649,12 @@ def published_snapshot(target, channel: Channel) -> dict:
             )
             lotes = [dict(r) for r in cur.fetchall()]
             if not lotes:
-                return {"effective_at": None, "refresh_batch_id": None, "linhas": []}
+                return {
+                    "effective_at": None,
+                    "refresh_batch_id": None,
+                    "linhas": [],
+                    "resumos": [],
+                }
             if len(lotes) > 1:
                 raise SourceUnhealthy(
                     f"fila de {channel.value} tem {len(lotes)} lotes simultaneos; "
@@ -643,6 +666,16 @@ def published_snapshot(target, channel: Channel) -> dict:
                 (channel.value,),
             )
             linhas = [dict(r) for r in cur.fetchall()]
+            # Os resumos entram no MESMO snapshot que a fila. Le-los fora dele
+            # permitiria comparar a fila de um lote com o resumo de outro e
+            # inventar uma incoerencia que nao existe - ou, pior, esconder uma
+            # que existe.
+            cur.execute(
+                f"SELECT {', '.join(COLUNAS_RESUMO_PUBLICADO)} FROM {RUN_TABLE} "
+                "WHERE channel = %s AND refresh_batch_id = %s",
+                (channel.value, lotes[0]["refresh_batch_id"]),
+            )
+            resumos = [dict(r) for r in cur.fetchall()]
     finally:
         with suppress(Exception):
             target.rollback()
@@ -653,6 +686,7 @@ def published_snapshot(target, channel: Channel) -> dict:
         "effective_at": lotes[0]["effective_at"],
         "refresh_batch_id": lotes[0]["refresh_batch_id"],
         "linhas": linhas,
+        "resumos": resumos,
     }
 
 
@@ -739,6 +773,34 @@ def reconcile_channel(
         source, extracao, registry, efetivo, publicado["refresh_batch_id"]
     )
 
+    # RESUMOS (EXP-3B2-H3) -------------------------------------------------
+    # A coerencia INTERNA do que esta' publicado e' um fato sobre o banco e nao
+    # depende de reler a fonte: a fila publicada e o resumo publicado vieram do
+    # mesmo snapshot e ou fecham, ou nao fecham. E' esta conferencia que teria
+    # denunciado o lote do incidente, com 1.056 linhas e quatro resumos zerados.
+    nomes_fonte = extracao.account_shop_names or {}
+    contas_canonicas = frozenset(
+        nomes_fonte.get(ext, ext) for ext in registry
+    )
+    incoerencias_publicado = problemas_do_lote(
+        channel.value,
+        publicado["linhas"],
+        publicado["resumos"],
+        expected_accounts=contas_canonicas,
+    )
+    recomputados = transform.build_account_summaries(
+        recomputada,
+        efetivo,
+        channel=channel.value,
+        refresh_batch_id=publicado["refresh_batch_id"],
+        accounts={
+            ext: (nomes_fonte.get(ext, ext), registry[ext].brand_key)
+            for ext in registry
+        },
+        watermarks=extracao.account_watermarks,
+        source_advanced=False,
+    )
+
     def chave(x):
         return (x["channel"], str(x["shop_account"]), str(x["marketplace_order_id"]))
 
@@ -774,6 +836,43 @@ def reconcile_channel(
             "no destino."
         )
 
+    if incoerencias_publicado:
+        raise LoteIncoerente(
+            f"a fotografia PUBLICADA de {channel.value} nao fecha consigo mesma: "
+            + "; ".join(incoerencias_publicado)
+        )
+
+    # Comparar o backlog publicado com o recomputado so' tem sentido quando a
+    # fila inteira era comparavel. Com churn ou linha relida, as contagens
+    # mudariam por MUDANCA DA FONTE, e chamar isso de drift seria o mesmo
+    # alarme falso que a revisao EXP-3B2-H2-R/V ja corrigiu para a fila.
+    churn = len(set(pub) - set(rec)) + len(set(rec) - set(pub))
+    resumo_comparavel = churn == 0 and mutadas == 0
+    backlog_publicado = {r["shop_account"]: r["backlog_count"]
+                         for r in publicado["resumos"]}
+    backlog_recomputado = {r["shop_account"]: r["backlog_count"]
+                           for r in recomputados}
+    resumos_divergentes = []
+    if resumo_comparavel:
+        for conta in sorted(set(backlog_publicado) | set(backlog_recomputado)):
+            a = backlog_publicado.get(conta)
+            b = backlog_recomputado.get(conta)
+            if a != b:
+                resumos_divergentes.append(
+                    f"conta {conta!r}: backlog publicado={a} recomputado={b}"
+                )
+        total_pub = sum(backlog_publicado.values())
+        total_rec = sum(backlog_recomputado.values())
+        if total_pub != total_rec:
+            resumos_divergentes.append(
+                f"total do canal: publicado={total_pub} recomputado={total_rec}"
+            )
+    if resumos_divergentes:
+        raise LoteIncoerente(
+            f"DRIFT DETERMINISTICO nos resumos de {channel.value}: mesma entrada "
+            f"e mesmo effective_at, contagens diferentes. {resumos_divergentes}"
+        )
+
     return {
         "channel": channel.value,
         "effective_at": efetivo,
@@ -792,6 +891,15 @@ def reconcile_channel(
         "veredito": (
             "deterministico_no_subconjunto_comparavel" if comparaveis
             else "inconclusivo_sem_linha_comparavel"
+        ),
+        "resumos_publicados": len(publicado["resumos"]),
+        "resumos_recomputados": len(recomputados),
+        "backlog_publicado": sum(backlog_publicado.values()),
+        "backlog_recomputado": sum(backlog_recomputado.values()),
+        "resumos_divergentes": 0,
+        "veredito_resumo": (
+            "coerente_e_igual_ao_recomputado" if resumo_comparavel
+            else "coerente_comparacao_inconclusiva_por_mudanca_da_fonte"
         ),
     }
 
@@ -891,6 +999,10 @@ def run_apply(
                     f"fonte em '{extracao.source_health.value}': {extracao.detail}"
                 )
 
+            # CORRESPONDENCIA 1:1 entre registry e fonte (EXP-3B2-H3). O
+            # conjunto esperado vem do REGISTRY ativo, nunca das marcas que a
+            # fonte por acaso devolveu: uma conta que sumiu da leitura tem de
+            # bloquear a publicacao, e nao desaparecer do resumo.
             nomes = extracao.account_shop_names or {}
             faltando = sorted(esperadas - set(nomes))
             if faltando:
@@ -899,7 +1011,16 @@ def run_apply(
                     "publicacao recusada para nao limpar a fila de uma loja que "
                     "apenas sumiu da leitura"
                 )
-
+            # As demais barreiras de correspondencia 1:1 vivem em
+            # `extract`, nao aqui: conta esperada ausente vira `ACCOUNT_MISSING`,
+            # conta sem cadastro vira `UNEXPECTED_ACCOUNT` e conta sem carimbo
+            # vira `WATERMARK_MISSING` - as tres com `can_publish = False`, entao
+            # a execucao ja' morreu acima. Repetir a checagem aqui criaria um
+            # guarda inalcancavel: nunca dispararia, nunca seria testado, e daria
+            # a impressao de uma protecao que quem le o codigo nao tem como
+            # verificar. Identificador de conta REPETIDO entre contas distintas e'
+            # coberto pelo invariante do lote, que ve as duas linhas de resumo com
+            # a mesma chave.
             fila = adaptador.build_fila(
                 source, extracao, registry, effective_at, batch_id
             )
@@ -927,6 +1048,11 @@ def run_apply(
                 resumos,
                 source_health=extracao.source_health,
                 refresh_batch_id=batch_id,
+                # Chaves CANONICAS das contas, como aparecem na fila e no
+                # resumo. Nao sao os `external_seller_id` crus: no Shopee a
+                # fonte identifica a conta pelo nome da loja. A traducao vive
+                # em `nomes`, e o invariante compara maca com maca.
+                expected_accounts=frozenset(nomes[ext] for ext in esperadas),
                 execute_values=execute_values,
             )
             publicado = True
@@ -1289,6 +1415,14 @@ def format_reconcile(r: dict) -> str:
         f"  fingerprint publicado  : {r['fingerprint_publicado']}",
         f"  fingerprint recomputado: {r['fingerprint_recomputado']}",
         f"  VEREDITO               : {r['veredito']}",
+        "",
+        "  RESUMOS POR CONTA (tendencia):",
+        f"    publicados          : {r['resumos_publicados']}  "
+        f"(backlog somado {r['backlog_publicado']})",
+        f"    recomputados        : {r['resumos_recomputados']}  "
+        f"(backlog somado {r['backlog_recomputado']})",
+        f"    divergencias        : {r['resumos_divergentes']}",
+        f"    VEREDITO DO RESUMO  : {r['veredito_resumo']}",
         "",
         "  Os dois fingerprints so coincidem se NADA mudou na fonte entre a",
         "  publicacao e esta leitura. Diferenca entre eles e churn ou mutacao,",

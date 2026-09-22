@@ -51,6 +51,9 @@ NOMES = {
     "1457734799": ("rituaria", "rituaria"),
 }
 WATERMARKS = {c: AGORA - timedelta(hours=1) for c in CONTAS}
+#: Chaves CANONICAS das contas, como aparecem na fila e no resumo. E' o
+#: conjunto que `publish_channel` exige para conferir a coerencia do lote.
+CONTAS_CANONICAS = frozenset(nome for nome, _marca in NOMES.values())
 
 
 def linha_fonte(
@@ -381,6 +384,7 @@ def test_conta_nao_publica_pedido_com_marca_de_outra():
         publisher.publish_channel(
             conn, Channel.SHOPEE, f, resumos([]),
             source_health=SourceHealth.HEALTHY, refresh_batch_id=LOTE,
+            expected_accounts=CONTAS_CANONICAS,
             execute_values=fake_execute_values,
         )
 
@@ -804,6 +808,7 @@ def _publish(conn, f, effective_at=AGORA, health=SourceHealth.HEALTHY, lote=LOTE
     return publisher.publish_channel(
         conn, Channel.SHOPEE, f, resumos(f, effective_at, lote=lote),
         source_health=health, refresh_batch_id=lote,
+        expected_accounts=CONTAS_CANONICAS,
         execute_values=fake_execute_values,
     )
 
@@ -932,6 +937,7 @@ def test_publicacao_exige_resumo():
         publisher.publish_channel(
             conn, Channel.SHOPEE, fila([linha_fonte()]), [],
             source_health=SourceHealth.HEALTHY, refresh_batch_id=LOTE,
+            expected_accounts=CONTAS_CANONICAS,
             execute_values=fake_execute_values,
         )
     assert conn.commits == 0
@@ -945,6 +951,7 @@ def test_lote_inconsistente_bloqueia():
         publisher.publish_channel(
             conn, Channel.SHOPEE, f, resumos(f, lote="batch-B"),
             source_health=SourceHealth.HEALTHY, refresh_batch_id="batch-A",
+            expected_accounts=CONTAS_CANONICAS,
             execute_values=fake_execute_values,
         )
 

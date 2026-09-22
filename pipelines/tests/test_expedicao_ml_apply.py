@@ -19,6 +19,7 @@ from pipelines.expedicao.contract import (
     RegistryError,
     SellerAccount,
     SourceHealth,
+    LoteIncoerente,
     SourceUnhealthy,
 )
 from pipelines.expedicao.publisher import IndeterminateCommit, LockNotAcquired
@@ -410,8 +411,32 @@ def test_candidata_vazia_inesperada_nao_passa_por_fonte_doente():
 # ---------------------------------------------------------------------------
 # Reconciliacao deterministica
 # ---------------------------------------------------------------------------
-def _publicado_fake(linhas_fila, efetivo=AGORA, batch=BATCH, ingestao=None):
-    """Respostas do destino: primeiro o cabecalho, depois as linhas.
+def resumos_do_publicado(linhas_fila, efetivo=AGORA, batch=BATCH):
+    """Os resumos que o destino devolveria para aquela fila, ja projetados.
+
+    Monta com o MESMO `build_account_summaries` da producao para que o dublê
+    nao possa ficar coerente por construcao propria: se a chave da conta voltar
+    a divergir, este helper passa a produzir zeros e os testes de reconciliacao
+    denunciam.
+    """
+    montados = transform.build_account_summaries(
+        linhas_fila,
+        efetivo,
+        channel=Channel.MERCADOLIVRE.value,
+        refresh_batch_id=batch,
+        accounts={ext: (ext, c.brand_key) for ext, c in REGISTRY_ML.items()},
+        watermarks={ext: efetivo for ext in REGISTRY_ML},
+        source_advanced=False,
+    )
+    return [{c: r[c] for c in cli.COLUNAS_RESUMO_PUBLICADO} for r in montados]
+
+
+def _publicado_fake(linhas_fila, efetivo=AGORA, batch=BATCH, ingestao=None,
+                    resumos=None):
+    """Respostas do destino: cabecalho, linhas e, desde o H3, os resumos.
+
+    Os tres saem do MESMO snapshot em producao, entao o dublê tambem os entrega
+    juntos - e a reconciliacao pode julgar a coerencia interna do publicado.
 
     `ingestao` sobrescreve `source_ingested_at` no PUBLICADO — e assim que se
     simula "a fonte releu esta linha depois do apply".
@@ -427,7 +452,9 @@ def _publicado_fake(linhas_fila, efetivo=AGORA, batch=BATCH, ingestao=None):
                                 else x["source_ingested_at"])}
         for x in linhas_fila
     ]
-    return [cabecalho, corpo]
+    if resumos is None:
+        resumos = resumos_do_publicado(linhas_fila, efetivo, batch)
+    return [cabecalho, corpo, resumos]
 
 
 def test_reconciliacao_usa_o_effective_at_do_batch_publicado():
@@ -708,3 +735,60 @@ def test_reconcile_e_apply_sao_mutuamente_exclusivos():
         cli.EXIT_FALHA
     )
     assert cli.main(["--channel", "mercadolivre"]) == cli.EXIT_FALHA
+
+
+def test_reconcile_denuncia_fotografia_publicada_incoerente():
+    """O lote do incidente EXP-3B2-I1, submetido a reconciliacao.
+
+    Fila com linhas e resumo zerado e' um fato sobre o BANCO: nao depende de
+    reler a fonte nem de comparar com nada. A reconciliacao passa a recusar
+    fechada em vez de devolver um relatorio verde sobre uma fotografia que nao
+    fecha consigo mesma.
+    """
+    linhas = [linha(700001), linha(700002)]
+    fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA, BATCH)
+    # o defeito: resumos indexados pela MARCA, como antes do H3
+    zerados = transform.build_account_summaries(
+        fila, AGORA, channel=Channel.MERCADOLIVRE.value, refresh_batch_id=BATCH,
+        accounts={e: (c.brand_key, c.brand_key) for e, c in REGISTRY_ML.items()},
+        watermarks={e: AGORA for e in REGISTRY_ML}, source_advanced=False,
+    )
+    projetados = [{c: r[c] for c in cli.COLUNAS_RESUMO_PUBLICADO} for r in zerados]
+    alvo = FakeTarget(respostas=_publicado_fake(fila, resumos=projetados))
+
+    with pytest.raises(LoteIncoerente) as erro:
+        cli.reconcile_channel(
+            alvo, FakeSource(linhas, WATERMARKS_OK), Channel.MERCADOLIVRE,
+            open_registry=lambda _c, _m: (REGISTRY_ML, []),
+        )
+    assert "nao fecha consigo mesma" in str(erro.value)
+    assert alvo.deletes == 0 and alvo.commits == 0, "reconciliacao nao escreve"
+
+
+def test_conta_registrada_com_carimbo_NULO_nao_publica():
+    """Conta observada, mas sem carimbo: nao ha prova de que foi lida.
+
+    E' diferente de conta ausente (`ACCOUNT_MISSING`): aqui a conta APARECE na
+    fonte, so' que sem `max_extracted_at`. Publicar assim transformaria uma
+    leitura muda numa fila vazia legitima, que e' exatamente o modo de falha que
+    o `SOURCE_STALE` do EXP-3B1-R/V existe para impedir.
+    """
+    sem_carimbo = [
+        wm(e, c.brand_key) if e != "1366932565" else
+        {"seller_id": int(e), "brand": c.brand_key, "max_extracted_at": None}
+        for e, c in REGISTRY_ML.items()
+    ]
+    codigo, alvo, mensagens = _rodar(watermarks=sem_carimbo)
+
+    assert codigo == cli.EXIT_FONTE_NAO_PUBLICAVEL
+    assert alvo.deletes == 0 and alvo.commits == 0, (
+        "a fila anterior tem de sobreviver a uma leitura sem carimbo"
+    )
+    # Checar so' o exit code nao bastaria: a barreira de COORTE devolve o
+    # mesmo 3 para uma conta parada, e mutar a barreira do carimbo passaria
+    # despercebida. O diagnostico precisa dizer QUAL barreira disparou.
+    junto = " ".join(mensagens)
+    assert SourceHealth.WATERMARK_MISSING.value in junto, junto
+    assert SourceHealth.SOURCE_STALE.value not in junto, (
+        "conta sem carimbo nao e' a mesma coisa que conta parada"
+    )
