@@ -606,3 +606,79 @@ def test_a_selecao_do_snapshot_acontece_antes_da_conversao_numerica():
     leitura = next(n for n in ast.walk(arvore)
                    if isinstance(n, ast.FunctionDef) and n.name == "_read_xlsx")
     assert "_to_float" not in ast.dump(leitura)
+
+
+# ---------------------------------------------------------------------------
+# SH-AUTO-1B-F — contraprovas COMPORTAMENTAIS exigidas pela validação final
+# ---------------------------------------------------------------------------
+def test_contraprova_mtime_invertido_nao_muda_o_resultado(tmp_path):
+    """Prova comportamental, não estrutural: com os `mtime` INVERTIDOS em
+    relação à janela, o vencedor continua sendo o de maior `(date_to,
+    date_from)`. Uma regra baseada em `mtime` daria o resultado oposto aqui."""
+    marca = tmp_path / "apice"
+    antigo = marca / "Order.all.20260901_20260908.xlsx"
+    novo = marca / "Order.all.20260907_20260915.xlsx"
+    _escrever(antigo, [{"oid": "P1", "qty": 1, "sub": 10.0, "status": "A Enviar"}])
+    _escrever(novo, [{"oid": "P1", "qty": 1, "sub": 10.0, "status": "Cancelado"}])
+
+    # o de janela MENOR passa a ser o mais recente no filesystem
+    import os
+
+    os.utime(novo, (1_600_000_000, 1_600_000_000))     # bem antigo
+    os.utime(antigo, (1_800_000_000, 1_800_000_000))   # bem recente
+    assert antigo.stat().st_mtime > novo.stat().st_mtime
+
+    dias = P.parse_brand(tmp_path, "apice")
+    assert dias == [], (
+        "o vencedor tem de ser o de janela maior (Cancelado), deixando o dia "
+        "sem pedido ativo — se o mtime mandasse, o pedido apareceria como ativo"
+    )
+
+
+def test_contraprova_escolha_por_arquivo_perderia_pedido(tmp_path):
+    """A escolha é POR PEDIDO. Se fosse por arquivo — "o snapshot vencedor
+    substitui o perdedor inteiro" — os pedidos que só existem no perdedor
+    sumiriam. Aqui `SO_NO_ANTIGO` não está no vencedor e tem de sobreviver."""
+    marca = tmp_path / "apice"
+    _escrever(marca / "Order.all.20260901_20260908.xlsx", [
+        {"oid": "COMUM", "qty": 1, "sub": 10.0},
+        {"oid": "SO_NO_ANTIGO", "qty": 1, "sub": 70.0},
+    ])
+    _escrever(marca / "Order.all.20260907_20260915.xlsx",
+              [{"oid": "COMUM", "qty": 1, "sub": 10.0}])
+
+    dias = P.parse_brand(tmp_path, "apice")
+    assert dias[0]["orders"] == 2, "o pedido exclusivo do perdedor não pode sumir"
+    assert dias[0]["gmv"] == 80.0, "10 do comum (uma vez) + 70 do exclusivo"
+
+
+def test_contraprova_escolha_por_pedido_na_deduplicacao_pura():
+    """O mesmo, no nível da função: lotes disjuntos preservam os dois lados."""
+    a = [{"order_id": "COMUM", "v": 1}, {"order_id": "SO_A", "v": 2}]
+    b = [{"order_id": "COMUM", "v": 3}]
+    saida, resumo = deduplicar_por_pedido([(ANTIGO, a), (NOVO, b)])
+    ids = sorted(str(l["order_id"]) for l in saida)
+    assert ids == ["COMUM", "SO_A"]
+    assert next(l for l in saida if l["order_id"] == "COMUM")["v"] == 3
+    assert resumo["linhas_descartadas"] == 1
+
+
+def test_contraprova_ordem_dos_arquivos_nao_muda_o_agregado(tmp_path):
+    """Determinismo end-to-end: as mesmas linhas, com os arquivos entregues em
+    ordens diferentes ao agrupador, produzem o mesmo agregado."""
+    marca = tmp_path / "apice"
+    f1 = marca / "Order.all.20260901_20260908.xlsx"
+    f2 = marca / "Order.all.20260907_20260915.xlsx"
+    _escrever(f1, [{"oid": "P1", "qty": 2, "sub": 40.0, "status": "A Enviar"}])
+    _escrever(f2, [{"oid": "P1", "qty": 2, "sub": 40.0, "status": "Concluído"}])
+
+    from pipelines.connectors.shopee._snapshots import agrupar_snapshots
+
+    a = [s.rotulo for s in agrupar_snapshots([f1, f2])]
+    b = [s.rotulo for s in agrupar_snapshots([f2, f1])]
+    assert a == b
+
+    dias = P.parse_brand(tmp_path, "apice")
+    assert dias[0]["gmv"] == 40.0
+    assert dias[0]["units_sold"] == 2
+    assert dias[0]["delivered_orders"] == 1
