@@ -473,3 +473,117 @@ def test_coerencia_do_publicado_e_verificavel_lendo_o_banco(banco):
     assert problemas_do_lote(
         "mercadolivre", linhas, resumos, expected_accounts=CONTAS
     ) == []
+
+
+class _FonteDuble:
+    """Fonte de mentira. O DESTINO e' o Postgres real - e' la' que a promessa
+    de read-only precisa valer."""
+
+    def __init__(self, candidatos, watermarks):
+        self.candidatos, self.watermarks = candidatos, watermarks
+
+    def cursor(self):
+        return _CursorDuble(self)
+
+    def close(self):
+        pass
+
+
+class _CursorDuble:
+    def __init__(self, f):
+        self.f = f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute(self, sql, params=None):
+        self._r = (self.f.watermarks if "MAX(s.extracted_at)" in sql
+                   else self.f.candidatos)
+
+    def fetchall(self):
+        return self._r
+
+
+def test_reconcile_le_banco_real_sem_escrever_e_sem_lock(banco):
+    """`--reconcile` contra o destino REAL: le, confere e nao toca em nada."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    from pipelines.expedicao import cli
+
+    distribuicao = {"2227056661": 6, "2532564723": 2}
+    brutas, n = [], 0
+    for seller, quantidade in distribuicao.items():
+        for _ in range(quantidade):
+            n += 1
+            brutas.append(linha_ml(seller, n))
+    fila = transform.build_fila_ml(brutas, REGISTRY, AGORA, LOTE_ML)
+    publicar(banco, fila, resumos_ml(fila))
+
+    leitor = psycopg2.connect(DSN, cursor_factory=RealDictCursor)
+    leitor.set_session(readonly=True, autocommit=True)
+    fonte = _FonteDuble(
+        brutas,
+        [{"seller_id": int(e), "max_extracted_at": datetime(2026, 9, 22, 14, 30)}
+         for e in REGISTRY],
+    )
+    try:
+        r = cli.reconcile_channel(
+            leitor, fonte, Channel.MERCADOLIVRE,
+            open_registry=lambda _c, _m: (REGISTRY, []),
+        )
+    finally:
+        leitor.close()
+
+    assert r["publicadas"] == r["recomputadas"] == 8
+    assert r["resumos_publicados"] == 4
+    assert r["backlog_publicado"] == r["backlog_recomputado"] == 8
+    assert r["veredito_resumo"] == "coerente_e_igual_ao_recomputado"
+
+    # nada foi tocado: a conexao era read-only e o banco continua igual
+    assert contagens(banco) == (8, {"2227056661": 6, "2532564723": 2,
+                                    "2579732860": 0, "1366932565": 0})
+    with banco.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
+        assert cur.fetchone()[0] == 0, "reconciliacao nao toma lock"
+    banco.rollback()
+
+
+def test_reconcile_recusa_fotografia_publicada_incoerente_no_banco_real(banco):
+    """O lote do incidente, reproduzido no banco e submetido a reconciliacao."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    from pipelines.expedicao import cli
+    from pipelines.expedicao.contract import LoteIncoerente as _LI
+
+    brutas = [linha_ml("2227056661", i) for i in range(1, 6)]
+    fila = transform.build_fila_ml(brutas, REGISTRY, AGORA, LOTE_ML)
+    # publica a fila correta e, por fora, zera os resumos - o estado de 22/09
+    publicar(banco, fila, resumos_ml(fila))
+    banco.rollback()
+    banco.autocommit = True
+    with banco.cursor() as cur:
+        cur.execute("UPDATE marts.expedicao_refresh_run SET backlog_count = 0, "
+                    "deadline_unavailable_count = 0 WHERE channel = 'mercadolivre'")
+
+    leitor = psycopg2.connect(DSN, cursor_factory=RealDictCursor)
+    leitor.set_session(readonly=True, autocommit=True)
+    fonte = _FonteDuble(
+        brutas,
+        [{"seller_id": int(e), "max_extracted_at": datetime(2026, 9, 22, 14, 30)}
+         for e in REGISTRY],
+    )
+    try:
+        with pytest.raises(_LI) as erro:
+            cli.reconcile_channel(
+                leitor, fonte, Channel.MERCADOLIVRE,
+                open_registry=lambda _c, _m: (REGISTRY, []),
+            )
+    finally:
+        leitor.close()
+    assert "nao fecha consigo mesma" in str(erro.value)
+    assert contagens(banco)[0] == 5, "a reconciliacao nao consertou nada"
