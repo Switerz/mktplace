@@ -51,6 +51,7 @@ from pipelines.expedicao.contract import (
     PII_FORBIDDEN_TOKENS,
     REGISTRY_SQL,
     ExtractionResult,
+    RegistryError,
     SourceHealth,
     SourceUnhealthy,
     SourceWatermark,
@@ -114,20 +115,49 @@ WHERE s.status = %(shipment_status)s
 
 #: Watermark POR CONTA. `seller_id` e a identidade do registry; a marca e
 #: atributo. Como no Shopee, o maximo GLOBAL esconderia uma conta parada.
+#:
+#: O GRAO e' o `seller_id` SOZINHO (EXP-3B2-H3). Agrupar tambem por `s.brand`
+#: devolvia uma linha por par, e desde que `shop_account` passou a ser o
+#: `seller_id` duas marcas sob a mesma conta produziriam duas entradas com a
+#: MESMA chave - uma sobrescreveria a outra em silencio, e o watermark
+#: publicado seria o da ultima lida, nao o maximo da conta. A marca sai da
+#: projecao porque quem a fornece e' o registry, nunca a fonte: os filtros e a
+#: leitura seguem exatamente os mesmos.
 ML_WATERMARK_SQL = """
 SELECT
     o.seller_id                AS seller_id,
-    s.brand                    AS brand,
     MAX(s.extracted_at)        AS max_extracted_at
 FROM raw.ml_shipments s
 JOIN raw.ml_orders o
   ON o.brand = s.brand AND o.order_id = s.order_id
-GROUP BY o.seller_id, s.brand
+GROUP BY o.seller_id
 """
 
 
+def _seller_id_canonico(bruto) -> str:
+    """O `seller_id` como texto, ou levanta. Nunca adivinha.
+
+    A conta do Mercado Livre e' identificada pelo `seller_id` e por mais nada.
+    Marca NAO serve de substituto: duas contas podem pertencer a mesma marca, e
+    foi justamente tratar marca como conta que zerou os resumos no incidente
+    EXP-3B2-I1.
+
+    `bool` e' recusado explicitamente porque em Python `True` passa por
+    `isinstance(x, int)` e viraria o `seller_id` `"True"` sem que nada
+    reclamasse.
+    """
+    if isinstance(bruto, bool) or bruto is None:
+        raise RegistryError(
+            f"seller_id invalido na fonte do Mercado Livre: {type(bruto).__name__}"
+        )
+    texto = str(bruto).strip()
+    if not texto:
+        raise RegistryError("seller_id vazio na fonte do Mercado Livre")
+    return texto
+
+
 def fetch_watermarks(conn) -> list[SourceWatermark]:
-    """Watermark por conta (`seller_id`), com a marca como nome da conta.
+    """Watermark por conta (`seller_id`), que e' tambem o nome canonico da conta.
 
     O carimbo sai daqui JA NORMALIZADO para UTC. Esta e a fronteira entre a
     linha crua do banco e o dominio: `SourceWatermark` alimenta
@@ -141,14 +171,23 @@ def fetch_watermarks(conn) -> list[SourceWatermark]:
     """
     with conn.cursor() as cur:
         cur.execute(ML_WATERMARK_SQL)
-        return [
-            SourceWatermark(
-                external_seller_id=str(row["seller_id"]),
-                shop_account=str(row["brand"]),
-                max_ingested_at=normalizar_ingestao_ml(row["max_extracted_at"]),
+        carimbos = []
+        for row in cur.fetchall():
+            # CHAVE CANONICA DA CONTA (EXP-3B2-H3). As duas identidades
+            # coincidem no ML de proposito: a fila publica `seller_id` em
+            # `shop_account`, entao o watermark tem de falar a MESMA lingua.
+            # Antes daqui saia `brand`, e `build_account_summaries` procurava
+            # "kokeshi" numa fila indexada por "2227056661" - achava nada e
+            # gravava `backlog_count = 0` para as quatro contas.
+            seller = _seller_id_canonico(row["seller_id"])
+            carimbos.append(
+                SourceWatermark(
+                    external_seller_id=seller,
+                    shop_account=seller,
+                    max_ingested_at=normalizar_ingestao_ml(row["max_extracted_at"]),
+                )
             )
-            for row in cur.fetchall()
-        ]
+        return carimbos
 
 
 def fetch_candidates(conn) -> list[dict]:

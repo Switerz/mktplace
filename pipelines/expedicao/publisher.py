@@ -43,9 +43,11 @@ from pipelines.expedicao.contract import (
     FILA_TABLE,
     RUN_TABLE,
     Channel,
+    LoteIncoerente,
     SourceHealth,
     SourceUnhealthy,
 )
+from pipelines.expedicao.coerencia import problemas_do_lote
 
 #: Ordem das colunas do INSERT da fila. `brand` aparece DEPOIS de
 #: `marketplace_order_id` para deixar visivel que e atributo, nao identidade.
@@ -213,6 +215,7 @@ def publish_channel(
     *,
     source_health: SourceHealth,
     refresh_batch_id: str,
+    expected_accounts,
     execute_values=None,
 ) -> tuple[int, int]:
     """Substitui a fila DO CANAL e grava o resumo por conta, numa transacao.
@@ -223,6 +226,11 @@ def publish_channel(
     acontece.
 
     Fonte nao saudavel levanta `SourceUnhealthy` ANTES de qualquer DELETE.
+
+    `expected_accounts` e' OBRIGATORIO e vem do registry ativo. Sem uma fonte
+    externa de verdade, "o resumo cobre todas as contas" nao e' verificavel: o
+    proprio resumo seria juiz da propria cobertura. Com ele, `problemas_do_lote`
+    recusa o lote ANTES do DELETE - ver `LoteIncoerente`.
     """
     if not source_health.can_publish:
         raise SourceUnhealthy(
@@ -277,6 +285,20 @@ def publish_channel(
                 f"conta {linha['shop_account']!r} publicou pedido com marca "
                 f"{linha['brand']!r}, mas o registry resolve {esperada!r}"
             )
+
+    # INVARIANTE ESTRUTURAL (EXP-3B2-H3). Ultima conferencia antes do DELETE:
+    # daqui em diante a fila anterior deixa de existir, entao um lote que nao
+    # fecha consigo mesmo nao pode passar. Fica DENTRO de `publish_channel`, e
+    # nao no chamador, porque este e' o unico ponto por onde toda publicacao
+    # passa - um caminho novo herda a protecao sem precisar lembrar dela.
+    incoerencias = problemas_do_lote(
+        channel.value, fila_rows, summary_rows, expected_accounts=expected_accounts
+    )
+    if incoerencias:
+        raise LoteIncoerente(
+            f"publicacao de {channel.value} recusada, fila anterior preservada: "
+            + "; ".join(incoerencias)
+        )
 
     neon_conn.autocommit = False
     try:

@@ -367,6 +367,16 @@ class SourceUnhealthy(RuntimeError):
     """
 
 
+class LoteIncoerente(RuntimeError):
+    """Fila e resumo do mesmo lote nao fecham entre si.
+
+    Falha fechada ANTES do DELETE: uma fotografia internamente contraditoria
+    nunca substitui uma fotografia integra. Foi o que faltou no incidente
+    EXP-3B2-I1, em que 1.056 pedidos foram publicados com os quatro resumos
+    zerados porque fila e resumo usavam chaves de conta diferentes.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Mercado Livre (EXP-3B1) — o que NAO e igual a Shopee
 # ---------------------------------------------------------------------------
