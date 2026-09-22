@@ -149,9 +149,125 @@ INSERT_PAGE_SIZE = 1000
 #: vez de truncar: truncar publicaria uma janela parcial com cara de completa.
 MAX_ROWS_PER_WINDOW = 200_000
 
+#: Gate PMA-2C5B — desfecho de COMMIT indeterminado. Mesmo codigo do
+#: `channel_offer_publisher`, para que o orquestrador traduza os dois canais
+#: com uma unica tabela de exit codes.
+EXIT_INDETERMINATE = 4
+
 
 class SyncError(RuntimeError):
     """Falha do sync. Mensagem sempre sanitizada antes de chegar ao operador."""
+
+
+class CommitIndeterminado(RuntimeError):
+    """Gate PMA-2C5B — o COMMIT foi TENTADO e levantou.
+
+    Nao e' falha e nao e' sucesso. Uma queda de conexao DEPOIS do commit e'
+    indistinguivel de uma queda ANTES, entao afirmar `failed` diria que nada
+    foi gravado — e isso nao se sabe. Mesma escolha de
+    `channel_offer_publisher`: a auditoria PERMANECE `running` com a nota
+    `INDETERMINADO:`, e um humano reconcilia por leitura.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Auditoria — Gate PMA-2C5B
+#
+# Conexao INDEPENDENTE com commit proprio, pelo mesmo motivo de
+# `channel_offer_publisher` e `pipelines/avoe/snapshot_import.py`: se a
+# auditoria vivesse na transacao dos dados, um `failed` seria desfeito junto
+# com o rollback e a tentativa nao deixaria rastro; e uma falha ao auditar
+# derrubaria dados ja' publicados.
+#
+# O CHECK da tabela admite apenas `running`, `success` e `failed`. Nao existe
+# status `indeterminate` e nao se cria um: `running` ja' significa "nao
+# concluiu", que e' exatamente o que sabemos. A nota vai em `error_message`.
+# ---------------------------------------------------------------------------
+
+#: Nome do processo em `audit.source_sync_run.source_name`.
+AUDIT_SOURCE_NAME = "ml_listing_price_snapshot"
+
+#: Dominio real do CHECK da tabela.
+AUDIT_STATUSES = ("running", "success", "failed")
+
+#: Prefixo da nota do desfecho indeterminado. Igual ao do publisher multicanal,
+#: para que uma unica busca encontre os dois.
+AUDIT_INDETERMINATE_PREFIX = "INDETERMINADO:"
+
+
+def _audit_conn(url: str):
+    """Conexao SO' da auditoria. Nunca a mesma que escreve a fotografia."""
+    conn = psycopg2.connect(
+        url, cursor_factory=RealDictCursor, connect_timeout=CONNECT_TIMEOUT_SECONDS
+    )
+    conn.autocommit = False
+    return conn
+
+
+def audit_start(audit_conn, rows_extracted: int) -> int:
+    """Abre o registro como `running`, com commit proprio, ANTES dos dados."""
+    with audit_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO audit.source_sync_run
+                (source_name, marketplace_id, loja_id, status, started_at,
+                 rows_extracted)
+            VALUES (%s, NULL, NULL, 'running', NOW(), %s)
+            RETURNING sync_run_id
+            """,
+            (AUDIT_SOURCE_NAME, rows_extracted),
+        )
+        sync_run_id = cur.fetchone()["sync_run_id"]
+    audit_conn.commit()
+    return sync_run_id
+
+
+def audit_finish(audit_conn, sync_run_id: int, status: str,
+                 rows_loaded: int | None = None,
+                 error_message: str | None = None,
+                 source_min_date: date | None = None,
+                 source_max_date: date | None = None) -> None:
+    """Fecha o registro. `rowcount != 1` e' falha: o alvo precisa existir.
+
+    Nenhum `item_id`, `seller_sku`, `gtin` ou permalink entra em
+    `error_message`: o texto ja chega sanitizado de `sanitize_error_message`,
+    e as unicas coisas acrescentadas aqui sao contagens e datas.
+    """
+    if status not in AUDIT_STATUSES:
+        raise SyncError("status de auditoria fora do dominio da tabela")
+    with audit_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE audit.source_sync_run
+               SET status = %s, finished_at = NOW(), rows_loaded = %s,
+                   error_message = %s, source_min_date = %s,
+                   source_max_date = %s
+             WHERE sync_run_id = %s
+            """,
+            (status, rows_loaded, error_message, source_min_date,
+             source_max_date, sync_run_id),
+        )
+        if cur.rowcount != 1:
+            raise SyncError("UPDATE de auditoria nao afetou exatamente 1 linha")
+    audit_conn.commit()
+
+
+def audit_note_indeterminate(audit_conn, sync_run_id: int, detalhe: str) -> None:
+    """Marca a nota SEM fechar o registro: `status` continua `running`.
+
+    Fechar como `failed` afirmaria que nada foi gravado. Fechar como `success`
+    afirmaria o contrario. Os dois seriam invencao.
+    """
+    with audit_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE audit.source_sync_run
+               SET error_message = %s
+             WHERE sync_run_id = %s AND status = 'running'
+            """,
+            (f"{AUDIT_INDETERMINATE_PREFIX} {detalhe}", sync_run_id),
+        )
+    audit_conn.commit()
 
 
 @dataclass(frozen=True)
@@ -771,13 +887,24 @@ def publish_window(neon_conn, snapshot: SourceSnapshot, run_id: str) -> dict:
             "except_both_ways": (a_nao_b, b_nao_a),
             "source_aggregates": snapshot.aggregates,
         }
-        neon_conn.commit()
-        return resultado
     except Exception:
         neon_conn.rollback()
         raise
     finally:
         cur.close()
+
+    # Gate PMA-2C5B — o COMMIT fica FORA do bloco que faz rollback.
+    #
+    # Antes ele vivia dentro do `try`, e uma excecao no proprio commit caia no
+    # `except`, chamava `rollback()` e subia como falha comum — afirmando que
+    # nada foi gravado. Isso nao se sabe: uma queda depois do commit e'
+    # indistinguivel de uma queda antes. Aqui a excecao vira
+    # `CommitIndeterminado`, e quem chama decide sem inventar desfecho.
+    try:
+        neon_conn.commit()
+    except Exception as exc:
+        raise CommitIndeterminado(sanitize_error_message(exc)) from exc
+    return resultado
 
 
 # ---------------------------------------------------------------------------
@@ -822,18 +949,66 @@ def run_diagnostic(date_from: date, date_to: date) -> dict:
     }
 
 
-def run_apply(date_from: date, date_to: date, run_id: str) -> dict:
+def run_apply(date_from: date, date_to: date, run_id: str,
+              *, audit_conn=None) -> dict:
+    """Gate PMA-2C5B — agora auditado, sem mudar o calculo da fotografia.
+
+    A maquina de estados e' a real, nao uma aproximacao:
+
+        publicado          COMMIT confirmado pelo servidor  -> `success`
+        rolled_back        falha ANTES do commit            -> `failed`
+        indeterminado      o COMMIT levantou                -> segue `running`
+        audit_incomplete   publicou, mas o UPDATE falhou    -> `success` nao foi
+                                                               gravado; os dados
+                                                               ESTAO publicados
+
+    A auditoria roda em conexao propria (`audit_conn`), injetavel para teste.
+    Nenhum identificador de anuncio entra em `error_message`.
+    """
     dm = _datamart_snapshot(_get_datamart_url())
     try:
         snapshot = read_source(dm, date_from, date_to)
     finally:
         dm.close()
 
-    neon = _neon_writable(_get_neon_url())
+    fechar_auditoria = audit_conn is None
+    if audit_conn is None:
+        audit_conn = _audit_conn(_get_neon_url())
+
+    sync_run_id = None
+    audit_complete = True
     try:
-        publicado = publish_window(neon, snapshot, run_id)
+        sync_run_id = audit_start(audit_conn, len(snapshot.rows))
+
+        neon = _neon_writable(_get_neon_url())
+        try:
+            publicado = publish_window(neon, snapshot, run_id)
+        except CommitIndeterminado as exc:
+            # NUNCA `failed`: o registro fica `running` com a nota.
+            audit_note_indeterminate(audit_conn, sync_run_id, str(exc))
+            raise
+        except Exception as exc:
+            # Falha comprovadamente ANTERIOR ao commit — `publish_window` ja
+            # desfez a transacao.
+            audit_finish(audit_conn, sync_run_id, "failed",
+                         rows_loaded=0,
+                         error_message=sanitize_error_message(exc),
+                         source_min_date=date_from, source_max_date=date_to)
+            raise
+        finally:
+            neon.close()
+
+        # Daqui para baixo o COMMIT esta confirmado. Uma falha ao FECHAR a
+        # auditoria nao pode alegar rollback: os dados estao publicados.
+        try:
+            audit_finish(audit_conn, sync_run_id, "success",
+                         rows_loaded=publicado.get("published", 0),
+                         source_min_date=date_from, source_max_date=date_to)
+        except Exception:
+            audit_complete = False
     finally:
-        neon.close()
+        if fechar_auditoria:
+            audit_conn.close()
 
     return {
         "mode": "apply", "applied": True, "run_id": run_id,
@@ -841,6 +1016,8 @@ def run_apply(date_from: date, date_to: date, run_id: str) -> dict:
         "source": snapshot.aggregates,
         "gtin_metrics": snapshot.gtin_metrics,
         "publish": publicado,
+        "sync_run_id": sync_run_id,
+        "audit_complete": audit_complete,
     }
 
 
@@ -908,13 +1085,34 @@ def _print_report(rel: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Gate PMA-2C5B — exit codes alinhados ao publisher multicanal.
+
+        0  publicado (ou diagnostico concluido)
+        1  falha ANTES do commit; a fotografia nao mudou
+        4  COMMIT indeterminado; NAO reexecute as cegas
+
+    `2` (recusa) e `3` (lock ocupado) nao aparecem aqui: este sync recusa
+    janela invalida como `SyncError` (exit 1) e o lock dele e' BLOQUEANTE, nao
+    fail-fast. A exclusao mutua vem antes, do lock logico do `run_task.ps1`.
+    """
     args = build_parser().parse_args(argv)
     try:
         de, ate = resolve_window(args)
         run_id = sanitize_run_id(args.run_id) if args.run_id else default_run_id()
         rel = run_apply(de, ate, run_id) if args.apply else run_diagnostic(de, ate)
         _print_report(rel)
+        if rel.get("applied") and not rel.get("audit_complete", True):
+            # NAO rebaixa o desfecho: os dados estao publicados. O defeito e' do
+            # registro, e precisa de conserto manual.
+            print("AVISO: os dados estao publicados, mas a auditoria ficou "
+                  "INCOMPLETA. Verifique audit.source_sync_run "
+                  f"(sync_run_id={rel.get('sync_run_id')}).", file=sys.stderr)
         return 0
+    except CommitIndeterminado as exc:
+        print(f"INDETERMINADO: {exc}. NAO reexecute as cegas: confira "
+              "audit.source_sync_run e a propria tabela antes de decidir.",
+              file=sys.stderr)
+        return EXIT_INDETERMINATE
     except SyncError as exc:
         print(f"ERRO: {exc}", file=sys.stderr)
         return 1

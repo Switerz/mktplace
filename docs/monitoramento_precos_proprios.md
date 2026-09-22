@@ -1237,3 +1237,176 @@ fazer a cobertura e as linhas discordarem por instantes: uma marca autorizada
 pode voltar sem linhas, ou uma recém-chegada ser recusada. Não produz número
 errado e se resolve ao recarregar. Fechar isso exigiria elevar o isolamento da
 requisição, o que é decisão de política de sessão e não deste gate.
+
+
+## Gate PMA-2C5B — orquestração diária (implementada, **ainda não agendada**)
+
+As fotografias ficaram paradas — ML em 14/09, Shopee e TikTok em 17/09 — não
+porque as fontes falharam, mas porque **ninguém invocava os publishers**. O
+diagnóstico PMA-2C5A mediu as três fontes atualizadas no mesmo dia e encontrou
+`channel_offer_snapshot` com cinco execuções na vida inteira, todas manuais.
+
+Este gate cria a orquestração. **Nenhuma tarefa foi registrada no Windows Task
+Scheduler e nenhuma publicação foi executada.**
+
+### Fonte, grão e publisher de cada canal
+
+| | Mercado Livre | Shopee | TikTok |
+|---|---|---|---|
+| Fonte | `silver.stg_ml_item_price_history` + `stg_ml_items` | `silver.stg_shopee_products` + `stg_shopee_product_models` | `silver.stg_tiktok_inventory` |
+| Grão | item × `ref_date` | oferta × conta (pai **xor** variação) | SKU × `snapshot_date` |
+| Publisher | `pipelines/sync_ml_listing_price_serving.py` | `channel_offer_sync` + `channel_offer_publisher` | idem Shopee |
+| Destino | `marts.fact_marketplace_listing_price_daily` | `marts.fact_channel_offer_observation` | idem |
+| Relógio da fonte | `extracted_at` ~06:03 | `ingested_at` ~06:01 BRT | `snapshot_date` D fetchado em D+1 ~02:55 |
+| Advisory lock | `914120014`, **transacional e bloqueante** | `917120017`, **de sessão e fail-fast** | idem Shopee |
+
+**São dois caminhos, não um.** O ML tem publisher próprio; Shopee e TikTok
+compartilham o multicanal. Isso não é acidente a corrigir: as fatos, os grãos e
+as políticas de data são diferentes.
+
+### Calendário e política de data
+
+Pipeline **`pma_refresh`**, próprio — não dentro do `full_daily`, para poder ser
+diagnosticado, executado e **desligado** sem mexer na ingestão do dia.
+
+Ordem **ML → Shopee → TikTok**, sem dependência entre eles. A ordem existe
+porque o ML é o único com teto D−1 e janela de recomposição; deixá-lo primeiro
+evita que uma janela longa atrase as duas fotografias de D0. A ausência de
+dependência é deliberada: `depends_on` viraria `SKIPPED` e uma recusa legítima
+da Shopee faria o TikTok nem tentar.
+
+| | horário | timezone | data-alvo | mutabilidade |
+|---|---|---|---|---|
+| ML | 07:00 | America/São_Paulo | **D−1** (`closed_day`) | dia fechado, imutável |
+| Shopee | 07:00 | America/São_Paulo | **D0**, dia do watermark da conta | `mutable_operational_snapshot` |
+| TikTok | 07:00 | America/São_Paulo | **D0**, `snapshot_date` da fonte | idem |
+
+**Janela do ML: `--lookback-days 3`, e o número foi medido.** Em 22/09/2026,
+100% das linhas de `stg_ml_item_price_history` têm `extracted_at::date =
+ref_date`, e **zero** linha foi re-extraída depois do próprio dia — a fonte não
+tem maturação. O lookback não existe para absorver revisão; existe para tolerar
+execução perdida. Três dias cobrem dois dias consecutivos sem execução e custam
+2.613 linhas, **1,31% do teto de 200.000 por janela**. O default do módulo (30
+dias, 25.476 linhas) seria dez vezes o custo diário para comprar tolerância que
+a fonte não pede.
+
+A recomposição inicial de 15 a 21/09 é um `--lookback-days 7` avulso — 6.072
+linhas, 3,04% do teto —, necessidade de uma vez e não custo recorrente.
+
+### Exit codes e o que cada um significa
+
+Os dois publishers falam o mesmo vocabulário, e o orquestrador traduz com uma
+única tabela:
+
+| exit | status no resumo | significa | o operador |
+|---|---|---|---|
+| 0 | `SUCCESS` | COMMIT confirmado | nada |
+| 1 | `FAILED` | falha **antes** do commit; a fotografia não mudou | investiga e roda de novo |
+| 2 | `REFUSED` | guarda recusou; nenhuma linha tocada | lê o motivo; **não** é erro |
+| 3 | `LOCKED` | outra execução detém o lock | espera; nada foi lido nem escrito |
+| 4 | `INDETERMINATE` | o COMMIT foi tentado e levantou | **não reexecuta às cegas**; reconcilia por leitura |
+| 5 | `FAILED` | uso incorreto do CLI | corrige o comando |
+
+**Recusa não é sucesso e lock ocupado não é falha.** Colapsar tudo em
+`FAILED`/`SUCCESS` apagaria exatamente a informação que decide se pode
+reexecutar.
+
+Status agregado: `OK` (tudo publicado), `DEGRADED` (algum canal não publicou —
+os três são `critical=False`, então um canal nunca derruba os outros), `BLOCKED`
+(**nenhum** canal chegou a ser tentado, tipicamente VPN fora) e `FAILED`
+(reservado a step crítico, que o `pma_refresh` não tem).
+
+**Publicação concluída com auditoria incompleta sai 0 de propósito** — os dados
+*estão* publicados e o defeito é do registro. Quem denuncia isso é o health
+check, não o exit code.
+
+### Comandos de diagnóstico e operação manual futura
+
+```
+# Diagnóstico, sem escrever nada e sem tomar lock
+python -m pipelines.channel_offer_publisher --marketplace shopee
+python -m pipelines.sync_ml_listing_price_serving        # sem --apply
+
+# Preflight de um canal, somente leitura
+python -m pipelines.ops.preflight --source pma_shopee
+
+# Recomposição inicial do ML (uma vez)
+python -m pipelines.sync_ml_listing_price_serving --apply --lookback-days 7
+
+# O pipeline inteiro, pelo mesmo wrapper de lock/timeout/log da futura tarefa
+powershell -NoProfile -NonInteractive -File scripts/run_task.ps1 -TaskKey pma_refresh
+```
+
+### Concorrência — duas camadas, propósitos distintos
+
+1. **Lock lógico** (`run_task.ps1`, `Lock = "full_daily"`) impede a disputa
+   **antes** de qualquer conexão. É o que protege o ML, cujo
+   `pg_advisory_xact_lock` **espera** em vez de desistir: sem ele, uma execução
+   concorrente ficaria pendurada até o timeout do step.
+2. **Advisory lock do Postgres** garante a exclusão mesmo que a primeira camada
+   seja contornada. Nos canais é `pg_try_advisory_lock`, fail-fast: a segunda
+   sai com exit 3 sem ler nem escrever.
+
+O preflight de cada canal lê `pg_locks` e transforma "lock tomado" num
+`BLOCKED` explícito, em vez de uma espera silenciosa.
+
+### Health check
+
+`python -m pipelines.ops.health_check` ganhou a seção **Frescor da FOTOGRAFIA
+de preços por canal**, que distingue seis causas — porque pedem seis ações
+diferentes:
+
+`fotografia_ausente` · `publisher_nao_executado` · `fonte_atrasada` ·
+`execucao_recusada` · `lock_ocupado` · `auditoria_incompleta`
+
+Limites: ML stale quando anterior a D−2; Shopee e TikTok quando anteriores a
+D−1. **O frescor sai de `observed_date`/`ref_date`, nunca de `synced_at`**: uma
+republicação de hoje de uma fotografia de 17/09 continua sendo uma fotografia
+de 17/09, e usar o horário de publicação esconderia a defasagem.
+
+Enquanto o agendamento não for ativado, os três canais entram como **não
+críticos**: a defasagem aparece em `ok` (visibilidade) e não derruba
+`ok_critical` nem o exit code.
+
+### Auditoria do ML
+
+O publisher do ML não escrevia em `audit.source_sync_run` — uma falha dele era
+silenciosa. Agora escreve, em conexão independente e com a máquina de estados
+real, sob `source_name = 'ml_listing_price_snapshot'`:
+
+| desfecho | registro |
+|---|---|
+| COMMIT confirmado | `success` |
+| falha antes do commit | `failed` |
+| COMMIT levantou | permanece `running` com nota `INDETERMINADO:` |
+| publicou, mas o UPDATE falhou | dados publicados, `audit_complete=False`, exit 0 com aviso |
+
+O `COMMIT` foi movido para **fora** do bloco que faz rollback. Antes, uma
+exceção no próprio commit caía no `except`, chamava `rollback()` e subia como
+falha comum — afirmando que nada foi gravado, o que não se sabe.
+
+### Rollout
+
+1. rever e mesclar este PR — nada muda em produção;
+2. rodar o **diagnóstico** dos três canais e conferir o plano contra a fato;
+3. recompor o ML uma vez (`--lookback-days 7`);
+4. **uma** publicação controlada por canal, com reconciliação, sob autorização;
+5. observar o health check por três dias;
+6. só então registrar a tarefa no Task Scheduler — outro gate.
+
+### Rollback
+
+Remover `pma_refresh` de `PIPELINES` ou desabilitar a tarefa. **Nenhum efeito
+sobre dados já publicados**: a publicação acumula datas e nunca substitui o
+canal. As fotografias existentes permanecem intactas em qualquer cenário.
+
+### Limitações conhecidas
+
+- **O agendamento não foi ativado.** Enquanto não for, as fotografias continuam
+  dependendo de execução manual, e este gate não encerra a frente.
+- **A orquestração vive numa máquina Windows.** Desligada ou sem VPN, não há
+  publicação. Sem VPN os três canais ficam `BLOCKED`, não `FAILED`.
+- **Dependência de VPN** para o Data Mart nos três canais.
+- Os testes que exigem PostgreSQL descartável (advisory lock e persistência da
+  auditoria) **pulam** onde não houver `initdb`/`pg_ctl`; apontar
+  `PMA_TEST_PG_BIN` para um Postgres local os habilita.

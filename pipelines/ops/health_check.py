@@ -1021,6 +1021,177 @@ def fetch_avoe_snapshot_status(conn, now: datetime | None = None
     )
 
 
+# ---------------------------------------------------------------------------
+# Gate PMA-2C5B — frescor da FOTOGRAFIA de precos, por canal
+#
+# Por que uma secao propria e nao mais uma linha em `fetch_data_freshness`:
+# aquela dimensao responde "o dado esta velho?", e aqui sao SEIS causas
+# distintas, que pedem acoes diferentes do operador. Colapsar tudo em `stale`
+# diria "esta velho" sem dizer se falta VPN, se o publisher recusou por guarda,
+# se outra execucao esta com o lock, ou se a fotografia foi publicada e so' o
+# registro ficou pela metade.
+#
+# REGRA QUE NAO SE NEGOCIA: o frescor sai de `observed_date`/`ref_date`, NUNCA
+# de `synced_at`. Uma republicacao de hoje de uma fotografia de 17/09 continua
+# sendo uma fotografia de 17/09 — usar o horario de publicacao esconderia
+# exatamente a defasagem que esta secao existe para revelar.
+# ---------------------------------------------------------------------------
+
+#: Nome do processo de cada canal em `audit.source_sync_run`.
+PMA_AUDIT_SOURCES = {
+    "ml": "ml_listing_price_snapshot",
+    "shopee": "channel_offer_snapshot",
+    "tiktok": "channel_offer_snapshot",
+}
+
+#: Atraso maximo aceitavel da FOTOGRAFIA, em dias, por canal.
+#:
+#: ML fecha em D-1, entao `observed_date` = D-1 e' o estado saudavel e o limite
+#: e' 2 (stale quando anterior a D-2). Shopee e TikTok publicam fotografia
+#: operacional de D0, mas a fonte so' fica pronta de manha; aceitar D-1 evita
+#: acusar atraso entre a meia-noite e a carga do dia.
+PMA_MAX_LAG_DAYS = {"ml": 2, "shopee": 1, "tiktok": 1}
+
+#: Prefixo da nota de commit indeterminado, escrito pelos dois publishers.
+PMA_INDETERMINATE_PREFIX = "INDETERMINADO:"
+
+PMA_STATUS_OK = "ok"
+PMA_STATUS_SEM_FOTOGRAFIA = "fotografia_ausente"
+PMA_STATUS_PUBLISHER_NAO_EXECUTADO = "publisher_nao_executado"
+PMA_STATUS_FONTE_ATRASADA = "fonte_atrasada"
+PMA_STATUS_RECUSADO = "execucao_recusada"
+PMA_STATUS_LOCK = "lock_ocupado"
+PMA_STATUS_AUDITORIA_INCOMPLETA = "auditoria_incompleta"
+PMA_STATUS_ERRO = "leitura_falhou"
+
+
+@dataclass
+class PmaChannelStatus:
+    channel: str
+    status: str
+    observed_date: str | None
+    days_since: int | None
+    max_lag_days: int
+    last_run_status: str | None
+    last_run_at: str | None
+    stale: bool
+    reason: str
+    # Nao critico por construcao: enquanto o agendamento nao estiver ativo, a
+    # fotografia defasada e' um gap CONHECIDO e nao deve derrubar o exit code
+    # do health check todo dia. Vira critico no gate que ativar a tarefa.
+    critical: bool = False
+
+
+def fetch_pma_channel_status(conn, today: date | None = None
+                             ) -> list[PmaChannelStatus]:
+    """Frescor da fotografia de cada canal, com a CAUSA discriminada."""
+    today = today or _now().date()
+    resultados: list[PmaChannelStatus] = []
+    cur = conn.cursor()
+
+    for canal in ("ml", "shopee", "tiktok"):
+        limite = PMA_MAX_LAG_DAYS[canal]
+        try:
+            if canal == "ml":
+                cur.execute(
+                    "SELECT MAX(ref_date) AS d FROM "
+                    "marts.fact_marketplace_listing_price_daily "
+                    "WHERE marketplace = 'ml'"
+                )
+            else:
+                cur.execute(
+                    "SELECT MAX(observed_date) AS d FROM "
+                    "marts.fact_channel_offer_observation "
+                    "WHERE marketplace = %s", (canal,)
+                )
+            linha = cur.fetchone()
+            observada = linha["d"] if isinstance(linha, dict) else linha[0]
+
+            cur.execute(
+                """
+                SELECT status, started_at, error_message
+                  FROM audit.source_sync_run
+                 WHERE source_name = %s
+                 ORDER BY sync_run_id DESC
+                 LIMIT 1
+                """, (PMA_AUDIT_SOURCES[canal],)
+            )
+            aud = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            resultados.append(PmaChannelStatus(
+                canal, PMA_STATUS_ERRO, None, None, limite, None, None, True,
+                f"PMA {canal}: leitura falhou — {type(exc).__name__}"))
+            continue
+
+        if aud is None:
+            aud_status, aud_inicio, aud_erro = None, None, None
+        elif isinstance(aud, dict):
+            aud_status = aud.get("status")
+            aud_inicio = aud.get("started_at")
+            aud_erro = aud.get("error_message")
+        else:
+            aud_status, aud_inicio, aud_erro = aud[0], aud[1], aud[2]
+
+        inicio_txt = aud_inicio.isoformat() if aud_inicio is not None else None
+
+        if observada is None:
+            resultados.append(PmaChannelStatus(
+                canal, PMA_STATUS_SEM_FOTOGRAFIA, None, None, limite,
+                aud_status, inicio_txt, True,
+                f"PMA {canal}: nenhuma fotografia publicada"))
+            continue
+
+        dias = (today - observada).days
+        atrasada = dias > limite
+
+        # Auditoria incompleta tem PRECEDENCIA sobre atraso: os dados podem
+        # estar publicados e so' o registro ficou pela metade, e isso precisa
+        # de conserto manual mesmo com a fotografia fresca.
+        if aud_status == "running" and aud_erro and str(aud_erro).startswith(
+                PMA_INDETERMINATE_PREFIX):
+            resultados.append(PmaChannelStatus(
+                canal, PMA_STATUS_AUDITORIA_INCOMPLETA, observada.isoformat(),
+                dias, limite, aud_status, inicio_txt, True,
+                f"PMA {canal}: ultima execucao ficou INDETERMINADA — confira "
+                "audit.source_sync_run e a fato antes de reexecutar"))
+            continue
+
+        if not atrasada:
+            resultados.append(PmaChannelStatus(
+                canal, PMA_STATUS_OK, observada.isoformat(), dias, limite,
+                aud_status, inicio_txt, False,
+                f"PMA {canal}: fotografia de {observada.isoformat()} "
+                f"({dias}d, limite {limite}d)"))
+            continue
+
+        # Atrasada: discrimina a causa pelo ultimo registro de execucao.
+        if aud is None:
+            causa, motivo = (
+                PMA_STATUS_PUBLISHER_NAO_EXECUTADO,
+                "o publisher NUNCA executou — falta orquestracao, nao ha falha")
+        elif aud_status == "failed":
+            causa, motivo = (
+                PMA_STATUS_RECUSADO,
+                "a ultima execucao terminou em falha ou recusa")
+        elif aud_status == "running":
+            causa, motivo = (
+                PMA_STATUS_LOCK,
+                "a ultima execucao ficou em `running` — lock ocupado ou "
+                "processo interrompido")
+        else:
+            causa, motivo = (
+                PMA_STATUS_FONTE_ATRASADA,
+                "a ultima execucao teve sucesso, entao a fonte e' que nao "
+                "avancou")
+        resultados.append(PmaChannelStatus(
+            canal, causa, observada.isoformat(), dias, limite,
+            aud_status, inicio_txt, True,
+            f"PMA {canal}: fotografia de {observada.isoformat()} com {dias}d "
+            f"(limite {limite}d) — {motivo}"))
+
+    return resultados
+
+
 def build_report(conn, now: datetime | None = None) -> dict:
     """`now` e' lido UMA UNICA vez aqui (ou recebido do chamador) e
     repassado para as duas dimensoes de frescor — evita que
@@ -1035,11 +1206,14 @@ def build_report(conn, now: datetime | None = None) -> dict:
     afiliados = fetch_affiliate_watermark_status(conn, now=now)
     descontos = fetch_discounts_coverage_status(conn, now=now)
     avoe = fetch_avoe_snapshot_status(conn, now=now)
+    pma = fetch_pma_channel_status(conn, today=now.date())
 
     exec_stale = [s for s in sources if s.stale]
     data_stale = [d for d in data_freshness if d.stale]
+    pma_stale = [x for x in pma if x.stale]
     ok = (not exec_stale and not data_stale and bug8["ok"]
-          and not afiliados.stale and not descontos.stale and not avoe.stale)
+          and not afiliados.stale and not descontos.stale and not avoe.stale
+          and not pma_stale)
 
     # Gate B1: ok_critical ignora fontes/entradas critical=False (hoje, so'
     # Shopee) — e' isso que `main()` usa para o exit code. `ok` continua
@@ -1055,10 +1229,17 @@ def build_report(conn, now: datetime | None = None) -> dict:
     # marcar a Avoe como critica, o efeito aparece aqui em vez de ficar
     # silenciosamente fora da conta.
     avoe_critico_stale = avoe.stale and avoe.critical
+    # PMA entra pelo MESMO padrao `stale and critical`. Como `critical` e'
+    # False por construcao ate o agendamento ser ativado, a parcela e'
+    # sempre False — escrever a conjuncao em vez de omitir o canal e'
+    # deliberado: quando o gate de ativacao marcar o PMA como critico, o
+    # efeito aparece AQUI em vez de ficar silenciosamente fora da conta.
+    pma_critico_stale = any(x.stale and x.critical for x in pma)
     ok_critical = (not exec_stale_critical and not data_stale_critical
                    and bug8["ok"] and not afiliados_critico_stale
                    and not descontos_critico_stale
-                   and not avoe_critico_stale)
+                   and not avoe_critico_stale
+                   and not pma_critico_stale)
 
     return {
         "ok": ok,
@@ -1069,6 +1250,10 @@ def build_report(conn, now: datetime | None = None) -> dict:
         "affiliate_watermark": asdict(afiliados),
         "discounts_coverage": asdict(descontos),
         "avoe_snapshot": asdict(avoe),
+        # Gate PMA-2C5B — nao critico enquanto o agendamento nao estiver
+        # ativo: o gap e' conhecido e nao deve derrubar o exit code todo
+        # dia. Entra em `ok` (visibilidade), fora de `ok_critical`.
+        "pma_channels": [asdict(x) for x in pma],
     }
 
 
@@ -1088,6 +1273,19 @@ def _print_human(report: dict) -> None:
         else:
             flag = "ATRASADO-CRITICO" if d["critical"] else "ATRASADO-CONHECIDO"
         print(f"[{flag}] {d['reason']}")
+
+    print("\n=== Frescor da FOTOGRAFIA de precos por canal (PMA) ===")
+    marca_pma = {
+        "ok": "OK", "fotografia_ausente": "SEM-FOTOGRAFIA",
+        "publisher_nao_executado": "PUBLISHER-NAO-EXECUTADO",
+        "fonte_atrasada": "FONTE-ATRASADA",
+        "execucao_recusada": "RECUSADA",
+        "lock_ocupado": "LOCK-OCUPADO",
+        "auditoria_incompleta": "AUDITORIA-INCOMPLETA",
+        "leitura_falhou": "LEITURA-FALHOU",
+    }
+    for x in report["pma_channels"]:
+        print(f"[{marca_pma.get(x['status'], x['status'])}] {x['reason']}")
 
     d = report["discounts_coverage"]
     print("\n=== Cobertura operacional dos descontos TikTok ===")

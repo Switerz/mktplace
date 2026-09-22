@@ -96,6 +96,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,6 +123,15 @@ class Step:
     # pipeline inteiro reportar FAILED/exit 1 sozinho — so' rebaixa o
     # resultado geral para DEGRADED (ver compute_overall_status).
     critical: bool = True
+    # Gate PMA-2C5B: traducao de exit code para status, por step.
+    #
+    # `None` preserva EXATAMENTE o comportamento de todo step que ja existia:
+    # 0 -> SUCCESS, qualquer outro -> FAILED. Os publishers do PMA tem uma
+    # maquina de estados mais rica que "deu ou nao deu" — recusa por guarda e
+    # lock ocupado NAO sao falha, e commit indeterminado nao e' nem falha nem
+    # sucesso. Colapsar tudo em FAILED apagaria justamente a informacao que o
+    # operador precisa para decidir se pode reexecutar.
+    exit_status_map: Mapping[int, str] | None = None
 
 
 # Checkpoint O1 Task 2/2 (2026-08-17): dependencia de FONTE por target de
@@ -429,6 +439,81 @@ SERVING_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step 
 SHOPEE_MANUAL_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(step.timeout_seconds for step in PIPELINES["shopee_manual_refresh"])
 
 
+# ---------------------------------------------------------------------------
+# Gate PMA-2C5B — monitoramento de precos proprios
+#
+# Pipeline PROPRIO, e nao steps dentro de `full_daily`, porque o PMA precisa de
+# execucao, diagnostico, rollback e eventual desativacao independentes: desligar
+# a publicacao de fotografia nao pode exigir desligar a ingestao do dia.
+#
+# Os tres canais sao `critical=False` e NAO tem `depends_on` entre si. A
+# ausencia de dependencia e' deliberada: `depends_on` no orquestrador significa
+# SKIPPED quando o anterior nao teve SUCCESS, e isso transformaria uma recusa
+# legitima da Shopee em "TikTok nem tentou". Os tres sao independentes na
+# fonte, no destino e no lock — entao sao independentes aqui.
+#
+# A ORDEM (ML -> Shopee -> TikTok) continua importando, mesmo sem dependencia:
+# o ML e' o unico com teto D-1 e janela de recomposicao, e deixa-lo primeiro
+# evita que uma janela longa atrase as duas fotografias de D0.
+# ---------------------------------------------------------------------------
+
+#: Traducao dos exit codes dos publishers do PMA. Os dois caminhos publicam com
+#: o MESMO vocabulario (`channel_offer_publisher.OUTCOME_EXIT` e o `main` do
+#: `sync_ml_listing_price_serving`), entao uma unica tabela serve aos tres
+#: canais.
+#:
+#:   0  publicado (a auditoria incompleta tambem sai 0 — os dados ESTAO la',
+#:      e quem denuncia isso e' o health check, nao o exit code)
+#:   1  falha ANTES do commit; a fotografia nao mudou
+#:   2  recusado pelas guardas; nenhuma linha foi tocada
+#:   3  lock ocupado; nada foi lido nem escrito
+#:   4  COMMIT indeterminado; NAO reexecutar as cegas
+#:   5  uso incorreto do CLI
+PMA_EXIT_STATUS = {
+    0: "SUCCESS",
+    1: "FAILED",
+    2: "REFUSED",
+    3: "LOCKED",
+    4: "INDETERMINATE",
+    5: "FAILED",
+}
+
+#: Janela incremental diaria do ML.
+#:
+#: MEDIDA em 2026-09-22 (Gate PMA-2C5B): 100% das linhas de
+#: `silver.stg_ml_item_price_history` tem `extracted_at::date = ref_date`, e
+#: ZERO linha foi re-extraida depois do proprio dia. A fonte nao tem maturacao,
+#: entao o lookback NAO existe para absorver revisao — existe so' para tolerar
+#: execucao perdida.
+#:
+#: 3 dias cobrem dois dias consecutivos sem execucao e custam 2.613 linhas,
+#: 1,31% do teto de 200.000 por janela. O default do modulo (30 dias, 25.476
+#: linhas) seria 10x o custo diario para comprar uma tolerancia que a fonte nao
+#: pede. A recomposicao inicial de 15 a 21/09 e' um `--lookback-days 7` avulso,
+#: documentado no runbook — necessidade de uma vez, nao custo recorrente.
+PMA_ML_LOOKBACK_DAYS = 3
+
+PMA_REFRESH_STEPS: tuple[Step, ...] = (
+    Step("pma_ml", "pipelines.sync_ml_listing_price_serving",
+         ("--apply", "--lookback-days", str(PMA_ML_LOOKBACK_DAYS)),
+         timeout_seconds=900, preflight_source="pma_ml",
+         critical=False, exit_status_map=PMA_EXIT_STATUS),
+    Step("pma_shopee", "pipelines.channel_offer_publisher",
+         ("--marketplace", "shopee", "--apply"),
+         timeout_seconds=900, preflight_source="pma_shopee",
+         critical=False, exit_status_map=PMA_EXIT_STATUS),
+    Step("pma_tiktok", "pipelines.channel_offer_publisher",
+         ("--marketplace", "tiktok", "--apply"),
+         timeout_seconds=900, preflight_source="pma_tiktok",
+         critical=False, exit_status_map=PMA_EXIT_STATUS),
+)
+
+PIPELINES["pma_refresh"] = PMA_REFRESH_STEPS
+
+PMA_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(
+    step.timeout_seconds for step in PIPELINES["pma_refresh"])
+
+
 def _default_executor(step: Step) -> int:
     cmd = [sys.executable, "-m", step.module, *step.args]
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), timeout=step.timeout_seconds)
@@ -476,10 +561,25 @@ def run_pipeline(name: str, executor=None, preflight_fn=None) -> dict[str, str]:
             print(f"[FAILED] {step.name} — timeout individual de {step.timeout_seconds}s estourado; processo morto, seguindo para o proximo passo.")
             continue
 
-        results[step.name] = "SUCCESS" if rc == 0 else "FAILED"
+        if step.exit_status_map is None:
+            # Comportamento historico, preservado byte a byte.
+            results[step.name] = "SUCCESS" if rc == 0 else "FAILED"
+        else:
+            # Exit code fora do mapa e' FAILED: um codigo que o publisher nao
+            # documentou nao pode ser lido como desfecho seguro.
+            results[step.name] = step.exit_status_map.get(rc, "FAILED")
         print(f"[{results[step.name]}] {step.name} (exit code {rc})")
 
     return results
+
+
+#: Gate PMA-2C5B — status de step que NAO sao sucesso.
+#:
+#: `REFUSED` e `LOCKED` sao desfechos SEGUROS (nada foi escrito), mas seguros
+#: nao e' o mesmo que bem-sucedido: a fotografia continua velha, e quem le o
+#: resumo precisa ver isso. Transformar recusa em sucesso e' exatamente o erro
+#: que este vocabulario existe para impedir.
+NON_SUCCESS_STATUSES = ("FAILED", "BLOCKED", "REFUSED", "LOCKED", "INDETERMINATE")
 
 
 def compute_overall_status(name: str, results: dict[str, str]) -> str:
@@ -500,15 +600,28 @@ def compute_overall_status(name: str, results: dict[str, str]) -> str:
     steps = PIPELINES[name]
     critical_by_name = {s.name: s.critical for s in steps}
 
+    # Gate PMA-2C5B — "BLOCKED" agregado: NENHUM step chegou a ser tentado.
+    #
+    # E' um estado distinto de FAILED e merece nome proprio: numa queda de VPN,
+    # nada foi lido, nada foi escrito e nada precisa ser reconciliado. Antes
+    # esse caso virava FAILED (todo critico bloqueado) ou DEGRADED (todos nao
+    # criticos), e as duas leituras escondiam que a execucao sequer comecou.
+    #
+    # O exit code NAO muda por causa disto: `main` devolve 1 tanto em FAILED
+    # quanto em BLOCKED, entao nenhum pipeline existente muda de comportamento
+    # observavel — so' o texto do resumo fica honesto.
+    if results and all(status == "BLOCKED" for status in results.values()):
+        return "BLOCKED"
+
     has_critical_failure = any(
-        critical_by_name.get(step_name, True) and status in ("FAILED", "BLOCKED")
+        critical_by_name.get(step_name, True) and status in NON_SUCCESS_STATUSES
         for step_name, status in results.items()
     )
     if has_critical_failure:
         return "FAILED"
 
     has_noncritical_failure = any(
-        not critical_by_name.get(step_name, True) and status in ("FAILED", "BLOCKED")
+        not critical_by_name.get(step_name, True) and status in NON_SUCCESS_STATUSES
         for step_name, status in results.items()
     )
     if has_noncritical_failure:
@@ -537,10 +650,11 @@ def main() -> int:
     print(f"  NAO-CRITICO (esperado, nao derruba o pipeline sozinho): {noncritical_results}")
     print(f"STATUS GERAL: {overall}")
 
-    # Exit 1 so' em FAILED (falha/bloqueio critico). DEGRADED (so' gap
-    # nao-critico conhecido, ex.: Shopee manual) e OK retornam exit 0 —
-    # o pipeline nao deve "falhar" todo dia por um gap ja conhecido.
-    return 1 if overall == "FAILED" else 0
+    # Exit 1 em FAILED (falha/bloqueio critico) e em BLOCKED (nada foi sequer
+    # tentado — Gate PMA-2C5B). DEGRADED (so' gap nao-critico conhecido, ex.:
+    # Shopee manual) e OK retornam exit 0: o pipeline nao deve "falhar" todo dia
+    # por um gap ja conhecido.
+    return 1 if overall in ("FAILED", "BLOCKED") else 0
 
 
 if __name__ == "__main__":
