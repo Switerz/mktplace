@@ -157,7 +157,92 @@ drift apareça no CI e não no número publicado.
 
 ---
 
-## 7. O que continua bloqueado
+## 7. Reconciliação medida (22/09/2026, leitura pura)
+
+### 7.1 Parser atual × candidato, sobre os mesmos arquivos
+
+| marca | arquivos → snapshots | pedidos em >1 snapshot | ΔGMV | Δunidades | Δpedidos | Δcancelados |
+| --- | --- | --- | --- | --- | --- | --- |
+| ápice | 22 → 18 | 990 | **−3,196%** | −3,249% | −0,148% | +1,195% |
+| barbours | 43 → 18 | 3.903 | **−2,621%** | −2,883% | −0,236% | +1,182% |
+| lescent | 19 → 18 | 1.241 | **−4,493%** | −4,597% | −0,444% | +2,308% |
+| rituária | 18 → 18 | 4.943 | **−15,112%** | −14,944% | −0,245% | +2,064% |
+
+🔑 **As duas causas se separam sozinhas.** A queda de `pedidos` é compensada
+**exatamente** pela alta de `canceled_orders` — ápice −47/+47, barbours
+−326/+326, lescent −119/+119, rituária −62/+62. Isso é **maturação de status**: o snapshot vencedor traz o
+pedido já cancelado. A queda de `gmv` e `units_sold`, muito maior e na mesma
+proporção entre si, é a **dupla contagem** sendo removida.
+
+A rituária é a mais afetada porque tem um export `20260707..20260806` que
+sobrepõe julho inteiro.
+
+### 7.2 Candidato × API corporativa — a prova independente
+
+Universo comum, mesma regra (`status <> Cancelado`), 258 dias:
+
+| marca | atual vs API | **candidato vs API** |
+| --- | --- | --- |
+| ápice | +3,768% | **+0,451%** |
+| barbours | +2,877% | **+0,181%** |
+| lescent | +5,197% | **+0,471%** |
+| rituária | +17,980% | **+0,152%** |
+
+Em unidades: ápice +3,684% → **+0,315%** · barbours +3,168% → **+0,194%** ·
+lescent +5,199% → **+0,363%** · rituária +17,732% → **+0,138%**.
+
+O parser atual media entre **+2,9% e +18,0%** acima da API. O candidato converge
+para **+0,15% a +0,47%** — o resíduo esperado de maturação de status, já que a
+API reflete o estado de hoje e os arquivos congelam o estado do dia da
+exportação. A fonte independente confirma a magnitude da duplicação e sua
+remoção.
+
+### 7.3 Kokeshi — e um defeito histórico que some por tabela
+
+Sem cobertura de API (a marca não está no registry), a verificação é de
+consistência interna. O diagnóstico focal (22/09/2026, **offline**, sem rede e
+sem banco) encontrou o seguinte:
+
+| item | resultado |
+| --- | --- |
+| arquivos → snapshots | 124 → 19, desempate OK |
+| snapshots que contêm os pedidos afetados | **2** |
+| `20260805..20260805` | **perdedor** — contém os valores inválidos |
+| `20260805..20260810` | **vencedor** — mesmos 2.617 registros, valores válidos |
+| a linha inválida sobrevive à deduplicação? | **não** |
+| categoria da diferença entre os dois | **status** (maturação) |
+
+Os valores inválidos são 2.494 pedidos com quatro campos financeiros
+(`total_global`, `commission_net`, `service_fee_net`, `freight_est`) em **formato
+US** (`1,234.56`), que `_numeric.py` rejeita deliberadamente. Esse é o defeito
+que derrubou o `shopee_daily` em **28/08 (run #226)** e **15/09 (run #297)** — o
+mesmo arquivo, a mesma marca.
+
+🔑 **A deduplicação elimina esse defeito incidentalmente, e isso não é uma
+correção genérica de valores inválidos.** Ela funciona aqui apenas porque a
+seleção do snapshot acontece **antes** da conversão numérica: `_read_xlsx`
+devolve células cruas, `deduplicar_por_pedido` escolhe, e só então
+`_aggregate_daily` chama `_to_float`. O snapshot perdedor é descartado inteiro,
+com os valores ruins dentro.
+
+🔴 **O fail-fast continua valendo.** Se o valor inválido estiver no snapshot
+**vencedor** — ou no único snapshot do pedido — o parser levanta como sempre.
+Quatro testes fixam essa fronteira, incluindo o caso fino em que o snapshot
+perde para um pedido e vence para outro (a escolha é **por pedido**, não por
+snapshot inteiro).
+
+O contrato do campo `total_global` para exports em formato US **não é escopo
+deste gate** e continua aberto.
+
+### 7.4 Caminho incremental
+
+`fetch_incremental(days_back=3)` lê os mesmos arquivos e passa pela mesma
+deduplicação. Dias cobertos por um único snapshot saem **idênticos** — é o que
+`test_parse_brand_snapshot_unico_inalterado` fixa.
+
+---
+
+## 8. O que continua bloqueado
 
 Esta correção **não autoriza backfill**. Ela torna o backfill *possível* sem
 inflação, mas o impacto agregado sobre o histórico já publicado precisa ser
@@ -165,3 +250,32 @@ revisado e aprovado antes de qualquer reprocessamento amplo — a projeção est
 seção de reconciliação do PR.
 
 O caminho incremental de 3 dias segue seguro, como já era.
+
+Também continuam abertos, e **fora** deste gate:
+
+- o **contrato do `total_global` em formato US** (§7.3) — hoje rejeitado por
+  desenho; a deduplicação só evita encostar nele quando o snapshot ruim perde;
+- a **reconciliação agregada da Kokeshi** contra o parser atual, que não pôde ser
+  concluída porque o caminho antigo levanta nessa marca. Ela não é necessária
+  para validar a regra: o diagnóstico focal já mostra qual snapshot vence e que a
+  diferença entre eles é de status.
+
+---
+
+## 9. Modo de validação usado
+
+A validação de 22/09/2026 foi feita em **modo offline**, por decisão operacional
+tomada durante o incidente `EXP-3B2-I1`:
+
+- todas as variáveis de conexão e segredo removidas do ambiente antes de
+  qualquer import (67 nomes);
+- `socket.socket.connect`, `socket.create_connection`, `socket.getaddrinfo`,
+  `psycopg2.connect` e `sqlalchemy.create_engine` substituídos por sentinelas que
+  **levantam**, com a sentinela verificada antes do diagnóstico começar;
+- dependências resolvidas do cache local (`uv --offline`), sem instalação remota;
+- **zero socket aberto, zero conexão, zero consulta** a Neon, Data Mart, API ou
+  Airflow;
+- nenhum `order_id`, comprador, CPF ou valor bruto de célula impresso.
+
+A reconciliação contra a API das §7.2 é **anterior** a essa restrição e não foi
+refeita.

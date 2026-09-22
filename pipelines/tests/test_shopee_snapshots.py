@@ -498,3 +498,111 @@ def test_contraprova_regex_de_parte_bate_com_a_do_inventario_raw():
         assert (meu is None) == (dele is None)
         if meu:
             assert meu.groups() == dele.groups()
+
+
+# ---------------------------------------------------------------------------
+# SH-AUTO-1B-OFFLINE — valor inválido e a ordem seleção → conversão
+#
+# Achado do diagnóstico focal da Kokeshi (22/09/2026, offline): o snapshot
+# `20260805..20260805` traz 2.494 pedidos com valores em formato US
+# ("1,234.56", rejeitado por `_numeric.py`) em quatro campos financeiros. Esse
+# snapshot é o PERDEDOR — o `20260805..20260810` tem os mesmos 2.617 registros
+# desses pedidos, com valores válidos, e é o vencedor pela regra.
+#
+# 🔑 A deduplicação elimina INCIDENTALMENTE um defeito histórico que derrubou o
+# refresh manual em 28/08 e 15/09. Isso NÃO é uma correção genérica de valores
+# inválidos, e os testes abaixo fixam exatamente essa fronteira: inválido no
+# perdedor some; inválido no vencedor continua levantando.
+# ---------------------------------------------------------------------------
+VALOR_US_INVALIDO = "1,234.56"  # formato US, rejeitado de propósito por _numeric
+
+
+def test_valor_invalido_no_perdedor_e_descartado_com_o_snapshot(tmp_path):
+    """O caso real da Kokeshi. O pedido é processado só com o vencedor, e o
+    valor inválido do perdedor nunca chega ao conversor numérico."""
+    marca = tmp_path / "kokeshi"
+    _escrever(marca / "Order.all.20260805_20260805.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": VALOR_US_INVALIDO,
+                "status": "A Enviar"}])
+    _escrever(marca / "Order.all.20260805_20260810.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": 150.0,
+                "status": "Concluído"}])
+
+    dias = P.parse_brand(tmp_path, "kokeshi")
+    assert len(dias) == 1
+    assert dias[0]["gmv"] == 100.0
+    assert dias[0]["total_settlement"] == 150.0, "o financeiro vem do vencedor"
+    assert dias[0]["delivered_orders"] == 1
+
+
+def test_valor_invalido_no_VENCEDOR_continua_levantando(tmp_path):
+    """🔴 O fail-fast NÃO foi afrouxado. A deduplicação escolhe o snapshot; ela
+    não conserta, não coage e não ignora valor inválido."""
+    marca = tmp_path / "kokeshi"
+    _escrever(marca / "Order.all.20260805_20260805.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": 150.0}])
+    _escrever(marca / "Order.all.20260805_20260810.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": VALOR_US_INVALIDO}])
+
+    from pipelines.connectors.shopee._numeric import ShopeeNumericParseError
+
+    with pytest.raises(ShopeeNumericParseError):
+        P.parse_brand(tmp_path, "kokeshi")
+
+
+def test_valor_invalido_em_snapshot_unico_continua_levantando(tmp_path):
+    """Sem snapshot concorrente não há o que escolher — o defeito aparece."""
+    marca = tmp_path / "kokeshi"
+    _escrever(marca / "Order.all.20260805_20260805.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": VALOR_US_INVALIDO}])
+
+    from pipelines.connectors.shopee._numeric import ShopeeNumericParseError
+
+    with pytest.raises(ShopeeNumericParseError):
+        P.parse_brand(tmp_path, "kokeshi")
+
+
+def test_valor_invalido_em_pedido_que_so_existe_no_perdedor_ainda_levanta(tmp_path):
+    """Fronteira fina: o snapshot perde para OUTRO pedido, mas este pedido só
+    existe nele — então ele é o vencedor deste pedido e o defeito aparece.
+    A escolha é por pedido, não por snapshot inteiro."""
+    marca = tmp_path / "kokeshi"
+    _escrever(marca / "Order.all.20260805_20260805.xlsx", [
+        {"oid": "P1", "qty": 1, "sub": 100.0, "total": 150.0},
+        {"oid": "SO_AQUI", "qty": 1, "sub": 50.0, "total": VALOR_US_INVALIDO},
+    ])
+    _escrever(marca / "Order.all.20260805_20260810.xlsx",
+              [{"oid": "P1", "qty": 1, "sub": 100.0, "total": 150.0}])
+
+    from pipelines.connectors.shopee._numeric import ShopeeNumericParseError
+
+    with pytest.raises(ShopeeNumericParseError):
+        P.parse_brand(tmp_path, "kokeshi")
+
+
+def test_a_selecao_do_snapshot_acontece_antes_da_conversao_numerica():
+    """Prova estrutural da ordem, que é o que faz o caso acima funcionar:
+    `_read_xlsx` devolve células cruas, `deduplicar_por_pedido` escolhe, e só
+    então `_aggregate_daily` chama `_to_float`. Inverter a ordem faria o parser
+    quebrar em dados que ele vai descartar."""
+    import ast
+
+    fonte = Path(P.__file__).read_text(encoding="utf-8")
+    arvore = ast.parse(fonte)
+    func = next(n for n in ast.walk(arvore)
+                if isinstance(n, ast.FunctionDef) and n.name == "parse_brand")
+    chamadas = [
+        (n.lineno, n.func.id)
+        for n in ast.walk(func)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
+    ordem = [nome for _, nome in sorted(chamadas)]
+    assert "deduplicar_por_pedido" in ordem
+    assert "_aggregate_daily" in ordem
+    assert ordem.index("deduplicar_por_pedido") < ordem.index("_aggregate_daily")
+
+    # e `_read_xlsx` não converte: quem converte é `_to_float`, dentro de
+    # `_aggregate_daily`.
+    leitura = next(n for n in ast.walk(arvore)
+                   if isinstance(n, ast.FunctionDef) and n.name == "_read_xlsx")
+    assert "_to_float" not in ast.dump(leitura)
