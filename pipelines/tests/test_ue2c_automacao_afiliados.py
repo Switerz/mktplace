@@ -595,7 +595,10 @@ def test_outros_pipelines_e_agendamento_intactos():
 
 
 def test_nenhum_pipeline_novo():
-    assert sorted(orch.PIPELINES) == ["full_daily", "serving_refresh",
+    # Gate PMA-2C5B acrescentou `pma_refresh`. O ponto deste teste e'
+    # que UE2-C nao criou pipeline — nao que o inventario seja eterno.
+    assert sorted(orch.PIPELINES) == ["full_daily", "pma_refresh",
+                                      "serving_refresh",
                                       "shopee_manual_refresh"]
 
 

@@ -701,6 +701,245 @@ def check_discounts_advisory_lock_free() -> CheckResult:
     return CheckResult(label, True, f"{label}: livre")
 
 
+# ---------------------------------------------------------------------------
+# Gate PMA-2C5B — preflight do monitoramento de precos, um por CANAL
+#
+# Cada canal tem fonte, grao e relogio proprios, entao cada um tem o seu check:
+# e' o que permite a Shopee passar enquanto o TikTok bloqueia, e vice-versa.
+#
+# Tudo aqui e' `SELECT` em sessao `readonly=True`. Nenhuma conexao gravavel e'
+# aberta no preflight — nem para o Data Mart, nem para o Neon.
+#
+# Sem VPN, `_select_1` ja falha na conexao e o step vira BLOCKED. Isso e'
+# deliberado: BLOCKED significa "nem tentamos", e e' o oposto de publicar uma
+# fotografia vazia sobre uma fonte que nao respondeu.
+# ---------------------------------------------------------------------------
+
+#: Fonte canonica de cada canal, no Data Mart.
+_PMA_SOURCE_RELATIONS = {
+    "ml": ("silver.stg_ml_item_price_history", "silver.stg_ml_items"),
+    "shopee": ("silver.stg_shopee_products", "silver.stg_shopee_product_models"),
+    "tiktok": ("silver.stg_tiktok_inventory",),
+}
+
+#: Fato de destino de cada canal, no Neon.
+_PMA_TARGET_TABLES = {
+    "ml": "marts.fact_marketplace_listing_price_daily",
+    "shopee": "marts.fact_channel_offer_observation",
+    "tiktok": "marts.fact_channel_offer_observation",
+}
+
+#: Cobertura MINIMA medida na fonte (PMA-2C5A, 2026-09-22). Abaixo disso a
+#: fonte esta incompleta e publicar encolheria a fotografia sem dizer por que.
+#: Nao e' o numero exato do dia: e' um piso, para nao virar teste de regressao
+#: de volume a cada variacao normal do catalogo.
+_PMA_MIN_COVERAGE = {
+    "ml": {"marcas": 4, "linhas": 500},
+    "shopee": {"contas": 4, "linhas": 400},
+    "tiktok": {"marcas": 7, "linhas": 900},
+}
+
+#: Advisory lock de SESSAO do publisher multicanal (fail-fast).
+_PMA_CHANNEL_ADVISORY_LOCK_KEY = 917120017
+#: Advisory lock TRANSACIONAL do sync do ML (bloqueante).
+_PMA_ML_ADVISORY_LOCK_KEY = 914_120_014
+
+
+def _pma_read(url: str, label: str, consulta: str, params=None):
+    """`SELECT` unico em sessao somente leitura. Devolve (linha, erro)."""
+    if not url:
+        return None, CheckResult(label, False,
+                                 f"{label}: variavel de conexao nao configurada")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute(consulta, params or {})
+            linha = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        return linha, None
+    except Exception as e:
+        return None, CheckResult(
+            label, False,
+            f"{label}: falha de conexao ({sanitize_url(url)}) — {type(e).__name__}. "
+            "Sem fonte nao ha fotografia: BLOQUEADO em vez de publicar vazio")
+
+
+def _pma_source_check(canal: str):
+    """Fonte responde, tem a relacao canonica, tem data maxima e cobertura."""
+    def check() -> CheckResult:
+        label = f"PMA {canal} (fonte)"
+        url = os.environ.get("DATAMART_DATABASE_URL", "")
+        if canal == "ml":
+            # `brand` existe nas DUAS relacoes; sem qualificar, o Postgres
+            # recusa por ambiguidade. A marca que vale e' a do cadastro do
+            # item, nao a do historico de preco.
+            consulta = f"""
+                SELECT max(h.ref_date) AS data_max, count(*) AS linhas,
+                       count(DISTINCT i.brand) AS marcas
+                  FROM {_PMA_SOURCE_RELATIONS['ml'][0]} h
+                  JOIN {_PMA_SOURCE_RELATIONS['ml'][1]} i USING (item_id)
+                 WHERE h.ref_date >= (CURRENT_DATE - 7)
+            """  # noqa: S608 — relacoes sao constantes do modulo
+            minimo = _PMA_MIN_COVERAGE["ml"]
+            chave_cobertura = "marcas"
+        elif canal == "shopee":
+            consulta = f"""
+                SELECT (max(ingested_at) AT TIME ZONE 'UTC')::date AS data_max,
+                       count(*) AS linhas,
+                       count(DISTINCT shop_account) AS contas
+                  FROM {_PMA_SOURCE_RELATIONS['shopee'][0]}
+            """  # noqa: S608
+            minimo = _PMA_MIN_COVERAGE["shopee"]
+            chave_cobertura = "contas"
+        else:
+            consulta = f"""
+                SELECT max(snapshot_date) AS data_max, count(*) AS linhas,
+                       count(DISTINCT brand) AS marcas
+                  FROM {_PMA_SOURCE_RELATIONS['tiktok'][0]}
+                 WHERE snapshot_date = (
+                     SELECT max(snapshot_date) FROM {_PMA_SOURCE_RELATIONS['tiktok'][0]})
+            """  # noqa: S608
+            minimo = _PMA_MIN_COVERAGE["tiktok"]
+            chave_cobertura = "marcas"
+
+        linha, erro = _pma_read(url, label, consulta)
+        if erro is not None:
+            return erro
+
+        data_max, linhas = linha[0], linha[1]
+        cobertura = linha[2]
+        if data_max is None or not linhas:
+            return CheckResult(label, False,
+                               f"{label}: fonte VAZIA — bloqueado. O caminho "
+                               "automatizado nunca publica fotografia vazia")
+        if linhas < minimo["linhas"]:
+            return CheckResult(label, False,
+                               f"{label}: cobertura abaixo do piso — "
+                               f"{linhas} linha(s), minimo {minimo['linhas']}")
+        if cobertura < minimo[chave_cobertura]:
+            return CheckResult(label, False,
+                               f"{label}: cobertura abaixo do piso — "
+                               f"{cobertura} {chave_cobertura}, minimo "
+                               f"{minimo[chave_cobertura]}")
+        return CheckResult(label, True,
+                           f"{label}: data maxima {data_max}, {linhas} linha(s), "
+                           f"{cobertura} {chave_cobertura}")
+    return check
+
+
+def _pma_target_check(canal: str):
+    """Destino existe e nao regrediu no tempo.
+
+    Regressao temporal aqui significa fotografia publicada com data MAIOR que a
+    data que a fonte consegue produzir. Publicar nesse estado reescreveria uma
+    fotografia mais nova com dado mais velho.
+    """
+    def check() -> CheckResult:
+        label = f"PMA {canal} (destino e regressao)"
+        url_neon = os.environ.get("DATABASE_URL", "")
+        url_fonte = os.environ.get("DATAMART_DATABASE_URL", "")
+        alvo = _PMA_TARGET_TABLES[canal]
+
+        if canal == "ml":
+            consulta_alvo = (f"SELECT max(ref_date) FROM {alvo} "  # noqa: S608
+                             "WHERE marketplace = 'ml'")
+            consulta_fonte = (
+                f"SELECT max(ref_date) FROM {_PMA_SOURCE_RELATIONS['ml'][0]}")  # noqa: S608
+        else:
+            consulta_alvo = (f"SELECT max(observed_date) FROM {alvo} "  # noqa: S608
+                             f"WHERE marketplace = '{canal}'")
+            if canal == "shopee":
+                consulta_fonte = (
+                    "SELECT (max(ingested_at) AT TIME ZONE 'UTC')::date "
+                    f"FROM {_PMA_SOURCE_RELATIONS['shopee'][0]}")  # noqa: S608
+            else:
+                consulta_fonte = (
+                    "SELECT max(snapshot_date) "
+                    f"FROM {_PMA_SOURCE_RELATIONS['tiktok'][0]}")  # noqa: S608
+
+        linha_alvo, erro = _pma_read(url_neon, label, consulta_alvo)
+        if erro is not None:
+            return erro
+        linha_fonte, erro = _pma_read(url_fonte, label, consulta_fonte)
+        if erro is not None:
+            return erro
+
+        publicada, na_fonte = linha_alvo[0], linha_fonte[0]
+        if na_fonte is None:
+            return CheckResult(label, False,
+                               f"{label}: fonte sem data maxima — bloqueado")
+        if publicada is not None and publicada > na_fonte:
+            return CheckResult(label, False,
+                               f"{label}: REGRESSAO — publicada {publicada} e' "
+                               f"mais nova que a fonte {na_fonte}")
+        if publicada is None:
+            return CheckResult(label, True,
+                               f"{label}: destino vazio; a fonte produz "
+                               f"{na_fonte}")
+        return CheckResult(label, True,
+                           f"{label}: publicada {publicada}, fonte {na_fonte} — "
+                           "sem regressao")
+    return check
+
+
+def check_pma_channel_lock_free() -> CheckResult:
+    """O advisory lock de SESSAO do publisher multicanal esta livre.
+
+    Diferente do lock do ML: este e' `pg_try_advisory_lock`, fail-fast. O
+    publisher ja sairia com `lock_unavailable` (exit 3) sem tocar em nada — este
+    check so transforma essa saida numa recusa ANTES de abrir conexao gravavel.
+    """
+    label = "PMA canais (advisory lock livre)"
+    linha, erro = _pma_read(
+        os.environ.get("DATABASE_URL", ""), label,
+        "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' "
+        "AND classid = 0 AND objid = %s",
+        (_PMA_CHANNEL_ADVISORY_LOCK_KEY,))
+    if erro is not None:
+        return erro
+    if linha[0]:
+        return CheckResult(label, False,
+                           f"{label}: {linha[0]} sessao(oes) ja detem o lock — "
+                           "outra publicacao esta em andamento")
+    return CheckResult(label, True, f"{label}: livre")
+
+
+def check_pma_ml_lock_free() -> CheckResult:
+    """O advisory lock TRANSACIONAL do sync do ML esta livre.
+
+    Aqui o check vale mais que no multicanal: o lock do ML e'
+    `pg_advisory_xact_lock`, que ESPERA em vez de desistir. Sem este preflight,
+    uma execucao manual concorrente faria a execucao agendada ficar pendurada
+    ate o timeout do step. Bloquear antes troca uma espera silenciosa por um
+    BLOCKED explicito.
+    """
+    label = "PMA ml (advisory lock livre)"
+    linha, erro = _pma_read(
+        os.environ.get("DATABASE_URL", ""), label,
+        "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' "
+        "AND classid = 0 AND objid = %s",
+        (_PMA_ML_ADVISORY_LOCK_KEY,))
+    if erro is not None:
+        return erro
+    if linha[0]:
+        return CheckResult(label, False,
+                           f"{label}: {linha[0]} sessao(oes) ja detem o lock — "
+                           "outra execucao do sync esta em andamento")
+    return CheckResult(label, True, f"{label}: livre")
+
+
+check_pma_ml_source = _pma_source_check("ml")
+check_pma_shopee_source = _pma_source_check("shopee")
+check_pma_tiktok_source = _pma_source_check("tiktok")
+check_pma_ml_target = _pma_target_check("ml")
+check_pma_shopee_target = _pma_target_check("shopee")
+check_pma_tiktok_target = _pma_target_check("tiktok")
+
+
 SOURCE_CHECKS = {
     "tiktok_daily": (check_rds, check_neon),
     "ml_daily": (check_rds, check_neon),
@@ -749,6 +988,23 @@ SOURCE_CHECKS = {
         check_rds, check_neon, check_discounts_relations,
         check_discounts_alembic_version, check_discounts_source_not_empty,
         check_discounts_advisory_lock_free,
+    ),
+    # Gate PMA-2C5B: monitoramento de precos, UMA fonte por canal. Data Mart
+    # (fonte, via VPN) e Neon (destino) sao ambos obrigatorios nos tres; mais a
+    # cobertura minima da fonte, a ausencia de regressao temporal e o advisory
+    # lock do canal. Fontes separadas e' o que faz `pma_shopee` poder publicar
+    # enquanto `pma_tiktok` bloqueia.
+    "pma_ml": (
+        check_rds, check_neon, check_pma_ml_source, check_pma_ml_target,
+        check_pma_ml_lock_free,
+    ),
+    "pma_shopee": (
+        check_rds, check_neon, check_pma_shopee_source, check_pma_shopee_target,
+        check_pma_channel_lock_free,
+    ),
+    "pma_tiktok": (
+        check_rds, check_neon, check_pma_tiktok_source, check_pma_tiktok_target,
+        check_pma_channel_lock_free,
     ),
 }
 

@@ -100,6 +100,15 @@ class FakeCursor:
         sql = self._last_sql
         params = self._last_params or ()
 
+        # Gate PMA-2C5B: as tres leituras da fotografia de precos. Ramos
+        # EXPLICITOS, como os de S3 e UE8-I4, e devolvendo DICT porque a
+        # conexao real usa `RealDictCursor`.
+        if "MAX(ref_date) AS d FROM marts.fact_marketplace_listing_price_daily" in sql:
+            return {"d": self.conn.pma_observed.get("ml")}
+        if "MAX(observed_date) AS d FROM marts.fact_channel_offer_observation" in sql:
+            return {"d": self.conn.pma_observed.get(params[0])}
+        if "status, started_at, error_message FROM audit.source_sync_run" in sql:
+            return self.conn.pma_last_run.get(params[0])
         if "started_at, finished_at, status, error_message" in sql:
             return self.conn.last_run.get(params[0])
         if "MAX(finished_at)" in sql and "status = 'success'" in sql:
@@ -170,7 +179,8 @@ class FakeConn:
                  ml_cross_company_synced_at=_UNSET, tiktok_channel_efficiency_max=_UNSET,
                  affiliate_watermark=_UNSET,
                  discounts_last_run=_UNSET, discounts_fact_max=_UNSET,
-                 avoe_candidatas=_UNSET, avoe_runs=_UNSET, avoe_erro=False):
+                 avoe_candidatas=_UNSET, avoe_runs=_UNSET, avoe_erro=False,
+                 pma_observed=_UNSET, pma_last_run=_UNSET):
         self.executed = []
         self.closed = False
         # Gate AVH-4C: estado SAUDAVEL por default — captura valida de 3 dias
@@ -183,6 +193,19 @@ class FakeConn:
         self.avoe_runs = [avoe_run()] if avoe_runs is _UNSET else avoe_runs
         self.avoe_erro = avoe_erro
         self.last_run = last_run or {}
+        # Gate PMA-2C5B: estado SAUDAVEL por default, como as demais
+        # dimensoes — ML fecha em D-1, Shopee e TikTok publicam D0. O
+        # default nunca reprova, para que cada teste isole UMA divergencia.
+        self.pma_observed = (
+            {"ml": TODAY - timedelta(days=1), "shopee": TODAY,
+             "tiktok": TODAY}
+            if pma_observed is _UNSET else pma_observed)
+        self.pma_last_run = (
+            {"ml_listing_price_snapshot":
+                 {"status": "success", "started_at": NOW, "error_message": None},
+             "channel_offer_snapshot":
+                 {"status": "success", "started_at": NOW, "error_message": None}}
+            if pma_last_run is _UNSET else pma_last_run)
         self.last_success = last_success or {}
         self.daily_freshness_rows = daily_freshness_rows if daily_freshness_rows is not None else [
             {"marketplace_id": 1, "max_date": TODAY},
