@@ -1057,12 +1057,28 @@ PMA_INDETERMINATE_PREFIX = "INDETERMINADO:"
 
 PMA_STATUS_OK = "ok"
 PMA_STATUS_SEM_FOTOGRAFIA = "fotografia_ausente"
-PMA_STATUS_PUBLISHER_NAO_EXECUTADO = "publisher_nao_executado"
-PMA_STATUS_FONTE_ATRASADA = "fonte_atrasada"
-PMA_STATUS_RECUSADO = "execucao_recusada"
-PMA_STATUS_LOCK = "lock_ocupado"
 PMA_STATUS_AUDITORIA_INCOMPLETA = "auditoria_incompleta"
 PMA_STATUS_ERRO = "leitura_falhou"
+
+#: Gate PMA-2C5D0 — fotografia velha e' UM estado; POR QUE ela esta velha e' uma
+#: pergunta separada, e nem sempre respondivel com o que este processo le.
+PMA_STATUS_SNAPSHOT_STALE = "snapshot_stale"
+
+#: As causas admissiveis. Cada uma exige EVIDENCIA; nao ha inferencia.
+#:
+#: O gate PMA-2C5C-O mediu o preco de inferir: o health check afirmava
+#: `fonte_atrasada` ("a ultima execucao teve sucesso, entao a fonte e' que nao
+#: avancou") apenas porque o ultimo registro de auditoria estava em `success`.
+#: Na mesma execucao o preflight mediu a fonte em 2026-09-22 contra fotografia
+#: de 2026-09-17: a fonte tinha avancado cinco dias, e quem nao rodou foi o
+#: publisher. A mensagem mandava o operador investigar o sistema errado.
+#:
+#: Este processo le SO' o Neon. Sem o watermark da fonte ele nao tem como
+#: distinguir "o publisher nao rodou" de "a fonte nao avancou" — e entao diz
+#: que nao sabe, que e' a unica coisa verdadeira que ele pode dizer.
+PMA_CAUSE_NOT_DETERMINED = "not_determined"
+PMA_CAUSE_PUBLISHER_NOT_EXECUTED = "publisher_not_executed"
+PMA_CAUSE_SOURCE_STALE = "source_stale"
 
 
 @dataclass
@@ -1076,13 +1092,85 @@ class PmaChannelStatus:
     last_run_at: str | None
     stale: bool
     reason: str
+    #: Gate PMA-2C5D0 — a causa, quando ha EVIDENCIA para ela. `None` num canal
+    #: saudavel; `not_determined` quando a fotografia esta velha e este
+    #: processo nao mediu a fonte.
+    cause: str | None = None
+    #: Watermark da FONTE, quando o chamador o forneceu. `None` significa "nao
+    #: medido" — e' o que impede a atribuicao causal, e precisa ficar visivel
+    #: no relatorio para que ninguem leia `not_determined` como "sem problema".
+    source_watermark: str | None = None
     # Nao critico por construcao: enquanto o agendamento nao estiver ativo, a
     # fotografia defasada e' um gap CONHECIDO e nao deve derrubar o exit code
     # do health check todo dia. Vira critico no gate que ativar a tarefa.
     critical: bool = False
 
 
-def fetch_pma_channel_status(conn, today: date | None = None
+def classifica_canal_pma(*, observada, today, limite,
+                         source_watermark=None,
+                         audit_status=None, audit_error=None):
+    """Decide (status, causa, stale, motivo) — SEM banco, SEM relogio proprio.
+
+    Separada de `fetch_pma_channel_status` de proposito: a regra causal e' o
+    que este gate precisa travar, e uma regra so' se trava em teste quando da'
+    para exercita-la sem servidor.
+
+    `source_watermark` e' a UNICA evidencia que distingue "o publisher nao
+    rodou" de "a fonte nao avancou". Sem ele, a resposta honesta e'
+    `not_determined` — nunca um palpite baseado no ultimo status de auditoria.
+    """
+    if observada is None:
+        # Sem fotografia alguma: nem ha atraso a explicar. A causa continua
+        # indeterminada porque a fonte nao foi medida.
+        return (PMA_STATUS_SEM_FOTOGRAFIA, PMA_CAUSE_NOT_DETERMINED, True,
+                "nenhuma fotografia publicada")
+
+    # Auditoria indeterminada tem PRECEDENCIA sobre atraso: os dados podem
+    # estar publicados e so' o registro ficou pela metade, e isso precisa de
+    # conserto manual mesmo com a fotografia fresca.
+    if audit_status == "running" and audit_error and str(audit_error).startswith(
+            PMA_INDETERMINATE_PREFIX):
+        return (PMA_STATUS_AUDITORIA_INCOMPLETA, PMA_CAUSE_NOT_DETERMINED, True,
+                "ultima execucao ficou INDETERMINADA - confira "
+                "audit.source_sync_run e a fato antes de reexecutar")
+
+    dias = (today - observada).days
+    if dias <= limite:
+        return (PMA_STATUS_OK, None, False,
+                f"fotografia de {observada.isoformat()} ({dias}d, "
+                f"limite {limite}d)")
+
+    if source_watermark is None:
+        causa, motivo = (
+            PMA_CAUSE_NOT_DETERMINED,
+            "causa NAO determinada: este processo le so' o Neon e nao mediu "
+            "o watermark da fonte, entao nao da' para saber se quem parou foi "
+            "o publisher ou a origem")
+    elif source_watermark > observada:
+        causa, motivo = (
+            PMA_CAUSE_PUBLISHER_NOT_EXECUTED,
+            f"a fonte avancou ate {source_watermark.isoformat()} e a "
+            f"fotografia parou em {observada.isoformat()}: o publisher nao "
+            "executou")
+    else:
+        # Aqui `source_watermark <= observada`, e chegamos neste ponto so' com
+        # a fotografia atrasada (`dias > limite`). Entao
+        # `today - source_watermark >= today - observada > limite`: a fonte
+        # esta' necessariamente atrasada tambem. Nao existe terceiro caso — um
+        # `else` extra aqui seria ramo morto fingindo cobrir algo.
+        causa, motivo = (
+            PMA_CAUSE_SOURCE_STALE,
+            f"a fonte tambem esta atrasada (watermark "
+            f"{source_watermark.isoformat()}): publicar agora nao traria "
+            "fotografia nova")
+
+    return (PMA_STATUS_SNAPSHOT_STALE, causa, True,
+            f"fotografia de {observada.isoformat()} com {dias}d "
+            f"(limite {limite}d) - {motivo}")
+
+
+def fetch_pma_channel_status(conn, today: date | None = None, *,
+                             source_watermarks=None
                              ) -> list[PmaChannelStatus]:
     """Frescor da fotografia de cada canal, com a CAUSA discriminada."""
     today = today or _now().date()
@@ -1133,61 +1221,19 @@ def fetch_pma_channel_status(conn, today: date | None = None
             aud_status, aud_inicio, aud_erro = aud[0], aud[1], aud[2]
 
         inicio_txt = aud_inicio.isoformat() if aud_inicio is not None else None
+        watermark = (source_watermarks or {}).get(canal)
 
-        if observada is None:
-            resultados.append(PmaChannelStatus(
-                canal, PMA_STATUS_SEM_FOTOGRAFIA, None, None, limite,
-                aud_status, inicio_txt, True,
-                f"PMA {canal}: nenhuma fotografia publicada"))
-            continue
+        status, causa, atrasada, motivo = classifica_canal_pma(
+            observada=observada, today=today, limite=limite,
+            source_watermark=watermark,
+            audit_status=aud_status, audit_error=aud_erro)
 
-        dias = (today - observada).days
-        atrasada = dias > limite
-
-        # Auditoria incompleta tem PRECEDENCIA sobre atraso: os dados podem
-        # estar publicados e so' o registro ficou pela metade, e isso precisa
-        # de conserto manual mesmo com a fotografia fresca.
-        if aud_status == "running" and aud_erro and str(aud_erro).startswith(
-                PMA_INDETERMINATE_PREFIX):
-            resultados.append(PmaChannelStatus(
-                canal, PMA_STATUS_AUDITORIA_INCOMPLETA, observada.isoformat(),
-                dias, limite, aud_status, inicio_txt, True,
-                f"PMA {canal}: ultima execucao ficou INDETERMINADA — confira "
-                "audit.source_sync_run e a fato antes de reexecutar"))
-            continue
-
-        if not atrasada:
-            resultados.append(PmaChannelStatus(
-                canal, PMA_STATUS_OK, observada.isoformat(), dias, limite,
-                aud_status, inicio_txt, False,
-                f"PMA {canal}: fotografia de {observada.isoformat()} "
-                f"({dias}d, limite {limite}d)"))
-            continue
-
-        # Atrasada: discrimina a causa pelo ultimo registro de execucao.
-        if aud is None:
-            causa, motivo = (
-                PMA_STATUS_PUBLISHER_NAO_EXECUTADO,
-                "o publisher NUNCA executou — falta orquestracao, nao ha falha")
-        elif aud_status == "failed":
-            causa, motivo = (
-                PMA_STATUS_RECUSADO,
-                "a ultima execucao terminou em falha ou recusa")
-        elif aud_status == "running":
-            causa, motivo = (
-                PMA_STATUS_LOCK,
-                "a ultima execucao ficou em `running` — lock ocupado ou "
-                "processo interrompido")
-        else:
-            causa, motivo = (
-                PMA_STATUS_FONTE_ATRASADA,
-                "a ultima execucao teve sucesso, entao a fonte e' que nao "
-                "avancou")
         resultados.append(PmaChannelStatus(
-            canal, causa, observada.isoformat(), dias, limite,
-            aud_status, inicio_txt, True,
-            f"PMA {canal}: fotografia de {observada.isoformat()} com {dias}d "
-            f"(limite {limite}d) — {motivo}"))
+            canal, status, observada.isoformat() if observada else None,
+            (today - observada).days if observada else None, limite,
+            aud_status, inicio_txt, atrasada, f"PMA {canal}: {motivo}",
+            cause=causa,
+            source_watermark=watermark.isoformat() if watermark else None))
 
     return resultados
 
@@ -1276,16 +1322,24 @@ def _print_human(report: dict) -> None:
 
     print("\n=== Frescor da FOTOGRAFIA de precos por canal (PMA) ===")
     marca_pma = {
-        "ok": "OK", "fotografia_ausente": "SEM-FOTOGRAFIA",
-        "publisher_nao_executado": "PUBLISHER-NAO-EXECUTADO",
-        "fonte_atrasada": "FONTE-ATRASADA",
-        "execucao_recusada": "RECUSADA",
-        "lock_ocupado": "LOCK-OCUPADO",
-        "auditoria_incompleta": "AUDITORIA-INCOMPLETA",
-        "leitura_falhou": "LEITURA-FALHOU",
+        PMA_STATUS_OK: "OK",
+        PMA_STATUS_SEM_FOTOGRAFIA: "SEM-FOTOGRAFIA",
+        PMA_STATUS_SNAPSHOT_STALE: "FOTOGRAFIA-ATRASADA",
+        PMA_STATUS_AUDITORIA_INCOMPLETA: "AUDITORIA-INCOMPLETA",
+        PMA_STATUS_ERRO: "LEITURA-FALHOU",
+    }
+    marca_causa = {
+        PMA_CAUSE_NOT_DETERMINED: "causa NAO determinada",
+        PMA_CAUSE_PUBLISHER_NOT_EXECUTED: "causa: publisher nao executou",
+        PMA_CAUSE_SOURCE_STALE: "causa: fonte atrasada",
     }
     for x in report["pma_channels"]:
         print(f"[{marca_pma.get(x['status'], x['status'])}] {x['reason']}")
+        if x.get("cause"):
+            print(f"    {marca_causa.get(x['cause'], x['cause'])}"
+                  + (f" (watermark da fonte: {x['source_watermark']})"
+                     if x.get("source_watermark") else
+                     " (watermark da fonte NAO medido)"))
 
     d = report["discounts_coverage"]
     print("\n=== Cobertura operacional dos descontos TikTok ===")

@@ -112,51 +112,78 @@ def test_fotografia_ausente_tem_status_proprio():
     assert r["ml"].stale is True
 
 
-def test_publisher_nunca_executado_e_distinguido_de_falha():
-    """E' o estado de hoje: os publishers existem e ninguem os orquestra."""
+def test_sem_execucao_registrada_a_causa_fica_INDETERMINADA():
+    """Antes este teste exigia `publisher_nao_executado`.
+
+    A ausencia de registro de auditoria diz que o publisher nao deixou rastro
+    — nao diz que a fonte avancou. Sem o watermark da fonte, as duas
+    explicacoes ("ninguem orquestrou" e "a fonte parou") continuam abertas, e
+    o relatorio tem de dizer isso.
+    """
     velha = HOJE - timedelta(days=5)
     r = _por_canal(ConnFake(
         observadas={"ml": velha, "shopee": velha, "tiktok": velha},
         execucoes={}))
     for canal in ("ml", "shopee", "tiktok"):
-        assert r[canal].status == hc.PMA_STATUS_PUBLISHER_NAO_EXECUTADO
-        assert "falta orquestracao" in r[canal].reason
+        assert r[canal].status == hc.PMA_STATUS_SNAPSHOT_STALE
+        assert r[canal].cause == hc.PMA_CAUSE_NOT_DETERMINED
+        assert r[canal].stale is True
+        assert r[canal].source_watermark is None
 
 
-def test_execucao_recusada_ou_falha_tem_status_proprio():
+def test_execucao_que_FALHOU_continua_visivel_mas_nao_vira_causa():
+    """O fato de auditoria permanece no relatorio; a conclusao causal, nao."""
     velha = HOJE - timedelta(days=5)
     r = _por_canal(ConnFake(
         observadas={"ml": velha, "shopee": velha, "tiktok": velha},
         execucoes={
             "ml_listing_price_snapshot":
-                {"status": "failed", "started_at": AGORA, "error_message": "recusa"},
+                {"status": "failed", "started_at": AGORA,
+                 "error_message": "recusa"},
             "channel_offer_snapshot":
-                {"status": "failed", "started_at": AGORA, "error_message": "recusa"},
+                {"status": "failed", "started_at": AGORA,
+                 "error_message": "recusa"},
         }))
-    assert r["ml"].status == hc.PMA_STATUS_RECUSADO
+    assert r["ml"].last_run_status == "failed", "o fato tem de continuar visivel"
+    assert r["ml"].status == hc.PMA_STATUS_SNAPSHOT_STALE
+    assert r["ml"].cause == hc.PMA_CAUSE_NOT_DETERMINED
 
 
-def test_lock_ocupado_e_distinguido_por_registro_em_running():
+def test_execucao_em_running_continua_visivel_mas_nao_vira_causa():
+    """`running` pode ser lock ocupado OU processo morto no meio. Sem mais
+    evidencia, escolher um dos dois e' chute."""
     velha = HOJE - timedelta(days=5)
     r = _por_canal(ConnFake(
         observadas={"ml": velha, "shopee": velha, "tiktok": velha},
         execucoes={
             "ml_listing_price_snapshot":
-                {"status": "running", "started_at": AGORA, "error_message": None},
+                {"status": "running", "started_at": AGORA,
+                 "error_message": None},
             "channel_offer_snapshot":
-                {"status": "running", "started_at": AGORA, "error_message": None},
+                {"status": "running", "started_at": AGORA,
+                 "error_message": None},
         }))
-    assert r["shopee"].status == hc.PMA_STATUS_LOCK
+    assert r["shopee"].last_run_status == "running"
+    assert r["shopee"].status == hc.PMA_STATUS_SNAPSHOT_STALE
+    assert r["shopee"].cause == hc.PMA_CAUSE_NOT_DETERMINED
 
 
-def test_fonte_atrasada_quando_a_ultima_execucao_teve_sucesso():
-    """Publisher rodou e deu certo, mas a fotografia continua velha: quem nao
-    avancou foi a fonte."""
+def test_execucao_bem_sucedida_NAO_prova_que_a_fonte_parou():
+    """O defeito medido no gate PMA-2C5C-O, travado para nao voltar.
+
+    Na producao de 22/09 o ultimo registro estava em `success`, e o health
+    check concluiu "a fonte e' que nao avancou". Na MESMA execucao o preflight
+    mediu a fonte em 2026-09-22 contra fotografia de 2026-09-17: a fonte tinha
+    avancado cinco dias. A conclusao mandava investigar o sistema errado.
+    """
     velha = HOJE - timedelta(days=5)
     r = _por_canal(ConnFake(
         observadas={"ml": velha, "shopee": velha, "tiktok": velha}))
-    assert r["tiktok"].status == hc.PMA_STATUS_FONTE_ATRASADA
-
+    for canal in ("ml", "shopee", "tiktok"):
+        assert r[canal].cause != "source_stale", (
+            "sucesso na auditoria NAO e' evidencia sobre a fonte")
+        assert r[canal].cause == hc.PMA_CAUSE_NOT_DETERMINED
+        assert "fonte atrasada" not in r[canal].reason.lower()
 
 def test_auditoria_incompleta_tem_precedencia_mesmo_com_fotografia_fresca():
     """Os dados podem estar publicados e so' o registro ficou pela metade —
