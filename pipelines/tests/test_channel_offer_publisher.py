@@ -546,9 +546,32 @@ def test_o_insert_usa_a_ordem_de_record_columns():
     assert "SELECT" not in pub.SQL_INSERT_OFFERS.upper()
 
 
-def test_a_cli_nao_publica_sem_apply(capsys):
+def test_a_cli_nao_publica_sem_apply(monkeypatch, capsys):
+    """Gate PMA-2C5C-H1 — o dry-run deixou de ser `print` e `return 0`.
+
+    Agora ele LE a fonte e monta a candidata, entao o teste precisa dar-lhe uma
+    fonte. O que continua garantido, e e' o ponto: nenhuma conexao de destino,
+    nenhum lock, nenhuma auditoria — e a saida nunca diz "publicado".
+    """
+    monkeypatch.setattr(pub, "run_diagnose",
+                        lambda args, **k: {
+                            "mode": "dry_run", "marketplace": args.marketplace,
+                            "observed_dates": ["2026-09-22"], "rows": 2,
+                            "accounts": ["apice"], "brands": ["apice"],
+                            "statuses": {"current": 2}, "prices_absent": 0,
+                            "prices_zero": 0, "fingerprint": "f" * 32,
+                            "scopes": [], "accounts_seen": ["apice"]})
     assert pub.main(["--marketplace", "shopee"]) == pub.EXIT_OK
-    assert "dry-run" in capsys.readouterr().out
+    saida = capsys.readouterr().out
+    assert "mode=dry_run" in saida
+    assert "CANDIDATA VALIDADA" in saida
+    assert "publicad" not in saida.replace("CANDIDATA VALIDADA", "").lower()
+
+
+def test_a_cli_sem_apply_falha_quando_a_fonte_nao_responde(monkeypatch):
+    """Fail-closed: ensaio sem fonte NAO pode devolver 0 fingindo sucesso."""
+    monkeypatch.delenv("DATAMART_DATABASE_URL", raising=False)
+    assert pub.main(["--marketplace", "shopee"]) == pub.EXIT_FAILED
 
 
 def test_a_cli_apply_alcanca_o_executor(monkeypatch, capsys):

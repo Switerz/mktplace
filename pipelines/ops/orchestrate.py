@@ -132,6 +132,19 @@ class Step:
     # sucesso. Colapsar tudo em FAILED apagaria justamente a informacao que o
     # operador precisa para decidir se pode reexecutar.
     exit_status_map: Mapping[int, str] | None = None
+    # Gate PMA-2C5C-H1: ARGUMENTOS do modo ensaio, declarados POR STEP.
+    #
+    # `None` significa "este step nao sabe ensaiar" — e nao "remova `--apply` e
+    # torca". A diferenca importa: uma remocao generica de `--apply` seria
+    # correta hoje e silenciosamente errada no dia em que um step publicar por
+    # outro caminho (uma env var, um default, um subcomando). Declarar os
+    # argumentos exatos faz a capacidade ser uma AFIRMACAO de quem escreveu o
+    # step, verificavel em teste, em vez de uma inferencia do orquestrador.
+    dry_run_args: tuple[str, ...] | None = None
+
+    @property
+    def supports_dry_run(self) -> bool:
+        return self.dry_run_args is not None
 
 
 # Checkpoint O1 Task 2/2 (2026-08-17): dependencia de FONTE por target de
@@ -500,22 +513,27 @@ PMA_REFRESH_STEPS: tuple[Step, ...] = (
     Step("pma_ml", "pipelines.sync_ml_listing_price_serving",
          ("--apply", "--lookback-days", str(PMA_ML_LOOKBACK_DAYS)),
          timeout_seconds=900, preflight_source="pma_ml",
-         critical=False, exit_status_map=PMA_EXIT_STATUS),
+         critical=False, exit_status_map=PMA_EXIT_STATUS,
+         dry_run_args=("--lookback-days", str(PMA_ML_LOOKBACK_DAYS))),
     Step("pma_shopee", "pipelines.channel_offer_publisher",
          ("--marketplace", "shopee", "--apply"),
          timeout_seconds=900, preflight_source="pma_shopee",
-         critical=False, exit_status_map=PMA_EXIT_STATUS),
+         critical=False, exit_status_map=PMA_EXIT_STATUS,
+         dry_run_args=("--marketplace", "shopee")),
     Step("pma_tiktok", "pipelines.channel_offer_publisher",
          ("--marketplace", "tiktok", "--apply"),
          timeout_seconds=900, preflight_source="pma_tiktok",
-         critical=False, exit_status_map=PMA_EXIT_STATUS),
+         critical=False, exit_status_map=PMA_EXIT_STATUS,
+         dry_run_args=("--marketplace", "tiktok")),
     # Gate PMA-2C5B-R2 — ULTIMO e SEMPRE, como no `full_daily`. `always_run`
     # o faz rodar mesmo depois de recusa, lock ou bloqueio nos canais: e'
     # justamente nesses desfechos que saber o frescor da fotografia importa.
     # `critical=False` porque a defasagem hoje e' gap conhecido; quem decide o
     # exit code deste pipeline sao os canais, nao o diagnostico.
     Step("health_check", "pipelines.ops.health_check", ("--json",),
-         timeout_seconds=180, always_run=True, critical=False),
+         timeout_seconds=180, always_run=True, critical=False,
+         # Ja' e' somente leitura nos dois modos: o ensaio usa o MESMO comando.
+         dry_run_args=("--json",)),
 )
 
 PIPELINES["pma_refresh"] = PMA_REFRESH_STEPS
@@ -524,13 +542,45 @@ PMA_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(
     step.timeout_seconds for step in PIPELINES["pma_refresh"])
 
 
-def _default_executor(step: Step) -> int:
-    cmd = [sys.executable, "-m", step.module, *step.args]
+class DryRunUnsupportedError(RuntimeError):
+    """Pedido de ensaio em pipeline/step que nao o declara. Fail-closed."""
+
+
+def assert_dry_run_supported(nome: str) -> None:
+    """Recusa ANTES de abrir subprocesso. Sem tentativa, sem fallback.
+
+    Um pipeline so' pode ser ensaiado se TODOS os seus steps declararem
+    `dry_run_args`. Deixar passar um step nao declarado seria pior que recusar:
+    ele rodaria com os argumentos de producao dentro de um comando que o
+    operador pediu como ensaio.
+    """
+    faltando = [s.name for s in PIPELINES[nome] if not s.supports_dry_run]
+    if faltando:
+        raise DryRunUnsupportedError(
+            f"o pipeline {nome!r} nao suporta --dry-run: "
+            f"{len(faltando)} step(s) sem modo ensaio declarado "
+            f"({', '.join(faltando)}). Nada foi executado."
+        )
+
+
+def _default_executor(step: Step, *, dry_run: bool = False) -> int:
+    if dry_run:
+        if not step.supports_dry_run:
+            # Defesa em profundidade: `assert_dry_run_supported` ja' recusou
+            # antes. Se um caminho novo chegar aqui, ele para — nunca cai para
+            # os argumentos de producao.
+            raise DryRunUnsupportedError(
+                f"step {step.name!r} sem modo ensaio declarado")
+        args = step.dry_run_args
+    else:
+        args = step.args
+    cmd = [sys.executable, "-m", step.module, *args]
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), timeout=step.timeout_seconds)
     return proc.returncode
 
 
-def run_pipeline(name: str, executor=None, preflight_fn=None) -> dict[str, str]:
+def run_pipeline(name: str, executor=None, preflight_fn=None, *,
+                 dry_run: bool = False) -> dict[str, str]:
     """Retorna {step_name: status} onde status em
     {"SUCCESS","FAILED","BLOCKED","SKIPPED"}. executor/preflight_fn sao
     injetaveis para teste (nunca chamam subprocess/banco de verdade nos
@@ -538,6 +588,11 @@ def run_pipeline(name: str, executor=None, preflight_fn=None) -> dict[str, str]:
     steps = PIPELINES.get(name)
     if steps is None:
         raise ValueError(f"pipeline desconhecido: {name!r}. Opcoes: {sorted(PIPELINES)}")
+
+    if dry_run:
+        # Recusa ANTES de qualquer subprocesso, preflight ou conexao.
+        assert_dry_run_supported(name)
+        print(f"[mode=dry_run] {name}: ensaio — nenhum step recebe `--apply`.")
 
     executor = executor or _default_executor
     preflight_fn = preflight_fn or run_preflight
@@ -559,9 +614,13 @@ def run_pipeline(name: str, executor=None, preflight_fn=None) -> dict[str, str]:
                 print(f"[BLOCKED] {step.name} — comando NAO executado.")
                 continue
 
-        print(f"[RUN] {step.name} -> python -m {step.module} {' '.join(step.args)} (cwd={REPO_ROOT}, timeout={step.timeout_seconds}s)")
+        args_do_modo = step.dry_run_args if dry_run else step.args
+        modo = "dry_run" if dry_run else "apply"
+        print(f"[RUN mode={modo}] {step.name} -> python -m {step.module} "
+              f"{' '.join(args_do_modo or ())} (cwd={REPO_ROOT}, "
+              f"timeout={step.timeout_seconds}s)")
         try:
-            rc = executor(step)
+            rc = executor(step, dry_run=dry_run) if dry_run else executor(step)
         except subprocess.TimeoutExpired:
             # Timeout INDIVIDUAL deste step — o processo ja foi morto por
             # subprocess.run. Marca FAILED (tentamos e nao terminou a
@@ -696,19 +755,32 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Orquestra uma sequencia de cargas com preflight amarrado a cada passo")
     parser.add_argument("--pipeline", required=True, choices=sorted(PIPELINES))
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help=("ensaio: cada step roda com os argumentos que ele DECLARA para o "
+              "modo, sem `--apply`. Recusa antes de executar se algum step do "
+              "pipeline nao declarar o modo."))
     args = parser.parse_args()
 
-    results = run_pipeline(args.pipeline)
+    try:
+        results = run_pipeline(args.pipeline, dry_run=args.dry_run)
+    except DryRunUnsupportedError as exc:
+        print(f"RECUSADO: {exc}", file=sys.stderr)
+        return 1
     overall = compute_overall_status(args.pipeline, results)
 
     steps = PIPELINES[args.pipeline]
     critical_results = {s.name: results[s.name] for s in steps if s.critical}
     noncritical_results = {s.name: results[s.name] for s in steps if not s.critical}
 
-    print(f"\nRESUMO {args.pipeline}:")
+    modo = "dry_run" if args.dry_run else "apply"
+    print(f"\nRESUMO {args.pipeline} (mode={modo}):")
     print(f"  CRITICO: {critical_results}")
     print(f"  NAO-CRITICO (esperado, nao derruba o pipeline sozinho): {noncritical_results}")
-    print(f"STATUS GERAL: {overall}")
+    print(f"STATUS GERAL: {overall} (mode={modo})")
+    if args.dry_run:
+        # NUNCA "publicado": nada foi escrito.
+        print("ENSAIO: candidatas validadas; nenhuma fotografia foi publicada.")
 
     # Exit 1 em FAILED (falha/bloqueio critico) e em BLOCKED (nada foi sequer
     # tentado — Gate PMA-2C5B). DEGRADED (so' gap nao-critico conhecido, ex.:
