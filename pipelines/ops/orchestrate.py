@@ -719,6 +719,73 @@ def compute_overall_status(name: str, results: dict[str, str]) -> str:
 PIPELINES_COM_EXIT_ESTRITO = frozenset({"pma_refresh"})
 
 
+#: Gate PMA-2C5D0 — os desfechos do EIXO DE PUBLICACAO do `pma_refresh`.
+#:
+#: `OK` significa "as tres fotografias do dia estao publicadas" (ou, em ensaio,
+#: "as tres candidatas foram validadas"). Nada mais entra nesta conta.
+PMA_PUB_OK = "OK"
+PMA_PUB_DEGRADED = "DEGRADED"
+PMA_PUB_INDETERMINATE = "INDETERMINATE"
+PMA_PUB_BLOCKED = "BLOCKED"
+
+
+def pma_publication_status(results: dict[str, str]) -> str:
+    """Desfecho da PUBLICACAO dos tres canais. O health check nao entra.
+
+    O gate PMA-2C5C-O mostrou por que os dois eixos precisam ser separados: os
+    tres canais montaram candidata com sucesso e o agregado exibido foi
+    `DEGRADED`, porque o `health_check` saiu 1 por DEZ itens atrasados —
+    nenhum deles do PMA. Um operador lendo `DEGRADED` conclui que a publicacao
+    teve problema, e o proximo passo natural e' reexecutar. Reexecutar canal ja
+    commitado e' exatamente o que nao se pode induzir.
+
+    Precedencia (do mais grave para o menos):
+      1. `INDETERMINATE` em qualquer canal — nao se sabe o que foi gravado;
+      2. nenhum canal valido — `BLOCKED` quando todos foram bloqueados, ou a
+         causa aplicavel quando o desfecho foi o mesmo em todos;
+      3. algum canal nao-`SUCCESS` — `DEGRADED`;
+      4. os tres `SUCCESS` — `OK`.
+    """
+    valores = [results.get(canal) for canal in PMA_CANAIS]
+
+    # INDETERMINATE vence tudo: e' o unico desfecho em que a reconciliacao
+    # humana precisa vir ANTES de qualquer decisao.
+    if any(v == "INDETERMINATE" for v in valores):
+        return PMA_PUB_INDETERMINATE
+
+    if all(v == "SUCCESS" for v in valores):
+        return PMA_PUB_OK
+
+    if not any(v == "SUCCESS" for v in valores):
+        # Zero canal valido. Quando TODOS terminaram do mesmo jeito, esse e' o
+        # nome honesto do desfecho (tipicamente `BLOCKED` numa queda de VPN).
+        # Desfechos mistos nao tem nome proprio: `DEGRADED` seria mentira (nada
+        # foi publicado), entao fica `BLOCKED`, que e' o caso de "nada avancou".
+        distintos = {v for v in valores}
+        if len(distintos) == 1:
+            unico = distintos.pop()
+            return unico if unico else PMA_PUB_BLOCKED
+        return PMA_PUB_BLOCKED
+
+    return PMA_PUB_DEGRADED
+
+
+def pma_health_status(results: dict[str, str]) -> str:
+    """Desfecho do EIXO DE SAUDE GLOBAL, lido do proprio step.
+
+    Repassa o status do `health_check` em vez de reinterpreta-lo. Hoje o step
+    so' produz `SUCCESS` ou `FAILED`, porque o exit code do health check e'
+    binario (`ok_critical`) — e mudar isso alteraria a semantica do
+    `full_daily`, que usa o MESMO modulo sem `exit_status_map`. `DEGRADED` e
+    `BLOCKED` sao repassados se um dia existirem; a funcao nao precisa mudar
+    junto.
+    """
+    bruto = results.get("health_check")
+    if bruto is None:
+        return "UNKNOWN"
+    return "OK" if bruto == "SUCCESS" else bruto
+
+
 def exit_code_do_pipeline(nome: str, results: dict[str, str],
                           overall: str) -> int:
     """Exit code, com politica ESTRITA para o `pma_refresh`.
@@ -741,12 +808,11 @@ def exit_code_do_pipeline(nome: str, results: dict[str, str],
     if nome not in PIPELINES_COM_EXIT_ESTRITO:
         return 1 if overall in ("FAILED", "BLOCKED") else 0
 
-    # So' os CANAIS contam. O `health_check` e' diagnostico e roda sempre; ele
-    # reportar defasagem conhecida nao pode impedir que uma execucao que
-    # publicou os tres canais devolva 0.
-    publicados = {canal for canal in PMA_CANAIS
-                  if results.get(canal) == "SUCCESS"}
-    return 0 if publicados == set(PMA_CANAIS) else 1
+    # Gate PMA-2C5D0 — o exit sai do EIXO DE PUBLICACAO, e so' dele. O
+    # `health_check` e' diagnostico, roda sempre e fica visivel no seu proprio
+    # eixo; ele reportar defasagem de outra fonte nao pode transformar uma
+    # publicacao bem-sucedida em falha, nem induzir retry de canal commitado.
+    return 0 if pma_publication_status(results) == PMA_PUB_OK else 1
 
 
 def main() -> int:
@@ -777,6 +843,32 @@ def main() -> int:
     print(f"\nRESUMO {args.pipeline} (mode={modo}):")
     print(f"  CRITICO: {critical_results}")
     print(f"  NAO-CRITICO (esperado, nao derruba o pipeline sozinho): {noncritical_results}")
+
+    codigo = exit_code_do_pipeline(args.pipeline, results, overall)
+
+    if args.pipeline in PIPELINES_COM_EXIT_ESTRITO:
+        # Gate PMA-2C5D0 — DOIS eixos, nomeados, com o exit amarrado a UM deles.
+        publicacao = pma_publication_status(results)
+        saude = pma_health_status(results)
+        # O eixo e' o mesmo nos dois modos; o que muda e' o que `OK` afirma —
+        # em `apply`, tres fotografias publicadas; em `dry_run`, tres
+        # candidatas validadas. Por isso o modo vai na propria linha.
+        print(f"STATUS PMA: {publicacao} (mode={modo})")
+        print(f"STATUS SAUDE GLOBAL: {saude}")
+        if saude not in ("OK", "UNKNOWN"):
+            # Explicito para nao virar retry: o health check mede OUTRA coisa.
+            print("  A saude global mede o frescor de TODAS as fontes da Torre."
+                  " Os itens atrasados listados acima NAO pertencem a"
+                  " publicacao do PMA e nao pedem reexecucao dos canais.")
+        if publicacao == PMA_PUB_OK and saude not in ("OK", "UNKNOWN"):
+            print("  Os tres canais do PMA concluiram. NAO reexecute os"
+                  " publishers por causa da saude global.")
+        if args.dry_run:
+            # NUNCA "publicado": nada foi escrito.
+            print("ENSAIO: candidatas validadas; nenhuma fotografia foi publicada.")
+        print(f"EXIT: {codigo}")
+        return codigo
+
     print(f"STATUS GERAL: {overall} (mode={modo})")
     if args.dry_run:
         # NUNCA "publicado": nada foi escrito.
@@ -788,8 +880,9 @@ def main() -> int:
     # por um gap ja conhecido.
     #
     # Gate PMA-2C5B-R2: o `pma_refresh` tem politica PROPRIA (ver
-    # `exit_code_do_pipeline`). Os demais pipelines nao mudam de semantica.
-    return exit_code_do_pipeline(args.pipeline, results, overall)
+    # `exit_code_do_pipeline`) e ja retornou acima. Os demais pipelines nao
+    # mudam de semantica.
+    return codigo
 
 
 if __name__ == "__main__":
