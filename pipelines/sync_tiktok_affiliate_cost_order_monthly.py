@@ -163,15 +163,54 @@ TARGET_TABLE = "marts.fact_tiktok_affiliate_cost_order_monthly"
 SYNC_STATE_TABLE = "marts.fact_tiktok_affiliate_cost_order_monthly_sync_state"
 STAGING_TABLE = "stg_ftacom_publish"
 
-#: Unico `transaction_type` aceito. Qualquer outro valor — ou NULL — FALHA a
-#: execucao (18.8.6). A allowlist e' validada ANTES de ser aplicada como filtro:
-#: filtrar primeiro tornaria o guardrail inoperante, porque um tipo novo
-#: simplesmente nao seria selecionado e passaria despercebido.
+#: Unico `transaction_type` que CONTRIBUI para o fato. Continua sendo um so'.
+#: A allowlist e' validada ANTES de ser aplicada como filtro: filtrar primeiro
+#: tornaria o guardrail inoperante, porque um tipo novo simplesmente nao seria
+#: selecionado e passaria despercebido.
 TRANSACTION_TYPE_ALLOWLIST = ("ORDER",)
 
-#: Chaves de `fee_breakdown` que compoem cada coluna de negocio.
-COMPONENT_JSON_KEYS = {
-    "affiliate_creator_commission": "affiliate_commission_amount_before_pit",
+#: Tipos RECONHECIDOS e deliberadamente FORA do escopo deste fato (UE-9C2E4).
+#:
+#: Medido em producao em 22/09/2026 sobre 2.390.477 linhas da fonte: para os
+#: seis, os tres componentes de afiliado sao EXATAMENTE 0,00 — nao nulos — e
+#: `order_id` e' nulo em 100% das linhas. A populacao declarada deste fato e' a
+#: coorte de PEDIDO (18.8.2); transacao sem pedido nao pertence a ela.
+#:
+#: Reconhecer explicitamente e' diferente de ignorar: a execucao segue FALHANDO
+#: se algum deles passar a carregar componente de afiliado nao zero
+#: (`validate_excluded_components_are_zero`), porque isso significaria que o
+#: entendimento da fonte ficou desatualizado.
+TRANSACTION_TYPE_EXCLUDED = (
+    "DEDUCTIONS_INCURRED_BY_SELLER",
+    "GMV_PAYMENT_FOR_TIKTOK_ADS",
+    "LOGISTICS_REIMBURSEMENT",
+    "PLATFORM_REIMBURSEMENT",
+    "PROMOTION_ADJUSTMENT",
+    "THIRD_PARTY_FINANCING",
+)
+
+#: Universo INTEIRO de tipos conhecidos. Um oitavo valor — ou NULL — FALHA a
+#: execucao (18.8.6): pode nao ser custo de afiliado, e incluir ou excluir por
+#: conta propria seria inventar semantica.
+TRANSACTION_TYPE_KNOWN = tuple(
+    sorted(set(TRANSACTION_TYPE_ALLOWLIST) | set(TRANSACTION_TYPE_EXCLUDED))
+)
+
+#: Colunas TIPADAS da Silver que compoem cada coluna de negocio.
+#:
+#: Ate 18/09/2026 este modulo lia `fee_breakdown->>'...'`. O commit `ea6a90aa`
+#: do repo do Airflow ("silver deixa de repetir os JSONB do raw") removeu a
+#: coluna `fee_breakdown` da Silver e achatou o payload em colunas numericas.
+#: A partir dai o modulo passou a referenciar coluna inexistente.
+#:
+#: `affiliate_commission_amount` substitui `affiliate_commission_amount_before_pit`
+#: por decisao do Gate UE-9C2E4-B. Motivo medido: a premissa de que as duas
+#: chaves carregam o MESMO valor deixou de valer — em 22/09/2026, 779.184 de
+#: 2.372.232 linhas ORDER tinham `before_pit = 0` com `amount <> 0`, e TODA
+#: linha reingerida a partir de 18/09 tem `before_pit = 0`. Manter `before_pit`
+#: faria o custo de criador tender a zero silenciosamente. Ver 18.8.2.
+COMPONENT_SOURCE_COLUMNS = {
+    "affiliate_creator_commission": "affiliate_commission_amount",
     "affiliate_partner_commission": "affiliate_partner_commission_amount",
     "affiliate_ads_commission": "affiliate_ads_commission_amount",
 }
@@ -183,11 +222,27 @@ COMPONENT_COLUMNS = (
     "affiliate_ads_commission",
 )
 
-#: `affiliate_commission_amount` e `affiliate_commission_amount_before_pit` sao a
-#: MESMA comissao antes e depois de PIT. Somar as duas conta o mesmo custo duas
-#: vezes. Esta chave nao pode aparecer em nenhum SQL deste modulo, e
-#: `assert_no_forbidden_component` prova isso em vez de confiar na revisao.
-FORBIDDEN_JSON_KEYS = ("affiliate_commission_amount",)
+#: Colunas que a Silver PRECISA expor para este contrato existir. Validadas por
+#: catalogo antes de qualquer leitura de dado: se a fonte mudar de forma outra
+#: vez, a falha diz o que faltou, em vez de estourar um `UndefinedColumn` cru.
+REQUIRED_SOURCE_COLUMNS = (
+    "brand",
+    "order_id",
+    "transaction_id",
+    "transaction_type",
+    "currency",
+    "order_create_time",
+    "updated_at",
+) + tuple(sorted(COMPONENT_SOURCE_COLUMNS.values()))
+
+#: Moeda unica do contrato (18.8.2). Medida em 100% das linhas da fonte.
+EXPECTED_CURRENCY = "BRL"
+
+#: Nenhum SQL deste modulo pode voltar a depender do JSONB da Raw nem das chaves
+#: `*_before_pit`. `assert_no_forbidden_component` prova isso em vez de confiar
+#: na revisao: reintroduzir `fee_breakdown` quebraria contra a Silver atual, e
+#: reintroduzir `before_pit` traria de volta o campo que zera desde 18/09.
+FORBIDDEN_SQL_TOKENS = ("fee_breakdown", "tax_breakdown", "_before_pit")
 
 #: Colunas materializadas na staging e no destino, fora as de auditoria.
 BUSINESS_COLUMNS = ("ref_month", "brand") + COMPONENT_COLUMNS + (
@@ -298,11 +353,12 @@ class AuditoriaIncompleta(RuntimeError):
     `running`, que e' exatamente o residuo observavel desse estado.
     """
 
-#: Busca a chave proibida na sua forma CITADA. Sem as aspas de fechamento o
-#: padrao casaria com `affiliate_commission_amount_before_pit`, que e' legitimo,
-#: e o guardrail acusaria falso positivo em toda execucao.
-_FORBIDDEN_QUOTED_RE = tuple(
-    re.compile(r"'" + re.escape(k) + r"'") for k in FORBIDDEN_JSON_KEYS
+#: Busca cada token proibido como substring simples. Diferente do guardrail
+#: anterior, que precisava das aspas para nao casar com `..._before_pit`: aqui
+#: `_before_pit` e' justamente um dos proibidos, entao a busca e' literal e a
+#: ausencia de aspas e' deliberada — `fee_breakdown->>'x'` tem de casar.
+_FORBIDDEN_SQL_RE = tuple(
+    re.compile(re.escape(t)) for t in FORBIDDEN_SQL_TOKENS
 )
 
 
@@ -334,38 +390,45 @@ class SourceSnapshot:
 # ---------------------------------------------------------------------------
 
 def assert_no_forbidden_component(sql: str) -> None:
-    """Falha se um SQL deste modulo referenciar chave proibida.
+    """Falha se um SQL deste modulo referenciar token proibido.
 
-    Chamada em toda montagem de SQL que toca `fee_breakdown`. Existe porque
-    "somar `affiliate_commission_amount` junto de `..._before_pit`" e' o erro
-    mais facil de cometer numa edicao futura e o mais dificil de notar depois:
-    o resultado nao quebra, so fica com o custo de criador dobrado.
+    Chamada em toda montagem de SQL que projeta componente. Dois erros que este
+    guardrail impede, ambos faceis de cometer numa edicao futura e dificeis de
+    notar depois:
+
+    - voltar a ler `fee_breakdown`/`tax_breakdown`: a Silver nao tem mais essas
+      colunas desde 18/09/2026, entao o SQL quebraria em producao;
+    - voltar a ler `*_before_pit`: esse campo passou a chegar ZERADO na
+      reingestao a partir de 18/09, e o resultado nao quebraria — so' faria o
+      custo de criador desaparecer aos poucos.
     """
-    for padrao in _FORBIDDEN_QUOTED_RE:
+    for padrao in _FORBIDDEN_SQL_RE:
         if padrao.search(sql):
             raise RuntimeError(
-                "SQL referencia chave de fee_breakdown proibida "
-                f"({padrao.pattern}): ela e' a mesma comissao antes/depois de PIT "
-                "e somar junto de affiliate_commission_amount_before_pit contaria "
-                "o mesmo custo duas vezes."
+                f"SQL referencia token proibido ({padrao.pattern}). "
+                "O contrato deste modulo le COLUNAS TIPADAS de "
+                f"{SOURCE_TABLE}: os JSONB sairam da Silver em 18/09/2026 e as "
+                "chaves *_before_pit passaram a chegar zeradas. Ver 18.8.2."
             )
 
 
 def _component_sql() -> str:
-    """Projecao dos tres componentes. `SUM` preserva a semantica de nulo exigida
-    pelo contrato: ignora nulos e devolve NULL quando TODAS as linhas sao nulas —
-    nunca 0. `COALESCE(...,0)` aqui inventaria medicao.
+    """Projecao dos tres componentes a partir das colunas TIPADAS da Silver.
 
-    `->>` devolve NULL tanto para chave ausente quanto para JSON null; ambos
-    significam "chave indisponivel", que e' o mesmo caso.
+    `SUM` preserva a semantica de nulo exigida pelo contrato: ignora nulos e
+    devolve NULL quando TODAS as linhas sao nulas — nunca 0. `COALESCE(...,0)`
+    aqui inventaria medicao.
 
-    Sem `abs()`: o sinal vem da fonte e e' publicado como veio.
+    Sem `abs()`: o sinal vem da fonte e e' publicado como veio. Medido em
+    22/09/2026, os tres componentes sao negativos em 100% das linhas ORDER com
+    valor — sao custo, e publicar o sinal da fonte e' o que mantem o fato
+    somavel sem regra de sinal implicita.
     """
     partes = []
     for coluna in COMPONENT_COLUMNS:
-        chave = COMPONENT_JSON_KEYS[coluna]
+        origem = validate_identifier(COMPONENT_SOURCE_COLUMNS[coluna])
         partes.append(
-            f"SUM((fee_breakdown->>'{chave}')::numeric) AS {validate_identifier(coluna)}"
+            f"SUM({origem}) AS {validate_identifier(coluna)}"
         )
     sql = ",\n               ".join(partes)
     assert_no_forbidden_component(sql)
@@ -555,18 +618,101 @@ def validate_transaction_types(cur, lower_bound: datetime | None,
             int(linha["n"])
         for linha in cur.fetchall()
     }
-    permitidos = set(TRANSACTION_TYPE_ALLOWLIST)
-    inesperados = {k: v for k, v in observados.items() if k not in permitidos}
+    conhecidos = set(TRANSACTION_TYPE_KNOWN)
+    inesperados = {k: v for k, v in observados.items() if k not in conhecidos}
     if inesperados:
+        # Nome e contagem apenas — nunca identificador individual.
         detalhe = "; ".join(f"{k}={v}" for k, v in sorted(inesperados.items()))
         raise RuntimeError(
-            "transaction_type fora da allowlist na janela lida: "
-            f"{detalhe}. Allowlist={sorted(permitidos)}. A execucao FALHA e o "
-            "watermark NAO avanca: um tipo desconhecido pode nao ser custo de "
-            "afiliado, e incluir ou excluir por conta propria seria inventar "
-            "semantica."
+            "transaction_type DESCONHECIDO na janela lida: "
+            f"{detalhe}. Conhecidos={sorted(conhecidos)} "
+            f"(contribuem: {sorted(TRANSACTION_TYPE_ALLOWLIST)}; "
+            f"fora do escopo: {sorted(TRANSACTION_TYPE_EXCLUDED)}). "
+            "A execucao FALHA e o watermark NAO avanca: um tipo desconhecido "
+            "pode nao ser custo de afiliado, e incluir ou excluir por conta "
+            "propria seria inventar semantica."
         )
     return observados
+
+
+def validate_source_schema(cur) -> list[str]:
+    """Fronteira A.0 — a fonte ainda tem a forma que este contrato exige?
+
+    Roda ANTES de qualquer leitura de dado. Existe por causa de um incidente
+    real: em 18/09/2026 o commit `ea6a90aa` do repo do Airflow removeu os JSONB
+    da Silver, e este modulo — que e' consumidor EXTERNO daquele repositorio —
+    passou a referenciar `fee_breakdown`, coluna que deixou de existir. A
+    quebra ficou mascarada atras do guardrail de `transaction_type`, que falha
+    antes.
+
+    Validar por catalogo troca um `UndefinedColumn` cru por uma mensagem
+    contratual que diz exatamente qual coluna sumiu.
+    """
+    schema, _, tabela = validate_qualified(SOURCE_TABLE).partition(".")
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = %(schema)s AND table_name = %(tabela)s",
+        {"schema": schema, "tabela": tabela},
+    )
+    presentes = {linha["column_name"] for linha in cur.fetchall()}
+    if not presentes:
+        raise RuntimeError(
+            f"fonte {SOURCE_TABLE} nao existe ou nao e' visivel para este "
+            "usuario. Execucao abortada sem escrita."
+        )
+    faltando = [c for c in REQUIRED_SOURCE_COLUMNS if c not in presentes]
+    if faltando:
+        raise RuntimeError(
+            f"contrato da fonte violado: {SOURCE_TABLE} nao expoe mais "
+            f"{faltando}. Este modulo le COLUNAS TIPADAS (18.8.2) e nao "
+            "reconstroi payload a partir de JSONB. Corrigir o contrato antes "
+            "de executar; a execucao FALHA e o watermark NAO avanca."
+        )
+    return sorted(presentes)
+
+
+def validate_excluded_components_are_zero(cur, cutoff: datetime) -> dict:
+    """Fronteira A.3b — os tipos fora do escopo continuam sem componente?
+
+    A exclusao dos seis tipos (18.8.2) nao e' opiniao sobre o que eles
+    significam: e' a constatacao medida de que os tres componentes de afiliado
+    sao EXATAMENTE zero neles. Se um deles passar a carregar valor, a premissa
+    da exclusao caiu e continuar filtrando em silencio esconderia custo real.
+
+    Sem filtro de marca, pela mesma razao de `validate_transaction_types`: a
+    leitura literal do contrato, e o lado seguro.
+    """
+    somas = ", ".join(
+        f"COALESCE(SUM({validate_identifier(col)}), 0) AS soma_{validate_identifier(col)}"
+        for col in sorted(COMPONENT_SOURCE_COLUMNS.values())
+    )
+    sql = f"""
+        SELECT transaction_type, COUNT(*) AS n, {somas}
+        FROM {validate_qualified(SOURCE_TABLE)}
+        WHERE updated_at <= %(cutoff)s
+          AND transaction_type = ANY(%(excluidos)s)
+        GROUP BY transaction_type
+    """
+    assert_no_forbidden_component(sql)
+    cur.execute(sql, {"cutoff": cutoff, "excluidos": list(TRANSACTION_TYPE_EXCLUDED)})
+    observado = {}
+    violacoes = []
+    for linha in cur.fetchall():
+        tipo = linha["transaction_type"]
+        observado[tipo] = int(linha["n"])
+        for col in sorted(COMPONENT_SOURCE_COLUMNS.values()):
+            valor = linha[f"soma_{col}"]
+            if valor is not None and Decimal(valor) != 0:
+                violacoes.append(f"{tipo}.{col}={valor}")
+    if violacoes:
+        raise RuntimeError(
+            "tipo fora do escopo passou a carregar componente de afiliado: "
+            + "; ".join(sorted(violacoes))
+            + ". A exclusao desses tipos (18.8.2) vale porque os componentes "
+            "sao zero; com valor, filtra-los esconderia custo real. A execucao "
+            "FALHA e o watermark NAO avanca."
+        )
+    return observado
 
 
 def validate_read_population(cur, cutoff: datetime) -> dict:
@@ -589,21 +735,36 @@ def validate_read_population(cur, cutoff: datetime) -> dict:
                COUNT(*) FILTER (WHERE transaction_id   IS NULL)    AS nulo_transaction_id,
                COUNT(*) FILTER (WHERE order_create_time IS NULL)   AS nulo_order_create_time,
                COUNT(*) FILTER (WHERE brand            IS NULL)    AS nulo_brand,
-               COUNT(*) FILTER (WHERE fee_breakdown    IS NULL)    AS nulo_fee_breakdown,
                COUNT(*) FILTER (WHERE updated_at > %(cutoff)s)     AS fora_da_fotografia,
                COUNT(DISTINCT transaction_id)                      AS transaction_ids_distintos,
-               COUNT(DISTINCT brand)                               AS marcas_distintas
+               COUNT(DISTINCT brand)                               AS marcas_distintas,
+               COUNT(*) FILTER (
+                   WHERE currency IS DISTINCT FROM %(moeda)s)      AS moeda_inesperada,
+               COUNT(DISTINCT currency)                            AS moedas_distintas
         FROM {validate_qualified(SOURCE_TABLE)}
         WHERE {_filtro_populacao()}
     """
-    cur.execute(sql, _params(None, cutoff))
+    assert_no_forbidden_component(sql)
+    params = _params(None, cutoff)
+    params["moeda"] = EXPECTED_CURRENCY
+    cur.execute(sql, params)
     linha = dict(cur.fetchone())
 
     problemas = []
-    for campo in ("transaction_id", "order_create_time", "brand", "fee_breakdown"):
+    for campo in ("transaction_id", "order_create_time", "brand"):
         n = int(linha[f"nulo_{campo}"])
         if n:
             problemas.append(f"{campo} nulo em {n} linha(s)")
+    # Moeda: o fato publica numeric sem unidade, entao uma segunda moeda somaria
+    # grandezas diferentes na mesma coluna. Medido em 22/09/2026: BRL em 100%.
+    n_moeda = int(linha["moeda_inesperada"])
+    if n_moeda:
+        problemas.append(
+            f"moeda diferente de {EXPECTED_CURRENCY} em {n_moeda} linha(s) "
+            f"({linha['moedas_distintas']} moeda(s) distinta(s)): o fato publica "
+            "numeric sem unidade e somar duas moedas na mesma coluna seria "
+            "inventar medicao"
+        )
     if int(linha["fora_da_fotografia"]):
         # A.7 — nao deveria ser possivel: o filtro tem `updated_at <= cutoff`.
         # Se acusar, o snapshot nao e' o que se acredita.
@@ -727,6 +888,7 @@ def read_source_snapshot(datamart_conn, lower_bound: datetime | None) -> SourceS
     try:
         cur.execute(f"SET LOCAL statement_timeout = '{SOURCE_STATEMENT_TIMEOUT}'")
         sessao = assert_snapshot_session(cur)                        # A.1
+        colunas = validate_source_schema(cur)                        # A.0 (forma)
         bounds = capture_source_bounds(cur)                          # A.2 + F5
         if bounds["empty"]:
             return SourceSnapshot(
@@ -737,6 +899,7 @@ def read_source_snapshot(datamart_conn, lower_bound: datetime | None) -> SourceS
             )
         cutoff = bounds["max_updated_at"]
         tipos = validate_transaction_types(cur, lower_bound, cutoff)  # A.3 (antes)
+        excluidos = validate_excluded_components_are_zero(cur, cutoff)  # A.3b
         populacao = validate_read_population(cur, cutoff)             # A.4-A.7
         keys = discover_touched_keys(cur, lower_bound, cutoff)
         rows = recompute_keys(cur, keys, cutoff)
@@ -758,9 +921,12 @@ def read_source_snapshot(datamart_conn, lower_bound: datetime | None) -> SourceS
                 "cutoff": cutoff,
                 "lower_bound": lower_bound,
                 "tipos_observados": tipos,
+                "tipos_excluidos_observados": excluidos,
+                "colunas_da_fonte": len(colunas),
                 "linhas_lidas": int(populacao["lidas"]),
                 "transaction_ids_distintos": int(populacao["transaction_ids_distintos"]),
                 "marcas_distintas": int(populacao["marcas_distintas"]),
+                "moedas_distintas": int(populacao["moedas_distintas"]),
                 "chaves_tocadas": len(keys),
             },
         )
