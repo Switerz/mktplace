@@ -68,8 +68,32 @@ excluiria com esta chave. Seria um lock que não tranca nada, e passaria em
 qualquer teste que não coloque as duas esteiras frente a frente. Há um teste
 que coloca: `test_forma_de_dois_argumentos_nao_se_exclui_com_a_nossa`.
 
-O valor está travado por `test_chaves_congeladas`. Mudá-lo de um lado só
-produz duas esteiras publicando juntas, sem erro em nenhuma delas.
+### 2.2 🔴 Proibição: chaves diferentes entre as duas esteiras
+
+**É proibido rodar o writer manual e o runner do Airflow com chaves diferentes**
+— seja por valor divergente, seja pela forma de dois argumentos, seja por uma
+chave derivada em runtime.
+
+Não existe erro que denuncie isso. Cada esteira adquire o seu lock, entra com
+sucesso e publica; a linha resultante é montada com metades de instantes
+diferentes e **os dois runs ficam verdes**. O sintoma aparece semanas depois,
+como um dia em que funil e pedidos não conversam, sem nenhum log para explicar.
+
+Salvaguardas em vigor:
+
+- `test_chaves_congeladas` trava os três literais;
+- `test_chaves_sao_literais_sem_fonte_instavel` recusa qualquer chave derivada de
+  `hash()` (randomizado por processo desde o PEP 456), PID, hostname, uuid ou
+  relógio — duas esteiras calculariam valores diferentes;
+- `test_modulo_nao_usa_a_forma_de_dois_argumentos` inspeciona o SQL executável;
+- `test_forma_de_dois_argumentos_nao_se_exclui_com_a_nossa` mede, contra o banco,
+  que as duas formas coexistem sem se bloquear;
+- `test_runner_do_airflow_simulado_bloqueia_o_processo_manual` e o seu inverso
+  medem a exclusão nas duas direções, com processos separados.
+
+Antes de ligar o runner do Airflow, rode o SQL de diagnóstico da §4 durante um
+`shopee_manual_refresh` e confirme que **a chave aparece**. Se não aparecer, as
+duas esteiras não estão se enxergando.
 
 ---
 
@@ -83,8 +107,31 @@ produz duas esteiras publicando juntas, sem erro em nenhuma delas.
 | **Ocupado** | `FatoDiariaLockUnavailable`, imediata, antes de ceder o controle. Zero leitura, zero escrita, zero linha de auditoria. |
 | **Retry** | **Nenhum.** Lock ocupado significa que o outro escritor está com a fotografia na mão. |
 | **Exit code** | `75` (`EX_TEMPFAIL`), distinto do `1` genérico no log do `full_daily`. |
-| **Liberação** | `pg_advisory_unlock` no `finally`, e o fechamento da conexão como garantia dura — lock de sessão morre com a sessão, inclusive se o processo cair. **Não existe lock preso a limpar na mão.** |
+| **Liberação** | `pg_advisory_unlock` no `finally`, com o **retorno conferido**. Se ele falhar ou devolver `false`, a conexão é **invalidada** (§3.2). |
 | **Cleanup** | Nunca substitui a exceção que trouxe o fluxo até ali. Um commit indeterminado que saísse daqui como "erro ao liberar lock" seria lido no runbook como "nada foi publicado" — afirmação falsa. |
+
+### 3.2 🔴 `close()` não libera o lock — e isso é contraintuitivo
+
+Lock de sessão morre com a **sessão**, e `close()` numa conexão *pooled* não
+encerra sessão nenhuma: devolve a conexão ao pool com a sessão viva no servidor.
+
+**Medido em 22/09/2026** (PostgreSQL 16, SQLAlchemy 2.0.54, o mesmo `QueuePool`
+de `pipelines/common/db.py`): com o lock tomado e sem unlock explícito, a
+contagem em `pg_locks` continua **1** depois do `close()`, e a sessão aparece
+viva em `pg_stat_activity`. Depois de `invalidate()`, a contagem vai a **0**.
+
+Por isso o cleanup **confere** o retorno do `pg_advisory_unlock` e chama
+`invalidate()` quando ele não confirma. Sem isso, um unlock que falha deixaria o
+lock preso até o pool reciclar a conexão, e **toda execução seguinte sairia com
+exit 75** sem que ninguém entendesse por quê.
+
+Se o **processo** cair, o sistema operacional fecha o socket e o PostgreSQL
+libera — essa é a rede de segurança por baixo. O caso perigoso é o processo que
+sobrevive com a conexão de volta no pool.
+
+⚠️ Uma versão anterior deste documento afirmava que "o fechamento da conexão
+garante a liberação" e que "não existe lock preso a limpar na mão". **As duas
+afirmações estavam erradas** e foram corrigidas na revisão do PR #25.
 
 ### 3.1 O que o lock **não** faz
 
@@ -108,15 +155,23 @@ aberta — não há `running` órfã para limpar.
 **O que fazer:** identificar a outra esteira antes de repetir.
 
 ```sql
--- quem detém a chave da Shopee, agora
+-- quem detém a chave da Shopee, agora. Read-only.
 SELECT a.pid, a.application_name, a.client_addr, a.state,
        a.query_start, left(a.query, 120) AS query
 FROM pg_locks l
 JOIN pg_stat_activity a USING (pid)
 WHERE l.locktype = 'advisory'
   AND ((l.classid::bigint << 32) | l.objid::bigint) = 918130003
+  AND l.objsubid = 1        -- 🔑 forma de UM bigint; 2 seria a de dois int
   AND l.granted;
 ```
+
+🔑 **O filtro `objsubid = 1` não é decoração.** Medido em 22/09/2026:
+`pg_try_advisory_lock(918130003)` e `pg_try_advisory_lock(0, 918130003)` projetam
+para o **mesmo** `(classid << 32) | objid`. Sem o filtro, a consulta devolve duas
+linhas para dois locks que **não se excluem entre si** — e num incidente
+apontaria a sessão errada para quem fosse investigar. `objsubid = 1` é a forma de
+um `bigint` (a nossa); `objsubid = 2` é a de dois `int`.
 
 **Nunca matar a sessão às cegas.** Um lock que persiste significa transação
 viva; derrubá-la no meio de uma publicação parcial deixa a linha pela metade,

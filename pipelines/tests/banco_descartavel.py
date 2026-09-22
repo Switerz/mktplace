@@ -113,13 +113,23 @@ def criar_esquema():
 
 
 def locks_ativos(chave: int) -> int:
+    """Quantas sessões detêm a chave, na FORMA DE UM ARGUMENTO.
+
+    🔑 `objsubid = 1` é a forma de um `bigint`; `objsubid = 2` é a de dois
+    `int`. MEDIDO (22/09/2026): `pg_try_advisory_lock(918130003)` e
+    `pg_try_advisory_lock(0, 918130003)` projetam para o MESMO
+    `(classid << 32) | objid`, e sem o filtro a contagem devolve 2 para dois
+    locks que não se excluem entre si. Num incidente isso apontaria a sessão
+    errada para quem fosse investigar.
+    """
     from sqlalchemy import text
 
     with conectar() as conn:
         return conn.execute(
             text(
                 "SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
-                "AND ((classid::bigint << 32) | objid::bigint) = :chave AND granted"
+                "AND ((classid::bigint << 32) | objid::bigint) = :chave "
+                "AND objsubid = 1 AND granted"
             ),
             {"chave": chave},
         ).scalar_one()

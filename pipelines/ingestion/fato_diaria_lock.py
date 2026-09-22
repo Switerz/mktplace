@@ -48,10 +48,20 @@ Entao: `pg_try_advisory_lock` em conexao DEDICADA e em autocommit, adquirido
 antes de qualquer leitura ou auditoria, liberado no `finally`. A transacao de
 escrita nasce depois, no ciclo normal de `local_session()`.
 
-A conexao dedicada e' a garantia dura da liberacao: lock de sessao morre com a
-sessao. Se o processo cair entre o UPSERT e o `pg_advisory_unlock`, o PostgreSQL
-libera ao encerrar a conexao — nao existe lock preso a limpar na mao. Por isso o
-`finally` fecha a conexao mesmo quando o unlock explicito falha.
+🔴 `close()` NAO BASTA — E' O CONTRARIO DO QUE PARECE
+-----------------------------------------------------
+Lock de sessao morre com a SESSAO, e `close()` numa conexao pooled nao encerra
+sessao nenhuma: devolve a conexao ao pool com a sessao viva no servidor.
+MEDIDO (22/09/2026, PostgreSQL 16, SQLAlchemy 2.0.54, o mesmo `QueuePool` de
+`pipelines/common/db.py`): com o lock tomado e SEM unlock explicito, a contagem
+em `pg_locks` continua 1 depois do `close()`, e a sessao aparece viva em
+`pg_stat_activity`.
+
+Entao o `finally` CONFERE o retorno do `pg_advisory_unlock` e, se ele falhar ou
+devolver false, chama `invalidate()` — que descarta a conexao do pool e fecha o
+socket (medido: contagem volta a 0). Se o PROCESSO cair, o sistema operacional
+fecha o socket e o PostgreSQL libera; o caso perigoso e' justamente o processo
+que sobrevive com a conexao de volta no pool.
 
 🔴 `try` E NUNCA A VARIANTE QUE ESPERA
 --------------------------------------
@@ -173,8 +183,8 @@ def _default_connect() -> Any:
     return local_engine().connect().execution_options(isolation_level="AUTOCOMMIT")
 
 
-def _acquired(row: Any) -> bool:
-    """Le o booleano de `pg_try_advisory_lock` de uma linha de resultado.
+def _booleano(row: Any, coluna: str) -> bool:
+    """Le o booleano de uma linha de resultado, por nome ou por posicao.
 
     Aceita tupla/`Row` (o que o SQLAlchemy entrega aqui) e mapping (o que um
     cursor configurado com `RealDictCursor` entregaria). Um dublê que devolva
@@ -183,15 +193,19 @@ def _acquired(row: Any) -> bool:
     """
     if row is None:
         raise RuntimeError(
-            "pg_try_advisory_lock nao devolveu linha. Sem resposta do banco nao "
-            "ha como afirmar que o lock foi adquirido, e assumir que sim "
-            "publicaria sem exclusao."
+            f"{coluna} nao devolveu linha. Sem resposta do banco nao ha como "
+            f"afirmar o resultado da operacao de lock, e assumir sucesso "
+            f"publicaria sem exclusao."
         )
     try:
-        valor = row["pg_try_advisory_lock"]
+        valor = row[coluna]
     except (TypeError, KeyError, IndexError):
         valor = row[0]
     return bool(valor)
+
+
+def _acquired(row: Any) -> bool:
+    return _booleano(row, "pg_try_advisory_lock")
 
 
 @contextmanager
@@ -227,19 +241,41 @@ def fato_diaria_lock(
         # 🔴 A liberacao e' CLEANUP e nunca pode SUBSTITUIR a excecao que trouxe
         # o fluxo ate aqui. Um commit indeterminado que saia daqui como
         # "erro ao liberar lock" seria lido no runbook como "nada foi
-        # publicado" — afirmacao falsa e cara. Por isso os dois `except` mudos.
+        # publicado" — afirmacao falsa e cara. Por isso os `except` mudos.
         #
-        # Perder o unlock explicito NAO deixa lock preso: ele e' de sessao e
-        # morre quando a conexao fecha, o que o `close()` abaixo garante e o
-        # proprio PostgreSQL garante se o processo morrer antes disso.
+        # 🔴 `close()` SOZINHO NAO LIBERA O LOCK — e' contraintuitivo e foi
+        # MEDIDO (22/09/2026, PostgreSQL 16, SQLAlchemy 2.0.54). O engine de
+        # `pipelines/common/db.py` usa QueuePool: `close()` devolve a conexao ao
+        # pool, a sessao no servidor continua VIVA e o advisory lock DE SESSAO
+        # sobrevive. Contagem em `pg_locks` depois do `close()` sem unlock: 1.
+        #
+        # Por isso o unlock e' CONFERIDO, e nao apenas emitido: se ele falhar ou
+        # devolver false, a conexao e' INVALIDADA (`invalidate()` descarta do
+        # pool e fecha o socket de verdade — medido: contagem volta a 0). Sem
+        # isso, um unlock que falha deixa o lock preso ate' o pool reciclar a
+        # conexao, e toda execucao seguinte sai com exit 75 sem ninguem
+        # entender por que.
         if adquirido:
+            liberado = False
             try:
-                conn.execute(text("SELECT pg_advisory_unlock(:chave)"), {"chave": chave})
-            except Exception:  # noqa: BLE001, S110 — ver comentario acima
-                logger.warning(
-                    "pg_advisory_unlock(%d) falhou; o lock sera liberado no "
-                    "fechamento da conexao", chave,
+                liberado = _booleano(
+                    conn.execute(
+                        text("SELECT pg_advisory_unlock(:chave)"), {"chave": chave}
+                    ).first(),
+                    "pg_advisory_unlock",
                 )
+            except Exception:  # noqa: BLE001 — ver comentario acima
+                liberado = False
+            if not liberado:
+                logger.warning(
+                    "pg_advisory_unlock(%d) nao confirmou a liberacao; "
+                    "invalidando a conexao para encerrar a sessao e soltar o lock",
+                    chave,
+                )
+                try:
+                    conn.invalidate()
+                except Exception:  # noqa: BLE001, S110 — idem
+                    pass
         try:
             conn.close()
         except Exception:  # noqa: BLE001, S110 — idem
