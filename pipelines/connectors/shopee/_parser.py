@@ -20,6 +20,12 @@ import openpyxl
 
 from pipelines.common.logging import get_logger
 from pipelines.connectors.shopee._numeric import ShopeeNumericParseError, parse_brl_float
+from pipelines.connectors.shopee._snapshots import (
+    Snapshot,
+    agrupar_snapshots,
+    deduplicar_por_pedido,
+    validar_desempate,
+)
 
 logger = get_logger(__name__)
 
@@ -259,13 +265,38 @@ def parse_brand(data_path: Path, brand: str) -> list[dict]:
         logger.warning("Nenhum Order.all*.xlsx em %s", brand_dir)
         return []
 
-    all_rows: list[dict] = []
-    for f in files:
-        logger.debug("Lendo %s", f.name)
-        all_rows.extend(_read_xlsx(f))
+    # Gate SH-AUTO-1B - DEDUPLICACAO POR SNAPSHOT VENCEDOR, ANTES da agregacao.
+    #
+    # Ate aqui, todos os arquivos viravam um lote unico e `_aggregate_daily`
+    # SOMAVA `subtotal` e `qty` linha a linha. Pedido presente em dois exports
+    # com janelas sobrepostas era contado DUAS VEZES - medido em 01-24/08/2026:
+    # barbours 1.007 pedidos, lescent 478, rituaria 369, apice 294,
+    # kokeshi 10.161.
+    #
+    # A ORDEM IMPORTA: deduplicar depois da agregacao nao resolveria nada,
+    # porque a soma indevida ja teria acontecido. E a unidade e o SNAPSHOT
+    # inteiro, nao o arquivo: partes de um mesmo export sao reagrupadas antes de
+    # qualquer escolha e nunca competem entre si. Regra, medicoes e recusas em
+    # `_snapshots.py`.
+    snapshots = agrupar_snapshots(files)
+    validar_desempate(snapshots)
+
+    lotes: list[tuple[Snapshot, list[dict]]] = []
+    for snap in snapshots:
+        linhas: list[dict] = []
+        for f in snap.arquivos:
+            logger.debug("Lendo %s", f.name)
+            linhas.extend(_read_xlsx(f))
+        lotes.append((snap, linhas))
+
+    all_rows, resumo = deduplicar_por_pedido(lotes)
 
     logger.info(
-        "Brand=%s: %d linhas de SKU de %d arquivos",
-        brand, len(all_rows), len(files),
+        "Brand=%s: %d linha(s) de SKU de %d arquivo(s) em %d snapshot(s) -> "
+        "%d mantida(s), %d descartada(s) de %d pedido(s) presente(s) em mais de "
+        "um snapshot | ordem: %s",
+        brand, resumo["linhas_entrada"], len(files), resumo["snapshots"],
+        resumo["linhas_mantidas"], resumo["linhas_descartadas"],
+        resumo["pedidos_em_mais_de_um_snapshot"], resumo["ordem_dos_snapshots"],
     )
     return _aggregate_daily(all_rows, brand)
