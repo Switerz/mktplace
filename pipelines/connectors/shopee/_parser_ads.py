@@ -21,6 +21,7 @@ Estrutura do CSV:
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,68 @@ from pipelines.common.logging import get_logger
 from pipelines.connectors.shopee._numeric import ShopeeNumericParseError, parse_brl_float
 
 logger = get_logger(__name__)
+
+
+class AdsPeriodoInvalido(ValueError):
+    """Período do cabeçalho ausente, ilegível ou invertido.
+
+    Antes deste gate o arquivo era descartado com um `logger.warning` e um
+    `return []` — silencioso. Um export sem período não tem denominador de
+    rateio, e ignorá-lo esconde uma lacuna em vez de declará-la.
+    """
+
+
+class AdsSnapshotAmbiguo(ValueError):
+    """Dois exports com o MESMO período disputam a mesma data.
+
+    Não há desempate confiável entre eles — nem `mtime` nem nome de arquivo
+    são contrato. Falha fechado em vez de escolher um arbitrariamente.
+    """
+
+
+def _chave_de_ordem(periodo: tuple[date, date]) -> tuple[date, date]:
+    """A regra do vencedor, num lugar só: `date_to` primeiro, `date_from` como
+    desempate. Espelha `_snapshots.Snapshot.chave_de_ordem` de propósito — mas
+    NÃO reaproveita aquele módulo, que modela `Order.all`: multipartes,
+    `_part_N_of_M` e janela no NOME. Aqui a janela vem do CABEÇALHO, porque
+    `Dados*.csv` não a carrega no nome de forma confiável.
+    """
+    date_from, date_to = periodo
+    return (date_to, date_from)
+
+
+def deduplicar_ads_por_data(
+    lotes: list[tuple[tuple[date, date], str, list[dict]]],
+) -> list[dict]:
+    """Mantém, para cada data, somente a linha do snapshot vencedor.
+
+    `lotes` chega em qualquer ordem e o resultado não depende dela: a escolha
+    é um `max` sobre `_chave_de_ordem`, e a saída sai ordenada por data.
+
+    Nunca SOMA duas linhas concorrentes. Cada linha já é o total do período
+    rateado pelos dias daquele período; somar duas leituras do mesmo dia
+    contaria a mesma mídia duas vezes.
+    """
+    por_data: dict[date, list[tuple[tuple[date, date], str, dict]]] = defaultdict(list)
+    for periodo, nome_arquivo, linhas in lotes:
+        for linha in linhas:
+            por_data[linha["date"]].append((periodo, nome_arquivo, linha))
+
+    resultado: list[dict] = []
+    for dia in sorted(por_data):
+        candidatos = por_data[dia]
+        melhor = max(_chave_de_ordem(p) for p, _, _ in candidatos)
+        vencedores = [c for c in candidatos if _chave_de_ordem(c[0]) == melhor]
+        arquivos = sorted({nome for _, nome, _ in vencedores})
+        if len(arquivos) > 1:
+            raise AdsSnapshotAmbiguo(
+                f"dois exports de Ads com o MESMO período "
+                f"{melhor[1]:%Y-%m-%d}..{melhor[0]:%Y-%m-%d} disputam {dia:%Y-%m-%d} "
+                f"e não há desempate confiável: {', '.join(arquivos)}"
+            )
+        resultado.append(vencedores[0][2])
+    return resultado
+
 
 _COL_MAP: dict[str, str] = {
     "Impressões":    "impressions",
@@ -87,17 +150,33 @@ def parse_brand_ads(data_path: Path, brand: str) -> list[dict]:
         logger.warning("Nenhum CSV de ads em %s", brand_dir)
         return []
 
-    all_rows: list[dict] = []
+    lotes: list[tuple[tuple[date, date], str, list[dict]]] = []
     for f in files:
-        rows = _parse_ads_file(f, brand)
-        all_rows.extend(rows)
+        periodo, rows = _ler_arquivo_ads(f, brand)
+        if periodo is None:
+            continue          # header/anúncios ausentes — já registrado em log
+        lotes.append((periodo, f.name, rows))
         logger.info("Ads/%s %s: %d dias gerados", brand, f.name, len(rows))
 
-    logger.info("Ads/%s: total %d dias de %d arquivos", brand, len(all_rows), len(files))
+    linhas_antes = sum(len(r) for _, _, r in lotes)
+    all_rows = deduplicar_ads_por_data(lotes)
+    logger.info(
+        "Ads/%s: %d dia(s) de %d arquivo(s) -> %d dia(s) apos desempate "
+        "(%d descartado(s) por snapshot perdedor)",
+        brand, linhas_antes, len(files), len(all_rows), linhas_antes - len(all_rows),
+    )
     return all_rows
 
 
 def _parse_ads_file(path: Path, brand: str) -> list[dict]:
+    """Compatibilidade: só as linhas, sem o período. O caminho oficial é
+    `_ler_arquivo_ads`, que devolve o período necessário ao desempate."""
+    return _ler_arquivo_ads(path, brand)[1]
+
+
+def _ler_arquivo_ads(
+    path: Path, brand: str,
+) -> tuple[Optional[tuple[date, date]], list[dict]]:
     with open(path, encoding="utf-8-sig") as f:
         lines = f.readlines()
 
@@ -110,8 +189,16 @@ def _parse_ads_file(path: Path, brand: str) -> list[dict]:
             break
 
     if not date_from or not date_to:
-        logger.warning("%s: não foi possível extrair o período do cabeçalho", path.name)
-        return []
+        raise AdsPeriodoInvalido(
+            f"período do cabeçalho ausente ou ilegível: brand={brand} "
+            f"arquivo={path.name}. Sem período não há denominador de rateio."
+        ) from None
+
+    if date_from > date_to:
+        raise AdsPeriodoInvalido(
+            f"período invertido: brand={brand} arquivo={path.name} "
+            f"{date_from:%Y-%m-%d}..{date_to:%Y-%m-%d}"
+        ) from None
 
     num_days = (date_to - date_from).days + 1
 
@@ -124,7 +211,7 @@ def _parse_ads_file(path: Path, brand: str) -> list[dict]:
 
     if header_line_idx is None:
         logger.warning("%s: header de colunas não encontrado", path.name)
-        return []
+        return None, []
 
     reader = csv.DictReader(lines[header_line_idx:])
 
@@ -137,7 +224,7 @@ def _parse_ads_file(path: Path, brand: str) -> list[dict]:
 
     if n_ads == 0:
         logger.warning("%s: nenhuma linha de anúncio encontrada", path.name)
-        return []
+        return None, []
 
     logger.debug(
         "%s: %d anúncios | spend=%.2f gmv=%.2f imp=%.0f clk=%.0f | %d dias",
@@ -174,4 +261,4 @@ def _parse_ads_file(path: Path, brand: str) -> list[dict]:
         })
         current += timedelta(days=1)
 
-    return result
+    return (date_from, date_to), result
