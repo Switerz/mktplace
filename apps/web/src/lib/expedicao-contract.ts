@@ -1005,12 +1005,28 @@ export const ROTULO_DEADLINE_STATUS: Record<string, string> = {
 };
 
 /** Rotulos de `operational_age_status`. Enum cru nao e' texto de tela. */
+/**
+ * Dominio REAL de `operational_age_status`, copiado da fonte da verdade:
+ * `OperationalAgeStatus` em `pipelines/expedicao/contract.py` e o
+ * `Literal["within_48h", "over_48h", "unknown"]` do schema da API.
+ *
+ * O mapa anterior foi escrito de memoria e inventou `under_24h` e
+ * `between_24h_48h`, que nao existem em lugar nenhum — e deixou de fora
+ * `within_48h`, que e' metade do dominio e aparece nos DOIS canais. O efeito
+ * em producao foi a coluna "Idade operacional" exibindo o enum cru.
+ *
+ * Nao existe faixa "entre 24h e 48h" no contrato: a idade operacional tem
+ * DUAS faixas medidas (dentro e acima de 48h) mais o desconhecido. Inventar
+ * uma terceira faixa era prometer um recorte que o pipeline nao calcula.
+ */
 export const ROTULO_IDADE_OPERACIONAL: Record<string, string> = {
-  under_24h: "Menos de 24h",
-  between_24h_48h: "Entre 24h e 48h",
+  within_48h: "Dentro de 48h",
   over_48h: "Acima de 48h",
   unknown: "Idade desconhecida",
 };
+
+/** O dominio fechado, para o teste travar contra a fonte da verdade. */
+export const IDADES_OPERACIONAIS = ["within_48h", "over_48h", "unknown"] as const;
 
 /** Traduz, e devolve o valor cru quando a fonte trouxer algo novo. */
 export function rotuloDeadline(valor: string): string {

@@ -490,6 +490,9 @@ export default function ExpedicaoClient() {
     series,
     dados?.coverage?.expected_accounts.length ?? 0,
   );
+  // UMA condicao para o grafico, a tabela e o botao "Ver dados": se o bloco
+  // nao e' renderizado, o controle que o revela nao pode existir.
+  const temSerieNaTendencia = estadoTend === "ok" || estadoTend === "parcial";
   const timeline = montarTimeline(dados?.queue ?? [], filtros.channel);
   const mostrarRef = mostrarColunaReferencia(dados?.queue ?? []);
   const pag = paginaAtual(dados?.pagination ?? null);
@@ -775,15 +778,23 @@ export default function ExpedicaoClient() {
                     }`
                   }
                 />
-                <button
-                  type="button"
-                  aria-expanded={dadosDaTendencia}
-                  aria-controls="exp-tendencia-dados"
-                  onClick={() => setDadosDaTendencia((v) => !v)}
-                  className="min-h-[44px] rounded-md px-3 text-sm text-slate-700 underline decoration-slate-400 underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
-                >
-                  {dadosDaTendencia ? "Ocultar dados" : "Ver dados"}
-                </button>
+                {/* "Ver dados" so' existe quando HA dados a revelar.
+                    Com a tendencia vazia — o caso da Shopee quando a
+                    fotografia cai fora da janela — o botao aparecia, alternava
+                    `aria-expanded` e apontava `aria-controls` para um alvo que
+                    nunca era renderizado: um controle que nao faz nada e uma
+                    referencia ARIA quebrada. */}
+                {temSerieNaTendencia && (
+                  <button
+                    type="button"
+                    aria-expanded={dadosDaTendencia}
+                    aria-controls="exp-tendencia-dados"
+                    onClick={() => setDadosDaTendencia((v) => !v)}
+                    className="min-h-[44px] rounded-md px-3 text-sm text-slate-700 underline decoration-slate-400 underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+                  >
+                    {dadosDaTendencia ? "Ocultar dados" : "Ver dados"}
+                  </button>
+                )}
               </div>
             }
           >
@@ -811,7 +822,7 @@ export default function ExpedicaoClient() {
                 interrompe porque falta dado, não porque o backlog caiu.
               </p>
             )}
-            {(estadoTend === "ok" || estadoTend === "parcial") && (
+            {temSerieNaTendencia && (
               <>
                 <TendenciaChart pontos={pontosGrafico} contas={contasSerie} />
                 {dadosDaTendencia && (
