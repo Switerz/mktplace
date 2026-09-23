@@ -1060,7 +1060,7 @@ A classificação veio da medição, **não do nome em inglês**. Nas 3 linhas e
 | `sku_count` | nulo em 3/3 |
 | moeda | `BRL`, única |
 
-É desembolso de competência **financeira**, amarrado a extrato (`statement_id`, `adjustment_id`) e a nenhum pedido. Pelos mesmos três critérios dos outros seis — componentes zerados, nenhuma linha é `ORDER`, grão do fato inaplicável — entra no conjunto **reconhecido e excluído**. `TRANSACTION_TYPE_KNOWN` passa a ter **8** membros; `TRANSACTION_TYPE_ALLOWLIST` continua sendo exatamente `('ORDER',)`.
+É movimento de competência **financeira**: amarrado a extrato (`statement_id`, `adjustment_id`) e a nenhum pedido. ⚠️ **O que NÃO está provado:** a direção econômica. O valor medido é **positivo** (+614.049,00), mas a convenção de sinal de `settlement_amount`/`adjustment_amount` para este tipo não foi estabelecida, então não se afirma aqui se é receita, adiantamento, estorno ou redutor — nem se deduz isso do nome em inglês. Essa classificação só será necessária quando existir o fato de competência financeira previsto acima, e terá de vir de medição própria. Pelos mesmos três critérios dos outros seis — componentes zerados, nenhuma linha é `ORDER`, grão do fato inaplicável — entra no conjunto **reconhecido e excluído**. `TRANSACTION_TYPE_KNOWN` passa a ter **8** membros; `TRANSACTION_TYPE_ALLOWLIST` continua sendo exatamente `('ORDER',)`.
 
 **[FATO] A ingestão não atribui semântica.** `transaction_type` é *pass-through* de `txn["type"]` da API do TikTok (`src/tiktok/ingestion/settlements/extract.py`), sem allowlist ou mapeamento, e a Silver não filtra por tipo. Qualquer tipo novo chega inteiro até este guardrail — que é onde a decisão precisa ser tomada, uma vez, com medição.
 

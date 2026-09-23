@@ -186,8 +186,12 @@ TRANSACTION_TYPE_ALLOWLIST = ("ORDER",)
 #:   - todo o valor esta' em `settlement_amount` = `adjustment_amount`
 #:     (+614.049,00), com `adjustment_id` preenchido e `adjustment_order_id`,
 #:     `associated_order_id` e `reserve_id` nulos; `sku_count` nulo.
-#: E' desembolso de competencia FINANCEIRA, vinculado a extrato e nao a pedido.
-#: A classificacao vem da medicao, nao do nome em ingles.
+#: E' movimento de competencia FINANCEIRA: vinculado a extrato e a nenhum
+#: pedido. A DIRECAO economica nao esta provada — o valor medido e' positivo,
+#: mas a convencao de sinal deste tipo nao foi estabelecida, entao nao se
+#: afirma se e' receita, adiantamento, estorno ou redutor. Para a decisao que
+#: ESTE fato exige — contribui ou nao — isso e' irrelevante: os tres
+#: componentes sao zero. A classificacao vem da medicao, nao do nome.
 #:
 #: Reconhecer explicitamente e' diferente de ignorar: a execucao segue FALHANDO
 #: se algum deles passar a carregar componente de afiliado nao zero
