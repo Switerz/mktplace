@@ -522,8 +522,13 @@ def fetch_ml_gestao_diaria_freshness(conn, now: datetime | None = None
     # O dia operacional vem do MESMO calendario que os syncs usam. Recalcular
     # "hoje em BRT" aqui abriria a porta para health check e sync discordarem
     # na fronteira da meia-noite.
-    agora_brt = now.astimezone(OPERATIONAL_TZ)
+    # `operational_today` PRIMEIRO: ele e' quem RECUSA um naive datetime, e
+    # `astimezone` sobre naive nao levanta — assume o fuso do processo em
+    # silencio. Invertida, a ordem derivaria a hora de uma premissa errada
+    # antes de a validacao acontecer. Naive aqui e' bug de quem chama, e sobe
+    # como `ValueError`, nunca vira um resultado "verde".
     hoje = operational_today(now)
+    agora_brt = now.astimezone(OPERATIONAL_TZ)
     hora = agora_brt.hour
     cobrando = hora >= GESTAO_DIARIA_ENFORCE_HOUR_BRT
     max_dias = (GESTAO_DIARIA_ENFORCED_MAX_DAYS if cobrando

@@ -2380,3 +2380,129 @@ def test_m6_contraprova_timezone(monkeypatch):
     monkeypatch.setattr(hc, "OPERATIONAL_TZ", timezone.utc)
     monkeypatch.setattr(hc, "operational_today", lambda agora: agora.date())
     assert _gestao(NOW_1059_BRT, d2).stale is True
+
+
+# ---------------------------------------------------------------------------
+# Gate M6-R/V — ataques da revisao adversarial, travados em teste
+# ---------------------------------------------------------------------------
+
+class _CursorTupla:
+    """Cursor que devolve TUPLA — o que `PostgresHook` entrega em producao.
+
+    A conexao de producao do health check usa `RealDictCursor`, mas o mesmo
+    codigo precisa atravessar as duas formas: foi um cursor de tupla que
+    derrubou o piloto da Torre em 17/09/2026.
+    """
+
+    def __init__(self, valor, erro=False):
+        self.valor = valor
+        self.erro = erro
+
+    def execute(self, sql, params=None):
+        if self.erro:
+            raise psycopg2.Error("falha simulada")
+
+    def fetchone(self):
+        return (self.valor,)
+
+    def close(self):
+        pass
+
+
+class _ConnTupla:
+    def __init__(self, valor, erro=False):
+        self.valor = valor
+        self.erro = erro
+
+    def cursor(self, cursor_factory=None):
+        return _CursorTupla(self.valor, self.erro)
+
+
+def test_m6_fronteira_exata_105959_ainda_e_graca():
+    """10:59:59 e 10:59:59.999999 ainda toleram D-2; 11:00:00 nao."""
+    d2 = DIA - timedelta(days=2)
+    quase = datetime(2026, 7, 3, 13, 59, 59, tzinfo=timezone.utc)
+    ultimo = datetime(2026, 7, 3, 13, 59, 59, 999999, tzinfo=timezone.utc)
+    virada = datetime(2026, 7, 3, 14, 0, 0, tzinfo=timezone.utc)
+    assert _gestao(quase, d2).stale is False
+    assert _gestao(ultimo, d2).stale is False
+    assert _gestao(virada, d2).stale is True
+
+
+def test_m6_naive_datetime_e_recusado():
+    """Naive seria lido no fuso do PROCESSO — e o fuso e o contrato aqui.
+
+    Sobe como ValueError em vez de virar um resultado verde: e bug de quem
+    chama, nao condicao de dado.
+    """
+    conn = FakeConn(gestao_diaria_max=DIA - timedelta(days=1))
+    with pytest.raises(ValueError, match="sem timezone"):
+        hc.fetch_ml_gestao_diaria_freshness(conn, now=datetime(2026, 7, 3, 10, 0, 0))
+
+
+def test_m6_instante_aware_em_fuso_nao_utc():
+    """Um instante ja em BRT tem de dar o MESMO veredito que o equivalente UTC."""
+    d2 = DIA - timedelta(days=2)
+    em_brt_graca = datetime(2026, 7, 3, 10, 59, tzinfo=hc.OPERATIONAL_TZ)
+    em_brt_cobra = datetime(2026, 7, 3, 11, 0, tzinfo=hc.OPERATIONAL_TZ)
+    assert _gestao(em_brt_graca, d2).stale is False
+    assert _gestao(em_brt_cobra, d2).stale is True
+
+
+def test_m6_cursor_de_tupla_funciona():
+    """O conversor nao pode depender de cursor de mapping."""
+    r = hc.fetch_ml_gestao_diaria_freshness(
+        _ConnTupla(DIA - timedelta(days=1)), now=NOW_1100_BRT)
+    assert r.stale is False
+    assert r.max_value == (DIA - timedelta(days=1)).isoformat()
+    assert r.days_since == 1
+
+
+def test_m6_cursor_de_tupla_com_none_e_stale():
+    r = hc.fetch_ml_gestao_diaria_freshness(_ConnTupla(None), now=NOW_1100_BRT)
+    assert r.stale is True
+    assert r.max_value is None
+
+
+def test_m6_tupla_e_mapping_dao_o_mesmo_veredito():
+    """Contraprova do harness: as duas formas convergem."""
+    ref = DIA - timedelta(days=1)
+    por_tupla = hc.fetch_ml_gestao_diaria_freshness(_ConnTupla(ref), now=NOW_1100_BRT)
+    por_mapping = _gestao(NOW_1100_BRT, ref)
+    assert (por_tupla.stale, por_tupla.max_value, por_tupla.days_since) == \
+           (por_mapping.stale, por_mapping.max_value, por_mapping.days_since)
+
+
+def test_m6_contraprova_participacao_em_ok_critical(monkeypatch):
+    """Se a dimensao deixar de ser critica, ela para de derrubar o exit code.
+
+    E a contraprova de que a participacao em `ok_critical` e real e nao
+    coincidencia de outro check estar reprovando junto.
+    """
+    conn = all_fresh_conn(gestao_diaria_max=TODAY - timedelta(days=5))
+    assert hc.build_report(conn, now=NOW_1100_BRT)["ok_critical"] is False
+
+    original = hc.fetch_ml_gestao_diaria_freshness
+
+    def sem_criticidade(c, now=None):
+        r = original(c, now=now)
+        return hc.DataFreshnessResult(
+            r.label, r.cadence, r.max_value, r.days_since, r.threshold_days,
+            r.stale, r.reason, False)
+
+    monkeypatch.setattr(hc, "fetch_ml_gestao_diaria_freshness", sem_criticidade)
+    conn2 = all_fresh_conn(gestao_diaria_max=TODAY - timedelta(days=5))
+    rel = hc.build_report(conn2, now=NOW_1100_BRT)
+    assert rel["ok_critical"] is True, (
+        "com critical=False a dimensao nao deve mais decidir o exit code")
+    assert rel["ok"] is False, "mas continua visivel em `ok`"
+
+
+def test_m6_exit_code_do_main_reflete_a_dimensao(monkeypatch):
+    """O caminho completo: dimensao stale -> ok_critical False -> exit code 1."""
+    conn = all_fresh_conn(gestao_diaria_max=TODAY - timedelta(days=5))
+    rel = hc.build_report(conn, now=NOW_1100_BRT)
+    entrada = next(d for d in rel["data_freshness"]
+                   if d["label"] == hc.GESTAO_DIARIA_TABLE_LABEL)
+    assert entrada["stale"] is True and entrada["critical"] is True
+    assert rel["ok_critical"] is False
