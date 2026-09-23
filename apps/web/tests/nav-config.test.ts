@@ -2,7 +2,13 @@
 // Roda via `node --test` com type-stripping nativo do Node.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NAV_SECTIONS, isNavItemActive, getRouteTitle } from "../src/components/shell/nav-config.ts";
+import {
+  EXPEDICAO_NAV,
+  NAV_SECTIONS,
+  SHOPEE_FBS_NAV,
+  getRouteTitle,
+  isNavItemActive,
+} from "../src/components/shell/nav-config.ts";
 import { buildPreservedQuery, hrefForPage } from "../src/lib/filters/nav-links.ts";
 
 test("NAV_SECTIONS mantem os grupos existentes, na ordem original", () => {
@@ -31,8 +37,10 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     "/regioes",
     "/tempo-real",
     "/pedidos",
-    "/pedidos/tiktok",
-    "/pedidos/ml",
+    // Gate EXP-UX-2C — `/pedidos/tiktok` e `/pedidos/ml` sairam. Eram itens
+    // `disabled` com selo "Em breve" desde o Gate U1: promessa parada ocupa a
+    // altura de um item real e ensina o operador a ignorar a regiao da lista.
+    // Voltam como itens de verdade quando as rotas existirem.
     "/inteligencia",
     // Gate PMA-3 — primeira rota acrescentada desde o Gate U1. Nenhuma
     // removida nem renomeada; o pino literal continua exigindo revisao
@@ -68,16 +76,47 @@ test("Gate PMA-3: rota ativa e titulo da topbar", () => {
   assert.equal(getRouteTitle("/inteligencia"), "Ações ML + TikTok");
 });
 
-test("TikTok Shop e Mercado Livre em Pedidos continuam desabilitados com badge 'Em breve'", () => {
+test("Gate EXP-UX-2C: nenhum item do menu e' uma promessa desabilitada", () => {
+  // Antes deste gate, "TikTok Shop" e "Mercado Livre" viviam em Pedidos como
+  // itens `disabled` com selo "Em breve". A assercao virou o INVERSO, e mais
+  // forte: nenhuma secao pode ter item desabilitado. Item que nao leva a lugar
+  // nenhum ocupa a altura de um real, some da navegacao por teclado e ensina o
+  // operador a ignorar aquela regiao da lista.
   const pedidos = NAV_SECTIONS.find((s) => s.label === "Pedidos")!;
-  const tiktok = pedidos.pages.find((p) => p.href === "/pedidos/tiktok")!;
-  const ml = pedidos.pages.find((p) => p.href === "/pedidos/ml")!;
-  assert.equal(tiktok.disabled, true);
-  assert.equal(tiktok.badge, "Em breve");
-  assert.equal(ml.disabled, true);
-  assert.equal(ml.badge, "Em breve");
-  const geral = pedidos.pages.find((p) => p.href === "/pedidos")!;
-  assert.equal(geral.disabled, undefined);
+  assert.deepEqual(
+    pedidos.pages.map((p) => p.href),
+    ["/pedidos"],
+    "Pedidos ficou so' com a rota que existe",
+  );
+  for (const s of NAV_SECTIONS) {
+    for (const p of s.pages) {
+      assert.notEqual(p.disabled, true, `${s.label} > ${p.label} desabilitado`);
+      assert.equal(p.badge, undefined, `${s.label} > ${p.label} com selo`);
+    }
+  }
+});
+
+test("Gate EXP-UX-2C: a Expedicao no menu nao diz o canal", () => {
+  // A tela e' multicanal: o menu dizer "Shopee" contradiz a tela aberta no ML.
+  assert.equal(EXPEDICAO_NAV.label, "Expedição");
+  assert.equal(EXPEDICAO_NAV.href, "/expedicao", "a ROTA nao pode mudar");
+  assert.ok(!/Shopee|Mercado Livre/.test(EXPEDICAO_NAV.label));
+  // e as duas telas Full, que nomeiam canal de proposito, seguem intactas
+  assert.equal(SHOPEE_FBS_NAV.label, "Full Shopee");
+  assert.equal(SHOPEE_FBS_NAV.href, "/full-shopee");
+  const ops = NAV_SECTIONS.find((s) => s.label === "Operações")!;
+  assert.ok(ops.pages.some((p) => p.href === "/full-ml" && p.label === "Full Mercado Livre"));
+});
+
+test("Gate EXP-UX-2C: o estado ativo do menu nao mudou", () => {
+  // Mesma funcao serve Sidebar (desktop) e MobileDrawer: um so' teste cobre os
+  // dois, e e' por isso que a regra vive no config e nao em cada componente.
+  assert.equal(isNavItemActive("/expedicao", "/expedicao"), true);
+  assert.equal(isNavItemActive("/expedicao", "/expedicao?channel=mercadolivre"), true);
+  assert.equal(isNavItemActive("/expedicao", "/pedidos"), false);
+  assert.equal(isNavItemActive("/pedidos", "/pedidos"), true);
+  // as rotas removidas nao podem reacender o item pai
+  assert.equal(isNavItemActive("/pedidos", "/pedidos/tiktok"), true);
 });
 
 test("isNavItemActive: Gerencial ativa em / e em qualquer /brand/[brand]", () => {

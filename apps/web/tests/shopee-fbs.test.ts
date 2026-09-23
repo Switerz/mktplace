@@ -712,7 +712,9 @@ test("getRouteTitle reconhece as DUAS rotas novas", () => {
   assert.match(nav, /navSections\(\{ expedicao: true, shopeeFbs: true \}\)/);
   // E o titulo resolve de fato.
   assert.equal(getRouteTitle("/full-shopee"), "Full Shopee");
-  assert.equal(getRouteTitle("/expedicao"), "Expedição Shopee");
+  // Gate EXP-UX-2C — o rotulo perdeu o "Shopee": a tela e' multicanal e o canal
+  // se escolhe dentro dela. A ROTA nao mudou.
+  assert.equal(getRouteTitle("/expedicao"), "Expedição");
   assert.equal(getRouteTitle("/full-ml"), "Full Mercado Livre");
 });
 

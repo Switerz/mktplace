@@ -16,7 +16,9 @@ import {
   CANAL_PADRAO,
   JANELAS_TENDENCIA,
   JANELA_INICIAL_HORAS,
+  IDADES_OPERACIONAIS,
   KPIS_PRINCIPAIS,
+  ROTULO_IDADE_OPERACIONAL,
   ROTULO_SEM_PRAZO,
   SITUACOES,
   TIMELINE_MAX_LINHAS,
@@ -292,6 +294,32 @@ test("a tabela acessivel da tendencia continua disponivel", () => {
   assert.match(CLIENTE, /contas nunca são somadas/);
 });
 
+test("'Ver dados' so' existe quando ha serie", () => {
+  // Com a tendencia vazia o bloco do grafico e da tabela nao e' renderizado.
+  // Um botao que promete revelar esse bloco seria um controle que nao faz nada
+  // e um `aria-controls` apontando para um alvo inexistente — foi o que
+  // aconteceu na Shopee em producao, cuja fotografia cai fora da janela.
+  assert.match(CLIENTE, /\{temSerieNaTendencia && \(\s*<button/);
+  assert.match(CLIENTE, /const temSerieNaTendencia =/);
+});
+
+test("botao e bloco usam UMA condicao, nao duas que podem divergir", () => {
+  const usos = (CLIENTE.match(/temSerieNaTendencia/g) ?? []).length;
+  assert.ok(usos >= 3, `esperava definicao + botao + bloco, achei ${usos}`);
+  // A condicao antiga, duplicada, nao pode ter sobrado em lugar nenhum.
+  assert.doesNotMatch(
+    CLIENTE,
+    /\(estadoTend === "ok" \|\| estadoTend === "parcial"\)/,
+  );
+});
+
+test("o estado vazio da tendencia continua explicado", () => {
+  // Esconder o botao nao pode esconder a explicacao: sem serie, a tela diz por
+  // que, em vez de mostrar um cartao mudo.
+  assert.match(CLIENTE, /estadoTend === "vazia"/);
+  assert.match(CLIENTE, /Sem pontos na janela escolhida/);
+});
+
 test("serie parcial segue visivel e explicada", () => {
   assert.match(CLIENTE, /Série parcial/);
   assert.match(CLIENTE, /falta dado, não porque o backlog caiu/);
@@ -512,11 +540,44 @@ test("`deadline_status` tem espaco de valores PROPRIO, nao o de Situacao", () =>
   assert.ok(!(SITUACOES as readonly string[]).includes("unavailable"));
 });
 
+test("o dominio de operational_age_status e' exatamente o do contrato", () => {
+  // Fonte da verdade: `OperationalAgeStatus` em pipelines/expedicao/contract.py
+  // e o Literal["within_48h","over_48h","unknown"] do schema da API. O mapa foi
+  // escrito de memoria uma vez, inventou `under_24h` e `between_24h_48h` e
+  // esqueceu `within_48h` — metade do dominio, presente nos DOIS canais. O enum
+  // cru vazou para a coluna "Idade operacional" em producao.
+  assert.deepEqual([...IDADES_OPERACIONAIS], ["within_48h", "over_48h", "unknown"]);
+  assert.deepEqual(
+    Object.keys(ROTULO_IDADE_OPERACIONAL).sort(),
+    [...IDADES_OPERACIONAIS].sort(),
+    "o mapa nao pode ter chave a mais nem a menos que o dominio",
+  );
+});
+
 test("idade operacional nunca aparece como enum cru", () => {
+  assert.equal(rotuloIdade("within_48h"), "Dentro de 48h");
   assert.equal(rotuloIdade("over_48h"), "Acima de 48h");
-  assert.equal(rotuloIdade("under_24h"), "Menos de 24h");
-  // valor novo da fonte volta cru em vez de sumir: melhor feio que invisivel
+  assert.equal(rotuloIdade("unknown"), "Idade desconhecida");
+  for (const v of IDADES_OPERACIONAIS) {
+    assert.notEqual(rotuloIdade(v), v, `${v} vazou cru para a tela`);
+  }
+});
+
+test("nao existe faixa 'entre 24h e 48h' no contrato", () => {
+  // A idade operacional tem DUAS faixas medidas mais o desconhecido. Prometer
+  // um terceiro recorte seria exibir um numero que o pipeline nao calcula.
+  for (const inventado of ["under_24h", "between_24h_48h", "over_24h"]) {
+    assert.ok(!(inventado in ROTULO_IDADE_OPERACIONAL), inventado);
+    assert.equal(rotuloIdade(inventado), inventado, "fallback fail-visible");
+  }
+});
+
+test("valor futuro desconhecido volta cru, nunca em branco", () => {
+  // Melhor feio que invisivel: um valor novo da fonte precisa aparecer para
+  // alguem notar, em vez de sumir da coluna.
   assert.equal(rotuloIdade("algo_novo"), "algo_novo");
+  assert.equal(rotuloDeadline("algo_novo"), "algo_novo");
+  assert.notEqual(rotuloIdade("algo_novo"), "");
 });
 
 test("a tela traduz os dois enums na fila", () => {
