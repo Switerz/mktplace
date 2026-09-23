@@ -229,6 +229,51 @@ def test_periodo_ilegivel_recusa(tmp_path):
         _parser_ads.parse_brand_ads(tmp_path, "apice")
 
 
+def test_cabecalho_legitimo_sobrevive_a_nfd_espaco_e_quebra_de_linha(tmp_path):
+    """Revisão H1-R/V: a recusa agora derruba a MARCA inteira, não um arquivo.
+
+    Variação de normalização ou um espaço à esquerda não podem custar isso.
+    Antes desta revisão a condição era
+    `startswith("Período,") or startswith("Período,")` — dois literais
+    byte a byte IGUAIS, ou seja, o segundo braço era código morto.
+    """
+    import unicodedata
+    from pipelines.connectors.shopee._parser_ads import _e_linha_de_periodo
+
+    base = "Período,14/09/2026 - 22/09/2026"
+    assert _e_linha_de_periodo(base)
+    assert _e_linha_de_periodo(unicodedata.normalize("NFD", base))
+    assert _e_linha_de_periodo("  " + base)
+    assert _e_linha_de_periodo("﻿" + base)
+    assert _e_linha_de_periodo(base + "\r\n")
+    # e continua exigindo o rotulo certo
+    assert not _e_linha_de_periodo("Periodo,14/09/2026 - 22/09/2026")
+    assert not _e_linha_de_periodo("Outra coisa,14/09/2026 - 22/09/2026")
+
+
+def test_quebras_de_linha_lf_crlf_e_cr_produzem_o_mesmo_resultado(tmp_path):
+    """Universal newlines cobre as três; o teste trava isso de propósito,
+    porque a recusa por período virou fatal."""
+    saidas = []
+    for i, eol in enumerate(("\n", "\r\n", "\r")):
+        d = tmp_path / f"m{i}"; d.mkdir()
+        linhas = [
+            "Relatório de Todos os Anúncios CPC - Shopee Brasil",
+            "Nome de Usuário,x", "Nome da loja,X", "ID da Loja,1",
+            "Data de Criação do Relatório,01/01/2026 00:00",
+            "Período,14/09/2026 - 22/09/2026", "",
+            "#,Impressões,Cliques,Despesas,GMV",
+            "1,90000,900,450.00,9000.00", "",
+        ]
+        with open(d / "Dados-x.csv", "w", encoding="utf-8-sig", newline="") as f:
+            f.write(eol.join(linhas))
+        # `brand` entra na linha e difere por pasta — comparar sem ele.
+        saidas.append([{k: v for k, v in l.items() if k != "brand"}
+                       for l in _parser_ads.parse_brand_ads(tmp_path, f"m{i}")])
+    assert len(saidas[0]) == 9
+    assert saidas[0] == saidas[1] == saidas[2]
+
+
 def test_periodo_invertido_recusa(tmp_path):
     """`date_from > date_to` daria num_days <= 0 — divisao por zero ou taxa
     negativa. Recusa antes de ratear."""

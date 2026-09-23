@@ -21,6 +21,7 @@ Estrutura do CSV:
 from __future__ import annotations
 
 import csv
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -124,6 +125,30 @@ def _to_float(val, *, brand: str, file_name: str, ad_index: int, field: str) -> 
     return parsed if parsed is not None else 0.0
 
 
+#: Rótulo do período, já normalizado — a comparação é feita em NFC.
+_ROTULO_PERIODO = unicodedata.normalize("NFC", "Período")
+
+
+def _e_linha_de_periodo(line: str) -> bool:
+    """A linha do cabeçalho que declara o período.
+
+    A comparação normaliza para NFC e ignora espaço/BOM à esquerda. Não é
+    frescura: até este gate a recusa custava UM arquivo (`logger.warning` +
+    `return []`); agora ela derruba a marca inteira, e recusar um cabeçalho
+    legítimo por causa de um `í` decomposto seria caro demais.
+
+    O código anterior era `startswith("Período,") or startswith("Período,")` —
+    os dois literais eram byte a byte IGUAIS, então o segundo braço nunca
+    executava. Prometia tolerância a uma variante e não entregava nenhuma.
+
+    Continua exigindo o rótulo acentuado: `Periodo` sem acento e o rótulo
+    entre aspas não são o formato do export, e aceitar aspas mudaria também
+    o parsing do VALOR.
+    """
+    limpo = unicodedata.normalize("NFC", line).lstrip("﻿ \t")
+    return limpo.startswith(_ROTULO_PERIODO + ",")
+
+
 def _parse_period(period_str: str) -> tuple[Optional[date], Optional[date]]:
     """'01/01/2026 - 31/03/2026' → (date(2026,1,1), date(2026,3,31))"""
     try:
@@ -183,7 +208,7 @@ def _ler_arquivo_ads(
     # Extrai período do cabeçalho (linha 5: "Período,DD/MM/AAAA - DD/MM/AAAA")
     date_from, date_to = None, None
     for line in lines[:7]:
-        if line.startswith("Período,") or line.startswith("Período,"):
+        if _e_linha_de_periodo(line):
             _, _, period_str = line.partition(",")
             date_from, date_to = _parse_period(period_str.strip())
             break
