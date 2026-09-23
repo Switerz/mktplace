@@ -146,6 +146,81 @@ function Cartao({
   );
 }
 
+/**
+ * Grupo de radio com o teclado que o papel ARIA promete.
+ *
+ * `role="radiogroup"` cria uma expectativa concreta em leitor de tela: o grupo
+ * e' UM ponto de tabulacao e as SETAS andam entre as opcoes. Sem isso, cada
+ * opcao vira um tab stop e as setas nao fazem nada — o papel anuncia um
+ * comportamento que a tela nao tem, o que e' pior que nao anunciar.
+ *
+ * `tabIndex` rovente: so' a opcao marcada entra na ordem de tabulacao.
+ */
+function GrupoRadio<T extends string>({
+  rotulo,
+  opcoes,
+  valor,
+  aoEscolher,
+  className,
+  classeOpcao,
+}: {
+  rotulo: string;
+  opcoes: readonly { valor: T; texto: string }[];
+  valor: T;
+  aoEscolher: (v: T) => void;
+  className: string;
+  classeOpcao: (ativo: boolean) => string;
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const andar = (de: number, passo: number) => {
+    const destino = (de + passo + opcoes.length) % opcoes.length;
+    aoEscolher(opcoes[destino].valor);
+    refs.current[destino]?.focus();
+  };
+
+  return (
+    <div role="radiogroup" aria-label={rotulo} className={className}>
+      {opcoes.map((o, i) => {
+        const ativo = o.valor === valor;
+        return (
+          <button
+            key={o.valor}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={ativo}
+            tabIndex={ativo ? 0 : -1}
+            onClick={() => aoEscolher(o.valor)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+                e.preventDefault();
+                andar(i, 1);
+              } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+                e.preventDefault();
+                andar(i, -1);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                andar(-1, 1);
+              } else if (e.key === "End") {
+                e.preventDefault();
+                andar(0, -1);
+              }
+            }}
+            className={`min-h-[44px] min-w-[44px] rounded-md text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600 ${classeOpcao(
+              ativo,
+            )}`}
+          >
+            {o.texto}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function dataCurta(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -447,31 +522,20 @@ export default function ExpedicaoClient() {
             Expedição — {ROTULO_CANAL[filtros.channel]}
           </h2>
           {ML_LIGADO && (
-            <div
-              role="radiogroup"
-              aria-label="Canal da fotografia"
+            <GrupoRadio
+              rotulo="Canal da fotografia"
+              opcoes={CANAIS.map((c) => ({ valor: c, texto: ROTULO_CANAL[c] }))}
+              valor={filtros.channel}
+              aoEscolher={trocarCanal}
               className="flex gap-1 rounded-lg bg-white p-1 ring-1 ring-slate-200"
-            >
-              {CANAIS.map((c) => {
-                const ativo = filtros.channel === c;
-                return (
-                  <button
-                    key={c}
-                    type="button"
-                    role="radio"
-                    aria-checked={ativo}
-                    onClick={() => trocarCanal(c)}
-                    className={`min-h-[44px] min-w-[44px] rounded-md px-4 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600 ${
-                      ativo
-                        ? "bg-brand-600 font-semibold text-white"
-                        : "text-slate-700 hover:bg-brand-50"
-                    }`}
-                  >
-                    {ROTULO_CANAL[c]}
-                  </button>
-                );
-              })}
-            </div>
+              classeOpcao={(ativo) =>
+                `px-4 ${
+                  ativo
+                    ? "bg-brand-600 font-semibold text-white"
+                    : "text-slate-700 hover:bg-brand-50"
+                }`
+              }
+            />
           )}
         </div>
         <p className="text-sm text-slate-600">
@@ -518,6 +582,7 @@ export default function ExpedicaoClient() {
               <button
                 type="button"
                 aria-expanded={qualidadeAberta}
+                aria-controls="exp-qualidade-detalhes"
                 onClick={() => setQualidadeAberta((v) => !v)}
                 className="min-h-[44px] rounded-md px-3 text-sm font-medium text-slate-700 underline decoration-slate-400 underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
               >
@@ -528,7 +593,10 @@ export default function ExpedicaoClient() {
             )}
           </div>
           {qualidadeAberta && (
-            <ul className="border-t border-black/5 px-4 py-2 text-sm text-slate-700">
+            <ul
+              id="exp-qualidade-detalhes"
+              className="border-t border-black/5 px-4 py-2 text-sm text-slate-700"
+            >
               {qualidade.detalhes.map((d) => (
                 <li key={d.chave} className="flex gap-2 py-1">
                   <span aria-hidden="true" className="text-slate-400">
@@ -690,31 +758,27 @@ export default function ExpedicaoClient() {
             titulo="Evolução do backlog por conta"
             acao={
               <div className="flex items-center gap-2">
-                <div
-                  role="radiogroup"
-                  aria-label="Janela da tendência"
+                <GrupoRadio
+                  rotulo="Janela da tendência"
+                  opcoes={JANELAS_TENDENCIA.map((j) => ({
+                    valor: String(j.horas),
+                    texto: j.rotulo,
+                  }))}
+                  valor={String(janela)}
+                  aoEscolher={(v) => setJanela(Number(v))}
                   className="flex gap-1 rounded-lg bg-slate-100 p-1"
-                >
-                  {JANELAS_TENDENCIA.map((j) => (
-                    <button
-                      key={j.horas}
-                      type="button"
-                      role="radio"
-                      aria-checked={janela === j.horas}
-                      onClick={() => setJanela(j.horas)}
-                      className={`min-h-[44px] min-w-[44px] rounded-md px-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600 ${
-                        janela === j.horas
-                          ? "bg-white font-semibold text-slate-900 shadow-sm"
-                          : "text-slate-600"
-                      }`}
-                    >
-                      {j.rotulo}
-                    </button>
-                  ))}
-                </div>
+                  classeOpcao={(ativo) =>
+                    `px-3 ${
+                      ativo
+                        ? "bg-white font-semibold text-slate-900 shadow-sm"
+                        : "text-slate-600"
+                    }`
+                  }
+                />
                 <button
                   type="button"
                   aria-expanded={dadosDaTendencia}
+                  aria-controls="exp-tendencia-dados"
                   onClick={() => setDadosDaTendencia((v) => !v)}
                   className="min-h-[44px] rounded-md px-3 text-sm text-slate-700 underline decoration-slate-400 underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
                 >
@@ -751,7 +815,7 @@ export default function ExpedicaoClient() {
               <>
                 <TendenciaChart pontos={pontosGrafico} contas={contasSerie} />
                 {dadosDaTendencia && (
-                  <div className="mt-3 max-h-[320px] overflow-auto">
+                  <div id="exp-tendencia-dados" className="mt-3 max-h-[320px] overflow-auto">
                     <table className="w-full text-sm [&_td]:py-2 [&_td]:pr-4 [&_th]:pr-4">
                       <caption className="sr-only">
                         Backlog por conta e hora — contas nunca são somadas

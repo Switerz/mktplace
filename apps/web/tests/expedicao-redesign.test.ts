@@ -440,10 +440,36 @@ test("com a flag desligada a tela nao pede canal nenhum", () => {
 // ===========================================================================
 test("o seletor de canal continua navegavel e com alvo de toque", () => {
   assert.match(CLIENTE, /role="radiogroup"/);
-  assert.match(CLIENTE, /aria-label="Canal da fotografia"/);
+  assert.match(CLIENTE, /aria-label=\{rotulo\}/);
+  assert.match(CLIENTE, /rotulo="Canal da fotografia"/);
   assert.match(CLIENTE, /role="radio"/);
   assert.match(CLIENTE, /aria-checked=\{ativo\}/);
-  assert.ok((CLIENTE.match(/min-h-\[44px\]/g) ?? []).length >= 4);
+  // O alvo de 44px vive no componente compartilhado e vale para toda opcao.
+  assert.match(CLIENTE, /min-h-\[44px\] min-w-\[44px\]/);
+});
+
+test("radiogroup cumpre o teclado que o papel ARIA promete", () => {
+  // Papel `radiogroup` sem setas anuncia um comportamento que a tela nao tem.
+  for (const tecla of ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"]) {
+    assert.ok(CLIENTE.includes(tecla), `sem tratamento de ${tecla}`);
+  }
+  // tabIndex rovente: o grupo e' UM ponto de tabulacao, nao um por opcao.
+  assert.match(CLIENTE, /tabIndex=\{ativo \? 0 : -1\}/);
+});
+
+test("os dois seletores usam o MESMO componente", () => {
+  // Um grupo com teclado e outro sem seria pior que os dois sem: o operador
+  // aprende um comportamento e ele falha no controle ao lado.
+  assert.equal((CLIENTE.match(/<GrupoRadio/g) ?? []).length, 2);
+  assert.match(CLIENTE, /rotulo="Janela da tendência"/);
+});
+
+test("disclosure diz QUAL regiao controla", () => {
+  const expandidos = (CLIENTE.match(/aria-expanded=/g) ?? []).length;
+  const controlados = (CLIENTE.match(/aria-controls=/g) ?? []).length;
+  assert.equal(controlados, expandidos, "aria-expanded sem aria-controls");
+  assert.match(CLIENTE, /id="exp-qualidade-detalhes"/);
+  assert.match(CLIENTE, /id="exp-tendencia-dados"/);
 });
 
 test("foco visivel em todo controle interativo novo", () => {

@@ -385,8 +385,12 @@ test("nenhum identificador de pedido e' renderizado", () => {
 // 8. Acessibilidade do seletor
 // ---------------------------------------------------------------------------
 test("o seletor e' um radiogroup com nome acessivel", () => {
+  // EXP-UX-1: os dois seletores da tela passaram a compartilhar `GrupoRadio`,
+  // entao o nome acessivel chega por prop em vez de literal na marcacao. A
+  // garantia e' a mesma e o teste segue a garantia, nao o lugar dela.
   assert.match(CLIENTE, /role="radiogroup"/);
-  assert.match(CLIENTE, /aria-label="Canal da fotografia"/);
+  assert.match(CLIENTE, /aria-label=\{rotulo\}/);
+  assert.match(CLIENTE, /rotulo="Canal da fotografia"/);
   assert.match(CLIENTE, /role="radio"/);
   assert.match(CLIENTE, /aria-checked=\{ativo\}/);
 });
