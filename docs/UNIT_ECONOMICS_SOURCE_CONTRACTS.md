@@ -537,8 +537,8 @@ fonte           : silver.stg_tiktok_payments_by_order, via VPN operacional (NUNC
 grão da fonte   : transaction_id (único, confirmado)
 allowlist       : BRANDS_IN_SCOPE — 3 das 8 marcas ficam fora
 competência     : order_create_time (estável por pedido; timezone NÃO demonstrável)
-transaction_type: contribui ['ORDER']; 6 tipos reconhecidos e fora do escopo;
-                  OITAVO tipo (ou NULL) = falha de contrato          (18.8.2.1)
+transaction_type: contribui [ORDER]; 7 tipos reconhecidos e fora do escopo;
+                  NONO tipo (ou NULL) = falha de contrato             (18.8.2.1)
 componentes     : creator  = SUM(affiliate_commission_amount)        (18.8.2.1)
                   partner  = SUM(affiliate_partner_commission_amount)
                   ads      = SUM(affiliate_ads_commission_amount)
@@ -1004,7 +1004,7 @@ marts.fact_tiktok_affiliate_cost_order_monthly     -- competencia COMERCIAL
 grao / PK    : (ref_month, brand)
 competencia  : mes de order_create_time            -- timestamp SEM timezone (18.8.1)
 populacao    : coorte de pedido; BRANDS_IN_SCOPE; transaction_type allowlist ['ORDER']
-             : seis tipos RECONHECIDOS e fora do escopo (18.8.2.1)
+             : sete tipos RECONHECIDOS e fora do escopo   (18.8.2.1)
 fonte        : COLUNAS TIPADAS da silver -- o JSONB saiu em 18/09/2026 (18.8.2.1)
 negocio      : affiliate_creator_commission  numeric   -- affiliate_commission_amount, ASSINADO
                affiliate_partner_commission  numeric   -- ASSINADO
@@ -1018,7 +1018,7 @@ PROIBIDO     : ler fee_breakdown/tax_breakdown ou qualquer chave *_before_pit
 CHECK        : (<> 'NaN') em cada numeric; SEM check de sinal
 ```
 
-#### 18.8.2.1 Fonte tipada e os seis tipos reconhecidos — Gate UE-9C2E4-B (22/09/2026)
+#### 18.8.2.1 Fonte tipada e os tipos reconhecidos — Gates UE-9C2E4-B (22/09/2026) e UE-9C2E4-D2 (23/09/2026)
 
 ⚠️ **[FATO] Esta seção substitui duas regras anteriores desta mesma §18.8:** a de que o fato lê chaves de `fee_breakdown`, e a que proibia `affiliate_commission_amount`. As duas deixaram de ser corretas, por medição — não por preferência.
 
@@ -1041,9 +1041,30 @@ Primeira linha divergente em `updated_at = 2026-07-21`; ainda chegam linhas conc
 - 18 chaves com delta, **todas em 2026-06..2026-09**, somando −1.310.163,98 — meses ainda em maturação, com transações novas e revisadas;
 - nenhuma chave aparece ou desaparece.
 
-**Decisão 3 — os seis tipos fora de `ORDER` são reconhecidos e excluídos.** `LOGISTICS_REIMBURSEMENT`, `PLATFORM_REIMBURSEMENT`, `THIRD_PARTY_FINANCING`, `GMV_PAYMENT_FOR_TIKTOK_ADS`, `PROMOTION_ADJUSTMENT` e `DEDUCTIONS_INCURRED_BY_SELLER`. Medido em 22/09/2026 sobre 2.390.477 linhas: nos seis, os **três componentes de afiliado são exatamente 0,00** — não nulos — e `order_id` é nulo em **100%** das linhas. A população declarada deste fato é a coorte de **pedido**; transação sem pedido não pertence a ela. Incluí-los mudaria os três valores publicados em **R$ 0,00** e corromperia apenas `source_row_count`.
+**Decisão 3 — os tipos fora de `ORDER` são reconhecidos e excluídos.** `LOGISTICS_REIMBURSEMENT`, `PLATFORM_REIMBURSEMENT`, `THIRD_PARTY_FINANCING`, `GMV_PAYMENT_FOR_TIKTOK_ADS`, `PROMOTION_ADJUSTMENT` e `DEDUCTIONS_INCURRED_BY_SELLER`. Medido em 22/09/2026 sobre 2.390.477 linhas: nos seis, os **três componentes de afiliado são exatamente 0,00** — não nulos — e `order_id` é nulo em **100%** das linhas. A população declarada deste fato é a coorte de **pedido**; transação sem pedido não pertence a ela. Incluí-los mudaria os três valores publicados em **R$ 0,00** e corromperia apenas `source_row_count`.
 
-Reconhecer não é ignorar: `validate_excluded_components_are_zero` **falha a execução** se qualquer um deles passar a carregar componente de afiliado diferente de zero — porque aí a premissa da exclusão caiu e continuar filtrando em silêncio esconderia custo real. Um **oitavo** tipo, ou `NULL`, continua falhando fechado (§18.8.6).
+⚠️ **[FATO] Um sétimo tipo entrou em 23/09/2026: `EARLY_SETTLEMENT_DISBURSEMENT` (Gate UE-9C2E4-D2).** Ele apareceu na fonte e **derrubou o run natural das 06:00** — comportamento correto do guardrail da §18.8.6, não defeito: o watermark não avançou e nada foi publicado.
+
+A classificação veio da medição, **não do nome em inglês**. Nas 3 linhas existentes (`order_create_time` 22/09 23:31..23:38, ingeridas 23/09 02:40, em 3 marcas):
+
+| Evidência | Medido |
+|---|---|
+| `affiliate_commission_amount` | **zero em 3/3** (Silver e Raw) |
+| `affiliate_partner_commission_amount` | **zero em 3/3** |
+| `affiliate_ads_commission_amount` | **zero em 3/3** |
+| `order_id` | **nulo em 3/3 (100%)** |
+| `revenue_amount` / `fee_and_tax_amount` / `shipping_cost_amount` | zero |
+| `settlement_amount` = `adjustment_amount` | **+614.049,00** |
+| `adjustment_id` | preenchido em 3/3 |
+| `adjustment_order_id` / `associated_order_id` / `reserve_id` | **nulos** |
+| `sku_count` | nulo em 3/3 |
+| moeda | `BRL`, única |
+
+É movimento de competência **financeira**: amarrado a extrato (`statement_id`, `adjustment_id`) e a nenhum pedido. ⚠️ **O que NÃO está provado:** a direção econômica. O valor medido é **positivo** (+614.049,00), mas a convenção de sinal de `settlement_amount`/`adjustment_amount` para este tipo não foi estabelecida, então não se afirma aqui se é receita, adiantamento, estorno ou redutor — nem se deduz isso do nome em inglês. Essa classificação só será necessária quando existir o fato de competência financeira previsto acima, e terá de vir de medição própria. Pelos mesmos três critérios dos outros seis — componentes zerados, nenhuma linha é `ORDER`, grão do fato inaplicável — entra no conjunto **reconhecido e excluído**. `TRANSACTION_TYPE_KNOWN` passa a ter **8** membros; `TRANSACTION_TYPE_ALLOWLIST` continua sendo exatamente `('ORDER',)`.
+
+**[FATO] A ingestão não atribui semântica.** `transaction_type` é *pass-through* de `txn["type"]` da API do TikTok (`src/tiktok/ingestion/settlements/extract.py`), sem allowlist ou mapeamento, e a Silver não filtra por tipo. Qualquer tipo novo chega inteiro até este guardrail — que é onde a decisão precisa ser tomada, uma vez, com medição.
+
+Reconhecer não é ignorar: `validate_excluded_components_are_zero` **falha a execução** se qualquer um deles passar a carregar componente de afiliado diferente de zero — porque aí a premissa da exclusão caiu e continuar filtrando em silêncio esconderia custo real. Um **nono** tipo, ou `NULL`, continua falhando fechado (§18.8.6).
 
 **[LIMITAÇÃO] O estado de 15/09/2026 não é reconstruível.** A reingestão reescreveu `updated_at` em ~1,4 milhão de linhas, então filtrar `updated_at <= 2026-09-15` na fonte de hoje devolve uma população **estritamente menor** do que a que existia naquela data. Por isso **não é possível decompor** a variação da fonte entre "correção da dupla contagem" e "revisão comercial normal" — qualquer número que separasse as duas parcelas seria inventado. O que *é* demonstrável está acima: a troca de regra é idêntica onde as duas chaves concordam, e a fato publicada é reproduzida ao centavo em todos os meses fechados.
 
@@ -1120,14 +1141,14 @@ Ordem correta, em duas etapas sobre a **mesma fotografia**:
                       FROM fonte
                       WHERE updated_at >= previous_successful_upper_bound
                         AND updated_at <= current_upper_bound
-   se tipos_na_janela contiver NULL ou qualquer valor fora dos SETE
+   se tipos_na_janela contiver NULL ou qualquer valor fora dos OITO
    CONHECIDOS (18.8.2.1):
         FALHAR a execucao, com erro sanitizado (nome do valor inesperado,
         contagem; nunca identificador individual)
         e NAO avancar o watermark
 
 1b. VALIDAR os EXCLUIDOS -- ainda antes do filtro comercial
-   se qualquer um dos seis tipos fora do escopo tiver componente de
+   se qualquer um dos sete tipos fora do escopo tiver componente de
    afiliado diferente de ZERO:
         FALHAR — a exclusao deles vale PORQUE os componentes sao zero;
         com valor, filtra-los em silencio esconderia custo real
@@ -1137,7 +1158,7 @@ Ordem correta, em duas etapas sobre a **mesma fotografia**:
    e no recalculo integral
 ```
 
-⚠️ **[FATO] Reconhecer não é incluir.** Desde o Gate UE-9C2E4-B a allowlist de **contribuição** continua sendo exatamente `['ORDER']`. O que mudou é que os seis tipos medidos em produção passaram a ser **reconhecidos** (§18.8.2.1): eles não derrubam mais a execução, mas também não entram na população. Um **oitavo** valor — ou `NULL` — continua falhando fechado, pela mesma razão de sempre.
+⚠️ **[FATO] Reconhecer não é incluir.** Desde o Gate UE-9C2E4-B a allowlist de **contribuição** continua sendo exatamente `['ORDER']`. O que mudou é que os **sete** tipos medidos em produção passaram a ser **reconhecidos** (§18.8.2.1): eles não derrubam mais a execução, mas também não entram na população. Um **nono** valor — ou `NULL` — continua falhando fechado, pela mesma razão de sempre.
 
 **[RECOMENDAÇÃO] Onde mais essa validação é obrigatória:**
 

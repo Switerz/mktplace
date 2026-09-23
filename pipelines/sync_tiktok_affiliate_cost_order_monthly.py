@@ -172,9 +172,26 @@ TRANSACTION_TYPE_ALLOWLIST = ("ORDER",)
 #: Tipos RECONHECIDOS e deliberadamente FORA do escopo deste fato (UE-9C2E4).
 #:
 #: Medido em producao em 22/09/2026 sobre 2.390.477 linhas da fonte: para os
-#: seis, os tres componentes de afiliado sao EXATAMENTE 0,00 — nao nulos — e
-#: `order_id` e' nulo em 100% das linhas. A populacao declarada deste fato e' a
-#: coorte de PEDIDO (18.8.2); transacao sem pedido nao pertence a ela.
+#: seis primeiros, os tres componentes de afiliado sao EXATAMENTE 0,00 — nao
+#: nulos — e `order_id` e' nulo em 100% das linhas. A populacao declarada deste
+#: fato e' a coorte de PEDIDO (18.8.2); transacao sem pedido nao pertence a ela.
+#:
+#: `EARLY_SETTLEMENT_DISBURSEMENT` entrou no UE-9C2E4-D2, com a MESMA prova.
+#: Ele apareceu na fonte em 23/09/2026 e derrubou o run natural das 06:00 —
+#: comportamento correto do guardrail, nao defeito. Medido nas 3 linhas
+#: existentes (22/09 23:31..23:38, ingeridas 23/09 02:40), em 3 marcas:
+#:   - os tres componentes de afiliado: ZERO em 3/3, na Silver E na Raw;
+#:   - `order_id` nulo em 3/3 (100%);
+#:   - `revenue_amount`, `fee_and_tax_amount`, `shipping_cost_amount`: zero;
+#:   - todo o valor esta' em `settlement_amount` = `adjustment_amount`
+#:     (+614.049,00), com `adjustment_id` preenchido e `adjustment_order_id`,
+#:     `associated_order_id` e `reserve_id` nulos; `sku_count` nulo.
+#: E' movimento de competencia FINANCEIRA: vinculado a extrato e a nenhum
+#: pedido. A DIRECAO economica nao esta provada — o valor medido e' positivo,
+#: mas a convencao de sinal deste tipo nao foi estabelecida, entao nao se
+#: afirma se e' receita, adiantamento, estorno ou redutor. Para a decisao que
+#: ESTE fato exige — contribui ou nao — isso e' irrelevante: os tres
+#: componentes sao zero. A classificacao vem da medicao, nao do nome.
 #:
 #: Reconhecer explicitamente e' diferente de ignorar: a execucao segue FALHANDO
 #: se algum deles passar a carregar componente de afiliado nao zero
@@ -182,6 +199,7 @@ TRANSACTION_TYPE_ALLOWLIST = ("ORDER",)
 #: entendimento da fonte ficou desatualizado.
 TRANSACTION_TYPE_EXCLUDED = (
     "DEDUCTIONS_INCURRED_BY_SELLER",
+    "EARLY_SETTLEMENT_DISBURSEMENT",
     "GMV_PAYMENT_FOR_TIKTOK_ADS",
     "LOGISTICS_REIMBURSEMENT",
     "PLATFORM_REIMBURSEMENT",

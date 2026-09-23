@@ -1798,22 +1798,33 @@ def test_tres_componentes_com_as_colunas_tipadas_do_contrato():
     assert not hasattr(sync, "COMPONENT_JSON_KEYS")
 
 
-def test_os_sete_tipos_conhecidos_e_a_particao_entre_eles():
+def test_os_oito_tipos_conhecidos_e_a_particao_entre_eles():
+    """UE-9C2E4-D2: `EARLY_SETTLEMENT_DISBURSEMENT` entrou como RECONHECIDO e
+    fora do escopo, com a mesma prova dos outros seis."""
     assert sync.TRANSACTION_TYPE_EXCLUDED == (
         "DEDUCTIONS_INCURRED_BY_SELLER",
+        "EARLY_SETTLEMENT_DISBURSEMENT",
         "GMV_PAYMENT_FOR_TIKTOK_ADS",
         "LOGISTICS_REIMBURSEMENT",
         "PLATFORM_REIMBURSEMENT",
         "PROMOTION_ADJUSTMENT",
         "THIRD_PARTY_FINANCING",
     )
-    assert len(sync.TRANSACTION_TYPE_KNOWN) == 7
+    assert len(sync.TRANSACTION_TYPE_KNOWN) == 8
     assert set(sync.TRANSACTION_TYPE_KNOWN) == (
         set(sync.TRANSACTION_TYPE_ALLOWLIST) | set(sync.TRANSACTION_TYPE_EXCLUDED)
     )
     # Reconhecer nao e' incluir: so' ORDER contribui.
+    assert sync.TRANSACTION_TYPE_ALLOWLIST == ("ORDER",)
     assert set(sync.TRANSACTION_TYPE_ALLOWLIST).isdisjoint(
         sync.TRANSACTION_TYPE_EXCLUDED)
+
+
+def test_early_settlement_disbursement_e_reconhecido_e_nao_contribui():
+    """O tipo que derrubou o run natural de 23/09 as 06:00."""
+    assert "EARLY_SETTLEMENT_DISBURSEMENT" in sync.TRANSACTION_TYPE_KNOWN
+    assert "EARLY_SETTLEMENT_DISBURSEMENT" in sync.TRANSACTION_TYPE_EXCLUDED
+    assert "EARLY_SETTLEMENT_DISBURSEMENT" not in sync.TRANSACTION_TYPE_ALLOWLIST
 
 
 @pytest.mark.parametrize("token", ["fee_breakdown", "tax_breakdown", "_before_pit"])

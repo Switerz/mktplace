@@ -301,3 +301,96 @@ def test_moeda_estranha_reprova_contra_banco_real(banco):
     cur = _montar(banco, [_linha(), _linha(transaction_id="t2", currency="USD")])
     with pytest.raises(RuntimeError, match="moeda diferente de BRL"):
         sync.validate_read_population(cur, CUTOFF)
+
+
+# ---------------------------------------------------------------------------
+# UE-9C2E4-D2 — EARLY_SETTLEMENT_DISBURSEMENT
+#
+# O tipo que derrubou o run natural de 23/09/2026 as 06:00. As fixtures abaixo
+# reproduzem a FORMA exata medida em producao nas 3 linhas existentes: sem
+# pedido, componentes de afiliado em zero, todo o valor em
+# `settlement_amount` == `adjustment_amount`, com `adjustment_id` preenchido.
+# ---------------------------------------------------------------------------
+
+ESD = "EARLY_SETTLEMENT_DISBURSEMENT"
+
+
+def _desembolso(**over):
+    campos = {
+        "transaction_type": ESD, "order_id": None,
+        "affiliate_commission_amount": Decimal("0"),
+        "affiliate_partner_commission_amount": Decimal("0"),
+        "affiliate_ads_commission_amount": Decimal("0"),
+        "revenue_amount": Decimal("0"),
+        "settlement_amount": Decimal("204683.00"),
+        "adjustment_amount": Decimal("204683.00"),
+    }
+    campos.update(over)
+    return _linha(**campos)
+
+
+def test_esd_atravessa_sem_falhar_e_nao_contribui(banco):
+    """Reconhecido: nao derruba a execucao. Fora do escopo: nao entra na soma
+    nem na contagem."""
+    linhas = [_linha()] + [
+        _desembolso(transaction_id=f"esd{i}", brand=b)
+        for i, b in enumerate(("apice", "kokeshi", "rituaria"))
+    ]
+    cur = _montar(banco, linhas)
+    sync.validate_source_schema(cur)
+    tipos = sync.validate_transaction_types(cur, None, CUTOFF)
+    assert ESD in tipos and tipos[ESD] == 3
+
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    populacao = sync.validate_read_population(cur, CUTOFF)
+    assert int(populacao["lidas"]) == 1, "so' a linha ORDER entra na populacao"
+
+    agregado = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert len(agregado) == 1
+    assert agregado[0]["source_row_count"] == 1
+    assert agregado[0]["affiliate_creator_commission"] == Decimal("-10.00")
+
+
+@pytest.mark.parametrize("componente", sorted(sync.COMPONENT_SOURCE_COLUMNS.values()))
+def test_esd_com_componente_nao_zero_falha(banco, componente):
+    """A exclusao vale PORQUE os componentes sao zero. Contraprova por coluna."""
+    cur = _montar(banco, [
+        _desembolso(transaction_id="esd1", **{componente: Decimal("-1.00")}),
+    ])
+    with pytest.raises(RuntimeError, match="componente de afiliado") as e:
+        sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    assert f"{ESD}.{componente}=-1.00" in str(e.value)
+
+
+def test_esd_nao_altera_os_valores_de_order(banco):
+    """Invariancia: a presenca do tipo novo nao pode mexer no que ORDER produz."""
+    so_order = [_linha(transaction_id="a"),
+                _linha(transaction_id="b", brand="kokeshi")]
+    cur = _montar(banco, so_order)
+    sem = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    cur = _montar(banco, so_order + [_desembolso(transaction_id="esd1"),
+                                     _desembolso(transaction_id="esd2")])
+    com = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert sem == com
+
+
+def test_um_nono_tipo_desconhecido_continua_falhando(banco):
+    """O guardrail nao foi afrouxado: reconhecer o oitavo nao abre a porta."""
+    cur = _montar(banco, [_linha(),
+                          _desembolso(transaction_id="esd1"),
+                          _linha(transaction_id="z", transaction_type="TIPO_AINDA_NOVO")])
+    with pytest.raises(RuntimeError, match="transaction_type DESCONHECIDO") as e:
+        sync.validate_transaction_types(cur, None, CUTOFF)
+    assert "TIPO_AINDA_NOVO=1" in str(e.value)
+    assert ESD not in str(e.value).split("DESCONHECIDO na janela lida:")[1].split(".")[0]
+
+
+def test_tipo_nulo_continua_falhando_com_o_oitavo_presente(banco):
+    cur = _montar(banco, [_linha(),
+                          _desembolso(transaction_id="esd1"),
+                          _linha(transaction_id="z", transaction_type=None)])
+    with pytest.raises(RuntimeError, match=r"<NULL>=1"):
+        sync.validate_transaction_types(cur, None, CUTOFF)
