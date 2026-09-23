@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  AVISO_SEM_AUTOMACAO,
   EXPLICACAO_LIMIAR_48H,
   FILTROS_PADRAO,
   JANELA_MAX_HORAS,
@@ -28,6 +29,7 @@ import {
   estadoDaTela,
   estadoDaTendencia,
   expedicaoHabilitado,
+  montarBarraDeQualidade,
   montarFrescor,
   montarKpis,
   montarRelogios,
@@ -315,8 +317,16 @@ test("aviso de carga manual e ausencia de automacao sempre presentes", () => {
   const rel = montarRelogios(resposta());
   assert.equal(rel.modoDeCarga, "manual_snapshot");
   assert.equal(rel.semAutomacao, true);
+  // EXP-UX-1: o aviso deixou de ser um banner solto na tela e passou a ser um
+  // item da barra consolidada de qualidade. A garantia que importa nao e' a
+  // string estar num arquivo, e' o aviso SEMPRE existir quando nao ha
+  // automacao — entao a assercao virou comportamental.
+  const barra = montarBarraDeQualidade(rel, [], []);
+  const semAutomacao = barra.detalhes.find((d) => d.chave === "sem_automacao");
+  assert.ok(semAutomacao, "aviso de ausencia de automacao sumiu da barra");
+  assert.equal(semAutomacao?.texto, AVISO_SEM_AUTOMACAO);
+
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(tela.includes("AVISO_SEM_AUTOMACAO"));
   assert.ok(tela.includes("manual_snapshot"));
   assert.ok(!/automatizad|agendad/i.test(tela.replace(/Sem automa\w+/gi, "")));
 });
@@ -622,7 +632,10 @@ test("estados de carga e erro sao anunciados por role", () => {
 test("tabelas grandes ficam contidas por overflow", () => {
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
   const tabelas = (tela.match(/<table\b/g) ?? []).length;
-  const contidas = (tela.match(/overflow-x-auto/g) ?? []).length;
+  // `overflow-auto` conta tambem: rola nos DOIS eixos, entao e' estritamente
+  // mais forte que `overflow-x-auto`. O redesign usa a versao dos dois eixos
+  // nas tabelas altas (fila e dados da tendencia), que ganharam altura maxima.
+  const contidas = (tela.match(/overflow-(x-)?auto/g) ?? []).length;
   assert.ok(contidas >= tabelas, "tabela sem container rolavel transborda no mobile");
 });
 
