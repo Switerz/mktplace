@@ -138,6 +138,13 @@ class FakeCursor:
             return self.conn.discounts_last_run
         if "MAX(ref_date) AS fact_max_ref_date" in sql:
             return {"fact_max_ref_date": self.conn.discounts_fact_max}
+        # Gate M6: frescor temporal da Gestao Diaria. Ramo EXPLICITO — sem ele
+        # a consulta cairia no fallback estrito abaixo e o teste ACUSARIA, que
+        # e' o comportamento desejado para consulta nova sem cobertura.
+        if "MAX(ref_date) AS m FROM marts.fact_ml_gestao_diaria" in sql:
+            if self.conn.gestao_diaria_erro:
+                raise psycopg2.Error("falha simulada na leitura da Gestao Diaria")
+            return {"m": self.conn.gestao_diaria_max}
         # Gate AVH-4C: as duas consultas da Avoe usam `fetchall`, nunca
         # `fetchone`. Cair aqui significa consulta nova sem ramo.
         for marker, value in self.conn.bug8_scalars:
@@ -180,7 +187,8 @@ class FakeConn:
                  affiliate_watermark=_UNSET,
                  discounts_last_run=_UNSET, discounts_fact_max=_UNSET,
                  avoe_candidatas=_UNSET, avoe_runs=_UNSET, avoe_erro=False,
-                 pma_observed=_UNSET, pma_last_run=_UNSET):
+                 pma_observed=_UNSET, pma_last_run=_UNSET,
+                 gestao_diaria_max=_UNSET, gestao_diaria_erro=False):
         self.executed = []
         self.closed = False
         # Gate AVH-4C: estado SAUDAVEL por default — captura valida de 3 dias
@@ -242,6 +250,14 @@ class FakeConn:
         self.discounts_fact_max = (
             TODAY - timedelta(days=1)
             if discounts_fact_max is _UNSET else discounts_fact_max)
+        # Gate M6: estado SAUDAVEL por default — D-1, que passa nos DOIS
+        # regimes (graca ate D-2 antes das 11:00 BRT, D-1 exigido depois).
+        # Mesma convencao das demais dimensoes: o default nunca reprova, para
+        # que cada teste isole UMA divergencia.
+        self.gestao_diaria_max = (
+            TODAY - timedelta(days=1) if gestao_diaria_max is _UNSET
+            else gestao_diaria_max)
+        self.gestao_diaria_erro = gestao_diaria_erro
         self.bug8_scalars = bug8_scalars or [
             ("HAVING COUNT(*) > 1", 0), ("IS NULL", 0), ("gmv < 0", 0),
             ("IS DISTINCT FROM 100", 0), ("ROUND(canceled_orders::numeric", 0),
@@ -2098,3 +2114,269 @@ def test_dimensao_nao_expoe_infraestrutura_nem_segredo():
                          "apikey", "host=", "user=", "dbname=", "onrender",
                          "neon.tech", "amazonaws"):
             assert proibido not in texto, f"{kw}: {proibido}"
+
+
+# ===========================================================================
+# Gate M6 — frescor TEMPORAL de marts.fact_ml_gestao_diaria
+# ===========================================================================
+# A expectativa muda ao longo do dia porque a FONTE muda: os anuncios de D-1
+# so' chegam em `raw.ml_ads_items` entre 09:00 e 09:02 BRT (medido em 8 dias
+# consecutivos, 23/09/2026). Cobrar D-1 antes disso acusaria todo dia uma
+# defasagem que e' do contrato da fonte, e alarme que toca todo dia deixa de
+# ser lido.
+
+#: 06:00 BRT = 09:00 UTC. Dentro da janela de graca.
+NOW_0600_BRT = datetime(2026, 7, 3, 9, 0, 0, tzinfo=timezone.utc)
+#: 10:59 BRT = 13:59 UTC. Ultimo minuto da graca.
+NOW_1059_BRT = datetime(2026, 7, 3, 13, 59, 0, tzinfo=timezone.utc)
+#: 11:00 BRT = 14:00 UTC. Primeiro minuto de cobranca.
+NOW_1100_BRT = datetime(2026, 7, 3, 14, 0, 0, tzinfo=timezone.utc)
+
+DIA = NOW_0600_BRT.astimezone(hc.OPERATIONAL_TZ).date()
+
+
+def _gestao(now, max_ref=_UNSET, erro=False):
+    conn = FakeConn(gestao_diaria_max=max_ref, gestao_diaria_erro=erro)
+    return hc.fetch_ml_gestao_diaria_freshness(conn, now=now)
+
+
+# -- os casos de fronteira do contrato --------------------------------------
+
+def test_m6_0600_com_d2_passa():
+    """Antes das 11:00 BRT, D-2 e tolerado: os Ads de D-1 ainda nao chegaram."""
+    r = _gestao(NOW_0600_BRT, DIA - timedelta(days=2))
+    assert r.stale is False
+    assert r.days_since == 2
+
+
+def test_m6_0600_com_d3_falha():
+    """D-3 nao e tolerancia de horario: e defasagem real."""
+    r = _gestao(NOW_0600_BRT, DIA - timedelta(days=3))
+    assert r.stale is True
+    assert r.critical is True
+
+
+def test_m6_1059_com_d2_passa():
+    """A graca vale ate o ultimo minuto antes do corte."""
+    r = _gestao(NOW_1059_BRT, DIA - timedelta(days=2))
+    assert r.stale is False
+
+
+def test_m6_1100_com_d2_falha():
+    """A partir das 11:00 BRT, D-2 vira defasagem."""
+    r = _gestao(NOW_1100_BRT, DIA - timedelta(days=2))
+    assert r.stale is True
+    assert r.critical is True
+
+
+def test_m6_1100_com_d1_passa():
+    r = _gestao(NOW_1100_BRT, DIA - timedelta(days=1))
+    assert r.stale is False
+    assert r.days_since == 1
+
+
+def test_m6_d1_passa_nos_dois_regimes():
+    """D-1 e o estado saudavel em qualquer horario."""
+    for agora in (NOW_0600_BRT, NOW_1059_BRT, NOW_1100_BRT):
+        assert _gestao(agora, DIA - timedelta(days=1)).stale is False
+
+
+# -- anomalias --------------------------------------------------------------
+
+def test_m6_d0_falha_como_data_indevida():
+    """O serving publica ate D-1 por contrato: D0 denuncia janela/fuso errado.
+
+    Nao e "mais fresco que o esperado": e erro de qualidade.
+    """
+    r = _gestao(NOW_1100_BRT, DIA)
+    assert r.stale is True
+    assert r.critical is True
+    assert "ANOMALIA" in r.reason
+    assert "DIA CORRENTE" in r.reason
+
+
+def test_m6_data_futura_falha():
+    r = _gestao(NOW_1100_BRT, DIA + timedelta(days=1))
+    assert r.stale is True
+    assert "ANOMALIA" in r.reason
+    assert "FUTURA" in r.reason
+
+
+def test_m6_d0_falha_tambem_na_janela_de_graca():
+    """A graca tolera ATRASO, nunca data indevida."""
+    r = _gestao(NOW_0600_BRT, DIA)
+    assert r.stale is True
+    assert "ANOMALIA" in r.reason
+
+
+def test_m6_tabela_vazia_falha_critico():
+    r = _gestao(NOW_0600_BRT, None)
+    assert r.stale is True
+    assert r.critical is True
+    assert r.max_value is None
+    assert "sem nenhuma linha" in r.reason
+
+
+def test_m6_erro_de_banco_falha_fechado():
+    """Nao consegui verificar nao e evidencia de saude."""
+    r = _gestao(NOW_0600_BRT, erro=True)
+    assert r.stale is True
+    assert r.critical is True
+    assert hc.GESTAO_DIARIA_ERROR_NOTE in r.reason
+
+
+def test_m6_erro_de_banco_nao_vaza_sql_nem_credencial():
+    r = _gestao(NOW_0600_BRT, erro=True)
+    baixo = r.reason.lower()
+    for proibido in ("select", "postgres://", "postgresql://", "password",
+                     "senha", "host=", "dbname=", "neon.tech", "amazonaws"):
+        assert proibido not in baixo, proibido
+
+
+# -- fuso -------------------------------------------------------------------
+
+def test_m6_utc_convertido_para_brt():
+    """13:59 UTC ainda e graca (10:59 BRT); 14:00 UTC ja cobra (11:00 BRT).
+
+    Se a regra lesse a hora em UTC, 13:59 ja estaria cobrando e o caso de
+    graca cairia. E esta assimetria que prova a conversao.
+    """
+    d2 = DIA - timedelta(days=2)
+    assert _gestao(NOW_1059_BRT, d2).stale is False
+    assert _gestao(NOW_1100_BRT, d2).stale is True
+
+
+def test_m6_usa_o_calendario_operacional_canonico():
+    """O dia de referencia vem de `operational_today`, nao de calculo local.
+
+    03:00 UTC e 00:00 BRT do mesmo dia; 02:59 UTC ainda e o dia anterior em
+    BRT. Um check que usasse `now.date()` erraria a fronteira.
+    """
+    antes = datetime(2026, 7, 4, 2, 59, tzinfo=timezone.utc)   # 23:59 BRT de 03/07
+    depois = datetime(2026, 7, 4, 3, 0, tzinfo=timezone.utc)   # 00:00 BRT de 04/07
+    assert hc.operational_today(antes) == date(2026, 7, 3)
+    assert hc.operational_today(depois) == date(2026, 7, 4)
+    ref = date(2026, 7, 2)
+    assert _gestao(antes, ref).days_since == 1
+    assert _gestao(depois, ref).days_since == 2
+
+
+# -- conteudo da mensagem (item 9 do contrato) ------------------------------
+
+def test_m6_mensagem_tem_os_quatro_elementos_exigidos():
+    achada = DIA - timedelta(days=2)
+    r = _gestao(NOW_0600_BRT, achada)
+    assert achada.isoformat() in r.reason, "data encontrada"
+    assert "minima esperada" in r.reason, "data minima esperada"
+    assert "BRT" in r.reason, "horario operacional aplicado"
+    assert "10:00 BRT" in r.reason, "estado da publicacao das 10h"
+    assert "janela de graca" in r.reason
+
+
+def test_m6_mensagem_muda_de_regime_apos_o_corte():
+    d1 = DIA - timedelta(days=1)
+    graca = _gestao(NOW_0600_BRT, d1).reason
+    cobrando = _gestao(NOW_1100_BRT, d1).reason
+    assert "ainda dentro da janela" in graca
+    assert "deveria ter ocorrido" in cobrando
+    assert "cobrando D-1" in cobrando
+
+
+def test_m6_minima_esperada_acompanha_o_regime():
+    """A data minima anunciada e D-2 na graca e D-1 na cobranca."""
+    d1 = DIA - timedelta(days=1)
+    assert (DIA - timedelta(days=2)).isoformat() in _gestao(NOW_0600_BRT, d1).reason
+    assert (DIA - timedelta(days=1)).isoformat() in _gestao(NOW_1100_BRT, d1).reason
+
+
+# -- contrato estrutural ----------------------------------------------------
+
+def test_m6_nao_cria_linha_em_expected_sources():
+    """A tabela nao tem auditoria: cobrar source_sync_run seria alarme falso."""
+    nomes = {s.source_name for s in hc.EXPECTED_SOURCES}
+    for proibido in ("ml_gestao_diaria", "fact_ml_gestao_diaria", "serving_ml"):
+        assert proibido not in nomes
+
+
+def test_m6_query_exata_sem_count_integral():
+    conn = FakeConn()
+    hc.fetch_ml_gestao_diaria_freshness(conn, now=NOW_0600_BRT)
+    nossas = [s for s in conn.executed if "fact_ml_gestao_diaria" in s]
+    assert nossas == ["SELECT MAX(ref_date) AS m FROM marts.fact_ml_gestao_diaria"]
+    assert "COUNT(" not in nossas[0].upper()
+
+
+def test_m6_alias_as_m_e_obrigatorio():
+    """A conexao real usa RealDictCursor: agregado sem alias viria como max."""
+    fonte = MODULE_PATH.read_text(encoding="utf-8")
+    assert "MAX(ref_date) AS m FROM {GESTAO_DIARIA_TABLE}" in fonte
+
+
+def test_m6_entra_no_relatorio_e_em_ok_critical():
+    conn = all_fresh_conn(gestao_diaria_max=TODAY - timedelta(days=5))
+    rel = hc.build_report(conn, now=NOW_1100_BRT)
+    rotulos = [d["label"] for d in rel["data_freshness"]]
+    assert hc.GESTAO_DIARIA_TABLE_LABEL in rotulos
+    entrada = next(d for d in rel["data_freshness"]
+                   if d["label"] == hc.GESTAO_DIARIA_TABLE_LABEL)
+    assert entrada["stale"] is True and entrada["critical"] is True
+    assert rel["ok_critical"] is False, "stale critico tem de derrubar o exit code"
+
+
+def test_m6_fresca_nao_derruba_ok_critical():
+    conn = all_fresh_conn(gestao_diaria_max=TODAY - timedelta(days=1))
+    rel = hc.build_report(conn, now=NOW_1100_BRT)
+    assert rel["ok_critical"] is True
+
+
+def test_m6_checks_legados_preservados_quando_a_nova_esta_fresca():
+    """A dimensao nova nao pode mudar o veredito de nenhuma das antigas."""
+    conn = all_fresh_conn()
+    rel = hc.build_report(conn, now=NOW_1100_BRT)
+    legados = {d["label"]: d["stale"] for d in rel["data_freshness"]
+               if d["label"] != hc.GESTAO_DIARIA_TABLE_LABEL}
+    esperado = {
+        "fact_marketplace_daily_performance[tiktok]",
+        "fact_marketplace_daily_performance[ml]",
+        "fact_marketplace_daily_performance[shopee]",
+        "fact_tiktok_product_daily", "fact_ml_produto_ranking",
+        "fact_ml_cross_company_summary[synced_at]",
+        "fact_tiktok_channel_efficiency_daily",
+    }
+    assert esperado.issubset(set(legados)), sorted(legados)
+    for rotulo in esperado:
+        assert legados[rotulo] is False, f"{rotulo} mudou de veredito"
+    assert rel["ok_critical"] is True
+
+
+# -- contraprovas: mexer nos limites tem de mudar o resultado ---------------
+
+def test_m6_contraprova_hora_de_corte(monkeypatch):
+    """Com o corte as 05:00, as 06:00 BRT ja deveriam cobrar D-1."""
+    d2 = DIA - timedelta(days=2)
+    assert _gestao(NOW_0600_BRT, d2).stale is False
+    monkeypatch.setattr(hc, "GESTAO_DIARIA_ENFORCE_HOUR_BRT", 5)
+    assert _gestao(NOW_0600_BRT, d2).stale is True
+
+
+def test_m6_contraprova_limite_da_graca(monkeypatch):
+    d2 = DIA - timedelta(days=2)
+    assert _gestao(NOW_0600_BRT, d2).stale is False
+    monkeypatch.setattr(hc, "GESTAO_DIARIA_GRACE_MAX_DAYS", 1)
+    assert _gestao(NOW_0600_BRT, d2).stale is True
+
+
+def test_m6_contraprova_limite_da_cobranca(monkeypatch):
+    d2 = DIA - timedelta(days=2)
+    assert _gestao(NOW_1100_BRT, d2).stale is True
+    monkeypatch.setattr(hc, "GESTAO_DIARIA_ENFORCED_MAX_DAYS", 2)
+    assert _gestao(NOW_1100_BRT, d2).stale is False
+
+
+def test_m6_contraprova_timezone(monkeypatch):
+    """Trocar o fuso para UTC faz 10:59 BRT (13:59 UTC) passar a cobrar."""
+    d2 = DIA - timedelta(days=2)
+    assert _gestao(NOW_1059_BRT, d2).stale is False
+    monkeypatch.setattr(hc, "OPERATIONAL_TZ", timezone.utc)
+    monkeypatch.setattr(hc, "operational_today", lambda agora: agora.date())
+    assert _gestao(NOW_1059_BRT, d2).stale is True

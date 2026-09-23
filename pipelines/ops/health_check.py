@@ -99,7 +99,7 @@ import json
 import re
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
@@ -126,11 +126,71 @@ from pipelines import sync_tiktok_order_discounts_daily as sync_descontos  # noq
 # validacao aqui — e' o que impede health check e tela de discordarem sobre
 # disponibilidade. O `sys.path.insert` acima e' o que torna `app.*` importavel.
 from app.services import avoe_snapshot_service as avoe_svc  # noqa: E402
+# Gate M6: o dia operacional e o fuso vem do calendario CANONICO, importados em
+# vez de reimplementados. Duas definicoes de "hoje em BRT" divergiriam em
+# silencio exatamente na fronteira da meia-noite, que e' onde esta regra
+# temporal mais importa.
+from pipelines.common.operational_calendar import (  # noqa: E402
+    OPERATIONAL_TZ,
+    operational_today,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 MARKETPLACE_LABELS = {1: "tiktok", 2: "ml", 3: "shopee"}
 DAILY_DATA_FRESHNESS_THRESHOLD_DAYS = 3
+
+# ---------------------------------------------------------------------------
+# Frescor de `marts.fact_ml_gestao_diaria` — expectativa TEMPORAL (Gate M6)
+# ---------------------------------------------------------------------------
+# 🔴 POR QUE ESTA TABELA PRECISA DE UMA REGRA PROPRIA
+# Ela e' a UNICA das tres fatos de serving ML sem nenhuma observabilidade: nao
+# entra em `EXPECTED_SOURCES` porque o runner dela **nao grava**
+# `audit.source_sync_run` — nem o do Windows, nem o do Airflow, e isso e'
+# contrato, nao esquecimento. Sem auditoria e sem frescor, ela ficou cinco dias
+# parada em 18/09/2026 sem ninguem notar. Cobrar linha de auditoria aqui criaria
+# alarme falso permanente; medir `MAX(ref_date)` e' o unico sinal honesto.
+#
+# 🔑 POR QUE A REGRA MUDA DE HORARIO
+# A janela publicavel depende de `raw.ml_ads_items`, e os anuncios de D-1 so'
+# aparecem la' entre **09:00 e 09:02 BRT** — medido em 8 dias consecutivos
+# (23/09/2026). Antes disso, nenhum publicador consegue fechar D-1 com Ads
+# completo, por mais saudavel que esteja.
+#
+# Consequencia pratica: uma regra fixa "exija D-1 sempre" acenderia alarme todo
+# dia de madrugada por uma defasagem que e' do CONTRATO DA FONTE, nao falha de
+# ninguem — e um alarme que toca todo dia deixa de ser lido. Por isso:
+#
+#   · antes das 11:00 BRT -> D-1 **ou** D-2 passam (janela de graca);
+#   · a partir das 11:00 BRT -> D-1 e' exigido.
+#
+# As 11:00 sao o horario de cobranca, nao o horario de publicacao: dao ~2h de
+# folga sobre a fronteira medida das 09:02 e ~1h sobre as 10:00 BRT que a Torre
+# deve passar a usar. Se a Torre publicar as 10:00, as 11:00 ela ja' tem D-1 e
+# o check passa; se ela falhar ou nao rodar, as 11:00 o check acende.
+GESTAO_DIARIA_TABLE = "marts.fact_ml_gestao_diaria"
+
+#: Rotulo no relatorio. Sem o prefixo `marts.`, como as demais entradas de
+#: `data_freshness`, para nao quebrar quem filtra a lista por nome curto.
+GESTAO_DIARIA_TABLE_LABEL = "fact_ml_gestao_diaria"
+
+#: Hora BRT a partir da qual D-1 deixa de ser tolerancia e vira exigencia.
+GESTAO_DIARIA_ENFORCE_HOUR_BRT = 11
+
+#: Atraso maximo em dias ANTES do horario de cobranca (D-2 ainda passa).
+GESTAO_DIARIA_GRACE_MAX_DAYS = 2
+
+#: Atraso maximo em dias A PARTIR do horario de cobranca (so' D-1 passa).
+GESTAO_DIARIA_ENFORCED_MAX_DAYS = 1
+
+#: Horario em que a Torre deve publicar, usado SO' na mensagem. Nao controla
+#: nada: agendar a DAG e' decisao de outro gate, e este check nao a dispara.
+GESTAO_DIARIA_PUBLISH_HOUR_BRT = 10
+
+GESTAO_DIARIA_ERROR_NOTE = (
+    "nao foi possivel ler marts.fact_ml_gestao_diaria para avaliar o frescor — "
+    "estado desconhecido, tratado como falha"
+)
 
 # ---------------------------------------------------------------------------
 # Obsolescencia do snapshot manual da Avoe (Gate AVH-4C)
@@ -439,6 +499,104 @@ def _evaluate_date_freshness(
         else f"{label}: dado fresco ({days_since}d, limite {threshold_days}d)"
     )
     return DataFreshnessResult(label, cadence, value_date.isoformat(), days_since, threshold_days, stale, reason, critical)
+
+
+def fetch_ml_gestao_diaria_freshness(conn, now: datetime | None = None
+                                     ) -> DataFreshnessResult:
+    """Frescor de `marts.fact_ml_gestao_diaria` com expectativa TEMPORAL.
+
+    Devolve um `DataFreshnessResult` como as demais dimensoes de frescor — e'
+    o que o faz participar de `ok_critical` e do exit code pelo caminho que ja'
+    existe (`data_stale_critical`), sem uma segunda regra de agregacao.
+
+    🔑 Recebe `now` (datetime), nao `today` (date), porque a expectativa MUDA ao
+    longo do dia: e' a unica dimensao em que a hora importa. O relogio e'
+    injetavel para que o teste fixe o instante sem monkeypatch global.
+
+    🔴 Fail-closed: erro de banco vira `stale=True` com mensagem FIXA e
+    sanitizada — nada de SQL, DSN, host ou texto de driver. "Nao consegui
+    verificar" nao e' evidencia de saude. Bug de codigo (que nao e'
+    `psycopg2.Error`) continua PROPAGANDO.
+    """
+    now = now or _now()
+    # O dia operacional vem do MESMO calendario que os syncs usam. Recalcular
+    # "hoje em BRT" aqui abriria a porta para health check e sync discordarem
+    # na fronteira da meia-noite.
+    agora_brt = now.astimezone(OPERATIONAL_TZ)
+    hoje = operational_today(now)
+    hora = agora_brt.hour
+    cobrando = hora >= GESTAO_DIARIA_ENFORCE_HOUR_BRT
+    max_dias = (GESTAO_DIARIA_ENFORCED_MAX_DAYS if cobrando
+                else GESTAO_DIARIA_GRACE_MAX_DAYS)
+    minima = hoje - timedelta(days=max_dias)
+    regime = (f"{hora:02d}:{agora_brt.minute:02d} BRT, "
+              f"{'cobrando D-1' if cobrando else 'janela de graca ate D-2'} "
+              f"(corte {GESTAO_DIARIA_ENFORCE_HOUR_BRT:02d}:00 BRT)")
+    # A publicacao das 10:00 so' esta "dentro da graca" enquanto a cobranca nao
+    # comecou; depois das 11:00 ela ja' deveria ter acontecido.
+    graca = ("publicacao das "
+             f"{GESTAO_DIARIA_PUBLISH_HOUR_BRT:02d}:00 BRT ainda dentro da janela"
+             if not cobrando else
+             f"publicacao das {GESTAO_DIARIA_PUBLISH_HOUR_BRT:02d}:00 BRT ja' "
+             "deveria ter ocorrido")
+
+    cur = conn.cursor()
+    try:
+        # `AS m` e' OBRIGATORIO: a conexao de producao usa `RealDictCursor` e um
+        # agregado sem alias viria na chave "max". Sem contagem integral — um
+        # `COUNT(*)` aqui varreria a tabela inteira sem responder nada que
+        # `MAX(ref_date)` ja' nao responda.
+        cur.execute(f"SELECT MAX(ref_date) AS m FROM {GESTAO_DIARIA_TABLE}")  # noqa: S608
+        linha = cur.fetchone()
+        encontrada = linha["m"] if isinstance(linha, dict) else (linha[0] if linha else None)
+    except psycopg2.Error:
+        cur.close()
+        return DataFreshnessResult(
+            GESTAO_DIARIA_TABLE_LABEL, "daily", None, None, float(max_dias), True,
+            f"{GESTAO_DIARIA_TABLE_LABEL}: {GESTAO_DIARIA_ERROR_NOTE} "
+            f"[{regime}; minima esperada {minima.isoformat()}; {graca}]",
+            True,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            cur.close()
+
+    if encontrada is None:
+        return DataFreshnessResult(
+            GESTAO_DIARIA_TABLE_LABEL, "daily", None, None, float(max_dias), True,
+            f"{GESTAO_DIARIA_TABLE_LABEL}: tabela sem nenhuma linha (MAX(ref_date) nulo) "
+            f"[encontrada: nenhuma; minima esperada {minima.isoformat()}; {regime}; {graca}]",
+            True,
+        )
+
+    achada = encontrada.date() if hasattr(encontrada, "date") else encontrada
+    dias = (hoje - achada).days
+
+    if dias <= 0:
+        # D0 ou futuro. NUNCA e' "mais fresco que o esperado": o serving publica
+        # ate' D-1 por contrato (`validate_window` recusa `date_to == today`),
+        # entao o dia corrente na fato denuncia janela errada, fuso trocado ou
+        # parsing de data — nao saude.
+        que = "o DIA CORRENTE" if dias == 0 else f"uma data FUTURA ({-dias}d a frente)"
+        return DataFreshnessResult(
+            GESTAO_DIARIA_TABLE_LABEL, "daily", achada.isoformat(), dias, float(max_dias), True,
+            f"{GESTAO_DIARIA_TABLE_LABEL}: ANOMALIA — a fato contem {que} "
+            f"[encontrada: {achada.isoformat()}; minima esperada {minima.isoformat()}; "
+            f"{regime}; {graca}]. O serving publica no maximo D-1; D0 ou futuro "
+            "indica janela, fuso ou parsing errado.",
+            True,
+        )
+
+    stale = dias > max_dias
+    veredito = (f"defasada: {dias}d, acima do maximo de {max_dias}d neste horario"
+                if stale else f"fresca: {dias}d, dentro do maximo de {max_dias}d")
+    return DataFreshnessResult(
+        GESTAO_DIARIA_TABLE_LABEL, "daily", achada.isoformat(), dias, float(max_dias), stale,
+        f"{GESTAO_DIARIA_TABLE_LABEL}: {veredito} "
+        f"[encontrada: {achada.isoformat()}; minima esperada {minima.isoformat()}; "
+        f"{regime}; {graca}]",
+        True,
+    )
 
 
 def fetch_data_freshness(conn, today: date | None = None) -> list[DataFreshnessResult]:
@@ -1248,6 +1406,12 @@ def build_report(conn, now: datetime | None = None) -> dict:
     now = now or _now()
     sources = fetch_source_statuses(conn, now=now)
     data_freshness = fetch_data_freshness(conn, today=now.date())
+    # Gate M6: entra na MESMA lista de frescor, e por isso participa de
+    # `ok_critical` e do exit code pelo caminho que ja' existe
+    # (`data_stale_critical`) — sem uma segunda regra de agregacao. Fica em
+    # funcao separada porque e' a unica dimensao cuja expectativa depende da
+    # HORA, e `fetch_data_freshness` so' recebe a data.
+    data_freshness.append(fetch_ml_gestao_diaria_freshness(conn, now=now))
     bug8 = run_bug8_check(conn)
     afiliados = fetch_affiliate_watermark_status(conn, now=now)
     descontos = fetch_discounts_coverage_status(conn, now=now)
