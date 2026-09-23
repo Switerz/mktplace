@@ -1,0 +1,83 @@
+# Empacotamento FOCAL de `pipelines` — e de mais nada deste repositorio.
+#
+# POR QUE ISTO EXISTE
+# -------------------
+# O agendador da Expedicao vive em `goca-se/airflow` e precisa CHAMAR o CLI
+# oficial (`python -m pipelines.expedicao.cli`), nunca reimplementar as regras
+# dele. Para isso o pacote tem de ser instalavel: a imagem do Airflow e'
+# construida do proprio repo (`COPY src/`, `COPY plugins/`) e nao instala nada
+# de git. Sem este arquivo, `pipelines` nao e' instalavel por `pip` e a unica
+# alternativa seria copiar a logica para o outro repositorio — exatamente o que
+# o contrato do gate proibe.
+#
+# ESTE ARQUIVO NAO EMPACOTA A API
+# -------------------------------
+# `apps/api` continua com o proprio `pyproject.toml` e a propria distribuicao
+# (`mktplace-api`). As duas nao se cruzam, e e' de proposito: existe teste de
+# regressao — `apps/api/etl/tests/test_load_shopee_products_numeric.py::
+# test_nunca_referencia_pipelines` — travando que a API NAO depende de
+# `pipelines`. Empacotar os dois juntos quebraria essa separacao.
+#
+# O QUE ENTRA NA DISTRIBUICAO
+# ---------------------------
+# Somente modulos Python sob `pipelines/`, e dentro dela apenas `expedicao` —
+# 22 modulos, nao a arvore inteira (ver a nota em `packages.find`). Nao ha
+# `package-data`, entao nenhum arquivo que nao seja `.py` e' embarcado: nem
+# `.env`, nem fixture, nem CSV, nem nada de `apps/`, `frontend/`, `docs/` ou
+# `logs/`. `pipelines.tests` fica de fora — codigo de teste nao pertence ao
+# artefato de runtime.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mktplace-pipelines"
+version = "0.1.0"
+description = "Pipelines da Torre de Marketplaces (inclui o CLI da Expedicao)"
+# 3.9 nao e' chute: `pipelines.expedicao.cli` foi importado sem erro em 3.9,
+# 3.10 e 3.12 (medido em 2026-09-23). O piso baixo existe para que a versao de
+# Python da imagem do Airflow deixe de ser um risco de instalacao.
+requires-python = ">=3.9"
+
+# Faixas LARGAS de proposito. A imagem do Airflow ja' traz
+# `psycopg2-binary==2.9.10` e `python-dotenv==1.1.1`, ambos dentro destas
+# faixas — entao `pip install` deste pacote encontra as duas ja' satisfeitas e
+# NAO mexe em nenhuma versao da imagem. Pin estreito aqui faria o pip trocar
+# dependencia de uma imagem compartilhada por ~180 DAGs.
+dependencies = [
+    "psycopg2-binary>=2.9,<3",
+    "python-dotenv>=1.0,<2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+# Inclusao por allowlist, no MENOR escopo que serve ao consumidor. `apps`,
+# `frontend`, `docs`, `scripts` e qualquer diretorio futuro ficam de fora por
+# omissao, nao por alguem lembrar de acrescenta-los ao `exclude`.
+#
+# POR QUE `pipelines.expedicao` E NAO `pipelines.*`
+# --------------------------------------------------
+# O fecho transitivo de imports de `pipelines.expedicao.cli` — o unico
+# consumidor deste pacote hoje — tem **9 modulos, todos dentro de
+# `pipelines/expedicao/`**. Medido no fonte, seguindo imports em qualquer
+# posicao (topo e dentro de funcao, porque o CLI adia `psycopg2` e `dotenv` de
+# proposito), e conferido: o pacote nao tem NENHUM import dinamico
+# (`importlib`, `__import__`, `exec`, `eval`), e todo import interno dele e'
+# `pipelines.expedicao.*`. O fecho e' exato, nao uma estimativa.
+#
+# Com `pipelines.*` a wheel levava 103 modulos: 94 deles (91%) fora do fecho,
+# incluindo `connectors/` (clientes de API de Shopee, Mercado Livre e TikTok),
+# `ingestion/`, `ops/`, `staging/`, `reconciliation/`, `pma/`, `avoe/`,
+# `quality/`, `transforms/` e `common/`. Nada disso e' importado pelo CLI; ir
+# parar numa imagem compartilhada e' superficie sem contrapartida.
+#
+# Piso de 22 e nao de 9: os 13 modulos soltos em `pipelines/*.py` sao modulos
+# DO pacote `pipelines`, e `packages.find` nao sabe excluir modulo individual
+# de um pacote incluido. Para descer abaixo disso seria preciso mover
+# `expedicao` para fora de `pipelines/`, o que quebraria o caminho de import
+# `python -m pipelines.expedicao.cli` que o agendador chama.
+#
+# ⚠️ Consumidor novo que precise de outra subarvore acrescenta UMA linha aqui,
+# e essa linha e' a revisao: o escopo cresce por decisao, nao por inercia.
+include = ["pipelines", "pipelines.expedicao"]
+exclude = ["pipelines.tests", "pipelines.tests.*"]
