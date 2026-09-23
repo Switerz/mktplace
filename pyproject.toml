@@ -20,10 +20,12 @@
 #
 # O QUE ENTRA NA DISTRIBUICAO
 # ---------------------------
-# Somente modulos Python sob `pipelines/`. Nao ha `package-data`, entao nenhum
-# arquivo que nao seja `.py` e' embarcado: nem `.env`, nem fixture, nem CSV,
-# nem nada de `apps/`, `frontend/`, `docs/` ou `logs/`. `pipelines.tests` fica
-# de fora — codigo de teste nao pertence ao artefato de runtime.
+# Somente modulos Python sob `pipelines/`, e dentro dela apenas `expedicao` —
+# 22 modulos, nao a arvore inteira (ver a nota em `packages.find`). Nao ha
+# `package-data`, entao nenhum arquivo que nao seja `.py` e' embarcado: nem
+# `.env`, nem fixture, nem CSV, nem nada de `apps/`, `frontend/`, `docs/` ou
+# `logs/`. `pipelines.tests` fica de fora — codigo de teste nao pertence ao
+# artefato de runtime.
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -49,8 +51,33 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-# Inclusao por allowlist: so' a arvore `pipelines`. `apps`, `frontend`, `docs`,
-# `scripts` e qualquer diretorio futuro ficam de fora por omissao, nao por
-# alguem lembrar de acrescenta-los ao `exclude`.
-include = ["pipelines", "pipelines.*"]
+# Inclusao por allowlist, no MENOR escopo que serve ao consumidor. `apps`,
+# `frontend`, `docs`, `scripts` e qualquer diretorio futuro ficam de fora por
+# omissao, nao por alguem lembrar de acrescenta-los ao `exclude`.
+#
+# POR QUE `pipelines.expedicao` E NAO `pipelines.*`
+# --------------------------------------------------
+# O fecho transitivo de imports de `pipelines.expedicao.cli` — o unico
+# consumidor deste pacote hoje — tem **9 modulos, todos dentro de
+# `pipelines/expedicao/`**. Medido no fonte, seguindo imports em qualquer
+# posicao (topo e dentro de funcao, porque o CLI adia `psycopg2` e `dotenv` de
+# proposito), e conferido: o pacote nao tem NENHUM import dinamico
+# (`importlib`, `__import__`, `exec`, `eval`), e todo import interno dele e'
+# `pipelines.expedicao.*`. O fecho e' exato, nao uma estimativa.
+#
+# Com `pipelines.*` a wheel levava 103 modulos: 94 deles (91%) fora do fecho,
+# incluindo `connectors/` (clientes de API de Shopee, Mercado Livre e TikTok),
+# `ingestion/`, `ops/`, `staging/`, `reconciliation/`, `pma/`, `avoe/`,
+# `quality/`, `transforms/` e `common/`. Nada disso e' importado pelo CLI; ir
+# parar numa imagem compartilhada e' superficie sem contrapartida.
+#
+# Piso de 22 e nao de 9: os 13 modulos soltos em `pipelines/*.py` sao modulos
+# DO pacote `pipelines`, e `packages.find` nao sabe excluir modulo individual
+# de um pacote incluido. Para descer abaixo disso seria preciso mover
+# `expedicao` para fora de `pipelines/`, o que quebraria o caminho de import
+# `python -m pipelines.expedicao.cli` que o agendador chama.
+#
+# ⚠️ Consumidor novo que precise de outra subarvore acrescenta UMA linha aqui,
+# e essa linha e' a revisao: o escopo cresce por decisao, nao por inercia.
+include = ["pipelines", "pipelines.expedicao"]
 exclude = ["pipelines.tests", "pipelines.tests.*"]
