@@ -156,18 +156,35 @@ test("a rota e fail-closed no servidor, nao so no menu", () => {
   assert.match(src, /notFound\(\)/);
   assert.match(src, /expedicaoHabilitado\(process\.env\.NEXT_PUBLIC_EXPEDICAO_ENABLED\)/);
   const guarda = src.indexOf("notFound()");
-  const render = src.indexOf("<ExpedicaoClient");
+  // Gate EXP-TK-OPS-1: a pagina passou a renderizar `ExpedicaoShell`, que
+  // escolhe entre a fila e a serie do TikTok. A assercao deixou de fixar o
+  // NOME do filho e passou a exigir a propriedade que de fato protege a rota:
+  // QUALQUER render tem de vir depois do guard. Continua pegando o defeito
+  // real (renderizar antes do 404) sem quebrar a cada troca de casca.
+  const render = src.search(/<[A-Z][A-Za-z]*/);
+  assert.ok(render > 0, "a pagina precisa renderizar algum componente");
   assert.ok(guarda > 0 && render > guarda, "o 404 precisa vir ANTES do render");
 });
 
 test("com a flag desligada nenhum fetch pode ser disparado", () => {
-  // O componente que faz fetch e' filho do guard: se o guard nao passar, ele
-  // nao e' renderizado nem chega ao navegador.
+  // Quem faz fetch e' descendente do guard: se o guard nao passar, nada disso
+  // e' renderizado nem chega ao navegador.
   const page = fonte("app/expedicao/page.tsx");
   assert.ok(!page.includes("fetch("), "a pagina-guarda nao pode buscar nada");
+
+  // Gate EXP-TK-OPS-1: entre a pagina e quem busca existe agora a casca. Ela
+  // tambem nao pode buscar nada — se buscasse, a escolha de aba dispararia
+  // requisicao antes de qualquer painel decidir o que precisa.
+  const casca = fonte("app/expedicao/ExpedicaoShell.tsx");
+  assert.ok(!casca.includes("fetch("), "a casca so' escolhe a aba, nao busca");
+
   const cliente = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(cliente.includes("fetch("), "o fetch vive no filho, atras do guard");
-  assert.ok(page.includes("import ExpedicaoClient"));
+  assert.ok(cliente.includes("fetch("), "o fetch vive no descendente, atras do guard");
+
+  // A cadeia inteira precisa estar ligada: pagina -> casca -> cliente. Sem
+  // isto, um render solto escaparia do guard sem o teste perceber.
+  assert.ok(page.includes("import ExpedicaoShell"));
+  assert.ok(casca.includes("import ExpedicaoClient"));
 });
 
 // ===========================================================================

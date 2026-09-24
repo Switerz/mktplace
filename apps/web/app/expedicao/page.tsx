@@ -12,7 +12,7 @@ import { notFound } from "next/navigation";
 
 import { expedicaoHabilitado } from "@/lib/expedicao-contract";
 
-import ExpedicaoClient from "./ExpedicaoClient";
+import ExpedicaoShell from "./ExpedicaoShell";
 
 export const dynamic = "force-dynamic";
 
@@ -20,5 +20,8 @@ export default function ExpedicaoPage() {
   if (!expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED)) {
     notFound();
   }
-  return <ExpedicaoClient />;
+  // Gate EXP-TK-OPS-1: a casca escolhe entre a fila (Shopee/ML) e a serie do
+  // TikTok. Com `NEXT_PUBLIC_EXPEDICAO_TIKTOK_ENABLED` desligada ela renderiza
+  // a fila direto, sem seletor e sem nenhuma mudanca de comportamento.
+  return <ExpedicaoShell />;
 }
