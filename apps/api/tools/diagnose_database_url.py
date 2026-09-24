@@ -36,8 +36,38 @@ PREFIXOS_SUSPEITOS = (
     "DATABASE_URL=", "database_url=", "psql ", "psql:", "export ",
 )
 
-#: Esquemas aceitos pelo app hoje.
-ESQUEMAS_OK = ("postgresql://", "postgresql+psycopg2://")
+#: VOCABULARIO FECHADO do esquema. Nada fora desta lista e' impresso.
+#:
+#: Derivar o rotulo do valor — `valor.split("://")[0]` — publica texto
+#: arbitrario quando o valor esta malformado: um wrapper de shell, um prefixo
+#: colado ou uma senha antes do `@` sairiam no relatorio (finding F2).
+#: Qualquer coisa que nao case EXATAMENTE vira `nao_reconhecido`.
+ESQUEMAS_CONHECIDOS = ("postgresql", "postgresql+psycopg2", "postgresql+psycopg")
+ESQUEMA_AUSENTE = "ausente"
+ESQUEMA_NAO_RECONHECIDO = "nao_reconhecido"
+
+#: Destes, so' os dois primeiros funcionam com o driver que o projeto instala.
+ESQUEMAS_SERVIVEIS = ("postgresql", "postgresql+psycopg2")
+
+#: Chaves de query que a ferramenta pode NOMEAR. Qualquer outra e' contada, nao
+#: nomeada: num valor malformado, "a chave" pode ser texto arbitrario escolhido
+#: por quem escreveu o valor.
+QUERY_CONHECIDAS = ("sslmode", "sslrootcert", "application_name",
+                    "connect_timeout", "options", "channel_binding")
+
+
+def rotulo_do_esquema(valor: str | None) -> str:
+    """Rotulo do esquema, SEMPRE tirado de `ESQUEMAS_CONHECIDOS`.
+
+    Nao devolve pedaco nenhum do valor: ou casa exatamente com um esquema
+    conhecido, ou e' `nao_reconhecido`.
+    """
+    if valor is None or valor.strip() == "":
+        return ESQUEMA_AUSENTE
+    if "://" not in valor:
+        return ESQUEMA_NAO_RECONHECIDO
+    candidato = valor.split("://", 1)[0]
+    return candidato if candidato in ESQUEMAS_CONHECIDOS else ESQUEMA_NAO_RECONHECIDO
 
 
 def sim_nao(v: bool) -> str:
@@ -83,13 +113,18 @@ def main() -> int:
     print("  prefixo indevido          : " + (repr(pref) if pref else "nao")
           + ("   <- QUEBRA o parse" if pref else ""))
 
+    # Vocabulario FECHADO: o rotulo sai de `ESQUEMAS_CONHECIDOS` ou e'
+    # `nao_reconhecido`. Nenhum pedaco do valor e' impresso.
     limpo = bruto.strip().strip('"').strip("'")
-    esquema = limpo.split("://", 1)[0] + "://" if "://" in limpo else "(sem esquema)"
-    print("  esquema declarado         : " + esquema)
-    print("  esquema aceito pelo app   : " + sim_nao(esquema in ESQUEMAS_OK))
-    if esquema == "postgres://":
-        print("     -> `postgres://` foi REMOVIDO no SQLAlchemy 2.x.")
-        print("        Troque por `postgresql://`. Esta e' a causa mais comum.")
+    esquema = rotulo_do_esquema(limpo)
+    print("  esquema                   : " + esquema)
+    print("  esquema servivel hoje     : " + sim_nao(esquema in ESQUEMAS_SERVIVEIS))
+    if esquema == ESQUEMA_NAO_RECONHECIDO:
+        print("     -> Nao casa com nenhum esquema conhecido. As causas mais")
+        print("        comuns sao `postgres://` (alias REMOVIDO no SQLAlchemy")
+        print("        2.x), aspas, prefixo colado ou wrapper de shell.")
+    elif esquema == "postgresql+psycopg":
+        print("     -> Exige o driver `psycopg` (v3), que o projeto NAO instala.")
 
     bloco("3. PARSE PELO SQLALCHEMY")
     try:
@@ -111,8 +146,16 @@ def main() -> int:
         print("  host presente             : " + sim_nao(bool(url.host)))
         print("  porta presente            : " + sim_nao(url.port is not None))
         print("  banco presente            : " + sim_nao(bool(url.database)))
-        chaves = sorted(url.query.keys())
-        print("  chaves de query           : " + (", ".join(chaves) if chaves else "(nenhuma)"))
+        # Tambem vocabulario FECHADO. Imprimir o nome cru da chave publicaria
+        # texto escolhido por quem escreveu o valor — e num valor malformado
+        # "a chave" pode ser qualquer coisa. Reporta-se quais chaves CONHECIDAS
+        # estao presentes, e quantas outras existem, sem nomea-las.
+        chaves = set(url.query.keys())
+        for conhecida in QUERY_CONHECIDAS:
+            print("  query `%s`%s: %s"
+                  % (conhecida, " " * max(1, 18 - len(conhecida)),
+                     sim_nao(conhecida in chaves)))
+        print("  outras chaves de query    : " + str(len(chaves - set(QUERY_CONHECIDAS))))
 
     bloco("4. DRIVER NO ARTEFATO")
     try:

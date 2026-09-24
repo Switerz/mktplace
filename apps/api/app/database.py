@@ -1,6 +1,7 @@
 import logging
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
@@ -131,39 +132,103 @@ def get_datamart_db():
         db.close()
 
 
+#: Vocabulario FECHADO das checagens de conexao. Antes estas funcoes devolviam
+#: `str(e)`, e a mensagem de varias excecoes do psycopg2/SQLAlchemy carrega o
+#: DSN inteiro — usuario, senha e host (finding N1). Hoje nenhum caminho
+#: devolve texto derivado da excecao: so' um destes rotulos, mais o NOME da
+#: classe, que nao contem valor.
+MSG_ENGINE_LOCAL_AUSENTE = "engine local nao inicializado"
+MSG_ENGINE_DATAMART_AUSENTE = "engine do datamart nao inicializado"
+
+
+def _falha_de_conexao(exc: BaseException) -> str:
+    """Rotulo neutro + nome da classe. NUNCA `str(exc)`."""
+    return f"falha de conexao ({type(exc).__name__})"
+
+
 def check_connection() -> tuple[bool, str | None]:
     if engine is None:
-        return False, "local engine not initialized"
+        return False, MSG_ENGINE_LOCAL_AUSENTE
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:  # noqa: BLE001
+        return False, _falha_de_conexao(exc)
 
 
 def check_datamart_connection() -> tuple[bool, str | None]:
     if datamart_engine is None:
-        return False, "datamart engine not initialized"
+        return False, MSG_ENGINE_DATAMART_AUSENTE
     try:
         with datamart_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:  # noqa: BLE001
+        return False, _falha_de_conexao(exc)
 
 
 # ---------------------------------------------------------------------------
 # Readiness
 # ---------------------------------------------------------------------------
-#: Espera CURTA de proposito. Readiness responde a "esta instancia pode servir
-#: agora?", e uma sonda que demora 30 s trava o health check do Render em vez de
-#: responde-lo. Nao e' o lugar de esperar o banco voltar.
-READINESS_TIMEOUT_SEGUNDOS = 3
+#: Limite da fase de CONEXAO (TCP + handshake + autenticacao). Vai em
+#: `connect_args`, que o libpq aplica ANTES de a conexao existir.
+#:
+#: A versao anterior usava `engine.connect().execution_options(timeout=3)` e
+#: isso nao limitava nada: `connect()` ja tinha acontecido quando o
+#: `execution_options` era aplicado, e o dialeto psycopg2 nao honra um
+#: `timeout` generico de execucao. Era um numero decorativo (finding F1).
+READINESS_CONNECT_TIMEOUT_S = 3
+
+#: Limite da CONSULTA, imposto pelo proprio PostgreSQL via `statement_timeout`.
+#: Cobre o caso em que a conexao abre e o servidor nao responde.
+READINESS_STATEMENT_TIMEOUT_MS = 3000
 
 PRONTO = "ready"
 MOTIVO_ENGINE_AUSENTE = "engine_nao_inicializado"
 MOTIVO_BANCO_INACESSIVEL = "banco_inacessivel"
+
+
+def _make_readiness_engine():
+    """Engine DEDICADO a sonda, criado UMA vez no import.
+
+    Tres decisoes, cada uma por um motivo:
+
+    `NullPool`        a sonda abre e fecha a propria conexao. Sem isso ela
+                      consumiria (e envenenaria) o pool que serve as rotas
+                      reais — um probe travado prenderia uma conexao de
+                      producao.
+    `connect_timeout` limita a fase de conexao. Nao da' para por isso no engine
+                      principal sem mudar o comportamento de TODAS as consultas
+                      da API.
+    `statement_timeout` limita a consulta no servidor.
+
+    Criado no import, e nao por requisicao: um `create_engine` a cada chamada
+    do health check e' alocacao inutil num caminho que o Render bate sem parar.
+    """
+    url = settings.database_url
+    if not url:
+        return None
+    try:
+        return create_engine(
+            url,
+            poolclass=NullPool,
+            connect_args={
+                "connect_timeout": READINESS_CONNECT_TIMEOUT_S,
+                # `options` e' repassado ao libpq; `-c` define GUC da sessao.
+                "options": f"-c statement_timeout={READINESS_STATEMENT_TIMEOUT_MS}",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        cat = _categoria(exc)
+        FALHA_DO_ENGINE["readiness"] = cat
+        logger.error(
+            "engine readiness nao criado: %s (%s)", cat, type(exc).__name__
+        )
+        return None
+
+
+readiness_engine = _make_readiness_engine()
 
 
 def readiness() -> tuple[bool, dict]:
@@ -172,26 +237,30 @@ def readiness() -> tuple[bool, dict]:
     Devolve `(pronta, detalhe_sanitizado)`. O detalhe carrega categoria e nome
     de classe — jamais mensagem de excecao, URL, host, usuario ou senha.
 
-    Os dois estados de falha sao distintos e a diferenca importa para quem esta
-    de plantao:
+    Os dois estados de falha sao distintos, e a diferenca importa para quem
+    esta de plantao:
 
-      `engine_nao_inicializado`  ESTRUTURAL. A configuracao ou o artefato estao
-                                 errados; nao volta sozinho, nao adianta
-                                 esperar. Foi este o estado do
+      `engine_nao_inicializado`  ESTRUTURAL. Configuracao ou artefato errados;
+                                 nao volta sozinho. Foi este o estado do
                                  INCIDENTE-API-DB-2.
       `banco_inacessivel`        O engine existe e o banco nao respondeu. Pode
                                  ser transitorio.
+
+    LIMITE CONHECIDO: `connect_timeout` do libpq comeca a contar DEPOIS da
+    resolucao de nome. Se o DNS pendurar, a sonda pendura junto — nao ha
+    garantia de teto total, e este modulo nao finge que ha. Com IP literal ou
+    DNS respondendo, o teto e' `connect_timeout` + `statement_timeout`.
     """
     if engine is None:
+        # O engine PRINCIPAL e' o que a API usa. Se ele nao nasceu, a instancia
+        # nao serve — nem adianta sondar.
         return False, {
             "status": MOTIVO_ENGINE_AUSENTE,
             "categoria": FALHA_DO_ENGINE.get("local", CATEGORIA_DESCONHECIDA),
         }
+    sonda = readiness_engine if readiness_engine is not None else engine
     try:
-        with engine.connect().execution_options(
-            # O timeout vale para ESTA sonda, nao para o pool inteiro.
-            timeout=READINESS_TIMEOUT_SEGUNDOS
-        ) as conn:
+        with sonda.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001 — fronteira da sonda
         return False, {

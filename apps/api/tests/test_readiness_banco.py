@@ -125,7 +125,9 @@ def test_banco_inacessivel_reprova_com_motivo_diferente(monkeypatch, cliente):
         def connect(self):
             raise OSError("sem rota")
 
-    monkeypatch.setattr(database, "engine", _EngineQuebrado())
+    # `engine` presente (nao e' falha estrutural) e a SONDA e' quem falha.
+    monkeypatch.setattr(database, "engine", object())
+    monkeypatch.setattr(database, "readiness_engine", _EngineQuebrado())
     r = cliente.get("/ready")
     assert r.status_code == 503
     assert r.json()["status"] == database.MOTIVO_BANCO_INACESSIVEL
@@ -145,20 +147,13 @@ def test_banco_ok_aprova_a_readiness(monkeypatch, cliente):
 
     class _EngineBom:
         def connect(self):
-            return self
-
-        def execution_options(self, **_k):
             return _Conn()
 
-    monkeypatch.setattr(database, "engine", _EngineBom())
+    monkeypatch.setattr(database, "engine", object())
+    monkeypatch.setattr(database, "readiness_engine", _EngineBom())
     r = cliente.get("/ready")
     assert r.status_code == 200
     assert r.json() == {"status": database.PRONTO}
-
-
-def test_readiness_tem_espera_curta():
-    """Sonda que demora trava o health check em vez de responde-lo."""
-    assert 1 <= database.READINESS_TIMEOUT_SEGUNDOS <= 5
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +188,135 @@ def test_ready_aceita_head_para_o_health_check_do_render():
 # ---------------------------------------------------------------------------
 # Barreira estrutural
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# F1 — os limites da sonda sao REAIS, nao decorativos
+# ---------------------------------------------------------------------------
+def test_a_sonda_tem_engine_dedicado_com_nullpool():
+    """Sem pool proprio, um probe travado prenderia conexao de producao."""
+    from sqlalchemy.pool import NullPool
+
+    assert database.readiness_engine is not None
+    assert isinstance(database.readiness_engine.pool, NullPool)
+
+
+def test_a_sonda_nao_e_o_engine_da_aplicacao():
+    assert database.readiness_engine is not database.engine
+
+
+def test_os_limites_vao_em_connect_args_e_nao_em_execution_options():
+    """`execution_options(timeout=...)` nao limitava nada: `connect()` ja tinha
+    acontecido, e o dialeto psycopg2 nao honra esse option. O limite tem de
+    chegar ao libpq ANTES da conexao."""
+    import ast
+    import inspect
+    from pathlib import Path
+
+    fonte = Path(inspect.getfile(database)).read_text(encoding="utf-8")
+    arvore = ast.parse(fonte)
+    # Olha o CODIGO, nao o texto: o comentario cita `execution_options` de
+    # proposito, para registrar por que ele foi removido.
+    chamadas = {
+        n.func.attr for n in ast.walk(arvore)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "execution_options" not in chamadas, "o timeout decorativo voltou"
+    assert "connect_timeout" in fonte
+    assert "statement_timeout" in fonte
+    # e os dois precisam ir juntos no engine da sonda
+    fn = next(n for n in ast.walk(arvore)
+              if isinstance(n, ast.FunctionDef) and n.name == "_make_readiness_engine")
+    corpo = ast.dump(fn)
+    assert "connect_timeout" in corpo and "statement_timeout" in corpo
+
+
+def test_a_sonda_nao_cria_engine_por_requisicao(monkeypatch):
+    """`create_engine` a cada health check e' alocacao inutil num caminho que
+    o Render bate sem parar."""
+    chamadas = []
+    monkeypatch.setattr(
+        database, "create_engine",
+        lambda *a, **k: chamadas.append(1),
+    )
+
+    class _Conn:
+        def execute(self, *_a, **_k):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(database, "readiness_engine",
+                        type("E", (), {"connect": lambda self: _Conn()})())
+    monkeypatch.setattr(database, "engine", object())
+    for _ in range(5):
+        database.readiness()
+    assert chamadas == []
+
+
+def test_os_limites_declarados_sao_curtos():
+    assert 1 <= database.READINESS_CONNECT_TIMEOUT_S <= 5
+    assert 500 <= database.READINESS_STATEMENT_TIMEOUT_MS <= 5000
+
+
+def test_o_modulo_documenta_o_limite_de_dns():
+    """`connect_timeout` do libpq so' comeca DEPOIS da resolucao de nome.
+    Anunciar teto total sem essa ressalva seria promessa falsa."""
+    import inspect
+
+    assert "DNS" in inspect.getdoc(database.readiness)
+
+
+# ---------------------------------------------------------------------------
+# N1 — `str(e)` legado nas checagens de conexao
+# ---------------------------------------------------------------------------
+class _ExcecaoComDsn(Exception):
+    """Imita psycopg2/SQLAlchemy, cuja mensagem carrega o DSN inteiro."""
+
+    def __init__(self):
+        super().__init__(
+            "connection to server failed: "
+            "postgresql://usuario_secreto:senha_secreta@host.interno:5432/banco"
+        )
+
+
+def test_check_connection_nao_devolve_a_mensagem_da_excecao(monkeypatch):
+    class _Engine:
+        def connect(self):
+            raise _ExcecaoComDsn()
+
+    monkeypatch.setattr(database, "engine", _Engine())
+    ok, msg = database.check_connection()
+    assert ok is False
+    for proibido in ("senha_secreta", "usuario_secreto", "host.interno",
+                     "postgresql://", "@"):
+        assert proibido not in msg, proibido
+    assert "DatabaseError" in msg or "_ExcecaoComDsn" in msg
+
+
+def test_check_datamart_connection_tambem_e_sanitizada(monkeypatch):
+    class _Engine:
+        def connect(self):
+            raise _ExcecaoComDsn()
+
+    monkeypatch.setattr(database, "datamart_engine", _Engine())
+    ok, msg = database.check_datamart_connection()
+    assert ok is False
+    for proibido in ("senha_secreta", "usuario_secreto", "host.interno", "@"):
+        assert proibido not in msg, proibido
+
+
+def test_engine_ausente_devolve_rotulo_fechado(monkeypatch):
+    monkeypatch.setattr(database, "engine", None)
+    monkeypatch.setattr(database, "datamart_engine", None)
+    assert database.check_connection() == (False, database.MSG_ENGINE_LOCAL_AUSENTE)
+    assert database.check_datamart_connection() == (
+        False, database.MSG_ENGINE_DATAMART_AUSENTE
+    )
+
+
 def test_o_modulo_nunca_loga_a_mensagem_da_excecao():
     """`str(exc)` em log de inicializacao e' vazamento de credencial."""
     import ast
