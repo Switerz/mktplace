@@ -1,4 +1,4 @@
-"""CLI da serie diaria de expedicao do TikTok Shop.
+"""CLI da LDR de expedicao do TikTok Shop.
 
     python -m pipelines.expedicao.tiktok_cli --diagnose
     python -m pipelines.expedicao.tiktok_cli --apply
@@ -23,7 +23,7 @@ import argparse
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pipelines.expedicao import audit as audit_mod
@@ -37,18 +37,26 @@ from pipelines.expedicao.tiktok_daily import (
     COLUNAS,
     DELETE_JANELA_SQL,
     JANELA_PADRAO_DIAS,
+    LIMIAR_CRITICO_INTERNO,
+    META_TIKTOK_LDR,
+    PRAZO_DIAS_UTEIS,
     PRAZO_E_RECONSTRUIDO,
     SOURCE_NAME,
     TABELA,
     Evento,
-    agregar_janela,
+    janela_de_vencimento,
+    janela_de_pagamento,
+    calcular_ldr,
     extrair,
     hoje_brt,
+    ler_proveniencia,
     ler_watermark,
     linhas_para_publicar,
     marcas_criticas,
     primeiro_dia_do_incidente,
-    serie_por_dia,
+    serie_por_pagamento,
+    serie_por_vencimento,
+    ultimo_dia_do_incidente,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +72,10 @@ EXIT_FONTE_NAO_PUBLICAVEL = 3
 EXIT_COMMIT_INDETERMINADO = 4
 EXIT_AUDITORIA_INCOMPLETA = 5
 EXIT_PRECONDICAO = 6
+
+#: Abaixo disto a cobertura de `IN_TRANSIT` nao sustenta a medicao de coleta:
+#: o diagnostico avisa em vez de apresentar uma taxa que mede outra coisa.
+COBERTURA_MINIMA_IN_TRANSIT = 0.95
 
 
 def log(msg: str) -> None:
@@ -98,36 +110,81 @@ def _agora_utc() -> datetime:
 # ---------------------------------------------------------------------------
 # Diagnostico
 # ---------------------------------------------------------------------------
-def _relatorio(coortes, hoje, dias: int) -> None:
+def _relatorio(coortes, proveniencia, hoje, dias: int) -> None:
+    desde, ate = janela_de_vencimento(hoje, dias)
     log(f"DIAGNOSTICO expedicao/{CANAL.value} — hoje (BRT) = {hoje}")
-    log(f"  janela: {dias} dias + hoje · {len(coortes)} coortes (dia x marca)")
+    log(f"  janela de vencimento: {desde} .. {ate}")
+    log(f"  {len(coortes)} coortes (data de pagamento x marca)")
     if PRAZO_E_RECONSTRUIDO:
-        log("  ATENCAO: o prazo e' RECONSTRUIDO da regra de 2 dias uteis.")
+        log("  ATENCAO: o prazo e' RECONSTRUIDO da politica de dias uteis")
+        log(f"  (RTS {PRAZO_DIAS_UTEIS[Evento.DESPACHO]} du, "
+            f"TTS {PRAZO_DIAS_UTEIS[Evento.COLETA]} du).")
         log("  O SLA oficial do TikTok nao e' ingerido (ver tiktok_daily.py).")
 
-    for evento in (Evento.DESPACHO, Evento.COLETA):
-        log("")
-        log(f"  === {evento.value.upper()} ===")
-        log("    dia         pagos   atrasados    taxa")
-        for dia, taxa, pagos, madura in serie_por_dia(coortes, evento, hoje):
-            atras = sum(
-                c.atrasados(evento) for c in coortes if c.paid_date == dia
-            )
-            marca = "" if madura else "   PARCIAL (prazo ainda nao venceu)"
-            log(f"    {dia}  {pagos:6d}  {atras:10d}  {_pct(taxa):>7}{marca}")
-        j = agregar_janela(coortes, evento, hoje)
-        log(f"    janela — razao dos totais  : {_pct(j.razao_dos_totais)}")
-        log(f"    janela — media das diarias : {_pct(j.media_das_diarias)}")
-        if j.divergencia_pp is not None:
-            log(f"    as duas leituras divergem em {j.divergencia_pp:+.2f} pp")
-        log(f"    coortes maduras={j.coortes_maduras} parciais={j.coortes_parciais}")
-
-    inicio = primeiro_dia_do_incidente(coortes, Evento.COLETA, hoje)
+    # --- proveniencia do instante de coleta -------------------------------
+    tot = sum(int(r["pedidos"]) for r in proveniencia)
+    com_it = sum(int(r["com_in_transit"]) for r in proveniencia)
+    so_post = sum(int(r["so_posterior"]) for r in proveniencia)
+    cobertura = (com_it / tot) if tot else 0.0
     log("")
-    log(f"  inicio do incidente de COLETA (limiar 10%): {inicio or 'nenhum'}")
-    log("  marcas por taxa de coleta atrasada:")
-    for marca, taxa, pagos in marcas_criticas(coortes, Evento.COLETA, hoje):
-        log(f"    {marca:<14}{_pct(taxa):>8}   ({pagos} pedidos)")
+    log("  === PROVENIENCIA DO INSTANTE DE COLETA ===")
+    log(f"    pedidos                           {tot}")
+    log(f"    com IN_TRANSIT (fonte usada)      {com_it}  ({_pct(cobertura)})")
+    log(f"    so' DELIVERED/COMPLETED (NAO usado) {so_post}")
+    log(f"    sem nenhum evento                 {tot - com_it - so_post}")
+    if cobertura < COBERTURA_MINIMA_IN_TRANSIT:
+        log("    AVISO: cobertura abaixo do minimo — a taxa de COLETA nao")
+        log("    sustenta conclusao sobre a transportadora.")
+
+    # --- as duas leituras --------------------------------------------------
+    for evento in (Evento.COLETA, Evento.DESPACHO):
+        ldr = calcular_ldr(coortes, evento, hoje, desde=desde, ate=ate)
+        log("")
+        log(f"  === LDR OPERACIONAL — VENCIMENTOS NA JANELA · {evento.value.upper()} "
+            f"({PRAZO_DIAS_UTEIS[evento]} dia(s) util(eis)) ===")
+        log(f"    taxa                 {_pct(ldr.taxa)}")
+        log(f"    meta do TikTok       {_pct(META_TIKTOK_LDR)}  -> "
+            f"{'FORA DA META' if ldr.fora_da_meta else 'dentro da meta'}")
+        if ldr.critico_interno:
+            log(f"    limiar interno       {_pct(LIMIAR_CRITICO_INTERNO)}  -> CRITICO")
+        log(f"    base (vencem na janela)   {ldr.base}")
+        log(f"    atrasados                 {ldr.atrasados}")
+        log(f"    pendentes ja vencidos     {ldr.pendentes_vencidos}")
+        log(f"    pendentes ainda no prazo  {ldr.pendentes_no_prazo} "
+            f"(em risco: {ldr.em_risco})")
+        log(f"    vencimentos maduros={ldr.vencimentos_maduros} "
+            f"parciais={ldr.vencimentos_parciais}")
+        log("    vence em    base  atrasados     taxa")
+        for d, taxa, base, atras, madura in serie_por_vencimento(coortes, evento, hoje):
+            if not (desde <= d <= ate):
+                continue
+            marca = "" if madura else "   PARCIAL (prazo ainda nao venceu)"
+            log(f"    {d}  {base:6d}  {atras:9d}  {_pct(taxa):>7}{marca}")
+
+    # --- fluxo por data de pagamento (a visao da gestao) -------------------
+    log("")
+    log("  === FLUXO POR DATA DE PAGAMENTO · COLETA ===")
+    log("  (denominador = quem PAGOU no dia; NAO e' a LDR oficial)")
+    log("    pago em     vence em    base  atrasados     taxa")
+    for d, venc, taxa, base, atras, madura in serie_por_pagamento(
+        coortes, Evento.COLETA, hoje
+    ):
+        if d < desde - (ate - desde):
+            continue
+        marca = "" if madura else "   PARCIAL"
+        log(f"    {d}  {venc}  {base:6d}  {atras:9d}  {_pct(taxa):>7}{marca}")
+
+    ini = primeiro_dia_do_incidente(coortes, Evento.COLETA, hoje)
+    fim = ultimo_dia_do_incidente(coortes, Evento.COLETA, hoje)
+    log("")
+    log(f"  incidente de COLETA (>= {_pct(LIMIAR_CRITICO_INTERNO)}, por vencimento): "
+        f"{ini or 'nenhum'} .. {fim or 'nenhum'}")
+    log("  marcas por LDR de coleta:")
+    for marca, taxa, base in marcas_criticas(
+        coortes, Evento.COLETA, hoje, desde=desde, ate=ate
+    ):
+        selo = "  FORA DA META" if taxa > META_TIKTOK_LDR else ""
+        log(f"    {marca:<14}{_pct(taxa):>8}   ({base} pedidos){selo}")
 
 
 def _run_diagnose(dias: int) -> int:
@@ -141,7 +198,8 @@ def _run_diagnose(dias: int) -> int:
         if not coortes:
             log("fonte sem coorte na janela — nada a diagnosticar.")
             return EXIT_FONTE_NAO_PUBLICAVEL
-        _relatorio(coortes, hoje, dias)
+        proveniencia = ler_proveniencia(fonte, hoje, dias)
+        _relatorio(coortes, proveniencia, hoje, dias)
     return EXIT_OK
 
 
@@ -161,8 +219,9 @@ def publicar(alvo, coortes, *, hoje, effective_at, watermark, desde, ate):
     MUDA quando um pedido dela e' finalmente coletado. Manter a linha velha
     congelaria a taxa historica num valor que deixou de ser verdade.
 
-    O DELETE e' limitado por canal E por intervalo de datas: a serie fora da
-    janela e' historico e nao pode ser tocada por uma execucao de rotina.
+    O DELETE e' limitado por canal E por intervalo de DATA DE PAGAMENTO — o
+    mesmo intervalo que foi extraido. A serie fora dele e' historico e nao pode
+    ser tocada por uma execucao de rotina.
     """
     lote, linhas = linhas_para_publicar(
         coortes, hoje=hoje, effective_at=effective_at, watermark=watermark
@@ -224,7 +283,7 @@ def _run_apply(dias: int) -> int:
             run_id = audit_mod.audit_start(auditoria, SOURCE_NAME, MARKETPLACE_ID[CANAL])
             effective_at = _agora_utc()
             hoje = hoje_brt(effective_at)
-            desde = hoje - timedelta(days=dias)
+            desde, ate = janela_de_pagamento(hoje, dias)
 
             with _conectar(fonte_url, readonly=True, nome="expedicao_tiktok_src") as fonte:
                 coortes = extrair(fonte, hoje, dias)
@@ -235,11 +294,11 @@ def _run_apply(dias: int) -> int:
 
             lote, gravadas, apagadas = publicar(
                 alvo, coortes, hoje=hoje, effective_at=effective_at,
-                watermark=watermark, desde=desde, ate=hoje,
+                watermark=watermark, desde=desde, ate=ate,
             )
             publicado = True
             log(f"PUBLICADO lote={lote} linhas={gravadas} (substituiu {apagadas})")
-            log(f"  janela {desde} .. {hoje} · effective_at={effective_at.isoformat()}")
+            log(f"  pagamentos {desde} .. {ate} · effective_at={effective_at.isoformat()}")
 
             audit_mod.audit_finish(
                 auditoria, run_id, "success",
@@ -279,13 +338,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="expedicao-tiktok",
         description=(
-            "Serie diaria de atraso de despacho do TikTok Shop. Sem --apply, "
-            "apenas diagnostico read-only."
+            "LDR de despacho do TikTok Shop. Sem --apply, apenas diagnostico "
+            "read-only."
         ),
     )
     p.add_argument(
         "--diagnose", action="store_true",
-        help="le a fonte e imprime a serie; nao abre conexao gravavel",
+        help="le a fonte e imprime as duas leituras; nao abre conexao gravavel",
     )
     p.add_argument(
         "--apply", action="store_true",
@@ -293,8 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--dias", type=int, default=JANELA_PADRAO_DIAS,
-        help=f"dias antes de hoje na janela (padrao {JANELA_PADRAO_DIAS}, "
-             f"totalizando {JANELA_PADRAO_DIAS + 1} coortes)",
+        help=f"dias de VENCIMENTO antes de hoje (padrao {JANELA_PADRAO_DIAS}, "
+             f"totalizando {JANELA_PADRAO_DIAS + 1} vencimentos)",
     )
     return p
 

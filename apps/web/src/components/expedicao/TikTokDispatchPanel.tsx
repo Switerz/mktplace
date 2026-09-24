@@ -1,20 +1,26 @@
 "use client";
 
 /**
- * Gate EXP-TK-OPS-1 — painel de atraso de despacho do TikTok Shop.
+ * Gate EXP-TK-OPS-1/2 — painel da LDR do TikTok Shop.
  *
- * Componente PROPRIO, e nao um ramo dentro do `ExpedicaoClient`. Aquele
- * componente serve dois canais ja em producao e tem 43 KB; o TikTok tem outra
- * forma de dado (serie por coorte, nao fila paginada), outros estados e outra
- * pergunta. Um `if (canal === "tiktokshop")` espalhado por ele poria Shopee e
- * Mercado Livre em risco a cada ajuste aqui.
+ * Componente PROPRIO, e nao um ramo dentro do `ExpedicaoClient`. Aquele serve
+ * dois canais ja em producao e tem 43 KB; o TikTok tem outra forma de dado
+ * (coorte por prazo, nao fila paginada), outros estados e outra pergunta. Um
+ * `if (canal === "tiktokshop")` espalhado por ele poria Shopee e Mercado Livre
+ * em risco a cada ajuste aqui.
  *
- * A tela responde, em ordem, as cinco perguntas da operacao:
- *   1. estamos dentro da regua?      -> cartao da taxa da janela
- *   2. quando o atraso comecou?      -> faixa do incidente + grafico
- *   3. quantos pedidos afetados?     -> cartoes de contagem
- *   4. quais lojas concentram?       -> tabela por marca
- *   5. quantos ainda da' para tratar -> cartao "ainda no prazo"
+ * A tela responde, nesta ordem:
+ *   1. estamos dentro da regua do TikTok?  -> cartao da LDR contra a meta de 4%
+ *   2. quando o atraso comecou?            -> faixa do incidente + grafico
+ *   3. quantos pedidos afetados?           -> cartoes de contagem
+ *   4. quais lojas concentram?             -> tabela por marca
+ *   5. quantos ainda da' para tratar?      -> cartao "ainda no prazo"
+ *
+ * As duas leituras aparecem SEPARADAS e NOMEADAS: a LDR (denominador = quem
+ * vence no periodo) e o fluxo por data de pagamento (denominador = quem pagou
+ * no dia). A segunda e' a visao que a gestao usa; usa-la como se fosse a LDR
+ * inflaria a taxa toda vez que um feriado empurrasse tres dias de pagamento
+ * para o mesmo vencimento.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -24,27 +30,35 @@ import {
   EVENTOS,
   EVENTO_PADRAO,
   EXPLICACAO_EVENTO,
+  EXPLICACAO_FLUXO,
+  EXPLICACAO_LDR,
   JANELAS,
   JANELA_INICIAL_DIAS,
+  META_TIKTOK_LDR,
   ROTULO_EVENTO,
+  ROTULO_LIMIAR_INTERNO,
+  ROTULO_META,
   ROTULO_SEVERIDADE,
+  TITULO_FLUXO,
+  TITULO_LDR,
   VALOR_SEM_TAXA,
   alturaDaBarra,
-  contarDiasCriticos,
+  alturaDaMeta,
+  contarCriticos,
+  contarForaDaMeta,
   descreverIncidente,
-  divergenciaEmPp,
   explicarIndisponivel,
   formatarDiaCurto,
   formatarDiaLongo,
   formatarInteiro,
   formatarTaxa,
-  marcasCriticas,
+  marcasForaDaMeta,
   queryDoTikTok,
   severidadeDoDia,
   taxaMaxima,
   type Evento,
   type Severidade,
-  type TikTokDia,
+  type TikTokLdrDia,
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
 
@@ -52,7 +66,7 @@ const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 const COR_SEVERIDADE: Record<Severidade, string> = {
   ok: "bg-emerald-500",
-  atencao: "bg-amber-500",
+  fora_da_meta: "bg-amber-500",
   critico: "bg-rose-600",
   // Hachurado de proposito: coorte parcial nao pode parecer um resultado
   // fechado, nem bom nem ruim.
@@ -62,7 +76,7 @@ const COR_SEVERIDADE: Record<Severidade, string> = {
 
 const TEXTO_SEVERIDADE: Record<Severidade, string> = {
   ok: "text-emerald-700 dark:text-emerald-400",
-  atencao: "text-amber-700 dark:text-amber-400",
+  fora_da_meta: "text-amber-700 dark:text-amber-400",
   critico: "text-rose-700 dark:text-rose-400",
   parcial: "text-slate-500 dark:text-slate-400",
 };
@@ -119,8 +133,7 @@ function GrupoRadio<T extends string>({
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   // Roving tabindex + setas: o grupo inteiro e' UMA parada de tabulacao, como
-  // manda o padrao de radiogroup. Sem isto, cada opcao vira uma parada e a
-  // navegacao por teclado fica insuportavel quando ha varios grupos.
+  // manda o padrao de radiogroup.
   const aoTeclar = (e: React.KeyboardEvent, i: number) => {
     const n = opcoes.length;
     let alvo = -1;
@@ -168,56 +181,70 @@ function GrupoRadio<T extends string>({
   );
 }
 
-function Grafico({ dias }: { dias: TikTokDia[] }) {
+function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
   const maximo = taxaMaxima(dias);
+  const meta = alturaDaMeta(maximo);
   if (!dias.length) return null;
   return (
     <div>
       {/* `items-stretch` e nao `items-end`: com `items-end` cada coluna e'
-          dimensionada pelo CONTEUDO, o `h-full` de dentro resolve para zero e
-          a barra (`height: X%`) desaparece — o grafico renderiza numeros e
-          datas sobre um retangulo vazio. A coluna precisa herdar a altura do
-          trilho, e a area da barra precisa de `flex-1` para receber o espaco
-          que sobra entre o rotulo de cima e a data de baixo. */}
-      <div
-        className="flex h-48 items-stretch gap-1 overflow-x-auto pb-1"
-        role="img"
-        aria-label={`Taxa por dia de pagamento. Máximo da série: ${formatarTaxa(maximo)}.`}
-      >
-        {dias.map((d) => {
-          const sev = severidadeDoDia(d);
-          return (
-            <div
-              key={d.paid_date}
-              className="flex min-w-[38px] flex-1 flex-col items-center gap-1"
-            >
-              <span className={`text-xs tabular-nums ${TEXTO_SEVERIDADE[sev]}`}>
-                {d.rate === null ? VALOR_SEM_TAXA : `${Math.round(d.rate * 100)}`}
-              </span>
-              <div className="flex w-full flex-1 items-end">
-                <div
-                  className={`w-full rounded-t ${COR_SEVERIDADE[sev]}`}
-                  style={{ height: `${alturaDaBarra(d, maximo)}%` }}
-                  title={`${formatarDiaLongo(d.paid_date)} · ${formatarTaxa(d.rate)} · ${
-                    ROTULO_SEVERIDADE[sev]
-                  }`}
-                />
+          dimensionada pelo CONTEUDO, o `flex-1` de dentro nao recebe altura e
+          a barra desaparece — o grafico renderiza numeros e datas sobre um
+          retangulo vazio. Ja aconteceu neste componente. */}
+      <div className="relative">
+        {meta !== null ? (
+          <div
+            className="pointer-events-none absolute inset-x-0 z-10 border-t border-dashed border-amber-500"
+            style={{ bottom: `calc(${meta}% + 1.25rem)` }}
+            aria-hidden="true"
+          >
+            <span className="absolute -top-4 right-0 rounded bg-amber-100 px-1 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              {ROTULO_META} {formatarTaxa(META_TIKTOK_LDR, 0)}
+            </span>
+          </div>
+        ) : null}
+        <div
+          className="flex h-48 items-stretch gap-1 overflow-x-auto pb-1"
+          role="img"
+          aria-label={`Taxa por dia de vencimento. Máximo da série: ${formatarTaxa(
+            maximo,
+          )}. Meta do TikTok: ${formatarTaxa(META_TIKTOK_LDR, 0)}.`}
+        >
+          {dias.map((d) => {
+            const sev = severidadeDoDia(d);
+            return (
+              <div
+                key={d.due_date}
+                className="flex min-w-[38px] flex-1 flex-col items-center gap-1"
+              >
+                <span className={`text-xs tabular-nums ${TEXTO_SEVERIDADE[sev]}`}>
+                  {d.rate === null ? VALOR_SEM_TAXA : `${Math.round(d.rate * 100)}`}
+                </span>
+                <div className="flex w-full flex-1 items-end">
+                  <div
+                    className={`w-full rounded-t ${COR_SEVERIDADE[sev]}`}
+                    style={{ height: `${alturaDaBarra(d, maximo)}%` }}
+                    title={`${formatarDiaLongo(d.due_date)} · ${formatarTaxa(d.rate)} · ${
+                      ROTULO_SEVERIDADE[sev]
+                    }`}
+                  />
+                </div>
+                <span className="text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                  {formatarDiaCurto(d.due_date)}
+                </span>
               </div>
-              <span className="text-xs tabular-nums text-slate-500 dark:text-slate-400">
-                {formatarDiaCurto(d.paid_date)}
-              </span>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
       <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500 dark:text-slate-400">
-        {(["ok", "atencao", "critico", "parcial"] as Severidade[]).map((s) => (
+        {(["ok", "fora_da_meta", "critico", "parcial"] as Severidade[]).map((s) => (
           <span key={s} className="inline-flex items-center gap-1.5">
             <span className={`inline-block h-2.5 w-2.5 rounded-sm ${COR_SEVERIDADE[s]}`} />
             {ROTULO_SEVERIDADE[s]}
           </span>
         ))}
-        <span>Números em % de pedidos pagos do dia.</span>
+        <span>Números em % dos pedidos que venciam no dia.</span>
       </div>
     </div>
   );
@@ -240,12 +267,9 @@ export default function TikTokDispatchPanel() {
     try {
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = (await r.json()) as TikTokPayload;
-      setDados(j);
+      setDados((await r.json()) as TikTokPayload);
       setEstado("ok");
     } catch (e) {
-      // A mensagem tecnica fica, mas nunca ecoa corpo de resposta: o texto de
-      // erro do servidor pode conter conteudo que nao queremos renderizar.
       setErro(e instanceof Error ? e.message : "falha de rede");
       setEstado("erro");
     }
@@ -255,12 +279,13 @@ export default function TikTokDispatchPanel() {
     void carregar();
   }, [carregar]);
 
-  const janela = dados?.window ?? null;
-  const diasSerie = dados?.daily ?? [];
-  const criticos = contarDiasCriticos(diasSerie);
-  const incidente = descreverIncidente(janela);
-  const divergencia = divergenciaEmPp(janela);
-  const piores = marcasCriticas(dados?.brands ?? []);
+  const ldr = dados?.ldr ?? null;
+  const fluxo = dados?.payment_flow ?? [];
+  const foraDaMeta = ldr ? contarForaDaMeta(ldr.daily) : 0;
+  const criticos = ldr ? contarCriticos(ldr.daily) : 0;
+  const incidente = descreverIncidente(ldr);
+  const piores = marcasForaDaMeta(dados?.brands ?? []);
+  const sla = dados?.sla_business_days?.[evento];
 
   return (
     <section className="space-y-4" aria-labelledby="tk-titulo">
@@ -270,7 +295,7 @@ export default function TikTokDispatchPanel() {
             Expedição — TikTok Shop
           </h2>
           <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-            Taxa de atraso por data de pagamento. {EXPLICACAO_EVENTO[evento]}
+            {EXPLICACAO_EVENTO[evento]}
           </p>
         </div>
         {dados?.snapshot ? (
@@ -343,7 +368,7 @@ export default function TikTokDispatchPanel() {
         </div>
       ) : null}
 
-      {estado === "ok" && dados?.availability === "available" && janela ? (
+      {estado === "ok" && dados?.availability === "available" && ldr ? (
         <>
           {dados.alerts.length ? (
             <ul className="space-y-1.5">
@@ -353,7 +378,9 @@ export default function TikTokDispatchPanel() {
                   className={`rounded-md border px-3 py-2 text-sm ${
                     a.severity === "critical"
                       ? "border-rose-300 bg-rose-50 text-rose-900 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-200"
-                      : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                      : a.severity === "warning"
+                        ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                        : "border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
                   }`}
                 >
                   {a.message}
@@ -362,110 +389,132 @@ export default function TikTokDispatchPanel() {
             </ul>
           ) : null}
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <Cartao
-              titulo="Taxa da janela"
-              valor={formatarTaxa(janela.rate_ratio_of_totals)}
-              detalhe={
-                divergencia === null
-                  ? `${janela.mature_cohorts} coorte(s) madura(s).`
-                  : // Separador decimal em pt-BR: a tela inteira usa virgula,
-                    // e um "+5.80 pp" ao lado de "23,09%" parece outro sistema.
-                    `Média das diárias: ${formatarTaxa(
-                      janela.rate_mean_of_daily,
-                    )} (${divergencia >= 0 ? "+" : ""}${divergencia
-                      .toFixed(2)
-                      .replace(".", ",")} pp).`
-              }
-              tom={
-                janela.rate_ratio_of_totals !== null &&
-                janela.rate_ratio_of_totals >= 0.1
-                  ? "critico"
-                  : "neutro"
-              }
-            />
-            <Cartao
-              titulo="Pedidos pagos"
-              valor={formatarInteiro(janela.paid_orders)}
-              detalhe={`${janela.partial_cohorts} coorte(s) ainda no prazo, fora do cálculo.`}
-            />
-            <Cartao
-              titulo="Já atrasaram"
-              valor={formatarInteiro(janela.late_orders)}
-              detalhe={`${formatarInteiro(janela.pending_overdue)} venceram e ainda não saíram.`}
-              tom={janela.late_orders > 0 ? "critico" : "bom"}
-            />
-            <Cartao
-              titulo="Ainda dá para tratar"
-              valor={formatarInteiro(janela.pending_at_risk)}
-              detalhe={`De ${formatarInteiro(
-                janela.pending_on_time,
-              )} pendentes no prazo, estes vencem hoje ou amanhã.`}
-              tom={janela.pending_at_risk > 0 ? "alerta" : "neutro"}
-            />
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              {TITULO_LDR}
+            </h3>
+            <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+              {EXPLICACAO_LDR}
+              {sla ? ` Prazo do evento: ${sla} dia(s) útil(eis).` : ""}
+            </p>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <Cartao
+                titulo="LDR da janela"
+                valor={formatarTaxa(ldr.rate)}
+                detalhe={
+                  ldr.rate === null
+                    ? "Sem vencimento maduro na janela."
+                    : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
+                        ldr.above_target ? "FORA DA META" : "dentro da meta"
+                      }`
+                }
+                tom={ldr.above_target ? "critico" : "bom"}
+              />
+              <Cartao
+                titulo="Venciam no período"
+                valor={formatarInteiro(ldr.base)}
+                detalhe={`${ldr.mature_due_days} dia(s) fechado(s), ${ldr.partial_due_days} ainda no prazo.`}
+              />
+              <Cartao
+                titulo="Já atrasaram"
+                valor={formatarInteiro(ldr.late)}
+                detalhe={`${formatarInteiro(ldr.pending_overdue)} venceram e ainda não saíram.`}
+                tom={ldr.late > 0 ? "critico" : "bom"}
+              />
+              <Cartao
+                titulo="Ainda dá para tratar"
+                valor={formatarInteiro(ldr.pending_at_risk)}
+                detalhe={`De ${formatarInteiro(
+                  ldr.pending_on_time,
+                )} pendentes no prazo, estes vencem hoje ou amanhã.`}
+                tom={ldr.pending_at_risk > 0 ? "alerta" : "neutro"}
+              />
+            </div>
           </div>
 
           <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
             <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Evolução por dia de pagamento
+                Evolução por dia de vencimento
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {criticos > 0
-                  ? `${criticos} dia(s) crítico(s).${incidente ? ` ${incidente}` : ""}`
-                  : "Nenhum dia acima do limiar na janela."}
+                {foraDaMeta > 0
+                  ? `${foraDaMeta} dia(s) fora da meta, ${criticos} acima do ${ROTULO_LIMIAR_INTERNO.toLowerCase()}.${
+                      incidente ? ` ${incidente}` : ""
+                    }`
+                  : "Nenhum dia fora da meta na janela."}
               </p>
             </div>
-            <Grafico dias={diasSerie} />
+            <Grafico dias={ldr.daily} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-              <h3 className="border-b border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-900 dark:border-slate-700 dark:text-slate-100">
-                Dia a dia
-              </h3>
-              <div className="max-h-80 overflow-auto">
+              <div className="border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {TITULO_FLUXO}
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  {EXPLICACAO_FLUXO}
+                </p>
+              </div>
+              <div className="max-h-96 overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                     <tr>
-                      <th className="px-3 py-2 text-left font-medium">Pago em</th>
-                      <th className="px-3 py-2 text-right font-medium">Pagos</th>
-                      <th className="px-3 py-2 text-right font-medium">Atrasados</th>
-                      <th className="px-3 py-2 text-right font-medium">Taxa</th>
+                      <th className="px-2 py-2 text-left font-medium">Pago em</th>
+                      <th className="px-2 py-2 text-right font-medium">Pagos</th>
+                      <th className="px-2 py-2 text-right font-medium">No prazo</th>
+                      <th className="px-2 py-2 text-right font-medium">Atrasados</th>
+                      <th className="px-2 py-2 text-right font-medium">Vencidos s/ envio</th>
+                      <th className="px-2 py-2 text-right font-medium">No prazo s/ envio</th>
+                      <th className="px-2 py-2 text-right font-medium">Taxa</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {diasSerie.map((d) => {
-                      const sev = severidadeDoDia(d);
-                      return (
-                        <tr
-                          key={d.paid_date}
-                          className="border-t border-slate-100 dark:border-slate-800"
+                    {fluxo.map((f) => (
+                      <tr
+                        key={f.paid_date}
+                        className="border-t border-slate-100 dark:border-slate-800"
+                      >
+                        <td className="whitespace-nowrap px-2 py-1.5 text-slate-700 dark:text-slate-300">
+                          {formatarDiaLongo(f.paid_date)}
+                          {!f.is_mature ? (
+                            <span className="ml-1.5 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                              parcial
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatarInteiro(f.paid_orders)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatarInteiro(f.shipped_on_time)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatarInteiro(f.shipped_late)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatarInteiro(f.pending_overdue)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatarInteiro(f.pending_on_time)}
+                        </td>
+                        <td
+                          className={`px-2 py-1.5 text-right font-medium tabular-nums ${
+                            !f.is_mature
+                              ? "text-slate-500"
+                              : (f.rate ?? 0) > META_TIKTOK_LDR
+                                ? "text-rose-700 dark:text-rose-400"
+                                : "text-emerald-700 dark:text-emerald-400"
+                          }`}
                         >
-                          <td className="whitespace-nowrap px-3 py-1.5 text-slate-700 dark:text-slate-300">
-                            {formatarDiaLongo(d.paid_date)}
-                            {!d.is_mature ? (
-                              <span className="ml-1.5 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300">
-                                parcial
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
-                            {formatarInteiro(d.pedidos_pagos)}
-                          </td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
-                            {formatarInteiro(d.atrasados)}
-                          </td>
-                          <td
-                            className={`px-3 py-1.5 text-right font-medium tabular-nums ${TEXTO_SEVERIDADE[sev]}`}
-                          >
-                            {/* Coorte parcial NUNCA mostra a taxa como numero
-                                fechado: ela ainda vai mudar. */}
-                            {d.is_mature ? formatarTaxa(d.rate) : VALOR_SEM_TAXA}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                          {/* Coorte parcial NUNCA mostra a taxa fechada: ela
+                              ainda vai mudar. */}
+                          {f.is_mature ? formatarTaxa(f.rate) : VALOR_SEM_TAXA}
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -476,18 +525,18 @@ export default function TikTokDispatchPanel() {
                 Por loja
                 {piores.length ? (
                   <span className="ml-2 text-xs font-normal text-rose-700 dark:text-rose-400">
-                    {piores.length} acima do limiar
+                    {piores.length} fora da meta
                   </span>
                 ) : null}
               </h3>
-              <div className="max-h-80 overflow-auto">
+              <div className="max-h-96 overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                     <tr>
                       <th className="px-3 py-2 text-left font-medium">Loja</th>
-                      <th className="px-3 py-2 text-right font-medium">Pagos</th>
+                      <th className="px-3 py-2 text-right font-medium">Venciam</th>
                       <th className="px-3 py-2 text-right font-medium">Atrasados</th>
-                      <th className="px-3 py-2 text-right font-medium">Taxa</th>
+                      <th className="px-3 py-2 text-right font-medium">LDR</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -497,16 +546,16 @@ export default function TikTokDispatchPanel() {
                           {m.shop_name ?? m.brand}
                         </td>
                         <td className="px-3 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
-                          {formatarInteiro(m.pedidos_pagos)}
+                          {formatarInteiro(m.base)}
                         </td>
                         <td className="px-3 py-1.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
-                          {formatarInteiro(m.atrasados)}
+                          {formatarInteiro(m.late)}
                         </td>
                         <td
                           className={`px-3 py-1.5 text-right font-medium tabular-nums ${
-                            m.rate !== null && m.rate >= 0.1
+                            m.above_target
                               ? "text-rose-700 dark:text-rose-400"
-                              : "text-slate-700 dark:text-slate-300"
+                              : "text-emerald-700 dark:text-emerald-400"
                           }`}
                         >
                           {formatarTaxa(m.rate)}
@@ -517,8 +566,8 @@ export default function TikTokDispatchPanel() {
                 </table>
               </div>
               <p className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                Só lojas com base suficiente no período. Coortes ainda no prazo
-                ficam de fora.
+                Só lojas com base suficiente no período. Vencimentos ainda no
+                prazo ficam de fora.
               </p>
             </div>
           </div>

@@ -292,39 +292,85 @@ class TendenciaResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Gate EXP-TK-OPS-1 — TikTok Shop: serie diaria por data de pagamento
+# Gate EXP-TK-OPS-1/2 — TikTok Shop: LDR e fluxo por data de pagamento
 # ---------------------------------------------------------------------------
 UNAVAILABLE_NOT_MIGRATED = "table_not_migrated"
 UNAVAILABLE_NO_SERIES = "no_series_published"
 
 
-class TikTokDiaItem(BaseModel):
-    """Uma data de pagamento, ja consolidada entre as marcas."""
+class TikTokLdrDia(BaseModel):
+    """Um dia de VENCIMENTO. E' o grao da metrica oficial.
+
+    Nao confundir com `TikTokFluxoDia`, que e' por data de PAGAMENTO. Um
+    feriado empurra tres datas de pagamento para o mesmo vencimento: aqui isso
+    vira uma linha com o volume somado, la' virariam tres linhas de ~100%.
+    """
+
+    due_date: date
+    base: int
+    late: int
+    pending_overdue: int
+    pending_on_time: int
+    #: `None` quando nao ha base. NUNCA 0.0 nesse caso.
+    rate: Optional[float]
+    is_mature: bool
+    #: Acima da META do TikTok (4%): conformidade com a plataforma.
+    above_target: bool
+    #: Acima do limiar INTERNO (10%): severidade nossa. Sao coisas diferentes.
+    is_critical: bool
+
+
+class TikTokFluxoDia(BaseModel):
+    """Uma data de PAGAMENTO. Reproduz as colunas da planilha da gestao.
+
+    NAO e' a LDR: o denominador e' quem pagou no dia, nao quem vence no dia.
+    """
 
     paid_date: date
     deadline_date: date
-    pedidos_pagos: int
-    cancelados: int
-    atrasados: int
-    pendentes_vencidos: int
-    pendentes_no_prazo: int
-    #: `None` quando nao houve pedido pago. NUNCA 0.0 nesse caso: zero seria
-    #: lido como "dia perfeito" e entraria assim numa media.
+    paid_orders: int
+    excluded_samples: int
+    excluded_cancelled: int
+    base: int
+    shipped_on_time: int
+    shipped_late: int
+    pending_overdue: int
+    pending_on_time: int
+    late: int
     rate: Optional[float]
-    #: A coorte so' e' comparavel depois que o prazo dela venceu. Enquanto
-    #: `false`, a taxa ainda pode subir e a tela precisa rotular como parcial.
     is_mature: bool
-    #: So' pode ser `true` em coorte madura — destacar em vermelho um dia que
-    #: ainda da' para cumprir acusa a operacao por algo que nao aconteceu.
-    is_critical: bool
+
+
+class TikTokLdr(BaseModel):
+    """LDR OPERACIONAL — vencimentos na janela. A metrica oficial."""
+
+    from_: date = Field(alias="from")
+    to: date
+    days: int
+    rate: Optional[float]
+    base: int
+    late: int
+    pending_overdue: int
+    pending_on_time: int
+    pending_at_risk: int
+    mature_due_days: int
+    partial_due_days: int
+    above_target: bool
+    internal_critical: bool
+    incident_start: Optional[date] = None
+    incident_end: Optional[date] = None
+    daily: list[TikTokLdrDia] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
 
 
 class TikTokMarcaItem(BaseModel):
     brand: str
     shop_name: Optional[str] = None
-    pedidos_pagos: int
-    atrasados: int
+    base: int
+    late: int
     rate: Optional[float]
+    above_target: bool
 
 
 class TikTokSnapshot(BaseModel):
@@ -334,31 +380,8 @@ class TikTokSnapshot(BaseModel):
     today_brt: date
 
 
-class TikTokJanela(BaseModel):
-    days: int
-    from_: date = Field(alias="from")
-    to: date
-    #: As DUAS leituras da janela, sempre as duas. A gestao descreveu a janela
-    #: como media das taxas diarias; medido em 2026-09-24 as duas divergiram
-    #: 3,96 pp na mesma janela. A fonte nao diz qual a plataforma usa, entao
-    #: publicar so' uma seria escolher sem prova.
-    rate_ratio_of_totals: Optional[float]
-    rate_mean_of_daily: Optional[float]
-    mature_cohorts: int
-    partial_cohorts: int
-    paid_orders: int
-    late_orders: int
-    pending_overdue: int
-    pending_on_time: int
-    pending_at_risk: int
-    incident_start: Optional[date] = None
-    incident_end: Optional[date] = None
-
-    model_config = {"populate_by_name": True}
-
-
 class TikTokAlerta(BaseModel):
-    severity: Literal["critical", "warning"]
+    severity: Literal["critical", "warning", "info"]
     code: str
     message: str
 
@@ -368,12 +391,19 @@ class TikTokDispatchResponse(BaseModel):
     unavailable_reason: Optional[str] = None
     channel: Literal["tiktokshop"]
     event: Optional[Literal["despacho", "coleta"]] = None
-    #: SEMPRE `true` enquanto o SLA oficial do TikTok nao for ingerido. Existe
-    #: para que nenhuma tela exiba a taxa como se fosse a medicao da
-    #: plataforma — o prazo aqui e' reconstruido da regra de 2 dias uteis.
+    #: SEMPRE `true` enquanto o SLA oficial do TikTok nao for ingerido. O prazo
+    #: aqui e' reconstruido da politica de dias uteis, e nenhuma tela pode
+    #: exibir a taxa como se fosse a medicao de penalizacao da plataforma.
     deadline_is_reconstructed: bool
+    #: Os prazos da POLITICA, por evento: RTS 1 dia util, TTS 2.
+    sla_business_days: dict[str, int]
+    #: `tiktok_ldr` = meta da plataforma (conformidade).
+    #: `internal_critical` = limiar nosso (severidade). Nomes distintos de
+    #: proposito: confundi-los faria a tela dizer "dentro da meta" num dia
+    #: de 9%.
+    targets: dict[str, float]
     snapshot: Optional[TikTokSnapshot] = None
-    window: Optional[TikTokJanela] = None
-    daily: list[TikTokDiaItem] = Field(default_factory=list)
+    ldr: Optional[TikTokLdr] = None
+    payment_flow: list[TikTokFluxoDia] = Field(default_factory=list)
     brands: list[TikTokMarcaItem] = Field(default_factory=list)
     alerts: list[TikTokAlerta] = Field(default_factory=list)

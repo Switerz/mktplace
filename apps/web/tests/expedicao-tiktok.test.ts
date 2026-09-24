@@ -1,9 +1,9 @@
-// Gate EXP-TK-OPS-1 — contrato da tela de expedicao do TikTok Shop.
+// Gate EXP-TK-OPS-1/2 — contrato da tela de LDR do TikTok Shop.
 //
 // O foco e' o que erra em silencio na tela: um `0%` mostrado numa coorte que
-// ainda nao venceu, uma data que anda um dia para tras por causa do fuso, e
-// uma barra que some porque a normalizacao do grafico esta errada. Nenhum
-// desses casos quebra nada — todos apenas mentem.
+// ainda nao venceu, os dois limiares confundidos (a tela diria "dentro da meta"
+// num dia de 9%), uma data que anda um dia para tras por causa do fuso, e uma
+// barra que some porque a normalizacao do grafico esta errada.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,48 +11,54 @@ import {
   AVISO_PRAZO_RECONSTRUIDO,
   EVENTOS,
   EVENTO_PADRAO,
+  EXPLICACAO_FLUXO,
+  EXPLICACAO_LDR,
   JANELA_INICIAL_DIAS,
-  LIMIAR_DIA_CRITICO,
+  LIMIAR_CRITICO_INTERNO,
+  META_TIKTOK_LDR,
   ROTULO_EVENTO,
+  ROTULO_LIMIAR_INTERNO,
+  ROTULO_META,
+  ROTULO_SEVERIDADE,
+  TITULO_FLUXO,
+  TITULO_LDR,
   VALOR_SEM_TAXA,
   alturaDaBarra,
-  contarDiasCriticos,
+  alturaDaMeta,
+  contarCriticos,
+  contarForaDaMeta,
   descreverIncidente,
-  divergenciaEmPp,
   explicarIndisponivel,
   formatarDiaCurto,
   formatarDiaLongo,
   formatarInteiro,
   formatarTaxa,
-  marcasCriticas,
+  marcasForaDaMeta,
   queryDoTikTok,
   severidadeDoDia,
   taxaMaxima,
-  type TikTokDia,
-  type TikTokJanela,
+  type TikTokLdr,
+  type TikTokLdrDia,
 } from "../src/lib/expedicao-tiktok-contract.ts";
 
-function dia(p: Partial<TikTokDia> & { paid_date: string }): TikTokDia {
+function dia(p: Partial<TikTokLdrDia> & { due_date: string }): TikTokLdrDia {
   return {
-    deadline_date: "2026-09-25",
-    pedidos_pagos: 100,
-    cancelados: 0,
-    atrasados: 0,
-    pendentes_vencidos: 0,
-    pendentes_no_prazo: 0,
+    base: 100,
+    late: 0,
+    pending_overdue: 0,
+    pending_on_time: 0,
     rate: 0,
     is_mature: true,
+    above_target: false,
     is_critical: false,
     ...p,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Eventos
+// Eventos e prazos
 // ---------------------------------------------------------------------------
 test("os dois eventos existem e a coleta e' o padrao", () => {
-  // A coleta e' o evento em que o incidente aparece: na janela medida o
-  // despacho ficou em ~0,05% e a coleta chegou a 88,9% num unico dia.
   assert.deepEqual([...EVENTOS], ["coleta", "despacho"]);
   assert.equal(EVENTO_PADRAO, "coleta");
 });
@@ -65,157 +71,145 @@ test("cada evento tem rotulo em portugues, sem termo cru da fonte", () => {
   }
 });
 
-test("o aviso do prazo diz que o numero nao e' o do TikTok", () => {
-  // Sem isto a tela afirma medir a penalizacao da plataforma, que ninguem mediu.
+test("o aviso do prazo diz que o numero nao e' o do TikTok e cita os dois prazos", () => {
   assert.match(AVISO_PRAZO_RECONSTRUIDO, /reconstru/i);
-  assert.match(AVISO_PRAZO_RECONSTRUIDO, /TikTok/);
+  assert.match(AVISO_PRAZO_RECONSTRUIDO, /1 dia/);
+  assert.match(AVISO_PRAZO_RECONSTRUIDO, /2 para/);
+});
+
+// ---------------------------------------------------------------------------
+// Os DOIS limiares — nomes e valores distintos
+// ---------------------------------------------------------------------------
+test("meta do TikTok e limiar interno sao numeros e nomes diferentes", () => {
+  // Confundi-los faria a tela dizer "dentro da meta" num dia de 9%.
+  assert.equal(META_TIKTOK_LDR, 0.04);
+  assert.equal(LIMIAR_CRITICO_INTERNO, 0.1);
+  assert.ok(META_TIKTOK_LDR < LIMIAR_CRITICO_INTERNO);
+  assert.notEqual(ROTULO_META, ROTULO_LIMIAR_INTERNO);
+  assert.match(ROTULO_META, /TikTok/);
+  assert.match(ROTULO_LIMIAR_INTERNO, /interno/i);
+});
+
+test("as duas leituras tem titulos e explicacoes distintos", () => {
+  assert.notEqual(TITULO_LDR, TITULO_FLUXO);
+  assert.match(TITULO_LDR, /vencimento/i);
+  assert.match(TITULO_FLUXO, /pagamento/i);
+  // a explicacao do fluxo precisa dizer que ele NAO e' a LDR
+  assert.match(EXPLICACAO_FLUXO, /não é a LDR/i);
+  assert.match(EXPLICACAO_LDR, /vence/i);
+});
+
+// ---------------------------------------------------------------------------
+// Severidade — le os selos da API, nao recalcula
+// ---------------------------------------------------------------------------
+test("coorte imatura e' sempre parcial, por pior que pareca a taxa", () => {
+  const d = dia({ due_date: "2026-09-24", rate: 0.9, is_mature: false, is_critical: true });
+  assert.equal(severidadeDoDia(d), "parcial");
+});
+
+test("coorte imatura com taxa zero tambem e' parcial, nao verde", () => {
+  // Este e' o caso de hoje: quase sempre 0%, quase nunca termina em 0%.
+  assert.equal(severidadeDoDia(dia({ due_date: "x", rate: 0, is_mature: false })), "parcial");
+});
+
+test("os selos da API mandam na cor, e a tela nao recalcula o limiar", () => {
+  assert.equal(severidadeDoDia(dia({ due_date: "a", rate: 0.02 })), "ok");
+  assert.equal(
+    severidadeDoDia(dia({ due_date: "b", rate: 0.05, above_target: true })),
+    "fora_da_meta",
+  );
+  assert.equal(
+    severidadeDoDia(dia({ due_date: "c", rate: 0.2, above_target: true, is_critical: true })),
+    "critico",
+  );
+});
+
+test("cada severidade tem rotulo distinto e o de meta cita o TikTok", () => {
+  const rotulos = Object.values(ROTULO_SEVERIDADE);
+  assert.equal(new Set(rotulos).size, rotulos.length);
+  assert.match(ROTULO_SEVERIDADE.fora_da_meta, /TikTok/);
+  assert.match(ROTULO_SEVERIDADE.critico, /interno/i);
 });
 
 // ---------------------------------------------------------------------------
 // Formatacao
 // ---------------------------------------------------------------------------
 test("taxa ausente nunca vira 0%", () => {
-  // `0%` numa coorte sem base seria lido como "dia perfeito".
   assert.equal(formatarTaxa(null), VALOR_SEM_TAXA);
   assert.equal(formatarTaxa(undefined), VALOR_SEM_TAXA);
   assert.equal(formatarTaxa(Number.NaN), VALOR_SEM_TAXA);
   assert.equal(formatarTaxa(0), "0,00%");
-  assert.equal(formatarTaxa(0.889), "88,90%");
+  assert.equal(formatarTaxa(0.0518), "5,18%");
+  assert.equal(formatarTaxa(0.04, 0), "4%");
 });
 
 test("inteiro ausente tambem nao vira zero", () => {
   assert.equal(formatarInteiro(null), VALOR_SEM_TAXA);
   assert.equal(formatarInteiro(0), "0");
+  assert.equal(formatarInteiro(36495), "36.495");
 });
 
 test("a data da coorte nao anda um dia para tras", () => {
-  // `new Date("2026-09-07")` e' meia-noite UTC e volta 06/09 em qualquer fuso
-  // negativo — o nosso. A tela inteira mostraria o dia errado.
+  // `new Date("2026-09-07")` e' meia-noite UTC e volta 06/09 em fuso negativo.
   assert.equal(formatarDiaCurto("2026-09-07"), "07/09");
   assert.equal(formatarDiaLongo("2026-09-07"), "07/09/2026");
   assert.equal(formatarDiaCurto("2026-01-01"), "01/01");
-  assert.equal(formatarDiaLongo("2026-12-31"), "31/12/2026");
 });
 
 // ---------------------------------------------------------------------------
-// Severidade e maturacao
-// ---------------------------------------------------------------------------
-test("coorte imatura e' sempre parcial, por pior que pareca a taxa", () => {
-  const d = dia({ paid_date: "2026-09-24", rate: 0.9, is_mature: false });
-  assert.equal(severidadeDoDia(d), "parcial");
-});
-
-test("coorte imatura com taxa zero tambem e' parcial, nao verde", () => {
-  // Este e' o caso de "hoje": quase sempre 0%, quase nunca termina em 0%.
-  const d = dia({ paid_date: "2026-09-24", rate: 0, is_mature: false });
-  assert.equal(severidadeDoDia(d), "parcial");
-});
-
-test("coorte madura classifica pelo limiar", () => {
-  assert.equal(severidadeDoDia(dia({ paid_date: "a", rate: 0.0 })), "ok");
-  assert.equal(severidadeDoDia(dia({ paid_date: "b", rate: 0.04 })), "ok");
-  assert.equal(severidadeDoDia(dia({ paid_date: "c", rate: 0.05 })), "atencao");
-  assert.equal(severidadeDoDia(dia({ paid_date: "d", rate: 0.1 })), "critico");
-  assert.equal(severidadeDoDia(dia({ paid_date: "e", rate: 0.889 })), "critico");
-});
-
-test("coorte madura sem base e' ok e nao critica", () => {
-  assert.equal(severidadeDoDia(dia({ paid_date: "f", rate: null, pedidos_pagos: 0 })), "ok");
-});
-
-test("o limiar da tela e' o mesmo da API", () => {
-  // Se divergirem, o alerta e o destaque do grafico discordam na mesma tela.
-  assert.equal(LIMIAR_DIA_CRITICO, 0.1);
-});
-
-// ---------------------------------------------------------------------------
-// Incidente
+// Incidente e contagens
 // ---------------------------------------------------------------------------
 test("sem incidente nao inventa periodo", () => {
-  const j = { incident_start: null, incident_end: null } as unknown as TikTokJanela;
+  const j = { incident_start: null, incident_end: null } as unknown as TikTokLdr;
   assert.equal(descreverIncidente(j), null);
   assert.equal(descreverIncidente(null), null);
 });
 
-test("incidente de um dia so' nao vira intervalo", () => {
+test("incidente de um vencimento so' nao vira intervalo", () => {
   const j = {
-    incident_start: "2026-09-07",
-    incident_end: "2026-09-07",
-  } as unknown as TikTokJanela;
-  assert.match(descreverIncidente(j)!, /Um dia/);
-  assert.match(descreverIncidente(j)!, /07\/09\/2026/);
+    incident_start: "2026-09-17",
+    incident_end: "2026-09-17",
+  } as unknown as TikTokLdr;
+  assert.match(descreverIncidente(j)!, /Um vencimento/);
 });
 
 test("incidente com inicio e fim descreve o intervalo", () => {
   const j = {
-    incident_start: "2026-09-06",
-    incident_end: "2026-09-13",
-  } as unknown as TikTokJanela;
+    incident_start: "2026-09-10",
+    incident_end: "2026-09-17",
+  } as unknown as TikTokLdr;
   const t = descreverIncidente(j)!;
-  assert.match(t, /06\/09\/2026/);
-  assert.match(t, /13\/09\/2026/);
+  assert.match(t, /10\/09\/2026/);
+  assert.match(t, /17\/09\/2026/);
 });
 
-test("conta apenas os dias marcados como criticos pela API", () => {
+test("conta fora-da-meta e critico separadamente", () => {
   const dias = [
-    dia({ paid_date: "2026-09-06", rate: 0.35, is_critical: true }),
-    dia({ paid_date: "2026-09-07", rate: 0.889, is_critical: true }),
-    dia({ paid_date: "2026-09-08", rate: 0.02 }),
-    // imatura com taxa alta: a API nunca marca critica, e a tela nao recalcula
-    dia({ paid_date: "2026-09-24", rate: 0.9, is_mature: false }),
+    dia({ due_date: "a", rate: 0.05, above_target: true }),
+    dia({ due_date: "b", rate: 0.2, above_target: true, is_critical: true }),
+    dia({ due_date: "c", rate: 0.01 }),
+    dia({ due_date: "d", rate: 0.9, is_mature: false }),
   ];
-  assert.equal(contarDiasCriticos(dias), 2);
-});
-
-// ---------------------------------------------------------------------------
-// As duas leituras da janela
-// ---------------------------------------------------------------------------
-test("a divergencia entre as duas leituras e' exposta em pontos percentuais", () => {
-  // Medido em 2026-09-24 na janela de 14 dias: 14,42% contra 10,46%.
-  const j = {
-    rate_ratio_of_totals: 0.1442,
-    rate_mean_of_daily: 0.1046,
-  } as unknown as TikTokJanela;
-  const d = divergenciaEmPp(j)!;
-  assert.ok(Math.abs(d - 3.96) < 0.01, String(d));
-});
-
-test("divergencia e' nula quando falta uma das leituras", () => {
-  assert.equal(
-    divergenciaEmPp({
-      rate_ratio_of_totals: null,
-      rate_mean_of_daily: 0.1,
-    } as unknown as TikTokJanela),
-    null,
-  );
-  assert.equal(divergenciaEmPp(null), null);
+  assert.equal(contarForaDaMeta(dias), 2);
+  assert.equal(contarCriticos(dias), 1);
 });
 
 // ---------------------------------------------------------------------------
 // Marcas
 // ---------------------------------------------------------------------------
-test("so' as marcas acima do limiar entram no destaque", () => {
+test("so' as marcas fora da meta entram no destaque", () => {
   const marcas = [
-    { brand: "kokeshi", shop_name: null, pedidos_pagos: 100, atrasados: 36, rate: 0.36 },
-    { brand: "gocase", shop_name: null, pedidos_pagos: 100, atrasados: 0, rate: 0.002 },
-    { brand: "novo", shop_name: null, pedidos_pagos: 0, atrasados: 0, rate: null },
+    { brand: "kokeshi", shop_name: null, base: 100, late: 36, rate: 0.36, above_target: true },
+    { brand: "gocase", shop_name: null, base: 100, late: 0, rate: 0.002, above_target: false },
   ];
-  assert.deepEqual(
-    marcasCriticas(marcas).map((m) => m.brand),
-    ["kokeshi"],
-  );
+  assert.deepEqual(marcasForaDaMeta(marcas).map((m) => m.brand), ["kokeshi"]);
 });
 
 // ---------------------------------------------------------------------------
 // Grafico
 // ---------------------------------------------------------------------------
 test("a barra normaliza pelo maximo da serie, nao por 100%", () => {
-  // Numa janela calma (maximo 3%) normalizar por 100% deixaria todas as
-  // barras invisiveis e esconderia justamente a variacao que importa.
-  const dias = [
-    dia({ paid_date: "a", rate: 0.03 }),
-    dia({ paid_date: "b", rate: 0.015 }),
-  ];
+  const dias = [dia({ due_date: "a", rate: 0.03 }), dia({ due_date: "b", rate: 0.015 })];
   const max = taxaMaxima(dias);
   assert.equal(max, 0.03);
   assert.equal(alturaDaBarra(dias[0], max), 100);
@@ -223,19 +217,22 @@ test("a barra normaliza pelo maximo da serie, nao por 100%", () => {
 });
 
 test("taxa pequena mas nao nula continua visivel", () => {
-  const dias = [dia({ paid_date: "a", rate: 0.889 }), dia({ paid_date: "b", rate: 0.0001 })];
-  const max = taxaMaxima(dias);
-  assert.ok(alturaDaBarra(dias[1], max) >= 2);
+  const dias = [dia({ due_date: "a", rate: 0.889 }), dia({ due_date: "b", rate: 0.0001 })];
+  assert.ok(alturaDaBarra(dias[1], taxaMaxima(dias)) >= 2);
 });
 
-test("taxa ausente nao desenha barra", () => {
-  assert.equal(alturaDaBarra(dia({ paid_date: "a", rate: null }), 0.5), 0);
+test("taxa ausente nao desenha barra e serie vazia nao divide por zero", () => {
+  assert.equal(alturaDaBarra(dia({ due_date: "a", rate: null }), 0.5), 0);
+  assert.equal(taxaMaxima([dia({ due_date: "a", rate: null })]), 0);
+  assert.equal(alturaDaBarra(dia({ due_date: "a", rate: null }), 0), 0);
 });
 
-test("serie toda sem taxa nao divide por zero", () => {
-  const dias = [dia({ paid_date: "a", rate: null })];
-  assert.equal(taxaMaxima(dias), 0);
-  assert.equal(alturaDaBarra(dias[0], 0), 0);
+test("a linha da meta so' aparece quando cabe na escala", () => {
+  // Numa janela calma (maximo 2%) a meta de 4% ficaria fora do grafico; desenhar
+  // uma linha acima do topo sugeriria que o dia encostou nela.
+  assert.equal(alturaDaMeta(0.02), null);
+  assert.equal(alturaDaMeta(0.08), 50);
+  assert.equal(alturaDaMeta(0), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -243,7 +240,7 @@ test("serie toda sem taxa nao divide por zero", () => {
 // ---------------------------------------------------------------------------
 test("cada motivo de indisponibilidade tem texto proprio", () => {
   assert.match(explicarIndisponivel("table_not_migrated"), /migration/i);
-  assert.match(explicarIndisponivel("no_series_published"), /publicada|publicad/i);
+  assert.match(explicarIndisponivel("no_series_published"), /publicad/i);
 });
 
 test("motivo desconhecido nao ecoa o codigo cru na tela", () => {
@@ -257,10 +254,7 @@ test("motivo desconhecido nao ecoa o codigo cru na tela", () => {
 // Query
 // ---------------------------------------------------------------------------
 test("a query carrega evento e janela", () => {
-  assert.equal(
-    queryDoTikTok("coleta", 7),
-    "/api/v1/expedicao/tiktok?event=coleta&days=7",
-  );
+  assert.equal(queryDoTikTok("coleta", 7), "/api/v1/expedicao/tiktok?event=coleta&days=7");
   assert.equal(
     queryDoTikTok("despacho", 30),
     "/api/v1/expedicao/tiktok?event=despacho&days=30",

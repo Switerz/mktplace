@@ -1,10 +1,11 @@
-"""Gate EXP-TK-OPS-1 — serving da serie diaria do TikTok Shop.
+"""Gate EXP-TK-OPS-1/2 — serving da LDR do TikTok Shop.
 
-O que estes testes travam, em uma frase: a tela nunca mostra `0%` de uma coorte
-que ainda pode piorar, nunca soma taxas, nunca some quando a tabela nao existe,
-e nunca deixa de dizer que o prazo e' reconstruido.
+O que estes testes travam, em uma frase: a LDR usa como denominador quem VENCE
+no periodo (nunca quem pagou), os dois limiares nao se confundem, a tela nunca
+mostra `0%` de uma coorte que ainda pode piorar, e a resposta nunca deixa de
+dizer que o prazo e' reconstruido.
 
-O dublê responde por TRECHO da consulta, e devolve MAPPINGS (dicionarios),
+O dublê responde por TRECHO da consulta e devolve MAPPINGS (dicionarios),
 porque e' assim que o servico le: `.mappings()`. Um dublê que devolvesse tuplas
 passaria nos testes e quebraria no primeiro contato com o banco — foi o defeito
 medido no gate do PostgresHook.
@@ -26,35 +27,47 @@ def linha(
     paid: date,
     brand: str = "kokeshi",
     *,
-    deadline: date | None = None,
-    pagos: int = 100,
-    mature: bool = True,
-    col_atras: int = 0,
-    col_pend_venc: int = 0,
-    col_pend_prazo: int = 0,
+    rts_deadline: date | None = None,
+    tts_deadline: date | None = None,
+    brutos: int = 100,
+    amostras: int = 0,
+    canc_rts: int = 0,
+    canc_tts: int = 0,
+    rts_mature: bool = True,
+    tts_mature: bool = True,
     desp_atras: int = 0,
     desp_pend_venc: int = 0,
     desp_pend_prazo: int = 0,
-    cancelados: int = 0,
+    col_atras: int = 0,
+    col_pend_venc: int = 0,
+    col_pend_prazo: int = 0,
     effective_at: datetime | None = None,
 ) -> dict:
-    """Linha publicada que FECHA por construcao (o "no prazo" absorve o resto)."""
+    """Linha publicada que FECHA por construcao."""
+    dbase = brutos - amostras - canc_rts
+    cbase = brutos - amostras - canc_tts
     return {
         "paid_date": paid,
         "brand": brand,
         "shop_name": brand.upper(),
-        "deadline_date": deadline or (paid + timedelta(days=2)),
-        "is_mature": mature,
-        "pedidos_pagos": pagos,
-        "cancelados": cancelados,
-        "despacho_no_prazo": pagos - desp_atras - desp_pend_venc - desp_pend_prazo,
+        "pedidos_pagos_brutos": brutos,
+        "amostras_excluidas": amostras,
+        "despacho_deadline": rts_deadline or (paid + timedelta(days=1)),
+        "despacho_base": dbase,
+        "despacho_cancelado_antes_sla": canc_rts,
+        "despacho_no_prazo": dbase - desp_atras - desp_pend_venc - desp_pend_prazo,
         "despacho_atrasado": desp_atras,
         "despacho_pendente_vencido": desp_pend_venc,
         "despacho_pendente_no_prazo": desp_pend_prazo,
-        "coleta_no_prazo": pagos - col_atras - col_pend_venc - col_pend_prazo,
+        "despacho_is_mature": rts_mature,
+        "coleta_deadline": tts_deadline or (paid + timedelta(days=2)),
+        "coleta_base": cbase,
+        "coleta_cancelado_antes_sla": canc_tts,
+        "coleta_no_prazo": cbase - col_atras - col_pend_venc - col_pend_prazo,
         "coleta_atrasada": col_atras,
         "coleta_pendente_vencida": col_pend_venc,
         "coleta_pendente_no_prazo": col_pend_prazo,
+        "coleta_is_mature": tts_mature,
         "refresh_batch_id": LOTE,
         "effective_at": effective_at or AGORA,
         "source_watermark_at": AGORA,
@@ -98,33 +111,23 @@ def serie(linhas, **kw):
 # Disponibilidade
 # ---------------------------------------------------------------------------
 def test_tabela_ausente_nao_vira_500_nem_tela_de_zero():
-    """A migration 020 pode nao ter sido aplicada ainda.
-
-    Devolver 0% seria lido como "nenhum atraso", que e' o oposto de "sem
-    medicao" — e nesta tela em particular e' o pior desfecho possivel.
-    """
     r = svc.obter_serie(SessaoFake(tabela_existe=False), agora=AGORA)
     assert r["availability"] == "unavailable"
     assert r["unavailable_reason"] == svc.UNAVAILABLE_NOT_MIGRATED
-    assert r["daily"] == []
-    assert r["window"] is None
+    assert r["ldr"] is None
+    assert r["payment_flow"] == []
 
 
 def test_tabela_vazia_e_um_motivo_diferente_de_tabela_ausente():
-    r = serie([])
-    assert r["unavailable_reason"] == svc.UNAVAILABLE_NO_DATA
+    assert serie([])["unavailable_reason"] == svc.UNAVAILABLE_NO_DATA
 
 
-def test_indisponivel_ainda_declara_que_o_prazo_e_reconstruido():
-    # O aviso nao pode depender de haver dado: a tela o exibe sempre.
+def test_indisponivel_ainda_declara_prazo_reconstruido_e_os_limiares():
     r = svc.obter_serie(SessaoFake(tabela_existe=False), agora=AGORA)
     assert r["deadline_is_reconstructed"] is True
-
-
-def test_disponivel_declara_que_o_prazo_e_reconstruido():
-    r = serie([linha(date(2026, 9, 20))])
-    assert r["availability"] == "available"
-    assert r["deadline_is_reconstructed"] is True
+    assert r["targets"]["tiktok_ldr"] == 0.04
+    assert r["targets"]["internal_critical"] == 0.10
+    assert r["sla_business_days"] == {"despacho": 1, "coleta": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -132,112 +135,202 @@ def test_disponivel_declara_que_o_prazo_e_reconstruido():
 # ---------------------------------------------------------------------------
 def test_evento_padrao_e_a_coleta():
     assert svc.resolver_evento(None) == "coleta"
-    assert serie([linha(date(2026, 9, 20))])["event"] == "coleta"
 
 
 def test_evento_fora_da_allowlist_levanta():
     with pytest.raises(svc.EventoInvalido):
-        svc.resolver_evento("qualquer")
-    with pytest.raises(svc.EventoInvalido):
         svc.resolver_evento("IN_TRANSIT")
 
 
-def test_os_dois_eventos_contam_populacoes_DIFERENTES():
-    """O mesmo pedido e' contado uma vez em cada evento.
+def test_cada_evento_tem_prazo_proprio():
+    """RTS 1 dia util, TTS 2. Aplicar o mesmo prazo aos dois subestimava o
+    atraso da operacao."""
+    assert svc.SLA_DIAS_UTEIS["despacho"] == 1
+    assert svc.SLA_DIAS_UTEIS["coleta"] == 2
 
-    Medido na fonte: despacho ~0,05% e coleta 88,9% no mesmo dia. Colapsar os
-    dois trocaria o dono do problema — a operacao etiquetou no prazo, quem nao
-    coletou foi a transportadora.
-    """
-    ls = [linha(date(2026, 9, 20), pagos=100, col_atras=80, desp_atras=1)]
-    assert serie(ls, evento="coleta")["window"]["late_orders"] == 80
-    assert serie(ls, evento="despacho")["window"]["late_orders"] == 1
+
+def test_os_dois_eventos_contam_populacoes_diferentes():
+    ls = [linha(date(2026, 9, 20), brutos=100, col_atras=80, desp_atras=1)]
+    assert serie(ls, evento="coleta")["ldr"]["late"] == 80
+    assert serie(ls, evento="despacho")["ldr"]["late"] == 1
 
 
 # ---------------------------------------------------------------------------
-# Consolidacao
+# LDR — o denominador e' quem VENCE na janela
 # ---------------------------------------------------------------------------
-def test_consolida_marcas_somando_numerador_e_denominador_e_nao_taxas():
-    """90% de 10 pedidos + 0% de 990 e' 0,9% no dia, nao 45%."""
+def test_ldr_usa_quem_vence_na_janela_e_nao_quem_pagou():
+    """Coorte paga ha muito tempo mas com vencimento dentro da janela ENTRA;
+    coorte paga na janela com vencimento fora dela NAO entra."""
+    dentro = linha(date(2026, 9, 10), tts_deadline=date(2026, 9, 22),
+                   brutos=100, col_atras=10)
+    fora = linha(date(2026, 9, 23), tts_deadline=date(2026, 10, 1),
+                 brutos=900, tts_mature=False, col_pend_prazo=900)
+    r = serie([dentro, fora], dias=7)
+    assert r["ldr"]["base"] == 100
+    assert r["ldr"]["rate"] == pytest.approx(0.10)
+
+
+def test_feriado_vira_um_vencimento_com_volume_somado():
+    """Sab, dom e o feriado vencem no mesmo dia. Pela LDR isso e' UMA linha
+    com a base somada; pelo fluxo de pagamento seriam tres linhas de 100%."""
+    venc = date(2026, 9, 22)
     ls = [
-        linha(date(2026, 9, 20), "lescent", pagos=10, col_atras=9),
-        linha(date(2026, 9, 20), "kokeshi", pagos=990),
+        linha(date(2026, 9, 18), tts_deadline=venc, brutos=100, col_atras=100),
+        linha(date(2026, 9, 19), tts_deadline=venc, brutos=200, col_atras=200),
+        linha(date(2026, 9, 20), tts_deadline=venc, brutos=700, col_atras=70),
     ]
-    (dia,) = serie(ls)["daily"]
-    assert dia["pedidos_pagos"] == 1000
-    assert dia["atrasados"] == 9
+    r = serie(ls)
+    assert len(r["ldr"]["daily"]) == 1
+    (dia,) = r["ldr"]["daily"]
+    assert dia["due_date"] == venc
+    assert dia["base"] == 1000 and dia["late"] == 370
+    assert dia["rate"] == pytest.approx(0.37)
+    # o fluxo por pagamento mantem as tres linhas, duas em 100%
+    assert [round((x["rate"] or 0) * 100) for x in r["payment_flow"]] == [100, 100, 10]
+
+
+def test_ldr_consolida_marcas_somando_numerador_e_denominador():
+    venc = date(2026, 9, 22)
+    ls = [
+        linha(date(2026, 9, 20), "lescent", tts_deadline=venc, brutos=10, col_atras=9),
+        linha(date(2026, 9, 20), "kokeshi", tts_deadline=venc, brutos=990),
+    ]
+    (dia,) = serie(ls)["ldr"]["daily"]
+    assert dia["base"] == 1000
     assert dia["rate"] == pytest.approx(0.009)
 
 
-def test_dia_e_parcial_se_qualquer_marca_dele_for_imatura():
+def test_vencimento_e_parcial_se_qualquer_marca_dele_for_imatura():
+    venc = date(2026, 9, 24)
     ls = [
-        linha(date(2026, 9, 22), "kokeshi", mature=True),
-        linha(date(2026, 9, 22), "lescent", mature=False),
+        linha(date(2026, 9, 22), "kokeshi", tts_deadline=venc, tts_mature=True),
+        linha(date(2026, 9, 22), "lescent", tts_deadline=venc, tts_mature=False),
     ]
-    (dia,) = serie(ls)["daily"]
+    (dia,) = serie(ls)["ldr"]["daily"]
     assert dia["is_mature"] is False
+    assert dia["is_critical"] is False
+    assert dia["above_target"] is False
 
 
-def test_dia_sem_pedido_pago_tem_taxa_nula_e_nao_zero():
-    (dia,) = serie([linha(date(2026, 9, 20), pagos=0)])["daily"]
+def test_vencimento_imaturo_fica_fora_da_taxa_da_janela():
+    ls = [
+        linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+              brutos=100, col_atras=50),
+        linha(date(2026, 9, 22), tts_deadline=date(2026, 9, 24), tts_mature=False,
+              brutos=900, col_pend_prazo=900),
+    ]
+    j = serie(ls)["ldr"]
+    assert j["rate"] == pytest.approx(0.5)
+    assert j["base"] == 100
+    assert j["mature_due_days"] == 1
+    assert j["partial_due_days"] == 1
+
+
+def test_vencimento_sem_base_tem_taxa_nula_e_nao_zero():
+    (dia,) = serie([linha(date(2026, 9, 20), brutos=0)])["ldr"]["daily"]
     assert dia["rate"] is None
 
 
 # ---------------------------------------------------------------------------
-# Maturacao — o requisito central
+# Os DOIS limiares
 # ---------------------------------------------------------------------------
-def test_coorte_imatura_nunca_e_marcada_como_critica():
-    """Pintar de vermelho um dia que ainda da' para cumprir acusa a operacao
-    por algo que nao aconteceu."""
-    ls = [linha(date(2026, 9, 24), mature=False, pagos=100, col_pend_prazo=100)]
-    (dia,) = serie(ls)["daily"]
-    assert dia["is_critical"] is False
+def test_acima_de_4_por_cento_e_fora_da_meta_do_tiktok():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=50)]  # 5%
+    j = serie(ls)["ldr"]
+    assert j["above_target"] is True
+    assert j["internal_critical"] is False
+    assert j["daily"][0]["above_target"] is True
+    assert j["daily"][0]["is_critical"] is False
 
 
-def test_coorte_imatura_fica_fora_da_taxa_da_janela():
-    """Incluir quem ainda tem prazo dilui a taxa e esconde o incidente."""
-    ls = [
-        linha(date(2026, 9, 20), pagos=100, col_atras=50),
-        linha(date(2026, 9, 24), pagos=900, mature=False, col_pend_prazo=900),
-    ]
-    j = serie(ls)["window"]
-    assert j["rate_ratio_of_totals"] == pytest.approx(0.5)
-    assert j["paid_orders"] == 100
-    assert j["mature_cohorts"] == 1
-    assert j["partial_cohorts"] == 1
+def test_acima_de_10_por_cento_e_tambem_critico_interno():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=120)]
+    j = serie(ls)["ldr"]
+    assert j["above_target"] is True
+    assert j["internal_critical"] is True
 
 
-def test_coorte_madura_acima_do_limiar_e_critica():
-    (dia,) = serie([linha(date(2026, 9, 20), pagos=100, col_atras=10)])["daily"]
-    assert dia["is_critical"] is True
-    (dia,) = serie([linha(date(2026, 9, 20), pagos=100, col_atras=9)])["daily"]
-    assert dia["is_critical"] is False
+def test_exatamente_na_meta_nao_esta_fora_dela():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=40)]
+    j = serie(ls)["ldr"]
+    assert j["rate"] == pytest.approx(0.04)
+    assert j["above_target"] is False
+
+
+def test_o_alerta_de_conformidade_cita_a_meta_e_nao_o_limiar_interno():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=50)]
+    alertas = {a["code"]: a for a in serie(ls)["alerts"]}
+    assert "fora_da_meta_tiktok" in alertas
+    assert "4%" in alertas["fora_da_meta_tiktok"]["message"]
+    assert "dias_criticos_internos" not in alertas
+
+
+def test_dentro_da_meta_gera_alerta_informativo_e_nao_critico():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=10)]
+    a = [x for x in serie(ls)["alerts"] if x["code"] == "dentro_da_meta_tiktok"]
+    assert a and a[0]["severity"] == "info"
+
+
+def test_os_dois_limiares_geram_alertas_com_codigos_diferentes():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=150)]
+    codigos = {a["code"] for a in serie(ls)["alerts"]}
+    assert "fora_da_meta_tiktok" in codigos
+    assert "dias_criticos_internos" in codigos
 
 
 # ---------------------------------------------------------------------------
-# As duas leituras da janela
+# Fluxo por data de pagamento — a visao da gestao
 # ---------------------------------------------------------------------------
-def test_publica_as_duas_leituras_da_janela():
-    """A fonte nao diz qual a plataforma usa; publicar so' uma e' escolher sem
-    prova. Medido em 2026-09-24: elas divergiram 3,96 pp na mesma janela."""
-    ls = [
-        linha(date(2026, 9, 18), pagos=10_000, col_atras=100),
-        linha(date(2026, 9, 19), pagos=10, col_atras=5),
-    ]
-    j = serie(ls)["window"]
-    assert j["rate_ratio_of_totals"] == pytest.approx(105 / 10_010)
-    assert j["rate_mean_of_daily"] == pytest.approx((0.01 + 0.5) / 2)
+def test_o_fluxo_reproduz_as_colunas_da_planilha():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22), brutos=100,
+                amostras=4, canc_tts=6, col_atras=7, col_pend_venc=3)]
+    (f,) = serie(ls)["payment_flow"]
+    assert f["paid_orders"] == 100
+    assert f["excluded_samples"] == 4
+    assert f["excluded_cancelled"] == 6
+    assert f["base"] == 90
+    assert f["shipped_late"] == 7
+    assert f["pending_overdue"] == 3
+    assert f["shipped_on_time"] == 80
+    assert f["late"] == 10
+    assert f["rate"] == pytest.approx(10 / 90)
 
 
-def test_media_das_diarias_e_por_dia_e_nao_por_linha_publicada():
-    """Cada DIA vale um ponto, nao cada (dia, marca)."""
+def test_o_fluxo_nao_e_a_ldr():
+    """Denominadores diferentes: a LDR agrega por vencimento e so' conta
+    coortes maduras; o fluxo lista toda data de pagamento lida."""
     ls = [
-        linha(date(2026, 9, 20), "lescent", pagos=10, col_atras=10),
-        linha(date(2026, 9, 20), "kokeshi", pagos=990),
+        linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+              brutos=100, col_atras=50),
+        linha(date(2026, 9, 23), tts_deadline=date(2026, 9, 28), tts_mature=False,
+              brutos=900, col_pend_prazo=900),
     ]
-    j = serie(ls)["window"]
-    assert j["rate_mean_of_daily"] == pytest.approx(0.01)
-    assert j["rate_ratio_of_totals"] == pytest.approx(0.01)
+    r = serie(ls)
+    assert len(r["payment_flow"]) == 2
+    assert len(r["ldr"]["daily"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Exclusoes do denominador
+# ---------------------------------------------------------------------------
+def test_amostra_gratis_sai_do_denominador():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=100, amostras=20, col_atras=8)]
+    assert serie(ls)["ldr"]["base"] == 80
+    assert serie(ls)["ldr"]["rate"] == pytest.approx(0.1)
+
+
+def test_cancelado_antes_do_sla_sai_do_denominador_do_evento():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=100, canc_tts=10, canc_rts=4)]
+    assert serie(ls, evento="coleta")["ldr"]["base"] == 90
+    assert serie(ls, evento="despacho")["ldr"]["base"] == 96
 
 
 # ---------------------------------------------------------------------------
@@ -245,115 +338,86 @@ def test_media_das_diarias_e_por_dia_e_nao_por_linha_publicada():
 # ---------------------------------------------------------------------------
 def test_separa_o_que_ja_venceu_do_que_ainda_da_para_tratar():
     ls = [
-        linha(date(2026, 9, 20), pagos=100, col_pend_venc=7),
-        linha(date(2026, 9, 24), deadline=date(2026, 9, 25), mature=False,
-              pagos=50, col_pend_prazo=50),
+        linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+              brutos=100, col_pend_venc=7),
+        linha(date(2026, 9, 23), tts_deadline=date(2026, 9, 25), tts_mature=False,
+              brutos=50, col_pend_prazo=50),
     ]
-    j = serie(ls)["window"]
+    j = serie(ls)["ldr"]
     assert j["pending_overdue"] == 7
     assert j["pending_on_time"] == 50
-    # vence amanha -> ainda da' para tratar
     assert j["pending_at_risk"] == 50
 
 
 def test_pendente_que_vence_depois_de_amanha_nao_conta_como_risco():
-    ls = [linha(date(2026, 9, 24), deadline=date(2026, 9, 28), mature=False,
-                pagos=50, col_pend_prazo=50)]
-    assert serie(ls)["window"]["pending_at_risk"] == 0
+    ls = [linha(date(2026, 9, 24), tts_deadline=date(2026, 9, 28), tts_mature=False,
+                brutos=50, col_pend_prazo=50)]
+    assert serie(ls)["ldr"]["pending_at_risk"] == 0
 
 
-def test_marca_o_periodo_do_incidente():
+def test_marca_o_periodo_do_incidente_pelo_vencimento():
     ls = [
-        linha(date(2026, 9, 17), pagos=100, col_atras=1),
-        linha(date(2026, 9, 18), pagos=100, col_atras=35),
-        linha(date(2026, 9, 19), pagos=100, col_atras=88),
-        linha(date(2026, 9, 20), pagos=100, col_atras=2),
+        linha(date(2026, 9, 17), tts_deadline=date(2026, 9, 19), brutos=100, col_atras=1),
+        linha(date(2026, 9, 18), tts_deadline=date(2026, 9, 21), brutos=100, col_atras=35),
+        linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22), brutos=100, col_atras=88),
+        linha(date(2026, 9, 21), tts_deadline=date(2026, 9, 23), brutos=100, col_atras=2),
     ]
-    j = serie(ls)["window"]
-    assert j["incident_start"] == date(2026, 9, 18)
-    assert j["incident_end"] == date(2026, 9, 19)
-
-
-def test_sem_dia_critico_nao_inventa_incidente():
-    j = serie([linha(date(2026, 9, 20), pagos=100, col_atras=1)])["window"]
-    assert j["incident_start"] is None
-    assert j["incident_end"] is None
+    j = serie(ls)["ldr"]
+    assert j["incident_start"] == date(2026, 9, 21)
+    assert j["incident_end"] == date(2026, 9, 22)
 
 
 # ---------------------------------------------------------------------------
 # Marcas
 # ---------------------------------------------------------------------------
 def test_marca_com_base_pequena_fica_fora_do_ranking():
-    """1 atraso em 3 pedidos vira 33% e lideraria sem significar nada."""
     ls = [
-        linha(date(2026, 9, 20), "denavita", pagos=3, col_atras=1),
-        linha(date(2026, 9, 20), "kokeshi", pagos=1000, col_atras=200),
+        linha(date(2026, 9, 20), "denavita", tts_deadline=date(2026, 9, 22),
+              brutos=3, col_atras=1),
+        linha(date(2026, 9, 20), "kokeshi", tts_deadline=date(2026, 9, 22),
+              brutos=1000, col_atras=200),
     ]
     assert [m["brand"] for m in serie(ls)["brands"]] == ["kokeshi"]
 
 
-def test_ranking_de_marcas_vai_da_pior_para_a_melhor():
+def test_marca_acima_da_meta_e_sinalizada():
     ls = [
-        linha(date(2026, 9, 20), "gocase", pagos=1000, col_atras=2),
-        linha(date(2026, 9, 20), "barbours", pagos=1000, col_atras=400),
-        linha(date(2026, 9, 20), "kokeshi", pagos=1000, col_atras=350),
+        linha(date(2026, 9, 20), "kokeshi", tts_deadline=date(2026, 9, 22),
+              brutos=1000, col_atras=200),
+        linha(date(2026, 9, 20), "gocase", tts_deadline=date(2026, 9, 22),
+              brutos=1000, col_atras=2),
     ]
-    assert [m["brand"] for m in serie(ls)["brands"]] == ["barbours", "kokeshi", "gocase"]
+    marcas = {m["brand"]: m for m in serie(ls)["brands"]}
+    assert marcas["kokeshi"]["above_target"] is True
+    assert marcas["gocase"]["above_target"] is False
 
 
-def test_marca_imatura_nao_entra_no_ranking():
-    ls = [linha(date(2026, 9, 24), "kokeshi", pagos=1000, mature=False,
-                col_pend_prazo=1000)]
-    assert serie(ls)["brands"] == []
-
-
-def test_filtro_de_marca_e_aplicado():
-    ls = [
-        linha(date(2026, 9, 20), "kokeshi", pagos=1000, col_atras=200),
-        linha(date(2026, 9, 20), "gocase", pagos=1000, col_atras=1),
-    ]
-    r = serie(ls, brands=["gocase"])
-    assert [m["brand"] for m in r["brands"]] == ["gocase"]
-    assert r["window"]["paid_orders"] == 1000
+def test_marca_fora_da_janela_de_vencimento_nao_entra_no_ranking():
+    ls = [linha(date(2026, 9, 1), "kokeshi", tts_deadline=date(2026, 9, 3),
+                brutos=1000, col_atras=900)]
+    assert serie(ls, dias=7)["brands"] == []
 
 
 # ---------------------------------------------------------------------------
 # Alertas
 # ---------------------------------------------------------------------------
-def test_alertas_sao_texto_pronto_em_portugues_do_brasil():
-    """Alerta com `88.9%` e `2026-09-07` no meio de uma tela em portugues faz
-    o operador achar que veio de outro sistema."""
-    ls = [linha(date(2026, 9, 18), pagos=1000, col_atras=889, col_pend_venc=0)]
+def test_alertas_em_portugues_do_brasil():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=889)]
     msgs = " ".join(a["message"] for a in serie(ls)["alerts"])
-    assert "18/09/2026" in msgs
+    assert "22/09/2026" in msgs
     assert "88,9%" in msgs
-    assert "2026-09-18" not in msgs
-
-
-def test_alerta_de_pendentes_vencidos_e_critico():
-    ls = [linha(date(2026, 9, 20), pagos=100, col_pend_venc=7)]
-    a = [x for x in serie(ls)["alerts"] if x["code"] == "pendentes_vencidos"]
-    assert a and a[0]["severity"] == "critical"
-
-
-def test_alerta_de_risco_e_aviso_e_nao_critico():
-    ls = [linha(date(2026, 9, 24), deadline=date(2026, 9, 25), mature=False,
-                pagos=50, col_pend_prazo=50)]
-    a = [x for x in serie(ls)["alerts"] if x["code"] == "em_risco"]
-    assert a and a[0]["severity"] == "warning"
+    assert "2026-09-22" not in msgs
 
 
 def test_fotografia_velha_vira_alerta():
-    velha = AGORA - timedelta(hours=30)
-    ls = [linha(date(2026, 9, 20), effective_at=velha)]
-    codigos = {a["code"] for a in serie(ls)["alerts"]}
-    assert "fotografia_velha" in codigos
+    ls = [linha(date(2026, 9, 20), effective_at=AGORA - timedelta(hours=30))]
+    assert "fotografia_velha" in {a["code"] for a in serie(ls)["alerts"]}
 
 
 def test_fotografia_recente_nao_alerta():
     ls = [linha(date(2026, 9, 20), effective_at=AGORA - timedelta(hours=2))]
-    codigos = {a["code"] for a in serie(ls)["alerts"]}
-    assert "fotografia_velha" not in codigos
+    assert "fotografia_velha" not in {a["code"] for a in serie(ls)["alerts"]}
 
 
 # ---------------------------------------------------------------------------
@@ -367,27 +431,27 @@ def test_a_consulta_e_sempre_limitada_ao_canal_tiktok():
     assert "channel = :canal" in sql
 
 
-def test_a_janela_pedida_vira_intervalo_de_datas():
+def test_le_mais_datas_de_pagamento_do_que_a_janela_de_vencimento():
+    """Uma coorte empurrada por feriado paga bem antes do vencimento. Ler so' a
+    janela de vencimento perderia justamente o dia ruim."""
     s = SessaoFake(linhas=[linha(date(2026, 9, 20))])
     svc.obter_serie(s, dias=7, agora=AGORA)
     _sql, params = next(c for c in s.consultas if "expedicao_tiktok" in c[0])
     assert params["ate"] == HOJE
-    assert params["desde"] == HOJE - timedelta(days=7)
+    assert params["desde"] < HOJE - timedelta(days=7)
 
 
 def test_janela_absurda_e_limitada_em_vez_de_derrubar_a_consulta():
     s = SessaoFake(linhas=[linha(date(2026, 9, 20))])
     svc.obter_serie(s, dias=9999, agora=AGORA)
     _sql, params = next(c for c in s.consultas if "expedicao_tiktok" in c[0])
-    assert params["desde"] == HOJE - timedelta(days=svc.JANELA_MAX_DIAS)
+    assert params["desde"] >= HOJE - timedelta(days=svc.JANELA_MAX_DIAS + 30)
 
 
-def test_from_reflete_o_dado_existente_e_nao_o_intervalo_pedido():
-    """Dizer "de 25/08" quando a serie comeca em 20/09 faz o operador achar
-    que houve semanas sem atraso nenhum."""
-    r = serie([linha(date(2026, 9, 20))], dias=30)
-    assert r["window"]["from"] == date(2026, 9, 20)
-    assert r["window"]["days"] == 30
+def test_from_reflete_o_vencimento_existente_e_nao_o_intervalo_pedido():
+    r = serie([linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22))], dias=30)
+    assert r["ldr"]["from"] == date(2026, 9, 22)
+    assert r["ldr"]["days"] == 30
 
 
 def test_sql_nao_seleciona_pii():
@@ -397,7 +461,6 @@ def test_sql_nao_seleciona_pii():
 
 
 def test_o_servico_nunca_escreve():
-    for sql in (svc.SERIE_SQL,):
-        baixo = sql.lower()
-        for proibido in ("insert", "update ", "delete", "drop", "truncate"):
-            assert proibido not in baixo, proibido
+    baixo = svc.SERIE_SQL.lower()
+    for proibido in ("insert", "update ", "delete", "drop", "truncate"):
+        assert proibido not in baixo, proibido

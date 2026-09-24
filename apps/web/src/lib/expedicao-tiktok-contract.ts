@@ -1,30 +1,30 @@
 /**
- * Gate EXP-TK-OPS-1 — contrato da tela de expedicao do TikTok Shop.
+ * Gate EXP-TK-OPS-1/2 — contrato da tela de LDR do TikTok Shop.
  *
  * Separado de `expedicao-contract.ts` de proposito. Aquele descreve uma FILA
- * (uma linha por pedido parado agora); este descreve uma SERIE por COORTE (uma
- * linha por data de pagamento). Os dois tem estados, rotulos e perguntas
- * diferentes, e misturar os contratos faria cada mudanca aqui arriscar os dois
- * canais que ja estao em producao.
+ * (uma linha por pedido parado agora); este descreve uma COORTE por prazo. Os
+ * dois tem estados, rotulos e perguntas diferentes, e misturar os contratos
+ * faria cada mudanca aqui arriscar os dois canais que ja estao em producao.
  */
 
 // ---------------------------------------------------------------------------
-// Eventos
+// Eventos — a politica tem DOIS prazos
 // ---------------------------------------------------------------------------
 /**
- * Os dois instantes que competem pelo nome "postado". Medidos na fonte em
- * 2026-09-24, e NAO sao a mesma coisa: a coleta acontece em mediana 44,9 h
- * depois do despacho.
+ * Os dois marcos da politica. NAO tem o mesmo prazo, e confundi-los troca o
+ * dono do problema:
  *
- * Na janela medida o despacho ficou em ~0,05% e a coleta chegou a 88,9% num
- * unico dia — a operacao etiquetou no prazo e a transportadora nao coletou.
- * A tela precisa deixar escolher qual esta sendo olhado, senao o operador
- * conclui a coisa errada sobre de quem e' o problema.
+ *   coleta (TTS)   2 dias uteis — a transportadora retirou o pacote
+ *   despacho (RTS) 1 dia util   — a operacao confirmou "pronto para envio"
+ *
+ * Medido na fonte, a coleta acontece em mediana 44,9 h depois do despacho.
+ * Aplicar 2 dias uteis a etiqueta subestimava o atraso da operacao: a taxa de
+ * RTS passa de 0,06% para 0,61% com o prazo certo.
  */
 export const EVENTOS = ["coleta", "despacho"] as const;
 export type Evento = (typeof EVENTOS)[number];
 
-/** A coleta e' o padrao: e' o evento em que o incidente aparece. */
+/** A coleta e' o padrao: e' o marco que a plataforma cobra. */
 export const EVENTO_PADRAO: Evento = "coleta";
 
 export const ROTULO_EVENTO: Record<Evento, string> = {
@@ -34,26 +34,60 @@ export const ROTULO_EVENTO: Record<Evento, string> = {
 
 export const EXPLICACAO_EVENTO: Record<Evento, string> = {
   coleta:
-    "Quando a transportadora de fato retirou o pacote. É o evento em que o " +
-    "atraso recente aparece.",
+    "Quando a transportadora de fato retirou o pacote. Prazo de 2 dias úteis. " +
+    "É o marco que a plataforma cobra.",
   despacho:
     "Quando a operação confirmou “pronto para envio” e a etiqueta nasceu. " +
-    "Está sob nosso controle direto.",
+    "Prazo de 1 dia útil. Está sob nosso controle direto.",
 };
 
 /**
- * O prazo desta tela NAO vem do TikTok: e' reconstruido da regra de 2 dias
+ * O prazo desta tela NAO vem do TikTok: e' reconstruido da politica de dias
  * uteis. A API devolve `deadline_is_reconstructed` e a tela e' obrigada a
- * mostrar este aviso — exibir a taxa como se fosse a medicao da plataforma
- * seria afirmar o que ninguem mediu.
+ * mostrar este aviso.
+ *
+ * A reconstrucao foi reconciliada contra a planilha da gestao (marca
+ * `barbours`, 01-23/09): erro absoluto acumulado de 5 pp em 23 dias.
  */
 export const AVISO_PRAZO_RECONSTRUIDO =
-  "Prazo reconstruído da regra de 2 dias úteis. O SLA oficial do TikTok não " +
-  "é ingerido hoje, então este número é um indicador interno e não a " +
+  "Prazo reconstruído da política de dias úteis (1 dia para etiqueta, 2 para " +
+  "coleta). O SLA oficial por pedido não é ingerido hoje, então este número é " +
+  "um indicador interno reconciliado com a planilha da gestão, e não a " +
   "medição de penalização da plataforma.";
 
-/** Acima disto o dia entra em destaque. Tem de casar com o limiar da API. */
-export const LIMIAR_DIA_CRITICO = 0.1;
+// ---------------------------------------------------------------------------
+// Os DOIS limiares — nomes diferentes de proposito
+// ---------------------------------------------------------------------------
+/**
+ * META OFICIAL do TikTok. Acima disto ha penalizacao da plataforma: e' um fato
+ * externo, nao uma preferencia nossa.
+ */
+export const META_TIKTOK_LDR = 0.04;
+
+/**
+ * Limiar INTERNO de severidade. Serve para achar o dia em que a operacao
+ * quebrou, e nao para dizer se estamos em conformidade. Confundir os dois faria
+ * a tela dizer "dentro da meta" num dia de 9%.
+ */
+export const LIMIAR_CRITICO_INTERNO = 0.1;
+
+export const ROTULO_META = "Meta do TikTok";
+export const ROTULO_LIMIAR_INTERNO = "Limiar crítico interno";
+
+// ---------------------------------------------------------------------------
+// As duas leituras
+// ---------------------------------------------------------------------------
+export const TITULO_LDR = "LDR operacional — vencimentos na janela";
+export const TITULO_FLUXO = "Fluxo por data de pagamento";
+
+export const EXPLICACAO_LDR =
+  "Denominador: pedidos cujo envio vence no período. É a leitura que responde " +
+  "se estamos dentro da régua do TikTok.";
+
+export const EXPLICACAO_FLUXO =
+  "Denominador: pedidos pagos em cada dia. É a visão usada para achar onde o " +
+  "fluxo entupiu — não é a LDR. Um feriado empurra três dias de pagamento " +
+  "para o mesmo vencimento e aparece aqui como três linhas de ~100%.";
 
 export const JANELAS = [
   { dias: 7, rotulo: "7d + hoje" },
@@ -66,46 +100,64 @@ export const JANELA_INICIAL_DIAS = 7;
 // ---------------------------------------------------------------------------
 // Payload
 // ---------------------------------------------------------------------------
-export type TikTokDia = {
-  paid_date: string;
-  deadline_date: string;
-  pedidos_pagos: number;
-  cancelados: number;
-  atrasados: number;
-  pendentes_vencidos: number;
-  pendentes_no_prazo: number;
+export type TikTokLdrDia = {
+  due_date: string;
+  base: number;
+  late: number;
+  pending_overdue: number;
+  pending_on_time: number;
   rate: number | null;
   is_mature: boolean;
+  above_target: boolean;
   is_critical: boolean;
+};
+
+export type TikTokFluxoDia = {
+  paid_date: string;
+  deadline_date: string;
+  paid_orders: number;
+  excluded_samples: number;
+  excluded_cancelled: number;
+  base: number;
+  shipped_on_time: number;
+  shipped_late: number;
+  pending_overdue: number;
+  pending_on_time: number;
+  late: number;
+  rate: number | null;
+  is_mature: boolean;
+};
+
+export type TikTokLdr = {
+  from: string;
+  to: string;
+  days: number;
+  rate: number | null;
+  base: number;
+  late: number;
+  pending_overdue: number;
+  pending_on_time: number;
+  pending_at_risk: number;
+  mature_due_days: number;
+  partial_due_days: number;
+  above_target: boolean;
+  internal_critical: boolean;
+  incident_start: string | null;
+  incident_end: string | null;
+  daily: TikTokLdrDia[];
 };
 
 export type TikTokMarca = {
   brand: string;
   shop_name: string | null;
-  pedidos_pagos: number;
-  atrasados: number;
+  base: number;
+  late: number;
   rate: number | null;
-};
-
-export type TikTokJanela = {
-  days: number;
-  from: string;
-  to: string;
-  rate_ratio_of_totals: number | null;
-  rate_mean_of_daily: number | null;
-  mature_cohorts: number;
-  partial_cohorts: number;
-  paid_orders: number;
-  late_orders: number;
-  pending_overdue: number;
-  pending_on_time: number;
-  pending_at_risk: number;
-  incident_start: string | null;
-  incident_end: string | null;
+  above_target: boolean;
 };
 
 export type TikTokAlerta = {
-  severity: "critical" | "warning";
+  severity: "critical" | "warning" | "info";
   code: string;
   message: string;
 };
@@ -116,14 +168,16 @@ export type TikTokPayload = {
   channel: "tiktokshop";
   event?: Evento;
   deadline_is_reconstructed: boolean;
+  sla_business_days: Record<string, number>;
+  targets: { tiktok_ldr: number; internal_critical: number };
   snapshot: {
     refresh_batch_id: string;
     effective_at: string;
     source_watermark_at: string | null;
     today_brt: string;
   } | null;
-  window: TikTokJanela | null;
-  daily: TikTokDia[];
+  ldr: TikTokLdr | null;
+  payment_flow: TikTokFluxoDia[];
   brands: TikTokMarca[];
   alerts: TikTokAlerta[];
 };
@@ -147,9 +201,9 @@ export function explicarIndisponivel(motivo: string | null): string {
 /** Marcador para taxa que nao existe. NUNCA renderizar `0%` no lugar dele. */
 export const VALOR_SEM_TAXA = "—";
 
-export function formatarTaxa(v: number | null | undefined): string {
+export function formatarTaxa(v: number | null | undefined, casas = 2): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return VALOR_SEM_TAXA;
-  return `${(v * 100).toFixed(2).replace(".", ",")}%`;
+  return `${(v * 100).toFixed(casas).replace(".", ",")}%`;
 }
 
 export function formatarInteiro(v: number | null | undefined): string {
@@ -159,9 +213,8 @@ export function formatarInteiro(v: number | null | undefined): string {
 
 /**
  * Data ISO -> `dd/mm`. Constroi a data com `Date.UTC` a partir das PARTES, e
- * nao com `new Date("2026-09-07")`, porque a segunda forma e' interpretada
- * como meia-noite UTC e volta um dia atras em qualquer fuso negativo — que e'
- * exatamente o nosso. O dia da coorte apareceria errado na tela inteira.
+ * nao com `new Date("2026-09-07")`, porque a segunda forma e' meia-noite UTC e
+ * volta um dia atras em qualquer fuso negativo — que e' exatamente o nosso.
  */
 export function formatarDiaCurto(iso: string): string {
   const [a, m, d] = iso.split("-").map(Number);
@@ -181,82 +234,75 @@ export function formatarDiaLongo(iso: string): string {
 // ---------------------------------------------------------------------------
 // Derivacoes da tela
 // ---------------------------------------------------------------------------
-export type Severidade = "ok" | "atencao" | "critico" | "parcial";
+export type Severidade = "ok" | "fora_da_meta" | "critico" | "parcial";
 
 /**
- * Cor/estado de um dia. `parcial` vence qualquer outra classificacao: coorte
- * que ainda nao venceu nao pode ser pintada de verde nem de vermelho, porque
- * a taxa dela ainda vai mudar.
+ * Estado de um dia de vencimento. `parcial` vence qualquer outra
+ * classificacao: coorte que ainda nao venceu nao pode ser pintada de verde nem
+ * de vermelho, porque a taxa dela ainda vai mudar.
+ *
+ * Le os selos que a API ja calculou em vez de recalcular o limiar. Se a tela
+ * recalculasse, o alerta e o grafico poderiam discordar na mesma pagina.
  */
-export function severidadeDoDia(dia: TikTokDia): Severidade {
+export function severidadeDoDia(dia: TikTokLdrDia): Severidade {
   if (!dia.is_mature) return "parcial";
-  if (dia.rate === null) return "ok";
-  if (dia.rate >= LIMIAR_DIA_CRITICO) return "critico";
-  if (dia.rate >= LIMIAR_DIA_CRITICO / 2) return "atencao";
+  if (dia.is_critical) return "critico";
+  if (dia.above_target) return "fora_da_meta";
   return "ok";
 }
 
 export const ROTULO_SEVERIDADE: Record<Severidade, string> = {
-  ok: "Dentro do esperado",
-  atencao: "Atenção",
-  critico: "Crítico",
+  ok: "Dentro da meta",
+  fora_da_meta: "Fora da meta do TikTok",
+  critico: "Crítico (limiar interno)",
   parcial: "Ainda no prazo (parcial)",
 };
 
 /**
- * Texto do periodo do incidente. Devolve `null` quando nao houve nenhum dia
- * critico — a tela nao deve inventar um incidente para preencher espaco.
+ * Texto do periodo do incidente. Devolve `null` quando nao houve dia critico —
+ * a tela nao deve inventar um incidente para preencher espaco.
  */
-export function descreverIncidente(j: TikTokJanela | null): string | null {
+export function descreverIncidente(j: TikTokLdr | null): string | null {
   if (!j || !j.incident_start) return null;
   const ini = formatarDiaLongo(j.incident_start);
   if (!j.incident_end || j.incident_end === j.incident_start) {
-    return `Um dia acima do limiar: ${ini}.`;
+    return `Um vencimento acima do limiar interno: ${ini}.`;
   }
   return `De ${ini} a ${formatarDiaLongo(j.incident_end)}.`;
 }
 
-/**
- * Quantos dias criticos houve. Serve para o cartao de resumo nao depender de
- * o consumidor reimplementar o limiar.
- */
-export function contarDiasCriticos(dias: TikTokDia[]): number {
+export function contarForaDaMeta(dias: TikTokLdrDia[]): number {
+  return dias.filter((d) => d.above_target).length;
+}
+
+export function contarCriticos(dias: TikTokLdrDia[]): number {
   return dias.filter((d) => d.is_critical).length;
 }
 
-/**
- * As duas leituras da janela divergem quando o volume diario varia muito.
- * Medido em 2026-09-24: 14,42% pela razao dos totais contra 10,46% pela media
- * das diarias, ou seja 3,96 pp. A tela mostra a razao como numero principal e
- * a media ao lado, rotulada — nao da' para escolher uma sem saber qual a
- * plataforma usa, e esconder a outra impediria a reconciliacao com a planilha.
- */
-export function divergenciaEmPp(j: TikTokJanela | null): number | null {
-  if (!j || j.rate_ratio_of_totals === null || j.rate_mean_of_daily === null) {
-    return null;
-  }
-  return (j.rate_ratio_of_totals - j.rate_mean_of_daily) * 100;
-}
-
-/** As marcas acima do limiar, que e' o que responde "quem concentra o risco". */
-export function marcasCriticas(marcas: TikTokMarca[]): TikTokMarca[] {
-  return marcas.filter((m) => m.rate !== null && m.rate >= LIMIAR_DIA_CRITICO);
+/** As marcas fora da meta, que e' o que responde "quem concentra o risco". */
+export function marcasForaDaMeta(marcas: TikTokMarca[]): TikTokMarca[] {
+  return marcas.filter((m) => m.above_target);
 }
 
 /**
- * Altura da barra no grafico, em porcentagem do maior valor da serie.
- * Normaliza pelo MAXIMO e nao por 100%: numa janela calma (taxa maxima de 3%)
- * todas as barras ficariam invisiveis e o operador nao veria a variacao que
- * importa. Piso de 2% para que um dia com taxa muito pequena, mas nao nula,
- * continue clicavel e visivel.
+ * Altura da barra, em porcentagem do maior valor da serie. Normaliza pelo
+ * MAXIMO e nao por 100%: numa janela calma (taxa maxima de 3%) todas as barras
+ * ficariam invisiveis e o operador nao veria a variacao que importa. Piso de
+ * 2% para que um dia com taxa pequena, mas nao nula, continue visivel.
  */
-export function alturaDaBarra(dia: TikTokDia, maximo: number): number {
+export function alturaDaBarra(dia: TikTokLdrDia, maximo: number): number {
   if (dia.rate === null || maximo <= 0) return 0;
   return Math.max(2, (dia.rate / maximo) * 100);
 }
 
-export function taxaMaxima(dias: TikTokDia[]): number {
+export function taxaMaxima(dias: TikTokLdrDia[]): number {
   return dias.reduce((max, d) => (d.rate !== null && d.rate > max ? d.rate : max), 0);
+}
+
+/** Onde desenhar a linha da meta no grafico, em % da altura. */
+export function alturaDaMeta(maximo: number, meta = META_TIKTOK_LDR): number | null {
+  if (maximo <= 0 || meta > maximo) return null;
+  return (meta / maximo) * 100;
 }
 
 /** URL da API. Mantem a mesma forma de query usada pelos outros canais. */
