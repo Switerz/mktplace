@@ -32,6 +32,7 @@ import {
   EXPLICACAO_EVENTO,
   EXPLICACAO_FLUXO,
   EXPLICACAO_LDR,
+  EXPLICACAO_META,
   JANELAS,
   JANELA_INICIAL_DIAS,
   META_TIKTOK_LDR,
@@ -39,6 +40,8 @@ import {
   ROTULO_LIMIAR_INTERNO,
   ROTULO_META,
   ROTULO_SEVERIDADE,
+  SELO_ACIMA_DA_META,
+  SELO_DENTRO_DA_META,
   TITULO_FLUXO,
   TITULO_LDR,
   VALOR_SEM_TAXA,
@@ -208,7 +211,7 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
           role="img"
           aria-label={`Taxa por dia de vencimento. Máximo da série: ${formatarTaxa(
             maximo,
-          )}. Meta do TikTok: ${formatarTaxa(META_TIKTOK_LDR, 0)}.`}
+          )}. Referência do TikTok: ${formatarTaxa(META_TIKTOK_LDR, 0)} (medição interna).`}
         >
           {dias.map((d) => {
             const sev = severidadeDoDia(d);
@@ -393,9 +396,15 @@ export default function TikTokDispatchPanel() {
             <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
               {TITULO_LDR}
             </h3>
-            <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               {EXPLICACAO_LDR}
               {sla ? ` Prazo do evento: ${sla} dia(s) útil(eis).` : ""}
+            </p>
+            {/* A ressalva fica COLADA no selo, nunca atras de um tooltip: o
+                numero sai desta tela para reuniao, e sem ela vira "o TikTok
+                nos penalizou". */}
+            <p className="mb-2 mt-1 text-xs text-slate-500 dark:text-slate-400">
+              {EXPLICACAO_META}
             </p>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <Cartao
@@ -405,7 +414,7 @@ export default function TikTokDispatchPanel() {
                   ldr.rate === null
                     ? "Sem vencimento maduro na janela."
                     : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
-                        ldr.above_target ? "FORA DA META" : "dentro da meta"
+                        ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META
                       }`
                 }
                 tom={ldr.above_target ? "critico" : "bom"}
@@ -439,10 +448,10 @@ export default function TikTokDispatchPanel() {
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {foraDaMeta > 0
-                  ? `${foraDaMeta} dia(s) fora da meta, ${criticos} acima do ${ROTULO_LIMIAR_INTERNO.toLowerCase()}.${
+                  ? `${foraDaMeta} dia(s) acima da meta, ${criticos} acima do ${ROTULO_LIMIAR_INTERNO.toLowerCase()}.${
                       incidente ? ` ${incidente}` : ""
                     }`
-                  : "Nenhum dia fora da meta na janela."}
+                  : "Nenhum dia acima da meta na janela."}
               </p>
             </div>
             <Grafico dias={ldr.daily} />
@@ -525,7 +534,7 @@ export default function TikTokDispatchPanel() {
                 Por loja
                 {piores.length ? (
                   <span className="ml-2 text-xs font-normal text-rose-700 dark:text-rose-400">
-                    {piores.length} fora da meta
+                    {piores.length} acima da meta
                   </span>
                 ) : null}
               </h3>

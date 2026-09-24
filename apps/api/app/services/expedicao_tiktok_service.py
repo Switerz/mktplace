@@ -17,8 +17,9 @@ coorte de pagamento como se fosse a LDR inflaria qualquer media.
 
 DOIS LIMIARES COM NOMES DIFERENTES
 -----------------------------------
-  META_TIKTOK_LDR (4%)        conformidade com a plataforma; acima disso ha
-                              penalizacao. Fato externo.
+  META_TIKTOK_LDR (4%)        referencia operacional do TikTok. O numero e da
+                              plataforma; a medicao e nossa e usa prazo
+                              reconstruido — nao e a conta de penalizacao dela.
   LIMIAR_CRITICO_INTERNO (10%) severidade nossa, para achar o dia do incidente.
 
 Confundi-los faria a tela dizer "dentro da meta" num dia de 9%.
@@ -55,7 +56,14 @@ EVENTOS = ("coleta", "despacho")
 EVENTO_PADRAO = "coleta"
 SLA_DIAS_UTEIS = {"despacho": 1, "coleta": 2}
 
-#: Meta OFICIAL do TikTok. Acima disto ha penalizacao da plataforma.
+#: Referencia operacional do TikTok para a LDR.
+#:
+#: O NUMERO e' da plataforma; a MEDICAO com que o comparamos e' nossa e usa
+#: prazo reconstruido, porque o SLA por pedido nao e' ingerido. Cruzar esta
+#: linha significa "acima da referencia pela nossa conta", e NAO "penalizado
+#: pelo TikTok" — a plataforma calcula com o proprio relogio e o proprio
+#: denominador, aos quais nao temos acesso. Todo texto derivado daqui carrega
+#: essa ressalva.
 META_TIKTOK_LDR = 0.04
 
 #: Limiar INTERNO de severidade. Nao e' conformidade.
@@ -413,10 +421,16 @@ def _alertas(*, ldr, marcas, evento, effective_at, agora):
         out.append({
             "severity": "critical",
             "code": "fora_da_meta_tiktok",
+            # "Acima da meta — medição interna", nunca "fora da meta". Quem
+            # declara penalização é o TikTok, com o próprio relógio e o próprio
+            # denominador; aqui o prazo é reconstruído.
             "message": (
-                f"LDR de {_pct(ldr['rate'], 2)} nos vencimentos da janela, acima "
-                f"da meta de {_pct(META_TIKTOK_LDR, 0)} do TikTok. "
-                f"Base: {ldr['base']} pedidos com envio vencendo no período."
+                f"Acima da meta — medição interna: LDR de {_pct(ldr['rate'], 2)} "
+                f"nos vencimentos da janela, contra a referência de "
+                f"{_pct(META_TIKTOK_LDR, 0)} do TikTok. Base: {ldr['base']} pedidos "
+                f"com envio vencendo no período. O prazo é reconstruído da "
+                f"política de dias úteis e ainda não é a medição oficial de "
+                f"penalização da plataforma."
             ),
         })
     elif ldr["rate"] is not None:
@@ -424,8 +438,9 @@ def _alertas(*, ldr, marcas, evento, effective_at, agora):
             "severity": "info",
             "code": "dentro_da_meta_tiktok",
             "message": (
-                f"LDR de {_pct(ldr['rate'], 2)}, dentro da meta de "
-                f"{_pct(META_TIKTOK_LDR, 0)} do TikTok."
+                f"Dentro da meta — medição interna: LDR de {_pct(ldr['rate'], 2)}, "
+                f"abaixo da referência de {_pct(META_TIKTOK_LDR, 0)} do TikTok. "
+                f"Prazo reconstruído; não é a medição oficial da plataforma."
             ),
         })
 
@@ -467,7 +482,7 @@ def _alertas(*, ldr, marcas, evento, effective_at, agora):
             "severity": "warning",
             "code": "marcas_concentram",
             "message": (
-                "Acima da meta em: "
+                "Acima da meta (medição interna) em: "
                 + ", ".join(f"{m['brand']} ({_pct(m['rate'])})" for m in piores[:4])
                 + "."
             ),

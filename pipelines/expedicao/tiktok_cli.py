@@ -50,6 +50,7 @@ from pipelines.expedicao.tiktok_daily import (
     extrair,
     hoje_brt,
     ler_proveniencia,
+    ler_qualidade,
     ler_watermark,
     linhas_para_publicar,
     marcas_criticas,
@@ -110,7 +111,7 @@ def _agora_utc() -> datetime:
 # ---------------------------------------------------------------------------
 # Diagnostico
 # ---------------------------------------------------------------------------
-def _relatorio(coortes, proveniencia, hoje, dias: int) -> None:
+def _relatorio(coortes, proveniencia, qualidade, hoje, dias: int) -> None:
     desde, ate = janela_de_vencimento(hoje, dias)
     log(f"DIAGNOSTICO expedicao/{CANAL.value} — hoje (BRT) = {hoje}")
     log(f"  janela de vencimento: {desde} .. {ate}")
@@ -136,6 +137,27 @@ def _relatorio(coortes, proveniencia, hoje, dias: int) -> None:
         log("    AVISO: cobertura abaixo do minimo — a taxa de COLETA nao")
         log("    sustenta conclusao sobre a transportadora.")
 
+    # --- premissas da transformacao, medidas na fonte ----------------------
+    # Estes numeros sao os citados na migration 020 e no handoff de ingestao.
+    # Imprimi-los aqui e' o que os torna reproduziveis por um comando, em vez
+    # de precisao herdada de uma consulta ad-hoc que ninguem mais tem.
+    if qualidade:
+        n_itens = int(qualidade.get("pedidos_com_itens") or 0)
+        parcial = int(qualidade.get("rts_parcial") or 0)
+        divergente = int(qualidade.get("rts_min_diferente_max") or 0)
+        canc = int(qualidade.get("cancelados") or 0)
+        canc_ok = int(qualidade.get("cancelados_com_carimbo") or 0)
+        log("")
+        log("  === PREMISSAS DA TRANSFORMACAO (medidas agora) ===")
+        log(f"    pedidos com line items                  {n_itens}")
+        log(f"    com rts_time PARCIAL (invalida o grao)  {parcial}")
+        log(f"    com min(rts_time) <> max(rts_time)      {divergente}")
+        log(f"    cancelados                              {canc}")
+        log(f"    cancelados COM carimbo no log           {canc_ok}  "
+            f"({_pct((canc_ok / canc) if canc else None)})")
+        log("    cancelado SEM carimbo permanece no denominador; o denominador")
+        log("    so' perde quem cancelou ANTES do vencimento.")
+
     # --- as duas leituras --------------------------------------------------
     for evento in (Evento.COLETA, Evento.DESPACHO):
         ldr = calcular_ldr(coortes, evento, hoje, desde=desde, ate=ate)
@@ -143,8 +165,8 @@ def _relatorio(coortes, proveniencia, hoje, dias: int) -> None:
         log(f"  === LDR OPERACIONAL — VENCIMENTOS NA JANELA · {evento.value.upper()} "
             f"({PRAZO_DIAS_UTEIS[evento]} dia(s) util(eis)) ===")
         log(f"    taxa                 {_pct(ldr.taxa)}")
-        log(f"    meta do TikTok       {_pct(META_TIKTOK_LDR)}  -> "
-            f"{'FORA DA META' if ldr.fora_da_meta else 'dentro da meta'}")
+        log(f"    referencia TikTok    {_pct(META_TIKTOK_LDR)}  -> "
+            f"{'ACIMA da meta (medicao interna)' if ldr.fora_da_meta else 'dentro da meta'}")
         if ldr.critico_interno:
             log(f"    limiar interno       {_pct(LIMIAR_CRITICO_INTERNO)}  -> CRITICO")
         log(f"    base (vencem na janela)   {ldr.base}")
@@ -183,7 +205,7 @@ def _relatorio(coortes, proveniencia, hoje, dias: int) -> None:
     for marca, taxa, base in marcas_criticas(
         coortes, Evento.COLETA, hoje, desde=desde, ate=ate
     ):
-        selo = "  FORA DA META" if taxa > META_TIKTOK_LDR else ""
+        selo = "  ACIMA da meta (medicao interna)" if taxa > META_TIKTOK_LDR else ""
         log(f"    {marca:<14}{_pct(taxa):>8}   ({base} pedidos){selo}")
 
 
@@ -199,7 +221,8 @@ def _run_diagnose(dias: int) -> int:
             log("fonte sem coorte na janela — nada a diagnosticar.")
             return EXIT_FONTE_NAO_PUBLICAVEL
         proveniencia = ler_proveniencia(fonte, hoje, dias)
-        _relatorio(coortes, proveniencia, hoje, dias)
+        qualidade = ler_qualidade(fonte, hoje, dias)
+        _relatorio(coortes, proveniencia, qualidade, hoje, dias)
     return EXIT_OK
 
 

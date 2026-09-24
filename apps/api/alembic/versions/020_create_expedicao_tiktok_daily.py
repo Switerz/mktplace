@@ -53,9 +53,19 @@ zero ocorrencias em `ORDER_COLUMN_MAPPING`. As colunas de deadline aqui sao
 RECONSTRUIDAS da politica de dias uteis.
 
 A reconstrucao foi reconciliada contra a planilha da gestao (marca `barbours`,
-01-23/09): a regra COM feriados nacionais reproduz a taxa diaria com erro
-absoluto acumulado de 5 pp em 23 dias, contra 136 pp sem feriados e 573 pp em
-dias corridos.
+01-23/09), a partir de um artefato VERSIONADO —
+`docs/reconciliation/tiktok_ldr_planilha_gestor_2026-09-23.csv` — e nao de uma
+consulta ad-hoc. Refazer com:
+
+    python -m pipelines.reconciliation.tiktok_ldr_planilha
+
+    regra                erro acumulado   erro medio   dias dentro de 1 pp
+    uteis_com_feriado           7,1 pp       0,31 pp          23/23  <- vigente
+    uteis_sem_feriado         137,7 pp       5,99 pp          19/23
+    corridos                  573,8 pp      24,95 pp          14/23
+
+Pedidos pagos batem em 21 dos 23 dias (total +1,68%). A planilha arredonda a
+taxa para inteiro, entao 1 pp e' a melhor resolucao possivel da comparacao.
 
 MATURACAO
 ---------

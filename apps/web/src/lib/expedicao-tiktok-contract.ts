@@ -47,7 +47,10 @@ export const EXPLICACAO_EVENTO: Record<Evento, string> = {
  * mostrar este aviso.
  *
  * A reconstrucao foi reconciliada contra a planilha da gestao (marca
- * `barbours`, 01-23/09): erro absoluto acumulado de 5 pp em 23 dias.
+ * `barbours`, 01-23/09): erro medio de 0,31 pp por dia, com os 23 dias dentro
+ * da resolucao de 1 pp que a planilha permite (ela exibe a taxa arredondada).
+ * O artefato e o script que refazem essa conta estao em
+ * `docs/reconciliation/` e `pipelines/reconciliation/tiktok_ldr_planilha.py`.
  */
 export const AVISO_PRAZO_RECONSTRUIDO =
   "Prazo reconstruído da política de dias úteis (1 dia para etiqueta, 2 para " +
@@ -59,8 +62,16 @@ export const AVISO_PRAZO_RECONSTRUIDO =
 // Os DOIS limiares — nomes diferentes de proposito
 // ---------------------------------------------------------------------------
 /**
- * META OFICIAL do TikTok. Acima disto ha penalizacao da plataforma: e' um fato
- * externo, nao uma preferencia nossa.
+ * Referencia operacional do TikTok para a LDR.
+ *
+ * O numero (4%) e' da plataforma. A MEDICAO com que o comparamos e' nossa, e
+ * usa prazo reconstruido — o SLA por pedido nao e' ingerido. Entao cruzar esta
+ * linha significa "acima da referencia pela nossa conta", e NAO "penalizado
+ * pelo TikTok": a plataforma calcula com o proprio relogio e o proprio
+ * denominador, aos quais nao temos acesso.
+ *
+ * Todo texto derivado daqui precisa carregar essa distincao. Ver
+ * `EXPLICACAO_META`.
  */
 export const META_TIKTOK_LDR = 0.04;
 
@@ -71,8 +82,26 @@ export const META_TIKTOK_LDR = 0.04;
  */
 export const LIMIAR_CRITICO_INTERNO = 0.1;
 
-export const ROTULO_META = "Meta do TikTok";
+export const ROTULO_META = "Referência do TikTok";
 export const ROTULO_LIMIAR_INTERNO = "Limiar crítico interno";
+
+/**
+ * O selo exibido quando a LDR cruza a referencia. NAO diz "fora da meta":
+ * quem decide isso e' o TikTok, com o proprio relogio e o proprio
+ * denominador. Diz o que de fato sabemos — que a NOSSA medicao passou de 4%.
+ */
+export const SELO_ACIMA_DA_META = "Acima da meta — medição interna";
+export const SELO_DENTRO_DA_META = "Dentro da meta — medição interna";
+
+/**
+ * Vai SEMPRE junto do selo, nunca escondido atras de um tooltip. As tres
+ * coisas que o operador precisa saber para nao levar o numero a uma reuniao
+ * como se fosse da plataforma.
+ */
+export const EXPLICACAO_META =
+  "4% é a referência operacional do TikTok. Esta medição usa prazo " +
+  "reconstruído da política de dias úteis e ainda não é a medição oficial de " +
+  "penalização da plataforma.";
 
 // ---------------------------------------------------------------------------
 // As duas leituras
@@ -252,8 +281,8 @@ export function severidadeDoDia(dia: TikTokLdrDia): Severidade {
 }
 
 export const ROTULO_SEVERIDADE: Record<Severidade, string> = {
-  ok: "Dentro da meta",
-  fora_da_meta: "Fora da meta do TikTok",
+  ok: "Dentro da meta (medição interna)",
+  fora_da_meta: "Acima da meta (medição interna)",
   critico: "Crítico (limiar interno)",
   parcial: "Ainda no prazo (parcial)",
 };

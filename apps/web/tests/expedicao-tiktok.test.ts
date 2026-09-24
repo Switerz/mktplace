@@ -13,6 +13,7 @@ import {
   EVENTO_PADRAO,
   EXPLICACAO_FLUXO,
   EXPLICACAO_LDR,
+  EXPLICACAO_META,
   JANELA_INICIAL_DIAS,
   LIMIAR_CRITICO_INTERNO,
   META_TIKTOK_LDR,
@@ -20,6 +21,8 @@ import {
   ROTULO_LIMIAR_INTERNO,
   ROTULO_META,
   ROTULO_SEVERIDADE,
+  SELO_ACIMA_DA_META,
+  SELO_DENTRO_DA_META,
   TITULO_FLUXO,
   TITULO_LDR,
   VALOR_SEM_TAXA,
@@ -124,11 +127,42 @@ test("os selos da API mandam na cor, e a tela nao recalcula o limiar", () => {
   );
 });
 
-test("cada severidade tem rotulo distinto e o de meta cita o TikTok", () => {
+test("cada severidade tem rotulo distinto, e nenhum atribui o veredito ao TikTok", () => {
   const rotulos = Object.values(ROTULO_SEVERIDADE);
   assert.equal(new Set(rotulos).size, rotulos.length);
-  assert.match(ROTULO_SEVERIDADE.fora_da_meta, /TikTok/);
+  // O rotulo diz que a MEDICAO e' nossa. Quem declara penalizacao e' o TikTok,
+  // com o proprio relogio e o proprio denominador — nao esta tela.
+  assert.match(ROTULO_SEVERIDADE.fora_da_meta, /medição interna/i);
+  assert.match(ROTULO_SEVERIDADE.ok, /medição interna/i);
   assert.match(ROTULO_SEVERIDADE.critico, /interno/i);
+  for (const r of rotulos) {
+    assert.ok(!/penaliz/i.test(r), r);
+  }
+});
+
+test("o selo diz 'acima da meta', e nunca 'fora da meta'", () => {
+  // "Fora da meta" soa a veredito da plataforma. O que sabemos e' que a NOSSA
+  // conta passou de 4%.
+  assert.match(SELO_ACIMA_DA_META, /acima da meta/i);
+  assert.match(SELO_ACIMA_DA_META, /medição interna/i);
+  assert.ok(!/fora da meta/i.test(SELO_ACIMA_DA_META));
+  assert.match(SELO_DENTRO_DA_META, /medição interna/i);
+});
+
+test("a ressalva da meta carrega as tres coisas que o operador precisa saber", () => {
+  // 1. de quem e' o 4%; 2. que o prazo e' reconstruido; 3. que nao e' a
+  // medicao oficial de penalizacao. Sem qualquer uma delas o numero sai desta
+  // tela para uma reuniao como se fosse da plataforma.
+  assert.match(EXPLICACAO_META, /4%/);
+  assert.match(EXPLICACAO_META, /TikTok/);
+  assert.match(EXPLICACAO_META, /reconstru/i);
+  assert.match(EXPLICACAO_META, /penaliza/i);
+  assert.match(EXPLICACAO_META, /ainda não é/i);
+});
+
+test("o rotulo da referencia nao a chama de meta oficial", () => {
+  assert.match(ROTULO_META, /refer/i);
+  assert.ok(!/oficial/i.test(ROTULO_META));
 });
 
 // ---------------------------------------------------------------------------

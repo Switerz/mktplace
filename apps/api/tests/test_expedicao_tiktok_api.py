@@ -269,6 +269,31 @@ def test_o_alerta_de_conformidade_cita_a_meta_e_nao_o_limiar_interno():
     assert "dias_criticos_internos" not in alertas
 
 
+def test_o_alerta_nao_atribui_o_veredito_ao_tiktok():
+    """O alerta sai desta tela para reuniao. Sem a ressalva, "acima da meta"
+    vira "o TikTok nos penalizou" — que e' outra conta, com outro relogio e
+    outro denominador, aos quais nao temos acesso."""
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=50)]
+    msg = next(a["message"] for a in serie(ls)["alerts"]
+               if a["code"] == "fora_da_meta_tiktok")
+    assert "medição interna" in msg
+    assert "reconstruído" in msg
+    assert "ainda não é a medição oficial" in msg
+    # "fora da meta" soa a veredito da plataforma; o texto diz "acima".
+    assert "fora da meta" not in msg.lower()
+    assert msg.lower().startswith("acima da meta")
+
+
+def test_dentro_da_meta_tambem_carrega_a_ressalva():
+    ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
+                brutos=1000, col_atras=10)]
+    msg = next(a["message"] for a in serie(ls)["alerts"]
+               if a["code"] == "dentro_da_meta_tiktok")
+    assert "medição interna" in msg
+    assert "reconstruído" in msg
+
+
 def test_dentro_da_meta_gera_alerta_informativo_e_nao_critico():
     ls = [linha(date(2026, 9, 20), tts_deadline=date(2026, 9, 22),
                 brutos=1000, col_atras=10)]

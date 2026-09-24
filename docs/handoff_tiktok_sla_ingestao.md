@@ -2,7 +2,34 @@
 
 > Emitido pelo gate EXP-TK-OPS-2 (Torre `Switerz/mktplace`, 2026-09-24).
 > Prompt autocontido para a instância que cuida da ingestão do TikTok.
-> Toda medição abaixo é datada e foi feita contra a fonte real.
+
+## Como refazer as medições deste documento
+
+Todo número abaixo foi medido **em 2026-09-24**, contra a fonte real. Os que
+descrevem cobertura e grão são reproduzíveis por um comando:
+
+```
+python -m pipelines.expedicao.tiktok_cli --diagnose
+```
+
+Ele imprime, sob `PROVENIÊNCIA` e `PREMISSAS DA TRANSFORMAÇÃO`, a cobertura de
+`IN_TRANSIT`, o grão dos line items e a cobertura do carimbo de cancelamento.
+
+**O comando reproduz a medição, não o valor.** Duas coisas mudam o número:
+
+1. **a janela é móvel** — rodar amanhã lê outros dias;
+2. **o tamanho da janela importa** — os valores citados abaixo foram medidos
+   sobre pagamentos de **01 a 24/09** (equivalente a `--dias 30`). Com a janela
+   padrão de 7 dias os mesmos indicadores dão outro número: a cobertura do
+   carimbo de cancelamento, por exemplo, sai 73,1% em vez de 78,4%, porque
+   cancelamento recente ainda não foi detectado pelo poller.
+
+Os valores aqui são a fotografia de 2026-09-24 na janela declarada. Servem para
+dimensionar o problema, não como constante.
+
+Os números de reconciliação com a planilha da gestão vêm de outro artefato,
+esse sim versionado: `docs/reconciliation/` +
+`python -m pipelines.reconciliation.tiktok_ldr_planilha`.
 
 ## Por que isto é necessário
 

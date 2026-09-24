@@ -36,6 +36,11 @@ meta de 4%, mas isso agora e' uma medicao, e nao um artefato de prazo frouxo.
 
 O QUE E' CADA EVENTO, MEDIDO NA FONTE (2026-09-24)
 ----------------------------------------------------
+As duas medicoes abaixo sao refeitas por `--diagnose`, sob PROVENIENCIA e
+PREMISSAS DA TRANSFORMACAO. O comando reproduz a MEDICAO, nao o valor: a janela
+e' movel e rodar amanha da' outro numero. O que esta escrito aqui e' a
+fotografia de 2026-09-24.
+
 1. RTS = `max(raw.tiktok_shop_line_items.rts_time)` do pedido, e SOMENTE quando
    TODOS os itens tem `rts_time`. Medido em 175.925 pedidos de 01-24/09:
    `rts_time` parcial dentro do pedido = 0 casos, e `min <> max` = 0 casos
@@ -59,9 +64,19 @@ Logo o prazo aqui e' RECONSTRUIDO da politica (1 e 2 dias uteis), nao o numero
 da plataforma, e `PRAZO_E_RECONSTRUIDO` obriga todo consumidor a rotular isso.
 
 A reconstrucao foi RECONCILIADA contra a planilha da gestao (marca `barbours`,
-01-23/09): a regra de dias uteis COM feriados nacionais reproduz a coluna de
-taxa diaria com erro absoluto acumulado de 5 pp em 23 dias, contra 136 pp sem
-feriados e 573 pp em dias corridos.
+01-23/09). Os numeros abaixo NAO sao citacao de uma medicao perdida: saem de
+um artefato versionado e sao refeitos por um comando.
+
+    python -m pipelines.reconciliation.tiktok_ldr_planilha
+
+    regra                erro acumulado   erro medio   dias dentro de 1 pp
+    uteis_com_feriado           7,1 pp       0,31 pp          23/23  <- vigente
+    uteis_sem_feriado         137,7 pp       5,99 pp          19/23
+    corridos                  573,8 pp      24,95 pp          14/23
+
+A planilha exibe a taxa ARREDONDADA para inteiro, entao 1 pp e' a melhor
+resolucao que a comparacao pode ter. Nenhum numero derivado dela deve ser
+reportado com mais precisao que isso.
 
 FUSO
 ----
@@ -106,8 +121,13 @@ PRAZO_DIAS_UTEIS: dict[Evento, int] = {
     Evento.COLETA: 2,
 }
 
-#: META OFICIAL do TikTok para a LDR. Ultrapassar isto e' estar fora da regua
-#: da plataforma, com penalizacao — e' um fato externo, nao uma preferencia.
+#: Referencia operacional do TikTok para a LDR.
+#:
+#: O NUMERO e' da plataforma; a MEDICAO com que o comparamos e' nossa e usa
+#: prazo reconstruido, porque o SLA por pedido nao e' ingerido. Cruzar esta
+#: linha significa "acima da referencia pela nossa conta", e NAO "penalizado
+#: pelo TikTok": a plataforma calcula com o proprio relogio e o proprio
+#: denominador, aos quais nao temos acesso.
 META_TIKTOK_LDR = 0.04
 
 #: Limiar INTERNO de severidade, muito acima da meta. Serve para achar o dia em
@@ -701,6 +721,36 @@ SELECT max(extracted_at) AS max_extracted_at
 #: existe para que a tela possa recusar a medicao se um dia o `IN_TRANSIT`
 #: deixar de cobrir a carteira. Medido em 2026-09-24: 99,32% de cobertura e
 #: 0,006% que so' teriam instante por DELIVERED/COMPLETED.
+QUALIDADE_SQL = """
+WITH ped AS MATERIALIZED (
+    SELECT order_id, order_status FROM raw.tiktok_shop_orders
+     WHERE paid_at >= %(desde)s::date AND paid_at < (%(ate)s::date + 1)
+),
+li AS (
+    SELECT l.order_id, count(*) AS itens, count(l.rts_time) AS com_rts,
+           min(l.rts_time) AS mn, max(l.rts_time) AS mx
+      FROM raw.tiktok_shop_line_items l
+      JOIN ped p ON p.order_id = l.order_id
+     GROUP BY 1
+),
+canc AS (
+    SELECT DISTINCT l.order_id
+      FROM raw.tiktok_shop_order_status_log l
+      JOIN ped p ON p.order_id = l.order_id
+     WHERE l.new_status = 'CANCELLED' AND l.updated_at_tiktok IS NOT NULL
+)
+SELECT
+    (SELECT count(*) FROM li)                                      AS pedidos_com_itens,
+    (SELECT count(*) FROM li WHERE com_rts > 0 AND com_rts < itens) AS rts_parcial,
+    (SELECT count(*) FROM li WHERE mn IS DISTINCT FROM mx)          AS rts_min_diferente_max,
+    (SELECT count(*) FROM ped WHERE order_status = 'CANCELLED')     AS cancelados,
+    (SELECT count(*) FROM ped p
+       WHERE p.order_status = 'CANCELLED'
+         AND EXISTS (SELECT 1 FROM canc c WHERE c.order_id = p.order_id))
+                                                                    AS cancelados_com_carimbo
+"""
+
+#: Diagnostico de PROVENIENCIA do instante de coleta.
 PROVENIENCIA_SQL = """
 WITH ped AS MATERIALIZED (
     SELECT order_id, brand FROM raw.tiktok_shop_orders
@@ -789,8 +839,21 @@ def _ler(conn, sql: str, params: dict) -> list[dict]:
     raise AssertionError("inalcancavel")  # pragma: no cover
 
 
-def extrair(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> list[CoorteDiaria]:
-    """Le a fonte e devolve as coortes ja validadas. Conexao deve ser read-only."""
+def extrair(
+    conn,
+    hoje: date,
+    dias: int = JANELA_PADRAO_DIAS,
+    *,
+    prazos: list[list[str]] | None = None,
+) -> list[CoorteDiaria]:
+    """Le a fonte e devolve as coortes ja validadas. Conexao deve ser read-only.
+
+    `prazos` existe SO para a reconciliacao poder testar regras de prazo
+    alternativas (sem feriado, dias corridos) contra a planilha da gestao sem
+    duplicar este SQL. Em producao fica `None` e a politica manda. Duplicar o
+    SQL na reconciliacao faria os dois divergirem em silencio, que e'
+    exatamente o que uma reconciliacao existe para impedir.
+    """
     import json  # noqa: PLC0415 - so' aqui, para nao pesar o import do modulo
 
     desde, ate = janela_de_pagamento(hoje, dias)
@@ -798,7 +861,8 @@ def extrair(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> list[CoorteDiar
         conn,
         FONTE_SQL,
         {
-            "prazos": json.dumps(prazos_da_janela(hoje, dias)),
+            "prazos": json.dumps(prazos if prazos is not None
+                                 else prazos_da_janela(hoje, dias)),
             "status_coleta": STATUS_COLETA,
             "hoje": hoje.isoformat(),
             "desde": desde.isoformat(),
@@ -842,6 +906,19 @@ def ler_watermark(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> datetime 
     if bruto is None:
         return None
     return bruto.replace(tzinfo=timezone.utc) if bruto.tzinfo is None else bruto
+
+
+def ler_qualidade(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> dict:
+    """Mede, na fonte, as duas premissas que este modulo assume.
+
+    Existe para que os numeros citados na migration e no handoff — grao dos
+    line items e cobertura do carimbo de cancelamento — sejam REPRODUZIVEIS por
+    um comando, e nao precisao herdada de uma consulta ad-hoc perdida.
+    """
+    desde, ate = janela_de_pagamento(hoje, dias)
+    linhas = _ler(conn, QUALIDADE_SQL,
+                  {"desde": desde.isoformat(), "ate": ate.isoformat()})
+    return linhas[0] if linhas else {}
 
 
 def ler_proveniencia(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> list[dict]:
