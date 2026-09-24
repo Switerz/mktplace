@@ -135,7 +135,7 @@ def test_snapshot_e_o_primeiro_comando_da_transacao():
 
 
 def test_limiares_sao_declarados_provisorios():
-    assert "PROVISORIOS" in svc.LIMITACAO_LIMIARES
+    assert "PROVISÓRIOS" in svc.LIMITACAO_LIMIARES
     assert str(svc.COBERTURA_BAIXA_DIAS) in svc.LIMITACAO_LIMIARES
     assert str(svc.COBERTURA_EXCESSO_DIAS) in svc.LIMITACAO_LIMIARES
 
@@ -143,14 +143,14 @@ def test_limiares_sao_declarados_provisorios():
 def test_cobertura_e_declarada_como_calculo_nosso():
     """Nao pode ser apresentada como numero oficial da Shopee."""
     assert "NOSSO" in svc.LIMITACAO_COBERTURA_TORRE
-    assert "NAO reproduz nenhuma formula da Shopee" in (
+    assert "NÃO reproduz nenhuma fórmula da Shopee" in (
         svc.LIMITACAO_COBERTURA_TORRE)
 
 
 def test_motivos_de_ausencia_negam_estoque_zero_por_escrito():
     """A mensagem que chega ao usuario tem de desfazer a confusao."""
     for motivo in (svc.MOTIVO_FATO_INEXISTENTE, svc.MOTIVO_SEM_FOTOGRAFIA):
-        assert "nao significa estoque zero" in motivo
+        assert "não significa estoque zero" in motivo
 
 
 def test_kokeshi_declarada_fora_da_cobertura():
@@ -418,7 +418,7 @@ def test_fato_inexistente_nao_devolve_zeros(engine, sessao):
     with pytest.raises(svc.FatoInexistente) as exc:
         _bloco(sessao)
     assert exc.value.motivo_tecnico == "fato_inexistente"
-    assert "nao significa estoque zero" in exc.value.mensagem
+    assert "não significa estoque zero" in exc.value.mensagem
 
 
 @pg
@@ -437,7 +437,7 @@ def test_tabela_vazia_e_sem_fotografia_nao_estoque_zero(engine, sessao):
     with pytest.raises(svc.SemFotografiaPublicada) as exc:
         _bloco(sessao)
     assert exc.value.motivo_tecnico == "sem_fotografia_publicada"
-    assert "nao significa estoque zero" in exc.value.mensagem
+    assert "não significa estoque zero" in exc.value.mensagem
 
 
 @pg

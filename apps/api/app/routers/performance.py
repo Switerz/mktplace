@@ -939,13 +939,15 @@ def shopee_fbs(
 # exatamente o arquivo que ele toca. O prefixo continua `/api/v1/performance`.
 # ===========================================================================
 
+# Textos LIDOS PELO GESTOR: viajam no payload e a tela os imprime como estao,
+# entao levam acentuacao correta -- ao contrario dos comentarios deste arquivo.
 MOTIVO_ESTOQUE_FULL_DESLIGADO = (
-    "Tela de Estoque Full da Shopee ainda nao habilitada. A fotografia de "
-    "estoque nao foi publicada e a ativacao e' decisao de negocio."
+    "Tela de Estoque Full da Shopee ainda não habilitada. A fotografia de "
+    "estoque não foi publicada e a ativação é decisão de negócio."
 )
 ERRO_ESTOQUE_FULL_CONTRATO = (
-    "Estoque Full da Shopee indisponivel: a fonte devolveu classificacao fora "
-    "do dominio autorizado. Acione o time de dados."
+    "Estoque Full da Shopee indisponível: a fonte devolveu classificação fora "
+    "do domínio autorizado. Acione o time de dados."
 )
 
 #: Teto de linhas aceito do cliente. O servico ainda aplica o proprio teto;

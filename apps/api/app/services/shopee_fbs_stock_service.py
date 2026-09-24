@@ -96,48 +96,56 @@ NO_AUTOMATION = True
 #: payload de megabytes sem ninguem perceber. Quando corta, a resposta DIZ.
 MAX_PRODUTOS = 1000
 
+# ---------------------------------------------------------------------------
+# TEXTO QUE VAI PARA A TELA
+# ---------------------------------------------------------------------------
+# Estas constantes sao LIDAS PELO GESTOR: viajam no payload e a tela as imprime
+# como estao. Por isso levam acentuacao correta, ao contrario dos comentarios e
+# docstrings deste arquivo, que seguem a convencao ASCII do repositorio.
+# Medido na captura local do gate: sem acento, a nota de limiares aparecia como
+# "Limiares PROVISORIOS, nao ratificados" no meio de uma tela acentuada.
+
 MOTIVO_FATO_INEXISTENTE = (
-    "A fotografia de Estoque Full ainda nao existe neste ambiente: as "
-    "migrations 020 e 021 nao foram aplicadas. Nao ha estoque medido -- isto "
-    "nao significa estoque zero."
+    "A fotografia de Estoque Full ainda não existe neste ambiente: as "
+    "migrations 020 e 021 não foram aplicadas. Não há estoque medido — isto "
+    "não significa estoque zero."
 )
 MOTIVO_SEM_FOTOGRAFIA = (
     "A tabela de Estoque Full existe, mas nenhuma fotografia foi publicada "
-    "ainda: o pipeline `sync_shopee_fbs_stock_daily` nunca rodou neste "
-    "ambiente. Nao ha estoque medido -- isto nao significa estoque zero."
+    "ainda: a carga `sync_shopee_fbs_stock_daily` nunca rodou neste ambiente. "
+    "Não há estoque medido — isto não significa estoque zero."
 )
 
 LIMITACAO_COBERTURA = (
-    "Cobertura PARCIAL: a esteira API cobre apice, barbours, lescent e "
-    "rituaria. Kokeshi NAO esta na API -- este total e' 'Estoque Full Shopee "
-    "(cobertura API)', nunca 'Shopee total'."
+    "Cobertura PARCIAL: a esteira de API cobre apice, barbours, lescent e "
+    "rituaria. Kokeshi NÃO está na API — este total é “Estoque Full Shopee "
+    "(cobertura API)”, nunca “Shopee total”."
 )
 LIMITACAO_CARGA_MANUAL = (
-    "Carga MANUAL: nao existe DAG nem agendamento para esta fotografia. A "
-    "data abaixo e' a da ultima execucao autorizada, nao de um ciclo diario."
+    "Carga MANUAL: não existe agendamento para esta fotografia. A data "
+    "mostrada é a da última execução autorizada, não de um ciclo diário."
 )
 LIMITACAO_KITS = (
-    "Kits ficam FORA dos indicadores operacionais: a semantica de estoque de "
-    "kit nao foi conciliada com o Seller Center. Aparecem como "
-    "KIT_NAO_CONCILIADO, em contagem propria."
+    "Kits ficam FORA dos indicadores operacionais: a semântica de estoque de "
+    "kit não foi conciliada com o Seller Center. Aparecem em contagem própria."
 )
 LIMITACAO_COBERTURA_TORRE = (
-    "'Cobertura da Torre' e' calculo NOSSO (estoque vendavel dividido pela "
-    "media diaria de 28 dias). NAO reproduz nenhuma formula da Shopee e nao "
-    "deve ser apresentada como numero oficial do marketplace."
+    "“Cobertura da Torre” é cálculo NOSSO: estoque vendável dividido pela "
+    "média diária de 28 dias. NÃO reproduz nenhuma fórmula da Shopee e não "
+    "deve ser apresentada como número oficial do marketplace."
 )
 LIMITACAO_LIMIARES = (
-    f"Limiares PROVISORIOS, nao ratificados: abaixo de {COBERTURA_BAIXA_DIAS} "
-    f"dias e' 'baixo', a partir de {COBERTURA_EXCESSO_DIAS} dias e' 'excesso'."
+    f"Limiares PROVISÓRIOS, não ratificados: abaixo de {COBERTURA_BAIXA_DIAS} "
+    f"dias é “baixo”, a partir de {COBERTURA_EXCESSO_DIAS} dias é “excesso”."
 )
 LIMITACAO_CONTEXTO = (
-    "'Reservado', 'estoque do vendedor' e 'disponivel (Shopee)' sao CONTEXTO: "
-    "nao sao estoque Full e nao entram em cobertura nem em classificacao."
+    "“Reservado”, “estoque do vendedor” e “disponível (Shopee)” são CONTEXTO: "
+    "não são estoque Full e não entram em cobertura nem em classificação."
 )
 LIMITACAO_DEMANDA = (
     f"Demanda = unidades de pedidos PAGOS nos {JANELA_VENDAS_DIAS} dias "
-    "completos anteriores a' fotografia. Pedidos `unpaid` ficam de fora: "
-    "nunca consumiram estoque. O criterio antigo, que os inclui, viaja "
+    "completos anteriores à fotografia. Pedidos não pagos ficam de fora: "
+    "nunca consumiram estoque. O critério antigo, que os inclui, viaja "
     "separado, apenas como contexto."
 )
 
@@ -178,7 +186,7 @@ class FiltroInvalido(ValueError):
         self.permitidos = tuple(permitidos)
         self.recebidos = tuple(recebidos)
         self.mensagem_segura = (
-            f"Filtro '{campo}' invalido. Valores aceitos: "
+            f"Filtro “{campo}” inválido. Valores aceitos: "
             f"{', '.join(permitidos)}.")
         super().__init__(self.mensagem_segura)
 

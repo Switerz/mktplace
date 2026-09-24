@@ -117,9 +117,27 @@ export const SHOPEE_FBS_NAV: NavPage = {
  * desligada. Esconder so' o menu deixaria a URL direta acessivel, e a API nao
  * tem autenticacao.
  */
+/**
+ * Gate FULL-SOURCE-3 — item da tela de Estoque Full, atras de
+ * `NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED`.
+ *
+ * Flag PROPRIA, e nao a do Full Shopee: aquela ja' esta ligada em producao e
+ * governa a tela de DESEMPENHO. Compartilhar faria esta tela nascer visivel
+ * sobre fatos que ainda nem existem no banco produtivo.
+ *
+ * O rotulo diz "Estoque Full Shopee" por inteiro: a Torre ja' tem "Full
+ * Shopee" (desempenho) e "Full Mercado Livre", e "Estoque Full" sozinho seria
+ * mais um item quase-homonimo no mesmo grupo.
+ */
+export const ESTOQUE_FULL_NAV: NavPage = {
+  href: "/estoque-full",
+  label: "Estoque Full Shopee",
+};
+
 export interface NavFlags {
   expedicao?: boolean;
   shopeeFbs?: boolean;
+  estoqueFull?: boolean;
 }
 
 export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
@@ -129,6 +147,7 @@ export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
   const extras: NavPage[] = [];
   if (f.expedicao) extras.push(EXPEDICAO_NAV);
   if (f.shopeeFbs) extras.push(SHOPEE_FBS_NAV);
+  if (f.estoqueFull) extras.push(ESTOQUE_FULL_NAV);
   if (!extras.length) return NAV_SECTIONS;
   return NAV_SECTIONS.map((s) =>
     s.label === "Operações" ? { ...s, pages: [...s.pages, ...extras] } : s,
