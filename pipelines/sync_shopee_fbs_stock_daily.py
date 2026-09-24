@@ -13,6 +13,13 @@ O QUE ESTE PIPELINE NAO FAZ
   174.906 unidades). Entra apenas como coluna de CONTEXTO.
 - NAO usa `seller_stock` (deposito do vendedor) nem `reserved_stock` (bloqueio
   por pedido) como estoque Full.
+- NAO soma `advance_stock`. Ele e' um OBJETO com `sellable_advance_stock` e
+  `in_transit_advance_stock`: estoque do programa de reposicao antecipada,
+  incluindo o que ainda esta' A CAMINHO do CD. Somar `in_transit` ao vendavel
+  contaria unidade que nao da' para vender hoje, e foi exatamente o "Total
+  Vendavel" da tela que conciliamos -- nao um total logistico. Medido em
+  2026-09-24: os dois campos valem 0 em todos os 301 produtos FBS, entao incluir
+  nao mudaria numero nenhum HOJE; ficam de fora pela semantica, nao pelo valor.
 - NAO classifica KIT: o unico kit levado a' validacao nao foi localizado no
   Seller Center, entao a semantica segue nao conciliada. Kit sai com
   `KIT_NAO_CONCILIADO` e fora de qualquer contagem operacional.
@@ -55,25 +62,61 @@ OPERATIONAL_TZ = timezone(timedelta(hours=-3))
 CONTAS_ESPERADAS = ("apice", "barbours", "lescent", "rituaria")
 
 # --------------------------------------------------------------------------- #
+# POPULACAO DA DEMANDA                                                         #
+# --------------------------------------------------------------------------- #
+# Lista EXPLICITA, nao "tudo menos cancelled". Status desconhecido BLOQUEIA a
+# carga: um valor novo que entrasse em silencio mudaria a demanda -- e a
+# cobertura -- sem ninguem ver.
+#
+# 🔑 RECONCILIADO com a definicao VIGENTE da Torre para a Shopee, em
+# `marts.fact_shopee_fbs_daily` / migration 019: "unico criterio de exclusao:
+# order_status = 'cancelled'; to_return e unpaid PERMANECEM, por decisao de
+# comparabilidade". Uso a MESMA populacao de proposito -- se eu inventasse aqui
+# uma regra diferente, as duas fatos da Torre deixariam de conversar sobre o que
+# e' uma venda da Shopee.
+#
+# CONSEQUENCIA MEDIDA (janela de 28 dias encerrada em 2026-09-24): `to_return`
+# responde por 0,67% das unidades e `unpaid` por 0,59%. Juntos inflam a demanda
+# -- e portanto REDUZEM a cobertura -- em ~1,3%. E' vies conhecido e aceito, nao
+# descuido: mudar isso e' mudar a definicao de venda da Torre inteira, nao desta
+# fato.
+STATUS_ELEGIVEIS = (
+    "completed", "shipped", "to_confirm_receive", "processed",
+    "ready_to_ship", "to_return", "unpaid",
+)
+#: Fora da demanda. Venda desfeita nunca consumiu estoque.
+STATUS_NAO_ELEGIVEIS = ("cancelled",)
+STATUS_CONHECIDOS = tuple(sorted(STATUS_ELEGIVEIS + STATUS_NAO_ELEGIVEIS))
+
+# --------------------------------------------------------------------------- #
 # PARAMETROS DA COBERTURA                                                      #
 # --------------------------------------------------------------------------- #
-#: Janela de demanda. REUTILIZADA de `gold.tiktok_inventory_daily`
-#: (`dias_janela_venda = 28`), onde ja' esta documentada e em producao.
+#: Janela de demanda, em dias COMPLETOS. Intervalo [ref_date - N, ref_date):
+#: o dia corrente NAO entra, porque ele esta' pela metade e faria a demanda
+#: parecer menor do que e' -- inflando a cobertura justo nos itens que mais
+#: vendem. REUTILIZADA de `gold.tiktok_inventory_daily` (`dias_janela_venda`).
 JANELA_VENDAS_DIAS = 28
 
-#: Limite de cobertura baixa. REUTILIZADO do mesmo modelo do TikTok
-#: (`dias_cobertura_baixa = 7`), que o documenta assim: o limite de alerta do
-#: painel nao e' exposto pela API, e um numero fixo de UNIDADES significa coisas
-#: opostas num SKU que vende 200/dia e num que vende 1/semana.
-COBERTURA_BAIXA_DIAS = 7
+#: 🔴 PROVISORIO. Limite de cobertura baixa. Veio de
+#: `gold.tiktok_inventory_daily` (`dias_cobertura_baixa = 7`), que o justifica
+#: assim: o limite de alerta do painel nao e' exposto pela API, e um numero fixo
+#: de UNIDADES significa coisas opostas num SKU que vende 200/dia e num que vende
+#: 1/semana. Herdar o parametro do TikTok NAO o valida para a Shopee: nenhum
+#: dono de numero ratificou este 7 para este canal.
+COBERTURA_BAIXA_DIAS_PROVISORIO = 7
 
-#: 🔴 Limite de EXCESSO: NAO tem origem documentada em lugar nenhum -- nem na
-#: Shopee, nem no modelo do TikTok, que simplesmente nao classifica excesso.
-#: E' um ponto de partida da Torre, explicitamente provisorio, exposto aqui para
-#: ser discutido e nao para ser tratado como verdade. A medida crua
-#: (`cobertura_torre_dias`) e' publicada sempre, entao mudar este numero nao
-#: exige recarga historica.
-COBERTURA_EXCESSO_DIAS = 90
+#: 🔴 PROVISORIO. Limite de excesso. NAO tem origem documentada em lugar nenhum
+#: -- nem na Shopee, nem no modelo do TikTok, que simplesmente nao classifica
+#: excesso. E' ponto de partida da Torre, exposto para ser discutido e nao para
+#: ser tratado como verdade.
+COBERTURA_EXCESSO_DIAS_PROVISORIO = 90
+
+#: Os dois limites acima sao provisorios: viajam juntos para o log e para o
+#: resumo do run, para que nenhum consumidor os leia como ratificados.
+LIMITES_PROVISORIOS = {
+    "cobertura_baixa_dias_PROVISORIO": COBERTURA_BAIXA_DIAS_PROVISORIO,
+    "cobertura_excesso_dias_PROVISORIO": COBERTURA_EXCESSO_DIAS_PROVISORIO,
+}
 
 STAGING_LOCATION = "stg_fsfsl"
 STAGING_PRODUTO = "stg_fsfs"
@@ -196,8 +239,12 @@ SQL_PRODUTOS = text("""
           FROM silver.stg_shopee_order_items i
           JOIN silver.stg_shopee_orders o
             ON o.shop_account = i.shop_account AND o.order_sn = i.order_sn
-         WHERE o.created_date_brt > :corte
-           AND o.order_status <> 'cancelled'
+         -- Janela de dias COMPLETOS: [inicio, ref_date). O dia corrente fica
+         -- FORA porque esta' pela metade -- incluir um dia parcial subestima a
+         -- demanda e infla a cobertura justo nos itens de maior giro.
+         WHERE o.created_date_brt >= :janela_inicio
+           AND o.created_date_brt <  :janela_fim
+           AND o.order_status = ANY(:status_elegiveis)
            AND o.shop_account = ANY(:contas)
          GROUP BY 1, 2
     )
@@ -238,6 +285,19 @@ SQL_PRODUTOS = text("""
 """)
 
 
+#: Guarda de contrato: status fora do dominio conhecido BLOQUEIA a carga. Sem
+#: isto, um status novo da Shopee entraria em silencio -- ou como demanda que
+#: nao existe, ou como demanda que some -- e a cobertura mudaria sem aviso.
+SQL_STATUS_DESCONHECIDOS = text("""
+    SELECT DISTINCT o.order_status
+      FROM silver.stg_shopee_orders o
+     WHERE o.created_date_brt >= :janela_inicio
+       AND o.created_date_brt <  :janela_fim
+       AND o.shop_account = ANY(:contas)
+       AND (o.order_status IS NULL OR NOT (o.order_status = ANY(:conhecidos)))
+""")
+
+
 def classificar(is_kit: bool, saleable: int, units: int,
                 cobertura: Decimal | None) -> str:
     """Classificacao da Torre. A ORDEM importa e e' deliberada.
@@ -254,19 +314,38 @@ def classificar(is_kit: bool, saleable: int, units: int,
         return "SEM_GIRO_CANDIDATO" if saleable > 0 else "SEM_DEMANDA_MEDIDA"
     if saleable == 0:
         return "RUPTURA_CANDIDATA"
-    if cobertura is not None and cobertura < COBERTURA_BAIXA_DIAS:
+    if cobertura is not None and cobertura < COBERTURA_BAIXA_DIAS_PROVISORIO:
         return "BAIXO_CANDIDATO"
-    if cobertura is not None and cobertura >= COBERTURA_EXCESSO_DIAS:
+    if cobertura is not None and cobertura >= COBERTURA_EXCESSO_DIAS_PROVISORIO:
         return "EXCESSO_CANDIDATO"
     return "SUFICIENTE"
 
 
+def janela_demanda(ref_date: date) -> tuple[date, date]:
+    """[ref_date - N, ref_date): N dias COMPLETOS, sem o dia corrente."""
+    return ref_date - timedelta(days=JANELA_VENDAS_DIAS), ref_date
+
+
 def read_source(conn, ref_date: date) -> Snapshot:
-    corte = ref_date - timedelta(days=JANELA_VENDAS_DIAS)
+    inicio, fim = janela_demanda(ref_date)
     params = {"contas": list(CONTAS_ESPERADAS)}
+    janela = {"janela_inicio": inicio, "janela_fim": fim}
+
+    # Fail-closed ANTES de ler a demanda: status novo bloqueia a carga.
+    novos = [r[0] for r in conn.execute(
+        SQL_STATUS_DESCONHECIDOS,
+        {**params, **janela, "conhecidos": list(STATUS_CONHECIDOS)}).all()]
+    if novos:
+        raise ShopeeStockSyncError(
+            f"order_status desconhecido na janela: {sorted(set(map(str, novos)))}. "
+            f"Conhecidos: {list(STATUS_CONHECIDOS)}. A carga para em vez de "
+            "decidir sozinha se o status novo e' demanda."
+        )
 
     locs = conn.execute(SQL_LOCATIONS, params).mappings().all()
-    prods = conn.execute(SQL_PRODUTOS, {**params, "corte": corte}).mappings().all()
+    prods = conn.execute(SQL_PRODUTOS, {
+        **params, **janela,
+        "status_elegiveis": list(STATUS_ELEGIVEIS)}).mappings().all()
 
     if not prods:
         raise ShopeeStockSyncError(
@@ -281,12 +360,21 @@ def read_source(conn, ref_date: date) -> Snapshot:
         "diferenca, explicada pelo intervalo entre fotografias).",
         "summary_available_stock, seller_stock_total e reserved_stock sao "
         "CONTEXTO: nenhum deles representa estoque Full.",
-        f"cobertura_torre_dias e' calculo da Torre (janela de "
-        f"{JANELA_VENDAS_DIAS} dias). NAO reproduz formula da Shopee.",
-        f"EXCESSO_CANDIDATO usa {COBERTURA_EXCESSO_DIAS} dias, limite "
-        "PROVISORIO sem origem documentada.",
+        f"cobertura_torre_dias e' calculo da Torre sobre {JANELA_VENDAS_DIAS} "
+        f"dias COMPLETOS [{inicio} .. {fim}), sem o dia corrente. NAO reproduz "
+        "formula da Shopee.",
+        f"LIMITES PROVISORIOS, nao ratificados para a Shopee: baixo < "
+        f"{COBERTURA_BAIXA_DIAS_PROVISORIO}d (herdado do TikTok) e excesso >= "
+        f"{COBERTURA_EXCESSO_DIAS_PROVISORIO}d (sem origem documentada).",
         "KIT sai como KIT_NAO_CONCILIADO e fora de qualquer contagem "
-        "operacional: semantica de estoque de kit nao validada.",
+        "operacional: semantica de estoque de kit nao validada. O total geral "
+        "de estoque INCLUI kits -- use full_stock_saleable_operacional.",
+        f"Demanda = status {list(STATUS_ELEGIVEIS)}; fora dela apenas "
+        f"{list(STATUS_NAO_ELEGIVEIS)}. Mesma populacao de "
+        "marts.fact_shopee_fbs_daily: to_return (~0,67% das unidades) e unpaid "
+        "(~0,59%) CONTAM como demanda, o que reduz a cobertura em ~1,3%.",
+        "advance_stock NAO compoe o vendavel: inclui in_transit, que nao da' "
+        "para vender hoje. Medido zero em 2026-09-24 nos 301 produtos.",
     ]
 
     contas_vistas = {p["shop_account"] for p in prods}
@@ -311,8 +399,11 @@ def read_source(conn, ref_date: date) -> Snapshot:
         total = int(r["full_total"])
         media = (Decimal(units) / Decimal(JANELA_VENDAS_DIAS)) if units else Decimal(0)
         cobertura = (Decimal(saleable) / media) if units else None
-        vinculo = ("COM_VENDA" if r["tem_venda"]
-                   else "SEM_VENDA_NA_JANELA")
+        # Dominio de DOIS valores: todo produto desta fato nasce do catalogo
+        # (`stg_shopee_products`), entao "fora do catalogo de vendas" era
+        # inalcancavel por construcao e foi removido -- estado que nao pode
+        # existir nao deve figurar no contrato.
+        vinculo = "COM_VENDA" if r["tem_venda"] else "SEM_VENDA_NA_JANELA"
         produto_rows.append(ProdutoRow(
             ref_date=ref_date, brand=r["brand"], shop_account=r["shop_account"],
             item_id=r["item_id"], model_id=r["model_id"],
@@ -438,8 +529,9 @@ def publish_in_transaction(conn, snap: Snapshot, run_id: str) -> dict:
             f"reconciliacao pre-commit falhou: destino n={destino['n']} "
             f"soma={destino['soma']}; esperado n={esperado_n} soma={esperado_soma}"
         )
-    return {"locations": len(snap.locations), "produtos": esperado_n,
-            "full_stock_saleable": esperado_soma}
+    return {"locations_publicadas": len(snap.locations),
+            "produtos_publicados": esperado_n,
+            "full_stock_saleable_publicado": esperado_soma}
 
 
 def _conn_lock():
@@ -460,6 +552,7 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
         dm.close()
 
     avisos = validate_contract(snap)
+    inicio, fim = janela_demanda(ref_date)
 
     resumo = {
         "ref_date": str(ref_date),
@@ -468,15 +561,30 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
         "locations": len(snap.locations),
         "produtos": len(snap.produtos),
         "source_captured_at": str(snap.captured_at),
-        "full_stock_saleable": sum(r.full_stock_saleable for r in snap.produtos),
+        # ---------------------------------------------------------------- #
+        # O total GERAL inclui kits. Quem opera reposicao precisa do de baixo:
+        # apresentar o geral como "estoque operacional" esconde unidades cuja
+        # semantica nao foi conciliada.
+        # ---------------------------------------------------------------- #
+        "full_stock_saleable_total": sum(r.full_stock_saleable for r in snap.produtos),
+        "full_stock_saleable_operacional": sum(
+            r.full_stock_saleable for r in snap.produtos if not r.is_kit),
+        "full_stock_saleable_kits_contexto": sum(
+            r.full_stock_saleable for r in snap.produtos if r.is_kit),
+        "produtos_operacionais": sum(1 for r in snap.produtos if not r.is_kit),
+        "produtos_kit_contexto": sum(1 for r in snap.produtos if r.is_kit),
         "full_stock_total": sum(r.full_stock_total for r in snap.produtos),
         "por_classificacao": {},
         "warnings": avisos,
-        "parametros": {
-            "janela_vendas_dias": JANELA_VENDAS_DIAS,
-            "cobertura_baixa_dias": COBERTURA_BAIXA_DIAS,
-            "cobertura_excesso_dias_PROVISORIO": COBERTURA_EXCESSO_DIAS,
+        "janela_demanda": {
+            "inicio_inclusivo": str(inicio),
+            "fim_exclusivo": str(fim),
+            "dias_completos": JANELA_VENDAS_DIAS,
+            "dia_corrente_incluido": False,
         },
+        "status_elegiveis": list(STATUS_ELEGIVEIS),
+        "status_nao_elegiveis": list(STATUS_NAO_ELEGIVEIS),
+        "limites_provisorios": dict(LIMITES_PROVISORIOS),
     }
     for r in snap.produtos:
         resumo["por_classificacao"][r.classificacao_torre] = \

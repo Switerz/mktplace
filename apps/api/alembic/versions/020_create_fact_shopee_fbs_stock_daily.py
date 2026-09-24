@@ -28,6 +28,25 @@ POR QUE NAO USAR OS OUTROS CAMPOS COMO ESTOQUE FULL
   que a divergencia continue visivel -- nunca como estoque Full.
 - `seller_stock` e' o deposito do vendedor, nao o CD da Shopee.
 - `reserved_stock` e' bloqueio por pedido em andamento, nao estoque disponivel.
+- `advance_stock` e' um OBJETO com `sellable_advance_stock` e
+  `in_transit_advance_stock` -- o programa de reposicao antecipada, que inclui
+  unidade AINDA A CAMINHO do CD. O que conciliamos com a tela foi o "Total
+  Vendavel", nao um total logistico: somar `in_transit` contaria estoque que nao
+  da' para vender hoje e inflaria a cobertura. Medido em 2026-09-24: os dois
+  campos valem 0 nos 301 produtos FBS, entao a exclusao nao muda numero nenhum
+  hoje -- ela existe pela semantica, para o dia em que deixarem de ser zero.
+
+DEMANDA: POPULACAO EXPLICITA, RECONCILIADA COM A FATO VIGENTE
+--------------------------------------------------------------
+A janela usa a MESMA populacao de `marts.fact_shopee_fbs_daily` (migration 019):
+sai apenas `cancelled`; `to_return` e `unpaid` CONTAM. Nao e' palpite -- e'
+alinhamento deliberado, para que as duas fatos da Torre concordem sobre o que e'
+uma venda da Shopee. Medido: `to_return` = 0,67% das unidades e `unpaid` =
+0,59%, entao a demanda fica ~1,3% acima do realizado e a cobertura, na mesma
+proporcao, abaixo. Vies conhecido e aceito.
+
+A janela sao N dias COMPLETOS, em [ref_date - N, ref_date): o dia corrente fica
+fora porque esta' pela metade.
 
 KITS FICAM DE FORA
 -------------------
@@ -69,7 +88,10 @@ CLASSIFICACOES = (
 )
 
 #: Qualidade do vinculo entre o produto e a demanda medida.
-VINCULOS = ("COM_VENDA", "SEM_VENDA_NA_JANELA", "FORA_DO_CATALOGO_DE_VENDAS")
+#: Dominio de DOIS valores. `FORA_DO_CATALOGO_DE_VENDAS` foi removido por ser
+#: inalcancavel: toda linha desta fato nasce de `stg_shopee_products`, entao nao
+#: existe produto aqui que esteja fora do catalogo.
+VINCULOS = ("COM_VENDA", "SEM_VENDA_NA_JANELA")
 
 
 def upgrade() -> None:
