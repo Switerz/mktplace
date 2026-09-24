@@ -79,8 +79,10 @@ variacao futuro entre pela porta da frente em vez de ser somado por engano.
 """
 from alembic import op
 
-revision = "020"
-down_revision = "019"
+#: Encadeia APOS a migration da Expedicao (020), que virou a cabeca do
+#: Alembic no merge do PR #43. Cadeia: 019 -> 020 -> 021.
+revision = "021"
+down_revision = "020"
 branch_labels = None
 depends_on = None
 

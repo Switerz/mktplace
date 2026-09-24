@@ -18,7 +18,7 @@ from pipelines import sync_shopee_fbs_stock_daily as mod
 
 MIGRATION = (Path(mod.__file__).resolve().parents[1]
              / "apps" / "api" / "alembic" / "versions"
-             / "020_create_fact_shopee_fbs_stock_daily.py")
+             / "021_create_fact_shopee_fbs_stock_daily.py")
 
 
 def _codigo_sem_texto(fonte: str) -> str:
@@ -400,10 +400,10 @@ def test_30_dry_run_e_o_default():
 # --------------------------------------------------------------------- #
 # G. MIGRATION                                                           #
 # --------------------------------------------------------------------- #
-def test_31_migration_encadeia_em_019():
+def test_31_migration_encadeia_em_020_da_expedicao():
     ddl = MIGRATION.read_text(encoding="utf-8")
-    assert 'revision = "020"' in ddl
-    assert 'down_revision = "019"' in ddl
+    assert 'revision = "021"' in ddl
+    assert 'down_revision = "020"' in ddl
 
 
 def test_32_migration_nao_altera_a_fato_existente():
