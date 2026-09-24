@@ -182,10 +182,40 @@ def test_escapar_like(entrada, esperado):
 
 def test_marca_desconhecida_e_erro_nao_filtro_vazio():
     """Silenciar faria a tela mostrar zero produtos e parecer 'sem estoque'."""
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(svc.FiltroInvalido) as exc:
         svc._validar_lista(["kokeshi"], svc.EXPECTED_BRANDS, "brands")
-    assert "kokeshi" in str(exc.value)
-    assert "apice" in str(exc.value), "a recusa precisa listar o que e' aceito"
+    assert exc.value.recebidos == ("kokeshi",)
+    assert "apice" in exc.value.mensagem_segura, (
+        "a recusa precisa listar o que e' aceito")
+
+
+def test_recusa_nao_ecoa_o_valor_recebido():
+    """A mensagem que vai para o HTTP e' montada so' com constantes.
+
+    Ecoar a entrada faria o endpoint devolver texto arbitrario do cliente
+    dentro da resposta -- e a politica deste router ja' e' mensagem FIXA.
+    """
+    payload = "<script>alert(1)</script>"
+    with pytest.raises(svc.FiltroInvalido) as exc:
+        svc._validar_lista([payload], svc.EXPECTED_BRANDS, "brands")
+    assert payload not in exc.value.mensagem_segura
+    assert payload.lower() not in exc.value.mensagem_segura.lower()
+    # E `FiltroInvalido` continua sendo um ValueError, para quem so' captura
+    # a excecao padrao.
+    assert isinstance(exc.value, ValueError)
+
+
+def test_endpoint_devolve_422_sem_ecoar_a_entrada(cliente, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "shopee_fbs_stock_enabled", True)
+
+    payload = "<script>alert(1)</script>"
+    r = cliente.get("/api/v1/performance/shopee-fbs-estoque",
+                    params={"brands": payload})
+
+    assert r.status_code == 422
+    assert payload not in r.text
+    assert "apice" in r.text
 
 
 def test_lista_vazia_significa_sem_filtro():

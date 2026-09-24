@@ -1010,10 +1010,12 @@ def shopee_fbs_estoque(
             somente_acao=somente_acao,
             limite=limite,
         )
-    except ValueError as exc:
+    except fbs_stock_svc.FiltroInvalido as invalido:
         # Filtro fora da allowlist. AQUI o 422 e' correto: mudar a requisicao
-        # resolve. A mensagem lista os valores ACEITOS, nao ecoa o recebido.
-        raise HTTPException(422, str(exc))
+        # resolve. A mensagem e' montada so' com constantes do servidor -- o
+        # valor recebido NAO volta no corpo, para que o endpoint nao sirva de
+        # espelho de texto arbitrario.
+        raise HTTPException(422, invalido.mensagem_segura)
     except fbs_stock_svc.EstoqueFullIndisponivel as ausente:
         # 🔑 200, nao 503: a tabela faltar e' estado CONHECIDO deste rollout
         # (migrations pendentes), nao falha. A tela precisa desenhar

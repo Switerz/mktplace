@@ -163,6 +163,26 @@ class EstoqueFullContractError(Exception):
     """A fonte devolveu algo fora do dominio declarado."""
 
 
+class FiltroInvalido(ValueError):
+    """Filtro fora da allowlist.
+
+    `mensagem_segura` e' montada SO' com constantes do servidor: ela lista o
+    que e' aceito e NUNCA ecoa o que foi recebido. Devolver a entrada no corpo
+    da resposta transformaria o endpoint em espelho de texto arbitrario.
+    O valor recusado fica em `recebidos`, para log interno -- nao para o HTTP.
+    """
+
+    def __init__(self, campo: str, permitidos: Sequence[str],
+                 recebidos: Sequence[str]):
+        self.campo = campo
+        self.permitidos = tuple(permitidos)
+        self.recebidos = tuple(recebidos)
+        self.mensagem_segura = (
+            f"Filtro '{campo}' invalido. Valores aceitos: "
+            f"{', '.join(permitidos)}.")
+        super().__init__(self.mensagem_segura)
+
+
 # ---------------------------------------------------------------------------
 # SQL — allowlist de colunas, filtros sempre parametrizados
 # ---------------------------------------------------------------------------
@@ -333,9 +353,7 @@ def _validar_lista(valores: Optional[Sequence[str]],
         return None
     desconhecidos = sorted(set(normalizados) - set(permitidos))
     if desconhecidos:
-        raise ValueError(
-            f"{campo} desconhecido(s): {', '.join(desconhecidos)}. "
-            f"Valores aceitos: {', '.join(permitidos)}.")
+        raise FiltroInvalido(campo, permitidos, desconhecidos)
     # `dict.fromkeys` deduplica PRESERVANDO a ordem pedida.
     return list(dict.fromkeys(normalizados))
 
