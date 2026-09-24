@@ -214,6 +214,34 @@ def test_o_modulo_nunca_loga_a_mensagem_da_excecao():
                 raise AssertionError("log de inicializacao usando f-string")
 
 
+def test_a_pilha_instalada_consegue_montar_um_engine_postgresql():
+    """Guarda de REGRESSAO DE DEPENDENCIA (INCIDENTE-API-DB-4C).
+
+    O SQLAlchemy 2.1.0 trocou o DBAPI padrao de `postgresql://` de `psycopg2`
+    para `psycopg` (v3). Como `apps/api/pyproject.toml` declara
+    `sqlalchemy>=2.0` e o Render constroi com `pip install -e .` — que IGNORA
+    o `uv.lock` —, um build resolveu 2.1.0 e `create_engine` passou a levantar
+    `ModuleNotFoundError: psycopg`. O engine nunca nasceu, `SessionLocal` ficou
+    `None`, e TODAS as rotas com banco devolveram 503.
+
+    Reproduzido com DSN sintetico:
+        SA 2.0.43 + psycopg2          -> OK   (driver psycopg2)
+        SA 2.1.0  + psycopg2          -> ModuleNotFoundError name='psycopg'
+        SA 2.1.0  + psycopg2, com     -> OK   (driver psycopg2)
+                  `+psycopg2://`
+        SA 2.1.0  + psycopg v3        -> OK   (driver psycopg)
+
+    Este teste afirma o COMPORTAMENTO, nao a versao: ele nao pina nada e passa
+    com qualquer combinacao coerente de SQLAlchemy e driver. Falha exatamente
+    quando o artefato instalado nao consegue mais montar o engine que a
+    aplicacao monta no import — que e' a condicao do incidente.
+    """
+    from sqlalchemy import create_engine
+
+    # DSN sintetico. Nenhuma credencial real, e `create_engine` nao conecta.
+    create_engine("postgresql://u:p@host.example:5432/d", pool_pre_ping=True)
+
+
 def test_o_import_do_modulo_nao_levanta_com_url_ruim(monkeypatch):
     """Reimportar com URL invalida tem de degradar, nunca derrubar o processo —
     senao o Render entra em laco de restart e perdemos ate' o `/health`."""
