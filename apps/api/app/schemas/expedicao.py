@@ -31,7 +31,7 @@ pedido vencido" — que nao foi feita.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -289,3 +289,121 @@ class TendenciaResponse(BaseModel):
     points: list[PontoTendencia] = Field(default_factory=list)
     truncated: bool = False
     limitations: Limitacoes = Field(default_factory=Limitacoes)
+
+
+# ---------------------------------------------------------------------------
+# Gate EXP-TK-OPS-1/2 — TikTok Shop: LDR e fluxo por data de pagamento
+# ---------------------------------------------------------------------------
+UNAVAILABLE_NOT_MIGRATED = "table_not_migrated"
+UNAVAILABLE_NO_SERIES = "no_series_published"
+
+
+class TikTokLdrDia(BaseModel):
+    """Um dia de VENCIMENTO. E' o grao da metrica oficial.
+
+    Nao confundir com `TikTokFluxoDia`, que e' por data de PAGAMENTO. Um
+    feriado empurra tres datas de pagamento para o mesmo vencimento: aqui isso
+    vira uma linha com o volume somado, la' virariam tres linhas de ~100%.
+    """
+
+    due_date: date
+    base: int
+    late: int
+    pending_overdue: int
+    pending_on_time: int
+    #: `None` quando nao ha base. NUNCA 0.0 nesse caso.
+    rate: Optional[float]
+    is_mature: bool
+    #: Acima da META do TikTok (4%): conformidade com a plataforma.
+    above_target: bool
+    #: Acima do limiar INTERNO (10%): severidade nossa. Sao coisas diferentes.
+    is_critical: bool
+
+
+class TikTokFluxoDia(BaseModel):
+    """Uma data de PAGAMENTO. Reproduz as colunas da planilha da gestao.
+
+    NAO e' a LDR: o denominador e' quem pagou no dia, nao quem vence no dia.
+    """
+
+    paid_date: date
+    deadline_date: date
+    paid_orders: int
+    excluded_samples: int
+    excluded_cancelled: int
+    base: int
+    shipped_on_time: int
+    shipped_late: int
+    pending_overdue: int
+    pending_on_time: int
+    late: int
+    rate: Optional[float]
+    is_mature: bool
+
+
+class TikTokLdr(BaseModel):
+    """LDR OPERACIONAL — vencimentos na janela. A metrica oficial."""
+
+    from_: date = Field(alias="from")
+    to: date
+    days: int
+    rate: Optional[float]
+    base: int
+    late: int
+    pending_overdue: int
+    pending_on_time: int
+    pending_at_risk: int
+    mature_due_days: int
+    partial_due_days: int
+    above_target: bool
+    internal_critical: bool
+    incident_start: Optional[date] = None
+    incident_end: Optional[date] = None
+    daily: list[TikTokLdrDia] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class TikTokMarcaItem(BaseModel):
+    brand: str
+    shop_name: Optional[str] = None
+    base: int
+    late: int
+    rate: Optional[float]
+    above_target: bool
+
+
+class TikTokSnapshot(BaseModel):
+    refresh_batch_id: str
+    effective_at: datetime
+    source_watermark_at: Optional[datetime] = None
+    today_brt: date
+
+
+class TikTokAlerta(BaseModel):
+    severity: Literal["critical", "warning", "info"]
+    code: str
+    message: str
+
+
+class TikTokDispatchResponse(BaseModel):
+    availability: Literal["available", "unavailable"]
+    unavailable_reason: Optional[str] = None
+    channel: Literal["tiktokshop"]
+    event: Optional[Literal["despacho", "coleta"]] = None
+    #: SEMPRE `true` enquanto o SLA oficial do TikTok nao for ingerido. O prazo
+    #: aqui e' reconstruido da politica de dias uteis, e nenhuma tela pode
+    #: exibir a taxa como se fosse a medicao de penalizacao da plataforma.
+    deadline_is_reconstructed: bool
+    #: Os prazos da POLITICA, por evento: RTS 1 dia util, TTS 2.
+    sla_business_days: dict[str, int]
+    #: `tiktok_ldr` = meta da plataforma (conformidade).
+    #: `internal_critical` = limiar nosso (severidade). Nomes distintos de
+    #: proposito: confundi-los faria a tela dizer "dentro da meta" num dia
+    #: de 9%.
+    targets: dict[str, float]
+    snapshot: Optional[TikTokSnapshot] = None
+    ldr: Optional[TikTokLdr] = None
+    payment_flow: list[TikTokFluxoDia] = Field(default_factory=list)
+    brands: list[TikTokMarcaItem] = Field(default_factory=list)
+    alerts: list[TikTokAlerta] = Field(default_factory=list)

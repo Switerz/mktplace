@@ -13,8 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas.expedicao import ExpedicaoResponse, TendenciaResponse
+from app.schemas.expedicao import (
+    ExpedicaoResponse,
+    TendenciaResponse,
+    TikTokDispatchResponse,
+)
 from app.services import expedicao_service as svc
+from app.services import expedicao_tiktok_service as tiktok_svc
 
 router = APIRouter(prefix="/api/v1/expedicao", tags=["expedicao"])
 
@@ -130,4 +135,52 @@ def trend(
     return svc.get_tendencia(
         _require_db(db), channel=channel, window_hours=window_hours,
         brands=brands, accounts=accounts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gate EXP-TK-OPS-1 — TikTok Shop
+# ---------------------------------------------------------------------------
+# Rota IRMA e nao parametro de `channel`: a resposta tem outra forma (serie por
+# coorte, nao fila paginada) e outro grao. Tenta-la caber no `ExpedicaoResponse`
+# obrigaria metade dos campos a serem opcionais nos dois lados, e o consumidor
+# deixaria de saber o que esperar de cada canal.
+_MSG_EVENTO = (
+    "Evento invalido. Valores aceitos: " + ", ".join(sorted(tiktok_svc.EVENTOS))
+)
+_MSG_DIAS = f"Janela invalida. Informe entre 1 e {tiktok_svc.JANELA_MAX_DIAS} dias."
+
+
+@router.get("/tiktok", response_model=TikTokDispatchResponse)
+def tiktok_dispatch(
+    event: str = Query(
+        tiktok_svc.EVENTO_PADRAO,
+        description=(
+            "`coleta` = retirada pela transportadora (padrao). "
+            "`despacho` = etiqueta criada pelo vendedor."
+        ),
+    ),
+    days: int = Query(
+        tiktok_svc.JANELA_PADRAO_DIAS,
+        description="Dias ANTES de hoje. 7 devolve 8 coortes (7 dias + hoje).",
+    ),
+    brands: Optional[list[str]] = Depends(brands_query),
+    db: Session = Depends(get_db),
+):
+    """Serie diaria de atraso de despacho por data de pagamento.
+
+    O prazo desta serie e' RECONSTRUIDO da regra de 2 dias uteis: o SLA oficial
+    do TikTok nao e' ingerido. A resposta sempre traz
+    `deadline_is_reconstructed = true` para que nenhuma tela exiba o numero
+    como se fosse a medicao da plataforma.
+    """
+    if days < 1 or days > tiktok_svc.JANELA_MAX_DIAS:
+        raise HTTPException(422, _MSG_DIAS)
+    try:
+        evento = tiktok_svc.resolver_evento(event)
+    except tiktok_svc.EventoInvalido:
+        # Mensagem FIXA: a entrada nunca e' ecoada de volta.
+        raise HTTPException(422, _MSG_EVENTO) from None
+    return tiktok_svc.obter_serie(
+        _require_db(db), evento=evento, dias=days, brands=brands,
     )
