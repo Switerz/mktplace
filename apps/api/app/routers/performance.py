@@ -18,6 +18,10 @@ from app.schemas.shopee_fbs import (
     ShopeeFbsResponse,
     ShopeeFbsUnavailableResponse,
 )
+from app.schemas.shopee_fbs_stock import (
+    EstoqueFullResponse,
+    EstoqueFullUnavailableResponse,
+)
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -36,6 +40,7 @@ from app.services.tiktok_order_discounts_service import (
     safe_tiktok_order_discounts_block,
 )
 from app.services import shopee_fbs_service as shopee_fbs_svc
+from app.services import shopee_fbs_stock_service as fbs_stock_svc
 from app.services.ml_fulfillment_service import (
     MLFulfillmentUnavailable,
     get_ml_fulfillment_block,
@@ -924,3 +929,102 @@ def shopee_fbs(
         raise HTTPException(503, ERRO_SHOPEE_FBS_CONTRATO)
     except shopee_fbs_svc.ShopeeFbsUnavailable:
         raise HTTPException(503, ERRO_SHOPEE_FBS_INDISPONIVEL)
+
+
+# ===========================================================================
+# Gate FULL-SOURCE-3 — ESTOQUE Full (FBS) da Shopee
+# ---------------------------------------------------------------------------
+# Superficie NOVA, colada no router JA' registrado de proposito: o PR #45 esta'
+# corrigindo `app/main.py`, e registrar um router novo exigiria editar
+# exatamente o arquivo que ele toca. O prefixo continua `/api/v1/performance`.
+# ===========================================================================
+
+MOTIVO_ESTOQUE_FULL_DESLIGADO = (
+    "Tela de Estoque Full da Shopee ainda nao habilitada. A fotografia de "
+    "estoque nao foi publicada e a ativacao e' decisao de negocio."
+)
+ERRO_ESTOQUE_FULL_CONTRATO = (
+    "Estoque Full da Shopee indisponivel: a fonte devolveu classificacao fora "
+    "do dominio autorizado. Acione o time de dados."
+)
+
+#: Teto de linhas aceito do cliente. O servico ainda aplica o proprio teto;
+#: este existe para que um `limite=999999` seja recusado antes do banco.
+LIMITE_PADRAO_ESTOQUE_FULL = 500
+
+
+@router.get(
+    "/shopee-fbs-estoque",
+    response_model=Union[EstoqueFullResponse, EstoqueFullUnavailableResponse],
+)
+def shopee_fbs_estoque(
+    brands: Optional[list[str]] = Query(
+        None, description="Marcas cobertas pela esteira API."),
+    accounts: Optional[list[str]] = Query(
+        None, description="Contas da esteira API."),
+    classificacoes: Optional[list[str]] = Query(
+        None, description="Classificacao da Torre. Dominio fechado."),
+    busca: Optional[str] = Query(
+        None, max_length=120, description="Casa SKU ou nome do produto."),
+    somente_acao: bool = Query(
+        False, description="So' ruptura e baixo: o que exige acao hoje."),
+    limite: int = Query(
+        LIMITE_PADRAO_ESTOQUE_FULL, ge=1, le=fbs_stock_svc.MAX_PRODUTOS),
+    db: Session = Depends(get_db),
+):
+    """Estoque fisico no CD da Shopee (FBS), por produto, na ultima fotografia.
+
+    Mede o ESTOQUE, nao o desempenho: `/shopee-fbs` classifica o PEDIDO pela
+    modalidade e nao e' tocado aqui. O estoque Full e' a soma de
+    `shopee_stock` VENDAVEL, conciliada com o "Total Vendavel" do Seller
+    Center. Reservado, estoque do vendedor e o agregado da Shopee viajam como
+    CONTEXTO e nunca como estoque Full.
+
+    "Cobertura da Torre" e' calculo NOSSO, com limiares PROVISORIOS -- nao
+    reproduz formula da Shopee.
+
+    **Ausencia nunca vira zero.** Flag desligada, fato inexistente (migrations
+    020/021 nao aplicadas) e fotografia nunca publicada devolvem 200 com
+    `status="unavailable"` e `motivo_tecnico` proprio.
+
+    Le apenas as duas fatos de estoque. Nenhuma consulta ao Data Mart, a `raw`
+    ou a' API da Shopee acontece durante o request.
+    """
+    # FLAG PRIMEIRO: com ela desligada nenhuma consulta e' emitida, e nem
+    # sequer exigimos sessao de banco.
+    if not settings.shopee_fbs_stock_enabled:
+        return EstoqueFullUnavailableResponse(
+            scope_label=fbs_stock_svc.SCOPE_LABEL,
+            unavailable_reason=MOTIVO_ESTOQUE_FULL_DESLIGADO,
+            motivo_tecnico="feature_flag_desligada",
+        )
+
+    try:
+        return fbs_stock_svc.get_estoque_full_block(
+            _require_db(db),
+            hoje=today_brt(),
+            brands=brands,
+            accounts=accounts,
+            classificacoes=classificacoes,
+            busca=busca,
+            somente_acao=somente_acao,
+            limite=limite,
+        )
+    except ValueError as exc:
+        # Filtro fora da allowlist. AQUI o 422 e' correto: mudar a requisicao
+        # resolve. A mensagem lista os valores ACEITOS, nao ecoa o recebido.
+        raise HTTPException(422, str(exc))
+    except fbs_stock_svc.EstoqueFullIndisponivel as ausente:
+        # 🔑 200, nao 503: a tabela faltar e' estado CONHECIDO deste rollout
+        # (migrations pendentes), nao falha. A tela precisa desenhar
+        # "indisponivel" com explicacao -- e 503 viraria erro generico, que o
+        # front tende a mostrar como vazio, isto e', como zero.
+        return EstoqueFullUnavailableResponse(
+            scope_label=fbs_stock_svc.SCOPE_LABEL,
+            unavailable_reason=ausente.mensagem,
+            motivo_tecnico=ausente.motivo_tecnico,
+            limitacoes=[fbs_stock_svc.LIMITACAO_CARGA_MANUAL],
+        )
+    except fbs_stock_svc.EstoqueFullContractError:
+        # Contrato da FONTE quebrado. Nao e' erro do cliente.
+        raise HTTPException(503, ERRO_ESTOQUE_FULL_CONTRATO)
