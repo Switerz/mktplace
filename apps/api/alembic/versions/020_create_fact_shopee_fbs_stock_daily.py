@@ -38,12 +38,22 @@ POR QUE NAO USAR OS OUTROS CAMPOS COMO ESTOQUE FULL
 
 DEMANDA: POPULACAO EXPLICITA, RECONCILIADA COM A FATO VIGENTE
 --------------------------------------------------------------
-A janela usa a MESMA populacao de `marts.fact_shopee_fbs_daily` (migration 019):
-sai apenas `cancelled`; `to_return` e `unpaid` CONTAM. Nao e' palpite -- e'
-alinhamento deliberado, para que as duas fatos da Torre concordem sobre o que e'
-uma venda da Shopee. Medido: `to_return` = 0,67% das unidades e `unpaid` =
-0,59%, entao a demanda fica ~1,3% acima do realizado e a cobertura, na mesma
-proporcao, abaixo. Vies conhecido e aceito.
+Allowlist explicita de status com PAGAMENTO COMPROVADO. Medido em 180 dias: os
+seis status da demanda operacional tem `pay_time` em 100% dos pedidos
+(completed 164.406/164.406, shipped 2.318/2.318, to_confirm_receive 2.246/2.246,
+processed 336/336, to_return 206/206, ready_to_ship 9/9), contra `unpaid` com
+0 de 159. O contraste e' binario.
+
+`unpaid` fica FORA: nunca foi pago e nunca consumiu estoque; soma-lo faria a
+velocidade parecer maior e a cobertura menor, disparando alerta de ruptura em
+produto que nao vendeu. Isso DIVERGE de `marts.fact_shopee_fbs_daily`, que o
+mantem no GMV bruto -- e a divergencia e' deliberada: comparabilidade com uma
+fato de VALOR nao justifica herdar a distorcao numa fonte OPERACIONAL de
+reposicao. O criterio antigo continua publicado em
+`units_sold_28d_legado_com_unpaid`, como contexto, sem classificar nada.
+
+`to_return` PERMANECE: 206/206 passaram por pagamento, a unidade foi vendida e
+deixou o estoque. Status desconhecido ou nulo BLOQUEIA a carga.
 
 A janela sao N dias COMPLETOS, em [ref_date - N, ref_date): o dia corrente fica
 fora porque esta' pela metade.
@@ -181,8 +191,16 @@ def upgrade() -> None:
             -- ============================================================ #
             -- DEMANDA. Janela de 28 dias.                                  #
             -- ============================================================ #
+            -- Demanda OPERACIONAL: apenas status com pagamento comprovado
+            -- (100% de pay_time, medido em 180 dias). E' a UNICA que alimenta
+            -- media diaria, cobertura e classificacao.
             units_sold_28d        BIGINT  NOT NULL,
             days_with_sales_28d   INTEGER NOT NULL,
+            -- CONTEXTO: demanda no criterio da migration 019, que mantem
+            -- `unpaid`. Existe para comparabilidade com a fato de desempenho e
+            -- NAO classifica nada. `unpaid` tem 0 de 159 pedidos com pay_time:
+            -- nunca foi pago e nunca consumiu estoque.
+            units_sold_28d_legado_com_unpaid  BIGINT,
             avg_daily_units_28d   NUMERIC NOT NULL,
 
             -- ============================================================ #

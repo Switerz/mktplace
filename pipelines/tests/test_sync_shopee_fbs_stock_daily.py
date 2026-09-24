@@ -43,7 +43,7 @@ def _loc(item="1", location="CD1", stock=10, saleable=True, kit=False,
 
 
 def _prod(item="1", saleable=10, total=10, units=28, kit=False,
-          conta="barbours", locs=1):
+          conta="barbours", locs=1, legado_extra=0):
     media = Decimal(units) / Decimal(28) if units else Decimal(0)
     cob = (Decimal(saleable) / media) if units else None
     return mod.ProdutoRow(
@@ -52,7 +52,9 @@ def _prod(item="1", saleable=10, total=10, units=28, kit=False,
         item_status="normal", is_kit=kit, full_stock_saleable=saleable,
         full_stock_total=total, location_count=locs, seller_stock_total=99,
         reserved_stock=5, summary_available_stock=123, units_sold_28d=units,
-        days_with_sales_28d=1 if units else 0, avg_daily_units_28d=media,
+        days_with_sales_28d=1 if units else 0,
+        units_sold_28d_legado_com_unpaid=units + legado_extra,
+        avg_daily_units_28d=media,
         cobertura_torre_dias=cob,
         classificacao_torre=mod.classificar(kit, saleable, units, cob),
         vinculo_vendas="COM_VENDA" if units else "SEM_VENDA_NA_JANELA")
@@ -231,9 +233,9 @@ def test_23_vendas_sao_pre_agregadas_antes_do_join():
 
 def test_24_cancelado_fora_da_demanda():
     """Agora por lista explicita de elegiveis, nao por exclusao isolada."""
-    assert "cancelled" not in mod.STATUS_ELEGIVEIS
-    assert "cancelled" in mod.STATUS_NAO_ELEGIVEIS
-    assert "= ANY(:status_elegiveis)" in str(mod.SQL_PRODUTOS)
+    assert "cancelled" not in mod.STATUS_DEMANDA_OPERACIONAL
+    assert "cancelled" in mod.STATUS_FORA_DA_DEMANDA
+    assert "= ANY(:status_operacional)" in str(mod.SQL_PRODUTOS)
 
 
 def test_25_janela_e_determinista_e_exclui_o_dia_corrente():
@@ -262,18 +264,19 @@ def test_25c_data_futura_nao_inventa_janela_negativa():
 
 
 def test_25d_status_elegiveis_sao_lista_explicita():
-    assert "cancelled" not in mod.STATUS_ELEGIVEIS
-    assert mod.STATUS_NAO_ELEGIVEIS == ("cancelled",)
-    assert "= ANY(:status_elegiveis)" in str(mod.SQL_PRODUTOS)
+    assert "cancelled" not in mod.STATUS_DEMANDA_OPERACIONAL
+    assert set(mod.STATUS_FORA_DA_DEMANDA) == {"unpaid", "cancelled"}
+    assert "= ANY(:status_operacional)" in str(mod.SQL_PRODUTOS)
     assert "<> 'cancelled'" not in str(mod.SQL_PRODUTOS)
 
 
-def test_25e_to_return_e_unpaid_contam_como_demanda():
-    """Reconciliado com marts.fact_shopee_fbs_daily, nao decidido por palpite."""
-    assert "to_return" in mod.STATUS_ELEGIVEIS
-    assert "unpaid" in mod.STATUS_ELEGIVEIS
+def test_25e_to_return_conta_e_unpaid_NAO():
+    """Decisao de negocio: unpaid nunca foi pago, entao nao e' demanda."""
+    assert "to_return" in mod.STATUS_DEMANDA_OPERACIONAL
+    assert "unpaid" not in mod.STATUS_DEMANDA_OPERACIONAL
+    assert "unpaid" in mod.STATUS_FORA_DA_DEMANDA
     fonte = Path(mod.__file__).read_text(encoding="utf-8")
-    assert "fact_shopee_fbs_daily" in fonte and "comparabilidade" in fonte
+    assert "pay_time" in fonte and "206/206" in fonte
 
 
 def test_25f_status_novo_bloqueia_a_carga():
@@ -289,6 +292,69 @@ def test_25g_dominio_conhecido_cobre_o_medido():
     medidos = {"completed", "cancelled", "shipped", "to_confirm_receive",
                "processed", "to_return", "unpaid", "ready_to_ship"}
     assert medidos == set(mod.STATUS_CONHECIDOS)
+
+
+# --------------------------------------------------------------------- #
+# I. unpaid FORA DA DEMANDA OPERACIONAL                                  #
+# --------------------------------------------------------------------- #
+def test_47_unpaid_nao_altera_a_cobertura():
+    """Dois produtos identicos; um tem unpaid no legado. Cobertura igual."""
+    sem = _prod(item="A", saleable=56, units=28, legado_extra=0)
+    com = _prod(item="B", saleable=56, units=28, legado_extra=99)
+    assert sem.cobertura_torre_dias == com.cobertura_torre_dias == Decimal(56)
+    assert sem.avg_daily_units_28d == com.avg_daily_units_28d
+    assert com.units_sold_28d_legado_com_unpaid == 127
+    assert com.units_sold_28d == 28
+
+
+def test_48_unpaid_nao_remove_uma_ruptura():
+    """Estoque zero + demanda operacional 0, mas unpaid>0: segue sem demanda."""
+    p = _prod(item="R", saleable=0, total=0, units=0, legado_extra=50)
+    assert p.units_sold_28d == 0
+    assert p.classificacao_torre == "SEM_DEMANDA_MEDIDA"
+    # e com demanda REAL vira ruptura, provando que a regra nao esta' quebrada
+    q = _prod(item="R2", saleable=0, total=0, units=10)
+    assert q.classificacao_torre == "RUPTURA_CANDIDATA"
+
+
+def test_49_unpaid_nao_tira_produto_do_sem_giro():
+    """Estoque parado com unpaid nao pode virar 'tem demanda'."""
+    p = _prod(item="S", saleable=80, total=80, units=0, legado_extra=40)
+    assert p.classificacao_torre == "SEM_GIRO_CANDIDATO"
+    assert p.cobertura_torre_dias is None
+
+
+def test_50_to_return_segue_a_decisao_documentada():
+    """Permanece como demanda E a condicao (pagamento) esta' medida no codigo."""
+    assert "to_return" in mod.STATUS_COM_PAGAMENTO_COMPROVADO
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    assert "206/206" in fonte
+    ddl = MIGRATION.read_text(encoding="utf-8")
+    assert "to_return" in ddl and "passaram por pagamento" in ddl
+
+
+def test_51_status_novo_bloqueia_a_publicacao():
+    sql = str(mod.SQL_STATUS_DESCONHECIDOS)
+    assert "NOT (o.order_status = ANY(:conhecidos))" in sql
+    assert "o.order_status IS NULL" in sql
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    i = fonte.index("order_status desconhecido na janela")
+    # a guarda roda ANTES de ler a demanda
+    assert i < fonte.index("locs = conn.execute(SQL_LOCATIONS")
+    assert "raise ShopeeStockSyncError" in fonte[max(0, i - 300):i]
+
+
+def test_52_demanda_legada_e_contexto_e_nao_classifica():
+    """A coluna existe, mas nenhuma regra de classificacao a le."""
+    import inspect
+    src = inspect.getsource(mod.classificar)
+    assert "legado" not in src
+    assert "units_sold_28d_legado_com_unpaid" not in src
+    ddl = MIGRATION.read_text(encoding="utf-8")
+    assert "units_sold_28d_legado_com_unpaid" in ddl
+    # e' nullable: contexto nunca bloqueia a carga
+    i = ddl.index("units_sold_28d_legado_com_unpaid")
+    assert "NOT NULL" not in ddl[i:i + 80]
 
 
 # --------------------------------------------------------------------- #
@@ -450,5 +516,8 @@ def test_46_resumo_declara_a_janela_e_os_limites():
     fonte = Path(mod.__file__).read_text(encoding="utf-8")
     for chave in ("janela_demanda", "inicio_inclusivo", "fim_exclusivo",
                   "dia_corrente_incluido", "limites_provisorios",
-                  "status_elegiveis", "status_nao_elegiveis"):
+                  "status_demanda_operacional", "status_fora_da_demanda",
+                  "demanda_operacional_unidades",
+                  "demanda_legada_com_unpaid_unidades",
+                  "produtos_afetados_por_unpaid"):
         assert chave in fonte

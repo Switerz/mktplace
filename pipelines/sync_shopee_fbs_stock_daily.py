@@ -80,13 +80,44 @@ CONTAS_ESPERADAS = ("apice", "barbours", "lescent", "rituaria")
 # -- e portanto REDUZEM a cobertura -- em ~1,3%. E' vies conhecido e aceito, nao
 # descuido: mudar isso e' mudar a definicao de venda da Torre inteira, nao desta
 # fato.
-STATUS_ELEGIVEIS = (
+#: ⚙️ DEMANDA OPERACIONAL -- a unica que alimenta media diaria, cobertura e as
+#: sete classificacoes. Allowlist explicita: status fora daqui nao entra nunca.
+#:
+#: MEDIDO em 180 dias (2026-09-24), sobre as 4 contas: TODOS estes status tem
+#: `pay_time` preenchido em 100% dos pedidos --
+#:     completed 164.406/164.406 · shipped 2.318/2.318 ·
+#:     to_confirm_receive 2.246/2.246 · processed 336/336 ·
+#:     to_return 206/206 · ready_to_ship 9/9
+#: O contraste com `unpaid` (0 de 159) e' BINARIO, nao inferido.
+STATUS_DEMANDA_OPERACIONAL = (
     "completed", "shipped", "to_confirm_receive", "processed",
-    "ready_to_ship", "to_return", "unpaid",
+    "ready_to_ship", "to_return",
 )
-#: Fora da demanda. Venda desfeita nunca consumiu estoque.
-STATUS_NAO_ELEGIVEIS = ("cancelled",)
-STATUS_CONHECIDOS = tuple(sorted(STATUS_ELEGIVEIS + STATUS_NAO_ELEGIVEIS))
+
+#: `to_return` PERMANECE na demanda operacional, e a condicao imposta pelo gate
+#: esta' satisfeita e medida: 206/206 pedidos (100%) passaram por `pay_time`.
+#: A unidade FOI vendida e DEIXOU o estoque -- a devolucao pode reentrar depois,
+#: mas no instante da fotografia ela nao esta' la' para ser vendida. Tratar
+#: devolucao como nao-demanda subestimaria a velocidade e inflaria a cobertura.
+STATUS_COM_PAGAMENTO_COMPROVADO = STATUS_DEMANDA_OPERACIONAL
+
+#: 🚫 FORA da demanda operacional, por motivos diferentes:
+#:  - `unpaid`: 0 de 159 pedidos com `pay_time` em 180 dias. Nunca foi pago,
+#:    nunca consumiu estoque. Somar isto a' velocidade faria a cobertura parecer
+#:    MENOR do que e' e dispararia alerta de ruptura em produto que nao vendeu.
+#:  - `cancelled`: venda desfeita.
+#: 🔑 Esta e' uma DIVERGENCIA DELIBERADA de `marts.fact_shopee_fbs_daily`
+#: (migration 019), que mantem `unpaid` no GMV bruto por comparabilidade
+#: historica. Comparabilidade com uma fato de VALOR nao e' motivo para herdar a
+#: distorcao numa fonte OPERACIONAL de reposicao: os dois numeros respondem a
+#: perguntas diferentes. A demanda no criterio antigo continua publicada como
+#: `units_sold_28d_legado_com_unpaid`, para contexto -- e NAO classifica nada.
+STATUS_FORA_DA_DEMANDA = ("unpaid", "cancelled")
+
+#: Criterio ANTIGO (migration 019), publicado apenas como contexto.
+STATUS_DEMANDA_LEGADA = STATUS_DEMANDA_OPERACIONAL + ("unpaid",)
+
+STATUS_CONHECIDOS = tuple(sorted(STATUS_DEMANDA_OPERACIONAL + STATUS_FORA_DA_DEMANDA))
 
 # --------------------------------------------------------------------------- #
 # PARAMETROS DA COBERTURA                                                      #
@@ -186,6 +217,7 @@ class ProdutoRow:
     summary_available_stock: int | None
     units_sold_28d: int
     days_with_sales_28d: int
+    units_sold_28d_legado_com_unpaid: int
     avg_daily_units_28d: Decimal
     cobertura_torre_dias: Decimal | None
     classificacao_torre: str
@@ -234,8 +266,17 @@ SQL_PRODUTOS = text("""
     WITH vendas AS (
         SELECT i.shop_account,
                i.item_id::text                              AS item_id,
-               SUM(i.quantity)::bigint                      AS units_sold,
-               COUNT(DISTINCT o.created_date_brt)::int      AS days_with_sales
+               -- Demanda OPERACIONAL: so' status com pagamento comprovado.
+               SUM(i.quantity) FILTER (
+                   WHERE o.order_status = ANY(:status_operacional)
+               )::bigint                                    AS units_sold,
+               COUNT(DISTINCT o.created_date_brt) FILTER (
+                   WHERE o.order_status = ANY(:status_operacional)
+               )::int                                       AS days_with_sales,
+               -- Criterio ANTIGO (019, com unpaid). CONTEXTO: nao classifica.
+               SUM(i.quantity) FILTER (
+                   WHERE o.order_status = ANY(:status_legado)
+               )::bigint                                    AS units_sold_legado
           FROM silver.stg_shopee_order_items i
           JOIN silver.stg_shopee_orders o
             ON o.shop_account = i.shop_account AND o.order_sn = i.order_sn
@@ -244,7 +285,7 @@ SQL_PRODUTOS = text("""
          -- demanda e infla a cobertura justo nos itens de maior giro.
          WHERE o.created_date_brt >= :janela_inicio
            AND o.created_date_brt <  :janela_fim
-           AND o.order_status = ANY(:status_elegiveis)
+           AND o.order_status = ANY(:status_legado)
            AND o.shop_account = ANY(:contas)
          GROUP BY 1, 2
     )
@@ -272,6 +313,7 @@ SQL_PRODUTOS = text("""
         (r.stock_info->'summary_info'->>'total_available_stock')::bigint AS summary_disp,
         COALESCE(v.units_sold, 0)               AS units_sold,
         COALESCE(v.days_with_sales, 0)          AS days_with_sales,
+        COALESCE(v.units_sold_legado, 0)        AS units_sold_legado,
         (v.item_id IS NOT NULL)                 AS tem_venda,
         r.ingested_at                           AS captured_at
       FROM raw.shopee_products r
@@ -345,7 +387,8 @@ def read_source(conn, ref_date: date) -> Snapshot:
     locs = conn.execute(SQL_LOCATIONS, params).mappings().all()
     prods = conn.execute(SQL_PRODUTOS, {
         **params, **janela,
-        "status_elegiveis": list(STATUS_ELEGIVEIS)}).mappings().all()
+        "status_operacional": list(STATUS_DEMANDA_OPERACIONAL),
+        "status_legado": list(STATUS_DEMANDA_LEGADA)}).mappings().all()
 
     if not prods:
         raise ShopeeStockSyncError(
@@ -369,10 +412,15 @@ def read_source(conn, ref_date: date) -> Snapshot:
         "KIT sai como KIT_NAO_CONCILIADO e fora de qualquer contagem "
         "operacional: semantica de estoque de kit nao validada. O total geral "
         "de estoque INCLUI kits -- use full_stock_saleable_operacional.",
-        f"Demanda = status {list(STATUS_ELEGIVEIS)}; fora dela apenas "
-        f"{list(STATUS_NAO_ELEGIVEIS)}. Mesma populacao de "
-        "marts.fact_shopee_fbs_daily: to_return (~0,67% das unidades) e unpaid "
-        "(~0,59%) CONTAM como demanda, o que reduz a cobertura em ~1,3%.",
+        f"Demanda OPERACIONAL = {list(STATUS_DEMANDA_OPERACIONAL)} -- todos com "
+        "pay_time em 100% dos pedidos (medido em 180 dias). FORA: "
+        f"{list(STATUS_FORA_DA_DEMANDA)}.",
+        "unpaid NAO entra na demanda operacional: 0 de 159 pedidos com pay_time "
+        "em 180 dias. DIVERGE de marts.fact_shopee_fbs_daily de proposito -- a "
+        "demanda no criterio antigo fica em units_sold_28d_legado_com_unpaid, "
+        "como CONTEXTO, e nao classifica nada.",
+        "to_return PERMANECE na demanda: 206/206 pedidos passaram por pay_time; "
+        "a unidade foi vendida e deixou o estoque.",
         "advance_stock NAO compoe o vendavel: inclui in_transit, que nao da' "
         "para vender hoje. Medido zero em 2026-09-24 nos 301 produtos.",
     ]
@@ -414,6 +462,7 @@ def read_source(conn, ref_date: date) -> Snapshot:
             seller_stock_total=r["seller_total"], reserved_stock=r["reserved"],
             summary_available_stock=r["summary_disp"],
             units_sold_28d=units, days_with_sales_28d=int(r["days_with_sales"]),
+            units_sold_28d_legado_com_unpaid=int(r["units_sold_legado"]),
             avg_daily_units_28d=media, cobertura_torre_dias=cobertura,
             classificacao_torre=classificar(bool(r["is_kit"]), saleable, units, cobertura),
             vinculo_vendas=vinculo,
@@ -474,7 +523,8 @@ _COLS_PROD = ("ref_date", "brand", "shop_account", "item_id", "model_id",
               "item_name", "item_sku", "item_status", "is_kit",
               "full_stock_saleable", "full_stock_total", "location_count",
               "seller_stock_total", "reserved_stock", "summary_available_stock",
-              "units_sold_28d", "days_with_sales_28d", "avg_daily_units_28d",
+              "units_sold_28d", "days_with_sales_28d",
+              "units_sold_28d_legado_com_unpaid", "avg_daily_units_28d",
               "cobertura_torre_dias", "classificacao_torre", "vinculo_vendas",
               "source_run_id", "source_captured_at")
 
@@ -512,7 +562,8 @@ def publish_in_transaction(conn, snap: Snapshot, run_id: str) -> dict:
         r.item_name, r.item_sku, r.item_status, r.is_kit,
         r.full_stock_saleable, r.full_stock_total, r.location_count,
         r.seller_stock_total, r.reserved_stock, r.summary_available_stock,
-        r.units_sold_28d, r.days_with_sales_28d, r.avg_daily_units_28d,
+        r.units_sold_28d, r.days_with_sales_28d,
+        r.units_sold_28d_legado_com_unpaid, r.avg_daily_units_28d,
         r.cobertura_torre_dias, r.classificacao_torre, r.vinculo_vendas,
         run_id, snap.captured_at,
     ) for r in snap.produtos])
@@ -582,8 +633,14 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
             "dias_completos": JANELA_VENDAS_DIAS,
             "dia_corrente_incluido": False,
         },
-        "status_elegiveis": list(STATUS_ELEGIVEIS),
-        "status_nao_elegiveis": list(STATUS_NAO_ELEGIVEIS),
+        "demanda_operacional_unidades": sum(r.units_sold_28d for r in snap.produtos),
+        "demanda_legada_com_unpaid_unidades": sum(
+            r.units_sold_28d_legado_com_unpaid for r in snap.produtos),
+        "produtos_afetados_por_unpaid": sum(
+            1 for r in snap.produtos
+            if r.units_sold_28d_legado_com_unpaid != r.units_sold_28d),
+        "status_demanda_operacional": list(STATUS_DEMANDA_OPERACIONAL),
+        "status_fora_da_demanda": list(STATUS_FORA_DA_DEMANDA),
         "limites_provisorios": dict(LIMITES_PROVISORIOS),
     }
     for r in snap.produtos:
