@@ -79,5 +79,25 @@ where = ["."]
 #
 # ⚠️ Consumidor novo que precise de outra subarvore acrescenta UMA linha aqui,
 # e essa linha e' a revisao: o escopo cresce por decisao, nao por inercia.
-include = ["pipelines", "pipelines.expedicao"]
+# SHOPEE-API-CUTOVER-2: `pipelines.common` entra porque o consumidor novo
+# `pipelines.sync_shopee_produtos_api` — chamado pela DAG
+# `marketplace_tower_shopee_produtos` — depende dele. O fecho transitivo
+# desse CLI foi MEDIDO no fonte e tem 4 modulos:
+#   pipelines.sync_shopee_produtos_api
+#   pipelines.common.{config, db, logging}
+# Zero imports dinamicos (`importlib`, `__import__`, `exec`, `eval`).
+# `pipelines/common/` tem 5 modulos e nenhum subpacote, entao o custo real
+# da linha e 5 arquivos — nao uma subarvore aberta.
+#
+# 🔴 ISTO CORRIGE UMA FALHA QUE JA EXISTIA. Os 13 modulos soltos em
+# `pipelines/*.py` ja iam na wheel (sao modulos DO pacote `pipelines`), e
+# varios deles importam `pipelines.common` — `sync_shopee_fbs_stock_daily`
+# e `sync_shopee_fbs_daily`, entre outros. Sem esta linha eles instalam e
+# NAO importam: `find_spec` encontra o arquivo e o import levanta
+# `ModuleNotFoundError: No module named 'pipelines.common'`. Medido dentro
+# de `apache/airflow:3.0.2` com o pacote instalado do SHA `22f48c45`.
+#
+# Consequencia pratica: um preflight baseado so em `find_spec` PASSA e o
+# subprocesso falha depois, com erro que parece de dado.
+include = ["pipelines", "pipelines.expedicao", "pipelines.common"]
 exclude = ["pipelines.tests", "pipelines.tests.*"]
