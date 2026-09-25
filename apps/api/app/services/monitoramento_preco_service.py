@@ -389,6 +389,40 @@ SELECT observed_date, marketplace, offer_key, parent_item_id, model_id,
  ORDER BY brand, offer_key
 """
 
+#: Gate KITS-PMA-3 — referencia de kit DERIVADA dos componentes.
+#:
+#: Tabela PROPRIA, publicada pelo pipeline (`kit_reference_publisher`), que e'
+#: quem alcanca o Data Mart. A API nunca calcula composicao: ela le' o valor
+#: ja' materializado. Nao ha BOM por requisicao.
+#:
+#: TRES FILTROS, TRES RECUSAS DIFERENTES:
+#:
+#:   `status = 'resolved'`  — linha `blocked` existe na tabela para dizer POR
+#:                            QUE aquele kit nao tem preco; ela nunca vira
+#:                            preco.
+#:   `reference_snapshot_id = :snapshot_id` — referencia calculada sobre uma
+#:                            planilha B2B ANTIGA e' recusada, nao exibida com
+#:                            o rotulo do snapshot de hoje.
+#:   `(marketplace, observed_date)` — a fotografia e' a mesma que a das
+#:                            ofertas servidas nesta resposta.
+#:
+#: A quarta recusa nao esta aqui e sim no casamento em memoria: marca, conta e
+#: `seller_sku` tambem precisam bater, para que a referencia de uma oferta
+#: jamais seja aplicada em outra.
+KIT_REFERENCE_TABLE = "marts.fact_kit_reference_daily"
+
+SQL_KIT_REFERENCES = f"""
+SELECT offer_key, brand, shop_account, seller_sku,
+       kit_protheus_sku, bridge_method, component_count, total_units,
+       components_base_amount, discount_pct, kit_reference_amount,
+       reference_captured_at
+  FROM {KIT_REFERENCE_TABLE}
+ WHERE marketplace = :marketplace
+   AND observed_date = :observed_date
+   AND reference_snapshot_id = :snapshot_id
+   AND status = 'resolved'
+"""
+
 #: Gate PMA-2C4D3-H2 — COBERTURA OBSERVADA do canal, por fotografia.
 #:
 #: `monitored_brands` responde "o que o negocio monitora" e e' igual para Shopee
@@ -571,7 +605,8 @@ def _metrics_zeradas() -> dict:
     return {
         "monitored_offers": 0, "active_offers": 0, "inactive_offers": 0,
         "kit_confirmed": 0, "kit_suspected": 0, "no_kit_signal": 0,
-        "product_type_unknown": 0, "eligible_offers": 0, "comparable_offers": 0,
+        "product_type_unknown": 0, "kit_reference_derived": 0,
+        "eligible_offers": 0, "comparable_offers": 0,
         "below_reference": 0, "at_or_above_reference": 0,
         "non_comparable_reasons": {r: 0 for r in dom.NON_COMPARABLE_REASONS},
         "no_reference_breakdown": {r: 0 for r in dom.NON_COMPARABLE_REASONS},
@@ -627,6 +662,10 @@ def _metrics_do_ml(comparadas: list[dict], contagem_tipos: dict,
         "kit_suspected": contagem_tipos[dom.PRODUCT_KIT_SUSPECTED],
         "no_kit_signal": contagem_tipos[dom.PRODUCT_NO_KIT_SIGNAL],
         "product_type_unknown": contagem_tipos[dom.PRODUCT_TYPE_UNKNOWN],
+        # O Mercado Livre nao tem kit sem composicao nesta fotografia e nao tem
+        # fato de referencia derivada: o campo existe para que a FORMA do bloco
+        # `metrics` seja a mesma nos tres canais.
+        "kit_reference_derived": 0,
         "eligible_offers": elegiveis,
         "comparable_offers": abaixo + acima,
         "below_reference": abaixo,
@@ -1031,6 +1070,39 @@ def _channel_listing(linha: dict) -> dict:
     }
 
 
+def _chave_da_oferta(linha) -> tuple:
+    """Identidade COMPLETA da oferta para casar a referencia derivada.
+
+    Quatro campos, nao so' `offer_key`. `offer_key` ja' e' unico dentro de
+    `(observed_date, marketplace)` — e' parte da PK das duas tabelas —, entao
+    marca, conta e `seller_sku` sao REDUNDANTES no caminho feliz. E' exatamente
+    por isso que valem: se um dia divergirem, foi porque a fotografia mudou
+    debaixo da referencia publicada, e a referencia deixa de ser aplicada em
+    vez de ser aplicada na oferta errada.
+    """
+    return (
+        (linha.get("offer_key") or "").strip(),
+        (linha.get("brand") or "").strip().lower(),
+        (linha.get("shop_account") or "").strip(),
+        (linha.get("seller_sku") or "").strip().upper(),
+    )
+
+
+def _indice_de_kits(db, canal: str, observado, snapshot_id) -> dict:
+    """Le' as referencias derivadas publicadas para ESTA fotografia.
+
+    Uma consulta por requisicao. Devolve `{}` quando nao ha snapshot — sem
+    snapshot nao existe referencia B2B com que comparar, derivada ou nao.
+    """
+    if snapshot_id is None:
+        return {}
+    linhas = _rows(db, SQL_KIT_REFERENCES, {
+        "marketplace": canal, "observed_date": observado,
+        "snapshot_id": snapshot_id,
+    })
+    return {_chave_da_oferta(r): r for r in linhas}
+
+
 #: Campos da fato que viajam ADITIVAMENTE na linha do payload. Todos existem
 #: materializados; nenhum e' recalculado aqui.
 _CHANNEL_ROW_EXTRA = (
@@ -1043,7 +1115,8 @@ _CHANNEL_ROW_EXTRA = (
 
 
 def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
-                      fora_de_escopo: set) -> dict:
+                      fora_de_escopo: set,
+                      com_kit_derivado: set | None = None) -> dict:
     """KPIs multicanal a partir dos valores MATERIALIZADOS na fato.
 
     `product_type` NAO e' reclassificado: o publisher ja' decidiu com as
@@ -1062,15 +1135,26 @@ def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
     fazem e' entrar em `eligible_offers` nem na taxa de cobertura: nao sao do
     produto, e infla-las no denominador faria a cobertura parecer pior do que e'.
     """
+    derivados = com_kit_derivado or set()
     ativos = [r for r in linhas if r["comparison_status"] != pm.STATUS_INACTIVE]
     inativos = len(linhas) - len(ativos)
     elegiveis_linhas = [
         r for r in ativos
         if id(r) not in fora_de_escopo
-        and not dom.is_excluded_from_comparison(
-            tipo_por_linha.get(id(r), dom.PRODUCT_TYPE_UNKNOWN))
+        and (id(r) in derivados
+             or not dom.is_excluded_from_comparison(
+                 tipo_por_linha.get(id(r), dom.PRODUCT_TYPE_UNKNOWN)))
     ]
     elegiveis = len(elegiveis_linhas)
+    # Gate KITS-PMA-3 — kits ATIVOS e em escopo cuja referencia foi derivada.
+    # Publicado como KPI proprio porque muda a identidade do denominador: era
+    # `eligible = active - kit_confirmed - kit_suspected`, e passa a ser
+    # `eligible = active - kit_confirmed - kit_suspected
+    #             - fora_de_escopo_nao_kit + kit_reference_derived`.
+    # Sem este numero a aritmetica do denominador deixaria de fechar sozinha na
+    # tela, e "por que elegiveis subiu 6" nao teria resposta no payload.
+    kits_derivados = sum(
+        1 for r in ativos if id(r) in derivados and id(r) not in fora_de_escopo)
 
     abaixo = sum(1 for r in elegiveis_linhas
                  if r["comparison_status"] == pm.STATUS_BELOW)
@@ -1092,6 +1176,7 @@ def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
         "kit_suspected": contagem[dom.PRODUCT_KIT_SUSPECTED],
         "no_kit_signal": contagem[dom.PRODUCT_NO_KIT_SIGNAL],
         "product_type_unknown": contagem[dom.PRODUCT_TYPE_UNKNOWN],
+        "kit_reference_derived": kits_derivados,
         "eligible_offers": elegiveis,
         "comparable_offers": abaixo + acima,
         "below_reference": abaixo,
@@ -1221,7 +1306,28 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
     mutavel = pm.is_mutable_snapshot(observado, hoje, politica)
 
     # ---- comparacao: MESMO matcher do ML, com a politica do canal ----------
-    listings = [_channel_listing(r) for r in linhas]
+    #
+    # Gate KITS-PMA-3 — a referencia derivada do kit viaja ANEXADA ao listing e
+    # e' consumida pelo mesmo `compare_listing`. Nao ha um segundo caminho de
+    # comparacao: diferenca, arredondamento e limiar de `below`/`at_or_above`
+    # sao o mesmo codigo das ofertas comuns.
+    kits_publicados = _indice_de_kits(db, canal, observado, snapshot_id)
+    listings = []
+    for r in linhas:
+        listing = _channel_listing(r)
+        derivada = kits_publicados.get(_chave_da_oferta(r))
+        if derivada is not None:
+            listing["kit_reference"] = {
+                "amount": derivada["kit_reference_amount"],
+                "reference_captured_at": derivada["reference_captured_at"],
+                "kit_protheus_sku": derivada["kit_protheus_sku"],
+                "bridge_method": derivada["bridge_method"],
+                "component_count": derivada["component_count"],
+                "total_units": derivada["total_units"],
+                "components_base_amount": derivada["components_base_amount"],
+                "discount_pct": derivada["discount_pct"],
+            }
+        listings.append(listing)
     por_linha = {
         id(destino): pm.channel_row_freshness(origem["snapshot_status"],
                                               snapshot_freshness=frescor)
@@ -1236,7 +1342,10 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
     contagem_tipos = {t: 0 for t in dom.PRODUCT_TYPES}
     tipo_por_linha = {}
     ids_fora_de_escopo = set()
+    ids_com_kit_derivado = set()
     for origem, linha in zip(linhas, comparadas):
+        if linha["match_method"] == pm.MATCH_KIT_DERIVED:
+            ids_com_kit_derivado.add(id(linha))
         for campo in _CHANNEL_ROW_EXTRA:
             linha[campo] = origem[campo]
         linha["observed_date"] = origem["observed_date"]
@@ -1256,7 +1365,7 @@ def _serve_channel(db, canal: str, *, hoje, pedida, marcas, contas,
 
     kpis = pm.build_kpis(comparadas)
     metricas = _metrics_do_canal(comparadas, tipo_por_linha, contagem_tipos,
-                                 ids_fora_de_escopo)
+                                 ids_fora_de_escopo, ids_com_kit_derivado)
 
     avisos = pm.build_warnings(
         comparadas, hoje, freshness=frescor, observed=observado,

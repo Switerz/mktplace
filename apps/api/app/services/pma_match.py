@@ -127,13 +127,31 @@ MATCH_SKU = "brand_sku_exact_unique"
 #: motivo em 84 linhas ja' publicadas. Ganho nulo nao paga risco de contrato,
 #: entao o ML nao recebe `internal_index` e este ramo nunca executa la'.
 MATCH_INTERNAL = "brand_internal_product_ean"
+#: Gate KITS-PMA-3 — a referencia nao veio de UMA linha da planilha B2B: foi
+#: derivada dos componentes do kit, pelo contrato de `pma_kit_bom`, e
+#: materializada em `marts.fact_kit_reference_daily` pelo pipeline.
+MATCH_KIT_DERIVED = "kit_components_derived"
 MATCH_NONE = None
+
+#: Dominio dos metodos. O schema Pydantic DERIVA daqui em vez de redigitar os
+#: literais: `MatchMethod` ja' ficou para tras de `MATCH_INTERNAL` uma vez, e
+#: um valor novo que o schema nao conhece derruba a PAGINA INTEIRA com 500, nao
+#: a linha. Acrescentar metodo aqui e' o unico passo necessario.
+MATCH_METHODS = (MATCH_GTIN, MATCH_SKU, MATCH_INTERNAL, MATCH_KIT_DERIVED)
 
 QUALITY_PRIMARY = "primary_gtin_exact"
 QUALITY_SECONDARY = "secondary_sku_unique_in_brand"
 QUALITY_TERTIARY = "tertiary_internal_product_unique"
 QUALITY_AMBIGUOUS = "ambiguous_multiple_candidates"
 QUALITY_UNMATCHED = "unmatched"
+#: Gate KITS-PMA-3 — qualidade propria para a referencia derivada. Nao e'
+#: "primaria" nem "secundaria": ela nao disputou chave com ninguem, foi somada
+#: dos componentes.
+QUALITY_KIT_DERIVED = "derived_from_kit_components"
+
+#: Dominio das qualidades, pela mesma razao de `MATCH_METHODS`.
+MATCH_QUALITIES = (QUALITY_PRIMARY, QUALITY_SECONDARY, QUALITY_TERTIARY,
+                   QUALITY_AMBIGUOUS, QUALITY_UNMATCHED, QUALITY_KIT_DERIVED)
 
 #: Tetos de seguranca. Estourar levanta — nunca trunca.
 MAX_LISTING_ROWS = 50_000
@@ -676,6 +694,16 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         # aqui, ao lado, para que `non_comparable_reasons` seja CONTADO em vez
         # de re-deduzido do status.
         "non_comparable_reason": None,
+        # Gate KITS-PMA-3 — procedencia da referencia DERIVADA dos componentes.
+        # Nascem nulas em TODA linha, inclusive no Mercado Livre, para que a
+        # forma do payload nao dependa de a oferta ser kit. Nulo aqui le-se "a
+        # referencia nao veio de componentes", nunca "o kit nao tem composicao".
+        "kit_protheus_sku": None,
+        "kit_bridge_method": None,
+        "kit_component_count": None,
+        "kit_total_units": None,
+        "kit_components_base_amount": None,
+        "kit_discount_pct": None,
         # Gate PMA-H1: qualidade TRANSVERSAL, na propria linha. Fica ao lado do
         # status comercial em vez de substitui-lo, e permite a UI marcar a linha
         # sem perder o veredito.
@@ -777,6 +805,34 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         ]
         return linha
 
+    if ref is None and listing.get("kit_reference") is not None:
+        # Gate KITS-PMA-3 — referencia DERIVADA dos componentes.
+        #
+        # Entra aqui, e nao antes, de proposito: `inactive_listing`, preco nao
+        # observado e ambiguidade continuam vencendo. E so' vale quando a
+        # referencia B2B DIRETA nao casou — se o proprio SKU do kit estiver na
+        # planilha, a planilha e' a autoridade e a derivada e' ignorada. Quantas
+        # vezes isso acontece e' medido pelo servico, nao presumido aqui.
+        #
+        # O valor NAO e' recalculado: ele vem materializado de
+        # `marts.fact_kit_reference_daily`, publicado pelo pipeline com o
+        # contrato de `pma_kit_bom`. Este modulo apenas o USA como `sugerido`,
+        # pelo MESMO caminho de diferenca da referencia direta.
+        kit = listing["kit_reference"]
+        derivado = _dec(kit.get("amount"))
+        if derivado is not None and derivado > 0:
+            linha["match_method"] = MATCH_KIT_DERIVED
+            linha["match_quality"] = QUALITY_KIT_DERIVED
+            linha["reference_candidate_count"] = 1
+            linha["reference_captured_at"] = kit.get("reference_captured_at")
+            linha["kit_protheus_sku"] = kit.get("kit_protheus_sku")
+            linha["kit_bridge_method"] = kit.get("bridge_method")
+            linha["kit_component_count"] = kit.get("component_count")
+            linha["kit_total_units"] = kit.get("total_units")
+            linha["kit_components_base_amount"] = kit.get("components_base_amount")
+            linha["kit_discount_pct"] = kit.get("discount_pct")
+            return _com_referencia(linha, limites, anunciado, derivado)
+
     if ref is None:
         # Gate PMA-REF-LINK-1 — PRECEDENCIA das causas, do mais fundamental ao
         # mais especifico. Cada linha recebe EXATAMENTE um motivo, e a ordem e'
@@ -830,6 +886,18 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         ]
         return linha
 
+    return _com_referencia(linha, limites, anunciado, sugerido)
+
+
+def _com_referencia(linha: dict, limites: list, anunciado: Decimal,
+                    sugerido: Decimal) -> dict:
+    """Fecha a linha COMPARADA. Unico lugar que calcula diferenca e status.
+
+    Chamado pelos dois caminhos — referencia B2B direta e referencia derivada
+    dos componentes do kit — para que a aritmetica, o arredondamento e o limiar
+    de `below`/`at_or_above` sejam literalmente o mesmo codigo. Duas copias
+    divergiriam no dia em que alguem mexesse em uma.
+    """
     linha["suggested_retail_amount"] = sugerido
     diferenca = anunciado - sugerido
     linha["difference_amount"] = diferenca.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
