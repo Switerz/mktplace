@@ -55,6 +55,33 @@ ESQUEMAS_SERVIVEIS = ("postgresql", "postgresql+psycopg2")
 QUERY_CONHECIDAS = ("sslmode", "sslrootcert", "application_name",
                     "connect_timeout", "options", "channel_binding")
 
+#: MESMO vocabulario fechado, aplicado ao `drivername` que o SQLAlchemy extrai.
+#:
+#: Fechar so' o esquema nao bastava. A regex de URL do SQLAlchemy aceita
+#: QUALQUER nome de esquema formado por `[\w+]`, entao `make_url` atravessa um
+#: valor hostil sem levantar e devolve o texto inteiro em `drivername`. Medido:
+#: `SEGREDO://u@h/d` -> drivername `'SEGREDO'`, e
+#: `postgresql+SEGREDO://u@h/d` -> drivername `'postgresql+SEGREDO'`. Imprimir
+#: esse campo cru republicava exatamente o que o rotulo do esquema recusava
+#: (finding F2, segunda rodada).
+DRIVERS_CONHECIDOS = ESQUEMAS_CONHECIDOS
+DRIVER_AUSENTE = ESQUEMA_AUSENTE
+DRIVER_NAO_RECONHECIDO = ESQUEMA_NAO_RECONHECIDO
+
+
+def _rotulo_fechado(candidato: str | None, conhecidos: tuple[str, ...],
+                    ausente: str, nao_reconhecido: str) -> str:
+    """Devolve `candidato` somente se ele estiver em `conhecidos`.
+
+    Unico ponto do programa autorizado a decidir um rotulo. Ou o valor casa
+    EXATAMENTE com um item da lista — e entao o que sai e' o item da lista, nao
+    o valor — ou sai um rotulo constante. Nao ha caminho que devolva texto
+    derivado da entrada.
+    """
+    if candidato is None or candidato.strip() == "":
+        return ausente
+    return candidato if candidato in conhecidos else nao_reconhecido
+
 
 def rotulo_do_esquema(valor: str | None) -> str:
     """Rotulo do esquema, SEMPRE tirado de `ESQUEMAS_CONHECIDOS`.
@@ -66,8 +93,21 @@ def rotulo_do_esquema(valor: str | None) -> str:
         return ESQUEMA_AUSENTE
     if "://" not in valor:
         return ESQUEMA_NAO_RECONHECIDO
-    candidato = valor.split("://", 1)[0]
-    return candidato if candidato in ESQUEMAS_CONHECIDOS else ESQUEMA_NAO_RECONHECIDO
+    return _rotulo_fechado(
+        valor.split("://", 1)[0], ESQUEMAS_CONHECIDOS,
+        ESQUEMA_AUSENTE, ESQUEMA_NAO_RECONHECIDO,
+    )
+
+
+def rotulo_do_driver(drivername: str | None) -> str:
+    """Rotulo do driver, SEMPRE tirado de `DRIVERS_CONHECIDOS`.
+
+    Recebe o `url.drivername` ja' parseado pelo SQLAlchemy — que pode ser texto
+    arbitrario, porque a regex de URL nao valida o nome do esquema.
+    """
+    return _rotulo_fechado(
+        drivername, DRIVERS_CONHECIDOS, DRIVER_AUSENTE, DRIVER_NAO_RECONHECIDO,
+    )
 
 
 def sim_nao(v: bool) -> str:
@@ -140,7 +180,13 @@ def main() -> int:
         print("  parse                     : FALHOU (" + type(exc).__name__ + ")")
 
     if url is not None:
-        print("  driver                    : " + (url.drivername or "(vazio)"))
+        # Vocabulario FECHADO, pelo mesmo motivo do esquema: `drivername` e'
+        # texto que veio do valor, nao uma constante do SQLAlchemy.
+        driver = rotulo_do_driver(url.drivername)
+        print("  driver                    : " + driver)
+        if driver == DRIVER_NAO_RECONHECIDO:
+            print("     -> O SQLAlchemy parseou, mas o driver nao esta' na lista")
+            print("        conhecida. `create_engine` vai levantar.")
         print("  usuario presente          : " + sim_nao(bool(url.username)))
         print("  senha presente            : " + sim_nao(bool(url.password)))
         print("  host presente             : " + sim_nao(bool(url.host)))
