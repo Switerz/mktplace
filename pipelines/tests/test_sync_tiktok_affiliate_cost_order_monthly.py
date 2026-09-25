@@ -1798,19 +1798,30 @@ def test_tres_componentes_com_as_colunas_tipadas_do_contrato():
     assert not hasattr(sync, "COMPONENT_JSON_KEYS")
 
 
-def test_os_oito_tipos_conhecidos_e_a_particao_entre_eles():
-    """UE-9C2E4-D2: `EARLY_SETTLEMENT_DISBURSEMENT` entrou como RECONHECIDO e
-    fora do escopo, com a mesma prova dos outros seis."""
+def test_o_vocabulario_de_tipos_e_a_particao_entre_eles():
+    """A lista EXATA, fixada por enumeracao — nao por tamanho.
+
+    UE-9C2E4-D2 acrescentou `EARLY_SETTLEMENT_DISBURSEMENT`;
+    SOURCES-RECOVERY-2 acrescentou `EARLY_SETTLEMENT_RECOVERY`. Cada entrada
+    exigiu a MESMA prova medida: componentes de afiliado em zero e sem pedido.
+
+    Este teste e' proposital e deve DOER: acrescentar um tipo sem passar por
+    aqui e' o que se quer impedir. O que mudou foi so' o nome — contar "oito"
+    no titulo envelhecia a cada adicao e ja' dizia o numero errado.
+    """
     assert sync.TRANSACTION_TYPE_EXCLUDED == (
         "DEDUCTIONS_INCURRED_BY_SELLER",
         "EARLY_SETTLEMENT_DISBURSEMENT",
+        "EARLY_SETTLEMENT_RECOVERY",
         "GMV_PAYMENT_FOR_TIKTOK_ADS",
         "LOGISTICS_REIMBURSEMENT",
         "PLATFORM_REIMBURSEMENT",
         "PROMOTION_ADJUSTMENT",
         "THIRD_PARTY_FINANCING",
     )
-    assert len(sync.TRANSACTION_TYPE_KNOWN) == 8
+    # Derivado, nao redigitado: `KNOWN` e' a uniao das duas listas acima.
+    assert len(sync.TRANSACTION_TYPE_KNOWN) == len(
+        sync.TRANSACTION_TYPE_EXCLUDED) + len(sync.TRANSACTION_TYPE_ALLOWLIST)
     assert set(sync.TRANSACTION_TYPE_KNOWN) == (
         set(sync.TRANSACTION_TYPE_ALLOWLIST) | set(sync.TRANSACTION_TYPE_EXCLUDED)
     )
@@ -1825,6 +1836,14 @@ def test_early_settlement_disbursement_e_reconhecido_e_nao_contribui():
     assert "EARLY_SETTLEMENT_DISBURSEMENT" in sync.TRANSACTION_TYPE_KNOWN
     assert "EARLY_SETTLEMENT_DISBURSEMENT" in sync.TRANSACTION_TYPE_EXCLUDED
     assert "EARLY_SETTLEMENT_DISBURSEMENT" not in sync.TRANSACTION_TYPE_ALLOWLIST
+
+
+def test_early_settlement_recovery_e_reconhecido_e_nao_contribui():
+    """O tipo que derrubou o run de 24/09. Medido 6/6: componentes de afiliado
+    em zero e `order_id` nulo — reconhecer nao e' incluir."""
+    assert "EARLY_SETTLEMENT_RECOVERY" in sync.TRANSACTION_TYPE_KNOWN
+    assert "EARLY_SETTLEMENT_RECOVERY" in sync.TRANSACTION_TYPE_EXCLUDED
+    assert "EARLY_SETTLEMENT_RECOVERY" not in sync.TRANSACTION_TYPE_ALLOWLIST
 
 
 @pytest.mark.parametrize("token", ["fee_breakdown", "tax_breakdown", "_before_pit"])
