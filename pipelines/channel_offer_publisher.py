@@ -115,6 +115,139 @@ class PublisherError(cos.ChannelSyncError):
     """Falha do executor. Mensagem sempre sanitizada."""
 
 
+# ---------------------------------------------------------------------------
+# Gate PMA-OPS-2 — a flag de publicacao sai do CODIGO e vira CONFIGURACAO
+# ---------------------------------------------------------------------------
+# Ate' aqui `run_apply` passava `channel_enabled=False` LITERAL para
+# `plan_publication`. Era o guarda-corpo certo durante o piloto: a unica forma
+# de publicar era um humano digitar `--operator-override`, e nenhum agendador
+# conseguia disparar uma publicacao sozinho.
+#
+# O efeito colateral e' que o canal ficou impossivel de automatizar. O
+# `pma_refresh` (orchestrate.PIPELINES) chama este modulo SEM `--operator-
+# override`, entao os steps `pma_shopee` e `pma_tiktok` recusam sempre. Medido
+# em `audit.source_sync_run`: `2026-09-22 21:22 — recusado: channel_flag_disabled`.
+# Agendar o pipeline sem mexer nisto produziria uma falha diaria previsivel.
+#
+# A flag vira variavel de ambiente, POR CANAL, e continua NASCENDO DESLIGADA.
+# Ligar segue sendo decisao explicita — so' que agora e' uma decisao de
+# configuracao, registravel e revisavel, em vez de um literal que exige deploy.
+#
+# `--operator-override` PERMANECE, e continua sendo o caminho do humano: ele
+# publica mesmo com a flag desligada. O que muda e' que deixou de ser o UNICO
+# caminho.
+#
+#: Variavel por canal. Nome explicito; nao ha variavel global que ligue os dois
+#: de uma vez, porque ligar a Shopee nao e' decidir sobre o TikTok.
+PUBLISH_FLAG_ENV = {
+    dom.MARKETPLACE_SHOPEE: "PMA_PUBLISH_SHOPEE_ENABLED",
+    dom.MARKETPLACE_TIKTOK: "PMA_PUBLISH_TIKTOK_ENABLED",
+}
+
+#: Os UNICOS textos aceitos, em cada direcao. Lista fechada nos dois lados de
+#: proposito: ver `channel_enabled_from_env`.
+_FLAG_TRUE = frozenset({"1", "true", "yes", "on"})
+_FLAG_FALSE = frozenset({"0", "false", "no", "off", ""})
+
+
+class PublishFlagError(PublisherError):
+    """Valor de flag que nao e' nem ligado nem desligado.
+
+    Nao e' o mesmo que a flag estar desligada, e por isso nao e' `refused`: e'
+    configuracao malformada, e o operador precisa ver o erro em vez de um canal
+    silenciosamente parado.
+    """
+
+
+def channel_enabled_from_env(marketplace: str, env=None) -> bool:
+    """A flag de publicacao do canal. FAIL-CLOSED em todos os sentidos.
+
+    Tres comportamentos, e os tres sao deliberados:
+
+    1. **Ausente -> False.** O default e' nao publicar. Uma instalacao nova, um
+       container sem a variavel ou um `.env` incompleto nunca publicam por
+       acidente.
+
+    2. **Valor reconhecido -> o que ele diz.** `1/true/yes/on` liga;
+       `0/false/no/off` e a string vazia desligam. Maiuscula e espaco ao redor
+       nao importam.
+
+    3. **Valor DESCONHECIDO -> levanta.** Este e' o ponto que exige explicacao,
+       porque a alternativa parece mais segura e nao e'. Tratar `"treu"` como
+       desligado tambem nao publica — mas nao publica em SILENCIO, e o operador
+       que digitou errado continuaria vendo a fotografia envelhecer sem
+       nenhuma pista do motivo. Uma lista fechada so' de valores verdadeiros
+       seria fail-open pelo avesso: qualquer lixo viraria "desligado" e
+       pareceria intencional. Exigir reconhecimento INTEGRAL, e falhar alto no
+       que nao for reconhecido, e' o que torna a recusa legivel.
+
+    Nenhum dos tres publica. A diferenca esta em qual deles o operador
+    consegue diagnosticar.
+    """
+    if marketplace not in PUBLISH_FLAG_ENV:
+        raise PublisherError("canal fora da fato multicanal")
+    variavel = PUBLISH_FLAG_ENV[marketplace]
+    bruto = (env if env is not None else os.environ).get(variavel)
+    if bruto is None:
+        return False
+    texto = str(bruto).strip().lower()
+    if texto in _FLAG_TRUE:
+        return True
+    if texto in _FLAG_FALSE:
+        return False
+    # A mensagem nomeia a variavel e os valores aceitos, e NUNCA ecoa o valor
+    # recebido: uma variavel de ambiente mal preenchida pode conter qualquer
+    # coisa, inclusive um segredo colado no lugar errado.
+    raise PublishFlagError(
+        f"{variavel} tem valor nao reconhecido. Use um de "
+        f"{sorted(_FLAG_TRUE)} para ligar ou {sorted(_FLAG_FALSE - {''})} "
+        f"para desligar; ausente significa desligado."
+    )
+
+
+def publication_gate_report(marketplace: str, *, operator_override: bool,
+                            env=None) -> dict:
+    """Por que ESTE canal pode ou nao publicar, em forma de dado.
+
+    Gate PMA-OPS-2. Existe para o `--diagnose`: antes, descobrir por que um
+    canal nao publicava exigia rodar o apply e ler a recusa na auditoria — ou
+    seja, exigia tentar publicar para saber que nao daria.
+
+    O relatorio e' HONESTO sobre o proprio alcance: ele avalia as guardas que
+    nao precisam da conexao de destino e DECLARA as que nao avaliou, em
+    `not_evaluated`. Um relatorio que omitisse isso sugeriria que `would_publish
+    = true` e' garantia de publicacao, e nao e'.
+    """
+    variavel = PUBLISH_FLAG_ENV.get(marketplace)
+    try:
+        ligado = channel_enabled_from_env(marketplace, env)
+        estado = "enabled" if ligado else "disabled"
+        erro = None
+    except PublishFlagError as exc:
+        # O valor invalido nao vira `False` silencioso nem aqui: o diagnostico
+        # e' justamente o lugar onde o operador precisa ver o erro.
+        ligado, estado, erro = False, "invalid_value", str(exc)
+    return {
+        "marketplace": marketplace,
+        "flag_env_var": variavel,
+        "flag_state": estado,
+        "flag_error": erro,
+        "channel_enabled": ligado,
+        "operator_override": bool(operator_override),
+        # A regra de `plan_publication`, espelhada: override vence a flag.
+        "authorized_to_publish": bool(ligado or operator_override),
+        "refusal_reason": (
+            None if (ligado or operator_override) else cos.REFUSE_FLAG_OFF),
+        # O que ESTE relatorio nao pode responder sem a conexao de destino.
+        "not_evaluated": [
+            "source_available",
+            "accounts_that_ran",
+            "record_count",
+            "snapshot_older_than_published",
+        ],
+    }
+
+
 class SourceReadBeforeLockError(PublisherError):
     """Tentativa de ler a fonte antes de adquirir o lock."""
 
@@ -855,7 +988,11 @@ def run_apply(args, *, connect_target=None, connect_audit=None,
                 incoming_watermarks=entrando,
                 published_watermarks=published_watermarks(destino,
                                                           args.marketplace),
-                channel_enabled=False,
+                # Gate PMA-OPS-2: era `False` LITERAL. Agora vem da
+                # configuracao, nasce desligada e levanta em valor invalido.
+                # `--operator-override` continua vencendo a flag, e continua
+                # sendo o caminho do humano.
+                channel_enabled=channel_enabled_from_env(args.marketplace),
                 operator_override=bool(args.operator_override),
                 source_available=True,
             )
@@ -939,6 +1076,12 @@ def run_diagnose(args, *, connect_source=None) -> dict:
         "fingerprint": candidate_fingerprint(registros),
         "scopes": sorted(str(e) for e in cos.scopes_of(registros)),
         "accounts_seen": sorted(contas),
+        # Gate PMA-OPS-2 — POR QUE este canal publicaria, ou nao. Antes, a
+        # unica forma de descobrir era rodar o apply e ler a recusa na
+        # auditoria: era preciso tentar publicar para saber que nao daria.
+        "publication_gate": publication_gate_report(
+            marketplace, operator_override=getattr(
+                args, "operator_override", False)),
     }
 
 
@@ -968,6 +1111,18 @@ def _relata_diagnostico(rel: dict) -> None:
     print(f"  preco ausente={rel['prices_absent']} (nao observado) "
           f"| preco zero={rel['prices_zero']}")
     print(f"  fingerprint={rel['fingerprint']}")
+    portao = rel.get("publication_gate")
+    if portao:
+        # A linha diz o que o apply FARIA, e diz que isto e' uma previsao
+        # parcial — nao promete publicacao.
+        veredito = ("PUBLICARIA" if portao["authorized_to_publish"]
+                    else f"RECUSARIA ({portao['refusal_reason']})")
+        print(f"  portao: {veredito} | {portao['flag_env_var']}="
+              f"{portao['flag_state']} override={portao['operator_override']}")
+        if portao["flag_error"]:
+            print(f"  portao: ATENCAO — {portao['flag_error']}")
+        print(f"  portao: nao avaliado aqui (exige o destino): "
+              f"{', '.join(portao['not_evaluated'])}")
 
 
 def main(argv=None) -> int:

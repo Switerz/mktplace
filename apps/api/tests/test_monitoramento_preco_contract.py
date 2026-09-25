@@ -1998,3 +1998,109 @@ def test_http_ref_date_continua_recusado_e_aponta_observed_date():
         assert "2026-08-01" not in r.text
     finally:
         _limpa_overrides()
+
+
+# ---------------------------------------------------------------------------
+# 11. Gate PMA-OPS-2 — o campo tem de ATRAVESSAR o schema, nao so' existir
+# ---------------------------------------------------------------------------
+# `no_reference_breakdown` foi calculado pelo servico desde o PMA-REF-LINK-1 e
+# NUNCA chegou ao cliente: o modelo Pydantic da resposta nao o declarava, e um
+# campo nao declarado e' descartado em silencio na serializacao. Os testes
+# daquele gate chamavam o servico direto e viam o valor certo; a resposta HTTP
+# real trazia `{}`.
+#
+# Nenhum teste cruzava a fronteira do schema — foi o QA em navegador que pegou.
+# Estes testes fecham essa fronteira: eles passam pelo `TestClient`, entao um
+# campo removido do schema volta a reprovar aqui em vez de sumir na producao.
+
+def test_http_breakdown_atravessa_o_schema_e_fecha_com_o_cartao():
+    listings, refs, d1 = _cenario_http()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        corpo = cli.get(ROTA).json()
+        breakdown = corpo["metrics"]["no_reference_breakdown"]
+        assert isinstance(breakdown, dict), (
+            "o campo sumiu na borda HTTP: declare-o no schema da resposta"
+        )
+        assert sum(breakdown.values()) == corpo["kpis"]["no_reference_count"]
+    finally:
+        _limpa_overrides()
+
+
+def test_http_breakdown_e_non_comparable_reasons_sao_campos_DISTINTOS():
+    """Os dois respondem perguntas diferentes e um nao pode virar alias do
+    outro: `non_comparable_reasons` fecha o denominador (so' elegiveis) e
+    `no_reference_breakdown` explica o cartao (ativas, kits inclusive)."""
+    listings, refs, d1 = _cenario_http()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        m = cli.get(ROTA).json()["metrics"]
+        assert "non_comparable_reasons" in m
+        assert "no_reference_breakdown" in m
+        assert m["non_comparable_reasons"] is not m["no_reference_breakdown"]
+    finally:
+        _limpa_overrides()
+
+
+def test_openapi_declara_o_breakdown():
+    """Sem isto, o contrato publicado nao menciona o campo e um cliente novo
+    nao tem como saber que ele existe."""
+    listings, refs, d1 = _cenario_http()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        schemas = cli.get("/openapi.json").json()["components"]["schemas"]
+        metrics = schemas["MonitoramentoPrecoMetrics"]["properties"]
+        assert "no_reference_breakdown" in metrics
+    finally:
+        _limpa_overrides()
+
+
+def test_schema_cobre_todo_o_vocabulario_do_dominio():
+    """INCIDENTE PMA-OPS-2 — a causa raiz, travada.
+
+    `NonComparableReason` era um `Literal` REDIGITADO com os sete valores
+    antigos. O PMA-REF-LINK-1 acrescentou tres motivos ao dominio e ao servico
+    e nao a este arquivo. Como o campo e' `Literal`, o Pydantic recusou a
+    RESPOSTA INTEIRA — `ResponseValidationError` -> HTTP 500 em qualquer pagina
+    que contivesse uma linha com motivo novo, ou seja, a maioria delas.
+
+    Duas listas do mesmo vocabulario divergem. Agora o `Literal` e' derivado, e
+    este teste prova a derivacao — se alguem voltar a redigitar, reprova aqui.
+    """
+    import typing
+
+    from app.schemas.monitoramento_preco import NonComparableReason
+    from app.services import pma_domain as dom
+
+    assert set(typing.get_args(NonComparableReason)) == set(dom.NON_COMPARABLE_REASONS)
+
+
+def test_toda_linha_real_do_servico_atravessa_o_schema():
+    """A contraprova pela BORDA, com linhas de verdade.
+
+    O `limit=1` que usei na conferencia manual pegava a linha 0, que por acaso
+    carregava um motivo antigo, e passava. So' a pagina cheia expunha o 500.
+    Este teste serializa TODAS as linhas do cenario pelo modelo real — e o
+    `TypeAdapter` abaixo cobre o vocabulario inteiro, inclusive os motivos que
+    o cenario nao produz.
+    """
+    from pydantic import TypeAdapter
+
+    from app.schemas.monitoramento_preco import (
+        MonitoramentoPrecoRow, NonComparableReason,
+    )
+    from app.services import pma_domain as dom
+
+    adaptador = TypeAdapter(NonComparableReason)
+    for motivo in dom.NON_COMPARABLE_REASONS:
+        assert adaptador.validate_python(motivo) == motivo, motivo
+
+    listings, refs, d1 = _cenario_http()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        corpo = cli.get(ROTA).json()
+        assert corpo["rows"], "o cenario precisa devolver linhas"
+        for linha in corpo["rows"]:
+            MonitoramentoPrecoRow.model_validate(linha)
+    finally:
+        _limpa_overrides()

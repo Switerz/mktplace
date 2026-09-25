@@ -21,6 +21,11 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# Gate PMA-OPS-2 — o vocabulario de motivos vem do DOMINIO, nao redigitado.
+# Redigitar foi a causa do incidente: o dominio ganhou tres valores, o schema
+# nao, e a resposta inteira passou a falhar validacao. Ver `NonComparableReason`.
+from app.services import pma_domain as dom
+
 #: PARTICAO COMERCIAL — cinco valores que somam `monitored_count`.
 #: Gate PMA-H1: `stale_observation` SAIU daqui. Era um status comercial e
 #: substituia a classificacao, de modo que um sync atrasado zerava os cinco
@@ -84,15 +89,23 @@ SnapshotMutability = Literal["mutable_operational_snapshot", "settled_snapshot"]
 #: Por que uma oferta elegivel nao pode ser comparada. Vive AO LADO de
 #: `comparison_status`, nunca no lugar dele: a particao comercial tem cinco
 #: valores e e' congelada por teste.
-NonComparableReason = Literal[
-    "reference_missing_for_product",
-    "sku_not_in_internal_catalog",
-    "product_without_ean",
-    "product_ean_not_consumer",
-    "ambiguous_multiple_candidates",
-    "invalid_reference_price",
-    "invalid_channel_price",
-]
+#:
+#: Gate PMA-OPS-2 — INCIDENTE. Os tres valores do PMA-REF-LINK-1
+#: (`brand_without_b2b_reference`, `kit_composition_missing`,
+#: `offer_without_match_key`) foram adicionados ao dominio e ao servico e NAO
+#: foram adicionados aqui. Como o campo e' `Literal`, o Pydantic recusou a
+#: resposta inteira: `ResponseValidationError` -> HTTP 500 em qualquer pagina
+#: que contivesse UMA linha com motivo novo. Na fotografia real isso e' a
+#: maioria das linhas — a tela caia em 500 nos tres canais.
+#:
+#: O teste do gate anterior nao pegou porque chamava o servico DIRETO, sem
+#: atravessar a serializacao; e um `limit=1` manual pegava a linha 0, que por
+#: acaso carregava um motivo antigo. So' o carregamento real da pagina expos.
+#:
+#: Este `Literal` e' agora derivado de `dom.NON_COMPARABLE_REASONS`, nao
+#: redigitado: duas listas do mesmo vocabulario divergem, e foi exatamente o
+#: que aconteceu. Ver `test_schema_cobre_todo_o_vocabulario_do_dominio`.
+NonComparableReason = Literal[tuple(dom.NON_COMPARABLE_REASONS)]  # type: ignore[valid-type]
 
 ReferenceType = Literal["suggested_retail_pdv"]
 PolicyStatus = Literal["not_applicable_to_own_store_monitoring"]
@@ -272,6 +285,16 @@ class MonitoramentoPrecoMetrics(BaseModel):
     at_or_above_reference: int
     #: Motivo -> contagem. Soma com `comparable_offers` em `eligible_offers`.
     non_comparable_reasons: dict[str, int] = {}
+    #: Motivo -> contagem sobre as ofertas ATIVAS sem referencia, kits e marcas
+    #: fora do escopo INCLUSIVE. Soma exatamente `kpis.no_reference_count`.
+    #:
+    #: Gate PMA-OPS-2 — este campo FALTAVA AQUI. O servico o calculava desde o
+    #: PMA-REF-LINK-1 e o Pydantic o descartava silenciosamente na borda HTTP,
+    #: porque um modelo sem o campo declarado simplesmente nao o serializa. Os
+    #: testes do gate anterior chamavam o servico DIRETO e por isso viam o
+    #: valor certo; a resposta real chegava com `{}`. Foi o QA em navegador que
+    #: pegou — nenhum teste de unidade cruzava a fronteira do schema.
+    no_reference_breakdown: dict[str, int] = {}
     coverage_rate: Optional[float] = None
     distinct_b2b_products: int = 0
     b2b_reach: Optional[float] = None

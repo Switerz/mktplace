@@ -311,6 +311,23 @@ export function fmtPercentual(valor: number | null | undefined): string {
   return `${sinal}${abs}%`;
 }
 
+/**
+ * PARTICIPACAO num total — sem sinal, uma casa.  (Gate PMA-OPS-2)
+ *
+ * Separado de `fmtPercentual` de proposito. Aquele formata DIFERENCA e por
+ * isso carimba `+` ou `-`: "+12,00%" significa "doze por cento acima da
+ * referencia". Reusa-lo para uma fatia produzia "+76,54%" no detalhamento das
+ * causas, que se le como variacao — como se as ofertas sem referencia
+ * tivessem CRESCIDO 76%. Sao 76,5% do total, e o sinal e' ruido.
+ */
+export function fmtParticipacao(fracao: number | null | undefined): string {
+  if (fracao == null || Number.isNaN(fracao)) return INDISPONIVEL;
+  return `${(fracao * 100).toLocaleString("pt-BR", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}%`;
+}
+
 /** Contagem inteira em pt-BR. Sem K/M: estes numeros sao auditaveis. */
 export function fmtContagem(valor: number | null | undefined): string {
   if (valor == null || Number.isNaN(valor)) return INDISPONIVEL;
@@ -820,5 +837,320 @@ export function resumoCobertura(
     ofertasForaDeEscopo: meta?.out_of_scope_offer_count ?? 0,
     revistas: temContagem ? (contagem.current ?? 0) : null,
     naoRevistas: temContagem ? (contagem.stale ?? 0) : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gate PMA-OPS-2 — POR QUE a oferta nao tem referencia
+// ---------------------------------------------------------------------------
+
+/**
+ * Nome de cada causa para quem GERE o negocio, nao para quem le o schema.
+ *
+ * Os quatro baldes tem donos diferentes, e e' por isso que a tela os separa:
+ * marca sem tabela e' pauta de Trade, kit e chave sao pauta de cadastro, e
+ * produto ausente e' o unico caso em que "nao esta na tabela B2B" se le ao pe
+ * da letra. Um cartao unico de 1.817 mandava as tres areas olharem a mesma
+ * lista indiferenciada.
+ */
+export const MOTIVO_SEM_REFERENCIA_ROTULO: Record<string, string> = {
+  reference_missing_for_product: "Produto sem referência B2B",
+  brand_without_b2b_reference: "Marca sem tabela B2B",
+  kit_composition_missing: "Kit sem composição comparável",
+  offer_without_match_key: "Oferta sem chave de associação",
+  ambiguous_multiple_candidates: "Referência ambígua",
+  invalid_reference_price: "Referência sem preço utilizável",
+  invalid_channel_price: "Preço não observado nesta fotografia",
+  sku_not_in_internal_catalog: "SKU fora do cadastro interno",
+  product_without_ean: "Produto sem EAN",
+  product_ean_not_consumer: "EAN não é de consumidor",
+};
+
+/** O que cada balde pede como ACAO. Sem isto o numero nao vira trabalho. */
+export const MOTIVO_SEM_REFERENCIA_DETALHE: Record<string, string> = {
+  reference_missing_for_product:
+    "A marca tem tabela B2B, a oferta tem chave e não é kit — e nenhuma linha " +
+    "casou. É o único caso em que “o produto não está na tabela” se lê ao pé " +
+    "da letra.",
+  brand_without_b2b_reference:
+    "A marca não tem tabela B2B publicada. Não há o que procurar: nenhuma " +
+    "correção de cadastro resolve enquanto a tabela não existir.",
+  kit_composition_missing:
+    "Oferta classificada como kit. A referência de um kit vem dos " +
+    "componentes, e nenhuma composição foi estimada.",
+  offer_without_match_key:
+    "O anúncio não tem GTIN nem SKU. A busca não falhou — ela não foi possível.",
+};
+
+export interface MotivoSemReferenciaView {
+  chave: string;
+  rotulo: string;
+  detalhe: string;
+  valor: number;
+  /** Participacao no total sem referencia. Nulo quando o total e' zero. */
+  fracao: number | null;
+  /** `true` no balde sintetico que denuncia falta de fechamento. */
+  residual?: boolean;
+}
+
+export interface DecomposicaoSemReferencia {
+  /** `null` quando a API ainda nao decompoe — diferente de decompor em zero. */
+  linhas: MotivoSemReferenciaView[] | null;
+  total: number;
+  /** Soma dos baldes. Igual a `total` quando reconcilia. */
+  somado: number;
+  fecha: boolean;
+  /** `true` quando a API nao enviou o campo (deploy antigo). */
+  indisponivel: boolean;
+}
+
+/**
+ * Decompoe `no_reference_count` nos baldes que a API emitiu.
+ *
+ * TRES ESTADOS, E ELES NAO SE CONFUNDEM
+ * --------------------------------------
+ *   API sem o campo   -> `indisponivel`, `linhas = null`. A tela diz que ESTA
+ *                        VERSAO da API nao decompoe, e nao inventa zero.
+ *   total zero        -> `linhas = []`, `fecha = true`. Zero MEDIDO: nao ha
+ *                        oferta sem referencia, e isso e' uma boa noticia.
+ *   soma != total     -> um balde `residual` aparece na lista. A tela NAO
+ *                        esconde a diferenca nem normaliza os numeros: um
+ *                        detalhamento que nao fecha e' um defeito a mostrar,
+ *                        nao a maquiar.
+ */
+export function decomporSemReferencia(
+  breakdown: Record<string, number> | null | undefined,
+  totalSemReferencia: number,
+): DecomposicaoSemReferencia {
+  if (breakdown == null) {
+    return {
+      linhas: null,
+      total: totalSemReferencia,
+      somado: 0,
+      fecha: false,
+      indisponivel: true,
+    };
+  }
+  const linhas: MotivoSemReferenciaView[] = Object.entries(breakdown)
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([chave, valor]) => ({
+      chave,
+      rotulo: MOTIVO_SEM_REFERENCIA_ROTULO[chave] ?? chave,
+      detalhe: MOTIVO_SEM_REFERENCIA_DETALHE[chave] ?? "",
+      valor,
+      fracao: totalSemReferencia > 0 ? valor / totalSemReferencia : null,
+    }));
+  const somado = linhas.reduce((s, l) => s + l.valor, 0);
+  if (somado !== totalSemReferencia) {
+    const resto = totalSemReferencia - somado;
+    linhas.push({
+      chave: "__residual__",
+      rotulo: "Não reconciliado",
+      detalhe:
+        "A soma das causas não fecha com o total sem referência. O número " +
+        "está exposto de propósito: é defeito de dado, não de exibição.",
+      valor: resto,
+      fracao: totalSemReferencia > 0 ? resto / totalSemReferencia : null,
+      residual: true,
+    });
+  }
+  return {
+    linhas,
+    total: totalSemReferencia,
+    somado,
+    fecha: somado === totalSemReferencia,
+    indisponivel: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gate PMA-OPS-2 — TRES RELOGIOS, e nenhum deles e' "agora"
+// ---------------------------------------------------------------------------
+
+export interface RelogioView {
+  chave: string;
+  rotulo: string;
+  valor: string;
+  /** O que este relogio mede — e o que ele NAO mede. */
+  explicacao: string;
+}
+
+export interface FrescorPainelView {
+  relogios: RelogioView[];
+  /** Situacao da fotografia: em dia, atrasada, retrospectiva ou ausente. */
+  situacao: "em_dia" | "atrasada" | "retrospectiva" | "indisponivel";
+  rotuloSituacao: string;
+  /** Frase de alerta quando ha defasagem. Nula quando nao ha. */
+  alerta: string | null;
+}
+
+/**
+ * Os relogios da fotografia, separados e nomeados.
+ *
+ * A CONFUSAO QUE ESTE PAINEL EXISTE PARA IMPEDIR
+ * -----------------------------------------------
+ * "A ingestao da Shopee rodou hoje de manha, entao a tela esta atual." Nao
+ * esta. Sao coisas diferentes:
+ *
+ *   captura no canal   quando a origem observou o preco, COMO REGISTRADO NESTA
+ *                      fotografia. Nao diz nada sobre o que a origem tem agora.
+ *   fotografia servida quando o publisher escreveu o que a tela le'.
+ *   defasagem          quantos dias separam a fotografia do teto consultavel.
+ *
+ * E ha um quarto relogio que esta tela NAO CONSEGUE LER: o estado atual da
+ * ingestao bruta. Ela vive no Data Mart e a API le' somente `marts.*` no Neon.
+ * O painel diz isso em vez de omitir, porque a omissao e' exatamente o que faz
+ * alguem concluir "a fonte rodou, logo a tela esta atual".
+ */
+export function painelDeFrescor(
+  meta: Pick<
+    MonitoramentoPrecoMeta,
+    | "observed_date"
+    | "observed_at"
+    | "refreshed_at"
+    | "eligible_ref_date"
+    | "lag_days"
+    | "freshness_status"
+  > | null,
+): FrescorPainelView {
+  const atraso = meta?.lag_days ?? null;
+  const frescor = meta?.freshness_status ?? "unavailable";
+  const situacao: FrescorPainelView["situacao"] =
+    frescor === "unavailable"
+      ? "indisponivel"
+      : frescor === "historical"
+        ? "retrospectiva"
+        : frescor === "stale"
+          ? "atrasada"
+          : "em_dia";
+
+  const relogios: RelogioView[] = [
+    {
+      chave: "captura",
+      rotulo: "Captura no canal",
+      valor: fmtInstanteBrt(meta?.observed_at ?? null),
+      explicacao:
+        "Quando a origem observou o preço, como registrado NESTA fotografia. " +
+        "Não descreve o que a origem tem agora.",
+    },
+    {
+      chave: "publicacao",
+      rotulo: "Fotografia publicada",
+      valor: fmtInstanteBrt(meta?.refreshed_at ?? null),
+      explicacao:
+        "Quando o publisher escreveu os dados que esta tela lê. É este o " +
+        "relógio que envelhece quando o refresh não roda.",
+    },
+    {
+      chave: "defasagem",
+      rotulo: "Defasagem da fotografia",
+      valor:
+        atraso == null
+          ? INDISPONIVEL
+          : atraso <= 0
+            ? "em dia"
+            : `${fmtContagem(atraso)} dia(s)`,
+      explicacao:
+        "Distância entre o dia da fotografia e o teto consultável deste " +
+        "canal. Zero significa em dia.",
+    },
+    {
+      chave: "ingestao_bruta",
+      rotulo: "Ingestão bruta na origem",
+      valor: "não observável aqui",
+      explicacao:
+        "Esta tela lê apenas o serving publicado. O estado atual da ingestão " +
+        "bruta vive no Data Mart e NÃO é visível aqui — a origem pode estar " +
+        "em dia com a fotografia atrasada.",
+    },
+  ];
+
+  const rotulo = {
+    em_dia: "Fotografia no dia mais recente disponível",
+    atrasada: "Fotografia atrasada",
+    retrospectiva: "Consulta retrospectiva",
+    indisponivel: "Sem fotografia para a data",
+  }[situacao];
+
+  const alerta =
+    situacao === "atrasada"
+      ? `A fotografia é de ${fmtData(meta?.observed_date ?? null)}` +
+        (atraso != null && atraso > 0
+          ? `, ${atraso} dia(s) atrás de ${fmtData(meta?.eligible_ref_date ?? null)}`
+          : "") +
+        ". Os números valem para aquele dia e NÃO descrevem o preço de hoje. " +
+        "Verifique a última execução do refresh do monitoramento."
+      : situacao === "indisponivel"
+        ? "Não existe fotografia materializada para a data pedida. Ausência " +
+          "não é zero: nenhum número é apresentado."
+        : null;
+
+  return { relogios, situacao, rotuloSituacao: rotulo, alerta };
+}
+
+// ---------------------------------------------------------------------------
+// Gate PMA-OPS-2 — o estado do LINK do anuncio
+// ---------------------------------------------------------------------------
+
+/**
+ * Canais cuja fonte NAO fornece URL de vitrine.
+ *
+ * Medido em 2026-09-25: nenhuma coluna de URL, permalink ou slug existe em
+ * `raw.shopee_products`, `raw.shopee_product_models`,
+ * `silver.stg_shopee_products` nem `gold.tiktok_product_catalog` — a unica
+ * coluna de URL em todo o conjunto e' `image_url`. Os identificadores existem
+ * (`shop_id` + `item_id`; `product_id` + `sku_id`), mas montar a URL a partir
+ * deles seria padrao observado na vitrine, nao contrato oficial da API.
+ */
+const CANAIS_SEM_URL_NA_FONTE: readonly string[] = ["shopee", "tiktok"];
+
+export interface LinkAnuncioView {
+  /** URL segura, ou `null`. Nunca montada — so' validada. */
+  url: string | null;
+  estado: "disponivel" | "ausente_na_fonte" | "anomalia";
+  rotulo: string;
+}
+
+/**
+ * Traduz `permalink` no que a tela deve MOSTRAR, distinguindo duas ausencias
+ * que nao sao a mesma coisa:
+ *
+ *   ausente_na_fonte  a origem daquele canal nao publica URL. Nao e' defeito
+ *                     nosso e nao ha o que corrigir — e' limite da fonte.
+ *   anomalia          o canal FORNECE URL (o ML entrega 872/872) e esta linha
+ *                     veio sem, ou veio fora do dominio do canal. Isso e'
+ *                     defeito, e a tela nao deve chama-lo de limite da fonte.
+ */
+export function linkAnuncioView(
+  permalink: string | null | undefined,
+  marketplace: Marketplace,
+): LinkAnuncioView {
+  const url = urlAnuncioSegura(permalink, marketplace);
+  if (url) {
+    return {
+      url,
+      estado: "disponivel",
+      rotulo:
+        `Abrir anúncio ${marketplace === "ml" ? "no" : "na"} ` +
+        `${canalLabel(marketplace)}`,
+    };
+  }
+  if (CANAIS_SEM_URL_NA_FONTE.includes(marketplace)) {
+    return {
+      url: null,
+      estado: "ausente_na_fonte",
+      rotulo:
+        `Link indisponível na fonte: a API ${canalComPreposicao(marketplace)} ` +
+        "não devolve URL de vitrine. Nenhuma URL é montada por padrão observado.",
+    };
+  }
+  return {
+    url: null,
+    estado: "anomalia",
+    rotulo:
+      "Link ausente ou fora dos domínios reconhecidos " +
+      `${canalComPreposicao(marketplace)}. Este canal normalmente fornece ` +
+      "link, então a ausência é um defeito do dado.",
   };
 }

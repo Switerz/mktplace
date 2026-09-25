@@ -114,6 +114,22 @@ function Get-TaskDefinitions {
     #     diagnostico manual usem o MESMO wrapper de lock/timeout/log que a
     #     execucao agendada usara' depois. Ativar o agendamento e' outro gate.
     #
+    #     Gate PMA-OPS-2 (2026-09-25): o bloqueio que faltava ser removido ANTES
+    #     do agendamento ja' foi. Ate' aqui os steps `pma_shopee` e `pma_tiktok`
+    #     recusavam SEMPRE — `channel_offer_publisher` passava
+    #     `channel_enabled=False` literal, e o orquestrador nao manda
+    #     `--operator-override`. Medido em `audit.source_sync_run`:
+    #     `2026-09-22 21:22 — recusado: channel_flag_disabled`. Agendar naquele
+    #     estado teria produzido uma falha diaria previsivel em dois dos tres
+    #     canais.
+    #
+    #     Agora a autorizacao vem de `PMA_PUBLISH_SHOPEE_ENABLED` e
+    #     `PMA_PUBLISH_TIKTOK_ENABLED`, que NASCEM DESLIGADAS. O agendamento
+    #     continua nao existindo, e ligar a flag continua sendo decisao
+    #     separada — a diferenca e' que agora as duas sao decisoes de
+    #     configuracao em vez de um literal que exige deploy.
+    #     Ver `docs/pma_refresh_runbook.md`.
+    #
     #     Lock = "full_daily" DE PROPOSITO, pela mesma razao do
     #     "serving_refresh": os publishers do PMA leem as MESMAS fontes do Data
     #     Mart que o `full_daily` carrega, e compartilhar o lock logico torna a
