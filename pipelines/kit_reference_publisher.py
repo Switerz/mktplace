@@ -458,7 +458,16 @@ def publish(*, target_conn, audit_conn, source_conn, marketplace: str,
             target_conn.commit()
         except BaseException as exc:
             target_conn.rollback()
-            audit_finish(audit_conn, sync_run_id, AUDIT_FAILED, 0, str(exc)[:500])
+            # A auditoria NAO pode mascarar a causa. Se o banco de auditoria
+            # tambem estiver ruim, `audit_finish` levantaria aqui e o erro que
+            # o operador veria seria o da auditoria, nao o da publicacao — e o
+            # registro ficaria `running` para sempre, o que e' pior de
+            # diagnosticar do que um `failed` perdido.
+            try:
+                audit_finish(audit_conn, sync_run_id, AUDIT_FAILED, 0,
+                             str(exc)[:500])
+            except Exception:  # pragma: no cover - defesa de borda
+                pass
             raise
         audit_finish(audit_conn, sync_run_id, AUDIT_SUCCESS, inseridas)
 

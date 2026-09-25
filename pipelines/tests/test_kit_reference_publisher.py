@@ -599,6 +599,24 @@ def test_marca_do_kit_desconhecida_nao_produz_linha(banco):
 
 # --------------------------------------------------------------- serving SQL
 
+def test_o_sql_real_do_serving_carrega_os_tres_filtros():
+    """Le' a consulta que a API usa DE VERDADE, nao uma copia.
+
+    O comportamento e' exercitado abaixo contra o banco, mas com SQL escrito no
+    teste. Sem esta assercao, alguem poderia remover um filtro do serving e o
+    teste de comportamento continuaria verde — ele estaria provando a copia.
+    """
+    sys.path.insert(0, str(RAIZ / "apps" / "api"))
+    from app.services.monitoramento_preco_service import SQL_KIT_REFERENCES
+
+    texto = " ".join(SQL_KIT_REFERENCES.lower().split())
+    assert "marts.fact_kit_reference_daily" in texto
+    assert "reference_snapshot_id = :snapshot_id" in texto
+    assert "status = 'resolved'" in texto
+    assert "marketplace = :marketplace" in texto
+    assert "observed_date = :observed_date" in texto
+
+
 def test_o_sql_do_serving_recusa_snapshot_diferente(banco):
     """A recusa esta no SQL, nao so' no dublê dos testes da API."""
     dsn, conn = banco
