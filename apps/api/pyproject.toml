@@ -9,7 +9,27 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
-    "sqlalchemy>=2.0",
+    # Teto em 2.1 por CAUSA MEDIDA, nao por precaucao (INCIDENTE-API-DB-4C).
+    #
+    # O SQLAlchemy 2.1.0 trocou o DBAPI padrao de `postgresql://` de `psycopg2`
+    # para `psycopg` (v3). O Render constroi com `pip install -e .`, que ignora
+    # o `uv.lock` e reresolve as faixas: um deploy pegou 2.1.0 com apenas
+    # `psycopg2` instalado, `create_engine` levantou `ModuleNotFoundError:
+    # psycopg`, o engine nunca nasceu e TODAS as rotas com banco viraram 503.
+    #
+    # Reproduzido com DSN sintetico:
+    #   2.0.43 + psycopg2                 -> OK  (driver psycopg2)
+    #   2.1.0  + psycopg2                 -> ModuleNotFoundError 'psycopg'
+    #   2.1.0  + psycopg2, `+psycopg2://` -> OK  (driver psycopg2)
+    #   2.1.0  + psycopg v3               -> OK  (driver psycopg)
+    #
+    # O teto preserva o driver ATUAL e nao mexe na `DATABASE_URL`. Subir para
+    # 2.1 exige decidir o DBAPI de propriedade e e' outro trabalho.
+    #
+    # Isto NAO torna o build reproduzivel: as demais faixas `>=` continuam
+    # sendo reresolvidas a cada deploy. Divida registrada em
+    # `docs/incidente_api_db_sqlalchemy_21.md`.
+    "sqlalchemy>=2.0,<2.1",
     "alembic>=1.13",
     "psycopg2-binary>=2.9",
     "pydantic>=2.7",
