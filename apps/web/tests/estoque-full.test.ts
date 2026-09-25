@@ -563,3 +563,38 @@ test("fixture completa continua sendo aceita pelo discriminante", () => {
   assert.equal(isIndisponivel(payload), false);
   assert.equal(isVazioPorFiltro(payload), false);
 });
+
+// ---------------------------------------------------------------------------
+// Gate FULL-SOURCE-4 — a grafia que sai daqui e' a que o backend reconhece
+// ---------------------------------------------------------------------------
+// O filtro de classificacao ficou morto porque o backend comparava caixa
+// contra o dominio errado. O backend foi corrigido para casar sem caixa, mas
+// isso nao autoriza o front a mandar qualquer coisa: a URL e' o contrato, e
+// mandar minuscula mascararia a origem do problema no proximo incidente.
+
+test("buildQuery envia a classificacao em MAIUSCULAS, como a fato guarda", () => {
+  const qs = buildQuery({ ...FILTROS_VAZIOS, classificacoes: [...CLASSIFICACOES] });
+  const enviadas = new URLSearchParams(qs).getAll("classificacoes");
+  assert.deepEqual(enviadas, [...CLASSIFICACOES]);
+  for (const v of enviadas) {
+    assert.equal(v, v.toUpperCase(), `${v} saiu fora de caixa alta`);
+  }
+});
+
+test("os sete valores do dominio viajam na URL sem serem reescritos", () => {
+  for (const c of CLASSIFICACOES) {
+    const qs = buildQuery({ ...FILTROS_VAZIOS, classificacoes: [c] });
+    assert.equal(new URLSearchParams(qs).get("classificacoes"), c);
+  }
+});
+
+test("chave REPETIDA por valor, nunca uma lista separada por virgula", () => {
+  // `classificacoes=A,B` chegaria ao backend como UM valor desconhecido e
+  // voltaria 422 -- o mesmo sintoma do defeito original, por outra causa.
+  const qs = buildQuery({
+    ...FILTROS_VAZIOS,
+    classificacoes: ["RUPTURA_CANDIDATA", "BAIXO_CANDIDATO"],
+  });
+  assert.equal(new URLSearchParams(qs).getAll("classificacoes").length, 2);
+  assert.ok(!qs.includes("%2C"), "virgula codificada indica lista num valor so");
+});
