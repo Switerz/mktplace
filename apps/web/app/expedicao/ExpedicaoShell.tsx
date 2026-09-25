@@ -16,12 +16,20 @@
  * Entao o TikTok e' uma ABA, nao um canal da fila. `ExpedicaoClient` continua
  * recebendo exatamente os dois canais que sempre recebeu, e nenhum caminho de
  * Shopee ou Mercado Livre passa por codigo novo.
+ *
+ * UX-TORRE-1 — O SELETOR DESCE PARA DENTRO DO PAINEL
+ * --------------------------------------------------
+ * Antes a casca desenhava a propria faixa "Superfície" ACIMA do painel, e o
+ * painel desenhava o proprio cabecalho logo abaixo: duas faixas de cromo antes
+ * do primeiro numero. Agora a casca so' MONTA o seletor e o entrega como
+ * `abas`; cada painel o posiciona dentro da sua unica faixa de cabecalho.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import ExpedicaoClient from "./ExpedicaoClient";
 import TikTokDispatchPanel from "@/components/expedicao/TikTokDispatchPanel";
+import Segmented from "@/components/ui/Segmented";
 
 const ML_LIGADO = process.env.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true";
 /**
@@ -57,7 +65,6 @@ function ComAbas() {
    */
   const [aba, setAba] = useState<Aba>(ABA_FILA);
   const [pronta, setPronta] = useState(false);
-  const refs = useRef<(HTMLButtonElement | null)[]>([]);
 
   useEffect(() => {
     setAba(lerAba());
@@ -80,70 +87,24 @@ function ComAbas() {
   }, []);
 
   const opcoes: { valor: Aba; texto: string }[] = [
-    { valor: ABA_FILA, texto: ML_LIGADO ? "Fila (Shopee / Mercado Livre)" : "Fila (Shopee)" },
+    { valor: ABA_FILA, texto: ML_LIGADO ? "Fila (Shopee / ML)" : "Fila (Shopee)" },
     { valor: ABA_TIKTOK, texto: "TikTok Shop" },
   ];
 
-  const aoTeclar = (e: React.KeyboardEvent, i: number) => {
-    const n = opcoes.length;
-    let alvo = -1;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") alvo = (i + 1) % n;
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") alvo = (i - 1 + n) % n;
-    else if (e.key === "Home") alvo = 0;
-    else if (e.key === "End") alvo = n - 1;
-    if (alvo < 0) return;
-    e.preventDefault();
-    trocar(opcoes[alvo].valor);
-    refs.current[alvo]?.focus();
-  };
+  const abas = (
+    <Segmented
+      rotulo="Superfície da Expedição"
+      opcoes={opcoes}
+      valor={aba}
+      aoEscolher={trocar}
+    />
+  );
 
-  return (
-    <div className="flex flex-col">
-      <div className="mx-auto flex w-full max-w-[1400px] flex-wrap items-center gap-2 px-4 pt-4">
-        <span id="exp-aba" className="text-xs text-slate-500">
-          Superfície
-        </span>
-        <div
-          role="radiogroup"
-          aria-labelledby="exp-aba"
-          className="flex gap-1 rounded-lg bg-white p-1 ring-1 ring-slate-200"
-        >
-          {opcoes.map((o, i) => {
-            const ativo = o.valor === aba;
-            return (
-              <button
-                key={o.valor}
-                ref={(el) => {
-                  refs.current[i] = el;
-                }}
-                type="button"
-                role="radio"
-                aria-checked={ativo}
-                tabIndex={ativo ? 0 : -1}
-                onKeyDown={(e) => aoTeclar(e, i)}
-                onClick={() => trocar(o.valor)}
-                className={`rounded-md px-4 py-1.5 text-sm ${
-                  ativo
-                    ? "bg-brand-600 font-semibold text-white"
-                    : "text-slate-700 hover:bg-brand-50"
-                }`}
-              >
-                {o.texto}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Ate' a URL ser lida, mostra a fila: e' o estado historico da rota e
-          evita um piscar de conteudo trocado. */}
-      {pronta && aba === ABA_TIKTOK ? (
-        <div className="mx-auto w-full max-w-[1400px] p-4">
-          <TikTokDispatchPanel />
-        </div>
-      ) : (
-        <ExpedicaoClient />
-      )}
-    </div>
+  // Ate' a URL ser lida, mostra a fila: e' o estado historico da rota e evita
+  // um piscar de conteudo trocado.
+  return pronta && aba === ABA_TIKTOK ? (
+    <TikTokDispatchPanel abas={abas} />
+  ) : (
+    <ExpedicaoClient abas={abas} />
   );
 }

@@ -100,7 +100,7 @@ function MobileDrawerInner({ open, onClose, openerRef }: MobileDrawerProps) {
 
   return (
     <div className={open ? "fixed inset-0 z-50 md:hidden" : "hidden"}>
-      <div className="absolute inset-0 bg-slate-900/40" aria-hidden="true" onClick={onClose} />
+      <div className="absolute inset-0 bg-ink/50" aria-hidden="true" onClick={onClose} />
       <div
         ref={panelRef}
         id="mobile-drawer"
@@ -108,22 +108,22 @@ function MobileDrawerInner({ open, onClose, openerRef }: MobileDrawerProps) {
         aria-modal="true"
         aria-label="Navegação principal"
         aria-hidden={!open}
-        className="absolute inset-y-0 left-0 w-[min(80vw,300px)] bg-white border-r border-violet-100 shadow-lg flex flex-col overflow-y-auto"
+        className="absolute inset-y-0 left-0 flex w-[min(82vw,300px)] flex-col overflow-y-auto border-r border-line bg-surface shadow-xl"
       >
-        <div className="flex items-center justify-between px-4 py-4 border-b border-violet-100">
-          <span className="text-sm font-bold text-gray-900">Navegação</span>
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <span className="text-sm font-bold text-ink">Navegação</span>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label="Fechar menu de navegação"
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-violet-50 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:bg-accent-soft hover:text-accent"
           >
             <CloseIcon />
           </button>
         </div>
-        <div className="px-4 py-4">
-          <NavList pathname={pathname} hrefFor={hrefFor} />
+        <div className="px-3 py-4">
+          <NavList pathname={pathname} hrefFor={hrefFor} alvoAmplo />
         </div>
       </div>
     </div>

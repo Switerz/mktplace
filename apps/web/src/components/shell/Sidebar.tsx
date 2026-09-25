@@ -8,14 +8,19 @@ import NavList from "./NavList";
 const SIDEBAR_FALLBACK = (
   <aside
     aria-label="Navegação principal"
-    className="hidden md:block md:w-60 md:shrink-0 md:border-r md:border-violet-100 md:bg-white"
+    className="hidden md:block md:w-56 md:shrink-0 md:border-r md:border-line md:bg-surface"
   />
 );
 
 /**
- * Sidebar clara/lavanda persistente no desktop (Gate U1). Nao e colapsavel
- * neste gate — apenas visivel a partir do breakpoint md, substituindo a
- * antiga barra horizontal do AppNav.
+ * Sidebar persistente no desktop (Gate U1), agora tematizada (UX-TORRE-1).
+ *
+ * Continua sendo uma superficie de SUPERFICIE, nao um painel carvao: a Torre
+ * rejeita o sidebar escuro do BI generico tambem no tema escuro, onde ela usa
+ * o violeta profundo do sistema.
+ *
+ * Largura 56 (224px) em vez de 60 (240px): 16px que voltam para a area de
+ * dados em toda rota.
  */
 export default function Sidebar() {
   return (
@@ -32,8 +37,12 @@ function SidebarInner() {
   const hrefFor = (pageHref: string) => hrefForPage(pageHref, preservedQuery);
 
   return (
-    <aside className="hidden md:flex md:w-60 md:shrink-0 md:flex-col md:border-r md:border-violet-100 md:bg-white md:sticky md:top-0 md:h-screen md:overflow-y-auto">
-      <div className="px-4 py-5">
+    // Duas camadas de proposito: a EXTERNA estica com o flex do shell e pinta
+    // a faixa ate o rodape (sem ela, a superficie da navegacao terminava na
+    // altura da janela e deixava uma emenda visivel no meio da pagina); a
+    // INTERNA e a que gruda no topo e rola sozinha.
+    <aside className="hidden md:block md:w-56 md:shrink-0 md:border-r md:border-line md:bg-surface">
+      <div className="sticky top-0 max-h-screen overflow-y-auto px-3 py-4">
         <NavList pathname={pathname} hrefFor={hrefFor} />
       </div>
     </aside>

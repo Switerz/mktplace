@@ -2,13 +2,169 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #f8f7ff;
-  --foreground: #1a1028;
-}
+/* ===========================================================================
+ * UX-TORRE-1 — tokens semanticos da Torre de Controle.
+ *
+ * Um token = um PAPEL, nunca uma cor. `--tc-crit` e' "critico", e o valor
+ * muda entre claro e escuro; nenhuma tela escreve o hex.
+ *
+ * Os valores sao CANAIS RGB separados por espaco (e nao `#rrggbb`) porque o
+ * Tailwind precisa injetar o alfa: `rgb(var(--tc-ink) / <alpha-value>)` e' o
+ * que faz `text-ink/70` funcionar. Com hex, toda utilidade com opacidade
+ * quebraria silenciosamente.
+ *
+ * O tema escuro NAO e' inversao: cada papel tem valor proprio, escolhido para
+ * manter >=4,5:1 em texto normal e >=3:1 em texto grande e em componente.
+ * ======================================================================== */
 
-body {
-  background-color: var(--background);
-  color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+@layer base {
+  :root,
+  .tc-tema-claro {
+    color-scheme: light;
+
+    /* superficies */
+    --tc-canvas: 247 246 251; /* fundo da pagina — lavanda quase branco */
+    --tc-surface: 255 255 255; /* cartao */
+    --tc-raised: 244 242 251; /* superficie elevada / faixa interna */
+    --tc-line: 231 227 245; /* borda padrao */
+    --tc-line-strong: 214 208 236; /* borda de enfase / divisor de tabela */
+
+    /* tinta */
+    --tc-ink: 23 18 38; /* texto principal          — 15,9:1 no branco */
+    --tc-muted: 82 76 103; /* texto secundario         —  7,7:1 no branco */
+    --tc-faint: 108 101 130; /* texto terciario / rotulo —  5,6:1 no branco */
+
+    /* destaque da marca */
+    --tc-accent: 109 40 217; /* violeta — 7,0:1 no branco */
+    --tc-accent-soft: 241 236 254;
+    --tc-accent-ink: 76 29 149;
+    /* Tinta que assenta SOBRE o violeta cheio. No escuro o destaque e claro,
+       entao texto branco em cima dele mediria ~2,4:1 — o token inverte. */
+    --tc-accent-on: 255 255 255;
+
+    /* severidade — so' com regra de negocio por tras */
+    --tc-ok: 5 150 105;
+    --tc-ok-soft: 232 247 240;
+    --tc-ok-ink: 5 96 62;
+    --tc-warn: 217 119 6;
+    --tc-warn-soft: 253 243 227;
+    --tc-warn-ink: 138 71 8;
+    --tc-crit: 225 29 72;
+    --tc-crit-soft: 253 234 238;
+    --tc-crit-ink: 159 18 57;
+
+    /* graficos — serie por POSICAO, nunca por estado */
+    --tc-chart-1: 109 40 217;
+    --tc-chart-2: 2 132 199;
+    --tc-chart-3: 100 116 139;
+    --tc-chart-4: 168 85 247;
+    --tc-chart-5: 8 145 178;
+    --tc-chart-6: 71 85 105;
+    --tc-chart-grid: 231 227 245;
+    --tc-chart-axis: 108 101 130;
+  }
+
+  .dark {
+    color-scheme: dark;
+
+    /* Violeta profundo, nao carvao: a Torre rejeita o cinza generico de BI
+       tambem no escuro. */
+    --tc-canvas: 14 11 24;
+    --tc-surface: 23 19 39;
+    --tc-raised: 31 26 51;
+    --tc-line: 44 37 68;
+    --tc-line-strong: 61 52 89;
+
+    --tc-ink: 242 239 250; /* 15,3:1 sobre --tc-surface */
+    --tc-muted: 184 176 208; /*  8,4:1 sobre --tc-surface */
+    --tc-faint: 150 141 178; /*  5,4:1 sobre --tc-surface */
+
+    --tc-accent: 167 139 250; /* 7,4:1 sobre --tc-surface */
+    --tc-accent-soft: 36 29 61;
+    --tc-accent-ink: 221 210 254;
+    --tc-accent-on: 23 19 39;
+
+    --tc-ok: 52 211 153;
+    --tc-ok-soft: 16 40 31;
+    --tc-ok-ink: 110 231 183;
+    --tc-warn: 251 191 36;
+    --tc-warn-soft: 43 31 7;
+    --tc-warn-ink: 252 211 77;
+    --tc-crit: 251 113 133;
+    --tc-crit-soft: 44 15 24;
+    --tc-crit-ink: 253 164 175;
+
+    --tc-chart-1: 167 139 250;
+    --tc-chart-2: 56 189 248;
+    --tc-chart-3: 148 163 184;
+    --tc-chart-4: 217 180 255;
+    --tc-chart-5: 34 211 238;
+    --tc-chart-6: 203 213 225;
+    --tc-chart-grid: 44 37 68;
+    --tc-chart-axis: 150 141 178;
+  }
+
+  /* Rotas ainda nao migradas para os tokens (ver docs/design-system-torre.md):
+     em vez de deixar cartoes claros boiando num fundo escuro, o conteudo
+     inteiro daquela rota volta ao tema claro, que e' o unico em que ele foi
+     desenhado. O shell permanece tematizado. */
+  .tc-tema-claro {
+    background-color: rgb(var(--tc-canvas));
+    color: rgb(var(--tc-ink));
+  }
+
+  body {
+    background-color: rgb(var(--tc-canvas));
+    color: rgb(var(--tc-ink));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Numeros de tabela e KPI alinham por construcao: digito que muda de
+     largura desmancha a coluna e destroi a leitura periferica. */
+  table,
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A barra de rolagem tambem e' superficie: no escuro, a barra clara do
+     sistema era a unica area branca da tela. */
+  * {
+    scrollbar-color: rgb(var(--tc-line-strong)) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgb(var(--tc-line-strong));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(var(--tc-faint));
+  }
+
+  /* Foco unico em toda a Torre, nos dois temas. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--tc-accent));
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }

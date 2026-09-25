@@ -45,6 +45,12 @@ typography:
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
+  data:
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+    fontSize: "0.8125rem"
+    fontWeight: 400
+    lineHeight: 1.35
+    letterSpacing: "normal"
   label:
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
     fontSize: "0.75rem"
@@ -256,3 +262,63 @@ The visual language for meta vs. real.
 - **Don't** let brand colors appear in chart bar fills, section fills, or progress bar fills. Brand colors are reserved for identity (avatar badges only). Chart bars use a unified violet scale; status bars use semantic green/amber/red.
 - **Don't** let the attainment progress bar visually exceed 100% width — use the percentage badge for overflow, not bar overflow.
 - **Don't** put display-scale (30px) numbers anywhere except KPI metric values. Large numbers imply a headline KPI; using that scale for secondary data (goal targets, date labels) inflates visual noise.
+
+---
+
+## 7. Semantic tokens and the two themes (UX-TORRE-1)
+
+Everything above still holds. What changed is *how* a colour reaches a
+component: no screen writes a hex or a palette literal any more. Each colour is
+a **role**, and the role's value is defined once per theme in
+`apps/web/app/globals.css`.
+
+### The token layer
+
+| Role | Token | Light | Dark |
+|---|---|---|---|
+| Page field | `--tc-canvas` | `#f7f6fb` | `#0e0b18` |
+| Card | `--tc-surface` | `#ffffff` | `#171327` |
+| Elevated / inset | `--tc-raised` | `#f4f2fb` | `#1f1a33` |
+| Border | `--tc-line` / `--tc-line-strong` | `#e7e3f5` / `#d6d0ec` | `#2c2544` / `#3d3459` |
+| Text | `--tc-ink` / `--tc-muted` / `--tc-faint` | `#171226` / `#524c67` / `#6c6582` | `#f2effa` / `#b8b0d0` / `#968db2` |
+| Accent | `--tc-accent` (+ `-soft`, `-ink`, `-on`) | `#6d28d9` | `#a78bfa` |
+| Success / Warn / Critical | `--tc-ok` / `--tc-warn` / `--tc-crit` (+ `-soft`, `-ink`) | `#059669` / `#d97706` / `#e11d48` | `#34d399` / `#fbbf24` / `#fb7185` |
+| Series 1–6 | `--tc-chart-1…6` | violet, sky, slate, purple, cyan, slate-dark | the lighter counterpart of each |
+
+Tokens are stored as **RGB channels** (`23 18 38`), never as `#rrggbb`: Tailwind
+injects the alpha inside `rgb(var(--tc-ink) / <alpha-value>)`, so `text-ink/70`
+only works in that form.
+
+Three rules the tokens enforce:
+
+1. **Dark is not an inversion.** Every role has its own value per theme,
+   chosen for ≥4.5:1 on body text and ≥3:1 on large text and UI parts. The dark
+   field is a deep violet (`#0e0b18`), not charcoal — the Metabase anti-reference
+   applies to both themes.
+2. **Full `ok` / `warn` / `crit` are *fills* only** (bars, dots, borders).
+   Text uses the `-ink` variant. That is why the fills can be mid-tone values
+   that stay apart from each other inside a stacked bar.
+3. **`-on` is the ink that sits on top of the full accent.** In dark the accent
+   is light, so white text on it would measure ~2.4:1. `text-accent-on` flips.
+
+### The `data` type step
+
+The ramp gained one step: **data, 13px / 1.35**, for dense operational tables.
+`body` (14px) stays the prose size. 13px is the floor for tabular data; nothing
+in the product goes below 12px (`label`).
+
+### Theme switching
+
+`darkMode: "class"`, never `"media"` — a media query cannot be overridden by a
+manual choice. The preference has three states (`light`, `dark`, `system`),
+persists in `localStorage` under `torre-tema`, and is applied by a synchronous
+script in `<head>` before first paint. `<html>` carries `data-tema` (the
+preference) and the `dark` class (the result); they are different facts.
+
+### Migration barrier
+
+`ROTAS_TEMATIZADAS` in `src/lib/theme.ts` lists the routes already on tokens. A
+route outside the list renders under `.tc-tema-claro`, which restores the light
+values for that subtree. A page designed in light literals dropped onto a dark
+field is exactly the defect this gate removed — it must not be reintroduced
+halfway through the migration. Each PR removes its own route from the list.
