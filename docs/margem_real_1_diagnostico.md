@@ -490,6 +490,29 @@ Cuidados que este gate já identificou:
 - Acrescentar coluna a um fato existente altera o INSERT mesmo sob feature flag quando o gerador deriva as
   colunas do primeiro registro. Gerar o SQL nos dois estados antes de prometer que o ALTER é folgado.
 
+### 1b. Decisões tomadas no MARGEM-REAL-2B
+
+**[FATO] `ml_total_cost_pct` fica inalterado.** Continua `(Ads + frete) / GMV`, sem a comissão. Somar a
+tarifa por dentro mudaria em silêncio o valor de um KPI histórico, e quem comparasse dois meses veria um
+salto que não aconteceu na operação. A próxima rodada cria indicadores **separados** em vez de redefinir
+este: `marketplace_fee_pct`, `ads_frete_pct` e `known_cost_pct`. Só então `ml_total_cost_pct` pode ser
+aposentado, com migração de rótulo explícita.
+
+**[FATO] Rótulos de interface conferidos.** O KPI card já se chama *"Ads + Frete / GMV"*, com o subtítulo
+*"Nao inclui comissao do Mercado Livre"* — está correto. O único texto que ainda chama isto de "custo total"
+é o subtítulo da seção em `apps/web/app/financeiro/page.tsx` (*"Ad Spend, receita atribuida, frete e custo
+total como % do GMV"*). **Registrado para a próxima rodada; o frontend não foi alterado.**
+
+**[FATO] O upsert não recebeu `COALESCE`.** Em vez disso há um guardrail fail-closed
+(`pipelines/quality/ml_fee_reconciliation.py`) que reconcilia `date × brand` antes de qualquer escrita e
+aborta a publicação inteira se a fonte não a sustentar. As três alternativas foram descartadas com motivo:
+apagar perde dado publicado; `COALESCE` preserva em silêncio um valor possivelmente obsoleto; zero afirma
+que o marketplace não cobrou nada. A quarta saída é não publicar.
+
+A comparação é de **igualdade exata, sem tolerância** — medido: `gold.gmv = SUM(total_amount)` em 248 de 248
+células, escala 2 nos dois lados, maior diferença `0.00`. Um zero **medido** de comissão continua sendo
+gravado como zero; o que aborta é ausência de observação.
+
 ### 2. Reconciliar comissão e GMV do ML
 
 Com a comissão no mart, comparar contra o GMV ML servido e contra o take rate por marca. A base de partida

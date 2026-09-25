@@ -1218,9 +1218,29 @@ def get_financeiro(
                 "ml_ad_impressions": ml_impressions or None,
                 "ml_seller_shipping_cost": ml_shipping or None,
                 "ml_shipping_pct_of_gmv": round(ml_shipping / ml_gmv * 100, 2) if ml_gmv > 0 else None,
-                # `ml_total_cost_pct` segue sendo Ads + frete, SEM a comissao.
-                # Incluir a tarifa mudaria o valor de um KPI ja exibido, e essa
-                # decisao nao pertence a este gate. Ver o PR do MARGEM-REAL-2.
+                # `ml_total_cost_pct` = (Ads + frete) / GMV. NAO inclui a
+                # comissao do marketplace, e nao passara a incluir por dentro.
+                #
+                # MARGEM-REAL-2B decidiu manter a formula intacta: somar a
+                # tarifa aqui mudaria em silencio o valor de um KPI historico,
+                # e quem comparasse dois meses veria um salto que nao aconteceu
+                # na operacao. A serie precisa continuar significando a mesma
+                # coisa ao longo do tempo.
+                #
+                # A proxima rodada cria indicadores SEPARADOS, em vez de
+                # redefinir este:
+                #   - `marketplace_fee_pct` = comissao / GMV
+                #   - `ads_frete_pct`       = (Ads + frete) / GMV  (o valor de hoje)
+                #   - `known_cost_pct`      = (comissao + Ads + frete) / GMV
+                # Ai' `ml_total_cost_pct` pode ser aposentado com uma migracao
+                # de rotulo explicita, nao com uma troca de conteudo.
+                #
+                # A tela ja' rotula este KPI como "Ads + Frete / GMV", com o
+                # subtitulo "Nao inclui comissao do Mercado Livre"
+                # (apps/web/app/financeiro/page.tsx). O unico texto que ainda
+                # chama isto de "custo total" e' o subtitulo da secao na mesma
+                # pagina — registrado para a proxima rodada, fora do escopo
+                # deste PR.
                 "ml_total_cost_pct": round((ml_spend + ml_shipping) / ml_gmv * 100, 2) if ml_gmv > 0 else None,
                 "ml_fees": ml_fees or None,
                 "ml_avg_fee_pct": round(ml_fees / ml_gmv * 100, 2) if ml_gmv > 0 and ml_fees > 0 else None,

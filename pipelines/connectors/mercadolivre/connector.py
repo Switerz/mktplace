@@ -38,6 +38,15 @@ BRANDS_IN_SCOPE = ("barbours", "kokeshi", "lescent", "rituaria")
 #
 # Sinal: a fonte e' POSITIVA e e' assim que o valor e' armazenado, igual a
 # Shopee. O TikTok grava negativo. Ver o transform para a convencao.
+# MARGEM-REAL-2B: alem da comissao, o CTE devolve o GMV e a contagem de
+# pedidos DA PROPRIA FONTE PAGA (`paid_gmv`, `paid_orders_src`). Eles nao vao
+# para a fato — existem para o guardrail de reconciliacao
+# (`pipelines.quality.ml_fee_reconciliation`) poder comparar os dois lados
+# celula a celula ANTES de qualquer escrita.
+#
+# Medido em jul+ago/2026: `gold.gmv = SUM(total_amount)` em 248 de 248 celulas,
+# com IGUALDADE EXATA (nao apenas ao centavo — a escala e' 2 nos dois lados e a
+# maior diferenca e' 0.00). Por isso o guardrail compara sem tolerancia alguma.
 ML_FEES_CTE = """
 WITH ml_fees AS (
     SELECT
@@ -48,6 +57,23 @@ WITH ml_fees AS (
     FROM api.ml_orders o
     JOIN api.ml_order_line_items li
       ON li.order_id = o.order_id
+    WHERE o.status = 'paid'
+      AND o.brand IN :brands
+      AND o.date_created >= :date_from
+      AND o.date_created < (CAST(:date_to AS date) + 1)
+    GROUP BY 1, 2
+),
+-- Populacao paga SEM passar pelos itens: e' o denominador da reconciliacao.
+-- Separada de `ml_fees` de proposito — se o join com line_items perder
+-- pedidos, `paid_orders_src` continua contando a verdade e a divergencia
+-- aparece em vez de se esconder.
+ml_paid AS (
+    SELECT
+        o.date_created::date        AS ref_date,
+        o.brand                     AS brand,
+        SUM(o.total_amount)         AS paid_gmv,
+        COUNT(DISTINCT o.order_id)  AS paid_orders_src
+    FROM api.ml_orders o
     WHERE o.status = 'paid'
       AND o.brand IN :brands
       AND o.date_created >= :date_from
@@ -92,12 +118,19 @@ SELECT
     -- Financeiro (MARGEM-REAL-2): tarifa/comissao do marketplace, e SO ela.
     -- Nao inclui Ads, frete, imposto, devolucao nem afiliado.
     f.marketplace_fee,
-    f.fee_orders
+    f.fee_orders,
+
+    -- Reconciliacao (MARGEM-REAL-2B): nao vao para a fato.
+    p.paid_gmv,
+    p.paid_orders_src
 
 FROM gold.ml_gestao_diaria g
 LEFT JOIN ml_fees f
        ON f.ref_date = g.ref_date
       AND f.brand    = g.brand
+LEFT JOIN ml_paid p
+       ON p.ref_date = g.ref_date
+      AND p.brand    = g.brand
 WHERE g.brand IN :brands
   AND g.ref_date >= :date_from
   AND g.ref_date <= :date_to

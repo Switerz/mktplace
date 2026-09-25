@@ -376,3 +376,86 @@ def test_consulta_e_deterministica_entre_execucoes(banco):
     segunda = _rodar(banco)
     assert primeira == segunda
     assert float(primeira[0]["marketplace_fee"]) == 170.0
+
+
+# ---------------------------------------------------------------------------
+# MARGEM-REAL-2B — as colunas de reconciliação
+# ---------------------------------------------------------------------------
+
+def test_reconciliacao_devolve_gmv_e_pedidos_da_fonte_paga(banco):
+    """`paid_gmv` e `paid_orders_src` são o outro lado da comparação. Sem eles
+    o guardrail não teria contra o que reconciliar."""
+    with banco.begin() as conn:
+        _gold(conn, "2026-07-10", "kokeshi", 1000, paid_orders=2)
+        _pedido(conn, 910001, "kokeshi", "paid", 600, "2026-07-10 10:00:00",
+                [(1, 1, 600, 100)])
+        _pedido(conn, 910002, "kokeshi", "paid", 400, "2026-07-10 11:00:00",
+                [(1, 1, 400, 70)])
+
+    row = _rodar(banco)[0]
+    assert float(row["paid_gmv"]) == 1000.0
+    assert row["paid_orders_src"] == 2
+    assert float(row["marketplace_fee"]) == 170.0
+
+
+def test_reconciliacao_exclui_cancelado_dos_DOIS_lados(banco):
+    """Item 11 do gate, e o mais perigoso de errar.
+
+    Se `ml_paid` contasse cancelados, `paid_gmv` não bateria com a Gold e o
+    guardrail abortaria TODA carga legítima. Os dois CTEs precisam usar
+    exatamente a mesma população.
+    """
+    with banco.begin() as conn:
+        _gold(conn, "2026-07-10", "kokeshi", 1000, paid_orders=1)
+        _pedido(conn, 910003, "kokeshi", "paid", 1000, "2026-07-10 10:00:00",
+                [(1, 1, 1000, 170)])
+        _pedido(conn, 910004, "kokeshi", "cancelled", 500, "2026-07-10 11:00:00",
+                [(1, 1, 500, 85)])
+        _pedido(conn, 910005, "kokeshi", "partially_refunded", 300,
+                "2026-07-10 12:00:00", [(1, 1, 300, 50)])
+
+    row = _rodar(banco)[0]
+    assert float(row["paid_gmv"]) == 1000.0, "cancelado entrou no denominador"
+    assert row["paid_orders_src"] == 1
+    assert float(row["marketplace_fee"]) == 170.0, "cancelado entrou na comissão"
+
+
+def test_paid_orders_src_conta_pedido_mesmo_sem_item(banco):
+    """`ml_paid` não passa por `line_items` de propósito.
+
+    Se o join com itens perder um pedido, `fee_orders` cai mas
+    `paid_orders_src` continua contando a verdade — e a divergência aparece em
+    vez de se esconder atrás de uma comissão silenciosamente menor.
+    """
+    with banco.begin() as conn:
+        _gold(conn, "2026-07-10", "kokeshi", 1500, paid_orders=2)
+        _pedido(conn, 910006, "kokeshi", "paid", 1000, "2026-07-10 10:00:00",
+                [(1, 1, 1000, 170)])
+        # pedido pago SEM linha de item
+        conn.execute(
+            text(
+                "INSERT INTO api.ml_orders (order_id, brand, status, total_amount, date_created) "
+                "VALUES (910007, 'kokeshi', 'paid', 500, '2026-07-10 11:00:00')"
+            )
+        )
+
+    row = _rodar(banco)[0]
+    assert row["paid_orders_src"] == 2, "a fonte paga conhece os dois pedidos"
+    assert row["fee_orders"] == 1, "só um pedido tem item"
+    assert float(row["paid_gmv"]) == 1500.0
+
+
+def test_dia_sem_pedido_pago_nao_tem_celula_de_reconciliacao(banco):
+    with banco.begin() as conn:
+        _gold(conn, "2026-07-11", "kokeshi", 0, paid_orders=0)
+
+    row = _rodar(banco)[0]
+    assert row["paid_gmv"] is None
+    assert row["paid_orders_src"] is None
+
+
+def test_query_nao_passou_a_usar_o_surrogate_no_cte_novo(banco):
+    """Item 9: o CTE de reconciliação também não pode tocar `o.id`."""
+    sql = ml_connector.QUERY
+    assert "o.id" not in sql
+    assert sql.count("li.order_id = o.order_id") == 1
