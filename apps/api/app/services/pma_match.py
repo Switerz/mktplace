@@ -362,6 +362,19 @@ class ReferenceIndex:
     by_gtin: dict[tuple[str, str], list[dict]]
     by_sku: dict[tuple[str, str], list[dict]]
     captured_at: object | None
+    #: Gate PMA-REF-LINK-1 — marcas que ESTE snapshot cobre, medidas no proprio
+    #: snapshot carregado. Substitui `NO_REFERENCE_BRANDS`, que e' a lista fixa
+    #: das marcas do Mercado Livre: aplicada a Shopee e ao TikTok, ela dizia
+    #: "nenhuma linha casou" para Gocase e Denavita, marcas que sequer tem
+    #: tabela B2B. A pergunta "esta marca tem tabela?" tem de ser respondida
+    #: pelo snapshot em maos, nunca por uma constante de outro canal.
+    #:
+    #: Uma marca so' entra aqui se contribuiu com ao menos uma linha INDEXAVEL
+    #: (com preco e chave). Uma marca cujas linhas foram todas descartadas por
+    #: `missing_suggested_price` nao tem referencia utilizavel, e conta-la faria
+    #: a oferta cair em "produto ausente da tabela" quando a tabela e' que esta
+    #: vazia para ela.
+    brands: frozenset = frozenset()
 
     @staticmethod
     def build(references: list[dict]) -> "ReferenceIndex":
@@ -373,6 +386,7 @@ class ReferenceIndex:
             )
         by_gtin: dict[tuple[str, str], list[dict]] = {}
         by_sku: dict[tuple[str, str], list[dict]] = {}
+        marcas: set[str] = set()
         captured: object | None = None
         for ref in references:
             # Linha sem preco de referencia NAO entra em nenhum indice: nao e'
@@ -390,13 +404,15 @@ class ReferenceIndex:
             gtin = consumer_ean_or_none(ref.get("source_gtin"))
             if gtin is not None:
                 by_gtin.setdefault((marca, gtin), []).append(ref)
+                marcas.add(marca)
             sku = normalize_sku_key(ref.get("source_sku"))
             if sku is not None:
                 by_sku.setdefault((marca, sku), []).append(ref)
+                marcas.add(marca)
             if ref.get("captured_at") is not None:
                 atual = ref["captured_at"]
                 captured = atual if captured is None or atual > captured else captured
-        return ReferenceIndex(by_gtin, by_sku, captured)
+        return ReferenceIndex(by_gtin, by_sku, captured, frozenset(marcas))
 
 
 @dataclass(frozen=True)
@@ -547,6 +563,16 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
 
     Nos casos 1 a 3 os campos de referencia e de diferenca ficam NULOS, nunca
     zero: zero afirmaria "diferenca medida igual a zero", que e' falso.
+
+    O MOTIVO NAO E' O STATUS  (Gate PMA-REF-LINK-1)
+    -----------------------------------------------
+    `comparison_status` continua com os CINCO valores da particao comercial —
+    congelada em teste e tipada no frontend — e `no_reference` continua cobrindo
+    varias causas. O que mudou e' que `non_comparable_reason` passou a
+    distingui-las: `brand_without_b2b_reference`, `kit_composition_missing`,
+    `offer_without_match_key` e `reference_missing_for_product` sao quatro
+    pautas com quatro donos, e colapsa-las num motivo so' mandava Trade,
+    cadastro e engenharia olharem todos para a mesma lista indiferenciada.
 
     FRESCOR NAO ENTRA NESTA PRECEDENCIA  (Gate PMA-H1)
     --------------------------------------------------
@@ -752,14 +778,46 @@ def compare_listing(listing: dict, index: ReferenceIndex, today: date,
         return linha
 
     if ref is None:
+        # Gate PMA-REF-LINK-1 — PRECEDENCIA das causas, do mais fundamental ao
+        # mais especifico. Cada linha recebe EXATAMENTE um motivo, e a ordem e'
+        # contrato: um kit de marca sem tabela B2B tem duas causas verdadeiras,
+        # e a que vale e' a que bloqueia primeiro.
+        #
+        #   1. marca sem tabela  — nao ha onde procurar;
+        #   2. kit sem composicao — ha tabela, mas o produto nao e' comparavel
+        #      contra uma linha unica de PDV enquanto a composicao nao estiver
+        #      confirmada;
+        #   3. sem chave         — ha tabela e o produto e' simples, mas o
+        #      anuncio nao oferece GTIN nem SKU com que procurar;
+        #   4. produto ausente   — havia tabela, tipo e chave, e a busca falhou.
+        #      SO' AQUI a leitura "o produto nao esta na tabela B2B" e' honesta.
         marca = normalize_brand_key(listing.get("brand"))
-        detalhe = (
-            f"marca {marca} nao possui tabela de referencia B2B"
-            if marca in NO_REFERENCE_BRANDS
-            else "nenhuma linha de referencia casou por GTIN nem por SKU unico na marca"
-        )
+        tipo = listing.get("product_type")
+        tem_chave = (consumer_ean_or_none(listing.get("gtin")) is not None
+                     or normalize_sku_key(listing.get("seller_sku")) is not None)
+        if marca not in index.brands:
+            razao = dom.REASON_BRAND_WITHOUT_REFERENCE
+            detalhe = f"marca {marca} nao possui tabela de referencia B2B"
+        elif tipo in dom.PRODUCT_TYPES_EXCLUDED_FROM_COMPARISON:
+            razao = dom.REASON_KIT_COMPOSITION_MISSING
+            detalhe = (
+                "oferta classificada como kit e sem composicao confirmada: a "
+                "referencia de um kit e' derivada dos componentes, e sem a "
+                "composicao nao ha valor a comparar. Nenhuma composicao foi "
+                "estimada"
+            )
+        elif not tem_chave:
+            razao = dom.REASON_NO_MATCH_KEY
+            detalhe = (
+                "anuncio sem GTIN e sem SKU: nao ha chave com que procurar a "
+                "referencia. A busca nao falhou — ela nao foi possivel"
+            )
+        else:
+            razao = dom.REASON_REFERENCE_MISSING
+            detalhe = ("nenhuma linha de referencia casou por GTIN nem por SKU "
+                       "unico na marca")
         linha["comparison_status"] = STATUS_NO_REFERENCE
-        linha["non_comparable_reason"] = dom.REASON_REFERENCE_MISSING
+        linha["non_comparable_reason"] = razao
         linha["limitations"] = limites + [detalhe]
         return linha
 

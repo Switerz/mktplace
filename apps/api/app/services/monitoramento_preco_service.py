@@ -523,6 +523,44 @@ def unavailable_response(marketplace: str) -> dict:
     return _unavailable_envelope(marketplace, dom.UNAVAILABLE_CHANNEL_DISABLED)
 
 
+def _contar_motivos(linhas) -> dict:
+    """Conta `non_comparable_reason` LIDO da linha, nunca re-deduzido do status.
+
+    Gate PMA-REF-LINK-1. O bloco do Mercado Livre re-derivava os motivos do
+    `comparison_status` (`REASON_REFERENCE_MISSING: sem_ref`), o que funcionava
+    enquanto havia um motivo so'. Com quatro causas distintas, re-deduzir faria
+    o agregado dizer "567 produtos ausentes da tabela" enquanto as linhas do
+    MESMO payload dizem que 132 sao de marca sem tabela e 1 nao tem chave —
+    dois numeros discordando sobre o mesmo dado, na mesma resposta.
+    """
+    motivos = {r: 0 for r in dom.NON_COMPARABLE_REASONS}
+    for linha in linhas:
+        motivo = linha.get("non_comparable_reason")
+        if motivo in motivos:
+            motivos[motivo] += 1
+    return motivos
+
+
+def _decompor_sem_referencia(ativos) -> dict:
+    """Decomposicao de `no_reference_count` por causa, sobre as ATIVAS.
+
+    Gate PMA-REF-LINK-1. `non_comparable_reasons` e' calculado sobre os
+    ELEGIVEIS, porque e' ele que fecha a particao
+    `comparable + motivos == eligible`. Mas kits e marcas fora do escopo de
+    negocio saem do elegivel de proposito — e sao 559 das 810 ofertas que a
+    tela do TikTok mostra como "sem referencia". Resultado: o cartao dizia 810
+    e o bloco de motivos somava 251, sem nada no payload explicando os 559 de
+    diferenca.
+
+    Este campo e' o que falta: conta as ATIVAS com `no_reference`, kits e fora
+    de escopo INCLUSIVE, e por construcao soma exatamente
+    `kpis.no_reference_count`. Nao substitui `non_comparable_reasons` — as duas
+    respondem perguntas diferentes, e agora as duas sao reconciliaveis.
+    """
+    return _contar_motivos(
+        r for r in ativos if r["comparison_status"] == pm.STATUS_NO_REFERENCE)
+
+
 def _metrics_zeradas() -> dict:
     """Bloco `metrics` sem nenhuma observacao.
 
@@ -536,6 +574,7 @@ def _metrics_zeradas() -> dict:
         "product_type_unknown": 0, "eligible_offers": 0, "comparable_offers": 0,
         "below_reference": 0, "at_or_above_reference": 0,
         "non_comparable_reasons": {r: 0 for r in dom.NON_COMPARABLE_REASONS},
+        "no_reference_breakdown": {r: 0 for r in dom.NON_COMPARABLE_REASONS},
         "coverage_rate": None, "distinct_b2b_products": 0, "b2b_reach": None,
     }
 
@@ -578,10 +617,6 @@ def _metrics_do_ml(comparadas: list[dict], contagem_tipos: dict,
                  if r["comparison_status"] == pm.STATUS_BELOW)
     acima = sum(1 for r in elegiveis_linhas
                 if r["comparison_status"] == pm.STATUS_AT_OR_ABOVE)
-    ambiguas = sum(1 for r in elegiveis_linhas
-                   if r["comparison_status"] == pm.STATUS_AMBIGUOUS)
-    sem_ref = sum(1 for r in elegiveis_linhas
-                  if r["comparison_status"] == pm.STATUS_NO_REFERENCE)
     referencias = {r.get("reference_row_id") for r in elegiveis_linhas
                    if r.get("reference_row_id") is not None}
     return {
@@ -596,10 +631,8 @@ def _metrics_do_ml(comparadas: list[dict], contagem_tipos: dict,
         "comparable_offers": abaixo + acima,
         "below_reference": abaixo,
         "at_or_above_reference": acima,
-        "non_comparable_reasons": {
-            dom.REASON_REFERENCE_MISSING: sem_ref,
-            dom.REASON_AMBIGUOUS: ambiguas,
-        },
+        "non_comparable_reasons": _contar_motivos(elegiveis_linhas),
+        "no_reference_breakdown": _decompor_sem_referencia(ativos),
         "coverage_rate": dom.coverage_rate(abaixo + acima, elegiveis),
         "distinct_b2b_products": len(referencias),
         "b2b_reach": None,
@@ -963,9 +996,18 @@ def _channel_listing(linha: dict) -> dict:
         observed_at          -> price_captured_at (instante da observacao)
         is_active            -> listing_status ('active' / 'inactive')
         list_price           -> original_price     (preco "de", quando o canal o publica)
+        product_type         -> product_type  (LIDO da fato, nunca reclassificado)
 
     `is_active` e' booleano na fato e string no matcher: a traducao e' feita
     aqui, uma vez, em vez de o matcher aprender um segundo formato.
+
+    Gate PMA-REF-LINK-1: `product_type` viaja para o matcher SOMENTE para
+    escolher o MOTIVO de nao comparabilidade — e' o valor que o publisher
+    gravou, transportado, nunca recalculado. O matcher nao classifica kit e
+    nao tem autoridade para isso: ele so' precisa saber que o publisher ja'
+    classificou, para nao chamar de "produto ausente da tabela" uma oferta
+    cujo problema e' a composicao. O Mercado Livre nao envia o campo (a fato
+    dele nao o modela), e ausente se comporta exatamente como hoje.
 
     NAO ha permalink: a fato nao guarda URL, e inventar uma a partir do
     `offer_key` produziria link quebrado com aparencia de link bom.
@@ -985,6 +1027,7 @@ def _channel_listing(linha: dict) -> dict:
         "original_price": linha["list_price"],
         "price_captured_at": linha["observed_at"],
         "listing_metadata_updated_at": None,
+        "product_type": linha["product_type"],
     }
 
 
@@ -1035,13 +1078,9 @@ def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
                 if r["comparison_status"] == pm.STATUS_AT_OR_ABOVE)
 
     # Motivos CONTADOS do campo que a linha ja' carrega, nunca re-deduzidos do
-    # status: `no_reference` cobre tres causas distintas e colapsa-las apagaria
-    # a diferenca entre "nao casou" e "preco nao observado".
-    motivos = {r: 0 for r in dom.NON_COMPARABLE_REASONS}
-    for r in elegiveis_linhas:
-        motivo = r.get("non_comparable_reason")
-        if motivo in motivos:
-            motivos[motivo] += 1
+    # status: `no_reference` cobre varias causas e colapsa-las apagaria a
+    # diferenca entre "nao casou" e "preco nao observado".
+    motivos = _contar_motivos(elegiveis_linhas)
 
     referencias = {r.get("reference_row_id") for r in elegiveis_linhas
                    if r.get("reference_row_id") is not None}
@@ -1058,6 +1097,7 @@ def _metrics_do_canal(linhas: list, tipo_por_linha: dict, contagem: dict,
         "below_reference": abaixo,
         "at_or_above_reference": acima,
         "non_comparable_reasons": motivos,
+        "no_reference_breakdown": _decompor_sem_referencia(ativos),
         "coverage_rate": dom.coverage_rate(abaixo + acima, elegiveis),
         "distinct_b2b_products": len(referencias),
         "b2b_reach": None,
