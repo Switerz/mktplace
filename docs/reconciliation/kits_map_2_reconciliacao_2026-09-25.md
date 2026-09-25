@@ -165,13 +165,17 @@ marcando EAN divergente. Os pares de geração de código observados no KITS-MAP
 aqui porque nenhum sinal estrutural os liga — foram identificados por inspeção.
 Esse de-para é entrega humana.
 
-### 7.3 Divergência de marca a resolver
+### 7.3 Divergência de marca — RESOLVIDA no KITS-PMA-3
 
-`KS03046` é **`By Samia`** em `silver.gobeaute_produto_cadastro` e **`kokeshi`**
-em `gold.dim_produto_gobeauty` (`marca_origem = prefixo_protheus`,
-`marca_conflitante = false`). O contrato segue a dimensão; a divergência precisa
-de decisão do dono do cadastro. Ela **não** bloqueia nenhum dos seis valores
-hoje.
+`KS03046` era **`By Samia`** em `silver.gobeaute_produto_cadastro` e
+**`kokeshi`** em `gold.dim_produto_gobeauty`. **Resolvido:** as notas fiscais
+arbitram — `gold.bling_all_brands_nfes_gproducts` traz **12.335 linhas, 100%
+`kokeshi`**, de 01/07 a 24/09/2026, zero de "By Samia". O cadastro é a
+inconsistência, não a autoridade, e entra na fila como
+`inconsistencia_de_marca` com estado `PENDENTE`.
+
+Ver [`kits_pma_3_serving_2026-09-25.md`](kits_pma_3_serving_2026-09-25.md) §4.
+A contagem da proposta mudou com a seção nova: **563 linhas**, não 504.
 
 ## 8. Estoque Full — registro, sem classificação
 

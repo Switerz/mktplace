@@ -1031,6 +1031,30 @@ def get_canais(db: Session, marketplace: str, year: int, month: int) -> dict:
 # Produtos Shopee
 # ---------------------------------------------------------------------------
 
+#: 🔴 O FILTRO QUE IMPEDE AS DUAS FONTES DE SE SOMAREM.
+#:
+#: `marts.fact_shopee_product_monthly` guarda as duas procedencias lado a lado:
+#: `api` (gold da Shopee Open API, 4 contas) e `manual_export` (planilha do
+#: Seller Center, unico caminho da `kokeshi`). Sem este casamento, um
+#: `SUM(gmv)` contaria a MESMA venda duas vezes na marca que tem as duas.
+#:
+#: `marts.shopee_product_source_mode` diz, marca a marca, qual procedencia
+#: vale. Ligar uma marca na API e' um UPDATE de uma linha; voltar atras, outro.
+#: Nao ha carga nem deploy no caminho — e' isso que torna o rollback imediato.
+#:
+#: 🔑 O `COALESCE` e' o fail-closed: marca AUSENTE da tabela de modo le'
+#: `manual_export`, que e' o comportamento de hoje. Uma marca nova jamais nasce
+#: lendo uma fonte que ninguem ligou, e um DELETE acidental na tabela de modo
+#: devolve todo mundo para o export em vez de zerar a tela.
+_SHOPEE_SOURCE_MODE_JOIN = """
+        LEFT JOIN marts.shopee_product_source_mode m ON m.brand = f.brand
+"""
+
+_SHOPEE_SOURCE_MODE_PRED = (
+    "f.source = COALESCE(m.source, 'manual_export')"
+)
+
+
 def get_produtos_shopee(
     db,
     brand: str | None,
@@ -1040,21 +1064,28 @@ def get_produtos_shopee(
     offset: int = 0,
 ) -> dict:
     ref_month = f"{year}-{month:02d}-01"
-    conditions = [f"ref_month = '{ref_month}'", "gmv > 0"]
+    conditions = [f"f.ref_month = '{ref_month}'", "f.gmv > 0",
+                  _SHOPEE_SOURCE_MODE_PRED]
     if brand:
-        conditions.append(f"brand = '{brand}'")
+        conditions.append(f"f.brand = '{brand}'")
     where = " AND ".join(conditions)
 
-    count_row = _query(db, f"SELECT COUNT(*) AS n FROM marts.fact_shopee_product_monthly WHERE {where}")
+    count_row = _query(
+        db,
+        f"SELECT COUNT(*) AS n FROM marts.fact_shopee_product_monthly f "
+        f"{_SHOPEE_SOURCE_MODE_JOIN} WHERE {where}",
+    )
     total = int(count_row[0]["n"]) if count_row else 0
 
     rows = _query(db, f"""
-        SELECT brand, sku_ref, product_name, variation_name,
-               gmv, units_sold, completed_orders, canceled_orders,
-               cancel_rate_pct, unique_buyers, avg_price
-        FROM marts.fact_shopee_product_monthly
+        SELECT f.brand, f.sku_ref, f.product_name, f.variation_name,
+               f.gmv, f.units_sold, f.completed_orders, f.canceled_orders,
+               f.cancel_rate_pct, f.unique_buyers, f.avg_price,
+               f.source, f.is_partial, f.source_captured_at
+        FROM marts.fact_shopee_product_monthly f
+        {_SHOPEE_SOURCE_MODE_JOIN}
         WHERE {where}
-        ORDER BY gmv DESC
+        ORDER BY f.gmv DESC
         LIMIT {limit} OFFSET {offset}
     """)
 
@@ -1067,10 +1098,23 @@ def get_produtos_shopee(
             "gmv": _float(r.get("gmv", 0)),
             "units_sold": int(_float(r.get("units_sold", 0))),
             "orders": int(_float(r.get("completed_orders", 0))),
-            "canceled_orders": int(_float(r.get("canceled_orders", 0))),
+            # 🔴 NULL NAO VIRA ZERO. A fonte `api` nao mede cancelamento nem
+            # comprador unico (o gold filtra `is_sale` na origem e o
+            # `buyer_user_id` e' pseudonimo por loja), entao estas colunas vem
+            # NULL nessas linhas. `_float` devolve 0.0 para None, e passar por
+            # ele aqui afirmaria "nenhum pedido cancelado" — que nao foi medido.
+            "canceled_orders": (
+                int(_float(r["canceled_orders"]))
+                if r.get("canceled_orders") is not None else None
+            ),
             "cancel_rate_pct": round(_float(r["cancel_rate_pct"]), 2) if r.get("cancel_rate_pct") else None,
             "unique_buyers": int(_float(r["unique_buyers"])) if r.get("unique_buyers") else None,
             "avg_price": round(_float(r["avg_price"]), 2) if r.get("avg_price") else None,
+            # Procedencia exposta por linha: quem le' precisa poder distinguir
+            # um numero que matura sozinho de uma fotografia congelada.
+            "source": r.get("source"),
+            "is_partial": bool(r.get("is_partial")),
+            "source_captured_at": r.get("source_captured_at"),
         }
         for r in rows
     ]
@@ -1080,6 +1124,10 @@ def get_produtos_shopee(
         "total": total,
         "limit": limit,
         "offset": offset,
+        # Competencia ainda aberta a maturacao: qualquer linha parcial marca o
+        # conjunto. A tela usa isto para nao deixar o mes corrente ser lido
+        # como queda de venda.
+        "is_partial": any(i["is_partial"] for i in items),
         "items": items,
     }
 

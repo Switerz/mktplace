@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 # Redigitar foi a causa do incidente: o dominio ganhou tres valores, o schema
 # nao, e a resposta inteira passou a falhar validacao. Ver `NonComparableReason`.
 from app.services import pma_domain as dom
+from app.services import pma_match as pm
 
 #: PARTICAO COMERCIAL — cinco valores que somam `monitored_count`.
 #: Gate PMA-H1: `stale_observation` SAIU daqui. Era um status comercial e
@@ -55,14 +56,19 @@ QueryMode = Literal["latest", "selected_date"]
 #: declara vigencia.
 ReferenceBasis = Literal["latest_available_snapshot"]
 
-MatchMethod = Literal["brand_gtin_exact", "brand_sku_exact_unique"]
+#: Gate KITS-PMA-3 — DERIVADOS do dominio, nao redigitados.
+#:
+#: Estavam literais e ja' tinham ficado para tras: `MATCH_INTERNAL`
+#: (`brand_internal_product_ean`) e `QUALITY_TERTIARY`
+#: (`tertiary_internal_product_unique`) existem em `pma_match` desde o gate
+#: PMA-2C1A e NUNCA foram acrescentados aqui. Hoje o caminho interno so' roda
+#: quando o chamador passa `internal_index`, e o serving nao passa — entao o
+#: 500 nunca disparou. Continuar redigitando adiaria o problema ate' o dia em
+#: que alguem ligasse aquele caminho e a PAGINA INTEIRA respondesse 500, nao a
+#: linha. Derivar fecha os dois: o valor novo deste gate e o antigo esquecido.
+MatchMethod = Literal[tuple(pm.MATCH_METHODS)]  # type: ignore[valid-type]
 
-MatchQuality = Literal[
-    "primary_gtin_exact",
-    "secondary_sku_unique_in_brand",
-    "ambiguous_multiple_candidates",
-    "unmatched",
-]
+MatchQuality = Literal[tuple(pm.MATCH_QUALITIES)]  # type: ignore[valid-type]
 
 #: Gate PMA-2C1A — dimensoes do contrato multicanal.
 MetricVersion = Literal["v1_all_active", "v2_product_type_aware"]
@@ -262,6 +268,7 @@ class MonitoramentoPrecoMetrics(BaseModel):
         active_offers   = kit_confirmed + kit_suspected + no_kit_signal
                           + product_type_unknown
         eligible_offers = active_offers - kit_confirmed - kit_suspected
+                          - fora_de_escopo_nao_kit + kit_reference_derived
         comparable_offers + soma(non_comparable_reasons) = eligible_offers
         below_reference + at_or_above_reference = comparable_offers
 
@@ -279,6 +286,12 @@ class MonitoramentoPrecoMetrics(BaseModel):
     kit_suspected: int
     no_kit_signal: int
     product_type_unknown: int
+    #: Gate KITS-PMA-3 — kits ATIVOS e em escopo cuja referencia foi DERIVADA
+    #: dos componentes e publicada em `marts.fact_kit_reference_daily`. Eles
+    #: continuam contados em `kit_confirmed`/`kit_suspected` — o tipo do
+    #: produto nao mudou — e VOLTAM para `eligible_offers`, porque agora ha
+    #: valor a comparar. E' este campo que explica por que o denominador subiu.
+    kit_reference_derived: int = 0
     eligible_offers: int
     comparable_offers: int
     below_reference: int
@@ -354,6 +367,17 @@ class MonitoramentoPrecoRow(BaseModel):
     difference_amount: Optional[float] = None
     difference_pct: Optional[float] = None
     match_method: Optional[MatchMethod] = None
+    #: Gate KITS-PMA-3 — procedencia da referencia DERIVADA dos componentes.
+    #: Preenchidos SOMENTE quando `match_method = "kit_components_derived"`.
+    #: Nulos em todas as demais linhas, inclusive nas do Mercado Livre.
+    kit_protheus_sku: Optional[str] = None
+    kit_bridge_method: Optional[str] = None
+    kit_component_count: Optional[int] = None
+    #: `SUM(qty_per_kit)` — e' este valor, nunca o numero de SKUs distintos,
+    #: que escolheu a faixa de desconto.
+    kit_total_units: Optional[float] = None
+    kit_components_base_amount: Optional[float] = None
+    kit_discount_pct: Optional[float] = None
     match_quality: MatchQuality
     reference_candidate_count: int
     comparison_status: ComparisonStatus
