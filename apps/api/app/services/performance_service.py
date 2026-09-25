@@ -2009,6 +2009,26 @@ class ScopeQualityInputError(ValueError):
     para `maturity_unknown` com aviso critico — jamais para `mature`."""
 
 
+#: 🔴 A FATO DE PRODUTO SHOPEE, JA' RESOLVIDA PARA UMA PROCEDENCIA POR MARCA.
+#:
+#: A tabela guarda `api` e `manual_export` lado a lado. Ler a tabela crua faria
+#: a marca que tem as duas ser contada DUAS VEZES em todo `SUM(gmv)` — e o
+#: sintoma seria faturamento dobrado, nao erro.
+#:
+#: E' uma SUBCONSULTA, e nao um JOIN solto no FROM de cada query, de proposito:
+#: `brand` existe nas duas tabelas, entao um join direto tornaria ambigua toda
+#: referencia nua a `brand` nas consultas que usam isto. Assim, quem consome
+#: continua escrevendo `brand`, `gmv`, `ref_month` sem qualificar nada.
+#:
+#: 🔑 `COALESCE(m.source, 'manual_export')` e' o fail-closed: marca ausente da
+#: tabela de modo le' o export, que e' o comportamento de hoje.
+_SH_PROD_ACTIVE_FACT = """(
+        SELECT f.*
+          FROM marts.fact_shopee_product_monthly f
+          LEFT JOIN marts.shopee_product_source_mode m ON m.brand = f.brand
+         WHERE f.source = COALESCE(m.source, 'manual_export')
+    ) AS fact"""
+
 _SCOPE_QUALITY_SQL = """
     WITH scope AS (
         SELECT COUNT(*)                              AS rows_present,
@@ -2016,7 +2036,7 @@ _SCOPE_QUALITY_SQL = """
                COALESCE(SUM(gmv), 0)                 AS prod_gmv,
                COUNT(DISTINCT brand)                 AS brands_present,
                MAX(ingested_at)                      AS loaded_at
-          FROM marts.fact_shopee_product_monthly
+          FROM """ + _SH_PROD_ACTIVE_FACT + """
          WHERE ref_month = :ref_month
            {scope_brand_filter}
     ),
@@ -2351,7 +2371,7 @@ def get_produtos_shopee(
                    CASE WHEN (completed_orders + canceled_orders) > 0
                         THEN canceled_orders::numeric / (completed_orders + canceled_orders) * 100
                         ELSE NULL END AS cancel_rate_pct
-            FROM marts.fact_shopee_product_monthly
+            FROM {_SH_PROD_ACTIVE_FACT}
             WHERE {where} AND gmv > 0
         ),
         ranked AS (
@@ -2457,7 +2477,7 @@ def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month
             SELECT COUNT(*) AS total_count,
                    COUNT(*) FILTER (WHERE gmv > 0) AS eligible_count,
                    SUM(units_sold) FILTER (WHERE gmv > 0) AS eligible_units
-            FROM marts.fact_shopee_product_monthly
+            FROM {_SH_PROD_ACTIVE_FACT}
             WHERE {where}
         """),
         params,
@@ -2470,7 +2490,7 @@ def get_produtos_shopee_summary(db: Session, brand: str | None, year: int, month
         text(f"""
             WITH base AS (
                 SELECT brand, sku_ref_key, product_name, variation_name, gmv
-                FROM marts.fact_shopee_product_monthly
+                FROM {_SH_PROD_ACTIVE_FACT}
                 WHERE {where} AND gmv > 0
             ),
             ranked AS (
