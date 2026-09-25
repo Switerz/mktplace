@@ -201,3 +201,69 @@ def test_campos_existem_no_schema_declarado(campo):
 
     assert campo in FinanceiroKpis.model_fields
     assert campo in FinanceiroBrandRow.model_fields
+
+
+# ---------------------------------------------------------------------------
+# Canais: o ML deixa de ser "sem dado" quando a comissão chega
+# ---------------------------------------------------------------------------
+
+class _FakeMappingSession:
+    def __init__(self, lotes):
+        self._lotes = list(lotes)
+
+    def execute(self, stmt, params=None):
+        rows = self._lotes.pop(0) if self._lotes else []
+        return _Rows(rows)
+
+
+def _row_canais(brand_key, marketplace_id, **over):
+    row = {
+        "brand_key": brand_key, "marketplace_id": marketplace_id,
+        "gmv": 0, "gmv_video": 0, "gmv_live": 0, "gmv_card": 0,
+        "visitors": 0, "unique_buyers": 0, "new_buyers": 0,
+        "repeat_buyers": 0, "canceled_orders": 0, "orders": 0,
+        "avg_conversion_rate": None,
+        "ad_spend": 0, "ad_revenue": 0, "ad_spend_n": 0,
+        "total_fees": 0, "total_fees_n": 0,
+        "seller_shipping_cost": 0, "seller_shipping_cost_n": 0,
+    }
+    row.update(over)
+    return row
+
+
+def _canais_ml(**over):
+    rows = [_row_canais("barbours", ML_ID, gmv=2000, orders=10,
+                        ad_spend=100, ad_revenue=1200, ad_spend_n=30,
+                        seller_shipping_cost=200, seller_shipping_cost_n=30, **over)]
+    res = perf_svc.get_canais(_FakeMappingSession([rows]), "ml", 2026, 7)
+    return next(r for r in res["channel_rows"] if r["channel"] == "ml")
+
+
+def test_canais_ml_sem_comissao_carregada_continua_sem_dado():
+    """Antes do backfill o período não tem `total_fees`, e a tela deve dizer
+    "sem dado" — nunca 0%."""
+    ml = _canais_ml(total_fees=0, total_fees_n=0)
+    assert ml["marketplace_cost_available"] is False
+    assert ml["marketplace_cost_pct"] is None
+    assert ml["data_warning"] is not None
+
+
+def test_canais_ml_com_comissao_passa_a_declarar_custo_disponivel():
+    """O que este gate destrava: com `total_fees` presente, o ML deixa de ser
+    "sem dado" e o aviso de ausência some. A lógica é data-driven (`fees_n`),
+    então isso passa a valer sozinho quando a carga rodar."""
+    ml = _canais_ml(total_fees=340.0, total_fees_n=30)
+    assert ml["marketplace_cost_available"] is True
+    assert ml["marketplace_cost_pct"] == 17.0   # 340 / 2000
+    assert ml["data_warning"] is None
+    assert "sem_dado" not in ml["signals"]
+
+
+def test_aviso_de_ausencia_nao_afirma_mais_que_falta_competencia():
+    """O texto antigo dizia que a única fonte era cumulativa por produto e
+    "sem competência mensal". Este gate provou o contrário, e um aviso que
+    descreve errado a razão da ausência desinforma quem lê a tela."""
+    aviso = perf_svc._ML_COST_MISSING_WARNING
+    assert "ml_produto_pnl" not in aviso
+    assert "sem competencia mensal" not in aviso
+    assert "ml_order_line_items" in aviso

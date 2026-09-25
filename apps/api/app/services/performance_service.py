@@ -170,11 +170,19 @@ _TIKTOK_COST_WARNING = (
     "(referencia mai/2026, ver financeiro_audit.md secao 11.1) — usar como "
     "referencia direcional, nao como valor exato mes a mes."
 )
+# MARGEM-REAL-2 reescreveu este aviso. O texto anterior dizia que a unica
+# fonte era `gold.ml_produto_pnl.marketplace_fee`, cumulativa por produto e
+# "sem competencia mensal" — o que deixou de ser verdade: existe fonte
+# transacional com competencia diaria (`api.ml_order_line_items.sale_fee` por
+# `date_created::date`), ja integrada ao conector do ML. O que falta e' a
+# carga. Enquanto o periodo consultado nao tiver sido recarregado, `fees_n`
+# continua 0 e este aviso aparece — mas agora diz a razao certa.
 _ML_COST_MISSING_WARNING = (
-    "Comissao do Mercado Livre nao esta disponivel no mart (total_fees "
-    "nulo para ML). Fonte real existe em gold.ml_produto_pnl.marketplace_fee, "
-    "porem e cumulativa por produto, sem competencia mensal — nao aplicavel "
-    "a um mes especifico (ver financeiro_audit.md secao 11.4)."
+    "Comissao do Mercado Livre ainda nao carregada para este periodo "
+    "(total_fees nulo no mart). A fonte existe com competencia diaria "
+    "(api.ml_order_line_items.sale_fee) e ja esta integrada ao pipeline; "
+    "os periodos anteriores a carga permanecem sem o valor. "
+    "Ver docs/margem_real_1_diagnostico.md secao 10.5."
 )
 
 
