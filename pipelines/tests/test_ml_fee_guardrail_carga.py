@@ -246,3 +246,33 @@ def test_1b_guardrail_roda_antes_do_upsert_no_loader():
     pos_guardrail = fonte.index("ml_fee_reconciliation.reconciliar")
     pos_upsert = fonte.index("session.execute(upsert_sql, row)")
     assert pos_guardrail < pos_upsert
+
+
+def test_guardrail_so_roda_para_a_fonte_ml():
+    """Contraprova de ESCOPO.
+
+    Shopee e TikTok não têm `paid_gmv` nem `paid_orders_src` nas suas linhas
+    cruas — se o guardrail rodasse para eles, toda carga desses canais abortaria
+    com "fonte paga não tem a célula". A chamada precisa estar sob
+    `if source == "ml"`, e nada no teste 8 provaria isso, porque lá o `source`
+    nunca é outro.
+    """
+    import inspect
+    import re
+
+    fonte = inspect.getsource(dp.run)
+    chamada = fonte.index("ml_fee_reconciliation.reconciliar")
+    antes = fonte[:chamada]
+    guarda = re.search(r'if\s+source\s*==\s*[\'"]ml[\'"]\s*:\s*$', antes.rstrip().split("\n")[-1])
+    assert guarda is not None, (
+        "a chamada do guardrail nao esta imediatamente sob `if source == \"ml\":`"
+    )
+
+
+def test_linhas_cruas_de_shopee_nao_passariam_pelo_guardrail():
+    """O outro lado da mesma prova: se alguém remover o `if`, isto mostra o
+    estrago — uma linha típica de Shopee aborta na hora."""
+    linha_shopee = {"date": D, "brand": "kokeshi", "gmv": Decimal("5000.00"),
+                    "orders": 50}
+    with pytest.raises(MlFeeReconciliationError):
+        reconciliar([linha_shopee], brands_esperadas=BRANDS)
