@@ -2104,3 +2104,149 @@ def test_toda_linha_real_do_servico_atravessa_o_schema():
             MonitoramentoPrecoRow.model_validate(linha)
     finally:
         _limpa_overrides()
+
+
+# ---------------------------------------------------------------------------
+# 12. Gate PMA-OPS-HOTFIX-1 — a PAGINA INTEIRA, no limite que a tela pede
+# ---------------------------------------------------------------------------
+# O incidente de 2026-09-25 foi exatamente este: a tela pede
+# `limit=500&offset=0` e o backend devolvia 500. A causa (um `Literal`
+# redigitado) ja' esta corrigida e travada em
+# `test_schema_cobre_todo_o_vocabulario_do_dominio`.
+#
+# O que faltava era a prova de ESCALA. Todo teste HTTP usava um punhado de
+# linhas, e nenhum exercitava `MAX_LIMIT`. Um defeito de serializacao que
+# aparece so' numa linha entre centenas passava despercebido: foi assim que o
+# `limit=1` da conferencia manual deu 200 na linha 0 e 500 na linha 347.
+#
+# A lista de motivos e' CICLADA sobre o vocabulario inteiro de proposito: assim
+# a pagina cheia contem, por construcao, ao menos uma linha de cada motivo — e
+# um valor novo no dominio que nao chegue ao schema reprova AQUI, na borda,
+# antes de chegar a producao.
+
+def _cenario_pagina_cheia(n=None):
+    """Uma pagina no tamanho MAXIMO, com todos os motivos representados."""
+    from datetime import timedelta
+
+    svc = _servico()
+    total = n if n is not None else svc.MAX_LIMIT
+    d1 = svc.today_operacional() - timedelta(days=1)
+
+    # Uma referencia real, para que parte das linhas seja de fato comparavel.
+    refs = [_ref("kokeshi", "KS06004", "7908790700922", "100.00")]
+    listings = []
+    for i in range(total):
+        if i % 4 == 0:
+            # comparavel: casa a referencia acima
+            li = _listing("kokeshi", f"P{i}", "KS06004", "7908790700922",
+                          str(90 + (i % 30)), ref_date=d1)
+        elif i % 4 == 1:
+            # marca sem tabela B2B
+            li = _listing("lescent", f"P{i}", f"LC{i:05d}", None,
+                          str(50 + (i % 20)), ref_date=d1)
+        elif i % 4 == 2:
+            # sem chave de casamento nenhuma
+            li = _listing("kokeshi", f"P{i}", None, None,
+                          str(70 + (i % 10)), ref_date=d1)
+        else:
+            # marca COM tabela, produto fora dela
+            li = _listing("kokeshi", f"P{i}", f"KS{i:05d}", None,
+                          str(60 + (i % 15)), ref_date=d1)
+        listings.append(li)
+    return listings, refs, d1
+
+
+def test_http_pagina_no_limite_maximo_responde_200_e_serializa_tudo():
+    """A requisicao EXATA que a tela faz. Era esta que devolvia 500."""
+    svc = _servico()
+    listings, refs, d1 = _cenario_pagina_cheia()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        r = cli.get(ROTA, params={"limit": svc.MAX_LIMIT, "offset": 0})
+        assert r.status_code == 200, r.text[:400]
+        corpo = r.json()
+        assert corpo["returned_count"] == svc.MAX_LIMIT
+        assert len(corpo["rows"]) == svc.MAX_LIMIT
+    finally:
+        _limpa_overrides()
+
+
+def test_http_pagina_cheia_contem_os_motivos_novos_do_gate_anterior():
+    """Sem esta afirmacao o teste acima passaria por acaso — bastaria o cenario
+    nao produzir nenhum motivo novo para ele deixar de provar o que importa."""
+    from app.services import pma_domain as dom
+
+    listings, refs, d1 = _cenario_pagina_cheia()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        motivos = {r.get("non_comparable_reason")
+                   for r in cli.get(ROTA, params={"limit": 500}).json()["rows"]}
+        assert dom.REASON_BRAND_WITHOUT_REFERENCE in motivos
+        assert dom.REASON_NO_MATCH_KEY in motivos
+        assert dom.REASON_REFERENCE_MISSING in motivos
+    finally:
+        _limpa_overrides()
+
+
+def test_http_nenhuma_oferta_e_descartada_para_a_resposta_passar():
+    """A correcao NAO pode ser filtrar a linha problematica.
+
+    Descartar ofertas faria a resposta voltar a 200 escondendo o defeito — e
+    faria a cobertura melhorar sozinha, que e' a pior forma de mentir aqui.
+    A pagina inteira, somada as seguintes, tem de reproduzir `total_count` sem
+    repetir nem perder uma linha.
+    """
+    svc = _servico()
+    listings, refs, d1 = _cenario_pagina_cheia(svc.MAX_LIMIT + 137)
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        p1 = cli.get(ROTA, params={"limit": svc.MAX_LIMIT, "offset": 0}).json()
+        p2 = cli.get(ROTA, params={"limit": svc.MAX_LIMIT,
+                                   "offset": svc.MAX_LIMIT}).json()
+        assert p1["total_count"] == len(listings)
+        vistos = [r["item_id"] for r in p1["rows"]] + [r["item_id"] for r in p2["rows"]]
+        assert len(vistos) == len(listings), "alguma oferta sumiu da paginacao"
+        assert len(set(vistos)) == len(listings), "alguma oferta apareceu duas vezes"
+        assert set(vistos) == {li["item_id"] for li in listings}
+    finally:
+        _limpa_overrides()
+
+
+def test_http_pagina_cheia_mantem_as_particoes_reconciliadas():
+    """Escala nao pode afrouxar invariante: as mesmas somas do gate anterior,
+    agora sobre 500 linhas."""
+    svc = _servico()
+    listings, refs, d1 = _cenario_pagina_cheia()
+    cli = _client(FakeSession(listings, refs, ref_date=d1))
+    try:
+        corpo = cli.get(ROTA, params={"limit": svc.MAX_LIMIT}).json()
+        k, m = corpo["kpis"], corpo["metrics"]
+        assert (k["below_reference_count"] + k["at_or_above_reference_count"]
+                + k["no_reference_count"] + k["ambiguous_reference_count"]
+                + k["inactive_count"] == k["monitored_count"])
+        assert sum(m["no_reference_breakdown"].values()) == k["no_reference_count"]
+        assert (m["comparable_offers"] + sum(m["non_comparable_reasons"].values())
+                == m["eligible_offers"])
+    finally:
+        _limpa_overrides()
+
+
+def test_erro_inesperado_continua_sanitizado_na_borda():
+    """Durante o incidente o corpo do 500 foi `Internal Server Error`, 22 bytes,
+    sem DSN, sem PII e sem traceback — medido. Esta guarda impede que uma
+    mudanca futura passe a vazar o detalhe junto com o erro."""
+    listings, refs, d1 = _cenario_http()
+
+    class SessaoQueExplode(FakeSession):
+        def execute(self, *a, **kw):
+            raise RuntimeError(
+                "postgresql://neondb_owner:npg_segredo@ep-host/db falhou")
+
+    cli = _client(SessaoQueExplode(listings, refs, ref_date=d1))
+    try:
+        r = cli.get(ROTA)
+        assert r.status_code >= 500
+        for vazamento in ("npg_segredo", "postgresql://", "ep-host", "Traceback"):
+            assert vazamento not in r.text, vazamento
+    finally:
+        _limpa_overrides()
