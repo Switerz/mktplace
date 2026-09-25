@@ -61,8 +61,8 @@ migration, `source` e' obrigatorio e explicito em toda escrita nova.
 """
 from alembic import op
 
-revision = "022"
-down_revision = "021"
+revision = "023"
+down_revision = "022"
 branch_labels = None
 depends_on = None
 

@@ -81,7 +81,7 @@ FACT = "marts.fact_shopee_product_monthly"
 MODE_TABLE = "marts.shopee_product_source_mode"
 GOLD = "gold.shopee_product_daily"
 
-#: Procedencia gravada por este publisher. Espelha o CHECK da migration 022.
+#: Procedencia gravada por este publisher. Espelha o CHECK da migration 023.
 SOURCE_API = "api"
 SOURCE_MANUAL = "manual_export"
 

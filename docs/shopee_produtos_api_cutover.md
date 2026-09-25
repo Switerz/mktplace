@@ -171,7 +171,7 @@ de um `_float(None) → 0.0`, e isso teria feito a ausência virar um fato.
 |---|---|---|
 | 1 | mesclar `goca-se/airflow#1698` (recorte no gold) | ⏳ aberto |
 | 2 | rodar o dbt: `gold.shopee_product_daily` ganha as 3 colunas | ⏳ depende de 1 |
-| 3 | aplicar a migration `022` no Neon | ⏳ depende de 2 |
+| 3 | aplicar a migration `023` no Neon | ⏳ depende de 2 |
 | 4 | `--apply` em shadow (todas as marcas ainda em `manual_export`) | ⏳ |
 | 5 | reconciliar publicado × recomputado | ⏳ |
 | 6 | ligar **uma** marca: `UPDATE ... SET source='api' WHERE brand='rituaria'` | ⏳ |

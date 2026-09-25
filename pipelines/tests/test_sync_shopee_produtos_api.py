@@ -16,7 +16,7 @@ from pipelines import sync_shopee_produtos_api as mod
 
 MIGRATION = (Path(mod.__file__).resolve().parents[1]
              / "apps" / "api" / "alembic" / "versions"
-             / "022_add_procedencia_shopee_product_monthly.py")
+             / "023_add_procedencia_shopee_product_monthly.py")
 
 CAPTURED = datetime(2026, 9, 25, 18, 0, tzinfo=timezone.utc)
 
@@ -188,10 +188,10 @@ def test_a_fonte_lida_e_o_recorte_concluido():
 # Migration                                                                     #
 # --------------------------------------------------------------------------- #
 
-def test_migration_encadeia_na_021():
+def test_migration_encadeia_na_022():
     fonte = MIGRATION.read_text(encoding="utf-8")
-    assert 'revision = "022"' in fonte
-    assert 'down_revision = "021"' in fonte
+    assert 'revision = "023"' in fonte
+    assert 'down_revision = "022"' in fonte
 
 
 def test_migration_remove_o_default_de_source():
