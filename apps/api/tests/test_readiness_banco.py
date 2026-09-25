@@ -203,30 +203,112 @@ def test_a_sonda_nao_e_o_engine_da_aplicacao():
     assert database.readiness_engine is not database.engine
 
 
-def test_os_limites_vao_em_connect_args_e_nao_em_execution_options():
+#: Chaves que nos interessam. O `cparams` completo carrega usuario, host e
+#: SENHA — ele nunca vai para `assert`, mensagem, log ou repr. So' estas duas
+#: saem daqui, e so' elas podem aparecer numa falha de teste.
+CHAVES_DE_LIMITE = ("connect_timeout", "options")
+
+
+def _limites_entregues_ao_driver(engine) -> dict:
+    """O que o engine ENTREGA ao driver, medido no evento `do_connect`.
+
+    `do_connect` roda com `cparams` ja' montado e ANTES do `dbapi.connect`.
+    Levantar ali aborta a conexao: o teste nao precisa de banco e mesmo assim
+    mede exatamente o que chegaria ao libpq.
+
+    Isto substitui a versao anterior, que era FALSAMENTE VERDE: ela procurava
+    `connect_timeout` e `statement_timeout` com `ast.dump()` e busca de texto
+    no arquivo, e os dois nomes aparecem na docstring e nos comentarios de
+    `_make_readiness_engine`. Medido: remover as duas configuracoes REAIS do
+    `connect_args` deixava a suite com 28/28 verdes. Agora a prova e'
+    comportamental.
+
+    Devolve SOMENTE `CHAVES_DE_LIMITE`, para que nenhuma falha de teste possa
+    imprimir credencial.
+    """
+    from sqlalchemy import event
+
+    class _Abortar(Exception):
+        """Interrompe em `do_connect`: o teste quer os parametros, nao a conexao."""
+
+    capturado: dict = {}
+
+    def _espiao(dialect, conn_rec, cargs, cparams):
+        capturado.update(
+            {k: v for k, v in cparams.items() if k in CHAVES_DE_LIMITE}
+        )
+        raise _Abortar
+
+    event.listen(engine, "do_connect", _espiao)
+    try:
+        with engine.connect():
+            pass
+    except Exception:  # noqa: BLE001 — a conexao e' abortada de proposito
+        pass
+    finally:
+        event.remove(engine, "do_connect", _espiao)
+    return capturado
+
+
+def test_a_sonda_entrega_connect_timeout_de_3s_ao_driver():
+    """`connect_timeout` precisa CHEGAR ao libpq, nao so' existir no arquivo."""
+    limites = _limites_entregues_ao_driver(database.readiness_engine)
+    assert "connect_timeout" in limites, (
+        "o engine da readiness nao entregou `connect_timeout` ao driver"
+    )
+    assert limites["connect_timeout"] == 3
+    assert limites["connect_timeout"] == database.READINESS_CONNECT_TIMEOUT_S
+
+
+def test_a_sonda_entrega_statement_timeout_de_3000ms_ao_driver():
+    """`statement_timeout` vai em `options`, que o libpq repassa como GUC."""
+    limites = _limites_entregues_ao_driver(database.readiness_engine)
+    assert "options" in limites, (
+        "o engine da readiness nao entregou `options` ao driver"
+    )
+    assert "statement_timeout=3000" in limites["options"]
+    assert (
+        "statement_timeout=%d" % database.READINESS_STATEMENT_TIMEOUT_MS
+        in limites["options"]
+    )
+
+
+def test_o_engine_principal_nao_recebe_os_limites_da_sonda():
+    """Os limites sao da SONDA. Impo-los ao engine principal mudaria o
+    comportamento de todas as consultas da API — que e' justamente o motivo de
+    a sonda ter engine proprio."""
+    limites = _limites_entregues_ao_driver(database.engine)
+    assert "connect_timeout" not in limites
+    assert "options" not in limites
+
+
+def test_a_sonda_usa_nullpool_e_o_principal_nao():
+    """Sem pool proprio, um probe travado prenderia conexao de producao."""
+    from sqlalchemy.pool import NullPool
+
+    assert isinstance(database.readiness_engine.pool, NullPool)
+    assert not isinstance(database.engine.pool, NullPool)
+
+
+def test_o_timeout_decorativo_nao_voltou():
     """`execution_options(timeout=...)` nao limitava nada: `connect()` ja tinha
-    acontecido, e o dialeto psycopg2 nao honra esse option. O limite tem de
-    chegar ao libpq ANTES da conexao."""
+    acontecido, e o dialeto psycopg2 nao honra esse option.
+
+    Barreira estrutural, complementar as tres provas comportamentais acima:
+    olha as CHAMADAS na arvore sintatica, nunca o texto — o comentario do
+    modulo cita `execution_options` de proposito, para registrar por que ele
+    foi removido."""
     import ast
     import inspect
     from pathlib import Path
 
     fonte = Path(inspect.getfile(database)).read_text(encoding="utf-8")
     arvore = ast.parse(fonte)
-    # Olha o CODIGO, nao o texto: o comentario cita `execution_options` de
-    # proposito, para registrar por que ele foi removido.
     chamadas = {
         n.func.attr for n in ast.walk(arvore)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
     assert "execution_options" not in chamadas, "o timeout decorativo voltou"
-    assert "connect_timeout" in fonte
-    assert "statement_timeout" in fonte
-    # e os dois precisam ir juntos no engine da sonda
-    fn = next(n for n in ast.walk(arvore)
-              if isinstance(n, ast.FunctionDef) and n.name == "_make_readiness_engine")
-    corpo = ast.dump(fn)
-    assert "connect_timeout" in corpo and "statement_timeout" in corpo
 
 
 def test_a_sonda_nao_cria_engine_por_requisicao(monkeypatch):
