@@ -1372,6 +1372,10 @@ export interface FinanceiroKpis {
   ml_acos_pct: number | null;
   ml_cpc: number | null;
   ml_total_cost_pct: number | null;
+  /** MARGEM-REAL-2: tarifa/comissao do marketplace no ML — so a tarifa.
+   *  Nao inclui Ads, frete, imposto, devolucao nem afiliado, e nao e' margem. */
+  ml_fees?: number | null;
+  ml_avg_fee_pct?: number | null;
   shopee_gmv?: number | null;
   shopee_settlement?: number | null;
   shopee_fees?: number | null;
@@ -1401,6 +1405,9 @@ export interface FinanceiroBrandRow {
   ml_seller_shipping_cost: number | null;
   ml_shipping_pct_of_gmv: number | null;
   ml_total_cost_pct: number | null;
+  /** MARGEM-REAL-2 — ver FinanceiroKpis. */
+  ml_fees?: number | null;
+  ml_avg_fee_pct?: number | null;
   shopee_gmv?: number | null;
   shopee_settlement?: number | null;
   shopee_fees?: number | null;

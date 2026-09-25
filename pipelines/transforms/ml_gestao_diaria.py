@@ -18,11 +18,48 @@ MARKETPLACE_ID = 2   # Mercado Livre (db/seeds/01_marketplaces.sql)
 EMPRESA_ID = 1       # GoBeauté
 
 
+def _fee_pct(fee, gmv) -> Optional[float]:
+    """avg_fee_pct só existe quando há numerador E denominador válidos.
+
+    Ausência permanece None — nunca zero. Um zero aqui seria lido como
+    "o marketplace não cobrou nada", que é afirmação diferente de
+    "não sabemos quanto o marketplace cobrou".
+    """
+    if fee is None or gmv is None:
+        return None
+    try:
+        fee_f = float(fee)
+        gmv_f = float(gmv)
+    except (TypeError, ValueError):
+        return None
+    # NaN não é comparável: NaN > 0 é False, então o guard abaixo já o exclui.
+    if not gmv_f > 0:
+        return None
+    if fee_f != fee_f:   # NaN
+        return None
+    return round(fee_f / gmv_f * 100, 2)
+
+
 def transform(row: dict) -> Optional[dict]:
     brand = row.get("brand")
     loja_id = BRAND_TO_LOJA.get(brand)
     if loja_id is None:
         return None
+
+    # MARGEM-REAL-2 — comissão do marketplace.
+    #
+    # Sinal: preservado como vem da fonte, POSITIVO. É a mesma convenção da
+    # Shopee (`commission_net + service_fee_net`, também positivo) e a oposta
+    # do TikTok, que grava negativo. A apresentação pode usar magnitude; o
+    # armazenamento não troca o sinal em silêncio.
+    #
+    # Conteúdo: SOMENTE tarifa/comissão do marketplace. Ads, frete, imposto,
+    # devolução e afiliado ficam fora — Ads e frete já têm colunas próprias
+    # nesta mesma linha, e somá-los aqui seria dupla contagem.
+    #
+    # Um dia sem pedido pago não tem comissão conhecida: o LEFT JOIN do
+    # conector devolve None, e None é o que se grava. Zero diria outra coisa.
+    total_fees = row.get("marketplace_fee")
 
     return {
         # Chaves
@@ -72,8 +109,8 @@ def transform(row: dict) -> Optional[dict]:
 
         # Financeiro
         "total_settlement": None,
-        "total_fees": None,
-        "avg_fee_pct": None,
+        "total_fees": total_fees,
+        "avg_fee_pct": _fee_pct(total_fees, row.get("gmv")),
         "avg_settlement_pct": None,
         "seller_shipping_cost": row.get("seller_shipping_cost"),
         "shipping_pct_of_gmv": row.get("shipping_pct_of_gmv"),

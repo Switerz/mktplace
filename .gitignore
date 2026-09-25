@@ -58,6 +58,11 @@ pyvenv.cfg
 !docs/reconciliation/ml_gmv_semantic_analysis_jan_maio_2026.csv
 # Gate R4: estado final publicado na Torre apos reconciliacao dos 3 canais
 !docs/reconciliation/torre_gmv_final_20260722.csv
+# Gate KITS-MAP-1/2: diagnostico de pontes de kit, reconciliacao antes x depois
+# e fila de aprovacao de cadastro. Sem PII — ver o .md ao lado de cada um.
+!docs/reconciliation/kit_map_1_candidatos_2026-09-25.csv
+!docs/reconciliation/kits_map_2_reconciliacao_2026-09-25.csv
+!docs/reconciliation/kits_map_2_cadastro_proposta_2026-09-25.csv
 
 # Tooling / local agent caches
 .codex/
