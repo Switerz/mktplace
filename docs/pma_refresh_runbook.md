@@ -1,8 +1,9 @@
 # `pma_refresh` — runbook operacional
 
-Gate PMA-OPS-2, 2026-09-25. Estado desta rodada: **o caminho está preparado e
-inerte**. Nenhuma flag foi ligada, nenhuma tarefa foi agendada, nenhuma
-publicação foi executada.
+Gate PMA-OPS-2, 2026-09-25 — preparação. **Ativado no PMA-GO-LIVE-1, no mesmo
+dia**: as duas flags estão ligadas, a publicação manual rodou com sucesso nos
+três canais e a tarefa `mktplace_pma_refresh` está registrada para 07:30.
+O estado corrente está na seção 5.
 
 ---
 
@@ -86,8 +87,13 @@ Ligar a flag autoriza a *intenção* de publicar. As demais recusas de
 Antes, saber por que um canal não publicava exigia rodar o apply e ler a recusa
 na auditoria: era preciso tentar publicar para descobrir que não daria.
 
-```bash
-python -m pipelines.channel_offer_publisher --marketplace shopee
+```powershell
+# O .env NAO e' carregado por este modulo — quem o carrega e'
+# `pipelines.ops.orchestrate`. Medido no PMA-GO-LIVE-1: invocado direto, o
+# comando morre com `falha de origem (KeyError)`, que e'
+# `os.environ["DATAMART_DATABASE_URL"]` ausente. Injete o ambiente antes.
+$env:PMA_PUBLISH_SHOPEE_ENABLED = 'true'
+python -c "from dotenv import load_dotenv; load_dotenv('.env'); import runpy; runpy.run_module('pipelines.channel_offer_publisher', run_name='__main__')" -- --marketplace shopee
 ```
 
 Sem `--apply` o comando é um ensaio real: lê a fonte por conexão **read-only**,
@@ -146,43 +152,96 @@ O step `pma_ml` **não** depende de flag: o Mercado Livre já está publicado e 
 
 ---
 
-## 5. O ponto exato em que o agendamento deve entrar
+## 5. Estado corrente — ATIVO desde 2026-09-25
 
-**Nada abaixo foi executado.** É o que falta, na ordem.
+Executado no PMA-GO-LIVE-1, com autorização de Mário. Nada abaixo é plano: é o
+que rodou.
 
-1. **Ligar a flag por canal**, no ambiente onde a tarefa roda — não no `.env` do
-   repositório. Confirmar com o `--diagnose` da seção 3: a linha do portão deve
-   passar de `RECUSARIA (channel_flag_disabled)` para `PUBLICARIA`.
-2. **Uma execução manual completa**, pelo comando da seção 4, e conferir em
-   `audit.source_sync_run` que os três canais saíram `success` com
-   `rows_loaded > 0`.
-3. **Registrar a tarefa** no Task Scheduler:
+### Flags
 
-   ```powershell
-   # NAO EXECUTADO nesta rodada — é o passo seguinte.
-   $acao = New-ScheduledTaskAction -Execute "powershell.exe" `
-     -Argument '-NoProfile -NonInteractive -File "C:\Users\Notebook\Desktop\mktplace\scripts\run_task.ps1" -TaskKey pma_refresh'
-   $gatilho = New-ScheduledTaskTrigger -Daily -At 07:30
-   Register-ScheduledTask -TaskName "mktplace_pma_refresh" -Action $acao -Trigger $gatilho
-   ```
+| variável | antes | depois |
+|---|---|---|
+| `PMA_PUBLISH_SHOPEE_ENABLED` | ausente (= off) | `true` (escopo **User**) |
+| `PMA_PUBLISH_TIKTOK_ENABLED` | ausente (= off) | `true` (escopo **User**) |
 
-   **07:30, e não 06:00.** O `full_daily` começa às 06:00 e os dois compartilham
-   o lock lógico: disparar junto faria o `pma_refresh` sair `BLOCKED` todo dia.
-   A folga precisa cobrir a duração real do `full_daily` — medi-la antes de
-   fixar o horário.
+Escopo **User**, não Machine, porque é o usuário `Notebook` que a Scheduled Task
+usa. `Machine` permanece ausente de propósito: uma variável de máquina ligaria a
+publicação para qualquer conta do host.
 
-   **Depois do `full_daily`, não dentro dele.** As duas razões pelas quais a
-   Shopee saiu do `full_daily` no Gate C1 valem aqui: um canal lento não deve
-   derrubar o pipeline dos outros, e o `pma_refresh` já tem política de exit
-   própria.
+### Publicação manual
 
-4. **Alerta de atraso dentro da Torre.** A matéria-prima já existe: o step
-   `health_check` é `always_run` dentro do `pma_refresh`, e a tela agora expõe
-   os relógios separados (captura na origem, publicação, defasagem) mais a
-   declaração explícita de que a ingestão bruta **não é observável** pela API.
-   Falta a superfície que avisa sem alguém abrir a tela.
+Comando — o veículo já existente, e nada mais:
 
----
+```powershell
+powershell.exe -NoProfile -NonInteractive `
+  -File "C:\Users\Notebook\Desktop\mktplace\scripts\run_task.ps1" -TaskKey pma_refresh
+```
+
+`STATUS=SUCCESS EXITCODE=0`, 63 s. Em `audit.source_sync_run`:
+
+| run | fonte | canal | linhas | status |
+|---:|---|---|---:|---|
+| 375 | `ml_listing_price_snapshot` | ML | 2.635 | success |
+| 376 | `channel_offer_snapshot` | Shopee | 695 | success |
+| 377 | `channel_offer_snapshot` | TikTok | 1.221 | success |
+
+Nenhum run ficou em `running`; o advisory lock `917120017` voltou a `LIVRE`.
+
+O `health_check` do mesmo ciclo saiu `FAILED`, e isso **não é do PMA**: ele mede
+o frescor de TODAS as fontes da Torre e acusou 6 itens alheios (51 h a 1.228 h de
+atraso, mais duas falhas de outros pipelines). Os cinco checks do PMA saíram
+`[OK]`. O próprio orquestrador imprime "NÃO reexecute os publishers por causa da
+saúde global" — o exit code do pipeline é decidido pelos canais, não pelo
+diagnóstico.
+
+### Resultado
+
+Os três canais saíram de atrasados para `lag=0 fresh`:
+
+| canal | observação | monitorados | comparáveis | sem referência |
+|---|---|---:|---:|---:|
+| ML | 2026-09-24 | 877 | 160 | 596 |
+| Shopee | 2026-09-25 | 695 | 152 | 440 |
+| TikTok | 2026-09-25 | 1.221 | 104 | 815 |
+
+O ML fica em D-1 por contrato (`closed_day`); Shopee e TikTok em D0
+(`snapshot_current`). As três partições fecham nos três canais.
+
+### Agendamento
+
+| campo | valor |
+|---|---|
+| nome | `mktplace_pma_refresh` |
+| gatilho | diário, **07:30** |
+| usuário | `Notebook` (Interactive, Limited) — o mesmo do `full_daily` |
+| sobreposição | `MultipleInstances=IgnoreNew` |
+| limite de execução | 1 h |
+| diretório | `C:\Users\Notebook\Desktop\mktplace` |
+| estado | `Ready`, habilitada |
+
+**07:30 e não 06:00**: o `full_daily` começa às 06:00 e os dois compartilham o
+lock lógico. Duração medida do `full_daily`: 1 a 10,1 min — 90 min de folga.
+A tarefa **não foi disparada** para testar; a primeira execução agendada é a de
+amanhã.
+
+### Como desligar
+
+Parar de publicar não exige deploy. Em ordem de reversibilidade:
+
+```powershell
+# 1. desabilitar a tarefa (para o agendamento, preserva os dados publicados)
+Disable-ScheduledTask -TaskName 'mktplace_pma_refresh'
+
+# 2. desligar os canais (a tarefa roda e RECUSA, deixando rastro na auditoria)
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_SHOPEE_ENABLED', $null, 'User')
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_TIKTOK_ENABLED', $null, 'User')
+```
+
+A opção 2 é a mais honesta quando se quer *saber* que a publicação foi barrada:
+a recusa fica gravada em `audit.source_sync_run` como
+`recusado: channel_flag_disabled`, enquanto a tarefa desabilitada não deixa
+rastro nenhum. O ML não tem flag e continuaria publicando pela tarefa — para
+pará-lo também, use a opção 1.
 
 ## 6. O que continua indisponível
 
@@ -192,4 +251,13 @@ O step `pma_ml` **não** depende de flag: o Mercado Livre já está publicado e 
   é exatamente o que leva alguém a concluir "a origem rodou, logo a tela está
   atual".
 - **Sem VPN não há publicação de canal.** A fonte é o Data Mart.
-- **O agendamento não existe.** Até o passo 3 acima, toda publicação é manual.
+- **A tarefa roda numa estação, não num servidor.** `mktplace_pma_refresh` vive
+  no Task Scheduler do host do Mário, sob o usuário `Notebook`. Máquina
+  desligada às 07:30 significa dia sem publicação — `StartWhenAvailable` faz o
+  disparo atrasado acontecer ao ligar, mas não cobre um dia inteiro fora do ar.
+- **Ninguém é avisado quando o refresh não roda.** A tela mostra a defasagem a
+  quem a abre, e o `health_check` já roda dentro do ciclo — falta a superfície
+  que avisa sem alguém olhar. O alerta na Torre continua pendente.
+- **O `health_check` global está vermelho por dívida alheia ao PMA**: 6 fontes
+  da Torre atrasadas ou falhando, sendo duas críticas. Não bloqueia a
+  publicação de preços e não se resolve aqui.
