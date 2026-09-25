@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { expedicaoHabilitado } from "@/lib/expedicao-contract";
 import { shopeeFbsEnabled } from "@/lib/shopee-fbs-flag";
+import { estoqueFullEnabled } from "@/lib/estoque-full-flag";
 
 import { isNavItemActive, navSections } from "./nav-config";
 
@@ -27,6 +28,7 @@ export default function NavList({ pathname, hrefFor }: NavListProps) {
       {navSections({
         expedicao: expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
         shopeeFbs: shopeeFbsEnabled(),
+        estoqueFull: estoqueFullEnabled(),
       }).map((section) => (
         <div key={section.label} className="flex flex-col gap-1">
           <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-2">

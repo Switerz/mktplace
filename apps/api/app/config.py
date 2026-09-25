@@ -125,6 +125,20 @@ class Settings(BaseSettings):
     # default False. Ligar e' decisao de negocio, fora deste gate.
     shopee_fbs_enabled: bool = Field(default=False)
 
+    # ------------------------------------------------------------------
+    # Gate FULL-SOURCE-3 — tela de ESTOQUE Full (FBS) da Shopee
+    # ------------------------------------------------------------------
+    # Flag SEPARADA da de cima de proposito: `shopee_fbs_enabled` governa o
+    # DESEMPENHO (fato 019, publicada e ativa em producao); esta governa o
+    # ESTOQUE (fatos 021, que sequer existem no banco produtivo -- a cabeca do
+    # Alembic la' e' 019). Reaproveitar a flag ja' ligada faria a tela nova
+    # aparecer ligada no mesmo instante do merge, sobre tabela inexistente.
+    #
+    # NASCE DESLIGADA e assim permanece neste gate: nada foi publicado.
+    # Mesmo LIGADA sobre um banco sem as migrations, o endpoint responde 200
+    # com `unavailable` estruturado -- a ausencia nunca vira estoque zero.
+    shopee_fbs_stock_enabled: bool = Field(default=False)
+
     @property
     def datamart_url(self) -> str:
         if self.datamart_database_url:

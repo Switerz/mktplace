@@ -13,6 +13,7 @@ import { buildRegioesQueryParams } from "./regioes-query";
 import { computeContentMix } from "./tiktok-content-mix";
 import type { MLFulfillmentResponse } from "./ml-fulfillment";
 import type { ShopeeFbsPayload } from "./shopee-fbs";
+import type { EstoqueFullResponse } from "./estoque-full";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -2361,4 +2362,55 @@ export async function fetchShopeeFbs(
     );
   }
   return (await res.json()) as ShopeeFbsPayload;
+}
+
+
+/**
+ * Gate FULL-SOURCE-3 — ESTOQUE Full (FBS) da Shopee.
+ *
+ * Superficie DIFERENTE da de cima: aquela mede desempenho de venda, esta mede
+ * estoque fisico no CD. As duas respondem 200 em dois formatos, e aqui o
+ * `unavailable` tem tres causas distintas (flag, fato inexistente, fotografia
+ * nunca publicada) -- todas respostas VALIDAS, nenhuma delas excecao.
+ *
+ * Cliente proprio, e nao `apiFetch`: aquele engole todo erro e devolve `null`,
+ * e `null` nesta tela seria desenhado como ausencia sem dizer o porque. "A API
+ * caiu" e "a fotografia nao existe" pedem textos e acoes diferentes -- e
+ * nenhum dos dois pode virar zero.
+ */
+export class EstoqueFullError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "EstoqueFullError";
+    this.status = status;
+  }
+}
+
+export async function fetchEstoqueFull(
+  query: string,
+  signal?: AbortSignal,
+): Promise<EstoqueFullResponse> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_URL}/api/v1/performance/shopee-fbs-estoque?${query}`,
+      { signal },
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new EstoqueFullError("Nao foi possivel contatar a API.", null);
+  }
+  if (res.status === 422) {
+    // Mensagem PROPRIA: o corpo tecnico do 422 descreve o filtro recebido e
+    // nao deve chegar a tela.
+    throw new EstoqueFullError("Filtro invalido para esta consulta.", 422);
+  }
+  if (!res.ok) {
+    throw new EstoqueFullError(
+      "A tela de Estoque Full esta indisponivel no momento.",
+      res.status,
+    );
+  }
+  return (await res.json()) as EstoqueFullResponse;
 }

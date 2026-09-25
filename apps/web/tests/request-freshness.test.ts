@@ -579,19 +579,24 @@ test("PF1 escopo: as funcoes sem cache continuam sem cache e fetchMonthly segue 
   assert.ok(/withCache\(`monthly:\$\{marketplace\}`/.test(corpoDe("fetchMonthly")), "fetchMonthly intocada, mesmo sem consumidor");
 });
 
-test("PF1 escopo: as 27 assinaturas publicas de fetchX nao mudaram", () => {
+test("PF1 escopo: as 28 assinaturas publicas de fetchX nao mudaram", () => {
   const assinaturas = [...CLIENT_SRC.matchAll(/^export (?:async )?function (fetch\w+)/gm)].map((m) => m[1]);
   // 23 -> 24 pelo Gate PMA-3, que acrescentou `fetchMonitoramentoPreco`;
   // 24 -> 25 pelo Gate AVH-4B-S Task 2/2, que acrescentou `fetchAvoeSnapshot`;
   // 25 -> 26 pelo Gate FULL-1D, que acrescentou `fetchMLFulfillment`;
-  // 26 -> 27 pelo Gate FULL-SH-1D, que acrescentou `fetchShopeeFbs`.
+  // 26 -> 27 pelo Gate FULL-SH-1D, que acrescentou `fetchShopeeFbs`;
+  // 27 -> 28 pelo Gate FULL-SOURCE-3, que acrescentou `fetchEstoqueFull`.
+  //   Cliente SEPARADO do `fetchShopeeFbs` de proposito: aquele mede
+  //   desempenho de venda, este mede estoque fisico no CD, e o `unavailable`
+  //   deste tem tres causas distintas que a tela precisa diferenciar.
   // O pino literal e' proposital: forca revisao consciente a cada funcao nova,
   // em vez de aceitar qualquer superficie publica em silencio.
-  assert.equal(assinaturas.length, 27, "nenhuma funcao publica foi adicionada ou removida");
+  assert.equal(assinaturas.length, 28, "nenhuma funcao publica foi adicionada ou removida");
   assert.ok(assinaturas.includes("fetchMonitoramentoPreco"));
   assert.ok(assinaturas.includes("fetchAvoeSnapshot"));
   assert.ok(assinaturas.includes("fetchMLFulfillment"));
   assert.ok(assinaturas.includes("fetchShopeeFbs"));
+  assert.ok(assinaturas.includes("fetchEstoqueFull"));
 
   // O NUMERO sozinho passaria se alguem removesse um cliente e adicionasse
   // outro no mesmo commit. O conjunto NOMINAL congelado reprova a remocao,
@@ -602,6 +607,7 @@ test("PF1 escopo: as 27 assinaturas publicas de fetchX nao mudaram", () => {
     "fetchBrandDetail",
     "fetchBrands",
     "fetchCanais",
+    "fetchEstoqueFull",
     "fetchExecutiveSummary",
     "fetchFinanceiro",
     "fetchInteligencia",
