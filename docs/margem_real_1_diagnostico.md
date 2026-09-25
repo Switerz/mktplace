@@ -419,6 +419,33 @@ ORDER BY 2 DESC;
 **[FATO]** Resultado em jul+ago/2026: `sale_fee` preenchido em 566.439 de 566.439 itens (100%); join casa
 566.439 de 566.439 linhas.
 
+> ### Correção aplicada no MARGEM-REAL-2 (2026-09-25)
+>
+> Os dois números abaixo estavam **subestimados**, e o contrato de fonte do gate seguinte mediu por quê.
+>
+> **[FATO] `sale_fee` é por UNIDADE, não por item.** A comissão do item é `sale_fee * quantity`. Medido:
+> `sale_fee / unit_price` fica estável em 0,1707–0,1828 para qualquer `quantity`, enquanto
+> `sale_fee / (unit_price * quantity)` cai com a quantidade (0,1707 → 0,0894 → 0,0608 → 0,0457). A query
+> original somava `sale_fee` cru.
+>
+> **[FATO] Os +3,9% eram cancelamento, e a causa está provada.** `status = 'paid'` na janela soma
+> **10.283.761** — idêntico ao GMV de `gold.ml_gestao_diaria`. O excesso eram 5.934 pedidos `cancelled`
+> (R$ 443.208) e 72 `partially_refunded` (R$ 10.032). Sobre a população correta, a reconciliação é exata:
+> **248 de 248** células dia × marca com GMV e pedidos idênticos, diferença máxima 0,00.
+>
+> Valores corrigidos, população `status = 'paid'`, comissão = `SUM(sale_fee * quantity)`:
+>
+> | marca | GMV (= gold) | pedidos | comissão | take rate |
+> |---|---:|---:|---:|---:|
+> | kokeshi | 3.432.578 | 53.727 | 579.112 | 16,87% |
+> | barbours | 3.131.719 | 31.232 | 461.728 | 14,74% |
+> | rituaria | 2.078.989 | 20.801 | 282.641 | 13,60% |
+> | lescent | 1.640.476 | 25.870 | 198.231 | 12,08% |
+>
+> Comissão total da janela: **1.521.713** (a soma das quatro linhas arredondadas dá 1.521.712 — a
+> diferença é o arredondamento por marca). A tabela abaixo fica como registro do que foi medido no
+> MARGEM-REAL-1, com a ressalva acima.
+
 | marca | GMV bruto (fonte) | pedidos | comissão | take rate |
 |---|---:|---:|---:|---:|
 | kokeshi | 3.575.546 | 55.998 | 593.153 | 16,59% |
@@ -427,7 +454,9 @@ ORDER BY 2 DESC;
 | lescent | 1.736.016 | 27.476 | 204.027 | 11,75% |
 
 **[FATO]** O GMV somado dessa fonte (10.737.001) fica **+3,9%** do GMV ML servido pela Torre (10.329.446)
-na mesma janela — a menor divergência entre todas as fontes de custo avaliadas neste gate.
+na mesma janela — a menor divergência entre todas as fontes de custo avaliadas neste gate. O MARGEM-REAL-2
+mediu a causa desses +3,9% (ver correção acima): são os pedidos cancelados e parcialmente reembolsados, que
+a consulta original não filtrava.
 
 ### 10.6 Origem dos fees da Shopee — código versionado
 
@@ -460,6 +489,29 @@ Cuidados que este gate já identificou:
 - Verificar se `sale_fee` estorna em pedido cancelado — não medido aqui (§9.4).
 - Acrescentar coluna a um fato existente altera o INSERT mesmo sob feature flag quando o gerador deriva as
   colunas do primeiro registro. Gerar o SQL nos dois estados antes de prometer que o ALTER é folgado.
+
+### 1b. Decisões tomadas no MARGEM-REAL-2B
+
+**[FATO] `ml_total_cost_pct` fica inalterado.** Continua `(Ads + frete) / GMV`, sem a comissão. Somar a
+tarifa por dentro mudaria em silêncio o valor de um KPI histórico, e quem comparasse dois meses veria um
+salto que não aconteceu na operação. A próxima rodada cria indicadores **separados** em vez de redefinir
+este: `marketplace_fee_pct`, `ads_frete_pct` e `known_cost_pct`. Só então `ml_total_cost_pct` pode ser
+aposentado, com migração de rótulo explícita.
+
+**[FATO] Rótulos de interface conferidos.** O KPI card já se chama *"Ads + Frete / GMV"*, com o subtítulo
+*"Nao inclui comissao do Mercado Livre"* — está correto. O único texto que ainda chama isto de "custo total"
+é o subtítulo da seção em `apps/web/app/financeiro/page.tsx` (*"Ad Spend, receita atribuida, frete e custo
+total como % do GMV"*). **Registrado para a próxima rodada; o frontend não foi alterado.**
+
+**[FATO] O upsert não recebeu `COALESCE`.** Em vez disso há um guardrail fail-closed
+(`pipelines/quality/ml_fee_reconciliation.py`) que reconcilia `date × brand` antes de qualquer escrita e
+aborta a publicação inteira se a fonte não a sustentar. As três alternativas foram descartadas com motivo:
+apagar perde dado publicado; `COALESCE` preserva em silêncio um valor possivelmente obsoleto; zero afirma
+que o marketplace não cobrou nada. A quarta saída é não publicar.
+
+A comparação é de **igualdade exata, sem tolerância** — medido: `gold.gmv = SUM(total_amount)` em 248 de 248
+células, escala 2 nos dois lados, maior diferença `0.00`. Um zero **medido** de comissão continua sendo
+gravado como zero; o que aborta é ausência de observação.
 
 ### 2. Reconciliar comissão e GMV do ML
 

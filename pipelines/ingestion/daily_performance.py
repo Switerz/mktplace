@@ -27,6 +27,7 @@ from pipelines.ingestion.fato_diaria_lock import (
     fato_diaria_lock,
 )
 from pipelines.quality import checks as quality
+from pipelines.quality import ml_fee_reconciliation
 from pipelines.transforms import ml_gestao_diaria as ml_transform
 from pipelines.transforms import shopee_ads_daily as shopee_ads_transform
 from pipelines.transforms import shopee_orders_daily as shopee_transform
@@ -470,6 +471,26 @@ def run(
             # BLOQUEIA, nao filtra: descartar em silencio esconderia um conector
             # quebrado e faria a contagem carregada divergir da extraida sem aviso.
             _assert_canonical_rows_closed(canonical_rows, source)
+
+            # MARGEM-REAL-2B — guardrail fail-closed da comissao do ML.
+            #
+            # Roda sobre as linhas CRUAS porque so' elas carregam `paid_gmv` e
+            # `paid_orders_src`; o schema canonico nao tem essas colunas.
+            #
+            # A posicao importa: aqui, nenhuma escrita na fato aconteceu ainda.
+            # Levantar neste ponto deixa a fato exatamente como estava, e o
+            # `except` abaixo marca o sync_run como `failed` com o motivo.
+            #
+            # O upsert NAO tem COALESCE de proposito (e' compartilhado com
+            # TikTok e Shopee). A protecao contra apagar comissao publicada e'
+            # esta barreira, nao o SQL.
+            if source == "ml":
+                ml_fee_reconciliation.reconciliar(
+                    raw_rows,
+                    brands_esperadas=ml_connector.BRANDS_IN_SCOPE,
+                    date_from=window[0] if window is not None else None,
+                    date_to=window[1] if window is not None else None,
+                )
 
             check_results = quality.run_all(canonical_rows)
             has_critical = quality.has_critical_failure(check_results)
