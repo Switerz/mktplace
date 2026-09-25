@@ -59,7 +59,14 @@ export type BusinessScope = "in_scope" | "out_of_business_scope";
  * `comparison_status`, nunca no lugar dele.
  */
 export type NonComparableReason =
+  /** Havia tabela B2B da marca, chave e tipo simples — e a busca nao achou. */
   | "reference_missing_for_product"
+  /** Gate PMA-REF-LINK-1: a MARCA nao tem tabela B2B publicada. */
+  | "brand_without_b2b_reference"
+  /** Gate PMA-REF-LINK-1: kit sem composicao confirmada. Nada foi estimado. */
+  | "kit_composition_missing"
+  /** Gate PMA-REF-LINK-1: anuncio sem GTIN e sem SKU — busca impossivel. */
+  | "offer_without_match_key"
   | "sku_not_in_internal_catalog"
   | "product_without_ean"
   | "product_ean_not_consumer"
@@ -237,6 +244,18 @@ export interface MonitoramentoPrecoMetrics {
   at_or_above_reference: number;
   /** Motivo -> contagem. Soma com `comparable_offers` em `eligible_offers`. */
   non_comparable_reasons: Record<string, number>;
+  /**
+   * Gate PMA-REF-LINK-1 — motivo -> contagem sobre as ofertas ATIVAS sem
+   * referencia, kits e marcas fora do escopo INCLUSIVE. Soma exatamente
+   * `kpis.no_reference_count`.
+   *
+   * Existe porque os dois numeros respondem perguntas diferentes:
+   * `non_comparable_reasons` fecha o DENOMINADOR (so' elegiveis) e
+   * `no_reference_breakdown` explica o CARTAO da tela. No TikTok eram 810 no
+   * cartao contra 251 nos motivos, e nada no payload dizia que os 559 de
+   * diferenca eram 404 kits e 155 ofertas fora do escopo de beleza.
+   */
+  no_reference_breakdown: Record<string, number>;
   /** NULO quando nada foi medido. Zero afirmaria "medimos e deu 0%". */
   coverage_rate: number | null;
   distinct_b2b_products: number;

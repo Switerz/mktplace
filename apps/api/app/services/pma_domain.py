@@ -308,9 +308,68 @@ REASON_AMBIGUOUS = "ambiguous_multiple_candidates"
 REASON_INVALID_REFERENCE_PRICE = "invalid_reference_price"
 REASON_INVALID_CHANNEL_PRICE = "invalid_channel_price"
 
+# --- Gate PMA-REF-LINK-1: tres causas que o serving SEMPRE soube distinguir --
+#
+# Medido em 2026-09-25 sobre a fotografia publicada dos tres canais: as 1.817
+# ofertas sem referencia recebiam UM unico motivo,
+# `reference_missing_for_product`, que se le como "o produto nao esta na tabela
+# B2B". Para 1.085 delas isso e' FALSO — e falso de tres formas diferentes,
+# cada uma com um dono e uma acao distintos.
+#
+# OS NUMEROS ABAIXO SAO OS BALDES QUE ESTE CODIGO EMITE, nao as subcausas da
+# auditoria. A distincao importa: `docs/pma_ref_link_1_auditoria.md` classifica
+# as mesmas 1.817 ofertas em dez subcausas analiticas, algumas das quais o
+# serving nao tem como distinguir sozinho — ele nao le o cadastro interno. Os
+# dois recortes sao corretos e NAO somam igual; forcar igualdade visual entre
+# eles faria um dos dois mentir.
+#
+#   477  a MARCA nao tem tabela B2B publicada. Sao dois grupos dentro do MESMO
+#        balde, porque a causa emitida e' a mesma — nao ha tabela a consultar:
+#          279  Lescent, nos tres canais (ML 132, Shopee 72, TikTok 75). Marca
+#               do produto, monitorada, e sem tabela. Acao de Trade: publicar.
+#          198  Gocase (132) e Denavita (66), so' no TikTok. Estas estao FORA
+#               do escopo de beleza (`business_scope = out_of_business_scope`),
+#               ja' saem do denominador por outro caminho e nao sao pauta de
+#               Trade. Aparecem aqui porque o motivo descreve o que o serving
+#               constatou, e o que ele constatou foi ausencia de tabela.
+#   607  a oferta e' KIT e nao casou referencia. O proprio `pma_domain` ja'
+#        prometia este rotulo no item 4 do cabecalho deste modulo ("kits ...
+#        recebem `kit_composition_missing`") e o serving nunca o emitiu. Inclui
+#        os 7 kits que TEM composicao cadastrada e ainda assim nao sao
+#        comparaveis — 6 por faltar referencia de componente, 1 por composicao
+#        incompleta. O balde diz "nao comparavel por ser kit", nao "sem BOM".
+#     1  a oferta nao tem NENHUMA chave de casamento — nem GTIN, nem SKU. Nao
+#        e' que a busca falhou: nao houve busca possivel. A auditoria conta 3
+#        ofertas sem chave; duas delas sao kits e a precedencia as entrega ao
+#        balde acima, que e' o bloqueio mais fundamental das duas.
+#
+# Nenhum deles exige dado novo. A marca sem tabela sai das linhas de referencia
+# que o servico ja' carrega; o tipo de produto e a ausencia de chave saem da
+# propria fato. O que faltava era a PRECEDENCIA, nao a informacao.
+#
+# O quarto balde, `reference_missing_for_product`, fica com 732 — e SO' nele a
+# leitura "o produto nao esta na tabela B2B" e' honesta. 477 + 607 + 1 + 732
+# = 1.817.
+#
+#: A marca da oferta nao aparece no snapshot de referencia carregado. Difere de
+#: `reference_missing_for_product`, que afirma que a marca TEM tabela e o
+#: produto nao esta nela.
+REASON_BRAND_WITHOUT_REFERENCE = "brand_without_b2b_reference"
+#: Kit sem composicao confirmada. MESMO literal de `COMPARISON_KIT_MISSING`, de
+#: proposito: e' a mesma afirmacao vista de dois vocabularios, e duas grafias
+#: fariam a tela e a metrica discordarem sobre o mesmo fato.
+REASON_KIT_COMPOSITION_MISSING = COMPARISON_KIT_MISSING
+#: Oferta sem GTIN e sem SKU: nao ha chave com que procurar. Nao e' o mesmo que
+#: "procuramos e nao achamos", e chamar as duas de ausencia de referencia
+#: mandaria conferir a tabela B2B quando o defeito esta no anuncio.
+REASON_NO_MATCH_KEY = "offer_without_match_key"
+
 #: Particao dos ELEGIVEIS: comparavel + estes motivos == eligible, sempre.
 NON_COMPARABLE_REASONS = (
     REASON_REFERENCE_MISSING,
+    REASON_BRAND_WITHOUT_REFERENCE,
+    REASON_KIT_COMPOSITION_MISSING,
+    REASON_NO_MATCH_KEY,
     REASON_SKU_NOT_INTERNAL,
     REASON_PRODUCT_WITHOUT_EAN,
     REASON_EAN_NOT_CONSUMER,
