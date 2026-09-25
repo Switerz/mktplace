@@ -47,6 +47,23 @@ requires-python = ">=3.9"
 dependencies = [
     "psycopg2-binary>=2.9,<3",
     "python-dotenv>=1.0,<2",
+    # SHOPEE-API-CUTOVER-2: as duas entram com `pipelines.common`, que
+    # `pipelines.sync_shopee_produtos_api` importa.
+    #
+    # `sqlalchemy` ja era dependencia REAL e nao declarada:
+    # `pipelines/common/db.py` a importa desde sempre, e so nao quebrou
+    # porque a imagem do Airflow a traz. Declarar torna o contrato
+    # honesto.
+    #
+    # 🔴 FAIXA LARGA, E AQUI ISSO E CRITICO. Medido em
+    # `apache/airflow:3.0.2`: a imagem traz **SQLAlchemy 1.4.54**, nao
+    # 2.x. Um pin `>=2.0` faria o pip SUBIR a versao de uma imagem
+    # compartilhada por ~180 DAGs durante a instalacao deste pacote.
+    # `>=1.4` e satisfeito pela imagem e nao mexe em nada.
+    "sqlalchemy>=1.4,<3",
+    # `pydantic-settings` e AUSENTE da imagem (medido) — entao esta e a
+    # unica das quatro que o pip de fato instala.
+    "pydantic-settings>=2.0,<3",
 ]
 
 [tool.setuptools.packages.find]
