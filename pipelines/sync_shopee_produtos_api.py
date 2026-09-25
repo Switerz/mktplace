@@ -107,6 +107,18 @@ JANELA_MESES = 3
 #: vendeu menos". Foi assim que agosto/2026 virou zero na tabela atual.
 MIN_LINHAS_RATIO = 0.80
 
+#: 🔴 FRESCOR DA FONTE — falha FECHADA se o gold estiver velho.
+#:
+#: `gold.shopee_product_daily` e' reconstruido dentro do `shopee_orders_etl`, que
+#: roda a cada 6h. Se o dia mais recente do gold estiver mais de
+#: `FRESCOR_MAX_DIAS` atras do dia BRT de hoje, a fonte parou — e publicar um
+#: gold parado REESCREVE a competencia corrente com dado velho, que e' pior do
+#: que nao publicar.
+#:
+#: 2 dias e' o teto: com 4 execucoes por dia, um gold de anteontem significa
+#: pelo menos 8 ciclos perdidos. Nao e' atraso, e' pane.
+FRESCOR_MAX_DIAS = 2
+
 STAGING_PAGE_SIZE = 500
 TARGET_STATEMENT_TIMEOUT_MS = 180_000
 
@@ -318,6 +330,34 @@ def _linha(r: ProdutoRow, run_id: str, captured_at: datetime) -> tuple:
     )
 
 
+SQL_FRESCOR = text(f"SELECT max(date) AS ultimo FROM {GOLD}")
+
+
+def validate_frescor(conn, hoje: date) -> date:
+    """Idade da fonte. Fonte velha ou vazia LEVANTA — nunca publica.
+
+    🔴 Falha FECHADA de proposito. Um gold parado publicado por cima da
+    competencia corrente a REESCREVE com dado velho, e o resultado e'
+    indistinguivel de "vendeu menos" — que foi exatamente como agosto/2026
+    virou zero na tabela que este publisher substitui.
+    """
+    ultimo = conn.execute(SQL_FRESCOR).scalar()
+    if ultimo is None:
+        raise ShopeeProdutosSyncError(
+            f"{GOLD} esta' VAZIA: a fonte nao foi materializada. "
+            "Nada foi publicado."
+        )
+    atraso = (hoje - ultimo).days
+    if atraso > FRESCOR_MAX_DIAS:
+        raise ShopeeProdutosSyncError(
+            f"fonte VELHA: o dia mais recente de {GOLD} e' {ultimo}, "
+            f"{atraso} dia(s) atras de {hoje} (teto {FRESCOR_MAX_DIAS}). "
+            "Com 4 execucoes por dia do upstream, isso e' pane, nao atraso. "
+            "Nada foi publicado."
+        )
+    return ultimo
+
+
 def escopo_publicado(conn, snap: Snapshot) -> dict[tuple, int]:
     """Quantas linhas `api` ja' existem por (brand, ref_month) no destino."""
     linhas = conn.execute(text(f"""
@@ -330,6 +370,62 @@ def escopo_publicado(conn, snap: Snapshot) -> dict[tuple, int]:
     """), {"src": SOURCE_API, "marcas": list(snap.marcas),
            "meses": snap.ref_months}).mappings().all()
     return {(r["brand"], r["ref_month"]): int(r["n"]) for r in linhas}
+
+
+#: Colunas que definem o CONTEUDO de uma linha publicada. `source_run_id` e
+#: `source_captured_at` ficam de fora de proposito: eles mudam a cada execucao
+#: mesmo quando o dado e' identico, e incluí-los faria a comparacao de
+#: equivalencia nunca dar igual — que e' o bug classico de fingerprint.
+_COLS_CONTEUDO = ("ref_month", "brand", "sku_ref_key", "product_name",
+                  "gmv", "units_sold", "completed_orders", "is_partial")
+
+
+def _conteudo_da_fonte(snap: Snapshot) -> set[tuple]:
+    return {
+        (r.ref_month, r.brand, r.sku_ref_key, r.product_name,
+         round(r.gmv, 2), r.units_sold, r.completed_orders, r.is_partial)
+        for r in snap.rows
+    }
+
+
+def _conteudo_publicado(conn, snap: Snapshot) -> set[tuple]:
+    linhas = conn.execute(text(f"""
+        SELECT {', '.join(_COLS_CONTEUDO)}
+          FROM {FACT}
+         WHERE source = :src
+           AND brand = ANY(:marcas)
+           AND ref_month = ANY(:meses)
+    """), {"src": SOURCE_API, "marcas": list(snap.marcas),
+           "meses": snap.ref_months}).mappings().all()
+    return {
+        (r["ref_month"], r["brand"], r["sku_ref_key"], r["product_name"],
+         round(float(r["gmv"]), 2), int(r["units_sold"]),
+         int(r["completed_orders"]), bool(r["is_partial"]))
+        for r in linhas
+    }
+
+
+def upstream_avancou(conn, snap: Snapshot) -> bool:
+    """O que a fonte traz difere do que ja' esta' publicado?
+
+    🔑 ESTA FUNCAO FAZ DUAS COISAS AO MESMO TEMPO, e as duas importam.
+
+    **NO-OP seguro.** Se o upstream nao avancou desde a ultima publicacao, o
+    conjunto lido e o conjunto publicado sao identicos. Republicar seria um
+    DELETE + INSERT que reescreve as mesmas linhas — trabalho, lock e risco por
+    nada. A execucao agendada simplesmente nao publica e diz por que.
+
+    **Retry seguro depois de um timeout INDETERMINADO.** O ponto cego de um
+    publisher transacional e' o timeout: a transacao pode ter commitado antes
+    de o processo morrer, e ninguem sabe. Com esta comparacao, a repeticao
+    descobre sozinha — se o commit anterior passou, o conteudo ja' esta' la' e
+    a repeticao vira NO-OP; se nao passou, ela publica. E' o que permite que a
+    DAG tenha retry sem apostar no desfecho do run anterior.
+
+    A comparacao e' por CONTEUDO, nao por `run_id` nem por `captured_at`:
+    esses dois mudam a cada execucao mesmo com dado identico.
+    """
+    return _conteudo_da_fonte(snap) != _conteudo_publicado(conn, snap)
 
 
 def publish_in_transaction(conn, snap: Snapshot, run_id: str) -> dict:
@@ -485,6 +581,12 @@ def _publicar(snap: Snapshot, run_id: str) -> dict:
             raise ConcurrentRunError(
                 f"advisory lock {ADVISORY_LOCK_KEY} ocupado: outra execucao em curso"
             )
+        # NO-OP DENTRO DO LOCK, e nao antes dele: checar fora seria uma corrida
+        # — outra execucao poderia publicar entre a checagem e o DELETE.
+        if not upstream_avancou(conn, snap):
+            return {"noop": True, "linhas_publicadas": 0,
+                    "motivo": "o upstream nao avancou: o conteudo lido do gold "
+                              "e' identico ao ja' publicado nesta janela"}
         return publish_in_transaction(conn, snap, run_id)
 
 
@@ -523,6 +625,9 @@ def run(apply: bool = False, meses: int = JANELA_MESES,
     dm = DataMartSession()
     try:
         dm.connection().connection.set_session(readonly=True)
+        # 🔴 FRESCOR ANTES DE TUDO: fonte velha ou vazia levanta aqui, antes de
+        # ler uma linha de dado e muito antes de abrir a transacao do destino.
+        ultimo_dia_gold = validate_frescor(dm.connection(), hoje)
         snap = read_source(dm.connection(), meses_ref, alvo, mes_corrente,
                            captured_at)
     finally:
@@ -535,6 +640,8 @@ def run(apply: bool = False, meses: int = JANELA_MESES,
         "run_id": run_id,
         "hoje_brt": str(hoje),
         "captured_at": captured_at.isoformat(),
+        "ultimo_dia_gold": str(ultimo_dia_gold),
+        "atraso_gold_dias": (hoje - ultimo_dia_gold).days,
         "competencias": [str(m) for m in meses_ref],
         "mes_corrente_parcial": str(mes_corrente),
         "marcas": list(alvo),
@@ -572,7 +679,11 @@ def run(apply: bool = False, meses: int = JANELA_MESES,
     audit_finish(sync_run_id, "success", rows_loaded=pub["linhas_publicadas"])
 
     resumo["modo"] = "apply"
-    resumo["aplicado"] = True
+    # `aplicado` so' e' verdadeiro quando houve ESCRITA. Um NO-OP termina em
+    # sucesso e nao escreveu nada — chamar isso de "aplicado" faria a operacao
+    # ler publicacao onde houve apenas confirmacao de que nada mudou.
+    resumo["aplicado"] = not pub.get("noop", False)
+    resumo["noop"] = bool(pub.get("noop", False))
     resumo["sync_run_id"] = sync_run_id
     resumo.update(pub)
     return resumo

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -217,3 +217,116 @@ def test_migration_exige_captura_em_linha_de_api():
     fonte = MIGRATION.read_text(encoding="utf-8")
     assert "ck_shopee_prod_api_tem_captura" in fonte
     assert "source <> 'api' OR source_captured_at IS NOT NULL" in fonte
+
+
+# --------------------------------------------------------------------------- #
+# Frescor da fonte — falha FECHADA                                              #
+# --------------------------------------------------------------------------- #
+
+class _ConnFrescor:
+    """Dublê mínimo: `execute(...).scalar()` devolve o dia configurado."""
+
+    def __init__(self, ultimo):
+        self._ultimo = ultimo
+
+    def execute(self, *_a, **_k):
+        return self
+
+    def scalar(self):
+        return self._ultimo
+
+
+def test_gold_vazio_levanta_em_vez_de_publicar():
+    with pytest.raises(mod.ShopeeProdutosSyncError, match="VAZIA"):
+        mod.validate_frescor(_ConnFrescor(None), date(2026, 9, 25))
+
+
+def test_gold_velho_levanta():
+    """Publicar um gold parado reescreve a competência corrente com dado velho
+    — indistinguível de 'vendeu menos'."""
+    velho = date(2026, 9, 25) - timedelta(days=mod.FRESCOR_MAX_DIAS + 1)
+    with pytest.raises(mod.ShopeeProdutosSyncError, match="VELHA"):
+        mod.validate_frescor(_ConnFrescor(velho), date(2026, 9, 25))
+
+
+def test_gold_no_limite_do_frescor_passa():
+    no_limite = date(2026, 9, 25) - timedelta(days=mod.FRESCOR_MAX_DIAS)
+    assert mod.validate_frescor(_ConnFrescor(no_limite),
+                                date(2026, 9, 25)) == no_limite
+
+
+def test_frescor_e_checado_antes_de_ler_a_fonte():
+    """Fonte velha tem de levantar ANTES de qualquer leitura de dado, e muito
+    antes de abrir a transação do destino."""
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    corpo = fonte[fonte.index("def run("):]
+    assert corpo.index("validate_frescor") < corpo.index("read_source")
+
+
+# --------------------------------------------------------------------------- #
+# NO-OP — upstream que não avançou, e retry seguro                              #
+# --------------------------------------------------------------------------- #
+
+class _ConnConteudo:
+    """Dublê que devolve linhas no formato de `.mappings().all()`."""
+
+    def __init__(self, linhas):
+        self._linhas = linhas
+
+    def execute(self, *_a, **_k):
+        return self
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._linhas
+
+
+def _publicado_de(rows):
+    return [{"ref_month": r.ref_month, "brand": r.brand,
+             "sku_ref_key": r.sku_ref_key, "product_name": r.product_name,
+             "gmv": r.gmv, "units_sold": r.units_sold,
+             "completed_orders": r.completed_orders,
+             "is_partial": r.is_partial} for r in rows]
+
+
+def test_conteudo_identico_nao_conta_como_avanco():
+    rows = [_row(sku="A"), _row(sku="B")]
+    snap = _snap(rows)
+    conn = _ConnConteudo(_publicado_de(rows))
+    assert mod.upstream_avancou(conn, snap) is False
+
+
+def test_gmv_diferente_conta_como_avanco():
+    rows = [_row(sku="A", gmv=100.0)]
+    snap = _snap(rows)
+    conn = _ConnConteudo(_publicado_de([_row(sku="A", gmv=101.0)]))
+    assert mod.upstream_avancou(conn, snap) is True
+
+
+def test_destino_vazio_conta_como_avanco():
+    assert mod.upstream_avancou(_ConnConteudo([]), _snap([_row()])) is True
+
+
+def test_linha_a_mais_no_destino_conta_como_avanco():
+    """SKU que saiu da fonte precisa provocar republicação, senão ele ficaria
+    publicado para sempre."""
+    snap = _snap([_row(sku="A")])
+    conn = _ConnConteudo(_publicado_de([_row(sku="A"), _row(sku="B")]))
+    assert mod.upstream_avancou(conn, snap) is True
+
+
+def test_comparacao_ignora_run_id_e_captura():
+    """Incluí-los faria a equivalência nunca dar igual — é o bug clássico de
+    fingerprint, e mataria tanto o NO-OP quanto o retry seguro."""
+    for col in ("source_run_id", "source_captured_at"):
+        assert col not in mod._COLS_CONTEUDO
+
+
+def test_noop_e_verificado_dentro_do_lock():
+    """Checar fora do lock seria corrida: outra execução poderia publicar
+    entre a checagem e o DELETE."""
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    corpo = fonte[fonte.index("def _publicar("):]
+    assert corpo.index("pg_try_advisory_xact_lock") < corpo.index("upstream_avancou")
