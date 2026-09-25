@@ -642,3 +642,235 @@ def test_transacao_e_read_only_de_fato(engine, sessao):
             "INSERT INTO marts.fact_shopee_fbs_stock_daily "
             "SELECT * FROM marts.fact_shopee_fbs_stock_daily LIMIT 1"))
     assert "read-only" in str(exc.value).lower()
+
+
+# ===========================================================================
+# 6. Gate FULL-SOURCE-4 — filtro de classificacao, PONTA A PONTA
+# ---------------------------------------------------------------------------
+# Defeito que esta secao existe para nao deixar voltar: `_validar_lista`
+# normalizava toda entrada para `.lower()` e comparava contra uma allowlist em
+# MAIUSCULAS, entao os sete valores validos de classificacao -- os unicos que a
+# tela envia -- eram recusados com 422. O filtro inteiro estava morto.
+#
+# A secao 5 nao pegou isso porque exercitava o SERVICO com `brands`, cujo
+# dominio ja' e' minusculo, e nunca passava uma classificacao de verdade. Aqui
+# a query e' montada como o FRONTEND monta, atravessa o ENDPOINT real e cai num
+# PostgreSQL real -- as tres camadas onde o defeito vivia.
+# ===========================================================================
+
+#: Ordem e grafia EXATAS que `apps/web/src/lib/estoque-full.ts` envia.
+CLASSIFICACOES_DA_TELA = (
+    "RUPTURA_CANDIDATA",
+    "BAIXO_CANDIDATO",
+    "EXCESSO_CANDIDATO",
+    "SEM_GIRO_CANDIDATO",
+    "SUFICIENTE",
+    "SEM_DEMANDA_MEDIDA",
+    "KIT_NAO_CONCILIADO",
+)
+
+ROTA = "/api/v1/performance/shopee-fbs-estoque"
+
+
+@pytest.fixture
+def cliente_com_banco(engine, sessao, monkeypatch):
+    """TestClient com sessao REAL: nada de duble neste caminho.
+
+    A flag e' ligada aqui porque o alvo do teste e' o que acontece DEPOIS
+    dela. Os testes de flag desligada continuam na secao 4.
+    """
+    from fastapi.testclient import TestClient
+    from app.config import settings
+    from app.database import get_db
+    from app.main import app
+
+    monkeypatch.setattr(settings, "shopee_fbs_stock_enabled", True)
+    app.dependency_overrides[get_db] = lambda: sessao
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+def _query_como_a_tela(classificacoes=(), brands=(), accounts=(),
+                       busca=None, somente_acao=False):
+    """Reproduz `buildQuery` do front: chave REPETIDA por valor.
+
+    Montar `classificacoes=A,B` num unico parametro passaria no teste e
+    falharia no browser -- e e' exatamente o tipo de diferenca que deixou o
+    defeito original escapar.
+    """
+    params = [("classificacoes", c) for c in classificacoes]
+    params += [("brands", b) for b in brands]
+    params += [("accounts", a) for a in accounts]
+    if busca:
+        params.append(("busca", busca))
+    if somente_acao:
+        params.append(("somente_acao", "true"))
+    return params
+
+
+@pg
+@pytest.mark.parametrize("classe", CLASSIFICACOES_DA_TELA)
+def test_cada_classificacao_da_tela_responde_200_e_filtra(
+        engine, cliente_com_banco, classe):
+    """🔑 O defeito bloqueante: cada um dos sete valores, um por um."""
+    _estado(engine, DDL + SEED)
+
+    r = cliente_com_banco.get(ROTA, params=_query_como_a_tela([classe]))
+
+    assert r.status_code == 200, (
+        f"{classe} recusada com {r.status_code}: {r.text[:200]}")
+    corpo = r.json()
+    assert corpo["status"] == "ok"
+    devolvidas = {p["classificacao_torre"] for p in corpo["produtos"]}
+    assert devolvidas == {classe}, (
+        f"o filtro vazou: pedi {classe} e vieram {devolvidas}")
+    assert corpo["total_no_filtro"] == len(corpo["produtos"])
+    # O SEED tem exatamente uma linha por classificacao.
+    assert corpo["total_no_filtro"] == 1
+
+
+@pg
+def test_multiplas_classificacoes_somam_sem_vazar(engine, cliente_com_banco):
+    _estado(engine, DDL + SEED)
+    pedidas = ["RUPTURA_CANDIDATA", "BAIXO_CANDIDATO", "EXCESSO_CANDIDATO"]
+
+    r = cliente_com_banco.get(ROTA, params=_query_como_a_tela(pedidas))
+
+    assert r.status_code == 200
+    corpo = r.json()
+    assert {p["classificacao_torre"] for p in corpo["produtos"]} == set(pedidas)
+    assert corpo["total_no_filtro"] == 3
+    # E os cartoes continuam descrevendo o ESCOPO, nao o filtro da tabela.
+    assert corpo["indicadores"]["produtos_total"] == 7
+
+
+@pg
+def test_classificacao_com_marca_conta_busca_e_acao(engine, cliente_com_banco):
+    """Todas as dimensoes ao mesmo tempo, que e' como a tela e' usada."""
+    _estado(engine, DDL + SEED)
+
+    # O item 102 e' barbours/barbours, BAIXO_CANDIDATO, SKU-102.
+    r = cliente_com_banco.get(ROTA, params=_query_como_a_tela(
+        classificacoes=["BAIXO_CANDIDATO"],
+        brands=["barbours"],
+        accounts=["barbours"],
+        busca="SKU-102",
+        somente_acao=True,
+    ))
+
+    assert r.status_code == 200
+    corpo = r.json()
+    assert [p["item_id"] for p in corpo["produtos"]] == ["102"]
+    assert corpo["produtos"][0]["classificacao_torre"] == "BAIXO_CANDIDATO"
+
+    # Combinacao CONTRADITORIA nao pode virar erro nem trazer linha errada:
+    # excesso nao esta entre as que exigem acao, entao o certo e' lista vazia.
+    r2 = cliente_com_banco.get(ROTA, params=_query_como_a_tela(
+        classificacoes=["EXCESSO_CANDIDATO"], somente_acao=True))
+    assert r2.status_code == 200
+    assert r2.json()["total_no_filtro"] == 0
+    assert r2.json()["status"] == "ok", "filtro sem match nao e' indisponivel"
+
+
+@pg
+def test_caixa_da_entrada_nao_importa_e_o_dominio_nao_muda(
+        engine, cliente_com_banco):
+    """Minuscula e caixa mista tambem casam -- e a fato segue em MAIUSCULAS."""
+    _estado(engine, DDL + SEED)
+
+    for grafia in ("ruptura_candidata", "Ruptura_Candidata",
+                   "  RUPTURA_CANDIDATA  "):
+        r = cliente_com_banco.get(ROTA, params=_query_como_a_tela([grafia]))
+        assert r.status_code == 200, f"{grafia!r} recusada"
+        produtos = r.json()["produtos"]
+        assert produtos, f"{grafia!r} nao trouxe linha"
+        # O que SAI e' sempre a forma canonica gravada na fato.
+        assert {p["classificacao_torre"] for p in produtos} == {
+            "RUPTURA_CANDIDATA"}
+
+
+@pg
+def test_marca_continua_normalizando_como_antes(engine, cliente_com_banco):
+    """A correcao nao podia mexer no comportamento de marca e conta."""
+    _estado(engine, DDL + SEED)
+
+    for grafia in ("apice", "APICE", " Apice "):
+        r = cliente_com_banco.get(ROTA,
+                                  params=_query_como_a_tela(brands=[grafia]))
+        assert r.status_code == 200, f"marca {grafia!r} recusada"
+        assert r.json()["contas_cobertas"] == ["apice"]
+        assert {p["brand"] for p in r.json()["produtos"]} == {"apice"}
+
+
+@pg
+def test_valor_invalido_continua_422_sem_ecoar(engine, cliente_com_banco):
+    """A correcao nao pode ter afrouxado a allowlist."""
+    _estado(engine, DDL + SEED)
+
+    for invalido in ("INVENTADA", "ruptura", "RUPTURA_CANDIDATA_X", "*"):
+        r = cliente_com_banco.get(ROTA,
+                                  params=_query_como_a_tela([invalido]))
+        assert r.status_code == 422, f"{invalido!r} passou pela allowlist"
+        assert invalido not in r.text, "a recusa ecoou a entrada"
+        assert "RUPTURA_CANDIDATA" in r.text, "a recusa precisa listar o aceito"
+
+
+@pg
+def test_entrada_hostil_nao_e_refletida_nem_interpolada(
+        engine, cliente_com_banco):
+    """Injecao pelos dois campos de texto que chegam ao SQL."""
+    from sqlalchemy import text as _t
+    _estado(engine, DDL + SEED)
+
+    hostis = [
+        "'; DROP TABLE marts.fact_shopee_fbs_stock_daily; --",
+        "' OR 1=1 --",
+        "<script>alert(1)</script>",
+        "%' UNION SELECT NULL--",
+    ]
+
+    for payload in hostis:
+        # 1) pela classificacao: recusa 422 e NAO devolve o texto.
+        r = cliente_com_banco.get(ROTA, params=_query_como_a_tela([payload]))
+        assert r.status_code == 422
+        assert payload not in r.text
+
+        # 2) pela busca: e' parametro legitimo, entao responde 200 -- mas como
+        #    TEXTO procurado, nunca como SQL, e sem casar nada.
+        r2 = cliente_com_banco.get(ROTA,
+                                   params=_query_como_a_tela(busca=payload))
+        assert r2.status_code == 200, (
+            f"busca {payload!r} quebrou: {r2.text[:200]}")
+        assert r2.json()["total_no_filtro"] == 0
+
+    # A prova que fecha: a tabela continua existindo e com todas as linhas.
+    with engine.begin() as conn:
+        restantes = conn.execute(_t(
+            "SELECT COUNT(*) FROM marts.fact_shopee_fbs_stock_daily")).scalar()
+    assert restantes == 7, "o DROP passou: a fonte foi alterada por uma query"
+
+
+@pg
+def test_filtro_de_classificacao_nao_altera_os_cartoes(
+        engine, cliente_com_banco):
+    """Os cartoes sao do ESCOPO; so' a tabela e' refinada."""
+    _estado(engine, DDL + SEED)
+
+    sem = cliente_com_banco.get(ROTA).json()
+    com = cliente_com_banco.get(
+        ROTA, params=_query_como_a_tela(["SUFICIENTE"])).json()
+
+    assert com["indicadores"] == sem["indicadores"]
+    assert com["total_no_filtro"] == 1
+    assert sem["total_no_filtro"] == 7
+
+
+def test_dominio_do_servico_bate_com_o_que_a_tela_envia():
+    """Contrato entre as duas pontas, sem banco.
+
+    Se o front ganhar uma classificacao nova e o servico nao, o filtro dela
+    volta a devolver 422 -- o mesmo defeito, com outro nome.
+    """
+    assert set(CLASSIFICACOES_DA_TELA) == set(svc.CLASSIFICACOES)

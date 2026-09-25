@@ -353,17 +353,34 @@ def _validar_lista(valores: Optional[Sequence[str]],
 
     Devolver lista vazia silenciosamente faria a tela mostrar zero produtos e
     parecer "sem estoque" -- exatamente a confusao que este modulo evita.
+
+    CASA SEM CAIXA, DEVOLVE A FORMA CANONICA
+    -----------------------------------------
+    Os dominios desta superficie nao compartilham caixa: marcas e contas vivem
+    em minusculas (`apice`), classificacoes em maiusculas
+    (`RUPTURA_CANDIDATA`), porque e' assim que cada uma esta GRAVADA na fato.
+    Normalizar toda entrada para `.lower()` e comparar direto reprovava os sete
+    valores validos de classificacao com 422 -- o filtro da tela inteiro.
+
+    Por isso a comparacao e' feita em minusculas dos DOIS lados, e o que sai
+    e' sempre o valor da allowlist, nao o que o cliente digitou. Assim o SQL
+    recebe a forma exata que a coluna guarda, venha `ruptura_candidata`,
+    `RUPTURA_CANDIDATA` ou `Ruptura_Candidata` do cliente.
     """
     if valores is None:
         return None
-    normalizados = [v.strip().lower() for v in valores if v and v.strip()]
-    if not normalizados:
+    limpos = [v.strip() for v in valores if v and v.strip()]
+    if not limpos:
         return None
-    desconhecidos = sorted(set(normalizados) - set(permitidos))
+    canonico = {p.lower(): p for p in permitidos}
+    # `recebidos` guarda o que o cliente MANDOU, para log interno; a mensagem
+    # que volta no HTTP continua sendo montada so' com constantes.
+    desconhecidos = sorted({v for v in limpos if v.lower() not in canonico})
     if desconhecidos:
         raise FiltroInvalido(campo, permitidos, desconhecidos)
-    # `dict.fromkeys` deduplica PRESERVANDO a ordem pedida.
-    return list(dict.fromkeys(normalizados))
+    # `dict.fromkeys` deduplica PRESERVANDO a ordem pedida -- e deduplica
+    # tambem `apice` com `APICE`, que ja' viraram o mesmo valor canonico.
+    return list(dict.fromkeys(canonico[v.lower()] for v in limpos))
 
 
 def _dias_desde(ref: date, hoje: date) -> int:
