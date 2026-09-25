@@ -47,7 +47,7 @@ from decimal import Decimal
 from psycopg2.extras import execute_values
 from sqlalchemy import text
 
-from pipelines.common.db import DataMartSession, LocalSession
+from pipelines.common.db import DataMartSession, LocalSession, local_engine
 from pipelines.common.logging import get_logger
 
 logger = get_logger(__name__)
@@ -172,9 +172,34 @@ _PADROES_PII = (
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
 )
 
+#: Credencial embutida em DSN. Mesma defesa de `pipelines/expedicao/audit.py`.
+#: Passou a importar aqui porque o texto do erro agora tambem e' GRAVADO em
+#: `audit.source_sync_run.error_message`: um `OperationalError` do psycopg2
+#: carrega a DSN inteira, e a linha de auditoria e' lida por mais gente do que
+#: o log do processo.
+_CREDENCIAL_EM_DSN = re.compile(r"//[^/\s:@]+:[^/\s@]+@")
+
+#: Teto do texto gravado. A coluna e' TEXT e aceitaria tudo, mas um traceback
+#: inteiro em `error_message` transforma a auditoria em deposito de log e afoga
+#: o que o health check procura.
+AUDIT_ERRO_MAX_CHARS = 4000
+
 
 def sanitizar(exc: BaseException | str) -> str:
-    txt = str(exc)
+    """Remove credencial e PII. A ORDEM importa e foi medida.
+
+    A credencial sai PRIMEIRO. Ao contrario, o padrao de e-mail casa
+    `senha@host.neon.tech` dentro da DSN e devolve
+    `postgresql://usuario:<removido>:5432/db`: a senha some por acidente, o
+    HOST e' destruido junto -- a mensagem deixa de dizer qual banco recusou --
+    e a redacao feita para DSN nunca chega a rodar, porque o texto que ela
+    procurava ja' foi comido.
+
+    Depois da substituicao o trecho vira `//<removido>:<removido>@host`, e o
+    padrao de e-mail nao casa mais ali: o caractere antes do `@` passa a ser
+    `>`, que esta' fora da classe. Host e usuario sobrevivem; a senha, nao.
+    """
+    txt = _CREDENCIAL_EM_DSN.sub("//<removido>:<removido>@", str(exc))
     for p in _PADROES_PII:
         txt = p.sub("<removido>", txt)
     return txt
@@ -585,9 +610,134 @@ def publish_in_transaction(conn, snap: Snapshot, run_id: str) -> dict:
             "full_stock_saleable_publicado": esperado_soma}
 
 
-def _conn_lock():
-    engine = LocalSession().get_bind()
-    return engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+# --------------------------------------------------------------------------- #
+# AUDITORIA OPERACIONAL — conexao INDEPENDENTE, commit proprio                  #
+# --------------------------------------------------------------------------- #
+# Mesma escolha de `pipelines/avoe/snapshot_import.py` e de
+# `channel_offer_publisher.py`, e o motivo e' o mesmo: a auditoria NAO pode
+# viver na transacao da publicacao. Se vivesse, o rollback que protege as fatos
+# apagaria junto o registro de que a execucao existiu e falhou -- exatamente o
+# rastro de que se precisa depois de uma falha.
+#
+# Cada chamada abre e fecha a PROPRIA conexao, em vez de segurar uma aberta
+# durante toda a publicacao. Publicar 980 linhas pode levar minutos; uma conexao
+# ociosa atravessando isso e' candidata a morrer no meio e levar junto a chance
+# de FECHAR o registro -- que e' justamente o que nao pode acontecer.
+
+#: Dominio da coluna `status`, espelhando o CHECK da migration 003. Valor fora
+#: daqui seria recusado pelo banco no meio do tratamento de erro.
+AUDIT_STATUSES = ("running", "success", "failed")
+
+
+def _audit_conn():
+    """Conexao psycopg2 CRUA para a auditoria, fora do pool da publicacao."""
+    return LocalSession().get_bind().raw_connection()
+
+
+def audit_start(rows_extracted: int) -> int:
+    """Abre o registro como `running` e COMMITA antes de qualquer escrita.
+
+    Commitar primeiro e' o que garante rastro: se o processo morrer no meio da
+    publicacao, existe uma linha dizendo que comecou.
+    """
+    conn = _audit_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO audit.source_sync_run
+                    (source_name, marketplace_id, loja_id, status, started_at,
+                     rows_extracted)
+                VALUES (%s, %s, NULL, 'running', NOW(), %s)
+                RETURNING sync_run_id
+                """,
+                (AUDIT_SOURCE, AUDIT_MARKETPLACE_ID, rows_extracted),
+            )
+            sync_run_id = cur.fetchone()[0]
+        conn.commit()
+        return sync_run_id
+    finally:
+        conn.close()
+
+
+def audit_finish(sync_run_id: int, status: str,
+                 rows_loaded: int | None = None,
+                 error_message: str | None = None) -> None:
+    """Fecha o registro com `finished_at`. `rowcount != 1` e' falha.
+
+    Nenhuma execucao pode ficar em `running` para sempre: os DOIS desfechos
+    passam por aqui, e o unico residuo possivel e' o banco estar inalcancavel
+    no instante do fechamento -- caso em que escrever o status era impossivel
+    por definicao.
+    """
+    if status not in AUDIT_STATUSES:
+        raise ShopeeStockSyncError(
+            f"status de auditoria fora do dominio da tabela: {status!r}")
+    conn = _audit_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE audit.source_sync_run
+                   SET status = %s, finished_at = NOW(),
+                       rows_loaded = %s, error_message = %s
+                 WHERE sync_run_id = %s
+                """,
+                (status, rows_loaded,
+                 (error_message or None) and error_message[:AUDIT_ERRO_MAX_CHARS],
+                 sync_run_id),
+            )
+            if cur.rowcount != 1:
+                raise ShopeeStockSyncError(
+                    "UPDATE de auditoria nao afetou exatamente 1 linha")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _publicar(snap: Snapshot, run_id: str) -> dict:
+    """UMA transacao explicita para a publicacao inteira.
+
+    O DEFEITO QUE ISTO CORRIGE
+    --------------------------
+    O codigo anterior fazia `with session.connection().begin():`. Numa Session
+    do ORM, `session.connection()` ja' faz AUTOBEGIN e devolve uma Connection
+    com transacao aberta; chamar `.begin()` nela levanta
+    `InvalidRequestError: This connection has already initialized a
+    Transaction()`. A publicacao morria antes da primeira escrita.
+
+    Trocar por `with session.begin():` apenas moveria o problema: aquilo levanta
+    `A transaction is already begun on this Session` se qualquer coisa ja' tiver
+    tocado a Session. A saida nao e' escolher a variante certa de autobegin, e'
+    NAO depender de autobegin: `publish_in_transaction` quer uma Connection, nao
+    uma Session, entao a Session do ORM nao tem papel algum aqui.
+
+    `engine.begin()` abre a transacao explicitamente, faz COMMIT ao sair sem
+    excecao e ROLLBACK em qualquer excecao. As duas fatos e a reconciliacao
+    ficam dentro do mesmo `with`: ou entram as duas, ou nao entra nenhuma.
+
+    ADVISORY LOCK DE TRANSACAO
+    ---------------------------
+    `pg_try_advisory_xact_lock` (e nao `pg_try_advisory_lock`) porque o banco o
+    libera no COMMIT **e** no ROLLBACK, sem depender de um `finally` chegar a
+    rodar. O lock de sessao anterior vivia numa segunda conexao e so' era
+    devolvido por um `pg_advisory_unlock` explicito -- se o processo morresse
+    entre uma coisa e outra, a chave ficava presa numa conexao do pool e a
+    proxima execucao seria recusada por um dono que ja' nao existe.
+
+    E' o PRIMEIRO comando da transacao: nenhuma escrita acontece antes de a
+    exclusividade estar garantida.
+    """
+    with local_engine().begin() as conn:
+        obtido = conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:k)"),
+            {"k": ADVISORY_LOCK_KEY},
+        ).scalar()
+        if not obtido:
+            raise ConcurrentRunError(
+                f"advisory lock {ADVISORY_LOCK_KEY} ocupado: outra execucao em curso"
+            )
+        return publish_in_transaction(conn, snap, run_id)
 
 
 def run(apply: bool = False, agora: datetime | None = None) -> dict:
@@ -650,29 +800,30 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
     if not apply:
         return resumo
 
-    conn_lock = _conn_lock()
+    # `rows_extracted` conta as linhas LIDAS da fonte nos dois graos: e' o
+    # universo que a publicacao tem de reproduzir. `rows_loaded`, no fim, conta
+    # as EFETIVAMENTE gravadas. Os dois batendo e' o sinal de saude que a
+    # auditoria existe para dar.
+    linhas_extraidas = len(snap.locations) + len(snap.produtos)
+    sync_run_id = audit_start(linhas_extraidas)
+    resumo["sync_run_id"] = sync_run_id
+
     try:
-        obtido = conn_lock.execute(
-            text("SELECT pg_try_advisory_lock(:k)"), {"k": ADVISORY_LOCK_KEY}
-        ).scalar()
-        if not obtido:
-            raise ConcurrentRunError(
-                f"advisory lock {ADVISORY_LOCK_KEY} ocupado: outra execucao em curso"
-            )
-        session = LocalSession()
-        try:
-            with session.connection().begin():
-                publicado = publish_in_transaction(session.connection(), snap, run_id)
-            resumo.update(publicado)
-            resumo["applied"] = True
-        finally:
-            session.close()
-    finally:
-        try:
-            conn_lock.execute(text("SELECT pg_advisory_unlock(:k)"),
-                              {"k": ADVISORY_LOCK_KEY})
-        finally:
-            conn_lock.close()
+        publicado = _publicar(snap, run_id)
+    except BaseException as exc:
+        # `BaseException` de proposito: um Ctrl-C tambem deixa a execucao sem
+        # desfecho, e uma linha eterna em `running` e' pior que um `failed`
+        # honesto. A transacao ja' foi desfeita pelo `with` e o advisory lock
+        # ja' foi devolvido pelo banco antes de chegarmos aqui.
+        audit_finish(sync_run_id, "failed", rows_loaded=0,
+                     error_message=sanitizar(exc))
+        raise
+
+    resumo.update(publicado)
+    resumo["applied"] = True
+    audit_finish(sync_run_id, "success",
+                 rows_loaded=(publicado["locations_publicadas"]
+                              + publicado["produtos_publicados"]))
     return resumo
 
 
