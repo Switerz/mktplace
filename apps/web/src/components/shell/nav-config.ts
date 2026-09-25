@@ -32,11 +32,12 @@ export const NAV_SECTIONS: NavSection[] = [
   },
   {
     label: "Pedidos",
-    pages: [
-      { href: "/pedidos", label: "Geral" },
-      { href: "/pedidos/tiktok", label: "TikTok Shop", badge: "Em breve", disabled: true },
-      { href: "/pedidos/ml", label: "Mercado Livre", badge: "Em breve", disabled: true },
-    ],
+    // Gate EXP-UX-2C: sairam "TikTok Shop" e "Mercado Livre", ambos `disabled`
+    // com selo "Em breve" desde o Gate U1. Promessa que ficou parada no menu
+    // vira ruido: ocupa a mesma altura de um item real, some da navegacao por
+    // teclado e ensina o operador a ignorar aquela regiao da lista. Quando as
+    // rotas existirem, entram como itens de verdade.
+    pages: [{ href: "/pedidos", label: "Geral" }],
   },
   {
     label: "Inteligência",
@@ -78,8 +79,14 @@ export const NAV_SECTIONS: NavSection[] = [
  * pedido em si. Nao vira filho de `/operacoes` porque `isNavItemActive` casa
  * por prefixo — dois itens ficariam ativos ao mesmo tempo, o mesmo motivo que
  * levou o Full ML para rota propria.
+ *
+ * Gate EXP-UX-2C: o rotulo perdeu o "Shopee". A tela e' MULTICANAL desde o
+ * EXP-3C2 e o canal se escolhe dentro dela; um menu dizendo "Shopee" ao lado
+ * de uma tela aberta no Mercado Livre contradiz o proprio conteudo. A ROTA
+ * continua `/expedicao` e a Shopee segue como canal padrao — muda o nome, nao
+ * o endereco nem o comportamento.
  */
-export const EXPEDICAO_NAV: NavPage = { href: "/expedicao", label: "Expedição Shopee" };
+export const EXPEDICAO_NAV: NavPage = { href: "/expedicao", label: "Expedição" };
 
 /**
  * Gate FULL-SH-1D — item da tela Full Shopee, atras de

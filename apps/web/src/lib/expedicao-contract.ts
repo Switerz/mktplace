@@ -759,3 +759,354 @@ export function formatarHoras(h: number | null): string {
   if (h < 48) return `${h.toFixed(1)} h`;
   return `${Math.floor(h / 24)} d`;
 }
+
+// ---------------------------------------------------------------------------
+// EXP-UX-1 — hierarquia "resumo primeiro, profundidade sob demanda"
+// ---------------------------------------------------------------------------
+
+/**
+ * As QUATRO perguntas que a tela responde primeiro, por canal.
+ *
+ * Nao sao as mesmas nos dois: a Shopee tem prazo contratual e a pergunta certa
+ * e' "o que venceu". O Mercado Livre nao tem prazo nenhum, entao perguntar
+ * "quantos venceram" devolveria N/D quatro vezes e desperdicaria a area mais
+ * nobre da tela. La' a pergunta e' idade operacional e saude da fonte.
+ */
+export const KPIS_PRINCIPAIS: Record<Canal, readonly string[]> = {
+  shopee: ["backlog", "overdue", "due24h", "stalled"],
+  mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
+};
+
+/** Os quatro cartoes de destaque, na ordem declarada para o canal. */
+export function montarKpisPrincipais(
+  t: Totais | null,
+  frescor: FrescorMarca[],
+  canal: Canal = CANAL_PADRAO,
+): Kpi[] {
+  const todos = montarKpis(t, frescor, canal);
+  const ordem = KPIS_PRINCIPAIS[canal];
+  return ordem
+    .map((chave) => todos.find((k) => k.chave === chave))
+    .filter((k): k is Kpi => k !== undefined);
+}
+
+/** O resto, na faixa secundaria compacta. Nada e' descartado da tela. */
+export function montarKpisSecundarios(
+  t: Totais | null,
+  frescor: FrescorMarca[],
+  canal: Canal = CANAL_PADRAO,
+): Kpi[] {
+  const principais = new Set(KPIS_PRINCIPAIS[canal]);
+  return montarKpis(t, frescor, canal).filter((k) => !principais.has(k.chave));
+}
+
+// ---------------------------------------------------------------------------
+// Barra consolidada de qualidade do dado
+// ---------------------------------------------------------------------------
+export type SeveridadeQualidade = "alerta" | "atencao" | "info";
+
+export interface ProblemaQualidade {
+  chave: string;
+  severidade: SeveridadeQualidade;
+  texto: string;
+}
+
+export interface BarraQualidade {
+  /** O problema que o operador precisa ler primeiro. `null` = tudo em ordem. */
+  principal: ProblemaQualidade | null;
+  /** Todos, inclusive o principal, para o painel expansivel. */
+  detalhes: ProblemaQualidade[];
+  severidade: SeveridadeQualidade | null;
+}
+
+const PESO_SEVERIDADE: Record<SeveridadeQualidade, number> = {
+  alerta: 0,
+  atencao: 1,
+  info: 2,
+};
+
+/**
+ * Consolida a pilha de banners numa barra so'.
+ *
+ * NADA e' escondido: tudo que hoje vira banner continua na lista de detalhes,
+ * e o item mais grave aparece fechado. Defasagem, ausencia de automacao e
+ * lacuna de cobertura entram sempre — sao exatamente as limitacoes que o
+ * operador precisa ver antes de confiar no numero.
+ */
+export function montarBarraDeQualidade(
+  relogios: Relogios | null,
+  avisos: AvisoCobertura[],
+  frescor: LinhaFrescor[],
+): BarraQualidade {
+  const itens: ProblemaQualidade[] = [];
+
+  if (relogios?.snapshotVelho) {
+    itens.push({
+      chave: "fotografia_antiga",
+      severidade: "atencao",
+      texto:
+        `Fotografia publicada há ${formatarHoras(relogios.snapshotAgeHours)}: os ` +
+        "números descrevem aquele instante, não agora.",
+    });
+  }
+  if (relogios?.semAutomacao !== false) {
+    itens.push({
+      chave: "sem_automacao",
+      severidade: "info",
+      texto: AVISO_SEM_AUTOMACAO,
+    });
+  }
+  for (const a of avisos) {
+    itens.push({
+      chave: `cobertura_${a.tipo}_${a.texto.slice(0, 24)}`,
+      // Conta esperada ausente e conta sem cadastro sao falhas de cobertura.
+      // Marca fora do escopo e' informacao de contrato, nao defeito.
+      severidade: a.tipo === "fora_do_escopo" ? "info" : "alerta",
+      texto: a.texto,
+    });
+  }
+  const emAlerta = frescor.filter((f) => f.alerta);
+  if (emAlerta.length) {
+    itens.push({
+      chave: "fonte_em_alerta",
+      severidade: "alerta",
+      texto:
+        `${emAlerta.length} marca(s) com a fonte em alerta: ` +
+        `${emAlerta.map((f) => f.brand).join(", ")}.`,
+    });
+  }
+
+  const ordenados = [...itens].sort(
+    (a, b) => PESO_SEVERIDADE[a.severidade] - PESO_SEVERIDADE[b.severidade],
+  );
+  return {
+    principal: ordenados[0] ?? null,
+    detalhes: ordenados,
+    severidade: ordenados[0]?.severidade ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Mapa de risco por conta
+// ---------------------------------------------------------------------------
+export interface FaixaRisco {
+  chave: string;
+  rotulo: string;
+  valor: number;
+}
+
+export interface LinhaRisco {
+  conta: string;
+  marca: string;
+  backlog: number;
+  /** Categorias MUTUAMENTE EXCLUSIVAS. Vazio quando o canal nao as tem. */
+  segmentos: FaixaRisco[];
+  /** Medidas que SE SOBREPOEM ao backlog e entre si. Nunca empilhadas. */
+  sobreposicoes: FaixaRisco[];
+}
+
+export interface MapaRisco {
+  /**
+   * `true` so' quando os segmentos particionam o backlog. Empilhar medidas
+   * sobrepostas desenharia uma barra maior que o proprio backlog e sugeriria
+   * um total que nao existe.
+   */
+  empilhavel: boolean;
+  linhas: LinhaRisco[];
+  /** Maior backlog da lista: escala comum das barras. */
+  maximo: number;
+  nota: string;
+}
+
+/**
+ * Shopee: `overdue + due_within_24h + on_time + deadline_unavailable` e' uma
+ * PARTICAO do backlog — o pipeline garante a soma exata, e por isso a barra
+ * pode ser empilhada.
+ *
+ * Mercado Livre: `backlog`, `over_48h` e `stalled` se SOBREPOEM. Um pedido
+ * acima de 48h tambem esta no backlog, e pode estar travado ao mesmo tempo.
+ * Empilhar as tres inventaria um total. La' a barra mostra o backlog e as
+ * outras duas entram como marcadores sobre ela.
+ */
+export function montarMapaDeRisco(
+  contas: ResumoConta[],
+  canal: Canal = CANAL_PADRAO,
+): MapaRisco {
+  const temPrazo = canalTemPrazo(canal);
+  const linhas: LinhaRisco[] = contas.map((a) => ({
+    conta: a.shop_account,
+    marca: a.brand,
+    backlog: a.backlog_count,
+    segmentos: temPrazo
+      ? [
+          { chave: "overdue", rotulo: "Vencidos", valor: a.overdue_count },
+          { chave: "due24h", rotulo: "Vence em 24h", valor: a.due_within_24h_count },
+          { chave: "on_time", rotulo: "No prazo", valor: a.on_time_count },
+          {
+            chave: "sem_prazo",
+            rotulo: ROTULO_SEM_PRAZO,
+            valor: a.deadline_unavailable_count,
+          },
+        ]
+      : [],
+    sobreposicoes: temPrazo
+      ? []
+      : [
+          { chave: "over48h", rotulo: "Acima de 48h", valor: a.over_48h_count },
+          { chave: "stalled", rotulo: "Travados", valor: a.stalled_count },
+        ],
+  }));
+  return {
+    empilhavel: temPrazo,
+    linhas,
+    maximo: linhas.reduce((m, l) => Math.max(m, l.backlog), 0),
+    nota: temPrazo
+      ? "Categorias mutuamente exclusivas: somadas, fecham o backlog da conta."
+      : "Backlog, acima de 48h e travados se sobrepõem e NÃO são somados. " +
+        EXPLICACAO_LIMIAR_48H,
+  };
+}
+
+/** Os segmentos particionam mesmo o backlog? Falso aqui e' defeito de dado. */
+export function segmentosFecham(linha: LinhaRisco): boolean {
+  if (!linha.segmentos.length) return true;
+  return linha.segmentos.reduce((s, f) => s + f.valor, 0) === linha.backlog;
+}
+
+// ---------------------------------------------------------------------------
+// Tendencia: janelas e serie para grafico
+// ---------------------------------------------------------------------------
+export const JANELAS_TENDENCIA = [
+  { horas: 24, rotulo: "24h" },
+  { horas: 72, rotulo: "72h" },
+  { horas: 168, rotulo: "7d" },
+] as const;
+
+/**
+ * Janela com que a tela ABRE. Tem de ser uma das tres acima, senao o seletor
+ * nasce com nenhum botao aceso e o operador nao sabe o que esta' vendo —
+ * defeito visto no QA do EXP-UX-1, quando o padrao era 48h.
+ *
+ * `JANELA_PADRAO_HORAS` continua sendo o default da API e nao muda.
+ */
+export const JANELA_INICIAL_HORAS = 72;
+
+/**
+ * Rotulos de `deadline_status`, que e' OUTRO espaco de valores que `Situacao`:
+ * a API devolve `unavailable`, nao `deadline_unavailable`. Reaproveitar o mapa
+ * de situacao fazia a tela imprimir o enum cru "unavailable" na coluna de
+ * situacao do Mercado Livre — onde e' justamente o estado de TODO o backlog.
+ */
+export const ROTULO_DEADLINE_STATUS: Record<string, string> = {
+  overdue: "Vencido",
+  due_within_24h: "Vence em 24h",
+  on_time: "No prazo",
+  unavailable: ROTULO_SEM_PRAZO,
+};
+
+/** Rotulos de `operational_age_status`. Enum cru nao e' texto de tela. */
+/**
+ * Dominio REAL de `operational_age_status`, copiado da fonte da verdade:
+ * `OperationalAgeStatus` em `pipelines/expedicao/contract.py` e o
+ * `Literal["within_48h", "over_48h", "unknown"]` do schema da API.
+ *
+ * O mapa anterior foi escrito de memoria e inventou `under_24h` e
+ * `between_24h_48h`, que nao existem em lugar nenhum — e deixou de fora
+ * `within_48h`, que e' metade do dominio e aparece nos DOIS canais. O efeito
+ * em producao foi a coluna "Idade operacional" exibindo o enum cru.
+ *
+ * Nao existe faixa "entre 24h e 48h" no contrato: a idade operacional tem
+ * DUAS faixas medidas (dentro e acima de 48h) mais o desconhecido. Inventar
+ * uma terceira faixa era prometer um recorte que o pipeline nao calcula.
+ */
+export const ROTULO_IDADE_OPERACIONAL: Record<string, string> = {
+  within_48h: "Dentro de 48h",
+  over_48h: "Acima de 48h",
+  unknown: "Idade desconhecida",
+};
+
+/** O dominio fechado, para o teste travar contra a fonte da verdade. */
+export const IDADES_OPERACIONAIS = ["within_48h", "over_48h", "unknown"] as const;
+
+/** Traduz, e devolve o valor cru quando a fonte trouxer algo novo. */
+export function rotuloDeadline(valor: string): string {
+  return ROTULO_DEADLINE_STATUS[valor] ?? valor;
+}
+
+export function rotuloIdade(valor: string): string {
+  return ROTULO_IDADE_OPERACIONAL[valor] ?? valor;
+}
+
+export interface PontoGrafico {
+  hora: string;
+  [conta: string]: string | number | null;
+}
+
+/**
+ * Series por conta -> linhas do grafico, uma coluna por conta.
+ *
+ * Hora sem ponto para uma conta fica `null`, NUNCA zero: o grafico interrompe
+ * a linha (`connectNulls={false}`) em vez de desenhar uma queda que nao houve.
+ * Foi esse o erro que a tabela de tendencia evitava mostrando linha ausente.
+ */
+export function montarPontosDoGrafico(series: SerieConta[]): PontoGrafico[] {
+  const horas = new Set<string>();
+  for (const s of series) for (const p of s.pontos) horas.add(p.hora);
+  return [...horas]
+    .sort((a, b) => a.localeCompare(b))
+    .map((hora) => {
+      const ponto: PontoGrafico = { hora };
+      for (const s of series) {
+        const achado = s.pontos.find((p) => p.hora === hora);
+        ponto[s.shopAccount] = achado ? achado.backlog : null;
+      }
+      return ponto;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Timeline dos pedidos mais criticos
+// ---------------------------------------------------------------------------
+export const TIMELINE_MAX_LINHAS = 12;
+
+export interface BarraTimeline {
+  chave: string;
+  conta: string;
+  marca: string;
+  horasAbertas: number;
+  /** Shopee: instante do prazo contratual. ML: sempre `null`. */
+  prazo: string | null;
+  /** Só `true` quando o canal publica prazo E o pedido o ultrapassou. */
+  vencido: boolean;
+  acimaDoLimiar: boolean;
+}
+
+/**
+ * Os pedidos mais criticos da PAGINA ATUAL — nunca a fila inteira.
+ *
+ * Desenhar 714 ou 821 barras nao e' leitura operacional, e' ruido: o operador
+ * age sobre os primeiros. O recorte e' explicito na tela para que ninguem leia
+ * a timeline como se fosse o backlog inteiro.
+ *
+ * Para o Mercado Livre `prazo` sai SEMPRE nulo. A barra mede idade operacional
+ * ate' agora; desenhar um fim fabricado seria inventar SLA que a fonte nao tem.
+ */
+export function montarTimeline(
+  fila: LinhaFila[],
+  canal: Canal = CANAL_PADRAO,
+  limite: number = TIMELINE_MAX_LINHAS,
+): BarraTimeline[] {
+  const temPrazo = canalTemPrazo(canal);
+  return [...fila]
+    .sort((a, b) => (b.hours_open ?? 0) - (a.hours_open ?? 0))
+    .slice(0, Math.max(0, limite))
+    .map((l, i) => ({
+      chave: `${l.shop_account}-${l.order_ref ?? i}`,
+      conta: l.shop_account,
+      marca: l.brand,
+      horasAbertas: l.hours_open ?? 0,
+      prazo: temPrazo ? l.dispatch_deadline : null,
+      vencido: temPrazo && l.deadline_status === "overdue",
+      acimaDoLimiar: l.operational_age_status === "over_48h",
+    }));
+}
