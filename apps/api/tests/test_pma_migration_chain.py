@@ -41,7 +41,7 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: 020 (Expedicao TikTok) e 021 (estoque FBS) entraram sem atualizar este pino,
 #: e o teste ficou VERMELHO no main por isso — nao por defeito de cadeia: o head
 #: sempre foi unico. Reajustado aqui pelo Gate KITS-PMA-3, que cria a 022.
-HEAD_ESPERADO = "022"
+HEAD_ESPERADO = "023"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta

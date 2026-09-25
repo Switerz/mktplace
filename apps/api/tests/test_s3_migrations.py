@@ -163,7 +163,12 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # marts.fact_shopee_fbs_daily -- desempenho FBS da Shopee classificado
     # pela modalidade OBSERVADA em cada pedido (`fulfillment_flag`), nunca
     # pela flag de catalogo.
-    assert heads == ["022"], f"head deveria ser unico e igual a 022, veio {heads}"
+    # Gate SHOPEE-API-PRODUTOS-2: head avancado de 022 (referencia de kit)
+    # para 023, que acrescenta procedencia por linha em
+    # marts.fact_shopee_product_monthly (`source`, `source_run_id`,
+    # `source_captured_at`, `is_partial`) e cria
+    # marts.shopee_product_source_mode, o interruptor por marca.
+    assert heads == ["023"], f"head deveria ser unico e igual a 023, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
