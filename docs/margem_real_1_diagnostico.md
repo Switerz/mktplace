@@ -127,8 +127,8 @@ por calibração:
 | rituaria | 1,431 | 0,536 |
 
 **[FATO]** Na mesma janela há R$ 4.092.375 de receita classificada como `plataforma='sem_loja'`
-(kokeshi 1.804.460 · barbours 1.656.072 · lescent 631.843), e o `erp_cd` é NULL em 100% das linhas de
-marketplace — não há emissor para desambiguar.
+(kokeshi 1.804.460 · barbours 1.656.072 · lescent 631.843), e o `erp_cd` é NULL em **2.142 de 2.142** linhas
+de marketplace na janela — não há emissor para desambiguar.
 
 **[INFERÊNCIA]** Parte do déficit da Shopee está em `sem_loja`. Não está provado: `sem_loja` soma R$ 4,09 mi
 e o déficit Shopee é R$ 7,68 mi, e nada no registro associa uma linha `sem_loja` a um canal. **Para virar fato**
@@ -255,7 +255,9 @@ Serve para rateio agregado, não para frete por canal.
 | 5. Lucro líquido | nível 4 − impostos − demais custos | ❌ | ❌ | ❌ |
 
 **Nota sobre o nível 2. [FATO]** O GMV oficial da Torre já é ratificado **sem frete, sem cancelado e sem
-devolvido** — no TikTok pela allowlist de status do conector, na Shopee pela seleção de pedidos ativos.
+devolvido** — no TikTok pela allowlist de status do conector (`COMPLETED/DELIVERED/IN_TRANSIT`, ver
+`docs/gold_vs_marts_matrix.md` §0.1), na Shopee pela seleção de pedidos ativos
+(`pipelines/connectors/shopee/_parser.py`, variável `active`).
 **[INFERÊNCIA]** Os níveis 1 e 2 portanto colapsam na prática. Não está provado que a exclusão é completa nos
 três canais: `refunded_orders` é NULL em todos, e `returned_orders` só existe na Shopee — ou seja, não há como
 **medir** o que foi excluído. **Para virar fato**, é preciso o valor (não a contagem) do que é retirado.
