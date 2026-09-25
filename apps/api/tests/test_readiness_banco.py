@@ -191,12 +191,30 @@ def test_ready_aceita_head_para_o_health_check_do_render():
 # ---------------------------------------------------------------------------
 # F1 — os limites da sonda sao REAIS, nao decorativos
 # ---------------------------------------------------------------------------
+def _nome_do_pool(engine) -> str:
+    """Nome da CLASSE do pool, resolvido fora do `assert`.
+
+    A versao anterior era `assert isinstance(engine.pool, NullPool)`. Quando
+    falha, o pytest monta a cadeia de sub-expressoes e publica o repr do
+    Engine. Medido com `poolclass=NullPool` removido:
+
+        where <...QueuePool object...> =
+            Engine(postgresql://user:***@localhost:5432/mktplace_control).pool
+
+    Ou seja: usuario, host, porta e banco no log de CI. A senha sai mascarada
+    pelo repr do SQLAlchemy, o resto nao.
+
+    Resolvendo o nome ANTES, o `assert` fica com duas strings e o pytest nao
+    tem objeto nenhum para expandir.
+    """
+    return type(engine.pool).__name__
+
+
 def test_a_sonda_tem_engine_dedicado_com_nullpool():
     """Sem pool proprio, um probe travado prenderia conexao de producao."""
-    from sqlalchemy.pool import NullPool
-
     assert database.readiness_engine is not None
-    assert isinstance(database.readiness_engine.pool, NullPool)
+    nome_do_pool = _nome_do_pool(database.readiness_engine)
+    assert nome_do_pool == "NullPool"
 
 
 def test_a_sonda_nao_e_o_engine_da_aplicacao():
@@ -283,11 +301,14 @@ def test_o_engine_principal_nao_recebe_os_limites_da_sonda():
 
 
 def test_a_sonda_usa_nullpool_e_o_principal_nao():
-    """Sem pool proprio, um probe travado prenderia conexao de producao."""
-    from sqlalchemy.pool import NullPool
+    """Sem pool proprio, um probe travado prenderia conexao de producao.
 
-    assert isinstance(database.readiness_engine.pool, NullPool)
-    assert not isinstance(database.engine.pool, NullPool)
+    Comparacao por NOME de classe, nao por `isinstance`: ver `_nome_do_pool`.
+    """
+    nome_do_pool_da_sonda = _nome_do_pool(database.readiness_engine)
+    nome_do_pool_principal = _nome_do_pool(database.engine)
+    assert nome_do_pool_da_sonda == "NullPool"
+    assert nome_do_pool_principal != "NullPool"
 
 
 def test_o_timeout_decorativo_nao_voltou():
