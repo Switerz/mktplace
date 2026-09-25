@@ -181,16 +181,104 @@ Travado em `test_todo_none_carrega_motivo_do_vocabulario`.
 
 ## 7. Limites conhecidos
 
-- **Não está ligado.** Nenhuma flag, nenhum consumidor. `pma_domain` continua
-  mandando todo kit para `kit_composition_missing`.
+- **Publicado, não ligado em produção.** O gate KITS-PMA-3 materializou a
+  referência em `marts.fact_kit_reference_daily` e a API já sabe servi-la (ver
+  seção 9), mas **nenhuma migration foi aplicada e nenhum publisher foi
+  executado em produção**. Enquanto a tabela não existir no Neon, o serving lê
+  zero linha e o comportamento é idêntico ao de antes.
 - **O teto não é a ponte, é a referência B2B.** Só 57 dos 612 componentes
   ativos da BOM têm linha na tabela B2B; 146 dos 1.516 kits têm *todos* os
   componentes referenciados. Mesmo com a ponte perfeita, o alcance para nesse
   número.
-- **Marca do componente vem do `dim_produto`.** Onde o cadastro discorda — o
-  caso conhecido é `KS03046`, `By Samia` no cadastro e `kokeshi` no
-  `dim_produto`, cuja `marca_origem` é `prefixo_protheus` — o contrato segue a
-  dimensão e só bloqueia quando ela própria declara `marca_conflitante`. A
-  divergência está registrada na proposta de cadastro, não resolvida.
+- **Marca do componente vem do `dim_produto`.** O contrato segue a dimensão e
+  só bloqueia quando ela própria declara `marca_conflitante`. Onde o cadastro
+  discorda, a discordância é do cadastro: ver `KS03046` na seção 8.
 - **`kit_available_units` não é calculável** e por isso não está implementado
   aqui: ver seção 8 da reconciliação.
+
+---
+
+## 8. `KS03046` — resolvido, e o cadastro é que está errado
+
+**Fato confirmado.** `KS03046` é **`kokeshi`**, "Sabonete Facial Pele Porcelana
+190ml", EAN `7908790700830`.
+
+Evidência medida em `gold.bling_all_brands_nfes_gproducts` em 2026-09-25:
+**12.335 linhas de nota fiscal, 100% com `marca = 'kokeshi'`**, um único
+`item_codigo`, entre 01/07/2026 e 24/09/2026. **Zero** linha de "By Samia".
+
+A linha `By Samia` em `silver.gobeaute_produto_cadastro` é **inconsistência
+cadastral, não autoridade**. Ela entra na fila de aprovação como
+`inconsistencia_de_marca`, com a marca proposta já preenchida e estado
+`PENDENTE` — corrigir cadastro é ato de quem o mantém.
+
+O contrato **não muda**: ele já seguia `dim_produto.marca` (`kokeshi`, via
+`marca_origem = prefixo_protheus`), então nenhum dos seis valores dependia
+desta decisão. O que muda é que **não há mais risco aberto** — havia uma
+divergência sem veredito, e agora há veredito.
+
+### Os sufixos da descrição não criam produto
+
+As descrições observadas para o mesmo `item_codigo` variam — "190ML", "200ml",
+"Sabonete Líquido", e em outros produtos sufixos como "E6" e "F5". **Lê-se como
+lote ou variação de embalagem, e isso permanece inferência, não fato.** O
+código e a marca não variam; a descrição sim. Nenhuma rotina deste gate
+interpreta sufixo de descrição, e nenhuma deve passar a interpretar sem
+evidência própria.
+
+---
+
+## 9. Serving (gate KITS-PMA-3)
+
+### Onde cada coisa roda
+
+| etapa | onde | por quê |
+|---|---|---|
+| BOM, catálogo, ponte cadastral | Data Mart | só existem lá |
+| cálculo da referência | **pipeline** (`kit_reference_publisher`) | é quem alcança o Data Mart; o Render não |
+| materialização | `marts.fact_kit_reference_daily` (Neon) | o que a API lê |
+| aplicação na oferta | `compare_listing` | mesmo caminho de diferença das ofertas comuns |
+
+**A API nunca recalcula composição.** Uma consulta por requisição, do valor já
+pronto. Travado em `test_nao_ha_consulta_de_bom_no_serving` e
+`test_api_nunca_toca_o_data_mart`.
+
+### Por que tabela própria, e não colunas na fotografia de ofertas
+
+Está argumentado na docstring da migration 022. Em resumo: produtor único da
+fotografia, dependência de **dois** insumos (fotografia da oferta **e** snapshot
+B2B), densidade (10 linhas em 1.916 ofertas) e reversibilidade.
+
+E **não** em `fact_suggested_price_reference_snapshot`: aquela tabela é a
+planilha B2B original, com contrato próprio. Um kit derivado não veio de
+arquivo nenhum; inserir ali faria `distinct_b2b_products` contar produto que a
+Trade nunca cadastrou.
+
+### As quatro recusas do serving
+
+1. `status = 'resolved'` — a linha `blocked` diz *por que* aquele kit não tem
+   preço; nunca vira preço;
+2. `reference_snapshot_id` igual ao snapshot em uso — referência calculada
+   sobre planilha antiga é recusada, não exibida com o rótulo de hoje;
+3. `(marketplace, observed_date)` — mesma fotografia das ofertas servidas;
+4. marca, conta e `seller_sku` conferidos no casamento em memória — a
+   referência de uma oferta jamais é aplicada em outra.
+
+A referência B2B **direta** tem precedência sobre a derivada: se o SKU do kit
+estiver na planilha, a planilha é a autoridade.
+
+### O que muda na oferta
+
+`product_type` **continua kit** e continua contado em
+`kit_confirmed`/`kit_suspected`. O que muda é que a oferta volta ao
+denominador, com KPI próprio:
+
+```
+eligible_offers = active_offers - kit_confirmed - kit_suspected
+                  - fora_de_escopo_nao_kit + kit_reference_derived
+```
+
+`match_method = "kit_components_derived"`, `match_quality =
+"derived_from_kit_components"`, e seis campos de procedência viajam na linha.
+Kit sem referência derivada continua exatamente como antes: `NULL`,
+`kit_composition_missing`, nunca zero.
