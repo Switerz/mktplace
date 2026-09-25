@@ -492,11 +492,23 @@ test("recusa http, dominio estranho e esquema perigoso", () => {
 });
 
 test("o link usa target e rel seguros, e ausencia vira texto", async () => {
-  const pagina = await ler(PAGE);
+  const [pagina, lib] = await Promise.all([ler(PAGE), ler(LIB)]);
   assert.ok(pagina.includes('target="_blank"'));
   assert.ok(pagina.includes('rel="noopener noreferrer"'));
-  assert.ok(pagina.includes("Link do anúncio indisponível"));
-  assert.ok(pagina.includes("urlAnuncioSegura"));
+  // Gate PMA-OPS-2 — a pagina passou a consumir `linkAnuncioView`, que
+  // distingue "a fonte nao publica URL" de "o canal publica e esta linha veio
+  // sem". A INVARIANTE nao mudou: toda URL continua passando pela allowlist
+  // de dominio, so' que agora dentro do helper. O teste segue o refactor e
+  // verifica a invariante nos dois arquivos, em vez de exigir a chamada
+  // literal na pagina — que so' provava onde a funcao estava escrita.
+  assert.ok(pagina.includes("linkAnuncioView(linhaAberta.permalink, marketplace)"),
+    "a pagina tem de resolver o link pelo helper, nunca montar URL");
+  assert.ok(/export function linkAnuncioView[\s\S]*?urlAnuncioSegura\(/.test(lib),
+    "o helper tem de passar pela allowlist de dominio do canal");
+  // Ausencia vira TEXTO, nos dois sabores.
+  assert.ok(pagina.includes("linkAnuncio.rotulo"));
+  assert.ok(lib.includes("Link indisponível na fonte"));
+  assert.ok(lib.includes("Link ausente ou fora dos domínios reconhecidos"));
 });
 
 test("nenhum HTML da API e' renderizado", async () => {

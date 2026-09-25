@@ -254,8 +254,13 @@ export interface MonitoramentoPrecoMetrics {
    * `no_reference_breakdown` explica o CARTAO da tela. No TikTok eram 810 no
    * cartao contra 251 nos motivos, e nada no payload dizia que os 559 de
    * diferenca eram 404 kits e 155 ofertas fora do escopo de beleza.
+   *
+   * OPCIONAL, como `observed_brands`: backend e frontend sao publicados
+   * separadamente, e durante a janela entre os dois deploys a resposta antiga
+   * nao traz o campo. Ausente significa "esta API ainda nao decompoe", que e'
+   * diferente de "decompos e nao ha nada" — a tela precisa distinguir os dois.
    */
-  no_reference_breakdown: Record<string, number>;
+  no_reference_breakdown?: Record<string, number>;
   /** NULO quando nada foi medido. Zero afirmaria "medimos e deu 0%". */
   coverage_rate: number | null;
   distinct_b2b_products: number;

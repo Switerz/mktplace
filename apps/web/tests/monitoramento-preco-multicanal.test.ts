@@ -381,8 +381,17 @@ test("23. a pagina nunca constroi URL a partir de offer_key", async () => {
   const codigo = await lerCodigo(PAGE);
   assert.ok(!/https?:\/\/[^"'`]*\$\{/.test(codigo),
     "nenhuma URL montada por interpolacao na pagina");
-  assert.ok(codigo.includes("urlAnuncioSegura(linhaAberta.permalink, marketplace)"),
-    "o link tem de passar pela allowlist do canal");
+  // Gate PMA-OPS-2 — a chamada mudou de `urlAnuncioSegura` para
+  // `linkAnuncioView`, que a envolve. A invariante que este teste protege e'
+  // "nenhuma URL escapa da allowlist do canal", nao o nome da funcao na
+  // pagina: por isso a verificacao segue ate' o helper, na lib.
+  assert.ok(codigo.includes("linkAnuncioView(linhaAberta.permalink, marketplace)"),
+    "o link tem de passar pelo helper, que aplica a allowlist do canal");
+  const lib = await lerCodigo(LIB);
+  assert.ok(/export function linkAnuncioView[\s\S]*?urlAnuncioSegura\(/.test(lib),
+    "o helper tem de delegar a allowlist de dominio, nunca montar URL");
+  assert.ok(!/https?:\/\/[^"'`]*\$\{/.test(lib),
+    "nenhuma URL montada por interpolacao na lib");
   const alvo = codigo.slice(codigo.indexOf("linkAnuncio"));
   assert.ok(/noopener/.test(codigo) && /noreferrer/.test(codigo), alvo.slice(0, 80));
 });

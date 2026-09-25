@@ -44,6 +44,7 @@ import {
   fmtDiferenca,
   fmtInstanteBrt,
   fmtMoeda,
+  fmtParticipacao,
   fmtPercentual,
   listingStatusLabel,
   matchLabel,
@@ -51,7 +52,10 @@ import {
   statusLabel,
   freshnessLabel,
   tituloLinha,
-  urlAnuncioSegura,
+  // Gate PMA-OPS-2 — causas, relogios e estado do link
+  decomporSemReferencia,
+  painelDeFrescor,
+  linkAnuncioView,
   // Gate PMA-2C4B — multicanal
   PRODUCT_TYPE_ORDER,
   canaisDisponiveis,
@@ -383,9 +387,19 @@ export default function MonitoramentoPrecoPage() {
     ? avisoTruncamento(dados.truncated, dados.returned_count, dados.total_count)
     : null;
 
+  // Gate PMA-OPS-2 — tres estados, nao dois. "A fonte nao fornece URL" e'
+  // limite da origem; "o canal fornece e esta linha veio sem" e' defeito. A
+  // mensagem antiga dizia a mesma frase para os dois.
   const linkAnuncio = linhaAberta
-    ? urlAnuncioSegura(linhaAberta.permalink, marketplace)
+    ? linkAnuncioView(linhaAberta.permalink, marketplace)
     : null;
+
+  // Gate PMA-OPS-2 — os quatro relogios e a decomposicao das causas.
+  const frescor = painelDeFrescor(meta);
+  const causas = decomporSemReferencia(
+    dados?.metrics?.no_reference_breakdown,
+    dados?.kpis?.no_reference_count ?? 0,
+  );
 
   // ---- Gate PMA-2C4B: vistas multicanal -----------------------------------
   const canais = canaisDisponiveis();
@@ -662,6 +676,73 @@ export default function MonitoramentoPrecoPage() {
         </section>
       )}
 
+      {/* ------- Gate PMA-OPS-2: os relogios, separados e nomeados -------- */}
+      {/*
+        Este painel existe para impedir UMA frase: "a ingestao rodou hoje de
+        manha, entao a tela esta atual". Sao relogios diferentes, e o unico que
+        descreve o que a tela mostra e' o da publicacao. O quarto — o estado
+        atual da ingestao bruta — e' declarado como NAO OBSERVAVEL aqui, porque
+        omiti-lo e' justamente o que produz aquela conclusao.
+      */}
+      <section
+        aria-label="Frescor da fotografia"
+        aria-busy={estado.loading}
+        className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 mb-4"
+      >
+        <div className="flex flex-wrap items-baseline gap-2 mb-3">
+          <h2 className="text-sm font-semibold text-slate-800">
+            Frescor da fotografia
+          </h2>
+          <span
+            className={`inline-block text-xs font-semibold border rounded-full px-2 py-0.5 ${
+              frescor.situacao === "em_dia"
+                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                : frescor.situacao === "atrasada"
+                  ? "bg-amber-50 border-amber-300 text-amber-900"
+                  : frescor.situacao === "retrospectiva"
+                    ? "bg-sky-50 border-sky-200 text-sky-900"
+                    : "bg-slate-100 border-slate-300 text-slate-700"
+            }`}
+          >
+            {frescor.rotuloSituacao}
+          </span>
+        </div>
+        {estado.loading && !meta ? (
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"
+            aria-hidden="true"
+          >
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-20 rounded-xl bg-slate-100 animate-pulse"
+              />
+            ))}
+          </div>
+        ) : (
+          <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {frescor.relogios.map((r) => (
+              <div
+                key={r.chave}
+                className={`rounded-xl border p-3 ${
+                  r.chave === "ingestao_bruta"
+                    ? "border-dashed border-slate-300 bg-slate-50"
+                    : "border-slate-200 bg-white"
+                }`}
+              >
+                <dt className="text-xs uppercase tracking-wide text-slate-500">
+                  {r.rotulo}
+                </dt>
+                <dd className="text-sm font-semibold text-slate-900 mt-0.5 tabular-nums">
+                  {r.valor}
+                </dd>
+                <dd className="text-xs text-slate-500 mt-1">{r.explicacao}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </section>
+
       {/* ---------------- aviso de escopo ---------------- */}
       <section
         aria-label="Escopo e limitações"
@@ -732,6 +813,114 @@ export default function MonitoramentoPrecoPage() {
           </div>
         )}
         <p className="text-xs text-slate-500 mt-2">{NOTA_DENOMINADOR}</p>
+      </section>
+
+      {/* ------- Gate PMA-OPS-2: POR QUE nao ha referencia ---------------- */}
+      {/*
+        O cartao "Sem referencia" e' um numero grande e mudo. Estas sao as
+        causas, e elas tem donos diferentes: marca sem tabela e' pauta de
+        Trade, kit e chave sao de cadastro, produto ausente e' o unico caso em
+        que "nao esta na tabela B2B" se le ao pe da letra.
+
+        A soma e' CONFERIDA contra o cartao e o resultado da conferencia fica
+        visivel. Um detalhamento que nao fecha e' defeito a mostrar, nao a
+        maquiar — por isso existe a linha "Nao reconciliado".
+      */}
+      <section
+        aria-label="Causas da ausência de referência"
+        aria-busy={estado.loading}
+        className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 mb-4"
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+          <h2 className="text-sm font-semibold text-slate-800">
+            Por que não há referência
+          </h2>
+          {!causas.indisponivel && causas.total > 0 && (
+            <span
+              className={`text-xs font-semibold rounded-full border px-2 py-0.5 ${
+                causas.fecha
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                  : "bg-rose-50 border-rose-300 text-rose-900"
+              }`}
+            >
+              {causas.fecha
+                ? `Fecha: ${fmtContagem(causas.somado)} de ${fmtContagem(causas.total)}`
+                : `Não fecha: ${fmtContagem(causas.somado)} de ${fmtContagem(causas.total)}`}
+            </span>
+          )}
+        </div>
+
+        {estado.loading && causas.linhas === null ? (
+          <div className="space-y-2" aria-hidden="true">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="h-12 rounded-xl bg-slate-100 animate-pulse" />
+            ))}
+          </div>
+        ) : estado.error ? (
+          <p className="text-sm text-slate-600">
+            Não foi possível carregar as causas — a falha está no aviso acima.
+            Nenhum número é apresentado no lugar.
+          </p>
+        ) : causas.indisponivel ? (
+          /* Deploy antigo da API: AUSENCIA DE CAMPO, nao ausencia de causa. */
+          <p className="text-sm text-slate-600">
+            Esta versão da API ainda não decompõe as causas. O total sem
+            referência continua correto no cartão acima — o que falta é o
+            detalhamento, não o dado.
+          </p>
+        ) : causas.total === 0 ? (
+          /* Zero MEDIDO, e e' uma boa noticia. Diferente de "nao medimos". */
+          <p className="text-sm text-emerald-800">
+            Nenhuma oferta sem referência nesta fotografia. Zero medido, não
+            ausência de medição.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {(causas.linhas ?? []).map((c) => (
+              <li
+                key={c.chave}
+                className={`rounded-xl border p-3 ${
+                  c.residual
+                    ? "border-rose-300 bg-rose-50"
+                    : "border-slate-200 bg-white"
+                }`}
+              >
+                <div className="flex items-baseline justify-between gap-3">
+                  <span
+                    className={`text-sm font-semibold ${
+                      c.residual ? "text-rose-900" : "text-slate-800"
+                    }`}
+                  >
+                    {c.rotulo}
+                  </span>
+                  <span className="text-sm font-bold text-slate-900 tabular-nums whitespace-nowrap">
+                    {fmtContagem(c.valor)}
+                    {c.fracao != null && (
+                      <span className="ml-1 text-xs font-normal text-slate-500">
+                        ({fmtParticipacao(c.fracao)})
+                      </span>
+                    )}
+                  </span>
+                </div>
+                {c.detalhe && (
+                  <p
+                    className={`text-xs mt-1 ${
+                      c.residual ? "text-rose-800" : "text-slate-500"
+                    }`}
+                  >
+                    {c.detalhe}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-slate-500 mt-3">
+          Conta as ofertas <strong>ativas</strong> sem referência — kits e
+          marcas fora do escopo de beleza inclusive. Por isso soma o cartão
+          &ldquo;Sem referência&rdquo; e não o denominador de cobertura, que
+          exclui os dois de propósito.
+        </p>
       </section>
 
       {/* ---------------- filtros ---------------- */}
@@ -1283,22 +1472,27 @@ export default function MonitoramentoPrecoPage() {
             </div>
 
             <div className="border-t border-slate-200 pt-3">
-              {linkAnuncio ? (
+              {/*
+                Gate PMA-OPS-2 — TRES estados. A mensagem anterior dizia a
+                mesma frase para "a fonte nao publica URL" (Shopee e TikTok,
+                limite da origem) e para "o canal publica e esta linha veio
+                sem" (ML, defeito do dado). A URL nunca e' montada: so'
+                validada contra a allowlist do canal.
+              */}
+              {linkAnuncio?.estado === "disponivel" && linkAnuncio.url ? (
                 <a
-                  href={linkAnuncio}
+                  href={linkAnuncio.url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-block bg-violet-600 text-white rounded-lg px-4 py-3 min-h-[44px] text-sm font-semibold hover:bg-violet-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
                 >
-                  Abrir anúncio {marketplace === "ml" ? "no" : "na"}{" "}
-                  {canalLabel(marketplace)}
+                  {linkAnuncio.rotulo}
                 </a>
-              ) : (
-                <p className="text-xs text-slate-500">
-                  Link do anúncio indisponível ou fora dos domínios reconhecidos
-                  {" "}{canalComPreposicao(marketplace)}.
-                </p>
-              )}
+              ) : linkAnuncio?.estado === "ausente_na_fonte" ? (
+                <p className="text-xs text-slate-500">{linkAnuncio.rotulo}</p>
+              ) : linkAnuncio ? (
+                <p className="text-xs text-amber-800">{linkAnuncio.rotulo}</p>
+              ) : null}
             </div>
           </div>
         )}
