@@ -467,3 +467,42 @@ def test_cli_sem_apply_e_diagnostico(monkeypatch, capsys):
                         lambda *a, **k: chamou.__setitem__("pub", 1))
     assert pub.main(["--mode", "backfill", "--days", "90"]) == 0
     assert chamou == {"diag": 1, "pub": 0}
+
+
+def test_falha_depois_do_commit_nao_marca_failed(banco, fabrica, monkeypatch):
+    """Self-review do MARGEM-REAL-3B.
+
+    Se algo quebrar DEPOIS do commit, `failed` seria uma afirmação falsa — a
+    comissão está publicada. E `failed` levaria o próximo operador a
+    republicar sobre dado correto. O estado honesto é deixar em `running`:
+    um alarme visível que pede inspeção humana.
+    """
+    _semear(banco, (D1, KOKESHI, ML_ID))
+
+    original = pub._fechar_auditoria
+    chamadas = []
+
+    def _quebra_no_success(sessao, sync_run_id, status, extracted, loaded, erro):
+        chamadas.append(status)
+        if status == "success":
+            raise RuntimeError("falha simulada apos o commit")
+        return original(sessao, sync_run_id, status, extracted, loaded, erro)
+
+    monkeypatch.setattr(pub, "_fechar_auditoria", _quebra_no_success)
+
+    with pytest.raises(RuntimeError, match="apos o commit"):
+        _publicar(banco, fabrica, [_bruta(date=D1)])
+
+    # a comissão FOI publicada e continua lá
+    assert _snapshot(banco)[0]["total_fees"] == Decimal("170.00")
+    # e a auditoria NÃO foi marcada failed
+    assert chamadas == ["success"], f"tentou marcar {chamadas}"
+    assert _auditorias(banco)[0]["status"] == "running"
+
+
+def test_falha_antes_do_commit_marca_failed(banco, fabrica):
+    """O contraponto: sem commit, `failed` é a afirmação verdadeira."""
+    _semear(banco, (D1, KOKESHI, ML_ID))
+    with pytest.raises(pub.MlFeeKeyMissingError):
+        _publicar(banco, fabrica, [_bruta(date=D1), _bruta(date=D2)])
+    assert _auditorias(banco)[0]["status"] == "failed"

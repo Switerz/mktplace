@@ -280,6 +280,11 @@ def publicar(date_from: date, date_to: date, *,
     loaded = 0
     sync_run_id: int | None = None
     sessao_audit = None
+    #: `failed` afirma que NADA foi publicado. Depois do commit isso deixa de
+    #: ser verdade, e um `failed` mentiroso faria o próximo operador republicar
+    #: sobre dado bom. A partir do commit, o desfecho honesto de uma falha é
+    #: deixar a auditoria em `running` — um alarme visível que pede inspeção.
+    publicado = False
 
     with trava(MARKETPLACE_ID):
         try:
@@ -324,6 +329,7 @@ def publicar(date_from: date, date_to: date, *,
                         )
                     loaded += res.rowcount
                 sessao_pub.commit()
+                publicado = True
             except BaseException:
                 sessao_pub.rollback()
                 raise
@@ -352,6 +358,18 @@ def publicar(date_from: date, date_to: date, *,
             # também têm de fechar a auditoria. Um `running` preso por Ctrl+C
             # faz o próximo operador acreditar que há carga em andamento.
             msg = sanitizar(exc)
+            if publicado:
+                # A publicação está COMMITADA e algo falhou depois (fechar a
+                # auditoria, montar o resumo). Marcar `failed` diria que nada
+                # foi escrito — falso, e levaria a uma republicação sobre dado
+                # correto. A linha fica em `running`, que é o estado honesto:
+                # ninguém sabe se a execução terminou, e isso pede um humano.
+                logger.error(
+                    "comissao COMMITADA (%d linha[s]) mas a execucao falhou "
+                    "depois: %s. sync_run_id=%s fica em 'running' de proposito "
+                    "— verifique %s antes de qualquer reexecucao.",
+                    loaded, msg, sync_run_id, FACT_TABLE)
+                raise
             logger.error("publicacao da comissao ML falhou: %s", msg)
             if sync_run_id is not None and sessao_audit is not None:
                 _fechar_auditoria(sessao_audit, sync_run_id, "failed",
