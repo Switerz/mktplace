@@ -72,10 +72,14 @@ class SessaoFake:
     """Responde por trecho da consulta e REGISTRA as tabelas tocadas."""
 
     def __init__(self, ofertas=None, referencias=None, listings_ml=None,
-                 datas=None):
+                 datas=None, kit_references=None):
         self.ofertas = list(ofertas or [])
         self.referencias = list(referencias or [])
         self.listings_ml = list(listings_ml or [])
+        # Gate KITS-PMA-3 — referencias de kit DERIVADAS, publicadas em
+        # `marts.fact_kit_reference_daily`. Vazio por padrao: o comportamento
+        # de TODOS os testes anteriores e' o de um banco sem nenhuma linha la'.
+        self.kit_references = list(kit_references or [])
         self.datas = list(datas) if datas is not None else (
             sorted({o["observed_date"] for o in self.ofertas}, reverse=True))
         self.executadas: list[tuple[str, dict]] = []
@@ -87,7 +91,8 @@ class SessaoFake:
         for texto, _ in self.executadas:
             for t in ("fact_channel_offer_observation",
                       "fact_marketplace_listing_price_daily",
-                      "fact_suggested_price_reference_snapshot"):
+                      "fact_suggested_price_reference_snapshot",
+                      "fact_kit_reference_daily"):
                 if t in texto:
                     alvo.add(t)
         return alvo
@@ -96,6 +101,17 @@ class SessaoFake:
         texto = " ".join(str(sql).lower().split())
         p = params or {}
         self.executadas.append((texto, p))
+
+        if "fact_kit_reference_daily" in texto:
+            # Aplica os MESMOS filtros da consulta real, inclusive o do
+            # snapshot: e' ele que impede servir referencia calculada sobre uma
+            # planilha B2B antiga, e um fake permissivo esconderia isso.
+            return _Result([
+                r for r in self.kit_references
+                if r.get("marketplace", p.get("marketplace")) == p.get("marketplace")
+                and r.get("observed_date", p.get("observed_date")) == p.get("observed_date")
+                and r.get("reference_snapshot_id") == p.get("snapshot_id")
+            ])
 
         if "fact_channel_offer_observation" in texto:
             if "max(observed_date)" in texto:

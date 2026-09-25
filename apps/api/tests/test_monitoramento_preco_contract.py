@@ -633,7 +633,7 @@ def test_servico_nao_interpola_valor_no_sql():
     for bloco in re.findall(r'SQL_[A-Z_]+\s*=\s*f?"""(.*?)"""', fonte, re.S):
         for chave in re.findall(r"\{([^}]*)\}", bloco):
             assert chave in ("LISTING_TABLE", "REFERENCE_TABLE",
-                             "CHANNEL_TABLE"), chave
+                             "CHANNEL_TABLE", "KIT_REFERENCE_TABLE"), chave
 
 
 def test_as_duas_pks_cobrem_todas_as_consultas():

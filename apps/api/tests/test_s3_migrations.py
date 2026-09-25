@@ -163,7 +163,7 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # marts.fact_shopee_fbs_daily -- desempenho FBS da Shopee classificado
     # pela modalidade OBSERVADA em cada pedido (`fulfillment_flag`), nunca
     # pela flag de catalogo.
-    assert heads == ["019"], f"head deveria ser unico e igual a 019, veio {heads}"
+    assert heads == ["022"], f"head deveria ser unico e igual a 022, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

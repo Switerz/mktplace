@@ -39,6 +39,7 @@ import argparse
 import csv
 import os
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
@@ -59,6 +60,11 @@ ESTADOS = ("PENDENTE", "APROVADO", "REJEITADO")
 
 #: Valores que o cadastro usa como "vazio" em `sku_antigo`.
 LIXO_DE_ALIAS = {"#N/A", "N/A", "-", "0", "NA", "#REF!"}
+
+#: Minimo de linhas de NF para a nota fiscal ARBITRAR uma marca divergente.
+#: `RT01009` tem UMA linha, de abril: um faturamento isolado nao sustenta
+#: corrigir cadastro. `KS03046` tem 12.335, de julho a setembro.
+MINIMO_DE_NOTAS = 10
 
 SQL_DE_PARA = """
 WITH cadastro AS (
@@ -91,6 +97,51 @@ SELECT c.marca, c.bling, c.protheus AS antigo, d.protheus AS atual,
  WHERE c.protheus <> d.protheus
 """
 
+#: Componentes de kit ATIVO em que o cadastro e a dimensao discordam da marca,
+#: com a contagem de notas fiscais que arbitra. A NF e' a evidencia mais forte
+#: disponivel: ela registra o que foi efetivamente faturado, por marca.
+SQL_MARCA_DIVERGENTE = """
+WITH componentes AS (
+    SELECT DISTINCT upper(trim(component_sku)) AS sku
+      FROM raw.protheus_kit_components
+     WHERE active
+),
+cadastro AS (
+    SELECT upper(trim(sku)) AS sku, lower(trim(marca)) AS marca_cadastro,
+           coalesce(descricao, descricao_comercial) AS descricao
+      FROM silver.gobeaute_produto_cadastro
+     WHERE trim(coalesce(sku, '')) <> ''
+),
+dimensao AS (
+    SELECT upper(trim(coalesce(nullif(codigo_protheus, ''), sku))) AS sku,
+           lower(trim(marca)) AS marca_dim, marca_origem, ean
+      FROM gold.dim_produto_gobeauty
+     WHERE coalesce(nullif(codigo_protheus, ''), '') <> ''
+        OR fonte_do_sku = 'protheus'
+),
+notas AS (
+    SELECT upper(trim(item_codigo)) AS sku, lower(trim(marca)) AS marca_nf,
+           count(*) AS linhas, min(data_emissao)::date AS de,
+           max(data_emissao)::date AS ate
+      FROM gold.bling_all_brands_nfes_gproducts
+     WHERE item_codigo IS NOT NULL
+     GROUP BY 1, 2
+)
+SELECT c.sku, c.marca_cadastro, d.marca_dim, d.marca_origem, d.ean,
+       c.descricao,
+       (SELECT string_agg(n.marca_nf || '=' || n.linhas, ' | '
+                          ORDER BY n.linhas DESC)
+          FROM notas n WHERE n.sku = c.sku) AS marcas_na_nf,
+       (SELECT sum(n.linhas) FROM notas n WHERE n.sku = c.sku) AS linhas_de_nf,
+       (SELECT min(n.de)::text || ' .. ' || max(n.ate)::text
+          FROM notas n WHERE n.sku = c.sku) AS periodo_da_nf
+  FROM cadastro c
+  JOIN dimensao d ON d.sku = c.sku
+  JOIN componentes k ON k.sku = c.sku
+ WHERE c.marca_cadastro IS DISTINCT FROM d.marca_dim
+ ORDER BY 1
+"""
+
 COLUNAS = (
     "secao", "chave", "canal", "marca", "alvo_proposto",
     "ofertas_afetadas", "composicao_empirica", "componentes", "unidades",
@@ -111,7 +162,8 @@ def _carregar_env() -> str:
     return url
 
 
-def _de_para(url: str) -> list[dict]:
+def _consultar(url: str) -> tuple[list[dict], list[dict]]:
+    """Uma conexao SOMENTE LEITURA, duas consultas."""
     import psycopg2
     import psycopg2.extras
     conn = psycopg2.connect(url)
@@ -119,9 +171,76 @@ def _de_para(url: str) -> list[dict]:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(SQL_DE_PARA, {"lixo": list(LIXO_DE_ALIAS)})
-            return [dict(r) for r in cur.fetchall()]
+            de_para = [dict(r) for r in cur.fetchall()]
+            cur.execute(SQL_MARCA_DIVERGENTE)
+            marcas = [dict(r) for r in cur.fetchall()]
+        return de_para, marcas
     finally:
         conn.close()
+
+
+def _sem_acento(texto: object) -> str:
+    """Compara marca ignorando acento.
+
+    `apice` x `Ápice` e `rituaria` x `Rituária` NAO sao inconsistencia de
+    cadastro: sao a mesma marca escrita de dois jeitos. Sem este filtro a fila
+    de aprovacao nasceria com dezenas de linhas que nao pedem decisao nenhuma,
+    e a unica que pede — `KS03046` — se perderia no meio.
+    """
+    bruto = unicodedata.normalize("NFKD", str(texto or "").strip().lower())
+    return "".join(c for c in bruto if not unicodedata.combining(c))
+
+
+def marca_divergente_linhas(linhas: list[dict]) -> list[dict]:
+    """Discordancia de MARCA entre cadastro e dimensao, arbitrada pela NF.
+
+    O caso que originou esta secao e' `KS03046`: o cadastro diz `By Samia`, o
+    `dim_produto` diz `kokeshi` (por `prefixo_protheus`), e as notas fiscais
+    registram `kokeshi` em 100% das linhas. A NF e' o que foi FATURADO — nao ha
+    fonte mais forte disponivel. A linha do cadastro e' a inconsistencia, nao a
+    autoridade.
+
+    A sugestao vai preenchida em `alvo_proposto`, mas o estado continua
+    `PENDENTE`: corrigir cadastro e' ato de quem o mantem.
+    """
+    saida = []
+    for r in linhas:
+        if _sem_acento(r["marca_cadastro"]) == _sem_acento(r["marca_dim"]):
+            continue
+        nf = (r.get("marcas_na_nf") or "").strip()
+        unica = nf.count("|") == 0 and nf != ""
+        marca_nf = nf.split("=")[0] if unica else None
+        linhas_nf = r.get("linhas_de_nf") or 0
+        # Uma nota so' nao arbitra nada. O limiar existe para que "a NF decidiu"
+        # signifique evidencia, nao coincidencia.
+        concorda = (unica and _sem_acento(marca_nf) == _sem_acento(r["marca_dim"])
+                    and linhas_nf >= MINIMO_DE_NOTAS)
+        saida.append({
+            "secao": "inconsistencia_de_marca",
+            "chave": r["sku"],
+            "canal": "",
+            "marca": r["marca_cadastro"] or "",
+            "alvo_proposto": (r["marca_dim"] or "") if concorda else "",
+            "ofertas_afetadas": "",
+            "composicao_empirica": "",
+            "componentes": "",
+            "unidades": "",
+            "pedidos_de_evidencia": r.get("linhas_de_nf") or "",
+            "ultima_evidencia": r.get("periodo_da_nf") or "",
+            "evidencia": (
+                f"cadastro='{r['marca_cadastro']}' x dim='{r['marca_dim']}' "
+                f"(origem {r['marca_origem']}); NF: {nf or 'sem nota'}; "
+                f"'{(r.get('descricao') or '')[:40]}' EAN {r.get('ean') or 'vazio'}"),
+            "alerta": ("" if concorda else
+                       "as notas nao arbitram sozinhas (marca unica ausente ou "
+                       "divergente do dim): decidir com o dono do cadastro"),
+            "responsavel": "",
+            "estado": ESTADO_INICIAL,
+            "decidido_em": "",
+            "observacao": ("corrigir a MARCA na linha do cadastro; o dim e a NF "
+                           "ja' concordam" if concorda else ""),
+        })
+    return saida
 
 
 def chaves_de_canal(diagnostico: list[dict]) -> list[dict]:
@@ -223,7 +342,9 @@ def main(argv: list[str] | None = None) -> int:
     with Path(args.diagnostico).open(encoding="utf-8-sig") as fh:
         diagnostico = list(csv.DictReader(fh))
 
-    linhas = chaves_de_canal(diagnostico) + de_para_linhas(_de_para(_carregar_env()))
+    de_para, marcas = _consultar(_carregar_env())
+    linhas = (chaves_de_canal(diagnostico) + de_para_linhas(de_para)
+              + marca_divergente_linhas(marcas))
 
     destino = Path(args.out)
     destino.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +368,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  de-para Protheus candidatos: {resumo['de_para_protheus']}  "
           f"(com alerta de EAN divergente: "
           f"{sum(1 for l in linhas if l['secao'] == 'de_para_protheus' and l['alerta'])})")
+    marcas_lin = [l for l in linhas if l["secao"] == "inconsistencia_de_marca"]
+    print(f"  inconsistencias de marca (componente de kit): {len(marcas_lin)}  "
+          f"(arbitradas pela NF: "
+          f"{sum(1 for l in marcas_lin if l['alvo_proposto'])})")
     print(f"  estados: {dict(estados)}")
     assert set(estados) == {ESTADO_INICIAL}, "toda linha nasce PENDENTE"
     return 0
