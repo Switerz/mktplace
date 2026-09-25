@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -292,7 +293,23 @@ def _upserts_usados(monkeypatch, source):
         "ml": (dp.ml_connector, "fetch_backfill", dp.ml_transform),
     }[source]
     conector, metodo, transform = alvo
-    monkeypatch.setattr(conector, metodo, lambda *a, **k: [{"x": 1}])
+
+    # MARGEM-REAL-2B: para `ml`, a linha CRUA precisa ser realista.
+    #
+    # `{"x": 1}` bastava enquanto o loader só olhava o resultado do transform.
+    # Agora o guardrail de reconciliação lê as linhas cruas do ML antes do
+    # upsert e aborta uma linha sem chave — corretamente, porque um conector
+    # que devolvesse isso estaria quebrado. O stub passa a representar o que o
+    # conector devolve de verdade; afrouxar o guardrail para acomodar um dublê
+    # seria trocar a garantia pelo teste.
+    bruta = (
+        {"date": date(2026, 8, 14), "brand": "kokeshi",
+         "gmv": Decimal("1000.00"), "orders": 10,
+         "marketplace_fee": Decimal("170.00"), "fee_orders": 10,
+         "paid_gmv": Decimal("1000.00"), "paid_orders_src": 10}
+        if source == "ml" else {"x": 1}
+    )
+    monkeypatch.setattr(conector, metodo, lambda *a, **k: [bruta])
     monkeypatch.setattr(transform, "transform_batch", lambda rows: [linha])
     monkeypatch.setattr(dp.quality, "run_checks", lambda *a, **k: None, raising=False)
 
