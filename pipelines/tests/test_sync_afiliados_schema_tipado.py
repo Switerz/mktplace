@@ -146,10 +146,10 @@ def test_o_sql_do_modulo_roda_contra_a_silver_sem_fee_breakdown(banco):
 
 
 # ---------------------------------------------------------------------------
-# 2. Os sete tipos
+# 2. Os tipos conhecidos
 # ---------------------------------------------------------------------------
 
-def test_os_seis_tipos_excluidos_atravessam_sem_falhar_e_nao_contribuem(banco):
+def test_todos_os_tipos_excluidos_atravessam_sem_falhar_e_nao_contribuem(banco):
     """O coracao do gate: reconhecidos, logo nao derrubam a execucao; fora do
     escopo, logo nao entram na soma nem na contagem."""
     linhas = [_linha()] + [
@@ -172,7 +172,7 @@ def test_os_seis_tipos_excluidos_atravessam_sem_falhar_e_nao_contribuem(banco):
     assert agregado[0]["affiliate_creator_commission"] == Decimal("-10.00")
 
 
-def test_oitavo_tipo_desconhecido_falha_fechado(banco):
+def test_tipo_desconhecido_falha_fechado(banco):
     cur = _montar(banco, [_linha(), _linha(transaction_id="t2",
                                            transaction_type="TIPO_NOVO_QUALQUER")])
     with pytest.raises(RuntimeError, match="transaction_type DESCONHECIDO") as e:
@@ -377,8 +377,12 @@ def test_esd_nao_altera_os_valores_de_order(banco):
     assert sem == com
 
 
-def test_um_nono_tipo_desconhecido_continua_falhando(banco):
-    """O guardrail nao foi afrouxado: reconhecer o oitavo nao abre a porta."""
+def test_um_tipo_desconhecido_continua_falhando_com_o_esd_presente(banco):
+    """O guardrail nao foi afrouxado: reconhecer o desembolso nao abre a porta.
+
+    (SOURCES-RECOVERY-2 renomeou: o universo conhecido deixou de ter oito
+    valores, entao contar a ordinal do proximo tipo envelhecia o nome a cada
+    adicao. O que o teste prova nao mudou.)"""
     cur = _montar(banco, [_linha(),
                           _desembolso(transaction_id="esd1"),
                           _linha(transaction_id="z", transaction_type="TIPO_AINDA_NOVO")])
@@ -388,9 +392,165 @@ def test_um_nono_tipo_desconhecido_continua_falhando(banco):
     assert ESD not in str(e.value).split("DESCONHECIDO na janela lida:")[1].split(".")[0]
 
 
-def test_tipo_nulo_continua_falhando_com_o_oitavo_presente(banco):
+def test_tipo_nulo_continua_falhando_com_o_esd_presente(banco):
     cur = _montar(banco, [_linha(),
                           _desembolso(transaction_id="esd1"),
+                          _linha(transaction_id="z", transaction_type=None)])
+    with pytest.raises(RuntimeError, match=r"<NULL>=1"):
+        sync.validate_transaction_types(cur, None, CUTOFF)
+
+
+# ---------------------------------------------------------------------------
+# SOURCES-RECOVERY-2 — EARLY_SETTLEMENT_RECOVERY
+#
+# O tipo que derrubou o run de 24/09/2026. As fixtures reproduzem a FORMA exata
+# medida em producao — duas vezes, 3 linhas em 24/09 e 6 em 25/09, nas marcas
+# apice, barbours e kokeshi: sem pedido, componentes de afiliado em zero,
+# `revenue`/`fee`/`shipping` zero, todo o valor em
+# `settlement_amount` == `adjustment_amount`, `adjustment_id` preenchido.
+#
+# O SINAL e' o que o distingue do desembolso: -141.757,00 no total, contra
+# +614.049,00 do ESD. O fato nao depende da direcao economica — os componentes
+# sao zero dos dois lados —, mas a fixture usa o sinal REAL de proposito: uma
+# fixture positiva esconderia um eventual `abs()` no caminho de exclusao.
+# ---------------------------------------------------------------------------
+
+ESR = "EARLY_SETTLEMENT_RECOVERY"
+
+
+def _recuperacao(**over):
+    campos = {
+        "transaction_type": ESR, "order_id": None,
+        "affiliate_commission_amount": Decimal("0"),
+        "affiliate_partner_commission_amount": Decimal("0"),
+        "affiliate_ads_commission_amount": Decimal("0"),
+        "revenue_amount": Decimal("0"),
+        "settlement_amount": Decimal("-23626.17"),
+        "adjustment_amount": Decimal("-23626.17"),
+    }
+    campos.update(over)
+    return _linha(**campos)
+
+
+def test_esr_e_reconhecido_como_excluido():
+    """Requisito 1. A constante e' a autoridade: o resto do modulo deriva dela."""
+    assert ESR in sync.TRANSACTION_TYPE_EXCLUDED
+    assert ESR in sync.TRANSACTION_TYPE_KNOWN
+    assert ESR not in sync.TRANSACTION_TYPE_ALLOWLIST
+
+
+def test_esr_atravessa_sem_falhar_e_nao_contribui(banco):
+    """Requisitos 1, 2 e 3: reconhecido (nao derruba), fora do escopo (nao entra
+    na soma de afiliado nem no denominador de cobertura)."""
+    linhas = [_linha()] + [
+        _recuperacao(transaction_id=f"esr{i}", brand=b)
+        for i, b in enumerate(("apice", "barbours", "kokeshi"))
+    ]
+    cur = _montar(banco, linhas)
+    sync.validate_source_schema(cur)
+    tipos = sync.validate_transaction_types(cur, None, CUTOFF)
+    assert ESR in tipos and tipos[ESR] == 3
+
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    populacao = sync.validate_read_population(cur, CUTOFF)
+    assert int(populacao["lidas"]) == 1, "so' a linha ORDER entra na populacao"
+
+    agregado = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert len(agregado) == 1
+    assert agregado[0]["source_row_count"] == 1
+    assert agregado[0]["affiliate_creator_commission"] == Decimal("-10.00")
+
+
+def test_esr_sozinho_nao_produz_chave_alguma(banco):
+    """Requisito 4: sem pedido, nao ha coorte a que pertencer. Uma janela SO'
+    com recuperacoes tem de produzir zero chaves — nunca uma chave sintetica."""
+    cur = _montar(banco, [_recuperacao(transaction_id=f"esr{i}") for i in range(3)])
+    sync.validate_transaction_types(cur, None, CUTOFF)
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    assert int(sync.validate_read_population(cur, CUTOFF)["lidas"]) == 0
+    assert sync.discover_touched_keys(cur, None, CUTOFF) == []
+
+
+def test_esr_com_order_id_preenchido_nao_vira_custo_de_afiliado(banco):
+    """Requisito 4, contraprova: mesmo que a fonte passe a trazer `order_id`, o
+    tipo continua fora da populacao. A exclusao e' por TIPO, nao por ausencia de
+    pedido — do contrario a mudanca de um campo mudaria a semantica do fato."""
+    cur = _montar(banco, [_linha(), _recuperacao(transaction_id="esr1",
+                                                 order_id="PEDIDO-X")])
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    assert int(sync.validate_read_population(cur, CUTOFF)["lidas"]) == 1
+    agregado = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert len(agregado) == 1
+    assert agregado[0]["source_row_count"] == 1
+
+
+@pytest.mark.parametrize("componente", sorted(sync.COMPONENT_SOURCE_COLUMNS.values()))
+def test_esr_com_componente_nao_zero_falha(banco, componente):
+    """A exclusao vale PORQUE os componentes sao zero. Contraprova por coluna:
+    se a premissa cair, filtrar em silencio esconderia custo real."""
+    cur = _montar(banco, [
+        _recuperacao(transaction_id="esr1", **{componente: Decimal("-1.00")}),
+    ])
+    with pytest.raises(RuntimeError, match="componente de afiliado") as e:
+        sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    assert f"{ESR}.{componente}=-1.00" in str(e.value)
+
+
+def test_esr_nao_altera_os_valores_de_order(banco):
+    """Requisito 7: invariancia. A presenca do tipo novo nao pode mexer em
+    NADA do que ORDER produz — nem valor, nem sinal, nem contagem."""
+    so_order = [_linha(transaction_id="a"),
+                _linha(transaction_id="b", brand="kokeshi")]
+    cur = _montar(banco, so_order)
+    sem = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    cur = _montar(banco, so_order + [_recuperacao(transaction_id="esr1"),
+                                     _recuperacao(transaction_id="esr2")])
+    com = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert sem == com
+
+
+def test_esd_e_esr_convivem_sem_se_contaminar(banco):
+    """Requisito 6: o desembolso mantem o comportamento anterior com o novo tipo
+    presente. Os dois sao espelhos de sinal, e a soma dos dois — que e' zero
+    neste cenario — nao pode vazar para lugar nenhum do fato."""
+    cur = _montar(banco, [
+        _linha(),
+        _desembolso(transaction_id="esd1", settlement_amount=Decimal("500.00"),
+                    adjustment_amount=Decimal("500.00")),
+        _recuperacao(transaction_id="esr1", settlement_amount=Decimal("-500.00"),
+                     adjustment_amount=Decimal("-500.00")),
+    ])
+    tipos = sync.validate_transaction_types(cur, None, CUTOFF)
+    assert tipos[ESD] == 1 and tipos[ESR] == 1
+    sync.validate_excluded_components_are_zero(cur, CUTOFF)
+    assert int(sync.validate_read_population(cur, CUTOFF)["lidas"]) == 1
+    agregado = sync.recompute_keys(
+        cur, sync.discover_touched_keys(cur, None, CUTOFF), CUTOFF)
+    assert len(agregado) == 1
+    assert agregado[0]["affiliate_creator_commission"] == Decimal("-10.00")
+
+
+def test_um_tipo_desconhecido_continua_falhando_com_o_esr_presente(banco):
+    """Requisito 5: o guardrail NAO foi afrouxado. Reconhecer a recuperacao nao
+    abre a porta para nenhum tipo seguinte."""
+    cur = _montar(banco, [_linha(),
+                          _recuperacao(transaction_id="esr1"),
+                          _linha(transaction_id="z",
+                                 transaction_type="OUTRO_TIPO_INEDITO")])
+    with pytest.raises(RuntimeError, match="transaction_type DESCONHECIDO") as e:
+        sync.validate_transaction_types(cur, None, CUTOFF)
+    assert "OUTRO_TIPO_INEDITO=1" in str(e.value)
+    desconhecidos = str(e.value).split("DESCONHECIDO na janela lida:")[1].split(".")[0]
+    assert ESR not in desconhecidos and ESD not in desconhecidos
+
+
+def test_tipo_nulo_continua_falhando_com_o_esr_presente(banco):
+    cur = _montar(banco, [_linha(),
+                          _recuperacao(transaction_id="esr1"),
                           _linha(transaction_id="z", transaction_type=None)])
     with pytest.raises(RuntimeError, match=r"<NULL>=1"):
         sync.validate_transaction_types(cur, None, CUTOFF)

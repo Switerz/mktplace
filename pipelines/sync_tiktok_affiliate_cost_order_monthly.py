@@ -197,9 +197,27 @@ TRANSACTION_TYPE_ALLOWLIST = ("ORDER",)
 #: se algum deles passar a carregar componente de afiliado nao zero
 #: (`validate_excluded_components_are_zero`), porque isso significaria que o
 #: entendimento da fonte ficou desatualizado.
+#: `EARLY_SETTLEMENT_RECOVERY` entrou no SOURCES-RECOVERY-2, com a MESMA prova.
+#: Apareceu na fonte em 24/09/2026 e derrubou o run natural — de novo,
+#: comportamento correto do guardrail. Medido duas vezes (24/09 com 3 linhas,
+#: 25/09 com 6, em apice, barbours e kokeshi):
+#:   - os tres componentes de afiliado: ZERO em 6/6 — e ZERO, nao nulo;
+#:   - `order_id` nulo em 6/6 (100%);
+#:   - `revenue_amount`, `fee_and_tax_amount`, `shipping_cost_amount`: zero;
+#:   - todo o valor em `settlement_amount` = `adjustment_amount`, identicos
+#:     linha a linha, somando **-141.757,00**, com `adjustment_id` preenchido em
+#:     6/6 e `adjustment_order_id`, `associated_order_id`, `reserve_id` e
+#:     `sku_count` nulos.
+#: E' o espelho do DISBURSEMENT: mesma forma, sinal oposto (+614.049,00 la',
+#: negativo aqui), o que o nome "RECOVERY" sugere e a medicao corrobora. Ainda
+#: assim a DIRECAO economica continua NAO afirmada — o nome nao e' prova, e a
+#: convencao de sinal deste tipo nao foi estabelecida. Para a decisao que ESTE
+#: fato exige — contribui ou nao — isso e' irrelevante: os tres componentes sao
+#: zero e nao ha pedido a que associar.
 TRANSACTION_TYPE_EXCLUDED = (
     "DEDUCTIONS_INCURRED_BY_SELLER",
     "EARLY_SETTLEMENT_DISBURSEMENT",
+    "EARLY_SETTLEMENT_RECOVERY",
     "GMV_PAYMENT_FOR_TIKTOK_ADS",
     "LOGISTICS_REIMBURSEMENT",
     "PLATFORM_REIMBURSEMENT",
@@ -207,7 +225,7 @@ TRANSACTION_TYPE_EXCLUDED = (
     "THIRD_PARTY_FINANCING",
 )
 
-#: Universo INTEIRO de tipos conhecidos. Um oitavo valor — ou NULL — FALHA a
+#: Universo INTEIRO de tipos conhecidos. Um NONO valor — ou NULL — FALHA a
 #: execucao (18.8.6): pode nao ser custo de afiliado, e incluir ou excluir por
 #: conta propria seria inventar semantica.
 TRANSACTION_TYPE_KNOWN = tuple(
