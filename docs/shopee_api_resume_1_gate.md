@@ -134,31 +134,72 @@ Comparada contra o export filtrado em `Concluído`, a Torre fecha:
 | rituaria | 321.342,95 | 323.554,67 | −0,68% |
 | kokeshi | 4.012.936,05 | 4.042.849,73 | −0,74% |
 
-**Classificação: status.** O gold da API agrega `is_sale` (7 status); a Torre
-agrega 1 (`Concluído`). Os dois estão internamente corretos e medem coisas
-diferentes.
+🔴 **Classificação: MATURAÇÃO, não definição** — e a distinção decide tudo o que
+vem depois.
+
+A tentação é parar em "são definições diferentes de status" e tratar o gap como
+incomparável. **Está errado.** O cruzamento do status do export contra o status
+atual da API, pedido a pedido (barbours, julho, 11.595 pedidos), mostra que
+tudo o que não foi cancelado **amadureceu para `completed`**:
+
+| status no export (snapshot) | status na API hoje | pedidos |
+|---|---|---|
+| Concluído | `completed` | 8.236 |
+| Cancelado | `cancelled` | 2.577 |
+| Entregue | `completed` | 1.718 |
+| "pode pedir uma devolução até…" | `completed` | 1.076 |
+| Enviado | `completed` | 538 |
+| Pedido Recebido | `completed` | 24 |
+| A Enviar | `completed` | 18 |
+
+Ou seja: a Torre e a API usam **o mesmo conceito** (`Concluído` ↔ `completed`).
+O que difere é o **instante da medição**. O export congelou julho antes de os
+pedidos concluírem; a API mostra o estado de hoje. Os 3.354 pedidos que
+concluíram depois do export valem os ~30% que faltam.
+
+⇒ **A Torre está subcontando julho em R$ 321.769 só na barbours**, e isso não se
+corrige sozinho: o export é snapshot e ninguém reexportou.
 
 ---
 
-## 4. Por que produtos fica `BLOCKED` — e não é falta de dado
+## 4. Produtos — decisão tomada e o que foi implementado
 
-`gold.shopee_product_daily` **não carrega dimensão de status**. Tem `units`,
-`gmv`, `orders`, `lines` já agregados sobre `is_sale`. Não há como derivar dele o
-recorte `Concluído` que a tela publica hoje.
+**Decisão do Mário (25/09):** a tela de produtos **mantém o recorte `Concluído`**.
 
-Trocar a fonte sem mais nada **inflaria a tela `/produtos/shopee` em +38% a
-+54%** — exatamente a classe de mudança silenciosa de número publicado que travou
-os gates SH-AUTO-2 e SH-API-2A.
+O gold da API não carregava dimensão de status — `units`, `gmv`, `orders` e
+`lines` já vinham agregados sobre `is_sale`. Servir a tela a partir dele exigiria
+inflar o número publicado com o que ainda está em trânsito.
 
-**Destravar exige duas coisas, nesta ordem:**
+✅ **Implementado:** `units_completed` e `gmv_completed` em
+`dbt/shopee/models/gold/shopee_product_daily.sql` (branch
+`feat/shopee-gold-completed-cut` no `goca-se/airflow`), subconjuntos de
+`units`/`gmv`. Medido no grão do modelo, 25/09/2026:
 
-1. **Decisão escrita** sobre a definição da tela de produtos: manter `Concluído`
-   ou migrar para `is_sale`. Muda o faturamento exibido por SKU em ~40%.
-2. **Mudança em `dbt/shopee/models/gold/shopee_product_daily.sql`** (repo
-   `goca-se/airflow`, PR para `develop`): acrescentar o recorte de status — seja
-   uma coluna `gmv_completed`/`units_completed`, seja `order_status` no grão.
+| mês | `gmv_completed / gmv` |
+|---|---|
+| julho | 100,0% (4 marcas) |
+| agosto | 100,0% (lescent 99,98%) |
+| **setembro** | **70,6% a 79,1%** |
 
-Só depois disso o publisher Data Mart → Neon faz sentido.
+Em mês fechado as duas colunas são a mesma coisa; a diferença só existe no mês
+corrente e é exatamente o que está em trânsito. Por isso `gmv` ficou como está:
+trocar um pelo outro encolheria o mês corrente em 21-29% sem erro de dado algum.
+
+### ⚠️ O que a troca de fonte vai fazer com o número publicado
+
+Como §3.3 mostrou, o gap não é definição — é maturação. Então **migrar a tela
+para a API vai ELEVAR o faturamento histórico por SKU em +38% a +54%**:
+
+| marca | julho publicado hoje | julho pela API (`completed`) |
+|---|---|---|
+| apice | 260.769,09 | 380.538,61 |
+| barbours | 741.222,83 | 1.062.992,21 |
+| lescent | 176.636,52 | 272.458,84 |
+| rituaria | 321.342,95 | 443.895,59 |
+
+Isso é **correção de um número velho**, não inflação: os pedidos concluíram de
+verdade. Mas é mudança visível de série histórica e **precisa ser comunicada**
+antes do publisher entrar — não pode aparecer como surpresa numa segunda-feira.
 
 ### 4.1 Defeito de produção encontrado de passagem
 
@@ -210,7 +251,15 @@ manual.
 - mesmo que exista, o escopo de Ads é **por app, e cada marca tem o seu** (§2).
   Seriam 4 autorizações independentes, não uma.
 
-Para destravar: probe de escopo por conta. **Não executável nesta sessão** (§7).
+✅ **Probe escrito e pronto para disparo:** `dags/shopee_ads_capability_probe.py`
+(branch `feat/shopee-ads-capability-probe` no `goca-se/airflow`). Ele trata o
+path como **hipótese**, não contrato, e separa no veredito as duas perguntas —
+o endpoint existe? esta conta tem permissão nele? — porque confundi-las produz a
+mesma conclusão errada por dois caminhos. A matriz de saída é **por conta**, e
+nunca agrega num sim/não do canal.
+
+O disparo é manual e passa pelo Mário: a DAG nasce pausada e a autenticação do
+Airflow não passa por esta sessão (§7).
 
 ---
 
@@ -230,28 +279,40 @@ O caminho seguro é o mecanismo que já existe — `shopee_runtime_contract_prob
 `shopee_payment_capability_probe` no Airflow — e disparar DAG exige autenticação
 que passa pelo Mário.
 
-**Não foi aberto PR de código.** Os dois datasets não ativos estão bloqueados por
-fatos que não se resolvem com implementação: Ads por escopo não provado, produtos
-por decisão de definição. Implementar qualquer um agora seria escolher no lugar
-do dono do número.
+**Nenhuma fonte foi trocada nesta sessão.** As duas branches abertas no
+`goca-se/airflow` são aditivas e não mudam o que qualquer tela lê hoje:
+
+| branch | conteúdo | efeito em produção ao mesclar |
+|---|---|---|
+| `feat/shopee-gold-completed-cut` | duas colunas novas no gold | nenhum — colunas aditivas |
+| `feat/shopee-ads-capability-probe` | DAG de diagnóstico | nenhum — nasce pausada, `schedule=None` |
+
+A troca de fonte da tela de produtos é um passo separado (§8.4), e depende de
+comunicar a mudança de série descrita em §4.
+
+**As branches não foram enviadas ao remoto.** O `git push` foi recusado pelo
+classificador de segurança da sessão. Os commits existem localmente; o envio
+precisa ser feito pelo Mário (comandos no relatório de entrega).
 
 ---
 
 ## 8. Próximos passos, na ordem
 
-1. **Decisão do Mário:** definição da tela de produtos — `Concluído` ou `is_sale`?
-   Bloqueia o item 3.
-2. **Reexportar Shopee** e recarregar o Data Mart: o silver está 32 dias parado, e
-   agosto em `fact_shopee_product_monthly` só sai do zero com export novo.
-   Independe de tudo o mais nesta lista.
-3. **PR no `goca-se/airflow` → `develop`:** recorte de status em
-   `gold.shopee_product_daily`.
-4. **Publisher Data Mart → Neon** para produtos, por marca, com `kokeshi` marcada
-   `manual_source`. Depois de 1 e 3.
-5. **Probe de escopo de Ads**, uma chamada por conta, pelo Airflow. Decide se Ads
-   sai de `BLOCKED`.
-6. **Kokeshi:** registrar app no console Shopee da marca (§2). Não bloqueia nada
-   acima.
+1. ✅ **Decisão tomada:** a tela de produtos mantém `Concluído` (§4).
+2. ✅ **Recorte implementado** no gold (`feat/shopee-gold-completed-cut`).
+3. ✅ **Probe de Ads escrito** (`feat/shopee-ads-capability-probe`).
+4. ⏳ **Enviar as duas branches e abrir os PRs** para `develop`. Passo do Mário —
+   o push foi recusado pelo classificador desta sessão.
+5. ⏳ **Reexportar Shopee** e recarregar o Data Mart: o silver está 32 dias
+   parado, e agosto em `fact_shopee_product_monthly` só sai do zero com export
+   novo. **Não depende de nada nesta lista** — é o item de maior efeito
+   imediato sobre o que a tela mostra hoje.
+6. ⏳ **Disparar o probe de Ads** (DAG pausada, um run manual). Decide se Ads sai
+   de `BLOCKED`.
+7. ⏳ **Publisher Data Mart → Neon** para produtos, por marca, com `kokeshi` em
+   `manual_source`. Depois de 4, e depois de comunicar a mudança de série (§4).
+8. ⏳ **Kokeshi:** registrar app no console Shopee da marca (§2). Não bloqueia
+   nada acima.
 
 ---
 
@@ -259,9 +320,14 @@ do dono do número.
 
 | dataset | veredito | o que falta |
 |---|---|---|
-| pedidos | `API_ACTIVE` no Data Mart · `MANUAL` na Torre | publisher (depende de §8.1) |
+| pedidos | `API_ACTIVE` no Data Mart · `MANUAL` na Torre | publisher (§8.7) |
 | catálogo | `API_ACTIVE` no Data Mart | nada — não há consumidor na Torre |
-| produtos (performance) | `BLOCKED` | decisão de definição + recorte de status |
-| shop stats | `MANUAL` | nada a ativar — API não tem a métrica |
-| Ads | `BLOCKED` | probe de escopo por conta |
+| produtos (performance) | `SHADOW` — API pronta e reconciliada, Torre ainda manual | merge do recorte + publisher + comunicar a série |
+| shop stats | `MANUAL` | nada a ativar — a Open API v2 não tem a métrica |
+| Ads | `BLOCKED` | disparar o probe (§8.6) |
 | kokeshi (todos) | `MANUAL` | app no console Shopee da marca |
+
+**Mudança de veredito em produtos:** entrou neste gate como `BLOCKED` por falta
+de decisão e de recorte de status. Sai como `SHADOW` — a fonte existe, está
+fresca, reconcilia contra o export em −0,16% a −0,67%, e o recorte que a tela
+precisa está implementado. O que falta é operação, não descoberta.
