@@ -9,11 +9,16 @@ POR QUE ISTO E' UM TESTE E NAO UMA CONVENCAO
 --------------------------------------------
 Medido em 2026-09-25 sobre a fotografia publicada: as 1.817 ofertas sem
 referencia dos tres canais recebiam `reference_missing_for_product`, que se le
-como "o produto nao esta na tabela B2B". Para 879 delas isso era falso — 279 sao
-de marca que nao tem tabela nenhuma, 600 sao kits sem composicao. A leitura
-errada manda a pessoa errada procurar a coisa errada, e nenhum numero da tela
-denunciava o engano. Um motivo por linha so' e' garantia se houver um teste que
-recuse a linha sem motivo.
+como "o produto nao esta na tabela B2B". Para 1.085 delas isso era falso — 477
+caem em `brand_without_b2b_reference`, 607 em `kit_composition_missing` e 1 em
+`offer_without_match_key`. A leitura errada manda a pessoa errada procurar a
+coisa errada, e nenhum numero da tela denunciava o engano. Um motivo por linha
+so' e' garantia se houver um teste que recuse a linha sem motivo.
+
+Estes sao os baldes EMITIDOS. `docs/pma_ref_link_1_auditoria.md` classifica as
+mesmas 1.817 ofertas em dez subcausas analiticas e por isso nao bate numero a
+numero — por exemplo, das 3 ofertas sem chave que a auditoria conta, 2 sao kits
+e a precedencia as entrega ao balde de kit. Os dois recortes estao certos.
 
 AS DUAS SOMAS NAO SAO A MESMA, E ISSO E' DE PROPOSITO
 ------------------------------------------------------
