@@ -419,6 +419,33 @@ ORDER BY 2 DESC;
 **[FATO]** Resultado em jul+ago/2026: `sale_fee` preenchido em 566.439 de 566.439 itens (100%); join casa
 566.439 de 566.439 linhas.
 
+> ### Correção aplicada no MARGEM-REAL-2 (2026-09-25)
+>
+> Os dois números abaixo estavam **subestimados**, e o contrato de fonte do gate seguinte mediu por quê.
+>
+> **[FATO] `sale_fee` é por UNIDADE, não por item.** A comissão do item é `sale_fee * quantity`. Medido:
+> `sale_fee / unit_price` fica estável em 0,1707–0,1828 para qualquer `quantity`, enquanto
+> `sale_fee / (unit_price * quantity)` cai com a quantidade (0,1707 → 0,0894 → 0,0608 → 0,0457). A query
+> original somava `sale_fee` cru.
+>
+> **[FATO] Os +3,9% eram cancelamento, e a causa está provada.** `status = 'paid'` na janela soma
+> **10.283.761** — idêntico ao GMV de `gold.ml_gestao_diaria`. O excesso eram 5.934 pedidos `cancelled`
+> (R$ 443.208) e 72 `partially_refunded` (R$ 10.032). Sobre a população correta, a reconciliação é exata:
+> **248 de 248** células dia × marca com GMV e pedidos idênticos, diferença máxima 0,00.
+>
+> Valores corrigidos, população `status = 'paid'`, comissão = `SUM(sale_fee * quantity)`:
+>
+> | marca | GMV (= gold) | pedidos | comissão | take rate |
+> |---|---:|---:|---:|---:|
+> | kokeshi | 3.432.578 | 53.727 | 579.112 | 16,87% |
+> | barbours | 3.131.719 | 31.232 | 461.728 | 14,74% |
+> | rituaria | 2.078.989 | 20.801 | 282.641 | 13,60% |
+> | lescent | 1.640.476 | 25.870 | 198.231 | 12,08% |
+>
+> Comissão total da janela: **1.521.713** (a soma das quatro linhas arredondadas dá 1.521.712 — a
+> diferença é o arredondamento por marca). A tabela abaixo fica como registro do que foi medido no
+> MARGEM-REAL-1, com a ressalva acima.
+
 | marca | GMV bruto (fonte) | pedidos | comissão | take rate |
 |---|---:|---:|---:|---:|
 | kokeshi | 3.575.546 | 55.998 | 593.153 | 16,59% |
@@ -427,7 +454,9 @@ ORDER BY 2 DESC;
 | lescent | 1.736.016 | 27.476 | 204.027 | 11,75% |
 
 **[FATO]** O GMV somado dessa fonte (10.737.001) fica **+3,9%** do GMV ML servido pela Torre (10.329.446)
-na mesma janela — a menor divergência entre todas as fontes de custo avaliadas neste gate.
+na mesma janela — a menor divergência entre todas as fontes de custo avaliadas neste gate. O MARGEM-REAL-2
+mediu a causa desses +3,9% (ver correção acima): são os pedidos cancelados e parcialmente reembolsados, que
+a consulta original não filtrava.
 
 ### 10.6 Origem dos fees da Shopee — código versionado
 

@@ -284,6 +284,10 @@ class FinanceiroKpis(BaseModel):
     ml_acos_pct: Optional[float] = None
     ml_cpc: Optional[float] = None
     ml_total_cost_pct: Optional[float] = None
+    # MARGEM-REAL-2: tarifa/comissao do marketplace no ML. So a tarifa —
+    # nao inclui Ads, frete, imposto, devolucao nem afiliado.
+    ml_fees: Optional[float] = None
+    ml_avg_fee_pct: Optional[float] = None
     shopee_gmv: Optional[float] = None
     shopee_settlement: Optional[float] = None
     shopee_fees: Optional[float] = None
@@ -313,6 +317,9 @@ class FinanceiroBrandRow(BaseModel):
     ml_seller_shipping_cost: Optional[float] = None
     ml_shipping_pct_of_gmv: Optional[float] = None
     ml_total_cost_pct: Optional[float] = None
+    # MARGEM-REAL-2 — ver FinanceiroKpis.
+    ml_fees: Optional[float] = None
+    ml_avg_fee_pct: Optional[float] = None
     shopee_gmv: Optional[float] = None
     shopee_settlement: Optional[float] = None
     shopee_fees: Optional[float] = None

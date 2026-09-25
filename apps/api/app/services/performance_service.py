@@ -1189,6 +1189,10 @@ def get_financeiro(
 
         if ml:
             ml_gmv = _f(ml["gmv"])
+            # MARGEM-REAL-2: comissao do marketplace no ML. A fonte grava
+            # positivo (igual a Shopee, ao contrario do TikTok); `abs()` aqui
+            # e' normalizacao de apresentacao, nao correcao de dado.
+            ml_fees = abs(_f(ml["total_fees"]))
             ml_spend = _f(ml["ad_spend"])
             ml_revenue = _f(ml["ad_revenue"])
             ml_clicks = int(_f(ml["ad_clicks"]))
@@ -1206,7 +1210,12 @@ def get_financeiro(
                 "ml_ad_impressions": ml_impressions or None,
                 "ml_seller_shipping_cost": ml_shipping or None,
                 "ml_shipping_pct_of_gmv": round(ml_shipping / ml_gmv * 100, 2) if ml_gmv > 0 else None,
+                # `ml_total_cost_pct` segue sendo Ads + frete, SEM a comissao.
+                # Incluir a tarifa mudaria o valor de um KPI ja exibido, e essa
+                # decisao nao pertence a este gate. Ver o PR do MARGEM-REAL-2.
                 "ml_total_cost_pct": round((ml_spend + ml_shipping) / ml_gmv * 100, 2) if ml_gmv > 0 else None,
+                "ml_fees": ml_fees or None,
+                "ml_avg_fee_pct": round(ml_fees / ml_gmv * 100, 2) if ml_gmv > 0 and ml_fees > 0 else None,
             })
 
         if sh:
@@ -1245,6 +1254,7 @@ def get_financeiro(
     ml_rev_t = _s("ml_ad_revenue")
     ml_clicks_t = _si("ml_ad_clicks")
     ml_ship_t = _s("ml_seller_shipping_cost")
+    ml_fees_t = _s("ml_fees")
     sh_gmv_t = _s("shopee_gmv")
     sh_fees_t = _s("shopee_fees")
     sh_set_t = _s("shopee_settlement")
@@ -1264,6 +1274,8 @@ def get_financeiro(
         "ml_acos_pct": round(ml_spend_t / ml_rev_t * 100, 2) if ml_rev_t > 0 else None,
         "ml_cpc": round(ml_spend_t / ml_clicks_t, 4) if ml_clicks_t > 0 else None,
         "ml_total_cost_pct": round((ml_spend_t + ml_ship_t) / ml_gmv_t * 100, 2) if ml_gmv_t > 0 else None,
+        "ml_fees": ml_fees_t or None,
+        "ml_avg_fee_pct": round(ml_fees_t / ml_gmv_t * 100, 2) if ml_gmv_t > 0 and ml_fees_t > 0 else None,
         "shopee_gmv": sh_gmv_t or None,
         "shopee_settlement": sh_set_t or None,
         "shopee_fees": sh_fees_t or None,
