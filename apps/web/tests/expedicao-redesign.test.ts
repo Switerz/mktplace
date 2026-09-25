@@ -597,7 +597,26 @@ test("a janela inicial e' uma das tres do seletor", () => {
 test("as colunas das tabelas tem respiro horizontal", () => {
   // Sem isto, "Travados" colava em "Fonte avancou" e "Aberto ha" em "Idade
   // operacional" — medido no QA visual do EXP-UX-1.
+  //
+  // UX-TORRE-1: a regra passou a viver numa CONSTANTE compartilhada pelas
+  // quatro tabelas da tela, entao contar ocorrencias do literal reprovaria
+  // justamente a versao sem duplicacao. A assercao virou estrutural: cada
+  // `<table>` e' RESOLVIDA ate' a string de classe que ela realmente aplica,
+  // e essa string precisa conter a regra. E' estritamente mais forte que a
+  // contagem — uma quinta tabela com classe propria e sem `pr-4` reprova.
+  const constantes = new Map<string, string>();
+  for (const m of CLIENTE.matchAll(/const (CLASSE_\w+)\s*=\s*\r?\n?\s*"([^"]*)";/g)) {
+    constantes.set(m[1], m[2]);
+  }
+
+  const classes = [...CLIENTE.matchAll(/<table\s+className=(?:\{(\w+)\}|"([^"]*)")/g)].map(
+    (m) => (m[1] ? (constantes.get(m[1]) ?? `<<${m[1]} nao resolvida>>`) : m[2]),
+  );
+
   const tabelas = (CLIENTE.match(/<table\b/g) ?? []).length;
-  const comEspaco = (CLIENTE.match(/\[&_td\]:pr-4/g) ?? []).length;
-  assert.equal(comEspaco, tabelas, "toda tabela precisa separar as colunas");
+  assert.equal(classes.length, tabelas, "toda tabela precisa declarar className");
+  assert.ok(tabelas >= 4, `esperava as quatro tabelas da tela, achei ${tabelas}`);
+  for (const c of classes) {
+    assert.ok(c.includes("[&_td]:pr-4"), `tabela sem respiro horizontal: ${c}`);
+  }
 });
