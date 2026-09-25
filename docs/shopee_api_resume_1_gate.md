@@ -34,7 +34,7 @@ Cobertura por conta: `apice`, `barbours`, `lescent`, `rituaria`. `kokeshi` ausen
 |---|---|---|---|---|---|---|
 | **pedidos** | API | API | API | API | manual | `API_ACTIVE` (Data Mart) |
 | **catálogo de produto** | API | API | API | API | manual | `API_ACTIVE` (Data Mart) |
-| **produtos (performance)** | manual | manual | manual | manual | manual | `BLOCKED` — ver §4 |
+| **produtos (performance)** | manual | manual | manual | manual | manual | `SHADOW` — API pronta, ver §4 |
 | **shop stats / funil** | manual | manual | manual | manual | manual | `MANUAL` — sem endpoint |
 | **Ads** | manual | manual | manual | manual | manual | `BLOCKED` — escopo não provado |
 
