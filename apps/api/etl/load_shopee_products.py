@@ -100,7 +100,17 @@ CREATE TABLE IF NOT EXISTS marts.fact_shopee_product_monthly (
     cancel_rate_pct  NUMERIC(8,4),
     unique_buyers    BIGINT DEFAULT 0,
     avg_price        NUMERIC(14,2),
-    UNIQUE (ref_month, brand, sku_ref_key, product_name)
+    -- Procedencia: migration 023. `source` e NOT NULL e SEM default de
+    -- proposito -- linha da API rotulada como export seria pior do que um
+    -- INSERT que falha. Este loader e o caminho `manual_export`.
+    source           VARCHAR(32) NOT NULL DEFAULT 'manual_export',
+    source_run_id    VARCHAR(64),
+    source_captured_at TIMESTAMPTZ,
+    is_partial       BOOLEAN NOT NULL DEFAULT FALSE,
+    -- migration 024: `source` ENTRA na chave. Sem ele, a linha `api` do
+    -- mesmo produto/mes/marca colide com a do export -- medido em
+    -- 28/09/2026, na primeira publicacao em shadow.
+    UNIQUE (ref_month, brand, sku_ref_key, product_name, source)
 );
 """
 
@@ -108,12 +118,12 @@ UPSERT_SQL = """
 INSERT INTO marts.fact_shopee_product_monthly
     (ref_month, brand, sku_ref, sku_ref_key, product_name, variation_name,
      gmv, units_sold, completed_orders, canceled_orders,
-     cancel_rate_pct, unique_buyers, avg_price)
+     cancel_rate_pct, unique_buyers, avg_price, source)
 VALUES
     (:ref_month, :brand, :sku_ref, :sku_ref_key, :product_name, :variation_name,
      :gmv, :units_sold, :completed_orders, :canceled_orders,
-     :cancel_rate_pct, :unique_buyers, :avg_price)
-ON CONFLICT (ref_month, brand, sku_ref_key, product_name)
+     :cancel_rate_pct, :unique_buyers, :avg_price, 'manual_export')
+ON CONFLICT (ref_month, brand, sku_ref_key, product_name, source)
 DO UPDATE SET
     sku_ref          = EXCLUDED.sku_ref,
     variation_name   = EXCLUDED.variation_name,
