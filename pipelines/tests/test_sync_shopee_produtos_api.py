@@ -330,3 +330,40 @@ def test_noop_e_verificado_dentro_do_lock():
     fonte = Path(mod.__file__).read_text(encoding="utf-8")
     corpo = fonte[fonte.index("def _publicar("):]
     assert corpo.index("pg_try_advisory_xact_lock") < corpo.index("upstream_avancou")
+
+
+# --------------------------------------------------------------------------- #
+# Migration 024 — a UNIQUE tem de incluir a procedencia                         #
+# --------------------------------------------------------------------------- #
+
+MIGRATION_024 = (Path(mod.__file__).resolve().parents[1]
+                 / "apps" / "api" / "alembic" / "versions"
+                 / "024_unique_por_procedencia_shopee_product.py")
+
+
+def test_migration_024_encadeia_na_023():
+    fonte = MIGRATION_024.read_text(encoding="utf-8")
+    assert 'revision = "024"' in fonte
+    assert 'down_revision = "023"' in fonte
+
+
+def test_unique_inclui_source():
+    """Sem `source` na chave, a linha `api` colide com a do export para o mesmo
+    produto/mes/marca — foi uma UniqueViolation real na 1a publicacao."""
+    fonte = MIGRATION_024.read_text(encoding="utf-8")
+    assert "UNIQUE (ref_month, brand, sku_ref_key, product_name, source)" in fonte
+
+
+def test_loader_manual_declara_a_procedencia():
+    """A 023 deixou `source` NOT NULL e SEM default. Escritor que nao declara
+    a procedencia quebra — e o loader manual era um deles."""
+    loader = (Path(mod.__file__).resolve().parents[1]
+              / "apps" / "api" / "etl" / "load_shopee_products.py")
+    fonte = loader.read_text(encoding="utf-8")
+    assert "'manual_export')" in fonte
+    alvo_novo = "ON CONFLICT (ref_month, brand, sku_ref_key, product_name, source)"
+    assert alvo_novo in fonte
+    # O alvo antigo de 4 colunas nao casa mais com indice unico algum: procurar
+    # pelo fecha-parenteses logo apos `product_name` distingue os dois.
+    alvo_antigo = "ON CONFLICT (ref_month, brand, sku_ref_key, product_name)"
+    assert alvo_antigo not in fonte

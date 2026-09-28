@@ -168,7 +168,11 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # marts.fact_shopee_product_monthly (`source`, `source_run_id`,
     # `source_captured_at`, `is_partial`) e cria
     # marts.shopee_product_source_mode, o interruptor por marca.
-    assert heads == ["023"], f"head deveria ser unico e igual a 023, veio {heads}"
+    # Gate SHOPEE-API-CUTOVER-2: head avancado de 023 para 024, que poe
+    # `source` na UNIQUE de marts.fact_shopee_product_monthly. Sem isso as
+    # duas procedencias nao podem coexistir para a mesma chave — medido
+    # numa UniqueViolation na primeira publicacao em shadow (28/09/2026).
+    assert heads == ["024"], f"head deveria ser unico e igual a 024, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
