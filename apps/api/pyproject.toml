@@ -48,6 +48,31 @@ dev = [
     "httpx>=0.27",
 ]
 
+# INCIDENTE 2026-09-25/28 — POR QUE `include` NAO E' OPCIONAL
+# ============================================================
+# Sem ele, `where = ["."]` varria o diretorio inteiro e a wheel publicava CINCO
+# pacotes de topo: `alembic`, `app`, `etl`, `tests` e `tools`.
+#
+# `alembic/` aqui e' a pasta de MIGRATIONS, com um `__init__.py` de 0 bytes. Ao
+# instalar `mktplace-api` na imagem do Airflow, o pip gravou esse arquivo POR
+# CIMA do `alembic/__init__.py` do pacote real — `--no-deps` protege contra
+# resolver dependencia, e NAO contra colisao de arquivo entre distribuicoes.
+# Resultado medido no staging, de 25/09 22:14 a 28/09: todo servico morria no
+# boot com `ImportError: cannot import name '__version__' from 'alembic'`, e o
+# build passava VERDE — porque nada no build importava `alembic`.
+#
+# `tests` e `tools` sao piores em outro sentido: sao nomes que qualquer projeto
+# pode ter. Publicar um pacote de topo chamado `tests` a partir desta
+# distribuicao e' apontar uma arma para o ambiente de quem a instalar.
+#
+# A allowlist e' por INCLUSAO: diretorio novo em `apps/api/` fica de fora por
+# omissao, nao por alguem lembrar de acrescenta-lo a um `exclude`. O mesmo
+# criterio do `pyproject.toml` da raiz, que empacota `pipelines.expedicao`.
+#
+# ⚠️ O conteudo REAL da wheel — nao esta declaracao — e' verificado em
+# `apps/api/tests/test_wheel_packaging.py`, que constroi a distribuicao e le'
+# o `top_level.txt` e o `RECORD` de dentro do `.whl`.
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["app", "app.*"]
 
