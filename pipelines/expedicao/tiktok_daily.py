@@ -146,6 +146,21 @@ TIKTOK_UTC_OFFSET = timedelta(hours=-3)
 #: Janela padrao da tela: 7 dias + hoje.
 JANELA_PADRAO_DIAS = 7
 
+#: Marcas FORA do escopo desta Torre. Excluidas na ORIGEM do calculo (dentro do
+#: `FONTE_SQL`, no CTE `ped`), nao no frontend e nem depois da agregacao.
+#:
+#: A diferenca importa: filtrar a linha depois de somar deixaria a marca dentro
+#: de `base`, `atrasados`, LDR, evolucao diaria, fluxo por pagamento, alertas e
+#: `marcas_criticas` — a tela esconderia a linha e mentiria no total. Excluindo
+#: em `ped`, o pedido nunca entra em agregado nenhum.
+#:
+#: NAO apaga nada da fonte: `raw.tiktok_shop_orders` continua intacta e a marca
+#: segue auditavel la'. O que muda e' o ESCOPO PUBLICADO.
+#:
+#: A chave e' `brand`, nao `shop_name`: `shop_name` e' texto de exibicao
+#: ("Gocase Brasil") e pode mudar sem aviso; `brand` e' a chave do registry.
+MARCAS_FORA_DO_ESCOPO: tuple[str, ...] = ("gocase",)
+
 #: Uma coorte "em risco" ainda nao venceu, mas vence em ate N dias.
 RISCO_DIAS = 1
 
@@ -607,6 +622,11 @@ ped AS MATERIALIZED (
      WHERE o.paid_at IS NOT NULL
        AND o.paid_at >= %(desde)s::date
        AND o.paid_at <  (%(ate)s::date + 1)
+       -- Escopo da Torre. AQUI, e nao depois: todo CTE abaixo faz JOIN com
+       -- `ped`, entao excluir aqui tira a marca de TODOS os agregados de uma
+       -- vez -- base, atrasados, pendentes, evolucao, fluxo e ranking de loja.
+       -- Filtrar mais tarde deixaria o pedido dentro dos totais.
+       AND NOT (o.brand = ANY(%(marcas_fora)s::text[]))
 ),
 -- RTS ESTRITO: o pedido so' esta despachado quando TODOS os itens tem
 -- `rts_time`, e o instante e' o ULTIMO deles. Medido, hoje nao ha pedido com
@@ -867,6 +887,9 @@ def extrair(
             "hoje": hoje.isoformat(),
             "desde": desde.isoformat(),
             "ate": ate.isoformat(),
+            # Lista, nao literal na string: interpolar nome de marca dentro do
+            # SQL abriria injecao e tiraria o valor do alcance dos testes.
+            "marcas_fora": list(MARCAS_FORA_DO_ESCOPO),
         },
     )
 
