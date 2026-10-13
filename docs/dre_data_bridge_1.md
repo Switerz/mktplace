@@ -203,7 +203,7 @@ Pontos revisados:
 | Serving novo alimentado por esse lote, contra o #66 | **0 diferenças** nas 14 células canal × marca (componentes, status, classificação, margem; tolerância R$ 0,50) |
 | Latência da rota contra o Neon real, sem Data Mart | mediana ~1,1 s (1 ou 4 meses), contra 8–30 s no #66 |
 | Testes do publisher (puros) | 66, em SQLAlchemy 2.0 e 1.4.54 |
-| Integração em PostgreSQL 16 descartável | 27 (25 funções, uma parametrizada em 3 casos), em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs, universo vazio, canal que some, `--sem-vendas` |
+| Integração em PostgreSQL 16 descartável | 27 (25 funções, uma parametrizada em 3 casos), em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs, universo vazio, canal que some, `--sem-vendas`, marca que some, `--remover-marca` (inclusive para chave viva) |
 | Contraprova do universo vazio | no código anterior a esta revisão, julho apagado da Torre → `--apply` saía **0 (success)**; com a guarda desligada, a fotografia é apagada (teste executável); com a guarda, sai 65 e a fotografia fica igual byte a byte |
 | Ponta a ponta (publica e serve) | 5: serve sem Data Mart, comissão ML uma vez, lote vencido, latência local |
 | Serving (testes da API) | 86 |
