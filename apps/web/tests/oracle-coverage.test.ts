@@ -58,11 +58,14 @@ const mlRow = (brand: string, available: boolean, pct: number | null) => ({
 // Afirmacoes congeladas nas descricoes
 // ---------------------------------------------------------------------------
 
-test("tools/list continua com exatamente as cinco tools", async () => {
+test("tools/list tem exatamente as oito tools", async () => {
   const { tools } = await (await connect()).listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), [
     "torre_comparar_canais_marcas",
     "torre_desempenho_marketplaces",
+    "torre_estoque_full",
+    "torre_expedicao_operacional",
+    "torre_monitoramento_precos",
     "torre_produtos_prioritarios",
     "torre_qualidade_dados",
     "torre_regioes_vendas",

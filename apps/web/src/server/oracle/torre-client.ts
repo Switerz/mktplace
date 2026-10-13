@@ -32,6 +32,14 @@ export const ENDPOINTS = {
   // ATENCAO: regioes NAO vive sob /performance — verificado em producao no OM0.
   regioesSummary: "/api/v1/regioes/summary",
   regioesByUf: "/api/v1/regioes/by-uf",
+  // MCP-COVERAGE-2 — superficies operacionais. Todas GET, todas agregadas.
+  expedicao: "/api/v1/expedicao",
+  expedicaoTrend: "/api/v1/expedicao/trend",
+  expedicaoTiktok: "/api/v1/expedicao/tiktok",
+  mlFulfillment: "/api/v1/performance/ml-fulfillment",
+  shopeeFbs: "/api/v1/performance/shopee-fbs",
+  shopeeFbsEstoque: "/api/v1/performance/shopee-fbs-estoque",
+  monitoramentoPreco: "/api/v1/performance/monitoramento-preco",
 } as const;
 
 export type EndpointKey = keyof typeof ENDPOINTS;
@@ -56,7 +64,41 @@ const ALLOWED_PARAMS = new Set([
   "uf",
 ]);
 
-export type QueryParams = Record<string, string | number | boolean | undefined>;
+/**
+ * MCP-COVERAGE-2 — allowlist POR ENDPOINT para as superficies operacionais.
+ * Mais estrita que a global: `channel` vale na Expedicao e continua sendo typo
+ * de `channels` no overview. De proposito FORA de todas as listas: `busca`
+ * (estoque), `product_query` (precos), `accounts`/`shop_account`, `order_by`
+ * e `offset` — texto livre, ou recorte/paginacao que o modelo nao escolhe.
+ * Qualquer um deles falha antes do fetch.
+ */
+const OPERATIONAL_PARAMS: Partial<Record<EndpointKey, ReadonlySet<string>>> = {
+  expedicao: new Set(["channel", "brands", "include_queue"]),
+  expedicaoTrend: new Set(["channel", "brands", "window_hours"]),
+  expedicaoTiktok: new Set(["event", "days", "brands"]),
+  mlFulfillment: new Set(["brands", "date_from", "date_to"]),
+  shopeeFbs: new Set(["brands", "date_from", "date_to"]),
+  shopeeFbsEstoque: new Set(["brands", "classificacoes", "somente_acao", "limite"]),
+  monitoramentoPreco: new Set([
+    "marketplace", "brand", "status", "product_type", "observed_date", "limit",
+  ]),
+};
+
+/** Unicos parametros que a fonte le como lista (`list[str] = Query`). */
+const LIST_PARAMS = new Set(["brands", "classificacoes"]);
+
+function allowedParamsFor(endpoint: EndpointKey): ReadonlySet<string> {
+  return OPERATIONAL_PARAMS[endpoint] ?? ALLOWED_PARAMS;
+}
+
+/**
+ * Lista vira parametro REPETIDO (`?brands=a&brands=b`), que e' como o FastAPI
+ * le `list[str] = Query(...)`. As rotas que esperam CSV recebem string pronta.
+ */
+export type QueryParams = Record<
+  string,
+  string | number | boolean | readonly string[] | undefined
+>;
 
 export type TorreClientOptions = {
   baseUrl: string;
@@ -119,12 +161,27 @@ export class TorreClient {
       // A allowlist e' checada ANTES do descarte de `undefined`: um typo cujo
       // valor por acaso seja `undefined` tambem precisa falhar, senao o erro
       // fica latente ate o dia em que aquele parametro passa a ter valor.
-      if (!ALLOWED_PARAMS.has(k)) {
+      if (!allowedParamsFor(endpoint).has(k)) {
         // Falha ANTES do fetch: zero chamada upstream.
         throw toolError("MISSING_CONFIGURATION");
       }
       if (v === undefined) continue;
-      url.searchParams.set(k, String(v));
+      // Lista em parametro escalar e' recusada: o FastAPI le o ULTIMO valor e
+      // a guarda abaixo o primeiro — os dois nunca podem discordar.
+      if (Array.isArray(v) && !LIST_PARAMS.has(k)) throw toolError("MISSING_CONFIGURATION");
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, String(item));
+      } else {
+        url.searchParams.set(k, String(v));
+      }
+    }
+
+    // A fila da Expedicao e' por pedido. Nenhuma tool pode pedi-la: a trava
+    // fica no adapter, e nao so' na tool, para que um descuido futuro em
+    // qualquer chamada falhe fechado em vez de devolver linha de pedido.
+    const fila = url.searchParams.getAll("include_queue");
+    if (endpoint === "expedicao" && (fila.length !== 1 || fila[0] !== "false")) {
+      throw toolError("MISSING_CONFIGURATION");
     }
 
     const controller = new AbortController();
@@ -263,6 +320,22 @@ export class TorreClient {
  */
 export function numOrNull(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
+  return null;
+}
+
+const DECIMAL_TEXT = /^-?\d+(\.\d+)?$/;
+
+/**
+ * Dinheiro/medida que o FastAPI serializa como `Decimal` chega como STRING
+ * (`"4049397.15"`). Numero finito ou texto decimal estrito viram numero; o
+ * resto (null, "", "NaN", "1e9") vira `null` — JAMAIS 0.
+ */
+export function decOrNull(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && DECIMAL_TEXT.test(v)) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
   return null;
 }
 
