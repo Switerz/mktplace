@@ -245,15 +245,24 @@ def test_apply_de_marca_da_api_e_recusado_antes_de_conectar(isolated):
     assert chamado == []
 
 
+def _codigo_executavel(fonte: str) -> str:
+    """Fonte sem comentarios e sem docstrings: so o que de fato executa. O
+    comentario que DOCUMENTA os grants proibidos (UPDATE, TRUNCATE) nao conta."""
+    sem_comentario = "\n".join(l for l in fonte.splitlines() if not l.strip().startswith("#"))
+    return "\n".join(sem_comentario.split('"""')[::2])
+
+
 def test_o_modulo_nunca_escreve_na_tabela_de_modo():
     fonte = Path(pub.__file__).read_text(encoding="utf-8")
-    sql = fonte.upper()
+    codigo = _codigo_executavel(fonte)
+    assert "def publish_scoped" in codigo and len(codigo) > 5000   # o recorte nao apagou o modulo
+    sql = codigo.upper()
     for proibido in ("UPDATE MARTS.SHOPEE_PRODUCT_SOURCE_MODE", "INSERT INTO MARTS.SHOPEE_PRODUCT_SOURCE_MODE",
                      "DELETE FROM MARTS.SHOPEE_PRODUCT_SOURCE_MODE", "UPDATE {MODE_TABLE}",
-                     "INSERT INTO {MODE_TABLE}", "TRUNCATE"):
+                     "INSERT INTO {MODE_TABLE}", "TRUNCATE", "UPDATE MARTS.", "UPDATE {TABLE}"):
         assert proibido not in sql, proibido
-    assert 'f"DELETE FROM {TABLE} WHERE {pred}"' in fonte
-    assert fonte.count("DELETE FROM") == 1
+    assert 'f"DELETE FROM {TABLE} WHERE {pred}"' in codigo
+    assert codigo.count("DELETE FROM") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +600,8 @@ def test_manifesto_tem_run_id_hashes_competencias_resultado_e_nunca_dsn(isolated
     assert m["scopes"] == ["kokeshi:2026-07", "kokeshi:2026-08"]
     assert {f["name"] for f in m["files"]["kokeshi"]} == {p.name for p in (isolated / "kokeshi").iterdir()}
     assert all(len(f["sha256"]) == 64 for f in m["files"]["kokeshi"])
-    assert m["result"]["code"] == 0 and m["result"]["escrita"] is False
+    assert m["result_code"] == 0
+    assert set(m) <= pub.MANIFEST_KEYS
     texto = arq.read_text(encoding="utf-8")
     assert "segredo" not in texto and "postgresql://" not in texto
 
@@ -631,39 +641,320 @@ def test_source_mode_trocado_antes_da_mutacao_faz_recusar(pg, isolated):
         res = pub.publish_scoped(prep.staging, pub.mark_partial(prep.staging, today=TODAY),
                                  executor=pub.ManualExportExecutor(conn, run_id="r4"))
     assert res["code"] == pub.EXIT_ROLLED_BACK, res
-    assert "procedencia ativa 'api'" in res["erro"]
+    assert "leitura inicial" in res["erro"] and "procedencia ativa 'api'" in res["erro"]
+    assert _snapshot(pg, "source = 'manual_export'") == manual_antes
+
+
+# ===========================================================================
+# SHOPEE-PUBLISHER-3 — privilegio minimo, M04, M15, manifesto e formulas
+# ===========================================================================
+
+import zipfile as _zipfile
+
+ROLE = "publicador_min"
+ROLE_PWD = "efemero_role"
+
+#: Os grants EXATOS documentados em `publish_shopee_manual_export` — e nada mais.
+GRANTS_MINIMOS = [
+    "GRANT CONNECT ON DATABASE {db} TO {r}",
+    "GRANT USAGE, CREATE ON SCHEMA marts TO {r}",
+    "GRANT SELECT, INSERT, DELETE ON marts.fact_shopee_product_monthly TO {r}",
+    "GRANT USAGE ON SEQUENCE marts.fact_shopee_product_monthly_id_seq TO {r}",
+    "GRANT SELECT ON marts.shopee_product_source_mode TO {r}",
+]
+
+
+@pytest.fixture
+def role_min(pg):
+    """Role NAO superusuaria com exatamente os grants minimos. Devolve a engine dela."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+    url = make_url(PG_URL)
+    with pg.begin() as c:
+        c.execute(text(f"""DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ROLE}') THEN
+                CREATE ROLE {ROLE} LOGIN PASSWORD '{ROLE_PWD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+            END IF; END $$"""))
+        for g in GRANTS_MINIMOS:
+            c.execute(text(g.format(db=url.database, r=ROLE)))
+    eng = create_engine(url.set(username=ROLE, password=ROLE_PWD))
+    yield eng
+    eng.dispose()
+
+
+def _backup_tables(pg):
+    from sqlalchemy import text
+    with pg.connect() as c:
+        return c.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = 'marts' "
+                              "AND tablename LIKE '%\\_bkp\\_%'")).scalars().all()
+
+
+@needs_pg
+def test_role_minima_nao_e_superusuaria_e_nao_tem_update(pg, role_min):
+    from sqlalchemy import text
+    with pg.connect() as c:
+        r = c.execute(text("SELECT rolsuper, rolcreaterole, rolbypassrls FROM pg_roles WHERE rolname = :r"),
+                      {"r": ROLE}).one()
+        assert tuple(r) == (False, False, False)
+        for tabela in ("marts.shopee_product_source_mode", "marts.fact_shopee_product_monthly"):
+            for priv in ("UPDATE", "TRUNCATE"):
+                assert c.execute(text("SELECT has_table_privilege(:r, :t, :p)"),
+                                 {"r": ROLE, "t": tabela, "p": priv}).scalar() is False, (tabela, priv)
+
+
+@needs_pg
+def test_role_minima_nao_consegue_alterar_o_source_mode(role_min):
+    from sqlalchemy import text
+    from sqlalchemy.exc import ProgrammingError
+    with role_min.connect() as c:
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            c.execute(text("UPDATE marts.shopee_product_source_mode SET source='api' WHERE brand='kokeshi'"))
+
+
+@needs_pg
+def test_apply_completo_com_a_role_minima(pg, role_min, isolated):
+    """O apply inteiro — privilegios, lock, leituras de modo, backup, DELETE,
+    INSERT, invariantes e commit — com a role de privilegio minimo."""
+    api_antes = _snapshot(pg, "source = 'api'")
+    fora_antes = _snapshot(pg, "NOT (brand = 'kokeshi' AND ref_month = '2026-08-01' AND source = 'manual_export')")
+    prep = _staging_agosto(isolated)
+    with role_min.connect() as conn:
+        res = pub.apply_on_connection(conn, prep, run_id="rmin", today=TODAY)
+    assert res["code"] == pub.EXIT_OK, res
+    assert _snapshot(pg, "source = 'api'") == api_antes
+    assert _snapshot(pg, "NOT (brand = 'kokeshi' AND ref_month = '2026-08-01' AND source = 'manual_export')") == fora_antes
+    manual = _snapshot(pg, "source = 'manual_export' AND ref_month = '2026-08-01'")
+    assert [(r[2], r[4], r[7]) for r in manual] == [("SKU1", Decimal("150.00"), "rmin")]
+    from sqlalchemy import text
+    with pg.connect() as c:
+        assert dict(c.execute(text("SELECT brand, source FROM marts.shopee_product_source_mode")).all()) == \
+            {"apice": "api", "kokeshi": "manual_export"}
+        assert c.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")).scalar() == 0
+
+
+@needs_pg
+@pytest.mark.parametrize("revogar,esperado", [
+    ("REVOKE INSERT ON marts.fact_shopee_product_monthly FROM {r}", "INSERT em marts.fact_shopee_product_monthly"),
+    ("REVOKE DELETE ON marts.fact_shopee_product_monthly FROM {r}", "DELETE em marts.fact_shopee_product_monthly"),
+    ("REVOKE SELECT ON marts.shopee_product_source_mode FROM {r}", "SELECT em marts.shopee_product_source_mode"),
+    ("REVOKE CREATE ON SCHEMA marts FROM {r}", "CREATE no schema marts"),
+    ("REVOKE USAGE ON SEQUENCE marts.fact_shopee_product_monthly_id_seq FROM {r}", "USAGE na sequence"),
+])
+def test_grant_faltando_falha_no_preflight_antes_do_backup(pg, role_min, isolated, revogar, esperado):
+    from sqlalchemy import text
+    with pg.begin() as c:
+        c.execute(text(revogar.format(r=ROLE)))
+    manual_antes = _snapshot(pg, "source = 'manual_export'")
+    prep = _staging_agosto(isolated)
+    with role_min.connect() as conn:
+        with pytest.raises(pub.PublishRefused, match=esperado) as e:
+            pub.apply_on_connection(conn, prep, run_id="rrev", today=TODAY)
+    msg = str(e.value)
+    assert ROLE not in msg and "127.0.0.1" not in msg and ROLE_PWD not in msg
+    assert _backup_tables(pg) == []                # nenhum backup deixado para tras
     assert _snapshot(pg, "source = 'manual_export'") == manual_antes
 
 
 @needs_pg
-def test_update_concorrente_do_source_mode_espera_o_commit(pg, isolated, monkeypatch):
-    """Depois da releitura com FOR SHARE, um UPDATE concorrente da linha de modo
-    nao consegue passar antes do commit da publicacao."""
+def test_troca_concorrente_durante_a_transacao_e_pega_antes_do_commit(pg, isolated, monkeypatch):
+    """Troca do interruptor COMMITADA por outra sessao no meio da transacao de
+    mutacao (depois da 1a leitura): a 2a leitura, antes do commit, recusa."""
     from sqlalchemy import create_engine, text
-    from sqlalchemy.exc import OperationalError
     outro = create_engine(PG_URL)
-    tentativa = {}
-    original = pub.ManualExportExecutor.delete_scope
+    original = pub.ManualExportExecutor.insert_rows
 
-    def tenta_trocar_no_meio(self, scopes):
-        with outro.connect() as c:
-            c.execute(text("SET lock_timeout = '500ms'"))
-            try:
-                c.execute(text("UPDATE marts.shopee_product_source_mode SET source='api' WHERE brand='kokeshi'"))
-                c.commit()
-                tentativa["passou"] = True
-            except OperationalError:
-                c.rollback()
-                tentativa["passou"] = False
-        return original(self, scopes)
-    monkeypatch.setattr(pub.ManualExportExecutor, "delete_scope", tenta_trocar_no_meio)
+    def troca_no_meio(self, rows):
+        with outro.begin() as c:
+            c.execute(text("UPDATE marts.shopee_product_source_mode SET source='api' WHERE brand='kokeshi'"))
+        return original(self, rows)
+    monkeypatch.setattr(pub.ManualExportExecutor, "insert_rows", troca_no_meio)
+    manual_antes = _snapshot(pg, "source = 'manual_export'")
+    api_antes = _snapshot(pg, "source = 'api'")
     prep = _staging_agosto(isolated)
     with pg.connect() as conn:
         res = pub.publish_scoped(prep.staging, pub.mark_partial(prep.staging, today=TODAY),
-                                 executor=pub.ManualExportExecutor(conn, run_id="r5"))
+                                 executor=pub.ManualExportExecutor(conn, run_id="r6"))
     outro.dispose()
-    assert tentativa == {"passou": False}
-    assert res["code"] == pub.EXIT_OK, res
-    with pg.connect() as c:
-        assert c.execute(text("SELECT source FROM marts.shopee_product_source_mode "
-                              "WHERE brand='kokeshi'")).scalar() == "manual_export"
+    assert res["code"] == pub.EXIT_ROLLED_BACK, res
+    assert "leitura pre-commit" in res["erro"]
+    assert _snapshot(pg, "source = 'manual_export'") == manual_antes
+    assert _snapshot(pg, "source = 'api'") == api_antes
+
+
+def test_conjunto_de_modo_tem_de_ser_exato():
+    pub.assert_modes_exactly_manual({"kokeshi": "manual_export"}, {"kokeshi"}, momento="t")
+    for modos, erro in (({}, "ausente"), ({"kokeshi": "api"}, "procedencia ativa 'api'"),
+                        ({"kokeshi": "manual_export", "apice": "api"}, "inesperada")):
+        with pytest.raises(pub.PublishRefused, match=erro):
+            pub.assert_modes_exactly_manual(modos, {"kokeshi"}, momento="t")
+
+
+def test_o_modulo_nao_usa_lock_de_linha():
+    fonte = Path(pub.__file__).read_text(encoding="utf-8")
+    codigo = "\n".join(l for l in fonte.splitlines() if not l.strip().startswith("#"))
+    executavel = codigo.split('"""')[::2]           # fora das docstrings
+    for trecho in executavel:
+        for proibido in ('" FOR SHARE', '" FOR UPDATE', "FOR SHARE\"", "FOR UPDATE\""):
+            assert proibido not in trecho
+
+
+# --- M04: arquivo resolvido fora da raiz ------------------------------------
+
+def test_m04_arquivo_que_resolve_fora_da_pasta_e_recusado(isolated, tmp_path, monkeypatch):
+    fora = tmp_path / "fora_da_raiz.xlsx"
+    _xlsx(fora, [_pedido("Z1", "2026-08-10 10:00", "SKU1", 1, 10.0)])
+    alvo = sorted((isolated / "kokeshi").iterdir())[0].name
+    real = Path.resolve
+
+    def resolve_controlado(self, *a, **k):
+        r = real(self, *a, **k)
+        return real(fora, *a, **k) if r.name == alvo else r
+    monkeypatch.setattr(Path, "resolve", resolve_controlado)
+    assert not pub.is_link_like(isolated / "kokeshi" / alvo)      # nao e link: so o containment pega
+    with pytest.raises(pub.PublishRefused, match="resolve fora da pasta"):
+        pub.list_brand_files(isolated, "kokeshi")
+
+
+def test_m04_pasta_da_marca_que_resolve_fora_da_raiz_e_recusada(isolated, tmp_path, monkeypatch):
+    outra = tmp_path / "outra_raiz" / "kokeshi"
+    outra.mkdir(parents=True)
+    real = Path.resolve
+
+    def resolve_controlado(self, *a, **k):
+        r = real(self, *a, **k)
+        return real(outra, *a, **k) if r == real(isolated / "kokeshi") else r
+    monkeypatch.setattr(Path, "resolve", resolve_controlado)
+    with pytest.raises(pub.PublishRefused, match="resolve fora da raiz"):
+        pub.list_brand_files(isolated, "kokeshi")
+
+
+# --- M15: arquivo trocado durante o preparo ---------------------------------
+
+def _troca_arquivo_depois_da_staging(monkeypatch, isolated):
+    original = bf.build_staging
+
+    def build_e_troca(scopes, root):
+        st = original(scopes, root)                 # a staging ja leu os arquivos
+        alvo = sorted((isolated / "kokeshi").iterdir())[0]
+        _xlsx(alvo, [_pedido("X9", "2026-07-20 10:00", "SKU7", 9, 999.0)])   # outro conteudo
+        return st
+    monkeypatch.setattr(bf, "build_staging", build_e_troca)
+
+
+def test_m15_arquivo_trocado_entre_listagem_e_reconferencia_aborta_o_preparo(isolated, monkeypatch):
+    _troca_arquivo_depois_da_staging(monkeypatch, isolated)
+    with pytest.raises(pub.PublishRefused, match="mudou durante o preparo"):
+        pub.prepare([("kokeshi", "2026-07"), ("kokeshi", "2026-08")], isolated, today=TODAY)
+
+
+def test_m15_no_apply_o_arquivo_trocado_aborta_sem_abrir_conexao(isolated, monkeypatch, tmp_path):
+    _troca_arquivo_depois_da_staging(monkeypatch, isolated)
+    chamado = []
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=False, apply=True, audit_dir=str(tmp_path / "audit_m15"))
+    env = {pub.CONSENT_ENV: "1", "BACKFILL_NEON_RW_URL": "postgresql://u:p@ep-x.neon.tech/db"}
+    assert pub.run_apply(args, env=env, engine_factory=lambda *a, **k: chamado.append(1),
+                         today=TODAY) == pub.EXIT_REFUSED
+    assert chamado == []                            # zero conexao, logo zero escrita
+
+
+# --- Manifesto ---------------------------------------------------------------
+
+def test_audit_dir_e_obrigatorio(isolated):
+    with pytest.raises(SystemExit):
+        pub.build_parser().parse_args(["--scope", "kokeshi:2026-07", "--source-root", str(isolated)])
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=True, apply=False, audit_dir=None)
+    assert pub.run_dry(args, today=TODAY) == pub.EXIT_USAGE
+
+
+def test_audit_dir_dentro_de_worktree_git_e_recusado(isolated, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    for destino in (repo / "audit", repo / "a" / "b"):
+        args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                         offline=True, apply=False, audit_dir=str(destino))
+        assert pub.run_dry(args, today=TODAY) == pub.EXIT_REFUSED
+        assert not destino.exists()
+    # worktree vinculado: `.git` e ARQUIVO
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: x")
+    assert pub.inside_git_worktree(wt / "audit")
+
+
+def test_o_proprio_repositorio_e_recusado_como_destino(isolated):
+    repo_api = Path(pub.__file__).resolve().parents[1]
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=True, apply=False, audit_dir=str(repo_api / "publish_audit"))
+    assert pub.run_dry(args, today=TODAY) == pub.EXIT_REFUSED
+    assert not (repo_api / "publish_audit").exists()
+
+
+def test_manifesto_sem_gmv_pedido_sku_produto_ou_credencial(isolated, tmp_path):
+    audit = tmp_path / "audit_priv"
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=True, apply=False, audit_dir=str(audit))
+    assert pub.run_dry(args, env={"BACKFILL_NEON_RO_URL": "postgresql://u:segredo@h.neon.tech/db"},
+                       today=TODAY) == pub.EXIT_OK
+    [arq] = list(audit.glob("*.json"))
+    texto = arq.read_text(encoding="utf-8")
+    m = json.loads(texto)
+    assert set(m) <= pub.MANIFEST_KEYS
+    for proibido in ("gmv", "SKU1", "SKU2", "Produto", "A1", "segredo", "neon.tech", "postgresql"):
+        assert proibido not in texto, proibido
+    assert m["per_scope_rows"]["kokeshi:2026-07"] == {"rows_before": None, "rows_after": 2}
+    assert m["started_at"] <= m["finished_at"]
+
+
+def test_manifesto_com_campo_financeiro_e_recusado():
+    with pytest.raises(pub.PublishRefused, match="lista branca"):
+        pub.assert_manifest_safe({"run_id": "x", "gmv_total": "1"})
+    with pytest.raises(pub.PublishRefused, match="proibido"):
+        pub.assert_manifest_safe({"run_id": "x", "scopes": ["gmv"]})
+
+
+# --- Formulas: deteccao estrutural -----------------------------------------
+
+def _xlsx_com_celula(path: Path, celula_xml: str, ns_extra: str = "") -> Path:
+    _xlsx(path, [_pedido("F1", "2026-08-10 10:00", "SKU1", 1, 10.0)])
+    tmp = path.with_suffix(".tmp")
+    with _zipfile.ZipFile(path) as zin, _zipfile.ZipFile(tmp, "w", _zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            dados = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                xml = dados.decode("utf-8")
+                if ns_extra:
+                    xml = xml.replace("<worksheet ", f"<worksheet {ns_extra} ", 1)
+                xml = xml.replace("</row>", celula_xml + "</row>", 1)
+                dados = xml.encode("utf-8")
+            zout.writestr(item, dados)
+    tmp.replace(path)
+    return path
+
+
+NS_MAIN = 'xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+
+
+@pytest.mark.parametrize("celula,ns", [
+    ('<c r="Z1"><f>1+1</f></c>', ""),                              # sem cache
+    ('<c r="Z1"><f>1+1</f><v>2</v></c>', ""),                      # com valor em cache
+    ('<c r="Z1"><x:f>1+1</x:f><x:v>2</x:v></c>', NS_MAIN),         # com namespace/prefixo
+    ('<c r="Z1"><f t="shared" ref="Z1:Z2" si="0">1+1</f></c>', ""),   # compartilhada
+])
+def test_toda_formula_e_detectada(tmp_path, celula, ns):
+    p = _xlsx_com_celula(tmp_path / "f.xlsx", celula, ns)
+    assert pub.has_formula(p) is True
+
+
+def test_planilha_sem_formula_nao_e_falso_positivo(tmp_path):
+    p = _xlsx_com_celula(tmp_path / "ok.xlsx", '<c r="Z1" t="inlineStr"><is><t>f</t></is></c>')
+    assert pub.has_formula(p) is False
+
+
+def test_formula_com_cache_e_recusada_no_preparo(tmp_path, monkeypatch):
+    root = _so_um_mes(tmp_path, monkeypatch, [_pedido("B0", "2026-08-09 10:00", "SKU1", 1, 10.0)])
+    alvo = next((root / "kokeshi").iterdir())
+    _xlsx_com_celula(alvo, '<c r="Z1"><x:f>1+1</x:f><x:v>2</x:v></c>', NS_MAIN)
+    with pytest.raises(pub.PublishRefused, match="formula"):
+        pub.prepare([("kokeshi", "2026-08")], root, today=TODAY_OUT)

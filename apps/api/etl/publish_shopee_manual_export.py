@@ -19,9 +19,12 @@ O QUE ELE GARANTE (e prova em teste)
 - dentro da transacao, antes do commit: impressao digital de TODAS as linhas
   fora dos pares pedidos (qualquer procedencia, qualquer mes) e de TODAS as
   linhas `api` identicas as de antes. Divergencia faz rollback;
-- `source_mode` e relido DENTRO da transacao de mutacao, com `FOR SHARE`,
-  depois do lock e imediatamente antes do DELETE: uma troca concorrente ou
-  espera o commit ou faz a publicacao recusar;
+- privilegio minimo: preflight explicito dos grants ANTES do backup, e nenhum
+  lock de linha (`FOR SHARE` exigiria UPDATE no source_mode). O `source_mode`
+  e lido por SELECT simples duas vezes DENTRO da transacao de mutacao — no
+  inicio (depois do advisory lock) e imediatamente antes do commit — e tem de
+  ser exatamente as marcas pedidas em `manual_export`. Risco residual aceito e
+  documentado em `publish_scoped`: troca commitada entre a 2a leitura e o commit;
 - recusa marca cuja procedencia ativa nao seja explicitamente `manual_export`
   (inclusive marca AUSENTE da tabela de modo); so a `kokeshi` e aceita;
 - recusa competencia FUTURA (no --scope e na janela);
@@ -35,8 +38,16 @@ O QUE ELE GARANTE (e prova em teste)
   linhas que entra na staging e conferido contra o bruto (nada descartado em
   silencio). Ausencia nunca vira zero;
 - backup duravel conferido, advisory lock de sessao, transacao unica, ZERO
-  retry, manifesto auditavel (run_id, hashes, competencias, resultado) sem DSN;
+  retry;
+- manifesto auditavel (run_id, hashes, competencias, contagens, codigo,
+  instantes) em `--audit-dir` OBRIGATORIO, fora de qualquer worktree Git; sem
+  GMV, pedido, SKU, comprador nem credencial;
 - nunca escreve em `marts.shopee_product_source_mode`.
+
+DIVIDA DE PERFORMANCE (registrada, nao tratada neste gate): o preparo dos 66
+exports reais leva ~9 min (529 s medidos), quase tudo leitura de XLSX — pela
+validacao estrita e de novo pelo loader oficial. Unificar as duas leituras e o
+candidato natural, mas mexe no loader compartilhado e fica para outro gate.
 
 USO
 ---
@@ -313,16 +324,27 @@ def assert_full_month_windows(brand: str, plan: dict[str, tuple[str, str]],
 # Validacao estrita das celulas (antes da transformacao)
 # ---------------------------------------------------------------------------
 
+def _local(tag: str) -> str:
+    """Nome LOCAL do elemento: `{namespace}f` -> `f`; `x:f` ja chega expandido."""
+    return tag.rsplit("}", 1)[-1]
+
+
 def has_formula(path: Path) -> bool:
-    """Formula no XML de qualquer planilha. Lida pelo pandas, uma formula sem
-    valor em cache vira celula vazia — e celula vazia viraria zero."""
+    """Formula em QUALQUER planilha, por leitura ESTRUTURAL do XML: todo
+    elemento cujo nome local seja `f`, com qualquer namespace/prefixo, com ou
+    sem valor em cache. Busca por texto teria ponto cego em prefixo (`<x:f>`) e
+    em fronteira de bloco. Toda formula e recusada: com cache o valor nao e
+    dado de origem; sem cache o pandas le vazio, e vazio viraria zero."""
+    from xml.etree.ElementTree import iterparse
     with zipfile.ZipFile(path) as z:
         for n in z.namelist():
             if n.startswith("xl/worksheets/") and n.endswith(".xml"):
                 with z.open(n) as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        if b"<f>" in chunk or b"<f " in chunk:
+                    for _evento, elem in iterparse(fh, events=("end",)):
+                        if _local(elem.tag) == "f":
                             return True
+                        if _local(elem.tag) == "row":
+                            elem.clear()          # libera a linha ja inspecionada
     return False
 
 
@@ -535,17 +557,81 @@ def scoped_predicate(scopes: list[tuple[str, str]]) -> tuple[str, dict]:
     return f"({pred}) AND source = :src", params
 
 
-def read_source_modes(conn, *, lock: bool = False, brands=None) -> dict[str, str]:
-    """`lock=True`: `FOR SHARE` — bloqueia UPDATE concorrente da linha de modo
-    ate o fim da transacao corrente."""
+def read_source_modes(conn, *, brands=None) -> dict[str, str]:
+    """SELECT simples. NUNCA `FOR SHARE`/`FOR UPDATE`: lock de linha exige
+    privilegio de UPDATE na tabela, e a role do publicador nao o tem — nem deve
+    ter, porque quem altera o interruptor nao pode ser quem publica."""
     sql = f"SELECT brand, source FROM {MODE_TABLE}"
     params = {}
     if brands is not None:
         sql += " WHERE brand = ANY(:brands)"
         params["brands"] = sorted(brands)
-    if lock:
-        sql += " FOR SHARE"
     return {r[0]: r[1] for r in conn.execute(sqlalchemy_text(sql), params).all()}
+
+
+def assert_modes_exactly_manual(modes: dict[str, str], brands, *, momento: str) -> None:
+    """O conjunto lido tem de ser EXATAMENTE as marcas pedidas, todas em
+    `manual_export`: nenhuma ausente, nenhuma em outra procedencia, nada a mais."""
+    esperado = {b: SOURCE for b in set(brands)}
+    if modes != esperado:
+        divergencias = []
+        for b in sorted(set(esperado) | set(modes)):
+            if b not in modes:
+                divergencias.append(f"{b}: ausente")
+            elif b not in esperado:
+                divergencias.append(f"{b}: inesperada")
+            elif modes[b] != SOURCE:
+                divergencias.append(f"{b}: procedencia ativa '{modes[b]}'")
+        raise PublishRefused(
+            f"source_mode divergente na leitura {momento}: {'; '.join(divergencias)}. "
+            f"Rollback integral; nada foi publicado")
+
+
+# --- Preflight de privilegios -----------------------------------------------
+#
+# GRANTS MINIMOS da role de escrita do publicador (e SO estes):
+#
+#   GRANT CONNECT ON DATABASE <db> TO <role>;
+#   GRANT USAGE, CREATE ON SCHEMA marts TO <role>;               -- CREATE so p/ backup
+#   GRANT SELECT, INSERT, DELETE ON marts.fact_shopee_product_monthly TO <role>;
+#   GRANT USAGE ON SEQUENCE marts.fact_shopee_product_monthly_id_seq TO <role>;
+#   GRANT SELECT ON marts.shopee_product_source_mode TO <role>;
+#
+# NUNCA: UPDATE em qualquer tabela, TRUNCATE, superuser, CREATEROLE, BYPASSRLS.
+
+REQUIRED_TABLE_PRIVILEGES: tuple[tuple[str, str], ...] = (
+    (MODE_TABLE, "SELECT"),
+    (TABLE, "SELECT"), (TABLE, "INSERT"), (TABLE, "DELETE"),
+)
+REQUIRED_SCHEMA_PRIVILEGES: tuple[tuple[str, str], ...] = (("marts", "USAGE"), ("marts", "CREATE"))
+
+PRIVILEGE_SQL = """
+SELECT has_table_privilege(current_user, :obj, :priv) AS ok
+"""
+SCHEMA_PRIVILEGE_SQL = """
+SELECT has_schema_privilege(current_user, :obj, :priv) AS ok
+"""
+
+
+def assert_publisher_privileges(conn) -> list[str]:
+    """Antes de QUALQUER backup/DDL/DML: confere cada privilegio necessario e
+    nomeia o que falta (objeto + privilegio). Nunca cita usuario, host ou DSN."""
+    faltam = []
+    for obj, priv in REQUIRED_SCHEMA_PRIVILEGES:
+        if not conn.execute(sqlalchemy_text(SCHEMA_PRIVILEGE_SQL), {"obj": obj, "priv": priv}).scalar():
+            faltam.append(f"{priv} no schema {obj}")
+    for obj, priv in REQUIRED_TABLE_PRIVILEGES:
+        if not conn.execute(sqlalchemy_text(PRIVILEGE_SQL), {"obj": obj, "priv": priv}).scalar():
+            faltam.append(f"{priv} em {obj}")
+    seq = conn.execute(sqlalchemy_text(bf.SEQUENCE_PRIVILEGE_SQL),
+                       {"tabela": TABLE, "coluna": bf.SEQUENCE_COLUMN}).scalar()
+    if seq and not conn.execute(sqlalchemy_text(bf.SEQUENCE_USAGE_SQL), {"seq": seq}).scalar():
+        faltam.append(f"USAGE na sequence {seq}")
+    if faltam:
+        raise PublishRefused(
+            "privilegio ausente para publicar (nada foi criado nem alterado): "
+            + "; ".join(faltam))
+    return ["ok"]
 
 
 def assert_brands_read_manual(modes: dict[str, str], brands) -> None:
@@ -658,11 +744,11 @@ class ManualExportExecutor:
     def begin(self):
         self._trans = self.conn.begin()
 
-    def recheck_modes(self, brands) -> dict[str, str]:
-        """Dentro da transacao de mutacao, com `FOR SHARE`: uma troca concorrente
-        ou espera este commit ou ja aconteceu — e entao a publicacao recusa."""
-        modos = read_source_modes(self.conn, lock=True, brands=brands)
-        assert_brands_read_manual(modos, brands)
+    def recheck_modes(self, brands, *, momento: str) -> dict[str, str]:
+        """Leitura SIMPLES do source_mode dentro da transacao de mutacao.
+        Chamada duas vezes por `publish_scoped`: no inicio e antes do commit."""
+        modos = read_source_modes(self.conn, brands=brands)
+        assert_modes_exactly_manual(modos, brands, momento=momento)
         return modos
 
     def delete_scope(self, scopes) -> int:
@@ -701,20 +787,38 @@ class ManualExportExecutor:
 
 
 def publish_scoped(staging: bf.Staging, rows: pd.DataFrame, *, executor) -> dict:
-    """Backup -> transacao unica (relê modo, DELETE manual, INSERT) -> invariantes -> commit.
+    """Privilegios -> backup -> transacao unica -> invariantes -> commit.
 
-    Invariantes conferidos DENTRO da transacao, antes do commit:
-      1. `source_mode` relido com FOR SHARE imediatamente antes do DELETE;
-      2. linhas manuais no escopo == linhas da staging;
-      3. impressao digital de TUDO fora do escopo identica a de antes;
-      4. impressao digital de todas as linhas `api` identica a de antes.
-    Qualquer divergencia -> rollback. ZERO retry."""
+    Sequencia:
+      0. preflight de privilegios, ANTES do backup (falta de grant nao deixa
+         tabela de backup para tras);
+      1. backup duravel em transacao propria;
+      2. transacao de mutacao: 1a leitura do source_mode (exatamente as marcas
+         pedidas, todas manual_export);
+      3. DELETE manual + INSERT;
+      4. invariantes: contagem do escopo, impressao digital de TUDO fora do
+         escopo, impressao digital de todas as linhas `api`;
+      5. 2a leitura do source_mode, imediatamente antes do commit;
+      6. commit.
+    Qualquer divergencia -> rollback integral. ZERO retry.
+
+    RISCO RESIDUAL ACEITO: as leituras do source_mode sao SELECT simples, sem
+    lock de linha (`FOR SHARE` exige privilegio de UPDATE, que a role do
+    publicador nao tem por desenho). Uma troca do interruptor COMMITADA entre a
+    2a leitura e o commit desta transacao nao e detectada. A janela e o tempo
+    de um round-trip de COMMIT; a troca do interruptor e manual e rara, e o
+    efeito seria a marca passar a ler `api` com as linhas `manual_export` recem
+    publicadas guardadas ao lado — sem dupla contagem, porque a leitura da tela
+    casa uma procedencia por marca."""
     scopes = list(staging.scopes)
     brands = sorted({b for b, _ in scopes})
+    assert_publisher_privileges(executor.conn)
+    if executor.conn.in_transaction():
+        executor.conn.rollback()                  # o preflight so leu
     backup = executor.backup_scope(scopes)
     executor.begin()
     try:
-        executor.recheck_modes(brands)
+        executor.recheck_modes(brands, momento="inicial")
         fora_antes = outside_fingerprint(executor.conn, scopes)
         api_antes = api_fingerprint(executor.conn)
         apagadas = executor.delete_scope(scopes)
@@ -726,6 +830,7 @@ def publish_scoped(staging: bf.Staging, rows: pd.DataFrame, *, executor) -> dict
             raise PublishRefused("linhas FORA do escopo mudaram durante a publicacao: rollback")
         if api_fingerprint(executor.conn) != api_antes:
             raise PublishRefused("linhas `api` mudaram durante a publicacao: rollback")
+        executor.recheck_modes(brands, momento="pre-commit")
     except (KeyboardInterrupt, SystemExit):
         try:
             executor.rollback()
@@ -748,33 +853,103 @@ def publish_scoped(staging: bf.Staging, rows: pd.DataFrame, *, executor) -> dict
             "inseridas": len(rows), "fora_do_escopo": fora_antes, "api": api_antes}
 
 
+def apply_on_connection(conn, prep: "Prepared", *, run_id: str, today: date) -> dict:
+    """Nucleo do --apply sobre uma conexao ja aberta (identidade, primary e SSL
+    sao conferidos por `run_apply` antes). Privilegios -> lock -> modo -> estado
+    anterior -> publicacao. Libera o lock sempre."""
+    scopes = list(prep.staging.scopes)
+    brands = sorted({b for b, _ in scopes})
+    assert_publisher_privileges(conn)
+    bf.acquire_advisory_lock(conn, key=LOCK_KEY)
+    try:
+        assert_modes_exactly_manual(read_source_modes(conn, brands=brands), brands, momento="preflight")
+        before = read_before(conn, scopes)
+        bf.close_preflight_transaction(conn)
+        rec = bf.reconcile(before, prep.staging, compared_target=TARGET)
+        res = publish_scoped(prep.staging, mark_partial(prep.staging, today=today),
+                             executor=ManualExportExecutor(conn, run_id=run_id))
+        return {**res, "rec": rec}
+    finally:
+        try:
+            if conn.in_transaction():
+                conn.rollback()
+            bf.release_advisory_lock(conn, key=LOCK_KEY)
+            if conn.in_transaction():
+                conn.rollback()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Manifesto auditavel e relatorio
 # ---------------------------------------------------------------------------
 
-def build_manifest(prep: Prepared, *, run_id: str, mode: str, result: dict | None = None,
-                   rec: bf.Reconciliation | None = None) -> dict:
-    """Run_id, competencias, hashes de TODOS os arquivos e resultado. Nunca DSN,
-    usuario, host ou senha — so dado que ja esta nos arquivos ou foi medido."""
-    return {
+#: Lista BRANCA de campos do manifesto. Nada financeiro (GMV, preco), nada de
+#: pedido, SKU, produto ou comprador, nada de conexao. Qualquer chave fora
+#: desta lista e recusada por `assert_manifest_safe`.
+MANIFEST_KEYS = frozenset({"run_id", "mode", "started_at", "finished_at", "today_brt",
+                           "scopes", "windows", "files", "raw_rows", "per_scope_rows", "result_code",
+                           "rows_deleted", "rows_inserted"})
+
+
+def build_manifest(prep: Prepared, *, run_id: str, mode: str, started_at: str,
+                   result_code: int, rec: bf.Reconciliation | None = None,
+                   rows_deleted: int | None = None, rows_inserted: int | None = None) -> dict:
+    """Run_id, competencias, hashes, CONTAGENS, codigo de resultado e instantes."""
+    m = {
         "run_id": run_id,
         "mode": mode,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
         "today_brt": str(prep.today),
         "scopes": [f"{b}:{m}" for b, m in prep.staging.scopes],
         "windows": prep.windows,
         "files": {b: [{"name": f.name, "bytes": f.size, "sha256": f.sha256} for f in fs]
                   for b, fs in prep.files.items()},
         "raw_rows": prep.raw.rows,
-        "per_scope_after": {f"{b}:{m}": {"rows": s["rows_after"], "gmv": str(s["gmv_after"]),
-                                         "rows_before": s["rows_before"],
-                                         "gmv_before": None if s["gmv_before"] is None else str(s["gmv_before"])}
-                            for (b, m), s in (rec.per_scope.items() if rec else [])},
-        "result": result,
+        "per_scope_rows": {f"{b}:{mm}": {"rows_before": s["rows_before"], "rows_after": s["rows_after"]}
+                           for (b, mm), s in (rec.per_scope.items() if rec else [])},
+        "result_code": result_code,
+        "rows_deleted": rows_deleted,
+        "rows_inserted": rows_inserted,
     }
+    assert_manifest_safe(m)
+    return m
+
+
+def assert_manifest_safe(m: dict) -> None:
+    extras = set(m) - MANIFEST_KEYS
+    if extras:
+        raise PublishRefused(f"manifesto com campo fora da lista branca: {sorted(extras)}")
+    texto = json.dumps(m, default=str).lower()
+    for proibido in ("gmv", "postgres", "password", "senha", "@", "://"):
+        if proibido in texto:
+            raise PublishRefused(f"manifesto conteria dado proibido ({proibido!r})")
+
+
+def inside_git_worktree(p: Path) -> bool:
+    """Qualquer ancestral com `.git` (pasta ou arquivo de worktree)."""
+    alvo = p.resolve()
+    return any((d / ".git").exists() for d in (alvo, *alvo.parents))
+
+
+def resolve_audit_dir(raw: str | None) -> Path:
+    """`--audit-dir` e OBRIGATORIO e nunca pode cair dentro de um worktree Git:
+    o repositorio e publico, e o manifesto descreve arquivos de uma loja."""
+    if not raw:
+        raise bf.BackfillUsageError("--audit-dir e obrigatorio (pasta privada, fora do repositorio)")
+    p = Path(raw)
+    if is_link_like(p):
+        raise PublishRefused("--audit-dir e symlink/junction (nada foi escrito)")
+    if inside_git_worktree(p if p.exists() else p.parent):
+        raise PublishRefused("--audit-dir esta dentro de um worktree Git; use pasta privada fora do repo")
+    return p
 
 
 def write_manifest(manifest: dict, audit_dir: Path) -> Path:
+    assert_manifest_safe(manifest)
+    if inside_git_worktree(audit_dir if audit_dir.exists() else audit_dir.parent):
+        raise PublishRefused("--audit-dir esta dentro de um worktree Git")
     audit_dir.mkdir(parents=True, exist_ok=True)
     p = audit_dir / f"publish_manual_export_{manifest['run_id']}_{manifest['mode']}.json"
     p.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -825,8 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", action="append", metavar="marca:AAAA-MM", required=True)
     p.add_argument("--source-root", required=True,
                    help="Pasta NOVA e isolada com <marca>/Order.all.*.xlsx de mes inteiro.")
-    p.add_argument("--audit-dir", default="publish_audit",
-                   help="Onde gravar o manifesto JSON (run_id, hashes, resultado).")
+    p.add_argument("--audit-dir", required=True,
+                   help="Pasta PRIVADA, fora de qualquer worktree Git, para o manifesto JSON.")
     m = p.add_mutually_exclusive_group()
     m.add_argument("--offline", action="store_true",
                    help="So arquivos e memoria; nenhum banco. Antes e deltas = N/D.")
@@ -845,12 +1020,16 @@ _REFUSALS = (PublishRefused, bf.BackfillValidationError,
              loader.ShopeeSnapshotError, loader.ShopeeProductInputError)
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def run_dry(args, *, env=None, engine_factory=None, today: date | None = None) -> int:
     env = os.environ if env is None else env
     today = today or today_brt()
-    run_id = uuid.uuid4().hex
-    audit_dir = Path(getattr(args, "audit_dir", "publish_audit"))
+    run_id, started = uuid.uuid4().hex, _now()
     try:
+        audit_dir = resolve_audit_dir(getattr(args, "audit_dir", None))
         prep = _prepare_from_args(args, today)
     except _REFUSALS as e:
         print(f"RECUSADO: {bf._sanitize(e)}", file=sys.stderr)
@@ -863,8 +1042,8 @@ def run_dry(args, *, env=None, engine_factory=None, today: date | None = None) -
     if args.offline:
         rec = bf.reconcile(None, prep.staging)
         print(format_report(prep, rec, mode="offline-dry-run", run_id=run_id))
-        p = write_manifest(build_manifest(prep, run_id=run_id, mode="offline", rec=rec,
-                                          result={"code": EXIT_OK, "escrita": False}), audit_dir)
+        p = write_manifest(build_manifest(prep, run_id=run_id, mode="offline", started_at=started,
+                                          result_code=EXIT_OK, rec=rec), audit_dir)
         print(f"manifesto: {p}", file=sys.stderr)
         return EXIT_OK
 
@@ -895,8 +1074,8 @@ def run_dry(args, *, env=None, engine_factory=None, today: date | None = None) -
     rec = bf.reconcile(before, prep.staging, compared_target=TARGET)
     print(format_report(prep, rec, mode="dry-run", run_id=run_id, daily=daily, modes=modes,
                         api_rows_in_scope=api_n))
-    p = write_manifest(build_manifest(prep, run_id=run_id, mode="dry-run", rec=rec,
-                                      result={"code": EXIT_OK, "escrita": False}), audit_dir)
+    p = write_manifest(build_manifest(prep, run_id=run_id, mode="dry-run", started_at=started,
+                                      result_code=EXIT_OK, rec=rec), audit_dir)
     print(f"manifesto: {p}", file=sys.stderr)
     return EXIT_OK
 
@@ -905,11 +1084,11 @@ def run_apply(args, *, env=None, engine_factory=None, today: date | None = None)
     """Caminho de escrita. So com autorizacao explicita."""
     env = os.environ if env is None else env
     today = today or today_brt()
-    run_id = uuid.uuid4().hex
-    audit_dir = Path(getattr(args, "audit_dir", "publish_audit"))
+    run_id, started = uuid.uuid4().hex, _now()
     try:
         if env.get(CONSENT_ENV) != "1":
             raise PublishRefused(f"--apply exige {CONSENT_ENV}=1 (nada foi escrito)")
+        audit_dir = resolve_audit_dir(getattr(args, "audit_dir", None))
         url = bf.resolve_write_url(TARGET, env=env)
         prep = _prepare_from_args(args, today)
     except _REFUSALS as e:
@@ -918,7 +1097,6 @@ def run_apply(args, *, env=None, engine_factory=None, today: date | None = None)
     except bf.BackfillUsageError as e:
         print(f"ERRO DE USO: {bf._sanitize(e)}", file=sys.stderr)
         return EXIT_USAGE
-    scopes = list(prep.staging.scopes)
 
     try:
         engine = (engine_factory or bf._default_writable_engine)(url)
@@ -927,44 +1105,32 @@ def run_apply(args, *, env=None, engine_factory=None, today: date | None = None)
         print(f"ERRO DE CONFIGURACAO: conexao gravavel: {bf._sanitize(e)}", file=sys.stderr)
         return EXIT_USAGE
 
-    lock = False
-    resultado: dict = {"code": EXIT_REFUSED}
-    rec = None
+    codigo, rec, apagadas, inseridas = EXIT_REFUSED, None, None, None
     try:
         bf.assert_target_identity(conn, TARGET, env=env)
         bf.assert_writable_primary(conn, TARGET)
-        bf.assert_sequence_privilege(conn, TARGET)
         bf.assert_ssl_required(conn, TARGET)
-        bf.acquire_advisory_lock(conn, key=LOCK_KEY)
-        lock = True
-        modes = read_source_modes(conn)
-        assert_brands_read_manual(modes, {b for b, _ in scopes})
-        before = read_before(conn, scopes)
-        bf.close_preflight_transaction(conn)
-        rec = bf.reconcile(before, prep.staging, compared_target=TARGET)
-        print(format_report(prep, rec, mode="apply (antes)", run_id=run_id, modes=modes))
-        resultado = publish_scoped(prep.staging, mark_partial(prep.staging, today=today),
-                                   executor=ManualExportExecutor(conn, run_id=run_id))
-        return resultado["code"]
+        res = apply_on_connection(conn, prep, run_id=run_id, today=today)
+        codigo, rec = res["code"], res.get("rec")
+        apagadas, inseridas = res.get("apagadas"), res.get("inseridas")
+        if res.get("erro"):
+            print(f"APPLY: {res['erro']}", file=sys.stderr)
+        return codigo
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as e:
         print(f"APPLY RECUSADO: {bf._sanitize(e)}", file=sys.stderr)
-        resultado = {"code": EXIT_REFUSED, "erro": bf._sanitize(e)}
+        codigo = EXIT_REFUSED
         return EXIT_REFUSED
     finally:
-        if lock:
-            try:
-                bf.release_advisory_lock(conn, key=LOCK_KEY)
-            except Exception:
-                pass
         try:
             conn.close()
         except Exception:
             pass
-        p = write_manifest(build_manifest(prep, run_id=run_id, mode="apply", rec=rec,
-                                          result=resultado), audit_dir)
-        print(f"run_id={run_id} resultado={resultado.get('code')} manifesto={p}", file=sys.stderr)
+        p = write_manifest(build_manifest(prep, run_id=run_id, mode="apply", started_at=started,
+                                          result_code=codigo, rec=rec, rows_deleted=apagadas,
+                                          rows_inserted=inseridas), audit_dir)
+        print(f"run_id={run_id} resultado={codigo} manifesto={p}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
