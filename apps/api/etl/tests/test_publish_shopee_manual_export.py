@@ -958,3 +958,15 @@ def test_formula_com_cache_e_recusada_no_preparo(tmp_path, monkeypatch):
     _xlsx_com_celula(alvo, '<c r="Z1"><x:f>1+1</x:f><x:v>2</x:v></c>', NS_MAIN)
     with pytest.raises(pub.PublishRefused, match="formula"):
         pub.prepare([("kokeshi", "2026-08")], root, today=TODAY_OUT)
+
+
+def test_apply_sem_consentimento_recusa_mesmo_com_credencial_presente(isolated, tmp_path):
+    """Sem esta variante, a falta da credencial de escrita mascararia a falta do
+    consentimento: as duas recusam, e so uma delas estaria sendo testada."""
+    chamado = []
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=False, apply=True, audit_dir=str(tmp_path / "audit_c"))
+    env = {"BACKFILL_NEON_RW_URL": "postgresql://u:p@ep-x.neon.tech/db"}
+    assert pub.run_apply(args, env=env, engine_factory=lambda *a, **k: chamado.append(1),
+                         today=TODAY) == pub.EXIT_REFUSED
+    assert chamado == []
