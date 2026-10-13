@@ -203,7 +203,8 @@ test("rota nao migrada volta ao tema claro em vez de ficar meio escura", () => {
 test("a lista de rotas migradas e' explicita e comeca pela Expedicao", () => {
   // Cada PR da sequencia remove a propria rota daqui ao migrar. Sem lista, a
   // migracao vira "quem lembrar".
-  assert.deepEqual([...ROTAS_TEMATIZADAS], ["/expedicao", "/", "/canais", "/financeiro"]);
+  // DRE-UX-1: `/dre` nasce tematizada (arvore inteira em tokens, abaixo).
+  assert.deepEqual([...ROTAS_TEMATIZADAS], ["/expedicao", "/", "/canais", "/financeiro", "/dre"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -220,6 +221,7 @@ const PAGINA_DA_ROTA: Record<string, string> = {
   "/": "app/page.tsx",
   "/canais": "app/canais/page.tsx",
   "/financeiro": "app/financeiro/page.tsx",
+  "/dre": "app/dre/page.tsx",
 };
 
 // A propria fonte da paleta dos graficos (SVG precisa de cor resolvida).
