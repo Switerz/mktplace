@@ -333,3 +333,73 @@ def test_cli_codigos_de_saida(bancos):
                 hoje=date(2026, 10, 13))
     assert rc == P.EXIT_RECONCILIACAO
     assert linhas(alvo) == {}
+
+
+# ---------------------------------------------------------------------------
+# Universo esperado vazio (revisao estrita #68, item 2)
+# ---------------------------------------------------------------------------
+
+def fotografia(alvo) -> str:
+    """Impressao digital BYTE A BYTE da fato: todas as colunas, inclusive lote e instante."""
+    with alvo.connect() as c:
+        return c.execute(text(
+            "SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY competencia, canal, marca, componente)), 'vazia') "
+            "FROM marts.fact_dre_insumo_mensal t")).scalar_one()
+
+
+def _apagar_receita(alvo, marketplace_id=None):
+    with alvo.begin() as c:
+        filtro = "" if marketplace_id is None else f" AND marketplace_id = {int(marketplace_id)}"
+        c.execute(text("DELETE FROM marts.fact_marketplace_daily_performance "
+                       f"WHERE date BETWEEN '2026-07-01' AND '2026-07-31'{filtro}"))
+
+
+def test_universo_esperado_vazio_preserva_a_fotografia_byte_a_byte(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    assert antes != "vazia"
+    _apagar_receita(alvo)  # a Torre "perdeu" julho inteiro (carga quebrada, filtro errado...)
+    rc = P.main(["--de", "2026-07", "--ate", "2026-07", "--apply"], engines=lambda: (alvo, fonte),
+                hoje=date(2026, 10, 13))
+    assert rc == P.EXIT_RECONCILIACAO
+    assert fotografia(alvo) == antes
+    aud = auditoria(alvo)
+    assert aud[-1]["status"] == "failed" and "universo esperado vazio" in aud[-1]["error_message"]
+
+
+def test_canal_que_some_inteiro_preserva_a_fotografia(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    _apagar_receita(alvo, marketplace_id=2)  # so' o ML de julho sumiu
+    with pytest.raises(P.PublicacaoRecusada) as exc:
+        publicar(alvo, fonte)
+    assert any("2026-07 ml" in m for m in exc.value.motivos)
+    assert fotografia(alvo) == antes
+    assert auditoria(alvo)[-1]["status"] == "failed"
+
+
+def test_contraprova_sem_a_guarda_o_lote_seria_apagado(bancos, monkeypatch):
+    """O que a implementacao antiga fazia: com a guarda desligada, o mesmo
+    cenario APAGA a fotografia e fecha `success`. E' a prova de que e' a guarda
+    — e nao outra coisa — que preserva o lote."""
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    assert fotografia(alvo) != "vazia"
+    _apagar_receita(alvo)
+    monkeypatch.setattr(P, "recusas_de_escopo", lambda *a, **k: [])
+    publicar(alvo, fonte)
+    assert fotografia(alvo) == "vazia"
+    assert auditoria(alvo)[-1]["status"] == "success"
+
+
+def test_mes_canal_sem_vendas_declarado_publica_e_remove_so_ele(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    _apagar_receita(alvo, marketplace_id=3)  # a Shopee de julho legitimamente sem vendas
+    res = publicar(alvo, fonte, sem_vendas=frozenset({(JUL, "shopee")}))
+    assert res["sem_vendas"] == ["2026-07:shopee"]
+    canais = {k[0] for k in linhas(alvo)}
+    assert canais == {"tiktok", "ml"}
+    assert auditoria(alvo)[-1]["status"] == "success"

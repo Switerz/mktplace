@@ -146,6 +146,15 @@ def mes_maduro(mes: date, hoje: date) -> bool:
     return hoje > ultimo_dia(somar_meses(mes, MESES_MATURACAO))
 
 
+def competencia_madura_mais_recente(hoje: date) -> date:
+    """Ultima competencia que `mes_maduro` aceita em `hoje`.
+
+    E' o periodo padrao da DRE: o "mes anterior" dos outros endpoints nunca e'
+    maduro pela regra M+2, e abriria a tela sempre NAO_CALCULAVEL.
+    """
+    return somar_meses(date(hoje.year, hoje.month, 1), -(MESES_MATURACAO + 1))
+
+
 def meses_do_periodo(inicio: date, fim: date) -> list[date]:
     """Meses calendario cobertos. Exige periodo alinhado a meses inteiros."""
     if inicio.day != 1 or fim != ultimo_dia(date(fim.year, fim.month, 1)):
@@ -766,14 +775,20 @@ def indexar_insumos(linhas: list[dict], agora: datetime) -> tuple[dict, dict]:
 def resumo_insumos(leitura: LeituraInsumos, agora: datetime) -> dict:
     if not leitura.tabela_existe:
         return {"estado": "tabela_ausente", "publicado_em": None,
+                "publicado_em_mais_antigo": None, "publicado_em_mais_recente": None,
                 "motivo": "marts.fact_dre_insumo_mensal nao existe (migration 025 nao aplicada)"}
     if not leitura.linhas:
         return {"estado": "nao_publicado", "publicado_em": None,
+                "publicado_em_mais_antigo": None, "publicado_em_mais_recente": None,
                 "motivo": "nenhum insumo publicado para o periodo"}
-    publicado = max(r["publicado_em"] for r in leitura.linhas)
+    # `publicado_em` e' a publicacao MAIS ANTIGA do conjunto: referencia
+    # conservadora. Mostrar so' o lote mais novo esconderia a parte velha.
+    mais_antigo = min(r["publicado_em"] for r in leitura.linhas)
+    mais_recente = max(r["publicado_em"] for r in leitura.linhas)
     vencidas = sum(1 for r in leitura.linhas if agora - r["publicado_em"] > INSUMO_IDADE_MAXIMA)
     estado = "ok" if vencidas == 0 else ("vencido" if vencidas == len(leitura.linhas) else "parcialmente_vencido")
-    return {"estado": estado, "publicado_em": publicado, "motivo": None if estado == "ok" else
+    return {"estado": estado, "publicado_em": mais_antigo, "publicado_em_mais_antigo": mais_antigo,
+            "publicado_em_mais_recente": mais_recente, "motivo": None if estado == "ok" else
             f"{vencidas} de {len(leitura.linhas)} linhas publicadas ha mais de "
             f"{int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600)} h"}
 
@@ -799,6 +814,7 @@ def montar_dre(
     insumos: LeituraInsumos,
     hoje: date,
     agora: datetime,
+    periodo_origem: str = "informado",
 ) -> dict:
     """Monta a resposta inteira a partir de linhas ja lidas. Funcao PURA."""
     meses = meses_do_periodo(inicio, fim)
@@ -841,7 +857,7 @@ def montar_dre(
     )
     return {
         "periodo": {"date_from": inicio.isoformat(), "date_to": fim.isoformat(),
-                    "meses": [m.isoformat()[:7] for m in meses]},
+                    "meses": [m.isoformat()[:7] for m in meses], "origem": periodo_origem},
         "filtros": {"canais": canais, "marcas": marcas},
         "fontes": {"neon": "ok", "insumos_dre": resumo_insumos(insumos, agora)},
         "regras": {
@@ -861,7 +877,8 @@ def montar_dre(
 
 
 def get_dre(db: Session, *, inicio: date, fim: date, canais: list[str],
-            marcas: list[str] | None, hoje: date, agora: datetime) -> dict:
+            marcas: list[str] | None, hoje: date, agora: datetime,
+            periodo_origem: str = "informado") -> dict:
     """Le SO' o Neon. Nenhum caminho desta funcao abre conexao com o Data Mart."""
     meses_do_periodo(inicio, fim)  # valida antes de ir ao banco
     escopo_marcas = marcas if marcas else marcas_ativas(db)
@@ -870,4 +887,4 @@ def get_dre(db: Session, *, inicio: date, fim: date, canais: list[str],
     insumos = ler_insumos(db, inicio, fim, canais, escopo_marcas)
     return montar_dre(inicio=inicio, fim=fim, canais=canais, marcas=escopo_marcas,
                       mart_rows=mart_rows, afiliado_rows=afiliado_rows, insumos=insumos,
-                      hoje=hoje, agora=agora)
+                      hoje=hoje, agora=agora, periodo_origem=periodo_origem)

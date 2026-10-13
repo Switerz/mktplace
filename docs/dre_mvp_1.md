@@ -14,7 +14,7 @@ Escopo desta entrega: tipos, serviço, endpoint e testes. **Sem tela, sem migrat
 | `ref_month` | Alias de um mês (`YYYY-MM`) |
 | `channels` | `all`, `tiktok`, `ml`, `shopee` ou combinação |
 | `brands` | `brand_key` separados por vírgula; omitido = marcas ativas |
-| sem período | mês anterior (padrão dos endpoints agregados) |
+| sem período | **competência madura mais recente** (regra M+2; em 13/10/2026 = julho), com `periodo.origem = padrao_competencia_madura`. O mês anterior dos outros endpoints nunca é maduro |
 
 A resposta traz quatro recortes calculados a partir da mesma célula base `mês × canal × marca`: `total`, `por_canal`,
 `por_marca` e `por_canal_marca`. As células base também vêm em `celulas_base`, para auditoria.
@@ -132,7 +132,8 @@ confiar no número.
 
 1. `valor = null` nunca vira "R$ 0" nem "—" ambíguo: mostrar o chip do status.
 2. `fontes.insumos_dre.estado` diferente de `ok` → faixa no topo com `fontes.insumos_dre.motivo` e
-   `fontes.insumos_dre.publicado_em` (ex.: "Insumos financeiros publicados há mais de 48 h").
+   `fontes.insumos_dre.publicado_em` — a publicação **mais antiga** do conjunto; `publicado_em_mais_recente`
+   também vem (ex.: "Insumos financeiros publicados há mais de 48 h").
 3. Mostrar `formula` e `faltam` junto da margem (tooltip ou linha de rodapé).
 4. Frescor: `data_maxima.receita_ultimo_dia` e `cmv_ultima_emissao` visíveis.
 5. Estados: carregando (~1 s medido contra o Neon), vazio (nenhuma célula para o filtro), erro (503/422 com

@@ -37,6 +37,16 @@ USO
 ---
     python -m pipelines.dre.insumo_publisher --de 2026-07 --ate 2026-07
     python -m pipelines.dre.insumo_publisher --meses 4 --apply
+    python -m pipelines.dre.insumo_publisher --meses 4 --apply --sem-vendas 2026-08:shopee
+
+ESCOPO NUNCA SAI VAZIO EM SILENCIO
+----------------------------------
+O universo esperado vem da receita da Torre. Se ele estiver vazio, ou se um
+par `competencia x canal` pedido nao tiver celula nenhuma, a publicacao e'
+RECUSADA antes do DELETE: apagar o escopo e fechar `success` trocaria a
+fotografia anterior por nada. Mes/canal legitimamente sem vendas precisa ser
+declarado com `--sem-vendas YYYY-MM:canal` -- e a declaracao e' conferida: se
+houver receita, a publicacao tambem e' recusada.
 
 Codigos de saida: 0 ok; 65 reconciliacao recusada; 69 fonte indisponivel;
 75 lock ocupado; 78 migration ausente; 1 erro inesperado.
@@ -331,8 +341,39 @@ def _razao(num: Optional[Decimal], den: Optional[Decimal]) -> Optional[Decimal]:
     return num / den
 
 
+def recusas_de_escopo(chaves_esperadas: set, comps: list[date], canais: list[str],
+                      sem_vendas: frozenset = frozenset()) -> list[str]:
+    """Recusas que impedem trocar a fotografia por um escopo vazio.
+
+    `chaves_esperadas` sao as celulas `(competencia, canal, marca)` com receita
+    na Torre. A publicacao substitui `comps x canais` inteiro; sem esta guarda,
+    um universo vazio (carga quebrada, filtro errado) apagaria tudo e fecharia
+    `success`. `sem_vendas` e' a unica saida legitima, e e' explicita.
+    """
+    recusas: list[str] = []
+    pares_com_receita = {(k[0], k[1]) for k in chaves_esperadas}
+    if not chaves_esperadas and not all((m, c) in sem_vendas for m in comps for c in canais):
+        recusas.append(
+            "universo esperado vazio: nenhuma celula com receita na Torre para o escopo pedido; "
+            "nada foi apagado"
+        )
+    for m in comps:
+        for c in canais:
+            par = (m, c)
+            rotulo = f"{m.isoformat()[:7]} {c}"
+            if par in sem_vendas and par in pares_com_receita:
+                recusas.append(f"{rotulo}: declarado --sem-vendas, mas ha receita na Torre")
+            elif par not in sem_vendas and par not in pares_com_receita:
+                recusas.append(
+                    f"{rotulo}: nenhuma celula com receita na Torre; se for legitimo, "
+                    f"declare --sem-vendas {rotulo.replace(' ', ':')}"
+                )
+    return recusas
+
+
 def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict],
-                repasse: list[dict], canais: list[str]) -> Lote:
+                repasse: list[dict], canais: list[str], comps: list[date],
+                sem_vendas: frozenset = frozenset()) -> Lote:
     """Transforma a leitura em linhas da fato e lista as recusas.
 
     Recusa (a publicacao inteira aborta) quando:
@@ -341,6 +382,9 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
       * CMV negativo, cobertura ou provisorio fora de [0, 1];
       * a identidade do repasse TikTok nao fecha numa celula;
       * alguma transacao tem afiliado maior que a propria taxa.
+
+      * o universo esperado, ou um par competencia x canal, esta vazio sem
+        declaracao explicita (`recusas_de_escopo`).
 
     NAO recusa — e grava com status — o CMV cuja receita fiscal nao bate com o
     GMV da Torre: isso e' estado do dado (Shopee hoje), nao defeito de carga.
@@ -366,6 +410,7 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
         canal = {v: k for k, v in MKT_ID.items()}.get(r["marketplace_id"])
         if canal in canais:
             esp[(_mes_de(r["competencia"]), canal, r["marca"])] = _dec(r["gmv"])
+    lote.recusas.extend(recusas_de_escopo(set(esp), comps, canais, sem_vendas))
 
     # Contraprova do CMV — mesma chave, mesmo total, nos dois sentidos.
     for k in set(cmv_idx) | set(cp_idx):
@@ -526,7 +571,8 @@ def _diff(atual: list[dict], novas: list[dict]) -> dict:
     }
 
 
-def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]) -> dict:
+def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str],
+                 sem_vendas: frozenset = frozenset()) -> dict:
     """Dry-run: le as duas pontas, monta, reconcilia e compara. ZERO escrita."""
     with alvo_engine.connect() as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
@@ -535,12 +581,15 @@ def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]
         atual = _rows(conn, SQL_ATUAL, {"competencias": comps, "canais": canais}) if existe else []
         conn.rollback()
     cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
-    lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais)
+    lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
+                       comps=comps, sem_vendas=sem_vendas)
     return _resumo(lote, comps, canais, modo="dry-run", aplicado=False, tabela_existe=bool(existe),
+                   sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    diff=_diff(atual, lote.linhas) if existe else None), lote
 
 
 def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
+             sem_vendas: frozenset = frozenset(),
              agora: Optional[datetime] = None,
              antes_do_commit: Optional[Callable[[Any], None]] = None) -> dict:
     """`--apply`: transacao unica no Neon, lock antes da leitura, recusa antes da escrita.
@@ -559,8 +608,9 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
                                                     "min_date": comps[0], "max_date": ultimo_dia(comps[-1])}).scalar_one()
             esperado = _esperado(conn, comps, canais)
             cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
-            lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais)
-            if lote.recusas:
+            lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
+                               comps=comps, sem_vendas=sem_vendas)
+            if lote.recusas:  # ANTES do DELETE: recusa nunca apaga a fotografia
                 raise PublicacaoRecusada(lote.recusas)
             apagadas = conn.execute(SQL_APAGA_ESCOPO, {"competencias": comps, "canais": canais}).rowcount
             for ln in lote.linhas:
@@ -574,7 +624,8 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
     except BaseException as exc:
         _registrar_falha(alvo_engine, comps, exc, agora)
         raise
-    return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas)
+    return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas,
+                   sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas))
 
 
 def _registrar_falha(alvo_engine, comps: list[date], exc: BaseException, agora: datetime) -> None:
@@ -594,8 +645,49 @@ def _registrar_falha(alvo_engine, comps: list[date], exc: BaseException, agora: 
 # ---------------------------------------------------------------------------
 
 def _parse_mes(s: str) -> date:
-    y, m = s.split("-")
-    return date(int(y), int(m), 1)
+    """`YYYY-MM` -> dia 1. Qualquer outra forma levanta ValueError."""
+    partes = s.strip().split("-")
+    if len(partes) != 2 or len(partes[0]) != 4 or len(partes[1]) != 2:
+        raise ValueError(f"competencia invalida {s!r}: use YYYY-MM")
+    return date(int(partes[0]), int(partes[1]), 1)
+
+
+def validar_argumentos(args, hoje: date) -> tuple[list[date], list[str], frozenset]:
+    """Escopo do CLI. Levanta ValueError com mensagem clara; nunca devolve escopo vazio."""
+    if (args.de is None) != (args.ate is None):
+        raise ValueError("--de e --ate vao juntos")
+    if args.de is not None:
+        de, ate = _parse_mes(args.de), _parse_mes(args.ate)
+        if de > ate:
+            raise ValueError(f"--de {args.de} e' posterior a --ate {args.ate}")
+        comps = competencias(de, ate)
+    else:
+        if args.meses is None or args.meses <= 0:
+            raise ValueError(f"--meses precisa ser inteiro positivo (veio {args.meses})")
+        comps = janela_padrao(hoje, args.meses)
+    if comps[-1] >= mes(hoje):
+        raise ValueError("a competencia corrente ainda nao fechou; publique so' meses anteriores")
+
+    tokens = [t.strip() for t in (args.canais or "").split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("--canais vazio: informe ao menos um de " + ", ".join(CANAIS))
+    desconhecidos = sorted(set(tokens) - set(CANAIS))
+    if desconhecidos:
+        raise ValueError(f"canal desconhecido: {', '.join(desconhecidos)}; validos: {', '.join(CANAIS)}")
+    canais = [c for c in CANAIS if c in tokens]
+
+    sem_vendas = set()
+    for item in args.sem_vendas or []:
+        if ":" not in item:
+            raise ValueError(f"--sem-vendas {item!r}: use YYYY-MM:canal")
+        m_txt, canal = item.split(":", 1)
+        m = _parse_mes(m_txt)
+        if canal not in canais:
+            raise ValueError(f"--sem-vendas {item!r}: canal fora de --canais")
+        if m not in comps:
+            raise ValueError(f"--sem-vendas {item!r}: competencia fora da janela publicada")
+        sem_vendas.add((m, canal))
+    return comps, canais, frozenset(sem_vendas)
 
 
 def url_psycopg2(url: str) -> str:
@@ -635,27 +727,24 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
     ap.add_argument("--ate", help="ultima competencia, YYYY-MM")
     ap.add_argument("--meses", type=int, default=4, help="meses fechados mais recentes (padrao 4)")
     ap.add_argument("--canais", default="tiktok,ml,shopee")
+    ap.add_argument("--sem-vendas", action="append", metavar="YYYY-MM:canal",
+                    help="declara mes/canal legitimamente sem receita na Torre (repetivel)")
     ap.add_argument("--apply", action="store_true", help="escreve no Neon; sem ele e' dry-run")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
     hoje = hoje or datetime.now(TZ_BRT).date()
-    if args.de or args.ate:
-        if not (args.de and args.ate):
-            ap.error("--de e --ate vao juntos")
-        comps = competencias(_parse_mes(args.de), _parse_mes(args.ate))
-    else:
-        comps = janela_padrao(hoje, args.meses)
-    if comps[-1] >= mes(hoje):
-        ap.error("a competencia corrente ainda nao fechou; publique so' meses anteriores")
-    canais = [c for c in CANAIS if c in args.canais.split(",")]
+    try:
+        comps, canais, sem_vendas = validar_argumentos(args, hoje)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     alvo, fonte = (engines or _engines)()
     try:
         if args.apply:
-            resumo = publicar(alvo, fonte, comps, canais)
+            resumo = publicar(alvo, fonte, comps, canais, sem_vendas=sem_vendas)
         else:
-            resumo, _ = diagnosticar(alvo, fonte, comps, canais)
+            resumo, _ = diagnosticar(alvo, fonte, comps, canais, sem_vendas=sem_vendas)
     except PublicacaoRecusada as exc:
         print(json.dumps({"status": "recusado", "motivos": exc.motivos}, ensure_ascii=False, indent=1))
         return EXIT_RECONCILIACAO

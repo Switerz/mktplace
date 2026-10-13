@@ -40,10 +40,15 @@ def repasse(marca="kokeshi", taxa=-290_000, frete=-12_000, afiliado=-90_000, res
             "tx_afiliado_maior_taxa": viol, "transacoes": 1000, "atualizado_em": datetime(2026, 10, 1, 3, 0)}
 
 
-def lote(esp, cmvs, reps=(), contraprova=None, canais=("tiktok", "ml", "shopee")):
+def lote(esp, cmvs, reps=(), contraprova=None, canais=None, comps=(JUL,), sem_vendas=frozenset()):
+    """Por padrao, os canais pedidos sao os que tem celula esperada — o mesmo que
+    o operador faria. Testes de escopo passam `canais` explicitamente."""
+    if canais is None:
+        presentes = {r["marketplace_id"] for r in esp}
+        canais = [c for c in P.CANAIS if P.MKT_ID[c] in presentes] or ["ml"]
     return P.montar_lote(esperado=list(esp), cmv=list(cmvs),
                          contraprova=list(contraprova if contraprova is not None else [cp(c) for c in cmvs]),
-                         repasse=list(reps), canais=list(canais))
+                         repasse=list(reps), canais=list(canais), comps=list(comps), sem_vendas=sem_vendas)
 
 
 def linha(lt, canal, marca, comp):
@@ -173,6 +178,79 @@ def test_data_sem_fuso_da_silver_vira_utc_e_data_fiscal_vira_brt():
     lt = lote([esperado("tiktok")], [cmv("tiktok")], reps=[repasse()])
     assert linha(lt, "tiktok", "kokeshi", "tiktok_taxa_repasse")["data_max_origem"].tzinfo == timezone.utc
     assert linha(lt, "tiktok", "kokeshi", "cmv")["data_max_origem"].utcoffset().total_seconds() == -3 * 3600
+
+
+# ---------------------------------------------------------------------------
+# Escopo vazio nunca vira success (revisao estrita #68, item 2)
+# ---------------------------------------------------------------------------
+
+def test_universo_esperado_vazio_e_recusado():
+    lt = lote([], [], canais=["tiktok", "ml", "shopee"])
+    assert any("universo esperado vazio" in m for m in lt.recusas)
+
+
+def test_par_competencia_canal_sem_celula_e_recusado():
+    lt = lote([esperado("ml")], [cmv("ml")], canais=["ml", "shopee"])
+    assert any(m.startswith("2026-07 shopee: nenhuma celula") for m in lt.recusas)
+    assert not any("2026-07 ml" in m for m in lt.recusas)
+
+
+def test_mes_sem_celula_dentro_da_janela_e_recusado():
+    ago = date(2026, 8, 1)
+    lt = lote([esperado("ml")], [cmv("ml")], canais=["ml"], comps=(JUL, ago))
+    assert any(m.startswith("2026-08 ml: nenhuma celula") for m in lt.recusas)
+
+
+def test_sem_vendas_declarado_libera_o_par():
+    lt = lote([esperado("ml")], [cmv("ml")], canais=["ml", "shopee"], sem_vendas=frozenset({(JUL, "shopee")}))
+    assert lt.recusas == []
+
+
+def test_sem_vendas_declarado_com_receita_e_contradicao():
+    lt = lote([esperado("ml")], [cmv("ml")], canais=["ml"], sem_vendas=frozenset({(JUL, "ml")}))
+    assert any("declarado --sem-vendas, mas ha receita" in m for m in lt.recusas)
+
+
+def test_universo_vazio_so_passa_com_todos_os_pares_declarados():
+    tudo = frozenset({(JUL, "ml"), (JUL, "shopee")})
+    assert lote([], [], canais=["ml", "shopee"], sem_vendas=tudo).recusas == []
+    parcial = frozenset({(JUL, "ml")})
+    assert any("universo esperado vazio" in m
+               for m in lote([], [], canais=["ml", "shopee"], sem_vendas=parcial).recusas)
+
+
+# ---------------------------------------------------------------------------
+# Validacao do CLI (revisao estrita #68, item 3)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("argv,trecho", [
+    (["--meses", "0"], "--meses precisa ser inteiro positivo"),
+    (["--meses", "-2"], "--meses precisa ser inteiro positivo"),
+    (["--de", "2026-08", "--ate", "2026-07"], "posterior a --ate"),
+    (["--de", "2026-07"], "--de e --ate vao juntos"),
+    (["--de", "2026-7", "--ate", "2026-07"], "use YYYY-MM"),
+    (["--canais", "tiktok,amazon"], "canal desconhecido: amazon"),
+    (["--canais", ""], "--canais vazio"),
+    (["--canais", " , ,"], "--canais vazio"),
+    (["--sem-vendas", "2026-07"], "use YYYY-MM:canal"),
+    (["--sem-vendas", "2026-07:amazon"], "canal fora de --canais"),
+    (["--de", "2026-07", "--ate", "2026-07", "--sem-vendas", "2026-06:ml"], "fora da janela"),
+])
+def test_cli_recusa_argumento_invalido_com_mensagem(argv, trecho, capsys):
+    chamou = []
+    with pytest.raises(SystemExit) as exc:
+        P.main(argv, engines=lambda: chamou.append(1), hoje=date(2026, 10, 13))
+    assert exc.value.code == 2
+    assert trecho in capsys.readouterr().err
+    assert chamou == []  # nenhuma conexao foi aberta
+
+
+def test_cli_canais_validos_sao_normalizados_na_ordem_canonica():
+    import argparse
+
+    args = argparse.Namespace(de="2026-07", ate="2026-07", meses=4, canais=" shopee ,ml", sem_vendas=None)
+    comps, canais, sem = P.validar_argumentos(args, date(2026, 10, 13))
+    assert comps == [JUL] and canais == ["ml", "shopee"] and sem == frozenset()
 
 
 # ---------------------------------------------------------------------------

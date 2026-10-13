@@ -434,6 +434,32 @@ def test_divergencia_mart_vs_repasse_vira_aviso():
     assert c["componentes"]["taxas"]["valor"] == 290_000.0  # sempre o repasse
 
 
+def test_resumo_usa_a_publicacao_mais_antiga_como_referencia():
+    """Revisao estrita #68, item 4: conjunto misto nao pode parecer novo."""
+    velho, novo = AGORA - timedelta(hours=40), AGORA - timedelta(hours=1)
+    res = montar(mart_rows=[mart("ml", "kokeshi"), mart("ml", "barbours")],
+                 cmv_rows=[cmv("ml", "kokeshi", publicado_em=velho), cmv("ml", "barbours", publicado_em=novo)],
+                 canais=("ml",))
+    r = res["fontes"]["insumos_dre"]
+    assert r["publicado_em"] == velho
+    assert r["publicado_em_mais_antigo"] == velho and r["publicado_em_mais_recente"] == novo
+    assert r["estado"] == "ok"
+
+
+def test_resumo_parcialmente_vencido_expoe_os_dois_extremos():
+    velho, novo = AGORA - timedelta(hours=60), AGORA - timedelta(hours=1)
+    res = montar(mart_rows=[mart("ml", "kokeshi"), mart("ml", "barbours")],
+                 cmv_rows=[cmv("ml", "kokeshi", publicado_em=velho), cmv("ml", "barbours", publicado_em=novo)],
+                 canais=("ml",))
+    r = res["fontes"]["insumos_dre"]
+    assert r["estado"] == "parcialmente_vencido"
+    assert (r["publicado_em"], r["publicado_em_mais_recente"]) == (velho, novo)
+    kok = next(c for c in res["por_canal_marca"] if c["marca"] == "kokeshi")
+    assert kok["componentes"]["cmv"]["status"] == dre.SNAPSHOT_VENCIDO
+    ml = res["por_canal"][0]
+    assert ml["componentes"]["cmv"]["publicado_em"] == velho  # agregado: a mais antiga
+
+
 def test_resumo_dos_insumos_no_topo_da_resposta():
     res = montar(mart_rows=[mart("ml")], cmv_rows=[cmv("ml")], canais=("ml",), marcas=("kokeshi",))
     assert res["fontes"]["insumos_dre"]["estado"] == "ok"
@@ -649,10 +675,76 @@ def test_rota_periodo_desalinhado_e_422(cliente):
     assert r.status_code == 422
 
 
-def test_rota_sem_periodo_usa_o_mes_anterior(cliente):
-    tc, _ = cliente
+def test_rota_sem_periodo_usa_a_competencia_madura_mais_recente(cliente):
+    """Revisao estrita #66/#68, item 1: em 13/10/2026 o padrao e' julho, nao
+    setembro (o "mes anterior" nunca e' maduro pela regra M+2)."""
+    tc, neon = cliente
     body = tc.get("/api/v1/dre").json()
-    assert body["periodo"]["meses"] == ["2026-09"]
+    assert body["periodo"] == {"date_from": "2026-07-01", "date_to": "2026-07-31",
+                               "meses": ["2026-07"], "origem": "padrao_competencia_madura"}
+    p = next(p for p in neon.params if "inicio" in p)
+    assert (p["inicio"], p["fim"]) == (date(2026, 7, 1), date(2026, 7, 31))
+    ml = next(c for c in body["por_canal"] if c["canal"] == "ml")
+    assert ml["classificacao"] == "PARCIAL"
+    assert not any("mes imaturo" in m for m in ml["motivos_classificacao"])
+
+
+def test_rota_periodo_informado_e_respeitado_e_marcado(cliente):
+    tc, _ = cliente
+    body = tc.get("/api/v1/dre", params={"ref_month": "2026-07"}).json()
+    assert body["periodo"]["origem"] == "informado" and body["periodo"]["meses"] == ["2026-07"]
+
+
+def test_rota_mes_imaturo_explicito_continua_nao_calculavel(monkeypatch):
+    ago = date(2026, 8, 1)
+    neon = FakeNeon(mart_rows=[mart("ml", "kokeshi", mes=ago)], insumos=cmv("ml", "kokeshi", mes=ago))
+    app.dependency_overrides[get_db] = lambda: neon
+    monkeypatch.setattr(database, "datamart_engine", _DataMartQueExplode())
+    monkeypatch.setattr(dre_router, "today_brt", lambda: HOJE)
+    try:
+        body = TestClient(app).get("/api/v1/dre", params={"ref_month": "2026-08", "channels": "ml"}).json()
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert body["periodo"]["meses"] == ["2026-08"] and body["periodo"]["origem"] == "informado"
+    ml = body["por_canal"][0]
+    assert ml["classificacao"] == "NAO_CALCULAVEL"
+    assert any("mes imaturo" in m for m in ml["motivos_classificacao"])
+
+
+def test_rota_so_um_extremo_do_periodo_continua_422(cliente):
+    tc, _ = cliente
+    assert tc.get("/api/v1/dre", params={"date_from": "2026-07-01"}).status_code == 422
+
+
+@pytest.mark.parametrize("hoje,esperado", [
+    (date(2026, 10, 13), date(2026, 7, 1)),
+    (date(2026, 10, 1), date(2026, 7, 1)),
+    (date(2026, 10, 31), date(2026, 7, 1)),
+    (date(2026, 11, 1), date(2026, 8, 1)),
+    (date(2027, 1, 15), date(2026, 10, 1)),
+    (date(2027, 3, 1), date(2026, 12, 1)),
+])
+def test_competencia_madura_mais_recente(hoje, esperado):
+    assert dre.competencia_madura_mais_recente(hoje) == esperado
+
+
+def test_competencia_padrao_e_coerente_com_a_regra_de_maturidade():
+    """Para todo dia de dois anos: o padrao e' maduro e o mes seguinte nao e'."""
+    d = date(2026, 1, 1)
+    while d < date(2028, 1, 1):
+        m = dre.competencia_madura_mais_recente(d)
+        assert dre.mes_maduro(m, d), d
+        assert not dre.mes_maduro(dre.somar_meses(m, 1), d), d
+        d += timedelta(days=1)
+
+
+def test_outros_endpoints_seguem_com_o_mes_anterior(monkeypatch):
+    import app.deps.filters as filtros
+
+    monkeypatch.setattr(filtros, "today_brt", lambda: HOJE)
+    r = filtros.filters_query(channels=None, marketplace=None, brands=None, date_from=None, date_to=None,
+                              ref_month=None, compare=False, db=None)
+    assert (r.period.start, r.period.end) == (date(2026, 9, 1), date(2026, 9, 30))
 
 
 def test_rota_nunca_toca_o_data_mart(cliente):

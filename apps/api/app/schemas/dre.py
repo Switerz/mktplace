@@ -103,11 +103,16 @@ class Periodo(BaseModel):
     date_from: date
     date_to: date
     meses: list[str]
+    #: `padrao_competencia_madura` quando a requisicao nao informou periodo.
+    origem: Literal["informado", "padrao_competencia_madura"] = "informado"
 
 
 class ResumoInsumos(BaseModel):
     estado: Literal["ok", "tabela_ausente", "nao_publicado", "vencido", "parcialmente_vencido"]
+    #: Referencia CONSERVADORA: a publicacao mais antiga do conjunto servido.
     publicado_em: datetime | None = None
+    publicado_em_mais_antigo: datetime | None = None
+    publicado_em_mais_recente: datetime | None = None
     motivo: str | None = None
 
 

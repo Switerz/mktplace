@@ -44,6 +44,7 @@ Nenhum pedido, nota, SKU, settlement ou dado pessoal entra; um teste confere as 
 ```
 python -m pipelines.dre.insumo_publisher --de 2026-07 --ate 2026-07          # dry-run
 python -m pipelines.dre.insumo_publisher --meses 4 --apply                     # 4 meses fechados
+python -m pipelines.dre.insumo_publisher --meses 4 --apply --sem-vendas 2026-08:shopee   # mes/canal sem vendas, declarado
 ```
 
 | Garantia | Como |
@@ -53,6 +54,8 @@ python -m pipelines.dre.insumo_publisher --meses 4 --apply                     #
 | Transação única no Neon | `engine.begin()`: lock, auditoria, `DELETE` do escopo, `INSERT`, fechamento do lote — tudo ou nada |
 | Advisory lock | `pg_try_advisory_xact_lock(918140025)` antes de ler a fonte; ocupado → sai 75 sem escrever |
 | Recusa antes da escrita | Chave repetida, CMV ≠ agregado mensal independente (`gold.nf_vendas_plataforma_mensal`), CMV negativo, cobertura/provisório fora de [0, 1], identidade do repasse violada, afiliado > taxa |
+| Escopo nunca vazio em silêncio | Universo esperado vazio, ou par competência × canal sem nenhuma célula com receita na Torre → **recusa antes do `DELETE`** (sai 65, auditoria `failed`, fotografia anterior intacta byte a byte). Mês/canal legitimamente sem vendas só passa declarado com `--sem-vendas YYYY-MM:canal`, e a declaração é conferida: se houver receita, recusa |
+| Argumentos validados | `--meses <= 0`, `--de` posterior a `--ate`, competência fora de `YYYY-MM`, canal desconhecido, `--canais` vazio e `--sem-vendas` malformado ou fora da janela → erro do argparse (sai 2) **antes de abrir qualquer conexão** |
 | Ausência ≠ zero | Chave esperada sem dado na origem → linha `NULL` `ausente_na_origem` |
 | Sem fotografia velha | A publicação substitui o escopo `competências × canais` inteiro; chave que sumiu é apagada |
 | Idempotente | Mesma fonte → mesmo conteúdo; só `lote_id`/`publicado_em` mudam |
@@ -78,7 +81,14 @@ Códigos de saída: `0` ok · `65` reconciliação recusada · `69` origem indis
 | Convenção de sinal publicada diferente da esperada | `sinal_inesperado` | — |
 
 Cada componente publicado expõe `data_as_of` e `publicado_em`. No agregado, vale a data **mais antiga** entre as
-células. O topo da resposta traz `fontes.insumos_dre` com `estado`, `publicado_em` e `motivo`.
+células. O topo da resposta traz `fontes.insumos_dre` com `estado`, `motivo`, `publicado_em_mais_antigo`,
+`publicado_em_mais_recente` e `publicado_em` — este último é a publicação **mais antiga** (referência conservadora):
+um conjunto misto nunca parece mais novo do que sua parte mais velha.
+
+**Período padrão da DRE:** sem período informado, a rota usa a **competência madura mais recente** (regra M+2), não o
+mês anterior — que nunca é maduro. Em 13/10/2026 isso dá 01/07–31/07/2026, e `periodo.origem` vem como
+`padrao_competencia_madura`. Período informado é sempre respeitado; mês imaturo informado sai `NAO_CALCULAVEL` com o
+motivo. O padrão dos outros endpoints (mês anterior) não muda.
 
 Regras do contrato preservadas: afiliado TikTok `somavel = false`; comissão do ML uma vez; sinal sem `abs()`;
 "margem de contribuição conhecida"; Shopee `NAO_CALCULAVEL`.
@@ -93,6 +103,15 @@ Regras do contrato preservadas: afiliado TikTok `somavel = false`; comissão do 
 - Variáveis: `DATABASE_URL` (Neon, escrita) e `DATAMART_DATABASE_URL` (leitura).
 - Sugestão de agenda: diária, `--meses 4`, depois da carga fiscal. O limite de 48 h tolera uma execução perdida.
 - **Não criado:** DAG, Connection ou Environment. A migration é operação manual e separada.
+
+**Contrato da DAG (PR separado, no repositório do Airflow):**
+1. a DAG **só chama o publisher**: `python -m pipelines.dre.insumo_publisher --meses 4 --apply`, e trata o código de saída
+   (`65`/`69`/`75`/`78` = falha visível, sem retry automático em `65` e `78`);
+2. **nunca roda Alembic** e não importa o pacote `app`; a migration 025 é aplicada à mão, uma vez, fora do Airflow;
+3. **não cria Environment** nem Connection nova: usa as variáveis já previstas (`DATABASE_URL`, `DATAMART_DATABASE_URL`);
+4. **não toca o banco de metadados do Airflow**: o pacote instalado não traz `alembic`, `app` nem `tests` (verificado na
+   wheel), e o publisher só fala com os dois DSNs acima;
+5. `--sem-vendas` nunca entra fixo na DAG: é decisão de operador, caso a caso.
 
 ## 6. SQL offline da migration (revisado)
 
@@ -160,11 +179,12 @@ Pontos revisados:
 | Dry-run real de jul/2026 (Neon + Data Mart, leitura) | 63 linhas, 0 recusas; 14 CMV (4 `nao_reconciliado` = Shopee); 5 marcas × 7 componentes do repasse; resíduo 0; 0 transações com afiliado > taxa |
 | Serving novo alimentado por esse lote, contra o #66 | **0 diferenças** nas 14 células canal × marca (componentes, status, classificação, margem; tolerância R$ 0,50) |
 | Latência da rota contra o Neon real, sem Data Mart | mediana ~1,1 s (1 ou 4 meses), contra 8–30 s no #66 |
-| Testes do publisher (puros) | 33, em SQLAlchemy 2.0 e 1.4.54 |
-| Integração em PostgreSQL 16 descartável | 17, em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs |
+| Testes do publisher (puros) | 51, em SQLAlchemy 2.0 e 1.4.54 |
+| Integração em PostgreSQL 16 descartável | 21, em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs, universo vazio, canal que some, `--sem-vendas` |
+| Contraprova do universo vazio | no código anterior a esta revisão, julho apagado da Torre → `--apply` saía **0 (success)**; com a guarda desligada, a fotografia é apagada (teste executável); com a guarda, sai 65 e a fotografia fica igual byte a byte |
 | Ponta a ponta (publica e serve) | 5: serve sem Data Mart, comissão ML uma vez, lote vencido, latência local |
-| Serving (testes da API) | 73 |
-| Mutações | publicar com recusa, não apagar escopo, ignorar lock, ignorar idade, ignorar status do lote: todas pegas |
+| Serving (testes da API) | 86 |
+| Mutações | publicar com recusa, não apagar escopo, ignorar lock, ignorar idade, ignorar status do lote, padrão voltar ao mês anterior, resumo pelo lote mais novo, `--meses` sem validação, guarda de escopo desligada: todas pegas |
 | Suíte da API | mesmas 43 falhas da `main` (worktree sem `.env`), nenhuma nova |
 
 Achados no caminho:
@@ -174,16 +194,21 @@ Achados no caminho:
 
 ## 8. Plano de aplicação (requer autorização em cada passo)
 
-1. Mesclar #66 e este PR. O serving novo já falha fechado sem a tabela: `snapshot_ausente`, sem erro.
-2. **Migration no Neon**, manual: `cd apps/api && alembic upgrade 025`. Conferir: `SELECT version_num FROM alembic_version` = `025`;
-   `to_regclass('marts.fact_dre_insumo_mensal')` não nulo.
-3. **Dry-run** do publisher na estação com VPN: `python -m pipelines.dre.insumo_publisher --meses 4`. Exigir status
-   `ok` e 0 recusas.
-4. **Primeira publicação**: o mesmo comando com `--apply`. Conferir uma linha `success` em `audit.source_sync_run` e a
-   contagem de linhas igual à do dry-run.
-5. Deploy do Render (manual). Conferir em `/api/v1/dre?ref_month=2026-07` que `fontes.insumos_dre.estado = ok` e que ML e
-   TikTok de julho saem `PARCIAL`.
-6. Agendamento diário (DAG no repositório do Airflow), em PR separado.
+**Regra: a DRE não vai para produção sem recorrência pronta.** Uma publicação manual vence em 48 h; servir a DRE sem a
+DAG funcionando seria mostrar um número que caduca em dois dias.
+
+1. Mesclar #66 e este PR. O merge **não** faz deploy (Render é manual). Se outro deploy acontecer antes do passo 6, a
+   rota sobe sem tabela e responde `snapshot_ausente` — sem erro e sem número.
+2. **Migration no Neon**, manual e fora do Airflow: `cd apps/api && alembic upgrade 025`. Conferir
+   `SELECT version_num FROM alembic_version` = `025` e `to_regclass('marts.fact_dre_insumo_mensal')` não nulo.
+3. **Dry-run** do publisher na estação com VPN: `python -m pipelines.dre.insumo_publisher --meses 4`. Exigir status `ok`
+   e 0 recusas.
+4. **Primeira publicação** manual: o mesmo comando com `--apply`. Conferir uma linha `success` em `audit.source_sync_run`
+   e a contagem de linhas igual à do dry-run.
+5. **Recorrência:** PR separado no repositório do Airflow com a DAG que só chama o publisher (contrato no §5). Ativar e
+   observar **pelo menos uma execução agendada com `success`**.
+6. Só então, **deploy do Render** (manual). Conferir em `/api/v1/dre` (sem período) que `periodo.origem =
+   padrao_competencia_madura`, `fontes.insumos_dre.estado = ok`, e que ML e TikTok da competência saem `PARCIAL`.
 
 ## 9. Rollback
 
