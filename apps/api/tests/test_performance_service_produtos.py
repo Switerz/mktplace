@@ -55,6 +55,12 @@ def quality_result(**over) -> FakeResult:
     return FakeResult([row])
 
 
+def brands_result() -> FakeResult:
+    """Resposta da consulta por marca do selo (a 4a de cada rota Shopee).
+    Vazia = detalhe nao medido; os testes desta suite nao exercitam o detalhe."""
+    return FakeResult([])
+
+
 class FakeSession:
     """Retorna, em ordem, um FakeResult por chamada a .execute()."""
 
@@ -70,7 +76,7 @@ def test_get_produtos_shopee_fonte_vazia_retorna_lista_vazia():
     # product_name) — SQL puro, sem consolidacao entre linhas (ver Bug 9).
     # variation_name e atributo descritivo, nao parte da chave: count + rows,
     # igual ao padrao de ML/TikTok.
-    db = FakeSession([FakeResult([FakeCountRow(0)]), FakeResult([]), quality_result()])
+    db = FakeSession([FakeResult([FakeCountRow(0)]), FakeResult([]), quality_result(), brands_result()])
     result = perf_svc.get_produtos_shopee(db, brand=None, year=2026, month=6)
     assert result["total"] == 0
     assert result["items"] == []
@@ -83,7 +89,7 @@ def test_get_produtos_shopee_com_linha_serializa_campos():
         gmv=1000.0, units_sold=10, completed_orders=8, canceled_orders=2,
         cancel_rate_pct=20.0, unique_buyers=7, avg_price=100.0, pareto_bucket="A_top50",
     )
-    db = FakeSession([FakeResult([FakeCountRow(1)]), FakeResult([row]), quality_result()])
+    db = FakeSession([FakeResult([FakeCountRow(1)]), FakeResult([row]), quality_result(), brands_result()])
     result = perf_svc.get_produtos_shopee(db, brand="kokeshi", year=2026, month=6)
     assert result["total"] == 1
     assert result["items"][0]["brand"] == "kokeshi"
@@ -195,7 +201,7 @@ def test_get_produtos_shopee_summary_avg_price_weighted():
     db = FakeSession([
         FakeResult([FakeRow(total_count=2, eligible_count=2, eligible_units=10)]),
         FakeResult([FakeRow(pareto_bucket="A_top50", count=2, gmv=1500.0)]),
-        quality_result(),
+        quality_result(), brands_result(),
     ])
     result = perf_svc.get_produtos_shopee_summary(db, brand=None, year=2026, month=6)
     assert result["avg_price_weighted"] == 150.0
