@@ -88,6 +88,27 @@ MIN_LOOKBACK_DAYS = tk_sync.MIN_LOOKBACK_DAYS
 CONNECT_TIMEOUT_SECONDS = 15
 SOURCE_MAX_STATEMENT_TIMEOUT_MS = 30_000
 
+#: Excecao MEDIDA ao teto acima, so' para o target `ml`. `gold.ml_gestao_diaria`
+#: e' uma VIEW sobre outra view (`gold.vw_ml_gestao_daily`), nao uma tabela com
+#: indice em `ref_date`. Medicoes de 13/10/2026 no leitor do Data Mart:
+#:   MAX(ref_date) sem filtro          51,9 s; depois > 120 s com a replica sob carga
+#:   MAX(ref_date) com piso de 14 dias 86,6 s a frio, 14,4 s em seguida
+#:   leitura de 90 dias pelo proprio CLI 22 s
+#: Com 30 s o preflight do wrapper estourava todo dia e o `serving_ml` nunca
+#: invocava o CLI (fato parada em 02/10). O custo oscila demais para um teto
+#: resolver sozinho; por isso o target `ml` tem as TRES medidas abaixo juntas:
+#: piso de data no probe, teto proprio e queda para D-1 se o probe for cancelado.
+#: 120 s cabe com folga no `child_timeout_seconds` (540 s), que NAO muda.
+ML_SOURCE_MAX_STATEMENT_TIMEOUT_MS = 120_000
+#: Piso do probe do `ml`: so' olha os ultimos 14 dias fechados. Fonte sem linha
+#: nesse intervalo devolve NULL e falha como "fonte vazia" -- o comportamento
+#: certo para uma Gold parada ha duas semanas.
+ML_SOURCE_MAX_FLOOR_DAYS = 14
+
+#: SQLSTATE de leitura CANCELADA pelo servidor, nao de dado errado:
+#: 57014 statement_timeout; 40001 conflito com recovery na replica.
+_PROBE_CANCELADO = frozenset({"57014", "40001"})
+
 #: Convencao Unix para timeout, a mesma de scripts/run_with_lock.ps1.
 EXIT_TIMEOUT = 124
 #: Falha do proprio wrapper (contrato de janela, allowlist, conexao) — nunca se
@@ -124,6 +145,17 @@ class Target:
     #: orquestrador mataria o wrapper e deixaria o CLI orfao escrevendo no Neon.
     step_timeout_seconds: int
     child_timeout_seconds: int
+    #: Teto do `MAX(<coluna de data>)` na fonte. Default para tabela; so' uma
+    #: fonte com custo medido acima dele recebe valor proprio.
+    source_max_timeout_ms: int = SOURCE_MAX_STATEMENT_TIMEOUT_MS
+    #: Piso, em dias antes de D-1, aplicado ao probe (`WHERE data >= piso`).
+    #: None = probe sem piso (tabelas, onde o MAX ja' e' barato).
+    source_max_floor_days: int | None = None
+    #: Se o probe for CANCELADO pelo servidor (timeout ou conflito de recovery),
+    #: a janela termina em D-1 em vez de abortar. So' e' seguro quando o CLI
+    #: reprova, antes de escrever, qualquer janela com dia sem linha -- o que
+    #: precisa ser provado em teste para cada target que liga isto.
+    probe_cancelado_usa_d1: bool = False
 
 
 TARGETS: dict[str, Target] = {
@@ -143,6 +175,11 @@ TARGETS: dict[str, Target] = {
         step_name="serving_ml",
         step_timeout_seconds=600,
         child_timeout_seconds=540,
+        source_max_timeout_ms=ML_SOURCE_MAX_STATEMENT_TIMEOUT_MS,
+        source_max_floor_days=ML_SOURCE_MAX_FLOOR_DAYS,
+        # Seguro porque `sync_ml_gestao_diaria.validate_source_rows` reprova
+        # janela com dia sem linha antes de qualquer escrita.
+        probe_cancelado_usa_d1=True,
     ),
     "brand": Target(
         name="brand",
@@ -308,15 +345,29 @@ def build_source_max_query(target: Target) -> str:
     dcol = validate_identifier(target.date_column)
     relation = validate_qualified(target.source_relation)
     sql = f"SELECT MAX({dcol}) AS source_max FROM {relation}"
+    filtros = []
     if target.brand_allowlist is not None:
-        sql += " WHERE brand = ANY(%(brands)s)"
+        filtros.append("brand = ANY(%(brands)s)")
+    if target.source_max_floor_days is not None:
+        filtros.append(f"{dcol} >= %(piso)s")
+    if filtros:
+        sql += " WHERE " + " AND ".join(filtros)
     return sql
 
 
-def source_max_params(target: Target) -> dict:
-    if target.brand_allowlist is None:
-        return {}
-    return {"brands": list(target.brand_allowlist)}
+def source_max_params(target: Target, today: date | None = None) -> dict:
+    params: dict = {}
+    if target.brand_allowlist is not None:
+        params["brands"] = list(target.brand_allowlist)
+    if target.source_max_floor_days is not None:
+        params["piso"] = ultimo_dia_fechado(today) - timedelta(
+            days=target.source_max_floor_days)
+    return params
+
+
+def probe_foi_cancelado(exc: BaseException) -> bool:
+    """Leitura cancelada pelo servidor (timeout/recovery), e nao erro de dado."""
+    return getattr(exc, "pgcode", None) in _PROBE_CANCELADO
 
 
 def _datamart_readonly():
@@ -331,15 +382,15 @@ def _datamart_readonly():
     return conn
 
 
-def read_source_max(target: Target, conn) -> date | None:
+def read_source_max(target: Target, conn, today: date | None = None) -> date | None:
     cur = conn.cursor()
     try:
         # Escopo de SESSAO, nao `SET LOCAL`: a conexao e' autocommit, logo nao
         # existe transacao para um `LOCAL` valer, e ele seria silenciosamente
         # ignorado. A conexao e' descartada em seguida, entao o efeito colateral
         # nao escapa desta leitura.
-        cur.execute(f"SET statement_timeout = {SOURCE_MAX_STATEMENT_TIMEOUT_MS}")
-        cur.execute(build_source_max_query(target), source_max_params(target))
+        cur.execute(f"SET statement_timeout = {int(target.source_max_timeout_ms)}")
+        cur.execute(build_source_max_query(target), source_max_params(target, today))
         row = cur.fetchone()
     finally:
         cur.close()
@@ -374,13 +425,21 @@ def run_target(target_name: str, lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     conn_factory = conn_factory or _datamart_readonly
     runner = runner or _default_runner
 
+    fechado = ultimo_dia_fechado(today)
+    probe_indisponivel = None
     conn = conn_factory()
     try:
-        source_max = read_source_max(target, conn)
+        source_max = read_source_max(target, conn, today)
+    except Exception as exc:
+        if not (target.probe_cancelado_usa_d1 and probe_foi_cancelado(exc)):
+            raise
+        # Sem watermark, a janela vai ate' D-1 e a COBERTURA passa a ser
+        # provada pelo CLI, que reprova dia sem linha antes de escrever.
+        probe_indisponivel = sanitize_error_message(exc)
+        source_max = fechado
     finally:
         conn.close()
 
-    fechado = ultimo_dia_fechado(today)
     date_from, date_to = resolve_window(target, source_max, lookback_days, today)
     resolved_run_id = sanitize_run_id(run_id) if run_id else default_run_id(target, now)
     argv = build_argv(target, date_from, date_to, resolved_run_id, apply=apply)
@@ -388,7 +447,11 @@ def run_target(target_name: str, lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     modo = "APPLY" if apply else "DIAGNOSTICO"
     print(f"[serving_refresh:{target.name}] modo={modo}")
     print(f"  fonte             : {target.source_relation}")
-    print(f"  source_max        : {source_max}")
+    if probe_indisponivel is None:
+        print(f"  source_max        : {source_max}")
+    else:
+        print(f"  source_max        : INDISPONIVEL ({probe_indisponivel}); janela "
+              f"ate' D-1 e cobertura por dia provada pelo CLI antes de escrever")
     print(f"  D-1 (Sao Paulo)   : {fechado}")
     print(f"  effective_date_to : {date_to}"
           + ("  (limitado pela fonte)" if date_to < fechado else "  (igual a D-1)"))

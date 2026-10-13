@@ -1063,7 +1063,8 @@ def test_i4_step_existe_com_modulo_args_timeout_e_preflight():
     p = _por_nome()
     s = p["tiktok_order_discounts_daily"]
     assert s.module == "pipelines.sync_tiktok_order_discounts_daily"
-    assert s.args == ("--mode", "auto", "--apply")
+    # `daily`, nao `auto`: o full mensal nao cabe nos 300 s (OPS-RECOVERY-4).
+    assert s.args == ("--mode", "daily", "--apply")
     assert s.timeout_seconds == 300
     assert s.preflight_source == "tiktok_order_discounts_daily"
 
@@ -1173,3 +1174,13 @@ def test_i4_o_step_de_afiliados_nao_mudou():
     assert a.timeout_seconds == 300
     assert a.depends_on == ()
     assert a.critical is True
+
+
+def test_r4_step_de_descontos_nunca_pede_full_nem_auto():
+    """OPS-RECOVERY-4: com `auto`, o full (leitura de 246 s medida) era
+    escolhido todo dia dentro de um envelope de 300 s e morria sempre."""
+    import pipelines.sync_tiktok_order_discounts_daily as sync
+    s = _por_nome()["tiktok_order_discounts_daily"]
+    assert sync.MODE_DAILY in s.args
+    assert sync.MODE_AUTO not in s.args and sync.MODE_FULL not in s.args
+    assert s.timeout_seconds == 300, "a correcao nao pode ter subido o envelope"
