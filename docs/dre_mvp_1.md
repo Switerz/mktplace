@@ -38,7 +38,7 @@ Cada célula traz:
 | Sinal | ML e Shopee gravam custo positivo; repasse TikTok, negativo. Normalizado num único ponto; sinal contrário vira `sinal_inesperado`, nunca `abs()` |
 | Afiliado TikTok | Dentro de `taxas` (contrato §6). `somavel = false`; nunca entra na margem. Afiliado maior que a taxa → célula `NAO_CALCULAVEL` |
 | Comissão ML | `total_fees` do mart, uma única vez, como `taxas` |
-| Taxa e frete TikTok | Repasse por coorte de pedido (Data Mart). O `total_fees` TikTok do mart **não** é usado: está congelado (contrato §4.5). Identidade do repasse violada → `nao_reconciliado` |
+| Taxa e frete TikTok | Repasse por coorte de pedido, publicado no Neon por `pipelines.dre.insumo_publisher` (DRE-DATA-BRIDGE-1). O `total_fees` TikTok do mart **não** é usado: está congelado (contrato §4.5). Identidade do repasse violada → `nao_reconciliado` |
 | Shopee | Taxas e frete com o sinal atual, mas `nao_confirmado`: sem contraprova independente (pergunta C4) |
 | CMV | Fiscal, só se receita fiscal ÷ GMV ∈ [0,95; 1,05] na célula. CMV 100% provisório → `provisorio` |
 | Impostos e devoluções | Sempre `indisponivel` (perguntas F8, C6, F5) |
@@ -67,11 +67,11 @@ células e só existe se nenhuma for `NAO_CALCULAVEL`. `faltam` lista o custo qu
 
 ## 4. Limitações
 
-1. **Produção não alcança o Data Mart** (Gate G4, comentário em `app/database.py`). No Render, CMV e taxa/frete TikTok saem
-   `fonte_inacessivel` e todas as células ficam `NAO_CALCULAVEL`. O endpoint funciona hoje onde houver acesso ao Data Mart.
+1. ~~Produção não alcança o Data Mart~~ — **resolvido por DRE-DATA-BRIDGE-1** (`docs/dre_data_bridge_1.md`): a rota lê só
+   o Neon. Até a migration 025 ser aplicada e o primeiro lote publicado, CMV e taxa/frete TikTok saem `snapshot_ausente`.
    Destrava com um publisher que grave o insumo mensal no Neon — exige migration e autorização.
-2. **Latência:** a consulta do repasse TikTok varre uma tabela de ~3,8 GB sem índice por data do pedido: ~8 s medidos para um mês só nessa consulta,
-   ~30 s medidos para a rota inteira com quatro meses. Filtrar `channels` sem `tiktok` evita a varredura. O publisher do item 1 resolve as duas coisas.
+2. ~~Latência de 8–30 s~~ — **resolvido por DRE-DATA-BRIDGE-1**: a varredura do repasse saiu da requisição e foi para o
+   publisher; a rota mediu ~1,1 s contra o Neon real.
 3. A fonte do repasse e a fonte fiscal mudam depois da carga; o mesmo mês pode variar entre duas leituras.
 4. A receita do TikTok inclui frete pago pelo comprador; ML e Shopee não.
 5. Cortes de coorte: o repasse TikTok usa `order_create_time` sem fuso; o GMV usa o dia do mart.
@@ -121,7 +121,8 @@ confiar no número.
 | `nao_reconciliado` | Não reconcilia | erro |
 | `sinal_inesperado` | Sinal inesperado | erro |
 | `indisponivel` | Indisponível | apagado |
-| `fonte_inacessivel` | Fonte fora do ar | erro |
+| `snapshot_ausente` | Insumo não publicado | apagado |
+| `snapshot_vencido` | Insumo desatualizado | atenção |
 | `nao_aplicavel` | N/A | apagado |
 
 **Selo de classificação:** `PARCIAL` → "Parcial · 4 de 6 custos"; `NAO_CALCULAVEL` → "Não calculável", com
@@ -130,10 +131,11 @@ confiar no número.
 **Regras de tela:**
 
 1. `valor = null` nunca vira "R$ 0" nem "—" ambíguo: mostrar o chip do status.
-2. `fontes.data_mart = "inacessivel"` → faixa no topo: "CMV e repasse TikTok indisponíveis nesta consulta".
+2. `fontes.insumos_dre.estado` diferente de `ok` → faixa no topo com `fontes.insumos_dre.motivo` e
+   `fontes.insumos_dre.publicado_em` (ex.: "Insumos financeiros publicados há mais de 48 h").
 3. Mostrar `formula` e `faltam` junto da margem (tooltip ou linha de rodapé).
 4. Frescor: `data_maxima.receita_ultimo_dia` e `cmv_ultima_emissao` visíveis.
-5. Estados: carregando (a rota pode levar de ~8 a ~30 s com TikTok no filtro), vazio (nenhuma célula para o filtro), erro (503/422 com
+5. Estados: carregando (~1 s medido contra o Neon), vazio (nenhuma célula para o filtro), erro (503/422 com
    a mensagem do servidor).
 6. Seletor de período só por mês inteiro.
 
@@ -142,13 +144,14 @@ confiar no número.
 ```ts
 type Classificacao = "COMPLETA" | "PARCIAL" | "NAO_CALCULAVEL";
 type StatusComponente =
-  | "disponivel" | "parcial" | "indisponivel" | "fonte_inacessivel" | "nao_reconciliado"
+  | "disponivel" | "parcial" | "indisponivel" | "snapshot_ausente" | "snapshot_vencido" | "nao_reconciliado"
   | "nao_confirmado" | "provisorio" | "sinal_inesperado" | "nao_aplicavel";
 
 interface Componente {
   valor: number | null; pct_receita: number | null; status: StatusComponente;
   motivo: string | null; fonte: string | null; somavel: boolean;
   partes: Record<string, number | null> | null;
+  data_as_of: string | null; publicado_em: string | null;  // so' insumos publicados
 }
 
 interface CelulaDRE {
@@ -166,5 +169,5 @@ interface CelulaDRE {
 
 ## 7. Próximo passo (requer autorização)
 
-Publisher mensal Data Mart → Neon com uma fato `mês × canal × marca` (insumos de CMV e repasse TikTok + versão fiscal
-lida), seguindo o contrato §13, item 5. Resolve a produção (limitação 1) e a latência (limitação 2). Envolve migration.
+Implementado em DRE-DATA-BRIDGE-1 (`docs/dre_data_bridge_1.md`): migration 025, publisher e serving só no Neon.
+Aplicação e primeira publicação aguardam autorização.

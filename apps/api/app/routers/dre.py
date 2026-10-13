@@ -3,10 +3,12 @@
 Contrato: `docs/dre_contrato_0.md`. Especificacao do endpoint e do componente
 visual: `docs/dre_mvp_1.md`.
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.database import datamart_engine, get_db
+from app.database import get_db
 from app.deps.filters import ResolvedFilters, filters_query
 from app.deps.period import today_brt
 from app.schemas.dre import DREResponse
@@ -25,8 +27,9 @@ def get_dre(filters: ResolvedFilters = Depends(filters_query), db: Session = Dep
     `compare` e' aceito pelo filtro global e ignorado aqui: a DRE ainda nao tem
     comparacao entre periodos.
 
-    O Data Mart inacessivel NAO derruba a rota: CMV e taxa/frete do TikTok saem
-    `fonte_inacessivel` e a classificacao vira NAO_CALCULAVEL onde dependia deles.
+    Le SO' o Neon. CMV e repasse TikTok vem de `marts.fact_dre_insumo_mensal`,
+    publicada pelo `pipelines.dre.insumo_publisher`; insumo ausente ou vencido
+    torna o componente indisponivel (falha fechada), nunca derruba a rota.
     """
     if db is None:
         raise HTTPException(503, "Banco indisponivel.")
@@ -36,7 +39,8 @@ def get_dre(filters: ResolvedFilters = Depends(filters_query), db: Session = Dep
         raise HTTPException(422, str(exc))
     canais = [_CANAL_POR_ID[i] for i in filters.mkt_ids]
     return dre_service.get_dre(
-        db, datamart_engine,
+        db,
         inicio=filters.period.start, fim=filters.period.end,
         canais=canais, marcas=filters.brands, hoje=today_brt(),
+        agora=datetime.now(timezone.utc),
     )

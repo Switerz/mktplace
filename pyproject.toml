@@ -116,5 +116,11 @@ where = ["."]
 #
 # Consequencia pratica: um preflight baseado so em `find_spec` PASSA e o
 # subprocesso falha depois, com erro que parece de dado.
-include = ["pipelines", "pipelines.expedicao", "pipelines.common"]
+# DRE-DATA-BRIDGE-1: `pipelines.dre` entra para o Airflow chamar
+# `python -m pipelines.dre.insumo_publisher`. Fecho transitivo MEDIDO no fonte:
+#   pipelines.dre.insumo_publisher -> pipelines.common.config
+# (import tardio, dentro de `_engines`). Nao importa `alembic` nem `app` — um
+# teste trava isso, porque Alembic na imagem colidiria com o banco de
+# metadados do Airflow. 2 arquivos, nenhum subpacote.
+include = ["pipelines", "pipelines.expedicao", "pipelines.common", "pipelines.dre"]
 exclude = ["pipelines.tests", "pipelines.tests.*"]

@@ -21,18 +21,22 @@ O QUE ESTE MODULO GARANTE, E POR QUE
   "margem de contribuicao conhecida", porque impostos nao estao ratificados e
   devolucoes em valor nao tem fonte (contrato §1, §8).
 
-FONTES
-------
-Neon (`db`):       `marts.fact_marketplace_daily_performance` (receita, taxas
-                   ML/Shopee, Ads, frete ML/Shopee) e
-                   `marts.fact_tiktok_affiliate_cost_order_monthly` (afiliados).
-Data Mart:         `gold.nf_vendas_plataforma_sku_mensal` (CMV fiscal) e
-                   `silver.stg_tiktok_payments_by_order` (taxa e frete TikTok
-                   por coorte de pedido). O Data Mart pode estar inacessivel
-                   (Gate G4: caso do Render hoje). Nesse caso os componentes
-                   que dependem dele saem `fonte_inacessivel` — nunca caem para
-                   um valor alternativo, porque o `total_fees` TikTok do mart
-                   esta comprovadamente congelado (contrato §4.5, §7).
+FONTES — SO' O NEON (Gate DRE-DATA-BRIDGE-1)
+-------------------------------------------
+- `marts.fact_marketplace_daily_performance`: receita, taxas ML/Shopee, Ads,
+  frete ML/Shopee.
+- `marts.fact_tiktok_affiliate_cost_order_monthly`: afiliados TikTok.
+- `marts.fact_dre_insumo_mensal`: CMV fiscal e repasse TikTok por coorte,
+  AGREGADOS e publicados pelo `pipelines.dre.insumo_publisher`, que e' o unico
+  que le o Data Mart. A requisicao nunca toca o Data Mart: o Render nao o
+  alcanca (Gate G4).
+
+FALHA FECHADA
+-------------
+Insumo ausente (migration nao aplicada, competencia nao publicada, lote nao
+concluido) ou vencido (publicado ha mais de `INSUMO_IDADE_MAXIMA`) torna o
+componente indisponivel, com o motivo. Nao ha fallback: o `total_fees` TikTok
+do mart esta congelado (contrato §4.5, §7) e nunca substitui o repasse.
 """
 from __future__ import annotations
 
@@ -43,7 +47,6 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.services.performance_service import BRAND_LABELS, ML_ID, SHOPEE_ID, TIKTOK_ID
@@ -61,7 +64,8 @@ NAO_CALCULAVEL = "NAO_CALCULAVEL"
 DISPONIVEL = "disponivel"
 COBERTURA_PARCIAL = "parcial"
 INDISPONIVEL = "indisponivel"
-FONTE_INACESSIVEL = "fonte_inacessivel"
+SNAPSHOT_AUSENTE = "snapshot_ausente"
+SNAPSHOT_VENCIDO = "snapshot_vencido"
 NAO_RECONCILIADO = "nao_reconciliado"
 NAO_CONFIRMADO = "nao_confirmado"
 PROVISORIO = "provisorio"
@@ -92,6 +96,11 @@ CMV_PROVISORIO_INTEGRAL = 0.995
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
+#: Idade maxima de um lote de insumos. O publisher roda diariamente; 48 h
+#: toleram UMA execucao perdida. Passado isso o insumo e' tratado como vencido
+#: — nunca exibido como atual.
+INSUMO_IDADE_MAXIMA = timedelta(hours=48)
+TABELA_INSUMOS = "marts.fact_dre_insumo_mensal"
 
 #: Sinal com que cada fonte grava custo. Medido no contrato §4.5/§4.8.
 SINAL_FONTE = {
@@ -104,7 +113,6 @@ SINAL_FONTE = {
 
 ROTULO_MARGEM = "Margem de contribuição conhecida"
 
-LOG_DATAMART_FALHOU = "dre: data mart inacessivel"
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +184,10 @@ def normalizar_custo(componente: str, canal: str, valor: float | None) -> tuple[
 class InsumosCelula:
     """Tudo o que a celula base `mes x canal x marca` precisa, ja lido.
 
-    `datamart_ok=False` significa que a leitura do Data Mart falhou nesta
-    requisicao; `cmv`/`repasse` `None` com `datamart_ok=True` significa que a
-    fonte respondeu e nao tem linha para a chave.
+    `cmv` e `repasse` vem de `marts.fact_dre_insumo_mensal`, ja agrupados por
+    chave. `None` = nada publicado para a chave. Quando ha linha, `_estado`
+    diz se ela pode ser usada (`ok`) ou por que nao (`snapshot_ausente`,
+    `snapshot_vencido`), e `_motivo` explica.
     """
 
     mes: date
@@ -188,14 +197,25 @@ class InsumosCelula:
     afiliado: dict | None = None
     cmv: dict | None = None
     repasse: dict | None = None
-    datamart_ok: bool = True
+    motivo_sem_insumo: str = "competencia nao publicada em marts.fact_dre_insumo_mensal"
 
 
-def _comp(valor=None, status=INDISPONIVEL, motivo=None, fonte=None, somavel=True, partes=None) -> dict:
+def _comp(valor=None, status=INDISPONIVEL, motivo=None, fonte=None, somavel=True, partes=None,
+          data_as_of=None, publicado_em=None) -> dict:
     return {
         "valor": valor, "status": status, "motivo": motivo, "fonte": fonte,
-        "somavel": somavel, "partes": partes,
+        "somavel": somavel, "partes": partes, "data_as_of": data_as_of, "publicado_em": publicado_em,
     }
+
+
+def _bloqueio_do_insumo(insumo: dict | None, motivo_sem: str, fonte: str, somavel: bool = True) -> dict | None:
+    """Componente indisponivel quando o insumo publicado nao pode ser usado. None = pode."""
+    if insumo is None:
+        return _comp(status=SNAPSHOT_AUSENTE, motivo=motivo_sem, fonte=fonte, somavel=somavel)
+    if insumo["_estado"] != "ok":
+        return _comp(status=insumo["_estado"], motivo=insumo["_motivo"], fonte=fonte, somavel=somavel,
+                     data_as_of=insumo.get("data_as_of"), publicado_em=insumo.get("publicado_em"))
+    return None
 
 
 def _cobertura_diaria(n_valores: int, dias: int) -> str:
@@ -342,8 +362,10 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
     datas = {
         "receita_ultimo_dia": mart.get("max_date"),
         "mart_carregado_em": mart.get("ingested_at"),
-        "cmv_ultima_emissao": (ins.cmv or {}).get("ultima_emissao"),
-        "repasse_tiktok_atualizado_em": (ins.repasse or {}).get("atualizado_em"),
+        "cmv_ultima_emissao": (ins.cmv or {}).get("data_as_of"),
+        "repasse_tiktok_atualizado_em": (ins.repasse or {}).get("data_as_of"),
+        "insumo_publicado_em": max(
+            (x["publicado_em"] for x in (ins.cmv, ins.repasse) if x and x.get("publicado_em")), default=None),
     }
     celula = {
         "mes": ins.mes.isoformat()[:7], "canal": canal, "marca": ins.marca,
@@ -354,39 +376,51 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
 
 
 def _taxa_tiktok(ins: InsumosCelula, avisos: list[str]) -> dict:
-    fonte = "silver.stg_tiktok_payments_by_order.fee_and_tax_amount (coorte de pedido)"
-    if not ins.datamart_ok:
-        return _comp(status=FONTE_INACESSIVEL, fonte=fonte,
-                     motivo="Data Mart inacessivel; o total_fees do mart esta congelado e nao e' usado")
+    fonte = f"{TABELA_INSUMOS}.tiktok_taxa_repasse (repasse por coorte de pedido)"
+    bloqueio = _bloqueio_do_insumo(ins.repasse, ins.motivo_sem_insumo, fonte)
+    if bloqueio:
+        return bloqueio
     rep = ins.repasse
-    if rep is None or rep.get("fee_and_tax") is None:
-        return _comp(status=INDISPONIVEL, fonte=fonte, motivo="sem transacoes de repasse para a coorte")
+    meta = {"fonte": fonte, "data_as_of": rep["data_as_of"], "publicado_em": rep["publicado_em"]}
+    if rep.get("taxa") is None:
+        return _comp(status=INDISPONIVEL, motivo="sem transacoes de repasse para a coorte na origem", **meta)
+    if rep["status_taxa"] != "reconciliado":
+        return _comp(status=NAO_RECONCILIADO, motivo=f"publicacao: {rep['motivo_taxa']}", **meta)
     residuo = abs(_num(rep.get("residuo")) or 0.0)
     if residuo > RESIDUO_REPASSE_MAX:
-        return _comp(status=NAO_RECONCILIADO, fonte=fonte,
-                     motivo=f"identidade do repasse violada (residuo {residuo:.2f})")
-    magnitude, ok = normalizar_custo("taxas", "tiktok", _num(rep["fee_and_tax"]))
+        return _comp(status=NAO_RECONCILIADO, motivo=f"identidade do repasse violada (residuo {residuo:.2f})", **meta)
+    if (_num(rep.get("violacoes")) or 0) > 0:
+        return _comp(status=NAO_RECONCILIADO, motivo="ha transacao com afiliado maior que a taxa", **meta)
+    if rep.get("sinal_taxa") != SINAL_FONTE[("taxas", "tiktok")]:
+        return _comp(status=SINAL_INESPERADO, motivo="convencao de sinal publicada diferente da esperada", **meta)
+    magnitude, ok = normalizar_custo("taxas", "tiktok", _num(rep["taxa"]))
     if not ok:
-        return _comp(status=SINAL_INESPERADO, fonte=fonte, motivo="fee_and_tax positivo na soma da coorte")
+        return _comp(status=SINAL_INESPERADO, motivo="fee_and_tax positivo na soma da coorte", **meta)
     mart_fees = _num(ins.mart.get("fees"))
     if mart_fees is not None and magnitude:
         div = (abs(mart_fees) / magnitude - 1) * 100
         if abs(div) >= 1.0:
             avisos.append(f"total_fees do mart diverge {div:+.1f}% do repasse; a DRE usa o repasse.")
-    return _comp(valor=magnitude, status=DISPONIVEL, fonte=fonte)
+    return _comp(valor=magnitude, status=DISPONIVEL, **meta)
 
 
 def _frete_tiktok(ins: InsumosCelula) -> dict:
-    fonte = "silver.stg_tiktok_payments_by_order.shipping_cost_amount (coorte de pedido)"
-    if not ins.datamart_ok:
-        return _comp(status=FONTE_INACESSIVEL, fonte=fonte, motivo="Data Mart inacessivel")
+    fonte = f"{TABELA_INSUMOS}.tiktok_frete_repasse (repasse por coorte de pedido)"
+    bloqueio = _bloqueio_do_insumo(ins.repasse, ins.motivo_sem_insumo, fonte)
+    if bloqueio:
+        return bloqueio
     rep = ins.repasse
-    if rep is None or rep.get("frete") is None:
-        return _comp(status=INDISPONIVEL, fonte=fonte, motivo="sem transacoes de repasse para a coorte")
+    meta = {"fonte": fonte, "data_as_of": rep["data_as_of"], "publicado_em": rep["publicado_em"]}
+    if rep.get("frete") is None:
+        return _comp(status=INDISPONIVEL, motivo="sem transacoes de repasse para a coorte na origem", **meta)
+    if rep["status_taxa"] != "reconciliado":
+        return _comp(status=NAO_RECONCILIADO, motivo=f"publicacao: {rep['motivo_taxa']}", **meta)
+    if rep.get("sinal_frete") != SINAL_FONTE[("frete", "tiktok")]:
+        return _comp(status=SINAL_INESPERADO, motivo="convencao de sinal publicada diferente da esperada", **meta)
     magnitude, ok = normalizar_custo("frete", "tiktok", _num(rep["frete"]))
     if not ok:
-        return _comp(status=SINAL_INESPERADO, fonte=fonte, motivo="shipping_cost positivo na soma da coorte")
-    return _comp(valor=magnitude, status=DISPONIVEL, fonte=fonte)
+        return _comp(status=SINAL_INESPERADO, motivo="shipping_cost positivo na soma da coorte", **meta)
+    return _comp(valor=magnitude, status=DISPONIVEL, **meta)
 
 
 def _afiliado_tiktok(af: dict | None) -> dict:
@@ -410,30 +444,37 @@ def _afiliado_tiktok(af: dict | None) -> dict:
 
 
 def _cmv(ins: InsumosCelula, receita: float | None, avisos: list[str]) -> dict:
-    fonte = "gold.nf_vendas_plataforma_sku_mensal.custo"
-    if not ins.datamart_ok:
-        return _comp(status=FONTE_INACESSIVEL, fonte=fonte, motivo="Data Mart inacessivel")
+    fonte = f"{TABELA_INSUMOS}.cmv (CMV fiscal agregado)"
+    bloqueio = _bloqueio_do_insumo(ins.cmv, ins.motivo_sem_insumo, fonte)
+    if bloqueio:
+        return bloqueio
     c = ins.cmv
-    if c is None or c.get("custo") is None:
-        return _comp(status=INDISPONIVEL, fonte=fonte, motivo="sem NF de venda para marca x plataforma x mes")
+    meta = {"fonte": fonte, "data_as_of": c["data_as_of"], "publicado_em": c["publicado_em"]}
+    if c.get("custo") is None:
+        return _comp(status=INDISPONIVEL, motivo="sem NF de venda para marca x plataforma x mes na origem", **meta)
+    if c.get("sinal") != SINAL_FONTE[("cmv", ins.canal)]:
+        return _comp(status=SINAL_INESPERADO, motivo="convencao de sinal publicada diferente da esperada", **meta)
     custo = _num(c["custo"])
     if custo < 0:
-        return _comp(status=SINAL_INESPERADO, fonte=fonte, motivo="CMV negativo")
+        return _comp(status=SINAL_INESPERADO, motivo="CMV negativo", **meta)
+    if c["status"] != "reconciliado":
+        return _comp(valor=custo, status=NAO_RECONCILIADO, motivo=f"publicacao: {c['motivo']} (pergunta F1/F7)", **meta)
+    # A publicacao reconciliou contra o GMV DAQUELE instante. O GMV pode ter
+    # mudado desde entao: a razao e' conferida de novo com o valor de agora.
     receita_fiscal = _num(c.get("receita_fiscal"))
     razao = (receita_fiscal / receita) if receita and receita_fiscal is not None else None
     if razao is None or not (CMV_RAZAO_MIN <= razao <= CMV_RAZAO_MAX):
-        txt = "sem receita para comparar" if razao is None else f"razao receita fiscal / GMV = {razao:.3f}"
-        return _comp(valor=custo, status=NAO_RECONCILIADO, fonte=fonte,
-                     motivo=f"{txt}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX} (pergunta F1/F7)")
-    prov = _num(c.get("custo_provisorio")) or 0.0
-    share = prov / custo if custo else 0.0
+        txt = "sem receita para comparar" if razao is None else f"razao receita fiscal / GMV atual = {razao:.3f}"
+        return _comp(valor=custo, status=NAO_RECONCILIADO,
+                     motivo=f"{txt}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX} (pergunta F1/F7)", **meta)
+    share = _num(c.get("provisorio_share")) or 0.0
     if share >= CMV_PROVISORIO_INTEGRAL:
-        return _comp(valor=custo, status=PROVISORIO, fonte=fonte,
-                     motivo="CMV integralmente provisorio: mes nao fechado na fonte fiscal (pergunta F2)")
+        return _comp(valor=custo, status=PROVISORIO,
+                     motivo="CMV integralmente provisorio: mes nao fechado na fonte fiscal (pergunta F2)", **meta)
     if share > 0:
         avisos.append(f"{share * 100:.0f}% do CMV ainda e' provisorio na fonte fiscal.")
     avisos.append(f"CMV fiscal reconciliado: receita fiscal / GMV = {razao:.3f}.")
-    return _comp(valor=custo, status=DISPONIVEL, fonte=fonte)
+    return _comp(valor=custo, status=DISPONIVEL, **meta)
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +580,11 @@ def agregar(celulas: list[dict], **chave) -> dict | None:
                 valor=valor, status=COBERTURA_PARCIAL, somavel=somavel,
                 motivo=f"disponivel em celulas que somam {cob}% da receita; status: {', '.join(sorted(status_set))}",
             )
+        # Datas do insumo publicado: a MAIS ANTIGA entre as celulas. Um agregado
+        # nunca pode parecer mais fresco que a sua parcela mais velha.
+        for chave_data in ("data_as_of", "publicado_em"):
+            datas = [p[chave_data] for p, _ in aplic if p.get(chave_data) is not None]
+            comps[nome][chave_data] = min(datas) if datas else None
     rec_status = {c["componentes"]["receita"]["status"] for c in celulas}
     comps["receita"] = _comp(valor=receita_total, status=DISPONIVEL if rec_status == {DISPONIVEL} else COBERTURA_PARCIAL,
                              somavel=False)
@@ -634,74 +680,102 @@ def marcas_ativas(db: Session) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Leitura — Data Mart
+# Leitura — insumos publicados (Neon)
 # ---------------------------------------------------------------------------
 
-SQL_CMV = """
-    SELECT data_mes AS mes, marca, plataforma,
-           SUM(receita_produto)   AS receita_fiscal,
-           SUM(custo)             AS custo,
-           SUM(custo_provisorio)  AS custo_provisorio,
-           MAX(ultima_emissao)    AS ultima_emissao
-    FROM gold.nf_vendas_plataforma_sku_mensal
-    WHERE data_mes BETWEEN :inicio AND :fim
-      AND canal = 'marketplace'
-      AND plataforma = ANY(:plataformas)
-      AND marca = ANY(:marcas)
-    GROUP BY 1, 2, 3
-"""
+SQL_INSUMOS_EXISTE = "SELECT to_regclass('marts.fact_dre_insumo_mensal') IS NOT NULL"
 
-SQL_REPASSE_TIKTOK = """
-    SELECT date_trunc('month', order_create_time)::date AS mes,
-           brand AS marca,
-           SUM(fee_and_tax_amount)   AS fee_and_tax,
-           SUM(shipping_cost_amount) AS frete,
-           SUM(settlement_amount - revenue_amount - fee_and_tax_amount - shipping_cost_amount) AS residuo,
-           COUNT(*)                  AS transacoes,
-           MAX(updated_at)           AS atualizado_em
-    FROM silver.stg_tiktok_payments_by_order
-    WHERE transaction_type = 'ORDER'
-      AND order_create_time >= :inicio
-      AND order_create_time < :fim_exclusivo
-      AND brand = ANY(:marcas)
-    GROUP BY 1, 2
+SQL_INSUMOS = """
+    SELECT i.competencia, i.canal, i.marca, i.componente, i.valor, i.sinal_origem,
+           i.cobertura, i.provisorio_share, i.status_reconciliacao, i.motivo,
+           i.data_max_origem, i.publicado_em, i.lote_id, a.status AS lote_status
+    FROM marts.fact_dre_insumo_mensal i
+    LEFT JOIN audit.source_sync_run a ON a.sync_run_id = i.lote_id
+    WHERE i.competencia BETWEEN :inicio AND :fim
+      AND i.canal = ANY(:canais)
+      AND i.marca = ANY(:marcas)
 """
 
 
 @dataclass
-class LeituraDataMart:
-    ok: bool
-    cmv: list[dict] = field(default_factory=list)
-    repasse: list[dict] = field(default_factory=list)
+class LeituraInsumos:
+    tabela_existe: bool
+    linhas: list[dict] = field(default_factory=list)
 
 
-def ler_datamart(engine, inicio: date, fim: date, canais: list[str], marcas: list[str]) -> LeituraDataMart:
-    """Le CMV e repasse TikTok em transacao READ ONLY.
+def ler_insumos(db: Session, inicio: date, fim: date, canais: list[str], marcas: list[str]) -> LeituraInsumos:
+    """Le os insumos publicados. Tabela ausente (migration 025 nao aplicada) nao
+    e' erro: devolve `tabela_existe=False` e os componentes saem
+    `snapshot_ausente`. `to_regclass` evita uma excecao que envenenaria a
+    transacao da sessao."""
+    if not db.execute(text(SQL_INSUMOS_EXISTE)).scalar():
+        return LeituraInsumos(tabela_existe=False)
+    rows = db.execute(text(SQL_INSUMOS), {"inicio": inicio, "fim": fim, "canais": canais,
+                                          "marcas": marcas}).mappings().all()
+    return LeituraInsumos(tabela_existe=True, linhas=[dict(r) for r in rows])
 
-    Qualquer falha devolve `ok=False` — os componentes dependentes saem como
-    `fonte_inacessivel`. O log registra so' uma categoria fixa e o NOME da
-    classe da excecao: a mensagem do driver pode carregar o DSN.
-    """
-    if engine is None:
-        logger.warning("%s (engine ausente)", LOG_DATAMART_FALHOU)
-        return LeituraDataMart(ok=False)
-    params = {
-        "inicio": inicio, "fim": fim, "fim_exclusivo": fim + timedelta(days=1),
-        "marcas": marcas, "plataformas": [PLATAFORMA_FISCAL[c] for c in canais],
-    }
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SET TRANSACTION READ ONLY"))
-            conn.execute(text("SET LOCAL statement_timeout = '120s'"))
-            cmv = [dict(r) for r in conn.execute(text(SQL_CMV), params).mappings().all()]
-            repasse = []
-            if "tiktok" in canais:
-                repasse = [dict(r) for r in conn.execute(text(SQL_REPASSE_TIKTOK), params).mappings().all()]
-            conn.rollback()
-    except (SQLAlchemyError, OSError) as exc:
-        logger.warning("%s (%s)", LOG_DATAMART_FALHOU, type(exc).__name__)
-        return LeituraDataMart(ok=False)
-    return LeituraDataMart(ok=True, cmv=cmv, repasse=repasse)
+
+def _estado_do_lote(linhas: list[dict], agora: datetime) -> tuple[str, str | None]:
+    """`ok`, ou o estado que torna o insumo inutilizavel e o motivo."""
+    if any(r.get("lote_status") != "success" for r in linhas):
+        return SNAPSHOT_AUSENTE, "lote de publicacao nao concluido com sucesso"
+    publicado = min(r["publicado_em"] for r in linhas)
+    if agora - publicado > INSUMO_IDADE_MAXIMA:
+        return SNAPSHOT_VENCIDO, (
+            f"publicado em {publicado.isoformat()}; limite de {int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600)} h"
+        )
+    return "ok", None
+
+
+def indexar_insumos(linhas: list[dict], agora: datetime) -> tuple[dict, dict]:
+    """Agrupa as linhas publicadas em insumo de CMV e de repasse por chave."""
+    por_chave: dict[tuple, dict[str, dict]] = {}
+    for r in linhas:
+        k = (_chave_mes(r["competencia"]), r["canal"], r["marca"])
+        por_chave.setdefault(k, {})[r["componente"]] = r
+    cmv, repasse = {}, {}
+    for k, comps in por_chave.items():
+        if "cmv" in comps:
+            c, rf = comps["cmv"], comps.get("cmv_receita_fiscal") or {}
+            grupo = [x for x in (c, rf) if x]
+            estado, motivo = _estado_do_lote(grupo, agora)
+            cmv[k] = {
+                "_estado": estado, "_motivo": motivo,
+                "custo": c["valor"], "receita_fiscal": rf.get("valor"), "sinal": c["sinal_origem"],
+                "provisorio_share": c["provisorio_share"], "status": c["status_reconciliacao"],
+                "motivo": c["motivo"], "data_as_of": c["data_max_origem"], "publicado_em": c["publicado_em"],
+                "lote_id": c["lote_id"],
+            }
+        if "tiktok_taxa_repasse" in comps:
+            tx = comps["tiktok_taxa_repasse"]
+            frete = comps.get("tiktok_frete_repasse") or {}
+            estado, motivo = _estado_do_lote(list(comps.values()), agora)
+            repasse[k] = {
+                "_estado": estado, "_motivo": motivo,
+                "taxa": tx["valor"], "sinal_taxa": tx["sinal_origem"], "status_taxa": tx["status_reconciliacao"],
+                "motivo_taxa": tx["motivo"],
+                "frete": frete.get("valor"),
+                "sinal_frete": frete.get("sinal_origem"),
+                "residuo": (comps.get("tiktok_residuo_identidade") or {}).get("valor"),
+                "violacoes": (comps.get("tiktok_tx_afiliado_maior_taxa") or {}).get("valor"),
+                "data_as_of": tx["data_max_origem"], "publicado_em": tx["publicado_em"], "lote_id": tx["lote_id"],
+            }
+    return cmv, repasse
+
+
+def resumo_insumos(leitura: LeituraInsumos, agora: datetime) -> dict:
+    if not leitura.tabela_existe:
+        return {"estado": "tabela_ausente", "publicado_em": None,
+                "motivo": "marts.fact_dre_insumo_mensal nao existe (migration 025 nao aplicada)"}
+    if not leitura.linhas:
+        return {"estado": "nao_publicado", "publicado_em": None,
+                "motivo": "nenhum insumo publicado para o periodo"}
+    publicado = max(r["publicado_em"] for r in leitura.linhas)
+    vencidas = sum(1 for r in leitura.linhas if agora - r["publicado_em"] > INSUMO_IDADE_MAXIMA)
+    estado = "ok" if vencidas == 0 else ("vencido" if vencidas == len(leitura.linhas) else "parcialmente_vencido")
+    return {"estado": estado, "publicado_em": publicado, "motivo": None if estado == "ok" else
+            f"{vencidas} de {len(leitura.linhas)} linhas publicadas ha mais de "
+            f"{int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600)} h"}
 
 
 # ---------------------------------------------------------------------------
@@ -722,14 +796,17 @@ def montar_dre(
     marcas: list[str],
     mart_rows: list[dict],
     afiliado_rows: list[dict],
-    datamart: LeituraDataMart,
+    insumos: LeituraInsumos,
     hoje: date,
+    agora: datetime,
 ) -> dict:
     """Monta a resposta inteira a partir de linhas ja lidas. Funcao PURA."""
     meses = meses_do_periodo(inicio, fim)
     af_idx = {(_chave_mes(r["mes"]), r["marca"]): r for r in afiliado_rows}
-    cmv_idx = {(_chave_mes(r["mes"]), r["marca"], r["plataforma"]): r for r in datamart.cmv}
-    rep_idx = {(_chave_mes(r["mes"]), r["marca"]): r for r in datamart.repasse}
+    cmv_idx, rep_idx = indexar_insumos(insumos.linhas, agora)
+    motivo_sem = ("marts.fact_dre_insumo_mensal nao existe (migration 025 nao aplicada)"
+                  if not insumos.tabela_existe else
+                  "competencia nao publicada em marts.fact_dre_insumo_mensal")
 
     base: list[dict] = []
     for r in mart_rows:
@@ -740,9 +817,9 @@ def montar_dre(
         ins = InsumosCelula(
             mes=mes, canal=canal, marca=r["marca"], mart=r,
             afiliado=af_idx.get((mes, r["marca"])) if canal == "tiktok" else None,
-            cmv=cmv_idx.get((mes, r["marca"], PLATAFORMA_FISCAL[canal])),
-            repasse=rep_idx.get((mes, r["marca"])) if canal == "tiktok" else None,
-            datamart_ok=datamart.ok,
+            cmv=cmv_idx.get((mes, canal, r["marca"])),
+            repasse=rep_idx.get((mes, canal, r["marca"])) if canal == "tiktok" else None,
+            motivo_sem_insumo=motivo_sem,
         )
         base.append(montar_celula_base(ins, hoje))
     base.sort(key=lambda c: (c["mes"], CANAIS.index(c["canal"]), c["marca"]))
@@ -766,9 +843,10 @@ def montar_dre(
         "periodo": {"date_from": inicio.isoformat(), "date_to": fim.isoformat(),
                     "meses": [m.isoformat()[:7] for m in meses]},
         "filtros": {"canais": canais, "marcas": marcas},
-        "fontes": {"neon": "ok", "data_mart": "ok" if datamart.ok else "inacessivel"},
+        "fontes": {"neon": "ok", "insumos_dre": resumo_insumos(insumos, agora)},
         "regras": {
             "maturacao_meses": MESES_MATURACAO,
+            "insumo_idade_maxima_horas": int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600),
             "cmv_razao_aceita": [CMV_RAZAO_MIN, CMV_RAZAO_MAX],
             "afiliado_tiktok": "decomposicao de taxas; nunca somado",
             "rotulo_margem": ROTULO_MARGEM,
@@ -782,12 +860,14 @@ def montar_dre(
     }
 
 
-def get_dre(db: Session, datamart_engine, *, inicio: date, fim: date, canais: list[str],
-            marcas: list[str] | None, hoje: date) -> dict:
+def get_dre(db: Session, *, inicio: date, fim: date, canais: list[str],
+            marcas: list[str] | None, hoje: date, agora: datetime) -> dict:
+    """Le SO' o Neon. Nenhum caminho desta funcao abre conexao com o Data Mart."""
     meses_do_periodo(inicio, fim)  # valida antes de ir ao banco
     escopo_marcas = marcas if marcas else marcas_ativas(db)
     mkt_ids = [MKT_POR_CANAL[c] for c in canais]
     mart_rows, afiliado_rows = ler_neon(db, inicio, fim, mkt_ids, escopo_marcas)
-    datamart = ler_datamart(datamart_engine, inicio, fim, canais, escopo_marcas)
+    insumos = ler_insumos(db, inicio, fim, canais, escopo_marcas)
     return montar_dre(inicio=inicio, fim=fim, canais=canais, marcas=escopo_marcas,
-                      mart_rows=mart_rows, afiliado_rows=afiliado_rows, datamart=datamart, hoje=hoje)
+                      mart_rows=mart_rows, afiliado_rows=afiliado_rows, insumos=insumos,
+                      hoje=hoje, agora=agora)

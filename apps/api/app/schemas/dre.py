@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 Classificacao = Literal["COMPLETA", "PARCIAL", "NAO_CALCULAVEL"]
 StatusComponente = Literal[
-    "disponivel", "parcial", "indisponivel", "fonte_inacessivel", "nao_reconciliado",
+    "disponivel", "parcial", "indisponivel", "snapshot_ausente", "snapshot_vencido", "nao_reconciliado",
     "nao_confirmado", "provisorio", "sinal_inesperado", "nao_aplicavel",
 ]
 NomeComponente = Literal["receita", "devolucoes", "taxas", "afiliados", "ads", "frete", "cmv", "impostos"]
@@ -34,6 +34,10 @@ class Componente(BaseModel):
     somavel: bool
     #: Decomposicao (so' afiliados TikTok: creator, partner, ads).
     partes: dict[str, float | None] | None = None
+    #: So' para insumos publicados (CMV, taxa e frete TikTok): data maxima da
+    #: origem e instante da publicacao do lote usado.
+    data_as_of: datetime | None = None
+    publicado_em: datetime | None = None
 
 
 class Componentes(BaseModel):
@@ -73,6 +77,7 @@ class DataMaxima(BaseModel):
     mart_carregado_em: datetime | None = None
     cmv_ultima_emissao: date | None = None
     repasse_tiktok_atualizado_em: datetime | None = None
+    insumo_publicado_em: datetime | None = None
 
 
 class CelulaDRE(BaseModel):
@@ -100,10 +105,21 @@ class Periodo(BaseModel):
     meses: list[str]
 
 
+class ResumoInsumos(BaseModel):
+    estado: Literal["ok", "tabela_ausente", "nao_publicado", "vencido", "parcialmente_vencido"]
+    publicado_em: datetime | None = None
+    motivo: str | None = None
+
+
+class Fontes(BaseModel):
+    neon: Literal["ok"]
+    insumos_dre: ResumoInsumos
+
+
 class DREResponse(BaseModel):
     periodo: Periodo
     filtros: dict[str, list[str]]
-    fontes: dict[str, Literal["ok", "inacessivel"]]
+    fontes: Fontes
     regras: dict[str, int | str | list[float]]
     total: CelulaDRE | None = None
     por_canal: list[CelulaDRE]
