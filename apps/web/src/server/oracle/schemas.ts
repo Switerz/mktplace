@@ -34,7 +34,7 @@ export const UFS = [
   "TO", "XX",
 ] as const;
 
-const isoDate = z
+export const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "data deve estar no formato YYYY-MM-DD")
   // Rejeita data sintaticamente valida mas inexistente (ex: 2026-02-31).
@@ -46,7 +46,7 @@ const isoDate = z
     );
   }, "data inexistente no calendario");
 
-const isoMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "mes deve estar no formato YYYY-MM");
+export const isoMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "mes deve estar no formato YYYY-MM");
 
 export const PERIOD_PRESETS = [
   "mes_anterior",
@@ -189,7 +189,7 @@ const periodShape = {
  * `["ml","ml"]` quase sempre indica chamada malformada; deduplicar sem avisar
  * esconderia o defeito de quem chamou.
  */
-function noDuplicates<T extends z.ZodType>(schema: T, label: string) {
+export function noDuplicates<T extends z.ZodType>(schema: T, label: string) {
   return schema.refine(
     (v) => !Array.isArray(v) || new Set(v).size === v.length,
     `${label} nao pode conter valores duplicados.`,

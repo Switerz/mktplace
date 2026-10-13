@@ -1,5 +1,6 @@
 /**
- * As cinco tools do MVP do Oraculo (docs/ORACLE_MCP_PLAN.md secao 8).
+ * Tools do Oraculo: as cinco do MVP (docs/ORACLE_MCP_PLAN.md secao 8) e as
+ * tres operacionais do MCP-COVERAGE-2, que vivem em `tools-*.ts`.
  *
  * Nenhuma tool escreve. Nenhuma expoe PII. Nenhuma espelha 1:1 um endpoint —
  * cada uma responde uma pergunta completa de negocio.
@@ -10,7 +11,7 @@
 import { z } from "zod";
 
 import {
-  buildEnvelope, CURRENT_DAY_WARNING, textFallback, type Envelope, type EnvelopePeriod,
+  buildEnvelope, type EnvelopePeriod,
 } from "./envelope.ts";
 import { toolError } from "./errors.ts";
 import {
@@ -22,9 +23,19 @@ import {
 } from "./limitations.ts";
 import {
   canaisInput, CHANNEL_LABELS, desempenhoInput, produtosInput, qualidadeInput,
-  regioesInput, resolvePeriod, type Channel, type ResolvedPeriod,
+  regioesInput, type Channel,
 } from "./schemas.ts";
-import { numOrNull, type TorreClient } from "./torre-client.ts";
+import { numOrNull } from "./torre-client.ts";
+import {
+  asWindow, envelopeSchema, limitationSchema, ok, periodWarnings, safeResolvePeriod,
+  windowSchema, type OracleTool,
+} from "./tool-kit.ts";
+
+export type { OracleTool, ToolDeps, ToolResult } from "./tool-kit.ts";
+import { afiliadosSchema, descontosSchema, projectCanaisBlocos } from "./canais-blocos.ts";
+import { estoqueTool } from "./tools-estoque.ts";
+import { expedicaoTool } from "./tools-expedicao.ts";
+import { precosTool } from "./tools-precos.ts";
 import {
   brandsContract, canaisContract, healthContract, monthBoundsOf, overviewContract,
   overviewFreshnessContract, parseUpstream, productKey, produtosMlContract,
@@ -32,60 +43,12 @@ import {
   regioesByUfContract, regioesSummaryContract, trendContract,
 } from "./upstream.ts";
 
-export type ToolDeps = {
-  client: TorreClient;
-  /** Relogio injetavel: a suite nao depende da hora real da maquina. */
-  now: () => Date;
-};
-
-export type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  structuredContent: Envelope<unknown>;
-};
-
-export type OracleTool = {
-  name: string;
-  config: {
-    title: string;
-    description: string;
-    inputSchema?: z.ZodType;
-    outputSchema: z.ZodType;
-  };
-  run: (args: unknown, deps: ToolDeps) => Promise<ToolResult>;
-};
-
 const GMV_DEFINITION =
   "GMV = valor bruto dos pedidos, sem frete, sem cancelados e sem devolucoes.";
 
 // ---------------------------------------------------------------------------
 // Helpers compartilhados
 // ---------------------------------------------------------------------------
-
-/** Envelope como schema Zod, para servir de `outputSchema` das tools. */
-function envelopeSchema<T extends z.ZodType>(data: T) {
-  return z.object({
-    meta: z.object({
-      source: z.string(),
-      layer: z.string(),
-      period: z
-        .object({ start: z.string(), end: z.string(), inclusive: z.literal(true) })
-        .nullable(),
-      timezone: z.string(),
-      currency: z.literal("BRL"),
-      monetary_unit: z.literal("reais"),
-      filters_applied: z.record(z.string(), z.unknown()),
-      metric_definition: z.string(),
-      refreshed_at: z.string().nullable(),
-      coverage: z.string(),
-      limit: z.number().nullable(),
-      returned_count: z.number(),
-      total_count: z.number().nullable(),
-      truncated: z.boolean(),
-      warnings: z.array(z.string()),
-    }),
-    data,
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Gate SH-API-2D — selo de qualidade do escopo, exposto ao modelo.
@@ -173,37 +136,12 @@ function toScopeQualityOut(q: UpstreamScopeQuality): ScopeQualityOut {
   };
 }
 
-const limitationSchema = z.object({
-  topic: z.string(),
-  scope: z.string(),
-  description: z.string(),
-});
-
-const windowSchema = z.object({
-  start: z.string(),
-  end: z.string(),
-  inclusive: z.literal(true),
-});
-
 /** Converte o escopo validado nos parametros aceitos pelo backend. */
 function scopeParams(canais?: Channel[], marcas?: string[]) {
   return {
     channels: canais && canais.length > 0 ? [...canais].sort().join(",") : "all",
     brands: marcas && marcas.length > 0 ? [...marcas].sort().join(",") : undefined,
   };
-}
-
-/** Resolve o periodo convertendo erro de faixa em erro de tool determinista. */
-function safeResolvePeriod(input: Parameters<typeof resolvePeriod>[0], now: Date): ResolvedPeriod {
-  try {
-    return resolvePeriod(input, now);
-  } catch (err) {
-    throw toolError("INVALID_INPUT", err instanceof Error ? err.message : undefined);
-  }
-}
-
-function asWindow(p: { start: string; end: string }): EnvelopePeriod {
-  return { start: p.start, end: p.end, inclusive: true };
 }
 
 /** Eco dos filtros REALMENTE aplicados, lido da resposta do backend. */
@@ -217,20 +155,9 @@ function echoFilters(
   return filters;
 }
 
-function periodWarnings(period: ResolvedPeriod, extra: string[] = []): string[] {
-  return period.includesCurrentDay ? [CURRENT_DAY_WARNING, ...extra] : extra;
-}
-
 function share(part: number | null, total: number | null): number | null {
   if (part === null || total === null || total <= 0) return null;
   return Math.round((part / total) * 10000) / 100;
-}
-
-function ok(headline: string, env: Envelope<unknown>): ToolResult {
-  return {
-    content: [{ type: "text", text: textFallback(headline, env) }],
-    structuredContent: env,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +351,10 @@ const canaisOutput = envelopeSchema(
         brands_with_data: z.number().nullable(),
       }),
     ),
+    /** MCP-COVERAGE-2: custo de afiliados (TikTok), com estado do snapshot. */
+    afiliados: afiliadosSchema,
+    /** MCP-COVERAGE-2: desconto da marca x subsidio da plataforma (TikTok). */
+    descontos_tiktok: descontosSchema,
     limitations: z.array(limitationSchema),
   }),
 );
@@ -438,6 +369,7 @@ export const canaisTool: OracleTool = {
       "Cada metrica traz 'applicable' e 'available': nao aplicavel (o canal nao opera esse custo) e' DIFERENTE de sem dado. Nenhum dos dois vira zero.",
       "A comissao do Mercado Livre tem disponibilidade POR LINHA (marca x periodo): quando marketplace_cost_available vem false, ela nao foi carregada para aquela marca no periodo — diga isso ao usuario, nunca trate como custo zero. 'Disponivel' significa valor em pelo menos um dia do periodo, nao cobertura integral; o que se aplica a cada resposta vem em data.limitations.",
       "O custo do TikTok e' direcional (base de repasse difere do GMV em ~5,5%).",
+      "Inclui data.afiliados (custo de afiliados do TikTok: comissao de criador, parceiro e ads, com o sinal da fonte e nunca somados; receita atribuida e retorno/ROAS de afiliados vem nulos porque a fonte nao os tem) e data.descontos_tiktok (desconto financiado pela marca x subsidio do TikTok, nunca somados). Cada bloco traz estado, periodo_status e frescor; snapshot_manual=true indica carga manual. Bloco sem linhas e' ausencia de registro, nao zero.",
       "NAO use para totais de GMV (use torre_desempenho_marketplaces), para produtos, nem para margem.",
     ].join(" "),
     inputSchema: canaisInput,
@@ -448,15 +380,15 @@ export const canaisTool: OracleTool = {
     const period = safeResolvePeriod(input, deps.now());
     const scope = scopeParams(input.canais, input.marcas);
 
-    const payload = parseUpstream(
-      canaisContract,
-      await deps.client.get("canais", {
-        channels: scope.channels,
-        brands: scope.brands,
-        date_from: period.start,
-        date_to: period.end,
-      }),
-    );
+    const raw = await deps.client.get("canais", {
+      channels: scope.channels,
+      brands: scope.brands,
+      date_from: period.start,
+      date_to: period.end,
+    });
+    const payload = parseUpstream(canaisContract, raw);
+    // Blocos validados a parte: bloco quebrado nao derruba a comparacao.
+    const blocos = projectCanaisBlocos(raw);
 
     const rows = payload.channel_rows.map((row) => ({
       brand: row.brand,
@@ -509,6 +441,7 @@ export const canaisTool: OracleTool = {
     if (rows.some((r) => r.channel === "tiktok" && r.marketplace_cost_available)) {
       limitations.push(TIKTOK_SETTLEMENT_DIRECTIONAL);
     }
+    limitations.push(...blocos.limitations);
 
     const env = buildEnvelope({
       period: asWindow(period),
@@ -521,8 +454,14 @@ export const canaisTool: OracleTool = {
       refreshedAt: payload.refreshed_at ?? null,
       coverage: "universo completo das combinacoes marca x canal com dado no periodo",
       returnedCount: rows.length,
-      warnings: periodWarnings(period),
-      data: { rows, channel_medians: medians, limitations },
+      warnings: periodWarnings(period, blocos.warnings),
+      data: {
+        rows,
+        channel_medians: medians,
+        afiliados: blocos.afiliados,
+        descontos_tiktok: blocos.descontos_tiktok,
+        limitations,
+      },
     });
 
     return ok(`Eficiencia por canal e marca (${period.start} a ${period.end}).`, env);
@@ -1045,11 +984,18 @@ export const regioesTool: OracleTool = {
   },
 };
 
-/** As cinco tools do MVP — nenhuma a mais. */
+/**
+ * As oito tools registradas: cinco do MVP + tres operacionais (MCP-COVERAGE-2).
+ * A DRE (`dre-contract.ts`) tem contrato e testes, mas NAO entra aqui enquanto
+ * o endpoint nao estiver publicado e populado.
+ */
 export const ORACLE_TOOLS: readonly OracleTool[] = [
   desempenhoTool,
   canaisTool,
   produtosTool,
   qualidadeTool,
   regioesTool,
+  expedicaoTool,
+  estoqueTool,
+  precosTool,
 ];

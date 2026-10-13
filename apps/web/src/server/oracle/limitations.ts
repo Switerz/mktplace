@@ -148,3 +148,107 @@ export const CURRENT_DAY_PARTIAL: Limitation = {
 
 /** Sempre aplicaveis, independentemente da resposta do backend. */
 export const ALWAYS_APPLICABLE: readonly Limitation[] = [NO_MARGIN, CURRENT_DAY_PARTIAL];
+
+// ---------------------------------------------------------------------------
+// MCP-COVERAGE-2 — superficies operacionais. Cada item e' emitido pela tool
+// SOMENTE quando o gatilho aparece na resposta; o texto descreve a semantica
+// da ausencia, nao um numero.
+// ---------------------------------------------------------------------------
+
+export const EXP_NO_ORDER_LEVEL: Limitation = {
+  topic: "expedicao_sem_pedido",
+  scope: "Expedicao",
+  description:
+    "Somente agregados por canal, conta/loja e data. A fila por pedido nao e' servida por este conector: nenhum pedido, cliente ou endereco pode ser citado a partir desta resposta.",
+};
+
+export const EXP_MANUAL_SNAPSHOT: Limitation = {
+  topic: "expedicao_fotografia_manual",
+  scope: "Expedicao — Shopee/Mercado Livre",
+  description:
+    "A fotografia declara load_mode=manual_snapshot: ela envelhece ate a proxima execucao do refresh. Cite a idade (fotografia.idade_horas) junto do numero.",
+};
+
+export const EXP_DEADLINE_NOT_PUBLISHED: Limitation = {
+  topic: "expedicao_prazo_nao_publicado",
+  scope: "Expedicao — prazo de despacho",
+  description:
+    "Parte ou todo o backlog nao tem prazo publicado pelo canal (sem_prazo_publicado). Nesses casos vencidos/em risco/no prazo vem nulos ou parciais: ausencia de prazo nao e' atraso, e nao e' 'zero vencidos'.",
+};
+
+export const EXP_BRAND_FILTER_LOCAL: Limitation = {
+  topic: "expedicao_filtro_marca",
+  scope: "Expedicao — Shopee/Mercado Livre",
+  description:
+    "O resumo da fonte nao aplica filtro de marca; o conector soma as contas da marca no mesmo lote, que e' a mesma definicao do total da fonte. Marca sem conta no canal aparece em marcas_sem_conta.",
+};
+
+export const EXP_TIKTOK_RECONSTRUCTED: Limitation = {
+  topic: "ldr_tiktok_interna",
+  scope: "Expedicao — TikTok Shop",
+  description:
+    "A LDR desta resposta usa prazo RECONSTRUIDO pela Torre (regra de dias uteis por evento). E' medicao interna, nao a medicao oficial de penalizacao do TikTok: pode divergir do painel da plataforma.",
+};
+
+export const EXP_TIKTOK_OFFICIAL: Limitation = {
+  topic: "ldr_tiktok_oficial",
+  scope: "Expedicao — TikTok Shop",
+  description:
+    "A fonte declara que o prazo desta LDR e' o oficial do marketplace (deadline_is_reconstructed=false).",
+};
+
+export const STOCK_ML_NOT_STOCK: Limitation = {
+  topic: "full_ml_nao_e_estoque",
+  scope: "Full — Mercado Livre",
+  description:
+    "Para o Mercado Livre a Torre mede a MODALIDADE do envio (Full x nao-Full), nao estoque: nao ha disponibilidade, cobertura em dias nem ruptura do ML. Estoque ML e' 'nao aplicavel' nesta fonte, nunca zero.",
+};
+
+export const STOCK_TOWER_COVERAGE: Limitation = {
+  topic: "estoque_cobertura_torre",
+  scope: "Estoque Full — Shopee",
+  description:
+    "Cobertura em dias e classificacoes (ruptura, baixo, excesso) sao calculo da Torre com limiares PROVISORIOS sobre a media de 28 dias — nao sao numero oficial da Shopee. Kits ficam fora dos indicadores operacionais (nao conciliados).",
+};
+
+export const STOCK_PARTIAL_SCOPE: Limitation = {
+  topic: "estoque_escopo_parcial",
+  scope: "Full/Estoque — Shopee",
+  description:
+    "A esteira da Shopee nao cobre todas as marcas: as nao cobertas vem listadas e NAO estao nos totais. O total e' 'Shopee (cobertura API)', nunca 'Shopee total'.",
+};
+
+export const PRICE_ADVERTISED_ONLY: Limitation = {
+  topic: "preco_somente_anunciado",
+  scope: "Monitoramento de precos",
+  description:
+    "A comparacao usa o preco ANUNCIADO. Frete, cupom, subsidio e preco final de checkout nao sao medidos e vem nulos — nunca inventados. A diferenca pode mudar de valor e de sinal quando esses componentes forem considerados.",
+};
+
+export const PRICE_REFERENCE_PDV: Limitation = {
+  topic: "preco_referencia_pdv",
+  scope: "Monitoramento de precos",
+  description:
+    "A referencia e' o preco sugerido de revenda (PDV) da tabela B2B, sem vigencia declarada. Nao e' preco minimo anunciado. Anuncio sem referencia fica em no_reference com diferenca nula — nunca 0%.",
+};
+
+export const AFFILIATE_NO_RETURN: Limitation = {
+  topic: "afiliados_sem_retorno",
+  scope: "Canais — afiliados",
+  description:
+    "So existe CUSTO de afiliados (TikTok). Nao ha receita atribuida a afiliados na fonte, portanto receita atribuida e retorno/ROAS de afiliados vem nulos — indisponiveis, nao zero.",
+};
+
+export const AFFILIATE_NO_ROWS: Limitation = {
+  topic: "afiliados_sem_linhas",
+  scope: "Canais — afiliados",
+  description:
+    "O bloco de afiliados nao trouxe linhas para este periodo/escopo (ex.: periodo que nao fecha mes calendario, ou marca sem registro). Isso e' AUSENCIA de registro, nao custo de afiliado zero.",
+};
+
+export const DISCOUNTS_NO_ROWS: Limitation = {
+  topic: "descontos_sem_linhas",
+  scope: "Canais — descontos TikTok",
+  description:
+    "O bloco de descontos do TikTok nao trouxe linhas para este escopo. Ausencia de registro nao e' desconto zero nem 'nenhum pedido'.",
+};
