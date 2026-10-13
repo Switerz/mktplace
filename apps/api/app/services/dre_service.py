@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -123,6 +123,25 @@ def _num(v) -> float | None:
     if v is None:
         return None
     return float(Decimal(str(v)))
+
+
+#: Fuso do negocio. Offset fixo: o Brasil nao tem horario de verao desde 2019.
+TZ_BRT = timezone(timedelta(hours=-3), "BRT")
+
+
+def data_brt(v) -> date | None:
+    """Instante -> data no fuso do negocio; `date` passa intacta.
+
+    `data_max_origem` do CMV e' a ultima EMISSAO fiscal (uma data), publicada
+    como meia-noite BRT = 03:00 UTC. O contrato expoe `cmv_ultima_emissao`
+    como `date`: entregar o instante fazia o Pydantic recusar a resposta
+    inteira (500) assim que a primeira fotografia foi publicada.
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).astimezone(TZ_BRT).date()
+    return v
 
 
 def _pct(valor: float | None, receita: float | None) -> float | None:
@@ -371,7 +390,7 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
     datas = {
         "receita_ultimo_dia": mart.get("max_date"),
         "mart_carregado_em": mart.get("ingested_at"),
-        "cmv_ultima_emissao": (ins.cmv or {}).get("data_as_of"),
+        "cmv_ultima_emissao": data_brt((ins.cmv or {}).get("data_as_of")),
         "repasse_tiktok_atualizado_em": (ins.repasse or {}).get("data_as_of"),
         "insumo_publicado_em": max(
             (x["publicado_em"] for x in (ins.cmv, ins.repasse) if x and x.get("publicado_em")), default=None),
