@@ -341,6 +341,41 @@ def test_analise_temporal_conta_chaves_que_mudam(tmp_path):
     reg = t["regime_por_fonte"][NOME_AP]
     assert reg["custo_atual_igual_ao_ultimo_mes"] == 2 and reg["trocas_de_valor_na_serie"] == 1
 
+# ---------------------------------------------------------------------------
+# Vigencia (alternativa 3, decidida em 13/10/2026)
+# ---------------------------------------------------------------------------
+
+AGO, JUN, MAI = date(2026, 8, 1), date(2026, 6, 1), date(2026, 5, 1)
+NOME_BB = "Comparativo_MesAMes_BB_VAREJO_Consolidado_TodasFiliais_01012025_31072026.xlsx"
+NOME_KOK = "Comparativo_MesAMes_KOKESHI_Consolidado_TodasFiliais_01012025_31072026.xlsx"
+
+
+def test_vigencia_nao_retroage_antes_da_primeira_entrada(tmp_path):
+    # `Custo Atual` existe (3), mas nao pode cobrir maio, antes da 1a entrada.
+    comparativo(tmp_path, [("SP", "A1", "", "X", [0, 2, 3], 3)])
+    _, ind = ler_pasta(tmp_path)
+    assert C.cmp_vigente(ind, ("AP_COSMETICS", "SP", "A1"), MAI).estado == "ausente"
+    v = C.cmp_vigente(ind, ("AP_COSMETICS", "SP", "A1"), JUN)
+    assert (v.cmp, v.competencia_origem, v.carry_forward) == (Decimal("2"), JUN, False)
+
+
+def test_vigencia_carrega_adiante_depois_do_ultimo_mes(tmp_path):
+    comparativo(tmp_path, [("SP", "A1", "", "X", [0, 2, 3], 3)])
+    _, ind = ler_pasta(tmp_path)
+    v = C.cmp_vigente(ind, ("AP_COSMETICS", "SP", "A1"), AGO)
+    assert (v.estado, v.cmp, v.competencia_origem, v.competencia_usada) == ("ok", Decimal("3"), JUL, AGO)
+    assert v.carry_forward and not v.fotografia
+
+
+def test_fotografia_vale_so_a_partir_da_propria_competencia(tmp_path):
+    lcv(tmp_path, [("0301", "LC1", "", 22.0, "OK")])
+    _, ind = ler_pasta(tmp_path)
+    k = ("LCV", "0301", "LC1")
+    assert C.cmp_vigente(ind, k, JUN).estado == "ausente"
+    jul, ago = C.cmp_vigente(ind, k, JUL), C.cmp_vigente(ind, k, AGO)
+    assert (jul.cmp, jul.carry_forward, jul.fotografia) == (Decimal("22"), False, True)
+    assert (ago.cmp, ago.competencia_origem, ago.carry_forward, ago.fotografia) == (Decimal("22"), JUL, True, True)
+
 
 # ---------------------------------------------------------------------------
 # Torre: casamento, kits e shadow
@@ -352,6 +387,10 @@ def venda(codigo, canonico, marca="apice", produto="", qtd=10, receita=1000, pla
             "quantidade": Decimal(qtd), "receita": Decimal(receita), "custo_fiscal": Decimal(1), "linhas": 1}
 
 
+def resolver(ind, codigos, produto="", marca="apice", cat=None, comp=JUL, gtin=True):
+    return T.resolver(ind, codigos, comp, produto, cat, marca, T.indice_gtin(ind) if gtin else None)
+
+
 def test_ean13_valido():
     assert T.ean13_valido("7908787700522")
     assert not T.ean13_valido("7908787700523")
@@ -360,35 +399,128 @@ def test_ean13_valido():
 
 def test_colisao_de_codigo_entre_marcas_e_descartada_por_gtin(tmp_path):
     """`10005` e' um condicionador na BB e um perfume Lescent na venda: o GTIN separa."""
-    comparativo(tmp_path, [("SP", "10005", "7899999512099", "COND PFM FIN ROSES", [13, 13, 13], 13)],
-                nome="Comparativo_MesAMes_BB_VAREJO_Consolidado_TodasFiliais_01012025_31072026.xlsx")
+    comparativo(tmp_path, [("SP", "10005", "7899999512099", "COND PFM FIN ROSES", [13, 13, 13], 13)], nome=NOME_BB)
     lcv(tmp_path, [("0301", "LC02002", "", 22.0, "OK")])
     _, ind = ler_pasta(tmp_path)
     cat = T.montar_catalogo([{"marca": "Lescent", "sku": "LC02002", "sku_antigo": "10005", "tipo": "PA",
                               "gtin_ean": "7908787702519"}], [])
-    r = T.resolver(ind, {"codigo_sku": "10005", "sku_canonico": "LC02002"}, JUL, "por_competencia",
-                   "DEO COLONIA NO 2 - 100ML", cat, "lescent")
+    r = resolver(ind, {"codigo_sku": "10005", "sku_canonico": "LC02002"}, "DEO COLONIA NO 2 - 100ML",
+                 "lescent", cat)
     assert (r.status, r.cmp, r.entidades, r.descartados) == ("coberto", Decimal("22"), ("LCV",), 1)
-    assert r.evidencia == T.INDETERMINADO
+    assert r.nivel == T.NIVEL_PROVISORIO
 
 
-def test_dois_cmps_para_a_mesma_venda_viram_conflito_sem_escolha(tmp_path):
-    comparativo(tmp_path, [("SP", "10041", "", "DEO BD SPL DELIGHT", [8, 8, 8], 8),
-                           ("SP", "BB02027", "", "DEO BD SPL MY SWEET DELIGHT 200ML", [9, 9, 9], 9)])
+def test_codigo_provisorio_escopado_por_marca_e_entidade(tmp_path):
+    lcv(tmp_path, [("0301", "LC1", "", 22.0, "OK")])
+    comparativo(tmp_path, [("SP", "RT9", "", "CAPS", [5, 5, 5], 5)], nome=NOME_KOK)
     _, ind = ler_pasta(tmp_path)
-    r = T.resolver(ind, {"codigo_sku": "10041", "sku_canonico": "BB02027"}, JUL, "por_competencia",
-                   "Body Splash 200ml", None, "barbours")
-    assert r.status == "conflito" and r.cmp is None
+    ok = resolver(ind, {"codigo_sku": "LC1"}, marca="lescent")
+    assert (ok.status, ok.nivel, ok.cmp) == ("coberto", T.NIVEL_PROVISORIO, Decimal("22"))
+    # Mesmo codigo, outra marca: a LCV nao esta no escopo da Barbours.
+    assert resolver(ind, {"codigo_sku": "LC1"}, marca="barbours").status == "sem_cmp"
+    # Codigo existe, mas numa entidade fora do escopo da marca (KOKESHI nao vende Rituaria).
+    assert resolver(ind, {"codigo_sku": "RT9"}, marca="rituaria").status == "sem_cmp"
+    assert resolver(ind, {"codigo_sku": "LC1"}, marca="marca_sem_escopo").status == "sem_cmp"
+
+
+def test_dois_candidatos_sem_evidencia_e_mesmo_cmp_sao_ambiguos(tmp_path):
+    comparativo(tmp_path, [("SP", "LC1", "", "X", [22, 22, 22], 22)])
+    lcv(tmp_path, [("0301", "LC1", "", 22.0, "OK")])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "LC1"}, marca="lescent")
+    assert (r.status, r.cmp) == ("ambiguo", None)
+
+
+def test_conflito_barbours_preservado_mesmo_com_gtin(tmp_path):
+    """Dois codigos do mesmo produto com CMPs diferentes: nem GTIN nem a serie mais recente escolhem."""
+    comparativo(tmp_path, [("SP", "10041", "7908787700522", "DEO BD SPL DELIGHT", [8, 8, 8], 8),
+                           ("SP", "BB02027", "", "DEO BD SPL MY SWEET DELIGHT 200ML", [0, 0, 9], 9)], nome=NOME_BB)
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "10041", "sku_canonico": "BB02027"},
+                 "7908787700522 - Body Splash My Sweet Delight 200ml", "barbours")
+    assert (r.status, r.cmp, r.nivel) == ("conflito", None, "")
+    assert {(e, s, c) for e, s, c, _ in r.candidatos} == {("BB_VAREJO", "10041", Decimal("8")),
+                                                          ("BB_VAREJO", "BB02027", Decimal("9"))}
+    # Antes da serie nova existir (maio), o codigo exato e' unico e pode ser usado.
+    antes = resolver(ind, {"codigo_sku": "10041", "sku_canonico": "BB02027"},
+                     "7908787700522 - Body Splash My Sweet Delight 200ml", "barbours", comp=MAI)
+    assert (antes.status, antes.cmp, antes.nivel) == ("coberto", Decimal("8"), T.NIVEL_GTIN)
 
 
 def test_volume_divergente_descarta_e_concordante_e_evidencia_fraca(tmp_path):
     comparativo(tmp_path, [("SP", "20322", "", "SHAMPOO CCH 1000 ML", [5, 5, 5], 5),
                            ("SP", "20323", "", "SHAMPOO CCH 300 ML", [4, 4, 4], 4)])
     _, ind = ler_pasta(tmp_path)
-    diverge = T.resolver(ind, {"codigo_sku": "20322"}, JUL, "por_competencia", "Shampoo Cachos 300 ml")
-    assert diverge.status == "evidencia_diverge"
-    ok = T.resolver(ind, {"codigo_sku": "20323"}, JUL, "por_competencia", "Shampoo Cachos 300ml")
-    assert (ok.status, ok.evidencia) == ("coberto", T.EVID_VOLUME)
+    assert resolver(ind, {"codigo_sku": "20322"}, "Shampoo Cachos 300 ml", gtin=False).status == "evidencia_diverge"
+    ok = resolver(ind, {"codigo_sku": "20323"}, "Shampoo Cachos 300ml")
+    assert (ok.status, ok.nivel) == ("coberto", T.NIVEL_VOLUME)
+
+
+def test_via_gtin_unico_com_volume_compativel(tmp_path):
+    comparativo(tmp_path, [("SP", "7898652877919", "7898652877919", "SHAMPOO CCH NUTRITIVO 300ML", [6, 6, 6], 6)])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "20688", "sku_canonico": "AP01102"},
+                 "7898652877919 - (N) Shampoo Cachos Nutritivo 300ml - H1")
+    assert (r.status, r.nivel, r.cmp, r.entidades) == ("coberto", T.NIVEL_VIA_GTIN, Decimal("6"), ("AP_COSMETICS",))
+
+
+def test_via_gtin_exige_volume_que_afaste_reuso(tmp_path):
+    comparativo(tmp_path, [("SP", "X1", "7898652877919", "SHAMPOO CCH NUTRITIVO", [6, 6, 6], 6)])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "20688"}, "7898652877919 - Shampoo Cachos 300ml")
+    assert r.status == "sem_cmp" and "gtin_sem_volume_para_afastar_reuso" in r.motivo
+    r = resolver(ind, {"codigo_sku": "20688"}, "7898652877919 - Shampoo Cachos 1L")
+    assert r.status == "sem_cmp"
+
+
+def test_via_gtin_reutilizado_com_volume_divergente_fica_sem_casamento(tmp_path):
+    """Mesmo EAN em 60 e 180 caps (medido na Rituaria): nenhuma das duas linhas vale."""
+    comparativo(tmp_path, [("SP", "10330/1", "7908407007796", "FORMULA 4 MAG 60 CAPS", [11, 11, 11], 11),
+                           ("SP", "10369/1", "7908407007796", "FORMULA 4 MAG 180 CAPS", [27, 27, 27], 27)],
+                nome="Comparativo_MesAMes_MAGA_COMERCIO_Consolidado_01012025_31072026.xlsx")
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "MKP4MAG"}, "7908407007796 Formula 4mag 60 caps", "rituaria")
+    assert r.status == "sem_cmp" and "gtin_reutilizado_volume_incompativel" in r.motivo
+
+
+def test_via_gtin_ambiguo_fica_sem_casamento(tmp_path):
+    comparativo(tmp_path, [("SP", "A1", "7898652877919", "SHAMPOO 300ML", [6, 6, 6], 6),
+                           ("SP", "A2", "7898652877919", "SHAMPOO 300 ML", [6, 6, 6], 6)])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "20688"}, "7898652877919 - Shampoo 300ml")
+    assert r.status == "sem_cmp" and "gtin_ambiguo" in r.motivo
+    # Venda com dois GTINs validos diferentes tambem e' ambigua.
+    r = resolver(ind, {"codigo_sku": "20688"}, "7898652877919 / 7908787700522 Shampoo 300ml")
+    assert r.status == "sem_cmp" and "gtin_venda_ambiguo" in r.motivo
+
+
+def test_codigo_exato_prevalece_sobre_gtin(tmp_path):
+    comparativo(tmp_path, [("SP", "20688", "", "SHAMPOO", [5, 5, 5], 5),
+                           ("SP", "B9", "7898652877919", "SHAMPOO 300ML", [7, 7, 7], 7)])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "20688"}, "7898652877919 - Shampoo 300ml")
+    assert (r.status, r.cmp, r.nivel) == ("coberto", Decimal("5"), T.NIVEL_PROVISORIO)
+
+
+def test_via_gtin_nao_resolve_conflito(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [5, 5, 5], 5), ("SP", "C2", "", "X", [6, 6, 6], 6),
+                           ("SP", "B9", "7898652877919", "SHAMPOO 300ML", [7, 7, 7], 7)])
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": "C1", "sku_canonico": "C2"}, "7898652877919 - Shampoo 300ml")
+    assert (r.status, r.cmp) == ("conflito", None)
+
+
+@pytest.mark.parametrize("codigo, canonico", [("KS03041", "KS03041"), ("KS03042", "KS03011")])
+def test_ks03041_e_ks03042_seguem_sem_cmp(tmp_path, codigo, canonico):
+    """Mesmo com codigo e GTIN casando na KOKESHI SP, a origem precisa ser confirmada."""
+    comparativo(tmp_path, [("SP", codigo, "7908790700687", "SERUM 10ML", [4, 4, 4], 4),
+                           ("SP", canonico, "", "X", [4, 4, 4], 4)], nome=NOME_KOK)
+    _, ind = ler_pasta(tmp_path)
+    r = resolver(ind, {"codigo_sku": codigo, "sku_canonico": canonico}, "7908790700687-SERUM 10ML", "kokeshi")
+    assert (r.status, r.cmp) == ("origem_a_confirmar", None)
+    a = T.analisar(ind, T.Catalogo(), [venda(codigo, canonico, marca="kokeshi", produto="7908790700687-SERUM 10ML")])
+    s = a["shadow"][0]
+    assert s["custo_cmp_coberto"] == 0 and s["pct_receita_origem_a_confirmar"] == Decimal("100.00")
 
 
 def test_kit_sem_regra_nunca_entra_no_shadow(tmp_path):
@@ -400,14 +532,14 @@ def test_kit_sem_regra_nunca_entra_no_shadow(tmp_path):
     s = a["shadow"][0]
     assert s["skus_por_status"] == {"kit_sem_regra": 1}
     assert s["receita_coberta"] == 0 and s["custo_cmp_coberto"] == 0
-    assert s["pct_receita_nao_comparavel"] == Decimal("100.00")
+    assert s["pct_receita_kit_sem_regra"] == Decimal("100.00")
     # As duas leituras existem e foram medidas — e nenhuma foi escolhida.
     assert a["kits"]["ambas_leituras_disponiveis"] == 1
 
 
 def test_codigo_de_kit_de_outra_marca_nao_torna_o_produto_kit(tmp_path):
     """Medido: `20008` e' kit Barbours no cadastro e hidratante Kokeshi na venda."""
-    comparativo(tmp_path, [("SP", "20008", "", "CREME 30G", [4, 4, 4], 4)])
+    comparativo(tmp_path, [("SP", "20008", "", "CREME 30G", [4, 4, 4], 4)], nome=NOME_KOK)
     _, ind = ler_pasta(tmp_path)
     cat = T.montar_catalogo([{"marca": "Barbours", "sku": "KBB99045", "sku_antigo": "20008", "tipo": "KT",
                               "gtin_ean": None}], [])
@@ -415,20 +547,25 @@ def test_codigo_de_kit_de_outra_marca_nao_torna_o_produto_kit(tmp_path):
     assert a["shadow"][0]["skus_por_status"] == {"coberto": 1}
 
 
-def test_shadow_margem_bruta_apos_cmp(tmp_path):
+def test_shadow_margem_bruta_apos_cmp_e_carry_forward(tmp_path):
     comparativo(tmp_path, [("SP", "A1", "7898652874765", "COND 500g", [2, 2, 3], 3)])
     _, ind = ler_pasta(tmp_path)
     a = T.analisar(ind, T.Catalogo(), [
         venda("A1", "", produto="7898652874765 - Creme 500g", qtd=10, receita=100),
         venda("SEMCMP", "", qtd=5, receita=50),
+        venda("A1", "", produto="7898652874765 - Creme 500g", qtd=1, receita=10, comp=AGO),
     ])
-    s = a["shadow"][0]
-    assert s["custo_cmp_coberto"] == Decimal("30")            # 10 x CMP de julho (3), nao o de junho
-    assert s["margem_bruta_apos_cmp"] == Decimal("70")
-    assert s["receita_coberta_gtin"] == Decimal("100")
-    assert s["pct_receita_coberta"] == Decimal("66.67")
-    assert s["pct_receita_sem_cmp"] == Decimal("33.33")
-    assert not any("liquida" in k or "contribuicao" in k for k in s)
+    jul, ago = a["shadow"]
+    assert jul["custo_cmp_coberto"] == Decimal("30")            # 10 x CMP de julho (3), nao o de junho
+    assert jul["margem_bruta_apos_cmp"] == Decimal("70")
+    assert jul["receita_confirmada_gtin"] == Decimal("100")
+    assert jul["pct_receita_coberta"] == Decimal("66.67") and jul["pct_receita_sem_cmp"] == Decimal("33.33")
+    assert jul["pct_receita_carry_forward"] == Decimal("0.00")
+    assert ago["custo_cmp_coberto"] == Decimal("3") and ago["pct_receita_carry_forward"] == Decimal("100.00")
+    det = [d for d in a["detalhe"] if d["competencia"] == "2026-08-01"][0]
+    assert (det["competencia_origem"], det["competencia_usada"], det["carry_forward"]) == (
+        "2026-07-01", "2026-08-01", True)
+    assert not any("liquida" in k or "contribuicao" in k for k in jul)
 
 
 def test_resumo_publico_nao_carrega_valores_monetarios(tmp_path):
@@ -436,5 +573,5 @@ def test_resumo_publico_nao_carrega_valores_monetarios(tmp_path):
     _, ind = ler_pasta(tmp_path)
     pub = T.resumo_publico(T.analisar(ind, T.Catalogo(), [venda("A1", "")]))
     texto = json.dumps(pub, default=str)
-    for proibido in ("receita_fiscal_total", "custo_cmp", "margem", '"cmp"'):
+    for proibido in ("receita_fiscal_total", "custo_cmp", "margem", '"cmp"', "receita_confirmada"):
         assert proibido not in texto

@@ -471,6 +471,7 @@ class Indice:
     descricoes: dict = field(default_factory=lambda: defaultdict(set))
     gtins: dict = field(default_factory=lambda: defaultdict(set))
     corte: dict = field(default_factory=dict)          # entidade -> mes de corte
+    fotografia: set = field(default_factory=set)       # entidades cuja fonte e' fotografia unica
     por_sku: dict = field(default_factory=lambda: defaultdict(set))  # sku -> {(entidade, filial)}
 
     def chaves(self) -> set:
@@ -481,6 +482,8 @@ def construir_indice(leituras: list[Leitura]) -> Indice:
     ind = Indice()
     for le in leituras:
         ind.corte[le.fonte.entidade] = le.fonte.corte
+        if le.fonte.layout == "lcv":
+            ind.fotografia.add(le.fonte.entidade)
         for ln in le.linhas:
             k = (ln.entidade, ln.filial, ln.sku)
             if ln.regime == REGIME_MENSAL:
@@ -602,6 +605,45 @@ def cmp_alternativa(ind: Indice, chave: tuple, comp: date, alternativa: str) -> 
     if len(vals) > 1:
         return "conflito", None
     return "ok", next(iter(vals))
+
+
+#: Regra decidida em 13/10/2026 (DRE-CMP-SKU-2): alternativa 3.
+ALTERNATIVA_DECIDIDA = "entidade_vigencia"
+
+
+@dataclass(frozen=True)
+class Vigencia:
+    """CMP vigente de uma chave numa competencia, com a procedencia temporal.
+
+    `competencia_origem` e' o ultimo mes que a FONTE declara ate `competencia_usada`.
+    `carry_forward` = o valor esta sendo usado num mes que a fonte nao declara
+    (depois do corte da serie, ou depois do mes de uma fotografia).
+    """
+    estado: str                              # ok | ausente | conflito
+    cmp: Optional[Decimal] = None
+    competencia_origem: Optional[date] = None
+    competencia_usada: Optional[date] = None
+    carry_forward: bool = False
+    fotografia: bool = False
+
+
+def cmp_vigente(ind: Indice, chave: tuple, comp: date) -> Vigencia:
+    """Alternativa 3 — entidade x vigencia.
+
+    O CMP vale a partir da competencia em que aparece e segue vigente ate nova
+    entrada da mesma entidade/filial/SKU. Nunca retroage antes da 1a entrada e
+    nunca usa `Custo Atual` (que e' a fotografia do corte, nao uma entrada).
+    """
+    serie = ind.mensal.get(chave, {})
+    anteriores = [c for c in serie if c <= comp]
+    if not anteriores:
+        return Vigencia("ausente", competencia_usada=comp)
+    origem = max(anteriores)
+    vals = serie[origem]
+    foto = chave[0] in ind.fotografia
+    if len(vals) > 1:
+        return Vigencia("conflito", None, origem, comp, origem < comp, foto)
+    return Vigencia("ok", next(iter(vals)), origem, comp, origem < comp, foto)
 
 
 def analise_temporal(leituras: list[Leitura], ind: Indice, grade: list[date]) -> dict:

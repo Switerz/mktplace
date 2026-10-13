@@ -1,4 +1,4 @@
-"""DRE-CMP-SKU-1 — cobertura do CMP sobre as vendas da Torre e shadow de margem por produto.
+"""DRE-CMP-SKU-1/2 — cobertura do CMP sobre as vendas da Torre e shadow de margem por produto.
 
 SOMENTE ESTUDO. Le o Data Mart em transacao READ ONLY, cruza com o indice de
 CMP de `pipelines.dre.cmp_sku` e devolve agregados. Nada e' publicado em API
@@ -12,25 +12,34 @@ produto, nao o GMV da Torre. Atribuicao de plataforma: reconcilia com a Torre
 no TikTok e NAO reconcilia em ML/Shopee (`docs/margem_real_1_diagnostico.md`
 §4.2) — o recorte por canal desses dois e' indicativo.
 
-CASAMENTO
----------
-So' por igualdade exata de codigo (`codigo_sku` ou `sku_canonico` da venda
-contra o `Cod. Proprio`/`Produto` da planilha). Cada via e' registrada.
+TEMPORALIDADE (decidida em 13/10/2026)
+--------------------------------------
+Alternativa 3, entidade x vigencia (`cmp_sku.cmp_vigente`): o CMP vale a partir
+da competencia em que aparece, segue vigente ate nova entrada, nunca retroage
+e nunca usa `Custo Atual`. Cada casamento registra competencia de origem,
+competencia usada, carry-forward e se a origem e' uma fotografia.
 
-Codigo igual NAO prova produto igual: os codigos numericos sao de ERPs
-diferentes e colidem entre marcas (medido: `10005` de uma venda Lescent e' um
-condicionador Barbours na BB VAREJO). Por isso cada candidato passa por duas
-evidencias independentes:
+CASAMENTO (decidido em 13/10/2026)
+----------------------------------
+Escopo: so' entidades da marca da venda (`ENTIDADES_POR_MARCA`) e filial SP.
+Codigo igual NAO prova produto igual — os codigos numericos colidem entre ERPs
+e marcas — entao cada candidato passa por GTIN e por volume declarado;
+evidencia DIVERGENTE descarta o candidato.
 
-  * GTIN — EAN-13 valido da venda (prefixo do nome ou cadastro) contra o GTIN
-    da planilha (coluna ou prefixo da descricao);
-  * volume declarado (ml, g, caps...) dos dois nomes.
+1. Codigo exato (`codigo_sku` ou `sku_canonico`), com prioridade:
+   * candidatos validos com CMP diferente => `conflito`. Nada escolhe entre eles:
+     nem GTIN, nem alias, nem media, minimo, maximo ou o mais recente;
+   * GTIN concorda => `CODIGO_EXATO_GTIN`; so' volume concorda =>
+     `CODIGO_EXATO_VOLUME`;
+   * sem evidencia nenhuma, um UNICO candidato => `CODIGO_EXATO_PROVISORIO`
+     (baixa confianca); mais de um => `ambiguo`.
+2. Via GTIN — so' se o codigo nao achou candidato valido: GTIN valido e unico
+   na venda, candidato unico no escopo com CMP vigente, volume CONCORDANTE e o
+   GTIN sem reuso entre volumes incompativeis. Qualquer falta deixa sem
+   casamento, com o motivo registrado. Nunca resolve conflito.
 
-Candidato com evidencia DIVERGENTE e' descartado. Os demais recebem o nivel
-da evidencia mais forte que concorda: `GTIN` (forte), `VOLUME` (fraca: linhas
-inteiras de produto tem o mesmo volume) ou `INDETERMINADO`. Se os candidatos
-restantes devolvem CMP diferentes, o SKU fica `conflito` — nenhuma precedencia
-e' escolhida. O shadow sai em dois niveis: so' GTIN, e todos os aceitos.
+`KS03041`/`KS03042` (Kokeshi) ficam `origem_a_confirmar`: a origem empresarial
+desses SKUs nao e' conhecida e nenhuma outra filial/entidade e' buscada.
 
 Kits nunca entram no shadow: sem regra aprovada, nao se escolhe entre o CMP do
 proprio kit e a soma dos componentes. Os dois sao apenas medidos.
@@ -54,12 +63,33 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from pipelines.dre.cmp_sku import ALTERNATIVAS, Indice, chave_sku, cmp_alternativa
+from pipelines.dre.cmp_sku import Indice, Vigencia, chave_sku, cmp_vigente
 
 PLATAFORMAS = ("tiktokshop", "mercadolivre", "shopee")
-#: Alternativa temporal usada no shadow. Nao e' decisao: as tres sao medidas e
-#: a diferenca entre elas aparece no relatorio.
-ALTERNATIVA_SHADOW = "por_competencia"
+
+#: [ASSUNCAO a ratificar] Entidades em que cada marca e' vendida, segundo a
+#: auditoria das planilhas de 13/10/2026 (Lescent em AP/BB, Apice em AP/Kokeshi)
+#: mais o CMV-LCV, cujos codigos `LC...` sao Lescent. Fora daqui, nenhum
+#: candidato e' considerado.
+ENTIDADES_POR_MARCA = {
+    "apice": ("AP_COSMETICS", "KOKESHI"),
+    "barbours": ("BB_VAREJO",),
+    "kokeshi": ("KOKESHI",),
+    "lescent": ("AP_COSMETICS", "BB_VAREJO", "LCV"),
+    "rituaria": ("MAGA_COMERCIO",),
+}
+FILIAIS_SP = frozenset({"SP", "0301"})
+
+#: Decisao de 13/10/2026: sem CMP ate a origem empresarial ser confirmada.
+ORIGEM_A_CONFIRMAR = frozenset({("kokeshi", "KS03041"), ("kokeshi", "KS03042")})
+
+NIVEL_GTIN = "CODIGO_EXATO_GTIN"
+NIVEL_VOLUME = "CODIGO_EXATO_VOLUME"
+NIVEL_PROVISORIO = "CODIGO_EXATO_PROVISORIO"
+NIVEL_VIA_GTIN = "VIA_GTIN"
+NIVEIS = (NIVEL_GTIN, NIVEL_VIA_GTIN, NIVEL_VOLUME, NIVEL_PROVISORIO)
+#: Os dois niveis confirmados por GTIN; nunca misturados com o provisorio.
+NIVEIS_GTIN = (NIVEL_GTIN, NIVEL_VIA_GTIN)
 
 #: MARGEM-REAL-1 §4.2, jul+ago/2026: receita fiscal / GMV servido.
 ATRIBUICAO_CANAL = {
@@ -102,9 +132,6 @@ RE_TAMANHO = re.compile(r"(\d+(?:[.,]\d+)?)\s*(ml|l|g|kg|mg|caps|cps|c[aá]psula
 RE_EAN13 = re.compile(r"(?<!\d)(\d{13})(?!\d)")
 
 CONCORDA, DIVERGE, INDETERMINADO = "CONCORDA", "DIVERGE", "INDETERMINADO"
-EVID_GTIN, EVID_VOLUME = "GTIN", "VOLUME"
-#: Forca da evidencia: a resolucao herda a mais forte entre os candidatos aceitos.
-FORCA = {EVID_GTIN: 2, EVID_VOLUME: 1, INDETERMINADO: 0}
 
 
 class TorreIndisponivel(RuntimeError):
@@ -159,15 +186,41 @@ def comparar_tamanho(a: Optional[str], b: Optional[str]) -> str:
     return comparar(tamanhos(a), tamanhos(b))
 
 
-# ---------------------------------------------------------------------------
-# Catalogo e resolucao
-# ---------------------------------------------------------------------------
-
 def chave_marca(valor: Optional[str]) -> str:
     """`Rituária` -> `rituaria`, `By Samia` -> `bysamia`: o grao de marca da Torre."""
     sem_acento = unicodedata.normalize("NFKD", valor or "").encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]", "", sem_acento.lower())
 
+
+def gtins_da_chave(ind: Indice, k: tuple) -> set:
+    return gtins(*ind.descricoes.get(k, set()), *ind.gtins.get(k, set()))
+
+
+def volumes_da_chave(ind: Indice, k: tuple) -> set:
+    out = set()
+    for d in ind.descricoes.get(k, set()):
+        out |= tamanhos(d)
+    return out
+
+
+def indice_gtin(ind: Indice) -> dict:
+    """GTIN -> chaves (entidade, filial, sku) que o declaram (coluna ou descricao)."""
+    out: dict = defaultdict(set)
+    for k in ind.chaves():
+        for g in gtins_da_chave(ind, k):
+            out[g].add(k)
+    return out
+
+
+def gtin_reutilizado(ind: Indice, chaves: set) -> bool:
+    """Mesmo GTIN em chaves com volumes declarados incompativeis (EAN reaproveitado)."""
+    vols = [v for v in (volumes_da_chave(ind, k) for k in chaves) if v]
+    return any(not (a & b) for i, a in enumerate(vols) for b in vols[i + 1:])
+
+
+# ---------------------------------------------------------------------------
+# Catalogo
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Catalogo:
@@ -212,15 +265,21 @@ def classificar_tipo(cat: Catalogo, marca: str, codigos: list[str]) -> str:
     return "desconhecido"
 
 
+# ---------------------------------------------------------------------------
+# Resolucao
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Resolucao:
-    status: str                       # coberto | sem_cmp | conflito | evidencia_diverge | kit_sem_regra
+    status: str          # coberto | conflito | ambiguo | evidencia_diverge | sem_cmp | origem_a_confirmar | kit_sem_regra
     cmp: Optional[Decimal] = None
+    nivel: str = ""      # um de NIVEIS, so' em `coberto`
     metodos: tuple = ()
     entidades: tuple = ()
-    evidencia: str = ""               # GTIN | VOLUME | INDETERMINADO (so' em `coberto`)
-    descartados: int = 0              # candidatos descartados por evidencia divergente
-    candidatos_por_alias: bool = False
+    descartados: int = 0
+    motivo: str = ""     # por que ficou sem casamento (inclui a tentativa pela via GTIN)
+    vigencia: Optional[Vigencia] = None
+    candidatos: tuple = ()  # (entidade, sku, cmp, competencia_origem) — para o de-para de conflitos
 
 
 def gtins_da_venda(cat: Optional[Catalogo], marca: str, produto: Optional[str], codigos: dict) -> set:
@@ -231,62 +290,127 @@ def gtins_da_venda(cat: Optional[Catalogo], marca: str, produto: Optional[str], 
     return g
 
 
-def resolver(ind: Indice, codigos: dict, comp: date, alternativa: str, produto: Optional[str],
-             cat: Optional[Catalogo] = None, marca: str = "") -> Resolucao:
-    """CMP inequivoco de uma venda, ou o motivo de nao haver."""
-    g_venda = gtins_da_venda(cat, marca, produto, codigos)
-    aceitos, descartados, conflito_fonte = [], 0, False
+def _no_escopo(marca: str, k: tuple) -> bool:
+    return k[0] in ENTIDADES_POR_MARCA.get(chave_marca(marca), ()) and k[1] in FILIAIS_SP
+
+
+def _vigencia_resumo(vigs: list[Vigencia]) -> Vigencia:
+    """Uma vigencia por resolucao: a mais antiga origem declarada, carry-forward se algum carregou."""
+    v0 = min(vigs, key=lambda v: v.competencia_origem)
+    return Vigencia("ok", v0.cmp, v0.competencia_origem, v0.competencia_usada,
+                    any(v.carry_forward for v in vigs), any(v.fotografia for v in vigs))
+
+
+def resolver_codigo(ind: Indice, codigos: dict, comp: date, produto: Optional[str], marca: str,
+                    g_venda: set) -> Resolucao:
+    """Via 1: codigo exato no escopo da marca, com a vigencia da alternativa 3."""
+    vistos: dict = defaultdict(set)
     for metodo, cod in codigos.items():
         cod = chave_sku(cod)
-        if not cod:
+        for ent, fil in ind.por_sku.get(cod, ()) if cod else ():
+            if _no_escopo(marca, (ent, fil, cod)):
+                vistos[(ent, fil, cod)].add(metodo)
+    validos, descartados, conflito_fonte = [], 0, False
+    for k, metodos in sorted(vistos.items()):
+        vg = cmp_vigente(ind, k, comp)
+        if vg.estado == "conflito":
+            conflito_fonte = True
             continue
-        for ent, fil in sorted(ind.por_sku.get(cod, ())):
-            k = (ent, fil, cod)
-            estado, valor = cmp_alternativa(ind, k, comp, alternativa)
-            if estado == "conflito":
-                conflito_fonte = True
-            if estado != "ok":
-                continue
-            descricoes = ind.descricoes.get(k, set())
-            ev_gtin = comparar(g_venda, gtins(*descricoes, *ind.gtins.get(k, set())))
-            tams = {comparar_tamanho(produto, d) for d in descricoes} or {INDETERMINADO}
-            ev_tam = DIVERGE if DIVERGE in tams else (CONCORDA if CONCORDA in tams else INDETERMINADO)
-            if DIVERGE in (ev_gtin, ev_tam):
-                descartados += 1
-                continue
-            ev = EVID_GTIN if ev_gtin == CONCORDA else (EVID_VOLUME if ev_tam == CONCORDA else INDETERMINADO)
-            aceitos.append((metodo, ent, valor, ev))
+        if vg.estado != "ok":
+            continue
+        ev_gtin = comparar(g_venda, gtins_da_chave(ind, k))
+        tams = {comparar_tamanho(produto, d) for d in ind.descricoes.get(k, set())} or {INDETERMINADO}
+        ev_tam = DIVERGE if DIVERGE in tams else (CONCORDA if CONCORDA in tams else INDETERMINADO)
+        if DIVERGE in (ev_gtin, ev_tam):
+            descartados += 1
+            continue
+        validos.append((k, metodos, vg, ev_gtin, ev_tam))
+    cands = tuple((k[0], k[2], vg.cmp, vg.competencia_origem) for k, _, vg, _, _ in validos)
     if conflito_fonte:
-        return Resolucao("conflito", descartados=descartados)
-    if not aceitos:
-        if descartados:
-            return Resolucao("evidencia_diverge", descartados=descartados)
-        alias = False
-        if cat is not None:
-            for cod in codigos.values():
-                for a in cat.alias.get((chave_marca(marca), chave_sku(cod)), ()):
-                    if any(cmp_alternativa(ind, (e, f, a), comp, alternativa)[0] == "ok"
-                           for e, f in ind.por_sku.get(a, ())):
-                        alias = True
-        return Resolucao("sem_cmp", candidatos_por_alias=alias)
-    valores = {v for _, _, v, _ in aceitos}
-    metodos = tuple(sorted({m for m, _, _, _ in aceitos}))
-    entidades = tuple(sorted({e for _, e, _, _ in aceitos}))
-    if len(valores) > 1:
-        return Resolucao("conflito", metodos=metodos, entidades=entidades, descartados=descartados)
-    ev = max((e for *_, e in aceitos), key=FORCA.__getitem__)
-    return Resolucao("coberto", next(iter(valores)), metodos, entidades, ev, descartados)
+        return Resolucao("conflito", descartados=descartados, motivo="cmp_conflitante_na_fonte", candidatos=cands)
+    if not validos:
+        return Resolucao("evidencia_diverge" if descartados else "sem_cmp", descartados=descartados,
+                         motivo="candidato_codigo_descartado" if descartados else "sem_candidato_codigo")
+    metodos = tuple(sorted({m for _, ms, _, _, _ in validos for m in ms}))
+    entidades = tuple(sorted({k[0] for k, *_ in validos}))
+    if len({vg.cmp for _, _, vg, _, _ in validos}) > 1:
+        return Resolucao("conflito", metodos=metodos, entidades=entidades, descartados=descartados,
+                         motivo="candidatos_validos_com_cmp_diferente", candidatos=cands)
+    vig = _vigencia_resumo([vg for _, _, vg, _, _ in validos])
+    if any(eg == CONCORDA for *_, eg, _ in validos):
+        nivel = NIVEL_GTIN
+    elif any(et == CONCORDA for *_, et in validos):
+        nivel = NIVEL_VOLUME
+    elif len(validos) == 1:
+        nivel = NIVEL_PROVISORIO
+    else:
+        return Resolucao("ambiguo", metodos=metodos, entidades=entidades, descartados=descartados,
+                         motivo="mais_de_um_candidato_sem_evidencia", candidatos=cands)
+    return Resolucao("coberto", vig.cmp, nivel, metodos, entidades, descartados, vigencia=vig)
 
 
-def avaliar_kit(ind: Indice, cat: Catalogo, marca: str, codigos: dict, comp: date, alternativa: str) -> dict:
+def resolver_gtin(ind: Indice, idx_gtin: dict, comp: date, produto: Optional[str], marca: str,
+                  g_venda: set) -> tuple[Optional[Resolucao], str]:
+    """Via 2: GTIN. Devolve (resolucao, '') ou (None, motivo da recusa)."""
+    if not g_venda:
+        return None, "gtin_ausente_na_venda"
+    if len(g_venda) > 1:
+        return None, "gtin_venda_ambiguo"
+    g = next(iter(g_venda))
+    todas = idx_gtin.get(g, set())
+    if gtin_reutilizado(ind, todas):
+        return None, "gtin_reutilizado_volume_incompativel"
+    cands = [k for k in sorted(todas) if _no_escopo(marca, k)]
+    if not cands:
+        return None, "gtin_sem_candidato_no_escopo"
+    vigs = [(k, cmp_vigente(ind, k, comp)) for k in cands]
+    if any(vg.estado == "conflito" for _, vg in vigs):
+        return None, "gtin_candidato_em_conflito"
+    oks = [(k, vg) for k, vg in vigs if vg.estado == "ok"]
+    if not oks:
+        return None, "gtin_sem_cmp_vigente"
+    if len(oks) > 1:
+        return None, "gtin_ambiguo"
+    k, vg = oks[0]
+    vol = comparar(tamanhos(produto), volumes_da_chave(ind, k))
+    if vol != CONCORDA:
+        return None, "gtin_volume_divergente" if vol == DIVERGE else "gtin_sem_volume_para_afastar_reuso"
+    return Resolucao("coberto", vg.cmp, NIVEL_VIA_GTIN, ("gtin",), (k[0],), vigencia=vg), ""
+
+
+def origem_a_confirmar(marca: str, codigos: dict) -> bool:
+    m = chave_marca(marca)
+    return any((m, chave_sku(c)) in ORIGEM_A_CONFIRMAR for c in codigos.values())
+
+
+def resolver(ind: Indice, codigos: dict, comp: date, produto: Optional[str], cat: Optional[Catalogo] = None,
+             marca: str = "", idx_gtin: Optional[dict] = None) -> Resolucao:
+    """CMP de uma venda, ou o motivo de nao haver. Codigo exato tem precedencia sobre GTIN."""
+    if origem_a_confirmar(marca, codigos):
+        return Resolucao("origem_a_confirmar", motivo="origem_empresarial_nao_confirmada")
+    g_venda = gtins_da_venda(cat, marca, produto, codigos)
+    r = resolver_codigo(ind, codigos, comp, produto, marca, g_venda)
+    # A via GTIN so' entra quando o codigo nao achou candidato valido. Conflito
+    # e ambiguidade do codigo nunca sao resolvidos por ela.
+    if r.status not in ("sem_cmp", "evidencia_diverge") or idx_gtin is None:
+        return r
+    via, motivo = resolver_gtin(ind, idx_gtin, comp, produto, marca, g_venda)
+    if via is not None:
+        via.descartados = r.descartados
+        return via
+    r.motivo = f"{r.motivo};{motivo}"
+    return r
+
+
+def avaliar_kit(ind: Indice, cat: Catalogo, marca: str, codigos: dict, comp: date) -> dict:
     """Mede as duas leituras possiveis de um kit sem escolher nenhuma."""
     m = chave_marca(marca)
-    proprio = resolver(ind, codigos, comp, alternativa, None, cat, marca)
+    proprio = resolver(ind, codigos, comp, None, cat, marca)
     chaves = {chave_sku(c) for c in codigos.values()} - {""}
     for c in list(chaves):
         chaves |= cat.alias.get((m, c), set())
     comps = next((cat.componentes[(m, k)] for k in sorted(chaves) if (m, k) in cat.componentes), [])
-    com_cmp = sum(resolver(ind, {"componente": cod}, comp, alternativa, None, cat, marca).status == "coberto"
+    com_cmp = sum(resolver(ind, {"componente": cod}, comp, None, cat, marca).status == "coberto"
                   for cod, _qtd in comps)
     return {
         "cmp_proprio": proprio.status == "coberto",
@@ -310,18 +434,17 @@ def _pct(num: Decimal, den: Decimal) -> Optional[Decimal]:
     return (Decimal(100) * num / den).quantize(Decimal("0.01")) if den else None
 
 
-PARES_ALTERNATIVAS = ("por_competencia_vs_ultimo_disponivel", "por_competencia_vs_entidade_vigencia",
-                      "ultimo_disponivel_vs_entidade_vigencia")
+STATUS_NAO_COMPARAVEL = ("conflito", "ambiguo", "evidencia_diverge", "kit_sem_regra", "fora_do_shadow_operacao")
 
 
 def analisar(ind: Indice, cat: Catalogo, vendas: list[dict]) -> dict:
-    """Cobertura, kits, alternativas temporais e shadow por competencia x canal x marca."""
+    """Cobertura por nivel, carry-forward, kits e shadow por competencia x canal x marca."""
+    idx_gtin = indice_gtin(ind)
     celulas: dict = defaultdict(lambda: defaultdict(Decimal))
     contagem: dict = defaultdict(Counter)
-    kits, tipo_status, operacoes = Counter(), Counter(), Counter()
+    kits, tipo_status, operacoes, motivos = Counter(), Counter(), Counter(), Counter()
+    skus_nivel: dict = defaultdict(set)
     detalhe = []
-    mudam = {p: set() for p in PARES_ALTERNATIVAS}
-    por_alt: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(Decimal)))
 
     for v in vendas:
         operacoes[v["tipo_operacao"]] += 1
@@ -329,13 +452,14 @@ def analisar(ind: Indice, cat: Catalogo, vendas: list[dict]) -> dict:
         codigos = {"codigo_sku": v["codigo_sku"], "sku_canonico": v["sku_canonico"]}
         tipo = classificar_tipo(cat, marca, [chave_sku(c) for c in codigos.values() if chave_sku(c)])
         qtd, rec, cf = _d(v["quantidade"]), _d(v["receita"]), v["custo_fiscal"]
+        sku_id = (marca, chave_sku(v["codigo_sku"]), chave_sku(v["sku_canonico"]))
         cel = celulas[(comp, plat, marca)]
         cel["quantidade"] += qtd
         cel["receita"] += rec
         if v["tipo_operacao"] != "normal":
             r = Resolucao("fora_do_shadow_operacao")
         elif tipo == "kit":
-            k = avaliar_kit(ind, cat, marca, codigos, comp, ALTERNATIVA_SHADOW)
+            k = avaliar_kit(ind, cat, marca, codigos, comp)
             kits["kits_vendidos"] += 1
             kits["com_cmp_proprio"] += k["cmp_proprio"]
             kits["com_composicao"] += k["composicao_disponivel"]
@@ -344,43 +468,36 @@ def analisar(ind: Indice, cat: Catalogo, vendas: list[dict]) -> dict:
             kits["nenhuma_leitura"] += not k["cmp_proprio"] and not k["soma_componentes_calculavel"]
             r = Resolucao("kit_sem_regra")
         else:
-            res = {a: resolver(ind, codigos, comp, a, v["produto"], cat, marca) for a in ALTERNATIVAS}
-            sku_id = (comp.isoformat(), marca, chave_sku(v["codigo_sku"]), chave_sku(v["sku_canonico"]))
-            for par in mudam:
-                a, b = par.split("_vs_")
-                if (res[a].status, res[a].cmp) != (res[b].status, res[b].cmp):
-                    mudam[par].add(sku_id)
-            for a, ra in res.items():
-                mes = por_alt[a][comp.isoformat()]
-                if ra.status == "coberto":
-                    mes["custo"] += qtd * ra.cmp
-                    mes["receita_coberta"] += rec
-                mes[f"linhas_{ra.status}"] += 1
-            r = res[ALTERNATIVA_SHADOW]
+            r = resolver(ind, codigos, comp, v["produto"], cat, marca, idx_gtin)
         status = r.status
         tipo_status[(comp.isoformat(), tipo, status)] += 1
         contagem[(comp, plat, marca)][status] += 1
+        skus_nivel[r.nivel or status].add(sku_id)
         cel[f"receita_{status}"] += rec
         cel[f"quantidade_{status}"] += qtd
-        if r.descartados:
-            cel["receita_com_candidato_descartado_por_evidencia"] += rec
+        if r.motivo and status != "coberto":
+            for m in r.motivo.split(";"):
+                motivos[(status, m)] += 1
         if status == "coberto":
-            cel["custo_cmp"] += qtd * r.cmp
+            custo = qtd * r.cmp
+            cel["custo_cmp"] += custo
+            cel[f"receita_{r.nivel}"] += rec
+            cel[f"custo_{r.nivel}"] += custo
             cel["custo_fiscal_fonte_nas_linhas_cobertas"] += _d(cf)
-            cel[f"receita_evidencia_{r.evidencia}"] += rec
-            if r.evidencia == EVID_GTIN:
-                cel["custo_cmp_gtin"] += qtd * r.cmp
-            for m in r.metodos:
-                cel[f"receita_via_{m}"] += rec
-            if len(r.entidades) > 1:
-                cel["receita_cmp_igual_em_mais_de_uma_entidade"] += rec
-        if status == "sem_cmp" and r.candidatos_por_alias:
-            cel["receita_sem_cmp_mas_alias_do_cadastro_tem_cmp"] += rec
+            if r.vigencia.carry_forward:
+                cel["receita_carry_forward"] += rec
+                if r.vigencia.fotografia:
+                    cel["receita_fotografia_carregada"] += rec
         detalhe.append({
             "competencia": comp.isoformat(), "marca": marca, "plataforma": plat, "tipo_operacao": v["tipo_operacao"],
             "codigo_sku": v["codigo_sku"], "sku_canonico": v["sku_canonico"], "produto": v["produto"],
-            "tipo": tipo, "status": status, "evidencia": r.evidencia, "descartados": r.descartados,
+            "tipo": tipo, "status": status, "nivel": r.nivel, "motivo": r.motivo, "descartados": r.descartados,
             "metodos": "|".join(r.metodos), "entidades": "|".join(r.entidades),
+            "competencia_origem": r.vigencia.competencia_origem.isoformat() if r.vigencia else "",
+            "competencia_usada": comp.isoformat() if r.vigencia else "",
+            "carry_forward": r.vigencia.carry_forward if r.vigencia else "",
+            "fotografia": r.vigencia.fotografia if r.vigencia else "",
+            "candidatos": "|".join(f"{e}:{s}:{c}:{o:%Y-%m}" for e, s, c, o in r.candidatos),
             "quantidade": str(qtd), "receita": str(rec),
             "cmp": str(r.cmp) if r.cmp is not None else "",
             "custo_cmp": str(qtd * r.cmp) if r.cmp is not None else "",
@@ -389,53 +506,60 @@ def analisar(ind: Indice, cat: Catalogo, vendas: list[dict]) -> dict:
 
     shadow = []
     for (comp, plat, marca), cel in sorted(celulas.items()):
-        rec_cob, rec_gtin = cel["receita_coberto"], cel[f"receita_evidencia_{EVID_GTIN}"]
-        nao_comp = (cel["receita_kit_sem_regra"] + cel["receita_conflito"] + cel["receita_evidencia_diverge"]
-                    + cel["receita_fora_do_shadow_operacao"])
-        shadow.append({
+        tot = cel["receita"]
+        rec_cob = cel["receita_coberto"]
+        rec_gtin = sum((cel[f"receita_{n}"] for n in NIVEIS_GTIN), Decimal(0))
+        custo_gtin = sum((cel[f"custo_{n}"] for n in NIVEIS_GTIN), Decimal(0))
+        linha = {
             "competencia": comp.isoformat(), "plataforma": plat, "marca": marca,
             "atribuicao_canal": ATRIBUICAO_CANAL.get(plat, ""),
-            "quantidade_total": cel["quantidade"], "receita_fiscal_total": cel["receita"],
-            # Nivel 1: so' casamentos confirmados por GTIN.
-            "receita_coberta_gtin": rec_gtin,
-            "custo_cmp_gtin": cel["custo_cmp_gtin"],
-            "margem_bruta_apos_cmp_gtin": rec_gtin - cel["custo_cmp_gtin"],
-            "pct_margem_bruta_apos_cmp_gtin": _pct(rec_gtin - cel["custo_cmp_gtin"], rec_gtin),
-            "pct_receita_coberta_gtin": _pct(rec_gtin, cel["receita"]),
-            # Nivel 2: todos os aceitos (GTIN + VOLUME + INDETERMINADO).
+            "quantidade_total": cel["quantidade"], "receita_fiscal_total": tot,
             "quantidade_coberta": cel["quantidade_coberto"], "receita_coberta": rec_cob,
             "custo_cmp_coberto": cel["custo_cmp"],
             "margem_bruta_apos_cmp": rec_cob - cel["custo_cmp"],
             "pct_margem_bruta_apos_cmp": _pct(rec_cob - cel["custo_cmp"], rec_cob),
-            "pct_receita_coberta": _pct(rec_cob, cel["receita"]),
-            "pct_receita_sem_cmp": _pct(cel["receita_sem_cmp"], cel["receita"]),
-            "pct_receita_nao_comparavel": _pct(nao_comp, cel["receita"]),
+            # Confirmado por GTIN (codigo+GTIN e via GTIN); o provisorio nunca entra aqui.
+            "receita_confirmada_gtin": rec_gtin, "custo_cmp_confirmado_gtin": custo_gtin,
+            "margem_bruta_apos_cmp_confirmada_gtin": rec_gtin - custo_gtin,
+            "pct_margem_bruta_apos_cmp_confirmada_gtin": _pct(rec_gtin - custo_gtin, rec_gtin),
+            "pct_receita_coberta": _pct(rec_cob, tot),
+            "pct_receita_carry_forward": _pct(cel["receita_carry_forward"], tot),
+            "pct_receita_fotografia_carregada": _pct(cel["receita_fotografia_carregada"], tot),
+            "pct_receita_sem_cmp": _pct(cel["receita_sem_cmp"], tot),
+            "pct_receita_origem_a_confirmar": _pct(cel["receita_origem_a_confirmar"], tot),
             "custo_fiscal_fonte_nas_linhas_cobertas": cel["custo_fiscal_fonte_nas_linhas_cobertas"],
-            "componentes_receita": {k: v for k, v in cel.items() if k.startswith("receita_")},
+            "componentes_receita": {k: val for k, val in cel.items() if k.startswith("receita_")},
             "skus_por_status": dict(contagem[(comp, plat, marca)]),
             "custos_variaveis_ausentes_por_sku": CUSTOS_AUSENTES_POR_SKU.get(plat, []),
-        })
+        }
+        for n in NIVEIS:
+            linha[f"pct_receita_{n}"] = _pct(cel[f"receita_{n}"], tot)
+        for s in STATUS_NAO_COMPARAVEL:
+            linha[f"pct_receita_{s}"] = _pct(cel[f"receita_{s}"], tot)
+        shadow.append(linha)
     return {
         "shadow": shadow,
         "detalhe": detalhe,
         "kits": dict(kits),
         "tipo_x_status": {"|".join(k): n for k, n in sorted(tipo_status.items())},
         "tipo_operacao": dict(operacoes),
-        "alternativas": {
-            "competencia_x_sku_que_mudam": {k: len(s) for k, s in mudam.items()},
-            "por_alternativa_e_mes": {a: {m: dict(x) for m, x in sorted(meses.items())}
-                                      for a, meses in por_alt.items()},
-        },
+        "motivos_sem_casamento": {"|".join(k): n for k, n in sorted(motivos.items())},
+        "skus_distintos_por_nivel_ou_status": {k: len(s) for k, s in sorted(skus_nivel.items())},
     }
+
+
+CAMPOS_PUBLICOS = ("competencia", "plataforma", "marca", "pct_receita_coberta",
+                   *(f"pct_receita_{n}" for n in NIVEIS), "pct_receita_carry_forward",
+                   "pct_receita_fotografia_carregada", "pct_receita_sem_cmp", "pct_receita_origem_a_confirmar",
+                   *(f"pct_receita_{s}" for s in STATUS_NAO_COMPARAVEL), "skus_por_status")
 
 
 def resumo_publico(analise: dict) -> dict:
     """Percentuais e contagens. Sem R$, sem CMP, sem margem."""
-    campos = ("competencia", "plataforma", "marca", "pct_receita_coberta_gtin", "pct_receita_coberta",
-              "pct_receita_sem_cmp", "pct_receita_nao_comparavel", "skus_por_status")
-    return {"cobertura": [{k: s[k] for k in campos} for s in analise["shadow"]],
+    return {"cobertura": [{k: s[k] for k in CAMPOS_PUBLICOS} for s in analise["shadow"]],
             "kits": analise["kits"],
-            "alternativas_competencia_x_sku_que_mudam": analise["alternativas"]["competencia_x_sku_que_mudam"]}
+            "skus_distintos_por_nivel_ou_status": analise["skus_distintos_por_nivel_ou_status"],
+            "motivos_sem_casamento": analise["motivos_sem_casamento"]}
 
 
 # ---------------------------------------------------------------------------
@@ -492,3 +616,19 @@ def escrever_detalhes(pasta: Path, analise: dict) -> None:
         w = csv.DictWriter(f, fieldnames=list(det[0]))
         w.writeheader()
         w.writerows(det)
+    # Produtos que precisam de de-para temporal: dois candidatos validos com CMP diferente.
+    conflitos: dict = {}
+    for r in det:
+        if r["status"] == "conflito":
+            k = (r["marca"], r["codigo_sku"], r["sku_canonico"])
+            c = conflitos.setdefault(k, {"produto": r["produto"], "competencias": set(), "receita": Decimal(0),
+                                         "candidatos": set()})
+            c["competencias"].add(r["competencia"])
+            c["receita"] += Decimal(r["receita"])
+            c["candidatos"].add(r["candidatos"])
+    with open(pasta / "depara_temporal_necessario.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["marca", "codigo_sku", "sku_canonico", "produto", "competencias", "receita", "candidatos"])
+        for (m, cs, sc), c in sorted(conflitos.items(), key=lambda x: -x[1]["receita"]):
+            w.writerow([m, cs, sc, c["produto"], ",".join(sorted(c["competencias"])), c["receita"],
+                        " || ".join(sorted(x for x in c["candidatos"] if x))])
