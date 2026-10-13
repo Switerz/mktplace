@@ -64,7 +64,7 @@ export default function AttentionQueue({
   return (
     <section
       aria-labelledby="fila-heading"
-      className="bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-4"
+      className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-4"
     >
       <h2 id="fila-heading" className="text-sm font-semibold text-ink-muted">
         Fila de atenção
@@ -172,7 +172,9 @@ export default function AttentionQueue({
                   <span className="min-w-0 flex-1">
                     <span className="block text-xs text-ink-muted leading-snug">{item.message}</span>
                     {(item.source || item.lastDate || item.stalenessDays != null) && (
-                      <span className="block text-xs text-ink-faint tabular-nums">
+                      // `overflow-wrap:anywhere`: o nome da tabela-fonte nao
+                      // tem ponto de quebra e vazava do cartao no mobile.
+                      <span className="block text-xs text-ink-faint tabular-nums [overflow-wrap:anywhere]">
                         {item.source && <>fonte {item.source}</>}
                         {item.lastDate && <> · até {item.lastDate}</>}
                         {item.stalenessDays != null && <> · defasagem {item.stalenessDays}d</>}

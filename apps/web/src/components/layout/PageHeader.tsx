@@ -22,9 +22,22 @@
  * Nao guarda estado: filtros, badge e linha de escopo chegam prontos da pagina,
  * cuja fonte de verdade continua sendo a URL via `useGlobalFilters`.
  */
+import type { LucideIcon } from "lucide-react";
+
 interface Props {
   title: string;
   subtitle: string;
+  /**
+   * UX-TORRE-B2B-1 — icone da rota (o MESMO da sidebar). Opcional: as rotas
+   * ainda nao redesenhadas seguem sem ele, com o cabecalho exatamente igual.
+   */
+  icon?: LucideIcon;
+  /**
+   * UX-TORRE-B2B-1 — selos de escopo a direita (periodo, frescor). Quando
+   * presente substitui `scopeLine` + `status`: o mesmo conteudo, em selos, sem
+   * a linha de texto a mais acima do primeiro numero.
+   */
+  meta?: React.ReactNode;
   /** Escopo do que esta na tela: periodo, fonte, frescor. */
   scopeLine?: React.ReactNode;
   /** Badge de frescor/live. A pagina decide se existe — nunca afirmamos live aqui. */
@@ -33,7 +46,7 @@ interface Props {
   filters?: React.ReactNode;
 }
 
-export default function PageHeader({ title, subtitle, scopeLine, status, filters }: Props) {
+export default function PageHeader({ title, subtitle, icon: Icon, meta, scopeLine, status, filters }: Props) {
   // Fragment de proposito (Gate V2-3, correcao consolidada): cabecalho e barra
   // saem como IRMAOS no fluxo do `PageContainer`.
   //
@@ -52,13 +65,23 @@ export default function PageHeader({ title, subtitle, scopeLine, status, filters
   return (
     <>
       <div className="flex flex-col gap-1">
-        <div className="flex items-start justify-between gap-3 flex-wrap">
-          <div className="min-w-0">
-            <h2 className="text-xl font-bold text-ink">{title}</h2>
-            <p className="text-sm text-ink-muted">{subtitle}</p>
-            {scopeLine && <p className="text-xs text-ink-muted mt-0.5 tabular-nums">{scopeLine}</p>}
+        <div className={`flex justify-between gap-3 flex-wrap ${meta ? "items-center" : "items-start"}`}>
+          <div className="flex min-w-0 items-center gap-3">
+            {Icon && (
+              <span
+                aria-hidden="true"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15"
+              >
+                <Icon className="h-5 w-5" strokeWidth={1.75} />
+              </span>
+            )}
+            <div className="min-w-0">
+              <h2 className="text-xl font-bold text-ink">{title}</h2>
+              <p className="text-sm text-ink-muted">{subtitle}</p>
+              {!meta && scopeLine && <p className="text-xs text-ink-muted mt-0.5 tabular-nums">{scopeLine}</p>}
+            </div>
           </div>
-          {status}
+          {meta ? <div className="flex flex-wrap items-center gap-1.5">{meta}</div> : status}
         </div>
       </div>
 

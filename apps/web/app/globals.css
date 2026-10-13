@@ -70,6 +70,19 @@
     --tc-canal-tiktok: 139 92 246;
     --tc-canal-ml: 6 182 212;
     --tc-canal-shopee: 249 115 22;
+
+    /* UX-TORRE-B2B-1 — o shell operacional. Navy com fundo violeta, e nao
+       carvao: e' a moldura do instrumento, escura nos DOIS temas, enquanto o
+       canvas de dados continua claro no modo claro. Contraste medido sobre
+       --tc-shell: ink 16,1:1 · muted 7,9:1 · faint 5,1:1 (medido). */
+    --tc-shell: 18 17 43;
+    --tc-shell-raised: 30 28 64;
+    --tc-shell-line: 40 37 78;
+    --tc-shell-ink: 240 238 252;
+    --tc-shell-muted: 170 166 206;
+    --tc-shell-faint: 134 130 176;
+    --tc-shell-accent: 167 139 250;
+    --tc-shell-active: 44 34 96;
   }
 
   .dark {
@@ -114,6 +127,17 @@
     --tc-canal-tiktok: 167 139 250;
     --tc-canal-ml: 34 211 238;
     --tc-canal-shopee: 251 146 60;
+
+    /* No escuro o shell fica UM degrau abaixo do canvas: a moldura continua
+       lida como moldura, sem virar um bloco preto chapado. */
+    --tc-shell: 10 9 20;
+    --tc-shell-raised: 24 21 42;
+    --tc-shell-line: 34 30 56;
+    --tc-shell-ink: 242 239 250;
+    --tc-shell-muted: 176 168 204;
+    --tc-shell-faint: 138 130 170;
+    --tc-shell-accent: 167 139 250;
+    --tc-shell-active: 38 30 78;
   }
 
   /* Rotas ainda nao migradas para os tokens (ver docs/design-system-torre.md):
@@ -128,7 +152,9 @@
   body {
     background-color: rgb(var(--tc-canvas));
     color: rgb(var(--tc-ink));
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* UX-TORRE-B2B-1: Inter autohospedada pelo next/font (var injetada no
+       <html>). O stack do sistema fica como fallback imediato. */
+    font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
 
   /* Numeros de tabela e KPI alinham por construcao: digito que muda de

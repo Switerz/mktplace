@@ -1371,7 +1371,8 @@ test("V24-1. GerencialHeader devolve Fragment, sem wrapper curto em volta do sti
   assert.match(src, /<\/>\s*\);/, "Fragment fechado");
 
   // 2. O wrapper visual do cabecalho FECHA antes de a barra comecar.
-  const cabecalho = src.indexOf('<div className="flex items-start justify-between gap-3 flex-wrap">');
+  // UX-TORRE-B2B-1: a linha passou a alinhar ao centro (icone + selos).
+  const cabecalho = src.indexOf('<div className="flex items-center justify-between gap-3 flex-wrap">');
   const stickyClasse = src.indexOf("sticky top-0 z-30");
   assert.ok(cabecalho > -1, "linha do cabecalho deve existir");
   assert.ok(stickyClasse > cabecalho, "ordem esperada: cabecalho, depois barra");
@@ -1426,10 +1427,17 @@ test("V24-3. a correcao nao introduziu fetch, estado, modal ou filtro novo", () 
   // conteudo preservado
   assert.match(src, /Visão Gerencial/);
   assert.match(src, /Como estamos, onde investigar e para onde ir a seguir\./);
-  assert.match(src, /Período: \{periodLabel\}/);
-  assert.match(src, /Atualizado em \{fmtRefreshedAt\(refreshedAt\)\}/);
-  assert.match(src, /<LiveStatusBadge live=\{live\} \/>/);
-  assert.match(src, /Atualizando dados…/);
+  // UX-TORRE-B2B-1: periodo, frescor e ao-vivo/demonstracao continuam no
+  // cabecalho, agora em selos (`PeriodChip` + `Freshness`), e o refreshed_at
+  // segue saindo SO' da resposta compativel com o filtro atual.
+  assert.match(src, /<PeriodChip label=\{periodLabel\} \/>/);
+  assert.match(src, /<Freshness live=\{live\} refreshedAt=\{live != null \? refreshedAt : null\} loading=\{loading\} \/>/);
+  const selo = read("src/components/ui/Freshness.tsx");
+  assert.match(selo, /Atualizado em \{quando\}/);
+  assert.match(selo, /fmtRefreshedAt\(refreshedAt\)/);
+  assert.match(selo, /Demonstração · API offline/);
+  assert.match(selo, /Atualizando…/);
+  assert.match(selo, /if \(live == null\)/, "sem resposta fresca, nunca afirma ao vivo");
   // o `<h1>` da Gerencial permanece: promover/rebaixar aqui mexeria na divida U6-04
   // UX-TORRE-2: a cor virou token; nivel (`<h1>`) e escala (`text-xl`) seguem travados.
   assert.match(code, /<h1 className="text-xl font-bold text-ink">Visão Gerencial<\/h1>/);

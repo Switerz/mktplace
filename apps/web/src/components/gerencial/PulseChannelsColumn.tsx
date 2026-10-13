@@ -52,7 +52,7 @@ function ChannelSummary({
   unavailable: boolean;
 }) {
   const base =
-    "flex-1 bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3";
+    "flex-1 bg-surface border border-line rounded-xl p-4 flex flex-col gap-3";
 
   if (loading) {
     return (
@@ -67,7 +67,7 @@ function ChannelSummary({
 
   if (unavailable || !overview) {
     return (
-      <div className="flex-1 bg-raised border border-line rounded-2xl p-4 flex flex-col gap-1">
+      <div className="flex-1 bg-raised border border-line rounded-xl p-4 flex flex-col gap-1">
         <h3 className="text-sm font-semibold text-ink-muted">Canais</h3>
         <p className="text-xs text-ink-faint">
           Participação por canal indisponível no momento. Os demais blocos do período seguem exibidos.

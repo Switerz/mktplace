@@ -11,8 +11,8 @@
  * `scroll-margin-top` nas ancoras da pagina resolve o unico risco real da barra
  * sticky: navegar por ancora e o titulo ficar escondido atras dela.
  */
-import LiveStatusBadge from "@/components/LiveStatusBadge";
-import { fmtRefreshedAt } from "@/lib/filters/format";
+import { LayoutDashboard } from "lucide-react";
+import Freshness, { PeriodChip } from "@/components/ui/Freshness";
 
 interface Props {
   periodLabel: string;
@@ -43,24 +43,28 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
   // e um subtitulo proprio) e um contrato generico esconderia essa diferenca.
   return (
     <>
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div className="min-w-0">
-          <h1 className="text-xl font-bold text-ink">Visão Gerencial</h1>
-          <p className="text-sm text-ink-muted">Como estamos, onde investigar e para onde ir a seguir.</p>
-          <p className="text-xs text-ink-muted mt-0.5 tabular-nums">
-            Período: {periodLabel}
-            {/* refreshed_at e badge saem SO' da resposta compativel com o filtro
-                atual — nunca da requisicao anterior. */}
-            {live != null && refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
-          </p>
-        </div>
-        {live != null ? (
-          <LiveStatusBadge live={live} />
-        ) : loading ? (
-          <span className="text-xs text-ink-faint bg-raised border border-line rounded-lg px-3 py-1.5 font-medium">
-            Atualizando dados…
+      {/* UX-TORRE-B2B-1: icone + titulo a esquerda, escopo em selos a direita.
+          O periodo e o frescor continuam na primeira linha da tela — so'
+          deixaram de ser uma frase entre o titulo e os filtros. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex min-w-0 items-center gap-3">
+          <span
+            aria-hidden="true"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15"
+          >
+            <LayoutDashboard className="h-5 w-5" strokeWidth={1.75} />
           </span>
-        ) : null}
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold text-ink">Visão Gerencial</h1>
+            <p className="text-sm text-ink-muted">Como estamos, onde investigar e para onde ir a seguir.</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <PeriodChip label={periodLabel} />
+          {/* refreshed_at e selo saem SO' da resposta compativel com o filtro
+              atual — nunca da requisicao anterior (`live` e' null ate la'). */}
+          <Freshness live={live} refreshedAt={live != null ? refreshedAt : null} loading={loading} />
+        </div>
       </div>
 
       {/* Com os controles compartilhados a 44x44px, esta faixa passou de ~29%

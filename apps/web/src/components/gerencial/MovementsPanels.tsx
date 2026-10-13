@@ -34,7 +34,7 @@ interface Props {
   onRetry: () => void;
 }
 
-const PANEL = "h-full bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-2";
+const PANEL = "h-full bg-surface border border-line rounded-xl p-4 flex flex-col gap-2";
 
 function PanelSkeleton() {
   return (
@@ -217,7 +217,7 @@ export default function MovementsPanels({
 
   if (error) {
     return (
-      <section className="bg-raised border border-line rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+      <section className="bg-raised border border-line rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-ink-muted">Movimentos e concentração</h2>
           <p className="text-xs text-ink-faint">

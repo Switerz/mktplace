@@ -61,6 +61,17 @@ const config: Config = {
           ml: token("canal-ml"),
           shopee: token("canal-shopee"),
         },
+        // UX-TORRE-B2B-1 — moldura navy do shell, escura nos dois temas.
+        shell: {
+          DEFAULT: token("shell"),
+          raised: token("shell-raised"),
+          line: token("shell-line"),
+          ink: token("shell-ink"),
+          muted: token("shell-muted"),
+          faint: token("shell-faint"),
+          accent: token("shell-accent"),
+          active: token("shell-active"),
+        },
         // Escala literal herdada, preservada para as rotas ainda nao migradas.
         brand: {
           50: "#f5f3ff",
@@ -69,6 +80,21 @@ const config: Config = {
           700: "#6d28d9",
           900: "#2e1065",
         },
+      },
+      // UX-TORRE-B2B-1 — o degrau `data` do DESIGN.md (13px / 1.35) como
+      // papel nomeado: celula de tabela densa e item de navegacao.
+      fontSize: {
+        data: ["13px", { lineHeight: "1.35" }],
+      },
+      fontFamily: {
+        sans: [
+          "var(--font-sans)",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          '"Segoe UI"',
+          "Roboto",
+          "sans-serif",
+        ],
       },
     },
   },

@@ -94,7 +94,8 @@ test("o <html> aceita a divergencia que o proprio script cria", () => {
   // O script altera `class` e `style` de <html> antes da hidratacao, DE
   // PROPOSITO. Sem `suppressHydrationWarning` o React reclamaria da unica
   // divergencia que ele precisa aceitar.
-  assert.match(LAYOUT, /<html lang="pt-BR" suppressHydrationWarning>/);
+  // UX-TORRE-B2B-1: o <html> tambem carrega a variavel da fonte (next/font).
+  assert.match(LAYOUT, /<html lang="pt-BR"[^>]*\bsuppressHydrationWarning>/);
 });
 
 test("aplicarTemaNoDocumento grava resultado e preferencia separadamente", () => {

@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useRef, type RefObject } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
+import { X } from "lucide-react";
 import { buildPreservedQuery, hrefForPage } from "@/lib/filters/nav-links";
 import NavList from "./NavList";
 
@@ -108,32 +109,24 @@ function MobileDrawerInner({ open, onClose, openerRef }: MobileDrawerProps) {
         aria-modal="true"
         aria-label="Navegação principal"
         aria-hidden={!open}
-        className="absolute inset-y-0 left-0 flex w-[min(82vw,300px)] flex-col overflow-y-auto border-r border-line bg-surface shadow-xl"
+        className="absolute inset-y-0 left-0 flex w-[min(82vw,300px)] flex-col overflow-y-auto border-r border-shell-line bg-shell shadow-xl"
       >
-        <div className="flex items-center justify-between border-b border-line px-4 py-3">
-          <span className="text-sm font-bold text-ink">Navegação</span>
+        <div className="flex items-center justify-between border-b border-shell-line px-4 py-1">
+          <span className="text-sm font-semibold text-shell-ink">Navegação</span>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label="Fechar menu de navegação"
-            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:bg-accent-soft hover:text-accent"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-shell-muted hover:bg-shell-raised hover:text-shell-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-shell-accent"
           >
-            <CloseIcon />
+            <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
-        <div className="px-3 py-4">
+        <div className="px-2 py-3">
           <NavList pathname={pathname} hrefFor={hrefFor} alvoAmplo />
         </div>
       </div>
     </div>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-4 h-4" aria-hidden="true">
-      <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
-    </svg>
   );
 }

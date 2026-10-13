@@ -133,7 +133,7 @@ export default function EvolutionCard({
   return (
     <section
       aria-labelledby="evolucao-heading"
-      className="h-full bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3"
+      className="h-full bg-surface border border-line rounded-xl p-4 flex flex-col gap-3"
     >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
@@ -160,7 +160,7 @@ export default function EvolutionCard({
                 onClick={() => onMetricChange(m)}
                 aria-pressed={metric === m}
                 className={`min-h-11 px-3 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                  metric === m ? "bg-surface text-accent shadow-sm" : "text-ink-faint hover:text-accent"
+                  metric === m ? "bg-surface text-accent" : "text-ink-faint hover:text-accent"
                 }`}
               >
                 {METRIC_LABEL[m]}
@@ -184,7 +184,7 @@ export default function EvolutionCard({
                 aria-label={opt.label}
                 className={`min-h-11 px-2.5 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                   granularity === opt.value
-                    ? "bg-surface text-accent shadow-sm"
+                    ? "bg-surface text-accent"
                     : "text-ink-faint hover:text-accent"
                 }`}
               >

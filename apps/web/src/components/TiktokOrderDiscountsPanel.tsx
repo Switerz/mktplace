@@ -38,7 +38,7 @@ interface Props {
 
 function Moldura({ children }: { children: React.ReactNode }) {
   return (
-    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+    <section className="bg-surface rounded-xl border border-line p-5">
       <h2 className="text-sm font-semibold text-ink-muted mb-2">
         {DISCOUNTS_BLOCK_TITLE}
       </h2>
@@ -64,7 +64,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   if (phase === "loading" || phase === "neutral") {
     return (
       <section
-        className="bg-surface rounded-2xl shadow-sm border border-line p-5"
+        className="bg-surface rounded-xl border border-line p-5"
         aria-busy="true"
       >
         {/* O titulo fica FORA da animacao: uma regiao `aria-busy` sem nome
@@ -110,7 +110,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   const notaCobertura = coverageNote(block);
 
   return (
-    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+    <section className="bg-surface rounded-xl border border-line p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
         <h2 className="text-sm font-semibold text-ink-muted">
           {DISCOUNTS_BLOCK_TITLE}

@@ -36,7 +36,7 @@ interface Props {
 
 function Moldura({ children }: { children: React.ReactNode }) {
   return (
-    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+    <section className="bg-surface rounded-xl border border-line p-5">
       <h2 className="text-sm font-semibold text-ink-muted mb-2">
         {AFFILIATE_BLOCK_TITLE}
       </h2>
@@ -66,7 +66,7 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
     // esconde-lo aqui tambem quebraria a convencao da pagina.
     return (
       <section
-        className="bg-surface rounded-2xl shadow-sm border border-line p-5"
+        className="bg-surface rounded-xl border border-line p-5"
         aria-busy="true"
       >
         <h2 className="text-sm font-semibold text-ink-muted mb-4">
@@ -107,7 +107,7 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
   const linhas = buildAffiliateDrilldown(block.rows);
 
   return (
-    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+    <section className="bg-surface rounded-xl border border-line p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
         <h2 className="text-sm font-semibold text-ink-muted">
           {AFFILIATE_BLOCK_TITLE}

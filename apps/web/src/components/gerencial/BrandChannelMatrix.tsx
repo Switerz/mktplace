@@ -85,7 +85,7 @@ export default function BrandChannelMatrix({
   if (loading) {
     return (
       <section
-        className="bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse"
+        className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3 animate-pulse"
         role="status"
         aria-busy="true"
       >
@@ -101,7 +101,7 @@ export default function BrandChannelMatrix({
   // Somente erro de /brands impede a matriz inteira.
   if (error) {
     return (
-      <section className="bg-raised border border-line rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+      <section className="bg-raised border border-line rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-ink-muted">Marca × Canal</h2>
           <p className="text-xs text-ink-faint">
@@ -121,7 +121,7 @@ export default function BrandChannelMatrix({
 
   if (matrix.rows.length === 0 || matrix.channels.length === 0) {
     return (
-      <section className="bg-surface border border-line rounded-2xl shadow-sm p-4">
+      <section className="bg-surface border border-line rounded-xl p-4">
         <h2 className="text-sm font-semibold text-ink-muted mb-1">Marca × Canal</h2>
         <p className="text-xs text-ink-faint">Sem marcas com dado no período e filtros selecionados.</p>
       </section>
@@ -131,7 +131,7 @@ export default function BrandChannelMatrix({
   return (
     <section
       aria-labelledby="matriz-heading"
-      className="bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3"
+      className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3"
     >
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
         <h2 id="matriz-heading" className="text-sm font-semibold text-ink-muted">

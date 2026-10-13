@@ -65,12 +65,16 @@ export default function GlobalFilterControls({ filters, onChange, hideCompare = 
         </svg>
       </button>
 
+      {/* UX-TORRE-B2B-1: uma linha so' no desktop. Canal fica segmentado
+          (quatro opcoes, com a cor de identidade); marca e periodo viram
+          gatilhos que mostram o valor atual — os mesmos botoes, dentro de um
+          painel. A barra passou de duas linhas (~100px) para uma (~52px). */}
       <div
         id={id}
-        className={`${aberto ? "flex" : "hidden"} min-w-0 flex-wrap items-start gap-x-3 gap-y-1.5 pb-1 sm:flex sm:pb-0`}
+        className={`${aberto ? "flex" : "hidden"} min-w-0 flex-wrap items-start gap-x-2 gap-y-1.5 pb-1 sm:flex sm:pb-0`}
       >
         <MarketplaceFilter value={filters.channels} onChange={(channels) => onChange({ channels })} />
-        <BrandFilter value={filters.brands} onChange={(brands) => onChange({ brands })} />
+        <BrandFilter value={filters.brands} onChange={(brands) => onChange({ brands })} variante="menu" />
         <DateRangeFilter
           dateFrom={filters.dateFrom}
           dateTo={filters.dateTo}
@@ -78,6 +82,7 @@ export default function GlobalFilterControls({ filters, onChange, hideCompare = 
           onChange={(v) => onChange(v)}
           onCompareChange={(compare) => onChange({ compare })}
           hideCompare={hideCompare}
+          variante="menu"
         />
         {loading && (
           <span className="inline-flex min-h-11 shrink-0 items-center text-xs text-ink-faint animate-pulse">

@@ -368,7 +368,10 @@ test("V33 o patch nao trouxe dependencia nova", () => {
   const pkg = JSON.parse(src("package.json")) as {
     dependencies: Record<string, string>; devDependencies: Record<string, string>;
   };
-  assert.equal(Object.keys(pkg.dependencies).length, 7);
+  // UX-TORRE-B2B-1 acrescentou lucide-react (vocabulario de icones do shell),
+  // em versao EXATA. Grafico continua so' no Recharts.
+  assert.equal(Object.keys(pkg.dependencies).length, 8);
+  assert.equal(pkg.dependencies["lucide-react"], "1.53.0", "icones fixados em versao exata");
   assert.equal(Object.keys(pkg.devDependencies).length, 8);
   assert.ok("recharts" in pkg.dependencies, "o grafico continua no Recharts ja instalado");
   // nada de biblioteca de acessibilidade ou de grafico nova

@@ -109,3 +109,23 @@ Rotas migradas: `/`, `/canais`, `/financeiro` (além de `/expedicao`).
   precisa poder sobrepor o sistema operacional.
 - Não toca em métrica, fórmula, filtro ou contrato de API. O redesenho é da
   camada visual; os números vêm do mesmo payload.
+
+## UX-TORRE-B2B-1 — shell navy e primitives (13/10/2026)
+
+Revisão aprovada pelo Mário com `b2b-gogroup/torre_b2b` como referência de
+acabamento. Auditoria em `docs/ux_torre_b2b_benchmark.md`; regras em
+`DESIGN.md`. O que mudou para quem desenvolve:
+
+- **Shell navy nos dois temas** (`--tc-shell-*`, `bg-shell`, `text-shell-*`).
+  Sidebar com ícone por rota (`ICONE_DA_ROTA` em `shell/NavList.tsx`), trilho
+  de 64px abaixo de 1280px, tema no rodapé. A topbar só existe no mobile.
+- **Fonte Inter** via `next/font` (variável `--font-sans`), autohospedada.
+- **Novo degrau tipográfico nomeado:** `text-data` (13px / 1.35).
+- **Primitives novos:** `ui/Popover` (gatilho + painel de filtro),
+  `ui/Freshness` + `PeriodChip` (escopo e frescor em selos), `ui/StatCard`
+  (KPI não interativo), `ui/StateBlock` + `RetryButton` (vazio / carregando /
+  erro / indisponível). `Panel` ganhou `icone` e `id`; `PageHeader` ganhou
+  `icon` e `meta`; `Segmented` ganhou `tom="shell"` e `soIcone`.
+- **Filtros `variante="menu"`:** `BrandFilter` e `DateRangeFilter` aceitam o
+  modo popover usado pela barra comum; as outras rotas seguem no modo `faixa`.
+- **`lucide-react@1.53.0`** é o único vocabulário de ícones (versão exata).

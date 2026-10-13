@@ -30,7 +30,7 @@ export default function ConfidenceStrip({ data, loading, onOpen }: Props) {
   if (loading) {
     return (
       <div
-        className="bg-surface border border-line rounded-2xl px-4 py-2.5 flex items-center gap-2"
+        className="bg-surface border border-line rounded-xl px-4 py-2.5 flex items-center gap-2"
         role="status"
         aria-busy="true"
       >
@@ -50,7 +50,7 @@ export default function ConfidenceStrip({ data, loading, onOpen }: Props) {
       onClick={onOpen}
       aria-haspopup="dialog"
       aria-label="Confiança no dado — abrir disponibilidade das séries, defasagem e avisos"
-      className="w-full min-h-11 text-left bg-surface border border-line rounded-2xl px-4 py-2.5 flex items-center gap-x-3 gap-y-1 flex-wrap hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+      className="w-full min-h-11 text-left bg-surface border border-line rounded-xl px-4 py-2.5 flex items-center gap-x-3 gap-y-1 flex-wrap hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
     >
       <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
         Confiança no dado

@@ -1,8 +1,25 @@
 "use client";
 
+/**
+ * Financeiro — UX-TORRE-B2B-1.
+ *
+ * Narrativa da tela, de cima para baixo:
+ *   1. Por canal: receita (GMV) e cada componente de custo que a fonte do
+ *      canal ENTREGA, em R$ e % do GMV — ou a declaracao de que nao entrega.
+ *   2. O que ainda esta FORA da conta (margem nao fechada), nomeado.
+ *   3. Taxa do marketplace por marca x canal, em grafico.
+ *   4. As tres tabelas por marca, densas, com ordenacao.
+ *
+ * Nenhuma regra de negocio mudou: mesma requisicao, mesma guarda de frescor,
+ * mesmas faixas de cor (ROAS, ACOS, taxas). A unica informacao NOVA na tela
+ * e' a tarifa do Mercado Livre (`ml_fees` / `ml_avg_fee_pct`), campo que a API
+ * ja' entrega desde o MARGEM-REAL-2 e que a tela ainda declarava ausente.
+ * Nada aqui se chama "margem": componentes conhecidos nao fecham margem.
+ */
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { ArrowUpRight, BarChart3, CircleSlash, Megaphone, Percent, Receipt, Wallet } from "lucide-react";
 import {
   fetchFinanceiro,
   type FinanceiroKpis,
@@ -11,19 +28,34 @@ import {
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { mergeFilteredHref } from "@/lib/filters/nav-links";
-import KpiCard from "@/components/KpiCard";
 import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
-import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import Freshness, { PeriodChip } from "@/components/ui/Freshness";
+import Note from "@/components/ui/Note";
+import Panel from "@/components/ui/Panel";
+import Disclosure from "@/components/ui/Disclosure";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
+import ChannelCostPanel from "@/components/financeiro/ChannelCostPanel";
+import dynamic from "next/dynamic";
+import type { LinhaTaxa } from "@/components/financeiro/FeeByBrandChart";
+
 import { fmtBrl } from "@/lib/formatters";
-import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { fmtPeriodo, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortHeader from "@/components/ui/SortHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import { buildFinanceiroRequestKey } from "@/lib/financeiro-request-key";
 import { computeRequestStatus } from "@/lib/request-freshness";
+import type { CanalDoGrafico } from "@/lib/chart-theme";
+
+// Recharts so' chega quando o grafico entra na tela: a primeira carga do
+// Financeiro fica com KPIs e tabelas, sem os ~110 kB da biblioteca.
+const FeeByBrandChart = dynamic(() => import("@/components/financeiro/FeeByBrandChart"), {
+  ssr: false,
+  loading: () => <div className="h-[220px] animate-pulse rounded-lg bg-raised" aria-hidden="true" />,
+});
 
 function fmtPct(v: number | null, decimals = 1): string {
   if (v == null) return "—";
@@ -77,12 +109,29 @@ function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | nul
         <div className="h-full bg-chart-4" style={{ width: `${frete}%` }} />
         <div className="h-full bg-raised" style={{ width: `${rest}%` }} />
       </div>
-      <span className="text-xs tabular-nums text-ink-faint w-11 text-right shrink-0">
+      <span className={`text-xs tabular-nums w-11 text-right shrink-0 font-semibold ${totalCostColor(ad + frete)}`}>
         {(ad + frete).toFixed(1)}%
       </span>
     </div>
   );
 }
+
+/** Legenda de faixa: ponto + rotulo, numa linha. Mesmos limiares de sempre. */
+function Faixa({ ponto, tinta, children }: { ponto: string; tinta: string; children: React.ReactNode }) {
+  return (
+    <span className={`flex items-center gap-1.5 text-xs ${tinta}`}>
+      <span aria-hidden="true" className={`h-2 w-2 rounded-full ${ponto}`} />
+      {children}
+    </span>
+  );
+}
+
+/** Classes das celulas: densidade do benchmark com o piso de 13px de dado. */
+const TD = "px-4 py-2.5 text-right tabular-nums";
+const TD_MARCA = "px-4 py-2.5 font-semibold text-ink whitespace-nowrap";
+const TR = "hover:bg-raised/70 transition-colors";
+const LINK_MARCA =
+  "hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded";
 
 function FinanceiroPageInner() {
   const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
@@ -181,14 +230,17 @@ function FinanceiroPageInner() {
   const tkSort = useSortableTable(tkBrands, tkGetValue, tkColumnTypes);
 
   const mlColumnTypes = useMemo(() => ({
-    brand: "text" as const, gmv: "numeric" as const, ad_spend: "numeric" as const,
-    ad_revenue: "numeric" as const, roas: "numeric" as const, acos: "numeric" as const,
+    brand: "text" as const, gmv: "numeric" as const, fees: "numeric" as const, fee_pct: "numeric" as const,
+    ad_spend: "numeric" as const, ad_revenue: "numeric" as const, roas: "numeric" as const, acos: "numeric" as const,
     frete: "numeric" as const, cost_pct: "numeric" as const,
   }), []);
   const mlGetValue = (row: FinanceiroBrandRow, column: string): string | number | null => {
     switch (column) {
       case "brand": return row.label;
       case "gmv": return row.ml_gmv;
+      // UX-TORRE-B2B-1: tarifa ML, campo ja' entregue pela API (MARGEM-REAL-2).
+      case "fees": return row.ml_fees ?? null;
+      case "fee_pct": return row.ml_avg_fee_pct ?? null;
       case "ad_spend": return row.ml_ad_spend;
       case "ad_revenue": return row.ml_ad_revenue;
       case "roas": return row.ml_roas;
@@ -222,139 +274,241 @@ function FinanceiroPageInner() {
   };
   const shSort = useSortableTable(shBrands, shGetValue, shColumnTypes);
 
+  // Grafico de taxa por marca: so' os canais selecionados, so' valores que a
+  // API entrega por linha. Marca sem nenhum valor nos canais visiveis sai.
+  const canaisDoGrafico: CanalDoGrafico[] = [
+    ...(showTiktok ? (["tiktok"] as const) : []),
+    ...(showMl ? (["ml"] as const) : []),
+    ...(showShopee ? (["shopee"] as const) : []),
+  ];
+  const linhasTaxa: LinhaTaxa[] = displayBrands
+    .map((b) => ({
+      marca: b.label,
+      tiktok: showTiktok ? b.tiktok_avg_fee_pct : null,
+      ml: showMl ? b.ml_avg_fee_pct ?? null : null,
+      shopee: showShopee ? b.shopee_avg_fee_pct ?? null : null,
+    }))
+    .filter((l) => l.tiktok != null || l.ml != null || l.shopee != null);
+
+  const k = displayKpis;
+  const vazio = dataIsFresh && displayBrands.length === 0;
+
   return (
     <PageContainer>
       <PageHeader
         title="Financeiro"
-        subtitle="Comparar repasse, taxas, mídia e frete conforme a disponibilidade de dado de cada canal."
-        scopeLine={
+        subtitle="Receita, taxas, mídia e frete por canal — e o que ainda falta para fechar a margem."
+        icon={Wallet}
+        meta={
           <>
-            Período: {periodLabel}
-            {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
+            <PeriodChip label={periodLabel} />
+            {/* Selo so' com dado fresco — nunca o estado da requisicao ANTERIOR
+                durante a transicao de filtro. */}
+            <Freshness
+              live={dataIsFresh ? displayIsLive : null}
+              refreshedAt={displayRefreshedAt}
+              loading={isLoadingState}
+            />
           </>
-        }
-        // Badge live/mock só aparece quando os dados sao frescos — nunca o
-        // estado da requisicao ANTERIOR durante a transicao de filtro.
-        status={
-          dataIsFresh ? (
-            <LiveStatusBadge live={displayIsLive} />
-          ) : isLoadingState ? (
-            <span className="text-xs text-ink-faint bg-raised border border-line rounded-lg px-3 py-1.5 font-medium">
-              Atualizando dados...
-            </span>
-          ) : null
         }
         filters={<GlobalFilterControls filters={filters} onChange={setFilters} hideCompare loading={isLoadingState} />}
       />
 
-        {dataIsFresh && (() => {
-          const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
-          const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
-          return note && (
-            <div className="bg-warn-soft border border-warn/35 rounded-2xl p-3">
-              <p className="text-xs text-warn-ink">{note}</p>
-            </div>
-          );
-        })()}
+      {dataIsFresh && (() => {
+        const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
+        const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
+        return note && <Note tom="atencao">{note}</Note>;
+      })()}
 
-        {error && (
-          <div className="bg-crit-soft border border-crit/35 rounded-2xl p-4 flex items-center justify-between gap-4">
-            <p className="text-sm text-crit-ink">{error}</p>
-            <button
-              onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
-              className="text-xs font-semibold text-crit-ink border border-crit/35 rounded-lg px-3 py-1.5 hover:bg-crit-soft transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crit/30"
-            >
-              Tentar novamente
-            </button>
-          </div>
-        )}
-
-        <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {isLoadingState ? "Carregando dados financeiros..." : isErrorState ? "Falha ao carregar." : "Dados financeiros carregados."}
-        </span>
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {isLoadingState ? "Carregando dados financeiros..." : isErrorState ? "Falha ao carregar." : "Dados financeiros carregados."}
+      </span>
 
       {isErrorState ? (
-        // FINDING 2: erro definitivo mostra so cabecalho/filtros/banner de
-        // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo,
-        // nunca `aria-busy=true`. Estado de erro dedicado, sem tentar
-        // renderizar KPIs/tabelas.
-        <div className="bg-surface border border-line rounded-2xl shadow-sm px-6 py-10 text-center">
-          <p className="text-ink-faint text-sm font-medium">Não foi possível carregar os dados financeiros.</p>
-          <p className="text-ink-faint text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
-        </div>
+        // FINDING 2: erro definitivo mostra so cabecalho/filtros e o estado de
+        // erro — nunca skeleton, nunca dado antigo, nunca `aria-busy=true`.
+        <StateBlock
+          tipo="erro"
+          titulo="Não foi possível carregar os dados financeiros."
+          descricao={error ?? undefined}
+          acao={<RetryButton onClick={() => { setError(null); setRetryKey((n) => n + 1); }} />}
+        />
+      ) : vazio ? (
+        <StateBlock
+          tipo="vazio"
+          titulo="Sem dados financeiros no período e filtros selecionados."
+          descricao="Tente ampliar o intervalo de datas ou revisar canal/marca."
+        />
       ) : (
       <>
-        {/* KPI Cards */}
-        <div
-          className={`grid grid-cols-2 md:grid-cols-4 gap-4 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}
-          aria-busy={isLoadingState}
-        >
-          {showTiktok && (
-            <KpiCard
-              label="Repasse recebido TikTok"
-              value={displayKpis?.tiktok_settlement != null ? fmtBrl(displayKpis.tiktok_settlement) : "—"}
-              subvalue={displayKpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(displayKpis.tiktok_avg_settlement_pct)} do GMV · competencias podem divergir` : undefined}
-              accent="bg-canal-tiktok"
-            />
-          )}
-          {showTiktok && (
-            <KpiCard
-              label="Taxas e encargos / GMV"
-              value={displayKpis?.tiktok_avg_fee_pct != null ? fmtPct(displayKpis.tiktok_avg_fee_pct) : "—"}
-              subvalue={displayKpis?.tiktok_fees != null ? fmtBrl(displayKpis.tiktok_fees) + " total" : undefined}
-              accent="bg-canal-tiktok"
-            />
-          )}
-          {showMl && (
-            <KpiCard
-              label="ROAS ML"
-              value={fmtRoas(displayKpis?.ml_roas ?? null)}
-              subvalue={displayKpis?.ml_acos_pct != null ? `ACOS ${fmtPct(displayKpis.ml_acos_pct)}` : undefined}
-              accent="bg-canal-ml"
-            />
-          )}
-          {showMl && (
-            <KpiCard
-              label="Ads + Frete / GMV"
-              value={displayKpis?.ml_total_cost_pct != null ? fmtPct(displayKpis.ml_total_cost_pct) : "—"}
-              subvalue="Nao inclui comissao do Mercado Livre"
-              accent="bg-canal-ml"
-            />
-          )}
-          {showShopee && (
-            <KpiCard
-              label="Taxas e encargos Shopee"
-              value={displayKpis?.shopee_avg_fee_pct != null ? fmtPct(displayKpis.shopee_avg_fee_pct) : "—"}
-              subvalue={displayKpis?.shopee_fees != null ? fmtBrl(displayKpis.shopee_fees) + " total" : undefined}
-              accent="bg-canal-shopee"
-            />
-          )}
-          {showShopee && (
-            <KpiCard
-              label="ROAS Shopee"
-              value={displayKpis?.shopee_roas != null ? fmtRoas(displayKpis.shopee_roas) : "—"}
-              subvalue={displayKpis?.shopee_ad_spend != null ? `Ad spend ${fmtBrl(displayKpis.shopee_ad_spend)}` : undefined}
-              accent="bg-canal-shopee"
-            />
-          )}
-        </div>
+        {/* ── 1. Receita e componentes conhecidos, por canal ── */}
+        <section aria-labelledby="fin-canais" className="flex flex-col gap-3">
+          <h2 id="fin-canais" className="sr-only">Receita e componentes de custo por canal</h2>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+            {showTiktok && (
+              <ChannelCostPanel
+                titulo="TikTok Shop"
+                ponto="bg-canal-tiktok"
+                barra="bg-canal-tiktok"
+                carregando={isLoadingState}
+                receita={k?.tiktok_gmv != null ? fmtBrl(k.tiktok_gmv) : "—"}
+                linhas={[
+                  {
+                    rotulo: "Taxas e encargos",
+                    valor: k?.tiktok_fees != null ? fmtBrl(k.tiktok_fees) : null,
+                    pct: k?.tiktok_avg_fee_pct ?? null,
+                    pctTexto: k?.tiktok_avg_fee_pct != null ? fmtPct(k.tiktok_avg_fee_pct) : "—",
+                  },
+                  {
+                    rotulo: "Repasse recebido",
+                    valor: k?.tiktok_settlement != null ? fmtBrl(k.tiktok_settlement) : "—",
+                    pct: k?.tiktok_avg_settlement_pct ?? null,
+                    pctTexto: k?.tiktok_avg_settlement_pct != null ? `${fmtPct(k.tiktok_avg_settlement_pct)} do GMV` : null,
+                    detalhe: "Competências podem divergir do GMV.",
+                  },
+                  { rotulo: "Ads (mídia)", ausente: "Não disponível nesta fonte" },
+                  { rotulo: "Frete do seller", ausente: "Não disponível nesta fonte" },
+                ]}
+              />
+            )}
+            {showMl && (
+              <ChannelCostPanel
+                titulo="Mercado Livre"
+                ponto="bg-canal-ml"
+                barra="bg-canal-ml"
+                carregando={isLoadingState}
+                receita={k?.ml_gmv != null ? fmtBrl(k.ml_gmv) : "—"}
+                linhas={[
+                  k?.ml_fees != null
+                    ? {
+                        rotulo: "Tarifa ML",
+                        valor: fmtBrl(k.ml_fees),
+                        pct: k.ml_avg_fee_pct ?? null,
+                        pctTexto: fmtPct(k.ml_avg_fee_pct ?? null),
+                        detalhe: "Só a tarifa do marketplace — não inclui Ads nem frete.",
+                      }
+                    : { rotulo: "Tarifa ML", ausente: "Não carregada neste período" },
+                  {
+                    rotulo: "Ads (mídia)",
+                    valor: k?.ml_ad_spend != null ? fmtBrl(k.ml_ad_spend) : "—",
+                    pct: k?.ml_ad_spend != null && k?.ml_gmv ? (k.ml_ad_spend / k.ml_gmv) * 100 : null,
+                    detalhe: (
+                      <>
+                        ROAS <span className={`font-semibold ${roasColor(k?.ml_roas ?? null)}`}>{fmtRoas(k?.ml_roas ?? null)}</span>
+                        {k?.ml_acos_pct != null && <> · ACOS {fmtPct(k.ml_acos_pct)}</>}
+                      </>
+                    ),
+                  },
+                  {
+                    rotulo: "Ads + frete / GMV",
+                    pct: k?.ml_total_cost_pct ?? null,
+                    pctTexto: k?.ml_total_cost_pct != null ? fmtPct(k.ml_total_cost_pct) : "—",
+                    detalhe: "Não inclui a tarifa ML (linha acima).",
+                  },
+                ]}
+              />
+            )}
+            {showShopee && (
+              <ChannelCostPanel
+                titulo="Shopee"
+                ponto="bg-canal-shopee"
+                barra="bg-canal-shopee"
+                carregando={isLoadingState}
+                receita={k?.shopee_gmv != null ? fmtBrl(k.shopee_gmv) : "—"}
+                linhas={[
+                  {
+                    rotulo: "Taxas e encargos",
+                    valor: k?.shopee_fees != null ? fmtBrl(k.shopee_fees) : null,
+                    pct: k?.shopee_avg_fee_pct ?? null,
+                    pctTexto: k?.shopee_avg_fee_pct != null ? fmtPct(k.shopee_avg_fee_pct) : "—",
+                  },
+                  {
+                    rotulo: "Ads (mídia)",
+                    valor: k?.shopee_ad_spend != null ? fmtBrl(k.shopee_ad_spend) : "—",
+                    detalhe: (
+                      <>
+                        ROAS{" "}
+                        <span className={`font-semibold ${roasColor(k?.shopee_roas ?? null)}`}>
+                          {k?.shopee_roas != null ? fmtRoas(k.shopee_roas) : "—"}
+                        </span>
+                      </>
+                    ),
+                  },
+                  { rotulo: "Frete do seller", ausente: "Só por marca (tabela abaixo)" },
+                ]}
+              />
+            )}
+          </div>
+
+          {/* ── 2. Margem nao fechada: o que esta FORA desta tela ── */}
+          <Note tom="neutro">
+            <span className="flex items-start gap-2">
+              <CircleSlash aria-hidden="true" className="mt-px h-3.5 w-3.5 shrink-0" />
+              <span>
+                <strong className="font-semibold text-ink">Margem ainda não fechada.</strong>{" "}
+                Componentes conhecidos não somam margem. Fora desta tela: CMV, impostos, devoluções e estornos
+                {showTiktok && (
+                  <>
+                    , frete do TikTok e afiliados do TikTok (
+                    <Link href={buildHref("/canais#afiliados")} className="font-semibold text-accent underline-offset-2 hover:underline">
+                      ver em Canais
+                    </Link>
+                    )
+                  </>
+                )}
+                .
+              </span>
+            </span>
+          </Note>
+        </section>
+
+        {/* ── 3. Taxa do marketplace por marca ── */}
+        {canaisDoGrafico.length > 0 && (dataIsFresh ? linhasTaxa.length > 0 : true) && (
+          <Panel
+            titulo="Taxa do marketplace sobre o GMV, por marca"
+            descricao="Cada canal mede um conjunto próprio de taxas — barras lado a lado, nunca somadas."
+            icone={BarChart3}
+          >
+            {dataIsFresh ? (
+              <FeeByBrandChart linhas={linhasTaxa} canais={canaisDoGrafico} />
+            ) : (
+              <div className="h-[220px] animate-pulse rounded-lg bg-raised" aria-hidden="true" />
+            )}
+          </Panel>
+        )}
 
         {/* Navegacao interna compacta (Task 4) */}
-        <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
-          {showTiktok && <a href="#tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">TikTok Shop</a>}
-          {showMl && <a href="#mercado-livre" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Mercado Livre</a>}
-          {showShopee && <a href="#shopee" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Shopee</a>}
+        <nav aria-label="Navegação interna da página" className="flex flex-wrap items-center gap-1">
+          <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-ink-faint">Tabelas por marca</span>
+          {showTiktok && <a href="#tiktok" className="inline-flex min-h-11 items-center gap-1 px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">TikTok Shop</a>}
+          {showMl && <a href="#mercado-livre" className="inline-flex min-h-11 items-center gap-1 px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Mercado Livre</a>}
+          {showShopee && <a href="#shopee" className="inline-flex min-h-11 items-center gap-1 px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Shopee</a>}
         </nav>
 
-        {/* Tabela: Repasses TikTok */}
+        {/* ── 4a. Tabela: Repasses TikTok ── */}
         {showTiktok && (
-          <div id="tiktok" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-line">
-              <h2 className="text-sm font-semibold text-ink-muted">Repasses TikTok</h2>
-              <p className="text-xs text-ink-faint mt-0.5">GMV bruto, taxas e encargos e repasse recebido por marca</p>
-            </div>
+          <Panel
+            id="tiktok"
+            titulo="Repasses TikTok"
+            descricao="GMV bruto, taxas e encargos e repasse recebido por marca"
+            icone={Receipt}
+            semPadding
+            rodape={
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos %</span>
+                  <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
+                  <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
+                  <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
+                </div>
+                <Disclosure className="-ml-2">
+                  Taxas e encargos / GMV · Repasse % = Repasse Recebido / GMV · repasses e GMV podem ter competencias diferentes (o repasse pode incluir pedidos de outros meses)
+                </Disclosure>
+              </div>
+            }
+          >
             <TableScrollHint>
-              <table className="w-full text-sm" aria-label="Repasses TikTok por marca">
+              <table className="w-full text-data" aria-label="Repasses TikTok por marca">
                 <thead>
                   <tr className="bg-raised text-left">
                     <SortHeader rotulo="Marca" coluna="brand" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} alinhamento="left" />
@@ -374,60 +528,61 @@ function FinanceiroPageInner() {
                     </tr>
                   )}
                   {tkSort.sortedRows.map((b) => (
-                    <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
-                        <Link
-                          href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)}
-                          className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
-                        >
+                    <tr key={b.brand} className={TR}>
+                      <td className={TD_MARCA}>
+                        <Link href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)} className={LINK_MARCA}>
                           {b.label}
                         </Link>
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">{fmtBrl(b.tiktok_fees!)}</td>
-                      <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.tiktok_avg_fee_pct)}`}>
+                      <td className={`${TD} text-ink-muted font-medium`}>{fmtBrl(b.tiktok_gmv!)}</td>
+                      <td className={`${TD} text-ink-muted`}>{fmtBrl(b.tiktok_fees!)}</td>
+                      <td className={`${TD} font-semibold ${feePctColor(b.tiktok_avg_fee_pct)}`}>
                         {fmtPct(b.tiktok_avg_fee_pct)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
-                        {fmtPct(b.tiktok_avg_settlement_pct)}
-                      </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink font-bold">{fmtBrl(b.tiktok_settlement!)}</td>
+                      <td className={`${TD} text-ink-muted`}>{fmtPct(b.tiktok_avg_settlement_pct)}</td>
+                      <td className={`${TD} text-ink font-bold`}>{fmtBrl(b.tiktok_settlement!)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </TableScrollHint>
-            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
-              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Taxas e encargos %:</span>
-              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
-                <span className="w-2 h-2 rounded-full bg-ink-faint inline-block" /> abaixo de 20%
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
-                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 20–30%
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
-                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> acima de 30%
-              </span>
-              <span className="ml-auto text-xs text-ink-faint">
-                Taxas e encargos / GMV · Repasse % = Repasse Recebido / GMV · repasses e GMV podem ter competencias diferentes (o repasse pode incluir pedidos de outros meses)
-              </span>
-            </div>
-          </div>
+          </Panel>
         )}
 
-        {/* Tabela: Publicidade e Custos ML */}
+        {/* ── 4b. Tabela: Tarifa, publicidade e custos ML ── */}
         {showMl && (
-          <div id="mercado-livre" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-line">
-              <h2 className="text-sm font-semibold text-ink-muted">Publicidade e Custos ML</h2>
-              <p className="text-xs text-ink-faint mt-0.5">Ad Spend, receita atribuida, frete e custo total como % do GMV</p>
-            </div>
+          <Panel
+            id="mercado-livre"
+            titulo="Tarifa, publicidade e custos ML"
+            descricao="Tarifa do marketplace, Ad Spend, receita atribuída, frete e Ads + frete como % do GMV"
+            icone={Megaphone}
+            semPadding
+            rodape={
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">ROAS</span>
+                  <Faixa ponto="bg-ok" tinta="text-ok-ink">acima de 10x</Faixa>
+                  <Faixa ponto="bg-warn" tinta="text-warn-ink">5x–10x</Faixa>
+                  <Faixa ponto="bg-crit" tinta="text-crit-ink">abaixo de 5x</Faixa>
+                  <span aria-hidden="true" className="h-3 w-px bg-line-strong" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Ads + Frete / GMV</span>
+                  <Faixa ponto="bg-chart-2" tinta="text-ink-muted">Ads</Faixa>
+                  <Faixa ponto="bg-chart-4" tinta="text-ink-muted">Frete</Faixa>
+                </div>
+                <Disclosure className="-ml-2">
+                  Ads + Frete / GMV · nao inclui a tarifa do Mercado Livre, que tem coluna propria · Tarifa ML = so' a tarifa/comissao do marketplace (pedidos pagos), sem Ads, frete, imposto, devolucao nem afiliado — nao e' margem · Receita Ads = GMV atribuido a anuncios
+                </Disclosure>
+              </div>
+            }
+          >
             <TableScrollHint>
-              <table className="w-full text-sm" aria-label="Publicidade e custos ML por marca">
+              <table className="w-full text-data" aria-label="Tarifa, publicidade e custos ML por marca">
                 <thead>
                   <tr className="bg-raised text-left">
                     <SortHeader rotulo="Marca" coluna="brand" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} alinhamento="left" />
                     <SortHeader rotulo="GMV ML" coluna="gmv" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Tarifa ML" coluna="fees" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Tarifa %" coluna="fee_pct" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
                     <SortHeader rotulo="Ad Spend" coluna="ad_spend" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
                     <SortHeader rotulo="Receita Ads" coluna="ad_revenue" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
                     <SortHeader rotulo="ROAS" coluna="roas" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
@@ -439,7 +594,7 @@ function FinanceiroPageInner() {
                 <tbody className={`divide-y divide-line transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {mlBrands.length === 0 && dataIsFresh && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-ink-faint text-sm">
+                      <td colSpan={10} className="px-6 py-8 text-center text-ink-faint text-sm">
                         Sem dados de anuncios ML para o periodo selecionado.
                       </td>
                     </tr>
@@ -449,30 +604,25 @@ function FinanceiroPageInner() {
                       ? b.ml_ad_spend / b.ml_gmv * 100
                       : null;
                     return (
-                      <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
-                        <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
-                          <Link
-                            href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)}
-                            className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
-                          >
+                      <tr key={b.brand} className={TR}>
+                        <td className={TD_MARCA}>
+                          <Link href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)} className={LINK_MARCA}>
                             {b.label}
                           </Link>
                         </td>
-                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.ml_gmv!)}</td>
-                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted">{fmtBrl(b.ml_ad_spend!)}</td>
-                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">
+                        <td className={`${TD} text-ink-muted font-medium`}>{fmtBrl(b.ml_gmv!)}</td>
+                        <td className={`${TD} text-ink-muted`}>{b.ml_fees != null ? fmtBrl(b.ml_fees) : "—"}</td>
+                        <td className={`${TD} text-ink-muted`}>{fmtPct(b.ml_avg_fee_pct ?? null)}</td>
+                        <td className={`${TD} text-ink-muted`}>{fmtBrl(b.ml_ad_spend!)}</td>
+                        <td className={`${TD} text-ink-muted font-medium`}>
                           {b.ml_ad_revenue != null ? fmtBrl(b.ml_ad_revenue) : "—"}
                         </td>
-                        <td className={`px-4 py-4 text-right tabular-nums font-semibold ${roasColor(b.ml_roas)}`}>
-                          {fmtRoas(b.ml_roas)}
-                        </td>
-                        <td className={`px-4 py-4 text-right tabular-nums font-semibold ${acosColor(b.ml_acos_pct)}`}>
-                          {fmtPct(b.ml_acos_pct)}
-                        </td>
-                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
+                        <td className={`${TD} font-semibold ${roasColor(b.ml_roas)}`}>{fmtRoas(b.ml_roas)}</td>
+                        <td className={`${TD} font-semibold ${acosColor(b.ml_acos_pct)}`}>{fmtPct(b.ml_acos_pct)}</td>
+                        <td className={`${TD} text-ink-muted`}>
                           {b.ml_seller_shipping_cost != null ? fmtBrl(b.ml_seller_shipping_cost) : "—"}
                         </td>
-                        <td className="px-6 py-4 min-w-[160px]">
+                        <td className="px-4 py-2.5 min-w-[160px]">
                           <CostBar adPct={adPct} freteP={b.ml_shipping_pct_of_gmv} />
                         </td>
                       </tr>
@@ -481,40 +631,33 @@ function FinanceiroPageInner() {
                 </tbody>
               </table>
             </TableScrollHint>
-
-            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
-              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">ROAS:</span>
-              <span className="flex items-center gap-1.5 text-xs text-ok-ink">
-                <span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 10x
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
-                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 5x–10x
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
-                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 5x
-              </span>
-              <span className="text-ink-faint select-none mx-1">|</span>
-              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Ads + Frete / GMV:</span>
-              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
-                <span className="inline-block w-2 h-2 rounded-sm bg-chart-2" /> Ads
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
-                <span className="inline-block w-2 h-2 rounded-sm bg-chart-4" /> Frete
-              </span>
-              <span className="ml-auto text-xs text-ink-faint">Ads + Frete / GMV · nao inclui comissao do Mercado Livre (sem granularidade mensal/diaria na fonte atual) · Receita Ads = GMV atribuido a anuncios</span>
-            </div>
-          </div>
+          </Panel>
         )}
 
-        {/* Tabela: Taxas e Custos Shopee */}
+        {/* ── 4c. Tabela: Taxas e Custos Shopee ── */}
         {showShopee && (
-          <div id="shopee" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-line">
-              <h2 className="text-sm font-semibold text-ink-muted">Taxas e Custos Shopee</h2>
-              <p className="text-xs text-ink-faint mt-0.5">GMV, taxas e encargos, total global dos pedidos, anuncios e frete por marca</p>
-            </div>
+          <Panel
+            id="shopee"
+            titulo="Taxas e Custos Shopee"
+            descricao="GMV, taxas e encargos, total global dos pedidos, anúncios e frete por marca"
+            icone={Percent}
+            semPadding
+            rodape={
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos %</span>
+                  <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
+                  <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
+                  <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
+                </div>
+                <Disclosure className="-ml-2">
+                  Taxas e encargos = comissao liquida + taxa de servico liquida, sobre o GMV · o indicador de liquidacao foi removido: o campo antigo (Total Global do pedido) nao representa repasse liquido
+                </Disclosure>
+              </div>
+            }
+          >
             <TableScrollHint>
-              <table className="w-full text-sm" aria-label="Taxas e custos Shopee por marca">
+              <table className="w-full text-data" aria-label="Taxas e custos Shopee por marca">
                 <thead>
                   <tr className="bg-raised text-left">
                     <SortHeader rotulo="Marca" coluna="brand" sort={shSort.sort} aoOrdenar={shSort.toggleSort} alinhamento="left" />
@@ -536,32 +679,25 @@ function FinanceiroPageInner() {
                     </tr>
                   )}
                   {shSort.sortedRows.map((b) => (
-                    <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
-                        <Link
-                          href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)}
-                          className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
-                        >
+                    <tr key={b.brand} className={TR}>
+                      <td className={TD_MARCA}>
+                        <Link href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)} className={LINK_MARCA}>
                           {b.label}
                         </Link>
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.shopee_gmv!)}</td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
-                        {b.shopee_fees != null ? fmtBrl(b.shopee_fees) : "—"}
-                      </td>
-                      <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.shopee_avg_fee_pct ?? null)}`}>
+                      <td className={`${TD} text-ink-muted font-medium`}>{fmtBrl(b.shopee_gmv!)}</td>
+                      <td className={`${TD} text-ink-muted`}>{b.shopee_fees != null ? fmtBrl(b.shopee_fees) : "—"}</td>
+                      <td className={`${TD} font-semibold ${feePctColor(b.shopee_avg_fee_pct ?? null)}`}>
                         {fmtPct(b.shopee_avg_fee_pct ?? null)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink font-bold">
+                      <td className={`${TD} text-ink font-bold`}>
                         {b.shopee_settlement != null ? fmtBrl(b.shopee_settlement) : "—"}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
-                        {b.shopee_ad_spend != null ? fmtBrl(b.shopee_ad_spend) : "—"}
-                      </td>
-                      <td className={`px-4 py-4 text-right tabular-nums font-semibold ${roasColor(b.shopee_roas ?? null)}`}>
+                      <td className={`${TD} text-ink-muted`}>{b.shopee_ad_spend != null ? fmtBrl(b.shopee_ad_spend) : "—"}</td>
+                      <td className={`${TD} font-semibold ${roasColor(b.shopee_roas ?? null)}`}>
                         {fmtRoas(b.shopee_roas ?? null)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
+                      <td className={`${TD} text-ink-muted`}>
                         {b.shopee_shipping_cost != null ? fmtBrl(b.shopee_shipping_cost) : "—"}
                       </td>
                     </tr>
@@ -569,26 +705,18 @@ function FinanceiroPageInner() {
                 </tbody>
               </table>
             </TableScrollHint>
-            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
-              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Taxas e encargos %:</span>
-              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
-                <span className="w-2 h-2 rounded-full bg-ink-faint inline-block" /> abaixo de 20%
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
-                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 20–30%
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
-                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> acima de 30%
-              </span>
-              <span className="ml-auto text-xs text-ink-faint">
-                Taxas e encargos = comissao liquida + taxa de servico liquida, sobre o GMV · o indicador de liquidacao foi removido: o campo antigo (Total Global do pedido) nao representa repasse liquido
-              </span>
-            </div>
-          </div>
+          </Panel>
+        )}
+
+        {dataIsFresh && (
+          <p className="flex items-center gap-1.5 text-xs text-ink-faint">
+            <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
+            O nome da marca abre a visão da marca no canal, com os mesmos filtros.
+          </p>
         )}
       </>
       )}
-      </PageContainer>
+    </PageContainer>
   );
 }
 

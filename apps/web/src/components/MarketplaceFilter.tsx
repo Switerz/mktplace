@@ -9,10 +9,10 @@ import {
   type MarketplaceSelection,
 } from "@/lib/marketplace-filter";
 
-const CHANNEL_OPTIONS: { value: Marketplace; label: string }[] = [
-  { value: "tiktok", label: "TikTok Shop" },
-  { value: "ml", label: "Mercado Livre" },
-  { value: "shopee", label: "Shopee" },
+const CHANNEL_OPTIONS: { value: Marketplace; label: string; ponto: string }[] = [
+  { value: "tiktok", label: "TikTok Shop", ponto: "bg-canal-tiktok" },
+  { value: "ml", label: "Mercado Livre", ponto: "bg-canal-ml" },
+  { value: "shopee", label: "Shopee", ponto: "bg-canal-shopee" },
 ];
 
 interface Props {
@@ -65,8 +65,11 @@ export default function MarketplaceFilter({ value, onChange }: Props) {
             type="button"
             aria-pressed={active}
             onClick={() => onChange(toggleMarketplace(value, opt.value))}
-            className={`${BASE_BTN} ${active ? ACTIVE_BTN : INACTIVE_BTN}`}
+            className={`${BASE_BTN} gap-1.5 ${active ? ACTIVE_BTN : INACTIVE_BTN}`}
           >
+            {/* UX-TORRE-B2B-1: a cor de IDENTIDADE do canal, a mesma dos
+                graficos e da matriz — o filtro ensina a legenda. */}
+            <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${opt.ponto}`} />
             {opt.label}
           </button>
         );

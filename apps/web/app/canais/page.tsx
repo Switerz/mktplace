@@ -15,20 +15,25 @@ import {
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { mergeFilteredHref } from "@/lib/filters/nav-links";
-import KpiCard from "@/components/KpiCard";
+import { Store } from "lucide-react";
+import StatCard from "@/components/ui/StatCard";
+import Freshness, { PeriodChip } from "@/components/ui/Freshness";
+import Note from "@/components/ui/Note";
+import Segmented from "@/components/ui/Segmented";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
+import ChannelOverview, { type CanalId, type ColunaCanal } from "@/components/canais/ChannelOverview";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import ChannelComparisonDialogContent from "@/components/ChannelComparisonDialogContent";
 import AffiliateCostsPanel from "@/components/AffiliateCostsPanel";
 import TiktokOrderDiscountsPanel from "@/components/TiktokOrderDiscountsPanel";
 import { resolveBlockPhase } from "@/lib/canais-affiliate-costs";
-import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
+import { SkeletonTableRows } from "@/components/Skeleton";
 import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
 import Disclosure from "@/components/ui/Disclosure";
-import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
-import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { fmtPeriodo, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortHeader from "@/components/ui/SortHeader";
@@ -39,6 +44,7 @@ import {
   signalTone,
   findChannelMedian,
   CHANNEL_BADGE_TONE,
+  CHANNEL_LABEL,
   type FormattedMetric,
 } from "@/lib/canais-channel-metrics";
 import {
@@ -175,16 +181,29 @@ function newBuyerPctStyle(v: number | null): string {
  * um estado paralelo de navegacao. So aparecem para canais atualmente
  * selecionados/visiveis. */
 function InternalNav({ showTiktok, showMl, showShopee }: { showTiktok: boolean; showMl: boolean; showShopee: boolean }) {
-  const linkClass = "px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+  // UX-TORRE-B2B-1: alvo de 44px explicito e a ordem nova da pagina. As
+  // ancoras de canal continuam: elas escolhem a aba do "Detalhe por canal".
+  const linkClass = "inline-flex min-h-11 items-center px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
   return (
-    <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
-      <a href="#comparativo" className={linkClass}>Comparativo</a>
+    <nav aria-label="Navegação interna da página" className="flex flex-wrap items-center gap-1 -mx-2.5">
+      <a href="#comparativo-canais" className={linkClass}>Lado a lado</a>
+      <a href="#comparativo" className={linkClass}>Marca × canal</a>
+      <a href="#afiliados" className={linkClass}>Afiliados</a>
+      <a href="#descontos-tiktok" className={linkClass}>Descontos TikTok</a>
+      <span aria-hidden="true" className="mx-1 h-4 w-px bg-line-strong" />
       {showTiktok && <a href="#tiktok-shop" className={linkClass}>TikTok Shop</a>}
       {showMl && <a href="#mercado-livre" className={linkClass}>Mercado Livre</a>}
       {showShopee && <a href="#shopee" className={linkClass}>Shopee</a>}
     </nav>
   );
 }
+
+/** Ancora de canal -> aba do detalhe. */
+const ABA_DA_ANCORA: Record<string, CanalId> = {
+  "#tiktok-shop": "tiktok",
+  "#mercado-livre": "ml",
+  "#shopee": "shopee",
+};
 
 function CanaisPageInner() {
   const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
@@ -418,25 +437,90 @@ function CanaisPageInner() {
   };
   const channelMatrixSort = useSortableTable(displayChannelRows, channelMatrixGetValue, channelMatrixColumnTypes);
 
+  // ── UX-TORRE-B2B-1: colunas do "Canais lado a lado" ──
+  // GMV e pedidos = soma das linhas marca x canal (a MESMA base da matriz);
+  // custo/Ads/frete = medianas que a API ja' entrega; compradores = KPIs de
+  // canal que a pagina ja' exibia, no MESMO formato de antes.
+  const canaisSelecionados: CanalId[] = [
+    ...(showTiktok ? (["tiktok"] as const) : []),
+    ...(showMl ? (["ml"] as const) : []),
+    ...(showShopee ? (["shopee"] as const) : []),
+  ];
+  const colunasCanal: ColunaCanal[] = canaisSelecionados.map((canal) => {
+    const linhas = displayChannelRows.filter((r) => r.channel === canal);
+    const k = displayKpis;
+    const compradores =
+      canal === "tiktok"
+        ? { novos: "N/D", recompra: "N/D", porComprador: "N/D", conversao: formatContentPctBr(k?.tiktok_conversion_rate) }
+        : canal === "ml"
+          ? {
+              novos: fmtPct(k?.ml_new_buyer_pct ?? null),
+              recompra: fmtPct(k?.ml_repeat_buyer_rate_pct ?? null),
+              porComprador: k?.ml_gmv_per_buyer != null ? fmtBrl(k.ml_gmv_per_buyer) : "—",
+              conversao: "N/D",
+            }
+          : {
+              novos: fmtPct(k?.shopee_new_buyer_pct ?? null),
+              recompra: fmtPct(k?.shopee_repeat_buyer_rate_pct ?? null),
+              porComprador: k?.shopee_gmv_per_buyer != null ? fmtBrl(k.shopee_gmv_per_buyer) : "—",
+              conversao: k?.shopee_conversion_rate != null ? fmtPct(k.shopee_conversion_rate) : "—",
+            };
+    return {
+      canal,
+      rotulo: CHANNEL_LABEL[canal],
+      gmv: linhas.reduce((s, r) => s + (r.gmv ?? 0), 0),
+      pedidos: linhas.reduce((s, r) => s + (r.orders ?? 0), 0),
+      mediana: findChannelMedian(displayChannelMedians, canal),
+      aplicavel: {
+        ads: linhas.some((r) => r.ads_applicable),
+        custo: linhas.some((r) => r.marketplace_cost_applicable),
+        frete: linhas.some((r) => r.seller_shipping_applicable),
+      },
+      disponivel: {
+        ads: linhas.some((r) => r.ads_available),
+        custo: linhas.some((r) => r.marketplace_cost_available),
+        frete: linhas.some((r) => r.seller_shipping_available),
+      },
+      novosPct: compradores.novos,
+      recompraPct: compradores.recompra,
+      gmvPorComprador: compradores.porComprador,
+      conversao: compradores.conversao,
+    };
+  });
+
+  // ── Detalhe por canal: uma aba por canal selecionado ──
+  const abasDetalhe: CanalId[] = canaisSelecionados.filter((c) => c !== "shopee" || showShopee);
+  const [abaEscolhida, setAba] = useState<CanalId>("tiktok");
+  // A ancora (#tiktok-shop, #mercado-livre, #shopee) escolhe a aba — ao
+  // carregar e ao clicar na navegacao interna.
+  useEffect(() => {
+    const aplicar = () => {
+      const ancora = window.location.hash;
+      const aba = ABA_DA_ANCORA[ancora];
+      if (!aba) return;
+      setAba(aba);
+      // A secao da aba so' existe depois do render: o navegador ja' tentou
+      // rolar e nao achou o alvo. Rola de novo quando ela montar.
+      window.setTimeout(() => document.getElementById(ancora.slice(1))?.scrollIntoView({ block: "start" }), 0);
+    };
+    aplicar();
+    window.addEventListener("hashchange", aplicar);
+    return () => window.removeEventListener("hashchange", aplicar);
+  }, []);
+  // Aba escolhida fora do filtro atual cai na primeira disponivel.
+  const abaAtiva: CanalId = abasDetalhe.includes(abaEscolhida) ? abaEscolhida : abasDetalhe[0] ?? "tiktok";
+
   return (
     <PageContainer>
       <PageHeader
         title="Canais"
         subtitle="Comparar TikTok Shop, Mercado Livre e Shopee — e investigar marca × canal."
-        scopeLine={
+        icon={Store}
+        meta={
           <>
-            Período: {periodLabel}
-            {dataIsFresh && refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+            <PeriodChip label={periodLabel} />
+            <Freshness live={dataIsFresh ? isLive : null} refreshedAt={dataIsFresh ? refreshedAt : null} loading={loading} />
           </>
-        }
-        status={
-          dataIsFresh ? (
-            <LiveStatusBadge live={isLive} />
-          ) : loading ? (
-            <span className="text-xs text-ink-faint bg-raised border border-line rounded-lg px-3 py-1.5 font-medium">
-              Atualizando dados...
-            </span>
-          ) : null
         }
         filters={<GlobalFilterControls filters={filters} onChange={setFilters} hideCompare loading={loading} />}
       />
@@ -447,26 +531,16 @@ function CanaisPageInner() {
       {dataIsFresh && (() => {
         const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
         const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
-        return note && (
-          <div className="bg-warn-soft border border-warn/35 rounded-2xl p-3">
-            <p className="text-xs text-warn-ink">{note}</p>
-          </div>
-        );
+        return note && <Note tom="atencao">{note}</Note>;
       })()}
 
       {error && (
-        <div className="bg-crit-soft border border-crit/35 rounded-2xl p-4 flex items-center justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold text-crit-ink uppercase tracking-wider mb-1">Erro de carregamento</p>
-            <p className="text-sm text-crit-ink">{error}</p>
-          </div>
-          <button
-            onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
-            className="text-xs font-semibold text-crit-ink border border-crit/35 rounded-lg px-3 py-1.5 hover:bg-crit-soft transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crit/30"
-          >
-            Tentar novamente
-          </button>
-        </div>
+        <StateBlock
+          tipo="erro"
+          titulo="Erro de carregamento"
+          descricao={error}
+          acao={<RetryButton onClick={() => { setError(null); setRetryKey((k) => k + 1); }} />}
+        />
       )}
 
       <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -474,187 +548,20 @@ function CanaisPageInner() {
       </span>
 
       {isEmpty && (
-        <div className="bg-surface border border-line rounded-2xl shadow-sm px-6 py-12 text-center">
-          <p className="text-ink-faint text-sm font-medium">Sem dados no período e filtros selecionados.</p>
-          <p className="text-ink-faint text-xs mt-1">Tente ampliar o intervalo de datas ou revisar canal/marca.</p>
-        </div>
+        <StateBlock
+          tipo="vazio"
+          titulo="Sem dados no período e filtros selecionados."
+          descricao="Tente ampliar o intervalo de datas ou revisar canal/marca."
+        />
       )}
 
-      {/* ── Resumo TikTok ── */}
-      {showTiktok && (
-        <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo do TikTok</h2>
-            <p className="text-xs text-ink-faint">
-              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
-              TikTok. Não representa participação nas vendas totais.
-            </p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Vídeo — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_video_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_video != null ? fmtBrl(displayKpis.tiktok_gmv_video) : undefined}
-                  accent={MIX_SERIE.video}
-                />
-                <KpiCard
-                  label="Live — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_live_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_live != null ? fmtBrl(displayKpis.tiktok_gmv_live) : undefined}
-                  accent={MIX_SERIE.live}
-                />
-                <KpiCard
-                  label="Card/vitrine — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_card_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_card != null ? fmtBrl(displayKpis.tiktok_gmv_card) : undefined}
-                  accent={MIX_SERIE.card}
-                />
-                <KpiCard
-                  label="Conversao TikTok"
-                  value={formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
-                  subvalue={displayKpis?.tiktok_customers != null ? `${fmtNumber(displayKpis.tiktok_customers)} compradores (soma diária)` : undefined}
-                  accent="bg-canal-tiktok"
-                />
-              </>
-            )}
-          </div>
-          {/* Faixa de reconciliacao — diagnostico NEUTRO entre duas linhagens.
-            * Fica FORA da barra de composicao de proposito: a divergencia nao e'
-            * um quarto segmento do mix. Sem cor de julgamento (positivo nao e'
-            * "bom", negativo nao e' "ruim") e sem a palavra cobertura/share. */}
-          {dataIsFresh && (
-            <div className="bg-raised border border-line rounded-xl px-4 py-3 flex flex-wrap items-baseline gap-x-6 gap-y-2">
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-ink-faint">Base de conteúdo:</span>
-                <span className="text-xs font-semibold tabular-nums text-ink-muted">
-                  {tkMixTotal.base != null ? fmtBrl(tkMixTotal.base) : "N/D"}
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-ink-faint">GMV comercial TikTok:</span>
-                <span className="text-xs font-semibold tabular-nums text-ink-muted">
-                  {displayKpis?.tiktok_gmv != null ? fmtBrl(displayKpis.tiktok_gmv) : "N/D"}
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-ink-faint">Diferença entre base de conteúdo e GMV comercial:</span>
-                <span className="text-xs font-semibold tabular-nums text-ink-muted">
-                  {formatDivergenceBr(tkMixTotal.divergencePct)}
-                </span>
-              </div>
-              {/* UX-TORRE-2: metodologia, nao ressalva de numero — vai para o
-                  recolhivel com as MESMAS palavras. */}
-              <Disclosure className="basis-full -ml-2">
-                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
-                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
-                margem nem severidade.
-              </Disclosure>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ── Resumo Mercado Livre ── */}
-      {showMl && (
-        <section id="mercado-livre" aria-labelledby="mercado-livre-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="mercado-livre-heading" className="text-sm font-semibold text-ink-muted">Mercado Livre</h2>
-            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Novos Compradores ML"
-                  value={fmtPct(displayKpis?.ml_new_buyer_pct ?? null)}
-                  subvalue={displayKpis?.ml_new_buyers != null ? `${fmtNumber(displayKpis.ml_new_buyers)} novos` : undefined}
-                  accent="bg-canal-ml"
-                />
-                <KpiCard
-                  label="Recompra ML"
-                  value={fmtPct(displayKpis?.ml_repeat_buyer_rate_pct ?? null)}
-                  subvalue={displayKpis?.ml_repeat_buyers != null ? `${fmtNumber(displayKpis.ml_repeat_buyers)} recorrentes` : undefined}
-                  accent="bg-canal-ml"
-                />
-                <KpiCard
-                  label="GMV por Comprador ML"
-                  value={displayKpis?.ml_gmv_per_buyer != null ? fmtBrl(displayKpis.ml_gmv_per_buyer) : "—"}
-                  subvalue={displayKpis?.ml_unique_buyers != null ? `${fmtNumber(displayKpis.ml_unique_buyers)} compradores (soma diária)` : undefined}
-                  accent="bg-canal-ml"
-                />
-              </>
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* ── Resumo Shopee — só quando há dados ── */}
-      {showShopee && hasShopeeData && (
-        <section id="shopee" aria-labelledby="shopee-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="shopee-heading" className="text-sm font-semibold text-ink-muted">Shopee</h2>
-            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Novos Compradores Shopee"
-                  value={fmtPct(displayKpis?.shopee_new_buyer_pct ?? null)}
-                  subvalue={displayKpis?.shopee_new_buyers != null ? `${fmtNumber(displayKpis.shopee_new_buyers)} novos` : undefined}
-                  accent="bg-canal-shopee"
-                />
-                <KpiCard
-                  label="Recompra Shopee"
-                  value={fmtPct(displayKpis?.shopee_repeat_buyer_rate_pct ?? null)}
-                  subvalue={displayKpis?.shopee_repeat_buyers != null ? `${fmtNumber(displayKpis.shopee_repeat_buyers)} recorrentes` : undefined}
-                  accent="bg-canal-shopee"
-                />
-                <KpiCard
-                  label="GMV / Comprador Shopee"
-                  value={displayKpis?.shopee_gmv_per_buyer != null ? fmtBrl(displayKpis.shopee_gmv_per_buyer) : "—"}
-                  subvalue={displayKpis?.shopee_unique_buyers != null ? `${fmtNumber(displayKpis.shopee_unique_buyers)} compradores (soma diária)` : undefined}
-                  accent="bg-canal-shopee"
-                />
-                <KpiCard
-                  label="Visitantes Shopee"
-                  value={displayKpis?.shopee_visitors != null ? fmtNumber(displayKpis.shopee_visitors) : "—"}
-                  subvalue="Visitas ao perfil no mês"
-                  accent="bg-canal-shopee"
-                />
-                <KpiCard
-                  label="Conversão Shopee"
-                  value={displayKpis?.shopee_conversion_rate != null ? fmtPct(displayKpis.shopee_conversion_rate) : "—"}
-                  subvalue="Compradores / Visitantes"
-                  accent="bg-canal-shopee"
-                />
-              </>
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
-      {filter.length === 1 && showShopee && dataIsFresh && !hasShopeeData && (
-        <div id="shopee" className="scroll-mt-24 bg-surface border border-dashed border-line-strong rounded-2xl p-6 flex flex-col items-center gap-2 text-center">
-          <p className="text-sm font-semibold text-ink-muted">Shopee — Dados de canal em integração</p>
-          <p className="text-xs text-ink-faint max-w-md">
-            O perfil de compradores e métricas de canal da Shopee serão disponibilizados assim que o endpoint da API for integrado.
-            Os dados de GMV e pedidos já estão disponíveis na visão Gerencial.
-          </p>
-        </div>
+      {/* ── Canais lado a lado (UX-TORRE-B2B-1) ── */}
+      {!error && !isEmpty && colunasCanal.length > 0 && (
+        <ChannelOverview colunas={colunasCanal} fmtBrl={fmtBrl} fmtNumber={fmtNumber} carregando={!dataIsFresh} />
       )}
 
       {/* ── Comparativo entre Canais: Ads, Custo e Frete (Gate 2) ── */}
-      <div id="comparativo" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+      <div id="comparativo" className="scroll-mt-24 bg-surface border border-line rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-line">
           <h2 className="text-sm font-semibold text-ink-muted">Comparativo entre Canais — Ads, Custo e Frete</h2>
           <p className="text-xs text-ink-faint mt-0.5">
@@ -663,7 +570,7 @@ function CanaisPageInner() {
           </p>
         </div>
         <TableScrollHint>
-          <table className="w-full text-sm" aria-label="Comparativo entre canais">
+          <table className="w-full text-data" aria-label="Comparativo entre canais">
             <thead>
               <tr className="bg-raised">
                 <SortHeader rotulo="Marca" coluna="brand" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} alinhamento="left" />
@@ -693,24 +600,24 @@ function CanaisPageInner() {
               ) : (
                 channelMatrixSort.sortedRows.map((row, i) => (
                   <tr key={`${row.brand}-${row.channel}`} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
-                    <td className="px-6 py-3.5 font-semibold text-ink-muted whitespace-nowrap">{row.label}</td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
+                    <td className="px-4 py-2.5 font-semibold text-ink-muted whitespace-nowrap">{row.label}</td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
                       <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${CHANNEL_BADGE_TONE[row.channel] ?? ""}`}>
                         {row.channel_label}
                       </span>
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium whitespace-nowrap">{fmtBrl(row.gmv)}</td>
-                    <td className="px-4 py-3.5 text-right tabular-nums text-ink-faint">{fmtNumber(row.orders)}</td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium whitespace-nowrap">{fmtBrl(row.gmv)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-ink-faint">{fmtNumber(row.orders)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.ads_gmv_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.roas} applicable={row.ads_applicable} available={row.ads_available} format={fmtRoas} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.acos_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell
                         value={row.marketplace_cost_pct}
                         applicable={row.marketplace_cost_applicable}
@@ -719,10 +626,10 @@ function CanaisPageInner() {
                         warning={row.data_warning}
                       />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.seller_shipping_pct} applicable={row.seller_shipping_applicable} available={row.seller_shipping_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-4 py-2.5 min-w-[15rem]">
                       <div className="flex flex-wrap gap-1">
                         {row.signals.length === 0 ? (
                           <span className="text-ink-faint text-xs">—</span>
@@ -735,7 +642,7 @@ function CanaisPageInner() {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-4 py-2.5">
                       <button
                         type="button"
                         onClick={() => setDetailRow(row)}
@@ -797,9 +704,109 @@ function CanaisPageInner() {
         />
       </div>
 
+      {/* ── Detalhe por canal (UX-TORRE-B2B-1) ──
+          Os tres blocos por canal eram empilhados (~2.600px no desktop). Agora
+          uma aba por canal SELECIONADO; o conteudo de cada aba e' o mesmo de
+          antes, com os mesmos textos, tabelas, totais e legendas. A ancora
+          #tiktok-shop / #mercado-livre / #shopee continua funcionando: ela
+          escolhe a aba ao carregar. */}
+      {!isEmpty && abasDetalhe.length > 0 && (
+        <section id="detalhe-canal" aria-labelledby="detalhe-canal-heading" className="scroll-mt-24 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
+            <h2 id="detalhe-canal-heading" className="text-base font-semibold text-ink">Detalhe por canal</h2>
+            {abasDetalhe.length > 1 && (
+              <Segmented
+                rotulo="Canal do detalhe"
+                valor={abaAtiva}
+                aoEscolher={setAba}
+                opcoes={abasDetalhe.map((a) => ({ valor: a, texto: CHANNEL_LABEL[a] }))}
+              />
+            )}
+          </div>
+
+          {abaAtiva === "tiktok" && (
+            <>
+      {/* ── Resumo TikTok ── */}
+      {showTiktok && (
+        <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo do TikTok</h2>
+            <p className="text-xs text-ink-faint">
+              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
+              TikTok. Não representa participação nas vendas totais.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Vídeo — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_video_pct)}
+                  contexto={displayKpis?.tiktok_gmv_video != null ? fmtBrl(displayKpis.tiktok_gmv_video) : undefined}
+                  canal={MIX_SERIE.video}
+                />
+                <StatCard
+                  rotulo="Live — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_live_pct)}
+                  contexto={displayKpis?.tiktok_gmv_live != null ? fmtBrl(displayKpis.tiktok_gmv_live) : undefined}
+                  canal={MIX_SERIE.live}
+                />
+                <StatCard
+                  rotulo="Card/vitrine — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_card_pct)}
+                  contexto={displayKpis?.tiktok_gmv_card != null ? fmtBrl(displayKpis.tiktok_gmv_card) : undefined}
+                  canal={MIX_SERIE.card}
+                />
+                <StatCard
+                  rotulo="Conversao TikTok"
+                  valor={formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
+                  contexto={displayKpis?.tiktok_customers != null ? `${fmtNumber(displayKpis.tiktok_customers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-tiktok"
+                />
+              </>
+            )}
+          </div>
+          {/* Faixa de reconciliacao — diagnostico NEUTRO entre duas linhagens.
+            * Fica FORA da barra de composicao de proposito: a divergencia nao e'
+            * um quarto segmento do mix. Sem cor de julgamento (positivo nao e'
+            * "bom", negativo nao e' "ruim") e sem a palavra cobertura/share. */}
+          {dataIsFresh && (
+            <div className="bg-raised border border-line rounded-xl px-4 py-3 flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">Base de conteúdo:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {tkMixTotal.base != null ? fmtBrl(tkMixTotal.base) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">GMV comercial TikTok:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {displayKpis?.tiktok_gmv != null ? fmtBrl(displayKpis.tiktok_gmv) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">Diferença entre base de conteúdo e GMV comercial:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {formatDivergenceBr(tkMixTotal.divergencePct)}
+                </span>
+              </div>
+              {/* UX-TORRE-2: metodologia, nao ressalva de numero — vai para o
+                  recolhivel com as MESMAS palavras. */}
+              <Disclosure className="basis-full -ml-2">
+                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
+                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
+                margem nem severidade.
+              </Disclosure>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ── Tabela: Mix do GMV de conteudo do TikTok por marca ── */}
       {showTiktok && (
-        <div className="bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line flex items-start justify-between">
             <div>
               <h2 className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo por marca</h2>
@@ -816,7 +823,7 @@ function CanaisPageInner() {
           </div>
           <TableScrollHint>
             <table
-              className="w-full text-sm"
+              className="w-full text-data"
               aria-label="Mix do GMV de conteúdo por marca — vídeo, live e card/vitrine como composição interna da base de conteúdo"
             >
               <thead>
@@ -849,7 +856,7 @@ function CanaisPageInner() {
                       const partPct = tkGmvTotal > 0 ? ((b.tiktok_gmv ?? 0) / tkGmvTotal) * 100 : null;
                       return (
                         <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)}
                               className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
@@ -857,11 +864,11 @@ function CanaisPageInner() {
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className="text-ink-faint text-xs">{formatContentPctBr(partPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5">
+                          <td className="px-4 py-2.5">
                             <div className="flex flex-col gap-1">
                               <ContentMixBar
                                 mix={mix}
@@ -881,25 +888,25 @@ function CanaisPageInner() {
                               </span>
                             </div>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "video" ? CHANNEL_STYLE.video : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_video_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "live" ? CHANNEL_STYLE.live : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_live_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "card" ? CHANNEL_STYLE.card : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_card_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-faint">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-faint">
                             {b.tiktok_visitors != null ? fmtNumber(b.tiktok_visitors) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${convRateStyle(b.tiktok_conversion_rate)}`}>
                               {formatContentPctBr(b.tiktok_conversion_rate)}
                             </span>
@@ -955,16 +962,56 @@ function CanaisPageInner() {
           </div>
         </div>
       )}
+            </>
+          )}
+
+          {abaAtiva === "ml" && (
+            <>
+      {/* ── Resumo Mercado Livre ── */}
+      {showMl && (
+        <section id="mercado-livre" aria-labelledby="mercado-livre-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="mercado-livre-heading" className="text-sm font-semibold text-ink-muted">Mercado Livre</h2>
+            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Novos Compradores ML"
+                  valor={fmtPct(displayKpis?.ml_new_buyer_pct ?? null)}
+                  contexto={displayKpis?.ml_new_buyers != null ? `${fmtNumber(displayKpis.ml_new_buyers)} novos` : undefined}
+                  canal="bg-canal-ml"
+                />
+                <StatCard
+                  rotulo="Recompra ML"
+                  valor={fmtPct(displayKpis?.ml_repeat_buyer_rate_pct ?? null)}
+                  contexto={displayKpis?.ml_repeat_buyers != null ? `${fmtNumber(displayKpis.ml_repeat_buyers)} recorrentes` : undefined}
+                  canal="bg-canal-ml"
+                />
+                <StatCard
+                  rotulo="GMV por Comprador ML"
+                  valor={displayKpis?.ml_gmv_per_buyer != null ? fmtBrl(displayKpis.ml_gmv_per_buyer) : "—"}
+                  contexto={displayKpis?.ml_unique_buyers != null ? `${fmtNumber(displayKpis.ml_unique_buyers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-ml"
+                />
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* ── Tabela: Perfil de compradores ML ── */}
       {showMl && (
-        <div className="bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line">
             <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores ML por Marca</h2>
             <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
           </div>
           <TableScrollHint>
-            <table className="w-full text-sm" aria-label="Perfil de compradores ML por marca">
+            <table className="w-full text-data" aria-label="Perfil de compradores ML por marca">
               <thead>
                 <tr className="bg-raised">
                   <SortHeader rotulo="Marca" coluna="brand" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} alinhamento="left" />
@@ -989,7 +1036,7 @@ function CanaisPageInner() {
                         (b.ml_unique_buyers && b.ml_new_buyers ? (b.ml_new_buyers / b.ml_unique_buyers) * 100 : null);
                       return (
                         <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)}
                               className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
@@ -997,28 +1044,28 @@ function CanaisPageInner() {
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.ml_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.ml_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className="text-ink-faint text-xs">{partPct.toFixed(1)}%</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_unique_buyers != null ? fmtNumber(b.ml_unique_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(newPct)}`}>{fmtPct(newPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_new_buyers != null ? fmtNumber(b.ml_new_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_repeat_buyers != null ? fmtNumber(b.ml_repeat_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(b.ml_repeat_buyer_rate_pct)}`}>
                               {fmtPct(b.ml_repeat_buyer_rate_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">
                             {b.ml_gmv_per_buyer != null ? fmtBrl(b.ml_gmv_per_buyer) : "—"}
                           </td>
                         </tr>
@@ -1070,15 +1117,92 @@ function CanaisPageInner() {
         </div>
       )}
 
+      {/* ── Insight: ML como canal de aquisicao ── */}
+      {showMl && dataIsFresh && mlBrands.length > 0 && mlNewPctTotal >= 80 && (
+        <div className="bg-raised border border-line rounded-xl p-4">
+          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
+            Insight — ML como canal de aquisicao
+          </p>
+          <p className="text-sm text-ink">
+            {mlNewPctTotal.toFixed(0)}% dos compradores ML em {periodLabel} sao novos — sem historico previo com a marca.
+            O ML opera como canal de aquisicao primaria, nao de retencao. Recompra media de{" "}
+            {mlRepeatPctTotal.toFixed(1)}% indica oportunidade de programas de fidelidade pos-compra.
+          </p>
+        </div>
+      )}
+            </>
+          )}
+
+          {abaAtiva === "shopee" && (
+            <>
+      {/* ── Resumo Shopee — só quando há dados ── */}
+      {showShopee && hasShopeeData && (
+        <section id="shopee" aria-labelledby="shopee-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="shopee-heading" className="text-sm font-semibold text-ink-muted">Shopee</h2>
+            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Novos Compradores Shopee"
+                  valor={fmtPct(displayKpis?.shopee_new_buyer_pct ?? null)}
+                  contexto={displayKpis?.shopee_new_buyers != null ? `${fmtNumber(displayKpis.shopee_new_buyers)} novos` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Recompra Shopee"
+                  valor={fmtPct(displayKpis?.shopee_repeat_buyer_rate_pct ?? null)}
+                  contexto={displayKpis?.shopee_repeat_buyers != null ? `${fmtNumber(displayKpis.shopee_repeat_buyers)} recorrentes` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="GMV / Comprador Shopee"
+                  valor={displayKpis?.shopee_gmv_per_buyer != null ? fmtBrl(displayKpis.shopee_gmv_per_buyer) : "—"}
+                  contexto={displayKpis?.shopee_unique_buyers != null ? `${fmtNumber(displayKpis.shopee_unique_buyers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Visitantes Shopee"
+                  valor={displayKpis?.shopee_visitors != null ? fmtNumber(displayKpis.shopee_visitors) : "—"}
+                  contexto="Visitas ao perfil no mês"
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Conversão Shopee"
+                  valor={displayKpis?.shopee_conversion_rate != null ? fmtPct(displayKpis.shopee_conversion_rate) : "—"}
+                  contexto="Compradores / Visitantes"
+                  canal="bg-canal-shopee"
+                />
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
+      {filter.length === 1 && showShopee && dataIsFresh && !hasShopeeData && (
+        <div id="shopee" className="scroll-mt-24 bg-surface border border-dashed border-line-strong rounded-xl p-6 flex flex-col items-center gap-2 text-center">
+          <p className="text-sm font-semibold text-ink-muted">Shopee — Dados de canal em integração</p>
+          <p className="text-xs text-ink-faint max-w-md">
+            O perfil de compradores e métricas de canal da Shopee serão disponibilizados assim que o endpoint da API for integrado.
+            Os dados de GMV e pedidos já estão disponíveis na visão Gerencial.
+          </p>
+        </div>
+      )}
+
       {/* ── Tabela: Perfil de compradores Shopee — só quando há dados ── */}
       {showShopee && hasShopeeData && (
-        <div className="bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line">
             <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores Shopee por Marca</h2>
             <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
           </div>
           <TableScrollHint>
-            <table className="w-full text-sm" aria-label="Perfil de compradores Shopee por marca">
+            <table className="w-full text-data" aria-label="Perfil de compradores Shopee por marca">
               <thead>
                 <tr className="bg-raised">
                   <SortHeader rotulo="Marca" coluna="brand" sort={shSort.sort} aoOrdenar={shSort.toggleSort} alinhamento="left" />
@@ -1105,7 +1229,7 @@ function CanaisPageInner() {
                         (b.shopee_unique_buyers && b.shopee_new_buyers ? (b.shopee_new_buyers / b.shopee_unique_buyers) * 100 : null);
                       return (
                         <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)}
                               className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
@@ -1113,34 +1237,34 @@ function CanaisPageInner() {
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.shopee_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.shopee_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className="text-ink-faint text-xs">{partPct.toFixed(1)}%</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_unique_buyers != null ? fmtNumber(b.shopee_unique_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(newPct)}`}>{fmtPct(newPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_new_buyers != null ? fmtNumber(b.shopee_new_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_repeat_buyers != null ? fmtNumber(b.shopee_repeat_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(b.shopee_repeat_buyer_rate_pct)}`}>
                               {fmtPct(b.shopee_repeat_buyer_rate_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted font-medium">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">
                             {b.shopee_gmv_per_buyer != null ? fmtBrl(b.shopee_gmv_per_buyer) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-ink-muted">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_visitors != null ? fmtNumber(b.shopee_visitors) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             {b.shopee_conversion_rate != null
                               ? <span className="text-xs px-1.5 py-0.5 rounded text-ink-muted">{fmtPct(b.shopee_conversion_rate)}</span>
                               : "—"}
@@ -1202,23 +1326,9 @@ function CanaisPageInner() {
         </div>
       )}
 
-      {/* ── Insight: ML como canal de aquisicao ── */}
-      {showMl && dataIsFresh && mlBrands.length > 0 && mlNewPctTotal >= 80 && (
-        <div className="bg-raised border border-line rounded-2xl p-4">
-          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
-            Insight — ML como canal de aquisicao
-          </p>
-          <p className="text-sm text-ink">
-            {mlNewPctTotal.toFixed(0)}% dos compradores ML em {periodLabel} sao novos — sem historico previo com a marca.
-            O ML opera como canal de aquisicao primaria, nao de retencao. Recompra media de{" "}
-            {mlRepeatPctTotal.toFixed(1)}% indica oportunidade de programas de fidelidade pos-compra.
-          </p>
-        </div>
-      )}
-
       {/* ── Insight: Shopee como canal de aquisicao ── */}
       {showShopee && hasShopeeData && dataIsFresh && shBrands.length > 0 && shNewPctTotal >= 80 && (
-        <div className="bg-raised border border-line rounded-2xl p-4">
+        <div className="bg-raised border border-line rounded-xl p-4">
           <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
             Insight — Shopee como canal de aquisicao
           </p>
@@ -1227,6 +1337,10 @@ function CanaisPageInner() {
             Recompra media de {shRepeatPctTotal.toFixed(1)}% — perfil de aquisicao similar ao ML.
           </p>
         </div>
+      )}
+            </>
+          )}
+        </section>
       )}
 
       <KpiDrilldownDialog
