@@ -8,6 +8,7 @@ import {
   type ProdutosMLResponse, type ProdutosTikTokResponse, type ProdutosShopeeListResponse,
   type ProdutosMLSummary, type ProdutosChannelSummary,
 } from "@/lib/api-client";
+import { scopeUnavailableReason, partialTotalNote } from "@/lib/scope-quality-display";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
@@ -206,6 +207,10 @@ function ProdutosPageInner() {
   const mlDisplaySummary = mlSummaryAvail === "available" ? mlSummaryState.data : null;
   const tkDisplaySummary = tkSummaryAvail === "available" ? tkSummaryState.data : null;
   const shDisplaySummary = shSummaryAvail === "available" ? shSummaryState.data : null;
+  // Lidos do selo, nunca recalculados aqui: a tela nao decide sozinha o que e
+  // ausencia nem o que e total parcial.
+  const shUnavailable = scopeUnavailableReason(shDisplaySummary?.quality);
+  const shPartialNote = partialTotalNote(shDisplaySummary?.quality);
 
   // "Ao vivo" reflete exclusivamente o ultimo resultado do PROPRIO canal, e
   // somente quando a tabela da aba ativa esta "available" para a identidade
@@ -581,7 +586,8 @@ function ProdutosPageInner() {
                 {TK_SH_BRANDS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
               </ProductSelect>
               <PeriodSelector value={period} onChange={setPeriod} months={monthOptions} />
-              <ProductCount total={shDisplayData?.total ?? null} />
+              {/* Ausencia nao vira "0 produtos": sem valor confiavel, o contador some. */}
+              <ProductCount total={shUnavailable ? null : shDisplayData?.total ?? null} />
             </ProductFilterBar>
 
             {/* Escopo atual — linha compacta (Task 2) */}
@@ -606,7 +612,8 @@ function ProdutosPageInner() {
               loading={shSummaryAvail === "loading"}
               activeBucket={shBucket}
               onSelectBucket={setShBucket}
-              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(shDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(shDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
+              unavailableReason={shUnavailable}
+              scopeNote={`${shPartialNote ? `${shPartialNote} ` : ""}Periodo: ${periodLabel}${zeroGmvNote(shDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(shDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
             />
 
             <div className="flex items-center px-6 py-2 border-b border-violet-50">

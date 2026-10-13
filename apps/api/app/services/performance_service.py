@@ -2074,7 +2074,11 @@ _SCOPE_QUALITY_SQL = """
         SELECT COUNT(*)                              AS rows_present,
                COUNT(*) FILTER (WHERE gmv > 0)       AS eligible_rows,
                COALESCE(SUM(gmv), 0)                 AS prod_gmv,
-               COUNT(DISTINCT brand)                 AS brands_present,
+               -- So conta a marca que TEM valor. Linhas carregadas com GMV
+               -- zero (kokeshi ago/2026: 63 linhas, nenhum Concluido) nao sao
+               -- dado de produto, e conta-las fazia o total parcial passar
+               -- por "5 de 5".
+               COUNT(DISTINCT brand) FILTER (WHERE gmv > 0) AS brands_present,
                MAX(ingested_at)                      AS loaded_at
           FROM """ + _SH_PROD_ACTIVE_FACT + """
          WHERE ref_month = :ref_month
@@ -2119,6 +2123,113 @@ _SCOPE_QUALITY_SQL = """
      CROSS JOIN daily d
       LEFT JOIN sync k ON TRUE
 """
+
+
+#: Uma linha por marca do escopo. Responde as perguntas que o total agregado
+#: esconde: quais marcas tem valor, quais a diaria diz que deveriam ter, de que
+#: procedencia cada uma e lida e QUANDO cada uma foi publicada. Nao soma GMV de
+#: produto nem expoe o GMV da diaria: so presenca, procedencia e relogio.
+#:
+#: `last_published_at` e a ultima publicacao da procedencia ATIVA em qualquer
+#: competencia. E o que impede uma marca ausente do mes de sumir da linha de
+#: datas — a kokeshi sem setembro continua aparecendo como "publicada em 05/08".
+_SCOPE_BRANDS_SQL = """
+    WITH brands(brand) AS (SELECT unnest(CAST(:brands AS text[]))),
+    prod AS (
+        SELECT brand,
+               COUNT(*)                        AS rows_present,
+               COUNT(*) FILTER (WHERE gmv > 0) AS eligible_rows,
+               MAX(ingested_at)                AS loaded_at
+          FROM """ + _SH_PROD_ACTIVE_FACT + """
+         WHERE ref_month = :ref_month
+         GROUP BY brand
+    ),
+    last_pub AS (
+        SELECT brand, MAX(ingested_at) AS last_published_at
+          FROM """ + _SH_PROD_ACTIVE_FACT + """
+         GROUP BY brand
+    ),
+    daily AS (
+        SELECT l.brand_key AS brand, COALESCE(SUM(f.gmv), 0) > 0 AS expected
+          FROM marts.fact_marketplace_daily_performance f
+          JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+         WHERE f.marketplace_id = :shopee_id
+           AND f.date BETWEEN :month_start AND :month_end
+         GROUP BY l.brand_key
+    )
+    SELECT b.brand,
+           COALESCE(m.source, 'manual_export') AS active_source,
+           COALESCE(p.rows_present, 0)         AS rows_present,
+           COALESCE(p.eligible_rows, 0)        AS eligible_rows,
+           p.loaded_at,
+           lp.last_published_at,
+           COALESCE(d.expected, FALSE)         AS expected
+      FROM brands b
+      LEFT JOIN marts.shopee_product_source_mode m ON m.brand = b.brand
+      LEFT JOIN prod p      ON p.brand = b.brand
+      LEFT JOIN last_pub lp ON lp.brand = b.brand
+      LEFT JOIN daily d     ON d.brand = b.brand
+     ORDER BY b.brand
+"""
+
+BRAND_WITH_DATA = "with_data"
+BRAND_ZERO_VALUE = "zero_value"
+BRAND_ABSENT = "absent"
+
+
+def _brand_coverage(rows: list[dict]) -> dict | None:
+    """Agrega o detalhe por marca. `None` quando a consulta nao devolveu marca
+    nenhuma — "nao medido", nunca "tudo certo"."""
+    if not rows:
+        return None
+    brands = []
+    for r in rows:
+        rows_present = int(r.get("rows_present") or 0)
+        eligible = int(r.get("eligible_rows") or 0)
+        status = (BRAND_WITH_DATA if eligible > 0
+                  else BRAND_ZERO_VALUE if rows_present > 0 else BRAND_ABSENT)
+        in_scope = r.get("loaded_at")
+        published = in_scope or r.get("last_published_at")
+        brands.append({
+            "brand": r["brand"],
+            "active_source": r.get("active_source") or "manual_export",
+            "expected": bool(r.get("expected")),
+            "status": status,
+            "rows_present": rows_present,
+            "eligible_rows": eligible,
+            "published_at": published.isoformat() if published is not None else None,
+            #: False = a data e a ultima publicacao da fonte ativa em OUTRA
+            #: competencia, porque esta nao tem linha nenhuma da marca.
+            "published_in_scope": in_scope is not None,
+        })
+    expected = [b["brand"] for b in brands if b["expected"]]
+    with_data = [b["brand"] for b in brands if b["status"] == BRAND_WITH_DATA]
+    missing = [b["brand"] for b in brands
+               if b["expected"] and b["status"] != BRAND_WITH_DATA]
+    # O relogio considera toda marca que pesa no escopo: as esperadas e as que
+    # tem linha. Uma marca sem venda e sem linha nao data nada.
+    datadas = [b for b in brands
+               if (b["expected"] or b["rows_present"] > 0) and b["published_at"]]
+    oldest = min((b["published_at"] for b in datadas), default=None)
+    newest = max((b["published_at"] for b in datadas), default=None)
+    return {
+        "brands": brands,
+        "expected": expected,
+        "with_data": with_data,
+        "missing": missing,
+        "total_is_partial": bool(missing),
+        "oldest_published_at": oldest,
+        "oldest_published_brands": [b["brand"] for b in datadas
+                                    if b["published_at"] == oldest],
+        "newest_published_at": newest,
+    }
+
+
+def _fmt_dia(iso: str | None) -> str:
+    return date.fromisoformat(iso[:10]).strftime("%d/%m/%Y") if iso else "data desconhecida"
+
+
+_SOURCE_LABEL = {"api": "API Shopee", "manual_export": "export manual"}
 
 
 def _warn(code: str, severity: str, message: str) -> dict:
@@ -2192,6 +2303,27 @@ def get_shopee_scope_quality(
     src_min = row.get("source_min_date")
     src_max = row.get("source_max_date")
     ever_loaded = row.get("ever_loaded")
+
+    scope_brands = [effective_brand] if effective_brand else sorted(_SH_BRANDS)
+    coverage = _brand_coverage([
+        dict(r) for r in db.execute(text(_SCOPE_BRANDS_SQL), {
+            "brands": scope_brands, "ref_month": ref_month,
+            "month_start": month_start, "month_end": month_end,
+            "shopee_id": SHOPEE_ID,
+        }).mappings().all()
+    ])
+
+    # A auditoria consultada acima e a do sync do EXPORT MANUAL — ela nao sabe
+    # nada da procedencia `api`. Usa-la para uma marca ligada na API afirmava
+    # "nunca foi carregada" ao lado de 133 produtos e R$ 299 mil (apice,
+    # set/2026). Por isso: marca na API prova a carga pelas proprias linhas; o
+    # historico do export so vale para as marcas que leem o export.
+    manual_brands: list[str] = []
+    if coverage is not None:
+        manual_brands = [b["brand"] for b in coverage["brands"]
+                         if b["active_source"] == "manual_export"]
+        if not manual_brands:
+            ever_loaded = rows_present > 0
 
     # --- eixo 1: historico da fonte ---------------------------------------
     # Responde "ja foi carregada alguma vez?", nunca "esta atualizada?".
@@ -2272,7 +2404,37 @@ def get_shopee_scope_quality(
 
     # --- avisos ------------------------------------------------------------
     warnings: list[dict] = []
-    if source_status == SOURCE_NEVER_LOADED:
+    if coverage is not None and coverage["missing"] and effective_brand is None:
+        warnings.append(_warn(
+            "shopee_produtos_total_parcial", "critical",
+            f"Total PARCIAL: {len(coverage['with_data'])} de "
+            f"{len(coverage['expected'])} marcas esperadas tem valor confiavel. "
+            f"Fora do total: {', '.join(coverage['missing'])}. O numero exibido "
+            f"NAO e o consolidado da Shopee."))
+    if coverage is not None:
+        for b in coverage["brands"]:
+            if b["brand"] not in coverage["missing"]:
+                continue
+            fonte = _SOURCE_LABEL.get(b["active_source"], b["active_source"])
+            quando = (f"publicacao desta competencia em {_fmt_dia(b['published_at'])}"
+                      if b["published_in_scope"]
+                      else f"ultima publicacao da fonte ativa em "
+                           f"{_fmt_dia(b['published_at'])}")
+            if b["status"] == BRAND_ZERO_VALUE:
+                motivo = (f"{b['rows_present']} linhas carregadas, todas com GMV "
+                          f"zero — nenhum pedido Concluido nessa carga")
+            else:
+                motivo = "nenhuma linha de produto nesta competencia"
+            warnings.append(_warn(
+                "shopee_produtos_marca_sem_valor_confiavel", "critical",
+                f"{b['brand']} sem valor confiavel ({fonte}): {motivo}; "
+                f"{quando}. Ausencia de dado, nao venda zero."))
+    if source_status == SOURCE_NEVER_LOADED and coverage is not None and manual_brands:
+        warnings.append(_warn(
+            "shopee_produtos_fonte_nunca_carregada", "critical",
+            f"Nenhuma execucao bem-sucedida do export manual carregou esta "
+            f"competencia para: {', '.join(manual_brands)}."))
+    elif source_status == SOURCE_NEVER_LOADED:
         warnings.append(_warn(
             "shopee_produtos_fonte_nunca_carregada", "critical",
             "Nenhuma execucao bem-sucedida da fonte de Pedidos carregou esta "
@@ -2327,7 +2489,10 @@ def get_shopee_scope_quality(
         warnings.append(_warn(
             "shopee_produtos_maturacao_nao_medida", "warning",
             f"Maturacao nao medida: {motivo}."))
-    if coverage_status == COVERAGE_BELOW:
+    # Com o detalhe por marca, os avisos acima ja nomeiam quem falta; repetir a
+    # contagem seca so empilharia o mesmo fato em duas frases.
+    if coverage_status == COVERAGE_BELOW and not (
+            coverage is not None and coverage["missing"]):
         warnings.append(_warn(
             "shopee_produtos_cobertura_de_marcas", "warning",
             f"{brands_present} de {brands_expected} marcas com venda na diaria "
@@ -2360,6 +2525,9 @@ def get_shopee_scope_quality(
         "loaded_at": published.isoformat() if published is not None else None,
         "load_age_days": load_age_days,
         "definitive": definitive,
+        #: Detalhe por marca. `None` = nao medido, nunca "cobertura completa".
+        #: `total_is_partial` e o que a tela usa para rotular o total.
+        "brand_coverage": coverage,
         "measured": {
             "rows_present": rows_present,
             "eligible_rows": eligible_rows,

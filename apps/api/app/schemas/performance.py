@@ -226,6 +226,35 @@ class ScopeQualityMeasured(BaseModel):
     daily_max_date: Optional[str] = None
 
 
+class ScopeBrandStatus(BaseModel):
+    brand: str
+    #: Procedencia que a tela le para esta marca (`api` | `manual_export`).
+    active_source: str
+    #: A diaria registrou venda da marca na competencia.
+    expected: bool
+    #: `with_data` | `zero_value` (linhas carregadas, todas com GMV zero) |
+    #: `absent` (nenhuma linha). Os dois ultimos sao AUSENCIA, nunca venda zero.
+    status: Literal["with_data", "zero_value", "absent"]
+    rows_present: int
+    eligible_rows: int
+    #: Publicacao NO MART da procedencia ativa. Nesta competencia quando
+    #: `published_in_scope`; senao, a ultima em qualquer competencia.
+    published_at: Optional[str] = None
+    published_in_scope: bool
+
+
+class ScopeBrandCoverage(BaseModel):
+    brands: list[ScopeBrandStatus]
+    expected: list[str]
+    with_data: list[str]
+    #: Esperadas sem valor confiavel. Nao-vazio => o total e PARCIAL.
+    missing: list[str]
+    total_is_partial: bool
+    oldest_published_at: Optional[str] = None
+    oldest_published_brands: list[str] = []
+    newest_published_at: Optional[str] = None
+
+
 class ScopeQuality(BaseModel):
     channel: str
     brand: Optional[str] = None
@@ -251,6 +280,8 @@ class ScopeQuality(BaseModel):
     #: Atalho de renderizacao. Falso NAO significa "numero errado": significa
     #: "nao use como definitivo sem ler os eixos".
     definitive: bool
+    #: Detalhe por marca. `None` = nao medido, jamais "cobertura completa".
+    brand_coverage: Optional[ScopeBrandCoverage] = None
     measured: ScopeQualityMeasured
     warnings: list[ScopeQualityWarning] = []
 

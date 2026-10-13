@@ -1,4 +1,4 @@
-import type { ScopeQuality, ScopeQualityWarning } from "@/lib/api-client";
+import type { ScopeBrandCoverage, ScopeBrandStatus, ScopeQuality, ScopeQualityWarning } from "@/lib/api-client";
 
 interface Props {
   quality: ScopeQuality | null | undefined;
@@ -49,9 +49,11 @@ export default function ScopeQualityBanner({ quality, loading }: Props) {
   // alarme em todo mes para de ler o alarme no mes que importa. O aviso `info`
   // continua visivel, em tom calmo, porque ele explica a diferenca entre
   // `total_count` e `eligible_count` nos cards.
-  const calmo = quality.definitive && pior === "info";
+  // Total parcial NUNCA e calmo: o numero exibido nao e o consolidado.
+  const parcial = quality.brand_coverage?.total_is_partial === true;
+  const calmo = quality.definitive && pior === "info" && !parcial;
 
-  if (calmo || quality.warnings.length === 0) {
+  if (calmo || (quality.warnings.length === 0 && !parcial)) {
     return (
       <div className="px-6 pt-2" data-testid="scope-quality-ok">
         <p className="text-xs text-slate-500">
@@ -64,6 +66,7 @@ export default function ScopeQualityBanner({ quality, loading }: Props) {
             ))}
           </ul>
         )}
+        <BrandCoverageDetail coverage={quality.brand_coverage} meta="text-slate-400" />
       </div>
     );
   }
@@ -91,14 +94,71 @@ export default function ScopeQualityBanner({ quality, loading }: Props) {
         ))}
       </ul>
       {publicacao && <p className={`mt-1.5 text-xs ${tom.meta}`}>{publicacao}</p>}
+      <BrandCoverageDetail coverage={quality.brand_coverage} meta={tom.meta} />
     </div>
   );
+}
+
+const SOURCE_LABEL: Record<string, string> = { api: "API Shopee", manual_export: "Export manual" };
+const STATUS_LABEL: Record<ScopeBrandStatus["status"], string> = {
+  with_data: "com dados",
+  zero_value: "sem valor confiável (só GMV zero)",
+  absent: "sem dado nesta competência",
+};
+
+/**
+ * Quem esta e quem falta no total, de que fonte cada marca e lida e quando foi
+ * publicada. Sem isto, "todas as marcas" parece o consolidado mesmo quando a
+ * maior marca ficou de fora.
+ */
+function BrandCoverageDetail({ coverage, meta }: { coverage: ScopeBrandCoverage | null | undefined; meta: string }) {
+  if (!coverage || coverage.brands.length === 0) return null;
+  const ausentes = coverage.missing.length > 0 ? coverage.missing.join(", ") : "nenhuma";
+  return (
+    <div className={`mt-2 text-xs ${meta}`} data-testid="scope-brand-coverage">
+      <p>
+        Marcas com dados: {coverage.with_data.length} · esperadas: {coverage.expected.length} · ausentes: {ausentes}
+      </p>
+      <table className="mt-1 w-full max-w-xl text-left">
+        <thead>
+          <tr>
+            <th className="pr-3 font-semibold">Marca</th>
+            <th className="pr-3 font-semibold">Fonte ativa</th>
+            <th className="pr-3 font-semibold">Situação</th>
+            <th className="font-semibold">Publicação no mart</th>
+          </tr>
+        </thead>
+        <tbody>
+          {coverage.brands.map((b) => (
+            <tr key={b.brand} data-brand={b.brand} data-status={b.status}>
+              <td className="pr-3">{b.brand}</td>
+              <td className="pr-3">{SOURCE_LABEL[b.active_source] ?? b.active_source}</td>
+              <td className="pr-3">{b.expected || b.status === "with_data" ? STATUS_LABEL[b.status] : "sem venda na diária"}</td>
+              <td>
+                {dia(b.published_at) ?? "—"}
+                {b.published_at && !b.published_in_scope ? " (última, em outra competência)" : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function dia(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString("pt-BR");
 }
 
 /** Titulo curto: diz o que FAZER com o numero, nao o nome tecnico do estado. */
 function headline(q: ScopeQuality): string {
   if (q.load_status === "load_absent") return "Sem dados de produto nesta competência";
   if (q.eligibility_status === "no_eligible_rows") return "Nenhum produto concluído nesta competência";
+  if (q.brand_coverage?.total_is_partial && !q.brand) {
+    return `Total PARCIAL — fora do total: ${q.brand_coverage.missing.join(", ")}`;
+  }
   if (q.maturity_status === "materially_immature") return "Competência ainda em maturação — números vão subir";
   if (q.source_status === "source_never_loaded") return "Esta competência nunca foi carregada da fonte";
   if (q.load_status === "load_behind_daily") return "O mart está atrás da diária nesta competência";
@@ -111,6 +171,14 @@ function headline(q: ScopeQuality): string {
  * "atualizado", que seria lido como frescor da fonte.
  */
 function publicationLine(q: ScopeQuality): string | null {
+  // Com o detalhe por marca, a data unica (MAX) esconderia a marca publicada
+  // ha mais tempo — a kokeshi de 05/08 sumia atras do 13/10 das outras.
+  const bc = q.brand_coverage;
+  const antiga = dia(bc?.oldest_published_at);
+  const recente = dia(bc?.newest_published_at);
+  if (bc && antiga && recente && antiga !== recente) {
+    return `Publicado no mart entre ${antiga} (mais antiga: ${bc.oldest_published_brands.join(", ")}) e ${recente} (mais recente) — datas da publicação no mart, não da última atualização do dado na Shopee.`;
+  }
   if (!q.loaded_at) return null;
   const data = new Date(q.loaded_at);
   if (Number.isNaN(data.getTime())) return null;

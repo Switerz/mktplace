@@ -825,6 +825,38 @@ export interface ScopeQualityMeasured {
   daily_max_date: string | null;
 }
 
+/**
+ * Situacao de UMA marca no escopo. `zero_value` (linhas carregadas, todas com
+ * GMV zero) e `absent` (nenhuma linha) sao AUSENCIA de dado, nunca venda zero.
+ */
+export type ScopeBrandStatusKind = "with_data" | "zero_value" | "absent";
+
+export interface ScopeBrandStatus {
+  brand: string;
+  /** Procedencia que a tela le para a marca: `api` | `manual_export`. */
+  active_source: string;
+  /** A diaria registrou venda da marca na competencia. */
+  expected: boolean;
+  status: ScopeBrandStatusKind;
+  rows_present: number;
+  eligible_rows: number;
+  /** Publicacao NO MART. Desta competencia se `published_in_scope`; senao, a ultima. */
+  published_at: string | null;
+  published_in_scope: boolean;
+}
+
+export interface ScopeBrandCoverage {
+  brands: ScopeBrandStatus[];
+  expected: string[];
+  with_data: string[];
+  /** Esperadas sem valor confiavel. Nao-vazio => total PARCIAL. */
+  missing: string[];
+  total_is_partial: boolean;
+  oldest_published_at: string | null;
+  oldest_published_brands: string[];
+  newest_published_at: string | null;
+}
+
 export interface ScopeQuality {
   channel: string;
   brand: string | null;
@@ -841,6 +873,8 @@ export interface ScopeQuality {
   loaded_at: string | null;
   load_age_days: number | null;
   definitive: boolean;
+  /** Detalhe por marca. Ausente/`null` = nao medido, jamais cobertura completa. */
+  brand_coverage?: ScopeBrandCoverage | null;
   measured: ScopeQualityMeasured;
   warnings: ScopeQualityWarning[];
 }
