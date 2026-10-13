@@ -180,7 +180,14 @@ function newBuyerPctStyle(v: number | null): string {
 /** Anchors internos compactos (Task 3) — sempre reais (`href="#id"`), nunca
  * um estado paralelo de navegacao. So aparecem para canais atualmente
  * selecionados/visiveis. */
-function InternalNav({ showTiktok, showMl, showShopee }: { showTiktok: boolean; showMl: boolean; showShopee: boolean }) {
+function InternalNav({
+  showTiktok, showMl, showShopee, onEscolherAba,
+}: {
+  showTiktok: boolean; showMl: boolean; showShopee: boolean;
+  /** O link de canal escolhe a aba direto: se a aba foi trocada a mao, a
+   * ancora pode ja' ser a atual e o `hashchange` nao dispararia. */
+  onEscolherAba: (aba: CanalId) => void;
+}) {
   // UX-TORRE-B2B-1: alvo de 44px explicito e a ordem nova da pagina. As
   // ancoras de canal continuam: elas escolhem a aba do "Detalhe por canal".
   const linkClass = "inline-flex min-h-11 items-center px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
@@ -191,12 +198,24 @@ function InternalNav({ showTiktok, showMl, showShopee }: { showTiktok: boolean; 
       <a href="#afiliados" className={linkClass}>Afiliados</a>
       <a href="#descontos-tiktok" className={linkClass}>Descontos TikTok</a>
       <span aria-hidden="true" className="mx-1 h-4 w-px bg-line-strong" />
-      {showTiktok && <a href="#tiktok-shop" className={linkClass}>TikTok Shop</a>}
-      {showMl && <a href="#mercado-livre" className={linkClass}>Mercado Livre</a>}
-      {showShopee && <a href="#shopee" className={linkClass}>Shopee</a>}
+      {showTiktok && <a href="#tiktok-shop" onClick={() => onEscolherAba("tiktok")} className={linkClass}>TikTok Shop</a>}
+      {showMl && <a href="#mercado-livre" onClick={() => onEscolherAba("ml")} className={linkClass}>Mercado Livre</a>}
+      {showShopee && <a href="#shopee" onClick={() => onEscolherAba("shopee")} className={linkClass}>Shopee</a>}
     </nav>
   );
 }
+
+/**
+ * Espelho do contrato de aplicabilidade por canal do backend
+ * (`_ADS_APPLICABLE`, `_COST_APPLICABLE`, `_SHIPPING_APPLICABLE` em
+ * performance_service.py, Gate 1 do canais_audit §14.2). "Aplicavel" e'
+ * modelo de negocio do canal — nao depende de haver linha no periodo.
+ */
+const APLICAVEL_POR_CANAL: Record<CanalId, { ads: boolean; custo: boolean; frete: boolean }> = {
+  tiktok: { ads: false, custo: true, frete: false },
+  ml: { ads: true, custo: true, frete: true },
+  shopee: { ads: true, custo: true, frete: true },
+};
 
 /** Ancora de canal -> aba do detalhe. */
 const ABA_DA_ANCORA: Record<string, CanalId> = {
@@ -465,17 +484,18 @@ function CanaisPageInner() {
               porComprador: k?.shopee_gmv_per_buyer != null ? fmtBrl(k.shopee_gmv_per_buyer) : "—",
               conversao: k?.shopee_conversion_rate != null ? fmtPct(k.shopee_conversion_rate) : "—",
             };
+    // Canal sem NENHUMA linha no recorte: ausencia de medicao (null -> "Sem
+    // dado"), nunca R$ 0. A aplicabilidade vem do contrato fixo por canal, e
+    // nao das linhas — sem linhas, `some()` devolveria "N/A" onde o certo e'
+    // "Sem dado".
+    const temLinhas = linhas.length > 0;
     return {
       canal,
       rotulo: CHANNEL_LABEL[canal],
-      gmv: linhas.reduce((s, r) => s + (r.gmv ?? 0), 0),
-      pedidos: linhas.reduce((s, r) => s + (r.orders ?? 0), 0),
+      gmv: temLinhas ? linhas.reduce((s, r) => s + (r.gmv ?? 0), 0) : null,
+      pedidos: temLinhas ? linhas.reduce((s, r) => s + (r.orders ?? 0), 0) : null,
       mediana: findChannelMedian(displayChannelMedians, canal),
-      aplicavel: {
-        ads: linhas.some((r) => r.ads_applicable),
-        custo: linhas.some((r) => r.marketplace_cost_applicable),
-        frete: linhas.some((r) => r.seller_shipping_applicable),
-      },
+      aplicavel: APLICAVEL_POR_CANAL[canal],
       disponivel: {
         ads: linhas.some((r) => r.ads_available),
         custo: linhas.some((r) => r.marketplace_cost_available),
@@ -489,7 +509,7 @@ function CanaisPageInner() {
   });
 
   // ── Detalhe por canal: uma aba por canal selecionado ──
-  const abasDetalhe: CanalId[] = canaisSelecionados.filter((c) => c !== "shopee" || showShopee);
+  const abasDetalhe: CanalId[] = canaisSelecionados;
   const [abaEscolhida, setAba] = useState<CanalId>("tiktok");
   // A ancora (#tiktok-shop, #mercado-livre, #shopee) escolhe a aba — ao
   // carregar e ao clicar na navegacao interna.
@@ -507,6 +527,12 @@ function CanaisPageInner() {
     window.addEventListener("hashchange", aplicar);
     return () => window.removeEventListener("hashchange", aplicar);
   }, []);
+  // Link interno de canal: escolhe a aba e rola ate ela depois que monta.
+  const escolherAbaPorLink = (aba: CanalId) => {
+    setAba(aba);
+    const ancora = Object.keys(ABA_DA_ANCORA).find((k) => ABA_DA_ANCORA[k] === aba);
+    if (ancora) window.setTimeout(() => document.getElementById(ancora.slice(1))?.scrollIntoView({ block: "start" }), 0);
+  };
   // Aba escolhida fora do filtro atual cai na primeira disponivel.
   const abaAtiva: CanalId = abasDetalhe.includes(abaEscolhida) ? abaEscolhida : abasDetalhe[0] ?? "tiktok";
 
@@ -526,7 +552,7 @@ function CanaisPageInner() {
       />
 
       {/* Navegacao interna compacta */}
-      <InternalNav showTiktok={showTiktok} showMl={showMl} showShopee={showShopee} />
+      <InternalNav showTiktok={showTiktok} showMl={showMl} showShopee={showShopee} onEscolherAba={escolherAbaPorLink} />
 
       {dataIsFresh && (() => {
         const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
@@ -556,7 +582,10 @@ function CanaisPageInner() {
       )}
 
       {/* ── Canais lado a lado (UX-TORRE-B2B-1) ── */}
-      {!error && !isEmpty && colunasCanal.length > 0 && (
+      {/* Em modo demonstracao (API offline) o mock nao modela linhas marca x
+          canal — a matriz abaixo ja' declara isso; aqui o painel nem aparece,
+          em vez de mostrar colunas vazias. */}
+      {!error && !isEmpty && colunasCanal.length > 0 && (!dataIsFresh || isLive) && (
         <ChannelOverview colunas={colunasCanal} fmtBrl={fmtBrl} fmtNumber={fmtNumber} carregando={!dataIsFresh} />
       )}
 

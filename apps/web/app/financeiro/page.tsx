@@ -291,6 +291,8 @@ function FinanceiroPageInner() {
     .filter((l) => l.tiktok != null || l.ml != null || l.shopee != null);
 
   const k = displayKpis;
+  // Marcas com venda no ML no recorte mas sem tarifa carregada.
+  const mlSemTarifa = displayBrands.filter((b) => b.ml_gmv != null && b.ml_gmv > 0 && b.ml_fees == null).length;
   const vazio = dataIsFresh && displayBrands.length === 0;
 
   return (
@@ -385,13 +387,19 @@ function FinanceiroPageInner() {
                         valor: fmtBrl(k.ml_fees),
                         pct: k.ml_avg_fee_pct ?? null,
                         pctTexto: fmtPct(k.ml_avg_fee_pct ?? null),
-                        detalhe: "Só a tarifa do marketplace — não inclui Ads nem frete.",
+                        // O backend soma marca sem tarifa como zero: com
+                        // carga parcial o total parece completo e sai baixo.
+                        detalhe:
+                          mlSemTarifa > 0
+                            ? `Parcial: ${mlSemTarifa} ${mlSemTarifa === 1 ? "marca sem tarifa" : "marcas sem tarifa"} no período. Só a tarifa do marketplace — não inclui Ads nem frete.`
+                            : "Só a tarifa do marketplace — não inclui Ads nem frete.",
                       }
                     : { rotulo: "Tarifa ML", ausente: "Não carregada neste período" },
                   {
                     rotulo: "Ads (mídia)",
                     valor: k?.ml_ad_spend != null ? fmtBrl(k.ml_ad_spend) : "—",
-                    pct: k?.ml_ad_spend != null && k?.ml_gmv ? (k.ml_ad_spend / k.ml_gmv) * 100 : null,
+                    // Sem barra de proposito: Ads/GMV do canal nao e' campo da
+                    // API, e uma barra sem numero seria uma razao nova muda.
                     detalhe: (
                       <>
                         ROAS <span className={`font-semibold ${roasColor(k?.ml_roas ?? null)}`}>{fmtRoas(k?.ml_roas ?? null)}</span>

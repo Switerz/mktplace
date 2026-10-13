@@ -28,8 +28,13 @@ export type CanalId = "tiktok" | "ml" | "shopee";
 export interface ColunaCanal {
   canal: CanalId;
   rotulo: string;
-  gmv: number;
-  pedidos: number;
+  /**
+   * `null` quando o canal selecionado nao tem NENHUMA linha marca x canal no
+   * recorte: ausencia de medicao, exibida como "Sem dado" — nunca R$ 0, e o
+   * canal sai do denominador da participacao em vez de virar 0%.
+   */
+  gmv: number | null;
+  pedidos: number | null;
   mediana: CanaisChannelMedian | null;
   aplicavel: { ads: boolean; custo: boolean; frete: boolean };
   disponivel: { ads: boolean; custo: boolean; frete: boolean };
@@ -65,8 +70,11 @@ export default function ChannelOverview({
   fmtNumber: (v: number) => string;
   carregando: boolean;
 }) {
-  const total = colunas.reduce((s, c) => s + c.gmv, 0);
-  const share = (c: ColunaCanal) => (total > 0 ? (c.gmv / total) * 100 : null);
+  // Mesmo recorte da "participacao no GMV" que a Gerencial ja' exibe: fatia
+  // de cada canal entre os canais selecionados COM dado.
+  const total = colunas.reduce((s, c) => s + (c.gmv ?? 0), 0);
+  const share = (c: ColunaCanal) => (c.gmv != null && total > 0 ? (c.gmv / total) * 100 : null);
+  const semDado = <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs font-semibold text-warn-ink">Sem dado</span>;
   const pct1 = (v: number) => `${v.toFixed(1)}%`;
   const roas = (v: number) => `${v.toFixed(2)}x`;
 
@@ -75,7 +83,7 @@ export default function ChannelOverview({
     {
       titulo: "Volume",
       linhas: [
-        { rotulo: "GMV", valor: (c) => <span className="font-semibold text-ink">{fmtBrl(c.gmv)}</span> },
+        { rotulo: "GMV", valor: (c) => (c.gmv == null ? semDado : <span className="font-semibold text-ink">{fmtBrl(c.gmv)}</span>) },
         {
           rotulo: "Participação no GMV",
           dica: "Entre os canais selecionados",
@@ -84,7 +92,7 @@ export default function ChannelOverview({
             return s == null ? <span className="text-xs text-ink-faint">—</span> : <span className="text-ink-muted">{pct1(s)}</span>;
           },
         },
-        { rotulo: "Pedidos", valor: (c) => <span className="text-ink-muted">{fmtNumber(c.pedidos)}</span> },
+        { rotulo: "Pedidos", valor: (c) => (c.pedidos == null ? semDado : <span className="text-ink-muted">{fmtNumber(c.pedidos)}</span>) },
       ],
     },
     {
@@ -135,8 +143,9 @@ export default function ChannelOverview({
       semPadding
       rodape={
         <span>
-          Medianas entre as marcas com dado em cada canal ({colunas.map((c) => `${c.rotulo}: ${c.mediana?.brands_with_data ?? 0}`).join(" · ")}).
-          N/A = não se aplica ao canal · Sem dado = deveria existir, mas está ausente hoje.
+          Custo, Ads, ROAS e frete são medianas entre as marcas de cada canal
+          {!carregando && <> ({colunas.map((c) => `${c.rotulo}: ${c.mediana?.brands_with_data ?? 0} marcas no canal`).join(" · ")})</>}.
+          {" "}N/A = não se aplica ao canal · Sem dado = deveria existir, mas está ausente hoje · Participação entre os canais selecionados com dado.
         </span>
       }
     >
