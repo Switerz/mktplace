@@ -27,7 +27,7 @@ import {
 } from "./limitations.ts";
 import { BRANDS, noDuplicates } from "./schemas.ts";
 import {
-  ageHours, envelopeSchema, limitationSchema, ok, type OracleTool, type ToolDeps,
+  ageHours, envelopeSchema, limitationSchema, ok, safeText, safeTexts, type OracleTool, type ToolDeps,
 } from "./tool-kit.ts";
 import { numOrNull } from "./torre-client.ts";
 import { parseUpstream } from "./upstream.ts";
@@ -109,6 +109,7 @@ const filaBlock = z.object({
     disponibilidade: z.enum(["available", "unavailable"]),
     janela_horas: z.number().nullable(),
     truncada: z.boolean(),
+    motivo_indisponivel: z.string().nullable(),
     pontos: z.array(
       z.object({
         snapshot_hour: z.string(),
@@ -246,13 +247,20 @@ async function fila(
   deps: ToolDeps,
 ): Promise<FilaBlock> {
   const channel = API_CHANNEL[canal];
-  // `brands` NAO e' enviado: o backend ignora no resumo (regra 1).
-  const [resumoRaw, trendRaw] = await Promise.all([
+  // `brands` NAO vai ao resumo: o backend o ignora la' (regra 1). Na
+  // tendencia ele filtra de verdade e reduz o payload — por isso vai.
+  const brandsCsv = marcas && marcas.length > 0 ? [...marcas].sort().join(",") : undefined;
+  const [resumoRaw, trend] = await Promise.all([
     deps.client.get("expedicao", { channel, include_queue: "false" }),
-    deps.client.get("expedicaoTrend", { channel, window_hours: horas }),
+    // Falha da TENDENCIA (ex.: payload acima do teto) nao derruba o resumo
+    // nem os outros canais: a tendencia sai indisponivel, sem numero.
+    deps.client
+      .get("expedicaoTrend", { channel, window_hours: horas, brands: brandsCsv })
+      .then((raw) => parseUpstream(expedicaoTrendContract, raw))
+      .catch(() => null),
   ]);
   const p = parseUpstream(expedicaoContract, resumoRaw);
-  const t = parseUpstream(expedicaoTrendContract, trendRaw);
+  const t = trend ?? { availability: "unavailable" as const, unavailable_reason: "falha_ao_ler_tendencia", window_hours: 0, truncated: false, points: [] };
 
   const noEscopo = (brand: string) => !marcas || marcas.includes(brand);
   const contas = p.accounts.filter((a) => noEscopo(a.brand));
@@ -262,7 +270,8 @@ async function fila(
 
   const disponivel = p.availability === "available";
   // Sem filtro: os totais do backend. Com filtro: soma das contas do escopo.
-  const totaisBrutos: Medidas | null = !disponivel
+  // NENHUMA conta no escopo nao e' backlog zero: e' ausencia — totais nulos.
+  const totaisBrutos: Medidas | null = !disponivel || contas.length === 0
     ? null
     : marcas
       ? somar(contas)
@@ -289,7 +298,7 @@ async function fila(
       return {
         snapshot_hour: hora,
         contas_observadas: slot.contas.size,
-        completo: [...contasEsperadas].every((x) => slot.contas.has(x)),
+        completo: contasEsperadas.size > 0 && [...contasEsperadas].every((x) => slot.contas.has(x)),
         backlog: c.backlog,
         vencidos: c.vencidos,
         acima_48h: c.acima_48h,
@@ -300,7 +309,7 @@ async function fila(
   return {
     canal,
     disponibilidade: p.availability,
-    motivo_indisponivel: p.unavailable_reason ?? null,
+    motivo_indisponivel: safeText(p.unavailable_reason) ?? (disponivel && contas.length === 0 ? "sem_conta_no_escopo" : null),
     fotografia: p.snapshot
       ? {
           effective_at: p.snapshot.effective_at,
@@ -328,17 +337,18 @@ async function fila(
         freshness: f.freshness,
         source_age_hours: numOrNull(f.source_age_hours),
       })),
-    contas_faltando: p.coverage?.missing_accounts ?? [],
-    contas_inesperadas: p.coverage?.unexpected_accounts ?? [],
+    contas_faltando: safeTexts(p.coverage?.missing_accounts),
+    contas_inesperadas: safeTexts(p.coverage?.unexpected_accounts),
     marcas_nao_cobertas_pela_fonte: naoCobertas,
     marcas_sem_conta: marcasSemConta,
     tendencia: {
       disponibilidade: t.availability,
       janela_horas: t.availability === "available" ? t.window_hours : null,
       truncada: t.truncated ?? false,
+      motivo_indisponivel: t.availability === "available" ? null : safeText(t.unavailable_reason),
       pontos,
     },
-    notas_da_fonte: p.limitations?.notes ?? [],
+    notas_da_fonte: safeTexts(p.limitations?.notes),
   };
 }
 
@@ -360,7 +370,7 @@ async function tiktok(
   return {
     canal: "tiktok",
     disponibilidade: p.availability,
-    motivo_indisponivel: p.unavailable_reason ?? null,
+    motivo_indisponivel: safeText(p.unavailable_reason),
     evento: p.event ?? evento,
     medicao: p.deadline_is_reconstructed ? "interna_reconstruida" : "oficial_marketplace",
     sla_dias_uteis: numOrNull(p.sla_business_days[p.event ?? evento]),
@@ -405,13 +415,13 @@ async function tiktok(
     })),
     por_loja: p.brands.map((b) => ({
       brand: b.brand,
-      loja: b.shop_name ?? null,
+      loja: safeText(b.shop_name),
       base: b.base,
       atrasados: b.late,
       taxa: numOrNull(b.rate),
       acima_da_meta: b.above_target,
     })),
-    alertas: p.alerts.map((a) => ({ severidade: a.severity, codigo: a.code, mensagem: a.message })),
+    alertas: p.alerts.map((a) => ({ severidade: a.severity, codigo: safeText(a.code) ?? "", mensagem: safeText(a.message) ?? "" })),
   };
 }
 
@@ -473,6 +483,9 @@ export const expedicaoTool: OracleTool = {
       if (velhas.length > 0) {
         warnings.push(`${nome}: fonte nao fresca para ${velhas.map((f) => `${f.brand} (${f.freshness})`).join(", ")}.`);
       }
+      if (b.tendencia.disponibilidade === "unavailable") {
+        warnings.push(`${nome}: tendencia indisponivel — sem serie, nao trate como backlog estavel.`);
+      }
       if (b.contas_faltando.length > 0) {
         warnings.push(`${nome}: contas esperadas ausentes da fotografia: ${b.contas_faltando.join(", ")}. O total esta INCOMPLETO.`);
       }
@@ -512,7 +525,10 @@ export const expedicaoTool: OracleTool = {
     const partes: string[] = [];
     for (const b of filas) {
       const nome = b.canal === "ml" ? "Mercado Livre" : "Shopee";
-      if (!b.totais) { partes.push(`${nome}: indisponivel`); continue; }
+      if (!b.totais) {
+        partes.push(b.disponibilidade === "available" ? `${nome}: sem conta no escopo (ausencia, nao backlog zero)` : `${nome}: indisponivel`);
+        continue;
+      }
       const venc = b.totais.vencidos === null ? "vencidos nao medidos (sem prazo publicado)" : `${b.totais.vencidos} vencidos`;
       partes.push(`${nome}: backlog ${b.totais.backlog}, ${venc}, ${b.totais.travados} travados`);
     }

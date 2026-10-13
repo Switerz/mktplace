@@ -84,6 +84,9 @@ const OPERATIONAL_PARAMS: Partial<Record<EndpointKey, ReadonlySet<string>>> = {
   ]),
 };
 
+/** Unicos parametros que a fonte le como lista (`list[str] = Query`). */
+const LIST_PARAMS = new Set(["brands", "classificacoes"]);
+
 function allowedParamsFor(endpoint: EndpointKey): ReadonlySet<string> {
   return OPERATIONAL_PARAMS[endpoint] ?? ALLOWED_PARAMS;
 }
@@ -163,6 +166,9 @@ export class TorreClient {
         throw toolError("MISSING_CONFIGURATION");
       }
       if (v === undefined) continue;
+      // Lista em parametro escalar e' recusada: o FastAPI le o ULTIMO valor e
+      // a guarda abaixo o primeiro — os dois nunca podem discordar.
+      if (Array.isArray(v) && !LIST_PARAMS.has(k)) throw toolError("MISSING_CONFIGURATION");
       if (Array.isArray(v)) {
         for (const item of v) url.searchParams.append(k, String(item));
       } else {
@@ -173,7 +179,8 @@ export class TorreClient {
     // A fila da Expedicao e' por pedido. Nenhuma tool pode pedi-la: a trava
     // fica no adapter, e nao so' na tool, para que um descuido futuro em
     // qualquer chamada falhe fechado em vez de devolver linha de pedido.
-    if (endpoint === "expedicao" && url.searchParams.get("include_queue") !== "false") {
+    const fila = url.searchParams.getAll("include_queue");
+    if (endpoint === "expedicao" && (fila.length !== 1 || fila[0] !== "false")) {
       throw toolError("MISSING_CONFIGURATION");
     }
 

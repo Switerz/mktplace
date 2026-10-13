@@ -104,3 +104,24 @@ export function ageHours(stamp: string | null | undefined, now: Date): number | 
   if (!Number.isFinite(t)) return null;
   return Math.round(((now.getTime() - t) / 3_600_000) * 100) / 100;
 }
+
+/** Teto de texto livre vindo da fonte (motivos, notas, alertas). */
+export const SOURCE_TEXT_MAX = 200;
+
+/**
+ * Texto livre DA FONTE que chega ao modelo: sem caracteres de controle e com
+ * teto de tamanho. A fonte e' a nossa API (Pydantic), mas nada garante o
+ * tamanho nem o charset desses campos — e eles vao para `content`.
+ * `null`/ausente continua `null`.
+ */
+export function safeText(v: unknown, max = SOURCE_TEXT_MAX): string | null {
+  if (typeof v !== "string") return null;
+  const limpo = v.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").trim();
+  if (limpo.length === 0) return null;
+  return limpo.length > max ? `${limpo.slice(0, max - 1)}…` : limpo;
+}
+
+/** Lista de textos da fonte, com o mesmo saneamento e no maximo 20 itens. */
+export function safeTexts(v: readonly unknown[] | null | undefined, max = SOURCE_TEXT_MAX): string[] {
+  return (v ?? []).slice(0, 20).map((x) => safeText(x, max)).filter((x): x is string => x !== null);
+}

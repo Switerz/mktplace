@@ -154,8 +154,8 @@ test("expedicao: filtro de marca e' LOCAL (fonte ignora brands no resumo), marca
   const env = await call(await connect(EXP_ROUTES, calls), "torre_expedicao_operacional", {
     canais: ["shopee", "ml"], marcas: ["apice", "kokeshi"],
   });
-  for (const u of calls.filter((x) => x.pathname.startsWith("/api/v1/expedicao") && !x.pathname.endsWith("tiktok"))) {
-    assert.equal(u.searchParams.get("brands"), null, "brands nao e' enviado a /expedicao");
+  for (const u of calls.filter((x) => x.pathname === "/api/v1/expedicao")) {
+    assert.equal(u.searchParams.get("brands"), null, "brands nao e' enviado ao RESUMO (a fonte o ignora la')");
   }
   const sh = env.data.shopee;
   assert.equal(sh.totais.backlog, 10, "so' a conta da apice");
@@ -657,4 +657,84 @@ test("rate limit tambem cobre as tools novas", async () => {
   const text = await callError(client, "torre_monitoramento_precos", { canal: "ml" });
   assert.match(text, /Limite de chamadas/);
   assert.equal(calls.length, 1, "chamada barrada nao toca a fonte");
+});
+
+// ===========================================================================
+// Revisao estrita do PR #73 — achados M1, m1, m2, m3
+// ===========================================================================
+
+test("M1: nenhuma conta no escopo -> totais NULOS, nunca 'backlog 0'", async () => {
+  const client = await connect(EXP_ROUTES);
+  const env = await call(client, "torre_expedicao_operacional", { canais: ["ml"], marcas: ["apice"] });
+  const ml = env.data.ml;
+  assert.equal(ml.totais, null);
+  assert.equal(ml.prazo, null);
+  assert.equal(ml.motivo_indisponivel, "sem_conta_no_escopo");
+  assert.deepEqual(ml.por_conta, []);
+  assert.deepEqual(ml.marcas_sem_conta, ["apice"]);
+  const res = await client.callTool({ name: "torre_expedicao_operacional", arguments: { canais: ["ml"], marcas: ["apice"] } });
+  const text = (res.content as Array<{ text: string }>)[0].text.split("\n")[0];
+  assert.match(text, /sem conta no escopo/);
+  assert.doesNotMatch(text, /backlog 0/);
+
+  // Mesmo sem filtro: fonte "available" sem nenhuma conta nao vira zero.
+  const vazio = await call(
+    await connect({ ...EXP_ROUTES, "/api/v1/expedicao": { ...EXP_SHOPEE, totals: null, accounts: [], freshness: [] } }),
+    "torre_expedicao_operacional", { canais: ["shopee"] },
+  );
+  assert.equal(vazio.data.shopee.totais, null);
+});
+
+test("m1: guarda de include_queue usa todos os valores; lista em parametro escalar e' recusada", async () => {
+  const calls: Calls = [];
+  const c = new TorreClient({ baseUrl: "https://mktplace-api.onrender.com", fetchImpl: routedFetch({ ...EXP_ROUTES, ...STOCK_ROUTES }, calls) });
+  for (const p of [
+    { channel: "shopee", include_queue: ["false", "true"] },
+    { channel: ["shopee", "mercadolivre"], include_queue: "false" },
+  ]) {
+    await assert.rejects(() => c.get("expedicao", p as never), (e: unknown) => e instanceof OracleToolError);
+  }
+  assert.equal(calls.length, 0);
+  await c.get("shopeeFbsEstoque", { brands: ["apice", "barbours"], limite: 1 });
+  assert.deepEqual(calls[0].searchParams.getAll("brands"), ["apice", "barbours"], "lista legitima continua valendo");
+});
+
+test("m2: brands vai para a tendencia; falha da tendencia nao derruba o resumo", async () => {
+  const calls: Calls = [];
+  await call(await connect(EXP_ROUTES, calls), "torre_expedicao_operacional", { canais: ["shopee"], marcas: ["barbours", "apice"] });
+  const tr = calls.find((u) => u.pathname === "/api/v1/expedicao/trend")!;
+  assert.equal(tr.searchParams.get("brands"), "apice,barbours");
+
+  const routes = { ...EXP_ROUTES };
+  delete routes["/api/v1/expedicao/trend"]; // 404 -> falha so' da tendencia
+  const env = await call(await connect(routes), "torre_expedicao_operacional", {});
+  assert.equal(env.data.shopee.totais.backlog, 30, "resumo intacto");
+  assert.equal(env.data.shopee.tendencia.disponibilidade, "unavailable");
+  assert.deepEqual(env.data.shopee.tendencia.pontos, []);
+  assert.ok(env.data.tiktok.ldr, "outros canais intactos");
+  assert.ok(env.meta.warnings.some((w: string) => /tendencia indisponivel/.test(w)));
+});
+
+test("m2: hora sem nenhuma conta esperada nao e' 'completa' por vacuidade", async () => {
+  const env = await call(
+    await connect({ ...EXP_ROUTES, "/api/v1/expedicao": { ...EXP_SHOPEE, accounts: [] } }),
+    "torre_expedicao_operacional", { canais: ["shopee"] },
+  );
+  for (const p of env.data.shopee.tendencia.pontos) assert.equal(p.completo, false);
+});
+
+test("m3: texto livre da fonte sai sem caractere de controle e com teto de tamanho", async () => {
+  const hostil = "linha1" + String.fromCharCode(10) + "linha2" + String.fromCharCode(0x2028) + "x".repeat(5000);
+  const env = await call(
+    await connect({
+      ...EXP_ROUTES,
+      "/api/v1/expedicao": { ...EXP_SHOPEE, availability: "unavailable", unavailable_reason: hostil, snapshot: null, totals: null, accounts: [], freshness: [], coverage: null, limitations: { notes: [hostil] } },
+    }),
+    "torre_expedicao_operacional", { canais: ["shopee"] },
+  );
+  const motivo = env.data.shopee.motivo_indisponivel as string;
+  assert.ok(motivo.length <= 200, `motivo com ${motivo.length} caracteres`);
+  assert.ok(!motivo.includes(String.fromCharCode(10)) && !motivo.includes(String.fromCharCode(0x2028)));
+  assert.ok(env.data.shopee.notas_da_fonte.every((n: string) => n.length <= 200));
+  assert.ok(env.meta.warnings.every((w: string) => w.length < 400));
 });

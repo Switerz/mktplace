@@ -27,7 +27,7 @@ import {
   STOCK_ML_NOT_STOCK, STOCK_PARTIAL_SCOPE, STOCK_TOWER_COVERAGE, type Limitation,
 } from "./limitations.ts";
 import { BRANDS, isoDate, noDuplicates, todayInAppTimezone, inclusiveDays } from "./schemas.ts";
-import { envelopeSchema, limitationSchema, ok, type OracleTool, type ToolDeps } from "./tool-kit.ts";
+import { envelopeSchema, limitationSchema, ok, safeText, safeTexts, type OracleTool, type ToolDeps } from "./tool-kit.ts";
 import { decOrNull, numOrNull } from "./torre-client.ts";
 import { toolError } from "./errors.ts";
 import { parseUpstream } from "./upstream.ts";
@@ -260,7 +260,7 @@ async function shopeeEstoque(input: EstoqueInput, deps: ToolDeps): Promise<Shope
     // propria fonte antes do filtro — nunca de uma lista fixa nossa.
     const pre = parseUpstream(shopeeEstoqueContract, await deps.client.get("shopeeFbsEstoque", { limite: 1 }));
     if (pre.status === "unavailable") {
-      return bloqueioEstoque(pre.unavailable_reason, pre.scope_label, []);
+      return bloqueioEstoque(safeText(pre.unavailable_reason) ?? "indisponivel", pre.scope_label, []);
     }
     naoCobertasPedidas = input.marcas.filter((b) => pre.marcas_nao_cobertas.includes(b));
     marcas = input.marcas.filter((b) => !pre.marcas_nao_cobertas.includes(b));
@@ -282,7 +282,7 @@ async function shopeeEstoque(input: EstoqueInput, deps: ToolDeps): Promise<Shope
     }),
   );
   if (p.status === "unavailable") {
-    return { ...bloqueioEstoque(p.unavailable_reason, p.scope_label, []), notas_da_fonte: p.limitacoes ?? [] };
+    return { ...bloqueioEstoque(safeText(p.unavailable_reason) ?? "indisponivel", p.scope_label, []), notas_da_fonte: safeTexts(p.limitacoes) };
   }
 
   // A fonte ja ordena por risco (ruptura, baixo, excesso, sem giro; depois
@@ -346,7 +346,7 @@ async function shopeeEstoque(input: EstoqueInput, deps: ToolDeps): Promise<Shope
     itens,
     itens_no_filtro: p.total_no_filtro,
     marcas_nao_cobertas: [...new Set([...p.marcas_nao_cobertas, ...naoCobertasPedidas])],
-    notas_da_fonte: p.limitacoes,
+    notas_da_fonte: safeTexts(p.limitacoes, 400),
   };
 }
 
@@ -378,7 +378,7 @@ async function shopeeFbs(
           ultima_data_da_fonte: p.meta.freshness.source_max_date ?? null,
           dias_fechados_atrasados: numOrNull(p.meta.freshness.closed_days_behind),
         },
-        definicao_gmv: p.meta.gmv_definition,
+        definicao_gmv: safeText(p.meta.gmv_definition, 400) ?? "",
       };
     }
   }
@@ -413,7 +413,7 @@ async function shopeeFbs(
       ultima_data_da_fonte: p.meta.freshness.source_max_date ?? null,
       dias_fechados_atrasados: numOrNull(p.meta.freshness.closed_days_behind),
     },
-    definicao_gmv: p.meta.gmv_definition,
+    definicao_gmv: safeText(p.meta.gmv_definition, 400) ?? "",
   };
 }
 
@@ -473,7 +473,7 @@ async function mlFull(
       ultima_data_da_fonte: p.freshness.source_max_date ?? null,
       load_mode: p.freshness.load_mode,
     },
-    notas_da_fonte: p.quality.limitations,
+    notas_da_fonte: safeTexts(p.quality.limitations, 400),
   };
 }
 
@@ -487,6 +487,7 @@ export const estoqueTool: OracleTool = {
       "Mercado Livre: ml_full mede a MODALIDADE do envio (Full x nao-Full); estoque do ML e' 'nao_aplicavel' — nunca diga que o estoque ML e' zero.",
       "Cada item e bloco declara estado: zero_real (mediu zero), sem_dado (sem medicao), nao_conciliado (kits) ou nao_aplicavel. Nenhum dos tres ultimos vira zero.",
       "Cobertura e classificacao sao calculo da Torre com limiares PROVISORIOS, nao numero oficial da Shopee. Marcas fora da esteira vem em marcas_nao_cobertas e NAO estao nos totais.",
+      "Escopo sem nenhum pedido no periodo (FBS ou Full ML) sai como sem_dado, de proposito: a fonte devolve 0 tanto para marca sem loja quanto para janela sem serie, e o conector nao afirma venda zero que nao consegue distinguir de ausencia.",
       "Filtros apenas por enums (canal, marca, classificacao, severidade). Periodo de dias fechados, ate 92 dias.",
     ].join(" "),
     inputSchema: estoqueInput,

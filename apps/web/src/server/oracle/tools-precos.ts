@@ -20,7 +20,7 @@ import { z } from "zod";
 import { buildEnvelope } from "./envelope.ts";
 import { PRICE_ADVERTISED_ONLY, PRICE_REFERENCE_PDV, type Limitation } from "./limitations.ts";
 import { BRANDS, isoDate, noDuplicates } from "./schemas.ts";
-import { envelopeSchema, limitationSchema, ok, type OracleTool } from "./tool-kit.ts";
+import { envelopeSchema, limitationSchema, ok, safeText, safeTexts, type OracleTool } from "./tool-kit.ts";
 import { numOrNull } from "./torre-client.ts";
 import { parseUpstream } from "./upstream.ts";
 import { monitoramentoPrecoContract, PRODUCT_TYPES } from "./upstream-operacional.ts";
@@ -121,7 +121,7 @@ const precosOutput = envelopeSchema(
         kits_suspeitos: z.number(),
         kits_com_referencia_derivada: z.number().nullable(),
         taxa_cobertura: z.number().nullable(),
-        motivos_sem_referencia: z.record(z.string(), z.number()),
+        motivos_sem_referencia: z.record(z.string(), z.number()).nullable(),
       })
       .nullable(),
     anuncios: z.array(anuncioSchema),
@@ -177,7 +177,7 @@ export const precosTool: OracleTool = {
           const naoObs = (pre.meta.monitored_unobserved_brands ?? []).includes(b);
           fora.push({
             brand: b,
-            motivo: oos ?? (naoObs ? "monitorada_nao_observada_nesta_fotografia" : "nao_monitorada_neste_canal"),
+            motivo: safeText(oos) ?? (naoObs ? "monitorada_nao_observada_nesta_fotografia" : "nao_monitorada_neste_canal"),
           });
         }
         marcas = input.marcas.filter((b) => observadas.includes(b));
@@ -243,7 +243,7 @@ export const precosTool: OracleTool = {
     const limitations: Limitation[] = [PRICE_ADVERTISED_ONLY, PRICE_REFERENCE_PDV];
     const warnings: string[] = [];
     if (!disponivel) {
-      warnings.push(`Monitoramento indisponivel (${m.unavailable_reason ?? "sem motivo"}) — nenhum numero, nao trate como zero anuncio.`);
+      warnings.push(`Monitoramento indisponivel (${safeText(m.unavailable_reason) ?? "sem motivo"}) — nenhum numero, nao trate como zero anuncio.`);
     }
     if (m.freshness_status === "stale") {
       warnings.push(`A observacao esta atrasada (${numOrNull(m.lag_days) ?? "?"} dia(s) de defasagem): o sync nao avancou.`);
@@ -258,7 +258,7 @@ export const precosTool: OracleTool = {
     const data: PrecosData = {
       canal: input.canal,
       disponibilidade: disponivel ? "available" : "unavailable",
-      motivo_indisponivel: m.unavailable_reason ?? null,
+      motivo_indisponivel: safeText(m.unavailable_reason),
       modo: m.mode,
       data_observada: m.observed_ref_date ?? null,
       data_pedida: dataPedida,
@@ -279,7 +279,7 @@ export const precosTool: OracleTool = {
         monitoradas_nao_observadas: m.monitored_unobserved_brands ?? [],
         comparaveis: m.comparable_brands,
         sem_referencia: m.no_reference_brands,
-        fora_de_escopo: m.out_of_scope_brands,
+        fora_de_escopo: Object.fromEntries(Object.entries(m.out_of_scope_brands).map(([k, v]) => [k, safeText(v) ?? ""])),
       },
       marcas_pedidas_fora: fora,
       kpis: disponivel
@@ -295,11 +295,11 @@ export const precosTool: OracleTool = {
             kits_suspeitos: p.metrics.kit_suspected,
             kits_com_referencia_derivada: numOrNull(p.metrics.kit_reference_derived),
             taxa_cobertura: numOrNull(p.metrics.coverage_rate),
-            motivos_sem_referencia: p.metrics.no_reference_breakdown ?? {},
+            motivos_sem_referencia: p.metrics.no_reference_breakdown ?? null,
           }
         : null,
       anuncios,
-      notas_da_fonte: m.warnings,
+      notas_da_fonte: safeTexts(m.warnings, 400),
       limitations,
     };
 

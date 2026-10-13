@@ -18,6 +18,7 @@ import { z } from "zod";
 import {
   AFFILIATE_NO_RETURN, AFFILIATE_NO_ROWS, DISCOUNTS_NO_ROWS, type Limitation,
 } from "./limitations.ts";
+import { safeText, safeTexts } from "./tool-kit.ts";
 import { numOrNull } from "./torre-client.ts";
 import { affiliateCostsContract, tiktokDiscountsContract } from "./upstream-operacional.ts";
 
@@ -139,7 +140,7 @@ export function projectCanaisBlocos(raw: unknown): CanaisBlocos {
         marca_d_agua_fonte: a.source_watermark ?? null,
         meses: a.months_included,
         por_canal: a.channels.map((c) => ({
-          canal: c.channel, disponibilidade: c.availability_status, nota: c.reason_note,
+          canal: c.channel, disponibilidade: safeText(c.availability_status) ?? "", nota: safeText(c.reason_note) ?? "",
         })),
         linhas: a.rows.map((x) => ({
           canal: x.channel,
@@ -152,7 +153,7 @@ export function projectCanaisBlocos(raw: unknown): CanaisBlocos {
         receita_atribuida: null,
         retorno_roas: null,
         retorno_disponibilidade: a.return_availability,
-        notas: [a.return_note, a.limitation_note],
+        notas: safeTexts([a.return_note, a.limitation_note], 400),
       };
       limitations.push(AFFILIATE_NO_RETURN);
       if (a.availability_status === "available" && a.rows.length === 0) {
@@ -199,8 +200,8 @@ export function projectCanaisBlocos(raw: unknown): CanaisBlocos {
           subsidio_plataforma_pct: numOrNull(x.platform_subsidy_rate),
           pedidos_cancelados: x.cancelled_orders,
         })),
-        avisos_da_fonte: d.warnings,
-        notas: [d.seller_note, d.subsidy_note, d.limitation_note],
+        avisos_da_fonte: safeTexts(d.warnings, 400),
+        notas: safeTexts([d.seller_note, d.subsidy_note, d.limitation_note], 400),
       };
       if (d.availability_status === "available" && d.rows.length === 0) {
         limitations.push(DISCOUNTS_NO_ROWS);
