@@ -22,15 +22,15 @@ function InsightButton({ group, onOpen }: { group: PulseGroup; onOpen: (key: str
       type="button"
       onClick={() => onOpen(group.key)}
       aria-haspopup="dialog"
-      className="w-full text-left flex items-start gap-2 rounded-lg px-2 py-1.5 min-h-11 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
+      className="w-full text-left flex items-start gap-2 rounded-lg px-2 py-1.5 min-h-11 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
     >
       <span className={`text-[10px] font-semibold uppercase rounded px-1.5 py-0.5 shrink-0 mt-0.5 ${SEVERITY_TONE[group.severity]}`}>
         {SEVERITY_LABEL[group.severity]}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-slate-800 leading-snug">{group.title}</span>
+        <span className="block text-sm font-medium text-ink leading-snug">{group.title}</span>
         {group.count === 1 && group.representative.metric_value != null && (
-          <span className="block text-xs text-slate-500 tabular-nums">{formatMetricByType(group.type, group.representative.metric_value)}</span>
+          <span className="block text-xs text-ink-faint tabular-nums">{formatMetricByType(group.type, group.representative.metric_value)}</span>
         )}
       </span>
     </button>
@@ -47,19 +47,19 @@ function InsightButton({ group, onOpen }: { group: PulseGroup; onOpen: (key: str
 export default function PulsoPeriodoPanel({ pulse, health, loading, unavailable, onOpenInsight, onOpenAll }: Props) {
   if (loading) {
     return (
-      <section className="bg-white rounded-2xl shadow-sm border border-violet-100 p-4 animate-pulse" aria-busy="true">
-        <div className="h-3 w-32 bg-violet-100 rounded mb-3" />
-        <div className="h-4 w-full bg-violet-50 rounded mb-2" />
-        <div className="h-4 w-2/3 bg-violet-50 rounded" />
+      <section className="bg-surface rounded-2xl shadow-sm border border-line p-4 animate-pulse" aria-busy="true">
+        <div className="h-3 w-32 bg-accent-soft rounded mb-3" />
+        <div className="h-4 w-full bg-accent-soft rounded mb-2" />
+        <div className="h-4 w-2/3 bg-accent-soft rounded" />
       </section>
     );
   }
 
   if (unavailable) {
     return (
-      <section className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-        <h2 className="text-sm font-semibold text-slate-700 mb-1">Pulso do período</h2>
-        <p className="text-xs text-slate-500">Indisponível no momento — os KPIs, a tendência e a tabela continuam com os dados do período.</p>
+      <section className="bg-raised border border-line rounded-2xl p-4">
+        <h2 className="text-sm font-semibold text-ink-muted mb-1">Pulso do período</h2>
+        <p className="text-xs text-ink-faint">Indisponível no momento — os KPIs, a tendência e a tabela continuam com os dados do período.</p>
       </section>
     );
   }
@@ -68,14 +68,14 @@ export default function PulsoPeriodoPanel({ pulse, health, loading, unavailable,
   const dc = pulse.dataConfidence;
 
   return (
-    <section className="bg-white rounded-2xl shadow-sm border border-violet-100 p-4 flex flex-col gap-3">
+    <section className="bg-surface rounded-2xl shadow-sm border border-line p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-slate-700">Pulso do período</h2>
+        <h2 className="text-sm font-semibold text-ink-muted">Pulso do período</h2>
         {/* Finding 3: sem dados NAO e' diagnostico comercial "Crítico" —
             comunica "Dados indisponíveis" (tom neutro). Com dados, mostra a
             saude comercial (Saudável/Atenção/Crítico). */}
         {pulse.dataUnavailable ? (
-          <span className="text-[11px] font-semibold rounded-lg px-2 py-1 shrink-0 text-slate-600 bg-slate-100 border border-slate-200">
+          <span className="text-[11px] font-semibold rounded-lg px-2 py-1 shrink-0 text-ink-muted bg-raised border border-line">
             Dados indisponíveis
           </span>
         ) : health ? (
@@ -85,10 +85,10 @@ export default function PulsoPeriodoPanel({ pulse, health, loading, unavailable,
         ) : null}
       </div>
 
-      {health?.summary && <p className="text-xs text-slate-600 leading-snug">{health.summary}</p>}
+      {health?.summary && <p className="text-xs text-ink-muted leading-snug">{health.summary}</p>}
 
       {totalCommercial === 0 ? (
-        <p className="text-xs text-slate-400">Sem atenções comerciais/operacionais no período.</p>
+        <p className="text-xs text-ink-faint">Sem atenções comerciais/operacionais no período.</p>
       ) : (
         <div className="flex flex-col gap-0.5">
           {pulse.top.map((g) => (
@@ -102,7 +102,7 @@ export default function PulsoPeriodoPanel({ pulse, health, loading, unavailable,
           type="button"
           onClick={onOpenAll}
           aria-haspopup="dialog"
-          className="inline-flex items-center min-h-11 text-xs font-semibold text-violet-700 hover:underline self-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+          className="inline-flex items-center min-h-11 text-xs font-semibold text-accent hover:underline self-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
         >
           Ver todos ({totalCommercial})
         </button>
@@ -113,7 +113,7 @@ export default function PulsoPeriodoPanel({ pulse, health, loading, unavailable,
           type="button"
           onClick={onOpenAll}
           aria-haspopup="dialog"
-          className={`mt-1 inline-flex items-center min-h-11 text-xs font-medium rounded-lg px-2.5 py-1.5 self-start border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${dc.severity ? SEVERITY_TONE[dc.severity] : "text-slate-600 bg-slate-50 border-slate-200"}`}
+          className={`mt-1 inline-flex items-center min-h-11 text-xs font-medium rounded-lg px-2.5 py-1.5 self-start border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${dc.severity ? SEVERITY_TONE[dc.severity] : "text-ink-muted bg-raised border-line"}`}
         >
           {dc.count} aviso(s) de confiança no dado
         </button>

@@ -44,7 +44,8 @@ test("severityLabel nunca quebra em severidade desconhecida (fallback = valor br
 });
 
 test("severityTone tem fallback para severidade desconhecida", () => {
-  assert.equal(severityTone("unknown"), "text-slate-500 bg-slate-100 border border-slate-200");
+  // UX-TORRE-2: o mesmo neutro, agora em token (acompanha o tema).
+  assert.equal(severityTone("unknown"), "text-ink-faint bg-raised border border-line");
 });
 
 test("SEVERITY_LABEL e HEALTH_STATUS_LABEL cobrem exatamente os valores do contrato do backend", () => {

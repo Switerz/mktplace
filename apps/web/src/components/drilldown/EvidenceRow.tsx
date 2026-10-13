@@ -3,9 +3,9 @@
 export type EvidenceTone = "value" | "muted" | "warning";
 
 const TONE_CLASS: Record<EvidenceTone, string> = {
-  value: "text-slate-800 font-semibold",
-  muted: "text-slate-400",
-  warning: "text-amber-700",
+  value: "text-ink font-semibold",
+  muted: "text-ink-faint",
+  warning: "text-warn-ink",
 };
 
 interface Props {
@@ -33,10 +33,10 @@ interface Props {
 export default function EvidenceRow({ label, value, tone = "value", reference, title, mutedLabel }: Props) {
   return (
     <li className="flex items-center justify-between gap-3 text-xs">
-      <span className={mutedLabel ? "text-slate-400" : "text-slate-500"}>{label}</span>
+      <span className={mutedLabel ? "text-ink-faint" : "text-ink-faint"}>{label}</span>
       <span className="text-right tabular-nums">
         <span className={TONE_CLASS[tone]} title={title}>{value}</span>
-        {reference && <span className="block text-[10px] text-slate-400">{reference}</span>}
+        {reference && <span className="block text-[10px] text-ink-faint">{reference}</span>}
       </span>
     </li>
   );

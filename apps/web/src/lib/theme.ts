@@ -72,8 +72,16 @@ export function resolverTema(
  *
  * Cada PR da sequencia (`/`, `/canais`, `/financeiro`, depois o resto) remove
  * a propria rota desta barreira ao migrar.
+ *
+ * UX-TORRE-2 acrescentou `/`, `/canais` e `/financeiro`. Entrar nesta lista
+ * exige que TODO arquivo alcancavel a partir da pagina da rota (inclusive os
+ * conteudos de dialogo) esteja sem cor literal — `tests/tema.test.ts` percorre
+ * o grafo de imports e recusa a rota se nao estiver.
+ *
+ * `/` casa SO' a raiz: `rotaTematizada` compara igualdade ou prefixo `"/" + "/"`,
+ * e nenhuma rota real comeca com `//`.
  */
-export const ROTAS_TEMATIZADAS = ["/expedicao"] as const;
+export const ROTAS_TEMATIZADAS = ["/expedicao", "/", "/canais", "/financeiro"] as const;
 
 export function rotaTematizada(pathname: string | null | undefined): boolean {
   if (!pathname) return false;

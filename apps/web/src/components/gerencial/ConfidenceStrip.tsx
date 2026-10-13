@@ -30,19 +30,19 @@ export default function ConfidenceStrip({ data, loading, onOpen }: Props) {
   if (loading) {
     return (
       <div
-        className="bg-white border border-violet-100 rounded-2xl px-4 py-2.5 flex items-center gap-2"
+        className="bg-surface border border-line rounded-xl px-4 py-2.5 flex items-center gap-2"
         role="status"
         aria-busy="true"
       >
-        <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse" />
-        <span className="text-xs text-slate-500">Verificando disponibilidade das séries…</span>
+        <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-line animate-pulse" />
+        <span className="text-xs text-ink-faint">Verificando disponibilidade das séries…</span>
       </div>
     );
   }
 
   const { selectedCount, availableCount, noRecordsCount, unavailableCount } = data;
   const allAvailable = availableCount === selectedCount && selectedCount > 0;
-  const dotTone = unavailableCount > 0 ? "bg-amber-500" : allAvailable ? "bg-emerald-500" : "bg-slate-400";
+  const dotTone = unavailableCount > 0 ? "bg-warn" : allAvailable ? "bg-ok" : "bg-ink-faint";
 
   return (
     <button
@@ -50,27 +50,27 @@ export default function ConfidenceStrip({ data, loading, onOpen }: Props) {
       onClick={onOpen}
       aria-haspopup="dialog"
       aria-label="Confiança no dado — abrir disponibilidade das séries, defasagem e avisos"
-      className="w-full min-h-11 text-left bg-white border border-violet-100 rounded-2xl px-4 py-2.5 flex items-center gap-x-3 gap-y-1 flex-wrap hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
+      className="w-full min-h-11 text-left bg-surface border border-line rounded-xl px-4 py-2.5 flex items-center gap-x-3 gap-y-1 flex-wrap hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
     >
-      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
         Confiança no dado
       </span>
 
       <span className="flex items-center gap-1.5 text-xs">
         <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${dotTone}`} />
-        <span className="text-slate-600 tabular-nums">
+        <span className="text-ink-muted tabular-nums">
           Série disponível em {availableCount} de {selectedCount}{" "}
           {selectedCount === 1 ? "canal" : "canais"}
         </span>
       </span>
 
       {noRecordsCount > 0 && (
-        <span className="text-xs text-slate-600 tabular-nums">
+        <span className="text-xs text-ink-muted tabular-nums">
           {noRecordsCount} sem registros no período
         </span>
       )}
       {unavailableCount > 0 && (
-        <span className="text-xs text-amber-800 tabular-nums">
+        <span className="text-xs text-warn-ink tabular-nums">
           {unavailableCount} {unavailableCount === 1 ? "indisponível" : "indisponíveis"}
         </span>
       )}
@@ -80,21 +80,21 @@ export default function ConfidenceStrip({ data, loading, onOpen }: Props) {
       {data.warningsChecked ? (
         <>
           {data.maxStalenessDays != null && (
-            <span className="text-xs text-slate-600 tabular-nums">
+            <span className="text-xs text-ink-muted tabular-nums">
               defasagem máxima {data.maxStalenessDays}d
             </span>
           )}
-          <span className={`text-xs tabular-nums ${data.warningCount > 0 ? "text-amber-800" : "text-slate-500"}`}>
+          <span className={`text-xs tabular-nums ${data.warningCount > 0 ? "text-warn-ink" : "text-ink-faint"}`}>
             {data.warningCount > 0
               ? `${data.warningCount} aviso${data.warningCount > 1 ? "s" : ""} de dado`
               : "sem avisos de dado"}
           </span>
         </>
       ) : (
-        <span className="text-xs text-slate-500">defasagem e avisos não verificados</span>
+        <span className="text-xs text-ink-faint">defasagem e avisos não verificados</span>
       )}
 
-      <span aria-hidden="true" className="ml-auto text-xs font-semibold text-violet-700">
+      <span aria-hidden="true" className="ml-auto text-xs font-semibold text-accent">
         Detalhar
       </span>
     </button>

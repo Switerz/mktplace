@@ -45,13 +45,13 @@ function KpiReference({ kind, overview }: { kind: KpiKind; overview: OverviewDat
   const hasGmvComparison = kind === "gmv" && overview.gmv_mom_pct != null;
   return (
     <div>
-      <p className="text-xs text-slate-400">Referência (período anterior)</p>
+      <p className="text-xs text-ink-faint">Referência (período anterior)</p>
       {hasGmvComparison ? (
-        <p className="text-sm font-semibold text-slate-700 tabular-nums">
+        <p className="text-sm font-semibold text-ink-muted tabular-nums">
           {fmtBrl(overview.prev_gmv)} · {overview.gmv_mom_pct! >= 0 ? "+" : ""}{overview.gmv_mom_pct!.toFixed(1)}%
         </p>
       ) : (
-        <p className="text-sm text-slate-400">Comparação indisponível</p>
+        <p className="text-sm text-ink-faint">Comparação indisponível</p>
       )}
     </div>
   );
@@ -70,7 +70,7 @@ export default function KpiDrilldownContent({ kind, value, periodLabel, refreshe
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <p className="text-3xl font-bold text-gray-900 tabular-nums leading-none">{value}</p>
+        <p className="text-3xl font-bold text-ink tabular-nums leading-none">{value}</p>
         <div className="mt-1">
           <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
         </div>
@@ -79,14 +79,14 @@ export default function KpiDrilldownContent({ kind, value, periodLabel, refreshe
       <KpiReference kind={kind} overview={overview} />
 
       <div className="flex flex-col gap-1">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Como é calculado</p>
-        <p className="text-slate-700">{meta.definition}</p>
-        <p className="text-xs text-slate-500 font-mono mt-1">{meta.formula}</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Como é calculado</p>
+        <p className="text-ink-muted">{meta.definition}</p>
+        <p className="text-xs text-ink-faint font-mono mt-1">{meta.formula}</p>
         {meta.caveat && <div className="mt-1"><DataQualityNote note={meta.caveat} /></div>}
       </div>
 
       <div className="flex flex-col gap-2">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Decomposição</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Decomposição</p>
         {kind === "gmv" && <GmvBreakdown overview={overview} brands={brands} channels={channels} />}
         {kind === "orders" && <OrdersBreakdown brands={brands} />}
         {kind === "avg_ticket" && <AvgTicketBreakdown brands={brands} />}
@@ -104,7 +104,7 @@ function GmvBreakdown({ overview, brands, channels }: { overview: OverviewData; 
   const byBrand = gmvBrandBreakdown(brands);
   return (
     <>
-      <p className="text-xs text-slate-500">Por canal</p>
+      <p className="text-xs text-ink-faint">Por canal</p>
       <ul className="flex flex-col gap-1">
         {byChannel.map((c) => (
           <EvidenceRow
@@ -115,7 +115,7 @@ function GmvBreakdown({ overview, brands, channels }: { overview: OverviewData; 
           />
         ))}
       </ul>
-      <p className="text-xs text-slate-500 mt-2">Por marca</p>
+      <p className="text-xs text-ink-faint mt-2">Por marca</p>
       <ul className="flex flex-col gap-1">
         {byBrand.map((b) => (
           <EvidenceRow key={b.brand} label={b.label} value={`${fmtBrl(b.value)} · ${fmtPct1(b.pct)}`} />

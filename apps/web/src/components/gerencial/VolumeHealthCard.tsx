@@ -12,10 +12,12 @@
  * A ordem das linhas segue a ordem canonica de canal, jamais a taxa — ordenar
  * por taxa criaria o ranking competitivo que o V2-0 proibiu.
  */
+import { Activity } from "lucide-react";
+import TableScrollHint from "@/components/TableScrollHint";
 import type { VolumeHealthRow } from "@/lib/gerencial/volume-health";
 import { CANCEL_RATE_FORMULA, NO_CROSS_CHANNEL_RANKING } from "@/lib/gerencial/volume-health";
 import { fmtBrlFull } from "@/lib/formatters";
-import { CHANNEL_STROKE } from "@/lib/gerencial/channel-colors";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 
 interface Props {
   rows: VolumeHealthRow[];
@@ -37,31 +39,31 @@ export default function VolumeHealthCard({ rows, loading, error, onOpenChannel, 
   if (loading) {
     return (
       <section
-        className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse"
+        className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3 animate-pulse"
         role="status"
         aria-busy="true"
       >
         <span className="sr-only">Carregando saúde do volume…</span>
-        <div className="h-3 w-48 bg-violet-100 rounded" />
-        <div className="h-12 w-full bg-violet-50 rounded" />
-        <div className="h-12 w-full bg-violet-50 rounded" />
+        <div className="h-3 w-48 bg-accent-soft rounded" />
+        <div className="h-12 w-full bg-accent-soft rounded" />
+        <div className="h-12 w-full bg-accent-soft rounded" />
       </section>
     );
   }
 
   if (error) {
     return (
-      <section className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+      <section className="bg-raised border border-line rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h2 className="text-sm font-semibold text-slate-700">Saúde do volume por canal</h2>
-          <p className="text-xs text-slate-500">
+          <h2 className="text-sm font-semibold text-ink-muted">Saúde do volume por canal</h2>
+          <p className="text-xs text-ink-faint">
             Fonte de qualidade indisponível nesta carga. Os demais blocos do período seguem exibidos.
           </p>
         </div>
         <button
           type="button"
           onClick={onRetry}
-          className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 min-h-11 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+          className="text-xs font-semibold text-ink-muted border border-line-strong rounded-lg px-3 min-h-11 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           Tentar novamente
         </button>
@@ -71,101 +73,107 @@ export default function VolumeHealthCard({ rows, loading, error, onOpenChannel, 
 
   if (rows.length === 0) return null;
 
+  // UX-TORRE-B2B-1: os motivos de N/D saem de dentro de cada linha e viram
+  // notas numeradas no rodape — continuam visiveis, mas a tabela volta a ser
+  // lida coluna a coluna. Mesmo texto, sem reescrita.
+  const notas = rows.flatMap((row) => {
+    if (!row.cancelAvailable && row.cancelUnavailableReason) return [row.cancelUnavailableReason];
+    if (row.cancelAvailable && !row.returnAvailable && row.returnUnavailableReason) return [row.returnUnavailableReason];
+    return [];
+  });
+
+  const TH = "px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink-faint";
+
   return (
     <section
       aria-labelledby="volume-heading"
-      className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3"
+      className="bg-surface border border-line rounded-xl flex flex-col overflow-hidden"
     >
-      <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <h2 id="volume-heading" className="text-sm font-semibold text-slate-700">
+      <div className="flex items-center justify-between gap-3 flex-wrap border-b border-line px-4 py-2.5">
+        <h2 id="volume-heading" className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <Activity aria-hidden="true" className="h-4 w-4 text-ink-faint" strokeWidth={1.75} />
           Saúde do volume por canal
         </h2>
-        <p className="text-xs text-slate-500">{CANCEL_RATE_FORMULA}</p>
+        <p className="text-xs text-ink-faint">{CANCEL_RATE_FORMULA}</p>
       </div>
 
-      <ul className="flex flex-col divide-y divide-violet-100">
-        {rows.map((row) => (
-          <li key={row.channel} className="py-2.5 first:pt-0 last:pb-0">
-            <button
-              type="button"
-              onClick={() => onOpenChannel(row.channel)}
-              aria-haspopup="dialog"
-              aria-label={`${row.channelLabel} — abrir definição, valores e limitações`}
-              className="w-full min-h-11 text-left rounded-lg px-2 -mx-2 py-1 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
-            >
-              <div className="flex items-center gap-2 mb-1.5">
-                <span
-                  aria-hidden="true"
-                  className="w-2 h-2 rounded-full shrink-0"
-                  style={{ background: CHANNEL_STROKE[row.channel] }}
-                />
-                <span className="text-sm font-semibold text-slate-800">{row.channelLabel}</span>
-                <span className="ml-auto text-sm tabular-nums text-slate-700 shrink-0">
-                  {row.gmv != null ? fmtBrlFull(row.gmv) : <span className="text-slate-400">GMV N/D</span>}
-                </span>
-              </div>
-
-              <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1.5">
-                <div className="min-w-0">
-                  <dt className="text-xs text-slate-500 truncate">{row.ordersLabel}</dt>
-                  <dd className="text-xs font-medium text-slate-700 tabular-nums">{intCount(row.orders)}</dd>
-                </div>
-                <div className="min-w-0">
-                  <dt className="text-xs text-slate-500">Cancelados</dt>
-                  <dd className="text-xs font-medium text-slate-700 tabular-nums">
-                    {row.cancelAvailable ? intCount(row.canceled) : <span className="text-slate-400">N/D</span>}
-                  </dd>
-                </div>
-                <div className="min-w-0">
-                  <dt className="text-xs text-slate-500">Taxa de cancelamento</dt>
-                  <dd className="text-xs font-medium tabular-nums">
-                    {row.cancelAvailable ? (
-                      <span className="text-slate-700">{ratePct(row.cancelRatePct)}</span>
-                    ) : (
-                      <span className="text-slate-400">N/D</span>
-                    )}
-                  </dd>
-                </div>
-                <div className="min-w-0">
-                  <dt className="text-xs text-slate-500">Devolução</dt>
-                  <dd className="text-xs font-medium tabular-nums">
-                    {row.returnAvailable ? (
-                      <span className="text-slate-700">
-                        {intCount(row.returned)} · {ratePct(row.returnRatePct)}
+      <TableScrollHint>
+        <table className="w-full text-data" aria-labelledby="volume-heading">
+          <thead>
+            <tr className="bg-raised">
+              <th scope="col" className={`${TH} text-left`}>Canal</th>
+              <th scope="col" className={`${TH} text-right`}>Pedidos</th>
+              <th scope="col" className={`${TH} text-right`}>Cancelados</th>
+              <th scope="col" className={`${TH} text-left min-w-[11rem]`}>Taxa de cancelamento</th>
+              <th scope="col" className={`${TH} text-right`}>Devolução</th>
+              <th scope="col" className={`${TH} text-right`}>GMV</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {rows.map((row) => (
+              <tr key={row.channel} className="hover:bg-raised/70 transition-colors">
+                <th scope="row" className="px-1.5 py-0.5 text-left font-normal">
+                  <button
+                    type="button"
+                    onClick={() => onOpenChannel(row.channel)}
+                    aria-haspopup="dialog"
+                    aria-label={`${row.channelLabel} — abrir definição, valores e limitações`}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-md px-1.5 text-sm font-semibold text-ink hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent whitespace-nowrap"
+                  >
+                    <span aria-hidden="true" className={`w-2 h-2 rounded-full shrink-0 ${CHANNEL_DOT[row.channel]}`} />
+                    {row.channelLabel}
+                  </button>
+                </th>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-muted">
+                  <span className="sr-only">{row.ordersLabel}: </span>
+                  {intCount(row.orders)}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-muted">
+                  {row.cancelAvailable ? intCount(row.canceled) : <span className="text-ink-faint">N/D</span>}
+                </td>
+                <td className="px-3 py-2">
+                  {/* A barra representa a TAXA do proprio canal (0-100%), nunca
+                      uma parcela monetaria. Canal sem taxa nao ganha barra. */}
+                  {row.cancelAvailable && row.cancelRatePct != null ? (
+                    <span className="flex items-center gap-2">
+                      <span className="block h-1.5 flex-1 overflow-hidden rounded-full bg-raised" aria-hidden="true">
+                        <span
+                          className="block h-1.5 rounded-full bg-ink-faint"
+                          style={{ width: `${Math.min(row.cancelRatePct, 100)}%` }}
+                        />
                       </span>
-                    ) : (
-                      <span className="text-slate-400">N/D</span>
-                    )}
-                  </dd>
-                </div>
-              </dl>
+                      <span className="w-12 shrink-0 text-right font-semibold tabular-nums text-ink-muted">
+                        {ratePct(row.cancelRatePct)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-ink-faint">N/D</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-muted whitespace-nowrap">
+                  {row.returnAvailable ? (
+                    <>
+                      {intCount(row.returned)} · {ratePct(row.returnRatePct)}
+                    </>
+                  ) : (
+                    <span className="text-ink-faint">N/D</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums font-semibold text-ink whitespace-nowrap">
+                  {row.gmv != null ? fmtBrlFull(row.gmv) : <span className="font-normal text-ink-faint">GMV N/D</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScrollHint>
 
-              {/* A barra representa a TAXA do proprio canal (0-100%), nunca uma
-                  parcela monetaria. Canal sem taxa nao ganha barra alguma. */}
-              {row.cancelAvailable && row.cancelRatePct != null && (
-                <div className="mt-2 flex items-center gap-2">
-                  <span className="block flex-1 bg-violet-50 rounded-full h-1.5 overflow-hidden">
-                    <span
-                      className="block h-1.5 rounded-full bg-slate-400"
-                      style={{ width: `${Math.min(row.cancelRatePct, 100)}%` }}
-                    />
-                  </span>
-                  <span className="text-xs text-slate-500 shrink-0">taxa do próprio canal</span>
-                </div>
-              )}
-
-              {!row.cancelAvailable && (
-                <p className="mt-1.5 text-xs text-slate-500">{row.cancelUnavailableReason}</p>
-              )}
-              {row.cancelAvailable && !row.returnAvailable && row.returnUnavailableReason && (
-                <p className="mt-1.5 text-xs text-slate-500">{row.returnUnavailableReason}</p>
-              )}
-            </button>
-          </li>
+      <div className="flex flex-col gap-0.5 border-t border-line px-4 py-2 text-xs text-ink-faint">
+        {notas.map((nota) => (
+          <p key={nota}>N/D — {nota}</p>
         ))}
-      </ul>
-
-      <p className="text-xs text-slate-500">{NO_CROSS_CHANNEL_RANKING}</p>
+        <p>{NO_CROSS_CHANNEL_RANKING} A taxa é a do próprio canal.</p>
+      </div>
     </section>
   );
 }

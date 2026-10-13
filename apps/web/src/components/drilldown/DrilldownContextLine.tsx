@@ -19,7 +19,7 @@ interface Props {
  */
 export default function DrilldownContextLine({ leading, periodLabel, refreshedAt }: Props) {
   return (
-    <p className="text-xs text-slate-400">
+    <p className="text-xs text-ink-faint">
       {leading && <>{leading} · </>}
       {periodLabel}
       {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}

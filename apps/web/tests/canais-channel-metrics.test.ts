@@ -62,7 +62,10 @@ test("signalLabel/signalTone tem fallback humano para um sinal desconhecido", ()
   assert.equal(signalLabel("codigo_novo_desconhecido"), "Sinal não mapeado");
   assert.doesNotMatch(signalLabel("codigo_novo_desconhecido"), /codigo_novo_desconhecido/);
   assert.doesNotMatch(signalLabel("codigo_novo_desconhecido"), /_/, "sem snake_case no rótulo");
-  assert.match(signalTone("codigo_novo_desconhecido"), /slate/);
+  // UX-TORRE-2: neutro em token (era `slate`). A garantia e' a mesma: sinal
+  // desconhecido nunca herda cor de severidade.
+  assert.match(signalTone("codigo_novo_desconhecido"), /text-ink-faint bg-raised/);
+  assert.doesNotMatch(signalTone("codigo_novo_desconhecido"), /\b(ok|warn|crit)\b|-(ok|warn|crit)/);
 });
 
 // findChannelMedian — drill-down marca x canal da matriz "Comparativo entre
