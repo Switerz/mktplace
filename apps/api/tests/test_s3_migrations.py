@@ -172,7 +172,10 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # `source` na UNIQUE de marts.fact_shopee_product_monthly. Sem isso as
     # duas procedencias nao podem coexistir para a mesma chave — medido
     # numa UniqueViolation na primeira publicacao em shadow (28/09/2026).
-    assert heads == ["024"], f"head deveria ser unico e igual a 024, veio {heads}"
+    # Gate DRE-DATA-BRIDGE-1: head avancado de 024 para 025, que cria
+    # marts.fact_dre_insumo_mensal -- insumos MENSAIS AGREGADOS da DRE (CMV
+    # fiscal e repasse TikTok) que so existem no Data Mart.
+    assert heads == ["025"], f"head deveria ser unico e igual a 025, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
