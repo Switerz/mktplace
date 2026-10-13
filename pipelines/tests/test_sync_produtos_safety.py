@@ -109,6 +109,39 @@ def test_sync_shopee_sem_linhas_novas_registra_sucesso_com_zero(monkeypatch):
     assert statuses, f"esperado status 'success' na auditoria, executed={audit_conn.executed}"
 
 
+def test_sync_shopee_grava_procedencia_e_usa_alvo_de_cinco_colunas(monkeypatch):
+    """Migration 024: a UNIQUE do Neon passou a incluir `source`. O alvo de 4
+    colunas nao casa com indice unico nenhum e o upsert falharia com "there is
+    no unique or exclusion constraint matching the ON CONFLICT specification"
+    — e a linha sem `source` violaria o NOT NULL da 023."""
+    row = {
+        "ref_month": "2026-09-01", "brand": "kokeshi", "sku_ref": "K1", "sku_ref_key": "K1",
+        "product_name": "Produto", "variation_name": None, "gmv": 10.0, "units_sold": 1,
+        "completed_orders": 1, "canceled_orders": 0, "cancel_rate_pct": 0,
+        "unique_buyers": 1, "avg_price": 10.0,
+    }
+    audit_conn = FakeConn()
+    local_conn = FakeConn(fetchall_result=[row])
+    neon_conn = FakeConn()
+    neons = iter([audit_conn, neon_conn])
+    capturado = {}
+
+    def fake_execute_values(cur, sql, batch, page_size=None):
+        capturado["sql"] = " ".join(sql.split())
+        capturado["batch"] = batch
+
+    monkeypatch.setattr(sp, "_neon", lambda: next(neons))
+    monkeypatch.setattr(sp, "_local", lambda: local_conn)
+    monkeypatch.setattr(sp, "execute_values", fake_execute_values)
+
+    assert sp.sync_shopee(full=True, brands={"kokeshi"}) == {"source": 1, "upserted": 1}
+    assert "avg_price, source) VALUES %s" in capturado["sql"]
+    assert "ON CONFLICT (ref_month, brand, sku_ref_key, product_name, source)" in capturado["sql"]
+    assert "ON CONFLICT (ref_month, brand, sku_ref_key, product_name) " not in capturado["sql"]
+    assert [t[-1] for t in capturado["batch"]] == ["manual_export"]
+    assert neon_conn.committed
+
+
 def test_sync_ml_queda_suspeita_de_linhas_aborta_e_registra_falha(monkeypatch):
     # Neon ja tem 1000 linhas; RDS agora so' retorna 10 -> queda > 50%, deve abortar.
     audit_conn = FakeConn(prev_count=1000)
