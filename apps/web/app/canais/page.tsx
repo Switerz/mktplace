@@ -15,24 +15,28 @@ import {
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { mergeFilteredHref } from "@/lib/filters/nav-links";
-import KpiCard from "@/components/KpiCard";
+import { Store } from "lucide-react";
+import StatCard from "@/components/ui/StatCard";
+import Freshness, { PeriodChip } from "@/components/ui/Freshness";
+import Note from "@/components/ui/Note";
+import Segmented from "@/components/ui/Segmented";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
+import ChannelOverview, { type CanalId, type ColunaCanal } from "@/components/canais/ChannelOverview";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import ChannelComparisonDialogContent from "@/components/ChannelComparisonDialogContent";
 import AffiliateCostsPanel from "@/components/AffiliateCostsPanel";
 import TiktokOrderDiscountsPanel from "@/components/TiktokOrderDiscountsPanel";
 import { resolveBlockPhase } from "@/lib/canais-affiliate-costs";
-import { SkeletonKpiCard, SkeletonTableRows } from "@/components/Skeleton";
-import MarketplaceFilter from "@/components/MarketplaceFilter";
-import BrandFilter from "@/components/BrandFilter";
-import DateRangeFilter from "@/components/DateRangeFilter";
-import LiveStatusBadge from "@/components/LiveStatusBadge";
+import { SkeletonTableRows } from "@/components/Skeleton";
+import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
+import Disclosure from "@/components/ui/Disclosure";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
-import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
+import { fmtPeriodo, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
-import SortableHeader from "@/components/SortableHeader";
+import SortHeader from "@/components/ui/SortHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import {
   formatChannelMetric,
@@ -40,6 +44,7 @@ import {
   signalTone,
   findChannelMedian,
   CHANNEL_BADGE_TONE,
+  CHANNEL_LABEL,
   type FormattedMetric,
 } from "@/lib/canais-channel-metrics";
 import {
@@ -71,9 +76,9 @@ function buildRequestKey(
 }
 
 function channelMetricToneClass(tone: FormattedMetric["tone"]): string {
-  if (tone === "value") return "text-slate-700 font-medium";
-  if (tone === "warning") return "text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 text-xs font-semibold";
-  return "text-slate-400 text-xs italic";
+  if (tone === "value") return "text-ink-muted font-medium";
+  if (tone === "warning") return "text-warn-ink bg-warn-soft rounded px-1.5 py-0.5 text-xs font-semibold";
+  return "text-ink-faint text-xs italic";
 }
 
 function ChannelMetricCell({
@@ -112,7 +117,7 @@ function ContentMixBar({ mix, gmvVideo, gmvLive, gmvCard }: {
   gmvCard: number | null;
 }) {
   if (mix.base == null) {
-    return <span className="text-xs text-slate-400">{MIX_UNAVAILABLE_LABEL}</span>;
+    return <span className="text-xs text-ink-faint">{MIX_UNAVAILABLE_LABEL}</span>;
   }
   const w = contentMixWeights(gmvVideo, gmvLive, gmvCard);
   const label =
@@ -120,60 +125,104 @@ function ContentMixBar({ mix, gmvVideo, gmvLive, gmvCard }: {
     `vídeo ${formatContentPctBr(mix.videoPct)}, live ${formatContentPctBr(mix.livePct)}, card/vitrine ${formatContentPctBr(mix.cardPct)}.`;
   return (
     <div
-      className="flex h-2 rounded-full overflow-hidden w-28 bg-slate-100"
+      className="flex h-2 rounded-full overflow-hidden w-28 bg-raised"
       role="img"
       aria-label={label}
       title={label}
     >
-      <div className="bg-violet-500 transition-all" style={{ flexGrow: w.video }} />
-      <div className="bg-cyan-500 transition-all" style={{ flexGrow: w.live }} />
-      <div className="bg-amber-400 transition-all" style={{ flexGrow: w.card }} />
+      {/* Composicao: cor de SERIE por origem, nunca ok/warn/crit. */}
+      <div className={`${MIX_SERIE.video} transition-all`} style={{ flexGrow: w.video }} />
+      <div className={`${MIX_SERIE.live} transition-all`} style={{ flexGrow: w.live }} />
+      <div className={`${MIX_SERIE.card} transition-all`} style={{ flexGrow: w.card }} />
     </div>
   );
 }
 
-const CHANNEL_STYLE = {
-  video: "text-violet-800 bg-violet-100 font-bold",
-  live: "text-cyan-800 bg-cyan-100 font-bold",
-  card: "text-amber-800 bg-amber-100 font-bold",
+/** UX-TORRE-2: serie por origem do conteudo. Card era ambar — a mesma cor de
+ * "atencao" — sem nenhuma regra de negocio por tras. */
+const MIX_SERIE = {
+  video: "bg-chart-1",
+  live: "bg-chart-5",
+  card: "bg-chart-6",
 };
-const DIM_STYLE = "text-slate-500";
+
+/** Origem dominante: destaque NEUTRO (relevo + peso), igual para as tres —
+ * ser dominante nao e' bom nem ruim. */
+const DOMINANT_STYLE = "text-ink bg-raised ring-1 ring-inset ring-line-strong font-bold";
+const CHANNEL_STYLE = {
+  video: DOMINANT_STYLE,
+  live: DOMINANT_STYLE,
+  card: DOMINANT_STYLE,
+};
+const DIM_STYLE = "text-ink-faint";
 
 function convRateStyle(v: number | null): string {
   if (v == null) return DIM_STYLE;
-  if (v >= 4) return "text-emerald-700 bg-emerald-50 font-semibold";
-  if (v >= 2) return "text-amber-700 bg-amber-50 font-semibold";
-  return "text-rose-700 bg-rose-50 font-semibold";
+  if (v >= 4) return "text-ok-ink bg-ok-soft font-semibold";
+  if (v >= 2) return "text-warn-ink bg-warn-soft font-semibold";
+  return "text-crit-ink bg-crit-soft font-semibold";
 }
 
 function repeatRateStyle(v: number | null): string {
   if (v == null) return DIM_STYLE;
-  if (v >= 15) return "text-emerald-700 bg-emerald-50 font-semibold";
-  if (v >= 8) return "text-amber-700 bg-amber-50 font-semibold";
-  return "text-rose-700 bg-rose-50 font-semibold";
+  if (v >= 15) return "text-ok-ink bg-ok-soft font-semibold";
+  if (v >= 8) return "text-warn-ink bg-warn-soft font-semibold";
+  return "text-crit-ink bg-crit-soft font-semibold";
 }
 
 function newBuyerPctStyle(v: number | null): string {
   if (v == null) return DIM_STYLE;
-  if (v >= 85) return "text-emerald-700 bg-emerald-50 font-semibold";
-  if (v >= 70) return "text-amber-700 bg-amber-50 font-semibold";
-  return "text-rose-700 bg-rose-50 font-semibold";
+  if (v >= 85) return "text-ok-ink bg-ok-soft font-semibold";
+  if (v >= 70) return "text-warn-ink bg-warn-soft font-semibold";
+  return "text-crit-ink bg-crit-soft font-semibold";
 }
 
 /** Anchors internos compactos (Task 3) — sempre reais (`href="#id"`), nunca
  * um estado paralelo de navegacao. So aparecem para canais atualmente
  * selecionados/visiveis. */
-function InternalNav({ showTiktok, showMl, showShopee }: { showTiktok: boolean; showMl: boolean; showShopee: boolean }) {
-  const linkClass = "px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500";
+function InternalNav({
+  showTiktok, showMl, showShopee, onEscolherAba,
+}: {
+  showTiktok: boolean; showMl: boolean; showShopee: boolean;
+  /** O link de canal escolhe a aba direto: se a aba foi trocada a mao, a
+   * ancora pode ja' ser a atual e o `hashchange` nao dispararia. */
+  onEscolherAba: (aba: CanalId) => void;
+}) {
+  // UX-TORRE-B2B-1: alvo de 44px explicito e a ordem nova da pagina. As
+  // ancoras de canal continuam: elas escolhem a aba do "Detalhe por canal".
+  const linkClass = "inline-flex min-h-11 items-center px-2.5 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
   return (
-    <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
-      <a href="#comparativo" className={linkClass}>Comparativo</a>
-      {showTiktok && <a href="#tiktok-shop" className={linkClass}>TikTok Shop</a>}
-      {showMl && <a href="#mercado-livre" className={linkClass}>Mercado Livre</a>}
-      {showShopee && <a href="#shopee" className={linkClass}>Shopee</a>}
+    <nav aria-label="Navegação interna da página" className="flex flex-wrap items-center gap-1 -mx-2.5">
+      <a href="#comparativo-canais" className={linkClass}>Lado a lado</a>
+      <a href="#comparativo" className={linkClass}>Marca × canal</a>
+      <a href="#afiliados" className={linkClass}>Afiliados</a>
+      <a href="#descontos-tiktok" className={linkClass}>Descontos TikTok</a>
+      <span aria-hidden="true" className="mx-1 h-4 w-px bg-line-strong" />
+      {showTiktok && <a href="#tiktok-shop" onClick={() => onEscolherAba("tiktok")} className={linkClass}>TikTok Shop</a>}
+      {showMl && <a href="#mercado-livre" onClick={() => onEscolherAba("ml")} className={linkClass}>Mercado Livre</a>}
+      {showShopee && <a href="#shopee" onClick={() => onEscolherAba("shopee")} className={linkClass}>Shopee</a>}
     </nav>
   );
 }
+
+/**
+ * Espelho do contrato de aplicabilidade por canal do backend
+ * (`_ADS_APPLICABLE`, `_COST_APPLICABLE`, `_SHIPPING_APPLICABLE` em
+ * performance_service.py, Gate 1 do canais_audit §14.2). "Aplicavel" e'
+ * modelo de negocio do canal — nao depende de haver linha no periodo.
+ */
+const APLICAVEL_POR_CANAL: Record<CanalId, { ads: boolean; custo: boolean; frete: boolean }> = {
+  tiktok: { ads: false, custo: true, frete: false },
+  ml: { ads: true, custo: true, frete: true },
+  shopee: { ads: true, custo: true, frete: true },
+};
+
+/** Ancora de canal -> aba do detalhe. */
+const ABA_DA_ANCORA: Record<string, CanalId> = {
+  "#tiktok-shop": "tiktok",
+  "#mercado-livre": "ml",
+  "#shopee": "shopee",
+};
 
 function CanaisPageInner() {
   const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior" });
@@ -407,70 +456,117 @@ function CanaisPageInner() {
   };
   const channelMatrixSort = useSortableTable(displayChannelRows, channelMatrixGetValue, channelMatrixColumnTypes);
 
+  // ── UX-TORRE-B2B-1: colunas do "Canais lado a lado" ──
+  // GMV e pedidos = soma das linhas marca x canal (a MESMA base da matriz);
+  // custo/Ads/frete = medianas que a API ja' entrega; compradores = KPIs de
+  // canal que a pagina ja' exibia, no MESMO formato de antes.
+  const canaisSelecionados: CanalId[] = [
+    ...(showTiktok ? (["tiktok"] as const) : []),
+    ...(showMl ? (["ml"] as const) : []),
+    ...(showShopee ? (["shopee"] as const) : []),
+  ];
+  const colunasCanal: ColunaCanal[] = canaisSelecionados.map((canal) => {
+    const linhas = displayChannelRows.filter((r) => r.channel === canal);
+    const k = displayKpis;
+    const compradores =
+      canal === "tiktok"
+        ? { novos: "N/D", recompra: "N/D", porComprador: "N/D", conversao: formatContentPctBr(k?.tiktok_conversion_rate) }
+        : canal === "ml"
+          ? {
+              novos: fmtPct(k?.ml_new_buyer_pct ?? null),
+              recompra: fmtPct(k?.ml_repeat_buyer_rate_pct ?? null),
+              porComprador: k?.ml_gmv_per_buyer != null ? fmtBrl(k.ml_gmv_per_buyer) : "—",
+              conversao: "N/D",
+            }
+          : {
+              novos: fmtPct(k?.shopee_new_buyer_pct ?? null),
+              recompra: fmtPct(k?.shopee_repeat_buyer_rate_pct ?? null),
+              porComprador: k?.shopee_gmv_per_buyer != null ? fmtBrl(k.shopee_gmv_per_buyer) : "—",
+              conversao: k?.shopee_conversion_rate != null ? fmtPct(k.shopee_conversion_rate) : "—",
+            };
+    // Canal sem NENHUMA linha no recorte: ausencia de medicao (null -> "Sem
+    // dado"), nunca R$ 0. A aplicabilidade vem do contrato fixo por canal, e
+    // nao das linhas — sem linhas, `some()` devolveria "N/A" onde o certo e'
+    // "Sem dado".
+    const temLinhas = linhas.length > 0;
+    return {
+      canal,
+      rotulo: CHANNEL_LABEL[canal],
+      gmv: temLinhas ? linhas.reduce((s, r) => s + (r.gmv ?? 0), 0) : null,
+      pedidos: temLinhas ? linhas.reduce((s, r) => s + (r.orders ?? 0), 0) : null,
+      mediana: findChannelMedian(displayChannelMedians, canal),
+      aplicavel: APLICAVEL_POR_CANAL[canal],
+      disponivel: {
+        ads: linhas.some((r) => r.ads_available),
+        custo: linhas.some((r) => r.marketplace_cost_available),
+        frete: linhas.some((r) => r.seller_shipping_available),
+      },
+      novosPct: compradores.novos,
+      recompraPct: compradores.recompra,
+      gmvPorComprador: compradores.porComprador,
+      conversao: compradores.conversao,
+    };
+  });
+
+  // ── Detalhe por canal: uma aba por canal selecionado ──
+  const abasDetalhe: CanalId[] = canaisSelecionados;
+  const [abaEscolhida, setAba] = useState<CanalId>("tiktok");
+  // A ancora (#tiktok-shop, #mercado-livre, #shopee) escolhe a aba — ao
+  // carregar e ao clicar na navegacao interna.
+  useEffect(() => {
+    const aplicar = () => {
+      const ancora = window.location.hash;
+      const aba = ABA_DA_ANCORA[ancora];
+      if (!aba) return;
+      setAba(aba);
+      // A secao da aba so' existe depois do render: o navegador ja' tentou
+      // rolar e nao achou o alvo. Rola de novo quando ela montar.
+      window.setTimeout(() => document.getElementById(ancora.slice(1))?.scrollIntoView({ block: "start" }), 0);
+    };
+    aplicar();
+    window.addEventListener("hashchange", aplicar);
+    return () => window.removeEventListener("hashchange", aplicar);
+  }, []);
+  // Link interno de canal: escolhe a aba e rola ate ela depois que monta.
+  const escolherAbaPorLink = (aba: CanalId) => {
+    setAba(aba);
+    const ancora = Object.keys(ABA_DA_ANCORA).find((k) => ABA_DA_ANCORA[k] === aba);
+    if (ancora) window.setTimeout(() => document.getElementById(ancora.slice(1))?.scrollIntoView({ block: "start" }), 0);
+  };
+  // Aba escolhida fora do filtro atual cai na primeira disponivel.
+  const abaAtiva: CanalId = abasDetalhe.includes(abaEscolhida) ? abaEscolhida : abasDetalhe[0] ?? "tiktok";
+
   return (
     <PageContainer>
       <PageHeader
         title="Canais"
         subtitle="Comparar TikTok Shop, Mercado Livre e Shopee — e investigar marca × canal."
-        scopeLine={
+        icon={Store}
+        meta={
           <>
-            Período: {periodLabel}
-            {dataIsFresh && refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+            <PeriodChip label={periodLabel} />
+            <Freshness live={dataIsFresh ? isLive : null} refreshedAt={dataIsFresh ? refreshedAt : null} loading={loading} />
           </>
         }
-        status={
-          dataIsFresh ? (
-            <LiveStatusBadge live={isLive} />
-          ) : loading ? (
-            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-              Atualizando dados...
-            </span>
-          ) : null
-        }
-        filters={
-          <>
-            <div className="flex items-start gap-3 flex-wrap min-w-0">
-              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-            </div>
-            <DateRangeFilter
-              dateFrom={filters.dateFrom}
-              dateTo={filters.dateTo}
-              compare={filters.compare}
-              onChange={(v) => setFilters(v)}
-              onCompareChange={(compare) => setFilters({ compare })}
-              hideCompare
-            />
-          </>
-        }
+        filters={<GlobalFilterControls filters={filters} onChange={setFilters} hideCompare loading={loading} />}
       />
 
       {/* Navegacao interna compacta */}
-      <InternalNav showTiktok={showTiktok} showMl={showMl} showShopee={showShopee} />
+      <InternalNav showTiktok={showTiktok} showMl={showMl} showShopee={showShopee} onEscolherAba={escolherAbaPorLink} />
 
       {dataIsFresh && (() => {
         const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
         const note = mockLimitationNote(isLive, filters.brands, isCustomPeriod);
-        return note && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
-            <p className="text-xs text-amber-800">{note}</p>
-          </div>
-        );
+        return note && <Note tom="atencao">{note}</Note>;
       })()}
 
       {error && (
-        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold text-rose-700 uppercase tracking-wider mb-1">Erro de carregamento</p>
-            <p className="text-sm text-rose-800">{error}</p>
-          </div>
-          <button
-            onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
-            className="text-xs font-semibold text-rose-700 border border-rose-300 rounded-lg px-3 py-1.5 hover:bg-rose-100 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
-          >
-            Tentar novamente
-          </button>
-        </div>
+        <StateBlock
+          tipo="erro"
+          titulo="Erro de carregamento"
+          descricao={error}
+          acao={<RetryButton onClick={() => { setError(null); setRetryKey((k) => k + 1); }} />}
+        />
       )}
 
       <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -478,215 +574,53 @@ function CanaisPageInner() {
       </span>
 
       {isEmpty && (
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
-          <p className="text-slate-500 text-sm font-medium">Sem dados no período e filtros selecionados.</p>
-          <p className="text-slate-400 text-xs mt-1">Tente ampliar o intervalo de datas ou revisar canal/marca.</p>
-        </div>
+        <StateBlock
+          tipo="vazio"
+          titulo="Sem dados no período e filtros selecionados."
+          descricao="Tente ampliar o intervalo de datas ou revisar canal/marca."
+        />
       )}
 
-      {/* ── Resumo TikTok ── */}
-      {showTiktok && (
-        <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-slate-700">Mix do GMV de conteúdo do TikTok</h2>
-            <p className="text-xs text-slate-500">
-              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
-              TikTok. Não representa participação nas vendas totais.
-            </p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Vídeo — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_video_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_video != null ? fmtBrl(displayKpis.tiktok_gmv_video) : undefined}
-                  accent="bg-violet-600"
-                />
-                <KpiCard
-                  label="Live — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_live_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_live != null ? fmtBrl(displayKpis.tiktok_gmv_live) : undefined}
-                  accent="bg-cyan-500"
-                />
-                <KpiCard
-                  label="Card/vitrine — % da base de conteúdo"
-                  value={formatContentPctBr(displayKpis?.tiktok_card_pct)}
-                  subvalue={displayKpis?.tiktok_gmv_card != null ? fmtBrl(displayKpis.tiktok_gmv_card) : undefined}
-                  accent="bg-amber-400"
-                />
-                <KpiCard
-                  label="Conversao TikTok"
-                  value={formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
-                  subvalue={displayKpis?.tiktok_customers != null ? `${fmtNumber(displayKpis.tiktok_customers)} compradores (soma diária)` : undefined}
-                  accent="bg-violet-300"
-                />
-              </>
-            )}
-          </div>
-          {/* Faixa de reconciliacao — diagnostico NEUTRO entre duas linhagens.
-            * Fica FORA da barra de composicao de proposito: a divergencia nao e'
-            * um quarto segmento do mix. Sem cor de julgamento (positivo nao e'
-            * "bom", negativo nao e' "ruim") e sem a palavra cobertura/share. */}
-          {dataIsFresh && (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-baseline gap-x-6 gap-y-2">
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-slate-500">Base de conteúdo:</span>
-                <span className="text-xs font-semibold tabular-nums text-slate-700">
-                  {tkMixTotal.base != null ? fmtBrl(tkMixTotal.base) : "N/D"}
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-slate-500">GMV comercial TikTok:</span>
-                <span className="text-xs font-semibold tabular-nums text-slate-700">
-                  {displayKpis?.tiktok_gmv != null ? fmtBrl(displayKpis.tiktok_gmv) : "N/D"}
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs text-slate-500">Diferença entre base de conteúdo e GMV comercial:</span>
-                <span className="text-xs font-semibold tabular-nums text-slate-600">
-                  {formatDivergenceBr(tkMixTotal.divergencePct)}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 basis-full">
-                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
-                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
-                margem nem severidade.
-              </p>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ── Resumo Mercado Livre ── */}
-      {showMl && (
-        <section id="mercado-livre" aria-labelledby="mercado-livre-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="mercado-livre-heading" className="text-sm font-semibold text-slate-700">Mercado Livre</h2>
-            <p className="text-xs text-slate-400">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Novos Compradores ML"
-                  value={fmtPct(displayKpis?.ml_new_buyer_pct ?? null)}
-                  subvalue={displayKpis?.ml_new_buyers != null ? `${fmtNumber(displayKpis.ml_new_buyers)} novos` : undefined}
-                  accent="bg-cyan-500"
-                />
-                <KpiCard
-                  label="Recompra ML"
-                  value={fmtPct(displayKpis?.ml_repeat_buyer_rate_pct ?? null)}
-                  subvalue={displayKpis?.ml_repeat_buyers != null ? `${fmtNumber(displayKpis.ml_repeat_buyers)} recorrentes` : undefined}
-                  accent="bg-emerald-500"
-                />
-                <KpiCard
-                  label="GMV por Comprador ML"
-                  value={displayKpis?.ml_gmv_per_buyer != null ? fmtBrl(displayKpis.ml_gmv_per_buyer) : "—"}
-                  subvalue={displayKpis?.ml_unique_buyers != null ? `${fmtNumber(displayKpis.ml_unique_buyers)} compradores (soma diária)` : undefined}
-                  accent="bg-amber-500"
-                />
-              </>
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* ── Resumo Shopee — só quando há dados ── */}
-      {showShopee && hasShopeeData && (
-        <section id="shopee" aria-labelledby="shopee-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="shopee-heading" className="text-sm font-semibold text-slate-700">Shopee</h2>
-            <p className="text-xs text-slate-400">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            {!dataIsFresh ? (
-              <><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /><SkeletonKpiCard /></>
-            ) : (
-              <>
-                <KpiCard
-                  label="Novos Compradores Shopee"
-                  value={fmtPct(displayKpis?.shopee_new_buyer_pct ?? null)}
-                  subvalue={displayKpis?.shopee_new_buyers != null ? `${fmtNumber(displayKpis.shopee_new_buyers)} novos` : undefined}
-                  accent="bg-orange-500"
-                />
-                <KpiCard
-                  label="Recompra Shopee"
-                  value={fmtPct(displayKpis?.shopee_repeat_buyer_rate_pct ?? null)}
-                  subvalue={displayKpis?.shopee_repeat_buyers != null ? `${fmtNumber(displayKpis.shopee_repeat_buyers)} recorrentes` : undefined}
-                  accent="bg-emerald-500"
-                />
-                <KpiCard
-                  label="GMV / Comprador Shopee"
-                  value={displayKpis?.shopee_gmv_per_buyer != null ? fmtBrl(displayKpis.shopee_gmv_per_buyer) : "—"}
-                  subvalue={displayKpis?.shopee_unique_buyers != null ? `${fmtNumber(displayKpis.shopee_unique_buyers)} compradores (soma diária)` : undefined}
-                  accent="bg-amber-500"
-                />
-                <KpiCard
-                  label="Visitantes Shopee"
-                  value={displayKpis?.shopee_visitors != null ? fmtNumber(displayKpis.shopee_visitors) : "—"}
-                  subvalue="Visitas ao perfil no mês"
-                  accent="bg-sky-500"
-                />
-                <KpiCard
-                  label="Conversão Shopee"
-                  value={displayKpis?.shopee_conversion_rate != null ? fmtPct(displayKpis.shopee_conversion_rate) : "—"}
-                  subvalue="Compradores / Visitantes"
-                  accent="bg-violet-400"
-                />
-              </>
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
-      {filter.length === 1 && showShopee && dataIsFresh && !hasShopeeData && (
-        <div id="shopee" className="scroll-mt-24 bg-orange-50 border border-orange-100 rounded-2xl p-6 flex flex-col items-center gap-2 text-center">
-          <p className="text-sm font-semibold text-orange-700">Shopee — Dados de canal em integração</p>
-          <p className="text-xs text-orange-600 max-w-md">
-            O perfil de compradores e métricas de canal da Shopee serão disponibilizados assim que o endpoint da API for integrado.
-            Os dados de GMV e pedidos já estão disponíveis na visão Gerencial.
-          </p>
-        </div>
+      {/* ── Canais lado a lado (UX-TORRE-B2B-1) ── */}
+      {/* Em modo demonstracao (API offline) o mock nao modela linhas marca x
+          canal — a matriz abaixo ja' declara isso; aqui o painel nem aparece,
+          em vez de mostrar colunas vazias. */}
+      {!error && !isEmpty && colunasCanal.length > 0 && (!dataIsFresh || isLive) && (
+        <ChannelOverview colunas={colunasCanal} fmtBrl={fmtBrl} fmtNumber={fmtNumber} carregando={!dataIsFresh} />
       )}
 
       {/* ── Comparativo entre Canais: Ads, Custo e Frete (Gate 2) ── */}
-      <div id="comparativo" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-violet-50">
-          <h2 className="text-sm font-semibold text-slate-700">Comparativo entre Canais — Ads, Custo e Frete</h2>
-          <p className="text-xs text-slate-400 mt-0.5">
+      <div id="comparativo" className="scroll-mt-24 bg-surface border border-line rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-line">
+          <h2 className="text-sm font-semibold text-ink-muted">Comparativo entre Canais — Ads, Custo e Frete</h2>
+          <p className="text-xs text-ink-faint mt-0.5">
             Marca × marketplace — mesmas métricas já validadas na aba Financeiro, lado a lado para comparar oportunidades.
             Não inclui desconto nem comissão de afiliados — afiliados aparecem em bloco próprio, por competência mensal (ver docs/sections/canais_audit.md, seção 14).
           </p>
         </div>
         <TableScrollHint>
-          <table className="w-full text-sm" aria-label="Comparativo entre canais">
+          <table className="w-full text-data" aria-label="Comparativo entre canais">
             <thead>
-              <tr className="bg-slate-50">
-                <SortableHeader label="Marca" column="brand" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} align="left" />
-                <SortableHeader label="Canal" column="channel" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} align="left" />
-                <SortableHeader label="GMV" column="gmv" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="Pedidos" column="orders" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="Ads/GMV" column="ads_gmv_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="ROAS" column="roas" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="ACOS" column="acos_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="Custo marketplace/GMV" column="marketplace_cost_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <SortableHeader label="Frete seller/GMV" column="seller_shipping_pct" sort={channelMatrixSort.sort} onSort={channelMatrixSort.toggleSort} />
-                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Sinal</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Detalhe</th>
+              <tr className="bg-raised">
+                <SortHeader rotulo="Marca" coluna="brand" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} alinhamento="left" />
+                <SortHeader rotulo="Canal" coluna="channel" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} alinhamento="left" />
+                <SortHeader rotulo="GMV" coluna="gmv" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="Pedidos" coluna="orders" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="Ads/GMV" coluna="ads_gmv_pct" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="ROAS" coluna="roas" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="ACOS" coluna="acos_pct" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="Custo marketplace/GMV" coluna="marketplace_cost_pct" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <SortHeader rotulo="Frete seller/GMV" coluna="seller_shipping_pct" sort={channelMatrixSort.sort} aoOrdenar={channelMatrixSort.toggleSort} />
+                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-muted uppercase tracking-wider">Sinal</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-muted uppercase tracking-wider">Detalhe</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-50">
+            <tbody className="divide-y divide-line">
               {!dataIsFresh ? (
                 <SkeletonTableRows rows={5} cols={11} />
               ) : channelMatrixSort.sortedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-6 py-8 text-center text-sm text-slate-400">
+                  <td colSpan={11} className="px-6 py-8 text-center text-sm text-ink-faint">
                     {isLive
                       ? "Sem dados de canal no período e filtros selecionados."
                       : "Comparativo disponível apenas com a API conectada — o modo demonstração não modela Ads/Custo/Frete por canal."}
@@ -694,25 +628,25 @@ function CanaisPageInner() {
                 </tr>
               ) : (
                 channelMatrixSort.sortedRows.map((row, i) => (
-                  <tr key={`${row.brand}-${row.channel}`} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
-                    <td className="px-6 py-3.5 font-semibold text-slate-700 whitespace-nowrap">{row.label}</td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
+                  <tr key={`${row.brand}-${row.channel}`} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
+                    <td className="px-4 py-2.5 font-semibold text-ink-muted whitespace-nowrap">{row.label}</td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
                       <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${CHANNEL_BADGE_TONE[row.channel] ?? ""}`}>
                         {row.channel_label}
                       </span>
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(row.gmv)}</td>
-                    <td className="px-4 py-3.5 text-right tabular-nums text-slate-500">{fmtNumber(row.orders)}</td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium whitespace-nowrap">{fmtBrl(row.gmv)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-ink-faint">{fmtNumber(row.orders)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.ads_gmv_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.roas} applicable={row.ads_applicable} available={row.ads_available} format={fmtRoas} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.acos_pct} applicable={row.ads_applicable} available={row.ads_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell
                         value={row.marketplace_cost_pct}
                         applicable={row.marketplace_cost_applicable}
@@ -721,13 +655,13 @@ function CanaisPageInner() {
                         warning={row.data_warning}
                       />
                     </td>
-                    <td className="px-4 py-3.5 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       <ChannelMetricCell value={row.seller_shipping_pct} applicable={row.seller_shipping_applicable} available={row.seller_shipping_available} format={fmtPct1} />
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-4 py-2.5 min-w-[15rem]">
                       <div className="flex flex-wrap gap-1">
                         {row.signals.length === 0 ? (
-                          <span className="text-slate-300 text-xs">—</span>
+                          <span className="text-ink-faint text-xs">—</span>
                         ) : (
                           row.signals.map((s) => (
                             <span key={s} className={`text-xs px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap ${signalTone(s)}`}>
@@ -737,13 +671,13 @@ function CanaisPageInner() {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-4 py-2.5">
                       <button
                         type="button"
                         onClick={() => setDetailRow(row)}
                         aria-haspopup="dialog"
                         aria-label={`Ver detalhes de ${row.label} no ${row.channel_label}`}
-                        className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded whitespace-nowrap"
+                        className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded whitespace-nowrap"
                       >
                         Detalhe
                       </button>
@@ -754,12 +688,12 @@ function CanaisPageInner() {
             </tbody>
           </table>
         </TableScrollHint>
-        <div className="px-6 py-3 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-1.5">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Legenda:</span>
-          <span className="text-xs text-slate-500">N/A = não se aplica a esse canal</span>
-          <span className="text-xs text-amber-700 font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
-          <span className="text-xs text-slate-400">— = denominador zero ou métrica não calculável no período (ex.: Ads/GMV quando GMV = 0)</span>
-          <span className="ml-auto text-xs text-slate-400 max-w-md text-right">
+        <div className="px-6 py-3 border-t border-line flex flex-wrap items-center gap-x-5 gap-y-1.5">
+          <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Legenda:</span>
+          <span className="text-xs text-ink-faint">N/A = não se aplica a esse canal</span>
+          <span className="text-xs text-warn-ink font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
+          <span className="text-xs text-ink-faint">— = denominador zero ou métrica não calculável no período (ex.: Ads/GMV quando GMV = 0)</span>
+          <span className="ml-auto text-xs text-ink-faint max-w-md text-right">
             Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
           </span>
         </div>
@@ -799,46 +733,146 @@ function CanaisPageInner() {
         />
       </div>
 
+      {/* ── Detalhe por canal (UX-TORRE-B2B-1) ──
+          Os tres blocos por canal eram empilhados (~2.600px no desktop). Agora
+          uma aba por canal SELECIONADO; o conteudo de cada aba e' o mesmo de
+          antes, com os mesmos textos, tabelas, totais e legendas. A ancora
+          #tiktok-shop / #mercado-livre / #shopee continua funcionando: ela
+          escolhe a aba ao carregar. */}
+      {!isEmpty && abasDetalhe.length > 0 && (
+        <section id="detalhe-canal" aria-labelledby="detalhe-canal-heading" className="scroll-mt-24 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
+            <h2 id="detalhe-canal-heading" className="text-base font-semibold text-ink">Detalhe por canal</h2>
+            {abasDetalhe.length > 1 && (
+              <Segmented
+                rotulo="Canal do detalhe"
+                valor={abaAtiva}
+                aoEscolher={setAba}
+                opcoes={abasDetalhe.map((a) => ({ valor: a, texto: CHANNEL_LABEL[a] }))}
+              />
+            )}
+          </div>
+
+          {abaAtiva === "tiktok" && (
+            <>
+      {/* ── Resumo TikTok ── */}
+      {showTiktok && (
+        <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo do TikTok</h2>
+            <p className="text-xs text-ink-faint">
+              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
+              TikTok. Não representa participação nas vendas totais.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Vídeo — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_video_pct)}
+                  contexto={displayKpis?.tiktok_gmv_video != null ? fmtBrl(displayKpis.tiktok_gmv_video) : undefined}
+                  canal={MIX_SERIE.video}
+                />
+                <StatCard
+                  rotulo="Live — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_live_pct)}
+                  contexto={displayKpis?.tiktok_gmv_live != null ? fmtBrl(displayKpis.tiktok_gmv_live) : undefined}
+                  canal={MIX_SERIE.live}
+                />
+                <StatCard
+                  rotulo="Card/vitrine — % da base de conteúdo"
+                  valor={formatContentPctBr(displayKpis?.tiktok_card_pct)}
+                  contexto={displayKpis?.tiktok_gmv_card != null ? fmtBrl(displayKpis.tiktok_gmv_card) : undefined}
+                  canal={MIX_SERIE.card}
+                />
+                <StatCard
+                  rotulo="Conversao TikTok"
+                  valor={formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
+                  contexto={displayKpis?.tiktok_customers != null ? `${fmtNumber(displayKpis.tiktok_customers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-tiktok"
+                />
+              </>
+            )}
+          </div>
+          {/* Faixa de reconciliacao — diagnostico NEUTRO entre duas linhagens.
+            * Fica FORA da barra de composicao de proposito: a divergencia nao e'
+            * um quarto segmento do mix. Sem cor de julgamento (positivo nao e'
+            * "bom", negativo nao e' "ruim") e sem a palavra cobertura/share. */}
+          {dataIsFresh && (
+            <div className="bg-raised border border-line rounded-xl px-4 py-3 flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">Base de conteúdo:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {tkMixTotal.base != null ? fmtBrl(tkMixTotal.base) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">GMV comercial TikTok:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {displayKpis?.tiktok_gmv != null ? fmtBrl(displayKpis.tiktok_gmv) : "N/D"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-ink-faint">Diferença entre base de conteúdo e GMV comercial:</span>
+                <span className="text-xs font-semibold tabular-nums text-ink-muted">
+                  {formatDivergenceBr(tkMixTotal.divergencePct)}
+                </span>
+              </div>
+              {/* UX-TORRE-2: metodologia, nao ressalva de numero — vai para o
+                  recolhivel com as MESMAS palavras. */}
+              <Disclosure className="basis-full -ml-2">
+                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
+                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
+                margem nem severidade.
+              </Disclosure>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ── Tabela: Mix do GMV de conteudo do TikTok por marca ── */}
       {showTiktok && (
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-violet-50 flex items-start justify-between">
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-line flex items-start justify-between">
             <div>
-              <h2 className="text-sm font-semibold text-slate-700">Mix do GMV de conteúdo por marca</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
+              <h2 className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo por marca</h2>
+              <p className="text-xs text-ink-faint mt-0.5">
                 Vídeo, live e card/vitrine são composição interna da base de conteúdo de cada marca — não participação nas
                 vendas totais.
               </p>
             </div>
-            <div className="flex items-center gap-3 text-xs font-semibold text-slate-400 uppercase tracking-widest shrink-0">
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Video</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" /> Live</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> Card</span>
+            <div className="flex items-center gap-3 text-xs font-semibold text-ink-faint uppercase tracking-widest shrink-0">
+              <span className="flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.video} inline-block`} /> Video</span>
+              <span className="flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.live} inline-block`} /> Live</span>
+              <span className="flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.card} inline-block`} /> Card</span>
             </div>
           </div>
           <TableScrollHint>
             <table
-              className="w-full text-sm"
+              className="w-full text-data"
               aria-label="Mix do GMV de conteúdo por marca — vídeo, live e card/vitrine como composição interna da base de conteúdo"
             >
               <thead>
-                <tr className="bg-slate-50">
-                  <SortableHeader label="Marca" column="brand" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
-                  <SortableHeader label="GMV comercial" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                <tr className="bg-raised">
+                  <SortHeader rotulo="Marca" coluna="brand" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} alinhamento="left" />
+                  <SortHeader rotulo="GMV comercial" coluna="gmv" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-ink-muted uppercase tracking-wider">
                     Share da marca no GMV comercial
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-ink-muted uppercase tracking-wider">
                     Mix de conteúdo
                   </th>
-                  <SortableHeader label="Vídeo % da base" column="video_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Live % da base" column="live_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Card % da base" column="card_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Visitantes" column="visitors" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                  <SortableHeader label="Conversao" column="conversion" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <SortHeader rotulo="Vídeo % da base" coluna="video_pct" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                  <SortHeader rotulo="Live % da base" coluna="live_pct" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                  <SortHeader rotulo="Card % da base" coluna="card_pct" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                  <SortHeader rotulo="Visitantes" coluna="visitors" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                  <SortHeader rotulo="Conversao" coluna="conversion" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50">
+              <tbody className="divide-y divide-line">
                 {!dataIsFresh ? (
                   <SkeletonTableRows rows={4} cols={9} />
                 ) : (
@@ -850,20 +884,20 @@ function CanaisPageInner() {
                       const dom = dominantContentOrigin(mix);
                       const partPct = tkGmvTotal > 0 ? ((b.tiktok_gmv ?? 0) / tkGmvTotal) * 100 : null;
                       return (
-                        <tr key={b.brand} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                        <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)}
-                              className="text-slate-700 hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                              className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                             >
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
-                            <span className="text-slate-500 text-xs">{formatContentPctBr(partPct)}</span>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
+                            <span className="text-ink-faint text-xs">{formatContentPctBr(partPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5">
+                          <td className="px-4 py-2.5">
                             <div className="flex flex-col gap-1">
                               <ContentMixBar
                                 mix={mix}
@@ -872,36 +906,36 @@ function CanaisPageInner() {
                                 gmvCard={b.tiktok_gmv_card}
                               />
                               {mix.base != null && (
-                                <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+                                <span className="text-xs text-ink-faint tabular-nums whitespace-nowrap">
                                   Base {fmtBrl(mix.base)}
                                 </span>
                               )}
                               {/* Sublinha separada: diagnostico de reconciliacao,
                                 * fora da barra de composicao de proposito. */}
-                              <span className="text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                              <span className="text-xs text-ink-faint tabular-nums whitespace-nowrap">
                                 Dif. base × GMV comercial: {formatDivergenceBr(mix.divergencePct)}
                               </span>
                             </div>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "video" ? CHANNEL_STYLE.video : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_video_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "live" ? CHANNEL_STYLE.live : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_live_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${dom === "card" ? CHANNEL_STYLE.card : DIM_STYLE}`}>
                               {formatContentPctBr(b.tiktok_card_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-500">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-faint">
                             {b.tiktok_visitors != null ? fmtNumber(b.tiktok_visitors) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${convRateStyle(b.tiktok_conversion_rate)}`}>
                               {formatContentPctBr(b.tiktok_conversion_rate)}
                             </span>
@@ -910,10 +944,10 @@ function CanaisPageInner() {
                       );
                     })}
                     {tkBrands.length > 0 && (
-                      <tr className="bg-slate-50 border-t border-slate-200">
-                        <td className="px-6 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">Total</td>
-                        <td className="px-4 py-3 text-right tabular-nums font-bold text-slate-800 text-sm">{fmtBrl(tkGmvTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-slate-400 text-xs">100%</span></td>
+                      <tr className="bg-raised border-t border-line">
+                        <td className="px-6 py-3 text-xs font-bold text-ink-muted uppercase tracking-wider">Total</td>
+                        <td className="px-4 py-3 text-right tabular-nums font-bold text-ink text-sm">{fmtBrl(tkGmvTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-ink-faint text-xs">100%</span></td>
                         <td className="px-4 py-3">
                           <div className="flex flex-col gap-1">
                             <ContentMixBar
@@ -923,20 +957,20 @@ function CanaisPageInner() {
                               gmvCard={tkCardTotal}
                             />
                             {tkMixTotal.base != null && (
-                              <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+                              <span className="text-xs text-ink-faint tabular-nums whitespace-nowrap">
                                 Base {fmtBrl(tkMixTotal.base)}
                               </span>
                             )}
-                            <span className="text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                            <span className="text-xs text-ink-faint tabular-nums whitespace-nowrap">
                               Dif. base × GMV comercial: {formatDivergenceBr(tkMixTotal.divergencePct)}
                             </span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-violet-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.videoPct)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-cyan-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.livePct)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-amber-700 text-xs font-bold">{formatContentPctBr(tkMixTotal.cardPct)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-500 text-xs">{fmtNumber(tkVisitorsTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-xs font-semibold text-slate-600">
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{formatContentPctBr(tkMixTotal.videoPct)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{formatContentPctBr(tkMixTotal.livePct)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{formatContentPctBr(tkMixTotal.cardPct)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-faint text-xs">{fmtNumber(tkVisitorsTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-xs font-semibold text-ink-muted">
                           {formatContentPctBr(displayKpis?.tiktok_conversion_rate)}
                         </td>
                       </tr>
@@ -946,41 +980,81 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-            <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Dominante:</span>
-            <span className="flex items-center gap-1.5 text-xs text-violet-700"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Video</span>
-            <span className="flex items-center gap-1.5 text-xs text-cyan-700"><span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" /> Live</span>
-            <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> Card</span>
-            <span className="ml-auto text-xs text-slate-400">
+          <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
+            <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Dominante:</span>
+            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.video} inline-block`} /> Video</span>
+            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.live} inline-block`} /> Live</span>
+            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.card} inline-block`} /> Card</span>
+            <span className="ml-auto text-xs text-ink-faint">
               Conversao calculada apenas nos dias com dado de visitantes — cobertura estruturalmente limitada pela API TikTok
             </span>
           </div>
         </div>
       )}
+            </>
+          )}
+
+          {abaAtiva === "ml" && (
+            <>
+      {/* ── Resumo Mercado Livre ── */}
+      {showMl && (
+        <section id="mercado-livre" aria-labelledby="mercado-livre-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="mercado-livre-heading" className="text-sm font-semibold text-ink-muted">Mercado Livre</h2>
+            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Novos Compradores ML"
+                  valor={fmtPct(displayKpis?.ml_new_buyer_pct ?? null)}
+                  contexto={displayKpis?.ml_new_buyers != null ? `${fmtNumber(displayKpis.ml_new_buyers)} novos` : undefined}
+                  canal="bg-canal-ml"
+                />
+                <StatCard
+                  rotulo="Recompra ML"
+                  valor={fmtPct(displayKpis?.ml_repeat_buyer_rate_pct ?? null)}
+                  contexto={displayKpis?.ml_repeat_buyers != null ? `${fmtNumber(displayKpis.ml_repeat_buyers)} recorrentes` : undefined}
+                  canal="bg-canal-ml"
+                />
+                <StatCard
+                  rotulo="GMV por Comprador ML"
+                  valor={displayKpis?.ml_gmv_per_buyer != null ? fmtBrl(displayKpis.ml_gmv_per_buyer) : "—"}
+                  contexto={displayKpis?.ml_unique_buyers != null ? `${fmtNumber(displayKpis.ml_unique_buyers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-ml"
+                />
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* ── Tabela: Perfil de compradores ML ── */}
       {showMl && (
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-violet-50">
-            <h2 className="text-sm font-semibold text-slate-700">Perfil de Compradores ML por Marca</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-line">
+            <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores ML por Marca</h2>
+            <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
           </div>
           <TableScrollHint>
-            <table className="w-full text-sm" aria-label="Perfil de compradores ML por marca">
+            <table className="w-full text-data" aria-label="Perfil de compradores ML por marca">
               <thead>
-                <tr className="bg-slate-50">
-                  <SortableHeader label="Marca" column="brand" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
-                  <SortableHeader label="GMV" column="gmv" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
-                  <SortableHeader label="Compradores" column="buyers" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <SortableHeader label="Novos %" column="new_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <SortableHeader label="Novos" column="new" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <SortableHeader label="Recorrentes" column="repeat" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <SortableHeader label="Recompra %" column="repeat_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                  <SortableHeader label="GMV / Comprador" column="gmv_per_buyer" sort={mlSort.sort} onSort={mlSort.toggleSort} />
+                <tr className="bg-raised">
+                  <SortHeader rotulo="Marca" coluna="brand" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} alinhamento="left" />
+                  <SortHeader rotulo="GMV" coluna="gmv" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-ink-muted uppercase tracking-wider">Part.%</th>
+                  <SortHeader rotulo="Compradores" coluna="buyers" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <SortHeader rotulo="Novos %" coluna="new_pct" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <SortHeader rotulo="Novos" coluna="new" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <SortHeader rotulo="Recorrentes" coluna="repeat" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <SortHeader rotulo="Recompra %" coluna="repeat_pct" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                  <SortHeader rotulo="GMV / Comprador" coluna="gmv_per_buyer" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50">
+              <tbody className="divide-y divide-line">
                 {!dataIsFresh ? (
                   <SkeletonTableRows rows={3} cols={9} />
                 ) : (
@@ -990,57 +1064,57 @@ function CanaisPageInner() {
                       const newPct = b.ml_new_buyer_pct ??
                         (b.ml_unique_buyers && b.ml_new_buyers ? (b.ml_new_buyers / b.ml_unique_buyers) * 100 : null);
                       return (
-                        <tr key={b.brand} className={`hover:bg-violet-50/50 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                        <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)}
-                              className="text-slate-700 hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                              className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                             >
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.ml_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
-                            <span className="text-slate-500 text-xs">{partPct.toFixed(1)}%</span>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.ml_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
+                            <span className="text-ink-faint text-xs">{partPct.toFixed(1)}%</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_unique_buyers != null ? fmtNumber(b.ml_unique_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(newPct)}`}>{fmtPct(newPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_new_buyers != null ? fmtNumber(b.ml_new_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.ml_repeat_buyers != null ? fmtNumber(b.ml_repeat_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(b.ml_repeat_buyer_rate_pct)}`}>
                               {fmtPct(b.ml_repeat_buyer_rate_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">
                             {b.ml_gmv_per_buyer != null ? fmtBrl(b.ml_gmv_per_buyer) : "—"}
                           </td>
                         </tr>
                       );
                     })}
                     {mlBrands.length > 0 && (
-                      <tr className="bg-slate-50 border-t border-slate-200">
-                        <td className="px-6 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">Total</td>
-                        <td className="px-4 py-3 text-right tabular-nums font-bold text-slate-800 text-sm">{fmtBrl(mlGmvTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-slate-400 text-xs">100%</span></td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(mlBuyersTotal)}</td>
+                      <tr className="bg-raised border-t border-line">
+                        <td className="px-6 py-3 text-xs font-bold text-ink-muted uppercase tracking-wider">Total</td>
+                        <td className="px-4 py-3 text-right tabular-nums font-bold text-ink text-sm">{fmtBrl(mlGmvTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-ink-faint text-xs">100%</span></td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(mlBuyersTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(mlNewPctTotal)}`}>{mlNewPctTotal.toFixed(1)}%</span>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(mlNewTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(mlRepeatTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(mlNewTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(mlRepeatTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(mlRepeatPctTotal)}`}>{mlRepeatPctTotal.toFixed(1)}%</span>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-700 text-xs font-bold">
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">
                           {mlGmvPerBuyerTotal != null ? fmtBrl(mlGmvPerBuyerTotal) : "—"}
                         </td>
                       </tr>
@@ -1050,53 +1124,130 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
+          <div className="px-6 py-3 border-t border-line flex items-start gap-5 flex-wrap">
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
-                <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 85%</span>
-                <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 70–85%</span>
-                <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 70%</span>
+                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Novos %:</span>
+                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 85%</span>
+                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 70–85%</span>
+                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 70%</span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
-                <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 15%</span>
-                <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 8–15%</span>
-                <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 8%</span>
+                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Recompra %:</span>
+                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 15%</span>
+                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 8–15%</span>
+                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 8%</span>
               </div>
             </div>
-            <p className="ml-auto text-xs text-slate-400 self-end">
+            <p className="ml-auto text-xs text-ink-faint self-end">
               Recompra = compradores com historico previo na marca no ML · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
             </p>
           </div>
         </div>
       )}
 
+      {/* ── Insight: ML como canal de aquisicao ── */}
+      {showMl && dataIsFresh && mlBrands.length > 0 && mlNewPctTotal >= 80 && (
+        <div className="bg-raised border border-line rounded-xl p-4">
+          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
+            Insight — ML como canal de aquisicao
+          </p>
+          <p className="text-sm text-ink">
+            {mlNewPctTotal.toFixed(0)}% dos compradores ML em {periodLabel} sao novos — sem historico previo com a marca.
+            O ML opera como canal de aquisicao primaria, nao de retencao. Recompra media de{" "}
+            {mlRepeatPctTotal.toFixed(1)}% indica oportunidade de programas de fidelidade pos-compra.
+          </p>
+        </div>
+      )}
+            </>
+          )}
+
+          {abaAtiva === "shopee" && (
+            <>
+      {/* ── Resumo Shopee — só quando há dados ── */}
+      {showShopee && hasShopeeData && (
+        <section id="shopee" aria-labelledby="shopee-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
+          <div>
+            <h2 id="shopee-heading" className="text-sm font-semibold text-ink-muted">Shopee</h2>
+            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            {!dataIsFresh ? (
+              <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
+            ) : (
+              <>
+                <StatCard
+                  rotulo="Novos Compradores Shopee"
+                  valor={fmtPct(displayKpis?.shopee_new_buyer_pct ?? null)}
+                  contexto={displayKpis?.shopee_new_buyers != null ? `${fmtNumber(displayKpis.shopee_new_buyers)} novos` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Recompra Shopee"
+                  valor={fmtPct(displayKpis?.shopee_repeat_buyer_rate_pct ?? null)}
+                  contexto={displayKpis?.shopee_repeat_buyers != null ? `${fmtNumber(displayKpis.shopee_repeat_buyers)} recorrentes` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="GMV / Comprador Shopee"
+                  valor={displayKpis?.shopee_gmv_per_buyer != null ? fmtBrl(displayKpis.shopee_gmv_per_buyer) : "—"}
+                  contexto={displayKpis?.shopee_unique_buyers != null ? `${fmtNumber(displayKpis.shopee_unique_buyers)} compradores (soma diária)` : undefined}
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Visitantes Shopee"
+                  valor={displayKpis?.shopee_visitors != null ? fmtNumber(displayKpis.shopee_visitors) : "—"}
+                  contexto="Visitas ao perfil no mês"
+                  canal="bg-canal-shopee"
+                />
+                <StatCard
+                  rotulo="Conversão Shopee"
+                  valor={displayKpis?.shopee_conversion_rate != null ? fmtPct(displayKpis.shopee_conversion_rate) : "—"}
+                  contexto="Compradores / Visitantes"
+                  canal="bg-canal-shopee"
+                />
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
+      {showShopee && dataIsFresh && !hasShopeeData && (
+        <div id="shopee" className="scroll-mt-24 bg-surface border border-dashed border-line-strong rounded-xl p-6 flex flex-col items-center gap-2 text-center">
+          <p className="text-sm font-semibold text-ink-muted">Shopee — Dados de canal em integração</p>
+          <p className="text-xs text-ink-faint max-w-md">
+            O perfil de compradores e métricas de canal da Shopee serão disponibilizados assim que o endpoint da API for integrado.
+            Os dados de GMV e pedidos já estão disponíveis na visão Gerencial.
+          </p>
+        </div>
+      )}
+
       {/* ── Tabela: Perfil de compradores Shopee — só quando há dados ── */}
       {showShopee && hasShopeeData && (
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-violet-50">
-            <h2 className="text-sm font-semibold text-slate-700">Perfil de Compradores Shopee por Marca</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
+        <div className="bg-surface border border-line rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-line">
+            <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores Shopee por Marca</h2>
+            <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
           </div>
           <TableScrollHint>
-            <table className="w-full text-sm" aria-label="Perfil de compradores Shopee por marca">
+            <table className="w-full text-data" aria-label="Perfil de compradores Shopee por marca">
               <thead>
-                <tr className="bg-slate-50">
-                  <SortableHeader label="Marca" column="brand" sort={shSort.sort} onSort={shSort.toggleSort} align="left" />
-                  <SortableHeader label="GMV" column="gmv" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Part.%</th>
-                  <SortableHeader label="Compradores" column="buyers" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Novos %" column="new_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Novos" column="new" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Recorrentes" column="repeat" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Recompra %" column="repeat_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="GMV / Comprador" column="gmv_per_buyer" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Visitantes" column="visitors" sort={shSort.sort} onSort={shSort.toggleSort} />
-                  <SortableHeader label="Conversão" column="conversion" sort={shSort.sort} onSort={shSort.toggleSort} />
+                <tr className="bg-raised">
+                  <SortHeader rotulo="Marca" coluna="brand" sort={shSort.sort} aoOrdenar={shSort.toggleSort} alinhamento="left" />
+                  <SortHeader rotulo="GMV" coluna="gmv" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-ink-muted uppercase tracking-wider">Part.%</th>
+                  <SortHeader rotulo="Compradores" coluna="buyers" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Novos %" coluna="new_pct" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Novos" coluna="new" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Recorrentes" coluna="repeat" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Recompra %" coluna="repeat_pct" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="GMV / Comprador" coluna="gmv_per_buyer" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Visitantes" coluna="visitors" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                  <SortHeader rotulo="Conversão" coluna="conversion" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50">
+              <tbody className="divide-y divide-line">
                 {!dataIsFresh ? (
                   <SkeletonTableRows rows={3} cols={11} />
                 ) : (
@@ -1106,73 +1257,73 @@ function CanaisPageInner() {
                       const newPct = b.shopee_new_buyer_pct ??
                         (b.shopee_unique_buyers && b.shopee_new_buyers ? (b.shopee_new_buyers / b.shopee_unique_buyers) * 100 : null);
                       return (
-                        <tr key={b.brand} className={`hover:bg-orange-50/40 transition-colors ${i % 2 === 0 ? "" : "bg-gray-50/30"}`}>
-                          <td className="px-6 py-3.5 font-semibold whitespace-nowrap">
+                        <tr key={b.brand} className={`hover:bg-accent-soft/50 transition-colors ${i % 2 === 0 ? "" : "bg-raised/30"}`}>
+                          <td className="px-4 py-2.5 font-semibold whitespace-nowrap">
                             <Link
                               href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)}
-                              className="text-slate-700 hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                              className="text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                             >
                               {b.label}
                             </Link>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.shopee_gmv!)}</td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
-                            <span className="text-slate-500 text-xs">{partPct.toFixed(1)}%</span>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.shopee_gmv!)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">
+                            <span className="text-ink-faint text-xs">{partPct.toFixed(1)}%</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_unique_buyers != null ? fmtNumber(b.shopee_unique_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(newPct)}`}>{fmtPct(newPct)}</span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_new_buyers != null ? fmtNumber(b.shopee_new_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_repeat_buyers != null ? fmtNumber(b.shopee_repeat_buyers) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(b.shopee_repeat_buyer_rate_pct)}`}>
                               {fmtPct(b.shopee_repeat_buyer_rate_pct)}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-700 font-medium">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted font-medium">
                             {b.shopee_gmv_per_buyer != null ? fmtBrl(b.shopee_gmv_per_buyer) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums text-slate-600">
+                          <td className="px-4 py-2.5 text-right tabular-nums text-ink-muted">
                             {b.shopee_visitors != null ? fmtNumber(b.shopee_visitors) : "—"}
                           </td>
-                          <td className="px-4 py-3.5 text-right tabular-nums">
+                          <td className="px-4 py-2.5 text-right tabular-nums">
                             {b.shopee_conversion_rate != null
-                              ? <span className="text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">{fmtPct(b.shopee_conversion_rate)}</span>
+                              ? <span className="text-xs px-1.5 py-0.5 rounded text-ink-muted">{fmtPct(b.shopee_conversion_rate)}</span>
                               : "—"}
                           </td>
                         </tr>
                       );
                     })}
                     {shBrands.length > 0 && (
-                      <tr className="bg-slate-50 border-t border-slate-200">
-                        <td className="px-6 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">Total</td>
-                        <td className="px-4 py-3 text-right tabular-nums font-bold text-slate-800 text-sm">{fmtBrl(shGmvTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-slate-400 text-xs">100%</span></td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(shBuyersTotal)}</td>
+                      <tr className="bg-raised border-t border-line">
+                        <td className="px-6 py-3 text-xs font-bold text-ink-muted uppercase tracking-wider">Total</td>
+                        <td className="px-4 py-3 text-right tabular-nums font-bold text-ink text-sm">{fmtBrl(shGmvTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums"><span className="text-ink-faint text-xs">100%</span></td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(shBuyersTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           <span className={`text-xs px-1.5 py-0.5 rounded ${newBuyerPctStyle(shNewPctTotal)}`}>{shNewPctTotal.toFixed(1)}%</span>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(shNewTotal)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">{fmtNumber(shRepeatTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(shNewTotal)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">{fmtNumber(shRepeatTotal)}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           <span className={`text-xs px-1.5 py-0.5 rounded ${repeatRateStyle(shRepeatPctTotal)}`}>{shRepeatPctTotal.toFixed(1)}%</span>
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-700 text-xs font-bold">
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">
                           {shGmvPerBuyerTotal != null ? fmtBrl(shGmvPerBuyerTotal) : "—"}
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums text-slate-600 text-xs font-bold">
+                        <td className="px-4 py-3 text-right tabular-nums text-ink-muted text-xs font-bold">
                           {shVisitorsTotal > 0 ? fmtNumber(shVisitorsTotal) : "—"}
                         </td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           {shConvRateTotal != null
-                            ? <span className="text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">{shConvRateTotal.toFixed(1)}%</span>
+                            ? <span className="text-xs px-1.5 py-0.5 rounded text-ink-muted font-bold">{shConvRateTotal.toFixed(1)}%</span>
                             : "—"}
                         </td>
                       </tr>
@@ -1182,53 +1333,43 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-slate-100 flex items-start gap-5 flex-wrap">
+          <div className="px-6 py-3 border-t border-line flex items-start gap-5 flex-wrap">
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Novos %:</span>
-                <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 85%</span>
-                <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 70–85%</span>
-                <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 70%</span>
+                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Novos %:</span>
+                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 85%</span>
+                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 70–85%</span>
+                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 70%</span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Recompra %:</span>
-                <span className="flex items-center gap-1 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 15%</span>
-                <span className="flex items-center gap-1 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 8–15%</span>
-                <span className="flex items-center gap-1 text-xs text-rose-700"><span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> abaixo de 8%</span>
+                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Recompra %:</span>
+                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 15%</span>
+                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 8–15%</span>
+                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 8%</span>
               </div>
             </div>
-            <p className="ml-auto text-xs text-slate-400 self-end">
+            <p className="ml-auto text-xs text-ink-faint self-end">
               Recompra = compradores com historico previo na marca na Shopee · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
             </p>
           </div>
         </div>
       )}
 
-      {/* ── Insight: ML como canal de aquisicao ── */}
-      {showMl && dataIsFresh && mlBrands.length > 0 && mlNewPctTotal >= 80 && (
-        <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-4">
-          <p className="text-xs font-semibold text-cyan-700 uppercase tracking-wider mb-1">
-            Insight — ML como canal de aquisicao
-          </p>
-          <p className="text-sm text-cyan-800">
-            {mlNewPctTotal.toFixed(0)}% dos compradores ML em {periodLabel} sao novos — sem historico previo com a marca.
-            O ML opera como canal de aquisicao primaria, nao de retencao. Recompra media de{" "}
-            {mlRepeatPctTotal.toFixed(1)}% indica oportunidade de programas de fidelidade pos-compra.
-          </p>
-        </div>
-      )}
-
       {/* ── Insight: Shopee como canal de aquisicao ── */}
       {showShopee && hasShopeeData && dataIsFresh && shBrands.length > 0 && shNewPctTotal >= 80 && (
-        <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4">
-          <p className="text-xs font-semibold text-orange-700 uppercase tracking-wider mb-1">
+        <div className="bg-raised border border-line rounded-xl p-4">
+          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
             Insight — Shopee como canal de aquisicao
           </p>
-          <p className="text-sm text-orange-800">
+          <p className="text-sm text-ink">
             {shNewPctTotal.toFixed(0)}% dos compradores Shopee em {periodLabel} sao novos.
             Recompra media de {shRepeatPctTotal.toFixed(1)}% — perfil de aquisicao similar ao ML.
           </p>
         </div>
+      )}
+            </>
+          )}
+        </section>
       )}
 
       <KpiDrilldownDialog
@@ -1252,7 +1393,7 @@ function CanaisPageInner() {
 
 export default function CanaisPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+    <Suspense fallback={<div className="min-h-screen bg-canvas" />}>
       <CanaisPageInner />
     </Suspense>
   );

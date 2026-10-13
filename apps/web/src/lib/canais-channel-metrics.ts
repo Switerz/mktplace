@@ -43,11 +43,11 @@ export const CHANNEL_SIGNAL_LABEL: Record<string, string> = {
 };
 
 export const CHANNEL_SIGNAL_TONE: Record<string, string> = {
-  roas_forte: "text-emerald-700 bg-emerald-50 border border-emerald-200",
-  ads_subutilizado: "text-sky-700 bg-sky-50 border border-sky-200",
-  custo_alto: "text-rose-700 bg-rose-50 border border-rose-200",
-  frete_alto: "text-orange-700 bg-orange-50 border border-orange-200",
-  sem_dado: "text-slate-500 bg-slate-100 border border-slate-200",
+  roas_forte: "text-ok-ink bg-ok-soft border border-ok/35",
+  ads_subutilizado: "text-accent-ink bg-accent-soft border border-accent/30",
+  custo_alto: "text-crit-ink bg-crit-soft border border-crit/35",
+  frete_alto: "text-warn-ink bg-warn-soft border border-warn/35",
+  sem_dado: "text-ink-faint bg-raised border border-line",
 };
 
 export const CHANNEL_LABEL: Record<string, string> = {
@@ -57,9 +57,9 @@ export const CHANNEL_LABEL: Record<string, string> = {
 };
 
 export const CHANNEL_BADGE_TONE: Record<string, string> = {
-  tiktok: "text-violet-700 bg-violet-50",
-  ml: "text-cyan-700 bg-cyan-50",
-  shopee: "text-orange-700 bg-orange-50",
+  tiktok: "text-ink-muted bg-raised ring-1 ring-inset ring-canal-tiktok/60",
+  ml: "text-ink-muted bg-raised ring-1 ring-inset ring-canal-ml/60",
+  shopee: "text-ink-muted bg-raised ring-1 ring-inset ring-canal-shopee/60",
 };
 
 /** Rotulo de fallback para um sinal desconhecido — nunca quebra a UI. */
@@ -79,7 +79,7 @@ export function isUnmappedSignal(signal: string): boolean {
 }
 
 export function signalTone(signal: string): string {
-  return CHANNEL_SIGNAL_TONE[signal] ?? "text-slate-500 bg-slate-100 border border-slate-200";
+  return CHANNEL_SIGNAL_TONE[signal] ?? "text-ink-faint bg-raised border border-line";
 }
 
 /**

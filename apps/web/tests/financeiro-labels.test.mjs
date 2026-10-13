@@ -17,22 +17,42 @@ test("nao exibe mais rotulos de settlement/liquidacao da Shopee", () => {
   assert.doesNotMatch(source, /fees positivos na fonte Shopee/);
 });
 
+// UX-TORRE-B2B-1: os KPIs viraram um painel POR CANAL (`ChannelCostPanel`),
+// e o canal passou a vir do titulo do painel em vez de um sufixo no rotulo
+// ("Taxas e encargos Shopee" -> linha "Taxas e encargos" do painel Shopee).
+// As afirmacoes travadas sao as mesmas; o recorte abaixo garante que cada
+// rotulo esta no painel do canal certo.
+const painel = (titulo) => {
+  const i = source.indexOf(`titulo="${titulo}"`);
+  assert.ok(i > 0, `painel ${titulo} ausente`);
+  const fim = source.indexOf("<ChannelCostPanel", i + 1);
+  return source.slice(i, fim > 0 ? fim : source.indexOf("Margem ainda não fechada", i));
+};
+
 test("Shopee expõe o valor renomeado para Total Global (pedidos)", () => {
   assert.match(source, /Total Global \(pedidos\)/);
-  assert.match(source, /Taxas e encargos Shopee/);
+  assert.match(painel("Shopee"), /rotulo: "Taxas e encargos"/);
 });
 
 test("ML nao chama mais o indicador de 'Custo Total'", () => {
   assert.doesNotMatch(source, /Custo Total/);
   assert.match(source, /Ads \+ Frete \/ GMV/);
-  assert.match(source, /Nao inclui comissao do Mercado Livre/i);
+  // Antes: "Nao inclui comissao do Mercado Livre". Agora a tarifa e' exibida
+  // (MARGEM-REAL-2) e o indicador declara que NAO a inclui.
+  assert.match(painel("Mercado Livre"), /Não inclui a tarifa ML/);
+  assert.match(source, /nao inclui a tarifa do Mercado Livre/i);
+  // A tarifa nunca e' apresentada como margem.
+  assert.match(painel("Mercado Livre"), /rotulo: "Tarifa ML"/);
+  assert.match(source, /nao e' margem/);
+  assert.doesNotMatch(source, /margem real/i);
 });
 
 test("TikTok nao afirma mais comissao de afiliados e usa nomenclatura de repasse", () => {
   assert.doesNotMatch(source, /comissao de afiliados/i);
   assert.doesNotMatch(source, /Receita Liquida TikTok/);
   assert.doesNotMatch(source, /Taxa Media TikTok/);
-  assert.match(source, /Repasse recebido TikTok/);
+  assert.match(painel("TikTok Shop"), /rotulo: "Repasse recebido"/);
+  assert.match(painel("TikTok Shop"), /rotulo: "Taxas e encargos"/);
   assert.match(source, /Taxas e encargos \/ GMV/);
 });
 

@@ -147,7 +147,8 @@ test("P4c. ticks do eixo X: minTickGap volta a valer e o ultimo rotulo nao e cor
   // margem direita reserva a metade do ultimo rotulo
   assert.match(chart, /margin=\{\{ top: 6, right: 28, left: 0, bottom: 0 \}\}/);
   // e a fonte do tick continua em 12px: nada foi encolhido para caber
-  assert.match(chart, /tick=\{\{ fontSize: 12, fill: "#64748b" \}\}/);
+  // UX-TORRE-2: a cor do eixo vem do tema do grafico; os 12px seguem travados.
+  assert.match(chart, /tick=\{\{ fontSize: 12, fill: tema\.eixo \}\}/);
 });
 
 test("P5. o hack de margem negativa do periodo desapareceu das dez rotas", () => {
@@ -162,7 +163,8 @@ test("P5. o hack de margem negativa do periodo desapareceu das dez rotas", () =>
 
 test("P6. titulo de pagina em text-xl nas dez rotas", () => {
   const header = codeOnly(read("src/components/layout/PageHeader.tsx"));
-  assert.match(header, /<h2 className="text-xl font-bold text-gray-900">\{title\}<\/h2>/);
+  // UX-TORRE-2: a cor virou token; nivel (`<h2>`) e escala (`text-xl`) seguem travados.
+  assert.match(header, /<h2 className="text-xl font-bold text-ink">\{title\}<\/h2>/);
   // brand tem titulo proprio, tambem em text-xl
   assert.match(codeOnly(read("app/brand/[brand]/page.tsx")), /text-xl font-bold text-gray-900 leading-none/);
   // e nenhuma rota mantem titulo de pagina em text-base/text-lg

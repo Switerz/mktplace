@@ -1,276 +1,335 @@
 ---
 name: Torre de Controle — GoBeauté
-description: Internal marketplace intelligence dashboard for five beauty brands across TikTok Shop and Mercado Livre.
+description: Internal marketplace control tower for the GoBeauté brands across TikTok Shop, Mercado Livre and Shopee.
 colors:
-  primary: "#7c3aed"
-  primary-deep: "#6d28d9"
-  primary-darkest: "#2e1065"
-  surface-bg: "#f8f7ff"
-  surface-card: "#ffffff"
-  surface-hover: "#f5f3ff"
-  border-subtle: "#ede9fe"
-  ink: "#1a1028"
-  ink-secondary: "#374151"
-  ink-muted: "#9ca3af"
-  status-success: "#10b981"
-  status-warn: "#f59e0b"
-  status-danger: "#f43f5e"
-  brand-barbours: "#7c3aed"
-  brand-kokeshi: "#06b6d4"
-  brand-apice: "#f59e0b"
-  brand-lescent: "#ec4899"
-  brand-rituaria: "#10b981"
+  shell: "#12112b"
+  shell-raised: "#1e1c40"
+  shell-line: "#28254e"
+  shell-ink: "#f0eefc"
+  shell-muted: "#aaa6ce"
+  shell-accent: "#a78bfa"
+  canvas: "#f7f6fb"
+  surface: "#ffffff"
+  raised: "#f4f2fb"
+  line: "#e7e3f5"
+  line-strong: "#d6d0ec"
+  ink: "#171226"
+  ink-muted: "#524c67"
+  ink-faint: "#6c6582"
+  accent: "#6d28d9"
+  accent-soft: "#f1ecfe"
+  ok: "#059669"
+  warn: "#d97706"
+  crit: "#e11d48"
+  canal-tiktok: "#8b5cf6"
+  canal-ml: "#06b6d4"
+  canal-shopee: "#f97316"
 typography:
-  display:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "1.875rem"
-    fontWeight: 700
-    lineHeight: 1
-    letterSpacing: "normal"
-  headline:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "1.125rem"
-    fontWeight: 700
-    lineHeight: 1.3
-    letterSpacing: "normal"
-  title:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "0.875rem"
+  label:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "12px"
     fontWeight: 600
-    lineHeight: 1.4
-    letterSpacing: "normal"
-  body:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "0.875rem"
-    fontWeight: 400
-    lineHeight: 1.5
-    letterSpacing: "normal"
+    lineHeight: 1.2
+    letterSpacing: "0.04em"
   data:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "0.8125rem"
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.35
     letterSpacing: "normal"
-  label:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "0.75rem"
+  body:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "14px"
+    fontWeight: 400
+    lineHeight: 1.5
+    letterSpacing: "normal"
+  title:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "14px"
+    fontWeight: 600
+    lineHeight: 1.4
+    letterSpacing: "normal"
+  headline:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "20px"
+    fontWeight: 700
+    lineHeight: 1.3
+    letterSpacing: "-0.01em"
+  kpi:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "24px"
+    fontWeight: 600
+    lineHeight: 1.15
+    letterSpacing: "-0.015em"
+  kpi-hero:
+    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "28px"
     fontWeight: 600
     lineHeight: 1
-    letterSpacing: "0.08em"
+    letterSpacing: "-0.02em"
 rounded:
+  control: "8px"
+  panel: "12px"
   full: "9999px"
-  card: "16px"
-  badge: "12px"
 spacing:
-  xs: "8px"
-  sm: "16px"
-  md: "20px"
+  xs: "6px"
+  sm: "12px"
+  md: "16px"
   lg: "24px"
-  xl: "32px"
 components:
-  button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.surface-card}"
-    rounded: "{rounded.badge}"
-    padding: "8px 16px"
-  button-primary-hover:
-    backgroundColor: "{colors.primary-deep}"
-    textColor: "{colors.surface-card}"
-    rounded: "{rounded.badge}"
-    padding: "8px 16px"
-  chip-filter-active:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.surface-card}"
-    rounded: "{rounded.full}"
-    padding: "6px 14px"
-  chip-filter-idle:
-    backgroundColor: "{colors.surface-card}"
-    textColor: "{colors.ink-secondary}"
-    rounded: "{rounded.full}"
-    padding: "6px 14px"
-  card-data:
-    backgroundColor: "{colors.surface-card}"
-    rounded: "{rounded.card}"
-    padding: "{spacing.md}"
-  brand-avatar:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.surface-card}"
-    rounded: "{rounded.badge}"
-    size: "36px"
+  sidebar:
+    backgroundColor: "{colors.shell}"
+    textColor: "{colors.shell-muted}"
+    width: "240px expanded / 64px rail"
+  nav-item-active:
+    backgroundColor: "#2c2260"
+    textColor: "{colors.shell-ink}"
+    indicator: "{colors.shell-accent}"
+  panel:
+    backgroundColor: "{colors.surface}"
+    rounded: "{rounded.panel}"
+    border: "{colors.line}"
+  kpi-card:
+    backgroundColor: "{colors.surface}"
+    rounded: "{rounded.panel}"
+    padding: "16px"
+  filter-trigger:
+    backgroundColor: "{colors.surface}"
+    rounded: "{rounded.control}"
+    height: "44px"
 ---
 
 # Design System: Torre de Controle — GoBeauté
 
+> Revised in **UX-TORRE-B2B-1** (13/10/2026). Mário set the private repository
+> `b2b-gogroup/torre_b2b` as the explicit finish benchmark and approved a
+> **navy operational shell** around a light data canvas. That decision replaces
+> the old rule "never a dark sidebar". The benchmark audit lives in
+> `docs/ux_torre_b2b_benchmark.md`.
+
 ## 1. Overview
 
-**Creative North Star: "The Brand Observatory"**
+**Creative North Star: "The instrument panel"**
 
-This is an elevated internal intelligence tool — the place where GoBeauté's commercial team watches its five brands navigate two marketplaces in real time. It has the calm authority of a brand that already knows it has something to say: data is presented with confidence, not apology. Numbers are large. Status reads at a distance. The lavender surface is a quiet container; the violet primary punctuates it with intention. The brands themselves — BARBOURS, KOKESHI, ÁPICE, LESCENT, RITUÁRIA — are protagonists, each with a signature color that anchors their identity throughout the tool.
+The Torre reads like a flight deck, not a report. A dark navy frame holds the
+navigation, identity and theme. Inside it sits a bright, dense data canvas: KPI
+strip first, then wide panels with charts and tables, and depth one click away.
+The category default is a stack of filter blocks, paragraphs and same-size
+cards. The Torre refuses it: every viewport has to answer a question with
+numbers.
 
-The system rejects all four anti-references from the product brief by design. It is not the default BI dashboard (no charcoal sidebar, no generic electric-blue accent, no anonymous card grid). It is not a data dump (hierarchy is deliberate, summary first, depth on demand). It is not a gray form-builder. It is not a corporate spreadsheet. It earns the GoBeauté name on the inside of the product, not just the outside.
+What changed from the previous "Brand Observatory" direction, and why:
 
-Components are tactile and confident: shadow presence at rest, stronger lift on hover, heavier border definitions. The interface responds to the user — it doesn't sit passively.
+| Before | Now | Why |
+|---|---|---|
+| Light lavender sidebar | Navy shell (`--tc-shell`) in **both** themes | Mário's brief; the frame separates navigation from data at a glance |
+| System font stack | **Inter** via `next/font` (self-hosted) | True tabular figures; consistent rendering across Windows/macOS |
+| 16px cards, shadow at rest | 12px panels, 1px border, shadow only on hover | Denser, quieter; the border defines the edge |
+| Two-row filter bar | One row: channel segmented + brand/period triggers | First number moved up ~60px |
+| Prose under titles | Chips (period, freshness) + short notes + disclosures | Warnings stay; their weight drops |
 
-**Key Characteristics:**
-- Lavender-tinted body field (#f8f7ff) as a quiet container
-- Violet primary (#7c3aed) used with discipline — in brand marks, primary actions, and accent borders only
-- Five named brand colors as a consistent visual language for brand identity
-- System UI font stack — sharp, legible, zero cost. No decorative serifs.
-- Rounded cards (16px) that sit clearly above the lavender surface
-- Shadow at rest (ambient) + shadow lift on hover (structural)
-- WCAG AA contrast throughout — labels are muted but never illegible
+The four anti-references still hold:
+
+- **Metabase.** The charcoal sidebar with an electric-blue accent is still
+  forbidden. Navy with a violet cast and violet selection is not that.
+- **Looker data dump.** Still forbidden.
+- **Retool gray.** Still forbidden.
+- **Excel beige.** Still forbidden.
+
+**Key characteristics**
+
+- Navy shell, light canvas, white panels, violet for selection and primary series only
+- Inter, tabular numerals everywhere numbers live
+- One icon vocabulary (`lucide-react`, 16px, stroke 1.75); the route icon repeats in the page header
+- KPIs as a strip of compact cards: label, icon, number, delta pill, short note
+- Status colours only behind a business rule; channel colours only for identity
 
 ## 2. Colors
 
-Violet owns its space. Everything else is quiet so the violet, the brand colors, and the status signals land with maximum clarity.
+### Shell (new)
 
-### Primary
-- **Observatory Violet** (#7c3aed): The brand's internal voice. Used on primary action buttons, nav marks, icon badges, brand initials (BARBOURS), card borders in subtle form (#ede9fe), and focus rings. Never used decoratively or as body fill.
-- **Observatory Violet Deep** (#6d28d9): Pressed and hover state of the primary. One step darker, used only in interactive state transitions — not as a default surface.
-- **Observatory Violet Ink** (#2e1065): Near-black violet. Available for dark-mode readiness or high-contrast text on violet surfaces. Rarely needed at default contrast settings.
+`--tc-shell` is navy with a violet cast (`#12112b` light, `#0a0914` dark, one
+step below the dark canvas). Text on it uses `shell-ink` (16.1:1),
+`shell-muted` (7.9:1) and `shell-faint` (5.1:1, group labels only) — measured; the dark shell measures 17.4 / 8.8 / 5.5. The active
+nav item is marked by three signals together: `shell-active` surface,
+`shell-ink` text, and a 3px `shell-accent` bar on the left edge. Weight alone is
+never the signal.
 
-### Neutral
-- **Lavender Field** (#f8f7ff): Page body background. A near-white with the faintest violet tint — barely perceptible but enough to set the system apart from a pure white canvas. Never used as a card background.
-- **Observatory White** (#ffffff): All card surfaces. Sits clearly above the lavender field.
-- **Hover Violet** (#f5f3ff): The resting hover surface for cards and table rows. One tonal step above the body bg.
-- **Border Subtle** (#ede9fe): Card borders, table dividers, section separators. Violet-tinted, not neutral gray — invisible at a glance but establishes structure.
-- **Ink** (#1a1028): Body text, large headings, data values. Deep purple-black. Used at full opacity only.
-- **Ink Secondary** (#374151): Secondary text, table cell data, metadata.
-- **Ink Muted** (#9ca3af): Placeholder labels, column headers, helper text. Minimum role: uppercase tracking label on white. Verify contrast before using at smaller sizes or lower weights.
+### Canvas and surfaces
 
-### Secondary — Brand Identity Palette
-Each brand owns one accent color used only for their avatar badge, chip, and data attribution. This palette must not migrate to other contexts (e.g., don't use KOKESHI cyan for a non-Kokeshi success state).
-- **BARBOURS Violet** (#7c3aed): Same as Observatory Violet — BARBOURS is the brand closest to GoBeauté's primary identity.
-- **KOKESHI Cyan** (#06b6d4): Electric cyan. Clear differentiation from the violet family.
-- **ÁPICE Amber** (#f59e0b): Also serves as the global Status Warn color (shared deliberately — ÁPICE and caution share the same warm frequency).
-- **LESCENT Pink** (#ec4899): Saturated warm pink. Distinct from red, distinct from violet.
-- **RITUÁRIA Emerald** (#10b981): Also serves as the global Status Success color (shared deliberately — RITUÁRIA and on-target share the same green frequency).
+The light canvas is lavender-white (`#f7f6fb`). Panels are white with a 1px
+`line` border. `raised` is the inset tone used for table heads, totals and
+skeletons. The dark theme keeps its deep violet field. See §7 for every value.
 
-### Tertiary — Status Signals
-- **On Target** (#10b981): Attainment ≥ 100%. Green. Use only for status; no decorative use.
-- **Near Target** (#f59e0b): Attainment 80–99%. Amber. Use only for status.
-- **Off Target** (#f43f5e): Attainment < 80%. Rose-red. Use only for status.
+### Violet discipline
 
-### Named Rules
-**The Violet Discipline Rule.** The primary violet (#7c3aed) is allowed on ≤4 distinct elements per screen: the nav mark, the active filter chip, brand avatars where applicable, and one primary CTA. If you're adding violet to a fifth element, you're decorating. Remove one of the four first.
+Violet (`accent`) is allowed on:
 
-**The Status Separation Rule.** Status colors (green / amber / red) have exactly one job each: expressing goal attainment, MoM direction, and live/demo badge state. They are forbidden as brand accents, section separators, or decorative fills.
+- the active nav item;
+- the brand mark;
+- the route icon tile in the page header;
+- the first data series;
+- primary actions and links.
+
+It is **not** a button fill for filter options. Active filter options use
+neutral relief (`bg-surface` + `ring-line-strong`).
+
+### Channel identity
+
+TikTok is violet, ML is cyan, Shopee is orange. This holds everywhere: the
+filter dots, charts, matrix columns and table badges. It is identity, never
+quality.
+
+### Status
+
+`ok` / `warn` / `crit` each need a business threshold behind them: ROAS bands,
+fee bands, buyer-profile bands, data-confidence severity. Use full tones for
+fills and dots, and the `-ink` variants for text.
+
+### Brand avatars
+
+The brand palette (BARBOURS violet, KOKESHI cyan, ÁPICE amber, LESCENT pink,
+RITUÁRIA emerald) is reserved for brand identity marks. It is not used for chart
+series or status.
 
 ## 3. Typography
 
-**All weights and sizes:** System UI stack — `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`. No custom font is loaded. This is a deliberate choice: the system loads at native speed, renders identically across macOS, Windows, and Linux for an internal team, and the native stack already has excellent legibility at small sizes.
+**Family:** Inter (`next/font/google`, self-hosted at build, `display: swap`),
+falling back to the system stack. It was chosen for real `tnum` figures, so R$
+columns align without monospace.
 
-**Character:** Crisp, neutral, precision-instrument. The restraint of the font forces hierarchy through weight and size contrast, not personality. Display numerics are bold and large; labels are tight, tracked, and uppercase. The contrast is enough.
+| Role | Size / weight | Use |
+|---|---|---|
+| label | 12px / 600, uppercase, tracked 0.04em | KPI labels, table column heads, nav group labels, status badges |
+| data | 13px / 400–600 | Dense table cells, nav items |
+| body | 14px / 400 | Prose, notes, panel subtitles |
+| title | 14px / 600 | Panel titles |
+| headline | 20px / 700 | Page title (`<h2>`; Gerencial keeps its `<h1>`) |
+| kpi | 24px / 600, −0.015em | KPI card value |
+| kpi-hero | 28px / 600 | `KpiTile destaque` only |
 
-### Hierarchy
-- **Display** (700 weight, 30px / 1.875rem, line-height 1): KPI primary values — GMV, order counts, average ticket. Numbers only. Never used for prose. Bold enough to read at arm's length.
-- **Headline** (700 weight, 18px / 1.125rem, line-height 1.3): Page title in the top nav. Brand drill-down headings. Use sparingly — only one headline per screen.
-- **Title** (600 weight, 14px / 0.875rem, line-height 1.4): Section headings within cards ("Performance por Brand", "Atingimento de Metas"). Card labels beside icons.
-- **Body** (400 weight, 14px / 0.875rem, line-height 1.5): Table cell data, alert text, metadata. Max line length in prose contexts: 70ch.
-- **Label** (600 weight, 12px / 0.75rem, line-height 1, letter-spacing 0.08em, UPPERCASE): Column headers, filter chips, badge text, section eyebrows. The eyebrow is earned in this system — each label identifies data infrastructure (a column, a filter, a status), not a decorative heading.
+**Floor: 12px.** The benchmark uses 10–11px labels everywhere. The Torre does
+not copy that: the 12px floor was a deliberate UX-TORRE-1 accessibility
+decision, and density comes from spacing, not from smaller type.
 
-### Named Rules
-**The Numeric Display Rule.** KPI numbers live at Display scale (700 weight, 30px minimum). Any number in a KPI card that drops below title size loses its authority. Tabular numerics only: `font-variant-numeric: tabular-nums` on any column of values so digits align under scroll.
+**Uppercase labels** belong to data infrastructure: KPI labels, column heads,
+nav group labels and badges. Panel titles are mixed-case title weight.
 
-**The Label Restraint Rule.** Uppercase tracking labels (LABEL role) are permitted in exactly two positions: table column headers and status badges. They must not appear as section eyebrows above card titles. Card titles use Title weight (600, 14px), not the uppercase label treatment.
+**Tabular numerals** are on for every table and every KPI value
+(`tabular-nums`, or the global `table, .tabular` rule).
 
 ## 4. Elevation
 
-The system is **tonal-first, shadow-second**. Depth is established primarily by the three-layer background stack (lavender field → white card → hover tint), not by shadow intensity. Shadows confirm interactivity and separateness; they do not substitute for color contrast.
+The system is tonal first. Depth comes from canvas → surface → raised, then the
+1px border. Shadow appears only:
 
-### Shadow Vocabulary
-- **Ambient Rest** (`0 1px 2px 0 rgba(0, 0, 0, 0.05)`): All cards and containers at rest. The Tailwind `shadow-sm` value. Barely visible — just enough to lift white off lavender.
-- **Structural Hover** (`0 4px 12px 0 rgba(124, 58, 237, 0.08), 0 1px 3px 0 rgba(0, 0, 0, 0.06)`): Applied on card or row hover. The violet tint in the outer shadow ties hover state to the brand. Do not use on non-interactive elements.
+- on hover of an interactive card or row: a soft offset with a violet cast,
+  `0 4px 14px -4px rgb(accent / .18)`;
+- on floating layers (popovers and dialogs): `0 8px 24px -6px rgb(ink / .18)`.
 
-### Named Rules
-**The Tonal Priority Rule.** Surface separation is achieved first by background color (lavender field → white card), then by border (#ede9fe), then by shadow. Do not reach for a heavier shadow when a tonal shift would do the same work.
-
-**The Shadow-On-Hover Rule.** The Structural Hover shadow appears only on interactive elements (clickable cards, table rows, nav items). Static containers — alert boxes, footers, chart wrappers — stay at Ambient Rest or no shadow. A shadow on a static element implies interactivity it doesn't have.
+Static panels never cast a shadow.
 
 ## 5. Components
 
-### Buttons
-Buttons are rare in this tool (primarily a read-only dashboard), but appear in filter controls and period selectors.
-- **Shape:** Gently rounded (12px badge radius). Not pill-shaped, not square.
-- **Primary:** Observatory Violet (#7c3aed) background, white text, 600 weight, 12px uppercase label treatment. Padding: 8px 16px. Hover: deep violet (#6d28d9) + Structural Hover shadow lift.
-- **Focus:** 2px ring at offset 2px, Observatory Violet color. Keyboard users must see this clearly.
-- **Ghost / Filter idle:** White background, #ede9fe border, Ink Secondary text. Hover: Hover Violet (#f5f3ff) background.
+The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
+`shell/`. A primitive exists only when it has two or more consumers.
 
-### Filter Chips
-The marketplace filter (All / TikTok / ML) and period selector use a chip pattern.
-- **Active chip:** Observatory Violet (#7c3aed) fill, white text, rounded-full (9999px), 600 weight, 12px. No border.
-- **Idle chip:** White fill, Border Subtle (#ede9fe) 1px border, Ink Secondary text. Hover: Hover Violet fill.
-- **Rule:** Chips are the only UI element allowed to use rounded-full. All other interactive containers use badge (12px) or card (16px) radius.
+| Primitive | File | Consumers |
+|---|---|---|
+| App shell (navy sidebar, mobile topbar, drawer) | `shell/*` | every route |
+| Page header (icon, title, subtitle, meta chips, sticky filter bar) | `layout/PageHeader.tsx`, `gerencial/GerencialHeader.tsx` | 10 routes + Gerencial |
+| Filter toolbar | `layout/GlobalFilterControls.tsx` | Gerencial, Canais, Financeiro |
+| Brand selector / period selector, `menu` variant | `BrandFilter.tsx`, `DateRangeFilter.tsx` + `ui/Popover.tsx` | toolbar (menu); other routes (faixa) |
+| Freshness + period chip | `ui/Freshness.tsx` | Gerencial, Canais, Financeiro |
+| KPI card | `ui/KpiTile.tsx`, `ui/StatCard.tsx`, `gerencial/KpiBand.tsx` | Expedição, Canais, Financeiro, Gerencial |
+| Panel (title, subtitle, actions, footer, icon) | `ui/Panel.tsx` | Expedição, Canais, Financeiro, Gerencial |
+| Segmented / tabs | `ui/Segmented.tsx` | theme, Expedição, Canais detail tabs |
+| Status badge | `ui/Chip.tsx` | Expedição, Canais, Financeiro |
+| Data-quality note + disclosure | `ui/Note.tsx`, `ui/Disclosure.tsx` | all three + Expedição |
+| Table shell (scroll hint) | `TableScrollHint.tsx` | all wide tables |
+| Empty / loading / error / unavailable | `ui/StateBlock.tsx` | Canais, Financeiro |
 
-### Cards / Containers
-The primary surface unit. White on lavender, with violet-tinted borders.
-- **Corner Style:** Gently rounded (16px — `rounded-2xl`).
-- **Background:** Observatory White (#ffffff).
-- **Shadow Strategy:** Ambient Rest at all times; Structural Hover when the card (or a row inside it) is interactive.
-- **Border:** Border Subtle (#ede9fe), 1px — always present. The border is what defines the card edge; the shadow confirms it.
-- **Internal Padding:** 20px (`p-5`) for content cards; 24px (`p-6`) for header-labeled section cards.
-- **Rule:** No nested cards. Cards contain data, not other cards. Alert boxes inside a section use a tinted background (`amber-50`, `rose-50`, `emerald-50`), not a card shape.
+### Sidebar
 
-### Brand Avatars
-The signature component — each brand has a 36px square with colored background and white initials.
-- **Shape:** 12px radius (`rounded-xl`) — matches the badge radius but distinctly not a circle, maintaining a grounded, structured feel.
-- **Colors:** BARBOURS violet, KOKESHI cyan, ÁPICE amber, LESCENT pink, RITUÁRIA emerald.
-- **Typography:** 12px, 700 weight, white — two-character initials (ÁP, BA, KO, LE, RI).
-- **Rule:** The brand avatar is the only place brand colors appear as filled backgrounds. Brand colors do not fill chart bars, progress bars, or section headers.
+- 240px expanded, 64px icon rail.
+- **Auto mode** shows the rail below 1280px and the expanded bar above. Only a
+  choice made on a wide screen persists (`localStorage: torre-sidebar`).
+- The theme selector lives in the sidebar footer: segmented when expanded, one
+  cycling button in the rail.
+- Mobile uses a navy topbar with a hamburger that opens a navy drawer with
+  44px targets.
 
-### Data Table
-The core data surface. Dense but readable.
-- **Header row:** LABEL typography (600 weight, 12px, uppercase, tracked). Ink Muted (#9ca3af). No background — header cells sit on white card surface.
-- **Body rows:** BODY typography (400 weight, 14px). Ink Secondary for data cells, Bold Ink for total/primary values.
-- **Dividers:** Border Subtle (#ede9fe), 1px top border per row. No outer vertical borders.
-- **Row hover:** Hover Violet (#f5f3ff) background + Structural Hover shadow on the row (not the whole card).
-- **Alternating rows:** Subtle gray tint (`rgba(0,0,0,0.015)`) on odd rows. Not strongly visible — just enough to aid scanning in dense tables.
-- **Numeric columns:** Right-aligned, `font-variant-numeric: tabular-nums`. Never center-aligned.
+### Filter toolbar
 
-### KPI Cards
-The headline metric unit. Two-column or four-column grid at the top of the dashboard.
-- **Structure:** Label (top, uppercase, muted) → Icon badge (top right, colored accent square) → Display number (large, bold, Ink) → Subvalue (small, muted) → MoM delta (emerald or rose, bold).
-- **Icon badges:** 32px × 32px, rounded-xl, colored per KPI semantic role (not per brand). Violet for GMV, cyan for orders, amber for ticket, emerald for spend.
-- **Rule:** The KPI card hero number is the only Display-scale element. Labels above it stay at Label scale. There is no room for a second Display element in a KPI card.
+- One row on desktop, sticky.
+- Channel is a segmented control with identity dots.
+- Brand and period are popover triggers showing the current value ("Marca:
+  Todas", "Período: Mês anterior").
+- Every target is 44px; that contract is V3 and is not traded for density.
+- Below `sm` the bar collapses behind a "Filtros" button that shows the scope
+  summary.
 
-### Goal Attainment Bars
-The visual language for meta vs. real.
-- **Bar track:** Gray-100 background, rounded-full, height 8px.
-- **Bar fill:** On Target green (#10b981) for ≥ 100%, Near Target amber (#f59e0b) for 80–99%, Off Target rose (#f43f5e) for < 80%. Never the brand color.
-- **Attainment badge:** Same three colors as tinted background + matching text (e.g. `emerald-50` / `emerald-700`). Shows percentage.
-- **Rule:** The fill never exceeds 100% width visually — attainment overflow is communicated by the badge percentage (e.g. 191%) and badge color, not by a bar that breaks its track.
+### KPI card
+
+- Uppercase label at the top left and a 28px icon tile at the top right (series
+  tint, not status).
+- 24px value, then a delta pill (`ok-soft` / `crit-soft` with an arrow), then
+  the reference.
+- Notes sit at the base in 12px muted text. A note is never removed, only
+  shortened.
+
+### Panel
+
+- 12px radius, 1px border.
+- Header: optional 16px icon, title (14/600), one-line subtitle, actions on the
+  right.
+- Methodology longer than one line goes into a `Disclosure` ("Como ler esta
+  medição").
+
+### Tables
+
+- Head on `raised`, using the label style.
+- Rows are 13–14px with no zebra striping and a hover tint.
+- Numbers are right-aligned and tabular.
+- The total row sits on `raised` with a 2px top border.
+- Wide tables scroll inside the panel, with a visible hint.
+
+### Charts
+
+- Recharts.
+- Grid from `--tc-chart-grid`, 12px axis ticks, no axis lines.
+- Series colour comes from position or channel identity, never status.
+- Every chart has a title and the period in its header.
 
 ## 6. Do's and Don'ts
 
-### Do:
-- **Do** use the lavender field (#f8f7ff) as the only page background. It is the Observatory's atmosphere. Sections within the page are white cards on lavender — never lavender sections within a white page.
-- **Do** make KPI numbers large and bold (30px, 700 weight). The manager who glances at the dashboard reads these numbers first; they must answer immediately.
-- **Do** use brand colors exclusively in brand avatar badges. KOKESHI cyan belongs to KOKESHI — nowhere else.
-- **Do** apply `font-variant-numeric: tabular-nums` on every column of numbers. Shifting digit widths break the precision-instrument feel instantly.
-- **Do** use shadow-lift (Structural Hover) on every interactive card and row. The tool's tactile character comes from the consistent, branded hover response.
-- **Do** show status signals (goal attainment, MoM delta) in the system's three semantic colors: emerald success, amber warn, rose danger. Never use brand colors for status.
-- **Do** cap the uppercase label treatment to table column headers and status badges. Section card titles use Title weight (600, 14px, mixed case) — not the UPPERCASE LABEL style.
+**Do**
 
-### Don't:
-- **Don't** use a charcoal or dark sidebar as primary navigation. This is the Metabase default aesthetic — the exact reference the product brief names as forbidden. Navigation lives in a persistent light/lavender sidebar on desktop (white surface, violet-tinted border, violet accent on the active item — never charcoal/dark) with a matching mobile drawer; the topbar remains as a contextual header (brand identity, current route) above the content, not the primary navigation surface. Depth-on-demand and preserved filters remain the guiding principles either way.
-- **Don't** lay out data as a "data dump": oversized chart blocks with no hierarchy, crowded side-by-side tables without whitespace. This is the Looker anti-pattern named in the brief. Summary first, depth on demand.
-- **Don't** use Retool's dense-gray form-builder look: gray backgrounds on interactive elements, no rounded corners, no brand color presence. Every interactive element in this system has a violet or brand-color identity.
-- **Don't** use beige, sand, or warm-tinted backgrounds. The body is a cool lavender (#f8f7ff), not a warm neutral. Warm backgrounds are the corporate Excel anti-pattern.
-- **Don't** place side-stripe borders (`border-left` > 1px as colored accent) on alert boxes or cards. Alerts use a fully tinted background (amber-50, rose-50, emerald-50) with a matching full border, not a decorative left stripe.
-- **Don't** use gradient text (`background-clip: text` with a gradient). Data values are single-color ink. Emphasis comes from weight and size.
-- **Don't** use glassmorphism (blurred translucent overlays) as a default surface treatment. This system's surfaces are opaque: lavender field, white cards. Blurs are forbidden except in a deliberate, rare overlay context.
-- **Don't** let brand colors appear in chart bar fills, section fills, or progress bar fills. Brand colors are reserved for identity (avatar badges only). Chart bars use a unified violet scale; status bars use semantic green/amber/red.
-- **Don't** let the attainment progress bar visually exceed 100% width — use the percentage badge for overflow, not bar overflow.
-- **Don't** put display-scale (30px) numbers anywhere except KPI metric values. Large numbers imply a headline KPI; using that scale for secondary data (goal targets, date labels) inflates visual noise.
+- Put a number in the first viewport of every route, above any prose.
+- Turn metadata sentences into chips: period, freshness, coverage.
+- Keep quality warnings visible and lighter: a short note, with the full text
+  in a disclosure or a `title`.
+- Repeat the route icon in the page header.
+- Keep the 44px target on every filter control and the 12px type floor.
+
+**Don't**
+
+- Use a charcoal/grey sidebar with an electric-blue accent (the Metabase
+  default). The shell is navy-violet.
+- Fill filter options with solid violet.
+- Use status colours without a business rule, or channel colours for anything
+  except identity.
+- Put a shadow on static panels, use a coloured side stripe on cards or alerts,
+  or use gradient text.
+- Call any cost view "margem real". Known costs are labelled as known costs,
+  and missing components are named as missing.
 
 ---
 
-## 7. Semantic tokens and the two themes (UX-TORRE-1)
+## 7. Semantic tokens and the two themes (UX-TORRE-1, extended)
 
-Everything above still holds. What changed is *how* a colour reaches a
-component: no screen writes a hex or a palette literal any more. Each colour is
-a **role**, and the role's value is defined once per theme in
-`apps/web/app/globals.css`.
+No screen writes a hex or a palette literal. Each colour is a **role**, and the
+role's value is defined once per theme in `apps/web/app/globals.css`.
 
 ### The token layer
 
@@ -284,41 +343,28 @@ a **role**, and the role's value is defined once per theme in
 | Accent | `--tc-accent` (+ `-soft`, `-ink`, `-on`) | `#6d28d9` | `#a78bfa` |
 | Success / Warn / Critical | `--tc-ok` / `--tc-warn` / `--tc-crit` (+ `-soft`, `-ink`) | `#059669` / `#d97706` / `#e11d48` | `#34d399` / `#fbbf24` / `#fb7185` |
 | Series 1–6 | `--tc-chart-1…6` | violet, sky, slate, purple, cyan, slate-dark | the lighter counterpart of each |
+| Channel identity (UX-TORRE-2) | `--tc-canal-tiktok` / `-ml` / `-shopee` | `#8b5cf6` / `#06b6d4` / `#f97316` | `#a78bfa` / `#22d3ee` / `#fb923c` |
+| Shell (UX-TORRE-B2B-1) | `--tc-shell` (+ `-raised`, `-line`, `-ink`, `-muted`, `-faint`, `-accent`, `-active`) | `#12112b` | `#0a0914` |
 
-Tokens are stored as **RGB channels** (`23 18 38`), never as `#rrggbb`: Tailwind
-injects the alpha inside `rgb(var(--tc-ink) / <alpha-value>)`, so `text-ink/70`
-only works in that form.
+Tokens are stored as **RGB channels** (`23 18 38`), never `#rrggbb`. Tailwind
+injects the alpha inside `rgb(var(--tc-ink) / <alpha-value>)`, which is why
+`text-ink/70` works.
 
-Three rules the tokens enforce:
+The tokens enforce three rules:
 
-1. **Dark is not an inversion.** Every role has its own value per theme,
-   chosen for ≥4.5:1 on body text and ≥3:1 on large text and UI parts. The dark
-   field is a deep violet (`#0e0b18`), not charcoal — the Metabase anti-reference
-   applies to both themes.
-2. **Full `ok` / `warn` / `crit` are *fills* only** (bars, dots, borders).
-   Text uses the `-ink` variant. That is why the fills can be mid-tone values
-   that stay apart from each other inside a stacked bar.
-3. **`-on` is the ink that sits on top of the full accent.** In dark the accent
-   is light, so white text on it would measure ~2.4:1. `text-accent-on` flips.
-
-### The `data` type step
-
-The ramp gained one step: **data, 13px / 1.35**, for dense operational tables.
-`body` (14px) stays the prose size. 13px is the floor for tabular data; nothing
-in the product goes below 12px (`label`).
+1. **Dark is not an inversion.** Each role has its own value per theme,
+   checked for ≥4.5:1 body text and ≥3:1 large text and UI.
+2. **Full `ok`/`warn`/`crit` are fills.** Text uses the `-ink` variant.
+3. **`-on` is the ink that sits on the full accent.** It flips in dark.
 
 ### Theme switching
 
-`darkMode: "class"`, never `"media"` — a media query cannot be overridden by a
-manual choice. The preference has three states (`light`, `dark`, `system`),
-persists in `localStorage` under `torre-tema`, and is applied by a synchronous
-script in `<head>` before first paint. `<html>` carries `data-tema` (the
-preference) and the `dark` class (the result); they are different facts.
+- `darkMode: "class"`.
+- Three states (`light`, `dark`, `system`), persisted under `torre-tema`.
+- A synchronous `<head>` script applies the theme before first paint.
 
 ### Migration barrier
 
-`ROTAS_TEMATIZADAS` in `src/lib/theme.ts` lists the routes already on tokens. A
-route outside the list renders under `.tc-tema-claro`, which restores the light
-values for that subtree. A page designed in light literals dropped onto a dark
-field is exactly the defect this gate removed — it must not be reintroduced
-halfway through the migration. Each PR removes its own route from the list.
+Routes in `ROTAS_TEMATIZADAS` (`src/lib/theme.ts`) are on tokens. Every other
+route renders under `.tc-tema-claro`. The shell is themed on every route; a
+route's content joins the dark theme only when its PR adds it to the list.

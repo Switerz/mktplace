@@ -76,28 +76,28 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
       {/* 2. Diagnóstico em linguagem humana — derivado só dos sinais e
           referências já carregados (channel-signal-reasons). */}
       <div>
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">O que o período mostra</p>
-        <p className="text-slate-700">{diagnosis.headline}</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">O que o período mostra</p>
+        <p className="text-ink-muted">{diagnosis.headline}</p>
       </div>
 
       {/* 3. Métricas principais (par local — sem componente compartilhado:
           este é o único consumidor deste layout, ver decisão anti-registry). */}
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">GMV</p>
-          <p className="text-xl font-bold text-gray-900 tabular-nums">{fmtBrl(row.gmv)}</p>
+          <p className="text-[10px] font-semibold text-ink-faint uppercase tracking-wide">GMV</p>
+          <p className="text-xl font-bold text-ink tabular-nums">{fmtBrl(row.gmv)}</p>
           {median?.gmv_median != null && (
-            <p className="text-[10px] text-slate-400 tabular-nums">Mediana do canal: {fmtBrl(median.gmv_median)}</p>
+            <p className="text-[10px] text-ink-faint tabular-nums">Mediana do canal: {fmtBrl(median.gmv_median)}</p>
           )}
         </div>
         <div>
-          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Pedidos</p>
-          <p className="text-xl font-bold text-gray-900 tabular-nums">{fmtNumber(row.orders)}</p>
+          <p className="text-[10px] font-semibold text-ink-faint uppercase tracking-wide">Pedidos</p>
+          <p className="text-xl font-bold text-ink tabular-nums">{fmtNumber(row.orders)}</p>
         </div>
       </div>
 
       {/* 4. Evidências vs referências do mesmo canal */}
-      <ul className="flex flex-col gap-2 border-t border-violet-50 pt-3">
+      <ul className="flex flex-col gap-2 border-t border-line pt-3">
         {metricEvidence("Ads/GMV", row.ads_gmv_pct, row.ads_applicable, row.ads_available, fmtPct1, median?.ads_gmv_pct_median)}
         {metricEvidence("ROAS", row.roas, row.ads_applicable, row.ads_available, fmtRoas, median?.roas_median)}
         {metricEvidence("ACOS", row.acos_pct, row.ads_applicable, row.ads_available, fmtPct1)}
@@ -120,9 +120,9 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
       {/* 5. Sinais que explicam o diagnóstico — chip + evidência textual,
           nunca chip mudo (Gate G2). */}
       <div className="flex flex-col gap-1.5">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sinais</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Sinais</p>
         {diagnosis.explanations.length === 0 ? (
-          <span className="text-slate-300 text-xs">Nenhum sinal no período.</span>
+          <span className="text-ink-faint text-xs">Nenhum sinal no período.</span>
         ) : (
           <ul className="flex flex-col gap-1.5">
             {diagnosis.explanations.map((e) => (
@@ -130,7 +130,7 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap shrink-0 mt-0.5 ${signalTone(e.signal)}`}>
                   {signalLabel(e.signal)}
                 </span>
-                <span className="text-xs text-slate-600">{e.reason}</span>
+                <span className="text-xs text-ink-muted">{e.reason}</span>
               </li>
             ))}
           </ul>
@@ -145,7 +145,7 @@ export default function ChannelComparisonDialogContent({ row, median, periodLabe
           linha: só identificadores, nenhum valor desta linha vai na URL. Sem
           sinal, o CTA continua idêntico ao do G2. */}
       <div className="flex flex-col gap-1">
-        {diagnosis.nextAction && <p className="text-xs text-slate-500">{diagnosis.nextAction}</p>}
+        {diagnosis.nextAction && <p className="text-xs text-ink-faint">{diagnosis.nextAction}</p>}
         <DrilldownCta href={buildHref(brandHref)}>
           Abrir visão completa da marca →
         </DrilldownCta>

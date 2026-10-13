@@ -36,9 +36,9 @@ const SEVERITY_LABEL: Record<CommercialSeverity, string> = {
 };
 
 const SEVERITY_TONE: Record<CommercialSeverity, string> = {
-  critical: "text-rose-700 bg-rose-50 border-rose-200",
-  warning: "text-amber-700 bg-amber-50 border-amber-200",
-  info: "text-slate-600 bg-slate-50 border-slate-200",
+  critical: "text-crit-ink bg-crit-soft border-crit/35",
+  warning: "text-warn-ink bg-warn-soft border-warn/35",
+  info: "text-ink-muted bg-raised border-line",
 };
 
 /** Escala PROPRIA dos avisos de dado — deliberadamente sem "Critico". */
@@ -48,8 +48,8 @@ const DATA_LABEL: Record<DataSeverity, string> = {
 };
 
 const DATA_TONE: Record<DataSeverity, string> = {
-  attention: "text-amber-700 bg-amber-50 border-amber-200",
-  note: "text-slate-600 bg-slate-50 border-slate-200",
+  attention: "text-warn-ink bg-warn-soft border-warn/35",
+  note: "text-ink-muted bg-raised border-line",
 };
 
 export default function AttentionQueue({
@@ -64,44 +64,44 @@ export default function AttentionQueue({
   return (
     <section
       aria-labelledby="fila-heading"
-      className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-4"
+      className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-4"
     >
-      <h2 id="fila-heading" className="text-sm font-semibold text-slate-700">
+      <h2 id="fila-heading" className="text-sm font-semibold text-ink-muted">
         Fila de atenção
       </h2>
 
       {/* Lista 1 — atencoes comerciais */}
       <div className="flex flex-col gap-2">
         <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
             Atenções comerciais
           </h3>
           {!commercialLoading && !commercialError && (
-            <span className="text-xs text-slate-500 tabular-nums">{commercial.length}</span>
+            <span className="text-xs text-ink-faint tabular-nums">{commercial.length}</span>
           )}
         </div>
 
         {commercialLoading ? (
           <div className="flex flex-col gap-2 animate-pulse" role="status" aria-busy="true">
             <span className="sr-only">Carregando atenções comerciais…</span>
-            <div className="h-10 w-full bg-violet-50 rounded-xl" />
-            <div className="h-10 w-full bg-violet-50 rounded-xl" />
+            <div className="h-10 w-full bg-accent-soft rounded-xl" />
+            <div className="h-10 w-full bg-accent-soft rounded-xl" />
           </div>
         ) : commercialError ? (
-          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
-            <p className="text-xs text-slate-600">
+          <div className="bg-raised border border-line rounded-xl px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-ink-muted">
               Resumo executivo indisponível — não é possível listar as atenções comerciais do período.
             </p>
             <button
               type="button"
               onClick={onRetry}
-              className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 min-h-11 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              className="text-xs font-semibold text-ink-muted border border-line-strong rounded-lg px-3 min-h-11 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               Tentar novamente
             </button>
           </div>
         ) : commercial.length === 0 ? (
-          <p className="text-xs text-slate-500">Sem atenções comerciais no período e filtros selecionados.</p>
+          <p className="text-xs text-ink-faint">Sem atenções comerciais no período e filtros selecionados.</p>
         ) : (
           <ul className="flex flex-col gap-1">
             {commercial.map((item) => (
@@ -111,7 +111,7 @@ export default function AttentionQueue({
                   onClick={() => onOpenCommercial(item)}
                   aria-haspopup="dialog"
                   aria-label={`${item.title} — abrir explicação`}
-                  className="w-full min-h-11 text-left flex items-start gap-2.5 rounded-xl px-2 -mx-2 py-2 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
+                  className="w-full min-h-11 text-left flex items-start gap-2.5 rounded-xl px-2 -mx-2 py-2 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                 >
                   <span
                     className={`text-xs font-semibold uppercase rounded border px-1.5 py-0.5 shrink-0 mt-0.5 ${SEVERITY_TONE[item.severity]}`}
@@ -119,10 +119,10 @@ export default function AttentionQueue({
                     {SEVERITY_LABEL[item.severity]}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-xs font-semibold text-slate-800 leading-snug">{item.title}</span>
-                    <span className="block text-xs text-slate-500 leading-snug">{item.description}</span>
+                    <span className="block text-xs font-semibold text-ink leading-snug">{item.title}</span>
+                    <span className="block text-xs text-ink-faint leading-snug">{item.description}</span>
                   </span>
-                  <span aria-hidden="true" className="text-slate-300 shrink-0 mt-0.5">
+                  <span aria-hidden="true" className="text-ink-faint shrink-0 mt-0.5">
                     →
                   </span>
                 </button>
@@ -133,22 +133,22 @@ export default function AttentionQueue({
       </div>
 
       {/* Lista 2 — confianca no dado, com estado proprio e escala propria */}
-      <div className="flex flex-col gap-2 pt-3 border-t border-violet-100">
+      <div className="flex flex-col gap-2 pt-3 border-t border-line">
         <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
             Confiança no dado
           </h3>
           {!commercialLoading && (
-            <span className="text-xs text-slate-500 tabular-nums">{dataConfidence.length}</span>
+            <span className="text-xs text-ink-faint tabular-nums">{dataConfidence.length}</span>
           )}
         </div>
 
         {commercialLoading ? (
-          <div className="h-10 w-full bg-violet-50 rounded-xl animate-pulse" role="status" aria-busy="true">
+          <div className="h-10 w-full bg-accent-soft rounded-xl animate-pulse" role="status" aria-busy="true">
             <span className="sr-only">Carregando avisos de confiança…</span>
           </div>
         ) : dataConfidence.length === 0 ? (
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-ink-faint">
             {commercialError
               ? "Não foi possível verificar avisos de confiança nesta carga."
               : "Nenhum aviso de confiança no dado neste período."}
@@ -162,7 +162,7 @@ export default function AttentionQueue({
                   onClick={() => onOpenDataWarning(item)}
                   aria-haspopup="dialog"
                   aria-label={`${item.message} — abrir explicação`}
-                  className="w-full min-h-11 text-left flex items-start gap-2.5 rounded-xl px-2 -mx-2 py-2 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
+                  className="w-full min-h-11 text-left flex items-start gap-2.5 rounded-xl px-2 -mx-2 py-2 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                 >
                   <span
                     className={`text-xs font-semibold uppercase rounded border px-1.5 py-0.5 shrink-0 mt-0.5 ${DATA_TONE[item.severity]}`}
@@ -170,16 +170,18 @@ export default function AttentionQueue({
                     {DATA_LABEL[item.severity]}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-xs text-slate-700 leading-snug">{item.message}</span>
+                    <span className="block text-xs text-ink-muted leading-snug">{item.message}</span>
                     {(item.source || item.lastDate || item.stalenessDays != null) && (
-                      <span className="block text-xs text-slate-500 tabular-nums">
+                      // `overflow-wrap:anywhere`: o nome da tabela-fonte nao
+                      // tem ponto de quebra e vazava do cartao no mobile.
+                      <span className="block text-xs text-ink-faint tabular-nums [overflow-wrap:anywhere]">
                         {item.source && <>fonte {item.source}</>}
                         {item.lastDate && <> · até {item.lastDate}</>}
                         {item.stalenessDays != null && <> · defasagem {item.stalenessDays}d</>}
                       </span>
                     )}
                   </span>
-                  <span aria-hidden="true" className="text-slate-300 shrink-0 mt-0.5">
+                  <span aria-hidden="true" className="text-ink-faint shrink-0 mt-0.5">
                     →
                   </span>
                 </button>

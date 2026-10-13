@@ -23,7 +23,7 @@ export default function DrilldownCta({ href, children, ariaLabel }: Props) {
     <Link
       href={href}
       aria-label={ariaLabel}
-      className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded self-start"
+      className="inline-flex items-center min-h-11 text-sm font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded self-start"
     >
       {children}
     </Link>

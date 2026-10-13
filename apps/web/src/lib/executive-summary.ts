@@ -12,9 +12,9 @@ export const SEVERITY_LABEL: Record<ExecutiveSeverity, string> = {
 };
 
 export const SEVERITY_TONE: Record<ExecutiveSeverity, string> = {
-  info: "text-sky-700 bg-sky-50 border border-sky-200",
-  warning: "text-amber-700 bg-amber-50 border border-amber-200",
-  critical: "text-rose-700 bg-rose-50 border border-rose-200",
+  info: "text-accent-ink bg-accent-soft border border-accent/30",
+  warning: "text-warn-ink bg-warn-soft border border-warn/35",
+  critical: "text-crit-ink bg-crit-soft border border-crit/35",
 };
 
 export const HEALTH_STATUS_LABEL: Record<ExecutiveHealthStatus, string> = {
@@ -24,9 +24,9 @@ export const HEALTH_STATUS_LABEL: Record<ExecutiveHealthStatus, string> = {
 };
 
 export const HEALTH_STATUS_TONE: Record<ExecutiveHealthStatus, string> = {
-  ok: "text-emerald-700 bg-emerald-50 border border-emerald-200",
-  attention: "text-amber-700 bg-amber-50 border border-amber-200",
-  critical: "text-rose-700 bg-rose-50 border border-rose-200",
+  ok: "text-ok-ink bg-ok-soft border border-ok/35",
+  attention: "text-warn-ink bg-warn-soft border border-warn/35",
+  critical: "text-crit-ink bg-crit-soft border border-crit/35",
 };
 
 const SEVERITY_RANK: Record<ExecutiveSeverity, number> = { critical: 0, warning: 1, info: 2 };
@@ -47,5 +47,5 @@ export function severityLabel(severity: string): string {
 }
 
 export function severityTone(severity: string): string {
-  return SEVERITY_TONE[severity as ExecutiveSeverity] ?? "text-slate-500 bg-slate-100 border border-slate-200";
+  return SEVERITY_TONE[severity as ExecutiveSeverity] ?? "text-ink-faint bg-raised border border-line";
 }
