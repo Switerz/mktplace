@@ -217,7 +217,7 @@ def test_partes_incompletas_reprovam_pela_regra_do_loader(isolated):
 
 def test_dry_run_offline_mostra_nd_e_nunca_zero(isolated, capsys):
     args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
-                     offline=True, apply=False)
+                     offline=True, apply=False, audit_dir=str(isolated.parent / "audit"))
     assert pub.run_dry(args, today=TODAY) == pub.EXIT_OK
     out = capsys.readouterr().out
     assert "NAO lido" in out
@@ -227,7 +227,8 @@ def test_dry_run_offline_mostra_nd_e_nunca_zero(isolated, capsys):
 
 def test_apply_sem_consentimento_nao_abre_conexao(isolated):
     chamado = []
-    args = Namespace(scope=["kokeshi:2026-07"], source_root=str(isolated), offline=False, apply=True)
+    args = Namespace(scope=["kokeshi:2026-07"], source_root=str(isolated), offline=False, apply=True,
+                     audit_dir=str(isolated.parent / "audit"))
     codigo = pub.run_apply(args, env={}, engine_factory=lambda *a, **k: chamado.append(1),
                            today=TODAY)
     assert codigo == pub.EXIT_REFUSED
@@ -236,7 +237,8 @@ def test_apply_sem_consentimento_nao_abre_conexao(isolated):
 
 def test_apply_de_marca_da_api_e_recusado_antes_de_conectar(isolated):
     chamado = []
-    args = Namespace(scope=["apice:2026-07"], source_root=str(isolated), offline=False, apply=True)
+    args = Namespace(scope=["apice:2026-07"], source_root=str(isolated), offline=False, apply=True,
+                     audit_dir=str(isolated.parent / "audit"))
     env = {pub.CONSENT_ENV: "1", "BACKFILL_NEON_RW_URL": "postgresql://u:p@ep-x.neon.tech/db"}
     assert pub.run_apply(args, env=env, engine_factory=lambda *a, **k: chamado.append(1),
                          today=TODAY) == pub.EXIT_REFUSED
@@ -375,3 +377,293 @@ def test_contraprova_sem_filtro_de_procedencia_a_transacao_e_desfeita(pg, isolat
     assert res["code"] == pub.EXIT_ROLLED_BACK, res
     assert _snapshot(pg, "source = 'api'") == api_antes
     assert _snapshot(pg, "source = 'manual_export'") == manual_antes
+
+
+# ===========================================================================
+# REREVIEW — correcoes do CHANGES_REQUIRED do #76
+# ===========================================================================
+
+import json
+import subprocess
+import sys as _sys
+
+TODAY_OUT = date(2026, 10, 13)
+
+
+# --- MAJOR 1: competencia futura -------------------------------------------
+
+def test_scope_futuro_e_recusado():
+    with pytest.raises(pub.PublishRefused, match="futura"):
+        pub.parse_scopes(["kokeshi:2026-11"], today=TODAY_OUT)
+    assert pub.parse_scopes(["kokeshi:2026-10"], today=TODAY_OUT) == [("kokeshi", "2026-10")]
+
+
+def test_janela_de_mes_futuro_e_recusada_e_nunca_vira_fechada():
+    # Antes: 20261101_20261130 passava como "mes fechado" (termina no ultimo dia).
+    with pytest.raises(pub.PublishRefused, match="FUTURA"):
+        pub.assert_full_month_windows("kokeshi", _plan(("20261101", "20261130")),
+                                      ["2026-11"], today=TODAY_OUT)
+    with pytest.raises(pub.PublishRefused, match="FUTURA"):
+        pub.assert_full_month_windows("kokeshi", _plan(("20270101", "20270131")),
+                                      ["2027-01"], today=TODAY_OUT)
+
+
+def test_apply_com_scope_futuro_recusa_antes_de_conectar(isolated):
+    chamado = []
+    args = Namespace(scope=["kokeshi:2026-11"], source_root=str(isolated), offline=False, apply=True,
+                     audit_dir=str(isolated.parent / "audit"))
+    env = {pub.CONSENT_ENV: "1", "BACKFILL_NEON_RW_URL": "postgresql://u:p@ep-x.neon.tech/db"}
+    assert pub.run_apply(args, env=env, engine_factory=lambda *a, **k: chamado.append(1),
+                         today=TODAY_OUT) == pub.EXIT_REFUSED
+    assert chamado == []
+
+
+# --- MAJOR 2: isolamento real ----------------------------------------------
+
+windows_only = pytest.mark.skipif(not _sys.platform.startswith("win"), reason="junction e de Windows")
+
+
+def _junction(link: Path, alvo: Path) -> None:
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(alvo)], capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip(f"mklink /J indisponivel: {r.stderr.strip()[:80]}")
+
+
+@windows_only
+def test_junction_da_pasta_da_marca_para_a_pasta_antiga_e_recusada(tmp_path, monkeypatch):
+    trabalho = tmp_path / "shopee"
+    antigo = trabalho / "kokeshi"
+    _export(trabalho, "20260801", "20260831", [_pedido("B1", "2026-08-10 10:00", "SKU1", 1, 10.0)])
+    monkeypatch.setattr(loader, "SHOPEE_ROOT", trabalho)
+    root = tmp_path / "isolada"
+    root.mkdir()
+    _junction(root / "kokeshi", antigo)
+    assert pub.is_link_like(root / "kokeshi")
+    pub.assert_source_root_isolated(root)          # a raiz em si e honesta...
+    with pytest.raises(pub.PublishRefused, match="junction|reparse|fora da raiz"):
+        pub.list_brand_files(root, "kokeshi")      # ...a pasta da marca nao
+    with pytest.raises(pub.PublishRefused):
+        pub.prepare([("kokeshi", "2026-08")], root, today=TODAY_OUT)
+
+
+@windows_only
+def test_raiz_junction_e_recusada(tmp_path, monkeypatch):
+    trabalho = tmp_path / "shopee"
+    trabalho.mkdir()
+    monkeypatch.setattr(loader, "SHOPEE_ROOT", trabalho)
+    real = tmp_path / "real"
+    (real / "kokeshi").mkdir(parents=True)
+    _junction(tmp_path / "atalho", real)
+    with pytest.raises(pub.PublishRefused, match="symlink/junction"):
+        pub.assert_source_root_isolated(tmp_path / "atalho")
+
+
+def test_arquivo_symlink_para_fora_e_recusado(tmp_path, monkeypatch):
+    trabalho = tmp_path / "shopee"
+    trabalho.mkdir()
+    monkeypatch.setattr(loader, "SHOPEE_ROOT", trabalho)
+    fora = tmp_path / "fora.xlsx"
+    _xlsx(fora, [_pedido("B1", "2026-08-10 10:00", "SKU1", 1, 10.0)])
+    root = tmp_path / "isolada"
+    (root / "kokeshi").mkdir(parents=True)
+    try:
+        os.symlink(fora, root / "kokeshi" / "Order.all.order_creation_date.20260801_20260831.xlsx")
+    except (OSError, NotImplementedError):
+        pytest.skip("sem privilegio para symlink de arquivo")
+    with pytest.raises(pub.PublishRefused, match="link"):
+        pub.list_brand_files(root, "kokeshi")
+
+
+def test_arquivo_estranho_ou_subpasta_na_pasta_isolada_e_recusado(isolated):
+    (isolated / "kokeshi" / "Dados+Gerais+de+Anuncios.csv").write_text("x")
+    with pytest.raises(pub.PublishRefused, match="nao e export"):
+        pub.list_brand_files(isolated, "kokeshi")
+    (isolated / "kokeshi" / "Dados+Gerais+de+Anuncios.csv").unlink()
+    (isolated / "kokeshi" / "sub").mkdir()
+    with pytest.raises(pub.PublishRefused, match="subpasta"):
+        pub.list_brand_files(isolated, "kokeshi")
+
+
+# --- item 6: lista unica e imutavel ---------------------------------------
+
+def test_a_pasta_e_listada_uma_unica_vez_e_o_loader_nao_relista(isolated, monkeypatch):
+    chamadas = []
+    original = pub.list_brand_files
+    monkeypatch.setattr(pub, "list_brand_files", lambda r, b: chamadas.append(b) or original(r, b))
+
+    def proibido(*a, **k):
+        raise AssertionError("o loader relistou a pasta")
+    monkeypatch.setattr(loader, "_find_xlsx", proibido)
+    prep = pub.prepare([("kokeshi", "2026-07"), ("kokeshi", "2026-08")], isolated, today=TODAY)
+    assert chamadas == ["kokeshi"]
+    assert loader._find_xlsx is proibido               # restaurado depois do preparo
+    assert all(len(f.sha256) == 64 for f in prep.files["kokeshi"])
+
+
+def test_arquivo_alterado_depois_do_hash_e_recusado(isolated):
+    files = pub.list_brand_files(isolated, "kokeshi")
+    with open(files[0].path, "ab") as fh:
+        fh.write(b"\x00")
+    with pytest.raises(pub.PublishRefused, match="mudou"):
+        pub.assert_files_unchanged(files)
+
+
+# --- item 7: limites --------------------------------------------------------
+
+def test_limites_de_bytes_arquivos_e_linhas(isolated, monkeypatch):
+    monkeypatch.setattr(pub, "MAX_FILE_BYTES", 10)
+    with pytest.raises(pub.PublishRefused, match="excede"):
+        pub.list_brand_files(isolated, "kokeshi")
+    monkeypatch.setattr(pub, "MAX_FILE_BYTES", 8 * 1024 * 1024)
+    monkeypatch.setattr(pub, "MAX_FILES_PER_BRAND", 1)
+    with pytest.raises(pub.PublishRefused, match="limite"):
+        pub.list_brand_files(isolated, "kokeshi")
+    monkeypatch.setattr(pub, "MAX_FILES_PER_BRAND", 150)
+    monkeypatch.setattr(pub, "MAX_ROWS_PER_FILE", 1)
+    with pytest.raises(pub.PublishRefused, match="linhas > limite"):
+        pub.prepare([("kokeshi", "2026-07"), ("kokeshi", "2026-08")], isolated, today=TODAY)
+
+
+def test_limites_cobrem_os_exports_reais_com_folga():
+    # medidos em 13/10: 66 arquivos, 122,6 MB, maior parte 1,92 MB
+    assert pub.MAX_FILES_PER_BRAND >= 66 * 2
+    assert pub.MAX_TOTAL_BYTES >= 122_590_813 * 3
+    assert pub.MAX_FILE_BYTES >= 1_920_625 * 4
+
+
+# --- item 8: datas invalidas, formulas, celula vazia, linha descartada ------
+
+def _so_um_mes(tmp_path, monkeypatch, linhas):
+    trabalho = tmp_path / "shopee"
+    trabalho.mkdir(exist_ok=True)
+    monkeypatch.setattr(loader, "SHOPEE_ROOT", trabalho)
+    root = tmp_path / "iso"
+    _export(root, "20260801", "20260831", linhas)
+    return root
+
+
+@pytest.mark.parametrize("linha,erro", [
+    (_pedido("B1", "2026-13-40 10:00", "SKU1", 1, 10.0), "data"),
+    (_pedido("B1", "10/08/2026", "SKU1", 1, 10.0), "data"),
+    (_pedido("B1", "2026-09-01 10:00", "SKU1", 1, 10.0), "fora da janela"),
+    (["B1", "2026-08-10 10:00", "SKU1", "Produto", None, "1", None, "Concluído", "u"], "vazia"),
+    (["B1", "2026-08-10 10:00", "SKU1", "Produto", None, None, "10.00", "Concluído", "u"], "vazia"),
+    (["B1", "2026-08-10 10:00", "SKU1", None, None, "1", "10.00", "Concluído", "u"], "vazia"),
+    (["B1", "2026-08-10 10:00", "SKU1", "Produto", None, "1", "abc", "Concluído", "u"], "invalido"),
+    (["B1", "2026-08-10 10:00", "SKU1", "Produto", None, "1.5", "10.00", "Concluído", "u"], "invalido"),
+])
+def test_celula_ruim_e_recusada_nunca_vira_zero(tmp_path, monkeypatch, linha, erro):
+    root = _so_um_mes(tmp_path, monkeypatch, [_pedido("B0", "2026-08-09 10:00", "SKU1", 1, 10.0), linha])
+    with pytest.raises(pub.PublishRefused, match=erro):
+        pub.prepare([("kokeshi", "2026-08")], root, today=TODAY_OUT)
+
+
+def test_formula_sem_valor_e_recusada(tmp_path, monkeypatch):
+    root = _so_um_mes(tmp_path, monkeypatch, [
+        ["B1", "2026-08-10 10:00", "SKU1", "Produto", None, "1", "=5+5", "Concluído", "u"]])
+    with pytest.raises(pub.PublishRefused, match="formula"):
+        pub.prepare([("kokeshi", "2026-08")], root, today=TODAY_OUT)
+
+
+def test_linha_descartada_em_silencio_pela_transformacao_e_recusada(isolated, monkeypatch):
+    original = bf.build_staging
+
+    def perde_uma(scopes, root):
+        st = original(scopes, root)
+        st.rows = st.rows.iloc[1:].reset_index(drop=True)
+        return st
+    monkeypatch.setattr(bf, "build_staging", perde_uma)
+    with pytest.raises(pub.PublishRefused, match="nao reproduz o bruto"):
+        pub.prepare([("kokeshi", "2026-07"), ("kokeshi", "2026-08")], isolated, today=TODAY)
+
+
+# --- item 5: manifesto auditavel -------------------------------------------
+
+def test_manifesto_tem_run_id_hashes_competencias_resultado_e_nunca_dsn(isolated):
+    audit = isolated.parent / "audit"
+    args = Namespace(scope=["kokeshi:2026-07", "kokeshi:2026-08"], source_root=str(isolated),
+                     offline=True, apply=False, audit_dir=str(audit))
+    assert pub.run_dry(args, env={"BACKFILL_NEON_RO_URL": "postgresql://u:segredo@h.neon.tech/db"},
+                       today=TODAY) == pub.EXIT_OK
+    [arq] = list(audit.glob("*.json"))
+    m = json.loads(arq.read_text(encoding="utf-8"))
+    assert len(m["run_id"]) == 32
+    assert m["scopes"] == ["kokeshi:2026-07", "kokeshi:2026-08"]
+    assert {f["name"] for f in m["files"]["kokeshi"]} == {p.name for p in (isolated / "kokeshi").iterdir()}
+    assert all(len(f["sha256"]) == 64 for f in m["files"]["kokeshi"])
+    assert m["result"]["code"] == 0 and m["result"]["escrita"] is False
+    texto = arq.read_text(encoding="utf-8")
+    assert "segredo" not in texto and "postgresql://" not in texto
+
+
+# --- PostgreSQL 16: fora do escopo e source_mode concorrente ----------------
+
+@needs_pg
+def test_regressao_que_apaga_junho_faz_rollback(pg, isolated, monkeypatch):
+    junho_antes = _snapshot(pg, "ref_month = '2026-06-01'")
+    manual_antes = _snapshot(pg, "source = 'manual_export'")
+    original = pub.ManualExportExecutor.delete_scope
+
+    def apaga_junho_tambem(self, scopes):
+        n = original(self, scopes)
+        from sqlalchemy import text
+        return n + self.conn.execute(text(
+            "DELETE FROM marts.fact_shopee_product_monthly WHERE ref_month = '2026-06-01'")).rowcount
+    monkeypatch.setattr(pub.ManualExportExecutor, "delete_scope", apaga_junho_tambem)
+    prep = _staging_agosto(isolated)
+    with pg.connect() as conn:
+        res = pub.publish_scoped(prep.staging, pub.mark_partial(prep.staging, today=TODAY),
+                                 executor=pub.ManualExportExecutor(conn, run_id="r3"))
+    assert res["code"] == pub.EXIT_ROLLED_BACK, res
+    assert "FORA do escopo" in res["erro"]
+    assert _snapshot(pg, "ref_month = '2026-06-01'") == junho_antes
+    assert _snapshot(pg, "source = 'manual_export'") == manual_antes
+
+
+@needs_pg
+def test_source_mode_trocado_antes_da_mutacao_faz_recusar(pg, isolated):
+    from sqlalchemy import text
+    manual_antes = _snapshot(pg, "source = 'manual_export'")
+    prep = _staging_agosto(isolated)               # o preparo/CLI ja viu manual_export
+    with pg.begin() as c:                          # alguem liga a kokeshi na API
+        c.execute(text("UPDATE marts.shopee_product_source_mode SET source='api' WHERE brand='kokeshi'"))
+    with pg.connect() as conn:
+        res = pub.publish_scoped(prep.staging, pub.mark_partial(prep.staging, today=TODAY),
+                                 executor=pub.ManualExportExecutor(conn, run_id="r4"))
+    assert res["code"] == pub.EXIT_ROLLED_BACK, res
+    assert "procedencia ativa 'api'" in res["erro"]
+    assert _snapshot(pg, "source = 'manual_export'") == manual_antes
+
+
+@needs_pg
+def test_update_concorrente_do_source_mode_espera_o_commit(pg, isolated, monkeypatch):
+    """Depois da releitura com FOR SHARE, um UPDATE concorrente da linha de modo
+    nao consegue passar antes do commit da publicacao."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
+    outro = create_engine(PG_URL)
+    tentativa = {}
+    original = pub.ManualExportExecutor.delete_scope
+
+    def tenta_trocar_no_meio(self, scopes):
+        with outro.connect() as c:
+            c.execute(text("SET lock_timeout = '500ms'"))
+            try:
+                c.execute(text("UPDATE marts.shopee_product_source_mode SET source='api' WHERE brand='kokeshi'"))
+                c.commit()
+                tentativa["passou"] = True
+            except OperationalError:
+                c.rollback()
+                tentativa["passou"] = False
+        return original(self, scopes)
+    monkeypatch.setattr(pub.ManualExportExecutor, "delete_scope", tenta_trocar_no_meio)
+    prep = _staging_agosto(isolated)
+    with pg.connect() as conn:
+        res = pub.publish_scoped(prep.staging, pub.mark_partial(prep.staging, today=TODAY),
+                                 executor=pub.ManualExportExecutor(conn, run_id="r5"))
+    outro.dispose()
+    assert tentativa == {"passou": False}
+    assert res["code"] == pub.EXIT_OK, res
+    with pg.connect() as c:
+        assert c.execute(text("SELECT source FROM marts.shopee_product_source_mode "
+                              "WHERE brand='kokeshi'")).scalar() == "manual_export"
