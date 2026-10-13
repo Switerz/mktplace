@@ -7,6 +7,12 @@ interface Props {
   activeBucket: string | null;
   onSelectBucket: (bucket: string | null) => void;
   scopeNote?: string;
+  /**
+   * Preenchido quando o escopo NAO tem valor confiavel (nada carregado, ou so
+   * GMV zero). Os cards viram uma mensagem de ausencia em vez de "R$ 0K":
+   * ausencia de dado nunca e desenhada como venda zero.
+   */
+  unavailableReason?: string | null;
 }
 
 const BUCKET_STYLE: Record<string, { bg: string; border: string; text: string; bar: string; sub: string; ring: string }> = {
@@ -28,13 +34,24 @@ function fmtGmvShort(v: number): string {
  * torno de 50/30/15/5 por causa do produto que cruza a fronteira — isso e
  * esperado, nao um bug.
  */
-export default function ProductParetoSummary({ buckets, loading, activeBucket, onSelectBucket, scopeNote }: Props) {
+export default function ProductParetoSummary({ buckets, loading, activeBucket, onSelectBucket, scopeNote, unavailableReason }: Props) {
   if (loading && !buckets) {
     return (
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-4 border-b border-violet-50">
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 h-[104px] animate-pulse" />
         ))}
+      </div>
+    );
+  }
+
+  if (unavailableReason) {
+    return (
+      <div className="border-b border-violet-50 px-6 py-4" data-testid="pareto-unavailable">
+        <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+          {unavailableReason}
+        </p>
+        {scopeNote && <p className="pt-2 text-[11px] text-slate-400">{scopeNote}</p>}
       </div>
     );
   }

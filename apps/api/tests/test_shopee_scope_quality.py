@@ -21,8 +21,9 @@ from app.services import performance_service as svc
 
 
 class FakeResult:
-    def __init__(self, row):
+    def __init__(self, row, rows=None):
         self._row = row
+        self._rows = rows or []
 
     def mappings(self):
         return self
@@ -30,20 +31,27 @@ class FakeResult:
     def first(self):
         return self._row
 
+    def all(self):
+        return self._rows
+
 
 class FakeSession:
     """Devolve UMA linha de mapping e registra os parametros recebidos — a
-    prova do escopo consultado e o parametro que chegou ao SQL, nao o eco."""
+    prova do escopo consultado e o parametro que chegou ao SQL, nao o eco.
 
-    def __init__(self, row):
+    `brand_rows` responde a consulta por marca. Vazio (o default) = detalhe
+    nao medido, que preserva o comportamento anterior ao detalhe por marca."""
+
+    def __init__(self, row, brand_rows=None):
         self._row = row
+        self._brand_rows = brand_rows or []
         self.params: list[dict] = []
         self.sql: list[str] = []
 
     def execute(self, stmt, params=None):
         self.params.append(dict(params or {}))
         self.sql.append(str(stmt))
-        return FakeResult(self._row)
+        return FakeResult(self._row, self._brand_rows)
 
 
 THRESHOLD = float(settings.shopee_maturation_threshold)
@@ -530,6 +538,121 @@ def test_loaded_at_e_rotulado_como_publicacao_no_mart():
     import inspect
     fonte = inspect.getsource(svc.get_shopee_scope_quality)
     assert "publicacao NO MART" in fonte or "publicacao do mart" in fonte
+
+
+# ---------------------------------------------------------------------------
+# Detalhe por marca — SHOPEE-PRODUCTS-TRUTH-KOKESHI-2
+# ---------------------------------------------------------------------------
+
+PUB_API = datetime(2026, 10, 13, 14, 53, 50, tzinfo=timezone.utc)
+
+
+def brand_row(brand, source="api", rows=100, elig=100, loaded=PUB_API,
+              last=None, expected=True) -> dict:
+    return {"brand": brand, "active_source": source, "rows_present": rows,
+            "eligible_rows": elig, "loaded_at": loaded,
+            "last_published_at": last or loaded, "expected": expected}
+
+
+def quatro_api(**over):
+    return [brand_row(b, **over) for b in ("apice", "barbours", "lescent", "rituaria")]
+
+
+def qb(brand_rows, brand=None, **over):
+    db = FakeSession(row(**over), brand_rows)
+    return svc.get_shopee_scope_quality(db, brand, 2026, 8, today=TODAY), db
+
+
+def test_marca_com_linhas_so_de_gmv_zero_nao_conta_como_presente():
+    # ago/2026: kokeshi tem 63 linhas, todas GMV zero. Antes, `brands_present`
+    # contava a marca e o total parcial passava por "5 de 5".
+    kokeshi = brand_row("kokeshi", source="manual_export", rows=63, elig=0, loaded=PUB)
+    r, _ = qb(quatro_api() + [kokeshi], brands_present=4, brands_expected=5)
+    bc = r["brand_coverage"]
+    assert bc["missing"] == ["kokeshi"]
+    assert bc["total_is_partial"] is True
+    assert {b["brand"]: b["status"] for b in bc["brands"]}["kokeshi"] == "zero_value"
+    assert "Total PARCIAL" in _msg(r, "shopee_produtos_total_parcial")
+    msg = _msg(r, "shopee_produtos_marca_sem_valor_confiavel")
+    assert "kokeshi" in msg and "63 linhas" in msg and "05/08/2026" in msg
+    assert "nao venda zero" in msg
+    # a contagem seca nao duplica o que o aviso por marca ja nomeia
+    assert "shopee_produtos_cobertura_de_marcas" not in _codes(r)
+
+
+def test_a_data_geral_nao_esconde_a_marca_publicada_ha_mais_tempo():
+    kokeshi = brand_row("kokeshi", source="manual_export", rows=0, elig=0,
+                        loaded=None, last=PUB)
+    r, _ = qb(quatro_api() + [kokeshi], brands_present=4)
+    bc = r["brand_coverage"]
+    assert bc["oldest_published_at"] == PUB.isoformat()
+    assert bc["oldest_published_brands"] == ["kokeshi"]
+    assert bc["newest_published_at"] == PUB_API.isoformat()
+    k = [b for b in bc["brands"] if b["brand"] == "kokeshi"][0]
+    assert k["status"] == "absent" and k["published_in_scope"] is False
+    assert "ultima publicacao da fonte ativa em 05/08/2026" in _msg(
+        r, "shopee_produtos_marca_sem_valor_confiavel")
+
+
+def test_marca_na_api_com_produtos_nao_e_nunca_carregada():
+    # set/2026 apice: a auditoria do EXPORT nunca cobriu setembro, mas a marca
+    # le a API e tem 133 produtos. Afirmar "nunca carregada" era falso.
+    r, _ = qb([brand_row("apice")], brand="apice", ever_loaded=False,
+              brands_present=1, brands_expected=1)
+    assert r["source_status"] == "source_ever_loaded"
+    assert "shopee_produtos_fonte_nunca_carregada" not in _codes(r)
+
+
+def test_marca_na_api_sem_linha_continua_nunca_carregada():
+    r, _ = qb([brand_row("apice", rows=0, elig=0, loaded=None, last=PUB_API)],
+              brand="apice", ever_loaded=False, rows_present=0, eligible_rows=0,
+              prod_gmv=0.0, brands_present=0, brands_expected=1)
+    assert r["source_status"] == "source_never_loaded"
+
+
+def test_escopo_misto_nomeia_so_as_marcas_do_export_no_nunca_carregada():
+    kokeshi = brand_row("kokeshi", source="manual_export", rows=0, elig=0,
+                        loaded=None, last=PUB)
+    r, _ = qb(quatro_api() + [kokeshi], ever_loaded=False, brands_present=4)
+    msg = _msg(r, "shopee_produtos_fonte_nunca_carregada")
+    assert "kokeshi" in msg and "apice" not in msg
+
+
+def test_marca_sem_venda_na_diaria_nao_torna_o_total_parcial():
+    # Ausente E nao esperada: nao ha venda que o total esteja deixando de fora.
+    r, _ = qb(quatro_api() + [brand_row("kokeshi", source="manual_export", rows=0,
+                                        elig=0, loaded=None, last=PUB, expected=False)],
+              brands_present=4, brands_expected=4)
+    assert r["brand_coverage"]["missing"] == []
+    assert r["brand_coverage"]["total_is_partial"] is False
+    assert "shopee_produtos_total_parcial" not in _codes(r)
+
+
+def test_detalhe_nao_altera_nenhum_numero_medido():
+    sem, _ = q()
+    com, _ = qb(quatro_api() + [brand_row("kokeshi", source="manual_export")])
+    assert sem["measured"] == com["measured"]
+    assert sem["maturity_status"] == com["maturity_status"]
+
+
+def test_sem_detalhe_por_marca_o_campo_e_nulo_e_nao_cobertura_completa():
+    r, _ = q()
+    assert r["brand_coverage"] is None
+
+
+def test_payload_com_detalhe_valida_contra_o_schema():
+    r, _ = qb(quatro_api() + [brand_row("kokeshi", source="manual_export", rows=63,
+                                        elig=0, loaded=PUB)], brands_present=4)
+    perf_schemas.ScopeQuality.model_validate(r)
+
+
+def test_brands_present_conta_so_marca_com_gmv():
+    assert "COUNT(DISTINCT brand) FILTER (WHERE gmv > 0) AS brands_present" in svc._SCOPE_QUALITY_SQL
+
+
+def test_consulta_por_marca_le_a_procedencia_ativa():
+    # Ler a fato crua contaria a marca da API tambem pelo export.
+    assert svc._SH_PROD_ACTIVE_FACT in svc._SCOPE_BRANDS_SQL
 
 
 # ---------------------------------------------------------------------------
