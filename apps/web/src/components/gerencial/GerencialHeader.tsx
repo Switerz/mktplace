@@ -45,9 +45,9 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
     <>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
-          <h1 className="text-xl font-bold text-gray-900">Visão Gerencial</h1>
-          <p className="text-sm text-slate-500">Como estamos, onde investigar e para onde ir a seguir.</p>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h1 className="text-xl font-bold text-ink">Visão Gerencial</h1>
+          <p className="text-sm text-ink-muted">Como estamos, onde investigar e para onde ir a seguir.</p>
+          <p className="text-xs text-ink-muted mt-0.5 tabular-nums">
             Período: {periodLabel}
             {/* refreshed_at e badge saem SO' da resposta compativel com o filtro
                 atual — nunca da requisicao anterior. */}
@@ -57,7 +57,7 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
         {live != null ? (
           <LiveStatusBadge live={live} />
         ) : loading ? (
-          <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+          <span className="text-xs text-ink-faint bg-raised border border-line rounded-lg px-3 py-1.5 font-medium">
             Atualizando dados…
           </span>
         ) : null}
@@ -68,8 +68,10 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
           vertical e gap entre linhas quando os filtros embrulham —, nunca do
           alvo: reduzir o botao para preservar a altura da faixa desfaria
           exatamente o que este patch corrige. `top-0` e o comportamento do
-          V2-4 seguem intactos. */}
-      <div className="sticky top-0 z-30 -mx-6 px-6 py-1.5 bg-[#f8f7ff]/95 backdrop-blur supports-[backdrop-filter]:bg-[#f8f7ff]/80 border-b border-violet-100/70">
+          V2-4 seguem intactos.
+          UX-TORRE-2: fundo em token (`bg-canvas`), que acompanha o tema; no
+          mobile os controles recolhem dentro de `GlobalFilterControls`. */}
+      <div className="sticky top-0 z-30 -mx-6 px-6 py-1.5 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
         <div className="flex items-start justify-between gap-x-3 gap-y-1.5 flex-wrap">{children}</div>
       </div>
     </>

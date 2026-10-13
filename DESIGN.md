@@ -284,6 +284,11 @@ a **role**, and the role's value is defined once per theme in
 | Accent | `--tc-accent` (+ `-soft`, `-ink`, `-on`) | `#6d28d9` | `#a78bfa` |
 | Success / Warn / Critical | `--tc-ok` / `--tc-warn` / `--tc-crit` (+ `-soft`, `-ink`) | `#059669` / `#d97706` / `#e11d48` | `#34d399` / `#fbbf24` / `#fb7185` |
 | Series 1–6 | `--tc-chart-1…6` | violet, sky, slate, purple, cyan, slate-dark | the lighter counterpart of each |
+| Channel identity (UX-TORRE-2) | `--tc-canal-tiktok` / `-ml` / `-shopee` | `#8b5cf6` / `#06b6d4` / `#f97316` | `#a78bfa` / `#22d3ee` / `#fb923c` |
+
+Channel identity is not a series colour: TikTok is violet everywhere in the
+Torre, whatever its position in a list. A KPI marker is either a channel or a
+series colour — never `ok`/`warn`/`crit`, which need a business threshold.
 
 Tokens are stored as **RGB channels** (`23 18 38`), never as `#rrggbb`: Tailwind
 injects the alpha inside `rgb(var(--tc-ink) / <alpha-value>)`, so `text-ink/70`

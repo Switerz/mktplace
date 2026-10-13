@@ -54,9 +54,9 @@ export default function PageHeader({ title, subtitle, scopeLine, status, filters
       <div className="flex flex-col gap-1">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="min-w-0">
-            <h2 className="text-xl font-bold text-gray-900">{title}</h2>
-            <p className="text-sm text-slate-500">{subtitle}</p>
-            {scopeLine && <p className="text-xs text-slate-500 mt-0.5">{scopeLine}</p>}
+            <h2 className="text-xl font-bold text-ink">{title}</h2>
+            <p className="text-sm text-ink-muted">{subtitle}</p>
+            {scopeLine && <p className="text-xs text-ink-muted mt-0.5 tabular-nums">{scopeLine}</p>}
           </div>
           {status}
         </div>
@@ -67,8 +67,9 @@ export default function PageHeader({ title, subtitle, scopeLine, status, filters
         // container, para a barra fixa nao parecer um card solto. O fundo e'
         // quase opaco com blur de apoio: o conteudo passa por baixo sem vazar
         // leitura. `z-30` fica abaixo do dialogo (portalizado no body) e acima
-        // de todo o conteudo da pagina.
-        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-[#f8f7ff]/95 backdrop-blur supports-[backdrop-filter]:bg-[#f8f7ff]/80 border-b border-violet-100/70">
+        // de todo o conteudo da pagina. UX-TORRE-2: fundo em token, que
+        // acompanha o tema (e volta ao claro nas rotas ainda nao migradas).
+        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
           <div className="flex items-start justify-between gap-3 flex-wrap">{filters}</div>
         </div>
       )}

@@ -57,11 +57,11 @@ export default function DateRangeFilter({
   return (
     <div className="flex flex-col gap-2 min-w-0 max-w-full">
       <div className="flex items-center gap-2 min-w-0 flex-wrap">
-        <span className="text-xs text-slate-500 font-medium shrink-0">Período</span>
+        <span className="text-xs text-ink-faint font-medium shrink-0">Período</span>
         <div
           role="group"
           aria-label="Presets de período"
-          className="flex gap-1 bg-white border border-violet-100 rounded-xl p-1 shadow-sm overflow-x-auto min-w-0 max-w-full"
+          className="flex gap-0.5 bg-raised border border-line rounded-lg p-0.5 overflow-x-auto min-w-0 max-w-full"
         >
           {DATE_PRESET_OPTIONS.map((opt) => {
             const active = showCustom ? opt.value === "personalizado" : activePreset === opt.value;
@@ -74,8 +74,10 @@ export default function DateRangeFilter({
                 // 44x44px no runtime. `shrink-0` impede que o flex comprima o
                 // botao abaixo do alvo: a faixa transborda e o `overflow-x-auto`
                 // do proprio grupo rola, que e' o comportamento ja declarado ali.
-                className={`inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-3 rounded-lg text-sm font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 ${
-                  active ? "bg-violet-600 text-white shadow" : "text-violet-700 hover:bg-violet-50"
+                className={`inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-3 rounded-md text-sm whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ${
+                  active
+                    ? "bg-surface font-semibold text-ink shadow-sm ring-1 ring-inset ring-line-strong"
+                    : "text-ink-muted hover:bg-surface/70 hover:text-ink"
                 }`}
               >
                 {opt.label}
@@ -92,12 +94,12 @@ export default function DateRangeFilter({
           menor. `px-2` garante largura util junto ao texto.
         */}
         {!hideCompare && (
-          <label className="inline-flex items-center gap-2 min-h-11 px-2 text-xs text-slate-600 font-medium ml-1 select-none cursor-pointer">
+          <label className="inline-flex items-center gap-2 min-h-11 px-2 text-xs text-ink-muted font-medium ml-1 select-none cursor-pointer">
             <input
               type="checkbox"
               checked={compare}
               onChange={(e) => onCompareChange(e.target.checked)}
-              className="w-4 h-4 shrink-0 rounded border-violet-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              className="w-4 h-4 shrink-0 rounded accent-[rgb(var(--tc-accent))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
             Comparar com período anterior
           </label>
@@ -109,17 +111,17 @@ export default function DateRangeFilter({
             {/* Nos campos de data o alvo e' o proprio `<input>`, que abre o
                 seletor nativo: `min-h-11` vai nele, nao no label. Limites
                 `min`/`max` e a validacao de intervalo seguem intocados. */}
-            <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
+            <label className="flex items-center gap-1.5 text-xs text-ink-faint min-w-0">
               De
               <input
                 type="date"
                 value={dateFrom}
                 max={dateTo < todayIso ? dateTo : todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom: e.target.value, dateTo })}
-                className="min-h-11 border border-violet-200 rounded-lg px-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
+                className="min-h-11 border border-line-strong bg-surface rounded-lg px-2 text-sm text-ink [color-scheme:inherit] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent min-w-0 max-w-full"
               />
             </label>
-            <label className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0">
+            <label className="flex items-center gap-1.5 text-xs text-ink-faint min-w-0">
               Até
               <input
                 type="date"
@@ -127,12 +129,12 @@ export default function DateRangeFilter({
                 min={dateFrom}
                 max={todayIso}
                 onChange={(e) => e.target.value && applyCustomChange({ dateFrom, dateTo: e.target.value })}
-                className="min-h-11 border border-violet-200 rounded-lg px-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 min-w-0 max-w-full"
+                className="min-h-11 border border-line-strong bg-surface rounded-lg px-2 text-sm text-ink [color-scheme:inherit] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent min-w-0 max-w-full"
               />
             </label>
           </div>
           {error && (
-            <p role="alert" className="text-xs text-rose-600 font-medium">
+            <p role="alert" className="text-xs text-crit-ink font-medium">
               {error}
             </p>
           )}

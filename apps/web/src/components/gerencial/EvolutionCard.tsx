@@ -21,14 +21,14 @@ import type { MergedSeries, Reconciliation } from "@/lib/gerencial/trend-series"
 import type { TrendMetric } from "@/lib/gerencial/request-key";
 import type { TrendGranularity, TrendGranularityRequest } from "@/lib/api-client";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
-import { CHANNEL_STROKE } from "@/lib/gerencial/channel-colors";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import { fmtBrlFull, fmtNumber } from "@/lib/formatters";
 
 const EvolutionChart = dynamic(() => import("./EvolutionChart"), {
   ssr: false,
   loading: () => (
-    <div className="h-full w-full rounded-xl bg-violet-50/60 animate-pulse" role="status" aria-busy="true">
+    <div className="h-full w-full rounded-xl bg-accent-soft/60 animate-pulse" role="status" aria-busy="true">
       <span className="sr-only">Carregando gráfico…</span>
     </div>
   ),
@@ -133,14 +133,14 @@ export default function EvolutionCard({
   return (
     <section
       aria-labelledby="evolucao-heading"
-      className="h-full bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3"
+      className="h-full bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3"
     >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
-          <h2 id="evolucao-heading" className="text-sm font-semibold text-slate-700">
+          <h2 id="evolucao-heading" className="text-sm font-semibold text-ink-muted">
             Evolução de {METRIC_LABEL[metric]}
           </h2>
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-ink-faint">
             {grainIssue
               ? "Granularidade inconsistente entre os canais"
               : granularityCaption(granularity, merged.granularity)}
@@ -149,7 +149,7 @@ export default function EvolutionCard({
 
         <div className="flex items-center gap-2 flex-wrap shrink-0">
           <div
-            className="flex items-center gap-1 bg-violet-50/70 rounded-lg p-0.5"
+            className="flex items-center gap-1 bg-accent-soft/70 rounded-lg p-0.5"
             role="group"
             aria-label="Métrica do gráfico"
           >
@@ -159,8 +159,8 @@ export default function EvolutionCard({
                 type="button"
                 onClick={() => onMetricChange(m)}
                 aria-pressed={metric === m}
-                className={`min-h-11 px-3 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
-                  metric === m ? "bg-white text-violet-700 shadow-sm" : "text-slate-500 hover:text-violet-700"
+                className={`min-h-11 px-3 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                  metric === m ? "bg-surface text-accent shadow-sm" : "text-ink-faint hover:text-accent"
                 }`}
               >
                 {METRIC_LABEL[m]}
@@ -171,7 +171,7 @@ export default function EvolutionCard({
           {/* Granularidade: rotulo curto no mobile, completo a partir de sm.
               O nome acessivel usa sempre o rotulo completo. */}
           <div
-            className="flex items-center gap-1 bg-violet-50/70 rounded-lg p-0.5"
+            className="flex items-center gap-1 bg-accent-soft/70 rounded-lg p-0.5"
             role="group"
             aria-label="Granularidade do gráfico"
           >
@@ -182,10 +182,10 @@ export default function EvolutionCard({
                 onClick={() => onGranularityChange(opt.value)}
                 aria-pressed={granularity === opt.value}
                 aria-label={opt.label}
-                className={`min-h-11 px-2.5 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                className={`min-h-11 px-2.5 rounded-md text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                   granularity === opt.value
-                    ? "bg-white text-violet-700 shadow-sm"
-                    : "text-slate-500 hover:text-violet-700"
+                    ? "bg-surface text-accent shadow-sm"
+                    : "text-ink-faint hover:text-accent"
                 }`}
               >
                 <span className="sm:hidden">{opt.short}</span>
@@ -200,17 +200,17 @@ export default function EvolutionCard({
           o que mantem o final deste card alinhado ao item Pulso+Canais. */}
       <div className="flex-1 min-h-[240px] lg:min-h-[280px]">
         {loading ? (
-          <div className="h-full w-full rounded-xl bg-violet-50/60 animate-pulse" role="status" aria-busy="true">
+          <div className="h-full w-full rounded-xl bg-accent-soft/60 animate-pulse" role="status" aria-busy="true">
             <span className="sr-only">Carregando série…</span>
           </div>
         ) : mismatch ? (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-4">
-            <p className="text-sm font-semibold text-rose-700">Série não reconciliada</p>
-            <p className="text-xs text-rose-800 max-w-sm">
+            <p className="text-sm font-semibold text-crit-ink">Série não reconciliada</p>
+            <p className="text-xs text-crit-ink max-w-sm">
               A soma das séries por canal não bate com o total do período no mesmo escopo. O gráfico não é
               exibido para não sugerir um número que não fecha.
             </p>
-            <p className="text-xs text-slate-500 tabular-nums">
+            <p className="text-xs text-ink-faint tabular-nums">
               Séries {metric === "gmv" ? fmtBrlFull(reconciliation.seriesTotal) : fmtNumber(reconciliation.seriesTotal)} ·
               período {metric === "gmv" ? fmtBrlFull(reconciliation.referenceValue) : fmtNumber(reconciliation.referenceValue)}
             </p>
@@ -220,14 +220,14 @@ export default function EvolutionCard({
              Estado PROPRIO — dizer "sem série" seria falso, e desenhar buckets de
              graos diferentes no mesmo eixo seria pior. */
           <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-4">
-            <p className="text-sm font-semibold text-amber-800">Granularidades incompatíveis</p>
-            <p className="text-xs text-amber-900 max-w-sm">
+            <p className="text-sm font-semibold text-warn-ink">Granularidades incompatíveis</p>
+            <p className="text-xs text-warn-ink max-w-sm">
               {grainIssue.kind === "unsupported_request"
                 ? `A granularidade ${REQUESTED_SHORT[grainIssue.requested]} foi solicitada, mas a resposta veio em outro grão. O gráfico não é exibido para não sugerir uma escolha que não foi aplicada.`
                 : "Os canais selecionados responderam em grãos diferentes. Buckets de grãos distintos não representam os mesmos períodos, então a série combinada não é montada."}
             </p>
-            <p className="text-xs text-slate-500">{grainList}</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-ink-faint">{grainList}</p>
+            <p className="text-xs text-ink-faint">
               Nenhuma conversão é feita aqui. Recarregue ou selecione um grão explícito.
             </p>
           </div>
@@ -243,8 +243,8 @@ export default function EvolutionCard({
           />
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-1 text-center px-4">
-            <p className="text-sm text-slate-500">Sem série para o período e filtros selecionados.</p>
-            <p className="text-xs text-slate-400">Tente ampliar o intervalo de datas ou revisar canal e marca.</p>
+            <p className="text-sm text-ink-faint">Sem série para o período e filtros selecionados.</p>
+            <p className="text-xs text-ink-faint">Tente ampliar o intervalo de datas ou revisar canal e marca.</p>
           </div>
         )}
       </div>
@@ -262,37 +262,36 @@ export default function EvolutionCard({
                 aria-haspopup="dialog"
                 aria-pressed={highlightedChannel === channel}
                 aria-label={`${CHANNEL_LABEL[channel]} — abrir detalhe da série do canal`}
-                className={`inline-flex items-center gap-1.5 min-h-11 px-2 rounded-lg text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                className={`inline-flex items-center gap-1.5 min-h-11 px-2 rounded-lg text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                   highlightedChannel === channel
-                    ? "bg-violet-50 text-violet-800 font-semibold"
+                    ? "bg-accent-soft text-accent-ink font-semibold"
                     : // Hover NEUTRO no estado inativo, de proposito: cinza sobre
                       // violeta fica lavado, e reservar o violeta ao estado ativo
                       // respeita a disciplina de violeta do sistema.
-                      "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      "text-ink-muted hover:bg-raised hover:text-ink"
                 }`}
               >
                 <span
                   aria-hidden="true"
-                  className="w-2.5 h-0.5 rounded-full shrink-0"
-                  style={{ background: CHANNEL_STROKE[channel] }}
+                  className={`w-2.5 h-0.5 rounded-full shrink-0 ${CHANNEL_DOT[channel]}`}
                 />
                 {CHANNEL_LABEL[channel]}
               </button>
             </li>
           ))}
           {showTotal && (
-            <li className="inline-flex items-center gap-1.5 px-2 text-slate-700 font-medium">
-              <span aria-hidden="true" className="w-2.5 h-0.5 rounded-full shrink-0 bg-violet-900" />
+            <li className="inline-flex items-center gap-1.5 px-2 text-ink-muted font-medium">
+              <span aria-hidden="true" className="w-2.5 h-0.5 rounded-full shrink-0 bg-accent" />
               Total
             </li>
           )}
           {/* O periodo anterior entra na legenda como item SECUNDARIO, e o
               tracejado o distingue sem depender de cor. */}
           {showComparison && (
-            <li className="inline-flex items-center gap-1.5 px-2 text-slate-500">
+            <li className="inline-flex items-center gap-1.5 px-2 text-ink-faint">
               <span
                 aria-hidden="true"
-                className="w-3.5 h-0 shrink-0 border-t-2 border-dashed border-slate-400"
+                className="w-3.5 h-0 shrink-0 border-t-2 border-dashed border-line-strong"
               />
               Total do período anterior
             </li>
@@ -314,7 +313,7 @@ export default function EvolutionCard({
           />
         )}
         {!showTotal && merged.availableChannels.length > 1 && merged.failedChannels.length === 0 && (
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-ink-faint">
             Total por ponto não exibido: há períodos sem valor em todos os canais selecionados.
           </p>
         )}
@@ -325,7 +324,7 @@ export default function EvolutionCard({
         {cmp.requested && (
           <>
             {cmpLoading && (
-              <p className="text-xs text-slate-500" role="status" aria-busy="true">
+              <p className="text-xs text-ink-faint" role="status" aria-busy="true">
                 Carregando série do período anterior…
               </p>
             )}
@@ -359,14 +358,14 @@ export default function EvolutionCard({
               />
             )}
             {cmpPartial && cmp.emptyChannels.length === 0 && (
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-ink-faint">
                 Total do período anterior não exibido: há posições sem valor em todos os canais comparativos.
               </p>
             )}
             {/* A janela real e' exibida sempre que conhecida — inclusive quando a
                 comparacao voltou VAZIA: a janela existe, os registros nao. */}
             {cmp.dateFrom && cmp.dateTo && (
-              <p className="text-xs text-slate-500 tabular-nums">
+              <p className="text-xs text-ink-faint tabular-nums">
                 Período anterior: {cmp.dateFrom} a {cmp.dateTo}
                 {showComparison ? " — alinhado ao atual pela posição do ponto." : "."}
               </p>
@@ -375,12 +374,12 @@ export default function EvolutionCard({
         )}
 
         {reconciliation.status === "ok" && (
-          <p className="text-xs text-slate-500">Soma das séries reconciliada com o total do período.</p>
+          <p className="text-xs text-ink-faint">Soma das séries reconciliada com o total do período.</p>
         )}
         {/* `compareActive` sem comparacao pedida nas series indica transicao de
             estado; nao inventamos aviso para isso. */}
         {compareActive && !cmp.requested && (
-          <p className="text-xs text-slate-500">Preparando a série do período anterior…</p>
+          <p className="text-xs text-ink-faint">Preparando a série do período anterior…</p>
         )}
       </div>
     </section>

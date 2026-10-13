@@ -1431,7 +1431,8 @@ test("V24-3. a correcao nao introduziu fetch, estado, modal ou filtro novo", () 
   assert.match(src, /<LiveStatusBadge live=\{live\} \/>/);
   assert.match(src, /Atualizando dados…/);
   // o `<h1>` da Gerencial permanece: promover/rebaixar aqui mexeria na divida U6-04
-  assert.match(code, /<h1 className="text-xl font-bold text-gray-900">Visão Gerencial<\/h1>/);
+  // UX-TORRE-2: a cor virou token; nivel (`<h1>`) e escala (`text-xl`) seguem travados.
+  assert.match(code, /<h1 className="text-xl font-bold text-ink">Visão Gerencial<\/h1>/);
 });
 
 test("V24-4. PageHeader das outras dez rotas nao regrediu", () => {
@@ -1453,5 +1454,6 @@ test("V24-5. os ticks semanais do V2-3 seguem intactos", () => {
   assert.match(chart, /const interval = "preserveStartEnd" as const;/);
   assert.match(chart, /minTickGap=\{20\}/);
   assert.match(chart, /margin=\{\{ top: 6, right: 28, left: 0, bottom: 0 \}\}/);
-  assert.match(chart, /tick=\{\{ fontSize: 12, fill: "#64748b" \}\}/);
+  // UX-TORRE-2: a cor do eixo vem do tema do grafico; os 12px seguem travados.
+  assert.match(chart, /tick=\{\{ fontSize: 12, fill: tema\.eixo \}\}/);
 });

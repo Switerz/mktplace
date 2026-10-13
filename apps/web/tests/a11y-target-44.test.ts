@@ -321,7 +321,8 @@ test("V33 DateRangeFilter cumpre 44px em preset, comparacao e datas", () => {
   // o alvo do checkbox e o LABEL, que e' o que recebe o clique
   assert.match(DRF, /<label className="inline-flex items-center gap-2 min-h-11 px-2/);
   // e os campos de data crescem no proprio input
-  assert.equal((DRF.match(/className="min-h-11 border border-violet-200/g) ?? []).length, 2);
+  // UX-TORRE-2: a borda virou token (`line-strong`); o alvo de 44px no input segue igual
+  assert.equal((DRF.match(/className="min-h-11 border border-line-strong/g) ?? []).length, 2);
 });
 
 test("V33 aria-pressed, labels e validacao de data seguem intactos", () => {

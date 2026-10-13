@@ -639,7 +639,11 @@ test("V22-20. a linha anterior e secundaria e nao depende de cor", () => {
   const cmpLine = chart.slice(chart.indexOf("showComparisonTotal && ("), chart.indexOf("{channels.map"));
   assert.match(cmpLine, /strokeDasharray="6 4"/, "tracejado distingue sem depender de cor");
   assert.match(cmpLine, /dataKey="comparison\.total"/, "UMA linha: o total anterior");
-  assert.match(cmpLine, /stroke="#94a3b8"/, "neutra, não compete com as séries por canal");
+  // UX-TORRE-2: a cor vem do tema do grafico. A garantia continua: a linha e'
+  // NEUTRA (cinza, fora da paleta de canais) — e no claro e' o mesmo hex de antes.
+  assert.match(cmpLine, /stroke=\{tema\.referencia\}/, "neutra, não compete com as séries por canal");
+  const paleta = read("src/lib/chart-theme.ts");
+  assert.match(paleta, /const CLARO[\s\S]*?referencia: "#94a3b8"/, "no claro, o mesmo cinza de antes");
   // nao viraram seis series equivalentes: a comparacao por canal nao e desenhada
   assert.doesNotMatch(chart, /dataKey=\{`comparison\.values\./);
 });

@@ -32,7 +32,7 @@ import { PRODUCTS_SCOPE_NOTE } from "@/lib/gerencial/brand-matrix";
 import type { VolumeHealthRow } from "@/lib/gerencial/volume-health";
 import { CANCEL_RATE_FORMULA, NO_CROSS_CHANNEL_RANKING } from "@/lib/gerencial/volume-health";
 
-const SECTION_LABEL = "text-xs font-semibold text-slate-500 uppercase tracking-wide";
+const SECTION_LABEL = "text-xs font-semibold text-ink-faint uppercase tracking-wide";
 
 /** Escopo do ponto por grao. O grao semanal (Gate V2-2) nao e' "competência". */
 const BUCKET_SCOPE_LABEL: Record<"day" | "week" | "month", string> = {
@@ -100,7 +100,7 @@ export function ConfidenceDrilldownContent({
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>Defasagem e avisos</p>
         {!data.warningsChecked ? (
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-ink-muted">
             O resumo executivo não respondeu nesta carga, então defasagem e avisos de dado{" "}
             <strong>não foram verificados</strong>. Isso não é o mesmo que ausência de avisos.
           </p>
@@ -112,7 +112,7 @@ export function ConfidenceDrilldownContent({
             reference={data.sources.length ? `Fontes: ${data.sources.join(", ")}` : null}
           />
         ) : (
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-ink-faint">
             Nenhum aviso de defasagem para o período — o que não é o mesmo que garantir que toda fonte está
             atualizada até hoje.
           </p>
@@ -123,14 +123,14 @@ export function ConfidenceDrilldownContent({
         <div className="flex flex-col gap-1.5">
           <p className={SECTION_LABEL}>Avisos ativos ({items.length})</p>
           {items.length === 0 ? (
-            <p className="text-xs text-slate-500">Nenhum aviso de confiança no dado neste período.</p>
+            <p className="text-xs text-ink-faint">Nenhum aviso de confiança no dado neste período.</p>
           ) : (
             <ul className="flex flex-col gap-1.5">
               {items.map((item) => (
-                <li key={item.key} className="text-xs text-slate-700 leading-snug">
+                <li key={item.key} className="text-xs text-ink-muted leading-snug">
                   {item.message}
                   {(item.source || item.lastDate) && (
-                    <span className="block text-xs text-slate-500 tabular-nums">
+                    <span className="block text-xs text-ink-faint tabular-nums">
                       {item.source && <>fonte {item.source}</>}
                       {item.lastDate && <> · até {item.lastDate}</>}
                       {item.thresholdDays != null && <> · limiar {item.thresholdDays}d</>}
@@ -271,11 +271,11 @@ export function TrendBucketDrilldownContent({
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <p className="text-2xl font-bold text-gray-900 tabular-nums leading-none">
+        <p className="text-2xl font-bold text-ink tabular-nums leading-none">
           {bucket.total != null ? (
             formatMetric(bucket.total, metric)
           ) : (
-            <span className="text-slate-400">Total indisponível</span>
+            <span className="text-ink-faint">Total indisponível</span>
           )}
         </p>
         <div className="mt-1">
@@ -285,7 +285,7 @@ export function TrendBucketDrilldownContent({
             refreshedAt={null}
           />
         </div>
-        <p className="text-xs text-slate-500 mt-0.5">
+        <p className="text-xs text-ink-faint mt-0.5">
           Ponto {position} de {merged.buckets.length} na série de {metricLabel(metric)}
         </p>
       </div>
@@ -307,7 +307,7 @@ export function TrendBucketDrilldownContent({
           })}
         </ul>
         {bucket.total == null && (
-          <p className="text-xs text-slate-500 mt-1">
+          <p className="text-xs text-ink-faint mt-1">
             O total não é exibido porque pelo menos um canal selecionado não tem valor neste ponto.
           </p>
         )}
@@ -318,7 +318,7 @@ export function TrendBucketDrilldownContent({
       {bucket.comparison && (
         <div className="flex flex-col gap-1">
           <p className={SECTION_LABEL}>Mesma posição no período anterior</p>
-          <p className="text-xs text-slate-500 tabular-nums">
+          <p className="text-xs text-ink-faint tabular-nums">
             {bucket.comparison.label} · {bucket.comparison.date}
           </p>
           <ul className="flex flex-col gap-1">
@@ -335,14 +335,14 @@ export function TrendBucketDrilldownContent({
             })}
           </ul>
           {bucket.comparison.total == null && (
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-ink-faint mt-1">
               Total anterior não exibido: falta valor em pelo menos um canal comparativo nesta posição.
             </p>
           )}
           {/* Janela do CONTRATO, nao derivada dos buckets: o primeiro bucket
               semanal comeca antes dela. */}
           {merged.comparison.dateFrom && merged.comparison.dateTo && (
-            <p className="text-xs text-slate-500 mt-1 tabular-nums">
+            <p className="text-xs text-ink-faint mt-1 tabular-nums">
               Janela anterior completa: {merged.comparison.dateFrom} a {merged.comparison.dateTo}.
             </p>
           )}
@@ -353,11 +353,11 @@ export function TrendBucketDrilldownContent({
         <p className={SECTION_LABEL}>Detalhe {BUCKET_SCOPE_LABEL[merged.granularity]}</p>
 
         {anyLoading ? (
-          <p className="text-xs text-slate-500" role="status" aria-busy="true">
+          <p className="text-xs text-ink-faint" role="status" aria-busy="true">
             Carregando detalhe…
           </p>
         ) : bothUnavailable ? (
-          <p className="text-xs text-rose-700">
+          <p className="text-xs text-crit-ink">
             Detalhe indisponível nesta carga: nem o agregado nem o desempenho por marca responderam. Os valores
             por canal acima vêm da série já carregada e continuam válidos.
           </p>
@@ -369,12 +369,12 @@ export function TrendBucketDrilldownContent({
                 <EvidenceRow label="Pedidos do recorte" value={fmtNumber(state.overview!.orders)} />
               </ul>
             ) : (
-              <p className="text-xs text-slate-500">Agregado do recorte indisponível nesta carga.</p>
+              <p className="text-xs text-ink-faint">Agregado do recorte indisponível nesta carga.</p>
             )}
 
             {brandsUsable && state.brands!.filter((b) => b.total_gmv > 0).length > 0 ? (
               <>
-                <p className="text-xs text-slate-500 mt-1.5">Por marca</p>
+                <p className="text-xs text-ink-faint mt-1.5">Por marca</p>
                 <ul className="flex flex-col gap-1">
                   {state.brands!
                     .filter((b) => b.total_gmv > 0)
@@ -385,7 +385,7 @@ export function TrendBucketDrilldownContent({
                 </ul>
               </>
             ) : (
-              <p className="text-xs text-slate-500 mt-1.5">
+              <p className="text-xs text-ink-faint mt-1.5">
                 Desempenho por marca indisponível nesta carga.
               </p>
             )}
@@ -413,15 +413,15 @@ export function TrendBucketDrilldownContent({
       <button
         type="button"
         onClick={() => onPinRange(range.dateFrom, range.dateTo)}
-        className="inline-flex items-center min-h-11 self-start text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+        className="inline-flex items-center min-h-11 self-start text-sm font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
       >
         Fixar {range.label} como período →
       </button>
-      <p className="text-xs text-slate-500 -mt-2 tabular-nums">
+      <p className="text-xs text-ink-faint -mt-2 tabular-nums">
         Aplicará {range.dateFrom} a {range.dateTo}. Canais, marcas e comparação são preservados; apenas o
         intervalo de datas muda.
         {range.clamped && (
-          <span className="block text-slate-500">
+          <span className="block text-ink-faint">
             Intervalo cortado pelo período selecionado: este bucket é parcial na borda do filtro.
           </span>
         )}
@@ -472,12 +472,12 @@ export function ChannelSeriesDrilldownContent({
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>Disponibilidade</p>
         {failed ? (
-          <p className="text-xs text-amber-800">
+          <p className="text-xs text-warn-ink">
             A série deste canal não respondeu nesta carga. As demais séries continuam no gráfico e o total por
             ponto não é apresentado como completo.
           </p>
         ) : empty ? (
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-ink-muted">
             A fonte respondeu, mas não há registros deste canal no período — ausência de dado, não zero.
           </p>
         ) : (
@@ -547,7 +547,7 @@ export function MatrixChannelDrilldownContent({
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <p className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{fmtBrlFull(total)}</p>
+        <p className="text-2xl font-bold text-ink tabular-nums leading-none">{fmtBrlFull(total)}</p>
         <div className="mt-1">
           <DrilldownContextLine
             leading={`${CHANNEL_LABEL[channel]} · GMV do canal`}
@@ -617,7 +617,7 @@ export function ConcentrationDrilldownContent({
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <p className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{fmtBrlFull(entry.gmv)}</p>
+        <p className="text-2xl font-bold text-ink tabular-nums leading-none">{fmtBrlFull(entry.gmv)}</p>
         <div className="mt-1">
           <DrilldownContextLine
             leading={`${entry.label} · ${position}ª no período`}
@@ -657,7 +657,7 @@ export function ConcentrationDrilldownContent({
         <DrilldownCta href={brandHref}>Abrir visão completa da marca →</DrilldownCta>
         <div className="flex flex-col gap-0.5">
           <DrilldownCta href={produtosHref}>Ver produtos desta seleção →</DrilldownCta>
-          <p className="text-xs text-slate-500">{PRODUCTS_SCOPE_NOTE}.</p>
+          <p className="text-xs text-ink-faint">{PRODUCTS_SCOPE_NOTE}.</p>
         </div>
       </div>
     </div>
@@ -685,9 +685,9 @@ export function VolumeHealthDrilldownContent({
 
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>Definição</p>
-        <p className="text-slate-700">{row.ordersDefinition}</p>
-        <p className="text-xs text-slate-500 font-mono mt-1">{CANCEL_RATE_FORMULA}</p>
-        <p className="text-xs text-slate-500 mt-1">
+        <p className="text-ink-muted">{row.ordersDefinition}</p>
+        <p className="text-xs text-ink-faint font-mono mt-1">{CANCEL_RATE_FORMULA}</p>
+        <p className="text-xs text-ink-faint mt-1">
           A taxa exibida é a servida pelo endpoint de qualidade. A Torre não a recalcula com outro denominador.
         </p>
       </div>
@@ -731,7 +731,7 @@ export function VolumeHealthDrilldownContent({
 
       <div className="flex flex-col gap-1.5">
         <p className={SECTION_LABEL}>Fonte e limitações</p>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-ink-faint">
           GMV vem do agregado do período; contagens e taxas vêm do endpoint de qualidade, no mesmo escopo de
           canal, marca e datas.
         </p>
@@ -771,7 +771,7 @@ export function CommercialAttentionDrilldownContent({
 
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>Diagnóstico</p>
-        <p className="text-slate-700">{item.description}</p>
+        <p className="text-ink-muted">{item.description}</p>
       </div>
 
       <div className="flex flex-col gap-1">
@@ -799,7 +799,7 @@ export function CommercialAttentionDrilldownContent({
 
       <div className="flex flex-col gap-1.5">
         <p className={SECTION_LABEL}>Evidência</p>
-        <p className="text-xs text-slate-500 tabular-nums">
+        <p className="text-xs text-ink-faint tabular-nums">
           {item.source ? `Fonte: ${item.source}` : "Fonte não declarada pelo resumo executivo"}
           {item.lastDate && ` · até ${item.lastDate}`}
         </p>
@@ -828,7 +828,7 @@ export function DataWarningDrilldownContent({
 
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>O que está indisponível</p>
-        <p className="text-slate-700">{item.message}</p>
+        <p className="text-ink-muted">{item.message}</p>
       </div>
 
       <div className="flex flex-col gap-1">
@@ -851,7 +851,7 @@ export function DataWarningDrilldownContent({
 
       <div className="flex flex-col gap-1">
         <p className={SECTION_LABEL}>Impacto interpretativo</p>
-        <p className="text-xs text-slate-600">
+        <p className="text-xs text-ink-muted">
           Um aviso de dado descreve o que a fonte não sustenta neste período. Ele não é um diagnóstico comercial
           e não deve ser lido como queda de desempenho.
         </p>
@@ -881,7 +881,7 @@ export function MovementDrilldownContent({
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div>
-        <p className={`text-2xl font-bold tabular-nums leading-none ${up ? "text-emerald-600" : "text-rose-600"}`}>
+        <p className={`text-2xl font-bold tabular-nums leading-none ${up ? "text-ok-ink" : "text-crit-ink"}`}>
           {up ? "+" : "−"}
           {fmtBrlFull(Math.abs(movement.deltaAbs))}
         </p>
@@ -945,8 +945,8 @@ export function MatrixCellUnavailableContent({
   if (status === "loading") {
     return (
       <div className="flex flex-col gap-2 text-sm" role="status" aria-busy="true">
-        <p className="text-slate-700">Verificando sinais e referências comparativas deste canal…</p>
-        <p className="text-xs text-slate-500">
+        <p className="text-ink-muted">Verificando sinais e referências comparativas deste canal…</p>
+        <p className="text-xs text-ink-faint">
           O GMV, a participação e a variação de {scope} já estão na matriz e vêm do desempenho por marca.
         </p>
       </div>
@@ -956,8 +956,8 @@ export function MatrixCellUnavailableContent({
   if (status === "error") {
     return (
       <div className="flex flex-col gap-2 text-sm">
-        <p className="text-slate-700">Fonte de sinais e referências indisponível nesta carga.</p>
-        <p className="text-xs text-slate-500">
+        <p className="text-ink-muted">Fonte de sinais e referências indisponível nesta carga.</p>
+        <p className="text-xs text-ink-faint">
           Ela fornece os sinais de eficiência e as referências de mediana e p75 do próprio canal. O GMV, a
           participação e a variação de {scope} continuam válidos, pois vêm do desempenho por marca.
         </p>
@@ -969,10 +969,10 @@ export function MatrixCellUnavailableContent({
   if (demoMode) {
     return (
       <div className="flex flex-col gap-2 text-sm">
-        <p className="text-slate-700">
+        <p className="text-ink-muted">
           O modo demonstração não modela Ads, custos, frete, sinais ou medianas por marca × canal.
         </p>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-ink-faint">
           Por isso não há detalhe comparativo para {scope} nesta sessão. Com a API respondendo, este diálogo
           traz o diagnóstico completo do canal.
         </p>
@@ -982,8 +982,8 @@ export function MatrixCellUnavailableContent({
 
   return (
     <div className="flex flex-col gap-2 text-sm">
-      <p className="text-slate-700">Não há registro comparativo para {scope} no período.</p>
-      <p className="text-xs text-slate-500">
+      <p className="text-ink-muted">Não há registro comparativo para {scope} no período.</p>
+      <p className="text-xs text-ink-faint">
         A fonte de canais respondeu normalmente — apenas não existe linha desta marca neste canal no período
         selecionado. Isso não indica falha de carga.
       </p>

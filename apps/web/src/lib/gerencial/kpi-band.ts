@@ -153,7 +153,7 @@ export function buildKpiBand(
     coverageNote: null,
     channelValues: null,
     highlightChannel: null,
-    accent: "bg-violet-600",
+    accent: "bg-chart-1",
   };
 
   const orders: KpiDescriptor = {
@@ -169,7 +169,7 @@ export function buildKpiBand(
     coverageNote: null,
     channelValues: null,
     highlightChannel: null,
-    accent: "bg-cyan-500",
+    accent: "bg-chart-2",
   };
 
   const ticket = overview ? avgTicketDisplay(overview) : { value: null, reason: null };
@@ -185,7 +185,7 @@ export function buildKpiBand(
     coverageNote: null,
     channelValues: null,
     highlightChannel: null,
-    accent: "bg-amber-500",
+    accent: "bg-chart-4",
   };
 
   let adsValue: string | null = null;
@@ -210,7 +210,7 @@ export function buildKpiBand(
     coverageNote: adsCoverageNote(channels),
     channelValues: null,
     highlightChannel: null,
-    accent: "bg-emerald-500",
+    accent: "bg-chart-5",
   };
 
   const roasChannels: ChannelValue[] = [];
@@ -250,7 +250,7 @@ export function buildKpiBand(
     coverageNote: null,
     channelValues: roasChannels.length ? roasChannels : null,
     highlightChannel: compatibleWithValue.length === 1 ? compatibleWithValue[0].channel : null,
-    accent: compatibleWithValue.length ? "bg-violet-500" : "bg-slate-300",
+    accent: compatibleWithValue.length ? "bg-chart-3" : "bg-line",
   };
 
   return [gmv, orders, avgTicket, adSpend, roas];

@@ -69,17 +69,17 @@ export default function TableScrollHint({ children, className = "" }: Props) {
       {edges.canScrollLeft && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-white to-transparent"
+          className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-surface to-transparent"
         />
       )}
       {edges.canScrollRight && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-white to-transparent"
+          className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-surface to-transparent"
         />
       )}
       {edges.canScrollRight && (
-        <p aria-hidden="true" className="sm:hidden text-center text-xs text-slate-400 pt-1">
+        <p aria-hidden="true" className="sm:hidden text-center text-xs text-ink-faint pt-1">
           ← arraste para ver mais →
         </p>
       )}

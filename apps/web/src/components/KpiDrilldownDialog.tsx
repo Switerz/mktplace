@@ -2,8 +2,10 @@
 
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
+import { usePathname } from "next/navigation";
 
 import { alvoDoFocusTrap, FOCUSABLE_SELECTOR } from "@/lib/focus-trap";
+import { CLASSE_TEMA_CLARO_FIXO, rotaTematizada } from "@/lib/theme";
 
 interface KpiDrilldownDialogProps {
   open: boolean;
@@ -32,6 +34,11 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
   const panelRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  // UX-TORRE-2: o portal sai da subarvore da rota e, com ela, da barreira de
+  // tema. Numa rota ainda nao migrada o dialogo carrega a mesma classe que a
+  // `main` dela — senao abriria escuro com conteudo desenhado em literais
+  // claros.
+  const tematizada = rotaTematizada(usePathname());
 
   // Foco inicial no botao de fechar; devolve ao elemento que abriu o
   // dialogo (o KpiCard clicado) ao fechar. Torna o shell inteiro inert e
@@ -103,12 +110,13 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
   if (!open || typeof document === "undefined") return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-50">
+    <div className={`fixed inset-0 z-50 ${tematizada ? "" : CLASSE_TEMA_CLARO_FIXO}`}>
       {/* Camada escurecida puramente visual — o container seguinte cobre
           toda a viewport por cima dela e e' quem realmente recebe o clique
           (Finding 1, rodada de correcao U2); por isso o fechamento fica
-          nele, nao aqui. */}
-      <div className="absolute inset-0 bg-slate-900/40" aria-hidden="true" />
+          nele, nao aqui. Veu NEUTRO nos dois temas: um token de tinta
+          clarearia a tela no escuro, onde a tinta e' clara. */}
+      <div className="absolute inset-0 bg-[rgb(0_0_0/0.45)]" aria-hidden="true" />
       <div
         className="absolute inset-0 flex items-end sm:items-center justify-center sm:p-4"
         onClick={(e) => {
@@ -123,16 +131,16 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
-          className="relative bg-white w-full sm:max-w-lg sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden"
+          className="relative bg-surface w-full sm:max-w-lg sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden"
         >
-          <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-violet-100 shrink-0">
-            <h2 id={titleId} className="text-sm font-bold text-gray-900">{title}</h2>
+          <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-line shrink-0">
+            <h2 id={titleId} className="text-sm font-bold text-ink">{title}</h2>
             <button
               ref={closeButtonRef}
               type="button"
               onClick={onClose}
               aria-label="Fechar detalhes"
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-violet-50 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 shrink-0"
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-ink-faint hover:bg-accent-soft hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent shrink-0"
             >
               <CloseIcon />
             </button>

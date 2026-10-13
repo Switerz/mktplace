@@ -55,6 +55,12 @@ const config: Config = {
           5: token("chart-5"),
           6: token("chart-6"),
         },
+        // Identidade de canal (UX-TORRE-2): cor por CANAL, nunca por posicao.
+        canal: {
+          tiktok: token("canal-tiktok"),
+          ml: token("canal-ml"),
+          shopee: token("canal-shopee"),
+        },
         // Escala literal herdada, preservada para as rotas ainda nao migradas.
         brand: {
           50: "#f5f3ff",

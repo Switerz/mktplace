@@ -21,9 +21,9 @@ import {
 import KpiDrilldownDialog from "./KpiDrilldownDialog";
 
 const TONE_CLASS: Record<string, string> = {
-  value: "text-slate-900",
-  muted: "text-slate-400",
-  warning: "text-amber-700",
+  value: "text-ink",
+  muted: "text-ink-faint",
+  warning: "text-warn-ink",
 };
 
 interface Props {
@@ -38,8 +38,8 @@ interface Props {
 
 function Moldura({ children }: { children: React.ReactNode }) {
   return (
-    <section className="bg-white rounded-2xl shadow-sm border border-violet-100 p-5">
-      <h2 className="text-sm font-semibold text-slate-700 mb-2">
+    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+      <h2 className="text-sm font-semibold text-ink-muted mb-2">
         {DISCOUNTS_BLOCK_TITLE}
       </h2>
       {children}
@@ -64,17 +64,17 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   if (phase === "loading" || phase === "neutral") {
     return (
       <section
-        className="bg-white rounded-2xl shadow-sm border border-violet-100 p-5"
+        className="bg-surface rounded-2xl shadow-sm border border-line p-5"
         aria-busy="true"
       >
         {/* O titulo fica FORA da animacao: uma regiao `aria-busy` sem nome
             acessivel anuncia "carregando" sem dizer o que carrega. */}
-        <h2 className="text-sm font-semibold text-slate-700 mb-4">
+        <h2 className="text-sm font-semibold text-ink-muted mb-4">
           {DISCOUNTS_BLOCK_TITLE}
         </h2>
         <div className="animate-pulse">
-          <div className="h-8 w-full bg-violet-50 rounded mb-2" />
-          <div className="h-8 w-full bg-violet-50 rounded" />
+          <div className="h-8 w-full bg-accent-soft rounded mb-2" />
+          <div className="h-8 w-full bg-accent-soft rounded" />
         </div>
       </section>
     );
@@ -83,7 +83,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   if (phase === "unavailable") {
     return (
       <Moldura>
-        <p className="text-sm text-amber-700">
+        <p className="text-sm text-warn-ink">
           Não foi possível carregar os dados de canais nesta consulta, então os
           descontos de pedido também não estão disponíveis.
         </p>
@@ -96,7 +96,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
     // Mensagem estatica, nunca R$ 0,00 — que seria lido como "sem desconto".
     return (
       <Moldura>
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-ink-faint">
           Descontos de pedido indisponíveis para o período e filtros
           selecionados.
         </p>
@@ -110,16 +110,16 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   const notaCobertura = coverageNote(block);
 
   return (
-    <section className="bg-white rounded-2xl shadow-sm border border-violet-100 p-5">
+    <section className="bg-surface rounded-2xl shadow-sm border border-line p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
-        <h2 className="text-sm font-semibold text-slate-700">
+        <h2 className="text-sm font-semibold text-ink-muted">
           {DISCOUNTS_BLOCK_TITLE}
         </h2>
         {view.hasRows && (
           <button
             type="button"
             onClick={() => setAberto(true)}
-            className="text-xs font-medium text-violet-700 hover:text-violet-900 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded min-h-[44px] min-w-[44px] px-2"
+            className="text-xs font-medium text-accent hover:text-accent-ink underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded min-h-[44px] min-w-[44px] px-2"
           >
             Ver detalhe e cancelados
           </button>
@@ -127,33 +127,33 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
       </div>
 
       {view.windowLabel && (
-        <p className="text-xs text-slate-500 mb-1">
+        <p className="text-xs text-ink-faint mb-1">
           Período: {view.windowLabel}
           {view.dayCountLabel ? ` · ${view.dayCountLabel}` : ""}
         </p>
       )}
       {/* Frescor PROPRIO do bloco, nunca o `refreshedAt` geral da pagina. */}
       {view.freshnessLabel && (
-        <p className="text-xs text-slate-500 mb-2">{view.freshnessLabel}</p>
+        <p className="text-xs text-ink-faint mb-2">{view.freshnessLabel}</p>
       )}
 
       {view.warnings.length > 0 && (
         <ul className="mb-3 flex flex-col gap-1">
           {view.warnings.map((aviso) => (
-            <li key={aviso} className="text-xs text-amber-700">
+            <li key={aviso} className="text-xs text-warn-ink">
               {aviso}
             </li>
           ))}
         </ul>
       )}
       {notaCobertura && !view.warnings.length && (
-        <p className="text-xs text-amber-700 mb-3">{notaCobertura}</p>
+        <p className="text-xs text-warn-ink mb-3">{notaCobertura}</p>
       )}
       {/* O limite acompanha a cobertura COMPLETA tambem: `complete` significa
           grade observada completa, e sem esta linha o leitor concluiria
           "ingestao comprovada". */}
       {view.hasRows && !view.coverageIsIncomplete && (
-        <p className="text-xs text-slate-500 mb-3">{COVERAGE_LIMIT_COPY}</p>
+        <p className="text-xs text-ink-faint mb-3">{COVERAGE_LIMIT_COPY}</p>
       )}
 
       {view.emptyMessage ? (
@@ -171,7 +171,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
               separadamente e não somados.
             </caption>
             <thead>
-              <tr className="text-left text-xs text-slate-500 border-b border-violet-100">
+              <tr className="text-left text-xs text-ink-faint border-b border-line">
                 <th scope="col" className="py-2 pr-4 font-medium">Marca</th>
                 <th scope="col" className="py-2 pr-4 font-medium text-right whitespace-nowrap">
                   Pedidos comerciais
@@ -197,12 +197,12 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
               {linhas.map((linha) => (
                 <tr
                   key={linha.brandKey}
-                  className="border-b border-violet-50 last:border-0"
+                  className="border-b border-line last:border-0"
                 >
-                  <th scope="row" className="py-2 pr-4 font-medium text-slate-800 text-left">
+                  <th scope="row" className="py-2 pr-4 font-medium text-ink text-left">
                     {linha.brand}
                   </th>
-                  <td className="py-2 pr-4 text-right tabular-nums text-slate-600 whitespace-nowrap">
+                  <td className="py-2 pr-4 text-right tabular-nums text-ink-muted whitespace-nowrap">
                     {linha.commercialOrders}
                   </td>
                   {linha.cells.map((c) => (
@@ -228,7 +228,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
         </div>
       )}
 
-      <div className="mt-4 pt-3 border-t border-violet-50 flex flex-col gap-1 text-xs text-slate-500">
+      <div className="mt-4 pt-3 border-t border-line flex flex-col gap-1 text-xs text-ink-faint">
         <p>{SELLER_COPY}</p>
         <p>{SUBSIDY_COPY}</p>
         <p>{RETROACTIVE_COPY}</p>
@@ -244,33 +244,33 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
         title={DISCOUNTS_BLOCK_TITLE}
       >
         {view.freshnessLabel && (
-          <p className="text-xs text-slate-500">{view.freshnessLabel}</p>
+          <p className="text-xs text-ink-faint">{view.freshnessLabel}</p>
         )}
         {linhas.map((linha) => (
           <div
             key={linha.brandKey}
-            className="border-b border-violet-50 pb-3 last:border-0"
+            className="border-b border-line pb-3 last:border-0"
           >
-            <p className="text-sm font-semibold text-slate-800">
+            <p className="text-sm font-semibold text-ink">
               {linha.brand} · {linha.commercialOrders} pedidos comerciais
             </p>
             <dl className="mt-1 flex flex-col gap-0.5">
               {linha.cells.map((c) => (
                 <div key={c.key} className="flex justify-between gap-4 text-sm">
-                  <dt className="text-slate-600">{c.label}</dt>
+                  <dt className="text-ink-muted">{c.label}</dt>
                   <dd className={`tabular-nums ${TONE_CLASS[c.cell.tone]}`}>
                     {c.cell.text}
                   </dd>
                 </div>
               ))}
               <div className="flex justify-between gap-4 text-sm">
-                <dt className="text-slate-600">% financiado pela marca</dt>
+                <dt className="text-ink-muted">% financiado pela marca</dt>
                 <dd className={`tabular-nums ${TONE_CLASS[linha.sellerRate.tone]}`}>
                   {linha.sellerRate.text}
                 </dd>
               </div>
               <div className="flex justify-between gap-4 text-sm">
-                <dt className="text-slate-600">% financiado pelo TikTok</dt>
+                <dt className="text-ink-muted">% financiado pelo TikTok</dt>
                 <dd className={`tabular-nums ${TONE_CLASS[linha.platformRate.tone]}`}>
                   {linha.platformRate.text}
                 </dd>
@@ -281,20 +281,20 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
 
         {/* Secao VISUALMENTE separada. Cancelados nao integram as vendas
             comerciais, e exibi-los na mesma lista convidaria a soma-los. */}
-        <section className="mt-2 pt-3 border-t-2 border-amber-200">
-          <h3 className="text-sm font-semibold text-amber-800">
+        <section className="mt-2 pt-3 border-t-2 border-warn/35">
+          <h3 className="text-sm font-semibold text-warn-ink">
             {CANCELLED_SECTION_TITLE}
           </h3>
-          <p className="text-xs text-slate-500 mt-0.5 mb-2">{CANCELLED_COPY}</p>
+          <p className="text-xs text-ink-faint mt-0.5 mb-2">{CANCELLED_COPY}</p>
           {cancelados.map((linha) => (
             <div key={linha.brandKey} className="mb-2 last:mb-0">
-              <p className="text-sm font-medium text-slate-700">
+              <p className="text-sm font-medium text-ink-muted">
                 {linha.brand} · {linha.cancelledOrders} pedidos cancelados
               </p>
               <dl className="flex flex-col gap-0.5">
                 {linha.components.map((c) => (
                   <div key={c.label} className="flex justify-between gap-4 text-sm">
-                    <dt className="text-slate-600">{c.label}</dt>
+                    <dt className="text-ink-muted">{c.label}</dt>
                     <dd className={`tabular-nums ${TONE_CLASS[c.cell.tone]}`}>
                       {c.cell.text}
                     </dd>
@@ -305,7 +305,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
           ))}
         </section>
 
-        <p className="text-xs text-slate-500">{block.limitation_note}</p>
+        <p className="text-xs text-ink-faint">{block.limitation_note}</p>
       </KpiDrilldownDialog>
     </section>
   );

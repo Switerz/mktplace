@@ -11,13 +11,13 @@ interface LiveStatusBadgeProps {
 export default function LiveStatusBadge({ live, offlineLabel = "Demonstração · API offline" }: LiveStatusBadgeProps) {
   if (live) {
     return (
-      <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 font-medium">
+      <span className="text-xs text-ok-ink bg-ok-soft border border-ok/35 rounded-lg px-3 py-1.5 font-medium">
         Dados ao vivo · API conectada
       </span>
     );
   }
   return (
-    <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 font-medium">
+    <span className="text-xs text-warn-ink bg-warn-soft border border-warn/35 rounded-lg px-3 py-1.5 font-medium">
       {offlineLabel}
     </span>
   );

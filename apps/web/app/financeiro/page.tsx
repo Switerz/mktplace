@@ -12,9 +12,7 @@ import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { mergeFilteredHref } from "@/lib/filters/nav-links";
 import KpiCard from "@/components/KpiCard";
-import MarketplaceFilter from "@/components/MarketplaceFilter";
-import BrandFilter from "@/components/BrandFilter";
-import DateRangeFilter from "@/components/DateRangeFilter";
+import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
@@ -22,7 +20,7 @@ import { fmtBrl } from "@/lib/formatters";
 import { fmtPeriodo, fmtRefreshedAt, mockLimitationNote } from "@/lib/filters/format";
 import { detectPreset } from "@/lib/filters/presets";
 import { useSortableTable } from "@/lib/use-sortable-table";
-import SortableHeader from "@/components/SortableHeader";
+import SortHeader from "@/components/ui/SortHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import { buildFinanceiroRequestKey } from "@/lib/financeiro-request-key";
 import { computeRequestStatus } from "@/lib/request-freshness";
@@ -38,31 +36,31 @@ function fmtRoas(v: number | null): string {
 }
 
 function roasColor(v: number | null): string {
-  if (v == null) return "text-slate-400";
-  if (v >= 10) return "text-emerald-700";
-  if (v >= 5) return "text-amber-700";
-  return "text-rose-700";
+  if (v == null) return "text-ink-faint";
+  if (v >= 10) return "text-ok-ink";
+  if (v >= 5) return "text-warn-ink";
+  return "text-crit-ink";
 }
 
 function acosColor(v: number | null): string {
-  if (v == null) return "text-slate-400";
-  if (v <= 15) return "text-emerald-700";
-  if (v <= 25) return "text-amber-700";
-  return "text-rose-700";
+  if (v == null) return "text-ink-faint";
+  if (v <= 15) return "text-ok-ink";
+  if (v <= 25) return "text-warn-ink";
+  return "text-crit-ink";
 }
 
 function totalCostColor(v: number | null): string {
-  if (v == null) return "text-slate-400";
-  if (v <= 18) return "text-emerald-700";
-  if (v <= 25) return "text-amber-700";
-  return "text-rose-700";
+  if (v == null) return "text-ink-faint";
+  if (v <= 18) return "text-ok-ink";
+  if (v <= 25) return "text-warn-ink";
+  return "text-crit-ink";
 }
 
 function feePctColor(v: number | null): string {
-  if (v == null) return "text-slate-500";
-  if (v < 20) return "text-slate-600";
-  if (v < 30) return "text-amber-700";
-  return "text-rose-700";
+  if (v == null) return "text-ink-faint";
+  if (v < 20) return "text-ink-muted";
+  if (v < 30) return "text-warn-ink";
+  return "text-crit-ink";
 }
 
 function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | null }) {
@@ -73,12 +71,13 @@ function CostBar({ adPct, freteP }: { adPct: number | null; freteP: number | nul
   const rest = Math.max(0, 100 - total);
   return (
     <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-slate-100 flex">
-        <div className="h-full bg-cyan-400" style={{ width: `${ad}%` }} />
-        <div className="h-full bg-amber-300" style={{ width: `${frete}%` }} />
-        <div className="h-full bg-slate-100" style={{ width: `${rest}%` }} />
+      <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-raised flex">
+        {/* Composicao, nao estado: cor de serie, nunca ok/warn/crit. */}
+        <div className="h-full bg-chart-2" style={{ width: `${ad}%` }} />
+        <div className="h-full bg-chart-4" style={{ width: `${frete}%` }} />
+        <div className="h-full bg-raised" style={{ width: `${rest}%` }} />
       </div>
-      <span className="text-xs tabular-nums text-slate-500 w-11 text-right shrink-0">
+      <span className="text-xs tabular-nums text-ink-faint w-11 text-right shrink-0">
         {(ad + frete).toFixed(1)}%
       </span>
     </div>
@@ -240,45 +239,30 @@ function FinanceiroPageInner() {
           dataIsFresh ? (
             <LiveStatusBadge live={displayIsLive} />
           ) : isLoadingState ? (
-            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+            <span className="text-xs text-ink-faint bg-raised border border-line rounded-lg px-3 py-1.5 font-medium">
               Atualizando dados...
             </span>
           ) : null
         }
-        filters={
-          <>
-            <div className="flex items-start gap-3 flex-wrap min-w-0">
-              <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-              <BrandFilter value={filters.brands} onChange={(brands) => setFilters({ brands })} />
-            </div>
-            <DateRangeFilter
-              dateFrom={filters.dateFrom}
-              dateTo={filters.dateTo}
-              compare={filters.compare}
-              onChange={(v) => setFilters(v)}
-              onCompareChange={(compare) => setFilters({ compare })}
-              hideCompare
-            />
-          </>
-        }
+        filters={<GlobalFilterControls filters={filters} onChange={setFilters} hideCompare loading={isLoadingState} />}
       />
 
         {dataIsFresh && (() => {
           const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
           const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
           return note && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
-              <p className="text-xs text-amber-800">{note}</p>
+            <div className="bg-warn-soft border border-warn/35 rounded-2xl p-3">
+              <p className="text-xs text-warn-ink">{note}</p>
             </div>
           );
         })()}
 
         {error && (
-          <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
-            <p className="text-sm text-rose-800">{error}</p>
+          <div className="bg-crit-soft border border-crit/35 rounded-2xl p-4 flex items-center justify-between gap-4">
+            <p className="text-sm text-crit-ink">{error}</p>
             <button
               onClick={() => { setError(null); setRetryKey((k) => k + 1); }}
-              className="text-xs font-semibold text-rose-700 border border-rose-300 rounded-lg px-3 py-1.5 hover:bg-rose-100 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+              className="text-xs font-semibold text-crit-ink border border-crit/35 rounded-lg px-3 py-1.5 hover:bg-crit-soft transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crit/30"
             >
               Tentar novamente
             </button>
@@ -294,9 +278,9 @@ function FinanceiroPageInner() {
         // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo,
         // nunca `aria-busy=true`. Estado de erro dedicado, sem tentar
         // renderizar KPIs/tabelas.
-        <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
-          <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados financeiros.</p>
-          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
+        <div className="bg-surface border border-line rounded-2xl shadow-sm px-6 py-10 text-center">
+          <p className="text-ink-faint text-sm font-medium">Não foi possível carregar os dados financeiros.</p>
+          <p className="text-ink-faint text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
         </div>
       ) : (
       <>
@@ -310,7 +294,7 @@ function FinanceiroPageInner() {
               label="Repasse recebido TikTok"
               value={displayKpis?.tiktok_settlement != null ? fmtBrl(displayKpis.tiktok_settlement) : "—"}
               subvalue={displayKpis?.tiktok_avg_settlement_pct != null ? `${fmtPct(displayKpis.tiktok_avg_settlement_pct)} do GMV · competencias podem divergir` : undefined}
-              accent="bg-violet-600"
+              accent="bg-canal-tiktok"
             />
           )}
           {showTiktok && (
@@ -318,7 +302,7 @@ function FinanceiroPageInner() {
               label="Taxas e encargos / GMV"
               value={displayKpis?.tiktok_avg_fee_pct != null ? fmtPct(displayKpis.tiktok_avg_fee_pct) : "—"}
               subvalue={displayKpis?.tiktok_fees != null ? fmtBrl(displayKpis.tiktok_fees) + " total" : undefined}
-              accent="bg-violet-400"
+              accent="bg-canal-tiktok"
             />
           )}
           {showMl && (
@@ -326,7 +310,7 @@ function FinanceiroPageInner() {
               label="ROAS ML"
               value={fmtRoas(displayKpis?.ml_roas ?? null)}
               subvalue={displayKpis?.ml_acos_pct != null ? `ACOS ${fmtPct(displayKpis.ml_acos_pct)}` : undefined}
-              accent="bg-cyan-500"
+              accent="bg-canal-ml"
             />
           )}
           {showMl && (
@@ -334,7 +318,7 @@ function FinanceiroPageInner() {
               label="Ads + Frete / GMV"
               value={displayKpis?.ml_total_cost_pct != null ? fmtPct(displayKpis.ml_total_cost_pct) : "—"}
               subvalue="Nao inclui comissao do Mercado Livre"
-              accent="bg-amber-500"
+              accent="bg-canal-ml"
             />
           )}
           {showShopee && (
@@ -342,7 +326,7 @@ function FinanceiroPageInner() {
               label="Taxas e encargos Shopee"
               value={displayKpis?.shopee_avg_fee_pct != null ? fmtPct(displayKpis.shopee_avg_fee_pct) : "—"}
               subvalue={displayKpis?.shopee_fees != null ? fmtBrl(displayKpis.shopee_fees) + " total" : undefined}
-              accent="bg-orange-400"
+              accent="bg-canal-shopee"
             />
           )}
           {showShopee && (
@@ -350,81 +334,81 @@ function FinanceiroPageInner() {
               label="ROAS Shopee"
               value={displayKpis?.shopee_roas != null ? fmtRoas(displayKpis.shopee_roas) : "—"}
               subvalue={displayKpis?.shopee_ad_spend != null ? `Ad spend ${fmtBrl(displayKpis.shopee_ad_spend)}` : undefined}
-              accent="bg-amber-400"
+              accent="bg-canal-shopee"
             />
           )}
         </div>
 
         {/* Navegacao interna compacta (Task 4) */}
         <nav aria-label="Navegação interna da página" className="flex flex-wrap gap-1 -mx-2.5">
-          {showTiktok && <a href="#tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">TikTok Shop</a>}
-          {showMl && <a href="#mercado-livre" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Mercado Livre</a>}
-          {showShopee && <a href="#shopee" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-violet-700 hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">Shopee</a>}
+          {showTiktok && <a href="#tiktok" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">TikTok Shop</a>}
+          {showMl && <a href="#mercado-livre" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Mercado Livre</a>}
+          {showShopee && <a href="#shopee" className="px-2.5 py-1 rounded-lg text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Shopee</a>}
         </nav>
 
         {/* Tabela: Repasses TikTok */}
         {showTiktok && (
-          <div id="tiktok" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-violet-50">
-              <h2 className="text-sm font-semibold text-slate-700">Repasses TikTok</h2>
-              <p className="text-xs text-slate-500 mt-0.5">GMV bruto, taxas e encargos e repasse recebido por marca</p>
+          <div id="tiktok" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-line">
+              <h2 className="text-sm font-semibold text-ink-muted">Repasses TikTok</h2>
+              <p className="text-xs text-ink-faint mt-0.5">GMV bruto, taxas e encargos e repasse recebido por marca</p>
             </div>
             <TableScrollHint>
               <table className="w-full text-sm" aria-label="Repasses TikTok por marca">
                 <thead>
-                  <tr className="bg-slate-50 text-left">
-                    <SortableHeader label="Marca" column="brand" sort={tkSort.sort} onSort={tkSort.toggleSort} align="left" />
-                    <SortableHeader label="GMV" column="gmv" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                    <SortableHeader label="Taxas (R$)" column="fees" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                    <SortableHeader label="Taxas e encargos %" column="fee_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                    <SortableHeader label="Repasse %" column="settlement_pct" sort={tkSort.sort} onSort={tkSort.toggleSort} />
-                    <SortableHeader label="Repasse Recebido" column="settlement" sort={tkSort.sort} onSort={tkSort.toggleSort} />
+                  <tr className="bg-raised text-left">
+                    <SortHeader rotulo="Marca" coluna="brand" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} alinhamento="left" />
+                    <SortHeader rotulo="GMV" coluna="gmv" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                    <SortHeader rotulo="Taxas (R$)" coluna="fees" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                    <SortHeader rotulo="Taxas e encargos %" coluna="fee_pct" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                    <SortHeader rotulo="Repasse %" coluna="settlement_pct" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
+                    <SortHeader rotulo="Repasse Recebido" coluna="settlement" sort={tkSort.sort} aoOrdenar={tkSort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                <tbody className={`divide-y divide-line transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {tkBrands.length === 0 && dataIsFresh && (
                     <tr>
-                      <td colSpan={6} className="px-6 py-8 text-center text-slate-400 text-sm">
+                      <td colSpan={6} className="px-6 py-8 text-center text-ink-faint text-sm">
                         Sem dados para o periodo selecionado.
                       </td>
                     </tr>
                   )}
                   {tkSort.sortedRows.map((b) => (
-                    <tr key={b.brand} className="hover:bg-slate-50/70 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                    <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
+                      <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
                         <Link
                           href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=tiktok`)}
-                          className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                          className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                         >
                           {b.label}
                         </Link>
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">{fmtBrl(b.tiktok_fees!)}</td>
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.tiktok_gmv!)}</td>
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">{fmtBrl(b.tiktok_fees!)}</td>
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.tiktok_avg_fee_pct)}`}>
                         {fmtPct(b.tiktok_avg_fee_pct)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
                         {fmtPct(b.tiktok_avg_settlement_pct)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">{fmtBrl(b.tiktok_settlement!)}</td>
+                      <td className="px-4 py-4 text-right tabular-nums text-ink font-bold">{fmtBrl(b.tiktok_settlement!)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </TableScrollHint>
-            <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
-              <span className="flex items-center gap-1.5 text-xs text-slate-600">
-                <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> abaixo de 20%
+            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
+              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Taxas e encargos %:</span>
+              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
+                <span className="w-2 h-2 rounded-full bg-ink-faint inline-block" /> abaixo de 20%
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 20–30%
+              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
+                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 20–30%
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-rose-700">
-                <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
+              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
+                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> acima de 30%
               </span>
-              <span className="ml-auto text-[10px] text-slate-400">
+              <span className="ml-auto text-xs text-ink-faint">
                 Taxas e encargos / GMV · Repasse % = Repasse Recebido / GMV · repasses e GMV podem ter competencias diferentes (o repasse pode incluir pedidos de outros meses)
               </span>
             </div>
@@ -433,29 +417,29 @@ function FinanceiroPageInner() {
 
         {/* Tabela: Publicidade e Custos ML */}
         {showMl && (
-          <div id="mercado-livre" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-violet-50">
-              <h2 className="text-sm font-semibold text-slate-700">Publicidade e Custos ML</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Ad Spend, receita atribuida, frete e custo total como % do GMV</p>
+          <div id="mercado-livre" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-line">
+              <h2 className="text-sm font-semibold text-ink-muted">Publicidade e Custos ML</h2>
+              <p className="text-xs text-ink-faint mt-0.5">Ad Spend, receita atribuida, frete e custo total como % do GMV</p>
             </div>
             <TableScrollHint>
               <table className="w-full text-sm" aria-label="Publicidade e custos ML por marca">
                 <thead>
-                  <tr className="bg-slate-50 text-left">
-                    <SortableHeader label="Marca" column="brand" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
-                    <SortableHeader label="GMV ML" column="gmv" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="Ad Spend" column="ad_spend" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="Receita Ads" column="ad_revenue" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="ROAS" column="roas" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="ACOS" column="acos" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="Frete" column="frete" sort={mlSort.sort} onSort={mlSort.toggleSort} />
-                    <SortableHeader label="Ads + Frete / GMV" column="cost_pct" sort={mlSort.sort} onSort={mlSort.toggleSort} align="left" />
+                  <tr className="bg-raised text-left">
+                    <SortHeader rotulo="Marca" coluna="brand" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} alinhamento="left" />
+                    <SortHeader rotulo="GMV ML" coluna="gmv" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Ad Spend" coluna="ad_spend" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Receita Ads" coluna="ad_revenue" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="ROAS" coluna="roas" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="ACOS" coluna="acos" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Frete" coluna="frete" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} />
+                    <SortHeader rotulo="Ads + Frete / GMV" coluna="cost_pct" sort={mlSort.sort} aoOrdenar={mlSort.toggleSort} alinhamento="left" />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                <tbody className={`divide-y divide-line transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {mlBrands.length === 0 && dataIsFresh && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
+                      <td colSpan={8} className="px-6 py-8 text-center text-ink-faint text-sm">
                         Sem dados de anuncios ML para o periodo selecionado.
                       </td>
                     </tr>
@@ -465,18 +449,18 @@ function FinanceiroPageInner() {
                       ? b.ml_ad_spend / b.ml_gmv * 100
                       : null;
                     return (
-                      <tr key={b.brand} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                      <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
+                        <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
                           <Link
                             href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=ml`)}
-                            className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                            className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                           >
                             {b.label}
                           </Link>
                         </td>
-                        <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.ml_gmv!)}</td>
-                        <td className="px-4 py-4 text-right tabular-nums text-slate-700">{fmtBrl(b.ml_ad_spend!)}</td>
-                        <td className="px-4 py-4 text-right tabular-nums text-emerald-700 font-medium">
+                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.ml_gmv!)}</td>
+                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted">{fmtBrl(b.ml_ad_spend!)}</td>
+                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">
                           {b.ml_ad_revenue != null ? fmtBrl(b.ml_ad_revenue) : "—"}
                         </td>
                         <td className={`px-4 py-4 text-right tabular-nums font-semibold ${roasColor(b.ml_roas)}`}>
@@ -485,7 +469,7 @@ function FinanceiroPageInner() {
                         <td className={`px-4 py-4 text-right tabular-nums font-semibold ${acosColor(b.ml_acos_pct)}`}>
                           {fmtPct(b.ml_acos_pct)}
                         </td>
-                        <td className="px-4 py-4 text-right tabular-nums text-slate-700">
+                        <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
                           {b.ml_seller_shipping_cost != null ? fmtBrl(b.ml_seller_shipping_cost) : "—"}
                         </td>
                         <td className="px-6 py-4 min-w-[160px]">
@@ -498,86 +482,86 @@ function FinanceiroPageInner() {
               </table>
             </TableScrollHint>
 
-            <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">ROAS:</span>
-              <span className="flex items-center gap-1.5 text-xs text-emerald-700">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> acima de 10x
+            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
+              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">ROAS:</span>
+              <span className="flex items-center gap-1.5 text-xs text-ok-ink">
+                <span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 10x
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 5x–10x
+              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
+                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 5x–10x
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-rose-700">
-                <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> abaixo de 5x
+              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
+                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 5x
               </span>
-              <span className="text-slate-200 select-none mx-1">|</span>
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Ads + Frete / GMV:</span>
-              <span className="flex items-center gap-1.5 text-xs text-slate-600">
-                <span className="inline-block w-2 h-2 rounded-sm bg-cyan-400" /> Ads
+              <span className="text-ink-faint select-none mx-1">|</span>
+              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Ads + Frete / GMV:</span>
+              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
+                <span className="inline-block w-2 h-2 rounded-sm bg-chart-2" /> Ads
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-slate-600">
-                <span className="inline-block w-2 h-2 rounded-sm bg-amber-300" /> Frete
+              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
+                <span className="inline-block w-2 h-2 rounded-sm bg-chart-4" /> Frete
               </span>
-              <span className="ml-auto text-[10px] text-slate-400">Ads + Frete / GMV · nao inclui comissao do Mercado Livre (sem granularidade mensal/diaria na fonte atual) · Receita Ads = GMV atribuido a anuncios</span>
+              <span className="ml-auto text-xs text-ink-faint">Ads + Frete / GMV · nao inclui comissao do Mercado Livre (sem granularidade mensal/diaria na fonte atual) · Receita Ads = GMV atribuido a anuncios</span>
             </div>
           </div>
         )}
 
         {/* Tabela: Taxas e Custos Shopee */}
         {showShopee && (
-          <div id="shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-orange-50">
-              <h2 className="text-sm font-semibold text-slate-700">Taxas e Custos Shopee</h2>
-              <p className="text-xs text-slate-500 mt-0.5">GMV, taxas e encargos, total global dos pedidos, anuncios e frete por marca</p>
+          <div id="shopee" className="scroll-mt-24 bg-surface border border-line rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-line">
+              <h2 className="text-sm font-semibold text-ink-muted">Taxas e Custos Shopee</h2>
+              <p className="text-xs text-ink-faint mt-0.5">GMV, taxas e encargos, total global dos pedidos, anuncios e frete por marca</p>
             </div>
             <TableScrollHint>
               <table className="w-full text-sm" aria-label="Taxas e custos Shopee por marca">
                 <thead>
-                  <tr className="bg-slate-50 text-left">
-                    <SortableHeader label="Marca" column="brand" sort={shSort.sort} onSort={shSort.toggleSort} align="left" />
-                    <SortableHeader label="GMV" column="gmv" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="Taxas (R$)" column="fees" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="Taxas e encargos %" column="fee_pct" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="Total Global (pedidos)" column="settlement" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="Ad Spend" column="ad_spend" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="ROAS" column="roas" sort={shSort.sort} onSort={shSort.toggleSort} />
-                    <SortableHeader label="Frete" column="frete" sort={shSort.sort} onSort={shSort.toggleSort} />
+                  <tr className="bg-raised text-left">
+                    <SortHeader rotulo="Marca" coluna="brand" sort={shSort.sort} aoOrdenar={shSort.toggleSort} alinhamento="left" />
+                    <SortHeader rotulo="GMV" coluna="gmv" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="Taxas (R$)" coluna="fees" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="Taxas e encargos %" coluna="fee_pct" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="Total Global (pedidos)" coluna="settlement" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="Ad Spend" coluna="ad_spend" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="ROAS" coluna="roas" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
+                    <SortHeader rotulo="Frete" coluna="frete" sort={shSort.sort} aoOrdenar={shSort.toggleSort} />
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-slate-100 transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
+                <tbody className={`divide-y divide-line transition-opacity duration-200 ${isLoadingState ? "opacity-50" : ""}`}>
                   {shBrands.length === 0 && dataIsFresh && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-slate-400 text-sm">
+                      <td colSpan={8} className="px-6 py-8 text-center text-ink-faint text-sm">
                         Sem dados Shopee para o periodo selecionado.
                       </td>
                     </tr>
                   )}
                   {shSort.sortedRows.map((b) => (
-                    <tr key={b.brand} className="hover:bg-orange-50/40 transition-colors">
-                      <td className="px-6 py-4 font-semibold text-slate-800 whitespace-nowrap">
+                    <tr key={b.brand} className="hover:bg-raised/70 transition-colors">
+                      <td className="px-6 py-4 font-semibold text-ink whitespace-nowrap">
                         <Link
                           href={buildHref(`/brand/${b.brand}?brands=${b.brand}&channels=shopee`)}
-                          className="hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                          className="hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                         >
                           {b.label}
                         </Link>
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-700 font-medium">{fmtBrl(b.shopee_gmv!)}</td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted font-medium">{fmtBrl(b.shopee_gmv!)}</td>
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
                         {b.shopee_fees != null ? fmtBrl(b.shopee_fees) : "—"}
                       </td>
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${feePctColor(b.shopee_avg_fee_pct ?? null)}`}>
                         {fmtPct(b.shopee_avg_fee_pct ?? null)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-gray-900 font-bold">
+                      <td className="px-4 py-4 text-right tabular-nums text-ink font-bold">
                         {b.shopee_settlement != null ? fmtBrl(b.shopee_settlement) : "—"}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-700">
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
                         {b.shopee_ad_spend != null ? fmtBrl(b.shopee_ad_spend) : "—"}
                       </td>
                       <td className={`px-4 py-4 text-right tabular-nums font-semibold ${roasColor(b.shopee_roas ?? null)}`}>
                         {fmtRoas(b.shopee_roas ?? null)}
                       </td>
-                      <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                      <td className="px-4 py-4 text-right tabular-nums text-ink-muted">
                         {b.shopee_shipping_cost != null ? fmtBrl(b.shopee_shipping_cost) : "—"}
                       </td>
                     </tr>
@@ -585,18 +569,18 @@ function FinanceiroPageInner() {
                 </tbody>
               </table>
             </TableScrollHint>
-            <div className="px-6 py-3 border-t border-slate-100 flex items-center gap-5 flex-wrap">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Taxas e encargos %:</span>
-              <span className="flex items-center gap-1.5 text-xs text-slate-600">
-                <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> abaixo de 20%
+            <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
+              <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Taxas e encargos %:</span>
+              <span className="flex items-center gap-1.5 text-xs text-ink-muted">
+                <span className="w-2 h-2 rounded-full bg-ink-faint inline-block" /> abaixo de 20%
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> 20–30%
+              <span className="flex items-center gap-1.5 text-xs text-warn-ink">
+                <span className="w-2 h-2 rounded-full bg-warn inline-block" /> 20–30%
               </span>
-              <span className="flex items-center gap-1.5 text-xs text-rose-700">
-                <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> acima de 30%
+              <span className="flex items-center gap-1.5 text-xs text-crit-ink">
+                <span className="w-2 h-2 rounded-full bg-crit inline-block" /> acima de 30%
               </span>
-              <span className="ml-auto text-[10px] text-slate-400">
+              <span className="ml-auto text-xs text-ink-faint">
                 Taxas e encargos = comissao liquida + taxa de servico liquida, sobre o GMV · o indicador de liquidacao foi removido: o campo antigo (Total Global do pedido) nao representa repasse liquido
               </span>
             </div>
@@ -610,7 +594,7 @@ function FinanceiroPageInner() {
 
 export default function FinanceiroPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+    <Suspense fallback={<div className="min-h-screen bg-canvas" />}>
       <FinanceiroPageInner />
     </Suspense>
   );

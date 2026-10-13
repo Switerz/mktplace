@@ -75,25 +75,25 @@ function InsightDetail({ insight }: { insight: PulseInsight }) {
   return (
     <div className="flex flex-col gap-3 text-sm">
       <div>
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">O que aconteceu</p>
-        <p className="text-slate-700">{insight.description || insight.title}</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">O que aconteceu</p>
+        <p className="text-ink-muted">{insight.description || insight.title}</p>
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <p className="text-xs text-slate-400">{metricLabel(insight.type)}</p>
-          <p className="text-base font-bold text-gray-900 tabular-nums">{formatMetricByType(insight.type, insight.metric_value)}</p>
+          <p className="text-xs text-ink-faint">{metricLabel(insight.type)}</p>
+          <p className="text-base font-bold text-ink tabular-nums">{formatMetricByType(insight.type, insight.metric_value)}</p>
         </div>
         {hasReference && (
           <div>
-            <p className="text-xs text-slate-400">Referência ({referenceKindLabel(insight.reference_kind)})</p>
-            <p className="text-base font-semibold text-slate-700 tabular-nums">{formatReferenceValue(insight.type, insight.reference_value)}</p>
+            <p className="text-xs text-ink-faint">Referência ({referenceKindLabel(insight.reference_kind)})</p>
+            <p className="text-base font-semibold text-ink-muted tabular-nums">{formatReferenceValue(insight.type, insight.reference_value)}</p>
           </div>
         )}
       </div>
       {hasDelta && (
         <div>
-          <p className="text-xs text-slate-400">Diferença</p>
-          <p className="text-sm font-semibold text-slate-700 tabular-nums">
+          <p className="text-xs text-ink-faint">Diferença</p>
+          <p className="text-sm font-semibold text-ink-muted tabular-nums">
             {insight.delta_pct != null && formatDeltaPct(insight.delta_pct)}
             {insight.delta_pct != null && insight.delta_abs != null && " · "}
             {insight.delta_abs != null && formatDeltaAbs(insight.type, insight.delta_abs)}
@@ -101,20 +101,20 @@ function InsightDetail({ insight }: { insight: PulseInsight }) {
         </div>
       )}
       {staleEvidence && (
-        <div className="text-xs text-slate-500 flex flex-col gap-0.5 border border-slate-100 rounded-lg px-3 py-2">
-          {insight.source && <span>Origem: <span className="font-medium text-slate-700">{insight.source}</span></span>}
-          {insight.last_date && <span>Última data disponível: <span className="font-medium text-slate-700">{insight.last_date}</span></span>}
-          {insight.staleness_days != null && <span>Defasagem: <span className="font-medium text-slate-700">{insight.staleness_days} dia(s)</span></span>}
-          {insight.threshold_days != null && <span>Limite de frescor: <span className="font-medium text-slate-700">{insight.threshold_days} dia(s)</span></span>}
+        <div className="text-xs text-ink-faint flex flex-col gap-0.5 border border-line rounded-lg px-3 py-2">
+          {insight.source && <span>Origem: <span className="font-medium text-ink-muted">{insight.source}</span></span>}
+          {insight.last_date && <span>Última data disponível: <span className="font-medium text-ink-muted">{insight.last_date}</span></span>}
+          {insight.staleness_days != null && <span>Defasagem: <span className="font-medium text-ink-muted">{insight.staleness_days} dia(s)</span></span>}
+          {insight.threshold_days != null && <span>Limite de frescor: <span className="font-medium text-ink-muted">{insight.threshold_days} dia(s)</span></span>}
         </div>
       )}
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-        {insight.brand && <span>Marca: <span className="font-medium text-slate-700">{insight.brand}</span></span>}
-        {insight.marketplace && <span>Canal: <span className="font-medium text-slate-700">{insight.marketplace}</span></span>}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-faint">
+        {insight.brand && <span>Marca: <span className="font-medium text-ink-muted">{insight.brand}</span></span>}
+        {insight.marketplace && <span>Canal: <span className="font-medium text-ink-muted">{insight.marketplace}</span></span>}
       </div>
       <div>
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Por que essa severidade</p>
-        <p className="text-slate-600 text-xs">{severityReason(insight.type, insight.severity)}</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Por que essa severidade</p>
+        <p className="text-ink-muted text-xs">{severityReason(insight.type, insight.severity)}</p>
       </div>
       <DataQualityNote note={insight.confidence_note} />
     </div>
@@ -133,20 +133,20 @@ function GroupDetail({ group, periodLabel, refreshedAt, buildHref }: { group: Pu
 
       {many ? (
         <div className="flex flex-col gap-2">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{group.count} itens agrupados</p>
-          <ul className="flex flex-col divide-y divide-slate-100 border border-slate-100 rounded-lg">
+          <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">{group.count} itens agrupados</p>
+          <ul className="flex flex-col divide-y divide-line border border-line rounded-lg">
             {group.members.map((m, i) => (
               <li key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
-                <span className="text-slate-700 truncate">{m.brand ?? m.title}</span>
+                <span className="text-ink-muted truncate">{m.brand ?? m.title}</span>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="tabular-nums font-semibold text-slate-800">{formatMetricByType(m.type, m.metric_value)}</span>
+                  <span className="tabular-nums font-semibold text-ink">{formatMetricByType(m.type, m.metric_value)}</span>
                   {/* CTA próprio por membro (Finding 6) — nome acessível
                       identifica a marca/item; filtros preservados por buildHref. */}
                   {m.href && (
                     <Link
                       href={buildHref(m.href)}
                       aria-label={`Abrir ${m.brand ?? m.title} na tela de origem`}
-                      className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                      className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                     >
                       Abrir
                     </Link>
@@ -179,15 +179,15 @@ function GroupButton({ group, onSelect, innerRef }: { group: PulseGroup; onSelec
       ref={innerRef}
       type="button"
       onClick={() => onSelect(group.key)}
-      className="w-full text-left flex items-start gap-2 rounded-lg border border-violet-100 px-3 py-2 min-h-11 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+      className="w-full text-left flex items-start gap-2 rounded-lg border border-line px-3 py-2 min-h-11 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       <span className={`text-[10px] font-semibold uppercase rounded px-1.5 py-0.5 shrink-0 mt-0.5 ${SEVERITY_TONE[group.severity]}`}>
         {SEVERITY_LABEL[group.severity]}
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-slate-800">{group.title}</span>
+        <span className="block text-sm font-medium text-ink">{group.title}</span>
         {group.count === 1 && group.representative.metric_value != null && (
-          <span className="block text-xs text-slate-500 tabular-nums">{formatMetricByType(group.type, group.representative.metric_value)}</span>
+          <span className="block text-xs text-ink-faint tabular-nums">{formatMetricByType(group.type, group.representative.metric_value)}</span>
         )}
       </span>
     </button>
@@ -221,7 +221,7 @@ export default function InsightDrilldownContent(props: Props) {
             ref={backRef}
             type="button"
             onClick={onBackToAll}
-            className="inline-flex items-center min-h-11 text-xs font-semibold text-violet-700 hover:underline self-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+            className="inline-flex items-center min-h-11 text-xs font-semibold text-accent hover:underline self-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
           >
             ← Voltar para todos os sinais
           </button>
@@ -243,12 +243,12 @@ export default function InsightDrilldownContent(props: Props) {
   return (
     <div className="flex flex-col gap-4">
       {sections.every((s) => s.groups.length === 0) && (
-        <p className="text-sm text-slate-500">Nenhum sinal no período.</p>
+        <p className="text-sm text-ink-faint">Nenhum sinal no período.</p>
       )}
       {sections.map((s) =>
         s.groups.length === 0 ? null : (
           <div key={s.key} className="flex flex-col gap-2">
-            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{CATEGORY_LABEL[s.key]}</p>
+            <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">{CATEGORY_LABEL[s.key]}</p>
             {s.groups.map((g) => (
               <GroupButton key={g.key} group={g} onSelect={onSelectGroup} innerRef={assignFirst()} />
             ))}

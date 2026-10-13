@@ -29,7 +29,7 @@ function DeltaBadge({ pct }: { pct: number }) {
   return (
     <span
       className={`inline-flex items-center gap-1 text-xs font-semibold tabular-nums ${
-        up ? "text-emerald-600" : "text-rose-600"
+        up ? "text-ok-ink" : "text-crit-ink"
       }`}
     >
       <span aria-hidden="true">{up ? "▲" : "▼"}</span>
@@ -41,14 +41,14 @@ function DeltaBadge({ pct }: { pct: number }) {
 function KpiCardSkeleton() {
   return (
     <div
-      className="h-full bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse"
+      className="h-full bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse"
       role="status"
       aria-busy="true"
     >
       <span className="sr-only">Carregando indicador…</span>
-      <div className="h-2.5 w-20 bg-violet-100 rounded" />
-      <div className="h-7 w-32 bg-violet-50 rounded" />
-      <div className="h-2.5 w-24 bg-violet-50 rounded mt-auto" />
+      <div className="h-2.5 w-20 bg-accent-soft rounded" />
+      <div className="h-7 w-32 bg-accent-soft rounded" />
+      <div className="h-2.5 w-24 bg-accent-soft rounded mt-auto" />
     </div>
   );
 }
@@ -65,11 +65,11 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
       // `w-full min-w-0`: sem eles o <button> se dimensiona pelo conteudo e
       // estoura a trilha da grade — era a origem de 5px de overflow horizontal
       // no mobile (390px), medido no QA.
-      className="group w-full min-w-0 h-full min-h-11 text-left bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-1.5 transition-shadow hover:shadow-[0_4px_12px_0_rgba(124,58,237,0.08),0_1px_3px_0_rgba(0,0,0,0.06)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+      className="group w-full min-w-0 h-full min-h-11 text-left bg-surface border border-line rounded-2xl shadow-sm p-4 flex flex-col gap-1.5 transition-shadow hover:shadow-[0_4px_12px_0_rgba(124,58,237,0.08),0_1px_3px_0_rgba(0,0,0,0.06)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       <span className="flex items-center gap-2">
         <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full shrink-0 ${kpi.accent}`} />
-        <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           {kpi.label}
         </span>
       </span>
@@ -81,39 +81,39 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
             const highlighted = kpi.highlightChannel === cv.channel;
             return (
               <span key={cv.channel} className="flex items-baseline justify-between gap-2">
-                <span className="text-xs text-slate-500 truncate">{cv.label}</span>
+                <span className="text-xs text-ink-faint truncate">{cv.label}</span>
                 {cv.value ? (
                   <span
                     className={`tabular-nums shrink-0 ${
-                      highlighted ? "text-xl font-bold text-slate-900" : "text-sm font-semibold text-slate-800"
+                      highlighted ? "text-xl font-bold text-ink" : "text-sm font-semibold text-ink"
                     }`}
                   >
                     {cv.value}
                   </span>
                 ) : (
-                  <span className="text-xs text-slate-500 shrink-0">N/D</span>
+                  <span className="text-xs text-ink-faint shrink-0">N/D</span>
                 )}
               </span>
             );
           })}
         </span>
       ) : kpi.value ? (
-        <span className="text-2xl font-bold text-slate-900 tabular-nums leading-tight">
+        <span className="text-2xl font-bold text-ink tabular-nums leading-tight">
           {kpi.value}
         </span>
       ) : (
-        <span className="text-2xl font-bold text-slate-400 tabular-nums leading-tight">N/D</span>
+        <span className="text-2xl font-bold text-ink-faint tabular-nums leading-tight">N/D</span>
       )}
 
       {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} />}
-      {kpi.reference && <span className="text-xs text-slate-500 tabular-nums">{kpi.reference}</span>}
+      {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
 
       <span className="mt-auto flex flex-col gap-0.5 pt-1">
-        {kpi.subvalue && <span className="text-xs text-slate-500 leading-snug">{kpi.subvalue}</span>}
-        {kpi.comparisonNote && <span className="text-xs text-slate-500">{kpi.comparisonNote}</span>}
-        {kpi.coverageNote && <span className="text-xs text-slate-500 leading-snug">{kpi.coverageNote}</span>}
+        {kpi.subvalue && <span className="text-xs text-ink-faint leading-snug">{kpi.subvalue}</span>}
+        {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
+        {kpi.coverageNote && <span className="text-xs text-ink-faint leading-snug">{kpi.coverageNote}</span>}
         {kpi.unavailableReason && (
-          <span className="text-xs text-slate-500 leading-snug">{kpi.unavailableReason}</span>
+          <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
         )}
       </span>
     </button>
@@ -125,11 +125,11 @@ export default function KpiBand({ kpis, loading, error, onOpen, onRetry }: Props
     return (
       <section
         aria-label="Indicadores do período"
-        className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap"
+        className="bg-raised border border-line rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap"
       >
         <div>
-          <h2 className="text-sm font-semibold text-slate-700">Indicadores do período</h2>
-          <p className="text-xs text-slate-500">
+          <h2 className="text-sm font-semibold text-ink-muted">Indicadores do período</h2>
+          <p className="text-xs text-ink-faint">
             O agregado do período não respondeu nesta carga — GMV, Pedidos, Ticket, Investimento e ROAS ficam
             indisponíveis. Os demais blocos abaixo seguem com as próprias fontes.
           </p>
@@ -137,7 +137,7 @@ export default function KpiBand({ kpis, loading, error, onOpen, onRetry }: Props
         <button
           type="button"
           onClick={onRetry}
-          className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 min-h-11 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+          className="text-xs font-semibold text-ink-muted border border-line-strong rounded-lg px-3 min-h-11 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           Tentar novamente
         </button>

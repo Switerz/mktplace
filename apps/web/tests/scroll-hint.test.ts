@@ -97,7 +97,8 @@ test("TableScrollHint: a dica de rolagem nao renderiza abaixo de 12px", () => {
   for (const m of HINT_SRC.matchAll(/text-\[(\d+)px\]/g)) {
     assert.ok(Number(m[1]) >= 12, `TableScrollHint renderiza texto a ${m[1]}px`);
   }
-  assert.match(HINT_SRC, /sm:hidden text-center text-xs text-slate-400 pt-1/,
+  // UX-TORRE-2: a cor virou token (`ink-faint`, que tambem passa contraste AA).
+  assert.match(HINT_SRC, /sm:hidden text-center text-xs text-ink-faint pt-1/,
     "a dica passou a usar a classe de 12px, preservando alinhamento, cor e espacamento");
 });
 

@@ -28,11 +28,17 @@ interface Props {
  * container e o `justify-center` passa a RECORTAR o rotulo em telas estreitas.
  * Com ele a faixa transborda e o `overflow-x-auto` que o container ja declarava
  * rola — o alvo nunca cai abaixo de 44px para caber.
+ *
+ * UX-TORRE-2: mesma aparencia do `Segmented` do sistema — trilho neutro e
+ * opcao ativa em relevo. O violeta cheio em cada botao ativo (ate dez na mesma
+ * faixa, somando marca e periodo) violava a disciplina do violeta e disputava
+ * a atencao com os numeros. Tokens, nao literais: o filtro tambem aparece em
+ * rotas ainda nao migradas, onde a barreira de tema devolve o valor claro.
  */
 const BASE_BTN =
-  "inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-4 rounded-lg text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1";
-const ACTIVE_BTN = "bg-violet-600 text-white shadow";
-const INACTIVE_BTN = "text-violet-700 hover:bg-violet-50";
+  "inline-flex shrink-0 items-center justify-center min-h-11 min-w-11 px-3 rounded-md text-sm whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
+const ACTIVE_BTN = "bg-surface font-semibold text-ink shadow-sm ring-1 ring-inset ring-line-strong";
+const INACTIVE_BTN = "text-ink-muted hover:bg-surface/70 hover:text-ink";
 
 export default function MarketplaceFilter({ value, onChange }: Props) {
   const allActive = isAllSelected(value);
@@ -41,7 +47,7 @@ export default function MarketplaceFilter({ value, onChange }: Props) {
     <div
       role="group"
       aria-label="Filtro de marketplaces"
-      className="flex gap-2 bg-white border border-violet-100 rounded-xl p-1 shadow-sm w-fit overflow-x-auto min-w-0 max-w-full"
+      className="flex gap-0.5 bg-raised border border-line rounded-lg p-0.5 w-fit overflow-x-auto min-w-0 max-w-full"
     >
       <button
         type="button"
