@@ -467,3 +467,31 @@ def test_dry_run_tambem_aponta_a_chave_que_sumiria(bancos):
     _apagar_marca(alvo, loja_id=2, marketplace_id=1)
     resumo, _ = P.diagnosticar(alvo, fonte, [JUL], ["tiktok", "ml", "shopee"])
     assert any("2026-07:tiktok:barbours" in m for m in resumo["recusas"])
+
+
+def test_remocao_de_chave_que_ainda_tem_receita_e_recusada_sem_tocar_a_fotografia(bancos, capsys):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    rc = P.main(["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:tiktok:barbours", "--apply"],
+                engines=lambda: (alvo, fonte), hoje=date(2026, 10, 13))
+    assert rc == P.EXIT_RECONCILIACAO
+    assert "--remover-marca 2026-07:tiktok:barbours: a chave ainda tem receita" in capsys.readouterr().out
+    assert fotografia(alvo) == antes
+    assert auditoria(alvo)[-1]["status"] == "failed"
+
+
+def test_canal_vazio_segue_protegido_pela_guarda_de_escopo_sozinha(bancos, monkeypatch):
+    """A guarda por marca nao substitui a de escopo: com ela desligada, o par
+    ML de julho que ficou vazio continua recusado -- mesmo com --remover-marca
+    declarado para a unica marca do par."""
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    _apagar_receita(alvo, marketplace_id=2)
+    monkeypatch.setattr(P, "recusas_de_marca", lambda *a, **k: [])
+    with pytest.raises(P.PublicacaoRecusada) as exc:
+        publicar(alvo, fonte, remover=frozenset({(JUL, "ml", "kokeshi")}))
+    assert any("2026-07 ml" in m for m in exc.value.motivos)
+    assert fotografia(alvo) == antes
+    assert auditoria(alvo)[-1]["status"] == "failed"
