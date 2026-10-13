@@ -123,7 +123,17 @@ MODE_AUTO = "auto"
 #: Recuperacao MANUAL de uma lacuna medida: exige --date-from/--date-to, nunca
 #: e' escolhido pelo `auto` e tem auditoria propria (WINDOW_AUDIT_SOURCE).
 MODE_WINDOW = "window"
-MODES = (MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL, MODE_AUTO, MODE_WINDOW)
+#: O `auto` da rotina diaria: mesma decisao durável sob o lock, mas NUNCA
+#: escolhe full. Medido em 13/10/2026: so' a LEITURA do full (desde
+#: 2025-06-04, 2,37 mi de pedidos comerciais) leva 246 s, e com a publicacao o
+#: full nao cabe nos 300 s do step do `full_daily`. Com `auto`, o full era
+#: escolhido todo dia, morria no timeout, deixava duas auditorias em `running`
+#: e o incremental nunca rodava (fato parada em 28/09 por duas semanas). O full
+#: mensal continua devido e continua sendo `--mode full` ou `--mode auto`
+#: invocados FORA do `full_daily`, com orcamento proprio.
+MODE_DAILY = "daily"
+MODES = (MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL, MODE_AUTO, MODE_WINDOW,
+         MODE_DAILY)
 
 #: Teto da janela manual. A lacuna que motivou o modo (OPS-RECOVERY-3) tinha 14
 #: dias e leu a fonte em 33 s; 31 dias cobre um mes perdido sem virar um full
@@ -285,9 +295,11 @@ _SQL_ULTIMO_SUCESSO = text("""
 """)
 
 
-def decide_effective_mode(conn, agora: datetime | None = None) -> str:
+def decide_effective_mode(conn, agora: datetime | None = None,
+                          permitir_full: bool = True) -> str:
     """Resolve `auto` -> full | backfill | incremental. SOB O LOCK, na conexao
-    que o detem.
+    que o detem. Com `permitir_full=False` (MODE_DAILY) a obrigacao do full nem
+    e' consultada: a decisao comeca no backfill.
 
     Decidir ANTES do lock abriria corrida: duas execucoes leriam a mesma
     ausencia de `_full` no mes e ambas escolheriam full, a segunda reconstruindo
@@ -300,12 +312,13 @@ def decide_effective_mode(conn, agora: datetime | None = None) -> str:
 
     `failed`, `running` e ausencia NAO consomem obrigacao: so' `success` consome.
     """
-    inicio_mes = _inicio_mes_brt(agora)
-    ultimo_full = conn.execute(
-        _SQL_ULTIMO_SUCESSO, {"fonte": FULL_AUDIT_SOURCE, "desde": inicio_mes}
-    ).scalar()
-    if ultimo_full is None:
-        return MODE_FULL
+    if permitir_full:
+        inicio_mes = _inicio_mes_brt(agora)
+        ultimo_full = conn.execute(
+            _SQL_ULTIMO_SUCESSO, {"fonte": FULL_AUDIT_SOURCE, "desde": inicio_mes}
+        ).scalar()
+        if ultimo_full is None:
+            return MODE_FULL
 
     limite_backfill = (agora or datetime.now(timezone.utc)) - timedelta(
         days=BACKFILL_OBLIGATION_DAYS
@@ -937,9 +950,9 @@ def run_dry(mode: str, agora: datetime | None = None,
     `audit.source_sync_run`, que exige conexao ao Neon. Em dry-run `auto` e'
     reportado como indeterminado, e o modo concreto tem de ser passado.
     """
-    if mode == MODE_AUTO:
+    if mode in (MODE_AUTO, MODE_DAILY):
         raise DiscountSyncError(
-            "--mode auto exige --apply: a decisao durável le a auditoria no "
+            f"--mode {mode} exige --apply: a decisao durável le a auditoria no "
             "destino, e dry-run nao abre conexao ao destino. Use um modo "
             "concreto para diagnosticar."
         )
@@ -1030,8 +1043,9 @@ def run_apply(mode: str, agora: datetime | None = None,
         conn_pub = sessao_pub.connection()
         conn_pub.execute(SQL_LOCK, {"chave": ADVISORY_LOCK_KEY})
 
-        if mode == MODE_AUTO:
-            modo_efetivo = decide_effective_mode(conn_pub, instante)
+        if mode in (MODE_AUTO, MODE_DAILY):
+            modo_efetivo = decide_effective_mode(
+                conn_pub, instante, permitir_full=(mode == MODE_AUTO))
 
         window = janela_manual or resolve_window(modo_efetivo, instante)
 

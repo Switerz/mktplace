@@ -332,8 +332,13 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # Posicao: depois de `daily_tiktok` (a fonte) e antes do `health_check`
         # (que precisa reportar o resultado deste step na mesma execucao).
         #
-        # `--mode auto` decide full x backfill x incremental SOB o advisory
-        # lock, dentro do proprio sync. Zero retry: o orquestrador nao reexecuta
+        # `--mode daily` decide backfill x incremental SOB o advisory lock,
+        # dentro do proprio sync, e NUNCA escolhe full. Ate' OPS-RECOVERY-4
+        # (13/10/2026) era `--mode auto`: o full mensal (leitura de 246 s
+        # medida, desde 2025-06-04) era escolhido todo dia, estourava os 300 s,
+        # morria com duas auditorias em `running` e o incremental nunca rodava.
+        # O full continua devido e roda FORA deste step, com orcamento proprio.
+        # Zero retry: o orquestrador nao reexecuta
         # step algum, e este em particular NAO pode ser reexecutado as cegas —
         # um commit indeterminado deixa as auditorias em `running` de proposito.
         #
@@ -349,8 +354,10 @@ PIPELINES: dict[str, tuple[Step, ...]] = {
         # a publicacao passou a ser em LOTE nesta task, entao os 347 s do piloto
         # (dominados por 2.081 round-trips) nao valem mais como referencia. A
         # duracao real otimizada so' sera medida na Task 2/2 — 300 s e' envelope
-        # conservador ate la, nao uma estimativa.
-        Step("tiktok_order_discounts_daily", "pipelines.sync_tiktok_order_discounts_daily", ("--mode", "auto", "--apply"), timeout_seconds=300, preflight_source="tiktok_order_discounts_daily", depends_on=("daily_tiktok",), critical=True),
+        # conservador ate la, nao uma estimativa. A leitura do full de 20 s
+        # deixou de valer: em 13/10/2026 mediu 246 s (a fonte cresceu), e e'
+        # por isso que o full saiu daqui em vez de o envelope subir.
+        Step("tiktok_order_discounts_daily", "pipelines.sync_tiktok_order_discounts_daily", ("--mode", "daily", "--apply"), timeout_seconds=300, preflight_source="tiktok_order_discounts_daily", depends_on=("daily_tiktok",), critical=True),
         # Sempre roda por ultimo, mesmo se algo anterior falhou/bloqueou —
         # e' o resumo do estado real, precisa rodar para reportar a falha.
         # always_run + ser o ULTIMO item desta tupla e' o que garante

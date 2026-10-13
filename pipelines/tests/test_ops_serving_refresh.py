@@ -621,7 +621,7 @@ def test_source_max_do_tiktok_filtra_pela_mesma_allowlist_da_leitura_real():
 def test_source_max_do_ml_nao_filtra_marca_porque_a_leitura_real_tambem_nao():
     sql = sr.build_source_max_query(sr.TARGETS["ml"])
     assert "brand" not in sql
-    assert sr.source_max_params(sr.TARGETS["ml"]) == {}
+    assert "brands" not in sr.source_max_params(sr.TARGETS["ml"], HOJE)
     assert "brand = ANY" not in ml_sync.build_source_query()
 
 
@@ -827,3 +827,120 @@ def test_30_nenhuma_biblioteca_de_agendamento_ou_airflow():
     for termo in ("airflow", "dag", "schtasks", "register-scheduledtask",
                   "scheduledtask", "crontab", "apscheduler", "celery"):
         assert termo not in codigo, f"{termo!r} presente no wrapper"
+
+
+# ===========================================================================
+# OPS-RECOVERY-4 — teto do source_max por target
+# ===========================================================================
+
+def _timeout_executado(conn):
+    sets = [sql for sql, _ in conn.executed if "statement_timeout" in str(sql)]
+    assert len(sets) == 1, sets
+    return int(str(sets[0]).split("=")[1])
+
+
+def test_r4_ml_usa_teto_proprio_de_source_max():
+    """gold.ml_gestao_diaria e' VIEW: MAX(ref_date) mediu 51,9 s em 13/10/2026.
+    Com o teto global de 30 s o serving_ml falhava todo dia antes do CLI."""
+    target = sr.TARGETS["ml"]
+    conn = FakeConn(D1)
+    assert sr.read_source_max(target, conn) == D1
+    assert _timeout_executado(conn) == sr.ML_SOURCE_MAX_STATEMENT_TIMEOUT_MS
+    assert sr.ML_SOURCE_MAX_STATEMENT_TIMEOUT_MS >= 2 * 51_900
+
+
+def test_r4_tiktok_mantem_o_teto_global():
+    for nome in ("brand", "creator"):
+        conn = FakeConn(D1)
+        sr.read_source_max(sr.TARGETS[nome], conn)
+        assert _timeout_executado(conn) == sr.SOURCE_MAX_STATEMENT_TIMEOUT_MS == 30_000
+
+
+def test_r4_teto_do_ml_cabe_no_orcamento_do_filho():
+    """O source_max roda ANTES do filho; somado a ele, nao pode comer o
+    child_timeout, e os orcamentos de step/filho nao mudaram."""
+    t = sr.TARGETS["ml"]
+    assert (t.step_timeout_seconds, t.child_timeout_seconds) == (600, 540)
+    assert t.source_max_timeout_ms / 1000 < t.child_timeout_seconds / 4
+
+
+class _CursorQueCancela(FakeCursor):
+    def __init__(self, log, pgcode):
+        super().__init__(None, log)
+        self._pgcode = pgcode
+
+    def execute(self, sql, params=None):
+        self._log.append((sql, params))
+        if "MAX(" in sql:
+            erro = RuntimeError("canceling statement due to statement timeout")
+            erro.pgcode = self._pgcode
+            raise erro
+
+
+class _ConnQueCancela(FakeConn):
+    def __init__(self, pgcode):
+        super().__init__(None)
+        self._pgcode = pgcode
+
+    def cursor(self):
+        return _CursorQueCancela(self.executed, self._pgcode)
+
+
+def _run_cancelado(target, pgcode):
+    conn = _ConnQueCancela(pgcode)
+    runner = RunnerSpy()
+    codigo = sr.run_target(target, apply=False, today=HOJE,
+                           conn_factory=lambda: conn, runner=runner)
+    return codigo, runner, conn
+
+
+def test_r4_probe_do_ml_tem_piso_de_data_parametrizado():
+    t = sr.TARGETS["ml"]
+    sql = sr.build_source_max_query(t)
+    assert sql.endswith("WHERE ref_date >= %(piso)s")
+    assert sr.source_max_params(t, HOJE) == {
+        "piso": D1 - sr.timedelta(days=sr.ML_SOURCE_MAX_FLOOR_DAYS)}
+    conn = FakeConn(D1)
+    sr.read_source_max(t, conn, HOJE)
+    assert [p for s_, p in conn.executed if "MAX(" in str(s_)] == [
+        {"piso": D1 - sr.timedelta(days=14)}]
+
+
+def test_r4_probe_do_tiktok_nao_ganhou_piso():
+    for nome in ("brand", "creator"):
+        sql = sr.build_source_max_query(sr.TARGETS[nome])
+        assert "%(piso)s" not in sql
+        assert "piso" not in sr.source_max_params(sr.TARGETS[nome], HOJE)
+
+
+@pytest.mark.parametrize("pgcode", ["57014", "40001"])
+def test_r4_ml_com_probe_cancelado_vai_ate_d1_e_invoca_o_cli(pgcode, capsys):
+    codigo, runner, conn = _run_cancelado("ml", pgcode)
+    assert codigo == 0 and runner.count == 1
+    assert argv_value(runner.argv, "--date-to") == D1.isoformat()
+    assert conn.closed is True
+    assert "INDISPONIVEL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("nome", ["brand", "creator"])
+def test_r4_tiktok_com_probe_cancelado_continua_falhando(nome):
+    with pytest.raises(RuntimeError):
+        _run_cancelado(nome, "57014")
+
+
+def test_r4_ml_com_erro_que_nao_e_cancelamento_continua_falhando():
+    with pytest.raises(RuntimeError):
+        _run_cancelado("ml", "42P01")   # relacao inexistente: erro de dado
+
+
+def test_r4_queda_para_d1_so_e_segura_porque_o_cli_reprova_dia_sem_linha():
+    """O contrato que torna `probe_cancelado_usa_d1` seguro no `ml`: sem o
+    watermark, um dia faltando na Gold tem de reprovar ANTES de escrever."""
+    assert sr.TARGETS["ml"].probe_cancelado_usa_d1 is True
+    linha = {"ref_date": date(2026, 10, 10), "brand": "barbours"}
+    problemas = ml_sync.validate_source_rows(
+        [dict(linha, **{c: 1 for c in ml_sync.BUSINESS_COLUMNS
+                        if c not in ("ref_date", "brand")})],
+        date(2026, 10, 10), date(2026, 10, 12))
+    assert any("cobertura incompleta" in p for p in problemas)
+    assert [n for n, t in sr.TARGETS.items() if t.probe_cancelado_usa_d1] == ["ml"]

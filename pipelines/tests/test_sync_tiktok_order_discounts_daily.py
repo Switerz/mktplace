@@ -1253,3 +1253,77 @@ def test_w7_cli_aceita_mode_window():
         ["--mode", "window", "--date-from", "2026-09-29",
          "--date-to", "2026-10-12", "--apply"])
     assert args.mode == sync.MODE_WINDOW and args.apply
+
+
+# ===========================================================================
+# OPS-RECOVERY-4 — MODE_DAILY: o auto da rotina diaria nunca escolhe full
+# ===========================================================================
+
+
+def test_d1_daily_sem_backfill_recente_escolhe_backfill_nunca_full():
+    conn = FakeConn({"MAX(finished_at)": FakeResult([])})   # nenhum success
+    assert sync.decide_effective_mode(conn, AGORA, permitir_full=False) == (
+        sync.MODE_BACKFILL)
+    lidas = [p.get("fonte") for p in conn.params]
+    assert sync.FULL_AUDIT_SOURCE not in lidas, "daily nem consulta o full"
+
+
+def test_d2_daily_com_backfill_recente_escolhe_incremental():
+    recente = AGORA - timedelta(days=1)
+    conn = FakeConn({"MAX(finished_at)": FakeResult([recente])})
+    assert sync.decide_effective_mode(conn, AGORA, permitir_full=False) == (
+        sync.MODE_INCREMENTAL)
+
+
+def test_d3_auto_continua_escolhendo_full_quando_devido():
+    """O comportamento do `auto` nao mudou: o full mensal segue devido."""
+    conn = FakeConn({"MAX(finished_at)": FakeResult([])})
+    assert sync.decide_effective_mode(conn, AGORA) == sync.MODE_FULL
+
+
+def test_d4_dry_run_daily_exige_apply():
+    with pytest.raises(sync.DiscountSyncError, match="--mode daily exige --apply"):
+        sync.run_dry(sync.MODE_DAILY, AGORA)
+
+
+def test_d5_daily_nao_aceita_janela_explicita(monkeypatch):
+    def nunca(*_a, **_k):
+        raise AssertionError("abriu conexao apesar da janela explicita")
+
+    monkeypatch.setattr(sync, "LocalSession", nunca)
+    monkeypatch.setattr(sync, "DataMartSession", nunca)
+    with pytest.raises(sync.DiscountSyncError, match="obrigacao durável"):
+        sync.run_apply(sync.MODE_DAILY, AGORA, date(2026, 8, 1), date(2026, 8, 2))
+
+
+def test_d6_apply_daily_sem_full_no_mes_publica_backfill(monkeypatch):
+    """Sem full no mes e sem backfill recente: `auto` faria full; `daily` faz
+    backfill de 90 dias e abre as auditorias do backfill, nunca as do full."""
+    class DM(FakeSession):
+        def connection(self):
+            return FakeConn({"WITH raw_dedup": FakeResult([
+                _linha_fonte(date(2026, 8, 25), "apice")])})
+
+    pub = FakeSession(FakeConn({
+        "MAX(finished_at)": FakeResult([]),
+        "so_staging": FakeResult([{"so_staging": 0, "so_destino": 0}]),
+    }))
+    aud = FakeSession(FakeConn(
+        {"INSERT INTO audit.source_sync_run": FakeResult([1]),
+         "UPDATE audit.source_sync_run": FakeResult(rowcount=1)}))
+    sessoes = iter([pub, aud])
+    monkeypatch.setattr(sync, "LocalSession", lambda: next(sessoes))
+
+    r = sync.run_apply(sync.MODE_DAILY, AGORA, dm_factory=DM)
+
+    assert r["mode"] == sync.MODE_BACKFILL
+    assert r["date_from"] == date(2026, 6, 4) and r["date_to"] == date(2026, 9, 1)
+    abertas = [p["fonte"] for p, q in zip(aud._conn.params, aud._conn.sql)
+               if "INSERT INTO audit.source_sync_run" in q]
+    assert abertas == [sync.CANONICAL_AUDIT_SOURCE, sync.BACKFILL_AUDIT_SOURCE]
+    assert sync.FULL_AUDIT_SOURCE not in abertas
+
+
+def test_d7_cli_aceita_mode_daily():
+    args = sync.build_parser().parse_args(["--mode", "daily", "--apply"])
+    assert args.mode == sync.MODE_DAILY and args.apply
