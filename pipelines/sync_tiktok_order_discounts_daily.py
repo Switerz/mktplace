@@ -110,12 +110,25 @@ AUDIT_MARKETPLACE_ID = 1
 CANONICAL_AUDIT_SOURCE = "tiktok_order_discounts_daily"
 BACKFILL_AUDIT_SOURCE = CANONICAL_AUDIT_SOURCE + "_backfill"
 FULL_AUDIT_SOURCE = CANONICAL_AUDIT_SOURCE + "_full"
+#: Nome PROPRIO da recuperacao manual delimitada. Nenhuma obrigacao durável o
+#: le: `decide_effective_mode` so' conhece `_full` e `_backfill`, entao uma
+#: janela manual nunca faz o full mensal ou o backfill semanal parecerem
+#: cumpridos.
+WINDOW_AUDIT_SOURCE = CANONICAL_AUDIT_SOURCE + "_window"
 
 MODE_INCREMENTAL = "incremental"
 MODE_BACKFILL = "backfill"
 MODE_FULL = "full"
 MODE_AUTO = "auto"
-MODES = (MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL, MODE_AUTO)
+#: Recuperacao MANUAL de uma lacuna medida: exige --date-from/--date-to, nunca
+#: e' escolhido pelo `auto` e tem auditoria propria (WINDOW_AUDIT_SOURCE).
+MODE_WINDOW = "window"
+MODES = (MODE_INCREMENTAL, MODE_BACKFILL, MODE_FULL, MODE_AUTO, MODE_WINDOW)
+
+#: Teto da janela manual. A lacuna que motivou o modo (OPS-RECOVERY-3) tinha 14
+#: dias e leu a fonte em 33 s; 31 dias cobre um mes perdido sem virar um full
+#: disfarcado, que e' o que o `auto` ja' faz pelo caminho auditado certo.
+WINDOW_MAX_DAYS = 31
 
 #: Larguras das janelas, em dias ANTERIORES ao ultimo dia fechado. `closed_window`
 #: devolve janela inclusiva de `days_back + 1` dias terminando em D-1.
@@ -230,6 +243,33 @@ def resolve_window(mode: str, agora: datetime | None = None,
     return Window(inicio, fim)
 
 
+def resolve_manual_window(date_from: date | None, date_to: date | None,
+                          agora: datetime | None = None) -> Window:
+    """Janela do MODE_WINDOW. Funcao PURA: valida tudo antes de qualquer I/O.
+
+    Exige as duas datas, teto em D-1, inicio nao anterior ao primeiro dado
+    comprovado da fonte e no maximo WINDOW_MAX_DAYS dias.
+    """
+    if date_from is None or date_to is None:
+        raise DiscountSyncError(
+            "--mode window exige --date-from E --date-to: o modo existe para "
+            "recuperar uma lacuna medida, nunca uma janela implicita."
+        )
+    window = resolve_window(MODE_WINDOW, agora, date_from, date_to)
+    if window.date_from < FULL_MIN_DATE:
+        raise DiscountSyncError(
+            f"--date-from {window.date_from.isoformat()} anterior ao primeiro "
+            f"dado comprovado da fonte ({FULL_MIN_DATE.isoformat()})."
+        )
+    if window.days > WINDOW_MAX_DAYS:
+        raise DiscountSyncError(
+            f"janela manual de {window.days} dias excede o teto de "
+            f"{WINDOW_MAX_DAYS}: recarga longa e' trabalho do backfill ou do "
+            "full, que tem obrigacao durável propria."
+        )
+    return window
+
+
 def _inicio_mes_brt(agora: datetime | None = None) -> datetime:
     hoje = (agora or datetime.now(timezone.utc)).astimezone(OPERATIONAL_TZ).date()
     return datetime(hoje.year, hoje.month, 1, tzinfo=OPERATIONAL_TZ)
@@ -292,6 +332,8 @@ def audit_sources_for_mode(mode: str) -> tuple[str, ...]:
         return (CANONICAL_AUDIT_SOURCE, FULL_AUDIT_SOURCE)
     if mode == MODE_BACKFILL:
         return (CANONICAL_AUDIT_SOURCE, BACKFILL_AUDIT_SOURCE)
+    if mode == MODE_WINDOW:
+        return (CANONICAL_AUDIT_SOURCE, WINDOW_AUDIT_SOURCE)
     return (CANONICAL_AUDIT_SOURCE,)
 
 
@@ -906,7 +948,10 @@ def run_dry(mode: str, agora: datetime | None = None,
     # concordar mesmo se a chamada cruzar a meia-noite BRT.
     instante = agora or datetime.now(timezone.utc)
     teto = last_closed_date(instante)
-    window = resolve_window(mode, instante, date_from, date_to)
+    if mode == MODE_WINDOW:
+        window = resolve_manual_window(date_from, date_to, instante)
+    else:
+        window = resolve_window(mode, instante, date_from, date_to)
     fabrica = dm_factory or DataMartSession
     if fabrica is None:
         raise DiscountSyncError("Data Mart nao configurado.")
@@ -952,22 +997,26 @@ def run_apply(mode: str, agora: datetime | None = None,
     # ANTES do lock, ANTES da auditoria, ANTES de qualquer conexao: janela
     # explicita nao pode consumir obrigacao durável. `--mode full` com dois dias
     # gravaria `_full` + `success` e faria o full mensal parecer cumprido sem
-    # reconstruir historico algum.
-    if date_from is not None or date_to is not None:
+    # reconstruir historico algum. So' MODE_WINDOW aceita janela, e ele grava
+    # um nome de auditoria que nenhuma obrigacao le.
+    if mode != MODE_WINDOW and (date_from is not None or date_to is not None):
         raise DiscountSyncError(
             "janela explicita nao e' permitida com --apply: os modos "
             "incremental, backfill, full e auto tem obrigacao durável "
             "registrada em auditoria, e uma janela arbitraria a consumiria sem "
             "fazer o trabalho correspondente. Use --date-from/--date-to apenas "
-            "em dry-run, ou espere um modo manual com auditoria propria."
+            "em dry-run, ou --mode window para recuperar uma lacuna medida."
         )
+
+    instante = agora or datetime.now(timezone.utc)
+    janela_manual = (resolve_manual_window(date_from, date_to, instante)
+                     if mode == MODE_WINDOW else None)
 
     fabrica_dm = dm_factory or DataMartSession
     fabrica_neon = neon_factory or LocalSession
     if fabrica_dm is None:
         raise DiscountSyncError("Data Mart nao configurado.")
 
-    instante = agora or datetime.now(timezone.utc)
     teto = last_closed_date(instante)
     run_id = uuid.uuid4().hex[:32]
     sessao_pub = fabrica_neon()
@@ -984,7 +1033,7 @@ def run_apply(mode: str, agora: datetime | None = None,
         if mode == MODE_AUTO:
             modo_efetivo = decide_effective_mode(conn_pub, instante)
 
-        window = resolve_window(modo_efetivo, instante)
+        window = janela_manual or resolve_window(modo_efetivo, instante)
 
         ids = audit_start(sessao_audit.connection(),
                           audit_sources_for_mode(modo_efetivo), window)
