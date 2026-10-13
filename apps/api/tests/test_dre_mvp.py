@@ -63,7 +63,9 @@ def _pub(mes, canal, marca, componente, valor, *, sinal=None, status="reconcilia
         "competencia": mes, "canal": canal, "marca": marca, "componente": componente, "valor": valor,
         "sinal_origem": sinal, "cobertura": None, "provisorio_share": provisorio,
         "status_reconciliacao": "ausente_na_origem" if valor is None else status, "motivo": motivo,
-        "data_max_origem": datetime(mes.year, mes.month, 28, tzinfo=timezone.utc),
+        # Forma REAL da publicacao: data fiscal como meia-noite BRT = 03:00 UTC.
+        # Com 00:00 UTC o Pydantic aceitava e escondia o 500 de producao.
+        "data_max_origem": datetime(mes.year, mes.month, 28, 3, 0, tzinfo=timezone.utc),
         "publicado_em": publicado_em or PUBLICADO, "lote_id": 7, "lote_status": lote_status,
     }
 
@@ -424,7 +426,7 @@ def test_componente_publicado_expoe_data_as_of_e_publicado_em():
     c = celula("tiktok", m=mart("tiktok"))
     tx = c["componentes"]["taxas"]
     assert tx["publicado_em"] == PUBLICADO
-    assert tx["data_as_of"] == datetime(2026, 7, 28, tzinfo=timezone.utc)
+    assert tx["data_as_of"] == datetime(2026, 7, 28, 3, 0, tzinfo=timezone.utc)
     assert c["data_maxima"]["insumo_publicado_em"] == PUBLICADO
 
 
@@ -786,3 +788,29 @@ def test_rota_sem_banco_e_503():
     finally:
         app.dependency_overrides.pop(get_db, None)
     assert r.status_code == 503
+
+
+
+# ---------------------------------------------------------------------------
+# Datas atravessando o contrato HTTP (DRE-OPS-1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("instante,esperada", [
+    (datetime(2026, 7, 31, 3, 0, tzinfo=timezone.utc), date(2026, 7, 31)),   # meia-noite BRT
+    (datetime(2026, 7, 31, 2, 59, tzinfo=timezone.utc), date(2026, 7, 30)),  # ainda dia 30 em BRT
+    (date(2026, 7, 31), date(2026, 7, 31)),
+    (None, None),
+])
+def test_data_brt(instante, esperada):
+    assert dre.data_brt(instante) == esperada
+
+
+def test_rota_com_emissao_publicada_as_03h_utc_responde_200(cliente):
+    """A forma real da publicacao (03:00 UTC) atravessa o `response_model`.
+    Antes da correcao, a resposta inteira era recusada com 500."""
+    tc, _ = cliente
+    r = tc.get("/api/v1/dre", params={"ref_month": "2026-07"})
+    assert r.status_code == 200, r.text[:500]
+    ml = next(c for c in r.json()["por_canal"] if c["canal"] == "ml")
+    assert ml["data_maxima"]["cmv_ultima_emissao"] == "2026-07-28"
+    assert ml["componentes"]["cmv"]["data_as_of"].startswith("2026-07-28T03:00")

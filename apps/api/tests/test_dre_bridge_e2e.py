@@ -153,3 +153,27 @@ def test_tempo_de_resposta_so_com_neon(ambiente):
     # Banco local: o numero prova a ORDEM de grandeza (sem varredura de 3,8 GB),
     # nao a latencia de rede do Neon — essa e' medida no PR contra o Neon real.
     assert media_ms < 2000, media_ms
+
+
+
+def test_rota_http_serve_a_fotografia_publicada(ambiente, monkeypatch):
+    """Atravessa a rota HTTP inteira, com `response_model`, sobre a fotografia
+    que o publisher REAL gravou. O teste anterior chamava o servico direto e
+    nao passava pela validacao da resposta."""
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+    from app.routers import dre as dre_router
+
+    sessao = sessionmaker(bind=ambiente)()
+    app.dependency_overrides[get_db] = lambda: sessao
+    monkeypatch.setattr(dre_router, "today_brt", lambda: date(2026, 10, 13))
+    try:
+        r = TestClient(app).get("/api/v1/dre", params={"ref_month": "2026-07"})
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        sessao.close()
+    assert r.status_code == 200, r.text[:500]
+    ml = next(c for c in r.json()["por_canal"] if c["canal"] == "ml")
+    assert ml["data_maxima"]["cmv_ultima_emissao"] == "2026-07-31"
