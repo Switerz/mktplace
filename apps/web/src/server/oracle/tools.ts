@@ -14,9 +14,10 @@ import {
 } from "./envelope.ts";
 import { toolError } from "./errors.ts";
 import {
-  ALWAYS_APPLICABLE, ML_COMMISSION_MISSING, ML_PRODUCTS_CUMULATIVE,
-  scopeWarningToLimitation,
-  REGIONAL_COVERAGE, TIKTOK_CANCEL_NOT_MEASURED, TIKTOK_SETTLEMENT_DIRECTIONAL,
+  ALWAYS_APPLICABLE, ML_COMMISSION_PARTIAL_WINDOW, ML_PRODUCTS_CUMULATIVE,
+  mlCommissionMissing, scopeWarningToLimitation,
+  REGIONAL_COVERAGE, REGIONAL_UNITS_NOT_MEASURED,
+  TIKTOK_CANCEL_NOT_MEASURED, TIKTOK_SETTLEMENT_DIRECTIONAL,
   type Limitation,
 } from "./limitations.ts";
 import {
@@ -435,7 +436,8 @@ export const canaisTool: OracleTool = {
       "Use para comparar EFICIENCIA entre canais e marcas: ROAS, ACOS, investimento de ads sobre GMV, custo de marketplace e frete do vendedor, com medianas por canal.",
       "Granularidade: uma linha por marca x canal. Retorna o universo completo, nao e' top-N.",
       "Cada metrica traz 'applicable' e 'available': nao aplicavel (o canal nao opera esse custo) e' DIFERENTE de sem dado. Nenhum dos dois vira zero.",
-      "Limitacoes que devem ser ditas ao usuario: a comissao do Mercado Livre NAO existe no mart, e o custo do TikTok e' direcional (base de repasse difere do GMV em ~5,5%).",
+      "A comissao do Mercado Livre tem disponibilidade POR LINHA (marca x periodo): quando marketplace_cost_available vem false, ela nao foi carregada para aquela marca no periodo — diga isso ao usuario, nunca trate como custo zero. 'Disponivel' significa valor em pelo menos um dia do periodo, nao cobertura integral; o que se aplica a cada resposta vem em data.limitations.",
+      "O custo do TikTok e' direcional (base de repasse difere do GMV em ~5,5%).",
       "NAO use para totais de GMV (use torre_desempenho_marketplaces), para produtos, nem para margem.",
     ].join(" "),
     inputSchema: canaisInput,
@@ -492,14 +494,17 @@ export const canaisTool: OracleTool = {
       brands_with_data: numOrNull(m.brands_with_data),
     }));
 
-    // Limitacoes DERIVADAS da resposta, nao presumidas.
+    // Limitacoes DERIVADAS da resposta, nao presumidas. A comissao ML e' por
+    // linha: a limitacao nomeia as marcas sem carga, para que uma marca coberta
+    // nao esconda outra descoberta (nem o contrario).
     const limitations: Limitation[] = [];
-    if (
-      rows.some(
-        (r) => r.channel === "ml" && r.marketplace_cost_applicable && !r.marketplace_cost_available,
-      )
-    ) {
-      limitations.push(ML_COMMISSION_MISSING);
+    const mlRows = rows.filter((r) => r.channel === "ml" && r.marketplace_cost_applicable);
+    const mlMissing = mlRows.filter((r) => !r.marketplace_cost_available).map((r) => r.brand);
+    if (mlMissing.length > 0) {
+      limitations.push(mlCommissionMissing(mlMissing));
+    }
+    if (mlRows.some((r) => r.marketplace_cost_available)) {
+      limitations.push(ML_COMMISSION_PARTIAL_WINDOW);
     }
     if (rows.some((r) => r.channel === "tiktok" && r.marketplace_cost_available)) {
       limitations.push(TIKTOK_SETTLEMENT_DIRECTIONAL);
@@ -762,7 +767,7 @@ export const qualidadeTool: OracleTool = {
     description: [
       "Use ANTES de confiar em qualquer numero, e para responder 'os dados estao atualizados?', 'ate quando temos dado?', 'posso confiar nisso?', ou quando o usuario questionar uma divergencia.",
       "ATENCAO: esta e' uma resposta COMPOSTA de duas janelas distintas — o frescor olha o mes corrente (freshness.checked_period) e os indicadores de qualidade olham o mes fechado anterior (quality_indicators_checked_period). Por isso meta.period e' nulo: nao existe uma janela unica.",
-      "Para o TikTok Shop o cancelamento NAO e' mensurado — vem como 0 e e' marcado com measured=false. Nunca leia isso como 0% de cancelamento.",
+      "Para o TikTok Shop o cancelamento NAO e' mensurado — a fonte devolve nulo (ou 0), e a tool marca measured=false com value_pct nulo. Nunca leia isso como 0% de cancelamento.",
       "Inclui `data.produtos_shopee_scope`: a confiabilidade do mart de PRODUTOS da Shopee na competencia dos indicadores — fonte distinta da diaria. Se `definitive` vier false, os numeros por produto daquele mes ainda vao mudar.",
       "NAO devolve GMV, ranking nem receita: e' uma tool de metadados.",
     ].join(" "),
@@ -942,6 +947,7 @@ export const regioesTool: OracleTool = {
       "Granularidade: UF (27 estados + XX para desconhecida), agregada no periodo, ordenada por GMV.",
       "AVISO OBRIGATORIO: a cobertura regional e' menor que a de canais — nem todo pedido tem UF. Os totais aqui NAO reconciliam com torre_desempenho_marketplaces, e a diferenca e' de cobertura, nao erro de calculo. Nenhum ajuste artificial e' feito para forcar igualdade.",
       "Os canais sem cobertura regional vem listados em channels_without_regional_coverage, lidos da propria fonte.",
+      "A fonte regional pode estar defasada: meta.refreshed_at e' a ultima carga, e meta.warnings avisa quando ela e' anterior ao fim do periodo. units_sold vem sempre nulo (a fonte nao distingue zero de ausencia).",
       "NAO use para totais oficiais da empresa, nem para qualquer coisa em grao de pedido, cliente, cidade ou CEP.",
     ].join(" "),
     inputSchema: regioesInput,
@@ -973,7 +979,8 @@ export const regioesTool: OracleTool = {
         uf: row.uf,
         gmv: numOrNull(row.gmv),
         orders: numOrNull(row.orders),
-        units_sold: numOrNull(row.units_sold),
+        // Zero e ausencia indistinguiveis na fonte (REGIONAL_UNITS_NOT_MEASURED).
+        units_sold: null,
         uf_fill_pct: numOrNull(row.uf_fill_pct),
         coverage_level: row.coverage_level ?? null,
       }))
@@ -983,6 +990,27 @@ export const regioesTool: OracleTool = {
     // Lido da fonte — nunca uma lista fixa de canais no nosso codigo.
     const semCobertura = summary.channels_sem_cobertura_regional ?? [];
 
+    // `refreshed_at` da fonte regional e' MAX(ingested_at) das linhas da
+    // janela. Duas consequencias derivadas do payload, sem data fixa no codigo:
+    // - null => nenhuma linha no escopo; os zeros do resumo sao COALESCE de
+    //   conjunto vazio, ou seja ausencia, e nao podem sair como venda zero;
+    // - carga anterior ao fim do periodo => os dias seguintes nao tem como
+    //   estar na base. Medido em 2026-10-13: a fonte parou em 29/09, e a
+    //   Shopee de setembro saia como R$ 0 sem nenhum aviso.
+    const refreshedAt = summary.refreshed_at ?? null;
+    const scopeEmpty = refreshedAt === null;
+    const freshnessWarnings: string[] = [];
+    if (scopeEmpty) {
+      freshnessWarnings.push(
+        "Nenhuma linha regional no escopo e periodo consultados: GMV, pedidos e UFs vem nulos porque e' ausencia de carga, nao venda zero.",
+      );
+    } else if (refreshedAt.slice(0, 10) < period.end) {
+      freshnessWarnings.push(
+        `A fonte regional foi carregada pela ultima vez em ${refreshedAt.slice(0, 10)} (UTC), antes do fim do periodo (${period.end}): os dias seguintes nao estao na base e os totais estao INCOMPLETOS. Nao trate a diferenca como queda de vendas.`,
+      );
+    }
+    const summaryNum = (v: unknown) => (scopeEmpty ? null : numOrNull(v));
+
     const env = buildEnvelope({
       period: asWindow(period),
       filtersApplied: echoFilters(summary.filters, {
@@ -991,25 +1019,25 @@ export const regioesTool: OracleTool = {
         uf: input.ufs ?? null,
       }),
       metricDefinition: `${GMV_DEFINITION} Atribuido a UF apenas quando o pedido tem UF conhecida.`,
-      refreshedAt: summary.refreshed_at ?? null,
+      refreshedAt,
       coverage:
         "UFs com venda no periodo, ordenadas por GMV — cobertura regional PARCIAL, nao reconciliavel com a Gerencial",
       limit: input.limite,
       returnedCount: rows.length,
       // Sem total verdadeiro do backend aqui: nao inventamos um.
-      warnings: periodWarnings(period, [REGIONAL_COVERAGE.description]),
+      warnings: periodWarnings(period, [REGIONAL_COVERAGE.description, ...freshnessWarnings]),
       data: {
         summary: {
-          gmv: numOrNull(summary.gmv),
-          orders: numOrNull(summary.orders),
-          units_sold: numOrNull(summary.units_sold),
-          ufs_with_sales: numOrNull(summary.ufs_com_venda),
+          gmv: summaryNum(summary.gmv),
+          orders: summaryNum(summary.orders),
+          units_sold: null,
+          ufs_with_sales: summaryNum(summary.ufs_com_venda),
           uf_fill_pct: numOrNull(summary.uf_fill_pct),
           coverage_level: summary.coverage_level ?? null,
         },
         channels_without_regional_coverage: semCobertura,
         by_uf: rows,
-        limitations: [REGIONAL_COVERAGE],
+        limitations: [REGIONAL_COVERAGE, REGIONAL_UNITS_NOT_MEASURED],
       },
     });
 
