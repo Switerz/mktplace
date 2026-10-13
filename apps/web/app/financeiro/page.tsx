@@ -299,7 +299,7 @@ function FinanceiroPageInner() {
     <PageContainer>
       <PageHeader
         title="Financeiro"
-        subtitle="Receita, taxas, mídia e frete por canal — e o que ainda falta para fechar a margem."
+        subtitle="Receita e custos conhecidos por canal; a margem ainda não fecha."
         icon={Wallet}
         meta={
           <>
@@ -366,10 +366,10 @@ function FinanceiroPageInner() {
                     valor: k?.tiktok_settlement != null ? fmtBrl(k.tiktok_settlement) : "—",
                     pct: k?.tiktok_avg_settlement_pct ?? null,
                     pctTexto: k?.tiktok_avg_settlement_pct != null ? `${fmtPct(k.tiktok_avg_settlement_pct)} do GMV` : null,
-                    detalhe: "Competências podem divergir do GMV.",
+                    detalhe: "Competências podem divergir.",
                   },
-                  { rotulo: "Ads (mídia)", ausente: "Não disponível nesta fonte" },
-                  { rotulo: "Frete do seller", ausente: "Não disponível nesta fonte" },
+                  { rotulo: "Ads (mídia)", ausente: "Sem fonte" },
+                  { rotulo: "Frete do seller", ausente: "Sem fonte" },
                 ]}
               />
             )}
@@ -391,8 +391,8 @@ function FinanceiroPageInner() {
                         // carga parcial o total parece completo e sai baixo.
                         detalhe:
                           mlSemTarifa > 0
-                            ? `Parcial: ${mlSemTarifa} ${mlSemTarifa === 1 ? "marca sem tarifa" : "marcas sem tarifa"} no período. Só a tarifa do marketplace — não inclui Ads nem frete.`
-                            : "Só a tarifa do marketplace — não inclui Ads nem frete.",
+                            ? `Parcial: ${mlSemTarifa} ${mlSemTarifa === 1 ? "marca sem tarifa" : "marcas sem tarifa"}. Só a tarifa; sem Ads e frete.`
+                            : "Só a tarifa; sem Ads e frete.",
                       }
                     : { rotulo: "Tarifa ML", ausente: "Não carregada neste período" },
                   {
@@ -411,7 +411,7 @@ function FinanceiroPageInner() {
                     rotulo: "Ads + frete / GMV",
                     pct: k?.ml_total_cost_pct ?? null,
                     pctTexto: k?.ml_total_cost_pct != null ? fmtPct(k.ml_total_cost_pct) : "—",
-                    detalhe: "Não inclui a tarifa ML (linha acima).",
+                    detalhe: "Não inclui a tarifa ML.",
                   },
                 ]}
               />
@@ -442,7 +442,7 @@ function FinanceiroPageInner() {
                       </>
                     ),
                   },
-                  { rotulo: "Frete do seller", ausente: "Só por marca (tabela abaixo)" },
+                  { rotulo: "Frete do seller", ausente: "Só por marca" },
                 ]}
               />
             )}
@@ -454,10 +454,10 @@ function FinanceiroPageInner() {
               <CircleSlash aria-hidden="true" className="mt-px h-3.5 w-3.5 shrink-0" />
               <span>
                 <strong className="font-semibold text-ink">Margem ainda não fechada.</strong>{" "}
-                Componentes conhecidos não somam margem. Fora desta tela: CMV, impostos, devoluções e estornos
+                Fora da conta: CMV, impostos, devoluções
                 {showTiktok && (
                   <>
-                    , frete do TikTok e afiliados do TikTok (
+                    , frete e afiliados do TikTok (
                     <Link href={buildHref("/canais#afiliados")} className="font-semibold text-accent underline-offset-2 hover:underline">
                       ver em Canais
                     </Link>

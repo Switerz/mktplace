@@ -57,6 +57,9 @@ function SidebarInner() {
   const hrefFor = (pageHref: string) => hrefForPage(pageHref, preservedQuery);
 
   const [modo, setModo] = useState<ModoSidebar>("auto");
+  // A largura so' anima DEPOIS de aplicar a preferencia salva: sem isto, quem
+  // salvou "recolhida" via a barra encolher sozinha a cada carga.
+  const [animar, setAnimar] = useState(false);
 
   // Preferencia salva so' vale em tela larga. `localStorage` LEVANTA em janela
   // anonima com cookies bloqueados: falha cai no modo automatico.
@@ -68,6 +71,18 @@ function SidebarInner() {
     } catch {
       /* sem armazenamento: segue automatico */
     }
+  }, []);
+
+  useEffect(() => {
+    // Dois quadros: o primeiro pinta a largura salva, o segundo liga a animacao.
+    let id2 = 0;
+    const id1 = window.requestAnimationFrame(() => {
+      id2 = window.requestAnimationFrame(() => setAnimar(true));
+    });
+    return () => {
+      window.cancelAnimationFrame(id1);
+      window.cancelAnimationFrame(id2);
+    };
   }, []);
 
   // Fora da tela larga, trocar de rota devolve ao automatico (recolhida).
@@ -104,7 +119,7 @@ function SidebarInner() {
     // Duas camadas de proposito: a EXTERNA estica com o flex do shell e pinta
     // a faixa ate o rodape; a INTERNA gruda no topo e rola sozinha.
     <aside
-      className={`hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell transition-[width] duration-200 ${largura}`}
+      className={`hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell ${animar ? "transition-[width] duration-200" : ""} ${largura}`}
     >
       <div className="sticky top-0 flex h-screen flex-col">
         {/* Identidade + botao de recolher */}
@@ -120,6 +135,7 @@ function SidebarInner() {
             type="button"
             onClick={alternar}
             aria-label="Recolher navegação"
+            aria-expanded={true}
             title="Recolher navegação"
             className={`h-8 w-8 shrink-0 items-center justify-center rounded-md text-shell-faint transition-colors hover:bg-shell-raised hover:text-shell-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-shell-accent ${soAberta === "block" ? "flex" : soAberta === "hidden" ? "hidden" : "hidden xl:flex"}`}
           >
@@ -133,6 +149,7 @@ function SidebarInner() {
             type="button"
             onClick={alternar}
             aria-label="Expandir navegação"
+            aria-expanded={false}
             title="Expandir navegação"
             className="mx-auto flex h-8 w-8 items-center justify-center rounded-md text-shell-faint transition-colors hover:bg-shell-raised hover:text-shell-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-shell-accent"
           >

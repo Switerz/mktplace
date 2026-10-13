@@ -42,7 +42,12 @@ export default function Popover({
   const raiz = useRef<HTMLDivElement>(null);
   const gatilho = useRef<HTMLButtonElement>(null);
 
-  const fechar = () => setAberto(false);
+  // Fechar por ESCOLHA devolve o foco ao gatilho: o botao escolhido some com
+  // o painel, e sem isto o foco de quem usa teclado cairia no <body>.
+  const fechar = () => {
+    setAberto(false);
+    gatilho.current?.focus();
+  };
 
   useEffect(() => {
     if (!aberto) return;
@@ -93,10 +98,15 @@ export default function Popover({
           className={`h-4 w-4 shrink-0 text-ink-faint transition-transform ${aberto ? "rotate-180" : ""}`}
         />
       </button>
+      {/* `tabIndex={-1}`: clique no respiro do painel (ou, no Safari, num
+          botao que nao recebe foco ao clicar) leva o foco para o PROPRIO
+          painel. Sem isso o `onBlur` acima via `relatedTarget = null` e
+          fechava o painel no meio do clique. */}
       <div
         id={id}
+        tabIndex={-1}
         hidden={!aberto}
-        className={`absolute top-full z-40 mt-1.5 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-surface p-1.5 shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] ${largura} ${
+        className={`absolute top-full z-40 mt-1.5 outline-none max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-surface p-1.5 shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] ${largura} ${
           alinhar === "fim" ? "right-0" : "left-0"
         }`}
       >

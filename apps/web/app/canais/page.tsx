@@ -1213,7 +1213,7 @@ function CanaisPageInner() {
       )}
 
       {/* ── Placeholder Shopee quando filtro=shopee e sem dados ── */}
-      {filter.length === 1 && showShopee && dataIsFresh && !hasShopeeData && (
+      {showShopee && dataIsFresh && !hasShopeeData && (
         <div id="shopee" className="scroll-mt-24 bg-surface border border-dashed border-line-strong rounded-xl p-6 flex flex-col items-center gap-2 text-center">
           <p className="text-sm font-semibold text-ink-muted">Shopee — Dados de canal em integração</p>
           <p className="text-xs text-ink-faint max-w-md">
