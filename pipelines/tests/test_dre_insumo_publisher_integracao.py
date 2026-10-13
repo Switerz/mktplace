@@ -389,6 +389,7 @@ def test_contraprova_sem_a_guarda_o_lote_seria_apagado(bancos, monkeypatch):
     assert fotografia(alvo) != "vazia"
     _apagar_receita(alvo)
     monkeypatch.setattr(P, "recusas_de_escopo", lambda *a, **k: [])
+    monkeypatch.setattr(P, "recusas_de_marca", lambda *a, **k: [])  # as duas guardas pegam este cenario
     publicar(alvo, fonte)
     assert fotografia(alvo) == "vazia"
     assert auditoria(alvo)[-1]["status"] == "success"
@@ -403,3 +404,66 @@ def test_mes_canal_sem_vendas_declarado_publica_e_remove_so_ele(bancos):
     canais = {k[0] for k in linhas(alvo)}
     assert canais == {"tiktok", "ml"}
     assert auditoria(alvo)[-1]["status"] == "success"
+
+
+
+# ---------------------------------------------------------------------------
+# Marca ja publicada nao some em silencio (DRE-REVIEW-FINAL)
+# ---------------------------------------------------------------------------
+
+def _apagar_marca(alvo, loja_id, marketplace_id):
+    with alvo.begin() as c:
+        c.execute(text("DELETE FROM marts.fact_marketplace_daily_performance "
+                       "WHERE date BETWEEN '2026-07-01' AND '2026-07-31' AND loja_id = :l AND marketplace_id = :m"),
+                  {"l": loja_id, "m": marketplace_id})
+
+
+def test_marca_que_some_de_canal_ativo_e_recusada_e_preserva_a_fotografia(bancos, capsys):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    assert ("tiktok", "barbours", "cmv") in linhas(alvo)
+    _apagar_marca(alvo, loja_id=2, marketplace_id=1)  # barbours some do TikTok; kokeshi continua
+    rc = P.main(["--de", "2026-07", "--ate", "2026-07", "--apply"], engines=lambda: (alvo, fonte),
+                hoje=date(2026, 10, 13))
+    saida = capsys.readouterr().out
+    assert rc == P.EXIT_RECONCILIACAO
+    assert "chave publicada desapareceu: 2026-07:tiktok:barbours" in saida
+    assert fotografia(alvo) == antes
+    aud = auditoria(alvo)
+    assert aud[-1]["status"] == "failed" and "2026-07:tiktok:barbours" in aud[-1]["error_message"]
+
+
+def test_remocao_explicita_apaga_so_a_chave_e_fica_auditada(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    _apagar_marca(alvo, loja_id=2, marketplace_id=1)
+    res = publicar(alvo, fonte, remover=frozenset({(JUL, "tiktok", "barbours")}))
+    assert res["remover_marca"] == ["2026-07:tiktok:barbours"]
+    ln = linhas(alvo)
+    assert not any(k[0] == "tiktok" and k[1] == "barbours" for k in ln)
+    assert ("tiktok", "kokeshi", "cmv") in ln and ("ml", "kokeshi", "cmv") in ln
+    aud = auditoria(alvo)[-1]
+    assert aud["status"] == "success"
+    assert aud["error_message"] == "excecoes autorizadas: remover_marca=2026-07:tiktok:barbours"
+
+
+def test_contraprova_sem_a_guarda_por_marca_a_chave_some_em_silencio(bancos, monkeypatch):
+    """Sem o guardrail, a mesma republicacao apaga a barbours do TikTok de julho
+    e fecha `success` -- exatamente o que a guarda impede."""
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    _apagar_marca(alvo, loja_id=2, marketplace_id=1)
+    monkeypatch.setattr(P, "recusas_de_marca", lambda *a, **k: [])
+    publicar(alvo, fonte)
+    assert not any(k[0] == "tiktok" and k[1] == "barbours" for k in linhas(alvo))
+    aud = auditoria(alvo)[-1]
+    assert aud["status"] == "success" and aud["error_message"] is None
+
+
+def test_dry_run_tambem_aponta_a_chave_que_sumiria(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    _apagar_marca(alvo, loja_id=2, marketplace_id=1)
+    resumo, _ = P.diagnosticar(alvo, fonte, [JUL], ["tiktok", "ml", "shopee"])
+    assert any("2026-07:tiktok:barbours" in m for m in resumo["recusas"])

@@ -40,7 +40,8 @@ def repasse(marca="kokeshi", taxa=-290_000, frete=-12_000, afiliado=-90_000, res
             "tx_afiliado_maior_taxa": viol, "transacoes": 1000, "atualizado_em": datetime(2026, 10, 1, 3, 0)}
 
 
-def lote(esp, cmvs, reps=(), contraprova=None, canais=None, comps=(JUL,), sem_vendas=frozenset()):
+def lote(esp, cmvs, reps=(), contraprova=None, canais=None, comps=(JUL,), sem_vendas=frozenset(),
+         publicadas=frozenset(), remover=frozenset()):
     """Por padrao, os canais pedidos sao os que tem celula esperada — o mesmo que
     o operador faria. Testes de escopo passam `canais` explicitamente."""
     if canais is None:
@@ -48,7 +49,8 @@ def lote(esp, cmvs, reps=(), contraprova=None, canais=None, comps=(JUL,), sem_ve
         canais = [c for c in P.CANAIS if P.MKT_ID[c] in presentes] or ["ml"]
     return P.montar_lote(esperado=list(esp), cmv=list(cmvs),
                          contraprova=list(contraprova if contraprova is not None else [cp(c) for c in cmvs]),
-                         repasse=list(reps), canais=list(canais), comps=list(comps), sem_vendas=sem_vendas)
+                         repasse=list(reps), canais=list(canais), comps=list(comps), sem_vendas=sem_vendas,
+                         publicadas=publicadas, remover=remover)
 
 
 def linha(lt, canal, marca, comp):
@@ -235,6 +237,15 @@ def test_universo_vazio_so_passa_com_todos_os_pares_declarados():
     (["--sem-vendas", "2026-07"], "use YYYY-MM:canal"),
     (["--sem-vendas", "2026-07:amazon"], "canal fora de --canais"),
     (["--de", "2026-07", "--ate", "2026-07", "--sem-vendas", "2026-06:ml"], "fora da janela"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:ml"], "use YYYY-MM:canal:marca"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:ml:kok:x"], "use YYYY-MM:canal:marca"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-7:ml:kokeshi"], "use YYYY-MM"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-06:ml:kokeshi"], "fora da janela"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:amazon:kokeshi"], "canal fora de --canais"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:ml:"], "marca invalida"),
+    (["--de", "2026-07", "--ate", "2026-07", "--remover-marca", "2026-07:ml:Kokeshi Ltda"], "marca invalida"),
+    (["--de", "2026-07", "--ate", "2026-07", "--sem-vendas", "2026-07:ml", "--remover-marca", "2026-07:ml:kokeshi"],
+     "ja esta declarado em --sem-vendas"),
 ])
 def test_cli_recusa_argumento_invalido_com_mensagem(argv, trecho, capsys):
     chamou = []
@@ -249,8 +260,8 @@ def test_cli_canais_validos_sao_normalizados_na_ordem_canonica():
     import argparse
 
     args = argparse.Namespace(de="2026-07", ate="2026-07", meses=4, canais=" shopee ,ml", sem_vendas=None)
-    comps, canais, sem = P.validar_argumentos(args, date(2026, 10, 13))
-    assert comps == [JUL] and canais == ["ml", "shopee"] and sem == frozenset()
+    comps, canais, sem, remover = P.validar_argumentos(args, date(2026, 10, 13))
+    assert comps == [JUL] and canais == ["ml", "shopee"] and sem == frozenset() and remover == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +363,51 @@ def test_publisher_nao_importa_alembic_nem_app():
 def test_pacote_dre_entra_na_wheel_dos_pipelines():
     texto = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     assert '"pipelines.dre"' in texto
+
+
+# ---------------------------------------------------------------------------
+# Marca ja publicada nao some em silencio (DRE-REVIEW-FINAL)
+# ---------------------------------------------------------------------------
+
+KOK, BAR = (JUL, "ml", "kokeshi"), (JUL, "ml", "barbours")
+
+
+def test_marca_publicada_que_some_de_par_ativo_e_recusada_e_nomeada():
+    lt = lote([esperado("ml", "kokeshi")], [cmv("ml", "kokeshi")], publicadas=frozenset({KOK, BAR}))
+    assert any("chave publicada desapareceu: 2026-07:ml:barbours" in m for m in lt.recusas)
+    assert any("--remover-marca 2026-07:ml:barbours" in m for m in lt.recusas)
+
+
+def test_remocao_explicita_libera_a_chave():
+    lt = lote([esperado("ml", "kokeshi")], [cmv("ml", "kokeshi")], publicadas=frozenset({KOK, BAR}),
+              remover=frozenset({BAR}))
+    assert lt.recusas == []
+
+
+def test_remocao_de_chave_com_receita_e_contradicao():
+    lt = lote([esperado("ml", "kokeshi")], [cmv("ml", "kokeshi")], publicadas=frozenset({KOK}),
+              remover=frozenset({KOK}))
+    assert any("ainda tem receita" in m for m in lt.recusas)
+
+
+def test_remocao_de_chave_nao_publicada_e_recusada():
+    lt = lote([esperado("ml", "kokeshi")], [cmv("ml", "kokeshi")], publicadas=frozenset({KOK}),
+              remover=frozenset({BAR}))
+    assert any("nao esta publicada" in m for m in lt.recusas)
+
+
+def test_marca_nova_nao_e_problema():
+    lt = lote([esperado("ml", "kokeshi"), esperado("ml", "barbours")],
+              [cmv("ml", "kokeshi"), cmv("ml", "barbours")], publicadas=frozenset({KOK}))
+    assert lt.recusas == []
+
+
+def test_par_declarado_sem_vendas_autoriza_no_grao_do_par():
+    lt = lote([], [], canais=["ml"], publicadas=frozenset({KOK, BAR}), sem_vendas=frozenset({(JUL, "ml")}))
+    assert lt.recusas == []
+
+
+def test_excecoes_autorizadas_sao_texto_auditavel():
+    assert P.excecoes_autorizadas(frozenset(), frozenset()) is None
+    txt = P.excecoes_autorizadas(frozenset({(JUL, "shopee")}), frozenset({BAR}))
+    assert txt == "excecoes autorizadas: sem_vendas=2026-07:shopee; remover_marca=2026-07:ml:barbours"

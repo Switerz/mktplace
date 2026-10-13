@@ -45,6 +45,8 @@ Nenhum pedido, nota, SKU, settlement ou dado pessoal entra; um teste confere as 
 python -m pipelines.dre.insumo_publisher --de 2026-07 --ate 2026-07          # dry-run
 python -m pipelines.dre.insumo_publisher --meses 4 --apply                     # 4 meses fechados
 python -m pipelines.dre.insumo_publisher --meses 4 --apply --sem-vendas 2026-08:shopee   # mes/canal sem vendas, declarado
+python -m pipelines.dre.insumo_publisher --de 2026-07 --ate 2026-07 --apply \
+    --remover-marca 2026-07:tiktok:barbours                                        # remocao explicita de uma marca
 ```
 
 | Garantia | Como |
@@ -55,7 +57,8 @@ python -m pipelines.dre.insumo_publisher --meses 4 --apply --sem-vendas 2026-08:
 | Advisory lock | `pg_try_advisory_xact_lock(918140025)` antes de ler a fonte; ocupado → sai 75 sem escrever |
 | Recusa antes da escrita | Chave repetida, CMV ≠ agregado mensal independente (`gold.nf_vendas_plataforma_mensal`), CMV negativo, cobertura/provisório fora de [0, 1], identidade do repasse violada, afiliado > taxa |
 | Escopo nunca vazio em silêncio | Universo esperado vazio, ou par competência × canal sem nenhuma célula com receita na Torre → **recusa antes do `DELETE`** (sai 65, auditoria `failed`, fotografia anterior intacta byte a byte). Mês/canal legitimamente sem vendas só passa declarado com `--sem-vendas YYYY-MM:canal`, e a declaração é conferida: se houver receita, recusa |
-| Argumentos validados | `--meses <= 0`, `--de` posterior a `--ate`, competência fora de `YYYY-MM`, canal desconhecido, `--canais` vazio e `--sem-vendas` malformado ou fora da janela → erro do argparse (sai 2) **antes de abrir qualquer conexão** |
+| Marca publicada não some em silêncio | Toda chave `competência × canal × marca` já publicada é comparada com o novo universo esperado. Se uma marca some de um mês/canal que continua existindo → **recusa antes do `DELETE`**, sai 65, auditoria `failed`, a chave aparece por extenso (`chave publicada desapareceu: 2026-07:tiktok:barbours`). Só passa com `--remover-marca YYYY-MM:canal:marca`, conferido (a chave tem de estar publicada e sem receita) e registrado na auditoria do lote |
+| Argumentos validados | `--meses <= 0`, `--de` posterior a `--ate`, competência fora de `YYYY-MM`, canal desconhecido, `--canais` vazio, `--sem-vendas` e `--remover-marca` malformados, fora da janela, com canal fora de `--canais`, marca que não é `brand_key` ou par já declarado `--sem-vendas` → erro do argparse (sai 2) **antes de abrir qualquer conexão** |
 | Ausência ≠ zero | Chave esperada sem dado na origem → linha `NULL` `ausente_na_origem` |
 | Sem fotografia velha | A publicação substitui o escopo `competências × canais` inteiro; chave que sumiu é apagada |
 | Idempotente | Mesma fonte → mesmo conteúdo; só `lote_id`/`publicado_em` mudam |
@@ -64,6 +67,25 @@ python -m pipelines.dre.insumo_publisher --meses 4 --apply --sem-vendas 2026-08:
 
 Códigos de saída: `0` ok · `65` reconciliação recusada · `69` origem indisponível · `75` lock ocupado ·
 `78` migration ausente · `1` inesperado.
+
+### Procedimento: remover uma marca de uma competência já publicada
+
+Uma marca pode deixar um canal daqui para a frente, mas isso não apaga em silêncio uma competência histórica fechada.
+
+1. A publicação agendada falha com o código 65 e a mensagem `chave publicada desapareceu: YYYY-MM:canal:marca`. A
+   fotografia anterior continua servida, até vencer em 48 h.
+2. Investigar na Torre por que a marca não tem mais receita naquele mês/canal: carga quebrada, loja desativada em
+   `marts.dim_loja` ou remapeamento de marca.
+3. Se for defeito de carga, corrigir a carga e deixar a próxima execução agendada republicar. **Não** usar a exceção.
+4. Se a saída for legítima, rodar **à mão**, com aprovação registrada:
+   `python -m pipelines.dre.insumo_publisher --de YYYY-MM --ate YYYY-MM --remover-marca YYYY-MM:canal:marca`
+   (dry-run). Conferir no resumo `remover_marca` e `recusas: []`. Depois, o mesmo comando com `--apply`.
+5. Conferir em `audit.source_sync_run` a linha `success` com
+   `error_message = 'excecoes autorizadas: remover_marca=YYYY-MM:canal:marca'`. Esse é o rastro auditável. Em lote
+   `success`, `error_message` só carrega exceções autorizadas.
+
+A exceção é recusada se a chave ainda tiver receita, se não estiver publicada ou se o par já estiver em `--sem-vendas`.
+`--sem-vendas` autoriza no grão do par (todas as marcas daquele mês/canal); `--remover-marca`, no grão da marca.
 
 **Estado do dado não é recusa:** CMV cuja receita fiscal não bate com o GMV (Shopee hoje) é publicado com
 `nao_reconciliado`, e o serving o recusa.
@@ -111,7 +133,8 @@ Regras do contrato preservadas: afiliado TikTok `somavel = false`; comissão do 
 3. **não cria Environment** nem Connection nova: usa as variáveis já previstas (`DATABASE_URL`, `DATAMART_DATABASE_URL`);
 4. **não toca o banco de metadados do Airflow**: o pacote instalado não traz `alembic`, `app` nem `tests` (verificado na
    wheel), e o publisher só fala com os dois DSNs acima;
-5. `--sem-vendas` nunca entra fixo na DAG: é decisão de operador, caso a caso.
+5. `--sem-vendas` e `--remover-marca` **nunca** entram na DAG: são decisões de operador, caso a caso, e executadas à
+   mão (procedimento no §3).
 
 ## 6. SQL offline da migration (revisado)
 
@@ -179,12 +202,13 @@ Pontos revisados:
 | Dry-run real de jul/2026 (Neon + Data Mart, leitura) | 63 linhas, 0 recusas; 14 CMV (4 `nao_reconciliado` = Shopee); 5 marcas × 7 componentes do repasse; resíduo 0; 0 transações com afiliado > taxa |
 | Serving novo alimentado por esse lote, contra o #66 | **0 diferenças** nas 14 células canal × marca (componentes, status, classificação, margem; tolerância R$ 0,50) |
 | Latência da rota contra o Neon real, sem Data Mart | mediana ~1,1 s (1 ou 4 meses), contra 8–30 s no #66 |
-| Testes do publisher (puros) | 51, em SQLAlchemy 2.0 e 1.4.54 |
-| Integração em PostgreSQL 16 descartável | 21, em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs, universo vazio, canal que some, `--sem-vendas` |
+| Testes do publisher (puros) | 66, em SQLAlchemy 2.0 e 1.4.54 |
+| Integração em PostgreSQL 16 descartável | 25, em SQLAlchemy 2.0 e 1.4.54: dry-run sem escrita, idempotência, snapshot parcial, recusa, rollback integral, origem indisponível, lock ocupado, migration ausente, up/down/up, CHECKs, universo vazio, canal que some, `--sem-vendas` |
 | Contraprova do universo vazio | no código anterior a esta revisão, julho apagado da Torre → `--apply` saía **0 (success)**; com a guarda desligada, a fotografia é apagada (teste executável); com a guarda, sai 65 e a fotografia fica igual byte a byte |
 | Ponta a ponta (publica e serve) | 5: serve sem Data Mart, comissão ML uma vez, lote vencido, latência local |
 | Serving (testes da API) | 86 |
-| Mutações | publicar com recusa, não apagar escopo, ignorar lock, ignorar idade, ignorar status do lote, padrão voltar ao mês anterior, resumo pelo lote mais novo, `--meses` sem validação, guarda de escopo desligada: todas pegas |
+| Marca que some de canal ativo | integração: republicação recusada (65), `md5` da fato idêntico, auditoria `failed` nomeando `2026-07:tiktok:barbours`; com `--remover-marca`, só a chave sai e a auditoria `success` registra a exceção; contraprova: sem o guardrail a chave some em silêncio com `success` |
+| Mutações | publicar com recusa, não apagar escopo, ignorar lock, ignorar idade, ignorar status do lote, padrão voltar ao mês anterior, resumo pelo lote mais novo, `--meses` sem validação, guarda de escopo desligada, guarda por marca desligada: todas pegas |
 | Suíte da API | mesmas 43 falhas da `main` (worktree sem `.env`), nenhuma nova |
 
 Achados no caminho:

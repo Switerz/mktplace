@@ -48,6 +48,16 @@ fotografia anterior por nada. Mes/canal legitimamente sem vendas precisa ser
 declarado com `--sem-vendas YYYY-MM:canal` -- e a declaracao e' conferida: se
 houver receita, a publicacao tambem e' recusada.
 
+MARCA JA PUBLICADA NAO SOME EM SILENCIO
+---------------------------------------
+Numa republicacao, toda chave `competencia x canal x marca` ja publicada e'
+comparada com o novo universo esperado. Se uma marca some de um mes/canal que
+continua existindo, a publicacao e' RECUSADA antes do DELETE e a chave e'
+nomeada. Uma marca pode deixar um canal daqui para a frente, mas isso nao
+apaga uma competencia historica fechada: a remocao exige
+`--remover-marca YYYY-MM:canal:marca`, conferida (a chave tem de estar
+publicada e sem receita) e registrada na auditoria do lote.
+
 Codigos de saida: 0 ok; 65 reconciliacao recusada; 69 fonte indisponivel;
 75 lock ocupado; 78 migration ausente; 1 erro inesperado.
 """
@@ -262,9 +272,13 @@ SQL_AUDIT_ABRE = text("""
     VALUES (:fonte, 'running', :agora, :min_date, :max_date)
     RETURNING sync_run_id
 """)
+#: Em `success`, `error_message` carrega as EXCECOES AUTORIZADAS do lote
+#: (`--sem-vendas`, `--remover-marca`) -- e' o rastro auditavel de quem
+#: autorizou apagar o que. NULL quando nao houve excecao.
 SQL_AUDIT_FECHA = text("""
     UPDATE audit.source_sync_run
-       SET status = 'success', finished_at = :agora, rows_extracted = :extraidas, rows_loaded = :gravadas
+       SET status = 'success', finished_at = :agora, rows_extracted = :extraidas, rows_loaded = :gravadas,
+           error_message = :excecoes
      WHERE sync_run_id = :lote
 """)
 SQL_AUDIT_FALHA = text("""
@@ -280,6 +294,10 @@ SQL_INSERE = text(f"""
         provisorio_share, status_reconciliacao, motivo, data_max_origem, publicado_em, lote_id, procedencia)
     VALUES (:competencia, :canal, :marca, :componente, :valor, :sinal_origem, :cobertura,
         :provisorio_share, :status_reconciliacao, :motivo, :data_max_origem, :publicado_em, :lote_id, :procedencia)
+""")
+SQL_PUBLICADAS = text(f"""
+    SELECT DISTINCT competencia, canal, marca
+    FROM {TABELA} WHERE competencia = ANY(:competencias) AND canal = ANY(:canais)
 """)
 SQL_ATUAL = text(f"""
     SELECT competencia, canal, marca, componente, valor, status_reconciliacao
@@ -371,9 +389,42 @@ def recusas_de_escopo(chaves_esperadas: set, comps: list[date], canais: list[str
     return recusas
 
 
+def rotulo_chave(chave: tuple) -> str:
+    """`(competencia, canal, marca)` -> `YYYY-MM:canal:marca`, o grao do CLI."""
+    return f"{chave[0].isoformat()[:7]}:{chave[1]}:{chave[2]}"
+
+
+def recusas_de_marca(chaves_esperadas: set, publicadas: set, sem_vendas: frozenset = frozenset(),
+                     remover: frozenset = frozenset()) -> list[str]:
+    """Recusas que impedem uma marca ja publicada de sumir em silencio.
+
+    `publicadas` sao as chaves `(competencia, canal, marca)` que a fotografia
+    atual tem para o escopo. Uma delas fora do novo universo esperado so' pode
+    ser apagada com `--remover-marca` explicito. Par inteiro declarado
+    `--sem-vendas` ja e' a autorizacao no grao do par.
+    """
+    recusas: list[str] = []
+    for chave in sorted(publicadas):
+        if (chave[0], chave[1]) in sem_vendas or chave in chaves_esperadas or chave in remover:
+            continue
+        rot = rotulo_chave(chave)
+        recusas.append(
+            f"chave publicada desapareceu: {rot} (mes/canal continua no escopo). Competencia fechada nao "
+            f"perde marca em silencio; para remover, declare --remover-marca {rot}"
+        )
+    for chave in sorted(remover):
+        rot = rotulo_chave(chave)
+        if chave in chaves_esperadas:
+            recusas.append(f"--remover-marca {rot}: a chave ainda tem receita na Torre")
+        elif chave not in publicadas:
+            recusas.append(f"--remover-marca {rot}: a chave nao esta publicada; nada a remover")
+    return recusas
+
+
 def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict],
                 repasse: list[dict], canais: list[str], comps: list[date],
-                sem_vendas: frozenset = frozenset()) -> Lote:
+                sem_vendas: frozenset = frozenset(), publicadas: frozenset = frozenset(),
+                remover: frozenset = frozenset()) -> Lote:
     """Transforma a leitura em linhas da fato e lista as recusas.
 
     Recusa (a publicacao inteira aborta) quando:
@@ -384,7 +435,8 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
       * alguma transacao tem afiliado maior que a propria taxa.
 
       * o universo esperado, ou um par competencia x canal, esta vazio sem
-        declaracao explicita (`recusas_de_escopo`).
+        declaracao explicita (`recusas_de_escopo`);
+      * uma chave ja publicada some sem `--remover-marca` (`recusas_de_marca`).
 
     NAO recusa — e grava com status — o CMV cuja receita fiscal nao bate com o
     GMV da Torre: isso e' estado do dado (Shopee hoje), nao defeito de carga.
@@ -411,6 +463,7 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
         if canal in canais:
             esp[(_mes_de(r["competencia"]), canal, r["marca"])] = _dec(r["gmv"])
     lote.recusas.extend(recusas_de_escopo(set(esp), comps, canais, sem_vendas))
+    lote.recusas.extend(recusas_de_marca(set(esp), set(publicadas), sem_vendas, remover))
 
     # Contraprova do CMV — mesma chave, mesmo total, nos dois sentidos.
     for k in set(cmv_idx) | set(cp_idx):
@@ -571,8 +624,18 @@ def _diff(atual: list[dict], novas: list[dict]) -> dict:
     }
 
 
+def excecoes_autorizadas(sem_vendas: frozenset, remover: frozenset) -> Optional[str]:
+    """Texto auditavel das excecoes do lote; None quando nao ha."""
+    partes = []
+    if sem_vendas:
+        partes.append("sem_vendas=" + ",".join(sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas)))
+    if remover:
+        partes.append("remover_marca=" + ",".join(sorted(rotulo_chave(k) for k in remover)))
+    return ("excecoes autorizadas: " + "; ".join(partes)) if partes else None
+
+
 def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str],
-                 sem_vendas: frozenset = frozenset()) -> dict:
+                 sem_vendas: frozenset = frozenset(), remover: frozenset = frozenset()) -> dict:
     """Dry-run: le as duas pontas, monta, reconcilia e compara. ZERO escrita."""
     with alvo_engine.connect() as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
@@ -581,15 +644,18 @@ def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]
         atual = _rows(conn, SQL_ATUAL, {"competencias": comps, "canais": canais}) if existe else []
         conn.rollback()
     cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
+    publicadas = frozenset((_mes_de(r["competencia"]), r["canal"], r["marca"]) for r in atual)
     lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
-                       comps=comps, sem_vendas=sem_vendas)
+                       comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover)
     return _resumo(lote, comps, canais, modo="dry-run", aplicado=False, tabela_existe=bool(existe),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
+                   remover_marca=sorted(rotulo_chave(k) for k in remover),
                    diff=_diff(atual, lote.linhas) if existe else None), lote
 
 
 def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
              sem_vendas: frozenset = frozenset(),
+             remover: frozenset = frozenset(),
              agora: Optional[datetime] = None,
              antes_do_commit: Optional[Callable[[Any], None]] = None) -> dict:
     """`--apply`: transacao unica no Neon, lock antes da leitura, recusa antes da escrita.
@@ -607,16 +673,22 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
             lote_id = conn.execute(SQL_AUDIT_ABRE, {"fonte": SOURCE_NAME, "agora": agora,
                                                     "min_date": comps[0], "max_date": ultimo_dia(comps[-1])}).scalar_one()
             esperado = _esperado(conn, comps, canais)
+            # Fotografia atual lida DENTRO da transacao e sob o lock: e' contra
+            # ela que a guarda por marca compara o novo universo.
+            publicadas = frozenset(
+                (_mes_de(r["competencia"]), r["canal"], r["marca"])
+                for r in _rows(conn, SQL_PUBLICADAS, {"competencias": comps, "canais": canais}))
             cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
             lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
-                               comps=comps, sem_vendas=sem_vendas)
+                               comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover)
             if lote.recusas:  # ANTES do DELETE: recusa nunca apaga a fotografia
                 raise PublicacaoRecusada(lote.recusas)
             apagadas = conn.execute(SQL_APAGA_ESCOPO, {"competencias": comps, "canais": canais}).rowcount
             for ln in lote.linhas:
                 conn.execute(SQL_INSERE, {**ln, "publicado_em": agora, "lote_id": lote_id})
             fechou = conn.execute(SQL_AUDIT_FECHA, {"agora": agora, "extraidas": lote.extraidas,
-                                                    "gravadas": len(lote.linhas), "lote": lote_id}).rowcount
+                                                    "gravadas": len(lote.linhas), "lote": lote_id,
+                                                    "excecoes": excecoes_autorizadas(sem_vendas, remover)}).rowcount
             if fechou != 1:
                 raise RuntimeError(f"auditoria do lote {lote_id} nao fechou ({fechou} linha[s])")
             if antes_do_commit is not None:
@@ -625,7 +697,8 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
         _registrar_falha(alvo_engine, comps, exc, agora)
         raise
     return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas,
-                   sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas))
+                   sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
+                   remover_marca=sorted(rotulo_chave(k) for k in remover))
 
 
 def _registrar_falha(alvo_engine, comps: list[date], exc: BaseException, agora: datetime) -> None:
@@ -652,7 +725,10 @@ def _parse_mes(s: str) -> date:
     return date(int(partes[0]), int(partes[1]), 1)
 
 
-def validar_argumentos(args, hoje: date) -> tuple[list[date], list[str], frozenset]:
+_MARCA_VALIDA = re.compile(r"^[a-z0-9_]+$")
+
+
+def validar_argumentos(args, hoje: date) -> tuple[list[date], list[str], frozenset, frozenset]:
     """Escopo do CLI. Levanta ValueError com mensagem clara; nunca devolve escopo vazio."""
     if (args.de is None) != (args.ate is None):
         raise ValueError("--de e --ate vao juntos")
@@ -687,7 +763,24 @@ def validar_argumentos(args, hoje: date) -> tuple[list[date], list[str], frozens
         if m not in comps:
             raise ValueError(f"--sem-vendas {item!r}: competencia fora da janela publicada")
         sem_vendas.add((m, canal))
-    return comps, canais, frozenset(sem_vendas)
+
+    remover = set()
+    for item in getattr(args, "remover_marca", None) or []:
+        partes = item.split(":")
+        if len(partes) != 3:
+            raise ValueError(f"--remover-marca {item!r}: use YYYY-MM:canal:marca")
+        m_txt, canal, marca = partes
+        m = _parse_mes(m_txt)
+        if canal not in canais:
+            raise ValueError(f"--remover-marca {item!r}: canal fora de --canais")
+        if m not in comps:
+            raise ValueError(f"--remover-marca {item!r}: competencia fora da janela publicada")
+        if not _MARCA_VALIDA.match(marca):
+            raise ValueError(f"--remover-marca {item!r}: marca invalida (use o brand_key, ex.: kokeshi)")
+        if (m, canal) in sem_vendas:
+            raise ValueError(f"--remover-marca {item!r}: o par ja esta declarado em --sem-vendas")
+        remover.add((m, canal, marca))
+    return comps, canais, frozenset(sem_vendas), frozenset(remover)
 
 
 def url_psycopg2(url: str) -> str:
@@ -729,22 +822,24 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
     ap.add_argument("--canais", default="tiktok,ml,shopee")
     ap.add_argument("--sem-vendas", action="append", metavar="YYYY-MM:canal",
                     help="declara mes/canal legitimamente sem receita na Torre (repetivel)")
+    ap.add_argument("--remover-marca", action="append", metavar="YYYY-MM:canal:marca",
+                    help="autoriza apagar uma marca ja publicada que saiu do mes/canal (repetivel, auditado)")
     ap.add_argument("--apply", action="store_true", help="escreve no Neon; sem ele e' dry-run")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
     hoje = hoje or datetime.now(TZ_BRT).date()
     try:
-        comps, canais, sem_vendas = validar_argumentos(args, hoje)
+        comps, canais, sem_vendas, remover = validar_argumentos(args, hoje)
     except ValueError as exc:
         ap.error(str(exc))
 
     alvo, fonte = (engines or _engines)()
     try:
         if args.apply:
-            resumo = publicar(alvo, fonte, comps, canais, sem_vendas=sem_vendas)
+            resumo = publicar(alvo, fonte, comps, canais, sem_vendas=sem_vendas, remover=remover)
         else:
-            resumo, _ = diagnosticar(alvo, fonte, comps, canais, sem_vendas=sem_vendas)
+            resumo, _ = diagnosticar(alvo, fonte, comps, canais, sem_vendas=sem_vendas, remover=remover)
     except PublicacaoRecusada as exc:
         print(json.dumps({"status": "recusado", "motivos": exc.motivos}, ensure_ascii=False, indent=1))
         return EXIT_RECONCILIACAO
