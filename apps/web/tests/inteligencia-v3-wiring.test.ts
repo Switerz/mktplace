@@ -244,12 +244,13 @@ test("32. nenhuma dependencia nova no package.json", () => {
   //   OM1  @modelcontextprotocol/server  SDK oficial do MCP (runtime da rota)
   //   OM1  zod                           validacao de input/output das tools
   //   OM2  jose                          verificacao de JWT/JWKS do Auth0
+  //   UX-TORRE-B2B-1  lucide-react       vocabulario de icones do shell e das telas
   // Todas sao de runtime por necessidade: a rota e' server-side e o build da
   // Vercel precisa delas em `dependencies`, nao em `devDependencies`.
   assert.deepEqual(
     deps,
-    ["@modelcontextprotocol/server", "jose", "next", "react", "react-dom", "recharts", "zod"],
-    "o conjunto de dependencias de runtime so muda por gate declarado (V3-1A: nenhuma; OM1: server+zod; OM2: jose)",
+    ["@modelcontextprotocol/server", "jose", "lucide-react", "next", "react", "react-dom", "recharts", "zod"],
+    "o conjunto de dependencias de runtime so muda por gate declarado (V3-1A: nenhuma; OM1: server+zod; OM2: jose; UX-TORRE-B2B-1: lucide-react)",
   );
   assert.ok(!("xlsx" in (pkg.dependencies ?? {})), "xlsx foi removido no U4 e nao volta");
 });

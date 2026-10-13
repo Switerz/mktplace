@@ -55,9 +55,7 @@ import type { TrendMetric } from "@/lib/gerencial/request-key";
 import type { TrendGranularityRequest } from "@/lib/api-client";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
-import MarketplaceFilter from "@/components/MarketplaceFilter";
-import BrandFilter from "@/components/BrandFilter";
-import DateRangeFilter from "@/components/DateRangeFilter";
+import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import KpiDrilldownContent from "@/components/KpiDrilldownContent";
 import InsightDrilldownContent, { type PulseView } from "@/components/InsightDrilldownContent";
@@ -321,22 +319,7 @@ function GerencialInner() {
         live={headerLive}
         loading={sources.anyLoading}
       >
-        <div className="flex items-start gap-2 flex-wrap min-w-0">
-          <MarketplaceFilter value={filters.channels} onChange={(channels) => setFilters({ channels })} />
-          <BrandFilter value={filters.brands} onChange={(brandKeys) => setFilters({ brands: brandKeys })} />
-        </div>
-        <div className="flex items-center gap-2 min-w-0 flex-wrap">
-          {sources.anyLoading && (
-            <span className="text-xs text-violet-400 animate-pulse shrink-0">Atualizando…</span>
-          )}
-          <DateRangeFilter
-            dateFrom={filters.dateFrom}
-            dateTo={filters.dateTo}
-            compare={filters.compare}
-            onChange={(v) => setFilters(v)}
-            onCompareChange={(compare) => setFilters({ compare })}
-          />
-        </div>
+        <GlobalFilterControls filters={filters} onChange={setFilters} loading={sources.anyLoading} />
       </GerencialHeader>
 
       <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -506,7 +489,7 @@ function GerencialInner() {
           const row = volumeRows.find((r) => r.channel === dialog.channel);
           if (!row) {
             return (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-ink-faint">
                 Sem dados de qualidade para {CHANNEL_LABEL[dialog.channel]} no período e filtros selecionados.
               </p>
             );
@@ -598,7 +581,7 @@ function GerencialInner() {
 
 export default function Gerencial() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-[#f8f7ff]" />}>
+    <Suspense fallback={<div className="min-h-screen bg-canvas" />}>
       <GerencialInner />
     </Suspense>
   );

@@ -37,8 +37,28 @@ interface Props<T extends string> {
   aoEscolher: (valor: T) => void;
   /** `compacto` esconde o texto no mobile e mantem so' o icone. */
   compacto?: boolean;
+  /** So' o icone em qualquer largura; o texto continua no nome acessivel. */
+  soIcone?: boolean;
+  /**
+   * UX-TORRE-B2B-1 — `shell` pinta sobre a moldura navy (rodape da sidebar).
+   * Mesmo comportamento, mesmo alvo de 44px; muda so' a superficie.
+   */
+  tom?: "padrao" | "shell";
   className?: string;
 }
+
+const PELE = {
+  padrao: {
+    trilho: "border-line bg-raised",
+    ativo: "bg-surface font-semibold text-ink shadow-sm ring-1 ring-line-strong",
+    inativo: "text-ink-muted hover:bg-surface/70 hover:text-ink",
+  },
+  shell: {
+    trilho: "border-shell-line bg-shell-raised/60",
+    ativo: "bg-shell-active font-semibold text-shell-ink ring-1 ring-shell-line",
+    inativo: "text-shell-faint hover:bg-shell-raised hover:text-shell-ink",
+  },
+} as const;
 
 export default function Segmented<T extends string>({
   rotulo,
@@ -47,9 +67,12 @@ export default function Segmented<T extends string>({
   valor,
   aoEscolher,
   compacto = false,
+  soIcone = false,
+  tom = "padrao",
   className = "",
 }: Props<T>) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const pele = PELE[tom];
 
   const andar = (de: number, passo: number) => {
     const destino = (de + passo + opcoes.length) % opcoes.length;
@@ -62,7 +85,7 @@ export default function Segmented<T extends string>({
       role="radiogroup"
       aria-label={rotuladoPor ? undefined : rotulo}
       aria-labelledby={rotuladoPor}
-      className={`inline-flex items-center gap-0.5 rounded-lg border border-line bg-raised p-0.5 ${className}`}
+      className={`inline-flex items-center gap-0.5 rounded-lg border p-0.5 ${pele.trilho} ${className}`}
     >
       {opcoes.map((o, i) => {
         const ativo = o.valor === valor;
@@ -95,13 +118,11 @@ export default function Segmented<T extends string>({
               }
             }}
             className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-md px-3 text-sm transition-colors ${
-              ativo
-                ? "bg-surface font-semibold text-ink shadow-sm ring-1 ring-line-strong"
-                : "text-ink-muted hover:bg-surface/70 hover:text-ink"
+              ativo ? pele.ativo : pele.inativo
             }`}
           >
             {o.icone}
-            <span className={compacto ? "hidden sm:inline" : undefined}>{o.texto}</span>
+            <span className={soIcone ? "sr-only" : compacto ? "hidden sm:inline" : undefined}>{o.texto}</span>
           </button>
         );
       })}

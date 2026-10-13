@@ -25,8 +25,10 @@ import type { Marketplace } from "@/lib/mock-data";
 import type { MergedBucket } from "@/lib/gerencial/trend-series";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
-import { CHANNEL_STROKE, TOTAL_STROKE } from "@/lib/gerencial/channel-colors";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import { fmtBrlFull, fmtNumber } from "@/lib/formatters";
+import { temaDoGrafico } from "@/lib/chart-theme";
+import { useTema } from "@/components/theme/ThemeProvider";
 
 interface Props {
   buckets: MergedBucket[];
@@ -90,10 +92,10 @@ function ChartTooltip({
   const bucket = payload[0]?.payload;
   const cmp = bucket?.comparison ?? null;
   return (
-    <div className="bg-white border border-violet-100 rounded-xl shadow-lg px-3 py-2 text-xs min-w-[168px]">
-      <p className="font-semibold text-slate-700">{label}</p>
+    <div className="bg-surface border border-line rounded-xl shadow-lg px-3 py-2 text-xs min-w-[168px]">
+      <p className="font-semibold text-ink-muted">{label}</p>
       {showComparisonTotal && (
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Período atual</p>
+        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide mb-1">Período atual</p>
       )}
       {!showComparisonTotal && <span className="block mb-1.5" />}
       <ul className="flex flex-col gap-0.5">
@@ -101,46 +103,45 @@ function ChartTooltip({
           const channel = row.dataKey.replace("values.", "") as Marketplace;
           return (
             <li key={channel} className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 text-slate-500">
+              <span className="flex items-center gap-1.5 text-ink-faint">
                 <span
                   aria-hidden="true"
-                  className="w-2 h-2 rounded-full shrink-0"
-                  style={{ background: CHANNEL_STROKE[channel] }}
+                  className={`w-2 h-2 rounded-full shrink-0 ${CHANNEL_DOT[channel]}`}
                 />
                 {CHANNEL_LABEL[channel]}
               </span>
-              <span className="tabular-nums font-medium text-slate-800">
-                {row.value == null ? <span className="text-slate-400">sem dado</span> : formatValue(row.value, metric)}
+              <span className="tabular-nums font-medium text-ink">
+                {row.value == null ? <span className="text-ink-faint">sem dado</span> : formatValue(row.value, metric)}
               </span>
             </li>
           );
         })}
       </ul>
       {showTotal && totalRow?.value != null && (
-        <p className="mt-1.5 pt-1.5 border-t border-violet-100 flex items-center justify-between gap-3">
-          <span className="text-slate-500">Total</span>
-          <span className="tabular-nums font-semibold text-slate-900">{formatValue(totalRow.value, metric)}</span>
+        <p className="mt-1.5 pt-1.5 border-t border-line flex items-center justify-between gap-3">
+          <span className="text-ink-faint">Total</span>
+          <span className="tabular-nums font-semibold text-ink">{formatValue(totalRow.value, metric)}</span>
         </p>
       )}
       {showComparisonTotal && (
-        <div className="mt-1.5 pt-1.5 border-t border-slate-200">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Período anterior</p>
+        <div className="mt-1.5 pt-1.5 border-t border-line">
+          <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Período anterior</p>
           {cmp ? (
             <>
-              <p className="text-xs text-slate-500 tabular-nums">{cmp.label} · {cmp.date}</p>
+              <p className="text-xs text-ink-faint tabular-nums">{cmp.label} · {cmp.date}</p>
               <p className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Total anterior</span>
-                <span className="tabular-nums font-medium text-slate-700">
-                  {cmp.total != null ? formatValue(cmp.total, metric) : <span className="text-slate-400">incompleto</span>}
+                <span className="text-ink-faint">Total anterior</span>
+                <span className="tabular-nums font-medium text-ink-muted">
+                  {cmp.total != null ? formatValue(cmp.total, metric) : <span className="text-ink-faint">incompleto</span>}
                 </span>
               </p>
             </>
           ) : (
-            <p className="text-xs text-slate-400">Sem ponto correspondente na janela anterior.</p>
+            <p className="text-xs text-ink-faint">Sem ponto correspondente na janela anterior.</p>
           )}
         </div>
       )}
-      <p className="mt-1.5 text-xs text-slate-500">Clique para abrir o detalhe do período</p>
+      <p className="mt-1.5 text-xs text-ink-faint">Clique para abrir o detalhe do período</p>
     </div>
   );
 }
@@ -173,6 +174,8 @@ export default function EvolutionChart({
   // espessura, sem sair do grafico (o contexto de comparacao continua legivel).
   const isolating = highlightedChannel != null;
   const dim = (channel: Marketplace) => isolating && channel !== highlightedChannel;
+  // SVG nao le classe de token: a cor resolvida vem da paleta do tema.
+  const tema = temaDoGrafico(useTema().resolvido);
 
   return (
     <ResponsiveContainer width="100%" height="100%">
@@ -187,10 +190,10 @@ export default function EvolutionChart({
           if (point?.date) onSelectBucket(point.date);
         }}
       >
-        <CartesianGrid strokeDasharray="3 3" stroke="#f3f0ff" vertical={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke={tema.grade} vertical={false} />
         <XAxis
           dataKey="label"
-          tick={{ fontSize: 12, fill: "#64748b" }}
+          tick={{ fontSize: 12, fill: tema.eixo }}
           axisLine={false}
           tickLine={false}
           interval={interval}
@@ -200,7 +203,7 @@ export default function EvolutionChart({
         />
         <YAxis
           tickFormatter={(v: number) => axisTick(v, metric)}
-          tick={{ fontSize: 12, fill: "#64748b" }}
+          tick={{ fontSize: 12, fill: tema.eixo }}
           axisLine={false}
           tickLine={false}
           width={metric === "gmv" ? 62 : 48}
@@ -215,7 +218,7 @@ export default function EvolutionChart({
             type="monotone"
             dataKey="total"
             name="Total"
-            stroke={TOTAL_STROKE}
+            stroke={tema.total}
             strokeWidth={2.25}
             strokeOpacity={isolating ? 0.18 : 1}
             dot={false}
@@ -232,7 +235,7 @@ export default function EvolutionChart({
             type="monotone"
             dataKey="comparison.total"
             name="Total do período anterior"
-            stroke="#94a3b8"
+            stroke={tema.referencia}
             strokeWidth={1.75}
             strokeDasharray="6 4"
             strokeOpacity={isolating ? 0.15 : 0.9}
@@ -248,7 +251,7 @@ export default function EvolutionChart({
             type="monotone"
             dataKey={`values.${channel}`}
             name={CHANNEL_LABEL[channel]}
-            stroke={CHANNEL_STROKE[channel]}
+            stroke={tema.canais[channel]}
             strokeWidth={dim(channel) ? 1 : isolating ? 2.5 : showTotal ? 1.5 : 2}
             strokeOpacity={dim(channel) ? 0.2 : 1}
             strokeDasharray={isolating ? undefined : showTotal ? "4 3" : undefined}

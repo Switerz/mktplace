@@ -85,14 +85,14 @@ export default function BrandChannelMatrix({
   if (loading) {
     return (
       <section
-        className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3 animate-pulse"
+        className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3 animate-pulse"
         role="status"
         aria-busy="true"
       >
         <span className="sr-only">Carregando matriz marca × canal…</span>
-        <div className="h-3 w-52 bg-violet-100 rounded" />
+        <div className="h-3 w-52 bg-accent-soft rounded" />
         {Array.from({ length: 4 }, (_, i) => (
-          <div key={i} className="h-8 w-full bg-violet-50 rounded" />
+          <div key={i} className="h-8 w-full bg-accent-soft rounded" />
         ))}
       </section>
     );
@@ -101,17 +101,17 @@ export default function BrandChannelMatrix({
   // Somente erro de /brands impede a matriz inteira.
   if (error) {
     return (
-      <section className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+      <section className="bg-raised border border-line rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h2 className="text-sm font-semibold text-slate-700">Marca × Canal</h2>
-          <p className="text-xs text-slate-500">
+          <h2 className="text-sm font-semibold text-ink-muted">Marca × Canal</h2>
+          <p className="text-xs text-ink-faint">
             Desempenho por marca indisponível nesta carga. Os demais blocos do período seguem exibidos.
           </p>
         </div>
         <button
           type="button"
           onClick={onRetry}
-          className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 min-h-11 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+          className="text-xs font-semibold text-ink-muted border border-line-strong rounded-lg px-3 min-h-11 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           Tentar novamente
         </button>
@@ -121,9 +121,9 @@ export default function BrandChannelMatrix({
 
   if (matrix.rows.length === 0 || matrix.channels.length === 0) {
     return (
-      <section className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4">
-        <h2 className="text-sm font-semibold text-slate-700 mb-1">Marca × Canal</h2>
-        <p className="text-xs text-slate-500">Sem marcas com dado no período e filtros selecionados.</p>
+      <section className="bg-surface border border-line rounded-xl p-4">
+        <h2 className="text-sm font-semibold text-ink-muted mb-1">Marca × Canal</h2>
+        <p className="text-xs text-ink-faint">Sem marcas com dado no período e filtros selecionados.</p>
       </section>
     );
   }
@@ -131,13 +131,13 @@ export default function BrandChannelMatrix({
   return (
     <section
       aria-labelledby="matriz-heading"
-      className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3"
+      className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3"
     >
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <h2 id="matriz-heading" className="text-sm font-semibold text-slate-700">
+        <h2 id="matriz-heading" className="text-sm font-semibold text-ink-muted">
           Marca × Canal
         </h2>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-ink-faint">
           Intensidade e participação calculadas dentro de cada canal
         </p>
       </div>
@@ -150,8 +150,8 @@ export default function BrandChannelMatrix({
             canal abre a distribuição daquele canal entre as marcas.
           </caption>
           <thead>
-            <tr className="border-b border-violet-100">
-              <th scope="col" className="text-left py-2 pr-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <tr className="border-b border-line">
+              <th scope="col" className="text-left py-2 pr-3 text-xs font-semibold uppercase tracking-wide text-ink-faint">
                 Marca
               </th>
               {matrix.channels.map((channel) => (
@@ -161,20 +161,20 @@ export default function BrandChannelMatrix({
                     onClick={() => onOpenChannelHeader(channel)}
                     aria-haspopup="dialog"
                     aria-label={`${CHANNEL_LABEL[channel]} — abrir distribuição do canal entre as marcas`}
-                    className="w-full min-h-11 text-right rounded-lg px-2 py-1 hover:bg-violet-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 transition-colors"
+                    className="w-full min-h-11 text-right rounded-lg px-2 py-1 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                   >
-                    <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <span className="block text-xs font-semibold uppercase tracking-wide text-ink-faint">
                       {CHANNEL_LABEL[channel]}
                     </span>
-                    <span className="block text-xs font-medium text-slate-500 tabular-nums">
+                    <span className="block text-xs font-medium text-ink-faint tabular-nums">
                       {fmtBrlFull(matrix.channelTotals[channel] ?? 0)}
                     </span>
                   </button>
                 </th>
               ))}
-              <th scope="col" className="text-right py-2 pl-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <th scope="col" className="text-right py-2 pl-3 text-xs font-semibold uppercase tracking-wide text-ink-faint">
                 <span className="block">Total</span>
-                <span className="block font-medium normal-case tracking-normal text-slate-400 tabular-nums">
+                <span className="block font-medium normal-case tracking-normal text-ink-faint tabular-nums">
                   {fmtBrlFull(matrix.grandTotal)}
                 </span>
               </th>
@@ -182,11 +182,11 @@ export default function BrandChannelMatrix({
           </thead>
           <tbody>
             {matrix.rows.map((row) => (
-              <tr key={row.brand} className="border-b border-violet-50 last:border-0">
+              <tr key={row.brand} className="border-b border-line last:border-0">
                 <th scope="row" className="text-left py-1.5 pr-3 align-middle">
                   <Link
                     href={brandHref(row.brand)}
-                    className="inline-flex items-center min-h-11 text-sm font-semibold text-slate-700 hover:text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                    className="inline-flex items-center min-h-11 text-sm font-semibold text-ink-muted hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
                   >
                     {row.label}
                   </Link>
@@ -203,19 +203,19 @@ export default function BrandChannelMatrix({
                         aria-haspopup="dialog"
                         aria-label={cellAriaLabel(row.label, cell, signals, signalsState)}
                         style={{ background: cell.available ? cellBackground(cell.intensity) : undefined }}
-                        className={`w-full min-w-0 min-h-11 rounded-lg px-2 py-1 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
-                          cell.available ? "hover:ring-1 hover:ring-violet-300" : "bg-slate-50 hover:bg-slate-100"
+                        className={`w-full min-w-0 min-h-11 rounded-lg px-2 py-1 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                          cell.available ? "hover:ring-1 hover:ring-accent" : "bg-raised hover:bg-raised"
                         }`}
                       >
                         {cell.available ? (
                           <>
-                            <span className="block text-sm font-semibold text-slate-800 tabular-nums">
+                            <span className="block text-sm font-semibold text-ink tabular-nums">
                               {fmtBrlFull(cell.gmv as number)}
                             </span>
-                            <span className="block text-xs text-slate-500 tabular-nums">
+                            <span className="block text-xs text-ink-faint tabular-nums">
                               {cell.sharePctInChannel != null && <>{cell.sharePctInChannel.toFixed(1)}%</>}
                               {cell.momPct != null && (
-                                <span className={cell.momPct >= 0 ? "text-emerald-700" : "text-rose-700"}>
+                                <span className={cell.momPct >= 0 ? "text-ok-ink" : "text-crit-ink"}>
                                   {" "}
                                   {cell.momPct >= 0 ? "▲" : "▼"} {fmtPct(cell.momPct).replace("+", "")}
                                 </span>
@@ -226,11 +226,11 @@ export default function BrandChannelMatrix({
                                 identificador snake_case cru. */}
                             {main && (
                               <span className="mt-1 flex items-center justify-end gap-1">
-                                <span className="text-xs font-medium rounded px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200 truncate max-w-full">
+                                <span className="text-xs font-medium rounded px-1.5 py-0.5 bg-warn-soft text-warn-ink border border-warn/35 truncate max-w-full">
                                   {signalLabel(main)}
                                 </span>
                                 {rest.length > 0 && (
-                                  <span className="text-xs font-medium text-slate-500 shrink-0">
+                                  <span className="text-xs font-medium text-ink-faint shrink-0">
                                     +{rest.length}
                                   </span>
                                 )}
@@ -239,8 +239,8 @@ export default function BrandChannelMatrix({
                           </>
                         ) : (
                           <>
-                            <span className="block text-sm text-slate-400">—</span>
-                            <span className="block text-xs text-slate-500">sem dado</span>
+                            <span className="block text-sm text-ink-faint">—</span>
+                            <span className="block text-xs text-ink-faint">sem dado</span>
                           </>
                         )}
                       </button>
@@ -249,7 +249,7 @@ export default function BrandChannelMatrix({
                 })}
 
                 <td className="py-1.5 pl-3 text-right align-middle">
-                  <span className="text-sm font-semibold text-slate-800 tabular-nums">
+                  <span className="text-sm font-semibold text-ink tabular-nums">
                     {fmtBrlFull(row.brandTotal)}
                   </span>
                 </td>
@@ -265,7 +265,7 @@ export default function BrandChannelMatrix({
         <DataQualityNote note="Sinais de eficiência e referências comparativas (mediana e p75 do canal) indisponíveis nesta carga — a matriz mostra GMV, participação e variação, mas não está completa." />
       )}
       {signalsState === "loading" && (
-        <p className="text-xs text-slate-500">Verificando sinais de eficiência e referências do canal…</p>
+        <p className="text-xs text-ink-faint">Verificando sinais de eficiência e referências do canal…</p>
       )}
     </section>
   );

@@ -58,6 +58,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div id="app-shell-root" className="min-h-screen bg-canvas md:flex">
+      {/* UX-TORRE-B2B-1 — o `<h1>` do shell no DESKTOP. A topbar (que carrega o
+          `<h1>` visivel no mobile) fica `display: none` a partir de `md`, e a
+          tela nao pode perder o titulo de nivel 1 na troca. `hidden md:block`
+          garante que os dois nunca coexistam na arvore de acessibilidade. */}
+      <h1 className="sr-only hidden md:block">Torre de Controle</h1>
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Topbar + conteudo ficam inertes enquanto o drawer mobile esta

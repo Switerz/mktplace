@@ -832,8 +832,9 @@ test("V32 package.json mudou apenas para registrar o teste novo", () => {
     scripts: Record<string, string>;
   };
   assert.match(pkg.scripts.test, /tests\/marca-360-v32\.test\.ts/);
-  // as dependências continuam as sete + oito de desenvolvimento
-  assert.equal(Object.keys(pkg.dependencies).length, 7);
+  // as dependências eram sete + oito de desenvolvimento; UX-TORRE-B2B-1
+  // acrescentou lucide-react (oito de runtime). Nenhuma de teste.
+  assert.equal(Object.keys(pkg.dependencies).length, 8);
   assert.equal(Object.keys(pkg.devDependencies).length, 8);
   assert.ok(!("@testing-library/react" in pkg.devDependencies));
 });

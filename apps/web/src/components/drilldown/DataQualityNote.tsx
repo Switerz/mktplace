@@ -15,7 +15,7 @@ interface Props {
 export default function DataQualityNote({ note }: Props) {
   if (!note) return null;
   return (
-    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+    <p className="text-xs text-warn-ink bg-warn-soft border border-warn/35 rounded-lg px-3 py-1.5">
       {note}
     </p>
   );

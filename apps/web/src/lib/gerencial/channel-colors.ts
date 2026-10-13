@@ -6,14 +6,16 @@
  * elas moravam em `EvolutionChart.tsx` cada um desses imports estaticos
  * arrastava o recharts para o bundle inicial — anulando o `next/dynamic` do
  * grafico (First Load da rota `/` caiu de 252 kB para ~157 kB ao separar).
+ *
+ * UX-TORRE-2: o hex fixo virou CLASSE de token (`bg-canal-*`), que muda com o
+ * tema. O SVG do grafico nao le classe — ele pega a cor resolvida em
+ * `temaDoGrafico(...).canais`, que espelha os mesmos tokens.
  */
 import type { Marketplace } from "../mock-data.ts";
 
-export const CHANNEL_STROKE: Record<Marketplace, string> = {
-  tiktok: "#8b5cf6",
-  ml: "#06b6d4",
-  shopee: "#f97316",
+/** Fundo com a cor de identidade do canal (ponto, barra, legenda). */
+export const CHANNEL_DOT: Record<Marketplace, string> = {
+  tiktok: "bg-canal-tiktok",
+  ml: "bg-canal-ml",
+  shopee: "bg-canal-shopee",
 };
-
-/** Cor da linha de total, mais escura que qualquer canal para se destacar. */
-export const TOTAL_STROKE = "#4c1d95";

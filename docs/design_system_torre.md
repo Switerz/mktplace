@@ -73,6 +73,35 @@ O valor muda entre claro e escuro; nenhuma tela escreve hex.
 - **Números tabulares** em toda coluna de valor (`tabular-nums`, já global em
   `table`).
 
+## UX-TORRE-2 — o que a segunda leva acrescentou
+
+Rotas migradas: `/`, `/canais`, `/financeiro` (além de `/expedicao`).
+
+- **Identidade de canal é um papel próprio** (`canal-tiktok`, `canal-ml`,
+  `canal-shopee`; `bg-canal-*` ou `temaDoGrafico(...).canais` no SVG). Não é
+  série por posição: TikTok é violeta em toda a Torre. No tema claro os valores
+  são os mesmos hex de antes.
+- **Três vocabulários de cor, sem mistura:** canal (quem é), série (composição,
+  ex.: vídeo/live/card, Ads/Frete) e severidade (`ok`/`warn`/`crit`, só com
+  limiar de negócio: ROAS, ACOS, taxas %, recompra %). Ponto de KPI é canal ou
+  série — nunca âmbar/verde decorativo.
+- **Filtros globais** se montam com `GlobalFilterControls`
+  (`src/components/layout/`): canal, marca e período no estilo do `Segmented`
+  (trilho neutro, ativo em relevo, 44px). No mobile recolhem atrás de um botão
+  com o resumo do escopo (`resumoDosFiltros`). `hideCompare` onde a fonte não
+  calcula delta (Canais, Financeiro).
+- **Diálogo portalizado herda a barreira:** `KpiDrilldownDialog` aplica
+  `.tc-tema-claro` quando a rota ainda não migrou; o véu é preto translúcido
+  nos dois temas.
+- **`ui/SortHeader`** encosta o rótulo das colunas numéricas à direita
+  (`flex-row-reverse justify-start`). O `SortableHeader` legado continua literal
+  e serve as rotas não migradas.
+- **Entrar em `ROTAS_TEMATIZADAS` exige a árvore inteira em tokens:**
+  `tests/tema.test.ts` percorre o grafo de imports a partir da página da rota
+  e recusa qualquer cor literal (a lista manual da Expedição não escalava).
+  Para migrar a próxima rota: acrescente-a à lista e ao mapa `PAGINA_DA_ROTA`
+  do teste — ele mostra cada arquivo que ainda falta.
+
 ## O que este sistema não faz
 
 - Não inverte cores por CSS. Cada papel tem valor próprio por tema.
@@ -80,3 +109,23 @@ O valor muda entre claro e escuro; nenhuma tela escreve hex.
   precisa poder sobrepor o sistema operacional.
 - Não toca em métrica, fórmula, filtro ou contrato de API. O redesenho é da
   camada visual; os números vêm do mesmo payload.
+
+## UX-TORRE-B2B-1 — shell navy e primitives (13/10/2026)
+
+Revisão aprovada pelo Mário com `b2b-gogroup/torre_b2b` como referência de
+acabamento. Auditoria em `docs/ux_torre_b2b_benchmark.md`; regras em
+`DESIGN.md`. O que mudou para quem desenvolve:
+
+- **Shell navy nos dois temas** (`--tc-shell-*`, `bg-shell`, `text-shell-*`).
+  Sidebar com ícone por rota (`ICONE_DA_ROTA` em `shell/NavList.tsx`), trilho
+  de 64px abaixo de 1280px, tema no rodapé. A topbar só existe no mobile.
+- **Fonte Inter** via `next/font` (variável `--font-sans`), autohospedada.
+- **Novo degrau tipográfico nomeado:** `text-data` (13px / 1.35).
+- **Primitives novos:** `ui/Popover` (gatilho + painel de filtro),
+  `ui/Freshness` + `PeriodChip` (escopo e frescor em selos), `ui/StatCard`
+  (KPI não interativo), `ui/StateBlock` + `RetryButton` (vazio / carregando /
+  erro / indisponível). `Panel` ganhou `icone` e `id`; `PageHeader` ganhou
+  `icon` e `meta`; `Segmented` ganhou `tom="shell"` e `soIcone`.
+- **Filtros `variante="menu"`:** `BrandFilter` e `DateRangeFilter` aceitam o
+  modo popover usado pela barra comum; as outras rotas seguem no modo `faixa`.
+- **`lucide-react@1.53.0`** é o único vocabulário de ícones (versão exata).

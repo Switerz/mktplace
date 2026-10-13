@@ -94,7 +94,8 @@ test("o <html> aceita a divergencia que o proprio script cria", () => {
   // O script altera `class` e `style` de <html> antes da hidratacao, DE
   // PROPOSITO. Sem `suppressHydrationWarning` o React reclamaria da unica
   // divergencia que ele precisa aceitar.
-  assert.match(LAYOUT, /<html lang="pt-BR" suppressHydrationWarning>/);
+  // UX-TORRE-B2B-1: o <html> tambem carrega a variavel da fonte (next/font).
+  assert.match(LAYOUT, /<html lang="pt-BR"[^>]*\bsuppressHydrationWarning>/);
 });
 
 test("aplicarTemaNoDocumento grava resultado e preferencia separadamente", () => {
@@ -173,7 +174,24 @@ test("os tokens sao canais RGB, para o alfa do Tailwind funcionar", () => {
 test("rota nao migrada volta ao tema claro em vez de ficar meio escura", () => {
   assert.ok(rotaTematizada("/expedicao"));
   assert.ok(rotaTematizada("/expedicao/qualquer-coisa"));
-  for (const r of ["/", "/canais", "/financeiro", "/produtos", null, undefined, ""]) {
+  // UX-TORRE-2: Gerencial, Canais e Financeiro migraram.
+  assert.ok(rotaTematizada("/"));
+  assert.ok(rotaTematizada("/canais"));
+  assert.ok(rotaTematizada("/financeiro"));
+  // `/` na lista NAO pode virar coringa: so' a raiz casa. As rotas ainda em
+  // literais claros continuam presas ao claro.
+  for (const r of [
+    "/produtos",
+    "/pedidos",
+    "/qualidade",
+    "/regioes",
+    "/brand/kokeshi",
+    "/inteligencia",
+    "/canais-legado",
+    null,
+    undefined,
+    "",
+  ]) {
     assert.equal(rotaTematizada(r as string), false, String(r));
   }
   // A barreira precisa estar LIGADA no shell, nao so' existir na biblioteca.
@@ -185,7 +203,114 @@ test("rota nao migrada volta ao tema claro em vez de ficar meio escura", () => {
 test("a lista de rotas migradas e' explicita e comeca pela Expedicao", () => {
   // Cada PR da sequencia remove a propria rota daqui ao migrar. Sem lista, a
   // migracao vira "quem lembrar".
-  assert.deepEqual([...ROTAS_TEMATIZADAS], ["/expedicao"]);
+  assert.deepEqual([...ROTAS_TEMATIZADAS], ["/expedicao", "/", "/canais", "/financeiro"]);
+});
+
+// ---------------------------------------------------------------------------
+// UX-TORRE-2 — entrar na lista exige a ARVORE inteira em tokens.
+//
+// A lista manual de arquivos (abaixo, na secao 5) protegia a Expedicao, mas
+// nao escala: a Gerencial sozinha alcanca 40+ arquivos, e um componente novo
+// importado por qualquer um deles entraria claro sem ninguem notar. Aqui o
+// teste PERCORRE o grafo de imports a partir da pagina de cada rota tematizada
+// (imports de valor, inclusive `import()` dinamico; `import type` nao renderiza
+// nada e fica de fora) e recusa qualquer cor literal de paleta.
+// ---------------------------------------------------------------------------
+const PAGINA_DA_ROTA: Record<string, string> = {
+  "/": "app/page.tsx",
+  "/canais": "app/canais/page.tsx",
+  "/financeiro": "app/financeiro/page.tsx",
+};
+
+// A propria fonte da paleta dos graficos (SVG precisa de cor resolvida).
+const FONTES_DE_PALETA = new Set(["src/lib/chart-theme.ts"]);
+
+const LITERAL_DE_PALETA =
+  /(?<![\w-])(?:[a-z-]+:)*(?:bg|text|border|ring|divide|from|to|via|fill|stroke|outline|decoration|placeholder|shadow)-(?:white|black|slate|gray|zinc|neutral|stone|violet|purple|fuchsia|emerald|amber|rose|red|green|sky|cyan|blue|indigo|teal|orange|yellow|pink|lime)(?:-\d{2,3})?(?:\/\d+)?(?![\w-])|#[0-9a-fA-F]{6}\b|(?<![\w-])dark:[a-z[]/;
+
+function resolverImport(spec: string, de: string): string | null {
+  let base: string;
+  if (spec.startsWith("@/")) base = join(RAIZ, "src", spec.slice(2));
+  else if (spec.startsWith(".")) base = join(de, "..", spec);
+  else return null;
+  for (const ext of ["", ".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+    try {
+      readFileSync(base + ext, "utf8");
+      return base + ext;
+    } catch {
+      // tenta a proxima extensao
+    }
+  }
+  return null;
+}
+
+function arvoreDaRota(pagina: string): string[] {
+  const inicio = join(RAIZ, pagina);
+  const fila = [inicio, join(inicio, "..", "layout.tsx")];
+  const visto = new Set<string>();
+  while (fila.length) {
+    const arquivo = fila.pop()!;
+    if (visto.has(arquivo)) continue;
+    let codigo: string;
+    try {
+      codigo = readFileSync(arquivo, "utf8");
+    } catch {
+      continue; // layout.tsx e' opcional
+    }
+    visto.add(arquivo);
+    const semTipos = codigo.replace(/^\s*import\s+type\s[\s\S]*?from\s+["'][^"']+["'];?/gm, "");
+    for (const m of semTipos.matchAll(/(?:from\s+|import\(\s*)["']([^"']+)["']/g)) {
+      const alvo = resolverImport(m[1], arquivo);
+      if (alvo) fila.push(alvo);
+    }
+  }
+  return [...visto].map((f) => f.slice(RAIZ.length + 1).split("\\").join("/"));
+}
+
+test("toda rota tematizada tem a arvore inteira em tokens, dialogos inclusive", () => {
+  for (const rota of ROTAS_TEMATIZADAS) {
+    if (rota === "/expedicao") continue; // coberta pela lista explicita da secao 5
+    const pagina = PAGINA_DA_ROTA[rota];
+    assert.ok(pagina, `${rota} entrou na lista sem pagina mapeada neste teste`);
+    const arvore = arvoreDaRota(pagina);
+    // sanidade: o percurso precisa de fato alcancar os componentes
+    assert.ok(arvore.length > 5, `${rota}: arvore suspeita de vazia (${arvore.length})`);
+    for (const rel of arvore) {
+      if (FONTES_DE_PALETA.has(rel)) continue;
+      const codigo = fonte(rel)
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      const achado = codigo.match(LITERAL_DE_PALETA);
+      assert.equal(achado, null, `${rota} -> ${rel} usa cor literal: ${achado?.[0]}`);
+    }
+  }
+});
+
+test("o percurso alcanca os dialogos de drill-down, nao so' a primeira dobra", () => {
+  // Se o resolvedor de imports quebrar, o teste acima passaria por vacuidade.
+  const gerencial = arvoreDaRota("app/page.tsx");
+  for (const esperado of [
+    "src/components/gerencial/GerencialDrilldowns.tsx",
+    "src/components/KpiDrilldownDialog.tsx",
+    "src/components/InsightDrilldownContent.tsx",
+    "src/components/gerencial/EvolutionChart.tsx",
+  ]) {
+    assert.ok(gerencial.includes(esperado), `percurso nao alcancou ${esperado}`);
+  }
+  const canais = arvoreDaRota("app/canais/page.tsx");
+  assert.ok(canais.includes("src/components/AffiliateCostsPanel.tsx"));
+  assert.ok(canais.includes("src/components/TiktokOrderDiscountsPanel.tsx"));
+});
+
+test("o dialogo portalizado herda a barreira da rota", () => {
+  // O portal sai da `main` e, com ela, da `.tc-tema-claro`. Em /brand ou
+  // /inteligencia (ainda claras) o dialogo abriria escuro com conteudo em
+  // literais claros — o mesmo defeito que a barreira existe para impedir.
+  const dialogo = fonte("src/components/KpiDrilldownDialog.tsx");
+  assert.match(dialogo, /rotaTematizada\(usePathname\(\)\)/);
+  assert.match(dialogo, /tematizada \? "" : CLASSE_TEMA_CLARO_FIXO/);
+  // O veu nao pode usar token de tinta: no escuro a tinta e' clara.
+  assert.doesNotMatch(dialogo, /bg-ink[\w-]*\/\d+" aria-hidden/);
 });
 
 // ===========================================================================
