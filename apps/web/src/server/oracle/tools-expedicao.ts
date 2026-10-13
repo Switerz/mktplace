@@ -38,8 +38,12 @@ import {
 export const EXP_CANAIS = ["shopee", "ml", "tiktok"] as const;
 type ExpCanal = (typeof EXP_CANAIS)[number];
 
-/** Janela de tendencia. 336 h = teto do backend (14 dias). */
-export const EXP_TREND_MAX_HOURS = 336;
+/**
+ * Janela de tendencia. O backend aceita ate 336 h, mas cada ponto (conta x
+ * hora) pesa ~450 B: com refresh horario, 336 h x 4 contas passaria do teto de
+ * 256 KB do adapter e a tool falharia. 96 h x 4 contas fica em ~173 KB.
+ */
+export const EXP_TREND_MAX_HOURS = 96;
 /** Janela da LDR. 90 dias = teto do backend. */
 export const EXP_TIKTOK_MAX_DAYS = 90;
 

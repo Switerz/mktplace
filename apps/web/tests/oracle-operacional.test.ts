@@ -227,7 +227,7 @@ test("expedicao: limites de janela e parametro desconhecido falham ANTES do GET"
   const calls: Calls = [];
   const client = await connect(EXP_ROUTES, calls);
   for (const args of [
-    { tendencia_horas: 337 },
+    { tendencia_horas: 97 },
     { tiktok_dias: 91 },
     { tiktok_dias: 0 },
     { canais: ["amazon"] },
