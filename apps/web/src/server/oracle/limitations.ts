@@ -15,23 +15,47 @@ export type Limitation = {
 };
 
 /**
- * TikTok nao registra cancelamento no mart: a coluna existe e vem 0 em todos
- * os meses auditados. Zero aqui significa AUSENCIA DE MEDICAO, nao excelencia
- * operacional — e e' por isso que precisa de texto, nao de numero.
+ * TikTok nao registra cancelamento no mart. Na auditoria original a coluna
+ * vinha 0; medido em 2026-10-13 ela chega `null` em todos os meses. Os dois
+ * significam AUSENCIA DE MEDICAO, nao excelencia operacional — e e' por isso
+ * que precisa de texto, nao de numero.
  */
 export const TIKTOK_CANCEL_NOT_MEASURED: Limitation = {
   topic: "cancelamento_tiktok",
   scope: "Qualidade — TikTok Shop",
   description:
-    "O TikTok Shop nao tem cancelamento medido nesta base: o valor chega como 0 em todos os meses auditados. Trate como NAO MENSURADO, nunca como 0% de cancelamento.",
+    "O TikTok Shop nao tem cancelamento medido nesta base: a fonte devolve nulo (ou 0) em todos os meses auditados. Trate como NAO MENSURADO, nunca como 0% de cancelamento.",
 };
 
-/** Comissao do Mercado Livre nao existe no mart (total_fees nulo para ML). */
-export const ML_COMMISSION_MISSING: Limitation = {
-  topic: "comissao_ml",
+/**
+ * Comissao do Mercado Livre NAO CARREGADA para marcas especificas no periodo.
+ *
+ * MCP-COVERAGE-1: o texto anterior afirmava que a comissao "nao esta
+ * disponivel no mart" — deixou de ser verdade com o MARGEM-REAL-2 (a carga
+ * existe a partir do fim de jun/2026). A disponibilidade agora e' POR LINHA,
+ * entao a limitacao nomeia as marcas afetadas em vez de afirmar ausencia geral.
+ */
+export function mlCommissionMissing(brands: readonly string[]): Limitation {
+  return {
+    topic: "comissao_ml",
+    scope: `Financeiro/Canais — Mercado Livre (${[...brands].sort().join(", ")})`,
+    description:
+      "A comissao do Mercado Livre nao esta carregada para estas marcas no periodo consultado: o custo de marketplace vem nulo — ausencia de dado, nunca custo zero. Outras marcas ou periodos podem ter o valor; leia marketplace_cost_available de cada linha.",
+  };
+}
+
+/**
+ * `marketplace_cost_available` do backend e' "ha custo em PELO MENOS UM dia
+ * do periodo" (`total_fees_n > 0`), nao "o periodo inteiro esta coberto".
+ * Medido em 2026-10-13: jun/2026 inteiro sai `available=true` com 1,5-3,2%
+ * contra 14-17% nos meses seguintes, porque so os ultimos dias de junho tem
+ * comissao carregada — e o backend nao emite `data_warning` nesse caso.
+ */
+export const ML_COMMISSION_PARTIAL_WINDOW: Limitation = {
+  topic: "cobertura_comissao_ml",
   scope: "Financeiro/Canais — Mercado Livre",
   description:
-    "A comissao do Mercado Livre nao esta disponivel no mart. O custo de marketplace vem nulo para o ML — isso e' ausencia de dado, nunca custo zero.",
+    "Comissao do Mercado Livre 'disponivel' significa que ha valor em pelo menos um dia do periodo, nao que o periodo inteiro esteja coberto. A carga e' recente: uma janela que comece antes dela traz custo SUBESTIMADO sem nenhum outro aviso. Para comparar meses, confirme que o percentual e' coerente com os meses seguintes antes de afirmar queda ou alta.",
 };
 
 /** Base de repasse do TikTok difere do GMV comercial. */
@@ -56,6 +80,20 @@ export const REGIONAL_COVERAGE: Limitation = {
   scope: "Regioes",
   description:
     "A cobertura regional e' materialmente menor que a de canais: nem todo pedido tem UF atribuida. O GMV por UF NAO reconcilia com o GMV gerencial, e a diferenca e' de cobertura, nao erro de calculo. Nenhum ajuste artificial e' aplicado para forcar igualdade.",
+};
+
+/**
+ * A fonte regional soma unidades com `COALESCE(SUM(units_sold), 0)`: canal ou
+ * periodo sem unidade registrada entra como 0. Medido em 2026-10-13: o ML
+ * devolve 0 unidades em todo mes com dezenas de milhares de pedidos, e numa
+ * consulta "todos os canais" o total e' so o da Shopee. Como zero e ausencia
+ * sao indistinguiveis no payload, a tool devolve `units_sold` sempre nulo.
+ */
+export const REGIONAL_UNITS_NOT_MEASURED: Limitation = {
+  topic: "unidades_regioes",
+  scope: "Regioes",
+  description:
+    "Unidades por UF nao sao confiaveis nesta fonte: canais sem unidade registrada entram como 0 na soma, e zero fica indistinguivel de ausencia. Por isso units_sold vem sempre nulo nesta tool. Para unidades, use torre_produtos_prioritarios.",
 };
 
 /** Base de produtos do ML e' cumulativa, sem competencia mensal. */

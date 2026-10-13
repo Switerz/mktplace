@@ -1128,3 +1128,128 @@ def test_i4_resultado_identico_ao_caminho_anterior():
         assert publicado["official_gmv"] == original.official_gmv
         assert publicado["seller_discount_signed"] == original.seller_discount_signed
         assert publicado["platform_subsidy_amount"] == original.platform_subsidy_amount
+
+
+# ===========================================================================
+# OPS-RECOVERY-3 — MODE_WINDOW: recuperacao manual de lacuna medida
+# ===========================================================================
+
+
+def _linha_fonte(ref_date=date(2026, 8, 25), brand="apice"):
+    return dict(ref_date=ref_date, brand=brand,
+                commercial_orders=1, official_gmv=Decimal("10"),
+                full_product_value=Decimal("12"),
+                seller_discount_signed=Decimal("-2"),
+                platform_subsidy_amount=Decimal("0"),
+                cancelled_orders=0,
+                cancelled_seller_discount_signed=Decimal("0"),
+                cancelled_platform_subsidy_amount=Decimal("0"),
+                source_max_updated_at=None, raw_max_updated_at=None,
+                total_dedup=1, unpaid_onhold_orders=0, unknown_orders=0,
+                commercial_null_money=0, cancelled_null_money=0)
+
+
+def test_w1_window_exige_as_duas_datas():
+    for de, ate in ((None, None), (date(2026, 8, 20), None),
+                    (None, date(2026, 8, 20))):
+        with pytest.raises(sync.DiscountSyncError, match="exige --date-from"):
+            sync.resolve_manual_window(de, ate, AGORA)
+
+
+def test_w2_limites_da_janela_manual():
+    # 31 dias terminando em D-1 (2026-09-01) e' o teto aceito.
+    w = sync.resolve_manual_window(date(2026, 8, 2), date(2026, 9, 1), AGORA)
+    assert w.days == sync.WINDOW_MAX_DAYS == 31
+    with pytest.raises(sync.DiscountSyncError, match="excede o teto"):
+        sync.resolve_manual_window(date(2026, 8, 1), date(2026, 9, 1), AGORA)
+    # D0 continua proibido, como em todo modo.
+    with pytest.raises(Exception):
+        sync.resolve_manual_window(date(2026, 8, 25), date(2026, 9, 2), AGORA)
+    with pytest.raises(sync.DiscountSyncError, match="primeiro dado"):
+        sync.resolve_manual_window(date(2025, 6, 1), date(2025, 6, 10), AGORA)
+
+
+def test_w3_window_tem_auditoria_propria_que_nenhuma_obrigacao_le():
+    assert sync.audit_sources_for_mode(sync.MODE_WINDOW) == (
+        sync.CANONICAL_AUDIT_SOURCE, sync.WINDOW_AUDIT_SOURCE)
+    conn = FakeConn({"MAX(finished_at)": FakeResult([])})
+    assert sync.decide_effective_mode(conn, AGORA) == sync.MODE_FULL
+    lidas = {p.get("fonte") for p in conn.params}
+    assert sync.WINDOW_AUDIT_SOURCE not in lidas
+    # O `auto` nunca escolhe a janela manual.
+    corpo = SYNC_CODE.split("def decide_effective_mode")[1].split("\ndef ")[0]
+    assert "MODE_WINDOW" not in corpo
+
+
+def test_w4_apply_window_publica_so_a_janela_sem_decidir_modo(monkeypatch):
+    class DM(FakeSession):
+        def connection(self):
+            return FakeConn({"WITH raw_dedup": FakeResult([
+                _linha_fonte(date(2026, 8, 25), "apice")])})
+
+    def nao_decide(*_a, **_k):
+        raise AssertionError("window nao pode passar pela decisao do auto")
+
+    monkeypatch.setattr(sync, "decide_effective_mode", nao_decide)
+    pub = FakeSession(_conn_ok())
+    aud = FakeSession(FakeConn(
+        {"INSERT INTO audit.source_sync_run": FakeResult([1]),
+         "UPDATE audit.source_sync_run": FakeResult(rowcount=1)}))
+    sessoes = iter([pub, aud])
+    monkeypatch.setattr(sync, "LocalSession", lambda: next(sessoes))
+
+    r = sync.run_apply(sync.MODE_WINDOW, AGORA,
+                       date(2026, 8, 25), date(2026, 8, 26), dm_factory=DM)
+
+    assert r["mode"] == sync.MODE_WINDOW and r["applied"] is True
+    assert (r["date_from"], r["date_to"]) == (date(2026, 8, 25), date(2026, 8, 26))
+    assert pub.commits == 1 and pub.rollbacks == 0
+    abertas = [p for p, q in zip(aud._conn.params, aud._conn.sql)
+               if "INSERT INTO audit.source_sync_run" in q]
+    assert [p["fonte"] for p in abertas] == [
+        sync.CANONICAL_AUDIT_SOURCE, sync.WINDOW_AUDIT_SOURCE]
+    assert all((p["min_date"], p["max_date"]) ==
+               (date(2026, 8, 25), date(2026, 8, 26)) for p in abertas)
+    # O DELETE do destino e' limitado a janela pedida, nunca a do full.
+    deletes = [p for p, q in zip(pub._conn.params, pub._conn.sql)
+               if q.startswith("DELETE FROM")]
+    assert deletes and all(p.get("date_from") == date(2026, 8, 25)
+                           and p.get("date_to") == date(2026, 8, 26)
+                           for p in deletes)
+
+
+@pytest.mark.parametrize("de,ate", [
+    (date(2026, 7, 1), date(2026, 9, 1)),    # 63 dias: excede o teto
+    (date(2026, 8, 30), date(2026, 9, 2)),   # inclui D0
+    (None, date(2026, 8, 30)),               # janela incompleta
+])
+def test_w5_window_invalida_recusa_antes_de_qualquer_conexao(de, ate, monkeypatch):
+    def nunca(*_a, **_k):
+        raise AssertionError("abriu conexao com janela manual invalida")
+
+    monkeypatch.setattr(sync, "LocalSession", nunca)
+    monkeypatch.setattr(sync, "DataMartSession", nunca)
+    with pytest.raises(Exception) as exc:
+        sync.run_apply(sync.MODE_WINDOW, AGORA, de, ate)
+    assert "abriu conexao" not in str(exc.value)
+
+
+def test_w6_dry_run_window_le_a_janela_pedida_sem_conexao_gravavel():
+    class DM(FakeSession):
+        def connection(self):
+            return FakeConn({"WITH raw_dedup": FakeResult([
+                _linha_fonte(date(2026, 8, 25), "apice")])})
+
+    r = sync.run_dry(sync.MODE_WINDOW, AGORA,
+                     date(2026, 8, 25), date(2026, 8, 26), dm_factory=DM)
+    assert (r["mode"], r["applied"]) == (sync.MODE_WINDOW, False)
+    assert (r["date_from"], r["date_to"]) == (date(2026, 8, 25), date(2026, 8, 26))
+    with pytest.raises(sync.DiscountSyncError, match="exige --date-from"):
+        sync.run_dry(sync.MODE_WINDOW, AGORA, dm_factory=DM)
+
+
+def test_w7_cli_aceita_mode_window():
+    args = sync.build_parser().parse_args(
+        ["--mode", "window", "--date-from", "2026-09-29",
+         "--date-to", "2026-10-12", "--apply"])
+    assert args.mode == sync.MODE_WINDOW and args.apply

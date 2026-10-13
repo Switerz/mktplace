@@ -199,13 +199,18 @@ def sync_shopee(full: bool = False, brands: set = None) -> dict:
         try:
             dc = dst.cursor()
 
+            # Migrations 023/024: `source` e NOT NULL sem default e entrou na
+            # UNIQUE. A fonte local so recebe o loader de export, entao a
+            # procedencia e sempre `manual_export` — o mesmo literal que
+            # `apps/api/etl/load_shopee_products.py` grava. O alvo de 4
+            # colunas nao casa mais com indice unico nenhum no Neon.
             UPSERT = """
                 INSERT INTO marts.fact_shopee_product_monthly
                     (ref_month, brand, sku_ref, sku_ref_key, product_name, variation_name,
                      gmv, units_sold, completed_orders, canceled_orders,
-                     cancel_rate_pct, unique_buyers, avg_price)
+                     cancel_rate_pct, unique_buyers, avg_price, source)
                 VALUES %s
-                ON CONFLICT (ref_month, brand, sku_ref_key, product_name)
+                ON CONFLICT (ref_month, brand, sku_ref_key, product_name, source)
                 DO UPDATE SET
                     sku_ref          = EXCLUDED.sku_ref,
                     variation_name   = EXCLUDED.variation_name,
@@ -225,6 +230,7 @@ def sync_shopee(full: bool = False, brands: set = None) -> dict:
                     r["product_name"], r["variation_name"],
                     r["gmv"], r["units_sold"], r["completed_orders"], r["canceled_orders"],
                     r["cancel_rate_pct"], r["unique_buyers"], r["avg_price"],
+                    "manual_export",
                 )
                 for r in rows
             ]
