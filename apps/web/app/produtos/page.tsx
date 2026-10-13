@@ -594,7 +594,7 @@ function ProdutosPageInner() {
             <p className="px-6 pt-3 text-[11px] text-slate-400">
               Escopo atual: {formatProdutosScope({
                 channelLabel: activeChannelLabel, brandLabel: activeBrandLabel, periodLabel,
-                total: shDisplayData?.total ?? null, offset: shOffset, limit: PAGE_SIZE,
+                total: shUnavailable ? null : shDisplayData?.total ?? null, offset: shOffset, limit: PAGE_SIZE,
               })}
             </p>
 
@@ -613,7 +613,7 @@ function ProdutosPageInner() {
               activeBucket={shBucket}
               onSelectBucket={setShBucket}
               unavailableReason={shUnavailable}
-              scopeNote={`${shPartialNote ? `${shPartialNote} ` : ""}Periodo: ${periodLabel}${zeroGmvNote(shDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(shDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
+              scopeNote={`${shPartialNote ? `${shPartialNote} ` : ""}Periodo: ${periodLabel}${shUnavailable ? "" : zeroGmvNote(shDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(shDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
             />
 
             <div className="flex items-center px-6 py-2 border-b border-violet-50">
