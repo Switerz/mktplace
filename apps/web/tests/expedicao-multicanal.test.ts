@@ -116,8 +116,13 @@ test("a flag do ML e' SEPARADA da flag da rota", () => {
 test("flag desligada: nenhum caminho leva ao canal do ML", () => {
   // o seletor so' existe atras da flag
   assert.match(CLIENTE, /ML_LIGADO && \(/);
-  // e a leitura da URL sai cedo quando a flag esta desligada
-  assert.match(CLIENTE, /if \(!ML_LIGADO\) return;/);
+  // e TODA leitura do canal na URL fica sob a flag. Desde o
+  // EXPEDICAO-UX-JANELA-CUSTOMIZAVEL-1 os efeitos de URL nao saem mais cedo
+  // (a janela `?dias=` vale sem o ML), entao a guarda desceu para o canal.
+  const leituras = CLIENTE.match(/lerCanalDaUrl\(\);/g) ?? [];
+  const guardadas = CLIENTE.match(/if \(ML_LIGADO\) \{\s*\n\s*const canal = lerCanalDaUrl\(\);/g) ?? [];
+  assert.equal(leituras.length, 2, "montagem e popstate");
+  assert.equal(guardadas.length, leituras.length, "leitura de canal fora da flag");
   // nenhum literal de canal do ML solto no componente
   assert.doesNotMatch(CLIENTE, /"mercadolivre"/);
 });
@@ -162,7 +167,9 @@ test("o ML entra nas DUAS rotas, com o mesmo canal", () => {
 });
 
 test("o cliente monta a tendencia pelo helper, nao a mao", () => {
-  assert.match(CLIENTE, /queryDaTendencia\(janela, filtros\.channel\)/);
+  // EXPEDICAO-UX-JANELA-CUSTOMIZAVEL-1: a janela e' guardada em dias e o
+  // helper converte para horas — ainda pelo MESMO canal da fila.
+  assert.match(CLIENTE, /queryDaTendenciaEmDias\(janela, filtros\.channel\)/);
   assert.match(CLIENTE, /expedicao\/trend\?\$\{chaveTendencia\}/);
 });
 
@@ -507,8 +514,12 @@ test("as duas buscas esperam a URL ser lida", () => {
   assert.equal(guardas.length, 2, "fila E tendencia precisam esperar");
 });
 
-test("com a flag desligada nao ha espera: comportamento identico ao de antes", () => {
-  assert.match(CLIENTE, /useState\(!ML_LIGADO\)/);
+test("a URL e' lida antes da primeira busca, com ou sem a flag do ML", () => {
+  // Antes deste gate, sem a flag nao havia o que ler e `urlPronta` nascia
+  // `true`. Agora `?dias=` vale nos dois casos: nascer `true` faria um link
+  // de 10 dias pedir primeiro a janela padrao.
+  assert.match(CLIENTE, /useState\(false\);\s*\n\s*const lerCanalDaUrl/);
+  assert.doesNotMatch(CLIENTE, /useState\(!ML_LIGADO\)/);
 });
 
 test("urlPronta entra nas dependencias dos dois efeitos", () => {

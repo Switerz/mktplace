@@ -39,8 +39,6 @@ import {
   CANAIS,
   EXPLICACAO_LIMIAR_48H,
   FILTROS_PADRAO,
-  JANELAS_TENDENCIA,
-  JANELA_INICIAL_HORAS,
   ORDENACOES,
   ROTULO_CANAL,
   SITUACOES,
@@ -65,7 +63,6 @@ import {
   montarTimeline,
   mostrarColunaReferencia,
   paginaAtual,
-  queryDaTendencia,
   rotuloDeadline,
   rotuloIdade,
   sanitizarCanal,
@@ -78,6 +75,20 @@ import {
   type RespostaTendencia,
   type Situacao,
 } from "@/lib/expedicao-contract";
+import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import {
+  OPCAO_PERSONALIZADA,
+  REGRA_JANELA,
+  descreverJanelaEmHoras,
+  lerDiasDaUrl,
+  opcoesDoSeletor,
+  queryDaTendenciaEmDias,
+  urlComDias,
+  valorDoSeletor,
+} from "@/lib/expedicao-janela";
+
+/** Janela da tendencia da fila, em DIAS. Horas so' na query. */
+const REGRA = REGRA_JANELA.fila;
 
 // Recharts fica fora do bundle inicial: a tela abre com KPIs e fila mesmo que
 // o grafico ainda esteja chegando.
@@ -342,7 +353,11 @@ export default function ExpedicaoClient({ abas }: { abas?: React.ReactNode }) {
   const [filtros, setFiltros] = useState<Filtros>(FILTROS_PADRAO);
   const [dados, setDados] = useState<RespostaExpedicao | null>(null);
   const [tendencia, setTendencia] = useState<RespostaTendencia | null>(null);
-  const [janela, setJanela] = useState(JANELA_INICIAL_HORAS);
+  const [janela, setJanela] = useState(REGRA.padrao);
+  // "Personalizado" escolhido no seletor; a janela so' muda no "Aplicar".
+  const [personalizado, setPersonalizado] = useState(false);
+  // `?dias=` invalido no link: a tela usa o padrao E avisa.
+  const [janelaDescartada, setJanelaDescartada] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [carregandoTendencia, setCarregandoTendencia] = useState(true);
   const [erroHttp, setErroHttp] = useState<number | null>(null);
@@ -367,35 +382,75 @@ export default function ExpedicaoClient({ abas }: { abas?: React.ReactNode }) {
    * requisicao desperdicada e, pior, um instante em que o operador le' numeros
    * de uma loja sob o titulo de outra.
    *
-   * `urlPronta` segura as duas buscas ate' a URL ser resolvida. Com a flag
-   * desligada ela ja' nasce `true`: nao ha URL a consultar, e o comportamento
-   * fica identico ao de antes deste gate.
+   * `urlPronta` segura as duas buscas ate' a URL ser resolvida.
+   *
+   * Gate EXPEDICAO-UX-JANELA-CUSTOMIZAVEL-1: ela nasce `false` SEMPRE, e nao
+   * mais so' com a flag do ML. `?dias=` vale com ou sem o ML, e sem esperar a
+   * leitura um link de 10 dias pediria primeiro a janela padrao.
    */
-  const [urlPronta, setUrlPronta] = useState(!ML_LIGADO);
+  const [urlPronta, setUrlPronta] = useState(false);
 
   const lerCanalDaUrl = useCallback(() => {
     const daUrl = new URLSearchParams(window.location.search).get("channel");
     return sanitizarCanal(daUrl, ML_LIGADO);
   }, []);
 
-  useEffect(() => {
-    if (!ML_LIGADO) return;
-    const canal = lerCanalDaUrl();
-    setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
-    setUrlPronta(true);
-  }, [lerCanalDaUrl]);
+  /**
+   * Janela da URL. Valor invalido nao vira requisicao: cai no padrao, avisa, e
+   * a URL e' reescrita para nao seguir adiante num link compartilhado.
+   */
+  const lerJanelaDaUrl = useCallback(() => {
+    const { dias, descartado } = lerDiasDaUrl(window.location.search, REGRA);
+    setJanela(dias);
+    setPersonalizado(false);
+    setJanelaDescartada(descartado);
+    if (descartado) {
+      window.history.replaceState(null, "", urlComDias(window.location.href, dias, REGRA));
+    }
+  }, []);
 
-  // Voltar/avancar do navegador pode trocar a URL sem remontar o componente.
-  // Sem isto, o endereco diria um canal e a tela mostraria outro.
   useEffect(() => {
-    if (!ML_LIGADO) return;
-    const aoVoltar = () => {
+    if (ML_LIGADO) {
       const canal = lerCanalDaUrl();
       setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+    }
+    lerJanelaDaUrl();
+    setUrlPronta(true);
+  }, [lerCanalDaUrl, lerJanelaDaUrl]);
+
+  // Voltar/avancar do navegador pode trocar a URL sem remontar o componente.
+  // Sem isto, o endereco diria um canal (ou uma janela) e a tela mostraria outro.
+  useEffect(() => {
+    const aoVoltar = () => {
+      if (ML_LIGADO) {
+        const canal = lerCanalDaUrl();
+        setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
+      }
+      lerJanelaDaUrl();
     };
     window.addEventListener("popstate", aoVoltar);
     return () => window.removeEventListener("popstate", aoVoltar);
-  }, [lerCanalDaUrl]);
+  }, [lerCanalDaUrl, lerJanelaDaUrl]);
+
+  /** Aplica uma janela JA' validada: estado e URL juntos, como o canal. */
+  const aplicarJanela = useCallback((dias: number) => {
+    setJanela(dias);
+    setJanelaDescartada(false);
+    window.history.replaceState(null, "", urlComDias(window.location.href, dias, REGRA));
+  }, []);
+
+  /** Atalho aplica na hora; "Personalizado" so' abre o campo. */
+  const escolherJanela = useCallback(
+    (valor: string) => {
+      if (valor === OPCAO_PERSONALIZADA) {
+        setPersonalizado(true);
+        return;
+      }
+      setPersonalizado(false);
+      aplicarJanela(Number(valor));
+    },
+    [aplicarJanela],
+  );
 
   /** Troca de canal: estado, URL e pagina, sempre juntos. */
   const trocarCanal = useCallback((canal: Canal) => {
@@ -440,7 +495,7 @@ export default function ExpedicaoClient({ abas }: { abas?: React.ReactNode }) {
   }, [chave, filtros, urlPronta]);
 
   const chaveTendencia = useMemo(
-    () => queryDaTendencia(janela, filtros.channel),
+    () => queryDaTendenciaEmDias(janela, filtros.channel),
     [janela, filtros.channel],
   );
   const chaveTendVigente = useRef(chaveTendencia);
@@ -755,12 +810,9 @@ export default function ExpedicaoClient({ abas }: { abas?: React.ReactNode }) {
                 <div className="flex items-center gap-1.5">
                   <GrupoRadio
                     rotulo="Janela da tendência"
-                    opcoes={JANELAS_TENDENCIA.map((j) => ({
-                      valor: String(j.horas),
-                      texto: j.rotulo,
-                    }))}
-                    valor={String(janela)}
-                    aoEscolher={(v) => setJanela(Number(v))}
+                    opcoes={opcoesDoSeletor(REGRA)}
+                    valor={valorDoSeletor(janela, REGRA, personalizado)}
+                    aoEscolher={escolherJanela}
                     className="inline-flex gap-0.5 rounded-lg border border-line bg-raised p-0.5"
                     classeOpcao={(ativo) =>
                       `px-2.5 ${
@@ -790,6 +842,36 @@ export default function ExpedicaoClient({ abas }: { abas?: React.ReactNode }) {
                 </div>
               }
             >
+              {valorDoSeletor(janela, REGRA, personalizado) === OPCAO_PERSONALIZADA && (
+                <div className="mb-3">
+                  <JanelaPersonalizada
+                    max={REGRA.max}
+                    diasAplicados={janela}
+                    aoAplicar={aplicarJanela}
+                  />
+                </div>
+              )}
+              {janelaDescartada && (
+                <Note tom="atencao" papel="status" className="mb-2">
+                  A janela do link era inválida e foi ignorada. Mostrando a janela
+                  padrão.
+                </Note>
+              )}
+              {/* O periodo vem da RESPOSTA (`window_hours`, primeira e ultima
+                  hora com ponto), nao do seletor: e' o que de fato foi
+                  consultado. Some enquanto carrega para nao rotular o grafico
+                  novo com a janela antiga. */}
+              {tendencia && estadoTend !== "carregando" && estadoTend !== "erro" && (
+                <p className="mb-2 text-xs text-ink-muted" data-testid="exp-periodo-consultado">
+                  Período consultado:{" "}
+                  <span className="font-medium text-ink">
+                    {descreverJanelaEmHoras(tendencia.window_hours) ?? "não informado"}
+                  </span>
+                  {tendencia.from_hour && tendencia.to_hour
+                    ? ` · pontos de ${dataCurta(tendencia.from_hour)} a ${dataCurta(tendencia.to_hour)}`
+                    : " · nenhum ponto no período"}
+                </p>
+              )}
               {estadoTend === "carregando" && (
                 <p role="status" className="py-12 text-center text-sm text-ink-muted">
                   Carregando tendência…
