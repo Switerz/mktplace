@@ -64,12 +64,15 @@ valido: `direto` (codigo/GTIN no escopo 0301) ou `kit_bom` (todos os
 componentes com CMP 0301). `depara_aprovado` esta reservado: nenhum de-para foi
 aprovado e esta pipeline nao le de-para sugerido.
 
-DE-PARA DETERMINISTICO (DRE-CMV-CMP-7)
--------------------------------------
-Quando codigo e GTIN falham, `cmp_sku_torre.resolver_depara` liga o codigo vendido
-a UM codigo com CMP 0301 pelo cadastro (`sku` <-> `sku_antigo`) ou pelo GTIN, na mesma
-marca, sem divergencia de GTIN/volume e sem NF apontando outro candidato. Metodo
-`depara_deterministico`; tudo o que falha vira decisao humana. Nao le planilha de sugestoes.
+DE-PARA PELO CADASTRO (autorizado pelo negocio, DRE-CMV-CMP-8)
+-------------------------------------------------------------
+Quando codigo e GTIN falham, `cmp_sku_torre.resolver_depara` usa a chave
+`(marca, sku_antigo)` do cadastro oficial para chegar a UM `sku` ativo/elegivel e busca
+o CMP dele na 0301. Metodo `depara_aprovado`. GTIN nunca cria de-para; NF com outro
+canonico bloqueia (conflito de identidade); custo de NF so' gera alerta. Codigo
+resolvido sem CMP 0301 fica `codigo_resolvido_cmp_ausente` (nulo, nunca zero).
+`DEPARA_CADASTRO_AUTORIZADO` liga a regra; desligada, a proposta sai em
+`proposta_depara_*` e o publicador recusa `receita_depara > 0`.
 
 Codigos de saida: 0 ok; 65 recusa; 69 fonte indisponivel; 75 lock; 78 migration ausente.
 """
@@ -119,18 +122,25 @@ NIVEL_KIT_MISTO = "KIT_BOM_MISTO"
 ORDEM_CONFIANCA = {"baixa": 0, "media": 1, "alta": 2}
 #: Regras de kit habilitaveis (medidas separadamente).
 REGRAS_KIT = ("homogeneo", "misto")
+#: AUTORIZADO pelo negocio em 16/10/2026 (DRE-CMV-CMP-8): o cadastro oficial sustenta o de-para
+#: `(marca, sku_antigo) -> sku` nas condicoes de `cmp_sku_torre.resolver_depara`. GTIN nao foi
+#: autorizado como de-para. Desligar volta a visao oficial para SEM de-para.
+DEPARA_CADASTRO_AUTORIZADO = True
+
 #: Metodo da visao por produto, a partir do nivel de casamento. `depara_aprovado`
 #: fica reservado ate existir um de-para APROVADO pelo negocio (hoje nenhum).
 METODO_POR_NIVEL = {T.NIVEL_GTIN: "direto", T.NIVEL_VIA_GTIN: "direto", T.NIVEL_VOLUME: "direto",
                     T.NIVEL_PROVISORIO: "direto", NIVEL_KIT_HOMOGENEO: "kit_bom", NIVEL_KIT_MISTO: "kit_bom",
-                    T.NIVEL_DEPARA_GTIN: "depara_deterministico", T.NIVEL_DEPARA_VOLUME: "depara_deterministico",
-                    T.NIVEL_DEPARA_CODIGO: "depara_deterministico"}
-#: `depara_deterministico`: regra reproduzivel (DRE-CMV-CMP-7). `depara_aprovado` segue reservado para
-#: decisao humana linha a linha, que esta pipeline ainda nao le.
-METODOS = ("direto", "kit_bom", "depara_deterministico", "depara_aprovado")
+                    T.NIVEL_DEPARA_GTIN: "depara_aprovado", T.NIVEL_DEPARA_VOLUME: "depara_aprovado",
+                    T.NIVEL_DEPARA_CODIGO: "depara_aprovado"}
+#: `depara_aprovado`: de-para pelo cadastro, autorizado pelo negocio (DRE-CMV-CMP-8).
+METODOS = ("direto", "kit_bom", "depara_aprovado")
+#: Situacao do de-para por produto (separada nas saidas). Kit herda a do componente mais grave.
+SITUACOES_DEPARA = ("depara_aplicado", T.STATUS_CODIGO_RESOLVIDO_SEM_CMP, T.STATUS_CONFLITO_IDENTIDADE, "sem_depara")
 CAMPOS_PRODUTO = ("competencia", "tipo_linha", "canal", "marca", "sku", "produto", "receita", "unidades", "cmp",
                   "cmv", "margem_bruta_apos_cmp", "margem_pct", "calculavel", "metodo", "nivel", "confianca",
-                  "competencia_origem_cmp", "carry_forward", "cobertura_da_celula", "status", "motivo")
+                  "competencia_origem_cmp", "carry_forward", "cobertura_da_celula", "status", "motivo",
+                  "situacao_depara", "alerta_qualidade")
 FONTE_BOM = "raw.bling_kit_estrutura (BOM explicita do Bling, conta = marca)"
 RE_KIT = re.compile(r"(?i)(^kit|\bkit\b)")
 
@@ -180,7 +190,17 @@ SQL_SHOPEE = """
     GROUP BY 1, 2
 """
 SQL_POR_CANAL = {"ml": SQL_ML, "tiktok": SQL_TIKTOK, "shopee": SQL_SHOPEE}
-#: Pares codigo emitido x canonico das NFs: SO' contradizem um de-para deterministico.
+#: Custo unitario da NF de saida do Protheus, por marca x codigo, no ultimo mes com custo ate a
+#: competencia. SO' para o alerta `cmp_possivelmente_desatualizado`: nunca vira CMP.
+SQL_NF_CUSTO = """
+    SELECT marca, upper(btrim(codigo_produto)) AS codigo, data_mes,
+           SUM(custo) / NULLIF(SUM(quantidade_item), 0) AS custo_unitario
+    FROM silver.protheus_nfes_unificada
+    WHERE data_mes BETWEEN :desde AND :ate AND custo_origem = 'protheus_nf'
+      AND custo_unitario > 0 AND NOT COALESCE(custo_outlier, false) AND quantidade_item > 0
+    GROUP BY 1, 2, 3
+"""
+#: Pares codigo emitido x canonico das NFs: SO' bloqueiam (conflito de identidade).
 SQL_NF_PARES = """
     SELECT marca, codigo_sku, sku_canonico
     FROM gold.nf_vendas_plataforma_sku_mensal
@@ -266,13 +286,26 @@ def tipo_kit(entrada: dict) -> str:
     return "homogeneo" if len(entrada["componentes"]) == 1 else "misto"
 
 
+def situacao_depara(resolucoes: list) -> str:
+    """Pior situacao entre as resolucoes (conflito > sem CMP > aplicado > sem de-para)."""
+    st = {r.status for r in resolucoes if r is not None}
+    if T.STATUS_CONFLITO_IDENTIDADE in st:
+        return T.STATUS_CONFLITO_IDENTIDADE
+    if T.STATUS_CODIGO_RESOLVIDO_SEM_CMP in st:
+        return T.STATUS_CODIGO_RESOLVIDO_SEM_CMP
+    if any(r is not None and r.nivel in T.NIVEIS_DEPARA for r in resolucoes):
+        return "depara_aplicado"
+    return "sem_depara"
+
+
 def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, marca: str, comp: date,
-               depara: bool = True) -> dict:
+               depara: bool = DEPARA_CADASTRO_AUTORIZADO) -> dict:
     """CMP do kit pela BOM, so' com TODOS os componentes cobertos. Nunca custo parcial."""
     partes, faltas, origem, carry = [], [], None, False
-    confs = []
+    confs, resolucoes = [], []
     for cod, q, desc in entrada["componentes"]:
         r = T.resolver(ind, {"componente": cod}, comp, desc, cat, marca, idx_gtin, depara)
+        resolucoes.append(r)
         if r.status != "coberto":
             faltas.append(f"{cod}:{r.status}")
             continue
@@ -280,15 +313,19 @@ def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, ma
         confs.append(CONFIANCA[r.nivel])
         origem = max(origem or r.vigencia.competencia_origem, r.vigencia.competencia_origem)
         carry = carry or r.vigencia.carry_forward
+    alerta = T.ALERTA_CMP_DESATUALIZADO if any(r.alerta for r in resolucoes) else ""
     if faltas:
-        return {"status": "kit_componente_sem_cmp", "cmp": None, "motivo": "componentes sem CMP: " + ",".join(faltas)}
+        return {"status": "kit_componente_sem_cmp", "cmp": None, "motivo": "componentes sem CMP: " + ",".join(faltas),
+                "situacao_depara": situacao_depara(resolucoes), "alerta": ""}
     return {"status": "coberto", "cmp": sum(partes, Decimal(0)),
             "confianca": min(confs, key=ORDEM_CONFIANCA.get), "competencia_origem": origem, "carry_forward": carry,
-            "motivo": "BOM explicita: " + " + ".join(f"{q}x{c}" for c, q, _ in entrada["componentes"])}
+            "motivo": "BOM explicita: " + " + ".join(f"{q}x{c}" for c, q, _ in entrada["componentes"]),
+            "situacao_depara": situacao_depara(resolucoes), "alerta": alerta}
 
 
 def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: date,
-                bom: Optional[dict] = None, regras_kit: tuple = REGRAS_KIT, depara: bool = True) -> list[dict]:
+                bom: Optional[dict] = None, regras_kit: tuple = REGRAS_KIT,
+                depara: bool = DEPARA_CADASTRO_AUTORIZADO) -> list[dict]:
     """Resolve o CMP de cada SKU vendido. Sem casamento => `cmp=None` (nunca zero).
 
     `regras_kit` liga as regras de kit separadamente ("homogeneo", "misto"),
@@ -325,7 +362,7 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
                 else:
                     kit = {"status": "kit_regra_nao_aplicada", "cmp": None, "motivo": f"regra {kit_tipo} desligada"}
             direto = r is not None and r.status == "coberto"
-            if r is not None and r.status in ("conflito", "ambiguo"):
+            if r is not None and r.status in ("conflito", "ambiguo", T.STATUS_CONFLITO_IDENTIDADE):
                 # Conflito ou ambiguidade no codigo direto nunca e' resolvido pela BOM.
                 status, motivo = r.status, r.motivo
             elif direto and kit and kit["cmp"] is not None and abs(kit["cmp"] - r.cmp) > Decimal("0.005"):
@@ -344,6 +381,10 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
             else:
                 status, motivo = r.status, r.motivo
         cmv = (v.unidades * cmp) if cmp is not None else None
+        usou_kit = kit is not None and (status == "coberto" and nivel in (NIVEL_KIT_HOMOGENEO, NIVEL_KIT_MISTO)
+                                        or status == "kit_componente_sem_cmp")
+        sit = kit.get("situacao_depara", "sem_depara") if usou_kit else situacao_depara([r])
+        alerta = (kit.get("alerta", "") if usou_kit else (r.alerta if r is not None and status == "coberto" else ""))
         out.append({
             "canal": v.canal, "marca": v.marca, "sku": v.sku, "produto": v.produto,
             "unidades": v.unidades, "receita": v.receita, "status": status, "nivel": nivel,
@@ -354,6 +395,7 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
             "entidades": "|".join(r.entidades) if r is not None else "",
             "candidatos": "|".join(f"{e}:{s}:{c}" for e, s, c, _ in r.candidatos) if r is not None else "",
             "parece_kit": bool(RE_KIT.search(f"{v.sku or ''} {v.produto or ''}")),
+            "situacao_depara": sit, "alerta": alerta,
         })
     return out
 
@@ -417,7 +459,8 @@ def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) 
             "cmv_provisorio": cmv_cob,
             "unidades_sem_cmp": sum((x["unidades"] for x in ls if x["cmp"] is None), Decimal(0)),
             "skus_total": len(ls), "skus_cobertos": len(cobertos),
-            "skus_conflito": sum(1 for x in ls if x["status"] in ("conflito", "conflito_kit")),
+            "skus_conflito": sum(1 for x in ls if x["status"] in ("conflito", "conflito_kit",
+                                                                    T.STATUS_CONFLITO_IDENTIDADE)),
             "skus_sem_cmp": sum(1 for x in ls if x["cmp"] is None),
             "receita_gtin": por_nivel[T.NIVEL_GTIN] + por_nivel[T.NIVEL_VIA_GTIN],
             "receita_volume": por_nivel[T.NIVEL_VOLUME],
@@ -467,6 +510,8 @@ def visao_produto(linhas: list[dict], celulas: list[dict], comp: date) -> list[d
             "cobertura_da_celula": cob.get((x["canal"], x["marca"])),
             "status": x["status"],
             "motivo": None if calculavel else f"{x['status']}: {x['motivo'] or 'sem detalhe'}",
+            "situacao_depara": x.get("situacao_depara", "sem_depara"),
+            "alerta_qualidade": x.get("alerta") or None,
         })
     for c in celulas:
         if c["status"] == "ausente_na_fonte":
@@ -532,9 +577,11 @@ def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.
         kits = _rows(conn, T.SQL_KITS, {})
         bom = montar_bom(_rows(conn, SQL_BOM, {"marcas": list(MARCAS)}))
         nf = T.montar_pares_nf(_rows(conn, SQL_NF_PARES, {"desde": date(comp.year - 1, 1, 1)}))
+        nf_custo = T.montar_custos_nf(_rows(conn, SQL_NF_CUSTO, {"desde": C.somar_meses(comp, -2), "ate": comp}))
         conn.rollback()
     cat = T.montar_catalogo(cad, kits)
     cat.nf = nf
+    cat.nf_custo = nf_custo
     return vendas, cat, bom
 
 
@@ -573,6 +620,8 @@ def publicar(neon, celulas: list[dict], comp: date, cmp_sha: str, *, agora: Opti
     from sqlalchemy import text
     from pipelines.dre.premissa_publisher import sanitizar
 
+    if not DEPARA_CADASTRO_AUTORIZADO and any(c.get("receita_depara") for c in celulas):
+        raise PublicacaoRecusada("celula com cobertura por de-para deterministico, ainda nao autorizado pelo negocio")
     agora = agora or datetime.now(timezone.utc)
     p = {"competencia": comp}
     try:
@@ -665,13 +714,16 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
         return EXIT_FONTE
     # Quanto cada regra eleva a cobertura: sem kit, so' homogeneo, homogeneo + misto.
     cenarios = {"sem_kit": ((), False), "homogeneo": (("homogeneo",), False), "homogeneo_e_misto": (REGRAS_KIT, False),
-                "homogeneo_misto_e_depara": (REGRAS_KIT, True)}
+                "com_depara_cadastro": (REGRAS_KIT, True)}
     cobertura_por_regra = {}
     for nome, (regras, dp) in cenarios.items():
         cels = agregar(classificar(ind, cat, vendas, comp, bom, regras, dp), receita_cel, cortes, comp)
         cobertura_por_regra[nome] = {f"{c['canal']}|{c['marca']}": c["cobertura"] for c in cels}
-    linhas = classificar(ind, cat, vendas, comp, bom, REGRAS_KIT)
+    linhas = classificar(ind, cat, vendas, comp, bom, REGRAS_KIT)   # oficial: so' o autorizado
     celulas = agregar(linhas, receita_cel, cortes, comp)
+    # Proposta (nao oficial): o mesmo calculo com o de-para deterministico ligado.
+    linhas_prop = classificar(ind, cat, vendas, comp, bom, REGRAS_KIT, True)
+    celulas_prop = agregar(linhas_prop, receita_cel, cortes, comp)
     args.saida.mkdir(parents=True, exist_ok=True)
     with open(args.saida / f"matriz_cmv_cmp_{comp:%Y-%m}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(linhas[0]) if linhas else ["vazio"])
@@ -685,6 +737,13 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
             w = csv.DictWriter(f, fieldnames=list(CAMPOS_PRODUTO))
             w.writeheader()
             w.writerows(recorte)
+    if not DEPARA_CADASTRO_AUTORIZADO:
+        with open(args.saida / f"proposta_depara_produto_cmp_{comp:%Y-%m}.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(CAMPOS_PRODUTO))
+            w.writeheader()
+            w.writerows(visao_produto(linhas_prop, celulas_prop, comp))
+        (args.saida / f"proposta_depara_celulas_{comp:%Y-%m}.json").write_text(
+            json.dumps(celulas_prop, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.saida / f"cobertura_por_regra_{comp:%Y-%m}.json").write_text(
         json.dumps(cobertura_por_regra, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.saida / f"celulas_cmv_cmp_{comp:%Y-%m}.json").write_text(
@@ -694,7 +753,14 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
                    "produtos": {"calculaveis": sum(1 for p in produtos if p["calculavel"]),
                                 "nao_calculaveis": sum(1 for p in produtos
                                                        if p["tipo_linha"] == "produto" and not p["calculavel"]),
-                                "celulas_ausentes": sum(1 for p in produtos if p["tipo_linha"] == "celula_ausente")}}
+                                "celulas_ausentes": sum(1 for p in produtos if p["tipo_linha"] == "celula_ausente"),
+                                "por_situacao_depara": dict(Counter(p["situacao_depara"] for p in produtos
+                                                                    if p["tipo_linha"] == "produto")),
+                                "alerta_cmp_possivelmente_desatualizado": sum(
+                                    1 for p in produtos if p["alerta_qualidade"] == T.ALERTA_CMP_DESATUALIZADO)},
+                   "depara_cadastro_autorizado": DEPARA_CADASTRO_AUTORIZADO}
+    if not DEPARA_CADASTRO_AUTORIZADO:
+        saida["proposta_depara_nao_oficial"] = resumo_publico(celulas_prop)
     codigo = EXIT_OK
     if args.apply:
         try:

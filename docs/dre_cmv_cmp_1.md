@@ -1,4 +1,4 @@
-# DRE-CMV-CMP-1…7 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
+# DRE-CMV-CMP-1…8 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
 
 Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de outubro sobe de 14,7% (sem kit)
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
@@ -17,9 +17,15 @@ DRE-CMV-CMP-6 (seção 14) fecha a regra de filial: **só 0301** (Rituaria só M
 outubro: **47,3%** sobre as 13 células com fonte, **41,2%** sobre as 14 células da DRE; o potencial só com de-para
 0301 vai a 63,9%–71,2%, e **nenhuma célula chega a 100%**.
 
-DRE-CMV-CMP-7 (seção 15) transformou o de-para que não precisa de pessoa em **regra determinística** do pipeline:
-**53 dos 72** de-para pendentes passaram. Cobertura oficial de outubro: **57,5%** (13 células com fonte) e **50,1%**
-(14 células da DRE). Restam 19 de-para, 42 escolhas, 2 KS e 86 itens sem CMP 0301 para o negócio.
+DRE-CMV-CMP-7/8 (seção 15): o negócio **autorizou** o de-para pelo cadastro oficial `(marca, sku_antigo) → sku`, com
+condições (registro ativo e elegível, relação única, sem conflito de identidade na NF; GTIN não cria de-para).
+
+| outubro/2026 | 13 células com fonte | 14 células da DRE |
+|---|---:|---:|
+| cobertura sem de-para | 47,3% | 41,2% |
+| **cobertura oficial com o de-para autorizado** | **57,4%** | **50,0%** |
+
+Nenhuma célula chega a 100%: a margem agregada continua nula.
 
 ## 1. O que é
 
@@ -331,7 +337,7 @@ código de origem fiscal (o do DRE-CMP-SKU-2) não aparece em outubro: as fontes
 
 | faixa | 13 células com fonte | 14 células da DRE |
 |---|---:|---:|
-| oficial atual | 47,3% | 41,2% |
+| oficial atual no CMP-6 (sem de-para) | 47,3% | 41,2% |
 | + de-para de alta confiança | 55,6% | 48,4% |
 | + de-para de média confiança | 63,9% | 55,6% |
 | + de-para de baixa confiança | 64,3% | 55,9% |
@@ -350,42 +356,56 @@ Shopee · Kokeshi sem aviso** (13). Impacto: os percentuais consolidados são so
 fonte; incluindo a receita de Shopee · Kokeshi no denominador (como ausente, nunca custo zero), a cobertura oficial
 cai de 47,3% para 41,2%. A visão por produto agora traz a célula ausente como linha própria.
 
-## 15. De-para determinístico (DRE-CMV-CMP-7)
+## 15. De-para pelo cadastro — autorizado pelo negócio (DRE-CMV-CMP-7/8)
 
 **Regras definitivas:** filial SP = `0301`; Rituaria = MAGA SP, nunca MG1; só o CMP unitário por SKU; bonificação
 fora do CMP (vai nas premissas percentuais da DRE); custo de NF, `preco_custo`, compras, estoque e CMV contábil não
 substituem CMP; nenhuma outra filial fornece valor.
 
-**Regra (`cmp_sku_torre.resolver_depara`, ligada no CMV provisório).** Quando o código vendido não casa por código
-exato nem pela via GTIN, ele casa com um código da planilha 0301 só se **todas** valerem:
-- mesma marca (cadastro e candidato escopados por marca → entidade, filial SP/0301);
-- chave exata: cadastro (`sku` ↔ `sku_antigo`) ou GTIN válido;
-- **um único candidato** somando as duas chaves;
-- candidato com CMP vigente na competência (alternativa 3);
-- GTIN e volume sem divergência (volume só quando houver); GTIN não reaproveitado entre produtos;
-- nenhuma NF ligando o código a **outro** candidato com CMP — a NF só contradiz, nunca cria casamento.
+**Autorização (16/10/2026, DRE-CMV-CMP-8).** O cadastro oficial pode sustentar o de-para `sku_antigo → sku`, nestas
+condições (todas fixadas em teste):
+1. chave obrigatória `(marca, sku_antigo)`; nunca só o código antigo, e nunca na direção `sku → sku_antigo`;
+2. relação única dentro da marca — `sku_antigo` com mais de um `sku` é **conflito de identidade**;
+3. só registro `is_active = true` com status elegível. **[assunção a ratificar]** elegível = só `Ativo`; o cadastro
+   também tem `Descontinuado` e `Reavaliação 45D`, que hoje não sustentam de-para (incluí-los mudaria a cobertura de
+   57,4% para 57,5%);
+4. código resolvido sem CMP vigente na MAGA SP/0301 → `codigo_resolvido_cmp_ausente`: CMP, CMV e margem nulos, nunca
+   zero;
+5. só onde existe `sku_antigo` (Rituaria não tem nenhum: segue dependendo das outras decisões);
+6. **GTIN não cria de-para** (não foi autorizado); o código resolvido passa pelas mesmas regras do código exato
+   (escopo 0301, vigência, GTIN/volume sem divergência, conflito);
+7. **nota fiscal:** NF com outro código canônico para o mesmo código e marca é conflito de identidade e bloqueia; custo
+   da NF diferente do CMP 0301 **não** bloqueia nem substitui — só registra o alerta `cmp_possivelmente_desatualizado`,
+   **sem limite percentual** (nenhum foi aprovado). O custo vem da NF de saída do Protheus (último mês com custo, sem
+   outlier) e serve só para o alerta.
 
-O de-para nunca resolve conflito ou ambiguidade do código exato e não contorna KS03041/KS03042. A confiança vem da
-evidência de produto: GTIN = alta, volume = média, só o código = baixa. Método na visão por produto:
-`depara_deterministico` (`depara_aprovado` segue reservado para decisão humana). A migration 028 (não aplicada)
-ganhou `receita_depara`, com CHECK de não negativo, não NaN e no máximo a receita coberta. A regra não lê a planilha
-de sugestões.
+Implementação: `cmp_sku_torre.resolver_depara` (via 3, depois do código exato e da via GTIN) e
+`cmv_cmp_provisorio.DEPARA_CADASTRO_AUTORIZADO = True`. Método na visão por produto: `depara_aprovado`. A visão por
+produto separa `situacao_depara` (`depara_aplicado`, `codigo_resolvido_cmp_ausente`, `conflito_identidade`,
+`sem_depara`) e `alerta_qualidade`. Se a autorização for revogada, a constante volta a `False`: a visão oficial sai sem
+de-para, a proposta sai em `proposta_depara_*` e o publicador recusa `receita_depara > 0`. A migration 028 (não
+aplicada) tem `receita_depara`, com CHECK.
 
 **Resultado em outubro** (dry-run real, só leitura):
 
-| | antes | depois |
+| | sem de-para | com o de-para autorizado |
 |---|---:|---:|
-| cobertura, 13 células com fonte | 47,3% | **57,5%** |
-| cobertura, 14 células da DRE | 41,2% | **50,1%** |
-| produtos calculáveis | 548 | **727** |
-| Lescent (TikTok / Shopee / ML) | 7,2% / 5,5% / 3,1% | 95,0% / 90,2% / 89,9% |
+| cobertura, 13 células com fonte | 47,3% | **57,4%** |
+| cobertura, 14 células da DRE | 41,2% | **50,0%** |
+| produtos calculáveis | 548 | **690** |
+| Lescent (TikTok / Shopee / ML) | 7,2% / 5,5% / 3,1% | 94,7% / 89,0% / 89,5% |
 
-Dos 72 de-para pendentes do CMP-6: **53 viraram regra** (37 pelo código antigo do cadastro, 16 por GTIN); **19
-continuam humanos** — 18 só têm ligação por NF (15 Rituaria, 3 Apice) e 1 tem dois códigos 0301.
+Situação do de-para por produto (canal × SKU): 148 com de-para aplicado, 108 com código resolvido sem CMP 0301,
+10 em conflito de identidade, 1.098 sem de-para. O alerta `cmp_possivelmente_desatualizado` marca 142 produtos: sem
+limite, quase todo de-para aplicado diverge do custo da NF em algum centavo — o alerta só fica útil com um limite
+aprovado pelo negócio.
 
-**Cenário canônico depois da regra** (% da receita das 13 células): CMP 0301 válido 57,5%; de-para humano pendente
-6,7%; sem CMP 0301 13,1% (sem evidência 5,0%, KS 8,1%); conflito entre CMPs 0301 7,0%; fora da regra 15,7%. O teto
-só com decisões dentro da 0301 continua 71,2% (62,0% nas 14 células); nenhuma célula chega a 100%.
+**Dos 53 de-para propostos no CMP-7:** 34 continuam válidos (todos componentes Lescent, pelo cadastro); 9 caem por não
+ter `sku_antigo` (eram ligações por GTIN); 6 caem por status `Descontinuado`; 4 são cobertos pela via GTIN antiga em
+algum canal e não são de-para. Os que caíram voltaram para a planilha de decisões humanas.
+
+**Nenhuma célula chega a 100%**, então a margem por canal, marca ou total continua nula; o teto só com decisões dentro
+da 0301 segue em 71,2% (62,0% nas 14 células).
 
 **Bonificação:** a extração de CMP nunca lê as abas de bonificação (teste com valor-armadilha); o CMV fiscal vem só de
 NF `tipo_operacao = normal` (sem NF de bonificação desde julho); no cenário estimado a linha "(-) Bonificações" é só
@@ -394,16 +414,19 @@ CMV coberto) é custo do kit, e a DRE também tem a premissa "(-) Brindes" — p
 
 ## 12. Decisões externas para destravar
 
-1. **Preencher a planilha de decisões 0301** (seções 14 e 15, privada): aprovar ou rejeitar os 19 de-para que não
-   são determinísticos, escolher o código nos 42 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP
-   0301.
-   Não há opção de custo de outra filial. O que for aprovado precisa de um gate próprio para entrar como de-para
-   versionado (`metodo = depara_aprovado`); nenhuma sugestão é aplicada sem essa decisão.
-2. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo
+1. **Preencher a planilha de decisões 0301** (seções 14 e 15, privada): aprovar ou rejeitar os 38 de-para que a regra
+   autorizada não cobre (18 só por NF, 12 só por GTIN, 6 com cadastro `Descontinuado`, 2 cujo código resolvido não
+   fecha), escolher o código nos 41 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP 0301.
+   Não há opção de custo de outra filial. Aprovação linha a linha precisa de um gate próprio para ser lida pelo
+   pipeline; nenhuma sugestão é aplicada sem essa decisão.
+2. **Status elegível do cadastro:** confirmar se só `Ativo` sustenta o de-para (assunção atual) ou se `Descontinuado` e
+   `Reavaliação 45D` também (efeito: +0,05 ponto).
+3. **Limite do alerta `cmp_possivelmente_desatualizado`:** sem limite aprovado, ele marca quase todo de-para aplicado.
+4. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo
    de 100%. Hoje ela não existe, e a margem fica ausente.
-3. KS03041/KS03042: sem exceção. Só a confirmação da origem empresarial libera o único candidato 0301 do KS03041;
+5. KS03041/KS03042: sem exceção. Só a confirmação da origem empresarial libera o único candidato 0301 do KS03041;
    o KS03042 não tem candidato 0301. De-para temporal dos conflitos fiscais segue pendente (DRE-CMP-SKU-2).
-4. Origem da tabela diária da Shopee (confirmar que é 100% API).
+6. Origem da tabela diária da Shopee (confirmar que é 100% API).
 
 ## 13. Próximo gate de publicação
 

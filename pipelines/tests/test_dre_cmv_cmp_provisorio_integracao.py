@@ -101,12 +101,18 @@ def _audit(eng):
     ({"status": "ausente_na_fonte"}, "ck_fdcp_ausencia_explicita"),
     ({"marca": "gocase"}, "ck_fdcp_marca"),
     ({"regra_temporal": "ultimo_disponivel"}, "ck_fdcp_regra_temporal"),
-    ({"receita_depara": Decimal(301)}, "ck_fdcp_depara"),
-    ({"receita_depara": Decimal("NaN")}, "ck_fdcp_depara"),
 ])
 def test_migration_027_recusa_linha_fora_do_contrato(banco, kw, motivo):
     with pytest.raises(IntegrityError, match=motivo):
         M.publicar(banco, [celula(**kw)], OUT, SHA, agora=AGORA)
+
+
+@pytest.mark.parametrize("valor", [Decimal(301), Decimal("NaN")])
+def test_migration_recusa_receita_depara_fora_do_contrato(banco, monkeypatch, valor):
+    """O CHECK do banco e' a ultima barreira: prova-o com a trava do publicador desligada."""
+    monkeypatch.setattr(M, "DEPARA_CADASTRO_AUTORIZADO", True)
+    with pytest.raises(IntegrityError, match="ck_fdcp_depara"):
+        M.publicar(banco, [celula(receita_depara=valor)], OUT, SHA, agora=AGORA)
 
 
 def test_publica_ausente_com_null_e_e_idempotente(banco):

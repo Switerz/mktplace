@@ -89,13 +89,26 @@ NIVEL_VOLUME = "CODIGO_EXATO_VOLUME"
 NIVEL_PROVISORIO = "CODIGO_EXATO_PROVISORIO"
 NIVEL_VIA_GTIN = "VIA_GTIN"
 NIVEIS = (NIVEL_GTIN, NIVEL_VIA_GTIN, NIVEL_VOLUME, NIVEL_PROVISORIO)
-#: De-para DETERMINISTICO (DRE-CMV-CMP-7): o codigo vendido nao tem CMP, mas o cadastro
-#: (`sku` <-> `sku_antigo`) ou o GTIN o ligam a UM unico codigo com CMP 0301. O nivel diz
-#: qual evidencia de produto confirmou: GTIN, volume, ou nenhuma (so' o codigo).
+#: De-para AUTORIZADO pelo negocio (DRE-CMV-CMP-8, 16/10/2026): o codigo vendido e' um
+#: `sku_antigo` do cadastro oficial e a chave `(marca, sku_antigo)` aponta para UM `sku` ativo e
+#: elegivel com CMP 0301. O nivel diz qual evidencia de produto confirmou o codigo resolvido:
+#: GTIN, volume, ou nenhuma (so' o codigo).
 NIVEL_DEPARA_GTIN = "DEPARA_GTIN"
 NIVEL_DEPARA_VOLUME = "DEPARA_VOLUME"
 NIVEL_DEPARA_CODIGO = "DEPARA_CODIGO"
 NIVEIS_DEPARA = (NIVEL_DEPARA_GTIN, NIVEL_DEPARA_VOLUME, NIVEL_DEPARA_CODIGO)
+#: Nivel do codigo resolvido -> nivel do de-para.
+NIVEL_DEPARA_POR_NIVEL = {NIVEL_GTIN: NIVEL_DEPARA_GTIN, NIVEL_VOLUME: NIVEL_DEPARA_VOLUME,
+                          NIVEL_PROVISORIO: NIVEL_DEPARA_CODIGO}
+#: [ASSUNCAO a ratificar] "Status operacionalmente elegivel": so' `Ativo`. O cadastro tambem tem
+#: `Descontinuado` e `Reavaliacao 45D`; nenhum dos dois sustenta de-para ate o negocio decidir.
+STATUS_ELEGIVEIS = frozenset({"ativo"})
+#: Estados do de-para que nao cobrem: codigo resolvido sem CMP 0301 e conflito de identidade.
+STATUS_CODIGO_RESOLVIDO_SEM_CMP = "codigo_resolvido_cmp_ausente"
+STATUS_CONFLITO_IDENTIDADE = "conflito_identidade"
+#: Alerta de qualidade (nao bloqueia, nao muda o CMP): custo da NF diverge do CMP 0301.
+#: Sem limite percentual: nenhum foi aprovado pelo negocio.
+ALERTA_CMP_DESATUALIZADO = "cmp_possivelmente_desatualizado"
 #: Os dois niveis confirmados por GTIN; nunca misturados com o provisorio.
 NIVEIS_GTIN = (NIVEL_GTIN, NIVEL_VIA_GTIN)
 
@@ -128,7 +141,7 @@ SQL_VENDAS = """
     GROUP BY 1, 2, 3, 4, 5, 6
 """
 SQL_CADASTRO = """
-    SELECT marca, sku, sku_antigo, tipo, gtin_ean
+    SELECT marca, sku, sku_antigo, tipo, gtin_ean, status, is_active
     FROM silver.gobeaute_produto_cadastro
 """
 SQL_KITS = """
@@ -241,8 +254,12 @@ class Catalogo:
     alias: dict = field(default_factory=lambda: defaultdict(set))         # -> codigos equivalentes
     gtin: dict = field(default_factory=lambda: defaultdict(set))          # -> GTINs validos
     componentes: dict = field(default_factory=lambda: defaultdict(list))  # kit -> [(componente, qtd)]
-    #: Pares codigo emitido <-> canonico das NFs. SO' contradizem um de-para; nunca o criam.
+    #: (marca, sku_antigo) -> [{sku, status, is_active}] do cadastro oficial (direcao antigo -> atual).
+    antigo: dict = field(default_factory=lambda: defaultdict(list))
+    #: (marca, codigo emitido na NF) -> codigos canonicos. SO' bloqueiam (identidade); nunca criam de-para.
     nf: dict = field(default_factory=lambda: defaultdict(set))
+    #: (marca, codigo) -> custo unitario da NF de saida. SO' gera alerta; nunca substitui o CMP.
+    nf_custo: dict = field(default_factory=dict)
 
 
 def montar_catalogo(cadastro: list[dict], kits: list[dict]) -> Catalogo:
@@ -256,6 +273,9 @@ def montar_catalogo(cadastro: list[dict], kits: list[dict]) -> Catalogo:
         for c in codigos:
             cat.alias[(m, c)] |= codigos - {c}
             cat.gtin[(m, c)] |= g
+        antigo, atual = chave_sku(r.get("sku_antigo")), chave_sku(r["sku"])
+        if antigo and atual and antigo != atual:
+            cat.antigo[(m, antigo)].append({"sku": atual, "status": r.get("status"), "is_active": r.get("is_active")})
     for r in kits:
         m = chave_marca(r.get("kit_marca"))
         k, c = chave_sku(r["kit_codigo"]), chave_sku(r["componente_codigo"])
@@ -290,6 +310,7 @@ class Resolucao:
     motivo: str = ""     # por que ficou sem casamento (inclui a tentativa pela via GTIN)
     vigencia: Optional[Vigencia] = None
     candidatos: tuple = ()  # (entidade, sku, cmp, competencia_origem) — para o de-para de conflitos
+    alerta: str = ""        # alerta de qualidade que nao bloqueia (ex.: cmp_possivelmente_desatualizado)
 
 
 def gtins_da_venda(cat: Optional[Catalogo], marca: str, produto: Optional[str], codigos: dict) -> set:
@@ -389,63 +410,69 @@ def resolver_gtin(ind: Indice, idx_gtin: dict, comp: date, produto: Optional[str
 
 
 def montar_pares_nf(rows: list[dict]) -> dict:
-    """(marca, codigo) -> codigos ligados por NF (emitido x canonico), nos dois sentidos."""
+    """(marca, codigo emitido na NF) -> codigos canonicos diferentes dele (so' nessa direcao)."""
     out: dict = defaultdict(set)
     for r in rows:
         m, a, b = chave_marca(r.get("marca")), chave_sku(r.get("codigo_sku")), chave_sku(r.get("sku_canonico"))
         if a and b and a != b:
             out[(m, a)].add(b)
-            out[(m, b)].add(a)
     return out
 
 
-def _chaves_no_escopo(ind: Indice, marca: str, codigo: str) -> list:
-    return [(e, f, codigo) for e, f in sorted(ind.por_sku.get(codigo, ())) if _no_escopo(marca, (e, f, codigo))]
+def montar_custos_nf(rows: list[dict]) -> dict:
+    """(marca, codigo) -> custo unitario da NF de saida (ultimo mes com custo). So' para alerta."""
+    out: dict = {}
+    for r in sorted(rows, key=lambda r: r["data_mes"]):
+        if r.get("custo_unitario") is not None and Decimal(str(r["custo_unitario"])) > 0:
+            out[(chave_marca(r.get("marca")), chave_sku(r.get("codigo")))] = Decimal(str(r["custo_unitario"]))
+    return out
 
 
-def resolver_depara(ind: Indice, cat: Catalogo, idx_gtin: dict, comp: date, produto: Optional[str], marca: str,
-                    codigo: str, g_venda: set) -> tuple[Optional[Resolucao], str]:
-    """Via 3 (DRE-CMV-CMP-7): de-para DETERMINISTICO, sem aprovacao linha a linha.
+def _elegivel(reg: dict) -> bool:
+    status = unicodedata.normalize("NFKD", reg.get("status") or "").encode("ascii", "ignore").decode().strip().lower()
+    return reg.get("is_active") is True and status in STATUS_ELEGIVEIS
 
-    Casa so' quando TODAS valem: mesma marca; chave exata por cadastro (`sku` <-> `sku_antigo`)
-    ou GTIN valido; UM unico candidato no escopo 0301; candidato com CMP vigente; GTIN e volume
-    sem divergencia (volume so' quando houver); GTIN nao reaproveitado; e nenhuma NF ligando o
-    codigo a OUTRO candidato com CMP. Qualquer falha devolve (None, motivo) — vira decisao humana.
+
+def resolver_depara(ind: Indice, cat: Catalogo, comp: date, produto: Optional[str], marca: str, codigo: str,
+                    g_venda: set) -> tuple[Optional[Resolucao], str]:
+    """Via 3 — de-para AUTORIZADO pelo cadastro oficial (DRE-CMV-CMP-8, 16/10/2026).
+
+    Contrato do negocio:
+      1. chave obrigatoria `(marca, sku_antigo)`; nunca so' o codigo antigo, nunca o GTIN;
+      2. relacao unica dentro da marca (um `sku` por `sku_antigo`), senao conflito de identidade;
+      3. so' registro `is_active = true` com status elegivel (`STATUS_ELEGIVEIS`);
+      4. codigo resolvido sem CMP vigente na 0301 -> `codigo_resolvido_cmp_ausente` (CMP nulo, nunca zero);
+      5. so' onde existe `sku_antigo`;
+      6. NF com outro codigo canonico para o mesmo codigo -> conflito de identidade (bloqueia);
+         custo da NF diferente do CMP -> so' alerta `cmp_possivelmente_desatualizado` (sem limite).
+    O codigo resolvido passa pelas MESMAS regras do codigo exato (escopo 0301, vigencia, GTIN/volume,
+    conflito). Devolve (None, motivo) quando a regra nao se aplica; senao uma Resolucao, coberta ou nao.
     """
     m, cod = chave_marca(marca), chave_sku(codigo)
-    origens: dict = defaultdict(set)
-    for alias in cat.alias.get((m, cod), set()):
-        for k in _chaves_no_escopo(ind, marca, alias):
-            origens[k].add("cadastro")
-    chaves_gtin: set = set()
-    for g in g_venda:
-        todas = idx_gtin.get(g, set())
-        if gtin_reutilizado(ind, todas):
-            return None, "depara_gtin_reutilizado"
-        for k in todas:
-            if k[2] != cod and _no_escopo(marca, k):
-                origens[k].add("gtin")
-                chaves_gtin.add(k)
-    if not origens:
-        return None, "depara_sem_ligacao_deterministica"
-    if len(origens) > 1:
-        return None, "depara_mais_de_um_candidato"
-    (k, fontes), = origens.items()
-    vg = cmp_vigente(ind, k, comp)
-    if vg.estado == "conflito":
-        return None, "depara_candidato_com_cmp_conflitante"
-    if vg.estado != "ok":
-        return None, "depara_candidato_sem_cmp_0301"
-    ev_g = comparar(g_venda, gtins_da_chave(ind, k))
-    ev_v = comparar(tamanhos(produto), volumes_da_chave(ind, k))
-    if DIVERGE in (ev_g, ev_v):
-        return None, "depara_evidencia_contraditoria"
-    for outro in cat.nf.get((m, cod), set()):
-        if outro != k[2] and any(cmp_vigente(ind, kk, comp).estado == "ok" for kk in _chaves_no_escopo(ind, marca, outro)):
-            return None, "depara_nf_aponta_outro_candidato"
-    nivel = NIVEL_DEPARA_GTIN if ev_g == CONCORDA else NIVEL_DEPARA_VOLUME if ev_v == CONCORDA else NIVEL_DEPARA_CODIGO
-    return Resolucao("coberto", vg.cmp, nivel, tuple(sorted(fontes)), (k[0],), vigencia=vg,
-                     motivo=f"de-para deterministico: {cod} -> {k[2]}@{k[0]}"), ""
+    regs = cat.antigo.get((m, cod))
+    if not regs:
+        return None, "depara_sem_sku_antigo"
+    skus = {r["sku"] for r in regs}
+    if len(skus) > 1:
+        return Resolucao(STATUS_CONFLITO_IDENTIDADE, motivo="depara: sku_antigo com mais de um sku na marca"), ""
+    if not any(_elegivel(r) for r in regs):
+        return None, "depara_cadastro_inativo_ou_status_inelegivel"
+    novo = next(iter(skus))
+    outros = cat.nf.get((m, cod), set()) - {novo}
+    if outros:
+        return Resolucao(STATUS_CONFLITO_IDENTIDADE, motivo="depara: NF indica outro codigo canonico"), ""
+    r = resolver_codigo(ind, {"depara": novo}, comp, produto, marca, g_venda)
+    if r.status == "coberto":
+        custo_nf = cat.nf_custo.get((m, novo), cat.nf_custo.get((m, cod)))
+        alerta = (ALERTA_CMP_DESATUALIZADO if custo_nf is not None
+                  and custo_nf.quantize(Decimal("0.01")) != r.cmp.quantize(Decimal("0.01")) else "")
+        return Resolucao("coberto", r.cmp, NIVEL_DEPARA_POR_NIVEL[r.nivel], ("cadastro",), r.entidades,
+                         r.descartados, f"de-para cadastro: {cod} -> {novo}", r.vigencia, alerta=alerta), ""
+    if r.status == "sem_cmp":
+        return Resolucao(STATUS_CODIGO_RESOLVIDO_SEM_CMP,
+                         motivo=f"de-para cadastro: {cod} -> {novo}, sem CMP vigente na 0301"), ""
+    # conflito, ambiguidade ou evidencia divergente do codigo RESOLVIDO: mesmo tratamento do codigo exato.
+    return Resolucao(r.status, motivo=f"de-para cadastro: {cod} -> {novo}: {r.motivo}", candidatos=r.candidatos), ""
 
 
 def origem_a_confirmar(marca: str, codigos: dict) -> bool:
@@ -457,7 +484,7 @@ def resolver(ind: Indice, codigos: dict, comp: date, produto: Optional[str], cat
              marca: str = "", idx_gtin: Optional[dict] = None, depara: bool = False) -> Resolucao:
     """CMP de uma venda, ou o motivo de nao haver.
 
-    Ordem: codigo exato > via GTIN > (so' com `depara=True`) de-para deterministico.
+    Ordem: codigo exato > via GTIN > (so' com `depara=True`) de-para autorizado pelo cadastro.
     """
     if origem_a_confirmar(marca, codigos):
         return Resolucao("origem_a_confirmar", motivo="origem_empresarial_nao_confirmada")
@@ -474,8 +501,7 @@ def resolver(ind: Indice, codigos: dict, comp: date, produto: Optional[str], cat
     r.motivo = f"{r.motivo};{motivo}"
     # O de-para so' entra quando codigo e GTIN falharam; nunca resolve conflito nem ambiguidade.
     if depara and cat is not None and len(codigos) == 1:
-        dp, motivo_dp = resolver_depara(ind, cat, idx_gtin, comp, produto, marca, next(iter(codigos.values())),
-                                        g_venda)
+        dp, motivo_dp = resolver_depara(ind, cat, comp, produto, marca, next(iter(codigos.values())), g_venda)
         if dp is not None:
             dp.descartados = r.descartados
             return dp

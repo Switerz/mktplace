@@ -317,14 +317,13 @@ def test_visao_produto_falha_fechada_em_linha_incoerente():
         raise AssertionError(f"aceitou linha incoerente: {linha}")
 
 
-def test_metodo_depara_aprovado_reservado_e_nunca_emitido():
-    """Nenhum nivel de casamento produz `depara_aprovado`: de-para sugerido nao entra."""
-    assert "depara_aprovado" in M.METODOS
-    assert "depara_aprovado" not in M.METODO_POR_NIVEL.values()
+def test_metodo_depara_aprovado_so_vem_do_depara_do_cadastro():
+    """`depara_aprovado` e' emitido so' pelos niveis do de-para autorizado; GTIN/codigo seguem `direto`."""
+    assert {n for n, m in M.METODO_POR_NIVEL.items() if m == "depara_aprovado"} == set(T.NIVEIS_DEPARA)
 
 
 # ---------------------------------------------------------------------------
-# DRE-CMV-CMP-7: de-para deterministico (cadastro / GTIN -> um unico CMP 0301)
+# DRE-CMV-CMP-8: de-para AUTORIZADO pelo cadastro — (marca, sku_antigo) -> sku
 # ---------------------------------------------------------------------------
 
 def ean(prefixo12: str) -> str:
@@ -336,10 +335,10 @@ def ean(prefixo12: str) -> str:
 G1, G2 = ean("200000000001"), ean("200000000002")
 
 
-def cad(*linhas, marca="Apice"):
+def cad(*linhas, marca="Apice", status="Ativo", ativo=True):
     """linhas: (sku, sku_antigo, gtin)."""
-    return T.montar_catalogo([{"marca": marca, "sku": s, "sku_antigo": a, "tipo": "PA", "gtin_ean": g}
-                              for s, a, g in linhas], [])
+    return T.montar_catalogo([{"marca": marca, "sku": s, "sku_antigo": a, "tipo": "PA", "gtin_ean": g,
+                               "status": status, "is_active": ativo} for s, a, g in linhas], [])
 
 
 def classif(tmp_path, vendas, cat, comp=OUT, depara=True, bom=None):
@@ -347,21 +346,138 @@ def classif(tmp_path, vendas, cat, comp=OUT, depara=True, bom=None):
     return M.classificar(ind, cat, vendas, comp, bom, M.REGRAS_KIT, depara)
 
 
-def test_depara_pelo_codigo_antigo_do_cadastro(tmp_path):
+def test_autorizacao_do_negocio_fixada():
+    """16/10/2026: cadastro sustenta o de-para; status elegivel = so' Ativo (assuncao a ratificar)."""
+    assert M.DEPARA_CADASTRO_AUTORIZADO is True
+    assert T.STATUS_ELEGIVEIS == frozenset({"ativo"})
+
+
+def test_depara_pela_chave_marca_e_sku_antigo(tmp_path):
     comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
     (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
     assert (ln["status"], ln["cmp"], ln["nivel"], ln["confianca"]) == ("coberto", Decimal(4), T.NIVEL_DEPARA_CODIGO,
                                                                        "baixa")
+    assert ln["situacao_depara"] == "depara_aplicado" and ln["alerta"] == ""
     (p,) = M.visao_produto([ln], [], OUT)
-    assert p["metodo"] == "depara_deterministico"
+    assert (p["metodo"], p["situacao_depara"]) == ("depara_aprovado", "depara_aplicado")
 
 
-def test_depara_por_gtin_sem_volume_tem_confianca_alta(tmp_path):
-    """Via GTIN exige volume; o de-para aceita volume ausente e so bloqueia divergencia."""
+def test_depara_por_padrao_na_pipeline_oficial(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    _, ind = ler_pasta(tmp_path)
+    (ln,) = M.classificar(ind, cad(("NOVO1", "VELHO1", None)), [v("tiktok", "apice", "VELHO1", 10, 100)], OUT)
+    assert ln["cmp"] == Decimal(4)
+
+
+def test_depara_so_na_direcao_antigo_para_atual(tmp_path):
+    """Vender o codigo ATUAL nunca puxa o CMP do codigo antigo."""
+    comparativo(tmp_path, [("SP", "VELHO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "NOVO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
+    assert ln["cmp"] is None and ln["situacao_depara"] == "sem_depara"
+
+
+def test_depara_nunca_cruza_marca(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None),
+                                                                              marca="Barbours"))
+    assert ln["cmp"] is None and "depara_sem_sku_antigo" in ln["motivo"]
+
+
+def test_depara_exige_relacao_unica_na_marca(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "NOVO2", "", "X", [5, 5, 5], 5)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)],
+                    cad(("NOVO1", "VELHO1", None), ("NOVO2", "VELHO1", None)))
+    assert (ln["status"], ln["cmp"]) == (T.STATUS_CONFLITO_IDENTIDADE, None)
+    assert ln["situacao_depara"] == T.STATUS_CONFLITO_IDENTIDADE
+
+
+def test_depara_so_com_registro_ativo_e_status_elegivel(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    venda = [v("tiktok", "apice", "VELHO1", 10, 100)]
+    for c in (cad(("NOVO1", "VELHO1", None), ativo=False), cad(("NOVO1", "VELHO1", None), ativo=None),
+              cad(("NOVO1", "VELHO1", None), status="Descontinuado"),
+              cad(("NOVO1", "VELHO1", None), status="Reavaliação 45D")):
+        (ln,) = classif(tmp_path, venda, c)
+        assert ln["cmp"] is None and "depara_cadastro_inativo_ou_status_inelegivel" in ln["motivo"]
+
+
+def test_codigo_resolvido_sem_cmp_0301_fica_nulo_e_explicito(tmp_path):
+    """O sku resolvido so' tem CMP em outra filial (1301): nunca zero, estado proprio."""
+    comparativo(tmp_path, [("1301", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "OUTRO", "", "X", [5, 5, 5], 5)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
+    assert (ln["status"], ln["cmp"], ln["cmv"], ln["margem_bruta_apos_cmp"]) == (T.STATUS_CODIGO_RESOLVIDO_SEM_CMP,
+                                                                                 None, None, None)
+    (p,) = M.visao_produto([ln], [], OUT)
+    assert p["calculavel"] is False and p["motivo"].startswith(T.STATUS_CODIGO_RESOLVIDO_SEM_CMP)
+    assert p["situacao_depara"] == T.STATUS_CODIGO_RESOLVIDO_SEM_CMP
+
+
+def test_codigo_resolvido_sem_cmp_vigente_na_competencia(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [0, 0, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)), comp=MAI)
+    assert (ln["status"], ln["cmp"]) == (T.STATUS_CODIGO_RESOLVIDO_SEM_CMP, None)
+
+
+def test_nf_com_outro_canonico_e_conflito_de_identidade(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    c = cad(("NOVO1", "VELHO1", None))
+    c.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "OUTRO"}])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], c)
+    assert (ln["status"], ln["cmp"]) == (T.STATUS_CONFLITO_IDENTIDADE, None)
+    # NF que confirma o mesmo codigo canonico nao bloqueia
+    c.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "NOVO1"}])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], c)
+    assert ln["cmp"] == Decimal(4)
+
+
+def test_nf_nunca_cria_depara(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    c = cad()
+    c.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "NOVO1"}])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], c)
+    assert ln["cmp"] is None and "depara_sem_sku_antigo" in ln["motivo"]
+
+
+def test_gtin_nunca_cria_depara(tmp_path):
+    """Sem `sku_antigo`, o GTIN do cadastro nao liga o codigo vendido a outro codigo (nao autorizado)."""
     comparativo(tmp_path, [("SP", "NOVO1", G1, "SHAMPOO", [4, 4, 4], 4)])
+    # Outro sku do cadastro tem o MESMO GTIN: ainda assim nao ha de-para sem `sku_antigo`.
     (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo")],
-                    cad(("VELHO1", None, G1)))
-    assert (ln["cmp"], ln["nivel"], ln["confianca"]) == (Decimal(4), T.NIVEL_DEPARA_GTIN, "alta")
+                    cad(("VELHO1", None, G1), ("NOVO1", None, G1)))
+    assert ln["cmp"] is None and "depara_sem_sku_antigo" in ln["motivo"]
+
+
+def test_custo_de_nf_divergente_so_gera_alerta_sem_limite(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    venda = [v("tiktok", "apice", "VELHO1", 10, 100)]
+    c = cad(("NOVO1", "VELHO1", None))
+    c.nf_custo = T.montar_custos_nf([{"marca": "Apice", "codigo": "NOVO1", "data_mes": OUT,
+                                      "custo_unitario": Decimal("4.01")}])
+    (ln,) = classif(tmp_path, venda, c)
+    assert (ln["status"], ln["cmp"], ln["alerta"]) == ("coberto", Decimal(4), T.ALERTA_CMP_DESATUALIZADO)
+    (p,) = M.visao_produto([ln], [], OUT)
+    assert p["alerta_qualidade"] == T.ALERTA_CMP_DESATUALIZADO and p["cmp"] == Decimal(4)
+    c.nf_custo = T.montar_custos_nf([{"marca": "Apice", "codigo": "NOVO1", "data_mes": OUT,
+                                      "custo_unitario": Decimal("4.00")}])
+    (ln,) = classif(tmp_path, venda, c)
+    assert ln["alerta"] == ""
+
+
+def test_custo_de_nf_usa_o_ultimo_mes():
+    custos = T.montar_custos_nf([{"marca": "Apice", "codigo": "X", "data_mes": date(2026, 10, 1), "custo_unitario": 9},
+                                 {"marca": "Apice", "codigo": "X", "data_mes": date(2026, 8, 1), "custo_unitario": 7}])
+    assert custos[("apice", "X")] == Decimal(9)
+
+
+def test_codigo_resolvido_passa_pelas_regras_do_codigo_exato(tmp_path):
+    """GTIN ou volume do codigo resolvido divergente da venda: sem CMP (conflito de evidencia)."""
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO 500ML", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo 300ml")],
+                    cad(("NOVO1", "VELHO1", None)))
+    assert (ln["status"], ln["cmp"]) == ("evidencia_diverge", None)
+    comparativo(tmp_path, [("SP", "NOVO1", G2, "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", G1)))
+    assert (ln["status"], ln["cmp"]) == ("evidencia_diverge", None)
 
 
 def test_depara_com_volume_concordante_tem_confianca_media(tmp_path):
@@ -378,52 +494,6 @@ def test_depara_desligado_mantem_sem_cmp(tmp_path):
     assert ln["cmp"] is None and ln["status"] == "sem_cmp"
 
 
-def test_depara_com_dois_candidatos_fica_humano(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "NOVO2", G1, "SHAMPOO", [5, 5, 5], 5)])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", G1)))
-    assert ln["cmp"] is None and "depara_mais_de_um_candidato" in ln["motivo"]
-
-
-def test_depara_com_volume_divergente_fica_humano(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO 500ML", [4, 4, 4], 4)])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo 300ml")],
-                    cad(("NOVO1", "VELHO1", None)))
-    assert ln["cmp"] is None and "depara_evidencia_contraditoria" in ln["motivo"]
-
-
-def test_depara_com_gtin_divergente_fica_humano(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", G2, "SHAMPOO", [4, 4, 4], 4)])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", G1)))
-    assert ln["cmp"] is None and "depara_evidencia_contraditoria" in ln["motivo"]
-
-
-def test_nf_contradiz_mas_nunca_cria_depara(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "OUTRO", "", "SHAMPOO", [6, 6, 6], 6)])
-    c = cad(("NOVO1", "VELHO1", None))
-    c.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "OUTRO"}])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], c)
-    assert ln["cmp"] is None and "depara_nf_aponta_outro_candidato" in ln["motivo"]
-    so_nf = cad()
-    so_nf.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "OUTRO"}])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], so_nf)
-    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
-
-
-def test_depara_nunca_usa_outra_filial_nem_outra_marca(tmp_path):
-    comparativo(tmp_path, [("1301", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "NOVO2", "", "X", [5, 5, 5], 5)])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
-    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO2", 10, 100)], cad(("NOVO2", "VELHO2", None),
-                                                                              marca="Barbours"))
-    assert ln["cmp"] is None
-
-
-def test_depara_candidato_sem_cmp_vigente_fica_sem_valor(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [0, 0, 4], 4)])
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)), comp=MAI)
-    assert ln["cmp"] is None and "depara_candidato_sem_cmp_0301" in ln["motivo"]
-
-
 def test_depara_nao_contorna_ks_nem_conflito(tmp_path):
     comparativo(tmp_path, [("SP", "K9", "", "SERUM", [4, 4, 4], 4)], nome=NOME_KOK)
     (ln,) = classif(tmp_path, [v("tiktok", "kokeshi", "KS03041", 10, 100)],
@@ -435,6 +505,13 @@ def test_depara_nao_contorna_ks_nem_conflito(tmp_path):
     assert ln["status"] == "conflito" and ln["cmp"] is None
 
 
+def test_depara_nao_usa_candidato_de_entidade_fora_da_marca(tmp_path):
+    """sku resolvido so' existe na BB_VAREJO (fora do escopo Apice): codigo resolvido, sem CMP 0301."""
+    comparativo(tmp_path, [("SP", "NOVO9", "", "SHAMPOO", [4, 4, 4], 4)], nome=NOME_BB)
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO9", 10, 100)], cad(("NOVO9", "VELHO9", None)))
+    assert (ln["status"], ln["cmp"]) == (T.STATUS_CODIGO_RESOLVIDO_SEM_CMP, None)
+
+
 def test_componente_de_kit_por_depara_fecha_o_kit(tmp_path):
     comparativo(tmp_path, [("SP", "C1", "", "X", [2, 2, 2], 2), ("SP", "NOVO2", "", "Y", [3, 3, 3], 3)])
     bom = M.montar_bom([{"marca": "apice", "kit_codigo": "K1", "componente_codigo": c, "quantidade": 1,
@@ -443,35 +520,37 @@ def test_componente_de_kit_por_depara_fecha_o_kit(tmp_path):
     (ln,) = linhas
     assert (ln["status"], ln["cmp"], ln["nivel"], ln["confianca"]) == ("coberto", Decimal(5), M.NIVEL_KIT_MISTO,
                                                                        "baixa")
+    assert ln["situacao_depara"] == "depara_aplicado"
     (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(100)}, {"tiktok": date(2026, 10, 15)}, OUT)
     assert cel["receita_depara"] == 0 and cel["receita_kit_misto"] == Decimal(100)
 
 
-def test_agregar_mede_receita_por_depara(tmp_path):
+def test_kit_com_componente_resolvido_sem_cmp_fica_sem_custo(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [2, 2, 2], 2)])
+    bom = M.montar_bom([{"marca": "apice", "kit_codigo": "K1", "componente_codigo": c, "quantidade": 1,
+                         "componente_descricao": "", "data_carga": None} for c in ("C1", "VELHO2")])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "K1", 4, 100)], cad(("NOVO2", "VELHO2", None)), bom=bom)
+    assert ln["cmp"] is None and f"VELHO2:{T.STATUS_CODIGO_RESOLVIDO_SEM_CMP}" in ln["motivo"]
+    assert ln["situacao_depara"] == T.STATUS_CODIGO_RESOLVIDO_SEM_CMP
+
+
+def test_agregar_mede_depara_e_conta_conflito_de_identidade(tmp_path):
     comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "A2", "", "Y", [2, 2, 2], 2)])
-    linhas = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100), v("tiktok", "apice", "A2", 1, 50)],
-                     cad(("NOVO1", "VELHO1", None)))
-    (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(150)}, {"tiktok": date(2026, 10, 15)}, OUT)
+    c = cad(("NOVO1", "VELHO1", None), ("NOVO3", "VELHO3", None), ("NOVO4", "VELHO3", None))
+    linhas = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100), v("tiktok", "apice", "A2", 1, 50),
+                                v("tiktok", "apice", "VELHO3", 1, 30)], c)
+    (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(180)}, {"tiktok": date(2026, 10, 15)}, OUT)
     assert cel["receita_depara"] == Decimal(100) and cel["receita_coberta"] == Decimal(150)
+    assert cel["skus_conflito"] == 1 and cel["margem_bruta_apos_cmp"] is None
 
 
-def test_depara_ligado_por_padrao_na_pipeline_oficial(tmp_path):
-    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
-    _, ind = ler_pasta(tmp_path)
-    (ln,) = M.classificar(ind, cad(("NOVO1", "VELHO1", None)), [v("tiktok", "apice", "VELHO1", 10, 100)], OUT)
-    assert ln["cmp"] == Decimal(4)
-
-
-def test_depara_recusa_gtin_reaproveitado(tmp_path):
-    """Mesmo GTIN em produtos de volume incompativel (mesmo fora do escopo): nao casa."""
-    comparativo(tmp_path, [("SP", "NOVO1", G1, "SHAMPOO 300ML", [4, 4, 4], 4)])
-    comparativo(tmp_path, [("SP", "OUTRO", G1, "SHAMPOO 500ML", [6, 6, 6], 6)], nome=NOME_BB)
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("VELHO1", None, G1)))
-    assert ln["cmp"] is None and "depara_gtin_reutilizado" in ln["motivo"]
-
-
-def test_depara_nao_usa_candidato_de_entidade_fora_da_marca(tmp_path):
-    """Alias do cadastro Apice aponta para um codigo que so existe na BB_VAREJO: nao casa."""
-    comparativo(tmp_path, [("SP", "NOVO9", "", "SHAMPOO", [4, 4, 4], 4)], nome=NOME_BB)
-    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO9", 10, 100)], cad(("NOVO9", "VELHO9", None)))
-    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
+def test_publicador_recusa_depara_quando_autorizacao_desligada(monkeypatch):
+    """A trava vem antes de qualquer acesso ao banco: o engine nem e' tocado."""
+    monkeypatch.setattr(M, "DEPARA_CADASTRO_AUTORIZADO", False)
+    cel = {"competencia": OUT, "canal": "tiktok", "marca": "apice", "receita_depara": Decimal(1)}
+    try:
+        M.publicar(None, [cel], OUT, "0" * 64)
+    except M.PublicacaoRecusada as exc:
+        assert "nao autorizado" in str(exc)
+    else:
+        raise AssertionError("publicou cobertura por de-para nao autorizado")
