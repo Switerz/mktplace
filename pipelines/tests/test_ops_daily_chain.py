@@ -191,3 +191,28 @@ def test_dry_run_da_cadeia_e_recusado_como_o_do_full_daily():
     # disparar um step real.
     with pytest.raises(o.DryRunUnsupportedError):
         o.assert_dry_run_supported("daily_chain")
+
+
+# --- template aceito pelo Agendador -------------------------------------------
+
+def test_template_nao_declara_encoding():
+    """O Agendador recebe a definicao como UTF-16 e recusa `encoding="UTF-8"`
+    ("unable to switch the encoding", medido em 16/10/2026)."""
+    primeira = TASK_XML.read_text(encoding="utf-8").lstrip("\ufeff").splitlines()[0]
+    assert primeira.startswith("<?xml")
+    assert "encoding" not in primeira
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="API COM do Agendador so' no Windows")
+def test_template_e_aceito_pela_api_do_agendador_sem_registrar():
+    import subprocess
+    script = (
+        "$s=New-Object -ComObject Schedule.Service;$s.Connect();$d=$s.NewTask(0);"
+        f"$d.XmlText=(Get-Content -Raw '{TASK_XML}');"
+        "'{0} {1} {2}' -f $d.Principal.LogonType,$d.Settings.MultipleInstances,$d.Settings.WakeToRun"
+    )
+    proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    # 2 = TASK_LOGON_S4U; 2 = TASK_INSTANCES_IGNORE_NEW
+    assert proc.stdout.split() == ["2", "2", "True"], (proc.stdout, proc.stderr)
