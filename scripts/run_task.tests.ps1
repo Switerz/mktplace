@@ -35,8 +35,8 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
         $inv.LockName | Should Be "full_daily"
         $inv.LockName | Should Be $full.LockName
         $inv.LockName | Should Be $pma.LockName
-        # Orcamento interno 10800s; 12600s = margem de 16,7%.
-        $inv.TimeoutSeconds | Should Be 12600
+        # Orcamento interno 11700s (com a expedicao TikTok); 13800s = margem de 17,9%.
+        $inv.TimeoutSeconds | Should Be 13800
         ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline daily_chain"
     }
 

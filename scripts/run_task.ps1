@@ -151,11 +151,12 @@ function Get-TaskDefinitions {
         "pma_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 3600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "pma_refresh") }
         # OPS-AUTOMATION-2: full_daily e PMA em SEQUENCIA num unico processo,
         # sob o MESMO lock logico — a segunda carga nunca disputa o lock com a
-        # primeira. Orcamento interno = 7920 (full_daily sem health) + 2700
-        # (3 canais PMA) + 180 (health) = 10800s; 12600s da' margem de 1800s
-        # (16,7% > 15%). O ExecutionTimeLimit da tarefa precisa ficar acima
+        # primeira. Orcamento interno = 7920 (full_daily sem health) + 900
+        # (expedicao TikTok, EXPEDICAO-TIKTOK-AUTOMATION-1) + 2700 (3 canais
+        # PMA) + 180 (health) = 11700s; 13800s da' margem de 2100s
+        # (17,9% > 15%). O ExecutionTimeLimit da tarefa precisa ficar acima
         # disso (template em infra/windows/mktplace_daily_chain.task.xml).
-        "daily_chain" = @{ Lock = "full_daily"; TimeoutSeconds = 12600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "daily_chain") }
+        "daily_chain" = @{ Lock = "full_daily"; TimeoutSeconds = 13800; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "daily_chain") }
     }
 }
 
