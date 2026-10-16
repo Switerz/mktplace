@@ -33,8 +33,9 @@
  * severidade mudou de cor: `critico` continua sendo o papel critico.
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import Chip from "@/components/ui/Chip";
 import Disclosure from "@/components/ui/Disclosure";
 import KpiTile from "@/components/ui/KpiTile";
@@ -54,8 +55,6 @@ import {
   EXPLICACAO_FLUXO,
   EXPLICACAO_LDR,
   EXPLICACAO_META,
-  JANELAS,
-  JANELA_INICIAL_DIAS,
   META_TIKTOK_LDR,
   ROTULO_EVENTO,
   ROTULO_LIMIAR_INTERNO,
@@ -86,8 +85,30 @@ import {
   type TikTokMarca,
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
+import {
+  OPCAO_PERSONALIZADA,
+  REGRA_JANELA,
+  lerDiasDaUrl,
+  opcoesDoSeletor,
+  urlComDias,
+  valorDoSeletor,
+} from "@/lib/expedicao-janela";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+/** Janela do TikTok: dias, de 1 a 90, que e' a unidade da propria API. */
+const REGRA = REGRA_JANELA.tiktok;
+
+/**
+ * A casca so' monta este painel DEPOIS de ler a URL no cliente, entao ler
+ * `window` aqui nao diverge de HTML de servidor nenhum — e evita disparar a
+ * janela padrao antes da janela do link. A guarda cobre um render fora do
+ * navegador.
+ */
+function janelaInicial(): { dias: number; descartado: boolean } {
+  if (typeof window === "undefined") return { dias: REGRA.padrao, descartado: false };
+  return lerDiasDaUrl(window.location.search, REGRA);
+}
 
 /**
  * Severidade -> token. `parcial` continua HACHURADO de proposito: coorte
@@ -204,21 +225,31 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
 // ---------------------------------------------------------------------------
 export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
   const [evento, setEvento] = useState<Evento>(EVENTO_PADRAO);
-  const [dias, setDias] = useState<number>(JANELA_INICIAL_DIAS);
+  const [inicial] = useState(janelaInicial);
+  const [dias, setDias] = useState<number>(inicial.dias);
+  const [personalizado, setPersonalizado] = useState(false);
+  const [janelaDescartada, setJanelaDescartada] = useState(inicial.descartado);
   const [dados, setDados] = useState<TikTokPayload | null>(null);
   const [estado, setEstado] = useState<"carregando" | "ok" | "erro">("carregando");
   const [erro, setErro] = useState<string>("");
 
   const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias)}`, [evento, dias]);
+  // Com o campo livre a janela troca mais rapido: a resposta de uma janela
+  // antiga que chega por ultimo NAO pode sobrescrever a atual.
+  const urlVigente = useRef(url);
+  urlVigente.current = url;
 
   const carregar = useCallback(async () => {
     setEstado("carregando");
     try {
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setDados((await r.json()) as TikTokPayload);
+      const json = (await r.json()) as TikTokPayload;
+      if (urlVigente.current !== url) return;
+      setDados(json);
       setEstado("ok");
     } catch (e) {
+      if (urlVigente.current !== url) return;
       setErro(e instanceof Error ? e.message : "falha de rede");
       setEstado("erro");
     }
@@ -227,6 +258,44 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
   useEffect(() => {
     void carregar();
   }, [carregar]);
+
+  // `?dias=` invalido no link: usa o padrao e tira o lixo da URL.
+  useEffect(() => {
+    if (inicial.descartado) {
+      window.history.replaceState(null, "", urlComDias(window.location.href, inicial.dias, REGRA));
+    }
+  }, [inicial]);
+
+  // Voltar/avancar do navegador pode trocar a janela sem remontar o painel.
+  useEffect(() => {
+    const aoVoltar = () => {
+      const lida = lerDiasDaUrl(window.location.search, REGRA);
+      setDias(lida.dias);
+      setPersonalizado(false);
+      setJanelaDescartada(lida.descartado);
+    };
+    window.addEventListener("popstate", aoVoltar);
+    return () => window.removeEventListener("popstate", aoVoltar);
+  }, []);
+
+  const aplicarJanela = useCallback((novo: number) => {
+    setDias(novo);
+    setJanelaDescartada(false);
+    window.history.replaceState(null, "", urlComDias(window.location.href, novo, REGRA));
+  }, []);
+
+  const escolherJanela = useCallback(
+    (valor: string) => {
+      if (valor === OPCAO_PERSONALIZADA) {
+        setPersonalizado(true);
+        return;
+      }
+      setPersonalizado(false);
+      aplicarJanela(Number(valor));
+    },
+    [aplicarJanela],
+  );
+  const seletor = valorDoSeletor(dias, REGRA, personalizado);
 
   const ldr = dados?.ldr ?? null;
   const fluxo = dados?.payment_flow ?? [];
@@ -277,9 +346,9 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
             <Segmented
               rotulo="Janela"
               rotuladoPor="tk-janela"
-              opcoes={JANELAS.map((j) => ({ valor: String(j.dias), texto: j.rotulo }))}
-              valor={String(dias)}
-              aoEscolher={(v) => setDias(Number(v))}
+              opcoes={opcoesDoSeletor(REGRA)}
+              valor={seletor}
+              aoEscolher={escolherJanela}
             />
           </div>
         }
@@ -294,6 +363,29 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
           ) : undefined
         }
       />
+
+      {seletor === OPCAO_PERSONALIZADA ? (
+        <JanelaPersonalizada max={REGRA.max} diasAplicados={dias} aoAplicar={aplicarJanela} />
+      ) : null}
+
+      {janelaDescartada ? (
+        <Note tom="atencao" papel="status">
+          A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
+        </Note>
+      ) : null}
+
+      {/* Periodo da RESPOSTA (`ldr.from`, `ldr.to`, `ldr.days`), nao do
+          seletor. Some enquanto carrega para nao rotular a serie nova com a
+          janela antiga. */}
+      {estado === "ok" && ldr ? (
+        <p className="text-xs text-ink-muted" data-testid="tk-periodo-consultado">
+          Período consultado:{" "}
+          <span className="font-medium text-ink">
+            vencimentos de {formatarDiaLongo(ldr.from)} a {formatarDiaLongo(ldr.to)}
+          </span>{" "}
+          ({ldr.days} {ldr.days === 1 ? "dia" : "dias"} + hoje)
+        </p>
+      ) : null}
 
       {/* O aviso do prazo vem ANTES de qualquer numero, sempre. Ele encolheu
           para UMA linha, mas continua sendo a primeira coisa depois do

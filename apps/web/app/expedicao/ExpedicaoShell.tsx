@@ -30,6 +30,7 @@ import { useCallback, useEffect, useState } from "react";
 import ExpedicaoClient from "./ExpedicaoClient";
 import TikTokDispatchPanel from "@/components/expedicao/TikTokDispatchPanel";
 import Segmented from "@/components/ui/Segmented";
+import { urlSemDias } from "@/lib/expedicao-janela";
 
 const ML_LIGADO = process.env.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true";
 /**
@@ -80,7 +81,10 @@ function ComAbas() {
 
   const trocar = useCallback((nova: Aba) => {
     setAba(nova);
-    const url = new URL(window.location.href);
+    // A janela NAO atravessa a troca de superficie: os limites sao diferentes
+    // (1-14 dias na fila, 1-90 no TikTok) e 30 dias levados para a fila seria
+    // um link invalido. Cada painel volta a sua janela padrao.
+    const url = new URL(urlSemDias(window.location.href));
     if (nova === ABA_TIKTOK) url.searchParams.set("channel", ABA_TIKTOK);
     else url.searchParams.delete("channel");
     window.history.replaceState(null, "", url.toString());
@@ -100,9 +104,20 @@ function ComAbas() {
     />
   );
 
-  // Ate' a URL ser lida, mostra a fila: e' o estado historico da rota e evita
-  // um piscar de conteudo trocado.
-  return pronta && aba === ABA_TIKTOK ? (
+  // Ate' a URL ser lida, NENHUM painel monta. Antes a fila montava "por
+  // enquanto" — e, com a janela na URL, ela lia `?dias=45` de um link do
+  // TikTok pela regra DELA (maximo 14), julgava invalido e apagava o
+  // parametro antes de o painel do TikTok nascer: o link de 45 dias abria em
+  // 7 (medido no QA deste gate). Montar so' o painel certo tambem elimina as
+  // requisicoes da fila que um link do TikTok disparava e jogava fora.
+  if (!pronta) {
+    return (
+      <p role="status" className="py-12 text-center text-sm text-ink-muted">
+        Carregando a Expedição…
+      </p>
+    );
+  }
+  return aba === ABA_TIKTOK ? (
     <TikTokDispatchPanel abas={abas} />
   ) : (
     <ExpedicaoClient abas={abas} />

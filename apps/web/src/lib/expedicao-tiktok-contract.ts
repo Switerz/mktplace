@@ -126,6 +126,9 @@ export const JANELAS = [
 
 export const JANELA_INICIAL_DIAS = 7;
 
+/** Teto da API (`JANELA_MAX_DIAS` em `expedicao_tiktok_service.py`). */
+export const JANELA_MAX_DIAS = 90;
+
 // ---------------------------------------------------------------------------
 // Payload
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@
     em scripts\run_with_lock.ps1 continua como segunda camada.
   - UMA tarefa para full_daily + PMA (TaskKey daily_chain): acaba a disputa
     do lock que fez o full_daily sair BLOCKED em 16/10 00:59:13.
-  - ExecutionTimeLimit PT4H = 14400s, acima dos 13800s do lock externo da
+  - ExecutionTimeLimit PT3H40M = 13200s, acima dos 12600s do lock externo da
     TaskKey daily_chain (600s de folga para o wrapper limpar o lock).
   - 10:15 BRT: os Ads de D-1 do ML so' chegam a raw.ml_ads_items entre 09:00
     e 09:02 BRT (medido em 8 dias, ver a DAG marketplace_tower_ml_refresh); o
@@ -70,7 +70,7 @@
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>true</WakeToRun>
-    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT3H40M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
