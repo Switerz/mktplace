@@ -42,7 +42,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: e o teste ficou VERMELHO no main por isso — nao por defeito de cadeia: o head
 #: sempre foi unico. Reajustado aqui pelo Gate KITS-PMA-3, que cria a 022.
 #: Avancado para 025 pelo Gate DRE-DATA-BRIDGE-1 (insumos mensais da DRE).
-HEAD_ESPERADO = "025"
+#: Avancado para 026 pelo Gate DRE-PREMISSAS-1 (premissas estimadas da DRE).
+HEAD_ESPERADO = "026"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta
