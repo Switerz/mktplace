@@ -18,9 +18,11 @@ import { fmtBrlFull, fmtNumber } from "../formatters.ts";
 
 export type KpiKey = "gmv" | "orders" | "avg_ticket" | "ad_spend" | "roas";
 
-/** Canais que possuem investimento em midia no contrato atual. */
+/** Canais com investimento em midia COBERTO pelo mart hoje. */
 export const ADS_CHANNELS: readonly Marketplace[] = ["ml", "shopee"];
-export const TIKTOK_ADS_UNAVAILABLE = "TikTok Shop: não disponível nesta fonte";
+/** Ads do TikTok e' aplicavel, mas a fonte ainda nao foi integrada: ausente,
+ *  nunca zero — e a comissao de afiliado nao preenche este lugar. */
+export const TIKTOK_ADS_UNAVAILABLE = "TikTok Shop: Ads sem fonte integrada (ausente, não zero)";
 export const COMPARISON_UNAVAILABLE = "Comparação indisponível";
 
 /**

@@ -18,7 +18,7 @@ import {
   ALWAYS_APPLICABLE, ML_COMMISSION_PARTIAL_WINDOW, ML_PRODUCTS_CUMULATIVE,
   mlCommissionMissing, scopeWarningToLimitation,
   REGIONAL_COVERAGE, REGIONAL_UNITS_NOT_MEASURED,
-  TIKTOK_CANCEL_NOT_MEASURED, TIKTOK_SETTLEMENT_DIRECTIONAL,
+  TIKTOK_ADS_SEM_FONTE, TIKTOK_CANCEL_NOT_MEASURED, TIKTOK_SETTLEMENT_DIRECTIONAL,
   type Limitation,
 } from "./limitations.ts";
 import {
@@ -367,6 +367,7 @@ export const canaisTool: OracleTool = {
       "Use para comparar EFICIENCIA entre canais e marcas: ROAS, ACOS, investimento de ads sobre GMV, custo de marketplace e frete do vendedor, com medianas por canal.",
       "Granularidade: uma linha por marca x canal. Retorna o universo completo, nao e' top-N.",
       "Cada metrica traz 'applicable' e 'available': nao aplicavel (o canal nao opera esse custo) e' DIFERENTE de sem dado. Nenhum dos dois vira zero.",
+      "Ads do TikTok e' aplicavel mas sem fonte integrada: ads_available=false significa sem dado, nao zero nem 'nao se aplica'; a comissao de afiliado (ads) de data.afiliados nao e' investimento em midia.",
       "A comissao do Mercado Livre tem disponibilidade POR LINHA (marca x periodo): quando marketplace_cost_available vem false, ela nao foi carregada para aquela marca no periodo — diga isso ao usuario, nunca trate como custo zero. 'Disponivel' significa valor em pelo menos um dia do periodo, nao cobertura integral; o que se aplica a cada resposta vem em data.limitations.",
       "O custo do TikTok e' direcional (base de repasse difere do GMV em ~5,5%).",
       "Inclui data.afiliados (custo de afiliados do TikTok: comissao de criador, parceiro e ads, com o sinal da fonte e nunca somados; receita atribuida e retorno/ROAS de afiliados vem nulos porque a fonte nao os tem) e data.descontos_tiktok (desconto financiado pela marca x subsidio do TikTok, nunca somados). Cada bloco traz estado, periodo_status e frescor; snapshot_manual=true indica carga manual. Bloco sem linhas e' ausencia de registro, nao zero.",
@@ -440,6 +441,9 @@ export const canaisTool: OracleTool = {
     }
     if (rows.some((r) => r.channel === "tiktok" && r.marketplace_cost_available)) {
       limitations.push(TIKTOK_SETTLEMENT_DIRECTIONAL);
+    }
+    if (rows.some((r) => r.channel === "tiktok" && r.ads_applicable && !r.ads_available)) {
+      limitations.push(TIKTOK_ADS_SEM_FONTE);
     }
     limitations.push(...blocos.limitations);
 

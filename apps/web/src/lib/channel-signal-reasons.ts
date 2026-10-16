@@ -164,7 +164,11 @@ function explainSignal(
     case "sem_dado":
       return {
         signal, label,
-        reason: row.data_warning ?? "Há métricas aplicáveis a este canal sem dado no período — a combinação não pode ser avaliada por completo.",
+        // Ads aplicavel-porem-ausente tem motivo proprio (TikTok: fonte nao
+        // integrada); vem antes do aviso generico de custo da linha.
+        reason: (!row.ads_available && row.ads_applicable ? row.ads_missing_reason : null)
+          ?? row.data_warning
+          ?? "Há métricas aplicáveis a este canal sem dado no período — a combinação não pode ser avaliada por completo.",
       };
     default:
       return { signal, label, reason: `Sinal sem explicação mapeada — ${INSUFFICIENT}` };

@@ -14,8 +14,8 @@ export interface FormattedMetric {
 /**
  * Formata uma metrica derivada por canal (Ads/GMV, ROAS, ACOS, Custo
  * marketplace/GMV, Frete seller/GMV) respeitando os 3 estados do contrato:
- * - nao aplicavel ao canal -> "N/A" (ex: Ads no TikTok);
- * - aplicavel mas sem dado no mart -> "Sem dado" (ex: custo ML);
+ * - nao aplicavel ao canal -> "N/A" (ex: frete seller no TikTok);
+ * - aplicavel mas sem dado no mart -> "Sem dado" (ex: custo ML, Ads TikTok);
  * - aplicavel e disponivel mas matematicamente indefinido (denominador
  *   zero/nulo, ex: ROAS sem ad_spend) -> "—", nunca "0%".
  * Um valor real igual a zero (ex: 0% de Ads/GMV porque a marca nao gastou

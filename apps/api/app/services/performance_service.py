@@ -160,10 +160,26 @@ def _percentile_nearest_rank(values: list[float], pct: float) -> float | None:
 # aplicavel e ainda assim indisponivel (ex: comissao ML) — os dois nunca
 # devem ser confundidos na UI (N/A != Sem dado).
 # ---------------------------------------------------------------------------
-_ADS_APPLICABLE = {"tiktok": False, "ml": True, "shopee": True}
+# TIKTOK-ADS-ML-FULL-DISCOVERY-2 (16/10/2026): Ads do TikTok passa a ser
+# APLICAVEL. O Gate 1 tinha declarado "TikTok nao opera ads pagos", mas o
+# repasse mostra `GMV_PAYMENT_FOR_TIKTOK_ADS` (apice ~R$ 244 mil em set/26) e
+# a DAG de Growth ja le spend da TikTok API for Business. O que falta e' a
+# FONTE no mart (ad_spend NULL em 100% dos dias): ausencia, nunca zero, e o
+# sinal correto e' `sem_dado`, nao N/A.
+_ADS_APPLICABLE = {"tiktok": True, "ml": True, "shopee": True}
 _COST_APPLICABLE = {"tiktok": True, "ml": True, "shopee": True}
 _SHIPPING_APPLICABLE = {"tiktok": False, "ml": True, "shopee": True}
 _CHANNEL_LABEL = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
+
+# Por que o Ads do TikTok esta vazio. Separa explicitamente a comissao de
+# afiliado (`comissao_ads_afiliado`, bloco de afiliados) do investimento em
+# midia: as duas coisas tem "ads" no nome e nao sao a mesma.
+_TIKTOK_ADS_MISSING_REASON = (
+    "Ads do TikTok e' aplicavel, mas a fonte de investimento em midia "
+    "(TikTok API for Business: leilao e GMV Max) ainda nao esta integrada ao "
+    "mart — valor ausente, nao zero. A comissao de afiliado (ads) do bloco de "
+    "afiliados nao e' investimento em midia e nao preenche este campo."
+)
 
 _TIKTOK_COST_WARNING = (
     "Base de repasse (settlements) difere do GMV comercial em ~5,5% "
@@ -235,6 +251,12 @@ def _channel_row(channel: str, brand: str, label: str, raw: dict) -> dict:
         "ads_applicable": _ADS_APPLICABLE[channel],
         "marketplace_cost_applicable": _COST_APPLICABLE[channel],
         "seller_shipping_applicable": _SHIPPING_APPLICABLE[channel],
+        # Aditivo e opcional: so' o TikTok tem motivo fixo hoje (fonte nao
+        # integrada). ML/Shopee sem ad_spend no periodo seguem com None.
+        "ads_missing_reason": (
+            _TIKTOK_ADS_MISSING_REASON
+            if channel == "tiktok" and not ads_available else None
+        ),
         "data_warning": data_warning,
         "signals": [],
     }

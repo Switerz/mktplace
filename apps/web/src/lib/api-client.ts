@@ -1019,6 +1019,9 @@ export interface CanaisChannelRow {
   ads_applicable: boolean;
   marketplace_cost_applicable: boolean;
   seller_shipping_applicable: boolean;
+  /** Motivo do Ads aplicavel-porem-ausente (TikTok: fonte nao integrada).
+   *  Opcional: backend anterior nao envia. */
+  ads_missing_reason?: string | null;
   data_warning: string | null;
   signals: string[];
 }

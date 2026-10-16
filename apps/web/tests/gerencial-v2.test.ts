@@ -643,13 +643,13 @@ test("19d. executive-summary em falha nao zera a faixa: avisos ficam NAO VERIFIC
 test("E. a nota de cobertura de Ads reflete ESTRITAMENTE a selecao (7 combinacoes)", () => {
   const cases: [Marketplace[], RegExp[], RegExp[]][] = [
     // selecao,                cita,                              NAO cita
-    [["tiktok"], [/Sem cobertura de m.dia/, /TikTok Shop: n.o dispon.vel/], [/Mercado Livre/, /Cobertura: Shopee/]],
+    [["tiktok"], [/Sem cobertura de m.dia/, /TikTok Shop: Ads sem fonte integrada \(ausente, não zero\)/], [/Mercado Livre/, /Cobertura: Shopee/]],
     [["ml"], [/Cobertura: Mercado Livre/], [/Shopee/, /TikTok/]],
     [["shopee"], [/Cobertura: Shopee/], [/Mercado Livre/, /TikTok/]],
     [["ml", "shopee"], [/Mercado Livre e Shopee/], [/TikTok/]],
-    [["tiktok", "ml"], [/Cobertura: Mercado Livre/, /TikTok Shop: não disponível/], [/Shopee/]],
-    [["tiktok", "shopee"], [/Cobertura: Shopee/, /TikTok Shop: não disponível/], [/Mercado Livre/]],
-    [["tiktok", "ml", "shopee"], [/Mercado Livre e Shopee/, /TikTok Shop: não disponível/], []],
+    [["tiktok", "ml"], [/Cobertura: Mercado Livre/, /TikTok Shop: Ads sem fonte integrada/], [/Shopee/]],
+    [["tiktok", "shopee"], [/Cobertura: Shopee/, /TikTok Shop: Ads sem fonte integrada/], [/Mercado Livre/]],
+    [["tiktok", "ml", "shopee"], [/Mercado Livre e Shopee/, /TikTok Shop: Ads sem fonte integrada/], []],
   ];
   for (const [selection, cites, omits] of cases) {
     const note = adsCoverageNote(selection);

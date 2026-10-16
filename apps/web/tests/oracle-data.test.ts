@@ -93,11 +93,28 @@ test("N/A (nao aplicavel) e' distinto de sem dado e de zero", async () => {
   });
 
   const tiktok = env.data.rows.find((r: any) => r.channel === "tiktok");
-  // TikTok nao opera ads neste contrato: nao aplicavel.
-  assert.equal(tiktok.ads_applicable, false);
+  // Frete seller nao e' operado pelo TikTok neste contrato: nao aplicavel.
+  assert.equal(tiktok.seller_shipping_applicable, false);
+  assert.equal(tiktok.seller_shipping_available, false);
+  assert.equal(tiktok.seller_shipping_pct, null);
+  assert.notEqual(tiktok.seller_shipping_pct, 0);
+});
+
+test("Ads do TikTok: aplicavel, sem fonte — sem dado, nunca zero nem comissao de afiliado", async () => {
+  const env = await call(await connect(), "torre_comparar_canais_marcas", {
+    periodo: "mes_anterior",
+  });
+
+  const tiktok = env.data.rows.find((r: any) => r.channel === "tiktok");
+  assert.equal(tiktok.ads_applicable, true);
   assert.equal(tiktok.ads_available, false);
-  assert.equal(tiktok.roas, null);
-  assert.notEqual(tiktok.roas, 0);
+  for (const campo of ["ad_spend", "roas", "acos_pct", "ads_over_gmv_pct"]) {
+    assert.equal(tiktok[campo], null, campo);
+  }
+  const lim = env.data.limitations.find((l: any) => l.topic === "ads_tiktok_sem_fonte");
+  assert.ok(lim, "a limitacao de fonte ausente acompanha a resposta");
+  assert.match(lim.description, /nunca 'nao se aplica' nem zero/);
+  assert.match(lim.description, /comissao de afiliado .* NAO e' investimento em midia/);
 });
 
 test("mediana inexistente (uma marca so) permanece null — sem comparacao fabricada", async () => {

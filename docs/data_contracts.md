@@ -624,6 +624,17 @@ listing*, nao estoque fisico, e nenhuma metrica foi construida sobre ele.
 `sold_quantity`, no mesmo teste, correlaciona **0,886** com as vendas reais: a
 fonte serve para velocidade, nao para nivel.
 
+**Estado semantico do estoque ML (TIKTOK-ADS-ML-FULL-DISCOVERY-2,
+16/10/2026).** Estoque Full do ML e' **aplicavel, sem fonte integrada**, e nao
+"nao aplicavel": ~88% do GMV pago do ML sai pelo Full, e a API oficial expoe o
+estoque por `inventory_id` (`/inventories/{id}/stock/fulfillment`). O MCP
+`torre_estoque_full` devolve `ml_full.estoque = "sem_dado"`,
+`estoque_aplicavel = true` e `estoque_motivo = "fonte_nao_integrada"`: ausente,
+nunca zero. Os shares deste contrato continuam medindo **modalidade de venda**,
+nunca estoque. A fonte so' entra depois do probe de capacidade
+(`mercadolivre_full_stock_capability_probe`, goca-se/airflow) e de uma shadow
+propria, deduplicada por `inventory_id` — nunca por anuncio.
+
 ### 8.8 Estado operacional
 
 ### 8.8.1 Piso historico do modo `full`: 2025-08-01 (Gate FULL-1C-H1)
