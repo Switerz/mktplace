@@ -1,5 +1,8 @@
 """Gate DRE-CMV-CMP-1 — cria marts.fact_dre_cmv_provisorio_mensal.
 
+Revisao 028 (DRE-CMV-CMP-4): nasceu como 027 no PR #78 e foi renumerada porque
+a 027 da main e' o shadow diario Shopee via API. Pousa sobre ela.
+
 POR QUE ESTA TABELA EXISTE
 --------------------------
 O CMV fiscal da DRE (`marts.fact_dre_insumo_mensal`, migration 025) so' chega
@@ -33,13 +36,13 @@ Nenhum SKU, pedido ou dado pessoal: so' agregados da celula.
 
 APLICACAO
 ---------
-Manual e explicita (`alembic upgrade 027`). Reversivel por `alembic downgrade
-026`, que derruba so' esta tabela. A migration nao insere dados.
+Manual e explicita (`alembic upgrade 028`). Reversivel por `alembic downgrade
+027`, que derruba so' esta tabela. A migration nao insere dados.
 """
 from alembic import op
 
-revision = "027"
-down_revision = "026"
+revision = "028"
+down_revision = "027"
 branch_labels = None
 depends_on = None
 
