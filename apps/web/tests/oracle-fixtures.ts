@@ -59,13 +59,14 @@ export const CANAIS = {
     {
       brand: "barbours", label: "BARBOURS", channel: "tiktok", channel_label: "TikTok Shop",
       gmv: 600, orders: 24,
-      // Ads NAO aplicavel ao TikTok: distinto de "sem dado".
+      // Ads APLICAVEL ao TikTok, sem fonte integrada (sem dado); frete N/A.
       ad_spend: null, ad_revenue: null, ads_gmv_pct: null, roas: null, acos_pct: null,
       marketplace_cost_pct: 8, seller_shipping_pct: null,
       ads_available: false, marketplace_cost_available: true, seller_shipping_available: false,
-      ads_applicable: false, marketplace_cost_applicable: true, seller_shipping_applicable: false,
+      ads_applicable: true, marketplace_cost_applicable: true, seller_shipping_applicable: false,
+      ads_missing_reason: "Ads do TikTok e' aplicavel, mas a fonte de investimento em midia ainda nao esta integrada ao mart — valor ausente, nao zero.",
       data_warning: null,
-      signals: [],
+      signals: ["sem_dado"],
     },
   ],
   channel_medians: [

@@ -33,6 +33,30 @@ function median(overrides: Partial<CanaisChannelMedian> = {}): CanaisChannelMedi
   };
 }
 
+test("sem_dado de Ads TikTok explica fonte nao integrada, nao o aviso de custo", () => {
+  const d = buildChannelDiagnosis(
+    row({
+      channel: "tiktok", channel_label: "TikTok Shop", signals: ["sem_dado"],
+      ad_spend: null, ad_revenue: null, ads_gmv_pct: null, roas: null, acos_pct: null,
+      ads_available: false, ads_applicable: true,
+      ads_missing_reason: "Ads do TikTok e' aplicavel, mas a fonte ainda nao esta integrada — valor ausente, nao zero.",
+      data_warning: "Base de repasse (settlements) difere do GMV comercial",
+    }),
+    median({ channel: "tiktok", channel_label: "TikTok Shop" }),
+  );
+  const r = d.explanations.find((e) => e.signal === "sem_dado")!.reason;
+  assert.match(r, /fonte ainda nao esta integrada/);
+  assert.doesNotMatch(r, /settlements/);
+});
+
+test("sem_dado sem motivo de Ads (cliente/backend antigo) cai no aviso da linha", () => {
+  const d = buildChannelDiagnosis(
+    row({ signals: ["sem_dado"], marketplace_cost_available: false, data_warning: "Comissao ML nao carregada" }),
+    median(),
+  );
+  assert.match(d.explanations[0].reason, /Comissao ML nao carregada/);
+});
+
 test("sem sinais: headline neutra, zero explicacoes, sem nextAction", () => {
   const d = buildChannelDiagnosis(row(), median());
   assert.match(d.headline, /Nenhum sinal de atenção/);

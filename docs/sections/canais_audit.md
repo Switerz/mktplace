@@ -317,6 +317,18 @@ Convenção: **✅ Confiável e comparável** · **⚠️ Existe, mas com ressal
 | Desconto total / médio / Desconto ÷ GMV | ❌ | ❌ | ❌ | Ver seção 14.3 — existe em **camada raw**, não em gold/mart, e com uma ambiguidade não resolvida no caso Shopee |
 | Settlement / repasse líquido | ⚠️ (proxy) | ❌ | ❌ (removido da UI) | Nenhum dos 3 marketplaces tem um "repasse líquido" confiável mês a mês hoje — não recriar esse indicador na Canais |
 
+> **Revisão 16/10/2026 (TIKTOK-ADS-ML-FULL-DISCOVERY-2): Ads do TikTok deixa de ser "N/A".**
+> As linhas Ads spend, Ads revenue, ROAS e ACOS do TikTok acima registravam
+> "não aplicável". Foi refutado: o repasse do TikTok traz
+> `GMV_PAYMENT_FOR_TIKTOK_ADS` (apice −R$ 243,9 mil em set/2026; rituaria e
+> azbuy também), e a TikTok API for Business expõe spend por campanha e GMV
+> Max. O estado correto é **aplicável, sem fonte integrada**:
+> `ads_applicable=true`, `ads_available=false`, sinal `sem_dado`, valores
+> nulos — nunca "0%" nem "N/A". O motivo vai em `ads_missing_reason`
+> (aditivo). A `comissao_ads_afiliado` do bloco de afiliados **não** é
+> investimento em mídia e não preenche esse campo. Frete seller do TikTok
+> continua N/A. Nenhum valor, cálculo ou tabela mudou.
+
 ### 14.3 Por que Desconto e Afiliados não entram nesta rodada (detalhe)
 
 **Desconto:**

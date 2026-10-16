@@ -244,10 +244,20 @@ test("expedicao: limites de janela e parametro desconhecido falham ANTES do GET"
 // Full e estoque
 // ===========================================================================
 
-test("estoque: ML e' nao_aplicavel para estoque; tempos sem amostra sao nulos", async () => {
+test("estoque: ML Full e' aplicavel sem fonte (sem_dado, nunca zero); tempos sem amostra sao nulos", async () => {
   const env = await call(await connect(STOCK_ROUTES), "torre_estoque_full", { canais: ["ml"] });
   const ml = env.data.ml_full;
-  assert.equal(ml.estoque, "nao_aplicavel");
+  assert.equal(ml.estoque, "sem_dado");
+  assert.notEqual(ml.estoque, 0);
+  assert.equal(ml.estoque_aplicavel, true);
+  assert.equal(ml.estoque_motivo, "fonte_nao_integrada");
+  // O share Full (modalidade de venda) segue medido e NAO e' estoque.
+  assert.equal(typeof ml.share_full_gmv, "number");
+  assert.ok(!("disponivel" in ml) && !("cobertura_dias" in ml), "nenhum campo de estoque inventado");
+  const lim = env.data.limitations.find((l: any) => l.topic === "full_ml_nao_e_estoque");
+  assert.match(lim.description, /APLICAVEL/);
+  assert.match(lim.description, /nunca zero/);
+  assert.match(lim.description, /MODALIDADE do envio/);
   assert.equal(ml.gmv_pago_total, 1000.5, "Decimal em string vira numero");
   const unknown = ml.por_modalidade.find((m: any) => m.modalidade === "unknown");
   assert.equal(unknown.dias_ate_despacho, null);

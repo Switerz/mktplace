@@ -7,15 +7,18 @@
  * - Shopee ESTOQUE (`/shopee-fbs-estoque`): fotografia fisica por produto no CD
  *   da Shopee, com classificacao da Torre. E' a unica fonte de ESTOQUE.
  * - Shopee FBS (`/shopee-fbs`): participacao FBS nas vendas do periodo.
- * - Mercado Livre Full (`/ml-fulfillment`): MODALIDADE do envio. O contrato da
- *   fonte proibe falar de estoque ML — aqui ele e' `nao_aplicavel`, nunca zero.
+ * - Mercado Livre Full (`/ml-fulfillment`): MODALIDADE do envio. A fonte nao
+ *   mede estoque. Estoque Full do ML e' APLICAVEL, mas sem fonte integrada:
+ *   `estoque: "sem_dado"` com `estoque_motivo: "fonte_nao_integrada"`, nunca
+ *   zero (DISCOVERY-2, 16/10/2026 — antes era `nao_aplicavel`).
  *
  * QUATRO ESTADOS que o modelo precisa distinguir, por item e por bloco:
  *   zero_real       mediu e deu zero (ex.: estoque vendavel 0 com venda)
- *   sem_dado        nao ha medicao (fonte indisponivel, sem demanda medida,
- *                   periodo sem carga, marca sem pedido no canal)
+ *   sem_dado        nao ha medicao (fonte indisponivel ou nao integrada, sem
+ *                   demanda medida, periodo sem carga, marca sem pedido)
  *   nao_conciliado  existe numero, mas a semantica nao foi conciliada (kits)
- *   nao_aplicavel   a pergunta nao se aplica a esta fonte (estoque do ML)
+ *   nao_aplicavel   a pergunta nao se aplica (mantido no vocabulario por
+ *                   compatibilidade; o estoque ML NAO usa mais este estado)
  *
  * Filtros SO' por enum. O parametro de texto livre `busca` da API nao e'
  * exposto e o adapter o recusa antes do fetch.
@@ -187,8 +190,11 @@ const shopeeFbsBlock = z.object({
 
 const mlFullBlock = z.object({
   estado: z.enum(ESTADOS),
-  /** Sempre `nao_aplicavel`: a fonte do ML nao mede estoque. */
-  estoque: z.literal("nao_aplicavel"),
+  /** Estoque Full do ML: aplicavel, sem fonte integrada. `sem_dado`, nunca
+   *  zero; os shares abaixo sao modalidade de venda, nao estoque. */
+  estoque: z.literal("sem_dado"),
+  estoque_aplicavel: z.literal(true),
+  estoque_motivo: z.literal("fonte_nao_integrada"),
   periodo_efetivo: z.object({ start: z.string(), end: z.string() }),
   marcas: z.array(z.string()),
   gmv_pago_total: z.number().nullable(),
@@ -434,7 +440,9 @@ async function mlFull(
   const n = (v: number | null) => (semRegistro ? null : v);
   return {
     estado: semRegistro ? "sem_dado" : "medido",
-    estoque: "nao_aplicavel",
+    estoque: "sem_dado",
+    estoque_aplicavel: true,
+    estoque_motivo: "fonte_nao_integrada",
     periodo_efetivo: { start: p.date_from, end: p.date_to },
     marcas: p.brands,
     gmv_pago_total: n(decOrNull(p.paid_gmv_total)),
@@ -484,7 +492,7 @@ export const estoqueTool: OracleTool = {
     description: [
       "Use para 'o que esta em ruptura ou com estoque baixo no Full', 'cobertura em dias', 'excesso de estoque', 'quanto das vendas sai pelo Full/FBS' e 'quais anuncios do ML migrar para o Full'.",
       "Shopee: shopee_estoque e' a fotografia FISICA no CD (unica fonte de estoque), com itens ordenados por risco (no maximo 50); shopee_fbs e' a participacao FBS nas vendas do periodo.",
-      "Mercado Livre: ml_full mede a MODALIDADE do envio (Full x nao-Full); estoque do ML e' 'nao_aplicavel' — nunca diga que o estoque ML e' zero.",
+      "Mercado Livre: ml_full mede a MODALIDADE do envio (Full x nao-Full), nao estoque. Estoque Full do ML e' aplicavel mas sem fonte integrada (estoque='sem_dado', estoque_motivo='fonte_nao_integrada') — nunca diga que o estoque ML e' zero nem use o share Full como estoque.",
       "Cada item e bloco declara estado: zero_real (mediu zero), sem_dado (sem medicao), nao_conciliado (kits) ou nao_aplicavel. Nenhum dos tres ultimos vira zero.",
       "Cobertura e classificacao sao calculo da Torre com limiares PROVISORIOS, nao numero oficial da Shopee. Marcas fora da esteira vem em marcas_nao_cobertas e NAO estao nos totais.",
       "Escopo sem nenhum pedido no periodo (FBS ou Full ML) sai como sem_dado, de proposito: a fonte devolve 0 tanto para marca sem loja quanto para janela sem serie, e o conector nao afirma venda zero que nao consegue distinguir de ausencia.",
@@ -563,7 +571,7 @@ export const estoqueTool: OracleTool = {
     } else if (estoque) {
       partes.push("Estoque Shopee indisponivel");
     }
-    if (ml) partes.push("estoque do Mercado Livre nao aplicavel (fonte mede modalidade, nao estoque)");
+    if (ml) partes.push("estoque Full do Mercado Livre sem fonte integrada (ausente, nao zero; o share Full mede modalidade, nao estoque)");
     return ok(`Full e estoque. ${partes.join("; ")}.`, env);
   },
 };

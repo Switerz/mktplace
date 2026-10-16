@@ -66,6 +66,14 @@ export const TIKTOK_SETTLEMENT_DIRECTIONAL: Limitation = {
     "A base de repasse (settlement) do TikTok difere do GMV comercial em cerca de 5,5%. Use o custo do TikTok como referencia direcional, nao como valor exato do mes.",
 };
 
+/** Ads do TikTok: aplicavel, sem fonte integrada (DISCOVERY-2, 16/10/2026). */
+export const TIKTOK_ADS_SEM_FONTE: Limitation = {
+  topic: "ads_tiktok_sem_fonte",
+  scope: "Canais — TikTok Shop",
+  description:
+    "Ads do TikTok e' APLICAVEL (ha midia paga, inclusive cobrada no repasse), mas a fonte de investimento em midia ainda nao esta integrada: ad_spend, ROAS e ACOS do TikTok vem nulos. Diga 'sem dado', nunca 'nao se aplica' nem zero. A comissao de afiliado (ads) em data.afiliados NAO e' investimento em midia e nao substitui este valor.",
+};
+
 /** Nao existe CMV: margem real e' impossivel nos tres marketplaces. */
 export const NO_MARGIN: Limitation = {
   topic: "margem",
@@ -201,7 +209,7 @@ export const STOCK_ML_NOT_STOCK: Limitation = {
   topic: "full_ml_nao_e_estoque",
   scope: "Full — Mercado Livre",
   description:
-    "Para o Mercado Livre a Torre mede a MODALIDADE do envio (Full x nao-Full), nao estoque: nao ha disponibilidade, cobertura em dias nem ruptura do ML. Estoque ML e' 'nao aplicavel' nesta fonte, nunca zero.",
+    "Estoque Full do Mercado Livre e' APLICAVEL, mas a fonte (estoque Fulfillment da API do ML) ainda nao esta integrada: nao ha disponibilidade, cobertura em dias nem ruptura do ML. O estoque ML vem 'sem_dado' — ausente, nunca zero. Os shares de ml_full medem a MODALIDADE do envio (participacao das vendas Full), nao estoque.",
 };
 
 export const STOCK_TOWER_COVERAGE: Limitation = {

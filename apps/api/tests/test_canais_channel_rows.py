@@ -67,21 +67,78 @@ def _row_for(rows, brand, channel):
 
 
 # ---------------------------------------------------------------------------
-# TikTok: ads/frete N/A (nao aplicavel) — nunca "sem dado"
+# TikTok: Ads APLICAVEL sem fonte (sem dado, nunca zero); frete segue N/A
+# (TIKTOK-ADS-ML-FULL-DISCOVERY-2 — antes era "nao aplicavel")
 # ---------------------------------------------------------------------------
 
-def test_tiktok_ads_e_frete_sao_nao_aplicaveis_nao_sem_dado():
+def test_tiktok_ads_e_aplicavel_sem_dado_e_frete_segue_nao_aplicavel():
     rows = [_row("barbours", perf_svc.TIKTOK_ID, gmv=1000, total_fees=-300, total_fees_n=30)]
     db = FakeMappingSession([rows])
     result = perf_svc.get_canais(db, "tiktok", 2026, 5)
 
     tk = _row_for(result["channel_rows"], "barbours", "tiktok")
-    assert tk["ads_applicable"] is False
+    assert tk["ads_applicable"] is True
     assert tk["ads_available"] is False
-    assert tk["seller_shipping_applicable"] is False
+    assert tk["seller_shipping_applicable"] is False  # frete: N/A continua
+    assert tk["ad_spend"] is None
     assert tk["ads_gmv_pct"] is None
     assert tk["roas"] is None
-    assert "sem_dado" not in tk["signals"]  # N/A nao e a mesma coisa que Sem dado
+    assert tk["acos_pct"] is None
+    assert "sem_dado" in tk["signals"]  # aplicavel e ausente = Sem dado
+    assert "fonte" in tk["ads_missing_reason"] and "nao zero" in tk["ads_missing_reason"]
+
+
+def test_tiktok_ads_ausente_nunca_vira_zero_mesmo_com_soma_zero_do_mart():
+    # SUM(NULL) chega como 0 ao Python; quem decide e' o COUNT (ad_spend_n=0).
+    rows = [_row("barbours", perf_svc.TIKTOK_ID, gmv=1000, ad_spend=0,
+                 ad_revenue=0, ad_spend_n=0, total_fees=-300, total_fees_n=30)]
+    db = FakeMappingSession([rows])
+    tk = _row_for(perf_svc.get_canais(db, "tiktok", 2026, 5)["channel_rows"],
+                  "barbours", "tiktok")
+    for campo in ("ad_spend", "ad_revenue", "ads_gmv_pct", "roas", "acos_pct"):
+        assert tk[campo] is None, campo
+
+
+def test_tiktok_ads_nao_e_comissao_de_afiliado():
+    # A linha da matriz nunca carrega comissao de afiliado, nem como ad_spend.
+    rows = [_row("barbours", perf_svc.TIKTOK_ID, gmv=1000, total_fees=-300, total_fees_n=30)]
+    db = FakeMappingSession([rows])
+    result = perf_svc.get_canais(db, "tiktok", 2026, 5)
+    tk = _row_for(result["channel_rows"], "barbours", "tiktok")
+    assert not any("afiliad" in k or "affiliate" in k for k in tk)
+    assert tk["ad_spend"] is None
+    assert "nao e' investimento em midia" in tk["ads_missing_reason"]
+
+
+def test_tiktok_ads_quando_o_mart_tiver_dado_fica_disponivel_sem_motivo():
+    rows = [_row("barbours", perf_svc.TIKTOK_ID, gmv=1000, ad_spend=100,
+                 ad_revenue=800, ad_spend_n=30, total_fees=-300, total_fees_n=30)]
+    db = FakeMappingSession([rows])
+    tk = _row_for(perf_svc.get_canais(db, "tiktok", 2026, 5)["channel_rows"],
+                  "barbours", "tiktok")
+    assert tk["ads_available"] is True
+    assert tk["roas"] == 8.0
+    assert tk["ads_missing_reason"] is None
+    assert "sem_dado" not in tk["signals"]
+
+
+def test_ml_sem_ad_spend_nao_ganha_motivo_do_tiktok():
+    rows = [_row("barbours", perf_svc.ML_ID, gmv=2000, orders=10, ad_spend_n=0,
+                 seller_shipping_cost=200, seller_shipping_cost_n=30)]
+    db = FakeMappingSession([rows])
+    ml = _row_for(perf_svc.get_canais(db, "ml", 2026, 5)["channel_rows"],
+                  "barbours", "ml")
+    assert ml["ads_available"] is False
+    assert ml["ads_missing_reason"] is None
+
+
+def test_schema_aceita_cliente_antigo_sem_ads_missing_reason():
+    from app.schemas.performance import CanaisChannelRow
+    base = dict(brand="b", label="B", channel="tiktok", channel_label="TikTok Shop",
+                gmv=1.0, orders=1, ads_available=False, marketplace_cost_available=False,
+                seller_shipping_available=False, ads_applicable=True,
+                marketplace_cost_applicable=True, seller_shipping_applicable=False)
+    assert CanaisChannelRow(**base).ads_missing_reason is None
 
 
 def test_tiktok_fees_negativo_vira_abs_e_carrega_aviso_de_base():

@@ -108,6 +108,8 @@ export const canaisContract = z.object({
       ads_applicable: z.boolean(),
       marketplace_cost_applicable: z.boolean(),
       seller_shipping_applicable: z.boolean(),
+      // Opcional: backend anterior ao DISCOVERY-2 nao envia.
+      ads_missing_reason: z.string().nullish(),
       data_warning: z.string().nullish(),
     }),
   ),

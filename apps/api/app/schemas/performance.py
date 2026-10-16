@@ -475,6 +475,9 @@ class CanaisChannelRow(BaseModel):
     ads_applicable: bool
     marketplace_cost_applicable: bool
     seller_shipping_applicable: bool
+    # Motivo do Ads aplicavel-porem-ausente (hoje so' TikTok: fonte de midia
+    # nao integrada). Aditivo e opcional: clientes antigos ignoram.
+    ads_missing_reason: Optional[str] = None
     data_warning: Optional[str] = None
     signals: list[str] = Field(default_factory=list)
 
