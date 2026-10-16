@@ -580,7 +580,7 @@ class FakeNeon:
         self.insumos, self.tabela_existe = list(insumos), tabela_existe
         #: `None` = migration 026 nao aplicada (estado real do Neon hoje).
         self.premissas = None if premissas is None else list(premissas)
-        #: `None` = migration 027 nao aplicada.
+        #: `None` = migration 028 nao aplicada.
         self.cmv_provisorio = None if cmv_provisorio is None else list(cmv_provisorio)
         self.params: list[dict] = []
         self.sqls: list[str] = []

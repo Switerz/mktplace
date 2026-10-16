@@ -6,7 +6,7 @@ O QUE E'
 sobre os SKUs com casamento valido. Serve para destravar o cenario ESTIMADO da
 DRE quando o CMV fiscal da competencia ainda nao existe. Nunca substitui o CMV
 fiscal: e' gravado em tabela propria (`marts.fact_dre_cmv_provisorio_mensal`,
-migration 027) e o serving so' o usa quando o fiscal esta inutilizavel.
+migration 028) e o serving so' o usa quando o fiscal esta inutilizavel.
 
 FONTES (somente leitura, somente API)
 -------------------------------------
@@ -491,7 +491,7 @@ def publicar(neon, celulas: list[dict], comp: date, cmp_sha: str, *, agora: Opti
             if not conn.execute(text(SQL_LOCK)).scalar():
                 raise LockOcupado(f"advisory lock {LOCK_KEY} ocupado")
             if not conn.execute(text(SQL_EXISTE)).scalar():
-                raise MigrationAusente(f"{TABELA} nao existe: aplique a migration 027 antes do --apply")
+                raise MigrationAusente(f"{TABELA} nao existe: aplique a migration 028 antes do --apply")
             run_id = conn.execute(text(SQL_AUDIT_ABRE), {"fonte": SOURCE_NAME, "agora": agora,
                                                           "competencia": comp}).scalar_one()
             fora = conn.execute(text(SQL_FORA), p).scalar_one()

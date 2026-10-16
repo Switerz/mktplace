@@ -4,7 +4,7 @@ Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de o
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
 cenário estimado.
 
-A migration 027 e o publicador estão no PR, mas não foram aplicados nem executados. Nada foi escrito no Neon e
+A migration 028 e o publicador estão no PR, mas não foram aplicados nem executados. Nada foi escrito no Neon e
 não houve deploy. Este documento traz só percentuais e contagens; valores, SKUs, listas de kits e o de-para ficam
 no relatório privado (`.local/dre_cmv_cmp/`).
 
@@ -20,7 +20,7 @@ somado **só** sobre os SKUs com casamento válido. SKU sem casamento fica sem c
 Ele serve para destravar o **cenário estimado** da DRE (DRE-PREMISSAS) enquanto o CMV fiscal da competência
 não existe. **Nunca substitui o CMV fiscal**:
 
-- tabela própria, `marts.fact_dre_cmv_provisorio_mensal` (migration 027), separada da 025;
+- tabela própria, `marts.fact_dre_cmv_provisorio_mensal` (migration 028), separada da 025;
 - a API usa o fiscal sempre que ele estiver utilizável. O provisório só entra quando o fiscal está
   inutilizável **e** a cobertura é de **100%**;
 - mesmo assim, o cenário nunca passa de `parcial`, e a linha de CMV vem rotulada como `cmp_provisorio`;
@@ -160,7 +160,10 @@ removida porque deixaria a parcela descoberta com custo zero. Até 99,99% de cob
 Simulação local de outubro (Neon só em leitura, provisório em memória, nada publicado): **14 de 14 células
 `nao_calculavel`**. A maior cobertura é a do ML · barbours, com 80,0%.
 
-## 8. Armazenamento — migration 027 (não aplicada)
+## 8. Armazenamento — migration 028 (não aplicada)
+
+Nasceu como 027 no PR #78. Foi renumerada para 028 (`down_revision = "027"`) no DRE-CMV-CMP-4, porque a 027
+da `main` é o shadow diário Shopee via API. A cadeia tem uma raiz e uma cabeça, a 028.
 
 `marts.fact_dre_cmv_provisorio_mensal`, PK `competencia × canal × marca`. Só agregados da célula, sem SKU,
 incluindo a receita coberta por regra de kit (`receita_kit_homogeneo`, `receita_kit_misto`).
@@ -194,11 +197,11 @@ python -m pipelines.dre.cmv_cmp_provisorio --pasta dre --competencia 2026-10 --a
   - **kits:** homogêneo, misto com a menor confiança, componente sem CMP sem custo parcial, escopo por marca,
     composição ambígua, regras ligadas separadamente, conflito direto × BOM, BOM não contorna KS nem conflito;
   - **margem:** margem por SKU, margem da célula só com 100% e margem da parcela coberta rotulada.
-- `pipelines/tests/test_dre_cmv_cmp_provisorio_integracao.py` (PostgreSQL descartável): CHECKs da 027, ausente
+- `pipelines/tests/test_dre_cmv_cmp_provisorio_integracao.py` (PostgreSQL descartável): CHECKs da 028, ausente
   gravado como NULL, idempotência, escopo por competência, rollback, lock e migration ausente.
 - `apps/api/tests/test_dre_cmv_provisorio.py`: provisório só com 100% e sem fiscal; 99,99% não entra; ausente
   na fonte; **contraprova de que o provisório não substitui o fiscal**; cobertura agregada pela soma; rota com a
-  027 ausente; lote não concluído ignorado.
+  028 ausente; lote não concluído ignorado.
 
 ## 11. De-para dos componentes para decisão do negócio (DRE-CMV-CMP-3)
 
@@ -293,7 +296,7 @@ Só depois que o item 1 (ou o 2) levar alguma célula a 100%. O caminho mais cur
 confirmação da marca mais os cerca de 10 códigos da aba "Lescent - rota a 100%" fecham as 3 células.
 
 1. merge do PR;
-2. `alembic upgrade 027`;
+2. `alembic upgrade 028` (a 027 da `main`, shadow Shopee, precisa estar aplicada antes);
 3. publicador em dry-run e conferência;
 4. `--apply`;
 5. deploy da API.

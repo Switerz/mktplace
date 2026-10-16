@@ -13,7 +13,7 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
 
     . $script
 
-    It "conhece exatamente as TRES TaskKeys (full_daily, serving_refresh, shopee_manual_refresh)" {
+    It "conhece exatamente as CINCO TaskKeys (daily_chain, full_daily, pma_refresh, serving_refresh, shopee_manual_refresh)" {
         # Inventario FIXO de proposito, nunca "duas ou mais": uma TaskKey nova
         # muda o que o operador pode disparar e o que compete pelo mesmo lock,
         # e tem de passar por revisao explicita aqui.
@@ -22,7 +22,22 @@ Describe "run_task.ps1 (dot-source, so' carrega as funcoes)" {
         # teste ficou fixado em duas chaves desde entao — vermelho em silencio
         # ate o Gate DQ-D2-R.
         $known = (Get-TaskDefinitions).Keys | Sort-Object
-        ($known -join ",") | Should Be "full_daily,serving_refresh,shopee_manual_refresh"
+        # `pma_refresh` (Gate PMA-2C5B) e `daily_chain` (OPS-AUTOMATION-2)
+        # entraram depois; o teste ficou fixado em tres chaves ate aqui.
+        ($known -join ",") | Should Be "daily_chain,full_daily,pma_refresh,serving_refresh,shopee_manual_refresh"
+    }
+
+    It "resolve daily_chain com o MESMO lock do full_daily e do pma_refresh, e timeout proprio" {
+        $inv = Resolve-TaskInvocation -TaskKey "daily_chain" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $full = Resolve-TaskInvocation -TaskKey "full_daily" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        $pma = Resolve-TaskInvocation -TaskKey "pma_refresh" -RepoRoot $repoRoot -PythonExe "python.exe" -LockScript "lock.ps1"
+        # O lock NAO foi separado: a cadeia so' troca a disputa por sequencia.
+        $inv.LockName | Should Be "full_daily"
+        $inv.LockName | Should Be $full.LockName
+        $inv.LockName | Should Be $pma.LockName
+        # Orcamento interno 10800s; 12600s = margem de 16,7%.
+        $inv.TimeoutSeconds | Should Be 12600
+        ($inv.ModuleArgs -join " ") | Should Be "-m pipelines.ops.orchestrate --pipeline daily_chain"
     }
 
     It "resolve serving_refresh com lock COMPARTILHADO do full_daily, timeout e modulo corretos" {

@@ -177,9 +177,13 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # fiscal e repasse TikTok) que so existem no Data Mart.
     # Gate DRE-PREMISSAS-1: head avancado de 025 para 026, que cria
     # marts.fact_dre_premissa_mensal -- premissas ESTIMADAS (taxas) por marca.
-    # Gate DRE-CMV-CMP-1: head avancado de 026 para 027, que cria
-    # marts.fact_dre_cmv_provisorio_mensal -- CMV PROVISORIO por CMP, separado do fiscal.
-    assert heads == ["027"], f"head deveria ser unico e igual a 027, veio {heads}"
+    # Gate SHOPEE-MANUAL-RETIREMENT-1: head avancado de 026 para 027, que cria
+    # marts.fact_shopee_daily_api_shadow -- shadow da familia de pedidos Shopee
+    # via API, em tabela PROPRIA que nenhum consumidor le'.
+    # Gate DRE-CMV-CMP-4: head avancado de 027 para 028, que cria
+    # marts.fact_dre_cmv_provisorio_mensal -- CMV PROVISORIO por CMP, separado do
+    # fiscal. Era a 027 do PR #78; renumerada para pousar sobre o shadow Shopee.
+    assert heads == ["028"], f"head deveria ser unico e igual a 028, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

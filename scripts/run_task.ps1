@@ -149,6 +149,13 @@ function Get-TaskDefinitions {
         "shopee_manual_refresh" = @{ Lock = "shopee_manual_refresh"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "shopee_manual_refresh") }
         "serving_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 9600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "serving_refresh") }
         "pma_refresh" = @{ Lock = "full_daily"; TimeoutSeconds = 3600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "pma_refresh") }
+        # OPS-AUTOMATION-2: full_daily e PMA em SEQUENCIA num unico processo,
+        # sob o MESMO lock logico — a segunda carga nunca disputa o lock com a
+        # primeira. Orcamento interno = 7920 (full_daily sem health) + 2700
+        # (3 canais PMA) + 180 (health) = 10800s; 12600s da' margem de 1800s
+        # (16,7% > 15%). O ExecutionTimeLimit da tarefa precisa ficar acima
+        # disso (template em infra/windows/mktplace_daily_chain.task.xml).
+        "daily_chain" = @{ Lock = "full_daily"; TimeoutSeconds = 12600; Module = "pipelines.ops.orchestrate"; ModuleArgs = @("--pipeline", "daily_chain") }
     }
 }
 

@@ -230,13 +230,19 @@ def test_failed_continua_saindo_um_nos_pipelines_antigos(nome):
 
 
 def test_nenhum_pipeline_antigo_produz_indeterminate():
-    """So' steps com `exit_status_map` emitem esse status, e so' o
-    `pma_refresh` tem um — entao a regra nova nao os alcanca."""
+    """So' steps com `exit_status_map` emitem esse status. OPS-AUTOMATION-2: o
+    `daily_chain` reusa os tres canais do PMA, entao ele tambem pode produzir
+    INDETERMINATE — e por isso a regra geral de exit passou a devolver 1 para
+    esse status (provado abaixo). Fora dos dois, nenhum step tem o mapa."""
     for nome, steps in orch.PIPELINES.items():
         if nome == "pma_refresh":
             continue
         for step in steps:
+            if nome == "daily_chain" and step.name in orch.PMA_CANAIS:
+                assert step.exit_status_map is orch.PMA_EXIT_STATUS
+                continue
             assert step.exit_status_map is None, f"{nome}/{step.name}"
+    assert orch.exit_code_do_pipeline("daily_chain", {}, "INDETERMINATE") == 1
 
 
 # ---------------------------------------------------------------------------

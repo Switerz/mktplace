@@ -868,7 +868,7 @@ SQL_CMV_PROVISORIO = f"""
 
 
 def ler_cmv_provisorio(db: Session, inicio: date, fim: date, marcas: list[str]) -> dict:
-    """(competencia, canal, marca) -> linha. Tabela ausente (027 nao aplicada) = vazio, nunca erro.
+    """(competencia, canal, marca) -> linha. Tabela ausente (028 nao aplicada) = vazio, nunca erro.
     Lote nao concluido nao e' usado."""
     if not db.execute(text(SQL_CMV_PROVISORIO_EXISTE)).scalar():
         return {}

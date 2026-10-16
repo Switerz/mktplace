@@ -80,8 +80,10 @@ export function resolverTema(
  *
  * `/` casa SO' a raiz: `rotaTematizada` compara igualdade ou prefixo `"/" + "/"`,
  * e nenhuma rota real comeca com `//`.
+ *
+ * DRE-UX-1 acrescentou `/dre`, que ja' nasce em tokens.
  */
-export const ROTAS_TEMATIZADAS = ["/expedicao", "/", "/canais", "/financeiro"] as const;
+export const ROTAS_TEMATIZADAS = ["/expedicao", "/", "/canais", "/financeiro", "/dre"] as const;
 
 export function rotaTematizada(pathname: string | null | undefined): boolean {
   if (!pathname) return false;

@@ -1,4 +1,4 @@
-"""DRE-CMV-CMP-1 — migration 027 e publicacao contra PostgreSQL DESCARTAVEL.
+"""DRE-CMV-CMP-1 — migration 028 e publicacao contra PostgreSQL DESCARTAVEL.
 
 CHECK, lock, transacao e rollback sao comportamento do servidor. Nunca toca o
 Neon. Sem binarios do PostgreSQL, o arquivo inteiro e' SKIP.
@@ -34,7 +34,7 @@ DDL_BASE = [
 
 
 def carregar_migration_027():
-    caminho = REPO / "apps" / "api" / "alembic" / "versions" / "027_create_fact_dre_cmv_provisorio_mensal.py"
+    caminho = REPO / "apps" / "api" / "alembic" / "versions" / "028_create_fact_dre_cmv_provisorio_mensal.py"
     fonte = caminho.read_text(encoding="utf-8")
     assert fonte.count("from alembic import op") == 1
     ns: dict = {}

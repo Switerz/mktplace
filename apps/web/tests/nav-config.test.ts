@@ -34,6 +34,9 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     "/produtos",
     "/qualidade",
     "/financeiro",
+    // DRE-UX-1 — rota de topo ao lado do Financeiro, nao filha dele
+    // (`isNavItemActive` casa por prefixo).
+    "/dre",
     "/regioes",
     "/tempo-real",
     "/pedidos",

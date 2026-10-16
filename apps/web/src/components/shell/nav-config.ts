@@ -26,6 +26,9 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: "/produtos", label: "Produtos" },
       { href: "/qualidade", label: "Qualidade" },
       { href: "/financeiro", label: "Financeiro" },
+      // DRE-UX-1 — rota de TOPO, e nao filha de /financeiro: `isNavItemActive`
+      // casa por prefixo, e um filho deixaria os dois itens ativos ao mesmo tempo.
+      { href: "/dre", label: "DRE" },
       { href: "/regioes", label: "Regiões" },
       { href: "/tempo-real", label: "Tempo Real" },
     ],

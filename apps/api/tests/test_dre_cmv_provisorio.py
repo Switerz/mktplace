@@ -7,7 +7,7 @@ Valores sinteticos. O que se prova:
   * cobertura abaixo do minimo ou celula ausente na fonte: nao_calculavel com motivo;
   * CONTRAPROVA: com CMV fiscal utilizavel, o provisorio nunca o substitui;
   * a DRE conhecida/realizada nao muda;
-  * a rota funciona com a tabela 027 ausente e expoe o provisorio quando publicado.
+  * a rota funciona com a tabela 028 ausente e expoe o provisorio quando publicado.
 """
 from __future__ import annotations
 
