@@ -21,6 +21,10 @@ Matriz privada (XLSX, ignorada pelo Git) com uma aba, as marcas em C:K e as linh
 O comentário de C1 declara o arquivo de orçamento de origem, a data de envio e a coluna de referência.
 A competência é tirada desse comentário, e a primeira matriz declara **out/26 → 2026-10**.
 
+**Privacidade da procedência.** O nome do arquivo de orçamento existe só no manifesto privado do
+publicador. Banco, API e stdout expõem apenas o rótulo "Premissas de outubro/2026", a competência, a data da
+fonte e o SHA-256.
+
 | item | contrato |
 |---|---|
 | marcas consumidas | `kokeshi`, `apice`, `barbours`, `rituaria`, `lescent` (obrigatórias, uma vez cada) |
@@ -42,11 +46,15 @@ Componentes (tabela 026): `devolucoes_reembolsos`, `icms`, `difal`, `pis`, `cofi
 trata como dedução. Ela é armazenada com `somavel=false` e `status='sinal_nao_ratificado'`, fica fora da
 margem e aparece como linha informativa. Nenhum sinal é escolhido.
 
+**Sobreposição não ratificada.** "Comissões" pode se sobrepor às taxas reais de marketplace, que a DRE já
+usa. A taxa é armazenada e exibida (percentual e valor na célula), mas com `somavel=false` e
+`status='sobreposicao_nao_ratificada'`, e fica fora da margem até a ratificação.
+
 ## 3. Armazenamento — migration 026
 
 `marts.fact_dre_premissa_mensal`, com grão `competencia × brand × component`. Colunas: `competencia`,
 `brand`, `component`, `rate`, `somavel`, `status`, `source_period`, `source_sha256`, `source_note`,
-`loaded_at` e `run_id` (FK para `audit.source_sync_run`).
+`source_sent_on`, `loaded_at` e `run_id` (FK para `audit.source_sync_run`).
 
 | CHECK | garante |
 |---|---|
@@ -54,9 +62,9 @@ margem e aparece como linha informativa. Nenhum sinal é escolhido.
 | `rate` em 0..1 e `<> 'NaN'` | faixa; `'NaN'::numeric >= 0` é TRUE no PostgreSQL |
 | `rate IS NULL` ⇔ `status = 'ausente_na_origem'` | ausência explícita, nunca zero |
 | allowlist de marcas e componentes | nenhum publisher grava o que o serving não conhece |
-| `somavel = false` ⇔ `outras_receitas_operacionais` | o sinal não ratificado nunca entra na soma |
+| `somavel = false` ⇔ `outras_receitas_operacionais` ou `comissoes`, cada um com seu status | premissas não ratificadas nunca entram na soma |
 | `source_sha256` hexadecimal de 64 caracteres | procedência verificável |
-| `source_note` sem `/`, `\` ou letra de unidade | nunca um caminho local |
+| `source_note` no formato `Premissas de <mês>/<aaaa>` | nunca o nome do arquivo de orçamento nem um caminho local |
 
 Não há coluna monetária, e a migration não insere dados. A reversão é `alembic downgrade 025`, que derruba só
 esta tabela.
@@ -102,7 +110,9 @@ traz `percentual = null` e só o efetivo `pct_receita`.
 | 10 | (=) Lucro Bruto Estimado | calculado |
 | 11 | (-) Mídia Online | realizado (Ads da DRE) |
 | 12 | (-) Influencer | decomposição (TikTok) / indisponível |
-| 13–16 | (-) Publicidade e Propaganda, Comissões, Agência de Growth, Gateway | premissa |
+| 13 | (-) Publicidade e Propaganda | premissa |
+| 14 | (-) Comissões | premissa **exibida, fora da soma** (`sobreposicao_nao_ratificada`) |
+| 15–16 | (-) Agência de Growth, Gateway | premissa |
 | 17 | (-) Despesas de Marketplace | realizado ou decomposição (TikTok) |
 | 18–20 | (-) Brindes, Logística — Fretes, Logística — Operador | premissa |
 | 21 | (=) Margem de Contribuição Estimada | calculado |
@@ -136,13 +146,18 @@ com e sem premissa → `nao_calculavel`.
 Zero nunca é fabricado para tornar o cenário calculável. A regra de maturidade da DRE realizada não muda; a
 célula realizada de outubro continua `NAO_CALCULAVEL`.
 
+**Maturidade não apaga o valor estimado.** Com receita, CMV e taxas presentes, outubro em andamento devolve
+`margem_contribuicao_estimada` com valor, `estado = parcial` e `previa = true`. Isso vale também nos
+agregados. Ao mesmo tempo, `margem_contribuicao_conhecida` continua `null` e a célula realizada continua
+`NAO_CALCULAVEL` pela regra M+2. Ambos os pontos são provados por teste.
+
 ## 7. Contrato da API (aditivo)
 
 Campos novos, todos opcionais:
 
 - `fontes.premissas_dre`:
   - `estado`: `ok` · `parcial` · `tabela_ausente` · `nao_publicado` · `lote_invalido` · `nao_consultado`;
-  - `competencias_publicadas`, `source_sha256`, `source_note`, `carregado_em`, `motivo`.
+  - `competencias_publicadas`, `source_sha256`, `rotulo`, `data_fonte`, `carregado_em`, `motivo`.
 - `regras.rotulo_margem_estimada` e `regras.contrato_premissas`.
 - `cenario_premissas` em `total`, `por_canal[]`, `por_marca[]`, `por_canal_marca[]` e `celulas_base[]`:
 
@@ -161,7 +176,8 @@ linhas[]               linha, rotulo, tipo (item|subtotal|informativo), valor, p
 componentes_ausentes[] linha, motivo
 motivos[], avisos[]
 margem_contribuicao_estimada, margem_contribuicao_estimada_pct
-fonte_premissas        source_sha256, source_note, source_period, carregado_em (sem caminho local)
+fonte_premissas        rotulo ("Premissas de outubro/2026"), competencia, data_fonte, source_sha256,
+                       carregado_em — nunca nome de arquivo ou caminho
 celulas                número de células base somadas
 ```
 
@@ -192,12 +208,14 @@ O PR #77 (`/dre`) ainda está aberto, por isso este gate **não toca o frontend*
 o #77:
 
 1. alternância explícita **"Conhecida"** × **"Estimada com premissas"**; nunca as duas margens sem rótulo;
-2. no modo estimado, cabeçalho "Premissas de outubro/2026", vindo de `cenario_premissas.competencia_premissas`;
+2. no modo estimado, cabeçalho vindo de `cenario_premissas.fonte_premissas.rotulo` ("Premissas de outubro/2026"),
+   com a data da fonte e o SHA-256 como detalhe;
 3. selo **"Prévia"** quando `previa = true`;
 4. coluna de origem por linha (`realizado`, `premissa`, `decomposição`, `indisponível`);
 5. comparação conhecido × estimado lado a lado, com a mesma receita base;
-6. lista de `componentes_ausentes` e o aviso de "Outras Receitas Operacionais" fora da margem
-   (`sinal_nao_ratificado`);
+6. lista de `componentes_ausentes` e os avisos de linhas fora da margem: "Outras Receitas Operacionais"
+   (`sinal_nao_ratificado`) e "Comissões" (`sobreposicao_nao_ratificada`). As duas aparecem como premissa,
+   mas sem entrar na soma;
 7. `cenario_premissas = null`: mostrar "Sem premissas para esta competência" e usar `fontes.premissas_dre.motivo`
    para explicar se a tabela não existe ou se a competência não foi publicada;
 8. filtros de marca, canal e competência preservados (o cenário segue o mesmo recorte da DRE);
@@ -217,6 +235,6 @@ o #77:
 ## 11. Pendências de negócio
 
 - sinal de "Outras Receitas Operacionais" (receita ou dedução);
-- possível sobreposição entre a premissa "Comissões" e as taxas reais de marketplace, que a matriz trata como
-  linhas distintas: precisa de ratificação;
+- possível sobreposição entre a premissa "Comissões" e as taxas reais de marketplace: hoje ela fica fora da
+  margem (`somavel=false`). Volta à soma só depois de ratificada;
 - vigência: a premissa de outubro não se estende. Novembro precisa de matriz própria.
