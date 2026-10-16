@@ -179,17 +179,88 @@ por este PR. O TikTok não muda.
 1. **Agora (este PR):** fazer o merge e atualizar o runner. O ML volta na
    próxima execução do `full_daily`. Isso é uma ação operacional e não foi
    executada.
-2. **Antes ou junto do item 1, um PR pequeno de API.** Cada resposta de
-   `/regioes/*` passa a trazer, por canal pedido, a última data carregada
-   (`MAX(date)` por `marketplace_id`) e uma lista
-   `channels_sem_carga_no_periodo` (Shopee quando `period.end > 24/08`). A tela
-   mostra um chip "Shopee sem dado regional desde 24/08" em vez de zero. Sem
-   isso, o item 1 piora a leitura da Shopee.
+2. **Feito no próprio PR #81 (RECOVERY-2):** a cobertura por canal entrou na
+   API e na tela. Ver a seção 9.
 3. **Recuperar a Shopee:** provar o endpoint de 7.2.1. Se ele entregar a UF,
    gravar só `state`, `city` e `zipcode` na visita em `READY_TO_SHIP`, sem
    nome, telefone ou endereço, com preservação contra sobrescrita por máscara.
    Depois, um transform Gold a partir de `silver.stg_shopee_orders` (`is_sale`)
    e o GMV ratificado.
+
+## 8. REGIONAL-SOURCE-RECOVERY-2: candidata Bling (16/10/2026)
+
+Fonte: `gold.bling_all_brands_nfes_gproducts`, uma VIEW de NF-e com uma linha
+por item. A análise foi offline, sobre os pedidos com `numero_pedido_loja` no
+formato de `order_sn`: 643.704 linhas, 271.950 NF-e e 270.304 pedidos, de
+dez/25 a 15/10. Só agregados foram impressos.
+
+| Verificação | Resultado |
+|---|---|
+| 1. A chave casa com o pedido Shopee? | **Sim.** A marca do Bling é igual à da API em 100% dos casados, e a chave da NF-e da API (`invoice_data.access_key`) aparece no Bling em **99,98%** de 96.165 pedidos |
+| 2. Taxa de casamento (pedidos de venda) | Ápice ~100% até ago, 76,6% em set e 46,9% em out. Rituaria ~100% em jan–abr, 22–43% depois. Lescent 15–86%. Barbour's 0–21% desde abr |
+| 3. Multiplicidade | 268.886 pedidos com 1 NF e 1.418 com 2 ou mais. Destes, 1.365 estão em lojas **de atacado** do Bling e só 53 em lojas Shopee, todos com NF autorizada (nota fracionada). A deduplicação é por pedido |
+| 4. Destinatário ou emissor? | **Destinatário.** Contra o export (197.942 pedidos sobrepostos), a UF bate em **100%** em 27 UFs distintas, o município em 99,94% e o CEP vem preenchido em 100%. O CFOP 6xxx (interestadual) predomina |
+| 5. Cobertura por marca | Cobre as 4 marcas da API e também a **Kokeshi**, que não tem conta na API (10–46% do export). Cobre ainda a Denavita |
+| 6. Cancelados e devolvidos | 3.004 de 95.547 cancelados têm NF, e 2.063 de 6.536 devoluções têm NF. A NF não serve para inferir status: o status vem do pedido |
+| 7. GMV contra o export | `valor_nota` fica 3,7% a 5,3% abaixo de `order_amount` nos pedidos sobrepostos |
+| 8. Separa a Shopee dos demais canais? | O campo `canal` diz só "marketplace". A Shopee é identificada pela `loja_id` (uma por marca) ou pelo formato do número do pedido. Há números no formato Shopee em lojas de **atacado**, que precisam ser excluídas por `loja_id` |
+
+**A causa da cobertura parcial é estrutural.** Cruzando com
+`raw.shopee_orders.fulfillment_flag` (pedidos de venda desde jun/26):
+
+| Marca | `fulfilled_by_local_seller` com NF no Bling | `fulfilled_by_shopee` (Full) com NF no Bling | Peso do Full |
+|---|---|---|---|
+| Ápice | 99,5% | 0,6% | 13% |
+| Barbour's | 96,8% | **0,0%** | 88% |
+| Lescent | 99,7% | **0,0%** | 65% |
+| Rituaria | 100,0% | **0,0%** | 59% |
+
+No Shopee Full, a nota é emitida fora do Bling da marca. O Bling só enxerga o
+que sai do CD próprio. O mix de UF dos pedidos com NF e sem NF, no export de
+jun–ago, difere no máximo 2,5 p.p. por UF, então a amostra local não parece
+geograficamente enviesada. Ainda assim, ela é uma **amostra** e não a
+população.
+
+**Decisão: a fonte não vale como substituta.** O endereço é confiável, mas a
+fonte não cobre o Full, que é a maior parte do volume em 3 das 4 marcas. Usá-la
+como "Shopee regional" mostraria 12% a 41% dos pedidos como se fossem o canal.
+Não houve shadow nem cutover. O PR #81 restaura só o ML, com aviso explícito
+para a Shopee.
+
+**Opção para decidir depois (não implementada):** carregar a Shopee com a API
+como denominador (`uf_eligible_orders`), a UF do Bling no fluxo local e o Full
+em `XX`. A `uf_fill_pct` real ficaria assim: Barbour's ~12%, Lescent ~35%,
+Rituaria ~41%, Ápice ~87%. O contrato já comporta isso, que é o mesmo
+mecanismo do gap da Barbour's no ML. Para seguir, falta decidir:
+
+1. a definição de GMV (`total_amount` da API × `order_amount` do export);
+2. a Kokeshi, que tem NF no Bling mas não tem denominador sem a API;
+3. se um mapa com 12% de UF na Barbour's tem valor de decisão.
+
+Para o Full, a UF teria de vir da NF emitida pela Shopee. As chaves existem em
+`invoice_data`, mas não há fonte do XML.
+
+## 9. Contrato novo da API `/regioes/*` (PR #81)
+
+Os campos novos estão em todas as respostas (summary, by-uf, by-brand e
+trend):
+
+| Campo | Significado |
+|---|---|
+| `cobertura_por_canal[]` | Um item por canal pedido, com `channel`, `marketplace_id`, `status`, `dados_ate`, `esperado_ate`, `motivo` e `motivo_detalhe` |
+| `status` | `atualizada`, `defasada` (a carga para antes de `esperado_ate − 1 dia`), `sem_carga` ou `sem_cobertura` (TikTok) |
+| `dados_ate` | Última **data** carregada do canal, sem recorte de período. Nunca é o instante de ingestão |
+| `esperado_ate` | `min(fim do período, D-1 BRT)` |
+| `motivo` | `carga_defasada`, `sem_carga` ou `sem_fonte_regional`. É `null` quando o canal está atualizado |
+| `dados_completos_ate` | Menor `dados_ate` entre os canais com fonte, ou seja, até onde o total cobre todos eles. É `null` se algum canal não tem carga |
+| `canais_defasados` | Canais com fonte e status `defasada` ou `sem_carga` |
+| `trend.data[].canais_ausentes` | Canais com fonte cuja carga para antes do fim do ponto. Ausência, não zero |
+
+`refreshed_at` permanece, mas a tela não o mostra mais sozinho como
+"Atualizado em" quando há canal defasado. O cabecalho passa a dizer "Dados
+completos até 24/08/2026 · carga mais recente (parcial) em …". A tela também
+ganha um aviso por canal antes dos KPIs, o subtítulo do KPI de GMV muda e cada
+ponto da tendência recebe o chip "sem Shopee".
 
 Alternativa descartada: carregar a Shopee API com `uf='XX'`. Os totais por
 canal seriam preservados, mas o mapa continuaria vazio, o GMV mudaria de
