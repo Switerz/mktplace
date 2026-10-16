@@ -578,8 +578,39 @@ PMA_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(
 
 _FULL_DAILY_HEALTH = next(s for s in PIPELINES["full_daily"] if s.name == "health_check")
 
+#: EXPEDICAO-TIKTOK-AUTOMATION-1 — fotografia da LDR de despacho do TikTok
+#: (`marts.expedicao_tiktok_dispatch_daily`). Nao existia em pipeline nenhum:
+#: so' era publicada a mao (ultima vez em 13/10/2026, por isso o vencimento de
+#: 13/10 seguia "parcial" em 16/10 — o `is_mature` e os pendentes sao
+#: calculados no instante da publicacao, e ninguem republicou).
+#:
+#: - O CLI reescreve a JANELA MOVEL inteira de pagamentos (DELETE + INSERT na
+#:   mesma transacao), entao coortes antigas amadurecem a cada execucao.
+#: - `--max-idade-fonte-horas 6`: recusa (exit 3, nada escrito) se o
+#:   `max(extracted_at)` de `raw.tiktok_shop_orders` na janela estiver ausente
+#:   ou com mais de 6h. A ingestao incremental roda a cada 5 min; 6h so' passa
+#:   quando ela parou.
+#: - `depends_on=("daily_tiktok",)`: mesma fonte (`raw.tiktok_shop_orders`) e
+#:   mesmo criterio do step de descontos. Se o dia do TikTok falhou, este nem
+#:   tenta.
+#: - `critical=True`: falha propaga para o status geral da cadeia.
+#: - 900s: o apply real mediu 307s em 13/10/2026 (leitura do Data Mart
+#:   dominante); o diagnostico, que le mais, chegou a 816-996s.
+#: - So' na `daily_chain`, nao no `full_daily`: somar 900s ao full_daily
+#:   exigiria subir o lock externo (9600s) e o ExecutionTimeLimit da tarefa
+#:   antiga, que esta sendo aposentada.
+#: - Advisory lock 917120017, o mesmo dos canais do PMA: sem disputa porque a
+#:   cadeia e' sequencial e este step roda ANTES do PMA.
+EXPEDICAO_TIKTOK_STEP = Step(
+    "expedicao_tiktok", "pipelines.expedicao.tiktok_cli",
+    ("--apply", "--max-idade-fonte-horas", "6"),
+    timeout_seconds=900, preflight_source="expedicao_tiktok",
+    depends_on=("daily_tiktok",), critical=True,
+)
+
 DAILY_CHAIN_STEPS: tuple[Step, ...] = (
     *(s for s in PIPELINES["full_daily"] if s.name != "health_check"),
+    EXPEDICAO_TIKTOK_STEP,
     *(s for s in PMA_REFRESH_STEPS if s.name in PMA_CANAIS),
     _FULL_DAILY_HEALTH,
 )

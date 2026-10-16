@@ -74,6 +74,39 @@ EXIT_COMMIT_INDETERMINADO = 4
 EXIT_AUDITORIA_INCOMPLETA = 5
 EXIT_PRECONDICAO = 6
 
+#: Teto aceito para `--max-idade-fonte-horas`. Acima de 3 dias a guarda deixa
+#: de proteger o que existe para proteger: uma fonte parada ha' tres dias ja'
+#: congelou a serie.
+MAX_IDADE_FONTE_HORAS_TETO = 72
+
+
+class FonteNaoPublicavel(RuntimeError):
+    """A fonte nao esta fresca o bastante para publicar. Nada foi escrito."""
+
+
+def verificar_frescor(watermark: datetime | None, agora: datetime,
+                      max_horas: float) -> float:
+    """Recusa publicar sobre fonte defasada. Devolve a idade em horas.
+
+    OPS (EXPEDICAO-TIKTOK-AUTOMATION-1): o `--apply` publicava sempre que
+    houvesse coorte, com qualquer idade de fonte. Numa execucao agendada, uma
+    ingestao parada viraria uma fotografia "nova" com dado velho: a coorte de
+    hoje apareceria zerada e os pendentes ficariam no prazo para sempre.
+    Watermark ausente tambem recusa — ausencia nao e' frescor.
+    """
+    if watermark is None:
+        raise FonteNaoPublicavel(
+            "fonte sem watermark (max(extracted_at)) na janela; nada publicado")
+    if watermark.tzinfo is None or agora.tzinfo is None:
+        raise ValueError("watermark e agora precisam ser aware")
+    idade = (agora - watermark).total_seconds() / 3600
+    if idade > max_horas:
+        raise FonteNaoPublicavel(
+            f"fonte defasada: watermark com {idade:.1f}h, limite {max_horas:g}h; "
+            "nada publicado")
+    return idade
+
+
 #: Abaixo disto a cobertura de `IN_TRANSIT` nao sustenta a medicao de coleta:
 #: o diagnostico avisa em vez de apresentar uma taxa que mede outra coisa.
 COBERTURA_MINIMA_IN_TRANSIT = 0.95
@@ -278,7 +311,7 @@ def publicar(alvo, coortes, *, hoje, effective_at, watermark, desde, ate):
     return lote, len(linhas), apagadas
 
 
-def _run_apply(dias: int) -> int:
+def _run_apply(dias: int, max_idade_fonte_horas: float | None = None) -> int:
     alvo_url = os.environ.get(ENV_TARGET, "")
     fonte_url = os.environ.get(ENV_SOURCE, "")
     if not alvo_url or not fonte_url:
@@ -312,6 +345,12 @@ def _run_apply(dias: int) -> int:
                 coortes = extrair(fonte, hoje, dias)
                 watermark = ler_watermark(fonte, hoje, dias)
             extraidas = len(coortes)
+            if max_idade_fonte_horas is not None:
+                # SOB o lock e ANTES do DELETE: recusar aqui deixa a serie
+                # publicada exatamente como estava.
+                idade = verificar_frescor(watermark, effective_at, max_idade_fonte_horas)
+                log(f"  fonte fresca: watermark com {idade:.2f}h "
+                    f"(limite {max_idade_fonte_horas:g}h)")
             if not coortes:
                 raise RuntimeError("fonte sem coorte na janela; nada a publicar")
 
@@ -332,6 +371,18 @@ def _run_apply(dias: int) -> int:
     except LockNotAcquired as exc:
         log(audit_mod.sanitize_error_message(exc))
         return EXIT_LOCK_OCUPADO
+    except FonteNaoPublicavel as exc:
+        log(f"RECUSADO: {audit_mod.sanitize_error_message(exc)}")
+        if run_id is not None:
+            try:
+                audit_mod.audit_finish(
+                    auditoria, run_id, "failed", rows_extracted=extraidas,
+                    rows_loaded=None, error=audit_mod.sanitize_error_message(exc),
+                )
+            except Exception:  # noqa: BLE001
+                log("auditoria nao pode ser fechada; execucao fica em 'running'.")
+                return EXIT_AUDITORIA_INCOMPLETA
+        return EXIT_FONTE_NAO_PUBLICAVEL
     except IndeterminateCommit as exc:
         log(audit_mod.sanitize_error_message(exc))
         return EXIT_COMMIT_INDETERMINADO
@@ -378,6 +429,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"dias de VENCIMENTO antes de hoje (padrao {JANELA_PADRAO_DIAS}, "
              f"totalizando {JANELA_PADRAO_DIAS + 1} vencimentos)",
     )
+    p.add_argument(
+        "--max-idade-fonte-horas", type=float, default=None,
+        help=("so' com --apply: recusa (exit 3, nada escrito) se o watermark da "
+              "fonte estiver ausente ou mais velho que isto. Sem a flag, o "
+              "comportamento e' o de antes."),
+    )
     return p
 
 
@@ -392,6 +449,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.dias < 1 or args.dias > 90:
         print("--dias deve estar entre 1 e 90.", file=sys.stderr)
         return EXIT_FALHA
+    if args.max_idade_fonte_horas is not None:
+        if not args.apply:
+            print("--max-idade-fonte-horas so' vale com --apply.", file=sys.stderr)
+            return EXIT_FALHA
+        if not 0 < args.max_idade_fonte_horas <= MAX_IDADE_FONTE_HORAS_TETO:
+            print(f"--max-idade-fonte-horas deve estar em (0, {MAX_IDADE_FONTE_HORAS_TETO}].",
+                  file=sys.stderr)
+            return EXIT_FALHA
 
     from dotenv import load_dotenv  # noqa: PLC0415
 
@@ -405,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FALHA (diagnose): {audit_mod.sanitize_error_message(exc)}",
                   file=sys.stderr)
             return EXIT_FALHA
-    return _run_apply(args.dias)
+    return _run_apply(args.dias, args.max_idade_fonte_horas)
 
 
 if __name__ == "__main__":

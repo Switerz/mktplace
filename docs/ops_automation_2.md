@@ -35,6 +35,7 @@ estação) e/ou escrevem no Neon. **Nenhum depende de arquivo manual.**
 | serving_tiktok_channel_efficiency | `gold.v_channel_efficiency` | `marts.fact_tiktok_channel_efficiency_daily` | 910120010 | 600s | 10s | não |
 | tiktok_affiliate_cost_order_monthly | `silver.stg_tiktok_payments_by_order` (chega ~21:02 BRT) | `marts.fact_tiktok_affiliate_cost_order_monthly` | 912120012 | 300s | 39s | não |
 | tiktok_order_discounts_daily | `raw.tiktok_shop_orders` | `marts.fact_tiktok_order_discounts_daily` | 912130013 | 300s | 44–130s; backfill até 298s | não |
+| expedicao_tiktok (só na `daily_chain`) | `raw.tiktok_shop_orders`, `raw.tiktok_shop_line_items`, `raw.tiktok_shop_order_status_log` | `marts.expedicao_tiktok_dispatch_daily` (janela móvel de pagamentos) | 917120017 (o mesmo dos canais do PMA) | 900s | apply de 307s em 13/10 | não (DAG só no staging) |
 | pma_ml | `silver.stg_ml_item_price_history/items/variations` | `marts.fact_marketplace_listing_price_daily` | 914120014 (`xact`, **espera**) | 900s | <1min | não |
 | pma_shopee, pma_tiktok | `silver.stg_shopee_products/models`, `silver.stg_tiktok_inventory`, `gold.*_gobeauty` | `marts.fact_channel_offer_observation` | 917120017 (try, fail-fast) | 900s | <1min | não |
 | health_check | `audit.*` e as fatos | — | — | 180s | <1min | — |
@@ -81,7 +82,7 @@ Airflow produção: marketplace_tower_ml_refresh (3 steps ML), PAUSADA
 
 ### Alvo, em três etapas
 
-1. **Já neste PR (Windows):** uma única TaskKey `daily_chain` que roda o `full_daily` e depois o PMA, no mesmo processo e sob o mesmo lock.
+1. **Já neste PR (Windows):** uma única TaskKey `daily_chain` que roda o `full_daily`, depois a Expedição TikTok e depois o PMA, no mesmo processo e sob o mesmo lock. O orçamento interno é de 11.700s, o lock externo de 13.800s e o limite da tarefa de `PT4H`.
    - **Exit da cadeia:** 1 se um step crítico do `full_daily` falhar, ficar bloqueado ou indeterminado, **ou** se algum canal do PMA não publicar (recusado, travado, com falha ou indeterminado). Exit 0 só com o dia inteiro publicado.
    - Tarefa única `mktplace_daily_chain` (template em `infra/windows/mktplace_daily_chain.task.xml`), com logon S4U, `WakeToRun`, `StartWhenAvailable`, `IgnoreNew` e sem janela.
    - Horário às 10:15 BRT, depois dos Ads de D-1 do ML (09:00–09:02) e antes da cobrança de D-1 pelo health check (11:00).
@@ -95,6 +96,16 @@ Airflow produção: marketplace_tower_ml_refresh (3 steps ML), PAUSADA
    - o backfill semanal e o full mensal dos descontos precisam de DAGs próprias (orçamentos de 298s e 246s+).
 
    Depois disso, a estação deixa de ser necessária para tudo, exceto a Shopee manual (arquivos locais) e, enquanto estiver quebrado, o regional.
+
+## 4b. Expedição TikTok na cadeia (EXPEDICAO-TIKTOK-AUTOMATION-1)
+
+**Por que o vencimento de 13/10 ficou parcial:** `marts.expedicao_tiktok_dispatch_daily` não estava em pipeline nenhum. A última publicação foi manual, em 13/10/2026. O `*_is_mature` e a divisão entre pendente no prazo e pendente vencido são calculados **no instante da publicação**, contra o `hoje` daquela execução. Sem nova publicação, a fotografia congelou.
+
+**Como o step resolve:**
+- **Janela móvel:** `python -m pipelines.expedicao.tiktok_cli --apply --max-idade-fonte-horas 6` reescreve toda a janela de pagamentos (DELETE + INSERT na mesma transação), e não só o dia novo. Assim cada coorte antiga é reclassificada todo dia.
+- **Fonte defasada:** se o `max(extracted_at)` da fonte na janela estiver ausente ou com mais de 6h, o CLI sai com exit 3 **antes do DELETE e sob o lock**. Nada é escrito e a auditoria fica `failed`.
+- **Dependência e propagação:** `depends_on=("daily_tiktok",)` e `critical=True`, então uma falha ou recusa faz a cadeia falhar.
+- **Por que só na cadeia:** somar 900s ao `full_daily` exigiria subir o lock externo e o limite da tarefa antiga, que está sendo aposentada.
 
 ## 5. Instalação da etapa 1 (ação administrativa, não executada)
 

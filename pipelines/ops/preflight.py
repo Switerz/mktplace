@@ -942,6 +942,10 @@ check_pma_tiktok_target = _pma_target_check("tiktok")
 
 SOURCE_CHECKS = {
     "tiktok_daily": (check_rds, check_neon),
+    # EXPEDICAO-TIKTOK-AUTOMATION-1: Data Mart (fonte) e Neon (destino). O
+    # frescor da fonte e' medido pelo proprio CLI, sob o lock, porque e' la'
+    # que a janela e o watermark sao resolvidos.
+    "expedicao_tiktok": (check_rds, check_neon),
     "ml_daily": (check_rds, check_neon),
     "shopee_daily": (check_shopee_orders_files, check_neon),
     "shopee-stats_daily": (check_shopee_stats_files, check_neon),

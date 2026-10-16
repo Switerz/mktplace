@@ -34,9 +34,9 @@ def _taskkey(nome):
 
 # --- composicao ---------------------------------------------------------------
 
-def test_cadeia_e_full_daily_sem_health_depois_canais_pma_depois_health():
+def test_cadeia_e_full_daily_sem_health_expedicao_tiktok_canais_pma_e_health():
     fd = [n for n in _nomes("full_daily") if n != "health_check"]
-    esperado = fd + list(o.PMA_CANAIS) + ["health_check"]
+    esperado = fd + ["expedicao_tiktok"] + list(o.PMA_CANAIS) + ["health_check"]
     assert _nomes("daily_chain") == esperado
 
 
@@ -90,7 +90,7 @@ def test_taskkey_daily_chain_usa_o_MESMO_lock_logico():
 def test_timeout_externo_cobre_o_orcamento_com_margem_acima_de_15_por_cento():
     _, timeout, _ = _taskkey("daily_chain")
     orcamento = o.DAILY_CHAIN_STEP_TIMEOUT_BUDGET_SECONDS
-    assert orcamento == 10800
+    assert orcamento == 11700   # 7920 + 900 (expedicao TikTok) + 2700 + 180
     assert timeout - orcamento > 0.15 * orcamento
 
 
@@ -102,8 +102,8 @@ def test_template_da_tarefa_e_coerente_com_o_wrapper():
     assert g("t:Settings/t:StartWhenAvailable") == "true"
     assert g("t:Settings/t:MultipleInstancesPolicy") == "IgnoreNew"
     assert "-TaskKey daily_chain" in g("t:Actions/t:Exec/t:Arguments")
-    limite = re.fullmatch(r"PT(\d+)H(\d+)M", g("t:Settings/t:ExecutionTimeLimit"))
-    segundos = int(limite.group(1)) * 3600 + int(limite.group(2)) * 60
+    limite = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?", g("t:Settings/t:ExecutionTimeLimit"))
+    segundos = int(limite.group(1) or 0) * 3600 + int(limite.group(2) or 0) * 60
     _, timeout, _ = _taskkey("daily_chain")
     assert segundos > timeout, "a tarefa nao pode matar o wrapper antes do lock"
 
