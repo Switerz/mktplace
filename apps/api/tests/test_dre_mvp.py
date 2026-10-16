@@ -575,11 +575,13 @@ class FakeNeon:
     """Roteia pelo texto do SQL e registra os parametros recebidos."""
 
     def __init__(self, mart_rows=(), afiliado_rows=(), insumos=(), marcas=("barbours", "kokeshi"),
-                 tabela_existe=True, premissas=None):
+                 tabela_existe=True, premissas=None, cmv_provisorio=None):
         self.mart_rows, self.afiliado_rows, self.marcas = list(mart_rows), list(afiliado_rows), list(marcas)
         self.insumos, self.tabela_existe = list(insumos), tabela_existe
         #: `None` = migration 026 nao aplicada (estado real do Neon hoje).
         self.premissas = None if premissas is None else list(premissas)
+        #: `None` = migration 028 nao aplicada.
+        self.cmv_provisorio = None if cmv_provisorio is None else list(cmv_provisorio)
         self.params: list[dict] = []
         self.sqls: list[str] = []
 
@@ -589,6 +591,11 @@ class FakeNeon:
         self.sqls.append(sql)
         if "to_regclass" in sql and "fact_dre_premissa_mensal" in sql:
             return _Res([self.premissas is not None])
+        if "to_regclass" in sql and "fact_dre_cmv_provisorio_mensal" in sql:
+            return _Res([self.cmv_provisorio is not None])
+        if "fact_dre_cmv_provisorio_mensal" in sql:
+            return _Res([r for r in self.cmv_provisorio if r["marca"] in params["marcas"]
+                         and params["inicio"] <= r["competencia"] <= params["fim"]])
         if "to_regclass" in sql:
             return _Res([self.tabela_existe])
         if "fact_dre_premissa_mensal" in sql:
