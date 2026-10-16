@@ -853,11 +853,20 @@ def exit_code_do_pipeline(nome: str, results: dict[str, str],
     devolvem 1. O relatorio continua distinguindo os desfechos entre si; o que
     o exit code carrega e' apenas "publicou tudo" ou "nao publicou tudo".
     """
+    if nome == "daily_chain":
+        # OPS-AUTOMATION-3: a cadeia carrega as DUAS politicas. A do full_daily
+        # (falha/bloqueio critico -> 1) e a do PMA (so' tres publicacoes
+        # confirmadas -> 0). Um canal recusado, travado ou indeterminado faz a
+        # cadeia sair 1: o Task Scheduler le exit 0 como "o dia esta
+        # publicado", e com um canal do PMA recusado ele nao esta.
+        if overall in ("FAILED", "BLOCKED", "INDETERMINATE"):
+            return 1
+        return 0 if pma_publication_status(results) == PMA_PUB_OK else 1
+
     if nome not in PIPELINES_COM_EXIT_ESTRITO:
-        # OPS-AUTOMATION-2: `INDETERMINATE` tambem e' 1. Ate o `daily_chain`
-        # nenhum pipeline da regra geral produzia esse status (so' steps com
-        # `exit_status_map`, que so' o PMA tinha), entao nada existente muda;
-        # mas um commit indeterminado do PMA DENTRO da cadeia nao pode sair 0.
+        # OPS-AUTOMATION-2: `INDETERMINATE` tambem e' 1. Nenhum pipeline da
+        # regra geral produz esse status hoje (so' steps com `exit_status_map`,
+        # que so' o PMA tem), entao nada existente muda de comportamento.
         return 1 if overall in ("FAILED", "BLOCKED", "INDETERMINATE") else 0
 
     # Gate PMA-2C5D0 — o exit sai do EIXO DE PUBLICACAO, e so' dele. O
@@ -921,13 +930,20 @@ def main() -> int:
         print(f"EXIT: {codigo}")
         return codigo
 
+    if args.pipeline == "daily_chain":
+        # OPS-AUTOMATION-3: os DOIS resumos, cada um no vocabulario da sua
+        # carga, antes do status geral. O do full_daily e' recalculado sobre os
+        # mesmos steps com a criticidade do proprio full_daily.
+        fd = {k: v for k, v in results.items() if k not in PMA_CANAIS}
+        print(f"RESUMO full_daily (dentro de daily_chain): "
+              f"{compute_overall_status('full_daily', fd)}")
+        print(f"RESUMO PMA (dentro de daily_chain): "
+              f"{pma_publication_status(results)} "
+              f"{ {c: results.get(c) for c in PMA_CANAIS} }")
     print(f"STATUS GERAL: {overall} (mode={modo})")
     if args.pipeline == "daily_chain":
-        # Informativo: o exit da cadeia segue a semantica do full_daily. O eixo
-        # de publicacao do PMA fica visivel para que um canal recusado nao se
-        # dissolva num `DEGRADED` generico.
-        print(f"STATUS PMA (informativo, nao decide o exit): "
-              f"{pma_publication_status(results)}")
+        print(f"EXIT: {codigo} (1 se o full_daily falhou OU se o PMA nao "
+              f"publicou os tres canais)")
     if args.dry_run:
         # NUNCA "publicado": nada foi escrito.
         print("ENSAIO: candidatas validadas; nenhuma fotografia foi publicada.")

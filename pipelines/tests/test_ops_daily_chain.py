@@ -110,27 +110,75 @@ def test_template_da_tarefa_e_coerente_com_o_wrapper():
 
 # --- exit ---------------------------------------------------------------------
 
-@pytest.mark.parametrize("overall,esperado", [
-    ("OK", 0), ("DEGRADED", 0), ("FAILED", 1), ("BLOCKED", 1), ("INDETERMINATE", 1)])
-def test_exit_da_cadeia_segue_o_full_daily_e_indeterminado_nao_sai_zero(overall, esperado):
-    assert o.exit_code_do_pipeline("daily_chain", {}, overall) == esperado
+def _tudo(status="SUCCESS", **excecoes):
+    res = {n: status for n in _nomes("daily_chain")}
+    res.update(excecoes)
+    return res
+
+
+def test_tudo_sucesso_sai_zero():
+    res = _tudo()
+    assert o.exit_code_do_pipeline("daily_chain", res, o.compute_overall_status("daily_chain", res)) == 0
+
+
+def test_health_check_falho_mantem_a_semantica_do_full_daily():
+    res = _tudo(health_check="FAILED")
+    overall = o.compute_overall_status("daily_chain", res)
+    assert overall == "FAILED"
+    assert o.exit_code_do_pipeline("daily_chain", res, overall) == 1
+
+
+@pytest.mark.parametrize("canal", list(o.PMA_CANAIS))
+@pytest.mark.parametrize("status", ["REFUSED", "LOCKED", "FAILED", "BLOCKED", "INDETERMINATE"])
+def test_canal_pma_nao_publicado_faz_a_cadeia_sair_1(canal, status):
+    """OPS-AUTOMATION-3: um step recusado (ou travado, falho, bloqueado,
+    indeterminado) faz o resultado da cadeia falhar — exit 0 so' com o dia
+    inteiro publicado."""
+    res = _tudo(**{canal: status})
+    overall = o.compute_overall_status("daily_chain", res)
+    assert o.exit_code_do_pipeline("daily_chain", res, overall) == 1
+
+
+def test_step_critico_do_full_daily_falho_faz_a_cadeia_sair_1_mesmo_com_pma_ok():
+    res = _tudo(daily_ml="FAILED")
+    overall = o.compute_overall_status("daily_chain", res)
+    assert overall == "FAILED"
+    assert o.exit_code_do_pipeline("daily_chain", res, overall) == 1
 
 
 def test_canal_pma_indeterminado_vira_indeterminate_e_exit_1():
-    res = {n: "SUCCESS" for n in _nomes("daily_chain")}
-    res["pma_shopee"] = "INDETERMINATE"
+    res = _tudo(pma_shopee="INDETERMINATE")
     overall = o.compute_overall_status("daily_chain", res)
     assert overall == "INDETERMINATE"
     assert o.exit_code_do_pipeline("daily_chain", res, overall) == 1
 
 
-def test_canal_pma_recusado_degrada_sem_falhar_a_cadeia():
-    res = {n: "SUCCESS" for n in _nomes("daily_chain")}
-    res["pma_tiktok"] = "REFUSED"
-    overall = o.compute_overall_status("daily_chain", res)
-    assert overall == "DEGRADED"
-    assert o.exit_code_do_pipeline("daily_chain", res, overall) == 0
-    assert o.pma_publication_status(res) == o.PMA_PUB_DEGRADED
+def _roda_main(monkeypatch, capsys, res):
+    import sys
+    monkeypatch.setattr(sys, "argv", ["orchestrate", "--pipeline", "daily_chain"])
+    monkeypatch.setattr(o, "run_pipeline", lambda *a, **k: res)   # nenhuma carga
+    monkeypatch.setitem(sys.modules, "dotenv", type(sys)("dotenv"))
+    sys.modules["dotenv"].load_dotenv = lambda **_k: None
+    codigo = o.main()
+    return codigo, capsys.readouterr().out
+
+
+def test_log_final_traz_os_dois_resumos(monkeypatch, capsys):
+    codigo, out = _roda_main(monkeypatch, capsys, _tudo())
+    assert codigo == 0
+    assert "RESUMO daily_chain" in out
+    assert "RESUMO full_daily (dentro de daily_chain): OK" in out
+    assert "RESUMO PMA (dentro de daily_chain): OK" in out
+    assert "STATUS GERAL: OK" in out
+    assert out.index("RESUMO full_daily") < out.index("RESUMO PMA") < out.index("STATUS GERAL")
+
+
+def test_main_com_canal_recusado_devolve_1_e_mostra_no_resumo_pma(monkeypatch, capsys):
+    codigo, out = _roda_main(monkeypatch, capsys, _tudo(pma_tiktok="REFUSED"))
+    assert codigo == 1
+    assert "RESUMO full_daily (dentro de daily_chain): OK" in out
+    assert "RESUMO PMA (dentro de daily_chain): DEGRADED" in out
+    assert "'pma_tiktok': 'REFUSED'" in out
 
 
 def test_pma_refresh_mantem_a_politica_estrita():

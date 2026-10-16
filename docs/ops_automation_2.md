@@ -82,6 +82,7 @@ Airflow produção: marketplace_tower_ml_refresh (3 steps ML), PAUSADA
 ### Alvo, em três etapas
 
 1. **Já neste PR (Windows):** uma única TaskKey `daily_chain` que roda o `full_daily` e depois o PMA, no mesmo processo e sob o mesmo lock.
+   - **Exit da cadeia:** 1 se um step crítico do `full_daily` falhar, ficar bloqueado ou indeterminado, **ou** se algum canal do PMA não publicar (recusado, travado, com falha ou indeterminado). Exit 0 só com o dia inteiro publicado.
    - Tarefa única `mktplace_daily_chain` (template em `infra/windows/mktplace_daily_chain.task.xml`), com logon S4U, `WakeToRun`, `StartWhenAvailable`, `IgnoreNew` e sem janela.
    - Horário às 10:15 BRT, depois dos Ads de D-1 do ML (09:00–09:02) e antes da cobrança de D-1 pelo health check (11:00).
 2. **Airflow, só com ação administrativa:**
@@ -111,7 +112,7 @@ Pré-requisito: este PR mesclado e o runner avançado por fast-forward.
 ## 6. Critérios de validação (ao menos uma execução agendada real)
 
 1. A tarefa disparou sozinha, sem login interativo, e `LastTaskResult` está registrado.
-2. Existe exatamente um log `full_daily_<data>_*_stdout.log`, não vazio, contendo `RESUMO daily_chain` e `STATUS PMA`.
+2. Existe exatamente um log `full_daily_<data>_*_stdout.log`, não vazio, contendo `RESUMO daily_chain`, `RESUMO full_daily (dentro de daily_chain)`, `RESUMO PMA (dentro de daily_chain)` e `STATUS GERAL`.
 3. Os steps `daily_*` e os servings estão em `SUCCESS`, com as fatos em D-1 (creator em D-2).
 4. Os três canais do PMA estão em `SUCCESS`. Se aparecer `REFUSED` por flag, o risco das flags se confirmou.
 5. Os descontos estão em `SUCCESS`, em incremental (ou backfill na semana em que estiver devido).
