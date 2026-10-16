@@ -1,8 +1,9 @@
 """DRE-CMV-CMP-1 — o cenario estimado consome o CMV PROVISORIO por CMP.
 
 Valores sinteticos. O que se prova:
-  * sem CMV fiscal e com cobertura >= minimo: o provisorio entra, rotulado, e o
+  * sem CMV fiscal e com cobertura de 100%: o provisorio entra, rotulado, e o
     cenario fica parcial (nunca calculavel);
+  * abaixo de 100% (ate 99,99%) nao entra: a parcela descoberta teria custo zero;
   * cobertura abaixo do minimo ou celula ausente na fonte: nao_calculavel com motivo;
   * CONTRAPROVA: com CMV fiscal utilizavel, o provisorio nunca o substitui;
   * a DRE conhecida/realizada nao muda;
@@ -21,7 +22,7 @@ from tests.test_dre_premissas import L, prem
 from tests.test_dre_premissas import rota as rota  # noqa: F401 — fixture reutilizada
 
 
-def prov(canal="ml", marca="kokeshi", mes=JUL, *, cobertura="0.95", cmv_valor="250000", status="calculado",
+def prov(canal="ml", marca="kokeshi", mes=JUL, *, cobertura="1", cmv_valor="250000", status="calculado",
          lote_status="success"):
     ausente = status == "ausente_na_fonte"
     return {"competencia": mes, "canal": canal, "marca": marca, "status": status, "data_corte": date(2026, 7, 31),
@@ -58,6 +59,14 @@ def test_sem_cmv_fiscal_o_provisorio_entra_rotulado_e_o_cenario_fica_parcial():
     # A DRE conhecida nao mudou: sem CMV fiscal, segue nao calculavel e sem margem.
     assert cel["classificacao"] == dre.NAO_CALCULAVEL and cel["margem_contribuicao_conhecida"]["valor"] is None
     assert cel["componentes"]["cmv"]["valor"] is None
+
+
+def test_cobertura_de_99_99_nao_entra_na_margem():
+    """Item 5 do DRE-CMV-CMP-2: nenhum piso transforma a parcela descoberta em custo zero."""
+    cen = montar(provisorio=[prov(cobertura="0.9999")])["celulas_base"][0]["cenario_premissas"]
+    assert cen["estado"] == DP.NAO_CALCULAVEL and cen["margem_contribuicao_estimada"] is None
+    assert L(cen, "cmv")["valor"] is None and cen["cmv_provisorio"]["usado_na_margem"] is False
+    assert any("custo zero" in m for m in cen["motivos"])
 
 
 def test_cobertura_abaixo_do_minimo_nao_calcula_e_diz_por_que():
@@ -119,7 +128,7 @@ def test_rota_expoe_o_provisorio_publicado_sem_sku(rota, monkeypatch):  # noqa: 
     neon.cmv_provisorio = [prov("ml", "kokeshi"), prov("ml", "barbours", lote_status="failed")]
     body = _get(tc)
     ml_k = next(c for c in body["celulas_base"] if c["canal"] == "ml" and c["marca"] == "kokeshi")
-    assert ml_k["cenario_premissas"]["cmv_provisorio"]["cobertura_pct"] == 95.0
+    assert ml_k["cenario_premissas"]["cmv_provisorio"]["cobertura_pct"] == 100.0
     ml_b = next(c for c in body["celulas_base"] if c["canal"] == "ml" and c["marca"] == "barbours")
     assert ml_b["cenario_premissas"]["cmv_provisorio"] is None     # lote nao concluido nunca e' usado
     assert "seller_sku" not in json.dumps(body)

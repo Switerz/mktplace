@@ -58,10 +58,11 @@ ORIGEM_CMP_PROVISORIO = "cmp_provisorio"
 FONTE_CMV = "dre_realizada"
 FONTE_CMV_PROVISORIO = "cmp_sku"
 FONTES_CMV_PREVISTAS = ("dre_realizada", "cmp_sku")
-#: [DECISAO PENDENTE] Cobertura minima (receita com CMP / receita da fonte) para
-#: o CMV provisorio entrar na margem estimada. Abaixo disso, a receita sem custo
-#: inflaria a margem: o cenario fica `nao_calculavel` com o motivo.
-COBERTURA_MINIMA_CMV_PROVISORIO = 0.90
+#: Cobertura exigida (receita com CMP / receita da fonte) para o CMV provisorio
+#: entrar na margem estimada: 100%. Qualquer parcela descoberta entraria na
+#: margem com custo ZERO; isso so' muda com uma regra EXPLICITA e auditavel de
+#: estimativa da parcela nao coberta (DRE-CMV-CMP-2), que ainda nao existe.
+COBERTURA_MINIMA_CMV_PROVISORIO = 1.0
 
 SINAL_NAO_RATIFICADO = "sinal_nao_ratificado"
 SOBREPOSICAO_NAO_RATIFICADA = "sobreposicao_nao_ratificada"
@@ -323,9 +324,11 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
             e_prov, valor=prov["cmv_provisorio"], origem=ORIGEM_CMP_PROVISORIO, status="provisorio_cmp",
             somavel=False, motivo=f"comparacao; cobre {prov['cobertura_pct']}% da receita da fonte")
     if uso == "inutilizavel":
-        cobertura = None if prov is None or prov["cobertura_pct"] is None else prov["cobertura_pct"] / 100
+        # Comparacao em fracao exata da tabela (nao no pct arredondado): 99,999% nao passa.
+        cob_exata = None if cmv_provisorio is None or cmv_provisorio.get("cobertura") is None \
+            else float(cmv_provisorio["cobertura"])
         if (prov is not None and prov["cmv_provisorio"] is not None
-                and cobertura is not None and cobertura >= COBERTURA_MINIMA_CMV_PROVISORIO):
+                and cob_exata is not None and cob_exata >= COBERTURA_MINIMA_CMV_PROVISORIO):
             # O fiscal nao existe: o provisorio entra, rotulado, e o cenario nunca passa de parcial.
             prov["usado_na_margem"] = True
             fonte_cmv = FONTE_CMV_PROVISORIO
@@ -343,7 +346,8 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
             else:
                 motivos_nc.append(
                     f"cmv provisorio por CMP insuficiente: cobre {prov['cobertura_pct']}% da receita da fonte "
-                    f"(minimo {COBERTURA_MINIMA_CMV_PROVISORIO * 100:.0f}%)")
+                    f"(exigido {COBERTURA_MINIMA_CMV_PROVISORIO * 100:.0f}%: a parcela descoberta nao pode "
+                    f"entrar com custo zero)")
             linhas["cmv"] = _linha(e, status=cmv["status"], motivo=cmv["motivo"])
             ausentes.append({"linha": "cmv", "motivo": cmv["status"]})
     else:
