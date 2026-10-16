@@ -396,7 +396,9 @@ export function dreCelula(over: Record<string, unknown> = {}, publicadoEm = "202
       devolucoes: comp("disponivel", 0),
       taxas: comp("disponivel", 100, { publicado_em: publicadoEm }),
       afiliados: comp("disponivel", 30, { somavel: false }),
-      ads: comp("nao_aplicavel", null),
+      // Mesmo contrato do backend (dre_service): Ads TikTok e' aplicavel e
+      // sem fonte -> `indisponivel`, nunca `nao_aplicavel` (DISCOVERY-3).
+      ads: comp("indisponivel", null, { motivo: "sem fonte de Ads do TikTok no mart" }),
       frete: comp("disponivel", 50, { publicado_em: publicadoEm }),
       cmv: comp("disponivel", 400, { publicado_em: publicadoEm }),
       impostos: comp("indisponivel", 0),

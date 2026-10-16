@@ -571,8 +571,11 @@ test("dre: status mapeado; nao calculavel tem valor NULO mesmo se a fonte mandar
   const c = env.data.celulas[0];
   assert.equal(c.receita.status, "CALCULADO");
   assert.equal(c.receita.valor, 1000);
-  assert.equal(c.ads.status, "NAO_APLICAVEL");
+  // Ads TikTok: aplicavel sem fonte -> NAO_CALCULAVEL, nulo (nunca N/A nem 0).
+  assert.equal(c.ads.status, "NAO_CALCULAVEL");
+  assert.equal(c.ads.status_fonte, "indisponivel");
   assert.equal(c.ads.valor, null);
+  assert.notEqual(c.ads.valor, 0);
   assert.equal(c.impostos.status, "NAO_CALCULAVEL");
   assert.equal(c.impostos.valor, null, "fonte mandou 0 com status indisponivel: sai nulo");
   assert.equal(c.impostos.status_fonte, "indisponivel");
@@ -582,6 +585,20 @@ test("dre: status mapeado; nao calculavel tem valor NULO mesmo se a fonte mandar
   assert.equal(c.margem_pct, 45);
   assert.equal(c.custos_conhecidos.valor, 550, "devolucoes+taxas+frete+cmv");
   assert.equal(env.data.snapshot.insumos_disponiveis, true);
+});
+
+test("dre: nao_aplicavel na fonte vira NAO_APLICAVEL (afiliados no ML, caso real do backend)", () => {
+  // Cobertura do mapeamento que a fixture TikTok deixou de exercer: no
+  // backend, `afiliados` do ML e' `nao_aplicavel` (sem programa medido).
+  const cel = dreCelula({
+    afiliados: { valor: null, pct_receita: null, status: "nao_aplicavel", motivo: "sem programa de afiliados medido no ML",
+      fonte: null, somavel: false, partes: null, data_as_of: null, publicado_em: null },
+  });
+  const ml = { ...cel, canal: "ml", canal_label: "Mercado Livre" };
+  const env = projectDre(dreResponse([ml]), { mes: "2026-07" }, NOW_DRE) as any;
+  const c = env.data.celulas[0];
+  assert.equal(c.afiliados.status, "NAO_APLICAVEL");
+  assert.equal(c.afiliados.valor, null);
 });
 
 test("dre: sem CMV calculado nao existe margem", () => {
