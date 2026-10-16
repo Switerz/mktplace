@@ -34,6 +34,7 @@ import {
 import { ALL_BRAND_KEYS } from "./filters/brands.ts";
 import type { Marketplace } from "./mock-data";
 import type { Tom } from "../components/ui/tone";
+import type { CenarioPremissas, ResumoPremissas } from "./dre-estimada";
 
 // ---------------------------------------------------------------------------
 // Tipos — espelham `apps/api/app/schemas/dre.py`
@@ -109,6 +110,12 @@ export interface CelulaDRE {
     repasse_tiktok_atualizado_em?: string | null;
     insumo_publicado_em?: string | null;
   };
+  /**
+   * DRE-UX-3 — cenario ESTIMADO com premissas (PR #79). Opcional e
+   * complementar: `undefined` = API anterior ao contrato; `null` = celula sem
+   * premissa publicada para a competencia. Nunca altera a margem conhecida.
+   */
+  cenario_premissas?: CenarioPremissas | null;
 }
 
 export type EstadoInsumos = "ok" | "tabela_ausente" | "nao_publicado" | "vencido" | "parcialmente_vencido";
@@ -130,6 +137,8 @@ export interface DreResponse {
       publicado_em_mais_recente?: string | null;
       motivo: string | null;
     };
+    /** DRE-UX-3 — `undefined` = API anterior ao contrato de premissas. */
+    premissas_dre?: ResumoPremissas | null;
   };
   regras: Record<string, unknown>;
   total: CelulaDRE | null;
@@ -207,9 +216,17 @@ export interface DreFiltros {
   canais: Marketplace[];
   /** brand_key. Vazio = todas as marcas ativas (decisao da API). */
   marcas: string[];
+  /**
+   * DRE-UX-3 — VISAO, nao recorte: a API entrega os dois cenarios na mesma
+   * resposta. Vai para a URL (`cenario=estimada`), nunca para a requisicao.
+   * Ausente = "conhecida".
+   */
+  cenario?: Cenario;
 }
 
-export const FILTROS_PADRAO: DreFiltros = { mes: null, canais: [...ALL_MARKETPLACES], marcas: [] };
+export type Cenario = "conhecida" | "estimada";
+
+export const FILTROS_PADRAO: DreFiltros = { mes: null, canais: [...ALL_MARKETPLACES], marcas: [], cenario: "conhecida" };
 
 const RE_MES = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
@@ -234,6 +251,8 @@ export function parseDreFiltros(params: { get(chave: string): string | null }): 
     mes: mesValido(mesRaw) ? mesRaw : null,
     canais: parseMarketplaceParam(params.get("channels") ?? "all"),
     marcas,
+    // So' "estimada" muda a visao; qualquer outro valor e' a conhecida.
+    cenario: params.get("cenario") === "estimada" ? "estimada" : "conhecida",
   };
 }
 
@@ -270,11 +289,30 @@ export function dreApiUrl(base: string, f: DreFiltros): string {
  * Sem isso, `?brands=xyz` mostraria todas as marcas sob uma URL que diz o
  * contrario — e a API, se recebesse `xyz`, responderia 422.
  */
-export function queryCanonica(search: string): { filtros: DreFiltros; query: string; mudou: boolean } {
+export function queryCanonica(search: string): {
+  filtros: DreFiltros;
+  /** Querystring da REQUISICAO (recorte). */
+  query: string;
+  /** Querystring da PAGINA (recorte + visao). */
+  url: string;
+  mudou: boolean;
+} {
   const atual = new URLSearchParams(search);
   const filtros = parseDreFiltros(atual);
   const query = dreQuery(filtros);
-  return { filtros, query, mudou: atual.toString() !== query };
+  const url = dreUrlQuery(filtros);
+  return { filtros, query, url, mudou: atual.toString() !== url };
+}
+
+/**
+ * Querystring da PAGINA: o recorte de `dreQuery` + a visao (`cenario`).
+ * `cenario` vem por ultimo e so' quando "estimada". A requisicao a API usa
+ * `dreQuery`: trocar de cenario nao muda o recorte nem refaz a busca.
+ */
+export function dreUrlQuery(f: DreFiltros): string {
+  const q = new URLSearchParams(dreQuery(f));
+  if (f.cenario === "estimada") q.set("cenario", "estimada");
+  return q.toString();
 }
 
 /** Ano e mes correntes NO FUSO DE BRASILIA, independente do relogio do navegador. */
@@ -440,6 +478,40 @@ function problemaNaCelula(c: unknown, onde: string): string | null {
   if (!numOuNull(m.valor) || !numOuNull(m.pct_receita)) return `${onde}.margem inválida`;
   if (!listaDeTexto(m.componentes_usados) || !listaDeTexto(m.faltam)) return `${onde}.margem: listas inválidas`;
   if (!ehObj(c.data_maxima)) return `${onde}.data_maxima ausente`;
+  // DRE-UX-3: cenario estimado e' opcional; quando vem, precisa ter a forma lida.
+  if (c.cenario_premissas !== undefined && c.cenario_premissas !== null) {
+    const p = problemaNoCenario(c.cenario_premissas, `${onde}.cenario_premissas`);
+    if (p) return p;
+  }
+  return null;
+}
+
+const ESTADOS_CENARIO: readonly string[] = ["calculavel", "parcial", "nao_calculavel"];
+const TIPOS_LINHA: readonly string[] = ["item", "subtotal", "informativo"];
+const ESTADOS_PREMISSAS: readonly string[] = ["ok", "parcial", "tabela_ausente", "nao_publicado", "lote_invalido", "nao_consultado"];
+
+function problemaNoCenario(c: unknown, onde: string): string | null {
+  if (!ehObj(c)) return `${onde} não é objeto`;
+  if (c.natureza !== "estimada") return `${onde}.natureza inválida`;
+  if (!ESTADOS_CENARIO.includes(c.estado as string)) return `${onde}.estado inválido`;
+  if (typeof c.previa !== "boolean") return `${onde}.previa inválida`;
+  if (!numOuNull(c.margem_contribuicao_estimada) || !numOuNull(c.margem_contribuicao_estimada_pct ?? null)) {
+    return `${onde}.margem estimada inválida`;
+  }
+  if (!listaDeTexto(c.motivos) || !listaDeTexto(c.avisos)) return `${onde}: motivos/avisos inválidos`;
+  if (!Array.isArray(c.componentes_ausentes)) return `${onde}.componentes_ausentes inválido`;
+  const f = c.fonte_premissas;
+  if (!ehObj(f) || typeof f.rotulo !== "string") return `${onde}.fonte_premissas inválida`;
+  if (!Array.isArray(c.linhas)) return `${onde}.linhas não é lista`;
+  for (let i = 0; i < c.linhas.length; i++) {
+    const l = c.linhas[i];
+    if (!ehObj(l) || typeof l.linha !== "string" || typeof l.rotulo !== "string") return `${onde}.linhas[${i}] inválida`;
+    if (!TIPOS_LINHA.includes(l.tipo as string)) return `${onde}.linhas[${i}].tipo inválido`;
+    if (!numOuNull(l.valor) || !numOuNull(l.pct_receita ?? null) || !numOuNull(l.percentual ?? null)) {
+      return `${onde}.linhas[${i}].valor inválido`;
+    }
+    if (typeof l.status !== "string" || typeof l.somavel !== "boolean") return `${onde}.linhas[${i}]: status/somavel inválidos`;
+  }
   return null;
 }
 
@@ -454,6 +526,10 @@ export function problemaNaResposta(json: unknown): string | null {
   const f = json.fontes;
   if (!ehObj(f) || !ehObj(f.insumos_dre) || !ESTADOS_INSUMO.includes(f.insumos_dre.estado as string)) {
     return "fontes.insumos_dre inválido";
+  }
+  const pr = f.premissas_dre;
+  if (pr !== undefined && pr !== null && (!ehObj(pr) || !ESTADOS_PREMISSAS.includes(pr.estado as string))) {
+    return "fontes.premissas_dre inválido";
   }
   if (json.total !== null) {
     const t = problemaNaCelula(json.total, "total");

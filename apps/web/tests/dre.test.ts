@@ -325,7 +325,8 @@ test("URL canonica: invalido, parcialmente invalido e fora de ordem sao reescrit
 test("a pagina reescreve a URL nao canonica com router.replace", () => {
   const cliente = semComentarios(fonte("app/dre/DreClient.tsx"));
   assert.match(cliente, /queryCanonica\(searchParams\.toString\(\)\)/);
-  assert.match(cliente, /if \(mudou\) router\.replace\(chave \? `\/dre\?\$\{chave\}` : "\/dre", \{ scroll: false \}\);/);
+  // DRE-UX-3: a URL canonica inclui a visao (cenario); a requisicao, so' o recorte.
+  assert.match(cliente, /if \(mudou\) router\.replace\(urlCanonica \? `\/dre\?\$\{urlCanonica\}` : "\/dre", \{ scroll: false \}\);/);
 });
 
 // ===========================================================================
@@ -434,9 +435,10 @@ test("a requisicao a API carrega EXATAMENTE a querystring da URL", () => {
 test("a pagina usa a MESMA serializacao para a URL e para o fetch", () => {
   const cliente = semComentarios(fonte("app/dre/DreClient.tsx"));
   // `chave` = dreQuery(parse(URL)), via queryCanonica.
-  assert.match(cliente, /const \{ filtros, query: chave, mudou \} = useMemo\(\(\) => queryCanonica\(searchParams\.toString\(\)\)/);
+  // `chave` (requisicao) = dreQuery; `urlCanonica` (pagina) = dreUrlQuery = recorte + visao.
+  assert.match(cliente, /const \{ filtros, query: chave, url: urlCanonica, mudou \} = useMemo\(\(\) => queryCanonica\(searchParams\.toString\(\)\)/);
   assert.match(cliente, /router\.replace\(q \? `\/dre\?\$\{q\}` : "\/dre"/);
-  assert.match(cliente, /const q = dreQuery\(\{ \.\.\.filtros, \.\.\.parcial \}\);/);
+  assert.match(cliente, /const q = dreUrlQuery\(\{ \.\.\.filtros, \.\.\.parcial \}\);/);
   assert.match(cliente, /fetchDre\(parseDreFiltros\(new URLSearchParams\(chave\)\)/);
   const api = semComentarios(fonte("src/lib/dre-api.ts"));
   assert.match(api, /fetch\(dreApiUrl\(API_URL, filtros\)/);

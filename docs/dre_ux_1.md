@@ -84,3 +84,39 @@ Achados da revisão do head `1288203` corrigidos no mesmo PR, sem tocar regra fi
 A fotografia de insumos publicada em 13/10 passou de 48 h: TikTok e ML saem `snapshot_vencido`, logo não
 calculáveis junto com a Shopee. A tela mostra "Bloqueado por TikTok Shop, Mercado Livre e Shopee" e não oferece o
 botão de recorte (não há canal calculável). Volta ao cenário de 13/10 quando o publisher de insumos rodar de novo.
+
+---
+
+## DRE-UX-3 — Conhecida × Estimada com premissas (16/10/2026)
+
+Consome o contrato aditivo do PR #79 (`docs/dre_premissas_1.md` §7 e §9). Só frontend; nenhuma regra financeira,
+backend ou dado alterado. `origin/main` (`cf91daf`) integrada por merge.
+
+| Regra | Implementação |
+|---|---|
+| Alternância explícita | `Segmented` "Conhecida" / "Estimada com premissas" (radiogroup rotulado "Cenário"), sempre visível |
+| Cenário na URL | `cenario=estimada` (padrão "conhecida" não vai à URL). É **visão**, não recorte: `dreUrlQuery` = recorte + cenário; a requisição usa só `dreQuery` — trocar de cenário não refaz a busca. URL canônica e reload preservam o cenário |
+| Conhecida intacta | Resumo, canais, DRE vertical, marcas e matriz não leem `cenario_premissas` (teste de fonte) |
+| Estimada | resumo (receita base, margem estimada, %, premissas), Conhecida × Estimada lado a lado com a mesma receita base, DRE estimada com origem/taxa/valor/status, estado por recorte, premissas por marca com fonte genérica, data e SHA-256 no detalhe |
+| Sem cálculo na tela | linhas, subtotais, margem e estado vêm da API; a única conversão é taxa (0..1) → % para exibir |
+| Não somáveis | Comissões e Outras Receitas Operacionais aparecem com taxa e valor, marcadas "fora da soma", sem sinal de subtração |
+| CMV ausente | linha `cmv` com `valor=null` e `snapshot_ausente` → "CMV da competência ainda não publicado"; nunca R$ 0 |
+| Zero explícito | premissa 0% da matriz aparece como R$ 0 (é medida, não ausência); "Ausente na matriz" para premissa vazia |
+| Premissas por marca | lidas de `celulas_base` (só a célula base tem `percentual`); agregado diz que soma células, sem taxa própria |
+| Estados sem cenário | API antiga (sem `fontes.premissas_dre`) → "A API publicada ainda não fornece o cenário estimado"; `cenario_premissas=null` → "Sem premissas para esta competência" + `fontes.premissas_dre.motivo` |
+| Payload | validação estrutural estendida ao cenário e a `premissas_dre` quando presentes; resposta antiga continua aceita |
+
+Pendente de contrato: **cobertura do CMV provisório** — o backend ainda não expõe o campo; a tela não inventa um.
+
+### Estado medido (API local → Neon, só leitura, 16/10/2026)
+
+Outubro: `premissas_dre=ok` ("Premissas de outubro/2026"), cenário em 14/14 células, total `nao_calculavel` com
+prévia, CMV `snapshot_ausente` → a tela mostra "CMV da competência ainda não publicado". Competência madura padrão
+(julho): `premissas_dre=nao_publicado` → "Sem premissas para esta competência".
+
+### Validação
+
+`tests/dre-estimada.test.ts` (19 testes, puros e de renderização) + fixtures sintéticas em
+`tests/dre-fixtures-estimada.ts`; 11 mutações derrubam teste. Suíte web 2100/2100, typecheck, build. Navegador:
+fixtures 112/112 (5 estados × 1440/1024/390 × claro/escuro, teclado, leitor de tela, reload) e regressão da
+visão conhecida 113/113 + 30/30; contra a API local 62/62 (estimada) e 90/90 (conhecida).

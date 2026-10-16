@@ -42,6 +42,16 @@ import DreVertical, { type OpcaoRecorte } from "@/components/dre/DreVertical";
 import DreCanais from "@/components/dre/DreCanais";
 import { DreMarcaCanalMatriz, DreMarcasTabela } from "@/components/dre/DreMarcas";
 import BotaoRecorteCalculavel from "@/components/dre/BotaoRecorteCalculavel";
+import Segmented from "@/components/ui/Segmented";
+import {
+  ComparacaoCenarios,
+  DreVerticalEstimada,
+  EstimadaPorRecorte,
+  PremissasPorMarca,
+  ResumoEstimado,
+  SemCenario,
+} from "@/components/dre/DreEstimada";
+import { disponibilidade } from "@/lib/dre-estimada";
 import { DreErro, fetchDre } from "@/lib/dre-api";
 import {
   FILTROS_PADRAO,
@@ -50,13 +60,14 @@ import {
   canaisBloqueadores,
   canaisCalculaveisOcultos,
   classificarFalha,
-  dreQuery,
+  dreUrlQuery,
   fmtInstanteBrt,
   juntarNomes,
   parseDreFiltros,
   queryCanonica,
   rotuloPeriodo,
   selecaoVazia,
+  type Cenario,
   type DreFiltros as Filtros,
   type DreResponse,
   type FalhaDre,
@@ -68,15 +79,16 @@ export default function DreClient() {
   const searchParams = useSearchParams();
   const router = useRouter();
   // Recorte aplicado = so' o que e' valido na URL; `chave` e' a forma canonica.
-  const { filtros, query: chave, mudou } = useMemo(() => queryCanonica(searchParams.toString()), [searchParams]);
+  const { filtros, query: chave, url: urlCanonica, mudou } = useMemo(() => queryCanonica(searchParams.toString()), [searchParams]);
+  const cenario = filtros.cenario ?? "conhecida";
 
   // DRE-UX-2: URL com parametro invalido, parcialmente invalido, fora da ordem
   // ou de outra tela e' reescrita NA HORA para a forma canonica. Barra de
   // endereco, controles e requisicao dizem sempre o MESMO recorte — nunca uma
   // URL falsa sobre um escopo ampliado em silencio.
   useEffect(() => {
-    if (mudou) router.replace(chave ? `/dre?${chave}` : "/dre", { scroll: false });
-  }, [mudou, chave, router]);
+    if (mudou) router.replace(urlCanonica ? `/dre?${urlCanonica}` : "/dre", { scroll: false });
+  }, [mudou, urlCanonica, router]);
 
   const [resultado, setResultado] = useState<Resultado | null>(null);
   const [tentativa, setTentativa] = useState(0);
@@ -102,7 +114,8 @@ export default function DreClient() {
 
   const aplicar = useCallback(
     (parcial: Partial<Filtros>) => {
-      const q = dreQuery({ ...filtros, ...parcial });
+      // URL = recorte + visao. A requisicao continua so' com o recorte (`chave`).
+      const q = dreUrlQuery({ ...filtros, ...parcial });
       router.replace(q ? `/dre?${q}` : "/dre", { scroll: false });
     },
     [filtros, router],
@@ -145,7 +158,11 @@ export default function DreClient() {
     <PageContainer>
       <PageHeader
         title="DRE"
-        subtitle="Margem de contribuição conhecida por canal e marca — o que falta aparece nomeado."
+        subtitle={
+          cenario === "estimada"
+            ? "Margem de contribuição estimada com premissas — ao lado da conhecida, nunca somada a ela."
+            : "Margem de contribuição conhecida por canal e marca — o que falta aparece nomeado."
+        }
         icon={Calculator}
         meta={
           resp ? (
@@ -153,6 +170,9 @@ export default function DreClient() {
               <PeriodChip label={`Competência ${competencia}${mesPadrao ? " · madura" : ""}`} />
               {atualizadoEm && (
                 <Chip>Carga do mart: {fmtInstanteBrt(atualizadoEm)}</Chip>
+              )}
+              {cenario === "estimada" && resp.total?.cenario_premissas && (
+                <Chip>{resp.total.cenario_premissas.fonte_premissas.rotulo}</Chip>
               )}
               <Chip tom={aviso ? "atencao" : "neutro"} ponto>
                 {aviso ? aviso.curto : `Fotografia ${insumoEm ? fmtInstanteBrt(insumoEm) : "ok"}`}
@@ -162,6 +182,28 @@ export default function DreClient() {
         }
         filters={<DreFiltros filtros={filtros} mesPadrao={mesPadrao} onChange={aplicar} carregando={carregando} />}
       />
+
+      {/* DRE-UX-3: cenario e' VISAO (vai para a URL), nao recorte (nao refaz a busca). */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span id="dre-cenario-rotulo" className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          Cenário
+        </span>
+        <Segmented<Cenario>
+          rotulo="Cenário da DRE"
+          rotuladoPor="dre-cenario-rotulo"
+          opcoes={[
+            { valor: "conhecida", texto: "Conhecida", descricao: "Conhecida: só componentes realizados (oficiais)" },
+            { valor: "estimada", texto: "Estimada com premissas", descricao: "Estimada: realizado mais premissas de orçamento por marca" },
+          ]}
+          valor={cenario}
+          aoEscolher={(c) => aplicar({ cenario: c })}
+        />
+        <span className="text-xs text-ink-muted">
+          {cenario === "conhecida"
+            ? "Só componentes realizados (oficiais)."
+            : "Realizado + premissas de orçamento por marca. Nunca somada à conhecida."}
+        </span>
+      </div>
 
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {carregando ? "Carregando a DRE…" : falha ? `Falha: ${falha.titulo}` : vazio ? "Sem dados para a seleção." : "DRE carregada."}
@@ -210,6 +252,10 @@ export default function DreClient() {
             </Note>
           )}
 
+          {cenario === "estimada" ? (
+            <VisaoEstimada resp={resp} total={resp.total} opcoes={opcoes} recorte={recorte} aoEscolher={setRecorte} />
+          ) : (
+          <>
           <section aria-labelledby="dre-resumo" className="flex flex-col gap-3">
             <h2 id="dre-resumo" className="sr-only">Resumo da seleção</h2>
             <DreResumo total={resp.total} competencia={competencia ?? ""} bloqueadores={bloqueadores} />
@@ -272,8 +318,59 @@ export default function DreClient() {
               <li>Uma competência só fecha depois de dois meses completos (maturação M+2). Mês imaturo sai não calculável.</li>
             </ul>
           </Disclosure>
+          </>
+          )}
         </>
       ) : null}
     </PageContainer>
+  );
+}
+
+/**
+ * DRE-UX-3 — corpo da visao "Estimada com premissas". So' le
+ * `cenario_premissas`; a margem conhecida aparece apenas no painel de
+ * comparacao, rotulada e em coluna propria.
+ */
+function VisaoEstimada({
+  resp,
+  total,
+  opcoes,
+  recorte,
+  aoEscolher,
+}: {
+  resp: DreResponse;
+  total: NonNullable<DreResponse["total"]>;
+  opcoes: OpcaoRecorte[];
+  recorte: string;
+  aoEscolher: (v: string) => void;
+}) {
+  const dispDe = (c: typeof total) => disponibilidade(c, resp);
+  const dispTotal = dispDe(total);
+  return (
+    <>
+      <section aria-labelledby="dre-resumo-estimado" className="flex flex-col gap-3">
+        <h2 id="dre-resumo-estimado" className="sr-only">Resumo do cenário estimado</h2>
+        {dispTotal.tipo === "ok" ? <ResumoEstimado cenario={dispTotal.cenario} /> : <SemCenario disp={dispTotal} />}
+        <p className="text-xs text-ink-muted">
+          Estimativa com premissas de orçamento sobre a receita realizada. Não é lucro nem margem líquida, e não
+          substitui a DRE conhecida.
+        </p>
+      </section>
+      {dispTotal.tipo === "ok" && <ComparacaoCenarios celula={total} cenario={dispTotal.cenario} />}
+      <DreVerticalEstimada opcoes={opcoes} selecionado={recorte} aoEscolher={aoEscolher} dispDe={dispDe} />
+      {dispTotal.tipo !== "api_antiga" && (
+        <EstimadaPorRecorte linhas={opcoes.map((o) => ({ rotulo: o.rotulo, celula: o.celula }))} dispDe={dispDe} />
+      )}
+      <PremissasPorMarca resp={resp} />
+      <Disclosure rotulo="Como ler a DRE estimada">
+        <ul className="flex list-disc flex-col gap-1 pl-4">
+          <li>Valor da premissa = receita bruta da célula × taxa da marca. Canal, marca e total somam células; nenhuma taxa é reaplicada.</li>
+          <li>Comissões e Outras Receitas Operacionais aparecem com percentual e valor, mas ficam fora da soma até a ratificação.</li>
+          <li>CMV, Ads e taxas vêm da DRE realizada, com o status dela. Sem CMV publicado, a margem estimada não é calculada.</li>
+          <li>Prévia: competência em andamento. A premissa vale só para a competência publicada; nunca é estendida.</li>
+          <li>Valor ausente nunca vira zero.</li>
+        </ul>
+      </Disclosure>
+    </>
   );
 }
