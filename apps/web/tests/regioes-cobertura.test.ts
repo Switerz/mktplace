@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  buildAvisoCobertura, linhaAtualizacao, marcaPontoAusente, fmtDataBr, nomeCanal,
+  buildAvisoCobertura, linhaAtualizacao, marcaPontoAusente, fmtDataBr, nomeCanal, normalizarCobertura,
 } from "../src/lib/regioes-cobertura.ts";
 import type { CoberturaCanal } from "../src/lib/api-client.ts";
 
@@ -115,13 +115,13 @@ test("page.tsx renderiza o aviso de cobertura ANTES dos KPI cards", () => {
   const kpis = PAGE.indexOf("{/* KPI Cards */}");
   assert.ok(aviso > 0, "aviso-cobertura-canal ausente");
   assert.ok(kpis > 0 && aviso < kpis, "o aviso precisa vir antes dos KPIs");
-  assert.match(PAGE, /buildAvisoCobertura\(coberturaPorCanal\)/);
+  assert.match(PAGE, /buildAvisoCobertura\(cobertura\.canais\)/);
 });
 
 test("page.tsx nunca mais escreve 'Atualizado em' direto do refreshed_at", () => {
   assert.doesNotMatch(PAGE, /Atualizado em \{fmtRefreshedAt/);
   assert.match(PAGE, /linhaAtualizacao\(/);
-  assert.match(PAGE, /summary\?\.dados_completos_ate/);
+  assert.match(PAGE, /cobertura\.dadosCompletosAte/);
 });
 
 test("page.tsx marca os pontos da tendencia sem algum canal", () => {
@@ -129,7 +129,75 @@ test("page.tsx marca os pontos da tendencia sem algum canal", () => {
   assert.match(PAGE, /data-testid="tendencia-canal-ausente"/);
 });
 
-test("a cobertura so' e' lida com dado fresco (nunca de uma requisicao antiga)", () => {
-  assert.match(PAGE, /const coberturaPorCanal = dataIsFresh \?/);
-  assert.match(PAGE, /const canaisDefasados = dataIsFresh \?/);
+test("a cobertura so' e' lida com dado fresco e sempre via normalizarCobertura", () => {
+  assert.match(PAGE, /normalizarCobertura\(dataIsFresh \? summary : null\)/);
+  // nenhum acesso direto aos campos crus (que somem na API antiga)
+  assert.doesNotMatch(PAGE, /summary\??\.(cobertura_por_canal|canais_defasados|canais_com_atraso|dados_completos_ate)/);
+});
+
+// ---------------------------------------------------------------------------
+// RECOVERY-3 — D-2 e' atraso leve, nunca "atualizado"
+// ---------------------------------------------------------------------------
+const ML_D2: CoberturaCanal = {
+  ...ML_ATUAL, status: "atraso_leve", dados_ate: "2026-10-14", motivo: "carga_atrasada",
+  motivo_detalhe: "A carga do último dia fechado ainda não chegou para este canal.",
+};
+
+test("ML em D-2: aviso leve, titulo de 1 dia de atraso, e o total deixa de ser 'atualizado'", () => {
+  const aviso = buildAvisoCobertura([ML_D2]);
+  assert.ok(aviso);
+  assert.equal(aviso.severidade, "leve");
+  assert.equal(aviso.titulo, "Mercado Livre com 1 dia de atraso — dados até 14/10/2026");
+  const n = normalizarCobertura({ cobertura_por_canal: [ML_D2], dados_completos_ate: "2026-10-14" });
+  assert.deepEqual(n.canaisComAtraso, ["ml"]);
+  assert.equal(linhaAtualizacao(n.dadosCompletosAte, n.canaisComAtraso, "16/10/2026 05:00"),
+    "Dados completos até 14/10/2026 · carga mais recente (parcial) em 16/10/2026 05:00");
+});
+
+test("ML em D-2 + Shopee defasada: o grave manda na severidade e os dois aparecem", () => {
+  const aviso = buildAvisoCobertura([ML_D2, SHOPEE_DEFASADA]);
+  assert.ok(aviso);
+  assert.equal(aviso.severidade, "alerta");
+  assert.equal(aviso.titulo, "Canais com dado regional desatualizado");
+  assert.match(aviso.mensagem, /Shopee não entra nos números depois de 24\/08\/2026; Mercado Livre não entra nos números depois de 14\/10\/2026/);
+});
+
+test("status desconhecido (API mais nova que o front) conta como atraso, nunca como atualizado", () => {
+  const futuro = { ...ML_ATUAL, status: "status_novo_qualquer" } as CoberturaCanal;
+  assert.deepEqual(normalizarCobertura({ cobertura_por_canal: [futuro] }).canaisComAtraso, ["ml"]);
+  assert.ok(buildAvisoCobertura([futuro]));
+});
+
+// ---------------------------------------------------------------------------
+// RECOVERY-3 — compatibilidade com a API antiga (Vercel publica antes do Render)
+// ---------------------------------------------------------------------------
+const SUMMARY_API_ANTIGA = {
+  gmv: 1000, orders: 10, refreshed_at: "2026-09-29T14:15:18+00:00",
+  channels_sem_cobertura_regional: ["tiktok"],
+}; // sem nenhum campo de cobertura
+
+test("API antiga: sem contrato, sem aviso, cabecalho continua 'Atualizado em' e nada quebra", () => {
+  const n = normalizarCobertura(SUMMARY_API_ANTIGA);
+  assert.equal(n.contratoPresente, false);
+  assert.deepEqual(n.canais, []);
+  assert.deepEqual(n.canaisComAtraso, []);
+  assert.equal(buildAvisoCobertura(n.canais), null);
+  assert.equal(linhaAtualizacao(n.dadosCompletosAte, n.canaisComAtraso, "29/09/2026 11:15"), "Atualizado em 29/09/2026 11:15");
+});
+
+test("API antiga: ponto de tendencia sem canais_ausentes nao ganha marca", () => {
+  assert.equal(marcaPontoAusente((({ date: "2026-09-01" }) as { canais_ausentes?: string[] }).canais_ausentes), null);
+});
+
+test("payload nulo ou campo com tipo errado nunca derruba a tela", () => {
+  assert.equal(normalizarCobertura(null).contratoPresente, false);
+  assert.equal(normalizarCobertura(undefined).contratoPresente, false);
+  assert.equal(normalizarCobertura({ cobertura_por_canal: null }).contratoPresente, false);
+});
+
+test("API da RECOVERY-2 (sem canais_com_atraso): atraso derivado da lista por canal", () => {
+  const n = normalizarCobertura({
+    cobertura_por_canal: [ML_ATUAL, SHOPEE_DEFASADA], canais_defasados: ["shopee"], dados_completos_ate: "2026-08-24",
+  });
+  assert.deepEqual(n.canaisComAtraso, ["shopee"]);
 });

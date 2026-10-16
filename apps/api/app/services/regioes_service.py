@@ -128,23 +128,32 @@ def _round_or_none(v) -> float | None:
 # instante de ingestao, que mede a carga e nao o dado.
 # ---------------------------------------------------------------------------
 
-# Atraso aceito entre o dia fechado (D-1) e a ultima data carregada: o
-# incremental roda de manha, e antes dele o canal saudavel ainda esta em D-2.
-TOLERANCIA_DIAS_CARGA = 1
-
-#: Status de cobertura de um canal no periodo pedido.
-#:   atualizada    — dados ate o fim esperado do periodo (com tolerancia);
-#:   defasada      — ha carga, mas ela para antes do fim esperado;
+#: Status de cobertura de um canal no periodo pedido. `esperado_ate` e'
+#: min(fim do periodo, D-1 em America/Sao_Paulo). Sem tolerancia: D-2 NAO e'
+#: "atualizada" (decisao REGIONAL-SOURCE-RECOVERY-3).
+#:   atualizada    — dados_ate >= esperado_ate;
+#:   atraso_leve   — dados_ate == esperado_ate - 1 dia (ex.: antes da carga
+#:                   da manha, o canal saudavel ainda esta em D-2);
+#:   defasada      — dados_ate < esperado_ate - 1 dia;
 #:   sem_carga     — nenhuma linha regional carregada para o canal;
 #:   sem_cobertura — canal sem fonte regional (estrutural, hoje so' TikTok).
+DIAS_ATRASO_LEVE = 1
+
 _MOTIVO_POR_STATUS = {
+    "atraso_leve": "carga_atrasada",
     "defasada": "carga_defasada",
     "sem_carga": "sem_carga",
     "sem_cobertura": "sem_fonte_regional",
 }
 
-# Explicacao conhecida por canal, exibida SO' quando o canal nao esta
-# atualizado — se a carga voltar, o texto deixa de aparecer sozinho.
+#: Status em que o total NAO pode ser apresentado como atualizado.
+STATUS_COM_ATRASO = ("atraso_leve", "defasada", "sem_carga")
+
+# Explicacao conhecida por canal, exibida SO' quando o canal esta defasado,
+# sem carga ou sem cobertura — nunca no atraso leve, que e' rotina de horario
+# de carga e nao a causa estrutural. Se a carga voltar, o texto some sozinho.
+_STATUS_COM_DETALHE = ("defasada", "sem_carga", "sem_cobertura")
+_DETALHE_ATRASO_LEVE = "A carga do último dia fechado ainda não chegou para este canal."
 _DETALHE_POR_CANAL = {
     "tiktok": "Nenhuma fonte mapeada expõe a UF do pedido TikTok.",
     "shopee": (
@@ -190,10 +199,18 @@ def build_cobertura_canais(
             ultimo = None
         elif ultimo is None:
             status = "sem_carga"
-        elif ultimo < esperado_ate - timedelta(days=TOLERANCIA_DIAS_CARGA):
-            status = "defasada"
-        else:
+        elif ultimo >= esperado_ate:
             status = "atualizada"
+        elif ultimo >= esperado_ate - timedelta(days=DIAS_ATRASO_LEVE):
+            status = "atraso_leve"
+        else:
+            status = "defasada"
+        if status in _STATUS_COM_DETALHE:
+            detalhe = _DETALHE_POR_CANAL.get(nome)
+        elif status == "atraso_leve":
+            detalhe = _DETALHE_ATRASO_LEVE
+        else:
+            detalhe = None
         canais.append({
             "channel": nome,
             "marketplace_id": mkt_id,
@@ -201,7 +218,7 @@ def build_cobertura_canais(
             "dados_ate": ultimo,
             "esperado_ate": esperado_ate,
             "motivo": _MOTIVO_POR_STATUS.get(status),
-            "motivo_detalhe": _DETALHE_POR_CANAL.get(nome) if status != "atualizada" else None,
+            "motivo_detalhe": detalhe,
         })
 
     com_fonte = [c for c in canais if c["status"] != "sem_cobertura"]
@@ -211,7 +228,10 @@ def build_cobertura_canais(
         dados_completos_ate = min(c["dados_ate"] for c in com_fonte)
     return {
         "cobertura_por_canal": canais,
+        # Graves (o canal falta no total por mais de um dia, ou inteiro).
         "canais_defasados": [c["channel"] for c in com_fonte if c["status"] in ("defasada", "sem_carga")],
+        # Qualquer canal que impede chamar o total de atualizado, inclusive D-2.
+        "canais_com_atraso": [c["channel"] for c in com_fonte if c["status"] in STATUS_COM_ATRASO],
         "dados_completos_ate": dados_completos_ate,
     }
 

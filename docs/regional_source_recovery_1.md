@@ -248,12 +248,13 @@ trend):
 | Campo | Significado |
 |---|---|
 | `cobertura_por_canal[]` | Um item por canal pedido, com `channel`, `marketplace_id`, `status`, `dados_ate`, `esperado_ate`, `motivo` e `motivo_detalhe` |
-| `status` | `atualizada`, `defasada` (a carga para antes de `esperado_ate − 1 dia`), `sem_carga` ou `sem_cobertura` (TikTok) |
+| `status` | `atualizada` (`dados_ate ≥ esperado_ate`, ou seja, D-1), `atraso_leve` (exatamente 1 dia antes, D-2), `defasada` (2 dias antes ou mais), `sem_carga` ou `sem_cobertura` (TikTok). Não há tolerância: **D-2 nunca é "atualizada"** (decisão RECOVERY-3) |
 | `dados_ate` | Última **data** carregada do canal, sem recorte de período. Nunca é o instante de ingestão |
 | `esperado_ate` | `min(fim do período, D-1 BRT)` |
-| `motivo` | `carga_defasada`, `sem_carga` ou `sem_fonte_regional`. É `null` quando o canal está atualizado |
+| `motivo` | `carga_atrasada`, `carga_defasada`, `sem_carga` ou `sem_fonte_regional`. É `null` quando o canal está atualizado. O texto estrutural do canal (ex.: "fonte descontinuada") só aparece quando o status é `defasada`, `sem_carga` ou `sem_cobertura`, nunca no atraso leve |
 | `dados_completos_ate` | Menor `dados_ate` entre os canais com fonte, ou seja, até onde o total cobre todos eles. É `null` se algum canal não tem carga |
-| `canais_defasados` | Canais com fonte e status `defasada` ou `sem_carga` |
+| `canais_defasados` | Canais com fonte e status `defasada` ou `sem_carga` (os casos graves) |
+| `canais_com_atraso` | Canais com fonte e status `atraso_leve`, `defasada` ou `sem_carga`. Qualquer um deles impede chamar o total de atualizado |
 | `trend.data[].canais_ausentes` | Canais com fonte cuja carga para antes do fim do ponto. Ausência, não zero |
 
 `refreshed_at` permanece, mas a tela não o mostra mais sozinho como
@@ -261,6 +262,37 @@ trend):
 completos até 24/08/2026 · carga mais recente (parcial) em …". A tela também
 ganha um aviso por canal antes dos KPIs, o subtítulo do KPI de GMV muda e cada
 ponto da tendência recebe o chip "sem Shopee".
+
+**Compatibilidade entre versões.** Todos os campos são aditivos. No front,
+eles são opcionais e lidos só por `normalizarCobertura`:
+
+- **API antiga** (sem os campos): a tela mantém o comportamento anterior, com
+  "Atualizado em" e sem aviso, e nada quebra;
+- **status desconhecido**: conta como atraso, para nunca chamar o total de
+  atualizado;
+- **sem `canais_com_atraso`**: o atraso é derivado da lista por canal;
+- **Oráculo (MCP)**: os contratos zod de `/regioes` não são estritos, então
+  campos novos passam.
+
+### Ordem de publicação
+
+1. Merge do PR #81 em `main`.
+2. A Vercel publica o front automaticamente. Ele fica compatível com a API
+   antiga; nesse intervalo a tela fica como hoje, e o ML continua parado em
+   28/09 porque o runner ainda não mudou.
+3. Deploy manual da API no Render. Depois dele, `/regioes/summary` já traz
+   `cobertura_por_canal`, com o ML `defasada` (dados até 28/09) e a Shopee
+   `defasada` (dados até 24/08).
+4. Smoke da API e da tela.
+5. Atualizar o runner (`runner/producao`) para o merge.
+6. O próximo `full_daily` (ou um disparo manual seu) roda o
+   `gold_regional_incremental` com SUCCESS e AVISO da Shopee, e em seguida o
+   `sync_region_if_needed`.
+7. Smoke final: o ML fica `atualizada` (dados até D-1) e a Shopee segue
+   `defasada` (dados até 24/08).
+
+Atualizar o runner antes do Render é o único caminho em que o ML volta fresco
+com a API antiga e a Shopee aparece com zero sem aviso.
 
 Alternativa descartada: carregar a Shopee API com `uf='XX'`. Os totais por
 canal seriam preservados, mas o mapa continuaria vazio, o GMV mudaria de

@@ -56,6 +56,7 @@ def test_ml_atual_e_shopee_defasada():
     # O total so' cobre TODOS os canais com fonte ate 24/08 — nao ate 15/10.
     assert r["dados_completos_ate"] == date(2026, 8, 24)
     assert r["canais_defasados"] == ["shopee"]
+    assert r["canais_com_atraso"] == ["shopee"]
 
 
 def test_data_recente_do_ml_nao_vira_data_do_total():
@@ -73,11 +74,34 @@ def test_esperado_ate_nunca_passa_de_d_menos_1():
     assert _por_canal(r)["ml"]["status"] == "atualizada"
 
 
-def test_tolerancia_de_um_dia_e_nao_mais():
-    um_dia = svc.build_cobertura_canais([ML_ID], {ML_ID: date(2026, 10, 14)}, SET_OUT, HOJE)
-    dois_dias = svc.build_cobertura_canais([ML_ID], {ML_ID: date(2026, 10, 13)}, SET_OUT, HOJE)
-    assert _por_canal(um_dia)["ml"]["status"] == "atualizada"
-    assert _por_canal(dois_dias)["ml"]["status"] == "defasada"
+@pytest.mark.parametrize("dados_ate, status, motivo, grave", [
+    (date(2026, 10, 15), "atualizada", None, False),          # D-1
+    (date(2026, 10, 14), "atraso_leve", "carga_atrasada", False),  # D-2
+    (date(2026, 10, 13), "defasada", "carga_defasada", True),  # D-3
+])
+def test_d1_atualizado_d2_atraso_leve_d3_defasado(dados_ate, status, motivo, grave):
+    """Decisao RECOVERY-3: sem tolerancia. D-2 nunca e' 'atualizada'."""
+    r = svc.build_cobertura_canais([ML_ID], {ML_ID: dados_ate}, SET_OUT, HOJE)
+    ml = _por_canal(r)["ml"]
+    assert ml["status"] == status
+    assert ml["motivo"] == motivo
+    assert (r["canais_defasados"] == ["ml"]) is grave
+    assert (r["canais_com_atraso"] == ["ml"]) is (status != "atualizada")
+
+
+def test_atraso_leve_nao_usa_o_motivo_estrutural_do_canal():
+    """A Shopee com D-2 (se a fonte voltar) nao pode dizer 'fonte descontinuada'."""
+    r = svc.build_cobertura_canais([SHOPEE_ID], {SHOPEE_ID: date(2026, 10, 14)}, SET_OUT, HOJE)
+    shopee = _por_canal(r)["shopee"]
+    assert shopee["status"] == "atraso_leve"
+    assert "descontinuada" not in shopee["motivo_detalhe"]
+    assert "ainda não chegou" in shopee["motivo_detalhe"]
+
+
+def test_atraso_leve_tambem_marca_o_ultimo_ponto_como_ausente():
+    cob = svc.build_cobertura_canais([ML_ID], {ML_ID: date(2026, 10, 14)}, SET_OUT, HOJE)["cobertura_por_canal"]
+    assert svc.canais_ausentes_no_bucket(cob, date(2026, 10, 14)) == []
+    assert svc.canais_ausentes_no_bucket(cob, date(2026, 10, 15)) == ["ml"]
 
 
 def test_periodo_anterior_ao_congelamento_e_shopee_atualizada():

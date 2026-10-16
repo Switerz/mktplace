@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.schemas.performance import FiltersEcho
 
 CoverageLevel = Literal["ok", "partial", "low", "not_applicable"]
-CanalCoberturaStatus = Literal["atualizada", "defasada", "sem_carga", "sem_cobertura"]
+CanalCoberturaStatus = Literal["atualizada", "atraso_leve", "defasada", "sem_carga", "sem_cobertura"]
 
 
 class CoberturaCanal(BaseModel):
@@ -20,7 +20,7 @@ class CoberturaCanal(BaseModel):
     status: CanalCoberturaStatus
     dados_ate: Optional[date] = None
     esperado_ate: date
-    motivo: Optional[Literal["carga_defasada", "sem_carga", "sem_fonte_regional"]] = None
+    motivo: Optional[Literal["carga_atrasada", "carga_defasada", "sem_carga", "sem_fonte_regional"]] = None
     motivo_detalhe: Optional[str] = None
 
 
@@ -30,7 +30,10 @@ class _CoberturaCampos(BaseModel):
     com fonte regional pedidos — diferente de `refreshed_at`, que e' o
     instante da carga mais recente de qualquer canal."""
     cobertura_por_canal: list[CoberturaCanal] = []
+    #: defasada ou sem_carga — o canal falta no total por mais de um dia.
     canais_defasados: list[str] = []
+    #: qualquer status que impede chamar o total de atualizado (inclui D-2).
+    canais_com_atraso: list[str] = []
     dados_completos_ate: Optional[date] = None
 
 

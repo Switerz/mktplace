@@ -20,7 +20,7 @@ import {
 } from "@/lib/regioes-format";
 import { buildRegionalScope, REGIONAL_GMV_LABEL, UF_FILL_LABEL } from "@/lib/regioes-scope";
 import {
-  buildAvisoCobertura, linhaAtualizacao, marcaPontoAusente, fmtDataBr,
+  buildAvisoCobertura, linhaAtualizacao, marcaPontoAusente, fmtDataBr, normalizarCobertura,
 } from "@/lib/regioes-cobertura";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
@@ -147,16 +147,18 @@ function RegioesPageInner() {
   const displayTrend = dataIsFresh ? (trend ?? []) : [];
   const displayRefreshedAt = dataIsFresh ? refreshedAt : null;
   const displaySemCobertura = dataIsFresh ? semCobertura : [];
-  // Cobertura por canal (REGIONAL-SOURCE-RECOVERY-2): vem do summary, a
-  // mesma resposta que define os totais exibidos. Com canal parado, o
-  // cabecalho mostra "Dados completos até" e nunca so' o `refreshed_at`.
-  const coberturaPorCanal = dataIsFresh ? (summary?.cobertura_por_canal ?? []) : [];
-  const canaisDefasados = dataIsFresh ? (summary?.canais_defasados ?? []) : [];
-  const avisoCobertura = buildAvisoCobertura(coberturaPorCanal);
+  // Cobertura por canal (REGIONAL-SOURCE-RECOVERY-2/3): vem do summary, a
+  // mesma resposta que define os totais exibidos. Com canal atrasado (D-2
+  // inclusive), o cabecalho mostra "Dados completos até" e nunca so' o
+  // `refreshed_at`. `normalizarCobertura` aceita a API antiga (sem os
+  // campos), que fica no ar entre a publicacao da Vercel e a do Render.
+  const cobertura = normalizarCobertura(dataIsFresh ? summary : null);
+  const canaisComAtraso = cobertura.canaisComAtraso;
+  const avisoCobertura = buildAvisoCobertura(cobertura.canais);
   const linhaTemporal = dataIsFresh
     ? linhaAtualizacao(
-        summary?.dados_completos_ate ?? null,
-        canaisDefasados,
+        cobertura.dadosCompletosAte,
+        canaisComAtraso,
         displayRefreshedAt ? fmtRefreshedAt(displayRefreshedAt) : null,
       )
     : null;
@@ -219,7 +221,7 @@ function RegioesPageInner() {
           <>
             Período: {periodLabel}
             {linhaTemporal && (
-              <span data-testid="regioes-linha-atualizacao" className={canaisDefasados.length > 0 ? "text-amber-700 font-medium" : undefined}>
+              <span data-testid="regioes-linha-atualizacao" className={canaisComAtraso.length > 0 ? "text-amber-700 font-medium" : undefined}>
                 {" · "}{linhaTemporal}
               </span>
             )}
@@ -302,7 +304,7 @@ function RegioesPageInner() {
           <div
             role="status"
             data-testid="aviso-cobertura-canal"
-            className={`rounded-2xl p-4 border ${avisoCobertura.severidade === "critico" ? "bg-rose-50 border-rose-200" : "bg-amber-50 border-amber-300"}`}
+            className={`rounded-2xl p-4 border ${avisoCobertura.severidade === "critico" ? "bg-rose-50 border-rose-200" : avisoCobertura.severidade === "alerta" ? "bg-amber-50 border-amber-300" : "bg-amber-50/60 border-amber-200"}`}
           >
             <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${avisoCobertura.severidade === "critico" ? "text-rose-700" : "text-amber-800"}`}>
               {avisoCobertura.titulo}
@@ -361,8 +363,10 @@ function RegioesPageInner() {
                 value={displaySummary ? fmtBrl(displaySummary.gmv) : "—"}
                 subvalue={
                   regionalScope
-                    ? canaisDefasados.length > 0 && summary?.dados_completos_ate
-                      ? `Completo só até ${fmtDataBr(summary.dados_completos_ate)} — ver aviso`
+                    ? canaisComAtraso.length > 0
+                      ? cobertura.dadosCompletosAte
+                        ? `Completo só até ${fmtDataBr(cobertura.dadosCompletosAte)} — ver aviso`
+                        : "Incompleto no período — ver aviso"
                       : `Escopo: ${regionalScope.channelsInScope.join(" + ") || "nenhum canal com regional"}`
                     : undefined
                 }
