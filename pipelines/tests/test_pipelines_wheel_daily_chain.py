@@ -5,7 +5,8 @@ como subprocesso. Um modulo do fecho fora da wheel so' apareceria em runtime,
 como `ModuleNotFoundError` no meio do ciclo. Por isso:
 
 1. o fecho e' RECONSTRUIDO a partir de `PIPELINES["daily_chain"]`, nao de uma
-   lista copiada — step novo na cadeia sem empacotamento reprova aqui;
+   lista copiada — step novo na cadeia sem empacotamento reprova aqui. Somam-se
+   os CLIs que o Airflow chama FORA da cadeia (`CLIS_DO_AIRFLOW_FORA_DA_CADEIA`);
 2. a wheel e' CONSTRUIDA e lida (como em `apps/api/tests/test_wheel_packaging`):
    provar o `include` do pyproject provaria so' a declaracao.
 """
@@ -76,8 +77,25 @@ def fecho_interno(raizes) -> set[str]:
     return vistos
 
 
+#: CLIs que DAGs do Airflow chamam fora da `daily_chain`. A Expedicao TikTok
+#: saiu da cadeia (PR #87) e o fecho reconstruido dela deixaria de cobri-la.
+CLIS_DO_AIRFLOW_FORA_DA_CADEIA = {
+    "pipelines.expedicao.cli",                  # marketplace_tower_expedicao_refresh (Shopee/ML)
+    "pipelines.expedicao.tiktok_cli",           # marketplace_tower_expedicao_refresh (TikTok)
+    "pipelines.sync_shopee_daily_api_shadow",   # marketplace_tower_shopee_daily_shadow
+    "pipelines.dre.insumo_publisher",           # marketplace_tower_dre_insumo_publish
+}
+
+
 def _clis_portaveis() -> set[str]:
-    return {s.module for s in o.PIPELINES["daily_chain"] if s.name not in NAO_PORTAVEIS}
+    cadeia = {s.module for s in o.PIPELINES["daily_chain"] if s.name not in NAO_PORTAVEIS}
+    return cadeia | CLIS_DO_AIRFLOW_FORA_DA_CADEIA
+
+
+def test_clis_do_airflow_fora_da_cadeia_existem_e_nao_estao_na_cadeia():
+    for mod in CLIS_DO_AIRFLOW_FORA_DA_CADEIA:
+        assert _arquivo(mod) is not None, mod
+    assert not CLIS_DO_AIRFLOW_FORA_DA_CADEIA & {s.module for s in o.PIPELINES["daily_chain"]}
 
 
 def test_os_dois_steps_nao_portaveis_ainda_existem_na_cadeia():
