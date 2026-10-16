@@ -268,10 +268,14 @@ def test_pipelines_disponiveis_sao_exatamente_os_quatro_conhecidos():
     precos — separado de `full_daily` para poder ser diagnosticado, executado e
     DESLIGADO sem mexer na ingestao do dia.
 
-    O inventario continua FECHADO: nenhum quinto pipeline, e nenhuma task
+    OPS-AUTOMATION-2 (2026-10-16): daily_chain, full_daily + PMA em sequencia
+    sob o mesmo lock, para acabar com a disputa entre as duas tarefas.
+
+    O inventario continua FECHADO: nenhum sexto pipeline, e nenhuma task
     Shopee, de serving ou de PMA agendada por engano."""
     assert set(orch.PIPELINES) == {
         "full_daily", "shopee_manual_refresh", "serving_refresh", "pma_refresh",
+        "daily_chain",
     }
 
 

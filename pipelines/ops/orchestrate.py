@@ -549,6 +549,47 @@ PMA_REFRESH_STEP_TIMEOUT_BUDGET_SECONDS = sum(
     step.timeout_seconds for step in PIPELINES["pma_refresh"])
 
 
+# ---------------------------------------------------------------------------
+# OPS-AUTOMATION-2 — `daily_chain`: full_daily e PMA em SEQUENCIA, um processo
+#
+# O defeito medido nao era o lock compartilhado, era a DISPUTA por ele. As duas
+# tarefas (`mktplace_full_daily` 06:00 e `mktplace_pma_refresh` 07:30) usam
+# `StartWhenAvailable`; quando a estacao estava suspensa nos dois horarios, as
+# duas disparavam no MESMO segundo ao acordar e uma saia BLOCKED. Em
+# 16/10/2026 00:59:13 quem perdeu foi o full_daily: nenhum step rodou.
+#
+# O lock logico continua o mesmo (`full_daily`, em scripts/run_task.ps1) — ele
+# existe para impedir duas execucoes do PMA antes de qualquer conexao (o sync
+# de preco do ML usa `pg_advisory_xact_lock`, que ESPERA). O que muda e' que as
+# duas cargas viram UMA sequencia deterministica: o PMA comeca quando o ultimo
+# step do full_daily termina, sem horario e sem corrida.
+#
+# Composicao: os steps do full_daily na mesma ordem, SEM o health_check; os
+# tres canais do PMA (nao-criticos, com o vocabulario de exit deles); e o
+# health_check CRITICO do full_daily por ultimo, para que ele reporte as duas
+# cargas e o exit code do pipeline continue com a semantica do full_daily.
+# O health_check do PMA nao entra: seria a mesma medicao duas vezes.
+#
+# Por que o PMA DEPOIS e nao antes: as fontes do PMA nao dependem do full_daily
+# (tabelas disjuntas, medido no codigo em 16/10/2026), entao a ordem nao muda
+# dado nenhum; mas o full_daily e' o que a Torre inteira cobra no health check
+# das 11:00, e nao deve esperar o PMA.
+# ---------------------------------------------------------------------------
+
+_FULL_DAILY_HEALTH = next(s for s in PIPELINES["full_daily"] if s.name == "health_check")
+
+DAILY_CHAIN_STEPS: tuple[Step, ...] = (
+    *(s for s in PIPELINES["full_daily"] if s.name != "health_check"),
+    *(s for s in PMA_REFRESH_STEPS if s.name in PMA_CANAIS),
+    _FULL_DAILY_HEALTH,
+)
+
+PIPELINES["daily_chain"] = DAILY_CHAIN_STEPS
+
+DAILY_CHAIN_STEP_TIMEOUT_BUDGET_SECONDS = sum(
+    step.timeout_seconds for step in PIPELINES["daily_chain"])
+
+
 class DryRunUnsupportedError(RuntimeError):
     """Pedido de ensaio em pipeline/step que nao o declara. Fail-closed."""
 
@@ -813,7 +854,11 @@ def exit_code_do_pipeline(nome: str, results: dict[str, str],
     o exit code carrega e' apenas "publicou tudo" ou "nao publicou tudo".
     """
     if nome not in PIPELINES_COM_EXIT_ESTRITO:
-        return 1 if overall in ("FAILED", "BLOCKED") else 0
+        # OPS-AUTOMATION-2: `INDETERMINATE` tambem e' 1. Ate o `daily_chain`
+        # nenhum pipeline da regra geral produzia esse status (so' steps com
+        # `exit_status_map`, que so' o PMA tinha), entao nada existente muda;
+        # mas um commit indeterminado do PMA DENTRO da cadeia nao pode sair 0.
+        return 1 if overall in ("FAILED", "BLOCKED", "INDETERMINATE") else 0
 
     # Gate PMA-2C5D0 — o exit sai do EIXO DE PUBLICACAO, e so' dele. O
     # `health_check` e' diagnostico, roda sempre e fica visivel no seu proprio
@@ -877,6 +922,12 @@ def main() -> int:
         return codigo
 
     print(f"STATUS GERAL: {overall} (mode={modo})")
+    if args.pipeline == "daily_chain":
+        # Informativo: o exit da cadeia segue a semantica do full_daily. O eixo
+        # de publicacao do PMA fica visivel para que um canal recusado nao se
+        # dissolva num `DEGRADED` generico.
+        print(f"STATUS PMA (informativo, nao decide o exit): "
+              f"{pma_publication_status(results)}")
     if args.dry_run:
         # NUNCA "publicado": nada foi escrito.
         print("ENSAIO: candidatas validadas; nenhuma fotografia foi publicada.")

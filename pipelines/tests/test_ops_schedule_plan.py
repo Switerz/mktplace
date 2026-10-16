@@ -386,8 +386,10 @@ def test_22_as_taskkeys_sao_exatamente_tres():
     # PROPOSED_SCHEDULE — existe para que o diagnostico manual e a
     # primeira publicacao usem o mesmo lock/timeout/log da futura
     # execucao agendada.
+    # OPS-AUTOMATION-2 acrescentou `daily_chain` (full_daily + PMA em
+    # sequencia, mesmo lock). Tambem NAO registrada no Task Scheduler.
     assert set(defs) == {"full_daily", "shopee_manual_refresh",
-                         "serving_refresh", "pma_refresh"}
+                         "serving_refresh", "pma_refresh", "daily_chain"}
 
 
 def test_23_serving_refresh_usa_o_lock_do_full_daily():
