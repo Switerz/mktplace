@@ -2075,7 +2075,27 @@ export function fetchOperacoes(): Promise<{ data: OperacoesData | null; live: bo
 
 export type CoverageLevel = "ok" | "partial" | "low" | "not_applicable";
 
-export interface RegioesSummaryData {
+/** Cobertura regional de um canal (REGIONAL-SOURCE-RECOVERY-2). `dados_ate`
+ * e' a ultima DATA carregada — nao o instante da carga. */
+export interface CoberturaCanal {
+  channel: string;
+  marketplace_id: number;
+  status: "atualizada" | "defasada" | "sem_carga" | "sem_cobertura";
+  dados_ate: string | null;
+  esperado_ate: string;
+  motivo: "carga_defasada" | "sem_carga" | "sem_fonte_regional" | null;
+  motivo_detalhe: string | null;
+}
+
+/** Comum a todas as respostas de /regioes. `dados_completos_ate` e' ate onde
+ * o TOTAL cobre todos os canais com fonte — diferente de `refreshed_at`. */
+export interface RegioesCoberturaCampos {
+  cobertura_por_canal: CoberturaCanal[];
+  canais_defasados: string[];
+  dados_completos_ate: string | null;
+}
+
+export interface RegioesSummaryData extends RegioesCoberturaCampos {
   gmv: number;
   orders: number;
   units_sold: number;
@@ -2113,7 +2133,7 @@ export interface RegiaoUfRow {
   coverage_warning: boolean;
 }
 
-export interface RegioesByUfData {
+export interface RegioesByUfData extends RegioesCoberturaCampos {
   data: RegiaoUfRow[];
   date_from: string;
   date_to: string;
@@ -2139,7 +2159,7 @@ export interface RegiaoBrandRow {
   coverage_warning: boolean;
 }
 
-export interface RegioesByBrandData {
+export interface RegioesByBrandData extends RegioesCoberturaCampos {
   data: RegiaoBrandRow[];
   date_from: string;
   date_to: string;
@@ -2153,9 +2173,11 @@ export interface RegiaoTrendPoint {
   gmv: number;
   orders: number;
   uf_fill_pct: number | null;
+  /** Canais com fonte regional que NAO estao neste ponto (carga parou antes). */
+  canais_ausentes: string[];
 }
 
-export interface RegioesTrendData {
+export interface RegioesTrendData extends RegioesCoberturaCampos {
   granularity: "day" | "month";
   data: RegiaoTrendPoint[];
   date_from: string;
