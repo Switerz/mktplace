@@ -83,7 +83,10 @@ def ler(p, sha, comp=OUT):
 def test_matriz_valida_carrega_cinco_marcas_e_dezoito_componentes(tmp_path):
     m = ler(*matriz(tmp_path))
     assert m.competencia == OUT and m.source_period == "out/26"
-    assert m.source_note == "Orcamento_Sintetico_2026.xlsx (enviado em 2026-10-13)"
+    # Publico: so' rotulo e data. O nome do orcamento fica no campo privado.
+    assert m.source_note == "Premissas de outubro/2026"
+    assert m.source_sent_on == date(2026, 10, 13)
+    assert m.arquivo_origem_privado == "Orcamento_Sintetico_2026.xlsx"
     assert len(m.linhas) == 5 * 18
     assert {ln["brand"] for ln in m.linhas} == {"kokeshi", "apice", "barbours", "rituaria", "lescent"}
     assert m.marcas_ignoradas == ["aua", "bysamia", "denavita", "yenzah"]
@@ -94,8 +97,9 @@ def test_componentes_iguais_aos_da_migration():
     src = (REPO / "apps/api/alembic/versions/026_create_fact_dre_premissa_mensal.py").read_text(encoding="utf-8")
     mod = ast.parse(src)
     consts = {t.id: ast.literal_eval(n.value) for n in mod.body if isinstance(n, ast.Assign)
-              for t in n.targets if isinstance(t, ast.Name) and t.id in ("COMPONENTES", "MARCAS")}
+              for t in n.targets if isinstance(t, ast.Name) and t.id in ("COMPONENTES", "MARCAS", "NAO_SOMAVEIS")}
     assert consts["COMPONENTES"] == P.COMPONENTES
+    assert consts["NAO_SOMAVEIS"] == P.NAO_SOMAVEIS
     assert set(consts["MARCAS"]) == set(P.MARCAS_TORRE.values())
     for c in P.COMPONENTES:
         assert f"'{c}'" in src  # o CHECK literal tem a mesma lista
@@ -198,11 +202,14 @@ def test_sem_comentario_ou_com_mais_de_uma_aba_recusa(tmp_path):
         ler(p, sha)
 
 
-def test_outras_receitas_nunca_somavel(tmp_path):
+def test_outras_receitas_e_comissoes_nunca_somaveis(tmp_path):
     m = ler(*matriz(tmp_path))
     outras = [ln for ln in m.linhas if ln["component"] == "outras_receitas_operacionais"]
     assert len(outras) == 5 and all(not ln["somavel"] and ln["status"] == "sinal_nao_ratificado" for ln in outras)
-    assert all(ln["somavel"] for ln in m.linhas if ln["component"] != "outras_receitas_operacionais")
+    comissoes = [ln for ln in m.linhas if ln["component"] == "comissoes"]
+    assert len(comissoes) == 5 and all(not ln["somavel"] and ln["status"] == "sobreposicao_nao_ratificada"
+                                       and ln["rate"] > 0 for ln in comissoes)  # taxa mantida, so' fora da soma
+    assert all(ln["somavel"] for ln in m.linhas if ln["component"] not in P.NAO_SOMAVEIS)
 
 
 def test_coluna_b_nunca_e_lida(tmp_path):
@@ -230,6 +237,8 @@ def test_manifesto_sem_taxas_sem_caminho_sem_credencial(tmp_path):
         assert str(ln["rate"]) not in texto or ln["rate"] in (None, Decimal(0))
     assert str(tmp_path) not in texto and "\\" not in texto and "postgres" not in texto
     assert not re.search(r"0\.0\d{2,}", texto)
+    assert "Orcamento" not in texto                                   # nome do orcamento: so' no privado
+    assert P.manifesto(m, modo="dry-run", privado=True)["arquivo_origem_privado"] == "Orcamento_Sintetico_2026.xlsx"
 
 
 def test_cli_dry_run_sem_banco_nao_escreve_e_grava_manifesto(tmp_path, capsys):
@@ -242,6 +251,9 @@ def test_cli_dry_run_sem_banco_nao_escreve_e_grava_manifesto(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["modo"] == "dry-run" and out["linhas"] == 90 and out["banco"] == "nao_consultado"
     assert len(list(saida.glob("manifesto_*.json"))) == 1 and not list(saida.glob("backup_*"))
+    assert "Orcamento" not in json.dumps(out) and out["source_note"] == "Premissas de outubro/2026"
+    privado = json.loads(next(saida.glob("manifesto_*.json")).read_text(encoding="utf-8"))
+    assert privado["arquivo_origem_privado"] == "Orcamento_Sintetico_2026.xlsx"
 
 
 def test_cli_dry_run_nunca_chama_publicar(tmp_path, monkeypatch, capsys):

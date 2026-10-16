@@ -76,7 +76,8 @@ def _run(eng) -> int:
 def _insere(eng, **kw):
     linha = {"competencia": OUT, "brand": "kokeshi", "component": "icms", "rate": Decimal("0.1"),
              "somavel": True, "status": "ok", "source_period": "out/26", "source_sha256": SHA,
-             "source_note": "Orcamento.xlsx (enviado em 2026-10-13)", "loaded_at": AGORA, "run_id": _run(eng)}
+             "source_note": "Premissas de outubro/2026", "source_sent_on": date(2026, 10, 13),
+             "loaded_at": AGORA, "run_id": _run(eng)}
     linha.update(kw)
     with eng.begin() as c:
         c.execute(text(P.SQL_INSERE), linha)
@@ -106,9 +107,13 @@ def _audit(eng) -> list[dict]:
     ({"rate": None}, "ck_fdpm_ausencia_explicita"),
     ({"brand": "bysamia"}, "ck_fdpm_brand"),
     ({"component": "receita_bruta"}, "ck_fdpm_component"),
-    ({"component": "outras_receitas_operacionais"}, "ck_fdpm_sinal_nao_ratificado"),
-    ({"source_note": "C:\\Users\\alguem\\premissas.xlsx"}, "ck_fdpm_nota_sem_caminho"),
-    ({"source_note": "/home/alguem/premissas.xlsx"}, "ck_fdpm_nota_sem_caminho"),
+    ({"component": "outras_receitas_operacionais"}, "ck_fdpm_nao_somavel"),
+    ({"component": "comissoes"}, "ck_fdpm_nao_somavel"),
+    ({"component": "comissoes", "somavel": False}, "ck_fdpm_nao_somavel"),
+    ({"status": "sobreposicao_nao_ratificada"}, "ck_fdpm_nao_somavel"),
+    ({"source_note": "C:\\Users\\alguem\\premissas.xlsx"}, "ck_fdpm_nota_rotulo"),
+    ({"source_note": "/home/alguem/premissas.xlsx"}, "ck_fdpm_nota_rotulo"),
+    ({"source_note": "Orcamento_Exemplo.xlsx (enviado em 2026-10-13)"}, "ck_fdpm_nota_rotulo"),
     ({"source_sha256": "nao-e-hash"}, "ck_fdpm_sha256"),
     ({"competencia": date(2026, 10, 15)}, "ck_fdpm_competencia_dia_1"),
 ])
@@ -120,7 +125,8 @@ def test_migration_recusa_linha_fora_do_contrato(banco, kw, motivo):
 def test_migration_aceita_ausencia_explicita_e_outras_receitas_nao_somavel(banco):
     _insere(banco, rate=None, status="ausente_na_origem")
     _insere(banco, component="outras_receitas_operacionais", somavel=False, status="sinal_nao_ratificado")
-    assert len(_linhas(banco)) == 2
+    _insere(banco, component="comissoes", somavel=False, status="sobreposicao_nao_ratificada")
+    assert len(_linhas(banco)) == 3
 
 
 def test_migration_nao_tem_coluna_monetaria(banco):
@@ -128,7 +134,7 @@ def test_migration_nao_tem_coluna_monetaria(banco):
         cols = set(c.execute(text("SELECT column_name FROM information_schema.columns "
                                   "WHERE table_schema='marts' AND table_name='fact_dre_premissa_mensal'")).scalars())
     assert cols == {"competencia", "brand", "component", "rate", "somavel", "status", "source_period",
-                    "source_sha256", "source_note", "loaded_at", "run_id"}
+                    "source_sha256", "source_note", "source_sent_on", "loaded_at", "run_id"}
 
 
 # ---------------------------------------------------------------------------

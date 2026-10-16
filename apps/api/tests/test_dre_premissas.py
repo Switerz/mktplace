@@ -46,11 +46,12 @@ def prem(mes, marca, taxas=None, *, padrao=0.01, run_id=1, lote_status="success"
     out = []
     for comp in DP.COMPONENTES_PREMISSA:
         rate = taxas.get(comp, padrao)
-        outras = comp == "outras_receitas_operacionais"
+        nao_somavel = comp in DP.NAO_SOMAVEIS
         out.append({
-            "competencia": mes, "brand": marca, "component": comp, "rate": rate, "somavel": not outras,
-            "status": "ausente_na_origem" if rate is None else ("sinal_nao_ratificado" if outras else "ok"),
-            "source_period": "out/26", "source_sha256": SHA, "source_note": "Orcamento.xlsx (enviado em 2026-10-13)",
+            "competencia": mes, "brand": marca, "component": comp, "rate": rate, "somavel": not nao_somavel,
+            "status": ("ausente_na_origem" if rate is None
+                       else DP.NAO_SOMAVEIS[comp][0] if nao_somavel else "ok"),
+            "source_period": "out/26", "source_sha256": SHA, "source_sent_on": date(2026, 10, 13),
             "loaded_at": datetime(2026, 10, 16, tzinfo=timezone.utc), "run_id": run_id, "lote_status": lote_status,
         })
     return out
@@ -93,9 +94,9 @@ def test_taxa_aplicada_na_celula_base_e_estado_calculavel():
 def test_margem_estimada_e_a_receita_menos_os_itens_somaveis():
     body = montar([ml()], premissas=prem(JUL, "kokeshi", padrao=0.01), insumos=ins_ml())
     cen = body["celulas_base"][0]["cenario_premissas"]
-    # 17 itens de premissa somaveis a 1% (18 menos Outras Receitas) = 170.000; CMV 300.000;
-    # Ads 40.000; taxas 150.000.
-    esperado = 1_000_000 - 17 * 10_000 - 300_000 - 40_000 - 150_000
+    # 16 itens de premissa somaveis a 1% (18 menos Outras Receitas e Comissoes) = 160.000;
+    # CMV 300.000; Ads 40.000; taxas 150.000.
+    esperado = 1_000_000 - 16 * 10_000 - 300_000 - 40_000 - 150_000
     assert cen["margem_contribuicao_estimada"] == esperado
     assert cen["margem_contribuicao_estimada_pct"] == round(esperado / 1_000_000 * 100, 2)
     assert L(cen, "impostos_sobre_receita")["valor"] == 50_000
@@ -135,6 +136,20 @@ def test_outras_receitas_fica_fora_da_margem():
     outras = L(cb, "outras_receitas_operacionais")
     assert (outras["somavel"], outras["status"], outras["tipo"]) == (False, "sinal_nao_ratificado", "informativo")
     assert any("nao ratificado" in a for a in cb["avisos"])
+
+
+def test_comissao_diferente_de_zero_fica_visivel_e_nao_e_somada():
+    """Sobreposicao com as taxas de marketplace nao ratificada: premissa exibida, margem intocada."""
+    zero = montar([ml()], premissas=prem(JUL, "kokeshi", {"comissoes": 0.0}), insumos=ins_ml())
+    alta = montar([ml()], premissas=prem(JUL, "kokeshi", {"comissoes": 0.25}), insumos=ins_ml())
+    cz, ca = (x["celulas_base"][0]["cenario_premissas"] for x in (zero, alta))
+    assert ca["margem_contribuicao_estimada"] == cz["margem_contribuicao_estimada"]
+    com = L(ca, "comissoes")
+    assert (com["valor"], com["percentual"], com["origem"]) == (250_000.0, 0.25, "premissa")
+    assert (com["somavel"], com["status"]) == (False, "sobreposicao_nao_ratificada")
+    assert any("Comissoes fora da margem" in a for a in ca["avisos"])
+    # Agregado tambem nao soma: margem do total = soma das margens das celulas.
+    assert alta["total"]["cenario_premissas"]["margem_contribuicao_estimada"] == ca["margem_contribuicao_estimada"]
 
 
 def test_tiktok_afiliado_separado_uma_vez_so():
@@ -213,6 +228,29 @@ def test_mes_em_andamento_e_previa_e_nunca_calculavel():
     assert cen["previa"] is True and cen["estado"] == DP.PARCIAL and cen["competencia_premissas"] == "2026-10"
     assert any("previa" in m for m in cen["motivos"])
     assert cel["classificacao"] == dre.NAO_CALCULAVEL     # a DRE realizada continua imatura
+
+
+def test_outubro_em_andamento_com_receita_cmv_e_taxas_tem_margem_estimada_previa():
+    """Antes da maturidade M+2: cenario parcial/previa COM valor; a DRE realizada segue sem margem."""
+    hoje = date(2026, 10, 16)
+    body = montar([ml(mes=OUT, gmv=500_000.0) | {"dias": 16}],
+                  premissas=prem(OUT, "kokeshi", padrao=0.01),
+                  insumos=ins_ml(mes=OUT, receita=500_000.0), inicio=OUT, fim=date(2026, 10, 31), hoje=hoje)
+    cel = body["celulas_base"][0]
+    cen = cel["cenario_premissas"]
+    assert cel["componentes"]["cmv"]["valor"] == 300_000.0 and cel["componentes"]["taxas"]["valor"] == 150_000.0
+    assert (cen["estado"], cen["previa"], cen["competencia_madura"]) == (DP.PARCIAL, True, False)
+    # 500.000 - 16 x 1% x 500.000 - CMV 300.000 - Ads 40.000 - taxas 150.000
+    assert cen["margem_contribuicao_estimada"] == 500_000 - 16 * 5_000 - 300_000 - 40_000 - 150_000
+    assert cen["margem_contribuicao_estimada_pct"] is not None
+    # A DRE conhecida obedece integralmente a M+2: imatura, sem margem.
+    assert cel["classificacao"] == dre.NAO_CALCULAVEL
+    assert cel["margem_contribuicao_conhecida"]["valor"] is None
+    assert any("mes imaturo" in m for m in cel["motivos_classificacao"])
+    # A maturidade nao apaga o valor nos agregados.
+    for recorte in (body["total"], body["por_canal"][0], body["por_marca"][0]):
+        assert recorte["cenario_premissas"]["margem_contribuicao_estimada"] == cen["margem_contribuicao_estimada"]
+        assert recorte["margem_contribuicao_conhecida"]["valor"] is None
 
 
 def test_competencia_encerrada_mas_imatura_continua_parcial():
@@ -300,6 +338,12 @@ def test_rota_premissa_publicada_em_todos_os_recortes(rota):
     body = _get(tc)
     assert body["fontes"]["premissas_dre"]["estado"] == "ok"
     assert body["fontes"]["premissas_dre"]["source_sha256"] == SHA
+    assert body["fontes"]["premissas_dre"]["rotulo"] == "Premissas de julho/2026"
+    assert body["fontes"]["premissas_dre"]["data_fonte"] == "2026-10-13"
+    fonte = body["total"]["cenario_premissas"]["fonte_premissas"]
+    assert set(fonte) == {"rotulo", "competencia", "data_fonte", "source_sha256", "carregado_em"}
+    texto = json.dumps(body)
+    assert "Orcamento" not in texto and "source_note" not in texto and ".xlsx" not in texto
     assert all(c["cenario_premissas"]["natureza"] == "estimada" for c in _todas(body))
     barbours = next(c for c in body["celulas_base"] if c["marca"] == "barbours")
     brindes = next(ln for ln in barbours["cenario_premissas"]["linhas"] if ln["linha"] == "brindes")

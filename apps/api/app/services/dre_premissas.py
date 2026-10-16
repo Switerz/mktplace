@@ -57,6 +57,22 @@ FONTE_CMV = "dre_realizada"
 FONTES_CMV_PREVISTAS = ("dre_realizada", "cmp_sku")
 
 SINAL_NAO_RATIFICADO = "sinal_nao_ratificado"
+SOBREPOSICAO_NAO_RATIFICADA = "sobreposicao_nao_ratificada"
+#: Premissas armazenadas e VISIVEIS, mas fora da margem, com o motivo. Mesma
+#: lista do CHECK `ck_fdpm_nao_somavel` da migration 026.
+NAO_SOMAVEIS = {
+    "outras_receitas_operacionais": (SINAL_NAO_RATIFICADO,
+                                     "rotulo de receita, formula de deducao: fora da margem ate ratificacao"),
+    "comissoes": (SOBREPOSICAO_NAO_RATIFICADA,
+                  "pode se sobrepor as taxas reais de marketplace ja usadas: fora da margem ate ratificacao"),
+}
+MESES_NOME = {1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho", 7: "julho",
+              8: "agosto", 9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"}
+
+
+def rotulo_premissas(mes: date) -> str:
+    """Procedencia PUBLICA. Derivada da competencia; o nome do arquivo de orcamento nunca sai."""
+    return f"Premissas de {MESES_NOME[mes.month]}/{mes.year}"
 TABELA_PREMISSAS = "marts.fact_dre_premissa_mensal"
 
 #: Estrutura da DRE estimada. `grupo` diz a qual subtotal o item pertence.
@@ -137,7 +153,7 @@ def indexar_premissas(leitura: LeituraPremissas | None) -> dict[tuple[date, str]
     for r in leitura.linhas:
         k = (_mes(r["competencia"]), r["brand"])
         g = out.setdefault(k, {"componentes": {}, "runs": set(), "lotes_ok": True, "sha": set(),
-                               "nota": r.get("source_note"), "periodo": r.get("source_period"),
+                               "data_fonte": r.get("source_sent_on"), "periodo": r.get("source_period"),
                                "carregado_em": r.get("loaded_at")})
         g["componentes"][r["component"]] = r
         g["runs"].add(r.get("run_id"))
@@ -152,16 +168,16 @@ def indexar_premissas(leitura: LeituraPremissas | None) -> dict[tuple[date, str]
 def resumo_premissas(leitura: LeituraPremissas | None, meses: list[date], marcas: list[str]) -> dict:
     if leitura is None:
         return {"estado": "nao_consultado", "competencias_publicadas": [], "source_sha256": None,
-                "source_note": None, "carregado_em": None, "motivo": "premissas nao consultadas"}
+                "rotulo": None, "data_fonte": None, "carregado_em": None, "motivo": "premissas nao consultadas"}
     if not leitura.tabela_existe:
         return {"estado": "tabela_ausente", "competencias_publicadas": [], "source_sha256": None,
-                "source_note": None, "carregado_em": None,
+                "rotulo": None, "data_fonte": None, "carregado_em": None,
                 "motivo": f"{TABELA_PREMISSAS} nao existe (migration 026 nao aplicada)"}
     idx = indexar_premissas(leitura)
     pub = sorted({m for m, b in idx if b in marcas and m in meses})
     if not pub:
         return {"estado": "nao_publicado", "competencias_publicadas": [], "source_sha256": None,
-                "source_note": None, "carregado_em": None,
+                "rotulo": None, "data_fonte": None, "carregado_em": None,
                 "motivo": "nenhuma competencia do periodo tem premissa publicada"}
     grupos = [g for (m, b), g in idx.items() if m in pub and b in marcas]
     shas = sorted({s for g in grupos for s in g["sha"] if s})
@@ -170,7 +186,9 @@ def resumo_premissas(leitura: LeituraPremissas | None, meses: list[date], marcas
         estado = "lote_invalido"
     return {"estado": estado, "competencias_publicadas": [m.isoformat()[:7] for m in pub],
             "source_sha256": shas[0] if len(shas) == 1 else None,
-            "source_note": grupos[0]["nota"], "carregado_em": max(g["carregado_em"] for g in grupos),
+            "rotulo": ", ".join(rotulo_premissas(m) for m in pub),
+            "data_fonte": max((g["data_fonte"] for g in grupos if g["data_fonte"]), default=None),
+            "carregado_em": max(g["carregado_em"] for g in grupos),
             "motivo": None if estado == "ok" else (
                 "lote de premissas nao concluido ou misto" if estado == "lote_invalido"
                 else "ha competencia do periodo sem premissa publicada (premissa nunca e' estendida)")}
@@ -247,15 +265,16 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
             linhas[nome] = _linha(e, status="ausente_na_origem",
                                   motivo="premissa ausente na matriz (ausencia nao e' zero)",
                                   somavel=False if e["tipo"] == "informativo" else None)
-            if e["tipo"] == "item":
+            if e["tipo"] == "item" and nome not in NAO_SOMAVEIS:
                 ausentes.append({"linha": nome, "motivo": "premissa ausente"})
                 motivos_parcial.append(f"premissa ausente: {nome}")
             continue
         valor = None if receita is None else _r2(float(Decimal(str(receita)) * rate))
-        if nome == "outras_receitas_operacionais":
+        if nome in NAO_SOMAVEIS:
+            status, motivo = NAO_SOMAVEIS[nome]
+            # Visivel como premissa, com taxa e valor; NUNCA subtraida da margem.
             linhas[nome] = _linha(e, valor=valor, origem=ORIGEM_PREMISSA, percentual=float(rate),
-                                  status=SINAL_NAO_RATIFICADO, somavel=False,
-                                  motivo="rotulo de receita, formula de deducao: fora da margem ate ratificacao")
+                                  status=status, somavel=False, motivo=motivo)
             continue
         linhas[nome] = _linha(e, valor=valor, origem=ORIGEM_PREMISSA, percentual=float(rate), status="ok")
 
@@ -346,6 +365,8 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
     for ln in linhas.values():
         ln["pct_receita"] = _pct(ln["valor"], receita)
     margem = linhas["margem_contribuicao_estimada"]["valor"]
+    if linhas["comissoes"]["status"] == SOBREPOSICAO_NAO_RATIFICADA:
+        avisos.append("Comissoes fora da margem: sobreposicao com as taxas de marketplace nao ratificada.")
     if linhas["outras_receitas_operacionais"]["status"] == SINAL_NAO_RATIFICADO:
         avisos.append("Outras Receitas Operacionais fora da margem: sinal (receita x deducao) nao ratificado.")
     avisos.append("Logistica - Fretes vem da matriz; o frete realizado aparece so' como comparacao.")
@@ -364,8 +385,9 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
         "avisos": avisos,
         "margem_contribuicao_estimada": margem,
         "margem_contribuicao_estimada_pct": _pct(margem, receita),
-        "fonte_premissas": {"source_sha256": next(iter(premissa["sha"]), None),
-                            "source_note": premissa["nota"], "source_period": premissa["periodo"],
+        "fonte_premissas": {"rotulo": rotulo_premissas(mes), "competencia": mes.isoformat()[:7],
+                            "data_fonte": premissa["data_fonte"],
+                            "source_sha256": next(iter(premissa["sha"]), None),
                             "carregado_em": premissa["carregado_em"]},
         "celulas": 1,
     }

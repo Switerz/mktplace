@@ -112,9 +112,13 @@ class ComponenteAusenteCenario(BaseModel):
 
 
 class FontePremissas(BaseModel):
+    """Procedencia PUBLICA: rotulo, competencia, data da fonte e hash. Nunca o
+    nome do arquivo de orcamento nem um caminho local."""
+    #: Ex.: "Premissas de outubro/2026" (derivado da competencia).
+    rotulo: str
+    competencia: str
+    data_fonte: date | None = None
     source_sha256: str | None = None
-    source_note: str | None = None
-    source_period: str | None = None
     carregado_em: datetime | None = None
 
 
@@ -180,7 +184,8 @@ class ResumoPremissas(BaseModel):
     estado: Literal["ok", "parcial", "tabela_ausente", "nao_publicado", "lote_invalido", "nao_consultado"]
     competencias_publicadas: list[str]
     source_sha256: str | None = None
-    source_note: str | None = None
+    rotulo: str | None = None
+    data_fonte: date | None = None
     carregado_em: datetime | None = None
     motivo: str | None = None
 

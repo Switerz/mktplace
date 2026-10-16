@@ -93,8 +93,21 @@ LINHAS_PREMISSA = {
     "logistica - operador": "logistica_operador",
 }
 COMPONENTES = tuple(LINHAS_PREMISSA.values())
-#: Sinal (receita x deducao) nao ratificado: armazenado, nunca somavel.
-SINAL_NAO_RATIFICADO = frozenset({"outras_receitas_operacionais"})
+#: Armazenados e visiveis, mas FORA da soma, com o status que explica por que.
+#: Igual a `NAO_SOMAVEIS` da migration 026 (CHECK `ck_fdpm_nao_somavel`).
+#:   * outras receitas: rotulo de receita, formula de deducao (sinal nao ratificado);
+#:   * comissoes: pode se sobrepor as taxas reais de marketplace (nao ratificado).
+NAO_SOMAVEIS = {
+    "outras_receitas_operacionais": "sinal_nao_ratificado",
+    "comissoes": "sobreposicao_nao_ratificada",
+}
+MESES_NOME = {1: "janeiro", 2: "fevereiro", 3: "marco", 4: "abril", 5: "maio", 6: "junho", 7: "julho",
+              8: "agosto", 9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"}
+
+
+def rotulo_publico(competencia: date) -> str:
+    """Unica procedencia textual que sai do arquivo: nunca o nome do orcamento."""
+    return f"Premissas de {MESES_NOME[competencia.month]}/{competencia.year}"
 
 #: Comentario de C1: `Fonte: <arquivo>, enviado em <AAAA-MM-DD>. ... coluna <mmm>/<aa>.`
 RE_FONTE = re.compile(r"Fonte:\s*([^,\s][^,]*?\.xlsx)", re.IGNORECASE)
@@ -153,12 +166,16 @@ class Matriz:
     competencia: date
     sha256: str
     source_period: str          # ex.: "out/26"
-    source_note: str            # arquivo de origem + data de envio, sem caminho
+    source_note: str            # rotulo publico: "Premissas de outubro/2026"
+    source_sent_on: date        # data de envio declarada no comentario de C1
+    #: Nome do arquivo de orcamento declarado em C1. SO' no manifesto privado:
+    #: nunca vai para o banco, a API ou o stdout.
+    arquivo_origem_privado: str = ""
     linhas: list[dict] = field(default_factory=list)   # competencia, brand, component, rate, somavel, status
     marcas_ignoradas: list[str] = field(default_factory=list)
 
 
-def _competencia_do_comentario(texto: str) -> tuple[date, str, str]:
+def _competencia_do_comentario(texto: str) -> tuple[date, str, date, str]:
     col = RE_COLUNA.search(texto)
     fonte = RE_FONTE.search(texto)
     envio = RE_ENVIO.search(texto)
@@ -166,7 +183,7 @@ def _competencia_do_comentario(texto: str) -> tuple[date, str, str]:
         raise MatrizRecusada("comentario de C1 nao declara fonte, data de envio e coluna mmm/aa")
     comp = date(2000 + int(col.group(2)), MESES[col.group(1).lower()], 1)
     nome = fonte.group(1).replace("\\", "/").rsplit("/", 1)[-1].strip()
-    return comp, f"{col.group(1).lower()}/{col.group(2)}", f"{nome} (enviado em {envio.group(1)})"
+    return comp, f"{col.group(1).lower()}/{col.group(2)}", date.fromisoformat(envio.group(1)), nome
 
 
 def _taxa(v: Any, onde: str) -> Optional[Decimal]:
@@ -202,7 +219,7 @@ def ler_matriz(path: Path, *, competencia: date, expected_sha256: str,
         comentario = ws["C1"].comment
         if comentario is None:
             raise MatrizRecusada("C1 sem comentario de fonte e competencia")
-        comp, periodo, nota = _competencia_do_comentario(comentario.text)
+        comp, periodo, enviado_em, arquivo_origem = _competencia_do_comentario(comentario.text)
         if comp != competencia:
             raise MatrizRecusada(
                 f"a matriz declara a competencia {comp:%Y-%m}; pedida {competencia:%Y-%m}")
@@ -245,11 +262,9 @@ def ler_matriz(path: Path, *, competencia: date, expected_sha256: str,
                     raise MatrizRecusada(f"{comp_nome}/{ws.cell(1, col).value}: formula numa celula consumida")
             for col, brand in colunas.items():
                 taxa = _taxa(ws.cell(r, col).value, f"{comp_nome}/{brand}")
-                nao_ratificado = comp_nome in SINAL_NAO_RATIFICADO
-                status = ("ausente_na_origem" if taxa is None
-                          else "sinal_nao_ratificado" if nao_ratificado else "ok")
+                status = ("ausente_na_origem" if taxa is None else NAO_SOMAVEIS.get(comp_nome, "ok"))
                 linhas.append({"competencia": comp, "brand": brand, "component": comp_nome, "rate": taxa,
-                               "somavel": not nao_ratificado, "status": status})
+                               "somavel": comp_nome not in NAO_SOMAVEIS, "status": status})
         ausentes = [c for c in COMPONENTES if c not in vistas]
         if ausentes:
             raise MatrizRecusada(f"linha(s) de premissa ausente(s): {', '.join(ausentes)}")
@@ -260,7 +275,8 @@ def ler_matriz(path: Path, *, competencia: date, expected_sha256: str,
     if sha256_arquivo(path) != antes:
         raise ArquivoAlterado("a matriz mudou durante a leitura")
     linhas.sort(key=lambda x: (x["brand"], COMPONENTES.index(x["component"])))
-    return Matriz(competencia=comp, sha256=antes, source_period=periodo, source_note=nota,
+    return Matriz(competencia=comp, sha256=antes, source_period=periodo, source_note=rotulo_publico(comp),
+                  source_sent_on=enviado_em, arquivo_origem_privado=arquivo_origem,
                   linhas=linhas, marcas_ignoradas=sorted(ignoradas))
 
 
@@ -268,7 +284,9 @@ def ler_matriz(path: Path, *, competencia: date, expected_sha256: str,
 # Manifesto — sem taxas, sem caminho, sem credencial
 # ---------------------------------------------------------------------------
 
-def manifesto(m: Matriz, *, modo: str, extra: Optional[dict] = None) -> dict:
+def manifesto(m: Matriz, *, modo: str, extra: Optional[dict] = None, privado: bool = False) -> dict:
+    """Sem taxas, caminho ou credencial. `privado=True` acrescenta o nome do
+    arquivo de orcamento — so' para o arquivo de manifesto fora do Git."""
     por_status: dict[str, int] = {}
     for ln in m.linhas:
         por_status[ln["status"]] = por_status.get(ln["status"], 0) + 1
@@ -276,6 +294,8 @@ def manifesto(m: Matriz, *, modo: str, extra: Optional[dict] = None) -> dict:
         "gate": "DRE-PREMISSAS-1", "modo": modo,
         "competencia": m.competencia.isoformat()[:7], "source_period": m.source_period,
         "source_sha256": m.sha256, "source_note": m.source_note,
+        "source_sent_on": m.source_sent_on.isoformat(),
+        **({"arquivo_origem_privado": m.arquivo_origem_privado} if privado else {}),
         "marcas_carregadas": sorted({ln["brand"] for ln in m.linhas}),
         "marcas_ignoradas": m.marcas_ignoradas,
         "componentes": list(COMPONENTES), "linhas": len(m.linhas),
@@ -294,7 +314,7 @@ SQL_TABELA_EXISTE = f"SELECT to_regclass('{TABELA}') IS NOT NULL"
 SQL_LOCK = f"SELECT pg_try_advisory_xact_lock({LOCK_KEY})"
 SQL_ESCOPO = f"""
     SELECT competencia, brand, component, rate, somavel, status, source_period, source_sha256,
-           source_note, loaded_at, run_id
+           source_note, source_sent_on, loaded_at, run_id
     FROM {TABELA} WHERE competencia = :competencia AND brand = ANY(:marcas)
     ORDER BY brand, component
 """
@@ -304,9 +324,9 @@ SQL_FORA_DO_ESCOPO = f"""
 SQL_APAGA_ESCOPO = f"DELETE FROM {TABELA} WHERE competencia = :competencia AND brand = ANY(:marcas)"
 SQL_INSERE = f"""
     INSERT INTO {TABELA} (competencia, brand, component, rate, somavel, status, source_period,
-        source_sha256, source_note, loaded_at, run_id)
+        source_sha256, source_note, source_sent_on, loaded_at, run_id)
     VALUES (:competencia, :brand, :component, :rate, :somavel, :status, :source_period,
-        :source_sha256, :source_note, :loaded_at, :run_id)
+        :source_sha256, :source_note, :source_sent_on, :loaded_at, :run_id)
 """
 SQL_AUDIT_ABRE = """
     INSERT INTO audit.source_sync_run (source_name, status, started_at, source_min_date, source_max_date)
@@ -409,6 +429,7 @@ def publicar(engine, m: Matriz, *, pasta_privada: Path, agora: Optional[datetime
             for ln in m.linhas:
                 conn.execute(text(SQL_INSERE), {**ln, "source_period": m.source_period,
                                                 "source_sha256": m.sha256, "source_note": m.source_note,
+                                                "source_sent_on": m.source_sent_on,
                                                 "loaded_at": agora, "run_id": run_id})
             fora_depois = conn.execute(text(SQL_FORA_DO_ESCOPO), p).scalar_one()
             if fora_depois != fora_antes:
@@ -517,11 +538,14 @@ def main(argv: Optional[list[str]] = None, *, engine_factory: Optional[Callable]
             raise
         extra["erro"], codigo = sanitizar(exc), EXIT_BANCO
 
-    man = manifesto(m, modo="apply" if args.apply else "dry-run", extra={**extra, "codigo_saida": codigo})
+    modo = "apply" if args.apply else "dry-run"
+    extra = {**extra, "codigo_saida": codigo}
     args.manifesto_dir.mkdir(parents=True, exist_ok=True)
+    # O nome do arquivo de orcamento so' existe no manifesto PRIVADO, nunca no stdout.
     (args.manifesto_dir / f"manifesto_premissas_{m.competencia:%Y-%m}_{agora:%Y%m%dT%H%M%S}Z.json").write_text(
-        json.dumps(man, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    print(json.dumps(man, ensure_ascii=False, indent=1, default=str))
+        json.dumps(manifesto(m, modo=modo, extra=extra, privado=True), ensure_ascii=False, indent=1, default=str),
+        encoding="utf-8")
+    print(json.dumps(manifesto(m, modo=modo, extra=extra), ensure_ascii=False, indent=1, default=str))
     return codigo
 
 

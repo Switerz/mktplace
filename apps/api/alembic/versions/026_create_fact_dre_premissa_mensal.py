@@ -27,6 +27,18 @@ trata como deducao. Ate ratificacao, ela e' armazenada com `somavel = false` e
 `status = 'sinal_nao_ratificado'` — por CHECK, nenhum publisher consegue
 grava-la como somavel.
 
+SOBREPOSICAO NAO RATIFICADA
+---------------------------
+"Comissoes" pode se sobrepor as taxas reais de marketplace, que a DRE ja usa.
+Ate ratificacao, a taxa fica armazenada e visivel, mas com `somavel = false` e
+`status = 'sobreposicao_nao_ratificada'`, tambem travado por CHECK.
+
+PRIVACIDADE DA PROCEDENCIA
+--------------------------
+`source_note` e' so' um rotulo no formato `Premissas de <mes>/<aaaa>`; o nome do
+arquivo de orcamento nunca e' gravado (fica no manifesto privado do publisher).
+A data da fonte vai em `source_sent_on`.
+
 COMPETENCIA
 -----------
 A premissa vale SO' para a competencia gravada. O serving nao a aplica
@@ -79,7 +91,13 @@ COMPONENTES = (
     "logistica_operador",
 )
 
-STATUS = ("ok", "ausente_na_origem", "sinal_nao_ratificado")
+STATUS = ("ok", "ausente_na_origem", "sinal_nao_ratificado", "sobreposicao_nao_ratificada")
+
+#: Componentes armazenados mas FORA da soma, com o status que explica por que.
+NAO_SOMAVEIS = {
+    "outras_receitas_operacionais": "sinal_nao_ratificado",
+    "comissoes": "sobreposicao_nao_ratificada",
+}
 
 UPGRADE_SQL = [
     f"""
@@ -93,6 +111,7 @@ UPGRADE_SQL = [
         source_period   TEXT         NOT NULL,
         source_sha256   TEXT         NOT NULL,
         source_note     TEXT         NOT NULL,
+        source_sent_on  DATE         NOT NULL,
         loaded_at       TIMESTAMPTZ  NOT NULL,
         run_id          INT          NOT NULL
                         REFERENCES audit.source_sync_run (sync_run_id),
@@ -105,18 +124,25 @@ UPGRADE_SQL = [
             'outras_receitas_operacionais', 'frete_primario', 'bonificacoes', 'embalagens',
             'provisao_perda_estoque', 'publicidade_propaganda', 'comissoes', 'agencia_growth',
             'despesas_gateway', 'brindes', 'logistica_fretes', 'logistica_operador')),
-        CONSTRAINT ck_fdpm_status CHECK (status IN ('ok', 'ausente_na_origem', 'sinal_nao_ratificado')),
+        CONSTRAINT ck_fdpm_status CHECK (status IN (
+            'ok', 'ausente_na_origem', 'sinal_nao_ratificado', 'sobreposicao_nao_ratificada')),
         CONSTRAINT ck_fdpm_rate_faixa
             CHECK (rate IS NULL OR (rate <> 'NaN' AND rate >= 0 AND rate <= 1)),
         CONSTRAINT ck_fdpm_ausencia_explicita
             CHECK ((rate IS NULL) = (status = 'ausente_na_origem')),
-        CONSTRAINT ck_fdpm_sinal_nao_ratificado CHECK (
-            (component = 'outras_receitas_operacionais') = (NOT somavel)
-            AND (component <> 'outras_receitas_operacionais' OR status <> 'ok')),
+        CONSTRAINT ck_fdpm_nao_somavel CHECK (
+            (component IN ('outras_receitas_operacionais', 'comissoes')) = (NOT somavel)
+            AND (component <> 'outras_receitas_operacionais'
+                 OR status IN ('sinal_nao_ratificado', 'ausente_na_origem'))
+            AND (component <> 'comissoes'
+                 OR status IN ('sobreposicao_nao_ratificada', 'ausente_na_origem'))
+            AND (status <> 'sinal_nao_ratificado' OR component = 'outras_receitas_operacionais')
+            AND (status <> 'sobreposicao_nao_ratificada' OR component = 'comissoes')),
         CONSTRAINT ck_fdpm_sha256 CHECK (source_sha256 ~ '^[0-9a-f]{{64}}$'),
         CONSTRAINT ck_fdpm_periodo_nao_vazio CHECK (length(btrim(source_period)) > 0),
-        CONSTRAINT ck_fdpm_nota_sem_caminho
-            CHECK (length(btrim(source_note)) > 0 AND source_note !~ '[\\\\/]' AND source_note !~ '^[A-Za-z]:')
+        CONSTRAINT ck_fdpm_nota_rotulo CHECK (source_note ~ (
+            '^Premissas de (janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|'
+            'novembro|dezembro)/[0-9]{{4}}$'))
     )
     """,
     f"CREATE INDEX ix_fdpm_run ON {TABELA} (run_id)",
@@ -134,11 +160,16 @@ UPGRADE_SQL = [
     """,
     f"""
     COMMENT ON COLUMN {TABELA}.somavel IS
-    'false so para outras_receitas_operacionais: sinal (receita x deducao) nao ratificado; fora da margem.'
+    'false para outras_receitas_operacionais (sinal nao ratificado) e comissoes (sobreposicao com as '
+    'taxas de marketplace nao ratificada): armazenadas e visiveis, fora da margem.'
     """,
     f"""
     COMMENT ON COLUMN {TABELA}.source_note IS
-    'Nome do arquivo de origem e data de envio declarados na matriz. Nunca um caminho local.'
+    'Rotulo publico "Premissas de <mes>/<aaaa>". Nunca o nome do arquivo de orcamento nem um caminho.'
+    """,
+    f"""
+    COMMENT ON COLUMN {TABELA}.source_sent_on IS
+    'Data de envio da fonte declarada na matriz.'
     """,
 ]
 

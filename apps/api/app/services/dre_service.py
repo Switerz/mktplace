@@ -832,7 +832,7 @@ SQL_PREMISSAS_EXISTE = f"SELECT to_regclass('{dre_premissas.TABELA_PREMISSAS}') 
 #: So' a competencia exata do periodo: a premissa nunca e' estendida a outro mes.
 SQL_PREMISSAS = f"""
     SELECT p.competencia, p.brand, p.component, p.rate, p.somavel, p.status, p.source_period,
-           p.source_sha256, p.source_note, p.loaded_at, p.run_id, a.status AS lote_status
+           p.source_sha256, p.source_sent_on, p.loaded_at, p.run_id, a.status AS lote_status
     FROM {dre_premissas.TABELA_PREMISSAS} p
     LEFT JOIN audit.source_sync_run a ON a.sync_run_id = p.run_id
     WHERE p.competencia BETWEEN :inicio AND :fim
