@@ -1,4 +1,4 @@
-# DRE-CMV-CMP-1/2 — CMV provisório por CMP e kits (outubro/2026)
+# DRE-CMV-CMP-1/2/3 — CMV provisório por CMP, kits e de-para de componentes (outubro/2026)
 
 Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de outubro sobe de 14,7% (sem kit)
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
@@ -7,6 +7,10 @@ cenário estimado.
 A migration 027 e o publicador estão no PR, mas não foram aplicados nem executados. Nada foi escrito no Neon e
 não houve deploy. Este documento traz só percentuais e contagens; valores, SKUs, listas de kits e o de-para ficam
 no relatório privado (`.local/dre_cmv_cmp/`).
+
+DRE-CMV-CMP-3 (seção 11) transformou o bloqueio dos componentes numa planilha privada de de-para para o negócio
+decidir. Nenhuma sugestão foi aplicada ao pipeline. Mesmo aprovando tudo o que tem candidato, **nenhuma célula
+chega a 100%**.
 
 ## 1. O que é
 
@@ -40,6 +44,9 @@ não existe. **Nunca substitui o CMV fiscal**:
   para as mesmas 4 marcas, sem Kokeshi.
 
 ## 3. Regras de CMP (as decididas, sem exceção)
+
+Regras confirmadas pelo negócio em 16/10/2026: filial SP = `0301`, empresa MAGA SP (não MG1), só CMP unitário
+por SKU e bonificações fora do CMP (entram na DRE como premissa % da receita).
 
 Usa o índice de CMP e o resolvedor do DRE-CMP-SKU-1/2: filial SP/0301, MAGA SP, vigência entidade ×
 competência (carry-forward só para frente, nunca retroativo), escopo marca → entidade, conflito sem escolha,
@@ -193,18 +200,97 @@ python -m pipelines.dre.cmv_cmp_provisorio --pasta dre --competencia 2026-10 --a
   na fonte; **contraprova de que o provisório não substitui o fiscal**; cobertura agregada pela soma; rota com a
   027 ausente; lote não concluído ignorado.
 
-## 11. Decisões externas para destravar
+## 11. De-para dos componentes para decisão do negócio (DRE-CMV-CMP-3)
 
-1. **De-para de componentes de kit → código com CMP** (cerca de 46 códigos para ~90%; a lista está no relatório
-   privado). Alternativa: aprovar os pares fiscais do Data Mart como de-para versionado.
+Artefato **privado**, fora do repositório: uma planilha com uma linha por componente bloqueado. Cada linha traz:
+- marca, código no Bling, descrição, quantidades nos kits, kits afetados e participação na receita bloqueada;
+- candidato, entidade, GTIN e volume dos dois lados, evidência e origem;
+- colunas vazias para a decisão do negócio.
+
+Esta seção traz só contagens e percentuais.
+
+**Como os candidatos são gerados.** Só por chave exata, nunca por semelhança de nome:
+- cadastro: `sku` ↔ `sku_antigo` no cadastro oficial;
+- GTIN válido igual dos dois lados;
+- par código emitido × canônico das notas fiscais: aparece como **SUGESTÃO — NÃO APLICADA**.
+
+O candidato só conta se estiver no escopo marca → entidade, na filial SP e com CMP vigente em outubro.
+
+**Categorias:**
+- *praticamente inequívoco* = fonte oficial (cadastro ou GTIN) com GTIN concordante, volume sem divergência e
+  um único CMP;
+- *precisa só de confirmação* = um único CMP e nenhuma divergência, mas sem a segunda evidência;
+- *ambíguo* = candidatos com CMP diferente, CMP conflitante ou GTIN/volume divergente;
+- *sem candidato*;
+- *bloqueado* = KS03041/KS03042, mantidos até a origem ser confirmada.
+
+A receita de kits bloqueada em outubro é 42,7% da receita da fonte, em 131 componentes distintos.
+
+| categoria | componentes | % da receita de kit bloqueada |
+|---|---:|---:|
+| praticamente inequívoco | 7 | 0,1% |
+| precisa só de confirmação | 55 | 38,4% |
+| ambíguo | 20 | 13,8% |
+| sem candidato | 47 | 30,1% |
+| bloqueado (KS a confirmar) | 2 | 17,5% |
+
+Origem das 62 propostas (inequívoco + confirmação):
+
+| origem | propostas |
+|---|---:|
+| cadastro + NF concordam | 37 |
+| só NF | 18 |
+| só GTIN | 6 |
+| GTIN + NF | 1 |
+
+Os ambíguos são, sobretudo, GTIN repetido em mais de um código da mesma entidade com CMP diferente.
+
+**Conjunto mínimo para ~90%.** São 33 componentes no recorte global; o CMP-2 dava 46, porque fazia o corte de
+90% dentro de cada marca. Por categoria, são 13 de confirmação, 4 ambíguos, 14 sem candidato e os 2 KS.
+
+**Simulação (sem escrita).** A aprovação de um componente cobre os kits em que ele é o último que falta e as
+vendas avulsas do mesmo código:
+
+| célula | atual | só alta | alta + média | teto (conjunto mínimo inteiro) |
+|---|---:|---:|---:|---:|
+| TikTok · apice | 37,9% | 37,9% | 39,1% | 80,3% |
+| TikTok · barbours | 64,5% | 64,5% | 64,5% | 97,2% |
+| TikTok · kokeshi | 63,2% | 63,2% | 63,2% | 93,6% |
+| TikTok · lescent | 7,2% | 7,2% | 95,0% | 78,3% |
+| TikTok · rituaria | 0,1% | 0,3% | 71,9% | 91,1% |
+| ML · barbours | 80,0% | 80,0% | 80,0% | 97,2% |
+| ML · kokeshi | 60,1% | 60,1% | 60,1% | 91,9% |
+| ML · lescent | 3,1% | 3,1% | 89,9% | 66,1% |
+| ML · rituaria | 0,1% | 0,6% | 59,8% | 86,1% |
+| Shopee · apice | 35,6% | 35,7% | 39,9% | 73,3% |
+| Shopee · barbours | 77,4% | 77,4% | 77,4% | 95,1% |
+| Shopee · lescent | 5,5% | 5,5% | 90,2% | 57,3% |
+| Shopee · rituaria | 1,6% | 2,0% | 50,1% | 84,7% |
+| **total** | **47,3%** | **47,4%** | **64,2%** | **88,8%** |
+
+O teto supõe que o negócio resolva todo o conjunto mínimo, inclusive ambíguos, componentes sem candidato e os KS.
+Os cenários não se somam: o teto não inclui as propostas de cauda longa fora do conjunto mínimo.
+
+**Nenhuma célula chega a 100% em nenhum cenário**, e por isso nenhuma margem agregada foi calculada.
+
+A célula mais próxima é a Lescent. Com alta + média aprovadas, faltam 5,0% no TikTok, 9,8% na Shopee e 10,1% no
+ML. Esse resíduo são cerca de 10 códigos: componentes sem candidato e SKUs avulsos ausentes do CMV-LCV. A
+planilha lista esses códigos numa aba própria.
+
+## 12. Decisões externas para destravar
+
+1. **Preencher a planilha de de-para** (seção 11): aprovar ou rejeitar as 62 propostas e informar o código ou CMP
+   dos 47 componentes sem candidato e dos 20 ambíguos. O que for aprovado entra como de-para versionado; nenhuma
+   sugestão é aplicada sem essa decisão.
 2. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo
    de 100%. Hoje ela não existe, e a margem fica ausente.
 3. Confirmação de KS03041/KS03042 e do de-para temporal dos conflitos (pendências do DRE-CMP-SKU-2).
 4. Origem da tabela diária da Shopee (confirmar que é 100% API).
 
-## 12. Próximo gate de publicação
+## 13. Próximo gate de publicação
 
-Só depois que o item 1 (ou o 2) levar alguma célula a 100%:
+Só depois que o item 1 (ou o 2) levar alguma célula a 100%. O caminho mais curto é a Lescent: as propostas de
+confirmação da marca mais os cerca de 10 códigos da aba "Lescent - rota a 100%" fecham as 3 células.
 
 1. merge do PR;
 2. `alembic upgrade 027`;

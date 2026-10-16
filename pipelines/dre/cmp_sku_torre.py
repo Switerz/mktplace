@@ -100,12 +100,12 @@ ATRIBUICAO_CANAL = {
 #: Custos variaveis e o grao em que existem hoje. Nenhum chega ao SKU.
 CUSTOS_AUSENTES_POR_SKU = {
     "tiktokshop": ["comissao/tarifa (so' dia x marca)", "afiliados (so' mes x marca)", "frete (so' statement)",
-                   "ads (inexistente no mart)", "impostos (sem premissa)", "bonificacao (premissa % pendente)"],
+                   "ads (inexistente no mart)", "impostos (sem premissa)", "bonificacao (premissa % da receita na DRE, fora do CMP)"],
     "mercadolivre": ["comissao (item de pedido em api.ml_order_line_items, fora do mart)", "frete (dia x marca)",
                      "ads (dia x marca)", "afiliados (sem fonte)", "impostos (sem premissa)",
-                     "bonificacao (premissa % pendente)"],
+                     "bonificacao (premissa % da receita na DRE, fora do CMP)"],
     "shopee": ["comissao/tarifa (so' dia x marca)", "frete (dia x marca)", "ads (dia x marca)",
-               "afiliados (sem fonte)", "impostos (sem premissa)", "bonificacao (premissa % pendente)"],
+               "afiliados (sem fonte)", "impostos (sem premissa)", "bonificacao (premissa % da receita na DRE, fora do CMP)"],
 }
 
 SQL_VENDAS = """

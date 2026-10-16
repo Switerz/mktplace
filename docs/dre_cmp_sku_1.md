@@ -10,13 +10,15 @@ Nada foi escrito em banco, API ou frontend. Não há migration nem modo de escri
 
 ## 1. Decisões aplicadas (não rediscutidas)
 
-Fontes (DRE-CMP-SKU-1):
+Fontes (DRE-CMP-SKU-1). **Confirmadas pelo negócio em 16/10/2026**, deixaram de ser assunção:
 
-- regra de custo: **CMP**; nenhuma outra coluna o substitui (CMM, SB2, D2, custo de compra);
-- comparativos AP, BB, Kokeshi e MAGA: `Filial = SP`. Na MAGA vale **SP**, nunca MG1/MG2/RJ;
-- `CMV-LCV`: `0301` é SP; `0302` é ignorada;
+- regra de custo: **CMP unitário por SKU**; nenhuma outra coluna o substitui (CMM, SB2, D2, custo de compra);
+- filial de SP = **`0301`**. Nos comparativos AP, BB, Kokeshi e MAGA vale `Filial = SP`; no `CMV-LCV`, `0301`
+  (a `0302` é ignorada);
+- na MAGA vale a empresa **MAGA SP**, nunca MG1 (nem MG2/RJ);
 - só custo unitário por SKU: receita, canal, `MKP`, CMV realizado e bonificações não são lidos;
-- bonificação entrará depois como premissa percentual sobre a receita.
+- **bonificações ficam fora do CMP**: entram na DRE separadamente, como premissa percentual da receita
+  (linha `bonificacoes` das premissas, DRE-PREMISSAS-1).
 
 Shadow (DRE-CMP-SKU-2):
 
@@ -315,7 +317,7 @@ contribuição nem margem líquida: nenhum custo variável está atribuído por 
 | afiliados | só mês × marca | sem fonte | sem fonte |
 | ads | inexistente no mart | dia × marca | dia × marca |
 | impostos | sem premissa | sem premissa | sem premissa |
-| bonificação | premissa % pendente | premissa % pendente | premissa % pendente |
+| bonificação | premissa % da receita na DRE (fora do CMP) | premissa % da receita na DRE (fora do CMP) | premissa % da receita na DRE (fora do CMP) |
 
 O shadow usa a alternativa 3 e é apresentado por nível: confirmado por GTIN, código + volume, provisório e o
 total aceito. Conflitos, ambiguidades, ausências e `KS` ficam fora do valor e visíveis na cobertura. Os
@@ -329,7 +331,7 @@ valores só existem no relatório local.
 4. 21,7% da receita de jan–set sem CMP, mais 2,5% de `KS` a confirmar;
 5. 20,7% da receita de jan–set depende só do código (provisório);
 6. ago–set dependem inteiramente do carry-forward: faltam as planilhas desses meses;
-7. bonificação e impostos sem premissa aprovada.
+7. impostos sem premissa aprovada; bonificação entra só como premissa % da receita na DRE, nunca por SKU.
 
 ## 10. Decisões externas ainda necessárias
 
