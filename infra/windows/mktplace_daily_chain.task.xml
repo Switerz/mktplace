@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OPS-AUTOMATION-2 - TEMPLATE da tarefa unica `mktplace_daily_chain`.
+  NAO INSTALADO. Instalar e' acao administrativa separada (ver
+  docs/ops_automation_2.md, secao "Instalacao"), e exige DESABILITAR antes as
+  tarefas `mktplace_full_daily` e `mktplace_pma_refresh`.
+
+  Cada configuracao responde a uma falha medida entre 13 e 16/10/2026:
+  - LogonType S4U: roda "com ou sem usuario conectado". Nao abre janela (a
+    tarefa Interactive abria uma; fecha-la matava o processo com 0xC000013A e
+    deixava log de 0 byte) e roda depois de um reinicio sem login (03:44 de
+    16/10). S4U nao guarda senha e nao tem credencial de REDE do Windows
+    (SMB/compartilhamento); conexoes TCP ao Postgres nao precisam dela.
+  - WakeToRun: a estacao ficou suspensa de 13/10 21:19 a 16/10 00:53 e as
+    duas tarefas perderam 14 e 15/10 (NumberOfMissedRuns=2).
+  - StartWhenAvailable: execucao perdida roda ao voltar.
+  - MultipleInstancesPolicy IgnoreNew: nunca duas instancias; o lock logico
+    em scripts\run_with_lock.ps1 continua como segunda camada.
+  - UMA tarefa para full_daily + PMA (TaskKey daily_chain): acaba a disputa
+    do lock que fez o full_daily sair BLOCKED em 16/10 00:59:13.
+  - ExecutionTimeLimit PT3H40M = 13200s, acima dos 12600s do lock externo da
+    TaskKey daily_chain (600s de folga para o wrapper limpar o lock).
+  - 10:15 BRT: os Ads de D-1 do ML so' chegam a raw.ml_ads_items entre 09:00
+    e 09:02 BRT (medido em 8 dias, ver a DAG marketplace_tower_ml_refresh); o
+    health check cobra D-1 a partir de 11:00.
+
+  Limite que esta tarefa NAO resolve: o Data Mart exige VPN. Se a VPN cair com
+  a estacao suspensa ou deslogada, os steps saem BLOCKED no preflight (sem
+  escrita). A saida definitiva e' o Airflow (docs/ops_automation_2.md).
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Torre de Marketplaces: full_daily e PMA em sequencia (TaskKey daily_chain). Template OPS-AUTOMATION-2.</Description>
+    <URI>\mktplace_daily_chain</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-10-17T10:15:00-03:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>Notebook</UserId>
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>true</WakeToRun>
+    <ExecutionTimeLimit>PT3H40M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\Notebook\Desktop\mktplace-runner\scripts\run_task.ps1" -TaskKey daily_chain</Arguments>
+      <WorkingDirectory>C:\Users\Notebook\Desktop\mktplace-runner</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
