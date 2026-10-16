@@ -328,6 +328,7 @@ test("nenhum arquivo da fatia migrada usa a variante `dark:` solta", () => {
     "app/expedicao/ExpedicaoShell.tsx",
     "src/components/expedicao/TikTokDispatchPanel.tsx",
     "src/components/expedicao/TendenciaChart.tsx",
+    "src/components/expedicao/JanelaPersonalizada.tsx",
     "src/components/shell/AppShell.tsx",
     "src/components/shell/Topbar.tsx",
     "src/components/shell/Sidebar.tsx",
@@ -357,6 +358,7 @@ test("a fatia migrada nao reintroduz cor literal de paleta", () => {
   const fatia = [
     "app/expedicao/ExpedicaoClient.tsx",
     "src/components/expedicao/TikTokDispatchPanel.tsx",
+    "src/components/expedicao/JanelaPersonalizada.tsx",
     "src/components/shell/Topbar.tsx",
     "src/components/shell/Sidebar.tsx",
     "src/components/shell/NavList.tsx",
