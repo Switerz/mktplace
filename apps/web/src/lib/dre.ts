@@ -197,8 +197,6 @@ export const CLASSIFICACAO_CHIP: Record<Classificacao, { rotulo: string; tom: To
   NAO_CALCULAVEL: { rotulo: "Não calculável", tom: "critico" },
 };
 
-const ORDEM_CLASSIFICACAO: Record<Classificacao, number> = { NAO_CALCULAVEL: 0, PARCIAL: 1, COMPLETA: 2 };
-
 // ---------------------------------------------------------------------------
 // Filtros <-> URL <-> API
 // ---------------------------------------------------------------------------
@@ -263,15 +261,43 @@ export function dreApiUrl(base: string, f: DreFiltros): string {
 }
 
 /**
- * Meses oferecidos no seletor: do mes corrente (BRT) para tras. Mes imaturo
- * continua selecionavel — a API responde `NAO_CALCULAVEL` com o motivo, que e'
- * informacao, nao erro. Um `mes` vindo da URL fora da janela entra na lista
- * para o seletor nao mentir sobre o que esta aplicado.
+ * URL atual -> recorte aplicado e a querystring CANONICA dele.
+ *
+ * A tela aplica so' o que e' valido. Se a URL trouxer algo a mais (marca ou
+ * canal desconhecido, competencia invalida, ordem nao canonica, parametro de
+ * outra tela), `mudou = true` e a pagina reescreve a URL com `router.replace`:
+ * barra de endereco, controles e requisicao passam a dizer o MESMO recorte.
+ * Sem isso, `?brands=xyz` mostraria todas as marcas sob uma URL que diz o
+ * contrario — e a API, se recebesse `xyz`, responderia 422.
  */
-export function mesesSelecionaveis(hoje: Date, quantidade = 12, extra: string | null = null): string[] {
+export function queryCanonica(search: string): { filtros: DreFiltros; query: string; mudou: boolean } {
+  const atual = new URLSearchParams(search);
+  const filtros = parseDreFiltros(atual);
+  const query = dreQuery(filtros);
+  return { filtros, query, mudou: atual.toString() !== query };
+}
+
+/** Ano e mes correntes NO FUSO DE BRASILIA, independente do relogio do navegador. */
+export function mesCorrenteBrt(agora: Date): { ano: number; mes: number } {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(agora);
+  const ano = Number(partes.find((p) => p.type === "year")?.value);
+  const mes = Number(partes.find((p) => p.type === "month")?.value);
+  return { ano, mes };
+}
+
+/**
+ * Meses oferecidos no seletor: do mes corrente em Brasilia para tras. Mes
+ * imaturo continua selecionavel — a API responde `NAO_CALCULAVEL` com o motivo,
+ * que e' informacao, nao erro. Um `mes` vindo da URL fora da janela entra na
+ * lista para o seletor nao mentir sobre o que esta aplicado.
+ */
+export function mesesSelecionaveis(agora: Date, quantidade = 12, extra: string | null = null): string[] {
   const out: string[] = [];
-  let ano = hoje.getFullYear();
-  let mes = hoje.getMonth() + 1;
+  let { ano, mes } = mesCorrenteBrt(agora);
   for (let i = 0; i < quantidade; i++) {
     out.push(`${ano}-${String(mes).padStart(2, "0")}`);
     mes -= 1;
@@ -287,15 +313,14 @@ export function mesesSelecionaveis(hoje: Date, quantidade = 12, extra: string | 
   return out;
 }
 
-const MESES_CURTOS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
-
+/** Competencia no formato `MM/AAAA` ("2026-07" -> "07/2026"). */
 export function rotuloMes(mes: string): string {
   const m = RE_MES.exec(mes);
   if (!m) return mes;
-  return `${MESES_CURTOS[Number(m[2]) - 1]}/${m[1]}`;
+  return `${m[2]}/${m[1]}`;
 }
 
-/** Competencia do periodo respondido: "jul/2026" ou "jun/2026 – jul/2026". */
+/** Competencia do periodo respondido: "07/2026" ou "06/2026 – 07/2026". */
 export function rotuloPeriodo(meses: string[]): string {
   if (!meses.length) return "—";
   if (meses.length === 1) return rotuloMes(meses[0]);
@@ -306,7 +331,7 @@ export function rotuloPeriodo(meses: string[]): string {
 // Falhas da requisicao
 // ---------------------------------------------------------------------------
 
-export type TipoFalha = "rede" | "invalido" | "indisponivel" | "sem_rota" | "outro";
+export type TipoFalha = "rede" | "invalido" | "indisponivel" | "sem_rota" | "payload_invalido" | "outro";
 
 export interface FalhaDre {
   tipo: TipoFalha;
@@ -365,6 +390,84 @@ export function classificarFalha(status: number | null, corpo: unknown): FalhaDr
     titulo: "Não foi possível carregar a DRE",
     mensagem: `A API respondeu com erro ${status}.`,
   };
+}
+
+/**
+ * Resposta 200 que nao e' a DRE: JSON quebrado ou formato incompativel (versao
+ * da API diferente da esperada). Nao e' falha de rede — a API respondeu.
+ */
+export function falhaDePayload(problema: string): FalhaDre {
+  return {
+    tipo: "payload_invalido",
+    status: 200,
+    titulo: "Resposta inválida da API",
+    mensagem: `A API respondeu, mas o conteúdo não é a DRE esperada (${problema}). Nenhum número foi exibido.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Validacao estrutural minima da resposta (sem dependencia)
+// ---------------------------------------------------------------------------
+
+const CLASSIFICACOES: readonly string[] = ["COMPLETA", "PARCIAL", "NAO_CALCULAVEL"];
+const STATUS_VALIDOS: readonly string[] = [
+  "disponivel", "parcial", "indisponivel", "snapshot_ausente", "snapshot_vencido",
+  "nao_reconciliado", "nao_confirmado", "provisorio", "sinal_inesperado", "nao_aplicavel",
+];
+const ESTADOS_INSUMO: readonly string[] = ["ok", "tabela_ausente", "nao_publicado", "vencido", "parcialmente_vencido"];
+
+const ehObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const numOuNull = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v));
+const listaDeTexto = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "string");
+
+function problemaNaCelula(c: unknown, onde: string): string | null {
+  if (!ehObj(c)) return `${onde} não é objeto`;
+  if (!CLASSIFICACOES.includes(c.classificacao as string)) return `${onde}.classificacao inválida`;
+  if (!listaDeTexto(c.motivos_classificacao)) return `${onde}.motivos_classificacao inválido`;
+  if (!listaDeTexto(c.avisos_qualidade)) return `${onde}.avisos_qualidade inválido`;
+  if (!ehObj(c.componentes)) return `${onde}.componentes ausente`;
+  for (const nome of NOMES_COMPONENTE) {
+    const k = (c.componentes as Record<string, unknown>)[nome];
+    if (!ehObj(k)) return `${onde}.componentes.${nome} ausente`;
+    if (!numOuNull(k.valor) || !numOuNull(k.pct_receita ?? null)) return `${onde}.componentes.${nome}.valor inválido`;
+    if (!STATUS_VALIDOS.includes(k.status as string)) return `${onde}.componentes.${nome}.status inválido`;
+    if (typeof k.somavel !== "boolean") return `${onde}.componentes.${nome}.somavel inválido`;
+  }
+  const comp = c.completude;
+  if (!ehObj(comp) || typeof comp.texto !== "string") return `${onde}.completude inválida`;
+  const m = c.margem_contribuicao_conhecida;
+  if (!ehObj(m)) return `${onde}.margem_contribuicao_conhecida ausente`;
+  if (!numOuNull(m.valor) || !numOuNull(m.pct_receita)) return `${onde}.margem inválida`;
+  if (!listaDeTexto(m.componentes_usados) || !listaDeTexto(m.faltam)) return `${onde}.margem: listas inválidas`;
+  if (!ehObj(c.data_maxima)) return `${onde}.data_maxima ausente`;
+  return null;
+}
+
+/**
+ * `null` = o JSON tem a forma que a tela consome; senao, o primeiro problema.
+ * Minima de proposito: so' o que a tela LE. Campo extra nao e' problema.
+ */
+export function problemaNaResposta(json: unknown): string | null {
+  if (!ehObj(json)) return "corpo não é objeto";
+  const p = json.periodo;
+  if (!ehObj(p) || !listaDeTexto(p.meses) || typeof p.origem !== "string") return "periodo inválido";
+  const f = json.fontes;
+  if (!ehObj(f) || !ehObj(f.insumos_dre) || !ESTADOS_INSUMO.includes(f.insumos_dre.estado as string)) {
+    return "fontes.insumos_dre inválido";
+  }
+  if (json.total !== null) {
+    const t = problemaNaCelula(json.total, "total");
+    if (t) return t;
+  }
+  for (const lista of ["por_canal", "por_marca", "por_canal_marca", "celulas_base"] as const) {
+    const v = json[lista];
+    if (!Array.isArray(v)) return `${lista} não é lista`;
+    for (let i = 0; i < v.length; i++) {
+      const prob = problemaNaCelula(v[i], `${lista}[${i}]`);
+      if (prob) return prob;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,9 +731,73 @@ export function canaisCalculaveisOcultos(resp: DreResponse): Marketplace[] {
   return canonicalizeSelection(ok);
 }
 
-export function piorClassificacao(cs: Classificacao[]): Classificacao | null {
-  if (!cs.length) return null;
-  return cs.reduce((a, b) => (ORDEM_CLASSIFICACAO[b] < ORDEM_CLASSIFICACAO[a] ? b : a));
+/**
+ * Canais que IMPEDEM o agregado: os nao calculaveis de `por_canal`, so'
+ * quando o total e' nao calculavel. E' leitura do que a API ja' classificou —
+ * nenhuma regra nova.
+ */
+export function canaisBloqueadores(resp: DreResponse): string[] {
+  if (!resp.total || resp.total.classificacao !== "NAO_CALCULAVEL") return [];
+  return resp.por_canal
+    .filter((c) => c.classificacao === "NAO_CALCULAVEL")
+    .map((c) => c.canal_label ?? ROTULO_CANAL[c.canal ?? ""] ?? c.canal ?? "?");
+}
+
+/** "Shopee" / "Shopee e TikTok Shop" / "A, B e C". */
+export function juntarNomes(nomes: string[]): string {
+  if (nomes.length <= 1) return nomes[0] ?? "";
+  return `${nomes.slice(0, -1).join(", ")} e ${nomes[nomes.length - 1]}`;
+}
+
+/**
+ * Rotulo da lista `faltam` conforme o ESCOPO da celula.
+ *
+ * Pelo contrato, num agregado `faltam` e' "custo que faltou em AO MENOS UMA
+ * celula". Chamar isso de "custos ausentes" sem qualificar faz uma marca com
+ * taxas e CMV no TikTok parecer sem taxas e sem CMV. Celula canal x marca e' a
+ * unica sem esse qualificador.
+ */
+export function rotuloAusentes(c: CelulaDRE): string {
+  if (c.canal && c.marca) return "Faltam";
+  if (c.canal) return "Ausente em ao menos uma marca";
+  return "Ausente em ao menos um canal";
+}
+
+export const TEXTO_NAO_CALCULAVEL_AGREGADO = "Não calculável — veja os canais";
+
+/** Celula sem margem: classificacao nao calculavel ou valor nulo. */
+export function semMargem(c: CelulaDRE): boolean {
+  return c.classificacao === "NAO_CALCULAVEL" || c.margem_contribuicao_conhecida.valor === null;
+}
+
+/** Margem em R$ como texto. Sem margem: o status, NUNCA "R$ 0". */
+export function textoMargem(c: CelulaDRE): string {
+  const v = c.margem_contribuicao_conhecida.valor;
+  return semMargem(c) || v === null ? "Não calculável" : fmtReais(v);
+}
+
+/** Margem % como texto. Sem margem ou sem %: o status, nunca travessao. */
+export function textoMargemPct(c: CelulaDRE): string {
+  if (semMargem(c)) return "Não calculável";
+  return fmtPctDre(c.margem_contribuicao_conhecida.pct_receita) ?? "Não calculável";
+}
+
+/** Share como texto. Sem receita (do recorte ou total): diz por que. */
+export function textoShare(recorte: CelulaDRE, total: CelulaDRE | null): string {
+  return fmtPctDre(shareDaReceita(recorte, total)) ?? "Sem receita";
+}
+
+/**
+ * Linha de completude para exibir. Num agregado NAO CALCULAVEL a completude do
+ * backend e' a intersecao entre celulas — e celula nao calculavel informa zero
+ * custos usados. "0 de 6 custos" ali leria "nenhum custo conhecido", o oposto
+ * do que os canais mostram. Por isso: `null` (nao exibir), e a tela diz
+ * "Não calculável — veja os canais".
+ */
+export function completudeExibida(c: CelulaDRE): string | null {
+  const agregado = !(c.canal && c.marca);
+  if (agregado && c.classificacao === "NAO_CALCULAVEL") return null;
+  return c.completude.texto;
 }
 
 /** Seleção sem nenhuma célula: a API respondeu e não há dado no recorte. */

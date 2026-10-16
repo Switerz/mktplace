@@ -52,3 +52,35 @@ a Shopee no filtro (a pior célula manda). A margem por marca só aparece na mat
 - Suíte web, `tsc --noEmit`, `next build`.
 - Navegador (Playwright): fixtures em 1440/1024/390 × claro/escuro + todos os estados; API local lendo o Neon em
   3 URLs × 3 larguras × 2 temas. Sem overflow horizontal, zero erro de console, requisição = URL.
+
+---
+
+## DRE-UX-2 — correções da revisão (16/10/2026)
+
+Achados da revisão do head `1288203` corrigidos no mesmo PR, sem tocar regra financeira nem backend.
+
+| Achado | Correção |
+|---|---|
+| Agregado não calculável mostrava "0 de 6 custos" e "Faltam: taxas, CMV…" | `completudeExibida` devolve `null` para agregado não calculável; a tela diz "Não calculável — veja os canais" e "Bloqueado por <canais>" (de `por_canal`) |
+| "Custos ausentes" sem qualificador | `rotuloAusentes`: "Ausente em ao menos um canal" (total, marca), "Ausente em ao menos uma marca" (canal), "Faltam" (célula canal × marca) — é o sentido de `faltam` no contrato |
+| Ranking vazio sem explicação | rodapé nomeia o bloqueio ("…porque Shopee não é calculável…") e traz o mesmo botão "Ver só <canais calculáveis>" do resumo |
+| URL inválida mantida na barra com escopo ampliado | `queryCanonica` + `router.replace` imediato: barra, controles e requisição dizem o mesmo recorte |
+| "e mais N motivo(s)" sem expandir; motivos só em `title`/`sr-only` | `Motivos` (botão com `aria-expanded`/`aria-controls`); célula não calculável da matriz é botão "por quê?"; nenhum `title` nos componentes da DRE |
+| Margem calculável sem marca de parcial no tile | o próprio tile mostra "Parcial" + "Ausente em ao menos um canal: …" |
+| Travessão em margem/share | `textoMargem`, `textoMargemPct`, `textoShare`: status por escrito, nunca "R$ 0" nem "—" |
+| JSON 200 incompatível virava "Sem conexão" | `problemaNaResposta` (validação estrutural mínima, sem dependência) → "Resposta inválida da API" |
+| Mês `jul/2026`; meses pelo relógio do navegador | `MM/AAAA`; mês corrente pelo fuso de Brasília (`mesCorrenteBrt`) |
+| `piorClassificacao` sem uso | removida |
+| (achado na QA) coluna "% rec." cortada em 390 px | abaixo de `sm` o % vai sob o valor; rótulos quebram em qualquer ponto |
+
+### Testes
+
+- `tests/dre-render.test.ts`: renderiza os componentes reais com `react-dom/server`; o `.tsx` é transpilado pelo
+  `typescript` já instalado (`tests/helpers/tsx-loader.mjs`) — nenhuma dependência nova.
+- 15 mutações (entre elas a C6: margem nula do canal como R$ 0) derrubam teste.
+
+### Estado do dado em 16/10/2026
+
+A fotografia de insumos publicada em 13/10 passou de 48 h: TikTok e ML saem `snapshot_vencido`, logo não
+calculáveis junto com a Shopee. A tela mostra "Bloqueado por TikTok Shop, Mercado Livre e Shopee" e não oferece o
+botão de recorte (não há canal calculável). Volta ao cenário de 13/10 quando o publisher de insumos rodar de novo.

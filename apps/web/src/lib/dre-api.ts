@@ -8,7 +8,15 @@
  * A URL da requisicao sai de `dreApiUrl`, a mesma funcao que escreve a barra
  * de endereco (ver `dreQuery`).
  */
-import { classificarFalha, dreApiUrl, type DreFiltros, type DreResponse, type FalhaDre } from "./dre.ts";
+import {
+  classificarFalha,
+  dreApiUrl,
+  falhaDePayload,
+  problemaNaResposta,
+  type DreFiltros,
+  type DreResponse,
+  type FalhaDre,
+} from "./dre.ts";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
@@ -38,5 +46,23 @@ export async function fetchDre(filtros: DreFiltros, signal?: AbortSignal): Promi
     }
     throw new DreErro(classificarFalha(res.status, corpo));
   }
-  return (await res.json()) as DreResponse;
+  return lerCorpoDre(res);
+}
+
+/**
+ * 200 -> DRE validada. JSON quebrado ou forma incompativel vira
+ * `payload_invalido` ("Resposta inválida da API"), e NAO "sem conexao": a API
+ * respondeu. Abort durante a leitura continua sendo abort.
+ */
+export async function lerCorpoDre(res: { json(): Promise<unknown> }): Promise<DreResponse> {
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new DreErro(falhaDePayload("o corpo não é JSON"));
+  }
+  const problema = problemaNaResposta(json);
+  if (problema) throw new DreErro(falhaDePayload(problema));
+  return json as DreResponse;
 }

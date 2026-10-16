@@ -1,32 +1,43 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Grid3x3, Tags } from "lucide-react";
 
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
 import Chip from "@/components/ui/Chip";
 import TableScrollHint from "@/components/TableScrollHint";
+import BotaoRecorteCalculavel from "@/components/dre/BotaoRecorteCalculavel";
 import { ClassificacaoChip } from "@/components/dre/DreChips";
 import {
   ROTULO_CANAL,
+  completudeExibida,
   custosAusentes,
   fmtPctDre,
   fmtReais,
+  juntarNomes,
   rankingDeMargem,
-  shareDaReceita,
+  semMargem,
+  textoMargem,
+  textoMargemPct,
+  textoShare,
   type CelulaDRE,
   type ItemRanking,
 } from "@/lib/dre";
+import type { Marketplace } from "@/lib/mock-data";
 
 /**
- * DRE-UX-1 — comparacao entre marcas.
+ * DRE-UX-1/2 — comparacao entre marcas.
  *
  * Share = receita da marca ÷ receita total da selecao, com os valores crus
  * da API (`shareDaReceita`). Ranking de margem SO' entre marcas comparaveis
  * (`rankingDeMargem`): marca nao calculavel, sem custo essencial ou com um
  * conjunto de custos diferente sai do ranking com o motivo, e nunca aparece
  * como "melhor margem".
+ *
+ * DRE-UX-2: a coluna de faltantes diz "Ausente em ao menos um canal" — pelo
+ * contrato, `faltam` de uma marca e' o que faltou em AO MENOS UMA celula dela.
+ * Ranking vazio diz por que e oferece o mesmo recorte calculavel do resumo.
  *
  * A matriz marca x canal existe porque a classificacao da marca e' a PIOR
  * entre os canais dela: com a Shopee no filtro, toda marca que vende na
@@ -54,7 +65,32 @@ function Posicao({ item }: { item: ItemRanking }) {
   );
 }
 
-export function DreMarcasTabela({ marcas, total }: { marcas: CelulaDRE[]; total: CelulaDRE }) {
+/** Por que o ranking esta vazio (ou com uma marca so'), em linguagem de gestor. */
+export function explicacaoRanking(comparaveis: number, bloqueadores: string[]): string {
+  if (comparaveis >= 2) return "Posição = ordem de margem % entre marcas com os mesmos custos na conta.";
+  const quantas = comparaveis === 0 ? "nenhuma marca é comparável" : "só uma marca é comparável";
+  if (bloqueadores.length) {
+    const verbo = bloqueadores.length > 1 ? "não são calculáveis" : "não é calculável";
+    return `Ranking vazio: ${quantas} neste recorte porque ${juntarNomes(bloqueadores)} ${verbo} e ${bloqueadores.length > 1 ? "entram" : "entra"} no agregado de cada marca. Receita e share continuam válidos.`;
+  }
+  return `Ranking vazio: ${quantas} neste recorte. O motivo de cada marca está na coluna Posição.`;
+}
+
+export function DreMarcasTabela({
+  marcas,
+  total,
+  bloqueadores = [],
+  calculaveis = [],
+  aoFiltrar,
+}: {
+  marcas: CelulaDRE[];
+  total: CelulaDRE;
+  /** Canais nao calculaveis que impedem o agregado (rotulos). */
+  bloqueadores?: string[];
+  /** Canais calculaveis escondidos pelo agregado — alvo do botao. */
+  calculaveis?: Marketplace[];
+  aoFiltrar?: (canais: Marketplace[]) => void;
+}) {
   const [ordem, setOrdem] = useState<Ordem>("receita");
   const ranking = useMemo(() => rankingDeMargem(marcas), [marcas]);
   const linhas = useMemo(() => {
@@ -83,9 +119,10 @@ export function DreMarcasTabela({ marcas, total }: { marcas: CelulaDRE[]; total:
         />
       }
       rodape={
-        comparaveis < 2
-          ? "Menos de duas marcas comparáveis nesta seleção: não há ranking de margem."
-          : "Posição = ordem de margem % entre marcas com os mesmos custos na conta."
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <span>{explicacaoRanking(comparaveis, bloqueadores)}</span>
+          {comparaveis < 2 && aoFiltrar && <BotaoRecorteCalculavel canais={calculaveis} aoAplicar={aoFiltrar} />}
+        </div>
       }
     >
       <TableScrollHint>
@@ -99,14 +136,13 @@ export function DreMarcasTabela({ marcas, total }: { marcas: CelulaDRE[]; total:
               <th scope="col" className={`${TH} text-right`}>Margem %</th>
               <th scope="col" className={TH}>Posição</th>
               <th scope="col" className={TH}>Classificação</th>
-              <th scope="col" className={TH}>Custos ausentes</th>
+              <th scope="col" className={TH}>Ausente em ao menos um canal</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
             {linhas.map((item) => {
               const c = item.celula;
-              const m = c.margem_contribuicao_conhecida;
-              const naoCalc = c.classificacao === "NAO_CALCULAVEL" || m.valor === null;
+              const sem = semMargem(c);
               const receita = c.componentes.receita.valor;
               const faltam = custosAusentes(c);
               return (
@@ -115,22 +151,16 @@ export function DreMarcasTabela({ marcas, total }: { marcas: CelulaDRE[]; total:
                     {nomeMarca(c)}
                   </th>
                   <td className={`${TD} text-right text-ink`}>{receita !== null ? fmtReais(receita) : "Sem valor"}</td>
-                  <td className={`${TD} text-right text-ink-muted`}>{fmtPctDre(shareDaReceita(c, total)) ?? "—"}</td>
-                  <td className={`${TD} text-right ${naoCalc ? "text-ink-faint" : "text-ink"}`}>
-                    {naoCalc || m.valor === null ? "Não calculável" : fmtReais(m.valor)}
-                  </td>
-                  <td className={`${TD} text-right font-semibold ${naoCalc ? "text-ink-faint" : "text-ink"}`}>
-                    {naoCalc ? "—" : fmtPctDre(m.pct_receita) ?? "—"}
+                  <td className={`${TD} text-right text-ink-muted`}>{textoShare(c, total)}</td>
+                  <td className={`${TD} text-right ${sem ? "text-ink-faint" : "text-ink"}`}>{textoMargem(c)}</td>
+                  <td className={`${TD} text-right font-semibold ${sem ? "text-ink-faint" : "text-ink"}`}>
+                    {textoMargemPct(c)}
                   </td>
                   <td className={TD}>
                     <Posicao item={item} />
                   </td>
                   <td className={TD}>
-                    <ClassificacaoChip
-                      classificacao={c.classificacao}
-                      completude={c.completude.texto}
-                      motivo={c.motivos_classificacao[0]}
-                    />
+                    <ClassificacaoChip classificacao={c.classificacao} completude={completudeExibida(c)} />
                   </td>
                   <td className={`${TD} whitespace-normal text-xs text-ink-muted`}>
                     {faltam.length ? faltam.join(", ") : "nenhum"}
@@ -145,22 +175,48 @@ export function DreMarcasTabela({ marcas, total }: { marcas: CelulaDRE[]; total:
   );
 }
 
+/**
+ * Celula nao calculavel da matriz: o selo e' um BOTAO que abre os motivos ali
+ * mesmo — clique, toque e teclado. Antes o motivo so' existia em `title` e
+ * `sr-only`, inalcancavel para quem enxerga e nao usa mouse.
+ */
+export function CelulaNaoCalculavel({ c, abertoInicial = false }: { c: CelulaDRE; abertoInicial?: boolean }) {
+  const [aberto, setAberto] = useState(abertoInicial);
+  const id = useId();
+  return (
+    <span className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        aria-expanded={aberto}
+        aria-controls={id}
+        onClick={() => setAberto((v) => !v)}
+        className="inline-flex min-h-11 items-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <ClassificacaoChip classificacao={c.classificacao} />
+        <span className="ml-1 text-xs font-semibold text-accent">{aberto ? "ocultar" : "por quê?"}</span>
+      </button>
+      {aberto && (
+        <ul id={id} className="max-w-[16rem] whitespace-normal text-left text-xs text-ink-muted">
+          {c.motivos_classificacao.length ? (
+            c.motivos_classificacao.map((m) => <li key={m}>{m}</li>)
+          ) : (
+            <li>sem motivo informado pela API</li>
+          )}
+        </ul>
+      )}
+    </span>
+  );
+}
+
 /** Celula da matriz. `undefined` = a marca nao vendeu no canal (nao e' zero). */
 function Celula({ c }: { c: CelulaDRE | undefined }) {
   if (!c) return <span className="text-xs text-ink-faint">Sem venda</span>;
-  const m = c.margem_contribuicao_conhecida;
-  if (c.classificacao === "NAO_CALCULAVEL" || m.valor === null) {
-    return (
-      <span className="flex flex-col items-end gap-1">
-        <ClassificacaoChip classificacao={c.classificacao} motivo={c.motivos_classificacao[0]} />
-        <span className="sr-only">{c.motivos_classificacao[0]}</span>
-      </span>
-    );
-  }
+  const v = c.margem_contribuicao_conhecida.valor;
+  if (semMargem(c) || v === null) return <CelulaNaoCalculavel c={c} />;
   return (
     <span className="flex flex-col items-end gap-0.5">
-      <span className="font-semibold text-ink">{fmtPctDre(m.pct_receita)}</span>
-      <span className="text-xs text-ink-muted">{fmtReais(m.valor)}</span>
+      <span className="font-semibold text-ink">{fmtPctDre(c.margem_contribuicao_conhecida.pct_receita) ?? "Sem %"}</span>
+      <span className="text-xs text-ink-muted">{fmtReais(v)}</span>
     </span>
   );
 }
@@ -196,7 +252,7 @@ export function DreMarcaCanalMatriz({
                   {ROTULO_CANAL[canal] ?? canal}
                 </th>
               ))}
-              <th scope="col" className={`${TH} text-right`}>Marca (todos)</th>
+              <th scope="col" className={`${TH} text-right`}>Marca (todos os canais)</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line">

@@ -5,15 +5,18 @@ import { FileSpreadsheet } from "lucide-react";
 
 import Disclosure from "@/components/ui/Disclosure";
 import Panel from "@/components/ui/Panel";
+import Motivos from "@/components/dre/Motivos";
 import { ClassificacaoChip, StatusChip } from "@/components/dre/DreChips";
 import {
   ROTULO_MARGEM,
+  completudeExibida,
   custosAusentes,
   fmtCusto,
   fmtInstanteBrt,
   fmtPctDre,
   fmtReais,
   linhasDre,
+  rotuloAusentes,
   type CelulaDRE,
   type LinhaDre,
 } from "@/lib/dre";
@@ -54,7 +57,7 @@ function Valor({ l }: { l: LinhaDre }) {
   const v = l.componente.valor;
   if (v === null) {
     // Ausencia: nenhum numero. O status ocupa a coluna do valor.
-    return <StatusChip status={l.componente.status} motivo={l.componente.motivo} />;
+    return <StatusChip status={l.componente.status} />;
   }
   if (l.recuo) {
     // Afiliado: magnitude informativa, sem "−". Ja' esta em Taxas.
@@ -132,9 +135,9 @@ export default function DreVertical({
       <table className="w-full text-data" aria-label={`DRE vertical — ${atual.rotulo}`}>
         <thead>
           <tr className="bg-raised text-left text-xs font-semibold uppercase tracking-wide text-ink-faint">
-            <th scope="col" className="px-4 py-2">Linha</th>
-            <th scope="col" className="px-4 py-2 text-right">Valor</th>
-            <th scope="col" className="w-16 px-4 py-2 text-right sm:w-24">% rec.</th>
+            <th scope="col" className="px-3 py-2 sm:px-4">Linha</th>
+            <th scope="col" className="px-3 py-2 text-right sm:px-4">Valor</th>
+            <th scope="col" className="hidden w-24 px-4 py-2 text-right sm:table-cell">% rec.</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-line">
@@ -145,7 +148,7 @@ export default function DreVertical({
             const foraDaMargem = !naoCalc && l.custo && !l.recuo && l.componente.valor !== null && !l.naMargem;
             return (
               <tr key={l.chave} className="align-top">
-                <th scope="row" className={`px-4 py-2.5 text-left font-normal ${l.recuo ? "pl-9" : ""}`}>
+                <th scope="row" className={`px-3 py-2.5 text-left font-normal [overflow-wrap:anywhere] sm:px-4 ${l.recuo ? "pl-7 sm:pl-9" : ""}`}>
                   <span className={`block ${l.recuo ? "italic text-ink-muted" : l.chave === "receita" ? "font-semibold text-ink" : "text-ink"}`}>
                     {l.rotulo}
                   </span>
@@ -154,7 +157,7 @@ export default function DreVertical({
                   )}
                   {l.componente.valor !== null && l.chip && (
                     <span className="mt-1 flex flex-wrap items-center gap-1.5">
-                      <StatusChip status={l.componente.status} motivo={l.componente.motivo} />
+                      <StatusChip status={l.componente.status} />
                       {foraDaMargem && <span className="text-xs text-ink-muted">fora da margem</span>}
                     </span>
                   )}
@@ -163,10 +166,14 @@ export default function DreVertical({
                   )}
                   <Origem l={l} />
                 </th>
-                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums">
+                <td className="whitespace-nowrap px-3 py-2.5 sm:px-4 text-right tabular-nums">
                   <Valor l={l} />
+                  {/* Mobile: o % mora sob o valor (a coluna some abaixo de sm). */}
+                  {l.componente.valor !== null && pct !== null && (
+                    <span className="block text-xs text-ink-muted sm:hidden">{pct}</span>
+                  )}
                 </td>
-                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-ink-muted">
+                <td className="hidden whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-ink-muted sm:table-cell">
                   {l.componente.valor !== null && pct !== null ? pct : ""}
                 </td>
               </tr>
@@ -175,33 +182,34 @@ export default function DreVertical({
         </tbody>
         <tfoot>
           <tr className="border-t-2 border-line-strong bg-raised align-top">
-            <th scope="row" className="px-4 py-3 text-left">
+            <th scope="row" className="px-3 py-3 text-left [overflow-wrap:anywhere] sm:px-4">
               <span className="block font-semibold text-ink">{ROTULO_MARGEM}</span>
               <span className="mt-1 flex flex-wrap items-center gap-1.5">
-                <ClassificacaoChip classificacao={c.classificacao} completude={c.completude.texto} />
+                <ClassificacaoChip classificacao={c.classificacao} completude={completudeExibida(c)} />
+                {completudeExibida(c) === null && (
+                  <span className="text-xs font-semibold text-ink-muted">— veja os canais</span>
+                )}
               </span>
               {naoCalc ? (
-                c.motivos_classificacao.length > 0 && (
-                  <ul className="mt-1 flex flex-col gap-0.5 text-xs font-normal text-ink-muted">
-                    {c.motivos_classificacao.slice(0, 4).map((mot) => (
-                      <li key={mot}>{mot}</li>
-                    ))}
-                    {c.motivos_classificacao.length > 4 && (
-                      <li>e mais {c.motivos_classificacao.length - 4} motivo(s)</li>
-                    )}
-                  </ul>
-                )
+                // DRE-UX-2: o "e mais N" agora abre — antes os motivos alem do
+                // quarto ficavam inalcancaveis.
+                <Motivos motivos={c.motivos_classificacao} visiveis={4} className="mt-1" />
               ) : (
                 m.formula && <span className="mt-1 block text-xs font-normal text-ink-muted">Fórmula: {m.formula}</span>
               )}
               {faltam.length > 0 && (
-                <span className="mt-0.5 block text-xs font-normal text-ink-muted">Faltam: {faltam.join(", ")}</span>
+                <span className="mt-0.5 block text-xs font-normal text-ink-muted">
+                  {rotuloAusentes(c)}: {faltam.join(", ")}
+                </span>
               )}
             </th>
-            <td className="whitespace-nowrap px-4 py-3 text-right text-sm font-semibold tabular-nums text-ink">
+            <td className="px-3 py-3 text-right text-sm font-semibold tabular-nums text-ink sm:whitespace-nowrap sm:px-4">
               {naoCalc || m.valor === null ? <span className="text-ink-faint">Não calculável</span> : fmtReais(m.valor)}
+              {!naoCalc && fmtPctDre(m.pct_receita) && (
+                <span className="block text-xs text-ink-muted sm:hidden">{fmtPctDre(m.pct_receita)}</span>
+              )}
             </td>
-            <td className="whitespace-nowrap px-4 py-3 text-right font-semibold tabular-nums text-ink">
+            <td className="hidden whitespace-nowrap px-4 py-3 text-right font-semibold tabular-nums text-ink sm:table-cell">
               {!naoCalc ? fmtPctDre(m.pct_receita) ?? "" : ""}
             </td>
           </tr>

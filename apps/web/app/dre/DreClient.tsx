@@ -41,16 +41,20 @@ import DreResumo from "@/components/dre/DreResumo";
 import DreVertical, { type OpcaoRecorte } from "@/components/dre/DreVertical";
 import DreCanais from "@/components/dre/DreCanais";
 import { DreMarcaCanalMatriz, DreMarcasTabela } from "@/components/dre/DreMarcas";
+import BotaoRecorteCalculavel from "@/components/dre/BotaoRecorteCalculavel";
 import { DreErro, fetchDre } from "@/lib/dre-api";
 import {
   FILTROS_PADRAO,
   ROTULO_CANAL,
   avisoFotografia,
+  canaisBloqueadores,
   canaisCalculaveisOcultos,
   classificarFalha,
   dreQuery,
   fmtInstanteBrt,
+  juntarNomes,
   parseDreFiltros,
+  queryCanonica,
   rotuloPeriodo,
   selecaoVazia,
   type DreFiltros as Filtros,
@@ -63,9 +67,16 @@ type Resultado = { chave: string; resp: DreResponse } | { chave: string; falha: 
 export default function DreClient() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const filtros = useMemo(() => parseDreFiltros(searchParams), [searchParams]);
-  // Identidade da requisicao = a propria querystring canonica.
-  const chave = dreQuery(filtros);
+  // Recorte aplicado = so' o que e' valido na URL; `chave` e' a forma canonica.
+  const { filtros, query: chave, mudou } = useMemo(() => queryCanonica(searchParams.toString()), [searchParams]);
+
+  // DRE-UX-2: URL com parametro invalido, parcialmente invalido, fora da ordem
+  // ou de outra tela e' reescrita NA HORA para a forma canonica. Barra de
+  // endereco, controles e requisicao dizem sempre o MESMO recorte — nunca uma
+  // URL falsa sobre um escopo ampliado em silencio.
+  useEffect(() => {
+    if (mudou) router.replace(chave ? `/dre?${chave}` : "/dre", { scroll: false });
+  }, [mudou, chave, router]);
 
   const [resultado, setResultado] = useState<Resultado | null>(null);
   const [tentativa, setTentativa] = useState(0);
@@ -106,6 +117,7 @@ export default function DreClient() {
   const competencia = resp ? rotuloPeriodo(resp.periodo.meses) : null;
   const aviso = resp ? avisoFotografia(resp.fontes.insumos_dre, fmtInstanteBrt) : null;
   const ocultos = resp ? canaisCalculaveisOcultos(resp) : [];
+  const bloqueadores = resp ? canaisBloqueadores(resp) : [];
   const vazio = resp ? selecaoVazia(resp) : false;
 
   const opcoes: OpcaoRecorte[] = useMemo(() => {
@@ -140,15 +152,9 @@ export default function DreClient() {
             <>
               <PeriodChip label={`Competência ${competencia}${mesPadrao ? " · madura" : ""}`} />
               {atualizadoEm && (
-                <Chip title="Carga mais recente do mart de receita, taxas, Ads e frete">
-                  Carga do mart {fmtInstanteBrt(atualizadoEm)}
-                </Chip>
+                <Chip>Carga do mart: {fmtInstanteBrt(atualizadoEm)}</Chip>
               )}
-              <Chip
-                tom={aviso ? "atencao" : "neutro"}
-                ponto
-                title={resp.fontes.insumos_dre.motivo ?? "CMV e repasse TikTok publicados no Neon"}
-              >
+              <Chip tom={aviso ? "atencao" : "neutro"} ponto>
                 {aviso ? aviso.curto : `Fotografia ${insumoEm ? fmtInstanteBrt(insumoEm) : "ok"}`}
               </Chip>
             </>
@@ -206,7 +212,7 @@ export default function DreClient() {
 
           <section aria-labelledby="dre-resumo" className="flex flex-col gap-3">
             <h2 id="dre-resumo" className="sr-only">Resumo da seleção</h2>
-            <DreResumo total={resp.total} competencia={competencia ?? ""} />
+            <DreResumo total={resp.total} competencia={competencia ?? ""} bloqueadores={bloqueadores} />
             <p className="text-xs text-ink-muted">
               {receitaAte && <>Receita até {fmtInstanteBrt(receitaAte)}. </>}
               {resp.total.data_maxima.cmv_ultima_emissao && (
@@ -217,20 +223,14 @@ export default function DreClient() {
             {ocultos.length > 0 && (
               <Note
                 tom="neutro"
-                acao={
-                  <button
-                    type="button"
-                    onClick={() => aplicar({ canais: ocultos })}
-                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                  >
-                    <Filter aria-hidden="true" className="h-3.5 w-3.5" />
-                    Ver só {ocultos.map((c) => ROTULO_CANAL[c]).join(" + ")}
-                  </button>
-                }
+                acao={<BotaoRecorteCalculavel canais={ocultos} aoAplicar={(canais) => aplicar({ canais })} />}
               >
-                O total não é calculável porque ao menos um canal não é. {ocultos.map((c) => ROTULO_CANAL[c]).join(" e ")}{" "}
-                {ocultos.length > 1 ? "têm" : "tem"} margem conhecida — veja abaixo, ou filtre só{" "}
-                {ocultos.length > 1 ? "esses canais" : "esse canal"} para o agregado calculado pela API.
+                {/* DRE-UX-2: o canal que bloqueia vem NOMEADO (de `por_canal`). */}
+                O total não é calculável porque {juntarNomes(bloqueadores)}{" "}
+                {bloqueadores.length > 1 ? "não são calculáveis" : "não é calculável"}.{" "}
+                {juntarNomes(ocultos.map((c) => ROTULO_CANAL[c]))} {ocultos.length > 1 ? "têm" : "tem"} margem conhecida —
+                veja abaixo, ou filtre só {ocultos.length > 1 ? "esses canais" : "esse canal"} para o agregado calculado
+                pela API.
               </Note>
             )}
           </section>
@@ -239,7 +239,13 @@ export default function DreClient() {
 
           <DreVertical opcoes={opcoes} selecionado={recorte} aoEscolher={setRecorte} />
 
-          <DreMarcasTabela marcas={resp.por_marca} total={resp.total} />
+          <DreMarcasTabela
+            marcas={resp.por_marca}
+            total={resp.total}
+            bloqueadores={bloqueadores}
+            calculaveis={ocultos}
+            aoFiltrar={(canais) => aplicar({ canais })}
+          />
           <DreMarcaCanalMatriz
             celulas={resp.por_canal_marca}
             marcas={resp.por_marca}

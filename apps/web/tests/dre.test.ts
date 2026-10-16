@@ -15,9 +15,12 @@ import {
   FILTROS_PADRAO,
   ROTULO_MARGEM,
   STATUS_CHIP,
+  TEXTO_NAO_CALCULAVEL_AGREGADO,
   avisoFotografia,
+  canaisBloqueadores,
   canaisCalculaveisOcultos,
   classificarFalha,
+  completudeExibida,
   custosAusentes,
   dreApiUrl,
   dreQuery,
@@ -25,16 +28,26 @@ import {
   fmtCusto,
   fmtPctDre,
   fmtReais,
+  juntarNomes,
   linhasDre,
+  mesCorrenteBrt,
   mesesSelecionaveis,
   parseDreFiltros,
+  problemaNaResposta,
+  queryCanonica,
   rankingDeMargem,
+  rotuloAusentes,
   rotuloMes,
+  rotuloPeriodo,
   selecaoVazia,
   shareDaReceita,
   somaDeControle,
+  textoMargem,
+  textoMargemPct,
+  textoShare,
   type DreFiltros,
 } from "../src/lib/dre.ts";
+import { DreErro, fetchDre, lerCorpoDre } from "../src/lib/dre-api.ts";
 import { NAV_SECTIONS, getRouteTitle } from "../src/components/shell/nav-config.ts";
 import { ROTAS_TEMATIZADAS, rotaTematizada } from "../src/lib/theme.ts";
 import {
@@ -210,9 +223,10 @@ test("sem canal calculavel, ou com total calculavel, nao ha oferta de refiltro",
   assert.deepEqual(canaisCalculaveisOcultos(resposta({ total: ML, por_canal: [ML] })), []);
 });
 
-test("o atalho de refiltro passa pelo mesmo `aplicar` que escreve a URL", () => {
+test("o atalho de refiltro (resumo e ranking) passa pelo mesmo `aplicar` que escreve a URL", () => {
   const src = semComentarios(fonte("app/dre/DreClient.tsx"));
-  assert.match(src, /onClick=\{\(\) => aplicar\(\{ canais: ocultos \}\)\}/);
+  assert.match(src, /<BotaoRecorteCalculavel canais=\{ocultos\} aoAplicar=\{\(canais\) => aplicar\(\{ canais \}\)\} \/>/);
+  assert.match(src, /calculaveis=\{ocultos\}\s*aoFiltrar=\{\(canais\) => aplicar\(\{ canais \}\)\}/);
 });
 
 // ===========================================================================
@@ -244,14 +258,157 @@ test("filtros -> query: so' o que difere do padrao, em ordem canonica", () => {
 });
 
 test("seletor de competencia: 12 meses ate o corrente, e o mes da URL nunca some", () => {
-  const meses = mesesSelecionaveis(new Date(2026, 9, 13));
+  const meses = mesesSelecionaveis(new Date("2026-10-13T15:00:00Z"));
   assert.equal(meses.length, 12);
   assert.equal(meses[0], "2026-10");
   assert.equal(meses[11], "2025-11");
-  const comExtra = mesesSelecionaveis(new Date(2026, 9, 13), 12, "2025-01");
+  const comExtra = mesesSelecionaveis(new Date("2026-10-13T15:00:00Z"), 12, "2025-01");
   assert.ok(comExtra.includes("2025-01"));
   assert.equal(comExtra[comExtra.length - 1], "2025-01");
-  assert.equal(rotuloMes("2026-07"), "jul/2026");
+});
+
+test("mes corrente e' o de BRASILIA, nao o do relogio do navegador", () => {
+  // 01/11 02:00 UTC = 31/10 23:00 em Brasilia: ainda outubro.
+  assert.deepEqual(mesCorrenteBrt(new Date("2026-11-01T02:00:00Z")), { ano: 2026, mes: 10 });
+  assert.equal(mesesSelecionaveis(new Date("2026-11-01T02:00:00Z"))[0], "2026-10");
+  // 01/11 03:30 UTC = 01/11 00:30 em Brasilia: novembro.
+  assert.equal(mesesSelecionaveis(new Date("2026-11-01T03:30:00Z"))[0], "2026-11");
+  // Virada de ano.
+  assert.equal(mesesSelecionaveis(new Date("2027-01-01T02:59:00Z"))[0], "2026-12");
+});
+
+test("competencia e' exibida como MM/AAAA", () => {
+  assert.equal(rotuloMes("2026-07"), "07/2026");
+  assert.equal(rotuloMes("2025-12"), "12/2025");
+  assert.equal(rotuloPeriodo(["2026-07"]), "07/2026");
+  assert.equal(rotuloPeriodo(["2026-06", "2026-07"]), "06/2026 – 07/2026");
+  for (const m of mesesSelecionaveis(new Date("2026-10-13T15:00:00Z"))) assert.match(rotuloMes(m), /^\d{2}\/\d{4}$/);
+});
+
+// ===========================================================================
+// URL canonica
+// ===========================================================================
+test("URL canonica: valida e canonica nao muda", () => {
+  for (const q of ["", "ref_month=2026-07", "channels=tiktok%2Cml", "ref_month=2026-06&channels=ml&brands=apice%2Ckokeshi"]) {
+    const r = queryCanonica(q);
+    assert.equal(r.mudou, false, q);
+    assert.equal(r.query, q);
+  }
+});
+
+test("URL canonica: invalido, parcialmente invalido e fora de ordem sao reescritos para o recorte aplicado", () => {
+  const casos: [string, string, Partial<DreFiltros>][] = [
+    // marca invalida: aplica todas e a URL deixa de dizer xyz
+    ["brands=xyz", "", { marcas: [] }],
+    // canal invalido
+    ["channels=foo", "", { canais: ["tiktok", "ml", "shopee"] }],
+    // competencia invalida
+    ["ref_month=2026-13", "", { mes: null }],
+    // mistura de marca valida e invalida
+    ["brands=kokeshi%2Cxyz", "brands=kokeshi", { marcas: ["kokeshi"] }],
+    // canais fora da ordem canonica
+    ["channels=ml%2Ctiktok", "channels=tiktok%2Cml", { canais: ["tiktok", "ml"] }],
+    // marcas fora de ordem + parametro de outra tela
+    ["brands=kokeshi%2Capice&date_from=2026-09-13&date_to=2026-10-12", "brands=apice%2Ckokeshi", { marcas: ["apice", "kokeshi"] }],
+  ];
+  for (const [entrada, canonica, esperado] of casos) {
+    const r = queryCanonica(entrada);
+    assert.equal(r.mudou, true, entrada);
+    assert.equal(r.query, canonica, entrada);
+    for (const [k, v] of Object.entries(esperado)) assert.deepEqual(r.filtros[k as keyof DreFiltros], v, `${entrada}: ${k}`);
+    // URL reescrita, controles (filtros) e requisicao dizem o MESMO recorte.
+    assert.equal(new URL(dreApiUrl("http://api", r.filtros)).search.replace(/^\?/, ""), r.query, entrada);
+    assert.equal(queryCanonica(r.query).mudou, false, `${entrada}: reescrita estabiliza`);
+  }
+});
+
+test("a pagina reescreve a URL nao canonica com router.replace", () => {
+  const cliente = semComentarios(fonte("app/dre/DreClient.tsx"));
+  assert.match(cliente, /queryCanonica\(searchParams\.toString\(\)\)/);
+  assert.match(cliente, /if \(mudou\) router\.replace\(chave \? `\/dre\?\$\{chave\}` : "\/dre", \{ scroll: false \}\);/);
+});
+
+// ===========================================================================
+// Payload invalido
+// ===========================================================================
+test("validacao estrutural: resposta real-like passa; forma incompativel nao", () => {
+  assert.equal(problemaNaResposta(resposta()), null);
+  assert.equal(problemaNaResposta(resposta({ total: null, por_canal: [], por_marca: [], celulas_base: [] })), null);
+  assert.equal(problemaNaResposta(null), "corpo não é objeto");
+  assert.equal(problemaNaResposta({ detail: "ok" }), "periodo inválido");
+  const semComponente = structuredClone(resposta());
+  delete (semComponente.por_canal[1].componentes as Partial<Record<string, unknown>>).cmv;
+  assert.equal(problemaNaResposta(semComponente), "por_canal[1].componentes.cmv ausente");
+  const statusNovo = structuredClone(resposta());
+  (statusNovo.total!.componentes.taxas as { status: string }).status = "estimado";
+  assert.equal(problemaNaResposta(statusNovo), "total.componentes.taxas.status inválido");
+  const margemTexto = structuredClone(resposta());
+  (margemTexto.por_marca[0].margem_contribuicao_conhecida as { valor: unknown }).valor = "24000";
+  assert.equal(problemaNaResposta(margemTexto), "por_marca[0].margem inválida");
+});
+
+test("payload 200 invalido vira 'Resposta inválida da API', nunca 'Sem conexão'", async () => {
+  const corpo = (json: () => Promise<unknown>) => ({ json });
+  for (const [nome, res] of [
+    ["JSON quebrado", corpo(() => Promise.reject(new SyntaxError("Unexpected token <")))],
+    ["forma incompativel", corpo(() => Promise.resolve({ ok: true }))],
+  ] as const) {
+    await assert.rejects(lerCorpoDre(res), (err: unknown) => {
+      assert.ok(err instanceof DreErro, nome);
+      assert.equal((err as DreErro).falha.tipo, "payload_invalido", nome);
+      assert.equal((err as DreErro).falha.titulo, "Resposta inválida da API", nome);
+      assert.notEqual((err as DreErro).falha.tipo, classificarFalha(null, null).tipo);
+      return true;
+    });
+  }
+  const ok = await lerCorpoDre(corpo(() => Promise.resolve(resposta())));
+  assert.equal(ok.total!.classificacao, "NAO_CALCULAVEL");
+});
+
+test("fetchDre: 200 invalido -> payload_invalido; fetch que falha -> rede", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response("<html>proxy</html>", { status: 200 })) as typeof fetch;
+    await assert.rejects(fetchDre(FILTROS_PADRAO), (e: unknown) => (e as DreErro).falha.tipo === "payload_invalido");
+    globalThis.fetch = (async () => { throw new TypeError("Failed to fetch"); }) as typeof fetch;
+    await assert.rejects(fetchDre(FILTROS_PADRAO), (e: unknown) => (e as DreErro).falha.tipo === "rede");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// ===========================================================================
+// Leitura do agregado nao calculavel
+// ===========================================================================
+test("agregado bloqueado pela Shopee: bloqueador nomeado, sem '0 de 6', ausencias qualificadas", () => {
+  const r = resposta();
+  assert.deepEqual(canaisBloqueadores(r), ["Shopee"]);
+  assert.equal(completudeExibida(r.total!), null, "agregado nao calculavel nao exibe completude");
+  assert.equal(TEXTO_NAO_CALCULAVEL_AGREGADO, "Não calculável — veja os canais");
+  assert.equal(rotuloAusentes(r.total!), "Ausente em ao menos um canal");
+  assert.equal(rotuloAusentes(MARCA_A), "Ausente em ao menos um canal");
+  assert.equal(rotuloAusentes(SHOPEE), "Ausente em ao menos uma marca");
+  assert.equal(rotuloAusentes({ ...ML, marca: "kokeshi" }), "Faltam");
+  // canal calculavel continua com a propria completude
+  assert.equal(completudeExibida(ML), "4 de 6 custos");
+  // total calculavel nao tem bloqueador
+  assert.deepEqual(canaisBloqueadores(resposta({ total: ML, por_canal: [ML] })), []);
+  assert.equal(juntarNomes(["Shopee", "TikTok Shop", "Mercado Livre"]), "Shopee, TikTok Shop e Mercado Livre");
+});
+
+test("margem, % e share nulos nunca viram R$ 0 nem travessao", () => {
+  for (const c of [SHOPEE, TOTAL_MISTO, MARCA_C]) {
+    assert.equal(textoMargem(c), "Não calculável");
+    assert.equal(textoMargemPct(c), "Não calculável");
+  }
+  assert.equal(textoMargem(ML), fmtReais(42_000));
+  assert.equal(textoMargem(TIKTOK), fmtReais(24_000));
+  assert.equal(textoMargemPct(ML), "42,0%");
+  assert.equal(textoShare(ML, TOTAL_MISTO), "50,0%");
+  assert.equal(textoShare(ML, null), "Sem receita");
+  // zero MEDIDO continua zero
+  const zero = celula({ classificacao: "PARCIAL", comps: { receita: comp(1_000, "disponivel", { somavel: false }) }, margem: 0, usados: ["taxas", "cmv"], faltam: [] });
+  assert.equal(textoMargem(zero), fmtReais(0));
 });
 
 // ===========================================================================
@@ -276,7 +433,8 @@ test("a requisicao a API carrega EXATAMENTE a querystring da URL", () => {
 
 test("a pagina usa a MESMA serializacao para a URL e para o fetch", () => {
   const cliente = semComentarios(fonte("app/dre/DreClient.tsx"));
-  assert.match(cliente, /const chave = dreQuery\(filtros\);/);
+  // `chave` = dreQuery(parse(URL)), via queryCanonica.
+  assert.match(cliente, /const \{ filtros, query: chave, mudou \} = useMemo\(\(\) => queryCanonica\(searchParams\.toString\(\)\)/);
   assert.match(cliente, /router\.replace\(q \? `\/dre\?\$\{q\}` : "\/dre"/);
   assert.match(cliente, /const q = dreQuery\(\{ \.\.\.filtros, \.\.\.parcial \}\);/);
   assert.match(cliente, /fetchDre\(parseDreFiltros\(new URLSearchParams\(chave\)\)/);
@@ -383,7 +541,7 @@ test("sem taxas ou sem CMV na conta, a marca e' inelegivel", () => {
 test("a tabela de marcas usa o ranking puro e mostra 'Não comparável' com motivo", () => {
   const src = semComentarios(fonte("src/components/dre/DreMarcas.tsx"));
   assert.match(src, /rankingDeMargem\(marcas\)/);
-  assert.match(src, /shareDaReceita\(c, total\)/);
+  assert.match(src, /textoShare\(c, total\)/);
   assert.match(src, /Não comparável/);
   assert.match(src, /item\.comparabilidade\.motivo/);
 });
