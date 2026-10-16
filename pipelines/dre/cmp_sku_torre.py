@@ -89,6 +89,13 @@ NIVEL_VOLUME = "CODIGO_EXATO_VOLUME"
 NIVEL_PROVISORIO = "CODIGO_EXATO_PROVISORIO"
 NIVEL_VIA_GTIN = "VIA_GTIN"
 NIVEIS = (NIVEL_GTIN, NIVEL_VIA_GTIN, NIVEL_VOLUME, NIVEL_PROVISORIO)
+#: De-para DETERMINISTICO (DRE-CMV-CMP-7): o codigo vendido nao tem CMP, mas o cadastro
+#: (`sku` <-> `sku_antigo`) ou o GTIN o ligam a UM unico codigo com CMP 0301. O nivel diz
+#: qual evidencia de produto confirmou: GTIN, volume, ou nenhuma (so' o codigo).
+NIVEL_DEPARA_GTIN = "DEPARA_GTIN"
+NIVEL_DEPARA_VOLUME = "DEPARA_VOLUME"
+NIVEL_DEPARA_CODIGO = "DEPARA_CODIGO"
+NIVEIS_DEPARA = (NIVEL_DEPARA_GTIN, NIVEL_DEPARA_VOLUME, NIVEL_DEPARA_CODIGO)
 #: Os dois niveis confirmados por GTIN; nunca misturados com o provisorio.
 NIVEIS_GTIN = (NIVEL_GTIN, NIVEL_VIA_GTIN)
 
@@ -234,6 +241,8 @@ class Catalogo:
     alias: dict = field(default_factory=lambda: defaultdict(set))         # -> codigos equivalentes
     gtin: dict = field(default_factory=lambda: defaultdict(set))          # -> GTINs validos
     componentes: dict = field(default_factory=lambda: defaultdict(list))  # kit -> [(componente, qtd)]
+    #: Pares codigo emitido <-> canonico das NFs. SO' contradizem um de-para; nunca o criam.
+    nf: dict = field(default_factory=lambda: defaultdict(set))
 
 
 def montar_catalogo(cadastro: list[dict], kits: list[dict]) -> Catalogo:
@@ -379,14 +388,77 @@ def resolver_gtin(ind: Indice, idx_gtin: dict, comp: date, produto: Optional[str
     return Resolucao("coberto", vg.cmp, NIVEL_VIA_GTIN, ("gtin",), (k[0],), vigencia=vg), ""
 
 
+def montar_pares_nf(rows: list[dict]) -> dict:
+    """(marca, codigo) -> codigos ligados por NF (emitido x canonico), nos dois sentidos."""
+    out: dict = defaultdict(set)
+    for r in rows:
+        m, a, b = chave_marca(r.get("marca")), chave_sku(r.get("codigo_sku")), chave_sku(r.get("sku_canonico"))
+        if a and b and a != b:
+            out[(m, a)].add(b)
+            out[(m, b)].add(a)
+    return out
+
+
+def _chaves_no_escopo(ind: Indice, marca: str, codigo: str) -> list:
+    return [(e, f, codigo) for e, f in sorted(ind.por_sku.get(codigo, ())) if _no_escopo(marca, (e, f, codigo))]
+
+
+def resolver_depara(ind: Indice, cat: Catalogo, idx_gtin: dict, comp: date, produto: Optional[str], marca: str,
+                    codigo: str, g_venda: set) -> tuple[Optional[Resolucao], str]:
+    """Via 3 (DRE-CMV-CMP-7): de-para DETERMINISTICO, sem aprovacao linha a linha.
+
+    Casa so' quando TODAS valem: mesma marca; chave exata por cadastro (`sku` <-> `sku_antigo`)
+    ou GTIN valido; UM unico candidato no escopo 0301; candidato com CMP vigente; GTIN e volume
+    sem divergencia (volume so' quando houver); GTIN nao reaproveitado; e nenhuma NF ligando o
+    codigo a OUTRO candidato com CMP. Qualquer falha devolve (None, motivo) — vira decisao humana.
+    """
+    m, cod = chave_marca(marca), chave_sku(codigo)
+    origens: dict = defaultdict(set)
+    for alias in cat.alias.get((m, cod), set()):
+        for k in _chaves_no_escopo(ind, marca, alias):
+            origens[k].add("cadastro")
+    chaves_gtin: set = set()
+    for g in g_venda:
+        todas = idx_gtin.get(g, set())
+        if gtin_reutilizado(ind, todas):
+            return None, "depara_gtin_reutilizado"
+        for k in todas:
+            if k[2] != cod and _no_escopo(marca, k):
+                origens[k].add("gtin")
+                chaves_gtin.add(k)
+    if not origens:
+        return None, "depara_sem_ligacao_deterministica"
+    if len(origens) > 1:
+        return None, "depara_mais_de_um_candidato"
+    (k, fontes), = origens.items()
+    vg = cmp_vigente(ind, k, comp)
+    if vg.estado == "conflito":
+        return None, "depara_candidato_com_cmp_conflitante"
+    if vg.estado != "ok":
+        return None, "depara_candidato_sem_cmp_0301"
+    ev_g = comparar(g_venda, gtins_da_chave(ind, k))
+    ev_v = comparar(tamanhos(produto), volumes_da_chave(ind, k))
+    if DIVERGE in (ev_g, ev_v):
+        return None, "depara_evidencia_contraditoria"
+    for outro in cat.nf.get((m, cod), set()):
+        if outro != k[2] and any(cmp_vigente(ind, kk, comp).estado == "ok" for kk in _chaves_no_escopo(ind, marca, outro)):
+            return None, "depara_nf_aponta_outro_candidato"
+    nivel = NIVEL_DEPARA_GTIN if ev_g == CONCORDA else NIVEL_DEPARA_VOLUME if ev_v == CONCORDA else NIVEL_DEPARA_CODIGO
+    return Resolucao("coberto", vg.cmp, nivel, tuple(sorted(fontes)), (k[0],), vigencia=vg,
+                     motivo=f"de-para deterministico: {cod} -> {k[2]}@{k[0]}"), ""
+
+
 def origem_a_confirmar(marca: str, codigos: dict) -> bool:
     m = chave_marca(marca)
     return any((m, chave_sku(c)) in ORIGEM_A_CONFIRMAR for c in codigos.values())
 
 
 def resolver(ind: Indice, codigos: dict, comp: date, produto: Optional[str], cat: Optional[Catalogo] = None,
-             marca: str = "", idx_gtin: Optional[dict] = None) -> Resolucao:
-    """CMP de uma venda, ou o motivo de nao haver. Codigo exato tem precedencia sobre GTIN."""
+             marca: str = "", idx_gtin: Optional[dict] = None, depara: bool = False) -> Resolucao:
+    """CMP de uma venda, ou o motivo de nao haver.
+
+    Ordem: codigo exato > via GTIN > (so' com `depara=True`) de-para deterministico.
+    """
     if origem_a_confirmar(marca, codigos):
         return Resolucao("origem_a_confirmar", motivo="origem_empresarial_nao_confirmada")
     g_venda = gtins_da_venda(cat, marca, produto, codigos)
@@ -400,6 +472,14 @@ def resolver(ind: Indice, codigos: dict, comp: date, produto: Optional[str], cat
         via.descartados = r.descartados
         return via
     r.motivo = f"{r.motivo};{motivo}"
+    # O de-para so' entra quando codigo e GTIN falharam; nunca resolve conflito nem ambiguidade.
+    if depara and cat is not None and len(codigos) == 1:
+        dp, motivo_dp = resolver_depara(ind, cat, idx_gtin, comp, produto, marca, next(iter(codigos.values())),
+                                        g_venda)
+        if dp is not None:
+            dp.descartados = r.descartados
+            return dp
+        r.motivo = f"{r.motivo};{motivo_dp}"
     return r
 
 

@@ -1,4 +1,4 @@
-# DRE-CMV-CMP-1…6 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
+# DRE-CMV-CMP-1…7 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
 
 Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de outubro sobe de 14,7% (sem kit)
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
@@ -16,6 +16,10 @@ DRE-CMV-CMP-6 (seção 14) fecha a regra de filial: **só 0301** (Rituaria só M
 `preco_custo` e sem exceção para os KS. O pipeline ganhou a **visão por produto** (seção 6). Cobertura oficial de
 outubro: **47,3%** sobre as 13 células com fonte, **41,2%** sobre as 14 células da DRE; o potencial só com de-para
 0301 vai a 63,9%–71,2%, e **nenhuma célula chega a 100%**.
+
+DRE-CMV-CMP-7 (seção 15) transformou o de-para que não precisa de pessoa em **regra determinística** do pipeline:
+**53 dos 72** de-para pendentes passaram. Cobertura oficial de outubro: **57,5%** (13 células com fonte) e **50,1%**
+(14 células da DRE). Restam 19 de-para, 42 escolhas, 2 KS e 86 itens sem CMP 0301 para o negócio.
 
 ## 1. O que é
 
@@ -346,10 +350,53 @@ Shopee · Kokeshi sem aviso** (13). Impacto: os percentuais consolidados são so
 fonte; incluindo a receita de Shopee · Kokeshi no denominador (como ausente, nunca custo zero), a cobertura oficial
 cai de 47,3% para 41,2%. A visão por produto agora traz a célula ausente como linha própria.
 
+## 15. De-para determinístico (DRE-CMV-CMP-7)
+
+**Regras definitivas:** filial SP = `0301`; Rituaria = MAGA SP, nunca MG1; só o CMP unitário por SKU; bonificação
+fora do CMP (vai nas premissas percentuais da DRE); custo de NF, `preco_custo`, compras, estoque e CMV contábil não
+substituem CMP; nenhuma outra filial fornece valor.
+
+**Regra (`cmp_sku_torre.resolver_depara`, ligada no CMV provisório).** Quando o código vendido não casa por código
+exato nem pela via GTIN, ele casa com um código da planilha 0301 só se **todas** valerem:
+- mesma marca (cadastro e candidato escopados por marca → entidade, filial SP/0301);
+- chave exata: cadastro (`sku` ↔ `sku_antigo`) ou GTIN válido;
+- **um único candidato** somando as duas chaves;
+- candidato com CMP vigente na competência (alternativa 3);
+- GTIN e volume sem divergência (volume só quando houver); GTIN não reaproveitado entre produtos;
+- nenhuma NF ligando o código a **outro** candidato com CMP — a NF só contradiz, nunca cria casamento.
+
+O de-para nunca resolve conflito ou ambiguidade do código exato e não contorna KS03041/KS03042. A confiança vem da
+evidência de produto: GTIN = alta, volume = média, só o código = baixa. Método na visão por produto:
+`depara_deterministico` (`depara_aprovado` segue reservado para decisão humana). A migration 028 (não aplicada)
+ganhou `receita_depara`, com CHECK de não negativo, não NaN e no máximo a receita coberta. A regra não lê a planilha
+de sugestões.
+
+**Resultado em outubro** (dry-run real, só leitura):
+
+| | antes | depois |
+|---|---:|---:|
+| cobertura, 13 células com fonte | 47,3% | **57,5%** |
+| cobertura, 14 células da DRE | 41,2% | **50,1%** |
+| produtos calculáveis | 548 | **727** |
+| Lescent (TikTok / Shopee / ML) | 7,2% / 5,5% / 3,1% | 95,0% / 90,2% / 89,9% |
+
+Dos 72 de-para pendentes do CMP-6: **53 viraram regra** (37 pelo código antigo do cadastro, 16 por GTIN); **19
+continuam humanos** — 18 só têm ligação por NF (15 Rituaria, 3 Apice) e 1 tem dois códigos 0301.
+
+**Cenário canônico depois da regra** (% da receita das 13 células): CMP 0301 válido 57,5%; de-para humano pendente
+6,7%; sem CMP 0301 13,1% (sem evidência 5,0%, KS 8,1%); conflito entre CMPs 0301 7,0%; fora da regra 15,7%. O teto
+só com decisões dentro da 0301 continua 71,2% (62,0% nas 14 células); nenhuma célula chega a 100%.
+
+**Bonificação:** a extração de CMP nunca lê as abas de bonificação (teste com valor-armadilha); o CMV fiscal vem só de
+NF `tipo_operacao = normal` (sem NF de bonificação desde julho); no cenário estimado a linha "(-) Bonificações" é só
+premissa. Não há duplicação. Única sobreposição possível: brinde dentro de kit vendido (1 componente na BOM, 0,27% do
+CMV coberto) é custo do kit, e a DRE também tem a premissa "(-) Brindes" — pergunta aberta ao negócio.
+
 ## 12. Decisões externas para destravar
 
-1. **Preencher a planilha de decisões 0301** (seção 14, privada): aprovar ou rejeitar os 72 de-para para códigos
-   com CMP 0301, escolher o código nos 42 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP 0301.
+1. **Preencher a planilha de decisões 0301** (seções 14 e 15, privada): aprovar ou rejeitar os 19 de-para que não
+   são determinísticos, escolher o código nos 42 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP
+   0301.
    Não há opção de custo de outra filial. O que for aprovado precisa de um gate próprio para entrar como de-para
    versionado (`metodo = depara_aprovado`); nenhuma sugestão é aplicada sem essa decisão.
 2. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo

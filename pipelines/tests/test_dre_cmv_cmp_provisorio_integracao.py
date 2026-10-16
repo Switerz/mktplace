@@ -64,7 +64,7 @@ def celula(comp=OUT, canal="tiktok", marca="apice", **kw):
          "cobertura": Decimal("0.3"), "cmv_provisorio": Decimal(90), "unidades_sem_cmp": Decimal(35),
          "skus_total": 10, "skus_cobertos": 3, "skus_conflito": 1, "skus_sem_cmp": 7, "receita_gtin": Decimal(100),
          "receita_volume": Decimal(0), "receita_codigo_provisorio": Decimal(200), "receita_carry_forward": Decimal(300),
-         "receita_kit_homogeneo": Decimal(0), "receita_kit_misto": Decimal(0),
+         "receita_kit_homogeneo": Decimal(0), "receita_kit_misto": Decimal(0), "receita_depara": Decimal(0),
          "confianca": "baixa", "regra_temporal": "entidade_vigencia", "fonte_vendas": "x (API)"}
     c.update(kw)
     return c
@@ -74,7 +74,8 @@ def ausente(**kw):
     return celula(status="ausente_na_fonte", receita_fonte=None, unidades=None, receita_coberta=None, cobertura=None,
                   cmv_provisorio=None, unidades_sem_cmp=None, skus_total=0, skus_cobertos=0, skus_conflito=0,
                   skus_sem_cmp=0, receita_gtin=None, receita_volume=None, receita_codigo_provisorio=None,
-                  receita_carry_forward=None, receita_kit_homogeneo=None, receita_kit_misto=None, confianca=None,
+                  receita_carry_forward=None, receita_kit_homogeneo=None, receita_kit_misto=None, receita_depara=None,
+                  confianca=None,
                   **kw)
 
 
@@ -100,6 +101,8 @@ def _audit(eng):
     ({"status": "ausente_na_fonte"}, "ck_fdcp_ausencia_explicita"),
     ({"marca": "gocase"}, "ck_fdcp_marca"),
     ({"regra_temporal": "ultimo_disponivel"}, "ck_fdcp_regra_temporal"),
+    ({"receita_depara": Decimal(301)}, "ck_fdcp_depara"),
+    ({"receita_depara": Decimal("NaN")}, "ck_fdcp_depara"),
 ])
 def test_migration_027_recusa_linha_fora_do_contrato(banco, kw, motivo):
     with pytest.raises(IntegrityError, match=motivo):

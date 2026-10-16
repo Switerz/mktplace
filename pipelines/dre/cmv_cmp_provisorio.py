@@ -64,6 +64,13 @@ valido: `direto` (codigo/GTIN no escopo 0301) ou `kit_bom` (todos os
 componentes com CMP 0301). `depara_aprovado` esta reservado: nenhum de-para foi
 aprovado e esta pipeline nao le de-para sugerido.
 
+DE-PARA DETERMINISTICO (DRE-CMV-CMP-7)
+-------------------------------------
+Quando codigo e GTIN falham, `cmp_sku_torre.resolver_depara` liga o codigo vendido
+a UM codigo com CMP 0301 pelo cadastro (`sku` <-> `sku_antigo`) ou pelo GTIN, na mesma
+marca, sem divergencia de GTIN/volume e sem NF apontando outro candidato. Metodo
+`depara_deterministico`; tudo o que falha vira decisao humana. Nao le planilha de sugestoes.
+
 Codigos de saida: 0 ok; 65 recusa; 69 fonte indisponivel; 75 lock; 78 migration ausente.
 """
 from __future__ import annotations
@@ -105,7 +112,8 @@ FONTE_VENDAS = {
     "shopee": "gold.shopee_product_daily (API)",
 }
 #: Nivel de casamento -> confianca.
-CONFIANCA = {T.NIVEL_GTIN: "alta", T.NIVEL_VIA_GTIN: "alta", T.NIVEL_VOLUME: "media", T.NIVEL_PROVISORIO: "baixa"}
+CONFIANCA = {T.NIVEL_GTIN: "alta", T.NIVEL_VIA_GTIN: "alta", T.NIVEL_VOLUME: "media", T.NIVEL_PROVISORIO: "baixa",
+             T.NIVEL_DEPARA_GTIN: "alta", T.NIVEL_DEPARA_VOLUME: "media", T.NIVEL_DEPARA_CODIGO: "baixa"}
 NIVEL_KIT_HOMOGENEO = "KIT_BOM_HOMOGENEO"
 NIVEL_KIT_MISTO = "KIT_BOM_MISTO"
 ORDEM_CONFIANCA = {"baixa": 0, "media": 1, "alta": 2}
@@ -114,8 +122,12 @@ REGRAS_KIT = ("homogeneo", "misto")
 #: Metodo da visao por produto, a partir do nivel de casamento. `depara_aprovado`
 #: fica reservado ate existir um de-para APROVADO pelo negocio (hoje nenhum).
 METODO_POR_NIVEL = {T.NIVEL_GTIN: "direto", T.NIVEL_VIA_GTIN: "direto", T.NIVEL_VOLUME: "direto",
-                    T.NIVEL_PROVISORIO: "direto", NIVEL_KIT_HOMOGENEO: "kit_bom", NIVEL_KIT_MISTO: "kit_bom"}
-METODOS = ("direto", "kit_bom", "depara_aprovado")
+                    T.NIVEL_PROVISORIO: "direto", NIVEL_KIT_HOMOGENEO: "kit_bom", NIVEL_KIT_MISTO: "kit_bom",
+                    T.NIVEL_DEPARA_GTIN: "depara_deterministico", T.NIVEL_DEPARA_VOLUME: "depara_deterministico",
+                    T.NIVEL_DEPARA_CODIGO: "depara_deterministico"}
+#: `depara_deterministico`: regra reproduzivel (DRE-CMV-CMP-7). `depara_aprovado` segue reservado para
+#: decisao humana linha a linha, que esta pipeline ainda nao le.
+METODOS = ("direto", "kit_bom", "depara_deterministico", "depara_aprovado")
 CAMPOS_PRODUTO = ("competencia", "tipo_linha", "canal", "marca", "sku", "produto", "receita", "unidades", "cmp",
                   "cmv", "margem_bruta_apos_cmp", "margem_pct", "calculavel", "metodo", "nivel", "confianca",
                   "competencia_origem_cmp", "carry_forward", "cobertura_da_celula", "status", "motivo")
@@ -168,6 +180,13 @@ SQL_SHOPEE = """
     GROUP BY 1, 2
 """
 SQL_POR_CANAL = {"ml": SQL_ML, "tiktok": SQL_TIKTOK, "shopee": SQL_SHOPEE}
+#: Pares codigo emitido x canonico das NFs: SO' contradizem um de-para deterministico.
+SQL_NF_PARES = """
+    SELECT marca, codigo_sku, sku_canonico
+    FROM gold.nf_vendas_plataforma_sku_mensal
+    WHERE data_mes >= :desde AND codigo_sku IS NOT NULL AND sku_canonico IS NOT NULL
+    GROUP BY 1, 2, 3
+"""
 #: BOM explicita do ERP. `conta` e' a marca: o mesmo codigo de kit existe em mais de uma conta.
 SQL_BOM = """
     SELECT conta AS marca, kit_codigo, componente_codigo, componente_descricao, quantidade, data_carga
@@ -247,12 +266,13 @@ def tipo_kit(entrada: dict) -> str:
     return "homogeneo" if len(entrada["componentes"]) == 1 else "misto"
 
 
-def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, marca: str, comp: date) -> dict:
+def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, marca: str, comp: date,
+               depara: bool = True) -> dict:
     """CMP do kit pela BOM, so' com TODOS os componentes cobertos. Nunca custo parcial."""
     partes, faltas, origem, carry = [], [], None, False
     confs = []
     for cod, q, desc in entrada["componentes"]:
-        r = T.resolver(ind, {"componente": cod}, comp, desc, cat, marca, idx_gtin)
+        r = T.resolver(ind, {"componente": cod}, comp, desc, cat, marca, idx_gtin, depara)
         if r.status != "coberto":
             faltas.append(f"{cod}:{r.status}")
             continue
@@ -268,7 +288,7 @@ def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, ma
 
 
 def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: date,
-                bom: Optional[dict] = None, regras_kit: tuple = REGRAS_KIT) -> list[dict]:
+                bom: Optional[dict] = None, regras_kit: tuple = REGRAS_KIT, depara: bool = True) -> list[dict]:
     """Resolve o CMP de cada SKU vendido. Sem casamento => `cmp=None` (nunca zero).
 
     `regras_kit` liga as regras de kit separadamente ("homogeneo", "misto"),
@@ -295,13 +315,13 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
             e_kit_cadastro = T.classificar_tipo(cat, v.marca, [cod]) == "kit"
             if not e_kit_cadastro:
                 texto = " ".join(x for x in (v.ean, v.produto) if x)
-                r = T.resolver(ind, {"seller_sku": v.sku}, comp, texto, cat, v.marca, idx_gtin)
+                r = T.resolver(ind, {"seller_sku": v.sku}, comp, texto, cat, v.marca, idx_gtin, depara)
             if entrada is not None:
                 kit_tipo = tipo_kit(entrada)
                 if kit_tipo == "ambigua":
                     kit = {"status": "kit_composicao_ambigua", "cmp": None, "motivo": entrada["ambigua"]}
                 elif kit_tipo in regras_kit:
-                    kit = cmp_do_kit(ind, cat, idx_gtin, entrada, v.marca, comp)
+                    kit = cmp_do_kit(ind, cat, idx_gtin, entrada, v.marca, comp, depara)
                 else:
                     kit = {"status": "kit_regra_nao_aplicada", "cmp": None, "motivo": f"regra {kit_tipo} desligada"}
             direto = r is not None and r.status == "coberto"
@@ -372,7 +392,7 @@ def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) 
                         "unidades_sem_cmp": None, "skus_total": 0, "skus_cobertos": 0, "skus_conflito": 0,
                         "skus_sem_cmp": 0, "receita_gtin": None, "receita_volume": None,
                         "receita_codigo_provisorio": None, "receita_carry_forward": None,
-                        "receita_kit_homogeneo": None, "receita_kit_misto": None,
+                        "receita_kit_homogeneo": None, "receita_kit_misto": None, "receita_depara": None,
                         "margem_bruta_parcela_coberta": None, "margem_bruta_apos_cmp": None,
                         "receita_por_status": {}, "confianca": None})
             continue
@@ -405,6 +425,8 @@ def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) 
             "receita_carry_forward": sum((x["receita"] for x in cobertos if x["carry_forward"]), Decimal(0)),
             "receita_kit_homogeneo": por_nivel[NIVEL_KIT_HOMOGENEO],
             "receita_kit_misto": por_nivel[NIVEL_KIT_MISTO],
+            # Direto por de-para deterministico. Kit com componente por de-para conta como kit.
+            "receita_depara": sum((por_nivel[n] for n in T.NIVEIS_DEPARA), Decimal(0)),
             # So' da parcela coberta, rotulada assim. A margem da CELULA so' existe com 100%.
             "margem_bruta_parcela_coberta": (rec_cob - cmv_cob) if cmv_cob is not None else None,
             "margem_bruta_apos_cmp": (rec_fonte - cmv_cob) if integral and cmv_cob is not None else None,
@@ -509,8 +531,11 @@ def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.
         cad = _rows(conn, T.SQL_CADASTRO, {})
         kits = _rows(conn, T.SQL_KITS, {})
         bom = montar_bom(_rows(conn, SQL_BOM, {"marcas": list(MARCAS)}))
+        nf = T.montar_pares_nf(_rows(conn, SQL_NF_PARES, {"desde": date(comp.year - 1, 1, 1)}))
         conn.rollback()
-    return vendas, T.montar_catalogo(cad, kits), bom
+    cat = T.montar_catalogo(cad, kits)
+    cat.nf = nf
+    return vendas, cat, bom
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +545,8 @@ def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.
 COLUNAS = ("competencia", "canal", "marca", "data_corte", "status", "receita_fonte", "unidades", "receita_coberta",
            "cobertura", "cmv_provisorio", "unidades_sem_cmp", "skus_total", "skus_cobertos", "skus_conflito",
            "skus_sem_cmp", "receita_gtin", "receita_volume", "receita_codigo_provisorio", "receita_carry_forward",
-           "receita_kit_homogeneo", "receita_kit_misto", "confianca", "regra_temporal", "fonte_vendas",
+           "receita_kit_homogeneo", "receita_kit_misto", "receita_depara", "confianca", "regra_temporal",
+           "fonte_vendas",
            "cmp_fontes_sha256")
 SQL_EXISTE = f"SELECT to_regclass('{TABELA}') IS NOT NULL"
 SQL_LOCK = f"SELECT pg_try_advisory_xact_lock({LOCK_KEY})"
@@ -638,10 +664,11 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
         print(json.dumps({"status": "fonte_indisponivel", "detalhe": sanitizar(exc)}, ensure_ascii=False))
         return EXIT_FONTE
     # Quanto cada regra eleva a cobertura: sem kit, so' homogeneo, homogeneo + misto.
-    cenarios = {"sem_kit": (), "homogeneo": ("homogeneo",), "homogeneo_e_misto": REGRAS_KIT}
+    cenarios = {"sem_kit": ((), False), "homogeneo": (("homogeneo",), False), "homogeneo_e_misto": (REGRAS_KIT, False),
+                "homogeneo_misto_e_depara": (REGRAS_KIT, True)}
     cobertura_por_regra = {}
-    for nome, regras in cenarios.items():
-        cels = agregar(classificar(ind, cat, vendas, comp, bom, regras), receita_cel, cortes, comp)
+    for nome, (regras, dp) in cenarios.items():
+        cels = agregar(classificar(ind, cat, vendas, comp, bom, regras, dp), receita_cel, cortes, comp)
         cobertura_por_regra[nome] = {f"{c['canal']}|{c['marca']}": c["cobertura"] for c in cels}
     linhas = classificar(ind, cat, vendas, comp, bom, REGRAS_KIT)
     celulas = agregar(linhas, receita_cel, cortes, comp)

@@ -26,7 +26,8 @@ Celula sem venda na fonte (ex.: Shopee Kokeshi, export manual) e' gravada como
 
 KITS
 ----
-`receita_kit_homogeneo` e `receita_kit_misto` medem a receita coberta pela BOM
+`receita_depara` (DRE-CMV-CMP-7) mede a receita coberta por de-para deterministico (cadastro
+ou GTIN -> um unico codigo com CMP 0301). `receita_kit_homogeneo` e `receita_kit_misto` medem a receita coberta pela BOM
 explicita do Bling (DRE-CMV-CMP-2): kit so' recebe custo com TODOS os
 componentes casados. Nunca custo parcial.
 
@@ -72,6 +73,7 @@ UPGRADE_SQL = [
         receita_carry_forward       NUMERIC(18, 2),
         receita_kit_homogeneo       NUMERIC(18, 2),
         receita_kit_misto           NUMERIC(18, 2),
+        receita_depara              NUMERIC(18, 2),
         confianca                   TEXT,
         regra_temporal              TEXT          NOT NULL,
         fonte_vendas                TEXT          NOT NULL,
@@ -99,6 +101,8 @@ UPGRADE_SQL = [
             AND skus_total >= 0 AND skus_cobertos >= 0 AND skus_conflito >= 0 AND skus_sem_cmp >= 0
             AND skus_cobertos + skus_sem_cmp = skus_total),
         CONSTRAINT ck_fdcp_coberta_le_fonte CHECK (receita_coberta IS NULL OR receita_coberta <= receita_fonte),
+        CONSTRAINT ck_fdcp_depara CHECK (receita_depara IS NULL OR (receita_depara <> 'NaN'
+            AND receita_depara >= 0 AND receita_coberta IS NOT NULL AND receita_depara <= receita_coberta)),
         CONSTRAINT ck_fdcp_confianca CHECK (confianca IS NULL OR confianca IN ('alta', 'media', 'baixa')),
         CONSTRAINT ck_fdcp_regra_temporal CHECK (regra_temporal = 'entidade_vigencia'),
         CONSTRAINT ck_fdcp_sha256 CHECK (cmp_fontes_sha256 ~ '^[0-9a-f]{{64}}$')

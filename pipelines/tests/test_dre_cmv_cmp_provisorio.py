@@ -321,3 +321,157 @@ def test_metodo_depara_aprovado_reservado_e_nunca_emitido():
     """Nenhum nivel de casamento produz `depara_aprovado`: de-para sugerido nao entra."""
     assert "depara_aprovado" in M.METODOS
     assert "depara_aprovado" not in M.METODO_POR_NIVEL.values()
+
+
+# ---------------------------------------------------------------------------
+# DRE-CMV-CMP-7: de-para deterministico (cadastro / GTIN -> um unico CMP 0301)
+# ---------------------------------------------------------------------------
+
+def ean(prefixo12: str) -> str:
+    """EAN-13 sintetico com digito verificador valido."""
+    soma = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(prefixo12))
+    return prefixo12 + str((10 - soma % 10) % 10)
+
+
+G1, G2 = ean("200000000001"), ean("200000000002")
+
+
+def cad(*linhas, marca="Apice"):
+    """linhas: (sku, sku_antigo, gtin)."""
+    return T.montar_catalogo([{"marca": marca, "sku": s, "sku_antigo": a, "tipo": "PA", "gtin_ean": g}
+                              for s, a, g in linhas], [])
+
+
+def classif(tmp_path, vendas, cat, comp=OUT, depara=True, bom=None):
+    _, ind = ler_pasta(tmp_path)
+    return M.classificar(ind, cat, vendas, comp, bom, M.REGRAS_KIT, depara)
+
+
+def test_depara_pelo_codigo_antigo_do_cadastro(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
+    assert (ln["status"], ln["cmp"], ln["nivel"], ln["confianca"]) == ("coberto", Decimal(4), T.NIVEL_DEPARA_CODIGO,
+                                                                       "baixa")
+    (p,) = M.visao_produto([ln], [], OUT)
+    assert p["metodo"] == "depara_deterministico"
+
+
+def test_depara_por_gtin_sem_volume_tem_confianca_alta(tmp_path):
+    """Via GTIN exige volume; o de-para aceita volume ausente e so bloqueia divergencia."""
+    comparativo(tmp_path, [("SP", "NOVO1", G1, "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo")],
+                    cad(("VELHO1", None, G1)))
+    assert (ln["cmp"], ln["nivel"], ln["confianca"]) == (Decimal(4), T.NIVEL_DEPARA_GTIN, "alta")
+
+
+def test_depara_com_volume_concordante_tem_confianca_media(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO 300ML", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo 300 ml")],
+                    cad(("NOVO1", "VELHO1", None)))
+    assert (ln["nivel"], ln["confianca"]) == (T.NIVEL_DEPARA_VOLUME, "media")
+
+
+def test_depara_desligado_mantem_sem_cmp(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)),
+                    depara=False)
+    assert ln["cmp"] is None and ln["status"] == "sem_cmp"
+
+
+def test_depara_com_dois_candidatos_fica_humano(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "NOVO2", G1, "SHAMPOO", [5, 5, 5], 5)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", G1)))
+    assert ln["cmp"] is None and "depara_mais_de_um_candidato" in ln["motivo"]
+
+
+def test_depara_com_volume_divergente_fica_humano(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO 500ML", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100, produto="Shampoo 300ml")],
+                    cad(("NOVO1", "VELHO1", None)))
+    assert ln["cmp"] is None and "depara_evidencia_contraditoria" in ln["motivo"]
+
+
+def test_depara_com_gtin_divergente_fica_humano(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", G2, "SHAMPOO", [4, 4, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", G1)))
+    assert ln["cmp"] is None and "depara_evidencia_contraditoria" in ln["motivo"]
+
+
+def test_nf_contradiz_mas_nunca_cria_depara(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "OUTRO", "", "SHAMPOO", [6, 6, 6], 6)])
+    c = cad(("NOVO1", "VELHO1", None))
+    c.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "OUTRO"}])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], c)
+    assert ln["cmp"] is None and "depara_nf_aponta_outro_candidato" in ln["motivo"]
+    so_nf = cad()
+    so_nf.nf = T.montar_pares_nf([{"marca": "Apice", "codigo_sku": "VELHO1", "sku_canonico": "OUTRO"}])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], so_nf)
+    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
+
+
+def test_depara_nunca_usa_outra_filial_nem_outra_marca(tmp_path):
+    comparativo(tmp_path, [("1301", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "NOVO2", "", "X", [5, 5, 5], 5)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
+    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO2", 10, 100)], cad(("NOVO2", "VELHO2", None),
+                                                                              marca="Barbours"))
+    assert ln["cmp"] is None
+
+
+def test_depara_candidato_sem_cmp_vigente_fica_sem_valor(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [0, 0, 4], 4)])
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)), comp=MAI)
+    assert ln["cmp"] is None and "depara_candidato_sem_cmp_0301" in ln["motivo"]
+
+
+def test_depara_nao_contorna_ks_nem_conflito(tmp_path):
+    comparativo(tmp_path, [("SP", "K9", "", "SERUM", [4, 4, 4], 4)], nome=NOME_KOK)
+    (ln,) = classif(tmp_path, [v("tiktok", "kokeshi", "KS03041", 10, 100)],
+                    cad(("K9", "KS03041", None), marca="Kokeshi"))
+    assert ln["status"] == "origem_a_confirmar" and ln["cmp"] is None
+    comparativo(tmp_path, [("SP", "LC1", "", "X", [5, 5, 5], 5), ("SP", "LC9", "", "X", [7, 7, 7], 7)], nome=NOME_BB)
+    lcv(tmp_path, [("0301", "LC1", "", 9.0, "OK")])
+    (ln,) = classif(tmp_path, [v("tiktok", "lescent", "LC1", 10, 100)], cad(("LC9", "LC1", None), marca="Lescent"))
+    assert ln["status"] == "conflito" and ln["cmp"] is None
+
+
+def test_componente_de_kit_por_depara_fecha_o_kit(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [2, 2, 2], 2), ("SP", "NOVO2", "", "Y", [3, 3, 3], 3)])
+    bom = M.montar_bom([{"marca": "apice", "kit_codigo": "K1", "componente_codigo": c, "quantidade": 1,
+                         "componente_descricao": "", "data_carga": None} for c in ("C1", "VELHO2")])
+    linhas = classif(tmp_path, [v("tiktok", "apice", "K1", 4, 100)], cad(("NOVO2", "VELHO2", None)), bom=bom)
+    (ln,) = linhas
+    assert (ln["status"], ln["cmp"], ln["nivel"], ln["confianca"]) == ("coberto", Decimal(5), M.NIVEL_KIT_MISTO,
+                                                                       "baixa")
+    (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(100)}, {"tiktok": date(2026, 10, 15)}, OUT)
+    assert cel["receita_depara"] == 0 and cel["receita_kit_misto"] == Decimal(100)
+
+
+def test_agregar_mede_receita_por_depara(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4), ("SP", "A2", "", "Y", [2, 2, 2], 2)])
+    linhas = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100), v("tiktok", "apice", "A2", 1, 50)],
+                     cad(("NOVO1", "VELHO1", None)))
+    (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(150)}, {"tiktok": date(2026, 10, 15)}, OUT)
+    assert cel["receita_depara"] == Decimal(100) and cel["receita_coberta"] == Decimal(150)
+
+
+def test_depara_ligado_por_padrao_na_pipeline_oficial(tmp_path):
+    comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
+    _, ind = ler_pasta(tmp_path)
+    (ln,) = M.classificar(ind, cad(("NOVO1", "VELHO1", None)), [v("tiktok", "apice", "VELHO1", 10, 100)], OUT)
+    assert ln["cmp"] == Decimal(4)
+
+
+def test_depara_recusa_gtin_reaproveitado(tmp_path):
+    """Mesmo GTIN em produtos de volume incompativel (mesmo fora do escopo): nao casa."""
+    comparativo(tmp_path, [("SP", "NOVO1", G1, "SHAMPOO 300ML", [4, 4, 4], 4)])
+    comparativo(tmp_path, [("SP", "OUTRO", G1, "SHAMPOO 500ML", [6, 6, 6], 6)], nome=NOME_BB)
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("VELHO1", None, G1)))
+    assert ln["cmp"] is None and "depara_gtin_reutilizado" in ln["motivo"]
+
+
+def test_depara_nao_usa_candidato_de_entidade_fora_da_marca(tmp_path):
+    """Alias do cadastro Apice aponta para um codigo que so existe na BB_VAREJO: nao casa."""
+    comparativo(tmp_path, [("SP", "NOVO9", "", "SHAMPOO", [4, 4, 4], 4)], nome=NOME_BB)
+    (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO9", 10, 100)], cad(("NOVO9", "VELHO9", None)))
+    assert ln["cmp"] is None and "depara_sem_ligacao_deterministica" in ln["motivo"]
