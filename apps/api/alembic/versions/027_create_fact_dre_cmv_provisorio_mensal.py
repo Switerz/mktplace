@@ -21,6 +21,12 @@ fica fora (nunca CMP zero) e aparece em `unidades_sem_cmp`/`skus_sem_cmp`.
 Celula sem venda na fonte (ex.: Shopee Kokeshi, export manual) e' gravada como
 `ausente_na_fonte`, com valores NULL — nunca zero.
 
+KITS
+----
+`receita_kit_homogeneo` e `receita_kit_misto` medem a receita coberta pela BOM
+explicita do Bling (DRE-CMV-CMP-2): kit so' recebe custo com TODOS os
+componentes casados. Nunca custo parcial.
+
 O QUE NAO ENTRA
 ---------------
 Nenhum SKU, pedido ou dado pessoal: so' agregados da celula.
@@ -61,6 +67,8 @@ UPGRADE_SQL = [
         receita_volume              NUMERIC(18, 2),
         receita_codigo_provisorio   NUMERIC(18, 2),
         receita_carry_forward       NUMERIC(18, 2),
+        receita_kit_homogeneo       NUMERIC(18, 2),
+        receita_kit_misto           NUMERIC(18, 2),
         confianca                   TEXT,
         regra_temporal              TEXT          NOT NULL,
         fonte_vendas                TEXT          NOT NULL,

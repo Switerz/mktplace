@@ -31,6 +31,25 @@ KS03041/KS03042 sem CMP, kit sem regra. Sem casamento => sem CMP (NUNCA zero).
 O nome do indicador continua "margem bruta apos CMP" quando o CMV e' so' CMP;
 no cenario estimado da DRE ele e' rotulado como CMV provisorio por CMP.
 
+KITS (DRE-CMV-CMP-2)
+-------------------
+Composicao so' de BOM EXPLICITA: `raw.bling_kit_estrutura` (estrutura do ERP
+Bling, escopada por conta = marca). Nunca por semelhanca de texto nem pela
+co-ocorrencia em NF (`silver.kits_composicao_marketplace` e' inferencia).
+
+  * homogeneo (1 componente): CMP do kit = quantidade x CMP do componente;
+  * misto (2+ componentes): soma de quantidade x CMP de cada componente;
+  * todos os componentes precisam de CMP valido (mesmas regras de casamento);
+    faltou um, o kit fica SEM custo — nunca custo parcial;
+  * se o proprio codigo do kit tambem casa com um CMP direto e os dois
+    divergem, `conflito_kit` (sem escolha).
+
+MARGEM
+------
+`margem bruta apos CMP = receita - CMV` por SKU coberto. Na celula, a margem
+numerica so' existe com 100% de cobertura; abaixo disso so' a margem da PARCELA
+COBERTA, rotulada como tal. A parcela descoberta nunca recebe custo zero.
+
 Codigos de saida: 0 ok; 65 recusa; 69 fonte indisponivel; 75 lock; 78 migration ausente.
 """
 from __future__ import annotations
@@ -73,6 +92,12 @@ FONTE_VENDAS = {
 }
 #: Nivel de casamento -> confianca.
 CONFIANCA = {T.NIVEL_GTIN: "alta", T.NIVEL_VIA_GTIN: "alta", T.NIVEL_VOLUME: "media", T.NIVEL_PROVISORIO: "baixa"}
+NIVEL_KIT_HOMOGENEO = "KIT_BOM_HOMOGENEO"
+NIVEL_KIT_MISTO = "KIT_BOM_MISTO"
+ORDEM_CONFIANCA = {"baixa": 0, "media": 1, "alta": 2}
+#: Regras de kit habilitaveis (medidas separadamente).
+REGRAS_KIT = ("homogeneo", "misto")
+FONTE_BOM = "raw.bling_kit_estrutura (BOM explicita do Bling, conta = marca)"
 RE_KIT = re.compile(r"(?i)(^kit|\bkit\b)")
 
 # ---------------------------------------------------------------------------
@@ -121,6 +146,12 @@ SQL_SHOPEE = """
     GROUP BY 1, 2
 """
 SQL_POR_CANAL = {"ml": SQL_ML, "tiktok": SQL_TIKTOK, "shopee": SQL_SHOPEE}
+#: BOM explicita do ERP. `conta` e' a marca: o mesmo codigo de kit existe em mais de uma conta.
+SQL_BOM = """
+    SELECT conta AS marca, kit_codigo, componente_codigo, componente_descricao, quantidade, data_carga
+    FROM raw.bling_kit_estrutura
+    WHERE conta = ANY(:marcas)
+"""
 
 
 class FonteIndisponivel(RuntimeError):
@@ -159,31 +190,125 @@ class LinhaVenda:
     sku_ambiguo: bool = False
 
 
-def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: date) -> list[dict]:
-    """Resolve o CMP de cada SKU vendido. Sem casamento => `cmp=None` (nunca zero)."""
+def montar_bom(rows: list[dict]) -> dict:
+    """(marca, kit) -> {"componentes": [(codigo, qtd, descricao)], "ambigua": motivo|None, "data_carga": d}.
+
+    Ambigua: componente sem codigo, quantidade nula/<=0/fracionaria, ou o mesmo
+    componente com quantidades diferentes no mesmo kit.
+    """
+    bom: dict = {}
+    for r in rows:
+        k = (r["marca"], C.chave_sku(r["kit_codigo"]))
+        e = bom.setdefault(k, {"componentes": [], "ambigua": None, "data_carga": r.get("data_carga")})
+        cod = C.chave_sku(r.get("componente_codigo"))
+        q = r.get("quantidade")
+        if not cod:
+            e["ambigua"] = "componente sem codigo"
+            continue
+        if q is None or Decimal(str(q)) <= 0 or Decimal(str(q)) != Decimal(str(q)).to_integral_value():
+            e["ambigua"] = f"quantidade invalida para {cod}"
+            continue
+        q = Decimal(str(q))
+        ja = [x for x in e["componentes"] if x[0] == cod]
+        if ja and ja[0][1] != q:
+            e["ambigua"] = f"componente {cod} com quantidades diferentes"
+            continue
+        if not ja:
+            e["componentes"].append((cod, q, r.get("componente_descricao")))
+    return bom
+
+
+def tipo_kit(entrada: dict) -> str:
+    """homogeneo | misto | ambigua (sem composicao = ausente do BOM)."""
+    if entrada["ambigua"] or not entrada["componentes"]:
+        return "ambigua"
+    return "homogeneo" if len(entrada["componentes"]) == 1 else "misto"
+
+
+def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, marca: str, comp: date) -> dict:
+    """CMP do kit pela BOM, so' com TODOS os componentes cobertos. Nunca custo parcial."""
+    partes, faltas, origem, carry = [], [], None, False
+    confs = []
+    for cod, q, desc in entrada["componentes"]:
+        r = T.resolver(ind, {"componente": cod}, comp, desc, cat, marca, idx_gtin)
+        if r.status != "coberto":
+            faltas.append(f"{cod}:{r.status}")
+            continue
+        partes.append(q * r.cmp)
+        confs.append(CONFIANCA[r.nivel])
+        origem = max(origem or r.vigencia.competencia_origem, r.vigencia.competencia_origem)
+        carry = carry or r.vigencia.carry_forward
+    if faltas:
+        return {"status": "kit_componente_sem_cmp", "cmp": None, "motivo": "componentes sem CMP: " + ",".join(faltas)}
+    return {"status": "coberto", "cmp": sum(partes, Decimal(0)),
+            "confianca": min(confs, key=ORDEM_CONFIANCA.get), "competencia_origem": origem, "carry_forward": carry,
+            "motivo": "BOM explicita: " + " + ".join(f"{q}x{c}" for c, q, _ in entrada["componentes"])}
+
+
+def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: date,
+                bom: Optional[dict] = None, regras_kit: tuple = REGRAS_KIT) -> list[dict]:
+    """Resolve o CMP de cada SKU vendido. Sem casamento => `cmp=None` (nunca zero).
+
+    `regras_kit` liga as regras de kit separadamente ("homogeneo", "misto"),
+    para medir quanto cada uma eleva a cobertura.
+    """
     idx_gtin = T.indice_gtin(ind)
+    bom = bom or {}
     out = []
     for v in vendas:
         r: Optional[T.Resolucao] = None
+        kit = None
+        kit_tipo = ""
+        cmp, nivel, conf, origem, carry = None, "", "", None, False
+        cod = C.chave_sku(v.sku)
         if v.sku_ambiguo:
-            status, nivel, motivo = "sku_ambiguo", "", "sku_id com mais de um seller_sku no inventario"
+            status, motivo = "sku_ambiguo", "sku_id com mais de um seller_sku no inventario"
         elif not v.sku:
-            status, nivel, motivo = "sem_sku", "", "venda sem seller_sku"
-        elif T.classificar_tipo(cat, v.marca, [C.chave_sku(v.sku)]) == "kit":
-            status, nivel, motivo = "kit_sem_regra", "", "kit: CMP do kit x soma dos componentes sem regra aprovada"
+            status, motivo = "sem_sku", "venda sem seller_sku"
+        elif T.origem_a_confirmar(v.marca, {"seller_sku": v.sku}):
+            # A BOM nunca contorna o bloqueio de origem (KS03041/KS03042).
+            status, motivo = "origem_a_confirmar", "origem empresarial nao confirmada"
         else:
-            texto = " ".join(x for x in (v.ean, v.produto) if x)
-            r = T.resolver(ind, {"seller_sku": v.sku}, comp, texto, cat, v.marca, idx_gtin)
-            status, nivel, motivo = r.status, r.nivel, r.motivo
-        cmp = r.cmp if (r is not None and r.status == "coberto") else None
-        vig = r.vigencia if (r is not None and r.status == "coberto") else None
+            entrada = bom.get((v.marca, cod))
+            e_kit_cadastro = T.classificar_tipo(cat, v.marca, [cod]) == "kit"
+            if not e_kit_cadastro:
+                texto = " ".join(x for x in (v.ean, v.produto) if x)
+                r = T.resolver(ind, {"seller_sku": v.sku}, comp, texto, cat, v.marca, idx_gtin)
+            if entrada is not None:
+                kit_tipo = tipo_kit(entrada)
+                if kit_tipo == "ambigua":
+                    kit = {"status": "kit_composicao_ambigua", "cmp": None, "motivo": entrada["ambigua"]}
+                elif kit_tipo in regras_kit:
+                    kit = cmp_do_kit(ind, cat, idx_gtin, entrada, v.marca, comp)
+                else:
+                    kit = {"status": "kit_regra_nao_aplicada", "cmp": None, "motivo": f"regra {kit_tipo} desligada"}
+            direto = r is not None and r.status == "coberto"
+            if r is not None and r.status in ("conflito", "ambiguo"):
+                # Conflito ou ambiguidade no codigo direto nunca e' resolvido pela BOM.
+                status, motivo = r.status, r.motivo
+            elif direto and kit and kit["cmp"] is not None and abs(kit["cmp"] - r.cmp) > Decimal("0.005"):
+                status, motivo = "conflito_kit", f"CMP direto {r.cmp} x BOM {kit['cmp']}: sem escolha"
+            elif direto:
+                status, motivo, cmp, nivel = r.status, r.motivo, r.cmp, r.nivel
+                conf, origem, carry = CONFIANCA[nivel], r.vigencia.competencia_origem, r.vigencia.carry_forward
+            elif kit is not None and kit["cmp"] is not None:
+                status, motivo, cmp = "coberto", kit["motivo"], kit["cmp"]
+                nivel = NIVEL_KIT_HOMOGENEO if kit_tipo == "homogeneo" else NIVEL_KIT_MISTO
+                conf, origem, carry = kit["confianca"], kit["competencia_origem"], kit["carry_forward"]
+            elif kit is not None:
+                status, motivo = kit["status"], kit["motivo"]
+            elif e_kit_cadastro:
+                status, motivo = "kit_sem_composicao", "kit no cadastro sem BOM explicita"
+            else:
+                status, motivo = r.status, r.motivo
+        cmv = (v.unidades * cmp) if cmp is not None else None
         out.append({
             "canal": v.canal, "marca": v.marca, "sku": v.sku, "produto": v.produto,
             "unidades": v.unidades, "receita": v.receita, "status": status, "nivel": nivel,
-            "confianca": CONFIANCA.get(nivel, ""), "motivo": motivo,
-            "cmp": cmp, "cmv": (v.unidades * cmp) if cmp is not None else None,
-            "competencia_origem": vig.competencia_origem if vig else None,
-            "carry_forward": bool(vig and vig.carry_forward),
+            "confianca": conf, "motivo": motivo, "kit_tipo": kit_tipo,
+            "cmp": cmp, "cmv": cmv,
+            "margem_bruta_apos_cmp": (v.receita - cmv) if cmv is not None else None,
+            "competencia_origem": origem, "carry_forward": carry,
             "entidades": "|".join(r.entidades) if r is not None else "",
             "candidatos": "|".join(f"{e}:{s}:{c}" for e, s, c, _ in r.candidatos) if r is not None else "",
             "parece_kit": bool(RE_KIT.search(f"{v.sku or ''} {v.produto or ''}")),
@@ -191,16 +316,18 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
     return out
 
 
-def confianca_predominante(receita_por_nivel: dict) -> Optional[str]:
-    """Confianca do nivel com mais receita coberta; empate vai para a MENOR confianca."""
-    ordem = {"baixa": 0, "media": 1, "alta": 2}
+def confianca_predominante(receita_por_confianca: dict) -> Optional[str]:
+    """Confianca com mais receita coberta; empate vai para a MENOR confianca.
+
+    Aceita chaves de confianca (`alta`/`media`/`baixa`) ou niveis de casamento.
+    """
     por_conf: Counter = Counter()
-    for nivel, rec in receita_por_nivel.items():
-        por_conf[CONFIANCA[nivel]] += rec
+    for chave, rec in receita_por_confianca.items():
+        por_conf[CONFIANCA.get(chave, chave)] += rec
     if not por_conf or sum(por_conf.values()) == 0:
         return None
     topo = max(por_conf.values())
-    return min((c for c, v in por_conf.items() if v == topo), key=ordem.get)
+    return min((c for c, v in por_conf.items() if v == topo), key=ORDEM_CONFIANCA.get)
 
 
 def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) -> list[dict]:
@@ -223,33 +350,44 @@ def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) 
                         "unidades_sem_cmp": None, "skus_total": 0, "skus_cobertos": 0, "skus_conflito": 0,
                         "skus_sem_cmp": 0, "receita_gtin": None, "receita_volume": None,
                         "receita_codigo_provisorio": None, "receita_carry_forward": None,
+                        "receita_kit_homogeneo": None, "receita_kit_misto": None,
+                        "margem_bruta_parcela_coberta": None, "margem_bruta_apos_cmp": None,
                         "receita_por_status": {}, "confianca": None})
             continue
         cobertos = [x for x in ls if x["cmp"] is not None]
         rec_fonte = sum((x["receita"] for x in ls), Decimal(0))
         rec_cob = sum((x["receita"] for x in cobertos), Decimal(0))
         por_nivel: Counter = Counter()
+        por_conf: Counter = Counter()
         por_status: Counter = Counter()
         for x in ls:
             por_status[x["status"]] += x["receita"]
             if x["cmp"] is not None:
                 por_nivel[x["nivel"]] += x["receita"]
+                por_conf[x["confianca"]] += x["receita"]
+        cmv_cob = sum((x["cmv"] for x in cobertos), Decimal(0)) if cobertos else None
+        integral = bool(rec_fonte) and rec_cob == rec_fonte
         out.append({
             **base, "status": "calculado", "receita_fonte": rec_fonte,
             "unidades": sum((x["unidades"] for x in ls), Decimal(0)),
             "receita_coberta": rec_cob,
             "cobertura": (rec_cob / rec_fonte).quantize(Decimal("0.000001")) if rec_fonte else Decimal(0),
-            "cmv_provisorio": sum((x["cmv"] for x in cobertos), Decimal(0)) if cobertos else None,
+            "cmv_provisorio": cmv_cob,
             "unidades_sem_cmp": sum((x["unidades"] for x in ls if x["cmp"] is None), Decimal(0)),
             "skus_total": len(ls), "skus_cobertos": len(cobertos),
-            "skus_conflito": sum(1 for x in ls if x["status"] == "conflito"),
+            "skus_conflito": sum(1 for x in ls if x["status"] in ("conflito", "conflito_kit")),
             "skus_sem_cmp": sum(1 for x in ls if x["cmp"] is None),
             "receita_gtin": por_nivel[T.NIVEL_GTIN] + por_nivel[T.NIVEL_VIA_GTIN],
             "receita_volume": por_nivel[T.NIVEL_VOLUME],
             "receita_codigo_provisorio": por_nivel[T.NIVEL_PROVISORIO],
             "receita_carry_forward": sum((x["receita"] for x in cobertos if x["carry_forward"]), Decimal(0)),
+            "receita_kit_homogeneo": por_nivel[NIVEL_KIT_HOMOGENEO],
+            "receita_kit_misto": por_nivel[NIVEL_KIT_MISTO],
+            # So' da parcela coberta, rotulada assim. A margem da CELULA so' existe com 100%.
+            "margem_bruta_parcela_coberta": (rec_cob - cmv_cob) if cmv_cob is not None else None,
+            "margem_bruta_apos_cmp": (rec_fonte - cmv_cob) if integral and cmv_cob is not None else None,
             "receita_por_status": dict(por_status),
-            "confianca": confianca_predominante(dict(por_nivel)),
+            "confianca": confianca_predominante(dict(por_conf)),
         })
     return out
 
@@ -291,7 +429,7 @@ def ler_receita_celulas(neon, comp: date, fim: date) -> tuple[dict, dict]:
     return receita, cortes
 
 
-def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.Catalogo]:
+def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.Catalogo, dict]:
     """Vendas por SKU de cada canal ate a data de corte da DRE (Data Mart, READ ONLY)."""
     from sqlalchemy import text
     vendas = []
@@ -307,8 +445,9 @@ def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.
                                          _d(r["unidades"]), _d(r["receita"]), bool(r["sku_ambiguo"])))
         cad = _rows(conn, T.SQL_CADASTRO, {})
         kits = _rows(conn, T.SQL_KITS, {})
+        bom = montar_bom(_rows(conn, SQL_BOM, {"marcas": list(MARCAS)}))
         conn.rollback()
-    return vendas, T.montar_catalogo(cad, kits)
+    return vendas, T.montar_catalogo(cad, kits), bom
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +457,8 @@ def ler_vendas(datamart, comp: date, cortes: dict) -> tuple[list[LinhaVenda], T.
 COLUNAS = ("competencia", "canal", "marca", "data_corte", "status", "receita_fonte", "unidades", "receita_coberta",
            "cobertura", "cmv_provisorio", "unidades_sem_cmp", "skus_total", "skus_cobertos", "skus_conflito",
            "skus_sem_cmp", "receita_gtin", "receita_volume", "receita_codigo_provisorio", "receita_carry_forward",
-           "confianca", "regra_temporal", "fonte_vendas", "cmp_fontes_sha256")
+           "receita_kit_homogeneo", "receita_kit_misto", "confianca", "regra_temporal", "fonte_vendas",
+           "cmp_fontes_sha256")
 SQL_EXISTE = f"SELECT to_regclass('{TABELA}') IS NOT NULL"
 SQL_LOCK = f"SELECT pg_try_advisory_xact_lock({LOCK_KEY})"
 SQL_APAGA = f"DELETE FROM {TABELA} WHERE competencia = :competencia"
@@ -429,18 +569,39 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
     try:
         neon, datamart = (engines or _engines)()
         receita_cel, cortes = ler_receita_celulas(neon, comp, fim)
-        vendas, cat = ler_vendas(datamart, comp, cortes)
+        vendas, cat, bom = ler_vendas(datamart, comp, cortes)
     except Exception as exc:  # noqa: BLE001
         from pipelines.dre.premissa_publisher import sanitizar
         print(json.dumps({"status": "fonte_indisponivel", "detalhe": sanitizar(exc)}, ensure_ascii=False))
         return EXIT_FONTE
-    linhas = classificar(ind, cat, vendas, comp)
+    # Quanto cada regra eleva a cobertura: sem kit, so' homogeneo, homogeneo + misto.
+    cenarios = {"sem_kit": (), "homogeneo": ("homogeneo",), "homogeneo_e_misto": REGRAS_KIT}
+    cobertura_por_regra = {}
+    for nome, regras in cenarios.items():
+        cels = agregar(classificar(ind, cat, vendas, comp, bom, regras), receita_cel, cortes, comp)
+        cobertura_por_regra[nome] = {f"{c['canal']}|{c['marca']}": c["cobertura"] for c in cels}
+    linhas = classificar(ind, cat, vendas, comp, bom, REGRAS_KIT)
     celulas = agregar(linhas, receita_cel, cortes, comp)
     args.saida.mkdir(parents=True, exist_ok=True)
     with open(args.saida / f"matriz_cmv_cmp_{comp:%Y-%m}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(linhas[0]) if linhas else ["vazio"])
         w.writeheader()
         w.writerows(linhas)
+    cob = {(c["canal"], c["marca"]): c["cobertura"] for c in celulas}
+    with open(args.saida / f"margem_produto_{comp:%Y-%m}.csv", "w", newline="", encoding="utf-8") as f:
+        campos = ["canal", "marca", "sku", "produto", "receita", "unidades", "cmp", "cmv", "margem_bruta_apos_cmp",
+                  "margem_pct", "nivel", "confianca", "kit_tipo", "cobertura_da_celula"]
+        w = csv.DictWriter(f, fieldnames=campos)
+        w.writeheader()
+        for x in linhas:
+            if x["cmp"] is None:
+                continue
+            w.writerow({**{k: x[k] for k in campos if k in x},
+                        "margem_pct": (x["margem_bruta_apos_cmp"] / x["receita"] * 100).quantize(Decimal("0.01"))
+                        if x["receita"] else None,
+                        "cobertura_da_celula": cob.get((x["canal"], x["marca"]))})
+    (args.saida / f"cobertura_por_regra_{comp:%Y-%m}.json").write_text(
+        json.dumps(cobertura_por_regra, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.saida / f"celulas_cmv_cmp_{comp:%Y-%m}.json").write_text(
         json.dumps(celulas, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     saida: dict = {"modo": "apply" if args.apply else "dry-run", "competencia": comp.isoformat()[:7],

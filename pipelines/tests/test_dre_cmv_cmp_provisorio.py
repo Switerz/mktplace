@@ -95,7 +95,7 @@ def test_sku_ambiguo_sem_sku_e_kit_ficam_sem_cmp(tmp_path):
     linhas = resolver(tmp_path, [v("tiktok", "apice", "A1", 1, 10, ambiguo=True),
                                  v("tiktok", "apice", None, 1, 10),
                                  v("tiktok", "apice", "K1", 1, 10)], cat=cat)
-    assert [ln["status"] for ln in linhas] == ["sku_ambiguo", "sem_sku", "kit_sem_regra"]
+    assert [ln["status"] for ln in linhas] == ["sku_ambiguo", "sem_sku", "kit_sem_composicao"]
     assert all(ln["cmp"] is None for ln in linhas)
 
 
@@ -128,9 +128,116 @@ def test_dry_run_nunca_chama_publicar(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(M, "publicar", lambda *a, **k: (_ for _ in ()).throw(AssertionError("escreveu")))
     monkeypatch.setattr(M, "ler_receita_celulas",
                         lambda neon, c, f: ({("tiktok", "apice"): Decimal(300)}, {"tiktok": date(2026, 10, 15)}))
-    monkeypatch.setattr(M, "ler_vendas", lambda dm, c, cortes: ([v("tiktok", "apice", "A1", 10, 300)], T.Catalogo()))
+    monkeypatch.setattr(M, "ler_vendas",
+                        lambda dm, c, cortes: ([v("tiktok", "apice", "A1", 10, 300)], T.Catalogo(), {}))
     rc = M.main(["--pasta", str(pasta), "--competencia", "2026-10", "--saida", str(tmp_path / "o")],
                 engines=lambda: (object(), object()))
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["modo"] == "dry-run" and "escrita" not in out
     assert out["celulas"][0]["cobertura_pct"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# DRE-CMV-CMP-2 — kits pela BOM explicita e margem por produto
+# ---------------------------------------------------------------------------
+
+def bom(*linhas):
+    """(marca, kit, componente, quantidade[, descricao])."""
+    return M.montar_bom([{"marca": m, "kit_codigo": k, "componente_codigo": c, "quantidade": q,
+                          "componente_descricao": (x[0] if x else None), "data_carga": date(2026, 9, 30)}
+                         for m, k, c, q, *x in linhas])
+
+
+def kits(tmp_path, vendas, b, regras=M.REGRAS_KIT):
+    _, ind = ler_pasta(tmp_path)
+    return M.classificar(ind, T.Catalogo(), vendas, OUT, b, regras)
+
+
+def test_kit_homogeneo_quantidade_vezes_cmp(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "SHAMPOO 300ML", [3, 3, 3], 3)])
+    (ln,) = kits(tmp_path, [v("ml", "apice", "KIT3", 2, 100)], bom(("apice", "KIT3", "C1", 3)))
+    assert (ln["status"], ln["nivel"], ln["kit_tipo"], ln["cmp"]) == ("coberto", M.NIVEL_KIT_HOMOGENEO, "homogeneo",
+                                                                      Decimal("9"))
+    assert ln["cmv"] == Decimal("18") and ln["margem_bruta_apos_cmp"] == Decimal("82")
+
+
+def test_kit_misto_soma_os_componentes_com_a_menor_confianca(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "7898652877919", "SHAMPOO 300ML", [3, 3, 3], 3),
+                           ("SP", "C2", "", "CONDICIONADOR", [2, 2, 2], 2)])
+    b = bom(("apice", "KITX", "C1", 1, "7898652877919 Shampoo 300ml"), ("apice", "KITX", "C2", 2, "Condicionador"))
+    (ln,) = kits(tmp_path, [v("tiktok", "apice", "KITX", 1, 50)], b)
+    assert (ln["status"], ln["nivel"], ln["cmp"]) == ("coberto", M.NIVEL_KIT_MISTO, Decimal("7"))
+    assert ln["confianca"] == "baixa"            # C1 por GTIN (alta), C2 so' por codigo (baixa): vale a menor
+
+
+def test_kit_com_componente_sem_cmp_fica_sem_custo_nunca_parcial(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3)])
+    (ln,) = kits(tmp_path, [v("ml", "apice", "KITX", 1, 50)], bom(("apice", "KITX", "C1", 1), ("apice", "KITX", "ZZ", 1)))
+    assert (ln["status"], ln["cmp"], ln["cmv"]) == ("kit_componente_sem_cmp", None, None)
+    assert "ZZ:sem_cmp" in ln["motivo"]
+
+
+def test_bom_e_escopada_pela_marca(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3)])
+    (ln,) = kits(tmp_path, [v("ml", "apice", "KITX", 1, 50)], bom(("barbours", "KITX", "C1", 1)))
+    assert ln["cmp"] is None and ln["kit_tipo"] == ""
+
+
+def test_composicao_ambigua_nao_calcula(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3)])
+    for b in (bom(("apice", "KITX", "C1", 1), ("apice", "KITX", "C1", 2)),     # mesmo componente, quantidades distintas
+              bom(("apice", "KITX", "C1", 1.5)),                               # quantidade fracionaria
+              bom(("apice", "KITX", "", 1))):                                  # componente sem codigo
+        (ln,) = kits(tmp_path, [v("ml", "apice", "KITX", 1, 50)], b)
+        assert (ln["status"], ln["cmp"]) == ("kit_composicao_ambigua", None)
+
+
+def test_regras_ligadas_separadamente(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3), ("SP", "C2", "", "Y", [2, 2, 2], 2)])
+    b = bom(("apice", "H", "C1", 2), ("apice", "MX", "C1", 1), ("apice", "MX", "C2", 1))
+    vendas = [v("ml", "apice", "H", 1, 10), v("ml", "apice", "MX", 1, 10)]
+    so_h = kits(tmp_path, vendas, b, ("homogeneo",))
+    assert [ln["status"] for ln in so_h] == ["coberto", "kit_regra_nao_aplicada"]
+    nenhuma = kits(tmp_path, vendas, b, ())
+    assert all(ln["cmp"] is None for ln in nenhuma)
+
+
+def test_cmp_direto_e_bom_divergentes_viram_conflito(tmp_path):
+    comparativo(tmp_path, [("SP", "KITX", "", "KIT", [9, 9, 9], 9), ("SP", "C1", "", "X", [3, 3, 3], 3)])
+    (ln,) = kits(tmp_path, [v("ml", "apice", "KITX", 1, 50)], bom(("apice", "KITX", "C1", 2)))
+    assert (ln["status"], ln["cmp"]) == ("conflito_kit", None)
+    (ok,) = kits(tmp_path, [v("ml", "apice", "KITX", 1, 50)], bom(("apice", "KITX", "C1", 3)))
+    assert (ok["status"], ok["cmp"]) == ("coberto", Decimal("9"))        # iguais: sem divergencia
+
+
+def test_bom_nao_contorna_bloqueio_ks_nem_conflito(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3)], nome=NOME_KOK)
+    (ks,) = kits(tmp_path, [v("tiktok", "kokeshi", "KS03041", 1, 50)], bom(("kokeshi", "KS03041", "C1", 1)))
+    assert (ks["status"], ks["cmp"]) == ("origem_a_confirmar", None)
+    (comp_ks,) = kits(tmp_path, [v("tiktok", "kokeshi", "KITK", 1, 50)], bom(("kokeshi", "KITK", "KS03041", 1)))
+    assert comp_ks["status"] == "kit_componente_sem_cmp" and "origem_a_confirmar" in comp_ks["motivo"]
+
+
+def test_conflito_do_codigo_direto_nao_e_resolvido_pela_bom(tmp_path):
+    comparativo(tmp_path, [("SP", "LC1", "", "X", [5, 5, 5], 5)])
+    lcv(tmp_path, [("0301", "LC1", "", 9.0, "OK"), ("0301", "C9", "", 4.0, "OK")])
+    (ln,) = kits(tmp_path, [v("tiktok", "lescent", "LC1", 1, 50)], bom(("lescent", "LC1", "C9", 1)))
+    assert (ln["status"], ln["cmp"]) == ("conflito", None)
+
+
+def test_margem_da_celula_so_com_cobertura_total(tmp_path):
+    comparativo(tmp_path, [("SP", "A1", "", "X", [3, 3, 3], 3)])
+    linhas = resolver(tmp_path, [v("tiktok", "apice", "A1", 10, 300), v("tiktok", "apice", "SEM", 5, 100)])
+    (cel,) = M.agregar(linhas, {("tiktok", "apice"): Decimal(400)}, {"tiktok": date(2026, 10, 15)}, OUT)
+    assert cel["margem_bruta_apos_cmp"] is None                       # 75%: sem margem da celula
+    assert cel["margem_bruta_parcela_coberta"] == Decimal(270)        # 300 - 10 x 3, rotulada como parcela
+    total = resolver(tmp_path, [v("tiktok", "apice", "A1", 10, 300)])
+    (cel100,) = M.agregar(total, {("tiktok", "apice"): Decimal(300)}, {"tiktok": date(2026, 10, 15)}, OUT)
+    assert cel100["margem_bruta_apos_cmp"] == Decimal(270)
+
+
+def test_confianca_da_celula_usa_a_confianca_da_linha(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [3, 3, 3], 3)])
+    linhas = kits(tmp_path, [v("ml", "apice", "K", 1, 50)], bom(("apice", "K", "C1", 1)))
+    (cel,) = M.agregar(linhas, {("ml", "apice"): Decimal(50)}, {"ml": date(2026, 10, 15)}, OUT)
+    assert cel["confianca"] == "baixa" and cel["receita_kit_homogeneo"] == Decimal(50)
