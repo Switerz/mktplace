@@ -529,6 +529,14 @@ class IncrementalFakeCursor:
         self.conn.executed_params.append(params)
         if self.conn.fail_on_substring and self.conn.fail_on_substring in norm:
             raise RuntimeError("falha simulada de execução")
+        # REGIONAL-SOURCE-RECOVERY-1: relacao Shopee ausente se comporta como no
+        # Postgres — qualquer consulta que a LEIA levanta; so' a sonda
+        # `to_regclass`, que recebe o nome como texto, responde sem levantar.
+        upper = norm.upper()
+        if (not self.conn.shopee_source_exists
+                and "SILVER.STG_SHOPEE_ORDER_ITEM_SNAPSHOTS" in upper
+                and "TO_REGCLASS" not in upper):
+            raise RuntimeError('relation "silver.stg_shopee_order_item_snapshots" does not exist')
         if norm.upper().startswith("INSERT INTO GOLD.MARKETPLACE_REGION_DAILY"):
             self.conn.final_insert_executed = True
 
@@ -540,6 +548,8 @@ class IncrementalFakeCursor:
             return (self.conn.lock_acquired,)
         if "PG_ADVISORY_UNLOCK" in upper:
             return (True,)
+        if "TO_REGCLASS" in upper:
+            return (self.conn.shopee_source_exists,)
         for matcher, value in self.conn.fetchone_responses:
             if matcher(upper):
                 # Resposta CALLABLE = fonte simulada de verdade: recebe os
@@ -576,7 +586,9 @@ class IncrementalFakeConn:
     def __init__(
         self, lock_acquired=True, fail_on_substring=None,
         fetchone_responses=None, fetchall_responses=None, final_insert_rowcount=10,
+        shopee_source_exists=True,
     ):
+        self.shopee_source_exists = shopee_source_exists
         self.executed = []
         self.executed_params = []
         self.committed = False
@@ -1626,6 +1638,8 @@ class _R2Cursor(IncrementalFakeCursor):
             return (self.conn.lock_acquired,)
         if "PG_ADVISORY_UNLOCK" in upper:
             return (True,)
+        if "TO_REGCLASS" in upper:
+            return (self.conn.shopee_source_exists,)
 
         # --- GMV do STAGING: soma pela janela do INSERT de staging ---
         for mkt, mkt_id in (("shopee", loader.SHOPEE_MARKETPLACE_ID),
@@ -1994,3 +2008,198 @@ def test_dqd2_reexecucao_e_idempotente_por_construcao(monkeypatch):
     assert r.no_op is True
     assert r.date_to == teto
     assert fake.final_insert_executed is False
+
+
+# ---------------------------------------------------------------------------
+# REGIONAL-SOURCE-RECOVERY-1 — fonte Shopee arquivada em 29/09/2026
+#
+# Medido em 16/10: `silver.stg_shopee_order_item_snapshots` foi movida para
+# `archive`, e desde 03/10 todo `--incremental` saia com exit 4
+# (`relation ... does not exist`) — o ML parado em 28/09 junto com a Shopee.
+# O fake desta secao LEVANTA ao ler a relacao ausente, como o Postgres.
+# ---------------------------------------------------------------------------
+
+def _shopee_ausente_conn(ml_fonte=date(2026, 10, 15), **overrides):
+    return IncrementalFakeConn(
+        shopee_source_exists=False,
+        fetchall_responses=[
+            (_inc_exact(_SQL_MAX_DATE_GOLD_NORM), [
+                (loader.ML_MARKETPLACE_ID, date(2026, 9, 28)),
+                (loader.SHOPEE_MARKETPLACE_ID, date(2026, 8, 24)),
+            ]),
+        ],
+        fetchone_responses=[
+            (_inc_exact(_SQL_MAX_DATE_ML_NORM), (ml_fonte,)),
+            (_inc_all("SELECT COUNT(*) FROM (", "RAW.ML_ORDERS", "ML_JOINED"), (321,)),
+            (_inc_contains("HAVING COUNT(*) > 1"), (0,)),
+            (_inc_contains("IS NULL OR MARKETPLACE_ID IS NULL"), (0,)),
+            (_inc_contains("UF_KNOWN_ORDERS > UF_ELIGIBLE_ORDERS"), (0,)),
+            (_inc_contains(f"WHERE MARKETPLACE_ID = {loader.ML_MARKETPLACE_ID}"), (Decimal("900.00"),)),
+            (_inc_contains("RAW.ML_ORDERS WHERE STATUS = 'PAID' AND DATE_CREATED"), (Decimal("900.00"),)),
+            (_inc_contains(f"WHERE MARKETPLACE_ID = {loader.TIKTOK_MARKETPLACE_ID}"), (0,)),
+            (_inc_exact("SELECT COUNT(*) FROM STG_MARKETPLACE_REGION_DAILY"), (321,)),
+        ],
+        **overrides,
+    )
+
+
+def _leu_a_relacao_shopee(executed):
+    return [s for s in executed
+            if "SILVER.STG_SHOPEE_ORDER_ITEM_SNAPSHOTS" in s.upper() and "TO_REGCLASS" not in s.upper()]
+
+
+_TETO_RSR = date(2026, 10, 15)
+
+
+def test_rsr1_contraprova_o_fake_reproduz_o_incidente():
+    """Sem esta contraprova o resto da secao poderia passar com um fake que
+    nunca levanta. Ler a relacao ausente TEM de falhar como no banco."""
+    conn = _shopee_ausente_conn()
+    with pytest.raises(RuntimeError, match="does not exist"):
+        conn.cursor().execute(loader.SQL_MAX_DATE_SHOPEE_SOURCE, {"date_to": _TETO_RSR})
+
+
+def test_rsr1_carga_com_shopee_ausente_carrega_o_ml(monkeypatch):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    fake = _shopee_ausente_conn()
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    r = loader.execute_incremental_load("postgresql://w@host/db")
+
+    assert r.no_op is False
+    assert r.marketplaces_updated == ["ml"]
+    assert r.marketplaces_source_unavailable == ["shopee"]
+    assert r.shopee_gmv_staging is None and r.shopee_gmv_source is None
+    assert fake.committed is True and fake.rolled_back is False
+    # Nenhuma consulta leu a relacao ausente — so' a sonda falou dela.
+    assert _leu_a_relacao_shopee(fake.executed) == []
+    assert sum("TO_REGCLASS" in s.upper() for s in fake.executed) == 1
+
+
+def test_rsr1_shopee_ausente_nao_vira_linha_zero_na_staging(monkeypatch):
+    """Ausencia nao e' zero: nenhum INSERT de staging pode citar a Shopee."""
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    fake = _shopee_ausente_conn()
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    loader.execute_incremental_load("postgresql://w@host/db")
+
+    inserts = [s.upper() for s in fake.executed
+               if s.upper().startswith("INSERT INTO STG_MARKETPLACE_REGION_DAILY")]
+    assert len(inserts) == 1
+    assert "RAW.ML_ORDERS" in inserts[0]
+    assert f"{loader.SHOPEE_MARKETPLACE_ID} AS MARKETPLACE_ID" not in inserts[0]
+
+
+def test_rsr1_no_op_com_shopee_ausente_declara_a_ausencia(monkeypatch):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    fake = _shopee_ausente_conn(ml_fonte=date(2026, 9, 28))  # ML sem novidade
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    r = loader.execute_incremental_load("postgresql://w@host/db")
+
+    assert r.no_op is True
+    assert r.marketplaces_source_unavailable == ["shopee"]
+    assert fake.final_insert_executed is False
+
+
+def test_rsr1_diagnose_com_shopee_ausente(monkeypatch):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    fake = _shopee_ausente_conn()
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    report = loader.diagnose_incremental_load("postgresql://r@host/db")
+
+    by = {m.marketplace: m for m in report.marketplaces}
+    assert by["ml"].source_available is True
+    assert by["ml"].will_update is True and by["ml"].estimated_new_rows == 321
+    assert by["shopee"].source_available is False
+    assert by["shopee"].will_update is False
+    assert by["shopee"].max_date_gold == date(2026, 8, 24)
+    assert by["shopee"].max_date_source_global is None
+    assert report.any_update_needed is True
+    assert _leu_a_relacao_shopee(fake.executed) == []
+
+
+def test_rsr1_shopee_presente_segue_o_caminho_de_sempre(monkeypatch):
+    """Sonda positiva nao muda nada: a consulta de maximos da Shopee roda."""
+    fake = _happy_incremental_only_ml_conn()
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    r = loader.execute_incremental_load("postgresql://w@host/db")
+
+    assert r.marketplaces_source_unavailable == []
+    assert any(s.upper() == _SQL_MAX_DATE_SHOPEE_NORM for s in fake.executed)
+
+
+def test_rsr1_ml_continua_obrigatorio():
+    """So' a Shopee tem a ausencia medida e explicada. Uma fonte ML ausente
+    tem de continuar derrubando a carga, nunca virar 'indisponivel'."""
+    sondas = {nome: sonda for nome, _id, _sql, _fn, sonda in loader._SUPPORTED_MARKETPLACES}
+    assert sondas == {"ml": None, "shopee": loader.SQL_SHOPEE_SOURCE_EXISTS}
+
+
+def test_rsr1_falha_do_ml_com_shopee_ausente_ainda_e_falha(monkeypatch):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    fake = _shopee_ausente_conn(fail_on_substring="FROM raw.ml_orders WHERE status IN")
+    monkeypatch.setattr(loader, "psycopg2", _FakePsycopg2Module(fake))
+
+    with pytest.raises(RuntimeError, match="rollback completo"):
+        loader.execute_incremental_load("postgresql://w@host/db")
+    assert fake.rolled_back is True and fake.committed is False
+
+
+def test_rsr1_sonda_usa_to_regclass_com_o_nome_da_fonte_e_nao_le_dado():
+    sql = loader.SQL_SHOPEE_SOURCE_EXISTS
+    assert "to_regclass('silver.stg_shopee_order_item_snapshots')" in sql
+    assert " FROM " not in sql.upper()
+
+
+def _cli_com_resultado(monkeypatch, result):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    monkeypatch.setattr(loader, "_resolve_write_url", lambda *a, **k: ("postgresql://w@h/db", None))
+    monkeypatch.setattr(loader.write_conn, "run_preflight",
+                        lambda *a, **k: type("R", (), {
+                            "ok": True, "safe_summary": {}, "warnings": [],
+                            "blocking_reasons": []})())
+    monkeypatch.setattr(loader, "execute_incremental_load", lambda url, date_to=None: result)
+
+
+def test_rsr1_cli_avisa_fonte_ausente_em_stderr_na_carga(monkeypatch, capsys):
+    _cli_com_resultado(monkeypatch, loader.IncrementalLoadResult(
+        no_op=False, date_to=_TETO_RSR, rows_inserted=321, marketplaces_updated=["ml"],
+        marketplaces_source_unavailable=["shopee"]))
+    assert loader.run_incremental_cli() == 0
+    cap = capsys.readouterr()
+    assert "AVISO: fonte de shopee indisponivel" in cap.err
+    assert "shopee NAO foi carregado" in cap.err
+    assert "Marketplaces atualizados: ['ml']" in cap.out
+
+
+def test_rsr1_cli_avisa_fonte_ausente_tambem_no_no_op(monkeypatch, capsys):
+    _cli_com_resultado(monkeypatch, loader.IncrementalLoadResult(
+        no_op=True, date_to=_TETO_RSR, marketplaces_source_unavailable=["shopee"]))
+    assert loader.run_incremental_cli() == 0
+    assert "AVISO: fonte de shopee indisponivel" in capsys.readouterr().err
+
+
+def test_rsr1_cli_sem_fonte_ausente_nao_avisa(monkeypatch, capsys):
+    _cli_com_resultado(monkeypatch, loader.IncrementalLoadResult(no_op=True, date_to=_TETO_RSR))
+    assert loader.run_incremental_cli() == 0
+    assert "indisponivel" not in capsys.readouterr().err
+
+
+def test_rsr1_diagnose_cli_nomeia_a_fonte_indisponivel(monkeypatch, capsys):
+    monkeypatch.setattr(loader, "last_closed_date", lambda agora=None: _TETO_RSR)
+    monkeypatch.setattr(loader.settings, "datamart_database_url", "postgresql://r@h/db")
+    monkeypatch.setattr(loader, "diagnose_incremental_load", lambda url, date_to=None: loader.DiagnoseReport(
+        marketplaces=[loader.MarketplaceFreshness(
+            marketplace="shopee", marketplace_id=loader.SHOPEE_MARKETPLACE_ID,
+            max_date_gold=date(2026, 8, 24), max_date_source_global=None,
+            max_date_source_eligible=None, estimated_new_rows=0, will_update=False,
+            source_available=False)],
+        any_update_needed=False))
+    assert loader.run_diagnose_cli() == 0
+    out = capsys.readouterr().out
+    assert "shopee: FONTE INDISPONIVEL" in out
+    assert "max_date_gold=2026-08-24" in out

@@ -18,12 +18,13 @@ Regras de negocio fixadas no Gate 6A/6B, nao redescobrir aqui:
 """
 from __future__ import annotations
 
-from datetime import date
+import calendar
+from datetime import date, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.deps.period import EffectivePeriod
+from app.deps.period import EffectivePeriod, today_brt
 from app.services.performance_service import (
     BRAND_LABELS, ML_ID, MES_LABELS, SHOPEE_ID, TIKTOK_ID, _brand_filter_sql, _f,
 )
@@ -118,11 +119,155 @@ def _round_or_none(v) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Cobertura por canal (REGIONAL-SOURCE-RECOVERY-2)
+#
+# `refreshed_at` e' o MAX(ingested_at) de TODOS os canais pedidos: com o ML
+# carregado ontem e a Shopee congelada em 24/08/2026, ele diz "atualizado" e
+# os meses seguintes mostram Shopee = 0 sem aviso. A cobertura passa a ser
+# declarada por canal, a partir da ultima DATA carregada de cada um — nunca do
+# instante de ingestao, que mede a carga e nao o dado.
+# ---------------------------------------------------------------------------
+
+#: Status de cobertura de um canal no periodo pedido. `esperado_ate` e'
+#: min(fim do periodo, D-1 em America/Sao_Paulo). Sem tolerancia: D-2 NAO e'
+#: "atualizada" (decisao REGIONAL-SOURCE-RECOVERY-3).
+#:   atualizada    — dados_ate >= esperado_ate;
+#:   atraso_leve   — dados_ate == esperado_ate - 1 dia (ex.: antes da carga
+#:                   da manha, o canal saudavel ainda esta em D-2);
+#:   defasada      — dados_ate < esperado_ate - 1 dia;
+#:   sem_carga     — nenhuma linha regional carregada para o canal;
+#:   sem_cobertura — canal sem fonte regional (estrutural, hoje so' TikTok).
+DIAS_ATRASO_LEVE = 1
+
+_MOTIVO_POR_STATUS = {
+    "atraso_leve": "carga_atrasada",
+    "defasada": "carga_defasada",
+    "sem_carga": "sem_carga",
+    "sem_cobertura": "sem_fonte_regional",
+}
+
+#: Status em que o total NAO pode ser apresentado como atualizado.
+STATUS_COM_ATRASO = ("atraso_leve", "defasada", "sem_carga")
+
+# Explicacao conhecida por canal, exibida SO' quando o canal esta defasado,
+# sem carga ou sem cobertura — nunca no atraso leve, que e' rotina de horario
+# de carga e nao a causa estrutural. Se a carga voltar, o texto some sozinho.
+_STATUS_COM_DETALHE = ("defasada", "sem_carga", "sem_cobertura")
+_DETALHE_ATRASO_LEVE = "A carga do último dia fechado ainda não chegou para este canal."
+_DETALHE_POR_CANAL = {
+    "tiktok": "Nenhuma fonte mapeada expõe a UF do pedido TikTok.",
+    "shopee": (
+        "A fonte regional da Shopee (export do Seller Center) foi descontinuada e a API "
+        "da Shopee entrega o endereço do comprador mascarado — não há UF para carregar."
+    ),
+}
+
+
+def _dados_ate_por_canal(
+    db: Session, mkt_ids: list[int], brand_keys: list[str] | None = None,
+) -> dict[int, date]:
+    """Ultima `date` carregada por marketplace, SEM filtro de periodo: o que
+    importa e' ate onde a carga chega, inclusive quando ela para antes do
+    periodo pedido."""
+    params: dict = {"mkt_ids": mkt_ids}
+    brand_filter = _brand_filter_sql(brand_keys, params)
+    sql = text(f"""
+        SELECT f.marketplace_id, MAX(f.date) AS dados_ate
+        FROM {REGION_TABLE} f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY f.marketplace_id
+    """)
+    rows = db.execute(sql, params).mappings().all()
+    return {int(r["marketplace_id"]): r["dados_ate"] for r in rows if r["dados_ate"] is not None}
+
+
+def build_cobertura_canais(
+    mkt_ids: list[int], dados_ate: dict[int, date], period: EffectivePeriod, hoje: date,
+) -> dict:
+    """Puro. Monta `cobertura_por_canal`, `canais_defasados` e
+    `dados_completos_ate` (o menor `dados_ate` entre os canais com fonte
+    regional — a data ate a qual o TOTAL cobre todos eles)."""
+    esperado_ate = min(period.end, hoje - timedelta(days=1))
+    canais: list[dict] = []
+    for mkt_id in sorted(set(mkt_ids)):
+        nome = _MKT_NAME.get(mkt_id, str(mkt_id))
+        ultimo = dados_ate.get(mkt_id)
+        if mkt_id in NO_REGIONAL_COVERAGE_IDS:
+            status = "sem_cobertura"
+            ultimo = None
+        elif ultimo is None:
+            status = "sem_carga"
+        elif ultimo >= esperado_ate:
+            status = "atualizada"
+        elif ultimo >= esperado_ate - timedelta(days=DIAS_ATRASO_LEVE):
+            status = "atraso_leve"
+        else:
+            status = "defasada"
+        if status in _STATUS_COM_DETALHE:
+            detalhe = _DETALHE_POR_CANAL.get(nome)
+        elif status == "atraso_leve":
+            detalhe = _DETALHE_ATRASO_LEVE
+        else:
+            detalhe = None
+        canais.append({
+            "channel": nome,
+            "marketplace_id": mkt_id,
+            "status": status,
+            "dados_ate": ultimo,
+            "esperado_ate": esperado_ate,
+            "motivo": _MOTIVO_POR_STATUS.get(status),
+            "motivo_detalhe": detalhe,
+        })
+
+    com_fonte = [c for c in canais if c["status"] != "sem_cobertura"]
+    if not com_fonte or any(c["dados_ate"] is None for c in com_fonte):
+        dados_completos_ate = None
+    else:
+        dados_completos_ate = min(c["dados_ate"] for c in com_fonte)
+    return {
+        "cobertura_por_canal": canais,
+        # Graves (o canal falta no total por mais de um dia, ou inteiro).
+        "canais_defasados": [c["channel"] for c in com_fonte if c["status"] in ("defasada", "sem_carga")],
+        # Qualquer canal que impede chamar o total de atualizado, inclusive D-2.
+        "canais_com_atraso": [c["channel"] for c in com_fonte if c["status"] in STATUS_COM_ATRASO],
+        "dados_completos_ate": dados_completos_ate,
+    }
+
+
+def _cobertura(
+    db: Session, mkt_ids: list[int], brand_keys: list[str] | None, period: EffectivePeriod,
+    hoje: date | None,
+) -> dict:
+    return build_cobertura_canais(
+        mkt_ids, _dados_ate_por_canal(db, mkt_ids, brand_keys), period, hoje or today_brt(),
+    )
+
+
+def _fim_do_bucket(bucket: date, granularity: str, period_end: date) -> date:
+    if granularity == "day":
+        return bucket
+    ultimo_dia = calendar.monthrange(bucket.year, bucket.month)[1]
+    return min(date(bucket.year, bucket.month, ultimo_dia), period_end)
+
+
+def canais_ausentes_no_bucket(cobertura_por_canal: list[dict], fim_bucket: date) -> list[str]:
+    """Canais com fonte regional cuja carga para antes do fim do bucket: o
+    ponto da serie NAO os inclui (por inteiro ou em parte). Ausencia, nao
+    zero — o cliente precisa marcar o ponto."""
+    return [
+        c["channel"] for c in cobertura_por_canal
+        if c["status"] != "sem_cobertura" and (c["dados_ate"] is None or c["dados_ate"] < fim_bucket)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # GET /regioes/summary
 # ---------------------------------------------------------------------------
 def get_summary(
     db: Session, mkt_ids: list[int], brand_keys: list[str] | None, period: EffectivePeriod,
-    *, uf_filter: list[str] | None = None, channels: str = "all",
+    *, uf_filter: list[str] | None = None, channels: str = "all", hoje: date | None = None,
 ) -> dict:
     params: dict = {"start": period.start, "end": period.end, "mkt_ids": mkt_ids}
     brand_filter = _brand_filter_sql(brand_keys, params)
@@ -154,6 +299,7 @@ def get_summary(
     uf_fill_pct = _pct(uf_known, uf_eligible)
     level = coverage_level(uf_fill_pct)
 
+    cob = _cobertura(db, mkt_ids, brand_keys, period, hoje)
     return {
         "gmv": round(_f(row.get("gmv")), 2),
         "orders": int(_f(row.get("orders"))),
@@ -173,6 +319,7 @@ def get_summary(
         "filters": {"channels": channels, "brands": brand_keys},
         "refreshed_at": _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys),
         "channels_sem_cobertura_regional": channels_sem_cobertura_regional(mkt_ids),
+        **cob,
     }
 
 
@@ -181,7 +328,7 @@ def get_summary(
 # ---------------------------------------------------------------------------
 def get_by_uf(
     db: Session, mkt_ids: list[int], brand_keys: list[str] | None, period: EffectivePeriod,
-    *, uf_filter: list[str] | None = None, channels: str = "all",
+    *, uf_filter: list[str] | None = None, channels: str = "all", hoje: date | None = None,
 ) -> dict:
     params: dict = {"start": period.start, "end": period.end, "mkt_ids": mkt_ids}
     brand_filter = _brand_filter_sql(brand_keys, params)
@@ -236,6 +383,7 @@ def get_by_uf(
             "coverage_warning": coverage_warning(level),
         })
 
+    cob = _cobertura(db, mkt_ids, brand_keys, period, hoje)
     return {
         "data": data,
         "date_from": period.start,
@@ -243,6 +391,7 @@ def get_by_uf(
         "filters": {"channels": channels, "brands": brand_keys},
         "refreshed_at": _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys),
         "channels_sem_cobertura_regional": channels_sem_cobertura_regional(mkt_ids),
+        **cob,
     }
 
 
@@ -251,7 +400,7 @@ def get_by_uf(
 # ---------------------------------------------------------------------------
 def get_by_brand(
     db: Session, mkt_ids: list[int], brand_keys: list[str] | None, period: EffectivePeriod,
-    *, channels: str = "all",
+    *, channels: str = "all", hoje: date | None = None,
 ) -> dict:
     params: dict = {"start": period.start, "end": period.end, "mkt_ids": mkt_ids}
     brand_filter = _brand_filter_sql(brand_keys, params)
@@ -304,6 +453,7 @@ def get_by_brand(
             "coverage_warning": coverage_warning(level),
         })
 
+    cob = _cobertura(db, mkt_ids, brand_keys, period, hoje)
     return {
         "data": data,
         "date_from": period.start,
@@ -311,6 +461,7 @@ def get_by_brand(
         "filters": {"channels": channels, "brands": brand_keys},
         "refreshed_at": _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys),
         "channels_sem_cobertura_regional": channels_sem_cobertura_regional(mkt_ids),
+        **cob,
     }
 
 
@@ -319,7 +470,7 @@ def get_by_brand(
 # ---------------------------------------------------------------------------
 def get_trend(
     db: Session, mkt_ids: list[int], brand_keys: list[str] | None, period: EffectivePeriod,
-    *, channels: str = "all",
+    *, channels: str = "all", hoje: date | None = None,
 ) -> dict:
     # Mesma regra de granularidade de perf_svc.get_trend: diaria ate 92 dias,
     # mensal acima disso (intervalos longos em barras diarias ficam ilegiveis).
@@ -344,6 +495,7 @@ def get_trend(
         ORDER BY {trunc_expr}
     """)
     rows = db.execute(sql, params).mappings().all()
+    cob = _cobertura(db, mkt_ids, brand_keys, period, hoje)
 
     data = []
     for r in rows:
@@ -361,6 +513,8 @@ def get_trend(
             "gmv": round(_f(r["gmv"]), 2),
             "orders": int(_f(r["orders"])),
             "uf_fill_pct": _pct(uf_known, uf_eligible),
+            "canais_ausentes": canais_ausentes_no_bucket(
+                cob["cobertura_por_canal"], _fim_do_bucket(bucket, granularity, period.end)),
         })
 
     return {
@@ -371,4 +525,5 @@ def get_trend(
         "filters": {"channels": channels, "brands": brand_keys},
         "refreshed_at": _max_refreshed_at(db, period.start, period.end, mkt_ids, brand_keys),
         "channels_sem_cobertura_regional": channels_sem_cobertura_regional(mkt_ids),
+        **cob,
     }

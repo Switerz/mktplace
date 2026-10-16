@@ -179,6 +179,11 @@ class MarketplaceFreshness:
     max_date_source_eligible: Optional[date]
     estimated_new_rows: int
     will_update: bool
+    #: False quando a RELACAO da fonte nao existe no banco (hoje, so' a Shopee:
+    #: `silver.stg_shopee_order_item_snapshots` foi movida para `archive` em
+    #: 29/09/2026). Ausencia de relacao nao e' "fonte sem data nova": e' fonte
+    #: que nao existe mais, e o relatorio tem de dizer isso com esse nome.
+    source_available: bool = True
 
 
 @dataclass
@@ -201,6 +206,10 @@ class IncrementalLoadResult:
     ml_gmv_staging: Optional[Decimal] = None
     ml_gmv_source: Optional[Decimal] = None
     tiktok_rows: int = 0
+    #: Marketplaces cuja relacao-fonte nao existe no banco e por isso NAO foram
+    #: considerados nesta rodada. Viaja tambem no no_op: "nada novo" e "fonte
+    #: ausente" sao respostas diferentes e a CLI imprime as duas.
+    marketplaces_source_unavailable: list = field(default_factory=list)
 
 
 @dataclass
@@ -828,10 +837,37 @@ def _wrap_count(select_sql: str) -> str:
     return f"SELECT COUNT(*) FROM ({select_sql}) t"
 
 
+# REGIONAL-SOURCE-RECOVERY-1 (16/10/2026): a fonte Shopee do incremental foi
+# movida para `archive.silver__stg_shopee_order_item_snapshots` em 29/09/2026
+# (archive._archive_log, lote 2026-09-29) e o `UndefinedTable` derrubava a
+# transacao inteira — ML incluido — desde 03/10. Nao existe substituto com UF:
+# a API Shopee entrega `recipient_address` 100% mascarado. Por isso a Shopee
+# deixa de ser pre-requisito do incremental: relacao ausente -> marketplace
+# fora da rodada e declarado como `source_unavailable`, nunca carregado como 0.
+#
+# A sonda vale SO' para a Shopee, de proposito. A ausencia de `raw.ml_orders`
+# continua sendo falha dura: so' a Shopee tem a ausencia medida e explicada.
+# O nome da relacao e' constante do modulo (nunca entrada externa).
+SHOPEE_SOURCE_RELATION = "silver.stg_shopee_order_item_snapshots"
+SQL_SHOPEE_SOURCE_EXISTS = f"SELECT to_regclass('{SHOPEE_SOURCE_RELATION}') IS NOT NULL"
+
+# (nome, marketplace_id, consulta de maximos, select incremental, sonda de
+# existencia da fonte ou None quando a fonte e' obrigatoria)
 _SUPPORTED_MARKETPLACES = (
-    ("ml", ML_MARKETPLACE_ID, SQL_MAX_DATE_ML_SOURCE, _ml_incremental_select),
-    ("shopee", SHOPEE_MARKETPLACE_ID, SQL_MAX_DATE_SHOPEE_SOURCE, _shopee_incremental_select),
+    ("ml", ML_MARKETPLACE_ID, SQL_MAX_DATE_ML_SOURCE, _ml_incremental_select, None),
+    ("shopee", SHOPEE_MARKETPLACE_ID, SQL_MAX_DATE_SHOPEE_SOURCE, _shopee_incremental_select,
+     SQL_SHOPEE_SOURCE_EXISTS),
 )
+
+
+def _source_exists(cur, source_exists_sql: Optional[str]) -> bool:
+    """Sem sonda = fonte obrigatoria, tratada como existente (se faltar, a
+    consulta de maximos levanta, como sempre levantou)."""
+    if source_exists_sql is None:
+        return True
+    cur.execute(source_exists_sql)
+    (exists,) = cur.fetchone()
+    return bool(exists)
 
 
 class IncrementalCeilingError(ValueError):
@@ -923,10 +959,20 @@ def diagnose_incremental_load(read_url: str,
             max_date_gold_by_mkt = {row[0]: row[1] for row in cur.fetchall()}
 
             marketplaces: list[MarketplaceFreshness] = []
-            for marketplace, marketplace_id, max_date_source_sql, incremental_select_fn in _SUPPORTED_MARKETPLACES:
+            for (marketplace, marketplace_id, max_date_source_sql, incremental_select_fn,
+                 source_exists_sql) in _SUPPORTED_MARKETPLACES:
+                max_date_gold = max_date_gold_by_mkt.get(marketplace_id)
+                if not _source_exists(cur, source_exists_sql):
+                    marketplaces.append(MarketplaceFreshness(
+                        marketplace=marketplace, marketplace_id=marketplace_id,
+                        max_date_gold=max_date_gold,
+                        max_date_source_global=None, max_date_source_eligible=None,
+                        estimated_new_rows=0, will_update=False, source_available=False,
+                    ))
+                    continue
+
                 cur.execute(max_date_source_sql, {"date_to": teto})
                 max_date_source_global, max_date_source_eligible = cur.fetchone()
-                max_date_gold = max_date_gold_by_mkt.get(marketplace_id)
 
                 # Decide SEMPRE pelo elegivel, medido pelo banco. O global fica
                 # no relatorio para diferenciar "fonte parada" de "fonte cheia
@@ -1000,7 +1046,12 @@ def execute_incremental_load(write_url: str,
 
                 to_load: list[tuple[str, str]] = []
                 min_dates: dict[str, date] = {}
-                for marketplace, marketplace_id, max_date_source_sql, incremental_select_fn in _SUPPORTED_MARKETPLACES:
+                source_unavailable: list[str] = []
+                for (marketplace, marketplace_id, max_date_source_sql, incremental_select_fn,
+                     source_exists_sql) in _SUPPORTED_MARKETPLACES:
+                    if not _source_exists(cur, source_exists_sql):
+                        source_unavailable.append(marketplace)
+                        continue
                     cur.execute(max_date_source_sql, {"date_to": teto})
                     _max_global, max_date_source_eligible = cur.fetchone()
                     min_date = max_date_gold_by_mkt.get(marketplace_id) or date.min
@@ -1019,7 +1070,8 @@ def execute_incremental_load(write_url: str,
 
                 if not to_load:
                     conn.commit()  # nada foi alterado; só fecha a transação de leitura limpa
-                    return IncrementalLoadResult(no_op=True, date_to=teto)
+                    return IncrementalLoadResult(no_op=True, date_to=teto,
+                                                 marketplaces_source_unavailable=source_unavailable)
 
                 # 1. Staging (só das linhas novas dos marketplaces com novidade)
                 cur.execute(SQL_CREATE_STAGING)
@@ -1104,6 +1156,7 @@ def execute_incremental_load(write_url: str,
                 ml_gmv_staging=ml_gmv_staging,
                 ml_gmv_source=ml_gmv_source,
                 tiktok_rows=tiktok_rows,
+                marketplaces_source_unavailable=source_unavailable,
             )
         except LoadValidationError:
             conn.rollback()
@@ -2968,6 +3021,12 @@ def run_diagnose_cli(date_to: Optional[date] = None) -> int:
     print("=== Diagnose Gold Regional (somente leitura) ===")
     print(f"  teto superior INCLUSIVO: {teto.isoformat()} (D-1 America/Sao_Paulo)")
     for m in report.marketplaces:
+        if not m.source_available:
+            print(
+                f"  {m.marketplace}: FONTE INDISPONIVEL (relacao ausente no banco) — "
+                f"fora da carga; Gold congelada em max_date_gold={m.max_date_gold}"
+            )
+            continue
         print(
             f"  {m.marketplace}: max_date_gold={m.max_date_gold} "
             f"max_date_source_global={m.max_date_source_global} "
@@ -2976,6 +3035,18 @@ def run_diagnose_cli(date_to: Optional[date] = None) -> int:
         )
     print(f"\nPrecisa atualizar: {report.any_update_needed}")
     return 0
+
+
+def _print_source_unavailable(marketplaces: list) -> None:
+    """Fonte ausente nao derruba a carga dos demais, mas nunca passa calada:
+    vai para stderr, que o orquestrador grava no log de cada execucao."""
+    for marketplace in marketplaces:
+        print(
+            f"AVISO: fonte de {marketplace} indisponivel (relacao ausente no banco) — "
+            f"{marketplace} NAO foi carregado nesta rodada; a Gold regional de "
+            f"{marketplace} segue congelada na ultima data ja carregada.",
+            file=sys.stderr,
+        )
 
 
 def run_diagnose_shopee_window_cli(date_from: date, date_to: date) -> int:
@@ -3062,6 +3133,7 @@ def run_incremental_cli(secret_path: Path = DEFAULT_WRITE_SECRET_PATH,
         print(f"carga incremental falhou: {sanitize_error_message(exc)}", file=sys.stderr)
         return 4
 
+    _print_source_unavailable(result.marketplaces_source_unavailable)
     if result.no_op:
         # Vazio LEGITIMO, nao falha: pode nao haver nada novo, ou o novo pode
         # estar todo acima do teto. Os dois casos sao exito com zero linha.

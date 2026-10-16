@@ -126,6 +126,10 @@ class FakeMappingSession:
 
 PERIOD = EffectivePeriod(start=date(2026, 1, 1), end=date(2026, 1, 31))
 
+# Resposta da consulta de `dados_ate` por canal (ordem: principal, dados_ate,
+# refreshed_at). Vazia = nenhuma carga conhecida, irrelevante nestes testes.
+DADOS_ATE_VAZIO: list = []
+
 
 # ---------------------------------------------------------------------------
 # get_summary
@@ -138,7 +142,7 @@ def test_get_summary_calcula_pcts_e_coverage_level():
         "seller_shipping_cost": 500.0,
     }]
     refreshed_row = [{"refreshed_at": None}]
-    db = FakeMappingSession([summary_row, refreshed_row])
+    db = FakeMappingSession([summary_row, DADOS_ATE_VAZIO, refreshed_row])
 
     result = svc.get_summary(db, [ML_ID], None, PERIOD, channels="ml")
 
@@ -158,7 +162,7 @@ def test_get_summary_denominador_zero_vira_null_nao_zero_pct():
         "seller_shipping_cost": None,
     }]
     refreshed_row = [{"refreshed_at": None}]
-    db = FakeMappingSession([summary_row, refreshed_row])
+    db = FakeMappingSession([summary_row, DADOS_ATE_VAZIO, refreshed_row])
 
     result = svc.get_summary(db, [SHOPEE_ID], None, PERIOD, channels="shopee")
 
@@ -178,7 +182,7 @@ def test_get_summary_tiktok_marca_sem_cobertura_regional_gmv_zero_honesto():
         "seller_shipping_cost": None,
     }]
     refreshed_row = [{"refreshed_at": None}]
-    db = FakeMappingSession([summary_row, refreshed_row])
+    db = FakeMappingSession([summary_row, DADOS_ATE_VAZIO, refreshed_row])
 
     result = svc.get_summary(db, [TIKTOK_ID], None, PERIOD, channels="tiktok")
 
@@ -193,7 +197,7 @@ def test_get_summary_brand_keys_chega_parametrizado_no_sql():
         "shipping_cost_covered_orders": 0, "shipping_cost_eligible_orders": 1,
         "seller_shipping_cost": None,
     }]
-    db = FakeMappingSession([summary_row, [{"refreshed_at": None}]])
+    db = FakeMappingSession([summary_row, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     svc.get_summary(db, [ML_ID], ["barbours", "kokeshi"], PERIOD)
     assert db.captured_params[0]["brand_keys"] == ["barbours", "kokeshi"]
 
@@ -205,7 +209,7 @@ def test_get_summary_uf_filter_chega_parametrizado_no_sql():
         "shipping_cost_covered_orders": 0, "shipping_cost_eligible_orders": 0,
         "seller_shipping_cost": None,
     }]
-    db = FakeMappingSession([summary_row, [{"refreshed_at": None}]])
+    db = FakeMappingSession([summary_row, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     svc.get_summary(db, [SHOPEE_ID], None, PERIOD, uf_filter=["SP", "RJ"])
     assert db.captured_params[0]["ufs"] == ["SP", "RJ"]
 
@@ -220,7 +224,7 @@ def test_get_by_uf_shopee_cobertura_alta_frete_seller_none():
          "uf_known_orders": 50, "uf_eligible_orders": 50,
          "shipping_cost_covered_orders": 0, "shipping_cost_eligible_orders": 0},
     ]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_by_uf(db, [SHOPEE_ID], None, PERIOD, channels="shopee")
 
     row = result["data"][0]
@@ -242,7 +246,7 @@ def test_get_by_uf_multiplas_ufs_ordenadas():
          "uf_known_orders": 40, "uf_eligible_orders": 40,
          "shipping_cost_covered_orders": 0, "shipping_cost_eligible_orders": 0},
     ]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_by_uf(db, [SHOPEE_ID], None, PERIOD)
     assert [r["uf"] for r in result["data"]] == ["RJ", "SP"]
 
@@ -258,7 +262,7 @@ def test_get_by_uf_ml_mostra_cobertura_de_frete():
          "uf_known_orders": 15, "uf_eligible_orders": 20,
          "shipping_cost_covered_orders": 10, "shipping_cost_eligible_orders": 20},
     ]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_by_uf(db, [ML_ID], None, PERIOD, channels="ml")
 
     row = result["data"][0]
@@ -281,7 +285,7 @@ def test_barbours_jan_2026_baixa_cobertura_aparece_como_low_nao_erro():
         "shipping_cost_covered_orders": 155, "shipping_cost_eligible_orders": 9036,
         "seller_shipping_cost": 5000.0,
     }]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_summary(db, [ML_ID], ["barbours"], PERIOD, channels="ml")
 
     assert result["uf_fill_pct"] == pytest.approx(1.72, abs=0.01)
@@ -301,7 +305,7 @@ def test_get_by_brand_monta_label_e_nome_do_marketplace():
          "uf_known_orders": 3, "uf_eligible_orders": 5,
          "shipping_cost_covered_orders": 2, "shipping_cost_eligible_orders": 5},
     ]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_by_brand(db, [ML_ID], None, PERIOD)
 
     row = result["data"][0]
@@ -314,7 +318,7 @@ def test_get_by_brand_monta_label_e_nome_do_marketplace():
 def test_get_by_brand_tiktok_nunca_aparece_nas_linhas_mas_meta_sinaliza():
     # A query real nunca retorna linha de TikTok (0 linhas estruturais) --
     # aqui simulado com "data" vazio quando so TikTok e' pedido.
-    db = FakeMappingSession([[], [{"refreshed_at": None}]])
+    db = FakeMappingSession([[], DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_by_brand(db, [TIKTOK_ID], None, PERIOD, channels="tiktok")
     assert result["data"] == []
     assert result["channels_sem_cobertura_regional"] == ["tiktok"]
@@ -331,7 +335,7 @@ def test_get_trend_granularidade_diaria_ate_92_dias():
         {"bucket": date(2026, 5, 2), "gmv": 200.0, "orders": 20,
          "uf_known_orders": 20, "uf_eligible_orders": 20},
     ]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_trend(db, [ML_ID], None, period)
 
     assert result["granularity"] == "day"
@@ -343,7 +347,7 @@ def test_get_trend_granularidade_mensal_acima_de_92_dias():
     period = EffectivePeriod(start=date(2026, 1, 1), end=date(2026, 6, 30))
     rows = [{"bucket": date(2026, 1, 1), "gmv": 1000.0, "orders": 100,
              "uf_known_orders": 50, "uf_eligible_orders": 100}]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_trend(db, [ML_ID], None, period)
     assert result["granularity"] == "month"
     assert result["data"][0]["label"] == "Jan/26"
@@ -353,6 +357,6 @@ def test_get_trend_denominador_zero_por_bucket_vira_none():
     period = EffectivePeriod(start=date(2026, 5, 1), end=date(2026, 5, 1))
     rows = [{"bucket": date(2026, 5, 1), "gmv": 0.0, "orders": 0,
              "uf_known_orders": 0, "uf_eligible_orders": 0}]
-    db = FakeMappingSession([rows, [{"refreshed_at": None}]])
+    db = FakeMappingSession([rows, DADOS_ATE_VAZIO, [{"refreshed_at": None}]])
     result = svc.get_trend(db, [SHOPEE_ID], None, period)
     assert result["data"][0]["uf_fill_pct"] is None

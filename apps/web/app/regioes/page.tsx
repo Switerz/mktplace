@@ -19,6 +19,9 @@ import {
   fmtPctOrNA, coverageLabel, coverageBadgeClass, semCoberturaAviso, fmtShareOfTotalPct,
 } from "@/lib/regioes-format";
 import { buildRegionalScope, REGIONAL_GMV_LABEL, UF_FILL_LABEL } from "@/lib/regioes-scope";
+import {
+  buildAvisoCobertura, linhaAtualizacao, marcaPontoAusente, fmtDataBr, normalizarCobertura,
+} from "@/lib/regioes-cobertura";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
@@ -144,6 +147,21 @@ function RegioesPageInner() {
   const displayTrend = dataIsFresh ? (trend ?? []) : [];
   const displayRefreshedAt = dataIsFresh ? refreshedAt : null;
   const displaySemCobertura = dataIsFresh ? semCobertura : [];
+  // Cobertura por canal (REGIONAL-SOURCE-RECOVERY-2/3): vem do summary, a
+  // mesma resposta que define os totais exibidos. Com canal atrasado (D-2
+  // inclusive), o cabecalho mostra "Dados completos até" e nunca so' o
+  // `refreshed_at`. `normalizarCobertura` aceita a API antiga (sem os
+  // campos), que fica no ar entre a publicacao da Vercel e a do Render.
+  const cobertura = normalizarCobertura(dataIsFresh ? summary : null);
+  const canaisComAtraso = cobertura.canaisComAtraso;
+  const avisoCobertura = buildAvisoCobertura(cobertura.canais);
+  const linhaTemporal = dataIsFresh
+    ? linhaAtualizacao(
+        cobertura.dadosCompletosAte,
+        canaisComAtraso,
+        displayRefreshedAt ? fmtRefreshedAt(displayRefreshedAt) : null,
+      )
+    : null;
 
   // Dados parciais (FINDING 3): `summary == null` ja e' erro TOTAL (acima).
   // Aqui, com `summary` resolvido, cada secao individual que veio `null`
@@ -202,7 +220,11 @@ function RegioesPageInner() {
         scopeLine={
           <>
             Período: {periodLabel}
-            {dataIsFresh && displayRefreshedAt && <> · Atualizado em {fmtRefreshedAt(displayRefreshedAt)}</>}
+            {linhaTemporal && (
+              <span data-testid="regioes-linha-atualizacao" className={canaisComAtraso.length > 0 ? "text-amber-700 font-medium" : undefined}>
+                {" · "}{linhaTemporal}
+              </span>
+            )}
           </>
         }
         filters={
@@ -276,6 +298,24 @@ function RegioesPageInner() {
           </div>
         )}
 
+        {/* REGIONAL-SOURCE-RECOVERY-2: canal com fonte regional parado. Fica
+            ANTES dos KPIs, porque e' o que muda a leitura deles. */}
+        {avisoCobertura && (
+          <div
+            role="status"
+            data-testid="aviso-cobertura-canal"
+            className={`rounded-2xl p-4 border ${avisoCobertura.severidade === "critico" ? "bg-rose-50 border-rose-200" : avisoCobertura.severidade === "alerta" ? "bg-amber-50 border-amber-300" : "bg-amber-50/60 border-amber-200"}`}
+          >
+            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${avisoCobertura.severidade === "critico" ? "text-rose-700" : "text-amber-800"}`}>
+              {avisoCobertura.titulo}
+            </p>
+            <p className={`text-sm ${avisoCobertura.severidade === "critico" ? "text-rose-800" : "text-amber-900"}`}>{avisoCobertura.mensagem}</p>
+            {avisoCobertura.detalhes.map((d) => (
+              <p key={d} className="text-xs text-slate-600 mt-1.5">{d}</p>
+            ))}
+          </div>
+        )}
+
         {dataIsFresh && aviso && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
             <p className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-1">Canal sem cobertura regional</p>
@@ -321,7 +361,15 @@ function RegioesPageInner() {
               <KpiCard
                 label={REGIONAL_GMV_LABEL}
                 value={displaySummary ? fmtBrl(displaySummary.gmv) : "—"}
-                subvalue={regionalScope ? `Escopo: ${regionalScope.channelsInScope.join(" + ") || "nenhum canal com regional"}` : undefined}
+                subvalue={
+                  regionalScope
+                    ? canaisComAtraso.length > 0
+                      ? cobertura.dadosCompletosAte
+                        ? `Completo só até ${fmtDataBr(cobertura.dadosCompletosAte)} — ver aviso`
+                        : "Incompleto no período — ver aviso"
+                      : `Escopo: ${regionalScope.channelsInScope.join(" + ") || "nenhum canal com regional"}`
+                    : undefined
+                }
                 accent="bg-violet-600"
               />
               <KpiCard
@@ -504,14 +552,24 @@ function RegioesPageInner() {
                         </td>
                       </tr>
                     )}
-                    {displayTrend.map((p) => (
+                    {displayTrend.map((p) => {
+                      const ausente = marcaPontoAusente(p.canais_ausentes);
+                      return (
                       <tr key={p.date} className="hover:bg-slate-50 transition-colors">
-                        <td className="px-6 py-3 font-medium text-slate-700 whitespace-nowrap">{p.label}</td>
+                        <td className="px-6 py-3 font-medium text-slate-700 whitespace-nowrap">
+                          {p.label}
+                          {ausente && (
+                            <span data-testid="tendencia-canal-ausente" className="ml-2 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                              {ausente}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-right tabular-nums text-slate-600">{fmtBrl(p.gmv)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-slate-600">{fmtNumber(p.orders)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-slate-600">{fmtPctOrNA(p.uf_fill_pct)}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </TableScrollHint>
