@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0"?>
 <!--
   OPS-AUTOMATION-2 - TEMPLATE da tarefa unica `mktplace_daily_chain`.
   NAO INSTALADO. Instalar e' acao administrativa separada (ver
@@ -23,6 +23,11 @@
   - 10:15 BRT: os Ads de D-1 do ML so' chegam a raw.ml_ads_items entre 09:00
     e 09:02 BRT (medido em 8 dias, ver a DAG marketplace_tower_ml_refresh); o
     health check cobra D-1 a partir de 11:00.
+
+  Sem atributo `encoding` na declaracao, de proposito: o Agendador recebe a
+  definicao como texto UTF-16 (Register-ScheduledTask -Xml / XmlText) e
+  recusa `encoding="UTF-8"` com "unable to switch the encoding" (medido
+  em 16/10/2026 pela API COM Schedule.Service).
 
   Limite que esta tarefa NAO resolve: o Data Mart exige VPN. Se a VPN cair com
   a estacao suspensa ou deslogada, os steps saem BLOCKED no preflight (sem

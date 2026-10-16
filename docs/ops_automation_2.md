@@ -98,16 +98,51 @@ Airflow produção: marketplace_tower_ml_refresh (3 steps ML), PAUSADA
 
 ## 5. Instalação da etapa 1 (ação administrativa, não executada)
 
-Pré-requisito: este PR mesclado e o runner avançado por fast-forward.
+**O que é preciso:**
+- **PowerShell elevado ("Executar como administrador").** O usuário `Notebook` está no grupo de Administradores, mas a sessão comum não é elevada.
+- **Nenhuma senha.** O logon S4U não guarda senha e o Agendador não pede.
+- **Runner com o PR #80** (`239627e` ou posterior). O passo 3 remove a declaração de encoding mesmo se o template ainda for o antigo.
 
-1. Desabilitar, sem apagar, as tarefas `mktplace_full_daily` e `mktplace_pma_refresh`.
-2. Registrar a tarefa nova a partir do template, num PowerShell elevado:
-   `Register-ScheduledTask -TaskName mktplace_daily_chain -Xml (Get-Content -Raw infra\windows\mktplace_daily_chain.task.xml)`.
-3. Rollback: desabilitar a tarefa nova e reabilitar as duas antigas.
+```powershell
+cd C:\Users\Notebook\Desktop\mktplace-runner
+git rev-parse HEAD   # deve conter o PR #80
+
+# 1. (recomendado) flags do PMA também no nível de MÁQUINA. Hoje elas existem
+#    só no ambiente do USUÁRIO, e não há garantia de que uma tarefa S4U as veja.
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_SHOPEE_ENABLED','true','Machine')
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_TIKTOK_ENABLED','true','Machine')
+
+# 2. desabilitar (sem apagar) as duas tarefas atuais
+Disable-ScheduledTask -TaskName mktplace_full_daily
+Disable-ScheduledTask -TaskName mktplace_pma_refresh
+
+# 3. registrar a tarefa única. O -replace torna o comando seguro mesmo com o
+#    template antigo, cuja declaração UTF-8 o Agendador recusa.
+$xml = (Get-Content -Raw .\infra\windows\mktplace_daily_chain.task.xml) -replace ' encoding="UTF-8"', ''
+Register-ScheduledTask -TaskName mktplace_daily_chain -Xml $xml
+
+# 4. conferir (só leitura)
+Get-ScheduledTask mktplace_daily_chain | Format-List TaskName, State
+(Get-ScheduledTask mktplace_daily_chain).Principal | Format-List UserId, LogonType
+Get-ScheduledTaskInfo mktplace_daily_chain | Format-List NextRunTime
+Get-ScheduledTask mktplace_full_daily, mktplace_pma_refresh | Format-Table TaskName, State
+```
+
+**Rollback**, também num PowerShell elevado:
+
+```powershell
+Disable-ScheduledTask -TaskName mktplace_daily_chain    # ou: Unregister-ScheduledTask -TaskName mktplace_daily_chain -Confirm:$false
+Enable-ScheduledTask -TaskName mktplace_full_daily
+Enable-ScheduledTask -TaskName mktplace_pma_refresh
+# opcional: desfazer as flags de máquina
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_SHOPEE_ENABLED', $null, 'Machine')
+[Environment]::SetEnvironmentVariable('PMA_PUBLISH_TIKTOK_ENABLED', $null, 'Machine')
+```
 
 **Riscos a provar na primeira execução real:**
-- **Flags do PMA:** uma tarefa S4U pode não carregar o ambiente do usuário. Se não carregar, Shopee e TikTok saem `REFUSED` por flag desligada.
-- **VPN:** se ela cair com a estação suspensa, os steps saem `BLOCKED` no preflight, sem escrita.
+- **Flags do PMA.** Se o passo 1 não for feito e a tarefa S4U não carregar o ambiente do usuário, Shopee e TikTok saem `REFUSED` por flag desligada. Com a política da cadeia, isso dá exit 1.
+- **VPN (Pritunl).** O túnel é mantido pelo serviço `pritunl`, que roda como LocalSystem e reconecta depois da suspensão (`disable_reconnect=false`). Mas o perfil é de **usuário**: depois de um reinício **sem login**, ninguém inicia a conexão, e os steps saem `BLOCKED` no preflight, sem escrita. Transformar o perfil em perfil de sistema, que conecta no boot, é decisão de segurança separada.
+- **Energia.** Os wake timers estão habilitados na tomada e desabilitados na bateria, num equipamento com Modern Standby (S0). Na bateria, o `WakeToRun` não acorda a máquina, e a execução fica para o `StartWhenAvailable`, quando ela voltar.
 
 ## 6. Critérios de validação (ao menos uma execução agendada real)
 
