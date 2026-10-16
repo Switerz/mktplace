@@ -849,14 +849,44 @@ def ler_premissas(db: Session, inicio: date, fim: date, marcas: list[str]) -> dr
     return dre_premissas.LeituraPremissas(tabela_existe=True, linhas=[dict(r) for r in rows])
 
 
-def _com_cenario(base: list[dict], premissas: dre_premissas.LeituraPremissas | None, hoje: date) -> None:
+# ---------------------------------------------------------------------------
+# Leitura — CMV provisorio por CMP (Neon, DRE-CMV-CMP-1)
+# ---------------------------------------------------------------------------
+
+TABELA_CMV_PROVISORIO = "marts.fact_dre_cmv_provisorio_mensal"
+SQL_CMV_PROVISORIO_EXISTE = f"SELECT to_regclass('{TABELA_CMV_PROVISORIO}') IS NOT NULL"
+#: Tabela PROPRIA, separada do CMV fiscal (025): nunca o substitui.
+SQL_CMV_PROVISORIO = f"""
+    SELECT p.competencia, p.canal, p.marca, p.status, p.data_corte, p.receita_fonte, p.receita_coberta,
+           p.cobertura, p.cmv_provisorio, p.unidades_sem_cmp, p.skus_total, p.skus_sem_cmp, p.skus_conflito,
+           p.receita_gtin, p.receita_volume, p.receita_codigo_provisorio, p.confianca, p.regra_temporal,
+           a.status AS lote_status
+    FROM {TABELA_CMV_PROVISORIO} p
+    LEFT JOIN audit.source_sync_run a ON a.sync_run_id = p.run_id
+    WHERE p.competencia BETWEEN :inicio AND :fim AND p.marca = ANY(:marcas)
+"""
+
+
+def ler_cmv_provisorio(db: Session, inicio: date, fim: date, marcas: list[str]) -> dict:
+    """(competencia, canal, marca) -> linha. Tabela ausente (027 nao aplicada) = vazio, nunca erro.
+    Lote nao concluido nao e' usado."""
+    if not db.execute(text(SQL_CMV_PROVISORIO_EXISTE)).scalar():
+        return {}
+    rows = db.execute(text(SQL_CMV_PROVISORIO), {"inicio": inicio, "fim": fim, "marcas": marcas}).mappings().all()
+    return {(_chave_mes(r["competencia"]), r["canal"], r["marca"]): dict(r)
+            for r in rows if r["lote_status"] == "success"}
+
+
+def _com_cenario(base: list[dict], premissas: dre_premissas.LeituraPremissas | None, hoje: date,
+                 cmv_provisorio: dict | None = None) -> None:
     """Acrescenta `cenario_premissas` em cada celula base. NAO toca nos campos realizados."""
     idx = dre_premissas.indexar_premissas(premissas)
+    prov = cmv_provisorio or {}
     for c in base:
         mes = date.fromisoformat(c["mes"] + "-01")
         c["cenario_premissas"] = dre_premissas.montar_cenario(
             c, idx.get((mes, c["marca"])), mes=mes, hoje=hoje, maduro=mes_maduro(mes, hoje),
-            fim_do_mes=ultimo_dia(mes))
+            fim_do_mes=ultimo_dia(mes), cmv_provisorio=prov.get((mes, c["canal"], c["marca"])))
 
 
 def montar_dre(
@@ -872,6 +902,7 @@ def montar_dre(
     agora: datetime,
     periodo_origem: str = "informado",
     premissas: dre_premissas.LeituraPremissas | None = None,
+    cmv_provisorio: dict | None = None,
 ) -> dict:
     """Monta a resposta inteira a partir de linhas ja lidas. Funcao PURA.
 
@@ -900,7 +931,7 @@ def montar_dre(
         )
         base.append(montar_celula_base(ins, hoje))
     base.sort(key=lambda c: (c["mes"], CANAIS.index(c["canal"]), c["marca"]))
-    _com_cenario(base, premissas, hoje)
+    _com_cenario(base, premissas, hoje, cmv_provisorio)
 
     def _agregar(cs: list[dict], **rotulos) -> dict | None:
         out = agregar(cs, **rotulos)
@@ -958,6 +989,8 @@ def get_dre(db: Session, *, inicio: date, fim: date, canais: list[str],
     mart_rows, afiliado_rows = ler_neon(db, inicio, fim, mkt_ids, escopo_marcas)
     insumos = ler_insumos(db, inicio, fim, canais, escopo_marcas)
     premissas = ler_premissas(db, inicio, fim, escopo_marcas)
+    cmv_provisorio = ler_cmv_provisorio(db, inicio, fim, escopo_marcas)
     return montar_dre(inicio=inicio, fim=fim, canais=canais, marcas=escopo_marcas,
                       mart_rows=mart_rows, afiliado_rows=afiliado_rows, insumos=insumos,
-                      hoje=hoje, agora=agora, periodo_origem=periodo_origem, premissas=premissas)
+                      hoje=hoje, agora=agora, periodo_origem=periodo_origem, premissas=premissas,
+                      cmv_provisorio=cmv_provisorio)
