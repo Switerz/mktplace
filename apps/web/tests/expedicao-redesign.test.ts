@@ -44,6 +44,7 @@ import {
   type ResumoConta,
   type Totais,
 } from "../src/lib/expedicao-contract.ts";
+import { REGRA_JANELA } from "../src/lib/expedicao-janela.ts";
 
 const RAIZ = join(import.meta.dirname, "..");
 const CLIENTE = readFileSync(join(RAIZ, "app/expedicao/ExpedicaoClient.tsx"), "utf8");
@@ -268,7 +269,7 @@ test("a tendencia usa o MESMO canal da fila", () => {
   assert.equal(queryDaTendencia(24, "mercadolivre"), "channel=mercadolivre&window_hours=24");
   // Shopee e' o canal historico: omitir `channel` significa exatamente ela.
   assert.equal(queryDaTendencia(24, CANAL_PADRAO), "window_hours=24");
-  assert.match(CLIENTE, /queryDaTendencia\(janela, filtros\.channel\)/);
+  assert.match(CLIENTE, /queryDaTendenciaEmDias\(janela, filtros\.channel\)/);
 });
 
 test("hora sem ponto vira lacuna, nunca zero", () => {
@@ -460,7 +461,9 @@ test("com a flag desligada a tela nao pede canal nenhum", () => {
   // Shopee sai identica a de antes do multicanal.
   assert.equal(queryDaTendencia(48, CANAL_PADRAO), "window_hours=48");
   assert.match(CLIENTE, /ML_LIGADO && \(/, "o seletor e' condicionado a flag");
-  assert.match(CLIENTE, /useState\(!ML_LIGADO\)/, "sem flag, urlPronta nasce true");
+  // Sem flag a URL continua sendo lida, agora so' pela janela (`?dias=`): o
+  // canal so' e' lido sob `if (ML_LIGADO)`.
+  assert.match(CLIENTE, /if \(ML_LIGADO\) \{\s*\n\s*const canal = lerCanalDaUrl\(\);/);
 });
 
 // ===========================================================================
@@ -591,7 +594,9 @@ test("a janela inicial e' uma das tres do seletor", () => {
     JANELAS_TENDENCIA.some((j) => j.horas === JANELA_INICIAL_HORAS),
     "abrir numa janela fora do seletor deixa nenhum botao aceso",
   );
-  assert.match(CLIENTE, /useState\(JANELA_INICIAL_HORAS\)/);
+  // A janela agora e' guardada em dias; o padrao continua sendo 72h.
+  assert.equal(REGRA_JANELA.fila.padrao * 24, JANELA_INICIAL_HORAS);
+  assert.match(CLIENTE, /useState\(REGRA\.padrao\)/);
 });
 
 test("as colunas das tabelas tem respiro horizontal", () => {
