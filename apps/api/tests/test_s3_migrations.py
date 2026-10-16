@@ -175,7 +175,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # Gate DRE-DATA-BRIDGE-1: head avancado de 024 para 025, que cria
     # marts.fact_dre_insumo_mensal -- insumos MENSAIS AGREGADOS da DRE (CMV
     # fiscal e repasse TikTok) que so existem no Data Mart.
-    assert heads == ["025"], f"head deveria ser unico e igual a 025, veio {heads}"
+    # Gate DRE-PREMISSAS-1: head avancado de 025 para 026, que cria
+    # marts.fact_dre_premissa_mensal -- premissas ESTIMADAS (taxas) por marca.
+    assert heads == ["026"], f"head deveria ser unico e igual a 026, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

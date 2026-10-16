@@ -80,6 +80,68 @@ class DataMaxima(BaseModel):
     insumo_publicado_em: datetime | None = None
 
 
+#: ---------------------------------------------------------------------------
+#: Cenario ESTIMADO com premissas (DRE-PREMISSAS-1). Complementar e opcional:
+#: nunca substitui nem altera `margem_contribuicao_conhecida`.
+#: ---------------------------------------------------------------------------
+
+EstadoCenario = Literal["calculavel", "parcial", "nao_calculavel"]
+OrigemLinha = Literal["realizado", "premissa", "decomposicao", "indisponivel", "calculado", "misto"]
+
+
+class LinhaCenario(BaseModel):
+    linha: str
+    rotulo: str
+    #: `item` entra na soma (se `somavel`); `subtotal` e' calculado; `informativo` nunca soma.
+    tipo: Literal["item", "subtotal", "informativo"]
+    #: Magnitude. `None` = ausente/indisponivel — nunca zero fabricado.
+    valor: float | None = None
+    pct_receita: float | None = None
+    origem: OrigemLinha
+    #: Taxa da matriz aplicada na celula base (0..1). Sempre `None` em agregados:
+    #: o agregado soma celulas, nao reaplica taxa.
+    percentual: float | None = None
+    status: str
+    motivo: str | None = None
+    somavel: bool
+
+
+class ComponenteAusenteCenario(BaseModel):
+    linha: str
+    motivo: str | None = None
+
+
+class FontePremissas(BaseModel):
+    """Procedencia PUBLICA: rotulo, competencia, data da fonte e hash. Nunca o
+    nome do arquivo de orcamento nem um caminho local."""
+    #: Ex.: "Premissas de outubro/2026" (derivado da competencia).
+    rotulo: str
+    competencia: str
+    data_fonte: date | None = None
+    source_sha256: str | None = None
+    carregado_em: datetime | None = None
+
+
+class CenarioPremissas(BaseModel):
+    competencia_premissas: str
+    natureza: Literal["estimada"]
+    rotulo: str
+    estado: EstadoCenario
+    #: Competencia em andamento: o cenario e' uma PREVIA.
+    previa: bool
+    competencia_madura: bool
+    receita_base: float | None = None
+    fonte_cmv: Literal["dre_realizada", "cmp_sku"]
+    linhas: list[LinhaCenario]
+    componentes_ausentes: list[ComponenteAusenteCenario]
+    motivos: list[str]
+    avisos: list[str]
+    margem_contribuicao_estimada: float | None = None
+    margem_contribuicao_estimada_pct: float | None = None
+    fonte_premissas: FontePremissas
+    celulas: int
+
+
 class CelulaDRE(BaseModel):
     escopo: str | None = None
     mes: str | None = None
@@ -97,6 +159,8 @@ class CelulaDRE(BaseModel):
     completude: Completude
     margem_contribuicao_conhecida: Margem
     data_maxima: DataMaxima
+    #: Opcional e retrocompativel. `None` = competencia sem premissa publicada.
+    cenario_premissas: CenarioPremissas | None = None
 
 
 class Periodo(BaseModel):
@@ -116,9 +180,20 @@ class ResumoInsumos(BaseModel):
     motivo: str | None = None
 
 
+class ResumoPremissas(BaseModel):
+    estado: Literal["ok", "parcial", "tabela_ausente", "nao_publicado", "lote_invalido", "nao_consultado"]
+    competencias_publicadas: list[str]
+    source_sha256: str | None = None
+    rotulo: str | None = None
+    data_fonte: date | None = None
+    carregado_em: datetime | None = None
+    motivo: str | None = None
+
+
 class Fontes(BaseModel):
     neon: Literal["ok"]
     insumos_dre: ResumoInsumos
+    premissas_dre: ResumoPremissas | None = None
 
 
 class DREResponse(BaseModel):
