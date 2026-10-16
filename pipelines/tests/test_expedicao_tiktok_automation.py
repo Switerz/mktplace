@@ -1,4 +1,4 @@
-"""EXPEDICAO-TIKTOK-AUTOMATION-1 — a fotografia da LDR do TikTok entra na cadeia diaria.
+"""EXPEDICAO-TIKTOK-AUTOMATION-1 — guarda de frescor da fotografia da LDR do TikTok.
 
 Por que 13/10 ficou congelado: `marts.expedicao_tiktok_dispatch_daily` nunca
 esteve em pipeline nenhum. A ultima publicacao foi manual, em 13/10/2026. Como
@@ -7,7 +7,8 @@ INSTANTE da publicacao (contra `hoje`), sem republicar o vencimento de 13/10
 seguiu "parcial" e os pendentes seguiram "no prazo" dias depois.
 
 Duas camadas de prova:
-  * unitaria — guarda de frescor, CLI, posicao/comando do step, propagacao;
+  * unitaria — guarda de frescor, CLI e ausencia do step na cadeia (a
+    Expedicao saiu para a DAG de 2h do Airflow);
   * integracao contra PostgreSQL DE VERDADE (pulada sem servidor) — o SQL de
     producao classifica a mesma coorte de outro jeito quando `hoje` avanca, a
     reexecucao e' idempotente e a fonte defasada nao escreve nada. Um duble
@@ -70,68 +71,23 @@ def test_cli_repassa_o_limite_ao_apply(monkeypatch):
 
 
 # ===========================================================================
-# Step na cadeia
+# Fora da cadeia diaria (adendo "Expedicao a cada 2 horas no Airflow")
 # ===========================================================================
 
-def _nomes(p):
-    return [s.name for s in o.PIPELINES[p]]
+def test_expedicao_nao_esta_em_pipeline_nenhum_do_orquestrador():
+    """A tela inteira da Expedicao e' da DAG de 2h (`marketplace_tower_expedicao_refresh`).
+
+    Um step aqui faria duas rotinas escreverem a mesma tabela e poria a cadeia
+    para disputar com o PMA o advisory lock 917120017.
+    """
+    for nome, steps in o.PIPELINES.items():
+        modulos = {s.module for s in steps}
+        assert not any(m.startswith("pipelines.expedicao") for m in modulos), nome
+    assert not hasattr(o, "EXPEDICAO_TIKTOK_STEP")
 
 
-def test_step_roda_depois_do_full_daily_e_antes_do_pma():
-    nomes = _nomes("daily_chain")
-    i = nomes.index("expedicao_tiktok")
-    assert nomes[i - 1] == "tiktok_order_discounts_daily"
-    assert nomes[i + 1] == "pma_ml"
-    assert nomes.index("daily_tiktok") < i
-
-
-def test_comando_exato_com_apply_e_guarda_de_frescor():
-    s = o.EXPEDICAO_TIKTOK_STEP
-    assert s.module == "pipelines.expedicao.tiktok_cli"
-    assert s.args == ("--apply", "--max-idade-fonte-horas", "6")
-    assert s.critical is True
-    assert s.depends_on == ("daily_tiktok",)
-    assert s.timeout_seconds == 900
-    assert s.exit_status_map is None, "qualquer exit != 0 vira FAILED"
-    assert s.preflight_source in preflight.SOURCE_CHECKS
-
-
-def test_step_nao_entrou_no_full_daily():
-    assert "expedicao_tiktok" not in _nomes("full_daily")
-    assert o.FULL_DAILY_STEP_TIMEOUT_BUDGET_SECONDS == 8100
-
-
-def _tudo(**excecoes):
-    res = {n: "SUCCESS" for n in _nomes("daily_chain")}
-    res.update(excecoes)
-    return res
-
-
-@pytest.mark.parametrize("status", ["FAILED", "BLOCKED"])
-def test_falha_da_expedicao_propaga_para_o_status_geral(status):
-    res = _tudo(expedicao_tiktok=status)
-    overall = o.compute_overall_status("daily_chain", res)
-    assert overall == "FAILED"
-    assert o.exit_code_do_pipeline("daily_chain", res, overall) == 1
-
-
-def test_exit_nao_zero_do_cli_vira_failed_no_orquestrador(monkeypatch):
-    """A recusa por fonte defasada (exit 3) chega ao orquestrador como FAILED."""
-    import dataclasses
-    # Copia sem a dependencia: num pipeline de um step so', `daily_tiktok` nao
-    # existe e o step seria (corretamente) SKIPPED antes de rodar.
-    alvo = dataclasses.replace(o.EXPEDICAO_TIKTOK_STEP, depends_on=())
-    rodados = []
-
-    def executor(step, **_k):
-        rodados.append(step.name)
-        return cli.EXIT_FONTE_NAO_PUBLICAVEL if step.name == alvo.name else 0
-
-    monkeypatch.setitem(o.PIPELINES, "_teste_exped", (alvo,))
-    res = o.run_pipeline("_teste_exped", executor=executor,
-                         preflight_fn=lambda *_a, **_k: (True, []))
-    assert rodados == ["expedicao_tiktok"]
-    assert res["expedicao_tiktok"] == "FAILED"
+def test_preflight_da_fonte_continua_disponivel_para_execucao_manual():
+    assert "expedicao_tiktok" in preflight.SOURCE_CHECKS
 
 
 # ===========================================================================

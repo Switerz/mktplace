@@ -122,5 +122,31 @@ where = ["."]
 # (import tardio, dentro de `_engines`). Nao importa `alembic` nem `app` — um
 # teste trava isso, porque Alembic na imagem colidiria com o banco de
 # metadados do Airflow. 2 arquivos, nenhum subpacote.
-include = ["pipelines", "pipelines.expedicao", "pipelines.common", "pipelines.dre"]
+# OPS-AIRFLOW-MIGRATION-1: a `daily_chain` (full_daily + Expedicao TikTok +
+# PMA + health check) passa a ser chamada pelo Airflow, CLI a CLI. Fecho
+# transitivo MEDIDO no fonte (AST, imports no topo e dentro de funcao) dos 12
+# CLIs portaveis — tudo da cadeia menos `gold_regional_incremental` e
+# `sync_region_if_needed`, que exigem credencial de ESCRITA no Data Mart e
+# ficam no Windows:
+#   pipelines.connectors{,.mercadolivre,.shopee,.tiktok}  — daily_performance
+#     importa os tres conectores no topo, mesmo rodando so' ML ou TikTok;
+#   pipelines.ingestion   — so' o pacote (daily_performance, fato_diaria_lock);
+#     `ingestion.gold_regional` e `ingestion.shopee_raw` NAO entram;
+#   pipelines.ops         — serving_refresh e health_check;
+#   pipelines.pma         — sync_ml_listing_price_serving;
+#   pipelines.quality     — daily_performance (checks, ml_fee_reconciliation);
+#   pipelines.reconciliation — health_check (diagnose/monitor bug8);
+#   pipelines.transforms  — daily_performance.
+# Terceiros do fecho: psycopg2, dotenv, sqlalchemy, pydantic_settings, pandas
+# e openpyxl — todos ja' na imagem do Airflow (`requirements.txt`). `etl` so'
+# aparece DENTRO de funcoes de reconciliacao da Shopee que nenhum desses CLIs
+# chama; `alembic` e `app` nao aparecem. Um teste reconstroi o fecho a partir
+# de `PIPELINES["daily_chain"]` e confere a wheel construida.
+include = [
+    "pipelines", "pipelines.expedicao", "pipelines.common", "pipelines.dre",
+    "pipelines.connectors", "pipelines.connectors.mercadolivre",
+    "pipelines.connectors.shopee", "pipelines.connectors.tiktok",
+    "pipelines.ingestion", "pipelines.ops", "pipelines.pma",
+    "pipelines.quality", "pipelines.reconciliation", "pipelines.transforms",
+]
 exclude = ["pipelines.tests", "pipelines.tests.*"]
