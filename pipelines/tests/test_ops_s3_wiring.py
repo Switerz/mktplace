@@ -289,7 +289,8 @@ def test_f26_os_outros_dois_pipelines_nao_mudaram():
     # Gate PMA-2C5B acrescentou `pma_refresh`, pipeline PROPRIO do
     # monitoramento de precos. O inventario segue FECHADO: o que este
     # teste trava e' que S3 nao criou pipeline, nao que nunca existira um.
-    assert sorted(orch.PIPELINES) == ["full_daily", "pma_refresh",
+    # OPS-AUTOMATION-2 acrescentou `daily_chain` (composicao, sem step novo).
+    assert sorted(orch.PIPELINES) == ["daily_chain", "full_daily", "pma_refresh",
                                       "serving_refresh", "shopee_manual_refresh"]
 
 
