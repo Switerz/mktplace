@@ -241,3 +241,83 @@ def test_confianca_da_celula_usa_a_confianca_da_linha(tmp_path):
     linhas = kits(tmp_path, [v("ml", "apice", "K", 1, 50)], bom(("apice", "K", "C1", 1)))
     (cel,) = M.agregar(linhas, {("ml", "apice"): Decimal(50)}, {"ml": date(2026, 10, 15)}, OUT)
     assert cel["confianca"] == "baixa" and cel["receita_kit_homogeneo"] == Decimal(50)
+
+
+# ---------------------------------------------------------------------------
+# DRE-CMV-CMP-6: visao por produto
+# ---------------------------------------------------------------------------
+
+def _celulas(linhas, receitas):
+    return M.agregar(linhas, receitas, {"tiktok": date(2026, 10, 15), "shopee": date(2026, 10, 12)}, OUT)
+
+
+def test_visao_produto_direto_tem_todos_os_campos(tmp_path):
+    comparativo(tmp_path, [("SP", "A1", "", "X", [3, 3, 3], 3)])
+    linhas = resolver(tmp_path, [v("tiktok", "apice", "A1", 10, 200)])
+    (p,) = M.visao_produto(linhas, _celulas(linhas, {("tiktok", "apice"): Decimal(200)}), OUT)
+    assert set(p) == set(M.CAMPOS_PRODUTO)
+    assert (p["calculavel"], p["metodo"], p["cmp"], p["cmv"]) == (True, "direto", Decimal(3), Decimal(30))
+    assert p["margem_bruta_apos_cmp"] == Decimal(170) and p["margem_pct"] == Decimal("85.00")
+    assert p["competencia"] == OUT and p["cobertura_da_celula"] == Decimal("1.000000") and p["motivo"] is None
+
+
+def test_visao_produto_sem_cmp_e_nulo_com_motivo_nunca_zero(tmp_path):
+    comparativo(tmp_path, [("SP", "A1", "", "X", [3, 3, 3], 3)])
+    linhas = resolver(tmp_path, [v("tiktok", "apice", "A1", 10, 200), v("tiktok", "apice", "SEM", 5, 100)])
+    ps = M.visao_produto(linhas, _celulas(linhas, {("tiktok", "apice"): Decimal(300)}), OUT)
+    (sem,) = [p for p in ps if p["sku"] == "SEM"]
+    assert sem["calculavel"] is False and sem["metodo"] is None
+    assert all(sem[k] is None for k in ("cmp", "cmv", "margem_bruta_apos_cmp", "margem_pct",
+                                        "competencia_origem_cmp", "carry_forward"))
+    assert sem["motivo"].startswith("sem_cmp:") and sem["receita"] == Decimal(100)
+    assert {p["cobertura_da_celula"] for p in ps} == {Decimal("0.666667")}
+
+
+def test_visao_produto_kit_pela_bom_e_metodo_kit_bom(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [2, 2, 2], 2), ("SP", "C2", "", "Y", [3, 3, 3], 3)])
+    _, ind = ler_pasta(tmp_path)
+    bom = M.montar_bom([{"marca": "apice", "kit_codigo": "K1", "componente_codigo": c, "quantidade": q,
+                         "componente_descricao": "", "data_carga": None} for c, q in (("C1", 2), ("C2", 1))])
+    linhas = M.classificar(ind, T.Catalogo(), [v("tiktok", "apice", "K1", 4, 100)], OUT, bom)
+    (p,) = M.visao_produto(linhas, _celulas(linhas, {("tiktok", "apice"): Decimal(100)}), OUT)
+    assert (p["metodo"], p["cmp"], p["cmv"]) == ("kit_bom", Decimal(7), Decimal(28))
+
+
+def test_visao_produto_kit_com_componente_sem_cmp_fica_nao_calculavel(tmp_path):
+    comparativo(tmp_path, [("SP", "C1", "", "X", [2, 2, 2], 2)])
+    _, ind = ler_pasta(tmp_path)
+    bom = M.montar_bom([{"marca": "apice", "kit_codigo": "K1", "componente_codigo": c, "quantidade": 1,
+                         "componente_descricao": "", "data_carga": None} for c in ("C1", "FALTA")])
+    linhas = M.classificar(ind, T.Catalogo(), [v("tiktok", "apice", "K1", 4, 100)], OUT, bom)
+    (p,) = M.visao_produto(linhas, _celulas(linhas, {("tiktok", "apice"): Decimal(100)}), OUT)
+    assert p["calculavel"] is False and p["cmv"] is None and p["cmp"] is None
+    assert p["motivo"].startswith("kit_componente_sem_cmp:") and "FALTA" in p["motivo"]
+
+
+def test_visao_produto_mostra_celula_ausente_em_vez_de_sumir():
+    """Shopee x Kokeshi nao tem venda na fonte de API: aparece como linha propria."""
+    cels = M.agregar([], {("shopee", "kokeshi"): Decimal(500)}, {"shopee": date(2026, 10, 12)}, OUT)
+    (p,) = M.visao_produto([], cels, OUT)
+    assert (p["tipo_linha"], p["canal"], p["marca"], p["calculavel"]) == ("celula_ausente", "shopee", "kokeshi",
+                                                                          False)
+    assert p["cmv"] is None and p["margem_bruta_apos_cmp"] is None and "ausente_na_fonte" in p["motivo"]
+
+
+def test_visao_produto_falha_fechada_em_linha_incoerente():
+    base = {"canal": "tiktok", "marca": "apice", "sku": "A1", "produto": "", "receita": Decimal(10),
+            "unidades": Decimal(1), "nivel": "", "confianca": "", "motivo": "", "competencia_origem": None,
+            "carry_forward": False, "margem_bruta_apos_cmp": None}
+    for linha in ({**base, "status": "sem_cmp", "cmp": Decimal(1), "cmv": Decimal(1)},
+                  {**base, "status": "coberto", "cmp": None, "cmv": None},
+                  {**base, "status": "coberto", "cmp": Decimal(1), "cmv": Decimal(1), "nivel": "DEPARA_SUGERIDO"}):
+        try:
+            M.visao_produto([linha], [], OUT)
+        except ValueError:
+            continue
+        raise AssertionError(f"aceitou linha incoerente: {linha}")
+
+
+def test_metodo_depara_aprovado_reservado_e_nunca_emitido():
+    """Nenhum nivel de casamento produz `depara_aprovado`: de-para sugerido nao entra."""
+    assert "depara_aprovado" in M.METODOS
+    assert "depara_aprovado" not in M.METODO_POR_NIVEL.values()

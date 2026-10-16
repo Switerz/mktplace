@@ -100,6 +100,18 @@ def test_maga_usa_sp_e_exclui_mg1_mg2_rj(tmp_path):
     assert ind.chaves() == {("MAGA_COMERCIO", "SP", "10330/1")}
 
 
+def test_decisao_final_so_0301_nenhuma_outra_filial(tmp_path):
+    """16/10/2026: so' 0301 (SP); Rituaria so' MAGA SP; 0302/1301/1303/1401/1403 nunca entram."""
+    outras = ("0302", "1301", "1303", "1401", "1403")
+    comparativo(tmp_path, [*((f, "Z900", "", "PRODUTO SINTETICO 200ML", [9, 9, 9], 9) for f in outras),
+                           ("SP", "Z900", "", "PRODUTO SINTETICO 200ML", [8, 8, 8], 8)], nome=NOME_MAGA)
+    lcv(tmp_path, [*((f, "LCZ900", "", 23.0, "OK") for f in outras), ("0301", "LCZ900", "", 20.0, "OK")])
+    _, ind = ler_pasta(tmp_path)
+    assert {k[1] for k in ind.chaves()} == {"SP", "0301"}
+    assert T.FILIAIS_SP == frozenset({"SP", "0301"})
+    assert T.ENTIDADES_POR_MARCA["rituaria"] == ("MAGA_COMERCIO",)
+
+
 def test_lcv_usa_somente_0301(tmp_path):
     lcv(tmp_path, [("0301", "LC02002", "", 22.5, "OK"), ("0302", "LC02002", "1003", 30.0, "OK")])
     (le,), ind = ler_pasta(tmp_path)

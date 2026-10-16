@@ -50,6 +50,20 @@ MARGEM
 numerica so' existe com 100% de cobertura; abaixo disso so' a margem da PARCELA
 COBERTA, rotulada como tal. A parcela descoberta nunca recebe custo zero.
 
+REGRA DE FILIAL (decisao final do negocio, 16/10/2026)
+-----------------------------------------------------
+So' a filial 0301 (`SP` nos comparativos, `0301` no CMV-LCV); Rituaria so' MAGA
+SP. Nenhuma outra filial (0302, 1301, 1303, 1401, 1403...) entra, nem custo de
+NF nem `preco_custo` do cadastro, e nao ha excecao para KS03041/KS03042.
+
+VISAO POR PRODUTO (DRE-CMV-CMP-6)
+--------------------------------
+`visao_produto` lista TODO produto vendido (calculavel ou nao) e cada celula
+ausente da fonte, para nada sumir em silencio. Margem numerica so' com CMP
+valido: `direto` (codigo/GTIN no escopo 0301) ou `kit_bom` (todos os
+componentes com CMP 0301). `depara_aprovado` esta reservado: nenhum de-para foi
+aprovado e esta pipeline nao le de-para sugerido.
+
 Codigos de saida: 0 ok; 65 recusa; 69 fonte indisponivel; 75 lock; 78 migration ausente.
 """
 from __future__ import annotations
@@ -97,6 +111,14 @@ NIVEL_KIT_MISTO = "KIT_BOM_MISTO"
 ORDEM_CONFIANCA = {"baixa": 0, "media": 1, "alta": 2}
 #: Regras de kit habilitaveis (medidas separadamente).
 REGRAS_KIT = ("homogeneo", "misto")
+#: Metodo da visao por produto, a partir do nivel de casamento. `depara_aprovado`
+#: fica reservado ate existir um de-para APROVADO pelo negocio (hoje nenhum).
+METODO_POR_NIVEL = {T.NIVEL_GTIN: "direto", T.NIVEL_VIA_GTIN: "direto", T.NIVEL_VOLUME: "direto",
+                    T.NIVEL_PROVISORIO: "direto", NIVEL_KIT_HOMOGENEO: "kit_bom", NIVEL_KIT_MISTO: "kit_bom"}
+METODOS = ("direto", "kit_bom", "depara_aprovado")
+CAMPOS_PRODUTO = ("competencia", "tipo_linha", "canal", "marca", "sku", "produto", "receita", "unidades", "cmp",
+                  "cmv", "margem_bruta_apos_cmp", "margem_pct", "calculavel", "metodo", "nivel", "confianca",
+                  "competencia_origem_cmp", "carry_forward", "cobertura_da_celula", "status", "motivo")
 FONTE_BOM = "raw.bling_kit_estrutura (BOM explicita do Bling, conta = marca)"
 RE_KIT = re.compile(r"(?i)(^kit|\bkit\b)")
 
@@ -392,6 +414,47 @@ def agregar(linhas: list[dict], receita_celula: dict, cortes: dict, comp: date) 
     return out
 
 
+def visao_produto(linhas: list[dict], celulas: list[dict], comp: date) -> list[dict]:
+    """Uma linha por produto vendido + uma por celula ausente da fonte.
+
+    Margem numerica so' quando ha CMP valido (`status == coberto`). Sem CMP, CMP,
+    CMV, margem e percentual ficam NULL (nunca zero) e `motivo` diz por que.
+    Falha fechada: CMP fora de `coberto`, ou nivel sem metodo conhecido, levanta.
+    """
+    cob = {(c["canal"], c["marca"]): c["cobertura"] for c in celulas}
+    out = []
+    for x in linhas:
+        calculavel = x["cmp"] is not None
+        if calculavel != (x["status"] == "coberto"):
+            raise ValueError(f"linha incoerente: status {x['status']} com cmp {x['cmp']}")
+        metodo = METODO_POR_NIVEL.get(x["nivel"]) if calculavel else None
+        if calculavel and metodo is None:
+            raise ValueError(f"nivel sem metodo conhecido: {x['nivel']!r}")
+        out.append({
+            "competencia": comp, "tipo_linha": "produto", "canal": x["canal"], "marca": x["marca"],
+            "sku": x["sku"], "produto": x["produto"], "receita": x["receita"], "unidades": x["unidades"],
+            "cmp": x["cmp"] if calculavel else None,
+            "cmv": x["cmv"] if calculavel else None,
+            "margem_bruta_apos_cmp": x["margem_bruta_apos_cmp"] if calculavel else None,
+            "margem_pct": (x["margem_bruta_apos_cmp"] / x["receita"] * 100).quantize(Decimal("0.01"))
+            if calculavel and x["receita"] else None,
+            "calculavel": calculavel, "metodo": metodo, "nivel": x["nivel"] or None,
+            "confianca": x["confianca"] or None,
+            "competencia_origem_cmp": x["competencia_origem"] if calculavel else None,
+            "carry_forward": x["carry_forward"] if calculavel else None,
+            "cobertura_da_celula": cob.get((x["canal"], x["marca"])),
+            "status": x["status"],
+            "motivo": None if calculavel else f"{x['status']}: {x['motivo'] or 'sem detalhe'}",
+        })
+    for c in celulas:
+        if c["status"] == "ausente_na_fonte":
+            out.append({**{k: None for k in CAMPOS_PRODUTO}, "competencia": comp, "tipo_linha": "celula_ausente",
+                        "canal": c["canal"], "marca": c["marca"], "calculavel": False, "status": c["status"],
+                        "motivo": "ausente_na_fonte: celula com receita na DRE e sem nenhuma venda na fonte de API "
+                                  "(nunca custo zero)"})
+    return out
+
+
 def resumo_publico(celulas: list[dict]) -> list[dict]:
     """So' percentuais e contagens: nada de receita, CMP, CMV ou SKU."""
     out = []
@@ -587,25 +650,24 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
         w = csv.DictWriter(f, fieldnames=list(linhas[0]) if linhas else ["vazio"])
         w.writeheader()
         w.writerows(linhas)
-    cob = {(c["canal"], c["marca"]): c["cobertura"] for c in celulas}
-    with open(args.saida / f"margem_produto_{comp:%Y-%m}.csv", "w", newline="", encoding="utf-8") as f:
-        campos = ["canal", "marca", "sku", "produto", "receita", "unidades", "cmp", "cmv", "margem_bruta_apos_cmp",
-                  "margem_pct", "nivel", "confianca", "kit_tipo", "cobertura_da_celula"]
-        w = csv.DictWriter(f, fieldnames=campos)
-        w.writeheader()
-        for x in linhas:
-            if x["cmp"] is None:
-                continue
-            w.writerow({**{k: x[k] for k in campos if k in x},
-                        "margem_pct": (x["margem_bruta_apos_cmp"] / x["receita"] * 100).quantize(Decimal("0.01"))
-                        if x["receita"] else None,
-                        "cobertura_da_celula": cob.get((x["canal"], x["marca"]))})
+    produtos = visao_produto(linhas, celulas, comp)
+    # Visao completa (calculaveis, nao calculaveis com motivo e celulas ausentes) e o recorte so' calculavel.
+    for nome, recorte in ((f"produto_cmp_{comp:%Y-%m}.csv", produtos),
+                          (f"margem_produto_{comp:%Y-%m}.csv", [p for p in produtos if p["calculavel"]])):
+        with open(args.saida / nome, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(CAMPOS_PRODUTO))
+            w.writeheader()
+            w.writerows(recorte)
     (args.saida / f"cobertura_por_regra_{comp:%Y-%m}.json").write_text(
         json.dumps(cobertura_por_regra, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.saida / f"celulas_cmv_cmp_{comp:%Y-%m}.json").write_text(
         json.dumps(celulas, default=_json, ensure_ascii=False, indent=1), encoding="utf-8")
     saida: dict = {"modo": "apply" if args.apply else "dry-run", "competencia": comp.isoformat()[:7],
-                   "cortes": {k: v.isoformat() for k, v in cortes.items()}, "celulas": resumo_publico(celulas)}
+                   "cortes": {k: v.isoformat() for k, v in cortes.items()}, "celulas": resumo_publico(celulas),
+                   "produtos": {"calculaveis": sum(1 for p in produtos if p["calculavel"]),
+                                "nao_calculaveis": sum(1 for p in produtos
+                                                       if p["tipo_linha"] == "produto" and not p["calculavel"]),
+                                "celulas_ausentes": sum(1 for p in produtos if p["tipo_linha"] == "celula_ausente")}}
     codigo = EXIT_OK
     if args.apply:
         try:

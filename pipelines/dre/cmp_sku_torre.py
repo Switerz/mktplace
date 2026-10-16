@@ -80,7 +80,8 @@ ENTIDADES_POR_MARCA = {
 }
 FILIAIS_SP = frozenset({"SP", "0301"})
 
-#: Decisao de 13/10/2026: sem CMP ate a origem empresarial ser confirmada.
+#: Decisao de 13/10/2026: sem CMP ate a origem empresarial ser confirmada. Decisao final de
+#: 16/10/2026: sem excecao (nem custo de outra filial, nem candidato 0301 sem a origem confirmada).
 ORIGEM_A_CONFIRMAR = frozenset({("kokeshi", "KS03041"), ("kokeshi", "KS03042")})
 
 NIVEL_GTIN = "CODIGO_EXATO_GTIN"

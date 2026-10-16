@@ -1,4 +1,4 @@
-# DRE-CMV-CMP-1/2/3 — CMV provisório por CMP, kits e de-para de componentes (outubro/2026)
+# DRE-CMV-CMP-1…6 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
 
 Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de outubro sobe de 14,7% (sem kit)
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
@@ -11,6 +11,11 @@ no relatório privado (`.local/dre_cmv_cmp/`).
 DRE-CMV-CMP-3 (seção 11) transformou o bloqueio dos componentes numa planilha privada de de-para para o negócio
 decidir. Nenhuma sugestão foi aplicada ao pipeline. Mesmo aprovando tudo o que tem candidato, **nenhuma célula
 chega a 100%**.
+
+DRE-CMV-CMP-6 (seção 14) fecha a regra de filial: **só 0301** (Rituaria só MAGA SP), sem custo de NF, sem
+`preco_custo` e sem exceção para os KS. O pipeline ganhou a **visão por produto** (seção 6). Cobertura oficial de
+outubro: **47,3%** sobre as 13 células com fonte, **41,2%** sobre as 14 células da DRE; o potencial só com de-para
+0301 vai a 63,9%–71,2%, e **nenhuma célula chega a 100%**.
 
 ## 1. O que é
 
@@ -135,13 +140,28 @@ Simulação **não aplicada**: usar os pares código fiscal ↔ código canônic
 (únicos por marca) como de-para levaria a Lescent a 90–95% (TikTok e Shopee) e a Rituaria a 10–19%. Isso pode
 servir de base para o de-para, mas precisa ser aprovado e versionado antes de entrar.
 
-## 6. Margem bruta após CMP por produto
+## 6. Margem bruta após CMP por produto (visão por produto, DRE-CMV-CMP-6)
 
-Para cada SKU coberto (548 em outubro), o relatório privado traz:
-- receita e unidades;
-- CMP unitário e CMV;
-- **margem bruta após CMP** (`receita − CMV`) e o percentual;
-- método de casamento, confiança e a cobertura da célula.
+`visao_produto` (em `pipelines/dre/cmv_cmp_provisorio.py`) gera `produto_cmp_<competência>.csv` no diretório
+privado de saída, com **todo** produto vendido (canal × SKU), calculável ou não, e uma linha
+`tipo_linha = celula_ausente` para cada célula sem venda na fonte — nada some em silêncio.
+`margem_produto_<competência>.csv` é o recorte só dos calculáveis.
+
+Campos: competência, canal, marca, SKU, produto, receita, unidades, CMP unitário, CMV, margem bruta após CMP,
+percentual, `calculavel`, método, nível, confiança, competência de origem do CMP, carry-forward, cobertura da
+célula, status e motivo.
+
+Regras:
+- **margem numérica só com CMP válido da 0301**: `metodo = direto` (código/GTIN no escopo) ou `kit_bom` (todos os
+  componentes da BOM com CMP 0301);
+- `metodo = depara_aprovado` está **reservado**: nenhum de-para foi aprovado e o pipeline não lê de-para
+  sugerido; nenhum nível de casamento produz esse método hoje;
+- não calculável: CMP, CMV, margem e percentual ficam **nulos** (nunca zero) e `motivo` diz por quê
+  (`status: detalhe`);
+- falha fechada: CMP fora de `coberto`, `coberto` sem CMP, ou nível sem método conhecido levantam erro.
+
+Outubro (dry-run real, só leitura): **548 produtos calculáveis**, 816 não calculáveis com motivo e 1 célula
+ausente (Shopee · Kokeshi). A saída pública do CLI traz só essas contagens.
 
 Na célula:
 - a **margem numérica só existe com 100% de cobertura**. Hoje nenhuma célula chega lá;
@@ -280,20 +300,69 @@ A célula mais próxima é a Lescent. Com alta + média aprovadas, faltam 5,0% n
 ML. Esse resíduo são cerca de 10 códigos: componentes sem candidato e SKUs avulsos ausentes do CMV-LCV. A
 planilha lista esses códigos numa aba própria.
 
+## 14. Regra 0301 fechada e cenário canônico (DRE-CMV-CMP-6)
+
+**Decisão final do negócio (16/10/2026):** só a filial 0301 (SP nos comparativos, `0301` no CMV-LCV); Rituaria
+só MAGA SP; nenhuma outra filial (0302, 1301, 1303, 1401, 1403…); custo de NF e `preco_custo` não substituem CMP;
+**sem exceção para KS03041/KS03042**. Custos de outras filiais ficam só como evidência privada. O código já
+seguia a regra; o teste `test_decisao_final_so_0301_nenhuma_outra_filial` fixa isso.
+
+**Cenário canônico de outubro** (participação na receita das 13 células com fonte; nenhum de-para tratado como
+aprovado):
+
+| classe | produtos | % da receita |
+|---|---:|---:|
+| 1. CMP 0301 já válido | 548 | 47,3% |
+| 2. de-para candidato para CMP 0301 existente, aguardando aprovação | 258 | 16,9% |
+| 3. sem CMP 0301 — sem evidência | 107 | 5,0% |
+| 3. sem CMP 0301 — KS bloqueado (sem exceção) | 29 | 8,1% |
+| 3. sem CMP 0301 — venda sem SKU | 4 | 0,0% |
+| 4. conflito (dois ou mais códigos 0301 com CMP diferente) | 140 | 7,0% |
+| 5. fora da regra (só há custo fora da 0301) | 278 | 15,7% |
+
+Um produto entra na classe do pior item que o bloqueia (um kit precisa de todos os componentes). Conflito de
+código de origem fiscal (o do DRE-CMP-SKU-2) não aparece em outubro: as fontes de API não o têm.
+
+**Potencial só com de-para 0301** (cobertura; nada aprovado ainda):
+
+| faixa | 13 células com fonte | 14 células da DRE |
+|---|---:|---:|
+| oficial atual | 47,3% | 41,2% |
+| + de-para de alta confiança | 55,6% | 48,4% |
+| + de-para de média confiança | 63,9% | 55,6% |
+| + de-para de baixa confiança | 64,3% | 55,9% |
+| + escolha entre CMPs 0301 | 71,2% | 62,0% |
+
+Nenhuma célula chega a 100% em nenhuma faixa. As mais próximas são TikTok · Lescent (95,0%), Shopee · Lescent
+(90,2%) e ML · Lescent (89,9%); o que falta nelas são códigos `LC…` sem CMP na planilha 0301, que o negócio
+precisa informar. Margem por canal, marca ou total continua **nula** abaixo de 100%; só a margem da parcela coberta
+pode aparecer, rotulada.
+
+**Reconciliação das células (13 × 14 × 15).** A grade teórica é 3 canais × 5 marcas = 15, mas a Apice não vende no
+Mercado Livre (nenhuma venda no mart em todo o histórico); como a DRE só cria célula onde há venda no mart, a grade
+real é **14**. O CMV provisório produz as 14: 13 calculadas e Shopee · Kokeshi `ausente_na_fonte` (export manual,
+fora da API). A simulação privada do DRE-CMV-CMP-5 montou as células a partir das linhas de produto e **omitiu
+Shopee · Kokeshi sem aviso** (13). Impacto: os percentuais consolidados são sobre a receita das 13 células com
+fonte; incluindo a receita de Shopee · Kokeshi no denominador (como ausente, nunca custo zero), a cobertura oficial
+cai de 47,3% para 41,2%. A visão por produto agora traz a célula ausente como linha própria.
+
 ## 12. Decisões externas para destravar
 
-1. **Preencher a planilha de de-para** (seção 11): aprovar ou rejeitar as 62 propostas e informar o código ou CMP
-   dos 47 componentes sem candidato e dos 20 ambíguos. O que for aprovado entra como de-para versionado; nenhuma
-   sugestão é aplicada sem essa decisão.
+1. **Preencher a planilha de decisões 0301** (seção 14, privada): aprovar ou rejeitar os 72 de-para para códigos
+   com CMP 0301, escolher o código nos 42 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP 0301.
+   Não há opção de custo de outra filial. O que for aprovado precisa de um gate próprio para entrar como de-para
+   versionado (`metodo = depara_aprovado`); nenhuma sugestão é aplicada sem essa decisão.
 2. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo
    de 100%. Hoje ela não existe, e a margem fica ausente.
-3. Confirmação de KS03041/KS03042 e do de-para temporal dos conflitos (pendências do DRE-CMP-SKU-2).
+3. KS03041/KS03042: sem exceção. Só a confirmação da origem empresarial libera o único candidato 0301 do KS03041;
+   o KS03042 não tem candidato 0301. De-para temporal dos conflitos fiscais segue pendente (DRE-CMP-SKU-2).
 4. Origem da tabela diária da Shopee (confirmar que é 100% API).
 
 ## 13. Próximo gate de publicação
 
-Só depois que o item 1 (ou o 2) levar alguma célula a 100%. O caminho mais curto é a Lescent: as propostas de
-confirmação da marca mais os cerca de 10 códigos da aba "Lescent - rota a 100%" fecham as 3 células.
+Só depois que o item 1 (ou o 2) levar alguma célula a 100%. O caminho mais curto é a Lescent: aprovar os de-para
+0301 da marca e o negócio informar o CMP 0301 dos códigos `LC…` que não estão na planilha (custo de outra filial
+não serve). Antes disso, um gate pequeno precisa ler o de-para aprovado (`metodo = depara_aprovado`).
 
 1. merge do PR;
 2. `alembic upgrade 028` (a 027 da `main`, shadow Shopee, precisa estar aplicada antes);
