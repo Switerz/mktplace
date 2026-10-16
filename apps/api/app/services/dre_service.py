@@ -49,6 +49,7 @@ from typing import Any, Callable
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services import dre_premissas
 from app.services.performance_service import BRAND_LABELS, ML_ID, SHOPEE_ID, TIKTOK_ID
 
 logger = logging.getLogger(__name__)
@@ -822,6 +823,42 @@ def _chave_mes(v) -> date:
     return date(v.year, v.month, 1)
 
 
+# ---------------------------------------------------------------------------
+# Leitura — premissas estimadas (Neon, DRE-PREMISSAS-1)
+# ---------------------------------------------------------------------------
+
+SQL_PREMISSAS_EXISTE = f"SELECT to_regclass('{dre_premissas.TABELA_PREMISSAS}') IS NOT NULL"
+
+#: So' a competencia exata do periodo: a premissa nunca e' estendida a outro mes.
+SQL_PREMISSAS = f"""
+    SELECT p.competencia, p.brand, p.component, p.rate, p.somavel, p.status, p.source_period,
+           p.source_sha256, p.source_note, p.loaded_at, p.run_id, a.status AS lote_status
+    FROM {dre_premissas.TABELA_PREMISSAS} p
+    LEFT JOIN audit.source_sync_run a ON a.sync_run_id = p.run_id
+    WHERE p.competencia BETWEEN :inicio AND :fim
+      AND p.brand = ANY(:marcas)
+"""
+
+
+def ler_premissas(db: Session, inicio: date, fim: date, marcas: list[str]) -> dre_premissas.LeituraPremissas:
+    """Tabela ausente (migration 026 nao aplicada) nao e' erro: `tabela_existe=False`.
+    `to_regclass` evita a excecao que envenenaria a transacao da sessao."""
+    if not db.execute(text(SQL_PREMISSAS_EXISTE)).scalar():
+        return dre_premissas.LeituraPremissas(tabela_existe=False)
+    rows = db.execute(text(SQL_PREMISSAS), {"inicio": inicio, "fim": fim, "marcas": marcas}).mappings().all()
+    return dre_premissas.LeituraPremissas(tabela_existe=True, linhas=[dict(r) for r in rows])
+
+
+def _com_cenario(base: list[dict], premissas: dre_premissas.LeituraPremissas | None, hoje: date) -> None:
+    """Acrescenta `cenario_premissas` em cada celula base. NAO toca nos campos realizados."""
+    idx = dre_premissas.indexar_premissas(premissas)
+    for c in base:
+        mes = date.fromisoformat(c["mes"] + "-01")
+        c["cenario_premissas"] = dre_premissas.montar_cenario(
+            c, idx.get((mes, c["marca"])), mes=mes, hoje=hoje, maduro=mes_maduro(mes, hoje),
+            fim_do_mes=ultimo_dia(mes))
+
+
 def montar_dre(
     *,
     inicio: date,
@@ -834,8 +871,13 @@ def montar_dre(
     hoje: date,
     agora: datetime,
     periodo_origem: str = "informado",
+    premissas: dre_premissas.LeituraPremissas | None = None,
 ) -> dict:
-    """Monta a resposta inteira a partir de linhas ja lidas. Funcao PURA."""
+    """Monta a resposta inteira a partir de linhas ja lidas. Funcao PURA.
+
+    `premissas` (opcional) acrescenta `cenario_premissas` — sempre estimado —
+    sem alterar nenhum campo realizado.
+    """
     meses = meses_do_periodo(inicio, fim)
     af_idx = {(_chave_mes(r["mes"]), r["marca"]): r for r in afiliado_rows}
     cmv_idx, rep_idx = indexar_insumos(insumos.linhas, agora)
@@ -858,12 +900,20 @@ def montar_dre(
         )
         base.append(montar_celula_base(ins, hoje))
     base.sort(key=lambda c: (c["mes"], CANAIS.index(c["canal"]), c["marca"]))
+    _com_cenario(base, premissas, hoje)
+
+    def _agregar(cs: list[dict], **rotulos) -> dict | None:
+        out = agregar(cs, **rotulos)
+        if out is not None:
+            # Soma dos cenarios das celulas base; nenhuma taxa e' reaplicada aqui.
+            out["cenario_premissas"] = dre_premissas.agregar_cenarios([c["cenario_premissas"] for c in cs])
+        return out
 
     def _grupo(chave_fn: Callable[[dict], tuple], rotulos: Callable[[tuple], dict]) -> list[dict]:
         grupos: dict[tuple, list[dict]] = {}
         for c in base:
             grupos.setdefault(chave_fn(c), []).append(c)
-        return [agregar(cs, **rotulos(k)) for k, cs in sorted(grupos.items(), key=lambda kv: kv[0])]
+        return [_agregar(cs, **rotulos(k)) for k, cs in sorted(grupos.items(), key=lambda kv: kv[0])]
 
     por_canal = _grupo(lambda c: (CANAIS.index(c["canal"]),),
                        lambda k: {"canal": CANAIS[k[0]], "canal_label": CANAL_LABEL[CANAIS[k[0]]]})
@@ -878,16 +928,19 @@ def montar_dre(
         "periodo": {"date_from": inicio.isoformat(), "date_to": fim.isoformat(),
                     "meses": [m.isoformat()[:7] for m in meses], "origem": periodo_origem},
         "filtros": {"canais": canais, "marcas": marcas},
-        "fontes": {"neon": "ok", "insumos_dre": resumo_insumos(insumos, agora)},
+        "fontes": {"neon": "ok", "insumos_dre": resumo_insumos(insumos, agora),
+                   "premissas_dre": dre_premissas.resumo_premissas(premissas, meses, marcas)},
         "regras": {
             "maturacao_meses": MESES_MATURACAO,
             "insumo_idade_maxima_horas": int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600),
             "cmv_razao_aceita": [CMV_RAZAO_MIN, CMV_RAZAO_MAX],
             "afiliado_tiktok": "decomposicao de taxas; nunca somado",
             "rotulo_margem": ROTULO_MARGEM,
+            "rotulo_margem_estimada": dre_premissas.ROTULO_MARGEM_ESTIMADA,
             "contrato": "docs/dre_contrato_0.md",
+            "contrato_premissas": "docs/dre_premissas_1.md",
         },
-        "total": agregar(base, escopo="total"),
+        "total": _agregar(base, escopo="total") if base else None,
         "por_canal": por_canal,
         "por_marca": por_marca,
         "por_canal_marca": por_canal_marca,
@@ -904,6 +957,7 @@ def get_dre(db: Session, *, inicio: date, fim: date, canais: list[str],
     mkt_ids = [MKT_POR_CANAL[c] for c in canais]
     mart_rows, afiliado_rows = ler_neon(db, inicio, fim, mkt_ids, escopo_marcas)
     insumos = ler_insumos(db, inicio, fim, canais, escopo_marcas)
+    premissas = ler_premissas(db, inicio, fim, escopo_marcas)
     return montar_dre(inicio=inicio, fim=fim, canais=canais, marcas=escopo_marcas,
                       mart_rows=mart_rows, afiliado_rows=afiliado_rows, insumos=insumos,
-                      hoje=hoje, agora=agora, periodo_origem=periodo_origem)
+                      hoje=hoje, agora=agora, periodo_origem=periodo_origem, premissas=premissas)
