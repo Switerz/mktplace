@@ -200,3 +200,8 @@ def test_migration_029_cadeia_e_travas():
     assert "INSERT" not in sql.upper()
     for c in pub.COLS_INV + pub.COLS_MARCA:
         assert c in sql, c
+
+
+def test_auditoria_marca_o_ml_como_2():
+    # audit.source_sync_run.marketplace_id: 1=tiktok, 2=ml, 3=shopee
+    assert pub.AUDIT_MARKETPLACE_ID == 2

@@ -51,9 +51,10 @@ FLAG_AMBIENTE = "ML_FULL_STOCK_PUBLISH_ENABLED"
 ADVISORY_LOCK_KEY = 916140029
 TARGET_STATEMENT_TIMEOUT_MS = 180_000
 PAGE_SIZE = 500
-#: Mesmo valor do `sync_ml_fulfillment_daily` ("ML em dim.dim_marketplace").
-#: ⚠️ O seed de `marts.dim_marketplace` diz ML = 2: divergencia a verificar.
-AUDIT_MARKETPLACE_ID = 1
+#: `audit.source_sync_run.marketplace_id`: 1=tiktok, 2=ml, 3=shopee (documentado
+#: em `sync_serving_snapshots.py` e no seed `db/seeds/01_marketplaces.sql`).
+#: ⚠️ `sync_ml_fulfillment_daily` usa 1 para o ML: defeito a corrigir la'.
+AUDIT_MARKETPLACE_ID = 2
 AUDIT_SOURCE = "ml_full_stock_daily"
 AUDIT_ERRO_MAX_CHARS = 4000
 
