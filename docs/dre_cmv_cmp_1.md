@@ -1,4 +1,4 @@
-# DRE-CMV-CMP-1…8 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
+# DRE-CMV-CMP-1…11 — CMV provisório por CMP, kits, de-para e visão por produto (outubro/2026)
 
 Status: implementado e medido em dry-run. Com as regras de kit, a cobertura de outubro sobe de 14,7% (sem kit)
 para 15,5% (+ homogêneo) e **47,3%** (+ misto) da receita, mas **nenhuma célula chega a 100%**. Por isso nenhuma ganha margem numérica no
@@ -375,14 +375,15 @@ condições (todas fixadas em teste):
 6. **GTIN não cria de-para** (não foi autorizado); o código resolvido passa pelas mesmas regras do código exato
    (escopo 0301, vigência, GTIN/volume sem divergência, conflito);
 7. **nota fiscal:** NF com outro código canônico para o mesmo código e marca é conflito de identidade e bloqueia; custo
-   da NF diferente do CMP 0301 **não** bloqueia nem substitui — só registra o alerta `cmp_possivelmente_desatualizado`,
-   **sem limite percentual** (nenhum foi aprovado). O custo vem da NF de saída do Protheus (último mês com custo, sem
-   outlier) e serve só para o alerta.
+   da NF **não** bloqueia, não substitui o CMP e não altera CMV nem margem. Desde o DRE-CMV-CMP-9 ele é só um
+   **diagnóstico privado e neutro**, `comparacao_nf_disponivel` (existe custo de NF para comparar), sem afirmar
+   defasagem e sem limite (nenhum foi aprovado). Aparece só no CSV privado por produto, nunca na saída pública. O custo
+   vem da NF de saída do Protheus (último mês com custo, sem outlier).
 
 Implementação: `cmp_sku_torre.resolver_depara` (via 3, depois do código exato e da via GTIN) e
 `cmv_cmp_provisorio.DEPARA_CADASTRO_AUTORIZADO = True`. Método na visão por produto: `depara_aprovado`. A visão por
 produto separa `situacao_depara` (`depara_aplicado`, `codigo_resolvido_cmp_ausente`, `conflito_identidade`,
-`sem_depara`) e `alerta_qualidade`. Se a autorização for revogada, a constante volta a `False`: a visão oficial sai sem
+`sem_depara`) e, só no CSV privado, `diagnostico_privado` e `custo_nf_comparacao`. Se a autorização for revogada, a constante volta a `False`: a visão oficial sai sem
 de-para, a proposta sai em `proposta_depara_*` e o publicador recusa `receita_depara > 0`. A migration 028 (não
 aplicada) tem `receita_depara`, com CHECK.
 
@@ -396,9 +397,8 @@ aplicada) tem `receita_depara`, com CHECK.
 | Lescent (TikTok / Shopee / ML) | 7,2% / 5,5% / 3,1% | 94,7% / 89,0% / 89,5% |
 
 Situação do de-para por produto (canal × SKU): 148 com de-para aplicado, 108 com código resolvido sem CMP 0301,
-10 em conflito de identidade, 1.098 sem de-para. O alerta `cmp_possivelmente_desatualizado` marca 142 produtos: sem
-limite, quase todo de-para aplicado diverge do custo da NF em algum centavo — o alerta só fica útil com um limite
-aprovado pelo negócio.
+10 em conflito de identidade, 1.098 sem de-para. A comparação com o custo de NF existe para quase todo de-para
+aplicado; como não há limite aprovado, ela ficou como diagnóstico privado (DRE-CMV-CMP-9), não como alerta.
 
 **Dos 53 de-para propostos no CMP-7:** 34 continuam válidos (todos componentes Lescent, pelo cadastro); 9 caem por não
 ter `sku_antigo` (eram ligações por GTIN); 6 caem por status `Descontinuado`; 4 são cobertos pela via GTIN antiga em
@@ -419,26 +419,74 @@ CMV coberto) é custo do kit, e a DRE também tem a premissa "(-) Brindes" — p
    fecha), escolher o código nos 41 itens com dois CMPs 0301 e informar o CMP 0301 de 86 itens sem CMP 0301.
    Não há opção de custo de outra filial. Aprovação linha a linha precisa de um gate próprio para ser lida pelo
    pipeline; nenhuma sugestão é aplicada sem essa decisão.
-2. **Status elegível do cadastro:** confirmar se só `Ativo` sustenta o de-para (assunção atual) ou se `Descontinuado` e
-   `Reavaliação 45D` também (efeito: +0,05 ponto).
-3. **Limite do alerta `cmp_possivelmente_desatualizado`:** sem limite aprovado, ele marca quase todo de-para aplicado.
+2. **Status elegível do cadastro — decidido (DRE-CMV-CMP-9):** só `Ativo`. `Descontinuado` fica fora e
+   `Reavaliação 45D` fica fora até autorização explícita. Vínculo descontinuado só entra por aprovação individual.
+3. **Divergência NF × CMP — decidido (DRE-CMV-CMP-9):** só diagnóstico privado; um limite só se o negócio aprovar.
 4. **Regra explícita de estimativa** para a parcela não coberta, se a margem da célula tiver de existir abaixo
    de 100%. Hoje ela não existe, e a margem fica ausente.
 5. KS03041/KS03042: sem exceção. Só a confirmação da origem empresarial libera o único candidato 0301 do KS03041;
    o KS03042 não tem candidato 0301. De-para temporal dos conflitos fiscais segue pendente (DRE-CMP-SKU-2).
 6. Origem da tabela diária da Shopee (confirmar que é 100% API).
 
-## 13. Próximo gate de publicação
+## 13. Próximo gate de publicação (preparado; só roda com uma célula a 100%)
 
-Só depois que o item 1 (ou o 2) levar alguma célula a 100%. O caminho mais curto é a Lescent: aprovar os de-para
-0301 da marca e o negócio informar o CMP 0301 dos códigos `LC…` que não estão na planilha (custo de outra filial
-não serve). Antes disso, um gate pequeno precisa ler o de-para aprovado (`metodo = depara_aprovado`).
+**Pré-condição:** alguma célula com cobertura exatamente 100% no dry-run, sem nenhuma linha com CMP de outra filial,
+custo de NF ou `preco_custo`. Hoje nenhuma chega. Duas peças de código ainda faltam e entram num gate pequeno
+antes deste: (a) leitura de decisões humanas linha a linha (de-para aprovado individualmente e CMP 0301 informado
+pelo negócio) a partir de arquivo privado versionado fora do repositório; (b) UX abaixo.
 
-1. merge do PR;
-2. `alembic upgrade 028` (a 027 da `main`, shadow Shopee, precisa estar aplicada antes);
-3. publicador em dry-run e conferência;
-4. `--apply`;
-5. deploy da API.
+1. **Integrar a `main`** no PR por merge (sem rebase) e repetir: cadeia com uma cabeça em 028, testes focais e suítes.
+2. **Merge** do PR #78 (sem squash/rebase, sem `--admin`).
+3. **Migration:** confirmar no Neon que a cabeça é 027 (`alembic current`); `alembic upgrade 028`; conferir tabela,
+   CHECKs (`ck_fdcp_*`, inclusive `ck_fdcp_depara`) e que ela nasce vazia.
+4. **Dry-run** do publicador para a competência: conferir as 14 células, a(s) célula(s) a 100% e que a saída pública
+   não traz SKU, valor nem diagnóstico privado.
+5. **Reconciliação:** receita da fonte × receita da célula da DRE (faixa 0,978–1,021 medida); CMV da célula a 100% =
+   soma do CMV por produto do CSV privado; nenhuma célula abaixo de 100% com margem numérica.
+6. **Apply único** (`--apply`), uma vez; lock, transação única, DELETE só da competência, auditoria `success`.
+7. **API:** deploy manual no Render da revisão mesclada; `/dre` com a célula a 100% mostra o CMV provisório rotulado,
+   cenário `parcial` (nunca `calculavel`), `fonte_cmv = cmp_sku`; as demais seguem `nao_calculavel` com motivo.
+8. **UX:** o frontend ainda não conhece a origem `cmp_provisorio` (cai no texto cru) nem exibe o bloco `cmv_provisorio`
+   e `fonte_cmv`. Antes do apply: rótulo "CMP provisório", cobertura e data de corte na linha de CMV, e a margem da
+   célula só a 100%. Sem isso a tela não quebra, mas mostra o código interno.
+9. **Rollback:** (a) dado — DELETE da competência em `marts.fact_dre_cmv_provisorio_mensal` (a API volta a
+   `nao_calculavel` na hora, porque só lê lote `success`); (b) schema — `alembic downgrade 027` derruba só a tabela;
+   (c) regra — `DEPARA_CADASTRO_AUTORIZADO = False` faz o publicador recusar cobertura por de-para.
 
-Publicar outubro hoje só trocaria o motivo das 14 células de "CMV provisório não publicado" para
+Publicar antes de uma célula chegar a 100% só trocaria o motivo das 14 células de "CMV provisório não publicado" para
 "cobertura insuficiente". O estado continuaria `nao_calculavel`.
+
+## 16. Estado em 20/10/2026 (DRE-CMV-CMP-9/10/11)
+
+**Cobertura de outubro** (dry-run real, só leitura; a receita da DRE ainda corta em 15/10 no TikTok e ML e em 12/10
+na Shopee — o mart de vendas não avançou desde 16/10): **57,4%** nas 13 células com fonte e **50,0%** nas 14 células da
+DRE; 691 produtos calculáveis; nenhuma célula a 100%; margem agregada nula.
+
+**Waterfall dos 50,0% sem CMV** (cada produto numa só categoria; kit com bloqueios mistos fica no mais difícil):
+
+| categoria | % da receita total | tipo de solução |
+|---|---:|---|
+| Shopee × Kokeshi sem fonte por SKU | 13,0 | fonte nova |
+| só existe custo de outra filial | 10,5 | CMP 0301 inexistente hoje |
+| KS03041/KS03042 bloqueados | 10,1 | decisão de origem (+ CMP do KS03042) |
+| de-para aguardando aprovação humana | 5,9 | decisão humana |
+| código resolvido sem CMP vigente na 0301 | 5,5 | CMP 0301 inexistente hoje |
+| produto sem de-para | 4,2 | CMP 0301 inexistente hoje |
+| escolha entre CMPs válidos da 0301 | 0,4 | decisão humana |
+| cadastro `Descontinuado` | 0,4 | decisão humana (aprovação individual) |
+| `Reavaliação 45D`, sem SKU, residual | 0,0 | — |
+
+Agrupado: **decisão humana ≈ 12 pontos** (6,8 só decisões + 5,2 com a origem do KS03041), **CMP 0301 inexistente
+≈ 25 pontos**, **Shopee × Kokeshi 13 pontos**. Tetos nas 14 células: só decisões 56,7%; + origem do KS03041 62,0%;
++ todos os CMPs 0301 que faltam 87,0% (as 13 células com fonte a 100%); + Shopee × Kokeshi 100%.
+
+**Primeira célula candidata: Shopee × Lescent** (88,8%). Pacote mínimo: CMP 0301 oficial de 7 produtos e aprovação
+individual de 4 vínculos descontinuados (dois deles também precisam de CMP 0301 do código destino). Com mais 2 itens,
+TikTok e ML × Lescent também fecham. Nenhum outro caminho fecha uma célula antes.
+
+**Protheus 0301 — só comparação.** `dim.protheus_cmp_mensal` tem filial 0301 em ago–set/26 (estável: mediana
+set/ago = 1,000) e todos os itens da rota Lescent têm registro em 09/2026. Mas ele **diverge da planilha**: nos 55
+códigos em comum, mediana 0,78 do CMP de jul/26; na LCV fica abaixo em 40 de 46 (mediana 0,74); na Kokeshi fica acima
+(mediana 1,12). Só contém produtos Lescent e Kokeshi; para Apice, Barbours e Rituaria a "SP" das planilhas é outra
+filial no Protheus. Não vira CMP oficial sem o negócio explicar a diferença.
+

@@ -357,7 +357,7 @@ def test_depara_pela_chave_marca_e_sku_antigo(tmp_path):
     (ln,) = classif(tmp_path, [v("tiktok", "apice", "VELHO1", 10, 100)], cad(("NOVO1", "VELHO1", None)))
     assert (ln["status"], ln["cmp"], ln["nivel"], ln["confianca"]) == ("coberto", Decimal(4), T.NIVEL_DEPARA_CODIGO,
                                                                        "baixa")
-    assert ln["situacao_depara"] == "depara_aplicado" and ln["alerta"] == ""
+    assert ln["situacao_depara"] == "depara_aplicado" and ln["diagnostico"] == ""
     (p,) = M.visao_produto([ln], [], OUT)
     assert (p["metodo"], p["situacao_depara"]) == ("depara_aprovado", "depara_aplicado")
 
@@ -447,20 +447,22 @@ def test_gtin_nunca_cria_depara(tmp_path):
     assert ln["cmp"] is None and "depara_sem_sku_antigo" in ln["motivo"]
 
 
-def test_custo_de_nf_divergente_so_gera_alerta_sem_limite(tmp_path):
+def test_custo_de_nf_e_so_diagnostico_privado_neutro(tmp_path):
+    """DRE-CMV-CMP-9: custo de NF nao bloqueia, nao substitui, nao muda CMV/margem e nao e' alerta."""
     comparativo(tmp_path, [("SP", "NOVO1", "", "SHAMPOO", [4, 4, 4], 4)])
     venda = [v("tiktok", "apice", "VELHO1", 10, 100)]
     c = cad(("NOVO1", "VELHO1", None))
+    (sem_nf,) = classif(tmp_path, venda, c)
     c.nf_custo = T.montar_custos_nf([{"marca": "Apice", "codigo": "NOVO1", "data_mes": OUT,
-                                      "custo_unitario": Decimal("4.01")}])
+                                      "custo_unitario": Decimal("2.50")}])
     (ln,) = classif(tmp_path, venda, c)
-    assert (ln["status"], ln["cmp"], ln["alerta"]) == ("coberto", Decimal(4), T.ALERTA_CMP_DESATUALIZADO)
+    assert (ln["status"], ln["cmp"], ln["cmv"], ln["margem_bruta_apos_cmp"]) == (
+        sem_nf["status"], sem_nf["cmp"], sem_nf["cmv"], sem_nf["margem_bruta_apos_cmp"])
+    assert ln["diagnostico"] == T.DIAGNOSTICO_COMPARACAO_NF == "comparacao_nf_disponivel"
+    assert ln["custo_nf_comparacao"] == Decimal("2.50") and sem_nf["diagnostico"] == ""
     (p,) = M.visao_produto([ln], [], OUT)
-    assert p["alerta_qualidade"] == T.ALERTA_CMP_DESATUALIZADO and p["cmp"] == Decimal(4)
-    c.nf_custo = T.montar_custos_nf([{"marca": "Apice", "codigo": "NOVO1", "data_mes": OUT,
-                                      "custo_unitario": Decimal("4.00")}])
-    (ln,) = classif(tmp_path, venda, c)
-    assert ln["alerta"] == ""
+    assert p["diagnostico_privado"] == "comparacao_nf_disponivel" and p["cmp"] == Decimal(4)
+    assert not any("alerta" in k for k in p) and "desatualizado" not in str(p)
 
 
 def test_custo_de_nf_usa_o_ultimo_mes():

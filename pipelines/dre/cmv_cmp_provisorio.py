@@ -69,7 +69,7 @@ DE-PARA PELO CADASTRO (autorizado pelo negocio, DRE-CMV-CMP-8)
 Quando codigo e GTIN falham, `cmp_sku_torre.resolver_depara` usa a chave
 `(marca, sku_antigo)` do cadastro oficial para chegar a UM `sku` ativo/elegivel e busca
 o CMP dele na 0301. Metodo `depara_aprovado`. GTIN nunca cria de-para; NF com outro
-canonico bloqueia (conflito de identidade); custo de NF so' gera alerta. Codigo
+canonico bloqueia (conflito de identidade); custo de NF so' gera diagnostico privado. Codigo
 resolvido sem CMP 0301 fica `codigo_resolvido_cmp_ausente` (nulo, nunca zero).
 `DEPARA_CADASTRO_AUTORIZADO` liga a regra; desligada, a proposta sai em
 `proposta_depara_*` e o publicador recusa `receita_depara > 0`.
@@ -140,7 +140,7 @@ SITUACOES_DEPARA = ("depara_aplicado", T.STATUS_CODIGO_RESOLVIDO_SEM_CMP, T.STAT
 CAMPOS_PRODUTO = ("competencia", "tipo_linha", "canal", "marca", "sku", "produto", "receita", "unidades", "cmp",
                   "cmv", "margem_bruta_apos_cmp", "margem_pct", "calculavel", "metodo", "nivel", "confianca",
                   "competencia_origem_cmp", "carry_forward", "cobertura_da_celula", "status", "motivo",
-                  "situacao_depara", "alerta_qualidade")
+                  "situacao_depara", "diagnostico_privado", "custo_nf_comparacao")
 FONTE_BOM = "raw.bling_kit_estrutura (BOM explicita do Bling, conta = marca)"
 RE_KIT = re.compile(r"(?i)(^kit|\bkit\b)")
 
@@ -191,7 +191,7 @@ SQL_SHOPEE = """
 """
 SQL_POR_CANAL = {"ml": SQL_ML, "tiktok": SQL_TIKTOK, "shopee": SQL_SHOPEE}
 #: Custo unitario da NF de saida do Protheus, por marca x codigo, no ultimo mes com custo ate a
-#: competencia. SO' para o alerta `cmp_possivelmente_desatualizado`: nunca vira CMP.
+#: competencia. SO' para o diagnostico privado `comparacao_nf_disponivel`: nunca vira CMP.
 SQL_NF_CUSTO = """
     SELECT marca, upper(btrim(codigo_produto)) AS codigo, data_mes,
            SUM(custo) / NULLIF(SUM(quantidade_item), 0) AS custo_unitario
@@ -313,14 +313,14 @@ def cmp_do_kit(ind: C.Indice, cat: T.Catalogo, idx_gtin: dict, entrada: dict, ma
         confs.append(CONFIANCA[r.nivel])
         origem = max(origem or r.vigencia.competencia_origem, r.vigencia.competencia_origem)
         carry = carry or r.vigencia.carry_forward
-    alerta = T.ALERTA_CMP_DESATUALIZADO if any(r.alerta for r in resolucoes) else ""
+    diag = T.DIAGNOSTICO_COMPARACAO_NF if any(r.diagnostico for r in resolucoes) else ""
     if faltas:
         return {"status": "kit_componente_sem_cmp", "cmp": None, "motivo": "componentes sem CMP: " + ",".join(faltas),
-                "situacao_depara": situacao_depara(resolucoes), "alerta": ""}
+                "situacao_depara": situacao_depara(resolucoes), "diagnostico": ""}
     return {"status": "coberto", "cmp": sum(partes, Decimal(0)),
             "confianca": min(confs, key=ORDEM_CONFIANCA.get), "competencia_origem": origem, "carry_forward": carry,
             "motivo": "BOM explicita: " + " + ".join(f"{q}x{c}" for c, q, _ in entrada["componentes"]),
-            "situacao_depara": situacao_depara(resolucoes), "alerta": alerta}
+            "situacao_depara": situacao_depara(resolucoes), "diagnostico": diag}
 
 
 def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: date,
@@ -384,7 +384,9 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
         usou_kit = kit is not None and (status == "coberto" and nivel in (NIVEL_KIT_HOMOGENEO, NIVEL_KIT_MISTO)
                                         or status == "kit_componente_sem_cmp")
         sit = kit.get("situacao_depara", "sem_depara") if usou_kit else situacao_depara([r])
-        alerta = (kit.get("alerta", "") if usou_kit else (r.alerta if r is not None and status == "coberto" else ""))
+        direto_coberto = not usou_kit and r is not None and status == "coberto"
+        diag = kit.get("diagnostico", "") if usou_kit else (r.diagnostico if direto_coberto else "")
+        custo_nf = r.custo_nf if direto_coberto else None
         out.append({
             "canal": v.canal, "marca": v.marca, "sku": v.sku, "produto": v.produto,
             "unidades": v.unidades, "receita": v.receita, "status": status, "nivel": nivel,
@@ -395,7 +397,7 @@ def classificar(ind: C.Indice, cat: T.Catalogo, vendas: list[LinhaVenda], comp: 
             "entidades": "|".join(r.entidades) if r is not None else "",
             "candidatos": "|".join(f"{e}:{s}:{c}" for e, s, c, _ in r.candidatos) if r is not None else "",
             "parece_kit": bool(RE_KIT.search(f"{v.sku or ''} {v.produto or ''}")),
-            "situacao_depara": sit, "alerta": alerta,
+            "situacao_depara": sit, "diagnostico": diag, "custo_nf_comparacao": custo_nf,
         })
     return out
 
@@ -511,7 +513,9 @@ def visao_produto(linhas: list[dict], celulas: list[dict], comp: date) -> list[d
             "status": x["status"],
             "motivo": None if calculavel else f"{x['status']}: {x['motivo'] or 'sem detalhe'}",
             "situacao_depara": x.get("situacao_depara", "sem_depara"),
-            "alerta_qualidade": x.get("alerta") or None,
+            # Diagnostico PRIVADO: so' no CSV por produto; nunca na saida publica nem em CMV/margem.
+            "diagnostico_privado": x.get("diagnostico") or None,
+            "custo_nf_comparacao": x.get("custo_nf_comparacao"),
         })
     for c in celulas:
         if c["status"] == "ausente_na_fonte":
@@ -755,9 +759,7 @@ def main(argv: Optional[list[str]] = None, *, engines: Optional[Callable] = None
                                                        if p["tipo_linha"] == "produto" and not p["calculavel"]),
                                 "celulas_ausentes": sum(1 for p in produtos if p["tipo_linha"] == "celula_ausente"),
                                 "por_situacao_depara": dict(Counter(p["situacao_depara"] for p in produtos
-                                                                    if p["tipo_linha"] == "produto")),
-                                "alerta_cmp_possivelmente_desatualizado": sum(
-                                    1 for p in produtos if p["alerta_qualidade"] == T.ALERTA_CMP_DESATUALIZADO)},
+                                                                    if p["tipo_linha"] == "produto"))},
                    "depara_cadastro_autorizado": DEPARA_CADASTRO_AUTORIZADO}
     if not DEPARA_CADASTRO_AUTORIZADO:
         saida["proposta_depara_nao_oficial"] = resumo_publico(celulas_prop)

@@ -106,9 +106,10 @@ STATUS_ELEGIVEIS = frozenset({"ativo"})
 #: Estados do de-para que nao cobrem: codigo resolvido sem CMP 0301 e conflito de identidade.
 STATUS_CODIGO_RESOLVIDO_SEM_CMP = "codigo_resolvido_cmp_ausente"
 STATUS_CONFLITO_IDENTIDADE = "conflito_identidade"
-#: Alerta de qualidade (nao bloqueia, nao muda o CMP): custo da NF diverge do CMP 0301.
-#: Sem limite percentual: nenhum foi aprovado pelo negocio.
-ALERTA_CMP_DESATUALIZADO = "cmp_possivelmente_desatualizado"
+#: Diagnostico PRIVADO e neutro (DRE-CMV-CMP-9): existe custo de NF de saida para comparar com o CMP 0301.
+#: Nao e' alerta funcional, nao afirma defasagem, nao bloqueia, nao muda CMP/CMV/margem. Nenhum limite
+#: de divergencia foi aprovado pelo negocio.
+DIAGNOSTICO_COMPARACAO_NF = "comparacao_nf_disponivel"
 #: Os dois niveis confirmados por GTIN; nunca misturados com o provisorio.
 NIVEIS_GTIN = (NIVEL_GTIN, NIVEL_VIA_GTIN)
 
@@ -258,7 +259,7 @@ class Catalogo:
     antigo: dict = field(default_factory=lambda: defaultdict(list))
     #: (marca, codigo emitido na NF) -> codigos canonicos. SO' bloqueiam (identidade); nunca criam de-para.
     nf: dict = field(default_factory=lambda: defaultdict(set))
-    #: (marca, codigo) -> custo unitario da NF de saida. SO' gera alerta; nunca substitui o CMP.
+    #: (marca, codigo) -> custo unitario da NF de saida. SO' diagnostico privado; nunca substitui o CMP.
     nf_custo: dict = field(default_factory=dict)
 
 
@@ -310,7 +311,8 @@ class Resolucao:
     motivo: str = ""     # por que ficou sem casamento (inclui a tentativa pela via GTIN)
     vigencia: Optional[Vigencia] = None
     candidatos: tuple = ()  # (entidade, sku, cmp, competencia_origem) — para o de-para de conflitos
-    alerta: str = ""        # alerta de qualidade que nao bloqueia (ex.: cmp_possivelmente_desatualizado)
+    diagnostico: str = ""   # diagnostico privado e neutro (ex.: comparacao_nf_disponivel); nunca muda o CMP
+    custo_nf: Optional[Decimal] = None  # custo da NF de saida, so' para comparacao privada
 
 
 def gtins_da_venda(cat: Optional[Catalogo], marca: str, produto: Optional[str], codigos: dict) -> set:
@@ -420,7 +422,7 @@ def montar_pares_nf(rows: list[dict]) -> dict:
 
 
 def montar_custos_nf(rows: list[dict]) -> dict:
-    """(marca, codigo) -> custo unitario da NF de saida (ultimo mes com custo). So' para alerta."""
+    """(marca, codigo) -> custo unitario da NF de saida (ultimo mes com custo). So' diagnostico privado."""
     out: dict = {}
     for r in sorted(rows, key=lambda r: r["data_mes"]):
         if r.get("custo_unitario") is not None and Decimal(str(r["custo_unitario"])) > 0:
@@ -444,7 +446,7 @@ def resolver_depara(ind: Indice, cat: Catalogo, comp: date, produto: Optional[st
       4. codigo resolvido sem CMP vigente na 0301 -> `codigo_resolvido_cmp_ausente` (CMP nulo, nunca zero);
       5. so' onde existe `sku_antigo`;
       6. NF com outro codigo canonico para o mesmo codigo -> conflito de identidade (bloqueia);
-         custo da NF diferente do CMP -> so' alerta `cmp_possivelmente_desatualizado` (sem limite).
+         custo da NF -> so' diagnostico privado `comparacao_nf_disponivel` (nao bloqueia, nao substitui).
     O codigo resolvido passa pelas MESMAS regras do codigo exato (escopo 0301, vigencia, GTIN/volume,
     conflito). Devolve (None, motivo) quando a regra nao se aplica; senao uma Resolucao, coberta ou nao.
     """
@@ -464,10 +466,10 @@ def resolver_depara(ind: Indice, cat: Catalogo, comp: date, produto: Optional[st
     r = resolver_codigo(ind, {"depara": novo}, comp, produto, marca, g_venda)
     if r.status == "coberto":
         custo_nf = cat.nf_custo.get((m, novo), cat.nf_custo.get((m, cod)))
-        alerta = (ALERTA_CMP_DESATUALIZADO if custo_nf is not None
-                  and custo_nf.quantize(Decimal("0.01")) != r.cmp.quantize(Decimal("0.01")) else "")
         return Resolucao("coberto", r.cmp, NIVEL_DEPARA_POR_NIVEL[r.nivel], ("cadastro",), r.entidades,
-                         r.descartados, f"de-para cadastro: {cod} -> {novo}", r.vigencia, alerta=alerta), ""
+                         r.descartados, f"de-para cadastro: {cod} -> {novo}", r.vigencia,
+                         diagnostico=DIAGNOSTICO_COMPARACAO_NF if custo_nf is not None else "",
+                         custo_nf=custo_nf), ""
     if r.status == "sem_cmp":
         return Resolucao(STATUS_CODIGO_RESOLVIDO_SEM_CMP,
                          motivo=f"de-para cadastro: {cod} -> {novo}, sem CMP vigente na 0301"), ""
