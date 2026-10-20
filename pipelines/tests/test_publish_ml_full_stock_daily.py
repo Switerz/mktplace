@@ -192,7 +192,7 @@ def _mig():
 def test_migration_029_cadeia_e_travas():
     m = _mig()
     assert (m.revision, m.down_revision) == ("029", "027")
-    sql = " ".join(m.UPGRADE_SQL)
+    sql = " ".join(m._upgrade_sql())
     for t in pub.TABELAS:
         assert f"CREATE TABLE {t}" in sql
     assert "ck_fmlfsi_leitura_quantidade" in sql and "ck_fmlfsi_cobertura_exige_demanda" in sql

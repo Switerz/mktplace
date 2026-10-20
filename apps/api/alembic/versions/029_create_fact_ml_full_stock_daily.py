@@ -53,7 +53,10 @@ def _lista(valores):
     return ", ".join(f"'{v}'" for v in valores)
 
 
-UPGRADE_SQL = [
+def _upgrade_sql() -> list[str]:
+    """Monta o DDL. Funcao (e nao lista no topo): a convencao do repo proibe
+    chamada no nivel do modulo, porque Alembic importa todas as versions."""
+    return [
     f"""
     CREATE TABLE {INVENTARIO} (
         ref_date              DATE         NOT NULL,   -- dia da FOTOGRAFIA (America/Sao_Paulo)
@@ -130,14 +133,15 @@ UPGRADE_SQL = [
             (inventarios_full_lidos > 0) = (disponivel_full IS NOT NULL))
     )
     """,
-]
+    ]
+
 
 DOWNGRADE_SQL = [f"DROP TABLE IF EXISTS {MARCA}", f"DROP TABLE IF EXISTS {STATUS}",
                  f"DROP TABLE IF EXISTS {INVENTARIO}"]
 
 
 def upgrade() -> None:
-    for sql in UPGRADE_SQL:
+    for sql in _upgrade_sql():
         op.execute(sql)
 
 
