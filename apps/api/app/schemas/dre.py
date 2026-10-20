@@ -86,7 +86,8 @@ class DataMaxima(BaseModel):
 #: ---------------------------------------------------------------------------
 
 EstadoCenario = Literal["calculavel", "parcial", "nao_calculavel"]
-OrigemLinha = Literal["realizado", "premissa", "decomposicao", "indisponivel", "calculado", "misto"]
+OrigemLinha = Literal["realizado", "premissa", "decomposicao", "indisponivel", "calculado", "misto",
+                      "cmp_provisorio"]
 
 
 class LinhaCenario(BaseModel):
@@ -122,6 +123,27 @@ class FontePremissas(BaseModel):
     carregado_em: datetime | None = None
 
 
+class CmvProvisorio(BaseModel):
+    """CMV PROVISORIO por CMP (DRE-CMV-CMP-1). Separado do fiscal; nunca o substitui."""
+    status: Literal["calculado", "ausente_na_fonte"]
+    data_corte: date | None = None
+    receita_fonte: float | None = None
+    receita_coberta: float | None = None
+    cobertura_pct: float | None = None
+    cmv_provisorio: float | None = None
+    unidades_sem_cmp: float | None = None
+    skus_total: int | None = None
+    skus_sem_cmp: int | None = None
+    skus_conflito: int | None = None
+    #: Receita coberta por metodo de casamento (gtin, volume, codigo_exato_provisorio).
+    receita_por_metodo: dict[str, float | None]
+    confianca: Literal["alta", "media", "baixa"] | None = None
+    regra_temporal: str | None = None
+    #: True so' quando o fiscal estava inutilizavel e a cobertura atingiu o minimo.
+    usado_na_margem: bool
+    celulas_ausentes_na_fonte: int | None = None
+
+
 class CenarioPremissas(BaseModel):
     competencia_premissas: str
     natureza: Literal["estimada"]
@@ -131,7 +153,8 @@ class CenarioPremissas(BaseModel):
     previa: bool
     competencia_madura: bool
     receita_base: float | None = None
-    fonte_cmv: Literal["dre_realizada", "cmp_sku"]
+    fonte_cmv: Literal["dre_realizada", "cmp_sku", "misto"]
+    cmv_provisorio: CmvProvisorio | None = None
     linhas: list[LinhaCenario]
     componentes_ausentes: list[ComponenteAusenteCenario]
     motivos: list[str]

@@ -51,10 +51,18 @@ ORIGEM_PREMISSA = "premissa"
 ORIGEM_DECOMPOSICAO = "decomposicao"
 ORIGEM_INDISPONIVEL = "indisponivel"
 ORIGEM_CALCULADO = "calculado"   # subtotais
+ORIGEM_CMP_PROVISORIO = "cmp_provisorio"
 
-#: Origem do CMV usada hoje. Contrato preparado para `cmp_sku` (PR #78) sem usa-la.
+#: Origem do CMV. O fiscal (`dre_realizada`) e' SEMPRE preferido; o provisorio
+#: por CMP (`cmp_sku`, DRE-CMV-CMP-1) so' entra quando o fiscal esta inutilizavel.
 FONTE_CMV = "dre_realizada"
+FONTE_CMV_PROVISORIO = "cmp_sku"
 FONTES_CMV_PREVISTAS = ("dre_realizada", "cmp_sku")
+#: Cobertura exigida (receita com CMP / receita da fonte) para o CMV provisorio
+#: entrar na margem estimada: 100%. Qualquer parcela descoberta entraria na
+#: margem com custo ZERO; isso so' muda com uma regra EXPLICITA e auditavel de
+#: estimativa da parcela nao coberta (DRE-CMV-CMP-2), que ainda nao existe.
+COBERTURA_MINIMA_CMV_PROVISORIO = 1.0
 
 SINAL_NAO_RATIFICADO = "sinal_nao_ratificado"
 SOBREPOSICAO_NAO_RATIFICADA = "sobreposicao_nao_ratificada"
@@ -111,6 +119,8 @@ ESTRUTURA: tuple[dict, ...] = (
 INFORMATIVAS: tuple[dict, ...] = (
     {"linha": "outras_receitas_operacionais", "rotulo": "Outras Receitas Operacionais", "tipo": "informativo",
      "fonte": "premissa"},
+    {"linha": "cmv_provisorio_cmp", "rotulo": "CMV provisório por CMP (comparação)", "tipo": "informativo",
+     "fonte": "cmv_provisorio"},
     {"linha": "frete_realizado_comparacao", "rotulo": "Frete realizado (comparação)", "tipo": "informativo",
      "fonte": "frete"},
 )
@@ -226,8 +236,29 @@ def _uso(comp: dict) -> str:
     return "inutilizavel"
 
 
+def resumo_cmv_provisorio(row: dict | None) -> dict | None:
+    """Campos publicos do CMV provisorio de uma celula (nunca SKU)."""
+    if row is None:
+        return None
+
+    def f(v):
+        return None if v is None else float(v)
+
+    cob = f(row.get("cobertura"))
+    return {"status": row["status"], "data_corte": row.get("data_corte"),
+            "receita_fonte": f(row.get("receita_fonte")), "receita_coberta": f(row.get("receita_coberta")),
+            "cobertura_pct": None if cob is None else round(cob * 100, 2),
+            "cmv_provisorio": f(row.get("cmv_provisorio")), "unidades_sem_cmp": f(row.get("unidades_sem_cmp")),
+            "skus_total": row.get("skus_total"), "skus_sem_cmp": row.get("skus_sem_cmp"),
+            "skus_conflito": row.get("skus_conflito"),
+            "receita_por_metodo": {"gtin": f(row.get("receita_gtin")), "volume": f(row.get("receita_volume")),
+                                   "codigo_exato_provisorio": f(row.get("receita_codigo_provisorio"))},
+            "confianca": row.get("confianca"), "regra_temporal": row.get("regra_temporal"),
+            "usado_na_margem": False}
+
+
 def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date, maduro: bool,
-                   fim_do_mes: date) -> dict | None:
+                   fim_do_mes: date, cmv_provisorio: dict | None = None) -> dict | None:
     """Cenario estimado de UMA celula base. `None` quando a competencia nao tem premissa."""
     if premissa is None:
         return None
@@ -278,14 +309,47 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
             continue
         linhas[nome] = _linha(e, valor=valor, origem=ORIGEM_PREMISSA, percentual=float(rate), status="ok")
 
-    # --- CMV (realizado; contrato pronto para CMP por SKU) -------------------
+    # --- CMV: fiscal primeiro; provisorio por CMP so' na falta dele -----------
     cmv = comps["cmv"]
     uso = _uso(cmv)
     e = por_linha["cmv"]
+    prov = resumo_cmv_provisorio(cmv_provisorio)
+    fonte_cmv = FONTE_CMV
+    e_prov = por_linha["cmv_provisorio_cmp"]
+    if prov is None or prov["cmv_provisorio"] is None:
+        linhas["cmv_provisorio_cmp"] = _linha(e_prov, status=prov["status"] if prov else "nao_publicado",
+                                              somavel=False, motivo="sem CMV provisorio por CMP para a celula")
+    else:
+        linhas["cmv_provisorio_cmp"] = _linha(
+            e_prov, valor=prov["cmv_provisorio"], origem=ORIGEM_CMP_PROVISORIO, status="provisorio_cmp",
+            somavel=False, motivo=f"comparacao; cobre {prov['cobertura_pct']}% da receita da fonte")
     if uso == "inutilizavel":
-        motivos_nc.append(f"cmv {cmv['status']}: {cmv['motivo']}")
-        linhas["cmv"] = _linha(e, status=cmv["status"], motivo=cmv["motivo"])
-        ausentes.append({"linha": "cmv", "motivo": cmv["status"]})
+        # Comparacao em fracao exata da tabela (nao no pct arredondado): 99,999% nao passa.
+        cob_exata = None if cmv_provisorio is None or cmv_provisorio.get("cobertura") is None \
+            else float(cmv_provisorio["cobertura"])
+        if (prov is not None and prov["cmv_provisorio"] is not None
+                and cob_exata is not None and cob_exata >= COBERTURA_MINIMA_CMV_PROVISORIO):
+            # O fiscal nao existe: o provisorio entra, rotulado, e o cenario nunca passa de parcial.
+            prov["usado_na_margem"] = True
+            fonte_cmv = FONTE_CMV_PROVISORIO
+            linhas["cmv"] = _linha(e, valor=prov["cmv_provisorio"], origem=ORIGEM_CMP_PROVISORIO,
+                                   status="provisorio_cmp",
+                                   motivo=(f"CMV provisorio por CMP: cobre {prov['cobertura_pct']}% da receita da "
+                                           f"fonte, confianca {prov['confianca']}; CMV fiscal {cmv['status']}"))
+            motivos_parcial.append(f"cmv provisorio por CMP (cobertura {prov['cobertura_pct']}%; fiscal ausente)")
+        else:
+            motivos_nc.append(f"cmv {cmv['status']}: {cmv['motivo']}")
+            if prov is None:
+                motivos_nc.append("cmv provisorio por CMP nao publicado para a celula")
+            elif prov["status"] == "ausente_na_fonte":
+                motivos_nc.append("cmv provisorio por CMP: vendas por SKU ausentes na fonte de API")
+            else:
+                motivos_nc.append(
+                    f"cmv provisorio por CMP insuficiente: cobre {prov['cobertura_pct']}% da receita da fonte "
+                    f"(exigido {COBERTURA_MINIMA_CMV_PROVISORIO * 100:.0f}%: a parcela descoberta nao pode "
+                    f"entrar com custo zero)")
+            linhas["cmv"] = _linha(e, status=cmv["status"], motivo=cmv["motivo"])
+            ausentes.append({"linha": "cmv", "motivo": cmv["status"]})
     else:
         linhas["cmv"] = _linha(e, valor=cmv["valor"], origem=ORIGEM_REALIZADO, status=cmv["status"],
                                motivo=cmv["motivo"])
@@ -378,7 +442,8 @@ def montar_cenario(celula: dict, premissa: dict | None, *, mes: date, hoje: date
         "previa": previa,
         "competencia_madura": maduro,
         "receita_base": receita,
-        "fonte_cmv": FONTE_CMV,
+        "fonte_cmv": fonte_cmv,
+        "cmv_provisorio": prov,
         "linhas": [linhas[e["linha"]] for e in ESTRUTURA + INFORMATIVAS],
         "componentes_ausentes": ausentes,
         "motivos": motivos_nc + motivos_parcial,
@@ -469,18 +534,47 @@ def agregar_cenarios(cenarios: list[dict | None]) -> dict | None:
             if a not in avisos:
                 avisos.append(a)
     comps = sorted({c["competencia_premissas"] for c in validos})
+    fontes_cmv = {c["fonte_cmv"] for c in validos}
     return {
         "competencia_premissas": comps[0] if len(comps) == 1 else ",".join(comps),
         "natureza": NATUREZA, "rotulo": ROTULO_MARGEM_ESTIMADA, "estado": estado,
         "previa": any(c["previa"] for c in validos),
         "competencia_madura": all(c["competencia_madura"] for c in validos),
-        "receita_base": _r2(receita) if validos else None, "fonte_cmv": FONTE_CMV,
+        "receita_base": _r2(receita) if validos else None,
+        "fonte_cmv": fontes_cmv.pop() if len(fontes_cmv) == 1 else "misto",
+        "cmv_provisorio": agregar_cmv_provisorio([c["cmv_provisorio"] for c in validos]),
         "linhas": linhas, "componentes_ausentes": ausentes, "motivos": motivos, "avisos": avisos,
         "margem_contribuicao_estimada": margem,
         "margem_contribuicao_estimada_pct": _pct(margem, receita),
         "fonte_premissas": validos[0]["fonte_premissas"],
         "celulas": sum(c["celulas"] for c in validos),
     }
+
+
+def agregar_cmv_provisorio(partes: list[dict | None]) -> dict | None:
+    """Soma das celulas. Cobertura = coberta / fonte do recorte; nunca media de percentuais."""
+    validos = [p for p in partes if p is not None]
+    if not validos:
+        return None
+
+    def soma(campo):
+        vs = [p[campo] for p in validos if p.get(campo) is not None]
+        return _r2(sum(vs)) if vs else None
+
+    fonte, coberta = soma("receita_fonte"), soma("receita_coberta")
+    return {"status": "calculado" if any(p["status"] == "calculado" for p in validos) else "ausente_na_fonte",
+            "data_corte": max((p["data_corte"] for p in validos if p.get("data_corte")), default=None),
+            "receita_fonte": fonte, "receita_coberta": coberta,
+            "cobertura_pct": round(coberta / fonte * 100, 2) if fonte and coberta is not None else None,
+            "cmv_provisorio": soma("cmv_provisorio"), "unidades_sem_cmp": soma("unidades_sem_cmp"),
+            "skus_total": sum(p["skus_total"] or 0 for p in validos),
+            "skus_sem_cmp": sum(p["skus_sem_cmp"] or 0 for p in validos),
+            "skus_conflito": sum(p["skus_conflito"] or 0 for p in validos),
+            "receita_por_metodo": {k: _r2(sum(p["receita_por_metodo"][k] or 0 for p in validos))
+                                   for k in ("gtin", "volume", "codigo_exato_provisorio")},
+            "confianca": None, "regra_temporal": validos[0].get("regra_temporal"),
+            "usado_na_margem": any(p["usado_na_margem"] for p in validos),
+            "celulas_ausentes_na_fonte": sum(1 for p in validos if p["status"] == "ausente_na_fonte")}
 
 
 def linha(cenario: dict, nome: str) -> dict[str, Any]:
