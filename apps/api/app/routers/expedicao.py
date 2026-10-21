@@ -15,10 +15,12 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.expedicao import (
     ExpedicaoResponse,
+    ShopeeLdrResponse,
     TendenciaResponse,
     TikTokDispatchResponse,
 )
 from app.services import expedicao_service as svc
+from app.services import expedicao_shopee_ldr_service as shopee_ldr_svc
 from app.services import expedicao_tiktok_service as tiktok_svc
 
 router = APIRouter(prefix="/api/v1/expedicao", tags=["expedicao"])
@@ -184,3 +186,35 @@ def tiktok_dispatch(
     return tiktok_svc.obter_serie(
         _require_db(db), evento=evento, dias=days, brands=brands,
     )
+
+
+# ---------------------------------------------------------------------------
+# EXPEDICAO-SHOPEE-LDR-1 — LDR operacional da Shopee
+# ---------------------------------------------------------------------------
+# Rota IRMA da `/tiktok`, pelo mesmo motivo: serie por vencimento, nao fila.
+_MSG_DIAS_SHOPEE = (
+    f"Janela invalida. Informe entre 1 e {shopee_ldr_svc.JANELA_MAX_DIAS} dias.")
+
+
+@router.get("/shopee/ldr", response_model=ShopeeLdrResponse)
+def shopee_ldr(
+    days: int = Query(
+        shopee_ldr_svc.JANELA_PADRAO_DIAS,
+        description="Dias de VENCIMENTO antes de hoje (maximo 35, a janela "
+                    "que o publisher recalcula).",
+    ),
+    brands: Optional[list[str]] = Depends(brands_query),
+    db: Session = Depends(get_db),
+):
+    """LDR operacional (coleta x prazo Shopee), por dia de vencimento.
+
+    Indicador INTERNO: a resposta sempre traz `official = false` e o aviso de
+    que nao e' a taxa usada pela Shopee para penalizacao. FBS, cancelados sem
+    coleta e pedidos sem prazo ficam fora da taxa e voltam em `exclusions`.
+    """
+    if days < 1 or days > shopee_ldr_svc.JANELA_MAX_DIAS:
+        raise HTTPException(422, _MSG_DIAS_SHOPEE)
+    if not shopee_ldr_svc.habilitado():
+        # Flag off: nem a sessao de banco e' exigida.
+        return shopee_ldr_svc.obter_ldr(None, dias=days, brands=brands)
+    return shopee_ldr_svc.obter_ldr(_require_db(db), dias=days, brands=brands)

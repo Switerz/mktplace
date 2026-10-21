@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     #: flag geral para que ligar a Expedicao nao exponha o ML sem
     #: querer, e para que adiar o ML nao exija derrubar a Shopee.
     expedicao_ml_api_enabled: bool = Field(default=False)
+    #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Nasce DESLIGADA e
+    #: exige tambem a flag geral: com qualquer uma das duas off, a rota
+    #: `/expedicao/shopee/ldr` devolve `unavailable/disabled` sem consultar.
+    expedicao_shopee_ldr_api_enabled: bool = Field(default=False)
 
     # Chave do identificador OPACO de pedido. Vazia por default, e vazia
     # significa NAO PUBLICAR: `order_ref` sai nulo.

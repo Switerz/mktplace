@@ -193,6 +193,33 @@ SHOPEE_ALLOWED_SOURCE_COLUMNS = frozenset(
     }
 )
 
+#: EXPEDICAO-SHOPEE-LDR-1 — vocabulario de `cancel_reason` medido em 365 dias
+#: (texto exato da fonte). Mora AQUI, e nao em `shopee_ldr.py`, porque dois
+#: motivos citam "address": e' texto da PLATAFORMA, nao dado do comprador, mas
+#: a barreira de PII e' por token e este arquivo e' a excecao declarada.
+SHOPEE_MOTIVO_NAO_ENVIOU = "Seller did not Ship"
+SHOPEE_MOTIVOS_CANCELAMENTO_CONHECIDOS = frozenset({
+    "Unpaid Order",
+    "Don't Want to Buy Anymore",
+    "Others",
+    "Need to Modify Order",
+    SHOPEE_MOTIVO_NAO_ENVIOU,
+    "Others / change of mind",
+    "Need to input / Change Voucher Code",
+    "Found Cheaper Elsewhere",
+    "Failed Delivery",
+    "Need to Change Delivery Address",
+    "Need to change delivery address",
+    "Payment Procedure too Troublesome",
+    "Modify existing order (colour, size, address, voucher, etc.)",
+    "Parcel lost in transit. The eligible compensation has been credited into "
+    "your seller wallet.",
+    "Seller is not responsive to my inquiries",
+    "Other",
+    "Logistic Issue",
+    "Out of Stock",
+})
+
 #: Fragmentos proibidos em qualquer SQL ou modelo deste pacote.
 PII_FORBIDDEN_TOKENS = frozenset(
     {

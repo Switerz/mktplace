@@ -407,3 +407,155 @@ class TikTokDispatchResponse(BaseModel):
     payment_flow: list[TikTokFluxoDia] = Field(default_factory=list)
     brands: list[TikTokMarcaItem] = Field(default_factory=list)
     alerts: list[TikTokAlerta] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# EXPEDICAO-SHOPEE-LDR-1 — LDR operacional da Shopee (coleta x prazo Shopee)
+# ---------------------------------------------------------------------------
+class ShopeeLdrDia(BaseModel):
+    """Um dia de VENCIMENTO (`ship_by_date` em Brasilia)."""
+
+    due_date: date
+    base: int
+    late: int
+    shipped_on_time: int
+    shipped_late: int
+    pending_overdue: int
+    pending_on_time: int
+    excluded_fbs: int
+    excluded_cancelled: int
+    shipped_without_pickup: int
+    #: `None` sem base OU enquanto o dia nao amadurece. NUNCA 0.0 nesses casos.
+    rate: Optional[float]
+    is_mature: bool
+
+
+class ShopeeLdr(BaseModel):
+    from_: date = Field(alias="from")
+    to: date
+    days: int
+    #: `None` sem vencimento maduro ou com cobertura insuficiente.
+    rate: Optional[float]
+    #: Por que a taxa existe e nao e' mostrada (hoje: `coverage_insufficient`).
+    rate_hidden_reason: Optional[str] = None
+    base: int
+    late: int
+    shipped_on_time: int
+    shipped_late: int
+    pending_overdue: int
+    pending_on_time: int
+    pending_at_risk: int
+    mature_due_days: int
+    partial_due_days: int
+    daily: list[ShopeeLdrDia] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class ShopeeLdrExclusoes(BaseModel):
+    """Fora da taxa, cada um com contador proprio. Ausencia nunca vira zero na
+    taxa: some do DENOMINADOR e aparece aqui."""
+
+    fbs: int
+    cancelled_without_pickup: int
+    #: Subconjunto de `cancelled_without_pickup`: "Seller did not Ship".
+    cancelled_seller_did_not_ship: int
+    #: Subconjunto: motivo fora do vocabulario medido (alerta de qualidade).
+    cancelled_unknown_reason: int
+    shipped_without_pickup: int
+    without_deadline: int
+
+
+class ShopeeLdrCobertura(BaseModel):
+    state: Literal["completa", "aviso", "insuficiente", "sem_base"]
+    missing_share: Optional[float] = None
+    missing: int
+    eligible: int
+    without_deadline: int
+    shipped_without_pickup: int
+
+
+class ShopeeLdrMarca(BaseModel):
+    brand: str
+    base: int
+    late: int
+    rate: Optional[float]
+    coverage_state: Literal["completa", "aviso", "insuficiente", "sem_base"]
+    excluded_fbs: int
+    excluded_cancelled: int
+    source_watermark_at: Optional[datetime] = None
+
+
+class ShopeeLdrSnapshot(BaseModel):
+    refresh_batch_id: str
+    effective_at: datetime
+    source_watermark_at: Optional[datetime] = None
+    today_brt: date
+    age_hours: float
+    #: Idade da leitura MAIS RECENTE da fonte entre as contas. `None` = sem leitura.
+    source_age_hours: Optional[float] = None
+    #: Publicacao OU fonte mais velha que o limite: a tela diz "fonte vencida".
+    stale: bool
+
+
+class ShopeeLdrAlerta(BaseModel):
+    severity: Literal["critical", "warning", "info"]
+    code: str
+    message: str
+
+
+class ShopeeFilaContagem(BaseModel):
+    """Mesmas medidas da fila publicada (`Totais`), para UMA parcela."""
+
+    backlog_count: int
+    overdue_count: int
+    due_within_24h_count: int
+    on_time_count: int
+    deadline_unavailable_count: int
+    over_48h_count: int
+    slow_count: int
+    zombie_count: int
+    stalled_count: int
+
+
+class ShopeeFilaConta(BaseModel):
+    shop_account: str
+    brand: str
+    seller: ShopeeFilaContagem
+    fbs: ShopeeFilaContagem
+
+
+class ShopeeFilaPorFluxo(BaseModel):
+    """Fila aberta da Shopee separada por responsabilidade de envio.
+
+    `seller` = fila ACIONAVEL do vendedor; `fbs` = pedidos que a Shopee despacha
+    do proprio armazem. `total` existe so' para reconciliar as parcelas.
+    """
+
+    effective_at: datetime
+    source_watermark_at: Optional[datetime] = None
+    stale: bool
+    seller: ShopeeFilaContagem
+    fbs: ShopeeFilaContagem
+    total: ShopeeFilaContagem
+    accounts: list[ShopeeFilaConta] = Field(default_factory=list)
+
+
+class ShopeeLdrResponse(BaseModel):
+    availability: Literal["available", "unavailable"]
+    unavailable_reason: Optional[str] = None
+    channel: Literal["shopee"]
+    metric_name: str
+    #: SEMPRE `false`: nao e' a taxa que a Shopee usa para penalizacao.
+    official: bool
+    disclaimer: str
+    event: Literal["coleta"]
+    thresholds: dict[str, float]
+    snapshot: Optional[ShopeeLdrSnapshot] = None
+    ldr: Optional[ShopeeLdr] = None
+    exclusions: Optional[ShopeeLdrExclusoes] = None
+    coverage: Optional[ShopeeLdrCobertura] = None
+    brands: list[ShopeeLdrMarca] = Field(default_factory=list)
+    alerts: list[ShopeeLdrAlerta] = Field(default_factory=list)
+    #: `None` = nada publicado (ausencia), nunca uma fila de zeros.
+    queue_by_flow: Optional[ShopeeFilaPorFluxo] = None

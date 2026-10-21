@@ -36,6 +36,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import EvolucaoPorMarca from "@/components/expedicao/EvolucaoPorMarca";
+import LdrShopeePanel, { useLdrShopee } from "@/components/expedicao/LdrShopeePanel";
+import {
+  AVISO_FILA_COM_FBS,
+  divisaoDaFila,
+  textoDaReconciliacao,
+  type DivisaoDaFila,
+} from "@/lib/expedicao-shopee-ldr";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import {
   AtencaoAgora,
@@ -122,6 +129,11 @@ const REGRA = REGRA_JANELA.fila;
 // dinamico que existia so' para tira-lo do bundle inicial.
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+
+// EXPEDICAO-SHOPEE-LDR-1: a LDR operacional da Shopee nasce DESLIGADA. Com a
+// flag off, a secao "Prazo" fica exatamente como antes — inclusive o aviso de
+// que a LDR ainda nao e' calculada. Literal inline para o Next embutir.
+const LDR_SHOPEE_LIGADA = process.env.NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED === "true";
 
 // A flag do Mercado Livre (`NEXT_PUBLIC_EXPEDICAO_ML_ENABLED`) mora na casca
 // desde o EXPEDICAO-UX-UNIFICADA-1: e' ela que decide quais canais o seletor
@@ -217,6 +229,32 @@ function CelulaKpi({ kpi, destaque }: { kpi: Kpi; destaque: boolean }) {
       tom={tomDoKpi(kpi)}
       destaque={destaque}
     />
+  );
+}
+
+/**
+ * Pedidos FBS — responsabilidade logistica da SHOPEE, nunca risco do vendedor.
+ * Fica a' parte do "Risco atual", em faixa secundaria e sem tom de alerta: o
+ * vendedor nao age sobre eles. A conferencia mostra as parcelas e o total da
+ * MESMA leitura; o total nao vira cartao.
+ */
+function BlocoFbs({ divisao }: { divisao: DivisaoDaFila }) {
+  const f = divisao.fbs;
+  return (
+    <section aria-label="Pedidos FBS" className="mt-3" data-testid="exp-fila-fbs">
+      <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+        Pedidos FBS — responsabilidade logística da Shopee
+      </h4>
+      <FaixaKpis rotulo="Pedidos FBS" secundaria>
+        <KpiTile rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
+        <KpiTile rotulo="Vencidos (FBS)" valor={numero(f.overdue_count)} />
+        <KpiTile rotulo="Acima de 48 h (FBS)" valor={numero(f.over_48h_count)} />
+        <KpiTile rotulo="Travados (FBS)" valor={numero(f.stalled_count)} />
+      </FaixaKpis>
+      <p className="mt-2 text-xs text-ink-muted" data-testid="exp-fila-conferencia">
+        {textoDaReconciliacao(divisao)}
+      </p>
+    </section>
   );
 }
 
@@ -467,6 +505,10 @@ export default function ExpedicaoClient({
     };
   }, [chaveTendencia, urlPronta]);
 
+  // EXPEDICAO-SHOPEE-LDR-1: a rota da LDR tambem traz a fila aberta separada
+  // em vendedor x FBS. UMA leitura, repartida entre o "Risco atual" e o painel.
+  const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee");
+
   const temFiltro =
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
   const estado = estadoDaTela({ carregando, erroHttp, resposta: dados, temFiltro });
@@ -475,14 +517,22 @@ export default function ExpedicaoClient({
   const recorte = recortarPorMarca(dados, marcaAtiva);
   const principais = montarKpisPrincipais(recorte.totais, recorte.frescor, filtros.channel);
   const secundarios = montarKpisSecundarios(recorte.totais, recorte.frescor, filtros.channel);
-  const risco = montarRiscoAtual(recorte.totais, recorte.frescor, filtros.channel);
+  // FBS fora do risco do vendedor. Com a divisao publicada, o "Risco atual" da
+  // Shopee e' a fila ACIONAVEL do vendedor; FBS aparece a' parte. Sem ela, a
+  // tela segue com a fila publicada E diz que ela inclui FBS (nunca zera nada).
+  const divisao = filtros.channel === "shopee" ? divisaoDaFila(ldr.resposta) : null;
+  const totaisRisco = divisao ? divisao.vendedor : recorte.totais;
+  const contasRisco = divisao ? divisao.contasVendedor : recorte.contas;
+  const risco = montarRiscoAtual(totaisRisco, recorte.frescor, filtros.channel).map((k) =>
+    divisao && k.chave === "backlog" ? { ...k, rotulo: "Fila acionável do vendedor" } : k,
+  );
   const frescor = montarFrescor(recorte.frescor);
   const avisos = avisosDeCobertura(dados?.coverage ?? null);
   // A qualidade do dado e' do CANAL: a barra nao some quando se filtra marca.
   const qualidade = montarBarraDeQualidade(relogios, avisos, montarFrescor(dados?.freshness ?? []));
   const mapa = montarMapaDeRisco(recorte.contas, filtros.channel);
   const marcasPresentes = [...new Set((dados?.accounts ?? []).map((a) => a.brand))];
-  const faixasPrazo = faixasDePrazo(recorte.totais);
+  const faixasPrazo = faixasDePrazo(totaisRisco);
   const envelhecimento = envelhecimentoDaFila(recorte.totais, recorte.frescor);
   const series = montarSeries(tendencia?.points ?? []);
   // Marca de cada conta, lida do proprio ponto da serie (`brand`).
@@ -515,14 +565,19 @@ export default function ExpedicaoClient({
   // enquanto a resposta nova nao chega, eles nao descrevem a fotografia antiga.
   const fotografia =
     dados && dados.channel === filtros.channel ? fotografiaDaFila(relogios) : null;
-  const atencao = montarAtencaoDaFila(recorte.totais, recorte.contas, filtros.channel);
+  const atencao = montarAtencaoDaFila(totaisRisco, contasRisco, filtros.channel);
   // "Agora" e' o instante da fotografia. Com ela velha, a secao diz isso em
-  // vez de deixar o gestor agir sobre o passado sem saber.
-  const quando = relogios?.efetivoEm
-    ? `Segundo a fotografia de ${dataCurta(relogios.efetivoEm)}${
-        relogios.snapshotVelho ? " — desatualizada: confirme antes de agir" : ""
-      }.`
-    : undefined;
+  // vez de deixar o gestor agir sobre o passado sem saber. Com a divisao, a
+  // fotografia do risco e' a da divisao (outra leitura, outro instante).
+  const quando = divisao
+    ? `Fila do vendedor segundo a leitura de ${dataCurta(divisao.efetivoEm)}${
+        divisao.velha ? " — desatualizada: confirme antes de agir" : ""
+      }. FBS fica fora: quem despacha é a Shopee.`
+    : relogios?.efetivoEm
+      ? `Segundo a fotografia de ${dataCurta(relogios.efetivoEm)}${
+          relogios.snapshotVelho ? " — desatualizada: confirme antes de agir" : ""
+        }.`
+      : undefined;
 
   const faixaPrincipal = (
     <FaixaKpis rotulo="Indicadores principais">
@@ -533,7 +588,9 @@ export default function ExpedicaoClient({
   );
 
   // EXPEDICAO-UX-3 — "Risco atual": os indicadores que o CANAL sustenta.
-  const avisoRecorte = recorte.variasContas ? (
+  // A divisao vem recortada pela marca no SERVIDOR (rota da LDR), entao o aviso
+  // de "a tela nao soma contas" so' vale sem ela.
+  const avisoRecorte = recorte.variasContas && !divisao ? (
     <Note tom="neutro" papel="status">
       {brandLabel(recorte.marca ?? "")} tem {recorte.contas.length} contas nesta fotografia. A API
       ainda não recorta o total por marca e a tela não soma contas: os números de cada conta
@@ -544,11 +601,19 @@ export default function ExpedicaoClient({
   const secaoRisco = (
     <SecaoGerencial titulo="Risco atual" descricao={quando}>
       {avisoRecorte}
+      {filtros.channel === "shopee" && !divisao && recorte.totais ? (
+        <div data-testid="exp-aviso-fbs">
+          <Note tom="atencao" papel="status">
+            {AVISO_FILA_COM_FBS}
+          </Note>
+        </div>
+      ) : null}
       <FaixaKpis rotulo="Risco atual" colunas={risco.length === 6 ? 6 : 4}>
         {risco.map((k) => (
           <CelulaKpi key={k.chave} kpi={k} destaque />
         ))}
       </FaixaKpis>
+      {divisao ? <BlocoFbs divisao={divisao} /> : null}
       <AtencaoAgora
         itens={atencao}
         semItens={
@@ -566,8 +631,10 @@ export default function ExpedicaoClient({
       titulo="Prazo"
       descricao="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
     >
-      <Panel titulo="Pedidos em fila por situação de prazo">
-        {faixasPrazo && recorte.totais && recorte.totais.backlog_count > 0 ? (
+      <Panel
+        titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+      >
+        {faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0 ? (
           <>
             <div
               className="flex h-3 w-full overflow-hidden rounded bg-raised"
@@ -578,7 +645,7 @@ export default function ExpedicaoClient({
                 <div
                   key={f.chave}
                   className={COR_SEGMENTO[f.chave]}
-                  style={{ width: `${(f.valor / (recorte.totais?.backlog_count || 1)) * 100}%` }}
+                  style={{ width: `${(f.valor / (totaisRisco?.backlog_count || 1)) * 100}%` }}
                 />
               ))}
             </div>
@@ -599,10 +666,13 @@ export default function ExpedicaoClient({
               : "Sem pedidos em fila nesta fotografia."}
           </p>
         )}
-        <Note tom="neutro" papel="note" className="mt-3">
-          {SEM_LDR_SHOPEE}
-        </Note>
+        {LDR_SHOPEE_LIGADA ? null : (
+          <Note tom="neutro" papel="note" className="mt-3">
+            {SEM_LDR_SHOPEE}
+          </Note>
+        )}
       </Panel>
+      {LDR_SHOPEE_LIGADA ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" descricao="O canal não publica prazo de envio.">
@@ -832,6 +902,13 @@ export default function ExpedicaoClient({
     <Panel
       className={classe}
       titulo="Concentração por marca"
+      // A tabela e' a fila PUBLICADA, que nao separa FBS: dito aqui para que
+      // ninguem compare com o "Risco atual" do vendedor sem saber.
+      descricao={
+        filtros.channel === "shopee"
+          ? "Fila publicada por conta, com pedidos FBS (despachados pela Shopee) incluídos."
+          : undefined
+      }
       semPadding
       acao={<Disclosure rotulo="Como ler">{mapa.nota}</Disclosure>}
       rodape={
