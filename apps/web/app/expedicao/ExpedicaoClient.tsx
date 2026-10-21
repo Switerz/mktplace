@@ -36,19 +36,35 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import EvolucaoPorMarca from "@/components/expedicao/EvolucaoPorMarca";
-import CabecalhoExpedicao from "@/components/expedicao/CabecalhoExpedicao";
-import { AtencaoAgora, ConviteAoDetalhe, FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
+import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
+import {
+  AtencaoAgora,
+  ConviteAoDetalhe,
+  FaixaKpis,
+  SecaoGerencial,
+} from "@/components/expedicao/SecoesExpedicao";
 import Disclosure from "@/components/ui/Disclosure";
 import KpiTile from "@/components/ui/KpiTile";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
 import type { Tom } from "@/components/ui/tone";
-import type { Visao } from "@/lib/expedicao-ux";
+import { comMarcaNaQuery, type Visao } from "@/lib/expedicao-ux";
+import { brandLabel } from "@/lib/filters/brands";
 
 import {
+  DEFINICAO_FILA,
+  EXPLICACAO_FONTE,
   EXPLICACAO_LIMIAR_48H,
+  EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
   FILTROS_PADRAO,
+  SEM_LDR_SHOPEE,
+  SEM_PRAZO_CANAL_ML,
+  envelhecimentoDaFila,
+  faixasDePrazo,
+  montarRiscoAtual,
+  recortarPorMarca,
+  rotuloFonte,
   ORDENACOES,
   ROTULO_CANAL,
   SITUACOES,
@@ -196,7 +212,7 @@ function CelulaKpi({ kpi, destaque }: { kpi: Kpi; destaque: boolean }) {
       valor={texto}
       // No cartao grande a nota fica visivel; no compacto vira tooltip, para
       // a faixa secundaria nao reintroduzir cinco paragrafos na tela.
-      comparacao={destaque ? kpi.nota : undefined}
+      comparacao={destaque ? (kpi.notaCurta ?? kpi.nota) : undefined}
       contexto={kpi.nota}
       tom={tomDoKpi(kpi)}
       destaque={destaque}
@@ -271,13 +287,19 @@ export default function ExpedicaoClient({
   seletorCanal,
   visao,
   aoTrocarVisao,
+  marca,
+  aoTrocarMarca,
 }: {
   /** Canal da fila ja' sanitizado pela casca (flag do ML aplicada la'). */
   canal: Canal;
   seletorCanal?: ReactNode;
   visao: Visao;
   aoTrocarVisao?: (v: Visao) => void;
+  /** EXPEDICAO-UX-3: marca escolhida na casca (`?marca=`), ou nenhuma. */
+  marca?: string | null;
+  aoTrocarMarca?: (m: string | null) => void;
 }) {
+  const marcaAtiva = marca ?? null;
   // A casca so' monta este componente depois de ler a URL, entao o canal da
   // primeira requisicao ja' e' o do link: nenhum quadro de uma loja sob o
   // titulo de outra, nenhuma requisicao de Shopee jogada fora.
@@ -339,6 +361,13 @@ export default function ExpedicaoClient({
   useEffect(() => {
     setFiltros((f) => (f.channel === canal ? f : aplicarCanal(f, canal)));
   }, [canal]);
+
+  // Marca -> `brands` da requisicao da fila. A API recorta a LISTA de
+  // pedidos; os indicadores da marca saem de `recortarPorMarca`.
+  useEffect(() => {
+    const alvo = marcaAtiva ? [marcaAtiva] : [];
+    setFiltros((f) => (f.brands.join(",") === alvo.join(",") ? f : aplicarFiltro(f, { brands: alvo })));
+  }, [marcaAtiva]);
 
   // Voltar/avancar do navegador pode trocar a janela sem remontar o
   // componente. O canal da URL e' relido pela casca, que repassa a prop.
@@ -404,8 +433,8 @@ export default function ExpedicaoClient({
   }, [chave, filtros, urlPronta]);
 
   const chaveTendencia = useMemo(
-    () => queryDaTendenciaEmDias(janela, filtros.channel),
-    [janela, filtros.channel],
+    () => comMarcaNaQuery(queryDaTendenciaEmDias(janela, filtros.channel), marcaAtiva),
+    [janela, filtros.channel, marcaAtiva],
   );
   const chaveTendVigente = useRef(chaveTendencia);
   chaveTendVigente.current = chaveTendencia;
@@ -442,20 +471,19 @@ export default function ExpedicaoClient({
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
   const estado = estadoDaTela({ carregando, erroHttp, resposta: dados, temFiltro });
   const relogios = dados ? montarRelogios(dados) : null;
-  const principais = montarKpisPrincipais(
-    dados?.totals ?? null,
-    dados?.freshness ?? [],
-    filtros.channel,
-  );
-  const secundarios = montarKpisSecundarios(
-    dados?.totals ?? null,
-    dados?.freshness ?? [],
-    filtros.channel,
-  );
-  const frescor = montarFrescor(dados?.freshness ?? []);
+  // Recorte por marca, por SELECAO das linhas que a API ja' publica.
+  const recorte = recortarPorMarca(dados, marcaAtiva);
+  const principais = montarKpisPrincipais(recorte.totais, recorte.frescor, filtros.channel);
+  const secundarios = montarKpisSecundarios(recorte.totais, recorte.frescor, filtros.channel);
+  const risco = montarRiscoAtual(recorte.totais, recorte.frescor, filtros.channel);
+  const frescor = montarFrescor(recorte.frescor);
   const avisos = avisosDeCobertura(dados?.coverage ?? null);
-  const qualidade = montarBarraDeQualidade(relogios, avisos, frescor);
-  const mapa = montarMapaDeRisco(dados?.accounts ?? [], filtros.channel);
+  // A qualidade do dado e' do CANAL: a barra nao some quando se filtra marca.
+  const qualidade = montarBarraDeQualidade(relogios, avisos, montarFrescor(dados?.freshness ?? []));
+  const mapa = montarMapaDeRisco(recorte.contas, filtros.channel);
+  const marcasPresentes = [...new Set((dados?.accounts ?? []).map((a) => a.brand))];
+  const faixasPrazo = faixasDePrazo(recorte.totais);
+  const envelhecimento = envelhecimentoDaFila(recorte.totais, recorte.frescor);
   const series = montarSeries(tendencia?.points ?? []);
   // Marca de cada conta, lida do proprio ponto da serie (`brand`).
   const evolucao = montarEvolucaoPorMarca(tendencia?.points ?? []);
@@ -487,11 +515,7 @@ export default function ExpedicaoClient({
   // enquanto a resposta nova nao chega, eles nao descrevem a fotografia antiga.
   const fotografia =
     dados && dados.channel === filtros.channel ? fotografiaDaFila(relogios) : null;
-  const atencao = montarAtencaoDaFila(
-    dados?.totals ?? null,
-    dados?.accounts ?? [],
-    filtros.channel,
-  );
+  const atencao = montarAtencaoDaFila(recorte.totais, recorte.contas, filtros.channel);
   // "Agora" e' o instante da fotografia. Com ela velha, a secao diz isso em
   // vez de deixar o gestor agir sobre o passado sem saber.
   const quando = relogios?.efetivoEm
@@ -506,6 +530,112 @@ export default function ExpedicaoClient({
         <CelulaKpi key={k.chave} kpi={k} destaque />
       ))}
     </FaixaKpis>
+  );
+
+  // EXPEDICAO-UX-3 — "Risco atual": os indicadores que o CANAL sustenta.
+  const avisoRecorte = recorte.variasContas ? (
+    <Note tom="neutro" papel="status">
+      {brandLabel(recorte.marca ?? "")} tem {recorte.contas.length} contas nesta fotografia. A API
+      ainda não recorta o total por marca e a tela não soma contas: os números de cada conta
+      estão em “Concentração por marca”.
+    </Note>
+  ) : null;
+
+  const secaoRisco = (
+    <SecaoGerencial titulo="Risco atual" descricao={quando}>
+      {avisoRecorte}
+      <FaixaKpis rotulo="Risco atual" colunas={risco.length === 6 ? 6 : 4}>
+        {risco.map((k) => (
+          <CelulaKpi key={k.chave} kpi={k} destaque />
+        ))}
+      </FaixaKpis>
+      <AtencaoAgora
+        itens={atencao}
+        semItens={
+          recorte.variasContas
+            ? "Com mais de uma conta na marca, a leitura de atenção fica por conta: veja “Concentração por marca”."
+            : undefined
+        }
+      />
+    </SecaoGerencial>
+  );
+
+  // "Prazo": a Shopee publica `ship_by_date`; o Mercado Livre, nao.
+  const secaoPrazo = temPrazo ? (
+    <SecaoGerencial
+      titulo="Prazo"
+      descricao="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
+    >
+      <Panel titulo="Pedidos em fila por situação de prazo">
+        {faixasPrazo && recorte.totais && recorte.totais.backlog_count > 0 ? (
+          <>
+            <div
+              className="flex h-3 w-full overflow-hidden rounded bg-raised"
+              role="img"
+              aria-label={faixasPrazo.map((f) => `${f.rotulo}: ${numero(f.valor)}`).join(", ")}
+            >
+              {faixasPrazo.map((f) => (
+                <div
+                  key={f.chave}
+                  className={COR_SEGMENTO[f.chave]}
+                  style={{ width: `${(f.valor / (recorte.totais?.backlog_count || 1)) * 100}%` }}
+                />
+              ))}
+            </div>
+            <ul className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {faixasPrazo.map((f) => (
+                <li key={f.chave} className="flex items-baseline gap-2">
+                  <span aria-hidden="true" className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${COR_SEGMENTO[f.chave]}`} />
+                  <span className="text-xs text-ink-muted">{f.rotulo}</span>
+                  <span className="ml-auto text-sm font-semibold tabular-nums text-ink">{numero(f.valor)}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="text-sm text-ink-muted">
+            {recorte.variasContas
+              ? "Situação de prazo por conta em “Concentração por marca”."
+              : "Sem pedidos em fila nesta fotografia."}
+          </p>
+        )}
+        <Note tom="neutro" papel="note" className="mt-3">
+          {SEM_LDR_SHOPEE}
+        </Note>
+      </Panel>
+    </SecaoGerencial>
+  ) : (
+    <SecaoGerencial titulo="Prazo" descricao="O canal não publica prazo de envio.">
+      <Panel titulo="Prazo indisponível pelo canal">
+        <p className="text-sm text-ink">{SEM_PRAZO_CANAL_ML}</p>
+        {envelhecimento ? (
+          <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+            <div className="rounded-lg bg-raised px-3 py-2">
+              <dt className="text-xs text-ink-muted">Acima de 48 h (limiar interno da Torre)</dt>
+              <dd className="text-sm text-ink">
+                <span className="text-xl font-semibold tabular-nums">{numero(envelhecimento.acima48h)}</span>{" "}
+                de {numero(envelhecimento.backlog)} pedidos em fila
+              </dd>
+            </div>
+            <div className="rounded-lg bg-raised px-3 py-2">
+              <dt className="text-xs text-ink-muted">Pedido mais antigo em fila</dt>
+              <dd className="text-sm text-ink">
+                {envelhecimento.maisAntigo ? (
+                  <>
+                    <span className="text-xl font-semibold tabular-nums">
+                      {formatarHoras(envelhecimento.maisAntigo.horas)}
+                    </span>{" "}
+                    · {brandLabel(envelhecimento.maisAntigo.marca)}
+                  </>
+                ) : (
+                  "não informado pela fonte"
+                )}
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+      </Panel>
+    </SecaoGerencial>
   );
 
   const painelMaisCriticos =
@@ -701,7 +831,7 @@ export default function ExpedicaoClient({
   const painelContas = (classe: string) => (
     <Panel
       className={classe}
-      titulo="Risco por conta"
+      titulo="Concentração por marca"
       semPadding
       acao={<Disclosure rotulo="Como ler">{mapa.nota}</Disclosure>}
       rodape={
@@ -734,29 +864,34 @@ export default function ExpedicaoClient({
       <div className="overflow-x-auto px-4 py-2">
         <table className={CLASSE_TABELA}>
           <caption className="sr-only">
-            Backlog por conta, com as medidas do canal
+            Backlog por marca e conta, com as medidas do canal
           </caption>
           <thead className={CLASSE_CABECALHO}>
             <tr>
-              <th scope="col">Conta</th>
               <th scope="col">Marca</th>
               <th scope="col" className="w-[34%]">Distribuição</th>
               <th scope="col" className="text-right">Backlog</th>
               {temPrazo && <th scope="col" className="text-right">Vencidos</th>}
               <th scope="col" className="text-right">Acima de 48h</th>
               <th scope="col" className="text-right">Travados</th>
-              <th scope="col">Fonte avançou</th>
+              <th scope="col" title={EXPLICACAO_FONTE}>Fonte</th>
             </tr>
           </thead>
           <tbody>
-            {(dados?.accounts ?? []).map((a) => {
+            {recorte.contas.map((a) => {
               const linha = mapa.linhas.find((l) => l.conta === a.shop_account);
               return (
                 <tr key={a.shop_account} className="border-t border-line">
-                  <th scope="row" className="text-left font-medium text-ink">
-                    {a.shop_account}
+                  {/* Marca e' a identidade; a conta so' aparece, discreta,
+                      quando difere do nome da marca (o seller_id do ML). */}
+                  <th scope="row" className="text-left font-semibold text-ink">
+                    {brandLabel(a.brand)}
+                    {a.shop_account !== a.brand ? (
+                      <span className="block text-xs font-normal text-ink-faint">
+                        conta {a.shop_account}
+                      </span>
+                    ) : null}
                   </th>
-                  <td className="text-ink-muted">{a.brand}</td>
                   <td>
                     {linha && (
                       <BarraDeRisco
@@ -780,9 +915,8 @@ export default function ExpedicaoClient({
                   <td className="text-right tabular-nums text-ink">
                     {numero(a.stalled_count)}
                   </td>
-                  <td className="text-ink-faint">
-                    {a.source_advanced ? "sim" : "não"}
-                    <span className="ml-1 text-xs">(metadado)</span>
+                  <td className="text-ink-faint" title={EXPLICACAO_FONTE}>
+                    {rotuloFonte(a.source_advanced)}
                   </td>
                 </tr>
               );
@@ -798,7 +932,11 @@ export default function ExpedicaoClient({
     <Panel
       titulo="Fila operacional"
       semPadding
-      acao={<Disclosure rotulo="Como ler">{EXPLICACAO_LIMIAR_48H}</Disclosure>}
+      acao={
+        <Disclosure rotulo="Como ler">
+          {temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO}
+        </Disclosure>
+      }
     >
       <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2">
         {SITUACOES.map((s) => (
@@ -999,6 +1137,12 @@ export default function ExpedicaoClient({
         fotografia={fotografia}
         visao={visao}
         aoTrocarVisao={aoTrocarVisao}
+        definicao={DEFINICAO_FILA[filtros.channel]}
+        filtroMarca={
+          aoTrocarMarca ? (
+            <SeletorMarca marca={marcaAtiva} marcasPresentes={marcasPresentes} aoTrocar={aoTrocarMarca} />
+          ) : undefined
+        }
       />
 
       {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
@@ -1059,16 +1203,23 @@ export default function ExpedicaoClient({
         </p>
       )}
 
-      {(estado === "ok" || estado === "fila_vazia_por_filtro") &&
+      {/* Marca escolhida sem conta neste canal: ausencia, nao backlog zero. */}
+      {(estado === "ok" || estado === "fila_vazia_por_filtro") && recorte.semConta ? (
+        <p role="status" className="rounded-xl border border-dashed border-line-strong bg-surface p-4 text-sm text-ink-muted">
+          {brandLabel(recorte.marca ?? "")}{" "}
+          {recorte.foraDaCobertura
+            ? "não é coberta pela fonte deste canal — ausência de cobertura, não backlog zero."
+            : "não tem conta nesta fotografia do canal."}
+        </p>
+      ) : null}
+      {(estado === "ok" || estado === "fila_vazia_por_filtro") && !recorte.semConta &&
         (visao === "gestor" ? (
           <>
-            {/* 4. O QUE EXIGE ATENCAO AGORA ------------------------------ */}
-            <AtencaoAgora itens={atencao} descricao={quando} />
-            {/* 5. KPIs PRINCIPAIS --------------------------------------- */}
-            {faixaPrincipal}
-            {/* 6. EVOLUCAO ---------------------------------------------- */}
+            {/* RISCO ATUAL -> PRAZO -> EVOLUCAO -> CONCENTRACAO, a mesma
+                ordem dos tres canais (EXPEDICAO-UX-3). */}
+            {secaoRisco}
+            {secaoPrazo}
             {painelEvolucao}
-            {/* 7. CONCENTRACAO ------------------------------------------ */}
             {painelContas("")}
             {aoTrocarVisao && (
               <ConviteAoDetalhe

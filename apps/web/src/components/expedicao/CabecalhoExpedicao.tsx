@@ -21,6 +21,7 @@ import Chip from "@/components/ui/Chip";
 import PageBar from "@/components/ui/PageBar";
 import Segmented from "@/components/ui/Segmented";
 import { ROTULO_VISAO, VISOES, type Fotografia, type Visao } from "@/lib/expedicao-ux";
+import { ALL_BRAND_OPTIONS, brandLabel } from "@/lib/filters/brands";
 
 /** Ancora da faixa de controles — o convite ao detalhe leva o foco ate' ela. */
 export const ID_FAIXA_DE_CONTROLES = "exp-controles";
@@ -45,19 +46,21 @@ export function ChipsFotografia({ fotografia: f }: { fotografia: Fotografia }) {
         {f.rotulo}{" "}
         {f.publicadaEm ? <time dateTime={f.publicadaEm}>{dataHoraCurta(f.publicadaEm)}</time> : "—"}
       </Chip>
-      {f.idade !== null || f.desatualizada ? (
+      {/* Estado ESCRITO nos dois sentidos (EXPEDICAO-UX-3): "Atualizada" ou
+          "Desatualizada", com a idade quando a API a publica. O veredito e'
+          do contrato do canal (limiar da fila; alerta da API no TikTok). */}
+      {f.publicadaEm ? (
         <Chip
           ponto
           tom={f.desatualizada ? "atencao" : "bom"}
           title={
             f.desatualizada
               ? "Os números descrevem o instante da publicação, não agora."
-              : "Idade da publicação."
+              : "Publicação dentro do prazo esperado de atualização."
           }
         >
-          {f.desatualizada ? "Desatualizada" : null}
-          {f.desatualizada && f.idade !== null ? " · " : null}
-          {f.idade !== null ? `há ${f.idade}` : null}
+          {f.desatualizada ? "Desatualizada" : "Atualizada"}
+          {f.idade !== null ? ` · há ${f.idade}` : null}
         </Chip>
       ) : null}
       {f.fonteLidaAte ? (
@@ -71,6 +74,44 @@ export function ChipsFotografia({ fotografia: f }: { fotografia: Fotografia }) {
   );
 }
 
+/**
+ * Filtro de marca comum aos tres canais. Opcoes: o mapa canonico de marcas
+ * mais qualquer marca que o payload trouxer (nunca some uma marca nova).
+ * `<select>` nativo: lista curta, teclado e leitor de tela de graca.
+ */
+export function SeletorMarca({
+  marca,
+  marcasPresentes,
+  aoTrocar,
+}: {
+  marca: string | null;
+  marcasPresentes: readonly string[];
+  aoTrocar: (m: string | null) => void;
+}) {
+  const id = useId();
+  const opcoes = [...new Set([...ALL_BRAND_OPTIONS.map((b) => b.value), ...marcasPresentes, ...(marca ? [marca] : [])])];
+  return (
+    <div className="flex items-center gap-2">
+      <label htmlFor={id} className="text-xs text-ink-faint">
+        Marca
+      </label>
+      <select
+        id={id}
+        value={marca ?? ""}
+        onChange={(e) => aoTrocar(e.target.value || null)}
+        className="min-h-11 rounded-md border border-line bg-surface px-2 text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      >
+        <option value="">Todas as marcas</option>
+        {opcoes.map((m) => (
+          <option key={m} value={m}>
+            {brandLabel(m)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export default function CabecalhoExpedicao({
   canal,
   seletorCanal,
@@ -78,6 +119,8 @@ export default function CabecalhoExpedicao({
   visao,
   aoTrocarVisao,
   controles,
+  definicao,
+  filtroMarca,
 }: {
   /** Rotulo do canal, que vai NO TITULO: numero de uma loja sob o titulo de
    *  outra foi o defeito do EXP-3C2-R/V. */
@@ -87,6 +130,10 @@ export default function CabecalhoExpedicao({
   visao: Visao;
   aoTrocarVisao?: (v: Visao) => void;
   controles?: ReactNode;
+  /** Uma linha: o que esta tela mede neste canal (EXPEDICAO-UX-3). */
+  definicao?: string;
+  /** `SeletorMarca` montado pelo painel, com as marcas do payload. */
+  filtroMarca?: ReactNode;
 }) {
   const idProfundidade = useId();
   return (
@@ -103,7 +150,12 @@ export default function CabecalhoExpedicao({
         }
         meta={fotografia ? <ChipsFotografia fotografia={fotografia} /> : undefined}
       />
-      {aoTrocarVisao || controles ? (
+      {definicao ? (
+        <p className="-mt-1 text-xs leading-snug text-ink-muted" data-testid="exp-definicao">
+          {definicao}
+        </p>
+      ) : null}
+      {aoTrocarVisao || controles || filtroMarca ? (
         <div
           id={ID_FAIXA_DE_CONTROLES}
           className="flex scroll-mt-24 flex-wrap items-center gap-x-4 gap-y-2"
@@ -122,6 +174,7 @@ export default function CabecalhoExpedicao({
               />
             </div>
           ) : null}
+          {filtroMarca}
           {controles}
         </div>
       ) : null}

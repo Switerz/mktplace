@@ -520,6 +520,75 @@ convida a decidir sobre estado vencido.
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
 
+### Hierarquia gerencial, filtro de marca e LDR (EXPEDICAO-UX-3, 21/10/2026)
+
+**O que cada canal sustenta** (medido na resposta de producao, so' estrutura):
+
+| | Shopee | Mercado Livre | TikTok |
+|---|---|---|---|
+| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | ausente (`deadline_source = unavailable`) | reconstruido pela politica de dias uteis |
+| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | so' `deadline_unavailable` | — |
+| Idade da fila | `over_48h`, `stalled`, `oldest_row_age_hours` | idem | — |
+| Taxa de atraso (LDR) | **nao existe no contrato** | **impossivel** (sem prazo na fonte) | `ldr`, por vencimento, coleta e despacho |
+
+A tela mostra a MESMA hierarquia (Risco atual -> Prazo -> Evolucao ->
+Concentracao por marca) e, em cada secao, so' o que o canal sustenta. Nenhuma
+regra de negocio foi mudada para forcar equivalencia.
+
+**Filtro de marca (`?marca=`).** Uma marca, ou nenhuma; atravessa a troca de
+canal. Comportamento por rota:
+
+- `GET /expedicao/trend?brands=` e `GET /expedicao/tiktok?brands=` recortam
+  no SERVIDOR (as agregacoes do TikTok — LDR, coortes, fluxo, lojas, alertas —
+  ja' saem da marca). A tela so' repassa o parametro.
+- `GET /expedicao?brands=` recorta **so' a lista de pedidos** (`queue`,
+  `pagination`). `totals`, `accounts`, `freshness` e `coverage` continuam do
+  CANAL inteiro: `totais` e' a soma de `snap["resumos"]` sem filtro
+  (`get_expedicao` em `apps/api/app/services/expedicao_service.py`). Por isso
+  a tela recorta por SELECAO: a linha da conta em `accounts` vira os
+  indicadores da marca. Marca com mais de uma conta fica SEM total da marca
+  (a tela nao soma contas) e mostra os numeros por conta.
+- Contrato necessario para remover essa limitacao: aplicar `brands` aos
+  `resumos` ANTES de calcular `totals`, `coverage` e `freshness` — ou devolver
+  `totals_scope: "channel" | "brands"` para o consumidor saber o que recebeu.
+- Com marca filtrada, `/expedicao/tiktok` devolve `no_series_published`
+  tambem quando so' a marca nao tem pedido na janela; a tela diz "Sem serie
+  do TikTok para esta marca na janela consultada".
+
+**LDR da Shopee — contrato necessario, NAO implementado.** A fonte tem o que
+e' preciso: `shopee_orders` no Data Mart traz `ship_by_date` e
+`pickup_done_time` (o proprio extrator da fila usa os dois em
+`pipelines/expedicao/shopee_extract.py`). O que falta e' backend:
+
+1. Serie diaria por vencimento, no mesmo grao do TikTok
+   (`marts.expedicao_tiktok_daily`): `marts.expedicao_shopee_daily` com
+   `brand`, `shop_account`, `deadline_date_brt` (`ship_by_date` em BRT),
+   `base`, `shipped_on_time`, `shipped_late`, `pending_overdue`,
+   `pending_on_time`, `is_mature`, `refresh_batch_id`, `effective_at`,
+   `source_watermark_at`. "Despachado" = `pickup_done_time` preenchido;
+   atrasado = `pickup_done_time > ship_by_date`. Decisoes de regra a ratificar
+   antes: cancelado depois do prazo, pedidos sem `ship_by_date`, e se o evento
+   e' a coleta (`pickup_done_time`) ou outro marco.
+2. Rota `GET /expedicao/shopee/ldr?days=&brands=` devolvendo o MESMO
+   envelope `ldr` do TikTok (`from`, `to`, `days`, `rate`, `base`, `late`,
+   `pending_overdue`, `pending_on_time`, `pending_at_risk`, `mature_due_days`,
+   `partial_due_days`, `daily[]`).
+3. So' entao a secao "Prazo" da Shopee ganha a LDR ao lado da situacao atual.
+
+Ate' la' a secao "Prazo" da Shopee mostra a particao do backlog por
+situacao de prazo e diz, por escrito, que a LDR ainda nao e' calculada.
+
+**Mercado Livre.** O canal nao publica prazo de envio (campos candidatos 0%
+preenchidos, medido no EXP-3A). Nao ha vencimento nem LDR a construir sem uma
+fonte nova de prazo; a secao "Prazo" diz isso e mostra o envelhecimento da
+fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
+
+**Evolucao em tabela.** Uma linha por conta, titulada pela marca: backlog
+atual, variacao, acima de 48 h, travados e sparkline. Sem escala escrita e sem
+alternancia de escala. Serie constante: "Estavel em N". Percentual so' com
+primeiro ponto >= 20 pedidos e >= 21 h de historico (24 h menos a folga de
+cobertura); historico parcial: "desde o inicio da serie (N h)".
+
 ### Consumo da tendencia na tela (EXPEDICAO-UX-2, 21/10/2026)
 
 `GET /expedicao/trend` ja' entrega o mapeamento conta -> marca: cada ponto traz

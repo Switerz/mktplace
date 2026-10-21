@@ -448,9 +448,30 @@ export function serieTemDiaMedido(dias: TikTokLdrDia[]): boolean {
 }
 
 /** URL da API. Mantem a mesma forma de query usada pelos outros canais. */
-export function queryDoTikTok(evento: Evento, dias: number): string {
+export function queryDoTikTok(evento: Evento, dias: number, marca: string | null = null): string {
   const p = new URLSearchParams();
   p.set("event", evento);
   p.set("days", String(dias));
+  // A API recorta pela marca ANTES de agregar: LDR, coortes, fluxo, lojas e
+  // alertas da resposta ja' sao da marca. A tela nao filtra nada sozinha.
+  if (marca) p.set("brands", marca);
   return `/api/v1/expedicao/tiktok?${p.toString()}`;
+}
+
+/** Uma linha, abaixo do cabecalho: o que esta tela mede no TikTok. */
+export const DEFINICAO_TIKTOK =
+  "Atraso de envio por data de vencimento (LDR), com coleta e despacho medidos " +
+  "separados. O prazo é reconstruído da política de dias úteis — indicador interno, " +
+  "não a medição de penalização da plataforma.";
+
+/**
+ * Com marca filtrada, a API devolve `no_series_published` tambem quando a
+ * marca so' nao tem pedido na janela — o motivo nao distingue os dois casos.
+ * A tela diz o que de fato sabe.
+ */
+export function explicarIndisponivelComMarca(motivo: string | null, marca: string | null): string {
+  if (marca && motivo === "no_series_published") {
+    return "Sem série do TikTok para esta marca na janela consultada.";
+  }
+  return explicarIndisponivel(motivo);
 }

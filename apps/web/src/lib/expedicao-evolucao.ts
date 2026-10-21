@@ -1,10 +1,11 @@
 /**
- * Gate EXPEDICAO-UX-2 — evolucao do backlog por MARCA, em small multiples.
+ * Gates EXPEDICAO-UX-2/3 — evolucao do backlog por MARCA (tabela gerencial no UX-3).
  *
  * O grafico anterior desenhava todas as contas num eixo so' (0-600): as contas
  * menores viravam linhas planas, a legenda mostrava `seller_id` do Mercado
  * Livre e o seletor dizia "72h" sobre tres horas de historico. Aqui cada conta
- * vira um cartao com a propria escala, titulado pela MARCA.
+ * vira uma linha titulada pela MARCA (UX-3: tabela com sparkline, sem escala
+ * escrita).
  *
  * DE ONDE VEM A MARCA
  * -------------------
@@ -28,7 +29,7 @@
  * `to_hour`, da resposta) e' dita por escrito quando e' menor que a janela.
  *
  * As unicas contas feitas aqui sao a diferenca entre o ultimo e o primeiro
- * ponto da MESMA conta (absoluta e percentual) e a escala de cada cartao.
+ * ponto da MESMA conta (absoluta e percentual) e a faixa de cada sparkline.
  */
 import type { PontoTendencia, RespostaTendencia } from "./expedicao-contract.ts";
 import { brandLabel } from "./filters/brands.ts";
@@ -45,12 +46,6 @@ const HORA_MS = 3600e3;
 export const FOLGA_COBERTURA_HORAS = 3;
 
 export const ROTULO_SEM_MARCA = "Marca não informada";
-
-export type EscalaEvolucao = "absoluto" | "variacao";
-export const ESCALAS: readonly { valor: EscalaEvolucao; texto: string }[] = [
-  { valor: "absoluto", texto: "Volume absoluto" },
-  { valor: "variacao", texto: "Variação %" },
-];
 
 export interface PontoMarca {
   /** Instante do ponto em ms (eixo de tempo real, nao categorico). */
@@ -239,59 +234,87 @@ export function descreverCobertura(c: CoberturaEvolucao): { desde: string | null
   return { desde, exibindo };
 }
 
-export function formatarVariacao(s: SerieMarca): string | null {
-  if (s.variacaoAbs === null) return null;
-  const abs = s.variacaoAbs;
-  const sinal = abs > 0 ? "+" : abs < 0 ? "−" : "";
-  const absTxt = `${sinal}${Math.abs(abs).toLocaleString("pt-BR")}`;
-  if (s.variacaoPct === null) return absTxt;
-  const pct = s.variacaoPct * 100;
-  const pctTxt = `${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct).toFixed(1).replace(".", ",")}%`;
-  return `${absTxt} (${pctTxt})`;
+// ---------------------------------------------------------------------------
+// EXPEDICAO-UX-3 — leitura da variacao na tabela gerencial
+// ---------------------------------------------------------------------------
+
+/**
+ * Percentual so' com BASE e HISTORICO suficientes. Com poucas horas, ou com
+ * um backlog inicial pequeno, "+50%" e' 2 -> 3 pedidos e parece mais
+ * relevante do que e'. Abaixo disto a tela mostra so' a diferenca absoluta.
+ */
+export const BASE_MINIMA_PERCENTUAL = 20;
+export const HORAS_MINIMAS_PERCENTUAL = 24;
+
+export interface LeituraVariacao {
+  /** O que vai na celula: "+21", "Estável em 102" ou "—". */
+  principal: string;
+  /** Percentual (quando valido) ou o motivo da ausencia. */
+  secundario: string | null;
 }
 
-// ---------------------------------------------------------------------------
-// Escala dos minigraficos
-// ---------------------------------------------------------------------------
+function comSinal(n: number, casas = 0): string {
+  const sinal = n > 0 ? "+" : n < 0 ? "−" : "";
+  const abs = casas ? Math.abs(n).toFixed(casas).replace(".", ",") : Math.abs(n).toLocaleString("pt-BR");
+  return `${sinal}${abs}`;
+}
 
-/** Valor plotado no modo escolhido; `null` quando o modo nao se aplica. */
-export function valorPlotado(s: SerieMarca, p: PontoMarca, escala: EscalaEvolucao): number | null {
-  if (escala === "absoluto") return p.backlog;
-  const base = s.pontos[0]?.backlog ?? 0;
-  if (base === 0) return null;
-  return ((p.backlog - base) / base) * 100;
+export function percentualValido(s: SerieMarca, horasCobertas: number | null): boolean {
+  return (
+    s.variacaoPct !== null &&
+    (s.pontos[0]?.backlog ?? 0) >= BASE_MINIMA_PERCENTUAL &&
+    horasCobertas !== null &&
+    // mesma folga da cobertura: 24 h bem servidas terminam com ~22 h entre pontas
+    horasCobertas >= HORAS_MINIMAS_PERCENTUAL - FOLGA_COBERTURA_HORAS
+  );
 }
 
 /**
- * Dominio vertical.
- *
- * - `absoluto`: cada cartao com a PROPRIA escala (min..max da conta, com
- *   folga). E' isso que tira as contas pequenas da linha plana. A escala vai
- *   escrita no cartao, para ninguem ler altura como volume entre cartoes.
- * - `variacao`: um dominio COMUM a todos (inclui o zero): e' o modo de
- *   comparar marcas entre si.
+ * - um ponto so': "—" e "um ponto só" (nao ha variacao a medir);
+ * - serie constante: "Estável em 102" — sem faixa, sem escala;
+ * - variou: diferenca absoluta; o percentual so' com `percentualValido`.
  */
-export function dominioVertical(
-  series: SerieMarca[],
-  escala: EscalaEvolucao,
-  alvo: SerieMarca,
-): [number, number] | null {
-  const valores = (escala === "absoluto" ? [alvo] : series).flatMap((s) =>
-    s.pontos.map((p) => valorPlotado(s, p, escala)).filter((v): v is number => v !== null),
-  );
-  if (!valores.length) return null;
-  let min = Math.min(...valores);
-  let max = Math.max(...valores);
-  if (escala === "variacao") {
-    min = Math.min(0, min);
-    max = Math.max(0, max);
+export function lerVariacao(s: SerieMarca, horasCobertas: number | null): LeituraVariacao {
+  if (s.estado === "insuficiente") return { principal: "—", secundario: "um ponto só" };
+  if (s.estado === "sem_variacao") {
+    return { principal: `Estável em ${s.atual.toLocaleString("pt-BR")}`, secundario: null };
   }
-  if (min === max) {
-    const folga = Math.max(1, Math.abs(min) * 0.1);
-    return [min - folga, max + folga];
+  const abs = comSinal(s.variacaoAbs ?? 0);
+  return {
+    principal: abs,
+    secundario: percentualValido(s, horasCobertas) ? `${comSinal((s.variacaoPct ?? 0) * 100, 1)}%` : null,
+  };
+}
+
+/**
+ * De onde a variacao e' medida. Com menos de 24 h de historico (ou com a
+ * cobertura menor que a janela) a frase e' "desde o início da série": a tela
+ * nao convida a ler 4 h como se fossem 72 h.
+ */
+export function periodoDaVariacao(c: CoberturaEvolucao): string {
+  if (c.horasCobertas === null) return "sem histórico";
+  if (c.parcial) {
+    return c.horasCobertas === 0
+      ? "desde o início da série (um único horário)"
+      : `desde o início da série (${horasTexto(c.horasCobertas)})`;
   }
-  const folga = (max - min) * 0.12;
-  return [escala === "absoluto" ? Math.max(0, min - folga) : min - folga, max + folga];
+  return `nas últimas ${c.janelaHoras ?? Math.round(c.horasCobertas)} h`;
+}
+
+// ---------------------------------------------------------------------------
+// Sparkline
+// ---------------------------------------------------------------------------
+
+/**
+ * Faixa vertical da PROPRIA serie, so' para desenhar a forma. `null` quando a
+ * serie e' constante: a linha sai reta no meio, sem faixa inventada, e a
+ * celula de variacao ja' diz "Estável em N".
+ */
+export function faixaDaSerie(s: SerieMarca): [number, number] | null {
+  const vs = s.pontos.map((p) => p.backlog);
+  const min = Math.min(...vs);
+  const max = Math.max(...vs);
+  return min === max ? null : [min, max];
 }
 
 /** Dominio horizontal comum: do primeiro ao ultimo ponto REAL do canal. */

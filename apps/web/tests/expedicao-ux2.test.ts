@@ -19,11 +19,13 @@ import {
   coberturaDaEvolucao,
   descreverCobertura,
   dominioHorizontal,
-  dominioVertical,
   formatarHoraBrt,
-  formatarVariacao,
+  faixaDaSerie,
+  lerVariacao,
+  periodoDaVariacao,
+  BASE_MINIMA_PERCENTUAL,
+  HORAS_MINIMAS_PERCENTUAL,
   montarEvolucaoPorMarca,
-  valorPlotado,
 } from "../src/lib/expedicao-evolucao.ts";
 
 register("./helpers/tsx-loader.mjs", import.meta.url);
@@ -139,7 +141,7 @@ test("um ponto so': historico insuficiente, sem variacao inventada", () => {
   assert.equal(s.estado, "insuficiente");
   assert.equal(s.variacaoAbs, null);
   assert.equal(s.variacaoPct, null);
-  assert.equal(formatarVariacao(s), null);
+  assert.deepEqual(lerVariacao(s, 72), { principal: "—", secundario: "um ponto só" });
   assert.equal(s.trechos.length, 1);
   assert.equal(s.trechos[0].length, 1, "um ponto nao vira linha");
 });
@@ -149,9 +151,9 @@ test("dois pontos: variacao absoluta e percentual sobre o primeiro", () => {
   assert.equal(s.estado, "variou");
   assert.equal(s.variacaoAbs, 30);
   assert.equal(s.variacaoPct, 0.15);
-  assert.equal(formatarVariacao(s), "+30 (+15,0%)");
+  assert.deepEqual(lerVariacao(s, 48), { principal: "+30", secundario: "+15,0%" });
   const [q] = montarEvolucaoPorMarca([ponto("a", "apice", H(13), 200), ponto("a", "apice", H(16), 150)]);
-  assert.equal(formatarVariacao(q), "−50 (−25,0%)");
+  assert.deepEqual(lerVariacao(q, 48), { principal: "−50", secundario: "−25,0%" });
 });
 
 test("serie sem variacao e' dita como tal", () => {
@@ -167,9 +169,7 @@ test("serie sem variacao e' dita como tal", () => {
 test("primeiro ponto em zero: variacao % nao existe (nunca infinito)", () => {
   const [s] = montarEvolucaoPorMarca([ponto("a", "apice", H(13), 0), ponto("a", "apice", H(16), 5)]);
   assert.equal(s.variacaoPct, null);
-  assert.equal(formatarVariacao(s), "+5");
-  assert.equal(valorPlotado(s, s.pontos[1], "variacao"), null);
-  assert.equal(valorPlotado(s, s.pontos[1], "absoluto"), 5);
+  assert.deepEqual(lerVariacao(s, 48), { principal: "+5", secundario: null });
 });
 
 test("hora sem ponto quebra a linha e nunca vira zero", () => {
@@ -247,38 +247,47 @@ test("a hora e' a de Brasilia, qualquer que seja o fuso da maquina", () => {
 });
 
 // ===========================================================================
-// 4. Escala
+// 4. Leitura da variacao (EXPEDICAO-UX-3) — sem escala, sem faixa artificial
 // ===========================================================================
-test("volume absoluto: cada cartao com a propria escala", () => {
+test("serie constante: 'Estável em N' e nenhuma faixa vertical", () => {
+  const [s] = montarEvolucaoPorMarca([
+    ponto("a", "apice", H(13), 102),
+    ponto("a", "apice", H(16), 102),
+  ]);
+  assert.deepEqual(lerVariacao(s, 72), { principal: "Estável em 102", secundario: null });
+  assert.equal(faixaDaSerie(s), null, "linha reta no meio, sem escala inventada");
+});
+
+test("serie que varia: faixa da PROPRIA serie, so' para desenhar a forma", () => {
   const series = montarEvolucaoPorMarca([
     ponto("grande", "apice", H(13), 600),
     ponto("grande", "apice", H(16), 610),
     ponto("pequena", "kokeshi", H(13), 10),
     ponto("pequena", "kokeshi", H(16), 14),
   ]);
-  const p = series.find((s) => s.conta === "pequena")!;
-  const [min, max] = dominioVertical(series, "absoluto", p)!;
-  assert.ok(max < 20, "a conta pequena nao herda o 0-600 da grande");
-  assert.ok(min >= 0 && min < 10);
+  assert.deepEqual(faixaDaSerie(series.find((s) => s.conta === "pequena")!), [10, 14]);
+  assert.deepEqual(faixaDaSerie(series.find((s) => s.conta === "grande")!), [600, 610]);
 });
 
-test("variacao %: um dominio comum, com o zero dentro", () => {
-  const series = montarEvolucaoPorMarca([
-    ponto("a", "apice", H(13), 100),
-    ponto("a", "apice", H(16), 120),
-    ponto("b", "kokeshi", H(13), 10),
-    ponto("b", "kokeshi", H(16), 9),
-  ]);
-  const da = dominioVertical(series, "variacao", series[0])!;
-  const db = dominioVertical(series, "variacao", series[1])!;
-  assert.deepEqual(da, db);
-  assert.ok(da[0] < -10 + 1 && da[1] > 20 - 1);
+test("percentual so' com base e historico suficientes", () => {
+  const [s] = montarEvolucaoPorMarca([ponto("a", "apice", H(13), 200), ponto("a", "apice", H(16), 230)]);
+  // 3 h de historico: so' a diferenca absoluta.
+  assert.deepEqual(lerVariacao(s, 3), { principal: "+30", secundario: null });
+  // 24 h ou mais e base >= 20: o percentual aparece.
+  assert.deepEqual(lerVariacao(s, HORAS_MINIMAS_PERCENTUAL), { principal: "+30", secundario: "+15,0%" });
+  // base pequena: 4 -> 6 seria "+50%"; a tela mostra so' "+2".
+  const [p] = montarEvolucaoPorMarca([ponto("b", "apice", H(13), 4), ponto("b", "apice", H(16), 6)]);
+  assert.ok(4 < BASE_MINIMA_PERCENTUAL);
+  assert.deepEqual(lerVariacao(p, 72), { principal: "+2", secundario: null });
 });
 
-test("serie plana nao divide por zero no dominio", () => {
-  const series = montarEvolucaoPorMarca([ponto("a", "apice", H(13), 5), ponto("a", "apice", H(16), 5)]);
-  const [min, max] = dominioVertical(series, "absoluto", series[0])!;
-  assert.ok(max > min);
+test("historico curto e' dito como historico curto", () => {
+  const curto = coberturaDaEvolucao(resposta([ponto("a", "apice", H(13), 1), ponto("a", "apice", H(17), 2)], 72));
+  assert.equal(periodoDaVariacao(curto), "desde o início da série (4 h)");
+  const um = coberturaDaEvolucao(resposta([ponto("a", "apice", H(13), 1)], 72));
+  assert.equal(periodoDaVariacao(um), "desde o início da série (um único horário)");
+  const pts = Array.from({ length: 12 }, (_, i) => ponto("a", "apice", H(i * 2), 10 + i));
+  assert.equal(periodoDaVariacao(coberturaDaEvolucao(resposta(pts, 24))), "nas últimas 24 h");
 });
 
 // ===========================================================================
@@ -298,16 +307,18 @@ test("o tooltip le a resposta: marca, conta, hora de Brasilia, backlog, 48 h, tr
   assert.doesNotMatch(COMPONENTE, /fetch\(/, "nenhuma chamada por hover");
 });
 
-test("as pontas do eixo sao as do dominio comum, nao as da conta", () => {
-  // Medido no QA: o cartao de um ponto so' rotulava "14:00 ... 14:00" sob um
-  // eixo que vai de 10:00 a 14:00.
-  assert.match(COMPONENTE, /formatarHoraBrt\(new Date\(x0\)\.toISOString\(\), false\)/);
-  assert.match(COMPONENTE, /formatarHoraBrt\(new Date\(x1\)\.toISOString\(\), false\)/);
+test("sem escala escrita, sem toggle de escala, cor so' para risco", () => {
+  assert.doesNotMatch(COMPONENTE, /Escala do cartão|Escala comum|Variação %|Volume absoluto/);
+  assert.doesNotMatch(COMPONENTE, /stroke-accent|fill-accent/, "a linha nao e' decorada com cor");
+  assert.doesNotMatch(COMPONENTE, /(stroke|fill)-(ok|warn|crit)\b/);
 });
 
-test("os cartoes nao sao Panel dentro de Panel", () => {
+test("a evolucao e' tabela, nao cartoes dentro de painel", () => {
   assert.doesNotMatch(COMPONENTE, /import Panel/);
-  assert.doesNotMatch(COMPONENTE, /<li className="[^"]*\bborder\b/);
+  assert.match(COMPONENTE, /<th scope="col">Marca<\/th>/);
+  for (const c of ["Backlog atual", "Variação", "Acima de 48 h", "Travados", "Tendência"]) {
+    assert.ok(COMPONENTE.includes(c), c);
+  }
 });
 
 // ===========================================================================
@@ -317,31 +328,33 @@ const { createElement: h } = await import("react");
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { default: EvolucaoPorMarca } = await import("../src/components/expedicao/EvolucaoPorMarca.tsx");
 
-test("render: marca no titulo, conta ausente do HTML, estados escritos", () => {
+test("render: tabela por marca, conta ausente do HTML, estados escritos", () => {
   const html = renderToStaticMarkup(
     h(EvolucaoPorMarca, {
       resposta: resposta(
         [
           ponto("2227056661", "kokeshi", H(13), 300),
           ponto("2227056661", "kokeshi", H(16), 320),
-          ponto("1366932565", "rituaria", H(13), 40),
-          ponto("1366932565", "rituaria", H(16), 40),
+          ponto("1366932565", "rituaria", H(13), 102),
+          ponto("1366932565", "rituaria", H(16), 102),
           ponto("1717171717", "lescent", H(16), 12),
         ],
         72,
       ),
     }),
   );
-  assert.match(html, /<h4[^>]*>KOKESHI<\/h4>/);
-  assert.match(html, /<h4[^>]*>RITUÁRIA<\/h4>/);
+  assert.match(html, /<th scope="row"[^>]*>KOKESHI/);
+  assert.match(html, /<th scope="row"[^>]*>RITUÁRIA/);
   assert.doesNotMatch(html, /2227056661|1366932565|1717171717/, "id so' no tooltip, que nasce fechado");
-  assert.match(html, /Sem variação no período/);
-  assert.match(html, /Histórico insuficiente — um ponto só/);
-  assert.match(html, /\+20 \(\+6,7%\)/);
+  assert.match(html, /Estável em 102/);
+  assert.match(html, /um ponto só/);
+  assert.match(html, />\+20</, "variacao absoluta");
+  assert.doesNotMatch(html, /6,7%/, "3 h de historico: sem percentual");
+  assert.match(html, /desde o início da série \(3 h\)/);
   assert.match(html, /Histórico disponível desde 21\/10\/2026 10:00\./);
   assert.match(html, /Exibindo 3 h disponíveis das 72 h selecionadas\./);
-  assert.match(html, /role="radiogroup"[^>]*aria-labelledby="exp-escala"/);
+  assert.doesNotMatch(html, /Escala|radiogroup/);
   assert.equal((html.match(/<polyline/g) ?? []).length, 2, "um ponto so' nao desenha linha");
   assert.equal((html.match(/<circle/g) ?? []).length, 5, "um circulo por ponto real");
-  assert.match(html, /role="group"[^>]*tabindex="0"|tabindex="0"[^>]*role="group"|tabIndex="0"/i);
+  assert.equal((html.match(/tabindex="0"/gi) ?? []).length, 3, "um ponto de tabulacao por linha");
 });
