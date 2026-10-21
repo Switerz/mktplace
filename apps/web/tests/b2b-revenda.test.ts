@@ -30,6 +30,9 @@ import {
   resumoVazio,
   situacaoLabel,
   temFiltro,
+  temBuyBox,
+  textoCobertura,
+  classesGradeKpis,
   type ResumoOk,
 } from "../src/lib/b2b-revenda.ts";
 import { B2B_REVENDA_FLAG, modoB2BRevenda, modoDoValor } from "../src/lib/b2b-revenda-flag.ts";
@@ -271,6 +274,54 @@ test("canal do escopo sem anuncio na carga e' sinalizado, nao some em silencio",
   assert.match(CLIENT, /escopo\.canais_kpi_sem_dados\.length > 0 && \(/);
   assert.match(CLIENT, /Os KPIs abaixo não incluem esse canal/);
   assert.deepEqual(FIXTURE_ESCOPO.canais_kpi_sem_dados, []);
+});
+
+// ---------------------------------------------------------------------------
+// Sem denominador nao ha medida: nunca "0 de 0"
+// ---------------------------------------------------------------------------
+test("buy box: sem anuncio com informacao de buy box o cartao NAO existe; com dado, volta", () => {
+  const base = fixtureResumo().kpis;
+  assert.equal(temBuyBox({ ...base, buy_box: { anuncios_com_buy_box: 0, violando_com_buy_box: 0 } }), false);
+  assert.equal(temBuyBox({ ...base, buy_box: { anuncios_com_buy_box: 1, violando_com_buy_box: 0 } }), true);
+  assert.equal(temBuyBox(base), true, "a fixture tem buy box: o cartao aparece no modo fixture");
+  // O cartao so' e' desenhado dentro do condicional.
+  const i = CLIENT.indexOf("{buyBox && (");
+  const j = CLIENT.indexOf('rotulo="Buy box abaixo do PMA"');
+  assert.ok(i > 0 && j > i && j - i < 120, "cartao de buy box fora do condicional");
+});
+
+test("nenhum 'X de Y' da aba sai com denominador zero", () => {
+  // Os unicos pontos que montam "de <numero>" sao o buy box (condicional) e
+  // a cobertura (textoCobertura). Qualquer novo ponto precisa passar por aqui.
+  const ocorrencias = [...CLIENT.matchAll(/de \$\{fmtInt\(/g)].length;
+  assert.equal(ocorrencias, 1, "so' o buy box monta 'de N' na tela; o resto vem de textoCobertura");
+  assert.doesNotMatch(CLIENT, /cob\.sellers_violando_identificados\)\} de/);
+});
+
+test("cobertura: sem seller violando diz isso, nunca '0 de 0' nem '— dos anuncios'", () => {
+  const vazio = { ...fixtureResumo().cobertura_identificacao, sellers_violando: 0, sellers_violando_identificados: 0, pct_sellers: null, anuncios_violando: 0, anuncios_violando_identificados: 0, pct_anuncios: null };
+  const t = textoCobertura(vazio);
+  assert.equal(t.contexto, "Nenhum seller violando neste recorte");
+  assert.equal(t.nota, undefined);
+  assert.doesNotMatch(t.contexto, /0 de 0/);
+  const cheio = textoCobertura(fixtureResumo().cobertura_identificacao);
+  assert.equal(cheio.contexto, "18 de 60 sellers violando têm cliente B2B");
+  assert.equal(cheio.nota, "40,0% dos anúncios violando");
+  const diverge = textoCobertura({ ...fixtureResumo().cobertura_identificacao, consistente: false });
+  assert.match(diverge.nota ?? "", /diverge/);
+});
+
+test("grade dos KPIs sem buraco com 5 ou 6 cartoes", () => {
+  const seis = classesGradeKpis(6);
+  assert.match(seis, /xl:grid-cols-3/);
+  assert.match(seis, /2xl:grid-cols-6/);
+  assert.doesNotMatch(seis, /col-span/);
+  const cinco = classesGradeKpis(5);
+  assert.match(cinco, /xl:grid-cols-5/);
+  assert.match(cinco, /sm:\[&>\*:last-child\]:col-span-2/, "com 2 colunas o 5o cartao ocupa a linha");
+  assert.match(cinco, /xl:\[&>\*:last-child\]:col-span-1/);
+  assert.doesNotMatch(cinco, /2xl:grid-cols-6/);
+  assert.match(CLIENT, /className=\{classesGradeKpis\(buyBox \? 6 : 5\)\}/);
 });
 
 test("tela mostra coleta, importacao e consulta, e o aviso de piso", () => {
