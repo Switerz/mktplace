@@ -145,6 +145,9 @@ def indicadores(snapshot, status, ponte, vendas):
             "transfer": st.get(STATUS_TRANSFER, 0) if ok else None,
             "nao_disponivel_por_status": dict(sorted(st.items())) if ok else None,
             "total_coerente": s.get("total_coerente"),
+            # Soma do detalhe por status == nao_disponivel? Incoerencia fica
+            # VISIVEL por inventario; nao bloqueia a publicacao das demais.
+            "detalhe_coerente": (sum(st.values()) == nao_disp) if ok else None,
             "anuncios": len(anuncios),
             "anuncios_ativos": sum(1 for a in anuncios if a.get("listing_status") == "active"),
             "anuncios_full": sum(1 for a in anuncios if a.get("logistic_type") == ROTULO_FULL),

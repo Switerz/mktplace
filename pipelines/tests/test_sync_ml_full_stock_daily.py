@@ -32,7 +32,7 @@ def ponte(brand, item, inv, var="0", lt="fulfillment", st="active", seller="S1")
 
 
 def cenario():
-    snapshot = [snap("b", "IA", 56), snap("b", "IB", 0), snap("b", "IC", status="NAO_ENCONTRADO"),
+    snapshot = [snap("b", "IA", 56, nao=5), snap("b", "IB", 0), snap("b", "IC", status="NAO_ENCONTRADO"),
                 snap("b", "ID", 30), snap("b", "IE", 500)]
     status = [{"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "transfer", "quantity": 4},
               {"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "statusNovo", "quantity": 1}]
@@ -121,6 +121,16 @@ def test_transfer_separado_e_status_cru_preservado():
     ia = por_inv(T.indicadores(*cenario())[0])["IA"]
     assert ia["transfer"] == 4
     assert ia["nao_disponivel_por_status"] == {"statusNovo": 1, "transfer": 4}
+    assert ia["detalhe_coerente"] is True
+
+
+def test_detalhe_incoerente_fica_visivel_sem_bloquear():
+    s, st, p, v = cenario()
+    s[0] = snap("b", "IA", 56, nao=0)        # detalhe soma 5, nao_disponivel diz 0
+    l = por_inv(T.indicadores(s, st, p, v)[0])
+    assert l["IA"]["detalhe_coerente"] is False
+    assert l["IB"]["detalhe_coerente"] is True     # os demais seguem normais
+    assert l["IC"]["detalhe_coerente"] is None     # sem leitura: nada a afirmar
 
 
 # ---------------------------------------------------------------------------
