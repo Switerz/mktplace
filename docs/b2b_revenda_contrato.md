@@ -129,10 +129,11 @@ autentica não recebe nem o `unavailable`. O token nunca é logado nem ecoado.
    operação, admin). Não usar a Action do Oráculo para isto: ela concede
    `oracle:read` por domínio, e este dado tem público menor.
 
-**Bloqueio conhecido para a tela:** o navegador da Torre ainda não tem login
-humano. Com `NEXT_PUBLIC_B2B_REVENDA_MODE=api`, a aba recebe 401 e mostra
-"Acesso restrito" — nunca zero. Ligar a aba no navegador exige o fluxo de
-login do Auth0 na web (gate próprio).
+**Login na web (Gate OCTAPRICE-3):** a aba usa um BFF no Next (`/api/b2b/*`):
+login Authorization Code + PKCE no servidor e sessão em cookie `HttpOnly`
+criptografado. O proxy chama esta API com o token da sessão, e o navegador
+nunca vê o token. Detalhes, passo a passo do Auth0 e gate de ativação:
+[`b2b_revenda_ativacao.md`](b2b_revenda_ativacao.md).
 
 ## Variáveis de ambiente
 
@@ -156,18 +157,12 @@ Web (Vercel, em build):
 |---|---|
 | `NEXT_PUBLIC_B2B_REVENDA_MODE` | ausente = desligada (404 e sem seletor) · `fixture` = dados fictícios com faixa de aviso, sem requisição · `api` = lê a nossa API |
 
-## Ativação (gate próprio, fora deste PR)
+## Ativação
 
-1. Auth0: API, permission e roles criadas (seção acima).
-2. Render: `API_AUTH_ISSUER`, `API_AUTH_AUDIENCE` e a credencial **exclusiva**
-   (nunca a da sondagem) colocadas direto nas variáveis; redeploy manual.
-3. Conferir 401 sem token, 403 sem permission e 200 `unavailable` com token
-   válido e flag desligada.
-4. `B2B_REVENDA_ENABLED=true` e reconciliação de `/frescor`, `/resumo`,
-   `/canais-marcas` e `/skus` contra a fonte no mesmo dia e recorte.
-5. Login humano na web; só então `NEXT_PUBLIC_B2B_REVENDA_MODE=api`.
-6. Rotas com dado de cliente (seller, cliente, vendedor, reincidência) ficam
-   para depois, sob a mesma autenticação e com permission própria.
+O gate único, com verificação e rollback em cada passo, está em
+[`b2b_revenda_ativacao.md`](b2b_revenda_ativacao.md). Rotas com dado de
+cliente (seller, cliente, vendedor, reincidência) ficam para depois, sob a
+mesma autenticação e com permission própria.
 
 ## Limitações conhecidas
 
