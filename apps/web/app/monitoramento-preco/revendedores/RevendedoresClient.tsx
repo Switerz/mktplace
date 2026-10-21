@@ -30,12 +30,6 @@ import {
   AVISO_FIXTURE,
   AVISO_SEM_CLIENTE,
   B2BRevendaError,
-  BFF,
-  RESULTADO_LOGIN,
-  TEXTO_ACESSO,
-  carregarSessao,
-  type Acesso,
-  type Sessao,
   FILTROS_VAZIOS,
   MARCAS,
   SEVERIDADES,
@@ -66,23 +60,7 @@ import { painelFicticio } from "@/lib/b2b-revenda-fixtures";
 type Estado =
   | { tipo: "carregando" }
   | { tipo: "erro"; mensagem: string }
-  /** Sem sessao, sessao expirada, sem permissao ou auth nao configurada. */
-  | { tipo: "acesso"; acesso: Acesso }
   | { tipo: "pronto"; painel: PainelB2B };
-
-const BOTAO =
-  "inline-flex min-h-11 items-center rounded-md border border-line bg-surface px-3 text-sm font-medium text-ink hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
-
-/** Le e REMOVE `?login=` da URL (resultado do callback; codigos fixos). */
-function resultadoLoginDaUrl(): string | null {
-  if (typeof window === "undefined") return null;
-  const url = new URL(window.location.href);
-  const codigo = url.searchParams.get("login");
-  if (!codigo) return null;
-  url.searchParams.delete("login");
-  window.history.replaceState(null, "", url.toString());
-  return RESULTADO_LOGIN[codigo] ?? null;
-}
 
 const CELULA = "px-3 py-2 text-data";
 const CABECALHO = "px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-muted";
@@ -109,10 +87,6 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
         if (!ac.signal.aborted) setEstado({ tipo: "pronto", painel });
       } catch (err) {
         if (ac.signal.aborted) return;
-        if (err instanceof B2BRevendaError && err.acesso) {
-          setEstado({ tipo: "acesso", acesso: err.acesso });
-          return;
-        }
         const mensagem = err instanceof B2BRevendaError ? err.message : "Falha inesperada ao carregar.";
         setEstado({ tipo: "erro", mensagem });
       }
@@ -124,17 +98,6 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
     carregar(filtros);
     return () => ultima.current?.abort();
   }, [carregar, filtros]);
-
-  // Sessao e resultado do login: so' no modo api (o ficticio nao tem login).
-  const [sessao, setSessao] = useState<Sessao | null>(null);
-  const [avisoLogin, setAvisoLogin] = useState<string | null>(null);
-  useEffect(() => {
-    if (modo !== "api") return;
-    setAvisoLogin(resultadoLoginDaUrl());
-    const ac = new AbortController();
-    carregarSessao(ac.signal).then((s) => !ac.signal.aborted && setSessao(s));
-    return () => ac.abort();
-  }, [modo]);
 
   const painel = estado.tipo === "pronto" ? estado.painel : null;
   const frescorOk = painel && !isIndisponivel(painel.frescor) ? painel.frescor : null;
@@ -154,43 +117,18 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
           <strong className="font-semibold">Demonstração.</strong> {AVISO_FIXTURE}
         </Note>
       )}
-      {avisoLogin && (
-        <Note tom="atencao" papel="status">
-          {avisoLogin}
-        </Note>
-      )}
-      {sessao?.autenticado && (
-        <section
-          aria-label="Sessão"
-          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-1 text-sm text-ink-muted"
-        >
-          <span>
-            Conectado como <strong className="font-semibold text-ink">{sessao.nome}</strong>
-          </span>
-          <a href={BFF.logout} className={BOTAO}>
-            Sair
-          </a>
-        </section>
-      )}
 
-      {/* Sem acesso, frescor e filtros so' fariam ruido: "frescor indisponivel"
-          pareceria problema de dado, e filtro nao filtra nada. */}
-      {estado.tipo !== "acesso" && (
-        <>
-          <FaixaFrescor frescor={frescor} carregando={estado.tipo === "carregando"} />
-          {escopo && <AvisoEscopo escopo={escopo} />}
+      <FaixaFrescor frescor={frescor} carregando={estado.tipo === "carregando"} />
+      {escopo && <AvisoEscopo escopo={escopo} />}
 
-          <BarraFiltros
-            filtros={filtros}
-            datas={frescor?.datas_disponiveis ?? []}
-            canais={escopo?.canais_nos_kpis ?? []}
-            aoMudar={setFiltros}
-          />
-        </>
-      )}
+      <BarraFiltros
+        filtros={filtros}
+        datas={frescor?.datas_disponiveis ?? []}
+        canais={escopo?.canais_nos_kpis ?? []}
+        aoMudar={setFiltros}
+      />
 
       {estado.tipo === "carregando" && <StateBlock tipo="carregando" titulo="Carregando a Torre B2B…" />}
-      {estado.tipo === "acesso" && <BlocoAcesso acesso={estado.acesso} />}
       {estado.tipo === "erro" && (
         <StateBlock
           tipo="erro"
@@ -200,7 +138,7 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
             <button
               type="button"
               onClick={() => carregar(filtros)}
-              className={BOTAO}
+              className="inline-flex min-h-11 items-center rounded-md border border-line bg-surface px-3 text-sm font-medium text-ink hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               Tentar de novo
             </button>
@@ -223,26 +161,6 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
       </Disclosure>
     </PageContainer>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Acesso (login, sessao expirada, permissao, configuracao)
-// ---------------------------------------------------------------------------
-function BlocoAcesso({ acesso }: { acesso: Acesso }) {
-  const texto = TEXTO_ACESSO[acesso];
-  const acao =
-    acesso === "sem_sessao" || acesso === "sessao_expirada" ? (
-      <a href={BFF.login()} className={BOTAO}>
-        Entrar com conta corporativa
-      </a>
-    ) : acesso === "sem_permissao" ? (
-      <a href={BFF.logout} className={BOTAO}>
-        Sair e entrar com outra conta
-      </a>
-    ) : undefined;
-  // "indisponivel" (borda tracejada), nao "erro" nem "vazio": nao e' falha da
-  // fonte e nao e' zero — e' acesso.
-  return <StateBlock tipo="indisponivel" titulo={texto.titulo} descricao={texto.descricao} acao={acao} />;
 }
 
 // ---------------------------------------------------------------------------
