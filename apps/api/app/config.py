@@ -1,4 +1,4 @@
-﻿from pydantic import Field
+﻿from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -138,6 +138,39 @@ class Settings(BaseSettings):
     # Mesmo LIGADA sobre um banco sem as migrations, o endpoint responde 200
     # com `unavailable` estruturado -- a ausencia nunca vira estoque zero.
     shopee_fbs_stock_enabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
+    # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
+    # ------------------------------------------------------------------
+    # A Torre B2B e' FONTE EXTERNA e somente leitura: esta API chama as RPCs
+    # `fn_monit_*` que ja' alimentam a tela de la', para os numeros baterem
+    # por construcao. Nada e' escrito do lado de la'.
+    #
+    # NASCE DESLIGADA. Com a flag off nenhuma conexao e' aberta e nenhum
+    # engine e' criado. Ligada SEM credencial, os endpoints respondem 200 com
+    # `unavailable` (motivo `credencial_ausente`) -- nunca zero.
+    b2b_revenda_enabled: bool = Field(default=False)
+
+    # DSN de uma role DEDICADA, somente leitura, provisionada pelo dono da
+    # Raiz do projeto (https://<ref>.supabase.co) e chave da Data API usada
+    # SO' pelo backend (ver docs/b2b_revenda_contrato.md). A chave e'
+    # `SecretStr`: nao aparece em repr, log nem resposta, e nunca vai ao
+    # navegador. Vazio = integracao sem credencial (`credencial_ausente`).
+    b2b_revenda_supabase_url: str = ""
+    b2b_revenda_supabase_key: SecretStr = SecretStr("")
+    b2b_revenda_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
+    # O relatorio do OctaPrice muda ~1x/dia (n8n 08h40-12h40 BRT). Cache de
+    # 15 a 30 min protege a fonte sem esconder a carga do dia por muito tempo.
+    b2b_revenda_cache_ttl_seconds: int = Field(default=1200, ge=900, le=1800)
+    # ALLOWLIST dos canais que entram nos KPIs, com a grafia da fonte.
+    # Amazon fica FORA no MVP: a deduplicacao da fonte descarta vendedores que
+    # dividem o mesmo anuncio de catalogo. Allowlist, e nao "tudo menos
+    # Amazon", para que um canal novo na fonte nao entre nos KPIs sem revisao.
+    b2b_revenda_canais_kpi: str = "Mercado Livre,Shopee"
+
+    @property
+    def b2b_revenda_canais_kpi_list(self) -> list[str]:
+        return [c.strip() for c in self.b2b_revenda_canais_kpi.split(",") if c.strip()]
 
     @property
     def datamart_url(self) -> str:
