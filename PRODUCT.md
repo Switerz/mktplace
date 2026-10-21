@@ -38,7 +38,7 @@ Voice: calm authority. Data presented with confidence, not apology. Numbers are 
 
 1. **Brand quality, inside out.** Internal tools aren't second-class citizens. GoBeauté's elegance — refined palette, generous spacing, confident typography — belongs here as much as on the storefront.
 2. **Status at a glance.** Goal attainment colors (green / amber / red), MoM arrows, and live/demo badges must be readable in peripheral vision. Never bury the lead.
-3. **Summary first, depth on demand.** The KPI row answers the manager's question; the brand table and drill-down answer the analyst's. No forced toggling between modes.
+3. **Summary first, depth on demand.** The KPI row answers the manager's question; the brand table and drill-down answer the analyst's. No forced toggling between modes. Where one screen serves both daily modes (Expedição), depth is an explicit, shareable choice — *Visão do gestor* by default, *Detalhe operacional* one click (or one link) away — and the KPI row is the same in both.
 4. **Data with no decoration tax.** Every visual element must either carry information or direct attention. No decorative borders, gradient fills, or icon collections that don't map to meaning.
 5. **Ops confidence through precision.** Monospace numerics, tight tabular alignment, consistent date/period labeling. A number that shifts layout is a number that erodes trust.
 

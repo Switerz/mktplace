@@ -38,6 +38,7 @@ import {
   type RespostaExpedicao,
   type Totais,
 } from "../src/lib/expedicao-contract.ts";
+import { canaisHabilitados, lerCanalExpedicao } from "../src/lib/expedicao-canal.ts";
 
 const RAIZ = join(import.meta.dirname, "..");
 const CLIENTE = readFileSync(
@@ -48,6 +49,15 @@ const CONTRATO = readFileSync(
   join(RAIZ, "src/lib/expedicao-contract.ts"),
   "utf8",
 );
+// EXPEDICAO-UX-UNIFICADA-1: a casca passou a ser dona do seletor unico
+// (Shopee | Mercado Livre | TikTok Shop) e da flag do ML; o titulo vive no
+// cabecalho compartilhado. As garantias seguem o codigo ate' la'.
+const CASCA = readFileSync(join(RAIZ, "app/expedicao/ExpedicaoShell.tsx"), "utf8");
+const CABECALHO = readFileSync(
+  join(RAIZ, "src/components/expedicao/CabecalhoExpedicao.tsx"),
+  "utf8",
+);
+const SEGMENTED = readFileSync(join(RAIZ, "src/components/ui/Segmented.tsx"), "utf8");
 
 function totais(over: Partial<Totais> = {}): Totais {
   return {
@@ -97,7 +107,7 @@ test("a regra da flag e' UMA SO', escrita de duas formas equivalentes", () => {
   // os testes. Se as duas divergirem, a tela e o contrato passam a discordar.
   assert.match(CONTRATO, /return valor === "true";/);
   assert.match(
-    CLIENTE,
+    CASCA,
     /const ML_LIGADO = process\.env\.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true";/,
   );
   for (const v of ["true", "false", "", "1", "TRUE"]) {
@@ -106,7 +116,7 @@ test("a regra da flag e' UMA SO', escrita de duas formas equivalentes", () => {
 });
 
 test("a flag do ML e' SEPARADA da flag da rota", () => {
-  assert.match(CLIENTE, /NEXT_PUBLIC_EXPEDICAO_ML_ENABLED/);
+  assert.match(CASCA, /NEXT_PUBLIC_EXPEDICAO_ML_ENABLED/);
   // a rota continua sendo controlada pela flag original, no servidor
   const page = readFileSync(join(RAIZ, "app/expedicao/page.tsx"), "utf8");
   assert.match(page, /expedicaoHabilitado\(process\.env\.NEXT_PUBLIC_EXPEDICAO_ENABLED\)/);
@@ -114,17 +124,20 @@ test("a flag do ML e' SEPARADA da flag da rota", () => {
 });
 
 test("flag desligada: nenhum caminho leva ao canal do ML", () => {
-  // o seletor so' existe atras da flag
-  assert.match(CLIENTE, /ML_LIGADO && \(/);
-  // e TODA leitura do canal na URL fica sob a flag. Desde o
-  // EXPEDICAO-UX-JANELA-CUSTOMIZAVEL-1 os efeitos de URL nao saem mais cedo
-  // (a janela `?dias=` vale sem o ML), entao a guarda desceu para o canal.
-  const leituras = CLIENTE.match(/lerCanalDaUrl\(\);/g) ?? [];
-  const guardadas = CLIENTE.match(/if \(ML_LIGADO\) \{\s*\n\s*const canal = lerCanalDaUrl\(\);/g) ?? [];
-  assert.equal(leituras.length, 2, "montagem e popstate");
-  assert.equal(guardadas.length, leituras.length, "leitura de canal fora da flag");
-  // nenhum literal de canal do ML solto no componente
+  // EXPEDICAO-UX-UNIFICADA-1: o seletor e a leitura do canal moram na casca.
+  // As opcoes do seletor e a leitura da URL passam pelas MESMAS flags.
+  assert.match(CASCA, /canaisHabilitados\(FLAGS\)/);
+  assert.match(CASCA, /lerCanalExpedicao\(window\.location\.search, FLAGS\)/);
+  assert.deepEqual(canaisHabilitados({ ml: false, tiktok: false }), ["shopee"]);
+  assert.deepEqual(canaisHabilitados({ ml: false, tiktok: true }), ["shopee", "tiktokshop"]);
+  // montagem E voltar/avancar passam pelo mesmo leitor, com a flag aplicada
+  assert.match(CASCA, /const aoVoltar = \(\) => lerDaUrl\(\);/);
+  assert.equal(lerCanalExpedicao("?channel=mercadolivre", { ml: false, tiktok: false }), "shopee");
+  // A fila nao le mais o canal da URL, e nenhum literal do ML solto nela
+  // nem na casca: o canal so' existe atras das flags.
+  assert.doesNotMatch(CLIENTE, /lerCanalDaUrl|get\("channel"\)/);
   assert.doesNotMatch(CLIENTE, /"mercadolivre"/);
+  assert.doesNotMatch(CASCA, /"mercadolivre"/);
 });
 
 test("sanitizarCanal e' fail-closed nas duas pontas", () => {
@@ -392,14 +405,14 @@ test("nenhum identificador de pedido e' renderizado", () => {
 // 8. Acessibilidade do seletor
 // ---------------------------------------------------------------------------
 test("o seletor e' um radiogroup com nome acessivel", () => {
-  // EXP-UX-1: os dois seletores da tela passaram a compartilhar `GrupoRadio`,
-  // entao o nome acessivel chega por prop em vez de literal na marcacao. A
-  // garantia e' a mesma e o teste segue a garantia, nao o lugar dela.
-  assert.match(CLIENTE, /role="radiogroup"/);
-  assert.match(CLIENTE, /aria-label=\{rotulo\}/);
-  assert.match(CLIENTE, /rotulo="Canal da fotografia"/);
-  assert.match(CLIENTE, /role="radio"/);
-  assert.match(CLIENTE, /aria-checked=\{ativo\}/);
+  // EXPEDICAO-UX-UNIFICADA-1: o seletor unico mora na casca e e' o
+  // `Segmented` compartilhado. A garantia e' a mesma e o teste segue a
+  // garantia, nao o lugar dela.
+  assert.match(CASCA, /<Segmented\s+rotulo="Canal da Expedição"/);
+  assert.match(SEGMENTED, /role="radiogroup"/);
+  assert.match(SEGMENTED, /aria-label=\{rotuladoPor \? undefined : rotulo\}/);
+  assert.match(SEGMENTED, /role="radio"/);
+  assert.match(SEGMENTED, /aria-checked=\{ativo\}/);
 });
 
 test("os alvos do seletor tem 44x44 e foco visivel", () => {
@@ -408,12 +421,16 @@ test("os alvos do seletor tem 44x44 e foco visivel", () => {
 });
 
 test("o seletor usa <button>, navegavel por teclado", () => {
-  assert.match(CLIENTE, /type="button"\r?\n?\s*role="radio"/);
+  assert.match(SEGMENTED, /type="button"\r?\n?\s*role="radio"/);
 });
 
 test("o titulo reflete o canal e a tela nao ganha um segundo h1", () => {
-  assert.match(CLIENTE, /Expedição — \{ROTULO_CANAL\[filtros\.channel\]\}/);
+  // O titulo e' do cabecalho compartilhado; a fila passa o canal DOS DADOS
+  // (`filtros.channel`), nao o do seletor.
+  assert.match(CLIENTE, /canal=\{ROTULO_CANAL\[filtros\.channel\]\}/);
+  assert.match(CABECALHO, /Expedição — \{canal\}/);
   assert.doesNotMatch(CLIENTE, /<h1/);
+  assert.doesNotMatch(CABECALHO, /<h1/);
   assert.equal(ROTULO_CANAL.mercadolivre, "Mercado Livre");
 });
 
@@ -518,8 +535,11 @@ test("a URL e' lida antes da primeira busca, com ou sem a flag do ML", () => {
   // Antes deste gate, sem a flag nao havia o que ler e `urlPronta` nascia
   // `true`. Agora `?dias=` vale nos dois casos: nascer `true` faria um link
   // de 10 dias pedir primeiro a janela padrao.
-  assert.match(CLIENTE, /useState\(false\);\s*\n\s*const lerCanalDaUrl/);
+  assert.match(CLIENTE, /const \[urlPronta, setUrlPronta\] = useState\(false\);/);
   assert.doesNotMatch(CLIENTE, /useState\(!ML_LIGADO\)/);
+  // E o canal ja' chega da casca, que so' monta a fila depois de ler a URL:
+  // a primeira requisicao sai com o canal do link.
+  assert.match(CLIENTE, /useState<Filtros>\(\(\) => aplicarCanal\(FILTROS_PADRAO, canal\)\)/);
 });
 
 test("urlPronta entra nas dependencias dos dois efeitos", () => {
@@ -534,6 +554,12 @@ test("voltar/avancar do navegador ressincroniza o canal", () => {
 
 test("a troca de canal usa aplicarCanal, nao aplicarFiltro cru", () => {
   assert.doesNotMatch(CLIENTE, /aplicarFiltro\(f, \{ channel/);
-  const usos = CLIENTE.match(/aplicarCanal\(f, canal\)/g) ?? [];
-  assert.ok(usos.length >= 3, "montagem, popstate e seletor");
+  // EXPEDICAO-UX-UNIFICADA-1: montagem, popstate e seletor convergem na casca,
+  // que repassa o canal como prop. Na fila restam dois pontos: o estado
+  // inicial e o efeito da troca — os dois por `aplicarCanal`.
+  assert.match(CLIENTE, /aplicarCanal\(FILTROS_PADRAO, canal\)/);
+  assert.match(
+    CLIENTE,
+    /useEffect\(\(\) => \{\s*setFiltros\(\(f\) => \(f\.channel === canal \? f : aplicarCanal\(f, canal\)\)\);\s*\}, \[canal\]\);/,
+  );
 });

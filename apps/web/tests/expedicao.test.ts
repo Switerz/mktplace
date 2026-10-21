@@ -668,5 +668,10 @@ test("a topbar resolve o titulo da rota de Expedicao", () => {
 test("a pagina nao cria um segundo h1: o shell e dono dele", () => {
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
   assert.equal((tela.match(/<h1\b/g) ?? []).length, 0, "dois h1 quebram a arvore de cabecalhos");
-  assert.ok((tela.match(/<h2\b/g) ?? []).length >= 1);
+  // EXPEDICAO-UX-UNIFICADA-1: o h2 do canal vive no cabecalho compartilhado
+  // pelos tres canais, que a fila renderiza.
+  const cabecalho = fonte("src/components/expedicao/CabecalhoExpedicao.tsx");
+  assert.match(tela, /<CabecalhoExpedicao\b/);
+  assert.equal((cabecalho.match(/<h1\b/g) ?? []).length, 0);
+  assert.ok((cabecalho.match(/<h2\b/g) ?? []).length >= 1);
 });

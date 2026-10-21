@@ -6,6 +6,14 @@
  * dois tem estados, rotulos e perguntas diferentes, e misturar os contratos
  * faria cada mudanca aqui arriscar os dois canais que ja estao em producao.
  */
+import {
+  consolidarQualidade,
+  type BarraQualidade,
+  type Fotografia,
+  type ItemAtencao,
+  type ProblemaQualidade,
+  type TomAtencao,
+} from "./expedicao-ux.ts";
 
 // ---------------------------------------------------------------------------
 // Eventos — a politica tem DOIS prazos
@@ -335,6 +343,121 @@ export function taxaMaxima(dias: TikTokLdrDia[]): number {
 export function alturaDaMeta(maximo: number, meta = META_TIKTOK_LDR): number | null {
   if (maximo <= 0 || meta > maximo) return null;
   return (meta / maximo) * 100;
+}
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-UX-UNIFICADA-1 — o TikTok na mesma hierarquia dos outros canais
+// ---------------------------------------------------------------------------
+
+/**
+ * Codigo do alerta de frescor que a API publica (`_alertas` em
+ * `expedicao_tiktok_service.py`, acima de 12 h). E' a UNICA fonte do veredito
+ * "serie desatualizada" nesta tela: o payload nao traz a idade, e a tela nao
+ * subtrai relogios para inventar uma nem redigita o limiar da API.
+ */
+export const CODIGO_FOTOGRAFIA_VELHA = "fotografia_velha";
+
+/**
+ * O payload do TikTok NAO informa como a serie foi publicada (nao existe
+ * `load_mode` nem `no_automation` nele). A tela diz isso, em vez de herdar o
+ * "atualizada a mao" da fila ou de presumir agendamento.
+ */
+export const AUTOMACAO_NAO_INFORMADA = "Modo de publicação não informado";
+
+export function serieDesatualizada(p: TikTokPayload | null): boolean {
+  return Boolean(p?.alerts.some((a) => a.code === CODIGO_FOTOGRAFIA_VELHA));
+}
+
+export function fotografiaDoTikTok(p: TikTokPayload | null): Fotografia | null {
+  if (!p?.snapshot) return null;
+  return {
+    rotulo: "Série",
+    publicadaEm: p.snapshot.effective_at,
+    idade: null,
+    desatualizada: serieDesatualizada(p),
+    automacao: AUTOMACAO_NAO_INFORMADA,
+    fonteLidaAte: p.snapshot.source_watermark_at,
+  };
+}
+
+const TOM_DO_ALERTA: Record<TikTokAlerta["severity"], TomAtencao> = {
+  critical: "critico",
+  warning: "atencao",
+  // O unico `info` publicado hoje e' "dentro da meta — medicao interna".
+  info: "bom",
+};
+
+/**
+ * "O que exige atenção agora" do TikTok: os alertas QUE A API JA' ESCREVEU,
+ * com o texto dela, na ordem dela. A tela nao reimplementa limiar nenhum —
+ * senao o alerta e o destaque do grafico discordariam na mesma pagina.
+ *
+ * Sai daqui so' o alerta de frescor: ele descreve o DADO, nao a operacao, e
+ * vai para a barra de qualidade e para o selo do cabecalho.
+ */
+export function montarAtencaoDoTikTok(p: TikTokPayload | null): ItemAtencao[] {
+  if (!p) return [];
+  return p.alerts
+    .filter((a) => a.code !== CODIGO_FOTOGRAFIA_VELHA)
+    .map((a) => ({ chave: a.code, tom: TOM_DO_ALERTA[a.severity] ?? "neutro", texto: a.message }));
+}
+
+/**
+ * A barra de qualidade do TikTok — a mesma barra da fila, preenchida com o
+ * que este contrato sabe. Substitui a pilha de banners (aviso de prazo +
+ * um banner por alerta) que empurrava o primeiro numero para baixo da dobra.
+ *
+ * Ordem no empate de severidade, de proposito: serie desatualizada primeiro
+ * (e' o que muda a leitura de TODOS os numeros abaixo), prazo reconstruido
+ * depois. O aviso de prazo nunca some: fica na lista e, alem disso, colado ao
+ * periodo consultado, ao lado da LDR.
+ */
+export function montarBarraDeQualidadeTikTok(p: TikTokPayload | null): BarraQualidade {
+  if (!p) return consolidarQualidade([]);
+  const itens: ProblemaQualidade[] = [];
+  const velha = p.alerts.find((a) => a.code === CODIGO_FOTOGRAFIA_VELHA);
+  if (velha) {
+    itens.push({
+      chave: "serie_desatualizada",
+      severidade: "atencao",
+      texto:
+        `Série desatualizada. ${velha.message} Os números descrevem aquela publicação, ` +
+        "não agora.",
+    });
+  }
+  if (p.deadline_is_reconstructed) {
+    itens.push({ chave: "prazo_reconstruido", severidade: "atencao", texto: AVISO_PRAZO_RECONSTRUIDO });
+  }
+  const parciais = p.ldr?.partial_due_days ?? 0;
+  if (parciais > 0) {
+    itens.push({
+      chave: "vencimentos_parciais",
+      severidade: "info",
+      texto:
+        `${parciais} vencimento(s) da janela ainda no prazo: a taxa desses dias ainda ` +
+        "vai mudar e fica fora da LDR.",
+    });
+  }
+  if (p.availability === "available") {
+    itens.push({
+      chave: "modo_publicacao",
+      severidade: "info",
+      texto:
+        "A API do TikTok não informa se a série é publicada à mão ou por " +
+        "agendamento. O instante da última publicação está no cabeçalho.",
+    });
+  }
+  return consolidarQualidade(itens);
+}
+
+/**
+ * A serie tem algum vencimento FECHADO com taxa? Sem nenhum, o grafico so'
+ * desenharia barras hachuradas ou vazias — um retangulo enorme sem informacao
+ * util, que era o que a tela mostrava com a fonte vencida. Nesse caso a tela
+ * troca o grafico por uma linha que diz por que nao ha o que desenhar.
+ */
+export function serieTemDiaMedido(dias: TikTokLdrDia[]): boolean {
+  return dias.some((d) => d.is_mature && d.rate !== null);
 }
 
 /** URL da API. Mantem a mesma forma de query usada pelos outros canais. */

@@ -512,6 +512,43 @@ painel que nao mostra a idade do dado convida a decidir sobre estado vencido.
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
 
+### Pendencia de contrato: modo de publicacao (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026)
+
+**O contrato nao consegue dizer que uma fotografia foi agendada.** Medido no
+codigo:
+
+- `LoadMode = Literal["manual_snapshot"]` em `apps/api/app/schemas/expedicao.py`;
+- `apps/api/app/services/expedicao_service.py` grava `load_mode =
+  "manual_snapshot"` e `no_automation = True` como CONSTANTES — no `snapshot` e
+  em `_limitacoes()` — sem olhar quem publicou o batch;
+- `GET /expedicao/tiktok` nao tem campo de modo nenhum.
+
+Consequencia: um batch publicado pela DAG `marketplace_tower_expedicao_refresh`
+(`goca-se/airflow`) sai anunciado como "atualizada a mao, sem agendamento". A
+tela **nao** corrige nem esconde isso: mostra literalmente o que a API declara,
+e no TikTok diz "Modo de publicacao nao informado". Inferir agendamento no
+frontend seria a tela afirmar o que o contrato nao afirma.
+
+Ajuste necessario, fora deste gate e nesta ordem:
+
+1. **Proveniencia por batch, gravada por quem publica.** `marts.expedicao_refresh_run`
+   (e a serie do TikTok, migration `020`) ganham `load_mode text NOT NULL
+   DEFAULT 'manual_snapshot' CHECK (load_mode IN ('manual_snapshot',
+   'scheduled'))`, em migration nova. O CLI recebe `--load-mode scheduled`
+   EXPLICITO da DAG — nunca inferido de variavel de ambiente: uma execucao
+   manual dentro do container nao pode virar "agendada".
+2. **API.** `LoadMode = Literal["manual_snapshot", "scheduled"]`, lido do batch
+   servido; `no_automation = load_mode != "scheduled"`; e
+   `limitations.expected_refresh_hours` (2 para a DAG de 2 h). Hoje o limiar de
+   "fotografia velha" e' fixo e diferente por canal: 6 h na tela da fila
+   (`SNAPSHOT_VELHO_HORAS`) e 12 h no alerta `fotografia_velha` do TikTok.
+3. **`/expedicao/tiktok`**: `snapshot.load_mode` com o mesmo dominio.
+4. **Frontend, so' depois de 1-3**: mapear `scheduled` para "publicação
+   agendada" e usar `expected_refresh_hours` no veredito de desatualizada.
+
+Ate' la' o selo de modo continua sendo a declaracao da API, e a idade da
+fotografia continua visivel ao lado dele.
+
 ### Cobertura e Kokeshi
 
 `coverage` compara conjuntos, nao continencia: `expected_accounts` vem do
