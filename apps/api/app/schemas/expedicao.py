@@ -492,7 +492,9 @@ class ShopeeLdrSnapshot(BaseModel):
     source_watermark_at: Optional[datetime] = None
     today_brt: date
     age_hours: float
-    #: Publicacao mais velha que o limite: a tela diz "fonte vencida".
+    #: Idade da leitura MAIS RECENTE da fonte entre as contas. `None` = sem leitura.
+    source_age_hours: Optional[float] = None
+    #: Publicacao OU fonte mais velha que o limite: a tela diz "fonte vencida".
     stale: bool
 
 

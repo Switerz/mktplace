@@ -93,6 +93,10 @@ BRT = timezone(timedelta(hours=-3))
 #: Atraso de ingestao medido (p99 de ingested_at - update_time = 6,0 h).
 MARGEM_MATURIDADE = timedelta(hours=6)
 
+#: Conta sem leitura nova ha' mais que isto e' "defasada" (alerta, nao bloqueio):
+#: 4x a margem de ingestao medida. Os vencimentos dela param de amadurecer.
+LIMITE_CONTA_DEFASADA = timedelta(hours=24)
+
 #: Advisory lock PROPRIO. Nao reutiliza a chave da fila Shopee (915_120_015):
 #: a LDR rodando nao pode fazer o refresh da fila sair com "lock ocupado".
 LOCK_KEY = 918_120_018
@@ -314,6 +318,12 @@ class Qualidade:
     status_desconhecidos: Counter = field(default_factory=Counter)
     contas_fora_do_registry: Counter = field(default_factory=Counter)
     fora_da_janela: int = 0
+    #: Contas do registry SEM nenhuma leitura na fonte: os vencimentos delas
+    #: somem da janela e a taxa "Todas" encolhe sem aviso se ninguem olhar.
+    contas_sem_leitura: list = field(default_factory=list)
+    #: Contas do registry cuja ultima leitura passou de `LIMITE_CONTA_DEFASADA`:
+    #: os vencimentos nao amadurecem, entao a taxa as ignora em silencio.
+    contas_defasadas: list = field(default_factory=list)
 
 
 @dataclass
@@ -402,6 +412,15 @@ def apurar(
         linha.validar()
     for linha in semp.values():
         linha.validar()
+
+    # Registry x fonte: a fila da Shopee acusa ACCOUNT_MISSING; aqui a ausencia
+    # vira alerta de qualidade, nunca linha com zero.
+    for shop_id, marca in sorted(registry.items()):
+        wm = watermarks.get(shop_id)
+        if wm is None:
+            q.contas_sem_leitura.append(marca)
+        elif agora - wm > LIMITE_CONTA_DEFASADA:
+            q.contas_defasadas.append(marca)
 
     return Apuracao(
         vencimentos=sorted(venc.values(), key=lambda x: (x.deadline_date, x.shop_account)),
@@ -648,12 +667,21 @@ def linhas_para_publicar(
     return lote, venc, semp
 
 
+RELEITURA_SEM_PRAZO_SQL = f"""
+SELECT count(*) AS linhas_sem_prazo, coalesce(sum(sem_prazo),0) AS sem_prazo
+  FROM {TABELA_SEM_PRAZO}
+ WHERE channel = %(channel)s AND refresh_batch_id = %(lote)s
+"""
+
+
 def esperado_na_releitura(apuracao: Apuracao) -> dict:
     return {
         "linhas": len(apuracao.vencimentos),
         "pagos": sum(x.pedidos_pagos for x in apuracao.vencimentos),
         "base": sum(x.base for x in apuracao.vencimentos),
         "atraso": sum(x.atrasado + x.pendente_vencido for x in apuracao.vencimentos),
+        "linhas_sem_prazo": len(apuracao.sem_prazo),
+        "sem_prazo": sum(x.sem_prazo for x in apuracao.sem_prazo),
     }
 
 

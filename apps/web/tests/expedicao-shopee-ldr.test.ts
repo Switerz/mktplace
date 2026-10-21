@@ -97,6 +97,13 @@ test("estados: desligada, nao migrada, vazia, erro, carregando e pronta", () => 
   assert.equal(estadoDaLdrShopee({ carregando: false, erro: false, resposta: resposta() }), "pronta");
 });
 
+test("trocando de marca, a resposta antiga nunca aparece como pronta", () => {
+  // Revisao do PR #107: com a resposta da marca anterior guardada, o estado
+  // virava "pronta" e a tela mostrava a LDR da marca errada ate' a nova chegar.
+  assert.equal(estadoDaLdrShopee({ carregando: true, erro: false, resposta: resposta() }), "carregando");
+  assert.match(PAINEL, /let vivo = true;[\s\S]*?setResposta\(null\);\s*setCarregando\(true\);/);
+});
+
 test("vazio diz ausencia de dado, nunca atraso zero", () => {
   assert.match(textoDoEstado("vazia", "apice"), /ausência de dado, não atraso zero/);
   assert.match(textoDoEstado("erro", null), /Nenhum número é exibido/);

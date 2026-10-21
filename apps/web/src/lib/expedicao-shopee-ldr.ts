@@ -50,6 +50,7 @@ export interface RespostaLdrShopee {
     source_watermark_at: string | null;
     today_brt: string;
     age_hours: number;
+    source_age_hours?: number | null;
     stale: boolean;
   } | null;
   ldr: {
@@ -120,7 +121,9 @@ export function estadoDaLdrShopee(args: {
   erro: boolean;
   resposta: RespostaLdrShopee | null;
 }): EstadoLdrShopee {
-  if (args.carregando && !args.resposta) return "carregando";
+  // Carregando vence a resposta guardada: ao trocar de marca, a resposta
+  // antiga e' de OUTRA marca e nao pode aparecer como se fosse a nova.
+  if (args.carregando) return "carregando";
   if (args.erro) return "erro";
   const r = args.resposta;
   if (!r) return "carregando";

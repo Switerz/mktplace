@@ -49,6 +49,9 @@ export default function LdrShopeePanel({ api, marca }: { api: string; marca: str
   useEffect(() => {
     const minha = chave;
     let vivo = true;
+    // A resposta anterior e' de outra marca (ou de outra fotografia): sai da
+    // tela enquanto a nova nao chega.
+    setResposta(null);
     setCarregando(true);
     setErro(false);
     fetch(`${api}${minha}`, { headers: { Accept: "application/json" } })

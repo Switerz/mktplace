@@ -176,8 +176,12 @@ def obter_ldr(
     linhas = [dict(r) for r in db.execute(
         text(VENCIMENTOS_SQL), {"canal": CANAL, "desde": desde, "ate": ate_leitura},
     ).mappings()]
+    # Sem prazo: so' pagamentos de dias FECHADOS, a mesma faixa dos vencimentos
+    # que entram na taxa. Contar hoje inflaria a ausencia com pedido que a
+    # Shopee ainda nem terminou de publicar.
     sem_prazo = [dict(r) for r in db.execute(
-        text(SEM_PRAZO_SQL), {"canal": CANAL, "desde": desde, "ate": hoje},
+        text(SEM_PRAZO_SQL),
+        {"canal": CANAL, "desde": desde, "ate": hoje - timedelta(days=1)},
     ).mappings()]
     if alvo is not None:
         linhas = [x for x in linhas if str(x["brand"]).lower() in alvo]
@@ -217,10 +221,15 @@ def obter_ldr(
     taxa_bruta = taxa(atraso_m, sm["base"])
     taxa_exibida = None if cob["state"] == "insuficiente" else taxa_bruta
 
-    risco = sum(int(x["pendente_no_prazo"]) for x in abertas
+    # Pendente "no prazo" so' se o prazo ainda nao passou: um vencimento de
+    # ontem publicado antes da virada do dia ainda carrega `pendente_no_prazo`,
+    # e chama-lo de "ainda pode ser coletado" seria falso.
+    abertas_futuras = [x for x in abertas if x["deadline_date"] >= hoje]
+    risco = sum(int(x["pendente_no_prazo"]) for x in abertas_futuras
                 if (x["deadline_date"] - hoje).days <= 1)
-    dias_maduros = {x["deadline_date"] for x in maduras}
-    dias_na_janela = {x["deadline_date"] for x in na_janela}
+    # Dia "fechado" so' quando TODAS as contas dele amadureceram.
+    dias_maduros = {d["due_date"] for d in diario if d["is_mature"]}
+    dias_na_janela = {d["due_date"] for d in diario}
 
     ldr = {
         "from": desde, "to": hoje, "days": dias,
@@ -231,7 +240,7 @@ def obter_ldr(
         "base": sm["base"], "late": atraso_m,
         "shipped_on_time": sm["no_prazo"], "shipped_late": sm["atrasado"],
         "pending_overdue": sm["pendente_vencido"],
-        "pending_on_time": sum(int(x["pendente_no_prazo"]) for x in abertas),
+        "pending_on_time": sum(int(x["pendente_no_prazo"]) for x in abertas_futuras),
         "pending_at_risk": risco,
         "mature_due_days": len(dias_maduros),
         "partial_due_days": len(dias_na_janela - dias_maduros),
@@ -271,13 +280,19 @@ def obter_ldr(
     lote = next(x["refresh_batch_id"] for x in linhas if x["effective_at"] == efetivo)
     idade = (ref - efetivo).total_seconds() / 3600.0
     wm_todos = [x["source_watermark_at"] for x in linhas if x["source_watermark_at"]]
+    # "Fonte vencida" tem dois sintomas: publicacao velha (o agendador parou)
+    # OU publicacao nova sobre fonte parada (`effective_at` recente, leitura
+    # mais recente da fonte velha). Sem leitura nenhuma tambem e' vencida.
+    idade_fonte = ((ref - max(wm_todos)).total_seconds() / 3600.0) if wm_todos else None
     snapshot = {
         "refresh_batch_id": str(lote),
         "effective_at": efetivo,
         "source_watermark_at": min(wm_todos) if wm_todos else None,
         "today_brt": hoje,
         "age_hours": round(idade, 2),
-        "stale": idade > LIMITE_FOTOGRAFIA_HORAS,
+        "source_age_hours": None if idade_fonte is None else round(idade_fonte, 2),
+        "stale": (idade > LIMITE_FOTOGRAFIA_HORAS or idade_fonte is None
+                  or idade_fonte > LIMITE_FOTOGRAFIA_HORAS),
     }
 
     resposta = _vazio(None, disponivel=True)
@@ -300,10 +315,14 @@ def _alertas(ldr: dict, exc: dict, cob: dict, snap: dict) -> list[dict]:
     """Texto pronto para a tela; a tela nao reimplementa limiar."""
     out: list[dict[str, Any]] = []
     if snap["stale"]:
+        if snap["age_hours"] > LIMITE_FOTOGRAFIA_HORAS:
+            causa = f"última publicação há {snap['age_hours']:.0f} h"
+        elif snap["source_age_hours"] is None:
+            causa = "a publicação não registra leitura da fonte"
+        else:
+            causa = f"a fonte não recebe dado novo há {snap['source_age_hours']:.0f} h"
         out.append({"severity": "critical", "code": "fonte_vencida",
-                    "message": (f"Fonte vencida: última publicação há "
-                                f"{snap['age_hours']:.0f} h. Os números abaixo não "
-                                f"são atuais.")})
+                    "message": f"Fonte vencida: {causa}. Os números abaixo não são atuais."})
     if cob["state"] == "insuficiente":
         out.append({"severity": "critical", "code": "cobertura_insuficiente",
                     "message": (f"Taxa não exibida: {_pct(cob['missing_share'])} da base "

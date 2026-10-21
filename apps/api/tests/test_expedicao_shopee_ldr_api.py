@@ -140,6 +140,23 @@ def test_taxa_so_conta_vencimento_maduro(ligado):
     assert r["daily"][1]["rate"] is None, "dia parcial nunca mostra taxa fechada"
 
 
+def test_pendente_de_prazo_ja_vencido_nao_e_em_risco(ligado):
+    """Revisao do PR #107: vencimento de ONTEM publicado antes da virada ainda
+    carrega `pendente_no_prazo`; nao pode virar "ainda podem ser coletados"."""
+    r = ldr([
+        venc(date(2026, 10, 20), pend_prazo=7, madura=False),     # ontem, nao maduro
+        venc(date(2026, 10, 22), pend_prazo=12),                   # amanha
+    ])["ldr"]
+    assert r["pending_at_risk"] == 12
+    assert r["pending_on_time"] == 12
+
+
+def test_dia_so_e_fechado_com_todas_as_contas_maduras(ligado):
+    r = ldr([venc(date(2026, 10, 19), "apice", no_prazo=10),
+             venc(date(2026, 10, 19), "barbours", no_prazo=5, madura=False)])["ldr"]
+    assert (r["mature_due_days"], r["partial_due_days"]) == (0, 1)
+
+
 def test_sem_vencimento_maduro_a_taxa_e_none_nunca_zero(ligado):
     r = ldr([venc(date(2026, 10, 21), pend_prazo=5)])["ldr"]
     assert r["rate"] is None and r["base"] == 0
@@ -214,6 +231,14 @@ def test_fonte_vencida_e_sinalizada(ligado):
     assert r["alerts"][0]["code"] == "fonte_vencida"
     fresco = ldr([venc(date(2026, 10, 19), no_prazo=10)])
     assert fresco["snapshot"]["stale"] is False
+
+
+def test_publicacao_nova_sobre_fonte_parada_tambem_e_fonte_vencida(ligado):
+    """Revisao do PR #107: `effective_at` recente nao prova fonte viva."""
+    r = ldr([venc(date(2026, 10, 19), no_prazo=10, wm=AGORA - timedelta(hours=9))])
+    assert r["snapshot"]["stale"] is True
+    assert r["snapshot"]["source_age_hours"] == 9.0
+    assert "a fonte não recebe dado novo há 9 h" in r["alerts"][0]["message"]
 
 
 def test_janela_limitada_a_35_dias(ligado):

@@ -62,6 +62,7 @@ MAX_IDADE_FONTE_HORAS_TETO = 72
 CHECK_MOTIVO = "expedicao_shopee_ldr_motivo_cancelamento"
 CHECK_COBERTURA = "expedicao_shopee_ldr_cobertura"
 CHECK_RECONCILIACAO = "expedicao_shopee_ldr_reconciliacao"
+CHECK_CONTAS = "expedicao_shopee_ldr_contas"
 
 
 class FonteNaoPublicavel(RuntimeError):
@@ -114,12 +115,20 @@ def advisory_lock(conn, chave: int):
                 f"publicacao da LDR Shopee ja' em andamento (advisory key {chave})")
         yield
     finally:
+        # A LIBERACAO E' CLEANUP e nunca pode SUBSTITUIR a excecao que trouxe o
+        # fluxo ate' aqui (mesma regra de `publisher.channel_lock`). Com a
+        # conexao morta — o caso do commit indeterminado — `cursor()` e o setter
+        # de `autocommit` levantam; o lock e' de SESSAO e cai junto com ela.
         try:
             if adquirido:
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(%s)", (chave,))
-        finally:
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             conn.autocommit = anterior
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def verificar_frescor(watermarks: dict, agora: datetime, max_horas: float) -> float:
@@ -188,7 +197,10 @@ def resumo_por_marca(apuracao: L.Apuracao) -> dict[str, dict]:
         a["nao_enviou"] += x.cancelado_vendedor_nao_enviou
         a["enviado_sem_coleta"] += x.excl_enviado_sem_coleta
     for s in apuracao.sem_prazo:
-        if s.brand in out:
+        # So' pagamentos de dias FECHADOS, como a base (vencimentos maduros):
+        # contar o dia de hoje inflaria a ausencia com pedido que a Shopee
+        # ainda nem terminou de publicar.
+        if s.brand in out and s.paid_date < apuracao.hoje:
             out[s.brand]["sem_prazo"] += s.sem_prazo
     for a in out.values():
         frac, estado = L.cobertura(a["base"], a["sem_prazo"], a["enviado_sem_coleta"])
@@ -216,6 +228,8 @@ def _relatorio(apuracao: L.Apuracao, celulas: int, n_pedidos: int) -> None:
     log(f"  motivos de cancelamento desconhecidos: {dict(q.motivos_desconhecidos) or 'nenhum'}")
     log(f"  motivos ausentes (nulos): {q.motivos_ausentes}")
     log(f"  status fora do vocabulario: {dict(q.status_desconhecidos) or 'nenhum'}")
+    log(f"  contas do registry sem leitura na fonte: {q.contas_sem_leitura or 'nenhuma'}")
+    log(f"  contas do registry com leitura defasada: {q.contas_defasadas or 'nenhuma'}")
     log(f"  contas fora do registry (nao publicadas): "
         f"{sum(q.contas_fora_do_registry.values())} pedido(s) em "
         f"{len(q.contas_fora_do_registry)} conta(s)")
@@ -254,6 +268,16 @@ def registrar_qualidade(conn, apuracao: L.Apuracao, celulas: int) -> None:
                         "enviado_sem_coleta": a["enviado_sem_coleta"]},
                        ensure_ascii=False, sort_keys=True),
         ))
+    problemas = len(q.contas_sem_leitura) + len(q.contas_defasadas)
+    linhas.append((
+        CHECK_CONTAS, L.TABELA, mkt,
+        "warn" if problemas else "pass", "high" if q.contas_sem_leitura else
+        ("medium" if problemas else "low"),
+        problemas,
+        json.dumps({"sem_leitura": q.contas_sem_leitura, "defasadas": q.contas_defasadas,
+                    "limite_defasada_horas": L.LIMITE_CONTA_DEFASADA.total_seconds() / 3600},
+                   ensure_ascii=False, sort_keys=True),
+    ))
     linhas.append((
         CHECK_RECONCILIACAO, L.TABELA, mkt, "pass", "low", 0,
         json.dumps({"celulas": celulas, "implementacoes": ["python", "sql"],
@@ -296,6 +320,9 @@ def publicar(alvo, apuracao: L.Apuracao, watermarks: dict):
             cur.execute(L.RELEITURA_SQL, {"channel": L.CANAL.value, "lote": str(lote)})
             lido = cur.fetchone()
             lido = {k: int(lido[k]) for k in ("linhas", "pagos", "base", "atraso")}
+            cur.execute(L.RELEITURA_SEM_PRAZO_SQL, {"channel": L.CANAL.value, "lote": str(lote)})
+            lido_sp = cur.fetchone()
+            lido.update({k: int(lido_sp[k]) for k in ("linhas_sem_prazo", "sem_prazo")})
             esperado = L.esperado_na_releitura(apuracao)
             if lido != esperado:
                 raise RuntimeError(
@@ -309,10 +336,20 @@ def publicar(alvo, apuracao: L.Apuracao, watermarks: dict):
     except IndeterminateCommit:
         raise
     except Exception:
-        alvo.rollback()
+        # Rollback com a conexao morta levantaria e ESCONDERIA o erro de origem.
+        try:
+            alvo.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         raise
     finally:
-        alvo.autocommit = True
+        # Depois de um commit que falhou a conexao pode estar fechada, e o
+        # setter levantaria `InterfaceError` por cima do `IndeterminateCommit`:
+        # o exit 4 viraria exit 1 e o runbook leria "nada publicado".
+        try:
+            alvo.autocommit = True
+        except Exception:  # noqa: BLE001
+            pass
     return lote, len(venc) + len(semp), apagadas
 
 

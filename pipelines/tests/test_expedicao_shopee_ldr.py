@@ -357,15 +357,76 @@ def test_publicar_apaga_as_duas_janelas_insere_e_rele_antes_do_commit():
     assert conn.commits == 1 and conn.rollbacks == 0
     assert conn.autocommit is True
     ordem = [s.split()[0] for s in conn.sql]
-    assert ordem == ["DELETE", "DELETE", "INSERT", "INSERT", "SELECT"]
+    assert ordem == ["DELETE", "DELETE", "INSERT", "INSERT", "SELECT", "SELECT"]
+    assert "sem_prazo_daily" in conn.sql[-1], "a tabela sem prazo tambem e' relida"
 
 
 def test_releitura_divergente_desfaz_tudo():
     ap = _ap_publicavel()
-    conn = ConexaoFake(releitura={"linhas": 1, "pagos": 99, "base": 0, "atraso": 0})
+    errada = {**L.esperado_na_releitura(ap), "pagos": 99}
+    conn = ConexaoFake(releitura=errada)
     with pytest.raises(RuntimeError, match="releitura diverge"):
         cli.publicar(conn, ap, {"111": AGORA})
     assert conn.commits == 0 and conn.rollbacks == 1
+
+
+def test_releitura_do_sem_prazo_divergente_tambem_desfaz():
+    ap = _ap_publicavel()
+    conn = ConexaoFake(releitura={**L.esperado_na_releitura(ap), "sem_prazo": 7})
+    with pytest.raises(RuntimeError, match="releitura diverge"):
+        cli.publicar(conn, ap, {"111": AGORA})
+    assert conn.commits == 0
+
+
+class ConexaoQueMorre(ConexaoFake):
+    """Como o psycopg2 real: depois de o COMMIT falhar com a conexao caida,
+    `autocommit = ...`, `cursor()` e `rollback()` levantam `InterfaceError`."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.morta = False
+        self._ac = True
+
+    @property
+    def autocommit(self):
+        return self._ac
+
+    @autocommit.setter
+    def autocommit(self, v):
+        if getattr(self, "morta", False):
+            raise RuntimeError("InterfaceError: connection already closed")
+        self._ac = v
+
+    def commit(self):
+        self.morta = True
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    def cursor(self):
+        if self.morta:
+            raise RuntimeError("InterfaceError: connection already closed")
+        return super().cursor()
+
+    def rollback(self):
+        if self.morta:
+            raise RuntimeError("InterfaceError: connection already closed")
+        super().rollback()
+
+
+def test_commit_com_conexao_morta_continua_indeterminado():
+    """Revisao do PR #107: o setter de `autocommit` no `finally` trocava o
+    exit 4 (commit indeterminado) por um exit 1 (falha comum)."""
+    ap = _ap_publicavel()
+    conn = ConexaoQueMorre(releitura=L.esperado_na_releitura(ap))
+    with pytest.raises(IndeterminateCommit):
+        cli.publicar(conn, ap, {"111": AGORA})
+
+
+def test_lock_com_conexao_morta_nao_mascara_a_excecao_de_dentro():
+    conn = ConexaoQueMorre()
+    with pytest.raises(IndeterminateCommit):
+        with cli.advisory_lock(conn, L.LOCK_KEY):
+            conn.morta = True
+            raise IndeterminateCommit("x")
 
 
 def test_falha_no_commit_e_indeterminada_e_redige_credencial():
@@ -442,7 +503,30 @@ def test_qualidade_marca_warn_com_motivo_desconhecido():
     assert motivo and motivo[0][3] == "warn" and motivo[0][5] == 1
     assert "Motivo inedito" in motivo[0][6]
     assert {linha[0] for linha in conn.inseridas} == {
-        cli.CHECK_MOTIVO, cli.CHECK_COBERTURA, cli.CHECK_RECONCILIACAO}
+        cli.CHECK_MOTIVO, cli.CHECK_COBERTURA, cli.CHECK_RECONCILIACAO, cli.CHECK_CONTAS}
+    contas = [linha for linha in conn.inseridas if linha[0] == cli.CHECK_CONTAS][0]
+    assert contas[3] == "warn" and "barbours" in contas[6], "barbours nao tem leitura"
+
+
+def test_conta_do_registry_sem_leitura_ou_defasada_vira_alerta():
+    """Revisao do PR #107: conta que some da fonte encolhia a taxa sem aviso."""
+    wm = {"111": AGORA - timedelta(hours=30)}            # apice defasada, barbours ausente
+    ap = L.apurar([ped()], registry=REGISTRY, watermarks=wm, agora=AGORA)
+    assert ap.qualidade.contas_sem_leitura == ["barbours"]
+    assert ap.qualidade.contas_defasadas == ["apice"]
+    ok = L.apurar([ped()], registry=REGISTRY,
+                  watermarks={"111": AGORA, "222": AGORA}, agora=AGORA)
+    assert (ok.qualidade.contas_sem_leitura, ok.qualidade.contas_defasadas) == ([], [])
+
+
+def test_cobertura_do_resumo_nao_conta_pagamento_de_hoje():
+    """Base = vencimentos fechados; sem prazo tambem so' de dias fechados."""
+    hoje = datetime(2026, 10, 21, 10, tzinfo=BRT)
+    pedidos = [ped()] * 10 + [ped(ship_by_date=None, order_status="PROCESSED",
+                                  pickup_done_time=None, pay_time=hoje)] * 5
+    ap = L.apurar(pedidos, registry=REGISTRY, watermarks={"111": AGORA}, agora=AGORA)
+    assert sum(s.sem_prazo for s in ap.sem_prazo) == 5, "publicado na tabela"
+    assert cli.resumo_por_marca(ap)["apice"]["sem_prazo"] == 0, "fora da cobertura"
 
 
 # ===========================================================================
