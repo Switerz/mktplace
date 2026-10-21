@@ -86,6 +86,7 @@ CLIS_DO_AIRFLOW_FORA_DA_CADEIA = {
     "pipelines.expedicao.shopee_ldr_cli",       # marketplace_tower_expedicao_shopee_ldr_publish
     "pipelines.sync_shopee_daily_api_shadow",   # marketplace_tower_shopee_daily_shadow
     "pipelines.dre.insumo_publisher",           # marketplace_tower_dre_insumo_publish
+    "pipelines.sync_shopee_daily_api",          # marketplace_tower_daily_chain (daily_shopee)
 }
 
 
