@@ -109,8 +109,18 @@ test("o navegador so' fala com a nossa API", () => {
     assert.doesNotMatch(src.toLowerCase(), /supabase|service_role|eyjhbgcio|sb_publishable|sb_secret/);
   }
   assert.doesNotMatch(CLIENT, /fetch\(/, "a tela nao faz fetch direto: usa carregarPainel");
-  assert.match(LIB, /const BASE = "\/api\/v1\/b2b-revenda";/);
-  assert.match(LIB, /process\.env\.NEXT_PUBLIC_API_URL/);
+  // Gate OCTAPRICE-3: o navegador fala com o BFF de mesma origem, que chama a
+  // FastAPI com o token da sessao. Nunca direto com a FastAPI.
+  assert.match(LIB, /revenda: "\/api\/b2b\/revenda"/);
+  assert.doesNotMatch(LIB, /NEXT_PUBLIC_API_URL/);
+});
+
+test("segredos do login (B2B_AUTH_*) so' existem em codigo de servidor", () => {
+  const servidor = (p: string) => /[\\/](src[\\/]server|app[\\/]api)[\\/]/.test(p);
+  const achados = arquivosDoFrontend().filter(
+    (p) => !servidor(p) && /B2B_AUTH_|B2B_API_BASE_URL/.test(readFileSync(p, "utf-8")),
+  );
+  assert.deepEqual(achados, []);
 });
 
 /** Todo arquivo de codigo do frontend (app/, src/, configs na raiz do web). */
@@ -143,11 +153,13 @@ test("nenhuma variavel secreta da integracao e' referenciada no frontend", () =>
   assert.deepEqual(achados, []);
 });
 
-test("401/403 da API viram erro de ACESSO, nao dado nem indisponivel", () => {
-  assert.match(LIB, /if \(res\.status === 401 \|\| res\.status === 403\) \{/);
-  assert.match(LIB, /throw new B2BRevendaError\(MSG_SEM_ACESSO, res\.status\);/);
-  // O tratamento de acesso vem ANTES do `res.ok` generico.
-  assert.ok(LIB.indexOf("res.status === 401") < LIB.indexOf("if (!res.ok)"));
+test("401/403/503 do BFF viram situacao de ACESSO com tela propria, nao dado", () => {
+  assert.match(LIB, /if \(acesso\) throw new B2BRevendaError\(MSG_SEM_ACESSO, res\.status, acesso\);/);
+  assert.match(CLIENT, /setEstado\(\{ tipo: "acesso", acesso: err\.acesso \}\)/);
+  assert.match(CLIENT, /estado\.tipo === "acesso" && <BlocoAcesso/);
+  // Entrar e sair sao NAVEGACOES para o BFF (redirect do Auth0), nao fetch.
+  assert.match(CLIENT, /<a href=\{BFF\.login\(\)\}/);
+  assert.match(CLIENT, /<a href=\{BFF\.logout\}/);
 });
 
 test("sem dado de cliente nos tipos da aba", () => {
