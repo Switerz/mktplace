@@ -369,9 +369,80 @@ def test_lote_vencido_nao_e_exibido_como_atual():
     c = celula("ml", c=cmv("ml", publicado_em=velho))
     cm = c["componentes"]["cmv"]
     assert cm["status"] == dre.SNAPSHOT_VENCIDO and cm["valor"] is None
-    assert "limite de 48 h" in cm["motivo"]
+    assert "limite de 54 h" in cm["motivo"]
     assert cm["publicado_em"] == velho
     assert c["classificacao"] == dre.NAO_CALCULAVEL
+
+
+# ---------------------------------------------------------------------------
+# Idade maxima de 54 h (DRE-TTL-54): limites exatos, resumo e ausencia != zero
+# ---------------------------------------------------------------------------
+
+def test_idade_maxima_e_54_horas():
+    assert dre.INSUMO_IDADE_MAXIMA == timedelta(hours=54)
+
+
+@pytest.mark.parametrize("idade, esperado", [
+    (timedelta(hours=48, minutes=1), "disponivel"),           # vencia com 48 h; agora vale
+    (timedelta(hours=53, minutes=59, seconds=59), "disponivel"),
+    (timedelta(hours=54), "disponivel"),                      # no limite exato: ainda vale (> estrito)
+    (timedelta(hours=54, microseconds=1), "snapshot_vencido"),
+    (timedelta(hours=54, minutes=1), "snapshot_vencido"),
+])
+def test_limite_de_54h_no_cmv_e_no_repasse(idade, esperado):
+    publicado = AGORA - idade
+    ml = celula("ml", c=cmv("ml", publicado_em=publicado))
+    tt = celula("tiktok", m=mart("tiktok"), c=cmv("tiktok", publicado_em=publicado),
+                r=repasse(publicado_em=publicado))
+    assert ml["componentes"]["cmv"]["status"] == esperado
+    for comp in ("cmv", "taxas", "frete"):
+        assert tt["componentes"][comp]["status"] == esperado, comp
+
+
+@pytest.mark.parametrize("idade, estado", [
+    (timedelta(hours=54), "ok"),
+    (timedelta(hours=54, microseconds=1), "vencido"),
+])
+def test_resumo_dos_insumos_no_limite_de_54h(idade, estado):
+    linhas = cmv("ml", publicado_em=AGORA - idade)
+    r = dre.resumo_insumos(dre.LeituraInsumos(tabela_existe=True, linhas=linhas), AGORA)
+    assert r["estado"] == estado
+    if estado != "ok":
+        assert r["motivo"].endswith("ha mais de 54 h")
+
+
+def test_resumo_parcialmente_vencido_dos_dois_lados_do_limite():
+    linhas = (cmv("ml", publicado_em=AGORA - timedelta(hours=54))
+              + cmv("ml", marca="barbours", publicado_em=AGORA - timedelta(hours=54, seconds=1)))
+    r = dre.resumo_insumos(dre.LeituraInsumos(tabela_existe=True, linhas=linhas), AGORA)
+    assert r["estado"] == "parcialmente_vencido"
+    assert r["motivo"].startswith("2 de 4 linhas")
+
+
+@pytest.mark.parametrize("idade", [timedelta(hours=53), timedelta(hours=54, minutes=1)])
+def test_ausencia_nunca_vira_zero_em_nenhum_lado_do_limite(idade):
+    """Antes e depois de 54 h: o que falta (vencido, ausente na origem) sai
+    `valor=None`, jamais 0, e a margem nao e' calculada sobre ele."""
+    publicado = AGORA - idade
+    ausente = celula("ml", c=cmv("ml", custo=None, publicado_em=publicado))
+    assert ausente["componentes"]["cmv"]["valor"] is None
+    assert ausente["componentes"]["cmv"]["status"] in (dre.INDISPONIVEL, dre.SNAPSHOT_VENCIDO)
+    tt = celula("tiktok", m=mart("tiktok"), c=cmv("tiktok", publicado_em=publicado), r=repasse(publicado_em=publicado))
+    for comp in ("cmv", "taxas", "frete"):
+        if tt["componentes"][comp]["status"] != dre.DISPONIVEL:
+            assert tt["componentes"][comp]["valor"] is None, comp
+    if idade > dre.INSUMO_IDADE_MAXIMA:
+        assert tt["classificacao"] == dre.NAO_CALCULAVEL
+        assert tt["margem_contribuicao_conhecida"]["valor"] is None
+
+
+def test_regras_expoem_54h_e_oraculo_usa_o_mesmo_limite():
+    """Paridade: o Oraculo (apps/web) julga vencimento por conta propria."""
+    import pathlib, re
+    contrato = (pathlib.Path(__file__).resolve().parents[2] / "web" / "src" / "server" / "oracle"
+                / "dre-contract.ts").read_text(encoding="utf-8")
+    horas = int(re.search(r"DRE_MAX_SNAPSHOT_HOURS\s*=\s*(\d+)", contrato).group(1))
+    assert horas == int(dre.INSUMO_IDADE_MAXIMA.total_seconds() // 3600) == 54
 
 
 def test_lote_no_limite_de_idade_ainda_vale():

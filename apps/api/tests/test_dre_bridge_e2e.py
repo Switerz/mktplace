@@ -126,8 +126,15 @@ def test_comissao_ml_entra_uma_vez_no_fim_a_fim(ambiente):
     assert ml["margem_contribuicao_conhecida"]["componentes_usados"] == ["taxas", "ads", "frete", "cmv"]
 
 
+def test_lote_dentro_de_54h_continua_servido(ambiente):
+    """DRE-TTL-54: com 53 h (vencia na regra antiga de 48 h) a fotografia vale."""
+    res = _dre(ambiente, PUBLICADO + timedelta(hours=53))
+    assert res["fontes"]["insumos_dre"]["estado"] == "ok"
+    assert _cel(res, "ml", "kokeshi")["componentes"]["cmv"]["status"] == "disponivel"
+
+
 def test_lote_vencido_vira_indisponivel_na_rota(ambiente):
-    res = _dre(ambiente, PUBLICADO + timedelta(hours=49))
+    res = _dre(ambiente, PUBLICADO + timedelta(hours=55))
     assert res["fontes"]["insumos_dre"]["estado"] == "vencido"
     for canal in ("ml", "tiktok"):
         cel = _cel(res, canal, "kokeshi")
@@ -139,7 +146,7 @@ def test_lote_vencido_vira_indisponivel_na_rota(ambiente):
 def test_lote_que_falhou_depois_nao_apaga_o_anterior_mas_ele_vence(ambiente):
     """Falha na publicacao seguinte preserva o lote bom (transacao desfeita), e
     o serving continua vendo-o como do instante em que foi publicado: depois de
-    48 h ele vence, nao se renova sozinho."""
+    54 h ele vence, nao se renova sozinho."""
     res = _dre(ambiente, PUBLICADO + timedelta(hours=60))
     assert _cel(res, "ml", "kokeshi")["componentes"]["cmv"]["status"] == "snapshot_vencido"
 

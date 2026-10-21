@@ -144,7 +144,7 @@ test("explicacao do ranking: 0, 1 e >=2 comparaveis", () => {
 });
 
 test("fotografia vencida (medido em 16/10): todos os canais bloqueiam, sem canal calculavel, sem botao", () => {
-  // Forma medida: insumo publicado ha mais de 48 h deixa TikTok e ML
+  // Forma medida: insumo publicado ha mais de 54 h deixa TikTok e ML
   // `snapshot_vencido` -> nao calculaveis, junto com a Shopee.
   const vencido = (c: typeof fx.ML) => ({ ...c, classificacao: "NAO_CALCULAVEL" as const, motivos_classificacao: ["taxas snapshot_vencido"], margem_contribuicao_conhecida: { ...c.margem_contribuicao_conhecida, valor: null, pct_receita: null, componentes_usados: [] } });
   const r = fx.resposta({ por_canal: [vencido(fx.TIKTOK), vencido(fx.ML), fx.SHOPEE] }, "vencido");

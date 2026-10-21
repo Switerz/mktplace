@@ -614,7 +614,14 @@ test("dre: sem CMV calculado nao existe margem", () => {
   assert.equal(c.custos_conhecidos.valor, null);
 });
 
-test("dre: lote acima de 48 h derruba CMV/taxas/frete mesmo que a fonte diga disponivel", () => {
+test("dre: lote de 50 h ainda vale (limite de 54 h, igual ao da API)", () => {
+  const recente = "2026-08-16T10:00:00+00:00"; // 50 h antes de NOW_DRE: vencia na regra antiga de 48 h
+  const env = projectDre(dreResponse([dreCelula({}, recente)], "ok", recente), { mes: "2026-07" }, NOW_DRE) as any;
+  assert.equal(env.data.snapshot.insumos_disponiveis, true);
+  assert.notEqual(env.data.celulas[0].cmv.status_fonte, "snapshot_vencido");
+});
+
+test("dre: lote acima de 54 h derruba CMV/taxas/frete mesmo que a fonte diga disponivel", () => {
   const velho = "2026-08-15T00:00:00+00:00"; // 84 h antes de NOW_DRE
   const env = projectDre(dreResponse([dreCelula({}, velho)], "ok", velho), { mes: "2026-07" }, NOW_DRE) as any;
   const c = env.data.celulas[0];

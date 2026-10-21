@@ -133,7 +133,7 @@ confiar no número.
 1. `valor = null` nunca vira "R$ 0" nem "—" ambíguo: mostrar o chip do status.
 2. `fontes.insumos_dre.estado` diferente de `ok` → faixa no topo com `fontes.insumos_dre.motivo` e
    `fontes.insumos_dre.publicado_em` — a publicação **mais antiga** do conjunto; `publicado_em_mais_recente`
-   também vem (ex.: "Insumos financeiros publicados há mais de 48 h").
+   também vem (ex.: "Insumos financeiros publicados há mais de 54 h"; regra em `dre_data_bridge_1.md` §10.1).
 3. Mostrar `formula` e `faltam` junto da margem (tooltip ou linha de rodapé).
 4. Frescor: `data_maxima.receita_ultimo_dia` e `cmv_ultima_emissao` visíveis.
 5. Estados: carregando (~1 s medido contra o Neon), vazio (nenhuma célula para o filtro), erro (503/422 com

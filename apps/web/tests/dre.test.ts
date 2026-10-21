@@ -196,7 +196,7 @@ test("fotografia: cada estado do lote vira uma faixa propria; ok nao mostra nada
 
   const vencido = avisoFotografia(resposta({}, "vencido").fontes.insumos_dre, fmt)!;
   assert.equal(vencido.curto, "Fotografia vencida");
-  assert.match(vencido.detalhe, /48 h/);
+  assert.match(vencido.detalhe, /54 h/);
   assert.match(vencido.detalhe, /<2026-10-10T06:00:00\+00:00>/, "mostra a publicacao mais antiga");
 
   assert.equal(avisoFotografia(resposta({}, "nao_publicado").fontes.insumos_dre, fmt)!.curto, "Fotografia ausente");
