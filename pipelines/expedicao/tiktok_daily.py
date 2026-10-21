@@ -952,6 +952,152 @@ def ler_proveniencia(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS) -> list[d
 
 
 # ---------------------------------------------------------------------------
+# Cobertura de coleta para a GUARDA de publicacao
+# ---------------------------------------------------------------------------
+# Por que existe, se ja' ha' `PROVENIENCIA_SQL`: medido em 21/10/2026, a
+# proveniencia usa como denominador TODO pedido pago na janela de pagamento,
+# inclusive os pagos hoje e ontem, que ainda estao DENTRO do prazo de coleta e
+# portanto sem `IN_TRANSIT` por definicao. A janela termina hoje, entao ~7 por
+# cento da carteira e' imatura em qualquer ciclo e a guarda de 95 reprovava por
+# construcao (92,65 com a janela terminando hoje; 99,98 nas coortes vencidas). A
+# referencia de 99,32 de 24/09 era uma janela madura de 30 dias.
+#
+# Aqui o denominador e' SO' a coorte cujo prazo OFICIAL de coleta ja' venceu,
+# pela MESMA regra da metrica publicada (`vence_tts < hoje`, a de
+# `coleta_pendente_vencida`), no MESMO escopo publicado (sem
+# `MARCAS_FORA_DO_ESCOPO`) e com a MESMA definicao de coleta (`IN_TRANSIT` com
+# `updated_at_tiktok`). A decomposicao e' EXAUSTIVA:
+#
+#   com_in_transit      vencida, tem o evento de coleta              -> coberto
+#   so_posterior        vencida, sem IN_TRANSIT, mas DELIVERED/COMPLETED
+#                       -> NAO coberto: e' o sinal de perda do evento
+#   pendentes_vencidos  vencida, sem IN_TRANSIT e sem pos-coleta (AWAITING_*,
+#                       sem log) -> NAO coberto: ingestao travada aparece aqui
+#   imaturos            prazo ainda nao venceu -> SO' informativo
+#   sem_prazo           dia de pagamento fora da tabela de prazos -> tem de ser 0
+#
+# Pedidos CANCELADOS e amostras ficam fora, como na proveniencia.
+#
+# PERFORMANCE: um SELECT agregado (uma linha), como a `FONTE_SQL`. O log so' e'
+# lido na faixa de indice `detected_at >= desde - 1` (seguro por causalidade:
+# todo evento pos-coleta e' detectado depois do pagamento).
+COBERTURA_COLETA_SQL = """
+WITH prazo(pago_em, vence_tts) AS (
+    SELECT (p->>0)::date, (p->>2)::date
+    FROM jsonb_array_elements(%(prazos)s::jsonb) p
+),
+ped AS MATERIALIZED (
+    SELECT o.order_id, o.paid_at::date AS pago_em
+      FROM raw.tiktok_shop_orders o
+     WHERE o.paid_at IS NOT NULL
+       AND o.paid_at >= %(desde)s::date
+       AND o.paid_at <  (%(ate)s::date + 1)
+       AND o.order_status <> 'CANCELLED'
+       AND NOT coalesce(o.is_sample_order, false)
+       AND NOT (o.brand = ANY(%(marcas_fora)s::text[]))
+),
+ev AS (
+    SELECT l.order_id,
+           bool_or(l.new_status = %(status_coleta)s
+                   AND l.updated_at_tiktok IS NOT NULL)              AS it,
+           bool_or(l.new_status IN ('DELIVERED', 'COMPLETED'))      AS posterior
+      FROM raw.tiktok_shop_order_status_log l
+      JOIN ped p ON p.order_id = l.order_id
+     WHERE l.new_status IN (%(status_coleta)s, 'DELIVERED', 'COMPLETED')
+       AND l.detected_at >= (%(desde)s::date - 1)
+     GROUP BY 1
+),
+cls AS (
+    SELECT z.vence_tts IS NULL                  AS sem_prazo,
+           z.vence_tts < %(hoje)s::date         AS vencida,
+           coalesce(e.it, false)                AS it,
+           coalesce(e.posterior, false)         AS posterior
+      FROM ped p
+      LEFT JOIN prazo z ON z.pago_em = p.pago_em
+      LEFT JOIN ev e    ON e.order_id = p.order_id
+)
+SELECT count(*)                                                          AS pedidos,
+       count(*) FILTER (WHERE sem_prazo)                                 AS sem_prazo,
+       count(*) FILTER (WHERE vencida AND it)                            AS com_in_transit,
+       count(*) FILTER (WHERE vencida AND NOT it AND posterior)          AS so_posterior,
+       count(*) FILTER (WHERE vencida AND NOT it AND NOT posterior)      AS pendentes_vencidos,
+       count(*) FILTER (WHERE NOT sem_prazo AND NOT vencida)             AS imaturos
+  FROM cls
+"""
+
+
+class CoberturaInconsistente(RuntimeError):
+    """A decomposicao nao fechou: a medicao nao pode decidir publicacao."""
+
+
+@dataclass(frozen=True)
+class CoberturaColeta:
+    """Cobertura de `IN_TRANSIT` nas coortes com prazo de coleta VENCIDO."""
+
+    hoje: date
+    desde: date
+    ate: date
+    pedidos: int
+    com_in_transit: int
+    so_posterior: int
+    pendentes_vencidos: int
+    imaturos: int
+
+    def __post_init__(self):
+        partes = (self.com_in_transit, self.so_posterior, self.pendentes_vencidos, self.imaturos)
+        if any(x < 0 for x in (self.pedidos, *partes)):
+            raise CoberturaInconsistente("contagem negativa na decomposicao")
+        if sum(partes) != self.pedidos:
+            raise CoberturaInconsistente(
+                f"decomposicao nao fecha: {sum(partes)} classificados de {self.pedidos} pedidos")
+
+    @property
+    def elegiveis(self) -> int:
+        """Denominador: coortes vencidas. `so_posterior` e pendentes CONTAM."""
+        return self.com_in_transit + self.so_posterior + self.pendentes_vencidos
+
+    @property
+    def cobertura(self) -> float | None:
+        """`None` sem coorte vencida: a guarda recusa em vez de aprovar o vazio."""
+        return None if self.elegiveis == 0 else self.com_in_transit / self.elegiveis
+
+    def como_dict(self) -> dict:
+        return {"hoje": self.hoje.isoformat(), "desde": self.desde.isoformat(),
+                "ate": self.ate.isoformat(), "pedidos": self.pedidos,
+                "elegiveis": self.elegiveis, "com_in_transit": self.com_in_transit,
+                "so_posterior": self.so_posterior, "pendentes_vencidos": self.pendentes_vencidos,
+                "imaturos": self.imaturos, "cobertura": self.cobertura}
+
+
+def ler_cobertura_coleta(conn, hoje: date, dias: int = JANELA_PADRAO_DIAS, *,
+                         prazos: list[list[str]] | None = None) -> CoberturaColeta:
+    """Mede a cobertura de coleta que decide a publicacao. Conexao read-only.
+
+    Mesma janela de pagamento, mesma tabela de prazos e mesmo escopo da
+    `extrair`. Levanta `CoberturaInconsistente` se a decomposicao nao fechar
+    (inclusive pedido com dia de pagamento fora da tabela de prazos).
+    """
+    import json  # noqa: PLC0415
+
+    desde, ate = janela_de_pagamento(hoje, dias)
+    linhas = _ler(conn, COBERTURA_COLETA_SQL, {
+        "prazos": json.dumps(prazos if prazos is not None else prazos_da_janela(hoje, dias)),
+        "status_coleta": STATUS_COLETA,
+        "hoje": hoje.isoformat(),
+        "desde": desde.isoformat(),
+        "ate": ate.isoformat(),
+        "marcas_fora": list(MARCAS_FORA_DO_ESCOPO),
+    })
+    r = linhas[0] if linhas else {}
+    if int(r.get("sem_prazo") or 0):
+        raise CoberturaInconsistente(f"{r['sem_prazo']} pedido(s) sem prazo de coleta na tabela")
+    return CoberturaColeta(
+        hoje=hoje, desde=desde, ate=ate, pedidos=int(r.get("pedidos") or 0),
+        com_in_transit=int(r.get("com_in_transit") or 0), so_posterior=int(r.get("so_posterior") or 0),
+        pendentes_vencidos=int(r.get("pendentes_vencidos") or 0), imaturos=int(r.get("imaturos") or 0))
+
+
+# ---------------------------------------------------------------------------
 # Publicacao
 # ---------------------------------------------------------------------------
 COLUNAS = (
