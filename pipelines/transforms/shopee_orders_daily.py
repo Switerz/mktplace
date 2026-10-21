@@ -21,6 +21,15 @@ BRAND_TO_LOJA: dict[str, int] = {
 MARKETPLACE_ID = 3  # Shopee (db/seeds/01_marketplaces.sql)
 EMPRESA_ID = 1      # GoBeauté
 
+#: FRESHNESS-SHOPEE-DAILY-1 — contas com aplicacao Shopee (Open API v2,
+#: `shopee_orders_etl`). Para estas lojas a familia de pedidos e o GMV da fato
+#: diaria tem UM dono: `pipelines.sync_shopee_daily_api`. Os carregadores de
+#: arquivo deixam de escrever essas colunas para elas (ver
+#: `daily_performance.colunas_da_api_por_loja`). A kokeshi fica FORA: nao tem
+#: aplicacao Shopee cadastrada e continua inteira pelos arquivos.
+CONTAS_COM_API: tuple[str, ...] = ("apice", "barbours", "lescent", "rituaria")
+LOJAS_COM_API: frozenset[int] = frozenset(BRAND_TO_LOJA[c] for c in CONTAS_COM_API)
+
 
 def transform(row: dict) -> Optional[dict]:
     """Retorna None se brand fora do escopo."""

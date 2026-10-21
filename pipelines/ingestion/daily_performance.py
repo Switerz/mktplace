@@ -224,6 +224,52 @@ PATCH_SHOP_STATS_SQL = text("""
 # PATCH roda por último e agora sobrescreve `gmv` também, ele é o valor que
 # prevalece no upsert final. Este SQL não foi executado nesta correção —
 # só o texto foi alterado, para revisão.
+#
+# FRESHNESS-SHOPEE-DAILY-1: o R2.1 continua valendo para a KOKESHI. Para as
+# lojas com API (`shopee_transform.LOJAS_COM_API`) o dono do `gmv` e da familia
+# de pedidos passa a ser `pipelines.sync_shopee_daily_api`; para elas o
+# shop-stats escreve so' o funil, por este patch sem `gmv`.
+
+PATCH_SHOP_STATS_SEM_GMV_SQL = text("""
+    INSERT INTO marts.fact_marketplace_daily_performance (
+        date, loja_id, marketplace_id, empresa_id,
+        visitors, conversion_rate,
+        new_buyers, repeat_buyers, repeat_buyer_rate_pct, unique_buyers,
+        source_updated_at
+    ) VALUES (
+        :date, :loja_id, :marketplace_id, :empresa_id,
+        :visitors, :conversion_rate,
+        :new_buyers, :repeat_buyers, :repeat_buyer_rate_pct, :unique_buyers,
+        NOW()
+    )
+    ON CONFLICT (date, loja_id, marketplace_id) DO UPDATE SET
+        visitors             = EXCLUDED.visitors,
+        conversion_rate      = EXCLUDED.conversion_rate,
+        new_buyers           = EXCLUDED.new_buyers,
+        repeat_buyers        = EXCLUDED.repeat_buyers,
+        repeat_buyer_rate_pct = EXCLUDED.repeat_buyer_rate_pct,
+        unique_buyers        = EXCLUDED.unique_buyers,
+        source_updated_at    = NOW(),
+        ingested_at          = NOW()
+""")
+
+
+def colunas_da_api_por_loja(source: str, rows: list[dict], upsert_sql) -> list[tuple]:
+    """(sql, linha) a executar, respeitando o dono de coluna por loja.
+
+    FRESHNESS-SHOPEE-DAILY-1. Nas lojas com API a familia de pedidos e o `gmv`
+    sao de `pipelines.sync_shopee_daily_api`; os arquivos NAO os escrevem:
+      * `shopee` (pedidos do export): linhas dessas lojas sao DESCARTADAS;
+      * `shopee-stats`: funil sim, `gmv` nao (`PATCH_SHOP_STATS_SEM_GMV_SQL`);
+      * `shopee-ads` e os outros marketplaces: inalterados.
+    A kokeshi (sem API) segue exatamente como antes.
+    """
+    api = shopee_transform.LOJAS_COM_API
+    if source == "shopee":
+        return [(upsert_sql, r) for r in rows if r["loja_id"] not in api]
+    if source == "shopee-stats":
+        return [(PATCH_SHOP_STATS_SEM_GMV_SQL if r["loja_id"] in api else upsert_sql, r) for r in rows]
+    return [(upsert_sql, r) for r in rows]
 
 
 def _start_sync_run(session: Any, source_name: str, marketplace_id: int) -> int:
@@ -522,9 +568,13 @@ def run(
             else:
                 upsert_sql = UPSERT_SQL
 
+            escritas = colunas_da_api_por_loja(source, canonical_rows, upsert_sql)
+            if len(escritas) != len(canonical_rows):
+                logger.info("precedencia API: %d linha(s) de lojas com API nao escritas pelo arquivo",
+                            len(canonical_rows) - len(escritas))
             with local_session() as session:
-                for row in canonical_rows:
-                    session.execute(upsert_sql, row)
+                for sql, row in escritas:
+                    session.execute(sql, row)
                     rows_loaded += 1
                 _finish_sync_run(
                     session, sync_run_id, "success",
