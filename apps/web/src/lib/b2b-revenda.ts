@@ -315,136 +315,53 @@ export function participacao(parte: number, total: number): number {
 // ---------------------------------------------------------------------------
 // Carga
 // ---------------------------------------------------------------------------
-/**
- * Situacao de ACESSO da aba. Nenhuma delas e' dado, zero ou "indisponivel":
- * cada uma tem tela propria com a acao certa (entrar, pedir acesso, aguardar).
- */
-export type Acesso =
-  | "sem_sessao"
-  | "sessao_expirada"
-  | "sem_permissao"
-  | "auth_nao_configurada";
-
 export class B2BRevendaError extends Error {
   readonly status: number | null;
-  readonly acesso: Acesso | null;
-  constructor(message: string, status: number | null, acesso: Acesso | null = null) {
+  constructor(message: string, status: number | null) {
     super(message);
     this.name = "B2BRevendaError";
     this.status = status;
-    this.acesso = acesso;
   }
 }
 
 export const MSG_SEM_ACESSO = "Acesso restrito: esta aba exige login corporativo.";
 
-export const TEXTO_ACESSO: Record<Acesso, { titulo: string; descricao: string }> = {
-  sem_sessao: {
-    titulo: "Entre com a conta corporativa",
-    descricao: "Esta aba mostra dados comerciais de revendedores e exige login. O restante da Torre continua aberto.",
-  },
-  sessao_expirada: {
-    titulo: "Sua sessão expirou",
-    descricao: "Entre de novo com a conta corporativa para continuar.",
-  },
-  sem_permissao: {
-    titulo: "Sua conta não tem acesso a esta aba",
-    descricao: "É preciso a permissão b2b_revenda:read. Peça ao responsável pelo acesso da Torre.",
-  },
-  auth_nao_configurada: {
-    titulo: "Login corporativo ainda não configurado",
-    descricao: "A aba está pronta, mas a configuração de autenticação deste ambiente não foi feita.",
-  },
-};
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const BASE = "/api/v1/b2b-revenda";
 
-/** Rotas do BFF (mesma origem). O token do Auth0 nunca chega ao navegador. */
-export const BFF = {
-  revenda: "/api/b2b/revenda",
-  sessao: "/api/b2b/auth/sessao",
-  logout: "/api/b2b/auth/logout",
-  login: (retorno = "/monitoramento-preco/revendedores") =>
-    `/api/b2b/auth/login?returnTo=${encodeURIComponent(retorno)}`,
-} as const;
-
-/** Resposta de erro do BFF -> situacao de acesso. So' codigos conhecidos. */
-export function acessoDoErro(status: number, erro: unknown): Acesso | null {
-  if (status === 401) return erro === "sessao_expirada" ? "sessao_expirada" : "sem_sessao";
-  if (status === 403) return "sem_permissao";
-  if (status === 503 && (erro === "auth_nao_configurada" || erro === "api_sem_autenticacao")) {
-    return "auth_nao_configurada";
-  }
-  return null;
-}
-
-async function obter<T>(rota: string, query: string, signal?: AbortSignal): Promise<Resposta<T>> {
+async function obter<T>(caminho: string, query: string, signal?: AbortSignal): Promise<Resposta<T>> {
   let res: Response;
   try {
-    // Mesma origem: o cookie de sessao (HttpOnly) vai sozinho; nada de token aqui.
-    res = await fetch(`${BFF.revenda}/${rota}${query ? `?${query}` : ""}`, {
-      signal,
-      credentials: "same-origin",
-      cache: "no-store",
-    });
+    res = await fetch(`${API_URL}${BASE}${caminho}${query ? `?${query}` : ""}`, { signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new B2BRevendaError("Não foi possível contatar a Torre.", null);
+    throw new B2BRevendaError("Não foi possível contatar a API.", null);
   }
   if (res.status === 422) {
-    await res.body?.cancel();
     throw new B2BRevendaError("Filtro recusado pela API.", 422);
   }
+  if (res.status === 401 || res.status === 403) {
+    // A API exige login corporativo (Auth0) nesta rota. Sem sessao, o erro e'
+    // de ACESSO, nao de dado — e nunca vira zero nem "indisponivel".
+    throw new B2BRevendaError(MSG_SEM_ACESSO, res.status);
+  }
   if (!res.ok) {
-    let erro: unknown = null;
-    try {
-      erro = ((await res.json()) as { erro?: unknown }).erro;
-    } catch {
-      /* corpo nao-JSON: segue sem codigo */
-    }
-    const acesso = acessoDoErro(res.status, erro);
-    if (acesso) throw new B2BRevendaError(MSG_SEM_ACESSO, res.status, acesso);
-    throw new B2BRevendaError(`A Torre respondeu ${res.status}.`, res.status);
+    throw new B2BRevendaError(`A API respondeu ${res.status}.`, res.status);
   }
   return (await res.json()) as Resposta<T>;
 }
 
 /**
- * As quatro leituras da aba. Erro de transporte/acesso REJEITA (vira bloco
- * proprio); `unavailable` RESOLVE (vira bloco "indisponivel").
+ * As quatro leituras da aba. Erro de transporte REJEITA (vira bloco "erro"
+ * com nova tentativa); `unavailable` RESOLVE (vira bloco "indisponivel").
  */
 export async function carregarPainel(f: Filtros, signal?: AbortSignal): Promise<PainelB2B> {
   const q = buildQuery(f);
   const [frescor, resumo, canaisMarcas, skus] = await Promise.all([
-    obter<FrescorOk>("frescor", "", signal),
-    obter<ResumoOk>("resumo", q, signal),
-    obter<CanaisMarcasOk>("canais-marcas", q, signal),
-    obter<SkusOk>("skus", buildQuery(f, { limite: "10" }), signal),
+    obter<FrescorOk>("/frescor", "", signal),
+    obter<ResumoOk>("/resumo", q, signal),
+    obter<CanaisMarcasOk>("/canais-marcas", q, signal),
+    obter<SkusOk>("/skus", buildQuery(f, { limite: "10" }), signal),
   ]);
   return { frescor, resumo, canaisMarcas, skus };
 }
-
-export type Sessao =
-  | { autenticado: true; nome: string; tem_permissao: boolean; expira_em: string }
-  | { autenticado: false; motivo: string };
-
-/** Quem esta logado (sem token). `null` = BFF indisponivel ou nao configurado. */
-export async function carregarSessao(signal?: AbortSignal): Promise<Sessao | null> {
-  try {
-    const res = await fetch(BFF.sessao, { signal, credentials: "same-origin", cache: "no-store" });
-    if (!res.ok) {
-      // Corpo nao lido fica com o stream aberto no navegador: sempre drenar.
-      await res.body?.cancel();
-      return null;
-    }
-    return (await res.json()) as Sessao;
-  } catch {
-    return null;
-  }
-}
-
-/** Resultado do login devolvido em `?login=` pelo callback (codigos fixos). */
-export const RESULTADO_LOGIN: Record<string, string> = {
-  negado: "O login foi recusado pelo provedor de identidade.",
-  estado_invalido: "O login expirou ou veio de outra aba. Tente entrar de novo.",
-  troca_falhou: "Não foi possível concluir o login. Tente de novo.",
-  token_invalido: "O login não pôde ser validado. Tente de novo ou fale com o responsável pelo acesso.",
-};
