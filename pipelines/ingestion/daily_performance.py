@@ -573,8 +573,8 @@ def run(
                 logger.info("precedencia API: %d linha(s) de lojas com API nao escritas pelo arquivo",
                             len(canonical_rows) - len(escritas))
             with local_session() as session:
-                for sql, row in escritas:
-                    session.execute(sql, row)
+                for upsert_sql, row in escritas:
+                    session.execute(upsert_sql, row)
                     rows_loaded += 1
                 _finish_sync_run(
                     session, sync_run_id, "success",
