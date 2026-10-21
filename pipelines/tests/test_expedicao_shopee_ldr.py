@@ -270,6 +270,98 @@ def test_reconciliacao_divergente_recusa():
 
 
 # ===========================================================================
+# Fila aberta por fluxo (vendedor x FBS)
+# ===========================================================================
+CONTAS = {"111": "apice", "222": "barbours"}
+
+
+def aberto(**kw) -> dict:
+    base = dict(shop_id="111", shop_account="apice", fulfillment_flag=L.FLUXO_VENDEDOR,
+                create_time=datetime(2026, 10, 20, 9, tzinfo=BRT),
+                pay_time=datetime(2026, 10, 20, 10, tzinfo=BRT),
+                ship_by_date=fim_do_dia(date(2026, 10, 23)))
+    base.update(kw)
+    return base
+
+
+def test_fbs_acima_de_48h_fica_na_parcela_fbs_e_nao_no_vendedor():
+    """O caso de 21/10/2026: todo pedido acima de 48 h era FBS."""
+    velho = datetime(2026, 10, 15, 10, tzinfo=BRT)
+    linhas = [
+        aberto(),                                                         # vendedor no prazo
+        aberto(ship_by_date=fim_do_dia(date(2026, 10, 20))),              # vendedor vencido
+        aberto(fulfillment_flag=L.FLUXO_FBS, pay_time=velho,
+               ship_by_date=fim_do_dia(date(2026, 10, 18))),              # FBS vencido e >48h
+    ]
+    fila = L.apurar_fila_por_fluxo(linhas, registry=REGISTRY, contas=CONTAS,
+                                   baselines={}, agora=AGORA)
+    por = {(x.shop_account, x.fluxo): x for x in fila}
+    v, f = por[("apice", "vendedor")], por[("apice", "fbs")]
+    assert (v.backlog, v.overdue, v.over_48h) == (2, 1, 0)
+    assert (f.backlog, f.overdue, f.over_48h) == (1, 1, 1)
+
+
+def test_conta_sem_pedido_aberto_tem_linha_com_zero_medido():
+    fila = L.apurar_fila_por_fluxo([aberto()], registry=REGISTRY, contas=CONTAS,
+                                   baselines={}, agora=AGORA)
+    assert {(x.shop_account, x.fluxo) for x in fila} == {
+        ("apice", "vendedor"), ("apice", "fbs"), ("barbours", "vendedor"), ("barbours", "fbs")}
+    assert all(x.backlog == 0 for x in fila if x.shop_account == "barbours")
+
+
+def test_fila_usa_as_regras_da_fila_publicada():
+    """Mesma fronteira das 48 h, do prazo e de travado que `transform`."""
+    marco = AGORA - timedelta(hours=48)                  # exatamente 48 h: ainda nao passou
+    lento = AGORA - timedelta(hours=40)
+    linhas = [aberto(pay_time=marco), aberto(pay_time=lento, ship_by_date=None)]
+    fila = L.apurar_fila_por_fluxo(linhas, registry=REGISTRY, contas=CONTAS,
+                                   baselines={"111": (200, 10.0)}, agora=AGORA)
+    v = next(x for x in fila if (x.shop_account, x.fluxo) == ("apice", "vendedor"))
+    assert v.over_48h == 0
+    assert v.deadline_unavailable == 1
+    assert (v.slow, v.stalled) == (2, 2), "48 h e 40 h > 2 x p50 de 10 h"
+
+
+def test_fluxo_desconhecido_na_fila_falha_fechado():
+    with pytest.raises(L.FluxoDesconhecido):
+        L.apurar_fila_por_fluxo([aberto(fulfillment_flag=None)], registry=REGISTRY,
+                                contas=CONTAS, baselines={}, agora=AGORA)
+
+
+def test_vendedor_mais_fbs_tem_de_bater_com_a_contagem_independente():
+    fila = L.apurar_fila_por_fluxo(
+        [aberto(), aberto(fulfillment_flag=L.FLUXO_FBS)], registry=REGISTRY,
+        contas=CONTAS, baselines={}, agora=AGORA)
+    assert L.reconciliar_fila(fila, {"111": 2}, REGISTRY) == 2
+    with pytest.raises(L.FilaDivergente):
+        L.reconciliar_fila(fila, {"111": 3}, REGISTRY)
+
+
+def test_conta_ambigua_na_fonte_falha_fechado():
+    class Cur:
+        description = [("shop_id",), ("shop_account",), ("max_ingested_at",)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a):
+            pass
+
+        def fetchall(self):
+            return [("111", "apice", AGORA), ("111", "apice_2", AGORA)]
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    with pytest.raises(L.ContaAmbigua):
+        L.ler_watermarks_e_contas(Conn())
+
+
+# ===========================================================================
 # Fonte: barreira de PII e de escopo
 # ===========================================================================
 def test_colunas_da_fonte_sao_fechadas_e_sem_comprador():
@@ -278,7 +370,8 @@ def test_colunas_da_fonte_sao_fechadas_e_sem_comprador():
         "pay_time", "ship_by_date", "pickup_done_time", "cancel_reason",
     )
     proibidas = ("buyer", "cpf", "recipient", "address", "order_sn")
-    for sql in (L.PEDIDOS_SQL, L.RECONCILIACAO_VENCIMENTO_SQL, L.WATERMARK_SQL):
+    for sql in (L.PEDIDOS_SQL, L.RECONCILIACAO_VENCIMENTO_SQL, L.WATERMARK_SQL,
+                L.FILA_ABERTA_SQL, L.FILA_ABERTA_CONTAGEM_SQL):
         baixo = sql.lower()
         assert not any(p in baixo for p in proibidas), sql
         assert not re.search(r"select\s+\*", baixo), sql
@@ -353,12 +446,13 @@ def test_publicar_apaga_as_duas_janelas_insere_e_rele_antes_do_commit():
     ap = _ap_publicavel()
     conn = ConexaoFake(releitura=L.esperado_na_releitura(ap))
     lote, gravadas, apagadas = cli.publicar(conn, ap, {"111": AGORA})
-    assert gravadas == 2 and apagadas == 6
+    assert gravadas == 2 and apagadas == 9
     assert conn.commits == 1 and conn.rollbacks == 0
     assert conn.autocommit is True
     ordem = [s.split()[0] for s in conn.sql]
-    assert ordem == ["DELETE", "DELETE", "INSERT", "INSERT", "SELECT", "SELECT"]
-    assert "sem_prazo_daily" in conn.sql[-1], "a tabela sem prazo tambem e' relida"
+    assert ordem == ["DELETE", "DELETE", "INSERT", "INSERT", "DELETE", "SELECT", "SELECT", "SELECT"]
+    assert "sem_prazo_daily" in conn.sql[-2], "a tabela sem prazo tambem e' relida"
+    assert "fila_fluxo" in conn.sql[-1], "a fila por fluxo tambem e' relida"
 
 
 def test_releitura_divergente_desfaz_tudo():
@@ -602,12 +696,14 @@ CREATE SCHEMA IF NOT EXISTS marts;
 CREATE SCHEMA IF NOT EXISTS audit;
 DROP TABLE IF EXISTS raw.shopee_orders, marts.dim_seller_account, marts.dim_loja,
     audit.source_sync_run, audit.data_quality_check,
-    marts.expedicao_shopee_ldr_daily, marts.expedicao_shopee_ldr_sem_prazo_daily CASCADE;
+    marts.expedicao_shopee_ldr_daily, marts.expedicao_shopee_ldr_sem_prazo_daily,
+    marts.expedicao_shopee_fila_fluxo CASCADE;
 CREATE TABLE raw.shopee_orders (
     shop_account text, order_sn text, shop_id text, order_status text,
     fulfillment_flag text, pay_time timestamptz, ship_by_date timestamptz,
     pickup_done_time timestamptz, cancel_reason text, ingested_at timestamptz,
-    buyer_cpf_id text, PRIMARY KEY (shop_account, order_sn));
+    buyer_cpf_id text, create_time timestamptz DEFAULT '2026-10-19 09:00-03',
+    PRIMARY KEY (shop_account, order_sn));
 CREATE TABLE marts.dim_loja (loja_id int PRIMARY KEY, brand_key text UNIQUE, ativo boolean);
 CREATE TABLE marts.dim_seller_account (seller_account_id serial PRIMARY KEY,
     marketplace_id int, loja_id int, external_seller_id text, ativo boolean,
@@ -702,7 +798,15 @@ def test_apply_ponta_a_ponta_publica_o_que_a_regra_diz(monkeypatch):
         import psycopg2
         with psycopg2.connect(url) as c, c.cursor() as cur:
             cur.execute("SELECT status, rows_loaded FROM audit.source_sync_run")
-            assert cur.fetchall() == [("success", 3)]
+            assert cur.fetchall() == [("success", 7)], "2 vencimentos + 1 sem prazo + 4 fila"
+            cur.execute(f"SELECT shop_account, fluxo, backlog_count, overdue_count, "
+                        f"deadline_unavailable_count FROM {L.TABELA_FILA_FLUXO} ORDER BY 1, 2")
+            fila = cur.fetchall()
+        # A3 (apice, aberto, vencido) e B1/B2 (barbours, um sem prazo); nenhum FBS
+        # aberto: as linhas FBS existem com zero MEDIDO.
+        assert fila == [("apice", "fbs", 0, 0, 0), ("apice", "vendedor", 1, 1, 0),
+                        ("barbours", "fbs", 0, 0, 0), ("barbours", "vendedor", 2, 0, 1)]
+        with psycopg2.connect(url) as c, c.cursor() as cur:
             cur.execute("SELECT check_name, status FROM audit.data_quality_check ORDER BY 1")
             checks = cur.fetchall()
         assert ("expedicao_shopee_ldr_reconciliacao", "pass") in checks

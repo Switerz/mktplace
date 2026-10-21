@@ -156,18 +156,27 @@ def ler_fonte(fonte, agora: datetime, registry: dict[str, str]):
     """
     import psycopg2.extensions as ext  # noqa: PLC0415
 
+    from pipelines.expedicao.shopee_extract import fetch_baselines  # noqa: PLC0415
+
     hoje = L.hoje_brt(agora)
     fonte.set_session(readonly=True, autocommit=False,
                       isolation_level=ext.ISOLATION_LEVEL_REPEATABLE_READ)
     try:
         pedidos = L.ler_pedidos(fonte, hoje)
-        watermarks = L.ler_watermarks(fonte)
+        watermarks, contas = L.ler_watermarks_e_contas(fonte)
         sql = L.ler_reconciliacao(fonte, hoje, agora)
+        # Fila por fluxo: MESMO snapshot, mesmo predicado e mesma linha de base
+        # de lentidao da fila publicada (`fetch_baselines` e' o da propria fila).
+        fila_bruta, contagem_fila = L.ler_fila_aberta(fonte)
+        baselines = fetch_baselines(fonte, agora)
     finally:
         fonte.rollback()
         fonte.set_session(readonly=True, autocommit=True)
     apuracao = L.apurar(pedidos, registry=registry, watermarks=watermarks, agora=agora)
     celulas = L.reconciliar(apuracao, sql, registry)
+    apuracao.fila_fluxo = L.apurar_fila_por_fluxo(
+        fila_bruta, registry=registry, contas=contas, baselines=baselines, agora=agora)
+    L.reconciliar_fila(apuracao.fila_fluxo, contagem_fila, registry)
     return apuracao, watermarks, celulas, len(pedidos)
 
 
@@ -225,6 +234,12 @@ def _relatorio(apuracao: L.Apuracao, celulas: int, n_pedidos: int) -> None:
         log(f"  {marca:<12}{a['base']:6d}  {a['atraso']:6d}  {_pct(a['taxa']):>7}   "
             f"{a['cobertura']:<12} {a['fbs']:6d}  {a['cancelados']}({a['nao_enviou']})")
     log("")
+    log("  FILA ABERTA POR FLUXO (mesmo predicado da fila; vendedor+FBS = contagem SQL)")
+    log("  marca        fluxo      backlog vencidos  24h  >48h travados")
+    for x in apuracao.fila_fluxo:
+        log(f"  {x.brand:<12} {x.fluxo:<9} {x.backlog:7d} {x.overdue:8d} {x.due_within_24h:4d} "
+            f"{x.over_48h:5d} {x.stalled:8d}")
+    log("")
     log(f"  motivos de cancelamento desconhecidos: {dict(q.motivos_desconhecidos) or 'nenhum'}")
     log(f"  motivos ausentes (nulos): {q.motivos_ausentes}")
     log(f"  status fora do vocabulario: {dict(q.status_desconhecidos) or 'nenhum'}")
@@ -281,7 +296,11 @@ def registrar_qualidade(conn, apuracao: L.Apuracao, celulas: int) -> None:
     linhas.append((
         CHECK_RECONCILIACAO, L.TABELA, mkt, "pass", "low", 0,
         json.dumps({"celulas": celulas, "implementacoes": ["python", "sql"],
-                    "snapshot": "repeatable_read"}, sort_keys=True),
+                    "snapshot": "repeatable_read",
+                    "fila_vendedor": sum(x.backlog for x in apuracao.fila_fluxo
+                                         if x.fluxo == "vendedor"),
+                    "fila_fbs": sum(x.backlog for x in apuracao.fila_fluxo if x.fluxo == "fbs"),
+                    "fila_reconciliada_com_contagem_sql": True}, sort_keys=True),
     ))
     with conn.cursor() as cur:
         cur.executemany(
@@ -302,6 +321,7 @@ def registrar_qualidade(conn, apuracao: L.Apuracao, celulas: int) -> None:
 def publicar(alvo, apuracao: L.Apuracao, watermarks: dict):
     """DELETE das duas janelas + INSERT + releitura, numa so' transacao."""
     lote, venc, semp = L.linhas_para_publicar(apuracao, watermarks)
+    fila = L.linhas_fila_para_publicar(apuracao.fila_fluxo, lote, apuracao.agora, watermarks)
     v_desde, v_ate = L.janela_de_vencimento(apuracao.hoje)
     p_desde, p_ate = L.janela_de_pagamento(apuracao.hoje)
     alvo.autocommit = False
@@ -317,12 +337,20 @@ def publicar(alvo, apuracao: L.Apuracao, watermarks: dict):
                 cur.executemany(L.INSERT_VENCIMENTO_SQL, venc)
             if semp:
                 cur.executemany(L.INSERT_SEM_PRAZO_SQL, semp)
+            # Fila por fluxo: fotografia, substituida inteira (DELETE do canal).
+            cur.execute(L.DELETE_FILA_FLUXO_SQL, {"channel": L.CANAL.value})
+            apagadas += cur.rowcount
+            if fila:
+                cur.executemany(L.INSERT_FILA_FLUXO_SQL, fila)
             cur.execute(L.RELEITURA_SQL, {"channel": L.CANAL.value, "lote": str(lote)})
             lido = cur.fetchone()
             lido = {k: int(lido[k]) for k in ("linhas", "pagos", "base", "atraso")}
             cur.execute(L.RELEITURA_SEM_PRAZO_SQL, {"channel": L.CANAL.value, "lote": str(lote)})
             lido_sp = cur.fetchone()
             lido.update({k: int(lido_sp[k]) for k in ("linhas_sem_prazo", "sem_prazo")})
+            cur.execute(L.RELEITURA_FILA_FLUXO_SQL, {"channel": L.CANAL.value, "lote": str(lote)})
+            lido_fila = cur.fetchone()
+            lido.update({k: int(lido_fila[k]) for k in ("linhas_fila", "backlog_fila")})
             esperado = L.esperado_na_releitura(apuracao)
             if lido != esperado:
                 raise RuntimeError(
@@ -350,7 +378,7 @@ def publicar(alvo, apuracao: L.Apuracao, watermarks: dict):
             alvo.autocommit = True
         except Exception:  # noqa: BLE001
             pass
-    return lote, len(venc) + len(semp), apagadas
+    return lote, len(venc) + len(semp) + len(fila), apagadas
 
 
 def _run_diagnose() -> int:

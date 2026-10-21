@@ -504,6 +504,43 @@ class ShopeeLdrAlerta(BaseModel):
     message: str
 
 
+class ShopeeFilaContagem(BaseModel):
+    """Mesmas medidas da fila publicada (`Totais`), para UMA parcela."""
+
+    backlog_count: int
+    overdue_count: int
+    due_within_24h_count: int
+    on_time_count: int
+    deadline_unavailable_count: int
+    over_48h_count: int
+    slow_count: int
+    zombie_count: int
+    stalled_count: int
+
+
+class ShopeeFilaConta(BaseModel):
+    shop_account: str
+    brand: str
+    seller: ShopeeFilaContagem
+    fbs: ShopeeFilaContagem
+
+
+class ShopeeFilaPorFluxo(BaseModel):
+    """Fila aberta da Shopee separada por responsabilidade de envio.
+
+    `seller` = fila ACIONAVEL do vendedor; `fbs` = pedidos que a Shopee despacha
+    do proprio armazem. `total` existe so' para reconciliar as parcelas.
+    """
+
+    effective_at: datetime
+    source_watermark_at: Optional[datetime] = None
+    stale: bool
+    seller: ShopeeFilaContagem
+    fbs: ShopeeFilaContagem
+    total: ShopeeFilaContagem
+    accounts: list[ShopeeFilaConta] = Field(default_factory=list)
+
+
 class ShopeeLdrResponse(BaseModel):
     availability: Literal["available", "unavailable"]
     unavailable_reason: Optional[str] = None
@@ -520,3 +557,5 @@ class ShopeeLdrResponse(BaseModel):
     coverage: Optional[ShopeeLdrCobertura] = None
     brands: list[ShopeeLdrMarca] = Field(default_factory=list)
     alerts: list[ShopeeLdrAlerta] = Field(default_factory=list)
+    #: `None` = nada publicado (ausencia), nunca uma fila de zeros.
+    queue_by_flow: Optional[ShopeeFilaPorFluxo] = None

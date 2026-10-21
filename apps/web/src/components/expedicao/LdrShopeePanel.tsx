@@ -3,8 +3,9 @@
 /**
  * EXPEDICAO-SHOPEE-LDR-1 — LDR operacional da Shopee, dentro da secao "Prazo".
  *
- * Busca a propria rota (`/api/v1/expedicao/shopee/ldr`) com a marca da casca.
- * So' e' montado com `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED === "true"`.
+ * A rota (`/api/v1/expedicao/shopee/ldr`) e' lida UMA vez por `useLdrShopee`,
+ * na tela da fila, e repartida entre o "Risco atual" (fila do vendedor x FBS)
+ * e este painel. Tudo so' liga com `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED`.
  *
  * SEM COR DE SEVERIDADE NA TAXA: a Shopee nao nos da' a referencia dela para
  * este recorte, e pintar 3% de verde ou de vermelho seria regra inventada. A
@@ -38,15 +39,32 @@ const diaCurto = (iso: string) => {
   return `${d}/${m}`;
 };
 
-export default function LdrShopeePanel({ api, marca }: { api: string; marca: string | null }) {
+export interface EstadoLdr {
+  resposta: RespostaLdrShopee | null;
+  carregando: boolean;
+  erro: boolean;
+}
+
+/**
+ * UMA requisicao a' rota da LDR, compartilhada pelo "Risco atual" (fila do
+ * vendedor x FBS) e por este painel. `ligada = false` nao faz requisicao
+ * nenhuma — e' o caminho da flag desligada.
+ */
+export function useLdrShopee(api: string, marca: string | null, ligada: boolean): EstadoLdr {
   const chave = queryDaLdrShopee(DIAS_LDR_SHOPEE, marca);
   const vigente = useRef(chave);
   vigente.current = chave;
   const [resposta, setResposta] = useState<RespostaLdrShopee | null>(null);
-  const [carregando, setCarregando] = useState(true);
+  const [carregando, setCarregando] = useState(ligada);
   const [erro, setErro] = useState(false);
 
   useEffect(() => {
+    if (!ligada) {
+      setResposta(null);
+      setCarregando(false);
+      setErro(false);
+      return;
+    }
     const minha = chave;
     let vivo = true;
     // A resposta anterior e' de outra marca (ou de outra fotografia): sai da
@@ -75,8 +93,13 @@ export default function LdrShopeePanel({ api, marca }: { api: string; marca: str
     return () => {
       vivo = false;
     };
-  }, [api, chave]);
+  }, [api, chave, ligada]);
 
+  return { resposta, carregando, erro };
+}
+
+export default function LdrShopeePanel({ ldr, marca }: { ldr: EstadoLdr; marca: string | null }) {
+  const { resposta, carregando, erro } = ldr;
   const estado = estadoDaLdrShopee({ carregando, erro, resposta });
   const titulo = resposta?.metric_name ?? NOME_LDR_SHOPEE;
 

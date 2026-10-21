@@ -94,14 +94,80 @@ def _vazio(motivo: Optional[str], disponivel: bool = False) -> dict:
         "coverage": None,
         "brands": [],
         "alerts": [],
+        "queue_by_flow": None,
     }
 
 
 def _tabela_existe(db) -> bool:
     return db.execute(
-        text("SELECT to_regclass(:a) IS NOT NULL AND to_regclass(:b) IS NOT NULL AS ok"),
-        {"a": TABELA, "b": TABELA_SEM_PRAZO},
+        text("SELECT to_regclass(:a) IS NOT NULL AND to_regclass(:b) IS NOT NULL "
+             "AND to_regclass(:c) IS NOT NULL AS ok"),
+        {"a": TABELA, "b": TABELA_SEM_PRAZO, "c": TABELA_FILA_FLUXO},
     ).scalar() is True
+
+
+# ---------------------------------------------------------------------------
+# Fila aberta por FLUXO (vendedor x FBS)
+# ---------------------------------------------------------------------------
+# A fila publicada nao separa FBS: o "risco atual" da Shopee somava pedidos que
+# a SHOPEE despacha ao atraso do vendedor (21/10/2026: 43 de 43 acima de 48 h
+# eram FBS). Esta fotografia vem do MESMO publisher da LDR, mesmo predicado e
+# mesmas regras da fila; vendedor + FBS = total por construcao (e reconciliado
+# no publisher contra uma contagem SQL independente).
+TABELA_FILA_FLUXO = "marts.expedicao_shopee_fila_fluxo"
+MEDIDAS_FILA = ("backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
+                "deadline_unavailable_count", "over_48h_count", "slow_count",
+                "zombie_count", "stalled_count")
+
+FILA_FLUXO_SQL = f"""
+SELECT shop_account, brand, fluxo, {', '.join(MEDIDAS_FILA)},
+       refresh_batch_id, effective_at, source_watermark_at
+  FROM {TABELA_FILA_FLUXO}
+ WHERE channel = :canal
+ ORDER BY brand, shop_account, fluxo
+"""
+
+
+def _zerar() -> dict:
+    return {m: 0 for m in MEDIDAS_FILA}
+
+
+def _fila_por_fluxo(db, alvo: Optional[set], ref: datetime) -> Optional[dict]:
+    """`None` quando nada foi publicado (ausencia), nunca uma fila com zeros."""
+    linhas = [dict(r) for r in db.execute(text(FILA_FLUXO_SQL), {"canal": CANAL}).mappings()]
+    if alvo is not None:
+        linhas = [x for x in linhas if str(x["brand"]).lower() in alvo]
+    if not linhas:
+        return None
+    vendedor, fbs, total = _zerar(), _zerar(), _zerar()
+    contas: dict[str, dict] = {}
+    for x in linhas:
+        destino = vendedor if x["fluxo"] == "vendedor" else fbs
+        conta = contas.setdefault(str(x["shop_account"]), {
+            "shop_account": str(x["shop_account"]), "brand": str(x["brand"]),
+            "seller": _zerar(), "fbs": _zerar(),
+        })
+        parte = conta["seller"] if x["fluxo"] == "vendedor" else conta["fbs"]
+        for m in MEDIDAS_FILA:
+            v = int(x[m])
+            destino[m] += v
+            total[m] += v
+            parte[m] += v
+    efetivo = max(x["effective_at"] for x in linhas)
+    wms = [x["source_watermark_at"] for x in linhas if x["source_watermark_at"]]
+    idade = (ref - efetivo).total_seconds() / 3600.0
+    idade_fonte = ((ref - max(wms)).total_seconds() / 3600.0) if wms else None
+    return {
+        "effective_at": efetivo,
+        "source_watermark_at": min(wms) if wms else None,
+        "stale": (idade > LIMITE_FOTOGRAFIA_HORAS or idade_fonte is None
+                  or idade_fonte > LIMITE_FOTOGRAFIA_HORAS),
+        "seller": vendedor,
+        "fbs": fbs,
+        # Total so' para reconciliar as parcelas; nunca e' o "risco do vendedor".
+        "total": total,
+        "accounts": sorted(contas.values(), key=lambda c: (c["brand"], c["shop_account"])),
+    }
 
 
 VENCIMENTOS_SQL = f"""
@@ -186,8 +252,13 @@ def obter_ldr(
     if alvo is not None:
         linhas = [x for x in linhas if str(x["brand"]).lower() in alvo]
         sem_prazo = [x for x in sem_prazo if str(x["brand"]).lower() in alvo]
+    # A fila por fluxo e' fotografia propria: existe mesmo sem serie de LDR na
+    # janela (e vice-versa). Cada uma diz a propria ausencia.
+    fila = _fila_por_fluxo(db, alvo, ref)
     if not linhas:
-        return _vazio(UNAVAILABLE_NO_DATA)
+        vazio = _vazio(UNAVAILABLE_NO_DATA)
+        vazio["queue_by_flow"] = fila
+        return vazio
 
     na_janela = [x for x in linhas if x["deadline_date"] <= hoje]
     maduras = [x for x in na_janela if x["is_mature"]]
@@ -303,6 +374,7 @@ def obter_ldr(
         "coverage": cob,
         "brands": marcas,
         "alerts": _alertas(ldr, exclusoes, cob, snapshot),
+        "queue_by_flow": fila,
     })
     return resposta
 

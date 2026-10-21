@@ -12,8 +12,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AVISO_FILA_COM_FBS,
   AVISO_LDR_SHOPEE,
   NOME_LDR_SHOPEE,
+  divisaoDaFila,
+  parcelasFecham,
+  textoDaReconciliacao,
   estadoDaLdrShopee,
   formatarTaxaLdr,
   montarExclusoes,
@@ -137,7 +141,69 @@ test("exclusoes: os quatro contadores, na ordem da precedencia, com o nao-enviad
 test("flag desligada: a secao Prazo fica como antes, inclusive o aviso de LDR ausente", () => {
   assert.match(CLIENTE, /const LDR_SHOPEE_LIGADA = process\.env\.NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED === "true";/);
   assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? null : \(\s*<Note[^>]*>\s*\{SEM_LDR_SHOPEE\}/);
-  assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? <LdrShopeePanel api=\{API\} marca=\{marcaAtiva\} \/> : null\}/);
+  assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? <LdrShopeePanel ldr=\{ldr\} marca=\{marcaAtiva\} \/> : null\}/);
+  // Flag off = nenhuma requisicao: o hook so' liga com a flag E na Shopee.
+  assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee"\)/);
+  assert.match(PAINEL, /if \(!ligada\) \{\s*setResposta\(null\);/);
+});
+
+// ---------------------------------------------------------------------------
+// Fila do vendedor x FBS
+// ---------------------------------------------------------------------------
+const T = (backlog: number, overdue: number, over48: number, stalled = 0) => ({
+  backlog_count: backlog, overdue_count: overdue, due_within_24h_count: 0,
+  on_time_count: backlog - overdue, deadline_unavailable_count: 0,
+  over_48h_count: over48, slow_count: stalled, zombie_count: 0, stalled_count: stalled,
+});
+function comFila(over: Partial<NonNullable<RespostaLdrShopee["queue_by_flow"]>> = {}) {
+  const seller = T(300, 2, 0);
+  const fbs = T(258, 11, 43, 20);
+  const total = T(558, 13, 43, 20);
+  return resposta({
+    queue_by_flow: {
+      effective_at: "2026-10-21T21:40:00Z", source_watermark_at: null, stale: false,
+      seller, fbs, total,
+      accounts: [{ shop_account: "apice", brand: "apice", seller, fbs }],
+      ...over,
+    },
+  });
+}
+
+test("FBS sai do risco do vendedor: os 43 acima de 48 h ficam na parcela FBS", () => {
+  const d = divisaoDaFila(comFila())!;
+  assert.equal(d.vendedor.over_48h_count, 0);
+  assert.equal(d.fbs.over_48h_count, 43);
+  assert.equal(d.vendedor.overdue_count, 2);
+  assert.equal(d.contasVendedor[0].backlog_count, 300, "concentracao usa a fila do vendedor");
+});
+
+test("as parcelas fecham o total; se nao fecharem, nao ha divisao (volta o aviso)", () => {
+  assert.ok(parcelasFecham(comFila().queue_by_flow!));
+  const torta = comFila({ total: T(559, 13, 43, 20) });
+  assert.equal(divisaoDaFila(torta), null);
+});
+
+test("sem fila publicada, a divisao e' ausencia (null), nunca zeros", () => {
+  assert.equal(divisaoDaFila(resposta({ queue_by_flow: null })), null);
+  assert.equal(divisaoDaFila(null), null);
+});
+
+test("conferencia mostra parcelas e total, sem chamar o total de risco", () => {
+  assert.equal(
+    textoDaReconciliacao(divisaoDaFila(comFila())!),
+    "Conferência: fila do vendedor 300 + FBS 258 = 558 pedidos em aberto na mesma leitura. " +
+      "O total serve só para conferir as parcelas.",
+  );
+});
+
+test("tela: risco do vendedor com a divisao; aviso de FBS sem ela; FBS em bloco proprio", () => {
+  assert.match(CLIENTE, /const totaisRisco = divisao \? divisao\.vendedor : recorte\.totais;/);
+  assert.match(CLIENTE, /montarRiscoAtual\(totaisRisco,/);
+  assert.match(CLIENTE, /montarAtencaoDaFila\(totaisRisco, contasRisco,/);
+  assert.match(CLIENTE, /faixasDePrazo\(totaisRisco\)/);
+  assert.match(CLIENTE, /filtros\.channel === "shopee" && !divisao && recorte\.totais \?/);
+  assert.match(CLIENTE, /\{divisao \? <BlocoFbs divisao=\{divisao\} \/> : null\}/);
+  assert.match(AVISO_FILA_COM_FBS, /Não leia estes números como atraso do vendedor/);
 });
 
 test("o painel sempre mostra o aviso de que nao e' oficial e nao pinta a taxa de severidade", () => {

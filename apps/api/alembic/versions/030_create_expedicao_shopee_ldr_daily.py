@@ -4,6 +4,7 @@ Cria duas tabelas, publicadas por `pipelines.expedicao.shopee_ldr_cli`:
 
   marts.expedicao_shopee_ldr_daily           (channel, deadline_date, shop_account)
   marts.expedicao_shopee_ldr_sem_prazo_daily (channel, paid_date, shop_account)
+  marts.expedicao_shopee_fila_fluxo          (channel, shop_account, fluxo)
 
 NAO E' A METRICA DE PENALIZACAO DA SHOPEE
 -----------------------------------------
@@ -46,6 +47,7 @@ depends_on = None
 
 TABELA = "expedicao_shopee_ldr_daily"
 TABELA_SP = "expedicao_shopee_ldr_sem_prazo_daily"
+TABELA_FILA = "expedicao_shopee_fila_fluxo"
 
 
 def upgrade() -> None:
@@ -136,8 +138,54 @@ def upgrade() -> None:
         )
         """
     )
+    # Fila aberta por FLUXO (vendedor x FBS): fotografia do estado agora, com o
+    # mesmo predicado e as mesmas regras da fila publicada. Existe para que o
+    # "risco atual" da Shopee nao some FBS (despachado pela Shopee) ao atraso do
+    # vendedor. Uma linha por conta e fluxo, inclusive com zero.
+    op.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS marts.{TABELA_FILA} (
+            channel                     VARCHAR(20)  NOT NULL,
+            shop_account                VARCHAR(64)  NOT NULL,
+            shop_id                     VARCHAR(32)  NOT NULL,
+            brand                       VARCHAR(64)  NOT NULL,
+            fluxo                       VARCHAR(16)  NOT NULL,
+            backlog_count               INTEGER      NOT NULL,
+            overdue_count               INTEGER      NOT NULL,
+            due_within_24h_count        INTEGER      NOT NULL,
+            on_time_count               INTEGER      NOT NULL,
+            deadline_unavailable_count  INTEGER      NOT NULL,
+            over_48h_count              INTEGER      NOT NULL,
+            slow_count                  INTEGER      NOT NULL,
+            zombie_count                INTEGER      NOT NULL,
+            stalled_count               INTEGER      NOT NULL,
+            refresh_batch_id            UUID         NOT NULL,
+            effective_at                TIMESTAMPTZ  NOT NULL,
+            source_watermark_at         TIMESTAMPTZ,
+
+            CONSTRAINT pk_{TABELA_FILA} PRIMARY KEY (channel, shop_account, fluxo),
+            CONSTRAINT ck_{TABELA_FILA}_channel CHECK (channel = 'shopee'),
+            CONSTRAINT ck_{TABELA_FILA}_fluxo CHECK (fluxo IN ('vendedor', 'fbs')),
+            CONSTRAINT ck_{TABELA_FILA}_nao_negativo CHECK (
+                backlog_count >= 0 AND overdue_count >= 0
+                AND due_within_24h_count >= 0 AND on_time_count >= 0
+                AND deadline_unavailable_count >= 0 AND over_48h_count >= 0
+                AND slow_count >= 0 AND zombie_count >= 0 AND stalled_count >= 0),
+            -- Mesma particao da fila: as quatro situacoes de prazo fecham o backlog.
+            CONSTRAINT ck_{TABELA_FILA}_particao_fecha CHECK (
+                overdue_count + due_within_24h_count + on_time_count
+                + deadline_unavailable_count = backlog_count),
+            -- Dimensoes transversais nunca passam do backlog; travado e' o OR.
+            CONSTRAINT ck_{TABELA_FILA}_transversais CHECK (
+                over_48h_count <= backlog_count AND stalled_count <= backlog_count
+                AND stalled_count <= slow_count + zombie_count
+                AND stalled_count >= GREATEST(slow_count, zombie_count))
+        )
+        """
+    )
 
 
 def downgrade() -> None:
+    op.execute(f"DROP TABLE IF EXISTS marts.{TABELA_FILA}")
     op.execute(f"DROP TABLE IF EXISTS marts.{TABELA_SP}")
     op.execute(f"DROP TABLE IF EXISTS marts.{TABELA}")

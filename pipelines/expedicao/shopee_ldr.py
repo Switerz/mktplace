@@ -333,6 +333,8 @@ class Apuracao:
     qualidade: Qualidade
     hoje: date
     agora: datetime
+    #: Fila aberta por (conta, fluxo), da MESMA leitura. Vazia ate' `ler_fonte`.
+    fila_fluxo: list = field(default_factory=list)
 
 
 def apurar(
@@ -465,10 +467,12 @@ SELECT {', '.join(COLUNAS_FONTE)}
 """
 
 #: Watermark POR CONTA: quando a fonte daquela conta foi lida pela ultima vez.
+#: Tambem da' o `shop_account` de cada `shop_id` (medido 1:1 nas 4 contas em
+#: 21/10/2026): a fila por fluxo publica linha com zero para conta sem pedido.
 WATERMARK_SQL = """
-SELECT shop_id, MAX(ingested_at) AS max_ingested_at
+SELECT shop_id, shop_account, MAX(ingested_at) AS max_ingested_at
   FROM raw.shopee_orders
- GROUP BY shop_id
+ GROUP BY shop_id, shop_account
 """
 
 #: Implementacao INDEPENDENTE da mesma regra, em SQL, para a reconciliacao.
@@ -537,17 +541,44 @@ def ler_pedidos(conn, hoje: date) -> list[Pedido]:
     ]
 
 
-def ler_watermarks(conn) -> dict[str, datetime | None]:
+class ContaAmbigua(RuntimeError):
+    """Um `shop_id` com mais de um `shop_account` na fonte. Nada e' publicado."""
+
+
+def ler_watermarks_e_contas(conn) -> tuple[dict[str, datetime | None], dict[str, str]]:
+    """(shop_id -> ultima leitura, shop_id -> shop_account). Falha FECHADA em 1:N."""
     with conn.cursor() as cur:
         cur.execute(WATERMARK_SQL)
         linhas = _linhas(cur)
-    out: dict[str, datetime | None] = {}
+    wms: dict[str, datetime | None] = {}
+    contas: dict[str, str] = {}
     for r in linhas:
+        shop_id = str(r["shop_id"])
+        if shop_id in contas and contas[shop_id] != str(r["shop_account"]):
+            raise ContaAmbigua(f"shop_id {shop_id} com mais de um shop_account na fonte")
+        contas[shop_id] = str(r["shop_account"])
         wm = r["max_ingested_at"]
         if wm is not None and wm.tzinfo is None:
             wm = wm.replace(tzinfo=timezone.utc)
-        out[str(r["shop_id"])] = wm
-    return out
+        wms[shop_id] = wm
+    return wms, contas
+
+
+def ler_watermarks(conn) -> dict[str, datetime | None]:
+    return ler_watermarks_e_contas(conn)[0]
+
+
+def ler_fila_aberta(conn) -> tuple[list[dict], dict[str, int]]:
+    """Fila aberta com fluxo + contagem independente do mesmo predicado."""
+    from pipelines.expedicao.shopee_extract import SHOPEE_BACKLOG_STATUSES  # noqa: PLC0415
+
+    params = {"statuses": list(SHOPEE_BACKLOG_STATUSES)}
+    with conn.cursor() as cur:
+        cur.execute(FILA_ABERTA_SQL, params)
+        linhas = _linhas(cur)
+        cur.execute(FILA_ABERTA_CONTAGEM_SQL, params)
+        contagem = {str(r["shop_id"]): int(r["n"]) for r in _linhas(cur)}
+    return linhas, contagem
 
 
 def ler_reconciliacao(conn, hoje: date, agora: datetime) -> dict[tuple[str, date], Counter]:
@@ -682,7 +713,193 @@ def esperado_na_releitura(apuracao: Apuracao) -> dict:
         "atraso": sum(x.atrasado + x.pendente_vencido for x in apuracao.vencimentos),
         "linhas_sem_prazo": len(apuracao.sem_prazo),
         "sem_prazo": sum(x.sem_prazo for x in apuracao.sem_prazo),
+        "linhas_fila": len(apuracao.fila_fluxo),
+        "backlog_fila": sum(x.backlog for x in apuracao.fila_fluxo),
     }
+
+
+# ---------------------------------------------------------------------------
+# Fila aberta por FLUXO (vendedor x FBS) — EXPEDICAO-SHOPEE-LDR-1, continuacao
+# ---------------------------------------------------------------------------
+# A fila publicada (`expedicao_fila_atual`) nao le `fulfillment_flag`, entao o
+# "risco atual" da Shopee soma pedidos FBS — que a Shopee despacha do proprio
+# armazem — como se fossem atraso do vendedor. Medido em 21/10/2026: 258 de 558
+# do backlog, 11 de 13 vencidos e 43 de 43 acima de 48 h eram FBS.
+#
+# A divisao sai da MESMA leitura deste publicador (sem coleta nova), com o
+# MESMO predicado da fila (`SHOPEE_BACKLOG_SQL`) e as MESMAS regras de
+# classificacao (`transform.classify_deadline`, `classify_age`,
+# `is_slow_vs_baseline`, `is_source_zombie`). Uma linha por conta do registry
+# e por fluxo, SEMPRE — inclusive com zero: zero aqui e' contagem medida,
+# nao ausencia.
+TABELA_FILA_FLUXO = "marts.expedicao_shopee_fila_fluxo"
+FLUXO_TELA = {FLUXO_VENDEDOR: "vendedor", FLUXO_FBS: "fbs"}
+
+FILA_ABERTA_SQL = """
+SELECT shop_id, shop_account, fulfillment_flag, create_time, pay_time, ship_by_date
+  FROM raw.shopee_orders
+ WHERE order_status = ANY(%(statuses)s)
+   AND pickup_done_time IS NULL
+"""
+
+#: Contagem INDEPENDENTE do mesmo predicado, sem fluxo: vendedor + FBS de cada
+#: conta tem de bater com ela no mesmo snapshot.
+FILA_ABERTA_CONTAGEM_SQL = """
+SELECT shop_id, count(*) AS n
+  FROM raw.shopee_orders
+ WHERE order_status = ANY(%(statuses)s)
+   AND pickup_done_time IS NULL
+ GROUP BY shop_id
+"""
+
+
+@dataclass
+class LinhaFluxo:
+    shop_account: str
+    shop_id: str
+    brand: str
+    fluxo: str
+    backlog: int = 0
+    overdue: int = 0
+    due_within_24h: int = 0
+    on_time: int = 0
+    deadline_unavailable: int = 0
+    over_48h: int = 0
+    slow: int = 0
+    zombie: int = 0
+    stalled: int = 0
+
+    def validar(self) -> None:
+        if self.fluxo not in ("vendedor", "fbs"):
+            raise ValueError(f"fluxo invalido: {self.fluxo!r}")
+        if (self.overdue + self.due_within_24h + self.on_time
+                + self.deadline_unavailable) != self.backlog:
+            raise ValueError(f"particao de prazo nao fecha em {self.shop_account}/{self.fluxo}")
+        if max(self.over_48h, self.slow, self.zombie, self.stalled) > self.backlog:
+            raise ValueError(f"contagem transversal acima do backlog em "
+                             f"{self.shop_account}/{self.fluxo}")
+        if self.stalled > self.slow + self.zombie or self.stalled < max(self.slow, self.zombie):
+            raise ValueError(f"travados fora de [max(lento,zumbi), lento+zumbi] em "
+                             f"{self.shop_account}/{self.fluxo}")
+
+
+def apurar_fila_por_fluxo(
+    linhas: list[dict],
+    *,
+    registry: dict[str, str],
+    contas: dict[str, str],
+    baselines: dict[str, tuple[int, float | None]],
+    agora: datetime,
+) -> list[LinhaFluxo]:
+    """Fila aberta -> (conta, fluxo). `contas` mapeia shop_id -> shop_account.
+
+    Conta do registry sem pedido aberto ganha as duas linhas com zero (medido).
+    Conta FORA do registry nao e' publicada (a reconciliacao a ignora tambem).
+    """
+    from pipelines.expedicao.transform import (  # noqa: PLC0415
+        classify_age, classify_deadline, hours_between, is_slow_vs_baseline,
+        is_source_zombie, marco_inicial,
+    )
+    from pipelines.expedicao.contract import DeadlineStatus, OperationalAgeStatus  # noqa: PLC0415
+
+    _aware(agora, "agora")
+    saida: dict[tuple[str, str], LinhaFluxo] = {}
+    for shop_id, marca in registry.items():
+        conta = contas.get(shop_id)
+        if conta is None:
+            continue
+        for fluxo in ("vendedor", "fbs"):
+            saida[(shop_id, fluxo)] = LinhaFluxo(conta, shop_id, marca, fluxo)
+
+    for r in linhas:
+        shop_id = str(r["shop_id"])
+        if shop_id not in registry:
+            continue
+        bruto = r["fulfillment_flag"]
+        if bruto not in FLUXOS_CONHECIDOS:
+            raise FluxoDesconhecido(f"fulfillment_flag fora do vocabulario medido: {bruto!r}")
+        chave = (shop_id, FLUXO_TELA[bruto])
+        if chave not in saida:  # conta do registry sem watermark/contas: cria
+            saida[chave] = LinhaFluxo(str(r["shop_account"]), shop_id, registry[shop_id],
+                                      FLUXO_TELA[bruto])
+        x = saida[chave]
+        prazo = _aware(r["ship_by_date"], "ship_by_date")
+        marco = marco_inicial(_aware(r["pay_time"], "pay_time"),
+                              _aware(r["create_time"], "create_time"))
+        horas = hours_between(marco, agora)
+        amostra, p50 = baselines.get(shop_id, (0, None))
+        lento = is_slow_vs_baseline(horas, amostra, p50)
+        zumbi = is_source_zombie(horas)
+        x.backlog += 1
+        situacao = classify_deadline(prazo, agora)
+        if situacao is DeadlineStatus.OVERDUE:
+            x.overdue += 1
+        elif situacao is DeadlineStatus.DUE_WITHIN_24H:
+            x.due_within_24h += 1
+        elif situacao is DeadlineStatus.ON_TIME:
+            x.on_time += 1
+        else:
+            x.deadline_unavailable += 1
+        if classify_age(marco, agora) is OperationalAgeStatus.OVER_48H:
+            x.over_48h += 1
+        x.slow += int(lento)
+        x.zombie += int(zumbi)
+        x.stalled += int(lento or zumbi)
+
+    for x in saida.values():
+        x.validar()
+    return sorted(saida.values(), key=lambda x: (x.shop_account, x.fluxo))
+
+
+class FilaDivergente(RuntimeError):
+    """Vendedor + FBS nao bate com a contagem independente. Nada e' publicado."""
+
+
+def reconciliar_fila(linhas: list[LinhaFluxo], contagem: dict[str, int],
+                     registry: dict[str, str]) -> int:
+    """Por conta do registry: vendedor + FBS == contagem SQL do mesmo predicado."""
+    soma: Counter = Counter()
+    for x in linhas:
+        soma[x.shop_id] += x.backlog
+    diferentes = [
+        f"{s}: vendedor+fbs={soma.get(s, 0)} contagem={contagem.get(s, 0)}"
+        for s in sorted(registry) if soma.get(s, 0) != contagem.get(s, 0)
+    ]
+    if diferentes:
+        raise FilaDivergente("fila por fluxo diverge: " + "; ".join(diferentes))
+    return sum(soma.values())
+
+
+COLUNAS_FILA_FLUXO = (
+    "refresh_batch_id", "channel", "shop_account", "shop_id", "brand", "fluxo",
+    "backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
+    "deadline_unavailable_count", "over_48h_count", "slow_count", "zombie_count",
+    "stalled_count", "effective_at", "source_watermark_at",
+)
+#: A fila por fluxo e' FOTOGRAFIA (o estado agora), nao serie: cada publicacao
+#: substitui a anterior inteira.
+DELETE_FILA_FLUXO_SQL = f"DELETE FROM {TABELA_FILA_FLUXO} WHERE channel = %(channel)s"
+INSERT_FILA_FLUXO_SQL = (
+    f"INSERT INTO {TABELA_FILA_FLUXO} ({', '.join(COLUNAS_FILA_FLUXO)}) VALUES "
+    f"({', '.join(['%s'] * len(COLUNAS_FILA_FLUXO))})")
+RELEITURA_FILA_FLUXO_SQL = f"""
+SELECT count(*) AS linhas_fila, coalesce(sum(backlog_count),0) AS backlog_fila
+  FROM {TABELA_FILA_FLUXO}
+ WHERE channel = %(channel)s AND refresh_batch_id = %(lote)s
+"""
+
+
+def linhas_fila_para_publicar(fila: list[LinhaFluxo], lote: uuid.UUID, agora: datetime,
+                              watermarks: dict[str, datetime | None]) -> list[tuple]:
+    saida = []
+    for x in fila:
+        x.validar()
+        saida.append((
+            str(lote), CANAL.value, x.shop_account, x.shop_id, x.brand, x.fluxo,
+            x.backlog, x.overdue, x.due_within_24h, x.on_time, x.deadline_unavailable,
+            x.over_48h, x.slow, x.zombie, x.stalled, agora, watermarks.get(x.shop_id),
+        ))
+    return saida
 
 
 # ---------------------------------------------------------------------------

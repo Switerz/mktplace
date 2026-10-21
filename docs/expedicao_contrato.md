@@ -1274,6 +1274,8 @@ e na resposta da API. Motivo NULO e' contado como ausente, sem alerta.
   total, maduro sem pendente no prazo, canal `shopee`.
 - `marts.expedicao_shopee_ldr_sem_prazo_daily` — PK `(channel, paid_date,
   shop_account)`; pagos = FBS + cancelados sem coleta + sem prazo.
+- `marts.expedicao_shopee_fila_fluxo` — PK `(channel, shop_account, fluxo)`;
+  fotografia da fila aberta por fluxo (ver "Fila do vendedor x FBS").
 
 ### Publisher
 
@@ -1321,7 +1323,36 @@ LDR do TikTok nao foi tocada.
 
 - **A fila Shopee publicada mistura FBS** (o extrator nao le
   `fulfillment_flag`): em 21/10, 258 de 558 do backlog, 11 de 13 vencidos e
-  43 de 43 acima de 48 h eram FBS. Fora do escopo deste gate.
+  43 de 43 acima de 48 h eram FBS. Corrigido NA TELA pela fila por fluxo (abaixo);
+  a tabela `expedicao_fila_atual`, a "Concentração por marca" e a evolucao
+  continuam com FBS incluido, e a tela diz isso.
+
+### Fila do vendedor x FBS no "Risco atual"
+
+`marts.expedicao_shopee_fila_fluxo` (PK `channel, shop_account, fluxo`) e' uma
+FOTOGRAFIA da fila aberta separada em `vendedor` e `fbs`, publicada pelo MESMO
+`shopee_ldr_cli`, na MESMA leitura (sem coleta nova):
+
+- mesmo predicado da fila (`PROCESSED`/`READY_TO_SHIP` sem `pickup_done_time`)
+  e mesmas regras (`transform.classify_deadline`, `classify_age`,
+  `is_slow_vs_baseline` com o `fetch_baselines` da propria fila,
+  `is_source_zombie`);
+- uma linha por conta do registry e por fluxo, inclusive com zero (medido);
+- reconciliacao: vendedor + FBS de cada conta == `count(*)` SQL independente do
+  mesmo predicado no mesmo snapshot (divergencia = nada publicado); CHECKs da
+  particao de prazo e de travados no banco;
+- `GET /expedicao/shopee/ldr` devolve `queue_by_flow` (`seller`, `fbs`, `total`
+  e por conta), recortado pela marca no servidor; `None` = nao publicado.
+
+Na tela (com a flag da LDR): o "Risco atual" e a barra de prazo da Shopee viram
+a **fila acionavel do vendedor**; FBS aparece em faixa propria, neutra
+("responsabilidade logistica da Shopee"); o total so' aparece numa linha de
+conferencia ("vendedor X + FBS Y = Z"). Sem a divisao (flag off, erro, nao
+publicada ou parcelas que nao fecham), a tela mostra a fila publicada com o
+aviso de que ela inclui FBS — nunca zera nada.
+
+`--diagnose` real, 21/10/2026: vendedor 300 (2 vencidos, 0 acima de 48 h) e
+FBS 258 (11 vencidos, 57 acima de 48 h), reconciliado nas 4 contas.
 - `MOTIVO_NAO_ENVIOU` depende do TEXTO da fonte; se a Shopee o mudar, o
   subconjunto zera e o alerta de motivo desconhecido e' o que avisa.
 - `ingested_at` e' reescrito a cada atualizacao: serve de watermark, nunca de

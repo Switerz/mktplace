@@ -10,6 +10,8 @@
  * aparece.
  */
 
+import type { ResumoConta, Totais } from "./expedicao-contract.ts";
+
 export const NOME_LDR_SHOPEE = "LDR operacional (coleta × prazo Shopee)";
 export const AVISO_LDR_SHOPEE =
   "Indicador interno da Torre: não é a taxa de envio atrasado que a Shopee usa para penalização.";
@@ -97,6 +99,91 @@ export interface RespostaLdrShopee {
     source_watermark_at: string | null;
   }[];
   alerts: { severity: "critical" | "warning" | "info"; code: string; message: string }[];
+  /** Fila aberta por responsabilidade de envio. `null` = nao publicada (ausencia). */
+  queue_by_flow?: FilaPorFluxo | null;
+}
+
+export interface FilaPorFluxo {
+  effective_at: string;
+  source_watermark_at: string | null;
+  stale: boolean;
+  seller: Totais;
+  fbs: Totais;
+  total: Totais;
+  accounts: { shop_account: string; brand: string; seller: Totais; fbs: Totais }[];
+}
+
+// ---------------------------------------------------------------------------
+// Fila acionavel do vendedor x FBS
+// ---------------------------------------------------------------------------
+// A fila publicada nao separa FBS (pedido que a SHOPEE despacha do proprio
+// armazem). Somado ao "risco atual", ele virava atraso do vendedor: em
+// 21/10/2026, 43 de 43 pedidos acima de 48 h eram FBS. A separacao vem da rota
+// da LDR (mesma leitura do publisher, mesmo predicado e mesmas regras da fila).
+
+export const AVISO_FILA_COM_FBS =
+  "Inclui pedidos FBS, que a Shopee despacha do próprio armazém: a separação entre a fila do " +
+  "vendedor e a da Shopee ainda não está publicada. Não leia estes números como atraso do vendedor.";
+
+export interface DivisaoDaFila {
+  /** Fila ACIONAVEL do vendedor, no formato de `totals` da fila. */
+  vendedor: Totais;
+  /** Pedidos FBS — responsabilidade logistica da Shopee. */
+  fbs: Totais;
+  /** So' para reconciliar: vendedor + FBS. */
+  total: Totais;
+  /** Linhas por conta da fila do vendedor (concentracao da "atencao agora"). */
+  contasVendedor: ResumoConta[];
+  efetivoEm: string;
+  velha: boolean;
+}
+
+const MEDIDAS: (keyof Totais)[] = [
+  "backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
+  "deadline_unavailable_count", "over_48h_count", "slow_count", "zombie_count", "stalled_count",
+];
+
+/** As parcelas fecham o total em TODAS as medidas? */
+export function parcelasFecham(f: FilaPorFluxo): boolean {
+  return MEDIDAS.every((m) => f.seller[m] + f.fbs[m] === f.total[m]);
+}
+
+/**
+ * Divisao da fila a partir da resposta da LDR. `null` quando nao ha fila
+ * publicada ou quando as parcelas nao fecham o total — nesse caso a tela
+ * volta ao numero da fila com o aviso, em vez de mostrar uma divisao que nao
+ * reconcilia.
+ */
+export function divisaoDaFila(r: RespostaLdrShopee | null): DivisaoDaFila | null {
+  const f = r?.queue_by_flow;
+  if (!f || !parcelasFecham(f)) return null;
+  return {
+    vendedor: f.seller,
+    fbs: f.fbs,
+    total: f.total,
+    contasVendedor: f.accounts.map((a) => ({
+      ...a.seller,
+      shop_account: a.shop_account,
+      brand: a.brand,
+      run_status: "success",
+      source_watermark_at: f.source_watermark_at,
+      source_advanced: true,
+      snapshot_hour: f.effective_at,
+    })),
+    efetivoEm: f.effective_at,
+    velha: f.stale,
+  };
+}
+
+const inteiro = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+
+/** Linha de conferencia: as parcelas e o total, sem chamar o total de risco. */
+export function textoDaReconciliacao(d: DivisaoDaFila): string {
+  return (
+    `Conferência: fila do vendedor ${inteiro(d.vendedor.backlog_count)} + FBS ` +
+    `${inteiro(d.fbs.backlog_count)} = ${inteiro(d.total.backlog_count)} pedidos em aberto ` +
+    `na mesma leitura. O total serve só para conferir as parcelas.`
+  );
 }
 
 export function queryDaLdrShopee(dias: number, marca: string | null): string {

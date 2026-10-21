@@ -51,9 +51,10 @@ class _Resultado:
 
 
 class SessaoFake:
-    def __init__(self, *, linhas=None, sem_prazo=None, tabela_existe=True):
+    def __init__(self, *, linhas=None, sem_prazo=None, fila=None, tabela_existe=True):
         self.linhas = linhas or []
         self.sem_prazo = sem_prazo or []
+        self.fila = fila or []
         self.tabela_existe = tabela_existe
         self.consultas: list[str] = []
 
@@ -64,7 +65,55 @@ class SessaoFake:
             return _Resultado([], escalar=self.tabela_existe)
         if "sem_prazo_daily" in sql:
             return _Resultado(self.sem_prazo)
+        if "fila_fluxo" in sql:
+            return _Resultado(self.fila)
         return _Resultado(self.linhas)
+
+
+def lf(brand: str, fluxo: str, backlog: int, overdue: int = 0, over48: int = 0,
+         effective_at=None) -> dict:
+    return {
+        "shop_account": brand, "brand": brand, "fluxo": fluxo,
+        "backlog_count": backlog, "overdue_count": overdue, "due_within_24h_count": 0,
+        "on_time_count": backlog - overdue, "deadline_unavailable_count": 0,
+        "over_48h_count": over48, "slow_count": 0, "zombie_count": 0, "stalled_count": 0,
+        "refresh_batch_id": LOTE, "effective_at": effective_at or AGORA - timedelta(hours=1),
+        "source_watermark_at": AGORA - timedelta(hours=2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fila por fluxo (vendedor x FBS)
+# ---------------------------------------------------------------------------
+FILA_21_10 = [lf("apice", "vendedor", 84, 2, 0), lf("apice", "fbs", 80, 1, 15),
+              lf("barbours", "vendedor", 163, 0, 0), lf("barbours", "fbs", 94, 2, 28)]
+
+
+def test_fila_por_fluxo_separa_vendedor_e_fbs_e_fecha_o_total(ligado):
+    q = ldr([venc(date(2026, 10, 19), no_prazo=1)], fila=FILA_21_10)["queue_by_flow"]
+    assert (q["seller"]["backlog_count"], q["fbs"]["backlog_count"]) == (247, 174)
+    assert (q["seller"]["over_48h_count"], q["fbs"]["over_48h_count"]) == (0, 43)
+    for m in q["total"]:
+        assert q["seller"][m] + q["fbs"][m] == q["total"][m], m
+    assert [a["brand"] for a in q["accounts"]] == ["apice", "barbours"]
+
+
+def test_fila_por_fluxo_recorta_pela_marca(ligado):
+    q = ldr([venc(date(2026, 10, 19), "apice", no_prazo=1)], fila=FILA_21_10,
+            brands=["apice"])["queue_by_flow"]
+    assert (q["seller"]["backlog_count"], q["fbs"]["backlog_count"]) == (84, 80)
+
+
+def test_fila_nao_publicada_e_ausencia_e_nao_some_sem_serie_de_ldr(ligado):
+    assert ldr([venc(date(2026, 10, 19), no_prazo=1)])["queue_by_flow"] is None
+    sem_serie = ldr([], fila=FILA_21_10)
+    assert sem_serie["unavailable_reason"] == svc.UNAVAILABLE_NO_DATA
+    assert sem_serie["queue_by_flow"]["seller"]["backlog_count"] == 247
+
+
+def test_fila_velha_e_sinalizada(ligado):
+    velha = [lf("apice", "vendedor", 5, effective_at=AGORA - timedelta(hours=8))]
+    assert ldr([], fila=velha)["queue_by_flow"]["stale"] is True
 
 
 @pytest.fixture
@@ -73,9 +122,9 @@ def ligado(monkeypatch):
     monkeypatch.setattr(svc.settings, "expedicao_shopee_ldr_api_enabled", True, raising=False)
 
 
-def ldr(linhas, sem_prazo=None, **kw):
+def ldr(linhas, sem_prazo=None, fila=None, **kw):
     kw.setdefault("agora", AGORA)
-    r = svc.obter_ldr(SessaoFake(linhas=linhas, sem_prazo=sem_prazo), **kw)
+    r = svc.obter_ldr(SessaoFake(linhas=linhas, sem_prazo=sem_prazo, fila=fila), **kw)
     ShopeeLdrResponse.model_validate(r)   # o contrato da rota aceita a resposta
     return r
 
