@@ -449,9 +449,29 @@ def test_qualidade_marca_warn_com_motivo_desconhecido():
 # Migration 030 (estatica)
 # ===========================================================================
 def _migration():
-    spec = importlib.util.spec_from_file_location("m030", MIGRATION)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    """Carrega a 030 com um `alembic` FALSO.
+
+    Dependendo da ordem da suite, `apps/api` entra no `sys.path` e `import
+    alembic` passa a resolver o PACOTE LOCAL `apps/api/alembic` (sem `op`), e
+    nao a biblioteca. O teste nao pode depender dessa ordem: `op` e' trocado
+    por um capturador em `_ddl` de qualquer jeito.
+    """
+    import sys
+    import types
+
+    falso = types.ModuleType("alembic")
+    falso.op = None
+    anterior = sys.modules.get("alembic")
+    sys.modules["alembic"] = falso
+    try:
+        spec = importlib.util.spec_from_file_location("m030", MIGRATION)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    finally:
+        if anterior is None:
+            sys.modules.pop("alembic", None)
+        else:
+            sys.modules["alembic"] = anterior
     return m
 
 

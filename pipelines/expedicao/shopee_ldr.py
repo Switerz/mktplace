@@ -64,7 +64,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 
-from pipelines.expedicao.contract import Channel
+from pipelines.expedicao.contract import (
+    SHOPEE_MOTIVO_NAO_ENVIOU,
+    SHOPEE_MOTIVOS_CANCELAMENTO_CONHECIDOS,
+    Channel,
+)
 
 TABELA = "marts.expedicao_shopee_ldr_daily"
 TABELA_SEM_PRAZO = "marts.expedicao_shopee_ldr_sem_prazo_daily"
@@ -109,33 +113,13 @@ STATUS_CONHECIDOS = frozenset({
     "INVOICE_PENDING",
 })
 
-MOTIVO_NAO_ENVIOU = "Seller did not Ship"
-#: Motivos de cancelamento medidos em 365 dias (texto exato da fonte). Motivo
-#: NAO-NULO fora desta lista gera alerta de qualidade: ou a Shopee mudou o
-#: texto — e `MOTIVO_NAO_ENVIOU` pode ter deixado de casar sem erro —, ou
-#: apareceu um caso novo que ninguem classificou. Motivo NULO (410 em 365 dias,
-#: todos `system`) e' contado como ausente, sem alerta.
-MOTIVOS_CONHECIDOS = frozenset({
-    "Unpaid Order",
-    "Don't Want to Buy Anymore",
-    "Others",
-    "Need to Modify Order",
-    MOTIVO_NAO_ENVIOU,
-    "Others / change of mind",
-    "Need to input / Change Voucher Code",
-    "Found Cheaper Elsewhere",
-    "Failed Delivery",
-    "Need to Change Delivery Address",
-    "Need to change delivery address",
-    "Payment Procedure too Troublesome",
-    "Modify existing order (colour, size, address, voucher, etc.)",
-    "Parcel lost in transit. The eligible compensation has been credited into "
-    "your seller wallet.",
-    "Seller is not responsive to my inquiries",
-    "Other",
-    "Logistic Issue",
-    "Out of Stock",
-})
+#: Motivos de cancelamento medidos em 365 dias (texto exato da fonte; a lista
+#: mora em `contract.py`). Motivo NAO-NULO fora dela gera alerta de qualidade:
+#: ou a Shopee mudou o texto — e `MOTIVO_NAO_ENVIOU` pode ter deixado de casar
+#: sem erro —, ou apareceu um caso novo que ninguem classificou. Motivo NULO
+#: (410 em 365 dias, todos `system`) e' contado como ausente, sem alerta.
+MOTIVO_NAO_ENVIOU = SHOPEE_MOTIVO_NAO_ENVIOU
+MOTIVOS_CONHECIDOS = SHOPEE_MOTIVOS_CANCELAMENTO_CONHECIDOS
 
 #: Cobertura: ausencias (sem prazo + enviado sem coleta) sobre a base elegivel.
 LIMIAR_AVISO_COBERTURA = 0.02
