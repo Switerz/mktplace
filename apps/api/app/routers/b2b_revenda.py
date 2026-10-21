@@ -9,10 +9,15 @@ esta API nao tem autenticacao, e rota com dado de cliente so' nasce depois que
 a autenticacao da Torre de Marketplaces for definida.
 
 ORDEM FIXA EM TODA ROTA:
-  0. AUTENTICACAO (dependencia do ROUTER, vale para toda rota daqui):
-     sem configuracao -> 503; sem token/token invalido -> 401; sem a
-     permission `b2b_revenda:read` -> 403. Nada abaixo roda antes disso
-     (app/auth.py, Gate OCTAPRICE-2);
+  0. ACESSO (dependencia do ROUTER, vale para toda rota daqui), conforme
+     `B2B_REVENDA_ACCESS_MODE`:
+       - "authenticated" (padrao; qualquer valor desconhecido cai aqui):
+         sem configuracao -> 503; sem token/token invalido -> 401; sem a
+         permission `b2b_revenda:read` -> 403 (app/auth.py, Gate OCTAPRICE-2);
+       - "public_readonly": TEMPORARIAMENTE sem autenticacao de usuario
+         (decisao B2B-REVENDA-ENTREGA-PUBLICA-1). So' leitura dos agregados
+         das seis RPCs; rate limit por cliente e global -> 429.
+     Nada abaixo roda antes disso;
   1. flag desligada -> `unavailable` sem criar cliente nem abrir conexao;
   2. recorte invalido -> 422 com mensagem constante (o valor nao volta);
   3. credencial ausente/invalida, fonte fora, contrato quebrado, dia sem
@@ -23,10 +28,12 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Callable, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
+from app import auth
 from app.auth import exigir_escopo
 from app.config import settings
+from app.rate_limit import JanelaDeslizante
 from app.schemas.b2b_revenda import (
     B2BRevendaUnavailableResponse,
     CanaisMarcasResponse,
@@ -37,10 +44,63 @@ from app.schemas.b2b_revenda import (
 from app.services import b2b_revenda_service as svc
 from app.services.b2b_revenda_fonte import FonteComCache, FonteIndisponivel, obter_fonte
 
+MODO_PUBLICO = "public_readonly"
+MSG_LIMITE = "Muitas consultas em pouco tempo. Tente de novo em instantes."
+
+_exigir_token = exigir_escopo(lambda: settings.b2b_revenda_required_scope)
+
+#: Limitadores do modo publico (memoria do processo; aproximado, como o do
+#: Oraculo). Recriados quando o limite configurado muda.
+_limites: dict[str, JanelaDeslizante] = {}
+
+
+def _limitador(nome: str, por_minuto: int) -> JanelaDeslizante:
+    atual = _limites.get(nome)
+    if atual is None or atual.limite != por_minuto:
+        atual = JanelaDeslizante(por_minuto, 60.0)
+        _limites[nome] = atual
+    return atual
+
+
+def modo_publico() -> bool:
+    """So' o valor EXATO abre. Desconhecido = autenticado (fail-closed)."""
+    return (settings.b2b_revenda_access_mode or "").strip().lower() == MODO_PUBLICO
+
+
+def chave_do_cliente(request: Request) -> str:
+    """IP do cliente. Atras do proxy do Render o IP real vem no
+    `X-Forwarded-For`; usa-se o ULTIMO elemento (o que o proxy anexou), nao o
+    primeiro (que o cliente pode forjar). Sem o header, o IP da conexao."""
+    xff = request.headers.get("x-forwarded-for", "")
+    partes = [p.strip() for p in xff.split(",") if p.strip()]
+    if partes:
+        return partes[-1][:64]
+    return (request.client.host if request.client else "desconhecido")[:64]
+
+
+def acesso_b2b(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    resolvedor_de=Depends(auth.provedor_resolvedor),
+) -> None:
+    if not modo_publico():
+        _exigir_token(authorization=authorization, resolvedor_de=resolvedor_de)
+        return
+    # public_readonly: sem token, mas com limite. Global primeiro (protege a
+    # fonte de qualquer volume), depois por cliente.
+    for nome, por_minuto, chave in (
+        ("global", settings.b2b_revenda_rate_limit_global_per_minute, "*"),
+        ("cliente", settings.b2b_revenda_rate_limit_per_minute, chave_do_cliente(request)),
+    ):
+        r = _limitador(nome, por_minuto).verificar(chave)
+        if not r.permitido:
+            raise HTTPException(429, MSG_LIMITE, headers={"Retry-After": str(r.retry_after_s)})
+
+
 router = APIRouter(
     prefix="/api/v1/b2b-revenda",
     tags=["b2b-revenda"],
-    dependencies=[Depends(exigir_escopo(lambda: settings.b2b_revenda_required_scope))],
+    dependencies=[Depends(acesso_b2b)],
 )
 
 

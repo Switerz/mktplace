@@ -129,10 +129,18 @@ autentica não recebe nem o `unavailable`. O token nunca é logado nem ecoado.
    operação, admin). Não usar a Action do Oráculo para isto: ela concede
    `oracle:read` por domínio, e este dado tem público menor.
 
-**Bloqueio conhecido para a tela:** o navegador da Torre ainda não tem login
-humano. Com `NEXT_PUBLIC_B2B_REVENDA_MODE=api`, a aba recebe 401 e mostra
-"Acesso restrito" — nunca zero. Ligar a aba no navegador exige o fluxo de
-login do Auth0 na web (gate próprio).
+**Modo `public_readonly` (temporário).** Com `B2B_REVENDA_ACCESS_MODE=public_readonly`
+as rotas ficam *temporariamente sem autenticação de usuário*, por decisão de
+entrega (B2B-REVENDA-ENTREGA-PUBLICA-1). Continuam valendo:
+- só leitura dos agregados das seis RPCs, sem consulta livre;
+- nenhum dado de cliente;
+- flag `B2B_REVENDA_ENABLED`;
+- chave só no backend;
+- rate limit em memória, aproximado por instância: por cliente (último IP do
+  `X-Forwarded-For`) e global, com 429 + `Retry-After`.
+
+Qualquer outro valor, inclusive erro de digitação, mantém o modo autenticado.
+Login de usuário e credencial exclusiva ficam como endurecimento posterior.
 
 ## Variáveis de ambiente
 
@@ -143,6 +151,9 @@ API (Render) — **documentadas, nenhuma configurada**:
 | `API_AUTH_ISSUER` | vazio | `https://gobeaute-oraculo.us.auth0.com/`; vazio ou outro host ⇒ 503 |
 | `API_AUTH_AUDIENCE` | vazio | Identifier da API no Auth0 (HTTPS); vazio ⇒ 503 |
 | `B2B_REVENDA_REQUIRED_SCOPE` | `b2b_revenda:read` | permission exigida (um único valor) |
+| `B2B_REVENDA_ACCESS_MODE` | `authenticated` | `public_readonly` dispensa o token (temporário); qualquer outro valor = autenticado |
+| `B2B_REVENDA_RATE_LIMIT_PER_MINUTE` | `60` | limite por cliente no modo público (1–600) |
+| `B2B_REVENDA_RATE_LIMIT_GLOBAL_PER_MINUTE` | `600` | limite global no modo público (10–6000) |
 | `B2B_REVENDA_ENABLED` | `false` | liga os endpoints; desligado ⇒ `unavailable` sem rede |
 | `B2B_REVENDA_SUPABASE_URL` | vazio | raiz do projeto (`https://<ref>.supabase.co`); só HTTPS, sem caminho |
 | `B2B_REVENDA_SUPABASE_KEY` | vazio | chave da Data API (segredo) |
@@ -156,18 +167,29 @@ Web (Vercel, em build):
 |---|---|
 | `NEXT_PUBLIC_B2B_REVENDA_MODE` | ausente = desligada (404 e sem seletor) · `fixture` = dados fictícios com faixa de aviso, sem requisição · `api` = lê a nossa API |
 
-## Ativação (gate próprio, fora deste PR)
+## Ativação e rollback (modo `public_readonly`)
 
-1. Auth0: API, permission e roles criadas (seção acima).
-2. Render: `API_AUTH_ISSUER`, `API_AUTH_AUDIENCE` e a credencial **exclusiva**
-   (nunca a da sondagem) colocadas direto nas variáveis; redeploy manual.
-3. Conferir 401 sem token, 403 sem permission e 200 `unavailable` com token
-   válido e flag desligada.
-4. `B2B_REVENDA_ENABLED=true` e reconciliação de `/frescor`, `/resumo`,
-   `/canais-marcas` e `/skus` contra a fonte no mesmo dia e recorte.
-5. Login humano na web; só então `NEXT_PUBLIC_B2B_REVENDA_MODE=api`.
-6. Rotas com dado de cliente (seller, cliente, vendedor, reincidência) ficam
-   para depois, sob a mesma autenticação e com permission própria.
+1. **Render**: `B2B_REVENDA_SUPABASE_URL`, `B2B_REVENDA_SUPABASE_KEY`,
+   `B2B_REVENDA_ACCESS_MODE=public_readonly` e `B2B_REVENDA_ENABLED=true`;
+   redeploy manual.
+2. **Verificar**: as quatro rotas respondem `ok` e reconciliam com as RPCs
+   chamadas direto (mesmo dia, sem Amazon).
+3. **Vercel**: `NEXT_PUBLIC_B2B_REVENDA_MODE=api` e redeploy.
+4. **Smoke**: aba visível, dados, frescor e nenhuma chamada do navegador à
+   Torre B2B.
+
+Rollback, do mais rápido ao mais completo (cada um basta sozinho):
+
+| Ação | Efeito |
+|---|---|
+| Render: `B2B_REVENDA_ENABLED=false` | API responde `unavailable` sem tocar a fonte; a aba mostra "indisponível" |
+| Render: remover `B2B_REVENDA_ACCESS_MODE` | volta ao modo autenticado: rotas em 503 (sem auth configurada) |
+| Vercel: remover `NEXT_PUBLIC_B2B_REVENDA_MODE` + redeploy | aba some (404) e o seletor também |
+| Render: remover `B2B_REVENDA_SUPABASE_KEY` | sem credencial: `unavailable` / `credencial_ausente` |
+
+Endurecimento posterior: login de usuário (Auth0) e credencial exclusiva
+restrita às seis RPCs. Rotas com dado de cliente (seller, cliente, vendedor,
+reincidência) só com autenticação e permission própria.
 
 ## Limitações conhecidas
 
