@@ -272,6 +272,28 @@ The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
 - The sticky band carries identity and freshness only; depth and filters
   scroll with the page, so the band stays short on a 390px screen.
 
+### Expedição — backlog evolution as small multiples (EXPEDICAO-UX-2)
+
+- One tile per **account**, titled by its **brand** (canonical label from
+  `lib/filters/brands.ts`); the account id lives only in the point tooltip
+  and in the "Ver dados" table. Two accounts of one brand stay two tiles
+  ("conta 1 de 2"), never summed. A missing brand reads "Marca não
+  informada".
+- Tiles are tinted areas (`bg-raised`), not bordered cards inside the panel.
+- Shared, real time axis across tiles; a missing hour breaks the line; nothing
+  is drawn before an account's first point. Axis ends are the channel's first
+  and last point.
+- Default scale is per tile ("Volume absoluto", range written on the tile) so
+  small accounts are not flat lines; "Variação %" puts every tile on one
+  common axis anchored at the first point.
+- Each tile states its reading in words: last value, change in the period,
+  "Sem variação no período" or "Histórico insuficiente — um ponto só".
+- When history is shorter than the selected window, the panel says so:
+  "Histórico disponível desde … Exibindo N h disponíveis das W h
+  selecionadas."
+- Series colour is the accent, never a status colour. Hand-drawn SVG; no
+  chart library in this block.
+
 ### Sidebar
 
 - 240px expanded, 64px icon rail.

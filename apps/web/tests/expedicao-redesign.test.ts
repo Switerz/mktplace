@@ -48,8 +48,10 @@ import { lerCanalExpedicao } from "../src/lib/expedicao-canal.ts";
 
 const RAIZ = join(import.meta.dirname, "..");
 const CLIENTE = readFileSync(join(RAIZ, "app/expedicao/ExpedicaoClient.tsx"), "utf8");
+// EXPEDICAO-UX-2: o grafico unico (recharts) virou small multiples em SVG
+// proprio. As garantias de grafico seguem para o componente novo.
 const GRAFICO = readFileSync(
-  join(RAIZ, "src/components/expedicao/TendenciaChart.tsx"),
+  join(RAIZ, "src/components/expedicao/EvolucaoPorMarca.tsx"),
   "utf8",
 );
 // EXPEDICAO-UX-UNIFICADA-1: o seletor de canal e a flag do ML foram para a
@@ -299,7 +301,11 @@ test("hora sem ponto vira lacuna, nunca zero", () => {
 });
 
 test("o grafico nao costura lacunas", () => {
-  assert.match(GRAFICO, /connectNulls=\{false\}/);
+  // Antes: `connectNulls={false}` no recharts. Agora a linha e' desenhada por
+  // TRECHO continuo; hora sem ponto separa dois trechos (ver
+  // `montarEvolucaoPorMarca` em expedicao-ux2.test.ts).
+  assert.match(GRAFICO, /serie\.trechos\.map\(/);
+  assert.equal((GRAFICO.match(/<polyline/g) ?? []).length, 1, "uma linha, por trecho");
 });
 
 test("a tabela acessivel da tendencia continua disponivel", () => {
@@ -550,6 +556,7 @@ test("foco visivel em todo controle interativo novo", () => {
 test("verde, ambar e vermelho ficam reservados para ESTADO", () => {
   // As cores das series do grafico sao por conta, e conta nao e' estado.
   assert.doesNotMatch(GRAFICO, /#16a34a|#22c55e|#dc2626|#ef4444|#f59e0b/);
+  assert.doesNotMatch(GRAFICO, /(stroke|fill)-(ok|warn|crit)\b/);
 });
 
 test("a tela nao cria um segundo landmark nem um segundo h1", () => {
@@ -557,10 +564,12 @@ test("a tela nao cria um segundo landmark nem um segundo h1", () => {
   assert.doesNotMatch(CLIENTE, /<h1/);
 });
 
-test("o recharts fica fora do bundle inicial", () => {
-  assert.match(CLIENTE, /dynamic\(\(\) => import\("@\/components\/expedicao\/TendenciaChart"\)/);
-  assert.match(CLIENTE, /ssr: false/);
+test("a evolucao nao carrega o recharts", () => {
+  // EXPEDICAO-UX-2: poucos pontos por cartao, SVG proprio. O import dinamico
+  // existia so' para tirar o recharts do bundle inicial; sem recharts, sai.
   assert.doesNotMatch(CLIENTE, /from "recharts"/);
+  assert.doesNotMatch(GRAFICO, /from "recharts"/);
+  assert.match(CLIENTE, /import EvolucaoPorMarca from "@\/components\/expedicao\/EvolucaoPorMarca";/);
 });
 
 test("a fila nao exibe o modo de carga constante da API", () => {

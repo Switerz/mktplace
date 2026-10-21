@@ -520,6 +520,32 @@ convida a decidir sobre estado vencido.
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
 
+### Consumo da tendencia na tela (EXPEDICAO-UX-2, 21/10/2026)
+
+`GET /expedicao/trend` ja' entrega o mapeamento conta -> marca: cada ponto traz
+`shop_account` e `brand`. A tela NAO mantem relacao conta -> marca propria;
+usa so' o rotulo de exibicao da marca (`lib/filters/brands.ts`). Nenhuma
+mudanca de contrato foi necessaria.
+
+- **Uma serie por conta, titulada pela marca.** Duas contas da mesma marca
+  NAO sao somadas: viram dois cartoes, "conta 1 de 2" e "conta 2 de 2", na
+  ordem do identificador. O identificador aparece so' no tooltip e na tabela
+  "Ver dados". `brand` nulo ou vazio vira "Marca nao informada".
+- **Nada e' fabricado.** Hora sem ponto quebra a linha; antes do primeiro
+  ponto de uma conta nao ha linha; nada vira zero.
+- **Cobertura real.** `from_hour`/`to_hour` da resposta sao comparados com
+  `window_hours`. Se o historico cobre menos que `window_hours - 3` h, a tela
+  escreve "Historico disponivel desde ..." e "Exibindo N h disponiveis das W h
+  selecionadas". A folga de 3 h absorve a cadencia da DAG (2 h) somada ao
+  balde horario; sem ela, uma janela de 24 h bem servida pareceria parcial.
+- **Unicas contas no frontend:** diferenca entre o ultimo e o primeiro ponto
+  da MESMA conta (absoluta e percentual; percentual indisponivel quando o
+  primeiro ponto e' zero) e a escala de cada cartao.
+
+Limitacao: a resposta so' cobre a janela pedida. "Historico disponivel desde"
+significa "primeiro ponto dentro desta janela"; a API nao informa se existe
+historico mais antigo fora dela.
+
 ### Pendencia de contrato: modo de publicacao (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026)
 
 **O contrato nao consegue dizer que uma fotografia foi agendada.** Medido no
