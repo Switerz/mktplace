@@ -46,6 +46,42 @@ export function urlComVisao(href: string, visao: Visao): string {
 }
 
 // ---------------------------------------------------------------------------
+// Marca — filtro comum aos tres canais (EXPEDICAO-UX-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * `?marca=` e' UMA marca (slug), ou nenhuma. Atravessa a troca de canal: a
+ * marca e' a mesma entidade nos tres. Valor fora do formato de slug e'
+ * ignorado — nunca vira requisicao.
+ */
+export const PARAM_MARCA = "marca";
+const SLUG_MARCA = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+export function lerMarca(search: string): string | null {
+  const v = new URLSearchParams(search).get(PARAM_MARCA);
+  return v && SLUG_MARCA.test(v) ? v : null;
+}
+
+export function urlComMarca(href: string, marca: string | null): string {
+  const url = new URL(href);
+  if (marca) url.searchParams.set(PARAM_MARCA, marca);
+  else url.searchParams.delete(PARAM_MARCA);
+  return url.toString();
+}
+
+/**
+ * Acrescenta `brands=<marca>` a uma query ja' montada, sem tocar no resto.
+ * As rotas `/expedicao/trend` e `/expedicao/tiktok` recortam pela marca no
+ * SERVIDOR; a tela nao filtra serie nenhuma por conta propria.
+ */
+export function comMarcaNaQuery(query: string, marca: string | null): string {
+  if (!marca) return query;
+  const p = new URLSearchParams(query);
+  p.set("brands", marca);
+  return p.toString();
+}
+
+// ---------------------------------------------------------------------------
 // Tipos de apresentacao que os dois paineis preenchem
 // ---------------------------------------------------------------------------
 

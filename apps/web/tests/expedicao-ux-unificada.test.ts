@@ -129,7 +129,7 @@ test("trocar de canal pelo teclado nao derruba o foco na travessia fila <-> TikT
 test("a casca nao busca nada e so' monta o corpo do canal certo", () => {
   assert.ok(!CASCA.includes("fetch("));
   assert.match(CASCA, /ehCanalDaFila\(canal\) \? \(\s*<ExpedicaoClient/);
-  assert.match(CASCA, /<TikTokDispatchPanel seletorCanal=\{seletorCanal\}/);
+  assert.match(CASCA, /<TikTokDispatchPanel\s+seletorCanal=\{seletorCanal\}/);
   // um canal so' => sem seletor: cromo vazio nao ajuda ninguem
   assert.match(CASCA, /opcoes\.length > 1 \?/);
 });
@@ -177,7 +177,7 @@ test("Shopee: vencidos vem primeiro, com a conta que mais concentra", () => {
   assert.deepEqual(itens.map((i) => i.chave), ["overdue", "due24h", "stalled"]);
   assert.equal(itens[0].tom, "critico");
   assert.match(itens[0].texto, /^24 pedido\(s\) já passaram do prazo da Shopee/);
-  assert.match(itens[0].texto, /Maior concentração: barbours, com 19\./);
+  assert.match(itens[0].texto, /Maior concentração: BARBOURS, com 19\./);
   assert.match(itens[1].texto, /^329 pedido\(s\) vencem nas próximas 24 h/);
 });
 
@@ -193,8 +193,10 @@ test("Mercado Livre: nunca pergunta por prazo, e 48h e' limiar interno", () => {
     assert.doesNotMatch(i.texto, /vencid|prazo da Shopee|SLA/i, i.texto);
   }
   assert.match(itens[0].texto, /limiar interno da Torre, não prazo do marketplace/);
-  // conta do ML e' seller_id: a frase nomeia a marca E a conta
-  assert.match(itens[0].texto, /kokeshi \(conta 2227056661\), com 169/);
+  // EXPEDICAO-UX-3: a marca e' a identidade da frase; o seller_id so'
+  // aparece quando a marca tem mais de uma conta.
+  assert.match(itens[0].texto, /Maior concentração: KOKESHI, com 169\./);
+  assert.doesNotMatch(itens[0].texto, /2227056661/);
 });
 
 test("nada aceso nao vira 'tudo certo' em verde", () => {
@@ -220,7 +222,7 @@ test("concentracao e' selecao, nao soma: empate fica com a primeira da API", () 
     ],
     "shopee",
   );
-  assert.match(itens[0].texto, /Maior concentração: a, com 5\./);
+  assert.match(itens[0].texto, /Maior concentração: A, com 5\./);
   assert.doesNotMatch(itens[0].texto, /com 10\./, "nenhuma conta e' somada a outra");
 });
 
@@ -393,9 +395,20 @@ function ramos(src: string): { gestor: string; detalhe: string } {
 
 test("fila: o gestor ve narrativa e concentracao; o detalhe ve a fila", () => {
   const { gestor, detalhe } = ramos(CLIENTE.replace(/\r\n/g, "\n"));
-  for (const s of ["<AtencaoAgora", "{faixaPrincipal}", "{painelEvolucao}", "painelContas(", "<ConviteAoDetalhe"]) {
+  // EXPEDICAO-UX-3: risco atual (com a lista de atencao dentro), prazo,
+  // evolucao e concentracao — a mesma ordem do TikTok.
+  for (const s of ["{secaoRisco}", "{secaoPrazo}", "{painelEvolucao}", "painelContas(", "<ConviteAoDetalhe"]) {
     assert.ok(gestor.includes(s), `gestor sem ${s}`);
   }
+  assert.ok(
+    gestor.indexOf("{secaoRisco}") < gestor.indexOf("{secaoPrazo}") &&
+      gestor.indexOf("{secaoPrazo}") < gestor.indexOf("{painelEvolucao}") &&
+      gestor.indexOf("{painelEvolucao}") < gestor.indexOf("painelContas("),
+    "ordem: risco, prazo, evolucao, concentracao",
+  );
+  assert.match(CLIENTE, /const secaoRisco = \([\s\S]*?<AtencaoAgora\s+itens=\{atencao\}/);
+  // marca de varias contas: a lista vazia diz POR QUE esta' vazia
+  assert.match(CLIENTE, /a leitura de atenção fica por conta/);
   assert.ok(!gestor.includes("{painelFila}"), "a fila paginada nao e' visao do gestor");
   for (const s of ["{faixaPrincipal}", "Indicadores secundários", "{painelMaisCriticos}", "{painelFila}", "{painelFonte}", "painelContas("]) {
     assert.ok(detalhe.includes(s), `detalhe sem ${s}`);
@@ -404,9 +417,16 @@ test("fila: o gestor ve narrativa e concentracao; o detalhe ve a fila", () => {
 
 test("TikTok: LDR no gestor, fluxo por pagamento so' no detalhe", () => {
   const { gestor, detalhe } = ramos(TIKTOK.replace(/\r\n/g, "\n"));
-  for (const s of ["<AtencaoAgora", "{secaoLdr}", "{painelEvolucao}", "painelLojas(", "<ConviteAoDetalhe"]) {
+  for (const s of ["{secaoRisco}", "{secaoLdr}", "{painelEvolucao}", "painelLojas(", "<ConviteAoDetalhe"]) {
     assert.ok(gestor.includes(s), `gestor sem ${s}`);
   }
+  assert.ok(
+    gestor.indexOf("{secaoRisco}") < gestor.indexOf("{secaoLdr}") &&
+      gestor.indexOf("{secaoLdr}") < gestor.indexOf("{painelEvolucao}") &&
+      gestor.indexOf("{painelEvolucao}") < gestor.indexOf("painelLojas("),
+    "mesma ordem da fila: risco, prazo, evolucao, concentracao",
+  );
+  assert.match(TIKTOK, /const secaoRisco = ldr \? \([\s\S]*?<AtencaoAgora itens=\{atencao\} \/>/);
   // LDR e fluxo por pagamento nao dividem a primeira dobra.
   assert.ok(!gestor.includes("painelFluxo("));
   assert.ok(!gestor.includes("{painelCoortes}"));

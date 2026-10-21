@@ -24,6 +24,7 @@
  * opcional e NUNCA vira link para o marketplace. A tela nao tenta reconstruir
  * o identificador real nem exibe coluna vazia quando ele nao vem.
  */
+import { brandLabel } from "./filters/brands.ts";
 import {
   consolidarQualidade,
   type BarraQualidade,
@@ -67,6 +68,10 @@ export const EXPLICACAO_LIMIAR_48H =
   "Limiar operacional interno da Torre, nao e' SLA do marketplace: o prazo " +
   "contratual aparece em Vencidos / Vence em 24h, que vem do ship_by_date da " +
   "Shopee.";
+/** O mesmo limiar num canal SEM prazo publicado (Mercado Livre). */
+export const EXPLICACAO_LIMIAR_48H_SEM_PRAZO =
+  "Limiar operacional interno da Torre, nao e' SLA do marketplace. O canal nao " +
+  "publica prazo de envio: nao ha vencidos a comparar.";
 
 /** Acima disto a fotografia e' considerada velha e a tela avisa. */
 export const SNAPSHOT_VELHO_HORAS = 6;
@@ -500,6 +505,11 @@ export interface Kpi {
    * "N/D", nunca "0". Zero e' uma medicao; ausencia nao e'.
    */
   valorTexto?: string;
+  /**
+   * Uma linha para o cartao em destaque (EXPEDICAO-UX-3). A `nota` completa
+   * continua no tooltip: nada e' apagado, so' sai da primeira dobra.
+   */
+  notaCurta?: string;
 }
 
 /**
@@ -562,7 +572,10 @@ export function montarKpis(
       rotulo: ROTULO_LIMIAR_48H,
       valor: v(t?.over_48h_count),
       alerta: (t?.over_48h_count ?? 0) > 0,
-      nota: EXPLICACAO_LIMIAR_48H,
+      // A nota e' do CANAL: a da Shopee cita "Vencidos" e `ship_by_date`,
+      // que nao existem no Mercado Livre (achado do QA do EXPEDICAO-UX-3).
+      nota: temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
+      notaCurta: "Limiar interno da Torre, não é SLA do marketplace.",
     },
     {
       chave: "stalled",
@@ -570,6 +583,7 @@ export function montarKpis(
       valor: v(t?.stalled_count),
       alerta: (t?.stalled_count ?? 0) > 0,
       nota: "Uniao de lentos e zumbis — nunca a soma dos dois.",
+      notaCurta: "Lentos ou zumbis, sem contar duas vezes.",
     },
     { chave: "slow", rotulo: "Lentos vs baseline", valor: v(t?.slow_count), alerta: false },
     { chave: "zombie", rotulo: "Zumbis", valor: v(t?.zombie_count), alerta: (t?.zombie_count ?? 0) > 0 },
@@ -893,10 +907,14 @@ function inteiro(n: number): string {
 }
 
 /** Shopee: a conta E' a loja. Mercado Livre: a conta e' um `seller_id`. */
-function nomeDaConta(c: ResumoConta): string {
-  return c.brand && c.brand !== c.shop_account
-    ? `${c.brand} (conta ${c.shop_account})`
-    : c.shop_account;
+/**
+ * A MARCA e' a identidade na frase. A conta so' aparece quando a marca tem mais
+ * de uma no recorte — senao o `seller_id` do ML tomava a frase do gestor.
+ */
+function nomeDaConta(c: ResumoConta, contas: ResumoConta[]): string {
+  if (!c.brand) return `conta ${c.shop_account}`;
+  const irmas = contas.filter((x) => x.brand === c.brand).length;
+  return irmas > 1 ? `${brandLabel(c.brand)} (conta ${c.shop_account})` : brandLabel(c.brand);
 }
 
 type MedidaDeConta =
@@ -915,7 +933,7 @@ function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
   for (const c of contas) {
     if (c[medida] > 0 && (maior === null || c[medida] > maior[medida])) maior = c;
   }
-  return maior ? ` Maior concentração: ${nomeDaConta(maior)}, com ${inteiro(maior[medida])}.` : "";
+  return maior ? ` Maior concentração: ${nomeDaConta(maior, contas)}, com ${inteiro(maior[medida])}.` : "";
 }
 
 /**
@@ -1067,7 +1085,7 @@ export function montarMapaDeRisco(
     nota: temPrazo
       ? "Categorias mutuamente exclusivas: somadas, fecham o backlog da conta."
       : "Backlog, acima de 48h e travados se sobrepõem e NÃO são somados. " +
-        EXPLICACAO_LIMIAR_48H,
+        EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
   };
 }
 
@@ -1214,3 +1232,167 @@ export function montarTimeline(
       acimaDoLimiar: l.operational_age_status === "over_48h",
     }));
 }
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-UX-3 — a hierarquia gerencial comum aos tres canais
+// ---------------------------------------------------------------------------
+
+/** Uma linha, abaixo do cabecalho: o que esta tela mede neste canal. */
+export const DEFINICAO_FILA: Record<Canal, string> = {
+  shopee:
+    "Pedidos pagos aguardando expedição, fotografados a cada publicação, com o " +
+    "prazo de envio publicado pela Shopee (ship_by_date).",
+  mercadolivre:
+    "Pedidos pagos aguardando expedição, fotografados a cada publicação. O " +
+    "Mercado Livre não publica prazo de envio: o risco é lido pela idade da fila.",
+};
+
+/**
+ * "Risco atual" — os indicadores que o CANAL sustenta, na ordem da leitura.
+ * O Mercado Livre nao tem prazo, entao nao ha "vencidos" nem "vence em 24h":
+ * a ausencia e' explicada na secao de prazo, nao em cartoes N/D.
+ */
+export const KPIS_RISCO_ATUAL: Record<Canal, readonly string[]> = {
+  shopee: ["backlog", "overdue", "due24h", "over48h", "stalled", "marcas_alerta"],
+  mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
+};
+
+export function montarRiscoAtual(
+  t: Totais | null,
+  frescor: FrescorMarca[],
+  canal: Canal = CANAL_PADRAO,
+): Kpi[] {
+  const todos = montarKpis(t, frescor, canal);
+  return KPIS_RISCO_ATUAL[canal]
+    .map((chave) => todos.find((k) => k.chave === chave))
+    .filter((k): k is Kpi => k !== undefined);
+}
+
+const MEDIDAS: readonly (keyof Totais)[] = [
+  "backlog_count",
+  "overdue_count",
+  "due_within_24h_count",
+  "on_time_count",
+  "deadline_unavailable_count",
+  "over_48h_count",
+  "slow_count",
+  "zombie_count",
+  "stalled_count",
+];
+
+export interface RecorteMarca {
+  marca: string | null;
+  /**
+   * Totais do recorte. Sem marca: `totals` da API. Com marca de UMA conta: a
+   * linha daquela conta, que a API ja' publica. Com marca de varias contas:
+   * `null` — a tela nao soma contas (ver `docs/expedicao_contrato.md`).
+   */
+  totais: Totais | null;
+  contas: ResumoConta[];
+  frescor: FrescorMarca[];
+  /** A marca nao tem conta nesta fotografia (ou esta' fora da cobertura). */
+  semConta: boolean;
+  /** A marca tem mais de uma conta: os indicadores ficam por conta. */
+  variasContas: boolean;
+  foraDaCobertura: boolean;
+}
+
+/**
+ * Recorte por marca da FILA.
+ *
+ * `GET /expedicao?brands=` recorta so' a LISTA de pedidos: `totals`,
+ * `accounts`, `freshness` e `coverage` continuam sendo do canal inteiro. Por
+ * isso o recorte e' feito aqui por SELECAO — a linha de cada conta que a API
+ * ja' publica em `accounts` —, nunca por soma. Uma marca com duas contas fica
+ * sem total da marca ate' a API recortar `totals` no servidor.
+ */
+export function recortarPorMarca(r: RespostaExpedicao | null, marca: string | null): RecorteMarca {
+  const contas = r?.accounts ?? [];
+  const frescor = r?.freshness ?? [];
+  if (!marca) {
+    return {
+      marca: null,
+      totais: r?.totals ?? null,
+      contas,
+      frescor,
+      semConta: false,
+      variasContas: false,
+      foraDaCobertura: false,
+    };
+  }
+  const daMarca = contas.filter((c) => c.brand === marca);
+  const unica = daMarca.length === 1 ? daMarca[0] : null;
+  return {
+    marca,
+    totais: unica
+      ? (Object.fromEntries(MEDIDAS.map((m) => [m, unica[m]])) as unknown as Totais)
+      : null,
+    contas: daMarca,
+    frescor: frescor.filter((f) => f.brand === marca),
+    semConta: daMarca.length === 0,
+    variasContas: daMarca.length > 1,
+    foraDaCobertura: Boolean(r?.coverage?.brands_not_covered.includes(marca)),
+  };
+}
+
+export interface FaixaPrazo {
+  chave: "overdue" | "due24h" | "on_time" | "sem_prazo";
+  rotulo: string;
+  valor: number;
+}
+
+/**
+ * Prazo da Shopee pela SITUACAO de cada pedido em fila (do `ship_by_date`).
+ * E' uma particao do backlog — o pipeline garante a soma exata —, entao pode
+ * ser desenhada empilhada. NAO e' LDR: a fotografia so' tem pedidos em aberto.
+ */
+export function faixasDePrazo(t: Totais | null): FaixaPrazo[] | null {
+  if (!t) return null;
+  return [
+    { chave: "overdue", rotulo: "Vencidos", valor: t.overdue_count },
+    { chave: "due24h", rotulo: "Vence em 24 h", valor: t.due_within_24h_count },
+    { chave: "on_time", rotulo: "No prazo", valor: t.on_time_count },
+    { chave: "sem_prazo", rotulo: "Sem prazo publicado", valor: t.deadline_unavailable_count },
+  ];
+}
+
+/** Por que a Shopee ainda nao tem LDR nesta tela — dito na propria secao. */
+export const SEM_LDR_SHOPEE =
+  "Taxa de atraso (LDR) da Shopee ainda não calculada: a fotografia guarda só os " +
+  "pedidos em aberto. A fonte tem o prazo e a coleta de cada pedido; falta a série " +
+  "diária por vencimento no backend.";
+
+export const SEM_PRAZO_CANAL_ML =
+  "Prazo indisponível pelo canal: o Mercado Livre não publica prazo de envio na " +
+  "fonte. Não há vencidos nem LDR a medir; o risco é lido pela idade da fila.";
+
+export interface Envelhecimento {
+  acima48h: number;
+  backlog: number;
+  /** Pedido mais antigo em fila, entre as marcas do recorte. */
+  maisAntigo: { marca: string; horas: number } | null;
+}
+
+/** Envelhecimento da fila: contagens da API e o pedido mais antigo por marca. */
+export function envelhecimentoDaFila(t: Totais | null, frescor: FrescorMarca[]): Envelhecimento | null {
+  if (!t) return null;
+  let maisAntigo: Envelhecimento["maisAntigo"] = null;
+  for (const f of frescor) {
+    if (f.oldest_row_age_hours === null) continue;
+    if (!maisAntigo || f.oldest_row_age_hours > maisAntigo.horas) {
+      maisAntigo = { marca: f.brand, horas: f.oldest_row_age_hours };
+    }
+  }
+  return { acima48h: t.over_48h_count, backlog: t.backlog_count, maisAntigo };
+}
+
+/**
+ * `source_advanced` em lingua de gestor. E' METADADO: `false` quer dizer "a
+ * fonte nao trouxe nada novo desde a leitura anterior", nunca falha.
+ */
+export function rotuloFonte(avancou: boolean): string {
+  return avancou ? "Recebeu atualização" : "Sem atualização nova";
+}
+export const EXPLICACAO_FONTE =
+  "Se a fonte trouxe dado novo desde a leitura anterior. “Sem atualização nova” não é " +
+  "falha: a fonte pode simplesmente não ter mudado.";

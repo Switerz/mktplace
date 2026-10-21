@@ -272,27 +272,33 @@ The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
 - The sticky band carries identity and freshness only; depth and filters
   scroll with the page, so the band stays short on a 390px screen.
 
-### Expedição — backlog evolution as small multiples (EXPEDICAO-UX-2)
+### Expedição — one managerial hierarchy for three channels (EXPEDICAO-UX-3)
 
-- One tile per **account**, titled by its **brand** (canonical label from
-  `lib/filters/brands.ts`); the account id lives only in the point tooltip
-  and in the "Ver dados" table. Two accounts of one brand stay two tiles
-  ("conta 1 de 2"), never summed. A missing brand reads "Marca não
-  informada".
-- Tiles are tinted areas (`bg-raised`), not bordered cards inside the panel.
-- Shared, real time axis across tiles; a missing hour breaks the line; nothing
-  is drawn before an account's first point. Axis ends are the channel's first
-  and last point.
-- Default scale is per tile ("Volume absoluto", range written on the tile) so
-  small accounts are not flat lines; "Variação %" puts every tile on one
-  common axis anchored at the first point.
-- Each tile states its reading in words: last value, change in the period,
-  "Sem variação no período" or "Histórico insuficiente — um ponto só".
-- When history is shorter than the selected window, the panel says so:
-  "Histórico disponível desde … Exibindo N h disponíveis das W h
-  selecionadas."
-- Series colour is the accent, never a status colour. Hand-drawn SVG; no
-  chart library in this block.
+Same section titles, same order, on Shopee, Mercado Livre and TikTok Shop;
+each channel shows only what its source sustains.
+
+1. **Header** — channel, photo/series time, written state ("Atualizada" /
+   "Desatualizada", with age when the API publishes it), source watermark
+   (TikTok) and one line defining the measurement. Brand filter
+   (`?marca=`, shared by the three channels) and depth live in the controls
+   row.
+2. **Risco atual** — KPI strip plus "O que exige atenção agora". Shopee: six
+   tiles (backlog, vencidos, vence em 24 h, acima de 48 h, travados, marcas
+   em alerta). ML: four — no deadline tiles at all. TikTok: pendentes
+   vencidos, vencem hoje/amanhã, pendentes no prazo, lojas acima da meta.
+3. **Prazo** — Shopee: backlog partitioned by deadline status (ship_by_date),
+   plus the sentence that LDR is not computed yet. ML: "Prazo indisponível
+   pelo canal" and queue ageing. TikTok: LDR, with collection and dispatch as
+   separate events.
+4. **Evolução** — queue: a compact table, one row per account titled by
+   brand (Backlog atual · Variação · Acima de 48 h · Travados · Tendência).
+   Sparklines in neutral ink, no written scale; a constant series reads
+   "Estável em N"; a percentage only with base ≥ 20 and ≥ 21 h of history;
+   short history reads "desde o início da série". TikTok: the daily chart by
+   due date.
+5. **Concentração por marca** — brand first; the account id is a small
+   secondary line only when it differs from the brand. "Fonte avançou"
+   became "Recebeu atualização" / "Sem atualização nova".
 
 ### Sidebar
 

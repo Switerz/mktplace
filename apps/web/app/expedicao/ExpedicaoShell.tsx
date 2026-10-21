@@ -45,7 +45,14 @@ import {
   urlDoCanal,
   type CanalExpedicao,
 } from "@/lib/expedicao-canal";
-import { VISAO_PADRAO, lerVisao, urlComVisao, type Visao } from "@/lib/expedicao-ux";
+import {
+  VISAO_PADRAO,
+  lerMarca,
+  lerVisao,
+  urlComMarca,
+  urlComVisao,
+  type Visao,
+} from "@/lib/expedicao-ux";
 
 /**
  * Flags de canal, escritas INLINE: o Next troca `process.env.NEXT_PUBLIC_*`
@@ -73,11 +80,15 @@ export default function ExpedicaoShell() {
    */
   const [canal, setCanal] = useState<CanalExpedicao>("shopee");
   const [visao, setVisao] = useState<Visao>(VISAO_PADRAO);
+  // EXPEDICAO-UX-3: a marca e' a mesma entidade nos tres canais, entao o
+  // filtro mora aqui e atravessa a troca de canal, como a profundidade.
+  const [marca, setMarca] = useState<string | null>(null);
   const [pronta, setPronta] = useState(false);
 
   const lerDaUrl = useCallback(() => {
     setCanal(lerCanalExpedicao(window.location.search, FLAGS));
     setVisao(lerVisao(window.location.search));
+    setMarca(lerMarca(window.location.search));
   }, []);
 
   useEffect(() => {
@@ -125,6 +136,11 @@ export default function ExpedicaoShell() {
     window.history.replaceState(null, "", urlComVisao(window.location.href, nova));
   }, []);
 
+  const trocarMarca = useCallback((nova: string | null) => {
+    setMarca(nova);
+    window.history.replaceState(null, "", urlComMarca(window.location.href, nova));
+  }, []);
+
   const opcoes = canaisHabilitados(FLAGS).map((c) => ({
     valor: c,
     texto: ROTULO_CANAL_EXPEDICAO[c],
@@ -164,8 +180,16 @@ export default function ExpedicaoShell() {
       seletorCanal={seletorCanal}
       visao={visao}
       aoTrocarVisao={trocarVisao}
+      marca={marca}
+      aoTrocarMarca={trocarMarca}
     />
   ) : (
-    <TikTokDispatchPanel seletorCanal={seletorCanal} visao={visao} aoTrocarVisao={trocarVisao} />
+    <TikTokDispatchPanel
+      seletorCanal={seletorCanal}
+      visao={visao}
+      aoTrocarVisao={trocarVisao}
+      marca={marca}
+      aoTrocarMarca={trocarMarca}
+    />
   );
 }

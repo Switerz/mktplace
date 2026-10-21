@@ -8,7 +8,7 @@
  * atencao da fila sao contagens da API; os do TikTok sao os alertas que a API
  * ja' escreveu. Nenhuma destas pecas conhece canal.
  */
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 
 import Panel from "@/components/ui/Panel";
 import type { ItemAtencao, TomAtencao } from "@/lib/expedicao-ux";
@@ -46,10 +46,13 @@ const ROTULO: Record<TomAtencao, string> = {
 export function AtencaoAgora({
   itens,
   descricao,
+  semItens = "Nenhum alerta publicado para este recorte.",
 }: {
   itens: ItemAtencao[];
   /** Uma linha. Com a fonte velha, diz de QUANDO e' o "agora". */
   descricao?: ReactNode;
+  /** Por que a lista esta' vazia — "nenhum alerta" so' quando e' verdade. */
+  semItens?: string;
 }) {
   return (
     <Panel titulo="O que exige atenção agora" descricao={descricao}>
@@ -68,31 +71,36 @@ export function AtencaoAgora({
           ))}
         </ul>
       ) : (
-        <p className="text-sm text-ink-muted">Nenhum alerta publicado para este recorte.</p>
+        <p className="text-sm text-ink-muted">{semItens}</p>
       )}
     </Panel>
   );
 }
 
-/** Faixa de KPIs: quatro em destaque, ou a faixa secundaria densa. */
+/**
+ * Faixa de KPIs: quatro em destaque, seis (o "Risco atual" da Shopee) ou a
+ * faixa secundaria densa.
+ */
 export function FaixaKpis({
   rotulo,
   secundaria = false,
+  colunas = 4,
   children,
 }: {
   rotulo: string;
   secundaria?: boolean;
+  colunas?: 3 | 4 | 6;
   children: ReactNode;
 }) {
+  const grade = secundaria
+    ? "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5"
+    : colunas === 6
+      ? "grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6"
+      : colunas === 3
+        ? "grid grid-cols-2 gap-2 sm:grid-cols-3"
+        : "grid grid-cols-2 gap-2 lg:grid-cols-4";
   return (
-    <section
-      aria-label={rotulo}
-      className={
-        secundaria
-          ? "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5"
-          : "grid grid-cols-2 gap-2 lg:grid-cols-4"
-      }
-    >
+    <section aria-label={rotulo} className={grade}>
       {children}
     </section>
   );
@@ -134,5 +142,39 @@ export function ConviteAoDetalhe({
         Abrir detalhe operacional
       </button>
     </div>
+  );
+}
+
+/**
+ * EXPEDICAO-UX-3 — a unidade da hierarquia comum: "Risco atual", "Prazo",
+ * "Evolução", "Concentração". O MESMO titulo e a mesma ordem nos tres canais;
+ * o conteudo e' do contrato de cada um.
+ */
+export function SecaoGerencial({
+  titulo,
+  descricao,
+  acao,
+  children,
+}: {
+  titulo: string;
+  /** Uma linha: o que esta secao mede neste canal. */
+  descricao?: ReactNode;
+  acao?: ReactNode;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="min-w-0">
+          <h3 id={id} className="text-sm font-semibold text-ink">
+            {titulo}
+          </h3>
+          {descricao ? <p className="text-xs leading-snug text-ink-muted">{descricao}</p> : null}
+        </div>
+        {acao}
+      </div>
+      {children}
+    </section>
   );
 }

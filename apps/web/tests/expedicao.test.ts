@@ -12,9 +12,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  EXPLICACAO_FONTE,
   EXPLICACAO_LIMIAR_48H,
   FILTROS_PADRAO,
   JANELA_MAX_HORAS,
+  rotuloFonte,
   LIMIAR_OPERACIONAL_HORAS,
   LIMIT_MAX,
   ORDENACOES,
@@ -316,8 +318,15 @@ test("source_advanced nao altera veredito nenhum", () => {
   assert.equal(est, "ok");
   const kpis = montarKpis(comFalse.totals, comFalse.freshness);
   assert.equal(kpis.find((k) => k.chave === "marcas_alerta")?.valor, 0);
-  // e a tela o rotula como metadado
-  assert.ok(fonte("app/expedicao/ExpedicaoClient.tsx").includes("(metadado)"));
+  // e a tela o mostra como METADADO em lingua de gestor (EXPEDICAO-UX-3):
+  // "Fonte avançou: não (metadado)" virou "Sem atualização nova", com a
+  // explicacao de que isso nao e' falha.
+  const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
+  assert.match(tela, /rotuloFonte\(a\.source_advanced\)/);
+  assert.equal(rotuloFonte(false), "Sem atualização nova");
+  assert.equal(rotuloFonte(true), "Recebeu atualização");
+  assert.match(EXPLICACAO_FONTE, /não é\s+falha/);
+  assert.doesNotMatch(tela, /Fonte avançou/);
 });
 
 test("snapshot antigo e sinalizado sem mudar os numeros", () => {

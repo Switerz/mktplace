@@ -57,9 +57,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
-import CabecalhoExpedicao from "@/components/expedicao/CabecalhoExpedicao";
+import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
-import { AtencaoAgora, ConviteAoDetalhe, FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
+import {
+  AtencaoAgora,
+  ConviteAoDetalhe,
+  FaixaKpis,
+  SecaoGerencial,
+} from "@/components/expedicao/SecoesExpedicao";
 import Chip from "@/components/ui/Chip";
 import Disclosure from "@/components/ui/Disclosure";
 import KpiTile from "@/components/ui/KpiTile";
@@ -72,6 +77,7 @@ import type { Visao } from "@/lib/expedicao-ux";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 
 import {
+  DEFINICAO_TIKTOK,
   EVENTOS,
   EVENTO_PADRAO,
   EXPLICACAO_EVENTO,
@@ -93,7 +99,7 @@ import {
   contarCriticos,
   contarForaDaMeta,
   descreverIncidente,
-  explicarIndisponivel,
+  explicarIndisponivelComMarca,
   formatarDiaCurto,
   formatarDiaLongo,
   formatarInteiro,
@@ -254,10 +260,15 @@ export default function TikTokDispatchPanel({
   seletorCanal,
   visao = "gestor",
   aoTrocarVisao,
+  marca = null,
+  aoTrocarMarca,
 }: {
   seletorCanal?: ReactNode;
   visao?: Visao;
   aoTrocarVisao?: (v: Visao) => void;
+  /** EXPEDICAO-UX-3: marca da casca; vai para a API como `brands`. */
+  marca?: string | null;
+  aoTrocarMarca?: (m: string | null) => void;
 }) {
   const [evento, setEvento] = useState<Evento>(EVENTO_PADRAO);
   const [inicial] = useState(janelaInicial);
@@ -268,7 +279,7 @@ export default function TikTokDispatchPanel({
   const [estado, setEstado] = useState<"carregando" | "ok" | "erro">("carregando");
   const [erro, setErro] = useState<string>("");
 
-  const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias)}`, [evento, dias]);
+  const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias, marca)}`, [evento, dias, marca]);
   // Com o campo livre a janela troca mais rapido: a resposta de uma janela
   // antiga que chega por ultimo NAO pode sobrescrever a atual.
   const urlVigente = useRef(url);
@@ -391,17 +402,57 @@ export default function TikTokDispatchPanel({
     </div>
   );
 
-  // 5. A REGUA — nas duas profundidades: e' o numero que responde se estamos
-  // dentro da referencia do TikTok.
+  // EXPEDICAO-UX-3 — "Risco atual": o que esta' pendente AGORA, com os
+  // mesmos campos que a LDR ja' publicava (nenhum novo, nenhum recalculado).
+  const secaoRisco = ldr ? (
+    <SecaoGerencial titulo="Risco atual" descricao={quando}>
+      <FaixaKpis rotulo="Risco atual">
+        <KpiTile
+          rotulo="Venceram e não saíram"
+          valor={formatarInteiro(ldr.pending_overdue)}
+          destaque
+          comparacao="Vencimentos da janela consultada, ainda sem o evento."
+          tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
+        />
+        <KpiTile
+          rotulo="Vencem hoje ou amanhã"
+          valor={formatarInteiro(ldr.pending_at_risk)}
+          destaque
+          comparacao="Ainda dá para tratar dentro do prazo."
+          tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
+        />
+        <KpiTile
+          rotulo="Pendentes no prazo"
+          valor={formatarInteiro(ldr.pending_on_time)}
+          destaque
+          comparacao="Pedidos ainda sem o evento, dentro do prazo."
+        />
+        {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
+        <KpiTile
+          rotulo="Lojas acima da meta"
+          valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
+          destaque
+          comparacao={
+            dados?.brands.length
+              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente · medição interna.`
+              : "Nenhuma loja com base suficiente no período."
+          }
+          tom={!dados?.brands.length ? "ausente" : piores.length > 0 ? "critico" : "neutro"}
+        />
+      </FaixaKpis>
+      <AtencaoAgora itens={atencao} />
+    </SecaoGerencial>
+  ) : null;
+
+  // "Prazo": a LDR, que so' o TikTok sustenta. Coleta e despacho continuam
+  // sendo eventos separados, escolhidos no cabecalho, com prazos diferentes.
   const secaoLdr = ldr ? (
-    <section aria-labelledby="tk-ldr-titulo" className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h3 id="tk-ldr-titulo" className="text-sm font-semibold text-ink">
-          {TITULO_LDR}
-        </h3>
-        {/* A ressalva fica COLADA no selo, nunca atras de um tooltip: o
-            numero sai desta tela para reuniao, e sem ela vira "o TikTok
-            nos penalizou". */}
+    <SecaoGerencial
+      titulo="Prazo"
+      descricao={`${TITULO_LDR} · evento: ${ROTULO_EVENTO[evento]}${sla ? ` (${sla} dia(s) útil(eis))` : ""}.`}
+      acao={
+        // A ressalva fica COLADA na secao, nunca atras de um tooltip: o numero
+        // sai desta tela para reuniao, e sem ela vira "o TikTok nos penalizou".
         <Disclosure rotulo="Como ler esta medição">
           <p>
             {EXPLICACAO_LDR}
@@ -410,7 +461,8 @@ export default function TikTokDispatchPanel({
           <p className="mt-1.5">{EXPLICACAO_META}</p>
           <p className="mt-1.5">{EXPLICACAO_EVENTO[evento]}</p>
         </Disclosure>
-      </div>
+      }
+    >
       {/* Periodo da RESPOSTA (`ldr.from`, `ldr.to`, `ldr.days`), nao do
           seletor. O prazo reconstruido fica colado a ele: e' a ressalva que
           qualifica TODOS os numeros desta faixa. */}
@@ -424,7 +476,7 @@ export default function TikTokDispatchPanel({
           ? " · prazo reconstruído da política de dias úteis — indicador interno"
           : ""}
       </p>
-      <FaixaKpis rotulo="Indicadores principais">
+      <FaixaKpis rotulo="Indicadores principais" colunas={3}>
         <KpiTile
           rotulo="LDR da janela"
           valor={formatarTaxa(ldr.rate)}
@@ -456,17 +508,8 @@ export default function TikTokDispatchPanel({
           comparacao={`${formatarInteiro(ldr.pending_overdue)} venceram e ainda não saíram.`}
           tom={semVencimentoFechado ? "ausente" : ldr.late > 0 ? "critico" : "bom"}
         />
-        <KpiTile
-          rotulo="Ainda dá para tratar"
-          valor={formatarInteiro(ldr.pending_at_risk)}
-          destaque
-          comparacao={`De ${formatarInteiro(
-            ldr.pending_on_time,
-          )} pendentes no prazo, estes vencem hoje ou amanhã.`}
-          tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
-        />
       </FaixaKpis>
-    </section>
+    </SecaoGerencial>
   ) : null;
 
   // 6. EVOLUCAO — quando comecou. Sem nenhum vencimento fechado o grafico
@@ -506,7 +549,7 @@ export default function TikTokDispatchPanel({
       semPadding
       titulo={
         <span className="flex items-center gap-2">
-          Por loja
+          Concentração por marca
           {piores.length ? (
             <Chip tom="critico" ponto>
               {piores.length} acima da meta
@@ -717,6 +760,16 @@ export default function TikTokDispatchPanel({
         visao={visao}
         aoTrocarVisao={aoTrocarVisao}
         controles={controles}
+        definicao={DEFINICAO_TIKTOK}
+        filtroMarca={
+          aoTrocarMarca ? (
+            <SeletorMarca
+              marca={marca}
+              marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
+              aoTrocar={aoTrocarMarca}
+            />
+          ) : undefined
+        }
       />
 
       {seletor === OPCAO_PERSONALIZADA ? (
@@ -754,7 +807,7 @@ export default function TikTokDispatchPanel({
       {estado === "ok" && dados?.availability === "unavailable" ? (
         <StateBlock
           tipo="indisponivel"
-          titulo={explicarIndisponivel(dados.unavailable_reason)}
+          titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
           descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
         />
       ) : null}
@@ -762,9 +815,9 @@ export default function TikTokDispatchPanel({
       {estado === "ok" && dados?.availability === "available" && ldr ? (
         visao === "gestor" ? (
           <>
-            {/* 4. O QUE EXIGE ATENCAO AGORA — os alertas da API ---------- */}
-            <AtencaoAgora itens={atencao} descricao={quando} />
-            {/* 5. A REGUA ------------------------------------------------ */}
+            {/* RISCO ATUAL -> PRAZO (LDR) -> EVOLUCAO -> CONCENTRACAO, a
+                mesma ordem dos tres canais (EXPEDICAO-UX-3). */}
+            {secaoRisco}
             {secaoLdr}
             {/* 6. QUANDO COMECOU ----------------------------------------- */}
             {painelEvolucao}
