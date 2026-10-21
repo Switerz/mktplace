@@ -48,6 +48,9 @@ import {
   situacaoLabel,
   temFiltro,
   tituloIndisponivel,
+  temBuyBox,
+  textoCobertura,
+  classesGradeKpis,
   type Escopo,
   type Filtros,
   type Frescor,
@@ -439,8 +442,12 @@ function Conteudo({ painel, filtros }: { painel: PainelB2B; filtros: Filtros }) 
 function FaixaKpis({ resumo }: { resumo: ResumoOk }) {
   const k = resumo.kpis;
   const cob = resumo.cobertura_identificacao;
+  // Sem anuncio com informacao de buy box, o cartao NAO existe (nada de
+  // "0 de 0"): ausencia de medida nao e' zero. Volta sozinho com dado.
+  const buyBox = temBuyBox(k);
+  const cobertura = textoCobertura(cob);
   return (
-    <section aria-label="Indicadores" className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+    <section aria-label="Indicadores" className={classesGradeKpis(buyBox ? 6 : 5)}>
       <StatCard rotulo="Anúncios monitorados" valor={fmtInt(k.anuncios)} icone={Tag} contexto={`${fmtInt(k.skus_monitorados)} SKUs`} />
       <StatCard
         rotulo="Violação do PMA"
@@ -457,23 +464,21 @@ function FaixaKpis({ resumo }: { resumo: ResumoOk }) {
         tom={k.desvio_medio_pma ? "atencao" : "neutro"}
         contexto="entre os anúncios que violam"
       />
-      <StatCard
-        rotulo="Buy box abaixo do PMA"
-        valor={fmtInt(k.buy_box.violando_com_buy_box)}
-        icone={Trophy}
-        tom={k.buy_box.violando_com_buy_box > 0 ? "critico" : "neutro"}
-        contexto={`de ${fmtInt(k.buy_box.anuncios_com_buy_box)} anúncios com buy box`}
-      />
+      {buyBox && (
+        <StatCard
+          rotulo="Buy box abaixo do PMA"
+          valor={fmtInt(k.buy_box.violando_com_buy_box)}
+          icone={Trophy}
+          tom={k.buy_box.violando_com_buy_box > 0 ? "critico" : "neutro"}
+          contexto={`de ${fmtInt(k.buy_box.anuncios_com_buy_box)} anúncios com buy box`}
+        />
+      )}
       <StatCard
         rotulo="Sellers identificados"
         valor={fmtPct(cob.pct_sellers)}
         icone={UserCheck}
-        contexto={`${fmtInt(cob.sellers_violando_identificados)} de ${fmtInt(cob.sellers_violando)} sellers violando têm cliente B2B`}
-        nota={
-          cob.consistente
-            ? `${fmtPct(cob.pct_anuncios)} dos anúncios violando`
-            : "Contagem diverge do KPI de sellers — confira a fonte"
-        }
+        contexto={cobertura.contexto}
+        nota={cobertura.nota}
         tom={cob.consistente ? "neutro" : "atencao"}
       />
     </section>

@@ -306,6 +306,49 @@ export function situacaoLabel(f: Frescor): string {
   return f.dias_de_atraso === 1 ? "Atrasado 1 dia" : `Atrasado ${f.dias_de_atraso} dias`;
 }
 
+// ---------------------------------------------------------------------------
+// Cartoes que dependem de denominador (nunca "0 de 0")
+// ---------------------------------------------------------------------------
+/**
+ * O cartao de buy box so' existe se ha anuncio COM informacao de buy box no
+ * recorte. Medido em 21/10/2026: o OctaPrice so' marca buy box na Amazon, que
+ * esta fora dos KPIs — o cartao diria "0 de 0", e isso se le como "nenhum
+ * problema". Sem denominador, nao ha medida: o cartao some e volta sozinho
+ * quando houver dado aplicavel (ex.: Amazon de volta ao escopo).
+ */
+export function temBuyBox(k: Kpis): boolean {
+  return k.buy_box.anuncios_com_buy_box > 0;
+}
+
+/**
+ * Texto da cobertura de identificacao. Sem seller violando no recorte nao ha
+ * fracao: diz isso em vez de "0 de 0" (e o valor ja' sai "—").
+ */
+export function textoCobertura(c: CoberturaIdentificacao): { contexto: string; nota: string | undefined } {
+  if (!c.consistente) {
+    return {
+      contexto: `${fmtInt(c.sellers_violando_identificados)} de ${fmtInt(c.sellers_violando)} sellers violando têm cliente B2B`,
+      nota: "Contagem diverge do KPI de sellers — confira a fonte",
+    };
+  }
+  if (c.sellers_violando === 0) return { contexto: "Nenhum seller violando neste recorte", nota: undefined };
+  return {
+    contexto: `${fmtInt(c.sellers_violando_identificados)} de ${fmtInt(c.sellers_violando)} sellers violando têm cliente B2B`,
+    nota: c.anuncios_violando > 0 ? `${fmtPct(c.pct_anuncios)} dos anúncios violando` : undefined,
+  };
+}
+
+/**
+ * Grade dos KPIs sem buraco. Com 6 cartoes: 2 / 3 / 6 colunas. Com 5: 2
+ * colunas (o ultimo ocupa a linha inteira) e 5 colunas a partir de xl.
+ */
+export function classesGradeKpis(n: number): string {
+  const base = "grid grid-cols-1 gap-3 sm:grid-cols-2";
+  if (n === 6) return `${base} xl:grid-cols-3 2xl:grid-cols-6`;
+  if (n === 5) return `${base} xl:grid-cols-5 sm:[&>*:last-child]:col-span-2 xl:[&>*:last-child]:col-span-1`;
+  return `${base} xl:grid-cols-3`;
+}
+
 /** Participacao de uma severidade no total violando, para a barra. */
 export function participacao(parte: number, total: number): number {
   if (total <= 0) return 0;
