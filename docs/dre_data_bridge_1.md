@@ -73,7 +73,7 @@ Códigos de saída: `0` ok · `65` reconciliação recusada · `69` origem indis
 Uma marca pode deixar um canal daqui para a frente, mas isso não apaga em silêncio uma competência histórica fechada.
 
 1. A publicação agendada falha com o código 65 e a mensagem `chave publicada desapareceu: YYYY-MM:canal:marca`. A
-   fotografia anterior continua servida, até vencer em 48 h.
+   fotografia anterior continua servida, até vencer em 54 h.
 2. Investigar na Torre por que a marca não tem mais receita naquele mês/canal: carga quebrada, loja desativada em
    `marts.dim_loja` ou remapeamento de marca.
 3. Se for defeito de carga, corrigir a carga e deixar a próxima execução agendada republicar. **Não** usar a exceção.
@@ -97,7 +97,7 @@ A exceção é recusada se a chave ainda tiver receita, se não estiver publicad
 | Tabela inexistente (migration não aplicada) | `snapshot_ausente` | "migration 025 não aplicada" |
 | Competência não publicada | `snapshot_ausente` | "competência não publicada" |
 | Lote não `success` | `snapshot_ausente` | "lote de publicação não concluído" |
-| Publicado há mais de 48 h | `snapshot_vencido` | instante da publicação e limite |
+| Publicado há mais de 54 h | `snapshot_vencido` | instante da publicação e limite |
 | `ausente_na_origem` | `indisponivel` | sem dado na origem |
 | `nao_reconciliado` na publicação, ou razão com o GMV **atual** fora de 0,95–1,05 | `nao_reconciliado` | razão medida |
 | Convenção de sinal publicada diferente da esperada | `sinal_inesperado` | — |
@@ -123,7 +123,7 @@ Regras do contrato preservadas: afiliado TikTok `somavel = false`; comissão do 
 - Compatível com o SQLAlchemy 1.4.54 da imagem: engines com `future=True`, e o driver é fixado em `psycopg2`
   quando a URL não declara outro. A suíte do publisher passa em 1.4.54 e em 2.0.
 - Variáveis: `DATABASE_URL` (Neon, escrita) e `DATAMART_DATABASE_URL` (leitura).
-- Sugestão de agenda: diária, `--meses 4`, depois da carga fiscal. O limite de 48 h tolera uma execução perdida.
+- Agenda: diária, `--meses 4`, 10h BRT (DAG `marketplace_tower_dre_insumo_publish`). O limite de 54 h tolera uma execução perdida — ver §10.1.
 - **Não criado:** DAG, Connection ou Environment. A migration é operação manual e separada.
 
 **Contrato da DAG (PR separado, no repositório do Airflow):**
@@ -218,7 +218,7 @@ Achados no caminho:
 
 ## 8. Plano de aplicação (requer autorização em cada passo)
 
-**Regra: a DRE não vai para produção sem recorrência pronta.** Uma publicação manual vence em 48 h; servir a DRE sem a
+**Regra: a DRE não vai para produção sem recorrência pronta.** Uma publicação manual vence em 54 h; servir a DRE sem a
 DAG funcionando seria mostrar um número que caduca em dois dias.
 
 1. Mesclar #66 e este PR. O merge **não** faz deploy (Render é manual). Se outro deploy acontecer antes do passo 6, a
@@ -241,11 +241,40 @@ DAG funcionando seria mostrar um número que caduca em dois dias.
 | Publicação com valor errado | `DELETE FROM marts.fact_dre_insumo_mensal WHERE lote_id = <lote>` | Componentes voltam a `snapshot_ausente` |
 | Desligar a ponte | `alembic downgrade 024` | Tabela some; serving responde `tabela_ausente`, sem erro |
 | Reverter o serving | Reverter o merge deste PR | Volta o #66 (Data Mart na requisição) |
-| Publisher agendado falhando | Nada a desfazer: a transação é única | O lote anterior vence em 48 h e a tela mostra "desatualizado" |
+| Publisher agendado falhando | Nada a desfazer: a transação é única | Alerta de falha da DAG no primeiro dia; o lote anterior vence em 54 h e a tela mostra "desatualizado" |
 
 ## 10. Riscos e decisões abertas
 
-- **48 h de validade** é decisão a ratificar (D5): mais curto expõe falha de agenda mais cedo; mais longo tolera mais.
+- **Validade de 54 h** — ratificada em DRE-TTL-54 (21/10/2026), ver §10.1.
+
+### 10.1 Regra de frescor dos insumos (DRE-TTL-54)
+
+| Item | Regra |
+|---|---|
+| Fórmula | `vencido` ⇔ `agora − publicado_em > 54 h` (estrito: exatamente 54 h ainda vale) |
+| `publicado_em` | instante do **início** da publicação (antes da varredura), igual em todas as linhas do lote |
+| Conjunto com lotes de idades diferentes | `ok` se nenhuma linha passou; `vencido` se todas; senão `parcialmente_vencido`. O resumo mostra a publicação **mais antiga** |
+| Efeito | CMV, taxa e frete que dependem do lote viram `snapshot_vencido` com `valor = null`; a margem não é calculada. **Nunca** zero |
+| Onde mora | `INSUMO_IDADE_MAXIMA` (API) e `DRE_MAX_SNAPSHOT_HOURS` (Oráculo), com teste de paridade; exposto em `regras.insumo_idade_maxima_horas` |
+
+**Por que 54 h e não 48 h.** A DAG publica uma vez por dia, às 10h BRT. Com 48 h, perder **um** dia dava margem ≈ 0:
+o lote do dia D vencia no mesmo instante em que a execução de D+2 começava, e qualquer retry (15 min) ou a própria
+varredura deixavam a tela `vencido`. Medido em 21/10: lote publicado às 13:20:45Z venceria às 13:20:45Z de D+2, e a
+execução seguinte só começa às 13:00Z. As 6 h de folga cobrem a execução seguinte com seus 3 retries, a varredura do
+Data Mart e atraso de agenda. A frequência da DAG **não** muda.
+
+**O que a folga não substitui.** Falha de um dia deixa de vencer a tela, então precisa ser **avisada** no mesmo dia,
+por card no Google Chat (`GOOGLE_CHAT_WEBHOOK_ALERTS`):
+
+- falha **definitiva** (65 reconciliação recusada, 78, 2, 1, timeout, preflight): a própria task avisa antes de terminar
+  (goca-se/airflow#2089). O listener global adia esses casos como se houvesse retry — medido no Airflow 3.0.2;
+- falha **transitória** (69/75) que esgota os 3 retries: o listener global `plugins/failure_notifier.py` avisa na 4ª tentativa.
+
+Duas falhas seguidas vencem a tela — e é o comportamento desejado. **Ordem de entrada:** o alerta vai para produção
+antes desta mudança de 48 h para 54 h.
+
+**Lacuna conhecida:** se a DAG **não rodar** (pausada, scheduler parado, import error), nenhuma task falha e nenhum
+card sai. Nesse caso o sinal é a própria tela: `vencido` após 54 h.
 - **`updated_at` da silver sem fuso** é tratado como UTC (inferência).
 - O publisher lê o repasse com a mesma varredura de ~3,8 GB (≈80 s medidos para um mês). Aceitável num job diário; um
   índice por `order_create_time` na silver ajudaria, mas é fora do nosso repositório.
