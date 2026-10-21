@@ -8,9 +8,9 @@
  * ----------------------------------------
  *   source_age_hours      ha quanto tempo a FONTE (Data Mart) foi lida.
  *                         E' o unico insumo do veredito de frescor.
- *   snapshot_age_hours    ha quanto tempo a FOTOGRAFIA foi publicada. Como nao
- *                         existe agendamento, isto cresce ate alguem rodar o
- *                         refresh a mao.
+ *   snapshot_age_hours    ha quanto tempo a FOTOGRAFIA foi publicada. Se a
+ *                         publicacao para, isto cresce ate alguem (ou a DAG)
+ *                         publicar de novo.
  *   oldest_row_age_hours  idade da linha mais antiga do backlog. CONTEXTO: um
  *                         backlog legitimo sempre tem pedido velho, e isso NAO
  *                         significa fonte desatualizada.
@@ -24,6 +24,14 @@
  * opcional e NUNCA vira link para o marketplace. A tela nao tenta reconstruir
  * o identificador real nem exibe coluna vazia quando ele nao vem.
  */
+import {
+  consolidarQualidade,
+  type BarraQualidade,
+  type Fotografia,
+  type ItemAtencao,
+  type ProblemaQualidade,
+  type SeveridadeQualidade,
+} from "./expedicao-ux.ts";
 
 /** Os oito valores de `situacao` aceitos pela API. Allowlist fechada. */
 export const SITUACOES = [
@@ -59,10 +67,6 @@ export const EXPLICACAO_LIMIAR_48H =
   "Limiar operacional interno da Torre, nao e' SLA do marketplace: o prazo " +
   "contratual aparece em Vencidos / Vence em 24h, que vem do ship_by_date da " +
   "Shopee.";
-
-export const AVISO_SEM_AUTOMACAO =
-  "Sem automacao: a fotografia so' avanca quando alguem executa o refresh " +
-  "manualmente.";
 
 /** Acima disto a fotografia e' considerada velha e a tela avisa. */
 export const SNAPSHOT_VELHO_HORAS = 6;
@@ -663,9 +667,17 @@ export interface Relogios {
   snapshotAgeHours: number | null;
   snapshotVelho: boolean;
   efetivoEm: string | null;
-  modoDeCarga: string;
-  semAutomacao: boolean;
 }
+
+/*
+ * EXPEDICAO-UX-UNIFICADA-1 — `load_mode` e `no_automation` NAO entram aqui.
+ * A API os devolve como CONSTANTES (`manual_snapshot` / `true`) sem olhar
+ * quem publicou o batch, e desde 21/10/2026 quem publica e' a DAG
+ * `marketplace_tower_expedicao_refresh`. Exibi-los afirmaria "atualizada a
+ * mao" sobre uma fotografia automatica. A tela fica com o que a API mede de
+ * fato: instante da publicacao e idade. A evolucao do contrato esta' em
+ * `docs/expedicao_contrato.md` (pendencia do modo de publicacao).
+ */
 
 export function montarRelogios(r: RespostaExpedicao): Relogios {
   const idade = r.limitations?.snapshot_age_hours ?? null;
@@ -673,8 +685,6 @@ export function montarRelogios(r: RespostaExpedicao): Relogios {
     snapshotAgeHours: idade,
     snapshotVelho: idade !== null && idade > SNAPSHOT_VELHO_HORAS,
     efetivoEm: r.snapshot?.effective_at ?? null,
-    modoDeCarga: r.limitations?.load_mode ?? "manual_snapshot",
-    semAutomacao: r.limitations?.no_automation !== false,
   };
 }
 
@@ -803,35 +813,22 @@ export function montarKpisSecundarios(
 // ---------------------------------------------------------------------------
 // Barra consolidada de qualidade do dado
 // ---------------------------------------------------------------------------
-export type SeveridadeQualidade = "alerta" | "atencao" | "info";
-
-export interface ProblemaQualidade {
-  chave: string;
-  severidade: SeveridadeQualidade;
-  texto: string;
-}
-
-export interface BarraQualidade {
-  /** O problema que o operador precisa ler primeiro. `null` = tudo em ordem. */
-  principal: ProblemaQualidade | null;
-  /** Todos, inclusive o principal, para o painel expansivel. */
-  detalhes: ProblemaQualidade[];
-  severidade: SeveridadeQualidade | null;
-}
-
-const PESO_SEVERIDADE: Record<SeveridadeQualidade, number> = {
-  alerta: 0,
-  atencao: 1,
-  info: 2,
-};
+// Os tipos moraram aqui ate' o EXPEDICAO-UX-UNIFICADA-1. Agora o TikTok
+// preenche a MESMA barra com o proprio contrato, entao eles vivem em
+// `expedicao-ux.ts` e sao reexportados para nao mudar quem importava daqui.
+export type { BarraQualidade, ProblemaQualidade, SeveridadeQualidade };
 
 /**
  * Consolida a pilha de banners numa barra so'.
  *
  * NADA e' escondido: tudo que hoje vira banner continua na lista de detalhes,
- * e o item mais grave aparece fechado. Defasagem, ausencia de automacao e
- * lacuna de cobertura entram sempre — sao exatamente as limitacoes que o
- * operador precisa ver antes de confiar no numero.
+ * e o item mais grave aparece fechado. Defasagem e lacuna de cobertura entram
+ * sempre — sao exatamente as limitacoes que o operador precisa ver antes de
+ * confiar no numero.
+ *
+ * O antigo aviso "sem automacao" SAIU (EXPEDICAO-UX-UNIFICADA-1): ele repetia
+ * o `no_automation` constante da API e, com a DAG publicando, era falso. A
+ * defasagem real continua aqui, medida pela idade da fotografia.
  */
 export function montarBarraDeQualidade(
   relogios: Relogios | null,
@@ -847,13 +844,6 @@ export function montarBarraDeQualidade(
       texto:
         `Fotografia publicada há ${formatarHoras(relogios.snapshotAgeHours)}: os ` +
         "números descrevem aquele instante, não agora.",
-    });
-  }
-  if (relogios?.semAutomacao !== false) {
-    itens.push({
-      chave: "sem_automacao",
-      severidade: "info",
-      texto: AVISO_SEM_AUTOMACAO,
     });
   }
   for (const a of avisos) {
@@ -876,14 +866,128 @@ export function montarBarraDeQualidade(
     });
   }
 
-  const ordenados = [...itens].sort(
-    (a, b) => PESO_SEVERIDADE[a.severidade] - PESO_SEVERIDADE[b.severidade],
-  );
+  return consolidarQualidade(itens);
+}
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-UX-UNIFICADA-1 — fotografia e "o que exige atencao agora"
+// ---------------------------------------------------------------------------
+
+/**
+ * Cabecalho de frescor da fila. A idade e' a que a API publicou
+ * (`limitations.snapshot_age_hours`); `desatualizada` e' o mesmo limiar de
+ * `SNAPSHOT_VELHO_HORAS` que ja' pintava o selo de ambar. Sem modo de
+ * publicacao: ver o comentario de `Relogios`.
+ */
+export function fotografiaDaFila(r: Relogios | null): Fotografia {
   return {
-    principal: ordenados[0] ?? null,
-    detalhes: ordenados,
-    severidade: ordenados[0]?.severidade ?? null,
+    rotulo: "Fotografia",
+    publicadaEm: r?.efetivoEm ?? null,
+    idade: r && r.snapshotAgeHours !== null ? formatarHoras(r.snapshotAgeHours) : null,
+    desatualizada: r?.snapshotVelho ?? false,
   };
+}
+
+function inteiro(n: number): string {
+  return n.toLocaleString("pt-BR");
+}
+
+/** Shopee: a conta E' a loja. Mercado Livre: a conta e' um `seller_id`. */
+function nomeDaConta(c: ResumoConta): string {
+  return c.brand && c.brand !== c.shop_account
+    ? `${c.brand} (conta ${c.shop_account})`
+    : c.shop_account;
+}
+
+type MedidaDeConta =
+  | "overdue_count"
+  | "due_within_24h_count"
+  | "stalled_count"
+  | "over_48h_count";
+
+/**
+ * A conta com a MAIOR contagem da MESMA medida, para dizer onde comecar.
+ * E' selecao sobre o que a API publicou por conta, nao calculo: nenhuma conta
+ * e' somada a outra. Empate fica com a primeira na ordem da API.
+ */
+function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
+  let maior: ResumoConta | null = null;
+  for (const c of contas) {
+    if (c[medida] > 0 && (maior === null || c[medida] > maior[medida])) maior = c;
+  }
+  return maior ? ` Maior concentração: ${nomeDaConta(maior)}, com ${inteiro(maior[medida])}.` : "";
+}
+
+/**
+ * "O que exige atenção agora" da fila.
+ *
+ * Cada linha restitui uma contagem que a API JA' publicou em `totals`, com a
+ * conta que mais concentra aquela mesma medida. Nenhuma taxa, nenhuma soma de
+ * contas, nenhum limiar novo.
+ *
+ * - Vencidos e "vence em 24h" so' existem no canal que publica prazo. No
+ *   Mercado Livre a pergunta nao existe, e uma frase dizendo "nenhum vencido"
+ *   leria como desempenho — ela simplesmente nao e' feita.
+ * - "Acima de 48h" e' o limiar interno da Torre e e' dito assim, nunca como
+ *   prazo do marketplace.
+ * - Sem nenhuma contagem acesa, a frase e' NEUTRA e presa a fotografia: a
+ *   fotografia pode estar velha, entao "tudo certo" seria uma afirmacao sobre
+ *   agora que ninguem mediu.
+ */
+export function montarAtencaoDaFila(
+  t: Totais | null,
+  contas: ResumoConta[],
+  canal: Canal = CANAL_PADRAO,
+): ItemAtencao[] {
+  if (!t) return [];
+  const temPrazo = canalTemPrazo(canal);
+  const itens: ItemAtencao[] = [];
+  if (temPrazo && t.overdue_count > 0) {
+    itens.push({
+      chave: "overdue",
+      tom: "critico",
+      texto:
+        `${inteiro(t.overdue_count)} pedido(s) já passaram do prazo da Shopee e seguem ` +
+        `sem expedição.${concentracao(contas, "overdue_count")}`,
+    });
+  }
+  if (temPrazo && t.due_within_24h_count > 0) {
+    itens.push({
+      chave: "due24h",
+      tom: "atencao",
+      texto:
+        `${inteiro(t.due_within_24h_count)} pedido(s) vencem nas próximas 24 h e ainda ` +
+        `podem sair no prazo.${concentracao(contas, "due_within_24h_count")}`,
+    });
+  }
+  if (t.stalled_count > 0) {
+    itens.push({
+      chave: "stalled",
+      tom: "atencao",
+      texto:
+        `${inteiro(t.stalled_count)} pedido(s) travados (lentos ou zumbis, sem contar ` +
+        `duas vezes).${concentracao(contas, "stalled_count")}`,
+    });
+  }
+  if (t.over_48h_count > 0) {
+    itens.push({
+      chave: "over48h",
+      tom: "atencao",
+      texto:
+        `${inteiro(t.over_48h_count)} pedido(s) abertos há mais de 48 h — limiar interno ` +
+        `da Torre, não prazo do marketplace.${concentracao(contas, "over_48h_count")}`,
+    });
+  }
+  if (!itens.length) {
+    itens.push({
+      chave: "nada_aceso",
+      tom: "neutro",
+      texto: temPrazo
+        ? "Nesta fotografia, nenhum pedido vencido, a vencer em 24 h, travado ou acima de 48 h."
+        : "Nesta fotografia, nenhum pedido travado ou acima de 48 h.",
+    });
+  }
+  return itens;
 }
 
 // ---------------------------------------------------------------------------

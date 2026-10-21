@@ -12,7 +12,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
-  AVISO_SEM_AUTOMACAO,
   CANAL_PADRAO,
   JANELAS_TENDENCIA,
   JANELA_INICIAL_HORAS,
@@ -45,6 +44,7 @@ import {
   type Totais,
 } from "../src/lib/expedicao-contract.ts";
 import { REGRA_JANELA } from "../src/lib/expedicao-janela.ts";
+import { lerCanalExpedicao } from "../src/lib/expedicao-canal.ts";
 
 const RAIZ = join(import.meta.dirname, "..");
 const CLIENTE = readFileSync(join(RAIZ, "app/expedicao/ExpedicaoClient.tsx"), "utf8");
@@ -52,6 +52,17 @@ const GRAFICO = readFileSync(
   join(RAIZ, "src/components/expedicao/TendenciaChart.tsx"),
   "utf8",
 );
+// EXPEDICAO-UX-UNIFICADA-1: o seletor de canal e a flag do ML foram para a
+// casca, e a barra de qualidade e o cabecalho viraram componentes dos tres
+// canais. As garantias abaixo seguem o codigo ate' o lugar novo.
+const CASCA = readFileSync(join(RAIZ, "app/expedicao/ExpedicaoShell.tsx"), "utf8");
+const TIKTOK = readFileSync(join(RAIZ, "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+const CABECALHO = readFileSync(
+  join(RAIZ, "src/components/expedicao/CabecalhoExpedicao.tsx"),
+  "utf8",
+);
+const BARRA = readFileSync(join(RAIZ, "src/components/expedicao/BarraDeQualidade.tsx"), "utf8");
+const SEGMENTED = readFileSync(join(RAIZ, "src/components/ui/Segmented.tsx"), "utf8");
 
 function totais(over: Partial<Totais> = {}): Totais {
   return {
@@ -192,13 +203,11 @@ function relogios(over: Partial<Relogios> = {}): Relogios {
     snapshotAgeHours: 21.9,
     snapshotVelho: true,
     efetivoEm: "2026-09-22T19:04:10Z",
-    modoDeCarga: "manual_snapshot",
-    semAutomacao: true,
     ...over,
   };
 }
 
-test("defasagem, ausencia de automacao e cobertura entram todas na barra", () => {
+test("defasagem e cobertura entram todas na barra", () => {
   const avisos: AvisoCobertura[] = [
     { tipo: "fora_do_escopo", texto: "kokeshi nao e' coberta por esta fonte." },
   ];
@@ -217,10 +226,12 @@ test("defasagem, ausencia de automacao e cobertura entram todas na barra", () =>
   const barra = montarBarraDeQualidade(relogios(), avisos, frescor);
   const chaves = barra.detalhes.map((d) => d.chave);
   assert.ok(chaves.includes("fotografia_antiga"));
-  assert.ok(chaves.includes("sem_automacao"));
   assert.ok(chaves.includes("fonte_em_alerta"));
   assert.equal(chaves.filter((c) => c.startsWith("cobertura_")).length, 1);
-  assert.equal(barra.detalhes.length, 4, "nenhuma limitacao pode sumir");
+  assert.equal(barra.detalhes.length, 3, "nenhuma limitacao pode sumir");
+  // EXPEDICAO-UX-UNIFICADA-1: o "sem automacao" saiu — repetia o
+  // `no_automation` constante da API, falso com a DAG publicando.
+  assert.ok(!chaves.includes("sem_automacao"));
 });
 
 test("o item mais grave e' o que aparece fechado", () => {
@@ -234,14 +245,14 @@ test("o item mais grave e' o que aparece fechado", () => {
 });
 
 test("fotografia velha aparece mesmo quando nada mais esta errado", () => {
-  const barra = montarBarraDeQualidade(relogios({ semAutomacao: false }), [], []);
+  const barra = montarBarraDeQualidade(relogios(), [], []);
   assert.equal(barra.principal?.chave, "fotografia_antiga");
   assert.match(barra.principal?.texto ?? "", /21,9 h|21\.9 h/);
 });
 
 test("sem nenhum problema, a barra nao e' pintada", () => {
   const barra = montarBarraDeQualidade(
-    relogios({ snapshotVelho: false, semAutomacao: false }),
+    relogios({ snapshotVelho: false }),
     [],
     [],
   );
@@ -249,10 +260,13 @@ test("sem nenhum problema, a barra nao e' pintada", () => {
   assert.equal(barra.detalhes.length, 0);
 });
 
-test("o aviso de ausencia de automacao e' exatamente o texto do contrato", () => {
+test("a barra nunca afirma publicacao manual nem ausencia de agendamento", () => {
+  // A API devolve `load_mode`/`no_automation` como CONSTANTES; desde
+  // 21/10/2026 quem publica e' a DAG. A barra nao repete essa declaracao.
   const barra = montarBarraDeQualidade(relogios(), [], []);
-  const item = barra.detalhes.find((d) => d.chave === "sem_automacao");
-  assert.equal(item?.texto, AVISO_SEM_AUTOMACAO);
+  for (const d of barra.detalhes) {
+    assert.doesNotMatch(d.texto, /autom|manual|à mão|a mao|agend/i, d.texto);
+  }
 });
 
 // ===========================================================================
@@ -448,10 +462,11 @@ test("a flag continua fail-closed e dobravel em build", () => {
   for (const v of ["TRUE", "1", "yes", "", undefined, null]) {
     assert.equal(expedicaoMlHabilitado(v as string), false, String(v));
   }
-  // A comparacao literal no cliente e' o que permite o minificador eliminar o
-  // seletor quando a flag esta definida como algo diferente de "true".
+  // A comparacao literal e' o que permite o minificador eliminar a opcao
+  // quando a flag esta definida como algo diferente de "true". Desde o
+  // EXPEDICAO-UX-UNIFICADA-1 ela vive na casca, dona do seletor unico.
   assert.match(
-    CLIENTE,
+    CASCA,
     /process\.env\.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true"/,
   );
 });
@@ -460,47 +475,70 @@ test("com a flag desligada a tela nao pede canal nenhum", () => {
   // `construirQuery` omite `channel` no canal historico, entao a requisicao da
   // Shopee sai identica a de antes do multicanal.
   assert.equal(queryDaTendencia(48, CANAL_PADRAO), "window_hours=48");
-  assert.match(CLIENTE, /ML_LIGADO && \(/, "o seletor e' condicionado a flag");
-  // Sem flag a URL continua sendo lida, agora so' pela janela (`?dias=`): o
-  // canal so' e' lido sob `if (ML_LIGADO)`.
-  assert.match(CLIENTE, /if \(ML_LIGADO\) \{\s*\n\s*const canal = lerCanalDaUrl\(\);/);
+  // O canal e' lido UMA vez, na casca, pelas flags; a fila so' recebe um
+  // canal ja' sanitizado e nao le mais `channel` da URL.
+  assert.match(CASCA, /const FLAGS = \{ ml: ML_LIGADO, tiktok: TIKTOK_LIGADO \};/);
+  assert.match(CASCA, /lerCanalExpedicao\(window\.location\.search, FLAGS\)/);
+  assert.doesNotMatch(CLIENTE, /get\("channel"\)/);
+  // e o comportamento, nao so' a fiacao: sem a flag, um link do ML abre a Shopee
+  assert.equal(lerCanalExpedicao("?channel=mercadolivre", { ml: false, tiktok: true }), "shopee");
 });
 
 // ===========================================================================
 // 9. Design system e acessibilidade
 // ===========================================================================
 test("o seletor de canal continua navegavel e com alvo de toque", () => {
-  assert.match(CLIENTE, /role="radiogroup"/);
-  assert.match(CLIENTE, /aria-label=\{rotulo\}/);
-  assert.match(CLIENTE, /rotulo="Canal da fotografia"/);
-  assert.match(CLIENTE, /role="radio"/);
-  assert.match(CLIENTE, /aria-checked=\{ativo\}/);
+  // O seletor unico mora na casca e e' o `Segmented` compartilhado.
+  assert.match(CASCA, /<Segmented\s+rotulo="Canal da Expedição"/);
+  assert.match(SEGMENTED, /role="radiogroup"/);
+  assert.match(SEGMENTED, /aria-label=\{rotuladoPor \? undefined : rotulo\}/);
+  assert.match(SEGMENTED, /role="radio"/);
+  assert.match(SEGMENTED, /aria-checked=\{ativo\}/);
   // O alvo de 44px vive no componente compartilhado e vale para toda opcao.
-  assert.match(CLIENTE, /min-h-\[44px\] min-w-\[44px\]/);
+  assert.match(SEGMENTED, /min-h-11 min-w-11/);
 });
 
 test("radiogroup cumpre o teclado que o papel ARIA promete", () => {
   // Papel `radiogroup` sem setas anuncia um comportamento que a tela nao tem.
   for (const tecla of ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"]) {
-    assert.ok(CLIENTE.includes(tecla), `sem tratamento de ${tecla}`);
+    assert.ok(SEGMENTED.includes(tecla), `sem tratamento de ${tecla}`);
   }
   // tabIndex rovente: o grupo e' UM ponto de tabulacao, nao um por opcao.
-  assert.match(CLIENTE, /tabIndex=\{ativo \? 0 : -1\}/);
+  assert.match(SEGMENTED, /tabIndex=\{ativo \? 0 : -1\}/);
 });
 
-test("os dois seletores usam o MESMO componente", () => {
+test("todo seletor da Expedicao usa o MESMO componente", () => {
   // Um grupo com teclado e outro sem seria pior que os dois sem: o operador
-  // aprende um comportamento e ele falha no controle ao lado.
-  assert.equal((CLIENTE.match(/<GrupoRadio/g) ?? []).length, 2);
-  assert.match(CLIENTE, /rotulo="Janela da tendência"/);
+  // aprende um comportamento e ele falha no controle ao lado. Antes eram dois
+  // componentes (`GrupoRadio` na fila, `Segmented` no TikTok); agora e' um.
+  for (const [nome, fonte] of [
+    ["fila", CLIENTE],
+    ["casca", CASCA],
+    ["tiktok", TIKTOK],
+    ["cabecalho", CABECALHO],
+  ] as const) {
+    // Sem comentarios: o cliente EXPLICA por que o `GrupoRadio` saiu.
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(codigo, /role="radiogroup"/, `${nome} reimplementa o radiogroup`);
+    assert.doesNotMatch(codigo, /GrupoRadio/, `${nome} ainda usa GrupoRadio`);
+  }
+  assert.match(CLIENTE, /<Segmented\s+rotulo="Janela da tendência"/);
+  assert.match(CABECALHO, /<Segmented\s+rotulo="Profundidade"/);
+  assert.equal((TIKTOK.match(/<Segmented\b/g) ?? []).length, 2, "evento e janela");
 });
 
 test("disclosure diz QUAL regiao controla", () => {
   const expandidos = (CLIENTE.match(/aria-expanded=/g) ?? []).length;
   const controlados = (CLIENTE.match(/aria-controls=/g) ?? []).length;
   assert.equal(controlados, expandidos, "aria-expanded sem aria-controls");
-  assert.match(CLIENTE, /id="exp-qualidade-detalhes"/);
   assert.match(CLIENTE, /id="exp-tendencia-dados"/);
+  // A barra de qualidade virou componente dos tres canais: o par
+  // aria-expanded/aria-controls e o alvo com o MESMO id vivem nela.
+  assert.match(CLIENTE, /<BarraDeQualidade barra=\{qualidade\} \/>/);
+  assert.match(BARRA, /const id = useId\(\);/);
+  assert.match(BARRA, /aria-expanded=\{aberta\}/);
+  assert.match(BARRA, /aria-controls=\{id\}/);
+  assert.match(BARRA, /id=\{id\}/);
 });
 
 test("foco visivel em todo controle interativo novo", () => {
@@ -525,8 +563,12 @@ test("o recharts fica fora do bundle inicial", () => {
   assert.doesNotMatch(CLIENTE, /from "recharts"/);
 });
 
-test("o modo de carga aparece em linguagem humana", () => {
-  assert.match(CLIENTE, /atualizada à mão, sem agendamento/);
+test("a fila nao exibe o modo de carga constante da API", () => {
+  // Antes: "atualizada à mão, sem agendamento", traducao de um
+  // `load_mode` que a API fixa em `manual_snapshot`. Com a DAG publicando,
+  // isso era falso. Sem comentarios: eles EXPLICAM a remocao.
+  const codigo = CLIENTE.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(codigo, /à mão|sem agendamento|manual_snapshot|load_mode|no_automation/);
 });
 
 // ===========================================================================

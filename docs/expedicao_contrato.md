@@ -4,11 +4,16 @@
 LIGADAS: a API serve `availability=available` e `/expedicao` responde 200 com a
 tela real. Migration `018` aplicada, quatro contas cadastradas.
 
-**A carga continua MANUAL.** Nenhum agendamento existe: `load_mode =
-manual_snapshot` e `no_automation = true` na propria resposta da API. A
-fotografia so' avanca quando alguem executa o `--apply` — o batch vigente depende
-de execucao manual, e entre duas execucoes a tela envelhece. A Expedicao **nao**
-e' tempo real e **nao** e' automatizada.
+**Atualizacao (21/10/2026): a carga e' AGENDADA.** A DAG
+`marketplace_tower_expedicao_refresh` (`goca-se/airflow`) roda a cada 2 h e
+publica Shopee, Mercado Livre e TikTok. A resposta da API, porem, ainda diz
+`load_mode = manual_snapshot` e `no_automation = true` — sao constantes no
+servico, nao proveniencia do batch. Ver "Pendencia de contrato: modo de
+publicacao" mais abaixo. A Expedicao continua **nao** sendo tempo real: entre
+duas execucoes a fotografia envelhece, e a tela mostra a idade.
+
+Historico: ate' 20/10/2026 toda fotografia vinha de alguem executando o
+`--apply` a mao.
 
 O EXP-1F corrigiu a semantica do alerta `expedicao_source_freshness`, que nascia
 permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
@@ -26,7 +31,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio, identificador do pedido nao e' servido |
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
-| `schedule_plan.py` / Airflow | **nao integrados** — automacao por DAG segue PENDENTE |
+| Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -503,14 +508,61 @@ com os limites do contrato (8h / 24h, inclusivos; futuro e nulo -> `unknown`).
 
 ### `load_mode = manual_snapshot`
 
-**Nao existe agendamento.** Toda fotografia veio de alguem executando o refresh
-a mao. `limitations.snapshot_age_hours` diz ha quanto tempo, e
-`limitations.no_automation` e' sempre `true`. O consumidor deve exibir isso: um
-painel que nao mostra a idade do dado convida a decidir sobre estado vencido.
+**O valor e' CONSTANTE no servico, nao proveniencia.** Foi verdade ate'
+20/10/2026, quando toda fotografia vinha de alguem executando o refresh a mao;
+desde 21/10/2026 a DAG publica e o campo continua dizendo `manual_snapshot`
+(e `limitations.no_automation` continua `true`). O consumidor NAO deve exibir
+esses dois campos como fato. O que ele deve exibir e'
+`limitations.snapshot_age_hours`: um painel que nao mostra a idade do dado
+convida a decidir sobre estado vencido.
 
 `source_advanced=false` e' METADADO: significa "a fonte nao avancou desde a
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
+
+### Pendencia de contrato: modo de publicacao (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026)
+
+**O contrato nao consegue dizer que uma fotografia foi agendada.** Medido no
+codigo:
+
+- `LoadMode = Literal["manual_snapshot"]` em `apps/api/app/schemas/expedicao.py`;
+- `apps/api/app/services/expedicao_service.py` grava `load_mode =
+  "manual_snapshot"` e `no_automation = True` como CONSTANTES — no `snapshot` e
+  em `_limitacoes()` — sem olhar quem publicou o batch;
+- `GET /expedicao/tiktok` nao tem campo de modo nenhum.
+
+Consequencia: desde 21/10/2026 a DAG `marketplace_tower_expedicao_refresh`
+(`goca-se/airflow`, a cada 2 h) publica os tres canais, e a API anuncia cada
+batch dela como `manual_snapshot` com `no_automation = true`.
+
+**Decisao de tela (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026):** o selo de modo de
+publicacao SAIU dos tres canais, junto com o item "sem automacao" da barra de
+qualidade. A tela mostra so' o que a API mede de fato — instante da
+publicacao, idade da fotografia (fila), ultimo dado da fonte (TikTok) e o
+veredito de desatualizada. Ela nao afirma "a mao" (falso com a DAG) nem
+"agendada" (a API ainda nao prova). Os campos continuam no payload e nos
+tipos do frontend; so' nao viram texto.
+
+Ajuste necessario, fora deste gate e nesta ordem:
+
+1. **Proveniencia por batch, gravada por quem publica.** `marts.expedicao_refresh_run`
+   (e a serie do TikTok, migration `020`) ganham `load_mode text NOT NULL
+   DEFAULT 'manual_snapshot' CHECK (load_mode IN ('manual_snapshot',
+   'scheduled'))`, em migration nova. O CLI recebe `--load-mode scheduled`
+   EXPLICITO da DAG — nunca inferido de variavel de ambiente: uma execucao
+   manual dentro do container nao pode virar "agendada".
+2. **API.** `LoadMode = Literal["manual_snapshot", "scheduled"]`, lido do batch
+   servido; `no_automation = load_mode != "scheduled"`; e
+   `limitations.expected_refresh_hours` (2 para a DAG de 2 h). Hoje o limiar de
+   "fotografia velha" e' fixo e diferente por canal: 6 h na tela da fila
+   (`SNAPSHOT_VELHO_HORAS`) e 12 h no alerta `fotografia_velha` do TikTok.
+3. **`/expedicao/tiktok`**: `snapshot.load_mode` com o mesmo dominio.
+4. **Frontend, so' depois de 1-3**: mapear `scheduled` para "publicação
+   agendada" e usar `expected_refresh_hours` no veredito de desatualizada.
+
+Ate' la' a tela fica sem selo de modo, com a idade da fotografia visivel. O
+selo so' volta quando o passo 4 existir — e volta mostrando o que o batch
+gravou, nunca um valor fixo no frontend.
 
 ### Cobertura e Kokeshi
 
