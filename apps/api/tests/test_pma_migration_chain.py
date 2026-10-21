@@ -44,9 +44,11 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: Avancado para 025 pelo Gate DRE-DATA-BRIDGE-1 (insumos mensais da DRE).
 #: Avancado para 026 pelo Gate DRE-PREMISSAS-1 (premissas estimadas da DRE).
 #: Avancado para 027 pelo Gate SHOPEE-MANUAL-RETIREMENT-1 (shadow diario Shopee via API).
-#: Avancado para 030 pelo Gate TIKTOK-ADS-PRODUCTIZATION-1 (shadow de TikTok Ads).
-#: 028 (#78, DRE) e 029 (#91, estoque ML) tambem partem da 027: quem mesclar
-#: por ultimo reencadeia o down_revision e ajusta este pino.
+#: Avancado para 029 pelo Gate ML-FULL-STOCK-PRODUCTIZATION-1 (estoque Full do ML).
+#: A 028 e' do PR #78 (DRE CMV), tambem sobre a 027: quem mesclar por ultimo
+#: reencadeia o down_revision e ajusta este pino.
+#: Avancado para 030 pelo Gate TIKTOK-ADS-PRODUCTIZATION-1 (shadow de TikTok Ads),
+#: encadeada SOBRE a 029 (mesclada em main em 21/10/2026).
 HEAD_ESPERADO = "030"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao

@@ -1,7 +1,7 @@
 """TIKTOK-ADS-PRODUCTIZATION-1 — shadow diario de TikTok Ads (integrado).
 
 NAO APLICADA. Aplicar e' gate proprio (`alembic upgrade 030` no Neon).
-Reversivel por `alembic downgrade 027`. A migration nao insere dados.
+Reversivel por `alembic downgrade 029`. A migration nao insere dados.
 
 POR QUE SHADOW
 --------------
@@ -25,15 +25,16 @@ O QUE ENTRA / NAO ENTRA
 
 CADEIA
 ------
-`down_revision = "027"`. O #78 (028) e o #91 (029) tambem partem de 027:
-quem mesclar por ultimo reencadeia e ajusta os pinos de head.
+`down_revision = "029"`: a 029 (estoque Full, #91) entrou em main em
+21/10/2026. O #78 (028, DRE) ainda parte da 027 e, ao ser mesclado,
+reencadeia sobre a head vigente e ajusta os pinos de head.
 
 NaN: `'NaN'::numeric >= 0` e' TRUE no PostgreSQL; as faixas tem `<> 'NaN'`.
 """
 from alembic import op
 
 revision = "030"
-down_revision = "027"
+down_revision = "029"
 branch_labels = None
 depends_on = None
 

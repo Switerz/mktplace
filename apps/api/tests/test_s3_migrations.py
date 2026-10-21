@@ -180,8 +180,10 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # Gate SHOPEE-MANUAL-RETIREMENT-1: head avancado de 026 para 027, que cria
     # marts.fact_shopee_daily_api_shadow -- shadow da familia de pedidos Shopee
     # via API, em tabela PROPRIA que nenhum consumidor le'.
-    # Gate TIKTOK-ADS-PRODUCTIZATION-1: head avancado de 027 para 030, que cria
-    # marts.fact_tiktok_ads_daily_shadow (028 e 029 reservadas a #78 e #91).
+    # Gate ML-FULL-STOCK-PRODUCTIZATION-1: head avancado de 027 para 029, que
+    # cria as fatos do estoque Full do ML (028 reservada ao PR #78 da DRE).
+    # Gate TIKTOK-ADS-PRODUCTIZATION-1: head avancado de 029 para 030, que cria
+    # marts.fact_tiktok_ads_daily_shadow sobre a 029 (028 reservada ao #78).
     assert heads == ["030"], f"head deveria ser unico e igual a 030, veio {heads}"
 
 

@@ -221,7 +221,7 @@ def test_migration_030():
     spec = importlib.util.spec_from_file_location("m030", MIG)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    assert (m.revision, m.down_revision) == ("030", "027")
+    assert (m.revision, m.down_revision) == ("030", "029")
     sql = " ".join(m.UPGRADE_SQL)
     assert "ck_ftads_estado_metricas" in sql and "fonte = 'integrado_leilao'" in sql
     assert "brand IN ('apice', 'barbours')" in sql and sql.count("<> 'NaN'") == 2
