@@ -57,6 +57,8 @@ export interface Escopo {
   aviso_piso: string;
   canais_nos_kpis: string[];
   canais_excluidos: CanalExcluido[];
+  /** Canais da allowlist ausentes da carga mais recente (grafia ou coleta). */
+  canais_kpi_sem_dados: string[];
 }
 
 export interface FiltrosAplicados {

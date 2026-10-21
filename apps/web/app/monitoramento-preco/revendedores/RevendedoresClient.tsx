@@ -207,6 +207,21 @@ function FaixaFrescor({ frescor, carregando }: { frescor: Frescor | null; carreg
 
 function AvisoEscopo({ escopo }: { escopo: Escopo }) {
   return (
+    <>
+      {escopo.canais_kpi_sem_dados.length > 0 && (
+        <Note tom="atencao" papel="status">
+          <span className="font-semibold">Canal do escopo sem anúncio no relatório mais recente:</span>{" "}
+          {escopo.canais_kpi_sem_dados.join(", ")}. Os KPIs abaixo não incluem esse canal — confira a coleta ou a
+          configuração.
+        </Note>
+      )}
+      <AvisoPiso escopo={escopo} />
+    </>
+  );
+}
+
+function AvisoPiso({ escopo }: { escopo: Escopo }) {
+  return (
     <Note tom="neutro">
       <span className="font-semibold text-ink">Piso: PMA do OctaPrice.</span> {escopo.aviso_piso}
       {escopo.canais_excluidos.length > 0 && (

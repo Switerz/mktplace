@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     # Amazon fica FORA no MVP: a deduplicacao da fonte descarta vendedores que
     # dividem o mesmo anuncio de catalogo. Allowlist, e nao "tudo menos
     # Amazon", para que um canal novo na fonte nao entre nos KPIs sem revisao.
-    b2b_revenda_canais_kpi: str = "Mercadolivre,Shopee"
+    b2b_revenda_canais_kpi: str = "Mercado Livre,Shopee"
 
     @property
     def b2b_revenda_canais_kpi_list(self) -> list[str]:

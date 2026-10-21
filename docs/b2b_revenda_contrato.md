@@ -100,7 +100,7 @@ API (Render) — nenhuma configurada nesta rodada:
 | `B2B_REVENDA_SUPABASE_KEY` | vazio | chave da Data API (segredo) |
 | `B2B_REVENDA_TIMEOUT_SECONDS` | `10` | 1–30 (conexão limitada a 5 s) |
 | `B2B_REVENDA_CACHE_TTL_SECONDS` | `1200` | 900–1800 |
-| `B2B_REVENDA_CANAIS_KPI` | `Mercadolivre,Shopee` | allowlist dos KPIs, com a grafia da fonte |
+| `B2B_REVENDA_CANAIS_KPI` | `Mercado Livre,Shopee` | allowlist dos KPIs, com a grafia da fonte |
 
 Web (Vercel, em build):
 

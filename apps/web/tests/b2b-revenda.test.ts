@@ -260,6 +260,12 @@ test("situacao do frescor e participacao", () => {
   assert.equal(participacao(1, 0), 0);
 });
 
+test("canal do escopo sem anuncio na carga e' sinalizado, nao some em silencio", () => {
+  assert.match(CLIENT, /escopo\.canais_kpi_sem_dados\.length > 0 && \(/);
+  assert.match(CLIENT, /Os KPIs abaixo não incluem esse canal/);
+  assert.deepEqual(FIXTURE_ESCOPO.canais_kpi_sem_dados, []);
+});
+
 test("tela mostra coleta, importacao e consulta, e o aviso de piso", () => {
   for (const trecho of ["fmtInstante(frescor.coleta_fim)", "fmtInstante(frescor.importado_fim)", "fmtInstante(frescor.consultado_em)", "escopo.aviso_piso", "Piso: PMA do OctaPrice."]) {
     assert.ok(CLIENT.includes(trecho), `falta ${trecho}`);

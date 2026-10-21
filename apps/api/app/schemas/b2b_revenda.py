@@ -74,6 +74,10 @@ class Escopo(BaseModel):
     canais_nos_kpis: list[str]
     #: Canais presentes na carga mais recente e FORA dos KPIs, com o porque.
     canais_excluidos: list[CanalExcluido]
+    #: Canais da allowlist que NAO aparecem na carga mais recente. Grafia
+    #: errada na allowlist ("Mercadolivre" x "Mercado Livre") tiraria o canal
+    #: dos KPIs em silencio; aqui ela aparece.
+    canais_kpi_sem_dados: list[str] = Field(default_factory=list)
 
 
 class FiltrosAplicados(BaseModel):

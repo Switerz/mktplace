@@ -214,7 +214,13 @@ def montar_escopo(canais_da_carga: Iterable[str], canais_kpi: list[str]) -> Esco
         for c in sorted(set(canais_da_carga))
         if c not in canais_kpi
     ]
-    return Escopo(aviso_piso=AVISO_PISO, canais_nos_kpis=list(canais_kpi), canais_excluidos=excluidos)
+    presentes = set(canais_da_carga)
+    return Escopo(
+        aviso_piso=AVISO_PISO,
+        canais_nos_kpis=list(canais_kpi),
+        canais_excluidos=excluidos,
+        canais_kpi_sem_dados=[c for c in canais_kpi if c not in presentes],
+    )
 
 
 @dataclass

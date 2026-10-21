@@ -44,7 +44,7 @@ export const FIXTURE_ESCOPO: Escopo = {
   piso: "pma_octaprice",
   aviso_piso:
     "Não é o preço sugerido de revenda (PDV) usado na visão Lojas próprias, e os dois não se comparam.",
-  canais_nos_kpis: ["Mercadolivre", "Shopee"],
+  canais_nos_kpis: ["Mercado Livre", "Shopee"],
   canais_excluidos: [
     {
       canal: "Amazon",
@@ -52,6 +52,7 @@ export const FIXTURE_ESCOPO: Escopo = {
         "Fora dos KPIs: a deduplicação da fonte guarda um vendedor por anúncio e descarta os demais vendedores do mesmo anúncio de catálogo.",
     },
   ],
+  canais_kpi_sem_dados: [],
 };
 
 function base(dataRef: string) {
@@ -62,7 +63,7 @@ function base(dataRef: string) {
     frescor: FIXTURE_FRESCOR,
     escopo: FIXTURE_ESCOPO,
     filtros: {
-      data_ref: dataRef, marcas: [], canais: ["Mercadolivre", "Shopee"],
+      data_ref: dataRef, marcas: [], canais: ["Mercado Livre", "Shopee"],
       severidades: [], skus: [], ufs: [],
     },
     limitacoes: LIMITACOES,
@@ -102,9 +103,9 @@ export function fixtureCanaisMarcas(dataRef = FIXTURE_FRESCOR.data_ref_mais_rece
   return {
     ...base(dataRef),
     linhas: [
-      { marca_id: "AP", marca: "Ápice", canal: "Mercadolivre", anuncios: 400, anuncios_violando: 100, pct_violacao: "25.0", desvio_medio_pma: "-0.080", preco_medio: "59.90" },
+      { marca_id: "AP", marca: "Ápice", canal: "Mercado Livre", anuncios: 400, anuncios_violando: 100, pct_violacao: "25.0", desvio_medio_pma: "-0.080", preco_medio: "59.90" },
       { marca_id: "AP", marca: "Ápice", canal: "Shopee", anuncios: 150, anuncios_violando: 45, pct_violacao: "30.0", desvio_medio_pma: "-0.110", preco_medio: "54.90" },
-      { marca_id: "BB", marca: "Barbours", canal: "Mercadolivre", anuncios: 250, anuncios_violando: 50, pct_violacao: "20.0", desvio_medio_pma: "-0.070", preco_medio: "39.90" },
+      { marca_id: "BB", marca: "Barbours", canal: "Mercado Livre", anuncios: 250, anuncios_violando: 50, pct_violacao: "20.0", desvio_medio_pma: "-0.070", preco_medio: "39.90" },
       { marca_id: "KS", marca: "Kokeshi", canal: "Shopee", anuncios: 190, anuncios_violando: 43, pct_violacao: "22.6", desvio_medio_pma: "-0.100", preco_medio: "29.90" },
       { marca_id: null, marca: "Marca não mapeada", canal: "Shopee", anuncios: 10, anuncios_violando: 2, pct_violacao: "20.0", desvio_medio_pma: "-0.040", preco_medio: "19.90" },
     ],

@@ -85,7 +85,7 @@ class FonteFalsa:
             importado_inicio=datetime(2026, 10, 21, 11, 41, tzinfo=timezone.utc),
             importado_fim=datetime(2026, 10, 21, 11, 42, tzinfo=timezone.utc),
             linhas=1530,
-            canais=("Amazon", "Mercadolivre", "Shopee"),
+            canais=("Amazon", "Mercado Livre", "Shopee"),
         ))
         self._datas = kw.get("datas", [HOJE, HOJE - timedelta(days=1), HOJE - timedelta(days=2)])
         self._resumo = kw.get("resumo", ResumoFonte(
@@ -98,7 +98,7 @@ class FonteFalsa:
             anuncios_violando=312, anuncios_violando_identificados=140,
         ))
         self._mc = kw.get("mc", [
-            MarcaCanalFonte("AP", "Mercadolivre", 500, 100, Decimal("-0.08"), Decimal("59.90")),
+            MarcaCanalFonte("AP", "Mercado Livre", 500, 100, Decimal("-0.08"), Decimal("59.90")),
             MarcaCanalFonte("BB", "Shopee", 300, 0, None, Decimal("39.90")),
             MarcaCanalFonte(None, "Shopee", 7, 1, Decimal("-0.20"), Decimal("10.00")),
         ])
@@ -156,7 +156,7 @@ class Relogio:
 @pytest.fixture()
 def ligado(monkeypatch):
     monkeypatch.setattr(settings, "b2b_revenda_enabled", True)
-    monkeypatch.setattr(settings, "b2b_revenda_canais_kpi", "Mercadolivre,Shopee")
+    monkeypatch.setattr(settings, "b2b_revenda_canais_kpi", "Mercado Livre,Shopee")
     monkeypatch.setattr(rota, "_agora", lambda: AGORA)
 
 
@@ -270,7 +270,7 @@ def test_sem_filtro_de_canal_envia_a_allowlist_e_nunca_nulo(caminho, ligado, cli
     recortes = falsa.recortes()
     assert recortes, "a fonte deveria ter sido consultada"
     for f in recortes:
-        assert f.canais == ("Mercadolivre", "Shopee")
+        assert f.canais == ("Mercado Livre", "Shopee")
         assert "Amazon" not in f.canais
 
 
@@ -292,13 +292,31 @@ def test_allowlist_vazia_nao_libera_amazon(ligado, client, falsa, monkeypatch):
 
 
 def test_escopo_lista_canais_excluidos_com_motivo(ligado, client, falsa):
-    falsa.carga = replace(falsa.carga, canais=("Amazon", "Magalu", "Mercadolivre", "Shopee"))
+    falsa.carga = replace(falsa.carga, canais=("Amazon", "Magalu", "Mercado Livre", "Shopee"))
     escopo = client.get(BASE + "/frescor").json()["escopo"]
     assert escopo["piso"] == "pma_octaprice"
     assert "PDV" in escopo["aviso_piso"]
-    assert escopo["canais_nos_kpis"] == ["Mercadolivre", "Shopee"]
+    assert escopo["canais_nos_kpis"] == ["Mercado Livre", "Shopee"]
     motivos = {c["canal"]: c["motivo"] for c in escopo["canais_excluidos"]}
     assert motivos == {"Amazon": svc.MOTIVO_AMAZON, "Magalu": svc.MOTIVO_FORA_ALLOWLIST}
+
+
+def test_canais_padrao_usam_a_grafia_da_fonte():
+    # Medido na fonte em 21/10/2026: o canal e' "Mercado Livre", com espaco.
+    # "Mercadolivre" tirava o ML inteiro dos KPIs sem erro nenhum.
+    assert Settings().b2b_revenda_canais_kpi_list == ["Mercado Livre", "Shopee"]
+
+
+def test_grafia_errada_na_allowlist_aparece_no_escopo(ligado, client, falsa, monkeypatch):
+    monkeypatch.setattr(settings, "b2b_revenda_canais_kpi", "Mercadolivre,Shopee")
+    escopo = client.get(BASE + "/frescor").json()["escopo"]
+    assert escopo["canais_kpi_sem_dados"] == ["Mercadolivre"]
+    # E o canal real, fora da allowlist, aparece como excluido.
+    assert "Mercado Livre" in {c["canal"] for c in escopo["canais_excluidos"]}
+
+
+def test_escopo_sem_alerta_quando_allowlist_bate(ligado, client):
+    assert client.get(BASE + "/frescor").json()["escopo"]["canais_kpi_sem_dados"] == []
 
 
 def test_filtro_de_canal_valido_e_repassado(ligado, client, falsa):
@@ -668,13 +686,13 @@ def test_http_carga_vem_de_datas_e_marca_canal_sem_filtro():
     t = Transporte({
         "fn_monit_datas": [{"data_ref": "2026-10-20"}, {"data_ref": "2026-10-21"}],
         "fn_monit_marca_canal": [
-            {"marca_id": "AP", "canal": "Mercadolivre", "anuncios": 4, "violando": 3, "desvio_medio": None, "preco_medio": 1},
+            {"marca_id": "AP", "canal": "Mercado Livre", "anuncios": 4, "violando": 3, "desvio_medio": None, "preco_medio": 1},
             {"marca_id": "AP", "canal": "Amazon", "anuncios": 2, "violando": 2, "desvio_medio": None, "preco_medio": 1},
         ],
     })
     carga = _fonte_http(t).carga_mais_recente()
     assert carga.data_ref == date(2026, 10, 21) and carga.linhas == 6
-    assert carga.canais == ("Amazon", "Mercadolivre")
+    assert carga.canais == ("Amazon", "Mercado Livre")
     assert carga.coleta_fim is None and carga.importado_fim is None
     corpo_mc = json.loads(t.reqs[1].content)
     assert corpo_mc["p_canais"] is None and corpo_mc["p_data"] == "2026-10-21"
