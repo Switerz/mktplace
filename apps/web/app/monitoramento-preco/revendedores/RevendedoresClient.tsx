@@ -33,6 +33,7 @@ import {
   FILTROS_VAZIOS,
   MARCAS,
   SEVERIDADES,
+  SEM_COLETA_IMPORTACAO,
   SEM_DADO,
   carregarPainel,
   fmtData,
@@ -188,8 +189,14 @@ function FaixaFrescor({ frescor, carregando }: { frescor: Frescor | null; carreg
       <span>
         Relatório de <strong className="font-semibold text-ink tabular-nums">{fmtData(frescor.data_ref_mais_recente)}</strong>
       </span>
-      <span className="tabular-nums">Coleta até {fmtInstante(frescor.coleta_fim)}</span>
-      <span className="tabular-nums">Importado {fmtInstante(frescor.importado_fim)}</span>
+      {frescor.coleta_fim || frescor.importado_fim ? (
+        <>
+          <span className="tabular-nums">Coleta até {fmtInstante(frescor.coleta_fim)}</span>
+          <span className="tabular-nums">Importado {fmtInstante(frescor.importado_fim)}</span>
+        </>
+      ) : (
+        <span>{SEM_COLETA_IMPORTACAO}</span>
+      )}
       <span className="tabular-nums">Consultado {fmtInstante(frescor.consultado_em)}</span>
       {atrasado && (
         <span className="text-warn-ink">Esperado: relatório de {fmtData(frescor.data_ref_esperada)}.</span>

@@ -20,8 +20,9 @@
  * inventado com cara de real.
  *
  * DUAS BARREIRAS, como nas demais telas novas: (1) a rota responde 404 com a
- * flag desligada; (2) o seletor some. A API tem a propria flag
- * (`B2B_REVENDA_ENABLED`), desligada por padrao.
+ * flag desligada; (2) o seletor some. A API tem flag propria, desligada por
+ * padrao (docs/b2b_revenda_contrato.md). Nenhuma variavel do backend e'
+ * citada no frontend — `tests/b2b-revenda.test.ts` trava isso.
  *
  * O acesso a `process.env.NEXT_PUBLIC_*` PRECISA ser literal: o Next substitui
  * a expressao em BUILD por analise estatica do texto.

@@ -1,39 +1,40 @@
 """Adapter da Torre B2B como FONTE EXTERNA somente leitura (Gate TORRE-B2B-OCTAPRICE).
 
-O que este modulo le, e nada alem disso (contrato: docs/b2b_revenda_contrato.md):
+Transporte: Data API do Supabase (PostgREST), chamada SO' pelo backend. A
+chave nunca vai ao navegador: o header e' montado aqui, a partir de variavel
+de ambiente, e nunca aparece em log, resposta, excecao ou traceback.
 
-  - `fn_monit_datas()`                      dias com relatorio do OctaPrice
-  - `fn_monit_resumo(...)`                  KPIs do dia
-  - `fn_monit_severidade(...)`              leve / media / grave + buy box
-  - `fn_monit_marca_canal(...)`             recorte marca x canal
-  - `fn_monit_top_produtos(...)`            ranking de SKUs
-  - `fn_monit_sellers(...)`                 SO' agregado em SQL: contagens de
-                                            identificados. Nome de seller,
-                                            cliente e vendedor NUNCA atravessam
-                                            a conexao.
-  - `fato_monitoramento_preco`              SO' carimbos da carga mais recente
-                                            (data_ref, data_coleta, created_at,
-                                            canal) para o frescor.
+ALLOWLIST FIXA de seis RPCs — nada alem disso e' chamado, e nenhum nome de RPC
+vem da requisicao (contrato: docs/b2b_revenda_contrato.md):
+
+  - `fn_monit_datas`          dias com relatorio do OctaPrice
+  - `fn_monit_resumo`         KPIs do dia
+  - `fn_monit_severidade`     leve / media / grave + buy box
+  - `fn_monit_marca_canal`    recorte marca x canal (e, sem filtro, os canais
+                              presentes na carga mais recente)
+  - `fn_monit_top_produtos`   ranking de SKUs
+  - `fn_monit_sellers`        SO' as colunas `identificado` e `violando`
+                              (`select=`), para contar a cobertura. Nome de
+                              seller, cliente e vendedor NAO atravessam a rede.
 
 As RPCs sao as MESMAS que alimentam a tela da Torre B2B, para os numeros
-baterem por construcao. Chamadas por NOME de parametro (`p_x => ...`): se a
-fonte renomear um parametro, a chamada falha alto em vez de deslocar valores.
-
-`p_vendedores` e `p_cnpjs` nunca sao enviados. Filtrar por cliente ou vendedor
-e' recorte de dado de cliente, e nenhuma rota com dado de cliente existe
-enquanto a autenticacao da Torre de Marketplaces nao estiver definida.
+baterem por construcao. Argumentos vao POR NOME no corpo JSON: se a fonte
+renomear um parametro, a chamada falha alto em vez de deslocar valores.
+`p_vendedores` e `p_cnpjs` nunca sao enviados.
 
 SEGURANCA
 ---------
-- Cada leitura roda numa transacao `READ ONLY` com `statement_timeout` local,
-  alem do `default_transaction_read_only` que a role dedicada ja' traz.
-- Nenhuma mensagem de excecao sai daqui. O texto de erro do driver pode
-  carregar host, usuario e DSN; so' a CATEGORIA (vocabulario fechado) e o nome
-  da classe sao registrados. `raise ... from None` corta o encadeamento para
-  que um log de traceback tambem nao a carregue.
+- So' o header `apikey`: o gateway do Supabase sintetiza o `Authorization`
+  a partir dele, para chave nova (`sb_*`) e legada (JWT). Uma copia a menos
+  do segredo em transito.
+- Nenhum corpo de erro da fonte e' lido alem do campo `code` (SQLSTATE /
+  PGRST). Mensagem, detalhe e hint podem trazer dado; nao sao tocados.
+- `raise ... from None` corta o encadeamento: um log de traceback nao carrega
+  a excecao do httpx (que tem a URL).
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -42,9 +43,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable, Literal, Optional, Protocol
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -59,22 +58,43 @@ MotivoIndisponivel = Literal[
     "falha_desconhecida",
 ]
 
-#: SQLSTATEs que significam "a fonte mudou o que prometia": funcao, tabela ou
-#: coluna sumiu, ou o tipo de retorno mudou.
-_PGCODES_CONTRATO = {"42883", "42P01", "42703", "42804", "42725", "42P13", "25006"}
-_PGCODE_PERMISSAO = "42501"
-_PGCODE_TIMEOUT = "57014"
+#: As UNICAS RPCs que este adapter chama.
+RPCS_PERMITIDAS = frozenset({
+    "fn_monit_datas",
+    "fn_monit_resumo",
+    "fn_monit_severidade",
+    "fn_monit_marca_canal",
+    "fn_monit_top_produtos",
+    "fn_monit_sellers",
+})
 
-#: Drivers aceitos na DSN. Qualquer outro esquema e' recusado SEM ecoar o valor.
-_DRIVERS_ACEITOS = {"postgresql", "postgresql+psycopg2"}
+#: Colunas pedidas a cada RPC (`select=`). E' o contrato de leitura: a fonte
+#: so' devolve isto, e uma coluna que sumir quebra a chamada (PGRST/42703).
+COLUNAS = {
+    "fn_monit_datas": ("data_ref",),
+    "fn_monit_resumo": ("data_ref", "total", "violando", "pct", "sellers_violando", "produtos", "desvio_medio"),
+    "fn_monit_severidade": ("leve", "media", "grave", "com_buybox", "viol_com_buybox"),
+    "fn_monit_marca_canal": ("marca_id", "canal", "anuncios", "violando", "desvio_medio", "preco_medio"),
+    "fn_monit_top_produtos": ("sku", "marca_id", "exemplo", "anuncios", "violando", "pct", "desvio_medio"),
+    "fn_monit_sellers": ("identificado", "violando"),
+}
 
-#: Identifica a conexao no `pg_stat_activity` da fonte: o dono do B2B ve quem
-#: esta lendo, sem precisar perguntar.
-APPLICATION_NAME = "torre-mktplace-b2b-revenda"
+#: SQLSTATE / codigos PostgREST que significam "a fonte mudou o que prometia".
+_CODIGOS_CONTRATO = {
+    "42883", "42P01", "42703", "42804", "42725", "42P13",
+    "PGRST202", "PGRST203", "PGRST204", "PGRST100", "PGRST116",
+}
+_CODIGO_PERMISSAO = "42501"
+_CODIGO_TIMEOUT = "57014"
 
-#: Teto do `p_limit` de `fn_monit_sellers` ao contar identificados. Se o numero
-#: de sellers violando chegar nele, a cobertura e' marcada como inconsistente.
+#: Identifica a origem das chamadas nos logs da fonte, sem expor nada.
+USER_AGENT = "torre-mktplace-b2b-revenda"
+
+#: Teto do `p_limit` de `fn_monit_sellers` ao contar identificados.
 LIMITE_SELLERS_COBERTURA = 100000
+#: Pagina para RPCs que podem passar do `max-rows` do PostgREST.
+PAGINA = 1000
+MAX_PAGINAS = 50
 
 
 class FonteIndisponivel(Exception):
@@ -162,7 +182,7 @@ class SkuFonte:
 
 class FonteRevenda(Protocol):
     """O que o servico precisa da Torre B2B. A implementacao falsa dos testes
-    e a real (Postgres) cumprem o mesmo contrato."""
+    e a real (HTTP) cumprem o mesmo contrato."""
 
     def datas(self) -> list[date]: ...
     def carga_mais_recente(self) -> CargaFonte: ...
@@ -174,171 +194,179 @@ class FonteRevenda(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# SQL — o contrato de leitura, inteiro, num lugar so'
+# Conversao
 # ---------------------------------------------------------------------------
-# Parametros comuns, por NOME. `p_vendedores`/`p_cnpjs` ficam de fora de
-# proposito (default NULL na fonte).
-_ARGS_FILTRO = (
-    "p_marcas => CAST(:marcas AS text[]), "
-    "p_canais => CAST(:canais AS text[]), "
-    "p_skus => CAST(:skus AS text[]), "
-    "p_ufs => CAST(:ufs AS text[])"
-)
-
-SQL_DATAS = "SELECT data_ref FROM fn_monit_datas()"
-
-SQL_CARGA = """
-WITH ult AS (SELECT max(data_ref) AS data_ref FROM fato_monitoramento_preco)
-SELECT u.data_ref,
-       min(f.data_coleta)  AS coleta_inicio,
-       max(f.data_coleta)  AS coleta_fim,
-       min(f.created_at)   AS importado_inicio,
-       max(f.created_at)   AS importado_fim,
-       count(f.data_ref)::int AS linhas,
-       array_remove(array_agg(DISTINCT f.canal), NULL) AS canais
-FROM ult u
-LEFT JOIN fato_monitoramento_preco f ON f.data_ref = u.data_ref
-GROUP BY u.data_ref
-"""
-
-SQL_RESUMO = f"""
-SELECT data_ref, total, violando, pct, sellers_violando, produtos, desvio_medio
-FROM fn_monit_resumo(p_data => CAST(:data AS date),
-                     p_sevs => CAST(:sevs AS text[]), {_ARGS_FILTRO})
-"""
-
-# `fn_monit_severidade` nao recebe `p_sevs`: e' o proprio breakdown.
-SQL_SEVERIDADE = f"""
-SELECT leve, media, grave, com_buybox, viol_com_buybox
-FROM fn_monit_severidade(p_data => CAST(:data AS date), {_ARGS_FILTRO})
-"""
-
-# Agregado DENTRO do banco: a conexao so' devolve quatro inteiros. Nome do
-# seller, cliente e vendedor nao saem da fonte.
-SQL_COBERTURA = f"""
-SELECT count(*)::int                                   AS sellers_violando,
-       count(*) FILTER (WHERE s.identificado)::int     AS sellers_violando_identificados,
-       COALESCE(sum(s.violando), 0)::int               AS anuncios_violando,
-       COALESCE(sum(s.violando) FILTER (WHERE s.identificado), 0)::int
-                                                       AS anuncios_violando_identificados
-FROM fn_monit_sellers(p_data => CAST(:data AS date), p_limit => :limite_sellers,
-                      p_sevs => CAST(:sevs AS text[]), {_ARGS_FILTRO}) s
-"""
-
-SQL_MARCA_CANAL = f"""
-SELECT marca_id, canal, anuncios, violando, desvio_medio, preco_medio
-FROM fn_monit_marca_canal(p_data => CAST(:data AS date),
-                          p_sevs => CAST(:sevs AS text[]), {_ARGS_FILTRO})
-"""
-
-SQL_TOP_SKUS = f"""
-SELECT sku, marca_id, exemplo, anuncios, violando, pct, desvio_medio
-FROM fn_monit_top_produtos(p_data => CAST(:data AS date), p_limit => :limite,
-                           p_sevs => CAST(:sevs AS text[]), {_ARGS_FILTRO})
-"""
-
-
 def _lista_ou_nulo(valores: tuple[str, ...]) -> Optional[list[str]]:
-    """Lista vazia vira NULL: na fonte, NULL e' "sem filtro" e `ARRAY[]` nem
-    tem tipo inferivel."""
+    """Lista vazia vira NULL: na fonte, NULL e' "sem filtro"."""
     return list(valores) if valores else None
 
 
-def _params(f: FiltrosFonte) -> dict[str, Any]:
-    return {
-        "data": f.data,
-        "sevs": _lista_ou_nulo(f.severidades),
-        "marcas": _lista_ou_nulo(f.marcas),
-        "canais": _lista_ou_nulo(f.canais),
-        "skus": _lista_ou_nulo(f.skus),
-        "ufs": _lista_ou_nulo(f.ufs),
+def argumentos(f: FiltrosFonte, *, com_severidade: bool = True) -> dict[str, Any]:
+    """Corpo JSON comum, por NOME de parametro. Nunca `p_vendedores`/`p_cnpjs`."""
+    corpo: dict[str, Any] = {
+        "p_data": f.data.isoformat() if f.data else None,
+        "p_marcas": _lista_ou_nulo(f.marcas),
+        "p_canais": _lista_ou_nulo(f.canais),
+        "p_skus": _lista_ou_nulo(f.skus),
+        "p_ufs": _lista_ou_nulo(f.ufs),
     }
+    if com_severidade:
+        corpo["p_sevs"] = _lista_ou_nulo(f.severidades)
+    return corpo
 
 
 def _int(v: Any) -> int:
-    return int(v) if v is not None else 0
+    if v is None:
+        return 0
+    if isinstance(v, bool) or not isinstance(v, (int, float, str, Decimal)):
+        raise FonteIndisponivel("contrato_da_fonte_quebrado")
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise FonteIndisponivel("contrato_da_fonte_quebrado") from None
 
 
 def _dec(v: Any) -> Optional[Decimal]:
     if v is None:
         return None
-    return v if isinstance(v, Decimal) else Decimal(str(v))
+    try:
+        # `str()` primeiro: float JSON vira Decimal pela representacao curta.
+        return v if isinstance(v, Decimal) else Decimal(str(v))
+    except Exception:  # noqa: BLE001
+        raise FonteIndisponivel("contrato_da_fonte_quebrado") from None
 
 
-def classificar_falha(exc: BaseException) -> MotivoIndisponivel:
-    """Categoria da falha SEM ler a mensagem — so' SQLSTATE e classe."""
-    pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
-    if pgcode == _PGCODE_PERMISSAO:
-        return "permissao_negada"
-    if pgcode == _PGCODE_TIMEOUT:
+def _data(v: Any) -> Optional[date]:
+    if v is None:
+        return None
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except ValueError:
+        raise FonteIndisponivel("contrato_da_fonte_quebrado") from None
+
+
+def _codigo_do_erro(resp: httpx.Response) -> Optional[str]:
+    """SO' o campo `code` do corpo de erro. Mensagem/detalhe/hint nao sao lidos."""
+    try:
+        corpo = resp.json()
+    except (ValueError, json.JSONDecodeError):
+        return None
+    codigo = corpo.get("code") if isinstance(corpo, dict) else None
+    return str(codigo) if codigo is not None else None
+
+
+def classificar_http(status: int, codigo: Optional[str]) -> MotivoIndisponivel:
+    """Categoria da falha pelo status HTTP e pelo codigo — nunca pela mensagem."""
+    if codigo == _CODIGO_TIMEOUT:
         return "fonte_lenta"
-    if pgcode in _PGCODES_CONTRATO:
+    if codigo == _CODIGO_PERMISSAO:
+        return "permissao_negada"
+    if codigo in _CODIGOS_CONTRATO:
         return "contrato_da_fonte_quebrado"
-    nome = type(exc).__name__
-    if nome in ("OperationalError", "InterfaceError", "TimeoutError"):
+    if status == 401:
+        return "credencial_invalida"
+    if status == 403:
+        return "permissao_negada"
+    if status in (404, 400, 300):
+        return "contrato_da_fonte_quebrado"
+    if status in (408, 504):
+        return "fonte_lenta"
+    if status >= 500 or status == 429:
         return "fonte_inacessivel"
     return "falha_desconhecida"
 
 
-class FontePostgres:
-    """Implementacao real: Postgres da Torre B2B via role dedicada read-only."""
+# ---------------------------------------------------------------------------
+# Implementacao real: Data API do Supabase
+# ---------------------------------------------------------------------------
+class FonteSupabaseHttp:
+    """Le as seis RPCs pela Data API (PostgREST) com uma chave server-side."""
 
-    def __init__(self, engine: Engine, statement_timeout_ms: int):
-        self._engine = engine
-        self._timeout = str(int(statement_timeout_ms))
+    def __init__(self, cliente: httpx.Client):
+        # O cliente ja' nasce com base_url e o header `apikey`; esta classe
+        # nunca ve o valor da chave.
+        self._http = cliente
 
-    def _ler(self, sql: str, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
-        try:
-            with self._engine.connect() as conn:
-                with conn.begin():
-                    conn.execute(text("SET TRANSACTION READ ONLY"))
-                    # `set_config(..., true)` = SET LOCAL, com valor por bind.
-                    conn.execute(
-                        text("SELECT set_config('statement_timeout', :t, true)"),
-                        {"t": self._timeout},
-                    )
-                    res = conn.execute(text(sql), params or {})
-                    return [dict(r._mapping) for r in res]
-        except (DBAPIError, SQLAlchemyError, OSError) as exc:
-            motivo = classificar_falha(exc)
-            # So' categoria e classe. NUNCA `str(exc)`: carrega host/usuario.
-            logger.warning("b2b_revenda: fonte indisponivel: %s (%s)", motivo, type(exc).__name__)
-            raise FonteIndisponivel(motivo) from None
+    def _rpc(
+        self,
+        nome: str,
+        corpo: dict[str, Any],
+        *,
+        paginar: bool = False,
+    ) -> list[dict[str, Any]]:
+        if nome not in RPCS_PERMITIDAS:
+            # Defesa em profundidade: nenhum caminho de codigo monta nome de
+            # RPC a partir da requisicao, mas se um dia montar, para aqui.
+            raise ValueError("RPC fora da allowlist")
+        params = {"select": ",".join(COLUNAS[nome])}
+        linhas: list[dict[str, Any]] = []
+        for pagina in range(MAX_PAGINAS if paginar else 1):
+            headers = {}
+            if paginar:
+                inicio = pagina * PAGINA
+                headers = {"Range-Unit": "items", "Range": f"{inicio}-{inicio + PAGINA - 1}"}
+            try:
+                resp = self._http.post(f"/rest/v1/rpc/{nome}", params=params, json=corpo, headers=headers)
+            except httpx.TimeoutException as exc:
+                motivo: MotivoIndisponivel = (
+                    "fonte_inacessivel" if isinstance(exc, httpx.ConnectTimeout) else "fonte_lenta"
+                )
+                logger.warning("b2b_revenda: %s em %s (%s)", motivo, nome, type(exc).__name__)
+                raise FonteIndisponivel(motivo) from None
+            except httpx.HTTPError as exc:
+                logger.warning("b2b_revenda: fonte_inacessivel em %s (%s)", nome, type(exc).__name__)
+                raise FonteIndisponivel("fonte_inacessivel") from None
+            if resp.status_code not in (200, 206):
+                motivo = classificar_http(resp.status_code, _codigo_do_erro(resp))
+                logger.warning("b2b_revenda: %s em %s (HTTP %s)", motivo, nome, resp.status_code)
+                raise FonteIndisponivel(motivo)
+            try:
+                lote = resp.json()
+            except (ValueError, json.JSONDecodeError):
+                raise FonteIndisponivel("contrato_da_fonte_quebrado") from None
+            if not isinstance(lote, list) or any(not isinstance(r, dict) for r in lote):
+                raise FonteIndisponivel("contrato_da_fonte_quebrado")
+            faltando = [c for c in COLUNAS[nome] if lote and c not in lote[0]]
+            if faltando:
+                raise FonteIndisponivel("contrato_da_fonte_quebrado")
+            linhas.extend(lote)
+            if not paginar or len(lote) < PAGINA:
+                break
+        return linhas
 
     def datas(self) -> list[date]:
-        return [r["data_ref"] for r in self._ler(SQL_DATAS) if r["data_ref"] is not None]
+        return [d for d in (_data(r["data_ref"]) for r in self._rpc("fn_monit_datas", {})) if d]
 
     def carga_mais_recente(self) -> CargaFonte:
-        linhas = self._ler(SQL_CARGA)
-        if not linhas:
+        """Dia mais recente + canais e anuncios dele (marca x canal SEM filtro).
+
+        Coleta e importacao (`data_coleta`, `created_at`) NAO saem de nenhuma
+        das seis RPCs: ficam `None` e a tela diz "nao informado".
+        """
+        datas = self.datas()
+        if not datas:
             return CargaFonte(None, None, None, None, None, 0, ())
-        r = linhas[0]
-        return CargaFonte(
-            data_ref=r["data_ref"],
-            coleta_inicio=r["coleta_inicio"],
-            coleta_fim=r["coleta_fim"],
-            importado_inicio=r["importado_inicio"],
-            importado_fim=r["importado_fim"],
-            linhas=_int(r["linhas"]),
-            canais=tuple(sorted(r["canais"] or ())),
-        )
+        dia = max(datas)
+        vazio = FiltrosFonte(dia, (), (), (), (), ())
+        linhas = self.marca_canal(vazio)
+        canais = tuple(sorted({r.canal for r in linhas if r.canal}))
+        return CargaFonte(dia, None, None, None, None, sum(r.anuncios for r in linhas), canais)
 
     def resumo(self, f: FiltrosFonte) -> ResumoFonte:
-        linhas = self._ler(SQL_RESUMO, _params(f))
-        if not linhas:
+        linhas = self._rpc("fn_monit_resumo", argumentos(f))
+        if len(linhas) != 1:
             raise FonteIndisponivel("contrato_da_fonte_quebrado")
         r = linhas[0]
         return ResumoFonte(
-            data_ref=r["data_ref"], total=_int(r["total"]), violando=_int(r["violando"]),
+            data_ref=_data(r["data_ref"]), total=_int(r["total"]), violando=_int(r["violando"]),
             pct=_dec(r["pct"]), sellers_violando=_int(r["sellers_violando"]),
             produtos=_int(r["produtos"]), desvio_medio=_dec(r["desvio_medio"]),
         )
 
     def severidade(self, f: FiltrosFonte) -> SeveridadeFonte:
-        p = _params(f)
-        p.pop("sevs")
-        linhas = self._ler(SQL_SEVERIDADE, p)
-        if not linhas:
+        # `fn_monit_severidade` nao recebe `p_sevs`: e' o proprio breakdown.
+        linhas = self._rpc("fn_monit_severidade", argumentos(f, com_severidade=False))
+        if len(linhas) != 1:
             raise FonteIndisponivel("contrato_da_fonte_quebrado")
         r = linhas[0]
         return SeveridadeFonte(
@@ -347,14 +375,16 @@ class FontePostgres:
         )
 
     def cobertura(self, f: FiltrosFonte) -> CoberturaFonte:
-        p = _params(f)
-        p["limite_sellers"] = LIMITE_SELLERS_COBERTURA
-        r = self._ler(SQL_COBERTURA, p)[0]
+        corpo = argumentos(f) | {"p_limit": LIMITE_SELLERS_COBERTURA}
+        # Uma linha por seller violando, so' com `identificado` e `violando`.
+        # Contado AQUI e descartado: nenhuma linha sai deste metodo.
+        linhas = self._rpc("fn_monit_sellers", corpo, paginar=True)
+        ident = [r for r in linhas if r.get("identificado") is True]
         return CoberturaFonte(
-            sellers_violando=_int(r["sellers_violando"]),
-            sellers_violando_identificados=_int(r["sellers_violando_identificados"]),
-            anuncios_violando=_int(r["anuncios_violando"]),
-            anuncios_violando_identificados=_int(r["anuncios_violando_identificados"]),
+            sellers_violando=len(linhas),
+            sellers_violando_identificados=len(ident),
+            anuncios_violando=sum(_int(r["violando"]) for r in linhas),
+            anuncios_violando_identificados=sum(_int(r["violando"]) for r in ident),
         )
 
     def marca_canal(self, f: FiltrosFonte) -> list[MarcaCanalFonte]:
@@ -364,19 +394,18 @@ class FontePostgres:
                 violando=_int(r["violando"]), desvio_medio=_dec(r["desvio_medio"]),
                 preco_medio=_dec(r["preco_medio"]),
             )
-            for r in self._ler(SQL_MARCA_CANAL, _params(f))
+            for r in self._rpc("fn_monit_marca_canal", argumentos(f), paginar=True)
         ]
 
     def top_skus(self, f: FiltrosFonte, limite: int) -> list[SkuFonte]:
-        p = _params(f)
-        p["limite"] = int(limite)
+        corpo = argumentos(f) | {"p_limit": int(limite)}
         return [
             SkuFonte(
-                sku=r["sku"], marca_id=r["marca_id"], exemplo=r["exemplo"],
+                sku=str(r["sku"]), marca_id=r["marca_id"], exemplo=r["exemplo"],
                 anuncios=_int(r["anuncios"]), violando=_int(r["violando"]),
                 pct=_dec(r["pct"]), desvio_medio=_dec(r["desvio_medio"]),
             )
-            for r in self._ler(SQL_TOP_SKUS, p)
+            for r in self._rpc("fn_monit_top_produtos", corpo)
         ]
 
 
@@ -456,39 +485,26 @@ class FonteComCache:
 # ---------------------------------------------------------------------------
 # Construcao preguicosa (so' com a flag ligada)
 # ---------------------------------------------------------------------------
-def criar_engine(url: str, *, sslmode: str, connect_timeout: int) -> Engine:
-    """Engine da fonte. Valida o esquema SEM ecoar a URL.
-
-    `create_engine` nao conecta: nenhuma rede acontece aqui.
-    """
-    if not url:
+def criar_cliente(url: str, chave: str, *, timeout_segundos: float) -> httpx.Client:
+    """Cliente HTTP da fonte. Valida a URL SEM ecoar valor; nao abre conexao."""
+    if not url or not chave:
         raise FonteIndisponivel("credencial_ausente")
     try:
-        parsed = make_url(url)
-    except Exception:  # noqa: BLE001 — a mensagem traria a URL inteira
+        base = httpx.URL(url.strip())
+    except Exception:  # noqa: BLE001
         raise FonteIndisponivel("credencial_invalida") from None
-    if parsed.drivername not in _DRIVERS_ACEITOS:
+    # So' HTTPS, sem credencial embutida, sem caminho/consulta: a chave vai no
+    # header e a URL e' so' a raiz do projeto.
+    if base.scheme != "https" or not base.host or base.userinfo or base.path not in ("", "/") or base.query:
         raise FonteIndisponivel("credencial_invalida")
-    # Driver EXPLICITO: o projeto depende de psycopg2, e o SQLAlchemy 2.1 muda
-    # o padrao de `postgresql://` para psycopg 3. Sem isto, subir a versao do
-    # SQLAlchemy derrubaria a integracao com `ModuleNotFoundError`.
-    parsed = parsed.set(drivername="postgresql+psycopg2")
-    try:
-        return create_engine(
-            parsed,
-            pool_pre_ping=True,
-            pool_size=2,
-            max_overflow=2,
-            pool_recycle=300,
-            connect_args={
-                "connect_timeout": connect_timeout,
-                "sslmode": sslmode,
-                "application_name": APPLICATION_NAME,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 — fronteira de configuracao
-        logger.error("b2b_revenda: engine nao criado (%s)", type(exc).__name__)
-        raise FonteIndisponivel("credencial_invalida") from None
+    if any(c in chave for c in "\r\n") or not chave.strip():
+        raise FonteIndisponivel("credencial_invalida")
+    return httpx.Client(
+        base_url=str(base).rstrip("/"),
+        headers={"apikey": chave.strip(), "User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=httpx.Timeout(timeout_segundos, connect=min(5.0, timeout_segundos)),
+        follow_redirects=False,
+    )
 
 
 _singleton_lock = threading.Lock()
@@ -504,13 +520,10 @@ def obter_fonte() -> FonteComCache:
 
     with _singleton_lock:
         if _singleton is None:
-            engine = criar_engine(
-                settings.b2b_revenda_database_url,
-                sslmode=settings.b2b_revenda_sslmode,
-                connect_timeout=settings.b2b_revenda_connect_timeout_seconds,
+            cliente = criar_cliente(
+                settings.b2b_revenda_supabase_url,
+                settings.b2b_revenda_supabase_key.get_secret_value(),
+                timeout_segundos=settings.b2b_revenda_timeout_seconds,
             )
-            _singleton = FonteComCache(
-                FontePostgres(engine, settings.b2b_revenda_statement_timeout_ms),
-                settings.b2b_revenda_cache_ttl_seconds,
-            )
+            _singleton = FonteComCache(FonteSupabaseHttp(cliente), settings.b2b_revenda_cache_ttl_seconds)
         return _singleton

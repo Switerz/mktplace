@@ -23,7 +23,7 @@ const LIMITACOES = [
   "Seller é identificado pelo nome normalizado: nomes iguais em canais diferentes contam como um.",
   "Cliente B2B depende da identificação feita na Torre B2B; seller sem vínculo não tem cliente.",
   "Histórico limitado à retenção da fonte (cerca de 90 dias).",
-  "Horário da coleta é exibido como a fonte o gravou, sem fuso declarado no relatório.",
+  "Horários de coleta e importação não são expostos pelas RPCs; o frescor é medido pelo dia do relatório.",
 ];
 
 export const FIXTURE_FRESCOR: Frescor = {

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import logging
 import re
 from dataclasses import replace
@@ -22,9 +23,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import get_args
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.config import Settings, settings
 from app.main import app
@@ -205,34 +207,54 @@ def singleton_limpo(monkeypatch):
     monkeypatch.setattr(fonte_mod, "_singleton", None)
 
 
-def test_credencial_ausente_e_indisponivel(ligado, singleton_limpo, monkeypatch):
-    monkeypatch.setattr(settings, "b2b_revenda_database_url", "")
+CHAVE = "chave-ficticia-de-teste-NAO-PODE-VAZAR"
+
+
+@pytest.mark.parametrize("url,chave", [("", CHAVE), ("https://exemplo.supabase.co", "")])
+def test_credencial_ausente_e_indisponivel(url, chave, ligado, singleton_limpo, monkeypatch):
+    monkeypatch.setattr(settings, "b2b_revenda_supabase_url", url)
+    monkeypatch.setattr(settings, "b2b_revenda_supabase_key", SecretStr(chave))
     r = TestClient(app).get(BASE + "/resumo")
     assert r.status_code == 200
     assert r.json()["motivo_tecnico"] == "credencial_ausente"
     assert fonte_mod._singleton is None, "falha de credencial nao pode ficar guardada"
 
 
-@pytest.mark.parametrize("dsn", [
-    "mysql://usuario:SENHA-SECRETA-XYZ@host.exemplo/db",
-    "isto nao e uma url SENHA-SECRETA-XYZ",
+@pytest.mark.parametrize("url", [
+    "http://exemplo.supabase.co",                       # sem TLS
+    "https://usuario:senha@exemplo.supabase.co",        # credencial embutida
+    "https://exemplo.supabase.co/rest/v1",              # caminho
+    "https://exemplo.supabase.co/?apikey=x",            # consulta
+    "isto nao e uma url",
 ])
-def test_credencial_invalida_nao_vaza_dsn(dsn, ligado, singleton_limpo, monkeypatch, caplog):
-    monkeypatch.setattr(settings, "b2b_revenda_database_url", dsn)
+def test_url_invalida_e_recusada_sem_eco(url, ligado, singleton_limpo, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "b2b_revenda_supabase_url", url)
+    monkeypatch.setattr(settings, "b2b_revenda_supabase_key", SecretStr(CHAVE))
     caplog.set_level(logging.DEBUG)
     r = TestClient(app).get(BASE + "/resumo")
     assert r.json()["motivo_tecnico"] == "credencial_invalida"
-    assert "SENHA-SECRETA-XYZ" not in r.text
-    assert "SENHA-SECRETA-XYZ" not in caplog.text
+    assert CHAVE not in r.text and CHAVE not in caplog.text
 
 
-def test_criar_engine_nao_conecta():
-    # Host inexistente: se `criar_engine` conectasse, isto falharia/penduraria.
-    eng = fonte_mod.criar_engine(
-        "postgresql://leitor:x@host-que-nao-existe.invalid:5432/db",
-        sslmode="require", connect_timeout=1,
-    )
-    assert eng.url.drivername == "postgresql+psycopg2"
+def test_chave_com_quebra_de_linha_e_recusada():
+    with pytest.raises(FonteIndisponivel) as info:
+        fonte_mod.criar_cliente("https://exemplo.supabase.co", "abc\r\nX-Injetado: 1", timeout_segundos=5)
+    assert info.value.motivo == "credencial_invalida"
+
+
+def test_chave_e_secretstr_e_nao_aparece_em_repr():
+    s = Settings(b2b_revenda_supabase_key=CHAVE)
+    assert CHAVE not in repr(s) and CHAVE not in str(s.model_dump())
+    assert Settings.model_fields["b2b_revenda_supabase_key"].annotation is SecretStr
+
+
+def test_criar_cliente_nao_conecta_e_so_leva_apikey():
+    # Host inexistente: se `criar_cliente` conectasse, isto falharia.
+    c = fonte_mod.criar_cliente("https://host-que-nao-existe.invalid", CHAVE, timeout_segundos=5)
+    assert c.headers["apikey"] == CHAVE
+    assert "authorization" not in {k.lower() for k in c.headers}
+    assert c.follow_redirects is False
+    assert str(c.base_url).startswith("https://host-que-nao-existe.invalid")
 
 
 # ---------------------------------------------------------------------------
@@ -542,141 +564,195 @@ def test_rotas_nao_aceitam_filtro_de_cliente_ou_vendedor():
     assert params == {"marcas", "canais", "severidades", "skus", "ufs"}
 
 
-def test_sql_nao_le_dado_de_cliente_nem_escreve():
-    sqls = {n: v for n, v in vars(fonte_mod).items() if n.startswith("SQL_")}
-    assert set(sqls) == {
-        "SQL_DATAS", "SQL_CARGA", "SQL_RESUMO", "SQL_SEVERIDADE",
-        "SQL_COBERTURA", "SQL_MARCA_CANAL", "SQL_TOP_SKUS",
+
+
+def test_allowlist_tem_exatamente_as_seis_rpcs():
+    assert fonte_mod.RPCS_PERMITIDAS == {
+        "fn_monit_datas", "fn_monit_resumo", "fn_monit_severidade",
+        "fn_monit_marca_canal", "fn_monit_top_produtos", "fn_monit_sellers",
     }
-    for nome, sql in sqls.items():
-        baixo = sql.lower()
-        for proibido in ("email", "telefone", "cliente_nome", "razao_social", "vendedor",
-                         "cnpj", "monitor_seller_cliente", "p_vendedores", "p_cnpjs"):
-            assert proibido not in baixo, f"{nome} menciona {proibido}"
-        assert not re.search(r"\b(insert|update|delete|create|alter|drop|grant|truncate)\b", baixo), nome
+    assert set(fonte_mod.COLUNAS) == set(fonte_mod.RPCS_PERMITIDAS)
 
 
-def test_rpcs_chamadas_por_nome_de_parametro():
-    for nome in ("SQL_RESUMO", "SQL_SEVERIDADE", "SQL_COBERTURA", "SQL_MARCA_CANAL", "SQL_TOP_SKUS"):
-        sql = getattr(fonte_mod, nome)
-        assert "p_data => " in sql and "p_marcas => " in sql and "p_canais => " in sql, nome
+def test_colunas_lidas_nao_incluem_dado_de_cliente():
+    for nome, colunas in fonte_mod.COLUNAS.items():
+        for c in colunas:
+            assert not _PROIBIDOS.search(c), f"{nome}.{c}"
+    # De `fn_monit_sellers`, so' as duas colunas da contagem.
+    assert fonte_mod.COLUNAS["fn_monit_sellers"] == ("identificado", "violando")
 
 
-def test_cobertura_agrega_no_banco_e_nao_traz_nome_de_seller():
-    sql = fonte_mod.SQL_COBERTURA.lower()
-    assert "seller_norm" not in sql and "seller_nome" not in sql
-    assert sql.strip().startswith("select count(*)")
+def test_argumentos_nunca_levam_cliente_nem_vendedor():
+    corpo = fonte_mod.argumentos(_f(marcas=("AP",), severidades=("grave",)))
+    assert set(corpo) == {"p_data", "p_marcas", "p_canais", "p_skus", "p_ufs", "p_sevs"}
+    assert corpo["p_data"] == "2026-10-21" and corpo["p_marcas"] == ["AP"] and corpo["p_skus"] is None
+    assert "p_sevs" not in fonte_mod.argumentos(_f(), com_severidade=False)
+
+
+def test_nenhum_endpoint_generico_nem_nome_de_rpc_da_requisicao():
+    # O OpenAPI publicado e' a superficie que de fato chega ao mundo.
+    paths = app.openapi()["paths"]
+    rotas = {p for p in paths if p.startswith(BASE)}
+    assert rotas == {BASE + c for c in ROTAS}
+    assert all(set(paths[p]) == {"get"} for p in rotas), "so' leitura"
+    codigo = _codigo(FONTE_SRC)
+    # O nome da RPC so' entra no caminho a partir de literais da allowlist.
+    assert re.findall(r"self\._rpc\((\w+)", codigo) == []
+    assert set(re.findall(r"self\._rpc\('(\w+)'", codigo)) == set(fonte_mod.RPCS_PERMITIDAS)
 
 
 # ---------------------------------------------------------------------------
-# 9. Adapter real: transacao read-only e falha sanitizada
+# 9. Adapter HTTP real (transporte falso): contrato, erros e sigilo da chave
 # ---------------------------------------------------------------------------
-class _Orig(Exception):
-    def __init__(self, pgcode):
-        super().__init__("detalhe com SENHA-SECRETA-XYZ")
-        self.pgcode = pgcode
+class Transporte:
+    """Responde como o PostgREST; registra cada requisicao."""
+
+    def __init__(self, respostas=None, falha=None):
+        self.respostas = respostas or {}
+        self.falha = falha
+        self.reqs: list[httpx.Request] = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        self.reqs.append(req)
+        if self.falha:
+            raise self.falha
+        nome = req.url.path.rsplit("/", 1)[-1]
+        r = self.respostas.get(nome, [])
+        if callable(r):
+            return r(req)
+        if isinstance(r, httpx.Response):
+            return r
+        return httpx.Response(200, json=r)
 
 
-def _dbapi(pgcode):
-    from sqlalchemy.exc import ProgrammingError
-    return ProgrammingError("SELECT ...", {}, _Orig(pgcode))
+def _fonte_http(transporte: Transporte) -> fonte_mod.FonteSupabaseHttp:
+    cliente = fonte_mod.criar_cliente("https://exemplo.supabase.co", CHAVE, timeout_segundos=5)
+    cliente._transport = httpx.MockTransport(transporte)
+    return fonte_mod.FonteSupabaseHttp(cliente)
 
 
-@pytest.mark.parametrize("pgcode,motivo", [
-    ("42501", "permissao_negada"),
-    ("57014", "fonte_lenta"),
-    ("42883", "contrato_da_fonte_quebrado"),
-    ("42703", "contrato_da_fonte_quebrado"),
-    ("XX000", "falha_desconhecida"),
+def test_http_chama_rpc_por_post_com_select_e_corpo_nomeado():
+    t = Transporte({"fn_monit_resumo": [{
+        "data_ref": "2026-10-21", "total": 7, "violando": 5, "pct": 71.4,
+        "sellers_violando": 3, "produtos": 3, "desvio_medio": -0.098}]})
+    r = _fonte_http(t).resumo(_f(severidades=("grave",)))
+    assert (r.total, r.violando, r.pct, r.desvio_medio) == (7, 5, Decimal("71.4"), Decimal("-0.098"))
+    req = t.reqs[0]
+    assert req.method == "POST" and req.url.path == "/rest/v1/rpc/fn_monit_resumo"
+    assert req.url.params["select"] == "data_ref,total,violando,pct,sellers_violando,produtos,desvio_medio"
+    corpo = json.loads(req.content)
+    assert corpo["p_canais"] == ["Shopee"] and corpo["p_sevs"] == ["grave"]
+    assert "p_vendedores" not in corpo and "p_cnpjs" not in corpo
+    assert req.headers["apikey"] == CHAVE
+    assert "authorization" not in {k.lower() for k in req.headers}
+    assert CHAVE not in str(req.url)
+
+
+def test_http_cobertura_conta_e_pagina_sem_guardar_linha():
+    def sellers(req):
+        inicio = int(req.headers["Range"].split("-")[0])
+        total = 1500
+        n = max(0, min(fonte_mod.PAGINA, total - inicio))
+        linhas = [{"identificado": (inicio + i) % 3 == 0, "violando": 2} for i in range(n)]
+        return httpx.Response(206 if n else 200, json=linhas)
+
+    t = Transporte({"fn_monit_sellers": sellers})
+    cob = _fonte_http(t).cobertura(_f())
+    assert cob.sellers_violando == 1500 and cob.anuncios_violando == 3000
+    assert cob.sellers_violando_identificados == 500 and cob.anuncios_violando_identificados == 1000
+    assert [r.headers["Range"] for r in t.reqs] == ["0-999", "1000-1999"]
+    assert t.reqs[0].url.params["select"] == "identificado,violando"
+
+
+def test_http_carga_vem_de_datas_e_marca_canal_sem_filtro():
+    t = Transporte({
+        "fn_monit_datas": [{"data_ref": "2026-10-20"}, {"data_ref": "2026-10-21"}],
+        "fn_monit_marca_canal": [
+            {"marca_id": "AP", "canal": "Mercadolivre", "anuncios": 4, "violando": 3, "desvio_medio": None, "preco_medio": 1},
+            {"marca_id": "AP", "canal": "Amazon", "anuncios": 2, "violando": 2, "desvio_medio": None, "preco_medio": 1},
+        ],
+    })
+    carga = _fonte_http(t).carga_mais_recente()
+    assert carga.data_ref == date(2026, 10, 21) and carga.linhas == 6
+    assert carga.canais == ("Amazon", "Mercadolivre")
+    assert carga.coleta_fim is None and carga.importado_fim is None
+    corpo_mc = json.loads(t.reqs[1].content)
+    assert corpo_mc["p_canais"] is None and corpo_mc["p_data"] == "2026-10-21"
+
+
+@pytest.mark.parametrize("status,codigo,motivo", [
+    (401, None, "credencial_invalida"),
+    (403, "42501", "permissao_negada"),
+    (401, "42501", "permissao_negada"),
+    (404, "PGRST202", "contrato_da_fonte_quebrado"),
+    (400, "42703", "contrato_da_fonte_quebrado"),
+    (500, "57014", "fonte_lenta"),
+    (503, None, "fonte_inacessivel"),
+    (429, None, "fonte_inacessivel"),
+    (418, None, "falha_desconhecida"),
 ])
-def test_classificacao_por_sqlstate(pgcode, motivo):
-    assert fonte_mod.classificar_falha(_dbapi(pgcode)) == motivo
-
-
-def test_operational_error_e_fonte_inacessivel():
-    from sqlalchemy.exc import OperationalError
-    exc = OperationalError("connect", {}, Exception("could not connect SENHA-SECRETA-XYZ"))
-    assert fonte_mod.classificar_falha(exc) == "fonte_inacessivel"
-
-
-class _ConnQuebrada:
-    def __init__(self, exc):
-        self.exc = exc
-
-    def connect(self):
-        raise self.exc
-
-
-def test_falha_do_driver_nao_vaza_mensagem_nem_encadeia(caplog):
+def test_http_erros_viram_motivo_sem_ler_mensagem(status, codigo, motivo, caplog):
     caplog.set_level(logging.DEBUG)
-    from sqlalchemy.exc import OperationalError
-    exc = OperationalError("connect", {}, Exception("password=SENHA-SECRETA-XYZ host=x"))
-    fonte = fonte_mod.FontePostgres(_ConnQuebrada(exc), 10000)
+    corpo = {"code": codigo, "message": f"detalhe com {CHAVE}", "hint": "x"}
+    t = Transporte({"fn_monit_resumo": httpx.Response(status, json=corpo)})
     with pytest.raises(FonteIndisponivel) as info:
-        fonte.resumo(_f())
-    assert info.value.motivo == "fonte_inacessivel"
+        _fonte_http(t).resumo(_f())
+    assert info.value.motivo == motivo
+    assert CHAVE not in caplog.text and CHAVE not in str(info.value)
+
+
+@pytest.mark.parametrize("exc,motivo", [
+    (httpx.ConnectTimeout("t"), "fonte_inacessivel"),
+    (httpx.ReadTimeout("t"), "fonte_lenta"),
+    (httpx.ConnectError("t"), "fonte_inacessivel"),
+])
+def test_http_falha_de_transporte_sem_encadear(exc, motivo, caplog):
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(FonteIndisponivel) as info:
+        _fonte_http(Transporte(falha=exc)).datas()
+    assert info.value.motivo == motivo
     assert info.value.__cause__ is None and info.value.__suppress_context__ is True
-    assert "SENHA-SECRETA-XYZ" not in caplog.text
-    assert "SENHA-SECRETA-XYZ" not in str(info.value)
+    assert CHAVE not in caplog.text
 
 
-class _Resultado:
-    def __init__(self, linhas):
-        self.linhas = linhas
-
-    def __iter__(self):
-        class R:
-            def __init__(self, d):
-                self._mapping = d
-        return iter(R(d) for d in self.linhas)
-
-
-class _ConnGravadora:
-    def __init__(self, linhas):
-        self.sqls, self.linhas = [], linhas
-
-    def connect(self):
-        return self
-
-    def begin(self):
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def execute(self, sql, params=None):
-        self.sqls.append((str(sql), params))
-        return _Resultado(self.linhas)
+@pytest.mark.parametrize("payload", [
+    {"nao": "lista"},
+    [1, 2],
+    [{"data_ref": "2026-10-21"}, {"data_ref": "x"}],
+])
+def test_http_payload_inesperado_e_contrato_quebrado(payload):
+    with pytest.raises(FonteIndisponivel) as info:
+        _fonte_http(Transporte({"fn_monit_datas": payload})).datas()
+    assert info.value.motivo == "contrato_da_fonte_quebrado"
 
 
-def test_cada_leitura_e_read_only_com_timeout_local():
-    conn = _ConnGravadora([{"data_ref": HOJE}])
-    fonte_mod.FontePostgres(conn, 7000).datas()
-    assert conn.sqls[0][0] == "SET TRANSACTION READ ONLY"
-    assert "set_config('statement_timeout', :t, true)" in conn.sqls[1][0]
-    assert conn.sqls[1][1] == {"t": "7000"}
+def test_http_coluna_faltando_e_contrato_quebrado():
+    t = Transporte({"fn_monit_severidade": [{"leve": 1, "media": 2}]})
+    with pytest.raises(FonteIndisponivel) as info:
+        _fonte_http(t).severidade(_f())
+    assert info.value.motivo == "contrato_da_fonte_quebrado"
 
 
-def test_listas_vazias_viram_nulo_e_severidade_nao_vai_ao_breakdown():
-    conn = _ConnGravadora([{"leve": 1, "media": 2, "grave": 3, "com_buybox": 4, "viol_com_buybox": 5}])
-    fonte_mod.FontePostgres(conn, 7000).severidade(_f(severidades=("grave",)))
-    params = conn.sqls[2][1]
-    assert "sevs" not in params
-    assert params["marcas"] is None and params["canais"] == ["Shopee"]
+def test_http_severidade_nao_manda_p_sevs():
+    t = Transporte({"fn_monit_severidade": [{"leve": 1, "media": 2, "grave": 3, "com_buybox": 4, "viol_com_buybox": 5}]})
+    _fonte_http(t).severidade(_f(severidades=("grave",)))
+    assert "p_sevs" not in json.loads(t.reqs[0].content)
+
+
+def test_rpc_fora_da_allowlist_e_recusada():
+    with pytest.raises(ValueError):
+        _fonte_http(Transporte())._rpc("fn_monit_identificacao", {})
 
 
 def test_modulos_nao_usam_mensagem_de_excecao():
     for src in (FONTE_SRC, ROTA_SRC, SVC_SRC):
         codigo = _codigo(src)
         assert "str(exc)" not in codigo and "repr(exc)" not in codigo
-        assert not re.search(r"logger\.\w+\([^)]*exc\b(?!\)\.__name__)", codigo.replace("type(exc).__name__", ""))
+        assert ".text" not in codigo, "corpo de resposta da fonte nao e' lido como texto"
 
 
 def test_nenhum_segredo_ou_chave_de_aplicacao_no_codigo():
     for src in (FONTE_SRC, ROTA_SRC, SVC_SRC):
         assert "service_role" not in src.lower()
         assert not re.search(r"eyJhbGciOi", src)
-        assert not re.search(r"sb_(secret|publishable)_", src)
+        assert not re.search(r"sb_(secret|publishable)_[A-Za-z0-9]", src)

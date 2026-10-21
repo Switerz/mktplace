@@ -1,4 +1,4 @@
-﻿from pydantic import Field
+﻿from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -152,18 +152,13 @@ class Settings(BaseSettings):
     b2b_revenda_enabled: bool = Field(default=False)
 
     # DSN de uma role DEDICADA, somente leitura, provisionada pelo dono da
-    # Torre B2B (ver docs/b2b_revenda_contrato.md). Jamais a chave
-    # `service_role`, a `anon` ou qualquer credencial de aplicacao de la'.
-    # Vazio = integracao sem credencial. O valor nunca aparece em log nem em
-    # resposta: so' a CATEGORIA da falha e o nome da classe da excecao.
-    b2b_revenda_database_url: str = ""
-    # `require` por padrao: a fonte e' um Postgres gerenciado na internet.
-    # `disable` existe so' para banco local de teste.
-    b2b_revenda_sslmode: str = Field(
-        default="require", pattern="^(require|verify-ca|verify-full|disable)$"
-    )
-    b2b_revenda_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
-    b2b_revenda_statement_timeout_ms: int = Field(default=10000, ge=1000, le=30000)
+    # Raiz do projeto (https://<ref>.supabase.co) e chave da Data API usada
+    # SO' pelo backend (ver docs/b2b_revenda_contrato.md). A chave e'
+    # `SecretStr`: nao aparece em repr, log nem resposta, e nunca vai ao
+    # navegador. Vazio = integracao sem credencial (`credencial_ausente`).
+    b2b_revenda_supabase_url: str = ""
+    b2b_revenda_supabase_key: SecretStr = SecretStr("")
+    b2b_revenda_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
     # O relatorio do OctaPrice muda ~1x/dia (n8n 08h40-12h40 BRT). Cache de
     # 15 a 30 min protege a fonte sem esconder a carga do dia por muito tempo.
     b2b_revenda_cache_ttl_seconds: int = Field(default=1200, ge=900, le=1800)

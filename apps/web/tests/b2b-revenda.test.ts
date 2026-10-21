@@ -10,7 +10,7 @@
  *  - fixture incoerente validando uma tela impossivel.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -111,6 +111,36 @@ test("o navegador so' fala com a nossa API", () => {
   assert.doesNotMatch(CLIENT, /fetch\(/, "a tela nao faz fetch direto: usa carregarPainel");
   assert.match(LIB, /const BASE = "\/api\/v1\/b2b-revenda";/);
   assert.match(LIB, /process\.env\.NEXT_PUBLIC_API_URL/);
+});
+
+/** Todo arquivo de codigo do frontend (app/, src/, configs na raiz do web). */
+function arquivosDoFrontend(): string[] {
+  const saida: string[] = [];
+  const andar = (dir: string) => {
+    for (const nome of readdirSync(dir)) {
+      if (nome === "node_modules" || nome === ".next" || nome === "tests") continue;
+      const p = join(dir, nome);
+      if (statSync(p).isDirectory()) andar(p);
+      else if (/\.(ts|tsx|js|jsx|mjs|cjs|json)$/.test(nome) && nome !== "package-lock.json") saida.push(p);
+    }
+  };
+  andar(join(RAIZ, "app"));
+  andar(join(RAIZ, "src"));
+  for (const raiz of readdirSync(RAIZ)) {
+    if (/^next\.config|^\.env/.test(raiz)) saida.push(join(RAIZ, raiz));
+  }
+  return saida;
+}
+
+test("nenhuma variavel secreta da integracao e' referenciada no frontend", () => {
+  // So' `NEXT_PUBLIC_B2B_REVENDA_MODE` pode existir no web. URL e chave da
+  // Torre B2B vivem SO' no backend; qualquer referencia aqui iria para o bundle.
+  const proibido =
+    /B2B_REVENDA_(ENABLED|SUPABASE|DATABASE|TIMEOUT|CACHE|CANAIS)|SUPABASE_(KEY|URL|SERVICE|ANON|SECRET|PUBLISHABLE)|service_role|sb_secret_|sb_publishable_/;
+  const arquivos = arquivosDoFrontend();
+  assert.ok(arquivos.length > 50, "varredura nao pode passar vazia");
+  const achados = arquivos.filter((p) => proibido.test(readFileSync(p, "utf-8")));
+  assert.deepEqual(achados, []);
 });
 
 test("sem dado de cliente nos tipos da aba", () => {

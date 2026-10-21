@@ -239,6 +239,9 @@ export function tituloIndisponivel(r: Indisponivel): string {
 export const AVISO_FIXTURE =
   "Dados fictícios. Esta aba está em modo de demonstração e não lê a Torre B2B — nenhum número aqui é real.";
 
+/** A fonte expoe o DIA do relatorio, nao os horarios de coleta e importacao. */
+export const SEM_COLETA_IMPORTACAO = "Horários de coleta e importação não expostos pela fonte";
+
 export const AVISO_SEM_CLIENTE =
   "Nomes de cliente, vendedor e seller ficam na Torre B2B até a autenticação da Torre de Marketplaces ser definida. Aqui aparecem só contagens.";
 
