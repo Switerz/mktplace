@@ -32,10 +32,10 @@
  * de recorte vivem em "Como ler" — mesma palavra, sob demanda. Nenhuma
  * ressalva de qualidade foi removida nem teve o sentido alterado.
  */
-import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
+import EvolucaoPorMarca from "@/components/expedicao/EvolucaoPorMarca";
 import CabecalhoExpedicao from "@/components/expedicao/CabecalhoExpedicao";
 import { AtencaoAgora, ConviteAoDetalhe, FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
 import Disclosure from "@/components/ui/Disclosure";
@@ -69,7 +69,6 @@ import {
   montarKpisPrincipais,
   montarKpisSecundarios,
   montarMapaDeRisco,
-  montarPontosDoGrafico,
   montarRelogios,
   montarSeries,
   montarTimeline,
@@ -97,20 +96,14 @@ import {
   urlComDias,
   valorDoSeletor,
 } from "@/lib/expedicao-janela";
+import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
 
 /** Janela da tendencia da fila, em DIAS. Horas so' na query. */
 const REGRA = REGRA_JANELA.fila;
 
-// Recharts fica fora do bundle inicial: a tela abre com KPIs e fila mesmo que
-// o grafico ainda esteja chegando.
-const TendenciaChart = dynamic(() => import("@/components/expedicao/TendenciaChart"), {
-  ssr: false,
-  loading: () => (
-    <p role="status" className="py-12 text-center text-sm text-ink-muted">
-      Carregando gráfico…
-    </p>
-  ),
-});
+// EXPEDICAO-UX-2: a evolucao virou small multiples em SVG proprio
+// (`EvolucaoPorMarca`). O recharts saiu do bloco — e, com ele, o import
+// dinamico que existia so' para tira-lo do bundle inicial.
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
@@ -464,8 +457,8 @@ export default function ExpedicaoClient({
   const qualidade = montarBarraDeQualidade(relogios, avisos, frescor);
   const mapa = montarMapaDeRisco(dados?.accounts ?? [], filtros.channel);
   const series = montarSeries(tendencia?.points ?? []);
-  const pontosGrafico = montarPontosDoGrafico(series);
-  const contasSerie = series.map((s) => s.shopAccount);
+  // Marca de cada conta, lida do proprio ponto da serie (`brand`).
+  const evolucao = montarEvolucaoPorMarca(tendencia?.points ?? []);
   const estadoTend = estadoDaTendencia(
     carregandoTendencia,
     erroTendencia,
@@ -565,7 +558,7 @@ export default function ExpedicaoClient({
 
   const painelEvolucao = (
     <Panel
-      titulo="Evolução do backlog por conta"
+      titulo="Evolução do backlog por marca"
       acao={
         <div className="flex flex-wrap items-center gap-1.5">
           <Segmented
@@ -620,7 +613,7 @@ export default function ExpedicaoClient({
             {descreverJanelaEmHoras(tendencia.window_hours) ?? "não informado"}
           </span>
           {tendencia.from_hour && tendencia.to_hour
-            ? ` · pontos de ${dataCurta(tendencia.from_hour)} a ${dataCurta(tendencia.to_hour)}`
+            ? ` · pontos de ${formatarHoraBrt(tendencia.from_hour)} a ${formatarHoraBrt(tendencia.to_hour)} (Brasília)`
             : " · nenhum ponto no período"}
         </p>
       )}
@@ -652,33 +645,36 @@ export default function ExpedicaoClient({
       )}
       {temSerieNaTendencia && (
         <>
-          <TendenciaChart pontos={pontosGrafico} contas={contasSerie} />
+          {tendencia ? <EvolucaoPorMarca resposta={tendencia} /> : null}
           {dadosDaTendencia && (
             <div id="exp-tendencia-dados" className="mt-3 max-h-[320px] overflow-auto">
               <table className={CLASSE_TABELA}>
                 <caption className="sr-only">
-                  Backlog por conta e hora — contas nunca são somadas
+                  Backlog por marca, conta e hora — contas nunca são somadas
                 </caption>
                 <thead className={CLASSE_CABECALHO}>
                   <tr>
+                    <th scope="col">Marca</th>
                     <th scope="col">Conta</th>
-                    <th scope="col">Hora</th>
+                    <th scope="col">Hora (Brasília)</th>
                     <th scope="col" className="text-right">Backlog</th>
                     <th scope="col" className="text-right">Acima de 48h</th>
                     <th scope="col" className="text-right">Travados</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {series.flatMap((s) =>
+                  {evolucao.flatMap((s) =>
                     s.pontos.map((p) => (
                       <tr
-                        key={`${s.shopAccount}-${p.hora}`}
+                        key={`${s.conta}-${p.hora}`}
                         className="border-t border-line"
                       >
                         <th scope="row" className="text-left font-normal text-ink">
-                          {s.shopAccount}
+                          {s.titulo}
+                          {s.apelido ? <span className="ml-1 text-xs text-ink-faint">({s.apelido})</span> : null}
                         </th>
-                        <td className="text-ink-muted">{dataCurta(p.hora)}</td>
+                        <td className="text-ink-faint">{s.conta}</td>
+                        <td className="text-ink-muted">{formatarHoraBrt(p.hora)}</td>
                         <td className="text-right tabular-nums text-ink">
                           {numero(p.backlog)}
                         </td>
