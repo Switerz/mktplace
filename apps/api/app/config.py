@@ -179,6 +179,17 @@ class Settings(BaseSettings):
     api_auth_audience: str = ""
     b2b_revenda_required_scope: str = "b2b_revenda:read"
 
+    # Gate B2B-REVENDA-ENTREGA-PUBLICA-1 — modo de acesso das rotas b2b-revenda.
+    #   "authenticated"   (padrao) exige o token do Auth0 acima;
+    #   "public_readonly" dispensa o token: leitura das seis RPCs agregadas,
+    #                     com rate limit por cliente e global.
+    # Qualquer outro valor vale "authenticated" (fail-closed): erro de
+    # digitacao nunca abre a rota. A flag `b2b_revenda_enabled` continua
+    # valendo nos dois modos.
+    b2b_revenda_access_mode: str = "authenticated"
+    b2b_revenda_rate_limit_per_minute: int = Field(default=60, ge=1, le=600)
+    b2b_revenda_rate_limit_global_per_minute: int = Field(default=600, ge=10, le=6000)
+
     @property
     def b2b_revenda_canais_kpi_list(self) -> list[str]:
         return [c.strip() for c in self.b2b_revenda_canais_kpi.split(",") if c.strip()]
