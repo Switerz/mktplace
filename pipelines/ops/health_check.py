@@ -299,6 +299,15 @@ EXPECTED_SOURCES: tuple[ExpectedSource, ...] = (
     # o pipeline todo dia. Essas obrigacoes duraveis sao verificadas dentro do
     # proprio sync, sob o advisory lock.
     ExpectedSource(sync_descontos.CANONICAL_AUDIT_SOURCE, "daily", 30),
+    # STOCK-DAILY-SHOPEE-TIKTOK-1 (2026-10-21): fotografia diaria do Estoque
+    # Full Shopee, que `/estoque-full` le em producao. Antes deste gate a tela
+    # ficou OITO dias na fotografia de 13/10 sem que nada acusasse, porque as
+    # tres cargas tinham sido manuais e nenhuma fonte cobrava a seguinte.
+    # CRITICA e com 30h, como as demais diarias da cadeia: o step roda TODO dia
+    # na `marketplace_tower_daily_chain`. Recusa do portao de frescor (catalogo
+    # do dia ausente) nao abre auditoria, entao aparece aqui como atraso -- que
+    # e' exatamente o que a tela esta' mostrando.
+    ExpectedSource("shopee_fbs_stock_daily", "daily", 30),
 )
 
 @dataclass

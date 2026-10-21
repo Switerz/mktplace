@@ -33,6 +33,16 @@ POR QUE UMA FOTOGRAFIA DIARIA
 execucao grava o estado do dia. Reexecutar no mesmo dia SOBRESCREVE a
 fotografia daquele dia (DELETE + INSERT do `ref_date`), nunca duplica.
 Consequencia honesta: nao existe backfill. A serie comeca na primeira execucao.
+
+AGENDAMENTO (STOCK-DAILY-SHOPEE-TIKTOK-1)
+----------------------------------------
+Roda na cadeia diaria da Torre no Airflow (`marketplace_tower_daily_chain`,
+10:15 BRT), quatro horas depois do `shopee_catalog_etl` (06:00 BRT). A ordem
+entre as duas DAGs NAO e' garantida pelo horario: quem garante e' o portao de
+frescor (`SQL_PORTAO_FONTE`), que recusa com `EXIT_FONTE_NAO_PRONTA` se o
+catalogo, a Silver ou os pedidos nao forem do dia. Codigos de saida: 0 ok,
+1 falha, 3 lock ocupado, 4 fonte nao pronta -- so' 3 e 4 sao repetiveis, e em
+nenhum dos dois algo foi escrito.
 """
 from __future__ import annotations
 
@@ -41,7 +51,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from psycopg2.extras import execute_values
@@ -167,6 +177,33 @@ class ConcurrentRunError(ShopeeStockSyncError):
     """Outra execucao ja' detem o advisory lock."""
 
 
+class FonteNaoProntaError(ShopeeStockSyncError):
+    """O catalogo ou os pedidos do dia ainda nao chegaram: nada foi escrito.
+
+    E' o unico desfecho de falha que faz sentido REPETIR mais tarde: a fonte
+    pode ficar pronta (o catalogo atrasou, o dbt ainda nao rodou). Qualquer
+    outra falha de contrato se repete igual na proxima tentativa.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# CODIGOS DE SAIDA                                                             #
+# --------------------------------------------------------------------------- #
+# O agendador (Airflow) le SO' o codigo de saida. Cada um diz o que aconteceu
+# com o destino, e por isso diz tambem se repetir e' seguro.
+#: Publicado (ou dry-run concluido).
+EXIT_OK = 0
+#: Falha de contrato ou de banco. Nada foi publicado: a transacao e' unica.
+EXIT_FALHA = 1
+#: Advisory lock ocupado: outra publicacao do estoque esta' em curso. Nada
+#: escrito. 2 fica de fora de proposito: e' o codigo do `argparse` para flag
+#: desconhecida, e repetir um uso errado nunca o conserta.
+EXIT_LOCK = 3
+#: Portao de frescor recusou: catalogo ou pedidos do dia ainda nao estao na
+#: fonte. Nada escrito; repetir mais tarde e' seguro e pode dar certo.
+EXIT_FONTE_NAO_PRONTA = 4
+
+
 _PADROES_PII = (
     re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b"),
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
@@ -256,6 +293,120 @@ class Snapshot:
     produtos: list[ProdutoRow]
     captured_at: datetime
     avisos: list[str]
+    #: Evidencia do portao de frescor, por conta, para o resumo do run.
+    portao: tuple = ()
+
+
+# --------------------------------------------------------------------------- #
+# PORTAO DE FRESCOR DA FONTE                                                   #
+# --------------------------------------------------------------------------- #
+# `raw.shopee_products` e' um RETRATO sobrescrito pela DAG `shopee_catalog_etl`
+# (09:00 UTC = 06:00 BRT). Sem este portao, uma DAG de catalogo que falhou faria
+# esta publicacao gravar o retrato de ONTEM com o `ref_date` de HOJE -- estoque
+# velho com data nova, sem nada indicando isso na tela.
+#
+# O corte e' a meia-noite BRT do `ref_date`, e vale para as DUAS fontes:
+#   - catalogo: todo produto FBS de cada conta tem de ter sido capturado hoje;
+#   - pedidos: a demanda usa a janela [ref_date - 28, ref_date), entao o D-1
+#     precisa estar COMPLETO -- a ultima ingestao de pedidos tem de ser depois
+#     da meia-noite. Pedido parado infla a cobertura em silencio.
+#
+# E a Silver tem de ter sido reconstruida SOBRE o retrato atual: o dbt carrega
+# o `ingested_at` da raw linha a linha (`stg_shopee_products` e' `table`), entao
+# qualquer linha so' de um lado ou com versao diferente prova que o dbt do
+# catalogo nao rodou depois da ultima carga. FBS, kit e status vem da Silver.
+#
+# Medido em 2026-10-21: as 4 contas com todo o FBS em 09:01 UTC, zero
+# divergencia raw x Silver, zero FBS sem `stock_info`, pedidos ate' 18:03 UTC.
+SQL_PORTAO_FONTE = text("""
+    WITH contas AS (
+        SELECT unnest(CAST(:contas AS text[])) AS shop_account
+    ),
+    fbs AS (
+        SELECT r.shop_account,
+               COUNT(*)                                        AS produtos_fbs,
+               COUNT(*) FILTER (WHERE r.stock_info IS NULL)    AS fbs_sem_stock_info,
+               MIN(r.ingested_at)                              AS fbs_capturado_min
+          FROM raw.shopee_products r
+          JOIN silver.stg_shopee_products s
+            ON s.shop_account = r.shop_account AND s.item_id = r.item_id
+         WHERE s.is_fulfillment_by_shopee
+           AND r.shop_account = ANY(:contas)
+         GROUP BY 1
+    ),
+    versao AS (
+        SELECT COALESCE(r.shop_account, s.shop_account)        AS shop_account,
+               COUNT(*)                                        AS silver_divergente
+          FROM raw.shopee_products r
+          FULL JOIN silver.stg_shopee_products s
+            ON s.shop_account = r.shop_account AND s.item_id = r.item_id
+         WHERE COALESCE(r.shop_account, s.shop_account) = ANY(:contas)
+           AND (r.item_id IS NULL OR s.item_id IS NULL
+                OR r.ingested_at IS DISTINCT FROM s.ingested_at)
+         GROUP BY 1
+    ),
+    pedidos AS (
+        SELECT o.shop_account, MAX(o.ingested_at)              AS pedidos_ingeridos_max
+          FROM silver.stg_shopee_orders o
+         WHERE o.shop_account = ANY(:contas)
+         GROUP BY 1
+    )
+    SELECT c.shop_account,
+           COALESCE(f.produtos_fbs, 0)       AS produtos_fbs,
+           COALESCE(f.fbs_sem_stock_info, 0) AS fbs_sem_stock_info,
+           f.fbs_capturado_min,
+           COALESCE(v.silver_divergente, 0)  AS silver_divergente,
+           p.pedidos_ingeridos_max
+      FROM contas c
+      LEFT JOIN fbs f     ON f.shop_account = c.shop_account
+      LEFT JOIN versao v  ON v.shop_account = c.shop_account
+      LEFT JOIN pedidos p ON p.shop_account = c.shop_account
+     ORDER BY c.shop_account
+""")
+
+
+def corte_de_frescor(ref_date: date) -> datetime:
+    """Meia-noite BRT do `ref_date`: o mais cedo que uma fonte do dia pode ser."""
+    return datetime.combine(ref_date, time(0), tzinfo=OPERATIONAL_TZ)
+
+
+def avaliar_portao(linhas, ref_date: date) -> list[str]:
+    """Problemas que impedem publicar HOJE. Lista vazia = fonte pronta.
+
+    Funcao pura: recebe as linhas de `SQL_PORTAO_FONTE` (uma por conta
+    esperada, inclusive a que nao aparece na fonte) e devolve frases.
+    """
+    corte = corte_de_frescor(ref_date)
+    problemas = []
+    vistas = set()
+    for r in linhas:
+        conta = r["shop_account"]
+        vistas.add(conta)
+        if int(r["produtos_fbs"]) == 0:
+            # Ausencia nunca vira zero: uma conta sem nenhum produto FBS no
+            # catalogo e' catalogo falho ou mudanca de operacao -- as duas
+            # pedem uma pessoa, nao uma fotografia sem a conta.
+            problemas.append(f"{conta}: nenhum produto FBS no catalogo")
+            continue
+        if int(r["fbs_sem_stock_info"]) > 0:
+            problemas.append(
+                f"{conta}: {r['fbs_sem_stock_info']} produto(s) FBS sem stock_info "
+                "(sairiam da fotografia em silencio)")
+        if r["fbs_capturado_min"] is None or r["fbs_capturado_min"] < corte:
+            problemas.append(
+                f"{conta}: catalogo FBS capturado em {r['fbs_capturado_min']}, "
+                f"antes do corte {corte.isoformat()}")
+        if int(r["silver_divergente"]) > 0:
+            problemas.append(
+                f"{conta}: {r['silver_divergente']} linha(s) da Silver fora da versao "
+                "da raw (dbt do catalogo nao rodou sobre o retrato atual)")
+        if r["pedidos_ingeridos_max"] is None or r["pedidos_ingeridos_max"] < corte:
+            problemas.append(
+                f"{conta}: ultima ingestao de pedidos em {r['pedidos_ingeridos_max']}, "
+                f"antes do corte {corte.isoformat()} (D-1 incompleto na demanda)")
+    for conta in sorted(set(CONTAS_ESPERADAS) - vistas):
+        problemas.append(f"{conta}: conta esperada ausente do portao")
+    return problemas
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +549,14 @@ def read_source(conn, ref_date: date) -> Snapshot:
     params = {"contas": list(CONTAS_ESPERADAS)}
     janela = {"janela_inicio": inicio, "janela_fim": fim}
 
+    # PRIMEIRA leitura: fonte velha nao chega nem a ser lida como estoque.
+    portao = [dict(r) for r in conn.execute(SQL_PORTAO_FONTE, params).mappings().all()]
+    problemas = avaliar_portao(portao, ref_date)
+    if problemas:
+        raise FonteNaoProntaError(
+            "fonte do estoque Full nao esta' pronta para "
+            f"{ref_date}: " + "; ".join(problemas))
+
     # Fail-closed ANTES de ler a demanda: status novo bloqueia a carga.
     novos = [r[0] for r in conn.execute(
         SQL_STATUS_DESCONHECIDOS,
@@ -453,7 +612,14 @@ def read_source(conn, ref_date: date) -> Snapshot:
     contas_vistas = {p["shop_account"] for p in prods}
     ausentes = sorted(set(CONTAS_ESPERADAS) - contas_vistas)
     if ausentes:
-        avisos.append(f"contas SEM produto FBS nesta fotografia: {ausentes}")
+        # O portao ja' exige produto FBS com stock_info em toda conta; chegar
+        # aqui significa que a fonte mudou ENTRE as duas leituras. Publicar sem
+        # a conta faria a ausencia passar por fotografia completa.
+        raise ShopeeStockSyncError(
+            f"contas sem produto FBS nesta fotografia: {ausentes}")
+    avisos.append(
+        "Kokeshi NAO e' coberta: nao esta' na esteira API da Shopee. Ausencia "
+        "de linha dela e' falta de fonte, nunca estoque zero.")
 
     location_rows = [
         LocationRow(
@@ -494,7 +660,8 @@ def read_source(conn, ref_date: date) -> Snapshot:
         ))
 
     return Snapshot(ref_date=ref_date, locations=location_rows,
-                    produtos=produto_rows, captured_at=captured, avisos=avisos)
+                    produtos=produto_rows, captured_at=captured, avisos=avisos,
+                    portao=tuple(portao))
 
 
 def validate_contract(snap: Snapshot) -> list[str]:
@@ -519,6 +686,28 @@ def validate_contract(snap: Snapshot) -> list[str]:
             erros.append(f"kit classificado como {r.classificacao_torre}")
         if r.cobertura_torre_dias is not None and not r.cobertura_torre_dias.is_finite():
             erros.append("cobertura nao finita")
+
+    # 🔴 REGIME NAO CONCILIADO: conta com estoque FISICO no Full e NADA vendavel.
+    # O contrato "vendavel = SUM(stock) WHERE if_saleable" foi conciliado com o
+    # Seller Center quando 100% das entradas FBS eram vendaveis. Em 2026-10-21
+    # a Barbours inteira veio com `if_saleable=false` (387/387 entradas, 119.163
+    # unidades nos CDs) e os MESMOS itens seguiram vendendo 114-486 unidades/dia
+    # de 08 a 21/10. Ou seja: `false` ali nao significa "nao vendavel". Publicar
+    # mostraria a conta zerada e em ruptura enquanto ela vende. A carga para ate'
+    # alguem conciliar o novo regime no Seller Center -- decisao de contrato, nao
+    # de pipeline, por isso nao ha' flag para pular.
+    fisico: dict[str, int] = {}
+    vendavel: dict[str, int] = {}
+    for r in snap.locations:
+        fisico[r.shop_account] = fisico.get(r.shop_account, 0) + r.full_stock
+        if r.is_saleable is True:
+            vendavel[r.shop_account] = vendavel.get(r.shop_account, 0) + r.full_stock
+    for conta in sorted(fisico):
+        if fisico[conta] > 0 and vendavel.get(conta, 0) == 0:
+            erros.append(
+                f"REGIME NAO CONCILIADO em {conta}: {fisico[conta]} unidades fisicas no "
+                "Full e zero com if_saleable=true -- conciliar no Seller Center antes "
+                "de publicar")
 
     # A soma do grao fino tem de reproduzir o agregado, produto a produto.
     por_produto: dict[tuple, int] = {}
@@ -746,7 +935,13 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
 
     dm = DataMartSession()
     try:
-        dm.connection().connection.set_session(readonly=True)
+        # REPEATABLE READ: o portao e as leituras de estoque e demanda veem o
+        # MESMO instante da fonte. Em READ COMMITTED cada comando ve' o que ja'
+        # foi commitado, e um catalogo gravando no meio do run passaria no
+        # portao com uma versao e seria lido com outra. Permitido em replica
+        # (hot standby); SERIALIZABLE nao seria.
+        dm.connection().connection.set_session(
+            readonly=True, isolation_level="REPEATABLE READ")
         snap = read_source(dm.connection(), ref_date)
     finally:
         dm.rollback()
@@ -792,6 +987,11 @@ def run(apply: bool = False, agora: datetime | None = None) -> dict:
         "status_demanda_operacional": list(STATUS_DEMANDA_OPERACIONAL),
         "status_fora_da_demanda": list(STATUS_FORA_DA_DEMANDA),
         "limites_provisorios": dict(LIMITES_PROVISORIOS),
+        "portao_fonte": {
+            "corte": str(corte_de_frescor(ref_date)),
+            "contas": [{k: str(v) if isinstance(v, datetime) else v
+                        for k, v in linha.items()} for linha in snap.portao],
+        },
     }
     for r in snap.produtos:
         resumo["por_classificacao"][r.classificacao_torre] = \
@@ -835,11 +1035,22 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         res = run(apply=args.apply)
+    except FonteNaoProntaError as exc:
+        logger.error("FONTE NAO PRONTA (nada escrito): %s", sanitizar(exc))
+        return EXIT_FONTE_NAO_PRONTA
+    except ConcurrentRunError as exc:
+        logger.error("LOCK OCUPADO (nada escrito): %s", sanitizar(exc))
+        return EXIT_LOCK
     except ShopeeStockSyncError as exc:
         logger.error("%s", sanitizar(exc))
-        return 1
+        return EXIT_FALHA
+    except Exception as exc:   # noqa: BLE001 — erro de driver carrega a DSN
+        # Sem isto o traceback do psycopg2 iria cru para o log do agendador.
+        # A transacao ja' foi desfeita e a auditoria ja' fechou em `failed`.
+        logger.error("%s: %s", type(exc).__name__, sanitizar(exc))
+        return EXIT_FALHA
     print(json.dumps(res, default=str, ensure_ascii=False, indent=2))
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":   # pragma: no cover

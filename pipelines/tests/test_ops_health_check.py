@@ -1361,9 +1361,10 @@ def test_s3_as_regras_das_fontes_antigas_nao_mudaram():
         assert por_nome[nome] == alvo, nome
     # +2 do Gate S3 (ml_cross_company, tiktok_channel_efficiency), +1 do Gate
     # UE2-C (custo de afiliado do TikTok) e +1 do Gate UE8-I4 (descontos do
-    # pedido TikTok). O objetivo do teste continua sendo o mesmo: provar que
-    # nenhuma REGRA das fontes antigas mudou ao acrescentar fontes novas.
-    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 4
+    # pedido TikTok) e +1 do STOCK-DAILY-SHOPEE-TIKTOK-1 (estoque Full Shopee).
+    # O objetivo do teste continua sendo o mesmo: provar que nenhuma REGRA das
+    # fontes antigas mudou ao acrescentar fontes novas.
+    assert len(hc.EXPECTED_SOURCES) == len(esperado) + 5
 
 
 # --- 13. o fake responde explicitamente, sem fallback generico --------------
@@ -2506,3 +2507,14 @@ def test_m6_exit_code_do_main_reflete_a_dimensao(monkeypatch):
                    if d["label"] == hc.GESTAO_DIARIA_TABLE_LABEL)
     assert entrada["stale"] is True and entrada["critical"] is True
     assert rel["ok_critical"] is False
+
+
+# --- STOCK-DAILY-SHOPEE-TIKTOK-1: estoque Full Shopee cobrado todo dia ------
+
+def test_estoque_full_shopee_e_fonte_critica_diaria_com_o_nome_da_auditoria():
+    """O nome tem de ser o que o CLI grava: divergir deixaria a fonte para
+    sempre "sem nenhuma linha no audit log", isto e', atrasada por engano."""
+    from pipelines import sync_shopee_fbs_stock_daily as fbs
+
+    entrada = next(s for s in hc.EXPECTED_SOURCES if s.source_name == fbs.AUDIT_SOURCE)
+    assert (entrada.cadence, entrada.exec_threshold_hours, entrada.critical) == ("daily", 30, True)
