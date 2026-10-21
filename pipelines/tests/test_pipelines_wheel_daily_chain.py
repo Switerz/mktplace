@@ -13,6 +13,7 @@ como `ModuleNotFoundError` no meio do ciclo. Por isso:
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import shutil
 import subprocess
@@ -161,11 +162,20 @@ def test_servicos_do_contrato_so_dependem_de_stdlib_sqlalchemy_ou_do_proprio_con
                 assert topo in sys.stdlib_module_names or topo in {"sqlalchemy", "__future__"}, (servico, nome)
 
 
+#: Variaveis de SISTEMA que o `python -m build` precisa (achar o interpretador,
+#: diretorio temporario, cache do pip). Allowlist: o filho NAO herda o ambiente
+#: do pytest, que pode carregar o `.env` real (`test_expedicao_isolamento_suite`).
+_ENV_DO_BUILD = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+                 "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                 "LANG", "LC_ALL")
+
+
 def _construir_wheel(destino: pathlib.Path) -> pathlib.Path:
+    env = {k: os.environ[k] for k in _ENV_DO_BUILD if k in os.environ}
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "build", "--wheel", "--outdir", str(destino), str(RAIZ)],
-            capture_output=True, text=True, timeout=900)
+            capture_output=True, text=True, timeout=900, env=env)
     except FileNotFoundError:  # pragma: no cover
         pytest.skip("modulo `build` indisponivel")
     if proc.returncode != 0:
