@@ -139,6 +139,44 @@ class Settings(BaseSettings):
     # com `unavailable` estruturado -- a ausencia nunca vira estoque zero.
     shopee_fbs_stock_enabled: bool = Field(default=False)
 
+    # ------------------------------------------------------------------
+    # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
+    # ------------------------------------------------------------------
+    # A Torre B2B e' FONTE EXTERNA e somente leitura: esta API chama as RPCs
+    # `fn_monit_*` que ja' alimentam a tela de la', para os numeros baterem
+    # por construcao. Nada e' escrito do lado de la'.
+    #
+    # NASCE DESLIGADA. Com a flag off nenhuma conexao e' aberta e nenhum
+    # engine e' criado. Ligada SEM credencial, os endpoints respondem 200 com
+    # `unavailable` (motivo `credencial_ausente`) -- nunca zero.
+    b2b_revenda_enabled: bool = Field(default=False)
+
+    # DSN de uma role DEDICADA, somente leitura, provisionada pelo dono da
+    # Torre B2B (ver docs/b2b_revenda_contrato.md). Jamais a chave
+    # `service_role`, a `anon` ou qualquer credencial de aplicacao de la'.
+    # Vazio = integracao sem credencial. O valor nunca aparece em log nem em
+    # resposta: so' a CATEGORIA da falha e o nome da classe da excecao.
+    b2b_revenda_database_url: str = ""
+    # `require` por padrao: a fonte e' um Postgres gerenciado na internet.
+    # `disable` existe so' para banco local de teste.
+    b2b_revenda_sslmode: str = Field(
+        default="require", pattern="^(require|verify-ca|verify-full|disable)$"
+    )
+    b2b_revenda_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    b2b_revenda_statement_timeout_ms: int = Field(default=10000, ge=1000, le=30000)
+    # O relatorio do OctaPrice muda ~1x/dia (n8n 08h40-12h40 BRT). Cache de
+    # 15 a 30 min protege a fonte sem esconder a carga do dia por muito tempo.
+    b2b_revenda_cache_ttl_seconds: int = Field(default=1200, ge=900, le=1800)
+    # ALLOWLIST dos canais que entram nos KPIs, com a grafia da fonte.
+    # Amazon fica FORA no MVP: a deduplicacao da fonte descarta vendedores que
+    # dividem o mesmo anuncio de catalogo. Allowlist, e nao "tudo menos
+    # Amazon", para que um canal novo na fonte nao entre nos KPIs sem revisao.
+    b2b_revenda_canais_kpi: str = "Mercadolivre,Shopee"
+
+    @property
+    def b2b_revenda_canais_kpi_list(self) -> list[str]:
+        return [c.strip() for c in self.b2b_revenda_canais_kpi.split(",") if c.strip()]
+
     @property
     def datamart_url(self) -> str:
         if self.datamart_database_url:
