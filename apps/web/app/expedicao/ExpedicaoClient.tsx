@@ -36,6 +36,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import EvolucaoPorMarca from "@/components/expedicao/EvolucaoPorMarca";
+import LdrShopeePanel from "@/components/expedicao/LdrShopeePanel";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import {
   AtencaoAgora,
@@ -122,6 +123,11 @@ const REGRA = REGRA_JANELA.fila;
 // dinamico que existia so' para tira-lo do bundle inicial.
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+
+// EXPEDICAO-SHOPEE-LDR-1: a LDR operacional da Shopee nasce DESLIGADA. Com a
+// flag off, a secao "Prazo" fica exatamente como antes — inclusive o aviso de
+// que a LDR ainda nao e' calculada. Literal inline para o Next embutir.
+const LDR_SHOPEE_LIGADA = process.env.NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED === "true";
 
 // A flag do Mercado Livre (`NEXT_PUBLIC_EXPEDICAO_ML_ENABLED`) mora na casca
 // desde o EXPEDICAO-UX-UNIFICADA-1: e' ela que decide quais canais o seletor
@@ -599,10 +605,13 @@ export default function ExpedicaoClient({
               : "Sem pedidos em fila nesta fotografia."}
           </p>
         )}
-        <Note tom="neutro" papel="note" className="mt-3">
-          {SEM_LDR_SHOPEE}
-        </Note>
+        {LDR_SHOPEE_LIGADA ? null : (
+          <Note tom="neutro" papel="note" className="mt-3">
+            {SEM_LDR_SHOPEE}
+          </Note>
+        )}
       </Panel>
+      {LDR_SHOPEE_LIGADA ? <LdrShopeePanel api={API} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" descricao="O canal não publica prazo de envio.">

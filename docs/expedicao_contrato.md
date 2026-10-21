@@ -555,28 +555,11 @@ canal. Comportamento por rota:
   tambem quando so' a marca nao tem pedido na janela; a tela diz "Sem serie
   do TikTok para esta marca na janela consultada".
 
-**LDR da Shopee — contrato necessario, NAO implementado.** A fonte tem o que
-e' preciso: `shopee_orders` no Data Mart traz `ship_by_date` e
-`pickup_done_time` (o proprio extrator da fila usa os dois em
-`pipelines/expedicao/shopee_extract.py`). O que falta e' backend:
-
-1. Serie diaria por vencimento, no mesmo grao do TikTok
-   (`marts.expedicao_tiktok_daily`): `marts.expedicao_shopee_daily` com
-   `brand`, `shop_account`, `deadline_date_brt` (`ship_by_date` em BRT),
-   `base`, `shipped_on_time`, `shipped_late`, `pending_overdue`,
-   `pending_on_time`, `is_mature`, `refresh_batch_id`, `effective_at`,
-   `source_watermark_at`. "Despachado" = `pickup_done_time` preenchido;
-   atrasado = `pickup_done_time > ship_by_date`. Decisoes de regra a ratificar
-   antes: cancelado depois do prazo, pedidos sem `ship_by_date`, e se o evento
-   e' a coleta (`pickup_done_time`) ou outro marco.
-2. Rota `GET /expedicao/shopee/ldr?days=&brands=` devolvendo o MESMO
-   envelope `ldr` do TikTok (`from`, `to`, `days`, `rate`, `base`, `late`,
-   `pending_overdue`, `pending_on_time`, `pending_at_risk`, `mature_due_days`,
-   `partial_due_days`, `daily[]`).
-3. So' entao a secao "Prazo" da Shopee ganha a LDR ao lado da situacao atual.
-
-Ate' la' a secao "Prazo" da Shopee mostra a particao do backlog por
-situacao de prazo e diz, por escrito, que a LDR ainda nao e' calculada.
+**LDR da Shopee — implementada ATRAS DE FLAG (EXPEDICAO-SHOPEE-LDR-1).** Ver
+a secao "LDR operacional da Shopee" no fim deste documento. Enquanto as flags
+estiverem desligadas, a secao "Prazo" da Shopee continua mostrando a particao
+do backlog por situacao de prazo e dizendo, por escrito, que a LDR ainda nao e'
+calculada.
 
 **Mercado Livre.** O canal nao publica prazo de envio (campos candidatos 0%
 preenchidos, medido no EXP-3A). Nao ha vencimento nem LDR a construir sem uma
@@ -1228,3 +1211,120 @@ normalizador do ML aparece no caminho dela.
 **PERGUNTA ABERTA AO TIME (inalterada):** confirmar na documentacao oficial da
 API do Mercado Livre se `date_created` / `date_ready_to_ship` vem com offset
 `-04:00` e se o extrator descarta o fuso ao gravar.
+
+## LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1, 21/10/2026)
+
+Nome na tela: **"LDR operacional (coleta × prazo Shopee)"**. E' um indicador
+INTERNO da Torre e **nao e' a taxa de envio atrasado que a Shopee usa para
+penalizacao**: o marco, as exclusoes e a janela da plataforma nao estao na
+nossa fonte. A API devolve `official = false` e o aviso pronto; a tela o mostra
+sempre que o numero aparece. Nao ha "meta" e a taxa nao ganha cor de
+severidade.
+
+### Regras (ratificadas em 21/10/2026)
+
+Entre os pedidos PAGOS e despachados pelo PROPRIO VENDEDOR cujo `ship_by_date`
+vence num dia (data em Brasilia), quantos nao foram coletados
+(`pickup_done_time`) ate' o prazo. Precedencia — o primeiro que casa decide:
+
+| # | Situacao | Classe |
+|---|---|---|
+| 1 | sem `pay_time` | fora do universo |
+| 2 | `fulfillment_flag = fulfilled_by_shopee` | FBS — fora da taxa, contador proprio |
+| 3 | fluxo fora do vocabulario medido | **falha fechada**, nada publicado |
+| 4 | cancelado sem coleta | fora da base, contador proprio (com o subconjunto "Seller did not Ship") |
+| 5 | sem `ship_by_date` | sem prazo, contador proprio (por dia de PAGAMENTO) |
+| 6 | status pos-envio sem `pickup_done_time` | fora da taxa, reduz a cobertura |
+| 7 | coleta ≤ prazo | no prazo |
+| 8 | coleta > prazo | atrasado |
+| 9 | sem coleta, prazo vencido | pendente vencido (conta como atraso) |
+| 10 | sem coleta, prazo por vencer | pendente no prazo |
+
+Cancelado COM coleta entra na base pela coleta. LDR = (atrasado + pendente
+vencido) / base, so' sobre vencimentos MADUROS: dia ja' fechado E fonte da conta
+lida depois de D+1 06:00 BRT (p99 de `ingested_at - update_time` = 6,0 h).
+
+Cobertura = (sem prazo + enviado sem coleta) / (base + essas ausencias). Acima
+de 2%: aviso. Acima de 10%: a taxa vira "—" com o motivo. Sem base madura: "—",
+nunca 0%.
+
+Motivo de cancelamento NAO-NULO fora do vocabulario medido (18 textos em 365
+dias, `MOTIVOS_CONHECIDOS`) gera alerta de qualidade em
+`audit.data_quality_check` (`expedicao_shopee_ldr_motivo_cancelamento`, `warn`)
+e na resposta da API. Motivo NULO e' contado como ausente, sem alerta.
+
+### Medicao que sustenta as regras (read-only, 21/10/2026)
+
+- `ship_by_date` e' `timestamptz`; 100% dos valores as 23:59 BRT; nenhum
+  vencimento em fim de semana nem em 12/10 (dias uteis ja' aplicados).
+- FBS e' a maioria: 4.768 de ~6.600 pedidos com vencimento em 12–18/10.
+- Enviado sem `pickup_done_time`: zero em 90 dias. Pago sem prazo: so' entre
+  cancelados.
+- Semana 12–18/10, regra ratificada: 61 / 1.819 = **3,35%** (APICE 5,93%,
+  BARBOURS 0,62%, LESCENT 0,89%, RITUARIA 2,21%). Se "Seller did not Ship"
+  contasse como atraso: 4,04%. Recalculada pelo modulo novo: identica.
+- Nao ha tabela de desempenho da loja no Data Mart: a comparacao com o Seller
+  Center depende de export manual ou do probe Account Health.
+
+### Tabelas (migration 030)
+
+- `marts.expedicao_shopee_ldr_daily` — PK `(channel, deadline_date,
+  shop_account)`. CHECKs: particao fecha na base, base = pagos − FBS −
+  cancelados sem coleta − enviados sem coleta, subconjuntos de cancelamento ≤
+  total, maduro sem pendente no prazo, canal `shopee`.
+- `marts.expedicao_shopee_ldr_sem_prazo_daily` — PK `(channel, paid_date,
+  shop_account)`; pagos = FBS + cancelados sem coleta + sem prazo.
+
+### Publisher
+
+    python -m pipelines.expedicao.shopee_ldr_cli --diagnose
+    python -m pipelines.expedicao.shopee_ldr_cli --reconcile
+    python -m pipelines.expedicao.shopee_ldr_cli --apply --max-idade-fonte-horas 6
+
+- Le `raw.shopee_orders` (so' 8 colunas, nenhuma de comprador, sem `order_sn`)
+  num UNICO snapshot REPEATABLE READ da replica. Marca pelo registry do Neon.
+- **Reconciliacao fonte × publicacao:** antes de escrever, `classificar`
+  (Python) e um CASE SQL independente tem de concordar celula a celula no MESMO
+  snapshot; dentro da transacao, a releitura do lote tem de bater com o
+  calculado antes do commit. `--reconcile` compara depois o publicado com a
+  fonte atual nos vencimentos maduros (read-only nos dois lados).
+- Janela reescrita a cada execucao: vencimentos de hoje − 35 a hoje + 7;
+  pagamentos (sem prazo) de hoje − 35 a hoje. Historico fora dela nao e' tocado.
+- Lock proprio `918_120_018` (nao disputa com a fila Shopee).
+- Exit codes iguais aos da `cli.py`/`tiktok_cli.py`.
+- Auditoria: `audit.source_sync_run` (`expedicao_shopee_ldr`) e tres checks em
+  `audit.data_quality_check`: motivo de cancelamento, cobertura por marca,
+  reconciliacao.
+- `--diagnose` real em 21/10: 30.669 pedidos lidos, 5,6 s, 112 celulas
+  reconciliadas, 0 divergencias.
+
+### API
+
+`GET /api/v1/expedicao/shopee/ldr?days=7&brands=apice` (days 1–35). Estados sem
+500: `disabled` (flag off — nenhuma consulta), `table_not_migrated`,
+`no_series_published` (tambem para marca sem linha), `snapshot.stale` (fonte
+vencida, > 6 h). Exclusoes em `exclusions`, cobertura em `coverage`, por marca
+em `brands` (nunca somadas entre marcas).
+
+### Flags (todas nascem desligadas)
+
+| Onde | Flag |
+|---|---|
+| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` |
+| Web (Vercel) | `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED=true` |
+| Airflow | DAG `marketplace_tower_expedicao_shopee_ldr_publish` nasce PAUSADA |
+
+Com a flag web off, a secao "Prazo" da Shopee fica byte a byte como antes. A
+LDR do TikTok nao foi tocada.
+
+### Limitacoes conhecidas
+
+- **A fila Shopee publicada mistura FBS** (o extrator nao le
+  `fulfillment_flag`): em 21/10, 258 de 558 do backlog, 11 de 13 vencidos e
+  43 de 43 acima de 48 h eram FBS. Fora do escopo deste gate.
+- `MOTIVO_NAO_ENVIOU` depende do TEXTO da fonte; se a Shopee o mudar, o
+  subconjunto zera e o alerta de motivo desconhecido e' o que avisa.
+- `ingested_at` e' reescrito a cada atualizacao: serve de watermark, nunca de
+  "quando a coleta chegou".
+- Sem indice em `ship_by_date`/`pay_time` na fonte: a leitura e' por varredura
+  (5,6 s medidos); se crescer, o custo aparece no `--diagnose`.

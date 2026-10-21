@@ -47,7 +47,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: Avancado para 029 pelo Gate ML-FULL-STOCK-PRODUCTIZATION-1 (estoque Full do ML).
 #: A 028 e' do PR #78 (DRE CMV), tambem sobre a 027: quem mesclar por ultimo
 #: reencadeia o down_revision e ajusta este pino.
-HEAD_ESPERADO = "029"
+#: Avancado para 030 pelo Gate EXPEDICAO-SHOPEE-LDR-1 (LDR operacional da Shopee).
+HEAD_ESPERADO = "030"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta
