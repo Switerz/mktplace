@@ -175,12 +175,9 @@ function dataCurta(iso: string | null): string {
     : d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
 }
 
-/** "manual_snapshot" nao diz nada a quem opera. Isto diz. */
-function modoHumano(modo: string): string {
-  return modo === "manual_snapshot"
-    ? "atualizada à mão, sem agendamento"
-    : modo.replace(/_/g, " ");
-}
+// O selo de modo de publicacao ("atualizada a mao") saiu no
+// EXPEDICAO-UX-UNIFICADA-1: a API devolve `load_mode` CONSTANTE, e desde
+// 21/10/2026 a fotografia e' publicada pela DAG. Ver `Relogios`.
 
 function numero(n: number | null | undefined): string {
   return typeof n === "number" ? n.toLocaleString("pt-BR") : "—";
@@ -496,9 +493,7 @@ export default function ExpedicaoClient({
   // Selos do MESMO canal que o titulo: na troca Shopee <-> Mercado Livre,
   // enquanto a resposta nova nao chega, eles nao descrevem a fotografia antiga.
   const fotografia =
-    dados && dados.channel === filtros.channel
-      ? fotografiaDaFila(relogios, modoHumano(relogios?.modoDeCarga ?? "manual_snapshot"))
-      : null;
+    dados && dados.channel === filtros.channel ? fotografiaDaFila(relogios) : null;
   const atencao = montarAtencaoDaFila(
     dados?.totals ?? null,
     dados?.accounts ?? [],

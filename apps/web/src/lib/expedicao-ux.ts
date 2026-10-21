@@ -50,10 +50,15 @@ export function urlComVisao(href: string, visao: Visao): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Fotografia, frescor e automacao — o cabecalho de todo canal.
+ * Fotografia e frescor — o cabecalho de todo canal.
  *
  * `idade` vem PRONTA do contrato do canal. Quando a API nao publica a idade
  * (TikTok), fica `null`: a tela nao subtrai relogios para inventar uma.
+ *
+ * Sem campo de modo de publicacao, de proposito: a API da fila devolve
+ * `load_mode`/`no_automation` como constantes ("manual") e a do TikTok nao
+ * tem o campo. Enquanto o contrato nao provar a origem do batch, a tela nao
+ * afirma nem "a mao" nem "agendada" (ver `docs/expedicao_contrato.md`).
  */
 export interface Fotografia {
   /** "Fotografia" (fila) ou "Série" (TikTok). */
@@ -62,8 +67,6 @@ export interface Fotografia {
   idade: string | null;
   /** Decidido pelo contrato do canal (limiar da tela ou alerta da API). */
   desatualizada: boolean;
-  /** Texto humano do modo de publicacao, exatamente o que a API declara. */
-  automacao: string;
   /** Ultimo dado lido da fonte, quando o payload o traz. */
   fonteLidaAte?: string | null;
 }

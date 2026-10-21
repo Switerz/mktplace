@@ -256,7 +256,7 @@ The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
 
 - One channel selector (`Shopee | Mercado Livre | TikTok Shop`, identity
   dots) owned by `ExpedicaoShell`. `?channel=` keeps its old values.
-- Same hierarchy on every channel: header → photo/freshness/publication mode
+- Same hierarchy on every channel: header → photo time/age/freshness (no publication-mode chip until the API proves the batch origin)
   chips → ONE quality bar → attention list → KPIs → evolution →
   concentration → operational detail.
 - Depth is a segmented control, in the URL (`?visao=detalhe`): **Visão do

@@ -8,9 +8,9 @@
  * ----------------------------------------
  *   source_age_hours      ha quanto tempo a FONTE (Data Mart) foi lida.
  *                         E' o unico insumo do veredito de frescor.
- *   snapshot_age_hours    ha quanto tempo a FOTOGRAFIA foi publicada. Como nao
- *                         existe agendamento, isto cresce ate alguem rodar o
- *                         refresh a mao.
+ *   snapshot_age_hours    ha quanto tempo a FOTOGRAFIA foi publicada. Se a
+ *                         publicacao para, isto cresce ate alguem (ou a DAG)
+ *                         publicar de novo.
  *   oldest_row_age_hours  idade da linha mais antiga do backlog. CONTEXTO: um
  *                         backlog legitimo sempre tem pedido velho, e isso NAO
  *                         significa fonte desatualizada.
@@ -67,10 +67,6 @@ export const EXPLICACAO_LIMIAR_48H =
   "Limiar operacional interno da Torre, nao e' SLA do marketplace: o prazo " +
   "contratual aparece em Vencidos / Vence em 24h, que vem do ship_by_date da " +
   "Shopee.";
-
-export const AVISO_SEM_AUTOMACAO =
-  "Sem automacao: a fotografia so' avanca quando alguem executa o refresh " +
-  "manualmente.";
 
 /** Acima disto a fotografia e' considerada velha e a tela avisa. */
 export const SNAPSHOT_VELHO_HORAS = 6;
@@ -671,9 +667,17 @@ export interface Relogios {
   snapshotAgeHours: number | null;
   snapshotVelho: boolean;
   efetivoEm: string | null;
-  modoDeCarga: string;
-  semAutomacao: boolean;
 }
+
+/*
+ * EXPEDICAO-UX-UNIFICADA-1 — `load_mode` e `no_automation` NAO entram aqui.
+ * A API os devolve como CONSTANTES (`manual_snapshot` / `true`) sem olhar
+ * quem publicou o batch, e desde 21/10/2026 quem publica e' a DAG
+ * `marketplace_tower_expedicao_refresh`. Exibi-los afirmaria "atualizada a
+ * mao" sobre uma fotografia automatica. A tela fica com o que a API mede de
+ * fato: instante da publicacao e idade. A evolucao do contrato esta' em
+ * `docs/expedicao_contrato.md` (pendencia do modo de publicacao).
+ */
 
 export function montarRelogios(r: RespostaExpedicao): Relogios {
   const idade = r.limitations?.snapshot_age_hours ?? null;
@@ -681,8 +685,6 @@ export function montarRelogios(r: RespostaExpedicao): Relogios {
     snapshotAgeHours: idade,
     snapshotVelho: idade !== null && idade > SNAPSHOT_VELHO_HORAS,
     efetivoEm: r.snapshot?.effective_at ?? null,
-    modoDeCarga: r.limitations?.load_mode ?? "manual_snapshot",
-    semAutomacao: r.limitations?.no_automation !== false,
   };
 }
 
@@ -820,9 +822,13 @@ export type { BarraQualidade, ProblemaQualidade, SeveridadeQualidade };
  * Consolida a pilha de banners numa barra so'.
  *
  * NADA e' escondido: tudo que hoje vira banner continua na lista de detalhes,
- * e o item mais grave aparece fechado. Defasagem, ausencia de automacao e
- * lacuna de cobertura entram sempre — sao exatamente as limitacoes que o
- * operador precisa ver antes de confiar no numero.
+ * e o item mais grave aparece fechado. Defasagem e lacuna de cobertura entram
+ * sempre — sao exatamente as limitacoes que o operador precisa ver antes de
+ * confiar no numero.
+ *
+ * O antigo aviso "sem automacao" SAIU (EXPEDICAO-UX-UNIFICADA-1): ele repetia
+ * o `no_automation` constante da API e, com a DAG publicando, era falso. A
+ * defasagem real continua aqui, medida pela idade da fotografia.
  */
 export function montarBarraDeQualidade(
   relogios: Relogios | null,
@@ -838,13 +844,6 @@ export function montarBarraDeQualidade(
       texto:
         `Fotografia publicada há ${formatarHoras(relogios.snapshotAgeHours)}: os ` +
         "números descrevem aquele instante, não agora.",
-    });
-  }
-  if (relogios?.semAutomacao !== false) {
-    itens.push({
-      chave: "sem_automacao",
-      severidade: "info",
-      texto: AVISO_SEM_AUTOMACAO,
     });
   }
   for (const a of avisos) {
@@ -877,17 +876,15 @@ export function montarBarraDeQualidade(
 /**
  * Cabecalho de frescor da fila. A idade e' a que a API publicou
  * (`limitations.snapshot_age_hours`); `desatualizada` e' o mesmo limiar de
- * `SNAPSHOT_VELHO_HORAS` que ja' pintava o selo de ambar.
- *
- * `automacao` chega pronta de quem conhece o vocabulario de `load_mode`.
+ * `SNAPSHOT_VELHO_HORAS` que ja' pintava o selo de ambar. Sem modo de
+ * publicacao: ver o comentario de `Relogios`.
  */
-export function fotografiaDaFila(r: Relogios | null, automacao: string): Fotografia {
+export function fotografiaDaFila(r: Relogios | null): Fotografia {
   return {
     rotulo: "Fotografia",
     publicadaEm: r?.efetivoEm ?? null,
     idade: r && r.snapshotAgeHours !== null ? formatarHoras(r.snapshotAgeHours) : null,
     desatualizada: r?.snapshotVelho ?? false,
-    automacao,
   };
 }
 

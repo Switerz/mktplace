@@ -36,7 +36,6 @@ import {
   type Totais,
 } from "../src/lib/expedicao-contract.ts";
 import {
-  AUTOMACAO_NAO_INFORMADA,
   AVISO_PRAZO_RECONSTRUIDO,
   CODIGO_FOTOGRAFIA_VELHA,
   fotografiaDoTikTok,
@@ -231,15 +230,12 @@ test("a fotografia da fila repete a idade e o veredito que ja' existiam", () => 
       snapshotAgeHours: 30,
       snapshotVelho: true,
       efetivoEm: "2026-10-13T12:00:00Z",
-      modoDeCarga: "manual_snapshot",
-      semAutomacao: true,
     },
-    "atualizada à mão, sem agendamento",
   );
   assert.equal(f.idade, "30.0 h");
   assert.equal(f.desatualizada, true);
-  assert.equal(f.automacao, "atualizada à mão, sem agendamento");
-  const nada = fotografiaDaFila(null, "x");
+  assert.ok(!("automacao" in f), "sem modo de publicacao: a API ainda nao o prova");
+  const nada = fotografiaDaFila(null);
   assert.equal(nada.publicadaEm, null);
   assert.equal(nada.idade, null);
   assert.equal(nada.desatualizada, false);
@@ -326,7 +322,6 @@ test("a barra do TikTok substitui a pilha: vencida primeiro, prazo nunca some", 
     "serie_desatualizada",
     "prazo_reconstruido",
     "vencimentos_parciais",
-    "modo_publicacao",
   ]);
   assert.equal(
     barra.detalhes.find((d) => d.chave === "prazo_reconstruido")?.texto,
@@ -341,11 +336,14 @@ test("sem serie vencida, o aviso de prazo e' o que aparece fechado", () => {
   assert.equal(barra.principal?.chave, "prazo_reconstruido");
 });
 
-test("serie indisponivel nao ganha aviso de modo de publicacao", () => {
-  const barra = montarBarraDeQualidadeTikTok(
-    payload({ availability: "unavailable", ldr: null, alerts: [] }),
-  );
-  assert.ok(!barra.detalhes.some((d) => d.chave === "modo_publicacao"));
+test("nenhuma barra afirma publicacao manual, agendada ou ausente", () => {
+  // EXPEDICAO-UX-UNIFICADA-1: o modo de publicacao saiu da tela nos tres
+  // canais ate' a API provar a origem do batch.
+  for (const p of [payload(), payload({ availability: "unavailable", ldr: null, alerts: [] })]) {
+    for (const d of montarBarraDeQualidadeTikTok(p).detalhes) {
+      assert.doesNotMatch(d.texto, /à mão|a mao|agendad|agendamento|automa/i, d.texto);
+    }
+  }
   assert.equal(montarBarraDeQualidadeTikTok(null).principal, null);
 });
 
@@ -353,7 +351,7 @@ test("a tela nao calcula a idade da serie do TikTok", () => {
   const f = fotografiaDoTikTok(payload());
   assert.equal(f?.idade, null, "a API nao publica idade; a tela nao subtrai relogios");
   assert.equal(f?.desatualizada, true, "o veredito e' o alerta da API");
-  assert.equal(f?.automacao, AUTOMACAO_NAO_INFORMADA);
+  assert.ok(f && !("automacao" in f));
   assert.equal(f?.fonteLidaAte, "2026-10-13T11:00:00Z");
   const fresca = fotografiaDoTikTok(payload({ alerts: [] }));
   assert.equal(fresca?.desatualizada, false);
@@ -507,13 +505,11 @@ test("fotografia desatualizada e' ESCRITA, nao so' pintada", () => {
         publicadaEm: "2026-10-13T12:00:00Z",
         idade: null,
         desatualizada: true,
-        automacao: AUTOMACAO_NAO_INFORMADA,
         fonteLidaAte: null,
       },
     }),
   );
   assert.match(velha, />Desatualizada</);
-  assert.match(velha, /Modo de publicação não informado/);
   assert.doesNotMatch(velha, /há /, "sem idade publicada, sem idade na tela");
   const fresca = renderToStaticMarkup(
     h(ChipsFotografia, {
@@ -522,13 +518,15 @@ test("fotografia desatualizada e' ESCRITA, nao so' pintada", () => {
         publicadaEm: "2026-10-21T12:00:00Z",
         idade: "1.2 h",
         desatualizada: false,
-        automacao: "atualizada à mão, sem agendamento",
       },
     }),
   );
   assert.doesNotMatch(fresca, /Desatualizada|não agora/);
   assert.match(fresca, /há 1\.2 h/);
-  assert.match(fresca, /atualizada à mão, sem agendamento/, "o modo declarado pela API aparece");
+  // Selos so' do que a API mede: instante, idade, fonte. Nenhum modo.
+  for (const html of [velha, fresca]) {
+    assert.doesNotMatch(html, /à mão|agendamento|Modo de publicação|manual/i);
+  }
 });
 
 test("a barra mostra o principal e anuncia quantas limitacoes ha", () => {
@@ -539,7 +537,7 @@ test("a barra mostra o principal e anuncia quantas limitacoes ha", () => {
   assert.match(html, /Série desatualizada\./);
   assert.match(html, /aria-expanded="false"/);
   assert.match(html, /aria-controls="[^"]+"/);
-  assert.match(html, /Ver 4 limitações/);
+  assert.match(html, /Ver 3 limitações/);
   assert.match(html, /min-h-11/);
   assert.equal(
     renderToStaticMarkup(h(BarraDeQualidade, { barra: consolidarQualidade([]) })),
@@ -569,4 +567,35 @@ test("o convite ao detalhe e' um botao de 44px", () => {
     h(ConviteAoDetalhe, { conteudo: "Fila no detalhe.", aoAbrir: () => {} }),
   );
   assert.match(html, /<button[^>]*type="button"[^>]*class="[^"]*min-h-11[^"]*"[^>]*>Abrir detalhe operacional<\/button>/);
+});
+
+// ===========================================================================
+// 7. Nenhuma afirmacao de publicacao manual (a DAG publica desde 21/10/2026)
+// ===========================================================================
+test("nenhum arquivo da Expedicao afirma atualizacao manual ou modo de publicacao", () => {
+  // A API ainda devolve `load_mode="manual_snapshot"` e `no_automation=true`
+  // como constantes. Ate' o contrato provar a origem do batch, a tela so'
+  // mostra instante, idade, fonte e frescor. Comentarios ficam de fora: eles
+  // EXPLICAM a remocao.
+  const arquivos = [
+    "app/expedicao/ExpedicaoShell.tsx",
+    "app/expedicao/ExpedicaoClient.tsx",
+    "src/components/expedicao/TikTokDispatchPanel.tsx",
+    "src/components/expedicao/CabecalhoExpedicao.tsx",
+    "src/components/expedicao/BarraDeQualidade.tsx",
+    "src/components/expedicao/SecoesExpedicao.tsx",
+    "src/lib/expedicao-contract.ts",
+    "src/lib/expedicao-tiktok-contract.ts",
+    "src/lib/expedicao-ux.ts",
+  ];
+  for (const rel of arquivos) {
+    const codigo = fonte(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(
+      codigo,
+      // `load_mode` continua nos TIPOS que espelham o payload; o que nao pode
+      // existir e' texto de tela ou campo derivado dele.
+      /à mão|a mao|sem agendamento|Sem automa|manualmente|Modo de publicação|modoDeCarga|semAutomacao/,
+      rel,
+    );
+  }
 });

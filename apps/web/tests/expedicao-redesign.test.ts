@@ -12,7 +12,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
-  AVISO_SEM_AUTOMACAO,
   CANAL_PADRAO,
   JANELAS_TENDENCIA,
   JANELA_INICIAL_HORAS,
@@ -204,13 +203,11 @@ function relogios(over: Partial<Relogios> = {}): Relogios {
     snapshotAgeHours: 21.9,
     snapshotVelho: true,
     efetivoEm: "2026-09-22T19:04:10Z",
-    modoDeCarga: "manual_snapshot",
-    semAutomacao: true,
     ...over,
   };
 }
 
-test("defasagem, ausencia de automacao e cobertura entram todas na barra", () => {
+test("defasagem e cobertura entram todas na barra", () => {
   const avisos: AvisoCobertura[] = [
     { tipo: "fora_do_escopo", texto: "kokeshi nao e' coberta por esta fonte." },
   ];
@@ -229,10 +226,12 @@ test("defasagem, ausencia de automacao e cobertura entram todas na barra", () =>
   const barra = montarBarraDeQualidade(relogios(), avisos, frescor);
   const chaves = barra.detalhes.map((d) => d.chave);
   assert.ok(chaves.includes("fotografia_antiga"));
-  assert.ok(chaves.includes("sem_automacao"));
   assert.ok(chaves.includes("fonte_em_alerta"));
   assert.equal(chaves.filter((c) => c.startsWith("cobertura_")).length, 1);
-  assert.equal(barra.detalhes.length, 4, "nenhuma limitacao pode sumir");
+  assert.equal(barra.detalhes.length, 3, "nenhuma limitacao pode sumir");
+  // EXPEDICAO-UX-UNIFICADA-1: o "sem automacao" saiu — repetia o
+  // `no_automation` constante da API, falso com a DAG publicando.
+  assert.ok(!chaves.includes("sem_automacao"));
 });
 
 test("o item mais grave e' o que aparece fechado", () => {
@@ -246,14 +245,14 @@ test("o item mais grave e' o que aparece fechado", () => {
 });
 
 test("fotografia velha aparece mesmo quando nada mais esta errado", () => {
-  const barra = montarBarraDeQualidade(relogios({ semAutomacao: false }), [], []);
+  const barra = montarBarraDeQualidade(relogios(), [], []);
   assert.equal(barra.principal?.chave, "fotografia_antiga");
   assert.match(barra.principal?.texto ?? "", /21,9 h|21\.9 h/);
 });
 
 test("sem nenhum problema, a barra nao e' pintada", () => {
   const barra = montarBarraDeQualidade(
-    relogios({ snapshotVelho: false, semAutomacao: false }),
+    relogios({ snapshotVelho: false }),
     [],
     [],
   );
@@ -261,10 +260,13 @@ test("sem nenhum problema, a barra nao e' pintada", () => {
   assert.equal(barra.detalhes.length, 0);
 });
 
-test("o aviso de ausencia de automacao e' exatamente o texto do contrato", () => {
+test("a barra nunca afirma publicacao manual nem ausencia de agendamento", () => {
+  // A API devolve `load_mode`/`no_automation` como CONSTANTES; desde
+  // 21/10/2026 quem publica e' a DAG. A barra nao repete essa declaracao.
   const barra = montarBarraDeQualidade(relogios(), [], []);
-  const item = barra.detalhes.find((d) => d.chave === "sem_automacao");
-  assert.equal(item?.texto, AVISO_SEM_AUTOMACAO);
+  for (const d of barra.detalhes) {
+    assert.doesNotMatch(d.texto, /autom|manual|à mão|a mao|agend/i, d.texto);
+  }
 });
 
 // ===========================================================================
@@ -561,8 +563,12 @@ test("o recharts fica fora do bundle inicial", () => {
   assert.doesNotMatch(CLIENTE, /from "recharts"/);
 });
 
-test("o modo de carga aparece em linguagem humana", () => {
-  assert.match(CLIENTE, /atualizada à mão, sem agendamento/);
+test("a fila nao exibe o modo de carga constante da API", () => {
+  // Antes: "atualizada à mão, sem agendamento", traducao de um
+  // `load_mode` que a API fixa em `manual_snapshot`. Com a DAG publicando,
+  // isso era falso. Sem comentarios: eles EXPLICAM a remocao.
+  const codigo = CLIENTE.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(codigo, /à mão|sem agendamento|manual_snapshot|load_mode|no_automation/);
 });
 
 // ===========================================================================

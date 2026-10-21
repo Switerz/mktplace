@@ -357,12 +357,9 @@ export function alturaDaMeta(maximo: number, meta = META_TIKTOK_LDR): number | n
  */
 export const CODIGO_FOTOGRAFIA_VELHA = "fotografia_velha";
 
-/**
- * O payload do TikTok NAO informa como a serie foi publicada (nao existe
- * `load_mode` nem `no_automation` nele). A tela diz isso, em vez de herdar o
- * "atualizada a mao" da fila ou de presumir agendamento.
- */
-export const AUTOMACAO_NAO_INFORMADA = "Modo de publicação não informado";
+// O payload do TikTok NAO informa como a serie foi publicada (nao existe
+// `load_mode` nem `no_automation` nele). A tela nao presume nem "a mao" nem
+// "agendada": mostra instante, fonte e frescor (ver `Fotografia`).
 
 export function serieDesatualizada(p: TikTokPayload | null): boolean {
   return Boolean(p?.alerts.some((a) => a.code === CODIGO_FOTOGRAFIA_VELHA));
@@ -375,7 +372,6 @@ export function fotografiaDoTikTok(p: TikTokPayload | null): Fotografia | null {
     publicadaEm: p.snapshot.effective_at,
     idade: null,
     desatualizada: serieDesatualizada(p),
-    automacao: AUTOMACAO_NAO_INFORMADA,
     fonteLidaAte: p.snapshot.source_watermark_at,
   };
 }
@@ -436,15 +432,6 @@ export function montarBarraDeQualidadeTikTok(p: TikTokPayload | null): BarraQual
       texto:
         `${parciais} vencimento(s) da janela ainda no prazo: a taxa desses dias ainda ` +
         "vai mudar e fica fora da LDR.",
-    });
-  }
-  if (p.availability === "available") {
-    itens.push({
-      chave: "modo_publicacao",
-      severidade: "info",
-      texto:
-        "A API do TikTok não informa se a série é publicada à mão ou por " +
-        "agendamento. O instante da última publicação está no cabeçalho.",
     });
   }
   return consolidarQualidade(itens);

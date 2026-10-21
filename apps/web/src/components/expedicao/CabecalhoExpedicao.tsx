@@ -33,7 +33,7 @@ function dataHoraCurta(iso: string): string {
 }
 
 /**
- * Publicacao, frescor, fonte e modo de publicacao, em selos.
+ * Publicacao, frescor e fonte, em selos.
  *
  * "Desatualizada" e' ESCRITO, nao so' pintado de ambar: cor nao pode ser o
  * unico sinal de que os numeros abaixo descrevem o passado.
@@ -65,7 +65,8 @@ export function ChipsFotografia({ fotografia: f }: { fotografia: Fotografia }) {
           Fonte até <time dateTime={f.fonteLidaAte}>{dataHoraCurta(f.fonteLidaAte)}</time>
         </Chip>
       ) : null}
-      <Chip title="Modo de publicação, como a API o declara">{f.automacao}</Chip>
+      {/* Sem selo de modo de publicacao: a API ainda nao prova a origem do
+          batch (`load_mode` e' constante). Instante, idade e frescor bastam. */}
     </>
   );
 }
