@@ -324,6 +324,8 @@ export class B2BRevendaError extends Error {
   }
 }
 
+export const MSG_SEM_ACESSO = "Acesso restrito: esta aba exige login corporativo.";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 const BASE = "/api/v1/b2b-revenda";
 
@@ -337,6 +339,11 @@ async function obter<T>(caminho: string, query: string, signal?: AbortSignal): P
   }
   if (res.status === 422) {
     throw new B2BRevendaError("Filtro recusado pela API.", 422);
+  }
+  if (res.status === 401 || res.status === 403) {
+    // A API exige login corporativo (Auth0) nesta rota. Sem sessao, o erro e'
+    // de ACESSO, nao de dado — e nunca vira zero nem "indisponivel".
+    throw new B2BRevendaError(MSG_SEM_ACESSO, res.status);
   }
   if (!res.ok) {
     throw new B2BRevendaError(`A API respondeu ${res.status}.`, res.status);

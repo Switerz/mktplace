@@ -168,6 +168,17 @@ class Settings(BaseSettings):
     # Amazon", para que um canal novo na fonte nao entre nos KPIs sem revisao.
     b2b_revenda_canais_kpi: str = "Mercado Livre,Shopee"
 
+    # ------------------------------------------------------------------
+    # Gate OCTAPRICE-2 — autenticacao das rotas protegidas (app/auth.py)
+    # ------------------------------------------------------------------
+    # Reusa o tenant Auth0 corporativo do Oraculo: mesmo issuer (allowlist
+    # fixa no codigo), RS256 apenas, audience EXATA desta API, permission
+    # exigida como elemento completo. Tudo vazio por padrao, e vazio NEGA:
+    # sem configuracao, nenhuma rota protegida responde dado (503).
+    api_auth_issuer: str = ""
+    api_auth_audience: str = ""
+    b2b_revenda_required_scope: str = "b2b_revenda:read"
+
     @property
     def b2b_revenda_canais_kpi_list(self) -> list[str]:
         return [c.strip() for c in self.b2b_revenda_canais_kpi.split(",") if c.strip()]

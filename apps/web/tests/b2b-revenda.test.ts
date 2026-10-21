@@ -143,6 +143,13 @@ test("nenhuma variavel secreta da integracao e' referenciada no frontend", () =>
   assert.deepEqual(achados, []);
 });
 
+test("401/403 da API viram erro de ACESSO, nao dado nem indisponivel", () => {
+  assert.match(LIB, /if \(res\.status === 401 \|\| res\.status === 403\) \{/);
+  assert.match(LIB, /throw new B2BRevendaError\(MSG_SEM_ACESSO, res\.status\);/);
+  // O tratamento de acesso vem ANTES do `res.ok` generico.
+  assert.ok(LIB.indexOf("res.status === 401") < LIB.indexOf("if (!res.ok)"));
+});
+
 test("sem dado de cliente nos tipos da aba", () => {
   const props = [...LIB.matchAll(/^\s+(\w+)\??:/gm)].map((m) => m[1]);
   const proibidos = props.filter((p) => /cliente|vendedor|cnpj|email|telefone|razao|seller_n/i.test(p));

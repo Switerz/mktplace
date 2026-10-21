@@ -9,7 +9,11 @@ esta API nao tem autenticacao, e rota com dado de cliente so' nasce depois que
 a autenticacao da Torre de Marketplaces for definida.
 
 ORDEM FIXA EM TODA ROTA:
-  1. flag desligada -> `unavailable` sem criar engine nem abrir conexao;
+  0. AUTENTICACAO (dependencia do ROUTER, vale para toda rota daqui):
+     sem configuracao -> 503; sem token/token invalido -> 401; sem a
+     permission `b2b_revenda:read` -> 403. Nada abaixo roda antes disso
+     (app/auth.py, Gate OCTAPRICE-2);
+  1. flag desligada -> `unavailable` sem criar cliente nem abrir conexao;
   2. recorte invalido -> 422 com mensagem constante (o valor nao volta);
   3. credencial ausente/invalida, fonte fora, contrato quebrado, dia sem
      relatorio -> 200 com `unavailable` e motivo. Nunca zero, nunca 500.
@@ -21,6 +25,7 @@ from typing import Callable, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.auth import exigir_escopo
 from app.config import settings
 from app.schemas.b2b_revenda import (
     B2BRevendaUnavailableResponse,
@@ -32,7 +37,11 @@ from app.schemas.b2b_revenda import (
 from app.services import b2b_revenda_service as svc
 from app.services.b2b_revenda_fonte import FonteComCache, FonteIndisponivel, obter_fonte
 
-router = APIRouter(prefix="/api/v1/b2b-revenda", tags=["b2b-revenda"])
+router = APIRouter(
+    prefix="/api/v1/b2b-revenda",
+    tags=["b2b-revenda"],
+    dependencies=[Depends(exigir_escopo(lambda: settings.b2b_revenda_required_scope))],
+)
 
 
 def _agora() -> datetime:

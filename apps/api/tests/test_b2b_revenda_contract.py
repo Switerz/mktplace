@@ -44,6 +44,16 @@ from app.services.b2b_revenda_fonte import (
     SeveridadeFonte,
     SkuFonte,
 )
+from tests import auth_testkit as kit
+
+
+@pytest.fixture(autouse=True)
+def _autenticado(monkeypatch):
+    """Este arquivo testa o CONTRATO de dados; a autenticacao tem arquivo
+    proprio (test_b2b_revenda_auth.py). Aqui todo cliente chega autenticado."""
+    kit.configurar(monkeypatch)
+    yield
+    kit.limpar()
 
 BASE = "/api/v1/b2b-revenda"
 ROTAS = ["/frescor", "/resumo", "/canais-marcas", "/skus"]
@@ -169,7 +179,7 @@ def falsa():
 def client(falsa):
     cache = FonteComCache(falsa, 1200, monotonico=Relogio(), agora=lambda: LIDO)
     app.dependency_overrides[rota.provedor_fonte] = lambda: (lambda: cache)
-    yield TestClient(app)
+    yield TestClient(app, headers=kit.cabecalho())
     app.dependency_overrides.pop(rota.provedor_fonte, None)
 
 
@@ -189,7 +199,7 @@ def test_flag_desligada_responde_indisponivel_sem_criar_fonte(caminho, monkeypat
 
     app.dependency_overrides[rota.provedor_fonte] = lambda: fabrica_proibida
     try:
-        r = TestClient(app).get(BASE + caminho)
+        r = TestClient(app, headers=kit.cabecalho()).get(BASE + caminho)
     finally:
         app.dependency_overrides.pop(rota.provedor_fonte, None)
     assert r.status_code == 200
@@ -214,7 +224,7 @@ CHAVE = "chave-ficticia-de-teste-NAO-PODE-VAZAR"
 def test_credencial_ausente_e_indisponivel(url, chave, ligado, singleton_limpo, monkeypatch):
     monkeypatch.setattr(settings, "b2b_revenda_supabase_url", url)
     monkeypatch.setattr(settings, "b2b_revenda_supabase_key", SecretStr(chave))
-    r = TestClient(app).get(BASE + "/resumo")
+    r = TestClient(app, headers=kit.cabecalho()).get(BASE + "/resumo")
     assert r.status_code == 200
     assert r.json()["motivo_tecnico"] == "credencial_ausente"
     assert fonte_mod._singleton is None, "falha de credencial nao pode ficar guardada"
@@ -231,7 +241,7 @@ def test_url_invalida_e_recusada_sem_eco(url, ligado, singleton_limpo, monkeypat
     monkeypatch.setattr(settings, "b2b_revenda_supabase_url", url)
     monkeypatch.setattr(settings, "b2b_revenda_supabase_key", SecretStr(CHAVE))
     caplog.set_level(logging.DEBUG)
-    r = TestClient(app).get(BASE + "/resumo")
+    r = TestClient(app, headers=kit.cabecalho()).get(BASE + "/resumo")
     assert r.json()["motivo_tecnico"] == "credencial_invalida"
     assert CHAVE not in r.text and CHAVE not in caplog.text
 
@@ -541,7 +551,7 @@ def test_consultado_em_e_o_da_leitura_mais_antiga(ligado, falsa):
     cache = FonteComCache(falsa, 1200, monotonico=rel, agora=lambda: next(instantes))
     app.dependency_overrides[rota.provedor_fonte] = lambda: (lambda: cache)
     try:
-        corpo = TestClient(app).get(BASE + "/resumo").json()
+        corpo = TestClient(app, headers=kit.cabecalho()).get(BASE + "/resumo").json()
     finally:
         app.dependency_overrides.pop(rota.provedor_fonte, None)
     assert corpo["frescor"]["consultado_em"].startswith("2026-10-21T16:00")
