@@ -6,8 +6,8 @@
 |---|---|---|
 | Fotografia → `raw.ml_full_*` (DAG `mercadolivre_full_stock_snapshot`) | goca-se/airflow #2057 + #2097 (develop), promoção **#2098** (main) | develop ✅ · main ⏳ aprovação + fim do rollout da Expedição |
 | DDL `raw.ml_full_*` | fim de `src/mercadolivre/schema.sql` (airflow) | **não aplicada** |
-| Indicadores por inventário (dry-run) | mktplace #89 | mesclado em `main` |
-| Migration 029 + publicador | mktplace #91 | ver o PR (código inerte) |
+| Indicadores por inventário (dry-run) | mktplace #89 | mesclado em `main` (`6d991811`) |
+| Migration 029 + publicador (três travas) | mktplace #91 | mesclado em `main` (`0eb106b1`); a 029 **não foi aplicada** |
 | GRANTs de privilégio mínimo | `db/sql/provisionamento/ml_full_stock_*_grants.sql` | **não executados** |
 
 ## 0. Evidência que sustenta a ativação (censo de 21/10/2026)
