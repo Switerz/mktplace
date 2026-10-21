@@ -116,13 +116,14 @@ def get_executive_summary(db: Session, filters: ResolvedFilters, *, now: datetim
         db, filters.mkt_ids, filters.brands, period, channels=filters.channels,
     )
     daily_freshness = _fetch_daily_performance_freshness(db, filters.mkt_ids)
+    brand_freshness = _fetch_brand_freshness(db, filters.mkt_ids, filters.brands)
     regional_max_date = _fetch_regional_freshness(db, filters.mkt_ids)
 
     return _compose_executive_summary(
         overview=overview, brands=brands, quality=quality, canais=canais,
         regioes_summary=regioes_summary, channels=filters.channels, mkt_ids=filters.mkt_ids,
         daily_freshness=daily_freshness, regional_max_date=regional_max_date,
-        now=now,
+        now=now, brand_freshness=brand_freshness,
     )
 
 
@@ -148,6 +149,31 @@ def _fetch_daily_performance_freshness(db: Session, mkt_ids: list[int]) -> list[
     ]
 
 
+def _fetch_brand_freshness(db: Session, mkt_ids: list[int], brand_keys: list[str] | None) -> list[dict]:
+    """MAX(date) por (marketplace, marca) — FRESHNESS-GERENCIAL-DAILY.
+
+    O frescor por marketplace sozinho nao enxerga uma MARCA parada dentro de um
+    canal em dia: com a Shopee publicada pela API (4 lojas), a kokeshi — que so'
+    tem arquivo — para numa data e o canal continua "fresco". Sem este sinal o
+    periodo exibido soma dias sem dado dela como se fossem dias sem venda."""
+    params: dict = {"mkt_ids": mkt_ids}
+    brand_filter = perf_svc._brand_filter_sql(brand_keys, params)
+    sql = text(f"""
+        SELECT f.marketplace_id, l.brand_key, MAX(f.date) AS max_date
+        FROM marts.fact_marketplace_daily_performance f
+        JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+        WHERE f.marketplace_id = ANY(:mkt_ids)
+          {brand_filter}
+        GROUP BY f.marketplace_id, l.brand_key
+    """)
+    rows = db.execute(sql, params).mappings().all()
+    return [
+        {"marketplace": _MKT_ID_NAME.get(r["marketplace_id"], str(r["marketplace_id"])),
+         "brand": r["brand_key"], "max_date": r["max_date"]}
+        for r in rows
+    ]
+
+
 def _fetch_regional_freshness(db: Session, mkt_ids: list[int]) -> date | None:
     sql = text("""
         SELECT MAX(date) AS max_date
@@ -165,7 +191,7 @@ def _fetch_regional_freshness(db: Session, mkt_ids: list[int]) -> date | None:
 def _compose_executive_summary(
     *, overview: dict, brands: dict, quality: dict, canais: dict, regioes_summary: dict,
     channels: str, mkt_ids: list[int], daily_freshness: list[dict], regional_max_date,
-    now: datetime,
+    now: datetime, brand_freshness: list[dict] | None = None,
 ) -> dict:
     cur = overview["current"]
     gmv = cur["gmv"]
@@ -176,6 +202,7 @@ def _compose_executive_summary(
 
     risks = _build_risks(quality, canais, regioes_summary, no_data)
     risks.extend(_build_daily_performance_freshness_risks(daily_freshness, now))
+    risks.extend(_build_brand_freshness_risks(brand_freshness or [], daily_freshness, now))
     regional_risk = _build_regional_freshness_risk(regional_max_date, now)
     if regional_risk is not None:
         risks.append(regional_risk)
@@ -461,6 +488,52 @@ def _build_daily_performance_freshness_risks(freshness_rows: list[dict], now: da
                 f"({staleness_days}d, limite de {DAILY_FRESHNESS_THRESHOLD_DAYS}d)."
             ),
             "brand": None,
+            "marketplace": mkt_name,
+            "metric_value": float(staleness_days),
+            "href": "/canais",
+            "source": "fact_marketplace_daily_performance",
+            "last_date": max_date.isoformat(),
+            "threshold_days": DAILY_FRESHNESS_THRESHOLD_DAYS,
+            "staleness_days": staleness_days,
+            "category": "data_confidence",
+        })
+    return risks
+
+
+def _build_brand_freshness_risks(brand_rows: list[dict], marketplace_rows: list[dict],
+                                 now: datetime) -> list[dict]:
+    """Uma marca parada DENTRO de um canal em dia vira `stale_data` com `brand`.
+
+    So' quando o canal esta' fresco (canal parado ja' tem o risco por
+    marketplace; repetir por marca seria ruido) e a marca fica mais de
+    `DAILY_FRESHNESS_THRESHOLD_DAYS` atras do proprio canal. Caso real: Shopee
+    publicada pela API para quatro lojas, kokeshi so' por arquivo. A
+    mensagem diz que o periodo sem dado NAO e' venda zero."""
+    today = now.date()
+    canal_max = {r["marketplace"]: r["max_date"] for r in marketplace_rows if r["max_date"] is not None}
+    risks: list[dict] = []
+    for row in sorted(brand_rows, key=lambda r: (r["marketplace"], r["brand"])):
+        mkt_name, brand, max_date = row["marketplace"], row["brand"], row["max_date"]
+        topo = canal_max.get(mkt_name)
+        if max_date is None or topo is None:
+            continue
+        if (today - topo).days > DAILY_FRESHNESS_THRESHOLD_DAYS:
+            continue                                   # canal inteiro parado: risco por marketplace
+        atraso = (topo - max_date).days
+        if atraso <= DAILY_FRESHNESS_THRESHOLD_DAYS:
+            continue
+        display = _MKT_DISPLAY.get(mkt_name, mkt_name)
+        staleness_days = (today - max_date).days
+        risks.append({
+            "type": "stale_data",
+            "severity": "warning",
+            "title": f"{display} · {brand.upper()} sem dados recentes",
+            "description": (
+                f"{brand.upper()} no {display} tem dados até {max_date.strftime('%d/%m/%Y')}; "
+                f"o canal está em {topo.strftime('%d/%m/%Y')}. Marca não coberta pela "
+                "atualização automática deste canal: os dias sem dado não são venda zero."
+            ),
+            "brand": brand,
             "marketplace": mkt_name,
             "metric_value": float(staleness_days),
             "href": "/canais",
