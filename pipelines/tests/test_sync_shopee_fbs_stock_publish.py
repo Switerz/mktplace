@@ -24,6 +24,7 @@ import re
 from datetime import date, timedelta
 
 import pytest
+import sqlalchemy
 
 DSN = os.getenv("TEST_PG_DSN")
 
@@ -64,12 +65,13 @@ DROP TABLE IF EXISTS silver.stg_shopee_products;
 CREATE TABLE silver.stg_shopee_products (
     shop_account text NOT NULL, item_id bigint NOT NULL, brand text NOT NULL,
     item_name text, item_sku text, item_status text, is_kit boolean,
-    is_fulfillment_by_shopee boolean NOT NULL,
+    is_fulfillment_by_shopee boolean NOT NULL, ingested_at timestamptz NOT NULL,
     PRIMARY KEY (shop_account, item_id));
 DROP TABLE IF EXISTS silver.stg_shopee_orders;
 CREATE TABLE silver.stg_shopee_orders (
     shop_account text NOT NULL, order_sn text NOT NULL, order_status text,
-    created_date_brt date NOT NULL, PRIMARY KEY (shop_account, order_sn));
+    created_date_brt date NOT NULL, ingested_at timestamptz NOT NULL,
+    PRIMARY KEY (shop_account, order_sn));
 DROP TABLE IF EXISTS silver.stg_shopee_order_items;
 CREATE TABLE silver.stg_shopee_order_items (
     shop_account text NOT NULL, order_sn text NOT NULL,
@@ -122,8 +124,8 @@ def _semear_fonte(conn) -> None:
              "t": f"{hoje} 08:00:00-03"})
         conn.execute(text(
             "INSERT INTO silver.stg_shopee_products VALUES "
-            "(:c,:i,:b,:n,:k,'NORMAL',:kit,TRUE)"),
-            {"c": conta, "i": item_id, "b": conta,
+            "(:c,:i,:b,:n,:k,'NORMAL',:kit,TRUE,:t)"),
+            {"c": conta, "i": item_id, "b": conta, "t": f"{hoje} 08:00:00-03",
              "n": f"Produto Sintetico {i:03d}", "k": f"SKU-{i:05d}",
              "kit": is_kit})
 
@@ -133,8 +135,9 @@ def _semear_fonte(conn) -> None:
                 sn = f"ORD-{item_id}-{d}"
                 conn.execute(text(
                     "INSERT INTO silver.stg_shopee_orders VALUES "
-                    "(:c,:s,'completed',:d)"),
-                    {"c": conta, "s": sn, "d": hoje - timedelta(days=d)})
+                    "(:c,:s,'completed',:d,:t)"),
+                    {"c": conta, "s": sn, "d": hoje - timedelta(days=d),
+                     "t": f"{hoje} 08:00:00-03"})
                 conn.execute(text(
                     "INSERT INTO silver.stg_shopee_order_items VALUES "
                     "(:c,:s,:i,:q)"),
@@ -196,6 +199,10 @@ def _locks_advisory(eng) -> int:
 # 1. O defeito: o padrao anterior levanta InvalidRequestError
 # ===========================================================================
 
+@pytest.mark.skipif(
+    int(sqlalchemy.__version__.split(".")[0]) < 2,
+    reason="o defeito e' do SQLAlchemy 2.x; o 1.4 (imagem do Airflow) aceita "
+           "o begin() aninhado com aviso, e o caminho corrigido roda nos dois")
 def test_padrao_anterior_levanta_invalid_request_error(banco):
     """Reproduz o limite transacional que quebrou o primeiro `--apply`.
 
@@ -432,11 +439,12 @@ def test_lock_liberado_na_falha(banco, monkeypatch):
 
 def test_lock_ocupado_recusa_a_execucao(banco):
     """Prova que o lock e' REALMENTE tomado: sem isso, 'liberado' e' trivial."""
+    # Lock de SESSAO: vale sem commit, e sem `Connection.commit()` -- que nao
+    # existe no SQLAlchemy 1.4 da imagem do Airflow.
     outro = banco.connect()
     try:
         outro.execute(text("SELECT pg_advisory_lock(:k)"),
                       {"k": P.ADVISORY_LOCK_KEY})
-        outro.commit()
         with pytest.raises(P.ConcurrentRunError):
             P.run(apply=True)
         # E nada foi publicado enquanto a chave estava com outro dono.
@@ -444,7 +452,6 @@ def test_lock_ocupado_recusa_a_execucao(banco):
     finally:
         outro.execute(text("SELECT pg_advisory_unlock(:k)"),
                       {"k": P.ADVISORY_LOCK_KEY})
-        outro.commit()
         outro.close()
 
 
@@ -596,3 +603,149 @@ def test_limiares_provisorios_nao_mudaram(banco):
                or cl in ("SUFICIENTE", "SEM_DEMANDA_MEDIDA",
                          "KIT_NAO_CONCILIADO")
                for cl in res["por_classificacao"])
+
+
+# ===========================================================================
+# 7. Portao de frescor da fonte (STOCK-DAILY-SHOPEE-TIKTOK-1)
+# ===========================================================================
+# Cada cenario estraga UMA condicao numa fonte que, sem o estrago, publica (a
+# fixture inteira passa no portao: ver test_apply_publica_...). Em todos, o
+# desfecho tem de ser o mesmo: recusa ANTES de qualquer escrita -- zero linha,
+# zero auditoria aberta, zero lock -- e codigo de saida 4 no CLI.
+
+ONTEM_NOITE = "{ontem} 20:00:00-03"
+
+
+def _estragar(banco, sql: str) -> None:
+    ontem = P._hoje_brt() - timedelta(days=1)
+    with banco.begin() as c:
+        c.execute(text(sql.format(ontem=ontem)))
+
+
+def _nada_aconteceu(banco) -> None:
+    c = _contagens(banco)
+    assert c["loc_linhas"] == 0 and c["prod_linhas"] == 0
+    assert _auditoria(banco) == [], "recusa do portao nao abre auditoria"
+    assert _locks_advisory(banco) == 0
+
+
+CENARIOS_FONTE_NAO_PRONTA = {
+    # DAG do catalogo falhou para UMA conta: raw e Silver dela sao de ontem.
+    "catalogo_de_ontem_numa_conta": (
+        "UPDATE raw.shopee_products SET ingested_at = '" + ONTEM_NOITE + "' "
+        "WHERE shop_account = 'barbours';"
+        "UPDATE silver.stg_shopee_products SET ingested_at = '" + ONTEM_NOITE + "' "
+        "WHERE shop_account = 'barbours'",
+        "barbours: catalogo FBS capturado"),
+    # Catalogo gravou, dbt nao rodou: a Silver ficou na versao anterior.
+    "silver_nao_reconstruida": (
+        "UPDATE silver.stg_shopee_products SET ingested_at = '" + ONTEM_NOITE + "' "
+        "WHERE shop_account = 'apice'",
+        "apice: "),
+    # Pedidos pararam ontem a noite: D-1 incompleto infla a cobertura.
+    "pedidos_parados": (
+        "UPDATE silver.stg_shopee_orders SET ingested_at = '" + ONTEM_NOITE + "' "
+        "WHERE shop_account = 'rituaria'",
+        "rituaria: ultima ingestao de pedidos"),
+    # Conta inteira sem FBS: ausencia nao pode virar fotografia sem a conta.
+    "conta_sem_fbs": (
+        "UPDATE silver.stg_shopee_products SET is_fulfillment_by_shopee = FALSE "
+        "WHERE shop_account = 'lescent'",
+        "lescent: nenhum produto FBS"),
+    # Produto FBS sem stock_info sairia da fotografia em silencio.
+    "fbs_sem_stock_info": (
+        "UPDATE raw.shopee_products SET stock_info = NULL "
+        "WHERE item_id = (SELECT MIN(item_id) FROM raw.shopee_products)",
+        "sem stock_info"),
+}
+
+
+@pytest.mark.parametrize("cenario", sorted(CENARIOS_FONTE_NAO_PRONTA))
+def test_portao_recusa_antes_de_qualquer_escrita(banco, cenario):
+    sql, trecho = CENARIOS_FONTE_NAO_PRONTA[cenario]
+    _estragar(banco, sql)
+    with pytest.raises(P.FonteNaoProntaError, match=re.escape(trecho)):
+        P.run(apply=True)
+    _nada_aconteceu(banco)
+
+
+def test_portao_recusa_tambem_no_dry_run(banco):
+    """O ensaio diario precisa reprovar pelo MESMO motivo que o apply."""
+    _estragar(banco, CENARIOS_FONTE_NAO_PRONTA["pedidos_parados"][0])
+    with pytest.raises(P.FonteNaoProntaError):
+        P.run(apply=False)
+
+
+def test_portao_recusado_preserva_a_fotografia_anterior(banco):
+    """Recusa nao apaga nada: a tela continua na ultima fotografia, com a data dela."""
+    P.run(apply=True)
+    antes = _contagens(banco)
+    _estragar(banco, CENARIOS_FONTE_NAO_PRONTA["catalogo_de_ontem_numa_conta"][0])
+    with pytest.raises(P.FonteNaoProntaError):
+        P.run(apply=True)
+    assert _contagens(banco) == antes
+
+
+def test_resumo_registra_a_evidencia_do_portao(banco):
+    res = P.run(apply=True)
+    contas = res["portao_fonte"]["contas"]
+    assert [c["shop_account"] for c in contas] == list(P.CONTAS_ESPERADAS)
+    assert all(c["silver_divergente"] == 0 and c["fbs_sem_stock_info"] == 0
+               for c in contas)
+    assert sum(c["produtos_fbs"] for c in contas) == TOTAL_PRODUTOS
+
+
+# --- codigos de saida do CLI: o que o agendador le --------------------------
+
+def test_cli_sai_0_ao_publicar(banco, capsys):
+    assert P.main(["--apply"]) == P.EXIT_OK
+    assert _contagens(banco)["prod_linhas"] == TOTAL_PRODUTOS
+
+
+def test_cli_sai_4_com_fonte_nao_pronta(banco):
+    _estragar(banco, CENARIOS_FONTE_NAO_PRONTA["catalogo_de_ontem_numa_conta"][0])
+    assert P.main(["--apply"]) == P.EXIT_FONTE_NAO_PRONTA
+    _nada_aconteceu(banco)
+
+
+def test_cli_sai_3_com_lock_ocupado(banco):
+    outro = banco.connect()
+    try:
+        outro.execute(text("SELECT pg_advisory_lock(:k)"),
+                      {"k": P.ADVISORY_LOCK_KEY})
+        assert P.main(["--apply"]) == P.EXIT_LOCK
+        assert _contagens(banco)["prod_linhas"] == 0
+        # A tentativa abriu auditoria e a FECHOU em failed: nada fica running.
+        assert [a["status"] for a in _auditoria(banco)] == ["failed"]
+    finally:
+        outro.execute(text("SELECT pg_advisory_unlock(:k)"),
+                      {"k": P.ADVISORY_LOCK_KEY})
+        outro.close()
+
+
+def test_cli_sai_1_em_erro_inesperado_sem_vazar_dsn(banco, monkeypatch, caplog):
+    segredo = "SenhaQueNaoPodeVazar"
+    monkeypatch.setattr(P, "_inserir", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError(f"caiu em postgresql://u:{segredo}@host:5432/db")))
+    assert P.main(["--apply"]) == P.EXIT_FALHA
+    assert "RuntimeError" in caplog.text, "o erro tem de ser registrado"
+    assert segredo not in caplog.text
+    assert [a["status"] for a in _auditoria(banco)] == ["failed"]
+
+
+def test_regime_nao_conciliado_bloqueia_sem_escrever(banco):
+    """Reproduz o payload de 2026-10-21: uma conta inteira com if_saleable=false."""
+    _sql_regime = """
+        UPDATE raw.shopee_products r
+           SET stock_info = jsonb_set(r.stock_info, '{shopee_stock}', (
+               SELECT jsonb_agg(jsonb_set(e, '{if_saleable}', 'false'::jsonb))
+                 FROM jsonb_array_elements(r.stock_info->'shopee_stock') e))
+         WHERE r.shop_account = 'barbours'"""
+    with banco.begin() as c:
+        c.execute(text(_sql_regime))
+    assert P.main(["--apply"]) == P.EXIT_FALHA
+    c = _contagens(banco)
+    assert c["loc_linhas"] == 0 and c["prod_linhas"] == 0
+    assert _auditoria(banco) == [], "a trava roda antes de abrir auditoria"
+    with pytest.raises(P.ShopeeStockSyncError, match="REGIME NAO CONCILIADO em barbours"):
+        P.run(apply=False)
