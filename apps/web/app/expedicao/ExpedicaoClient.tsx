@@ -109,6 +109,13 @@ import {
   type Situacao,
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import LayoutExpedicao, {
+  CLASSE_CABECALHO,
+  CLASSE_RAIZ_EXPEDICAO,
+  CLASSE_TABELA,
+  CorpoGestor,
+} from "@/components/expedicao/LayoutExpedicao";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import {
   OPCAO_PERSONALIZADA,
   REGRA_JANELA,
@@ -178,11 +185,8 @@ const COR_BADGE: Record<string, string> = {
   unavailable: "bg-raised text-ink-muted ring-line-strong",
 };
 
-/** Classe comum das tabelas densas da tela. */
-const CLASSE_TABELA =
-  "w-full text-[13px] [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4";
-const CLASSE_CABECALHO =
-  "sticky top-0 z-10 bg-surface text-left text-xs uppercase tracking-wide text-ink-faint";
+// T-0010: CLASSE_TABELA e CLASSE_CABECALHO vem do esqueleto comum
+// (`LayoutExpedicao`), o mesmo do TikTok.
 
 // O `GrupoRadio` que morava aqui saiu no EXPEDICAO-UX-UNIFICADA-1. Ele so'
 // existia porque os testes liam este arquivo procurando os atributos ARIA; com
@@ -552,6 +556,10 @@ export default function ExpedicaoClient({
   const mostrarRef = mostrarColunaReferencia(dados?.queue ?? []);
   const pag = paginaAtual(dados?.pagination ?? null);
   const temPrazo = canalTemPrazo(filtros.channel);
+
+  // Nova tentativa: um objeto de filtros novo, com a MESMA chave, refaz a
+  // busca (o efeito depende de `filtros`) sem mudar a requisicao.
+  const tentarDeNovo = useCallback(() => setFiltros((f) => ({ ...f })), []);
 
   const alternarSituacao = useCallback((s: Situacao) => {
     setFiltros((f) =>
@@ -1218,86 +1226,72 @@ export default function ExpedicaoClient({
   // `main` quebram a navegacao por landmarks no leitor de tela — mesmo
   // motivo do `h2` no cabecalho compartilhado.
   return (
-    <div
-      className="mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4"
-      aria-busy={carregando}
+    // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
+    <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={carregando}>
+    <LayoutExpedicao
+      // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
+      // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
+      // outra foi o defeito que o EXP-3C2-R/V corrigiu.
+      cabecalho={
+        <CabecalhoExpedicao
+          canal={ROTULO_CANAL[filtros.channel]}
+          seletorCanal={seletorCanal}
+          fotografia={fotografia}
+          visao={visao}
+          aoTrocarVisao={aoTrocarVisao}
+          definicao={DEFINICAO_FILA[filtros.channel]}
+          filtroMarca={
+            aoTrocarMarca ? (
+              <SeletorMarca marca={marcaAtiva} marcasPresentes={marcasPresentes} aoTrocar={aoTrocarMarca} />
+            ) : undefined
+          }
+        />
+      }
+      // 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada)
+      qualidade={<BarraDeQualidade barra={qualidade} />}
+      // Os estados sao os MESMOS componentes do TikTok (T-0010).
+      estado={
+        <>
+          {estado === "carregando" && <StateBlock tipo="carregando" titulo="Carregando fotografia…" />}
+          {estado === "canal_desligado" && (
+            <StateBlock
+              tipo="indisponivel"
+              titulo="Este canal ainda não está disponível na API."
+              descricao="A fotografia existe, mas a exposição depende de uma ativação coordenada."
+            />
+          )}
+          {estado === "indisponivel_backend" && (
+            <StateBlock tipo="indisponivel" titulo="A API de Expedição está desligada. Nada a exibir." />
+          )}
+          {estado === "sem_snapshot" && (
+            <StateBlock tipo="indisponivel" titulo="Nenhuma fotografia publicada ainda." />
+          )}
+          {estado === "batch_inconsistente" && (
+            <StateBlock
+              tipo="erro"
+              titulo="A fotografia está inconsistente e não pode ser exibida."
+              descricao="Nenhum número parcial é mostrado de propósito."
+            />
+          )}
+          {estado === "erro_validacao" && (
+            <StateBlock tipo="erro" titulo="Filtro inválido. Ajuste a seleção e tente novamente." />
+          )}
+          {estado === "erro" && (
+            <StateBlock
+              tipo="erro"
+              titulo="Não foi possível carregar a Expedição agora."
+              acao={<RetryButton onClick={tentarDeNovo} />}
+            />
+          )}
+          {estado === "fotografia_vazia" && (
+            <StateBlock
+              tipo="vazio"
+              titulo="Backlog zerado nesta fotografia. Nenhum pedido aguardando expedição."
+            />
+          )}
+        </>
+      }
     >
-      {/* 1-2. CABECALHO, FOTOGRAFIA E FRESCOR (compartilhado) ------------ */}
-      {/* O canal fica NO TITULO, nao so' no seletor: numeros de uma loja sob
-          o titulo de outra foi exatamente o defeito que o EXP-3C2-R/V
-          corrigiu, e o titulo e' o ultimo lugar que o operador confere. */}
-      <CabecalhoExpedicao
-        canal={ROTULO_CANAL[filtros.channel]}
-        seletorCanal={seletorCanal}
-        fotografia={fotografia}
-        visao={visao}
-        aoTrocarVisao={aoTrocarVisao}
-        definicao={DEFINICAO_FILA[filtros.channel]}
-        filtroMarca={
-          aoTrocarMarca ? (
-            <SeletorMarca marca={marcaAtiva} marcasPresentes={marcasPresentes} aoTrocar={aoTrocarMarca} />
-          ) : undefined
-        }
-      />
-
-      {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
-      <BarraDeQualidade barra={qualidade} />
-
-      {estado === "carregando" && (
-        <p role="status" className="text-sm text-ink-muted">
-          Carregando fotografia…
-        </p>
-      )}
-      {estado === "canal_desligado" && (
-        <p
-          role="status"
-          className="rounded-xl border border-line bg-surface px-4 py-6 text-sm text-ink-muted"
-        >
-          Este canal ainda não está disponível na API. A fotografia existe, mas a
-          exposição depende de uma ativação coordenada.
-        </p>
-      )}
-      {estado === "indisponivel_backend" && (
-        <p role="alert" className="rounded-xl border border-line bg-surface p-4 text-sm text-ink">
-          A API de Expedição está desligada. Nada a exibir.
-        </p>
-      )}
-      {estado === "sem_snapshot" && (
-        <p role="alert" className="rounded-xl border border-line bg-surface p-4 text-sm text-ink">
-          Nenhuma fotografia publicada ainda.
-        </p>
-      )}
-      {estado === "batch_inconsistente" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          A fotografia está inconsistente e não pode ser exibida. Nenhum número
-          parcial é mostrado de propósito.
-        </p>
-      )}
-      {estado === "erro_validacao" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          Filtro inválido. Ajuste a seleção e tente novamente.
-        </p>
-      )}
-      {estado === "erro" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          Não foi possível carregar a Expedição agora.
-        </p>
-      )}
-      {estado === "fotografia_vazia" && (
-        <p role="status" className="rounded-xl border border-ok/35 bg-ok-soft p-4 text-sm text-ok-ink">
-          Backlog zerado nesta fotografia. Nenhum pedido aguardando expedição.
-        </p>
-      )}
-
       {/* Marca escolhida sem conta neste canal: ausencia, nao backlog zero. */}
       {(estado === "ok" || estado === "fila_vazia_por_filtro") && recorte.semConta ? (
         <p role="status" className="rounded-xl border border-dashed border-line-strong bg-surface p-4 text-sm text-ink-muted">
@@ -1309,20 +1303,22 @@ export default function ExpedicaoClient({
       ) : null}
       {(estado === "ok" || estado === "fila_vazia_por_filtro") && !recorte.semConta &&
         (visao === "gestor" ? (
-          <>
-            {/* RISCO ATUAL -> PRAZO -> EVOLUCAO -> CONCENTRACAO, a mesma
-                ordem dos tres canais (EXPEDICAO-UX-3). */}
-            {secaoRisco}
-            {secaoPrazo}
-            {painelEvolucao}
-            {painelContas("")}
-            {aoTrocarVisao && (
-              <ConviteAoDetalhe
-                conteudo="Fila de pedidos com filtros, os mais críticos, os indicadores secundários e a fonte por marca ficam no detalhe operacional."
-                aoAbrir={() => aoTrocarVisao("detalhe")}
-              />
-            )}
-          </>
+          // RISCO ATUAL -> PRAZO -> JORNADA -> EVOLUCAO -> CONCENTRACAO: a
+          // ordem e' do esqueleto, a mesma dos tres canais.
+          <CorpoGestor
+            risco={secaoRisco}
+            prazo={secaoPrazo}
+            evolucao={painelEvolucao}
+            concentracao={painelContas("")}
+            convite={
+              aoTrocarVisao && (
+                <ConviteAoDetalhe
+                  conteudo="Fila de pedidos com filtros, os mais críticos, os indicadores secundários e a fonte por marca ficam no detalhe operacional."
+                  aoAbrir={() => aoTrocarVisao("detalhe")}
+                />
+              )
+            }
+          />
         ) : (
           <>
             {faixaPrincipal}
@@ -1339,6 +1335,7 @@ export default function ExpedicaoClient({
             {painelFonte}
           </>
         ))}
+    </LayoutExpedicao>
     </div>
   );
 }

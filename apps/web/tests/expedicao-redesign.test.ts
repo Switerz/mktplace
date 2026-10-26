@@ -661,7 +661,9 @@ test("as colunas das tabelas tem respiro horizontal", () => {
   // e essa string precisa conter a regra. E' estritamente mais forte que a
   // contagem — uma quinta tabela com classe propria e sem `pr-4` reprova.
   const constantes = new Map<string, string>();
-  for (const m of CLIENTE.matchAll(/const (CLASSE_\w+)\s*=\s*\r?\n?\s*"([^"]*)";/g)) {
+  // T-0010: as constantes de tabela moram no esqueleto comum (LayoutExpedicao).
+  const LAYOUT = readFileSync(join(RAIZ, "src/components/expedicao/LayoutExpedicao.tsx"), "utf8");
+  for (const m of (CLIENTE + LAYOUT).matchAll(/const (CLASSE_\w+)\s*=\s*\r?\n?\s*"([^"]*)";/g)) {
     constantes.set(m[1], m[2]);
   }
 
@@ -673,6 +675,6 @@ test("as colunas das tabelas tem respiro horizontal", () => {
   assert.equal(classes.length, tabelas, "toda tabela precisa declarar className");
   assert.ok(tabelas >= 4, `esperava as quatro tabelas da tela, achei ${tabelas}`);
   for (const c of classes) {
-    assert.ok(c.includes("[&_td]:pr-4"), `tabela sem respiro horizontal: ${c}`);
+    assert.ok(/\[&_td\]:(pr-4|px-3)/.test(c), `tabela sem respiro horizontal: ${c}`);
   }
 });

@@ -59,6 +59,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import LayoutExpedicao, {
+  CLASSE_CABECALHO,
+  CLASSE_RAIZ_EXPEDICAO,
+  CLASSE_TABELA,
+  CorpoGestor,
+} from "@/components/expedicao/LayoutExpedicao";
 import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import {
   AtencaoAgora,
@@ -163,10 +169,7 @@ const TEXTO_SEVERIDADE: Record<Severidade, string> = {
   parcial: "text-ink-faint",
 };
 
-const CLASSE_TABELA =
-  "w-full text-[13px] [&_td]:py-1.5 [&_td]:px-3 [&_th]:py-1.5 [&_th]:px-3";
-const CLASSE_CABECALHO =
-  "sticky top-0 z-10 bg-raised text-left text-xs uppercase tracking-wide text-ink-faint";
+// T-0010: CLASSE_TABELA e CLASSE_CABECALHO vem do esqueleto comum.
 
 const COLUNAS_MARCA: Record<string, SortColumnType> = {
   loja: "text",
@@ -763,92 +766,91 @@ export default function TikTokDispatchPanel({
   );
 
   return (
-    <div
-      className="mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4"
-      aria-busy={estado === "carregando"}
-    >
-      {/* 1-2. CABECALHO, FOTOGRAFIA E FRESCOR (compartilhado) ------------ */}
-      <CabecalhoExpedicao
-        canal="TikTok Shop"
-        seletorCanal={seletorCanal}
-        fotografia={fotografia}
-        visao={visao}
-        aoTrocarVisao={aoTrocarVisao}
-        controles={controles}
-        definicao={DEFINICAO_TIKTOK}
-        filtroMarca={
-          aoTrocarMarca ? (
-            <SeletorMarca
-              marca={marca}
-              marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
-              aoTrocar={aoTrocarMarca}
+    // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
+    <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={estado === "carregando"}>
+    <LayoutExpedicao
+      // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado)
+      cabecalho={
+        <CabecalhoExpedicao
+          canal="TikTok Shop"
+          seletorCanal={seletorCanal}
+          fotografia={fotografia}
+          visao={visao}
+          aoTrocarVisao={aoTrocarVisao}
+          controles={controles}
+          definicao={DEFINICAO_TIKTOK}
+          filtroMarca={
+            aoTrocarMarca ? (
+              <SeletorMarca
+                marca={marca}
+                marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
+                aoTrocar={aoTrocarMarca}
+              />
+            ) : undefined
+          }
+        />
+      }
+      avisos={
+        <>
+          {seletor === OPCAO_PERSONALIZADA ? (
+            <JanelaPersonalizada max={REGRA.max} diasAplicados={dias} aoAplicar={aplicarJanela} />
+          ) : null}
+          {janelaDescartada ? (
+            <Note tom="atencao" papel="status">
+              A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
+            </Note>
+          ) : null}
+        </>
+      }
+      // 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada)
+      qualidade={<BarraDeQualidade barra={barra} />}
+      // Erro, ausencia e serie vencida sao estados DIFERENTES: erro e' a carga
+      // que falhou agora (com nova tentativa); ausencia e' nao haver serie
+      // nenhuma (nunca 0%); serie vencida e' dado que existe, velho, e aparece
+      // no selo do cabecalho e na barra de qualidade.
+      estado={
+        <>
+          {estado === "carregando" ? <StateBlock tipo="carregando" titulo="Carregando a série…" /> : null}
+          {estado === "erro" ? (
+            <StateBlock
+              tipo="erro"
+              titulo="Não foi possível carregar a série."
+              descricao={erro ? `Falha: ${erro}.` : undefined}
+              acao={<RetryButton onClick={() => void carregar()} />}
             />
-          ) : undefined
-        }
-      />
-
-      {seletor === OPCAO_PERSONALIZADA ? (
-        <JanelaPersonalizada max={REGRA.max} diasAplicados={dias} aoAplicar={aplicarJanela} />
-      ) : null}
-
-      {janelaDescartada ? (
-        <Note tom="atencao" papel="status">
-          A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
-        </Note>
-      ) : null}
-
-      {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
-      <BarraDeQualidade barra={barra} />
-
-      {estado === "carregando" ? (
-        <p role="status" className="py-8 text-center text-sm text-ink-muted">
-          Carregando a série…
-        </p>
-      ) : null}
-
-      {/* Erro, ausencia e serie vencida sao estados DIFERENTES: erro e' a
-          carga que falhou agora (com nova tentativa); ausencia e' nao haver
-          serie nenhuma (nunca 0%); serie vencida e' dado que existe, velho,
-          e aparece no selo do cabecalho e na barra de qualidade. */}
-      {estado === "erro" ? (
-        <StateBlock
-          tipo="erro"
-          titulo="Não foi possível carregar a série."
-          descricao={erro ? `Falha: ${erro}.` : undefined}
-          acao={<RetryButton onClick={() => void carregar()} />}
-        />
-      ) : null}
-
-      {estado === "ok" && dados?.availability === "unavailable" ? (
-        <StateBlock
-          tipo="indisponivel"
-          titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
-          descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
-        />
-      ) : null}
-
+          ) : null}
+          {estado === "ok" && dados?.availability === "unavailable" ? (
+            <StateBlock
+              tipo="indisponivel"
+              titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
+              descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
+            />
+          ) : null}
+        </>
+      }
+    >
       {estado === "ok" && dados?.availability === "available" && ldr ? (
         visao === "gestor" ? (
-          <>
-            {/* RISCO ATUAL -> PRAZO (LDR) -> EVOLUCAO -> CONCENTRACAO, a
-                mesma ordem dos tres canais (EXPEDICAO-UX-3). */}
-            {secaoRisco}
-            {secaoLdr}
-            {/* 6. QUANDO COMECOU ----------------------------------------- */}
-            {painelEvolucao}
-            {/* 7. ONDE CONCENTRA ----------------------------------------- */}
-            {painelLojas("")}
-            {aoTrocarVisao ? (
-              <ConviteAoDetalhe
-                conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
-                aoAbrir={() => aoTrocarVisao("detalhe")}
-              />
-            ) : null}
-          </>
+          // RISCO ATUAL -> PRAZO (LDR) -> JORNADA -> EVOLUCAO -> CONCENTRACAO:
+          // a ordem e' do esqueleto, a mesma dos tres canais.
+          <CorpoGestor
+            risco={secaoRisco}
+            prazo={secaoLdr}
+            evolucao={painelEvolucao}
+            concentracao={painelLojas("")}
+            convite={
+              aoTrocarVisao ? (
+                <ConviteAoDetalhe
+                  conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
+                  aoAbrir={() => aoTrocarVisao("detalhe")}
+                />
+              ) : null
+            }
+          />
         ) : (
           <>
             {secaoLdr}
-            {/* 8. DETALHE: coorte, loja e fluxo ------------------------ */}
+            {/* DETALHE: coorte, loja e fluxo */}
             {painelCoortes}
             <div className="grid gap-3 lg:grid-cols-5">
               {painelLojas("lg:col-span-2")}
@@ -857,6 +859,7 @@ export default function TikTokDispatchPanel({
           </>
         )
       ) : null}
+    </LayoutExpedicao>
     </div>
   );
 }

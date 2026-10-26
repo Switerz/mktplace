@@ -650,8 +650,12 @@ test("botoes de filtro anunciam estado por aria-pressed", () => {
 
 test("estados de carga e erro sao anunciados por role", () => {
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok((tela.match(/role="status"/g) ?? []).length >= 3);
-  assert.ok((tela.match(/role="alert"/g) ?? []).length >= 3);
+  // T-0010: os estados usam o StateBlock (role="alert" no tipo "erro",
+  // role="status" nos demais), o mesmo componente do TikTok.
+  const status = (tela.match(/role="status"|<StateBlock\s+tipo="(carregando|vazio|indisponivel)"/g) ?? []).length;
+  const alerta = (tela.match(/role="alert"|<StateBlock\s+tipo="erro"/g) ?? []).length;
+  assert.ok(status >= 3, `status: ${status}`);
+  assert.ok(alerta >= 3, `alert: ${alerta}`);
   assert.match(tela, /aria-busy=\{carregando\}/);
 });
 
