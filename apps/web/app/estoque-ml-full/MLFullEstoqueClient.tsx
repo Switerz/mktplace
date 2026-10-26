@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import KpiCard from "@/components/KpiCard";
+import TableScrollHint from "@/components/TableScrollHint";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import { MLFullEstoqueError, fetchMLFullEstoque } from "@/lib/api-client";
@@ -34,25 +35,33 @@ import {
   AVISO_TRANSFER_ML,
   CLASS_LABEL_ML,
   CLASS_TOM_ML,
+  ERRO_DATA_FUTURA_ML,
   FILTROS_ML_VAZIOS,
   MARCAS_ML,
+  PREFIXO_PARCIAL_ML,
   PROXIMO_PASSO_ML,
   SEM_DADO,
   TITULO_INDISPONIVEL_ML,
   buildQueryML,
   coberturaMarcasLabel,
   eDataHistorica,
+  eErroDataFuturaML,
   fmtCobertura,
   fmtData,
   fmtDecimal,
   fmtFracao,
   fmtInt,
   fmtOpcional,
-  fotografiaVelhaML,
   frescorLabelML,
+  hojeSaoPauloML,
   isIndisponivelML,
   leituraLabel,
+  mostrarAvisoVelhaML,
+  motivoParcialLegivel,
+  subtituloTransferML,
+  subvalorContagemML,
   temFiltroAtivoML,
+  textoVazioML,
   tituloMarca,
   type ClassificacaoML,
   type FiltrosML,
@@ -126,136 +135,178 @@ function Etiqueta({ classe }: { classe: ClassificacaoML }) {
   );
 }
 
+/**
+ * Alvo de foco por teclado da tabela larga. Fica DENTRO do container rolavel
+ * do `TableScrollHint` (compartilhado, sem props de foco): com o foco aqui,
+ * as setas rolam o ancestral rolavel e o leitor de tela anuncia a regiao.
+ */
+function RegiaoRolavel({
+  rotulo,
+  children,
+}: {
+  rotulo: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      tabIndex={0}
+      role="region"
+      aria-label={rotulo}
+      className="min-w-max rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500"
+    >
+      {children}
+    </div>
+  );
+}
+
 /** Cobertura por marca: com fotografia, sem fotografia (ausencia), leitura. */
 function TabelaMarcas({ marcas }: { marcas: MarcaML[] }) {
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
-      <table className="w-full text-sm">
-        <caption className="sr-only">Cobertura e estoque Full por marca</caption>
-        <thead>
-          <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
-            <th scope="col" className="px-4 py-3">Marca</th>
-            <th scope="col" className="px-4 py-3">Fotografia</th>
-            <th scope="col" className="px-4 py-3 text-right">Disponível Full</th>
-            <th scope="col" className="px-4 py-3 text-right">Inventários lidos</th>
-            <th scope="col" className="px-4 py-3 text-right">Sem leitura</th>
-            <th scope="col" className="px-4 py-3 text-right">Compartilhados</th>
-            <th scope="col" className="px-4 py-3 text-right">Vendas alocadas</th>
-          </tr>
-        </thead>
-        <tbody>
-          {marcas.map((m) => (
-            <tr key={m.brand} className="border-b border-slate-100 last:border-0">
-              <td className="px-4 py-3 font-medium text-slate-900">{tituloMarca(m.brand)}</td>
-              <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
-                {m.tem_fotografia_no_dia ? (
-                  fmtData(m.ultima_fotografia)
-                ) : (
-                  <span className="text-amber-800">
-                    Sem fotografia no dia
-                    {m.ultima_fotografia
-                      ? ` (última: ${fmtData(m.ultima_fotografia)})`
-                      : " (nunca publicada)"}
-                  </span>
-                )}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
-                {fmtOpcional(m.disponivel_full)}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {m.leitura
-                  ? `${fmtInt(m.leitura.inventarios_lidos)} de ${fmtInt(m.leitura.inventarios)}`
-                  : SEM_DADO}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {m.leitura ? fmtInt(m.leitura.inventarios_sem_leitura) : SEM_DADO}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {fmtOpcional(m.inventarios_compartilhados)}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {fmtFracao(m.cobertura_da_alocacao)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+      <TableScrollHint>
+        <RegiaoRolavel rotulo="Cobertura por marca (role na horizontal para ver todas as colunas)">
+          <table className="w-full text-sm">
+            <caption className="sr-only">Cobertura e estoque Full por marca</caption>
+            <thead>
+              <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
+                <th scope="col" className="px-4 py-3">Marca</th>
+                <th scope="col" className="px-4 py-3">Fotografia</th>
+                <th scope="col" className="px-4 py-3 text-right">Disponível Full</th>
+                <th scope="col" className="px-4 py-3 text-right">Inventários lidos</th>
+                <th scope="col" className="px-4 py-3 text-right">Sem leitura</th>
+                <th scope="col" className="px-4 py-3 text-right">Compartilhados</th>
+                <th scope="col" className="px-4 py-3 text-right">Vendas alocadas</th>
+              </tr>
+            </thead>
+            <tbody>
+              {marcas.map((m) => (
+                <tr key={m.brand} className="border-b border-slate-100 last:border-0">
+                  <td className="px-4 py-3 font-medium text-slate-900">{tituloMarca(m.brand)}</td>
+                  <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
+                    {m.tem_fotografia_no_dia ? (
+                      fmtData(m.ultima_fotografia)
+                    ) : (
+                      <span className="text-amber-800">
+                        Sem fotografia no dia
+                        {m.ultima_fotografia
+                          ? ` (última: ${fmtData(m.ultima_fotografia)})`
+                          : " (nunca publicada)"}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
+                    {fmtOpcional(m.disponivel_full)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {m.leitura
+                      ? `${fmtInt(m.leitura.inventarios_lidos)} de ${fmtInt(m.leitura.inventarios)}`
+                      : SEM_DADO}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {m.leitura ? fmtInt(m.leitura.inventarios_sem_leitura) : SEM_DADO}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {fmtOpcional(m.inventarios_compartilhados)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {fmtFracao(m.cobertura_da_alocacao)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </RegiaoRolavel>
+      </TableScrollHint>
     </div>
   );
 }
 
 function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
-      <table className="w-full text-sm">
-        <caption className="sr-only">
-          Estoque Full por inventário, ordenado por urgência de reposição
-        </caption>
-        <thead>
-          <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
-            <th scope="col" className="px-4 py-3">Marca</th>
-            <th scope="col" className="px-4 py-3 text-right">Disponível</th>
-            <th scope="col" className="px-4 py-3 text-right">Não disponível</th>
-            <th scope="col" className="px-4 py-3 text-right">Demanda 28d</th>
-            <th scope="col" className="px-4 py-3 text-right">Cobertura da Torre</th>
-            <th scope="col" className="px-4 py-3">Classificação</th>
-            <th scope="col" className="px-4 py-3 text-right">Anúncios</th>
-          </tr>
-        </thead>
-        <tbody>
-          {/* key = ordinal da resposta: o ID do inventario nao sai na API publica. */}
-          {inventarios.map((i) => (
-            <tr
-              key={i.posicao}
-              className="border-b border-slate-100 last:border-0 align-top"
-            >
-              <td className="px-4 py-3 whitespace-nowrap text-slate-600">{tituloMarca(i.brand)}</td>
-              <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
-                {/* `null` = sem leitura: travessao, nunca 0. */}
-                {fmtOpcional(i.disponivel)}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {fmtOpcional(i.nao_disponivel)}
-                {i.transfer !== null && i.transfer > 0 && (
-                  <span className="block text-xs text-slate-500">
-                    {fmtInt(i.transfer)} em transferência
-                  </span>
-                )}
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {fmtInt(i.unidades_28d)}
-                <span className="block text-xs text-slate-500">
-                  {fmtDecimal(i.media_diaria_28d)}/dia
-                </span>
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-700">
-                {fmtCobertura(i.cobertura_torre_dias)}
-              </td>
-              <td className="px-4 py-3">
-                <Etiqueta classe={i.classificacao_torre} />
-              </td>
-              <td className="px-4 py-3 text-right tabular-nums text-slate-600">
-                {/* ASSOCIACAO, nao estoque: nunca multiplica o disponivel. */}
-                {fmtInt(i.anuncios)}
-                {i.compartilhado && (
-                  <span className="block text-xs text-slate-500">compartilhado</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+      <TableScrollHint>
+        <RegiaoRolavel rotulo="Inventários (role na horizontal para ver todas as colunas)">
+          <table className="w-full text-sm">
+            <caption className="sr-only">
+              Estoque Full por inventário, ordenado por urgência de reposição
+            </caption>
+            <thead>
+              <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
+                <th scope="col" className="px-4 py-3">Marca</th>
+                <th scope="col" className="px-4 py-3 text-right">Disponível</th>
+                <th scope="col" className="px-4 py-3 text-right">Não disponível</th>
+                <th scope="col" className="px-4 py-3 text-right">Demanda 28d</th>
+                <th scope="col" className="px-4 py-3 text-right">Cobertura da Torre</th>
+                <th scope="col" className="px-4 py-3">Classificação</th>
+                <th scope="col" className="px-4 py-3 text-right">Anúncios</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* key = ordinal da resposta: o ID do inventario nao sai na API publica. */}
+              {inventarios.map((i) => (
+                <tr
+                  key={i.posicao}
+                  className="border-b border-slate-100 last:border-0 align-top"
+                >
+                  <td className="px-4 py-3 whitespace-nowrap text-slate-600">{tituloMarca(i.brand)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
+                    {/* `null` = sem leitura: travessao, nunca 0. */}
+                    {fmtOpcional(i.disponivel)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {fmtOpcional(i.nao_disponivel)}
+                    {i.transfer !== null && i.transfer > 0 && (
+                      <span className="block text-xs text-slate-500">
+                        {fmtInt(i.transfer)} em transferência
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {fmtInt(i.unidades_28d)}
+                    <span className="block text-xs text-slate-500">
+                      {fmtDecimal(i.media_diaria_28d)}/dia
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-700">
+                    {fmtCobertura(i.cobertura_torre_dias)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <Etiqueta classe={i.classificacao_torre} />
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-600">
+                    {/* ASSOCIACAO, nao estoque: nunca multiplica o disponivel. */}
+                    {fmtInt(i.anuncios)}
+                    {i.compartilhado && (
+                      <span className="block text-xs text-slate-500">compartilhado</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </RegiaoRolavel>
+      </TableScrollHint>
     </div>
   );
+}
+
+interface ErroML {
+  texto: string;
+  /** 422 por data futura: repetir a mesma data daria o mesmo erro. */
+  dataFutura: boolean;
 }
 
 export default function MLFullEstoqueClient() {
   const [filtros, setFiltros] = useState<FiltrosML>(FILTROS_ML_VAZIOS);
   const [payload, setPayload] = useState<MLFullEstoqueResponse | null>(null);
   const [carregando, setCarregando] = useState(true);
-  const [erro, setErro] = useState<string | null>(null);
+  const [erro, setErro] = useState<ErroML | null>(null);
+  const primeiroChipRef = useRef<HTMLButtonElement | null>(null);
+  // Hoje em America/Sao_Paulo (o mesmo relogio da API), uma vez por montagem.
+  const hoje = useMemo(() => hojeSaoPauloML(), []);
 
   const query = useMemo(() => buildQueryML(filtros), [filtros]);
+  const refDate = filtros.refDate;
   const abortRef = useRef<AbortController | null>(null);
 
   const carregar = useCallback(async () => {
@@ -270,15 +321,17 @@ export default function MLFullEstoqueClient() {
       if (e instanceof DOMException && e.name === "AbortError") return;
       // Numero velho nunca convive com mensagem de falha.
       setPayload(null);
-      setErro(
-        e instanceof MLFullEstoqueError
-          ? e.message
-          : "Falha inesperada ao carregar o estoque.",
-      );
+      if (e instanceof MLFullEstoqueError) {
+        const dataFutura = eErroDataFuturaML(e.status, refDate);
+        setErro({ texto: dataFutura ? ERRO_DATA_FUTURA_ML : e.message, dataFutura });
+      } else {
+        setErro({ texto: "Falha inesperada ao carregar o estoque.", dataFutura: false });
+      }
     } finally {
       if (!ctrl.signal.aborted) setCarregando(false);
     }
-  }, [query]);
+    // `refDate` ja esta contido em `query`; entra so' para classificar o 422.
+  }, [query, refDate]);
 
   useEffect(() => {
     carregar();
@@ -293,7 +346,14 @@ export default function MLFullEstoqueClient() {
         : [...f.brands, m],
     }));
 
-  const limpar = () => setFiltros(FILTROS_ML_VAZIOS);
+  const limpar = () => {
+    setFiltros(FILTROS_ML_VAZIOS);
+    // O botao "Limpar filtros" some ao limpar: o foco vai para o primeiro
+    // chip de marca, que esta sempre na tela, em vez de cair no <body>.
+    primeiroChipRef.current?.focus();
+  };
+
+  const voltarParaUltima = () => setFiltros((f) => ({ ...f, refDate: "" }));
 
   const filtrosUI = (
     <div className="flex flex-col gap-3 w-full">
@@ -301,13 +361,14 @@ export default function MLFullEstoqueClient() {
         <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
           Marca
         </span>
-        {MARCAS_ML.map((m) => (
+        {MARCAS_ML.map((m, idx) => (
           <button
             key={m}
+            ref={idx === 0 ? primeiroChipRef : undefined}
             type="button"
             aria-pressed={filtros.brands.includes(m)}
             onClick={() => alternarMarca(m)}
-            className={`text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+            className={`inline-flex items-center justify-center min-h-11 min-w-11 text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
               filtros.brands.includes(m)
                 ? "bg-violet-600 border-violet-600 text-white font-semibold"
                 : "bg-white border-slate-200 text-slate-600 hover:border-violet-300"
@@ -322,6 +383,7 @@ export default function MLFullEstoqueClient() {
           Data da fotografia
           <input
             type="date"
+            max={hoje}
             value={filtros.refDate}
             onChange={(e) => setFiltros((f) => ({ ...f, refDate: e.target.value }))}
             className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
@@ -342,7 +404,7 @@ export default function MLFullEstoqueClient() {
           <button
             type="button"
             onClick={limpar}
-            className="text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+            className="inline-flex items-center min-h-11 px-2 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
           >
             Limpar filtros
           </button>
@@ -355,6 +417,9 @@ export default function MLFullEstoqueClient() {
     payload && !isIndisponivelML(payload)
       ? `${payload.scope_label} · ${frescorLabelML(payload.frescor)}`
       : "Estoque Full Mercado Livre — por inventário";
+
+  const parcial =
+    payload !== null && !isIndisponivelML(payload) && payload.indicadores.total_parcial;
 
   return (
     <PageContainer>
@@ -379,14 +444,24 @@ export default function MLFullEstoqueClient() {
           <h3 className="text-lg font-semibold text-slate-900">
             Não foi possível carregar o estoque
           </h3>
-          <p className="text-sm text-slate-600">{erro}</p>
-          <button
-            type="button"
-            onClick={carregar}
-            className="self-start text-sm font-semibold rounded-lg bg-violet-600 text-white px-4 py-2 hover:bg-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-          >
-            Tentar novamente
-          </button>
+          <p className="text-sm text-slate-600">{erro.texto}</p>
+          {erro.dataFutura ? (
+            <button
+              type="button"
+              onClick={voltarParaUltima}
+              className="self-start inline-flex items-center min-h-11 text-sm font-semibold rounded-lg bg-violet-600 text-white px-4 py-2 hover:bg-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            >
+              Ver a última fotografia
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={carregar}
+              className="self-start inline-flex items-center min-h-11 text-sm font-semibold rounded-lg bg-violet-600 text-white px-4 py-2 hover:bg-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            >
+              Tentar novamente
+            </button>
+          )}
         </section>
       )}
 
@@ -401,7 +476,8 @@ export default function MLFullEstoqueClient() {
 
       {!carregando && !erro && payload && !isIndisponivelML(payload) && (
         <>
-          {fotografiaVelhaML(payload.frescor) && (
+          {/* Data historica escolhida de proposito ja tem aviso proprio. */}
+          {mostrarAvisoVelhaML(payload.frescor) && (
             <Aviso tom="alerta">
               {frescorLabelML(payload.frescor)}. A publicação ainda não tem
               agendamento.
@@ -431,7 +507,10 @@ export default function MLFullEstoqueClient() {
 
           {payload.indicadores.total_parcial && (
             <Aviso tom="alerta">
-              Total PARCIAL: {payload.indicadores.motivos_total_parcial.join(" ")}
+              Total PARCIAL:{" "}
+              {payload.indicadores.motivos_total_parcial
+                .map(motivoParcialLegivel)
+                .join(" ")}
             </Aviso>
           )}
 
@@ -440,52 +519,65 @@ export default function MLFullEstoqueClient() {
               label="Disponível Full"
               value={fmtOpcional(payload.indicadores.disponivel_full)}
               subvalue={
-                payload.indicadores.total_parcial
-                  ? "Parcial: ver aviso acima"
+                parcial
+                  ? PREFIXO_PARCIAL_ML
                   : `${fmtInt(payload.indicadores.inventarios_full_lidos)} inventários Full lidos`
               }
               accent="bg-emerald-500"
             />
+            {/* Contagens num total PARCIAL: "0" nao e' "nenhum". */}
             <KpiCard
               label="Exigem ação"
               value={fmtInt(payload.indicadores.inventarios_exigem_acao)}
-              subvalue="Ruptura + estoque baixo"
+              subvalue={subvalorContagemML(parcial, "Ruptura + estoque baixo")}
               accent="bg-red-500"
             />
             <KpiCard
               label="Sem leitura"
               value={fmtInt(payload.indicadores.inventarios_sem_leitura)}
-              subvalue="Inventários sem quantidade medida"
+              subvalue={subvalorContagemML(parcial, "Inventários sem quantidade medida")}
               accent="bg-orange-500"
             />
             <KpiCard
               label="Compartilhados"
               value={fmtInt(payload.indicadores.inventarios_compartilhados)}
-              subvalue="Inventários com 2+ anúncios (contados uma vez)"
+              subvalue={subvalorContagemML(
+                parcial,
+                "Inventários com 2+ anúncios (contados uma vez)",
+              )}
               accent="bg-violet-500"
             />
             <KpiCard
               label="Ruptura"
               value={fmtInt(payload.indicadores.inventarios_ruptura)}
-              subvalue="Sem disponível, com venda na janela"
+              subvalue={subvalorContagemML(parcial, "Sem disponível, com venda na janela")}
               accent="bg-red-500"
             />
             <KpiCard
               label="Estoque baixo"
               value={fmtInt(payload.indicadores.inventarios_baixo)}
-              subvalue={`Abaixo de ${payload.limites.cobertura_baixa_dias} dias de cobertura`}
+              subvalue={subvalorContagemML(
+                parcial,
+                `Abaixo de ${payload.limites.cobertura_baixa_dias} dias de cobertura`,
+              )}
               accent="bg-amber-500"
             />
             <KpiCard
               label="Excesso"
               value={fmtInt(payload.indicadores.inventarios_excesso)}
-              subvalue={`A partir de ${payload.limites.cobertura_excesso_dias} dias de cobertura`}
+              subvalue={subvalorContagemML(
+                parcial,
+                `A partir de ${payload.limites.cobertura_excesso_dias} dias de cobertura`,
+              )}
               accent="bg-sky-500"
             />
             <KpiCard
               label="Não disponível Full"
               value={fmtOpcional(payload.indicadores.nao_disponivel_full)}
-              subvalue={`${fmtOpcional(payload.indicadores.transfer_full)} em transferência interna`}
+              subvalue={subvalorContagemML(
+                parcial,
+                subtituloTransferML(payload.indicadores.transfer_full),
+              )}
               accent="bg-slate-400"
             />
           </div>
@@ -501,9 +593,11 @@ export default function MLFullEstoqueClient() {
                 Nenhum inventário neste filtro
               </h3>
               <p className="text-sm text-slate-600">
-                A fotografia de {fmtData(payload.frescor.ref_date)} tem{" "}
-                {fmtInt(payload.indicadores.inventarios)} inventários; nenhum
-                casa com os filtros atuais.
+                {textoVazioML({
+                  refDate: payload.frescor.ref_date,
+                  inventarios: payload.indicadores.inventarios,
+                  filtroAtivo: temFiltroAtivoML(filtros),
+                })}
               </p>
             </section>
           ) : (

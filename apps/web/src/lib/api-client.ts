@@ -2517,14 +2517,14 @@ export async function fetchMLFullEstoque(
     );
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new MLFullEstoqueError("Nao foi possivel contatar a API.", null);
+    throw new MLFullEstoqueError("Não foi possível contatar a API.", null);
   }
   if (res.status === 422) {
-    throw new MLFullEstoqueError("Filtro invalido para esta consulta.", 422);
+    throw new MLFullEstoqueError("Filtro inválido para esta consulta.", 422);
   }
   if (!res.ok) {
     throw new MLFullEstoqueError(
-      "O Estoque Full do Mercado Livre esta indisponivel no momento.",
+      "O Estoque Full do Mercado Livre está indisponível no momento.",
       res.status,
     );
   }

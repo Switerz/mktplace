@@ -19,15 +19,24 @@ import {
   SEM_DADO,
   TITULO_INDISPONIVEL_ML,
   buildQueryML,
+  ERRO_DATA_FUTURA_ML,
+  PREFIXO_PARCIAL_ML,
   coberturaMarcasLabel,
   eDataHistorica,
+  eErroDataFuturaML,
   fmtFracao,
   fmtOpcional,
   fotografiaVelhaML,
   frescorLabelML,
+  hojeSaoPauloML,
   isIndisponivelML,
   leituraLabel,
+  mostrarAvisoVelhaML,
+  motivoParcialLegivel,
+  subtituloTransferML,
+  subvalorContagemML,
   temFiltroAtivoML,
+  textoVazioML,
   type FrescorML,
   type MLFullEstoqueResponse,
   type MotivoIndisponivelML,
@@ -234,4 +243,124 @@ test("buildQueryML: marca repetida, data valida, lista vazia omitida", () => {
   assert.equal(qs.get("incluir_fora_do_full"), "true");
   assert.equal(buildQueryML({ ...FILTROS_ML_VAZIOS, refDate: "lixo" }), "");
   assert.equal(temFiltroAtivoML(FILTROS_ML_VAZIOS), false);
+});
+
+// ---------------------------------------------------------------------------
+// Correcoes de QA (dados ficticios)
+// ---------------------------------------------------------------------------
+
+test("QA1: mensagens de erro do estoque ML com acento, so' nesta funcao", () => {
+  const trecho = (API_CLIENT_SRC.split("export async function fetchMLFullEstoque")[1] ?? "")
+    .split("\n}\n")[0];
+  assert.ok(trecho.includes("Não foi possível contatar a API."));
+  assert.ok(trecho.includes("Filtro inválido para esta consulta."));
+  assert.ok(trecho.includes("O Estoque Full do Mercado Livre está indisponível no momento."));
+  assert.ok(!/Nao foi possivel|invalido|esta indisponivel/.test(trecho));
+});
+
+test("QA2: data futura -- max = hoje em BRT e 422 com data vira mensagem propria", () => {
+  // 02:30 UTC de 27/10 ainda e' 26/10 em Sao Paulo (UTC-3).
+  assert.equal(hojeSaoPauloML(new Date("2026-10-27T02:30:00Z")), "2026-10-26");
+  assert.equal(hojeSaoPauloML(new Date("2026-10-27T03:30:00Z")), "2026-10-27");
+  assert.match(CLIENT_SRC, /type="date"\s+max=\{hoje\}/);
+  assert.ok(CLIENT_SRC.includes("hojeSaoPauloML()"));
+
+  assert.equal(eErroDataFuturaML(422, "2026-12-01"), true);
+  assert.equal(eErroDataFuturaML(422, ""), false, "sem data, 422 nao e' da data");
+  assert.equal(eErroDataFuturaML(503, "2026-12-01"), false);
+  assert.equal(eErroDataFuturaML(null, "2026-12-01"), false);
+  assert.equal(ERRO_DATA_FUTURA_ML, "Data no futuro: escolha até hoje.");
+
+  // No erro de data, a saida e' voltar a' ultima fotografia, nao repetir.
+  const erroBloco = CLIENT_SRC.split('role="alert"')[1] ?? "";
+  const ramoData = erroBloco.split("erro.dataFutura ?")[1]?.split(") : (")[0] ?? "";
+  assert.ok(ramoData.includes("voltarParaUltima"));
+  assert.ok(!ramoData.includes("Tentar novamente"));
+});
+
+test("QA3: tabelas usam TableScrollHint e tem regiao focavel com nome", () => {
+  assert.match(
+    CLIENT_SRC,
+    /import\s+TableScrollHint\s+from\s+["']@\/components\/TableScrollHint["'];/,
+  );
+  assert.equal((CLIENT_SRC.match(/<TableScrollHint>/g) ?? []).length, 2);
+  assert.equal((CLIENT_SRC.match(/<RegiaoRolavel rotulo=/g) ?? []).length, 2);
+  assert.ok(!CLIENT_SRC.includes("overflow-x-auto"), "sem rolagem crua sem dica");
+  const regiao = CLIENT_SRC.split("function RegiaoRolavel")[1]?.split("\n}\n")[0] ?? "";
+  assert.ok(regiao.includes("tabIndex={0}"));
+  assert.ok(regiao.includes('role="region"'));
+  assert.ok(regiao.includes("aria-label={rotulo}"));
+  // Cada <table> fica dentro do hint e da regiao.
+  for (const parte of CLIENT_SRC.split("<TableScrollHint>").slice(1)) {
+    const ate = parte.split("</TableScrollHint>")[0];
+    assert.ok(ate.indexOf("<RegiaoRolavel") < ate.indexOf("<table"));
+    assert.ok(ate.indexOf("</table>") < ate.indexOf("</RegiaoRolavel>"));
+  }
+});
+
+test("QA4: estado vazio sem filtro nao fala em filtros; transfer ausente diz 'sem medida'", () => {
+  const sem = textoVazioML({ refDate: "2026-10-25", inventarios: 0, filtroAtivo: false });
+  assert.equal(sem, "A fotografia de 25/10/2026 não tem inventários.");
+  const soFora = textoVazioML({ refDate: "2026-10-25", inventarios: 7, filtroAtivo: false });
+  assert.ok(!soFora.includes("filtros atuais"));
+  assert.match(soFora, /nenhum no Full/);
+  const com = textoVazioML({ refDate: "2026-10-25", inventarios: 7, filtroAtivo: true });
+  assert.match(com, /nenhum casa com os filtros atuais/);
+  assert.ok(CLIENT_SRC.includes("filtroAtivo: temFiltroAtivoML(filtros)"));
+
+  assert.equal(subtituloTransferML(null), "Transferência interna sem medida");
+  assert.equal(subtituloTransferML(0), "0 em transferência interna");
+  assert.ok(!CLIENT_SRC.includes("transfer_full)} em transferência"));
+});
+
+test("QA5: limpar filtros move o foco para o primeiro chip de marca", () => {
+  const limpar = CLIENT_SRC.split("const limpar = () => {")[1]?.split("\n  };")[0] ?? "";
+  assert.ok(limpar.includes("setFiltros(FILTROS_ML_VAZIOS)"));
+  assert.ok(limpar.includes("primeiroChipRef.current?.focus()"));
+  assert.match(CLIENT_SRC, /ref=\{idx === 0 \? primeiroChipRef : undefined\}/);
+});
+
+test("QA6: chips com 44px, marca formatada no PARCIAL, sem aviso duplicado", () => {
+  const chip = CLIENT_SRC.split("aria-pressed={filtros.brands.includes(m)}")[1] ?? "";
+  assert.match(chip.split("{tituloMarca(m)}")[0], /inline-flex items-center justify-center min-h-11 min-w-11/);
+
+  assert.equal(
+    motivoParcialLegivel("Sem fotografia no dia: kokeshi, lescent."),
+    "Sem fotografia no dia: Kokeshi, Lescent.",
+  );
+  assert.equal(motivoParcialLegivel("2 inventário(s) Full sem leitura."), "2 inventário(s) Full sem leitura.");
+  assert.ok(CLIENT_SRC.includes(".map(motivoParcialLegivel)"));
+
+  // Ultima fotografia velha: alerta. Data historica escolhida: so' o aviso proprio.
+  assert.equal(
+    mostrarAvisoVelhaML(frescor({ dias_desde_a_fotografia: 3, ref_date: "2026-10-23", ultima_fotografia_disponivel: "2026-10-23" })),
+    true,
+  );
+  assert.equal(
+    mostrarAvisoVelhaML(frescor({ dias_desde_a_fotografia: 3, ref_date: "2026-10-23" })),
+    false,
+  );
+  assert.ok(CLIENT_SRC.includes("mostrarAvisoVelhaML(payload.frescor)"));
+  assert.ok(!CLIENT_SRC.includes("fotografiaVelhaML(payload.frescor)"));
+});
+
+test("QA7: cards de contagem marcam PARCIAL como o card de disponivel", () => {
+  assert.equal(subvalorContagemML(false, "Ruptura + estoque baixo"), "Ruptura + estoque baixo");
+  assert.equal(
+    subvalorContagemML(true, "Ruptura + estoque baixo"),
+    `${PREFIXO_PARCIAL_ML} · Ruptura + estoque baixo`,
+  );
+  assert.ok(PREFIXO_PARCIAL_ML.startsWith("Parcial"));
+  for (const campo of [
+    "inventarios_exigem_acao",
+    "inventarios_sem_leitura",
+    "inventarios_compartilhados",
+    "inventarios_ruptura",
+    "inventarios_baixo",
+    "inventarios_excesso",
+    "nao_disponivel_full",
+  ]) {
+    const card = CLIENT_SRC.split(`payload.indicadores.${campo})`)[1]?.split("/>")[0] ?? "";
+    assert.match(card, /subvalorContagemML\(\s*parcial,/, `${campo} sem marca de parcial`);
+  }
 });

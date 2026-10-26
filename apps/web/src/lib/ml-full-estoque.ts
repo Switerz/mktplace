@@ -285,6 +285,90 @@ export function tituloMarca(m: string): string {
   return m.charAt(0).toUpperCase() + m.slice(1);
 }
 
+/**
+ * O motivo PARCIAL vem da API com o slug da marca ("kokeshi"). A tela exibe o
+ * rotulo formatado; o texto e' so' apresentado, nunca reinterpretado.
+ */
+export function motivoParcialLegivel(texto: string): string {
+  return texto.replace(
+    new RegExp(`\\b(${MARCAS_ML.join("|")})\\b`, "g"),
+    (slug) => tituloMarca(slug),
+  );
+}
+
+/**
+ * Aviso de "fotografia velha" so' quando a tela mostra a ULTIMA fotografia.
+ * Data historica escolhida de proposito ja tem aviso proprio.
+ */
+export function mostrarAvisoVelhaML(f: FrescorML): boolean {
+  return fotografiaVelhaML(f) && !eDataHistorica(f);
+}
+
+/** Subtitulo do card "Nao disponivel Full": ausencia nao vira travessao solto. */
+export function subtituloTransferML(transfer: number | null): string {
+  return transfer === null
+    ? "Transferência interna sem medida"
+    : `${fmtInt(transfer)} em transferência interna`;
+}
+
+/**
+ * Cards de CONTAGEM num total PARCIAL: "0" nao pode ser lido como "nenhum"
+ * quando parte do escopo nao foi medida. Mesmo prefixo do card de disponivel.
+ */
+export const PREFIXO_PARCIAL_ML = "Parcial: ver aviso acima";
+
+export function subvalorContagemML(parcial: boolean, texto: string): string {
+  return parcial ? `${PREFIXO_PARCIAL_ML} · ${texto}` : texto;
+}
+
+/** Texto do estado vazio: sem filtro ativo, nao fala em "filtros atuais". */
+export function textoVazioML(args: {
+  refDate: string;
+  inventarios: number;
+  filtroAtivo: boolean;
+}): string {
+  const dia = fmtData(args.refDate);
+  if (args.filtroAtivo) {
+    return (
+      `A fotografia de ${dia} tem ${fmtInt(args.inventarios)} inventários; ` +
+      "nenhum casa com os filtros atuais."
+    );
+  }
+  if (args.inventarios === 0) {
+    return `A fotografia de ${dia} não tem inventários.`;
+  }
+  return (
+    `A fotografia de ${dia} tem ${fmtInt(args.inventarios)} inventários, ` +
+    "nenhum no Full. Marque “Listar também inventários fora do Full” para vê-los."
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------
+
+/** Hoje (YYYY-MM-DD) em America/Sao_Paulo -- o mesmo relogio da API. */
+export function hojeSaoPauloML(agora: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(agora);
+}
+
+export const ERRO_DATA_FUTURA_ML = "Data no futuro: escolha até hoje.";
+
+/**
+ * A API devolve 422 para data futura (D+1 em BRT). Marca fora da allowlist
+ * tambem e' 422, mas a tela so' envia marcas da allowlist: com data no
+ * filtro, o 422 e' da data. Nao compara com o relogio local, que pode
+ * divergir do servidor perto da meia-noite.
+ */
+export function eErroDataFuturaML(status: number | null, refDate: string): boolean {
+  return status === 422 && /^\d{4}-\d{2}-\d{2}$/.test(refDate);
+}
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
