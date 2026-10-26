@@ -622,7 +622,7 @@ def test_62_conta_ausente_na_leitura_falha_em_vez_de_avisar():
 
 
 # --------------------------------------------------------------------- #
-# K. REGIME NAO CONCILIADO (medido em producao em 2026-10-21)            #
+# K. FULL PAUSADO (medido em 21-26/10/2026)                          #
 # --------------------------------------------------------------------- #
 def test_63_conta_com_fisico_e_nada_vendavel_bloqueia():
     locs = [_loc("1", "BRFSP1", 33099, saleable=False),
@@ -630,7 +630,7 @@ def test_63_conta_com_fisico_e_nada_vendavel_bloqueia():
             _loc("2", "CD1", 10, saleable=True, conta="apice")]
     prods = [_prod("1", saleable=0, total=33242, locs=2),
              _prod("2", saleable=10, total=10, conta="apice")]
-    with pytest.raises(mod.ShopeeStockSyncError, match="REGIME NAO CONCILIADO em barbours"):
+    with pytest.raises(mod.ShopeeStockSyncError, match="FULL PAUSADO em barbours"):
         mod.validate_contract(_snap(locs, prods))
 
 
@@ -642,3 +642,12 @@ def test_64_conta_mista_e_conta_toda_zerada_nao_bloqueiam():
     prods = [_prod("1", saleable=5, total=12, locs=2),
              _prod("2", saleable=0, total=0, conta="apice")]
     mod.validate_contract(_snap(locs, prods))
+
+
+def test_65_regra_do_full_pausado_e_uma_so():
+    assert mod.contas_com_full_pausado(
+        {"barbours": 159294, "apice": 3735, "lescent": 0},
+        {"apice": 3735}) == ["barbours"]
+    assert mod.contas_com_full_pausado({"a": 5}, {"a": 5}) == []
+    assert "FULL PAUSADO em barbours" in mod.mensagem_full_pausado("barbours", 1)
+    assert "nao publicar como ruptura" in mod.mensagem_full_pausado("barbours", 1)

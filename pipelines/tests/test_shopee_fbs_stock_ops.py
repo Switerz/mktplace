@@ -237,3 +237,22 @@ def test_reverter_respeita_o_lock_da_publicacao(banco):
     finally:
         outro.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": P.ADVISORY_LOCK_KEY})
         outro.close()
+
+
+_PAUSAR_BARBOURS = """
+    UPDATE raw.shopee_products r
+       SET stock_info = jsonb_set(r.stock_info, '{shopee_stock}', (
+           SELECT jsonb_agg(jsonb_set(e, '{if_saleable}', 'false'::jsonb))
+             FROM jsonb_array_elements(r.stock_info->'shopee_stock') e))
+     WHERE r.shop_account = 'barbours'"""
+
+
+def test_preflight_recusa_full_pausado_com_a_mesma_regra_do_publicador(banco):
+    _sql(banco, _PAUSAR_BARBOURS)
+    res = OPS.preflight(P._hoje_brt())
+    assert res["pronto"] is False
+    assert [p for p in res["problemas"] if p.startswith("FULL PAUSADO em barbours")]
+    assert res["full_por_conta"]["barbours"]["vendavel"] == 0
+    assert res["full_por_conta"]["barbours"]["fisico"] > 0
+    assert OPS.main(["primeira-execucao", OPS.CONFIRMACAO]) == P.EXIT_FONTE_NAO_PRONTA
+    assert _contagens(banco)["prod_linhas"] == 0 and _auditoria(banco) == []

@@ -747,5 +747,5 @@ def test_regime_nao_conciliado_bloqueia_sem_escrever(banco):
     c = _contagens(banco)
     assert c["loc_linhas"] == 0 and c["prod_linhas"] == 0
     assert _auditoria(banco) == [], "a trava roda antes de abrir auditoria"
-    with pytest.raises(P.ShopeeStockSyncError, match="REGIME NAO CONCILIADO em barbours"):
+    with pytest.raises(P.ShopeeStockSyncError, match="FULL PAUSADO em barbours"):
         P.run(apply=False)

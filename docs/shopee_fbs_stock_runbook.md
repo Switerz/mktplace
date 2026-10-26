@@ -39,20 +39,47 @@ Corte = meia-noite BRT do `ref_date`. Por conta esperada, recusa se:
 
 O portão e as leituras rodam no **mesmo** snapshot (`REPEATABLE READ`, somente leitura).
 
-### Trava de regime não conciliado
+### Trava de Full pausado
 
-Conta com estoque físico no Full e **zero** unidades com `if_saleable = true` bloqueia a
-carga inteira. Motivo medido em 21/10/2026: a Barbours veio com 387/387 entradas
-`if_saleable = false` (119.163 unidades nos CDs) enquanto os mesmos itens seguiam
-vendendo 114–486 unidades/dia. Publicar mostraria a conta zerada e em ruptura. Não há
-flag para pular: resolver é decisão de contrato (conciliar no Seller Center).
+`if_saleable` diz se a Shopee está vendendo **aquele CD naquele instante**. Conta com
+estoque físico no Full e **zero** unidades com `if_saleable = true` bloqueia a carga
+inteira (exit 1, sem retry), no publicador e no `preflight`, pela mesma função
+(`contas_com_full_pausado`).
+
+Provado em 26/10/2026 na Barbours, por SKU e no mesmo instante:
+
+- de 21/10 ~03h UTC a 26/10 10h UTC, **zero** pedido dos itens FBS saiu do CD
+  (`is_fbs`), contra 43–85% nos dias anteriores; a Ápice seguiu normal;
+- na mesma resposta da API, `summary_info.total_available_stock` **excluiu** o estoque
+  do CD (`= seller_stock − reservado` em 123/125 itens), enquanto nas outras contas
+  ele soma CD + vendedor;
+- todo o `shopee_stock` da conta veio `false` (159.294 unidades em 26/10, 09:02 UTC);
+  o `seller_stock` (`BRZ`), `true`.
+
+Ou seja: o `false` era verdadeiro. Publicar como está mostraria a conta "em ruptura"
+com o estoque parado no CD — alerta de reposição quando o problema é a pausa.
+
+#### Proposta de contrato (não ativada)
+
+Para publicar **durante** uma pausa sem travar as outras contas:
+
+| Campo | Regra |
+|---|---|
+| `classificacao_torre` | novo valor `FULL_PAUSADO_CANDIDATO` quando o produto tem físico no CD e nenhuma entrada vendável, e a conta inteira está pausada; nunca `RUPTURA_CANDIDATA` |
+| `full_stock_saleable` | 0 (verdade da fonte) |
+| `full_stock_total` | o físico, como hoje |
+| indicadores da API | `produtos_ruptura` não conta esses produtos; novo contador `produtos_full_pausado` e unidades físicas paradas |
+| trava | deixa de bloquear o run; vira estado da conta no resumo e na auditoria |
+
+Exige migration nova (o CHECK de `classificacao_torre` da 021 é fechado), ajuste do
+service e da tela. Só depois de aceite.
 
 ## Códigos de saída
 
 | Exit | Significado | Repetir? |
 |---|---|---|
 | 0 | publicado (ou dry-run concluído) | — |
-| 1 | falha de contrato, trava de regime ou banco; nada publicado | não: repete igual |
+| 1 | falha de contrato, Full pausado ou banco; nada publicado | não: repete igual |
 | 3 | advisory lock ocupado; nada escrito | sim |
 | 4 | fonte não pronta (portão); nada escrito, nenhuma auditoria aberta | sim, mais tarde |
 

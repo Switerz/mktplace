@@ -110,10 +110,15 @@ def preflight(ref_date: date) -> dict:
         # psycopg2: o preflight nao pode ter uma regra propria de frescor.
         portao = _linhas(dm, P.SQL_PORTAO_FONTE.text.replace(":contas", "%(contas)s"),
                          {"contas": list(P.CONTAS_ESPERADAS)})
+        regime = _linhas(dm, SQL_DM_REGIME_POR_CONTA, {"contas": list(P.CONTAS_ESPERADAS)})
     finally:
         dm.rollback()
         dm.close()
     problemas += P.avaliar_portao(portao, ref_date)
+    fisico = {r["shop_account"]: int(r["fisico"] or 0) for r in regime}
+    vendavel = {r["shop_account"]: int(r["vendavel"] or 0) for r in regime}
+    problemas += [P.mensagem_full_pausado(c, fisico[c])
+                  for c in P.contas_com_full_pausado(fisico, vendavel)]
     return {
         "ref_date": str(ref_date),
         "pronto": not problemas,
@@ -121,7 +126,24 @@ def preflight(ref_date: date) -> dict:
         "neon": {**estado, "ultima_fotografia": str(ultima) if ultima else None},
         "portao_fonte": [{k: str(v) if isinstance(v, datetime) else v
                           for k, v in r.items()} for r in portao],
+        "full_por_conta": {c: {"fisico": fisico[c], "vendavel": vendavel.get(c, 0)}
+                           for c in sorted(fisico)},
     }
+
+
+#: Fisico x vendavel por conta, direto do JSON da raw: alimenta a MESMA regra
+#: de Full pausado que o publicador aplica.
+SQL_DM_REGIME_POR_CONTA = """
+    SELECT r.shop_account,
+           SUM((e->>'stock')::bigint)                                       AS fisico,
+           SUM((e->>'stock')::bigint) FILTER (WHERE e->>'if_saleable' = 'true') AS vendavel
+      FROM raw.shopee_products r
+      JOIN silver.stg_shopee_products s
+        ON s.shop_account = r.shop_account AND s.item_id = r.item_id
+     CROSS JOIN LATERAL jsonb_array_elements(r.stock_info->'shopee_stock') e
+     WHERE s.is_fulfillment_by_shopee AND r.shop_account = ANY(%(contas)s)
+     GROUP BY 1
+"""
 
 
 # --------------------------------------------------------------------------- #

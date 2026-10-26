@@ -664,6 +664,22 @@ def read_source(conn, ref_date: date) -> Snapshot:
                     portao=tuple(portao))
 
 
+def contas_com_full_pausado(fisico: dict, vendavel: dict) -> list[str]:
+    """Contas com unidade fisica no Full e nenhuma vendavel. Funcao pura.
+
+    A MESMA regra roda no publicador (sobre o snapshot) e no preflight de
+    `pipelines.ops.shopee_fbs_stock_ops` (sobre a raw), para que o preflight
+    nunca diga "pronto" a um run que a trava vai recusar.
+    """
+    return sorted(c for c, n in fisico.items() if n > 0 and not vendavel.get(c, 0))
+
+
+def mensagem_full_pausado(conta: str, unidades: int) -> str:
+    return (f"FULL PAUSADO em {conta}: {unidades} unidades fisicas no Full e zero "
+            "com if_saleable=true -- a Shopee nao esta' vendendo pelo CD; nao "
+            "publicar como ruptura")
+
+
 def validate_contract(snap: Snapshot) -> list[str]:
     """Invariantes que tem de valer ANTES de escrever. Falha alto."""
     erros = []
@@ -687,27 +703,25 @@ def validate_contract(snap: Snapshot) -> list[str]:
         if r.cobertura_torre_dias is not None and not r.cobertura_torre_dias.is_finite():
             erros.append("cobertura nao finita")
 
-    # 🔴 REGIME NAO CONCILIADO: conta com estoque FISICO no Full e NADA vendavel.
-    # O contrato "vendavel = SUM(stock) WHERE if_saleable" foi conciliado com o
-    # Seller Center quando 100% das entradas FBS eram vendaveis. Em 2026-10-21
-    # a Barbours inteira veio com `if_saleable=false` (387/387 entradas, 119.163
-    # unidades nos CDs) e os MESMOS itens seguiram vendendo 114-486 unidades/dia
-    # de 08 a 21/10. Ou seja: `false` ali nao significa "nao vendavel". Publicar
-    # mostraria a conta zerada e em ruptura enquanto ela vende. A carga para ate'
-    # alguem conciliar o novo regime no Seller Center -- decisao de contrato, nao
-    # de pipeline, por isso nao ha' flag para pular.
+    # 🔴 FULL PAUSADO: conta com estoque FISICO no Full e NADA vendavel.
+    # `if_saleable` diz se a Shopee esta' vendendo AQUELE CD naquele instante.
+    # Provado em 26/10/2026 na Barbours: de 21/10 ~03h UTC a 26/10 10h UTC,
+    # ZERO pedido saiu do CD (`is_fbs`), contra 43-85% nos dias anteriores, e o
+    # `summary_info.total_available_stock` da MESMA resposta excluiu o estoque
+    # do CD (= seller_stock - reservado em 123/125 itens). O `false` era
+    # verdadeiro. Publicar como esta' mostraria a conta "em ruptura" com
+    # dezenas de milhares de unidades paradas no CD -- alerta de reposicao
+    # quando o problema e' a pausa. A carga para; nao ha' flag para pular,
+    # porque publicar esse regime exige estado proprio no contrato (ver
+    # docs/shopee_fbs_stock_runbook.md).
     fisico: dict[str, int] = {}
     vendavel: dict[str, int] = {}
     for r in snap.locations:
         fisico[r.shop_account] = fisico.get(r.shop_account, 0) + r.full_stock
         if r.is_saleable is True:
             vendavel[r.shop_account] = vendavel.get(r.shop_account, 0) + r.full_stock
-    for conta in sorted(fisico):
-        if fisico[conta] > 0 and vendavel.get(conta, 0) == 0:
-            erros.append(
-                f"REGIME NAO CONCILIADO em {conta}: {fisico[conta]} unidades fisicas no "
-                "Full e zero com if_saleable=true -- conciliar no Seller Center antes "
-                "de publicar")
+    for conta in contas_com_full_pausado(fisico, vendavel):
+        erros.append(mensagem_full_pausado(conta, fisico[conta]))
 
     # A soma do grao fino tem de reproduzir o agregado, produto a produto.
     por_produto: dict[tuple, int] = {}
