@@ -14,6 +14,7 @@ import { computeContentMix } from "./tiktok-content-mix";
 import type { MLFulfillmentResponse } from "./ml-fulfillment";
 import type { ShopeeFbsPayload } from "./shopee-fbs";
 import type { EstoqueFullResponse } from "./estoque-full";
+import type { MLFullEstoqueResponse } from "./ml-full-estoque";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -2484,4 +2485,48 @@ export async function fetchEstoqueFull(
     );
   }
   return (await res.json()) as EstoqueFullResponse;
+}
+
+
+/**
+ * ML-FULL-STOCK-API-1 — ESTOQUE Full do Mercado Livre, por inventario.
+ *
+ * NAO e' `fetchMLFulfillment` (modalidade de envio). Cliente proprio pelo
+ * mesmo motivo do estoque Shopee: `unavailable` e' resposta VALIDA (200) com
+ * quatro causas, e "a API caiu" precisa de texto proprio -- nenhum dos dois
+ * pode virar zero.
+ */
+export class MLFullEstoqueError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "MLFullEstoqueError";
+    this.status = status;
+  }
+}
+
+export async function fetchMLFullEstoque(
+  query: string,
+  signal?: AbortSignal,
+): Promise<MLFullEstoqueResponse> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_URL}/api/v1/performance/ml-full-estoque?${query}`,
+      { signal },
+    );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new MLFullEstoqueError("Nao foi possivel contatar a API.", null);
+  }
+  if (res.status === 422) {
+    throw new MLFullEstoqueError("Filtro invalido para esta consulta.", 422);
+  }
+  if (!res.ok) {
+    throw new MLFullEstoqueError(
+      "O Estoque Full do Mercado Livre esta indisponivel no momento.",
+      res.status,
+    );
+  }
+  return (await res.json()) as MLFullEstoqueResponse;
 }
