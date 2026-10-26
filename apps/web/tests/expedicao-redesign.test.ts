@@ -813,3 +813,41 @@ test("fila zerada nao esconde a pagina (M4): o corpo aparece sob o aviso de vazi
   assert.match(CLIENTE, /const mostraCorpo =\s*estado === "ok" \|\| estado === "fila_vazia_por_filtro" \|\| estado === "fotografia_vazia";/);
   assert.match(CLIENTE, /\{mostraCorpo && !recorte\.semConta &&/);
 });
+
+// ===========================================================================
+// QA T-0010 (reteste) — aviso "parcial" uma vez so'
+// ===========================================================================
+import { motivoDoTopo } from "../src/lib/expedicao-jornada.ts";
+
+const { createElement: hF } = await import("react");
+const { renderToStaticMarkup: htmlF } = await import("react-dom/server");
+const { default: JornadaF } = await import("../src/components/expedicao/JornadaPedidos.tsx");
+
+test("parcial por etapas que nao fecham: o aviso aparece UMA vez (no bloco)", () => {
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "parcial")!.corpo;
+  const r = lerJornada(corpo, "shopee");
+  assert.ok(r.ok);
+  const resposta = (r as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  assert.equal(motivoDoTopo(resposta), null, "o topo nao repete o bloco");
+  const html = htmlF(
+    hF(JornadaF, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: r },
+      aoTentarDeNovo: () => {},
+    }),
+  );
+  assert.equal((html.match(/não fecham/g) ?? []).length, 1, html);
+  // motivo que o bloco NAO diz continua no topo
+  assert.equal(
+    motivoDoTopo({ ...resposta, reason: "fila_aberta: etapas_nao_fecham; coorte: dias_sem_publicacao (2)" }),
+    "Coorte: 2 dia(s) sem publicação na janela",
+  );
+  // parcial sem motivo e sem aviso de bloco: frase generica
+  assert.match(
+    motivoDoTopo({
+      ...resposta,
+      reason: null,
+      fila_aberta: { ...resposta.fila_aberta!, etapas_fecham: true },
+    })!,
+    /parte da jornada/,
+  );
+});

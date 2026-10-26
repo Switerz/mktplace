@@ -496,3 +496,20 @@ export function avisoDeMarcaNaoAplicada(marca: string | null, r: RespostaJornada
   if (aplicadas.includes(marca.toLowerCase())) return null;
   return `O filtro de marca (${marca.toUpperCase()}) não foi aplicado pela API: os números da jornada são do canal inteiro.`;
 }
+
+/**
+ * Motivo do aviso "parcial" no TOPO da secao. A parte "etapas_nao_fecham"
+ * sai: o bloco da propria secao ja' avisa que as etapas nao fecham, e o
+ * mesmo aviso duas vezes vira ruido (QA T-0010). Sem nada a dizer alem do
+ * que os blocos dizem -> `null`. Sem motivo nenhum, uma frase generica.
+ */
+export function motivoDoTopo(r: RespostaJornada): string | null {
+  const avisoNoBloco =
+    (r.fila_aberta !== null && !r.fila_aberta.etapas_fecham) || (r.coorte !== null && !r.coorte.etapas_fecham);
+  const restante = (r.reason ?? "")
+    .split(/;\s*/)
+    .filter((parte) => parte.trim() && !/etapas_nao_fecham/.test(parte))
+    .join("; ");
+  if (restante) return explicarMotivo(restante);
+  return avisoNoBloco ? null : "parte da jornada não fecha ou não foi publicada.";
+}

@@ -25,6 +25,7 @@ import {
   avisoDeMarcaNaoAplicada,
   estadoDaJornada,
   explicarMotivo,
+  motivoDoTopo,
   filaDesatualizada,
   larguraDaEtapa,
   lerJornada,
@@ -352,11 +353,10 @@ export default function JornadaPedidos({
               <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
             </div>
           ) : null}
-          {resposta.status === "partial" ? (
-            <EstadoSecao
-              tipo="parcial"
-              titulo={explicarMotivo(resposta.reason) ?? "parte da jornada não fecha ou não foi publicada."}
-            />
+          {/* QA T-0010: "etapas não fecham" ja' aparece no bloco da secao;
+              o topo so' diz o que o bloco nao diz (sem aviso duplicado). */}
+          {resposta.status === "partial" && motivoDoTopo(resposta) ? (
+            <EstadoSecao tipo="parcial" titulo={motivoDoTopo(resposta)!} />
           ) : null}
           <div className="grid gap-3 lg:grid-cols-2" data-testid="exp-jornada">
             <BlocoFilaAberta r={resposta} />

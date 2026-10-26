@@ -416,7 +416,10 @@ test("nenhum elemento da Expedicao combina hidden= com classe de display (B1)", 
 
 test("clique fora num elemento focavel nao rouba o foco (M1)", () => {
   const src = fonte("src/components/expedicao/AjudaMetrica.tsx");
-  assert.match(src, /fechar\(focoDentro && !focavel\)/);
+  // Reteste (F1): fecha sem roubar foco; com alvo NAO focavel, o foco volta
+  // ao botao no proximo quadro, so' se o mousedown o jogou no <body>.
+  assert.match(src, /fechar\(false\);\s*if \(!focavel\) \{\s*requestAnimationFrame\(/);
+  assert.match(src, /document\.activeElement === document\.body\) botao\.current\?\.focus\(\)/);
   assert.match(src, /alvo\.closest\(SELETOR_FOCAVEL\)/);
 });
 

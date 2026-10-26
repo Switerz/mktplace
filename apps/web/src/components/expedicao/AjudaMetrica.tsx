@@ -98,10 +98,16 @@ export default function AjudaMetrica({
       const alvo = e.target as Node;
       if (botao.current?.contains(alvo) || painel.current?.contains(alvo)) return;
       // Clique num elemento focavel fora do painel: o foco e' DELE, nao do
-      // `?`. So' devolve o foco ao botao quando ele estava dentro do painel.
+      // `?`. Clique em area nao focavel: o `mousedown` padrao (que vem DEPOIS
+      // deste `pointerdown`) joga o foco no <body>; no proximo quadro o foco
+      // volta ao botao, so' se tiver mesmo caido no <body> (QA T-0010, F1).
       const focavel = alvo instanceof Element && Boolean(alvo.closest(SELETOR_FOCAVEL));
-      const focoDentro = Boolean(painel.current?.contains(document.activeElement));
-      fechar(focoDentro && !focavel);
+      fechar(false);
+      if (!focavel) {
+        requestAnimationFrame(() => {
+          if (!document.activeElement || document.activeElement === document.body) botao.current?.focus();
+        });
+      }
     };
     document.addEventListener("keydown", tecla);
     document.addEventListener("pointerdown", fora);
