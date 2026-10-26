@@ -35,19 +35,23 @@ const ATRASO_HOVER_MS = 250;
 const ATRASO_SAIDA_MS = 150;
 const MARGEM = 8;
 const LARGURA_MAX = 320;
+const SELETOR_FOCAVEL = "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])";
 
 type Origem = "clique" | "hover";
 
 export default function AjudaMetrica({
   chave,
   className = "",
+  abertoInicial = false,
 }: {
   chave: ChaveMetrica;
   className?: string;
+  /** Nasce aberto (renderizacao estatica em teste; a tela nao usa). */
+  abertoInicial?: boolean;
 }) {
   const def = definicaoDe(chave);
   const id = useId();
-  const [aberto, setAberto] = useState<Origem | null>(null);
+  const [aberto, setAberto] = useState<Origem | null>(abertoInicial ? "clique" : null);
   const [pos, setPos] = useState<{ top: number; left: number; largura: number } | null>(null);
   const botao = useRef<HTMLButtonElement>(null);
   const painel = useRef<HTMLSpanElement>(null);
@@ -61,6 +65,7 @@ export default function AjudaMetrica({
   const fechar = useCallback((devolverFoco: boolean) => {
     limparTimer();
     setAberto(null);
+    setPos(null);
     if (devolverFoco) botao.current?.focus();
   }, []);
 
@@ -92,8 +97,11 @@ export default function AjudaMetrica({
     const fora = (e: PointerEvent) => {
       const alvo = e.target as Node;
       if (botao.current?.contains(alvo) || painel.current?.contains(alvo)) return;
+      // Clique num elemento focavel fora do painel: o foco e' DELE, nao do
+      // `?`. So' devolve o foco ao botao quando ele estava dentro do painel.
+      const focavel = alvo instanceof Element && Boolean(alvo.closest(SELETOR_FOCAVEL));
       const focoDentro = Boolean(painel.current?.contains(document.activeElement));
-      fechar(focoDentro);
+      fechar(focoDentro && !focavel);
     };
     document.addEventListener("keydown", tecla);
     document.addEventListener("pointerdown", fora);
@@ -128,7 +136,8 @@ export default function AjudaMetrica({
         type="button"
         aria-label={`O que é ${def.nome}`}
         aria-expanded={Boolean(aberto)}
-        aria-controls={id}
+        // Fechado, o painel nao existe no DOM: sem alvo, sem aria-controls.
+        aria-controls={aberto ? id : undefined}
         onClick={() => {
           limparTimer();
           // Clique num `?` aberto por hover FIXA o painel; num aberto por
@@ -144,13 +153,17 @@ export default function AjudaMetrica({
           ?
         </span>
       </button>
+      {/* QA T-0010 (B1): o painel FECHADO nao e' renderizado. Com `hidden` +
+          `block`, o `.block` do Tailwind vencia o `[hidden]` do preflight e os
+          paineis ficavam abertos sobre a tela (e o "Fechar" entrava no Tab). */}
+      {aberto ? (
       <span
         ref={painel}
         id={id}
         role="dialog"
         aria-label={def.nome}
-        hidden={!aberto}
-        style={pos ? { top: pos.top, left: pos.left, width: pos.largura } : undefined}
+        // Ate' a posicao ser medida, invisivel (sem piscar no canto).
+        style={pos ? { top: pos.top, left: pos.left, width: pos.largura } : { visibility: "hidden" }}
         className="fixed z-50 block rounded-xl border border-line bg-surface p-3 text-left text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)]"
       >
         <span className="mb-1.5 flex items-start justify-between gap-2">
@@ -170,6 +183,7 @@ export default function AjudaMetrica({
           </span>
         ))}
       </span>
+      ) : null}
     </span>
   );
 }

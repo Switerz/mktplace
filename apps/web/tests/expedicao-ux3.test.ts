@@ -375,11 +375,49 @@ test("o `?` e' um botao real, de 44px, rotulado e ligado ao painel", () => {
   assert.match(botao!, /type="button"/);
   assert.match(botao!, /aria-expanded="false"/);
   assert.match(botao!, /h-11 w-11/);
-  const alvo = botao!.match(/aria-controls="([^"]+)"/)![1];
-  assert.match(html, new RegExp(`<span[^>]*id="${alvo.replace(/[:]/g, "\:")}"[^>]*role="dialog"[^>]*hidden=""`));
-  for (const [, rotulo] of CAMPOS_DEFINICAO) assert.ok(html.includes(`${rotulo}: `), rotulo);
-  assert.doesNotMatch(html, /<div\b/, "so' span: o ? mora dentro de <p>");
-  assert.match(html, /min-h-11 min-w-11[^"]*"[^>]*>Fechar<\/button>/);
+  // QA T-0010 (B1/I1): FECHADO, o painel nao existe no DOM — nada visivel,
+  // nenhum "Fechar" no Tab, nenhum aria-controls apontando para o vazio.
+  assert.doesNotMatch(botao!, /aria-controls=/);
+  assert.doesNotMatch(html, /role="dialog"|Fechar|Definição/);
+  // ABERTO: painel ligado ao botao, com os seis campos, so' com <span>.
+  const aberto = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr", abertoInicial: true }));
+  const controla = aberto.match(/aria-controls="([^"]+)"/);
+  assert.ok(controla, aberto);
+  assert.match(aberto, /aria-expanded="true"/);
+  assert.ok(aberto.includes(`id="${controla![1]}"`), "aria-controls aponta para o painel");
+  assert.match(aberto, /role="dialog"/);
+  for (const [, rotulo] of CAMPOS_DEFINICAO) assert.ok(aberto.includes(`${rotulo}: `), rotulo);
+  assert.doesNotMatch(aberto, /<div\b/, "so' span: o ? mora dentro de <p>");
+  assert.match(aberto, /min-h-11 min-w-11[^"]*"[^>]*>Fechar<\/button>/);
+});
+
+test("nenhum elemento da Expedicao combina hidden= com classe de display (B1)", () => {
+  // No Tailwind 3.4 ".block"/".flex" vencem o "[hidden]" do preflight: o
+  // elemento "escondido" aparece. Esconder = nao renderizar.
+  for (const rel of [
+    "src/components/expedicao/AjudaMetrica.tsx",
+    "src/components/expedicao/JornadaPedidos.tsx",
+    "src/components/expedicao/LayoutExpedicao.tsx",
+    "src/components/expedicao/KpiComAjuda.tsx",
+    "src/components/expedicao/TikTokDispatchPanel.tsx",
+    "src/components/expedicao/LdrShopeePanel.tsx",
+    "app/expedicao/ExpedicaoClient.tsx",
+    "app/expedicao/ExpedicaoShell.tsx",
+  ]) {
+    // Cada tag de abertura JSX, inteira (atributos em varias linhas).
+    for (const tag of fonte(rel).match(/<[a-zA-Z]+\b(?:[^<>{}]|\{(?:[^{}]|\{[^{}]*\})*\})*>/g) ?? []) {
+      if (/\shidden=/.test(tag)) {
+        assert.doesNotMatch(tag, /\b(block|flex|grid|inline-flex|inline-block)\b/, `${rel}: ${tag}`);
+      }
+    }
+  }
+  assert.match(fonte("src/components/expedicao/AjudaMetrica.tsx"), /\{aberto \? \(/);
+});
+
+test("clique fora num elemento focavel nao rouba o foco (M1)", () => {
+  const src = fonte("src/components/expedicao/AjudaMetrica.tsx");
+  assert.match(src, /fechar\(focoDentro && !focavel\)/);
+  assert.match(src, /alvo\.closest\(SELETOR_FOCAVEL\)/);
 });
 
 test("o `?` fecha com Esc, clique fora e devolve o foco; posicao fixa na viewport", () => {
