@@ -22,6 +22,8 @@ import {
   ERRO_DATA_FUTURA_ML,
   PREFIXO_PARCIAL_ML,
   coberturaMarcasLabel,
+  dataCompletaML,
+  dataParaFiltroML,
   eDataHistorica,
   eErroDataFuturaML,
   fmtFracao,
@@ -363,4 +365,48 @@ test("QA7: cards de contagem marcam PARCIAL como o card de disponivel", () => {
     const card = CLIENT_SRC.split(`payload.indicadores.${campo})`)[1]?.split("/>")[0] ?? "";
     assert.match(card, /subvalorContagemML\(\s*parcial,/, `${campo} sem marca de parcial`);
   }
+});
+
+test("D1: data parcial do input nao vira filtro; vazio limpa", () => {
+  // Digitar 01122026 emite estes valores antes do ano completo.
+  for (const parcial of ["0002-12-01", "0020-12-01", "0202-12-01"]) {
+    assert.equal(dataCompletaML(parcial), false, parcial);
+    assert.equal(dataParaFiltroML(parcial), null, parcial);
+  }
+  assert.equal(dataParaFiltroML("2026-12-01"), "2026-12-01");
+  assert.equal(dataParaFiltroML(""), "", "vazio continua limpando o filtro");
+  // Formato e calendario.
+  assert.equal(dataCompletaML("2019-12-31"), false, "ano < 2020");
+  assert.equal(dataCompletaML("2020-01-01"), true);
+  assert.equal(dataCompletaML("2026-02-30"), false);
+  assert.equal(dataCompletaML("2026-13-01"), false);
+  assert.equal(dataCompletaML("2028-02-29"), true, "bissexto");
+  assert.equal(dataCompletaML("26-12-01"), false);
+  assert.equal(dataCompletaML("lixo"), false);
+
+  // Wiring: o campo mostra o rascunho e so' aplica via dataParaFiltroML.
+  const input = CLIENT_SRC.split('type="date"')[1]?.split("/>")[0] ?? "";
+  assert.ok(input.includes("value={dataDigitada}"));
+  assert.ok(input.includes("onChange={(e) => digitarData(e.target.value)}"));
+  assert.ok(input.includes("onBlur={(e) => confirmarData(e.target.value)}"));
+  assert.match(input, /e\.key === "Enter"\) confirmarData/);
+  assert.ok(!input.includes("refDate: e.target.value"), "valor cru nao vai ao filtro");
+  for (const fn of ["const digitarData", "const confirmarData"]) {
+    const corpo = CLIENT_SRC.split(fn)[1]?.split("\n  };")[0] ?? "";
+    assert.ok(corpo.includes("dataParaFiltroML(valor)"), fn);
+  }
+  // Limpar e voltar zeram tambem o rascunho do campo.
+  for (const fn of ["const limpar = () => {", "const voltarParaUltima = () => {"]) {
+    const corpo = CLIENT_SRC.split(fn)[1]?.split("\n  };")[0] ?? "";
+    assert.ok(corpo.includes('setDataDigitada("")'), fn);
+  }
+});
+
+test("D2: 'Ver a ultima fotografia' move o foco para o campo de data", () => {
+  const voltar =
+    CLIENT_SRC.split("const voltarParaUltima = () => {")[1]?.split("\n  };")[0] ?? "";
+  assert.ok(voltar.includes('refDate: ""'));
+  assert.ok(voltar.includes("dataRef.current?.focus()"));
+  const input = CLIENT_SRC.split('type="date"')[1]?.split("/>")[0] ?? "";
+  assert.ok(input.includes("ref={dataRef}"));
 });

@@ -44,6 +44,7 @@ import {
   TITULO_INDISPONIVEL_ML,
   buildQueryML,
   coberturaMarcasLabel,
+  dataParaFiltroML,
   eDataHistorica,
   eErroDataFuturaML,
   fmtCobertura,
@@ -302,6 +303,10 @@ export default function MLFullEstoqueClient() {
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<ErroML | null>(null);
   const primeiroChipRef = useRef<HTMLButtonElement | null>(null);
+  const dataRef = useRef<HTMLInputElement | null>(null);
+  // O que esta no campo de data. So' vira filtro quando completo (ver
+  // `dataParaFiltroML`): digitar o ano nao dispara busca com "0002-12-01".
+  const [dataDigitada, setDataDigitada] = useState("");
   // Hoje em America/Sao_Paulo (o mesmo relogio da API), uma vez por montagem.
   const hoje = useMemo(() => hojeSaoPauloML(), []);
 
@@ -348,12 +353,33 @@ export default function MLFullEstoqueClient() {
 
   const limpar = () => {
     setFiltros(FILTROS_ML_VAZIOS);
+    setDataDigitada("");
     // O botao "Limpar filtros" some ao limpar: o foco vai para o primeiro
     // chip de marca, que esta sempre na tela, em vez de cair no <body>.
     primeiroChipRef.current?.focus();
   };
 
-  const voltarParaUltima = () => setFiltros((f) => ({ ...f, refDate: "" }));
+  const voltarParaUltima = () => {
+    setFiltros((f) => ({ ...f, refDate: "" }));
+    setDataDigitada("");
+    // O botao some com o erro: o foco vai para o campo de data, que esta
+    // sempre na tela, em vez de cair no <body>.
+    dataRef.current?.focus();
+  };
+
+  /** Digitando: aplica so' data completa ou vazio; parcial fica so' no campo. */
+  const digitarData = (valor: string) => {
+    setDataDigitada(valor);
+    const aplicar = dataParaFiltroML(valor);
+    if (aplicar !== null) setFiltros((f) => ({ ...f, refDate: aplicar }));
+  };
+
+  /** Blur/Enter: parcial nao vira filtro -- o campo volta ao filtro vigente. */
+  const confirmarData = (valor: string) => {
+    const aplicar = dataParaFiltroML(valor);
+    if (aplicar === null) setDataDigitada(filtros.refDate);
+    else setFiltros((f) => ({ ...f, refDate: aplicar }));
+  };
 
   const filtrosUI = (
     <div className="flex flex-col gap-3 w-full">
@@ -384,8 +410,13 @@ export default function MLFullEstoqueClient() {
           <input
             type="date"
             max={hoje}
-            value={filtros.refDate}
-            onChange={(e) => setFiltros((f) => ({ ...f, refDate: e.target.value }))}
+            ref={dataRef}
+            value={dataDigitada}
+            onChange={(e) => digitarData(e.target.value)}
+            onBlur={(e) => confirmarData(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") confirmarData(e.currentTarget.value);
+            }}
             className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
           />
         </label>

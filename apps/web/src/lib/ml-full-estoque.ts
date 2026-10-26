@@ -359,6 +359,34 @@ export function hojeSaoPauloML(agora: Date = new Date()): string {
 
 export const ERRO_DATA_FUTURA_ML = "Data no futuro: escolha até hoje.";
 
+/** Ano minimo plausivel para a fotografia: abaixo disso e' digitacao parcial. */
+export const ANO_MINIMO_DATA_ML = 2020;
+
+/**
+ * O `<input type="date">` emite valores parciais enquanto se digita o ano
+ * ("0002-12-01", "0020-12-01", "0202-12-01"). So' uma data AAAA-MM-DD que
+ * existe no calendario e com ano >= ANO_MINIMO_DATA_ML vai para o filtro.
+ */
+export function dataCompletaML(valor: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(valor);
+  if (!m) return false;
+  const [ano, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (ano < ANO_MINIMO_DATA_ML) return false;
+  const d = new Date(Date.UTC(ano, mes - 1, dia));
+  return (
+    d.getUTCFullYear() === ano && d.getUTCMonth() === mes - 1 && d.getUTCDate() === dia
+  );
+}
+
+/**
+ * Valor do campo -> valor do filtro. Vazio limpa (""); data completa aplica;
+ * parcial/implausivel devolve `null` = nao mexe no filtro.
+ */
+export function dataParaFiltroML(valor: string): string | null {
+  if (valor === "") return "";
+  return dataCompletaML(valor) ? valor : null;
+}
+
 /**
  * A API devolve 422 para data futura (D+1 em BRT). Marca fora da allowlist
  * tambem e' 422, mas a tela so' envia marcas da allowlist: com data no
