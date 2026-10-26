@@ -164,7 +164,7 @@ test("acima de 48 h e' limiar interno nos dois canais, nunca SLA", () => {
   for (const canal of ["shopee", "mercadolivre"] as const) {
     const k = montarRiscoAtual(totais(), [], canal).find((x) => x.chave === "over48h")!;
     assert.match(k.rotulo, /limiar interno/i);
-    assert.match(String(k.nota), /nao e' SLA/i);
+    assert.match(String(k.nota), /não é SLA/i);
   }
 });
 

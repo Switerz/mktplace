@@ -92,7 +92,25 @@ export function formatarPercentualComBase(
   if (!ehNumero(base) || base <= 0 || !ehNumero(numerador)) return TEXTO_INDISPONIVEL;
   const taxa = opcoes.taxa !== undefined ? opcoes.taxa : numerador / base;
   if (!ehNumero(taxa)) return TEXTO_INDISPONIVEL;
-  return `${formatarPercentual(taxa, opcoes)} · ${formatarBase(numerador, base)}`;
+  return `${percentualDeContagem(taxa, numerador, opcoes)} · ${formatarBase(numerador, base)}`;
+}
+
+/**
+ * QA T-0010 (M2): contagem MAIOR que zero cujo percentual arredonda para
+ * zero vira "<0,1%" (ou "<0,01%" com 2 casas). "0,0%" leria como nenhum.
+ */
+function percentualDeContagem(taxa: number, numerador: number, opcoes: OpcoesPercentual): string {
+  const casas = opcoes.casas ?? CASAS_PADRAO;
+  const texto = formatarPercentual(taxa, opcoes);
+  if (numerador > 0 && taxa > 0 && /^[0,]+%$/.test(texto)) {
+    return `<${decimal(casas).format(1 / 10 ** casas)}%`;
+  }
+  return texto;
+}
+
+/** Decimal pt-BR com casas fixas ("33,0"). Ausente vira "—". */
+export function formatarDecimal(v: number | null | undefined, casas = 1): string {
+  return ehNumero(v) ? decimal(casas).format(v + 0) : VALOR_AUSENTE;
 }
 
 /**

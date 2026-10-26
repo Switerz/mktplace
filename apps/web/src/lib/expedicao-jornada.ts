@@ -445,6 +445,11 @@ const MOTIVOS: Record<string, string> = {
   no_series_published: "nenhuma série publicada ainda",
   disabled: "a rota está desligada",
   feature_flag_disabled: "a rota está desligada",
+  // QA T-0010 (M3): os codigos que o backend real devolve hoje.
+  etapas_nao_fecham: "as etapas não fecham com a base (a tela não refaz a soma)",
+  desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
+  publicacao_desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
+  no_snapshot: "nenhuma fotografia publicada ainda",
 };
 
 /**

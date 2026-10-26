@@ -459,7 +459,9 @@ test("o menu continua atras da flag original", () => {
 
 test("o contrato documenta por que o ML nao tem prazo", () => {
   assert.match(CONTRATO, /0% preenchidos/);
-  assert.match(SEM_PRAZO_ML, /N\/D/);
+  // QA T-0010 (M2): a ausencia e' escrita "indisponível", nunca "N/D" nem 0.
+  assert.match(SEM_PRAZO_ML, /indisponível/);
+  assert.doesNotMatch(SEM_PRAZO_ML, /N\/D/);
 });
 
 
@@ -544,7 +546,8 @@ test("a URL e' lida antes da primeira busca, com ou sem a flag do ML", () => {
 
 test("urlPronta entra nas dependencias dos dois efeitos", () => {
   assert.match(CLIENTE, /\[chave, filtros, urlPronta\]/);
-  assert.match(CLIENTE, /\[chaveTendencia, urlPronta\]/);
+  // QA T-0010: a nova tentativa da tendencia entra nas dependencias.
+  assert.match(CLIENTE, /\[chaveTendencia, urlPronta, tentativaTendencia\]/);
 });
 
 test("voltar/avancar do navegador ressincroniza o canal", () => {
@@ -789,4 +792,65 @@ test("jornada TikTok: coorte rotulada, publicado em e selo de frescor; parcial a
   assert.match(html, /Parcial:/);
   assert.match(html, /1 dia\(s\) sem publicação na janela/);
   assert.match(html, /Indisponível neste canal: o TikTok não publica fila aberta/);
+});
+
+// ===========================================================================
+// QA T-0010 — menores (M2–M6) e lacunas (retry da tendencia, ? nas tabelas)
+// ===========================================================================
+import { formatarDecimal, formatarPercentualComBase as pctComBase } from "../src/lib/expedicao-formato.ts";
+import { formatarHoras as horasFmt, VALOR_SEM_PRAZO as SEM_PRAZO_VALOR, avisosDeCobertura as avisosCob } from "../src/lib/expedicao-contract.ts";
+
+test("M2: horas com virgula, 'indisponível' no lugar de N/D, '<0,1%' para contagem > 0", () => {
+  assert.equal(horasFmt(33), "33,0 h");
+  assert.equal(horasFmt(20), "20,0 h");
+  assert.equal(formatarDecimal(1.25, 1), "1,3");
+  assert.equal(SEM_PRAZO_VALOR, "indisponível");
+  assert.equal(pctComBase(1, 5000), "<0,1% · 1 de 5.000");
+  assert.equal(pctComBase(1, 50000, { casas: 2 }), "<0,01% · 1 de 50.000");
+  assert.equal(pctComBase(0, 5000), "0,0% · 0 de 5.000", "zero medido continua zero");
+});
+
+test("M3: os reason com prefixo de secao viram frase", () => {
+  for (const [r, esperado] of [
+    ["fila_aberta: etapas_nao_fecham", /^Fila aberta: as etapas não fecham com a base/],
+    ["coorte: desatualizada", /^Coorte: publicação desatualizada/],
+    ["coorte: publicacao_desatualizada", /^Coorte: publicação desatualizada/],
+    ["coorte: dias_sem_publicacao (3)", /^Coorte: 3 dia\(s\) sem publicação na janela$/],
+    ["coorte: table_not_migrated", /^Coorte: a tabela ainda não foi publicada nesta base$/],
+  ] as const) {
+    const t = explicarMotivo(r)!;
+    assert.match(t, esperado, r);
+    assert.doesNotMatch(t, /não detalhado/, r);
+  }
+});
+
+test("M5: textos de cobertura com acento e marca com o rotulo de exibicao", () => {
+  const [aviso] = avisosCob({
+    expected_accounts: [], observed_accounts: [], missing_accounts: [], unexpected_accounts: [], accounts: [],
+    brands_not_covered: ["apice"],
+  });
+  assert.match(aviso.texto, /^ÁPICE não é coberta por esta fonte e por isso não aparece nos números — ausência de cobertura, não backlog zero\.$/);
+  const contrato = readFileSync(join(RAIZ, "src/lib/expedicao-contract.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  for (const literal of contrato.match(/"[^"\n]*"/g) ?? []) {
+    assert.doesNotMatch(literal, /\bnao e'|\bnao ha\b|\bentao\b|\bUniao\b|\bnumeros\b/, literal);
+  }
+  assert.match(CLIENTE, /<td className="text-ink-muted">\{brandLabel\(l\.brand\)\}<\/td>/);
+  assert.match(CLIENTE, /\{brandLabel\(f\.brand\)\}/);
+});
+
+test("M4/M6: textos de estado comuns e fluxo vazio com estado proprio", () => {
+  const tk = readFileSync(join(RAIZ, "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+  for (const f of [CLIENTE, tk]) {
+    assert.match(f, /titulo=\{TEXTO_ESTADO\.carregando\}/);
+    assert.match(f, /titulo=\{TEXTO_ESTADO\.erro\}/);
+  }
+  assert.match(CLIENTE, /<StateBlock tipo="vazio" titulo=\{TEXTO_ESTADO\.vazio\} compacto \/>/);
+  assert.match(tk, /\{fluxo\.length === 0 \? \(\s*<p role="status"[^>]*>\s*Nenhum dia de pagamento na janela consultada\./);
+});
+
+test("lacunas: tendencia com nova tentativa e ? nos cabecalhos de contagem", () => {
+  assert.match(CLIENTE, /aoTentarDeNovo=\{\(\) => setTentativaTendencia\(\(n\) => n \+ 1\)\}/);
+  for (const k of ["overdue", "over48h", "stalled"]) {
+    assert.ok(CLIENTE.includes(`{ajudaDaFila("${k}")}`), k);
+  }
 });

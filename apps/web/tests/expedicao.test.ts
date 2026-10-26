@@ -255,9 +255,9 @@ test("stalled e servido como medida, nunca como slow + zombie", () => {
 
 test("48h e descrito como limiar INTERNO, nunca como SLA do marketplace", () => {
   assert.match(ROTULO_LIMIAR_48H, /limiar interno/i);
-  assert.match(EXPLICACAO_LIMIAR_48H, /nao e' SLA do marketplace/i);
+  assert.match(EXPLICACAO_LIMIAR_48H, /não é SLA do marketplace/i);
   const kpi = montarKpis(TOTAIS, []).find((k) => k.chave === "over48h");
-  assert.match(String(kpi?.nota), /nao e' SLA/i);
+  assert.match(String(kpi?.nota), /não é SLA/i);
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
   assert.ok(tela.includes("EXPLICACAO_LIMIAR_48H"), "a tela precisa exibir a ressalva");
   assert.ok(!/SLA da Shopee|SLA oficial|garantia de prazo/i.test(tela));
@@ -374,10 +374,12 @@ test("Kokeshi aparece como fora do escopo, nunca como zero", () => {
     brands_not_covered: ["kokeshi"],
   };
   const avisos = avisosDeCobertura(c);
-  const kokeshi = avisos.find((a) => a.texto.includes("kokeshi"));
+  // a marca aparece com o rotulo de exibicao (KOKESHI), como no resto da tela
+  const kokeshi = avisos.find((a) => a.texto.toLowerCase().includes("kokeshi"));
   assert.ok(kokeshi);
   assert.equal(kokeshi.tipo, "fora_do_escopo");
-  assert.match(kokeshi.texto, /nao backlog zero/i);
+  assert.match(kokeshi.texto, /não backlog zero/i);
+  assert.match(kokeshi.texto, /^KOKESHI não é coberta/);
   assert.ok(!avisos.some((a) => a.tipo === "faltando"));
 });
 

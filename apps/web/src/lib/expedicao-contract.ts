@@ -33,7 +33,7 @@ import {
   type ProblemaQualidade,
   type SeveridadeQualidade,
 } from "./expedicao-ux.ts";
-import { formatarInteiro } from "./expedicao-formato.ts";
+import { TEXTO_INDISPONIVEL, formatarDecimal, formatarInteiro } from "./expedicao-formato.ts";
 
 /** Os oito valores de `situacao` aceitos pela API. Allowlist fechada. */
 export const SITUACOES = [
@@ -66,13 +66,13 @@ export const JANELA_PADRAO_HORAS = 48;
 export const LIMIAR_OPERACIONAL_HORAS = 48;
 export const ROTULO_LIMIAR_48H = "Acima de 48h (limiar interno da Torre)";
 export const EXPLICACAO_LIMIAR_48H =
-  "Limiar operacional interno da Torre, nao e' SLA do marketplace: o prazo " +
+  "Limiar operacional interno da Torre, não é SLA do marketplace: o prazo " +
   "contratual aparece em Vencidos / Vence em 24h, que vem do ship_by_date da " +
   "Shopee.";
 /** O mesmo limiar num canal SEM prazo publicado (Mercado Livre). */
 export const EXPLICACAO_LIMIAR_48H_SEM_PRAZO =
-  "Limiar operacional interno da Torre, nao e' SLA do marketplace. O canal nao " +
-  "publica prazo de envio: nao ha vencidos a comparar.";
+  "Limiar operacional interno da Torre, não é SLA do marketplace. O canal não " +
+  "publica prazo de envio: não há vencidos a comparar.";
 
 /** Acima disto a fotografia e' considerada velha e a tela avisa. */
 export const SNAPSHOT_VELHO_HORAS = 6;
@@ -135,11 +135,12 @@ export function sanitizarCanal(
  * vencidos" para o ML seria uma afirmacao que ninguem mediu.
  */
 export const SEM_PRAZO_ML =
-  "O Mercado Livre nao publica prazo de despacho: nao ha vencidos nem 'no " +
-  "prazo' a medir. Zero aqui seria engano, entao a tela mostra N/D.";
+  "O Mercado Livre não publica prazo de despacho: não há vencidos nem “no " +
+  "prazo” a medir. Zero aqui seria engano, então a tela mostra “indisponível”.";
 
 export const ROTULO_SEM_PRAZO = "Prazo indisponível";
-export const VALOR_SEM_PRAZO = "N/D";
+/** QA T-0010 (M2): o mesmo texto de ausencia do formato unico, nao "N/D". */
+export const VALOR_SEM_PRAZO = TEXTO_INDISPONIVEL;
 
 /** O canal tem prazo contratual publicado pela fonte? */
 export function canalTemPrazo(canal: Canal): boolean {
@@ -564,8 +565,8 @@ export function montarKpis(
             valor: v(t?.deadline_unavailable_count),
             alerta: false,
             nota:
-              "Pedidos sem prazo de despacho publicado pela fonte. E' o backlog" +
-              " inteiro do canal, nao uma anomalia.",
+              "Pedidos sem prazo de despacho publicado pela fonte. É o backlog" +
+              " inteiro do canal, não uma anomalia.",
           } as Kpi,
         ]),
     {
@@ -583,7 +584,7 @@ export function montarKpis(
       rotulo: "Travados",
       valor: v(t?.stalled_count),
       alerta: (t?.stalled_count ?? 0) > 0,
-      nota: "Uniao de lentos e zumbis — nunca a soma dos dois.",
+      nota: "União de lentos e zumbis — nunca a soma dos dois.",
       notaCurta: "Lentos ou zumbis, sem contar duas vezes.",
     },
     { chave: "slow", rotulo: "Lentos vs baseline", valor: v(t?.slow_count), alerta: false },
@@ -668,8 +669,8 @@ export function avisosDeCobertura(c: Cobertura | null): AvisoCobertura[] {
     avisos.push({
       tipo: "fora_do_escopo",
       texto:
-        `${marca} nao e' coberta por esta fonte e por isso nao aparece nos ` +
-        "numeros — ausencia de cobertura, nao backlog zero.",
+        `${brandLabel(marca)} não é coberta por esta fonte e por isso não aparece nos ` +
+        "números — ausência de cobertura, não backlog zero.",
     });
   }
   return avisos;
@@ -781,7 +782,8 @@ export function paginaAtual(p: Paginacao | null): { pagina: number; total: numbe
 export function formatarHoras(h: number | null): string {
   if (h === null || !Number.isFinite(h)) return "—";
   if (h < 1) return `${Math.round(h * 60)} min`;
-  if (h < 48) return `${h.toFixed(1)} h`;
+  // QA T-0010 (M2): decimal pt-BR ("33,0 h"), como o resto da Expedicao.
+  if (h < 48) return `${formatarDecimal(h, 1)} h`;
   return `${Math.floor(h / 24)} d`;
 }
 
@@ -877,7 +879,7 @@ export function montarBarraDeQualidade(
       severidade: "alerta",
       texto:
         `${emAlerta.length} marca(s) com a fonte em alerta: ` +
-        `${emAlerta.map((f) => f.brand).join(", ")}.`,
+        `${emAlerta.map((f) => brandLabel(f.brand)).join(", ")}.`,
     });
   }
 

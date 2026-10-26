@@ -115,6 +115,8 @@ import LayoutExpedicao, {
   CLASSE_RAIZ_EXPEDICAO,
   CLASSE_TABELA,
   CorpoGestor,
+  EstadoSecao,
+  TEXTO_ESTADO,
 } from "@/components/expedicao/LayoutExpedicao";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import {
@@ -482,6 +484,8 @@ export default function ExpedicaoClient({
     () => comMarcaNaQuery(queryDaTendenciaEmDias(janela, filtros.channel), marcaAtiva),
     [janela, filtros.channel, marcaAtiva],
   );
+  // QA T-0010: erro da tendencia com "Tentar novamente".
+  const [tentativaTendencia, setTentativaTendencia] = useState(0);
   const chaveTendVigente = useRef(chaveTendencia);
   chaveTendVigente.current = chaveTendencia;
 
@@ -491,6 +495,7 @@ export default function ExpedicaoClient({
     let vivo = true;
     setCarregandoTendencia(true);
     setErroTendencia(false);
+    void tentativaTendencia; // nova tentativa refaz a busca com a mesma chave
     buscarExpedicao(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
       headers: { Accept: "application/json" },
     })
@@ -511,7 +516,7 @@ export default function ExpedicaoClient({
     return () => {
       vivo = false;
     };
-  }, [chaveTendencia, urlPronta]);
+  }, [chaveTendencia, urlPronta, tentativaTendencia]);
 
   // EXPEDICAO-SHOPEE-LDR-1: a rota da LDR tambem traz a fila aberta separada
   // em vendedor x FBS. UMA leitura, repartida entre o "Risco atual" e o painel.
@@ -570,6 +575,12 @@ export default function ExpedicaoClient({
 
   // Nova tentativa: um objeto de filtros novo, com a MESMA chave, refaz a
   // busca (o efeito depende de `filtros`) sem mudar a requisicao.
+  /** O `?` de uma medida da fila, no canal atual (cabecalhos de tabela). */
+  const ajudaDaFila = (kpi: string) => {
+    const chave = chaveDoKpiDaFila(filtros.channel, kpi);
+    return chave ? <Ajuda chave={chave} /> : null;
+  };
+
   const tentarDeNovo = useCallback(() => setFiltros((f) => ({ ...f })), []);
 
   const alternarSituacao = useCallback((s: Situacao) => {
@@ -864,9 +875,11 @@ export default function ExpedicaoClient({
           fotografia velha caindo fora da janela — por isso a linha diz de
           quando e' a ultima fotografia. */}
       {estadoTend === "erro" && (
-        <p role="alert" className="py-2 text-sm text-crit-ink">
-          Tendência indisponível agora.
-        </p>
+        <EstadoSecao
+          tipo="erro"
+          titulo="Tendência indisponível agora."
+          aoTentarDeNovo={() => setTentativaTendencia((n) => n + 1)}
+        />
       )}
       {estadoTend === "vazia" && (
         <p role="status" className="py-2 text-sm text-ink-muted">
@@ -985,9 +998,17 @@ export default function ExpedicaoClient({
               <th scope="col">Marca</th>
               <th scope="col" className="w-[34%]">Distribuição</th>
               <th scope="col" className="text-right">Backlog</th>
-              {temPrazo && <th scope="col" className="text-right">Vencidos</th>}
-              <th scope="col" className="text-right">Acima de 48h</th>
-              <th scope="col" className="text-right">Travados</th>
+              {temPrazo && (
+                <th scope="col" className="text-right">
+                  Vencidos {ajudaDaFila("overdue")}
+                </th>
+              )}
+              <th scope="col" className="text-right">
+                Acima de 48h {ajudaDaFila("over48h")}
+              </th>
+              <th scope="col" className="text-right">
+                Travados {ajudaDaFila("stalled")}
+              </th>
               <th scope="col" title={EXPLICACAO_FONTE}>Fonte</th>
             </tr>
           </thead>
@@ -1125,7 +1146,7 @@ export default function ExpedicaoClient({
                     >
                       {l.shop_account}
                     </th>
-                    <td className="text-ink-muted">{l.brand}</td>
+                    <td className="text-ink-muted">{brandLabel(l.brand)}</td>
                     {temPrazo && (
                       <td className="text-ink-muted">{dataCurta(l.dispatch_deadline)}</td>
                     )}
@@ -1212,7 +1233,7 @@ export default function ExpedicaoClient({
             {frescor.map((f) => (
               <tr key={f.brand} className="border-t border-line">
                 <th scope="row" className="text-left font-medium text-ink">
-                  {f.brand}
+                  {brandLabel(f.brand)}
                 </th>
                 <td className={f.alerta ? "text-warn-ink" : "text-ink-muted"}>
                   {f.rotulo}
@@ -1263,7 +1284,7 @@ export default function ExpedicaoClient({
       // Os estados sao os MESMOS componentes do TikTok (T-0010).
       estado={
         <>
-          {estado === "carregando" && <StateBlock tipo="carregando" titulo="Carregando fotografia…" />}
+          {estado === "carregando" && <StateBlock tipo="carregando" titulo={TEXTO_ESTADO.carregando} />}
           {estado === "canal_desligado" && (
             <StateBlock
               tipo="indisponivel"
@@ -1290,15 +1311,12 @@ export default function ExpedicaoClient({
           {estado === "erro" && (
             <StateBlock
               tipo="erro"
-              titulo="Não foi possível carregar a Expedição agora."
+              titulo={TEXTO_ESTADO.erro}
               acao={<RetryButton onClick={tentarDeNovo} />}
             />
           )}
           {estado === "fotografia_vazia" && (
-            <StateBlock
-              tipo="vazio"
-              titulo="Backlog zerado nesta fotografia. Nenhum pedido aguardando expedição."
-            />
+            <StateBlock tipo="vazio" titulo={TEXTO_ESTADO.vazio} compacto />
           )}
         </>
       }

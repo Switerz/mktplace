@@ -43,6 +43,15 @@ export const CLASSE_CABECALHO =
  */
 export const CLASSE_RAIZ_EXPEDICAO = "mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4";
 
+/**
+ * QA T-0010 (M4): os MESMOS textos de estado nos tres canais.
+ */
+export const TEXTO_ESTADO = {
+  carregando: "Carregando os dados do canal…",
+  erro: "Não foi possível carregar os dados deste canal agora.",
+  vazio: "Nenhum pedido aguardando expedição nesta publicação.",
+} as const;
+
 export default function LayoutExpedicao({
   cabecalho,
   avisos,

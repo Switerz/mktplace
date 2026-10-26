@@ -65,6 +65,7 @@ import LayoutExpedicao, {
   CLASSE_RAIZ_EXPEDICAO,
   CLASSE_TABELA,
   CorpoGestor,
+  TEXTO_ESTADO,
 } from "@/components/expedicao/LayoutExpedicao";
 import { Ajuda, KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
 import {
@@ -708,6 +709,12 @@ export default function TikTokDispatchPanel({
       }
       acao={<Disclosure rotulo="Como ler">{EXPLICACAO_FLUXO}</Disclosure>}
     >
+      {/* QA T-0010 (M6): sem dia de pagamento na janela, estado de vazio. */}
+      {fluxo.length === 0 ? (
+        <p role="status" className="px-4 py-3 text-sm text-ink-muted">
+          Nenhum dia de pagamento na janela consultada.
+        </p>
+      ) : (
       <div className="max-h-96 overflow-auto">
         <table className={CLASSE_TABELA}>
           <caption className="sr-only">
@@ -774,6 +781,7 @@ export default function TikTokDispatchPanel({
           </tbody>
         </table>
       </div>
+      )}
     </Panel>
   );
 
@@ -822,11 +830,11 @@ export default function TikTokDispatchPanel({
       // no selo do cabecalho e na barra de qualidade.
       estado={
         <>
-          {estado === "carregando" ? <StateBlock tipo="carregando" titulo="Carregando a série…" /> : null}
+          {estado === "carregando" ? <StateBlock tipo="carregando" titulo={TEXTO_ESTADO.carregando} /> : null}
           {estado === "erro" ? (
             <StateBlock
               tipo="erro"
-              titulo="Não foi possível carregar a série."
+              titulo={TEXTO_ESTADO.erro}
               descricao={erro ? `Falha: ${erro}.` : undefined}
               acao={<RetryButton onClick={() => void carregar()} />}
             />

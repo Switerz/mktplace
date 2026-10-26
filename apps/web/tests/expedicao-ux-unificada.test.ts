@@ -234,7 +234,7 @@ test("a fotografia da fila repete a idade e o veredito que ja' existiam", () => 
       efetivoEm: "2026-10-13T12:00:00Z",
     },
   );
-  assert.equal(f.idade, "30.0 h");
+  assert.equal(f.idade, "30,0 h", "decimal pt-BR");
   assert.equal(f.desatualizada, true);
   assert.ok(!("automacao" in f), "sem modo de publicacao: a API ainda nao o prova");
   const nada = fotografiaDaFila(null);
