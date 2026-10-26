@@ -69,8 +69,12 @@ export const CLASS_TOM_ML: Record<ClassificacaoML, string> = {
 };
 
 export interface InventarioML {
+  /**
+   * Ordinal da linha NESTA resposta (1..n, ordem operacional). A API e'
+   * publica: o ID do inventario do ML nao viaja, nem derivado dele.
+   */
+  posicao: number;
   brand: string;
-  inventory_id: string;
   read_status: string;
   eh_full: boolean;
   disponivel: number | null;

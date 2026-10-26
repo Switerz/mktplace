@@ -9,6 +9,9 @@ O QUE ESTE ARQUIVO PROTEGE
    por varios anuncios aparece UMA vez, e o total da marca nao multiplica por
    anuncio. Se o agregado de marca divergir da soma por inventario (o que um
    somatorio por anuncio produziria), a rota recusa com 503.
+3. **Nenhum identificador do ML na API publica.** `seller_id` e
+   `inventory_id` nao saem no JSON (nem derivados); a linha tem so' o
+   ordinal `posicao` dentro da resposta.
 
 DUAS CAMADAS DE TESTE
 ---------------------
@@ -101,6 +104,23 @@ INVENTARIOS = [
     _inv("kokeshi", "S-K", "INV-K1", disp=7, nao=0, tr=0, un=0,
          classe="SEM_GIRO_CANDIDATO", ref=ANTERIOR),
 ]
+
+#: O ID do inventario NAO sai na resposta (API publica, sem auth). Nos testes,
+#: cada linha do fixture e' reconhecida por (marca, classificacao) -- par unico
+#: neste fixture, garantido pelo assert abaixo.
+CHAVE = {i["inventory_id"]: (i["brand"], i["classificacao_torre"])
+         for i in INVENTARIOS}
+assert len(set(CHAVE.values())) == len(CHAVE), "fixture ambiguo"
+IDS_FICTICIOS = sorted(CHAVE)
+
+
+def _chave(i):
+    return (i.brand, i.classificacao_torre)
+
+
+def _linha(resposta, inventory_id):
+    return next(i for i in resposta.inventarios
+                if _chave(i) == CHAVE[inventory_id])
 
 STATUS = [
     {"ref_date": REF, "brand": "barbours", "seller_id": "S-B",
@@ -293,6 +313,24 @@ def test_seller_id_nao_sai_no_payload():
     assert "seller_id" not in MarcaEstoque.model_fields
 
 
+def test_inventory_id_nao_sai_no_payload_nem_e_selecionado():
+    """API publica: o ID do inventario do ML nao viaja, nem derivado dele."""
+    from app.schemas.ml_full_stock import InventarioEstoque
+    assert "inventory_id" not in InventarioEstoque.model_fields
+    select = str(svc.SQL_INVENTARIOS).split("FROM")[0]
+    assert "inventory_id" not in select, "o ID nao pode nem chegar ao servico"
+
+
+def _chaves_json(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _chaves_json(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _chaves_json(v)
+
+
 def test_nao_reusa_ml_fulfillment():
     """Modalidade de envio NAO e' estoque."""
     assert "ml_fulfillment" not in SERVICE_SRC.replace(
@@ -435,7 +473,7 @@ def test_snapshot_read_only_e_o_primeiro_comando():
 
 def test_inventario_compartilhado_conta_uma_vez():
     r = _bloco_falso()
-    b1 = [i for i in r.inventarios if i.inventory_id == "INV-B1"]
+    b1 = [i for i in r.inventarios if _chave(i) == CHAVE["INV-B1"]]
     assert len(b1) == 1, "inventario compartilhado repetido por anuncio"
     assert b1[0].anuncios == 3 and b1[0].compartilhado is True
     assert b1[0].disponivel == 10
@@ -455,7 +493,7 @@ def test_agregado_que_somou_por_anuncio_e_recusado():
 
 def test_sem_leitura_fica_nulo_e_declarado():
     r = _bloco_falso()
-    b3 = next(i for i in r.inventarios if i.inventory_id == "INV-B3")
+    b3 = _linha(r, "INV-B3")
     assert b3.classificacao_torre == "SEM_LEITURA"
     assert (b3.disponivel, b3.nao_disponivel, b3.transfer) == (None, None, None)
     assert b3.cobertura_torre_dias is None
@@ -464,7 +502,7 @@ def test_sem_leitura_fica_nulo_e_declarado():
     assert r.indicadores.total_parcial is True
     assert any("sem leitura" in m for m in r.indicadores.motivos_total_parcial)
     # Zero MEDIDO continua zero.
-    b2 = next(i for i in r.inventarios if i.inventory_id == "INV-B2")
+    b2 = _linha(r, "INV-B2")
     assert b2.disponivel == 0
 
 
@@ -503,10 +541,10 @@ def test_indicadores_do_escopo():
 
 def test_fora_do_full_so_lista_quando_pedido():
     r = _bloco_falso()
-    assert "INV-B4" not in {i.inventory_id for i in r.inventarios}
+    assert CHAVE["INV-B4"] not in {_chave(i) for i in r.inventarios}
     assert r.total_no_filtro == 6
     r2 = _bloco_falso(incluir_fora_do_full=True)
-    assert "INV-B4" in {i.inventory_id for i in r2.inventarios}
+    assert CHAVE["INV-B4"] in {_chave(i) for i in r2.inventarios}
     assert r2.indicadores == r.indicadores, "cartoes nao seguem a listagem"
 
 
@@ -530,7 +568,7 @@ def test_filtro_de_marca_e_data_anterior():
     assert r.frescor.ref_date == ANTERIOR
     assert r.indicadores.disponivel_full == 7
     assert r.indicadores.total_parcial is False
-    assert [i.inventory_id for i in r.inventarios] == ["INV-K1"]
+    assert [_chave(i) for i in r.inventarios] == [CHAVE["INV-K1"]]
 
     r2 = _bloco_falso(brands=["lescent"])
     assert r2.cobertura.marcas_esperadas == ["lescent"]
@@ -568,6 +606,25 @@ def test_resposta_ok_pelo_endpoint(cliente_factory):
     kok = next(m for m in corpo["marcas"] if m["brand"] == "kokeshi")
     assert kok["disponivel_full"] is None
     assert "seller_id" not in r.text and "S-B" not in r.text
+
+
+@pytest.mark.parametrize("fora_do_full", [False, True])
+def test_resposta_ok_nao_expoe_id_de_inventario(cliente_factory, fora_do_full):
+    """Procura no CORPO INTEIRO serializado: nem a chave, nem nenhum ID."""
+    r = cliente_factory(SessaoFalsa()).get(
+        ROTA, params={"incluir_fora_do_full": str(fora_do_full).lower()})
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["status"] == "ok"
+    # Sanidade: as linhas estao la' (senao o teste passaria por vazio).
+    assert len(corpo["inventarios"]) == (7 if fora_do_full else 6)
+    assert '"inventory_id"' not in r.text
+    assert "inventory_id" not in set(_chaves_json(corpo))
+    for inv_id in IDS_FICTICIOS:
+        assert inv_id not in r.text, f"{inv_id} vazou na resposta publica"
+    assert "INV-" not in r.text
+    assert [i["posicao"] for i in corpo["inventarios"]] == list(
+        range(1, len(corpo["inventarios"]) + 1))
 
 
 # ===========================================================================
@@ -665,15 +722,17 @@ def test_pg_dados_normais_batem_com_a_sessao_falsa(engine, sessao):
 def test_pg_ordem_operacional(engine, sessao):
     _recriar(engine)
     r = _bloco(sessao)
-    assert [i.inventory_id for i in r.inventarios] == [
-        "INV-B2", "INV-B1", "INV-B3", "INV-R1", "INV-L1", "INV-L2"]
+    assert [_chave(i) for i in r.inventarios] == [CHAVE[k] for k in (
+        "INV-B2", "INV-B1", "INV-B3", "INV-R1", "INV-L1", "INV-L2")]
+    # A chave da tela e' o ordinal na resposta, 1..n na ordem operacional.
+    assert [i.posicao for i in r.inventarios] == [1, 2, 3, 4, 5, 6]
 
 
 @pg
 def test_pg_compartilhado_conta_uma_vez(engine, sessao):
     _recriar(engine)
     r = _bloco(sessao)
-    assert [i.inventory_id for i in r.inventarios].count("INV-B1") == 1
+    assert [_chave(i) for i in r.inventarios].count(CHAVE["INV-B1"]) == 1
     assert next(m for m in r.marcas if m.brand == "barbours").disponivel_full == 10
     assert r.indicadores.disponivel_full == 570
 
@@ -691,7 +750,7 @@ def test_pg_agregado_por_anuncio_e_recusado(engine, sessao):
 def test_pg_sem_leitura_e_marca_sem_fotografia(engine, sessao):
     _recriar(engine)
     r = _bloco(sessao)
-    r1 = next(i for i in r.inventarios if i.inventory_id == "INV-R1")
+    r1 = _linha(r, "INV-R1")
     assert (r1.disponivel, r1.nao_disponivel, r1.transfer) == (None, None, None)
     assert r.cobertura.marcas_sem_fotografia == ["kokeshi"]
     kok = next(m for m in r.marcas if m.brand == "kokeshi")
@@ -711,7 +770,8 @@ def test_pg_data_e_marca(engine, sessao):
 def test_pg_fora_do_full_e_truncamento(engine, sessao):
     _recriar(engine)
     r = _bloco(sessao, incluir_fora_do_full=True)
-    assert r.inventarios[-1].inventory_id == "INV-B4"
+    assert _chave(r.inventarios[-1]) == CHAVE["INV-B4"]
+    assert r.inventarios[-1].posicao == 7
     assert r.total_no_filtro == 7
     r2 = _bloco(sessao, limite=2)
     assert r2.truncado is True and len(r2.inventarios) == 2
@@ -750,3 +810,8 @@ def test_pg_endpoint_ponta_a_ponta(engine, sessao, monkeypatch):
     assert corpo["cobertura"]["marcas_sem_fotografia"] == []
     assert corpo["indicadores"]["total_parcial"] is True
     assert "S-B" not in r.text
+    assert corpo["inventarios"], "sem linhas o teste de vazamento e' vazio"
+    assert '"inventory_id"' not in r.text
+    assert "inventory_id" not in set(_chaves_json(corpo))
+    for inv_id in IDS_FICTICIOS:
+        assert inv_id not in r.text, f"{inv_id} vazou na resposta publica"

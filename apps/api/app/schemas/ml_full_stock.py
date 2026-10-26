@@ -38,11 +38,15 @@ MotivoIndisponivel = Literal[
 
 
 class InventarioEstoque(BaseModel):
-    """Uma linha por inventario. `seller_id` NAO viaja: nao e' necessario para
-    agir e e' identificador de conta."""
+    """Uma linha por inventario. `seller_id` e `inventory_id` NAO viajam: a API
+    da Torre e' publica e ambos sao identificadores do ML. A agregacao continua
+    por inventario no banco; so' o ID nao sai."""
 
+    #: Ordinal da linha NESTA resposta (1..n, na ordem operacional). Chave
+    #: estavel para a tela; sem relacao nenhuma com o ID do inventario e nao
+    #: e' estavel entre respostas diferentes.
+    posicao: int = Field(ge=1)
     brand: str
-    inventory_id: str
     read_status: str
     eh_full: bool
 

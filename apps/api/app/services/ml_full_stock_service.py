@@ -270,9 +270,10 @@ SQL_TOTAL_NO_FILTRO = text(f"""
 
 #: Ordem OPERACIONAL: ruptura, baixo, e logo depois SEM_LEITURA -- "nao
 #: sabemos" precisa ser visto antes do que esta' sobrando. Desempate pela
-#: chave completa para ordem estavel.
+#: chave completa para ordem estavel. `inventory_id` entra SO' no ORDER BY:
+#: nao e' selecionado, para nao poder vazar na API publica.
 SQL_INVENTARIOS = text(f"""
-    SELECT ref_date, brand, inventory_id, read_status, eh_full,
+    SELECT ref_date, brand, read_status, eh_full,
            disponivel, nao_disponivel, transfer,
            total_coerente, detalhe_coerente,
            anuncios, anuncios_ativos, anuncios_full,
@@ -572,8 +573,10 @@ def get_ml_full_estoque_block(
 
     inventarios = [
         InventarioEstoque(
+            # Ordinal na resposta, nao derivado do ID (hash de ID curto e'
+            # reversivel por forca bruta).
+            posicao=posicao,
             brand=r["brand"],
-            inventory_id=r["inventory_id"],
             read_status=r["read_status"],
             eh_full=bool(r["eh_full"]),
             disponivel=_opt_int(r["disponivel"]),
@@ -592,7 +595,7 @@ def get_ml_full_estoque_block(
             vinculo_vendas=r["vinculo_vendas"],
             ref_date=r["ref_date"],
         )
-        for r in linhas
+        for posicao, r in enumerate(linhas, start=1)
     ]
 
     publicados = [fatos_marca[m]["published_at"] for m in com_foto

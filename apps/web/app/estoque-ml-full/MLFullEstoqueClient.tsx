@@ -194,7 +194,6 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
         <thead>
           <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
             <th scope="col" className="px-4 py-3">Marca</th>
-            <th scope="col" className="px-4 py-3">Inventário</th>
             <th scope="col" className="px-4 py-3 text-right">Disponível</th>
             <th scope="col" className="px-4 py-3 text-right">Não disponível</th>
             <th scope="col" className="px-4 py-3 text-right">Demanda 28d</th>
@@ -204,13 +203,13 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
           </tr>
         </thead>
         <tbody>
+          {/* key = ordinal da resposta: o ID do inventario nao sai na API publica. */}
           {inventarios.map((i) => (
             <tr
-              key={`${i.brand}-${i.inventory_id}`}
+              key={i.posicao}
               className="border-b border-slate-100 last:border-0 align-top"
             >
               <td className="px-4 py-3 whitespace-nowrap text-slate-600">{tituloMarca(i.brand)}</td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-700">{i.inventory_id}</td>
               <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
                 {/* `null` = sem leitura: travessao, nunca 0. */}
                 {fmtOpcional(i.disponivel)}

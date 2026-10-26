@@ -191,6 +191,16 @@ test("a tela nao soma estoque por anuncio", () => {
   assert.ok(!CLIENT_SRC.includes(".reduce("), "a tela nao recalcula totais");
 });
 
+test("a tela nao exibe nem usa o ID do inventario (API publica)", () => {
+  const LIB_SRC = readFileSync(join(RAIZ, "src", "lib", "ml-full-estoque.ts"), "utf8");
+  // `unidades_28d_sem_inventory_id` e' contagem agregada e pode ficar.
+  const semContagem = (s: string) => s.replaceAll("unidades_28d_sem_inventory_id", "");
+  assert.ok(!semContagem(LIB_SRC).includes("inventory_id"), "tipo ainda tem o ID");
+  assert.ok(!semContagem(CLIENT_SRC).includes("inventory_id"), "tela ainda usa o ID");
+  assert.ok(CLIENT_SRC.includes("key={i.posicao}"), "a key e' o ordinal da resposta");
+  assert.ok(!/<th[^>]*>\s*Inventário\s*<\/th>/.test(CLIENT_SRC), "coluna do ID removida");
+});
+
 test("rotulos de frescor e cobertura", () => {
   assert.equal(
     frescorLabelML(frescor()),
