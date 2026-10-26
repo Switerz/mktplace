@@ -1,6 +1,6 @@
-"""Shadow de TikTok Ads (inerte): transform, travas, publicacao e migration 030.
+"""Shadow de TikTok Ads (inerte): transform, travas, publicacao e migration 031.
 
-Sem banco. A 030 e o publicador sao executados contra PostgreSQL real
+Sem banco. A 031 e o publicador sao executados contra PostgreSQL real
 descartavel pelo script de validacao do gate.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ import pytest
 from pipelines import publish_tiktok_ads_daily_shadow as pub
 from pipelines.transforms import tiktok_ads_shadow as T
 
-MIG = Path(__file__).resolve().parents[2] / "apps" / "api" / "alembic" / "versions" / "030_create_fact_tiktok_ads_daily_shadow.py"
+MIG = Path(__file__).resolve().parents[2] / "apps" / "api" / "alembic" / "versions" / "031_create_fact_tiktok_ads_daily_shadow.py"
 D1, D2 = date(2026, 10, 14), date(2026, 10, 15)
 
 
@@ -177,7 +177,7 @@ def test_travas(amb, monkeypatch):
         pub.run(apply=True, hoje=date(2026, 10, 20))
     monkeypatch.setenv(pub.FLAG_AMBIENTE, "true")
     monkeypatch.setattr(pub, "tabela_destino_existe", lambda: False)
-    with pytest.raises(pub.PublicacaoRecusada, match="030"):
+    with pytest.raises(pub.PublicacaoRecusada, match="031"):
         pub.run(apply=True, hoje=date(2026, 10, 20))
     monkeypatch.setattr(pub, "_ler", lambda i, f: None)
     with pytest.raises(pub.PublicacaoRecusada, match="fonte_inexistente"):
@@ -214,14 +214,14 @@ def test_auditoria_marca_tiktok_como_1():
 
 
 # ---------------------------------------------------------------------------
-# Migration 030 (estatico)
+# Migration 031 (estatico)
 # ---------------------------------------------------------------------------
-def test_migration_030():
+def test_migration_031():
     sys.modules.setdefault("alembic", types.SimpleNamespace(op=None))
-    spec = importlib.util.spec_from_file_location("m030", MIG)
+    spec = importlib.util.spec_from_file_location("m031", MIG)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    assert (m.revision, m.down_revision) == ("030", "029")
+    assert (m.revision, m.down_revision) == ("031", "030")
     sql = " ".join(m.UPGRADE_SQL)
     assert "ck_ftads_estado_metricas" in sql and "fonte = 'integrado_leilao'" in sql
     assert "brand IN ('apice', 'barbours')" in sql and sql.count("<> 'NaN'") == 2

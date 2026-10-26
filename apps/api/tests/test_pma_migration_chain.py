@@ -48,7 +48,9 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: A 028 e' do PR #78 (DRE CMV), tambem sobre a 027: quem mesclar por ultimo
 #: reencadeia o down_revision e ajusta este pino.
 #: Avancado para 030 pelo Gate EXPEDICAO-SHOPEE-LDR-1 (LDR operacional da Shopee).
-HEAD_ESPERADO = "030"
+#: Avancado para 031 pelo Gate TIKTOK-ADS-PRODUCTIZATION-1 (shadow de TikTok Ads),
+#: encadeada SOBRE a 030 do LDR (nasceu 030 no PR #92 e foi renumerada).
+HEAD_ESPERADO = "031"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta

@@ -3,13 +3,13 @@
 Le `raw.tiktok_ads_campaign_daily` e `raw.tiktok_ads_coverage` no Data Mart
 (sessao READ ONLY), monta (dia, marca, escopo) por
 `pipelines.transforms.tiktok_ads_shadow` e, SO' com as tres travas, grava em
-`marts.fact_tiktok_ads_daily_shadow` (migration 030, NAO aplicada) -- uma
+`marts.fact_tiktok_ads_daily_shadow` (migration 031, NAO aplicada) -- uma
 tabela que NENHUM consumidor le'.
 
 TRES TRAVAS (todas obrigatorias)
 ---------------------------------
 1. `--apply`;  2. `TIKTOK_ADS_SHADOW_PUBLISH_ENABLED=true`;
-3. a tabela da 030 existindo no Neon (`to_regclass`).
+3. a tabela da 031 existindo no Neon (`to_regclass`).
 
 Fora isso: dry-run (agregados) ou recusa explicita. Nada e' gravado.
 
@@ -187,7 +187,7 @@ def run(apply: bool = False, hoje: date | None = None) -> dict:
     if fonte is None:
         raise PublicacaoRecusada("fonte_inexistente: tabelas raw.tiktok_ads_* ausentes")
     if not tabela_destino_existe():
-        raise PublicacaoRecusada("fato_inexistente: migration 030 nao aplicada")
+        raise PublicacaoRecusada("fato_inexistente: migration 031 nao aplicada")
     if not saida:
         raise PublicacaoRecusada("sem_linhas_publicaveis")
     sid = audit_start(len(saida))
@@ -203,7 +203,7 @@ def run(apply: bool = False, hoje: date | None = None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Shadow TikTok Ads (exige --apply + flag + migration 030).")
+    ap = argparse.ArgumentParser(description="Shadow TikTok Ads (exige --apply + flag + migration 031).")
     ap.add_argument("--apply", action="store_true", help="publica; sem ela o run e' dry-run")
     a = ap.parse_args(argv)
     try:
