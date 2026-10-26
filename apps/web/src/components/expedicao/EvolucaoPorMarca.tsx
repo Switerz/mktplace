@@ -32,14 +32,13 @@ import {
   type SerieMarca,
 } from "@/lib/expedicao-evolucao";
 import type { RespostaTendencia } from "@/lib/expedicao-contract";
+import { formatarInteiro } from "@/lib/expedicao-formato";
 
 const L = 120;
 const A = 28;
 const PAD = 3;
 
-function inteiro(n: number): string {
-  return n.toLocaleString("pt-BR");
-}
+const inteiro = formatarInteiro;
 
 function Sparkline({ serie, dominioX }: { serie: SerieMarca; dominioX: [number, number] }) {
   const [ativo, setAtivo] = useState<number | null>(null);

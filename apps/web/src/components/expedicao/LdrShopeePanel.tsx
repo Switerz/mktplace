@@ -32,8 +32,9 @@ import {
   textoDoEstado,
   type RespostaLdrShopee,
 } from "@/lib/expedicao-shopee-ldr";
+import { formatarInteiro } from "@/lib/expedicao-formato";
 
-const numero = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+const numero = formatarInteiro;
 const diaCurto = (iso: string) => {
   const [, m, d] = iso.split("-");
   return `${d}/${m}`;

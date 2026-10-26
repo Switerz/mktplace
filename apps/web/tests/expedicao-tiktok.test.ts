@@ -298,3 +298,98 @@ test("a query carrega evento e janela", () => {
 test("a janela inicial e' 7 dias + hoje", () => {
   assert.equal(JANELA_INICIAL_DIAS, 7);
 });
+
+// ===========================================================================
+// T-0010 — formato unico de percentual da Expedicao
+// ===========================================================================
+import {
+  TEXTO_INDISPONIVEL,
+  formatarBase,
+  formatarDeltaPp,
+  formatarPercentual,
+  formatarPercentualComBase,
+  rotuloCoorte,
+  rotuloJanela,
+} from "../src/lib/expedicao-formato.ts";
+import { formatarTaxaLdr } from "../src/lib/expedicao-shopee-ldr.ts";
+import { readFileSync as lerFonte } from "node:fs";
+import { join as juntar } from "node:path";
+
+test("percentual com base: pt-BR, 1 casa por padrao, base ao lado", () => {
+  assert.equal(formatarPercentualComBase(62, 1820), "3,4% · 62 de 1.820");
+  assert.equal(formatarPercentualComBase(62, 1820, { casas: 2 }), "3,41% · 62 de 1.820");
+  assert.equal(formatarPercentualComBase(0, 50), "0,0% · 0 de 50", "zero medido continua zero");
+  assert.equal(formatarPercentualComBase(1820, 1820), "100,0% · 1.820 de 1.820");
+});
+
+test("base 0, null, ausente ou negativa e' 'indisponível', nunca 0%", () => {
+  for (const base of [0, null, undefined, -3, Number.NaN]) {
+    assert.equal(formatarPercentualComBase(0, base as number), TEXTO_INDISPONIVEL, String(base));
+    assert.equal(formatarBase(0, base as number), TEXTO_INDISPONIVEL, String(base));
+  }
+  assert.equal(TEXTO_INDISPONIVEL, "indisponível");
+  assert.equal(formatarPercentualComBase(null, 10), TEXTO_INDISPONIVEL, "numerador ausente");
+});
+
+test("arredondamento: meia unidade para longe do zero, sem '-0'", () => {
+  // o valor exato do double decide, como no toFixed de antes
+  assert.equal(formatarPercentual(0.0345), `${(0.0345 * 100).toFixed(1).replace(".", ",")}%`);
+  assert.equal(formatarPercentual(0.125), "12,5%");
+  assert.equal(formatarPercentual(0.12345, { casas: 2 }), "12,35%");
+  assert.equal(formatarPercentual(1 / 3), "33,3%");
+  assert.equal(formatarPercentual(2 / 3), "66,7%");
+  assert.equal(formatarPercentual(-0), "0,0%");
+  assert.equal(formatarPercentual(null), VALOR_SEM_TAXA);
+});
+
+test("a taxa publicada pela API e' exibida sem ser recalculada", () => {
+  // 5 de 100 daria 5,0%; a API publicou 5,18% (outro recorte): vale a da API.
+  assert.equal(formatarPercentualComBase(5, 100, { taxa: 0.0518, casas: 2 }), "5,18% · 5 de 100");
+  assert.equal(formatarPercentualComBase(5, 100, { taxa: null }), TEXTO_INDISPONIVEL);
+});
+
+test("delta em pontos percentuais com sinal tipografico", () => {
+  assert.equal(formatarDeltaPp(0.042, 0.034), "+0,8 p.p.");
+  assert.equal(formatarDeltaPp(0.022, 0.034), "\u22121,2 p.p.");
+  assert.equal(formatarDeltaPp(0.034, 0.034), "0,0 p.p.");
+  assert.equal(formatarDeltaPp(0.0340001, 0.034), "0,0 p.p.", "arredondado a zero nao ganha sinal");
+  assert.equal(formatarDeltaPp(null, 0.03), TEXTO_INDISPONIVEL);
+  assert.equal(formatarDeltaPp(0.03, undefined), TEXTO_INDISPONIVEL);
+});
+
+test("rotulos de janela e de coorte", () => {
+  assert.equal(rotuloJanela(7, "pagamento"), "últimos 7 dias · por dia de pagamento");
+  assert.equal(rotuloJanela(1), "último dia");
+  assert.equal(rotuloJanela(0), "janela não informada");
+  assert.equal(rotuloCoorte("2026-10-19", "2026-10-25", "pagamento"), "pedidos pagos de 19/10 a 25/10");
+  assert.equal(rotuloCoorte("2026-10-25", "2026-10-25", "vencimento"), "pedidos com vencimento em 25/10");
+});
+
+test("regressao TikTok/Shopee: os digitos exibidos nao mudam com o formato unico", () => {
+  // Implementacao ANTERIOR, copiada aqui como oraculo.
+  const antiga = (v: number | null, casas = 2) =>
+    v === null || !Number.isFinite(v) ? "—" : `${(v * 100).toFixed(casas).replace(".", ",")}%`;
+  const amostra = [0, 0.0001, 0.0049, 0.005, 0.0399, 0.04, 0.0401, 0.0518, 0.0335, 0.1, 0.12345, 0.889, 1, null];
+  for (const v of amostra) {
+    assert.equal(formatarTaxa(v), antiga(v), `TikTok ${v}`);
+    assert.equal(formatarTaxa(v, 0), antiga(v, 0), `TikTok 0 casas ${v}`);
+    assert.equal(formatarTaxaLdr(v), antiga(v), `Shopee ${v}`);
+  }
+  const inteiroAntigo = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+  for (const n of [0, 7, 1820, 36495, 1234567]) assert.equal(formatarInteiro(n), inteiroAntigo(n));
+});
+
+test("nenhum formato de numero divergente sobrou na Expedicao", () => {
+  const raiz = juntar(import.meta.dirname, "..");
+  for (const rel of [
+    "app/expedicao/ExpedicaoClient.tsx",
+    "src/components/expedicao/TikTokDispatchPanel.tsx",
+    "src/components/expedicao/LdrShopeePanel.tsx",
+    "src/components/expedicao/EvolucaoPorMarca.tsx",
+    "src/lib/expedicao-tiktok-contract.ts",
+    "src/lib/expedicao-shopee-ldr.ts",
+  ]) {
+    const codigo = lerFonte(juntar(raiz, rel), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(codigo, /NumberFormat\("pt-BR"\)\.format|toFixed\([^)]*\)\.replace\("\."/, rel);
+  }
+});

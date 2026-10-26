@@ -120,6 +120,7 @@ import {
   valorDoSeletor,
 } from "@/lib/expedicao-janela";
 import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
+import { formatarInteiro } from "@/lib/expedicao-formato";
 
 /** Janela da tendencia da fila, em DIAS. Horas so' na query. */
 const REGRA = REGRA_JANELA.fila;
@@ -200,9 +201,8 @@ function dataCurta(iso: string | null): string {
 // EXPEDICAO-UX-UNIFICADA-1: a API devolve `load_mode` CONSTANTE, e desde
 // 21/10/2026 a fotografia e' publicada pela DAG. Ver `Relogios`.
 
-function numero(n: number | null | undefined): string {
-  return typeof n === "number" ? n.toLocaleString("pt-BR") : "—";
-}
+// T-0010: o numero da fila usa o formato unico da Expedicao.
+const numero = formatarInteiro;
 
 /**
  * Severidade do KPI.

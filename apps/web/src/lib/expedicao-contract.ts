@@ -33,6 +33,7 @@ import {
   type ProblemaQualidade,
   type SeveridadeQualidade,
 } from "./expedicao-ux.ts";
+import { formatarInteiro } from "./expedicao-formato.ts";
 
 /** Os oito valores de `situacao` aceitos pela API. Allowlist fechada. */
 export const SITUACOES = [
@@ -903,7 +904,7 @@ export function fotografiaDaFila(r: Relogios | null): Fotografia {
 }
 
 function inteiro(n: number): string {
-  return n.toLocaleString("pt-BR");
+  return formatarInteiro(n);
 }
 
 /** Shopee: a conta E' a loja. Mercado Livre: a conta e' um `seller_id`. */

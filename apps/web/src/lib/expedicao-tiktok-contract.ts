@@ -14,6 +14,11 @@ import {
   type ProblemaQualidade,
   type TomAtencao,
 } from "./expedicao-ux.ts";
+import {
+  VALOR_AUSENTE,
+  formatarInteiro as formatarInteiroUnico,
+  formatarPercentual,
+} from "./expedicao-formato.ts";
 
 // ---------------------------------------------------------------------------
 // Eventos — a politica tem DOIS prazos
@@ -239,16 +244,19 @@ export function explicarIndisponivel(motivo: string | null): string {
 // Formatacao
 // ---------------------------------------------------------------------------
 /** Marcador para taxa que nao existe. NUNCA renderizar `0%` no lugar dele. */
-export const VALOR_SEM_TAXA = "—";
+export const VALOR_SEM_TAXA = VALOR_AUSENTE;
 
+/**
+ * T-0010: delega ao formato unico (`expedicao-formato.ts`). A LDR do TikTok
+ * segue com 2 casas: e' a resolucao com que ela e' comparada a' referencia
+ * de 4% e a' planilha da gestao — nenhum digito exibido mudou.
+ */
 export function formatarTaxa(v: number | null | undefined, casas = 2): string {
-  if (v === null || v === undefined || !Number.isFinite(v)) return VALOR_SEM_TAXA;
-  return `${(v * 100).toFixed(casas).replace(".", ",")}%`;
+  return formatarPercentual(v, { casas });
 }
 
 export function formatarInteiro(v: number | null | undefined): string {
-  if (v === null || v === undefined || !Number.isFinite(v)) return VALOR_SEM_TAXA;
-  return new Intl.NumberFormat("pt-BR").format(v);
+  return formatarInteiroUnico(v);
 }
 
 /**

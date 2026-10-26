@@ -118,6 +118,7 @@ import {
   type TikTokMarca,
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
+import { formatarBase } from "@/lib/expedicao-formato";
 import {
   OPCAO_PERSONALIZADA,
   REGRA_JANELA,
@@ -484,9 +485,12 @@ export default function TikTokDispatchPanel({
           comparacao={
             ldr.rate === null
               ? "Sem vencimento maduro na janela."
-              : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
-                  ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META
-                }`
+              : // T-0010: a base ao lado da taxa ("62 de 1.820"), com a taxa
+                // PUBLICADA pela API — a tela nao divide de novo.
+                `${formatarBase(ldr.late, ldr.base)} · ${ROTULO_META}: ${formatarTaxa(
+                  META_TIKTOK_LDR,
+                  0,
+                )} · ${ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META}`
           }
           // Sem taxa nao ha veredito: verde aqui leria ausencia como acerto.
           tom={ldr.rate === null ? "ausente" : ldr.above_target ? "critico" : "bom"}

@@ -11,11 +11,12 @@
  */
 
 import type { ResumoConta, Totais } from "./expedicao-contract.ts";
+import { VALOR_AUSENTE as AUSENTE, formatarInteiro, formatarPercentual } from "./expedicao-formato.ts";
 
 export const NOME_LDR_SHOPEE = "LDR operacional (coleta × prazo Shopee)";
 export const AVISO_LDR_SHOPEE =
   "Indicador interno da Torre: não é a taxa de envio atrasado que a Shopee usa para penalização.";
-export const VALOR_AUSENTE = "—";
+export const VALOR_AUSENTE = AUSENTE;
 
 /** Janela padrao, em dias de vencimento antes de hoje. */
 export const DIAS_LDR_SHOPEE = 7;
@@ -175,7 +176,7 @@ export function divisaoDaFila(r: RespostaLdrShopee | null): DivisaoDaFila | null
   };
 }
 
-const inteiro = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+const inteiro = formatarInteiro;
 
 /** Linha de conferencia: as parcelas e o total, sem chamar o total de risco. */
 export function textoDaReconciliacao(d: DivisaoDaFila): string {
@@ -244,8 +245,8 @@ export function textoDoEstado(estado: EstadoLdrShopee, marca: string | null): st
 
 /** Taxa em pt-BR com 2 casas; `null` vira "—", nunca "0,00%". */
 export function formatarTaxaLdr(v: number | null | undefined): string {
-  if (v === null || v === undefined || !Number.isFinite(v)) return VALOR_AUSENTE;
-  return `${(v * 100).toFixed(2).replace(".", ",")}%`;
+  // T-0010: formato unico da Expedicao, 2 casas (mesmos digitos de antes).
+  return formatarPercentual(v, { casas: 2 });
 }
 
 /** Por que a taxa aparece como "—" quando a resposta esta' pronta. */
