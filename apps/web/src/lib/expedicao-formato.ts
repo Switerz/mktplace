@@ -96,6 +96,22 @@ export function formatarPercentualComBase(
 }
 
 /**
+ * As duas partes de `formatarPercentualComBase` ("3,35%" e "199 de 5.940"),
+ * para telas que mostram a base numa linha secundaria. `null` = sem base
+ * valida ("indisponível").
+ */
+export function partesDoPercentualComBase(
+  numerador: number | null | undefined,
+  base: number | null | undefined,
+  opcoes: OpcoesPercentualComBase = {},
+): { percentual: string; base: string } | null {
+  const texto = formatarPercentualComBase(numerador, base, opcoes);
+  if (texto === TEXTO_INDISPONIVEL) return null;
+  const [percentual, resto] = texto.split(" · ");
+  return { percentual, base: resto };
+}
+
+/**
  * Diferenca entre duas taxas (fracoes) em pontos percentuais:
  * "+0,8 p.p.", "−1,2 p.p.", "0,0 p.p.". Falta um lado -> "indisponível".
  */

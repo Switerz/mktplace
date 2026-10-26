@@ -66,7 +66,7 @@ import LayoutExpedicao, {
   CLASSE_TABELA,
   CorpoGestor,
 } from "@/components/expedicao/LayoutExpedicao";
-import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
+import { Ajuda, KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
 import {
   AtencaoAgora,
   ConviteAoDetalhe,
@@ -125,7 +125,6 @@ import {
   type TikTokMarca,
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
-import { formatarBase } from "@/lib/expedicao-formato";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   OPCAO_PERSONALIZADA,
@@ -493,14 +492,14 @@ export default function TikTokDispatchPanel({
         <KpiComAjuda
           ajuda="tiktok.ldr"
           rotulo="LDR da janela"
-          valor={formatarTaxa(ldr.rate)}
+          valor={<TaxaComBase numerador={ldr.late} base={ldr.base} taxa={ldr.rate} />}
           destaque
           comparacao={
             ldr.rate === null
               ? "Sem vencimento maduro na janela."
               : // T-0010: a base ao lado da taxa ("62 de 1.820"), com a taxa
                 // PUBLICADA pela API — a tela nao divide de novo.
-                `${formatarBase(ldr.late, ldr.base)} · ${ROTULO_META}: ${formatarTaxa(
+                `${ROTULO_META}: ${formatarTaxa(
                   META_TIKTOK_LDR,
                   0,
                 )} · ${ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META}`
@@ -615,7 +614,7 @@ export default function TikTokDispatchPanel({
                       m.above_target ? "text-crit-ink" : "text-ok-ink"
                     }`}
                   >
-                    {formatarTaxa(m.rate)}
+                    <TaxaComBase numerador={m.late} base={m.base} taxa={m.rate} linha />
                   </td>
                 </tr>
               ))}
@@ -673,7 +672,11 @@ export default function TikTokDispatchPanel({
                     <td
                       className={`text-right font-semibold tabular-nums ${TEXTO_SEVERIDADE[sev]}`}
                     >
-                      {d.is_mature ? formatarTaxa(d.rate) : VALOR_SEM_TAXA}
+                      {d.is_mature ? (
+                        <TaxaComBase numerador={d.late} base={d.base} taxa={d.rate} linha />
+                      ) : (
+                        VALOR_SEM_TAXA
+                      )}
                     </td>
                     <td className="whitespace-nowrap text-ink-muted">{ROTULO_SEVERIDADE[sev]}</td>
                   </tr>
@@ -760,7 +763,11 @@ export default function TikTokDispatchPanel({
                 >
                   {/* Coorte parcial NUNCA mostra a taxa fechada: ela
                       ainda vai mudar. */}
-                  {f.is_mature ? formatarTaxa(f.rate) : VALOR_SEM_TAXA}
+                  {f.is_mature ? (
+                    <TaxaComBase numerador={f.late} base={f.base} taxa={f.rate} linha />
+                  ) : (
+                    VALOR_SEM_TAXA
+                  )}
                 </td>
               </tr>
             ))}

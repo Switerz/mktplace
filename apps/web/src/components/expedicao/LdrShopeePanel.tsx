@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
-import { KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
+import { KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import {
@@ -24,7 +24,6 @@ import {
   NOME_LDR_SHOPEE,
   VALOR_AUSENTE,
   estadoDaLdrShopee,
-  formatarTaxaLdr,
   montarExclusoes,
   motivoDaTaxaAusente,
   queryDaLdrShopee,
@@ -158,8 +157,8 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
         <KpiComAjuda
           ajuda="shopee.ldr"
           rotulo="LDR operacional"
-          valor={formatarTaxaLdr(l.rate)}
-          comparacao={motivo ?? `${numero(l.late)} de ${numero(l.base)} pedidos com prazo vencido`}
+          valor={<TaxaComBase numerador={l.late} base={l.base} taxa={l.rate} />}
+          comparacao={motivo ?? "Atrasados sobre os pedidos com prazo vencido na janela."}
           contexto={AVISO_LDR_SHOPEE}
           tom={l.rate === null ? "ausente" : "neutro"}
           destaque

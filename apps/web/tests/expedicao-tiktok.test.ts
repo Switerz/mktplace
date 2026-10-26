@@ -393,3 +393,46 @@ test("nenhum formato de numero divergente sobrou na Expedicao", () => {
     assert.doesNotMatch(codigo, /NumberFormat\("pt-BR"\)\.format|toFixed\([^)]*\)\.replace\("\."/, rel);
   }
 });
+
+// ===========================================================================
+// QA T-0010 (I2) — a LDR no formato unico, 2 casas: "3,35% · 199 de 5.940"
+// ===========================================================================
+import { register as registrarLoaderI2 } from "node:module";
+import { partesDoPercentualComBase } from "../src/lib/expedicao-formato.ts";
+
+registrarLoaderI2("./helpers/tsx-loader.mjs", import.meta.url);
+
+test("LDR: as partes saem do MESMO formatador e a taxa publicada nao e' recalculada", () => {
+  assert.equal(formatarPercentualComBase(199, 5940, { taxa: 0.0335, casas: 2 }), "3,35% · 199 de 5.940");
+  assert.deepEqual(partesDoPercentualComBase(199, 5940, { taxa: 0.0335, casas: 2 }), {
+    percentual: "3,35%",
+    base: "199 de 5.940",
+  });
+  assert.equal(partesDoPercentualComBase(0, 0, { taxa: null, casas: 2 }), null, "sem base: indisponível");
+});
+
+test("LDR do TikTok e da Shopee (KPI e tabelas) usam TaxaComBase", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TaxaComBase } = await import("../src/components/expedicao/KpiComAjuda.tsx");
+  const kpi = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335 }));
+  assert.equal(kpi.replace(/<[^>]+>/g, ""), "3,35% · 199 de 5.940");
+  const linha = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335, linha: true }));
+  assert.match(linha, /<span>3,35%<\/span><span class="block[^"]*">199 de 5\.940<\/span>/);
+  assert.equal(
+    renderToStaticMarkup(h(TaxaComBase, { numerador: 0, base: 0, taxa: null })).replace(/<[^>]+>/g, ""),
+    "indisponível",
+  );
+  const raiz = juntar(import.meta.dirname, "..");
+  const tk = lerFonte(juntar(raiz, "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+  const sh = lerFonte(juntar(raiz, "src/components/expedicao/LdrShopeePanel.tsx"), "utf8");
+  assert.match(tk, /valor=\{<TaxaComBase numerador=\{ldr\.late\} base=\{ldr\.base\} taxa=\{ldr\.rate\} \/>\}/);
+  assert.match(tk, /<TaxaComBase numerador=\{m\.late\} base=\{m\.base\} taxa=\{m\.rate\} linha \/>/);
+  assert.match(tk, /<TaxaComBase numerador=\{d\.late\} base=\{d\.base\} taxa=\{d\.rate\} linha \/>/);
+  assert.match(tk, /<TaxaComBase numerador=\{f\.late\} base=\{f\.base\} taxa=\{f\.rate\} linha \/>/);
+  assert.match(sh, /valor=\{<TaxaComBase numerador=\{l\.late\} base=\{l\.base\} taxa=\{l\.rate\} \/>\}/);
+  for (const proibido of [/formatarTaxa\(ldr\.rate\)/, /formatarTaxa\(m\.rate\)/, /\? formatarTaxa\(d\.rate\)/, /\? formatarTaxa\(f\.rate\)/]) {
+    assert.doesNotMatch(tk, proibido);
+  }
+  assert.doesNotMatch(sh, /valor=\{formatarTaxaLdr\(/);
+});
