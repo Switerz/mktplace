@@ -21,13 +21,18 @@ import {
   AVISO_KITS,
   CLASSIFICACOES,
   CLASS_LABEL,
+  CD_NAO_INFORMADO,
+  CONTAS_ESPERADAS_API,
   DIAS_ATE_AVISAR,
   EXIGEM_ACAO,
   FILTROS_VAZIOS,
   PROXIMO_PASSO,
   SEM_DADO,
   TITULO_INDISPONIVEL,
+  avisoContasAusentes,
   buildQuery,
+  contasAusentes,
+  contasPresentes,
   fmtCobertura,
   fmtData,
   fmtDecimal,
@@ -38,6 +43,7 @@ import {
   isIndisponivel,
   isVazioPorFiltro,
   nomeExibido,
+  rotuloCD,
   skuExibido,
   temFiltroAtivo,
   type EstoqueFullOk,
@@ -597,4 +603,147 @@ test("chave REPETIDA por valor, nunca uma lista separada por virgula", () => {
   });
   assert.equal(new URLSearchParams(qs).getAll("classificacoes").length, 2);
   assert.ok(!qs.includes("%2C"), "virgula codificada indica lista num valor so");
+});
+
+// ---------------------------------------------------------------------------
+// QA T-0007 — D1: conta ausente da fotografia nao vira zero
+// ---------------------------------------------------------------------------
+
+test("contasAusentes: todas presentes -> nenhuma ausente", () => {
+  assert.deepEqual(
+    contasAusentes(CONTAS_ESPERADAS_API, ["apice", "barbours", "lescent", "rituaria"]),
+    [],
+  );
+});
+
+test("contasAusentes: uma conta faltando -> so' ela", () => {
+  assert.deepEqual(
+    contasAusentes(CONTAS_ESPERADAS_API, ["apice", "barbours", "rituaria"]),
+    ["lescent"],
+  );
+});
+
+test("contasAusentes: contas_cobertas vazio (ou nulo) -> as quatro", () => {
+  assert.deepEqual(contasAusentes(CONTAS_ESPERADAS_API, []), [
+    "apice",
+    "barbours",
+    "lescent",
+    "rituaria",
+  ]);
+  assert.deepEqual(
+    contasAusentes(CONTAS_ESPERADAS_API, null),
+    [...CONTAS_ESPERADAS_API],
+  );
+});
+
+test("contasAusentes: conta extra inesperada e' ignorada", () => {
+  assert.deepEqual(
+    contasAusentes(CONTAS_ESPERADAS_API, [
+      "apice",
+      "barbours",
+      "lescent",
+      "rituaria",
+      "kokeshi",
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    contasAusentes(CONTAS_ESPERADAS_API, ["kokeshi", "apice"]),
+    ["barbours", "lescent", "rituaria"],
+  );
+});
+
+test("contasPresentes: so' esperadas, na ordem esperada, sem extras", () => {
+  assert.deepEqual(
+    contasPresentes(CONTAS_ESPERADAS_API, ["rituaria", "kokeshi", "apice"]),
+    ["apice", "rituaria"],
+  );
+  assert.deepEqual(contasPresentes(CONTAS_ESPERADAS_API, null), []);
+});
+
+test("as contas esperadas sao as quatro da esteira API", () => {
+  assert.deepEqual(
+    [...CONTAS_ESPERADAS_API],
+    ["apice", "barbours", "lescent", "rituaria"],
+  );
+});
+
+test("o aviso de conta ausente nomeia a conta e nega o zero", () => {
+  const texto = avisoContasAusentes(["Lescent"]);
+  assert.equal(
+    texto,
+    "Sem fotografia nesta data para: Lescent. Ausência de dado, não estoque zero.",
+  );
+  assert.match(avisoContasAusentes(["Apice", "Lescent"]), /Apice, Lescent/);
+});
+
+test("os botoes de conta saem da fotografia, nao de lista fixa", () => {
+  assert.ok(!CLIENT_SRC.includes("const MARCAS"), "lista fixa de marcas voltou");
+  assert.ok(CLIENT_SRC.includes("contas_cobertas"));
+  assert.ok(CLIENT_SRC.includes("contasFiltraveis.map("));
+  assert.match(
+    CLIENT_SRC,
+    /contasPresentes\(\s*CONTAS_ESPERADAS_API,\s*cobertasFotografia,?\s*\)/,
+  );
+});
+
+test("a cobertura dos botoes so' vem de resposta sem filtro de conta", () => {
+  // `contas_cobertas` segue o escopo da consulta: com filtro de conta, a API
+  // devolve so' as selecionadas, e os outros botoes sumiriam.
+  const trecho = CLIENT_SRC.split("const carregar")[1] ?? "";
+  assert.match(trecho, /if \(escopoCompleto\) \{\s*setCobertasFotografia/);
+});
+
+test("a tela exibe o aviso de conta ausente como status acessivel", () => {
+  assert.match(
+    CLIENT_SRC,
+    /<Aviso tom="alerta" role="status">\s*\{avisoContasAusentes\(/,
+  );
+});
+
+test("conta selecionada sem fotografia esconde os cartoes", () => {
+  // Os cartoes e a tabela ficam no ramo ELSE; o ramo da ausencia nao tem
+  // nenhum indicador.
+  const [, depois] = CLIENT_SRC.split("selecionadasSemFotografia.length > 0 ? (");
+  assert.ok(depois, "falta o desvio para conta selecionada sem fotografia");
+  const [ramoAusencia, ramoDados] = depois.split(") : (");
+  assert.ok(!ramoAusencia.includes("KpiCard"));
+  assert.ok(!ramoAusencia.includes("payload.indicadores"));
+  assert.match(ramoAusencia, /ausência de dado,\s*não estoque zero/);
+  assert.ok(ramoDados.includes("KpiCard"));
+});
+
+// ---------------------------------------------------------------------------
+// QA T-0007 — D2: CD sem location_id tem rotulo legivel
+// ---------------------------------------------------------------------------
+
+test("rotuloCD: location_id vazio vira 'CD não informado'", () => {
+  assert.equal(rotuloCD("CD-SP"), "CD-SP");
+  assert.equal(rotuloCD(""), CD_NAO_INFORMADO);
+  assert.equal(rotuloCD("   "), CD_NAO_INFORMADO);
+  assert.equal(rotuloCD(null), CD_NAO_INFORMADO);
+  assert.equal(CD_NAO_INFORMADO, "CD não informado");
+});
+
+test("a coluna Por CD usa o rotulo, nao o location_id cru", () => {
+  assert.ok(CLIENT_SRC.includes("{rotuloCD(cd.location_id)}: "));
+  assert.ok(!CLIENT_SRC.includes("{cd.location_id}: "));
+  // Chave estavel mesmo com mais de um CD vazio no mesmo produto.
+  assert.ok(!CLIENT_SRC.includes("key={cd.location_id}"));
+});
+
+// ---------------------------------------------------------------------------
+// QA T-0007 — D4: o aviso de contexto so' cita colunas que existem
+// ---------------------------------------------------------------------------
+
+test("AVISO_CONTEXTO cita apenas colunas presentes na tabela", () => {
+  const cabecalhos = [...CLIENT_SRC.matchAll(/<th scope="col"[^>]*>([^<]+)<\/th>/g)]
+    .map((m) => m[1].trim());
+  assert.ok(cabecalhos.length > 0, "nao achei os cabecalhos da tabela");
+  const citadas = [...AVISO_CONTEXTO.matchAll(/“([^”]+)”/g)].map((m) => m[1]);
+  assert.ok(citadas.length > 0);
+  for (const c of citadas) {
+    assert.ok(cabecalhos.includes(c), `"${c}" nao e' coluna da tabela`);
+  }
+  assert.ok(!AVISO_CONTEXTO.includes("Disponível"));
 });

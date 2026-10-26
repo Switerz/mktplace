@@ -290,6 +290,64 @@ export function skuExibido(p: ProdutoEstoque): string {
   return p.item_sku?.trim() || SEM_DADO;
 }
 
+/**
+ * Rotulo do CD na coluna "Por CD". A API entrega `location_id` vazio em parte
+ * das entradas; imprimir cru deixava ": 0" sem nome nenhum.
+ */
+export const CD_NAO_INFORMADO = "CD não informado";
+
+export function rotuloCD(locationId: string | null | undefined): string {
+  return locationId?.trim() || CD_NAO_INFORMADO;
+}
+
+// ---------------------------------------------------------------------------
+// Cobertura por conta
+// ---------------------------------------------------------------------------
+
+/**
+ * Contas da esteira API, espelhando `EXPECTED_ACCOUNTS` do backend. Sao as
+ * unicas que a tela oferece como filtro.
+ */
+export const CONTAS_ESPERADAS_API = [
+  "apice",
+  "barbours",
+  "lescent",
+  "rituaria",
+] as const;
+
+/**
+ * Contas esperadas que NAO aparecem em `contas_cobertas`.
+ *
+ * Conta ausente da fotografia e' AUSENCIA DE DADO: os indicadores da API sao
+ * `COUNT`/`COALESCE(...,0)` e, filtrados por ela, dariam "0" em tudo. Por
+ * isso a tela precisa saber quem falta antes de desenhar qualquer numero.
+ * Contas extras em `contas_cobertas` sao ignoradas: so' importa quem falta.
+ */
+export function contasAusentes(
+  esperadas: readonly string[],
+  cobertas: readonly string[] | null | undefined,
+): string[] {
+  const presentes = new Set(cobertas ?? []);
+  return esperadas.filter((c) => !presentes.has(c));
+}
+
+/** Contas esperadas presentes na fotografia, na ordem da lista esperada. */
+export function contasPresentes(
+  esperadas: readonly string[],
+  cobertas: readonly string[] | null | undefined,
+): string[] {
+  const presentes = new Set(cobertas ?? []);
+  return esperadas.filter((c) => presentes.has(c));
+}
+
+/** Texto do aviso de conta sem fotografia. Recebe os nomes ja' rotulados. */
+export function avisoContasAusentes(nomes: readonly string[]): string {
+  return (
+    `Sem fotografia nesta data para: ${nomes.join(", ")}. ` +
+    "Ausência de dado, não estoque zero."
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
@@ -348,8 +406,8 @@ export const AVISO_KITS =
   "não foi conciliada com o Seller Center.";
 
 export const AVISO_CONTEXTO =
-  "“Reservado” e “Disponível (Shopee)” são contexto: não são estoque Full e não " +
-  "entram no cálculo de cobertura.";
+  "“Reservado” é contexto: não é estoque Full e não entra no cálculo de " +
+  "cobertura.";
 
 export const AVISO_ALERTAS_SO_NA_TORRE =
   "Os alertas desta tela existem apenas aqui, na Torre. Nada é enviado ao " +
