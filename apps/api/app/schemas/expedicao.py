@@ -635,6 +635,12 @@ class JornadaCoorte(BaseModel):
     sobreposicoes: list[JornadaSobreposicao]
     fora_da_coorte: list[JornadaForaDaCoorte] = Field(default_factory=list)
     maturidade: JornadaMaturidade
+    #: `max(effective_at)` das linhas da janela (sem filtro de marca), ou `None`.
+    publicado_em: Optional[datetime] = None
+    #: Publicacao mais velha que o limite da rota irma (`/shopee/ldr`:
+    #: `snapshot.stale`; `/tiktok`: alerta `fotografia_velha`). Leva o
+    #: `status` a no minimo `partial`.
+    desatualizada: bool = False
     limitacoes: list[str] = Field(default_factory=list)
 
 

@@ -810,12 +810,11 @@ def get_tendencia(db, *, channel: Optional[str] = None,
 #     — e nenhuma flag propria, como na `/tiktok`.
 JORNADA_CANAIS = ("shopee", "mercadolivre", "tiktok")
 JORNADA_DIAS_PADRAO = 7
-#: Teto da janela por canal: o mesmo das rotas irmas. O ML nao tem coorte; o
-#: teto existe so' para a borda validar a entrada de forma uniforme.
+#: Teto da janela por canal: o mesmo das rotas irmas. O ML nao tem coorte e
+#: fica FORA: no ML `days` e' ignorado, nao validado (contrato v1.1 §3.1.6).
 JORNADA_DIAS_MAX = {
     "shopee": shopee_ldr_svc.JANELA_MAX_DIAS,
     "tiktok": tiktok_svc.JANELA_MAX_DIAS,
-    "mercadolivre": shopee_ldr_svc.JANELA_MAX_DIAS,
 }
 JORNADA_EVENTO_PADRAO = "coleta"
 
@@ -981,7 +980,11 @@ def _fila_aberta(db, channel: str,
                if not filtro.marcas or str(r["brand"]).lower() in filtro.marcas]
     frescores = [f["freshness"] for f in
                  _monta_frescor(_frescor(db, canal), resumos, snap["effective_at"])]
-    frescor = max(frescores, key=_ORDEM_FRESCOR.__getitem__) if frescores else "unknown"
+    # Valor fora do dominio (auditoria antiga, typo) vale `unknown`: nem KeyError
+    # (500), nem um Literal invalido na resposta.
+    frescores = [f if f in _ORDEM_FRESCOR else "unknown" for f in frescores]
+    frescor = max(frescores, key=lambda f: _ORDEM_FRESCOR.get(
+        f, _ORDEM_FRESCOR["unknown"])) if frescores else "unknown"
 
     secao = {
         "grain": "shipment" if channel == "mercadolivre" else "pedido",
@@ -1027,6 +1030,8 @@ def _agrega_coorte(db, *, tabela: str, canal: str, eixo: str, colunas: dict,
 
     `linhas_canal` conta o canal na janela SEM o filtro de marca: distingue
     "nada publicado" (ausencia) de "a marca filtrada nao tem pedido" (zero).
+    `dias_publicados` e `publicado_em` usam o MESMO criterio (sem marca): dia
+    sem publicacao e publicacao velha sao propriedades da fonte, nao da marca.
     """
     sel = ",\n                   ".join(
         f"{expr} AS {nome}" for nome, expr in colunas.items())
@@ -1045,6 +1050,12 @@ def _agrega_coorte(db, *, tabela: str, canal: str, eixo: str, colunas: dict,
                (SELECT count(*) FROM {tabela}
                  WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
                    AS linhas_canal,
+               (SELECT count(DISTINCT {eixo}) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS dias_publicados,
+               (SELECT max(effective_at) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS publicado_em,
                (SELECT count(*) FROM dias WHERE madura) AS dias_maduros,
                (SELECT count(*) FROM dias WHERE NOT madura) AS dias_imaturos
         FROM c
@@ -1083,7 +1094,8 @@ def _coorte_tiktok(db, evento: str, dias: int, agora: datetime,
     ]
     return _monta_coorte(a, etapas, eixo="paid_date", evento=evento,
                          inicio=inicio, fim=fim, dias=dias, fora=[],
-                         limitacoes=[LIMITACAO_TIKTOK_PRAZO])
+                         limitacoes=[LIMITACAO_TIKTOK_PRAZO], agora=agora,
+                         desatualizada=_tiktok_fotografia_velha)
 
 
 def _coorte_shopee(db, dias: int, agora: datetime,
@@ -1128,13 +1140,45 @@ def _coorte_shopee(db, dias: int, agora: datetime,
     return _monta_coorte(a, etapas, eixo="deadline_date", evento="coleta",
                          inicio=inicio, fim=fim, dias=dias,
                          fora=[{"key": "sem_prazo", "count": int(sem_prazo)}],
-                         limitacoes=[LIMITACAO_SHOPEE_NAO_OFICIAL])
+                         limitacoes=[LIMITACAO_SHOPEE_NAO_OFICIAL], agora=agora,
+                         desatualizada=_shopee_ldr_velha)
+
+
+# ----- frescor da coorte: o MESMO limite das rotas irmas, sem redigitar ------
+def _shopee_ldr_velha(publicado_em: datetime, agora: datetime) -> bool:
+    """Regra de `snapshot.stale` da `/shopee/ldr` para a idade da publicacao."""
+    idade_h = (agora - publicado_em).total_seconds() / 3600.0
+    return idade_h > shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
+
+
+#: Entrada NEUTRA para os alertas da `/tiktok`: nenhum alerta de taxa, pendente
+#: ou marca dispara, sobra so' o de frescor.
+_LDR_NEUTRA = {"above_target": False, "rate": None, "daily": [],
+               "pending_overdue": 0, "pending_at_risk": 0}
+
+
+def _tiktok_fotografia_velha(publicado_em: datetime, agora: datetime) -> bool:
+    """Regra do alerta `fotografia_velha` da `/tiktok`, chamada e nao copiada.
+
+    O limite vive como literal dentro de `tiktok_svc._alertas`; redigita-lo
+    aqui deixaria as duas rotas discordarem no dia em que ele mudar.
+    """
+    alertas = tiktok_svc._alertas(ldr=_LDR_NEUTRA, marcas=[], evento="coleta",
+                                  effective_at=publicado_em, agora=agora)
+    return any(a["code"] == "fotografia_velha" for a in alertas)
+
+
+def _brt_texto(instante: datetime) -> str:
+    local = instante.astimezone(timezone.utc) + tiktok_svc.BRT
+    return local.strftime("%d/%m/%Y %H:%M") + " (Brasília)"
 
 
 def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
                   inicio: date, fim: date, dias: int, fora: list[dict],
-                  limitacoes: list[str]) -> tuple[dict, list[str], str]:
+                  limitacoes: list[str], agora: datetime,
+                  desatualizada) -> tuple[dict, list[str], str]:
     base = int(a["base"])
+    limitacoes = list(limitacoes)
     sobreposicoes = [
         {"key": "aguardando_vencido", "count": int(a["aguardando_vencido"]),
          "subconjunto_de": "aguardando"},
@@ -1143,6 +1187,22 @@ def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
     ]
     fecham, motivos = _confere(base, etapas, sobreposicoes, "coorte")
     imaturos = int(a["dias_imaturos"])
+
+    # Dia sem publicacao NAO e' dia de zero pedidos: os totais ficam como
+    # estao, mas a resposta deixa de ser `ok` e diz quantos dias faltam.
+    faltam = dias - int(a["dias_publicados"])
+    if faltam > 0:
+        motivos.append(f"coorte: dias_sem_publicacao ({faltam})")
+        limitacoes.append(f"{faltam} dia(s) da janela sem publicação; os totais "
+                          f"não cobrem a janela inteira")
+
+    publicado_em = a["publicado_em"]
+    velha = publicado_em is None or bool(desatualizada(publicado_em, agora))
+    if velha:
+        quando = _brt_texto(publicado_em) if publicado_em else "data desconhecida"
+        motivos.append("coorte: publicacao_desatualizada")
+        limitacoes.append(f"publicação de {quando} ainda não atualizada")
+
     secao = {
         "eixo": eixo,
         "evento": evento,
@@ -1154,9 +1214,16 @@ def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
         "fora_da_coorte": fora,
         "maturidade": {"dias_maduros": int(a["dias_maduros"]),
                        "dias_imaturos": imaturos},
+        "publicado_em": publicado_em,
+        "desatualizada": velha,
         "limitacoes": limitacoes + ([LIMITACAO_COORTE_IMATURA] if imaturos else []),
     }
     return secao, motivos, "partial" if motivos else "ok"
+
+
+def _agora() -> datetime:
+    """Relogio da rota. Funcao propria para o teste HTTP fixar o instante."""
+    return datetime.now(timezone.utc)
 
 
 def get_jornada(
@@ -1177,7 +1244,7 @@ def get_jornada(
     `ok` < `partial` < `unavailable`. A secao ausente sai `None`; a outra
     continua servida. `reason` junta os motivos, prefixados pela secao.
     """
-    ref = (agora or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    ref = (agora or _agora()).astimezone(timezone.utc)
     marcas = normalizar_marcas(brands)
     resposta: dict[str, Any] = {
         "channel": channel, "status": "ok", "reason": None,

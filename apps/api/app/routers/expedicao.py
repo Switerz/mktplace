@@ -238,7 +238,8 @@ def jornada(
     days: int = Query(
         svc.JORNADA_DIAS_PADRAO,
         description="Janela da coorte em dias FECHADOS (Brasilia), terminando "
-                    "ontem: 1-35 (Shopee/ML) ou 1-90 (TikTok)."),
+                    "ontem: 1-35 (Shopee) ou 1-90 (TikTok). Ignorado no "
+                    "Mercado Livre, que nao tem coorte."),
     event: str = Query(
         svc.JORNADA_EVENTO_PADRAO,
         description="`coleta` (padrao) ou `despacho` (so' TikTok; a Shopee e' "
@@ -254,7 +255,8 @@ def jornada(
     # Mensagens FIXAS: a entrada do cliente nunca e' ecoada num erro.
     if channel not in svc.JORNADA_CANAIS:
         raise HTTPException(422, _MSG_CANAL_JORNADA)
-    if days < 1 or days > svc.JORNADA_DIAS_MAX[channel]:
+    # ML nao tem coorte: `days` e' IGNORADO, nao validado (contrato v1.1 §3.1.6).
+    if channel in svc.JORNADA_DIAS_MAX and not 1 <= days <= svc.JORNADA_DIAS_MAX[channel]:
         raise HTTPException(
             422, f"Janela invalida. Informe entre 1 e "
                  f"{svc.JORNADA_DIAS_MAX[channel]} dias.")

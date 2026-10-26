@@ -51,9 +51,10 @@ def _carregar_helper():
     return mod
 
 
+#: SEM `pytestmark` de modulo: so' os testes que pedem `engine` (direta ou via
+#: `sessao`/`cliente`) pulam sem Postgres. Flag desligada, 422, OpenAPI e
+#: `_confere` rodam sempre.
 PG = _carregar_helper()
-pytestmark = pytest.mark.skipif(not PG.postgres_disponivel(),
-                                reason=PG.MOTIVO_SEM_POSTGRES)
 
 #: 26/10/2026 12:00 em Brasilia. Janela padrao (7 dias fechados): 19/10 a 25/10.
 AGORA = datetime(2026, 10, 26, 15, 0, tzinfo=timezone.utc)
@@ -70,6 +71,8 @@ LOJAS = {"apice": 1, "barbours": 2, "kokeshi": 3, "lescent": 4, "rituaria": 5}
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def engine():
+    if not PG.postgres_disponivel():
+        pytest.skip(PG.MOTIVO_SEM_POSTGRES)
     with PG.cluster_da_sessao() as base:
         adm = create_engine(base, isolation_level="AUTOCOMMIT")
         with adm.connect() as c:
@@ -366,11 +369,13 @@ def _app():
 
 
 @pytest.fixture
-def cliente(engine):
+def cliente(engine, monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.database import get_db
     app = _app()
+    # A rota usa o relogio; o teste fixa o instante para nao depender do dia.
+    monkeypatch.setattr(svc, "_agora", lambda: AGORA)
 
     S = sessionmaker(bind=engine)
 
@@ -448,7 +453,7 @@ def test_flag_desligada_na_rota_nao_abre_sessao(monkeypatch):
     {"channel": "shopee", "brands": ",".join(f"m{i}" for i in range(51))},
     {"channel": "shopee", "days": 0},
     {"channel": "shopee", "days": 36},
-    {"channel": "mercadolivre", "days": 36},
+    {"channel": "tiktok", "days": 0},
     {"channel": "tiktok", "days": 91},
     {"channel": "tiktok", "event": "entrega"},
     {"channel": "shopee", "event": "despacho"},          # Shopee e' sempre coleta
@@ -493,6 +498,39 @@ def test_tiktok_aceita_90_dias_e_50_marcas(monkeypatch):
         app.dependency_overrides.pop(get_db, None)
     assert r.status_code == 200
     assert r.json()["status"] == "disabled"
+
+
+@pytest.mark.parametrize("dias", [0, 36, 999, -5])
+def test_ml_ignora_days_em_vez_de_validar(dias, monkeypatch):
+    """Contrato v1.1 §3.1.6: o ML nao tem coorte, entao `days` nao e' validado."""
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    app = _app()
+
+    monkeypatch.setattr(svc.settings, "expedicao_api_enabled", False, raising=False)
+
+    def _db():
+        yield _BancoQueExplode()
+
+    app.dependency_overrides[get_db] = _db
+    try:
+        r = TestClient(app).get("/api/v1/expedicao/jornada",
+                                params={"channel": "mercadolivre", "days": dias})
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert r.status_code == 200
+    assert r.json()["status"] == "disabled"
+
+
+def test_regras_de_frescor_vem_das_rotas_irmas():
+    """Mesmos limites da `/shopee/ldr` (6 h) e do alerta da `/tiktok` (12 h),
+    sem o numero redigitado aqui: a prova e' pelas bordas."""
+    lim = svc.shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
+    assert not svc._shopee_ldr_velha(AGORA - timedelta(hours=lim), AGORA)
+    assert svc._shopee_ldr_velha(AGORA - timedelta(hours=lim, minutes=1), AGORA)
+    assert not svc._tiktok_fotografia_velha(AGORA - timedelta(hours=12), AGORA)
+    assert svc._tiktok_fotografia_velha(AGORA - timedelta(hours=12, minutes=1), AGORA)
 
 
 def test_openapi_lista_a_rota():
@@ -804,3 +842,90 @@ def test_reconciliacao_soma_das_etapas_igual_a_base_pela_rota(canal, cliente, li
         assert "rate" not in json.dumps(s) and "percent" not in json.dumps(s)
     # Exemplo para o relatorio (`pytest -s -k exemplo` mostra).
     print(f"\n=== exemplo {canal} ===\n" + json.dumps(corpo, ensure_ascii=False, indent=1))
+
+
+# ---------------------------------------------------------------------------
+# Revisao do 42c3b79: dia sem publicacao, frescor da coorte, frescor invalido
+# ---------------------------------------------------------------------------
+def test_coorte_publicada_e_recente_nao_e_desatualizada(sessao, ligado):
+    for canal in ("shopee", "tiktok"):
+        c = jornada(sessao, canal)["coorte"]
+        assert c["publicado_em"] == AGORA - timedelta(hours=1)
+        assert c["desatualizada"] is False
+
+
+def test_dia_sem_publicacao_no_meio_da_janela_vira_partial(engine, sessao, ligado,
+                                                           cliente):
+    tabela = "marts.expedicao_tiktok_dispatch_daily"
+    buraco = date(2026, 10, 22)
+    removidas = [x for x in TIKTOK if x["paid_date"] == buraco]
+    completa = jornada(sessao, "tiktok")["coorte"]
+    with engine.begin() as c:
+        c.execute(text(f"DELETE FROM {tabela} WHERE paid_date = :d"), {"d": buraco})
+    try:
+        r = jornada(sessao, "tiktok")
+        c = r["coorte"]
+        assert r["status"] == "partial"
+        assert r["reason"] == "coorte: dias_sem_publicacao (1)"
+        assert any("1 dia(s) da janela sem publicação" in x for x in c["limitacoes"])
+        # Numeros mantidos: so' sai o que nao foi publicado, nada e' inventado.
+        assert c["base"] == completa["base"] - sum(x["pedidos_pagos_brutos"]
+                                                   for x in removidas)
+        assert c["etapas_fecham"] is True
+        # O filtro de marca nao esconde o buraco: e' propriedade da fonte.
+        assert jornada(sessao, "tiktok", brands=["apice"])["status"] == "partial"
+        corpo = cliente.get("/api/v1/expedicao/jornada",
+                            params={"channel": "tiktok"}).json()
+        assert corpo["status"] == "partial"
+        print("\n=== exemplo tiktok partial ===\n"
+              + json.dumps(corpo, ensure_ascii=False, indent=1))
+    finally:
+        _inserir(engine, tabela, removidas)
+    assert jornada(sessao, "tiktok")["status"] == "ok"
+
+
+def test_shopee_coorte_desatualizada_acima_do_limite_da_ldr(sessao, ligado):
+    # Publicada 1 h antes de AGORA; +6 h = 7 h, acima do limite de 6 h. Ainda
+    # 26/10 em Brasilia, entao a janela nao muda.
+    r = jornada(sessao, "shopee", agora=AGORA + timedelta(hours=6))
+    c = r["coorte"]
+    assert c["desatualizada"] is True
+    assert r["status"] == "partial"
+    assert "coorte: publicacao_desatualizada" in r["reason"]
+    assert "publicação de 26/10/2026 11:00 (Brasília) ainda não atualizada" \
+        in c["limitacoes"]
+    # Dentro do limite: nao e' desatualizada.
+    assert jornada(sessao, "shopee", agora=AGORA + timedelta(hours=4))["coorte"][
+        "desatualizada"] is False
+
+
+def test_tiktok_coorte_desatualizada_pelo_alerta_da_rota_irma(sessao, ligado):
+    # 12 h 30 depois da publicacao (> 12 h do alerta `fotografia_velha`);
+    # 26/10 23:30 em Brasilia, mesma janela.
+    agora = AGORA + timedelta(hours=11, minutes=30)
+    r = jornada(sessao, "tiktok", agora=agora)
+    assert r["coorte"]["desatualizada"] is True
+    assert r["status"] == "partial"
+    # 11 h depois da publicacao: abaixo do limite da /tiktok, ainda que acima
+    # do da LDR — cada canal usa o limite da SUA rota irma.
+    r = jornada(sessao, "tiktok", agora=AGORA + timedelta(hours=10))
+    assert r["coorte"]["desatualizada"] is False
+    assert r["status"] == "ok"
+
+
+def test_frescor_fora_do_dominio_vira_unknown_e_nao_500(engine, sessao, ligado):
+    with engine.begin() as c:
+        c.execute(text("""
+            INSERT INTO audit.data_quality_check (check_name, table_name,
+                marketplace_id, status, severity, details)
+            VALUES (:chk, 'marts.expedicao_fila_atual', 3, 'pass', 'low', :det)"""),
+                  {"chk": svc.CHECK_FRESHNESS, "det": json.dumps(
+                      {"brand": "lescent", "measures": "source_watermark_only",
+                       "freshness": "esquisito"})})
+    try:
+        fila = jornada(sessao, "shopee", brands=["lescent"])["fila_aberta"]
+        assert fila["freshness"] == "unknown"
+    finally:
+        with engine.begin() as c:
+            c.execute(text("DELETE FROM audit.data_quality_check WHERE check_name = :chk"),
+                      {"chk": svc.CHECK_FRESHNESS})
