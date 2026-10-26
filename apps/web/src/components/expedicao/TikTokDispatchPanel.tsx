@@ -848,7 +848,7 @@ export default function TikTokDispatchPanel({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoLdr}
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} />}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} />}
             evolucao={painelEvolucao}
             concentracao={painelLojas("")}
             convite={

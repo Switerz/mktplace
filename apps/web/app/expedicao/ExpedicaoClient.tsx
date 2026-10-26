@@ -563,6 +563,11 @@ export default function ExpedicaoClient({
   const pag = paginaAtual(dados?.pagination ?? null);
   const temPrazo = canalTemPrazo(filtros.channel);
 
+  // QA T-0010 (M4): fila zerada nao esconde a pagina — como o TikTok com
+  // base 0, o corpo aparece (zeros medidos, jornada, evolucao) sob o aviso.
+  const mostraCorpo =
+    estado === "ok" || estado === "fila_vazia_por_filtro" || estado === "fotografia_vazia";
+
   // Nova tentativa: um objeto de filtros novo, com a MESMA chave, refaz a
   // busca (o efeito depende de `filtros`) sem mudar a requisicao.
   const tentarDeNovo = useCallback(() => setFiltros((f) => ({ ...f })), []);
@@ -1299,7 +1304,7 @@ export default function ExpedicaoClient({
       }
     >
       {/* Marca escolhida sem conta neste canal: ausencia, nao backlog zero. */}
-      {(estado === "ok" || estado === "fila_vazia_por_filtro") && recorte.semConta ? (
+      {mostraCorpo && recorte.semConta ? (
         <p role="status" className="rounded-xl border border-dashed border-line-strong bg-surface p-4 text-sm text-ink-muted">
           {brandLabel(recorte.marca ?? "")}{" "}
           {recorte.foraDaCobertura
@@ -1307,14 +1312,14 @@ export default function ExpedicaoClient({
             : "não tem conta nesta fotografia do canal."}
         </p>
       ) : null}
-      {(estado === "ok" || estado === "fila_vazia_por_filtro") && !recorte.semConta &&
+      {mostraCorpo && !recorte.semConta &&
         (visao === "gestor" ? (
           // RISCO ATUAL -> PRAZO -> JORNADA -> EVOLUCAO -> CONCENTRACAO: a
           // ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoPrazo}
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} />}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} />}
             evolucao={painelEvolucao}
             concentracao={painelContas("")}
             convite={

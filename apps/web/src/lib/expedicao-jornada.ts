@@ -480,3 +480,14 @@ export function rotuloDaCoorte(c: CoorteJornada): string {
 export function filaDesatualizada(f: FilaAbertaJornada): boolean {
   return f.freshness !== "fresh";
 }
+
+/**
+ * QA T-0010 (I4): a tela pediu `brands` e a API nao as aplicou? Entao os
+ * numeros sao do canal inteiro e a tela precisa DIZER isso.
+ */
+export function avisoDeMarcaNaoAplicada(marca: string | null, r: RespostaJornada): string | null {
+  if (!marca) return null;
+  const aplicadas = r.brands_applied.map((b) => b.toLowerCase());
+  if (aplicadas.includes(marca.toLowerCase())) return null;
+  return `O filtro de marca (${marca.toUpperCase()}) não foi aplicado pela API: os números da jornada são do canal inteiro.`;
+}

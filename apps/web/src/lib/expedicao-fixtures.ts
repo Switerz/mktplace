@@ -16,6 +16,11 @@
  *   erro          todas as rotas respondem 500
  *   indisponivel  sem fotografia/serie; jornada 404 (como hoje em producao)
  *   carregando    nenhuma resposta chega
+ *   jornada404    pagina ok; so' a Jornada responde 404 (como em producao hoje)
+ *   jornadaErro   pagina ok; so' a Jornada responde 500 (erro com nova tentativa)
+ *   jornadaVazia  pagina ok; a Jornada responde com base 0
+ *
+ * Com `&marca=`, a Jornada recorta pela marca e devolve `brands_applied`.
  */
 import type {
   PontoTendencia,
@@ -35,6 +40,10 @@ export const CENARIOS_DEMO = [
   "erro",
   "indisponivel",
   "carregando",
+  // So' a Jornada muda; o resto da pagina fica no cenario `ok`:
+  "jornada404",
+  "jornadaErro",
+  "jornadaVazia",
 ] as const;
 export type CenarioDemo = (typeof CENARIOS_DEMO)[number];
 
@@ -339,79 +348,106 @@ function tiktok(c: CenarioDemo): TikTokPayload {
 // ---------------------------------------------------------------------------
 // Jornada (contrato v1.2)
 // ---------------------------------------------------------------------------
-function jornada(canal: string, c: CenarioDemo): { status: number; corpo: unknown } {
-  if (c === "indisponivel") return { status: 404, corpo: { detail: "Not Found" } };
-  const vazio = c === "vazio";
+/**
+ * Parte de cada marca na base do canal (ficticia). A jornada da demo recorta
+ * pela marca como a API real faz: o filtro vale tambem para os TOTAIS, e
+ * `brands_applied` diz qual marca foi aplicada.
+ */
+const PARTE_DA_MARCA: Record<string, Record<string, number>> = {
+  shopee: { apice: 620 / 1820, barbours: 980 / 1820, kokeshi: 220 / 1820 },
+  mercadolivre: { kokeshi: 140 / 230, barbours: 90 / 230 },
+  tiktok: { kokeshi: 0.5, barbours: 0.5 },
+};
+
+/** Etapas proporcionais que FECHAM a base (a ultima leva o resto). */
+function etapasQueFecham(base: number, modelo: { key: string; label: string; parte: number }[]) {
+  let usado = 0;
+  return modelo.map((m, i) => {
+    const count = i === modelo.length - 1 ? base - usado : Math.floor(base * m.parte);
+    usado += count;
+    return { key: m.key, label: m.label, count };
+  });
+}
+
+function jornada(canal: string, marca: string | null, c: CenarioDemo): { status: number; corpo: unknown } {
+  if (c === "indisponivel" || c === "jornada404") return { status: 404, corpo: { detail: "Not Found" } };
+  if (c === "jornadaErro") return { status: 500, corpo: { detail: "erro fictício de demonstração" } };
+  const vazio = c === "vazio" || c === "jornadaVazia";
+  const parte = marca ? (PARTE_DA_MARCA[canal]?.[marca.toLowerCase()] ?? 0) : 1;
+  const escala = (n: number) => (vazio ? 0 : Math.round(n * parte));
+  const aplicadas = marca ? [marca.toLowerCase()] : [];
   const publicado = c === "desatualizado" ? VELHO : AGORA;
   const filaAberta = (grain: "pedido" | "shipment", base: number, sobre: unknown[], limitacoes: string[]) => ({
     grain,
     snapshot_at: publicado,
     freshness: c === "desatualizado" ? "critical" : "fresh",
     base,
-    etapas: [{ key: "aguardando_expedicao", label: "Aguardando expedição", count: c === "parcial" ? base - 3 : base }],
-    etapas_fecham: c !== "parcial",
+    // `parcial`: a etapa publicada nao fecha a base (o servidor nao conserta).
+    etapas: [{ key: "aguardando_expedicao", label: "Aguardando expedição", count: c === "parcial" && base > 3 ? base - 3 : base }],
+    etapas_fecham: !(c === "parcial" && base > 3),
     sobreposicoes: sobre,
     limitacoes,
   });
-  const coorteTikTok = {
-    eixo: "paid_date",
-    evento: "coleta",
-    janela: { inicio: "2026-10-19", fim: "2026-10-25", dias: 7 },
-    base: vazio ? 0 : 4310,
-    etapas: vazio
-      ? []
-      : [
-          { key: "fora_amostra", label: "Amostras (fora da taxa)", count: 12 },
-          { key: "cancelado_antes", label: "Cancelados antes do envio", count: 80 },
-          { key: "aguardando", label: "Aguardando coleta", count: 300 },
-          { key: "concluido", label: "Coletados", count: 3918 },
-        ],
-    etapas_fecham: true,
-    sobreposicoes: vazio
-      ? []
-      : [
-          { key: "aguardando_vencido", count: 41, subconjunto_de: "aguardando" },
-          { key: "concluido_atrasado", count: 150, subconjunto_de: "concluido" },
-        ],
-    fora_da_coorte: [],
-    maturidade: { dias_maduros: 6, dias_imaturos: 1 },
-    limitacoes: c === "parcial" ? ["1 dia da janela sem publicação (dados fictícios)."] : [],
-    publicado_em: publicado,
-    desatualizada: c === "desatualizado",
+  const coorte = (eixo: "paid_date" | "deadline_date", base: number, modelo: { key: string; label: string; parte: number }[]) => {
+    const etapas = etapasQueFecham(base, modelo);
+    const aguardando = etapas.find((e) => e.key === "aguardando")?.count ?? 0;
+    const concluido = etapas.find((e) => e.key === "concluido")?.count ?? 0;
+    return {
+      eixo,
+      evento: "coleta",
+      janela: { inicio: "2026-10-19", fim: "2026-10-25", dias: 7 },
+      base,
+      etapas,
+      etapas_fecham: true,
+      sobreposicoes: [
+        { key: "aguardando_vencido", count: Math.floor(aguardando * 0.14), subconjunto_de: "aguardando" },
+        { key: "concluido_atrasado", count: Math.floor(concluido * 0.04), subconjunto_de: "concluido" },
+      ],
+      fora_da_coorte: eixo === "deadline_date" ? [{ key: "sem_prazo", count: escala(4) }] : [],
+      maturidade: { dias_maduros: 6, dias_imaturos: 1 },
+      limitacoes: c === "parcial" ? ["1 dia da janela sem publicação (dados fictícios)."] : [],
+      publicado_em: publicado,
+      desatualizada: c === "desatualizado",
+    };
   };
-  const parcial = c === "parcial" || c === "desatualizado";
+  const status = c === "parcial" || c === "desatualizado" ? "partial" : "ok";
+  const comum = { brands_applied: aplicadas, generated_at: AGORA };
   if (canal === "tiktok") {
     return {
       status: 200,
       corpo: {
+        ...comum,
         channel: "tiktok",
-        status: parcial ? "partial" : "ok",
-        reason: c === "parcial" ? "coorte: dias_sem_publicacao (1)" : c === "desatualizado" ? "coorte: desatualizada" : null,
-        brands_applied: [],
-        generated_at: AGORA,
+        status,
+        reason:
+          c === "parcial" ? "coorte: dias_sem_publicacao (1)" : c === "desatualizado" ? "coorte: publicacao_desatualizada" : null,
         fila_aberta: null,
-        coorte: coorteTikTok,
+        coorte: coorte("paid_date", escala(4310), [
+          { key: "fora_amostra", label: "Amostras (fora da taxa)", parte: 0.003 },
+          { key: "cancelado_antes", label: "Cancelados antes do envio", parte: 0.019 },
+          { key: "aguardando", label: "Aguardando coleta", parte: 0.07 },
+          { key: "concluido", label: "Coletados", parte: 1 },
+        ]),
         limitacoes: ["o TikTok não publica fila aberta em grão de pedido"],
       },
     };
   }
   if (canal === "mercadolivre") {
-    const base = vazio ? 0 : 230;
+    const base = escala(230);
     return {
       status: 200,
       corpo: {
+        ...comum,
         channel: "mercadolivre",
-        status: c === "parcial" ? "partial" : "ok",
-        reason: c === "parcial" ? "fila_aberta: etapas_nao_fecham" : null,
-        brands_applied: [],
-        generated_at: AGORA,
+        status: c === "parcial" && base > 3 ? "partial" : "ok",
+        reason: c === "parcial" && base > 3 ? "fila_aberta: etapas_nao_fecham" : null,
         fila_aberta: filaAberta(
           "shipment",
           base,
           [
             { key: "vencido", count: null, reason: "o Mercado Livre não publica prazo de despacho" },
             { key: "sem_prazo", count: base },
-            { key: "acima_48h", count: vazio ? 0 : 43 },
+            { key: "acima_48h", count: Math.floor(base * 0.19) },
           ],
           ["substatus do shipment não publicado na fila"],
         ),
@@ -420,40 +456,33 @@ function jornada(canal: string, c: CenarioDemo): { status: number; corpo: unknow
       },
     };
   }
-  const base = vazio ? 0 : 1820;
+  const base = escala(1820);
   return {
     status: 200,
     corpo: {
+      ...comum,
       channel: "shopee",
-      status: parcial ? "partial" : "ok",
-      reason: c === "parcial" ? "fila_aberta: etapas_nao_fecham" : null,
-      brands_applied: [],
-      generated_at: AGORA,
+      status: (c === "parcial" && base > 3) || c === "desatualizado" ? "partial" : "ok",
+      reason:
+        c === "parcial" && base > 3 ? "fila_aberta: etapas_nao_fecham" : c === "desatualizado" ? "coorte: desatualizada" : null,
       fila_aberta: filaAberta(
         "pedido",
         base,
         [
-          { key: "vencido", count: vazio ? 0 : 62 },
-          { key: "vence_24h", count: vazio ? 0 : 380 },
-          { key: "acima_48h", count: vazio ? 0 : 146 },
-          { key: "travado", count: vazio ? 0 : 37 },
+          { key: "vencido", count: Math.floor(base * 0.034) },
+          { key: "vence_24h", count: Math.floor(base * 0.2) },
+          { key: "acima_48h", count: Math.floor(base * 0.08) },
+          { key: "travado", count: Math.floor(base * 0.02) },
         ],
         ["etapa interna (a preparar × envio organizado) não publicada na fila", "FBS não separado na fila aberta"],
       ),
-      coorte: {
-        ...coorteTikTok,
-        eixo: "deadline_date",
-        etapas: vazio
-          ? []
-          : [
-              { key: "fora_fbs", label: "FBS (envio pela Shopee)", count: 210 },
-              { key: "cancelado_antes", label: "Cancelados antes da coleta", count: 44 },
-              { key: "enviado_sem_registro", label: "Enviados sem marco de coleta", count: 2 },
-              { key: "aguardando", label: "Aguardando coleta", count: 379 },
-              { key: "concluido", label: "Coletados", count: 3675 },
-            ],
-        fora_da_coorte: [{ key: "sem_prazo", count: 4 }],
-      },
+      coorte: coorte("deadline_date", escala(4310), [
+        { key: "fora_fbs", label: "FBS (envio pela Shopee)", parte: 0.049 },
+        { key: "cancelado_antes", label: "Cancelados antes da coleta", parte: 0.01 },
+        { key: "enviado_sem_registro", label: "Enviados sem marco de coleta", parte: 0.0005 },
+        { key: "aguardando", label: "Aguardando coleta", parte: 0.088 },
+        { key: "concluido", label: "Coletados", parte: 1 },
+      ]),
       limitacoes: [],
     },
   };
@@ -466,17 +495,20 @@ function jornada(canal: string, c: CenarioDemo): { status: number; corpo: unknow
  * Resposta ficticia para uma URL da Expedicao. `null` = rota que a
  * demonstracao nao conhece (o chamador cai no `fetch` real).
  */
-export function respostaFicticia(url: string, cenario: CenarioDemo): { status: number; corpo: unknown } | null {
+export function respostaFicticia(url: string, cenarioPedido: CenarioDemo): { status: number; corpo: unknown } | null {
+  let cenario: CenarioDemo = cenarioPedido;
   const u = new URL(url, "http://demo.local");
   const canal = u.searchParams.get("channel");
   const caminho = u.pathname;
   if (!caminho.startsWith("/api/v1/expedicao")) return null;
   if (cenario === "erro") return { status: 500, corpo: { detail: "erro fictício de demonstração" } };
+  if (caminho === "/api/v1/expedicao/jornada") return jornada(canal ?? "shopee", u.searchParams.get("brands"), cenario);
+  // Os cenarios so' da Jornada deixam o resto da pagina em `ok`.
+  if (cenario.startsWith("jornada")) cenario = "ok";
   const filaCanal = canal === "mercadolivre" ? "mercadolivre" : "shopee";
   if (caminho === "/api/v1/expedicao") return { status: 200, corpo: fila(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/trend") return { status: 200, corpo: tendencia(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/tiktok") return { status: 200, corpo: tiktok(cenario) };
   if (caminho === "/api/v1/expedicao/shopee/ldr") return { status: 200, corpo: ldrShopee(cenario) };
-  if (caminho === "/api/v1/expedicao/jornada") return jornada(canal ?? "shopee", cenario);
   return null;
 }

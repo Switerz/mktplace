@@ -22,6 +22,7 @@ import Chip from "@/components/ui/Chip";
 import Panel from "@/components/ui/Panel";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
+  avisoDeMarcaNaoAplicada,
   estadoDaJornada,
   explicarMotivo,
   filaDesatualizada,
@@ -300,9 +301,12 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
 export default function JornadaPedidos({
   carga,
   aoTentarDeNovo,
+  marca = null,
 }: {
   carga: CargaJornada;
   aoTentarDeNovo: () => void;
+  /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
+  marca?: string | null;
 }) {
   const estado = estadoDaJornada(carga);
   const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
@@ -343,6 +347,11 @@ export default function JornadaPedidos({
       ) : null}
       {estado === "pronta" && resposta ? (
         <>
+          {avisoDeMarcaNaoAplicada(marca, resposta) ? (
+            <div data-testid="exp-jornada-marca-nao-aplicada">
+              <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
+            </div>
+          ) : null}
           {resposta.status === "partial" ? (
             <EstadoSecao
               tipo="parcial"

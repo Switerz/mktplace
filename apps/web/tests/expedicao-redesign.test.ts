@@ -731,8 +731,8 @@ test("fixtures: 3 canais e todos os estados, coerentes com os contratos", () => 
     // jornada: o parser aceita a fixture de cada canal (exceto 404/500)
     for (const canal of ["shopee", "mercadolivre", "tiktok"] as const) {
       const j = respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, c)!;
-      if (c === "indisponivel") { assert.equal(j.status, 404); continue; }
-      if (c === "erro") { assert.equal(j.status, 500); continue; }
+      if (c === "indisponivel" || c === "jornada404") { assert.equal(j.status, 404); continue; }
+      if (c === "erro" || c === "jornadaErro") { assert.equal(j.status, 500); continue; }
       const p = lerJornada(j.corpo, canal);
       assert.ok(p.ok, `${c}/${canal}: ${p.ok ? "" : p.erro}`);
     }
@@ -749,4 +749,67 @@ test("fixtures da jornada cobrem count nulo, dias_sem_publicacao e desatualizada
   const velha = respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "desatualizado")!.corpo as { coorte: { desatualizada: boolean; publicado_em: string } };
   assert.equal(velha.coorte.desatualizada, true);
   assert.ok(velha.coorte.publicado_em);
+});
+
+// ===========================================================================
+// QA T-0010 (I3, I4, M4) — cenarios so' da Jornada e recorte por marca
+// ===========================================================================
+import { register as registrarLoaderI3 } from "node:module";
+import { avisoDeMarcaNaoAplicada } from "../src/lib/expedicao-jornada.ts";
+
+registrarLoaderI3("./helpers/tsx-loader.mjs", import.meta.url);
+
+test("demo: jornada404 / jornadaErro / jornadaVazia mexem SO' na Jornada", () => {
+  for (const c of ["jornada404", "jornadaErro", "jornadaVazia"] as const) {
+    assert.equal(lerCenario(c), c);
+    // a pagina segue no cenario ok
+    const fila = respostaFicticia("/api/v1/expedicao?channel=shopee", c)!;
+    assert.equal(fila.status, 200);
+    assert.ok((fila.corpo as { totals: { backlog_count: number } }).totals.backlog_count > 0, c);
+    assert.equal(respostaFicticia("/api/v1/expedicao/tiktok?event=coleta&days=7", c)!.status, 200);
+  }
+  assert.equal(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "jornada404")!.status, 404);
+  assert.equal(respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "jornadaErro")!.status, 500);
+  for (const canal of ["shopee", "mercadolivre"] as const) {
+    const j = lerJornada(respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, "jornadaVazia")!.corpo, canal);
+    assert.ok(j.ok);
+    assert.equal((j as { ok: true; resposta: { fila_aberta: { base: number } } }).resposta.fila_aberta.base, 0);
+  }
+});
+
+test("demo: a Jornada recorta pela marca como a API (brands_applied e totais)", () => {
+  const todas = lerJornada(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo, "shopee");
+  const apice = lerJornada(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee&brands=apice", "ok")!.corpo, "shopee");
+  assert.ok(todas.ok && apice.ok);
+  const t = (todas as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  const a = (apice as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  assert.deepEqual(a.brands_applied, ["apice"]);
+  assert.ok(a.fila_aberta!.base < t.fila_aberta!.base, "o total e' da marca, nao do canal");
+  assert.equal(avisoDeMarcaNaoAplicada("apice", a), null);
+  assert.match(avisoDeMarcaNaoAplicada("apice", t)!, /não foi aplicado pela API: os números da jornada são do canal inteiro/);
+  assert.equal(avisoDeMarcaNaoAplicada(null, t), null);
+});
+
+test("jornada: marca pedida e nao aplicada aparece ESCRITA na secao", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { default: JornadaPedidos } = await import("../src/components/expedicao/JornadaPedidos.tsx");
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
+  const html = renderToStaticMarkup(
+    h(JornadaPedidos, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: lerJornada(corpo, "shopee") },
+      aoTentarDeNovo: () => {},
+      marca: "apice",
+    }),
+  );
+  assert.match(html, /exp-jornada-marca-nao-aplicada/);
+  assert.match(html, /O filtro de marca \(APICE\) não foi aplicado pela API/);
+  for (const rel of ["app/expedicao/ExpedicaoClient.tsx", "src/components/expedicao/TikTokDispatchPanel.tsx"]) {
+    assert.match(readFileSync(join(RAIZ, rel), "utf8"), /<JornadaPedidos carga=\{jornada\.carga\} aoTentarDeNovo=\{jornada\.tentarDeNovo\} marca=\{/);
+  }
+});
+
+test("fila zerada nao esconde a pagina (M4): o corpo aparece sob o aviso de vazio", () => {
+  assert.match(CLIENTE, /const mostraCorpo =\s*estado === "ok" \|\| estado === "fila_vazia_por_filtro" \|\| estado === "fotografia_vazia";/);
+  assert.match(CLIENTE, /\{mostraCorpo && !recorte\.semConta &&/);
 });
