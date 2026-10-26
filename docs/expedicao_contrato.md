@@ -1359,3 +1359,84 @@ FBS 258 (11 vencidos, 57 acima de 48 h), reconciliado nas 4 contas.
   "quando a coleta chegou".
 - Sem indice em `ship_by_date`/`pay_time` na fonte: a leitura e' por varredura
   (5,6 s medidos); se crescer, o custo aparece no `--diagnose`.
+
+
+## Jornada de pedidos (rota /jornada) — contrato v1.2
+
+Fonte de verdade da tela: `apps/web/src/lib/expedicao-jornada.ts` (tipos e
+parser) e `apps/web/src/components/expedicao/JornadaPedidos.tsx`. Histórico da
+negociação T-0010 × T-0011:
+`.artefacts/deliveries/expedicao-jornada/contrato-jornada-v1.md` (seções 3.1 e
+3.2). É apenas registro: o contrato vigente é este resumo.
+
+### Rota e parâmetros
+
+`GET /api/v1/expedicao/jornada`
+
+| Parâmetro | Valores | Padrão |
+|---|---|---|
+| `channel` | `shopee` \| `mercadolivre` \| `tiktok` (allowlist) | obrigatório |
+| `brands` | CSV (máx. 50), case-insensitive no servidor; a tela manda o `?marca=` | todas |
+| `days` | janela da coorte: 1–35 (Shopee), 1–90 (TikTok); ignorado no ML | 7 |
+| `event` | `despacho` \| `coleta`, só TikTok (fora dele → 422) | `coleta` |
+
+Flags: `expedicao_api_enabled` sempre; o ML exige também
+`expedicao_ml_api_enabled`; a coorte Shopee exige
+`expedicao_shopee_ldr_api_enabled`. Flag desligada → `status: "disabled"` sem
+consultar o banco.
+
+### Resposta
+
+- `status` = **pior** estado entre as seções (`ok` < `partial` <
+  `unavailable`), ou `disabled`. `reason` traz o prefixo da seção
+  (`coorte: table_not_migrated`, `coorte: dias_sem_publicacao (n)`,
+  `fila_aberta: etapas_nao_fecham`, `coorte: publicacao_desatualizada`). Uma
+  seção indisponível não apaga a outra.
+- `brands_applied`: marcas efetivamente aplicadas. A tela avisa por escrito
+  quando pediu `brands` e a API não as aplicou (números do canal inteiro).
+- `limitacoes` também no nível da resposta: guardam a limitação da seção que
+  veio `null`.
+- `fila_aberta` (agora): `grain` (`pedido` | `shipment`), `snapshot_at`,
+  `freshness`, `base`, `etapas`, `etapas_fecham`, `sobreposicoes`,
+  `limitacoes`.
+- `coorte` (dias fechados, horário de Brasília, **terminando ontem**): `eixo`
+  (`paid_date` no TikTok, `deadline_date` na Shopee), `evento`,
+  `janela {inicio, fim, dias}`, `base`, `etapas` (com `label`),
+  `etapas_fecham`, `sobreposicoes`, `fora_da_coorte`, `maturidade`,
+  `limitacoes`, `publicado_em` (ISO ou `null`) e `desatualizada` (bool).
+  `publicado_em`/`desatualizada` são opcionais no parser. A tela rotula
+  "pedidos pagos de DD/MM a DD/MM" (ou "pedidos com vencimento de …").
+  Como as rotas `/tiktok` e `/shopee/ldr` incluem hoje, os números não batem
+  dia a dia com elas.
+
+### Etapas × sobreposições
+
+- **Etapas** são exclusivas e somam a `base`. `etapas_fecham=true` com soma
+  diferente da base → o parser **rejeita** o payload. `etapas_fecham=false` →
+  `status` `partial` e aviso "parcial"; a tela não refaz a soma.
+- **Sobreposições** são subconjuntos (da base ou da etapa em
+  `subconjunto_de`) e **nunca** entram em soma. A tela as mostra à parte:
+  "62 vencidos dentro de Aguardando expedição (3,4% · 62 de 1.820)".
+- Etapas da coorte por canal: TikTok `fora_amostra`, `cancelado_antes`,
+  `aguardando`, `concluido`; Shopee `fora_fbs`, `cancelado_antes`,
+  `enviado_sem_registro`, `aguardando`, `concluido`. A fila aberta tem uma
+  etapa só (`aguardando_expedicao`) até a etapa interna ser publicada.
+
+### Ausência ≠ zero
+
+- A API manda `count` e `base`, nunca percentual; a tela usa o formato único
+  ("x% · n de base"). Base 0 → "indisponível".
+- `sobreposicoes[].count = null` (com `reason`) = a medida não existe no
+  canal → "indisponível", nunca 0. O payload continua válido.
+- Fonte ausente → seção `null` + limitação; `unavailable` com `reason`.
+- Na tela: 404, erro de rede e `disabled` → "Jornada indisponível" discreto
+  (a rota ainda não está em produção); 5xx ou payload fora do contrato →
+  erro com "Tentar novamente".
+
+### Limitações por canal
+
+| Canal | Fila aberta | Coorte |
+|---|---|---|
+| Shopee | por pedido (`READY_TO_SHIP` + `PROCESSED`); etapa interna e FBS não separados | por vencimento, só com a LDR operacional ativa (indicador interno, não o Account Health oficial) |
+| Mercado Livre | por shipment `ready_to_ship`; Full fora; `substatus` não publicado; `vencido`/`vence_24h` = `null` | não existe: o canal não publica prazo de despacho |
+| TikTok | não existe: não há fila em grão de pedido | por dia de pagamento × marca, evento coleta ou despacho; prazo reconstruído da política de dias úteis |
