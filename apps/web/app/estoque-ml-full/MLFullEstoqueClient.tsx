@@ -384,7 +384,7 @@ export default function MLFullEstoqueClient() {
   const filtrosUI = (
     <div className="flex flex-col gap-3 w-full">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+        <span className="text-xs font-semibold text-ink-faint uppercase tracking-wide">
           Marca
         </span>
         {MARCAS_ML.map((m, idx) => (
@@ -462,7 +462,7 @@ export default function MLFullEstoqueClient() {
       />
 
       {carregando && (
-        <p role="status" className="text-sm text-slate-500 px-1 py-8">
+        <p role="status" className="text-sm text-ink-muted px-1 py-8">
           Carregando estoque…
         </p>
       )}
@@ -633,7 +633,7 @@ export default function MLFullEstoqueClient() {
             </section>
           ) : (
             <>
-              <p className="text-xs text-slate-500 px-1">
+              <p className="text-xs text-ink-muted px-1">
                 Exibindo {fmtInt(payload.inventarios.length)} de{" "}
                 {fmtInt(payload.total_no_filtro)} inventários no filtro.
                 {payload.truncado &&
@@ -647,7 +647,7 @@ export default function MLFullEstoqueClient() {
             <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
               Como ler esta tela
             </h4>
-            <ul className="text-xs text-slate-500 list-disc pl-5 flex flex-col gap-1">
+            <ul className="text-xs text-ink-muted list-disc pl-5 flex flex-col gap-1">
               <li>{AVISO_GRAO_ML}</li>
               <li>{AVISO_AUSENCIA_ML}</li>
               <li>{AVISO_NAO_E_MODALIDADE_ML}</li>
