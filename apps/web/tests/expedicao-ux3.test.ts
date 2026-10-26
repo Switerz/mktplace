@@ -287,3 +287,114 @@ test("frescor escrito nos dois sentidos: 'Atualizada' e 'Desatualizada'", () => 
   assert.match(renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: false } })), /Atualizada · há 1\.2 h/);
   assert.match(renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: true } })), /Desatualizada · há 1\.2 h/);
 });
+
+// ===========================================================================
+// T-0010 — `?` das metricas e catalogo unico de definicoes
+// ===========================================================================
+import {
+  AJUDA_CANAL_SEM_PRAZO,
+  CAMPOS_DEFINICAO,
+  DEFINICOES,
+  KPIS_DA_FILA,
+  METRICAS_POR_CANAL,
+  chaveDoKpiDaFila,
+  ehChaveMetrica,
+} from "../src/lib/expedicao-definicoes.ts";
+import { montarKpis } from "../src/lib/expedicao-contract.ts";
+
+const { default: AjudaMetrica } = await import("../src/components/expedicao/AjudaMetrica.tsx");
+const { KpiComAjuda } = await import("../src/components/expedicao/KpiComAjuda.tsx");
+
+test("catalogo: toda metrica exibida tem os seis campos, curtos", () => {
+  for (const [canal, chaves] of Object.entries(METRICAS_POR_CANAL)) {
+    for (const c of chaves) {
+      assert.ok(ehChaveMetrica(c), `${canal}: ${c} fora do catalogo`);
+    }
+  }
+  for (const [chave, def] of Object.entries(DEFINICOES)) {
+    assert.ok(def.nome.length > 2, chave);
+    for (const [campo] of CAMPOS_DEFINICAO) {
+      const t = def[campo];
+      assert.ok(t.trim().length > 0, `${chave}.${campo} vazio`);
+      assert.ok(t.length <= 260, `${chave}.${campo} longo demais (${t.length})`);
+    }
+  }
+});
+
+test("catalogo: todo KPI da fila, nos dois canais, tem `?`", () => {
+  for (const canal of ["shopee", "mercadolivre"] as const) {
+    const exibidos = montarKpis(totais(), [frescor("a", 1)], canal).map((k) => k.chave);
+    for (const k of exibidos) {
+      assert.ok(chaveDoKpiDaFila(canal, k), `${canal}.${k} sem definicao`);
+      assert.ok((KPIS_DA_FILA as readonly string[]).includes(k), k);
+    }
+  }
+});
+
+test("catalogo: toda chave citada nas telas existe", () => {
+  const arquivos = [
+    "app/expedicao/ExpedicaoClient.tsx",
+    "src/components/expedicao/TikTokDispatchPanel.tsx",
+    "src/components/expedicao/LdrShopeePanel.tsx",
+  ];
+  let total = 0;
+  for (const rel of arquivos) {
+    for (const m of fonte(rel).matchAll(/(?:ajuda|chave)="([a-z_.]+)"/g)) {
+      total += 1;
+      assert.ok(ehChaveMetrica(m[1]), `${rel}: ${m[1]}`);
+    }
+  }
+  assert.ok(total >= 12, `poucas chaves encontradas: ${total}`);
+  // cada KPI do TikTok e da LDR Shopee passa pelo componente com `?`
+  for (const rel of ["src/components/expedicao/TikTokDispatchPanel.tsx", "src/components/expedicao/LdrShopeePanel.tsx"]) {
+    assert.doesNotMatch(fonte(rel), /<KpiTile\b/, `${rel} tem KPI sem ?`);
+  }
+  assert.match(CLIENTE, /ajuda=\{chaveDoKpiDaFila\(canal, kpi\.chave\)\}/);
+});
+
+test("LDR Shopee: indicador interno, nao o Account Health oficial", () => {
+  const d = DEFINICOES["shopee.ldr"];
+  assert.match(`${d.definicao} ${d.limitacoes}`, /interno/i);
+  assert.match(d.limitacoes, /não é o índice oficial de Account Health/);
+});
+
+test("Mercado Livre: o `?` diz que nao ha SLA/LDR e nao inventa numero", () => {
+  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", AJUDA_CANAL_SEM_PRAZO.prazo] as const) {
+    const d = DEFINICOES[c];
+    assert.match(d.limitacoes, /não publica prazo de despacho/);
+    assert.match(d.limitacoes, /SLA nem LDR/);
+    assert.doesNotMatch(`${d.definicao} ${d.formula}`, /\d+\s*%/, "nenhum numero inventado");
+  }
+  assert.match(DEFINICOES["mercadolivre.over48h"].limitacoes, /não é SLA/);
+});
+
+test("o `?` e' um botao real, de 44px, rotulado e ligado ao painel", () => {
+  const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr" }));
+  const botao = html.match(/<button[^>]*aria-label="O que é LDR do TikTok"[^>]*>/)?.[0];
+  assert.ok(botao, html);
+  assert.match(botao!, /type="button"/);
+  assert.match(botao!, /aria-expanded="false"/);
+  assert.match(botao!, /h-11 w-11/);
+  const alvo = botao!.match(/aria-controls="([^"]+)"/)![1];
+  assert.match(html, new RegExp(`<span[^>]*id="${alvo.replace(/[:]/g, "\:")}"[^>]*role="dialog"[^>]*hidden=""`));
+  for (const [, rotulo] of CAMPOS_DEFINICAO) assert.ok(html.includes(`${rotulo}: `), rotulo);
+  assert.doesNotMatch(html, /<div\b/, "so' span: o ? mora dentro de <p>");
+  assert.match(html, /min-h-11 min-w-11[^"]*"[^>]*>Fechar<\/button>/);
+});
+
+test("o `?` fecha com Esc, clique fora e devolve o foco; posicao fixa na viewport", () => {
+  const src = fonte("src/components/expedicao/AjudaMetrica.tsx");
+  assert.match(src, /e\.key === "Escape"\) fechar\(true\)/);
+  assert.match(src, /addEventListener\("pointerdown", fora\)/);
+  assert.match(src, /botao\.current\?\.focus\(\)/);
+  assert.match(src, /Math\.min\(LARGURA_MAX, vw - 2 \* MARGEM\)/, "cabe em 390 px");
+  assert.match(src, /className="fixed z-50/);
+  assert.match(src, /ATRASO_HOVER_MS/);
+});
+
+test("KpiComAjuda poe o `?` na linha de comparacao do KPI", () => {
+  const html = renderToStaticMarkup(
+    h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),
+  );
+  assert.match(html, /Fila aberta\. <span[^>]*><button[^>]*aria-label="O que é Backlog total"/);
+});

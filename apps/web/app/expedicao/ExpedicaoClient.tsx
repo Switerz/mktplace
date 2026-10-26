@@ -51,7 +51,7 @@ import {
   SecaoGerencial,
 } from "@/components/expedicao/SecoesExpedicao";
 import Disclosure from "@/components/ui/Disclosure";
-import KpiTile from "@/components/ui/KpiTile";
+import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
@@ -121,6 +121,7 @@ import {
 } from "@/lib/expedicao-janela";
 import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
 import { formatarInteiro } from "@/lib/expedicao-formato";
+import { AJUDA_CANAL_SEM_PRAZO, chaveDoKpiDaFila } from "@/lib/expedicao-definicoes";
 
 /** Janela da tendencia da fila, em DIAS. Horas so' na query. */
 const REGRA = REGRA_JANELA.fila;
@@ -216,10 +217,11 @@ function tomDoKpi(kpi: Kpi): Tom {
   return kpi.alerta ? "atencao" : "neutro";
 }
 
-function CelulaKpi({ kpi, destaque }: { kpi: Kpi; destaque: boolean }) {
+function CelulaKpi({ kpi, destaque, canal }: { kpi: Kpi; destaque: boolean; canal: Canal }) {
   const texto = kpi.valorTexto ?? (kpi.valor === null ? "—" : numero(kpi.valor));
   return (
-    <KpiTile
+    <KpiComAjuda
+      ajuda={chaveDoKpiDaFila(canal, kpi.chave)}
       rotulo={kpi.rotulo}
       valor={texto}
       // No cartao grande a nota fica visivel; no compacto vira tooltip, para
@@ -246,10 +248,10 @@ function BlocoFbs({ divisao }: { divisao: DivisaoDaFila }) {
         Pedidos FBS — responsabilidade logística da Shopee
       </h4>
       <FaixaKpis rotulo="Pedidos FBS" secundaria>
-        <KpiTile rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
-        <KpiTile rotulo="Vencidos (FBS)" valor={numero(f.overdue_count)} />
-        <KpiTile rotulo="Acima de 48 h (FBS)" valor={numero(f.over_48h_count)} />
-        <KpiTile rotulo="Travados (FBS)" valor={numero(f.stalled_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Vencidos (FBS)" valor={numero(f.overdue_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Acima de 48 h (FBS)" valor={numero(f.over_48h_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Travados (FBS)" valor={numero(f.stalled_count)} />
       </FaixaKpis>
       <p className="mt-2 text-xs text-ink-muted" data-testid="exp-fila-conferencia">
         {textoDaReconciliacao(divisao)}
@@ -582,7 +584,7 @@ export default function ExpedicaoClient({
   const faixaPrincipal = (
     <FaixaKpis rotulo="Indicadores principais">
       {principais.map((k) => (
-        <CelulaKpi key={k.chave} kpi={k} destaque />
+        <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque />
       ))}
     </FaixaKpis>
   );
@@ -610,7 +612,7 @@ export default function ExpedicaoClient({
       ) : null}
       <FaixaKpis rotulo="Risco atual" colunas={risco.length === 6 ? 6 : 4}>
         {risco.map((k) => (
-          <CelulaKpi key={k.chave} kpi={k} destaque />
+          <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque />
         ))}
       </FaixaKpis>
       {divisao ? <BlocoFbs divisao={divisao} /> : null}
@@ -632,7 +634,12 @@ export default function ExpedicaoClient({
       descricao="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
     >
       <Panel
-        titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+        titulo={
+          <>
+            {divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+            <Ajuda chave="shopee.prazo_situacao" />
+          </>
+        }
       >
         {faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0 ? (
           <>
@@ -676,19 +683,30 @@ export default function ExpedicaoClient({
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" descricao="O canal não publica prazo de envio.">
-      <Panel titulo="Prazo indisponível pelo canal">
+      <Panel
+        titulo={
+          <>
+            Prazo indisponível pelo canal <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />
+          </>
+        }
+      >
         <p className="text-sm text-ink">{SEM_PRAZO_CANAL_ML}</p>
         {envelhecimento ? (
           <dl className="mt-3 grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg bg-raised px-3 py-2">
-              <dt className="text-xs text-ink-muted">Acima de 48 h (limiar interno da Torre)</dt>
+              <dt className="text-xs text-ink-muted">
+                Acima de 48 h (limiar interno da Torre){" "}
+                <Ajuda chave={`${filtros.channel}.over48h`} />
+              </dt>
               <dd className="text-sm text-ink">
                 <span className="text-xl font-semibold tabular-nums">{numero(envelhecimento.acima48h)}</span>{" "}
                 de {numero(envelhecimento.backlog)} pedidos em fila
               </dd>
             </div>
             <div className="rounded-lg bg-raised px-3 py-2">
-              <dt className="text-xs text-ink-muted">Pedido mais antigo em fila</dt>
+              <dt className="text-xs text-ink-muted">
+                Pedido mais antigo em fila <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.maisAntigo} />
+              </dt>
               <dd className="text-sm text-ink">
                 {envelhecimento.maisAntigo ? (
                   <>
@@ -1310,7 +1328,7 @@ export default function ExpedicaoClient({
             {faixaPrincipal}
             <FaixaKpis rotulo="Indicadores secundários" secundaria>
               {secundarios.map((k) => (
-                <CelulaKpi key={k.chave} kpi={k} destaque={false} />
+                <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque={false} />
               ))}
             </FaixaKpis>
             <div className="grid gap-3 lg:grid-cols-3">

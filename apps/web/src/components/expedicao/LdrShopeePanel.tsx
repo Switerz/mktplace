@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
-import KpiTile from "@/components/ui/KpiTile";
+import { KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import {
@@ -154,7 +154,8 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
         </ul>
       )}
       <FaixaKpis rotulo="LDR operacional da Shopee" colunas={4}>
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr"
           rotulo="LDR operacional"
           valor={formatarTaxaLdr(l.rate)}
           comparacao={motivo ?? `${numero(l.late)} de ${numero(l.base)} pedidos com prazo vencido`}
@@ -162,21 +163,24 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
           tom={l.rate === null ? "ausente" : "neutro"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_base"
           rotulo="Base (prazos vencidos)"
           valor={l.mature_due_days ? numero(l.base) : VALOR_AUSENTE}
           comparacao="Pagos, do vendedor, sem FBS e sem cancelados sem coleta."
           tom={l.mature_due_days ? "neutro" : "ausente"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_atrasados"
           rotulo="Atrasados"
           valor={l.mature_due_days ? numero(l.late) : VALOR_AUSENTE}
           comparacao={`${numero(l.shipped_late)} coletados depois do prazo · ${numero(l.pending_overdue)} vencidos sem coleta`}
           tom={l.mature_due_days ? "neutro" : "ausente"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_em_risco"
           rotulo="Vencem hoje ou amanhã"
           valor={numero(l.pending_at_risk)}
           comparacao="Ainda sem coleta e dentro do prazo."

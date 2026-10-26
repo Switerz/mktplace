@@ -59,6 +59,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import {
   AtencaoAgora,
   ConviteAoDetalhe,
@@ -67,7 +68,6 @@ import {
 } from "@/components/expedicao/SecoesExpedicao";
 import Chip from "@/components/ui/Chip";
 import Disclosure from "@/components/ui/Disclosure";
-import KpiTile from "@/components/ui/KpiTile";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
@@ -408,28 +408,32 @@ export default function TikTokDispatchPanel({
   const secaoRisco = ldr ? (
     <SecaoGerencial titulo="Risco atual" descricao={quando}>
       <FaixaKpis rotulo="Risco atual">
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.pendente_vencido"
           rotulo="Venceram e não saíram"
           valor={formatarInteiro(ldr.pending_overdue)}
           destaque
           comparacao="Vencimentos da janela consultada, ainda sem o evento."
           tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.vence_hoje_amanha"
           rotulo="Vencem hoje ou amanhã"
           valor={formatarInteiro(ldr.pending_at_risk)}
           destaque
           comparacao="Ainda dá para tratar dentro do prazo."
           tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.pendente_no_prazo"
           rotulo="Pendentes no prazo"
           valor={formatarInteiro(ldr.pending_on_time)}
           destaque
           comparacao="Pedidos ainda sem o evento, dentro do prazo."
         />
         {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.lojas_acima_meta"
           rotulo="Lojas acima da meta"
           valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
           destaque
@@ -478,7 +482,8 @@ export default function TikTokDispatchPanel({
           : ""}
       </p>
       <FaixaKpis rotulo="Indicadores principais" colunas={3}>
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.ldr"
           rotulo="LDR da janela"
           valor={formatarTaxa(ldr.rate)}
           destaque
@@ -498,14 +503,16 @@ export default function TikTokDispatchPanel({
         {/* `base` e `late` da LDR somam SO' vencimentos fechados. Sem nenhum
             fechado (o caso da serie vencida) eles valem zero por construcao,
             nao por medicao: a tela mostra ausencia, nao "0 venciam". */}
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.venciam"
           rotulo="Venciam no período"
           valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.base)}
           destaque
           comparacao={`${ldr.mature_due_days} dia(s) fechado(s), ${ldr.partial_due_days} ainda no prazo.`}
           tom={semVencimentoFechado ? "ausente" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.atrasaram"
           rotulo="Já atrasaram"
           valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.late)}
           destaque
@@ -633,7 +640,9 @@ export default function TikTokDispatchPanel({
                 <th scope="col" className="text-right font-semibold">Atrasados</th>
                 <th scope="col" className="text-right font-semibold">… ainda sem envio</th>
                 <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
-                <th scope="col" className="text-right font-semibold">Taxa</th>
+                <th scope="col" className="text-right font-semibold">
+                  Taxa <Ajuda chave="tiktok.ldr" />
+                </th>
                 <th scope="col" className="font-semibold">Estado</th>
               </tr>
             </thead>
@@ -701,7 +710,9 @@ export default function TikTokDispatchPanel({
               <th scope="col" className="text-right font-semibold">Atrasados</th>
               <th scope="col" className="text-right font-semibold">Vencidos s/ envio</th>
               <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
-              <th scope="col" className="text-right font-semibold">Taxa</th>
+              <th scope="col" className="text-right font-semibold">
+                  Taxa <Ajuda chave="tiktok.fluxo_pagamento" />
+                </th>
             </tr>
           </thead>
           <tbody>
