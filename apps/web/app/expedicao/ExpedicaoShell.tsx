@@ -36,7 +36,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import ExpedicaoClient from "./ExpedicaoClient";
 import TikTokDispatchPanel from "@/components/expedicao/TikTokDispatchPanel";
+import Note from "@/components/ui/Note";
 import Segmented from "@/components/ui/Segmented";
+import { demoAtivo } from "@/lib/expedicao-demo";
 import {
   ROTULO_CANAL_EXPEDICAO,
   canaisHabilitados,
@@ -84,11 +86,14 @@ export default function ExpedicaoShell() {
   // filtro mora aqui e atravessa a troca de canal, como a profundidade.
   const [marca, setMarca] = useState<string | null>(null);
   const [pronta, setPronta] = useState(false);
+  // T-0010: `?demo=` (dados ficticios para QA). `demoAtivo` e' sempre falso em producao.
+  const [demo, setDemo] = useState(false);
 
   const lerDaUrl = useCallback(() => {
     setCanal(lerCanalExpedicao(window.location.search, FLAGS));
     setVisao(lerVisao(window.location.search));
     setMarca(lerMarca(window.location.search));
+    setDemo(demoAtivo(window.location.search));
   }, []);
 
   useEffect(() => {
@@ -174,7 +179,7 @@ export default function ExpedicaoShell() {
       </p>
     );
   }
-  return ehCanalDaFila(canal) ? (
+  const corpo = ehCanalDaFila(canal) ? (
     <ExpedicaoClient
       canal={canal}
       seletorCanal={seletorCanal}
@@ -191,5 +196,19 @@ export default function ExpedicaoShell() {
       marca={marca}
       aoTrocarMarca={trocarMarca}
     />
+  );
+  if (!demo) return corpo;
+  // T-0010: modo de demonstracao (so' fora de producao). A faixa e' ESCRITA:
+  // numero ficticio nao pode parecer real em print nenhum.
+  return (
+    <>
+      <div className="mx-auto max-w-[1400px] px-3 pt-3 sm:px-4">
+        <Note tom="atencao" papel="status">
+          Dados fictícios — modo de demonstração da Expedição (só em desenvolvimento). Nenhum número
+          desta tela veio da API.
+        </Note>
+      </div>
+      {corpo}
+    </>
   );
 }

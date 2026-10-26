@@ -33,6 +33,7 @@ import {
   type RespostaLdrShopee,
 } from "@/lib/expedicao-shopee-ldr";
 import { formatarInteiro } from "@/lib/expedicao-formato";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
 
 const numero = formatarInteiro;
 const diaCurto = (iso: string) => {
@@ -73,7 +74,7 @@ export function useLdrShopee(api: string, marca: string | null, ligada: boolean)
     setResposta(null);
     setCarregando(true);
     setErro(false);
-    fetch(`${api}${minha}`, { headers: { Accept: "application/json" } })
+    buscarExpedicao(`${api}${minha}`, { headers: { Accept: "application/json" } })
       .then(async (r) => {
         if (!r.ok) throw new Error("http");
         return (await r.json()) as RespostaLdrShopee;

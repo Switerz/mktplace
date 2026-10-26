@@ -126,6 +126,7 @@ import {
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
 import { formatarBase } from "@/lib/expedicao-formato";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   OPCAO_PERSONALIZADA,
   REGRA_JANELA,
@@ -293,7 +294,7 @@ export default function TikTokDispatchPanel({
   const carregar = useCallback(async () => {
     setEstado("carregando");
     try {
-      const r = await fetch(url, { cache: "no-store" });
+      const r = await buscarExpedicao(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const json = (await r.json()) as TikTokPayload;
       if (urlVigente.current !== url) return;

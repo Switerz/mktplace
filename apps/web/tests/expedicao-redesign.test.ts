@@ -678,3 +678,75 @@ test("as colunas das tabelas tem respiro horizontal", () => {
     assert.ok(/\[&_td\]:(pr-4|px-3)/.test(c), `tabela sem respiro horizontal: ${c}`);
   }
 });
+
+// ===========================================================================
+// T-0010 — modo de demonstracao (?demo=) e fixtures coerentes
+// ===========================================================================
+import { cenarioDaUrl, demoAtivo } from "../src/lib/expedicao-demo.ts";
+import { CENARIOS_DEMO, lerCenario, respostaFicticia } from "../src/lib/expedicao-fixtures.ts";
+import { lerJornada } from "../src/lib/expedicao-jornada.ts";
+import { faixasDePrazo as faixas } from "../src/lib/expedicao-contract.ts";
+
+test("demo: so' fora de producao, e so' com ?demo=", () => {
+  assert.equal(demoAtivo("?demo=1", "development"), true);
+  assert.equal(demoAtivo("?demo=parcial", "development"), true);
+  assert.equal(demoAtivo("?demo=1", "production"), false, "producao ignora ?demo=");
+  assert.equal(demoAtivo("", "development"), false);
+  assert.equal(demoAtivo("?demo=0", "development"), false);
+  assert.equal(cenarioDaUrl("?channel=tiktokshop&demo=erro"), "erro");
+  assert.equal(lerCenario("1"), "ok");
+  assert.equal(lerCenario("<script>"), "ok");
+  const demo = readFileSync(join(RAIZ, "src/lib/expedicao-demo.ts"), "utf8");
+  // inline, para o Next dobrar a condicao e tirar as fixtures do bundle
+  assert.match(demo, /if \(process\.env\.NODE_ENV !== "production" && typeof window !== "undefined"\) \{/);
+  assert.match(demo, /await import\("\.\/expedicao-fixtures\.ts"\)/);
+  for (const rel of ["src/components/expedicao/TikTokDispatchPanel.tsx", "src/components/expedicao/LdrShopeePanel.tsx", "src/components/expedicao/JornadaPedidos.tsx"]) {
+    const src = readFileSync(join(RAIZ, rel), "utf8");
+    assert.doesNotMatch(src, /[^.\w]fetch\(/, `${rel} busca sem o ponto unico`);
+    assert.match(src, /buscarExpedicao\(/, rel);
+  }
+  assert.match(readFileSync(join(RAIZ, "app/expedicao/ExpedicaoShell.tsx"), "utf8"), /Dados fictícios — modo de demonstração/);
+});
+
+test("fixtures: 3 canais e todos os estados, coerentes com os contratos", () => {
+  for (const c of CENARIOS_DEMO) {
+    if (c === "carregando") continue;
+    for (const url of [
+      "/api/v1/expedicao?channel=shopee",
+      "/api/v1/expedicao?channel=mercadolivre",
+      "/api/v1/expedicao/trend?window_hours=72&channel=shopee",
+      "/api/v1/expedicao/tiktok?event=coleta&days=7",
+      "/api/v1/expedicao/shopee/ldr?days=7",
+    ]) {
+      const r = respostaFicticia(url, c);
+      assert.ok(r, `${c} ${url}`);
+      assert.equal(r!.status, c === "erro" ? 500 : 200, `${c} ${url}`);
+    }
+    // a particao de prazo da Shopee fecha o backlog em todo cenario
+    const fila = respostaFicticia("/api/v1/expedicao?channel=shopee", c)!.corpo as { totals: import("../src/lib/expedicao-contract.ts").Totais | null; accounts: import("../src/lib/expedicao-contract.ts").Totais[] };
+    for (const t of [fila.totals, ...(fila.accounts ?? [])]) {
+      if (!t) continue;
+      assert.equal(faixas(t)!.reduce((s, x) => s + x.valor, 0), t.backlog_count, c);
+    }
+    // jornada: o parser aceita a fixture de cada canal (exceto 404/500)
+    for (const canal of ["shopee", "mercadolivre", "tiktok"] as const) {
+      const j = respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, c)!;
+      if (c === "indisponivel") { assert.equal(j.status, 404); continue; }
+      if (c === "erro") { assert.equal(j.status, 500); continue; }
+      const p = lerJornada(j.corpo, canal);
+      assert.ok(p.ok, `${c}/${canal}: ${p.ok ? "" : p.erro}`);
+    }
+  }
+  assert.equal(respostaFicticia("/api/v1/outra-coisa", "ok"), null, "rota desconhecida cai no fetch real");
+});
+
+test("fixtures da jornada cobrem count nulo, dias_sem_publicacao e desatualizada (v1.2)", () => {
+  const ml = respostaFicticia("/api/v1/expedicao/jornada?channel=mercadolivre", "ok")!.corpo as { fila_aberta: { sobreposicoes: { count: number | null }[] } };
+  assert.ok(ml.fila_aberta.sobreposicoes.some((s) => s.count === null));
+  const parcial = respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "parcial")!.corpo as { status: string; reason: string };
+  assert.equal(parcial.status, "partial");
+  assert.match(parcial.reason, /dias_sem_publicacao/);
+  const velha = respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "desatualizado")!.corpo as { coorte: { desatualizada: boolean; publicado_em: string } };
+  assert.equal(velha.coorte.desatualizada, true);
+  assert.ok(velha.coorte.publicado_em);
+});

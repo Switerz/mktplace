@@ -129,6 +129,7 @@ import {
 } from "@/lib/expedicao-janela";
 import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
 import { formatarInteiro } from "@/lib/expedicao-formato";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
 import { AJUDA_CANAL_SEM_PRAZO, chaveDoKpiDaFila } from "@/lib/expedicao-definicoes";
 
 /** Janela da tendencia da fila, em DIAS. Horas so' na query. */
@@ -450,7 +451,7 @@ export default function ExpedicaoClient({
     let vivo = true;
     setCarregando(true);
     setErroHttp(null);
-    fetch(`${API}/api/v1/expedicao?${construirQuery(filtros)}`, {
+    buscarExpedicao(`${API}/api/v1/expedicao?${construirQuery(filtros)}`, {
       headers: { Accept: "application/json" },
     })
       .then(async (r) => {
@@ -490,7 +491,7 @@ export default function ExpedicaoClient({
     let vivo = true;
     setCarregandoTendencia(true);
     setErroTendencia(false);
-    fetch(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
+    buscarExpedicao(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
       headers: { Accept: "application/json" },
     })
       .then(async (r) => {
