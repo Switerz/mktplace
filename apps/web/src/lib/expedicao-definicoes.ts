@@ -304,6 +304,24 @@ export const DEFINICOES = {
     cobertura: "Pagos, sem amostras e sem cancelados antes do prazo.",
     limitacoes: "Não é a LDR: o denominador é outro. Um feriado empurra vários dias de pagamento para o mesmo vencimento.",
   },
+  "jornada.fila_aberta": {
+    nome: "Jornada — fila aberta",
+    definicao: "Pedidos pagos ainda não expedidos, divididos pela etapa em que estão agora.",
+    formula: "Contagem por etapa ÷ total da fila aberta (as etapas somam o total).",
+    fonte: "Rota /expedicao/jornada sobre a fila publicada (marts.expedicao_fila_atual).",
+    janela: FOTO,
+    cobertura: "Contas cadastradas do canal, com o filtro de marca aplicado no servidor.",
+    limitacoes: "A etapa interna (a preparar × envio organizado; substatus no ML) ainda não é publicada. Sobreposições como vencidos são subconjuntos e não se somam.",
+  },
+  "jornada.coorte": {
+    nome: "Jornada — coorte",
+    definicao: "Pedidos de uma janela de dias fechados, pela etapa em que terminaram.",
+    formula: "Contagem por etapa ÷ base da coorte (as etapas somam a base).",
+    fonte: "TikTok: marts.expedicao_tiktok_dispatch_daily. Shopee: tabelas da LDR operacional.",
+    janela: "Dias fechados em horário de Brasília, até ontem (as rotas irmãs incluem hoje).",
+    cobertura: "TikTok por dia de pagamento; Shopee por dia de vencimento. O Mercado Livre não tem coorte.",
+    limitacoes: "Dias recentes ainda mudam. Não bate dia a dia com a LDR, que inclui hoje.",
+  },
 } satisfies Record<string, DefinicaoMetrica>;
 
 /** As chaves do `fila()` sao montadas por canal; o teste confere o catalogo. */
@@ -339,15 +357,17 @@ export const METRICAS_POR_CANAL: Record<"shopee" | "mercadolivre" | "tiktokshop"
     "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.over48h", "shopee.stalled",
     "shopee.slow", "shopee.zombie", "shopee.marcas_alerta", "shopee.prazo_situacao",
     "shopee.fbs", "shopee.ldr", "shopee.ldr_base", "shopee.ldr_atrasados", "shopee.ldr_em_risco",
+    "jornada.fila_aberta", "jornada.coorte",
   ],
   mercadolivre: [
     "mercadolivre.backlog", "mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.sem_prazo",
     "mercadolivre.over48h", "mercadolivre.stalled", "mercadolivre.slow", "mercadolivre.zombie",
     "mercadolivre.marcas_alerta", "mercadolivre.prazo", "mercadolivre.mais_antigo",
+    "jornada.fila_aberta",
   ],
   tiktokshop: [
     "tiktok.pendente_vencido", "tiktok.vence_hoje_amanha", "tiktok.pendente_no_prazo",
     "tiktok.lojas_acima_meta", "tiktok.ldr", "tiktok.venciam", "tiktok.atrasaram",
-    "tiktok.fluxo_pagamento",
+    "tiktok.fluxo_pagamento", "jornada.coorte",
   ],
 };

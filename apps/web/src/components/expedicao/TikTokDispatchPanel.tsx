@@ -59,6 +59,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -346,6 +347,9 @@ export default function TikTokDispatchPanel({
     [aplicarJanela],
   );
   const seletor = valorDoSeletor(dias, REGRA, personalizado);
+
+  // T-0010: a jornada usa a mesma janela e o mesmo evento do painel.
+  const jornada = useJornada(BASE, "tiktok", marca, { dias, evento });
 
   const ldr = dados?.ldr ?? null;
   const fluxo = dados?.payment_flow ?? [];
@@ -836,6 +840,7 @@ export default function TikTokDispatchPanel({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoLdr}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} />}
             evolucao={painelEvolucao}
             concentracao={painelLojas("")}
             convite={

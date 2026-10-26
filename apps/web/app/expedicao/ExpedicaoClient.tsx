@@ -109,6 +109,7 @@ import {
   type Situacao,
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -513,6 +514,10 @@ export default function ExpedicaoClient({
 
   // EXPEDICAO-SHOPEE-LDR-1: a rota da LDR tambem traz a fila aberta separada
   // em vendedor x FBS. UMA leitura, repartida entre o "Risco atual" e o painel.
+  // T-0010: a jornada (fila aberta por etapa + coorte), recortada pela marca
+  // no SERVIDOR. Nada aqui soma a fila paginada.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva);
+
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee");
 
   const temFiltro =
@@ -1308,6 +1313,7 @@ export default function ExpedicaoClient({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoPrazo}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} />}
             evolucao={painelEvolucao}
             concentracao={painelContas("")}
             convite={

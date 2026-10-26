@@ -563,3 +563,230 @@ test("a troca de canal usa aplicarCanal, nao aplicarFiltro cru", () => {
     /useEffect\(\(\) => \{\s*setFiltros\(\(f\) => \(f\.channel === canal \? f : aplicarCanal\(f, canal\)\)\);\s*\}, \[canal\]\);/,
   );
 });
+
+// ===========================================================================
+// T-0010 — Jornada (contrato v1 + v1.1 + v1.2)
+// ===========================================================================
+import { register as registrarLoader } from "node:module";
+import {
+  canalDaJornada,
+  estadoDaJornada,
+  explicarMotivo,
+  lerJornada,
+  queryDaJornada,
+  rotuloDaCoorte,
+  textoDaSobreposicao,
+  type RespostaJornada,
+} from "../src/lib/expedicao-jornada.ts";
+
+registrarLoader("./helpers/tsx-loader.mjs", import.meta.url);
+
+/** Exemplo REAL do ML enviado pelo backend (v1.1). */
+const JORNADA_ML = {
+  channel: "mercadolivre",
+  status: "ok",
+  fila_aberta: {
+    grain: "shipment",
+    base: 10,
+    etapas: [{ key: "aguardando_expedicao", label: "Aguardando expedição", count: 10 }],
+    etapas_fecham: true,
+    sobreposicoes: [
+      { key: "vencido", count: null, reason: "o Mercado Livre não publica prazo de despacho" },
+      { key: "sem_prazo", count: 10 },
+    ],
+    limitacoes: ["substatus do shipment não publicado na fila"],
+  },
+  coorte: null,
+  limitacoes: ["o Mercado Livre não publica prazo de despacho"],
+};
+
+function jornadaTikTok(over: Record<string, unknown> = {}) {
+  return {
+    channel: "tiktok",
+    status: "ok",
+    reason: null,
+    brands_applied: [],
+    generated_at: "2026-10-26T21:00:00Z",
+    fila_aberta: null,
+    coorte: {
+      eixo: "paid_date",
+      evento: "coleta",
+      janela: { inicio: "2026-10-19", fim: "2026-10-25", dias: 7 },
+      base: 4310,
+      etapas: [
+        { key: "fora_amostra", label: "Amostras", count: 12 },
+        { key: "cancelado_antes", label: "Cancelados antes do prazo", count: 80 },
+        { key: "aguardando", label: "Aguardando", count: 300 },
+        { key: "concluido", label: "Coletados", count: 3918 },
+      ],
+      etapas_fecham: true,
+      sobreposicoes: [
+        { key: "aguardando_vencido", count: 41, subconjunto_de: "aguardando" },
+        { key: "concluido_atrasado", count: 150, subconjunto_de: "concluido" },
+      ],
+      fora_da_coorte: [],
+      maturidade: { dias_maduros: 6, dias_imaturos: 1 },
+      limitacoes: [],
+      ...over,
+    },
+    limitacoes: ["o TikTok não publica fila aberta em grão de pedido"],
+  };
+}
+
+type Ok = { ok: true; resposta: RespostaJornada };
+
+test("jornada: payload real do ML passa, com sobreposicao nula como 'indisponível'", () => {
+  const r = lerJornada(JORNADA_ML, "mercadolivre");
+  assert.ok(r.ok, r.ok ? "" : r.erro);
+  const j = (r as Ok).resposta;
+  assert.equal(j.coorte, null);
+  assert.deepEqual(j.limitacoes, ["o Mercado Livre não publica prazo de despacho"]);
+  const f = j.fila_aberta!;
+  const vencido = f.sobreposicoes.find((s) => s.key === "vencido")!;
+  assert.equal(vencido.count, null, "nulo nao vira zero");
+  const t = textoDaSobreposicao(vencido, f.etapas, f.base);
+  assert.equal(t, "Vencidos: indisponível — o Mercado Livre não publica prazo de despacho");
+  assert.equal(
+    textoDaSobreposicao(f.sobreposicoes[1], f.etapas, f.base),
+    "10 sem prazo publicado dentro de Aguardando expedição (100,0% · 10 de 10)",
+  );
+});
+
+test("jornada: TikTok valido, coorte rotulada pela janela que termina ontem", () => {
+  const r = lerJornada(jornadaTikTok(), "tiktok");
+  assert.ok(r.ok);
+  const c = (r as Ok).resposta.coorte!;
+  assert.equal(rotuloDaCoorte(c), "pedidos pagos de 19/10 a 25/10");
+  assert.equal(c.publicado_em, null, "v1.2 opcional: ausente vira null");
+  assert.equal(c.desatualizada, null);
+  assert.ok(lerJornada({ ...jornadaTikTok(), channel: "tiktokshop" }, "tiktok").ok);
+});
+
+test("jornada: v1.2 — publicado_em e desatualizada", () => {
+  const r = lerJornada(jornadaTikTok({ publicado_em: "2026-10-26T09:00:00Z", desatualizada: true }), "tiktok");
+  assert.ok(r.ok);
+  const c = (r as Ok).resposta.coorte!;
+  assert.equal(c.publicado_em, "2026-10-26T09:00:00Z");
+  assert.equal(c.desatualizada, true);
+  assert.equal(lerJornada(jornadaTikTok({ desatualizada: "sim" }), "tiktok").ok, false);
+});
+
+test("jornada: sobreposicao nunca e' somada e e' mostrada como subconjunto da etapa", () => {
+  const c = (lerJornada(jornadaTikTok(), "tiktok") as Ok).resposta.coorte!;
+  assert.equal(c.etapas.reduce((s, e) => s + e.count, 0), c.base, "as etapas fecham sem as sobreposicoes");
+  assert.equal(
+    textoDaSobreposicao(c.sobreposicoes[0], c.etapas, c.base, "coleta"),
+    "41 vencidos ainda sem envio dentro de Aguardando (13,7% · 41 de 300)",
+  );
+  const comp = readFileSync(join(RAIZ, "src/components/expedicao/JornadaPedidos.tsx"), "utf8");
+  assert.doesNotMatch(comp, /\.reduce\(/, "o componente nao soma nada");
+});
+
+test("jornada: payload invalido e' REJEITADO", () => {
+  const casos: [string, unknown][] = [
+    ["nao objeto", "x"],
+    ["canal fora da allowlist", { ...jornadaTikTok(), channel: "amazon" }],
+    ["canal trocado", JORNADA_ML],
+    ["status desconhecido", { ...jornadaTikTok(), status: "great" }],
+    ["contagem negativa", jornadaTikTok({ base: -1 })],
+    ["contagem fracionada", jornadaTikTok({ base: 4310.5 })],
+    ["fecham=true sem fechar", jornadaTikTok({ base: 9999 })],
+    ["sobreposicao maior que a etapa", jornadaTikTok({ sobreposicoes: [{ key: "aguardando_vencido", count: 301, subconjunto_de: "aguardando" }] })],
+    ["subconjunto de etapa inexistente", jornadaTikTok({ sobreposicoes: [{ key: "x", count: 1, subconjunto_de: "nada" }] })],
+    ["janela invertida", jornadaTikTok({ janela: { inicio: "2026-10-25", fim: "2026-10-19", dias: 7 } })],
+    ["eixo desconhecido", jornadaTikTok({ eixo: "created_at" })],
+  ];
+  for (const [nome, payload] of casos) {
+    assert.equal(lerJornada(payload, "tiktok").ok, false, nome);
+  }
+});
+
+test("jornada: etapas_fecham=false com status partial e' aceito; 'ok' assim e' rejeitado", () => {
+  const p = { ...jornadaTikTok({ base: 9999, etapas_fecham: false }), status: "partial", reason: "coorte: dias_sem_publicacao (2)" };
+  const r = lerJornada(p, "tiktok");
+  assert.ok(r.ok, r.ok ? "" : r.erro);
+  assert.equal(lerJornada({ ...p, status: "ok" }, "tiktok").ok, false);
+  assert.equal(explicarMotivo(p.reason), "Coorte: 2 dia(s) sem publicação na janela");
+  assert.equal(explicarMotivo("coorte: table_not_migrated"), "Coorte: a tabela ainda não foi publicada nesta base");
+  assert.equal(explicarMotivo("coorte: codigo_novo"), "Coorte: motivo não detalhado pela API");
+});
+
+test("jornada: 404, rede e disabled viram 'indisponível'; 5xx e invalido viram erro", () => {
+  const base = { carregando: false, http: 200, erroDeRede: false, resultado: null };
+  assert.equal(estadoDaJornada({ ...base, http: 404 }), "indisponivel");
+  assert.equal(estadoDaJornada({ ...base, http: null, erroDeRede: true }), "indisponivel");
+  assert.equal(
+    estadoDaJornada({ ...base, resultado: lerJornada({ channel: "shopee", status: "disabled" }, "shopee") }),
+    "indisponivel",
+  );
+  assert.equal(estadoDaJornada({ ...base, http: 500 }), "erro");
+  assert.equal(estadoDaJornada({ ...base, resultado: lerJornada({ channel: "shopee" }, "shopee") }), "erro");
+  assert.equal(
+    estadoDaJornada({
+      ...base,
+      resultado: lerJornada({ channel: "shopee", status: "unavailable", reason: "coorte: table_not_migrated" }, "shopee"),
+    }),
+    "fora_do_ar",
+  );
+  assert.equal(estadoDaJornada({ ...base, carregando: true }), "carregando");
+});
+
+test("jornada: a marca da URL vai como `brands`; evento so' no TikTok; dias nao no ML", () => {
+  assert.equal(canalDaJornada("tiktokshop"), "tiktok");
+  assert.equal(queryDaJornada("shopee", "apice"), "/api/v1/expedicao/jornada?channel=shopee&brands=apice");
+  assert.equal(
+    queryDaJornada("tiktok", "kokeshi", { dias: 14, evento: "despacho" }),
+    "/api/v1/expedicao/jornada?channel=tiktok&brands=kokeshi&days=14&event=despacho",
+  );
+  assert.equal(queryDaJornada("mercadolivre", null, { dias: 7, evento: "coleta" }), "/api/v1/expedicao/jornada?channel=mercadolivre");
+  assert.equal(queryDaJornada("shopee", null, { evento: "despacho" }), "/api/v1/expedicao/jornada?channel=shopee");
+  assert.match(CLIENTE, /useJornada\(API, filtros\.channel, marcaAtiva\)/);
+});
+
+const { createElement: hj } = await import("react");
+const { renderToStaticMarkup: htmlDe } = await import("react-dom/server");
+const { default: JornadaPedidos } = await import("../src/components/expedicao/JornadaPedidos.tsx");
+
+function render(http: number | null, json: unknown, canal: "shopee" | "mercadolivre" | "tiktok", erroDeRede = false) {
+  return htmlDe(
+    hj(JornadaPedidos, {
+      carga: { carregando: false, http, erroDeRede, resultado: json === undefined ? null : lerJornada(json, canal) },
+      aoTentarDeNovo: () => {},
+    }),
+  );
+}
+
+test("jornada 404 e rede: secao discreta, sem alerta vermelho", () => {
+  for (const html of [render(404, undefined, "shopee"), render(null, undefined, "shopee", true)]) {
+    assert.match(html, /Jornada indisponível\./);
+    assert.doesNotMatch(html, /role="alert"|crit/);
+  }
+});
+
+test("jornada ML: fila aberta com etapas e coorte indisponivel com a limitacao", () => {
+  const html = render(200, JORNADA_ML, "mercadolivre");
+  assert.match(html, /Agora — fila aberta/);
+  assert.match(html, /Aguardando expedição/);
+  assert.match(html, /100,0% · 10 de 10/);
+  assert.match(html, /Vencidos: indisponível — o Mercado Livre não publica prazo de despacho/);
+  assert.match(html, /Coorte<\/h3>[\s\S]*Indisponível neste canal: o Mercado Livre não publica prazo de despacho/);
+  assert.match(html, /substatus do shipment não publicado na fila/);
+});
+
+test("jornada TikTok: coorte rotulada, publicado em e selo de frescor; parcial avisado", () => {
+  const html = render(
+    200,
+    {
+      ...jornadaTikTok({ publicado_em: "2026-10-26T09:00:00Z", desatualizada: true, base: 9999, etapas_fecham: false }),
+      status: "partial",
+      reason: "coorte: dias_sem_publicacao (1)",
+    },
+    "tiktok",
+  );
+  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /publicado em <time dateTime="2026-10-26T09:00:00Z">\d{2}\/\d{2} \d{2}:\d{2}<\/time>/);
+  assert.match(html, />Desatualizada</);
+  assert.match(html, /Parcial:/);
+  assert.match(html, /1 dia\(s\) sem publicação na janela/);
+  assert.match(html, /Indisponível neste canal: o TikTok não publica fila aberta/);
+});
