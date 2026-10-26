@@ -1,10 +1,10 @@
 """TIKTOK-ADS-PRODUCTIZATION-1 — publica o shadow diario de TikTok Ads. INERTE.
 
 Le `raw.tiktok_ads_campaign_daily` e `raw.tiktok_ads_coverage` no Data Mart
-(sessao READ ONLY), monta (dia, marca, escopo) por
+(sessao READ ONLY), monta campanha x dia + cobertura por
 `pipelines.transforms.tiktok_ads_shadow` e, SO' com as tres travas, grava em
-`marts.fact_tiktok_ads_daily_shadow` (migration 031, NAO aplicada) -- uma
-tabela que NENHUM consumidor le'.
+`marts.fact_tiktok_ads_daily_shadow` e `marts.fact_tiktok_ads_coverage_shadow`
+(migration 031, NAO aplicada) -- tabelas que NENHUM consumidor le'.
 
 TRES TRAVAS (todas obrigatorias)
 ---------------------------------
@@ -13,9 +13,13 @@ TRES TRAVAS (todas obrigatorias)
 
 Fora isso: dry-run (agregados) ou recusa explicita. Nada e' gravado.
 
-PUBLICACAO: transacao unica, `pg_try_advisory_xact_lock` primeiro, DELETE da
-janela das marcas presentes + INSERT, reconciliacao (linhas e spend medido)
-antes do COMMIT, auditoria em conexao propria (marketplace 1 = TikTok).
+PUBLICACAO: transacao unica, `pg_try_advisory_xact_lock` primeiro. Substitui
+exatamente os pares (anunciante, dia) CONSULTADOS nesta leitura: DELETE da
+fato e da cobertura desses pares + INSERT. Par nao consultado nesta leitura
+fica como estava (ausencia nao apaga nem zera). Mesma entrada -> mesmo
+conteudo; rerun nao duplica (PK + DELETE do par). Reconciliacao por
+(dia, anunciante, escopo, moeda) -- linhas e spend -- e da cobertura antes do
+COMMIT; auditoria em conexao propria (marketplace 1 = TikTok).
 """
 from __future__ import annotations
 
@@ -45,9 +49,12 @@ AUDIT_MARKETPLACE_ID = 1     # audit.source_sync_run: 1=tiktok, 2=ml, 3=shopee
 AUDIT_SOURCE = "tiktok_ads_daily_shadow"
 AUDIT_ERRO_MAX_CHARS = 4000
 
-COLS = ("stat_date", "brand", "escopo", "estado", "spend", "impressions", "clicks",
-        "onsite_shopping", "onsite_shopping_value", "campanhas", "anunciantes", "moeda",
-        "fuso", "source_run_id")
+FACT_COBERTURA = "marts.fact_tiktok_ads_coverage_shadow"
+COLS = ("stat_date", "brand", "advertiser_id", "campaign_id", "escopo", "moeda", "fuso", "spend",
+        "impressions", "clicks", "onsite_shopping", "onsite_shopping_value", "source_run_id")
+COLS_COBERTURA = ("stat_date", "brand", "advertiser_id", "linhas", "source_run_id")
+#: Pares (anunciante, dia) desta publicacao, como tabela, para DELETE e reconciliacao.
+PARES = "unnest(CAST(:advs AS text[]), CAST(:dias AS date[])) AS k(advertiser_id, stat_date)"
 
 SQL_PRESENCA = text("SELECT " + ", ".join(f"to_regclass('{t}') IS NOT NULL" for t in FONTE_TABELAS))
 SQL_LINHAS = text("""
@@ -102,37 +109,61 @@ def _ler(inicio, fim):
         dm.close()
 
 
-def publicar_em_transacao(conn, saida, inicio, fim, run_id) -> dict:
+def _chave_rec(dia, adv, escopo, moeda):
+    return (str(dia), str(adv), escopo, moeda)
+
+
+def publicar_em_transacao(conn, fato, cobertura, run_id) -> dict:
     conn.execute(text(f"SET LOCAL statement_timeout = {TARGET_STATEMENT_TIMEOUT_MS}"))
-    marcas = sorted({s["brand"] for s in saida})
-    p = {"inicio": inicio, "fim": fim, "marcas": marcas}
-    conn.execute(text(f"DELETE FROM {FACT} WHERE stat_date BETWEEN :inicio AND :fim AND brand = ANY(:marcas)"), p)
-    if saida:
-        with conn.connection.cursor() as cur:
-            execute_values(cur, f"INSERT INTO {FACT} ({', '.join(COLS)}) VALUES %s",
-                           [tuple({**s, "source_run_id": run_id}[c] for c in COLS) for s in saida],
-                           page_size=500)
-    destino = conn.execute(text(f"""
-        SELECT COUNT(*) AS n, COALESCE(SUM(spend), 0) AS spend FROM {FACT}
-         WHERE stat_date BETWEEN :inicio AND :fim AND brand = ANY(:marcas)"""), p).mappings().one()
-    esperado_spend = sum((s["spend"] for s in saida if s["spend"] is not None), Decimal("0"))
-    if destino["n"] != len(saida) or Decimal(destino["spend"]) != esperado_spend:
-        raise ReconciliacaoFalhou(f"destino n={destino['n']} spend={destino['spend']}; "
-                                  f"esperado n={len(saida)} spend={esperado_spend}")
-    return {"linhas_publicadas": len(saida), "marcas_publicadas": marcas,
-            "spend_medido_publicado": esperado_spend}
+    p = {"advs": [c["advertiser_id"] for c in cobertura], "dias": [c["stat_date"] for c in cobertura]}
+    # Fato antes da cobertura (FK); cobertura antes da fato no INSERT.
+    for tabela in (FACT, FACT_COBERTURA):
+        conn.execute(text(f"""DELETE FROM {tabela} t USING {PARES}
+                               WHERE t.advertiser_id = k.advertiser_id AND t.stat_date = k.stat_date"""), p)
+    with conn.connection.cursor() as cur:
+        for tabela, cols, linhas in ((FACT_COBERTURA, COLS_COBERTURA, cobertura), (FACT, COLS, fato)):
+            if linhas:
+                execute_values(cur, f"INSERT INTO {tabela} ({', '.join(cols)}) VALUES %s",
+                               [tuple({**x, "source_run_id": run_id}[c] for c in cols) for x in linhas],
+                               page_size=500)
+    destino = {
+        _chave_rec(r["stat_date"], r["advertiser_id"], r["escopo"], r["moeda"]): (r["n"], Decimal(r["spend"]))
+        for r in conn.execute(text(f"""
+            SELECT f.stat_date, f.advertiser_id, f.escopo, f.moeda, COUNT(*) AS n, SUM(f.spend) AS spend
+              FROM {FACT} f JOIN {PARES} ON f.advertiser_id = k.advertiser_id AND f.stat_date = k.stat_date
+             GROUP BY 1, 2, 3, 4"""), p).mappings().all()
+    }
+    esperado = {}
+    for f in fato:
+        k = _chave_rec(f["stat_date"], f["advertiser_id"], f["escopo"], f["moeda"])
+        n, sp = esperado.get(k, (0, Decimal("0")))
+        esperado[k] = (n + 1, sp + f["spend"])
+    if destino != esperado:
+        divergentes = sorted(set(destino.items()) ^ set(esperado.items()))[:5]
+        raise ReconciliacaoFalhou(f"fato diverge por (dia, anunciante, escopo, moeda): {divergentes}")
+    cob = conn.execute(text(f"""
+        SELECT COUNT(*) AS n, COALESCE(SUM(c.linhas), 0) AS linhas
+          FROM {FACT_COBERTURA} c JOIN {PARES} ON c.advertiser_id = k.advertiser_id AND c.stat_date = k.stat_date
+    """), p).mappings().one()
+    if cob["n"] != len(cobertura) or cob["linhas"] != len(fato):
+        raise ReconciliacaoFalhou(f"cobertura n={cob['n']} linhas={cob['linhas']}; "
+                                  f"esperado n={len(cobertura)} linhas={len(fato)}")
+    return {"linhas_publicadas": len(fato), "pares_publicados": len(cobertura),
+            "marcas_publicadas": sorted({c["brand"] for c in cobertura}),
+            "spend_medido_publicado": sum((f["spend"] for f in fato), Decimal("0"))}
 
 
-def _publicar(saida, inicio, fim, run_id):
+def _publicar(fato, cobertura, run_id):
     with local_engine().begin() as conn:
         if not conn.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar():
             raise ConcurrentRunError(f"advisory lock {ADVISORY_LOCK_KEY} ocupado")
-        return publicar_em_transacao(conn, saida, inicio, fim, run_id)
+        return publicar_em_transacao(conn, fato, cobertura, run_id)
 
 
 def tabela_destino_existe() -> bool:
     with local_engine().connect() as conn:
-        return bool(conn.execute(text(f"SELECT to_regclass('{FACT}') IS NOT NULL")).scalar())
+        return bool(conn.execute(text(f"SELECT to_regclass('{FACT}') IS NOT NULL "
+                                      f"AND to_regclass('{FACT_COBERTURA}') IS NOT NULL")).scalar())
 
 
 def _audit_conn():
@@ -175,24 +206,31 @@ def run(apply: bool = False, hoje: date | None = None) -> dict:
     fonte = _ler(inicio, fim)
     resumo = {"janela": [str(inicio), str(fim)], "modo": "dry_run", "applied": False, "run_id": run_id,
               "fonte_gmv_max": "sem_fonte", "marcas_cobertas": list(T.MARCAS)}
+    fato, cobertura, inconsistente = [], [], None
     if fonte is None:
         resumo["estado"] = "fonte_inexistente"
     else:
-        saida, r = T.montar_shadow(fonte["linhas"], fonte["cobertura"])
-        resumo.update(r, estado="medido" if saida else "sem_linhas_publicaveis")
+        try:
+            fato, cobertura, r = T.montar_shadow(fonte["linhas"], fonte["cobertura"])
+            resumo.update(r, estado="medido" if cobertura else "sem_linhas_publicaveis")
+        except T.FonteInconsistente as exc:
+            inconsistente = str(exc)
+            resumo.update(estado="fonte_inconsistente", motivo=inconsistente)
     if not apply:
         return resumo
     if not flag_ligada():
         raise PublicacaoRecusada(f"{FLAG_AMBIENTE} desligada")
     if fonte is None:
         raise PublicacaoRecusada("fonte_inexistente: tabelas raw.tiktok_ads_* ausentes")
+    if inconsistente is not None:
+        raise PublicacaoRecusada(f"fonte_inconsistente: {inconsistente}")
     if not tabela_destino_existe():
         raise PublicacaoRecusada("fato_inexistente: migration 031 nao aplicada")
-    if not saida:
-        raise PublicacaoRecusada("sem_linhas_publicaveis")
-    sid = audit_start(len(saida))
+    if not cobertura:
+        raise PublicacaoRecusada("sem_linhas_publicaveis: nenhum anunciante x dia consultado")
+    sid = audit_start(len(fato))
     try:
-        publicado = _publicar(saida, inicio, fim, run_id)
+        publicado = _publicar(fato, cobertura, run_id)
     except BaseException as exc:
         audit_finish(sid, "failed", rows_loaded=0,
                      error_message=f"{type(exc).__name__}: {str(exc)[:AUDIT_ERRO_MAX_CHARS]}")
