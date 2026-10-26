@@ -182,8 +182,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # via API, em tabela PROPRIA que nenhum consumidor le'.
     # Gate ML-FULL-STOCK-PRODUCTIZATION-1: head avancado de 027 para 029, que
     # cria as fatos do estoque Full do ML (028 reservada ao PR #78 da DRE).
-    # Gate TIKTOK-ADS-PRODUCTIZATION-1: head avancado de 029 para 030, que cria
-    # marts.fact_tiktok_ads_daily_shadow sobre a 029 (028 reservada ao #78).
+    # Gate EXPEDICAO-SHOPEE-LDR-1: head avancado de 029 para 030, que cria
+    # marts.expedicao_shopee_ldr_daily e marts.expedicao_shopee_ldr_sem_prazo_daily
+    # (LDR operacional da Shopee). A 028 segue reservada ao PR #78.
     assert heads == ["030"], f"head deveria ser unico e igual a 030, veio {heads}"
 
 

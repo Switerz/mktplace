@@ -31,24 +31,53 @@
  * negocio — era inconsistencia visual. Os pares `x dark:y` foram trocados pelo
  * token semantico correspondente, que ja' muda de valor com o tema. Nenhuma
  * severidade mudou de cor: `critico` continua sendo o papel critico.
+ *
+ * EXPEDICAO-UX-UNIFICADA-1 — A MESMA HIERARQUIA DA FILA
+ * ----------------------------------------------------
+ * Cabecalho, fotografia e barra de qualidade sao os componentes da fila
+ * (`CabecalhoExpedicao`, `BarraDeQualidade`, `AtencaoAgora`). O CORPO continua
+ * sendo deste painel: nao existe fila do TikTok e nenhuma foi inventada.
+ *
+ *   visao do gestor   atencao agora (alertas da API) -> LDR -> evolucao por
+ *                     vencimento -> lojas
+ *   detalhe           LDR -> coortes por vencimento -> lojas -> fluxo por
+ *                     data de pagamento (visao auxiliar, NUNCA a LDR)
+ *
+ * O que mudou de lugar, e por que:
+ *   - o aviso de prazo reconstruido e os alertas eram uma PILHA de banners
+ *     antes do primeiro numero. O aviso entrou na barra de qualidade (e segue
+ *     colado ao periodo, ao lado da LDR); os alertas viraram as linhas de
+ *     "O que exige atenção agora", com o texto da API, sem reescrita;
+ *   - sem nenhum vencimento fechado (o caso da serie vencida), o grafico vira
+ *     uma linha: um retangulo de 224 px sem barra nao informa nada;
+ *   - o fluxo por pagamento desceu para o detalhe. Lado a lado com a LDR na
+ *     primeira dobra, os dois denominadores competiam pela mesma leitura.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
+import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import {
+  AtencaoAgora,
+  ConviteAoDetalhe,
+  FaixaKpis,
+  SecaoGerencial,
+} from "@/components/expedicao/SecoesExpedicao";
 import Chip from "@/components/ui/Chip";
 import Disclosure from "@/components/ui/Disclosure";
 import KpiTile from "@/components/ui/KpiTile";
 import Note from "@/components/ui/Note";
-import PageBar from "@/components/ui/PageBar";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
 import SortHeader from "@/components/ui/SortHeader";
-import type { Tom } from "@/components/ui/tone";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
+import type { Visao } from "@/lib/expedicao-ux";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 
 import {
-  AVISO_PRAZO_RECONSTRUIDO,
+  DEFINICAO_TIKTOK,
   EVENTOS,
   EVENTO_PADRAO,
   EXPLICACAO_EVENTO,
@@ -70,13 +99,17 @@ import {
   contarCriticos,
   contarForaDaMeta,
   descreverIncidente,
-  explicarIndisponivel,
+  explicarIndisponivelComMarca,
   formatarDiaCurto,
   formatarDiaLongo,
   formatarInteiro,
   formatarTaxa,
+  fotografiaDoTikTok,
   marcasForaDaMeta,
+  montarAtencaoDoTikTok,
+  montarBarraDeQualidadeTikTok,
   queryDoTikTok,
+  serieTemDiaMedido,
   severidadeDoDia,
   taxaMaxima,
   type Evento,
@@ -223,7 +256,20 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
 // ---------------------------------------------------------------------------
 // Painel
 // ---------------------------------------------------------------------------
-export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
+export default function TikTokDispatchPanel({
+  seletorCanal,
+  visao = "gestor",
+  aoTrocarVisao,
+  marca = null,
+  aoTrocarMarca,
+}: {
+  seletorCanal?: ReactNode;
+  visao?: Visao;
+  aoTrocarVisao?: (v: Visao) => void;
+  /** EXPEDICAO-UX-3: marca da casca; vai para a API como `brands`. */
+  marca?: string | null;
+  aoTrocarMarca?: (m: string | null) => void;
+}) {
   const [evento, setEvento] = useState<Evento>(EVENTO_PADRAO);
   const [inicial] = useState(janelaInicial);
   const [dias, setDias] = useState<number>(inicial.dias);
@@ -233,7 +279,7 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
   const [estado, setEstado] = useState<"carregando" | "ok" | "erro">("carregando");
   const [erro, setErro] = useState<string>("");
 
-  const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias)}`, [evento, dias]);
+  const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias, marca)}`, [evento, dias, marca]);
   // Com o campo livre a janela troca mais rapido: a resposta de uma janela
   // antiga que chega por ultimo NAO pode sobrescrever a atual.
   const urlVigente = useRef(url);
@@ -304,6 +350,23 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
   const incidente = descreverIncidente(ldr);
   const piores = marcasForaDaMeta(dados?.brands ?? []);
   const sla = dados?.sla_business_days?.[evento];
+  const fotografia = fotografiaDoTikTok(dados);
+  const barra = montarBarraDeQualidadeTikTok(dados);
+  const atencao = montarAtencaoDoTikTok(dados);
+  const temDiaMedido = ldr ? serieTemDiaMedido(ldr.daily) : false;
+  const semVencimentoFechado = ldr ? ldr.mature_due_days === 0 : false;
+  const publicadaEm = dados?.snapshot
+    ? new Date(dados.snapshot.effective_at).toLocaleString("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "short",
+      })
+    : null;
+  // "Agora" e' o instante da serie. Com ela vencida, a secao diz isso.
+  const quando = publicadaEm
+    ? `Segundo a série publicada em ${publicadaEm}${
+        fotografia?.desatualizada ? " — desatualizada: confirme antes de agir" : ""
+      }.`
+    : undefined;
 
   // Ordenacao client-side sobre `brands`, que vem INTEIRO no payload. Nao ha
   // paginacao aqui, entao ordenar nao esconde linha nenhuma nem recalcula
@@ -314,52 +377,397 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
     COLUNAS_MARCA,
   );
 
+  const controles = (
+    <div className="flex flex-wrap items-center gap-2">
+      <span id="tk-evento" className="text-xs text-ink-faint">
+        Evento
+      </span>
+      <Segmented
+        rotulo="Evento"
+        rotuladoPor="tk-evento"
+        opcoes={EVENTOS.map((e) => ({ valor: e, texto: ROTULO_EVENTO[e] }))}
+        valor={evento}
+        aoEscolher={setEvento}
+      />
+      <span id="tk-janela" className="text-xs text-ink-faint">
+        Janela
+      </span>
+      <Segmented
+        rotulo="Janela"
+        rotuladoPor="tk-janela"
+        opcoes={opcoesDoSeletor(REGRA)}
+        valor={seletor}
+        aoEscolher={escolherJanela}
+      />
+    </div>
+  );
+
+  // EXPEDICAO-UX-3 — "Risco atual": o que esta' pendente AGORA, com os
+  // mesmos campos que a LDR ja' publicava (nenhum novo, nenhum recalculado).
+  const secaoRisco = ldr ? (
+    <SecaoGerencial titulo="Risco atual" descricao={quando}>
+      <FaixaKpis rotulo="Risco atual">
+        <KpiTile
+          rotulo="Venceram e não saíram"
+          valor={formatarInteiro(ldr.pending_overdue)}
+          destaque
+          comparacao="Vencimentos da janela consultada, ainda sem o evento."
+          tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
+        />
+        <KpiTile
+          rotulo="Vencem hoje ou amanhã"
+          valor={formatarInteiro(ldr.pending_at_risk)}
+          destaque
+          comparacao="Ainda dá para tratar dentro do prazo."
+          tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
+        />
+        <KpiTile
+          rotulo="Pendentes no prazo"
+          valor={formatarInteiro(ldr.pending_on_time)}
+          destaque
+          comparacao="Pedidos ainda sem o evento, dentro do prazo."
+        />
+        {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
+        <KpiTile
+          rotulo="Lojas acima da meta"
+          valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
+          destaque
+          comparacao={
+            dados?.brands.length
+              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente · medição interna.`
+              : "Nenhuma loja com base suficiente no período."
+          }
+          tom={!dados?.brands.length ? "ausente" : piores.length > 0 ? "critico" : "neutro"}
+        />
+      </FaixaKpis>
+      <AtencaoAgora itens={atencao} />
+    </SecaoGerencial>
+  ) : null;
+
+  // "Prazo": a LDR, que so' o TikTok sustenta. Coleta e despacho continuam
+  // sendo eventos separados, escolhidos no cabecalho, com prazos diferentes.
+  const secaoLdr = ldr ? (
+    <SecaoGerencial
+      titulo="Prazo"
+      descricao={`${TITULO_LDR} · evento: ${ROTULO_EVENTO[evento]}${sla ? ` (${sla} dia(s) útil(eis))` : ""}.`}
+      acao={
+        // A ressalva fica COLADA na secao, nunca atras de um tooltip: o numero
+        // sai desta tela para reuniao, e sem ela vira "o TikTok nos penalizou".
+        <Disclosure rotulo="Como ler esta medição">
+          <p>
+            {EXPLICACAO_LDR}
+            {sla ? ` Prazo do evento: ${sla} dia(s) útil(eis).` : ""}
+          </p>
+          <p className="mt-1.5">{EXPLICACAO_META}</p>
+          <p className="mt-1.5">{EXPLICACAO_EVENTO[evento]}</p>
+        </Disclosure>
+      }
+    >
+      {/* Periodo da RESPOSTA (`ldr.from`, `ldr.to`, `ldr.days`), nao do
+          seletor. O prazo reconstruido fica colado a ele: e' a ressalva que
+          qualifica TODOS os numeros desta faixa. */}
+      <p className="text-xs text-ink-muted" data-testid="tk-periodo-consultado">
+        Período consultado:{" "}
+        <span className="font-medium text-ink">
+          vencimentos de {formatarDiaLongo(ldr.from)} a {formatarDiaLongo(ldr.to)}
+        </span>{" "}
+        ({ldr.days} {ldr.days === 1 ? "dia" : "dias"} + hoje)
+        {dados?.deadline_is_reconstructed
+          ? " · prazo reconstruído da política de dias úteis — indicador interno"
+          : ""}
+      </p>
+      <FaixaKpis rotulo="Indicadores principais" colunas={3}>
+        <KpiTile
+          rotulo="LDR da janela"
+          valor={formatarTaxa(ldr.rate)}
+          destaque
+          comparacao={
+            ldr.rate === null
+              ? "Sem vencimento maduro na janela."
+              : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
+                  ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META
+                }`
+          }
+          // Sem taxa nao ha veredito: verde aqui leria ausencia como acerto.
+          tom={ldr.rate === null ? "ausente" : ldr.above_target ? "critico" : "bom"}
+        />
+        {/* `base` e `late` da LDR somam SO' vencimentos fechados. Sem nenhum
+            fechado (o caso da serie vencida) eles valem zero por construcao,
+            nao por medicao: a tela mostra ausencia, nao "0 venciam". */}
+        <KpiTile
+          rotulo="Venciam no período"
+          valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.base)}
+          destaque
+          comparacao={`${ldr.mature_due_days} dia(s) fechado(s), ${ldr.partial_due_days} ainda no prazo.`}
+          tom={semVencimentoFechado ? "ausente" : "neutro"}
+        />
+        <KpiTile
+          rotulo="Já atrasaram"
+          valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.late)}
+          destaque
+          comparacao={`${formatarInteiro(ldr.pending_overdue)} venceram e ainda não saíram.`}
+          tom={semVencimentoFechado ? "ausente" : ldr.late > 0 ? "critico" : "bom"}
+        />
+      </FaixaKpis>
+    </SecaoGerencial>
+  ) : null;
+
+  // 6. EVOLUCAO — quando comecou. Sem nenhum vencimento fechado o grafico
+  // seria um retangulo sem barra: a tela diz por que nao ha o que desenhar.
+  const painelEvolucao = ldr ? (
+    <Panel
+      titulo="Evolução por dia de vencimento"
+      descricao={
+        temDiaMedido
+          ? foraDaMeta > 0
+            ? `${foraDaMeta} dia(s) acima da meta, ${criticos} acima do ${ROTULO_LIMIAR_INTERNO.toLowerCase()}.${
+                incidente ? ` ${incidente}` : ""
+              }`
+            : "Nenhum dia acima da meta na janela."
+          : undefined
+      }
+    >
+      {temDiaMedido ? (
+        <Grafico dias={ldr.daily} />
+      ) : (
+        <p role="status" className="text-sm text-ink-muted">
+          Nenhum vencimento da janela tem taxa fechada para desenhar.
+          {fotografia?.desatualizada
+            ? ` A série está desatualizada${publicadaEm ? ` (publicada em ${publicadaEm})` : ""}.`
+            : ldr.partial_due_days > 0
+              ? ` ${ldr.partial_due_days} dia(s) seguem no prazo (parcial).`
+              : ""}
+        </p>
+      )}
+    </Panel>
+  ) : null;
+
+  // 7. CONCENTRACAO — lojas, nas duas profundidades.
+  const painelLojas = (classe: string) => (
+    <Panel
+      className={classe}
+      semPadding
+      titulo={
+        <span className="flex items-center gap-2">
+          Concentração por marca
+          {piores.length ? (
+            <Chip tom="critico" ponto>
+              {piores.length} acima da meta
+            </Chip>
+          ) : null}
+        </span>
+      }
+      rodape="Só lojas com base suficiente no período. Vencimentos ainda no prazo ficam de fora."
+    >
+      {/* Sem loja elegivel, um cabecalho de tabela sem linha nenhuma so'
+          ocuparia espaco: a tela diz que nao ha loja a ranquear. */}
+      {sortedRows.length === 0 ? (
+        <p role="status" className="px-4 py-3 text-sm text-ink-muted">
+          Nenhuma loja com base suficiente de vencimentos fechados no período.
+        </p>
+      ) : (
+        <div className="max-h-96 overflow-auto">
+          <table className={CLASSE_TABELA}>
+            <caption className="sr-only">LDR por loja no período</caption>
+            <thead className={CLASSE_CABECALHO}>
+              <tr>
+                <SortHeader
+                  rotulo="Loja"
+                  coluna="loja"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  alinhamento="left"
+                />
+                <SortHeader rotulo="Venciam" coluna="base" sort={sort} aoOrdenar={toggleSort} />
+                <SortHeader rotulo="Atrasados" coluna="late" sort={sort} aoOrdenar={toggleSort} />
+                <SortHeader rotulo="LDR" coluna="rate" sort={sort} aoOrdenar={toggleSort} />
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((m) => (
+                <tr key={m.brand} className="border-t border-line">
+                  <th scope="row" className="text-left font-medium text-ink">
+                    {m.shop_name ?? m.brand}
+                  </th>
+                  <td className="text-right tabular-nums text-ink">{formatarInteiro(m.base)}</td>
+                  <td className="text-right tabular-nums text-ink">{formatarInteiro(m.late)}</td>
+                  <td
+                    className={`text-right font-semibold tabular-nums ${
+                      m.above_target ? "text-crit-ink" : "text-ok-ink"
+                    }`}
+                  >
+                    {formatarTaxa(m.rate)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+
+  // 8. DETALHE — as coortes que compoem a LDR, linha a linha. Sao os mesmos
+  // campos de `ldr.daily` que o grafico desenha, agora legiveis por leitor de
+  // tela. Coorte parcial NUNCA mostra taxa fechada: ela ainda vai mudar.
+  const painelCoortes = ldr ? (
+    <Panel
+      semPadding
+      titulo="Coortes por dia de vencimento"
+      descricao="A base da LDR: cada linha são os pedidos cujo envio vencia naquele dia."
+    >
+      {ldr.daily.length ? (
+        <div className="max-h-96 overflow-auto">
+          <table className={CLASSE_TABELA}>
+            <caption className="sr-only">
+              Coortes por dia de vencimento — o denominador da LDR
+            </caption>
+            <thead className={CLASSE_CABECALHO}>
+              <tr>
+                <th scope="col" className="font-semibold">Vencimento</th>
+                <th scope="col" className="text-right font-semibold">Venciam</th>
+                <th scope="col" className="text-right font-semibold">Atrasados</th>
+                <th scope="col" className="text-right font-semibold">… ainda sem envio</th>
+                <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
+                <th scope="col" className="text-right font-semibold">Taxa</th>
+                <th scope="col" className="font-semibold">Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ldr.daily.map((d) => {
+                const sev = severidadeDoDia(d);
+                return (
+                  <tr key={d.due_date} className="border-t border-line">
+                    <th scope="row" className="whitespace-nowrap text-left font-medium text-ink">
+                      {formatarDiaLongo(d.due_date)}
+                    </th>
+                    <td className="text-right tabular-nums text-ink">{formatarInteiro(d.base)}</td>
+                    <td className="text-right tabular-nums text-ink">{formatarInteiro(d.late)}</td>
+                    <td className="text-right tabular-nums text-ink">
+                      {formatarInteiro(d.pending_overdue)}
+                    </td>
+                    <td className="text-right tabular-nums text-ink">
+                      {formatarInteiro(d.pending_on_time)}
+                    </td>
+                    <td
+                      className={`text-right font-semibold tabular-nums ${TEXTO_SEVERIDADE[sev]}`}
+                    >
+                      {d.is_mature ? formatarTaxa(d.rate) : VALOR_SEM_TAXA}
+                    </td>
+                    <td className="whitespace-nowrap text-ink-muted">{ROTULO_SEVERIDADE[sev]}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p role="status" className="px-4 py-3 text-sm text-ink-muted">
+          Nenhum pedido vence na janela consultada.
+        </p>
+      )}
+    </Panel>
+  ) : null;
+
+  const painelFluxo = (classe: string) => (
+    <Panel
+      className={classe}
+      semPadding
+      titulo={
+        <span className="flex flex-wrap items-center gap-2">
+          {TITULO_FLUXO}
+          {/* Nomeado como VISAO AUXILIAR na propria etiqueta: quem le
+              de relance nao pode confundir este denominador com o da
+              LDR. */}
+          <Chip>visão auxiliar · não é a LDR</Chip>
+        </span>
+      }
+      acao={<Disclosure rotulo="Como ler">{EXPLICACAO_FLUXO}</Disclosure>}
+    >
+      <div className="max-h-96 overflow-auto">
+        <table className={CLASSE_TABELA}>
+          <caption className="sr-only">
+            Fluxo por data de pagamento — denominador diferente do da LDR
+          </caption>
+          <thead className={CLASSE_CABECALHO}>
+            <tr>
+              <th scope="col" className="font-semibold">Pago em</th>
+              <th scope="col" className="text-right font-semibold">Pagos</th>
+              <th scope="col" className="text-right font-semibold">No prazo</th>
+              <th scope="col" className="text-right font-semibold">Atrasados</th>
+              <th scope="col" className="text-right font-semibold">Vencidos s/ envio</th>
+              <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
+              <th scope="col" className="text-right font-semibold">Taxa</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fluxo.map((f) => (
+              <tr key={f.paid_date} className="border-t border-line">
+                <th scope="row" className="whitespace-nowrap text-left font-medium text-ink">
+                  {formatarDiaLongo(f.paid_date)}
+                  {!f.is_mature ? (
+                    <span className="ml-1.5 rounded bg-raised px-1.5 py-0.5 text-xs text-ink-faint ring-1 ring-inset ring-line">
+                      parcial
+                    </span>
+                  ) : null}
+                </th>
+                <td className="text-right tabular-nums text-ink">
+                  {formatarInteiro(f.paid_orders)}
+                </td>
+                <td className="text-right tabular-nums text-ink">
+                  {formatarInteiro(f.shipped_on_time)}
+                </td>
+                <td className="text-right tabular-nums text-ink">
+                  {formatarInteiro(f.shipped_late)}
+                </td>
+                <td className="text-right tabular-nums text-ink">
+                  {formatarInteiro(f.pending_overdue)}
+                </td>
+                <td className="text-right tabular-nums text-ink">
+                  {formatarInteiro(f.pending_on_time)}
+                </td>
+                <td
+                  className={`text-right font-semibold tabular-nums ${
+                    !f.is_mature
+                      ? "text-ink-faint"
+                      : (f.rate ?? 0) > META_TIKTOK_LDR
+                        ? "text-crit-ink"
+                        : "text-ok-ink"
+                  }`}
+                >
+                  {/* Coorte parcial NUNCA mostra a taxa fechada: ela
+                      ainda vai mudar. */}
+                  {f.is_mature ? formatarTaxa(f.rate) : VALOR_SEM_TAXA}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+
   return (
     <div
       className="mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4"
       aria-busy={estado === "carregando"}
     >
-      <PageBar
-        titulo={
-          <>
-            <h2 id="tk-titulo" className="text-base font-semibold tracking-tight text-ink">
-              Expedição — TikTok Shop
-            </h2>
-            {abas}
-          </>
-        }
-        controles={
-          <div className="flex flex-wrap items-center gap-2">
-            <span id="tk-evento" className="text-xs text-ink-faint">
-              Evento
-            </span>
-            <Segmented
-              rotulo="Evento"
-              rotuladoPor="tk-evento"
-              opcoes={EVENTOS.map((e) => ({ valor: e, texto: ROTULO_EVENTO[e] }))}
-              valor={evento}
-              aoEscolher={setEvento}
+      {/* 1-2. CABECALHO, FOTOGRAFIA E FRESCOR (compartilhado) ------------ */}
+      <CabecalhoExpedicao
+        canal="TikTok Shop"
+        seletorCanal={seletorCanal}
+        fotografia={fotografia}
+        visao={visao}
+        aoTrocarVisao={aoTrocarVisao}
+        controles={controles}
+        definicao={DEFINICAO_TIKTOK}
+        filtroMarca={
+          aoTrocarMarca ? (
+            <SeletorMarca
+              marca={marca}
+              marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
+              aoTrocar={aoTrocarMarca}
             />
-            <span id="tk-janela" className="text-xs text-ink-faint">
-              Janela
-            </span>
-            <Segmented
-              rotulo="Janela"
-              rotuladoPor="tk-janela"
-              opcoes={opcoesDoSeletor(REGRA)}
-              valor={seletor}
-              aoEscolher={escolherJanela}
-            />
-          </div>
-        }
-        meta={
-          dados?.snapshot ? (
-            <Chip title="Instante da última publicação da série">
-              Atualizado em{" "}
-              <time dateTime={dados.snapshot.effective_at}>
-                {new Date(dados.snapshot.effective_at).toLocaleString("pt-BR")}
-              </time>
-            </Chip>
           ) : undefined
         }
       />
@@ -374,27 +782,8 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
         </Note>
       ) : null}
 
-      {/* Periodo da RESPOSTA (`ldr.from`, `ldr.to`, `ldr.days`), nao do
-          seletor. Some enquanto carrega para nao rotular a serie nova com a
-          janela antiga. */}
-      {estado === "ok" && ldr ? (
-        <p className="text-xs text-ink-muted" data-testid="tk-periodo-consultado">
-          Período consultado:{" "}
-          <span className="font-medium text-ink">
-            vencimentos de {formatarDiaLongo(ldr.from)} a {formatarDiaLongo(ldr.to)}
-          </span>{" "}
-          ({ldr.days} {ldr.days === 1 ? "dia" : "dias"} + hoje)
-        </p>
-      ) : null}
-
-      {/* O aviso do prazo vem ANTES de qualquer numero, sempre. Ele encolheu
-          para UMA linha, mas continua sendo a primeira coisa depois do
-          cabecalho e segue colado a metrica que ele qualifica. */}
-      {dados?.deadline_is_reconstructed ? (
-        <Note tom="atencao" papel="note">
-          {AVISO_PRAZO_RECONSTRUIDO}
-        </Note>
-      ) : null}
+      {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
+      <BarraDeQualidade barra={barra} />
 
       {estado === "carregando" ? (
         <p role="status" className="py-8 text-center text-sm text-ink-muted">
@@ -402,266 +791,56 @@ export default function TikTokDispatchPanel({ abas }: { abas?: ReactNode }) {
         </p>
       ) : null}
 
+      {/* Erro, ausencia e serie vencida sao estados DIFERENTES: erro e' a
+          carga que falhou agora (com nova tentativa); ausencia e' nao haver
+          serie nenhuma (nunca 0%); serie vencida e' dado que existe, velho,
+          e aparece no selo do cabecalho e na barra de qualidade. */}
       {estado === "erro" ? (
-        <Note
-          tom="critico"
-          papel="alert"
-          acao={
-            <button
-              type="button"
-              onClick={() => void carregar()}
-              className="min-h-11 rounded-md border border-crit/40 px-3 text-xs font-semibold"
-            >
-              Tentar de novo
-            </button>
-          }
-        >
-          Não foi possível carregar a série ({erro}).
-        </Note>
+        <StateBlock
+          tipo="erro"
+          titulo="Não foi possível carregar a série."
+          descricao={erro ? `Falha: ${erro}.` : undefined}
+          acao={<RetryButton onClick={() => void carregar()} />}
+        />
       ) : null}
 
       {estado === "ok" && dados?.availability === "unavailable" ? (
-        <div className="rounded-xl border border-line bg-surface p-6 text-center">
-          <p className="text-sm text-ink">{explicarIndisponivel(dados.unavailable_reason)}</p>
-          <p className="mx-auto mt-1 max-w-prose text-xs text-ink-muted">
-            A tela não mostra 0% enquanto não houver série: zero aqui seria lido
-            como “nenhum atraso”, que é diferente de “sem medição”.
-          </p>
-        </div>
+        <StateBlock
+          tipo="indisponivel"
+          titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
+          descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
+        />
       ) : null}
 
       {estado === "ok" && dados?.availability === "available" && ldr ? (
-        <>
-          {dados.alerts.length ? (
-            <ul className="flex flex-col gap-1.5">
-              {dados.alerts.map((a) => (
-                <li key={a.code}>
-                  <Note
-                    papel={a.severity === "critical" ? "alert" : "status"}
-                    tom={
-                      (a.severity === "critical"
-                        ? "critico"
-                        : a.severity === "warning"
-                          ? "atencao"
-                          : "bom") as Tom
-                    }
-                  >
-                    {a.message}
-                  </Note>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {/* 1. A REGUA ------------------------------------------------- */}
-          <section aria-labelledby="tk-ldr-titulo" className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-              <h3 id="tk-ldr-titulo" className="text-sm font-semibold text-ink">
-                {TITULO_LDR}
-              </h3>
-              {/* A ressalva fica COLADA no selo, nunca atras de um tooltip: o
-                  numero sai desta tela para reuniao, e sem ela vira "o TikTok
-                  nos penalizou". O texto e' o mesmo; deixou de ocupar dois
-                  paragrafos antes dos cartoes. */}
-              <Disclosure rotulo="Como ler esta medição">
-                <p>
-                  {EXPLICACAO_LDR}
-                  {sla ? ` Prazo do evento: ${sla} dia(s) útil(eis).` : ""}
-                </p>
-                <p className="mt-1.5">{EXPLICACAO_META}</p>
-                <p className="mt-1.5">{EXPLICACAO_EVENTO[evento]}</p>
-              </Disclosure>
+        visao === "gestor" ? (
+          <>
+            {/* RISCO ATUAL -> PRAZO (LDR) -> EVOLUCAO -> CONCENTRACAO, a
+                mesma ordem dos tres canais (EXPEDICAO-UX-3). */}
+            {secaoRisco}
+            {secaoLdr}
+            {/* 6. QUANDO COMECOU ----------------------------------------- */}
+            {painelEvolucao}
+            {/* 7. ONDE CONCENTRA ----------------------------------------- */}
+            {painelLojas("")}
+            {aoTrocarVisao ? (
+              <ConviteAoDetalhe
+                conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
+                aoAbrir={() => aoTrocarVisao("detalhe")}
+              />
+            ) : null}
+          </>
+        ) : (
+          <>
+            {secaoLdr}
+            {/* 8. DETALHE: coorte, loja e fluxo ------------------------ */}
+            {painelCoortes}
+            <div className="grid gap-3 lg:grid-cols-5">
+              {painelLojas("lg:col-span-2")}
+              {painelFluxo("lg:col-span-3")}
             </div>
-            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-              <KpiTile
-                rotulo="LDR da janela"
-                valor={formatarTaxa(ldr.rate)}
-                destaque
-                comparacao={
-                  ldr.rate === null
-                    ? "Sem vencimento maduro na janela."
-                    : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
-                        ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META
-                      }`
-                }
-                tom={ldr.above_target ? "critico" : "bom"}
-              />
-              <KpiTile
-                rotulo="Venciam no período"
-                valor={formatarInteiro(ldr.base)}
-                destaque
-                comparacao={`${ldr.mature_due_days} dia(s) fechado(s), ${ldr.partial_due_days} ainda no prazo.`}
-              />
-              <KpiTile
-                rotulo="Já atrasaram"
-                valor={formatarInteiro(ldr.late)}
-                destaque
-                comparacao={`${formatarInteiro(ldr.pending_overdue)} venceram e ainda não saíram.`}
-                tom={ldr.late > 0 ? "critico" : "bom"}
-              />
-              <KpiTile
-                rotulo="Ainda dá para tratar"
-                valor={formatarInteiro(ldr.pending_at_risk)}
-                destaque
-                comparacao={`De ${formatarInteiro(
-                  ldr.pending_on_time,
-                )} pendentes no prazo, estes vencem hoje ou amanhã.`}
-                tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
-              />
-            </div>
-          </section>
-
-          {/* 2. QUANDO COMECOU ----------------------------------------- */}
-          <Panel
-            titulo="Evolução por dia de vencimento"
-            descricao={
-              foraDaMeta > 0
-                ? `${foraDaMeta} dia(s) acima da meta, ${criticos} acima do ${ROTULO_LIMIAR_INTERNO.toLowerCase()}.${
-                    incidente ? ` ${incidente}` : ""
-                  }`
-                : "Nenhum dia acima da meta na janela."
-            }
-          >
-            <Grafico dias={ldr.daily} />
-          </Panel>
-
-          {/* 3. ONDE CONCENTRA + A VISAO AUXILIAR ---------------------- */}
-          <div className="grid gap-3 lg:grid-cols-5">
-            <Panel
-              className="lg:col-span-2"
-              semPadding
-              titulo={
-                <span className="flex items-center gap-2">
-                  Por loja
-                  {piores.length ? (
-                    <Chip tom="critico" ponto>
-                      {piores.length} acima da meta
-                    </Chip>
-                  ) : null}
-                </span>
-              }
-              rodape="Só lojas com base suficiente no período. Vencimentos ainda no prazo ficam de fora."
-            >
-              <div className="max-h-96 overflow-auto">
-                <table className={CLASSE_TABELA}>
-                  <caption className="sr-only">LDR por loja no período</caption>
-                  <thead className={CLASSE_CABECALHO}>
-                    <tr>
-                      <SortHeader
-                        rotulo="Loja"
-                        coluna="loja"
-                        sort={sort}
-                        aoOrdenar={toggleSort}
-                        alinhamento="left"
-                      />
-                      <SortHeader rotulo="Venciam" coluna="base" sort={sort} aoOrdenar={toggleSort} />
-                      <SortHeader rotulo="Atrasados" coluna="late" sort={sort} aoOrdenar={toggleSort} />
-                      <SortHeader rotulo="LDR" coluna="rate" sort={sort} aoOrdenar={toggleSort} />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedRows.map((m) => (
-                      <tr key={m.brand} className="border-t border-line">
-                        <th scope="row" className="text-left font-medium text-ink">
-                          {m.shop_name ?? m.brand}
-                        </th>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(m.base)}
-                        </td>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(m.late)}
-                        </td>
-                        <td
-                          className={`text-right font-semibold tabular-nums ${
-                            m.above_target ? "text-crit-ink" : "text-ok-ink"
-                          }`}
-                        >
-                          {formatarTaxa(m.rate)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Panel>
-
-            <Panel
-              className="lg:col-span-3"
-              semPadding
-              titulo={
-                <span className="flex flex-wrap items-center gap-2">
-                  {TITULO_FLUXO}
-                  {/* Nomeado como VISAO AUXILIAR na propria etiqueta: quem le
-                      de relance nao pode confundir este denominador com o da
-                      LDR. */}
-                  <Chip>visão auxiliar · não é a LDR</Chip>
-                </span>
-              }
-              acao={<Disclosure rotulo="Como ler">{EXPLICACAO_FLUXO}</Disclosure>}
-            >
-              <div className="max-h-96 overflow-auto">
-                <table className={CLASSE_TABELA}>
-                  <caption className="sr-only">
-                    Fluxo por data de pagamento — denominador diferente do da LDR
-                  </caption>
-                  <thead className={CLASSE_CABECALHO}>
-                    <tr>
-                      <th scope="col" className="font-semibold">Pago em</th>
-                      <th scope="col" className="text-right font-semibold">Pagos</th>
-                      <th scope="col" className="text-right font-semibold">No prazo</th>
-                      <th scope="col" className="text-right font-semibold">Atrasados</th>
-                      <th scope="col" className="text-right font-semibold">Vencidos s/ envio</th>
-                      <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
-                      <th scope="col" className="text-right font-semibold">Taxa</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {fluxo.map((f) => (
-                      <tr key={f.paid_date} className="border-t border-line">
-                        <th scope="row" className="whitespace-nowrap text-left font-medium text-ink">
-                          {formatarDiaLongo(f.paid_date)}
-                          {!f.is_mature ? (
-                            <span className="ml-1.5 rounded bg-raised px-1.5 py-0.5 text-xs text-ink-faint ring-1 ring-inset ring-line">
-                              parcial
-                            </span>
-                          ) : null}
-                        </th>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(f.paid_orders)}
-                        </td>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(f.shipped_on_time)}
-                        </td>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(f.shipped_late)}
-                        </td>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(f.pending_overdue)}
-                        </td>
-                        <td className="text-right tabular-nums text-ink">
-                          {formatarInteiro(f.pending_on_time)}
-                        </td>
-                        <td
-                          className={`text-right font-semibold tabular-nums ${
-                            !f.is_mature
-                              ? "text-ink-faint"
-                              : (f.rate ?? 0) > META_TIKTOK_LDR
-                                ? "text-crit-ink"
-                                : "text-ok-ink"
-                          }`}
-                        >
-                          {/* Coorte parcial NUNCA mostra a taxa fechada: ela
-                              ainda vai mudar. */}
-                          {f.is_mature ? formatarTaxa(f.rate) : VALOR_SEM_TAXA}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Panel>
-          </div>
-        </>
+          </>
+        )
       ) : null}
     </div>
   );

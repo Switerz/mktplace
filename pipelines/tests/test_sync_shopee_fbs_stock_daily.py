@@ -521,3 +521,133 @@ def test_46_resumo_declara_a_janela_e_os_limites():
                   "demanda_legada_com_unpaid_unidades",
                   "produtos_afetados_por_unpaid"):
         assert chave in fonte
+
+
+# --------------------------------------------------------------------- #
+# J. PORTAO DE FRESCOR DA FONTE (STOCK-DAILY-SHOPEE-TIKTOK-1)            #
+# --------------------------------------------------------------------- #
+REF = date(2026, 10, 22)
+BRT = timezone(timedelta(hours=-3))
+HOJE_06H = datetime(2026, 10, 22, 6, 1, tzinfo=BRT)
+
+
+def _linha(conta, **mudar):
+    base = {"shop_account": conta, "produtos_fbs": 10, "fbs_sem_stock_info": 0,
+            "fbs_capturado_min": HOJE_06H, "silver_divergente": 0,
+            "pedidos_ingeridos_max": HOJE_06H}
+    base.update(mudar)
+    return base
+
+
+def _todas(**mudar_barbours):
+    return [_linha(c, **(mudar_barbours if c == "barbours" else {}))
+            for c in mod.CONTAS_ESPERADAS]
+
+
+def test_53_portao_aceita_fonte_do_dia():
+    assert mod.avaliar_portao(_todas(), REF) == []
+
+
+def test_54_corte_e_meia_noite_brt_do_ref_date():
+    corte = mod.corte_de_frescor(REF)
+    assert corte == datetime(2026, 10, 22, 0, 0, tzinfo=BRT)
+    # 23:59 BRT de ontem = 02:59 UTC de hoje: a data UTC NAO salva o catalogo.
+    ontem_tarde = datetime(2026, 10, 22, 2, 59, tzinfo=timezone.utc)
+    assert mod.avaliar_portao(_todas(fbs_capturado_min=ontem_tarde), REF)
+    assert mod.avaliar_portao(_todas(fbs_capturado_min=corte), REF) == []
+
+
+@pytest.mark.parametrize("mudar, trecho", [
+    ({"fbs_capturado_min": HOJE_06H - timedelta(days=1)}, "catalogo FBS capturado"),
+    ({"fbs_capturado_min": None}, "catalogo FBS capturado"),
+    ({"silver_divergente": 3}, "Silver fora da versao"),
+    ({"pedidos_ingeridos_max": HOJE_06H - timedelta(hours=7)}, "pedidos"),
+    ({"pedidos_ingeridos_max": None}, "pedidos"),
+    ({"fbs_sem_stock_info": 1}, "sem stock_info"),
+    ({"produtos_fbs": 0}, "nenhum produto FBS"),
+])
+def test_55_cada_condicao_sozinha_recusa(mudar, trecho):
+    problemas = mod.avaliar_portao(_todas(**mudar), REF)
+    assert len(problemas) == 1 and problemas[0].startswith("barbours:")
+    assert trecho in problemas[0]
+
+
+def test_56_conta_esperada_sem_linha_recusa():
+    linhas = [l for l in _todas() if l["shop_account"] != "lescent"]
+    assert mod.avaliar_portao(linhas, REF) == ["lescent: conta esperada ausente do portao"]
+
+
+def test_57_kokeshi_nao_e_cobrada_pelo_portao():
+    """Kokeshi esta' fora da esteira API: o portao nao pode exigi-la."""
+    assert "kokeshi" not in str(mod.SQL_PORTAO_FONTE).lower()
+    assert "kokeshi" not in mod.CONTAS_ESPERADAS
+
+
+def test_58_portao_e_a_primeira_leitura_e_recusa_com_erro_repetivel():
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    corpo = fonte[fonte.index("def read_source"):]
+    i_portao = corpo.index("SQL_PORTAO_FONTE")
+    assert i_portao < corpo.index("SQL_STATUS_DESCONHECIDOS")
+    assert i_portao < corpo.index("SQL_LOCATIONS")
+    assert "raise FonteNaoProntaError" in corpo[i_portao:i_portao + 400]
+    assert issubclass(mod.FonteNaoProntaError, mod.ShopeeStockSyncError)
+
+
+def test_59_portao_le_raw_silver_e_pedidos_pela_mesma_chave_do_pipeline():
+    sql = str(mod.SQL_PORTAO_FONTE)
+    assert "FULL JOIN silver.stg_shopee_products" in sql
+    assert "r.ingested_at IS DISTINCT FROM s.ingested_at" in sql
+    assert "s.is_fulfillment_by_shopee" in sql
+    assert "silver.stg_shopee_orders" in sql
+
+
+def test_60_codigos_de_saida_sao_distintos_e_evitam_o_2_do_argparse():
+    codigos = (mod.EXIT_OK, mod.EXIT_FALHA, mod.EXIT_LOCK, mod.EXIT_FONTE_NAO_PRONTA)
+    assert codigos == (0, 1, 3, 4)
+    assert 2 not in codigos
+
+
+def test_61_leitura_da_fonte_e_um_unico_instante():
+    """Portao e leituras no MESMO snapshot: REPEATABLE READ e somente leitura."""
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    corpo = fonte[fonte.index("def run("):]
+    assert 'isolation_level="REPEATABLE READ"' in corpo
+    assert "readonly=True" in corpo
+
+
+def test_62_conta_ausente_na_leitura_falha_em_vez_de_avisar():
+    fonte = Path(mod.__file__).read_text(encoding="utf-8")
+    assert "contas SEM produto FBS nesta fotografia" not in fonte
+    assert "contas sem produto FBS nesta fotografia" in fonte
+
+
+# --------------------------------------------------------------------- #
+# K. FULL PAUSADO (medido em 21-26/10/2026)                          #
+# --------------------------------------------------------------------- #
+def test_63_conta_com_fisico_e_nada_vendavel_bloqueia():
+    locs = [_loc("1", "BRFSP1", 33099, saleable=False),
+            _loc("1", "BRFPE1", 143, saleable=False),
+            _loc("2", "CD1", 10, saleable=True, conta="apice")]
+    prods = [_prod("1", saleable=0, total=33242, locs=2),
+             _prod("2", saleable=10, total=10, conta="apice")]
+    with pytest.raises(mod.ShopeeStockSyncError, match="FULL PAUSADO em barbours"):
+        mod.validate_contract(_snap(locs, prods))
+
+
+def test_64_conta_mista_e_conta_toda_zerada_nao_bloqueiam():
+    """Uma entrada nao vendavel ao lado de vendaveis e' o caso conhecido; uma
+    conta sem estoque fisico nenhum e' ruptura real, nao regime novo."""
+    locs = [_loc("1", "CD1", 5, saleable=True), _loc("1", "CD2", 7, saleable=False),
+            _loc("2", "CD1", 0, saleable=True, conta="apice")]
+    prods = [_prod("1", saleable=5, total=12, locs=2),
+             _prod("2", saleable=0, total=0, conta="apice")]
+    mod.validate_contract(_snap(locs, prods))
+
+
+def test_65_regra_do_full_pausado_e_uma_so():
+    assert mod.contas_com_full_pausado(
+        {"barbours": 159294, "apice": 3735, "lescent": 0},
+        {"apice": 3735}) == ["barbours"]
+    assert mod.contas_com_full_pausado({"a": 5}, {"a": 5}) == []
+    assert "FULL PAUSADO em barbours" in mod.mensagem_full_pausado("barbours", 1)
+    assert "nao publicar como ruptura" in mod.mensagem_full_pausado("barbours", 1)

@@ -247,7 +247,58 @@ The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
 | Status badge | `ui/Chip.tsx` | Expedição, Canais, Financeiro |
 | Data-quality note + disclosure | `ui/Note.tsx`, `ui/Disclosure.tsx` | all three + Expedição |
 | Table shell (scroll hint) | `TableScrollHint.tsx` | all wide tables |
-| Empty / loading / error / unavailable | `ui/StateBlock.tsx` | Canais, Financeiro |
+| Empty / loading / error / unavailable | `ui/StateBlock.tsx` | Canais, Financeiro, Expedição (TikTok) |
+| Expedição channel header + photo/freshness chips | `expedicao/CabecalhoExpedicao.tsx` | Expedição queue (Shopee/ML), Expedição TikTok |
+| Single data-quality bar | `expedicao/BarraDeQualidade.tsx` | Expedição queue, Expedição TikTok |
+| "O que exige atenção agora", KPI strip, detail invitation | `expedicao/SecoesExpedicao.tsx` | Expedição queue, Expedição TikTok |
+
+### Expedição — one product, two depths (EXPEDICAO-UX-UNIFICADA-1)
+
+- One channel selector (`Shopee | Mercado Livre | TikTok Shop`, identity
+  dots) owned by `ExpedicaoShell`. `?channel=` keeps its old values.
+- Same hierarchy on every channel: header → photo time/age/freshness (no publication-mode chip until the API proves the batch origin)
+  chips → ONE quality bar → attention list → KPIs → evolution →
+  concentration → operational detail.
+- Depth is a segmented control, in the URL (`?visao=detalhe`): **Visão do
+  gestor** (default) shows attention → KPIs → evolution → concentration;
+  **Detalhe operacional** shows KPIs plus the channel's own detail (queue,
+  most critical, source by brand; or cohorts and the payment-date flow).
+- Bodies stay separate: the queue and the TikTok cohort never share a
+  component with channel `if`s. Shared pieces receive view models built by
+  each channel's contract.
+- States are distinct: loading, error (with retry), absent (dashed, never
+  zero), empty (zero measured), partial (named), stale (written "Desatualizada",
+  not only amber). A stale or empty series collapses its chart to one line.
+- The sticky band carries identity and freshness only; depth and filters
+  scroll with the page, so the band stays short on a 390px screen.
+
+### Expedição — one managerial hierarchy for three channels (EXPEDICAO-UX-3)
+
+Same section titles, same order, on Shopee, Mercado Livre and TikTok Shop;
+each channel shows only what its source sustains.
+
+1. **Header** — channel, photo/series time, written state ("Atualizada" /
+   "Desatualizada", with age when the API publishes it), source watermark
+   (TikTok) and one line defining the measurement. Brand filter
+   (`?marca=`, shared by the three channels) and depth live in the controls
+   row.
+2. **Risco atual** — KPI strip plus "O que exige atenção agora". Shopee: six
+   tiles (backlog, vencidos, vence em 24 h, acima de 48 h, travados, marcas
+   em alerta). ML: four — no deadline tiles at all. TikTok: pendentes
+   vencidos, vencem hoje/amanhã, pendentes no prazo, lojas acima da meta.
+3. **Prazo** — Shopee: backlog partitioned by deadline status (ship_by_date),
+   plus the sentence that LDR is not computed yet. ML: "Prazo indisponível
+   pelo canal" and queue ageing. TikTok: LDR, with collection and dispatch as
+   separate events.
+4. **Evolução** — queue: a compact table, one row per account titled by
+   brand (Backlog atual · Variação · Acima de 48 h · Travados · Tendência).
+   Sparklines in neutral ink, no written scale; a constant series reads
+   "Estável em N"; a percentage only with base ≥ 20 and ≥ 21 h of history;
+   short history reads "desde o início da série". TikTok: the daily chart by
+   due date.
+5. **Concentração por marca** — brand first; the account id is a small
+   secondary line only when it differs from the brand. "Fonte avançou"
+   became "Recebeu atualização" / "Sem atualização nova".
 
 ### Sidebar
 

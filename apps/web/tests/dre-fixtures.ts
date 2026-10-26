@@ -263,7 +263,7 @@ export function resposta(over: Partial<DreResponse> = {}, estado: EstadoInsumos 
         publicado_em: estado === "tabela_ausente" || estado === "nao_publicado" ? null : "2026-10-10T06:00:00+00:00",
         publicado_em_mais_antigo: null,
         publicado_em_mais_recente: null,
-        motivo: estado === "ok" ? null : estado === "vencido" ? "12 de 12 linhas publicadas ha mais de 48 h" : "motivo do backend",
+        motivo: estado === "ok" ? null : estado === "vencido" ? "12 de 12 linhas publicadas ha mais de 54 h" : "motivo do backend",
       },
     },
     regras: { maturacao_meses: 2 },

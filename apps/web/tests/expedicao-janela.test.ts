@@ -29,6 +29,7 @@ import {
 } from "../src/lib/expedicao-janela.ts";
 import { JANELA_MAX_HORAS } from "../src/lib/expedicao-contract.ts";
 import { queryDoTikTok } from "../src/lib/expedicao-tiktok-contract.ts";
+import { urlDoCanal } from "../src/lib/expedicao-canal.ts";
 
 register("./helpers/tsx-loader.mjs", import.meta.url);
 
@@ -268,13 +269,26 @@ test("o popstate da fila relê a janela mesmo sem a flag do ML", () => {
 });
 
 test("a casca descarta a janela ao trocar de superficie", () => {
-  assert.match(CASCA, /new URL\(urlSemDias\(window\.location\.href\)\)/);
+  // EXPEDICAO-UX-UNIFICADA-1: a troca virou um seletor so' de tres canais. A
+  // janela cai SO' quando a troca atravessa fila <-> TikTok; Shopee <-> ML
+  // mantem, como ja' mantinha quando esse seletor morava dentro da fila.
+  assert.match(CASCA, /urlDoCanal\(window\.location\.href, canal, novo\)/);
+  const tk = new URL(urlDoCanal(`${BASE}?dias=10&visao=detalhe`, "shopee", "tiktokshop"));
+  assert.equal(tk.searchParams.has(PARAM_DIAS), false, "fila -> TikTok descarta");
+  assert.equal(tk.searchParams.get("channel"), "tiktokshop");
+  assert.equal(tk.searchParams.get("visao"), "detalhe", "profundidade atravessa");
+  const volta = new URL(urlDoCanal(`${BASE}?channel=tiktokshop&dias=45`, "tiktokshop", "shopee"));
+  assert.equal(volta.searchParams.has(PARAM_DIAS), false, "TikTok -> fila descarta");
+  assert.equal(volta.searchParams.has("channel"), false, "Shopee e' o padrao");
+  const ml = new URL(urlDoCanal(`${BASE}?dias=10`, "shopee", "mercadolivre"));
+  assert.equal(ml.searchParams.get(PARAM_DIAS), "10", "Shopee -> ML mantem a janela");
+  assert.equal(ml.searchParams.get("channel"), "mercadolivre");
 });
 
 test("a casca nao monta painel nenhum antes de ler a URL", () => {
   // Defeito medido no QA: a fila montava antes de a aba ser lida, julgava
   // `?dias=45` (link do TikTok) invalido pela regra dela e o apagava da URL.
-  const corpo = CASCA.slice(CASCA.indexOf("function ComAbas"));
+  const corpo = CASCA.slice(CASCA.indexOf("export default function ExpedicaoShell"));
   const guarda = corpo.indexOf("if (!pronta) {");
   const fila = corpo.indexOf("<ExpedicaoClient");
   assert.ok(guarda > 0, "precisa existir a guarda de `pronta`");

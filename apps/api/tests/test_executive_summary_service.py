@@ -117,6 +117,7 @@ def _daily_freshness_row(marketplace, max_date):
 def _compose(
     *, overview=None, brands=None, quality=None, canais=None, regioes_summary=None,
     channels="all", mkt_ids=None, daily_freshness=None, regional_max_date=None, now=NOW,
+    brand_freshness=None,
 ):
     return svc._compose_executive_summary(
         overview=overview or _overview(),
@@ -129,7 +130,68 @@ def _compose(
         daily_freshness=daily_freshness if daily_freshness is not None else [],
         regional_max_date=regional_max_date,
         now=now,
+        brand_freshness=brand_freshness,
     )
+
+
+# ---------------------------------------------------------------------------
+# FRESHNESS-GERENCIAL-DAILY — marca parada dentro de canal em dia
+# ---------------------------------------------------------------------------
+
+def _marca(marketplace, brand, max_date):
+    return {"marketplace": marketplace, "brand": brand, "max_date": max_date}
+
+
+def test_marca_parada_em_canal_fresco_vira_risco_com_marca_e_nao_e_venda_zero():
+    result = _compose(
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 7, 12))],
+        brand_freshness=[_marca("shopee", "apice", date(2026, 7, 12)),
+                         _marca("shopee", "kokeshi", date(2026, 7, 3))],
+    )
+    stale = [r for r in result["risks"] if r["type"] == "stale_data"]
+    assert len(stale) == 1
+    r = stale[0]
+    assert (r["marketplace"], r["brand"], r["last_date"]) == ("shopee", "kokeshi", "2026-07-03")
+    assert r["staleness_days"] == (NOW.date() - date(2026, 7, 3)).days
+    assert "KOKESHI" in r["title"] and "não são venda zero" in r["description"]
+    assert r["category"] == "data_confidence"
+    ExecutiveSummaryResponse.model_validate(result)
+
+
+def test_marca_dentro_do_limite_do_canal_nao_dispara():
+    result = _compose(
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 7, 12))],
+        brand_freshness=[_marca("shopee", "kokeshi", date(2026, 7, 12 - svc.DAILY_FRESHNESS_THRESHOLD_DAYS))],
+    )
+    assert not [r for r in result["risks"] if r["type"] == "stale_data"]
+
+
+def test_canal_inteiro_parado_fica_so_no_risco_do_marketplace():
+    result = _compose(
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 6, 20))],
+        brand_freshness=[_marca("shopee", "apice", date(2026, 6, 20)),
+                         _marca("shopee", "kokeshi", date(2026, 6, 1))],
+    )
+    stale = [r for r in result["risks"] if r["type"] == "stale_data"]
+    assert [(r["marketplace"], r["brand"]) for r in stale] == [("shopee", None)]
+
+
+def test_marca_atrasada_em_um_canal_nao_contamina_outro_canal():
+    result = _compose(
+        daily_freshness=[_daily_freshness_row("shopee", date(2026, 7, 12)),
+                         _daily_freshness_row("ml", date(2026, 7, 12))],
+        brand_freshness=[_marca("shopee", "kokeshi", date(2026, 7, 1)),
+                         _marca("ml", "kokeshi", date(2026, 7, 12))],
+    )
+    stale = [(r["marketplace"], r["brand"]) for r in result["risks"] if r["type"] == "stale_data"]
+    assert stale == [("shopee", "kokeshi")]
+
+
+def test_risco_de_frescor_por_marca_nao_altera_a_saude_comercial():
+    base = _compose(daily_freshness=[_daily_freshness_row("shopee", date(2026, 7, 12))])
+    com = _compose(daily_freshness=[_daily_freshness_row("shopee", date(2026, 7, 12))],
+                   brand_freshness=[_marca("shopee", "kokeshi", date(2026, 7, 1))])
+    assert com["health"]["status"] == base["health"]["status"]
 
 
 # ---------------------------------------------------------------------------

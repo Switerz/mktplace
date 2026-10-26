@@ -4,11 +4,16 @@
 LIGADAS: a API serve `availability=available` e `/expedicao` responde 200 com a
 tela real. Migration `018` aplicada, quatro contas cadastradas.
 
-**A carga continua MANUAL.** Nenhum agendamento existe: `load_mode =
-manual_snapshot` e `no_automation = true` na propria resposta da API. A
-fotografia so' avanca quando alguem executa o `--apply` — o batch vigente depende
-de execucao manual, e entre duas execucoes a tela envelhece. A Expedicao **nao**
-e' tempo real e **nao** e' automatizada.
+**Atualizacao (21/10/2026): a carga e' AGENDADA.** A DAG
+`marketplace_tower_expedicao_refresh` (`goca-se/airflow`) roda a cada 2 h e
+publica Shopee, Mercado Livre e TikTok. A resposta da API, porem, ainda diz
+`load_mode = manual_snapshot` e `no_automation = true` — sao constantes no
+servico, nao proveniencia do batch. Ver "Pendencia de contrato: modo de
+publicacao" mais abaixo. A Expedicao continua **nao** sendo tempo real: entre
+duas execucoes a fotografia envelhece, e a tela mostra a idade.
+
+Historico: ate' 20/10/2026 toda fotografia vinha de alguem executando o
+`--apply` a mao.
 
 O EXP-1F corrigiu a semantica do alerta `expedicao_source_freshness`, que nascia
 permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
@@ -26,7 +31,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio, identificador do pedido nao e' servido |
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
-| `schedule_plan.py` / Airflow | **nao integrados** — automacao por DAG segue PENDENTE |
+| Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -503,14 +508,139 @@ com os limites do contrato (8h / 24h, inclusivos; futuro e nulo -> `unknown`).
 
 ### `load_mode = manual_snapshot`
 
-**Nao existe agendamento.** Toda fotografia veio de alguem executando o refresh
-a mao. `limitations.snapshot_age_hours` diz ha quanto tempo, e
-`limitations.no_automation` e' sempre `true`. O consumidor deve exibir isso: um
-painel que nao mostra a idade do dado convida a decidir sobre estado vencido.
+**O valor e' CONSTANTE no servico, nao proveniencia.** Foi verdade ate'
+20/10/2026, quando toda fotografia vinha de alguem executando o refresh a mao;
+desde 21/10/2026 a DAG publica e o campo continua dizendo `manual_snapshot`
+(e `limitations.no_automation` continua `true`). O consumidor NAO deve exibir
+esses dois campos como fato. O que ele deve exibir e'
+`limitations.snapshot_age_hours`: um painel que nao mostra a idade do dado
+convida a decidir sobre estado vencido.
 
 `source_advanced=false` e' METADADO: significa "a fonte nao avancou desde a
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
+
+### Hierarquia gerencial, filtro de marca e LDR (EXPEDICAO-UX-3, 21/10/2026)
+
+**O que cada canal sustenta** (medido na resposta de producao, so' estrutura):
+
+| | Shopee | Mercado Livre | TikTok |
+|---|---|---|---|
+| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | ausente (`deadline_source = unavailable`) | reconstruido pela politica de dias uteis |
+| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | so' `deadline_unavailable` | — |
+| Idade da fila | `over_48h`, `stalled`, `oldest_row_age_hours` | idem | — |
+| Taxa de atraso (LDR) | **nao existe no contrato** | **impossivel** (sem prazo na fonte) | `ldr`, por vencimento, coleta e despacho |
+
+A tela mostra a MESMA hierarquia (Risco atual -> Prazo -> Evolucao ->
+Concentracao por marca) e, em cada secao, so' o que o canal sustenta. Nenhuma
+regra de negocio foi mudada para forcar equivalencia.
+
+**Filtro de marca (`?marca=`).** Uma marca, ou nenhuma; atravessa a troca de
+canal. Comportamento por rota:
+
+- `GET /expedicao/trend?brands=` e `GET /expedicao/tiktok?brands=` recortam
+  no SERVIDOR (as agregacoes do TikTok — LDR, coortes, fluxo, lojas, alertas —
+  ja' saem da marca). A tela so' repassa o parametro.
+- `GET /expedicao?brands=` recorta **so' a lista de pedidos** (`queue`,
+  `pagination`). `totals`, `accounts`, `freshness` e `coverage` continuam do
+  CANAL inteiro: `totais` e' a soma de `snap["resumos"]` sem filtro
+  (`get_expedicao` em `apps/api/app/services/expedicao_service.py`). Por isso
+  a tela recorta por SELECAO: a linha da conta em `accounts` vira os
+  indicadores da marca. Marca com mais de uma conta fica SEM total da marca
+  (a tela nao soma contas) e mostra os numeros por conta.
+- Contrato necessario para remover essa limitacao: aplicar `brands` aos
+  `resumos` ANTES de calcular `totals`, `coverage` e `freshness` — ou devolver
+  `totals_scope: "channel" | "brands"` para o consumidor saber o que recebeu.
+- Com marca filtrada, `/expedicao/tiktok` devolve `no_series_published`
+  tambem quando so' a marca nao tem pedido na janela; a tela diz "Sem serie
+  do TikTok para esta marca na janela consultada".
+
+**LDR da Shopee — implementada ATRAS DE FLAG (EXPEDICAO-SHOPEE-LDR-1).** Ver
+a secao "LDR operacional da Shopee" no fim deste documento. Enquanto as flags
+estiverem desligadas, a secao "Prazo" da Shopee continua mostrando a particao
+do backlog por situacao de prazo e dizendo, por escrito, que a LDR ainda nao e'
+calculada.
+
+**Mercado Livre.** O canal nao publica prazo de envio (campos candidatos 0%
+preenchidos, medido no EXP-3A). Nao ha vencimento nem LDR a construir sem uma
+fonte nova de prazo; a secao "Prazo" diz isso e mostra o envelhecimento da
+fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
+
+**Evolucao em tabela.** Uma linha por conta, titulada pela marca: backlog
+atual, variacao, acima de 48 h, travados e sparkline. Sem escala escrita e sem
+alternancia de escala. Serie constante: "Estavel em N". Percentual so' com
+primeiro ponto >= 20 pedidos e >= 21 h de historico (24 h menos a folga de
+cobertura); historico parcial: "desde o inicio da serie (N h)".
+
+### Consumo da tendencia na tela (EXPEDICAO-UX-2, 21/10/2026)
+
+`GET /expedicao/trend` ja' entrega o mapeamento conta -> marca: cada ponto traz
+`shop_account` e `brand`. A tela NAO mantem relacao conta -> marca propria;
+usa so' o rotulo de exibicao da marca (`lib/filters/brands.ts`). Nenhuma
+mudanca de contrato foi necessaria.
+
+- **Uma serie por conta, titulada pela marca.** Duas contas da mesma marca
+  NAO sao somadas: viram dois cartoes, "conta 1 de 2" e "conta 2 de 2", na
+  ordem do identificador. O identificador aparece so' no tooltip e na tabela
+  "Ver dados". `brand` nulo ou vazio vira "Marca nao informada".
+- **Nada e' fabricado.** Hora sem ponto quebra a linha; antes do primeiro
+  ponto de uma conta nao ha linha; nada vira zero.
+- **Cobertura real.** `from_hour`/`to_hour` da resposta sao comparados com
+  `window_hours`. Se o historico cobre menos que `window_hours - 3` h, a tela
+  escreve "Historico disponivel desde ..." e "Exibindo N h disponiveis das W h
+  selecionadas". A folga de 3 h absorve a cadencia da DAG (2 h) somada ao
+  balde horario; sem ela, uma janela de 24 h bem servida pareceria parcial.
+- **Unicas contas no frontend:** diferenca entre o ultimo e o primeiro ponto
+  da MESMA conta (absoluta e percentual; percentual indisponivel quando o
+  primeiro ponto e' zero) e a escala de cada cartao.
+
+Limitacao: a resposta so' cobre a janela pedida. "Historico disponivel desde"
+significa "primeiro ponto dentro desta janela"; a API nao informa se existe
+historico mais antigo fora dela.
+
+### Pendencia de contrato: modo de publicacao (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026)
+
+**O contrato nao consegue dizer que uma fotografia foi agendada.** Medido no
+codigo:
+
+- `LoadMode = Literal["manual_snapshot"]` em `apps/api/app/schemas/expedicao.py`;
+- `apps/api/app/services/expedicao_service.py` grava `load_mode =
+  "manual_snapshot"` e `no_automation = True` como CONSTANTES — no `snapshot` e
+  em `_limitacoes()` — sem olhar quem publicou o batch;
+- `GET /expedicao/tiktok` nao tem campo de modo nenhum.
+
+Consequencia: desde 21/10/2026 a DAG `marketplace_tower_expedicao_refresh`
+(`goca-se/airflow`, a cada 2 h) publica os tres canais, e a API anuncia cada
+batch dela como `manual_snapshot` com `no_automation = true`.
+
+**Decisao de tela (EXPEDICAO-UX-UNIFICADA-1, 21/10/2026):** o selo de modo de
+publicacao SAIU dos tres canais, junto com o item "sem automacao" da barra de
+qualidade. A tela mostra so' o que a API mede de fato — instante da
+publicacao, idade da fotografia (fila), ultimo dado da fonte (TikTok) e o
+veredito de desatualizada. Ela nao afirma "a mao" (falso com a DAG) nem
+"agendada" (a API ainda nao prova). Os campos continuam no payload e nos
+tipos do frontend; so' nao viram texto.
+
+Ajuste necessario, fora deste gate e nesta ordem:
+
+1. **Proveniencia por batch, gravada por quem publica.** `marts.expedicao_refresh_run`
+   (e a serie do TikTok, migration `020`) ganham `load_mode text NOT NULL
+   DEFAULT 'manual_snapshot' CHECK (load_mode IN ('manual_snapshot',
+   'scheduled'))`, em migration nova. O CLI recebe `--load-mode scheduled`
+   EXPLICITO da DAG — nunca inferido de variavel de ambiente: uma execucao
+   manual dentro do container nao pode virar "agendada".
+2. **API.** `LoadMode = Literal["manual_snapshot", "scheduled"]`, lido do batch
+   servido; `no_automation = load_mode != "scheduled"`; e
+   `limitations.expected_refresh_hours` (2 para a DAG de 2 h). Hoje o limiar de
+   "fotografia velha" e' fixo e diferente por canal: 6 h na tela da fila
+   (`SNAPSHOT_VELHO_HORAS`) e 12 h no alerta `fotografia_velha` do TikTok.
+3. **`/expedicao/tiktok`**: `snapshot.load_mode` com o mesmo dominio.
+4. **Frontend, so' depois de 1-3**: mapear `scheduled` para "publicação
+   agendada" e usar `expected_refresh_hours` no veredito de desatualizada.
+
+Ate' la' a tela fica sem selo de modo, com a idade da fotografia visivel. O
+selo so' volta quando o passo 4 existir — e volta mostrando o que o batch
+gravou, nunca um valor fixo no frontend.
 
 ### Cobertura e Kokeshi
 
@@ -1081,3 +1211,151 @@ normalizador do ML aparece no caminho dela.
 **PERGUNTA ABERTA AO TIME (inalterada):** confirmar na documentacao oficial da
 API do Mercado Livre se `date_created` / `date_ready_to_ship` vem com offset
 `-04:00` e se o extrator descarta o fuso ao gravar.
+
+## LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1, 21/10/2026)
+
+Nome na tela: **"LDR operacional (coleta × prazo Shopee)"**. E' um indicador
+INTERNO da Torre e **nao e' a taxa de envio atrasado que a Shopee usa para
+penalizacao**: o marco, as exclusoes e a janela da plataforma nao estao na
+nossa fonte. A API devolve `official = false` e o aviso pronto; a tela o mostra
+sempre que o numero aparece. Nao ha "meta" e a taxa nao ganha cor de
+severidade.
+
+### Regras (ratificadas em 21/10/2026)
+
+Entre os pedidos PAGOS e despachados pelo PROPRIO VENDEDOR cujo `ship_by_date`
+vence num dia (data em Brasilia), quantos nao foram coletados
+(`pickup_done_time`) ate' o prazo. Precedencia — o primeiro que casa decide:
+
+| # | Situacao | Classe |
+|---|---|---|
+| 1 | sem `pay_time` | fora do universo |
+| 2 | `fulfillment_flag = fulfilled_by_shopee` | FBS — fora da taxa, contador proprio |
+| 3 | fluxo fora do vocabulario medido | **falha fechada**, nada publicado |
+| 4 | cancelado sem coleta | fora da base, contador proprio (com o subconjunto "Seller did not Ship") |
+| 5 | sem `ship_by_date` | sem prazo, contador proprio (por dia de PAGAMENTO) |
+| 6 | status pos-envio sem `pickup_done_time` | fora da taxa, reduz a cobertura |
+| 7 | coleta ≤ prazo | no prazo |
+| 8 | coleta > prazo | atrasado |
+| 9 | sem coleta, prazo vencido | pendente vencido (conta como atraso) |
+| 10 | sem coleta, prazo por vencer | pendente no prazo |
+
+Cancelado COM coleta entra na base pela coleta. LDR = (atrasado + pendente
+vencido) / base, so' sobre vencimentos MADUROS: dia ja' fechado E fonte da conta
+lida depois de D+1 06:00 BRT (p99 de `ingested_at - update_time` = 6,0 h).
+
+Cobertura = (sem prazo + enviado sem coleta) / (base + essas ausencias). Acima
+de 2%: aviso. Acima de 10%: a taxa vira "—" com o motivo. Sem base madura: "—",
+nunca 0%.
+
+Motivo de cancelamento NAO-NULO fora do vocabulario medido (18 textos em 365
+dias, `MOTIVOS_CONHECIDOS`) gera alerta de qualidade em
+`audit.data_quality_check` (`expedicao_shopee_ldr_motivo_cancelamento`, `warn`)
+e na resposta da API. Motivo NULO e' contado como ausente, sem alerta.
+
+### Medicao que sustenta as regras (read-only, 21/10/2026)
+
+- `ship_by_date` e' `timestamptz`; 100% dos valores as 23:59 BRT; nenhum
+  vencimento em fim de semana nem em 12/10 (dias uteis ja' aplicados).
+- FBS e' a maioria: 4.768 de ~6.600 pedidos com vencimento em 12–18/10.
+- Enviado sem `pickup_done_time`: zero em 90 dias. Pago sem prazo: so' entre
+  cancelados.
+- Semana 12–18/10, regra ratificada: 61 / 1.819 = **3,35%** (APICE 5,93%,
+  BARBOURS 0,62%, LESCENT 0,89%, RITUARIA 2,21%). Se "Seller did not Ship"
+  contasse como atraso: 4,04%. Recalculada pelo modulo novo: identica.
+- Nao ha tabela de desempenho da loja no Data Mart: a comparacao com o Seller
+  Center depende de export manual ou do probe Account Health.
+
+### Tabelas (migration 030)
+
+- `marts.expedicao_shopee_ldr_daily` — PK `(channel, deadline_date,
+  shop_account)`. CHECKs: particao fecha na base, base = pagos − FBS −
+  cancelados sem coleta − enviados sem coleta, subconjuntos de cancelamento ≤
+  total, maduro sem pendente no prazo, canal `shopee`.
+- `marts.expedicao_shopee_ldr_sem_prazo_daily` — PK `(channel, paid_date,
+  shop_account)`; pagos = FBS + cancelados sem coleta + sem prazo.
+- `marts.expedicao_shopee_fila_fluxo` — PK `(channel, shop_account, fluxo)`;
+  fotografia da fila aberta por fluxo (ver "Fila do vendedor x FBS").
+
+### Publisher
+
+    python -m pipelines.expedicao.shopee_ldr_cli --diagnose
+    python -m pipelines.expedicao.shopee_ldr_cli --reconcile
+    python -m pipelines.expedicao.shopee_ldr_cli --apply --max-idade-fonte-horas 6
+
+- Le `raw.shopee_orders` (so' 8 colunas, nenhuma de comprador, sem `order_sn`)
+  num UNICO snapshot REPEATABLE READ da replica. Marca pelo registry do Neon.
+- **Reconciliacao fonte × publicacao:** antes de escrever, `classificar`
+  (Python) e um CASE SQL independente tem de concordar celula a celula no MESMO
+  snapshot; dentro da transacao, a releitura do lote tem de bater com o
+  calculado antes do commit. `--reconcile` compara depois o publicado com a
+  fonte atual nos vencimentos maduros (read-only nos dois lados).
+- Janela reescrita a cada execucao: vencimentos de hoje − 35 a hoje + 7;
+  pagamentos (sem prazo) de hoje − 35 a hoje. Historico fora dela nao e' tocado.
+- Lock proprio `918_120_018` (nao disputa com a fila Shopee).
+- Exit codes iguais aos da `cli.py`/`tiktok_cli.py`.
+- Auditoria: `audit.source_sync_run` (`expedicao_shopee_ldr`) e tres checks em
+  `audit.data_quality_check`: motivo de cancelamento, cobertura por marca,
+  reconciliacao.
+- `--diagnose` real em 21/10: 30.669 pedidos lidos, 5,6 s, 112 celulas
+  reconciliadas, 0 divergencias.
+
+### API
+
+`GET /api/v1/expedicao/shopee/ldr?days=7&brands=apice` (days 1–35). Estados sem
+500: `disabled` (flag off — nenhuma consulta), `table_not_migrated`,
+`no_series_published` (tambem para marca sem linha), `snapshot.stale` (fonte
+vencida, > 6 h). Exclusoes em `exclusions`, cobertura em `coverage`, por marca
+em `brands` (nunca somadas entre marcas).
+
+### Flags (todas nascem desligadas)
+
+| Onde | Flag |
+|---|---|
+| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` |
+| Web (Vercel) | `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED=true` |
+| Airflow | DAG `marketplace_tower_expedicao_shopee_ldr_publish` nasce PAUSADA |
+
+Com a flag web off, a secao "Prazo" da Shopee fica byte a byte como antes. A
+LDR do TikTok nao foi tocada.
+
+### Limitacoes conhecidas
+
+- **A fila Shopee publicada mistura FBS** (o extrator nao le
+  `fulfillment_flag`): em 21/10, 258 de 558 do backlog, 11 de 13 vencidos e
+  43 de 43 acima de 48 h eram FBS. Corrigido NA TELA pela fila por fluxo (abaixo);
+  a tabela `expedicao_fila_atual`, a "Concentração por marca" e a evolucao
+  continuam com FBS incluido, e a tela diz isso.
+
+### Fila do vendedor x FBS no "Risco atual"
+
+`marts.expedicao_shopee_fila_fluxo` (PK `channel, shop_account, fluxo`) e' uma
+FOTOGRAFIA da fila aberta separada em `vendedor` e `fbs`, publicada pelo MESMO
+`shopee_ldr_cli`, na MESMA leitura (sem coleta nova):
+
+- mesmo predicado da fila (`PROCESSED`/`READY_TO_SHIP` sem `pickup_done_time`)
+  e mesmas regras (`transform.classify_deadline`, `classify_age`,
+  `is_slow_vs_baseline` com o `fetch_baselines` da propria fila,
+  `is_source_zombie`);
+- uma linha por conta do registry e por fluxo, inclusive com zero (medido);
+- reconciliacao: vendedor + FBS de cada conta == `count(*)` SQL independente do
+  mesmo predicado no mesmo snapshot (divergencia = nada publicado); CHECKs da
+  particao de prazo e de travados no banco;
+- `GET /expedicao/shopee/ldr` devolve `queue_by_flow` (`seller`, `fbs`, `total`
+  e por conta), recortado pela marca no servidor; `None` = nao publicado.
+
+Na tela (com a flag da LDR): o "Risco atual" e a barra de prazo da Shopee viram
+a **fila acionavel do vendedor**; FBS aparece em faixa propria, neutra
+("responsabilidade logistica da Shopee"); o total so' aparece numa linha de
+conferencia ("vendedor X + FBS Y = Z"). Sem a divisao (flag off, erro, nao
+publicada ou parcelas que nao fecham), a tela mostra a fila publicada com o
+aviso de que ela inclui FBS — nunca zera nada.
+
+`--diagnose` real, 21/10/2026: vendedor 300 (2 vencidos, 0 acima de 48 h) e
+FBS 258 (11 vencidos, 57 acima de 48 h), reconciliado nas 4 contas.
+- `MOTIVO_NAO_ENVIOU` depende do TEXTO da fonte; se a Shopee o mudar, o
+  subconjunto zera e o alerta de motivo desconhecido e' o que avisa.
+- `ingested_at` e' reescrito a cada atualizacao: serve de watermark, nunca de
+  "quando a coleta chegou".
+- Sem indice em `ship_by_date`/`pay_time` na fonte: a leitura e' por varredura
+  (5,6 s medidos); se crescer, o custo aparece no `--diagnose`.

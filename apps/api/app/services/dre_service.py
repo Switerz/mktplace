@@ -97,10 +97,18 @@ CMV_PROVISORIO_INTEGRAL = 0.995
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
-#: Idade maxima de um lote de insumos. O publisher roda diariamente; 48 h
-#: toleram UMA execucao perdida. Passado isso o insumo e' tratado como vencido
-#: — nunca exibido como atual.
-INSUMO_IDADE_MAXIMA = timedelta(hours=48)
+#: Idade maxima de um lote de insumos, contada de `publicado_em` (marcado no
+#: INICIO da publicacao). Passado isso o insumo e' tratado como vencido — nunca
+#: exibido como atual.
+#:
+#: 54 h = 48 h + 6 h de folga (DRE-TTL-54, 21/10/2026). A DAG publica uma vez por
+#: dia, as 10h BRT. Com 48 h, perder UM dia dava margem ~0: o lote de D vencia
+#: no mesmo instante em que a execucao de D+2 comecava, e um retry (15 min) ou a
+#: propria varredura ja deixavam a tela `vencido`. A folga cobre a execucao
+#: seguinte com retries (3 x 15 min), varredura e atraso de agenda. Falha de UM
+#: dia deixa de vencer a tela; o alerta de falha da DAG (goca-se/airflow#2089 +
+#: listener global) avisa no primeiro dia. Ha' teste de paridade com `DRE_MAX_SNAPSHOT_HOURS` do Oraculo.
+INSUMO_IDADE_MAXIMA = timedelta(hours=54)
 TABELA_INSUMOS = "marts.fact_dre_insumo_mensal"
 
 #: Sinal com que cada fonte grava custo. Medido no contrato §4.5/§4.8.

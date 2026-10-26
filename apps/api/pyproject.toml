@@ -39,6 +39,9 @@ dependencies = [
     "openpyxl>=3.1",
     "pandas>=3.0.3",
     "tzdata>=2024.1",
+    # Validacao RS256 dos access tokens do Auth0 corporativo nas rotas
+    # protegidas (app/auth.py). Faixa com teto: o Render ignora o uv.lock.
+    "pyjwt[crypto]>=2.8,<3",
 ]
 
 [project.optional-dependencies]

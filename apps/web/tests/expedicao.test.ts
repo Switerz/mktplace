@@ -12,10 +12,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
-  AVISO_SEM_AUTOMACAO,
+  EXPLICACAO_FONTE,
   EXPLICACAO_LIMIAR_48H,
   FILTROS_PADRAO,
   JANELA_MAX_HORAS,
+  rotuloFonte,
   LIMIAR_OPERACIONAL_HORAS,
   LIMIT_MAX,
   ORDENACOES,
@@ -317,8 +318,15 @@ test("source_advanced nao altera veredito nenhum", () => {
   assert.equal(est, "ok");
   const kpis = montarKpis(comFalse.totals, comFalse.freshness);
   assert.equal(kpis.find((k) => k.chave === "marcas_alerta")?.valor, 0);
-  // e a tela o rotula como metadado
-  assert.ok(fonte("app/expedicao/ExpedicaoClient.tsx").includes("(metadado)"));
+  // e a tela o mostra como METADADO em lingua de gestor (EXPEDICAO-UX-3):
+  // "Fonte avançou: não (metadado)" virou "Sem atualização nova", com a
+  // explicacao de que isso nao e' falha.
+  const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
+  assert.match(tela, /rotuloFonte\(a\.source_advanced\)/);
+  assert.equal(rotuloFonte(false), "Sem atualização nova");
+  assert.equal(rotuloFonte(true), "Recebeu atualização");
+  assert.match(EXPLICACAO_FONTE, /não é\s+falha/);
+  assert.doesNotMatch(tela, /Fonte avançou/);
 });
 
 test("snapshot antigo e sinalizado sem mudar os numeros", () => {
@@ -330,22 +338,23 @@ test("snapshot antigo e sinalizado sem mudar os numeros", () => {
   assert.equal(montarKpis(r.totals, []).find((k) => k.chave === "backlog")?.valor, 985);
 });
 
-test("aviso de carga manual e ausencia de automacao sempre presentes", () => {
-  const rel = montarRelogios(resposta());
-  assert.equal(rel.modoDeCarga, "manual_snapshot");
-  assert.equal(rel.semAutomacao, true);
-  // EXP-UX-1: o aviso deixou de ser um banner solto na tela e passou a ser um
-  // item da barra consolidada de qualidade. A garantia que importa nao e' a
-  // string estar num arquivo, e' o aviso SEMPRE existir quando nao ha
-  // automacao — entao a assercao virou comportamental.
+test("o modo de carga constante da API nao vira afirmacao na tela", () => {
+  // EXPEDICAO-UX-UNIFICADA-1: a API ainda devolve `load_mode=manual_snapshot`
+  // e `no_automation=true` como CONSTANTES, e desde 21/10/2026 a fotografia e'
+  // publicada pela DAG. A tela nao afirma "manual" nem "agendada": fica com o
+  // instante e a idade da publicacao, que a API mede de fato.
+  const r = resposta();
+  assert.equal(r.limitations.no_automation, true, "o payload continua dizendo isso");
+  const rel = montarRelogios(r);
+  assert.deepEqual(Object.keys(rel).sort(), ["efetivoEm", "snapshotAgeHours", "snapshotVelho"]);
   const barra = montarBarraDeQualidade(rel, [], []);
-  const semAutomacao = barra.detalhes.find((d) => d.chave === "sem_automacao");
-  assert.ok(semAutomacao, "aviso de ausencia de automacao sumiu da barra");
-  assert.equal(semAutomacao?.texto, AVISO_SEM_AUTOMACAO);
+  assert.ok(!barra.detalhes.some((d) => d.chave === "sem_automacao"));
+  for (const d of barra.detalhes) assert.doesNotMatch(d.texto, /manual|autom|agend/i);
 
-  const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(tela.includes("manual_snapshot"));
-  assert.ok(!/automatizad|agendad/i.test(tela.replace(/Sem automa\w+/gi, "")));
+  const tela = fonte("app/expedicao/ExpedicaoClient.tsx")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(tela, /manual_snapshot|à mão|sem agendamento|automatizad|agendad/i);
 });
 
 // ===========================================================================
@@ -668,5 +677,10 @@ test("a topbar resolve o titulo da rota de Expedicao", () => {
 test("a pagina nao cria um segundo h1: o shell e dono dele", () => {
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
   assert.equal((tela.match(/<h1\b/g) ?? []).length, 0, "dois h1 quebram a arvore de cabecalhos");
-  assert.ok((tela.match(/<h2\b/g) ?? []).length >= 1);
+  // EXPEDICAO-UX-UNIFICADA-1: o h2 do canal vive no cabecalho compartilhado
+  // pelos tres canais, que a fila renderiza.
+  const cabecalho = fonte("src/components/expedicao/CabecalhoExpedicao.tsx");
+  assert.match(tela, /<CabecalhoExpedicao\b/);
+  assert.equal((cabecalho.match(/<h1\b/g) ?? []).length, 0);
+  assert.ok((cabecalho.match(/<h2\b/g) ?? []).length >= 1);
 });

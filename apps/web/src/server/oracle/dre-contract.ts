@@ -20,7 +20,7 @@
  *   (parcial, indisponivel, snapshot_*, provisorio, nao_reconciliado,
  *   nao_confirmado, sinal_inesperado) vira NAO_CALCULAVEL com `valor=null` e o
  *   status original preservado em `status_fonte`;
- * - insumo publicado ha mais de 48 h (ou lote nao `ok`) torna CMV, taxas e
+ * - insumo publicado ha mais de 54 h (ou lote nao `ok`) torna CMV, taxas e
  *   frete que dependem dele NAO_CALCULAVEL — mesmo que a fonte diga outra coisa;
  * - margem (resultado e %) so' existe quando o CMV esta CALCULADO;
  * - custos conhecidos so' quando TODOS os custos usados na margem estao
@@ -38,7 +38,9 @@ export const DRE_TOOL_NAME = "torre_dre_mensal";
 /** Path da API. Fora de `ENDPOINTS` de proposito ate a ativacao. */
 export const DRE_ENDPOINT_PATH = "/api/v1/dre";
 /** Idade maxima do lote de insumos (mesmo valor do backend). */
-export const DRE_MAX_SNAPSHOT_HOURS = 48;
+// Igual a `INSUMO_IDADE_MAXIMA` da API (54 h desde DRE-TTL-54). Ha' teste de
+// paridade em `apps/api/tests/test_dre_mvp.py`.
+export const DRE_MAX_SNAPSHOT_HOURS = 54;
 
 export const dreInput = z
   .object({
