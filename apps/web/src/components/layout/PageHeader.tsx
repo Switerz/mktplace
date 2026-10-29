@@ -86,13 +86,17 @@ export default function PageHeader({ title, subtitle, icon: Icon, meta, scopeLin
       </div>
 
       {filters && (
-        // `-mx-4 sm:-mx-6` + `px-4 sm:px-6` fazem a faixa sangrar ate a borda do
-        // container, para a barra fixa nao parecer um card solto. O fundo e'
+        // `-mx-4` + `px-4` fazem a faixa sangrar ate a borda do container, para
+        // a barra fixa nao parecer um card solto. A sangria precisa casar com o
+        // padding do PageContainer (`px-4`, 16px fixo em todos os breakpoints
+        // desde UI-DENSIDADE-1): margem negativa maior que o padding passa da
+        // borda e gera rolagem horizontal na pagina (era `sm:-mx-6`, 8px). O
+        // contrato fica travado em `tests/page-header-sangria.test.ts`. O fundo e'
         // quase opaco com blur de apoio: o conteudo passa por baixo sem vazar
         // leitura. `z-30` fica abaixo do dialogo (portalizado no body) e acima
         // de todo o conteudo da pagina. UX-TORRE-2: fundo em token, que
         // acompanha o tema (e volta ao claro nas rotas ainda nao migradas).
-        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
+        <div className="sticky top-0 z-30 -mx-4 px-4 py-2 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
           <div className="flex items-start justify-between gap-3 flex-wrap">{filters}</div>
         </div>
       )}
