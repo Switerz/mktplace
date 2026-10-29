@@ -26,6 +26,9 @@ import {
   motivoDoTravado,
   percentualDaFila,
   queryDosTravados,
+  rotuloDaEtapa,
+  temEtapaPublicada,
+  travadosPorEtapa,
   type AlvoTravados,
 } from "@/lib/expedicao-travados";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
@@ -86,6 +89,9 @@ export default function TravadosDialog({
   const temCodigo = estado.tipo === "ok" && estado.linhas.some((l) => l.order_ref);
   // Sem prazo publicado (Mercado Livre) a coluna seria "Sem prazo" em todas.
   const temPrazo = canalTemPrazo(canal);
+  // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
+  const temEtapa = estado.tipo === "ok" && temEtapaPublicada(estado.linhas);
+  const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];
 
   return (
     <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"}>
@@ -115,6 +121,27 @@ export default function TravadosDialog({
             <p role="status" className="text-sm text-ink-muted">Nenhum pedido travado nesta fotografia.</p>
           ) : (
             <>
+              {porEtapa.length ? (
+                <div data-testid="exp-travados-por-etapa">
+                  <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                    Onde estão travados
+                    {estado.total > estado.linhas.length
+                      ? ` (nos ${formatarInteiro(estado.linhas.length)} mais antigos)`
+                      : ""}
+                  </p>
+                  <ul className="flex flex-wrap gap-1.5">
+                    {porEtapa.map((e) => (
+                      <li
+                        key={e.etapa}
+                        className="inline-flex items-baseline gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1 text-xs"
+                      >
+                        <span className="text-ink-muted">{e.rotulo}</span>
+                        <span className="font-semibold tabular-nums text-ink">{formatarInteiro(e.n)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="max-h-[50vh] overflow-auto rounded-lg border border-line">
                 <table className="w-full text-sm [&_td]:px-3 [&_td]:py-1.5 [&_th]:px-3 [&_th]:py-1.5">
                   <caption className="sr-only">Pedidos travados, do mais antigo ao mais novo</caption>
@@ -122,6 +149,7 @@ export default function TravadosDialog({
                     <tr>
                       {temCodigo ? <th scope="col">Pedido</th> : null}
                       {variasMarcas ? <th scope="col">Marca</th> : null}
+                      {temEtapa ? <th scope="col">Etapa</th> : null}
                       <th scope="col" className="text-right">Aberto há</th>
                       <th scope="col">Por que travou</th>
                       {temPrazo ? <th scope="col">Prazo</th> : null}
@@ -136,6 +164,7 @@ export default function TravadosDialog({
                           </td>
                         ) : null}
                         {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}
+                        {temEtapa ? <td className="font-medium text-ink">{rotuloDaEtapa(l.etapa)}</td> : null}
                         <td className="text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
                         <td className="text-ink">{motivoDoTravado(l)}</td>
                         {temPrazo ? <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
@@ -154,7 +183,9 @@ export default function TravadosDialog({
           )}
           <p className="text-xs text-ink-faint">
             {alvo.incluiFbs ? "Lista da fila publicada, com pedidos FBS (despachados pela Shopee). " : ""}
-            A etapa de cada pedido (a preparar ou pronto para envio) ainda não é publicada pela fonte.
+            {estado.tipo === "ok" && !temEtapa
+              ? "A etapa de cada pedido ainda não é publicada pela fonte."
+              : ""}
             {estado.tipo === "ok" && !temCodigo ? " Por segurança, o número do pedido não é exibido." : ""}
           </p>
         </div>
