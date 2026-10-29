@@ -88,7 +88,9 @@ test("comparacao: so' a Gerencial oferece; Canais e Financeiro seguem sem delta"
 });
 
 test("defaults de periodo de cada tela nao mudaram", () => {
-  assert.match(fonte(PAGINAS.gerencial), /useGlobalFilters\(\{ defaultPreset: "mes_anterior", defaultCompare: true \}\)/);
+  // GERENCIAL-METAS-1: a Gerencial passou a abrir no mes corrente (decisao do
+  // proprietario), para a meta mostrar ritmo e projecao. As demais seguem.
+  assert.match(fonte(PAGINAS.gerencial), /useGlobalFilters\(\{ defaultPreset: "mes_atual", defaultCompare: true \}\)/);
   assert.match(fonte(PAGINAS.canais), /useGlobalFilters\(\{ defaultPreset: "mes_anterior" \}\)/);
   assert.match(fonte(PAGINAS.financeiro), /useGlobalFilters\(\{ defaultPreset: "mes_anterior" \}\)/);
 });

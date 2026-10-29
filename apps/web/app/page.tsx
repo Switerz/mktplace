@@ -118,7 +118,10 @@ type DialogView =
   | { kind: "dataWarning"; item: DataConfidenceItem };
 
 function GerencialInner() {
-  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior", defaultCompare: true });
+  // GERENCIAL-METAS-1: abre no mes corrente, porque e' nele que a meta ainda
+  // pode ser decidida (ritmo, projecao e quanto falta por dia). O mes fechado
+  // continua a um clique no seletor de periodo.
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_atual", defaultCompare: true });
   const searchParams = useSearchParams();
 
   // Metrica do grafico: estado LOCAL. `/trend` entrega GMV e Pedidos na mesma
