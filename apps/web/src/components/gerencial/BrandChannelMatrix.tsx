@@ -135,10 +135,12 @@ export default function BrandChannelMatrix({
       className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3"
     >
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <h2 id="matriz-heading" className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
-          Marca × Canal
+        <div className="flex items-center gap-1.5">
+          <h2 id="matriz-heading" className="text-sm font-semibold text-ink-muted">
+            Marca × Canal
+          </h2>
           <InfoDica texto="Intensidade e participação calculadas dentro de cada canal." />
-        </h2>
+        </div>
       </div>
 
       <TableScrollHint>

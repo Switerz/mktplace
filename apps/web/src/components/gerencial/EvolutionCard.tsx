@@ -138,10 +138,12 @@ export default function EvolutionCard({
     >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
-          <h2 id="evolucao-heading" className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
-            Evolução de {METRIC_LABEL[metric]}
+          <div className="flex items-center gap-1.5">
+            <h2 id="evolucao-heading" className="text-sm font-semibold text-ink-muted">
+              Evolução de {METRIC_LABEL[metric]}
+            </h2>
             {!grainIssue && <InfoDica texto={granularityCaption(granularity, merged.granularity)} />}
-          </h2>
+          </div>
           {/* Problema de grao continua VISIVEL: muda a leitura do grafico. */}
           {grainIssue && <p className="text-xs text-ink-faint">Granularidade inconsistente entre os canais</p>}
         </div>

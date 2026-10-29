@@ -22,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { DeltaTone, KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
-import type { TendenciaKpi } from "@/lib/gerencial/kpi-trend";
+import { suavizar, type TendenciaKpi } from "@/lib/gerencial/kpi-trend";
 import InfoDica from "@/components/ui/InfoDica";
 import { fmtPct } from "@/lib/formatters";
 
@@ -120,42 +120,51 @@ function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
   // Serie constante fica no MEIO: colada no chao ela parece "caiu para zero".
   const y = (v: number) => (faixa === 0 ? 14 : 26 - ((v - min) / faixa) * 24);
   const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${y(v).toFixed(2)}`);
+  const ultimoY = y(pontos[pontos.length - 1]);
+  // O ponto final e' um <rect> SEPARADO, fora do `preserveAspectRatio="none"`
+  // da linha: dentro dele o quadrado esticaria junto com o grafico.
   return (
-    <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className={`h-6 w-full ${tinta}`}>
-      <polyline
-        points={coords.join(" ")}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.75}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        vectorEffect="non-scaling-stroke"
+    <span className={`relative block h-6 w-full ${tinta}`}>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 h-full w-[calc(100%-6px)]">
+        <polyline
+          points={coords.join(" ")}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.5}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+          opacity={0.75}
+        />
+      </svg>
+      <span
+        aria-hidden="true"
+        className="absolute right-0 h-1.5 w-1.5 rounded-[1px] bg-current"
+        style={{ top: `calc(${(ultimoY / 28) * 100}% - 3px)` }}
       />
-    </svg>
+    </span>
   );
 }
 
 /**
- * Tendencia como INDICATIVO (pedido do proprietario): so' "tende a subir /
- * descer / estavel". A conta (ultimos 7 contra os 7 anteriores e o %) fica no
- * `title`, para quem quiser conferir passando o mouse.
+ * Tendencia como INDICATIVO (pedido do proprietario): SO' o mini grafico,
+ * terminando num ponto — o formato da linha ja' diz se sobe ou desce. Nenhum
+ * texto no card; a conta (ultimos 7 contra os 7 anteriores e o %) fica no
+ * `title` e no texto `sr-only`, para quem quiser conferir.
  */
-const INDICATIVO: Record<"up" | "down" | "flat", { texto: string; cor: string }> = {
-  up: { texto: "↗ tende a subir", cor: "text-ok-ink" },
-  down: { texto: "↘ tende a descer", cor: "text-crit-ink" },
-  flat: { texto: "→ estável", cor: "text-ink-muted" },
+const DIRECAO_FALADA: Record<"up" | "down" | "flat", string> = {
+  up: "tende a subir",
+  down: "tende a descer",
+  flat: "estável",
 };
 
 function LinhaDeTendencia({ t, tinta }: { t: TendenciaKpi; tinta: string }) {
-  const ind = t.direcao ? INDICATIVO[t.direcao] : null;
   const detalhe =
     t.variacaoPct != null ? `${t.rotulo}: ${t.variacaoPct >= 0 ? "+" : ""}${t.variacaoPct.toFixed(1)}%` : undefined;
   return (
-    <span className="mt-1 flex items-center gap-2" title={detalhe}>
-      <span className="min-w-0 flex-1">
-        <Sparkline pontos={t.pontos} tinta={tinta} />
-      </span>
-      {ind && <span className={`shrink-0 text-xs font-semibold ${ind.cor}`}>{ind.texto}</span>}
+    <span className="mt-1 block w-28" title={detalhe}>
+      <Sparkline pontos={suavizar(t.pontos)} tinta={tinta} />
+      {t.direcao && <span className="sr-only">Tendência: {DIRECAO_FALADA[t.direcao]}.</span>}
     </span>
   );
 }
@@ -188,7 +197,7 @@ function KpiCard({
           {/* VISUAL-PALETA-1: compradores e cobertura de Ads saem do corpo do
               card para o "i" — o numero fala primeiro. */}
           {(kpi.subvalue || kpi.coverageNote) && (
-            <InfoDica texto={[kpi.subvalue, kpi.coverageNote].filter(Boolean).join(" · ")} />
+            <InfoDica emControle texto={[kpi.subvalue, kpi.coverageNote].filter(Boolean).join(" · ")} />
           )}
           {/* KPIS-COMPARACAO-1: sem `aria-label` no botao, o nome acessivel e'
               o proprio conteudo (valor, variacao, tendencia); a acao vai aqui. */}

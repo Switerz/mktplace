@@ -64,12 +64,14 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
     <section aria-labelledby="marcas-meta-titulo" className="flex h-full flex-col rounded-xl border border-line bg-surface p-5">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 id="marcas-meta-titulo" className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-            Marcas
+          <div className="flex items-center gap-1.5">
+            <h2 id="marcas-meta-titulo" className="text-sm font-semibold text-ink">
+              Marcas
+            </h2>
             <InfoDica
               texto={`GMV no período. Traço = ${algumaMeta ? "meta da marca (ou período anterior, sem meta)" : "período anterior"}.`}
             />
-          </h2>
+          </div>
         </div>
         <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
           {channels.map((c) => (

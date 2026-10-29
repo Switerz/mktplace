@@ -83,7 +83,7 @@ export default function MetaHero(props: Props) {
             <TriangleAlert aria-hidden="true" className="h-4 w-4 shrink-0" />
             {/* So' a primeira oracao; o texto inteiro no `title` e no dialogo. */}
             <span className="min-w-0 flex-1" title={props.aviso.texto}>
-              {props.aviso.texto.split(/[;.]/)[0]}
+              {primeiraOracao(props.aviso.texto)}
             </span>
             <button
               type="button"
@@ -303,4 +303,12 @@ function Selo({
       )}
     </div>
   );
+}
+
+/**
+ * Primeira oracao do aviso: corta em ";" ou "." SEGUIDOS de espaco (ou no
+ * fim). Ponto decimal ("16.7%") e data ("12/10/2026") nao cortam.
+ */
+export function primeiraOracao(texto: string): string {
+  return texto.split(/[;.](?=\s|$)/)[0].trim();
 }

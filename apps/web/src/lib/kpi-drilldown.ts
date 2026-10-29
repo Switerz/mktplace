@@ -39,6 +39,7 @@ export const KPI_META: Record<KpiKind, KpiMeta> = {
     label: "Pedidos",
     definition: "Contagem de pedidos no período, somada entre os canais selecionados.",
     formula: "Pedidos = pedidos TikTok Shop + pedidos Mercado Livre + pedidos Shopee",
+    caveat: "O número de compradores que acompanha os pedidos é soma diária, não comprador único no período.",
     nextLabel: "Ver detalhamento por canal em Canais",
     nextHref: "/canais",
   },
@@ -56,7 +57,7 @@ export const KPI_META: Record<KpiKind, KpiMeta> = {
       "Investimento em mídia no período, somado nos canais que reportam anúncios. A cobertura é de Mercado Livre e Shopee.",
     formula: "Investimento = investimento Mercado Livre + investimento Shopee",
     caveat:
-      "TikTok Shop não reporta investimento em mídia nesta fonte, então não entra na soma e não é exibido como zero. O contrato não traz o investimento do período anterior, portanto este indicador não tem variação.",
+      "TikTok Shop não reporta investimento em mídia nesta fonte, então não entra na soma e não é exibido como zero. A variação contra o período anterior é mostrada sem cor de bom ou ruim: investir mais não é, por si, melhor ou pior.",
     nextLabel: "Ver detalhamento de mídia em Financeiro",
     nextHref: "/financeiro",
   },

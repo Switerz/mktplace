@@ -16,7 +16,8 @@ import { scriptDeTema } from "@/lib/theme";
  * digito de largura variavel desmancha a coluna de R$. O resto e' DM Sans.
  */
 const dmSans = DM_Sans({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
-const inter = Inter({ subsets: ["latin"], variable: "--font-num", display: "swap" });
+// `preload: false`: so' tabela usa a Inter; pagina sem tabela nao a baixa.
+const inter = Inter({ subsets: ["latin"], variable: "--font-num", display: "swap", preload: false });
 
 export const metadata: Metadata = {
   title: {
