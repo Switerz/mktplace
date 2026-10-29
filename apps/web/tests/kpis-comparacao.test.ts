@@ -138,3 +138,19 @@ test("o card nao esconde valor e variacao do leitor de tela", () => {
   assert.doesNotMatch(card, /aria-label=\{`\$\{kpi\.label\} — abrir decomposição`\}/);
   assert.match(card, /<span className="sr-only"> \(abrir decomposição\)<\/span>/);
 });
+
+test("tendencia e' so' um indicativo: tende a subir / descer / estavel", () => {
+  const card = readFileSync(new URL("../src/components/gerencial/KpiBand.tsx", import.meta.url), "utf8");
+  for (const t of ["↗ tende a subir", "↘ tende a descer", "→ estável"]) assert.ok(card.includes(t), t);
+  // o detalhe numerico sai do texto e vai para o title
+  assert.doesNotMatch(card, />\s*Tendência:/);
+  assert.match(card, /title=\{detalhe\}/);
+});
+
+test("DM Sans no corpo e Inter so' nas tabelas (DM Sans nao tem tnum)", () => {
+  const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  assert.match(layout, /DM_Sans\(\{ subsets: \["latin"\], variable: "--font-sans"/);
+  assert.match(layout, /Inter\(\{ subsets: \["latin"\], variable: "--font-num"/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /table \{\s*font-family: var\(--font-num\)/);
+});

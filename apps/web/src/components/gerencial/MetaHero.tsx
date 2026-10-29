@@ -20,6 +20,7 @@ import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerencial/meta-progress";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPct } from "@/lib/formatters";
+import InfoDica from "@/components/ui/InfoDica";
 
 const SELO: Record<StatusMeta, string> = {
   atingida: "border-ok/40 bg-ok-soft text-ok-ink",
@@ -58,7 +59,7 @@ interface Props {
 export default function MetaHero(props: Props) {
   const { gmv, loading, error } = props;
   return (
-    <section aria-labelledby="meta-hero-titulo" className="rounded-xl border border-line bg-surface">
+    <section aria-labelledby="meta-hero-titulo" className="rounded-xl border border-kpi-gmv/30 bg-surface">
       <div className="grid grid-cols-1 gap-5 p-5 lg:grid-cols-[minmax(240px,1fr)_2fr_auto] lg:items-center lg:gap-8 lg:p-6">
         <Resultado {...props} />
         <div className="min-w-0">
@@ -80,13 +81,16 @@ export default function MetaHero(props: Props) {
             className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs leading-snug text-warn-ink"
           >
             <TriangleAlert aria-hidden="true" className="h-4 w-4 shrink-0" />
-            <span className="min-w-0 flex-1">{props.aviso.texto}</span>
+            {/* So' a primeira oracao; o texto inteiro no `title` e no dialogo. */}
+            <span className="min-w-0 flex-1" title={props.aviso.texto}>
+              {props.aviso.texto.split(/[;.]/)[0]}
+            </span>
             <button
               type="button"
               onClick={props.aviso.onOpen}
               className="inline-flex min-h-11 items-center font-semibold text-accent-ink underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
-              Ver confiança no dado →
+              Ver →
             </button>
           </div>
         </div>
@@ -123,17 +127,17 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
                 )}
                 {fmtPct(momPct)}
               </span>
-              vs período anterior{prevGmv != null ? ` (${fmtCompacto(prevGmv)})` : ""}
+              {prevGmv != null ? `antes ${fmtCompacto(prevGmv)}` : "vs anterior"}
             </p>
           )}
-          <p className="mt-1 text-xs text-ink-faint">{periodLabel}</p>
           <button
             type="button"
             aria-haspopup="dialog"
             onClick={onOpenGmv}
+            title={`GMV de ${periodLabel}, por marca e canal`}
             className="mt-1 inline-flex min-h-11 items-center text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
-            Detalhar GMV por marca e canal →
+            Detalhar →
           </button>
         </>
       )}
@@ -182,20 +186,21 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
       </div>
       <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
         <span>
-          realizado <b className="font-semibold text-ink">{fmtCompacto(p.realizado)}</b> ·{" "}
-          {p.encerrado ? "mês encerrado" : `${p.diasComDado} de ${p.diasNoMes} dias`}
+          <b className="font-semibold text-ink">{fmtCompacto(p.realizado)}</b> ·{" "}
+          {p.encerrado ? "mês encerrado" : `${p.diasComDado}/${p.diasNoMes} dias`}
         </span>
         {!p.encerrado && p.projecao != null && (
-          <span>
-            projeção <b className="font-semibold text-ink">{fmtCompacto(p.projecao)}</b> ({pct0(p.projecaoSobreMeta!)} da
-            meta)
+          <span title="Projeção pelo ritmo dos dias com dado">
+            projeção <b className="font-semibold text-ink">{fmtCompacto(p.projecao)}</b> · {pct0(p.projecaoSobreMeta!)}
           </span>
         )}
       </div>
       {p.porDiaNecessario != null && (
-        <p className="mt-1.5 text-xs text-ink-muted tabular-nums">
-          Faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b>: {fmtCompacto(p.porDiaNecessario)} por dia nos{" "}
-          {p.diasRestantes} {p.diasRestantes === 1 ? "dia restante" : "dias restantes"}.
+        <p
+          className="mt-1.5 text-xs text-ink-muted tabular-nums"
+          title={`Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`}
+        >
+          faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b> · {fmtCompacto(p.porDiaNecessario)}/dia
         </p>
       )}
     </div>

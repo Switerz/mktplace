@@ -18,6 +18,7 @@
  * sinais, e a explicacao completa vive no dialogo comparativo.
  */
 import Link from "next/link";
+import InfoDica from "@/components/ui/InfoDica";
 import TableScrollHint from "@/components/TableScrollHint";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import type { BrandChannelMatrix as MatrixData, MatrixCell } from "@/lib/gerencial/brand-matrix";
@@ -134,12 +135,10 @@ export default function BrandChannelMatrix({
       className="bg-surface border border-line rounded-xl p-4 flex flex-col gap-3"
     >
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <h2 id="matriz-heading" className="text-sm font-semibold text-ink-muted">
+        <h2 id="matriz-heading" className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
           Marca × Canal
+          <InfoDica texto="Intensidade e participação calculadas dentro de cada canal." />
         </h2>
-        <p className="text-xs text-ink-faint">
-          Intensidade e participação calculadas dentro de cada canal
-        </p>
       </div>
 
       <TableScrollHint>

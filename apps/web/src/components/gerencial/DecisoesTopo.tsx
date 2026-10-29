@@ -10,10 +10,12 @@
  */
 import type { CommercialAttentionItem } from "@/lib/gerencial/attention";
 
+// VISUAL-PALETA-1 — fundo levemente tingido + borda na cor da severidade,
+// como os cartoes de status do funil da Torre do Atacado.
 const PELE: Record<CommercialAttentionItem["severity"], { borda: string; tinta: string; rotulo: string }> = {
-  critical: { borda: "border-t-crit", tinta: "text-crit-ink", rotulo: "Crítico" },
-  warning: { borda: "border-t-warn", tinta: "text-warn-ink", rotulo: "Atenção" },
-  info: { borda: "border-t-accent", tinta: "text-accent-ink", rotulo: "Informativo" },
+  critical: { borda: "border-crit/30 border-t-crit bg-crit-soft/60", tinta: "text-crit-ink", rotulo: "Crítico" },
+  warning: { borda: "border-warn/35 border-t-warn bg-warn-soft/60", tinta: "text-warn-ink", rotulo: "Atenção" },
+  info: { borda: "border-accent/25 border-t-accent bg-accent-soft/60", tinta: "text-accent-ink", rotulo: "Informativo" },
 };
 
 interface Props {
@@ -35,7 +37,7 @@ export default function DecisoesTopo({ itens, total, loading, error, onOpen, onV
         </h2>
         {!loading && (
           <span className="text-xs text-ink-faint tabular-nums">
-            {itens.length} de {total} {total === 1 ? "sinal" : "sinais"}, por severidade
+            {itens.length} de {total}
           </span>
         )}
         {total > itens.length && (
@@ -59,10 +61,10 @@ export default function DecisoesTopo({ itens, total, loading, error, onOpen, onV
           {itens.map((item) => {
             const p = PELE[item.severity];
             return (
-              <li key={item.key} className={`flex flex-col gap-1.5 rounded-xl border border-line border-t-[3px] bg-surface p-4 ${p.borda}`}>
+              <li key={item.key} className={`card-hover flex flex-col gap-1.5 rounded-xl border border-t-[3px] p-4 ${p.borda}`}>
                 <span className={`text-xs font-bold uppercase tracking-wide ${p.tinta}`}>{p.rotulo}</span>
                 <h3 className="text-sm font-semibold leading-snug text-ink">{item.title}</h3>
-                {item.description && <p className="line-clamp-3 text-xs leading-relaxed text-ink-muted">{item.description}</p>}
+                {/* VISUAL-PALETA-1: a descricao vai para o detalhe; o titulo ja' diz o que e'. */}
                 <button
                   type="button"
                   aria-haspopup="dialog"

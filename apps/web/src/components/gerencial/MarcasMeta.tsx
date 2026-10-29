@@ -19,6 +19,7 @@ import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import type { ProgressoMeta, StatusMeta } from "@/lib/gerencial/meta-progress";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPct } from "@/lib/formatters";
+import InfoDica from "@/components/ui/InfoDica";
 
 const CHIP: Record<StatusMeta, string> = {
   atingida: "bg-ok-soft text-ok-ink",
@@ -63,10 +64,12 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
     <section aria-labelledby="marcas-meta-titulo" className="flex h-full flex-col rounded-xl border border-line bg-surface p-5">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 id="marcas-meta-titulo" className="text-sm font-semibold text-ink">Marcas</h2>
-          <p className="text-xs text-ink-faint">
-            GMV no período · traço = {algumaMeta ? "meta da marca (ou período anterior, sem meta)" : "período anterior"}
-          </p>
+          <h2 id="marcas-meta-titulo" className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+            Marcas
+            <InfoDica
+              texto={`GMV no período. Traço = ${algumaMeta ? "meta da marca (ou período anterior, sem meta)" : "período anterior"}.`}
+            />
+          </h2>
         </div>
         <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
           {channels.map((c) => (
@@ -97,9 +100,11 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
               <li key={b.brand} className="border-t border-line first:border-t-0">
                 <Link
                   href={brandHref(b.brand)}
-                  className="grid min-h-11 grid-cols-[88px_1fr_auto] items-center gap-3 py-2.5 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="group grid min-h-11 grid-cols-[88px_1fr_auto] items-center gap-3 rounded-lg px-1.5 py-2.5 transition-colors duration-200 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >
-                  <span className="truncate text-sm font-semibold text-ink">{b.label}</span>
+                  <span className="truncate text-sm font-semibold text-ink transition-transform duration-200 ease-out group-hover:translate-x-0.5 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0">
+                    {b.label}
+                  </span>
                   <span className="relative h-2.5 rounded-full bg-raised" aria-hidden="true">
                     <span
                       className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"

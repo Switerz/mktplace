@@ -56,6 +56,14 @@ const config: Config = {
           6: token("chart-6"),
         },
         // Identidade de canal (UX-TORRE-2): cor por CANAL, nunca por posicao.
+        // VISUAL-PALETA-1 — identidade de cada KPI (ver globals.css).
+        kpi: {
+          gmv: token("kpi-gmv"),
+          pedidos: token("kpi-pedidos"),
+          ticket: token("kpi-ticket"),
+          ads: token("kpi-ads"),
+          roas: token("kpi-roas"),
+        },
         canal: {
           tiktok: token("canal-tiktok"),
           ml: token("canal-ml"),
