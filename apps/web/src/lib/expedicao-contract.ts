@@ -643,6 +643,7 @@ export function montarFrescor(itens: FrescorMarca[]): LinhaFrescor[] {
 export interface AvisoCobertura {
   tipo: "faltando" | "inesperada" | "fora_do_escopo";
   texto: string;
+  curto?: string;
 }
 
 /**
@@ -668,6 +669,7 @@ export function avisosDeCobertura(c: Cobertura | null): AvisoCobertura[] {
   for (const marca of c.brands_not_covered) {
     avisos.push({
       tipo: "fora_do_escopo",
+      curto: `${brandLabel(marca)} fora da cobertura`,
       texto:
         `${brandLabel(marca)} não é coberta por esta fonte e por isso não aparece nos ` +
         "números — ausência de cobertura, não backlog zero.",
@@ -870,6 +872,7 @@ export function montarBarraDeQualidade(
       // Marca fora do escopo e' informacao de contrato, nao defeito.
       severidade: a.tipo === "fora_do_escopo" ? "info" : "alerta",
       texto: a.texto,
+      ...(a.curto ? { curto: a.curto } : {}),
     });
   }
   const emAlerta = frescor.filter((f) => f.alerta);
