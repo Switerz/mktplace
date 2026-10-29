@@ -24,7 +24,7 @@ import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import type { BrandChannelMatrix as MatrixData, MatrixCell } from "@/lib/gerencial/brand-matrix";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { signalLabel } from "@/lib/canais-channel-metrics";
-import { fmtBrlFull, fmtPct } from "@/lib/formatters";
+import { fmtBrlCurto, fmtPctBr } from "@/lib/formatters";
 
 /** Estado da fonte de sinais/referencias (`/canais`), independente de `/brands`. */
 export type SignalsState = "fresh" | "loading" | "error";
@@ -168,7 +168,7 @@ export default function BrandChannelMatrix({
                       {CHANNEL_LABEL[channel]}
                     </span>
                     <span className="block text-xs font-medium text-ink-faint tabular-nums">
-                      {fmtBrlFull(matrix.channelTotals[channel] ?? 0)}
+                      {fmtBrlCurto(matrix.channelTotals[channel] ?? 0)}
                     </span>
                   </button>
                 </th>
@@ -176,7 +176,7 @@ export default function BrandChannelMatrix({
               <th scope="col" className="text-right py-2 pl-3 text-xs font-semibold uppercase tracking-wide text-ink-faint">
                 <span className="block">Total</span>
                 <span className="block font-medium normal-case tracking-normal text-ink-faint tabular-nums">
-                  {fmtBrlFull(matrix.grandTotal)}
+                  {fmtBrlCurto(matrix.grandTotal)}
                 </span>
               </th>
             </tr>
@@ -210,31 +210,33 @@ export default function BrandChannelMatrix({
                       >
                         {cell.available ? (
                           <>
-                            <span className="block text-sm font-semibold text-ink tabular-nums">
-                              {fmtBrlFull(cell.gmv as number)}
-                            </span>
-                            <span className="block text-xs text-ink-faint tabular-nums">
-                              {cell.sharePctInChannel != null && <>{cell.sharePctInChannel.toFixed(1)}%</>}
-                              {cell.momPct != null && (
-                                <span className={cell.momPct >= 0 ? "text-ok-ink" : "text-crit-ink"}>
-                                  {" "}
-                                  {cell.momPct >= 0 ? "▲" : "▼"} {fmtPct(cell.momPct).replace("+", "")}
+                            {/* UI-DENSIDADE-1: mapa de calor limpo — valor curto e
+                                variacao. A participacao no canal ja' e' a cor da
+                                celula; o numero continua no detalhe. */}
+                            <span className="flex items-center justify-end gap-1.5">
+                              {/* Sinal vira um ponto pequeno: <span>, nunca <button>
+                                  aninhado. Rotulo humano do contrato de Canais no
+                                  `title` e no texto do leitor de tela. */}
+                              {main && (
+                                <span
+                                  title={signals.map(signalLabel).join(" · ")}
+                                  className="inline-flex shrink-0 items-center gap-0.5 text-xs text-warn-ink"
+                                >
+                                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-warn" />
+                                  <span className="sr-only">{signalLabel(main)}</span>
+                                  {rest.length > 0 && <span aria-hidden="true">+{rest.length}</span>}
                                 </span>
                               )}
+                              <span className="text-sm font-semibold text-ink tabular-nums">
+                                {fmtBrlCurto(cell.gmv as number)}
+                              </span>
                             </span>
-                            {/* Chips de sinal: <span>, nunca <button> aninhado.
-                                Rotulo humano do contrato de Canais — jamais o
-                                identificador snake_case cru. */}
-                            {main && (
-                              <span className="mt-1 flex items-center justify-end gap-1">
-                                <span className="text-xs font-medium rounded px-1.5 py-0.5 bg-warn-soft text-warn-ink border border-warn/35 truncate max-w-full">
-                                  {signalLabel(main)}
-                                </span>
-                                {rest.length > 0 && (
-                                  <span className="text-xs font-medium text-ink-faint shrink-0">
-                                    +{rest.length}
-                                  </span>
-                                )}
+                            {cell.momPct != null && (
+                              <span
+                                className={`block text-xs font-medium tabular-nums ${cell.momPct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}
+                              >
+                                {/* A seta ja' diz o sentido: o numero vai sem sinal. */}
+                                {cell.momPct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(cell.momPct)).replace("+", "")}
                               </span>
                             )}
                           </>
@@ -251,7 +253,7 @@ export default function BrandChannelMatrix({
 
                 <td className="py-1.5 pl-3 text-right align-middle">
                   <span className="text-sm font-semibold text-ink tabular-nums">
-                    {fmtBrlFull(row.brandTotal)}
+                    {fmtBrlCurto(row.brandTotal)}
                   </span>
                 </td>
               </tr>

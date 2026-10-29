@@ -16,7 +16,7 @@
 import type { OverviewData } from "../api-client.ts";
 import { isMarketplaceSelected } from "../marketplace-filter.ts";
 import type { Marketplace } from "../mock-data.ts";
-import { fmtBrlFull, fmtNumber } from "../formatters.ts";
+import { fmtBrlFull, fmtNumber, fmtBrlCurto, fmtNumCurto, fmtVezes } from "../formatters.ts";
 
 export type KpiKey = "gmv" | "orders" | "avg_ticket" | "ad_spend" | "roas";
 
@@ -95,8 +95,10 @@ export function direcao(pct: number | null): "up" | "down" | "flat" | null {
 export interface KpiDescriptor {
   key: KpiKey;
   label: string;
-  /** Valor principal formatado. `null` => renderizar como N/D com motivo. */
+  /** Valor principal formatado (curto). `null` => renderizar como N/D com motivo. */
   value: string | null;
+  /** UI-DENSIDADE-1: o valor EXATO, mostrado no detalhe do card. */
+  exactValue: string | null;
   unavailableReason: string | null;
   subvalue: string | null;
   /** Variacao % contra o periodo anterior; null sem base. */
@@ -169,7 +171,8 @@ export function buildKpiBand(
   const gmv: KpiDescriptor = {
     key: "gmv",
     label: "GMV",
-    value: overview ? fmtBrlFull(overview.gmv) : null,
+    value: overview ? fmtBrlCurto(overview.gmv) : null,
+    exactValue: overview ? fmtBrlFull(overview.gmv) : null,
     unavailableReason: null,
     subvalue: overview ? splitByChannel(overview, channels) : null,
     deltaPct: overview?.gmv_mom_pct ?? null,
@@ -190,12 +193,13 @@ export function buildKpiBand(
   const orders: KpiDescriptor = {
     key: "orders",
     label: "Pedidos",
-    value: overview ? fmtNumber(overview.orders) : null,
+    value: overview ? fmtNumCurto(overview.orders) : null,
+    exactValue: overview ? overview.orders.toLocaleString("pt-BR") : null,
     unavailableReason: null,
     subvalue: overview ? buyersSubvalue(overview) : null,
     deltaPct: ordersDelta,
     deltaTone: "higher_is_better",
-    reference: ordersDelta != null ? `antes ${fmtNumber(overview!.prev_orders!)}` : null,
+    reference: ordersDelta != null ? `antes ${fmtNumCurto(overview!.prev_orders!)}` : null,
     comparisonNote: compare && ordersDelta == null ? COMPARISON_UNAVAILABLE : null,
     coverageNote: null,
     channelValues: null,
@@ -209,6 +213,7 @@ export function buildKpiBand(
     key: "avg_ticket",
     label: "Ticket Médio",
     value: ticket.value,
+    exactValue: ticket.value,
     unavailableReason: ticket.reason,
     subvalue: null,
     deltaPct: ticketDelta,
@@ -228,18 +233,19 @@ export function buildKpiBand(
   } else if (!overview || overview.ad_spend == null) {
     adsReason = "Investimento não disponível para o período e filtros selecionados.";
   } else {
-    adsValue = fmtBrlFull(overview.ad_spend);
+    adsValue = fmtBrlCurto(overview.ad_spend);
   }
   const adsDelta = compare && adsValue ? deltaPct(overview?.ad_spend, overview?.prev_ad_spend) : null;
   const adSpend: KpiDescriptor = {
     key: "ad_spend",
     label: "Investimento em Ads",
     value: adsValue,
+    exactValue: adsValue && overview?.ad_spend != null ? fmtBrlFull(overview.ad_spend) : null,
     unavailableReason: adsReason,
     subvalue: null,
     deltaPct: adsDelta,
     deltaTone: "neutral",
-    reference: adsDelta != null ? `antes ${fmtBrlFull(overview!.prev_ad_spend!)}` : null,
+    reference: adsDelta != null ? `antes ${fmtBrlCurto(overview!.prev_ad_spend!)}` : null,
     comparisonNote: null,
     coverageNote: adsCoverageNote(channels),
     channelValues: null,
@@ -256,9 +262,9 @@ export function buildKpiBand(
     roasChannels.push({
       channel,
       label: CHANNEL_LABEL[channel],
-      value: raw != null ? `${raw.toFixed(1)}x` : null,
+      value: raw != null ? fmtVezes(raw) : null,
       unavailableReason: raw != null ? undefined : "Sem ROAS para o período e filtros selecionados.",
-      previous: pct != null ? `${anterior!.toFixed(1)}x` : null,
+      previous: pct != null ? fmtVezes(anterior!) : null,
       direction: direcao(pct),
     });
   }
@@ -276,6 +282,7 @@ export function buildKpiBand(
     label: "ROAS por canal",
     // NUNCA um valor unico agregado: o card renderiza a lista por canal.
     value: null,
+    exactValue: null,
     unavailableReason: anyAdsChannel
       ? compatibleWithValue.length === 0
         ? "Sem ROAS disponível nos canais selecionados."

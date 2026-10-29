@@ -10,9 +10,11 @@ import NavList from "./NavList";
 /**
  * UX-TORRE-B2B-1 — modo da sidebar.
  *
- *   "auto"      CSS decide: trilho de icones abaixo de 1280px, aberta acima.
- *               E' o estado do primeiro paint (servidor e hidratacao), entao
- *               nao ha salto de layout para quem nunca mexeu no botao.
+ *   "auto"      trilho de icones em TODA largura (UI-DENSIDADE-1: menos
+ *               margem, como a Torre do Atacado). E' o estado do primeiro
+ *               paint (servidor e hidratacao), entao nao ha salto de layout
+ *               para quem nunca mexeu no botao. Quem abre em tela larga tem a
+ *               escolha salva e ela volta aberta.
  *   "aberta" /
  *   "recolhida" escolha explicita do usuario.
  *
@@ -30,7 +32,7 @@ const telaLarga = () => typeof window !== "undefined" && window.innerWidth >= LA
 const SIDEBAR_FALLBACK = (
   <aside
     aria-label="Navegação principal"
-    className="hidden md:block md:w-16 md:shrink-0 md:bg-shell xl:w-60"
+    className="hidden md:block md:w-16 md:shrink-0 md:bg-shell"
   />
 );
 
@@ -92,7 +94,7 @@ function SidebarInner() {
 
   const recolhidaAgora = () => {
     if (modo !== "auto") return modo === "recolhida";
-    return !telaLarga();
+    return true;
   };
 
   function alternar() {
@@ -107,13 +109,10 @@ function SidebarInner() {
     }
   }
 
-  // Classes por modo. Em "auto" quem decide e' o breakpoint `xl` (1280px).
-  const largura =
-    modo === "aberta" ? "md:w-60" : modo === "recolhida" ? "md:w-16" : "md:w-16 xl:w-60";
-  const soAberta =
-    modo === "aberta" ? "block" : modo === "recolhida" ? "hidden" : "hidden xl:block";
-  const soRecolhida =
-    modo === "aberta" ? "hidden" : modo === "recolhida" ? "block" : "block xl:hidden";
+  // Classes por modo. "auto" e' o trilho (UI-DENSIDADE-1).
+  const largura = modo === "aberta" ? "md:w-60" : "md:w-16";
+  const soAberta = modo === "aberta" ? "block" : "hidden";
+  const soRecolhida = modo === "aberta" ? "hidden" : "block";
 
   return (
     // Duas camadas de proposito: a EXTERNA estica com o flex do shell e pinta

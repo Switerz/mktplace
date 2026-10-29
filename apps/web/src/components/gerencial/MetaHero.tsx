@@ -19,7 +19,7 @@ import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerencial/meta-progress";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
-import { fmtPct } from "@/lib/formatters";
+import { fmtPctBr } from "@/lib/formatters";
 import InfoDica from "@/components/ui/InfoDica";
 
 const SELO: Record<StatusMeta, string> = {
@@ -60,7 +60,7 @@ export default function MetaHero(props: Props) {
   const { gmv, loading, error } = props;
   return (
     <section aria-labelledby="meta-hero-titulo" className="rounded-xl border border-kpi-gmv/30 bg-surface">
-      <div className="grid grid-cols-1 gap-5 p-5 lg:grid-cols-[minmax(240px,1fr)_2fr_auto] lg:items-center lg:gap-8 lg:p-6">
+      <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(220px,1fr)_2fr_auto] lg:items-center lg:gap-6">
         <Resultado {...props} />
         <div className="min-w-0">
           {loading && gmv == null ? (
@@ -74,32 +74,11 @@ export default function MetaHero(props: Props) {
         </div>
         <Selo progresso={props.progresso} metasHref={props.metasHref} mesMeta={props.mesMeta} />
       </div>
-      {props.aviso && (
-        <div className="px-5 pb-5 lg:px-6">
-          <div
-            role="note"
-            className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs leading-snug text-warn-ink"
-          >
-            <TriangleAlert aria-hidden="true" className="h-4 w-4 shrink-0" />
-            {/* So' a primeira oracao; o texto inteiro no `title` e no dialogo. */}
-            <span className="min-w-0 flex-1" title={props.aviso.texto}>
-              {primeiraOracao(props.aviso.texto)}
-            </span>
-            <button
-              type="button"
-              onClick={props.aviso.onOpen}
-              className="inline-flex min-h-11 items-center font-semibold text-accent-ink underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              Ver →
-            </button>
-          </div>
-        </div>
-      )}
     </section>
   );
 }
 
-function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, error, ultimoDia, onOpenGmv }: Props) {
+function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, error, ultimoDia, onOpenGmv, aviso }: Props) {
   const ate = ultimoDia ? ` · até ${ultimoDia.slice(8, 10)}/${ultimoDia.slice(5, 7)}` : "";
   return (
     <div className="min-w-0">
@@ -107,12 +86,21 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
         GMV do período{ate}
       </h2>
       {error ? (
-        <p className="mt-2 text-sm text-crit-ink">Indicadores do período indisponíveis.</p>
+        <>
+          <p className="mt-2 text-sm text-crit-ink">Indicadores do período indisponíveis.</p>
+          {/* O aviso de dado nao depende do overview: aparece mesmo com ele em falha. */}
+          {aviso && <div className="mt-2"><SeloAviso aviso={aviso} /></div>}
+        </>
       ) : loading && gmv == null ? (
         <div className="mt-2 h-9 w-48 animate-pulse rounded bg-raised motion-reduce:animate-none" aria-hidden="true" />
       ) : (
         <>
-          <p className="mt-1 text-3xl font-bold tracking-tight text-ink tabular-nums">{fmtCompacto(gmv)}</p>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-3xl font-bold tracking-tight text-ink tabular-nums">{fmtCompacto(gmv)}</span>
+            {/* UI-DENSIDADE-1: o aviso de dado vira um SELO colado no numero,
+                onde a duvida nasce; o texto inteiro esta' no detalhe. */}
+            {aviso && <SeloAviso aviso={aviso} />}
+          </p>
           {compareActive && momPct != null && (
             <p className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted tabular-nums">
               <span
@@ -125,7 +113,7 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
                 ) : (
                   <ArrowDownRight aria-hidden="true" className="h-3.5 w-3.5" />
                 )}
-                {fmtPct(momPct)}
+                {fmtPctBr(momPct)}
               </span>
               {prevGmv != null ? `antes ${fmtCompacto(prevGmv)}` : "vs anterior"}
             </p>
@@ -311,4 +299,21 @@ function Selo({
  */
 export function primeiraOracao(texto: string): string {
   return texto.split(/[;.](?=\s|$)/)[0].trim();
+}
+
+/** Selo "dado incompleto" colado no GMV; abre a confianca no dado. */
+function SeloAviso({ aviso }: { aviso: { texto: string; onOpen: () => void } }) {
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      onClick={aviso.onOpen}
+      title={aviso.texto}
+      aria-label={`Dado incompleto: ${primeiraOracao(aviso.texto)}. Ver confiança no dado`}
+      className="inline-flex min-h-8 items-center gap-1 rounded-full border border-warn/40 bg-warn-soft px-2.5 text-xs font-semibold text-warn-ink transition-colors hover:bg-warn-soft/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      <TriangleAlert aria-hidden="true" className="h-3.5 w-3.5" />
+      dado incompleto
+    </button>
+  );
 }

@@ -294,7 +294,8 @@ function GerencialInner() {
     }
     return mapa;
   }, [metaAplicavel, mesMeta, sources.brands.status.fresh, metaEscopo.porMarca, brands, hoje, ultimoDia]);
-  const decisoes = useMemo(() => topComerciais(queue.commercial), [queue.commercial]);
+  // Lista compacta (UI-DENSIDADE-1): cabem ate' 5 sinais no espaco que 3 cartoes ocupavam.
+  const decisoes = useMemo(() => topComerciais(queue.commercial, 5), [queue.commercial]);
   const avisoDeDado = avisoQueAfetaOGmv(queue.dataConfidence);
 
   // "Mais detalhes" comeca fechado; "Ver todos os sinais" abre e rola ate' la'.
@@ -400,7 +401,7 @@ function GerencialInner() {
   const highlightedChannel = dialog?.kind === "channelSeries" ? dialog.channel : null;
 
   return (
-    <div className="max-w-[1440px] mx-auto px-6 py-6 flex flex-col gap-4">
+    <div className="w-full px-4 py-4 flex flex-col gap-3">
       <GerencialHeader
         periodLabel={periodLabel}
         refreshedAt={sources.overview.refreshedAt}
@@ -578,7 +579,11 @@ function GerencialInner() {
         {dialog?.kind === "kpi" && overview && (
           <KpiDrilldownContent
             kind={dialog.key}
-            value={kpis.find((k) => k.key === dialog.key)?.value ?? "—"}
+            // O detalhe mostra o valor EXATO; o card, o curto (UI-DENSIDADE-1).
+            value={(() => {
+              const k = kpis.find((x) => x.key === dialog.key);
+              return k?.exactValue ?? k?.value ?? "—";
+            })()}
             comparacao={kpis.find((k) => k.key === dialog.key)}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { buildKpiBand, deltaPct } from "../src/lib/gerencial/kpi-band.ts";
+import { fmtBrlCurto, fmtNumCurto, fmtPctBr, fmtVezes } from "../src/lib/formatters.ts";
 import { suavizar, tendencia, tendenciasDosKpis, ticketPorPonto, totaisDaSerie } from "../src/lib/gerencial/kpi-trend.ts";
 import type { OverviewData } from "../src/lib/api-client.ts";
 import type { Marketplace } from "../src/lib/mock-data.ts";
@@ -57,8 +58,8 @@ test("ROAS compara por canal, nunca agregado", () => {
   assert.equal(roas.value, null);
   const ml = roas.channelValues!.find((c) => c.channel === "ml")!;
   const sh = roas.channelValues!.find((c) => c.channel === "shopee")!;
-  assert.deepEqual([ml.direction, ml.previous], ["down", "12.6x"]);
-  assert.deepEqual([sh.direction, sh.previous], ["up", "13.6x"]);
+  assert.deepEqual([ml.direction, ml.previous], ["down", "12,6x"]);
+  assert.deepEqual([sh.direction, sh.previous], ["up", "13,6x"]);
   const tk = roas.channelValues!.find((c) => c.channel === "tiktok")!;
   assert.equal(tk.direction ?? null, null);
 });
@@ -190,4 +191,39 @@ test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", (
   assert.equal(lisa.length, 8);
   assert.ok(lisa.every((v) => v > 95 && v < 105), "a serrilha some");
   assert.deepEqual(suavizar([1, 2, 3]), [1, 2, 3]);
+});
+
+test("numeros curtos em pt-BR (escolha: so' o numero curto)", () => {
+  assert.equal(fmtNumCurto(308_360), "308,4 mil");
+  assert.equal(fmtNumCurto(1_240_000), "1,24 mi");
+  assert.equal(fmtNumCurto(850), "850");
+  assert.equal(fmtBrlCurto(345_336.98), "R$ 345,3 mil");
+  assert.equal(fmtBrlCurto(19_607_780), "R$ 19,61 mi");
+  assert.equal(fmtBrlCurto(63.587), "R$ 63,59");
+  assert.equal(fmtPctBr(-11.13), "−11,1%");
+  assert.equal(fmtPctBr(3.55), "+3,6%");
+  assert.equal(fmtPctBr(0), "0,0%");
+  assert.equal(fmtVezes(12), "12,0x");
+  const k = porChave(buildKpiBand(overview(), ALL));
+  assert.equal(k.orders.value, "308,4 mil");
+  assert.equal(k.ad_spend.value, "R$ 345,3 mil");
+  assert.equal(k.orders.reference, "antes 333,6 mil");
+});
+
+test("fronteira de unidade: nunca \"1.000,0 mil\"", () => {
+  assert.equal(fmtNumCurto(999_960), "1,0 mi");
+  assert.equal(fmtNumCurto(999_400), "999,4 mil");
+  assert.equal(fmtNumCurto(999.6), "1,0 mil");
+  assert.equal(fmtBrlCurto(999_960), "R$ 1,00 mi");
+  assert.equal(fmtBrlCurto(999.999), "R$ 1,0 mil");
+  assert.equal(fmtBrlCurto(999_999_999), "R$ 1,00 bi");
+});
+
+test("o detalhe do card recebe o valor exato", () => {
+  const k = porChave(buildKpiBand(overview(), ALL));
+  assert.equal(k.orders.exactValue, "308.360");
+  // Intl poe espaco nao separavel entre "R$" e o numero.
+  assert.match(k.ad_spend.exactValue!, /^R\$\s345\.337$/);
+  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /return k\?\.exactValue \?\? k\?\.value \?\? "—";/);
 });

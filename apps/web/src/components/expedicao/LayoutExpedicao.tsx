@@ -41,7 +41,7 @@ export const CLASSE_CABECALHO =
  * painel (com `aria-busy`), e nao deste componente: o `main` e' do
  * AppShell e o teste de landmarks ancora na raiz do componente do canal.
  */
-export const CLASSE_RAIZ_EXPEDICAO = "mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4";
+export const CLASSE_RAIZ_EXPEDICAO = "flex w-full flex-col gap-3 p-4";
 
 /**
  * QA T-0010 (M4): os MESMOS textos de estado nos tres canais.

@@ -1,22 +1,42 @@
 "use client";
 
 /**
- * "O que pede decisao" (GERENCIAL-METAS-1): no maximo tres sinais comerciais,
- * por severidade, logo abaixo dos numeros. A fila completa continua inteira em
- * "Mais detalhes"; aqui fica so' o que merece a primeira olhada.
+ * "O que pede decisao" (GERENCIAL-METAS-1) — UI-DENSIDADE-1: LISTA COMPACTA,
+ * uma linha por sinal (escolha do proprietario). Cartoes altos e iguais davam
+ * o mesmo peso a tudo; a linha mostra o sinal, onde (marca e canal, ja' no
+ * titulo do contrato) e o numero que importa, e abre o detalhe no clique.
  *
- * O aviso de dado nao entra aqui: ele ja' aparece colado no GMV, no bloco
+ * O aviso de dado nao entra aqui: ele aparece colado no GMV, no bloco
  * principal, que e' onde muda a leitura.
  */
-import type { CommercialAttentionItem } from "@/lib/gerencial/attention";
+import { ChevronRight } from "lucide-react";
 
-// VISUAL-PALETA-1 — fundo levemente tingido + borda na cor da severidade,
-// como os cartoes de status do funil da Torre do Atacado.
-const PELE: Record<CommercialAttentionItem["severity"], { borda: string; tinta: string; rotulo: string }> = {
-  critical: { borda: "border-crit/30 border-t-crit bg-crit-soft/60", tinta: "text-crit-ink", rotulo: "Crítico" },
-  warning: { borda: "border-warn/35 border-t-warn bg-warn-soft/60", tinta: "text-warn-ink", rotulo: "Atenção" },
-  info: { borda: "border-accent/25 border-t-accent bg-accent-soft/60", tinta: "text-accent-ink", rotulo: "Informativo" },
+import type { CommercialAttentionItem } from "@/lib/gerencial/attention";
+import { fmtPctBr } from "@/lib/formatters";
+
+const PONTO: Record<CommercialAttentionItem["severity"], { cor: string; rotulo: string }> = {
+  critical: { cor: "bg-crit", rotulo: "Crítico" },
+  warning: { cor: "bg-warn", rotulo: "Atenção" },
+  info: { cor: "bg-accent", rotulo: "Informativo" },
 };
+
+/**
+ * O numero que importa no sinal, decidido pelo CONTRATO e nao pelo nome do
+ * tipo: alta/queda contra o periodo anterior mostra a variacao; sinal medido
+ * contra referencia do canal (mediana/p75) mostra o proprio valor — os sinais
+ * de eficiencia do resumo executivo sao percentuais (custo/GMV, frete/GMV).
+ * Sem numero confiavel, nada (nunca inventa).
+ */
+export function numeroDoSinal(
+  item: Pick<CommercialAttentionItem, "type" | "deltaPct" | "metricValue" | "referenceKind">,
+): string | null {
+  if (item.referenceKind === "previous_period" && item.deltaPct != null) return fmtPctBr(item.deltaPct);
+  if ((item.type === "growth" || item.type === "drop") && item.deltaPct != null) return fmtPctBr(item.deltaPct);
+  if (item.metricValue != null && (item.referenceKind === "p75" || item.referenceKind === "median")) {
+    return `${item.metricValue.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  }
+  return null;
+}
 
 interface Props {
   itens: CommercialAttentionItem[];
@@ -30,48 +50,49 @@ interface Props {
 export default function DecisoesTopo({ itens, total, loading, error, onOpen, onVerTodos }: Props) {
   if (error || (!loading && itens.length === 0)) return null;
   return (
-    <section aria-labelledby="decisoes-titulo" className="flex flex-col gap-2.5">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <section aria-labelledby="decisoes-titulo" className="rounded-xl border border-line bg-surface">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-1.5">
         <h2 id="decisoes-titulo" className="text-sm font-semibold text-ink">
           O que pede decisão
         </h2>
-        {!loading && (
-          <span className="text-xs text-ink-faint tabular-nums">
-            {itens.length} de {total}
-          </span>
-        )}
+        {!loading && <span className="text-xs text-ink-faint tabular-nums">{itens.length} de {total}</span>}
         {total > itens.length && (
           <button
             type="button"
             onClick={onVerTodos}
             className="ml-auto inline-flex min-h-11 items-center text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
-            Ver todos os sinais →
+            Ver todos →
           </button>
         )}
       </div>
       {loading && itens.length === 0 ? (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3" aria-hidden="true">
+        <div className="flex flex-col gap-2 p-3" aria-hidden="true">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="h-32 animate-pulse rounded-xl bg-raised motion-reduce:animate-none" />
+            <div key={i} className="h-9 animate-pulse rounded-lg bg-raised motion-reduce:animate-none" />
           ))}
         </div>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <ul className="divide-y divide-line">
           {itens.map((item) => {
-            const p = PELE[item.severity];
+            const p = PONTO[item.severity];
+            const numero = numeroDoSinal(item);
             return (
-              <li key={item.key} className={`card-hover flex flex-col gap-1.5 rounded-xl border border-t-[3px] p-4 ${p.borda}`}>
-                <span className={`text-xs font-bold uppercase tracking-wide ${p.tinta}`}>{p.rotulo}</span>
-                <h3 className="text-sm font-semibold leading-snug text-ink">{item.title}</h3>
-                {/* VISUAL-PALETA-1: a descricao vai para o detalhe; o titulo ja' diz o que e'. */}
+              <li key={item.key}>
                 <button
                   type="button"
                   aria-haspopup="dialog"
                   onClick={() => onOpen(item)}
-                  className="mt-auto inline-flex min-h-11 w-fit items-center text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="group flex min-h-11 w-full items-center gap-3 px-4 py-2 text-left transition-colors duration-200 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
                 >
-                  Ver detalhe →
+                  <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${p.cor}`} />
+                  <span className="sr-only">{p.rotulo}:</span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink">{item.title}</span>
+                  {numero && <span className="shrink-0 text-sm font-semibold text-ink tabular-nums">{numero}</span>}
+                  <ChevronRight
+                    aria-hidden="true"
+                    className="h-4 w-4 shrink-0 text-ink-faint transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                  />
                 </button>
               </li>
             );
