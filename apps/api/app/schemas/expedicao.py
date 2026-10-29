@@ -559,3 +559,109 @@ class ShopeeLdrResponse(BaseModel):
     alerts: list[ShopeeLdrAlerta] = Field(default_factory=list)
     #: `None` = nada publicado (ausencia), nunca uma fila de zeros.
     queue_by_flow: Optional[ShopeeFilaPorFluxo] = None
+
+
+# ---------------------------------------------------------------------------
+# T-0011 — Jornada de pedidos (contrato jornada v1)
+# ---------------------------------------------------------------------------
+# Rota ADITIVA: nada acima muda. Nomes em portugues, como no contrato.
+#
+# A API NUNCA manda percentual: so' `count` e `base`. Ausencia nao e' zero —
+# medida que a fonte nao publica sai `None` com `reason`.
+JornadaCanal = Literal["shopee", "mercadolivre", "tiktok"]
+JornadaStatus = Literal["ok", "partial", "unavailable", "disabled"]
+
+
+class JornadaEtapa(BaseModel):
+    """Etapa EXCLUSIVA. A soma das etapas de uma secao e' a `base` dela."""
+
+    key: str
+    label: str
+    count: int
+
+
+class JornadaSobreposicao(BaseModel):
+    """Recorte NAO somavel: subconjunto da base (ou da etapa `subconjunto_de`).
+
+    `count = None` com `reason` quando a fonte nao publica a medida — zero
+    afirmaria uma medicao que nao houve.
+    """
+
+    key: str
+    count: Optional[int]
+    subconjunto_de: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class JornadaFilaAberta(BaseModel):
+    grain: Literal["pedido", "shipment"]
+    #: `effective_at` da fotografia publicada.
+    snapshot_at: datetime
+    freshness: FreshnessStatus
+    #: COUNT(*) no servidor, base COMPLETA, com o filtro de marca.
+    base: int
+    etapas: list[JornadaEtapa]
+    #: `sum(etapas.count) == base`, conferido no servidor.
+    etapas_fecham: bool
+    sobreposicoes: list[JornadaSobreposicao]
+    limitacoes: list[str] = Field(default_factory=list)
+
+
+class JornadaJanela(BaseModel):
+    inicio: date
+    fim: date
+    dias: int
+
+
+class JornadaForaDaCoorte(BaseModel):
+    key: str
+    count: int
+
+
+class JornadaMaturidade(BaseModel):
+    dias_maduros: int
+    dias_imaturos: int
+
+
+class JornadaCoorte(BaseModel):
+    eixo: Literal["paid_date", "deadline_date"]
+    evento: Literal["despacho", "coleta"]
+    janela: JornadaJanela
+    #: Soma de todas as etapas (= pagos brutos no TikTok; = pagos no eixo Shopee),
+    #: somada no servidor de forma INDEPENDENTE das etapas.
+    base: int
+    etapas: list[JornadaEtapa]
+    etapas_fecham: bool
+    sobreposicoes: list[JornadaSobreposicao]
+    fora_da_coorte: list[JornadaForaDaCoorte] = Field(default_factory=list)
+    maturidade: JornadaMaturidade
+    #: `max(effective_at)` das linhas da janela (sem filtro de marca), ou `None`.
+    publicado_em: Optional[datetime] = None
+    #: `max(source_watermark_at)` das linhas da janela com o filtro de marca (o
+    #: watermark e' por conta); marca sem linha na janela usa o do canal.
+    #: `None` = a publicacao nao registra leitura da fonte.
+    fonte_lida_em: Optional[datetime] = None
+    #: Mesma regra da rota irma. `/shopee/ldr` (`snapshot.stale`): publicacao
+    #: velha, fonte velha OU fonte sem carimbo. `/tiktok` (alerta
+    #: `fotografia_velha`): so' a publicacao. Leva o `status` a no minimo
+    #: `partial`, e a limitacao diz qual foi a causa.
+    desatualizada: bool = False
+    limitacoes: list[str] = Field(default_factory=list)
+
+
+class JornadaResponse(BaseModel):
+    channel: JornadaCanal
+    status: JornadaStatus
+    reason: Optional[str] = None
+    #: Marcas aplicadas, normalizadas (minusculas, sem repeticao). `[]` = todas.
+    brands_applied: list[str] = Field(default_factory=list)
+    generated_at: datetime
+    #: `None` quando o canal nao tem fila em grao de pedido (TikTok) ou a fonte
+    #: esta ausente.
+    fila_aberta: Optional[JornadaFilaAberta] = None
+    #: `None` quando o canal nao tem coorte (ML; Shopee sem LDR) ou a fonte
+    #: esta ausente.
+    coorte: Optional[JornadaCoorte] = None
+    #: Limitacoes do CANAL que nao cabem numa secao — sobretudo a de uma secao
+    #: `None` (ex.: "o Mercado Livre nao publica prazo de despacho").
+    limitacoes: list[str] = Field(default_factory=list)

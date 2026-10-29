@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.expedicao import (
     ExpedicaoResponse,
+    JornadaResponse,
     ShopeeLdrResponse,
     TendenciaResponse,
     TikTokDispatchResponse,
@@ -218,3 +219,56 @@ def shopee_ldr(
         # Flag off: nem a sessao de banco e' exigida.
         return shopee_ldr_svc.obter_ldr(None, dias=days, brands=brands)
     return shopee_ldr_svc.obter_ldr(_require_db(db), dias=days, brands=brands)
+
+
+# ---------------------------------------------------------------------------
+# T-0011 — Jornada de pedidos (contrato jornada v1)
+# ---------------------------------------------------------------------------
+_MSG_CANAL_JORNADA = "Canal invalido. Valores aceitos: " + ", ".join(
+    sorted(svc.JORNADA_CANAIS))
+_MSG_EVENTO_JORNADA = (
+    "Evento invalido. Valores aceitos: coleta, despacho (despacho so' no tiktok).")
+
+
+@router.get("/jornada", response_model=JornadaResponse)
+def jornada(
+    channel: str = Query(
+        ..., description="Canal: shopee, mercadolivre ou tiktok (allowlist)."),
+    brands: Optional[list[str]] = Depends(brands_query),
+    days: int = Query(
+        svc.JORNADA_DIAS_PADRAO,
+        description="Janela da coorte em dias FECHADOS (Brasilia), terminando "
+                    "ontem: 1-35 (Shopee) ou 1-90 (TikTok). Ignorado no "
+                    "Mercado Livre, que nao tem coorte."),
+    event: str = Query(
+        svc.JORNADA_EVENTO_PADRAO,
+        description="`coleta` (padrao) ou `despacho` (so' TikTok; a Shopee e' "
+                    "sempre coleta)."),
+    db: Session = Depends(get_db),
+):
+    """Jornada do pedido: fila aberta + coorte, agregadas NO SERVIDOR.
+
+    Etapas sao exclusivas e somam a base (conferido; se nao fechar, `partial`).
+    Sobreposicoes nunca entram na soma. Nunca ha percentual: so' `count` e
+    `base`. Ausencia de medida sai `null` com `reason`, nunca zero.
+    """
+    # Mensagens FIXAS: a entrada do cliente nunca e' ecoada num erro.
+    if channel not in svc.JORNADA_CANAIS:
+        raise HTTPException(422, _MSG_CANAL_JORNADA)
+    # ML nao tem coorte: `days` e' IGNORADO, nao validado (contrato v1.1 §3.1.6).
+    if channel in svc.JORNADA_DIAS_MAX and not 1 <= days <= svc.JORNADA_DIAS_MAX[channel]:
+        raise HTTPException(
+            422, f"Janela invalida. Informe entre 1 e "
+                 f"{svc.JORNADA_DIAS_MAX[channel]} dias.")
+    try:
+        evento = tiktok_svc.resolver_evento(event)
+    except tiktok_svc.EventoInvalido:
+        raise HTTPException(422, _MSG_EVENTO_JORNADA) from None
+    if channel != "tiktok" and evento != "coleta":
+        raise HTTPException(422, _MSG_EVENTO_JORNADA)
+    if not svc.jornada_habilitada(channel):
+        # Flag off: nem a sessao de banco e' exigida.
+        return svc.get_jornada(None, channel=channel, brands=brands, dias=days,
+                               evento=evento)
+    return svc.get_jornada(_require_db(db), channel=channel, brands=brands,
+                           dias=days, evento=evento)

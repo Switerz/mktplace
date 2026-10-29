@@ -33,8 +33,8 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Optional, get_args
 
 from sqlalchemy import text
 
@@ -44,7 +44,10 @@ from app.schemas.expedicao import (
     UNAVAILABLE_DISABLED,
     UNAVAILABLE_INCONSISTENT_BATCH,
     UNAVAILABLE_NO_SNAPSHOT,
+    DeadlineStatus,
 )
+from app.services import expedicao_shopee_ldr_service as shopee_ldr_svc
+from app.services import expedicao_tiktok_service as tiktok_svc
 
 CHECK_FRESHNESS = "expedicao_source_freshness"
 
@@ -781,3 +784,621 @@ def get_tendencia(db, *, channel: Optional[str] = None,
         "truncated": truncado,
         "limitations": _limitacoes(canal, None),
     }
+
+
+# ---------------------------------------------------------------------------
+# T-0011 — Jornada de pedidos (contrato jornada v1)
+# ---------------------------------------------------------------------------
+# Uma resposta por canal com DUAS secoes de grao diferente, que nunca se somam:
+#
+#   fila_aberta  fotografia AGORA (`expedicao_fila_atual`), grao pedido/shipment;
+#   coorte       agregado por dia (TikTok: pagamento; Shopee: vencimento).
+#
+# TODA contagem sai de `count`/`sum` no SERVIDOR sobre a base completa, com o
+# filtro de marca aplicado tambem aos totais. A soma das etapas e' CONFERIDA
+# contra uma base somada de forma independente; se nao fechar, a resposta vira
+# `partial` com o motivo e os numeros ficam como estao — consertar a soma
+# esconderia justamente o defeito que a conferencia existe para mostrar.
+#
+# FLAGS (sem flag nova):
+#   * `expedicao_api_enabled` para tudo;
+#   * ML exige tambem `expedicao_ml_api_enabled` (`canal_habilitado`);
+#   * coorte Shopee exige `expedicao_shopee_ldr_api_enabled`
+#     (`shopee_ldr_svc.habilitado`); desligada -> coorte `None` + limitacao;
+#   * TikTok: `GET /tiktok` NAO tem flag de API (so' confere a tabela com
+#     `to_regclass`). Aqui vale a regra geral do contrato — `expedicao_api_enabled`
+#     — e nenhuma flag propria, como na `/tiktok`.
+JORNADA_CANAIS = ("shopee", "mercadolivre", "tiktok")
+JORNADA_DIAS_PADRAO = 7
+#: Teto da janela por canal: o mesmo das rotas irmas. O ML nao tem coorte e
+#: fica FORA: no ML `days` e' ignorado, nao validado (contrato v1.1 §3.1.6).
+JORNADA_DIAS_MAX = {
+    "shopee": shopee_ldr_svc.JANELA_MAX_DIAS,
+    "tiktok": tiktok_svc.JANELA_MAX_DIAS,
+}
+JORNADA_EVENTO_PADRAO = "coleta"
+
+#: Dominio de `deadline_status` (o mesmo CHECK da 018). A etapa unica da fila
+#: aberta conta as linhas cujo status esta no dominio publicado.
+_STATUS_DE_PRAZO = get_args(DeadlineStatus)
+
+#: Pior frescor entre as marcas filtradas. `unknown` fica acima de `stale`: nao
+#: da para afirmar que a fonte esta so' atrasada.
+_ORDEM_FRESCOR = {"fresh": 0, "stale": 1, "unknown": 2, "critical": 3}
+
+_GRAVIDADE_STATUS = {"ok": 0, "partial": 1, "unavailable": 2}
+
+LIMITACAO_ML_SEM_PRAZO = "o Mercado Livre não publica prazo de despacho"
+LIMITACOES_FILA = {
+    "shopee": [
+        "etapa interna (a preparar × envio organizado) não publicada na fila",
+        "FBS não separado na fila aberta",
+    ],
+    "mercadolivre": [
+        "substatus do shipment não publicado na fila",
+        "Full (fulfillment) fora da fila por contrato",
+    ],
+}
+LIMITACAO_TIKTOK_SEM_FILA = (
+    "o TikTok não publica fila aberta em grão de pedido; só a coorte diária")
+LIMITACAO_TIKTOK_PRAZO = (
+    "prazo reconstruído da política de dias úteis; não é o SLA oficial do TikTok")
+LIMITACAO_SHOPEE_LDR_DESLIGADA = (
+    "coorte Shopee (LDR operacional) desligada: expedicao_shopee_ldr_api_enabled")
+LIMITACAO_SHOPEE_NAO_OFICIAL = (
+    "indicador operacional interno: não é o índice oficial de Account Health "
+    "da Shopee")
+LIMITACAO_COORTE_IMATURA = "dias imaturos ainda podem mudar"
+
+
+class _FiltroMarca:
+    """O MESMO predicado de marca nos tres canais, sempre no servidor.
+
+    Comparacao case-insensitive: a entrada e' normalizada aqui e a coluna com
+    `lower()` no SQL. Lista vazia = todas as marcas (nenhum predicado).
+    """
+
+    def __init__(self, marcas: list[str]):
+        self.marcas = marcas
+
+    def sql(self, coluna: str = "brand") -> str:
+        return f" AND lower({coluna}) = ANY(:marcas)" if self.marcas else ""
+
+    def params(self) -> dict:
+        return {"marcas": self.marcas} if self.marcas else {}
+
+
+def normalizar_marcas(brands: Optional[list[str]]) -> list[str]:
+    """Minusculas, sem espaco nas pontas, sem repeticao, ordenadas."""
+    return sorted({b.strip().lower() for b in (brands or []) if b and b.strip()})
+
+
+def jornada_habilitada(channel: str) -> bool:
+    """A rota inteira esta ligada para o canal? Nao consulta o banco."""
+    if not habilitado():
+        return False
+    if channel == "mercadolivre":
+        return canal_habilitado(CANAIS["mercadolivre"])
+    return True
+
+
+def _tabelas_existem(db, *tabelas: str) -> bool:
+    for t in tabelas:
+        ok = db.execute(text("SELECT to_regclass(:t) IS NOT NULL AS ok"),
+                        {"t": t}).scalar()
+        if ok is not True:
+            return False
+    return True
+
+
+def _janela_coorte(dias: int, agora: datetime) -> tuple[date, date]:
+    """Dias FECHADOS em data de Brasilia: termina ontem, `dias` datas.
+
+    Exemplo do contrato: gerado em 26/10 com `days=7` -> 19/10 a 25/10. O dia
+    de hoje fica fora porque ainda nao terminou de acontecer.
+    """
+    hoje = tiktok_svc._hoje_brt(agora)
+    fim = hoje - timedelta(days=1)
+    return fim - timedelta(days=dias - 1), fim
+
+
+def _confere(base: int, etapas: list[dict], sobreposicoes: list[dict],
+             secao: str) -> tuple[bool, list[str]]:
+    """Soma das etapas == base; sobreposicao cabe no conjunto de que e' parte.
+
+    So' CONFERE. Nunca ajusta numero.
+    """
+    motivos: list[str] = []
+    soma = sum(e["count"] for e in etapas)
+    fecham = soma == base
+    if not fecham:
+        motivos.append(f"{secao}: etapas_nao_fecham (soma {soma} != base {base})")
+    por_etapa = {e["key"]: e["count"] for e in etapas}
+    for s in sobreposicoes:
+        if s["count"] is None:
+            continue
+        pai = s.get("subconjunto_de")
+        teto = por_etapa.get(pai, base) if pai else base
+        if s["count"] > teto:
+            motivos.append(
+                f"{secao}: sobreposicao_{s['key']}_excede ({s['count']} > {teto})")
+    return fecham, motivos
+
+
+# ----- fila aberta (Shopee, ML) --------------------------------------------
+_FILA_SOBREPOSICOES = (
+    # chave da jornada -> predicado ja' escrito em SITUACAO_SQL (sem duplicar).
+    ("vencido", "overdue"),
+    ("vence_24h", "due_within_24h"),
+    ("sem_prazo", "deadline_unavailable"),
+    ("acima_48h", "over_48h"),
+    ("travado", "stalled"),
+    ("lento", "slow"),
+    ("zumbi_fonte", "zombie"),
+)
+#: Sobreposicoes que dependem de prazo: no ML a fonte nao publica prazo, entao
+#: elas saem `None` + motivo, nunca 0.
+_SOBREPOSICOES_DE_PRAZO = ("vencido", "vence_24h")
+
+#: Contagens do resumo por conta (018). Fotografia vazia = TODAS zeradas.
+_MEDIDAS_RESUMO = ("backlog_count", "overdue_count", "due_within_24h_count",
+                   "on_time_count", "deadline_unavailable_count", "over_48h_count",
+                   "slow_count", "zombie_count", "stalled_count")
+
+
+def _fila_vazia_publicada(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]:
+    """Fila sem linha: o ULTIMO lote do resumo prova uma fotografia vazia?
+
+    O publicador grava a fotografia vazia como fila limpa + um resumo por conta
+    com tudo zerado, na MESMA transacao (`pipelines/expedicao/cli.py`, desfecho
+    "fonte saudavel e vazia"). Entao:
+
+    * nenhum resumo do canal          -> nunca publicou: `no_snapshot_published`;
+    * ultimo lote todo zerado         -> vazio COMPROVADO: snapshot com 0 linhas;
+    * ultimo lote com pedido no resumo -> fila apagada por fora ou lote partido:
+      `inconsistent_batch` com o tamanho do buraco. Nunca vira zero.
+
+    O ultimo lote e' o de maior `observed_at`; mais de um lote, hora ou
+    instante nesse topo e' a mesma falha fechada de `_carregar_snapshot`.
+    """
+    resumos = _linhas(db, f"""
+        SELECT shop_account, brand, {", ".join(_MEDIDAS_RESUMO)},
+               run_status, source_watermark_at, source_advanced, snapshot_hour,
+               observed_at, refresh_batch_id
+        FROM {RUN}
+        WHERE channel = :canal
+          AND observed_at = (SELECT max(observed_at) FROM {RUN} WHERE channel = :canal)
+        ORDER BY brand, shop_account
+    """, {"canal": canal.slug})
+    if not resumos:
+        return None, UNAVAILABLE_NO_SNAPSHOT
+    if (len({r["refresh_batch_id"] for r in resumos}) != 1
+            or len({r["snapshot_hour"] for r in resumos}) != 1):
+        return None, UNAVAILABLE_INCONSISTENT_BATCH
+    pendentes = sum(int(r["backlog_count"]) for r in resumos)
+    if any(int(r[m]) for r in resumos for m in _MEDIDAS_RESUMO):
+        return None, (f"{UNAVAILABLE_INCONSISTENT_BATCH} (fila vazia, mas o resumo "
+                      f"do ultimo lote tem {pendentes} pedido(s) no backlog)")
+    return {"batch": resumos[0]["refresh_batch_id"],
+            "effective_at": resumos[0]["observed_at"],
+            "linhas": 0, "resumos": resumos}, None
+
+
+def _fila_aberta(db, channel: str,
+                 filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
+    """(secao, motivos, estado). `None` quando a fonte nao serve fotografia."""
+    canal = CANAIS[channel]
+    if not _tabelas_existem(db, FILA, RUN):
+        return None, ["fila_aberta: table_not_migrated"], "unavailable"
+    snap, motivo = _carregar_snapshot(db, canal)
+    if snap is None and motivo == UNAVAILABLE_NO_SNAPSHOT:
+        # Fila sem linha nenhuma: ausencia OU fotografia vazia publicada. Quem
+        # desempata e' o resumo do ultimo lote, nunca a fila (`_carregar_snapshot`
+        # fica como esta': as rotas irmas dependem dele).
+        snap, motivo = _fila_vazia_publicada(db, canal)
+    if snap is None:
+        return None, [f"fila_aberta: {motivo or UNAVAILABLE_NO_SNAPSHOT}"], "unavailable"
+
+    dominio = ", ".join(f"'{s}'" for s in _STATUS_DE_PRAZO)
+    colunas = ",\n               ".join(
+        f"count(*) FILTER (WHERE {SITUACAO_SQL[sit]}) AS {chave}"
+        for chave, sit in _FILA_SOBREPOSICOES)
+    linha = _linhas(db, f"""
+        SELECT count(*) AS base,
+               count(*) FILTER (WHERE deadline_status IN ({dominio}))
+                   AS aguardando_expedicao,
+               {colunas}
+        FROM {FILA}
+        WHERE channel = :canal AND refresh_batch_id = :batch{filtro.sql()}
+    """, {"canal": canal.slug, "batch": snap["batch"], **filtro.params()})[0]
+
+    base = int(linha["base"])
+    etapas = [{"key": "aguardando_expedicao", "label": "Aguardando expedição",
+               "count": int(linha["aguardando_expedicao"])}]
+    sobreposicoes = []
+    for chave, _sit in _FILA_SOBREPOSICOES:
+        if channel == "mercadolivre" and chave in _SOBREPOSICOES_DE_PRAZO:
+            sobreposicoes.append({"key": chave, "count": None,
+                                  "reason": LIMITACAO_ML_SEM_PRAZO})
+        else:
+            sobreposicoes.append({"key": chave, "count": int(linha[chave])})
+    fecham, motivos = _confere(base, etapas, sobreposicoes, "fila_aberta")
+
+    resumos = [r for r in snap["resumos"]
+               if not filtro.marcas or str(r["brand"]).lower() in filtro.marcas]
+    frescores = [f["freshness"] for f in
+                 _monta_frescor(_frescor(db, canal), resumos, snap["effective_at"])]
+    # Valor fora do dominio (auditoria antiga, typo) vale `unknown`: nem KeyError
+    # (500), nem um Literal invalido na resposta.
+    frescores = [f if f in _ORDEM_FRESCOR else "unknown" for f in frescores]
+    frescor = max(frescores, key=lambda f: _ORDEM_FRESCOR.get(
+        f, _ORDEM_FRESCOR["unknown"])) if frescores else "unknown"
+
+    secao = {
+        "grain": "shipment" if channel == "mercadolivre" else "pedido",
+        "snapshot_at": snap["effective_at"],
+        "freshness": frescor,
+        "base": base,
+        "etapas": etapas,
+        "etapas_fecham": fecham,
+        "sobreposicoes": sobreposicoes,
+        "limitacoes": list(LIMITACOES_FILA[channel]),
+    }
+    return secao, motivos, "partial" if motivos else "ok"
+
+
+# ----- coorte (TikTok, Shopee LDR) -----------------------------------------
+#: Colunas por evento do TikTok. ALLOWLIST: o evento do cliente so' escolhe uma
+#: entrada daqui, nunca vira nome de coluna. Atencao a concordancia
+#: (`coleta_atrasada`, `coleta_pendente_vencida`).
+_TIKTOK_COLUNAS = {
+    "despacho": {
+        "cancelado": "despacho_cancelado_antes_sla",
+        "no_prazo": "despacho_no_prazo",
+        "atrasado": "despacho_atrasado",
+        "pend_vencido": "despacho_pendente_vencido",
+        "pend_no_prazo": "despacho_pendente_no_prazo",
+        "madura": "despacho_is_mature",
+    },
+    "coleta": {
+        "cancelado": "coleta_cancelado_antes_sla",
+        "no_prazo": "coleta_no_prazo",
+        "atrasado": "coleta_atrasada",
+        "pend_vencido": "coleta_pendente_vencida",
+        "pend_no_prazo": "coleta_pendente_no_prazo",
+        "madura": "coleta_is_mature",
+    },
+}
+_ROTULO_CONCLUIDO = {"despacho": "Despachado", "coleta": "Coletado"}
+
+
+def _agrega_coorte(db, *, tabela: str, canal: str, eixo: str, colunas: dict,
+                   inicio: date, fim: date, filtro: _FiltroMarca) -> dict:
+    """Um SELECT: base e etapas somadas SEPARADAMENTE, mais a maturidade.
+
+    `linhas_canal` conta o canal na janela SEM o filtro de marca: distingue
+    "nada publicado" (ausencia) de "a marca filtrada nao tem pedido" (zero).
+    `dias_publicados` e `publicado_em` usam o MESMO criterio (sem marca): dia
+    sem publicacao e publicacao velha sao propriedades da fonte, nao da marca.
+
+    `fonte_lida_em` e' a excecao, e de proposito: o watermark e' POR CONTA (o
+    publicador grava o da conta lida), e a `/shopee/ldr` com filtro de marca
+    mede so' as linhas da marca. Conta parada nao pode ser escondida pela conta
+    fresca de outra marca. So' quando a marca nao tem linha na janela (nada a
+    medir dela) vale o watermark do canal.
+    """
+    sel = ",\n                   ".join(
+        f"{expr} AS {nome}" for nome, expr in colunas.items())
+    soma = ",\n               ".join(
+        f"coalesce(sum({nome}), 0) AS {nome}" for nome in colunas if nome != "madura")
+    linha = _linhas(db, f"""
+        WITH c AS (
+            SELECT {eixo} AS eixo,
+                   source_watermark_at AS wm,
+                   {sel}
+            FROM {tabela}
+            WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim{filtro.sql()}
+        ), dias AS (
+            SELECT eixo, bool_and(madura) AS madura FROM c GROUP BY eixo
+        )
+        SELECT {soma},
+               (SELECT count(*) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS linhas_canal,
+               (SELECT count(DISTINCT {eixo}) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS dias_publicados,
+               (SELECT max(effective_at) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS publicado_em,
+               (SELECT count(*) FROM c) AS linhas_marca,
+               (SELECT max(wm) FROM c) AS fonte_marca,
+               (SELECT max(source_watermark_at) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS fonte_canal,
+               (SELECT count(*) FROM dias WHERE madura) AS dias_maduros,
+               (SELECT count(*) FROM dias WHERE NOT madura) AS dias_imaturos
+        FROM c
+    """, {"canal": canal, "inicio": inicio, "fim": fim, **filtro.params()})[0]
+    # Mesma regra da `/shopee/ldr`: o MAIS RECENTE watermark das linhas lidas;
+    # nenhum carimbo nelas -> `None` (fonte sem carimbo), nunca o do canal.
+    linha["fonte_lida_em"] = (linha["fonte_marca"] if linha["linhas_marca"]
+                              else linha["fonte_canal"])
+    return linha
+
+
+def _coorte_tiktok(db, evento: str, dias: int, agora: datetime,
+                   filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
+    if not _tabelas_existem(db, tiktok_svc.TABELA):
+        return None, [f"coorte: {tiktok_svc.UNAVAILABLE_NOT_MIGRATED}"], "unavailable"
+    inicio, fim = _janela_coorte(dias, agora)
+    c = _TIKTOK_COLUNAS[evento]
+    a = _agrega_coorte(db, tabela=tiktok_svc.TABELA, canal=tiktok_svc.CANAL,
+                       eixo="paid_date", inicio=inicio, fim=fim, filtro=filtro,
+                       colunas={
+                           "base": "pedidos_pagos_brutos",
+                           "fora_amostra": "amostras_excluidas",
+                           "cancelado_antes": c["cancelado"],
+                           "aguardando": f"{c['pend_vencido']} + {c['pend_no_prazo']}",
+                           "concluido": f"{c['no_prazo']} + {c['atrasado']}",
+                           "aguardando_vencido": c["pend_vencido"],
+                           "concluido_atrasado": c["atrasado"],
+                           "madura": c["madura"],
+                       })
+    if not a["linhas_canal"]:
+        return None, [f"coorte: {tiktok_svc.UNAVAILABLE_NO_DATA}"], "unavailable"
+    etapas = [
+        {"key": "fora_amostra", "label": "Amostra grátis (fora)",
+         "count": int(a["fora_amostra"])},
+        {"key": "cancelado_antes", "label": "Cancelado antes do prazo",
+         "count": int(a["cancelado_antes"])},
+        {"key": "aguardando", "label": f"Aguardando {evento}",
+         "count": int(a["aguardando"])},
+        {"key": "concluido", "label": _ROTULO_CONCLUIDO[evento],
+         "count": int(a["concluido"])},
+    ]
+    return _monta_coorte(a, etapas, eixo="paid_date", evento=evento,
+                         inicio=inicio, fim=fim, dias=dias, fora=[],
+                         limitacoes=[LIMITACAO_TIKTOK_PRAZO], agora=agora,
+                         desatualizada=_tiktok_velha)
+
+
+def _coorte_shopee(db, dias: int, agora: datetime,
+                   filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
+    if not _tabelas_existem(db, shopee_ldr_svc.TABELA, shopee_ldr_svc.TABELA_SEM_PRAZO):
+        return None, [f"coorte: {shopee_ldr_svc.UNAVAILABLE_NOT_MIGRATED}"], "unavailable"
+    inicio, fim = _janela_coorte(dias, agora)
+    a = _agrega_coorte(db, tabela=shopee_ldr_svc.TABELA, canal=shopee_ldr_svc.CANAL,
+                       eixo="deadline_date", inicio=inicio, fim=fim, filtro=filtro,
+                       colunas={
+                           "base": "pedidos_pagos",
+                           "fora_fbs": "excl_fbs",
+                           "cancelado_antes": "excl_cancelado_sem_coleta",
+                           "enviado_sem_registro": "excl_enviado_sem_coleta",
+                           "aguardando": "pendente_vencido + pendente_no_prazo",
+                           "concluido": "no_prazo + atrasado",
+                           "aguardando_vencido": "pendente_vencido",
+                           "concluido_atrasado": "atrasado",
+                           "madura": "is_mature",
+                       })
+    if not a["linhas_canal"]:
+        return None, [f"coorte: {shopee_ldr_svc.UNAVAILABLE_NO_DATA}"], "unavailable"
+    # Pedido sem `ship_by` nao tem dia de vencimento: fica FORA da coorte, na
+    # tabela propria, pela data de PAGAMENTO na mesma faixa de datas.
+    sem_prazo = _linhas(db, f"""
+        SELECT coalesce(sum(sem_prazo), 0) AS n
+        FROM {shopee_ldr_svc.TABELA_SEM_PRAZO}
+        WHERE channel = :canal AND paid_date BETWEEN :inicio AND :fim{filtro.sql()}
+    """, {"canal": shopee_ldr_svc.CANAL, "inicio": inicio, "fim": fim,
+          **filtro.params()})[0]["n"]
+    etapas = [
+        {"key": "fora_fbs", "label": "FBS (despachado pela Shopee)",
+         "count": int(a["fora_fbs"])},
+        {"key": "cancelado_antes", "label": "Cancelado sem coleta",
+         "count": int(a["cancelado_antes"])},
+        {"key": "enviado_sem_registro", "label": "Enviado sem registro de coleta",
+         "count": int(a["enviado_sem_registro"])},
+        {"key": "aguardando", "label": "Aguardando coleta",
+         "count": int(a["aguardando"])},
+        {"key": "concluido", "label": "Coletado", "count": int(a["concluido"])},
+    ]
+    return _monta_coorte(a, etapas, eixo="deadline_date", evento="coleta",
+                         inicio=inicio, fim=fim, dias=dias,
+                         fora=[{"key": "sem_prazo", "count": int(sem_prazo)}],
+                         limitacoes=[LIMITACAO_SHOPEE_NAO_OFICIAL], agora=agora,
+                         desatualizada=_shopee_ldr_velha)
+
+
+# ----- frescor da coorte: o MESMO limite das rotas irmas, sem redigitar ------
+# Cada regra devolve os SINTOMAS (codigo, limitacao); lista vazia = em dia. O
+# codigo vira `coorte: <codigo>` no `reason`, e a limitacao diz qual foi a causa.
+def _idade_h(instante: datetime, agora: datetime) -> float:
+    return (agora - instante).total_seconds() / 3600.0
+
+
+def _shopee_ldr_velha(publicado_em: datetime, fonte_lida_em: Optional[datetime],
+                      agora: datetime) -> list[tuple[str, str]]:
+    """`snapshot.stale` da `/shopee/ldr`, sintoma por sintoma.
+
+    A LDR calcula `stale` dentro de `obter_ldr` (nao ha funcao para chamar):
+    `idade > LIMITE or idade_fonte is None or idade_fonte > LIMITE`, com o
+    `LIMITE_FOTOGRAFIA_HORAS` importado de la'. Sao os tres ramos abaixo, na
+    mesma ordem. Publicacao recente sobre fonte parada E' velha: reprocessar
+    dado antigo nao torna o numero atual.
+    """
+    limite = shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
+    sintomas = []
+    if _idade_h(publicado_em, agora) > limite:
+        sintomas.append(("publicacao_desatualizada",
+                         f"publicação de {_brt_texto(publicado_em)} ainda não atualizada"))
+    if fonte_lida_em is None:
+        sintomas.append(("fonte_sem_carimbo",
+                         "a publicação não registra leitura da fonte; não dá para "
+                         "afirmar que os números são atuais"))
+    elif _idade_h(fonte_lida_em, agora) > limite:
+        sintomas.append(("fonte_desatualizada",
+                         f"a fonte não recebe dado novo desde "
+                         f"{_brt_texto(fonte_lida_em)}; os números não são atuais"))
+    return sintomas
+
+
+#: Entrada NEUTRA para os alertas da `/tiktok`: nenhum alerta de taxa, pendente
+#: ou marca dispara, sobra so' o de frescor.
+_LDR_NEUTRA = {"above_target": False, "rate": None, "daily": [],
+               "pending_overdue": 0, "pending_at_risk": 0}
+
+
+def _tiktok_fotografia_velha(publicado_em: datetime, agora: datetime) -> bool:
+    """Regra do alerta `fotografia_velha` da `/tiktok`, chamada e nao copiada.
+
+    O limite vive como literal dentro de `tiktok_svc._alertas`; redigita-lo
+    aqui deixaria as duas rotas discordarem no dia em que ele mudar.
+    """
+    alertas = tiktok_svc._alertas(ldr=_LDR_NEUTRA, marcas=[], evento="coleta",
+                                  effective_at=publicado_em, agora=agora)
+    return any(a["code"] == "fotografia_velha" for a in alertas)
+
+
+def _tiktok_velha(publicado_em: datetime, fonte_lida_em: Optional[datetime],
+                  agora: datetime) -> list[tuple[str, str]]:
+    """So' a idade da PUBLICACAO, como a `/tiktok`.
+
+    `fonte_lida_em` e' ignorado de proposito: o alerta `fotografia_velha` da
+    rota irma nao olha `source_watermark_at` (so' `effective_at`). Considera-lo
+    aqui faria a jornada chamar de velha uma coorte que a `/tiktok` serve como
+    atual; a lacuna, se for lacuna, e' da rota irma e muda la' primeiro.
+    """
+    if _tiktok_fotografia_velha(publicado_em, agora):
+        return [("publicacao_desatualizada",
+                 f"publicação de {_brt_texto(publicado_em)} ainda não atualizada")]
+    return []
+
+
+def _brt_texto(instante: datetime) -> str:
+    local = instante.astimezone(timezone.utc) + tiktok_svc.BRT
+    return local.strftime("%d/%m/%Y %H:%M") + " (Brasília)"
+
+
+def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
+                  inicio: date, fim: date, dias: int, fora: list[dict],
+                  limitacoes: list[str], agora: datetime,
+                  desatualizada) -> tuple[dict, list[str], str]:
+    base = int(a["base"])
+    limitacoes = list(limitacoes)
+    sobreposicoes = [
+        {"key": "aguardando_vencido", "count": int(a["aguardando_vencido"]),
+         "subconjunto_de": "aguardando"},
+        {"key": "concluido_atrasado", "count": int(a["concluido_atrasado"]),
+         "subconjunto_de": "concluido"},
+    ]
+    fecham, motivos = _confere(base, etapas, sobreposicoes, "coorte")
+    imaturos = int(a["dias_imaturos"])
+
+    # Dia sem publicacao NAO e' dia de zero pedidos: os totais ficam como
+    # estao, mas a resposta deixa de ser `ok` e diz quantos dias faltam.
+    faltam = dias - int(a["dias_publicados"])
+    if faltam > 0:
+        motivos.append(f"coorte: dias_sem_publicacao ({faltam})")
+        limitacoes.append(f"{faltam} dia(s) da janela sem publicação; os totais "
+                          f"não cobrem a janela inteira")
+
+    publicado_em = a["publicado_em"]
+    fonte_lida_em = a["fonte_lida_em"]
+    if publicado_em is None:
+        sintomas = [("publicacao_desatualizada",
+                     "publicação de data desconhecida ainda não atualizada")]
+    else:
+        sintomas = desatualizada(publicado_em, fonte_lida_em, agora)
+    velha = bool(sintomas)
+    for codigo, texto in sintomas:
+        motivos.append(f"coorte: {codigo}")
+        limitacoes.append(texto)
+
+    secao = {
+        "eixo": eixo,
+        "evento": evento,
+        "janela": {"inicio": inicio, "fim": fim, "dias": dias},
+        "base": base,
+        "etapas": etapas,
+        "etapas_fecham": fecham,
+        "sobreposicoes": sobreposicoes,
+        "fora_da_coorte": fora,
+        "maturidade": {"dias_maduros": int(a["dias_maduros"]),
+                       "dias_imaturos": imaturos},
+        "publicado_em": publicado_em,
+        "fonte_lida_em": fonte_lida_em,
+        "desatualizada": velha,
+        "limitacoes": limitacoes + ([LIMITACAO_COORTE_IMATURA] if imaturos else []),
+    }
+    return secao, motivos, "partial" if motivos else "ok"
+
+
+def _agora() -> datetime:
+    """Relogio da rota. Funcao propria para o teste HTTP fixar o instante."""
+    return datetime.now(timezone.utc)
+
+
+def get_jornada(
+    db,
+    *,
+    channel: str,
+    brands: Optional[list[str]] = None,
+    dias: int = JORNADA_DIAS_PADRAO,
+    evento: str = JORNADA_EVENTO_PADRAO,
+    agora: Optional[datetime] = None,
+) -> dict:
+    """Jornada do canal: fila aberta + coorte, contadas no servidor.
+
+    A borda ja' validou canal, marcas, janela e evento. Com a rota desligada
+    devolve `disabled` SEM tocar em `db` (pode ser `None`).
+
+    `status` e' o pior estado entre as secoes que o canal deveria servir:
+    `ok` < `partial` < `unavailable`. A secao ausente sai `None`; a outra
+    continua servida. `reason` junta os motivos, prefixados pela secao.
+    """
+    ref = (agora or _agora()).astimezone(timezone.utc)
+    marcas = normalizar_marcas(brands)
+    resposta: dict[str, Any] = {
+        "channel": channel, "status": "ok", "reason": None,
+        "brands_applied": marcas, "generated_at": ref,
+        "fila_aberta": None, "coorte": None, "limitacoes": [],
+    }
+    if not jornada_habilitada(channel):
+        resposta["status"] = "disabled"
+        resposta["reason"] = (UNAVAILABLE_DISABLED if not habilitado()
+                              else UNAVAILABLE_CHANNEL_DISABLED)
+        return resposta
+
+    _abrir_snapshot(db)
+    filtro = _FiltroMarca(marcas)
+    estados: list[str] = []
+    motivos: list[str] = []
+
+    if channel in ("shopee", "mercadolivre"):
+        fila, m, e = _fila_aberta(db, channel, filtro)
+        resposta["fila_aberta"] = fila
+        motivos += m
+        estados.append(e)
+    else:
+        resposta["limitacoes"].append(LIMITACAO_TIKTOK_SEM_FILA)
+
+    if channel == "tiktok":
+        coorte, m, e = _coorte_tiktok(db, evento, dias, ref, filtro)
+        resposta["coorte"] = coorte
+        motivos += m
+        estados.append(e)
+    elif channel == "shopee":
+        if shopee_ldr_svc.habilitado():
+            coorte, m, e = _coorte_shopee(db, dias, ref, filtro)
+            resposta["coorte"] = coorte
+            motivos += m
+            estados.append(e)
+        else:
+            # Desligada por decisao, nao por falha: limitacao, sem rebaixar status.
+            resposta["limitacoes"].append(LIMITACAO_SHOPEE_LDR_DESLIGADA)
+    else:
+        resposta["limitacoes"].append(LIMITACAO_ML_SEM_PRAZO)
+
+    resposta["status"] = max(estados, key=_GRAVIDADE_STATUS.__getitem__)
+    resposta["reason"] = "; ".join(motivos) or None
+    return resposta
