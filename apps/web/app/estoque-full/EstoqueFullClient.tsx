@@ -44,11 +44,15 @@ import {
   CLASSIFICACOES,
   CLASS_LABEL,
   CLASS_TOM,
+  CONTAS_ESPERADAS_API,
   FILTROS_VAZIOS,
   PROXIMO_PASSO,
   SEM_DADO,
   TITULO_INDISPONIVEL,
+  avisoContasAusentes,
   buildQuery,
+  contasAusentes,
+  contasPresentes,
   fmtCobertura,
   fmtData,
   fmtDecimal,
@@ -58,6 +62,7 @@ import {
   frescorLabel,
   isIndisponivel,
   nomeExibido,
+  rotuloCD,
   skuExibido,
   temFiltroAtivo,
   type Classificacao,
@@ -66,8 +71,6 @@ import {
   type ProdutoEstoque,
 } from "@/lib/estoque-full";
 
-const MARCAS = ["apice", "barbours", "lescent", "rituaria"] as const;
-
 /** Rotulo humano da marca. A API trabalha em caixa baixa. */
 function tituloMarca(m: string): string {
   return m.charAt(0).toUpperCase() + m.slice(1);
@@ -75,9 +78,11 @@ function tituloMarca(m: string): string {
 
 function Aviso({
   tom,
+  role,
   children,
 }: {
   tom: "info" | "alerta";
+  role?: "status";
   children: React.ReactNode;
 }) {
   const cor =
@@ -85,7 +90,9 @@ function Aviso({
       ? "bg-amber-50 border-amber-200 text-amber-900"
       : "bg-slate-50 border-slate-200 text-slate-700";
   return (
-    <p className={`text-sm rounded-xl border px-4 py-3 ${cor}`}>{children}</p>
+    <p role={role} className={`text-sm rounded-xl border px-4 py-3 ${cor}`}>
+      {children}
+    </p>
   );
 }
 
@@ -148,9 +155,9 @@ function PorCD({ produto }: { produto: ProdutoEstoque }) {
   if (!produto.por_cd.length) return <span className="text-slate-400">{SEM_DADO}</span>;
   return (
     <ul className="flex flex-col gap-0.5">
-      {produto.por_cd.map((cd) => (
-        <li key={cd.location_id} className="whitespace-nowrap">
-          <span className="text-slate-500">{cd.location_id}: </span>
+      {produto.por_cd.map((cd, i) => (
+        <li key={`${cd.location_id}-${i}`} className="whitespace-nowrap">
+          <span className="text-slate-500">{rotuloCD(cd.location_id)}: </span>
           <span className="tabular-nums">{fmtInt(cd.full_stock)}</span>
           {cd.is_saleable === false && (
             <span className="text-amber-700"> (não vendável)</span>
@@ -262,6 +269,14 @@ export default function EstoqueFullClient() {
     return () => clearTimeout(t);
   }, [buscaDigitada]);
 
+  // Contas presentes na fotografia INTEIRA. `contas_cobertas` segue o mesmo
+  // escopo da consulta: com filtro de conta, a API so' devolve as escolhidas.
+  // Por isso so' a resposta SEM filtro de conta define os botoes e o aviso.
+  const [cobertasFotografia, setCobertasFotografia] = useState<
+    string[] | null
+  >(null);
+  const escopoCompleto = filtros.brands.length === 0;
+
   const query = useMemo(() => buildQuery(filtros), [filtros]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -272,7 +287,13 @@ export default function EstoqueFullClient() {
     setCarregando(true);
     setErro(null);
     try {
-      setPayload(await fetchEstoqueFull(query, ctrl.signal));
+      const resposta = await fetchEstoqueFull(query, ctrl.signal);
+      setPayload(resposta);
+      if (escopoCompleto) {
+        setCobertasFotografia(
+          isIndisponivel(resposta) ? null : resposta.contas_cobertas,
+        );
+      }
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       // 🔑 Erro NAO zera o payload anterior por acidente: limpamos de
@@ -286,7 +307,7 @@ export default function EstoqueFullClient() {
     } finally {
       if (!ctrl.signal.aborted) setCarregando(false);
     }
-  }, [query]);
+  }, [query, escopoCompleto]);
 
   useEffect(() => {
     carregar();
@@ -314,13 +335,31 @@ export default function EstoqueFullClient() {
     setFiltros(FILTROS_VAZIOS);
   };
 
+  // Ausencia de conta NUNCA vira zero: so' contas presentes viram filtro, e
+  // conta selecionada que nao veio na resposta esconde os numeros.
+  const contasFiltraveis = contasPresentes(
+    CONTAS_ESPERADAS_API,
+    cobertasFotografia,
+  );
+  const selecionadasSemFotografia =
+    payload && !isIndisponivel(payload)
+      ? contasAusentes(filtros.brands, payload.contas_cobertas)
+      : [];
+  const foraDaFotografia = cobertasFotografia
+    ? contasAusentes(CONTAS_ESPERADAS_API, cobertasFotografia)
+    : [];
+  const contasSemFotografia = CONTAS_ESPERADAS_API.filter(
+    (c) =>
+      foraDaFotografia.includes(c) || selecionadasSemFotografia.includes(c),
+  );
+
   const filtrosUI = (
     <div className="flex flex-col gap-3 w-full">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
           Conta
         </span>
-        {MARCAS.map((m) => (
+        {contasFiltraveis.map((m) => (
           <button
             key={m}
             type="button"
@@ -450,100 +489,134 @@ export default function EstoqueFullClient() {
             </Aviso>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-            <KpiCard
-              label="Unidades vendáveis"
-              value={fmtInt(payload.indicadores.unidades_vendaveis_operacional)}
-              subvalue={`${fmtInt(payload.indicadores.produtos_total)} produtos na fotografia`}
-              accent="bg-emerald-500"
-            />
-            <KpiCard
-              label="Exigem ação"
-              value={fmtInt(payload.indicadores.produtos_exigem_acao)}
-              subvalue="Ruptura + estoque baixo"
-              accent="bg-red-500"
-            />
-            <KpiCard
-              label="Ruptura"
-              value={fmtInt(payload.indicadores.produtos_ruptura)}
-              subvalue="Sem estoque vendável, com venda na janela"
-              accent="bg-red-500"
-            />
-            <KpiCard
-              label="Estoque baixo"
-              value={fmtInt(payload.indicadores.produtos_baixo)}
-              subvalue={`Abaixo de ${payload.limites.cobertura_baixa_dias} dias de cobertura`}
-              accent="bg-amber-500"
-            />
-            <KpiCard
-              label="Excesso"
-              value={fmtInt(payload.indicadores.produtos_excesso)}
-              subvalue={`A partir de ${payload.limites.cobertura_excesso_dias} dias de cobertura`}
-              accent="bg-sky-500"
-            />
-            <KpiCard
-              label="Sem giro"
-              value={fmtInt(payload.indicadores.produtos_sem_giro)}
-              subvalue="Com estoque, sem venda na janela"
-              accent="bg-slate-400"
-            />
-            <KpiCard
-              label="Suficiente"
-              value={fmtInt(payload.indicadores.produtos_suficientes)}
-              subvalue={`Entre ${payload.limites.cobertura_baixa_dias} e ${payload.limites.cobertura_excesso_dias} dias`}
-              accent="bg-emerald-500"
-            />
-            <KpiCard
-              label="Kits não conciliados"
-              value={fmtInt(payload.indicadores.produtos_kit_nao_conciliado)}
-              subvalue={`${fmtInt(payload.indicadores.unidades_vendaveis_kits_contexto)} unidades, fora do operacional`}
-              accent="bg-violet-500"
-            />
-          </div>
-
-          {payload.marcas_nao_cobertas.length > 0 && (
-            <Aviso tom="info">
-              Cobertura parcial:{" "}
-              {payload.marcas_nao_cobertas.map(tituloMarca).join(", ")} não
-              está na esteira de API e não aparece em nenhum número desta tela —
-              como ausência, nunca como zero.
+          {contasSemFotografia.length > 0 && (
+            <Aviso tom="alerta" role="status">
+              {avisoContasAusentes(contasSemFotografia.map(tituloMarca))}
             </Aviso>
           )}
 
-          {payload.total_no_filtro === 0 ? (
-            /* Vazio POR FILTRO: os cartoes acima continuam de pe', porque o
-               dado existe. E' diferente de indisponivel. */
+          {selecionadasSemFotografia.length > 0 ? (
+            /* Conta selecionada sem fotografia: a API responderia "0" em
+               todos os cartoes. Sem numero nenhum aqui, como no indisponivel. */
             <section
               role="status"
               className="bg-white rounded-2xl border border-slate-200 p-8 flex flex-col gap-3"
             >
               <h3 className="text-base font-semibold text-slate-900">
-                Nenhum produto neste filtro
+                Conta sem fotografia nesta data
               </h3>
               <p className="text-sm text-slate-600">
-                A fotografia de {fmtData(payload.frescor.ref_date)} tem{" "}
-                {fmtInt(payload.indicadores.produtos_total)} produtos. Nenhum
-                deles casa com os filtros atuais.
+                {selecionadasSemFotografia.map(tituloMarca).join(", ")} não
+                aparece na fotografia de {fmtData(payload.frescor.ref_date)}.
+                Os números desta seleção não são exibidos: ausência de dado,
+                não estoque zero.
               </p>
-              {temFiltroAtivo(filtros) && (
-                <button
-                  type="button"
-                  onClick={limpar}
-                  className="self-start text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
-                >
-                  Limpar filtros
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={limpar}
+                className="self-start text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+              >
+                Limpar filtros
+              </button>
             </section>
           ) : (
             <>
-              <p className="text-xs text-slate-500 px-1">
-                Exibindo {fmtInt(payload.produtos.length)} de{" "}
-                {fmtInt(payload.total_no_filtro)} produtos no filtro.
-                {payload.truncado &&
-                  " A lista foi truncada — refine o filtro para ver o restante."}
-              </p>
-              <Tabela produtos={payload.produtos} />
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                <KpiCard
+                  label="Unidades vendáveis"
+                  value={fmtInt(payload.indicadores.unidades_vendaveis_operacional)}
+                  subvalue={`${fmtInt(payload.indicadores.produtos_total)} produtos na fotografia`}
+                  accent="bg-emerald-500"
+                />
+                <KpiCard
+                  label="Exigem ação"
+                  value={fmtInt(payload.indicadores.produtos_exigem_acao)}
+                  subvalue="Ruptura + estoque baixo"
+                  accent="bg-red-500"
+                />
+                <KpiCard
+                  label="Ruptura"
+                  value={fmtInt(payload.indicadores.produtos_ruptura)}
+                  subvalue="Sem estoque vendável, com venda na janela"
+                  accent="bg-red-500"
+                />
+                <KpiCard
+                  label="Estoque baixo"
+                  value={fmtInt(payload.indicadores.produtos_baixo)}
+                  subvalue={`Abaixo de ${payload.limites.cobertura_baixa_dias} dias de cobertura`}
+                  accent="bg-amber-500"
+                />
+                <KpiCard
+                  label="Excesso"
+                  value={fmtInt(payload.indicadores.produtos_excesso)}
+                  subvalue={`A partir de ${payload.limites.cobertura_excesso_dias} dias de cobertura`}
+                  accent="bg-sky-500"
+                />
+                <KpiCard
+                  label="Sem giro"
+                  value={fmtInt(payload.indicadores.produtos_sem_giro)}
+                  subvalue="Com estoque, sem venda na janela"
+                  accent="bg-slate-400"
+                />
+                <KpiCard
+                  label="Suficiente"
+                  value={fmtInt(payload.indicadores.produtos_suficientes)}
+                  subvalue={`Entre ${payload.limites.cobertura_baixa_dias} e ${payload.limites.cobertura_excesso_dias} dias`}
+                  accent="bg-emerald-500"
+                />
+                <KpiCard
+                  label="Kits não conciliados"
+                  value={fmtInt(payload.indicadores.produtos_kit_nao_conciliado)}
+                  subvalue={`${fmtInt(payload.indicadores.unidades_vendaveis_kits_contexto)} unidades, fora do operacional`}
+                  accent="bg-violet-500"
+                />
+              </div>
+
+              {payload.marcas_nao_cobertas.length > 0 && (
+                <Aviso tom="info">
+                  Cobertura parcial:{" "}
+                  {payload.marcas_nao_cobertas.map(tituloMarca).join(", ")} não
+                  está na esteira de API e não aparece em nenhum número desta tela —
+                  como ausência, nunca como zero.
+                </Aviso>
+              )}
+
+              {payload.total_no_filtro === 0 ? (
+                /* Vazio POR FILTRO: os cartoes acima continuam de pe', porque o
+                   dado existe. E' diferente de indisponivel. */
+                <section
+                  role="status"
+                  className="bg-white rounded-2xl border border-slate-200 p-8 flex flex-col gap-3"
+                >
+                  <h3 className="text-base font-semibold text-slate-900">
+                    Nenhum produto neste filtro
+                  </h3>
+                  <p className="text-sm text-slate-600">
+                    A fotografia de {fmtData(payload.frescor.ref_date)} tem{" "}
+                    {fmtInt(payload.indicadores.produtos_total)} produtos. Nenhum
+                    deles casa com os filtros atuais.
+                  </p>
+                  {temFiltroAtivo(filtros) && (
+                    <button
+                      type="button"
+                      onClick={limpar}
+                      className="self-start text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                    >
+                      Limpar filtros
+                    </button>
+                  )}
+                </section>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-500 px-1">
+                    Exibindo {fmtInt(payload.produtos.length)} de{" "}
+                    {fmtInt(payload.total_no_filtro)} produtos no filtro.
+                    {payload.truncado &&
+                      " A lista foi truncada — refine o filtro para ver o restante."}
+                  </p>
+                  <Tabela produtos={payload.produtos} />
+                </>
+              )}
             </>
           )}
 
