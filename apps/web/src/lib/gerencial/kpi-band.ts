@@ -95,8 +95,10 @@ export function direcao(pct: number | null): "up" | "down" | "flat" | null {
 export interface KpiDescriptor {
   key: KpiKey;
   label: string;
-  /** Valor principal formatado. `null` => renderizar como N/D com motivo. */
+  /** Valor principal formatado (curto). `null` => renderizar como N/D com motivo. */
   value: string | null;
+  /** UI-DENSIDADE-1: o valor EXATO, mostrado no detalhe do card. */
+  exactValue: string | null;
   unavailableReason: string | null;
   subvalue: string | null;
   /** Variacao % contra o periodo anterior; null sem base. */
@@ -170,6 +172,7 @@ export function buildKpiBand(
     key: "gmv",
     label: "GMV",
     value: overview ? fmtBrlCurto(overview.gmv) : null,
+    exactValue: overview ? fmtBrlFull(overview.gmv) : null,
     unavailableReason: null,
     subvalue: overview ? splitByChannel(overview, channels) : null,
     deltaPct: overview?.gmv_mom_pct ?? null,
@@ -191,6 +194,7 @@ export function buildKpiBand(
     key: "orders",
     label: "Pedidos",
     value: overview ? fmtNumCurto(overview.orders) : null,
+    exactValue: overview ? overview.orders.toLocaleString("pt-BR") : null,
     unavailableReason: null,
     subvalue: overview ? buyersSubvalue(overview) : null,
     deltaPct: ordersDelta,
@@ -209,6 +213,7 @@ export function buildKpiBand(
     key: "avg_ticket",
     label: "Ticket Médio",
     value: ticket.value,
+    exactValue: ticket.value,
     unavailableReason: ticket.reason,
     subvalue: null,
     deltaPct: ticketDelta,
@@ -235,6 +240,7 @@ export function buildKpiBand(
     key: "ad_spend",
     label: "Investimento em Ads",
     value: adsValue,
+    exactValue: adsValue && overview?.ad_spend != null ? fmtBrlFull(overview.ad_spend) : null,
     unavailableReason: adsReason,
     subvalue: null,
     deltaPct: adsDelta,
@@ -276,6 +282,7 @@ export function buildKpiBand(
     label: "ROAS por canal",
     // NUNCA um valor unico agregado: o card renderiza a lista por canal.
     value: null,
+    exactValue: null,
     unavailableReason: anyAdsChannel
       ? compatibleWithValue.length === 0
         ? "Sem ROAS disponível nos canais selecionados."

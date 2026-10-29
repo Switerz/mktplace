@@ -45,21 +45,25 @@ export function calcMoM(current: number, prev: number): number {
 const fmtDec = (min: number, max: number) =>
   new Intl.NumberFormat("pt-BR", { minimumFractionDigits: min, maximumFractionDigits: max });
 
+// A unidade e' escolhida pelo valor JA' ARREDONDADO na unidade de baixo: sem
+// isso, 999.960 virava "1.000,0 mil" em vez de "1,0 mi". Cada limiar e' o
+// ponto em que o arredondamento da unidade menor chegaria a 1.000.
+
 /** Contagem curta: "308,4 mil", "1,24 mi", "850". */
 export function fmtNumCurto(valor: number): string {
   const abs = Math.abs(valor);
-  if (abs >= 1e9) return `${fmtDec(1, 2).format(valor / 1e9)} bi`;
-  if (abs >= 1e6) return `${fmtDec(1, 2).format(valor / 1e6)} mi`;
-  if (abs >= 1e3) return `${fmtDec(1, 1).format(valor / 1e3)} mil`;
+  if (abs >= 999_995_000) return `${fmtDec(1, 2).format(valor / 1e9)} bi`;
+  if (abs >= 999_950) return `${fmtDec(1, 2).format(valor / 1e6)} mi`;
+  if (abs >= 999.5) return `${fmtDec(1, 1).format(valor / 1e3)} mil`;
   return fmtDec(0, 0).format(valor);
 }
 
 /** Reais curtos: "R$ 345,3 mil", "R$ 19,61 mi"; abaixo de mil, com centavos ("R$ 63,59"). */
 export function fmtBrlCurto(valor: number): string {
   const abs = Math.abs(valor);
-  if (abs >= 1e9) return `R$ ${fmtDec(2, 2).format(valor / 1e9)} bi`;
-  if (abs >= 1e6) return `R$ ${fmtDec(2, 2).format(valor / 1e6)} mi`;
-  if (abs >= 1e3) return `R$ ${fmtDec(1, 1).format(valor / 1e3)} mil`;
+  if (abs >= 999_995_000) return `R$ ${fmtDec(2, 2).format(valor / 1e9)} bi`;
+  if (abs >= 999_950) return `R$ ${fmtDec(2, 2).format(valor / 1e6)} mi`;
+  if (abs >= 999.995) return `R$ ${fmtDec(1, 1).format(valor / 1e3)} mil`;
   return `R$ ${fmtDec(2, 2).format(valor)}`;
 }
 

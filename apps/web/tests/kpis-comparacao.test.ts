@@ -209,3 +209,21 @@ test("numeros curtos em pt-BR (escolha: so' o numero curto)", () => {
   assert.equal(k.ad_spend.value, "R$ 345,3 mil");
   assert.equal(k.orders.reference, "antes 333,6 mil");
 });
+
+test("fronteira de unidade: nunca \"1.000,0 mil\"", () => {
+  assert.equal(fmtNumCurto(999_960), "1,0 mi");
+  assert.equal(fmtNumCurto(999_400), "999,4 mil");
+  assert.equal(fmtNumCurto(999.6), "1,0 mil");
+  assert.equal(fmtBrlCurto(999_960), "R$ 1,00 mi");
+  assert.equal(fmtBrlCurto(999.999), "R$ 1,0 mil");
+  assert.equal(fmtBrlCurto(999_999_999), "R$ 1,00 bi");
+});
+
+test("o detalhe do card recebe o valor exato", () => {
+  const k = porChave(buildKpiBand(overview(), ALL));
+  assert.equal(k.orders.exactValue, "308.360");
+  // Intl poe espaco nao separavel entre "R$" e o numero.
+  assert.match(k.ad_spend.exactValue!, /^R\$\s345\.337$/);
+  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /return k\?\.exactValue \?\? k\?\.value \?\? "—";/);
+});

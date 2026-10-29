@@ -86,7 +86,11 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
         GMV do período{ate}
       </h2>
       {error ? (
-        <p className="mt-2 text-sm text-crit-ink">Indicadores do período indisponíveis.</p>
+        <>
+          <p className="mt-2 text-sm text-crit-ink">Indicadores do período indisponíveis.</p>
+          {/* O aviso de dado nao depende do overview: aparece mesmo com ele em falha. */}
+          {aviso && <div className="mt-2"><SeloAviso aviso={aviso} /></div>}
+        </>
       ) : loading && gmv == null ? (
         <div className="mt-2 h-9 w-48 animate-pulse rounded bg-raised motion-reduce:animate-none" aria-hidden="true" />
       ) : (
@@ -95,19 +99,7 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
             <span className="text-3xl font-bold tracking-tight text-ink tabular-nums">{fmtCompacto(gmv)}</span>
             {/* UI-DENSIDADE-1: o aviso de dado vira um SELO colado no numero,
                 onde a duvida nasce; o texto inteiro esta' no detalhe. */}
-            {aviso && (
-              <button
-                type="button"
-                aria-haspopup="dialog"
-                onClick={aviso.onOpen}
-                title={aviso.texto}
-                aria-label={`Dado incompleto: ${primeiraOracao(aviso.texto)}. Ver confiança no dado`}
-                className="inline-flex min-h-8 items-center gap-1 rounded-full border border-warn/40 bg-warn-soft px-2.5 text-xs font-semibold text-warn-ink transition-colors hover:bg-warn-soft/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                <TriangleAlert aria-hidden="true" className="h-3.5 w-3.5" />
-                dado incompleto
-              </button>
-            )}
+            {aviso && <SeloAviso aviso={aviso} />}
           </p>
           {compareActive && momPct != null && (
             <p className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted tabular-nums">
@@ -307,4 +299,21 @@ function Selo({
  */
 export function primeiraOracao(texto: string): string {
   return texto.split(/[;.](?=\s|$)/)[0].trim();
+}
+
+/** Selo "dado incompleto" colado no GMV; abre a confianca no dado. */
+function SeloAviso({ aviso }: { aviso: { texto: string; onOpen: () => void } }) {
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      onClick={aviso.onOpen}
+      title={aviso.texto}
+      aria-label={`Dado incompleto: ${primeiraOracao(aviso.texto)}. Ver confiança no dado`}
+      className="inline-flex min-h-8 items-center gap-1 rounded-full border border-warn/40 bg-warn-soft px-2.5 text-xs font-semibold text-warn-ink transition-colors hover:bg-warn-soft/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      <TriangleAlert aria-hidden="true" className="h-3.5 w-3.5" />
+      dado incompleto
+    </button>
+  );
 }

@@ -21,13 +21,19 @@ const PONTO: Record<CommercialAttentionItem["severity"], { cor: string; rotulo: 
 };
 
 /**
- * O numero que importa no sinal: variacao para alta/queda; percentual medido
- * para sinal de custo/eficiencia. Sem numero confiavel, nada (nunca inventa).
+ * O numero que importa no sinal, decidido pelo CONTRATO e nao pelo nome do
+ * tipo: alta/queda contra o periodo anterior mostra a variacao; sinal medido
+ * contra referencia do canal (mediana/p75) mostra o proprio valor — os sinais
+ * de eficiencia do resumo executivo sao percentuais (custo/GMV, frete/GMV).
+ * Sem numero confiavel, nada (nunca inventa).
  */
-export function numeroDoSinal(item: Pick<CommercialAttentionItem, "type" | "deltaPct" | "metricValue">): string | null {
+export function numeroDoSinal(
+  item: Pick<CommercialAttentionItem, "type" | "deltaPct" | "metricValue" | "referenceKind">,
+): string | null {
+  if (item.referenceKind === "previous_period" && item.deltaPct != null) return fmtPctBr(item.deltaPct);
   if ((item.type === "growth" || item.type === "drop") && item.deltaPct != null) return fmtPctBr(item.deltaPct);
-  if (item.metricValue != null && /cost|cust|frete|fee/i.test(item.type)) {
-    return `${item.metricValue.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}% do GMV`;
+  if (item.metricValue != null && (item.referenceKind === "p75" || item.referenceKind === "median")) {
+    return `${item.metricValue.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
   }
   return null;
 }

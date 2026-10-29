@@ -579,7 +579,11 @@ function GerencialInner() {
         {dialog?.kind === "kpi" && overview && (
           <KpiDrilldownContent
             kind={dialog.key}
-            value={kpis.find((k) => k.key === dialog.key)?.value ?? "—"}
+            // O detalhe mostra o valor EXATO; o card, o curto (UI-DENSIDADE-1).
+            value={(() => {
+              const k = kpis.find((x) => x.key === dialog.key);
+              return k?.exactValue ?? k?.value ?? "—";
+            })()}
             comparacao={kpis.find((k) => k.key === dialog.key)}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}
