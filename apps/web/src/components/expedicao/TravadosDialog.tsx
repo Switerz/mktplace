@@ -92,6 +92,14 @@ export default function TravadosDialog({
   // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
   const temEtapa = estado.tipo === "ok" && temEtapaPublicada(estado.linhas);
   const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];
+  // Rodape so' com o que falta dizer; sem nada, nenhum paragrafo vazio.
+  const rodape = [
+    alvo?.incluiFbs ? "Lista da fila publicada, com pedidos FBS (despachados pela Shopee)." : null,
+    estado.tipo === "ok" && !temEtapa ? "A etapa de cada pedido ainda não é publicada pela fonte." : null,
+    estado.tipo === "ok" && !temCodigo ? "Por segurança, o número do pedido não é exibido." : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"}>
@@ -181,13 +189,7 @@ export default function TravadosDialog({
               ) : null}
             </>
           )}
-          <p className="text-xs text-ink-faint">
-            {alvo.incluiFbs ? "Lista da fila publicada, com pedidos FBS (despachados pela Shopee). " : ""}
-            {estado.tipo === "ok" && !temEtapa
-              ? "A etapa de cada pedido ainda não é publicada pela fonte."
-              : ""}
-            {estado.tipo === "ok" && !temCodigo ? " Por segurança, o número do pedido não é exibido." : ""}
-          </p>
+          {rodape ? <p className="text-xs text-ink-faint">{rodape}</p> : null}
         </div>
       ) : null}
     </KpiDrilldownDialog>

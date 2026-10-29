@@ -7,11 +7,17 @@ O código está todo na `main`:
 - PR #125 (T-0015): pipeline, migration 033 e jornada por etapa;
 - PR deste runbook: a API devolve a etapa de cada pedido, e a tela mostra.
 
-Nada liga sozinho. São **4 passos**, todos seguros. A ordem não importa: o
-publicador e a API detectam a coluna nova e, sem ela, seguem exatamente como
-hoje.
+São **4 passos**, todos seguros. A ordem não importa: o publicador e a API
+detectam a coluna nova e, sem ela, seguem exatamente como hoje.
 
-## 1. Aprovar e mesclar o PR
+| Passo | Quem |
+|---|---|
+| 1. Mesclar o PR (a Vercel publica a tela sozinha) | quem mantém a Torre |
+| 2. Migration 033 no Neon | quem mantém a Torre |
+| 3. Deploy da API no Render | **Mario** |
+| 4. Versão nova do pipeline no Airflow | **Mario** |
+
+## 1. Mesclar o PR
 
 A Vercel publica a tela sozinha a partir da `main`.
 

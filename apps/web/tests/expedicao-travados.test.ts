@@ -104,12 +104,16 @@ test("marca fora da cobertura vira linha curta com ⓘ, sem caixa", () => {
 test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclui FBS", () => {
   const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
   assert.match(POPUP, /\{temPrazo \? <th scope="col">Prazo<\/th> : null\}/);
-  assert.match(POPUP, /alvo\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
-  assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? " Por segurança/);
+  assert.match(POPUP, /alvo\?\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
+  assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? "Por segurança/);
+  assert.match(POPUP, /\{rodape \? <p className="text-xs text-ink-faint">\{rodape\}<\/p> : null\}/);
   assert.match(CLIENTE, /<TravadosDialog\s+key=\{alvoTravados \?/);
   assert.match(CLIENTE, /incluiFbs: divisao !== null/);
   const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
-  assert.match(JORNADA, /if \(!ligada\) \{/, "o hook ainda sabe ficar desligado");
+  // revisao #127: o modo compacto mantem o aviso de marca e as limitacoes
+  const compacto = JORNADA.slice(JORNADA.indexOf("if (compacta) {"));
+  assert.match(compacto, /avisoDeMarcaNaoAplicada\(marca, resposta\)/);
+  assert.match(JORNADA, /\{compacta \? null : \(\s*<Sobreposicoes[^]*?\)\}\s*\{\/\*[^]*?\*\/\}\s*<Limitacoes itens=\{f\.limitacoes\} \/>/);
 });
 
 
