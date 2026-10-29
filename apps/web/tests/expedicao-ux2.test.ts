@@ -417,3 +417,81 @@ test("QA F1: o `sr-only` da variacao fica dentro de um invólucro `relative` (na
   assert.equal(comPai.length, srOnly.length, html);
   assert.match(COMPONENTE, /<span className="relative">\s*\{v\.principal\}/);
 });
+
+// ===========================================================================
+// T-0021 sobre a UI objetiva (#121): a tela usa a TABELA UNICA (`fila`); o
+// par absoluto/percentual da variacao mora nela agora. Os testes acima cobrem
+// o modo so' de tendencia (sem `fila`), que o componente ainda exporta.
+// ===========================================================================
+const linhaDaFila = (conta: string, titulo: string, backlog: number) => ({
+  conta,
+  titulo,
+  apelido: null,
+  backlog,
+  vencidos: null,
+  acima48h: 3,
+  travados: 1,
+  barra: null,
+});
+
+test("tabela unica: a variacao le '−12 · −12,0%' (separador em sr-only), visual igual", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+        ],
+        72,
+      ),
+      fila: [linhaDaFila("2227056661", "KOKESHI", 88)],
+    }),
+  );
+  const celula = html.match(/<td class="whitespace-nowrap[^"]*">([\s\S]*?)<\/td>/);
+  assert.ok(celula, html);
+  assert.match(celula![1], /<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">−12,0%<\/span>/);
+  assert.equal(celula![1].replace(/<[^>]+>/g, ""), "−12 · −12,0%");
+  assert.doesNotMatch(html, /−12−12,0%/);
+});
+
+test("tabela unica: 'um ponto só' ganha o separador; sem secundario, sem separador; sem serie, so' '—'", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [ponto("2227056661", "kokeshi", H(13), 300), ponto("2227056661", "kokeshi", H(16), 320), ponto("1717171717", "lescent", H(16), 12)],
+        72,
+      ),
+      fila: [
+        linhaDaFila("2227056661", "KOKESHI", 320),
+        linhaDaFila("1717171717", "LESCENT", 12),
+        linhaDaFila("9999999999", "ÁPICE", 5),
+      ],
+    }),
+  );
+  assert.match(html, />—<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">um ponto só<\/span>/);
+  assert.match(html, /<span class="relative">\+20<\/span><\/td>/);
+  // a conta sem ponto no periodo nao ganha separador solto
+  assert.match(html, /<td class="whitespace-nowrap[^"]*"><span class="text-ink-faint">—<\/span><\/td>/);
+});
+
+test("QA F1 na tabela unica: todo `sr-only` da variacao fica dentro do invólucro `relative`", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+          ponto("1717171717", "lescent", H(16), 12),
+        ],
+        72,
+      ),
+      fila: [linhaDaFila("2227056661", "KOKESHI", 88), linhaDaFila("1717171717", "LESCENT", 12)],
+    }),
+  );
+  const srOnly = html.match(/<span class="sr-only">/g) ?? [];
+  assert.equal(srOnly.length, 2, "variacao com percentual + 'um ponto só'");
+  const comPai = html.match(/<span class="relative">[^<]*<span class="sr-only">/g) ?? [];
+  assert.equal(comPai.length, srOnly.length, html);
+  // os DOIS modos (so' tendencia e tabela unica) usam o mesmo invólucro
+  assert.equal((COMPONENTE.match(/<span className="relative">\s*\{v\.principal\}/g) ?? []).length, 2);
+});

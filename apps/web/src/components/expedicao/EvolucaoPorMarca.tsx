@@ -353,12 +353,18 @@ function TabelaUnica({
                   <td>{f?.barra ?? null}</td>
                   <td className="whitespace-nowrap text-right tabular-nums text-ink">
                     {v ? (
-                      <>
+                      // T-0021: mesmo separador acessivel da tabela so' de
+                      // tendencia — o " · " so' para o leitor de tela, preso a'
+                      // celula pelo invólucro `relative` (QA F1).
+                      <span className="relative">
                         {v.principal}
                         {v.secundario ? (
-                          <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                          <>
+                            <span className="sr-only"> · </span>
+                            <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                          </>
                         ) : null}
-                      </>
+                      </span>
                     ) : (
                       <span className="text-ink-faint">—</span>
                     )}
