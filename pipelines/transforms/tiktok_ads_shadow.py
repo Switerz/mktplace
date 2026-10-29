@@ -28,12 +28,18 @@ Regras
   `FonteInconsistente` -- somar duplicata seria dupla contagem.
 - Linha da fonte sem cobertura do par nao e' publicada (contada em
   `linhas_sem_cobertura`): sem prova de consulta completa, nao ha medicao.
+- Contagem RAW por par: a cobertura da raw DECLARA `linhas` por (anunciante,
+  dia); as linhas da fato raw lidas para o par tem de ser exatamente essa
+  quantidade. Declarado > 0 com linhas ausentes ou parciais, declarado 0 com
+  linhas presentes, `linhas` nula/negativa ou duas declaracoes diferentes do
+  mesmo par levantam `FonteInconsistente`. Sem isso, leitura incompleta viraria
+  "consultado sem linha" e o DELETE do par apagaria a foto anterior.
 - Completude por marca (todos os anunciantes da marca consultados no dia) e'
   regra de SERVING, nao do shadow; o resumo so' informa os dias incompletos.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 
 MARCAS = ("apice", "barbours")
@@ -55,15 +61,43 @@ def _fuso(valor):
     return v or None
 
 
+def divergencias_por_par(cobertura, linhas):
+    """Pares da `cobertura` cuja `linhas` declarada difere de quantas `linhas` o par tem.
+
+    Lista ordenada de (advertiser_id, stat_date, declarado, contado); vazia = coerente.
+    Par ausente de `linhas` conta 0 -- e' exatamente o caso que nao pode passar
+    quando a cobertura declara > 0.
+    """
+    contadas = Counter((str(x["advertiser_id"]), x["stat_date"]) for x in linhas)
+    div = []
+    for c in cobertura:
+        chave = (str(c["advertiser_id"]), c["stat_date"])
+        if c["linhas"] != contadas.get(chave, 0):
+            div.append((chave[0], chave[1], c["linhas"], contadas.get(chave, 0)))
+    return sorted(div, key=lambda d: (d[1], d[0]))
+
+
+def _linhas_declaradas(c):
+    n = c.get("linhas")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise FonteInconsistente(f"cobertura sem contagem valida: {c['advertiser_id']} {c['stat_date']} "
+                                 f"linhas={n!r}")
+    return n
+
+
 def montar_shadow(linhas, cobertura):
     """(fato, cobertura, resumo). `linhas`/`cobertura` sao dicts do raw."""
-    pares = {}                                        # (adv, dia) -> brand
+    pares, declarado = {}, {}                         # (adv, dia) -> brand / linhas declaradas
     for c in cobertura:
         if c["brand"] not in MARCAS:
             continue
         chave = (str(c["advertiser_id"]), c["stat_date"])
         if pares.setdefault(chave, c["brand"]) != c["brand"]:
             raise FonteInconsistente(f"anunciante {chave[0]} em duas marcas no dia {chave[1]}")
+        n = _linhas_declaradas(c)
+        if declarado.setdefault(chave, n) != n:
+            raise FonteInconsistente(f"cobertura declara duas contagens para {chave[0]} {chave[1]}: "
+                                     f"{declarado[chave]} e {n}")
 
     fato, vistos, sem_cobertura = [], set(), 0
     for l in linhas:
@@ -90,10 +124,14 @@ def montar_shadow(linhas, cobertura):
             "onsite_shopping_value": Decimal(l["total_onsite_shopping_value"]),
         })
 
-    por_par = defaultdict(int)
-    for f in fato:
-        por_par[(f["advertiser_id"], f["stat_date"])] += 1
-    cob = [{"stat_date": dia, "brand": brand, "advertiser_id": adv, "linhas": por_par[(adv, dia)]}
+    # Toda linha raw de par coberto virou exatamente uma linha da fato (ou a
+    # leitura ja' foi recusada acima); logo a fato do par e' a contagem RAW lida.
+    div = divergencias_por_par(
+        [{"advertiser_id": adv, "stat_date": dia, "linhas": n} for (adv, dia), n in declarado.items()], fato)
+    if div:
+        exemplos = "; ".join(f"{a} {d} declarado={n} lido={m}" for a, d, n, m in div[:5])
+        raise FonteInconsistente(f"contagem RAW por par diverge da cobertura em {len(div)} par(es): {exemplos}")
+    cob = [{"stat_date": dia, "brand": brand, "advertiser_id": adv, "linhas": declarado[(adv, dia)]}
            for (adv, dia), brand in sorted(pares.items(), key=lambda kv: (kv[0][1], kv[0][0]))]
 
     advs_marca, advs_dia = defaultdict(set), defaultdict(set)

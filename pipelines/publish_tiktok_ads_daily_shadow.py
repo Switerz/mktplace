@@ -13,13 +13,34 @@ TRES TRAVAS (todas obrigatorias)
 
 Fora isso: dry-run (agregados) ou recusa explicita. Nada e' gravado.
 
+LEITURA: fato e cobertura da raw na MESMA transacao do Data Mart, aberta com
+`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY` (um snapshot so';
+SERIALIZABLE nao existe em hot standby; `set_session` nao e' usado porque
+persiste na conexao do pool). A contagem RAW por par tem de bater com a
+cobertura declarada (`tiktok_ads_shadow.montar_shadow`); divergencia = recusa.
+
 PUBLICACAO: transacao unica, `pg_try_advisory_xact_lock` primeiro. Substitui
 exatamente os pares (anunciante, dia) CONSULTADOS nesta leitura: DELETE da
 fato e da cobertura desses pares + INSERT. Par nao consultado nesta leitura
 fica como estava (ausencia nao apaga nem zera). Mesma entrada -> mesmo
-conteudo; rerun nao duplica (PK + DELETE do par). Reconciliacao por
-(dia, anunciante, escopo, moeda) -- linhas e spend -- e da cobertura antes do
-COMMIT; auditoria em conexao propria (marketplace 1 = TikTok).
+conteudo; rerun nao duplica (PK + DELETE do par). Contagem por par conferida
+de novo antes do DELETE; reconciliacao por (dia, anunciante, escopo, moeda) --
+linhas e spend -- e da cobertura antes do COMMIT.
+
+AUDITORIA (`audit.source_sync_run`, marketplace 1 = TikTok):
+- `running` e' gravada em conexao propria antes da escrita;
+- `success` e' gravada DENTRO da transacao da publicacao, no mesmo COMMIT dos
+  dados: success <=> dados confirmados. Nao existe "commit feito, auditoria
+  nao";
+- `failed` (recusa por fonte inconsistente, reconciliacao, lock, erro) vai em
+  conexao propria, so' sobre linha ainda `running`, com o motivo;
+- `running` remanescente => nada confirmado no destino (o processo morreu ou
+  nem o `failed` foi gravado). Diagnostico so' leitura: nenhuma linha da fato
+  com `source_run_id` = run_id.
+Exit code: 0 = dry-run ou publicado (JSON com `auditoria: success`);
+2 = recusa (`PublicacaoRecusada`: nada escrito no shadow, motivo no log e,
+para fonte inconsistente, na auditoria `failed`); 1 = excecao (lock,
+reconciliacao, auditoria que nao fecha, rede): rollback, nada confirmado.
 """
 from __future__ import annotations
 
@@ -56,6 +77,11 @@ COLS_COBERTURA = ("stat_date", "brand", "advertiser_id", "linhas", "source_run_i
 #: Pares (anunciante, dia) desta publicacao, como tabela, para DELETE e reconciliacao.
 PARES = "unnest(CAST(:advs AS text[]), CAST(:dias AS date[])) AS k(advertiser_id, stat_date)"
 
+#: Primeiro comando da transacao de leitura: um snapshot para fato e cobertura.
+SQL_SNAPSHOT = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+SQL_CONFERE_SNAPSHOT = text("SELECT current_setting('transaction_isolation'), "
+                            "current_setting('transaction_read_only')")
+SNAPSHOT_ESPERADO = ("repeatable read", "on")
 SQL_PRESENCA = text("SELECT " + ", ".join(f"to_regclass('{t}') IS NOT NULL" for t in FONTE_TABELAS))
 SQL_LINHAS = text("""
 SELECT brand, advertiser_id, campaign_id, stat_date, escopo, spend, impressions, clicks,
@@ -82,6 +108,14 @@ class ReconciliacaoFalhou(RuntimeError):
     pass
 
 
+class LeituraSemSnapshot(RuntimeError):
+    """A leitura da raw nao esta' num snapshot REPEATABLE READ READ ONLY."""
+
+
+class AuditoriaNaoFechou(RuntimeError):
+    """O UPDATE da auditoria nao achou a linha `running` do run."""
+
+
 def flag_ligada() -> bool:
     return os.environ.get(FLAG_AMBIENTE, "").strip().lower() == "true"
 
@@ -91,6 +125,15 @@ def janela(hoje: date) -> tuple[date, date]:
 
 
 def ler_fonte(conn, inicio: date, fim: date):
+    """Fato e cobertura da raw num snapshot so'. `conn` tem de estar no INICIO da transacao.
+
+    O PostgreSQL recusa `SET TRANSACTION ISOLATION LEVEL` depois de qualquer
+    consulta na transacao -- leitura fora de snapshot falha alto, nao degrada.
+    """
+    conn.execute(SQL_SNAPSHOT)
+    snapshot = tuple(conn.execute(SQL_CONFERE_SNAPSHOT).fetchone())
+    if snapshot != SNAPSHOT_ESPERADO:
+        raise LeituraSemSnapshot(f"isolamento/read_only = {snapshot}; esperado {SNAPSHOT_ESPERADO}")
     if not all(conn.execute(SQL_PRESENCA).fetchone()):
         return None
     p = {"inicio": inicio, "fim": fim, "marcas": list(T.MARCAS)}
@@ -102,7 +145,6 @@ def ler_fonte(conn, inicio: date, fim: date):
 def _ler(inicio, fim):
     dm = DataMartSession()
     try:
-        dm.connection().connection.set_session(readonly=True)
         return ler_fonte(dm.connection(), inicio, fim)
     finally:
         dm.rollback()
@@ -113,7 +155,18 @@ def _chave_rec(dia, adv, escopo, moeda):
     return (str(dia), str(adv), escopo, moeda)
 
 
+def conferir_pares(fato, cobertura) -> None:
+    """Invariante antes do DELETE: cada par tem na fato exatamente as `linhas` da cobertura."""
+    div = T.divergencias_por_par(cobertura, fato)
+    fora = {(str(f["advertiser_id"]), f["stat_date"]) for f in fato} - \
+        {(str(c["advertiser_id"]), c["stat_date"]) for c in cobertura}
+    if div or fora:
+        raise ReconciliacaoFalhou(f"contagem por par incoerente antes do DELETE: divergentes={div[:5]} "
+                                  f"pares_da_fato_sem_cobertura={sorted(fora, key=str)[:5]}")
+
+
 def publicar_em_transacao(conn, fato, cobertura, run_id) -> dict:
+    conferir_pares(fato, cobertura)
     conn.execute(text(f"SET LOCAL statement_timeout = {TARGET_STATEMENT_TIMEOUT_MS}"))
     p = {"advs": [c["advertiser_id"] for c in cobertura], "dias": [c["stat_date"] for c in cobertura]}
     # Fato antes da cobertura (FK); cobertura antes da fato no INSERT.
@@ -153,11 +206,20 @@ def publicar_em_transacao(conn, fato, cobertura, run_id) -> dict:
             "spend_medido_publicado": sum((f["spend"] for f in fato), Decimal("0"))}
 
 
-def _publicar(fato, cobertura, run_id):
+SQL_AUDIT_SUCESSO = text("""
+UPDATE audit.source_sync_run SET status = 'success', finished_at = NOW(), rows_loaded = :n, error_message = NULL
+ WHERE sync_run_id = :sid AND status = 'running'""")
+
+
+def _publicar(fato, cobertura, run_id, sid):
     with local_engine().begin() as conn:
         if not conn.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar():
             raise ConcurrentRunError(f"advisory lock {ADVISORY_LOCK_KEY} ocupado")
-        return publicar_em_transacao(conn, fato, cobertura, run_id)
+        publicado = publicar_em_transacao(conn, fato, cobertura, run_id)
+        # success no MESMO commit dos dados: um nao existe sem o outro.
+        if conn.execute(SQL_AUDIT_SUCESSO, {"n": publicado["linhas_publicadas"], "sid": sid}).rowcount != 1:
+            raise AuditoriaNaoFechou(f"sync_run_id {sid} nao esta' 'running'; publicacao desfeita")
+        return publicado
 
 
 def tabela_destino_existe() -> bool:
@@ -186,17 +248,45 @@ def audit_start(n: int) -> int:
 
 
 def audit_finish(sid: int, status: str, rows_loaded=None, error_message=None) -> None:
+    """Fecha a auditoria em conexao propria. So' toca linha ainda `running`:
+    nunca rebaixa um `success` que ja' saiu no COMMIT da publicacao."""
     conn = _audit_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("""UPDATE audit.source_sync_run SET status = %s, finished_at = NOW(),
-                               rows_loaded = %s, error_message = %s WHERE sync_run_id = %s""",
+                               rows_loaded = %s, error_message = %s
+                           WHERE sync_run_id = %s AND status = 'running'""",
                         (status, rows_loaded, error_message, sid))
             if cur.rowcount != 1:
-                raise RuntimeError("UPDATE de auditoria nao afetou exatamente 1 linha")
+                raise AuditoriaNaoFechou(f"sync_run_id {sid} nao esta' 'running' (ja' terminal ou ausente)")
         conn.commit()
     finally:
         conn.close()
+
+
+def _auditar_falha(sid: int, motivo: str) -> None:
+    """Grava `failed` com o motivo. Falha da auditoria e' logada e nunca mascara a causa."""
+    try:
+        audit_finish(sid, "failed", rows_loaded=0, error_message=motivo[:AUDIT_ERRO_MAX_CHARS])
+    except AuditoriaNaoFechou:
+        # Linha ja' terminal: ou o COMMIT da publicacao chegou ao banco e o cliente viu
+        # erro depois dele (linha = 'success'), ou outro processo a fechou. Fica como esta'.
+        logger.error("sync_run_id %s ja' nao estava 'running': confira o status (success = COMMIT "
+                     "da publicacao confirmado)", sid)
+    except Exception as aud:  # noqa: BLE001
+        logger.error("auditoria 'failed' do sync_run_id %s NAO gravada (%s); a linha fica 'running' "
+                     "e nada foi confirmado no destino", sid, type(aud).__name__)
+
+
+def _recusar_auditado(n_extraidas: int, motivo: str):
+    """Recusa ANTES de qualquer escrita no shadow, com auditoria `failed` registrando o motivo."""
+    try:
+        sid = audit_start(n_extraidas)
+    except Exception as aud:  # noqa: BLE001
+        logger.error("auditoria da recusa NAO gravada (%s)", type(aud).__name__)
+    else:
+        _auditar_falha(sid, f"PublicacaoRecusada: {motivo}")
+    raise PublicacaoRecusada(motivo)
 
 
 def run(apply: bool = False, hoje: date | None = None) -> dict:
@@ -223,20 +313,18 @@ def run(apply: bool = False, hoje: date | None = None) -> dict:
     if fonte is None:
         raise PublicacaoRecusada("fonte_inexistente: tabelas raw.tiktok_ads_* ausentes")
     if inconsistente is not None:
-        raise PublicacaoRecusada(f"fonte_inconsistente: {inconsistente}")
+        _recusar_auditado(len(fonte["linhas"]), f"fonte_inconsistente: {inconsistente} (run_id={run_id})")
     if not tabela_destino_existe():
         raise PublicacaoRecusada("fato_inexistente: migration 031 nao aplicada")
     if not cobertura:
         raise PublicacaoRecusada("sem_linhas_publicaveis: nenhum anunciante x dia consultado")
     sid = audit_start(len(fato))
     try:
-        publicado = _publicar(fato, cobertura, run_id)
+        publicado = _publicar(fato, cobertura, run_id, sid)
     except BaseException as exc:
-        audit_finish(sid, "failed", rows_loaded=0,
-                     error_message=f"{type(exc).__name__}: {str(exc)[:AUDIT_ERRO_MAX_CHARS]}")
+        _auditar_falha(sid, f"{type(exc).__name__}: {exc} (run_id={run_id})")
         raise
-    audit_finish(sid, "success", rows_loaded=publicado["linhas_publicadas"])
-    resumo.update(publicado, applied=True, modo="escrita", sync_run_id=sid)
+    resumo.update(publicado, applied=True, modo="escrita", sync_run_id=sid, auditoria="success")
     return resumo
 
 

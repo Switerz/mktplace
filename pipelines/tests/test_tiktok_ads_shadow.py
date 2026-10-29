@@ -128,6 +128,75 @@ def test_completude_por_marca_so_informada():
     assert r["dias_marca_incompletos"] == 1          # apice D2: A2 nao consultado
 
 
+def _sem(linhas, adv, dia, quantas=None):
+    """Tira `quantas` (todas, se None) linhas raw do par."""
+    fora, out = 0, []
+    for x in linhas:
+        if x["advertiser_id"] == adv and x["stat_date"] == dia and (quantas is None or fora < quantas):
+            fora += 1
+            continue
+        out.append(x)
+    return out
+
+
+def _raw_positiva_ausente():
+    linhas, cobertura = base()
+    return _sem(linhas, "A1", D1), cobertura                      # declara 3, le 0
+
+
+def _raw_parcial():
+    linhas, cobertura = base()
+    return _sem(linhas, "A1", D1, 1), cobertura                   # declara 3, le 2
+
+
+def _raw_zero_com_linhas():
+    linhas, cobertura = base()
+    return linhas + [l("barbours", "B1", "CB", D1, "shop")], cobertura   # declara 0, le 1
+
+
+RAW_INCOERENTE = {"positiva_ausente": (_raw_positiva_ausente, "A1 2026-10-14 declarado=3 lido=0"),
+                  "parcial": (_raw_parcial, "A1 2026-10-14 declarado=3 lido=2"),
+                  "zero_com_linhas": (_raw_zero_com_linhas, "B1 2026-10-14 declarado=0 lido=1")}
+
+
+@pytest.mark.parametrize("caso", sorted(RAW_INCOERENTE))
+def test_contagem_raw_por_par_divergente_recusa(caso):
+    fabrica, trecho = RAW_INCOERENTE[caso]
+    with pytest.raises(T.FonteInconsistente, match="contagem RAW por par") as e:
+        T.montar_shadow(*fabrica())
+    assert trecho in str(e.value)
+
+
+def test_contagem_raw_por_par_ok_publica_a_declarada():
+    linhas, cobertura = base()
+    _, cob_out, _ = T.montar_shadow(linhas, cobertura)
+    declarada = {(c["advertiser_id"], c["stat_date"]): c["linhas"] for c in cobertura if c["brand"] != "kokeshi"}
+    assert {k: c["linhas"] for k, c in cob_por(cob_out).items()} == declarada
+
+
+@pytest.mark.parametrize("valor", [None, -1, True, "3", Decimal("3")])
+def test_contagem_declarada_invalida_recusa(valor):
+    linhas, cobertura = base()
+    cobertura[0]["linhas"] = valor
+    with pytest.raises(T.FonteInconsistente, match="contagem valida"):
+        T.montar_shadow(linhas, cobertura)
+
+
+def test_cobertura_com_duas_contagens_para_o_par_recusa():
+    linhas, cobertura = base()
+    with pytest.raises(T.FonteInconsistente, match="duas contagens"):
+        T.montar_shadow(linhas, cobertura + [cob("apice", "A1", D1, 0)])
+    # declaracao repetida identica nao contradiz nada
+    assert T.montar_shadow(linhas, cobertura + [cob("apice", "A1", D1, 3)])[1] == T.montar_shadow(linhas, cobertura)[1]
+
+
+def test_divergencias_por_par():
+    c = [cob("apice", "A1", D1, 2), cob("apice", "A2", D1, 0), cob("apice", "A3", D1, 1)]
+    linhas = [l("apice", "A1", "C1", D1, "shop"), l("apice", "A2", "C1", D1, "shop"), l("apice", "A3", "C1", D1, "shop")]
+    assert T.divergencias_por_par(c, linhas) == [("A1", D1, 2, 1), ("A2", D1, 0, 1)]
+    assert T.divergencias_por_par(c[2:], linhas) == []
+
+
 @pytest.mark.parametrize("valor,spend,esperado", [
     (Decimal("50"), Decimal("10"), Decimal("5.00")), (Decimal("50"), Decimal("0"), None),
     (None, Decimal("10"), None), (Decimal("50"), None, None)])
@@ -139,8 +208,15 @@ def test_roas_so_com_denominador_valido(valor, spend, esperado):
 # Travas e publicacao (fake)
 # ---------------------------------------------------------------------------
 class Res:
-    def __init__(self, escalar=None, mapa=None, linhas=None):
+    def __init__(self, escalar=None, mapa=None, linhas=None, rowcount=0, um=None):
         self.escalar, self.mapa, self.linhas = escalar, mapa, linhas or []
+        self.rowcount, self.um = rowcount, um
+
+    def fetchone(self):
+        return self.um
+
+    def __iter__(self):
+        return iter(self.linhas)
 
     def scalar(self):
         return self.escalar
@@ -156,8 +232,9 @@ class Res:
 
 
 class Conn:
-    def __init__(self, lock=True, rec=None, cob=None):
+    def __init__(self, lock=True, rec=None, cob=None, audit_rowcount=1):
         self.lock, self.rec, self.cob, self.sqls = lock, rec or [], cob, []
+        self.audit_rowcount = audit_rowcount
         self.connection = self
 
     def execute(self, sql, params=None):
@@ -165,6 +242,8 @@ class Conn:
         self.sqls.append((s, params))
         if "pg_try_advisory_xact_lock" in s:
             return Res(escalar=self.lock)
+        if "audit.source_sync_run" in s:
+            return Res(rowcount=self.audit_rowcount)
         if "GROUP BY" in s:
             return Res(linhas=self.rec)
         if "COUNT(*)" in s:
@@ -192,7 +271,8 @@ def amb(monkeypatch):
     monkeypatch.setattr(pub, "_ler", lambda i, f: {"linhas": linhas, "cobertura": cobertura})
     monkeypatch.setattr(pub, "tabela_destino_existe", lambda: True)
     monkeypatch.setattr(pub, "audit_start", lambda n: estado["audit"].append(("start", n)) or 9)
-    monkeypatch.setattr(pub, "audit_finish", lambda sid, st, **kw: estado["audit"].append((st,)))
+    monkeypatch.setattr(pub, "audit_finish",
+                        lambda sid, st, **kw: estado["audit"].append((st, kw.get("error_message"))))
     monkeypatch.setattr(pub, "execute_values",
                         lambda cur, sql, vals, page_size: estado["ins"].append((sql.split()[2], len(vals))))
     monkeypatch.setenv(pub.FLAG_AMBIENTE, "true")
@@ -237,14 +317,36 @@ def test_travas(amb, monkeypatch):
     assert amb["audit"] == []
 
 
-def test_fonte_inconsistente_dry_run_reporta_e_apply_recusa(amb, monkeypatch):
+def test_fonte_inconsistente_dry_run_reporta_e_apply_recusa_auditado(amb, monkeypatch):
     linhas, cobertura = base()
     linhas.append(dict(linhas[0]))
     monkeypatch.setattr(pub, "_ler", lambda i, f: {"linhas": linhas, "cobertura": cobertura})
+    monkeypatch.setattr(pub, "local_engine", lambda: pytest.fail("recusa tocou o destino"))
     assert pub.run(apply=False, hoje=date(2026, 10, 20))["estado"] == "fonte_inconsistente"
     with pytest.raises(pub.PublicacaoRecusada, match="fonte_inconsistente"):
         pub.run(apply=True, hoje=date(2026, 10, 20))
-    assert amb["audit"] == []
+    assert amb["audit"][0] == ("start", len(linhas)) and amb["audit"][1][0] == "failed"
+    assert "fonte_inconsistente" in amb["audit"][1][1] and "repetida" in amb["audit"][1][1]
+    assert amb["ins"] == []
+
+
+@pytest.mark.parametrize("caso", sorted(RAW_INCOERENTE))
+def test_apply_com_contagem_raw_divergente_recusa_sem_tocar_destino(amb, monkeypatch, caso):
+    linhas, cobertura = RAW_INCOERENTE[caso][0]()
+    monkeypatch.setattr(pub, "_ler", lambda i, f: {"linhas": linhas, "cobertura": cobertura})
+    monkeypatch.setattr(pub, "local_engine", lambda: pytest.fail("recusa tocou o destino"))
+    monkeypatch.setattr(pub, "tabela_destino_existe", lambda: pytest.fail("recusa consultou o destino"))
+    with pytest.raises(pub.PublicacaoRecusada, match="contagem RAW por par"):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
+    assert [a[0] for a in amb["audit"]] == ["start", "failed"]
+    assert RAW_INCOERENTE[caso][1] in amb["audit"][1][1] and amb["ins"] == []
+
+
+def test_recusa_continua_recusa_se_a_auditoria_falhar(amb, monkeypatch):
+    monkeypatch.setattr(pub, "_ler", lambda i, f: dict(zip(("linhas", "cobertura"), _raw_parcial())))
+    monkeypatch.setattr(pub, "audit_start", lambda n: (_ for _ in ()).throw(OSError("sem rede")))
+    with pytest.raises(pub.PublicacaoRecusada, match="contagem RAW por par"):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
 
 
 def test_publica_com_lock_primeiro_cobertura_antes_da_fato(amb, monkeypatch):
@@ -256,14 +358,66 @@ def test_publica_com_lock_primeiro_cobertura_antes_da_fato(amb, monkeypatch):
     assert [t for t, _ in amb["ins"]] == [pub.FACT_COBERTURA, pub.FACT]
     deletes = [s for s, _ in conn.sqls if s.lstrip().startswith("DELETE")]
     assert pub.FACT in deletes[0] and pub.FACT_COBERTURA in deletes[1]
-    assert amb["audit"][-1] == ("success",)
+    # success sai DENTRO da transacao da publicacao, como ultimo comando, e so' sobre 'running'
+    ultimo, params = conn.sqls[-1]
+    assert "status = 'success'" in ultimo and "status = 'running'" in ultimo and params == {"n": 5, "sid": 9}
+    assert amb["audit"] == [("start", 5)] and r["auditoria"] == "success" and r["sync_run_id"] == 9
+
+
+def test_success_nao_fecha_desfaz_a_publicacao(amb, monkeypatch):
+    conn = _conn_certo()
+    conn.audit_rowcount = 0                      # linha de auditoria nao esta' 'running'
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    with pytest.raises(pub.AuditoriaNaoFechou):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
+    assert amb["audit"][-1][0] == "failed" and "AuditoriaNaoFechou" in amb["audit"][-1][1]
+
+
+def test_conferencia_por_par_antes_do_delete():
+    fato, cobertura, _ = T.montar_shadow(*base())
+    for fato_ruim, cob_ruim in ((fato[1:], cobertura),                                   # parcial
+                                ([f for f in fato if f["advertiser_id"] != "A2"], cobertura),  # ausente
+                                (fato, [c for c in cobertura if c["advertiser_id"] != "A2"])):  # fora da cobertura
+        conn = Conn()
+        with pytest.raises(pub.ReconciliacaoFalhou, match="antes do DELETE"):
+            pub.publicar_em_transacao(conn, fato_ruim, cob_ruim, "r")
+        assert conn.sqls == []
 
 
 def test_reconciliacao_divergente_aborta(amb, monkeypatch):
     monkeypatch.setattr(pub, "local_engine", lambda: Engine(Conn(rec=[], cob={"n": 0, "linhas": 0})))
     with pytest.raises(pub.ReconciliacaoFalhou):
         pub.run(apply=True, hoje=date(2026, 10, 20))
-    assert amb["audit"][-1] == ("failed",)
+    assert amb["audit"][-1][0] == "failed" and "ReconciliacaoFalhou" in amb["audit"][-1][1]
+
+
+class ConnLeitura:
+    def __init__(self, snapshot=pub.SNAPSHOT_ESPERADO):
+        self.snapshot, self.sqls = snapshot, []
+
+    def execute(self, sql, params=None):
+        self.sqls.append(sql)
+        if sql is pub.SQL_CONFERE_SNAPSHOT:
+            return Res(um=self.snapshot)
+        if sql is pub.SQL_PRESENCA:
+            return Res(um=(True, True))
+        return Res()
+
+
+def test_ler_fonte_abre_snapshot_antes_de_tudo():
+    conn = ConnLeitura()
+    assert pub.ler_fonte(conn, D1, D2) == {"linhas": [], "cobertura": []}
+    assert conn.sqls[:2] == [pub.SQL_SNAPSHOT, pub.SQL_CONFERE_SNAPSHOT]
+    assert conn.sqls[-2:] == [pub.SQL_LINHAS, pub.SQL_COBERTURA]
+    assert str(pub.SQL_SNAPSHOT) == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+
+@pytest.mark.parametrize("snapshot", [("read committed", "on"), ("repeatable read", "off")])
+def test_ler_fonte_sem_snapshot_recusa(snapshot):
+    conn = ConnLeitura(snapshot)
+    with pytest.raises(pub.LeituraSemSnapshot):
+        pub.ler_fonte(conn, D1, D2)
+    assert pub.SQL_LINHAS not in conn.sqls
 
 
 def test_lock_ocupado(amb, monkeypatch):
@@ -338,6 +492,9 @@ def pg_engine():
             c.execute(text(sql))
         c.execute(text(f"DELETE FROM {pub.FACT}"))
         c.execute(text(f"DELETE FROM {pub.FACT_COBERTURA}"))
+        # audit.source_sync_run tem FK para dim_marketplace, que nenhuma migration semeia
+        c.execute(text("INSERT INTO marts.dim_marketplace (marketplace_id, nome_marketplace, slug) "
+                       "VALUES (1, 'TikTok', 'tiktok') ON CONFLICT DO NOTHING"))
     yield eng
     eng.dispose()
 
@@ -359,7 +516,6 @@ def _publicar_pg(eng, inicio=D1, fim=D2):
     from sqlalchemy import text
 
     with eng.begin() as c:
-        c.execute(text("SET TRANSACTION READ ONLY"))
         fonte = pub.ler_fonte(c, inicio, fim)
     fato, cobertura, _ = T.montar_shadow(fonte["linhas"], fonte["cobertura"])
     with eng.begin() as c:
@@ -462,3 +618,184 @@ def test_pg_republicacao_parcial_so_substitui_pares_consultados(pg_engine):
         assert c.execute(text(f"SELECT spend FROM {pub.FACT} WHERE stat_date=:d"), {"d": D2}).all() == \
             [(Decimal("2.00"),)]
         assert c.execute(text(f"SELECT COUNT(*) FROM {pub.FACT_COBERTURA}")).scalar() == 4
+
+
+# ---------------------------------------------------------------------------
+# PG: contagem RAW por par, snapshot da leitura e auditoria (R14)
+# ---------------------------------------------------------------------------
+HOJE = date(2026, 10, 20)
+
+
+def _ler_pg(eng):
+    def ler(inicio, fim):
+        with eng.begin() as c:
+            return pub.ler_fonte(c, inicio, fim)
+    return ler
+
+
+@pytest.fixture
+def run_pg(pg_engine, monkeypatch):
+    """`pub.run(apply=True)` de verdade: leitura, destino e auditoria no PG descartavel."""
+    monkeypatch.setattr(pub, "_ler", _ler_pg(pg_engine))
+    monkeypatch.setattr(pub, "local_engine", lambda: pg_engine)
+    monkeypatch.setattr(pub, "_audit_conn", pg_engine.raw_connection)
+    monkeypatch.setenv(pub.FLAG_AMBIENTE, "true")
+    return lambda: pub.run(apply=True, hoje=HOJE)
+
+
+def _foto_bytes(eng):
+    """Destino inteiro, TODAS as colunas (inclusive source_run_id e published_at), como texto."""
+    from sqlalchemy import text
+
+    with eng.connect() as c:
+        return tuple(tuple(c.execute(text(f"SELECT COUNT(*), COALESCE(string_agg(t::text, '|' ORDER BY t::text), '') "
+                                          f"FROM {tabela} t")).one())
+                     for tabela in (pub.FACT, pub.FACT_COBERTURA))
+
+
+def _auditoria(eng, sid=None):
+    from sqlalchemy import text
+
+    with eng.connect() as c:
+        if sid is None:
+            sid = c.execute(text("SELECT MAX(sync_run_id) FROM audit.source_sync_run "
+                                 "WHERE source_name = :s"), {"s": pub.AUDIT_SOURCE}).scalar()
+        return tuple(c.execute(text("SELECT sync_run_id, status, rows_loaded, error_message, finished_at IS NOT NULL "
+                                    "FROM audit.source_sync_run WHERE sync_run_id = :i"), {"i": sid}).one())
+
+
+@pg
+@pytest.mark.parametrize("caso", sorted(RAW_INCOERENTE))
+def test_pg_raw_incoerente_recusa_e_destino_fica_byte_a_byte(pg_engine, run_pg, caso):
+    _carregar_raw(pg_engine, *base())
+    r = run_pg()                                                      # foto anterior, publicada de verdade
+    assert r["applied"] is True and _auditoria(pg_engine, r["sync_run_id"])[1:3] == ("success", 5)
+    antes = _foto_bytes(pg_engine)
+    assert antes[0][0] == 5 and antes[1][0] == 4
+
+    _carregar_raw(pg_engine, *RAW_INCOERENTE[caso][0]())
+    with pytest.raises(pub.PublicacaoRecusada, match="contagem RAW por par"):
+        run_pg()
+    assert _foto_bytes(pg_engine) == antes                            # contagem e conteudo iguais
+    sid, status, rows, erro, fechou = _auditoria(pg_engine)
+    assert sid > r["sync_run_id"] and (status, rows, fechou) == ("failed", 0, True)
+    assert "fonte_inconsistente" in erro and RAW_INCOERENTE[caso][1] in erro
+
+
+@pg
+def test_pg_caso_positivo_continua_publicando_e_substitui(pg_engine, run_pg):
+    from sqlalchemy import text
+
+    _carregar_raw(pg_engine, *base())
+    r1 = run_pg()
+    antes = _foto_bytes(pg_engine)
+    linhas, cobertura = base()
+    linhas[0] = l("apice", "A1", "C1", D1, "shop", "11.00")          # spend revisado, contagem coerente
+    _carregar_raw(pg_engine, linhas, cobertura)
+    r2 = run_pg()
+    assert r2["applied"] is True and r2["spend_medido_publicado"] == Decimal("23.75")
+    assert _foto_bytes(pg_engine) != antes
+    assert _auditoria(pg_engine, r2["sync_run_id"])[1:3] == ("success", 5)
+    with pg_engine.connect() as c:
+        assert set(c.execute(text(f"SELECT source_run_id FROM {pub.FACT}")).scalars()) == {r2["run_id"]}
+        assert set(c.execute(text(f"SELECT source_run_id FROM {pub.FACT_COBERTURA}")).scalars()) == {r2["run_id"]}
+    assert r1["run_id"] != r2["run_id"]
+
+
+@pg
+def test_pg_success_que_nao_fecha_desfaz_a_publicacao(pg_engine, run_pg, monkeypatch):
+    _carregar_raw(pg_engine, *base())
+    run_pg()
+    antes = _foto_bytes(pg_engine)
+    linhas, cobertura = base()
+    linhas[0] = l("apice", "A1", "C1", D1, "shop", "11.00")
+    _carregar_raw(pg_engine, linhas, cobertura)
+    real = pub.audit_start
+    sids = []
+
+    def start_e_fecha(n):                       # outro processo "fecha" a linha antes do COMMIT
+        sid = real(n)
+        sids.append(sid)
+        pub.audit_finish(sid, "failed", rows_loaded=0, error_message="fechada por fora")
+        return sid
+
+    monkeypatch.setattr(pub, "audit_start", start_e_fecha)
+    with pytest.raises(pub.AuditoriaNaoFechou):
+        run_pg()
+    assert _foto_bytes(pg_engine) == antes                            # success nao saiu => dados nao sairam
+    assert _auditoria(pg_engine, sids[0])[1:4] == ("failed", 0, "fechada por fora")   # nao foi sobrescrita
+
+
+@pg
+def test_pg_audit_finish_nunca_rebaixa_success(pg_engine, run_pg):
+    _carregar_raw(pg_engine, *base())
+    r = run_pg()
+    with pytest.raises(pub.AuditoriaNaoFechou):
+        pub.audit_finish(r["sync_run_id"], "failed", rows_loaded=0, error_message="tardio")
+    pub._auditar_falha(r["sync_run_id"], "tardio")                  # caminho do except: so' loga
+    assert _auditoria(pg_engine, r["sync_run_id"])[1:4] == ("success", 5, None)
+
+
+def _inserir_raw_alheio(eng):
+    from sqlalchemy import text
+
+    with eng.begin() as o:
+        o.execute(text("INSERT INTO raw.tiktok_ads_campaign_daily VALUES "
+                       "('apice', 'A9', 'C1', :d, 'shop', 1, 1, 1, 1, 1, NULL, NULL), "
+                       "('apice', 'A9', 'C2', :d, 'shop', 1, 1, 1, 1, 1, NULL, NULL)"), {"d": D2})
+        o.execute(text("INSERT INTO raw.tiktok_ads_coverage VALUES ('apice', 'A9', :d, 2)"), {"d": D2})
+
+
+class _Intercalada:
+    """Conexao que, logo apos ler a fato da raw, deixa outro processo COMMITar fato + cobertura novas."""
+
+    def __init__(self, conn, eng):
+        self.conn, self.eng = conn, eng
+
+    def execute(self, sql, params=None):
+        res = self.conn.execute(sql) if params is None else self.conn.execute(sql, params)
+        if sql is pub.SQL_LINHAS:
+            res = list(res)                                           # materializa antes do commit alheio
+            _inserir_raw_alheio(self.eng)
+        return res
+
+
+@pg
+def test_pg_leitura_ve_um_snapshot_so(pg_engine):
+    _carregar_raw(pg_engine, *base())
+    with pg_engine.begin() as c:
+        fonte = pub.ler_fonte(_Intercalada(c, pg_engine), D1, D2)
+    # REPEATABLE READ: nem as linhas nem a cobertura do commit alheio aparecem -> coerente
+    assert not [x for x in fonte["linhas"] + fonte["cobertura"] if x["advertiser_id"] == "A9"]
+    T.montar_shadow(fonte["linhas"], fonte["cobertura"])
+
+
+@pg
+def test_pg_contraprova_read_committed_le_cobertura_sem_as_linhas(pg_engine, monkeypatch):
+    """Discriminador do teste acima: sem o snapshot, a mesma intercalacao produz par incoerente."""
+    from sqlalchemy import text
+
+    monkeypatch.setattr(pub, "SQL_SNAPSHOT", text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY"))
+    monkeypatch.setattr(pub, "SNAPSHOT_ESPERADO", ("read committed", "on"))
+    _carregar_raw(pg_engine, *base())
+    with pg_engine.begin() as c:
+        fonte = pub.ler_fonte(_Intercalada(c, pg_engine), D1, D2)
+    assert [x["linhas"] for x in fonte["cobertura"] if x["advertiser_id"] == "A9"] == [2]
+    assert not [x for x in fonte["linhas"] if x["advertiser_id"] == "A9"]
+    with pytest.raises(T.FonteInconsistente, match="A9 2026-10-15 declarado=2 lido=0"):
+        T.montar_shadow(fonte["linhas"], fonte["cobertura"])
+
+
+@pg
+def test_pg_leitura_e_read_only_e_exige_inicio_de_transacao(pg_engine):
+    from sqlalchemy import exc, text
+
+    _carregar_raw(pg_engine, *base())
+    with pytest.raises(exc.DBAPIError, match="read-only"):
+        with pg_engine.begin() as c:
+            pub.ler_fonte(c, D1, D2)
+            c.execute(text("INSERT INTO raw.tiktok_ads_coverage VALUES ('apice', 'Z', '2026-10-14', 0)"))
+    with pytest.raises(exc.DBAPIError, match="before any query"):
+        with pg_engine.begin() as c:
+            c.execute(text("SELECT 1"))
+            pub.ler_fonte(c, D1, D2)
