@@ -598,3 +598,22 @@ test("ML Prazo: o painel renderiza 'Indisponível neste canal: …' (a frase ant
   const ajuda = renderToStaticMarkup(h(AjudaMetrica, { chave: "mercadolivre.prazo", abertoInicial: true }));
   assert.match(ajuda, /Indisponível neste canal/);
 });
+
+test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o `?`; a ausencia fica no corpo", async () => {
+  const { default: Panel } = await import("../src/components/ui/Panel.tsx");
+  // O titulo no cliente, com o `?` do canal sem prazo logo depois.
+  assert.match(CLIENTE, /Prazo de despacho <Ajuda chave=\{AJUDA_CANAL_SEM_PRAZO\.prazo\} \/>/);
+  assert.doesNotMatch(CLIENTE, /Prazo indisponível pelo canal/, "titulo antigo fora");
+  // Mesma montagem do cliente: titulo + `?` + corpo com a frase do canal.
+  const html = renderToStaticMarkup(
+    h(
+      Panel,
+      { titulo: h("span", null, "Prazo de despacho ", h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo })) },
+      h("p", { className: "text-sm text-ink" }, SEM_PRAZO_CANAL_ML),
+    ),
+  );
+  assert.match(html, /Prazo de despacho /);
+  assert.match(html, /aria-label="O que é Prazo e LDR no Mercado Livre"/);
+  assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./);
+  assert.doesNotMatch(html, /Prazo indisponível pelo canal/);
+});

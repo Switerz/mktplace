@@ -716,7 +716,7 @@ export default function ExpedicaoClient({
       <Panel
         titulo={
           <>
-            Prazo indisponível pelo canal <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />
+            Prazo de despacho <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />
           </>
         }
       >
