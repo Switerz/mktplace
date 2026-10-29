@@ -527,10 +527,24 @@ def test_regras_de_frescor_vem_das_rotas_irmas():
     """Mesmos limites da `/shopee/ldr` (6 h) e do alerta da `/tiktok` (12 h),
     sem o numero redigitado aqui: a prova e' pelas bordas."""
     lim = svc.shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
-    assert not svc._shopee_ldr_velha(AGORA - timedelta(hours=lim), AGORA)
-    assert svc._shopee_ldr_velha(AGORA - timedelta(hours=lim, minutes=1), AGORA)
+    no_limite = AGORA - timedelta(hours=lim)
+    passou = AGORA - timedelta(hours=lim, minutes=1)
+
+    def codigos(*args):
+        return [c for c, _ in svc._shopee_ldr_velha(*args, AGORA)]
+
+    # Publicacao e fonte medidas com o MESMO limite, cada uma no seu sintoma.
+    assert codigos(no_limite, no_limite) == []
+    assert codigos(passou, no_limite) == ["publicacao_desatualizada"]
+    assert codigos(no_limite, passou) == ["fonte_desatualizada"]
+    assert codigos(no_limite, None) == ["fonte_sem_carimbo"]
+    assert codigos(passou, None) == ["publicacao_desatualizada", "fonte_sem_carimbo"]
     assert not svc._tiktok_fotografia_velha(AGORA - timedelta(hours=12), AGORA)
     assert svc._tiktok_fotografia_velha(AGORA - timedelta(hours=12, minutes=1), AGORA)
+    # A `/tiktok` nao olha o watermark: a jornada tambem nao.
+    assert svc._tiktok_velha(AGORA - timedelta(hours=1), None, AGORA) == []
+    assert svc._tiktok_velha(AGORA - timedelta(hours=1),
+                             AGORA - timedelta(days=3), AGORA) == []
 
 
 def test_openapi_lista_a_rota():
@@ -929,3 +943,234 @@ def test_frescor_fora_do_dominio_vira_unknown_e_nao_500(engine, sessao, ligado):
         with engine.begin() as c:
             c.execute(text("DELETE FROM audit.data_quality_check WHERE check_name = :chk"),
                       {"chk": svc.CHECK_FRESHNESS})
+
+
+# ---------------------------------------------------------------------------
+# Revisao R16 (HIGH): frescor da FONTE na coorte Shopee, paridade com a LDR
+# ---------------------------------------------------------------------------
+WM_ORIGINAL = AGORA - timedelta(hours=2)
+LDR_TAB = "marts.expedicao_shopee_ldr_daily"
+TIKTOK_TAB = "marts.expedicao_tiktok_dispatch_daily"
+
+
+@pytest.fixture
+def watermark(engine):
+    """Reescreve `source_watermark_at` de uma tabela de coorte e restaura."""
+    tocadas: set[str] = set()
+
+    def aplicar(tabela: str, valor, marca=None):
+        tocadas.add(tabela)
+        onde = " WHERE lower(brand) = :m" if marca else ""
+        with engine.begin() as c:
+            c.execute(text(f"UPDATE {tabela} SET source_watermark_at = :v{onde}"),
+                      {"v": valor, "m": marca})
+
+    yield aplicar
+    with engine.begin() as c:
+        for tabela in tocadas:
+            c.execute(text(f"UPDATE {tabela} SET source_watermark_at = :v"),
+                      {"v": WM_ORIGINAL})
+
+
+def ldr_irma(sessao, **kw):
+    kw.setdefault("agora", AGORA)
+    r = svc.shopee_ldr_svc.obter_ldr(sessao, **kw)
+    sessao.rollback()
+    return r
+
+
+def test_coorte_expoe_fonte_lida_em(sessao, ligado):
+    for canal in ("shopee", "tiktok"):
+        c = jornada(sessao, canal)["coorte"]
+        assert c["fonte_lida_em"] == WM_ORIGINAL
+        assert c["desatualizada"] is False
+
+
+def test_shopee_publicacao_recente_sobre_fonte_velha_e_desatualizada(
+        sessao, ligado, watermark, cliente):
+    """Reproducao do revisor: publicacao de 1 h, watermark de 48 h."""
+    watermark(LDR_TAB, AGORA - timedelta(hours=48))
+    r = jornada(sessao, "shopee")
+    c = r["coorte"]
+    assert c["publicado_em"] == AGORA - timedelta(hours=1)
+    assert c["fonte_lida_em"] == AGORA - timedelta(hours=48)
+    assert c["desatualizada"] is True
+    assert r["status"] == "partial"
+    assert r["reason"] == "coorte: fonte_desatualizada"
+    assert ("a fonte não recebe dado novo desde 24/10/2026 12:00 (Brasília); "
+            "os números não são atuais") in c["limitacoes"]
+    # A publicacao em si nao e' velha: o motivo nao pode dizer que e'.
+    assert not any(x.startswith("publicação de") for x in c["limitacoes"])
+    # Numeros intactos; a fila aberta (outra fonte) segue servida.
+    assert c["etapas_fecham"] is True and c["base"] == 7 * 90
+    assert r["fila_aberta"]["base"] == 535
+
+    irma = ldr_irma(sessao)["snapshot"]
+    assert irma["stale"] is True and irma["source_age_hours"] == 48
+
+    corpo = cliente.get("/api/v1/expedicao/jornada", params={"channel": "shopee"}).json()
+    assert corpo["coorte"]["desatualizada"] is True
+    print("\n=== exemplo shopee fonte velha, publicacao recente ===\n"
+          + json.dumps(corpo, ensure_ascii=False, indent=1))
+
+
+def test_shopee_fonte_sem_carimbo_e_desatualizada(sessao, ligado, watermark):
+    watermark(LDR_TAB, None)
+    r = jornada(sessao, "shopee")
+    c = r["coorte"]
+    assert c["fonte_lida_em"] is None
+    assert c["desatualizada"] is True
+    assert r["status"] == "partial"
+    assert r["reason"] == "coorte: fonte_sem_carimbo"
+    assert any("não registra leitura da fonte" in x for x in c["limitacoes"])
+    irma = ldr_irma(sessao)["snapshot"]
+    assert irma["stale"] is True and irma["source_age_hours"] is None
+
+
+def test_shopee_publicacao_e_fonte_velhas_dao_os_dois_motivos(sessao, ligado, watermark):
+    watermark(LDR_TAB, AGORA - timedelta(hours=30))
+    r = jornada(sessao, "shopee", agora=AGORA + timedelta(hours=6))
+    assert r["reason"] == "coorte: publicacao_desatualizada; coorte: fonte_desatualizada"
+    assert r["coorte"]["desatualizada"] is True
+
+
+@pytest.mark.parametrize("idade_fonte", [
+    timedelta(hours=2), timedelta(hours=6), timedelta(hours=6, minutes=1),
+    timedelta(hours=48), None,
+], ids=["fonte2h", "fonte6h", "fonte6h01", "fonte48h", "fonte_nula"])
+@pytest.mark.parametrize("depois", [timedelta(0), timedelta(hours=6)],
+                         ids=["pub1h", "pub7h"])
+def test_paridade_com_a_rota_ldr_sobre_velha(idade_fonte, depois, sessao, ligado,
+                                             watermark):
+    """As duas rotas, no MESMO banco e no MESMO instante, concordam sobre "velha"."""
+    agora = AGORA + depois
+    watermark(LDR_TAB, None if idade_fonte is None else agora - idade_fonte)
+    c = jornada(sessao, "shopee", agora=agora)["coorte"]
+    irma = ldr_irma(sessao, agora=agora)["snapshot"]
+    assert c["desatualizada"] is irma["stale"]
+    assert c["publicado_em"] == irma["effective_at"]
+
+
+def test_paridade_com_a_ldr_no_filtro_de_marca(sessao, ligado, watermark):
+    """Watermark e' por conta: a conta fresca do apice nao esconde a barbours."""
+    watermark(LDR_TAB, AGORA - timedelta(hours=48), marca="barbours")
+    so_barbours = jornada(sessao, "shopee", brands=["Barbours"])
+    assert so_barbours["coorte"]["desatualizada"] is True
+    assert so_barbours["coorte"]["fonte_lida_em"] == AGORA - timedelta(hours=48)
+    assert ldr_irma(sessao, brands=["Barbours"])["snapshot"]["stale"] is True
+    # Sem filtro, as duas rotas usam o watermark mais recente: em dia.
+    assert jornada(sessao, "shopee")["coorte"]["desatualizada"] is False
+    assert ldr_irma(sessao)["snapshot"]["stale"] is False
+    # Marca sem linha na janela: nada a medir dela, vale o do canal.
+    c = jornada(sessao, "shopee", brands=["naoexiste"])["coorte"]
+    assert c["fonte_lida_em"] == WM_ORIGINAL and c["desatualizada"] is False
+
+
+def test_tiktok_mantem_a_regra_da_rota_irma_que_ignora_watermark(sessao, ligado,
+                                                                watermark):
+    """A `/tiktok` so' olha `effective_at` no alerta `fotografia_velha`."""
+    for valor in (AGORA - timedelta(hours=48), None):
+        watermark(TIKTOK_TAB, valor)
+        r = jornada(sessao, "tiktok")
+        assert r["coorte"]["fonte_lida_em"] == valor
+        assert r["coorte"]["desatualizada"] is False
+        assert r["status"] == "ok", r["reason"]
+        irma = svc.tiktok_svc.obter_serie(sessao, agora=AGORA)
+        sessao.rollback()
+        assert not any(a["code"] == "fotografia_velha" for a in irma["alerts"])
+
+
+# ---------------------------------------------------------------------------
+# Revisao R16 (MEDIUM): fila vazia comprovada x ausencia de publicacao
+# ---------------------------------------------------------------------------
+FILA_TAB = "marts.expedicao_fila_atual"
+RUN_TAB = "marts.expedicao_refresh_run"
+LOTE_ML_VAZIO = "dddddddd-4444-4444-8444-dddddddddddd"
+
+
+def _resumo_ml_zerado(conta: str, marca: str) -> dict:
+    return {"refresh_batch_id": LOTE_ML_VAZIO, "channel": "mercadolivre",
+            "shop_account": conta, "brand": marca,
+            "snapshot_hour": HORA + timedelta(hours=1),
+            "observed_at": AGORA + timedelta(hours=1),
+            "source_watermark_at": AGORA + timedelta(minutes=30),
+            "source_advanced": True, **{m: 0 for m in svc._MEDIDAS_RESUMO},
+            "run_status": "success", "ingested_at": AGORA + timedelta(hours=1)}
+
+
+@pytest.fixture
+def ml_sem_fila(engine):
+    """Apaga a fila do ML (o DELETE do publicador) e restaura tudo no fim."""
+    with engine.begin() as c:
+        resumos = [dict(r) for r in c.execute(text(
+            f"SELECT * FROM {RUN_TAB} WHERE channel = 'mercadolivre'")).mappings()]
+        c.execute(text(f"DELETE FROM {FILA_TAB} WHERE channel = 'mercadolivre'"))
+    yield
+    with engine.begin() as c:
+        c.execute(text(f"DELETE FROM {RUN_TAB} WHERE channel = 'mercadolivre'"))
+    _inserir(engine, RUN_TAB, resumos)
+    _inserir(engine, FILA_TAB, FILA_ML)
+
+
+def test_fila_vazia_comprovada_vira_base_zero_ok(engine, sessao, ligado, ml_sem_fila,
+                                                 cliente):
+    """Desfecho legitimo do publicador: fila limpa + resumos zerados no lote."""
+    _inserir(engine, RUN_TAB, [_resumo_ml_zerado("2532564723", "barbours"),
+                               _resumo_ml_zerado("2227056661", "kokeshi")])
+    r = jornada(sessao, "mercadolivre")
+    assert r["status"] == "ok", r["reason"]
+    fila = r["fila_aberta"]
+    assert fila["base"] == 0
+    assert fila["etapas"] == [{"key": "aguardando_expedicao",
+                               "label": "Aguardando expedição", "count": 0}]
+    assert fila["etapas_fecham"] is True
+    assert fila["snapshot_at"] == AGORA + timedelta(hours=1)
+    assert fila["freshness"] == "fresh"
+    # Medida que o ML nao publica continua `None`, nunca 0.
+    assert sobre(fila, "vencido")["count"] is None
+    assert sobre(fila, "acima_48h")["count"] == 0
+    assert jornada(sessao, "mercadolivre", brands=["kokeshi"])["fila_aberta"]["base"] == 0
+    corpo = cliente.get("/api/v1/expedicao/jornada",
+                        params={"channel": "mercadolivre"}).json()
+    assert corpo["status"] == "ok"
+    print("\n=== exemplo mercadolivre fila vazia comprovada ===\n"
+          + json.dumps(corpo, ensure_ascii=False, indent=1))
+
+
+def test_sem_lote_nenhum_continua_unavailable(engine, sessao, ligado, ml_sem_fila):
+    with engine.begin() as c:
+        c.execute(text(f"DELETE FROM {RUN_TAB} WHERE channel = 'mercadolivre'"))
+    r = jornada(sessao, "mercadolivre")
+    assert r["status"] == "unavailable"
+    assert r["reason"] == "fila_aberta: no_snapshot_published"
+    assert r["fila_aberta"] is None
+
+
+def test_fila_vazia_com_resumo_nao_zerado_nao_vira_zero(sessao, ligado, ml_sem_fila):
+    """Fila apagada e ultimo resumo com 10 pedidos: incoerente, nunca base 0."""
+    r = jornada(sessao, "mercadolivre")
+    assert r["status"] == "unavailable"
+    assert r["fila_aberta"] is None
+    assert r["reason"] == ("fila_aberta: inconsistent_batch (fila vazia, mas o resumo "
+                           "do ultimo lote tem 10 pedido(s) no backlog)")
+
+
+def test_fila_vazia_com_dois_lotes_no_topo_falha_fechada(engine, sessao, ligado,
+                                                         ml_sem_fila):
+    a = _resumo_ml_zerado("2532564723", "barbours")
+    b = _resumo_ml_zerado("2227056661", "kokeshi")
+    b["refresh_batch_id"] = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+    _inserir(engine, RUN_TAB, [a, b])
+    r = jornada(sessao, "mercadolivre")
+    assert r["status"] == "unavailable"
+    assert r["reason"] == "fila_aberta: inconsistent_batch"
+
+
+def test_rota_principal_nao_mudou_com_fila_vazia(engine, sessao, ligado, ml_sem_fila):
+    """`_carregar_snapshot` ficou como estava: a `/` segue sem fotografia."""
+    _inserir(engine, RUN_TAB, [_resumo_ml_zerado("2532564723", "barbours"),
+                               _resumo_ml_zerado("2227056661", "kokeshi")])
+    r = svc.get_expedicao(sessao, channel="mercadolivre")
+    sessao.rollback()
+    assert r["availability"] == "unavailable"
+    assert r["unavailable_reason"] == "no_snapshot_published"

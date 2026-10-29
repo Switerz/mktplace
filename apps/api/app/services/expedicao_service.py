@@ -940,6 +940,49 @@ _FILA_SOBREPOSICOES = (
 #: elas saem `None` + motivo, nunca 0.
 _SOBREPOSICOES_DE_PRAZO = ("vencido", "vence_24h")
 
+#: Contagens do resumo por conta (018). Fotografia vazia = TODAS zeradas.
+_MEDIDAS_RESUMO = ("backlog_count", "overdue_count", "due_within_24h_count",
+                   "on_time_count", "deadline_unavailable_count", "over_48h_count",
+                   "slow_count", "zombie_count", "stalled_count")
+
+
+def _fila_vazia_publicada(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]:
+    """Fila sem linha: o ULTIMO lote do resumo prova uma fotografia vazia?
+
+    O publicador grava a fotografia vazia como fila limpa + um resumo por conta
+    com tudo zerado, na MESMA transacao (`pipelines/expedicao/cli.py`, desfecho
+    "fonte saudavel e vazia"). Entao:
+
+    * nenhum resumo do canal          -> nunca publicou: `no_snapshot_published`;
+    * ultimo lote todo zerado         -> vazio COMPROVADO: snapshot com 0 linhas;
+    * ultimo lote com pedido no resumo -> fila apagada por fora ou lote partido:
+      `inconsistent_batch` com o tamanho do buraco. Nunca vira zero.
+
+    O ultimo lote e' o de maior `observed_at`; mais de um lote, hora ou
+    instante nesse topo e' a mesma falha fechada de `_carregar_snapshot`.
+    """
+    resumos = _linhas(db, f"""
+        SELECT shop_account, brand, {", ".join(_MEDIDAS_RESUMO)},
+               run_status, source_watermark_at, source_advanced, snapshot_hour,
+               observed_at, refresh_batch_id
+        FROM {RUN}
+        WHERE channel = :canal
+          AND observed_at = (SELECT max(observed_at) FROM {RUN} WHERE channel = :canal)
+        ORDER BY brand, shop_account
+    """, {"canal": canal.slug})
+    if not resumos:
+        return None, UNAVAILABLE_NO_SNAPSHOT
+    if (len({r["refresh_batch_id"] for r in resumos}) != 1
+            or len({r["snapshot_hour"] for r in resumos}) != 1):
+        return None, UNAVAILABLE_INCONSISTENT_BATCH
+    pendentes = sum(int(r["backlog_count"]) for r in resumos)
+    if any(int(r[m]) for r in resumos for m in _MEDIDAS_RESUMO):
+        return None, (f"{UNAVAILABLE_INCONSISTENT_BATCH} (fila vazia, mas o resumo "
+                      f"do ultimo lote tem {pendentes} pedido(s) no backlog)")
+    return {"batch": resumos[0]["refresh_batch_id"],
+            "effective_at": resumos[0]["observed_at"],
+            "linhas": 0, "resumos": resumos}, None
+
 
 def _fila_aberta(db, channel: str,
                  filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
@@ -948,6 +991,11 @@ def _fila_aberta(db, channel: str,
     if not _tabelas_existem(db, FILA, RUN):
         return None, ["fila_aberta: table_not_migrated"], "unavailable"
     snap, motivo = _carregar_snapshot(db, canal)
+    if snap is None and motivo == UNAVAILABLE_NO_SNAPSHOT:
+        # Fila sem linha nenhuma: ausencia OU fotografia vazia publicada. Quem
+        # desempata e' o resumo do ultimo lote, nunca a fila (`_carregar_snapshot`
+        # fica como esta': as rotas irmas dependem dele).
+        snap, motivo = _fila_vazia_publicada(db, canal)
     if snap is None:
         return None, [f"fila_aberta: {motivo or UNAVAILABLE_NO_SNAPSHOT}"], "unavailable"
 
@@ -1032,14 +1080,21 @@ def _agrega_coorte(db, *, tabela: str, canal: str, eixo: str, colunas: dict,
     "nada publicado" (ausencia) de "a marca filtrada nao tem pedido" (zero).
     `dias_publicados` e `publicado_em` usam o MESMO criterio (sem marca): dia
     sem publicacao e publicacao velha sao propriedades da fonte, nao da marca.
+
+    `fonte_lida_em` e' a excecao, e de proposito: o watermark e' POR CONTA (o
+    publicador grava o da conta lida), e a `/shopee/ldr` com filtro de marca
+    mede so' as linhas da marca. Conta parada nao pode ser escondida pela conta
+    fresca de outra marca. So' quando a marca nao tem linha na janela (nada a
+    medir dela) vale o watermark do canal.
     """
     sel = ",\n                   ".join(
         f"{expr} AS {nome}" for nome, expr in colunas.items())
     soma = ",\n               ".join(
         f"coalesce(sum({nome}), 0) AS {nome}" for nome in colunas if nome != "madura")
-    return _linhas(db, f"""
+    linha = _linhas(db, f"""
         WITH c AS (
             SELECT {eixo} AS eixo,
+                   source_watermark_at AS wm,
                    {sel}
             FROM {tabela}
             WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim{filtro.sql()}
@@ -1056,10 +1111,20 @@ def _agrega_coorte(db, *, tabela: str, canal: str, eixo: str, colunas: dict,
                (SELECT max(effective_at) FROM {tabela}
                  WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
                    AS publicado_em,
+               (SELECT count(*) FROM c) AS linhas_marca,
+               (SELECT max(wm) FROM c) AS fonte_marca,
+               (SELECT max(source_watermark_at) FROM {tabela}
+                 WHERE channel = :canal AND {eixo} BETWEEN :inicio AND :fim)
+                   AS fonte_canal,
                (SELECT count(*) FROM dias WHERE madura) AS dias_maduros,
                (SELECT count(*) FROM dias WHERE NOT madura) AS dias_imaturos
         FROM c
     """, {"canal": canal, "inicio": inicio, "fim": fim, **filtro.params()})[0]
+    # Mesma regra da `/shopee/ldr`: o MAIS RECENTE watermark das linhas lidas;
+    # nenhum carimbo nelas -> `None` (fonte sem carimbo), nunca o do canal.
+    linha["fonte_lida_em"] = (linha["fonte_marca"] if linha["linhas_marca"]
+                              else linha["fonte_canal"])
+    return linha
 
 
 def _coorte_tiktok(db, evento: str, dias: int, agora: datetime,
@@ -1095,7 +1160,7 @@ def _coorte_tiktok(db, evento: str, dias: int, agora: datetime,
     return _monta_coorte(a, etapas, eixo="paid_date", evento=evento,
                          inicio=inicio, fim=fim, dias=dias, fora=[],
                          limitacoes=[LIMITACAO_TIKTOK_PRAZO], agora=agora,
-                         desatualizada=_tiktok_fotografia_velha)
+                         desatualizada=_tiktok_velha)
 
 
 def _coorte_shopee(db, dias: int, agora: datetime,
@@ -1145,10 +1210,36 @@ def _coorte_shopee(db, dias: int, agora: datetime,
 
 
 # ----- frescor da coorte: o MESMO limite das rotas irmas, sem redigitar ------
-def _shopee_ldr_velha(publicado_em: datetime, agora: datetime) -> bool:
-    """Regra de `snapshot.stale` da `/shopee/ldr` para a idade da publicacao."""
-    idade_h = (agora - publicado_em).total_seconds() / 3600.0
-    return idade_h > shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
+# Cada regra devolve os SINTOMAS (codigo, limitacao); lista vazia = em dia. O
+# codigo vira `coorte: <codigo>` no `reason`, e a limitacao diz qual foi a causa.
+def _idade_h(instante: datetime, agora: datetime) -> float:
+    return (agora - instante).total_seconds() / 3600.0
+
+
+def _shopee_ldr_velha(publicado_em: datetime, fonte_lida_em: Optional[datetime],
+                      agora: datetime) -> list[tuple[str, str]]:
+    """`snapshot.stale` da `/shopee/ldr`, sintoma por sintoma.
+
+    A LDR calcula `stale` dentro de `obter_ldr` (nao ha funcao para chamar):
+    `idade > LIMITE or idade_fonte is None or idade_fonte > LIMITE`, com o
+    `LIMITE_FOTOGRAFIA_HORAS` importado de la'. Sao os tres ramos abaixo, na
+    mesma ordem. Publicacao recente sobre fonte parada E' velha: reprocessar
+    dado antigo nao torna o numero atual.
+    """
+    limite = shopee_ldr_svc.LIMITE_FOTOGRAFIA_HORAS
+    sintomas = []
+    if _idade_h(publicado_em, agora) > limite:
+        sintomas.append(("publicacao_desatualizada",
+                         f"publicação de {_brt_texto(publicado_em)} ainda não atualizada"))
+    if fonte_lida_em is None:
+        sintomas.append(("fonte_sem_carimbo",
+                         "a publicação não registra leitura da fonte; não dá para "
+                         "afirmar que os números são atuais"))
+    elif _idade_h(fonte_lida_em, agora) > limite:
+        sintomas.append(("fonte_desatualizada",
+                         f"a fonte não recebe dado novo desde "
+                         f"{_brt_texto(fonte_lida_em)}; os números não são atuais"))
+    return sintomas
 
 
 #: Entrada NEUTRA para os alertas da `/tiktok`: nenhum alerta de taxa, pendente
@@ -1166,6 +1257,21 @@ def _tiktok_fotografia_velha(publicado_em: datetime, agora: datetime) -> bool:
     alertas = tiktok_svc._alertas(ldr=_LDR_NEUTRA, marcas=[], evento="coleta",
                                   effective_at=publicado_em, agora=agora)
     return any(a["code"] == "fotografia_velha" for a in alertas)
+
+
+def _tiktok_velha(publicado_em: datetime, fonte_lida_em: Optional[datetime],
+                  agora: datetime) -> list[tuple[str, str]]:
+    """So' a idade da PUBLICACAO, como a `/tiktok`.
+
+    `fonte_lida_em` e' ignorado de proposito: o alerta `fotografia_velha` da
+    rota irma nao olha `source_watermark_at` (so' `effective_at`). Considera-lo
+    aqui faria a jornada chamar de velha uma coorte que a `/tiktok` serve como
+    atual; a lacuna, se for lacuna, e' da rota irma e muda la' primeiro.
+    """
+    if _tiktok_fotografia_velha(publicado_em, agora):
+        return [("publicacao_desatualizada",
+                 f"publicação de {_brt_texto(publicado_em)} ainda não atualizada")]
+    return []
 
 
 def _brt_texto(instante: datetime) -> str:
@@ -1197,11 +1303,16 @@ def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
                           f"não cobrem a janela inteira")
 
     publicado_em = a["publicado_em"]
-    velha = publicado_em is None or bool(desatualizada(publicado_em, agora))
-    if velha:
-        quando = _brt_texto(publicado_em) if publicado_em else "data desconhecida"
-        motivos.append("coorte: publicacao_desatualizada")
-        limitacoes.append(f"publicação de {quando} ainda não atualizada")
+    fonte_lida_em = a["fonte_lida_em"]
+    if publicado_em is None:
+        sintomas = [("publicacao_desatualizada",
+                     "publicação de data desconhecida ainda não atualizada")]
+    else:
+        sintomas = desatualizada(publicado_em, fonte_lida_em, agora)
+    velha = bool(sintomas)
+    for codigo, texto in sintomas:
+        motivos.append(f"coorte: {codigo}")
+        limitacoes.append(texto)
 
     secao = {
         "eixo": eixo,
@@ -1215,6 +1326,7 @@ def _monta_coorte(a: dict, etapas: list[dict], *, eixo: str, evento: str,
         "maturidade": {"dias_maduros": int(a["dias_maduros"]),
                        "dias_imaturos": imaturos},
         "publicado_em": publicado_em,
+        "fonte_lida_em": fonte_lida_em,
         "desatualizada": velha,
         "limitacoes": limitacoes + ([LIMITACAO_COORTE_IMATURA] if imaturos else []),
     }

@@ -637,9 +637,14 @@ class JornadaCoorte(BaseModel):
     maturidade: JornadaMaturidade
     #: `max(effective_at)` das linhas da janela (sem filtro de marca), ou `None`.
     publicado_em: Optional[datetime] = None
-    #: Publicacao mais velha que o limite da rota irma (`/shopee/ldr`:
-    #: `snapshot.stale`; `/tiktok`: alerta `fotografia_velha`). Leva o
-    #: `status` a no minimo `partial`.
+    #: `max(source_watermark_at)` das linhas da janela com o filtro de marca (o
+    #: watermark e' por conta); marca sem linha na janela usa o do canal.
+    #: `None` = a publicacao nao registra leitura da fonte.
+    fonte_lida_em: Optional[datetime] = None
+    #: Mesma regra da rota irma. `/shopee/ldr` (`snapshot.stale`): publicacao
+    #: velha, fonte velha OU fonte sem carimbo. `/tiktok` (alerta
+    #: `fotografia_velha`): so' a publicacao. Leva o `status` a no minimo
+    #: `partial`, e a limitacao diz qual foi a causa.
     desatualizada: bool = False
     limitacoes: list[str] = Field(default_factory=list)
 
