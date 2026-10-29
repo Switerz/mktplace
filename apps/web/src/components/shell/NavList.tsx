@@ -4,6 +4,7 @@ import {
   BookMarked,
   Boxes,
   Calculator,
+  Gauge,
   CircleDot,
   LayoutDashboard,
   Lightbulb,
@@ -25,6 +26,7 @@ import { expedicaoHabilitado } from "@/lib/expedicao-contract";
 import { shopeeFbsEnabled } from "@/lib/shopee-fbs-flag";
 import { estoqueFullEnabled } from "@/lib/estoque-full-flag";
 import { mlFullEstoqueEnabled } from "@/lib/ml-full-estoque-flag";
+import { habilitado as performanceContasHabilitado } from "@/lib/performance-contas";
 
 import { isNavItemActive, navSections } from "./nav-config";
 
@@ -54,6 +56,7 @@ export const ICONE_DA_ROTA: Record<string, LucideIcon> = {
   "/full-shopee": Boxes,
   "/estoque-full": PackageSearch,
   "/estoque-ml-full": PackageCheck,
+  "/performance-contas": Gauge,
   "/referencias-externas/avoe": BookMarked,
 };
 
@@ -105,6 +108,7 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
         shopeeFbs: shopeeFbsEnabled(),
         estoqueFull: estoqueFullEnabled(),
         mlFullEstoque: mlFullEstoqueEnabled(),
+        performanceContas: performanceContasHabilitado(),
       }).map((section, idx) => (
         <div key={section.label} className="flex flex-col gap-0.5">
           {recolhido ? (
