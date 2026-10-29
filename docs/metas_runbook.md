@@ -22,19 +22,40 @@ Regras:
 - O GMV realizado aparece embaixo de cada campo como referência, lido de
   `/api/v1/performance/brands` até hoje. Se essa leitura falhar, a grade continua editável.
 
-## Publicação (ordem)
+## Publicação (ordem segura)
 
-1. **Migration no Neon** — manual, como as demais:
+A migration vem **antes** do código: as tabelas novas não são lidas pelo backend
+atual, então criá-las não muda nada em produção. Só depois o código que as usa entra.
+
+1. **Checar o Neon antes.** Em `apps/api`, com a `DATABASE_URL` do Render no
+   ambiente (ou no `.env`, que é ignorado pelo git):
 
    ```bash
-   cd apps/api
+   python tools/metas_deploy_check.py antes
+   ```
+
+   Exige `alembic_version = 031` (a do TikTok Ads). Se estiver abaixo, **pare**:
+   `alembic upgrade 032` aplicaria também migrations de outras frentes.
+
+2. **Migration 032:**
+
+   ```bash
    alembic upgrade 032
    ```
 
-   Reversível com `alembic downgrade 031` (derruba só as duas tabelas; nenhuma outra relação é tocada).
+   Reversível com `alembic downgrade 031`, que derruba só as duas tabelas e não toca
+   nenhuma outra relação.
 
-2. **Permissão de escrita** para o papel da `DATABASE_URL` do Render. São as
-   primeiras tabelas que a API **escreve**. Trocar `<papel_da_api>` pelo papel real:
+3. **Checar depois.** Confere tabelas, privilégios do papel da API e uma escrita de
+   teste desfeita por ROLLBACK (nada fica gravado):
+
+   ```bash
+   python tools/metas_deploy_check.py depois
+   ```
+
+   Se um privilégio falhar, o papel que roda a migration não é o mesmo da API.
+   Nesse caso, conceda o acesso e rode o passo 3 de novo (troque `<papel_da_api>`
+   pelo papel real):
 
    ```sql
    GRANT SELECT, INSERT, UPDATE, DELETE ON marts.meta_gmv_mensal TO <papel_da_api>;
@@ -42,10 +63,12 @@ Regras:
    GRANT USAGE ON SEQUENCE marts.meta_gmv_mensal_historico_id_seq TO <papel_da_api>;
    ```
 
-   Se o papel da API for o dono do schema, o GRANT é desnecessário.
-
-3. **Backend no Render** — republicar manualmente.
-4. **Frontend** — a Vercel publica sozinha após o merge.
+4. **Mesclar o PR da aba Metas** na `main`. A Vercel publica o frontend sozinha.
+5. **Republicar o backend no Render** logo em seguida. Até isso acontecer, a aba
+   Metas responde 404 e mostra erro; as outras telas não mudam.
+6. **Smoke** (abaixo).
+7. **Mesclar o PR da Gerencial** (reapontado para a `main`), aguardar a Vercel e
+   abrir a Gerencial.
 
 ## Smoke pós-deploy
 
@@ -53,8 +76,13 @@ Regras:
 curl -s https://mktplace-api.onrender.com/api/v1/metas/2026-10
 ```
 
-Esperado: `200` com `celulas: []` num mês sem metas. `503` com "Nao foi possivel
-acessar as metas no banco agora." indica migration não aplicada ou falta de GRANT.
+- `200` com `celulas: []` num mês sem metas: backend e banco certos.
+- `404`: o Render ainda não publicou o código novo.
+- `503` com "Nao foi possivel acessar as metas no banco agora.": falta migration ou privilégio (volte ao passo 3).
+
+Depois abra `/metas` no domínio canônico, salve uma meta, recarregue a página e
+confira que o valor voltou. Na Gerencial, com "Mês atual", o bloco principal deve
+mostrar a meta.
 
 ## Desfazer uma alteração
 
