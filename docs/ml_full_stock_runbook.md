@@ -128,23 +128,25 @@ psql "$NEON_ADMIN_URL" -v ON_ERROR_STOP=1 -1 \
 
 ### 7.1 Publicador: contrato do CLI (T-0019)
 
-O dry-run continua sem argumentos obrigatórios. O `--apply` exige **todas** as travas: `--apply`, `ML_FULL_STOCK_PUBLISH_ENABLED=true`, a 029 aplicada e mais três argumentos do chamador.
+O dry-run e o `--diagnosticar` continuam sem argumentos obrigatórios (nenhum dos dois exige `--destino-esperado`). O `--apply` exige **todas** as travas: `--apply`, `ML_FULL_STOCK_PUBLISH_ENABLED=true`, a 029 aplicada e mais quatro argumentos do chamador.
 
 | Argumento | Regra |
 |---|---|
 | `--marca <m>` | Repetível. Allowlist: `barbours`, `kokeshi`, `lescent`, `rituaria`. A fonte é **filtrada** para essas marcas; marca com fotografia que não foi pedida sai em `marcas_ignoradas` e nunca é gravada. Marca pedida sem fotografia faz o publicador recusar. |
 | `--raw-run <marca>=<run_id>` | Um por marca pedida. Antes de qualquer DELETE/INSERT, toda linha lida (snapshot, ponte e status) da marca/data precisa ter esse `run_id`. Além disso, em `raw.ml_full_stock_runs` o run precisa ter pedido a marca, ter começado na data (fuso de São Paulo), estar `completo`/`parcial` e ter registrado `PUBLICADA` para ela. Se algo divergir, ele recusa. |
 | `--publish-run-id <uuid hex 32>` | Gerado pelo chamador **antes** do apply e gravado como `source_run_id`. Se o id já existir em alguma fato, ele recusa (a checagem roda antes e de novo dentro do lock). |
+| `--destino-esperado <arquivo.json>` | O arquivo **aprovado** gerado pelo `-Identificar` do pacote humano, no formato que o `identificar` do helper `ml_full_neon_db.py` grava. O publicador usa só `identidade.alvo_neon`. Sem o argumento, ou com arquivo ilegível, recusa antes de qualquer conexão (`nao_iniciada`). Dentro da transação de escrita, logo depois do advisory lock e **antes de qualquer DELETE**, lê a impressão digital do banco **com a conexão da própria transação** e compara campo a campo; null só bate com null. As queries e a normalização são as mesmas do helper: `current_database`, `server_version_num`, `em_recuperacao`, `system_identifier`, `neon_tenant_id`, `neon_timeline_id`, `alembic_version_num` e `modo`. Se divergir, recusa com `destino_divergente: alvo_neon.<campo>` (só o nome do campo, sem valores), exit 2 e `revertida_comprovada`. |
 
 ```bash
 # 1) dry-run: o JSON traz `linhagem_raw` (run_id por marca) para montar o --raw-run
 python -m pipelines.publish_ml_full_stock_daily --ref-date 2026-10-28 \
        --marca barbours --raw-run barbours=<run_id>        # mesma conferência, sem escrita
 
-# 2) apply só da Barbours
+# 2) apply só da Barbours (arquivo = identidade_ml_full_<UTC>.json aprovado do -Identificar)
 PID=$(python -c "import uuid; print(uuid.uuid4().hex)")    # guardar ANTES de rodar
 ML_FULL_STOCK_PUBLISH_ENABLED=true python -m pipelines.publish_ml_full_stock_daily --apply \
-       --ref-date 2026-10-28 --marca barbours --raw-run barbours=<run_id> --publish-run-id "$PID"
+       --ref-date 2026-10-28 --marca barbours --raw-run barbours=<run_id> --publish-run-id "$PID" \
+       --destino-esperado <identidade_aprovada.json>
 
 # 3) depois de timeout / JSON perdido / exit 1 com estado indeterminado (só leitura, sem flag)
 python -m pipelines.publish_ml_full_stock_daily --diagnosticar --ref-date 2026-10-28 --publish-run-id "$PID"
@@ -155,9 +157,13 @@ python -m pipelines.publish_ml_full_stock_daily --diagnosticar --ref-date 2026-1
 | Exit | Significado | `estado_transacao` |
 |---|---|---|
 | 0 | dry-run, diagnóstico ou apply com commit e auditoria ok | `commit_confirmado` (no apply) |
-| 2 | recusa: travas, contrato, linhagem, marca, `publish-run-id` reutilizado. Nada gravado | `nao_iniciada` ou `revertida_comprovada` (recusa sob o lock) |
+| 2 | recusa: travas, contrato, linhagem, marca, `publish-run-id` reutilizado, destino esperado ausente, ilegível ou divergente. Nada gravado nas fatos | `nao_iniciada` ou `revertida_comprovada` (recusa sob o lock: `publish-run-id` reutilizado ou `destino_divergente`) |
 | 5 | **commit confirmado com pendência**: as fatos foram gravadas, mas o `audit_finish` falhou (`auditoria_ok=false`, `erro_auditoria`) | `commit_confirmado` |
 | 1 | erro (lock, reconciliação, conexão…) | `nao_iniciada`, `revertida_comprovada` (exceção antes do COMMIT, rollback feito) ou `indeterminado` (falhou o próprio COMMIT: rode `--diagnosticar`) |
+
+**`modo` e o fallback `localhost`.** O publicador não recebe o modo por argumento. Ele vale `teste` quando o host **real** da conexão (`connection.info.host`) é loopback ou socket, e `real` fora disso. O helper só aceita loopback no modo teste e recusa no real. Por isso um arquivo aprovado real nunca confere com uma conexão que caiu no `localhost` padrão do `config.py`: diverge em `modo`, além dos outros campos.
+
+**Limite conhecido.** A auditoria (`audit_start`) usa uma conexão própria e roda **antes** da transação de escrita. Com destino divergente, a linha `failed` de `audit.source_sync_run` vai para o banco que o publicador abriu (o divergente), não para o aprovado. As fatos não são tocadas.
 
 **Diagnóstico.** `--diagnosticar` abre uma transação `READ ONLY` no Neon, sem lock e sem escrita, e devolve:
 - as linhas por fato e por marca com aquele `source_run_id` na data;

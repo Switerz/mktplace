@@ -11,7 +11,10 @@ TRAVAS PARA ESCREVER (todas obrigatorias)
 2. `ML_FULL_STOCK_PUBLISH_ENABLED=true` no ambiente;
 3. as tres tabelas da 029 existindo no Neon (`to_regclass`);
 4. contrato do chamador (T-0019): `--marca` (allowlist), um `--raw-run
-   <marca>=<run_id>` por marca pedida e `--publish-run-id <uuid hex 32>`.
+   <marca>=<run_id>` por marca pedida e `--publish-run-id <uuid hex 32>`;
+5. `--destino-esperado <arquivo.json>`: o arquivo aprovado gerado pelo
+   `-Identificar` do pacote humano. Ausente/ilegivel = recusa antes de qualquer
+   conexao de escrita.
 Sem qualquer uma delas o run e' dry-run (ou recusa explicita), sem escrita.
 
 CONTRATO DO APPLY
@@ -31,6 +34,10 @@ PUBLICACAO
 ----------
 - `engine.begin()`: uma transacao; `pg_try_advisory_xact_lock` e' o PRIMEIRO
   comando (devolvido pelo banco no COMMIT e no ROLLBACK).
+- Logo depois do lock, ANTES de qualquer DELETE, a impressao digital do banco
+  (mesmas queries do `identificar` do helper) e' lida NA conexao da transacao e
+  comparada campo a campo com `identidade.alvo_neon` (null so' bate com null).
+  Divergencia = `PublicacaoRecusada` com o NOME do campo, `revertida_comprovada`.
 - So' as marcas pedidas. DELETE do (ref_date, marca) + INSERT: reexecutar
   substitui, nunca duplica, e nunca toca marca nao pedida.
 - Reconciliacao PRE-COMMIT: linhas e soma do disponivel no destino tem de
@@ -59,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -173,6 +181,109 @@ def sanitizar(exc) -> str:
 
 def flag_ligada() -> bool:
     return os.environ.get(FLAG_AMBIENTE, "").strip().lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# Destino esperado: impressao digital NAO secreta do Neon (T-0019, fase 3)
+# ---------------------------------------------------------------------------
+#: Mesmo formato, mesmas queries e mesma normalizacao do `identificar` do helper
+#: do pacote humano (`ml_full_neon_db.py`): o arquivo aprovado por `-Identificar`
+#: e' `{"identidade": {"alvo_neon": {...}, "fonte_datamart": {...}}, ...}` e o
+#: publicador usa so' `identidade.alvo_neon`.
+DESTINO_LADO = "alvo_neon"
+
+
+def carregar_destino_esperado(caminho) -> dict:
+    """`identidade.alvo_neon` do arquivo aprovado. Ausente/ilegivel = recusa (sem conexao)."""
+    if not caminho:
+        raise PublicacaoRecusada("--apply exige --destino-esperado <arquivo aprovado por -Identificar>")
+    try:
+        with open(caminho, encoding="utf-8-sig") as f:
+            ident = json.load(f).get("identidade")
+    except Exception:
+        raise PublicacaoRecusada("destino_esperado_ilegivel: arquivo ausente ou nao e' o JSON do identificar") \
+            from None
+    esperado = ident.get(DESTINO_LADO) if isinstance(ident, dict) else None
+    if not isinstance(esperado, dict) or not esperado:
+        raise PublicacaoRecusada(f"destino_esperado_sem_identidade: falta identidade.{DESTINO_LADO}")
+    return esperado
+
+
+def _host_loopback(host) -> bool:
+    """Mesma regra do helper; socket (host vazio ou diretorio) conta como local."""
+    if not host:
+        return True
+    h = str(host).strip().strip("[]").lower()
+    if h.startswith("/") or h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def _um(cur, q):
+    cur.execute(q)
+    return cur.fetchone()[0]
+
+
+def _opcional(cur, q):
+    """Campo que o papel pode nao ter permissao de ler: erro vira null, sem abortar a transacao."""
+    cur.execute("SAVEPOINT ml_full_ident")
+    try:
+        cur.execute(q)
+        v = cur.fetchone()
+        cur.execute("RELEASE SAVEPOINT ml_full_ident")
+        return None if v is None or v[0] is None else str(v[0])
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT ml_full_ident")
+        return None
+
+
+def identidade_destino(cur) -> dict:
+    """Impressao digital do banco do cursor, identica a `ml_full_neon_db.identidade`.
+
+    `modo` nao vem de argumento: e' "teste" quando o host REAL da conexao e'
+    loopback/socket (o helper so' aceita loopback no modo teste e recusa no real)
+    e "real" fora disso. O `localhost` padrao do config.py nunca confere com um
+    arquivo real.
+    """
+    host = getattr(getattr(cur.connection, "info", None), "host", None)
+    r = {"modo": "teste" if _host_loopback(host) else "real",
+         "current_database": _um(cur, "SELECT current_database()"),
+         "server_version_num": _um(cur, "SELECT current_setting('server_version_num')"),
+         "em_recuperacao": bool(_um(cur, "SELECT pg_is_in_recovery()")),
+         "system_identifier": None,
+         "neon_tenant_id": _opcional(cur, "SELECT current_setting('neon.tenant_id', true)"),
+         "neon_timeline_id": _opcional(cur, "SELECT current_setting('neon.timeline_id', true)"),
+         "alembic_version_num": None}
+    if _um(cur, "SELECT has_function_privilege('pg_catalog.pg_control_system()', 'EXECUTE')"):
+        r["system_identifier"] = _opcional(cur, "SELECT system_identifier FROM pg_catalog.pg_control_system()")
+    if _um(cur, "SELECT to_regclass('public.alembic_version') IS NOT NULL"):
+        r["alembic_version_num"] = _opcional(
+            cur, "SELECT string_agg(version_num::text, ',' ORDER BY version_num) FROM public.alembic_version")
+    return r
+
+
+def _igual(x, y) -> bool:
+    if x is None or y is None:
+        return x is None and y is None
+    return type(x) is type(y) and x == y
+
+
+def campos_divergentes(atual: dict, esperado: dict) -> list[str]:
+    """Nomes dos campos que nao batem (null so' com null). Sem valores: nada sensivel sai."""
+    return [k for k in sorted(set(atual) | set(esperado))
+            if k not in atual or k not in esperado or not _igual(atual[k], esperado[k])]
+
+
+def conferir_destino(conn, esperado: dict) -> None:
+    """Na conexao DA TRANSACAO de escrita: o banco e' o aprovado, ou recusa."""
+    with conn.connection.cursor() as cur:
+        div = campos_divergentes(identidade_destino(cur), esperado)
+    if div:
+        raise PublicacaoRecusada("destino_divergente: " + ", ".join(f"{DESTINO_LADO}.{k}" for k in div))
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +435,16 @@ def _marcar(exc, **atributos):
             pass
 
 
-def _publicar(pacote, ref_date, publish_run_id):
+def _publicar(pacote, ref_date, publish_run_id, destino_esperado: dict):
     """Uma transacao. Marca na excecao se o COMMIT chegou a ser enviado."""
     corpo_concluido = False
     try:
         with local_engine().begin() as conn:
             if not conn.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar():
                 raise ConcurrentRunError(f"advisory lock {ADVISORY_LOCK_KEY} ocupado")
+            # Identidade NA conexao desta transacao, antes de qualquer DELETE: fecha a
+            # janela entre a checagem do chamador e a conexao do publicador.
+            conferir_destino(conn, destino_esperado)
             # Rechecagem sob o lock: fecha a corrida entre a pre-checagem e a escrita.
             if conn.execute(SQL_PUBLISH_RUN_ID_EM_USO, {"publish_run_id": publish_run_id}).scalar():
                 raise PublicacaoRecusada(f"publish_run_id_reutilizado: {publish_run_id} ja' existe no destino")
@@ -418,12 +532,14 @@ def _ler_fonte(ref_date, runs=()):
 # Execucao
 # ---------------------------------------------------------------------------
 def run(apply: bool = False, ref_date: date | None = None, agora: datetime | None = None,
-        marcas=None, raw_runs=None, publish_run_id: str | None = None) -> dict:
+        marcas=None, raw_runs=None, publish_run_id: str | None = None,
+        destino_esperado: str | None = None) -> dict:
     ref_date = ref_date or fonte_mod._hoje_brt(agora)
     marcas, raw_runs = list(marcas or []), dict(raw_runs or {})
     validar_contrato(marcas, raw_runs, publish_run_id, exigir=apply)
     if apply and not flag_ligada():
         raise PublicacaoRecusada(f"{FLAG_AMBIENTE} desligada")
+    esperado_neon = carregar_destino_esperado(destino_esperado) if (apply or destino_esperado) else None
     run_id = publish_run_id or uuid.uuid4().hex
     fonte = _ler_fonte(ref_date, tuple(sorted(set(raw_runs.values()))))
     ignoradas, sem_foto = [], []
@@ -454,7 +570,7 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
     resumo.update(modo="apply", source_run_id=run_id)
     sid = audit_start(len(pacote["inventario"]))
     try:
-        publicado = _publicar(pacote, ref_date, run_id)
+        publicado = _publicar(pacote, ref_date, run_id, esperado_neon)
     except BaseException as exc:
         estado = getattr(exc, "estado_transacao", ESTADO_REVERTIDA)
         prefixo = "" if estado == ESTADO_REVERTIDA else f"estado_transacao={estado}; "
@@ -542,7 +658,7 @@ def _raw_run(valor: str):
 
 def _parser() -> argparse.ArgumentParser:
     ap = _Parser(description="Publica o estoque Full do ML (apply exige --marca, --raw-run, "
-                             "--publish-run-id, flag e migration 029).")
+                             "--publish-run-id, --destino-esperado, flag e migration 029).")
     ap.add_argument("--apply", action="store_true", help="publica; sem ela o run e' dry-run")
     ap.add_argument("--diagnosticar", action="store_true",
                     help="so' leitura: linhas do --publish-run-id na --ref-date e o vigente por marca")
@@ -551,6 +667,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--raw-run", action="append", default=[], type=_raw_run, metavar="MARCA=RUN_ID",
                     help="run RAW publicado esperado, um por marca pedida")
     ap.add_argument("--publish-run-id", default=None, help="uuid hex 32; vira o source_run_id")
+    ap.add_argument("--destino-esperado", default=None, metavar="ARQUIVO.json",
+                    help="obrigatorio no --apply: JSON aprovado do -Identificar (usa identidade.alvo_neon)")
     return ap
 
 
@@ -596,7 +714,7 @@ def _executar(argv) -> tuple[int, dict]:
                 raise ArgumentoInvalido(f"--raw-run repetido para {marca}")
             raw_runs[marca] = rid
         res = run(apply=a.apply, ref_date=a.ref_date, marcas=a.marca, raw_runs=raw_runs,
-                  publish_run_id=a.publish_run_id)
+                  publish_run_id=a.publish_run_id, destino_esperado=a.destino_esperado)
     except PublicacaoRecusada as exc:
         logger.error("publicacao recusada: %s", sanitizar(exc))
         return EXIT_RECUSA, _saida_erro("recusada", exc, a)

@@ -15,6 +15,7 @@ import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,9 +26,24 @@ REF = date(2026, 10, 20)
 RAW = "run-raw-barbours-1"
 PUB = "0123456789abcdef0123456789abcdef"
 MIG = Path(__file__).resolve().parents[2] / "apps" / "api" / "alembic" / "versions" / "029_create_fact_ml_full_stock_daily.py"
-CONTRATO = {"marcas": ["barbours"], "raw_runs": {"barbours": RAW}, "publish_run_id": PUB}
+#: arquivo aprovado do `-Identificar`, relativo ao cwd (o fixture `ambiente` faz chdir para tmp_path)
+ARQ_DESTINO = "identidade_aprovada.json"
+#: impressao digital do Neon como o helper grava (tipos do JSON: str, bool, null)
+IDENT = {"modo": "real", "current_database": "neondb", "server_version_num": "160004", "em_recuperacao": False,
+         "system_identifier": "7350000000000000001", "neon_tenant_id": "tenant-a", "neon_timeline_id": "timeline-a",
+         "alembic_version_num": "029"}
+CONTRATO = {"marcas": ["barbours"], "raw_runs": {"barbours": RAW}, "publish_run_id": PUB,
+            "destino_esperado": ARQ_DESTINO}
 ARGV_APPLY = ["--apply", "--ref-date", str(REF), "--marca", "barbours", "--raw-run", f"barbours={RAW}",
-              "--publish-run-id", PUB]
+              "--publish-run-id", PUB, "--destino-esperado", ARQ_DESTINO]
+
+
+def gravar_destino(caminho, alvo=None, fonte=None):
+    alvo = dict(IDENT) if alvo is None else alvo
+    fonte = dict(IDENT, current_database="datamart", em_recuperacao=True) if fonte is None else fonte
+    Path(caminho).write_text(json.dumps({"subcomando": "identificar", "ok": True,
+                                         "identidade": {"alvo_neon": alvo, "fonte_datamart": fonte}}),
+                             encoding="utf-8")
 
 
 def registro(run_id=RAW, marcas="barbours", status="completo", desfecho=None,
@@ -78,9 +94,40 @@ class Res:
         return self.mapa
 
 
+class Cursor:
+    """Cursor DBAPI da MESMA conexao da transacao: responde as queries da impressao digital."""
+
+    def __init__(self, conn):
+        self.conn, self.ultimo = conn, None
+        self.connection = SimpleNamespace(info=SimpleNamespace(host=conn.host))
+
+    def execute(self, q, p=None):
+        self.conn.sqls.append((q, p))
+        i = self.conn.ident
+        if q in self.conn.negar:
+            raise RuntimeError("permission denied")
+        respostas = (
+            ("current_database()", i["current_database"]),
+            ("current_setting('server_version_num')", i["server_version_num"]),
+            ("pg_is_in_recovery()", i["em_recuperacao"]),
+            ("has_function_privilege", self.conn.pode_control),
+            ("pg_control_system()", None if i["system_identifier"] is None else int(i["system_identifier"])),
+            ("neon.tenant_id", i["neon_tenant_id"]),
+            ("neon.timeline_id", i["neon_timeline_id"]),
+            ("to_regclass('public.alembic_version')", self.conn.tem_alembic),
+            ("FROM public.alembic_version", i["alembic_version_num"]),
+        )
+        self.ultimo = next(((v,) for chave, v in respostas if chave in q), None)
+
+    def fetchone(self):
+        return self.ultimo
+
+
 class Conn:
-    def __init__(self, lock=True, destino=None, em_uso=False):
+    def __init__(self, lock=True, destino=None, em_uso=False, ident=None, host="ep-x.sa-east-1.aws.neon.tech"):
         self.lock, self.destino, self.em_uso, self.sqls = lock, destino, em_uso, []
+        self.ident, self.host = dict(IDENT) if ident is None else ident, host
+        self.pode_control, self.tem_alembic, self.negar = True, True, set()
         self.connection = self
 
     def execute(self, sql, params=None):
@@ -96,7 +143,7 @@ class Conn:
 
     @contextmanager
     def cursor(self):
-        yield self
+        yield Cursor(self)
 
 
 class Engine:
@@ -120,8 +167,10 @@ class Engine:
 
 
 @pytest.fixture
-def ambiente(monkeypatch):
+def ambiente(monkeypatch, tmp_path):
     estado = {"audit": [], "inseridos": [], "marcas_inseridas": set(), "leituras": []}
+    monkeypatch.chdir(tmp_path)
+    gravar_destino(tmp_path / ARQ_DESTINO)
 
     def ler(ref, runs=()):
         estado["leituras"].append((ref, runs))
@@ -244,7 +293,7 @@ def test_marca_pedida_sem_fotografia_recusa(ambiente, monkeypatch):
     _sem_neon(monkeypatch)
     with pytest.raises(pub.PublicacaoRecusada, match="marca_pedida_sem_fotografia"):
         pub.run(apply=True, ref_date=REF, marcas=["barbours", "kokeshi"],
-                raw_runs={"barbours": RAW, "kokeshi": RAW}, publish_run_id=PUB)
+                raw_runs={"barbours": RAW, "kokeshi": RAW}, publish_run_id=PUB, destino_esperado=ARQ_DESTINO)
     assert ambiente["audit"] == []
 
 
@@ -342,7 +391,8 @@ def test_publish_run_id_reutilizado_sob_o_lock_recusa_e_reverte(ambiente, monkey
         pub.run(apply=True, ref_date=REF, **CONTRATO)
     assert e.value.estado_transacao == pub.ESTADO_REVERTIDA
     assert not any(s.startswith("DELETE") for s, _ in conn.sqls) and ambiente["inseridos"] == []
-    assert "pg_try_advisory_xact_lock" in conn.sqls[0][0] and "source_run_id" in conn.sqls[1][0]
+    assert "pg_try_advisory_xact_lock" in conn.sqls[0][0]
+    assert any("source_run_id = :publish_run_id" in s for s, _ in conn.sqls)
     assert eng.rollbacks == 1 and eng.commits == 0 and ambiente["audit"][-1][0] == "failed"
 
 
@@ -674,3 +724,168 @@ def test_migration_029_cadeia_e_travas():
 def test_auditoria_marca_o_ml_como_2():
     # audit.source_sync_run.marketplace_id: 1=tiktok, 2=ml, 3=shopee
     assert pub.AUDIT_MARKETPLACE_ID == 2
+
+
+# ---------------------------------------------------------------------------
+# Destino esperado: impressao digital do Neon na transacao de escrita (fase 3)
+# ---------------------------------------------------------------------------
+def _ordem(conn):
+    sqls = [s for s, _ in conn.sqls]
+    lock = next(i for i, s in enumerate(sqls) if "pg_try_advisory_xact_lock" in s)
+    ident = [i for i, s in enumerate(sqls) if "current_database()" in s]
+    deletes = [i for i, s in enumerate(sqls) if s.startswith("DELETE")]
+    return lock, ident, deletes
+
+
+@pytest.mark.parametrize("destino", [None, ""])
+def test_apply_sem_destino_esperado_recusa_sem_conexao(ambiente, monkeypatch, destino):
+    _sem_neon(monkeypatch, "abriu o Neon sem --destino-esperado")
+    monkeypatch.setattr(pub, "_ler_fonte", lambda *a: pytest.fail("leu o Data Mart sem --destino-esperado"))
+    with pytest.raises(pub.PublicacaoRecusada, match="--destino-esperado"):
+        pub.run(apply=True, ref_date=REF, **dict(CONTRATO, destino_esperado=destino))
+    assert ambiente["audit"] == [] and ambiente["inseridos"] == []
+
+
+@pytest.mark.parametrize("conteudo,erro", [
+    (None, "destino_esperado_ilegivel"),                                          # arquivo inexistente
+    ("isto nao e' json", "destino_esperado_ilegivel"),
+    ("[1, 2]", "destino_esperado_ilegivel"),
+    ('{"identidade": {"fonte_datamart": {"modo": "real"}}}', "destino_esperado_sem_identidade"),
+    ('{"identidade": {"alvo_neon": {}}}', "destino_esperado_sem_identidade"),
+    ('{"identidade": {"alvo_neon": "neondb"}}', "destino_esperado_sem_identidade"),
+])
+def test_apply_com_destino_ilegivel_recusa_sem_conexao(ambiente, monkeypatch, tmp_path, conteudo, erro):
+    _sem_neon(monkeypatch, "abriu o Neon com destino ilegivel")
+    monkeypatch.setattr(pub, "_ler_fonte", lambda *a: pytest.fail("leu o Data Mart com destino ilegivel"))
+    arq = tmp_path / "destino_ruim.json"
+    if conteudo is not None:
+        arq.write_text(conteudo, encoding="utf-8")
+    with pytest.raises(pub.PublicacaoRecusada, match=erro):
+        pub.run(apply=True, ref_date=REF, **dict(CONTRATO, destino_esperado=str(arq)))
+    assert ambiente["audit"] == []
+
+
+def test_cli_apply_sem_destino_esperado_exit_2_nao_iniciada(ambiente, monkeypatch, capsys):
+    _sem_neon(monkeypatch)
+    codigo, j = _main_json(capsys, ARGV_APPLY[:-2])
+    assert codigo == 2 and j["estado_transacao"] == "nao_iniciada" and "--destino-esperado" in j["motivo"]
+    assert ambiente["audit"] == [] and ambiente["leituras"] == []
+
+
+def test_destino_igual_segue_e_confere_depois_do_lock_antes_do_delete(ambiente, monkeypatch):
+    conn = _conn_ok()
+    eng = Engine(conn)
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    r = pub.run(apply=True, ref_date=REF, **CONTRATO)
+    assert r["applied"] is True and eng.commits == 1
+    lock, ident, deletes = _ordem(conn)
+    assert lock == 0 and ident and deletes and lock < ident[0] < deletes[0]
+
+
+@pytest.mark.parametrize("campo,valor", [
+    ("current_database", "outro_banco"),
+    ("system_identifier", "7350000000000000999"),
+    ("neon_timeline_id", "timeline-b"),
+    ("alembic_version_num", "027"),
+    ("em_recuperacao", True),
+    ("server_version_num", "170000"),
+])
+def test_destino_divergente_recusa_sem_delete_e_revertida(ambiente, monkeypatch, capsys, campo, valor):
+    conn = Conn(ident=dict(IDENT, **{campo: valor}))
+    eng = Engine(conn)
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["resultado"] == "recusada" and j["erro_classe"] == "PublicacaoRecusada"
+    assert j["estado_transacao"] == "revertida_comprovada" and j["applied"] is False
+    assert j["motivo"] == f"destino_divergente: alvo_neon.{campo}"
+    assert str(valor) not in j["motivo"] and str(IDENT[campo]) not in j["motivo"]      # sem valores
+    assert not any(s.startswith("DELETE") for s, _ in conn.sqls) and ambiente["inseridos"] == []
+    assert not any("source_run_id = :publish_run_id" in s for s, _ in conn.sqls)
+    assert eng.rollbacks == 1 and eng.commits == 0 and ambiente["audit"][-1][0] == "failed"
+
+
+@pytest.mark.parametrize("campo,atual,aprovado", [
+    ("neon_tenant_id", None, "tenant-a"),             # leitura null x arquivo com valor
+    ("neon_tenant_id", "tenant-a", None),             # leitura com valor x arquivo null
+    ("system_identifier", None, "7350000000000000001"),
+    ("alembic_version_num", "029", None),
+])
+def test_null_so_bate_com_null(ambiente, monkeypatch, tmp_path, campo, atual, aprovado):
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(IDENT, **{campo: aprovado}))
+    conn = Conn(ident=dict(IDENT, **{campo: atual}))
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    with pytest.raises(pub.PublicacaoRecusada, match=f"destino_divergente: alvo_neon.{campo}$") as e:
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
+    assert e.value.estado_transacao == pub.ESTADO_REVERTIDA
+    assert not any(s.startswith("DELETE") for s, _ in conn.sqls)
+
+
+def test_null_com_null_segue(ambiente, monkeypatch, tmp_path):
+    nulos = dict(IDENT, system_identifier=None, neon_tenant_id=None, neon_timeline_id=None)
+    gravar_destino(tmp_path / ARQ_DESTINO, nulos)
+    conn = _conn_ok()
+    conn.ident = dict(nulos)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    assert pub.run(apply=True, ref_date=REF, **CONTRATO)["applied"] is True
+
+
+def test_tipo_tambem_conta_texto_nao_bate_com_booleano(ambiente, monkeypatch, tmp_path):
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(IDENT, em_recuperacao="false"))
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_conn_ok()))
+    with pytest.raises(pub.PublicacaoRecusada, match="alvo_neon.em_recuperacao$"):
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
+
+
+def test_campo_a_mais_ou_a_menos_no_arquivo_diverge(ambiente, monkeypatch, tmp_path):
+    sem_modo = {k: v for k, v in IDENT.items() if k != "modo"}
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(sem_modo, extra="x"))
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_conn_ok()))
+    with pytest.raises(pub.PublicacaoRecusada, match="alvo_neon.extra, alvo_neon.modo$"):
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1", "/var/run/postgresql", None, ""])
+def test_conexao_local_e_modo_teste_e_nao_confere_com_arquivo_real(ambiente, monkeypatch, host):
+    # o fallback localhost do config.py cai aqui: o arquivo aprovado real tem modo=real
+    conn = Conn(host=host)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    with pytest.raises(pub.PublicacaoRecusada, match="destino_divergente: alvo_neon.modo$"):
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
+    assert not any(s.startswith("DELETE") for s, _ in conn.sqls)
+
+
+def test_modo_teste_confere_com_arquivo_de_teste(ambiente, monkeypatch, tmp_path):
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(IDENT, modo="teste"))
+    conn = _conn_ok()
+    conn.host, conn.ident = "127.0.0.1", dict(IDENT, modo="teste")
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    assert pub.run(apply=True, ref_date=REF, **CONTRATO)["applied"] is True
+
+
+def test_identidade_igual_ao_helper_permissao_negada_vira_null_com_savepoint():
+    conn = Conn()
+    conn.negar = {"SELECT current_setting('neon.tenant_id', true)"}
+    conn.pode_control = False
+    with conn.cursor() as cur:
+        r = pub.identidade_destino(cur)
+    assert r == dict(IDENT, neon_tenant_id=None, system_identifier=None)
+    sqls = [s for s, _ in conn.sqls]
+    assert "ROLLBACK TO SAVEPOINT ml_full_ident" in sqls
+    assert not any("FROM pg_catalog.pg_control_system()" in s for s in sqls)
+    assert isinstance(r["server_version_num"], str) and r["em_recuperacao"] is False
+
+
+def test_identidade_sem_alembic_e_system_identifier_em_texto():
+    conn = Conn()
+    conn.tem_alembic = False
+    with conn.cursor() as cur:
+        r = pub.identidade_destino(cur)
+    assert r["alembic_version_num"] is None and r["system_identifier"] == IDENT["system_identifier"]
+    assert not any("FROM public.alembic_version" in s for s, _ in conn.sqls)
+
+
+def test_diagnosticar_nao_exige_destino_esperado(monkeypatch, capsys):
+    conn = ConnLeitura()
+    monkeypatch.setattr(pub, "local_engine", lambda: EngineLeitura(conn))
+    codigo, j = _main_json(capsys, ["--diagnosticar", "--ref-date", str(REF), "--publish-run-id", PUB])
+    assert codigo == 0 and j["modo"] == "diagnostico"
