@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import {
+  canalTemPrazo,
   formatarHoras,
   rotuloDeadline,
   type Canal,
@@ -83,6 +84,8 @@ export default function TravadosDialog({
   // Sem o segredo do `order_ref` configurado na API, todo codigo vem nulo:
   // uma coluna inteira de "—" nao diz nada, entao ela sai.
   const temCodigo = estado.tipo === "ok" && estado.linhas.some((l) => l.order_ref);
+  // Sem prazo publicado (Mercado Livre) a coluna seria "Sem prazo" em todas.
+  const temPrazo = canalTemPrazo(canal);
 
   return (
     <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"}>
@@ -121,7 +124,7 @@ export default function TravadosDialog({
                       {variasMarcas ? <th scope="col">Marca</th> : null}
                       <th scope="col" className="text-right">Aberto há</th>
                       <th scope="col">Por que travou</th>
-                      <th scope="col">Prazo</th>
+                      {temPrazo ? <th scope="col">Prazo</th> : null}
                     </tr>
                   </thead>
                   <tbody>
@@ -135,7 +138,7 @@ export default function TravadosDialog({
                         {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}
                         <td className="text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
                         <td className="text-ink">{motivoDoTravado(l)}</td>
-                        <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td>
+                        {temPrazo ? <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
                       </tr>
                     ))}
                   </tbody>
@@ -150,8 +153,9 @@ export default function TravadosDialog({
             </>
           )}
           <p className="text-xs text-ink-faint">
-            A etapa de cada pedido (a preparar ou pronto para envio) ainda não é publicada pela fonte. Por
-            segurança, o número do pedido não é exibido.
+            {alvo.incluiFbs ? "Lista da fila publicada, com pedidos FBS (despachados pela Shopee). " : ""}
+            A etapa de cada pedido (a preparar ou pronto para envio) ainda não é publicada pela fonte.
+            {estado.tipo === "ok" && !temCodigo ? " Por segurança, o número do pedido não é exibido." : ""}
           </p>
         </div>
       ) : null}

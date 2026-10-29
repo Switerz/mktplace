@@ -120,6 +120,7 @@ import {
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
+import { canalTemCoorte } from "@/lib/expedicao-jornada";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -547,7 +548,12 @@ export default function ExpedicaoClient({
   // no SERVIDOR. Nada aqui soma a fila paginada.
   // UI-EXPEDICAO-1: o periodo do topo comanda a pagina — a coorte da jornada
   // e a LDR leem a MESMA janela da tendencia. A fila aberta e' "agora".
-  const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
+  // O Mercado Livre nao tem coorte (contrato): sem ela a secao nao aparece,
+  // entao nem busca.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva, {
+    dias: janela,
+    ligada: canalTemCoorte(filtros.channel),
+  });
 
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
 
@@ -752,8 +758,8 @@ export default function ExpedicaoClient({
         comparacao={
           <>
             {pct ? `${pct} da fila` : null}
-            {pct && travados > 0 ? " · " : null}
-            {travados > 0 ? (
+            {pct && (k.valor ?? 0) > 0 ? " · " : null}
+            {(k.valor ?? 0) > 0 ? (
               <button
                 type="button"
                 onClick={() =>
@@ -763,6 +769,7 @@ export default function ExpedicaoClient({
                     conta: null,
                     travados,
                     backlog,
+                    incluiFbs: divisao !== null,
                   })
                 }
                 className="-my-3 inline-flex min-h-[44px] items-center font-semibold text-ink underline underline-offset-4 hover:text-accent"
@@ -1460,7 +1467,14 @@ export default function ExpedicaoClient({
   return (
     // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
     <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={carregando}>
-    <TravadosDialog api={API} canal={filtros.channel} alvo={alvoTravados} aoFechar={() => setAlvoTravados(null)} />
+    {/* `key` por alvo: abrir outra marca comeca do zero, sem a lista anterior. */}
+    <TravadosDialog
+      key={alvoTravados ? `${alvoTravados.marca ?? "todas"}-${alvoTravados.conta ?? "todas"}` : "fechado"}
+      api={API}
+      canal={filtros.channel}
+      alvo={alvoTravados}
+      aoFechar={() => setAlvoTravados(null)}
+    />
     <LayoutExpedicao
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
       // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de

@@ -2,6 +2,7 @@
  * EXPEDICAO-TRAVADOS-1 — a parte pura do popup de travados (testavel sem o
  * dialogo, que depende do roteador do Next).
  */
+import { formatarDecimal } from "./expedicao-formato.ts";
 import {
   FILTROS_PADRAO,
   construirQuery,
@@ -19,6 +20,11 @@ export interface AlvoTravados {
   conta: string | null;
   travados: number;
   backlog: number;
+  /**
+   * A lista vem da fila PUBLICADA. Com a divisao vendedor x FBS na tela, o
+   * cartao e' so' do vendedor: o popup diz que a lista inclui FBS.
+   */
+  incluiFbs?: boolean;
 }
 
 /** Por que o pipeline marcou o pedido como travado, em linguagem de gestor. */
@@ -31,8 +37,7 @@ export function motivoDoTravado(l: Pick<LinhaFila, "is_slow_vs_baseline" | "is_s
 /** "6,7% da fila" — so' com base positiva; sem base, nada. */
 export function percentualDaFila(parte: number, base: number): string | null {
   if (!(base > 0)) return null;
-  const pct = (parte / base) * 100;
-  return `${pct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  return `${formatarDecimal((parte / base) * 100, 1)}%`;
 }
 
 export function queryDosTravados(canal: Canal, marca: string | null, conta: string | null): string {

@@ -100,3 +100,15 @@ test("marca fora da cobertura vira linha curta com ⓘ, sem caixa", () => {
   assert.match(html, /aria-label="KOKESHI não é coberta por esta fonte/);
   assert.doesNotMatch(html, /role="status"/, "informacao nao e' alerta");
 });
+
+test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclui FBS", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /\{temPrazo \? <th scope="col">Prazo<\/th> : null\}/);
+  assert.match(POPUP, /alvo\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
+  assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? " Por segurança/);
+  assert.match(CLIENTE, /<TravadosDialog\s+key=\{alvoTravados \?/);
+  assert.match(CLIENTE, /incluiFbs: divisao !== null/);
+  const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
+  assert.match(JORNADA, /if \(!ligada\) \{/);
+});
+
