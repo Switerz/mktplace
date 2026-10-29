@@ -1,7 +1,10 @@
 """T-0014 — rota read-only da Performance das contas.
 
-INERTE DE PROPOSITO: este router NAO esta registrado em `app/main.py`. Ligar a
-rota e' uma mudanca separada, num arquivo compartilhado.
+INERTE POR FLAG: registrado em `app/main.py`, mas com
+`settings.performance_contas_api_enabled` desligada (padrao) toda requisicao
+responde 404 -- o mesmo corpo de rota inexistente. A checagem e' dependencia
+do ROUTER, e por isso roda ANTES de `get_db` e de `brands_query`: desligada,
+nenhuma sessao e' aberta e nenhuma fonte e' chamada (fail-closed).
 
 SOMENTE GET. A entrada do cliente e' validada na BORDA contra a allowlist de
 marcas do servico; o que nao passa vira 422 com mensagem FIXA, sem ecoar a
@@ -12,11 +15,27 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.schemas.account_performance import PerformanceContasResponse
 from app.services import account_performance_service as svc
 
-router = APIRouter(prefix="/api/v1/performance-contas", tags=["performance-contas"])
+
+def exigir_flag() -> None:
+    """Flag desligada = 404 igual ao de rota inexistente, sem tocar em nada.
+
+    Lida a cada requisicao (e nao no import) para que a flag valha sem
+    reconstruir o app e para que os testes possam alterna-la.
+    """
+    if not settings.performance_contas_api_enabled:
+        raise HTTPException(404, "Not Found")
+
+
+router = APIRouter(
+    prefix="/api/v1/performance-contas",
+    tags=["performance-contas"],
+    dependencies=[Depends(exigir_flag)],
+)
 
 _MSG_BRANDS = "Marca invalida. Valores aceitos: " + ", ".join(svc.MARCAS_PERMITIDAS)
 _MAX_ITENS = 20

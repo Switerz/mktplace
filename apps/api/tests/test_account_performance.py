@@ -21,6 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config import Settings, settings
 from app.database import get_db
 from app.routers import account_performance as rota
 from app.schemas.account_performance import Indicador, Limiar
@@ -167,7 +168,13 @@ def fontes(monkeypatch, chamadas):
 
 
 @pytest.fixture()
-def cliente(db):
+def flag_ligada(monkeypatch):
+    """A rota nasce desligada (404). Os testes de conteudo ligam a flag."""
+    monkeypatch.setattr(settings, "performance_contas_api_enabled", True)
+
+
+@pytest.fixture()
+def cliente(db, flag_ligada):
     app = FastAPI()
     app.include_router(rota.router)
     app.dependency_overrides[get_db] = lambda: db
@@ -237,14 +244,75 @@ def test_oficiais_nao_dependem_de_fonte(cliente, fontes):
         assert _ind(corpo, codigo)["estado"] == "erro"
 
 
-def test_router_nao_esta_registrado_no_main():
-    main = Path(__file__).resolve().parents[1] / "app" / "main.py"
-    texto = main.read_text(encoding="utf-8")
-    assert "account_performance" not in texto
-    assert "performance-contas" not in texto
+# ---------------------------------------------------------------------------
+# Flag (fail-closed): desligada = 404 sem tocar em fonte nem em sessao
+# ---------------------------------------------------------------------------
+class _SessaoProibida:
+    def __getattr__(self, nome):
+        raise AssertionError(f"a rota tocou a sessao (.{nome}) com a flag desligada")
 
 
-def test_sem_banco_responde_503(fontes):
+def test_flag_nasce_desligada():
+    assert Settings.model_fields["performance_contas_api_enabled"].default is False
+
+
+def test_flag_desligada_404_sem_chamar_fonte_nem_banco(fontes, chamadas, monkeypatch):
+    monkeypatch.setattr(settings, "performance_contas_api_enabled", False)
+    abriu_sessao = []
+
+    def _get_db_espiao():
+        abriu_sessao.append(True)
+        yield _SessaoProibida()
+
+    app = FastAPI()
+    app.include_router(rota.router)
+    app.dependency_overrides[get_db] = _get_db_espiao
+    c = TestClient(app)
+    for caminho, params in ((URL, {}), (URL + "/", {}),
+                            (URL, {"brands": "barbours"}),
+                            # entrada invalida tambem e' 404: a flag vem antes
+                            (URL, {"brands": "<script>"})):
+        r = c.get(caminho, params=params)
+        assert r.status_code == 404, (caminho, params, r.text)
+        assert r.json() == {"detail": "Not Found"}
+    assert chamadas == {}
+    assert abriu_sessao == []
+
+
+def test_flag_ligada_200_com_fontes_falsas(cliente, fontes, chamadas):
+    corpo = _get(cliente)
+    assert [c["canal"] for c in corpo["canais"]] == ["mercado_livre", "shopee", "tiktok"]
+    assert set(chamadas) == {"quality", "expedicao", "tiktok", "shopee"}
+
+
+@pytest.fixture()
+def app_real(db):
+    from app.main import app
+    app.dependency_overrides[get_db] = lambda: db
+    yield app
+    app.dependency_overrides.pop(get_db, None)
+
+
+def test_app_real_expoe_a_rota(app_real):
+    # Pelo schema, e nao por `app.routes`: no FastAPI recente o router incluido
+    # vira um no' preguicoso sem `path` proprio.
+    assert set(app_real.openapi()["paths"][URL]) == {"get"}
+
+
+def test_app_real_flag_desligada_404(app_real, fontes, chamadas, monkeypatch):
+    monkeypatch.setattr(settings, "performance_contas_api_enabled", False)
+    r = TestClient(app_real).get(URL)
+    assert r.status_code == 404
+    assert chamadas == {}
+
+
+def test_app_real_flag_ligada_200(app_real, fontes, flag_ligada):
+    r = TestClient(app_real).get(URL)
+    assert r.status_code == 200, r.text
+    assert [c["canal"] for c in r.json()["canais"]] == ["mercado_livre", "shopee", "tiktok"]
+
+
+def test_sem_banco_responde_503(fontes, flag_ligada):
     app = FastAPI()
     app.include_router(rota.router)
     app.dependency_overrides[get_db] = lambda: None

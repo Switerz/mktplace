@@ -31,9 +31,8 @@
  * constante (`PERFORMANCE_CONTAS_FLAG`) nao e' substituido, e no
  * browser o valor viraria `undefined`.
  *
- * A rota devolve 404 com a flag desligada (guard no servidor, em `page.tsx`).
- * O item de menu ainda nao existe — fica para quando `nav-config.ts` for
- * liberado.
+ * A rota devolve 404 com a flag desligada (guard no servidor, em `page.tsx`)
+ * e o item de menu (`PERFORMANCE_CONTAS_NAV` em `nav-config.ts`) some.
  */
 export const PERFORMANCE_CONTAS_FLAG = "NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED";
 

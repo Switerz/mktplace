@@ -154,6 +154,15 @@ class Settings(BaseSettings):
     ml_full_stock_api_enabled: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # T-0014 — Performance das contas (`/api/v1/performance-contas`)
+    # ------------------------------------------------------------------
+    # NASCE DESLIGADA. Desligada, a rota responde 404 ANTES de abrir sessao
+    # ou chamar qualquer fonte (fail-closed): para quem chama, a superficie
+    # nao existe. Ligar e' decisao separada, coordenada com a flag da tela
+    # (`NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED`).
+    performance_contas_api_enabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
     # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
     # ------------------------------------------------------------------
     # A Torre B2B e' FONTE EXTERNA e somente leitura: esta API chama as RPCs
