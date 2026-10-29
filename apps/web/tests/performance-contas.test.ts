@@ -432,6 +432,27 @@ test("pagina e item desenham so' a visao montada (sem desreferenciar o payload c
   assert.doesNotMatch(item, /\bind\./);
 });
 
+// Reteste T-0014: aberto, o <details> crescia ate' a largura do texto, o "?"
+// ia para o meio do card e o titulo encolhia. O "?" fica em absoluto no canto
+// do cabecalho; o texto abre abaixo, em largura total.
+test("IndicadorItem: '?' fixo no canto e ajuda abaixo do cabecalho, sem espremer o titulo", () => {
+  const item = readFileSync(join(AQUI, "../app/performance-contas/IndicadorItem.tsx"), "utf8");
+  const summary = item.match(/<summary\s[\s\S]*?>/)?.[0] ?? "";
+  assert.match(summary, /\babsolute right-0 top-0\b/);
+  assert.match(summary, /min-h-11 min-w-11/);
+  assert.match(summary, /aria-label=\{`O que é: \$\{v\.rotulo\}`\}/);
+  assert.match(summary, /aria-describedby=\{v\.idAjuda\}/);
+  assert.match(summary, /focus-visible:ring-2/);
+  // O <details> nao e' item de flex ao lado do titulo, e o texto nao tem largura propria.
+  assert.match(item, /<div className="relative">/);
+  assert.doesNotMatch(item, /<details className="[^"]*shrink-0/);
+  assert.match(item, /pr-\[3\.25rem\]/);
+  const ajuda = item.match(/<p\s+id=\{v\.idAjuda\}[\s\S]*?>/)?.[0] ?? "";
+  assert.ok(ajuda, "texto de ajuda com id");
+  assert.doesNotMatch(ajuda, /max-w-/);
+  assert.match(ajuda, /break-words/);
+});
+
 test("carregarPerformanceContas: falha de rede vira erro, nunca dado", async () => {
   const falha = (async () => {
     throw new TypeError("fetch failed");

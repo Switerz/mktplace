@@ -121,6 +121,19 @@ MOTIVOS_EXPEDICAO = {
 }
 MOTIVO_EXPEDICAO_GENERICO = "Fotografia de expedição indisponível."
 
+#: `freshness` da Expedicao por conta -> texto. ALLOWLIST, como acima: estado
+#: fora daqui cai no generico e o codigo cru nunca chega a tela.
+FRESCOR_EXPEDICAO = {
+    "stale": "fonte desatualizada",
+    "critical": "fonte muito desatualizada",
+    "unknown": "atualização da fonte desconhecida",
+}
+FRESCOR_EXPEDICAO_GENERICO = "atualização da fonte não confirmada"
+
+#: Rotulo do limiar de 4% da LDR TikTok. A origem ("interno") e' escrita a
+#: parte pela web; o rotulo so' diz o que o numero e'.
+ROTULO_LIMIAR_TIKTOK = "meta operacional da Torre"
+
 #: Estados de serving que significam "serie nao existe" (§1.1 decisao 3).
 NAO_PUBLICADA_TIKTOK = {
     expedicao_tiktok_service.UNAVAILABLE_NOT_MIGRATED,
@@ -389,8 +402,8 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
         janela = "fotografia atual da fila (shipments abertos)"
         if res.get("availability") != "available":
             motivo = res.get("unavailable_reason")
-            texto = MOTIVOS_EXPEDICAO.get(motivo)
-            texto = f"{texto} ({motivo})" if texto else MOTIVO_EXPEDICAO_GENERICO
+            # So' o texto do mapa: o codigo cru da API nao vai para a tela.
+            texto = MOTIVOS_EXPEDICAO.get(motivo, MOTIVO_EXPEDICAO_GENERICO)
             return {"estado": "sem_fonte", "janela": janela, "limiar": limiar,
                     "motivo_indisponivel": texto}
 
@@ -406,7 +419,8 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
         marcas = sorted({str(c["brand"]) for c in contas})
 
         avisos = []
-        velhas = [f"{_rotulo_marca(f['brand'])} ({f['freshness']})"
+        velhas = [f"{_rotulo_marca(f['brand'])} "
+                  f"({FRESCOR_EXPEDICAO.get(f.get('freshness'), FRESCOR_EXPEDICAO_GENERICO)})"
                   for f in res.get("freshness") or []
                   if str(f.get("brand")) in marcas and f.get("freshness") != "fresh"]
         if velhas:
@@ -551,8 +565,10 @@ def _tiktok_ldr(res: Optional[dict], falhou: bool, selecionadas: list[str],
     def _dinamico() -> dict:
         alvo = (res.get("targets") or {}).get("tiktok_ldr")
         # A referencia de 4% nao tem fonte oficial: entra SEMPRE como interna.
+        # O rotulo nao repete a origem (a web ja' escreve "referência interna,
+        # não é meta da plataforma" na linha de origem do limiar).
         limiar = (Limiar(valor=_fracao_para_pct(alvo), origem="interno",
-                         rotulo="referência interna, sem fonte oficial")
+                         rotulo=ROTULO_LIMIAR_TIKTOK)
                   if alvo is not None else None)
         # Ausente conta como reconstruido: afirmar prazo oficial sem a fonte
         # dizer seria pior que a ressalva a mais.

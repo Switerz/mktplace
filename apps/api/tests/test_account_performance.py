@@ -551,8 +551,18 @@ def test_expedicao_indisponivel_vira_sem_fonte_com_motivo(cliente, fontes, motiv
     fontes["expedicao"] = lambda: expedicao_indisponivel(motivo)
     ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
     assert (ind["estado"], ind["valor"]) == ("sem_fonte", None)
-    assert motivo in ind["motivo_indisponivel"]
+    # Texto legivel do mapa fechado; o codigo cru da API nao aparece (reteste T-0014).
+    assert ind["motivo_indisponivel"] == svc.MOTIVOS_EXPEDICAO[motivo]
+    assert motivo not in ind["motivo_indisponivel"]
+    assert "(" not in ind["motivo_indisponivel"]
     assert ind["limiar"]["origem"] == "interno"
+
+
+def test_expedicao_no_snapshot_published_diz_nenhuma_fotografia(cliente, fontes):
+    fontes["expedicao"] = lambda: expedicao_indisponivel("no_snapshot_published")
+    texto = _ind(_get(cliente), "ml_expedicao_48h_torre")["motivo_indisponivel"]
+    assert "Nenhuma fotografia" in texto
+    assert "no_snapshot_published" not in texto
 
 
 def test_expedicao_motivo_desconhecido_nao_e_ecoado(cliente, fontes):
@@ -560,6 +570,7 @@ def test_expedicao_motivo_desconhecido_nao_e_ecoado(cliente, fontes):
     ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
     assert ind["estado"] == "sem_fonte"
     assert "<script>" not in ind["motivo_indisponivel"]
+    assert ind["motivo_indisponivel"] == svc.MOTIVO_EXPEDICAO_GENERICO
 
 
 @pytest.mark.parametrize("motivo", ["table_not_migrated", "no_series_published"])
@@ -582,12 +593,27 @@ def test_shopee_nao_publicada_vira_sem_fonte_e_nunca_oficial(cliente, fontes, mo
 # ---------------------------------------------------------------------------
 # Frescor
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("estado", ["stale", "critical", "unknown"])
-def test_expedicao_desatualizada_gera_aviso(cliente, fontes, estado):
+@pytest.mark.parametrize("estado,texto", [
+    ("stale", "fonte desatualizada"),
+    ("critical", "fonte muito desatualizada"),
+    ("unknown", "atualização da fonte desconhecida"),
+])
+def test_expedicao_desatualizada_gera_aviso(cliente, fontes, estado, texto):
     fontes["expedicao"] = lambda: expedicao_ok(freshness=estado)
     ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
     assert ind["estado"] == "dado"
-    assert ind["aviso_frescor"] and f"BARBOURS ({estado})" in ind["aviso_frescor"]
+    assert ind["aviso_frescor"] and f"BARBOURS ({texto})" in ind["aviso_frescor"]
+    # Reteste T-0014: o codigo cru ("stale") nao chega a tela.
+    assert f"({estado})" not in ind["aviso_frescor"]
+
+
+@pytest.mark.parametrize("estado", ["<b>x</b>", "STALE", "", None])
+def test_expedicao_frescor_desconhecido_vira_texto_generico(cliente, fontes, estado):
+    fontes["expedicao"] = lambda: expedicao_ok(freshness=estado)
+    aviso = _ind(_get(cliente), "ml_expedicao_48h_torre")["aviso_frescor"]
+    assert f"BARBOURS ({svc.FRESCOR_EXPEDICAO_GENERICO})" in aviso
+    if estado:
+        assert estado not in aviso
 
 
 def test_expedicao_fotografia_velha_gera_aviso(cliente, fontes):
@@ -634,7 +660,10 @@ def test_referencia_tiktok_e_interna_nunca_oficial(cliente, fontes):
         fontes["tiktok"] = lambda r=resposta: r
         ind = _ind(_get(cliente), "tiktok_ldr_operacional_torre")
         assert ind["limiar"]["origem"] == "interno"
-        assert ind["limiar"]["rotulo"] == "referência interna, sem fonte oficial"
+        # Reteste T-0014: o rotulo nao repete a origem ("referência interna"),
+        # que a web ja' escreve na linha "Origem do limiar".
+        assert ind["limiar"]["rotulo"] == "meta operacional da Torre"
+        assert "referência" not in ind["limiar"]["rotulo"]
         # Mesma unidade do indicador: 0,04 vira 4 pontos percentuais.
         assert ind["limiar"]["valor"] == pytest.approx(4.0)
 

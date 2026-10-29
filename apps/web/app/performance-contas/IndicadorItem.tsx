@@ -6,7 +6,8 @@ import type { VisaoIndicador } from "@/lib/performance-contas";
  * T-0014 — um indicador da tela "Performance das contas".
  *
  * Server component. O "?" usa `<details>/<summary>`: abre e fecha sem JS e o
- * leitor de tela anuncia o estado expandido nativamente.
+ * leitor de tela anuncia o estado expandido nativamente. Enter/Espaco e foco
+ * vem do proprio <summary>; o texto abre abaixo do cabecalho, nao ao lado.
  *
  * Recebe a visao ja' montada por `montarIndicador` (testada em node --test):
  * aqui so' se desenha. O valor so' aparece quando o estado efetivo e' `dado`.
@@ -17,24 +18,27 @@ import type { VisaoIndicador } from "@/lib/performance-contas";
 export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
   return (
     <li className="flex min-w-0 flex-col gap-2 rounded-lg border border-line bg-surface p-3">
-      {/* Sem flex-wrap aqui: o "?" fica sempre no canto direito do cabecalho,
-          por maior que seja o rotulo (QA). So' o rotulo + chip quebram linha. */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-          <h4 className="text-sm font-semibold text-ink">{v.rotulo}</h4>
+      {/* O "?" fica fixo no canto direito do cabecalho, aberto ou fechado
+          (reteste T-0014): o <summary> e' posicionado em absoluto e o rotulo
+          reserva a largura dele (pr). O <details> e' um bloco de largura total
+          ABAIXO do rotulo: fechado tem altura zero; aberto, o texto de ajuda
+          ocupa a largura do card sem espremer o titulo. */}
+      <div className="relative">
+        <div className="flex min-h-11 min-w-0 flex-wrap items-center gap-2 pr-[3.25rem]">
+          <h4 className="min-w-0 break-words text-sm font-semibold text-ink">{v.rotulo}</h4>
           <Chip tom="neutro">{v.tipo}</Chip>
         </div>
-        <details className="group shrink-0">
+        <details>
           <summary
             aria-label={`O que é: ${v.rotulo}`}
             aria-describedby={v.idAjuda}
-            className="inline-flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-md border border-line text-sm font-semibold text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden"
+            className="absolute right-0 top-0 inline-flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-md border border-line text-sm font-semibold text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden"
           >
             ?
           </summary>
           <p
             id={v.idAjuda}
-            className="mt-1.5 max-w-sm rounded-lg border border-line bg-raised px-3 py-2.5 text-xs leading-relaxed text-ink-muted"
+            className="mt-2 break-words rounded-lg border border-line bg-raised px-3 py-2.5 text-xs leading-relaxed text-ink-muted"
           >
             {v.ajuda}
           </p>
