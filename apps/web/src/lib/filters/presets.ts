@@ -17,9 +17,18 @@ function endOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0);
 }
 
+/** Ultimo dia fechado (D-1). A fato diaria so' publica dias fechados: um
+ * preset que terminasse hoje somaria um dia vazio e compararia N-1 dias com
+ * N, puxando comparacao e ritmo para baixo. Por isso os presets de janela
+ * terminam aqui; "Hoje" e' o unico que olha o dia corrente. */
+function lastClosedDay(today: Date): Date {
+  return new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+}
+
 function lastNDays(today: Date, n: number): { dateFrom: string; dateTo: string } {
-  const from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (n - 1));
-  return { dateFrom: toISODate(from), dateTo: toISODate(today) };
+  const to = lastClosedDay(today);
+  const from = new Date(to.getFullYear(), to.getMonth(), to.getDate() - (n - 1));
+  return { dateFrom: toISODate(from), dateTo: toISODate(to) };
 }
 
 export function presetRange(preset: DatePreset, today: Date = new Date()): { dateFrom: string; dateTo: string } {
@@ -32,8 +41,12 @@ export function presetRange(preset: DatePreset, today: Date = new Date()): { dat
       return lastNDays(today, 7);
     case "90d":
       return lastNDays(today, 90);
-    case "mes_atual":
-      return { dateFrom: toISODate(startOfMonth(today)), dateTo: toISODate(today) };
+    case "mes_atual": {
+      // No dia 1 o mes novo ainda nao tem dia fechado: ancorar em D-1 devolve
+      // o mes anterior inteiro em vez de um intervalo invertido.
+      const to = lastClosedDay(today);
+      return { dateFrom: toISODate(startOfMonth(to)), dateTo: toISODate(to) };
+    }
     case "mes_anterior": {
       const anchor = new Date(today.getFullYear(), today.getMonth() - 1, 1);
       return { dateFrom: toISODate(startOfMonth(anchor)), dateTo: toISODate(endOfMonth(anchor)) };
