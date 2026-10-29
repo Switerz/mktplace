@@ -433,6 +433,119 @@ test("o `?` fecha com Esc, clique fora e devolve o foco; posicao fixa na viewpor
   assert.match(src, /ATRASO_HOVER_MS/);
 });
 
+// ===========================================================================
+// Revisao T-0010 — origem do numero (oficial x Torre x indisponivel) e `?`
+// nos cabecalhos ordenaveis da "LDR por loja"
+// ===========================================================================
+import { ROTULO_ORIGEM } from "../src/lib/expedicao-definicoes.ts";
+
+const { default: SortHeaderComAjuda } = await import("../src/components/expedicao/SortHeaderComAjuda.tsx");
+
+test("catalogo: toda definicao declara a origem do numero", () => {
+  const validas = Object.keys(ROTULO_ORIGEM);
+  for (const [chave, def] of Object.entries(DEFINICOES) as [string, { origem?: string; formula: string; fonte: string; limitacoes: string }][]) {
+    assert.ok(def.origem && validas.includes(def.origem), `${chave} sem origem declarada`);
+    if (def.origem === "torre") {
+      assert.doesNotMatch(def.formula, /Não se aplica/, `${chave}: calculo da Torre sem regra`);
+    }
+    if (def.origem === "oficial") {
+      assert.ok(def.fonte.trim().length > 0, `${chave}: oficial sem fonte`);
+    }
+    if (def.origem === "indisponivel") {
+      assert.match(def.formula, /Não se aplica/, `${chave}: indisponivel com formula`);
+      assert.match(def.limitacoes, /não publica/, `${chave}: indisponivel sem motivo`);
+    }
+  }
+});
+
+test("origem: classificacao pelos fatos do codigo", () => {
+  assert.equal(DEFINICOES["shopee.ldr"].origem, "torre", "LDR Shopee nao e' Account Health");
+  assert.equal(DEFINICOES["tiktok.ldr"].origem, "torre");
+  // 4% e' REFERENCIA do TikTok, nao a fonte do numero
+  for (const c of ["tiktok.ldr", "tiktok.lojas_acima_meta"] as const) {
+    const d = DEFINICOES[c];
+    assert.match(d.referencia ?? "", /4%.*TikTok/, c);
+    assert.doesNotMatch(d.fonte, /TikTok Shop|4%/, `${c}: a meta nao e' fonte`);
+  }
+  for (const k of ["backlog", "over48h", "stalled", "slow", "zombie"]) {
+    assert.equal(DEFINICOES[`shopee.${k}` as keyof typeof DEFINICOES].origem, "torre", `shopee.${k}`);
+    assert.equal(DEFINICOES[`mercadolivre.${k}` as keyof typeof DEFINICOES].origem, "torre", `mercadolivre.${k}`);
+  }
+  assert.equal(DEFINICOES["shopee.overdue"].origem, "torre");
+  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.prazo"] as const) {
+    assert.equal(DEFINICOES[c].origem, "indisponivel", c);
+  }
+  // Hoje nenhuma metrica da Expedicao e' copiada da plataforma.
+  assert.deepEqual(Object.entries(DEFINICOES).filter(([, d]) => d.origem === "oficial"), []);
+});
+
+test("o `?` mostra a origem como rotulo curto ANTES da definicao", () => {
+  const aberto = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr", abertoInicial: true }));
+  const iOrigem = aberto.indexOf("Cálculo da Torre");
+  assert.ok(iOrigem > 0, aberto);
+  assert.ok(iOrigem < aberto.indexOf("Definição: "), "origem antes da definicao");
+  assert.match(aberto, /Referência: <\/span>Meta de 4% publicada pelo TikTok Shop/);
+  const ml = renderToStaticMarkup(h(AjudaMetrica, { chave: "mercadolivre.prazo", abertoInicial: true }));
+  assert.match(ml, /Indisponível neste canal/);
+  assert.doesNotMatch(ml, /Referência: /);
+});
+
+test("LDR por loja: `?` nos cabecalhos ordenaveis, fora do botao de ordenar", () => {
+  const props = {
+    rotulo: "LDR",
+    coluna: "rate",
+    sort: { column: "rate", direction: "desc" as const },
+    aoOrdenar: () => {},
+    ajuda: "tiktok.ldr" as const,
+  };
+  const html = renderToStaticMarkup(h(SortHeaderComAjuda, props));
+  assert.match(html, /^<th scope="col" aria-sort="descending"/);
+  const i = html.indexOf('aria-label="O que é LDR do TikTok"');
+  assert.ok(i > 0, html);
+  // Antes do `?`, o botao de ordenar ja' fechou: nao ha botao dentro de botao.
+  const antes = html.slice(0, i);
+  assert.equal((antes.match(/<button\b/g) ?? []).length, 2, "o 2o <button> e' o ?");
+  assert.equal((antes.match(/<\/button>/g) ?? []).length, 1, "o botao de ordenar fecha antes do ?");
+  assert.match(html, /min-h-11/, "alvo de 44 px do ordenar");
+  assert.match(html, /h-11 w-11/, "alvo de 44 px do ?");
+
+  // Arvore React: so' o botao de ordenar tem onClick, e o `?` nao mora nele.
+  type No = { type: unknown; props: { onClick?: () => void; children?: unknown } };
+  const ordenadas: string[] = [];
+  const raiz = SortHeaderComAjuda({ ...props, aoOrdenar: (c: string) => ordenadas.push(c) }) as unknown as No;
+  const filhos = (n: No): No[] =>
+    ([] as unknown[]).concat(n.props.children ?? []).filter((x): x is No => typeof x === "object" && x !== null && "props" in x);
+  const todos: { no: No; dentroDoOrdenar: boolean }[] = [];
+  const andar = (n: No, dentro: boolean) => {
+    todos.push({ no: n, dentroDoOrdenar: dentro });
+    const ehOrdenar = n.type === "button";
+    for (const f of filhos(n)) andar(f, dentro || ehOrdenar);
+  };
+  andar(raiz, false);
+  const comClique = todos.filter((t) => typeof t.no.props.onClick === "function");
+  assert.equal(comClique.length, 1, "um unico onClick: o de ordenar");
+  assert.equal(comClique[0].no.type, "button");
+  const ajuda = todos.find((t) => t.no.type === AjudaMetrica);
+  assert.ok(ajuda, "o `?` e' o AjudaMetrica");
+  assert.equal(ajuda!.dentroDoOrdenar, false, "o `?` nao esta' dentro do botao de ordenar");
+  comClique[0].no.props.onClick!();
+  assert.deepEqual(ordenadas, ["rate"]);
+});
+
+test("LDR por loja: Venciam, Atrasados e LDR com `?`; Loja segue no SortHeader", () => {
+  const ini = TIKTOK.indexOf("LDR por loja no período");
+  const tabela = TIKTOK.slice(ini, TIKTOK.indexOf("</thead>", ini));
+  for (const [coluna, chave] of [["base", "tiktok.venciam"], ["late", "tiktok.atrasaram"], ["rate", "tiktok.ldr"]]) {
+    assert.match(
+      tabela,
+      new RegExp(`<SortHeaderComAjuda\\s+rotulo="[^"]+"\\s+coluna="${coluna}"[^>]*ajuda="${chave.replace(".", "\\.")}"`),
+      coluna,
+    );
+  }
+  assert.match(tabela, /<SortHeader\s+rotulo="Loja"/);
+  assert.doesNotMatch(tabela, /<SortHeader rotulo="(Venciam|Atrasados|LDR)"/);
+});
+
 test("KpiComAjuda poe o `?` na linha de comparacao do KPI", () => {
   const html = renderToStaticMarkup(
     h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),

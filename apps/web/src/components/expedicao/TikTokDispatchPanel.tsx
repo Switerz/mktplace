@@ -79,6 +79,7 @@ import Disclosure from "@/components/ui/Disclosure";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
+import SortHeaderComAjuda from "@/components/expedicao/SortHeaderComAjuda";
 import SortHeader from "@/components/ui/SortHeader";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import type { Visao } from "@/lib/expedicao-ux";
@@ -597,9 +598,28 @@ export default function TikTokDispatchPanel({
                   aoOrdenar={toggleSort}
                   alinhamento="left"
                 />
-                <SortHeader rotulo="Venciam" coluna="base" sort={sort} aoOrdenar={toggleSort} />
-                <SortHeader rotulo="Atrasados" coluna="late" sort={sort} aoOrdenar={toggleSort} />
-                <SortHeader rotulo="LDR" coluna="rate" sort={sort} aoOrdenar={toggleSort} />
+                {/* O `?` fica FORA do botao de ordenar: clicar nele nao ordena. */}
+                <SortHeaderComAjuda
+                  rotulo="Venciam"
+                  coluna="base"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.venciam"
+                />
+                <SortHeaderComAjuda
+                  rotulo="Atrasados"
+                  coluna="late"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.atrasaram"
+                />
+                <SortHeaderComAjuda
+                  rotulo="LDR"
+                  coluna="rate"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.ldr"
+                />
               </tr>
             </thead>
             <tbody>

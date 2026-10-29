@@ -5,7 +5,9 @@
  *
  * Um `<button>` real, com alvo de 44px, que abre um painel curto com os seis
  * campos fixos do catalogo (`expedicao-definicoes.ts`): definicao, formula,
- * fonte, janela, cobertura e limitacoes.
+ * fonte, janela, cobertura e limitacoes — precedidos do rotulo de origem
+ * ("Oficial do marketplace" / "Cálculo da Torre" / indisponivel) e seguidos
+ * da referencia externa, quando houver.
  *
  * Comportamento:
  *   - abre por clique/toque e por teclado (Enter/Espaco sao o clique nativo);
@@ -29,7 +31,7 @@ import {
   type PointerEvent as EventoPonteiro,
 } from "react";
 
-import { CAMPOS_DEFINICAO, definicaoDe, type ChaveMetrica } from "@/lib/expedicao-definicoes";
+import { CAMPOS_DEFINICAO, ROTULO_ORIGEM, definicaoDe, type ChaveMetrica } from "@/lib/expedicao-definicoes";
 
 const ATRASO_HOVER_MS = 250;
 const ATRASO_SAIDA_MS = 150;
@@ -182,12 +184,27 @@ export default function AjudaMetrica({
             Fechar
           </button>
         </span>
+        {/* Revisao T-0010: de onde vem o numero, ANTES da definicao. */}
+        <span className="block">
+          <span
+            data-origem={def.origem}
+            className="inline-block rounded bg-raised px-1.5 py-0.5 font-semibold text-ink ring-1 ring-inset ring-line"
+          >
+            {ROTULO_ORIGEM[def.origem]}
+          </span>
+        </span>
         {CAMPOS_DEFINICAO.map(([campo, rotulo]) => (
           <span key={campo} className="mt-1 block">
             <span className="font-semibold text-ink">{rotulo}: </span>
             {def[campo]}
           </span>
         ))}
+        {def.referencia ? (
+          <span className="mt-1 block">
+            <span className="font-semibold text-ink">Referência: </span>
+            {def.referencia}
+          </span>
+        ) : null}
       </span>
       ) : null}
     </span>

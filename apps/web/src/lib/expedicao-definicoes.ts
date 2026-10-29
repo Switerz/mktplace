@@ -12,18 +12,46 @@
  *     `?` diz isso em vez de inventar numero;
  *   - "acima de 48 h" e' limiar interno da Torre, nunca SLA do marketplace.
  *
+ * Revisao T-0010: cada entrada declara tambem a ORIGEM do numero, em campo
+ * proprio (`origem`), que o `?` mostra como rotulo curto antes da definicao:
+ *   - "oficial": numero publicado pela plataforma, copiado dela — `fonte`
+ *     diz de onde;
+ *   - "torre": calculo operacional da Torre sobre dados brutos — a regra e' a
+ *     `formula`;
+ *   - "indisponivel": o canal nao publica o insumo; a tela nao mede.
+ * Hoje NENHUMA metrica da Expedicao e' oficial: ate' as que comparam com um
+ * numero da plataforma (a meta de 4% do TikTok) sao medicao da Torre, e o
+ * numero da plataforma vai em `referencia`, nunca como fonte.
+ *
  * SEM IMPORTS de outros contratos, para nao abrir ciclo.
  */
+
+/** De onde vem o numero exibido. */
+export type OrigemMetrica = "oficial" | "torre" | "indisponivel";
+
+/** O rotulo curto que o `?` mostra antes da definicao. */
+export const ROTULO_ORIGEM: Record<OrigemMetrica, string> = {
+  oficial: "Oficial do marketplace",
+  torre: "Cálculo da Torre",
+  indisponivel: "Indisponível neste canal",
+};
 
 export interface DefinicaoMetrica {
   /** Nome curto, igual ao rotulo da tela. Vai no `aria-label` do `?`. */
   nome: string;
+  /** Oficial do marketplace, calculo da Torre ou indisponivel no canal. */
+  origem: OrigemMetrica;
   definicao: string;
   formula: string;
   fonte: string;
   janela: string;
   cobertura: string;
   limitacoes: string;
+  /**
+   * Numero externo citado como REFERENCIA (ex.: a meta publicada pela
+   * plataforma). Nao e' a fonte do numero exibido.
+   */
+  referencia?: string;
 }
 
 /** Os seis campos, na ordem em que aparecem no `?`. */
@@ -43,6 +71,9 @@ const COB_SHOPEE = "Contas Shopee cadastradas; pedidos FBS incluídos quando a d
 const COB_ML = "Contas do Mercado Livre cadastradas; envios Full (fulfillment) ficam fora.";
 const SEM_PRAZO_ML =
   "O Mercado Livre não publica prazo de despacho: não há SLA nem LDR a medir. A tela não inventa esse número.";
+/** O 4% e' da plataforma; a medicao comparada com ele e' da Torre. */
+const REF_META_TIKTOK =
+  "Meta de 4% publicada pelo TikTok Shop: só a linha de comparação, não a fonte do número (a plataforma mede com o próprio relógio e denominador).";
 
 /** Os KPIs da fila (`montarKpis`), um `?` por canal. */
 export const KPIS_DA_FILA = [
@@ -59,6 +90,8 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     canal === "shopee"
       ? {
           nome,
+          // O prazo (ship_by_date) e' da Shopee; a contagem e' da Torre.
+          origem: "torre",
           definicao,
           formula,
           fonte,
@@ -68,6 +101,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
         }
       : {
           nome,
+          origem: "indisponivel",
           definicao: "Não medido neste canal.",
           formula: "Não se aplica.",
           fonte,
@@ -78,6 +112,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
   return {
     [`${canal}.backlog`]: {
       nome: canal === "shopee" ? "Backlog total" : "Backlog total (envios)",
+      origem: "torre",
       definicao: `Cada ${grao} pago que ainda não foi expedido.`,
       formula: `Contagem de ${grao}s em aberto na fotografia.`,
       fonte,
@@ -100,6 +135,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     ),
     [`${canal}.sem_prazo`]: {
       nome: "Sem prazo publicado",
+      origem: "torre",
       definicao: "Envios sem prazo de despacho na fonte.",
       formula: "Contagem de envios sem prazo publicado.",
       fonte,
@@ -109,6 +145,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.over48h`]: {
       nome: "Acima de 48 h",
+      origem: "torre",
       definicao: "Abertos há mais de 48 h desde o pagamento.",
       formula: "Contagem com horas em aberto > 48.",
       fonte,
@@ -118,6 +155,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.stalled`]: {
       nome: "Travados",
+      origem: "torre",
       definicao: "Lentos ou zumbis, sem contar o mesmo pedido duas vezes.",
       formula: "União de lentos e zumbis (nunca a soma).",
       fonte,
@@ -127,6 +165,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.slow`]: {
       nome: "Lentos vs baseline",
+      origem: "torre",
       definicao: "Abertos há mais tempo que o histórico da própria conta.",
       formula: "Horas em aberto acima da linha de base da conta.",
       fonte,
@@ -136,6 +175,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.zombie`]: {
       nome: "Zumbis",
+      origem: "torre",
       definicao: "Pedidos que pararam de mudar na fonte.",
       formula: "Contagem marcada como zumbi da fonte pelo pipeline.",
       fonte,
@@ -145,6 +185,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.marcas_alerta`]: {
       nome: "Marcas com fonte em alerta",
+      origem: "torre",
       definicao: "Marcas cuja fonte está desatualizada ou com frescor desconhecido.",
       formula: "Contagem de marcas com frescor crítico ou desconhecido.",
       fonte: "Frescor por marca publicado com a fila.",
@@ -161,6 +202,7 @@ export const DEFINICOES = {
 
   "shopee.prazo_situacao": {
     nome: "Pedidos em fila por situação de prazo",
+    origem: "torre",
     definicao: "Divide a fila aberta em vencidos, vence em 24 h, no prazo e sem prazo.",
     formula: "Partição da fila: as quatro faixas somam o backlog.",
     fonte: FILA_SHOPEE,
@@ -170,6 +212,7 @@ export const DEFINICOES = {
   },
   "shopee.fbs": {
     nome: "Pedidos FBS",
+    origem: "torre",
     definicao: "Pedidos que a própria Shopee despacha do armazém dela.",
     formula: "Fila aberta com fluxo FBS, separada da fila do vendedor.",
     fonte: "Rota da LDR operacional (fila por fluxo).",
@@ -179,6 +222,7 @@ export const DEFINICOES = {
   },
   "shopee.ldr": {
     nome: "LDR operacional da Shopee",
+    origem: "torre",
     definicao: "Indicador operacional interno: parte dos pedidos com prazo vencido que foram coletados com atraso ou seguem sem coleta.",
     formula: "Atrasados ÷ pedidos com prazo vencido na janela.",
     fonte: "marts.expedicao_shopee_ldr_daily (por dia de vencimento × conta).",
@@ -188,6 +232,7 @@ export const DEFINICOES = {
   },
   "shopee.ldr_base": {
     nome: "Base (prazos vencidos)",
+    origem: "torre",
     definicao: "Pedidos cujo prazo de envio venceu na janela.",
     formula: "Pagos − FBS − cancelados sem coleta − enviados sem coleta.",
     fonte: "marts.expedicao_shopee_ldr_daily.",
@@ -197,6 +242,7 @@ export const DEFINICOES = {
   },
   "shopee.ldr_atrasados": {
     nome: "Atrasados",
+    origem: "torre",
     definicao: "Coletados depois do prazo mais os vencidos ainda sem coleta.",
     formula: "Coletados com atraso + vencidos sem coleta.",
     fonte: "marts.expedicao_shopee_ldr_daily.",
@@ -206,6 +252,7 @@ export const DEFINICOES = {
   },
   "shopee.ldr_em_risco": {
     nome: "Vencem hoje ou amanhã",
+    origem: "torre",
     definicao: "Pedidos ainda sem coleta e dentro do prazo, que vencem hoje ou amanhã.",
     formula: "Contagem de pendentes com vencimento em hoje ou amanhã.",
     fonte: "marts.expedicao_shopee_ldr_daily.",
@@ -215,6 +262,7 @@ export const DEFINICOES = {
   },
   "mercadolivre.prazo": {
     nome: "Prazo e LDR no Mercado Livre",
+    origem: "indisponivel",
     definicao: "Não medido: o canal não publica prazo de despacho.",
     formula: "Não se aplica.",
     fonte: FILA_ML,
@@ -224,6 +272,7 @@ export const DEFINICOES = {
   },
   "mercadolivre.mais_antigo": {
     nome: "Pedido mais antigo em fila",
+    origem: "torre",
     definicao: "Idade do envio mais antigo ainda em aberto, por marca.",
     formula: "Maior idade de linha publicada no frescor por marca.",
     fonte: "Frescor por marca publicado com a fila.",
@@ -234,6 +283,7 @@ export const DEFINICOES = {
 
   "tiktok.pendente_vencido": {
     nome: "Venceram e não saíram",
+    origem: "torre",
     definicao: "Pedidos cujo prazo venceu e que ainda não tiveram o evento escolhido.",
     formula: "Contagem de pendentes com prazo vencido na janela.",
     fonte: "marts.expedicao_tiktok_dispatch_daily (dia × marca).",
@@ -243,6 +293,7 @@ export const DEFINICOES = {
   },
   "tiktok.vence_hoje_amanha": {
     nome: "Vencem hoje ou amanhã",
+    origem: "torre",
     definicao: "Pedidos ainda sem o evento que vencem hoje ou amanhã.",
     formula: "Contagem de pendentes com vencimento em hoje ou amanhã.",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
@@ -252,6 +303,7 @@ export const DEFINICOES = {
   },
   "tiktok.pendente_no_prazo": {
     nome: "Pendentes no prazo",
+    origem: "torre",
     definicao: "Pedidos ainda sem o evento, dentro do prazo.",
     formula: "Contagem de pendentes com vencimento futuro.",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
@@ -261,24 +313,29 @@ export const DEFINICOES = {
   },
   "tiktok.lojas_acima_meta": {
     nome: "Lojas acima da meta",
+    origem: "torre",
     definicao: "Lojas cuja LDR da janela passou da referência de 4% do TikTok.",
     formula: "Contagem de lojas com LDR > 4%, entre as com base suficiente.",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
     janela: "Vencimentos fechados da janela.",
     cobertura: "Só lojas com base suficiente de vencimentos fechados.",
     limitacoes: "Medição interna: não é o veredito de penalização da plataforma.",
+    referencia: REF_META_TIKTOK,
   },
   "tiktok.ldr": {
     nome: "LDR do TikTok",
+    origem: "torre",
     definicao: "Parte dos pedidos que venciam no período e saíram com atraso ou seguem sem o evento.",
     formula: "Atrasados ÷ pedidos que venciam (só vencimentos fechados).",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
     janela: "Vencimentos da janela consultada; o dia de hoje fica fora da taxa.",
     cobertura: "Pagos, sem amostras e sem cancelados antes do prazo.",
     limitacoes: "Prazo reconstruído (1 dia útil para etiqueta, 2 para coleta). Indicador interno, não a medição oficial da plataforma.",
+    referencia: REF_META_TIKTOK,
   },
   "tiktok.venciam": {
     nome: "Venciam no período",
+    origem: "torre",
     definicao: "Pedidos cujo prazo venceu num dia fechado da janela.",
     formula: "Soma dos vencimentos fechados (denominador da LDR).",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
@@ -288,6 +345,7 @@ export const DEFINICOES = {
   },
   "tiktok.atrasaram": {
     nome: "Já atrasaram",
+    origem: "torre",
     definicao: "Pedidos dos vencimentos fechados que saíram depois do prazo ou ainda não saíram.",
     formula: "Enviados com atraso + vencidos sem o evento (numerador da LDR).",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
@@ -297,6 +355,7 @@ export const DEFINICOES = {
   },
   "tiktok.fluxo_pagamento": {
     nome: "Taxa por data de pagamento",
+    origem: "torre",
     definicao: "Visão auxiliar: atraso dos pedidos pagos em cada dia.",
     formula: "Atrasados ÷ pedidos pagos no dia (só dias fechados).",
     fonte: "marts.expedicao_tiktok_dispatch_daily.",
@@ -306,6 +365,7 @@ export const DEFINICOES = {
   },
   "jornada.fila_aberta": {
     nome: "Jornada — fila aberta",
+    origem: "torre",
     definicao: "Pedidos pagos ainda não expedidos, divididos pela etapa em que estão agora.",
     formula: "Contagem por etapa ÷ total da fila aberta (as etapas somam o total).",
     fonte: "Rota /expedicao/jornada sobre a fila publicada (marts.expedicao_fila_atual).",
@@ -315,6 +375,7 @@ export const DEFINICOES = {
   },
   "jornada.coorte": {
     nome: "Jornada — coorte",
+    origem: "torre",
     definicao: "Pedidos de uma janela de dias fechados, pela etapa em que terminaram.",
     formula: "Contagem por etapa ÷ base da coorte (as etapas somam a base).",
     fonte: "TikTok: marts.expedicao_tiktok_dispatch_daily. Shopee: tabelas da LDR operacional.",
