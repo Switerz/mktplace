@@ -67,20 +67,15 @@ export function useJornada(
   api: string,
   canal: CanalJornada,
   marca: string | null,
-  opcoes: { dias?: number; evento?: "coleta" | "despacho"; ligada?: boolean } = {},
+  opcoes: { dias?: number; evento?: "coleta" | "despacho" } = {},
 ): { carga: CargaJornada; tentarDeNovo: () => void } {
   const url = `${api}${queryDaJornada(canal, marca, opcoes)}`;
-  const ligada = opcoes.ligada ?? true;
   const vigente = useRef(url);
   vigente.current = url;
   const [carga, setCarga] = useState<CargaJornada>(CARGA_INICIAL);
   const [tentativa, setTentativa] = useState(0);
 
   useEffect(() => {
-    if (!ligada) {
-      setCarga({ carregando: false, http: null, erroDeRede: false, resultado: null });
-      return;
-    }
     let vivo = true;
     const minha = url;
     setCarga(CARGA_INICIAL);
@@ -107,7 +102,7 @@ export function useJornada(
     return () => {
       vivo = false;
     };
-  }, [url, canal, tentativa, ligada]);
+  }, [url, canal, tentativa]);
 
   const tentarDeNovo = useCallback(() => setTentativa((n) => n + 1), []);
   return { carga, tentarDeNovo };
@@ -216,7 +211,15 @@ function SecaoNula({ titulo, secao, r }: { titulo: string; secao: "fila_aberta" 
   );
 }
 
-function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
+/** A fila aberta tem etapa REAL (T-0015), nao so' "aguardando expedicao". */
+export function filaTemEtapasReais(r: RespostaJornada): boolean {
+  const f = r.fila_aberta;
+  return Boolean(
+    f && f.etapas.some((e) => e.key !== "aguardando_expedicao" && e.key !== "nao_publicada"),
+  );
+}
+
+function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta?: boolean }) {
   const f = r.fila_aberta;
   if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
   return (
@@ -243,7 +246,13 @@ function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
         </div>
       ) : null}
       <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" />
-      <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
+      {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
+          "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
+      {compacta ? null : (
+        <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
+      )}
+      {/* As limitacoes (ex.: "FBS nao separado na fila aberta") ficam sempre:
+          sao elas que dizem que esta base nao e' a do "Risco atual". */}
       <Limitacoes itens={f.limitacoes} />
     </Panel>
   );
@@ -324,31 +333,42 @@ export default function JornadaPedidos({
   carga,
   aoTentarDeNovo,
   marca = null,
-  soCoorte = false,
+  compacta = false,
 }: {
   carga: CargaJornada;
   aoTentarDeNovo: () => void;
   /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
   marca?: string | null;
   /**
-   * EXPEDICAO-TRAVADOS-1 — so' a coorte. Na fila (Shopee/ML) a fila aberta e'
-   * UMA etapa, e as sobreposicoes repetem os numeros do "Risco atual". Sem
-   * coorte publicada, a secao inteira sai (nada a mostrar que ja' nao esteja
-   * na tela).
+   * EXPEDICAO-TRAVADOS-1 — so' o que o "Risco atual" nao diz. A fila aberta
+   * entra apenas com etapa REAL publicada (T-0015) e sem as sobreposicoes; a
+   * coorte, quando existe. Sem nenhuma das duas, a secao inteira sai.
    */
-  soCoorte?: boolean;
+  compacta?: boolean;
 }) {
   const estado = estadoDaJornada(carga);
   const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
-  if (soCoorte) {
-    if (estado !== "pronta" || !resposta?.coorte) return null;
+  if (compacta) {
+    if (estado !== "pronta" || !resposta) return null;
+    const comFila = filaTemEtapasReais(resposta);
+    const comCoorte = Boolean(resposta.coorte);
+    if (!comFila && !comCoorte) return null;
     return (
       <SecaoGerencial
         titulo="Jornada"
-        dica="Pedidos dos dias fechados do período, por etapa."
+        dica="Em que etapa estão os pedidos: agora (fila aberta) e nos dias fechados do período (coorte)."
       >
-        <div data-testid="exp-jornada">
-          <BlocoCoorte r={resposta} />
+        {avisoDeMarcaNaoAplicada(marca, resposta) ? (
+          <div data-testid="exp-jornada-marca-nao-aplicada">
+            <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
+          </div>
+        ) : null}
+        {resposta.status === "partial" && motivoDoTopo(resposta) ? (
+          <EstadoSecao tipo="parcial" titulo={motivoDoTopo(resposta)!} />
+        ) : null}
+        <div className={`grid gap-3 ${comFila && comCoorte ? "lg:grid-cols-2" : ""}`} data-testid="exp-jornada">
+          {comFila ? <BlocoFilaAberta r={resposta} compacta /> : null}
+          {comCoorte ? <BlocoCoorte r={resposta} /> : null}
         </div>
       </SecaoGerencial>
     );

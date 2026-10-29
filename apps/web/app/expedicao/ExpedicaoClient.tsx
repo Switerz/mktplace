@@ -120,7 +120,6 @@ import {
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
-import { canalTemCoorte } from "@/lib/expedicao-jornada";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -548,12 +547,9 @@ export default function ExpedicaoClient({
   // no SERVIDOR. Nada aqui soma a fila paginada.
   // UI-EXPEDICAO-1: o periodo do topo comanda a pagina — a coorte da jornada
   // e a LDR leem a MESMA janela da tendencia. A fila aberta e' "agora".
-  // O Mercado Livre nao tem coorte (contrato): sem ela a secao nao aparece,
-  // entao nem busca.
-  const jornada = useJornada(API, filtros.channel, marcaAtiva, {
-    dias: janela,
-    ligada: canalTemCoorte(filtros.channel),
-  });
+  // T-0015: a fila aberta do ML tambem tem etapa (substatus do envio), entao
+  // a jornada e' buscada nos dois canais; o `days` so' vai onde ha coorte.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
 
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
 
@@ -1553,9 +1549,9 @@ export default function ExpedicaoClient({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoPrazo}
-            // A fila aberta da jornada repetiria o "Risco atual" (uma etapa so');
-            // na fila, a jornada mostra so' a coorte do periodo.
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} soCoorte />}
+            // Compacta: a fila aberta so' com etapa real (sem repetir o
+            // "Risco atual") e a coorte do periodo quando existe.
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} compacta />}
             evolucao={painelEvolucao}
             convite={
               aoTrocarVisao && (

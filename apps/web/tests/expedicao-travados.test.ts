@@ -82,11 +82,11 @@ test("tabela: o numero de travados abre a lista e mostra o %", () => {
 
 test("menos texto: Prazo some sem LDR; jornada so' com coorte; convite curto", () => {
   assert.match(CLIENTE, /const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo \? null/);
-  assert.match(CLIENTE, /<JornadaPedidos [^>]*soCoorte \/>/);
+  assert.match(CLIENTE, /<JornadaPedidos [^>]*compacta \/>/);
   assert.match(CLIENTE, /conteudo="Lista de pedidos, mais críticos e fonte por conta\."/);
   assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{SEM_PRAZO_CANAL_ML\}>/);
   const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
-  assert.match(JORNADA, /if \(estado !== "pronta" \|\| !resposta\?\.coorte\) return null;/);
+  assert.match(JORNADA, /if \(!comFila && !comCoorte\) return null;/);
 });
 
 test("marca fora da cobertura vira linha curta com ⓘ, sem caixa", () => {
@@ -104,11 +104,42 @@ test("marca fora da cobertura vira linha curta com ⓘ, sem caixa", () => {
 test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclui FBS", () => {
   const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
   assert.match(POPUP, /\{temPrazo \? <th scope="col">Prazo<\/th> : null\}/);
-  assert.match(POPUP, /alvo\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
-  assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? " Por segurança/);
+  assert.match(POPUP, /alvo\?\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
+  assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? "Por segurança/);
+  assert.match(POPUP, /\{rodape \? <p className="text-xs text-ink-faint">\{rodape\}<\/p> : null\}/);
   assert.match(CLIENTE, /<TravadosDialog\s+key=\{alvoTravados \?/);
   assert.match(CLIENTE, /incluiFbs: divisao !== null/);
   const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
-  assert.match(JORNADA, /if \(!ligada\) \{/);
+  // revisao #127: o modo compacto mantem o aviso de marca e as limitacoes
+  const compacto = JORNADA.slice(JORNADA.indexOf("if (compacta) {"));
+  assert.match(compacto, /avisoDeMarcaNaoAplicada\(marca, resposta\)/);
+  assert.match(JORNADA, /\{compacta \? null : \(\s*<Sobreposicoes[^]*?\)\}\s*\{\/\*[^]*?\*\/\}\s*<Limitacoes itens=\{f\.limitacoes\} \/>/);
 });
 
+
+test("etapa (T-0015): rotulo do contrato, so' com etapa real, contagem na ordem do fluxo", async () => {
+  const { rotuloDaEtapa, temEtapaPublicada, travadosPorEtapa, ETAPAS_DO_PEDIDO } = await import(
+    "../src/lib/expedicao-travados.ts"
+  );
+  assert.equal(rotuloDaEtapa("aguardando_coleta"), "Aguardando coleta");
+  assert.equal(rotuloDaEtapa("valor_novo"), "valor_novo", "desconhecido aparece cru");
+  assert.equal(rotuloDaEtapa(null), "—");
+  assert.equal(temEtapaPublicada([{ etapa: null }, { etapa: "nao_publicada" }]), false);
+  assert.equal(temEtapaPublicada([{ etapa: "a_preparar" }]), true);
+  assert.deepEqual(
+    travadosPorEtapa([{ etapa: "aguardando_coleta" }, { etapa: "a_preparar" }, { etapa: "aguardando_coleta" }]).map(
+      (e) => [e.rotulo, e.n],
+    ),
+    [["A preparar", 1], ["Aguardando coleta", 2]],
+  );
+  // o dominio e' o mesmo da API (expedicao_service.ETAPAS_FILA)
+  const API = readFileSync(join(RAIZ, "../api/app/services/expedicao_service.py"), "utf8");
+  for (const [k, rotulo] of ETAPAS_DO_PEDIDO) assert.ok(API.includes(`("${k}", "${rotulo}")`), k);
+});
+
+test("popup: coluna e resumo de etapa so' com etapa publicada", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /\{temEtapa \? <th scope="col">Etapa<\/th> : null\}/);
+  assert.match(POPUP, /data-testid="exp-travados-por-etapa"/);
+  assert.match(POPUP, /Onde estão travados/);
+});

@@ -201,6 +201,10 @@ class OrderRow(BaseModel):
     source_ingested_at: Optional[datetime] = None
     source_freshness_status: FreshnessStatus
     timestamp_quality: TimestampQuality
+    #: Etapa do pedido na fila (T-0015, migration 033): dominio de
+    #: `ETAPAS_FILA`. Nula sem a 033 no destino; `nao_publicada` quando a
+    #: linha foi gravada pelo publicador antigo.
+    etapa: Optional[str] = None
 
 
 class Paginacao(BaseModel):

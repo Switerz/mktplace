@@ -709,8 +709,14 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
 
     ordem = ", ".join(ORDENACOES.get(order_by, ORDEM_PADRAO))
     colunas = ", ".join(FILA_COLUNAS)
+    # EXPEDICAO-ETAPA-POPUP: a etapa de cada pedido (T-0015) so' com a 033 no
+    # destino. Sem ela a coluna nao existe e a linha sai com `etapa` nula —
+    # exatamente a resposta de antes, mais um campo opcional.
+    sonda = _linhas(db, _COLUNA_ETAPA_SQL, {})
+    tem_etapa = bool(sonda) and sonda[0].get("ok") is True
+    extra = ", etapa" if tem_etapa else ""
     brutas = _linhas(db, f"""
-        SELECT marketplace_order_id, {colunas}
+        SELECT marketplace_order_id, {colunas}{extra}
         FROM {FILA} WHERE {filtro}
         ORDER BY {ordem}
         LIMIT :limit OFFSET :offset
@@ -722,6 +728,7 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         linha["hours_open"] = _num(r["hours_open"])
         linha["hours_overdue"] = _num(r["hours_overdue"])
         linha["order_ref"] = _order_ref(str(r["marketplace_order_id"]))
+        linha["etapa"] = str(r["etapa"]) if tem_etapa and r["etapa"] is not None else None
         linhas.append(linha)
     return linhas, total
 
@@ -1012,12 +1019,12 @@ ETAPA_NAO_PUBLICADA = "nao_publicada"
 _ORDEM_ETAPA = {k: i for i, (k, _) in enumerate(ETAPAS_FILA)}
 _ROTULO_ETAPA = dict(ETAPAS_FILA)
 
+#: UM `SELECT` so' (sem subconsulta): o teste de "serving sem escrita" conta
+#: um SELECT por consulta.
 _COLUNA_ETAPA_SQL = """
-    SELECT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'marts' AND table_name = 'expedicao_fila_atual'
-          AND column_name = 'etapa'
-    ) AS ok
+    SELECT count(*) > 0 AS ok FROM information_schema.columns
+    WHERE table_schema = 'marts' AND table_name = 'expedicao_fila_atual'
+      AND column_name = 'etapa'
 """
 
 
