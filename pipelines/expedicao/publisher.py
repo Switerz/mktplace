@@ -33,9 +33,25 @@ ATOMICIDADE FILA + RESUMO
 Os dois vao na MESMA transacao, com o mesmo `refresh_batch_id`. Se fossem
 transacoes separadas, uma falha no meio deixaria fila nova com resumo antigo (ou
 o contrario) e a tela mostraria um backlog que a tendencia nao explica.
+
+ETAPA DA FILA (T-0015, migration 033)
+-------------------------------------
+`etapa`/`etapa_fonte` sao colunas CONDICIONAIS: a cada execucao o publicador
+pergunta ao `information_schema` se a 033 esta aplicada no destino. Com a
+coluna, grava as duas; sem ela, o INSERT e' exatamente o de antes. Por isso a
+imagem nova pode ir ao ar antes da migration.
+
+A lista de colunas do INSERT continua EXPLICITA (`FILA_COLUMNS` + o recorte de
+`ETAPA_COLUMNS` que existe no destino) e nunca sai de `records[0].keys()`: uma
+chave nova na linha nao entra no banco sem alguem declara-la aqui.
+
+Linha com etapa `outro` (valor novo da fonte) NAO bloqueia: e' contada em
+`relatorio` e vira aviso no log do run.
 """
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from contextlib import contextmanager
 
 from pipelines.expedicao.contract import (
@@ -43,6 +59,7 @@ from pipelines.expedicao.contract import (
     FILA_TABLE,
     RUN_TABLE,
     Channel,
+    Etapa,
     LoteIncoerente,
     SourceHealth,
     SourceUnhealthy,
@@ -75,6 +92,29 @@ FILA_COLUMNS = (
     "source_freshness_status",
     "timestamp_quality",
 )
+
+#: Colunas da migration 033, em ordem. CONDICIONAIS: entram no INSERT so' as
+#: que existirem no destino, e so' se `etapa` existir. Ficam FORA de
+#: `FILA_COLUMNS` porque aquela lista e' o schema da 018, sempre presente.
+ETAPA_COLUMNS = ("etapa", "etapa_fonte")
+
+_FILA_SCHEMA, _FILA_NOME = FILA_TABLE.split(".")
+
+#: Deteccao por execucao. Roda DENTRO da transacao da publicacao, logo antes
+#: do INSERT: se a coluna sumir entre a leitura e a escrita, o INSERT falha e o
+#: rollback preserva a fila anterior.
+COLUNAS_ETAPA_SQL = """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = %s
+  AND table_name = %s
+  AND column_name = ANY(%s)
+"""
+
+#: Teto de valores brutos `outro` citados no relatorio/aviso.
+_MAX_FONTES_OUTRO_NO_RELATORIO = 20
+
+_log = logging.getLogger(__name__)
 
 #: PK FISICA FUTURA da fila. Espelha `pk_shopee_orders (shop_account, order_sn)`.
 #: `brand` NAO entra: corrigir a marca de uma conta nao pode criar outro pedido.
@@ -136,6 +176,32 @@ ON CONFLICT (channel, shop_account, snapshot_hour) DO UPDATE SET
     ingested_at = EXCLUDED.ingested_at
 WHERE EXCLUDED.observed_at > {_RUN}.observed_at
 """
+
+
+def colunas_de_etapa_no_destino(cur) -> tuple[str, ...]:
+    """Recorte de `ETAPA_COLUMNS` presente no destino. Vazio = 033 ausente.
+
+    Aceita cursor de tupla e `RealDictCursor`, como `channel_lock`.
+    """
+    cur.execute(COLUNAS_ETAPA_SQL, (_FILA_SCHEMA, _FILA_NOME, list(ETAPA_COLUMNS)))
+    existentes = {
+        linha["column_name"] if isinstance(linha, dict) else linha[0]
+        for linha in cur.fetchall()
+    }
+    if "etapa" not in existentes:
+        return ()
+    return tuple(c for c in ETAPA_COLUMNS if c in existentes)
+
+
+def contagem_por_etapa(fila_rows: list[dict]) -> dict[str, int]:
+    """Linhas por etapa. A soma e' sempre `len(fila_rows)`.
+
+    Linha sem a chave `etapa` (montada fora de `build_fila_*`) conta como
+    `nao_publicada`, que e' exatamente o que o banco gravaria para ela.
+    """
+    return dict(
+        Counter(r.get("etapa", Etapa.NAO_PUBLICADA.value) for r in fila_rows)
+    )
 
 
 class LockNotAcquired(RuntimeError):
@@ -217,6 +283,7 @@ def publish_channel(
     refresh_batch_id: str,
     expected_accounts,
     execute_values=None,
+    relatorio: dict | None = None,
 ) -> tuple[int, int]:
     """Substitui a fila DO CANAL e grava o resumo por conta, numa transacao.
 
@@ -231,6 +298,10 @@ def publish_channel(
     externa de verdade, "o resumo cobre todas as contas" nao e' verificavel: o
     proprio resumo seria juiz da propria cobertura. Com ele, `problemas_do_lote`
     recusa o lote ANTES do DELETE - ver `LoteIncoerente`.
+
+    `relatorio`, quando passado, recebe depois do COMMIT: as colunas de etapa
+    efetivamente escritas, a contagem por etapa (soma = linhas publicadas) e
+    quantas linhas foram `outro`, com os valores brutos. `outro` nunca bloqueia.
     """
     if not source_health.can_publish:
         raise SourceUnhealthy(
@@ -300,16 +371,39 @@ def publish_channel(
             + "; ".join(incoerencias)
         )
 
+    # Etapa fora do dominio fechado e' lote mal montado: recusa ANTES do
+    # DELETE, em vez de deixar o CHECK da 033 derrubar a transacao.
+    dominio_etapa = {e.value for e in Etapa}
+    fora_do_dominio = sorted(
+        {str(r["etapa"]) for r in fila_rows if "etapa" in r} - dominio_etapa
+    )
+    if fora_do_dominio:
+        raise ValueError(
+            f"publicacao de {channel.value} com etapa fora do dominio: "
+            f"{fora_do_dominio}"
+        )
+    por_etapa = contagem_por_etapa(fila_rows)
+    fontes_outro = sorted(
+        {
+            str(r.get("etapa_fonte"))
+            for r in fila_rows
+            if r.get("etapa") == Etapa.OUTRO.value
+        }
+    )[:_MAX_FONTES_OUTRO_NO_RELATORIO]
+
+    colunas_etapa: tuple[str, ...] = ()
     neon_conn.autocommit = False
     try:
         with neon_conn.cursor() as cur:
             cur.execute(DELETE_CANAL_SQL, (channel.value,))
 
             if fila_rows:
+                colunas_etapa = colunas_de_etapa_no_destino(cur)
+                colunas = FILA_COLUMNS + colunas_etapa
                 execute_values(
                     cur,
-                    f"INSERT INTO {FILA_TABLE} ({', '.join(FILA_COLUMNS)}) VALUES %s",
-                    [tuple(r[c] for c in FILA_COLUMNS) for r in fila_rows],
+                    f"INSERT INTO {FILA_TABLE} ({', '.join(colunas)}) VALUES %s",
+                    [tuple(r[c] for c in colunas) for r in fila_rows],
                 )
             # SEMPRE gravado, inclusive com backlog zero: e a prova de que a
             # fotografia foi tirada naquela hora, por conta.
@@ -330,5 +424,20 @@ def publish_channel(
             f"COMMIT do canal {channel.value} sem resposta conclusiva; "
             "reconcilie antes de reexecutar."
         ) from exc
+
+    outro = por_etapa.get(Etapa.OUTRO.value, 0)
+    if outro:
+        # Aviso, nunca bloqueio: valor novo da fonte e' contado e citado para
+        # alguem classificar no contrato. Sao codigos de status, nao PII.
+        _log.warning(
+            "expedicao %s: %d linha(s) com etapa 'outro' (valor da fonte fora "
+            "do mapeamento): %s",
+            channel.value, outro, fontes_outro,
+        )
+    if relatorio is not None:
+        relatorio["etapa_colunas_escritas"] = colunas_etapa
+        relatorio["etapa_por_etapa"] = por_etapa
+        relatorio["etapa_outro_count"] = outro
+        relatorio["etapa_outro_fontes"] = fontes_outro
 
     return len(fila_rows), len(summary_rows)

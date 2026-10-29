@@ -768,6 +768,10 @@ class FakeCursor:
     def fetchone(self):
         return {"pg_try_advisory_lock": self.conn.lock_disponivel}
 
+    def fetchall(self):
+        # T-0015: so' a deteccao da 033 usa fetchall aqui; destino sem a 033.
+        return []
+
 
 class FakeConn:
     def __init__(self, lock_disponivel=True, falhar_em=None, falhar_commit=False):

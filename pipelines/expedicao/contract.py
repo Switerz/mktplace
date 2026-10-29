@@ -549,3 +549,107 @@ ML_ALLOWED_SOURCE_COLUMNS = frozenset(
         "extracted_at",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Etapa do pedido na fila aberta (T-0015, contrato etapa v1)
+# ---------------------------------------------------------------------------
+class Etapa(str, Enum):
+    """Etapa em que o pedido esta DENTRO da fila aberta.
+
+    Dominio FECHADO: o CHECK `ck_efa_dominio_etapa` da migration 033 repete
+    exatamente estes valores, e o teste compara os dois por igualdade.
+
+    `OUTRO` existe porque o dominio da FONTE e' aberto: um `order_status` ou
+    `substatus` novo nunca e' descartado nem adivinhado. A linha entra na fila
+    com `etapa = 'outro'`, o valor bruto fica em `etapa_fonte` e o publicador
+    conta quantas foram assim - sem bloquear a publicacao.
+
+    `NAO_PUBLICADA` e' o DEFAULT da coluna: so' existe em linhas gravadas por
+    um publicador anterior a esta etapa. A transformacao nunca a produz.
+    """
+
+    A_PREPARAR = "a_preparar"
+    AGUARDANDO_COLETA = "aguardando_coleta"
+    A_FATURAR = "a_faturar"
+    A_IMPRIMIR = "a_imprimir"
+    EM_SEPARACAO = "em_separacao"
+    ENTREGUE_TRANSPORTADORA = "entregue_transportadora"
+    SINALIZADO_ML = "sinalizado_ml"
+    OUTRO = "outro"
+    NAO_PUBLICADA = "nao_publicada"
+
+
+#: Coluna da FONTE que decide a etapa, por canal. As duas ja' estao nas listas
+#: FECHADAS de colunas extraidas (`SHOPEE_ALLOWED_SOURCE_COLUMNS` e
+#: `ML_ALLOWED_SOURCE_COLUMNS`): a etapa nao amplia o SELECT. Sao codigos de
+#: estado do marketplace, nao dado de comprador.
+ETAPA_SOURCE_COLUMN = {
+    Channel.SHOPEE: "order_status",
+    Channel.MERCADOLIVRE: "substatus",
+}
+
+#: Shopee, por `order_status`. Dominio medido na fonte com o filtro do
+#: extrator (PROCESSED, READY_TO_SHIP); evidencia numerica fora do repositorio.
+SHOPEE_ETAPA_POR_ORDER_STATUS = {
+    "READY_TO_SHIP": Etapa.A_PREPARAR,
+    "PROCESSED": Etapa.AGUARDANDO_COLETA,
+}
+
+#: Mercado Livre, por `substatus`, so' das modalidades operadas pelo VENDEDOR
+#: (o Full ja' sai da fila em `ml_extract.classify_candidates`). Dominio medido
+#: na fonte com o filtro do extrator (in_hub, picked_up, ready_for_pickup,
+#: in_packing_list, dropped_off, ready_to_print, invoice_pending, stale,
+#: delayed); evidencia numerica fora do repositorio.
+#:
+#: `ready_to_pack` e `packed` foram medidos so' no Full; ficam mapeados porque
+#: significam a mesma separacao quando aparecerem no vendedor.
+#:
+#: `picked_up`, `dropped_off` e `in_hub` viram `entregue_transportadora` pelo
+#: status/substatus REPORTADO pelo Mercado Livre; o evento fisico de saida do
+#: vendedor nao e' verificado. Esses envios continuam no backlog: a definicao
+#: de backlog/KPI NAO muda aqui (secao 2 do contrato, decisao de negocio
+#: pendente). A etapa so' torna o substatus reportado visivel.
+ML_ETAPA_POR_SUBSTATUS = {
+    "invoice_pending": Etapa.A_FATURAR,
+    "ready_to_print": Etapa.A_IMPRIMIR,
+    "in_packing_list": Etapa.EM_SEPARACAO,
+    "ready_to_pack": Etapa.EM_SEPARACAO,
+    "packed": Etapa.EM_SEPARACAO,
+    "ready_for_pickup": Etapa.AGUARDANDO_COLETA,
+    "picked_up": Etapa.ENTREGUE_TRANSPORTADORA,
+    "dropped_off": Etapa.ENTREGUE_TRANSPORTADORA,
+    "in_hub": Etapa.ENTREGUE_TRANSPORTADORA,
+    "delayed": Etapa.SINALIZADO_ML,
+    "stale": Etapa.SINALIZADO_ML,
+}
+
+_ETAPA_POR_CANAL = {
+    Channel.SHOPEE: SHOPEE_ETAPA_POR_ORDER_STATUS,
+    Channel.MERCADOLIVRE: ML_ETAPA_POR_SUBSTATUS,
+}
+
+#: Largura de `etapa_fonte` na 033 (`VARCHAR(40)`). Valor bruto maior e'
+#: CORTADO, nunca recusado: um status novo e longo da fonte nao pode derrubar a
+#: publicacao da fila inteira.
+ETAPA_FONTE_MAX_LEN = 40
+
+
+def etapa_da_fonte(channel: Channel, valor_bruto) -> tuple[str, str | None]:
+    """`(etapa, etapa_fonte)` a partir do valor bruto da fonte.
+
+    O UNICO lugar do pacote que traduz status da fonte em etapa. A comparacao
+    e' EXATA (sem `lower()`/`strip()`): uma variacao de grafia da fonte e'
+    mudanca de contrato e deve aparecer como `outro`, nao ser absorvida.
+
+    Valor desconhecido ou nulo vira `outro`; o bruto segue em `etapa_fonte`
+    (nulo continua nulo). Canal sem fila em grao de pedido (TikTok) levanta.
+    """
+    mapa = _ETAPA_POR_CANAL.get(channel)
+    if mapa is None:
+        raise ValueError(f"canal {channel.value} nao tem etapa de fila publicada")
+    if valor_bruto is None:
+        return Etapa.OUTRO.value, None
+    bruto = str(valor_bruto)
+    etapa = mapa.get(bruto, Etapa.OUTRO)
+    return etapa.value, bruto[:ETAPA_FONTE_MAX_LEN]

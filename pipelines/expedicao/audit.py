@@ -69,6 +69,8 @@ _FRESHNESS_TO_STATUS = {
 
 CHECK_OBSERVATION = "expedicao_observacao"
 CHECK_FRESHNESS = "expedicao_source_freshness"
+#: T-0015: contador da etapa `outro` (valor da fonte fora do mapeamento).
+CHECK_ETAPA = "expedicao_etapa_outro"
 
 
 class AuditAfterCommitError(RuntimeError):
@@ -290,6 +292,63 @@ def record_freshness(
                     detalhe,
                 ),
             )
+    conn.commit()
+
+
+def record_etapa(
+    conn,
+    channel: Channel,
+    marketplace_id: int,
+    relatorio: dict,
+) -> None:
+    """Uma linha por execucao PUBLICADA com o contador da etapa `outro` (T-0015).
+
+    `relatorio` e' o que `publish_channel` preencheu depois do COMMIT. Valor
+    novo da fonte (fora do mapeamento do contrato) vira `outro`: a linha e'
+    publicada mesmo assim e aqui so' se registra o AVISO (`warn`/`medium`),
+    com os valores brutos (ate' 20, ja' cortados pelo publicador) para alguem
+    classificar no contrato. Sao codigos de status da fonte, nao PII.
+
+    Zero `outro` grava `pass`/`low`: distingue "medido e limpo" de "nao medido".
+    `etapa_colunas_escritas` vazio diz que a 033 ainda nao esta' no destino - a
+    contagem continua valendo, so' nao foi persistida por linha.
+    """
+    outro = int(relatorio.get("etapa_outro_count", 0))
+    fontes = list(relatorio.get("etapa_outro_fontes", ()))[:20]
+    detalhe = json.dumps(
+        {
+            "channel": channel.value,
+            "etapa_outro_count": outro,
+            "etapa_outro_fontes": fontes,
+            "etapa_por_etapa": dict(sorted(
+                (relatorio.get("etapa_por_etapa") or {}).items()
+            )),
+            "etapa_colunas_escritas": list(
+                relatorio.get("etapa_colunas_escritas", ())
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    status, severity = ("warn", "medium") if outro else ("pass", "low")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO audit.data_quality_check
+                (check_name, table_name, marketplace_id, status, severity,
+                 failed_rows, details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                CHECK_ETAPA,
+                FILA_TABLE,
+                marketplace_id,
+                status,
+                severity,
+                outro,
+                detalhe,
+            ),
+        )
     conn.commit()
 
 
