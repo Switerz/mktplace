@@ -358,3 +358,40 @@ test("render: tabela por marca, conta ausente do HTML, estados escritos", () => 
   assert.equal((html.match(/<circle/g) ?? []).length, 5, "um circulo por ponto real");
   assert.equal((html.match(/tabindex="0"/gi) ?? []).length, 3, "um ponto de tabulacao por linha");
 });
+
+// ===========================================================================
+// T-0021 — variacao: absoluto e percentual com separador para o leitor de tela
+// ===========================================================================
+test("render: a variacao le '−12 · −12,0%' (separador em sr-only), visual igual", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+        ],
+        72,
+      ),
+    }),
+  );
+  const celula = html.match(/<td class="whitespace-nowrap[^"]*">([\s\S]*?)<\/td>/);
+  assert.ok(celula, html);
+  assert.match(celula![1], /<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">−12,0%<\/span>/);
+  // O que o leitor de tela ouve: nada colado.
+  assert.equal(celula![1].replace(/<[^>]+>/g, ""), "−12 · −12,0%");
+  assert.doesNotMatch(html, /−12−12,0%/);
+});
+
+test("render: o motivo secundario ('um ponto só') tambem ganha o separador", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [ponto("2227056661", "kokeshi", H(13), 300), ponto("2227056661", "kokeshi", H(16), 320), ponto("1717171717", "lescent", H(16), 12)],
+        72,
+      ),
+    }),
+  );
+  assert.match(html, />—<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">um ponto só<\/span>/);
+  // sem secundario, sem separador solto
+  assert.match(html, />\+20<\/td>/);
+});
