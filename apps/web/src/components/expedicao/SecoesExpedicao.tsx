@@ -10,6 +10,7 @@
  */
 import { useId, type ReactNode } from "react";
 
+import InfoDica from "@/components/ui/InfoDica";
 import Panel from "@/components/ui/Panel";
 import type { ItemAtencao, TomAtencao } from "@/lib/expedicao-ux";
 
@@ -74,6 +75,19 @@ export function AtencaoAgora({
         <p className="text-sm text-ink-muted">{semItens}</p>
       )}
     </Panel>
+  );
+}
+
+/** Selo de leitura: "agora" na fila do instante, "inclui FBS" no aviso. */
+export function SeloLeitura({ children, tom = "neutro" }: { children: ReactNode; tom?: "neutro" | "atencao" }) {
+  const cor =
+    tom === "atencao"
+      ? "border-warn/40 bg-warn-soft text-warn-ink"
+      : "border-line bg-raised text-ink-muted";
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${cor}`}>
+      {children}
+    </span>
   );
 }
 
@@ -153,12 +167,18 @@ export function ConviteAoDetalhe({
 export function SecaoGerencial({
   titulo,
   descricao,
+  dica,
+  selo,
   acao,
   children,
 }: {
   titulo: string;
   /** Uma linha: o que esta secao mede neste canal. */
   descricao?: ReactNode;
+  /** UI-EXPEDICAO-1: a explicacao vira um "ⓘ" ao lado do titulo. */
+  dica?: string;
+  /** Selo curto ao lado do titulo ("agora", "inclui FBS"). */
+  selo?: ReactNode;
   acao?: ReactNode;
   children: ReactNode;
 }) {
@@ -167,9 +187,14 @@ export function SecaoGerencial({
     <section aria-labelledby={id} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <div className="min-w-0">
-          <h3 id={id} className="text-sm font-semibold text-ink">
-            {titulo}
-          </h3>
+          {/* O "ⓘ" e o selo ficam FORA do h3: o nome da secao continua so' o titulo. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <h3 id={id} className="text-sm font-semibold text-ink">
+              {titulo}
+            </h3>
+            {dica ? <InfoDica texto={dica} /> : null}
+            {selo}
+          </div>
           {descricao ? <p className="text-xs leading-snug text-ink-muted">{descricao}</p> : null}
         </div>
         {acao}

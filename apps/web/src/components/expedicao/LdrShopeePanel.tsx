@@ -51,8 +51,14 @@ export interface EstadoLdr {
  * vendedor x FBS) e por este painel. `ligada = false` nao faz requisicao
  * nenhuma — e' o caminho da flag desligada.
  */
-export function useLdrShopee(api: string, marca: string | null, ligada: boolean): EstadoLdr {
-  const chave = queryDaLdrShopee(DIAS_LDR_SHOPEE, marca);
+export function useLdrShopee(
+  api: string,
+  marca: string | null,
+  ligada: boolean,
+  // UI-EXPEDICAO-1: o periodo do topo da pagina; sem ele, a janela padrao.
+  dias: number = DIAS_LDR_SHOPEE,
+): EstadoLdr {
+  const chave = queryDaLdrShopee(dias, marca);
   const vigente = useRef(chave);
   vigente.current = chave;
   const [resposta, setResposta] = useState<RespostaLdrShopee | null>(null);

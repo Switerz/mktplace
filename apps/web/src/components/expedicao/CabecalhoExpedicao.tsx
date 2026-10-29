@@ -19,6 +19,7 @@ import { useId, type ReactNode } from "react";
 
 import Chip from "@/components/ui/Chip";
 import PageBar from "@/components/ui/PageBar";
+import InfoDica from "@/components/ui/InfoDica";
 import Segmented from "@/components/ui/Segmented";
 import { ROTULO_VISAO, VISOES, type Fotografia, type Visao } from "@/lib/expedicao-ux";
 import { ALL_BRAND_OPTIONS, brandLabel } from "@/lib/filters/brands";
@@ -145,16 +146,17 @@ export default function CabecalhoExpedicao({
             <h2 className="text-base font-semibold tracking-tight text-ink">
               Expedição — {canal}
             </h2>
+            {/* UI-EXPEDICAO-1: a definicao vira um "ⓘ" ao lado do titulo. */}
+            {definicao ? (
+              <span data-testid="exp-definicao" className="inline-flex">
+                <InfoDica texto={definicao} />
+              </span>
+            ) : null}
             {seletorCanal}
           </>
         }
         meta={fotografia ? <ChipsFotografia fotografia={fotografia} /> : undefined}
       />
-      {definicao ? (
-        <p className="-mt-1 text-xs leading-snug text-ink-muted" data-testid="exp-definicao">
-          {definicao}
-        </p>
-      ) : null}
       {aoTrocarVisao || controles || filtroMarca ? (
         <div
           id={ID_FAIXA_DE_CONTROLES}

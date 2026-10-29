@@ -528,7 +528,8 @@ test("todo seletor da Expedicao usa o MESMO componente", () => {
     assert.doesNotMatch(codigo, /role="radiogroup"/, `${nome} reimplementa o radiogroup`);
     assert.doesNotMatch(codigo, /GrupoRadio/, `${nome} ainda usa GrupoRadio`);
   }
-  assert.match(CLIENTE, /<Segmented\s+rotulo="Janela da tendência"/);
+  // UI-EXPEDICAO-1: a janela da tendencia virou o "Período" do topo da pagina.
+  assert.match(CLIENTE, /<Segmented\s+rotulo="Período"/);
   assert.match(CABECALHO, /<Segmented\s+rotulo="Profundidade"/);
   assert.equal((TIKTOK.match(/<Segmented\b/g) ?? []).length, 2, "evento e janela");
 });
