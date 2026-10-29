@@ -386,6 +386,17 @@ const ROTULO_ETAPA: Record<string, string> = {
   cancelado_antes: "Cancelados antes do envio",
   enviado_sem_registro: "Enviados sem marco de coleta",
   aguardando: "Aguardando envio",
+  // T-0021: etapas novas da API. A API ja' manda o `label`; isto so' cobre
+  // resposta sem ele, com o MESMO texto que a API publica.
+  a_faturar: "A faturar",
+  a_imprimir: "A imprimir",
+  em_separacao: "Em separação",
+  a_preparar: "A preparar",
+  aguardando_coleta: "Aguardando coleta",
+  entregue_transportadora: "Entregue à transportadora",
+  sinalizado_ml: "Sinalizado pelo Mercado Livre",
+  outro: "Outro status da fonte",
+  nao_publicada: "Etapa ainda não publicada",
 };
 
 const ROTULO_SOBREPOSICAO: Record<string, string> = {
@@ -455,6 +466,8 @@ const MOTIVOS: Record<string, string> = {
   feature_flag_disabled: "a rota está desligada",
   // QA T-0010 (M3): os codigos que o backend real devolve hoje.
   etapas_nao_fecham: "as etapas não fecham com a base (a tela não refaz a soma)",
+  // T-0021: parte da fila caiu em `nao_publicada` (etapa ainda nao publicada).
+  etapa_parcial: "parte da fila ainda não tem a etapa publicada; os números por etapa não cobrem a fila inteira",
   desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
   publicacao_desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
   no_snapshot: "nenhuma fotografia publicada ainda",
