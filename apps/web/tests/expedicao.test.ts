@@ -180,7 +180,11 @@ test("com a flag desligada nenhum fetch pode ser disparado", () => {
   assert.ok(!casca.includes("fetch("), "a casca so' escolhe a aba, nao busca");
 
   const cliente = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(cliente.includes("fetch("), "o fetch vive no descendente, atras do guard");
+  // T-0010: o descendente busca por `buscarExpedicao` (ponto unico, com o modo
+  // de demonstracao fora de producao), que termina no `fetch`.
+  assert.ok(cliente.includes("buscarExpedicao("), "o fetch vive no descendente, atras do guard");
+  assert.ok(!casca.includes("buscarExpedicao("), "a casca nao busca nem pelo helper");
+  assert.ok(fonte("src/lib/expedicao-demo.ts").includes("return fetch(url, init);"));
 
   // A cadeia inteira precisa estar ligada: pagina -> casca -> cliente. Sem
   // isto, um render solto escaparia do guard sem o teste perceber.
@@ -251,9 +255,9 @@ test("stalled e servido como medida, nunca como slow + zombie", () => {
 
 test("48h e descrito como limiar INTERNO, nunca como SLA do marketplace", () => {
   assert.match(ROTULO_LIMIAR_48H, /limiar interno/i);
-  assert.match(EXPLICACAO_LIMIAR_48H, /nao e' SLA do marketplace/i);
+  assert.match(EXPLICACAO_LIMIAR_48H, /não é SLA do marketplace/i);
   const kpi = montarKpis(TOTAIS, []).find((k) => k.chave === "over48h");
-  assert.match(String(kpi?.nota), /nao e' SLA/i);
+  assert.match(String(kpi?.nota), /não é SLA/i);
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
   assert.ok(tela.includes("EXPLICACAO_LIMIAR_48H"), "a tela precisa exibir a ressalva");
   assert.ok(!/SLA da Shopee|SLA oficial|garantia de prazo/i.test(tela));
@@ -370,10 +374,12 @@ test("Kokeshi aparece como fora do escopo, nunca como zero", () => {
     brands_not_covered: ["kokeshi"],
   };
   const avisos = avisosDeCobertura(c);
-  const kokeshi = avisos.find((a) => a.texto.includes("kokeshi"));
+  // a marca aparece com o rotulo de exibicao (KOKESHI), como no resto da tela
+  const kokeshi = avisos.find((a) => a.texto.toLowerCase().includes("kokeshi"));
   assert.ok(kokeshi);
   assert.equal(kokeshi.tipo, "fora_do_escopo");
-  assert.match(kokeshi.texto, /nao backlog zero/i);
+  assert.match(kokeshi.texto, /não backlog zero/i);
+  assert.match(kokeshi.texto, /^KOKESHI não é coberta/);
   assert.ok(!avisos.some((a) => a.tipo === "faltando"));
 });
 
@@ -650,8 +656,12 @@ test("botoes de filtro anunciam estado por aria-pressed", () => {
 
 test("estados de carga e erro sao anunciados por role", () => {
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok((tela.match(/role="status"/g) ?? []).length >= 3);
-  assert.ok((tela.match(/role="alert"/g) ?? []).length >= 3);
+  // T-0010: os estados usam o StateBlock (role="alert" no tipo "erro",
+  // role="status" nos demais), o mesmo componente do TikTok.
+  const status = (tela.match(/role="status"|<StateBlock\s+tipo="(carregando|vazio|indisponivel)"/g) ?? []).length;
+  const alerta = (tela.match(/role="alert"|<StateBlock\s+tipo="erro"/g) ?? []).length;
+  assert.ok(status >= 3, `status: ${status}`);
+  assert.ok(alerta >= 3, `alert: ${alerta}`);
   assert.match(tela, /aria-busy=\{carregando\}/);
 });
 

@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
-import KpiTile from "@/components/ui/KpiTile";
+import { KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import {
@@ -24,7 +24,6 @@ import {
   NOME_LDR_SHOPEE,
   VALOR_AUSENTE,
   estadoDaLdrShopee,
-  formatarTaxaLdr,
   montarExclusoes,
   motivoDaTaxaAusente,
   queryDaLdrShopee,
@@ -32,8 +31,10 @@ import {
   textoDoEstado,
   type RespostaLdrShopee,
 } from "@/lib/expedicao-shopee-ldr";
+import { formatarInteiro } from "@/lib/expedicao-formato";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
 
-const numero = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+const numero = formatarInteiro;
 const diaCurto = (iso: string) => {
   const [, m, d] = iso.split("-");
   return `${d}/${m}`;
@@ -72,7 +73,7 @@ export function useLdrShopee(api: string, marca: string | null, ligada: boolean)
     setResposta(null);
     setCarregando(true);
     setErro(false);
-    fetch(`${api}${minha}`, { headers: { Accept: "application/json" } })
+    buscarExpedicao(`${api}${minha}`, { headers: { Accept: "application/json" } })
       .then(async (r) => {
         if (!r.ok) throw new Error("http");
         return (await r.json()) as RespostaLdrShopee;
@@ -153,29 +154,33 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
         </ul>
       )}
       <FaixaKpis rotulo="LDR operacional da Shopee" colunas={4}>
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr"
           rotulo="LDR operacional"
-          valor={formatarTaxaLdr(l.rate)}
-          comparacao={motivo ?? `${numero(l.late)} de ${numero(l.base)} pedidos com prazo vencido`}
+          valor={<TaxaComBase numerador={l.late} base={l.base} taxa={l.rate} />}
+          comparacao={motivo ?? "Atrasados sobre os pedidos com prazo vencido na janela."}
           contexto={AVISO_LDR_SHOPEE}
           tom={l.rate === null ? "ausente" : "neutro"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_base"
           rotulo="Base (prazos vencidos)"
           valor={l.mature_due_days ? numero(l.base) : VALOR_AUSENTE}
           comparacao="Pagos, do vendedor, sem FBS e sem cancelados sem coleta."
           tom={l.mature_due_days ? "neutro" : "ausente"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_atrasados"
           rotulo="Atrasados"
           valor={l.mature_due_days ? numero(l.late) : VALOR_AUSENTE}
           comparacao={`${numero(l.shipped_late)} coletados depois do prazo · ${numero(l.pending_overdue)} vencidos sem coleta`}
           tom={l.mature_due_days ? "neutro" : "ausente"}
           destaque
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="shopee.ldr_em_risco"
           rotulo="Vencem hoje ou amanhã"
           valor={numero(l.pending_at_risk)}
           comparacao="Ainda sem coleta e dentro do prazo."

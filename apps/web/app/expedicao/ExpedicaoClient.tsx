@@ -51,7 +51,7 @@ import {
   SecaoGerencial,
 } from "@/components/expedicao/SecoesExpedicao";
 import Disclosure from "@/components/ui/Disclosure";
-import KpiTile from "@/components/ui/KpiTile";
+import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
@@ -109,6 +109,16 @@ import {
   type Situacao,
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
+import LayoutExpedicao, {
+  CLASSE_CABECALHO,
+  CLASSE_RAIZ_EXPEDICAO,
+  CLASSE_TABELA,
+  CorpoGestor,
+  EstadoSecao,
+  TEXTO_ESTADO,
+} from "@/components/expedicao/LayoutExpedicao";
+import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import {
   OPCAO_PERSONALIZADA,
   REGRA_JANELA,
@@ -120,6 +130,9 @@ import {
   valorDoSeletor,
 } from "@/lib/expedicao-janela";
 import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
+import { formatarInteiro } from "@/lib/expedicao-formato";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
+import { AJUDA_CANAL_SEM_PRAZO, chaveDoKpiDaFila } from "@/lib/expedicao-definicoes";
 
 /** Janela da tendencia da fila, em DIAS. Horas so' na query. */
 const REGRA = REGRA_JANELA.fila;
@@ -176,11 +189,8 @@ const COR_BADGE: Record<string, string> = {
   unavailable: "bg-raised text-ink-muted ring-line-strong",
 };
 
-/** Classe comum das tabelas densas da tela. */
-const CLASSE_TABELA =
-  "w-full text-[13px] [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4";
-const CLASSE_CABECALHO =
-  "sticky top-0 z-10 bg-surface text-left text-xs uppercase tracking-wide text-ink-faint";
+// T-0010: CLASSE_TABELA e CLASSE_CABECALHO vem do esqueleto comum
+// (`LayoutExpedicao`), o mesmo do TikTok.
 
 // O `GrupoRadio` que morava aqui saiu no EXPEDICAO-UX-UNIFICADA-1. Ele so'
 // existia porque os testes liam este arquivo procurando os atributos ARIA; com
@@ -200,9 +210,8 @@ function dataCurta(iso: string | null): string {
 // EXPEDICAO-UX-UNIFICADA-1: a API devolve `load_mode` CONSTANTE, e desde
 // 21/10/2026 a fotografia e' publicada pela DAG. Ver `Relogios`.
 
-function numero(n: number | null | undefined): string {
-  return typeof n === "number" ? n.toLocaleString("pt-BR") : "—";
-}
+// T-0010: o numero da fila usa o formato unico da Expedicao.
+const numero = formatarInteiro;
 
 /**
  * Severidade do KPI.
@@ -216,10 +225,11 @@ function tomDoKpi(kpi: Kpi): Tom {
   return kpi.alerta ? "atencao" : "neutro";
 }
 
-function CelulaKpi({ kpi, destaque }: { kpi: Kpi; destaque: boolean }) {
+function CelulaKpi({ kpi, destaque, canal }: { kpi: Kpi; destaque: boolean; canal: Canal }) {
   const texto = kpi.valorTexto ?? (kpi.valor === null ? "—" : numero(kpi.valor));
   return (
-    <KpiTile
+    <KpiComAjuda
+      ajuda={chaveDoKpiDaFila(canal, kpi.chave)}
       rotulo={kpi.rotulo}
       valor={texto}
       // No cartao grande a nota fica visivel; no compacto vira tooltip, para
@@ -246,10 +256,10 @@ function BlocoFbs({ divisao }: { divisao: DivisaoDaFila }) {
         Pedidos FBS — responsabilidade logística da Shopee
       </h4>
       <FaixaKpis rotulo="Pedidos FBS" secundaria>
-        <KpiTile rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
-        <KpiTile rotulo="Vencidos (FBS)" valor={numero(f.overdue_count)} />
-        <KpiTile rotulo="Acima de 48 h (FBS)" valor={numero(f.over_48h_count)} />
-        <KpiTile rotulo="Travados (FBS)" valor={numero(f.stalled_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Vencidos (FBS)" valor={numero(f.overdue_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Acima de 48 h (FBS)" valor={numero(f.over_48h_count)} />
+        <KpiComAjuda ajuda="shopee.fbs" rotulo="Travados (FBS)" valor={numero(f.stalled_count)} />
       </FaixaKpis>
       <p className="mt-2 text-xs text-ink-muted" data-testid="exp-fila-conferencia">
         {textoDaReconciliacao(divisao)}
@@ -443,7 +453,7 @@ export default function ExpedicaoClient({
     let vivo = true;
     setCarregando(true);
     setErroHttp(null);
-    fetch(`${API}/api/v1/expedicao?${construirQuery(filtros)}`, {
+    buscarExpedicao(`${API}/api/v1/expedicao?${construirQuery(filtros)}`, {
       headers: { Accept: "application/json" },
     })
       .then(async (r) => {
@@ -474,6 +484,8 @@ export default function ExpedicaoClient({
     () => comMarcaNaQuery(queryDaTendenciaEmDias(janela, filtros.channel), marcaAtiva),
     [janela, filtros.channel, marcaAtiva],
   );
+  // QA T-0010: erro da tendencia com "Tentar novamente".
+  const [tentativaTendencia, setTentativaTendencia] = useState(0);
   const chaveTendVigente = useRef(chaveTendencia);
   chaveTendVigente.current = chaveTendencia;
 
@@ -483,7 +495,8 @@ export default function ExpedicaoClient({
     let vivo = true;
     setCarregandoTendencia(true);
     setErroTendencia(false);
-    fetch(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
+    void tentativaTendencia; // nova tentativa refaz a busca com a mesma chave
+    buscarExpedicao(`${API}/api/v1/expedicao/trend?${chaveTendencia}`, {
       headers: { Accept: "application/json" },
     })
       .then(async (r) => {
@@ -503,10 +516,14 @@ export default function ExpedicaoClient({
     return () => {
       vivo = false;
     };
-  }, [chaveTendencia, urlPronta]);
+  }, [chaveTendencia, urlPronta, tentativaTendencia]);
 
   // EXPEDICAO-SHOPEE-LDR-1: a rota da LDR tambem traz a fila aberta separada
   // em vendedor x FBS. UMA leitura, repartida entre o "Risco atual" e o painel.
+  // T-0010: a jornada (fila aberta por etapa + coorte), recortada pela marca
+  // no SERVIDOR. Nada aqui soma a fila paginada.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva);
+
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee");
 
   const temFiltro =
@@ -551,6 +568,21 @@ export default function ExpedicaoClient({
   const pag = paginaAtual(dados?.pagination ?? null);
   const temPrazo = canalTemPrazo(filtros.channel);
 
+  // QA T-0010 (M4): fila zerada nao esconde a pagina — como o TikTok com
+  // base 0, o corpo aparece (zeros medidos, jornada, evolucao) sob o aviso.
+  const mostraCorpo =
+    estado === "ok" || estado === "fila_vazia_por_filtro" || estado === "fotografia_vazia";
+
+  // Nova tentativa: um objeto de filtros novo, com a MESMA chave, refaz a
+  // busca (o efeito depende de `filtros`) sem mudar a requisicao.
+  /** O `?` de uma medida da fila, no canal atual (cabecalhos de tabela). */
+  const ajudaDaFila = (kpi: string) => {
+    const chave = chaveDoKpiDaFila(filtros.channel, kpi);
+    return chave ? <Ajuda chave={chave} /> : null;
+  };
+
+  const tentarDeNovo = useCallback(() => setFiltros((f) => ({ ...f })), []);
+
   const alternarSituacao = useCallback((s: Situacao) => {
     setFiltros((f) =>
       aplicarFiltro(f, {
@@ -582,7 +614,7 @@ export default function ExpedicaoClient({
   const faixaPrincipal = (
     <FaixaKpis rotulo="Indicadores principais">
       {principais.map((k) => (
-        <CelulaKpi key={k.chave} kpi={k} destaque />
+        <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque />
       ))}
     </FaixaKpis>
   );
@@ -610,7 +642,7 @@ export default function ExpedicaoClient({
       ) : null}
       <FaixaKpis rotulo="Risco atual" colunas={risco.length === 6 ? 6 : 4}>
         {risco.map((k) => (
-          <CelulaKpi key={k.chave} kpi={k} destaque />
+          <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque />
         ))}
       </FaixaKpis>
       {divisao ? <BlocoFbs divisao={divisao} /> : null}
@@ -632,7 +664,12 @@ export default function ExpedicaoClient({
       descricao="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
     >
       <Panel
-        titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+        titulo={
+          <>
+            {divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+            <Ajuda chave="shopee.prazo_situacao" />
+          </>
+        }
       >
         {faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0 ? (
           <>
@@ -676,19 +713,30 @@ export default function ExpedicaoClient({
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" descricao="O canal não publica prazo de envio.">
-      <Panel titulo="Prazo indisponível pelo canal">
+      <Panel
+        titulo={
+          <>
+            Prazo indisponível pelo canal <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />
+          </>
+        }
+      >
         <p className="text-sm text-ink">{SEM_PRAZO_CANAL_ML}</p>
         {envelhecimento ? (
           <dl className="mt-3 grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg bg-raised px-3 py-2">
-              <dt className="text-xs text-ink-muted">Acima de 48 h (limiar interno da Torre)</dt>
+              <dt className="text-xs text-ink-muted">
+                Acima de 48 h (limiar interno da Torre){" "}
+                <Ajuda chave={`${filtros.channel}.over48h`} />
+              </dt>
               <dd className="text-sm text-ink">
                 <span className="text-xl font-semibold tabular-nums">{numero(envelhecimento.acima48h)}</span>{" "}
                 de {numero(envelhecimento.backlog)} pedidos em fila
               </dd>
             </div>
             <div className="rounded-lg bg-raised px-3 py-2">
-              <dt className="text-xs text-ink-muted">Pedido mais antigo em fila</dt>
+              <dt className="text-xs text-ink-muted">
+                Pedido mais antigo em fila <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.maisAntigo} />
+              </dt>
               <dd className="text-sm text-ink">
                 {envelhecimento.maisAntigo ? (
                   <>
@@ -827,9 +875,11 @@ export default function ExpedicaoClient({
           fotografia velha caindo fora da janela — por isso a linha diz de
           quando e' a ultima fotografia. */}
       {estadoTend === "erro" && (
-        <p role="alert" className="py-2 text-sm text-crit-ink">
-          Tendência indisponível agora.
-        </p>
+        <EstadoSecao
+          tipo="erro"
+          titulo="Tendência indisponível agora."
+          aoTentarDeNovo={() => setTentativaTendencia((n) => n + 1)}
+        />
       )}
       {estadoTend === "vazia" && (
         <p role="status" className="py-2 text-sm text-ink-muted">
@@ -948,9 +998,17 @@ export default function ExpedicaoClient({
               <th scope="col">Marca</th>
               <th scope="col" className="w-[34%]">Distribuição</th>
               <th scope="col" className="text-right">Backlog</th>
-              {temPrazo && <th scope="col" className="text-right">Vencidos</th>}
-              <th scope="col" className="text-right">Acima de 48h</th>
-              <th scope="col" className="text-right">Travados</th>
+              {temPrazo && (
+                <th scope="col" className="text-right">
+                  Vencidos {ajudaDaFila("overdue")}
+                </th>
+              )}
+              <th scope="col" className="text-right">
+                Acima de 48h {ajudaDaFila("over48h")}
+              </th>
+              <th scope="col" className="text-right">
+                Travados {ajudaDaFila("stalled")}
+              </th>
               <th scope="col" title={EXPLICACAO_FONTE}>Fonte</th>
             </tr>
           </thead>
@@ -1088,7 +1146,7 @@ export default function ExpedicaoClient({
                     >
                       {l.shop_account}
                     </th>
-                    <td className="text-ink-muted">{l.brand}</td>
+                    <td className="text-ink-muted">{brandLabel(l.brand)}</td>
                     {temPrazo && (
                       <td className="text-ink-muted">{dataCurta(l.dispatch_deadline)}</td>
                     )}
@@ -1175,7 +1233,7 @@ export default function ExpedicaoClient({
             {frescor.map((f) => (
               <tr key={f.brand} className="border-t border-line">
                 <th scope="row" className="text-left font-medium text-ink">
-                  {f.brand}
+                  {brandLabel(f.brand)}
                 </th>
                 <td className={f.alerta ? "text-warn-ink" : "text-ink-muted"}>
                   {f.rotulo}
@@ -1200,88 +1258,71 @@ export default function ExpedicaoClient({
   // `main` quebram a navegacao por landmarks no leitor de tela — mesmo
   // motivo do `h2` no cabecalho compartilhado.
   return (
-    <div
-      className="mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4"
-      aria-busy={carregando}
+    // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
+    <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={carregando}>
+    <LayoutExpedicao
+      // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
+      // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
+      // outra foi o defeito que o EXP-3C2-R/V corrigiu.
+      cabecalho={
+        <CabecalhoExpedicao
+          canal={ROTULO_CANAL[filtros.channel]}
+          seletorCanal={seletorCanal}
+          fotografia={fotografia}
+          visao={visao}
+          aoTrocarVisao={aoTrocarVisao}
+          definicao={DEFINICAO_FILA[filtros.channel]}
+          filtroMarca={
+            aoTrocarMarca ? (
+              <SeletorMarca marca={marcaAtiva} marcasPresentes={marcasPresentes} aoTrocar={aoTrocarMarca} />
+            ) : undefined
+          }
+        />
+      }
+      // 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada)
+      qualidade={<BarraDeQualidade barra={qualidade} />}
+      // Os estados sao os MESMOS componentes do TikTok (T-0010).
+      estado={
+        <>
+          {estado === "carregando" && <StateBlock tipo="carregando" titulo={TEXTO_ESTADO.carregando} />}
+          {estado === "canal_desligado" && (
+            <StateBlock
+              tipo="indisponivel"
+              titulo="Este canal ainda não está disponível na API."
+              descricao="A fotografia existe, mas a exposição depende de uma ativação coordenada."
+            />
+          )}
+          {estado === "indisponivel_backend" && (
+            <StateBlock tipo="indisponivel" titulo="A API de Expedição está desligada. Nada a exibir." />
+          )}
+          {estado === "sem_snapshot" && (
+            <StateBlock tipo="indisponivel" titulo="Nenhuma fotografia publicada ainda." />
+          )}
+          {estado === "batch_inconsistente" && (
+            <StateBlock
+              tipo="erro"
+              titulo="A fotografia está inconsistente e não pode ser exibida."
+              descricao="Nenhum número parcial é mostrado de propósito."
+            />
+          )}
+          {estado === "erro_validacao" && (
+            <StateBlock tipo="erro" titulo="Filtro inválido. Ajuste a seleção e tente novamente." />
+          )}
+          {estado === "erro" && (
+            <StateBlock
+              tipo="erro"
+              titulo={TEXTO_ESTADO.erro}
+              acao={<RetryButton onClick={tentarDeNovo} />}
+            />
+          )}
+          {estado === "fotografia_vazia" && (
+            <StateBlock tipo="vazio" titulo={TEXTO_ESTADO.vazio} compacto />
+          )}
+        </>
+      }
     >
-      {/* 1-2. CABECALHO, FOTOGRAFIA E FRESCOR (compartilhado) ------------ */}
-      {/* O canal fica NO TITULO, nao so' no seletor: numeros de uma loja sob
-          o titulo de outra foi exatamente o defeito que o EXP-3C2-R/V
-          corrigiu, e o titulo e' o ultimo lugar que o operador confere. */}
-      <CabecalhoExpedicao
-        canal={ROTULO_CANAL[filtros.channel]}
-        seletorCanal={seletorCanal}
-        fotografia={fotografia}
-        visao={visao}
-        aoTrocarVisao={aoTrocarVisao}
-        definicao={DEFINICAO_FILA[filtros.channel]}
-        filtroMarca={
-          aoTrocarMarca ? (
-            <SeletorMarca marca={marcaAtiva} marcasPresentes={marcasPresentes} aoTrocar={aoTrocarMarca} />
-          ) : undefined
-        }
-      />
-
-      {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
-      <BarraDeQualidade barra={qualidade} />
-
-      {estado === "carregando" && (
-        <p role="status" className="text-sm text-ink-muted">
-          Carregando fotografia…
-        </p>
-      )}
-      {estado === "canal_desligado" && (
-        <p
-          role="status"
-          className="rounded-xl border border-line bg-surface px-4 py-6 text-sm text-ink-muted"
-        >
-          Este canal ainda não está disponível na API. A fotografia existe, mas a
-          exposição depende de uma ativação coordenada.
-        </p>
-      )}
-      {estado === "indisponivel_backend" && (
-        <p role="alert" className="rounded-xl border border-line bg-surface p-4 text-sm text-ink">
-          A API de Expedição está desligada. Nada a exibir.
-        </p>
-      )}
-      {estado === "sem_snapshot" && (
-        <p role="alert" className="rounded-xl border border-line bg-surface p-4 text-sm text-ink">
-          Nenhuma fotografia publicada ainda.
-        </p>
-      )}
-      {estado === "batch_inconsistente" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          A fotografia está inconsistente e não pode ser exibida. Nenhum número
-          parcial é mostrado de propósito.
-        </p>
-      )}
-      {estado === "erro_validacao" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          Filtro inválido. Ajuste a seleção e tente novamente.
-        </p>
-      )}
-      {estado === "erro" && (
-        <p
-          role="alert"
-          className="rounded-xl border border-crit/40 bg-crit-soft p-4 text-sm text-crit-ink"
-        >
-          Não foi possível carregar a Expedição agora.
-        </p>
-      )}
-      {estado === "fotografia_vazia" && (
-        <p role="status" className="rounded-xl border border-ok/35 bg-ok-soft p-4 text-sm text-ok-ink">
-          Backlog zerado nesta fotografia. Nenhum pedido aguardando expedição.
-        </p>
-      )}
-
       {/* Marca escolhida sem conta neste canal: ausencia, nao backlog zero. */}
-      {(estado === "ok" || estado === "fila_vazia_por_filtro") && recorte.semConta ? (
+      {mostraCorpo && recorte.semConta ? (
         <p role="status" className="rounded-xl border border-dashed border-line-strong bg-surface p-4 text-sm text-ink-muted">
           {brandLabel(recorte.marca ?? "")}{" "}
           {recorte.foraDaCobertura
@@ -1289,28 +1330,31 @@ export default function ExpedicaoClient({
             : "não tem conta nesta fotografia do canal."}
         </p>
       ) : null}
-      {(estado === "ok" || estado === "fila_vazia_por_filtro") && !recorte.semConta &&
+      {mostraCorpo && !recorte.semConta &&
         (visao === "gestor" ? (
-          <>
-            {/* RISCO ATUAL -> PRAZO -> EVOLUCAO -> CONCENTRACAO, a mesma
-                ordem dos tres canais (EXPEDICAO-UX-3). */}
-            {secaoRisco}
-            {secaoPrazo}
-            {painelEvolucao}
-            {painelContas("")}
-            {aoTrocarVisao && (
-              <ConviteAoDetalhe
-                conteudo="Fila de pedidos com filtros, os mais críticos, os indicadores secundários e a fonte por marca ficam no detalhe operacional."
-                aoAbrir={() => aoTrocarVisao("detalhe")}
-              />
-            )}
-          </>
+          // RISCO ATUAL -> PRAZO -> JORNADA -> EVOLUCAO -> CONCENTRACAO: a
+          // ordem e' do esqueleto, a mesma dos tres canais.
+          <CorpoGestor
+            risco={secaoRisco}
+            prazo={secaoPrazo}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} />}
+            evolucao={painelEvolucao}
+            concentracao={painelContas("")}
+            convite={
+              aoTrocarVisao && (
+                <ConviteAoDetalhe
+                  conteudo="Fila de pedidos com filtros, os mais críticos, os indicadores secundários e a fonte por marca ficam no detalhe operacional."
+                  aoAbrir={() => aoTrocarVisao("detalhe")}
+                />
+              )
+            }
+          />
         ) : (
           <>
             {faixaPrincipal}
             <FaixaKpis rotulo="Indicadores secundários" secundaria>
               {secundarios.map((k) => (
-                <CelulaKpi key={k.chave} kpi={k} destaque={false} />
+                <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque={false} />
               ))}
             </FaixaKpis>
             <div className="grid gap-3 lg:grid-cols-3">
@@ -1321,6 +1365,7 @@ export default function ExpedicaoClient({
             {painelFonte}
           </>
         ))}
+    </LayoutExpedicao>
     </div>
   );
 }

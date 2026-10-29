@@ -661,7 +661,9 @@ test("as colunas das tabelas tem respiro horizontal", () => {
   // e essa string precisa conter a regra. E' estritamente mais forte que a
   // contagem — uma quinta tabela com classe propria e sem `pr-4` reprova.
   const constantes = new Map<string, string>();
-  for (const m of CLIENTE.matchAll(/const (CLASSE_\w+)\s*=\s*\r?\n?\s*"([^"]*)";/g)) {
+  // T-0010: as constantes de tabela moram no esqueleto comum (LayoutExpedicao).
+  const LAYOUT = readFileSync(join(RAIZ, "src/components/expedicao/LayoutExpedicao.tsx"), "utf8");
+  for (const m of (CLIENTE + LAYOUT).matchAll(/const (CLASSE_\w+)\s*=\s*\r?\n?\s*"([^"]*)";/g)) {
     constantes.set(m[1], m[2]);
   }
 
@@ -673,6 +675,203 @@ test("as colunas das tabelas tem respiro horizontal", () => {
   assert.equal(classes.length, tabelas, "toda tabela precisa declarar className");
   assert.ok(tabelas >= 4, `esperava as quatro tabelas da tela, achei ${tabelas}`);
   for (const c of classes) {
-    assert.ok(c.includes("[&_td]:pr-4"), `tabela sem respiro horizontal: ${c}`);
+    assert.ok(/\[&_td\]:(pr-4|px-3)/.test(c), `tabela sem respiro horizontal: ${c}`);
   }
+});
+
+// ===========================================================================
+// T-0010 — modo de demonstracao (?demo=) e fixtures coerentes
+// ===========================================================================
+import { cenarioDaUrl, demoAtivo } from "../src/lib/expedicao-demo.ts";
+import { CENARIOS_DEMO, lerCenario, respostaFicticia } from "../src/lib/expedicao-fixtures.ts";
+import { lerJornada } from "../src/lib/expedicao-jornada.ts";
+import { faixasDePrazo as faixas } from "../src/lib/expedicao-contract.ts";
+
+test("demo: so' fora de producao, e so' com ?demo=", () => {
+  assert.equal(demoAtivo("?demo=1", "development"), true);
+  assert.equal(demoAtivo("?demo=parcial", "development"), true);
+  assert.equal(demoAtivo("?demo=1", "production"), false, "producao ignora ?demo=");
+  assert.equal(demoAtivo("", "development"), false);
+  assert.equal(demoAtivo("?demo=0", "development"), false);
+  assert.equal(cenarioDaUrl("?channel=tiktokshop&demo=erro"), "erro");
+  assert.equal(lerCenario("1"), "ok");
+  assert.equal(lerCenario("<script>"), "ok");
+  const demo = readFileSync(join(RAIZ, "src/lib/expedicao-demo.ts"), "utf8");
+  // inline, para o Next dobrar a condicao e tirar as fixtures do bundle
+  assert.match(demo, /if \(process\.env\.NODE_ENV !== "production" && typeof window !== "undefined"\) \{/);
+  assert.match(demo, /await import\("\.\/expedicao-fixtures\.ts"\)/);
+  for (const rel of ["src/components/expedicao/TikTokDispatchPanel.tsx", "src/components/expedicao/LdrShopeePanel.tsx", "src/components/expedicao/JornadaPedidos.tsx"]) {
+    const src = readFileSync(join(RAIZ, rel), "utf8");
+    assert.doesNotMatch(src, /[^.\w]fetch\(/, `${rel} busca sem o ponto unico`);
+    assert.match(src, /buscarExpedicao\(/, rel);
+  }
+  assert.match(readFileSync(join(RAIZ, "app/expedicao/ExpedicaoShell.tsx"), "utf8"), /Dados fictícios — modo de demonstração/);
+});
+
+test("fixtures: 3 canais e todos os estados, coerentes com os contratos", () => {
+  for (const c of CENARIOS_DEMO) {
+    if (c === "carregando") continue;
+    for (const url of [
+      "/api/v1/expedicao?channel=shopee",
+      "/api/v1/expedicao?channel=mercadolivre",
+      "/api/v1/expedicao/trend?window_hours=72&channel=shopee",
+      "/api/v1/expedicao/tiktok?event=coleta&days=7",
+      "/api/v1/expedicao/shopee/ldr?days=7",
+    ]) {
+      const r = respostaFicticia(url, c);
+      assert.ok(r, `${c} ${url}`);
+      assert.equal(r!.status, c === "erro" ? 500 : 200, `${c} ${url}`);
+    }
+    // a particao de prazo da Shopee fecha o backlog em todo cenario
+    const fila = respostaFicticia("/api/v1/expedicao?channel=shopee", c)!.corpo as { totals: import("../src/lib/expedicao-contract.ts").Totais | null; accounts: import("../src/lib/expedicao-contract.ts").Totais[] };
+    for (const t of [fila.totals, ...(fila.accounts ?? [])]) {
+      if (!t) continue;
+      assert.equal(faixas(t)!.reduce((s, x) => s + x.valor, 0), t.backlog_count, c);
+    }
+    // jornada: o parser aceita a fixture de cada canal (exceto 404/500)
+    for (const canal of ["shopee", "mercadolivre", "tiktok"] as const) {
+      const j = respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, c)!;
+      if (c === "indisponivel" || c === "jornada404") { assert.equal(j.status, 404); continue; }
+      if (c === "erro" || c === "jornadaErro") { assert.equal(j.status, 500); continue; }
+      const p = lerJornada(j.corpo, canal);
+      assert.ok(p.ok, `${c}/${canal}: ${p.ok ? "" : p.erro}`);
+    }
+  }
+  assert.equal(respostaFicticia("/api/v1/outra-coisa", "ok"), null, "rota desconhecida cai no fetch real");
+});
+
+test("fixtures da jornada cobrem count nulo, dias_sem_publicacao e desatualizada (v1.2)", () => {
+  const ml = respostaFicticia("/api/v1/expedicao/jornada?channel=mercadolivre", "ok")!.corpo as { fila_aberta: { sobreposicoes: { count: number | null }[] } };
+  assert.ok(ml.fila_aberta.sobreposicoes.some((s) => s.count === null));
+  const parcial = respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "parcial")!.corpo as { status: string; reason: string };
+  assert.equal(parcial.status, "partial");
+  assert.match(parcial.reason, /dias_sem_publicacao/);
+  const velha = respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "desatualizado")!.corpo as { coorte: { desatualizada: boolean; publicado_em: string } };
+  assert.equal(velha.coorte.desatualizada, true);
+  assert.ok(velha.coorte.publicado_em);
+});
+
+// ===========================================================================
+// QA T-0010 (I3, I4, M4) — cenarios so' da Jornada e recorte por marca
+// ===========================================================================
+import { register as registrarLoaderI3 } from "node:module";
+import { avisoDeMarcaNaoAplicada } from "../src/lib/expedicao-jornada.ts";
+
+registrarLoaderI3("./helpers/tsx-loader.mjs", import.meta.url);
+
+test("demo: jornada404 / jornadaErro / jornadaVazia mexem SO' na Jornada", () => {
+  for (const c of ["jornada404", "jornadaErro", "jornadaVazia"] as const) {
+    assert.equal(lerCenario(c), c);
+    // a pagina segue no cenario ok
+    const fila = respostaFicticia("/api/v1/expedicao?channel=shopee", c)!;
+    assert.equal(fila.status, 200);
+    assert.ok((fila.corpo as { totals: { backlog_count: number } }).totals.backlog_count > 0, c);
+    assert.equal(respostaFicticia("/api/v1/expedicao/tiktok?event=coleta&days=7", c)!.status, 200);
+  }
+  assert.equal(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "jornada404")!.status, 404);
+  assert.equal(respostaFicticia("/api/v1/expedicao/jornada?channel=tiktok", "jornadaErro")!.status, 500);
+  for (const canal of ["shopee", "mercadolivre"] as const) {
+    const j = lerJornada(respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, "jornadaVazia")!.corpo, canal);
+    assert.ok(j.ok);
+    assert.equal((j as { ok: true; resposta: { fila_aberta: { base: number } } }).resposta.fila_aberta.base, 0);
+  }
+});
+
+test("demo: a Jornada recorta pela marca como a API (brands_applied e totais)", () => {
+  const todas = lerJornada(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo, "shopee");
+  const apice = lerJornada(respostaFicticia("/api/v1/expedicao/jornada?channel=shopee&brands=apice", "ok")!.corpo, "shopee");
+  assert.ok(todas.ok && apice.ok);
+  const t = (todas as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  const a = (apice as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  assert.deepEqual(a.brands_applied, ["apice"]);
+  assert.ok(a.fila_aberta!.base < t.fila_aberta!.base, "o total e' da marca, nao do canal");
+  assert.equal(avisoDeMarcaNaoAplicada("apice", a), null);
+  assert.match(avisoDeMarcaNaoAplicada("apice", t)!, /não foi aplicado pela API: os números da jornada são do canal inteiro/);
+  assert.equal(avisoDeMarcaNaoAplicada(null, t), null);
+});
+
+test("jornada: marca pedida e nao aplicada aparece ESCRITA na secao", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { default: JornadaPedidos } = await import("../src/components/expedicao/JornadaPedidos.tsx");
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
+  const html = renderToStaticMarkup(
+    h(JornadaPedidos, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: lerJornada(corpo, "shopee") },
+      aoTentarDeNovo: () => {},
+      marca: "apice",
+    }),
+  );
+  assert.match(html, /exp-jornada-marca-nao-aplicada/);
+  assert.match(html, /O filtro de marca \(APICE\) não foi aplicado pela API/);
+  for (const rel of ["app/expedicao/ExpedicaoClient.tsx", "src/components/expedicao/TikTokDispatchPanel.tsx"]) {
+    assert.match(readFileSync(join(RAIZ, rel), "utf8"), /<JornadaPedidos carga=\{jornada\.carga\} aoTentarDeNovo=\{jornada\.tentarDeNovo\} marca=\{/);
+  }
+});
+
+test("fila zerada nao esconde a pagina (M4): o corpo aparece sob o aviso de vazio", () => {
+  assert.match(CLIENTE, /const mostraCorpo =\s*estado === "ok" \|\| estado === "fila_vazia_por_filtro" \|\| estado === "fotografia_vazia";/);
+  assert.match(CLIENTE, /\{mostraCorpo && !recorte\.semConta &&/);
+});
+
+// ===========================================================================
+// QA T-0010 (reteste) — aviso "parcial" uma vez so'
+// ===========================================================================
+import { motivoDoTopo } from "../src/lib/expedicao-jornada.ts";
+
+const { createElement: hF } = await import("react");
+const { renderToStaticMarkup: htmlF } = await import("react-dom/server");
+const { default: JornadaF } = await import("../src/components/expedicao/JornadaPedidos.tsx");
+
+test("parcial por etapas que nao fecham: o aviso aparece UMA vez (no bloco)", () => {
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "parcial")!.corpo;
+  const r = lerJornada(corpo, "shopee");
+  assert.ok(r.ok);
+  const resposta = (r as { ok: true; resposta: import("../src/lib/expedicao-jornada.ts").RespostaJornada }).resposta;
+  assert.equal(motivoDoTopo(resposta), null, "o topo nao repete o bloco");
+  const html = htmlF(
+    hF(JornadaF, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: r },
+      aoTentarDeNovo: () => {},
+    }),
+  );
+  assert.equal((html.match(/não fecham/g) ?? []).length, 1, html);
+  // motivo que o bloco NAO diz continua no topo
+  assert.equal(
+    motivoDoTopo({ ...resposta, reason: "fila_aberta: etapas_nao_fecham; coorte: dias_sem_publicacao (2)" }),
+    "Coorte: 2 dia(s) sem publicação na janela",
+  );
+  // parcial sem motivo e sem aviso de bloco: frase generica
+  assert.match(
+    motivoDoTopo({
+      ...resposta,
+      reason: null,
+      fila_aberta: { ...resposta.fila_aberta!, etapas_fecham: true },
+    })!,
+    /parte da jornada/,
+  );
+});
+
+// ===========================================================================
+// R21 — cenario de demo: fila valida + coorte nula (table_not_migrated)
+// ===========================================================================
+test("demo jornadaCoorteAusente: a pagina fica ok e a fila Shopee continua com a coorte indisponivel", () => {
+  assert.equal(lerCenario("jornadaCoorteAusente"), "jornadaCoorteAusente");
+  assert.equal(respostaFicticia("/api/v1/expedicao?channel=shopee", "jornadaCoorteAusente")!.status, 200);
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "jornadaCoorteAusente")!.corpo as {
+    status: string;
+    reason: string;
+    coorte: unknown;
+  };
+  assert.equal(corpo.status, "unavailable");
+  assert.equal(corpo.reason, "coorte: table_not_migrated");
+  assert.equal(corpo.coorte, null);
+  const r = lerJornada(corpo, "shopee");
+  assert.ok(r.ok);
+  const html = htmlF(
+    hF(JornadaF, { carga: { carregando: false, http: 200, erroDeRede: false, resultado: r }, aoTentarDeNovo: () => {} }),
+  );
+  assert.match(html, /1\.820 pedidos pagos aguardando expedição\./, "a fila nao some");
+  assert.match(html, /Indisponível agora: a tabela ainda não foi publicada nesta base\./);
+  assert.doesNotMatch(html, /Jornada indisponível/);
 });

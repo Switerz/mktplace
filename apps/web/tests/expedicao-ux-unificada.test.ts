@@ -234,7 +234,7 @@ test("a fotografia da fila repete a idade e o veredito que ja' existiam", () => 
       efetivoEm: "2026-10-13T12:00:00Z",
     },
   );
-  assert.equal(f.idade, "30.0 h");
+  assert.equal(f.idade, "30,0 h", "decimal pt-BR");
   assert.equal(f.desatualizada, true);
   assert.ok(!("automacao" in f), "sem modo de publicacao: a API ainda nao o prova");
   const nada = fotografiaDaFila(null);
@@ -618,4 +618,67 @@ test("nenhum arquivo da Expedicao afirma atualizacao manual ou modo de publicaca
       rel,
     );
   }
+});
+
+// ===========================================================================
+// T-0010 — esqueleto comum (LayoutExpedicao) nos tres canais
+// ===========================================================================
+const { CorpoGestor, SecaoIndisponivel, EstadoSecao, CLASSE_RAIZ_EXPEDICAO } = await import(
+  "../src/components/expedicao/LayoutExpedicao.tsx"
+);
+
+test("o corpo do gestor tem ordem fixa: risco, prazo, jornada, evolucao, concentracao, convite", () => {
+  const html = renderToStaticMarkup(
+    h(CorpoGestor, {
+      // fora de ordem de proposito: quem manda e' o esqueleto
+      convite: h("i", null, "6"),
+      concentracao: h("i", null, "5"),
+      evolucao: h("i", null, "4"),
+      jornada: h("i", null, "3"),
+      prazo: h("i", null, "2"),
+      risco: h("i", null, "1"),
+    }),
+  );
+  assert.equal(html, "<i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i>");
+});
+
+test("os dois corpos usam o mesmo esqueleto, a mesma raiz e a mesma tabela", () => {
+  for (const f of [CLIENTE, TIKTOK]) {
+    assert.match(f, /<div className=\{CLASSE_RAIZ_EXPEDICAO\} aria-busy=/);
+    assert.match(f, /<LayoutExpedicao\b/);
+    assert.match(f, /<CorpoGestor\b/);
+    assert.doesNotMatch(f, /const CLASSE_TABELA\s*=/, "CLASSE_TABELA so' no esqueleto");
+    assert.doesNotMatch(f, /const CLASSE_CABECALHO\s*=/);
+  }
+  assert.match(CLASSE_RAIZ_EXPEDICAO, /max-w-\[1400px\]/);
+});
+
+test("estados da fila sao os mesmos componentes do TikTok, com nova tentativa", () => {
+  assert.match(CLIENTE, /<StateBlock tipo="carregando"/);
+  assert.match(CLIENTE, /<RetryButton onClick=\{tentarDeNovo\} \/>/);
+  assert.match(CLIENTE, /const tentarDeNovo = useCallback\(\(\) => setFiltros\(\(f\) => \(\{ \.\.\.f \}\)\), \[\]\);/);
+  assert.match(TIKTOK, /<StateBlock tipo="carregando"/);
+});
+
+test("secao sem fonte no canal: bloco curto 'indisponível neste canal' com o ?", () => {
+  const html = renderToStaticMarkup(
+    h(SecaoIndisponivel, {
+      titulo: "Prazo",
+      motivo: "o Mercado Livre não publica prazo de despacho.",
+      ajuda: "mercadolivre.prazo",
+    }),
+  );
+  assert.match(html, /<h3[^>]*>Prazo<\/h3>/);
+  assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho\./);
+  assert.match(html, /aria-label="O que é Prazo e LDR no Mercado Livre"/);
+  assert.match(html, /role="status"/);
+});
+
+test("estado de secao: parcial e desatualizado sao ressalvas; erro tem nova tentativa", () => {
+  assert.match(renderToStaticMarkup(h(EstadoSecao, { tipo: "parcial", titulo: "etapas não fecham." })), /Parcial:/);
+  assert.match(renderToStaticMarkup(h(EstadoSecao, { tipo: "desatualizado", titulo: "x" })), /Desatualizada:/);
+  const erro = renderToStaticMarkup(h(EstadoSecao, { tipo: "erro", titulo: "Falhou.", aoTentarDeNovo: () => {} }));
+  assert.match(erro, /role="alert"/);
+  assert.match(erro, /Tentar novamente/);
+  assert.match(renderToStaticMarkup(h(EstadoSecao, { tipo: "carregando", titulo: "Carregando…" })), /aria-busy="true"/);
 });

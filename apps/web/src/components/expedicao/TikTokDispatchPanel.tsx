@@ -59,6 +59,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
+import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
+import LayoutExpedicao, {
+  CLASSE_CABECALHO,
+  CLASSE_RAIZ_EXPEDICAO,
+  CLASSE_TABELA,
+  CorpoGestor,
+  TEXTO_ESTADO,
+} from "@/components/expedicao/LayoutExpedicao";
+import { Ajuda, KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
 import {
   AtencaoAgora,
   ConviteAoDetalhe,
@@ -67,10 +76,10 @@ import {
 } from "@/components/expedicao/SecoesExpedicao";
 import Chip from "@/components/ui/Chip";
 import Disclosure from "@/components/ui/Disclosure";
-import KpiTile from "@/components/ui/KpiTile";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
+import SortHeaderComAjuda from "@/components/expedicao/SortHeaderComAjuda";
 import SortHeader from "@/components/ui/SortHeader";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import type { Visao } from "@/lib/expedicao-ux";
@@ -118,6 +127,7 @@ import {
   type TikTokMarca,
   type TikTokPayload,
 } from "@/lib/expedicao-tiktok-contract";
+import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   OPCAO_PERSONALIZADA,
   REGRA_JANELA,
@@ -162,10 +172,7 @@ const TEXTO_SEVERIDADE: Record<Severidade, string> = {
   parcial: "text-ink-faint",
 };
 
-const CLASSE_TABELA =
-  "w-full text-[13px] [&_td]:py-1.5 [&_td]:px-3 [&_th]:py-1.5 [&_th]:px-3";
-const CLASSE_CABECALHO =
-  "sticky top-0 z-10 bg-raised text-left text-xs uppercase tracking-wide text-ink-faint";
+// T-0010: CLASSE_TABELA e CLASSE_CABECALHO vem do esqueleto comum.
 
 const COLUNAS_MARCA: Record<string, SortColumnType> = {
   loja: "text",
@@ -288,7 +295,7 @@ export default function TikTokDispatchPanel({
   const carregar = useCallback(async () => {
     setEstado("carregando");
     try {
-      const r = await fetch(url, { cache: "no-store" });
+      const r = await buscarExpedicao(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const json = (await r.json()) as TikTokPayload;
       if (urlVigente.current !== url) return;
@@ -342,6 +349,9 @@ export default function TikTokDispatchPanel({
     [aplicarJanela],
   );
   const seletor = valorDoSeletor(dias, REGRA, personalizado);
+
+  // T-0010: a jornada usa a mesma janela e o mesmo evento do painel.
+  const jornada = useJornada(BASE, "tiktok", marca, { dias, evento });
 
   const ldr = dados?.ldr ?? null;
   const fluxo = dados?.payment_flow ?? [];
@@ -407,28 +417,32 @@ export default function TikTokDispatchPanel({
   const secaoRisco = ldr ? (
     <SecaoGerencial titulo="Risco atual" descricao={quando}>
       <FaixaKpis rotulo="Risco atual">
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.pendente_vencido"
           rotulo="Venceram e não saíram"
           valor={formatarInteiro(ldr.pending_overdue)}
           destaque
           comparacao="Vencimentos da janela consultada, ainda sem o evento."
           tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.vence_hoje_amanha"
           rotulo="Vencem hoje ou amanhã"
           valor={formatarInteiro(ldr.pending_at_risk)}
           destaque
           comparacao="Ainda dá para tratar dentro do prazo."
           tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.pendente_no_prazo"
           rotulo="Pendentes no prazo"
           valor={formatarInteiro(ldr.pending_on_time)}
           destaque
           comparacao="Pedidos ainda sem o evento, dentro do prazo."
         />
         {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.lojas_acima_meta"
           rotulo="Lojas acima da meta"
           valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
           destaque
@@ -477,16 +491,20 @@ export default function TikTokDispatchPanel({
           : ""}
       </p>
       <FaixaKpis rotulo="Indicadores principais" colunas={3}>
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.ldr"
           rotulo="LDR da janela"
-          valor={formatarTaxa(ldr.rate)}
+          valor={<TaxaComBase numerador={ldr.late} base={ldr.base} taxa={ldr.rate} />}
           destaque
           comparacao={
             ldr.rate === null
               ? "Sem vencimento maduro na janela."
-              : `${ROTULO_META}: ${formatarTaxa(META_TIKTOK_LDR, 0)} · ${
-                  ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META
-                }`
+              : // T-0010: a base ao lado da taxa ("62 de 1.820"), com a taxa
+                // PUBLICADA pela API — a tela nao divide de novo.
+                `${ROTULO_META}: ${formatarTaxa(
+                  META_TIKTOK_LDR,
+                  0,
+                )} · ${ldr.above_target ? SELO_ACIMA_DA_META : SELO_DENTRO_DA_META}`
           }
           // Sem taxa nao ha veredito: verde aqui leria ausencia como acerto.
           tom={ldr.rate === null ? "ausente" : ldr.above_target ? "critico" : "bom"}
@@ -494,14 +512,16 @@ export default function TikTokDispatchPanel({
         {/* `base` e `late` da LDR somam SO' vencimentos fechados. Sem nenhum
             fechado (o caso da serie vencida) eles valem zero por construcao,
             nao por medicao: a tela mostra ausencia, nao "0 venciam". */}
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.venciam"
           rotulo="Venciam no período"
           valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.base)}
           destaque
           comparacao={`${ldr.mature_due_days} dia(s) fechado(s), ${ldr.partial_due_days} ainda no prazo.`}
           tom={semVencimentoFechado ? "ausente" : "neutro"}
         />
-        <KpiTile
+        <KpiComAjuda
+          ajuda="tiktok.atrasaram"
           rotulo="Já atrasaram"
           valor={semVencimentoFechado ? VALOR_SEM_TAXA : formatarInteiro(ldr.late)}
           destaque
@@ -578,9 +598,28 @@ export default function TikTokDispatchPanel({
                   aoOrdenar={toggleSort}
                   alinhamento="left"
                 />
-                <SortHeader rotulo="Venciam" coluna="base" sort={sort} aoOrdenar={toggleSort} />
-                <SortHeader rotulo="Atrasados" coluna="late" sort={sort} aoOrdenar={toggleSort} />
-                <SortHeader rotulo="LDR" coluna="rate" sort={sort} aoOrdenar={toggleSort} />
+                {/* O `?` fica FORA do botao de ordenar: clicar nele nao ordena. */}
+                <SortHeaderComAjuda
+                  rotulo="Venciam"
+                  coluna="base"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.venciam"
+                />
+                <SortHeaderComAjuda
+                  rotulo="Atrasados"
+                  coluna="late"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.atrasaram"
+                />
+                <SortHeaderComAjuda
+                  rotulo="LDR"
+                  coluna="rate"
+                  sort={sort}
+                  aoOrdenar={toggleSort}
+                  ajuda="tiktok.ldr"
+                />
               </tr>
             </thead>
             <tbody>
@@ -596,7 +635,7 @@ export default function TikTokDispatchPanel({
                       m.above_target ? "text-crit-ink" : "text-ok-ink"
                     }`}
                   >
-                    {formatarTaxa(m.rate)}
+                    <TaxaComBase numerador={m.late} base={m.base} taxa={m.rate} linha />
                   </td>
                 </tr>
               ))}
@@ -629,7 +668,9 @@ export default function TikTokDispatchPanel({
                 <th scope="col" className="text-right font-semibold">Atrasados</th>
                 <th scope="col" className="text-right font-semibold">… ainda sem envio</th>
                 <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
-                <th scope="col" className="text-right font-semibold">Taxa</th>
+                <th scope="col" className="text-right font-semibold">
+                  Taxa <Ajuda chave="tiktok.ldr" />
+                </th>
                 <th scope="col" className="font-semibold">Estado</th>
               </tr>
             </thead>
@@ -652,7 +693,11 @@ export default function TikTokDispatchPanel({
                     <td
                       className={`text-right font-semibold tabular-nums ${TEXTO_SEVERIDADE[sev]}`}
                     >
-                      {d.is_mature ? formatarTaxa(d.rate) : VALOR_SEM_TAXA}
+                      {d.is_mature ? (
+                        <TaxaComBase numerador={d.late} base={d.base} taxa={d.rate} linha />
+                      ) : (
+                        VALOR_SEM_TAXA
+                      )}
                     </td>
                     <td className="whitespace-nowrap text-ink-muted">{ROTULO_SEVERIDADE[sev]}</td>
                   </tr>
@@ -684,6 +729,12 @@ export default function TikTokDispatchPanel({
       }
       acao={<Disclosure rotulo="Como ler">{EXPLICACAO_FLUXO}</Disclosure>}
     >
+      {/* QA T-0010 (M6): sem dia de pagamento na janela, estado de vazio. */}
+      {fluxo.length === 0 ? (
+        <p role="status" className="px-4 py-3 text-sm text-ink-muted">
+          Nenhum dia de pagamento na janela consultada.
+        </p>
+      ) : (
       <div className="max-h-96 overflow-auto">
         <table className={CLASSE_TABELA}>
           <caption className="sr-only">
@@ -697,7 +748,9 @@ export default function TikTokDispatchPanel({
               <th scope="col" className="text-right font-semibold">Atrasados</th>
               <th scope="col" className="text-right font-semibold">Vencidos s/ envio</th>
               <th scope="col" className="text-right font-semibold">No prazo s/ envio</th>
-              <th scope="col" className="text-right font-semibold">Taxa</th>
+              <th scope="col" className="text-right font-semibold">
+                  Taxa <Ajuda chave="tiktok.fluxo_pagamento" />
+                </th>
             </tr>
           </thead>
           <tbody>
@@ -737,103 +790,108 @@ export default function TikTokDispatchPanel({
                 >
                   {/* Coorte parcial NUNCA mostra a taxa fechada: ela
                       ainda vai mudar. */}
-                  {f.is_mature ? formatarTaxa(f.rate) : VALOR_SEM_TAXA}
+                  {f.is_mature ? (
+                    <TaxaComBase numerador={f.late} base={f.base} taxa={f.rate} linha />
+                  ) : (
+                    VALOR_SEM_TAXA
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      )}
     </Panel>
   );
 
   return (
-    <div
-      className="mx-auto flex max-w-[1400px] flex-col gap-3 p-3 sm:p-4"
-      aria-busy={estado === "carregando"}
-    >
-      {/* 1-2. CABECALHO, FOTOGRAFIA E FRESCOR (compartilhado) ------------ */}
-      <CabecalhoExpedicao
-        canal="TikTok Shop"
-        seletorCanal={seletorCanal}
-        fotografia={fotografia}
-        visao={visao}
-        aoTrocarVisao={aoTrocarVisao}
-        controles={controles}
-        definicao={DEFINICAO_TIKTOK}
-        filtroMarca={
-          aoTrocarMarca ? (
-            <SeletorMarca
-              marca={marca}
-              marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
-              aoTrocar={aoTrocarMarca}
+    // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
+    <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={estado === "carregando"}>
+    <LayoutExpedicao
+      // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado)
+      cabecalho={
+        <CabecalhoExpedicao
+          canal="TikTok Shop"
+          seletorCanal={seletorCanal}
+          fotografia={fotografia}
+          visao={visao}
+          aoTrocarVisao={aoTrocarVisao}
+          controles={controles}
+          definicao={DEFINICAO_TIKTOK}
+          filtroMarca={
+            aoTrocarMarca ? (
+              <SeletorMarca
+                marca={marca}
+                marcasPresentes={(dados?.brands ?? []).map((b) => b.brand)}
+                aoTrocar={aoTrocarMarca}
+              />
+            ) : undefined
+          }
+        />
+      }
+      avisos={
+        <>
+          {seletor === OPCAO_PERSONALIZADA ? (
+            <JanelaPersonalizada max={REGRA.max} diasAplicados={dias} aoAplicar={aplicarJanela} />
+          ) : null}
+          {janelaDescartada ? (
+            <Note tom="atencao" papel="status">
+              A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
+            </Note>
+          ) : null}
+        </>
+      }
+      // 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada)
+      qualidade={<BarraDeQualidade barra={barra} />}
+      // Erro, ausencia e serie vencida sao estados DIFERENTES: erro e' a carga
+      // que falhou agora (com nova tentativa); ausencia e' nao haver serie
+      // nenhuma (nunca 0%); serie vencida e' dado que existe, velho, e aparece
+      // no selo do cabecalho e na barra de qualidade.
+      estado={
+        <>
+          {estado === "carregando" ? <StateBlock tipo="carregando" titulo={TEXTO_ESTADO.carregando} /> : null}
+          {estado === "erro" ? (
+            <StateBlock
+              tipo="erro"
+              titulo={TEXTO_ESTADO.erro}
+              descricao={erro ? `Falha: ${erro}.` : undefined}
+              acao={<RetryButton onClick={() => void carregar()} />}
             />
-          ) : undefined
-        }
-      />
-
-      {seletor === OPCAO_PERSONALIZADA ? (
-        <JanelaPersonalizada max={REGRA.max} diasAplicados={dias} aoAplicar={aplicarJanela} />
-      ) : null}
-
-      {janelaDescartada ? (
-        <Note tom="atencao" papel="status">
-          A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
-        </Note>
-      ) : null}
-
-      {/* 3. QUALIDADE DO DADO, CONSOLIDADA (compartilhada) --------------- */}
-      <BarraDeQualidade barra={barra} />
-
-      {estado === "carregando" ? (
-        <p role="status" className="py-8 text-center text-sm text-ink-muted">
-          Carregando a série…
-        </p>
-      ) : null}
-
-      {/* Erro, ausencia e serie vencida sao estados DIFERENTES: erro e' a
-          carga que falhou agora (com nova tentativa); ausencia e' nao haver
-          serie nenhuma (nunca 0%); serie vencida e' dado que existe, velho,
-          e aparece no selo do cabecalho e na barra de qualidade. */}
-      {estado === "erro" ? (
-        <StateBlock
-          tipo="erro"
-          titulo="Não foi possível carregar a série."
-          descricao={erro ? `Falha: ${erro}.` : undefined}
-          acao={<RetryButton onClick={() => void carregar()} />}
-        />
-      ) : null}
-
-      {estado === "ok" && dados?.availability === "unavailable" ? (
-        <StateBlock
-          tipo="indisponivel"
-          titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
-          descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
-        />
-      ) : null}
-
+          ) : null}
+          {estado === "ok" && dados?.availability === "unavailable" ? (
+            <StateBlock
+              tipo="indisponivel"
+              titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
+              descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
+            />
+          ) : null}
+        </>
+      }
+    >
       {estado === "ok" && dados?.availability === "available" && ldr ? (
         visao === "gestor" ? (
-          <>
-            {/* RISCO ATUAL -> PRAZO (LDR) -> EVOLUCAO -> CONCENTRACAO, a
-                mesma ordem dos tres canais (EXPEDICAO-UX-3). */}
-            {secaoRisco}
-            {secaoLdr}
-            {/* 6. QUANDO COMECOU ----------------------------------------- */}
-            {painelEvolucao}
-            {/* 7. ONDE CONCENTRA ----------------------------------------- */}
-            {painelLojas("")}
-            {aoTrocarVisao ? (
-              <ConviteAoDetalhe
-                conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
-                aoAbrir={() => aoTrocarVisao("detalhe")}
-              />
-            ) : null}
-          </>
+          // RISCO ATUAL -> PRAZO (LDR) -> JORNADA -> EVOLUCAO -> CONCENTRACAO:
+          // a ordem e' do esqueleto, a mesma dos tres canais.
+          <CorpoGestor
+            risco={secaoRisco}
+            prazo={secaoLdr}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} />}
+            evolucao={painelEvolucao}
+            concentracao={painelLojas("")}
+            convite={
+              aoTrocarVisao ? (
+                <ConviteAoDetalhe
+                  conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
+                  aoAbrir={() => aoTrocarVisao("detalhe")}
+                />
+              ) : null
+            }
+          />
         ) : (
           <>
             {secaoLdr}
-            {/* 8. DETALHE: coorte, loja e fluxo ------------------------ */}
+            {/* DETALHE: coorte, loja e fluxo */}
             {painelCoortes}
             <div className="grid gap-3 lg:grid-cols-5">
               {painelLojas("lg:col-span-2")}
@@ -842,6 +900,7 @@ export default function TikTokDispatchPanel({
           </>
         )
       ) : null}
+    </LayoutExpedicao>
     </div>
   );
 }
