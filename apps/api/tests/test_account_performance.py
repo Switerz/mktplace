@@ -48,13 +48,16 @@ def _agora() -> datetime:
 # ---------------------------------------------------------------------------
 # Respostas falsas das fontes (formato real dos servicos)
 # ---------------------------------------------------------------------------
-def _linha_ml(marca, pedidos, nao_entregues):
+def _linha_ml(marca, pedidos, nao_entregues, cancelados=0):
     """Linha por marca no formato de `get_quality`: sem entrega registrada, o
-    servico publica `ml_not_delivered_shipments` e a taxa como None."""
+    servico publica `ml_not_delivered_shipments` e a taxa como None. Como no
+    servico, `ml_total_orders` inclui os cancelados e cancelado 0 sai None."""
+    pagos = pedidos - cancelados
     return {"brand": marca, "ml_total_orders": pedidos,
+            "ml_cancelled_orders": cancelados or None,
             "ml_not_delivered_shipments": nao_entregues,
-            "ml_not_delivered_rate_pct": (None if nao_entregues is None
-                                          else round(nao_entregues / pedidos * 100, 2))}
+            "ml_not_delivered_rate_pct": (None if nao_entregues is None or not pagos
+                                          else round(nao_entregues / pagos * 100, 2))}
 
 
 def quality_ok(cancel=4.5, nao_entregue=1.2, linhas=None):
@@ -210,8 +213,10 @@ def test_tres_oficiais_com_estados_fixos(cliente, fontes):
     assert "reputação oficial do mercado livre ainda não capturada pela torre" in (
         ml["motivo_indisponivel"].lower())
     assert (tk["tipo"], tk["estado"], tk["valor"]) == ("oficial", "sem_fonte", None)
-    assert "não expõe sps/saúde da conta por api para lojas br" in tk["motivo_indisponivel"].lower()
+    assert "não ingeridos pela torre" in tk["motivo_indisponivel"].lower()
+    assert "capacidade por API para lojas BR não comprovada" in tk["motivo_indisponivel"]
     assert "26/10/2026" in tk["motivo_indisponivel"]
+    assert "só para lojas dos EUA" in tk["motivo_indisponivel"]
     assert (sh["tipo"], sh["estado"], sh["valor"]) == ("oficial", "nao_comprovado", None)
     assert "não comprovada" in sh["motivo_indisponivel"]
     assert "sem chamadas" in sh["motivo_indisponivel"]
@@ -259,7 +264,8 @@ def test_mapeamento_dado_de_cada_indicador_torre(cliente, fontes):
     assert c["atualizado_em"] and c["cobertura"] == "barbours, kokeshi"
 
     n = _ind(corpo, "ml_nao_entregue_torre")
-    assert (n["estado"], n["valor"], n["unidade"]) == ("dado", 1.2, "pct")
+    # Recalculado das linhas por marca: (1 + 1) / (100 + 50) = 1,33.
+    assert (n["estado"], n["valor"], n["unidade"]) == ("dado", 1.33, "pct")
     assert "shipments não entregues / pedidos pagos" in n["rotulo"]
     assert "por pedido" not in n["rotulo"] + n["ajuda"]
     assert "pedidos − cancelados" in n["ajuda"]
@@ -305,7 +311,8 @@ def test_ml_quality_usa_janela_fechada_sem_comparacao(cliente, fontes, chamadas)
 # null nunca vira 0
 # ---------------------------------------------------------------------------
 def test_null_do_ml_vira_vazio_legitimo_e_nunca_zero(cliente, fontes):
-    fontes["quality"] = lambda: quality_ok(cancel=None, nao_entregue=None)
+    # `get_quality` devolve None justamente quando nao ha pedido ML na janela.
+    fontes["quality"] = lambda: quality_ok(cancel=None, nao_entregue=None, linhas=[])
     corpo = _get(cliente)
     for codigo in ("ml_cancelamento_torre", "ml_nao_entregue_torre"):
         ind = _ind(corpo, codigo)
@@ -326,15 +333,23 @@ def test_nao_entregue_sem_dado_em_nenhuma_marca_e_sem_fonte_nunca_zero(cliente, 
     assert _ind(_get(cliente), "ml_cancelamento_torre")["estado"] == "dado"
 
 
-def test_nao_entregue_parcial_e_dado_com_aviso_das_marcas_fora(cliente, fontes):
+def test_nao_entregue_parcial_recalcula_sobre_a_mesma_cobertura(cliente, fontes):
+    """Assimetrico: kokeshi (sem dado) tem 3x os pedidos de barbours.
+
+    Agregado do servico: 2 / (100 + 300) = 0,5 (kokeshi no denominador e com 0
+    no numerador). Recalculo: 2 / (110 - 10) = 2,0, so' barbours dos dois lados.
+    """
     fontes["quality"] = lambda: quality_ok(
-        nao_entregue=0.67,
-        linhas=[_linha_ml("barbours", 100, 1), _linha_ml("kokeshi", 50, None)])
+        nao_entregue=0.5,
+        linhas=[_linha_ml("barbours", 110, 2, cancelados=10),
+                _linha_ml("kokeshi", 300, None)])
     ind = _ind(_get(cliente), "ml_nao_entregue_torre")
-    assert (ind["estado"], ind["valor"]) == ("dado", 0.67)  # valor do servico, sem recalculo
+    assert (ind["estado"], ind["valor"]) == ("dado", 2.0)
+    assert ind["valor"] != 0.5  # nunca o agregado do servico
     assert ind["cobertura"] == "barbours"
-    assert ind["aviso_frescor"] and "kokeshi" in ind["aviso_frescor"]
-    assert "barbours" not in ind["aviso_frescor"]
+    aviso = ind["aviso_frescor"]
+    assert aviso and "kokeshi" in aviso and "barbours" not in aviso
+    assert "fora do numerador e do denominador" in aviso
 
 
 def test_nao_entregue_completo_e_dado_sem_aviso(cliente, fontes):
@@ -343,6 +358,76 @@ def test_nao_entregue_completo_e_dado_sem_aviso(cliente, fontes):
     assert (ind["estado"], ind["valor"]) == ("dado", 1.33)
     assert ind["aviso_frescor"] is None
     assert ind["cobertura"] == "barbours, kokeshi"
+
+
+def test_nao_entregue_denominador_zero_e_vazio_legitimo(cliente, fontes):
+    # Marca com dado mas todos os pedidos cancelados: 0 pagos nao e' taxa 0.
+    fontes["quality"] = lambda: quality_ok(
+        linhas=[_linha_ml("barbours", 5, 0, cancelados=5), _linha_ml("kokeshi", 50, None)])
+    ind = _ind(_get(cliente), "ml_nao_entregue_torre")
+    assert (ind["estado"], ind["valor"]) == ("vazio_legitimo", None)
+    assert ind["motivo_indisponivel"]
+
+
+class _ResultadoFalso:
+    def __init__(self, linhas):
+        self._linhas = linhas
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._linhas
+
+    def first(self):
+        return {"refreshed_at": None}
+
+
+class _DbQualidadeFalso:
+    """Devolve as linhas cruas do mart para o `get_quality` REAL."""
+
+    def __init__(self, linhas):
+        self.linhas = linhas
+
+    def execute(self, sql, params=None):
+        return _ResultadoFalso(self.linhas)
+
+
+def _linha_mart_ml(marca, pedidos, cancelados, entregues):
+    base = {k: 0 for k in ("returned_orders", "unique_buyers", "new_buyers",
+                           "repeat_buyers", "gmv", "seller_shipping_cost")}
+    return {**base, "brand_key": marca, "marketplace_id": performance_service.ML_ID,
+            "orders": pedidos, "canceled_orders": cancelados,
+            "delivered_orders": entregues, "avg_delivery_days": None,
+            "avg_delivery_hours": None, "problem_rate": None}
+
+
+def _qualidade_real(linhas):
+    periodo = svc.EffectivePeriod(start=date(2026, 9, 29), end=date(2026, 10, 28))
+    return performance_service.get_quality(
+        _DbQualidadeFalso(linhas), "ml", 2026, 9, brand_keys=None,
+        period=periodo, compare_period=None)
+
+
+def test_nao_entregue_completo_bate_com_agregado_real_do_servico():
+    # barbours 3 nao entregues / 100 pagos; kokeshi 1 / 50.
+    res = _qualidade_real([_linha_mart_ml("barbours", 100, 10, 97),
+                           _linha_mart_ml("kokeshi", 50, 5, 49)])
+    agregado = res["kpis"]["ml_not_delivered_rate_pct"]
+    assert agregado == 2.67
+    ind = svc._ml_nao_entregue(res, False, "janela")
+    assert (ind.estado, ind.valor, ind.aviso_frescor) == ("dado", agregado, None)
+
+
+def test_nao_entregue_parcial_diverge_do_agregado_real_do_servico():
+    # kokeshi sem entrega registrada: o servico soma 0 no numerador e mantem
+    # os 50 pagos no denominador (3 / 150 = 2,0). O recalculo usa 3 / 100.
+    res = _qualidade_real([_linha_mart_ml("barbours", 100, 10, 97),
+                           _linha_mart_ml("kokeshi", 50, 5, 0)])
+    assert res["kpis"]["ml_not_delivered_rate_pct"] == 2.0
+    ind = svc._ml_nao_entregue(res, False, "janela")
+    assert (ind.estado, ind.valor, ind.cobertura) == ("dado", 3.0, "barbours")
+    assert "kokeshi" in ind.aviso_frescor
 
 
 def test_null_da_ldr_tiktok_vira_vazio_legitimo(cliente, fontes):
@@ -375,7 +460,7 @@ def test_contagem_ausente_na_expedicao_vira_erro_nao_zero(cliente, fontes):
 
 
 def test_nenhum_indicador_fora_de_dado_carrega_valor(cliente, fontes):
-    fontes["quality"] = lambda: quality_ok(cancel=None, nao_entregue=None)
+    fontes["quality"] = lambda: quality_ok(cancel=None, nao_entregue=None, linhas=[])
     fontes["expedicao"] = lambda: expedicao_indisponivel("channel_disabled")
     fontes["tiktok"] = lambda: tiktok_indisponivel("no_series_published")
     fontes["shopee"] = lambda: shopee_indisponivel("disabled")
@@ -440,6 +525,18 @@ def test_expedicao_fotografia_velha_gera_aviso(cliente, fontes):
     fontes["expedicao"] = lambda: expedicao_ok(idade=30.0)
     ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
     assert ind["aviso_frescor"] and "30 h" in ind["aviso_frescor"]
+
+
+@pytest.mark.parametrize("idade,frescor", [(30.0, "fresh"), (30.0, "stale"),
+                                           (7.0, "critical"), (1.0, "unknown")])
+def test_frescor_nunca_afirma_ausencia_de_agendamento(cliente, fontes, idade, frescor):
+    """A Expedicao e' agendada: idade da fotografia nao prova carga manual."""
+    fontes["expedicao"] = lambda: expedicao_ok(freshness=frescor, idade=idade)
+    r = cliente.get(URL)
+    assert r.status_code == 200
+    assert "agendamento" not in r.text.lower()
+    assert "sem agendamento" not in (
+        _ind(r.json(), "ml_expedicao_48h_torre")["aviso_frescor"] or "")
 
 
 def test_tiktok_publicacao_acima_de_6h_gera_aviso(cliente, fontes):
@@ -622,3 +719,59 @@ def test_expedicao_filtra_contas_pela_marca(cliente, fontes):
     corpo = _get(cliente, brands="kokeshi")
     ind = _ind(corpo, "ml_expedicao_48h_torre")
     assert (ind["estado"], ind["valor"], ind["cobertura"]) == ("dado", 1.0, "kokeshi")
+
+
+# ---------------------------------------------------------------------------
+# Capacidade de API: limite da descoberta, nunca ausencia universal
+# ---------------------------------------------------------------------------
+import re  # noqa: E402
+
+#: Frases que afirmam que a plataforma NAO TEM o dado/API. O que sabemos e' so'
+#: o que a Torre nao ingeriu e o que a doc consultada documentou.
+AUSENCIA_UNIVERSAL = re.compile(
+    r"não expõe|não existe|inexistente|não sai por api|indisponível por api"
+    r"|não publica\b|nao expoe|nao existe",
+    re.IGNORECASE,
+)
+
+
+def _textos_estaticos() -> list[str]:
+    textos = [v for k, v in vars(svc).items()
+              if k.startswith(("TEXTO_", "AJUDA_", "MOTIVO_")) and isinstance(v, str)]
+    textos += list(svc.MOTIVOS_EXPEDICAO.values())
+    for meta in svc.META.values():
+        textos += [v for v in meta.values() if isinstance(v, str)]
+    return textos
+
+
+def test_textos_estaticos_nao_afirmam_ausencia_universal_de_api():
+    achados = [t for t in _textos_estaticos() if AUSENCIA_UNIVERSAL.search(t)]
+    assert achados == []
+
+
+@pytest.mark.parametrize("cenario", ["ok", "indisponivel", "erro"])
+def test_resposta_nao_afirma_ausencia_universal_de_api(cliente, fontes, cenario):
+    if cenario == "indisponivel":
+        fontes["quality"] = lambda: quality_ok(linhas=[_linha_ml("barbours", 10, None)])
+        fontes["expedicao"] = lambda: expedicao_indisponivel("channel_disabled")
+        fontes["tiktok"] = lambda: tiktok_indisponivel("no_series_published")
+        fontes["shopee"] = lambda: shopee_indisponivel("disabled")
+    elif cenario == "erro":
+        def _cai():
+            raise RuntimeError("x")
+        for nome in fontes:
+            fontes[nome] = _cai
+    r = cliente.get(URL)
+    assert r.status_code == 200
+    assert AUSENCIA_UNIVERSAL.findall(r.text) == []
+
+
+def test_oficiais_qualificados_como_nao_ingeridos_ou_nao_comprovados(cliente, fontes):
+    corpo = _get(cliente)
+    tk = _ind(corpo, "tiktok_sps_ahr_oficial")
+    for campo in ("motivo_indisponivel", "ajuda"):
+        assert "não comprovada" in tk[campo]
+    assert "não ingerido" in tk["fonte"]
+    assert "não comprovada" in _ind(corpo, "shopee_account_health_oficial")["motivo_indisponivel"]
+    ml = _ind(corpo, "ml_reputacao_oficial")
+    assert "não ingerido" in ml["fonte"]

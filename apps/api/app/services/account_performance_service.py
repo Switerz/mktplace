@@ -77,9 +77,12 @@ MOTIVO_FORA_SHOPEE = "Conta sem app Shopee (ausente da fonte de pedidos da Shope
 TEXTO_REPUTACAO_ML = (
     "Reputação oficial do Mercado Livre ainda não capturada pela Torre."
 )
+#: Limite da DESCOBERTA, nao prova universal de inexistencia: a doc consultada
+#: so' documenta lojas dos EUA; para o BR a capacidade nao foi comprovada.
 TEXTO_SPS_TIKTOK = (
-    "O TikTok não expõe SPS/saúde da conta por API para lojas BR segundo a doc "
-    "oficial consultada em 26/10/2026."
+    "SPS/saúde da conta do TikTok não ingeridos pela Torre; capacidade por API "
+    "para lojas BR não comprovada (doc oficial consultada em 26/10/2026 indica "
+    "disponibilidade só para lojas dos EUA)."
 )
 TEXTO_HEALTH_SHOPEE = (
     "Autorização da API de saúde da conta da Shopee não comprovada; probe de "
@@ -118,7 +121,7 @@ AJUDA_TIKTOK_RECONSTRUIDO = (
     "Cálculo Torre · prazo reconstruído (2/1 dias úteis): coleta 2 dias úteis e "
     "despacho 1 dia útil após o pagamento. Atrasados (coletados após o prazo + "
     "não coletados vencidos) sobre a base madura, por vencimento. Não é a LDR "
-    "oficial do TikTok, que não sai por API."
+    "oficial do TikTok, que não é ingerida pela Torre."
 )
 AJUDA_TIKTOK_OFICIAL = (
     "Cálculo Torre sobre o prazo oficial TikTok por pedido. Atrasados sobre a "
@@ -156,7 +159,8 @@ META: dict[str, dict[str, Any]] = {
         "fonte": "marts.fact_marketplace_daily_performance → /api/v1/performance/quality "
                  "(ml_not_delivered_rate_pct)",
         "ajuda": "Shipments não entregues / pedidos pagos (pedidos − cancelados) "
-                 "do período, somados nas marcas. Não é métrica de reputação do ML.",
+                 "do período, somados só nas marcas com dado de não entregue "
+                 "(numerador e denominador). Não é métrica de reputação do ML.",
     },
     "ml_expedicao_48h_torre": {
         "rotulo": "Expedição acima de 48 h · Cálculo Torre · 48 h é limite "
@@ -166,8 +170,8 @@ META: dict[str, dict[str, Any]] = {
         "fonte": "marts.expedicao_fila_atual / marts.expedicao_refresh_run → "
                  "/api/v1/expedicao?channel=mercadolivre (over_48h_count)",
         "ajuda": "Shipments ready_to_ship de pedidos pagos abertos há mais de 48 h "
-                 "na fotografia atual. O Mercado Livre não publica prazo de "
-                 "despacho; 48 h é limite operacional interno.",
+                 "na fotografia atual. Prazo de despacho do Mercado Livre não "
+                 "ingerido pela Torre; 48 h é limite operacional interno.",
     },
     "shopee_account_health_oficial": {
         "rotulo": "Saúde da conta oficial da Shopee (nota, métricas, pontos, punições)",
@@ -191,9 +195,12 @@ META: dict[str, dict[str, Any]] = {
         "rotulo": "SPS, AHR e violações (saúde da conta oficial do TikTok)",
         "tipo": "oficial",
         "unidade": None,
-        "fonte": "TikTok Shop API analytics/shop_performances (só lojas dos EUA); "
-                 "AHR e violações só no Seller Center",
-        "ajuda": "Métrica oficial da plataforma, indisponível por API para lojas BR.",
+        "fonte": "TikTok Shop API analytics/shop_performances, não ingerido (doc "
+                 "oficial consultada em 26/10/2026 indica disponibilidade só para "
+                 "lojas dos EUA); AHR e violações: capacidade por API para lojas "
+                 "BR não comprovada",
+        "ajuda": "Métrica oficial da plataforma, não ingerida pela Torre; "
+                 "capacidade por API para lojas BR não comprovada.",
     },
     "tiktok_ldr_operacional_torre": {
         "rotulo": "LDR operacional de coleta · Cálculo Torre",
@@ -294,42 +301,59 @@ def _ml_quality(codigo: str, campo: str, res: Optional[dict], falhou: bool,
 
 
 def _tem_nao_entregue(linha: dict) -> bool:
-    return (linha.get("ml_not_delivered_shipments") is not None
-            or linha.get("ml_not_delivered_rate_pct") is not None)
+    # So' a contagem: e' ela que entra no numerador recalculado.
+    return linha.get("ml_not_delivered_shipments") is not None
+
+
+def _pedidos_pagos(linha: dict) -> int:
+    # Mesma definicao do agregado de `get_quality`: pedidos - cancelados.
+    return int(linha.get("ml_total_orders") or 0) - int(linha.get("ml_cancelled_orders") or 0)
 
 
 def _ml_nao_entregue(res: Optional[dict], falhou: bool, janela: str) -> Indicador:
-    """Nao entregue sem falso zero.
+    """Nao entregue sem falso zero e sem denominador maior que o numerador.
 
     O agregado de `get_quality` soma `ml_not_delivered_shipments or 0`: marca
     sem o dado (nenhuma entrega registrada) entra como 0 no numerador e com os
-    pedidos no denominador. Se NENHUMA marca tem o dado, o 0,0 nao e' medicao.
-    Por isso o estado e' decidido pelas linhas por marca, nao pelo agregado.
+    pedidos no denominador. Por isso a taxa e' RECALCULADA aqui a partir das
+    linhas por marca (sem SQL novo, sem mexer no servico da Gerencial), so'
+    sobre as marcas com o dado, no numerador E no denominador:
+
+        soma(ml_not_delivered_shipments) / soma(ml_total_orders - ml_cancelled_orders) * 100
+
+    Com todas as marcas com dado, a formula e' a mesma do agregado do servico.
     """
     codigo = "ml_nao_entregue_torre"
     if falhou:
         return _erro(codigo)
 
     def _dinamico() -> dict:
-        valor = res["kpis"]["ml_not_delivered_rate_pct"]
         com_pedidos = [r for r in res.get("brands") or [] if r.get("ml_total_orders")]
-        com_dado = [str(r["brand"]) for r in com_pedidos if _tem_nao_entregue(r)]
+        com_dado = [r for r in com_pedidos if _tem_nao_entregue(r)]
         sem_dado = [str(r["brand"]) for r in com_pedidos if not _tem_nao_entregue(r)]
         comum = {"janela": janela, "atualizado_em": res.get("refreshed_at"),
-                 "cobertura": ", ".join(com_dado) or None}
-        if valor is None:
+                 "cobertura": ", ".join(str(r["brand"]) for r in com_dado) or None}
+        if not com_pedidos:
             return {**comum, "estado": "vazio_legitimo",
                     "motivo_indisponivel": f"Nenhum pedido Mercado Livre em {janela}."}
         if not com_dado:
             return {**comum, "estado": "sem_fonte",
                     "motivo_indisponivel": MOTIVO_ML_NAO_ENTREGUE_AUSENTE}
+        # int(None) levanta: contagem corrompida vira `erro`, nunca zero.
+        numerador = sum(int(r["ml_not_delivered_shipments"]) for r in com_dado)
+        denominador = sum(_pedidos_pagos(r) for r in com_dado)
+        if denominador <= 0:
+            return {**comum, "estado": "vazio_legitimo",
+                    "motivo_indisponivel": "Nenhum pedido pago Mercado Livre nas "
+                                           f"marcas com dado de não entregue em {janela}."}
         aviso = None
         if sem_dado:
             aviso = ("Dado de não entregue ausente na fonte para: "
                      + ", ".join(sem_dado)
-                     + ". Os pedidos dessas marcas entram no denominador do agregado, "
-                       "que pode estar subestimado.")
-        return {**comum, "estado": "dado", "valor": float(valor),
+                     + ". Essas marcas ficaram fora do numerador e do denominador; "
+                       "a taxa cobre só as marcas listadas na cobertura.")
+        return {**comum, "estado": "dado",
+                "valor": round(numerador / denominador * 100, 2),
                 "aviso_frescor": aviso}
 
     return _indicador(codigo, _dinamico)
@@ -369,8 +393,11 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
         if velhas:
             avisos.append("Fonte desatualizada em: " + ", ".join(velhas) + ".")
         idade = (res.get("limitations") or {}).get("snapshot_age_hours")
+        # So' a idade, sinal explicito da fonte. Idade NAO prova ausencia de
+        # agendamento (a Expedicao e' agendada): a causa nao e' inferida.
         if idade is not None and idade > LIMITE_FRESCOR_HORAS:
-            avisos.append(f"Fotografia de há {idade:.0f} h (carga sem agendamento).")
+            avisos.append(f"Fotografia de há {idade:.0f} h (acima do limite de "
+                          f"{LIMITE_FRESCOR_HORAS:.0f} h).")
 
         snapshot = res.get("snapshot") or {}
         return {"estado": "dado", "valor": float(valor), "janela": janela,
