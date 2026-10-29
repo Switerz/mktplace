@@ -275,7 +275,10 @@ test("8. a faixa tem exatamente os 5 KPIs, nesta ordem, e confianca NAO e' um de
   assert.ok(!band.some((k) => /confian/i.test(k.label)), "confiança não pode ser KPI");
 });
 
-test("8b. delta e referencia existem SO' no GMV; os demais declaram indisponibilidade", () => {
+test("8b. sem periodo anterior no contrato, so' o GMV tem delta; os demais declaram indisponibilidade", () => {
+  // KPIS-COMPARACAO-1: a regra continua sendo "nunca delta inventado". Sem os
+  // campos `prev_*` (contrato antigo, mock), Pedidos e Ticket seguem dizendo
+  // "Comparação indisponível". Com eles, ver 8c.
   const band = buildKpiBand(makeOverview(), ALL);
   const byKey = Object.fromEntries(band.map((k) => [k.key, k]));
   assert.equal(byKey.gmv.deltaPct, 8);

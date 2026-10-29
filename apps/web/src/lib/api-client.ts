@@ -39,6 +39,16 @@ export interface OverviewData {
   shopee_unique_buyers: number | null;
   gmv_mom_pct: number | null;
   prev_gmv: number;
+  /**
+   * KPIS-COMPARACAO-1 — o restante do periodo anterior, que o contrato
+   * (`previous: KpiSummary`) ja' trazia e a tela ignorava. Opcionais: o mock
+   * e fixtures antigas nao os tem, e ausencia vira "Comparacao indisponivel".
+   */
+  prev_orders?: number | null;
+  prev_avg_ticket?: number | null;
+  prev_ad_spend?: number | null;
+  prev_ml_roas?: number | null;
+  prev_shopee_roas?: number | null;
 }
 
 export interface BrandRow {
@@ -327,7 +337,14 @@ export function fetchOverview(
       ml_unique_buyers?: number | null;
       shopee_unique_buyers?: number | null;
     };
-    previous: { gmv: number };
+    previous: {
+      gmv: number;
+      orders?: number | null;
+      avg_ticket?: number | null;
+      ad_spend?: number | null;
+      ml_roas?: number | null;
+      shopee_roas?: number | null;
+    };
     gmv_mom_pct: number | null;
     date_from?: string | null;
     date_to?: string | null;
@@ -359,6 +376,11 @@ export function fetchOverview(
           shopee_unique_buyers: raw.current.shopee_unique_buyers ?? null,
           gmv_mom_pct: raw.gmv_mom_pct,
           prev_gmv: raw.previous.gmv,
+          prev_orders: raw.previous.orders ?? null,
+          prev_avg_ticket: raw.previous.avg_ticket ?? null,
+          prev_ad_spend: raw.previous.ad_spend ?? null,
+          prev_ml_roas: raw.previous.ml_roas ?? null,
+          prev_shopee_roas: raw.previous.shopee_roas ?? null,
         },
       };
     }

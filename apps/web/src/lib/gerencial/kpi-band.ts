@@ -5,10 +5,12 @@
  * Ads e ROAS por canal. **Confianca no dado NAO e' KPI** — vive numa faixa
  * transversal propria (ver `confidence-strip.ts`).
  *
- * A regra que este modulo existe para impedir: **delta inventado**. Somente o
- * GMV tem comparacao garantida no contrato (`prev_gmv` / `gmv_mom_pct`).
- * Pedidos e Ticket declaram "Comparacao indisponivel"; Investimento em Ads e
- * ROAS nao tem delta nenhum. E ROAS **nunca** e' consolidado: sem soma, sem
+ * A regra que este modulo existe para impedir: **delta inventado**. O delta so'
+ * existe quando o periodo anterior veio no contrato (`previous: KpiSummary`) e
+ * e' positivo; sem ele, o card declara "Comparacao indisponivel".
+ * KPIS-COMPARACAO-1: Pedidos, Ticket, Ads e ROAS por canal passaram a usar o
+ * `previous` que a API ja' devolvia (antes so' o GMV lia). Investimento em Ads
+ * tem tom NEUTRO: gastar mais nao e' bom nem ruim por si. E ROAS **nunca** e' consolidado: sem soma, sem
  * media, sem "ROAS total".
  */
 import type { OverviewData } from "../api-client.ts";
@@ -67,6 +69,27 @@ export interface ChannelValue {
   /** Texto ja formatado, ou null quando indisponivel nesta fonte. */
   value: string | null;
   unavailableReason?: string;
+  /** Valor do periodo anterior, formatado ("12.6x"); null sem comparacao. */
+  previous?: string | null;
+  /** Sentido da variacao contra o anterior; null sem comparacao. */
+  direction?: "up" | "down" | "flat" | null;
+}
+
+/** Como colorir a variacao: subir e' bom, ou nao ha' juizo (neutro). */
+export type DeltaTone = "higher_is_better" | "neutral";
+
+/** Variacao % quando ha' base: anterior positivo e finito; senao null. */
+export function deltaPct(current: number | null | undefined, previous: number | null | undefined): number | null {
+  if (current == null || previous == null || !Number.isFinite(current) || !Number.isFinite(previous)) return null;
+  if (previous <= 0) return null;
+  return ((current - previous) / previous) * 100;
+}
+
+/** "flat" abaixo de 0,5% de variacao: ruido de arredondamento, nao movimento. */
+export function direcao(pct: number | null): "up" | "down" | "flat" | null {
+  if (pct == null) return null;
+  if (Math.abs(pct) < 0.5) return "flat";
+  return pct > 0 ? "up" : "down";
 }
 
 export interface KpiDescriptor {
@@ -76,9 +99,11 @@ export interface KpiDescriptor {
   value: string | null;
   unavailableReason: string | null;
   subvalue: string | null;
-  /** Somente GMV: variacao percentual do contrato. */
+  /** Variacao % contra o periodo anterior; null sem base. */
   deltaPct: number | null;
-  /** Somente GMV: "vs. período anterior: R$ X". */
+  /** Como colorir `deltaPct`. */
+  deltaTone: DeltaTone;
+  /** "vs. período anterior: X" / "antes X". */
   reference: string | null;
   /** Texto explicito quando o contrato nao traz comparacao. */
   comparisonNote: string | null;
@@ -134,6 +159,8 @@ export function avgTicketDisplay(overview: OverviewData): { value: string | null
 export function buildKpiBand(
   overview: OverviewData | null,
   channels: readonly Marketplace[],
+  /** "Comparar com periodo anterior" desligado: nenhum delta alem do GMV. */
+  compare = true,
 ): KpiDescriptor[] {
   const mlSelected = isMarketplaceSelected(channels, "ml");
   const shopeeSelected = isMarketplaceSelected(channels, "shopee");
@@ -146,6 +173,7 @@ export function buildKpiBand(
     unavailableReason: null,
     subvalue: overview ? splitByChannel(overview, channels) : null,
     deltaPct: overview?.gmv_mom_pct ?? null,
+    deltaTone: "higher_is_better",
     reference:
       overview && overview.prev_gmv > 0
         ? `vs. período anterior: ${fmtBrlFull(overview.prev_gmv)}`
@@ -158,16 +186,17 @@ export function buildKpiBand(
     accent: "bg-chart-1",
   };
 
+  const ordersDelta = compare ? deltaPct(overview?.orders, overview?.prev_orders) : null;
   const orders: KpiDescriptor = {
     key: "orders",
     label: "Pedidos",
     value: overview ? fmtNumber(overview.orders) : null,
     unavailableReason: null,
     subvalue: overview ? buyersSubvalue(overview) : null,
-    // Sem delta: o contrato nao traz pedidos do periodo anterior.
-    deltaPct: null,
-    reference: null,
-    comparisonNote: COMPARISON_UNAVAILABLE,
+    deltaPct: ordersDelta,
+    deltaTone: "higher_is_better",
+    reference: ordersDelta != null ? `antes ${fmtNumber(overview!.prev_orders!)}` : null,
+    comparisonNote: compare && ordersDelta == null ? COMPARISON_UNAVAILABLE : null,
     coverageNote: null,
     channelValues: null,
     highlightChannel: null,
@@ -175,15 +204,17 @@ export function buildKpiBand(
   };
 
   const ticket = overview ? avgTicketDisplay(overview) : { value: null, reason: null };
+  const ticketDelta = compare && ticket.value ? deltaPct(overview?.avg_ticket, overview?.prev_avg_ticket) : null;
   const avgTicket: KpiDescriptor = {
     key: "avg_ticket",
     label: "Ticket Médio",
     value: ticket.value,
     unavailableReason: ticket.reason,
     subvalue: null,
-    deltaPct: null,
-    reference: null,
-    comparisonNote: ticket.value ? COMPARISON_UNAVAILABLE : null,
+    deltaPct: ticketDelta,
+    deltaTone: "higher_is_better",
+    reference: ticketDelta != null ? `antes ${fmtBrlFull(overview!.prev_avg_ticket!)}` : null,
+    comparisonNote: compare && ticket.value && ticketDelta == null ? COMPARISON_UNAVAILABLE : null,
     coverageNote: null,
     channelValues: null,
     highlightChannel: null,
@@ -199,15 +230,16 @@ export function buildKpiBand(
   } else {
     adsValue = fmtBrlFull(overview.ad_spend);
   }
+  const adsDelta = compare && adsValue ? deltaPct(overview?.ad_spend, overview?.prev_ad_spend) : null;
   const adSpend: KpiDescriptor = {
     key: "ad_spend",
     label: "Investimento em Ads",
     value: adsValue,
     unavailableReason: adsReason,
     subvalue: null,
-    // Sem delta por decisao de contrato.
-    deltaPct: null,
-    reference: null,
+    deltaPct: adsDelta,
+    deltaTone: "neutral",
+    reference: adsDelta != null ? `antes ${fmtBrlFull(overview!.prev_ad_spend!)}` : null,
     comparisonNote: null,
     coverageNote: adsCoverageNote(channels),
     channelValues: null,
@@ -219,11 +251,15 @@ export function buildKpiBand(
   for (const channel of ["ml", "shopee"] as const) {
     if (!isMarketplaceSelected(channels, channel)) continue;
     const raw = channel === "ml" ? overview?.ml_roas : overview?.shopee_roas;
+    const anterior = channel === "ml" ? overview?.prev_ml_roas : overview?.prev_shopee_roas;
+    const pct = compare && raw != null ? deltaPct(raw, anterior) : null;
     roasChannels.push({
       channel,
       label: CHANNEL_LABEL[channel],
       value: raw != null ? `${raw.toFixed(1)}x` : null,
       unavailableReason: raw != null ? undefined : "Sem ROAS para o período e filtros selecionados.",
+      previous: pct != null ? `${anterior!.toFixed(1)}x` : null,
+      direction: direcao(pct),
     });
   }
   if (isMarketplaceSelected(channels, "tiktok")) {
@@ -247,6 +283,7 @@ export function buildKpiBand(
       : "Nenhum canal com ROAS selecionado.",
     subvalue: null,
     deltaPct: null,
+    deltaTone: "higher_is_better",
     reference: null,
     comparisonNote: null,
     coverageNote: null,

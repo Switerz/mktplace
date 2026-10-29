@@ -35,6 +35,7 @@ import type { Marketplace } from "@/lib/mock-data";
 import { buildPulse } from "@/lib/executive-pulse";
 import { findChannelMedian } from "@/lib/canais-channel-metrics";
 import { CHANNEL_LABEL, buildKpiBand } from "@/lib/gerencial/kpi-band";
+import { tendenciasDosKpis } from "@/lib/gerencial/kpi-trend";
 import { buildVolumeHealth } from "@/lib/gerencial/volume-health";
 import {
   buildAttentionQueue,
@@ -173,13 +174,27 @@ function GerencialInner() {
 
   // ---- derivacoes puras -------------------------------------------------
   const overview = sources.overview.data;
-  const kpis = useMemo(() => buildKpiBand(overview, filters.channels), [overview, filters.channels]);
+  const kpis = useMemo(
+    () => buildKpiBand(overview, filters.channels, filters.compare),
+    [overview, filters.channels, filters.compare],
+  );
 
   const merged = useMemo(
     // A granularidade PEDIDA entra no merge para que um grao explicito ignorado
     // pela API seja tratado como contrato incompativel, e nao como sucesso.
     () => mergeChannelSeries(sources.series, filters.channels, metric, granularity),
     [sources.series, filters.channels, metric, granularity],
+  );
+  // KPIS-COMPARACAO-1 — tendencia dos cards: GMV e Pedidos SEMPRE, independente
+  // da metrica escolhida no grafico. `/trend` ja' traz as duas na mesma
+  // resposta, entao isto nao dispara requisicao nenhuma.
+  const tendencias = useMemo(
+    () =>
+      tendenciasDosKpis(
+        mergeChannelSeries(sources.series, filters.channels, "gmv", granularity),
+        mergeChannelSeries(sources.series, filters.channels, "orders", granularity),
+      ),
+    [sources.series, filters.channels, granularity],
   );
   const reconciliation = useMemo(
     () =>
@@ -432,6 +447,7 @@ function GerencialInner() {
         onOpen={(key) => setDialog({ kind: "kpi", key })}
         onRetry={sources.retry}
         semGmv
+        tendencias={tendencias}
       />
 
       <DecisoesTopo
