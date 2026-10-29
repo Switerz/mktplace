@@ -357,7 +357,12 @@ export interface CargaJornada {
  * A rota AINDA NAO existe em producao: 404, erro de rede e `disabled` sao
  * "Jornada indisponível" discreto (`indisponivel`), sem alarme. Falha do
  * servidor (5xx) ou payload fora do contrato sao `erro`, com nova tentativa.
- * `unavailable` vira `fora_do_ar` com o motivo.
+ *
+ * R21: o estado da tela e' POR SECAO. `status` e' o PIOR estado entre as
+ * secoes (contrato v1.1), entao `unavailable`/`partial` com UMA secao
+ * presente continua `pronta`: a secao valida aparece e a nula diz, no proprio
+ * bloco, por que esta' indisponivel. So' com AS DUAS secoes nulas a Jornada
+ * inteira vira `fora_do_ar`, com o motivo.
  */
 export function estadoDaJornada(c: CargaJornada): EstadoJornada {
   if (c.carregando) return "carregando";
@@ -365,8 +370,9 @@ export function estadoDaJornada(c: CargaJornada): EstadoJornada {
   if (c.http !== null && c.http >= 400) return "erro";
   if (!c.resultado) return "carregando";
   if (!c.resultado.ok) return "erro";
-  if (c.resultado.resposta.status === "disabled") return "indisponivel";
-  if (c.resultado.resposta.status === "unavailable") return "fora_do_ar";
+  const r = c.resultado.resposta;
+  if (r.status === "disabled") return "indisponivel";
+  if (!r.fila_aberta && !r.coorte) return "fora_do_ar";
   return "pronta";
 }
 
@@ -389,7 +395,9 @@ const ROTULO_SOBREPOSICAO: Record<string, string> = {
   acima_48h: "abertos há mais de 48 h (limiar interno)",
   travado: "travados",
   lento: "lentos",
-  zumbi_fonte: "parados na fonte",
+  // R21: o pipeline so' mede a idade (`hours_open` > 30 dias), nao se a fonte
+  // parou de mudar.
+  zumbi_fonte: "abertos há mais de 30 dias",
   aguardando_vencido: "vencidos ainda sem envio",
   concluido_atrasado: "enviados com atraso",
 };
@@ -450,7 +458,51 @@ const MOTIVOS: Record<string, string> = {
   desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
   publicacao_desatualizada: "publicação desatualizada — os números descrevem a última publicação, não agora",
   no_snapshot: "nenhuma fotografia publicada ainda",
+  // R21: codigos de frescor e de lote que a rota publica (T-0011).
+  no_snapshot_published: "nenhuma fotografia publicada ainda",
+  inconsistent_batch: "o último lote publicado está incompleto; os números não foram exibidos",
+  fonte_desatualizada: "a fonte não recebe dado novo dentro do prazo esperado; os números não são atuais",
+  fonte_sem_carimbo: "a publicação não registra quando a fonte foi lida; não dá para afirmar que os números são atuais",
 };
+
+/** Codigos de `reason` que tornam a secao desatualizada (selo na secao). */
+const MOTIVOS_DESATUALIZADA = new Set([
+  "desatualizada",
+  "publicacao_desatualizada",
+  "fonte_desatualizada",
+  "fonte_sem_carimbo",
+]);
+
+type SecaoJornada = "fila_aberta" | "coorte";
+
+interface ParteDoMotivo {
+  secao: SecaoJornada | null;
+  codigo: string | null;
+  frase: string;
+}
+
+/** Uma parte do `reason` ("coorte: dias_sem_publicacao (2)") ja' traduzida. */
+function lerParte(parte: string): ParteDoMotivo {
+  const m = parte.match(/^(fila_aberta|coorte):\s*(.*)$/);
+  const secao = m ? (m[1] as SecaoJornada) : null;
+  const resto = (m ? m[2] : parte).trim();
+  // O detalhe entre parenteses e' opcional: "(2)", "(soma 9 != base 10)".
+  const codigo = resto.match(/^([a-z_]+)(?:\s*\(([^)]*)\))?$/);
+  let frase: string;
+  if (codigo && MOTIVOS[codigo[1]]) frase = MOTIVOS[codigo[1]];
+  else if (codigo && codigo[1] === "dias_sem_publicacao") {
+    frase = `${codigo[2] && /^\d+$/.test(codigo[2]) ? codigo[2] : "algum"} dia(s) sem publicação na janela`;
+  } else if (codigo) frase = "motivo não detalhado pela API";
+  else frase = resto;
+  return { secao, codigo: codigo ? codigo[1] : null, frase };
+}
+
+function partesDoMotivo(reason: string | null): ParteDoMotivo[] {
+  return (reason ?? "")
+    .split(/;\s*/)
+    .filter((p) => p.trim())
+    .map(lerParte);
+}
 
 /**
  * `reason` vem com o prefixo da secao ("coorte: table_not_migrated"). Codigo
@@ -459,21 +511,33 @@ const MOTIVOS: Record<string, string> = {
  */
 export function explicarMotivo(reason: string | null): string | null {
   if (!reason) return null;
-  return reason
-    .split(/;\s*/)
-    .map((parte) => {
-      const m = parte.match(/^(fila_aberta|coorte):\s*(.*)$/);
-      const secao = m ? (m[1] === "coorte" ? "Coorte" : "Fila aberta") : null;
-      const resto = (m ? m[2] : parte).trim();
-      const codigo = resto.match(/^([a-z_]+)(?:\s*\((\d+)\))?$/);
-      let frase: string;
-      if (codigo && MOTIVOS[codigo[1]]) frase = MOTIVOS[codigo[1]];
-      else if (codigo && codigo[1] === "dias_sem_publicacao") frase = `${codigo[2] ?? "algum"} dia(s) sem publicação na janela`;
-      else if (codigo) frase = "motivo não detalhado pela API";
-      else frase = resto;
-      return secao ? `${secao}: ${frase}` : frase;
-    })
+  return partesDoMotivo(reason)
+    .map((p) => (p.secao ? `${p.secao === "coorte" ? "Coorte" : "Fila aberta"}: ${p.frase}` : p.frase))
     .join("; ");
+}
+
+/**
+ * R21: o motivo de UMA secao, sem o prefixo (o bloco ja' tem o titulo).
+ * `null` = o `reason` nao fala desta secao.
+ */
+export function motivoDaSecao(r: RespostaJornada, secao: SecaoJornada): string | null {
+  const frases = partesDoMotivo(r.reason)
+    .filter((p) => p.secao === secao)
+    .map((p) => p.frase);
+  return frases.length ? frases.join("; ") : null;
+}
+
+/**
+ * R21: a coorte esta' desatualizada? `coorte.desatualizada` manda; sem ele
+ * (campo opcional no parser), o `reason` da propria secao decide. Selo da
+ * secao afetada nunca some por falta do booleano.
+ */
+export function coorteDesatualizada(r: RespostaJornada): boolean {
+  if (!r.coorte) return false;
+  if (r.coorte.desatualizada === true) return true;
+  return partesDoMotivo(r.reason).some(
+    (p) => p.secao === "coorte" && p.codigo !== null && MOTIVOS_DESATUALIZADA.has(p.codigo),
+  );
 }
 
 /** "pedidos pagos de 19/10 a 25/10" (TikTok) / "pedidos com vencimento ..." (Shopee). */

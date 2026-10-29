@@ -795,6 +795,105 @@ test("jornada TikTok: coorte rotulada, publicado em e selo de frescor; parcial a
 });
 
 // ===========================================================================
+// R21 (HIGH) — secao indisponivel nao apaga a secao valida
+// ===========================================================================
+/** Shopee com a fila valida (base 10) e a coorte nula por migration ausente. */
+function shopeeFilaSemCoorte() {
+  return {
+    channel: "shopee",
+    status: "unavailable",
+    reason: "coorte: table_not_migrated",
+    brands_applied: [],
+    generated_at: "2026-10-26T21:00:00Z",
+    fila_aberta: {
+      grain: "pedido",
+      snapshot_at: "2026-10-26T20:00:00Z",
+      freshness: "fresh",
+      base: 10,
+      etapas: [{ key: "aguardando_expedicao", label: "Aguardando expedição", count: 10 }],
+      etapas_fecham: true,
+      sobreposicoes: [{ key: "vencido", count: 2 }],
+      limitacoes: [],
+    },
+    coorte: null,
+    limitacoes: [],
+  };
+}
+
+test("R21: unavailable com UMA secao presente e' 'pronta'; so' as duas nulas viram fora_do_ar", () => {
+  const base = { carregando: false, http: 200, erroDeRede: false };
+  assert.equal(estadoDaJornada({ ...base, resultado: lerJornada(shopeeFilaSemCoorte(), "shopee") }), "pronta");
+  const tk = { ...jornadaTikTok(), status: "unavailable", reason: "fila_aberta: no_snapshot_published" };
+  assert.equal(estadoDaJornada({ ...base, resultado: lerJornada(tk, "tiktok") }), "pronta");
+  const nenhuma = { ...shopeeFilaSemCoorte(), fila_aberta: null, reason: "fila_aberta: no_snapshot_published; coorte: table_not_migrated" };
+  assert.equal(estadoDaJornada({ ...base, resultado: lerJornada(nenhuma, "shopee") }), "fora_do_ar");
+});
+
+test("R21 render: fila valida + coorte nula (table_not_migrated) -> fila visivel, coorte indisponivel com o motivo", () => {
+  const html = render(200, shopeeFilaSemCoorte(), "shopee");
+  assert.match(html, /data-testid="exp-jornada"/, "os blocos aparecem");
+  assert.match(html, /Agora — fila aberta/);
+  assert.match(html, /10 pedidos pagos aguardando expedição\./);
+  assert.match(html, /100,0% · 10 de 10/);
+  assert.match(html, /exp-jornada-coorte-indisponivel/);
+  assert.match(html, /Coorte<\/h3>[\s\S]*Indisponível agora: a tabela ainda não foi publicada nesta base\./);
+  assert.doesNotMatch(html, /Jornada indisponível/, "a secao inteira nao some");
+  assert.doesNotMatch(html, /table_not_migrated/, "o codigo cru nao aparece");
+});
+
+test("R21 render: fila nula + coorte valida (TikTok) -> coorte visivel", () => {
+  const html = render(
+    200,
+    { ...jornadaTikTok(), status: "unavailable", reason: "fila_aberta: no_snapshot_published" },
+    "tiktok",
+  );
+  assert.match(html, /data-testid="exp-jornada"/);
+  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /4\.310 pedidos/);
+  assert.match(html, /exp-jornada-fila_aberta-indisponivel/);
+  assert.match(html, /Agora — fila aberta<\/h3>[\s\S]*Indisponível agora: nenhuma fotografia publicada ainda\./);
+  assert.doesNotMatch(html, /Jornada indisponível/);
+});
+
+test("R21 render: as duas secoes nulas -> 'Jornada indisponível' geral, com o motivo", () => {
+  const html = render(
+    200,
+    { ...shopeeFilaSemCoorte(), fila_aberta: null, reason: "fila_aberta: no_snapshot_published; coorte: table_not_migrated" },
+    "shopee",
+  );
+  assert.match(html, /Jornada indisponível agora\./);
+  assert.match(html, /Coorte: a tabela ainda não foi publicada nesta base/);
+  assert.doesNotMatch(html, /data-testid="exp-jornada"/, "nenhum bloco desenhado");
+});
+
+test("R21 render: partial por fonte_desatualizada -> secao visivel com selo de desatualizada", () => {
+  const p = {
+    ...jornadaTikTok({ publicado_em: "2026-10-26T09:00:00Z", desatualizada: true }),
+    status: "partial",
+    reason: "coorte: fonte_desatualizada",
+  };
+  const html = render(200, p, "tiktok");
+  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /4\.310 pedidos/);
+  assert.match(html, />Desatualizada</, "chip de frescor");
+  assert.match(html, /exp-jornada-coorte-desatualizada/, "aviso no bloco");
+  assert.match(html, /Parcial:/);
+  assert.match(html, /Coorte: a fonte não recebe dado novo/);
+  // sem o booleano (opcional no parser), o `reason` da secao mantem o selo
+  const semBool = render(200, { ...p, coorte: { ...p.coorte, desatualizada: undefined } }, "tiktok");
+  assert.match(semBool, />Desatualizada</);
+  assert.match(semBool, /exp-jornada-coorte-desatualizada/);
+});
+
+test("R21: motivo com detalhe entre parenteses vira frase; zumbi nao afirma fonte parada", () => {
+  assert.match(explicarMotivo("fila_aberta: etapas_nao_fecham (soma 9 != base 10)")!, /^Fila aberta: as etapas não fecham/);
+  assert.equal(explicarMotivo("coorte: dias_sem_publicacao (2)"), "Coorte: 2 dia(s) sem publicação na janela");
+  const z = textoDaSobreposicao({ key: "zumbi_fonte", count: 1, reason: null, subconjunto_de: null }, [], 10);
+  assert.match(z, /abertos há mais de 30 dias/);
+  assert.doesNotMatch(z, /parad/);
+});
+
+// ===========================================================================
 // QA T-0010 — menores (M2–M6) e lacunas (retry da tendencia, ? nas tabelas)
 // ===========================================================================
 import { formatarDecimal, formatarPercentualComBase as pctComBase } from "../src/lib/expedicao-formato.ts";

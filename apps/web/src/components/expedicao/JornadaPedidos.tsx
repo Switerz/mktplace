@@ -23,8 +23,10 @@ import Panel from "@/components/ui/Panel";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   avisoDeMarcaNaoAplicada,
+  coorteDesatualizada,
   estadoDaJornada,
   explicarMotivo,
+  motivoDaSecao,
   motivoDoTopo,
   filaDesatualizada,
   larguraDaEtapa,
@@ -181,18 +183,37 @@ function Limitacoes({ itens }: { itens: string[] }) {
   );
 }
 
-function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
-  const f = r.fila_aberta;
-  if (!f) {
+/**
+ * R21: secao que veio `null`. Com motivo no `reason` desta secao (ex.:
+ * `coorte: table_not_migrated`), a ausencia e' de AGORA e o motivo vai
+ * traduzido; sem ele, e' estrutural do canal ("Indisponível neste canal").
+ * A outra secao continua na tela.
+ */
+function SecaoNula({ titulo, secao, r }: { titulo: string; secao: "fila_aberta" | "coorte"; r: RespostaJornada }) {
+  const motivo = motivoDaSecao(r, secao);
+  if (motivo) {
     return (
-      <Panel titulo="Agora — fila aberta">
-        <p role="status" className="text-sm text-ink-muted">
-          Indisponível neste canal{r.limitacoes.length ? `: ${r.limitacoes[0]}` : "."}
-        </p>
-        <Limitacoes itens={r.limitacoes.slice(1)} />
+      <Panel titulo={titulo}>
+        <div data-testid={`exp-jornada-${secao}-indisponivel`}>
+          <EstadoSecao tipo="indisponivel" titulo={`Indisponível agora: ${motivo}.`} />
+        </div>
+        <Limitacoes itens={r.limitacoes} />
       </Panel>
     );
   }
+  return (
+    <Panel titulo={titulo}>
+      <p role="status" className="text-sm text-ink-muted" data-testid={`exp-jornada-${secao}-indisponivel`}>
+        Indisponível neste canal{r.limitacoes.length ? `: ${r.limitacoes[0]}` : "."}
+      </p>
+      <Limitacoes itens={r.limitacoes.slice(1)} />
+    </Panel>
+  );
+}
+
+function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
+  const f = r.fila_aberta;
+  if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
   return (
     <Panel
       titulo={
@@ -225,18 +246,10 @@ function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
 
 function BlocoCoorte({ r }: { r: RespostaJornada }) {
   const c = r.coorte;
-  if (!c) {
-    const motivo = r.limitacoes.length ? r.limitacoes : [];
-    return (
-      <Panel titulo="Coorte">
-        <p role="status" className="text-sm text-ink-muted">
-          Indisponível neste canal{motivo.length ? `: ${motivo[0]}` : "."}
-        </p>
-        <Limitacoes itens={motivo.slice(1)} />
-      </Panel>
-    );
-  }
+  if (!c) return <SecaoNula titulo="Coorte" secao="coorte" r={r} />;
   const evento = c.evento;
+  // R21: selo pelo booleano OU pelo `reason` da secao (fonte/publicacao velha).
+  const velha = coorteDesatualizada(r);
   return (
     <Panel
       titulo={
@@ -248,7 +261,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         evento === "despacho" ? "despacho" : "coleta"
       }.`}
       acao={
-        c.publicado_em || c.desatualizada !== null ? (
+        c.publicado_em || c.desatualizada !== null || velha ? (
           // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
           <span className="flex flex-wrap gap-1.5">
             {c.publicado_em ? (
@@ -256,9 +269,9 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
                 publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
               </Chip>
             ) : null}
-            {c.desatualizada !== null ? (
-              <Chip ponto tom={c.desatualizada ? "atencao" : "bom"}>
-                {c.desatualizada ? "Desatualizada" : "Atualizada"}
+            {c.desatualizada !== null || velha ? (
+              <Chip ponto tom={velha ? "atencao" : "bom"}>
+                {velha ? "Desatualizada" : "Atualizada"}
               </Chip>
             ) : null}
           </span>
@@ -270,9 +283,12 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
           <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base; a tela não refaz a soma." />
         </div>
       ) : null}
-      {c.desatualizada ? (
-        <div className="mb-2">
-          <EstadoSecao tipo="desatualizado" titulo="a coorte não foi republicada dentro do prazo esperado." />
+      {velha ? (
+        <div className="mb-2" data-testid="exp-jornada-coorte-desatualizada">
+          <EstadoSecao
+            tipo="desatualizado"
+            titulo="a publicação ou a fonte desta coorte não foi atualizada dentro do prazo esperado; os números podem não ser atuais."
+          />
         </div>
       ) : null}
       <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" />
