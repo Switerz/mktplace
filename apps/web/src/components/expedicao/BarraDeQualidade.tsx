@@ -12,6 +12,7 @@
  */
 import { useId, useState } from "react";
 
+import InfoDica from "@/components/ui/InfoDica";
 import Note from "@/components/ui/Note";
 import type { Tom } from "@/components/ui/tone";
 import type { BarraQualidade, SeveridadeQualidade } from "@/lib/expedicao-ux";
@@ -32,6 +33,20 @@ export default function BarraDeQualidade({ barra }: { barra: BarraQualidade }) {
   const [aberta, setAberta] = useState(false);
   const id = useId();
   if (!barra.principal) return null;
+  // EXPEDICAO-TRAVADOS-1: so' informacao (ex.: marca fora da cobertura) nao
+  // e' problema do dado — vira uma linha discreta com "ⓘ", sem caixa.
+  if (barra.severidade === "info" && barra.detalhes.every((d) => d.curto)) {
+    return (
+      <section aria-label="Qualidade do dado" className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {barra.detalhes.map((d) => (
+          <span key={d.chave} className="inline-flex items-center gap-1 text-xs text-ink-muted">
+            {d.curto}
+            <InfoDica texto={d.texto} />
+          </span>
+        ))}
+      </section>
+    );
+  }
   const mais = barra.detalhes.length > 1;
   return (
     <section aria-label="Qualidade do dado">

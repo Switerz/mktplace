@@ -67,15 +67,20 @@ export function useJornada(
   api: string,
   canal: CanalJornada,
   marca: string | null,
-  opcoes: { dias?: number; evento?: "coleta" | "despacho" } = {},
+  opcoes: { dias?: number; evento?: "coleta" | "despacho"; ligada?: boolean } = {},
 ): { carga: CargaJornada; tentarDeNovo: () => void } {
   const url = `${api}${queryDaJornada(canal, marca, opcoes)}`;
+  const ligada = opcoes.ligada ?? true;
   const vigente = useRef(url);
   vigente.current = url;
   const [carga, setCarga] = useState<CargaJornada>(CARGA_INICIAL);
   const [tentativa, setTentativa] = useState(0);
 
   useEffect(() => {
+    if (!ligada) {
+      setCarga({ carregando: false, http: null, erroDeRede: false, resultado: null });
+      return;
+    }
     let vivo = true;
     const minha = url;
     setCarga(CARGA_INICIAL);
@@ -102,7 +107,7 @@ export function useJornada(
     return () => {
       vivo = false;
     };
-  }, [url, canal, tentativa]);
+  }, [url, canal, tentativa, ligada]);
 
   const tentarDeNovo = useCallback(() => setTentativa((n) => n + 1), []);
   return { carga, tentarDeNovo };
@@ -319,14 +324,35 @@ export default function JornadaPedidos({
   carga,
   aoTentarDeNovo,
   marca = null,
+  soCoorte = false,
 }: {
   carga: CargaJornada;
   aoTentarDeNovo: () => void;
   /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
   marca?: string | null;
+  /**
+   * EXPEDICAO-TRAVADOS-1 — so' a coorte. Na fila (Shopee/ML) a fila aberta e'
+   * UMA etapa, e as sobreposicoes repetem os numeros do "Risco atual". Sem
+   * coorte publicada, a secao inteira sai (nada a mostrar que ja' nao esteja
+   * na tela).
+   */
+  soCoorte?: boolean;
 }) {
   const estado = estadoDaJornada(carga);
   const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
+  if (soCoorte) {
+    if (estado !== "pronta" || !resposta?.coorte) return null;
+    return (
+      <SecaoGerencial
+        titulo="Jornada"
+        dica="Pedidos dos dias fechados do período, por etapa."
+      >
+        <div data-testid="exp-jornada">
+          <BlocoCoorte r={resposta} />
+        </div>
+      </SecaoGerencial>
+    );
+  }
   return (
     <SecaoGerencial
       titulo="Jornada"

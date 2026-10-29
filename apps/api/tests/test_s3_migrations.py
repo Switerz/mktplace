@@ -190,7 +190,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # PR #92 e foi renumerada para nao abrir duas cabecas).
     # Gate METAS-1: head avancado de 031 para 032, que cria marts.meta_gmv_mensal
     # e o historico de alteracoes (metas digitadas na aba "Metas"), sobre a 031.
-    assert heads == ["032"], f"head deveria ser unico e igual a 032, veio {heads}"
+    # T-0015: head avancado de 032 para 033, que acrescenta `etapa` e
+    # `etapa_fonte` a marts.expedicao_fila_atual, sobre a 032 da Metas.
+    assert heads == ["033"], f"head deveria ser unico e igual a 033, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

@@ -113,6 +113,8 @@ export interface ProblemaQualidade {
   chave: string;
   severidade: SeveridadeQualidade;
   texto: string;
+  /** Rotulo curto para a linha compacta (so' informacao); o texto vai no "ⓘ". */
+  curto?: string;
 }
 
 export interface BarraQualidade {

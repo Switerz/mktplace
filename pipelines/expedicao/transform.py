@@ -45,6 +45,7 @@ from pipelines.expedicao.contract import (
     RunStatus,
     SellerAccount,
     TimestampQuality,
+    etapa_da_fonte,
 )
 
 #: Valores de `deadline_source` persistidos na fila.
@@ -233,6 +234,9 @@ def build_fila_shopee(
         amostra, p50 = baselines.get(seller_id, (0, None))
         lento = is_slow_vs_baseline(horas_aberto, amostra, p50)
         zumbi = is_source_zombie(horas_aberto)
+        etapa, etapa_fonte = etapa_da_fonte(
+            Channel.SHOPEE, linha.get("order_status")
+        )
 
         saida.append(
             {
@@ -272,6 +276,10 @@ def build_fila_shopee(
                 ).value,
                 # Shopee: todas as colunas de data sao timestamptz.
                 "timestamp_quality": TimestampQuality.VERIFIED.value,
+                # Etapa DENTRO da fila (T-0015), por `order_status`. So' e'
+                # gravada se a 033 estiver aplicada no destino (publisher).
+                "etapa": etapa,
+                "etapa_fonte": etapa_fonte,
             }
         )
     return saida
@@ -382,6 +390,9 @@ def build_fila_ml(
         marco = pronto if pronto is not None else criado
         horas_aberto = hours_between(marco, effective_at)
         zumbi = is_source_zombie(horas_aberto)
+        etapa, etapa_fonte = etapa_da_fonte(
+            Channel.MERCADOLIVRE, linha.get("substatus")
+        )
 
         saida.append(
             {
@@ -420,6 +431,10 @@ def build_fila_ml(
                 # Convencao de fuso INFERIDA por medicao, nao declarada pela
                 # fonte nem confirmada pela documentacao oficial.
                 "timestamp_quality": TimestampQuality.ASSUMED.value,
+                # Etapa DENTRO da fila (T-0015), por `substatus`. O Full ja'
+                # saiu em `classify_candidates`; aqui so' ha' vendedor.
+                "etapa": etapa,
+                "etapa_fonte": etapa_fonte,
             }
         )
     return saida

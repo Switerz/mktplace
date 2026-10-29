@@ -52,6 +52,10 @@ export interface LinhaDaFila {
   vencidos: number | null;
   acima48h: number;
   travados: number;
+  /** "5,3%" dos travados sobre o backlog da conta. */
+  pctTravados?: string | null;
+  /** Abre a lista dos pedidos travados da conta. */
+  aoVerTravados?: () => void;
   /** Barra de prazo (ou de distribuicao) desenhada pelo cliente do canal. */
   barra: ReactNode;
 }
@@ -307,13 +311,14 @@ function TabelaUnica({
               <th scope="col" className="text-right">Acima de 48 h</th>
               <th scope="col" className="text-right">Travados</th>
               <th scope="col" className="w-[22%]">{rotuloBarra}</th>
-              <th scope="col" className="text-right">
-                Variação
+              {/* EXPEDICAO-TRAVADOS-1: variacao e linha falam do MESMO periodo,
+                  por isso moram na mesma coluna, com o periodo no cabecalho. */}
+              <th scope="col">
+                Tendência
                 {periodo ? (
                   <span className="block font-normal normal-case tracking-normal">{periodo}</span>
                 ) : null}
               </th>
-              <th scope="col">Tendência</th>
             </tr>
           </thead>
           <tbody>
@@ -347,36 +352,46 @@ function TabelaUnica({
                   <td className="text-right tabular-nums text-ink">
                     {inteiro(f ? f.acima48h : (ultimo?.over48h ?? 0))}
                   </td>
-                  <td className="text-right tabular-nums text-ink">
-                    {inteiro(f ? f.travados : (ultimo?.stalled ?? 0))}
+                  <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                    {f?.aoVerTravados ? (
+                      <button
+                        type="button"
+                        onClick={f.aoVerTravados}
+                        aria-label={`Ver os ${inteiro(f.travados)} pedidos travados de ${titulo}`}
+                        className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
+                      >
+                        {inteiro(f.travados)}
+                      </button>
+                    ) : (
+                      inteiro(f ? f.travados : (ultimo?.stalled ?? 0))
+                    )}
+                    {f?.pctTravados && f.travados > 0 ? (
+                      <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
+                    ) : null}
                   </td>
                   <td>{f?.barra ?? null}</td>
-                  <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                    {v ? (
-                      // T-0021: mesmo separador acessivel da tabela so' de
-                      // tendencia — o " · " so' para o leitor de tela, preso a'
-                      // celula pelo invólucro `relative` (QA F1).
-                      <span className="relative">
-                        {v.principal}
-                        {v.secundario ? (
-                          <>
-                            <span className="sr-only"> · </span>
-                            <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
-                          </>
-                        ) : null}
-                      </span>
-                    ) : (
-                      <span className="text-ink-faint">—</span>
-                    )}
-                  </td>
                   <td>
                     {s && dominioX ? (
-                      <>
+                      <span className="inline-flex items-center gap-2">
                         <Sparkline serie={s} dominioX={dominioX} />
-                        {s.lacunas > 0 ? (
-                          <span className="ml-2 text-xs text-ink-faint">{s.lacunas} hora(s) sem ponto</span>
+                        {v ? (
+                          // T-0021: o " · " so' para o leitor de tela (sem ele,
+                          // "−12" e "−5,0%" eram lidos colados), preso ao
+                          // invólucro `relative` (QA F1).
+                          <span className="relative whitespace-nowrap text-xs tabular-nums text-ink">
+                            {v.principal}
+                            {v.secundario ? (
+                              <>
+                                <span className="sr-only"> · </span>
+                                <span className="ml-1 text-ink-muted">{v.secundario}</span>
+                              </>
+                            ) : null}
+                          </span>
                         ) : null}
-                      </>
+                        {s.lacunas > 0 ? (
+                          <span className="text-xs text-ink-faint">{s.lacunas} hora(s) sem ponto</span>
+                        ) : null}
+                      </span>
                     ) : (
                       <span className="text-xs text-ink-faint">sem ponto no período</span>
                     )}

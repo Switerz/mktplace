@@ -91,6 +91,7 @@ from pipelines.expedicao.contract import (
     MARKETPLACE_ID,
     RUN_TABLE,
     Channel,
+    Etapa,
     FreshnessStatus,
     ExtractionResult,
     LoteIncoerente,
@@ -107,6 +108,7 @@ from pipelines.expedicao.publisher import (
     IndeterminateCommit,
     LockNotAcquired,
     channel_lock,
+    colunas_de_etapa_no_destino,
     publish_channel,
 )
 
@@ -654,6 +656,7 @@ def published_snapshot(target, channel: Channel) -> dict:
                     "refresh_batch_id": None,
                     "linhas": [],
                     "resumos": [],
+                    "tem_etapa": False,
                 }
             if len(lotes) > 1:
                 raise SourceUnhealthy(
@@ -676,6 +679,20 @@ def published_snapshot(target, channel: Channel) -> dict:
                 (channel.value, lotes[0]["refresh_batch_id"]),
             )
             resumos = [dict(r) for r in cur.fetchall()]
+            # T-0015: a `etapa` so' entra na comparacao quando a 033 existe no
+            # destino. A deteccao vem DEPOIS das leituras de hoje, de proposito:
+            # sem a coluna, as consultas emitidas e a ordem delas sao as mesmas
+            # de antes. Com a coluna, as linhas sao relidas com a etapa no MESMO
+            # snapshot - e o SELECT acima segura AccessShareLock na fila ate' o
+            # fim da transacao, entao um ALTER TABLE nao cai no meio da leitura.
+            tem_etapa = bool(colunas_de_etapa_no_destino(cur))
+            if tem_etapa:
+                cur.execute(
+                    f"SELECT {', '.join(COLUNAS_PUBLICADAS)}, etapa "
+                    f"FROM {FILA_TABLE} WHERE channel = %s",
+                    (channel.value,),
+                )
+                linhas = [dict(r) for r in cur.fetchall()]
     finally:
         with suppress(Exception):
             target.rollback()
@@ -687,6 +704,7 @@ def published_snapshot(target, channel: Channel) -> dict:
         "refresh_batch_id": lotes[0]["refresh_batch_id"],
         "linhas": linhas,
         "resumos": resumos,
+        "tem_etapa": tem_etapa,
     }
 
 
@@ -818,6 +836,14 @@ def reconcile_channel(
     rec = {chave(x): x for x in recomputada}
     comuns = set(pub) & set(rec)
 
+    # T-0015: com a 033 no destino, a etapa e' classificacao como as outras e
+    # entra na comparacao. EXCECAO: `nao_publicada` no publicado nao e' o
+    # codigo se contradizendo - e' a linha gravada antes da 033 (default da
+    # coluna) ou pelo publicador antigo. Comparar daria DRIFT falso na janela
+    # entre a migration e a proxima publicacao; a linha e' contada a' parte.
+    compara_etapa = bool(publicado.get("tem_etapa"))
+    etapa_nao_publicada = 0
+
     comparaveis, mutadas, divergentes = 0, 0, []
     for k in sorted(comuns):
         if pub[k].get("source_ingested_at") != rec[k].get("source_ingested_at"):
@@ -825,7 +851,13 @@ def reconcile_channel(
             mutadas += 1
             continue
         comparaveis += 1
-        for campo in CAMPOS_RECONCILIADOS:
+        campos = CAMPOS_RECONCILIADOS
+        if compara_etapa:
+            if pub[k].get("etapa") == Etapa.NAO_PUBLICADA.value:
+                etapa_nao_publicada += 1
+            else:
+                campos = (*CAMPOS_RECONCILIADOS, "etapa")
+        for campo in campos:
             a, b = pub[k].get(campo), rec[k].get(campo)
             if a != b:
                 # A chave NAO entra na mensagem: e identificador operacional.
@@ -877,7 +909,7 @@ def reconcile_channel(
             f"e mesmo effective_at, contagens diferentes. {resumos_divergentes}"
         )
 
-    return {
+    resultado = {
         "channel": channel.value,
         "effective_at": efetivo,
         "refresh_batch_id": publicado["refresh_batch_id"],
@@ -906,6 +938,11 @@ def reconcile_channel(
             else "coerente_comparacao_inconclusiva_por_mudanca_da_fonte"
         ),
     }
+    if compara_etapa:
+        # Chaves so' com a 033 no destino: sem ela o resultado e' o de hoje.
+        resultado["etapa_reconciliada"] = True
+        resultado["etapa_nao_publicada"] = etapa_nao_publicada
+    return resultado
 
 def run_apply(
     channel: Channel,
@@ -1045,6 +1082,10 @@ def run_apply(
                 source_advanced=avancou,
             )
 
+            # T-0015: o publicador preenche depois do COMMIT a contagem por
+            # etapa e o contador `outro`. Vai para a auditoria abaixo, como
+            # aviso: valor novo da fonte nunca bloqueia a publicacao.
+            relatorio_etapa: dict = {}
             linhas, contas_registradas = publish_channel(
                 target,
                 channel,
@@ -1058,6 +1099,7 @@ def run_apply(
                 # em `nomes`, e o invariante compara maca com maca.
                 expected_accounts=frozenset(nomes[ext] for ext in esperadas),
                 execute_values=execute_values,
+                relatorio=relatorio_etapa,
             )
             publicado = True
 
@@ -1083,6 +1125,9 @@ def run_apply(
                     auditoria,
                     marketplace_id,
                     _freshness_por_marca(fila, resumos, effective_at),
+                )
+                audit_mod.record_etapa(
+                    auditoria, channel, marketplace_id, relatorio_etapa
                 )
             except Exception as exc:  # noqa: BLE001 — pos-commit: nunca vira failed
                 avisar(
@@ -1398,6 +1443,13 @@ def _run_reconcile(canal: Channel) -> int:
 
 def format_reconcile(r: dict) -> str:
     """Saida legivel. Nenhum `shipment_id` nem `order_sn` impresso."""
+    etapa = []
+    if r.get("etapa_reconciliada"):
+        etapa = [
+            "",
+            "  ETAPA (033 no destino): comparada nas linhas comparaveis; "
+            f"{r['etapa_nao_publicada']} com 'nao_publicada' ficaram fora",
+        ]
     return "\n".join([
         f"RECONCILIACAO {r['channel']} (read-only)",
         f"  effective_at do batch : {r['effective_at']}",
@@ -1419,6 +1471,7 @@ def format_reconcile(r: dict) -> str:
         f"  fingerprint publicado  : {r['fingerprint_publicado']}",
         f"  fingerprint recomputado: {r['fingerprint_recomputado']}",
         f"  VEREDITO               : {r['veredito']}",
+        *etapa,
         "",
         "  RESUMOS POR CONTA (tendencia):",
         f"    publicados          : {r['resumos_publicados']}  "
