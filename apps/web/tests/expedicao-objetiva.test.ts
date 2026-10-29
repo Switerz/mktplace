@@ -202,7 +202,7 @@ test("tabela unica: sem tendencia ainda mostra as marcas; canal sem prazo sem co
 test("tela: destaque no lugar da faixa e da lista; barra de prazo nao repete", () => {
   assert.match(CLIENTE, /\{destaque \? \(\s*<RiscoEmDestaque/);
   assert.match(CLIENTE, /\{destaque \? null : \(\s*<AtencaoAgora/);
-  assert.match(CLIENTE, /\{destaque && barraDePrazo\(true\) \? null : \(/);
+  assert.match(CLIENTE, /\{destaque && temBarraDePrazo \? null : \(/);
   assert.match(CLIENTE, /const chaveDestaque = temPrazo \? "overdue" : "over48h";/);
   // sem prazo publicado, a barra seria 100% "sem prazo": nao entra no destaque
   assert.match(CLIENTE, /prazo=\{temPrazo \? barraDePrazo\(true\) : undefined\}/);
@@ -219,4 +219,24 @@ test("tela: o periodo fica no topo, so' na visao do gestor", () => {
   assert.match(CLIENTE, /controles=\{visao === "gestor" \? controlePeriodo : undefined\}/);
   assert.match(CLIENTE, /const controlePeriodo = \([\s\S]*?<Segmented\s+rotulo="Período"/);
   assert.match(CLIENTE, /periodoConsultado \? <InfoDica texto=\{periodoConsultado\} \/> : null/);
+});
+
+test("LDR: trocar o periodo nao apaga a divisao da fila de agora; trocar a marca, sim", () => {
+  const PAINEL = fonte("src/components/expedicao/LdrShopeePanel.tsx");
+  assert.match(PAINEL, /if \(marcaDaResposta\.current !== marca\) setResposta\(null\);/);
+  assert.match(PAINEL, /marcaDaResposta\.current = marca;\s*setResposta\(json\);/);
+});
+
+test("tabela unica: com fotografia, o apelido da conta e' o dela (uma numeracao so')", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: tendencia([ponto("a", "apice", H(13), 50), ponto("a", "apice", H(15), 60)]),
+      fila: [
+        { ...linha("a", "ÁPICE", 61, 25), apelido: "conta 1 de 2" },
+        { ...linha("b", "ÁPICE", 9, 0), apelido: "conta 2 de 2" },
+      ],
+    }),
+  );
+  assert.match(html, /conta 1 de 2/);
+  assert.match(html, /conta 2 de 2/);
 });

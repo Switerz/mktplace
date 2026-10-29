@@ -931,11 +931,17 @@ type MedidaDeConta =
  * E' selecao sobre o que a API publicou por conta, nao calculo: nenhuma conta
  * e' somada a outra. Empate fica com a primeira na ordem da API.
  */
-function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
+/** A conta com a MAIOR contagem da medida (zero nao concentra nada). */
+function maiorConta(contas: ResumoConta[], medida: MedidaDeConta): ResumoConta | null {
   let maior: ResumoConta | null = null;
   for (const c of contas) {
     if (c[medida] > 0 && (maior === null || c[medida] > maior[medida])) maior = c;
   }
+  return maior;
+}
+
+function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
+  const maior = maiorConta(contas, medida);
   return maior ? ` Maior concentração: ${nomeDaConta(maior, contas)}, com ${inteiro(maior[medida])}.` : "";
 }
 
@@ -1048,10 +1054,7 @@ export function ondeAgirNaFila(
   if (!t || contas.length < 2) return null;
   for (const medida of medidasDoDestaque(canal)) {
     if (t[medida] <= 0) continue;
-    let maior: ResumoConta | null = null;
-    for (const c of contas) {
-      if (c[medida] > 0 && (maior === null || c[medida] > maior[medida])) maior = c;
-    }
+    const maior = maiorConta(contas, medida);
     if (!maior) return null;
     const nome = nomeDaConta(maior, contas);
     const total = t[medida];

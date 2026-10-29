@@ -64,19 +64,24 @@ export function useLdrShopee(
   const [resposta, setResposta] = useState<RespostaLdrShopee | null>(null);
   const [carregando, setCarregando] = useState(ligada);
   const [erro, setErro] = useState(false);
+  // Marca da resposta na tela. So' a troca de MARCA tira a resposta antiga:
+  // trocar o periodo nao muda a fila aberta (vendedor x FBS), que e' "agora".
+  const marcaDaResposta = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     if (!ligada) {
       setResposta(null);
+      marcaDaResposta.current = undefined;
       setCarregando(false);
       setErro(false);
       return;
     }
     const minha = chave;
     let vivo = true;
-    // A resposta anterior e' de outra marca (ou de outra fotografia): sai da
-    // tela enquanto a nova nao chega.
-    setResposta(null);
+    // A resposta anterior de OUTRA marca sai da tela enquanto a nova nao
+    // chega. De outro periodo, fica: a divisao da fila aberta nao depende da
+    // janela, e o "Risco atual" nao pisca para a fila com FBS a cada troca.
+    if (marcaDaResposta.current !== marca) setResposta(null);
     setCarregando(true);
     setErro(false);
     buscarExpedicao(`${api}${minha}`, { headers: { Accept: "application/json" } })
@@ -86,6 +91,7 @@ export function useLdrShopee(
       })
       .then((json) => {
         if (!vivo || vigente.current !== minha) return;
+        marcaDaResposta.current = marca;
         setResposta(json);
         setCarregando(false);
       })
@@ -93,6 +99,7 @@ export function useLdrShopee(
         if (!vivo || vigente.current !== minha) return;
         // Erro NAO mantem o numero antigo na tela: ele seria de outra marca
         // ou de outra fotografia.
+        marcaDaResposta.current = undefined;
         setResposta(null);
         setErro(true);
         setCarregando(false);

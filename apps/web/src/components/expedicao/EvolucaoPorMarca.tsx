@@ -312,7 +312,9 @@ function TabelaUnica({
               const ultimo = s ? s.pontos[s.pontos.length - 1] : null;
               const v = s && cob ? lerVariacao(s, cob.horasCobertas) : null;
               const titulo = s?.titulo ?? f?.titulo ?? "";
-              const apelido = s ? s.apelido : (f?.apelido ?? null);
+              // A fotografia numera TODAS as contas da marca; a serie so' as
+              // que tem ponto. Com fotografia, vale a dela (uma numeracao so').
+              const apelido = f ? f.apelido : (s?.apelido ?? null);
               return (
                 <tr
                   key={f?.conta ?? s?.chave}

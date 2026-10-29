@@ -14,10 +14,13 @@
  *   1. cabecalho do canal (compartilhado: `CabecalhoExpedicao`);
  *   2. fotografia, frescor e modo de publicacao, em selos no cabecalho;
  *   3. UMA barra de qualidade do dado, recolhivel (`BarraDeQualidade`);
- *   4. o que exige atencao agora — contagens da API em frase;
- *   5. KPIs principais;
- *   6. evolucao do backlog por conta;
- *   7. concentracao por conta, numa UNICA tabela com a barra embutida;
+ *   4. risco atual (UI-EXPEDICAO-1): UM numero em destaque (vencidos; sem
+ *      prazo publicado, acima de 48 h), com a barra de prazo e o "onde agir";
+ *      os demais ao lado. Sem valor medido, a faixa de cartoes e a lista;
+ *   5. prazo e jornada;
+ *   6. "Backlog por marca": UMA tabela com a fila de agora de cada conta e a
+ *      tendencia do periodo (o periodo fica no topo e comanda a pagina);
+ *   7. concentracao por conta, com a fonte — so' no detalhe;
  *   8. detalhe operacional: KPIs secundarios, mais criticos, fila e fonte.
  *
  * Duas profundidades, escolhidas na casca (`?visao=`): a visao do gestor
@@ -638,8 +641,9 @@ export default function ExpedicaoClient({
    * Barra de situacao de prazo. Dentro do destaque, a legenda nao repete os
    * numeros que os cartoes ja' mostram (vencidos, 24 h): so' os que so' ela tem.
    */
+  const temBarraDePrazo = Boolean(faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0);
   const barraDePrazo = (dentroDoDestaque: boolean) =>
-    faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0 ? (
+    temBarraDePrazo && faixasPrazo && totaisRisco ? (
       <>
         <div
           className="flex h-3 w-full overflow-hidden rounded bg-raised"
@@ -841,7 +845,7 @@ export default function ExpedicaoClient({
       dica="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
     >
       {/* UI-EXPEDICAO-1: com o destaque, a barra de prazo ja' esta' no topo. */}
-      {destaque && barraDePrazo(true) ? null : (
+      {destaque && temBarraDePrazo ? null : (
         <Panel
           titulo={
             <>
