@@ -133,9 +133,24 @@ O dry-run e o `--diagnosticar` continuam sem argumentos obrigatórios (nenhum do
 | Argumento | Regra |
 |---|---|
 | `--marca <m>` | Repetível. Allowlist: `barbours`, `kokeshi`, `lescent`, `rituaria`. A fonte é **filtrada** para essas marcas; marca com fotografia que não foi pedida sai em `marcas_ignoradas` e nunca é gravada. Marca pedida sem fotografia faz o publicador recusar. |
-| `--raw-run <marca>=<run_id>` | Um por marca pedida. Antes de qualquer DELETE/INSERT, toda linha lida (snapshot, ponte e status) da marca/data precisa ter esse `run_id`. Além disso, em `raw.ml_full_stock_runs` o run precisa ter pedido a marca, ter começado na data (fuso de São Paulo), estar `completo`/`parcial` e ter registrado `PUBLICADA` para ela. Se algo divergir, ele recusa. Depois, a **coerência** da fotografia do run, por marca (regras do produtor, airflow `snapshot.py`): snapshot e ponte com ao menos 1 linha do run, todo inventário do snapshot presente na ponte do mesmo run e todo inventário do status presente no snapshot do mesmo run (chave `seller_id`+`inventory_id`). Status vazio é legítimo. Falha = `fonte_incoerente: ...` (só contagens), `nao_iniciada`. |
+| `--raw-run <marca>=<run_id>` | Um por marca pedida. Antes de qualquer DELETE/INSERT, toda linha lida (snapshot, ponte e status) da marca/data precisa ter esse `run_id`. Além disso, em `raw.ml_full_stock_runs` o run precisa ter pedido a marca, ter começado na data (fuso de São Paulo), estar `completo`/`parcial` e ter registrado `PUBLICADA` para ela. Se algo divergir, ele recusa. Depois, a **coerência** da fotografia do run, por marca pedida: as invariantes do produtor para marca `PUBLICADA` (tabela abaixo). Falha = `fonte_incoerente: ...` (só contagens), `nao_iniciada`. |
 | `--publish-run-id <uuid hex 32>` | Gerado pelo chamador **antes** do apply e gravado como `source_run_id`. Se o id já existir em alguma fato, ele recusa (a checagem roda antes e de novo dentro do lock). |
 | `--destino-esperado <arquivo.json>` | O arquivo **aprovado** gerado pelo `-Identificar` do pacote humano, no formato que o `identificar` do helper `ml_full_neon_db.py` grava. O publicador usa só `identidade.alvo_neon`. Sem o argumento, com arquivo ilegível ou **sem identificador forte** (`system_identifier`, ou o par `neon_tenant_id`+`neon_timeline_id`, não nulos), recusa antes de qualquer conexão (`nao_iniciada`; `destino_nao_identificavel`). Metadados genéricos iguais nunca bastam. Dentro da transação de escrita, logo depois do advisory lock e **antes de qualquer DELETE**, lê a impressão digital do banco **com a conexão da própria transação** e compara campo a campo; null só bate com null. As queries e a normalização são as mesmas do helper: `current_database`, `server_version_num`, `em_recuperacao`, `system_identifier`, `neon_tenant_id`, `neon_timeline_id`, `alembic_version_num` e `modo`. Destino vivo sem identificador forte = `destino_nao_identificavel`. Se divergir, recusa com `destino_divergente: alvo_neon.<campo>` (só o nome do campo, sem valores), exit 2 e `revertida_comprovada`. A **mesma conferência** roda nas duas conexões da auditoria, antes do INSERT (`audit_start`) e antes do UPDATE (`audit_finish`): nenhuma escrita, nem de auditoria, vai para destino não aprovado. |
+
+
+**Regras de coerência** (`conferir_coerencia`, por marca pedida, só linhas do `--raw-run`, chave `seller_id`+`inventory_id`). Produtor = airflow `src/mercadolivre/ingestion/full_stock/snapshot.py` @ `ab0ad334`. A fixture de teste segue o produtor; a regra nunca é afrouxada para caber na fixture.
+
+| Regra | Recusa (`fonte_incoerente: <marca> ...`) | Quem garante |
+|---|---|---|
+| Snapshot com ≥ 1 linha do run (e, pela igualdade abaixo, a ponte também) | `sem linha do run <run> em snapshot` / `em ponte` | **Publicador**, não o produtor: ele publica marca sem anúncio com 0 linhas (L424 itera conjunto vazio; `publicar_marca` L538 pula listas vazias). Para o publicador, marca pedida sem fotografia é recusa, a mesma de `marca_pedida_sem_fotografia`. |
+| Snapshot sem duplicata | `N linha(s) duplicada(s) no snapshot` | L424: `for inv in sorted({...})`, uma linha por `inventory_id` distinto |
+| Inventários do snapshot ⊂ ponte | `N inventario(s) do snapshot fora da ponte` | L424: o snapshot nasce só de `inventory_id` da ponte |
+| `inventory_id` não nulos da ponte ⊂ snapshot (ponte com `inventory_id` nulo/vazio é legítima e não conta) | `N inventario(s) da ponte fora do snapshot` | L424: `if p["inventory_id"]`; todo inventário não nulo gera uma linha (L431 404, L438 erro, L443 OK) |
+| `read_status` ∈ {`OK`, `NAO_ENCONTRADO`} | `N inventario(s) do snapshot com read_status fora de [...]` | L62-65 (`LEITURA_*`); `CONTRATO_QUEBRADO` faz `completa = False` (L438-440) e marca incompleta vira `INCOMPLETA_NAO_PUBLICADA` (L330-331); só chega a `PUBLICADA` (L339) com coleta completa |
+| Status ⊂ snapshot | `N inventario(s) do status fora do snapshot` | L448-449: status nasce dentro do laço do snapshot |
+| Status só de inventário com `read_status=OK` | `N inventario(s) do status sem leitura OK no snapshot` | L443-449: `por_status` só é lido no ramo OK (404 e erro fazem `continue` antes) |
+| Status vazio é legítimo | (aceito) | L448: `por_status` vazio não gera linha |
+| Uma linhagem por marca | (via `--raw-run` e `conferir_linhagem`) | `publicar_marca` L524-543: DELETE+INSERT das 3 tabelas numa transação |
 
 ```bash
 # 1) dry-run: o JSON traz `linhagem_raw` (run_id por marca) para montar o --raw-run
@@ -174,7 +189,7 @@ python -m pipelines.publish_ml_full_stock_daily --diagnosticar --ref-date 2026-1
 
 O `veredito` é `commit_confirmado` (há linhas) ou `nenhuma_linha`. `nenhuma_linha` não distingue "não houve commit" de "outra publicação já substituiu o dia/marca": por isso o chamador deve diagnosticar antes de republicar.
 
-Contraprova em PG16 descartável (24/24, inclui R31: auditoria no banco errado, identidade fraca no arquivo e no destino vivo, fonte intercalada em READ COMMITTED x REPEATABLE READ e ponte vazia): `.artefacts/deliveries/ml-full/publicacao-contrato/teste/contraprova_pg.py` (não versionado).
+Contraprova em PG16 descartável (24/24 com a fixture fiel ao produtor, inclui R31: auditoria no banco errado, identidade fraca no arquivo e no destino vivo, fonte intercalada em READ COMMITTED x REPEATABLE READ e ponte vazia): `.artefacts/deliveries/ml-full/publicacao-contrato/teste/contraprova_pg.py` (não versionado).
 
 **Atenção à cadeia:** se o #78 (028, DRE) for mesclado antes, o `down_revision` da 029 precisa ser reencadeado antes do `upgrade`. O certo é aplicar a cadeia que estiver na `main`, nunca uma revisão solta.
 
