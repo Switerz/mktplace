@@ -211,3 +211,88 @@ def test_nenhum_date_today_nos_caminhos_alterados(mod):
     codigo = "\n".join(l.split("#")[0] for l in src.split("\n"))
     codigo = re.sub(r'""".*?"""', "", codigo, flags=re.S)
     assert "date.today()" not in codigo, f"{mod.__name__} ainda usa date.today()"
+
+
+# ---------------------------------------------------------------------------
+# 6. Liberacao explicita do dia corrente (--incluir-hoje)
+# ---------------------------------------------------------------------------
+HOJE = date(2026, 8, 28)
+AGORA_BRT_15H = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)   # 15:00 BRT de 28/08
+
+
+def test_padrao_continua_d1_fora_do_contexto():
+    assert cal.dia_corrente_liberado() is False
+    assert cal.publish_ceiling(AGORA_BRT_15H) == date(2026, 8, 27)
+
+
+def test_contexto_libera_d0_e_restaura_ao_sair():
+    with cal.liberar_dia_corrente():
+        assert cal.dia_corrente_liberado() is True
+        assert cal.publish_ceiling(AGORA_BRT_15H) == HOJE
+        assert cal.closed_window(3, AGORA_BRT_15H) == (date(2026, 8, 25), HOJE)
+        assert cal.assert_closed_day(HOJE, agora=AGORA_BRT_15H) == HOJE
+    assert cal.dia_corrente_liberado() is False
+    with pytest.raises(ValueError, match="ultimo dia fechado"):
+        cal.assert_closed_day(HOJE, agora=AGORA_BRT_15H)
+
+
+def test_contexto_restaura_mesmo_com_excecao():
+    with pytest.raises(RuntimeError):
+        with cal.liberar_dia_corrente():
+            raise RuntimeError("falha no meio")
+    assert cal.dia_corrente_liberado() is False
+
+
+def test_dia_corrente_liberado_ainda_recusa_futuro():
+    amanha = HOJE + timedelta(days=1)
+    with cal.liberar_dia_corrente():
+        with pytest.raises(ValueError, match="dia corrente"):
+            cal.assert_closed_day(amanha, agora=AGORA_BRT_15H)
+
+
+@pytest.mark.parametrize("mod,fn,alvo", [
+    (tk, "fetch_incremental", "fetch"),
+    (ml, "fetch_incremental", "fetch"),
+    (sh, "fetch_incremental", "fetch"),
+    (sh, "fetch_shop_stats_incremental", "fetch_shop_stats"),
+    (sh, "fetch_ads_incremental", "fetch_ads"),
+])
+def test_incremental_liberado_termina_em_d0(monkeypatch, mod, fn, alvo):
+    monkeypatch.setattr(cal, "operational_today", lambda agora=None: HOJE)
+    vistos = _captura(monkeypatch, mod, alvo)
+    with cal.liberar_dia_corrente():
+        getattr(mod, fn)()
+    assert vistos["janela"][1] == HOJE
+
+
+def test_segunda_defesa_aceita_d0_so_quando_liberado(monkeypatch):
+    monkeypatch.setattr(dp, "last_closed_date", lambda agora=None: FECHADO)
+    monkeypatch.setattr(dp, "operational_today", lambda agora=None: HOJE)
+    rows = [{"date": HOJE, "loja_id": 3}]
+    with pytest.raises(dp.ClosedDayViolation):
+        dp._assert_canonical_rows_closed(rows, "shopee")
+    with cal.liberar_dia_corrente():
+        dp._assert_canonical_rows_closed(rows, "shopee")
+        with pytest.raises(dp.ClosedDayViolation):
+            dp._assert_canonical_rows_closed([{"date": HOJE + timedelta(days=1)}], "shopee")
+
+
+def test_run_com_incluir_hoje_libera_a_janela_explicita(monkeypatch):
+    """--incluir-hoje aceita --date-to = hoje; sem a flag, a mesma janela reprova."""
+    monkeypatch.setattr(cal, "operational_today", lambda agora=None: HOJE)
+    monkeypatch.setattr(cal, "last_closed_date", lambda agora=None: FECHADO)
+    class Parou(Exception):
+        pass
+
+    vistas = []
+
+    def espia(*a, **k):
+        vistas.append(cal.dia_corrente_liberado())
+        raise Parou
+
+    monkeypatch.setattr(dp, "_resolve_date_window", espia)
+    with pytest.raises(Parou):
+        dp.run(source="tiktok", mode="backfill", date_from="2026-08-28",
+               date_to="2026-08-28", incluir_hoje=True)
+    assert vistas == [True]
+    assert cal.dia_corrente_liberado() is False

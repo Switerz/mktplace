@@ -17,7 +17,13 @@ from sqlalchemy import text
 
 from pipelines.common.db import local_session
 from pipelines.common.logging import get_logger
-from pipelines.common.operational_calendar import assert_closed_day, last_closed_date
+from pipelines.common.operational_calendar import (
+    assert_closed_day,
+    dia_corrente_liberado,
+    last_closed_date,
+    liberar_dia_corrente,
+    operational_today,
+)
 from pipelines.connectors.mercadolivre import connector as ml_connector
 from pipelines.connectors.shopee import connector as shopee_connector
 from pipelines.connectors.tiktok import connector as tiktok_connector
@@ -371,14 +377,16 @@ def _assert_canonical_rows_closed(rows: list[dict], source: str,
     mal-comportado, e silenciar isso reintroduziria o defeito que o Gate DQ-D1
     corrige.
     """
-    fechado = last_closed_date(agora)
+    liberado = dia_corrente_liberado()
+    fechado = operational_today(agora) if liberado else last_closed_date(agora)
     futuras = [r for r in rows if r.get("date") is not None and r["date"] > fechado]
     if not futuras:
         return
     datas = sorted({r["date"] for r in futuras})
+    teto = "ao dia corrente" if liberado else "ao ultimo dia fechado"
     raise ClosedDayViolation(
         f"source={source!r}: {len(futuras)} linha(s) canonica(s) com data "
-        f"posterior ao ultimo dia fechado ({fechado.isoformat()}) em "
+        f"posterior {teto} ({fechado.isoformat()}) em "
         f"America/Sao_Paulo — datas: "
         f"{', '.join(d.isoformat() for d in datas[:5])}"
         f"{' ...' if len(datas) > 5 else ''}. Carregamento bloqueado ANTES do "
@@ -425,7 +433,15 @@ def run(
     days_back: int = 3,
     date_from: str | None = None,
     date_to: str | None = None,
+    incluir_hoje: bool = False,
 ) -> None:
+    # `--incluir-hoje`: publica tambem o dia corrente, PARCIAL. Toda a execucao
+    # (janela, conectores e segunda defesa) roda com o teto em D0. O incremental
+    # seguinte sem a flag termina em D-1 e regrava esta data com o dia fechado.
+    if incluir_hoje:
+        logger.warning("--incluir-hoje: o dia corrente sera publicado PARCIAL.")
+        with liberar_dia_corrente():
+            return run(source, mode, days_back, date_from, date_to)
     # Validação da janela exata acontece antes de qualquer outra coisa —
     # nenhuma sessão de escrita, audit ou fetch é tocado se ela falhar.
     window = _resolve_date_window(source, mode, date_from, date_to)
@@ -605,6 +621,8 @@ if __name__ == "__main__":
                         help="Data inicial exata (só --mode backfill; source em tiktok/shopee-stats/ml)")
     parser.add_argument("--date-to", default=None, metavar="YYYY-MM-DD",
                         help="Data final exata (só --mode backfill; source em tiktok/shopee-stats/ml)")
+    parser.add_argument("--incluir-hoje", action="store_true",
+                        help="Publica também o dia corrente (parcial). Padrão: só até ontem.")
     args = parser.parse_args()
     # Lock ocupado NAO e' erro generico: sai com EXIT_CODE_LOCK_UNAVAILABLE (75,
     # `EX_TEMPFAIL`) para que o log do orquestrador distinga "outra esteira
@@ -622,6 +640,7 @@ if __name__ == "__main__":
             days_back=args.days,
             date_from=args.date_from,
             date_to=args.date_to,
+            incluir_hoje=args.incluir_hoje,
         )
     except FatoDiariaLockUnavailable as exc:
         logger.error("%s", exc)
