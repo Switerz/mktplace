@@ -108,11 +108,11 @@ test("ticket ponto a ponto e' GMV / pedidos, so' onde ha' pedido", () => {
   assert.deepEqual(ticketPorPonto([100, 50, null, 30], [2, 0, 3, 3]), [50, null, null, 10]);
 });
 
-test("tendenciasDosKpis monta GMV, pedidos e ticket a partir das duas series", () => {
+test("tendenciasDosKpis monta pedidos e ticket a partir das duas series", () => {
   const gmv = { granularity: "day", buckets: [...Array(14)].map((_, i) => ({ total: i < 7 ? 1000 : 1200 })) };
   const ped = { granularity: "day", buckets: [...Array(14)].map(() => ({ total: 10 })) };
   const t = tendenciasDosKpis(gmv, ped);
-  assert.ok(Math.abs(t.gmv!.variacaoPct! - 20) < 1e-9);
+  assert.deepEqual(Object.keys(t).sort(), ["avg_ticket", "orders"]);
   assert.equal(t.orders!.direcao, "flat");
   assert.ok(Math.abs(t.avg_ticket!.variacaoPct! - 20) < 1e-9);
 });
@@ -124,4 +124,17 @@ test("o card usa o tom do KPI e a tendencia; a pagina passa as tendencias", () =
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /tendencias=\{tendencias\}/);
   assert.match(page, /buildKpiBand\(overview, filters\.channels, filters\.compare\)/);
+});
+
+test("o detalhe do card usa a mesma comparacao do card", () => {
+  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /comparacao=\{kpis\.find\(\(k\) => k\.key === dialog\.key\)\}/);
+  const det = readFileSync(new URL("../src/components/KpiDrilldownContent.tsx", import.meta.url), "utf8");
+  assert.match(det, /<KpiReference kind=\{kind\} overview=\{overview\} comparacao=\{comparacao\} \/>/);
+});
+
+test("o card nao esconde valor e variacao do leitor de tela", () => {
+  const card = readFileSync(new URL("../src/components/gerencial/KpiBand.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(card, /aria-label=\{`\$\{kpi\.label\} — abrir decomposição`\}/);
+  assert.match(card, /<span className="sr-only"> \(abrir decomposição\)<\/span>/);
 });

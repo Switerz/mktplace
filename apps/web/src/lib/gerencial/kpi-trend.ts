@@ -74,11 +74,13 @@ export function ticketPorPonto(gmv: (number | null)[], pedidos: (number | null)[
 export function tendenciasDosKpis(
   gmv: { buckets: Pick<MergedBucket, "total">[]; granularity: string },
   pedidos: { buckets: Pick<MergedBucket, "total">[]; granularity: string },
-): { gmv: TendenciaKpi | null; orders: TendenciaKpi | null; avg_ticket: TendenciaKpi | null } {
+): { orders: TendenciaKpi | null; avg_ticket: TendenciaKpi | null } {
+  // O GMV da Gerencial e' o numero do bloco principal, ao lado do grafico de
+  // evolucao: a faixa de cards nao o mostra, entao nao se calcula tendencia
+  // dele aqui. O GMV entra so' para o ticket (GMV / pedidos).
   const g = totaisDaSerie(gmv.buckets);
   const p = totaisDaSerie(pedidos.buckets);
   return {
-    gmv: tendencia(g, gmv.granularity),
     orders: tendencia(p, pedidos.granularity),
     avg_ticket: tendencia(ticketPorPonto(g, p), pedidos.granularity),
   };

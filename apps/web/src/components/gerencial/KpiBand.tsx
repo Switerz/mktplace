@@ -112,9 +112,11 @@ const SETA: Record<"up" | "down" | "flat", string> = { up: "▲", down: "▼", f
 function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
   const min = Math.min(...pontos);
   const max = Math.max(...pontos);
-  const faixa = max - min || 1;
+  const faixa = max - min;
   const passo = 100 / (pontos.length - 1);
-  const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${(26 - ((v - min) / faixa) * 24).toFixed(2)}`);
+  // Serie constante fica no MEIO: colada no chao ela parece "caiu para zero".
+  const y = (v: number) => (faixa === 0 ? 14 : 26 - ((v - min) / faixa) * 24);
+  const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${y(v).toFixed(2)}`);
   return (
     <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className={`h-7 w-full ${tinta}`}>
       <polyline
@@ -166,7 +168,6 @@ function KpiCard({
       type="button"
       onClick={() => onOpen(kpi.key)}
       aria-haspopup="dialog"
-      aria-label={`${kpi.label} — abrir decomposição`}
       // `w-full min-w-0`: sem eles o <button> se dimensiona pelo conteudo e
       // estoura a trilha da grade — era a origem de 5px de overflow horizontal
       // no mobile (390px), medido no QA.
@@ -175,6 +176,9 @@ function KpiCard({
       <span className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           {kpi.label}
+          {/* KPIS-COMPARACAO-1: sem `aria-label` no botao, o nome acessivel e'
+              o proprio conteudo (valor, variacao, tendencia); a acao vai aqui. */}
+          <span className="sr-only"> (abrir decomposição)</span>
         </span>
         <span
           aria-hidden="true"

@@ -579,6 +579,7 @@ function GerencialInner() {
           <KpiDrilldownContent
             kind={dialog.key}
             value={kpis.find((k) => k.key === dialog.key)?.value ?? "—"}
+            comparacao={kpis.find((k) => k.key === dialog.key)}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}
             overview={overview}
