@@ -151,6 +151,7 @@ _REDACOES = (
     (re.compile(r"\b(host|hostaddr|user|password|dbname|port|sslrootcert|sslkey|sslcert|service|passfile)"
                 r"\s*=\s*('[^']*'|\"[^\"]*\"|\S+)", re.I), r"\1=<redigido>"),
     (re.compile(r'\b(server at|host|user|role|database)\s+"[^"]*"', re.I), r'\1 "<redigido>"'),
+    (re.compile(r"\bport\s+\d+", re.I), "port <redigido>"),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<ip>"),
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|tech|io|aws|cloud|internal|local|br|dev)\b", re.I),
      "<host>"),

@@ -495,7 +495,7 @@ def test_cli_erro_de_conexao_sai_em_json_sanitizado(ambiente, monkeypatch, capsy
 
 @pytest.mark.parametrize("bruto,proibido", [
     ("host=db.interno.local port=5432 user=pub password=x dbname=y", ["db.interno", "pub", "=x"]),
-    ('connection to server at "1.2.3.4", port 5432 failed', ["1.2.3.4"]),
+    ('connection to server at "1.2.3.4", port 5432 failed', ["1.2.3.4", "5432"]),
     ("could not translate host name \"ep-a.neon.tech\" to address", ["ep-a"]),
     ("postgresql+psycopg2://u:p@h:5432/d", ["u:p@h"]),
 ])
