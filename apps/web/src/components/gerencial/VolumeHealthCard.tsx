@@ -138,7 +138,7 @@ export default function VolumeHealthCard({ rows, loading, error, onOpenChannel, 
                     <span className="flex items-center gap-2">
                       <span className="block h-1.5 flex-1 overflow-hidden rounded-full bg-raised" aria-hidden="true">
                         <span
-                          className="block h-1.5 rounded-full bg-ink-faint"
+                          className="tc-barra block h-1.5 rounded-full bg-ink-faint"
                           style={{ width: `${Math.min(row.cancelRatePct, 100)}%` }}
                         />
                       </span>

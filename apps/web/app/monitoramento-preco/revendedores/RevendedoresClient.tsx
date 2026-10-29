@@ -487,7 +487,7 @@ function PainelSeveridade({ resumo }: { resumo: ResumoOk }) {
                   </span>
                 </div>
                 <div className="mt-1 h-2 overflow-hidden rounded-full bg-raised" aria-hidden="true">
-                  <div className={`h-full rounded-full ${l.cor}`} style={{ width: `${pct}%` }} />
+                  <div className={`tc-barra h-full rounded-full ${l.cor}`} style={{ width: `${pct}%` }} />
                 </div>
               </li>
             );

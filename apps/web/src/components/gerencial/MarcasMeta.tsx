@@ -109,7 +109,7 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
                   </span>
                   <span className="relative h-2.5 rounded-full bg-raised" aria-hidden="true">
                     <span
-                      className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
+                      className="tc-barra absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
                       style={{ width: `${(b.total_gmv / escala) * 100}%` }}
                     >
                       {channels.map((c) => {

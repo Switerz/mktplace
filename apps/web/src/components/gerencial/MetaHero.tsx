@@ -21,6 +21,7 @@ import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerenc
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 
 const SELO: Record<StatusMeta, string> = {
   atingida: "border-ok/40 bg-ok-soft text-ok-ink",
@@ -96,7 +97,7 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
       ) : (
         <>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-3xl font-bold tracking-tight text-ink tabular-nums">{fmtCompacto(gmv)}</span>
+            <NumeroAnimado texto={fmtCompacto(gmv)} className="text-3xl font-bold tracking-tight text-ink tabular-nums" />
             {/* UI-DENSIDADE-1: o aviso de dado vira um SELO colado no numero,
                 onde a duvida nasce; o texto inteiro esta' no detalhe. */}
             {aviso && <SeloAviso aviso={aviso} />}
@@ -161,7 +162,7 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
       >
         {projecaoAlem && !p.encerrado && (
           <div
-            className="absolute inset-y-0 left-0 rounded-full"
+            className="tc-barra absolute inset-y-0 left-0 rounded-full"
             style={{
               width: larg(p.projecaoSobreMeta!),
               backgroundImage:
@@ -169,7 +170,7 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
             }}
           />
         )}
-        <div className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: larg(p.atingimento) }} />
+        <div className="tc-barra absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: larg(p.atingimento) }} />
         <div className="absolute -inset-y-1 w-0.5 bg-ink" style={{ left: larg(1) }} aria-hidden="true" />
       </div>
       <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">

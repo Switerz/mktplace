@@ -544,7 +544,7 @@ function BrandPageInner() {
                             // decorativa: o valor e o percentual ja estao em texto
                             // ao lado, entao a cor nao carrega significado sozinha
                             aria-hidden="true"
-                            className={`h-2 rounded-full ${MIX_TOM[c.key]}`}
+                            className={`tc-barra h-2 rounded-full ${MIX_TOM[c.key]}`}
                             style={{ width: `${Math.max(2, Math.min(100, c.sharePct))}%` }}
                           />
                         )}

@@ -494,8 +494,8 @@ function PedidosPageInner() {
                   iconSize={8}
                   wrapperStyle={{ fontSize: 12, paddingTop: 12 }}
                 />
-                {showTiktokSel && <Bar dataKey="tiktok" stackId="orders" fill="#7c3aed" radius={[0, 0, 0, 0]} />}
-                {showMlSel && <Bar dataKey="ml" stackId="orders" fill="#f59e0b" radius={[3, 3, 0, 0]} />}
+                {showTiktokSel && <Bar dataKey="tiktok" animationDuration={450} animationEasing="ease-out" stackId="orders" fill="#7c3aed" radius={[0, 0, 0, 0]} />}
+                {showMlSel && <Bar dataKey="ml" animationDuration={450} animationEasing="ease-out" stackId="orders" fill="#f59e0b" radius={[3, 3, 0, 0]} />}
               </BarChart>
             </ResponsiveContainer>
           ) : (

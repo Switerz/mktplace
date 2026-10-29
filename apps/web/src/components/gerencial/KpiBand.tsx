@@ -24,6 +24,7 @@ import {
 import type { DeltaTone, KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
 import { suavizar, type TendenciaKpi } from "@/lib/gerencial/kpi-trend";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import { fmtPctBr } from "@/lib/formatters";
 
 interface Props {
@@ -125,7 +126,7 @@ function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
   // da linha: dentro dele o quadrado esticaria junto com o grafico.
   return (
     <span className={`relative block h-6 w-full ${tinta}`}>
-      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 h-full w-[calc(100%-6px)]">
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="tc-revela absolute inset-0 h-full w-[calc(100%-6px)]">
         <polyline
           points={coords.join(" ")}
           fill="none"
@@ -139,7 +140,7 @@ function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
       </svg>
       <span
         aria-hidden="true"
-        className="absolute right-0 h-1.5 w-1.5 rounded-[1px] bg-current"
+        className="absolute right-0 h-1.5 w-1.5 rounded-[1px] bg-current animate-[tc-fade_240ms_var(--mov-ease)_700ms_both] motion-reduce:animate-none"
         style={{ top: `calc(${(ultimoY / 28) * 100}% - 3px)` }}
       />
     </span>
@@ -247,7 +248,7 @@ function KpiCard({
         </span>
       ) : kpi.value ? (
         <span className="text-lg md:text-xl lg:text-2xl xl:text-lg min-[1440px]:text-2xl font-semibold tracking-tight text-ink tabular-nums leading-tight">
-          {kpi.value}
+          <NumeroAnimado texto={kpi.value} />
         </span>
       ) : (
         <span className="text-lg md:text-xl lg:text-2xl xl:text-lg min-[1440px]:text-2xl font-semibold tracking-tight text-ink-faint tabular-nums leading-tight">N/D</span>

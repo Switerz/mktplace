@@ -541,7 +541,7 @@ function InteligenciaPageInner() {
                             </p>
                             <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden" aria-hidden="true">
                               <div
-                                className={panel.kind === "parar" ? "h-full bg-rose-400" : "h-full bg-emerald-400"}
+                                className={panel.kind === "parar" ? "tc-barra h-full bg-rose-400" : "tc-barra h-full bg-emerald-400"}
                                 style={{ width: `${Math.max(4, (Math.abs(value) / max) * 100)}%` }}
                               />
                             </div>

@@ -300,7 +300,7 @@ function BarraDeRisco({
   return (
     <div className="relative h-4 w-full min-w-[120px] overflow-hidden rounded bg-raised">
       {empilhavel ? (
-        <div className="flex h-full" style={{ width: `${largura}%` }}>
+        <div className="tc-barra flex h-full" style={{ width: `${largura}%` }}>
           {linha.segmentos.map((s) => (
             <div
               key={s.chave}
@@ -317,7 +317,7 @@ function BarraDeRisco({
           {/* Barra do BACKLOG. As sobreposicoes viram marcadores por cima —
               empilhá-las desenharia um total que nao existe. */}
           <div
-            className="h-full rounded bg-accent/70"
+            className="tc-barra h-full rounded bg-accent/70"
             style={{ width: `${largura}%` }}
             title={`Backlog: ${numero(linha.backlog)}`}
           />
@@ -995,7 +995,7 @@ export default function ExpedicaoClient({
                 </span>
                 <span className="h-3.5 flex-1 overflow-hidden rounded bg-raised">
                   <span
-                    className={`block h-full rounded ${
+                    className={`tc-barra block h-full rounded ${
                       b.vencido
                         ? "bg-crit"
                         : b.acimaDoLimiar

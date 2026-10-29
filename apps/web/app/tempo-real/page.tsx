@@ -68,7 +68,7 @@ function GmvProgressBar({ hoje, ontem }: { hoje: number; ontem: number | null })
   return (
     <div className="mt-1.5 w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
       <div
-        className={`h-full rounded-full transition-all duration-500 ${color}`}
+        className={`tc-barra h-full rounded-full ${color}`}
         style={{ width: `${Math.min(pct, 100)}%` }}
       />
     </div>
@@ -307,7 +307,10 @@ export default function TempoRealPage() {
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
-                <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${status === "updating" ? "" : "animate-pulse"}`} />
+                <span aria-hidden="true" className="relative inline-flex h-1.5 w-1.5">
+                  {status !== "updating" && <span className="tc-ping absolute inset-0 rounded-full bg-emerald-500/70" />}
+                  <span className="relative h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                </span>
                 {status === "updating"
                   ? "Atualizando..."
                   : lastUpdated
