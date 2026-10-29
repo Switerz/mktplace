@@ -331,7 +331,10 @@ def _ler_e_montar(inicio, fim, hoje, agora_utc):
 
 
 def run(apply: bool = False, desde: date | None = None, agora: datetime | None = None,
-        ambiente: dict | None = None, incluir_hoje: bool = False) -> dict:
+        ambiente: dict | None = None, incluir_hoje: bool = True) -> dict:
+    # Dia corrente (parcial) entra por padrao desde 29/10/2026, como nas fontes
+    # de arquivo da Shopee; `--ate-ontem` volta a D-1. A rodada seguinte regrava
+    # D0 com o dia fechado.
     agora_utc = (agora or datetime.now(timezone.utc)).astimezone(timezone.utc)
     hoje = SH.hoje_brt(agora_utc)
     inicio, fim = SH.janela(hoje, desde, DIAS_JANELA, incluir_hoje=incluir_hoje)
@@ -377,11 +380,14 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"publica (exige {FLAG_HABILITADO}=true). Sem esta flag o run e' dry-run.")
     p.add_argument("--desde", type=date.fromisoformat, default=None,
                    help=f"inicio da janela (YYYY-MM-DD). Default: {DIAS_JANELA} dias ate' D-1")
-    p.add_argument("--incluir-hoje", action="store_true",
-                   help="publica tambem o dia corrente (parcial). Padrao: ate' D-1")
+    teto = p.add_mutually_exclusive_group()
+    teto.add_argument("--incluir-hoje", action="store_true",
+                      help="mantido por compatibilidade: o dia corrente ja' entra por padrao")
+    teto.add_argument("--ate-ontem", action="store_true",
+                      help="publica so' ate' D-1")
     args = p.parse_args(argv)
     try:
-        res = run(apply=args.apply, desde=args.desde, incluir_hoje=args.incluir_hoje)
+        res = run(apply=args.apply, desde=args.desde, incluir_hoje=not args.ate_ontem)
     except FatoDiariaLockUnavailable as exc:
         logger.error("%s", exc)
         return EXIT_CODE_LOCK_UNAVAILABLE
