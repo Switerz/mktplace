@@ -13,9 +13,10 @@
  * LACUNA e a linha se interrompe — nunca e' costurado como se houvesse dado.
  */
 import {
+  Area,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -55,12 +56,12 @@ export function axisTick(value: number, metric: TrendMetric): string {
   if (Math.abs(value) >= 1_000_000) {
     const millions = value / 1_000_000;
     const text = Number.isInteger(millions) ? String(millions) : millions.toFixed(1).replace(".", ",");
-    return `${prefix}${text}M`;
+    return `${prefix}${text} mi`;
   }
   if (Math.abs(value) >= 1_000) {
     const thousands = value / 1_000;
     const text = Number.isInteger(thousands) ? String(thousands) : thousands.toFixed(1).replace(".", ",");
-    return `${prefix}${text}k`;
+    return `${prefix}${text} mil`;
   }
   return `${prefix}${value}`;
 }
@@ -179,7 +180,7 @@ export default function EvolutionChart({
 
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <LineChart
+      <ComposedChart
         data={buckets}
         // `right: 28` (era 8) reserva a metade do ultimo rotulo, que o Recharts
         // centra no ultimo ponto — ele ficava 22px fora da area do grafico e
@@ -206,20 +207,38 @@ export default function EvolutionChart({
           tick={{ fontSize: 12, fill: tema.eixo }}
           axisLine={false}
           tickLine={false}
-          width={metric === "gmv" ? 62 : 48}
+          // UI-DENSIDADE-1: rotulo em pt-BR ("R$ 900 mil") cabe numa linha so'.
+          width={metric === "gmv" ? 78 : 56}
         />
         <Tooltip
           content={
             <ChartTooltip metric={metric} showTotal={showTotal} showComparisonTotal={showComparisonTotal} />
           }
         />
+        {/* UI-DENSIDADE-1: o TOTAL e' a leitura principal — area suave por baixo
+            da linha mais grossa. Canais ficam finos e claros, de apoio. */}
+        {showTotal && (
+          <Area
+            type="monotone"
+            dataKey="total"
+            name="Total"
+            fill={tema.total}
+            fillOpacity={isolating ? 0.03 : 0.12}
+            stroke="none"
+            activeDot={false}
+            legendType="none"
+            tooltipType="none"
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        )}
         {showTotal && (
           <Line
             type="monotone"
             dataKey="total"
             name="Total"
             stroke={tema.total}
-            strokeWidth={2.25}
+            strokeWidth={2.75}
             strokeOpacity={isolating ? 0.18 : 1}
             dot={false}
             activeDot={{ r: 4 }}
@@ -252,9 +271,10 @@ export default function EvolutionChart({
             dataKey={`values.${channel}`}
             name={CHANNEL_LABEL[channel]}
             stroke={tema.canais[channel]}
-            strokeWidth={dim(channel) ? 1 : isolating ? 2.5 : showTotal ? 1.5 : 2}
+            strokeWidth={dim(channel) ? 1 : isolating ? 2.5 : showTotal ? 1.25 : 2}
             strokeOpacity={dim(channel) ? 0.2 : 1}
-            strokeDasharray={isolating ? undefined : showTotal ? "4 3" : undefined}
+            // De apoio quando o total aparece: fino, solido e mais claro.
+            opacity={!isolating && showTotal ? 0.55 : 1}
             dot={false}
             activeDot={{ r: 4 }}
             // Lacuna interrompe a linha: nunca costura buckets ausentes.
@@ -262,7 +282,7 @@ export default function EvolutionChart({
             isAnimationActive={false}
           />
         ))}
-      </LineChart>
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }

@@ -143,7 +143,8 @@ test("flag desligada: a secao Prazo fica como antes, inclusive o aviso de LDR au
   assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? null : \(\s*<Note[^>]*>\s*\{SEM_LDR_SHOPEE\}/);
   assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? <LdrShopeePanel ldr=\{ldr\} marca=\{marcaAtiva\} \/> : null\}/);
   // Flag off = nenhuma requisicao: o hook so' liga com a flag E na Shopee.
-  assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee"\)/);
+  // UI-EXPEDICAO-1: a LDR le o periodo do topo da pagina.
+  assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee", janela\)/);
   assert.match(PAINEL, /if \(!ligada\) \{\s*setResposta\(null\);/);
 });
 

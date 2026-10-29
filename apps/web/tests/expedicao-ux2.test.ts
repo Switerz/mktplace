@@ -294,10 +294,11 @@ test("historico curto e' dito como historico curto", () => {
 // 5. Fiacao
 // ===========================================================================
 test("o painel e' 'por marca' e a tabela de dados mostra marca e conta", () => {
-  assert.match(CLIENTE, /titulo="Evolução do backlog por marca"/);
+  // UI-EXPEDICAO-1: tabela unica (fila de agora + tendencia do periodo).
+  assert.match(CLIENTE, /titulo="Backlog por marca"/);
   assert.match(CLIENTE, /<th scope="col">Marca<\/th>/);
   assert.match(CLIENTE, /<th scope="col">Hora \(Brasília\)<\/th>/);
-  assert.match(CLIENTE, /\{tendencia \? <EvolucaoPorMarca resposta=\{tendencia\} \/> : null\}/);
+  assert.match(CLIENTE, /<EvolucaoPorMarca\s+resposta=\{temSerieNaTendencia \? tendencia : null\}\s+fila=\{linhasDaFila\}/);
 });
 
 test("o tooltip le a resposta: marca, conta, hora de Brasilia, backlog, 48 h, travados", () => {

@@ -25,7 +25,7 @@
  * A lacuna diagnosticada no V2-0 morre por construcao: a grade da segunda dobra
  * nao usa `items-start`, cada card E' o item da grade, e nao existe `row-span`.
  */
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { useGerencialSources } from "@/hooks/useGerencialSources";
@@ -35,6 +35,7 @@ import type { Marketplace } from "@/lib/mock-data";
 import { buildPulse } from "@/lib/executive-pulse";
 import { findChannelMedian } from "@/lib/canais-channel-metrics";
 import { CHANNEL_LABEL, buildKpiBand } from "@/lib/gerencial/kpi-band";
+import { tendenciasDosKpis } from "@/lib/gerencial/kpi-trend";
 import { buildVolumeHealth } from "@/lib/gerencial/volume-health";
 import {
   buildAttentionQueue,
@@ -69,6 +70,20 @@ import VolumeHealthCard from "@/components/gerencial/VolumeHealthCard";
 import BrandChannelMatrix, { cellKey, type SignalsState } from "@/components/gerencial/BrandChannelMatrix";
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
+import MetaHero from "@/components/gerencial/MetaHero";
+import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
+import MarcasMeta from "@/components/gerencial/MarcasMeta";
+import { useMetasDoMes } from "@/hooks/useMetasDoMes";
+import {
+  avisoQueAfetaOGmv,
+  mesDaMeta,
+  metaDoEscopo,
+  progressoMeta,
+  topComerciais,
+  ultimoDiaComDado,
+  type ProgressoMeta,
+} from "@/lib/gerencial/meta-progress";
+import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
   CommercialAttentionDrilldownContent,
@@ -105,7 +120,10 @@ type DialogView =
   | { kind: "dataWarning"; item: DataConfidenceItem };
 
 function GerencialInner() {
-  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_anterior", defaultCompare: true });
+  // GERENCIAL-METAS-1: abre no mes corrente, porque e' nele que a meta ainda
+  // pode ser decidida (ritmo, projecao e quanto falta por dia). O mes fechado
+  // continua a um clique no seletor de periodo.
+  const [filters, setFilters] = useGlobalFilters({ defaultPreset: "mes_atual", defaultCompare: true });
   const searchParams = useSearchParams();
 
   // Metrica do grafico: estado LOCAL. `/trend` entrega GMV e Pedidos na mesma
@@ -156,13 +174,27 @@ function GerencialInner() {
 
   // ---- derivacoes puras -------------------------------------------------
   const overview = sources.overview.data;
-  const kpis = useMemo(() => buildKpiBand(overview, filters.channels), [overview, filters.channels]);
+  const kpis = useMemo(
+    () => buildKpiBand(overview, filters.channels, filters.compare),
+    [overview, filters.channels, filters.compare],
+  );
 
   const merged = useMemo(
     // A granularidade PEDIDA entra no merge para que um grao explicito ignorado
     // pela API seja tratado como contrato incompativel, e nao como sucesso.
     () => mergeChannelSeries(sources.series, filters.channels, metric, granularity),
     [sources.series, filters.channels, metric, granularity],
+  );
+  // KPIS-COMPARACAO-1 — tendencia dos cards: GMV e Pedidos SEMPRE, independente
+  // da metrica escolhida no grafico. `/trend` ja' traz as duas na mesma
+  // resposta, entao isto nao dispara requisicao nenhuma.
+  const tendencias = useMemo(
+    () =>
+      tendenciasDosKpis(
+        mergeChannelSeries(sources.series, filters.channels, "gmv", granularity),
+        mergeChannelSeries(sources.series, filters.channels, "orders", granularity),
+      ),
+    [sources.series, filters.channels, granularity],
   );
   const reconciliation = useMemo(
     () =>
@@ -217,6 +249,63 @@ function GerencialInner() {
     }
     return map;
   }, [sources.canais.data]);
+
+  // ---- metas (GERENCIAL-METAS-1) -----------------------------------------
+  // Fonte PROPRIA (`useMetasDoMes`), fora do hook das fontes do Data Mart: a
+  // meta falhar nao apaga nenhum outro bloco. So' ha meta quando o periodo e'
+  // um mes inteiro, ou o mes corrente ate' hoje.
+  const hoje = useMemo(() => hojeBrt(), []);
+  const mesMeta = mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
+  const metas = useMetasDoMes(mesMeta);
+  const metaEscopo = useMemo(
+    () => metaDoEscopo(metas.celulas, filters.channels, filters.brands),
+    [metas.celulas, filters.channels, filters.brands],
+  );
+  const ultimoDia = useMemo(
+    () => ultimoDiaComDado(merged.buckets, merged.granularity),
+    [merged.buckets, merged.granularity],
+  );
+  // Em modo demonstracao o GMV e' exemplo: atingimento contra meta real seria
+  // um numero falso com cara de decisao.
+  const metaAplicavel = mesMeta != null && metas.status === "fresh" && !sources.demoMode;
+  const progresso = useMemo(
+    () =>
+      metaAplicavel && mesMeta
+        ? progressoMeta({ meta: metaEscopo.total, realizado: overview?.gmv ?? null, mes: mesMeta, hoje, ultimoDia })
+        : null,
+    [metaAplicavel, mesMeta, metaEscopo.total, overview, hoje, ultimoDia],
+  );
+  const progressoPorMarca = useMemo(() => {
+    const mapa: Record<string, ProgressoMeta | null> = {};
+    // So' com `/brands` fresco: sem ele, "sem linha" nao quer dizer "sem venda".
+    if (!metaAplicavel || !mesMeta || !sources.brands.status.fresh) return mapa;
+    const realizado = new Map(brands.map((b) => [b.brand, b.total_gmv]));
+    // Marca com meta e SEM linha em `/brands` (nada vendido no recorte) entra
+    // com realizado zero: e' o caso mais urgente, nao pode sumir.
+    const ids = new Set([...realizado.keys(), ...Object.keys(metaEscopo.porMarca)]);
+    for (const id of ids) {
+      mapa[id] = progressoMeta({
+        meta: metaEscopo.porMarca[id] ?? null,
+        realizado: realizado.get(id) ?? 0,
+        mes: mesMeta,
+        hoje,
+        ultimoDia,
+      });
+    }
+    return mapa;
+  }, [metaAplicavel, mesMeta, sources.brands.status.fresh, metaEscopo.porMarca, brands, hoje, ultimoDia]);
+  // Lista compacta (UI-DENSIDADE-1): cabem ate' 5 sinais no espaco que 3 cartoes ocupavam.
+  const decisoes = useMemo(() => topComerciais(queue.commercial, 5), [queue.commercial]);
+  const avisoDeDado = avisoQueAfetaOGmv(queue.dataConfidence);
+
+  // "Mais detalhes" comeca fechado; "Ver todos os sinais" abre e rola ate' la'.
+  const detalhesRef = useRef<HTMLDetailsElement>(null);
+  const abrirDetalhes = useCallback(() => {
+    const el = detalhesRef.current;
+    if (!el) return;
+    el.open = true;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   const signalsState: SignalsState = sources.canais.status.loading
     ? "loading"
@@ -312,7 +401,7 @@ function GerencialInner() {
   const highlightedChannel = dialog?.kind === "channelSeries" ? dialog.channel : null;
 
   return (
-    <div className="max-w-[1440px] mx-auto px-6 py-6 flex flex-col gap-4">
+    <div className="w-full px-4 py-4 flex flex-col gap-3">
       <GerencialHeader
         periodLabel={periodLabel}
         refreshedAt={sources.overview.refreshedAt}
@@ -326,12 +415,30 @@ function GerencialInner() {
         {liveAnnouncement}
       </span>
 
-      {/* ---- Dobra 1: o que aconteceu ----
+      {/* ---- Dobra 1: vamos bater a meta? (GERENCIAL-METAS-1) ----
           Nenhum gate global daqui para baixo: cada bloco decide sozinho. */}
-      <ConfidenceStrip
-        data={confidence}
-        loading={confidence.checkingCount === confidence.selectedCount && confidence.selectedCount > 0}
-        onOpen={() => setDialog({ kind: "confidence" })}
+      <MetaHero
+        periodLabel={periodLabel}
+        loading={overviewStatus.loading}
+        error={overviewStatus.error}
+        gmv={overview?.gmv ?? null}
+        prevGmv={overview?.prev_gmv ?? null}
+        momPct={overview?.gmv_mom_pct ?? null}
+        compareActive={filters.compare}
+        channels={filters.channels}
+        gmvByChannel={{
+          tiktok: overview?.tiktok_gmv ?? null,
+          ml: overview?.ml_gmv ?? null,
+          shopee: overview?.shopee_gmv ?? null,
+        }}
+        mesMeta={mesMeta}
+        metasStatus={metas.status === "idle" ? "fresh" : metas.status}
+        onRetryMetas={metas.tentarDeNovo}
+        progresso={progresso}
+        ultimoDia={ultimoDia}
+        aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}
+        metasHref={mesMeta ? `/metas?mes=${mesMeta}` : "/metas"}
+        onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
       />
 
       <KpiBand
@@ -340,13 +447,24 @@ function GerencialInner() {
         error={overviewStatus.error}
         onOpen={(key) => setDialog({ kind: "kpi", key })}
         onRetry={sources.retry}
+        semGmv
+        tendencias={tendencias}
       />
 
-      {/* ---- Dobra 2: como evoluiu / o que atender ----
-          12 colunas: 8/4 no tablet e 7/5 no desktop. SEM `items-start` e SEM
-          `row-span`: os dois itens esticam juntos. */}
+      <DecisoesTopo
+        itens={decisoes}
+        total={queue.commercial.length}
+        loading={sources.executiveSummary.status.loading}
+        error={sources.executiveSummary.status.error}
+        onOpen={(item) => setDialog({ kind: "commercial", item })}
+        onVerTodos={abrirDetalhes}
+      />
+
+      {/* ---- Dobra 2: como evoluiu / onde ----
+          12 colunas: 7/5 a partir de `lg`. SEM `items-start` e SEM `row-span`:
+          os dois itens esticam juntos. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-        <div className="order-2 lg:order-none lg:col-span-8 xl:col-span-7">
+        <div className="lg:col-span-7">
           <EvolutionCard
             merged={merged}
             metric={metric}
@@ -361,7 +479,55 @@ function GerencialInner() {
             highlightedChannel={highlightedChannel}
           />
         </div>
-        <div className="order-1 lg:order-none lg:col-span-4 xl:col-span-5">
+        <div className="lg:col-span-5">
+          <MarcasMeta
+            brands={brands}
+            channels={filters.channels}
+            progressoPorMarca={progressoPorMarca}
+            compareActive={filters.compare}
+            loading={sources.brands.status.loading}
+            error={sources.brands.status.error}
+            brandHref={brandHref}
+          />
+        </div>
+      </div>
+
+      {/* ---- Dobra 3: marca x canal ---- */}
+      <BrandChannelMatrix
+        matrix={matrix}
+        loading={sources.brands.status.loading}
+        error={sources.brands.status.error}
+        signalsByCell={signalsByCell}
+        signalsState={signalsState}
+        onOpenCell={(brand, channel) => setDialog({ kind: "matrix", brand, channel })}
+        onOpenChannelHeader={(channel) => setDialog({ kind: "matrixChannel", channel })}
+        brandHref={brandHref}
+        onRetry={sources.retry}
+      />
+
+      {/* ---- Mais detalhes (GERENCIAL-METAS-1) ----
+          Profundidade sob demanda: tudo o que a V2 mostrava continua aqui,
+          cada bloco com a propria fonte e o proprio erro. Fechado por padrao
+          para a primeira dobra responder sozinha. */}
+      <details ref={detalhesRef} className="group rounded-xl border border-line bg-surface">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-3 text-sm font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+          <span>
+            Mais detalhes
+            <span className="ml-2 font-normal text-ink-faint">
+              confiança no dado, pulso e canais, saúde do volume, movimentos e fila completa
+            </span>
+          </span>
+          <span aria-hidden="true" className="text-ink-faint transition-transform group-open:rotate-180">
+            ▾
+          </span>
+        </summary>
+        <div className="flex flex-col gap-4 border-t border-line p-4">
+          <ConfidenceStrip
+            data={confidence}
+            loading={confidence.checkingCount === confidence.selectedCount && confidence.selectedCount > 0}
+            onOpen={() => setDialog({ kind: "confidence" })}
+          />
+
           <PulseChannelsColumn
             pulse={pulse}
             health={sources.executiveSummary.data?.health ?? null}
@@ -376,59 +542,49 @@ function GerencialInner() {
             onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
             channelsHref={buildHref("/canais")}
           />
+
+          <VolumeHealthCard
+            rows={volumeRows}
+            loading={sources.quality.status.loading}
+            error={sources.quality.status.error}
+            onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
+            onRetry={sources.retry}
+          />
+
+          <MovementsPanels
+            movements={movements}
+            concentration={concentration}
+            loading={sources.brands.status.loading}
+            error={sources.brands.status.error}
+            onOpenMovement={(movement) => setDialog({ kind: "movement", movement })}
+            onOpenConcentration={(entry) => setDialog({ kind: "concentration", entry })}
+            produtosHref={buildHref("/produtos")}
+            onRetry={sources.retry}
+          />
+
+          <AttentionQueue
+            commercial={queue.commercial}
+            dataConfidence={queue.dataConfidence}
+            commercialLoading={sources.executiveSummary.status.loading}
+            commercialError={sources.executiveSummary.status.error}
+            onOpenCommercial={(item) => setDialog({ kind: "commercial", item })}
+            onOpenDataWarning={(item) => setDialog({ kind: "dataWarning", item })}
+            onRetry={sources.retry}
+          />
         </div>
-      </div>
-
-      {/* ---- Dobra 3: onde aconteceu ---- */}
-      <VolumeHealthCard
-        rows={volumeRows}
-        loading={sources.quality.status.loading}
-        error={sources.quality.status.error}
-        onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
-        onRetry={sources.retry}
-      />
-
-      <BrandChannelMatrix
-        matrix={matrix}
-        loading={sources.brands.status.loading}
-        error={sources.brands.status.error}
-        signalsByCell={signalsByCell}
-        signalsState={signalsState}
-        onOpenCell={(brand, channel) => setDialog({ kind: "matrix", brand, channel })}
-        onOpenChannelHeader={(channel) => setDialog({ kind: "matrixChannel", channel })}
-        brandHref={brandHref}
-        onRetry={sources.retry}
-      />
-
-      {/* ---- Dobra 4: por que ---- */}
-      <MovementsPanels
-        movements={movements}
-        concentration={concentration}
-        loading={sources.brands.status.loading}
-        error={sources.brands.status.error}
-        onOpenMovement={(movement) => setDialog({ kind: "movement", movement })}
-        onOpenConcentration={(entry) => setDialog({ kind: "concentration", entry })}
-        produtosHref={buildHref("/produtos")}
-        onRetry={sources.retry}
-      />
-
-      {/* ---- Dobra 5: para onde ir ---- */}
-      <AttentionQueue
-        commercial={queue.commercial}
-        dataConfidence={queue.dataConfidence}
-        commercialLoading={sources.executiveSummary.status.loading}
-        commercialError={sources.executiveSummary.status.error}
-        onOpenCommercial={(item) => setDialog({ kind: "commercial", item })}
-        onOpenDataWarning={(item) => setDialog({ kind: "dataWarning", item })}
-        onRetry={sources.retry}
-      />
+      </details>
 
       {/* ---- Shell UNICO de dialogo, para todos os drill-downs ---- */}
       <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle}>
         {dialog?.kind === "kpi" && overview && (
           <KpiDrilldownContent
             kind={dialog.key}
-            value={kpis.find((k) => k.key === dialog.key)?.value ?? "—"}
+            // O detalhe mostra o valor EXATO; o card, o curto (UI-DENSIDADE-1).
+            value={(() => {
+              const k = kpis.find((x) => x.key === dialog.key);
+              return k?.exactValue ?? k?.value ?? "—";
+            })()}
+            comparacao={kpis.find((k) => k.key === dialog.key)}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}
             overview={overview}

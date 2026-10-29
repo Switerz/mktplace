@@ -34,13 +34,21 @@ AUDITORIA (`audit.source_sync_run`, marketplace 1 = TikTok):
   nao";
 - `failed` (recusa por fonte inconsistente, reconciliacao, lock, erro) vai em
   conexao propria, so' sobre linha ainda `running`, com o motivo;
-- `running` remanescente => nada confirmado no destino (o processo morreu ou
-  nem o `failed` foi gravado). Diagnostico so' leitura: nenhuma linha da fato
-  com `source_run_id` = run_id.
+- `running` remanescente, lido DEPOIS que a sessao da publicacao terminou no
+  servidor => nada confirmado (success sai no mesmo COMMIT dos dados). Lido
+  antes disso, o COMMIT ainda pode estar em curso.
+COMMIT AMBIGUO: se o cliente recebe erro no proprio COMMIT (ACK perdido), o
+servidor pode ter confirmado ou nao. `failed` gravado depois prova que nao
+confirmou (o UPDATE so' acha linha `running`); se o `failed` nao fecha
+(linha ja' terminal) ou a auditoria esta' inacessivel, o estado e'
+INDETERMINADO ate' conferir, so' leitura, `audit.source_sync_run`
+(sync_run_id) e a contagem do destino por `source_run_id` (= run_id) antes de
+republicar. O log desse caminho diz isso; nao afirma confirmacao nem ausencia.
 Exit code: 0 = dry-run ou publicado (JSON com `auditoria: success`);
 2 = recusa (`PublicacaoRecusada`: nada escrito no shadow, motivo no log e,
 para fonte inconsistente, na auditoria `failed`); 1 = excecao (lock,
-reconciliacao, auditoria que nao fecha, rede): rollback, nada confirmado.
+reconciliacao, auditoria que nao fecha, rede). Excecao ANTES do COMMIT nao
+confirma nada; excecao NO COMMIT deixa o estado indeterminado (acima).
 """
 from __future__ import annotations
 
@@ -264,18 +272,33 @@ def audit_finish(sid: int, status: str, rows_loaded=None, error_message=None) ->
         conn.close()
 
 
-def _auditar_falha(sid: int, motivo: str) -> None:
-    """Grava `failed` com o motivo. Falha da auditoria e' logada e nunca mascara a causa."""
+#: Procedimento (so' leitura) para quando o desfecho da publicacao nao esta' provado.
+CONFERIR_ANTES_DE_REPUBLICAR = (
+    "conferir audit.source_sync_run (sync_run_id=%s) e a contagem do destino "
+    f"({FACT_COBERTURA} e {FACT} por source_run_id=%s) antes de republicar")
+
+
+def _auditar_falha(sid: int, motivo: str, run_id: str | None = None) -> None:
+    """Grava `failed` com o motivo. Falha da auditoria e' logada e nunca mascara a causa.
+
+    `failed` gravado prova que a publicacao nao confirmou (so' casa linha `running`).
+    Nos outros dois desfechos o log NAO afirma nem confirmacao nem ausencia dela.
+    """
+    rid = run_id or "n/d"
     try:
         audit_finish(sid, "failed", rows_loaded=0, error_message=motivo[:AUDIT_ERRO_MAX_CHARS])
     except AuditoriaNaoFechou:
         # Linha ja' terminal: ou o COMMIT da publicacao chegou ao banco e o cliente viu
         # erro depois dele (linha = 'success'), ou outro processo a fechou. Fica como esta'.
-        logger.error("sync_run_id %s ja' nao estava 'running': confira o status (success = COMMIT "
-                     "da publicacao confirmado)", sid)
+        logger.error("estado INDETERMINADO: sync_run_id %s ja' nao estava 'running' (run_id=%s); o COMMIT "
+                     "da publicacao (se este run publicou) pode ter sido confirmado ou outro processo "
+                     "fechou a linha; " + CONFERIR_ANTES_DE_REPUBLICAR, sid, rid, sid, rid)
     except Exception as aud:  # noqa: BLE001
-        logger.error("auditoria 'failed' do sync_run_id %s NAO gravada (%s); a linha fica 'running' "
-                     "e nada foi confirmado no destino", sid, type(aud).__name__)
+        # O UPDATE do 'failed' pode nem ter chegado ou ter confirmado sem ACK; a linha pode
+        # estar 'running', 'failed' ou, se o COMMIT da publicacao chegou ao banco, 'success'.
+        logger.error("estado INDETERMINADO: auditoria 'failed' do sync_run_id %s NAO confirmada (%s; "
+                     "run_id=%s); o COMMIT da publicacao (se este run publicou) pode ter sido "
+                     "confirmado; " + CONFERIR_ANTES_DE_REPUBLICAR, sid, type(aud).__name__, rid, sid, rid)
 
 
 def _recusar_auditado(n_extraidas: int, motivo: str):
@@ -283,7 +306,10 @@ def _recusar_auditado(n_extraidas: int, motivo: str):
     try:
         sid = audit_start(n_extraidas)
     except Exception as aud:  # noqa: BLE001
-        logger.error("auditoria da recusa NAO gravada (%s)", type(aud).__name__)
+        # O INSERT 'running' pode ter confirmado sem ACK; o shadow nao foi tocado (recusa vem antes).
+        logger.error("auditoria da recusa NAO confirmada (%s): pode ter ficado linha 'running' orfa; conferir "
+                     "audit.source_sync_run (source_name=%s, status='running'); o shadow nao foi tocado "
+                     "por esta recusa", type(aud).__name__, AUDIT_SOURCE)
     else:
         _auditar_falha(sid, f"PublicacaoRecusada: {motivo}")
     raise PublicacaoRecusada(motivo)
@@ -322,7 +348,7 @@ def run(apply: bool = False, hoje: date | None = None) -> dict:
     try:
         publicado = _publicar(fato, cobertura, run_id, sid)
     except BaseException as exc:
-        _auditar_falha(sid, f"{type(exc).__name__}: {exc} (run_id={run_id})")
+        _auditar_falha(sid, f"{type(exc).__name__}: {exc} (run_id={run_id})", run_id=run_id)
         raise
     resumo.update(publicado, applied=True, modo="escrita", sync_run_id=sid, auditoria="success")
     return resumo

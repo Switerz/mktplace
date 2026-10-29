@@ -1,17 +1,23 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { DM_Sans, Inter } from "next/font/google";
 import "./globals.css";
 import AppShell from "@/components/shell/AppShell";
 import ThemeProvider from "@/components/theme/ThemeProvider";
 import { scriptDeTema } from "@/lib/theme";
 
 /**
- * UX-TORRE-B2B-1 — Inter, autohospedada: o next/font baixa o arquivo no BUILD
- * e serve do proprio dominio, entao nenhuma requisicao vai ao Google em
- * runtime. Escolhida pelos algarismos tabulares de verdade (`tnum`), que e' o
- * que mantem colunas de R$ alinhadas.
+ * VISUAL-PALETA-1 — DM Sans (antes Inter), a fonte da Torre do Atacado: mais
+ * arredondada. Autohospedadas: o next/font baixa os arquivos no BUILD e serve
+ * do proprio dominio, entao nenhuma requisicao vai ao Google em runtime.
+ *
+ * MEDIDO: a DM Sans do Google NAO tem algarismos tabulares (`tnum`) — com
+ * `tabular-nums`, "1111111" mede 52px e "8888888" 102px a 24px. Por isso a
+ * Inter fica so' DENTRO DE TABELAS (`--font-num`, ver globals.css), onde
+ * digito de largura variavel desmancha a coluna de R$. O resto e' DM Sans.
  */
-const inter = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
+const dmSans = DM_Sans({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
+// `preload: false`: so' tabela usa a Inter; pagina sem tabela nao a baixa.
+const inter = Inter({ subsets: ["latin"], variable: "--font-num", display: "swap", preload: false });
 
 export const metadata: Metadata = {
   title: {
@@ -27,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // abaixo altera `class` e `style` de <html> antes da hidratacao, de
     // proposito. Sem isto o React reclamaria da divergencia que ele mesmo
     // precisa aceitar para nao haver flash de tema errado.
-    <html lang="pt-BR" className={inter.variable} suppressHydrationWarning>
+    <html lang="pt-BR" className={`${dmSans.variable} ${inter.variable}`} suppressHydrationWarning>
       <head>
         {/* Sincrono e no <head>: precisa rodar ANTES da primeira pintura. */}
         <script dangerouslySetInnerHTML={{ __html: scriptDeTema() }} />
