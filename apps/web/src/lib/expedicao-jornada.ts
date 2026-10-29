@@ -327,6 +327,11 @@ export function canalDaJornada(canal: "shopee" | "mercadolivre" | "tiktokshop"):
   return canal === "tiktokshop" ? "tiktok" : canal;
 }
 
+/** O Mercado Livre nao tem coorte (contrato v1.1 §3.1.6): `days` e' ignorado. */
+export function canalTemCoorte(canal: CanalJornada): boolean {
+  return canal !== "mercadolivre";
+}
+
 export function queryDaJornada(
   canal: CanalJornada,
   marca: string | null,
@@ -337,7 +342,7 @@ export function queryDaJornada(
   // A marca da URL (`?marca=`) vai como `brands`: o servidor recorta TODOS os
   // totais, nao so' uma lista.
   if (marca) p.set("brands", marca);
-  if (opcoes.dias !== undefined && canal !== "mercadolivre") p.set("days", String(opcoes.dias));
+  if (opcoes.dias !== undefined && canalTemCoorte(canal)) p.set("days", String(opcoes.dias));
   // `event` so' existe no TikTok (fora dele a API responde 422).
   if (opcoes.evento && canal === "tiktok") p.set("event", opcoes.evento);
   return `/api/v1/expedicao/jornada?${p.toString()}`;

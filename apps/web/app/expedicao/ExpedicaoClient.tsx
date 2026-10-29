@@ -49,6 +49,8 @@ import {
 } from "@/lib/expedicao-shopee-ldr";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import RiscoEmDestaque from "@/components/expedicao/RiscoEmDestaque";
+import TravadosDialog from "@/components/expedicao/TravadosDialog";
+import { percentualDaFila, type AlvoTravados } from "@/lib/expedicao-travados";
 import {
   AtencaoAgora,
   ConviteAoDetalhe,
@@ -118,6 +120,7 @@ import {
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
+import { canalTemCoorte } from "@/lib/expedicao-jornada";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -233,7 +236,18 @@ function tomDoKpi(kpi: Kpi): Tom {
   return kpi.alerta ? "atencao" : "neutro";
 }
 
-function CelulaKpi({ kpi, destaque, canal }: { kpi: Kpi; destaque: boolean; canal: Canal }) {
+function CelulaKpi({
+  kpi,
+  destaque,
+  canal,
+  numeroGrande = false,
+}: {
+  kpi: Kpi;
+  destaque: boolean;
+  canal: Canal;
+  /** Numero na escala grande sem a nota visivel (cartoes ao lado do destaque). */
+  numeroGrande?: boolean;
+}) {
   const texto = kpi.valorTexto ?? (kpi.valor === null ? "—" : numero(kpi.valor));
   return (
     <KpiComAjuda
@@ -245,7 +259,7 @@ function CelulaKpi({ kpi, destaque, canal }: { kpi: Kpi; destaque: boolean; cana
       comparacao={destaque ? (kpi.notaCurta ?? kpi.nota) : undefined}
       contexto={kpi.nota}
       tom={tomDoKpi(kpi)}
-      destaque={destaque}
+      destaque={destaque || numeroGrande}
     />
   );
 }
@@ -372,6 +386,8 @@ export default function ExpedicaoClient({
   const [erroHttp, setErroHttp] = useState<number | null>(null);
   const [erroTendencia, setErroTendencia] = useState(false);
   const [dadosDaTendencia, setDadosDaTendencia] = useState(false);
+  // EXPEDICAO-TRAVADOS-1: quais pedidos estao travados (popup).
+  const [alvoTravados, setAlvoTravados] = useState<AlvoTravados | null>(null);
 
   // Chave da requisicao resolvida. Resposta que chega com chave diferente da
   // atual e' DESCARTADA: sem isso, trocar filtro rapidamente deixaria a
@@ -532,7 +548,12 @@ export default function ExpedicaoClient({
   // no SERVIDOR. Nada aqui soma a fila paginada.
   // UI-EXPEDICAO-1: o periodo do topo comanda a pagina — a coorte da jornada
   // e a LDR leem a MESMA janela da tendencia. A fila aberta e' "agora".
-  const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
+  // O Mercado Livre nao tem coorte (contrato): sem ela a secao nao aparece,
+  // entao nem busca.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva, {
+    dias: janela,
+    ligada: canalTemCoorte(filtros.channel),
+  });
 
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
 
@@ -631,9 +652,10 @@ export default function ExpedicaoClient({
     kpiDestaque && kpiDestaque.valor !== null && kpiDestaque.valorTexto === undefined
       ? kpiDestaque
       : null;
-  const secundariosDoRisco = risco.filter(
-    (k) => k.chave !== chaveDestaque && k.chave !== "backlog" && k.chave !== "marcas_alerta",
-  );
+  const secundariosDoRisco = risco
+    .filter((k) => k.chave !== chaveDestaque && k.chave !== "backlog" && k.chave !== "marcas_alerta")
+    // Rotulo curto no cartao: "limiar interno da Torre" fica no "?".
+    .map((k) => (k.chave === "over48h" ? { ...k, rotulo: "Acima de 48 h" } : k));
   // "Onde agir": so' a marca que concentra — os numeros ja' estao no destaque.
   const ondeAgir = ondeAgirNaFila(totaisRisco, contasRisco, filtros.channel);
 
@@ -694,11 +716,72 @@ export default function ExpedicaoClient({
       vencidos: temPrazo ? a.overdue_count : null,
       acima48h: a.over_48h_count,
       travados: a.stalled_count,
+      pctTravados: percentualDaFila(a.stalled_count, a.backlog_count),
+      aoVerTravados:
+        a.stalled_count > 0
+          ? () =>
+              setAlvoTravados({
+                titulo: `Travados · ${brandLabel(a.brand)}`,
+                marca: a.brand,
+                conta: a.shop_account,
+                travados: a.stalled_count,
+                backlog: a.backlog_count,
+              })
+          : undefined,
+      // Prazo: a barra e' a fila DA MARCA em 100% (quanto dela esta' vencido,
+      // vence em 24 h ou no prazo); o tamanho da fila ja' esta' na coluna.
       barra: linha ? (
-        <BarraDeRisco linha={linha} maximo={mapa.maximo} empilhavel={mapa.empilhavel} />
+        <BarraDeRisco
+          linha={linha}
+          maximo={mapa.empilhavel ? linha.backlog : mapa.maximo}
+          empilhavel={mapa.empilhavel}
+        />
       ) : null,
     };
   });
+
+  /** Cartao "Travados" do destaque: o numero, o % da fila e "ver quais". */
+  const cartaoTravados = (k: Kpi) => {
+    // A lista vem da fila PUBLICADA; o % usa a mesma base.
+    const travados = recorte.totais?.stalled_count ?? k.valor ?? 0;
+    const backlog = recorte.totais?.backlog_count ?? totaisRisco?.backlog_count ?? 0;
+    const pct = percentualDaFila(k.valor ?? 0, totaisRisco?.backlog_count ?? 0);
+    return (
+      <KpiComAjuda
+        key={k.chave}
+        ajuda={chaveDoKpiDaFila(filtros.channel, k.chave)}
+        rotulo={k.rotulo}
+        valor={numero(k.valor ?? 0)}
+        contexto={k.nota}
+        tom={tomDoKpi(k)}
+        destaque
+        comparacao={
+          <>
+            {pct ? `${pct} da fila` : null}
+            {pct && (k.valor ?? 0) > 0 ? " · " : null}
+            {(k.valor ?? 0) > 0 ? (
+              <button
+                type="button"
+                onClick={() =>
+                  setAlvoTravados({
+                    titulo: marcaAtiva ? `Travados · ${brandLabel(marcaAtiva)}` : "Travados",
+                    marca: marcaAtiva,
+                    conta: null,
+                    travados,
+                    backlog,
+                    incluiFbs: divisao !== null,
+                  })
+                }
+                className="-my-3 inline-flex min-h-[44px] items-center font-semibold text-ink underline underline-offset-4 hover:text-accent"
+              >
+                ver quais
+              </button>
+            ) : null}
+          </>
+        }
+      />
+    );
+  };
 
   /** Legenda da barra por conta — a mesma na tabela unica e na do detalhe. */
   const legendaDaBarra = (
@@ -809,9 +892,13 @@ export default function ExpedicaoClient({
           backlog={risco.find((k) => k.chave === "backlog")}
           marcasAlerta={risco.find((k) => k.chave === "marcas_alerta")}
           ajuda={ajudaDaFila(chaveDestaque)}
-          secundarios={secundariosDoRisco.map((k) => (
-            <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque={false} />
-          ))}
+          secundarios={secundariosDoRisco.map((k) =>
+            k.chave === "stalled" && k.valor !== null ? (
+              cartaoTravados(k)
+            ) : (
+              <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque={false} numeroGrande />
+            ),
+          )}
           // Sem prazo publicado (Mercado Livre), a barra seria 100% "sem prazo".
           prazo={temPrazo ? barraDePrazo(true) : undefined}
           ondeAgir={ondeAgir}
@@ -839,7 +926,9 @@ export default function ExpedicaoClient({
   );
 
   // "Prazo": a Shopee publica `ship_by_date`; o Mercado Livre, nao.
-  const secaoPrazo = temPrazo ? (
+  // EXPEDICAO-TRAVADOS-1: sem LDR e com a barra ja' no destaque, a secao
+  // "Prazo" so' teria um paragrafo dizendo o que falta — sai da tela.
+  const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo ? null : temPrazo ? (
     <SecaoGerencial
       titulo="Prazo"
       dica="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
@@ -871,7 +960,7 @@ export default function ExpedicaoClient({
       {LDR_SHOPEE_LIGADA ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
-    <SecaoGerencial titulo="Prazo" dica="O canal não publica prazo de envio.">
+    <SecaoGerencial titulo="Prazo" dica={SEM_PRAZO_CANAL_ML}>
       <Panel
         titulo={
           <>
@@ -879,7 +968,6 @@ export default function ExpedicaoClient({
           </>
         }
       >
-        <p className="text-sm text-ink">{SEM_PRAZO_CANAL_ML}</p>
         {envelhecimento ? (
           <dl className="mt-3 grid gap-2 sm:grid-cols-2">
             {/* Com o destaque, "acima de 48 h" ja' e' o numero do topo. */}
@@ -1379,6 +1467,14 @@ export default function ExpedicaoClient({
   return (
     // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
     <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={carregando}>
+    {/* `key` por alvo: abrir outra marca comeca do zero, sem a lista anterior. */}
+    <TravadosDialog
+      key={alvoTravados ? `${alvoTravados.marca ?? "todas"}-${alvoTravados.conta ?? "todas"}` : "fechado"}
+      api={API}
+      canal={filtros.channel}
+      alvo={alvoTravados}
+      aoFechar={() => setAlvoTravados(null)}
+    />
     <LayoutExpedicao
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
       // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
@@ -1457,12 +1553,14 @@ export default function ExpedicaoClient({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoPrazo}
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} />}
+            // A fila aberta da jornada repetiria o "Risco atual" (uma etapa so');
+            // na fila, a jornada mostra so' a coorte do periodo.
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} soCoorte />}
             evolucao={painelEvolucao}
             convite={
               aoTrocarVisao && (
                 <ConviteAoDetalhe
-                  conteudo="Fila de pedidos com filtros, os mais críticos, os indicadores secundários, a concentração por conta e a fonte por marca ficam no detalhe operacional."
+                  conteudo="Lista de pedidos, mais críticos e fonte por conta."
                   aoAbrir={() => aoTrocarVisao("detalhe")}
                 />
               )

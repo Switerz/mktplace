@@ -93,7 +93,11 @@ export default function RiscoEmDestaque({
           </p>
         ) : null}
       </section>
-      <section aria-label="Demais indicadores de risco" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:content-start">
+      {/* Os cartoes ESTICAM ate' a altura do destaque: sem faixa vazia embaixo. */}
+      <section
+        aria-label="Demais indicadores de risco"
+        className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:auto-rows-fr [&>*]:h-full"
+      >
         {secundarios}
       </section>
     </div>
