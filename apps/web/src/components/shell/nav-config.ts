@@ -65,6 +65,13 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: "/full-ml", label: "Full Mercado Livre" },
     ],
   },
+  // METAS-1 — grupo PROPRIO: Metas e' a unica tela da Torre que RECEBE dado
+  // digitado pelo time, e nao uma leitura. Rota de topo (`/metas`), sem prefixo
+  // comum com nenhuma outra, entao `isNavItemActive` nao acende dois itens.
+  {
+    label: "Planejamento",
+    pages: [{ href: "/metas", label: "Metas" }],
+  },
   // Gate AVH-4B-S — grupo PROPRIO, e nao um item dentro de Cockpits ou
   // Inteligência, de proposito: o que vive aqui e' dado de terceiro, com carga
   // manual, que nao e' KPI da Torre. A separacao na navegacao e' a primeira

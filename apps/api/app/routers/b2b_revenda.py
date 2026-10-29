@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from app import auth
 from app.auth import exigir_escopo
 from app.config import settings
-from app.rate_limit import JanelaDeslizante
+from app.rate_limit import JanelaDeslizante, chave_do_cliente
 from app.schemas.b2b_revenda import (
     B2BRevendaUnavailableResponse,
     CanaisMarcasResponse,
@@ -65,17 +65,6 @@ def _limitador(nome: str, por_minuto: int) -> JanelaDeslizante:
 def modo_publico() -> bool:
     """So' o valor EXATO abre. Desconhecido = autenticado (fail-closed)."""
     return (settings.b2b_revenda_access_mode or "").strip().lower() == MODO_PUBLICO
-
-
-def chave_do_cliente(request: Request) -> str:
-    """IP do cliente. Atras do proxy do Render o IP real vem no
-    `X-Forwarded-For`; usa-se o ULTIMO elemento (o que o proxy anexou), nao o
-    primeiro (que o cliente pode forjar). Sem o header, o IP da conexao."""
-    xff = request.headers.get("x-forwarded-for", "")
-    partes = [p.strip() for p in xff.split(",") if p.strip()]
-    if partes:
-        return partes[-1][:64]
-    return (request.client.host if request.client else "desconhecido")[:64]
 
 
 def acesso_b2b(

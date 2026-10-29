@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   ShoppingBag,
   Store,
+  Target,
   Truck,
   Users,
   Wallet,
@@ -56,6 +57,7 @@ export const ICONE_DA_ROTA: Record<string, LucideIcon> = {
   "/full-shopee": Boxes,
   "/estoque-full": PackageSearch,
   "/estoque-ml-full": PackageCheck,
+  "/metas": Target,
   "/performance-contas": Gauge,
   "/referencias-externas/avoe": BookMarked,
 };

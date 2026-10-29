@@ -188,7 +188,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # Gate TIKTOK-ADS-PRODUCTIZATION-1: head avancado de 030 para 031, que cria
     # marts.fact_tiktok_ads_daily_shadow sobre a 030 do LDR (nasceu 030 no
     # PR #92 e foi renumerada para nao abrir duas cabecas).
-    assert heads == ["031"], f"head deveria ser unico e igual a 031, veio {heads}"
+    # Gate METAS-1: head avancado de 031 para 032, que cria marts.meta_gmv_mensal
+    # e o historico de alteracoes (metas digitadas na aba "Metas"), sobre a 031.
+    assert heads == ["032"], f"head deveria ser unico e igual a 032, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
