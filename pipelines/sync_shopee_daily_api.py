@@ -331,13 +331,13 @@ def _ler_e_montar(inicio, fim, hoje, agora_utc):
 
 
 def run(apply: bool = False, desde: date | None = None, agora: datetime | None = None,
-        ambiente: dict | None = None) -> dict:
+        ambiente: dict | None = None, incluir_hoje: bool = False) -> dict:
     agora_utc = (agora or datetime.now(timezone.utc)).astimezone(timezone.utc)
     hoje = SH.hoje_brt(agora_utc)
-    inicio, fim = SH.janela(hoje, desde, DIAS_JANELA)
+    inicio, fim = SH.janela(hoje, desde, DIAS_JANELA, incluir_hoje=incluir_hoje)
     habilitado = (ambiente if ambiente is not None else os.environ).get(FLAG_HABILITADO) == "true"
     resumo = {"run_id": uuid.uuid4().hex, "hoje_brt": str(hoje), "janela": [str(inicio), str(fim)],
-              "lojas": sorted(LOJAS_COM_API), "aplicado": False}
+              "lojas": sorted(LOJAS_COM_API), "aplicado": False, "incluir_hoje": incluir_hoje}
 
     if not (apply and habilitado):
         snap, avisos, linhas = _ler_e_montar(inicio, fim, hoje, agora_utc)
@@ -377,9 +377,11 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"publica (exige {FLAG_HABILITADO}=true). Sem esta flag o run e' dry-run.")
     p.add_argument("--desde", type=date.fromisoformat, default=None,
                    help=f"inicio da janela (YYYY-MM-DD). Default: {DIAS_JANELA} dias ate' D-1")
+    p.add_argument("--incluir-hoje", action="store_true",
+                   help="publica tambem o dia corrente (parcial). Padrao: ate' D-1")
     args = p.parse_args(argv)
     try:
-        res = run(apply=args.apply, desde=args.desde)
+        res = run(apply=args.apply, desde=args.desde, incluir_hoje=args.incluir_hoje)
     except FatoDiariaLockUnavailable as exc:
         logger.error("%s", exc)
         return EXIT_CODE_LOCK_UNAVAILABLE

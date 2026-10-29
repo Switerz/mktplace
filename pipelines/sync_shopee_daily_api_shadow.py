@@ -115,12 +115,18 @@ def hoje_brt(agora: datetime | None = None) -> date:
     return (agora or datetime.now(OPERATIONAL_TZ)).astimezone(OPERATIONAL_TZ).date()
 
 
-def janela(hoje: date, desde: date | None = None, dias: int = DIAS_JANELA) -> tuple[date, date]:
-    """[inicio, fim] inclusivos, terminando SEMPRE em D-1 (dia fechado em BRT)."""
+def janela(hoje: date, desde: date | None = None, dias: int = DIAS_JANELA,
+           incluir_hoje: bool = False) -> tuple[date, date]:
+    """[inicio, fim] inclusivos, terminando em D-1 (dia fechado em BRT).
+
+    `incluir_hoje` (so' `sync_shopee_daily_api --incluir-hoje`) leva o fim a D0,
+    parcial; o inicio nao muda. A rodada seguinte sem a flag regrava o dia fechado.
+    """
     if dias < 1:
         raise ShopeeDailyShadowError(f"dias precisa ser >= 1, recebido {dias}")
-    fim = hoje - timedelta(days=1)
-    inicio = desde if desde is not None else fim - timedelta(days=dias - 1)
+    fechado = hoje - timedelta(days=1)
+    inicio = desde if desde is not None else fechado - timedelta(days=dias - 1)
+    fim = hoje if incluir_hoje else fechado
     if inicio > fim:
         raise ShopeeDailyShadowError(f"janela vazia: inicio {inicio} depois do fim {fim}")
     return inicio, fim
