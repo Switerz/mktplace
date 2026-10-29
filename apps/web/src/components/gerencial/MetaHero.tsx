@@ -15,16 +15,11 @@ import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Target, TriangleAlert } from "lucide-react";
 
 import type { Marketplace } from "@/lib/mock-data";
+import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerencial/meta-progress";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPct } from "@/lib/formatters";
-
-const PONTO: Record<Marketplace, string> = {
-  tiktok: "bg-canal-tiktok",
-  ml: "bg-canal-ml",
-  shopee: "bg-canal-shopee",
-};
 
 const SELO: Record<StatusMeta, string> = {
   atingida: "border-ok/40 bg-ok-soft text-ok-ink",
@@ -49,6 +44,8 @@ interface Props {
   /** Mes comparavel com a meta; `null` = periodo nao e' um mes. */
   mesMeta: string | null;
   metasStatus: "loading" | "error" | "fresh";
+  /** Nova tentativa de ler as metas (so' elas; os demais blocos tem a propria). */
+  onRetryMetas: () => void;
   progresso: ProgressoMeta | null;
   /** Ate' onde o realizado tem dado, para o rotulo ("até 28/10"). */
   ultimoDia: string | null;
@@ -205,7 +202,7 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
   );
 }
 
-function SemMeta({ mesMeta, metasStatus, metasHref }: Props) {
+function SemMeta({ mesMeta, metasStatus, metasHref, onRetryMetas }: Props) {
   let texto: string;
   if (!mesMeta) texto = "A meta é mensal: escolha “Mês atual” ou um mês fechado no período para ver o atingimento.";
   else if (metasStatus === "loading") texto = "Carregando a meta do mês…";
@@ -215,6 +212,15 @@ function SemMeta({ mesMeta, metasStatus, metasHref }: Props) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-dashed border-line-strong px-3 py-3 text-sm text-ink-muted">
       <Target aria-hidden="true" className="h-4 w-4 shrink-0 text-ink-faint" />
       <span className="min-w-0 flex-1">{texto}</span>
+      {metasStatus === "error" && (
+        <button
+          type="button"
+          onClick={onRetryMetas}
+          className="inline-flex min-h-11 items-center text-sm font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          Tentar novamente
+        </button>
+      )}
       {mesMeta && metasStatus === "fresh" && (
         <Link
           href={metasHref}

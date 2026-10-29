@@ -74,10 +74,11 @@ import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
 import MarcasMeta from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
 import {
-  decisoesDoTopo,
+  avisoQueAfetaOGmv,
   mesDaMeta,
   metaDoEscopo,
   progressoMeta,
+  topComerciais,
   ultimoDiaComDado,
   type ProgressoMeta,
 } from "@/lib/gerencial/meta-progress";
@@ -249,33 +250,37 @@ function GerencialInner() {
     () => ultimoDiaComDado(merged.buckets, merged.granularity),
     [merged.buckets, merged.granularity],
   );
+  // Em modo demonstracao o GMV e' exemplo: atingimento contra meta real seria
+  // um numero falso com cara de decisao.
+  const metaAplicavel = mesMeta != null && metas.status === "fresh" && !sources.demoMode;
   const progresso = useMemo(
     () =>
-      mesMeta && metas.status === "fresh"
+      metaAplicavel && mesMeta
         ? progressoMeta({ meta: metaEscopo.total, realizado: overview?.gmv ?? null, mes: mesMeta, hoje, ultimoDia })
         : null,
-    [mesMeta, metas.status, metaEscopo.total, overview, hoje, ultimoDia],
+    [metaAplicavel, mesMeta, metaEscopo.total, overview, hoje, ultimoDia],
   );
   const progressoPorMarca = useMemo(() => {
     const mapa: Record<string, ProgressoMeta | null> = {};
-    if (!mesMeta || metas.status !== "fresh") return mapa;
-    for (const b of brands) {
-      mapa[b.brand] = progressoMeta({
-        meta: metaEscopo.porMarca[b.brand] ?? null,
-        realizado: b.total_gmv,
+    // So' com `/brands` fresco: sem ele, "sem linha" nao quer dizer "sem venda".
+    if (!metaAplicavel || !mesMeta || !sources.brands.status.fresh) return mapa;
+    const realizado = new Map(brands.map((b) => [b.brand, b.total_gmv]));
+    // Marca com meta e SEM linha em `/brands` (nada vendido no recorte) entra
+    // com realizado zero: e' o caso mais urgente, nao pode sumir.
+    const ids = new Set([...realizado.keys(), ...Object.keys(metaEscopo.porMarca)]);
+    for (const id of ids) {
+      mapa[id] = progressoMeta({
+        meta: metaEscopo.porMarca[id] ?? null,
+        realizado: realizado.get(id) ?? 0,
         mes: mesMeta,
         hoje,
         ultimoDia,
       });
     }
     return mapa;
-  }, [mesMeta, metas.status, metaEscopo.porMarca, brands, hoje, ultimoDia]);
-  const decisoes = useMemo(
-    // O aviso de dado ja' aparece no bloco principal: aqui so' os comerciais.
-    () => decisoesDoTopo(queue.commercial, []).map((d) => d.item as CommercialAttentionItem),
-    [queue.commercial],
-  );
-  const avisoDeDado = queue.dataConfidence.find((d) => d.severity === "attention") ?? null;
+  }, [metaAplicavel, mesMeta, sources.brands.status.fresh, metaEscopo.porMarca, brands, hoje, ultimoDia]);
+  const decisoes = useMemo(() => topComerciais(queue.commercial), [queue.commercial]);
+  const avisoDeDado = avisoQueAfetaOGmv(queue.dataConfidence);
 
   // "Mais detalhes" comeca fechado; "Ver todos os sinais" abre e rola ate' la'.
   const detalhesRef = useRef<HTMLDetailsElement>(null);
@@ -412,6 +417,7 @@ function GerencialInner() {
         }}
         mesMeta={mesMeta}
         metasStatus={metas.status === "idle" ? "fresh" : metas.status}
+        onRetryMetas={metas.tentarDeNovo}
         progresso={progresso}
         ultimoDia={ultimoDia}
         aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}

@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  decisoesDoTopo,
+  avisoQueAfetaOGmv,
+  topComerciais,
   diasNoMes,
   mesDaMeta,
   metaDoEscopo,
@@ -114,20 +115,23 @@ test("sem meta, meta zero ou sem realizado: nao ha progresso", () => {
   assert.equal(progressoMeta({ ...base, meta: 1, realizado: null }), null);
 });
 
-test("decisoesDoTopo: um aviso de dado primeiro, depois comerciais por severidade, ate' 3", () => {
+test("topComerciais: por severidade, ordem da fila no empate, ate' 3", () => {
   const c = [
     { key: "a", severity: "info" as const },
     { key: "b", severity: "warning" as const },
     { key: "c", severity: "critical" as const },
     { key: "d", severity: "warning" as const },
   ];
-  const d = [
-    { key: "n", severity: "note" as const },
-    { key: "x", severity: "attention" as const },
-    { key: "y", severity: "attention" as const },
-  ];
-  const r = decisoesDoTopo(c, d);
-  assert.deepEqual(r.map((x) => `${x.tipo}:${x.item.key}`), ["dado:x", "comercial:c", "comercial:b"]);
-  assert.deepEqual(decisoesDoTopo(c, []).map((x) => x.item.key), ["c", "b", "d"]);
-  assert.deepEqual(decisoesDoTopo([], [{ key: "n", severity: "note" as const }]), []);
+  assert.deepEqual(topComerciais(c).map((x) => x.key), ["c", "b", "d"]);
+  assert.deepEqual(topComerciais(c, 10).map((x) => x.key), ["c", "b", "d", "a"]);
+  assert.deepEqual(topComerciais([]), []);
+});
+
+test("avisoQueAfetaOGmv: so' aviso de atencao da fonte do GMV", () => {
+  const regiao = { key: "r", severity: "attention" as const, source: "fact_marketplace_region_daily" };
+  const gmv = { key: "g", severity: "attention" as const, source: "fact_marketplace_daily_performance" };
+  const nota = { key: "n", severity: "note" as const, source: "fact_marketplace_daily_performance" };
+  assert.equal(avisoQueAfetaOGmv([regiao, nota]), null);
+  assert.equal(avisoQueAfetaOGmv([regiao, nota, gmv])?.key, "g");
+  assert.equal(avisoQueAfetaOGmv([{ key: "x", severity: "attention" as const, source: null }]), null);
 });

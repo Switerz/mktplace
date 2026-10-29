@@ -14,16 +14,11 @@ import Link from "next/link";
 
 import type { BrandRow } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
+import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import type { ProgressoMeta, StatusMeta } from "@/lib/gerencial/meta-progress";
-import { fmtCompacto } from "@/lib/metas";
+import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPct } from "@/lib/formatters";
-
-const PONTO: Record<Marketplace, string> = {
-  tiktok: "bg-canal-tiktok",
-  ml: "bg-canal-ml",
-  shopee: "bg-canal-shopee",
-};
 
 const CHIP: Record<StatusMeta, string> = {
   atingida: "bg-ok-soft text-ok-ink",
@@ -51,7 +46,12 @@ interface Props {
 }
 
 export default function MarcasMeta({ brands, channels, progressoPorMarca, compareActive, loading, error, brandHref }: Props) {
-  const linhas = [...brands]
+  // Marca com meta e sem linha em `/brands` (nada vendido no recorte) entra
+  // com tudo zerado: mostrar 0% da meta e' o ponto, nao esconder a marca.
+  const semVenda: BrandRow[] = Object.keys(progressoPorMarca)
+    .filter((id) => progressoPorMarca[id] && !brands.some((b) => b.brand === id))
+    .map((id) => linhaZerada(id));
+  const linhas = [...brands, ...semVenda]
     .filter((b) => b.total_gmv > 0 || progressoPorMarca[b.brand])
     .sort((a, b) => b.total_gmv - a.total_gmv);
   const algumaMeta = linhas.some((b) => progressoPorMarca[b.brand]);
@@ -134,4 +134,14 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
       )}
     </section>
   );
+}
+
+function linhaZerada(brand: string): BrandRow {
+  const label = MARCAS.find((m) => m.id === brand)?.label ?? brand.toUpperCase();
+  return {
+    brand, label, tiktok_gmv: null, ml_gmv: null, shopee_gmv: null, total_gmv: 0, orders: 0,
+    avg_ticket: null, tiktok_avg_ticket: null, ml_avg_ticket: null,
+    tiktok_gmv_prev: null, ml_gmv_prev: null, shopee_gmv_prev: null, total_gmv_prev: 0,
+    mom_pct: null, cos_pct: null, gpm: null, ml_roas: null, ml_cancel_rate_pct: null,
+  };
 }

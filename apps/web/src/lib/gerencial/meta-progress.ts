@@ -179,24 +179,29 @@ export function progressoMeta(args: {
 }
 
 /**
- * As ate' 3 coisas que pedem decisao, na ordem: primeiro um aviso de dado que
- * pode estar distorcendo o numero (antes de reagir a uma queda, confirme a
- * carga), depois os sinais comerciais por severidade.
+ * Os ate' `limite` sinais comerciais que pedem decisao, por severidade
+ * (critico, atencao, informativo) e, no empate, na ordem da fila. O aviso de
+ * dado nao entra: ele aparece colado no GMV, no bloco principal.
  */
-export function decisoesDoTopo<
-  C extends { severity: "critical" | "warning" | "info" },
-  D extends { severity: "attention" | "note" },
->(commercial: C[], dataConfidence: D[], limite = 3): ({ tipo: "dado"; item: D } | { tipo: "comercial"; item: C })[] {
+export function topComerciais<C extends { severity: "critical" | "warning" | "info" }>(
+  commercial: C[],
+  limite = 3,
+): C[] {
   const ordem = { critical: 0, warning: 1, info: 2 } as const;
-  const saida: ({ tipo: "dado"; item: D } | { tipo: "comercial"; item: C })[] = [];
-  const aviso = dataConfidence.find((d) => d.severity === "attention");
-  if (aviso) saida.push({ tipo: "dado", item: aviso });
-  const comerciais = commercial
+  return commercial
     .map((item, i) => ({ item, i }))
-    .sort((a, b) => ordem[a.item.severity] - ordem[b.item.severity] || a.i - b.i);
-  for (const { item } of comerciais) {
-    if (saida.length >= limite) break;
-    saida.push({ tipo: "comercial", item });
-  }
-  return saida;
+    .sort((a, b) => ordem[a.item.severity] - ordem[b.item.severity] || a.i - b.i)
+    .slice(0, limite)
+    .map(({ item }) => item);
+}
+
+/**
+ * O aviso de dado que muda a leitura do GMV: so' os da fonte do fato diario de
+ * performance, que e' de onde sai o total. Aviso de regiao, por exemplo, nao
+ * distorce o GMV e fica na confianca no dado, em "Mais detalhes".
+ */
+export function avisoQueAfetaOGmv<D extends { severity: "attention" | "note"; source: string | null }>(
+  itens: D[],
+): D | null {
+  return itens.find((d) => d.severity === "attention" && (d.source ?? "").includes("daily_performance")) ?? null;
 }

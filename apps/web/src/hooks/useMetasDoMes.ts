@@ -7,7 +7,7 @@
  * e a falha dela nao pode apagar nenhum outro bloco. `mes = null` (periodo que
  * nao e' um mes) nao dispara requisicao.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { fetchMetas } from "@/lib/metas-api";
 import type { CelulaMetaGmv } from "@/lib/gerencial/meta-progress";
@@ -16,11 +16,13 @@ export type MetasDoMes =
   | { status: "idle" | "loading" | "error"; celulas: CelulaMetaGmv[] }
   | { status: "fresh"; celulas: CelulaMetaGmv[] };
 
-export function useMetasDoMes(mes: string | null): MetasDoMes {
+export function useMetasDoMes(mes: string | null): MetasDoMes & { tentarDeNovo: () => void } {
   const [estado, setEstado] = useState<{ mes: string | null; valor: MetasDoMes }>({
     mes: null,
     valor: { status: "idle", celulas: [] },
   });
+  const [tentativa, setTentativa] = useState(0);
+  const tentarDeNovo = useCallback(() => setTentativa((n) => n + 1), []);
 
   useEffect(() => {
     if (!mes) return;
@@ -32,8 +34,8 @@ export function useMetasDoMes(mes: string | null): MetasDoMes {
         if (!ctrl.signal.aborted) setEstado({ mes, valor: { status: "error", celulas: [] } });
       });
     return () => ctrl.abort();
-  }, [mes]);
+  }, [mes, tentativa]);
 
-  if (!mes) return { status: "idle", celulas: [] };
-  return estado.mes === mes ? estado.valor : { status: "loading", celulas: [] };
+  if (!mes) return { status: "idle", celulas: [], tentarDeNovo };
+  return { ...(estado.mes === mes ? estado.valor : { status: "loading", celulas: [] }), tentarDeNovo };
 }
