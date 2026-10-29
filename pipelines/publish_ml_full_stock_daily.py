@@ -30,9 +30,11 @@ CONTRATO DO APPLY
   airflow), terminou (`completo`/`parcial`) e registrou `PUBLICADA` para ela.
   Qualquer divergencia = recusa ANTES de qualquer DELETE/INSERT.
 - Coerencia da fotografia do run, por marca pedida (`conferir_coerencia`,
-  regras do produtor): snapshot e ponte com >= 1 linha do run, todo
-  inventario do snapshot na ponte e todo inventario do status no snapshot.
-  Falha = `fonte_incoerente`, recusa `nao_iniciada`.
+  invariantes do produtor para marca PUBLICADA): snapshot sem duplicata,
+  inventarios do snapshot == `inventory_id` nao nulos da ponte (nas duas
+  direcoes), `read_status` so' OK/NAO_ENCONTRADO e status so' de inventario
+  lido OK. Mais a regra do PUBLICADOR: snapshot (e ponte) com >= 1 linha do
+  run. Falha = `fonte_incoerente`, recusa `nao_iniciada`.
 - `--publish-run-id` vira o `source_run_id` das linhas. Id ja' presente em
   qualquer fato = recusa (checado antes e de novo dentro do lock).
 
@@ -119,6 +121,13 @@ RAW_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,36}$")      # raw.*.run_id e' VARC
 #: (airflow `snapshot.py`: PUBLICADA so' depois do DELETE+INSERT da marca).
 RUN_STATUS_TERMINADO = ("completo", "parcial")
 DESFECHO_PUBLICADA = "PUBLICADA"
+#: `read_status` do snapshot, com os nomes do produtor (airflow `snapshot.py`
+#: L62-65: LEITURA_OK, LEITURA_NAO_ENCONTRADO, LEITURA_CONTRATO="CONTRATO_QUEBRADO").
+#: CONTRATO_QUEBRADO torna a coleta incompleta (L438-440) e a marca nao e'
+#: PUBLICADA (L330-331): numa marca PUBLICADA so' existem estes dois.
+LEITURA_OK = "OK"
+LEITURA_NAO_ENCONTRADO = "NAO_ENCONTRADO"
+LEITURAS_DE_MARCA_PUBLICADA = frozenset({LEITURA_OK, LEITURA_NAO_ENCONTRADO})
 
 ESTADO_NAO_INICIADA = "nao_iniciada"
 ESTADO_REVERTIDA = "revertida_comprovada"
@@ -417,33 +426,52 @@ def conferir_linhagem(fonte, ref_date: date, raw_runs: dict) -> None:
 def conferir_coerencia(fonte, raw_runs: dict) -> None:
     """Fotografia do run esperado coerente por marca, ou `fonte_incoerente` (antes de qualquer escrita).
 
-    `conferir_linhagem` so' recusa run ALHEIO: conjunto vazio passa. Estas regras
-    sao as que o produtor garante para marca PUBLICADA (airflow
-    `mercadolivre/ingestion/full_stock/snapshot.py`, `coletar_marca` +
-    `GravadorDataMart.publicar_marca`, as tres tabelas numa transacao):
-    - snapshot = um registro por `inventory_id` NAO nulo da ponte => snapshot
-      com >= 1 linha (sem ela nao ha' fotografia) e ponte com >= 1 linha;
-    - todo inventario do snapshot esta' na ponte do mesmo run;
-    - status so' e' emitido para inventario lido => todo inventario do status
-      esta' no snapshot do mesmo run. Status VAZIO e' legitimo (nenhum
-      indisponivel) e nao e' recusado.
-    Chave: (seller_id, inventory_id). A mensagem leva contagens, nunca ids.
+    `conferir_linhagem` so' recusa run ALHEIO: conjunto vazio passa. As regras
+    abaixo sao as INVARIANTES do produtor para marca PUBLICADA (airflow
+    `mercadolivre/ingestion/full_stock/snapshot.py` @ ab0ad334); a linha que
+    garante cada uma esta' no runbook, secao 7.1. Chave: (seller_id, inventory_id).
+    - snapshot sem duplicata: uma linha por inventario distinto (L424);
+    - inventarios do snapshot == `inventory_id` NAO nulos da ponte, nas duas
+      direcoes (L424). Ponte com `inventory_id` nulo e' legitima e nao conta;
+    - `read_status` em {OK, NAO_ENCONTRADO}: CONTRATO_QUEBRADO deixa a coleta
+      incompleta e a marca nao e' PUBLICADA (L438-440, L330-331);
+    - status so' de inventario lido OK (L443-449): todo inventario do status
+      esta' no snapshot com `read_status=OK`. Status VAZIO e' legitimo.
+    Regra do PUBLICADOR, nao do produtor (que publica marca sem anuncio com 0
+    linhas): snapshot com >= 1 linha do run, a mesma recusa de
+    `marca_pedida_sem_fotografia`; com a igualdade acima, a ponte tambem tem
+    >= 1 linha. A mensagem leva contagens, nunca ids.
     """
+    def recusa(m, rid, msg):
+        raise PublicacaoRecusada(f"fonte_incoerente: {m} {msg} do run {rid}")
+
     for m, rid in sorted(raw_runs.items()):
         do_run = {k: [r for r in fonte[k] if r["brand"] == m and r.get("run_id") == rid]
                   for k in ("snapshot", "status", "ponte")}
         for k in ("snapshot", "ponte"):
             if not do_run[k]:
                 raise PublicacaoRecusada(f"fonte_incoerente: {m} sem linha do run {rid} em {k}")
-        snap = {(r["seller_id"], r["inventory_id"]) for r in do_run["snapshot"]}
+        chaves = [(r["seller_id"], r["inventory_id"]) for r in do_run["snapshot"]]
+        snap = set(chaves)
+        if len(chaves) != len(snap):
+            recusa(m, rid, f"tem {len(chaves) - len(snap)} linha(s) duplicada(s) no snapshot")
+        fora_do_dominio = sum(1 for r in do_run["snapshot"]
+                              if r.get("read_status") not in LEITURAS_DE_MARCA_PUBLICADA)
+        if fora_do_dominio:
+            recusa(m, rid, f"tem {fora_do_dominio} inventario(s) do snapshot com read_status fora de "
+                           f"{sorted(LEITURAS_DE_MARCA_PUBLICADA)}")
         ponte = {(r["seller_id"], r["inventory_id"]) for r in do_run["ponte"] if r.get("inventory_id")}
-        status = {(r["seller_id"], r["inventory_id"]) for r in do_run["status"]}
         if snap - ponte:
-            raise PublicacaoRecusada(
-                f"fonte_incoerente: {m} tem {len(snap - ponte)} inventario(s) do snapshot fora da ponte do run {rid}")
+            recusa(m, rid, f"tem {len(snap - ponte)} inventario(s) do snapshot fora da ponte")
+        if ponte - snap:
+            recusa(m, rid, f"tem {len(ponte - snap)} inventario(s) da ponte fora do snapshot")
+        status = {(r["seller_id"], r["inventory_id"]) for r in do_run["status"]}
         if status - snap:
-            raise PublicacaoRecusada(
-                f"fonte_incoerente: {m} tem {len(status - snap)} inventario(s) do status fora do snapshot do run {rid}")
+            recusa(m, rid, f"tem {len(status - snap)} inventario(s) do status fora do snapshot")
+        lidos = {(r["seller_id"], r["inventory_id"]) for r in do_run["snapshot"]
+                 if r.get("read_status") == LEITURA_OK}
+        if status - lidos:
+            recusa(m, rid, f"tem {len(status - lidos)} inventario(s) do status sem leitura OK no snapshot")
 
 
 # ---------------------------------------------------------------------------

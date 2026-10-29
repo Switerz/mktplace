@@ -32,8 +32,11 @@ def ponte(brand, item, inv, var="0", lt="fulfillment", st="active", seller="S1")
 
 
 def cenario():
+    # Fiel ao produtor (airflow full_stock/snapshot.py L424): uma linha de snapshot por
+    # inventory_id NAO nulo da ponte, nas duas direcoes; status so' de inventario OK.
     snapshot = [snap("b", "IA", 56, nao=5), snap("b", "IB", 0), snap("b", "IC", status="NAO_ENCONTRADO"),
-                snap("b", "ID", 30), snap("b", "IE", 500)]
+                snap("b", "ID", 30), snap("b", "IE", 500),
+                snap("b", "IV1", status="NAO_ENCONTRADO"), snap("b", "IV2", status="NAO_ENCONTRADO")]
     status = [{"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "transfer", "quantity": 4},
               {"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "statusNovo", "quantity": 1}]
     p = [ponte("b", "M1", "IA"), ponte("b", "M2", "IA"), ponte("b", "M3", "IA", st="closed", lt="cross_docking"),
@@ -78,7 +81,7 @@ def test_venda_de_anuncio_inativo_entra_na_velocidade():
 
 def test_variacao_casa_pelo_par_item_variacao():
     s, st, p, v = cenario()
-    s = s + [snap("b", "IV1", 10), snap("b", "IV2", 10)]
+    s = [x for x in s if x["inventory_id"] not in ("IV1", "IV2")] + [snap("b", "IV1", 10), snap("b", "IV2", 10)]
     v = {**v, ("b", "MV", "11"): 5}
     l = por_inv(T.indicadores(s, st, p, v)[0])
     assert l["IV1"]["unidades_28d"] == 5 and l["IV2"]["unidades_28d"] == 0

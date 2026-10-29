@@ -434,7 +434,7 @@ def test_publicacao_lock_primeiro_delete_por_marca_e_reconcilia(ambiente, monkey
     assert len(deletes) == 3 and all(p["marcas"] == ["barbours"] for p in deletes)
     tabelas = [t for t, _ in ambiente["inseridos"]]
     assert tabelas == [pub.FACT_INVENTARIO, pub.FACT_STATUS, pub.FACT_MARCA]
-    assert ambiente["audit"][0] == ("start", 5) and ambiente["audit"][-1][0] == "success"
+    assert ambiente["audit"][0] == ("start", 7) and ambiente["audit"][-1][0] == "success"   # 5 + IV1/IV2
     assert eng.begins == 1 and eng.commits == 1
 
 
@@ -1097,11 +1097,42 @@ def _ponte_de_outro_seller(f):           # mesmo inventory_id, conta diferente: 
     return f
 
 
+def _ponte_fora_do_snapshot(f):          # o produtor le TODO inventory_id nao nulo da ponte (L424)
+    f["ponte"].append(dict(f["ponte"][0], item_id="M9", inventory_id="IZ"))
+    return f
+
+
+def _variacoes_sem_snapshot(f):          # a fixture antiga: IV1/IV2 na ponte e fora do snapshot
+    f["snapshot"] = [s for s in f["snapshot"] if s["inventory_id"] not in ("IV1", "IV2")]
+    return f
+
+
+def _read_status_contrato_quebrado(f):   # coleta incompleta: o produtor nao publica a marca (L438-440)
+    f["snapshot"] = [dict(s, read_status="CONTRATO_QUEBRADO") if s["inventory_id"] == "IB" else s
+                     for s in f["snapshot"]]
+    return f
+
+
+def _status_de_inventario_nao_encontrado(f):   # status so' nasce de leitura OK (L443-449)
+    f["status"].append(dict(f["status"][0], inventory_id="IC", status_raw="lost"))
+    return f
+
+
+def _snapshot_duplicado(f):              # uma linha por inventario distinto (L424)
+    f["snapshot"].append(dict(f["snapshot"][0]))
+    return f
+
+
 @pytest.mark.parametrize("adultera,trecho", [
     (_sem_ponte, "sem linha do run run-raw-barbours-1 em ponte"),
     (_sem_snapshot_na_ponte, "1 inventario(s) do snapshot fora da ponte"),
     (_ponte_de_outro_seller, "1 inventario(s) do snapshot fora da ponte"),
+    (_ponte_fora_do_snapshot, "1 inventario(s) da ponte fora do snapshot"),
+    (_variacoes_sem_snapshot, "2 inventario(s) da ponte fora do snapshot"),
+    (_read_status_contrato_quebrado, "1 inventario(s) do snapshot com read_status fora de"),
     (_status_fora_do_snapshot, "1 inventario(s) do status fora do snapshot"),
+    (_status_de_inventario_nao_encontrado, "1 inventario(s) do status sem leitura OK no snapshot"),
+    (_snapshot_duplicado, "1 linha(s) duplicada(s) no snapshot"),
 ])
 def test_fonte_incoerente_recusa_nao_iniciada_sem_escrita(ambiente, monkeypatch, capsys, adultera, trecho):
     monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): adultera(fonte_barbours()))
@@ -1110,7 +1141,7 @@ def test_fonte_incoerente_recusa_nao_iniciada_sem_escrita(ambiente, monkeypatch,
     codigo, j = _main_json(capsys, ARGV_APPLY)
     assert codigo == 2 and j["estado_transacao"] == "nao_iniciada" and j["erro_classe"] == "PublicacaoRecusada"
     assert j["motivo"].startswith("fonte_incoerente: barbours") and trecho in j["motivo"]
-    for inv in ("IA", "IB", "IZ", "S1", "S9"):                     # contagens, nunca ids
+    for inv in ("IA", "IB", "IC", "IV1", "IZ", "M9", "S1", "S9"):   # contagens, nunca ids
         assert inv not in j["motivo"].replace("barbours", "")
     assert ambiente["audit"] == [] and ambiente["inseridos"] == []
 
@@ -1142,8 +1173,36 @@ def test_status_vazio_e_legitimo_e_publica(ambiente, monkeypatch):
 def test_ponte_com_anuncio_sem_inventario_nao_conta_como_cobertura():
     f = fonte_barbours()
     f["ponte"] = [dict(p, inventory_id=None) for p in f["ponte"]]
-    with pytest.raises(pub.PublicacaoRecusada, match="5 inventario\\(s\\) do snapshot fora da ponte"):
+    with pytest.raises(pub.PublicacaoRecusada, match="7 inventario\\(s\\) do snapshot fora da ponte"):
         pub.conferir_coerencia(f, {"barbours": RAW})
+
+
+def test_fixture_do_cenario_e_fiel_ao_produtor():
+    # A fixture tem de satisfazer as invariantes do produtor; nao o contrario.
+    f = fonte_barbours()
+    pub.conferir_coerencia(f, {"barbours": RAW})
+    snap = {s["inventory_id"] for s in f["snapshot"]}
+    assert snap == {p["inventory_id"] for p in f["ponte"] if p["inventory_id"]}
+    assert {s["read_status"] for s in f["snapshot"]} == {pub.LEITURA_OK, pub.LEITURA_NAO_ENCONTRADO}
+
+
+def test_ponte_com_inventory_id_nulo_e_legitima_e_publica(ambiente, monkeypatch):
+    # anuncio sem inventario: o produtor grava a linha da ponte e nao le snapshot dela (L424)
+    f = fonte_barbours()
+    assert any(p["inventory_id"] is None for p in f["ponte"])
+    f["ponte"] += [dict(f["ponte"][0], item_id="M10", inventory_id=None),
+                   dict(f["ponte"][0], item_id="M11", inventory_id="")]
+    pub.conferir_coerencia(f, {"barbours": RAW})
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): f)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_ok(Conn())))
+    r = pub.run(apply=True, ref_date=REF, **CONTRATO)
+    assert r["applied"] is True and r["inventarios_publicados"] == 7
+
+
+def test_status_vazio_e_coerente():
+    f = fonte_barbours()
+    f["status"] = []
+    pub.conferir_coerencia(f, {"barbours": RAW})
 
 
 def test_ler_fonte_que_nao_fica_repeatable_read_falha_antes_de_ler_dado(monkeypatch):
