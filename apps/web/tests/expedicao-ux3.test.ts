@@ -206,7 +206,11 @@ test("Shopee: a secao diz que NAO ha LDR e por que", () => {
 });
 
 test("Mercado Livre: prazo indisponivel pelo canal e envelhecimento da fila", () => {
-  assert.match(SEM_PRAZO_CANAL_ML, /Prazo indisponível pelo canal/);
+  assert.match(
+    SEM_PRAZO_CANAL_ML,
+    /^Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
+  );
+  assert.doesNotMatch(SEM_PRAZO_CANAL_ML, /Prazo indisponível pelo canal/, "frase antiga fora");
   assert.match(SEM_PRAZO_CANAL_ML, /Não há vencidos nem LDR/);
   const e = envelhecimentoDaFila(totais({ over_48h_count: 30 }), [frescor("a", 50), frescor("b", 200), frescor("c", null)])!;
   assert.deepEqual(e, { acima48h: 30, backlog: 100, maisAntigo: { marca: "b", horas: 200 } });
@@ -573,4 +577,24 @@ test("KpiComAjuda poe o `?` na linha de comparacao do KPI", () => {
     h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),
   );
   assert.match(html, /Fila aberta\. <span[^>]*><button[^>]*aria-label="O que é Backlog total"/);
+});
+
+// ===========================================================================
+// T-0021 — ML, secao Prazo: frase no padrao "Indisponível neste canal: …"
+// ===========================================================================
+test("ML Prazo: o painel renderiza 'Indisponível neste canal: …' (a frase antiga sai)", async () => {
+  const { default: Panel } = await import("../src/components/ui/Panel.tsx");
+  // Mesmo corpo do painel do ExpedicaoClient: `<p>{SEM_PRAZO_CANAL_ML}</p>`.
+  assert.match(CLIENTE, /<p className="text-sm text-ink">\{SEM_PRAZO_CANAL_ML\}<\/p>/);
+  const html = renderToStaticMarkup(
+    h(Panel, { titulo: "Prazo" }, h("p", { className: "text-sm text-ink" }, SEM_PRAZO_CANAL_ML)),
+  );
+  assert.match(
+    html,
+    /<p class="text-sm text-ink">Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
+  );
+  assert.doesNotMatch(html, /Prazo indisponível pelo canal:/);
+  // Igual ao rotulo de origem que o `?` mostra.
+  const ajuda = renderToStaticMarkup(h(AjudaMetrica, { chave: "mercadolivre.prazo", abertoInicial: true }));
+  assert.match(ajuda, /Indisponível neste canal/);
 });
