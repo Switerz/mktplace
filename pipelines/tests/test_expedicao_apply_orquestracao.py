@@ -236,6 +236,8 @@ class Cenario:
             "somente_leitura": "off", "tem_fila": True, "tem_resumo": True,
         }
         self.anteriores = anteriores or []
+        #: Colunas da 033 presentes no destino. Vazio = 033 nao aplicada.
+        self.colunas_etapa: list[str] = []
 
         self.target = ConexaoFake("target", self._rotear_target)
         self.source = ConexaoFake("source", self._rotear_source)
@@ -259,6 +261,10 @@ class Cenario:
         if sql.startswith("DELETE FROM"):
             self.ordem.append("delete")
             return []
+        if "information_schema.columns" in sql:
+            # T-0015: deteccao da 033. Fora de `ordem` de proposito - o roteiro
+            # das quinze etapas e' o do destino SEM a 033, que e' o de hoje.
+            return [{"column_name": c} for c in self.colunas_etapa]
         raise ErroDeUso(f"SQL inesperada no target: {sql[:60]!r}")
 
     def _rotear_source(self, conn, sql, params):

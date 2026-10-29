@@ -1,6 +1,6 @@
 """T-0011 — `GET /api/v1/expedicao/jornada` contra PostgreSQL REAL descartavel.
 
-O schema nasce das MIGRATIONS reais (`alembic upgrade head`, 001..030), num
+O schema nasce das MIGRATIONS reais (`alembic upgrade head`, 001..033), num
 cluster proprio subido por `pipelines/tests/postgres_descartavel.py`. Nada aqui
 alcanca Neon, Data Mart ou qualquer banco configurado: a URL sai do helper.
 
@@ -69,6 +69,36 @@ LOJAS = {"apice": 1, "barbours": 2, "kokeshi": 3, "lescent": 4, "rituaria": 5}
 # ---------------------------------------------------------------------------
 # Banco: cluster da sessao + migrations reais
 # ---------------------------------------------------------------------------
+#: T-0015: a cadeia sobe pelo `alembic.ini` e pelo `versions/` REAIS
+#: (001..033). `alvo` existe para o banco "sem a coluna `etapa`" da
+#: `test_expedicao_api_jornada_etapa.py`, que para na 032.
+ROTEIRO_MIGRAR = """
+import sys
+import alembic.config as C
+api, ini, alvo = sys.argv[1:4]
+sys.path.insert(0, api)
+C.main(argv=['-c', ini, 'upgrade', alvo])
+"""
+
+
+def migrar(url: str, *, alvo: str = "head") -> None:
+    """`alembic upgrade <alvo>` com o `alembic.ini` e o `versions/` reais.
+
+    `-P` tira o cwd do sys.path: `apps/api/alembic/` (as migrations)
+    sombrearia o pacote `alembic` instalado. O ambiente aponta as duas URLs
+    para o banco descartavel antes de o filho existir.
+    """
+    ambiente = dict(os.environ)
+    ambiente["DATABASE_URL"] = url
+    ambiente["DATAMART_DATABASE_URL"] = url
+    ambiente["PYTHONPATH"] = str(RAIZ)
+    r = subprocess.run(
+        [sys.executable, "-P", "-c", ROTEIRO_MIGRAR, str(RAIZ_API),
+         str(RAIZ_API / "alembic.ini"), alvo],
+        cwd=str(RAIZ_API), env=ambiente, capture_output=True, text=True)
+    assert r.returncode == 0, f"alembic upgrade {alvo} falhou: {r.stderr[-800:]}"
+
+
 @pytest.fixture(scope="module")
 def engine():
     if not PG.postgres_disponivel():
@@ -80,22 +110,7 @@ def engine():
             c.execute(text("CREATE DATABASE jornada_t0011"))
         adm.dispose()
         url = base.rsplit("/", 1)[0] + "/jornada_t0011"
-
-        ambiente = dict(os.environ)
-        ambiente["DATABASE_URL"] = url
-        ambiente["DATAMART_DATABASE_URL"] = url
-        ambiente["PYTHONPATH"] = str(RAIZ)
-        # `-P` tira o cwd do sys.path: `apps/api/alembic/` (as migrations)
-        # sombrearia o pacote `alembic` instalado. Mesmo roteiro do teste
-        # multicanal de integracao.
-        roteiro = (
-            "import alembic.config as C, sys;"
-            "sys.path.insert(0, r%s);" % repr(str(RAIZ_API))
-            + "C.main(argv=['upgrade', 'head'])"
-        )
-        r = subprocess.run([sys.executable, "-P", "-c", roteiro], cwd=str(RAIZ_API),
-                           env=ambiente, capture_output=True, text=True)
-        assert r.returncode == 0, f"alembic upgrade head falhou: {r.stderr[-800:]}"
+        migrar(url)
 
         eng = create_engine(url)
         _semear(eng)

@@ -184,7 +184,14 @@ def test_nenhum_modulo_do_pacote_menciona_pii():
 
 
 def test_colunas_publicadas_nao_tem_campo_de_comprador():
-    for coluna in publisher.FILA_COLUMNS + publisher.SUMMARY_COLUMNS:
+    # T-0015: as colunas CONDICIONAIS da 033 tambem sao publicadas. A lista e'
+    # fixada por igualdade para que uma terceira coluna nao entre por carona.
+    # `etapa_fonte` e' o order_status/substatus bruto: codigo de estado do
+    # marketplace, nao dado de comprador.
+    assert publisher.ETAPA_COLUMNS == ("etapa", "etapa_fonte")
+    for coluna in (
+        publisher.FILA_COLUMNS + publisher.ETAPA_COLUMNS + publisher.SUMMARY_COLUMNS
+    ):
         for token in PII_FORBIDDEN_TOKENS:
             assert token not in coluna.lower(), f"coluna {coluna} parece PII"
 

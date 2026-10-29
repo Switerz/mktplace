@@ -839,6 +839,16 @@ LIMITACOES_FILA = {
         "Full (fulfillment) fora da fila por contrato",
     ],
 }
+#: Limitacao que SAI quando a etapa real esta' publicada (T-0015). E' a
+#: primeira de `LIMITACOES_FILA` de cada canal.
+LIMITACAO_ETAPA_NAO_PUBLICADA = {
+    "shopee": LIMITACOES_FILA["shopee"][0],
+    "mercadolivre": LIMITACOES_FILA["mercadolivre"][0],
+}
+#: Fato do contrato etapa v1, secao 2: a T-0015 NAO muda o backlog.
+LIMITACAO_ML_ENTREGUE_NO_BACKLOG = (
+    "envios 'entregue à transportadora' ainda contam no backlog: o Mercado Livre "
+    "mantém o status ready_to_ship")
 LIMITACAO_TIKTOK_SEM_FILA = (
     "o TikTok não publica fila aberta em grão de pedido; só a coorte diária")
 LIMITACAO_TIKTOK_PRAZO = (
@@ -984,6 +994,66 @@ def _fila_vazia_publicada(db, canal: Canal) -> tuple[Optional[dict], Optional[st
             "linhas": 0, "resumos": resumos}, None
 
 
+#: T-0015 (contrato etapa v1, secoes 3 e 5). Ordem ESTAVEL no fluxo do pedido;
+#: o rotulo e' do contrato. `nao_publicada` e' o DEFAULT da 033: linha gravada
+#: antes dela ou pelo publicador antigo.
+ETAPAS_FILA = (
+    ("a_faturar", "A faturar"),
+    ("a_imprimir", "A imprimir"),
+    ("em_separacao", "Em separação"),
+    ("a_preparar", "A preparar"),
+    ("aguardando_coleta", "Aguardando coleta"),
+    ("entregue_transportadora", "Entregue à transportadora"),
+    ("sinalizado_ml", "Sinalizado pelo Mercado Livre"),
+    ("outro", "Outro status da fonte"),
+    ("nao_publicada", "Etapa ainda não publicada"),
+)
+ETAPA_NAO_PUBLICADA = "nao_publicada"
+_ORDEM_ETAPA = {k: i for i, (k, _) in enumerate(ETAPAS_FILA)}
+_ROTULO_ETAPA = dict(ETAPAS_FILA)
+
+_COLUNA_ETAPA_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'marts' AND table_name = 'expedicao_fila_atual'
+          AND column_name = 'etapa'
+    ) AS ok
+"""
+
+
+def _etapas_publicadas(db, canal: Canal, batch: str,
+                       filtro: _FiltroMarca) -> Optional[dict[str, int]]:
+    """Contagem por `etapa` do lote, no servidor, com o filtro de marca.
+
+    `None` quando a 033 nao esta' no destino. A deteccao roda na MESMA
+    transacao REPEATABLE READ da resposta (`_abrir_snapshot`); a contagem cai
+    no mesmo snapshot da base, entao a soma fecha com ela.
+    """
+    if db.execute(text(_COLUNA_ETAPA_SQL)).scalar() is not True:
+        return None
+    return {
+        str(r["etapa"]): int(r["n"])
+        for r in _linhas(db, f"""
+            SELECT etapa, count(*) AS n
+            FROM {FILA}
+            WHERE channel = :canal AND refresh_batch_id = :batch{filtro.sql()}
+            GROUP BY etapa
+        """, {"canal": canal.slug, "batch": batch, **filtro.params()})
+    }
+
+
+def _etapas_reais(por_etapa: dict[str, int]) -> list[dict]:
+    """Uma entrada por etapa presente, na ordem do fluxo.
+
+    Valor fora do dominio (impossivel com o CHECK da 033, mas nunca 500) vai
+    para o fim, antes de `nao_publicada`, com a propria chave como rotulo.
+    """
+    fim = _ORDEM_ETAPA[ETAPA_NAO_PUBLICADA]
+    chaves = sorted(por_etapa, key=lambda k: (_ORDEM_ETAPA.get(k, fim - 0.5), k))
+    return [{"key": k, "label": _ROTULO_ETAPA.get(k, k), "count": por_etapa[k]}
+            for k in chaves]
+
+
 def _fila_aberta(db, channel: str,
                  filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
     """(secao, motivos, estado). `None` quando a fonte nao serve fotografia."""
@@ -1015,6 +1085,21 @@ def _fila_aberta(db, channel: str,
     base = int(linha["base"])
     etapas = [{"key": "aguardando_expedicao", "label": "Aguardando expedição",
                "count": int(linha["aguardando_expedicao"])}]
+    limitacoes = list(LIMITACOES_FILA[channel])
+    etapa_parcial = False
+
+    # T-0015: etapa real so' com a 033 no destino E alguma linha com etapa
+    # publicada. Sem a coluna, ou com tudo `nao_publicada`, a secao e' a de
+    # antes, byte a byte (etapa unica + limitacao).
+    por_etapa = _etapas_publicadas(db, canal, snap["batch"], filtro)
+    if por_etapa and any(k != ETAPA_NAO_PUBLICADA for k in por_etapa):
+        etapas = _etapas_reais(por_etapa)
+        etapa_parcial = ETAPA_NAO_PUBLICADA in por_etapa
+        if not etapa_parcial:
+            limitacoes.remove(LIMITACAO_ETAPA_NAO_PUBLICADA[channel])
+        if channel == "mercadolivre":
+            limitacoes.append(LIMITACAO_ML_ENTREGUE_NO_BACKLOG)
+
     sobreposicoes = []
     for chave, _sit in _FILA_SOBREPOSICOES:
         if channel == "mercadolivre" and chave in _SOBREPOSICOES_DE_PRAZO:
@@ -1023,6 +1108,10 @@ def _fila_aberta(db, channel: str,
         else:
             sobreposicoes.append({"key": chave, "count": int(linha[chave])})
     fecham, motivos = _confere(base, etapas, sobreposicoes, "fila_aberta")
+    if etapa_parcial:
+        # Parte do lote com etapa real e parte sem: numeros servidos como estao,
+        # sem reconciliar a forca (contrato etapa v1, secao 5).
+        motivos.append("fila_aberta: etapa_parcial")
 
     resumos = [r for r in snap["resumos"]
                if not filtro.marcas or str(r["brand"]).lower() in filtro.marcas]
@@ -1042,7 +1131,7 @@ def _fila_aberta(db, channel: str,
         "etapas": etapas,
         "etapas_fecham": fecham,
         "sobreposicoes": sobreposicoes,
-        "limitacoes": list(LIMITACOES_FILA[channel]),
+        "limitacoes": limitacoes,
     }
     return secao, motivos, "partial" if motivos else "ok"
 
