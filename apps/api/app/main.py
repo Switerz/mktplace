@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import readiness
-from app.routers import b2b_revenda, dre, expedicao, performance, regioes
+from app.routers import b2b_revenda, dre, expedicao, metas, performance, regioes
 
 app = FastAPI(
     title="Torre de Controle de Marketplaces — GoBeauté",
@@ -25,6 +25,7 @@ app.include_router(regioes.router)
 app.include_router(expedicao.router)
 app.include_router(dre.router)
 app.include_router(b2b_revenda.router)
+app.include_router(metas.router)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])

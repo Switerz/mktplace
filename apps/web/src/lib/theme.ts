@@ -83,7 +83,7 @@ export function resolverTema(
  *
  * DRE-UX-1 acrescentou `/dre`, que ja' nasce em tokens.
  */
-export const ROTAS_TEMATIZADAS = ["/expedicao", "/", "/canais", "/financeiro", "/dre"] as const;
+export const ROTAS_TEMATIZADAS = ["/expedicao", "/", "/canais", "/financeiro", "/dre", "/metas"] as const;
 
 export function rotaTematizada(pathname: string | null | undefined): boolean {
   if (!pathname) return false;

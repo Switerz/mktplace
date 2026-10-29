@@ -21,6 +21,8 @@ test("NAV_SECTIONS mantem os grupos existentes, na ordem original", () => {
       "Operações",
       // Gate AVH-4B-S — unico grupo acrescentado desde o Gate U1. Fica no fim
       // e isolado de proposito: dado de terceiro, carga manual, nao e' KPI.
+      // METAS-1 — grupo de entrada de dado do time, antes das referencias externas.
+      "Planejamento",
       "Referências externas",
     ],
   );
@@ -55,6 +57,8 @@ test("NAV_SECTIONS mantem exatamente as rotas atuais (nenhuma nova, nenhuma remo
     // prefixo, e um filho deixaria os dois itens ativos ao mesmo tempo.
     // Nao e estoque nem expedicao; mede por onde o pedido foi enviado.
     "/full-ml",
+    // METAS-1 — metas mensais de GMV por marca x canal (grupo Planejamento).
+    "/metas",
     // Gate AVH-4B-S Task 2/2 — referencias externas da Avoe.
     "/referencias-externas/avoe",
   ]);
