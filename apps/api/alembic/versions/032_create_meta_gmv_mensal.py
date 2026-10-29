@@ -32,10 +32,15 @@ NaN
 ---
 `'NaN'::numeric >= 0` e' TRUE no PostgreSQL: a faixa tem `<> 'NaN'` explicito.
 
+ENCADEAMENTO
+------------
+Nasceu 031 e foi renumerada para 032 ao mesclar a `main`, que ganhou a 031 do
+shadow de TikTok Ads: duas 031 abririam duas cabecas no Alembic.
+
 APLICACAO
 ---------
-Operacao manual e explicita no Neon (`alembic upgrade 031`). Reversivel por
-`alembic downgrade 030`, que derruba so' estas duas tabelas. A migration nao
+Operacao manual e explicita no Neon (`alembic upgrade 032`). Reversivel por
+`alembic downgrade 031`, que derruba so' estas duas tabelas. A migration nao
 insere dados.
 
 PERMISSAO
@@ -48,8 +53,8 @@ migration, porque o nome do papel nao e' versionado.
 """
 from alembic import op
 
-revision = "031"
-down_revision = "030"
+revision = "032"
+down_revision = "031"
 branch_labels = None
 depends_on = None
 

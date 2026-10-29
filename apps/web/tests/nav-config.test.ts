@@ -5,10 +5,13 @@ import assert from "node:assert/strict";
 import {
   EXPEDICAO_NAV,
   NAV_SECTIONS,
+  PERFORMANCE_CONTAS_NAV,
   SHOPEE_FBS_NAV,
   getRouteTitle,
   isNavItemActive,
+  navSections,
 } from "../src/components/shell/nav-config.ts";
+import { habilitado as performanceContasHabilitado } from "../src/lib/performance-contas.ts";
 import { buildPreservedQuery, hrefForPage } from "../src/lib/filters/nav-links.ts";
 
 test("NAV_SECTIONS mantem os grupos existentes, na ordem original", () => {
@@ -178,4 +181,42 @@ test("hrefForPage: paginas fora do contrato de filtros nunca recebem querystring
   assert.equal(hrefForPage("/tempo-real", "channels=ml"), "/tempo-real");
   assert.equal(hrefForPage("/inteligencia", "channels=ml"), "/inteligencia");
   assert.equal(hrefForPage("/operacoes", "channels=ml"), "/operacoes");
+});
+
+test("T-0014: Performance das contas ausente do menu com a flag desligada (padrao)", () => {
+  const hrefs = (secoes: ReturnType<typeof navSections>) =>
+    secoes.flatMap((s) => s.pages.map((p) => p.href));
+  assert.ok(!hrefs(NAV_SECTIONS).includes("/performance-contas"));
+  assert.ok(!hrefs(navSections()).includes("/performance-contas"));
+  assert.ok(!hrefs(navSections({ performanceContas: false })).includes("/performance-contas"));
+  // Flag derivada do mesmo helper fail-closed da tela: so' "true" exato liga.
+  for (const v of [undefined, "", "1", "TRUE", "yes"]) {
+    const flag = performanceContasHabilitado({ NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED: v });
+    assert.ok(!hrefs(navSections({ performanceContas: flag })).includes("/performance-contas"));
+  }
+  // Ligar as OUTRAS flags nao revela este item.
+  const outras = navSections({ expedicao: true, shopeeFbs: true, estoqueFull: true, mlFullEstoque: true });
+  assert.ok(!hrefs(outras).includes("/performance-contas"));
+});
+
+test("T-0014: Performance das contas presente em Operações com a flag ligada", () => {
+  const flag = performanceContasHabilitado({ NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED: "true" });
+  assert.equal(flag, true);
+  const secoes = navSections({ performanceContas: flag });
+  // Nenhum grupo novo.
+  assert.deepEqual(secoes.map((s) => s.label), NAV_SECTIONS.map((s) => s.label));
+  const comItem = secoes.filter((s) => s.pages.some((p) => p.href === "/performance-contas"));
+  assert.deepEqual(comItem.map((s) => s.label), ["Operações"]);
+  const item = comItem[0].pages.find((p) => p.href === "/performance-contas")!;
+  assert.deepEqual(item, { href: "/performance-contas", label: "Performance das contas" });
+  assert.equal(PERFORMANCE_CONTAS_NAV.label, "Performance das contas");
+  // Nao rouba o estado ativo de outra rota (casamento por prefixo).
+  for (const s of secoes) {
+    for (const p of s.pages) {
+      if (p.href === "/performance-contas" || p.href === "/") continue;
+      assert.equal(isNavItemActive(p.href, "/performance-contas"), false, p.href);
+    }
+  }
+  assert.equal(isNavItemActive("/performance-contas", "/performance-contas"), true);
+  assert.equal(getRouteTitle("/performance-contas"), "Performance das contas");
 });

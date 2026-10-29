@@ -1,6 +1,6 @@
 """METAS-1 — metas mensais de GMV por marca x canal (aba "Metas" da Torre).
 
-O grao e' `mes x brand x channel` (migration 031). Celula sem meta NAO tem
+O grao e' `mes x brand x channel` (migration 032). Celula sem meta NAO tem
 linha: "sem meta" e "meta zero" nao se confundem.
 
 A regra de quais celulas mudam vive em `planejar`, pura e testavel sem banco.
@@ -19,7 +19,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-#: Mesmas listas do CHECK da migration 031 (um teste confere).
+#: Mesmas listas do CHECK da migration 032 (um teste confere).
 MARCAS = ("apice", "barbours", "kokeshi", "lescent", "rituaria")
 CANAIS = ("tiktok", "ml", "shopee")
 

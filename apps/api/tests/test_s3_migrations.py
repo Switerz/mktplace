@@ -185,9 +185,12 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # Gate EXPEDICAO-SHOPEE-LDR-1: head avancado de 029 para 030, que cria
     # marts.expedicao_shopee_ldr_daily e marts.expedicao_shopee_ldr_sem_prazo_daily
     # (LDR operacional da Shopee). A 028 segue reservada ao PR #78.
-    # Gate METAS-1: head avancado de 030 para 031, que cria marts.meta_gmv_mensal
-    # e o historico de alteracoes (metas digitadas na aba "Metas").
-    assert heads == ["031"], f"head deveria ser unico e igual a 031, veio {heads}"
+    # Gate TIKTOK-ADS-PRODUCTIZATION-1: head avancado de 030 para 031, que cria
+    # marts.fact_tiktok_ads_daily_shadow sobre a 030 do LDR (nasceu 030 no
+    # PR #92 e foi renumerada para nao abrir duas cabecas).
+    # Gate METAS-1: head avancado de 031 para 032, que cria marts.meta_gmv_mensal
+    # e o historico de alteracoes (metas digitadas na aba "Metas"), sobre a 031.
+    assert heads == ["032"], f"head deveria ser unico e igual a 032, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

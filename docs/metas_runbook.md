@@ -8,7 +8,7 @@ na tela.
 
 | Peça | Onde |
 |---|---|
-| Tabelas | `marts.meta_gmv_mensal` (grão `mes × brand × channel`) e `marts.meta_gmv_mensal_historico` — migration `031` |
+| Tabelas | `marts.meta_gmv_mensal` (grão `mes × brand × channel`) e `marts.meta_gmv_mensal_historico` — migration `032` (sobre a `031` do TikTok Ads) |
 | API | `GET /api/v1/metas/{AAAA-MM}` e `PUT /api/v1/metas/{AAAA-MM}` (`apps/api/app/routers/metas.py`) |
 | Tela | `apps/web/app/metas/`, grade em `apps/web/src/components/metas/MetasGrade.tsx`, regras em `apps/web/src/lib/metas.ts` |
 
@@ -28,10 +28,10 @@ Regras:
 
    ```bash
    cd apps/api
-   alembic upgrade 031
+   alembic upgrade 032
    ```
 
-   Reversível com `alembic downgrade 030` (derruba só as duas tabelas; nenhuma outra relação é tocada).
+   Reversível com `alembic downgrade 031` (derruba só as duas tabelas; nenhuma outra relação é tocada).
 
 2. **Permissão de escrita** para o papel da `DATABASE_URL` do Render. São as
    primeiras tabelas que a API **escreve**. Trocar `<papel_da_api>` pelo papel real:
