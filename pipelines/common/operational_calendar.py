@@ -94,25 +94,51 @@ def dia_corrente_liberado() -> bool:
     return _DIA_CORRENTE_LIBERADO.get()
 
 
-def publish_ceiling(agora: datetime | None = None) -> date:
-    """Ultima data que pode ser publicada: D-1 por padrao, D0 dentro de
-    `liberar_dia_corrente()`. Futuro nunca."""
+#: O oposto: forca D-1 mesmo onde o padrao e' D0 (`--ate-ontem`). Vence
+#: `hoje_por_padrao`; `liberar_dia_corrente()` vence os dois.
+_SO_DIAS_FECHADOS: ContextVar[bool] = ContextVar("so_dias_fechados", default=False)
+
+
+@contextmanager
+def apenas_dias_fechados() -> Iterator[None]:
+    """Dentro do bloco, o teto e' D-1 mesmo nas fontes com D0 por padrao."""
+    token = _SO_DIAS_FECHADOS.set(True)
+    try:
+        yield
+    finally:
+        _SO_DIAS_FECHADOS.reset(token)
+
+
+def so_dias_fechados() -> bool:
+    return _SO_DIAS_FECHADOS.get()
+
+
+def inclui_dia_corrente(hoje_por_padrao: bool = False) -> bool:
+    """D0 entra? Liberacao explicita > `--ate-ontem` > padrao da fonte."""
     if dia_corrente_liberado():
+        return True
+    return hoje_por_padrao and not so_dias_fechados()
+
+
+def publish_ceiling(agora: datetime | None = None, hoje_por_padrao: bool = False) -> date:
+    """Ultima data que pode ser publicada: D-1, ou D0 quando
+    `inclui_dia_corrente(hoje_por_padrao)`. Futuro nunca."""
+    if inclui_dia_corrente(hoje_por_padrao):
         return operational_today(agora)
     return last_closed_date(agora)
 
 
 def assert_closed_day(limite: date, agora: datetime | None = None,
-                      rotulo: str = "date_to") -> date:
+                      rotulo: str = "date_to", *, hoje_por_padrao: bool = False) -> date:
     """Valida `limite <= publish_ceiling` (D-1, ou D0 se liberado) e devolve o
     proprio limite.
 
     Levanta `ValueError` com a razao explicita. Usado ANTES de qualquer I/O:
     sessao de escrita, registro de audit ou consulta a fonte.
     """
-    teto = publish_ceiling(agora)
+    teto = publish_ceiling(agora, hoje_por_padrao)
     if limite > teto:
-        if dia_corrente_liberado():
+        if inclui_dia_corrente(hoje_por_padrao):
             raise ValueError(
                 f"{rotulo}={limite.isoformat()} e' posterior ao dia corrente "
                 f"({teto.isoformat()}) em America/Sao_Paulo."
@@ -126,7 +152,8 @@ def assert_closed_day(limite: date, agora: datetime | None = None,
     return limite
 
 
-def closed_window(days_back: int, agora: datetime | None = None) -> tuple[date, date]:
+def closed_window(days_back: int, agora: datetime | None = None, *,
+                  hoje_por_padrao: bool = False) -> tuple[date, date]:
     """Janela INCLUSIVA de `days_back + 1` dias terminando em D-1 (em D0 dentro
     de `liberar_dia_corrente()`).
 
@@ -138,5 +165,5 @@ def closed_window(days_back: int, agora: datetime | None = None) -> tuple[date, 
         raise ValueError(f"days_back precisa ser inteiro: recebido {days_back!r}.")
     if days_back < 0:
         raise ValueError(f"days_back nao pode ser negativo: {days_back}.")
-    fim = publish_ceiling(agora)
+    fim = publish_ceiling(agora, hoje_por_padrao)
     return fim - timedelta(days=days_back), fim

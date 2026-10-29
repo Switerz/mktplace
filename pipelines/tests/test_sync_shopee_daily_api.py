@@ -236,13 +236,21 @@ def test_run_incluir_hoje_publica_janela_ate_d0(monkeypatch):
     assert res["incluir_hoje"] is True
 
 
-def test_main_repassa_incluir_hoje(monkeypatch):
+def test_main_inclui_hoje_por_padrao_e_ate_ontem_desliga(monkeypatch):
     recebidos = {}
     monkeypatch.setattr(D, "run", lambda **k: recebidos.update(k) or {})
+    assert D.main([]) == 0
+    assert recebidos["incluir_hoje"] is True
     assert D.main(["--incluir-hoje"]) == 0
     assert recebidos["incluir_hoje"] is True
-    assert D.main([]) == 0
+    assert D.main(["--ate-ontem"]) == 0
     assert recebidos["incluir_hoje"] is False
+
+
+def test_run_sem_argumento_publica_ate_d0(monkeypatch):
+    _preparar_dry_run(monkeypatch, [bruta()])
+    res = D.run(apply=False, agora=AGORA, ambiente={})
+    assert res["janela"][1] == str(HOJE) and res["incluir_hoje"] is True
 
 
 def test_main_lock_ocupado_sai_75(monkeypatch):

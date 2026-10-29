@@ -56,17 +56,17 @@ def fetch(date_from: date, date_to: date) -> list[dict]:
 
 def fetch_incremental(days_back: int = 3) -> list[dict]:
     """Ãšltimos N dias â€” para sync diÃ¡rio incremental."""
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch(inicio, fim)
 
 
 def fetch_backfill(days_back: int = 150) -> list[dict]:
     """Backfill histÃ³rico â€” padrÃ£o 150 dias (~5 meses, cobrindo jan-mai 2026)."""
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch(inicio, fim)
 
 
@@ -98,16 +98,16 @@ def fetch_shop_stats(date_from: date, date_to: date) -> list[dict]:
 
 
 def fetch_shop_stats_incremental(days_back: int = 3) -> list[dict]:
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch_shop_stats(inicio, fim)
 
 
 def fetch_shop_stats_backfill(days_back: int = 150) -> list[dict]:
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch_shop_stats(inicio, fim)
 
 
@@ -136,16 +136,16 @@ def fetch_ads(date_from: date, date_to: date) -> list[dict]:
 
 
 def fetch_ads_incremental(days_back: int = 3) -> list[dict]:
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch_ads(inicio, fim)
 
 
 def fetch_ads_backfill(days_back: int = 150) -> list[dict]:
-    # Gate DQ-D1: teto em D-1 (America/Sao_Paulo), nunca D0. A LARGURA
-    # inclusiva da janela e' a mesma de antes — apenas o teto desceu um dia.
-    inicio, fim = closed_window(days_back)
+    # Teto em D0 (America/Sao_Paulo): a Shopee publica o dia corrente parcial
+    # por padrao; `--ate-ontem` volta a D-1. A largura inclusiva nao muda.
+    inicio, fim = closed_window(days_back, hoje_por_padrao=True)
     return fetch_ads(inicio, fim)
 
 

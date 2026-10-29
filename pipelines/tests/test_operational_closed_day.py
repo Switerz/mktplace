@@ -119,17 +119,21 @@ def _captura(monkeypatch, mod, nome):
     return vistos
 
 
-@pytest.mark.parametrize("mod,fn,alvo,dias", [
-    (tk, "fetch_incremental", "fetch", 10),
-    (tk, "fetch_backfill", "fetch", 90),
-    (ml, "fetch_incremental", "fetch", 3),
-    (ml, "fetch_backfill", "fetch", 90),
+CAMINHOS_SHOPEE = [
     (sh, "fetch_incremental", "fetch", 3),
     (sh, "fetch_backfill", "fetch", 150),
     (sh, "fetch_shop_stats_incremental", "fetch_shop_stats", 3),
     (sh, "fetch_shop_stats_backfill", "fetch_shop_stats", 150),
     (sh, "fetch_ads_incremental", "fetch_ads", 3),
     (sh, "fetch_ads_backfill", "fetch_ads", 150),
+]
+
+
+@pytest.mark.parametrize("mod,fn,alvo,dias", [
+    (tk, "fetch_incremental", "fetch", 10),
+    (tk, "fetch_backfill", "fetch", 90),
+    (ml, "fetch_incremental", "fetch", 3),
+    (ml, "fetch_backfill", "fetch", 90),
 ])
 def test_todo_caminho_termina_em_d1(monkeypatch, congela, mod, fn, alvo, dias):
     vistos = _captura(monkeypatch, mod, alvo)
@@ -138,6 +142,25 @@ def test_todo_caminho_termina_em_d1(monkeypatch, congela, mod, fn, alvo, dias):
     assert fim == FECHADO, f"{mod.__name__}.{fn} terminou em {fim}, esperado D-1"
     assert fim < date(2026, 8, 28), "D0 alcancado"
     assert (fim - inicio).days == dias, "largura inclusiva alterada"
+
+
+@pytest.mark.parametrize("mod,fn,alvo,dias", CAMINHOS_SHOPEE)
+def test_shopee_termina_em_d0_por_padrao(monkeypatch, congela, mod, fn, alvo, dias):
+    monkeypatch.setattr(cal, "operational_today", lambda agora=None: date(2026, 8, 28))
+    vistos = _captura(monkeypatch, mod, alvo)
+    getattr(mod, fn)()
+    inicio, fim = vistos["janela"]
+    assert fim == date(2026, 8, 28)
+    assert (fim - inicio).days == dias, "largura inclusiva alterada"
+
+
+@pytest.mark.parametrize("mod,fn,alvo,dias", CAMINHOS_SHOPEE)
+def test_shopee_ate_ontem_volta_a_d1(monkeypatch, congela, mod, fn, alvo, dias):
+    monkeypatch.setattr(cal, "operational_today", lambda agora=None: date(2026, 8, 28))
+    vistos = _captura(monkeypatch, mod, alvo)
+    with cal.apenas_dias_fechados():
+        getattr(mod, fn)()
+    assert vistos["janela"][1] == FECHADO
 
 
 def test_largura_do_lookback_preservada(monkeypatch, congela):
@@ -270,11 +293,62 @@ def test_segunda_defesa_aceita_d0_so_quando_liberado(monkeypatch):
     monkeypatch.setattr(dp, "operational_today", lambda agora=None: HOJE)
     rows = [{"date": HOJE, "loja_id": 3}]
     with pytest.raises(dp.ClosedDayViolation):
-        dp._assert_canonical_rows_closed(rows, "shopee")
+        dp._assert_canonical_rows_closed(rows, "tiktok")
     with cal.liberar_dia_corrente():
-        dp._assert_canonical_rows_closed(rows, "shopee")
+        dp._assert_canonical_rows_closed(rows, "tiktok")
         with pytest.raises(dp.ClosedDayViolation):
-            dp._assert_canonical_rows_closed([{"date": HOJE + timedelta(days=1)}], "shopee")
+            dp._assert_canonical_rows_closed([{"date": HOJE + timedelta(days=1)}], "tiktok")
+
+
+@pytest.mark.parametrize("source", dp.FONTES_HOJE_POR_PADRAO)
+def test_segunda_defesa_shopee_aceita_d0_por_padrao_e_recusa_com_ate_ontem(monkeypatch, source):
+    monkeypatch.setattr(dp, "last_closed_date", lambda agora=None: FECHADO)
+    monkeypatch.setattr(dp, "operational_today", lambda agora=None: HOJE)
+    rows = [{"date": HOJE, "loja_id": 3}]
+    dp._assert_canonical_rows_closed(rows, source)
+    with pytest.raises(dp.ClosedDayViolation):
+        dp._assert_canonical_rows_closed([{"date": HOJE + timedelta(days=1)}], source)
+    with cal.apenas_dias_fechados():
+        with pytest.raises(dp.ClosedDayViolation):
+            dp._assert_canonical_rows_closed(rows, source)
+
+
+@pytest.mark.parametrize("source", ["tiktok", "ml"])
+def test_tiktok_e_ml_continuam_recusando_d0_por_padrao(monkeypatch, source):
+    monkeypatch.setattr(dp, "last_closed_date", lambda agora=None: FECHADO)
+    monkeypatch.setattr(dp, "operational_today", lambda agora=None: HOJE)
+    with pytest.raises(dp.ClosedDayViolation):
+        dp._assert_canonical_rows_closed([{"date": HOJE}], source)
+
+
+def test_janela_explicita_shopee_stats_aceita_d0_tiktok_nao(monkeypatch):
+    monkeypatch.setattr(cal, "operational_today", lambda agora=None: HOJE)
+    monkeypatch.setattr(cal, "last_closed_date", lambda agora=None: FECHADO)
+    assert dp._resolve_date_window("shopee-stats", "backfill", "2026-08-20", "2026-08-28")[1] == HOJE
+    with pytest.raises(ValueError, match="ultimo dia fechado"):
+        dp._resolve_date_window("tiktok", "backfill", "2026-08-20", "2026-08-28")
+
+
+def test_ate_ontem_e_incluir_hoje_juntos_sao_recusados():
+    with pytest.raises(ValueError, match="opostos"):
+        dp.run(source="shopee", mode="incremental", incluir_hoje=True, ate_ontem=True)
+
+
+def test_run_ate_ontem_roda_tudo_dentro_de_apenas_dias_fechados(monkeypatch):
+    class Parou(Exception):
+        pass
+
+    vistas = []
+
+    def espia(*a, **k):
+        vistas.append(cal.so_dias_fechados())
+        raise Parou
+
+    monkeypatch.setattr(dp, "_resolve_date_window", espia)
+    with pytest.raises(Parou):
+        dp.run(source="shopee", mode="incremental", ate_ontem=True)
+    assert vistas == [True]
+    assert cal.so_dias_fechados() is False
 
 
 def test_run_com_incluir_hoje_libera_a_janela_explicita(monkeypatch):
