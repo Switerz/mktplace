@@ -32,6 +32,9 @@ interface Props {
   error: boolean;
   onOpen: (key: KpiKey) => void;
   onRetry: () => void;
+  /** GERENCIAL-METAS-1 — o GMV ja' e' o numero do bloco principal; a faixa
+   * mostra so' os quatro de apoio, sem repetir. */
+  semGmv?: boolean;
 }
 
 function DeltaBadge({ pct }: { pct: number }) {
@@ -170,7 +173,11 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
   );
 }
 
-export default function KpiBand({ kpis, loading, error, onOpen, onRetry }: Props) {
+export default function KpiBand({ kpis: todos, loading, error, onOpen, onRetry, semGmv = false }: Props) {
+  const kpis = semGmv ? todos.filter((k) => k.key !== "gmv") : todos;
+  // Com quatro cards a grade fecha sem celula vazia em 2 e 4 colunas, entao os
+  // spans da fileira de cinco nao se aplicam.
+  const span = (i: number) => (semGmv ? undefined : SPAN_DO_KPI[i]);
   if (error) {
     return (
       <section
@@ -201,17 +208,20 @@ export default function KpiBand({ kpis, loading, error, onOpen, onRetry }: Props
       {/* 2 / 3 / 5 colunas. O ROAS (indice 4) ocupa duas colunas fora do
           desktop para que a fileira de cinco nunca deixe celula vazia — e ele
           e' justamente o card que precisa de mais largura, por listar canais. */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3" aria-busy={loading}>
+      <div
+        className={semGmv ? "grid grid-cols-2 xl:grid-cols-4 gap-3" : "grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3"}
+        aria-busy={loading}
+      >
         {loading
-          ? Array.from({ length: 5 }, (_, i) => (
+          ? Array.from({ length: semGmv ? 4 : 5 }, (_, i) => (
               // O ROAS ocupa duas colunas no tablet para nao deixar celula
               // vazia na fileira (grade de 5 em 2 colunas no mobile).
-              <div key={i} className={SPAN_DO_KPI[i]}>
+              <div key={i} className={span(i)}>
                 <KpiCardSkeleton />
               </div>
             ))
           : kpis.map((kpi, i) => (
-              <div key={kpi.key} className={SPAN_DO_KPI[i]}>
+              <div key={kpi.key} className={span(i)}>
                 <KpiCard kpi={kpi} onOpen={onOpen} />
               </div>
             ))}
