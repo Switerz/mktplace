@@ -17,7 +17,7 @@ const CAIXA: Record<Tom, string> = {
  * tarja e' decoracao que finge ser semantica, e num alerta de verdade a cor
  * precisa estar no fundo para ser vista de longe.
  *
- * Uma linha por padrao. Metodologia longa pertence a um `Disclosure`.
+ * Uma linha por padrao. Metodologia longa vai para um `InfoDica` (ⓘ).
  */
 export default function Note({
   children,

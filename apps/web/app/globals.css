@@ -209,6 +209,18 @@
     }
   }
 
+  /* ABAS-OBJETIVAS — entrada do balao do "ⓘ" (InfoDica). */
+  @keyframes dica-entra {
+    from {
+      opacity: 0;
+      transform: translateY(-2px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
   /* VISUAL-PALETA-1: a DM Sans nao tem `tnum` (medido); dentro de tabela,
      onde a coluna de digitos precisa alinhar, vale a Inter. */
   table {

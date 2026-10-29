@@ -182,7 +182,7 @@ test("a dica dentro do card nao e' focavel nem entra no nome do botao", () => {
   assert.match(card, /<InfoDica emControle /);
   const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
   assert.match(dica, /tabIndex=\{0\}/);
-  assert.match(dica, /group-focus\/dica:visible/);
+  assert.match(dica, /onFocus=\{abrir\}/);
 });
 
 test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {

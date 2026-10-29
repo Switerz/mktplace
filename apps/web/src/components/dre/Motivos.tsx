@@ -15,12 +15,15 @@ export default function Motivos({
   visiveis = 2,
   abertoInicial = false,
   className = "",
+  unidade = ["motivo", "motivos"],
 }: {
   motivos: string[];
   /** Quantos aparecem antes de expandir. */
   visiveis?: number;
   abertoInicial?: boolean;
   className?: string;
+  /** Singular e plural do item no botao ("Ver mais 3 avisos"). */
+  unidade?: [string, string];
 }) {
   const [aberto, setAberto] = useState(abertoInicial);
   const id = useId();
@@ -42,7 +45,7 @@ export default function Motivos({
           onClick={() => setAberto((v) => !v)}
           className="inline-flex min-h-11 items-center rounded-md text-xs font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
-          {aberto ? "Mostrar menos" : `Ver mais ${resto} ${resto === 1 ? "motivo" : "motivos"}`}
+          {aberto ? "Mostrar menos" : `Ver mais ${resto} ${resto === 1 ? unidade[0] : unidade[1]}`}
         </button>
       )}
     </div>

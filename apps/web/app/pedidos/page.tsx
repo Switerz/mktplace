@@ -304,7 +304,6 @@ function PedidosPageInner() {
     <PageContainer>
       <PageHeader
         title="Pedidos"
-        subtitle="Volume, GMV e cancelamento agregados por canal, data e marca — cobertura de TikTok Shop e Mercado Livre."
         scopeLine={
           <>
             Período: {periodLabel}
@@ -347,19 +346,12 @@ function PedidosPageInner() {
         }
       />
 
-        {showShopeeOnly && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
-            <p className="text-sm text-amber-800">
-              Pedidos não cobre Shopee nesta fonte — dados indisponíveis para a seleção atual. Selecione TikTok Shop e/ou Mercado Livre.
-            </p>
-          </div>
-        )}
+        {/* Shopee isolada: o selo do cabecalho e o estado vazio abaixo ja dizem
+            que nao ha cobertura. Selecao mista: os numeros nunca incluem Shopee. */}
         {showShopeeMixed && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
-            <p className="text-sm text-amber-800">
-              Shopee selecionada, mas esta fonte cobre apenas TikTok Shop e Mercado Livre — os números abaixo refletem somente os canais suportados, nunca Shopee.
-            </p>
-          </div>
+          <p className="w-fit rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800">
+            Shopee fora: só TikTok Shop e Mercado Livre
+          </p>
         )}
 
         {error && (
@@ -390,12 +382,11 @@ function PedidosPageInner() {
       {isErrorState ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
           <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de pedidos.</p>
-          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
         </div>
       ) : showShopeeOnly ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
-          <p className="text-slate-500 text-sm font-medium">Pedidos indisponível para a seleção atual.</p>
-          <p className="text-slate-400 text-xs mt-1">Selecione TikTok Shop e/ou Mercado Livre para ver KPIs, breakdown e tabela por marca.</p>
+          <p className="text-slate-500 text-sm font-medium">Sem cobertura de Shopee em Pedidos.</p>
+          <p className="text-slate-400 text-xs mt-1">Selecione TikTok Shop ou Mercado Livre.</p>
         </div>
       ) : (
       <>
@@ -418,7 +409,7 @@ function PedidosPageInner() {
           <KpiCard
             label="GMV total"
             value={kpis ? fmtBrl(kpis.total_gmv) : "—"}
-            subvalue="Canais suportados nesta fonte"
+            subvalue="Só TikTok Shop + Mercado Livre"
             accent="bg-violet-600"
           />
           <KpiCard
@@ -519,7 +510,7 @@ function PedidosPageInner() {
 
         {dataIsFresh && !displayData && (
           <div className="bg-white rounded-2xl border border-violet-100 p-12 text-center">
-            <p className="text-sm text-slate-500">API offline — conecte o banco de dados para visualizar pedidos.</p>
+            <p className="text-sm text-slate-500">API offline — pedidos indisponíveis.</p>
           </div>
         )}
       </>

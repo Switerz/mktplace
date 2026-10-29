@@ -16,6 +16,7 @@ import {
   type AffiliateBlockPhase,
 } from "@/lib/canais-affiliate-costs";
 import KpiDrilldownDialog from "./KpiDrilldownDialog";
+import InfoDica from "./ui/InfoDica";
 
 const TONE_CLASS: Record<string, string> = {
   value: "text-ink",
@@ -83,10 +84,7 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
   if (phase === "unavailable") {
     return (
       <Moldura>
-        <p className="text-sm text-warn-ink">
-          Não foi possível carregar os dados de canais nesta consulta, então os
-          lançamentos de afiliado também não estão disponíveis.
-        </p>
+        <p className="text-sm text-warn-ink">Indisponível: falha ao carregar canais.</p>
       </Moldura>
     );
   }
@@ -96,9 +94,7 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
     // estática, nunca R$ 0,00 — que seria lido como "não houve custo".
     return (
       <Moldura>
-        <p className="text-sm text-ink-faint">
-          Dados de afiliado indisponíveis para o período e filtros selecionados.
-        </p>
+        <p className="text-sm text-ink-faint">Sem dados de afiliado no recorte.</p>
       </Moldura>
     );
   }
@@ -109,8 +105,11 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
   return (
     <section className="bg-surface rounded-xl border border-line p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
-        <h2 className="text-sm font-semibold text-ink-muted">
+        {/* As notas da fonte (nao somados, retorno indisponivel, competencia)
+            mudam a leitura dos valores: ficam no ⓘ ao lado do titulo. */}
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
           {AFFILIATE_BLOCK_TITLE}
+          <InfoDica texto={[block.limitation_note, block.return_note, block.source_note].filter(Boolean).join(" ")} />
         </h2>
         {view.hasRows && (
           <button
@@ -218,12 +217,6 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
           })}
         </ul>
       )}
-
-      <div className="mt-4 pt-3 border-t border-line flex flex-col gap-1 text-xs text-ink-faint">
-        <p>{block.limitation_note}</p>
-        <p>{block.return_note}</p>
-        <p>{block.source_note}</p>
-      </div>
 
       {/* Reusa o shell generico de drilldown. As linhas vem do bloco JA
           carregado — zero fetch adicional ao abrir, entao o dialogo nao pode

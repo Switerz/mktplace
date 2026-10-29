@@ -13,6 +13,7 @@ import {
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import InfoDica from "@/components/ui/InfoDica";
 import {
   fetchOperacoes,
   type OperacoesData,
@@ -280,28 +281,25 @@ export default function OperacoesPage() {
 
   return (
     <PageContainer>
-      {/* Contrato independente dos filtros globais (ver nota de escopo abaixo):
-          sem barra sticky, para nao sugerir um escopo que a tela nao aplica. */}
+      {/* Contrato independente dos filtros globais (declarado no "ⓘ" do
+          cabecalho): sem barra sticky, para nao sugerir um escopo que a tela
+          nao aplica. */}
       <PageHeader
         title="Operações"
-        subtitle="Acompanhamento e priorização operacional — alertas, criadores, lives e velocidade de mídia."
+        subtitle="Alertas, criadores, lives e velocidade de mídia."
         status={
-          dataIsFresh ? (
-            <LiveStatusBadge live={displayIsLive} />
-          ) : isLoadingState ? (
-            <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
-              Atualizando dados...
-            </span>
-          ) : null
+          <span className="flex items-center gap-2">
+            {dataIsFresh ? (
+              <LiveStatusBadge live={displayIsLive} />
+            ) : isLoadingState ? (
+              <span className="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 font-medium">
+                Atualizando dados...
+              </span>
+            ) : null}
+            <InfoDica texto="Os filtros globais de canal, marca e período não se aplicam aqui: cada seção usa o próprio período." />
+          </span>
         }
       />
-
-      {/* Nota de escopo (Task 6) — esta tela nao herda os filtros globais. */}
-      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
-        <p className="text-xs text-slate-600">
-          Cada seção usa o período fornecido pelo próprio endpoint (<code className="font-mono text-[11px]">fetchOperacoes</code>) — filtros globais de canal, marca e período não se aplicam aqui. O filtro de marca abaixo é local e afeta somente a tabela de Top Criadores.
-        </p>
-      </div>
 
       {error && (
           <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-center justify-between gap-4">
@@ -334,12 +332,10 @@ export default function OperacoesPage() {
       {isErrorState ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
           <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de operações.</p>
-          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
         </div>
       ) : dataIsFresh && !hasAnyData ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
           <p className="text-slate-500 text-sm font-medium">Dados de operações indisponíveis no momento.</p>
-          <p className="text-slate-400 text-xs mt-1">Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.</p>
           <button
             onClick={() => setRetryKey((k) => k + 1)}
             className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
@@ -372,9 +368,6 @@ export default function OperacoesPage() {
             <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
               <p className="text-sm font-semibold text-emerald-800">
                 Nenhum alerta ativo esta semana.
-              </p>
-              <p className="text-xs text-emerald-600 mt-1">
-                Todos os ad spends estão com GMV e ROAS dentro dos limites.
               </p>
             </div>
           ) : (
@@ -449,10 +442,7 @@ export default function OperacoesPage() {
           }`}
           aria-busy={isLoadingState}
         >
-          <SectionHeader
-            title="Top Criadores — Últimos 7 dias"
-            subtitle="Criadores TikTok com maior GMV gerado no período"
-          />
+          <SectionHeader title="Top Criadores — Últimos 7 dias" />
 
           {/* Filtros por marca */}
           <div className="px-6 pt-4 pb-2 flex items-center gap-2 flex-wrap">
@@ -600,10 +590,7 @@ export default function OperacoesPage() {
           }`}
           aria-busy={isLoadingState}
         >
-          <SectionHeader
-            title="Performance de Lives — Últimos 30 dias"
-            subtitle="Apenas marcas com lives no período. GMV/min = eficiência de cada minuto ao vivo."
-          />
+          <SectionHeader title="Performance de Lives — Últimos 30 dias" />
           <TableWrap>
             <thead>
               <tr className="bg-slate-50 text-left">
@@ -692,11 +679,6 @@ export default function OperacoesPage() {
               )}
             </tbody>
           </TableWrap>
-          <div className="px-6 py-3 border-t border-slate-50">
-            <p className="text-[10px] text-slate-400">
-              Marcas sem lives no período não aparecem aqui.
-            </p>
-          </div>
           <div className="px-6 py-3 border-t border-slate-50 flex items-center gap-6 flex-wrap">
             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">% GMV via Live:</span>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700">
@@ -803,7 +785,7 @@ export default function OperacoesPage() {
         >
           <SectionHeader
             title="Trend TikTok — Últimos 14 dias"
-            subtitle="GMV diário por marca — todos os canais combinados"
+            subtitle="GMV diário por marca, todos os canais."
           />
           <div className="px-4 py-5">
             {chartData.length > 0 ? (

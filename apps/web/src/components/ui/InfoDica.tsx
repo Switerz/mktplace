@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
 import { Info } from "lucide-react";
 
 /**
@@ -13,7 +16,15 @@ import { Info } from "lucide-react";
  *  - `emControle`: dentro de um botao (card de KPI), onde elemento focavel
  *    aninhado e' invalido. Fica so' o `title` decorativo, fora do nome
  *    acessivel do botao; a ressalva completa esta' no detalhe que o botao abre.
+ *
+ * ABAS-OBJETIVAS — o balao e' `fixed`, posicionado pelo retangulo do "ⓘ".
+ * Com `absolute` ele era cortado pelo `overflow-hidden` do `Panel` e das
+ * tabelas com rolagem, e passava da borda da tela em 390px. Abre abaixo; sem
+ * espaco, abre acima. Fecha ao rolar, porque a posicao ficaria velha.
  */
+const LARGURA = 256;
+const MARGEM = 8;
+
 export default function InfoDica({
   texto,
   emControle = false,
@@ -23,6 +34,40 @@ export default function InfoDica({
   emControle?: boolean;
   className?: string;
 }) {
+  const gatilho = useRef<HTMLSpanElement>(null);
+  const balao = useRef<HTMLSpanElement>(null);
+  const [aberto, setAberto] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number; acima: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!aberto || !gatilho.current) return;
+    const r = gatilho.current.getBoundingClientRect();
+    const largura = Math.min(LARGURA, window.innerWidth - 2 * MARGEM);
+    const left = Math.min(
+      Math.max(MARGEM, r.left + r.width / 2 - largura / 2),
+      window.innerWidth - largura - MARGEM,
+    );
+    const altura = balao.current?.offsetHeight ?? 0;
+    const acima = r.bottom + 8 + altura > window.innerHeight - MARGEM && r.top - 8 - altura > MARGEM;
+    setPos({ left, top: acima ? r.top - 8 - altura : r.bottom + 8, acima });
+
+    const fechar = () => {
+      setAberto(false);
+      setPos(null);
+    };
+    const tecla = (e: KeyboardEvent) => {
+      if (e.key === "Escape") fechar();
+    };
+    window.addEventListener("scroll", fechar, true);
+    window.addEventListener("resize", fechar);
+    document.addEventListener("keydown", tecla);
+    return () => {
+      window.removeEventListener("scroll", fechar, true);
+      window.removeEventListener("resize", fechar);
+      document.removeEventListener("keydown", tecla);
+    };
+  }, [aberto]);
+
   if (emControle) {
     return (
       <span aria-hidden="true" title={texto} className={`inline-flex shrink-0 cursor-help text-ink-faint ${className}`}>
@@ -30,20 +75,43 @@ export default function InfoDica({
       </span>
     );
   }
+
+  const abrir = () => setAberto(true);
+  const fechar = () => {
+    setAberto(false);
+    setPos(null);
+  };
+
   return (
     <span
+      ref={gatilho}
       tabIndex={0}
       role="img"
       aria-label={texto}
-      className={`group/dica relative inline-flex shrink-0 cursor-help rounded-full text-ink-faint outline-none hover:text-ink-muted focus-visible:ring-2 focus-visible:ring-accent ${className}`}
+      onMouseEnter={abrir}
+      onMouseLeave={fechar}
+      onFocus={abrir}
+      onBlur={fechar}
+      className={`relative inline-flex shrink-0 cursor-help rounded-full text-ink-faint outline-none transition-colors hover:text-ink-muted focus-visible:ring-2 focus-visible:ring-accent ${className}`}
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2} />
-      <span
-        aria-hidden="true"
-        className="pointer-events-none invisible absolute left-1/2 top-full z-40 mt-2 w-64 -translate-x-1/2 rounded-lg border border-line bg-surface px-3 py-2 text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted opacity-0 shadow-lg transition-opacity duration-150 group-hover/dica:visible group-hover/dica:opacity-100 group-focus/dica:visible group-focus/dica:opacity-100"
-      >
-        {texto}
-      </span>
+      {aberto && (
+        <span
+          ref={balao}
+          aria-hidden="true"
+          style={{
+            left: pos?.left ?? 0,
+            top: pos?.top ?? 0,
+            width: `min(${LARGURA}px, calc(100vw - ${2 * MARGEM}px))`,
+            visibility: pos ? "visible" : "hidden",
+          }}
+          className={`pointer-events-none fixed z-50 rounded-lg border border-line bg-surface px-3 py-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] motion-safe:animate-[dica-entra_160ms_cubic-bezier(0.2,0.8,0.2,1)] ${
+            pos?.acima ? "origin-bottom" : "origin-top"
+          }`}
+        >
+          {texto}
+        </span>
+      )}
     </span>
   );
 }

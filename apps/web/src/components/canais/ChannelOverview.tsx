@@ -1,5 +1,6 @@
 import { Columns3 } from "lucide-react";
 import Panel from "@/components/ui/Panel";
+import InfoDica from "@/components/ui/InfoDica";
 import TableScrollHint from "@/components/TableScrollHint";
 import type { CanaisChannelMedian } from "@/lib/api-client";
 import { formatChannelMetric, type FormattedMetric } from "@/lib/canais-channel-metrics";
@@ -137,17 +138,18 @@ export default function ChannelOverview({
   return (
     <Panel
       id="comparativo-canais"
-      titulo="Canais lado a lado"
-      descricao="Volume, custo mediano das marcas e perfil de compradores no período"
+      titulo={
+        <>
+          Canais lado a lado
+          <InfoDica
+            texto={`Custo, Ads, ROAS e frete: mediana das marcas de cada canal${
+              carregando ? "" : ` (${colunas.map((c) => `${c.rotulo}: ${c.mediana?.brands_with_data ?? 0} marcas`).join(" · ")})`
+            }. N/A = não se aplica · Sem dado = deveria existir, mas falta.`}
+          />
+        </>
+      }
       icone={Columns3}
       semPadding
-      rodape={
-        <span>
-          Custo, Ads, ROAS e frete são medianas entre as marcas de cada canal
-          {!carregando && <> ({colunas.map((c) => `${c.rotulo}: ${c.mediana?.brands_with_data ?? 0} marcas no canal`).join(" · ")})</>}.
-          {" "}N/A = não se aplica ao canal · Sem dado = deveria existir, mas está ausente hoje · Participação entre os canais selecionados com dado.
-        </span>
-      }
     >
       {/* Participacao em barra: a unica leitura VISUAL da tabela, em cor de
           identidade. A largura e' a fatia do GMV dos canais selecionados. */}

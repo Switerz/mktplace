@@ -12,6 +12,7 @@ import DrilldownMetricPair from "@/components/drilldown/DrilldownMetricPair";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import InfoDica from "@/components/ui/InfoDica";
 import PriorityCards from "@/components/inteligencia/PriorityCards";
 import ConcentrationBars from "@/components/inteligencia/ConcentrationBars";
 import EvidenceQueue from "@/components/inteligencia/EvidenceQueue";
@@ -20,8 +21,8 @@ import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import OpportunityMatrix from "@/components/inteligencia/OpportunityMatrix";
 import {
-  BAND_META, QUADRANT_META, freshnessLabel, isSample, matrixState,
-  contagemExata, moedaExata, readPoint, referenceOrigins, sampleDeclaration, trueSampleNote,
+  BAND_META, QUADRANT_META, freshnessLabel, isSample,
+  contagemExata, moedaExata, readPoint, sampleDeclaration, trueSampleNote,
   type BandKey, type QuadrantKey,
 } from "@/lib/inteligencia/opportunity";
 import { fetchInteligencia, type InteligenciaData, type LtvRow, type OpportunityHighlight } from "@/lib/api-client";
@@ -40,7 +41,7 @@ import {
 } from "@/lib/inteligencia/lens";
 import {
   buildQueue, KIND_LABELS, KIND_RULES, lensSampleNote, listSampleNote, queueForLens,
-  sampleNote, sortForLens, TK_PRODUCTS_LIMIT, tkSampleNote, type EvidenceItem,
+  sampleNote, sortForLens, tkSampleNote, type EvidenceItem,
 } from "@/lib/inteligencia/queue";
 import { buildPriorities, priorityLimit, receivedByKind, type Priority } from "@/lib/inteligencia/priorities";
 import {
@@ -265,7 +266,6 @@ function InteligenciaPageInner() {
   // classificação, agregado, faixa ou seleção de destaque recalculados aqui.
   const oppMap = displayData?.opportunity_map ?? null;
   const mlScope = displayData?.ml_scope_brands ?? [];
-  const oppState = matrixState(oppMap, mlScope);
   // FINDING 1 (Task 2/2): um unico timestamp de exibicao para todo o bloco ML.
   //
   // Ele sai de `displayData`, nao de `data`. Essa distincao e a protecao: quando
@@ -328,7 +328,7 @@ function InteligenciaPageInner() {
       {/* ---------------- Bloco 1 — cabeçalho e regimes ---------------- */}
       <PageHeader
         title="Inteligência"
-        subtitle="Radar de portfólio: o que exige atenção, quanto representa e para onde seguir."
+        subtitle="Radar de portfólio."
         status={
           status.fresh ? <LiveStatusBadge live={displayIsLive} />
             : status.loading ? (
@@ -342,14 +342,7 @@ function InteligenciaPageInner() {
       <div className="flex flex-wrap items-center gap-2">
         <RegimeBadge text={REGIME_ML} />
         <RegimeBadge text={REGIME_TK} tone="tk" />
-      </div>
-
-      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
-        <p className="text-xs text-slate-600">
-          Os blocos de Mercado Livre vêm de uma <strong>fotografia acumulada sem janela de datas</strong> — não
-          respondem ao período global e não têm intervalo. Só o bloco de produtos TikTok tem janela, de 30 dias.
-          O filtro de marca abaixo é <strong>local</strong> e afeta as análises ML compatíveis.
-        </p>
+        <InfoDica texto="Os blocos ML não têm janela de datas e não respondem ao período global. O filtro de marca é local." />
       </div>
 
       {/* Chips de marca: a lista vem do PAYLOAD, incluindo Rituária */}
@@ -416,14 +409,10 @@ function InteligenciaPageInner() {
       ) : status.error ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
           <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de inteligência.</p>
-          <p className="text-slate-500 text-xs mt-1">Use &quot;Tentar novamente&quot; no banner de erro acima.</p>
         </div>
       ) : status.fresh && !hasData ? (
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
           <p className="text-slate-500 text-sm font-medium">Dados de inteligência indisponíveis no momento.</p>
-          <p className="text-slate-500 text-xs mt-1">
-            Não é modo demonstração — a fonte não retornou dados. Tente novamente em instantes.
-          </p>
           <button
             type="button"
             onClick={() => setRetryKey((k) => k + 1)}
@@ -455,12 +444,10 @@ function InteligenciaPageInner() {
 
           {/* ---------------- Bloco 2 — prioridades ---------------- */}
           <section id={INTELIGENCIA_ANCHORS.prioridades} className="scroll-mt-24">
-            <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">
-              Prioridades da fotografia ML atual
+            <h2 className="flex items-center gap-1 text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
+              Prioridades da fotografia ML atual · {scope}
+              <InfoDica texto="As contagens são dos registros recebidos, não do portfólio." />
             </h2>
-            <p className="text-xs text-slate-500 mb-3">
-              {REGIME_ML} · escopo {scope}. As contagens são dos registros recebidos, não do portfólio.
-            </p>
             {priorities.length > 0 ? (
               <PriorityCards priorities={priorities} onOpen={(p) => setDialog({ kind: "priority", priority: p })} disabled={status.loading} />
             ) : (
@@ -483,11 +470,7 @@ function InteligenciaPageInner() {
           <SectionCard
             id={INTELIGENCIA_ANCHORS.oportunidades}
             title="Mapa de oportunidades"
-            subtitle={
-              oppState === "available"
-                ? "Retorno × volume no snapshot ML inteiro. Clique num quadrante para os agregados, ou num ponto para o produto."
-                : "Retorno × volume no snapshot ML inteiro."
-            }
+            subtitle="Retorno × volume no snapshot ML inteiro."
             regime={REGIME_ML}
           >
             <OpportunityMatrix
@@ -499,18 +482,14 @@ function InteligenciaPageInner() {
               onOpenMatrix={() => setDialog({ kind: "matrix" })}
               disabled={status.loading}
             />
-            <p className="px-4 sm:px-6 pb-5 text-xs text-slate-500">
-              Escopo <code>ml_snapshot</code>: fotografia do Mercado Livre, sem janela
-              temporal. TikTok não entra neste mapa porque a fonte dele não tem ROAS.
-              {" "}{frescorMl}.
-            </p>
+            <p className="px-4 sm:px-6 pb-5 text-xs text-slate-500">{frescorMl}.</p>
           </SectionCard>
 
           {/* ---------------- Bloco 4 — concentração ---------------- */}
           <SectionCard
             id={INTELIGENCIA_ANCHORS.concentracao}
             title="Concentração por marca"
-            subtitle="Distribuição do GMV entre os buckets A/B/C/D. Clique num bucket para ver os agregados."
+            subtitle="GMV por bucket A/B/C/D."
             regime={REGIME_ML}
           >
             <ConcentrationBars
@@ -585,7 +564,7 @@ function InteligenciaPageInner() {
                         ? "Sem registros nesta lista."
                         : `${panel.total != null
                             ? trueSampleNote(panel.rows.length, panel.total, "registro")
-                            : listSampleNote(panel.kind, panel.rows.length, received)} · 3 no mobile é apresentação, não cobertura.`}
+                            : listSampleNote(panel.kind, panel.rows.length, received)}`}
                     </p>
                     <Link
                       href={buildLensHref("/inteligencia", panel.kind, searchParams, { anchor: INTELIGENCIA_ANCHORS.fila })}
@@ -626,13 +605,11 @@ function InteligenciaPageInner() {
                   ))}
                 </ul>
               )}
-              <p className="px-4 sm:px-6 py-3 text-xs text-slate-500 border-t border-slate-100">
-                {tkRows.length === 0
-                  ? `O payload traz até ${TK_PRODUCTS_LIMIT} produtos nesta janela.`
-                  : `${tkSampleNote(tkRows.length, tkReceived)} · 3 no mobile é apresentação, não cobertura.`}{" "}
-                Agrupado por nome de produto, como o payload entrega. Sem ROAS ou Ads: o contrato do TikTok
-                não traz investimento de mídia.
-              </p>
+              {tkRows.length > 0 && (
+                <p className="px-4 sm:px-6 py-3 text-xs text-slate-500 border-t border-slate-100">
+                  {tkSampleNote(tkRows.length, tkReceived)}
+                </p>
+              )}
             </SectionCard>
           </section>
 
@@ -679,7 +656,6 @@ function InteligenciaPageInner() {
               <SectionCard
                 id={INTELIGENCIA_ANCHORS.ltv}
                 title="LTV e fidelização"
-                subtitle="Comportamento de compradores por marca. A fonte não tem dimensão temporal."
                 regime={REGIME_ML}
               >
                 {ltvRows.length === 0 ? (
@@ -732,7 +708,7 @@ function InteligenciaPageInner() {
               </SectionCard>
             </div>
 
-            <SectionCard title="Próximos destinos" subtitle="Navegação limpa, sem contexto de origem.">
+            <SectionCard title="Próximos destinos">
               <ul className="px-4 sm:px-6 py-4 flex flex-col gap-2 list-none m-0">
                 <li>
                   <Link href="/canais" className="inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded">
@@ -759,9 +735,6 @@ function InteligenciaPageInner() {
                   </li>
                 )}
               </ul>
-              <p className="px-4 sm:px-6 pb-4 text-xs text-slate-500">
-                Selecione uma única marca para habilitar o destino de marca.
-              </p>
             </SectionCard>
           </div>
         </>
@@ -779,8 +752,7 @@ function InteligenciaPageInner() {
             <div className="flex flex-col gap-4">
               <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
               <p className="text-sm text-slate-700">
-                <strong>Regra:</strong> {meta.regra(roasBr(oppMap.roas_reference), gmvRef)}.{" "}
-                Fronteiras altas são inclusivas. {meta.leitura}
+                <strong>Regra:</strong> {meta.regra(roasBr(oppMap.roas_reference), gmvRef)}.
               </p>
               {/* Mesmo contrato de contagem auditável do cabeçalho da matriz: o
                   diálogo é onde se confere que N destaques saem de M produtos, e
@@ -798,19 +770,7 @@ function InteligenciaPageInner() {
                 referenceLabel="Ad spend do quadrante"
                 referenceValue={fmtBrl(q?.ad_spend ?? 0)}
               />
-              <div>
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
-                  De onde vem cada referência
-                </p>
-                <ul className="flex flex-col gap-1 list-none p-0 m-0">
-                  {referenceOrigins(oppMap, moedaExata).map((t) => (
-                    <li key={t} className="text-xs text-slate-600">{t}</li>
-                  ))}
-                </ul>
-              </div>
-              <DataQualityNote
-                note={`Fotografia ML sem janela temporal: o quadrante descreve o estado do snapshot, não um período. ${sampleDeclaration(oppMap)}`}
-              />
+              <DataQualityNote note={isSample(oppMap) ? sampleDeclaration(oppMap) : null} />
               <button
                 type="button"
                 onClick={() => { setDialog(null); setLens(dialog.key === "escalar" ? "escalar" : dialog.key === "reduzir_parar" ? "parar" : "todos"); }}
@@ -844,9 +804,6 @@ function InteligenciaPageInner() {
                 <li className="text-sm text-slate-700">{leitura.gmvComparacao}</li>
               </ul>
               <p className="text-sm text-slate-700">{leitura.porque}</p>
-              <DataQualityNote
-                note="Fotografia ML sem janela temporal. As duas referências descrevem o portfólio do escopo atual; não são metas."
-              />
               <Link
                 // V3-2: o consumidor de foco existe, e o CTA esquenta APENAS
                 // quando o quadrante prova a populacao. `escalar` exige ROAS >=
@@ -888,7 +845,6 @@ function InteligenciaPageInner() {
                 referenceLabel="Universo classificado"
                 referenceValue={fmtNumber(oppMap.total_count)}
               />
-              <DataQualityNote note={`${meta.naoConfundir} Faixa não produz destaque plotado: ela fica fora dos quadrantes.`} />
             </div>
           );
         })()}
@@ -936,7 +892,7 @@ function InteligenciaPageInner() {
               </ul>
             </div>
             <DataQualityNote
-              note={`${dialog.priority.limitation}. A lista é capada em até ${priorityLimit(dialog.priority.kind)} no backend, então este número não é o total do portfólio.`}
+              note={`Lista capada em ${priorityLimit(dialog.priority.kind)} registros — não é o total do portfólio.`}
             />
             <DrilldownCta href={buildLensHref("/inteligencia", dialog.priority.kind, searchParams)}>
               Ver evidências na lente {LENS_LABELS[dialog.priority.kind]} →
@@ -967,7 +923,6 @@ function InteligenciaPageInner() {
                 tone={dialog.share.sharePct == null ? "muted" : "value"}
               />
             </ul>
-            <DataQualityNote note="Este payload traz apenas os agregados do bucket — ele não contém a lista de produtos. Use o destino abaixo, onde a consulta por bucket existe." />
             <DrilldownCta
               href={buildParetoProdutosHref(dialog.brand, dialog.share.bucket)}
               ariaLabel={`Ver produtos do bucket ${dialog.share.bucket.charAt(0)} de ${brandLabel(dialog.brand)} em Produtos`}
@@ -1005,7 +960,6 @@ function InteligenciaPageInner() {
               <EvidenceRow label="Dias com ads" value={dialog.item.days_advertised == null ? "sem dado" : fmtNumber(dialog.item.days_advertised)} tone={dialog.item.days_advertised == null ? "muted" : "value"} />
               <EvidenceRow label="Bucket Pareto" value={dialog.item.pareto_bucket ?? "sem dado"} tone={dialog.item.pareto_bucket == null ? "muted" : "value"} />
             </ul>
-            <DataQualityNote note="Fotografia ML sem janela temporal, e sem CMV — não há margem real por produto. O detalhe usa a linha já carregada; ele não é compartilhável por identificador de produto nesta fase." />
             <DrilldownCta
               // Mapeamento EXATO lente -> foco: as tres lentes SAO as tres
               // listas do payload, e os tres focos sao essas mesmas listas.

@@ -19,6 +19,7 @@ import {
   type DiscountBlockPhase,
 } from "@/lib/canais-tiktok-order-discounts";
 import KpiDrilldownDialog from "./KpiDrilldownDialog";
+import InfoDica from "./ui/InfoDica";
 
 const TONE_CLASS: Record<string, string> = {
   value: "text-ink",
@@ -83,10 +84,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   if (phase === "unavailable") {
     return (
       <Moldura>
-        <p className="text-sm text-warn-ink">
-          Não foi possível carregar os dados de canais nesta consulta, então os
-          descontos de pedido também não estão disponíveis.
-        </p>
+        <p className="text-sm text-warn-ink">Indisponível: falha ao carregar canais.</p>
       </Moldura>
     );
   }
@@ -96,10 +94,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
     // Mensagem estatica, nunca R$ 0,00 — que seria lido como "sem desconto".
     return (
       <Moldura>
-        <p className="text-sm text-ink-faint">
-          Descontos de pedido indisponíveis para o período e filtros
-          selecionados.
-        </p>
+        <p className="text-sm text-ink-faint">Sem dados de desconto no recorte.</p>
       </Moldura>
     );
   }
@@ -112,8 +107,11 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
   return (
     <section className="bg-surface rounded-xl border border-line p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
-        <h2 className="text-sm font-semibold text-ink-muted">
+        {/* Quem financia cada componente e o "nao somar" mudam a leitura: ficam
+            no ⓘ; as frases completas estao no detalhe. */}
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
           {DISCOUNTS_BLOCK_TITLE}
+          <InfoDica texto={`${SELLER_COPY} ${SUBSIDY_COPY} ${RETROACTIVE_COPY}`} />
         </h2>
         {view.hasRows && (
           <button
@@ -134,7 +132,7 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
       )}
       {/* Frescor PROPRIO do bloco, nunca o `refreshedAt` geral da pagina. */}
       {view.freshnessLabel && (
-        <p className="text-xs text-ink-faint mb-2">{view.freshnessLabel}</p>
+        <p className="text-xs text-ink-faint mb-3">{view.freshnessLabel}</p>
       )}
 
       {view.warnings.length > 0 && (
@@ -148,12 +146,6 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
       )}
       {notaCobertura && !view.warnings.length && (
         <p className="text-xs text-warn-ink mb-3">{notaCobertura}</p>
-      )}
-      {/* O limite acompanha a cobertura COMPLETA tambem: `complete` significa
-          grade observada completa, e sem esta linha o leitor concluiria
-          "ingestao comprovada". */}
-      {view.hasRows && !view.coverageIsIncomplete && (
-        <p className="text-xs text-ink-faint mb-3">{COVERAGE_LIMIT_COPY}</p>
       )}
 
       {view.emptyMessage ? (
@@ -228,13 +220,6 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
         </div>
       )}
 
-      <div className="mt-4 pt-3 border-t border-line flex flex-col gap-1 text-xs text-ink-faint">
-        <p>{SELLER_COPY}</p>
-        <p>{SUBSIDY_COPY}</p>
-        <p>{RETROACTIVE_COPY}</p>
-        <p>{CANCELLED_COPY}</p>
-      </div>
-
       {/* Reusa o shell generico de drilldown — nenhum modal proprio. As linhas
           vem do bloco JA carregado: zero fetch ao abrir, entao o dialogo nao
           pode divergir da tabela. */}
@@ -305,7 +290,15 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
           ))}
         </section>
 
-        <p className="text-xs text-ink-faint">{block.limitation_note}</p>
+        <div className="flex flex-col gap-1 text-xs text-ink-faint">
+          <p>{SELLER_COPY}</p>
+          <p>{SUBSIDY_COPY}</p>
+          <p>{RETROACTIVE_COPY}</p>
+          {/* O limite acompanha a cobertura COMPLETA tambem: `complete`
+              significa grade observada completa, nao "ingestao comprovada". */}
+          {!view.coverageIsIncomplete && <p>{COVERAGE_LIMIT_COPY}</p>}
+          <p>{block.limitation_note}</p>
+        </div>
       </KpiDrilldownDialog>
     </section>
   );

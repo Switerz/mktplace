@@ -29,7 +29,7 @@ import TiktokOrderDiscountsPanel from "@/components/TiktokOrderDiscountsPanel";
 import { resolveBlockPhase } from "@/lib/canais-affiliate-costs";
 import { SkeletonTableRows } from "@/components/Skeleton";
 import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
@@ -169,6 +169,12 @@ function repeatRateStyle(v: number | null): string {
   if (v >= 8) return "text-warn-ink bg-warn-soft font-semibold";
   return "text-crit-ink bg-crit-soft font-semibold";
 }
+
+/** Faixas de cor das colunas e a ressalva de "Compradores" (soma diaria), no ⓘ
+ * das tabelas de perfil de compradores ML e Shopee. */
+const LEGENDA_COMPRADORES =
+  "Novos %: verde ≥85, amarelo 70–85, vermelho <70 · Recompra %: verde ≥15, amarelo 8–15, vermelho <8. " +
+  "Compradores = soma diária, não comprador único do período.";
 
 function newBuyerPctStyle(v: number | null): string {
   if (v == null) return DIM_STYLE;
@@ -540,7 +546,6 @@ function CanaisPageInner() {
     <PageContainer>
       <PageHeader
         title="Canais"
-        subtitle="Comparar TikTok Shop, Mercado Livre e Shopee — e investigar marca × canal."
         icon={Store}
         meta={
           <>
@@ -592,11 +597,10 @@ function CanaisPageInner() {
       {/* ── Comparativo entre Canais: Ads, Custo e Frete (Gate 2) ── */}
       <div id="comparativo" className="scroll-mt-24 bg-surface border border-line rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-line">
-          <h2 className="text-sm font-semibold text-ink-muted">Comparativo entre Canais — Ads, Custo e Frete</h2>
-          <p className="text-xs text-ink-faint mt-0.5">
-            Marca × marketplace — mesmas métricas já validadas na aba Financeiro, lado a lado para comparar oportunidades.
-            Não inclui desconto nem comissão de afiliados — afiliados aparecem em bloco próprio, por competência mensal (ver docs/sections/canais_audit.md, seção 14).
-          </p>
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
+            Comparativo entre Canais — Ads, Custo e Frete
+            <InfoDica texto="N/A = não se aplica ao canal · Sem dado = deveria existir, mas falta hoje · — = denominador zero ou métrica não calculável. Sem desconto nem afiliados." />
+          </h2>
         </div>
         <TableScrollHint>
           <table className="w-full text-data" aria-label="Comparativo entre canais">
@@ -623,7 +627,7 @@ function CanaisPageInner() {
                   <td colSpan={11} className="px-6 py-8 text-center text-sm text-ink-faint">
                     {isLive
                       ? "Sem dados de canal no período e filtros selecionados."
-                      : "Comparativo disponível apenas com a API conectada — o modo demonstração não modela Ads/Custo/Frete por canal."}
+                      : "Disponível só com a API conectada."}
                   </td>
                 </tr>
               ) : (
@@ -688,15 +692,6 @@ function CanaisPageInner() {
             </tbody>
           </table>
         </TableScrollHint>
-        <div className="px-6 py-3 border-t border-line flex flex-wrap items-center gap-x-5 gap-y-1.5">
-          <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Legenda:</span>
-          <span className="text-xs text-ink-faint">N/A = não se aplica a esse canal</span>
-          <span className="text-xs text-warn-ink font-medium">Sem dado = deveria existir, mas está ausente hoje</span>
-          <span className="text-xs text-ink-faint">— = denominador zero ou métrica não calculável no período (ex.: Ads/GMV quando GMV = 0)</span>
-          <span className="ml-auto text-xs text-ink-faint max-w-md text-right">
-            Sinais comparam cada marca contra a mediana/percentil 75 das marcas do mesmo canal no período — nunca incluem desconto ou afiliados.
-          </span>
-        </div>
       </div>
 
       {/* ── Impacto de afiliados no resultado (UE3, contrato §23) ──
@@ -736,7 +731,7 @@ function CanaisPageInner() {
       {/* ── Detalhe por canal (UX-TORRE-B2B-1) ──
           Os tres blocos por canal eram empilhados (~2.600px no desktop). Agora
           uma aba por canal SELECIONADO; o conteudo de cada aba e' o mesmo de
-          antes, com os mesmos textos, tabelas, totais e legendas. A ancora
+          antes, com as mesmas tabelas e totais. A ancora
           #tiktok-shop / #mercado-livre / #shopee continua funcionando: ela
           escolhe a aba ao carregar. */}
       {!isEmpty && abasDetalhe.length > 0 && (
@@ -758,13 +753,10 @@ function CanaisPageInner() {
       {/* ── Resumo TikTok ── */}
       {showTiktok && (
         <section id="tiktok-shop" aria-labelledby="tiktok-shop-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="tiktok-shop-heading" className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo do TikTok</h2>
-            <p className="text-xs text-ink-faint">
-              Distribuição entre vídeo, live e card/vitrine <strong className="font-semibold">dentro da base de conteúdo</strong> do
-              TikTok. Não representa participação nas vendas totais.
-            </p>
-          </div>
+          <h2 id="tiktok-shop-heading" className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
+            Mix do GMV de conteúdo do TikTok
+            <InfoDica texto="% da base de conteúdo (vídeo + live + card/vitrine). Não representa participação nas vendas totais." />
+          </h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {!dataIsFresh ? (
               <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
@@ -820,14 +812,12 @@ function CanaisPageInner() {
                 <span className="text-xs font-semibold tabular-nums text-ink-muted">
                   {formatDivergenceBr(tkMixTotal.divergencePct)}
                 </span>
+                {/* A ressalva de linhagem muda a leitura da diferenca: fica no ⓘ. */}
+                <InfoDica
+                  className="self-center"
+                  texto="As medidas têm linhagens diferentes. A diferença é diagnóstico de reconciliação — não é cobertura, participação, margem nem severidade."
+                />
               </div>
-              {/* UX-TORRE-2: metodologia, nao ressalva de numero — vai para o
-                  recolhivel com as MESMAS palavras. */}
-              <Disclosure className="basis-full -ml-2">
-                As medidas têm linhagens diferentes: o GMV comercial vem do GMV canônico de pedidos, e os componentes vêm da
-                quebra de conteúdo do TikTok. A diferença é um diagnóstico de reconciliação — não é cobertura, participação,
-                margem nem severidade.
-              </Disclosure>
             </div>
           )}
         </section>
@@ -837,13 +827,10 @@ function CanaisPageInner() {
       {showTiktok && (
         <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line flex items-start justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-ink-muted">Mix do GMV de conteúdo por marca</h2>
-              <p className="text-xs text-ink-faint mt-0.5">
-                Vídeo, live e card/vitrine são composição interna da base de conteúdo de cada marca — não participação nas
-                vendas totais.
-              </p>
-            </div>
+            <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
+              Mix do GMV de conteúdo por marca
+              <InfoDica texto="Conversão só nos dias com dado de visitantes (limite da API TikTok)." />
+            </h2>
             <div className="flex items-center gap-3 text-xs font-semibold text-ink-faint uppercase tracking-widest shrink-0">
               <span className="flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.video} inline-block`} /> Video</span>
               <span className="flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.live} inline-block`} /> Live</span>
@@ -980,15 +967,6 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-line flex items-center gap-5 flex-wrap">
-            <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Dominante:</span>
-            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.video} inline-block`} /> Video</span>
-            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.live} inline-block`} /> Live</span>
-            <span className="flex items-center gap-1.5 text-xs text-ink-muted"><span className={`w-2 h-2 rounded-full ${MIX_SERIE.card} inline-block`} /> Card</span>
-            <span className="ml-auto text-xs text-ink-faint">
-              Conversao calculada apenas nos dias com dado de visitantes — cobertura estruturalmente limitada pela API TikTok
-            </span>
-          </div>
         </div>
       )}
             </>
@@ -999,10 +977,7 @@ function CanaisPageInner() {
       {/* ── Resumo Mercado Livre ── */}
       {showMl && (
         <section id="mercado-livre" aria-labelledby="mercado-livre-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="mercado-livre-heading" className="text-sm font-semibold text-ink-muted">Mercado Livre</h2>
-            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
+          <h2 id="mercado-livre-heading" className="text-sm font-semibold text-ink-muted">Mercado Livre</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {!dataIsFresh ? (
               <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
@@ -1036,8 +1011,10 @@ function CanaisPageInner() {
       {showMl && (
         <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line">
-            <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores ML por Marca</h2>
-            <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
+            <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
+              Perfil de Compradores ML por Marca
+              <InfoDica texto={LEGENDA_COMPRADORES} />
+            </h2>
           </div>
           <TableScrollHint>
             <table className="w-full text-data" aria-label="Perfil de compradores ML por marca">
@@ -1124,39 +1101,6 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-line flex items-start gap-5 flex-wrap">
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Novos %:</span>
-                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 85%</span>
-                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 70–85%</span>
-                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 70%</span>
-              </div>
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Recompra %:</span>
-                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 15%</span>
-                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 8–15%</span>
-                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 8%</span>
-              </div>
-            </div>
-            <p className="ml-auto text-xs text-ink-faint self-end">
-              Recompra = compradores com historico previo na marca no ML · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* ── Insight: ML como canal de aquisicao ── */}
-      {showMl && dataIsFresh && mlBrands.length > 0 && mlNewPctTotal >= 80 && (
-        <div className="bg-raised border border-line rounded-xl p-4">
-          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
-            Insight — ML como canal de aquisicao
-          </p>
-          <p className="text-sm text-ink">
-            {mlNewPctTotal.toFixed(0)}% dos compradores ML em {periodLabel} sao novos — sem historico previo com a marca.
-            O ML opera como canal de aquisicao primaria, nao de retencao. Recompra media de{" "}
-            {mlRepeatPctTotal.toFixed(1)}% indica oportunidade de programas de fidelidade pos-compra.
-          </p>
         </div>
       )}
             </>
@@ -1167,10 +1111,7 @@ function CanaisPageInner() {
       {/* ── Resumo Shopee — só quando há dados ── */}
       {showShopee && hasShopeeData && (
         <section id="shopee" aria-labelledby="shopee-heading" className="scroll-mt-24 flex flex-col gap-3" aria-busy={!dataIsFresh}>
-          <div>
-            <h2 id="shopee-heading" className="text-sm font-semibold text-ink-muted">Shopee</h2>
-            <p className="text-xs text-ink-faint">Perfil de compradores — aquisição vs. retenção no mês.</p>
-          </div>
+          <h2 id="shopee-heading" className="text-sm font-semibold text-ink-muted">Shopee</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             {!dataIsFresh ? (
               <><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /><StatCard rotulo="" valor="" carregando /></>
@@ -1216,10 +1157,7 @@ function CanaisPageInner() {
       {showShopee && dataIsFresh && !hasShopeeData && (
         <div id="shopee" className="scroll-mt-24 bg-surface border border-dashed border-line-strong rounded-xl p-6 flex flex-col items-center gap-2 text-center">
           <p className="text-sm font-semibold text-ink-muted">Shopee — Dados de canal em integração</p>
-          <p className="text-xs text-ink-faint max-w-md">
-            O perfil de compradores e métricas de canal da Shopee serão disponibilizados assim que o endpoint da API for integrado.
-            Os dados de GMV e pedidos já estão disponíveis na visão Gerencial.
-          </p>
+          <p className="text-xs text-ink-faint">GMV e pedidos já estão na Gerencial.</p>
         </div>
       )}
 
@@ -1227,8 +1165,10 @@ function CanaisPageInner() {
       {showShopee && hasShopeeData && (
         <div className="bg-surface border border-line rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-line">
-            <h2 className="text-sm font-semibold text-ink-muted">Perfil de Compradores Shopee por Marca</h2>
-            <p className="text-xs text-ink-faint mt-0.5">Aquisicao vs. retencao — novos e recorrentes no mes</p>
+            <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink-muted">
+              Perfil de Compradores Shopee por Marca
+              <InfoDica texto={LEGENDA_COMPRADORES} />
+            </h2>
           </div>
           <TableScrollHint>
             <table className="w-full text-data" aria-label="Perfil de compradores Shopee por marca">
@@ -1333,38 +1273,6 @@ function CanaisPageInner() {
               </tbody>
             </table>
           </TableScrollHint>
-          <div className="px-6 py-3 border-t border-line flex items-start gap-5 flex-wrap">
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Novos %:</span>
-                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 85%</span>
-                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 70–85%</span>
-                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 70%</span>
-              </div>
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-semibold text-ink-faint uppercase tracking-widest">Recompra %:</span>
-                <span className="flex items-center gap-1 text-xs text-ok-ink"><span className="w-2 h-2 rounded-full bg-ok inline-block" /> acima de 15%</span>
-                <span className="flex items-center gap-1 text-xs text-warn-ink"><span className="w-2 h-2 rounded-full bg-warn inline-block" /> 8–15%</span>
-                <span className="flex items-center gap-1 text-xs text-crit-ink"><span className="w-2 h-2 rounded-full bg-crit inline-block" /> abaixo de 8%</span>
-              </div>
-            </div>
-            <p className="ml-auto text-xs text-ink-faint self-end">
-              Recompra = compradores com historico previo na marca na Shopee · "Compradores" é soma diária de compradores únicos por dia — pode contar a mesma pessoa mais de uma vez em dias diferentes; não é comprador único do período selecionado
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* ── Insight: Shopee como canal de aquisicao ── */}
-      {showShopee && hasShopeeData && dataIsFresh && shBrands.length > 0 && shNewPctTotal >= 80 && (
-        <div className="bg-raised border border-line rounded-xl p-4">
-          <p className="text-xs font-semibold text-ink-muted uppercase tracking-wide mb-1">
-            Insight — Shopee como canal de aquisicao
-          </p>
-          <p className="text-sm text-ink">
-            {shNewPctTotal.toFixed(0)}% dos compradores Shopee em {periodLabel} sao novos.
-            Recompra media de {shRepeatPctTotal.toFixed(1)}% — perfil de aquisicao similar ao ML.
-          </p>
         </div>
       )}
             </>

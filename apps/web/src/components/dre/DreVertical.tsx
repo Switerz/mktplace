@@ -3,7 +3,6 @@
 import { useId } from "react";
 import { FileSpreadsheet } from "lucide-react";
 
-import Disclosure from "@/components/ui/Disclosure";
 import Panel from "@/components/ui/Panel";
 import Motivos from "@/components/dre/Motivos";
 import { ClassificacaoChip, StatusChip } from "@/components/dre/DreChips";
@@ -87,7 +86,6 @@ export default function DreVertical({
   return (
     <Panel
       titulo="DRE vertical"
-      descricao="Receita, cada custo e a margem de contribuição conhecida do recorte escolhido."
       icone={FileSpreadsheet}
       semPadding
       acao={
@@ -110,25 +108,10 @@ export default function DreVertical({
         </div>
       }
       rodape={
+        // Num agregado os avisos das celulas se acumulam (medido: 11 no total
+        // de jul/2026). Dois ficam visiveis; o resto abre sob demanda.
         c.avisos_qualidade.length ? (
-          // Num agregado os avisos das celulas se acumulam (medido: 11 no
-          // total de jul/2026). Dois ficam visiveis; o resto abre sob demanda.
-          <div className="flex flex-col gap-0.5">
-            <ul className="flex flex-col gap-0.5">
-              {c.avisos_qualidade.slice(0, 2).map((a) => (
-                <li key={a}>{a}</li>
-              ))}
-            </ul>
-            {c.avisos_qualidade.length > 2 && (
-              <Disclosure rotulo={`Mais ${c.avisos_qualidade.length - 2} avisos de qualidade`} className="-ml-2">
-                <ul className="flex flex-col gap-0.5">
-                  {c.avisos_qualidade.slice(2).map((a) => (
-                    <li key={a}>{a}</li>
-                  ))}
-                </ul>
-              </Disclosure>
-            )}
-          </div>
+          <Motivos motivos={c.avisos_qualidade} visiveis={2} unidade={["aviso", "avisos"]} />
         ) : undefined
       }
     >

@@ -255,7 +255,8 @@ The primitives live in `apps/web/src/components/ui/`, plus `layout/` and
 | Panel (title, subtitle, actions, footer, icon) | `ui/Panel.tsx` | Expedição, Canais, Financeiro, Gerencial |
 | Segmented / tabs | `ui/Segmented.tsx` | theme, Expedição, Canais detail tabs |
 | Status badge | `ui/Chip.tsx` | Expedição, Canais, Financeiro |
-| Data-quality note + disclosure | `ui/Note.tsx`, `ui/Disclosure.tsx` | all three + Expedição |
+| Data-quality note | `ui/Note.tsx` | all three + Expedição |
+| Caveat tip (ⓘ) | `ui/InfoDica.tsx` | every route |
 | Table shell (scroll hint) | `TableScrollHint.tsx` | all wide tables |
 | Empty / loading / error / unavailable | `ui/StateBlock.tsx` | Canais, Financeiro, Expedição (TikTok) |
 | Expedição channel header + photo/freshness chips | `expedicao/CabecalhoExpedicao.tsx` | Expedição queue (Shopee/ML), Expedição TikTok |
@@ -336,16 +337,18 @@ each channel shows only what its source sustains.
   tint, not status).
 - 24px value, then a delta pill (`ok-soft` / `crit-soft` with an arrow), then
   the reference.
-- Notes sit at the base in 12px muted text. A note is never removed, only
-  shortened.
+- No note under the number. A caveat that changes the reading goes into an
+  `InfoDica` (ⓘ) next to the label or a short chip.
 
 ### Panel
 
 - 12px radius, 1px border.
 - Header: optional 16px icon, title (14/600), one-line subtitle, actions on the
   right.
-- Methodology longer than one line goes into a `Disclosure` ("Como ler esta
-  medição").
+- No methodology on screen (ABAS-OBJETIVAS, 29/10/2026): no "Como ler",
+  no explanatory subtitle or footer. A caveat that changes how a number is
+  read becomes a chip of up to ~8 words or an `InfoDica`; the rest is cut.
+  Every tab follows the Gerencial: title, chips, numbers.
 
 ### Tables
 
@@ -368,8 +371,8 @@ each channel shows only what its source sustains.
 
 - Put a number in the first viewport of every route, above any prose.
 - Turn metadata sentences into chips: period, freshness, coverage.
-- Keep quality warnings visible and lighter: a short note, with the full text
-  in a disclosure or a `title`.
+- Keep a quality warning only when it changes the reading of a number: a
+  short chip, with the full text in an `InfoDica`.
 - Repeat the route icon in the page header.
 - Keep the 44px target on every filter control and the 12px type floor.
 

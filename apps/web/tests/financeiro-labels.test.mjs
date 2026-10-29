@@ -40,10 +40,10 @@ test("ML nao chama mais o indicador de 'Custo Total'", () => {
   // Antes: "Nao inclui comissao do Mercado Livre". Agora a tarifa e' exibida
   // (MARGEM-REAL-2) e o indicador declara que NAO a inclui.
   assert.match(painel("Mercado Livre"), /Não inclui a tarifa ML/);
-  assert.match(source, /nao inclui a tarifa do Mercado Livre/i);
+  assert.match(source, /n[aã]o inclui a tarifa do Mercado Livre/i);
   // A tarifa nunca e' apresentada como margem.
   assert.match(painel("Mercado Livre"), /rotulo: "Tarifa ML"/);
-  assert.match(source, /nao e' margem/);
+  assert.match(source, /n[aã]o (e'|é) margem/);
   assert.doesNotMatch(source, /margem real/i);
 });
 
@@ -57,7 +57,7 @@ test("TikTok nao afirma mais comissao de afiliados e usa nomenclatura de repasse
 });
 
 test("TikTok expõe aviso de competencia diferente entre repasse e GMV", () => {
-  assert.match(source, /competencias? (podem|diferentes)/i);
+  assert.match(source, /compet[eê]ncias? (podem|diferentes)/i);
 });
 
 test("secao TikTok chama-se 'Repasses TikTok', nao mais 'Liquidacao TikTok'", () => {

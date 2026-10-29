@@ -28,6 +28,7 @@ import PageContainer from "@/components/layout/PageContainer";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import InfoDica from "@/components/ui/InfoDica";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import TikTokMonthlyPanel from "@/components/brand/TikTokMonthlyPanel";
@@ -103,10 +104,13 @@ function MetricList({ metrics }: { metrics: readonly DrilldownMetric[] }) {
   );
 }
 
-function SectionTitle({ children, badge }: { children: ReactNode; badge?: string }) {
+function SectionTitle({ children, badge, dica }: { children: ReactNode; badge?: string; dica?: string }) {
   return (
     <div className="flex items-center gap-3 mb-4 flex-wrap">
-      <h3 className="text-sm font-semibold text-slate-600">{children}</h3>
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-600">
+        {children}
+        {dica && <InfoDica texto={dica} />}
+      </h3>
       {badge && (
         <span className="text-xs font-semibold text-slate-600 bg-slate-100 rounded-full px-2.5 py-0.5">
           {badge}
@@ -468,12 +472,16 @@ function BrandPageInner() {
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            {!isLive && <DataQualityNote note={DEMO_SERIES_WARNING} />}
+            {!isLive && (
+              <p className="flex w-fit items-center gap-1.5 text-xs font-semibold text-warn-ink bg-warn-soft border border-warn/35 rounded-lg px-3 py-1.5">
+                Dados de exemplo · não usar para decisão
+                <InfoDica texto={DEMO_SERIES_WARNING} />
+              </p>
+            )}
             {!ordersReliable && (
-              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-                Seleção parcial de canal em modo demonstração — os dados de exemplo não separam
-                pedidos por canal, então Pedidos e Ticket Médio ficam indisponíveis para esta
-                seleção. GMV continua filtrável normalmente.
+              <p className="flex w-fit items-center gap-1.5 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                Pedidos e Ticket N/D nesta seleção
+                <InfoDica texto="Em modo demonstração, os dados de exemplo não separam pedidos por canal. GMV continua filtrável." />
               </p>
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -491,11 +499,6 @@ function BrandPageInner() {
                 <KpiCard label="Ad Spend" value="—" subvalue="N/D para TikTok Shop" accent="bg-slate-300" />
               )}
             </div>
-            <p className="text-xs text-slate-500">
-              Estes quatro indicadores são do <strong>intervalo global</strong>. A classificação de
-              sinais por canal (custo, frete, Ads) é da matriz marca × canal, em Canais — esta
-              página não a recalcula.
-            </p>
           </div>
         )}
       </section>
@@ -518,7 +521,10 @@ function BrandPageInner() {
               <DailyChart data={projectedDaily} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
             </div>
             <div className={`bg-white border rounded-2xl shadow-sm px-4 py-4 ${isLive ? "border-violet-100" : "border-amber-200"}`}>
-              <h3 className="text-sm font-semibold text-slate-700 mb-3">Mix por marketplace</h3>
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 mb-3">
+                Mix por marketplace
+                <InfoDica texto={'Participação sobre a soma dos canais com dado no intervalo. Canal sem cobertura fica "Sem dado", nunca 0%.'} />
+              </h3>
               {mixCanais.length === 0 ? (
                 <p className="text-sm text-slate-500 py-8 text-center">Nenhum canal selecionado.</p>
               ) : (
@@ -545,10 +551,6 @@ function BrandPageInner() {
                       </div>
                     </li>
                   ))}
-                  <li className="text-xs text-slate-500">
-                    Participação sobre a soma dos canais com dado no intervalo. Canal sem cobertura
-                    fica &quot;Sem dado&quot;, nunca 0%.
-                  </li>
                 </ul>
               )}
             </div>
@@ -558,7 +560,12 @@ function BrandPageInner() {
 
       {/* ══ 5. o que mudou — so quando o dado existente sustenta ═════════ */}
       <section aria-label="O que mudou no intervalo global">
-        <SectionTitle badge={`intervalo global ${periodLabel} vs anterior`}>O que mudou</SectionTitle>
+        <SectionTitle
+          badge={`intervalo global ${periodLabel} vs anterior`}
+          dica="GMV decomposto por canal contra o intervalo equivalente anterior. Sem variação % quando a base anterior não é positiva."
+        >
+          O que mudou
+        </SectionTitle>
         {mudancas !== "ready" ? (
           <p className="text-xs text-slate-500">{CHANGES_NOTE[mudancas]}</p>
         ) : (
@@ -582,11 +589,6 @@ function BrandPageInner() {
                 </span>
               </li>
             ))}
-            <li className="text-xs text-slate-500">
-              Decomposição do mesmo GMV pela coluna de canal do payload diário, contra o intervalo
-              equivalente anterior. Sem variação percentual quando a base anterior não é positiva —
-              dividir por zero não produz leitura.
-            </li>
           </ul>
         )}
       </section>
@@ -613,10 +615,7 @@ function BrandPageInner() {
           className="rounded-2xl border border-slate-200 bg-white px-4 sm:px-6 py-5"
         >
           <h2 className="text-sm font-bold text-slate-700">TikTok Shop · análise mensal</h2>
-          <p className="text-xs text-slate-600 mt-1">
-            A seleção de canais atual não inclui TikTok Shop, e todo o conteúdo deste contêiner vem
-            do contrato mensal do TikTok. Nada foi estimado para preencher o bloco.
-          </p>
+          <p className="text-xs text-slate-600 mt-1">Seleção sem TikTok Shop.</p>
         </section>
       )}
 
@@ -624,9 +623,7 @@ function BrandPageInner() {
       <section aria-label={`Últimos 7 dias do intervalo global ${periodLabel}`} aria-busy={!dailyIsFresh}>
         <SectionTitle badge={`intervalo global ${periodLabel}`}>Últimos 7 dias</SectionTitle>
         {!ordersReliable && dailyIsFresh && (
-          <p className="text-xs text-slate-500 -mt-2 mb-3">
-            Pedidos e Ticket Médio indisponíveis nesta seleção (modo demonstração, canal parcial).
-          </p>
+          <p className="text-xs text-slate-500 -mt-2 mb-3">Pedidos e Ticket N/D nesta seleção.</p>
         )}
         <div className="bg-white rounded-2xl shadow-sm border border-violet-100 overflow-hidden">
           <TableScrollHint>
@@ -721,10 +718,6 @@ function BrandPageInner() {
             </DrilldownCta>
           </li>
         </ul>
-        <p className="text-xs text-slate-500 mt-1">
-          Navegação limpa: os destinos preservam apenas filtros compatíveis, e nenhum contexto de
-          chegada é repropagado.
-        </p>
       </section>
 
       {/* ══ shell UNICO de detalhe — um dialogo por vez ═════════════════ */}

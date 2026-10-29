@@ -21,14 +21,13 @@ import { AlertTriangle, Percent, Store, Tag, TrendingDown, Trophy, UserCheck } f
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import TableScrollHint from "@/components/TableScrollHint";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import StatCard from "@/components/ui/StatCard";
 import StateBlock from "@/components/ui/StateBlock";
 import {
   AVISO_FIXTURE,
-  AVISO_SEM_CLIENTE,
   B2BRevendaError,
   FILTROS_VAZIOS,
   MARCAS,
@@ -112,7 +111,7 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
     <PageContainer>
       <PageHeader
         title="Monitoramento de preços — B2B / Revendedores"
-        subtitle="Preço praticado por revendedores B2B nos marketplaces comparado ao PMA informado pelo OctaPrice. Fonte: Torre B2B, somente leitura."
+        subtitle="Preço dos revendedores B2B × PMA do OctaPrice."
       />
 
       {modo === "fixture" && (
@@ -149,19 +148,6 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
         />
       )}
       {painel && <Conteudo painel={painel} filtros={filtros} />}
-
-      <Disclosure rotulo="Como ler esta aba">
-        <ul className="list-disc space-y-1 pl-5 text-sm text-ink-muted">
-          <li>{AVISO_SEM_CLIENTE}</li>
-          {(painel && !isIndisponivel(painel.frescor) ? painel.frescor.limitacoes : []).map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-          <li>
-            Severidade: grave = mais de 15% abaixo do PMA; média = de 5% a 15%; leve = até 5%. As faixas são as da
-            Torre B2B.
-          </li>
-        </ul>
-      </Disclosure>
     </PageContainer>
   );
 }
@@ -172,7 +158,7 @@ export default function RevendedoresClient({ modo }: { modo: "fixture" | "api" }
 function FaixaFrescor({ frescor, carregando }: { frescor: Frescor | null; carregando: boolean }) {
   if (!frescor) {
     return carregando ? null : (
-      <Note tom="ausente">Frescor indisponível: a Torre B2B não informou a carga mais recente.</Note>
+      <Note tom="ausente">Frescor indisponível.</Note>
     );
   }
   const atrasado = frescor.situacao === "atrasado";
@@ -213,9 +199,8 @@ function AvisoEscopo({ escopo }: { escopo: Escopo }) {
     <>
       {escopo.canais_kpi_sem_dados.length > 0 && (
         <Note tom="atencao" papel="status">
-          <span className="font-semibold">Canal do escopo sem anúncio no relatório mais recente:</span>{" "}
-          {escopo.canais_kpi_sem_dados.join(", ")}. Os KPIs abaixo não incluem esse canal — confira a coleta ou a
-          configuração.
+          <span className="font-semibold">Sem anúncio no relatório:</span> {escopo.canais_kpi_sem_dados.join(", ")}.{" "}
+          Os KPIs abaixo não incluem esse canal.
         </Note>
       )}
       <AvisoPiso escopo={escopo} />
@@ -223,21 +208,16 @@ function AvisoEscopo({ escopo }: { escopo: Escopo }) {
   );
 }
 
+/** Piso em um selo; o aviso e o motivo de cada canal excluido ficam no "ⓘ". */
 function AvisoPiso({ escopo }: { escopo: Escopo }) {
+  const excluidos = escopo.canais_excluidos;
+  const dica = [escopo.aviso_piso, ...excluidos.map((c) => `${c.canal}: ${c.motivo}`)].join(" ");
   return (
-    <Note tom="neutro">
-      <span className="font-semibold text-ink">Piso: PMA do OctaPrice.</span> {escopo.aviso_piso}
-      {escopo.canais_excluidos.length > 0 && (
-        <>
-          {" "}
-          {escopo.canais_excluidos.map((c) => (
-            <span key={c.canal}>
-              <span className="font-semibold text-ink">{c.canal}:</span> {c.motivo}{" "}
-            </span>
-          ))}
-        </>
-      )}
-    </Note>
+    <p className="inline-flex w-fit flex-wrap items-center gap-1 rounded-md border border-line bg-raised px-2.5 py-1 text-xs text-ink-muted">
+      <span className="font-semibold text-ink">Piso: PMA do OctaPrice.</span>
+      {excluidos.length > 0 && <span>Fora: {excluidos.map((c) => c.canal).join(", ")}.</span>}
+      <InfoDica texto={dica} />
+    </p>
   );
 }
 
@@ -336,9 +316,7 @@ function Conteudo({ painel, filtros }: { painel: PainelB2B; filtros: Filtros }) 
         tipo="vazio"
         titulo="Nenhum anúncio neste recorte"
         descricao={
-          temFiltro(filtros)
-            ? "A Torre B2B respondeu e não há anúncio monitorado com estes filtros."
-            : "A Torre B2B respondeu e o relatório deste dia não tem anúncio nos canais do escopo."
+          temFiltro(filtros) ? "Ajuste os filtros." : "O relatório do dia não tem anúncio no escopo."
         }
       />
     );
@@ -355,7 +333,7 @@ function Conteudo({ painel, filtros }: { painel: PainelB2B; filtros: Filtros }) 
       <div className="grid grid-cols-1 gap-3 sm:gap-4 xl:grid-cols-3">
         <PainelSeveridade resumo={resumo} />
         <div className="xl:col-span-2 min-w-0">
-          <Panel titulo="Canal × marca" descricao="Anúncios e violações do PMA no dia, nos canais do escopo." semPadding>
+          <Panel titulo="Canal × marca" semPadding>
             {isIndisponivel(canaisMarcas) ? (
               <BlocoIndisponivel r={canaisMarcas} compacto />
             ) : canaisMarcas.linhas.length === 0 ? (
@@ -393,11 +371,7 @@ function Conteudo({ painel, filtros }: { painel: PainelB2B; filtros: Filtros }) 
           </Panel>
         </div>
       </div>
-      <Panel
-        titulo="SKUs com mais anúncios abaixo do PMA"
-        descricao="Ranking por anúncios violando. Só entram SKUs com ao menos uma violação."
-        semPadding
-      >
+      <Panel titulo="SKUs com mais anúncios abaixo do PMA" semPadding>
         {isIndisponivel(skus) ? (
           <BlocoIndisponivel r={skus} compacto />
         ) : skus.linhas.length === 0 ? (
@@ -456,7 +430,7 @@ function FaixaKpis({ resumo }: { resumo: ResumoOk }) {
         tom={k.anuncios_violando > 0 ? "critico" : "neutro"}
         contexto={`${fmtInt(k.anuncios_violando)} anúncios abaixo do PMA`}
       />
-      <StatCard rotulo="Sellers violando" valor={fmtInt(k.sellers_violando)} icone={Store} nota="Seller pelo nome normalizado" />
+      <StatCard rotulo="Sellers violando" valor={fmtInt(k.sellers_violando)} icone={Store} />
       <StatCard
         rotulo="Desvio médio"
         valor={fmtDesvio(k.desvio_medio_pma)}
@@ -494,7 +468,7 @@ function PainelSeveridade({ resumo }: { resumo: ResumoOk }) {
     { ...SEVERIDADES[2], n: s.leve, cor: "bg-ink-faint" },
   ];
   return (
-    <Panel titulo="Severidade das violações" descricao="Faixa do desvio em relação ao PMA." icone={Percent}>
+    <Panel titulo="Severidade das violações" icone={Percent}>
       {total === 0 ? (
         <StateBlock tipo="vazio" titulo="Nenhuma violação neste recorte" compacto />
       ) : (

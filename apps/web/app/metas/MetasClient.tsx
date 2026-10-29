@@ -237,7 +237,6 @@ export default function MetasClient() {
     <PageContainer>
       <PageHeader
         title="Metas"
-        subtitle="Meta mensal de GMV por marca e canal. Os totais são somados automaticamente."
         icon={Target}
         meta={
           <span className="inline-flex min-h-8 items-center rounded-lg border border-line bg-surface px-2.5 text-xs text-ink-muted">
@@ -287,10 +286,7 @@ export default function MetasClient() {
       ) : (
         <>
           {vazio && (
-            <Note>
-              Nenhuma meta definida para {rotuloMes(mes)}. Preencha os campos ou copie as metas de{" "}
-              {rotuloMes(deslocarMes(mes, -1))}.
-            </Note>
+            <Note>Nenhuma meta definida para {rotuloMes(mes)}.</Note>
           )}
 
           <MetasGrade
