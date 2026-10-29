@@ -22,7 +22,7 @@
  * ---------------------
  * Com a API fora, a tela mostra o erro: meta de exemplo seria lida como real.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight, Copy, Save, Target, Undo2 } from "lucide-react";
 
@@ -40,6 +40,7 @@ import {
   parseMes,
   podeIrPara,
   rascunhoDe,
+  rascunhoParcialDe,
   realizadoDasMarcas,
   rotuloMes,
   valoresDaResposta,
@@ -66,6 +67,11 @@ export default function MetasClient() {
   const router = useRouter();
   const mesCorrente = useMemo(() => mesAtualBrt(), []);
   const mes = parseMes(searchParams.get("mes")) ?? mesCorrente;
+  // Mes vigente para as respostas assincronas (salvar, copiar): o mes pode
+  // trocar pelo voltar/avancar do navegador enquanto a requisicao esta em voo,
+  // e a resposta de outro mes nao pode cair no estado deste.
+  const mesRef = useRef(mes);
+  mesRef.current = mes;
 
   const [carga, setCarga] = useState<Carga | null>(null);
   const [rascunho, setRascunho] = useState<Rascunho>({});
@@ -122,6 +128,25 @@ export default function MetasClient() {
     return () => window.removeEventListener("beforeunload", segurar);
   }, [sujo]);
 
+  // Navegar pelo menu (link interno do Next) tambem pede confirmacao. Captura
+  // no documento roda antes do `onClick` do `<Link>`, e `preventDefault` faz o
+  // Next desistir da navegacao.
+  useEffect(() => {
+    if (!sujo) return;
+    const interceptar = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const link = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!link || link.target === "_blank" || link.origin !== window.location.origin) return;
+      if (link.pathname === window.location.pathname) return;
+      if (!window.confirm(`Há alterações não salvas em ${rotuloMes(mes)}. Sair e descartá-las?`)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener("click", interceptar, true);
+    return () => document.removeEventListener("click", interceptar, true);
+  }, [sujo, mes]);
+
   const irPara = useCallback(
     (destino: string) => {
       if (!podeIrPara(destino) || destino === mes) return;
@@ -144,10 +169,14 @@ export default function MetasClient() {
       return;
     }
     if (!nAlteradas) return;
+    const alvo = mes;
     setSalvando(true);
     setAviso(null);
     try {
-      const resp = await salvarMetas(mes, analise.alteradas);
+      const resp = await salvarMetas(alvo, analise.alteradas);
+      // Gravou no banco; se o mes da tela ja' e' outro, a carga dele traz o
+      // estado certo quando o usuario voltar.
+      if (mesRef.current !== alvo) return;
       const novo = valoresDaResposta(resp);
       setCarga({ mes, salvo: novo, ultima: resp.ultima_alteracao });
       setRascunho(rascunhoDe(novo));
@@ -156,6 +185,7 @@ export default function MetasClient() {
         texto: `Metas de ${rotuloMes(mes)} salvas · ${plural(resp.alteracoes, "alteração", "alterações")}.`,
       });
     } catch (err) {
+      if (mesRef.current !== alvo) return;
       const texto = err instanceof MetasErro ? err.falha.mensagem : "Não foi possível salvar.";
       setAviso({ tom: "critico", texto: `${texto} Nada foi perdido: os valores continuam na tela.` });
     } finally {
@@ -164,22 +194,27 @@ export default function MetasClient() {
   }
 
   async function copiarAnterior() {
-    const anterior = deslocarMes(mes, -1);
+    const alvo = mes;
+    const anterior = deslocarMes(alvo, -1);
     if (!podeIrPara(anterior)) return;
     setCopiando(true);
     setAviso(null);
     try {
       const resp = await fetchMetas(anterior);
+      if (mesRef.current !== alvo) return;
       if (!resp.celulas.length) {
         setAviso({ tom: "neutro", texto: `${capitalizar(rotuloMes(anterior))} não tem metas para copiar.` });
         return;
       }
-      setRascunho(rascunhoDe(valoresDaResposta(resp)));
+      // So' as celulas que o mes anterior TEM: as demais ficam como estao,
+      // para copiar nunca apagar uma meta ja' digitada neste mes.
+      setRascunho((r) => ({ ...r, ...rascunhoParcialDe(valoresDaResposta(resp)) }));
       setAviso({
         tom: "atencao",
-        texto: `Valores de ${rotuloMes(anterior)} copiados para ${rotuloMes(mes)}. Revise e clique em Salvar metas.`,
+        texto: `Metas de ${rotuloMes(anterior)} copiadas para ${rotuloMes(alvo)} nas células que ${rotuloMes(anterior).split(" ")[0]} tinha; as demais ficaram como estavam. Revise e clique em Salvar metas.`,
       });
     } catch (err) {
+      if (mesRef.current !== alvo) return;
       const texto = err instanceof MetasErro ? err.falha.mensagem : "Não foi possível copiar.";
       setAviso({ tom: "critico", texto });
     } finally {

@@ -188,6 +188,13 @@ export function rascunhoDe(valores: Valores): Rascunho {
   return r;
 }
 
+/** Texto so' das celulas que TEM valor — para copiar sem apagar as demais. */
+export function rascunhoParcialDe(valores: Valores): Rascunho {
+  const r: Rascunho = {};
+  for (const k of TODAS_AS_CHAVES) if (valores[k] != null) r[k] = textoDoCampo(valores[k]);
+  return r;
+}
+
 export interface Analise {
   /** Celulas digitadas que nao se leem como valor. */
   invalidas: Partial<Record<Chave, string>>;

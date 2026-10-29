@@ -59,3 +59,18 @@ class JanelaDeslizante:
     def limpar(self) -> None:
         with self._lock:
             self._hits.clear()
+
+
+def chave_do_cliente(request) -> str:
+    """IP do cliente. Atras do proxy do Render o IP real vem no
+    `X-Forwarded-For`; usa-se o ULTIMO elemento (o que o proxy anexou), nao o
+    primeiro (que o cliente pode forjar). Sem o header, o IP da conexao.
+
+    Vive aqui, ao lado da janela, para todas as rotas com limite (b2b, metas)
+    identificarem o cliente do mesmo jeito.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    partes = [p.strip() for p in xff.split(",") if p.strip()]
+    if partes:
+        return partes[-1][:64]
+    return (request.client.host if request.client else "desconhecido")[:64]

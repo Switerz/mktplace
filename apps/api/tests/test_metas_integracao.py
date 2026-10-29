@@ -74,6 +74,7 @@ def test_salvar_inclui_altera_remove_e_registra_historico(db):
     })
     assert n == 2
     assert estado["celulas"] == [{"brand": "kokeshi", "channel": "tiktok", "meta_gmv": 4500000.5}]
+    assert estado["ultima_alteracao"] is not None
     assert _historico(db) == [
         ("kokeshi", "tiktok", None, D("4216608.00")),
         ("kokeshi", "ml", None, D("0.00")),
@@ -122,3 +123,13 @@ def test_check_barra_nan(db):
         ))
         db.commit()
     db.rollback()
+
+
+def test_remover_a_ultima_meta_ainda_registra_a_alteracao(db):
+    """Sem linha restante, o horario da alteracao vem do historico."""
+    primeiro, _ = svc.salvar(db, OUT, {("apice", "ml"): D("10")})
+    estado, n = svc.salvar(db, OUT, {("apice", "ml"): None})
+    assert n == 1
+    assert estado["celulas"] == []
+    assert estado["ultima_alteracao"] is not None
+    assert estado["ultima_alteracao"] >= primeiro["ultima_alteracao"]

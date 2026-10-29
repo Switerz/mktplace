@@ -19,8 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.rate_limit import JanelaDeslizante
-from app.routers.b2b_revenda import chave_do_cliente
+from app.rate_limit import JanelaDeslizante, chave_do_cliente
 from app.schemas.metas import MetasMesResponse, SalvarMetasRequest, SalvarMetasResponse
 from app.services import metas_service as svc
 
