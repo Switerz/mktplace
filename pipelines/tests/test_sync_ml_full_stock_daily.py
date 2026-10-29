@@ -234,17 +234,20 @@ def test_resumo_dry_run_nao_expoe_run_id():
     assert "run-x" not in json.dumps(r, default=str)
 
 
-def test_run_usa_sessao_read_only_e_sempre_fecha(monkeypatch):
+def test_run_usa_transacao_repeatable_read_read_only_e_sempre_fecha(monkeypatch):
     eventos = []
 
     class Raw:
-        def set_session(self, **kw):
+        def set_session(self, **kw):                 # persistiria no pool: nao e' mais usado
             eventos.append(("set_session", kw))
 
     class Conexao:
         connection = Raw()
 
         def execute(self, sql, params=None):
+            eventos.append(str(sql))
+            if str(sql) == mod.SQL_CONFERE_LEITURA:
+                return _Res([("repeatable read", "on")])
             return _Res([(False, False, False)])
 
     class Sessao:
@@ -260,8 +263,26 @@ def test_run_usa_sessao_read_only_e_sempre_fecha(monkeypatch):
     monkeypatch.setattr(mod, "DataMartSession", Sessao)
     r = mod.run(date(2026, 10, 20))
     assert r["estado"] == "fonte_inexistente"
-    assert ("set_session", {"readonly": True}) in eventos
+    assert eventos[0] == mod.SQL_LEITURA_CONSISTENTE and eventos[1] == mod.SQL_CONFERE_LEITURA
+    assert not any(isinstance(e, tuple) for e in eventos)
     assert eventos[-2:] == ["rollback", "close"]
+
+
+@pytest.mark.parametrize("resposta", [("read committed", "on"), ("repeatable read", "off"), None])
+def test_leitura_que_nao_ficou_repeatable_read_read_only_falha_fechada(resposta):
+    class Conexao:
+        def __init__(self):
+            self.sqls = []
+
+        def execute(self, sql, params=None):
+            self.sqls.append(str(sql))
+            return _Res([resposta])
+
+    c = Conexao()
+    with pytest.raises(mod.LeituraInconsistente, match="leitura_inconsistente"):
+        mod.iniciar_leitura_consistente(c)
+    assert c.sqls == [mod.SQL_LEITURA_CONSISTENTE, mod.SQL_CONFERE_LEITURA]
+    assert "SERIALIZABLE" not in mod.SQL_LEITURA_CONSISTENTE          # proibido em hot standby
 
 
 # ---------------------------------------------------------------------------

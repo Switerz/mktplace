@@ -20,7 +20,12 @@ from types import SimpleNamespace
 import pytest
 
 from pipelines import publish_ml_full_stock_daily as pub
+from pipelines import sync_ml_full_stock_daily as fonte_mod
 from pipelines.tests.test_sync_ml_full_stock_daily import cenario
+
+#: as funcoes REAIS da auditoria (o fixture `ambiente` troca por dubles)
+AUDIT_START, AUDIT_FINISH = pub.audit_start, pub.audit_finish
+ESCRITA = re.compile(r"^\s*(INSERT|UPDATE|DELETE|TRUNCATE|MERGE)\b", re.I)
 
 REF = date(2026, 10, 20)
 RAW = "run-raw-barbours-1"
@@ -106,6 +111,12 @@ class Cursor:
         i = self.conn.ident
         if q in self.conn.negar:
             raise RuntimeError("permission denied")
+        if "INSERT INTO audit.source_sync_run" in q:
+            self.ultimo = (77,)
+            return
+        if "UPDATE audit.source_sync_run" in q:
+            self.rowcount = 1
+            return
         respostas = (
             ("current_database()", i["current_database"]),
             ("current_setting('server_version_num')", i["server_version_num"]),
@@ -129,6 +140,7 @@ class Conn:
         self.ident, self.host = dict(IDENT) if ident is None else ident, host
         self.pode_control, self.tem_alembic, self.negar = True, True, set()
         self.connection = self
+        self.commits = self.rollbacks = self.closes = 0
 
     def execute(self, sql, params=None):
         s = str(sql)
@@ -144,6 +156,16 @@ class Conn:
     @contextmanager
     def cursor(self):
         yield Cursor(self)
+
+    # conexao DBAPI crua da auditoria (`_audit_conn`)
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closes += 1
 
 
 class Engine:
@@ -179,7 +201,7 @@ def ambiente(monkeypatch, tmp_path):
     monkeypatch.setattr(pub, "_ler_fonte", ler)
     monkeypatch.setattr(pub, "tabelas_destino_existem", lambda: True)
     monkeypatch.setattr(pub, "publish_run_id_em_uso", lambda rid: False)
-    monkeypatch.setattr(pub, "audit_start", lambda n: estado["audit"].append(("start", n)) or 77)
+    monkeypatch.setattr(pub, "audit_start", lambda n, esp=None: estado["audit"].append(("start", n)) or 77)
     monkeypatch.setattr(pub, "audit_finish", lambda sid, st, **kw: estado["audit"].append((st, kw)))
 
     def inserir(cur, sql, linhas, page_size):
@@ -622,7 +644,7 @@ class EngineLeitura:
 def _assert_so_leitura(conn):
     assert conn.sqls[0] == "SET TRANSACTION READ ONLY" and conn.rollbacks == 1
     for s in conn.sqls:
-        assert not re.search(r"(INSERT|UPDATE|DELETE|TRUNCATE)|advisory", s, re.I), s
+        assert not re.search(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b|advisory", s, re.I), s
 
 
 def test_diagnosticar_so_le_e_acha_as_linhas(monkeypatch, capsys):
@@ -652,7 +674,7 @@ def test_pre_checagem_do_publish_run_id_so_le(monkeypatch):
     _assert_so_leitura(conn)
 
 
-def test_ler_fonte_le_os_runs_na_mesma_sessao_read_only(monkeypatch):
+def test_ler_fonte_le_tudo_numa_transacao_repeatable_read_read_only(monkeypatch):
     eventos, sqls = [], []
 
     class Raw:
@@ -669,6 +691,8 @@ def test_ler_fonte_le_os_runs_na_mesma_sessao_read_only(monkeypatch):
         def execute(self, sql, params=None):
             s = str(sql)
             sqls.append(s)
+            if s == fonte_mod.SQL_CONFERE_LEITURA:
+                return Res(linhas=[("repeatable read", "on")])
             if "raw.ml_full_stock_runs" in s and "to_regclass" in s:
                 return Res(escalar=True)
             if "to_regclass" in s:
@@ -692,8 +716,14 @@ def test_ler_fonte_le_os_runs_na_mesma_sessao_read_only(monkeypatch):
     monkeypatch.setattr(pub, "DataMartSession", Sessao)
     f = pub._ler_fonte(REF, (RAW,))
     assert f["runs"] == {RAW: registro()}
-    assert eventos[0] == ("set_session", {"readonly": True}) and eventos[-2:] == ["rollback", "close"]
-    assert not any(re.search(r"(INSERT|UPDATE|DELETE)", s, re.I) for s in sqls)
+    # 1o comando: a transacao e' REPEATABLE READ READ ONLY, conferida antes de qualquer SELECT de dado;
+    # snapshot, status, ponte, vendas e runs saem todos da MESMA conexao/transacao.
+    assert sqls[:2] == [fonte_mod.SQL_LEITURA_CONSISTENTE, fonte_mod.SQL_CONFERE_LEITURA]
+    for trecho in ("ml_full_inventory_snapshot", "ml_full_inventory_unavailable", "ml_full_inventory_listing",
+                   "api.ml_orders", "FROM raw.ml_full_stock_runs"):
+        assert any(trecho in s for s in sqls[2:]), trecho
+    assert eventos == ["rollback", "close"]                      # sem set_session (persistiria no pool)
+    assert not any(re.search(r"\b(INSERT|UPDATE|DELETE)\b", s, re.I) for s in sqls)
 
 
 # ---------------------------------------------------------------------------
@@ -820,11 +850,14 @@ def test_null_so_bate_com_null(ambiente, monkeypatch, tmp_path, campo, atual, ap
     assert not any(s.startswith("DELETE") for s, _ in conn.sqls)
 
 
-def test_null_com_null_segue(ambiente, monkeypatch, tmp_path):
-    nulos = dict(IDENT, system_identifier=None, neon_tenant_id=None, neon_timeline_id=None)
-    gravar_destino(tmp_path / ARQ_DESTINO, nulos)
+@pytest.mark.parametrize("nulos", [
+    {"neon_tenant_id": None, "neon_timeline_id": None},       # forte = system_identifier
+    {"system_identifier": None},                              # forte = par Neon
+])
+def test_null_com_null_segue_se_sobra_identificador_forte(ambiente, monkeypatch, tmp_path, nulos):
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(IDENT, **nulos))
     conn = _conn_ok()
-    conn.ident = dict(nulos)
+    conn.ident = dict(IDENT, **nulos)
     monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
     assert pub.run(apply=True, ref_date=REF, **CONTRATO)["applied"] is True
 
@@ -889,3 +922,252 @@ def test_diagnosticar_nao_exige_destino_esperado(monkeypatch, capsys):
     monkeypatch.setattr(pub, "local_engine", lambda: EngineLeitura(conn))
     codigo, j = _main_json(capsys, ["--diagnosticar", "--ref-date", str(REF), "--publish-run-id", PUB])
     assert codigo == 0 and j["modo"] == "diagnostico"
+
+
+# ---------------------------------------------------------------------------
+# R31-1: auditoria tambem so' no destino aprovado (contagem de TODAS as escritas)
+# ---------------------------------------------------------------------------
+def _escritas(*conns):
+    """Comandos de escrita enviados (fatos via conn.execute + auditoria via cursor)."""
+    return [s for c in conns for s, _ in c.sqls if ESCRITA.match(s)]
+
+
+def _audit_real(monkeypatch, *conns):
+    """Liga as funcoes REAIS da auditoria; cada `_audit_conn()` devolve a proxima conexao."""
+    fila = list(conns)
+    monkeypatch.setattr(pub, "audit_start", AUDIT_START)
+    monkeypatch.setattr(pub, "audit_finish", AUDIT_FINISH)
+    monkeypatch.setattr(pub, "_audit_conn", lambda: fila.pop(0) if fila else pytest.fail("conexao de audit a mais"))
+    return fila
+
+
+def _ok(conn):
+    pac = pub.montar(fonte_barbours(), REF, "r")["esperado"]
+    conn.destino = {"n": pac["inventarios"], "soma": pac["soma_disponivel"]}
+    return conn
+
+
+@pytest.mark.parametrize("campo,valor", [
+    ("current_database", "outro_banco"), ("system_identifier", "7350000000000000999"),
+    ("neon_tenant_id", "tenant-b"), ("modo", "teste")])
+def test_destino_divergente_zero_escritas_em_fatos_e_auditoria_nao_iniciada(ambiente, monkeypatch, capsys,
+                                                                           campo, valor):
+    errado = dict(IDENT, **{campo: valor})
+    host = "127.0.0.1" if campo == "modo" else "ep-x.sa-east-1.aws.neon.tech"     # modo vem do host real
+    fato, aud1, aud2 = (Conn(ident=errado, host=host) for _ in range(3))
+    eng = Engine(fato)
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    sobra = _audit_real(monkeypatch, aud1, aud2)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["estado_transacao"] == "nao_iniciada" and j["applied"] is False
+    assert j["motivo"] == f"destino_divergente: alvo_neon.{campo}"
+    # NENHUMA escrita em lugar nenhum: fatos (DELETE/INSERT) e auditoria (INSERT/UPDATE), nem COMMIT
+    assert _escritas(fato, aud1, aud2) == [] and ambiente["inseridos"] == []
+    assert eng.begins == 0 and eng.commits == 0 and aud1.commits == 0 and aud1.closes == 1
+    assert sobra == [aud2]                                       # o audit_finish nem foi chamado
+    assert any("current_database()" in s for s, _ in aud1.sqls)  # conferiu NA conexao do audit
+
+
+def test_audit_confere_identidade_antes_do_insert_e_do_update(ambiente, monkeypatch, capsys):
+    fato, aud1, aud2 = _ok(Conn()), Conn(), Conn()
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(fato))
+    _audit_real(monkeypatch, aud1, aud2)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 0 and j["auditoria_ok"] is True and j["sync_run_id"] == 77
+    for aud, comando in ((aud1, "INSERT"), (aud2, "UPDATE")):
+        sqls = [s for s, _ in aud.sqls]
+        ident = next(i for i, s in enumerate(sqls) if "current_database()" in s)
+        escrita = next(i for i, s in enumerate(sqls) if ESCRITA.match(s))
+        assert ident < escrita and sqls[escrita].lstrip().startswith(comando) and aud.commits == 1
+    assert len(_escritas(aud1, aud2)) == 2
+
+
+def test_divergencia_so_na_transacao_das_fatos_audit_finish_tambem_recusa(ambiente, monkeypatch, capsys):
+    # audit_start viu o aprovado; o destino trocou antes da transacao das fatos e do audit_finish
+    errado = dict(IDENT, system_identifier="7350000000000000999")
+    fato, aud1, aud2 = Conn(ident=errado), Conn(), Conn(ident=errado)
+    eng = Engine(fato)
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    _audit_real(monkeypatch, aud1, aud2)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["estado_transacao"] == "revertida_comprovada"
+    assert j["motivo"] == "destino_divergente: alvo_neon.system_identifier"
+    assert j["auditoria_ok"] is False and "destino_divergente" in j["erro_auditoria"]
+    # escritas: so' o INSERT `running` no banco APROVADO; zero no divergente (fatos e UPDATE)
+    assert [s.split()[0] for s in _escritas(aud1)] == ["INSERT"] and aud1.commits == 1
+    assert _escritas(fato, aud2) == [] and ambiente["inseridos"] == []
+    assert eng.commits == 0 and aud2.commits == 0
+
+
+def test_divergencia_no_audit_finish_pos_commit_nao_grava_e_exit_5(ambiente, monkeypatch, capsys):
+    fato, aud1, aud2 = _ok(Conn()), Conn(), Conn(ident=dict(IDENT, current_database="outro"))
+    eng = Engine(fato)
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    _audit_real(monkeypatch, aud1, aud2)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 5 and j["estado_transacao"] == "commit_confirmado" and eng.commits == 1
+    assert j["auditoria_ok"] is False and "destino_divergente: alvo_neon.current_database" in j["erro_auditoria"]
+    assert _escritas(aud2) == [] and aud2.commits == 0
+
+
+# ---------------------------------------------------------------------------
+# R31-2: identificador forte obrigatorio (arquivo E destino vivo)
+# ---------------------------------------------------------------------------
+NULOS_FORTES = {"system_identifier": None, "neon_tenant_id": None, "neon_timeline_id": None}
+
+
+@pytest.mark.parametrize("fracos", [
+    NULOS_FORTES,
+    dict(NULOS_FORTES, neon_tenant_id="tenant-a"),          # par Neon incompleto
+    dict(NULOS_FORTES, neon_timeline_id="timeline-a"),
+    dict(NULOS_FORTES, system_identifier=""),
+])
+def test_arquivo_sem_identificador_forte_recusa_sem_conexao(ambiente, monkeypatch, tmp_path, capsys, fracos):
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(IDENT, **fracos))
+    _sem_neon(monkeypatch, "abriu o Neon com arquivo sem identificador forte")
+    monkeypatch.setattr(pub, "_audit_conn", lambda: pytest.fail("abriu conexao de auditoria"))
+    monkeypatch.setattr(pub, "_ler_fonte", lambda *a: pytest.fail("leu o Data Mart"))
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["estado_transacao"] == "nao_iniciada"
+    assert j["motivo"].startswith("destino_nao_identificavel: o arquivo aprovado")
+    assert ambiente["audit"] == [] and ambiente["inseridos"] == []
+
+
+def test_dois_servidores_com_metadados_genericos_iguais_e_fortes_nulos_recusa(ambiente, monkeypatch, tmp_path,
+                                                                            capsys):
+    # servidor A (aprovado) e B (vivo): mesmo banco/versao/alembic/modo, nenhum id forte
+    a = dict(IDENT, **NULOS_FORTES)
+    b = Conn(ident=dict(a))
+    assert pub.campos_divergentes(b.ident, a) == []              # pelos genericos, "bateriam"
+    gravar_destino(tmp_path / ARQ_DESTINO, a)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(b))
+    _audit_real(monkeypatch, Conn(ident=dict(a)))
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["motivo"].startswith("destino_nao_identificavel")
+    assert _escritas(b) == [] and ambiente["inseridos"] == []
+
+
+def test_destino_vivo_sem_identificador_forte_recusa_no_audit_start(ambiente, monkeypatch, capsys):
+    vivo = dict(IDENT, **NULOS_FORTES)
+    fato, aud1 = Conn(ident=vivo), Conn(ident=vivo)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(fato))
+    _audit_real(monkeypatch, aud1)
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["estado_transacao"] == "nao_iniciada"
+    assert j["motivo"] == f"destino_nao_identificavel: o destino nao expoe {pub.IDENT_FORTE_TEXTO}"
+    assert _escritas(fato, aud1) == [] and aud1.commits == 0
+
+
+def test_destino_vivo_sem_identificador_forte_recusa_na_transacao_das_fatos():
+    conn = Conn(ident=dict(IDENT, **NULOS_FORTES))
+    with pytest.raises(pub.PublicacaoRecusada, match="destino_nao_identificavel: o destino"):
+        pub.conferir_destino(conn, IDENT)
+    with pytest.raises(pub.PublicacaoRecusada, match="destino_nao_identificavel: o arquivo"):
+        pub.conferir_destino(Conn(), dict(IDENT, **NULOS_FORTES))
+
+
+def test_identificador_forte_regra():
+    assert pub.identificador_forte(IDENT)
+    assert pub.identificador_forte(dict(IDENT, system_identifier=None))
+    assert pub.identificador_forte(dict(IDENT, neon_tenant_id=None, neon_timeline_id=None))
+    assert not pub.identificador_forte(dict(IDENT, system_identifier=None, neon_timeline_id=None))
+    assert not pub.identificador_forte({})
+
+
+# ---------------------------------------------------------------------------
+# R31-3: fonte coerente (regras do produtor) antes de qualquer escrita
+# ---------------------------------------------------------------------------
+def _sem_ponte(f):
+    f["ponte"] = []
+    return f
+
+
+def _sem_snapshot_na_ponte(f):           # IB (M4) some da ponte; o snapshot ainda tem IB
+    f["ponte"] = [p for p in f["ponte"] if p["inventory_id"] != "IB"]
+    return f
+
+
+def _status_fora_do_snapshot(f):
+    f["status"].append(dict(f["status"][0], inventory_id="IZ"))
+    return f
+
+
+def _ponte_de_outro_seller(f):           # mesmo inventory_id, conta diferente: nao cobre
+    f["ponte"] = [dict(p, seller_id="S9") if p["inventory_id"] == "IA" else p for p in f["ponte"]]
+    return f
+
+
+@pytest.mark.parametrize("adultera,trecho", [
+    (_sem_ponte, "sem linha do run run-raw-barbours-1 em ponte"),
+    (_sem_snapshot_na_ponte, "1 inventario(s) do snapshot fora da ponte"),
+    (_ponte_de_outro_seller, "1 inventario(s) do snapshot fora da ponte"),
+    (_status_fora_do_snapshot, "1 inventario(s) do status fora do snapshot"),
+])
+def test_fonte_incoerente_recusa_nao_iniciada_sem_escrita(ambiente, monkeypatch, capsys, adultera, trecho):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): adultera(fonte_barbours()))
+    _sem_neon(monkeypatch, "tocou o Neon com fonte incoerente")
+    monkeypatch.setattr(pub, "_audit_conn", lambda: pytest.fail("abriu conexao de auditoria"))
+    codigo, j = _main_json(capsys, ARGV_APPLY)
+    assert codigo == 2 and j["estado_transacao"] == "nao_iniciada" and j["erro_classe"] == "PublicacaoRecusada"
+    assert j["motivo"].startswith("fonte_incoerente: barbours") and trecho in j["motivo"]
+    for inv in ("IA", "IB", "IZ", "S1", "S9"):                     # contagens, nunca ids
+        assert inv not in j["motivo"].replace("barbours", "")
+    assert ambiente["audit"] == [] and ambiente["inseridos"] == []
+
+
+def test_fonte_incoerente_tambem_recusa_no_dry_run_com_raw_run(ambiente, monkeypatch):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): _sem_ponte(fonte_barbours()))
+    _sem_neon(monkeypatch)
+    with pytest.raises(pub.PublicacaoRecusada, match="fonte_incoerente"):
+        pub.run(apply=False, ref_date=REF, marcas=["barbours"], raw_runs={"barbours": RAW})
+
+
+def test_snapshot_vazio_do_run_e_incoerente():
+    f = fonte_barbours()
+    f["snapshot"] = []
+    with pytest.raises(pub.PublicacaoRecusada, match="sem linha do run .* em snapshot"):
+        pub.conferir_coerencia(f, {"barbours": RAW})
+
+
+def test_status_vazio_e_legitimo_e_publica(ambiente, monkeypatch):
+    # o produtor so' emite status para indisponivel > 0: dia sem indisponivel nao e' incoerente
+    f = fonte_barbours()
+    f["status"] = []
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): f)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_ok(Conn())))
+    r = pub.run(apply=True, ref_date=REF, **CONTRATO)
+    assert r["applied"] is True and r["status_publicados"] == 0
+
+
+def test_ponte_com_anuncio_sem_inventario_nao_conta_como_cobertura():
+    f = fonte_barbours()
+    f["ponte"] = [dict(p, inventory_id=None) for p in f["ponte"]]
+    with pytest.raises(pub.PublicacaoRecusada, match="5 inventario\\(s\\) do snapshot fora da ponte"):
+        pub.conferir_coerencia(f, {"barbours": RAW})
+
+
+def test_ler_fonte_que_nao_fica_repeatable_read_falha_antes_de_ler_dado(monkeypatch):
+    eventos, sqls = [], []
+
+    class Conexao:
+        def execute(self, sql, params=None):
+            sqls.append(str(sql))
+            return Res(linhas=[("read committed", "on")])
+
+    class Sessao:
+        conexao = Conexao()
+
+        def connection(self):
+            return self.conexao
+
+        def rollback(self):
+            eventos.append("rollback")
+
+        def close(self):
+            eventos.append("close")
+
+    monkeypatch.setattr(pub, "DataMartSession", Sessao)
+    with pytest.raises(fonte_mod.LeituraInconsistente):
+        pub._ler_fonte(REF, (RAW,))
+    assert sqls == [fonte_mod.SQL_LEITURA_CONSISTENTE, fonte_mod.SQL_CONFERE_LEITURA]
+    assert eventos == ["rollback", "close"]

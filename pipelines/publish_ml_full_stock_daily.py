@@ -1,7 +1,8 @@
 """ML-FULL-STOCK-PRODUCTIZATION-1 — publica o estoque Full do ML no Neon. INERTE.
 
-Le a fotografia do airflow (`raw.ml_full_*`, Data Mart, sessao READ ONLY)
-pelo mesmo leitor do dry-run (`sync_ml_full_stock_daily.ler_fonte`), calcula
+Le a fotografia do airflow (`raw.ml_full_*`, Data Mart, numa unica transacao
+REPEATABLE READ READ ONLY: snapshot, status, ponte, vendas e runs no MESMO
+instante) pelo mesmo leitor do dry-run (`sync_ml_full_stock_daily.ler_fonte`), calcula
 os indicadores por inventario (`pipelines.transforms.ml_full_stock`) e, SO'
 com as travas abaixo, publica nas fatos da migration 029.
 
@@ -13,8 +14,9 @@ TRAVAS PARA ESCREVER (todas obrigatorias)
 4. contrato do chamador (T-0019): `--marca` (allowlist), um `--raw-run
    <marca>=<run_id>` por marca pedida e `--publish-run-id <uuid hex 32>`;
 5. `--destino-esperado <arquivo.json>`: o arquivo aprovado gerado pelo
-   `-Identificar` do pacote humano. Ausente/ilegivel = recusa antes de qualquer
-   conexao de escrita.
+   `-Identificar` do pacote humano. Ausente/ilegivel, ou sem identificador
+   FORTE (`system_identifier` ou o par `neon_tenant_id`+`neon_timeline_id`),
+   = recusa antes de qualquer conexao de escrita.
 Sem qualquer uma delas o run e' dry-run (ou recusa explicita), sem escrita.
 
 CONTRATO DO APPLY
@@ -27,6 +29,10 @@ CONTRATO DO APPLY
   comecou na data (fuso de Sao Paulo, mesmo relogio do `ref_date` do
   airflow), terminou (`completo`/`parcial`) e registrou `PUBLICADA` para ela.
   Qualquer divergencia = recusa ANTES de qualquer DELETE/INSERT.
+- Coerencia da fotografia do run, por marca pedida (`conferir_coerencia`,
+  regras do produtor): snapshot e ponte com >= 1 linha do run, todo
+  inventario do snapshot na ponte e todo inventario do status no snapshot.
+  Falha = `fonte_incoerente`, recusa `nao_iniciada`.
 - `--publish-run-id` vira o `source_run_id` das linhas. Id ja' presente em
   qualquer fato = recusa (checado antes e de novo dentro do lock).
 
@@ -37,13 +43,18 @@ PUBLICACAO
 - Logo depois do lock, ANTES de qualquer DELETE, a impressao digital do banco
   (mesmas queries do `identificar` do helper) e' lida NA conexao da transacao e
   comparada campo a campo com `identidade.alvo_neon` (null so' bate com null).
-  Divergencia = `PublicacaoRecusada` com o NOME do campo, `revertida_comprovada`.
+  Destino sem identificador forte = `destino_nao_identificavel`; divergencia =
+  `destino_divergente` com o NOME do campo; ambos `revertida_comprovada`.
 - So' as marcas pedidas. DELETE do (ref_date, marca) + INSERT: reexecutar
   substitui, nunca duplica, e nunca toca marca nao pedida.
 - Reconciliacao PRE-COMMIT: linhas e soma do disponivel no destino tem de
   bater com o calculado; qualquer diferenca aborta.
 - Auditoria em `audit.source_sync_run` numa conexao PROPRIA: o rollback das
-  fatos nao apaga o registro de que a execucao existiu e falhou.
+  fatos nao apaga o registro de que a execucao existiu e falhou. As DUAS
+  conexoes da auditoria conferem a mesma identidade ANTES do INSERT/UPDATE:
+  nenhuma escrita (fato ou auditoria) vai para destino nao aprovado. No
+  `audit_start` a recusa e' `nao_iniciada`; no `audit_finish` vira
+  `auditoria_ok=false` com a causa.
 
 ESTADO DA TRANSACAO (JSON `estado_transacao`)
 ---------------------------------------------
@@ -206,7 +217,21 @@ def carregar_destino_esperado(caminho) -> dict:
     esperado = ident.get(DESTINO_LADO) if isinstance(ident, dict) else None
     if not isinstance(esperado, dict) or not esperado:
         raise PublicacaoRecusada(f"destino_esperado_sem_identidade: falta identidade.{DESTINO_LADO}")
+    if not identificador_forte(esperado):
+        raise PublicacaoRecusada(f"destino_nao_identificavel: o arquivo aprovado nao tem {IDENT_FORTE_TEXTO}")
     return esperado
+
+
+#: Identificador FORTE: os metadados genericos (banco, versao, recuperacao,
+#: alembic, modo) se repetem entre servidores distintos; sozinhos nunca provam
+#: que o destino e' o aprovado. Exige-se `system_identifier` ou o par Neon
+#: `neon_tenant_id` + `neon_timeline_id`, nao nulos, no arquivo E no destino vivo.
+IDENT_FORTE_TEXTO = "system_identifier nem o par neon_tenant_id+neon_timeline_id"
+
+
+def identificador_forte(ident: dict) -> bool:
+    tem = lambda k: ident.get(k) not in (None, "")
+    return tem("system_identifier") or (tem("neon_tenant_id") and tem("neon_timeline_id"))
 
 
 def _host_loopback(host) -> bool:
@@ -278,12 +303,26 @@ def campos_divergentes(atual: dict, esperado: dict) -> list[str]:
             if k not in atual or k not in esperado or not _igual(atual[k], esperado[k])]
 
 
+def conferir_identidade(cur, esperado: dict) -> None:
+    """No cursor da conexao que VAI escrever: destino identificavel e igual ao aprovado, ou recusa.
+
+    Usada nas tres conexoes que escrevem no Neon: a transacao das fatos e as
+    duas da auditoria (`audit_start` e `audit_finish`).
+    """
+    if not esperado or not identificador_forte(esperado):     # cinto: o carregador ja' recusa
+        raise PublicacaoRecusada(f"destino_nao_identificavel: o arquivo aprovado nao tem {IDENT_FORTE_TEXTO}")
+    atual = identidade_destino(cur)
+    if not identificador_forte(atual):
+        raise PublicacaoRecusada(f"destino_nao_identificavel: o destino nao expoe {IDENT_FORTE_TEXTO}")
+    div = campos_divergentes(atual, esperado)
+    if div:
+        raise PublicacaoRecusada("destino_divergente: " + ", ".join(f"{DESTINO_LADO}.{k}" for k in div))
+
+
 def conferir_destino(conn, esperado: dict) -> None:
     """Na conexao DA TRANSACAO de escrita: o banco e' o aprovado, ou recusa."""
     with conn.connection.cursor() as cur:
-        div = campos_divergentes(identidade_destino(cur), esperado)
-    if div:
-        raise PublicacaoRecusada("destino_divergente: " + ", ".join(f"{DESTINO_LADO}.{k}" for k in div))
+        conferir_identidade(cur, esperado)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +412,38 @@ def conferir_linhagem(fonte, ref_date: date, raw_runs: dict) -> None:
         desfecho = _outcome(reg.get("outcome_by_brand")).get(m)
         if desfecho != DESFECHO_PUBLICADA:
             raise PublicacaoRecusada(f"run_raw_nao_publicado: {esperado} desfecho de {m}={desfecho!r}")
+
+
+def conferir_coerencia(fonte, raw_runs: dict) -> None:
+    """Fotografia do run esperado coerente por marca, ou `fonte_incoerente` (antes de qualquer escrita).
+
+    `conferir_linhagem` so' recusa run ALHEIO: conjunto vazio passa. Estas regras
+    sao as que o produtor garante para marca PUBLICADA (airflow
+    `mercadolivre/ingestion/full_stock/snapshot.py`, `coletar_marca` +
+    `GravadorDataMart.publicar_marca`, as tres tabelas numa transacao):
+    - snapshot = um registro por `inventory_id` NAO nulo da ponte => snapshot
+      com >= 1 linha (sem ela nao ha' fotografia) e ponte com >= 1 linha;
+    - todo inventario do snapshot esta' na ponte do mesmo run;
+    - status so' e' emitido para inventario lido => todo inventario do status
+      esta' no snapshot do mesmo run. Status VAZIO e' legitimo (nenhum
+      indisponivel) e nao e' recusado.
+    Chave: (seller_id, inventory_id). A mensagem leva contagens, nunca ids.
+    """
+    for m, rid in sorted(raw_runs.items()):
+        do_run = {k: [r for r in fonte[k] if r["brand"] == m and r.get("run_id") == rid]
+                  for k in ("snapshot", "status", "ponte")}
+        for k in ("snapshot", "ponte"):
+            if not do_run[k]:
+                raise PublicacaoRecusada(f"fonte_incoerente: {m} sem linha do run {rid} em {k}")
+        snap = {(r["seller_id"], r["inventory_id"]) for r in do_run["snapshot"]}
+        ponte = {(r["seller_id"], r["inventory_id"]) for r in do_run["ponte"] if r.get("inventory_id")}
+        status = {(r["seller_id"], r["inventory_id"]) for r in do_run["status"]}
+        if snap - ponte:
+            raise PublicacaoRecusada(
+                f"fonte_incoerente: {m} tem {len(snap - ponte)} inventario(s) do snapshot fora da ponte do run {rid}")
+        if status - snap:
+            raise PublicacaoRecusada(
+                f"fonte_incoerente: {m} tem {len(status - snap)} inventario(s) do status fora do snapshot do run {rid}")
 
 
 # ---------------------------------------------------------------------------
@@ -479,10 +550,17 @@ def _audit_conn():
     return LocalSession().get_bind().raw_connection()
 
 
-def audit_start(rows_extracted: int) -> int:
+def audit_start(rows_extracted: int, esperado: dict) -> int:
+    """INSERT `running`, so' depois de conferir NESTA conexao que o banco e' o aprovado.
+
+    Destino divergente/nao identificavel = `PublicacaoRecusada` sem INSERT nem
+    COMMIT (a conexao fecha com rollback); como roda antes da transacao das
+    fatos, o run sai `nao_iniciada`.
+    """
     conn = _audit_conn()
     try:
         with conn.cursor() as cur:
+            conferir_identidade(cur, esperado)
             cur.execute("""INSERT INTO audit.source_sync_run
                                (source_name, marketplace_id, loja_id, status, started_at, rows_extracted)
                            VALUES (%s, %s, NULL, 'running', NOW(), %s) RETURNING sync_run_id""",
@@ -494,10 +572,16 @@ def audit_start(rows_extracted: int) -> int:
         conn.close()
 
 
-def audit_finish(sid: int, status: str, rows_loaded=None, error_message=None) -> None:
+def audit_finish(sid: int, status: str, rows_loaded=None, error_message=None, *, esperado: dict) -> None:
+    """UPDATE do desfecho, so' depois de conferir NESTA conexao que o banco e' o aprovado.
+
+    Divergencia aqui (o destino mudou depois do `audit_start`) levanta sem
+    UPDATE nem COMMIT; quem chama reporta `auditoria_ok=false` com a causa.
+    """
     conn = _audit_conn()
     try:
         with conn.cursor() as cur:
+            conferir_identidade(cur, esperado)
             cur.execute("""UPDATE audit.source_sync_run SET status = %s, finished_at = NOW(),
                                rows_loaded = %s, error_message = %s WHERE sync_run_id = %s""",
                         (status, rows_loaded, error_message, sid))
@@ -515,10 +599,14 @@ def _ler_runs(conn, runs):
 
 
 def _ler_fonte(ref_date, runs=()):
-    """Fonte + registro dos runs RAW pedidos, na MESMA sessao read-only do Data Mart."""
+    """Fonte + registro dos runs RAW pedidos: TUDO numa unica transacao REPEATABLE READ READ ONLY.
+
+    Snapshot, status, ponte, vendas e runs veem o MESMO instante do Data Mart:
+    uma republicacao do airflow no meio da leitura nao intercala runs.
+    """
     dm = DataMartSession()
     try:
-        dm.connection().connection.set_session(readonly=True)
+        fonte_mod.iniciar_leitura_consistente(dm.connection())
         fonte = fonte_mod.ler_fonte(dm.connection(), ref_date)
         if fonte is not None and runs:
             fonte["runs"] = _ler_runs(dm.connection(), runs)
@@ -555,6 +643,7 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
         raise PublicacaoRecusada(f"marca_pedida_sem_fotografia: {sem_foto} em {ref_date}")
     if fonte is not None and raw_runs:
         conferir_linhagem(fonte, ref_date, raw_runs)     # dry-run com --raw-run: mesma conferencia
+        conferir_coerencia(fonte, raw_runs)
     if not apply:
         return resumo
     # --- travas: qualquer uma ausente = recusa explicita, nada gravado -----
@@ -568,7 +657,9 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
     if pacote["marcas"] != sorted(marcas):
         raise PublicacaoRecusada(f"pacote_fora_do_pedido: {pacote['marcas']} != {sorted(marcas)}")
     resumo.update(modo="apply", source_run_id=run_id)
-    sid = audit_start(len(pacote["inventario"]))
+    # Identidade conferida na conexao do audit ANTES do INSERT: destino divergente
+    # recusa aqui, sem nenhuma escrita (`nao_iniciada`).
+    sid = audit_start(len(pacote["inventario"]), esperado_neon)
     try:
         publicado = _publicar(pacote, ref_date, run_id, esperado_neon)
     except BaseException as exc:
@@ -576,7 +667,7 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
         prefixo = "" if estado == ESTADO_REVERTIDA else f"estado_transacao={estado}; "
         try:
             audit_finish(sid, "failed", rows_loaded=0 if estado == ESTADO_REVERTIDA else None,
-                         error_message=prefixo + sanitizar(exc))
+                         error_message=prefixo + sanitizar(exc), esperado=esperado_neon)
             _marcar(exc, auditoria_ok=True, sync_run_id=sid)
         except Exception as exc_audit:
             logger.error("auditoria da falha nao gravada: %s", sanitizar(exc_audit))
@@ -585,7 +676,7 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
     # Daqui em diante o COMMIT esta' confirmado: nada abaixo pode virar "falha".
     resumo.update(publicado, applied=True, grava=True, sync_run_id=sid, estado_transacao=ESTADO_COMMIT)
     try:
-        audit_finish(sid, "success", rows_loaded=publicado["inventarios_publicados"])
+        audit_finish(sid, "success", rows_loaded=publicado["inventarios_publicados"], esperado=esperado_neon)
         resumo["auditoria_ok"] = True
     except Exception as exc:
         logger.error("commit confirmado, auditoria pendente: %s", sanitizar(exc))

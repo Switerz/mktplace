@@ -2,7 +2,8 @@
 
 O que este pipeline e' HOJE
 ---------------------------
-Somente leitura e somente dry-run. Le, no Data Mart e em sessao READ ONLY, a
+Somente leitura e somente dry-run. Le, no Data Mart e numa unica transacao
+REPEATABLE READ READ ONLY (`iniciar_leitura_consistente`), a
 fotografia publicada pela DAG `mercadolivre_full_stock_snapshot` do airflow
 (`raw.ml_full_inventory_snapshot`, `_unavailable`, `_listing`) e as vendas
 Full pagas dos 28 dias completos anteriores. Calcula os indicadores por
@@ -91,6 +92,29 @@ SELECT l.brand, l.item_id, COALESCE(l.variation_id::text, '0') AS variation_id,
 """)
 
 
+#: Fotografia consistente: TODA a fonte (snapshot, status, ponte, vendas e runs)
+#: numa unica transacao REPEATABLE READ READ ONLY. Em READ COMMITTED cada SELECT
+#: ve' um instante diferente e uma republicacao do airflow entre eles intercala
+#: runs (ou esvazia a ponte/status). REPEATABLE READ e' permitido em hot standby
+#: (SERIALIZABLE nao e'). Por transacao: nada persiste na conexao do pool.
+SQL_LEITURA_CONSISTENTE = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+SQL_CONFERE_LEITURA = ("SELECT current_setting('transaction_isolation'), "
+                       "current_setting('transaction_read_only')")
+
+
+class LeituraInconsistente(RuntimeError):
+    """A transacao de leitura nao ficou REPEATABLE READ READ ONLY."""
+
+
+def iniciar_leitura_consistente(conn) -> None:
+    """PRIMEIRO comando da transacao de leitura; confere o efeito (fail closed)."""
+    conn.execute(text(SQL_LEITURA_CONSISTENTE))
+    linha = conn.execute(text(SQL_CONFERE_LEITURA)).fetchone()
+    if linha is None or tuple(linha) != ("repeatable read", "on"):
+        raise LeituraInconsistente(f"leitura_inconsistente: transacao {tuple(linha or ())!r}, "
+                                   "esperado ('repeatable read', 'on')")
+
+
 def janela_demanda(ref_date: date) -> tuple[date, date]:
     """[ref_date - 28, ref_date): dias COMPLETOS, sem o dia corrente."""
     return ref_date - timedelta(days=T.JANELA_VENDAS_DIAS), ref_date
@@ -148,7 +172,7 @@ def run(ref_date: date | None = None, agora: datetime | None = None) -> dict:
     ref_date = ref_date or _hoje_brt(agora)
     dm = DataMartSession()
     try:
-        dm.connection().connection.set_session(readonly=True)
+        iniciar_leitura_consistente(dm.connection())
         fonte = ler_fonte(dm.connection(), ref_date)
     finally:
         dm.rollback()
