@@ -16,6 +16,8 @@ O que ele NAO faz (de proposito)
 - NAO assume que as tabelas `raw.ml_full_*` existem. A DDL delas nao foi
   aplicada; ausentes, o resultado e' `fonte_inexistente`, nunca estoque zero.
 - NAO soma estoque por anuncio nem rateia venda sem vinculo unico.
+- NAO imprime `run_id`: ele e' lido em cada linha (snapshot, status, ponte) so'
+  para o publicador conferir a linhagem RAW; o resumo continua so' agregado.
 - NAO trata `transfer` como remessa do operador (Eli) ao Full: essa remessa
   vem de NF do Bling e e' outro fato.
 
@@ -48,19 +50,19 @@ SQL_PRESENCA = text("SELECT " + ", ".join(f"to_regclass('{t}') IS NOT NULL" for 
 
 SQL_SNAPSHOT = text("""
 SELECT brand, seller_id, inventory_id, read_status, available_quantity,
-       not_available_quantity, total_coerente
+       not_available_quantity, total_coerente, run_id
   FROM raw.ml_full_inventory_snapshot
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)
 
 SQL_STATUS = text("""
-SELECT brand, seller_id, inventory_id, status_raw, quantity
+SELECT brand, seller_id, inventory_id, status_raw, quantity, run_id
   FROM raw.ml_full_inventory_unavailable
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)
 
 SQL_PONTE = text("""
-SELECT brand, seller_id, item_id, variation_id, inventory_id, logistic_type, listing_status
+SELECT brand, seller_id, item_id, variation_id, inventory_id, logistic_type, listing_status, run_id
   FROM raw.ml_full_inventory_listing
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)

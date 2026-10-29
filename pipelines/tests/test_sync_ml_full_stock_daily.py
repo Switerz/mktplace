@@ -219,6 +219,21 @@ def test_ler_fonte_para_se_tabela_ausente():
     assert len(c.sqls) == 1
 
 
+@pytest.mark.parametrize("sql", [mod.SQL_SNAPSHOT, mod.SQL_STATUS, mod.SQL_PONTE])
+def test_linhas_raw_trazem_o_run_id_da_linhagem(sql):
+    # O publicador confere a linhagem RAW linha a linha, no MESMO SELECT dos dados.
+    colunas = str(sql).split("SELECT", 1)[1].split("FROM", 1)[0]
+    assert "run_id" in [c.strip() for c in colunas.split(",")]
+
+
+def test_resumo_dry_run_nao_expoe_run_id():
+    s, st, p, v = cenario()
+    marcar = lambda xs: [dict(x, brand="barbours", run_id="run-x") for x in xs]
+    r = mod.resumir({"snapshot": marcar(s), "status": marcar(st), "ponte": marcar(p), "vendas": {}},
+                    date(2026, 10, 20))
+    assert "run-x" not in json.dumps(r, default=str)
+
+
 def test_run_usa_sessao_read_only_e_sempre_fecha(monkeypatch):
     eventos = []
 
