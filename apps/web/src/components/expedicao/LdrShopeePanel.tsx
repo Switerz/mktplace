@@ -51,26 +51,37 @@ export interface EstadoLdr {
  * vendedor x FBS) e por este painel. `ligada = false` nao faz requisicao
  * nenhuma — e' o caminho da flag desligada.
  */
-export function useLdrShopee(api: string, marca: string | null, ligada: boolean): EstadoLdr {
-  const chave = queryDaLdrShopee(DIAS_LDR_SHOPEE, marca);
+export function useLdrShopee(
+  api: string,
+  marca: string | null,
+  ligada: boolean,
+  // UI-EXPEDICAO-1: o periodo do topo da pagina; sem ele, a janela padrao.
+  dias: number = DIAS_LDR_SHOPEE,
+): EstadoLdr {
+  const chave = queryDaLdrShopee(dias, marca);
   const vigente = useRef(chave);
   vigente.current = chave;
   const [resposta, setResposta] = useState<RespostaLdrShopee | null>(null);
   const [carregando, setCarregando] = useState(ligada);
   const [erro, setErro] = useState(false);
+  // Marca da resposta na tela. So' a troca de MARCA tira a resposta antiga:
+  // trocar o periodo nao muda a fila aberta (vendedor x FBS), que e' "agora".
+  const marcaDaResposta = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     if (!ligada) {
       setResposta(null);
+      marcaDaResposta.current = undefined;
       setCarregando(false);
       setErro(false);
       return;
     }
     const minha = chave;
     let vivo = true;
-    // A resposta anterior e' de outra marca (ou de outra fotografia): sai da
-    // tela enquanto a nova nao chega.
-    setResposta(null);
+    // A resposta anterior de OUTRA marca sai da tela enquanto a nova nao
+    // chega. De outro periodo, fica: a divisao da fila aberta nao depende da
+    // janela, e o "Risco atual" nao pisca para a fila com FBS a cada troca.
+    if (marcaDaResposta.current !== marca) setResposta(null);
     setCarregando(true);
     setErro(false);
     buscarExpedicao(`${api}${minha}`, { headers: { Accept: "application/json" } })
@@ -80,6 +91,7 @@ export function useLdrShopee(api: string, marca: string | null, ligada: boolean)
       })
       .then((json) => {
         if (!vivo || vigente.current !== minha) return;
+        marcaDaResposta.current = marca;
         setResposta(json);
         setCarregando(false);
       })
@@ -87,6 +99,7 @@ export function useLdrShopee(api: string, marca: string | null, ligada: boolean)
         if (!vivo || vigente.current !== minha) return;
         // Erro NAO mantem o numero antigo na tela: ele seria de outra marca
         // ou de outra fotografia.
+        marcaDaResposta.current = undefined;
         setResposta(null);
         setErro(true);
         setCarregando(false);

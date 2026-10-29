@@ -92,7 +92,8 @@ export function CorpoGestor({
   prazo: ReactNode;
   jornada?: ReactNode;
   evolucao: ReactNode;
-  concentracao: ReactNode;
+  /** UI-EXPEDICAO-1: opcional — a fila junta concentracao e evolucao numa tabela. */
+  concentracao?: ReactNode;
   convite?: ReactNode;
 }) {
   return (

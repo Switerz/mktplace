@@ -395,17 +395,20 @@ function ramos(src: string): { gestor: string; detalhe: string } {
 
 test("fila: o gestor ve narrativa e concentracao; o detalhe ve a fila", () => {
   const { gestor, detalhe } = ramos(CLIENTE.replace(/\r\n/g, "\n"));
-  // EXPEDICAO-UX-3: risco atual (com a lista de atencao dentro), prazo,
-  // evolucao e concentracao — a mesma ordem do TikTok.
-  for (const s of ["{secaoRisco}", "{secaoPrazo}", "{painelEvolucao}", "painelContas(", "<ConviteAoDetalhe"]) {
+  // EXPEDICAO-UX-3: risco atual (com a lista de atencao dentro), prazo e
+  // evolucao — a mesma ordem do TikTok. UI-EXPEDICAO-1 (decisao do usuario):
+  // a concentracao entrou na TABELA UNICA de marcas do painel de evolucao,
+  // entao o gestor nao tem mais a segunda tabela com as mesmas marcas.
+  for (const s of ["{secaoRisco}", "{secaoPrazo}", "{painelEvolucao}", "<ConviteAoDetalhe"]) {
     assert.ok(gestor.includes(s), `gestor sem ${s}`);
   }
   assert.ok(
     gestor.indexOf("{secaoRisco}") < gestor.indexOf("{secaoPrazo}") &&
-      gestor.indexOf("{secaoPrazo}") < gestor.indexOf("{painelEvolucao}") &&
-      gestor.indexOf("{painelEvolucao}") < gestor.indexOf("painelContas("),
-    "ordem: risco, prazo, evolucao, concentracao",
+      gestor.indexOf("{secaoPrazo}") < gestor.indexOf("{painelEvolucao}"),
+    "ordem: risco, prazo, evolucao",
   );
+  assert.ok(!gestor.includes("painelContas("), "o gestor tem UMA tabela de marcas");
+  assert.match(CLIENTE, /fila=\{linhasDaFila\}/);
   assert.match(CLIENTE, /const secaoRisco = \([\s\S]*?<AtencaoAgora\s+itens=\{atencao\}/);
   // marca de varias contas: a lista vazia diz POR QUE esta' vazia
   assert.match(CLIENTE, /a leitura de atenção fica por conta/);

@@ -330,7 +330,7 @@ export default function JornadaPedidos({
   return (
     <SecaoGerencial
       titulo="Jornada"
-      descricao="Quantos pedidos há em cada etapa. A fila aberta (agora) e a coorte (dias fechados) são leituras separadas."
+      dica="Quantos pedidos há em cada etapa. A fila aberta (agora) e a coorte (dias fechados) são leituras separadas."
     >
       {estado === "carregando" ? <EstadoSecao tipo="carregando" titulo="Carregando a jornada…" /> : null}
       {estado === "indisponivel" ? (

@@ -931,11 +931,17 @@ type MedidaDeConta =
  * E' selecao sobre o que a API publicou por conta, nao calculo: nenhuma conta
  * e' somada a outra. Empate fica com a primeira na ordem da API.
  */
-function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
+/** A conta com a MAIOR contagem da medida (zero nao concentra nada). */
+function maiorConta(contas: ResumoConta[], medida: MedidaDeConta): ResumoConta | null {
   let maior: ResumoConta | null = null;
   for (const c of contas) {
     if (c[medida] > 0 && (maior === null || c[medida] > maior[medida])) maior = c;
   }
+  return maior;
+}
+
+function concentracao(contas: ResumoConta[], medida: MedidaDeConta): string {
+  const maior = maiorConta(contas, medida);
   return maior ? ` Maior concentração: ${nomeDaConta(maior, contas)}, com ${inteiro(maior[medida])}.` : "";
 }
 
@@ -1009,6 +1015,62 @@ export function montarAtencaoDaFila(
     });
   }
   return itens;
+}
+
+/** Nome de cada medida na frase "onde agir", no plural. */
+const NOME_DA_MEDIDA: Record<MedidaDeConta, string> = {
+  overdue_count: "vencidos",
+  due_within_24h_count: "a vencer em 24 h",
+  stalled_count: "travados",
+  over_48h_count: "acima de 48 h",
+};
+
+const NOME_NO_SINGULAR: Record<MedidaDeConta, string> = {
+  overdue_count: "vencido",
+  due_within_24h_count: "a vencer em 24 h",
+  stalled_count: "travado",
+  over_48h_count: "acima de 48 h",
+};
+
+/** A medida em destaque do canal: vencidos com prazo publicado; sem ele, +48 h. */
+export function medidasDoDestaque(canal: Canal = CANAL_PADRAO): MedidaDeConta[] {
+  return canalTemPrazo(canal)
+    ? ["overdue_count", "due_within_24h_count", "stalled_count", "over_48h_count"]
+    : ["over_48h_count", "stalled_count"];
+}
+
+/**
+ * UI-EXPEDICAO-1 — "onde agir": UMA frase com a marca que concentra a medida
+ * mais grave acesa. Os numeros ja' estao no destaque; aqui so' entra o que o
+ * destaque nao diz (quem concentra). Selecao sobre o que a API publicou por
+ * conta, nunca soma. Com uma conta so' no recorte, a frase nao acrescenta
+ * nada e nao existe.
+ */
+export function ondeAgirNaFila(
+  t: Totais | null,
+  contas: ResumoConta[],
+  canal: Canal = CANAL_PADRAO,
+): ItemAtencao | null {
+  if (!t || contas.length < 2) return null;
+  for (const medida of medidasDoDestaque(canal)) {
+    if (t[medida] <= 0) continue;
+    const maior = maiorConta(contas, medida);
+    if (!maior) return null;
+    const nome = nomeDaConta(maior, contas);
+    const total = t[medida];
+    const parte = maior[medida];
+    return {
+      chave: medida,
+      tom: medida === "overdue_count" ? "critico" : "atencao",
+      texto:
+        total === 1
+          ? `${nome} tem o único pedido ${NOME_NO_SINGULAR[medida]}.`
+          : parte >= total
+          ? `${nome} concentra todos os ${inteiro(total)} ${NOME_DA_MEDIDA[medida]}.`
+          : `${nome} concentra ${inteiro(parte)} dos ${inteiro(total)} ${NOME_DA_MEDIDA[medida]}.`,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

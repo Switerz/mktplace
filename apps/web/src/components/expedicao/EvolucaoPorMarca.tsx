@@ -17,8 +17,16 @@
  *   da serie", dito no cabecalho da coluna;
  * - a sparkline usa tinta neutra: cor e' para risco, nao para decorar linha;
  * - o tooltip le a resposta que ja' esta' na tela — nenhuma chamada por hover.
+ *
+ * UI-EXPEDICAO-1 — com `fila`, vira a TABELA UNICA de marcas: a fotografia
+ * de cada conta (backlog, vencidos, +48 h, travados e a barra de prazo) ao
+ * lado da tendencia do periodo. Antes eram duas tabelas com as mesmas marcas
+ * ("Concentracao" e "Evolucao"). As linhas vem da fotografia — a conta sem
+ * ponto no periodo continua na tabela, so' sem tendencia.
  */
-import { useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+
+import InfoDica from "@/components/ui/InfoDica";
 
 import {
   coberturaDaEvolucao,
@@ -33,6 +41,20 @@ import {
 } from "@/lib/expedicao-evolucao";
 import type { RespostaTendencia } from "@/lib/expedicao-contract";
 import { formatarInteiro } from "@/lib/expedicao-formato";
+
+/** A fotografia da fila de UMA conta, para a tabela unica. */
+export interface LinhaDaFila {
+  conta: string;
+  titulo: string;
+  apelido: string | null;
+  backlog: number;
+  /** `null` no canal sem prazo publicado: a coluna nem existe. */
+  vencidos: number | null;
+  acima48h: number;
+  travados: number;
+  /** Barra de prazo (ou de distribuicao) desenhada pelo cliente do canal. */
+  barra: ReactNode;
+}
 
 const L = 120;
 const A = 28;
@@ -141,7 +163,24 @@ function Sparkline({ serie, dominioX }: { serie: SerieMarca; dominioX: [number, 
 const CLASSE_TABELA =
   "w-full text-sm [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4";
 
-export default function EvolucaoPorMarca({ resposta }: { resposta: RespostaTendencia }) {
+const NOTA_DO_EIXO =
+  "Tendência no mesmo eixo de tempo para todas as marcas; hora sem ponto interrompe a linha.";
+
+export default function EvolucaoPorMarca({
+  resposta,
+  fila,
+  rotuloBarra = "Prazo",
+}: {
+  resposta: RespostaTendencia | null;
+  fila?: LinhaDaFila[];
+  rotuloBarra?: string;
+}) {
+  if (fila) return <TabelaUnica resposta={resposta} fila={fila} rotuloBarra={rotuloBarra} />;
+  if (!resposta) return null;
+  return <SoTendencia resposta={resposta} />;
+}
+
+function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
   const series = montarEvolucaoPorMarca(resposta.points);
   const dominioX = dominioHorizontal(series);
   const cob = coberturaDaEvolucao(resposta);
@@ -207,9 +246,132 @@ export default function EvolucaoPorMarca({ resposta }: { resposta: RespostaTende
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-ink-faint">
-        Tendência no mesmo eixo de tempo para todas as marcas; hora sem ponto interrompe a linha.
-      </p>
+      <p className="text-xs text-ink-faint">{NOTA_DO_EIXO}</p>
+    </div>
+  );
+}
+
+function TabelaUnica({
+  resposta,
+  fila,
+  rotuloBarra,
+}: {
+  resposta: RespostaTendencia | null;
+  fila: LinhaDaFila[];
+  rotuloBarra: string;
+}) {
+  const series = resposta ? montarEvolucaoPorMarca(resposta.points) : [];
+  const dominioX = dominioHorizontal(series);
+  const cob = resposta ? coberturaDaEvolucao(resposta) : null;
+  const cobertura = cob ? descreverCobertura(cob) : null;
+  const periodo = cob ? periodoDaVariacao(cob) : null;
+  const comVencidos = fila.some((l) => l.vencidos !== null);
+  const naFila = new Set(fila.map((l) => l.conta));
+  // A fotografia manda nas linhas; conta so' com tendencia (fora da fila
+  // agora) entra no fim, com os numeros do ultimo ponto e sem barra.
+  const linhas: { fila: LinhaDaFila | null; serie: SerieMarca | null }[] = [
+    ...fila.map((l) => ({ fila: l, serie: series.find((s) => s.conta === l.conta) ?? null })),
+    ...series.filter((s) => !naFila.has(s.conta)).map((s) => ({ fila: null, serie: s })),
+  ];
+  if (!linhas.length) return null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {cobertura?.desde ? (
+        <p className="flex items-center gap-1.5 text-xs text-ink-muted" data-testid="exp-cobertura-real">
+          <span>
+            <span className="font-medium text-ink">{cobertura.desde}</span> {cobertura.exibindo}
+          </span>
+          <InfoDica texto={NOTA_DO_EIXO} />
+        </p>
+      ) : null}
+      <div className="overflow-x-auto">
+        <table className={CLASSE_TABELA}>
+          <caption className="sr-only">
+            Backlog por marca — a fila de agora e a tendência do período, uma linha por conta, contas nunca somadas
+          </caption>
+          <thead className="text-left text-xs uppercase tracking-wide text-ink-faint">
+            <tr className="border-b border-line">
+              <th scope="col">Marca</th>
+              <th scope="col" className="text-right">Backlog</th>
+              {comVencidos ? <th scope="col" className="text-right">Vencidos</th> : null}
+              <th scope="col" className="text-right">Acima de 48 h</th>
+              <th scope="col" className="text-right">Travados</th>
+              <th scope="col" className="w-[22%]">{rotuloBarra}</th>
+              <th scope="col" className="text-right">
+                Variação
+                {periodo ? (
+                  <span className="block font-normal normal-case tracking-normal">{periodo}</span>
+                ) : null}
+              </th>
+              <th scope="col">Tendência</th>
+            </tr>
+          </thead>
+          <tbody>
+            {linhas.map(({ fila: f, serie: s }) => {
+              const ultimo = s ? s.pontos[s.pontos.length - 1] : null;
+              const v = s && cob ? lerVariacao(s, cob.horasCobertas) : null;
+              const titulo = s?.titulo ?? f?.titulo ?? "";
+              // A fotografia numera TODAS as contas da marca; a serie so' as
+              // que tem ponto. Com fotografia, vale a dela (uma numeracao so').
+              const apelido = f ? f.apelido : (s?.apelido ?? null);
+              return (
+                <tr
+                  key={f?.conta ?? s?.chave}
+                  className="border-b border-line last:border-b-0"
+                  data-estado={s?.estado ?? "sem_ponto"}
+                >
+                  <th scope="row" className="text-left font-semibold text-ink">
+                    {titulo}
+                    {apelido ? (
+                      <span className="ml-1.5 text-xs font-normal text-ink-faint">{apelido}</span>
+                    ) : null}
+                  </th>
+                  <td className="text-right tabular-nums font-semibold text-ink">
+                    {inteiro(f ? f.backlog : (s?.atual ?? 0))}
+                  </td>
+                  {comVencidos ? (
+                    <td className={`text-right tabular-nums ${f?.vencidos ? "font-semibold text-crit-ink" : "text-ink"}`}>
+                      {f?.vencidos != null ? inteiro(f.vencidos) : "—"}
+                    </td>
+                  ) : null}
+                  <td className="text-right tabular-nums text-ink">
+                    {inteiro(f ? f.acima48h : (ultimo?.over48h ?? 0))}
+                  </td>
+                  <td className="text-right tabular-nums text-ink">
+                    {inteiro(f ? f.travados : (ultimo?.stalled ?? 0))}
+                  </td>
+                  <td>{f?.barra ?? null}</td>
+                  <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                    {v ? (
+                      <>
+                        {v.principal}
+                        {v.secundario ? (
+                          <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-ink-faint">—</span>
+                    )}
+                  </td>
+                  <td>
+                    {s && dominioX ? (
+                      <>
+                        <Sparkline serie={s} dominioX={dominioX} />
+                        {s.lacunas > 0 ? (
+                          <span className="ml-2 text-xs text-ink-faint">{s.lacunas} hora(s) sem ponto</span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-xs text-ink-faint">sem ponto no período</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

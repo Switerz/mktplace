@@ -743,7 +743,8 @@ test("jornada: a marca da URL vai como `brands`; evento so' no TikTok; dias nao 
   );
   assert.equal(queryDaJornada("mercadolivre", null, { dias: 7, evento: "coleta" }), "/api/v1/expedicao/jornada?channel=mercadolivre");
   assert.equal(queryDaJornada("shopee", null, { evento: "despacho" }), "/api/v1/expedicao/jornada?channel=shopee");
-  assert.match(CLIENTE, /useJornada\(API, filtros\.channel, marcaAtiva\)/);
+  // UI-EXPEDICAO-1 (decisao do usuario): o periodo do topo comanda a coorte.
+  assert.match(CLIENTE, /useJornada\(API, filtros\.channel, marcaAtiva, \{ dias: janela \}\)/);
 });
 
 const { createElement: hj } = await import("react");
