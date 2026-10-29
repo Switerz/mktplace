@@ -21,7 +21,8 @@ import {
   ShoppingBag,
   type LucideIcon,
 } from "lucide-react";
-import type { KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
+import type { DeltaTone, KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
+import type { TendenciaKpi } from "@/lib/gerencial/kpi-trend";
 import { fmtPct } from "@/lib/formatters";
 
 interface Props {
@@ -32,19 +33,25 @@ interface Props {
   error: boolean;
   onOpen: (key: KpiKey) => void;
   onRetry: () => void;
+  /** KPIS-COMPARACAO-1 — tendencia dentro do periodo, so' para quem tem serie. */
+  tendencias?: Partial<Record<KpiKey, TendenciaKpi | null>>;
   /** GERENCIAL-METAS-1 — o GMV ja' e' o numero do bloco principal; a faixa
    * mostra so' os quatro de apoio, sem repetir. */
   semGmv?: boolean;
 }
 
-function DeltaBadge({ pct }: { pct: number }) {
+/**
+ * KPIS-COMPARACAO-1 — `neutral` (Investimento em Ads) mostra a variacao sem
+ * cor de juizo: gastar mais nao e' bom nem ruim por si.
+ */
+function DeltaBadge({ pct, tone = "higher_is_better" }: { pct: number; tone?: DeltaTone }) {
   const up = pct >= 0;
   const Seta = up ? ArrowUpRight : ArrowDownRight;
+  const pele =
+    tone === "neutral" ? "bg-raised text-ink-muted" : up ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink";
   return (
     <span
-      className={`inline-flex w-fit items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold tabular-nums ${
-        up ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink"
-      }`}
+      className={`inline-flex w-fit items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold tabular-nums ${pele}`}
     >
       <Seta aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2.25} />
       {fmtPct(pct)}
@@ -96,7 +103,63 @@ function KpiCardSkeleton() {
   );
 }
 
-function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) => void }) {
+const SETA: Record<"up" | "down" | "flat", string> = { up: "▲", down: "▼", flat: "=" };
+
+/**
+ * Mini grafico da tendencia. Decorativo (`aria-hidden`): a leitura acessivel e'
+ * o texto ao lado, que diz a direcao e o recorte comparado.
+ */
+function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
+  const min = Math.min(...pontos);
+  const max = Math.max(...pontos);
+  const faixa = max - min;
+  const passo = 100 / (pontos.length - 1);
+  // Serie constante fica no MEIO: colada no chao ela parece "caiu para zero".
+  const y = (v: number) => (faixa === 0 ? 14 : 26 - ((v - min) / faixa) * 24);
+  const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${y(v).toFixed(2)}`);
+  return (
+    <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className={`h-7 w-full ${tinta}`}>
+      <polyline
+        points={coords.join(" ")}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.75}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
+function LinhaDeTendencia({ t, tinta }: { t: TendenciaKpi; tinta: string }) {
+  const cor =
+    t.direcao === "up" ? "text-ok-ink" : t.direcao === "down" ? "text-crit-ink" : "text-ink-muted";
+  return (
+    <span className="mt-1 flex flex-col gap-0.5">
+      <Sparkline pontos={t.pontos} tinta={tinta} />
+      {t.variacaoPct != null && t.direcao && (
+        <span className="text-xs leading-snug text-ink-faint tabular-nums">
+          Tendência:{" "}
+          <span className={`font-semibold ${cor}`}>
+            {SETA[t.direcao]} {t.direcao === "flat" ? "estável" : fmtPct(t.variacaoPct)}
+          </span>{" "}
+          ({t.rotulo})
+        </span>
+      )}
+    </span>
+  );
+}
+
+function KpiCard({
+  kpi,
+  onOpen,
+  tendencia,
+}: {
+  kpi: KpiDescriptor;
+  onOpen: (key: KpiKey) => void;
+  tendencia?: TendenciaKpi | null;
+}) {
   const hasChannelList = kpi.channelValues != null && kpi.channelValues.length > 0;
   const { Icone, tinta } = ICONE_KPI[kpi.key];
 
@@ -105,7 +168,6 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
       type="button"
       onClick={() => onOpen(kpi.key)}
       aria-haspopup="dialog"
-      aria-label={`${kpi.label} — abrir decomposição`}
       // `w-full min-w-0`: sem eles o <button> se dimensiona pelo conteudo e
       // estoura a trilha da grade — era a origem de 5px de overflow horizontal
       // no mobile (390px), medido no QA.
@@ -114,6 +176,9 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
       <span className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           {kpi.label}
+          {/* KPIS-COMPARACAO-1: sem `aria-label` no botao, o nome acessivel e'
+              o proprio conteudo (valor, variacao, tendencia); a acao vai aqui. */}
+          <span className="sr-only"> (abrir decomposição)</span>
         </span>
         <span
           aria-hidden="true"
@@ -132,12 +197,23 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
               <span key={cv.channel} className="flex items-baseline justify-between gap-2">
                 <span className="text-xs text-ink-faint truncate">{cv.label}</span>
                 {cv.value ? (
-                  <span
-                    className={`tabular-nums shrink-0 ${
-                      highlighted ? "text-xl font-bold text-ink" : "text-sm font-semibold text-ink"
-                    }`}
-                  >
-                    {cv.value}
+                  <span className="flex shrink-0 items-baseline gap-1.5">
+                    {cv.direction && cv.previous && (
+                      <span
+                        className={`text-xs font-semibold tabular-nums ${
+                          cv.direction === "up" ? "text-ok-ink" : cv.direction === "down" ? "text-crit-ink" : "text-ink-muted"
+                        }`}
+                      >
+                        {SETA[cv.direction]} de {cv.previous}
+                      </span>
+                    )}
+                    <span
+                      className={`tabular-nums ${
+                        highlighted ? "text-xl font-bold text-ink" : "text-sm font-semibold text-ink"
+                      }`}
+                    >
+                      {cv.value}
+                    </span>
                   </span>
                 ) : (
                   <span className="text-xs text-ink-faint shrink-0">N/D</span>
@@ -156,10 +232,14 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
 
       {(kpi.deltaPct != null && kpi.value) || kpi.reference ? (
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} />}
+          {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} tone={kpi.deltaTone} />}
           {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
         </span>
       ) : null}
+
+      {tendencia && tendencia.pontos.length >= 4 && kpi.value && (
+        <LinhaDeTendencia t={tendencia} tinta={ICONE_KPI[kpi.key].tinta} />
+      )}
 
       <span className="mt-auto flex flex-col gap-0.5 pt-1">
         {kpi.subvalue && <span className="text-xs text-ink-faint leading-snug">{kpi.subvalue}</span>}
@@ -173,7 +253,7 @@ function KpiCard({ kpi, onOpen }: { kpi: KpiDescriptor; onOpen: (key: KpiKey) =>
   );
 }
 
-export default function KpiBand({ kpis: todos, loading, error, onOpen, onRetry, semGmv = false }: Props) {
+export default function KpiBand({ kpis: todos, loading, error, onOpen, onRetry, semGmv = false, tendencias }: Props) {
   const kpis = semGmv ? todos.filter((k) => k.key !== "gmv") : todos;
   // Com quatro cards a grade fecha sem celula vazia em 2 e 4 colunas, entao os
   // spans da fileira de cinco nao se aplicam.
@@ -222,7 +302,7 @@ export default function KpiBand({ kpis: todos, loading, error, onOpen, onRetry, 
             ))
           : kpis.map((kpi, i) => (
               <div key={kpi.key} className={span(i)}>
-                <KpiCard kpi={kpi} onOpen={onOpen} />
+                <KpiCard kpi={kpi} onOpen={onOpen} tendencia={tendencias?.[kpi.key]} />
               </div>
             ))}
       </div>

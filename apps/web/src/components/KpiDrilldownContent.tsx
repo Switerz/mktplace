@@ -30,6 +30,12 @@ interface Props {
    * (omitido) de canal selecionado sem valor no contrato ("Sem dado"). */
   channels: Marketplace[];
   buildHref: (href: string) => string;
+  /**
+   * KPIS-COMPARACAO-1 — a comparacao que o CARD mostrou (variacao % e "antes
+   * X"). Vem pronta da faixa para o detalhe nunca contradizer o card; ausente
+   * = sem comparacao.
+   */
+  comparacao?: { deltaPct: number | null; reference: string | null };
 }
 
 function fmtPct1(v: number | null): string {
@@ -37,18 +43,30 @@ function fmtPct1(v: number | null): string {
 }
 
 /** Referência vs período anterior — SÓ com dado já carregado (Gate G2).
- * O contrato de OverviewData só traz comparação para GMV (prev_gmv +
- * gmv_mom_pct); os demais KPIs informam indisponibilidade explicitamente,
- * nunca uma aproximação calculada aqui. `gmv_mom_pct == null` (ex: período
- * anterior sem dado) também vira indisponível — nunca um delta fabricado. */
-function KpiReference({ kind, overview }: { kind: KpiKind; overview: OverviewData }) {
+ * GMV lê `prev_gmv`/`gmv_mom_pct`; os demais (KPIS-COMPARACAO-1) recebem a
+ * comparação que o card já calculou, para o detalhe nunca contradizer o card.
+ * Sem base, "Comparação indisponível" — nunca um delta fabricado aqui. */
+function KpiReference({
+  kind,
+  overview,
+  comparacao,
+}: {
+  kind: KpiKind;
+  overview: OverviewData;
+  comparacao?: { deltaPct: number | null; reference: string | null };
+}) {
   const hasGmvComparison = kind === "gmv" && overview.gmv_mom_pct != null;
+  const outra = kind !== "gmv" && comparacao?.deltaPct != null && comparacao.reference ? comparacao : null;
   return (
     <div>
       <p className="text-xs text-ink-faint">Referência (período anterior)</p>
       {hasGmvComparison ? (
         <p className="text-sm font-semibold text-ink-muted tabular-nums">
           {fmtBrl(overview.prev_gmv)} · {overview.gmv_mom_pct! >= 0 ? "+" : ""}{overview.gmv_mom_pct!.toFixed(1)}%
+        </p>
+      ) : outra ? (
+        <p className="text-sm font-semibold text-ink-muted tabular-nums">
+          {outra.reference} · {outra.deltaPct! >= 0 ? "+" : ""}{outra.deltaPct!.toFixed(1)}%
         </p>
       ) : (
         <p className="text-sm text-ink-faint">Comparação indisponível</p>
@@ -64,7 +82,7 @@ function KpiReference({ kind, overview }: { kind: KpiKind; overview: OverviewDat
  * carregados (OverviewData/BrandRow), sem fetch/endpoint novo. Nao existe um
  * framework generico de KPI aqui, so um `switch` direto sobre os 4 casos.
  */
-export default function KpiDrilldownContent({ kind, value, periodLabel, refreshedAt, overview, brands, channels, buildHref }: Props) {
+export default function KpiDrilldownContent({ kind, value, periodLabel, refreshedAt, overview, brands, channels, buildHref, comparacao }: Props) {
   const meta = KPI_META[kind];
 
   return (
@@ -76,7 +94,7 @@ export default function KpiDrilldownContent({ kind, value, periodLabel, refreshe
         </div>
       </div>
 
-      <KpiReference kind={kind} overview={overview} />
+      <KpiReference kind={kind} overview={overview} comparacao={comparacao} />
 
       <div className="flex flex-col gap-1">
         <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Como é calculado</p>
