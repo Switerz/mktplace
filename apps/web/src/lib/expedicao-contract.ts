@@ -72,7 +72,7 @@ export const EXPLICACAO_LIMIAR_48H =
 /** O mesmo limiar num canal SEM prazo publicado (Mercado Livre). */
 export const EXPLICACAO_LIMIAR_48H_SEM_PRAZO =
   "Limiar operacional interno da Torre, não é SLA do marketplace. O canal não " +
-  "publica prazo de envio: não há vencidos a comparar.";
+  "publica prazo de despacho: não há vencidos a comparar.";
 
 /** Acima disto a fotografia e' considerada velha e a tela avisa. */
 export const SNAPSHOT_VELHO_HORAS = 6;
@@ -1309,7 +1309,7 @@ export const DEFINICAO_FILA: Record<Canal, string> = {
     "prazo de envio publicado pela Shopee (ship_by_date).",
   mercadolivre:
     "Pedidos pagos aguardando expedição, fotografados a cada publicação. O " +
-    "Mercado Livre não publica prazo de envio: o risco é lido pela idade da fila.",
+    "Mercado Livre não publica prazo de despacho: o risco é lido pela idade da fila.",
 };
 
 /**
