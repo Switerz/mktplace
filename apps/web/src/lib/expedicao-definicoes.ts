@@ -86,6 +86,17 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
   const fonte = canal === "shopee" ? FILA_SHOPEE : FILA_ML;
   const cobertura = canal === "shopee" ? COB_SHOPEE : COB_ML;
   const grao = canal === "shopee" ? "pedido" : "envio (shipment)";
+  // R21: o relogio da idade (`hours_open`) e' por canal, como em
+  // `pipelines/expedicao/transform.py`: Shopee parte de `pay_time` (criacao se
+  // faltar); o ML parte de `date_ready_to_ship` (criacao se faltar) porque a
+  // fonte nao expoe pagamento (`paid_at` sai nulo de proposito).
+  const marco =
+    canal === "shopee"
+      ? { curto: "desde o pagamento", regra: "pagamento (pay_time; a criação do pedido, se faltar)" }
+      : {
+          curto: "desde que o envio ficou pronto para despacho",
+          regra: "envio pronto para despacho (date_ready_to_ship; a criação do pedido, se faltar)",
+        };
   const prazo = (nome: string, definicao: string, formula: string): DefinicaoMetrica =>
     canal === "shopee"
       ? {
@@ -146,8 +157,8 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     [`${canal}.over48h`]: {
       nome: "Acima de 48 h",
       origem: "torre",
-      definicao: "Abertos há mais de 48 h desde o pagamento.",
-      formula: "Contagem com horas em aberto > 48.",
+      definicao: `Abertos há mais de 48 h ${marco.curto}.`,
+      formula: `Contagem com horas em aberto > 48, contadas a partir do ${marco.regra}.`,
       fonte,
       janela: FOTO,
       cobertura,
@@ -176,12 +187,14 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     [`${canal}.zombie`]: {
       nome: "Zumbis",
       origem: "torre",
-      definicao: "Pedidos que pararam de mudar na fonte.",
-      formula: "Contagem marcada como zumbi da fonte pelo pipeline.",
+      // R21: o pipeline so' compara a idade (`hours_open` > 30 dias); nao ha
+      // historico de mudanca nem watermark. Nao afirmar que a fonte parou.
+      definicao: `${grao === "pedido" ? "Pedidos" : "Envios"} abertos há mais de 30 dias na fonte, ${marco.curto}.`,
+      formula: `Contagem com horas em aberto > 30 dias (720 h), contadas a partir do ${marco.regra}.`,
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "Pode ser defeito da fonte, não da operação.",
+      limitacoes: `Mede só a idade: não verifica se o ${grao} mudou na fonte. Pode ser item esquecido na operação ou status não atualizado na fonte; a tela não distingue.`,
     },
     [`${canal}.marcas_alerta`]: {
       nome: "Marcas com fonte em alerta",

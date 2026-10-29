@@ -368,6 +368,28 @@ test("Mercado Livre: o `?` diz que nao ha SLA/LDR e nao inventa numero", () => {
   assert.match(DEFINICOES["mercadolivre.over48h"].limitacoes, /não é SLA/);
 });
 
+test("R21: +48 h conta do marco de cada canal (Shopee = pagamento; ML = pronto para despacho)", () => {
+  const sh = DEFINICOES["shopee.over48h"];
+  assert.match(sh.definicao, /48 h desde o pagamento/);
+  assert.match(sh.formula, /pay_time/);
+  const ml = DEFINICOES["mercadolivre.over48h"];
+  // no ML `paid_at` e' nulo de proposito: o relogio e' `date_ready_to_ship`
+  assert.match(ml.definicao, /48 h desde que o envio ficou pronto para despacho/);
+  assert.match(ml.formula, /date_ready_to_ship/);
+  assert.doesNotMatch(`${ml.definicao} ${ml.formula}`, /pagamento|pay_time/);
+});
+
+test("R21: zumbi declara a idade (> 30 dias), sem afirmar que a fonte parou", () => {
+  for (const [c, marco] of [["shopee", /pay_time/], ["mercadolivre", /date_ready_to_ship/]] as const) {
+    const d = DEFINICOES[`${c}.zombie`];
+    assert.match(d.definicao, /abertos há mais de 30 dias na fonte/, c);
+    assert.match(d.formula, /> 30 dias \(720 h\)/, c);
+    assert.match(d.formula, marco, c);
+    assert.match(d.limitacoes, /Mede só a idade/, c);
+    assert.doesNotMatch(`${d.definicao} ${d.formula} ${d.limitacoes}`, /pararam|parou|parad/, c);
+  }
+});
+
 test("o `?` e' um botao real, de 44px, rotulado e ligado ao painel", () => {
   const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr" }));
   const botao = html.match(/<button[^>]*aria-label="O que é LDR do TikTok"[^>]*>/)?.[0];
