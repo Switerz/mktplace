@@ -22,6 +22,7 @@ import {
   parseMes,
   problemaNaResposta,
   rascunhoDe,
+  rascunhoParcialDe,
   realizadoDasMarcas,
   rotuloMes,
   textoDoCampo,
@@ -249,4 +250,26 @@ test("trocar de mes com alteracao pendente pede confirmacao", () => {
   const cliente = src("app/metas/MetasClient.tsx");
   assert.match(cliente, /window\.confirm\(/);
   assert.match(cliente, /beforeunload/);
+});
+
+test("copiar do mes anterior so' preenche as celulas que ele tem", () => {
+  const atual = rascunhoDe({ [K]: 4_000_000, [chave("kokeshi", "shopee")]: 4_000_000 });
+  const anterior = rascunhoParcialDe({ [K]: 3_500_000 });
+  assert.deepEqual(Object.keys(anterior), [K]);
+  const junto = { ...atual, ...anterior };
+  assert.equal(junto[K], "3.500.000");
+  // a meta que setembro nao tinha continua la'
+  assert.equal(junto[chave("kokeshi", "shopee")], "4.000.000");
+});
+
+test("respostas de outro mes nao caem no estado do mes atual", () => {
+  const cliente = src("app/metas/MetasClient.tsx");
+  assert.equal((cliente.match(/if \(mesRef\.current !== alvo\) return;/g) ?? []).length, 4);
+  assert.match(cliente, /setRascunho\(\(r\) => \(\{ \.\.\.r, \.\.\.rascunhoParcialDe\(/);
+});
+
+test("navegar pelo menu com alteracao pendente pede confirmacao", () => {
+  const cliente = src("app/metas/MetasClient.tsx");
+  assert.match(cliente, /document\.addEventListener\("click", interceptar, true\)/);
+  assert.match(cliente, /e\.preventDefault\(\);\s*e\.stopPropagation\(\);/);
 });

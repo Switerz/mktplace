@@ -104,12 +104,19 @@ def ler(db: Session, mes: date) -> dict:
         ),
         key=lambda c: ordem.get((c["brand"], c["channel"]), len(ordem)),
     )
+    # Ultima alteracao vem do HISTORICO, e nao do `updated_at` das linhas que
+    # sobraram: uma gravacao que so' remove metas tambem e' alteracao, e sem
+    # linha restante o `updated_at` dela some junto.
+    ultima = db.execute(
+        text("SELECT max(alterado_em) FROM marts.meta_gmv_mensal_historico WHERE mes = :mes"),
+        {"mes": mes},
+    ).scalar()
     return {
         "mes": f"{mes:%Y-%m}",
         "marcas": list(MARCAS),
         "canais": list(CANAIS),
         "celulas": celulas,
-        "ultima_alteracao": max((r.updated_at for r in linhas), default=None),
+        "ultima_alteracao": ultima,
     }
 
 
