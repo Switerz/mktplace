@@ -851,3 +851,27 @@ test("parcial por etapas que nao fecham: o aviso aparece UMA vez (no bloco)", ()
     /parte da jornada/,
   );
 });
+
+// ===========================================================================
+// R21 — cenario de demo: fila valida + coorte nula (table_not_migrated)
+// ===========================================================================
+test("demo jornadaCoorteAusente: a pagina fica ok e a fila Shopee continua com a coorte indisponivel", () => {
+  assert.equal(lerCenario("jornadaCoorteAusente"), "jornadaCoorteAusente");
+  assert.equal(respostaFicticia("/api/v1/expedicao?channel=shopee", "jornadaCoorteAusente")!.status, 200);
+  const corpo = respostaFicticia("/api/v1/expedicao/jornada?channel=shopee", "jornadaCoorteAusente")!.corpo as {
+    status: string;
+    reason: string;
+    coorte: unknown;
+  };
+  assert.equal(corpo.status, "unavailable");
+  assert.equal(corpo.reason, "coorte: table_not_migrated");
+  assert.equal(corpo.coorte, null);
+  const r = lerJornada(corpo, "shopee");
+  assert.ok(r.ok);
+  const html = htmlF(
+    hF(JornadaF, { carga: { carregando: false, http: 200, erroDeRede: false, resultado: r }, aoTentarDeNovo: () => {} }),
+  );
+  assert.match(html, /1\.820 pedidos pagos aguardando expedição\./, "a fila nao some");
+  assert.match(html, /Indisponível agora: a tabela ainda não foi publicada nesta base\./);
+  assert.doesNotMatch(html, /Jornada indisponível/);
+});

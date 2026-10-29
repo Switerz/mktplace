@@ -19,6 +19,8 @@
  *   jornada404    pagina ok; so' a Jornada responde 404 (como em producao hoje)
  *   jornadaErro   pagina ok; so' a Jornada responde 500 (erro com nova tentativa)
  *   jornadaVazia  pagina ok; a Jornada responde com base 0
+ *   jornadaCoorteAusente  pagina ok; Shopee com a fila valida e a coorte
+ *                 nula (`coorte: table_not_migrated`) — R21: a fila continua
  *
  * Com `&marca=`, a Jornada recorta pela marca e devolve `brands_applied`.
  */
@@ -44,6 +46,7 @@ export const CENARIOS_DEMO = [
   "jornada404",
   "jornadaErro",
   "jornadaVazia",
+  "jornadaCoorteAusente",
 ] as const;
 export type CenarioDemo = (typeof CENARIOS_DEMO)[number];
 
@@ -457,14 +460,21 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
     };
   }
   const base = escala(1820);
+  // R21: a coorte nula (migration ausente) nao pode apagar a fila valida.
+  const semCoorte = c === "jornadaCoorteAusente";
   return {
     status: 200,
     corpo: {
       ...comum,
       channel: "shopee",
-      status: (c === "parcial" && base > 3) || c === "desatualizado" ? "partial" : "ok",
-      reason:
-        c === "parcial" && base > 3 ? "fila_aberta: etapas_nao_fecham" : c === "desatualizado" ? "coorte: desatualizada" : null,
+      status: semCoorte ? "unavailable" : (c === "parcial" && base > 3) || c === "desatualizado" ? "partial" : "ok",
+      reason: semCoorte
+        ? "coorte: table_not_migrated"
+        : c === "parcial" && base > 3
+          ? "fila_aberta: etapas_nao_fecham"
+          : c === "desatualizado"
+            ? "coorte: desatualizada"
+            : null,
       fila_aberta: filaAberta(
         "pedido",
         base,
@@ -476,14 +486,16 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
         ],
         ["etapa interna (a preparar × envio organizado) não publicada na fila", "FBS não separado na fila aberta"],
       ),
-      coorte: coorte("deadline_date", escala(4310), [
-        { key: "fora_fbs", label: "FBS (envio pela Shopee)", parte: 0.049 },
-        { key: "cancelado_antes", label: "Cancelados antes da coleta", parte: 0.01 },
-        { key: "enviado_sem_registro", label: "Enviados sem marco de coleta", parte: 0.0005 },
-        { key: "aguardando", label: "Aguardando coleta", parte: 0.088 },
-        { key: "concluido", label: "Coletados", parte: 1 },
-      ]),
-      limitacoes: [],
+      coorte: semCoorte
+        ? null
+        : coorte("deadline_date", escala(4310), [
+            { key: "fora_fbs", label: "FBS (envio pela Shopee)", parte: 0.049 },
+            { key: "cancelado_antes", label: "Cancelados antes da coleta", parte: 0.01 },
+            { key: "enviado_sem_registro", label: "Enviados sem marco de coleta", parte: 0.0005 },
+            { key: "aguardando", label: "Aguardando coleta", parte: 0.088 },
+            { key: "concluido", label: "Coletados", parte: 1 },
+          ]),
+      limitacoes: semCoorte ? ["coorte por vencimento depende da LDR operacional publicada (dados fictícios)."] : [],
     },
   };
 }
