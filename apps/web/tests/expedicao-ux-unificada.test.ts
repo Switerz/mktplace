@@ -650,7 +650,9 @@ test("os dois corpos usam o mesmo esqueleto, a mesma raiz e a mesma tabela", () 
     assert.doesNotMatch(f, /const CLASSE_TABELA\s*=/, "CLASSE_TABELA so' no esqueleto");
     assert.doesNotMatch(f, /const CLASSE_CABECALHO\s*=/);
   }
-  assert.match(CLASSE_RAIZ_EXPEDICAO, /max-w-\[1400px\]/);
+  // UI-DENSIDADE-1: largura total como o resto da Torre.
+  assert.match(CLASSE_RAIZ_EXPEDICAO, /w-full/);
+  assert.doesNotMatch(CLASSE_RAIZ_EXPEDICAO, /max-w-/);
 });
 
 test("estados da fila sao os mesmos componentes do TikTok, com nova tentativa", () => {

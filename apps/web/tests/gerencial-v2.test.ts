@@ -299,7 +299,8 @@ test("9. ROAS nunca agrega: sem valor unico, uma linha por canal, TikTok N/D", (
   assert.equal(tiktok.value, null);
   assert.match(tiktok.unavailableReason ?? "", /Não disponível nesta fonte/);
   const ml = roas.channelValues!.find((c) => c.channel === "ml")!;
-  assert.equal(ml.value, "4.0x");
+  // UI-DENSIDADE-1: pt-BR (virgula decimal).
+  assert.equal(ml.value, "4,0x");
 });
 
 test("9b. com um unico canal compativel selecionado, esse canal e' destacado", () => {
@@ -878,7 +879,10 @@ test("B. os tres novos conteudos de drill-down abrem no shell unico", () => {
 
 test("B1. legenda de canal e botao acessivel e realca a serie", () => {
   const card = codeOnly(read("src/components/gerencial/EvolutionCard.tsx"));
-  const legend = card.slice(card.indexOf("merged.availableChannels.map"), card.indexOf("{showTotal && ("));
+  // UI-DENSIDADE-1: a legenda subiu e o Total vem PRIMEIRO; o recorte vai do
+  // mapa de canais ao fim da lista.
+  const inicioLegenda = card.indexOf("merged.availableChannels.map");
+  const legend = card.slice(inicioLegenda, card.indexOf("</ul>", inicioLegenda));
   assert.match(legend, /<button/, "a legenda precisa ser botao, nao <li> inerte");
   assert.match(legend, /aria-haspopup="dialog"/);
   assert.match(legend, /aria-pressed=\{highlightedChannel === channel\}/);
@@ -1366,25 +1370,20 @@ test("T10. erro terminal nao esconde as fontes que responderam", () => {
 // foi prova de nada.
 // ---------------------------------------------------------------------------
 
-test("V24-1. GerencialHeader devolve Fragment, sem wrapper curto em volta do sticky", () => {
+test("V24-1. GerencialHeader devolve Fragment com UMA barra sticky (titulo, filtros e frescor)", () => {
   const src = codeOnly(read("src/components/gerencial/GerencialHeader.tsx"));
 
-  // 1. Retorno e' Fragment: cabecalho e barra sobem para o container da pagina.
+  // 1. Retorno e' Fragment: a barra sobe para o container da pagina.
   assert.match(src, /return \(\s*<>/, "GerencialHeader deve devolver um Fragment");
   assert.match(src, /<\/>\s*\);/, "Fragment fechado");
 
-  // 2. O wrapper visual do cabecalho FECHA antes de a barra comecar.
-  // UX-TORRE-B2B-1: a linha passou a alinhar ao centro (icone + selos).
-  const cabecalho = src.indexOf('<div className="flex items-center justify-between gap-3 flex-wrap">');
-  const stickyClasse = src.indexOf("sticky top-0 z-30");
-  assert.ok(cabecalho > -1, "linha do cabecalho deve existir");
-  assert.ok(stickyClasse > cabecalho, "ordem esperada: cabecalho, depois barra");
-  // o slice termina onde COMECA a tag da barra, senao contaria o `<div` dela
-  const tagSticky = src.lastIndexOf("<div", stickyClasse);
-  const entre = src.slice(cabecalho, tagSticky);
-  const abre = (entre.match(/<div/g) || []).length;
-  const fecha = (entre.match(/<\/div>/g) || []).length;
-  assert.equal(abre, fecha, `wrapper do cabecalho deve estar fechado antes da barra (abre=${abre} fecha=${fecha})`);
+  // 2. UI-DENSIDADE-1: uma linha so'. O titulo vive DENTRO da barra sticky, e
+  // nenhuma linha de cabecalho separada fica antes dela.
+  const sticky = src.indexOf("sticky top-0 z-30");
+  const h1 = src.indexOf("<h1");
+  assert.ok(sticky > -1 && h1 > sticky, "o titulo fica dentro da barra sticky");
+  const antes = src.slice(src.indexOf("return ("), src.lastIndexOf("<div", sticky));
+  assert.equal((antes.match(/<div/g) || []).length, 0, "nada de linha de cabecalho antes da barra");
 
   // 3. O antigo wrapper que causava o defeito nao pode voltar.
   assert.doesNotMatch(
@@ -1403,7 +1402,8 @@ test("V24-2. o pai efetivo do sticky e o container da pagina inteira", () => {
   // ganhe `overflow`/`transform` — os dois criariam bloco de contencao e
   // matariam o sticky outra vez.
   const page = codeOnly(read("app/page.tsx"));
-  const container = page.match(/<div className="max-w-\[1440px\][^"]*"/);
+  // UI-DENSIDADE-1: largura total (sem teto de 1440px); a regra do sticky e' a mesma.
+  const container = page.match(/<div className="w-full px-4[^"]*"/);
   assert.ok(container, "container da Gerencial deve existir");
   assert.doesNotMatch(container[0], /overflow-(hidden|auto|scroll|clip)/);
   assert.doesNotMatch(container[0], /transform|scale-|rotate-|translate-/);
@@ -1429,11 +1429,13 @@ test("V24-3. a correcao nao introduziu fetch, estado, modal ou filtro novo", () 
   }
   // conteudo preservado
   assert.match(src, /Visão Gerencial/);
-  assert.match(src, /Como estamos, onde investigar e para onde ir a seguir\./);
-  // UX-TORRE-B2B-1: periodo, frescor e ao-vivo/demonstracao continuam no
-  // cabecalho, agora em selos (`PeriodChip` + `Freshness`), e o refreshed_at
-  // segue saindo SO' da resposta compativel com o filtro atual.
-  assert.match(src, /<PeriodChip label=\{periodLabel\} \/>/);
+  // UI-DENSIDADE-1 (escolha do proprietario): sem subtitulo e sem o selo de
+  // periodo, que repetia o filtro ao lado. O periodo segue para leitor de tela
+  // junto do titulo; frescor e ao-vivo/demonstracao continuam no `Freshness`,
+  // com o refreshed_at saindo SO' da resposta compativel com o filtro atual.
+  assert.doesNotMatch(code, /Como estamos, onde investigar/);
+  assert.doesNotMatch(code, /<PeriodChip/);
+  assert.match(src, /<span className="sr-only"> · \{periodLabel\}<\/span>/);
   assert.match(src, /<Freshness live=\{live\} refreshedAt=\{live != null \? refreshedAt : null\} loading=\{loading\} \/>/);
   const selo = read("src/components/ui/Freshness.tsx");
   assert.match(selo, /Atualizado em \{quando\}/);
@@ -1441,9 +1443,9 @@ test("V24-3. a correcao nao introduziu fetch, estado, modal ou filtro novo", () 
   assert.match(selo, /Demonstração · API offline/);
   assert.match(selo, /Atualizando…/);
   assert.match(selo, /if \(live == null\)/, "sem resposta fresca, nunca afirma ao vivo");
-  // o `<h1>` da Gerencial permanece: promover/rebaixar aqui mexeria na divida U6-04
-  // UX-TORRE-2: a cor virou token; nivel (`<h1>`) e escala (`text-xl`) seguem travados.
-  assert.match(code, /<h1 className="text-xl font-bold text-ink">Visão Gerencial<\/h1>/);
+  // o `<h1>` da Gerencial permanece: promover/rebaixar aqui mexeria na divida U6-04.
+  // UI-DENSIDADE-1: escala `text-lg` (linha unica com os filtros).
+  assert.match(code, /<h1 className="flex shrink-0 items-center gap-2 text-lg font-bold text-ink">/);
 });
 
 test("V24-4. PageHeader das outras dez rotas nao regrediu", () => {

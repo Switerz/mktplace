@@ -202,7 +202,7 @@ export default function ExpedicaoShell() {
   // numero ficticio nao pode parecer real em print nenhum.
   return (
     <>
-      <div className="mx-auto max-w-[1400px] px-3 pt-3 sm:px-4">
+      <div className="w-full px-4 pt-4">
         <Note tom="atencao" papel="status">
           Dados fictícios — modo de demonstração da Expedição (só em desenvolvimento). Nenhum número
           desta tela veio da API.

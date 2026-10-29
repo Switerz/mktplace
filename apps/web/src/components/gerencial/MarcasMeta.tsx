@@ -18,7 +18,7 @@ import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import type { ProgressoMeta, StatusMeta } from "@/lib/gerencial/meta-progress";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
-import { fmtPct } from "@/lib/formatters";
+import { fmtPctBr } from "@/lib/formatters";
 import InfoDica from "@/components/ui/InfoDica";
 
 const CHIP: Record<StatusMeta, string> = {
@@ -129,7 +129,7 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
                       </span>
                     ) : compareActive && b.mom_pct != null ? (
                       <span className={`text-xs font-semibold ${b.mom_pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>
-                        {fmtPct(b.mom_pct)}
+                        {fmtPctBr(b.mom_pct)}
                       </span>
                     ) : null}
                   </span>

@@ -199,6 +199,57 @@ export default function EvolutionCard({
 
       {/* Area do grafico: flex-1 + piso. Absorve toda a sobra da coluna, que e'
           o que mantem o final deste card alinhado ao item Pulso+Canais. */}
+      {/* Legenda por canal + estado do total */}
+      {/* Sem grao comum nao existe linha desenhada: a legenda tambem nao aparece,
+          para nao prometer series que o grafico nao mostra. */}
+      {!loading && !grainIssue && merged.availableChannels.length > 0 && (
+        <ul className="flex items-center gap-x-1 gap-y-1 flex-wrap text-xs">
+          {/* UI-DENSIDADE-1: legenda no TOPO e o Total primeiro, em destaque. */}
+          {showTotal && (
+            <li className="inline-flex items-center gap-1.5 px-2 text-ink font-semibold">
+              <span aria-hidden="true" className="w-3 h-1 rounded-full shrink-0 bg-accent" />
+              Total
+            </li>
+          )}
+          {merged.availableChannels.map((channel) => (
+            <li key={channel}>
+              <button
+                type="button"
+                onClick={() => onOpenChannelSeries(channel)}
+                aria-haspopup="dialog"
+                aria-pressed={highlightedChannel === channel}
+                aria-label={`${CHANNEL_LABEL[channel]} — abrir detalhe da série do canal`}
+                className={`inline-flex items-center gap-1.5 min-h-11 px-2 rounded-lg text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                  highlightedChannel === channel
+                    ? "bg-accent-soft text-accent-ink font-semibold"
+                    : // Hover NEUTRO no estado inativo, de proposito: cinza sobre
+                      // violeta fica lavado, e reservar o violeta ao estado ativo
+                      // respeita a disciplina de violeta do sistema.
+                      "text-ink-muted hover:bg-raised hover:text-ink"
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`w-2.5 h-0.5 rounded-full shrink-0 ${CHANNEL_DOT[channel]}`}
+                />
+                {CHANNEL_LABEL[channel]}
+              </button>
+            </li>
+          ))}
+          {/* O periodo anterior entra na legenda como item SECUNDARIO, e o
+              tracejado o distingue sem depender de cor. */}
+          {showComparison && (
+            <li className="inline-flex items-center gap-1.5 px-2 text-ink-faint">
+              <span
+                aria-hidden="true"
+                className="w-3.5 h-0 shrink-0 border-t-2 border-dashed border-line-strong"
+              />
+              Total do período anterior
+            </li>
+          )}
+        </ul>
+      )}
+
       <div className="flex-1 min-h-[240px] lg:min-h-[280px]">
         {loading ? (
           <div className="h-full w-full rounded-xl bg-accent-soft/60 animate-pulse" role="status" aria-busy="true">
@@ -250,55 +301,6 @@ export default function EvolutionCard({
         )}
       </div>
 
-      {/* Legenda por canal + estado do total */}
-      {/* Sem grao comum nao existe linha desenhada: a legenda tambem nao aparece,
-          para nao prometer series que o grafico nao mostra. */}
-      {!loading && !grainIssue && merged.availableChannels.length > 0 && (
-        <ul className="flex items-center gap-x-1 gap-y-1 flex-wrap text-xs">
-          {merged.availableChannels.map((channel) => (
-            <li key={channel}>
-              <button
-                type="button"
-                onClick={() => onOpenChannelSeries(channel)}
-                aria-haspopup="dialog"
-                aria-pressed={highlightedChannel === channel}
-                aria-label={`${CHANNEL_LABEL[channel]} — abrir detalhe da série do canal`}
-                className={`inline-flex items-center gap-1.5 min-h-11 px-2 rounded-lg text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                  highlightedChannel === channel
-                    ? "bg-accent-soft text-accent-ink font-semibold"
-                    : // Hover NEUTRO no estado inativo, de proposito: cinza sobre
-                      // violeta fica lavado, e reservar o violeta ao estado ativo
-                      // respeita a disciplina de violeta do sistema.
-                      "text-ink-muted hover:bg-raised hover:text-ink"
-                }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`w-2.5 h-0.5 rounded-full shrink-0 ${CHANNEL_DOT[channel]}`}
-                />
-                {CHANNEL_LABEL[channel]}
-              </button>
-            </li>
-          ))}
-          {showTotal && (
-            <li className="inline-flex items-center gap-1.5 px-2 text-ink-muted font-medium">
-              <span aria-hidden="true" className="w-2.5 h-0.5 rounded-full shrink-0 bg-accent" />
-              Total
-            </li>
-          )}
-          {/* O periodo anterior entra na legenda como item SECUNDARIO, e o
-              tracejado o distingue sem depender de cor. */}
-          {showComparison && (
-            <li className="inline-flex items-center gap-1.5 px-2 text-ink-faint">
-              <span
-                aria-hidden="true"
-                className="w-3.5 h-0 shrink-0 border-t-2 border-dashed border-line-strong"
-              />
-              Total do período anterior
-            </li>
-          )}
-        </ul>
-      )}
 
       <div className="flex flex-col gap-1.5">
         {/* Falha parcial da serie ATUAL: canal indisponivel e' NOMEADO e o total

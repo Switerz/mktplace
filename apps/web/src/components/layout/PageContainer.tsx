@@ -15,8 +15,11 @@
  * nao conhece filtros, dados nem estado.
  */
 export default function PageContainer({ children }: { children: React.ReactNode }) {
+  // UI-DENSIDADE-1 — largura total, borda de 16px e 12px entre blocos, como a
+  // Torre do Atacado. O teto de 1440px deixava 137px vazios de cada lado num
+  // monitor de 1920px.
   return (
-    <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 flex flex-col gap-3 sm:gap-4">
+    <div className="w-full px-4 py-4 flex flex-col gap-3">
       {children}
     </div>
   );

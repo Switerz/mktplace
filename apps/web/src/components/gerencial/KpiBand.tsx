@@ -24,7 +24,7 @@ import {
 import type { DeltaTone, KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
 import { suavizar, type TendenciaKpi } from "@/lib/gerencial/kpi-trend";
 import InfoDica from "@/components/ui/InfoDica";
-import { fmtPct } from "@/lib/formatters";
+import { fmtPctBr } from "@/lib/formatters";
 
 interface Props {
   kpis: KpiDescriptor[];
@@ -55,7 +55,7 @@ function DeltaBadge({ pct, tone = "higher_is_better" }: { pct: number; tone?: De
       className={`inline-flex w-fit items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold tabular-nums ${pele}`}
     >
       <Seta aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2.25} />
-      {fmtPct(pct)}
+      {fmtPctBr(pct)}
     </span>
   );
 }
@@ -189,7 +189,7 @@ function KpiCard({
       // `w-full min-w-0`: sem eles o <button> se dimensiona pelo conteudo e
       // estoura a trilha da grade — era a origem de 5px de overflow horizontal
       // no mobile (390px), medido no QA.
-      className={`card-hover group w-full min-w-0 h-full min-h-11 text-left bg-surface border rounded-xl p-4 flex flex-col gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${borda}`}
+      className={`card-hover group w-full min-w-0 h-full min-h-11 text-left bg-surface border rounded-xl p-3.5 flex flex-col gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${borda}`}
     >
       <span className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">

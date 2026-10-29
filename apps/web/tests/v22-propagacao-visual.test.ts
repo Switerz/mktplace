@@ -59,9 +59,10 @@ test("P1. as dez rotas usam o container compartilhado, e nenhuma mantem max-w-7x
 
 test("P2. o container define largura, respiro e ritmo do V2 num unico lugar", () => {
   const src = codeOnly(read("src/components/layout/PageContainer.tsx"));
-  assert.match(src, /max-w-\[1440px\]/);
-  assert.match(src, /px-4 sm:px-6/, "mobile/tablet px-4, desktop px-6");
-  assert.match(src, /gap-3 sm:gap-4/, "gap-3 abaixo de sm, gap-4 acima");
+  // UI-DENSIDADE-1: largura total, borda 16px e 12px entre blocos em toda tela.
+  assert.match(src, /w-full px-4 py-4/);
+  assert.doesNotMatch(src, /max-w-\[1440px\]/, "sem teto de largura");
+  assert.match(src, /gap-3/, "12px entre blocos");
   assert.doesNotMatch(src, /gap-6/, "gap-6 era o espalhamento que reduzia densidade");
 });
 

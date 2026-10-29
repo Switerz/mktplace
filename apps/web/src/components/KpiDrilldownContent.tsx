@@ -12,7 +12,7 @@ import {
   roasBreakdown,
   type KpiKind,
 } from "@/lib/kpi-drilldown";
-import { fmtBrl, fmtNumber } from "@/lib/formatters";
+import { fmtBrl, fmtNumber, fmtPctBr } from "@/lib/formatters";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
@@ -66,7 +66,7 @@ function KpiReference({
         </p>
       ) : outra ? (
         <p className="text-sm font-semibold text-ink-muted tabular-nums">
-          {outra.reference} · {outra.deltaPct! >= 0 ? "+" : ""}{outra.deltaPct!.toFixed(1)}%
+          {outra.reference} · {fmtPctBr(outra.deltaPct!)}
         </p>
       ) : (
         <p className="text-sm text-ink-faint">Comparação indisponível</p>

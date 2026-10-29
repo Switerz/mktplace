@@ -18,7 +18,7 @@ export default function MonitoramentoPrecoLayout({ children }: { children: React
   if (modoB2BRevenda() === "off") return <>{children}</>;
   return (
     <>
-      <div className="max-w-[1440px] mx-auto px-4 sm:px-6 pt-6 -mb-2">
+      <div className="w-full px-4 pt-4 -mb-2">
         <VisaoMonitoramentoNav />
       </div>
       {children}
