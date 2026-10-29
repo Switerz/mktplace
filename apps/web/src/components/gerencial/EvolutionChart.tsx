@@ -218,7 +218,7 @@ export default function EvolutionChart({
         {/* UI-DENSIDADE-1: o TOTAL e' a leitura principal — area suave por baixo
             da linha mais grossa. Canais ficam finos e claros, de apoio. */}
         {showTotal && (
-          <Area
+          <Area animationDuration={450} animationEasing="ease-out"
             type="monotone"
             dataKey="total"
             name="Total"
@@ -233,7 +233,7 @@ export default function EvolutionChart({
           />
         )}
         {showTotal && (
-          <Line
+          <Line animationDuration={450} animationEasing="ease-out"
             type="monotone"
             dataKey="total"
             name="Total"
@@ -250,7 +250,7 @@ export default function EvolutionChart({
             das series atuais na ordem de render e nao concorre com a leitura
             principal. O tracejado distingue sem depender de cor. */}
         {showComparisonTotal && (
-          <Line
+          <Line animationDuration={450} animationEasing="ease-out"
             type="monotone"
             dataKey="comparison.total"
             name="Total do período anterior"
@@ -265,7 +265,7 @@ export default function EvolutionChart({
           />
         )}
         {channels.map((channel) => (
-          <Line
+          <Line animationDuration={450} animationEasing="ease-out"
             key={channel}
             type="monotone"
             dataKey={`values.${channel}`}

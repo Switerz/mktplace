@@ -87,7 +87,7 @@ export default function ChannelCostPanel({
             </div>
             {!l.ausente && l.pct != null && (
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-raised" aria-hidden="true">
-                <div className={`h-full rounded-full ${barra}`} style={{ width: `${Math.min(100, Math.max(0, l.pct))}%` }} />
+                <div className={`tc-barra h-full rounded-full ${barra}`} style={{ width: `${Math.min(100, Math.max(0, l.pct))}%` }} />
               </div>
             )}
             {l.detalhe && <p className="text-xs leading-snug text-ink-faint">{l.detalhe}</p>}

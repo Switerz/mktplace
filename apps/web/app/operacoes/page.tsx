@@ -822,7 +822,7 @@ export default function OperacoesPage() {
                     wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }}
                   />
                   {brandsInChart.map((brand) => (
-                    <Line
+                    <Line animationDuration={450} animationEasing="ease-out"
                       key={brand}
                       type="monotone"
                       dataKey={brand}

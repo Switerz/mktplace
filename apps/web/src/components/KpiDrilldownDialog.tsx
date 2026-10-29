@@ -116,7 +116,7 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
           (Finding 1, rodada de correcao U2); por isso o fechamento fica
           nele, nao aqui. Veu NEUTRO nos dois temas: um token de tinta
           clarearia a tela no escuro, onde a tinta e' clara. */}
-      <div className="absolute inset-0 bg-[rgb(0_0_0/0.45)]" aria-hidden="true" />
+      <div className="absolute inset-0 bg-[rgb(0_0_0/0.45)] animate-[tc-fade_200ms_var(--mov-ease)]" aria-hidden="true" />
       <div
         className="absolute inset-0 flex items-end sm:items-center justify-center sm:p-4"
         onClick={(e) => {
@@ -131,7 +131,7 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
-          className="relative bg-surface w-full sm:max-w-lg sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden"
+          className="relative bg-surface w-full sm:max-w-lg sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden animate-[tc-sobe_320ms_var(--mov-ease)]"
         >
           <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-line shrink-0">
             <h2 id={titleId} className="text-sm font-bold text-ink">{title}</h2>
@@ -140,7 +140,7 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
               type="button"
               onClick={onClose}
               aria-label="Fechar detalhes"
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-ink-faint hover:bg-accent-soft hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent shrink-0"
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-accent-soft hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent shrink-0"
             >
               <CloseIcon />
             </button>

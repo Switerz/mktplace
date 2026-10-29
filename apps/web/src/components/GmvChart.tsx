@@ -129,7 +129,7 @@ export default function GmvChart({ data }: Props) {
               }
             />
             {BRANDS.map((brand) => (
-              <Bar
+              <Bar animationDuration={450} animationEasing="ease-out"
                 key={brand}
                 dataKey={brand}
                 stackId="a"
@@ -137,7 +137,7 @@ export default function GmvChart({ data }: Props) {
                 radius={brand === "rituaria" ? [3, 3, 0, 0] : [0, 0, 0, 0]}
               />
             ))}
-            <Line
+            <Line animationDuration={450} animationEasing="ease-out"
               type="monotone"
               dataKey="total"
               stroke="#1e293b"

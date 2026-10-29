@@ -269,3 +269,186 @@
     }
   }
 }
+
+/* ===========================================================================
+ * ANIMACOES-1 — movimento da Torre.
+ *
+ * Uma curva e tres duracoes para o app inteiro: 120ms responde (hover, cor),
+ * 200ms abre e fecha (popover, segmentado), 320ms entra (paineis, barras).
+ * A curva desacelera no fim — chega rapido e assenta. So' `transform` e
+ * `opacity` animam; nada repete em loop alem do esqueleto e do "ao vivo".
+ * Quem pede menos movimento cai na regra global de `prefers-reduced-motion`
+ * acima, e a entrada escalonada some de vez (o atraso deixaria a tela vazia).
+ * ======================================================================== */
+:root {
+  --mov-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --mov-rapido: 120ms;
+  --mov-base: 200ms;
+  --mov-lento: 320ms;
+}
+
+@keyframes tc-entra {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tc-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tc-sobe {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tc-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes tc-brilho {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes tc-barra {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes tc-revela {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes tc-ping {
+  75%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes tc-indicador {
+  from {
+    transform: translateY(-50%) scaleY(0);
+  }
+  to {
+    transform: translateY(-50%) scaleY(1);
+  }
+}
+
+/* Entrada da rota: o `template.tsx` envolve a pagina (display: contents), e
+   cada bloco do topo da pagina entra 45ms depois do anterior. Remonta so' ao
+   trocar de rota — trocar filtro muda a query, nao a rota, e nao repete. */
+.tc-entrada > * > * {
+  animation: tc-entra var(--mov-lento) var(--mov-ease) both;
+}
+.tc-entrada > * > *:nth-child(2) { animation-delay: 45ms; }
+.tc-entrada > * > *:nth-child(3) { animation-delay: 90ms; }
+.tc-entrada > * > *:nth-child(4) { animation-delay: 135ms; }
+.tc-entrada > * > *:nth-child(5) { animation-delay: 180ms; }
+.tc-entrada > * > *:nth-child(6) { animation-delay: 225ms; }
+.tc-entrada > * > *:nth-child(n + 7) { animation-delay: 270ms; }
+
+/* Esqueleto: brilho que atravessa da esquerda para a direita, no lugar do
+   piscar. Vale para todo `animate-pulse` cujos blocos usam os tokens. */
+.animate-pulse:has(.bg-raised) {
+  animation: none;
+}
+.animate-pulse :is(.bg-raised, .bg-line) {
+  background-image: linear-gradient(
+    90deg,
+    rgb(var(--tc-raised)) 30%,
+    rgb(var(--tc-line)) 50%,
+    rgb(var(--tc-raised)) 70%
+  );
+  background-size: 200% 100%;
+  animation: tc-brilho 1.4s linear infinite;
+}
+
+/* Hover unico de linha de tabela. Linha com hover proprio (utilitario) vence
+   por especificidade; esta regra cobre as que nao tinham nenhum. */
+tbody tr {
+  transition: background-color var(--mov-rapido) var(--mov-ease);
+}
+tbody tr:hover {
+  background-color: rgb(var(--tc-raised) / 0.7);
+}
+
+/* Barras de proporcao: enchem da esquerda ao montar e deslizam ao mudar. */
+.tc-barra {
+  transform-origin: left center;
+  animation: tc-barra 600ms var(--mov-ease) both;
+  transition: width 500ms var(--mov-ease);
+}
+
+/* Mini grafico: revela da esquerda para a direita, uma vez. */
+.tc-revela {
+  animation: tc-revela 800ms var(--mov-ease) both;
+}
+
+/* Clique com resposta: afunda de leve. */
+.tc-pressiona {
+  transition: transform var(--mov-rapido) var(--mov-ease);
+}
+.tc-pressiona:active {
+  transform: scale(0.97);
+}
+
+/* "Ao vivo": anel que se expande atras do ponto. */
+.tc-ping {
+  animation: tc-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Barra fina de navegacao no topo do conteudo. */
+.tc-nav-progresso {
+  transform-origin: left center;
+  transition:
+    transform 600ms var(--mov-ease),
+    opacity 240ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-entrada > * > *,
+  .tc-barra,
+  .tc-revela,
+  .tc-ping {
+    animation: none !important;
+  }
+}

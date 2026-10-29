@@ -91,7 +91,7 @@ export default function FeeByBrandChart({
               labelStyle={{ color: tema.tooltipTinta, fontWeight: 600 }}
             />
             {canais.map((c) => (
-              <Bar key={c} dataKey={c} fill={tema.canais[c]} radius={[0, 3, 3, 0]} maxBarSize={12} isAnimationActive={false}>
+              <Bar animationDuration={450} animationEasing="ease-out" key={c} dataKey={c} fill={tema.canais[c]} radius={[0, 3, 3, 0]} maxBarSize={12} isAnimationActive={false}>
                 <LabelList dataKey={c} position="right" formatter={fmt} style={{ fontSize: 12, fill: tema.eixo }} />
               </Bar>
             ))}

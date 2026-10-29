@@ -93,7 +93,7 @@ export default function ProductParetoSummary({ buckets, loading, activeBucket, o
                 <span className={`text-xs font-semibold tabular-nums ${c.sub}`}>{b.gmv_pct.toFixed(1)}%</span>
               </div>
               <div className="h-1 rounded-full bg-white/60 overflow-hidden mb-2">
-                <div className={`h-1 rounded-full ${c.bar}`} style={{ width: `${Math.min(100, b.gmv_pct)}%` }} />
+                <div className={`tc-barra h-1 rounded-full ${c.bar}`} style={{ width: `${Math.min(100, b.gmv_pct)}%` }} />
               </div>
               <p className={`text-xs font-semibold tabular-nums ${c.text}`}>{fmtGmvShort(b.gmv)}</p>
               <p className={`text-[11px] tabular-nums mt-0.5 ${c.sub}`}>{b.count} produtos · {b.description}</p>

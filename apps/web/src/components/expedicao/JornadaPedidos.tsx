@@ -136,7 +136,7 @@ function ListaDeEtapas({
             · {formatarPercentualComBase(e.count, base)}
           </span>
           <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
-            <span className="block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
+            <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
           </span>
         </li>
       ))}

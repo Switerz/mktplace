@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { CLASSE_TEMA_CLARO_FIXO, rotaTematizada } from "@/lib/theme";
+import BarraDeNavegacao from "./BarraDeNavegacao";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 import MobileDrawer from "./MobileDrawer";
@@ -63,6 +64,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           tela nao pode perder o titulo de nivel 1 na troca. `hidden md:block`
           garante que os dois nunca coexistam na arvore de acessibilidade. */}
       <h1 className="sr-only hidden md:block">Torre de Controle</h1>
+      <BarraDeNavegacao />
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Topbar + conteudo ficam inertes enquanto o drawer mobile esta

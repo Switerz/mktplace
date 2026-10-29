@@ -106,7 +106,7 @@ export default function HourlyChart({ hours, mode, currentHour }: Props) {
             label={{ value: "agora", position: "top", fontSize: 10, fill: "#7c3aed", opacity: 0.7 }}
           />
         )}
-        <Line
+        <Line animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Hoje"
           stroke="url(#lineHoje)"
@@ -115,7 +115,7 @@ export default function HourlyChart({ hours, mode, currentHour }: Props) {
           activeDot={{ r: 4, fill: "#7c3aed" }}
           connectNulls
         />
-        <Line
+        <Line animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Ontem"
           stroke="#cbd5e1"
@@ -125,7 +125,7 @@ export default function HourlyChart({ hours, mode, currentHour }: Props) {
           activeDot={{ r: 3, fill: "#64748b" }}
           connectNulls
         />
-        <Line
+        <Line animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Media 7d"
           stroke="#c4b5fd"
