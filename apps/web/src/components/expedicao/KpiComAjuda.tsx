@@ -47,6 +47,10 @@ export default KpiComAjuda;
  * QA T-0010 (I2) — taxa no formato unico "3,35% · 199 de 5.940", com a taxa
  * PUBLICADA pela API (a tela nao divide de novo). `linha`: a base vai para
  * uma linha secundaria (tabelas); sem ela, fica ao lado, menor (KPI).
+ *
+ * T-0021: empilhada, a base perdia o separador e o leitor de tela lia
+ * "3,35% 199 de 5.940". O " · " fica no texto acessivel (`sr-only`), sem
+ * mudar o visual: o texto lido e' sempre o de `formatarPercentualComBase`.
  */
 export function TaxaComBase({
   numerador,
@@ -67,7 +71,10 @@ export function TaxaComBase({
     <>
       <span>{partes.percentual}</span>
       {linha ? (
-        <span className="block text-xs font-normal text-ink-muted">{partes.base}</span>
+        <>
+          <span className="sr-only"> · </span>
+          <span className="block text-xs font-normal text-ink-muted">{partes.base}</span>
+        </>
       ) : (
         <span className="text-sm font-normal text-ink-muted"> · {partes.base}</span>
       )}
