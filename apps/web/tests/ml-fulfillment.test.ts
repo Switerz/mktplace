@@ -363,15 +363,17 @@ test("sem unknown, sem alerta de unknown", () => {
 // Avisos de contrato
 // ---------------------------------------------------------------------------
 
-test("a tela declara que nao mede estoque", () => {
+// Abas objetivas: AVISO_SEM_ESTOQUE e AVISO_JANELA eram so' prosa de
+// metodologia e sairam da tela; o contrato da lib segue valendo. A janela
+// acima de 366 dias continua barrada por `validateRange` (erroJanela).
+test("o contrato declara que a tela nao mede estoque", () => {
   assert.match(AVISO_SEM_ESTOQUE, /nao.*estoque|nao e.*estoque/i);
   assert.match(AVISO_SEM_ESTOQUE, /ruptura/);
-  assert.ok(PAGE.includes("AVISO_SEM_ESTOQUE"));
+  assert.ok(!PAGE.includes("Como ler"));
 });
 
-test("a tela avisa que o historico excede a janela consultavel", () => {
+test("o contrato limita a janela consultavel a 366 dias", () => {
   assert.match(AVISO_JANELA, /366/);
-  assert.ok(PAGE.includes("AVISO_JANELA"));
 });
 
 test("a tela nao apresenta maio-julho/2025 como cobertos", () => {

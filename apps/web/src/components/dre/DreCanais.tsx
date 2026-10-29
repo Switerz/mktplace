@@ -1,6 +1,7 @@
 import { Columns3 } from "lucide-react";
 
 import Panel from "@/components/ui/Panel";
+import InfoDica from "@/components/ui/InfoDica";
 import { ClassificacaoChip } from "@/components/dre/DreChips";
 import Motivos from "@/components/dre/Motivos";
 import {
@@ -35,8 +36,12 @@ const PONTO: Record<string, string> = {
 export default function DreCanais({ canais, total }: { canais: CelulaDRE[]; total: CelulaDRE }) {
   return (
     <Panel
-      titulo="Comparação por canal"
-      descricao="Cada canal com a própria classificação. Participação sobre a receita da seleção."
+      titulo={
+        <>
+          Comparação por canal
+          <InfoDica texto="Participação sobre a receita da seleção." />
+        </>
+      }
       icone={Columns3}
       semPadding
     >

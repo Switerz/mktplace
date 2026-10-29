@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * T-0010 — o `KpiTile` da Expedicao com o `?` da metrica.
+ * T-0010 — o `KpiTile` da Expedicao com o "ⓘ" da metrica.
  *
- * O `KpiTile` (ui) nao e' editado: o `?` entra no fim da linha de comparacao,
+ * O `KpiTile` (ui) nao e' editado: o "ⓘ" entra no fim da linha de comparacao,
  * que e' `ReactNode`. Assim ele acompanha o texto (nao cobre rotulo nem o
  * ponto de severidade) e funciona igual com ou sem comparacao.
  */
@@ -15,7 +15,7 @@ import { TEXTO_INDISPONIVEL, partesDoPercentualComBase } from "@/lib/expedicao-f
 
 import AjudaMetrica from "./AjudaMetrica";
 
-/** Reexportado para quem so' precisa do `?` (titulo de painel, cabecalho). */
+/** Reexportado para quem so' precisa do "ⓘ" (titulo de painel, cabecalho). */
 export { AjudaMetrica as Ajuda };
 
 export function KpiComAjuda({

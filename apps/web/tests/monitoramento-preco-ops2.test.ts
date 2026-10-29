@@ -335,6 +335,7 @@ test("o detalhamento declara que conta ATIVAS, kits e fora de escopo inclusive",
   // Sem esta frase, alguem somaria o detalhamento ao denominador de cobertura
   // — que exclui os dois de proposito — e acharia um erro que nao existe.
   const pagina = await ler(PAGE);
-  assert.ok(/ofertas <strong>ativas<\/strong> sem referência/.test(pagina));
+  // Abas objetivas: a ressalva vive no "ⓘ" do titulo da secao.
+  assert.ok(pagina.includes("Conta as ofertas ativas sem referência"));
   assert.ok(pagina.includes("não o denominador de cobertura"));
 });

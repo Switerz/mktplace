@@ -22,7 +22,8 @@ export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
           (reteste T-0014): o <summary> e' posicionado em absoluto e o rotulo
           reserva a largura dele (pr). O <details> e' um bloco de largura total
           ABAIXO do rotulo: fechado tem altura zero; aberto, o texto de ajuda
-          ocupa a largura do card sem espremer o titulo. */}
+          ocupa a largura do card sem espremer o titulo. A tabela de origem
+          mora so' ali, fora do caminho do numero. */}
       <div className="relative">
         <div className="flex min-h-11 min-w-0 flex-wrap items-center gap-2 pr-[3.25rem]">
           <h4 className="min-w-0 break-words text-sm font-semibold text-ink">{v.rotulo}</h4>
@@ -41,6 +42,7 @@ export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
             className="mt-2 break-words rounded-lg border border-line bg-raised px-3 py-2.5 text-xs leading-relaxed text-ink-muted"
           >
             {v.ajuda}
+            <span className="mt-1 block break-all">Fonte: {v.fonte}</span>
           </p>
         </details>
       </div>
@@ -91,10 +93,6 @@ export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
             <dd className="inline">{v.limiar.origem}</dd>
           </div>
         )}
-        <div className="sm:col-span-2">
-          <dt className="inline font-medium">Fonte: </dt>
-          <dd className="inline">{v.fonte}</dd>
-        </div>
       </dl>
 
       {v.avisoFrescor && (

@@ -30,7 +30,7 @@ O valor muda entre claro e escuro; nenhuma tela escreve hex.
 | `KpiTile` | célula da faixa de KPIs: rótulo, valor, comparação, tom, `destaque` |
 | `Chip` | selo compacto de metadado (frescor, modo de carga, estado) |
 | `Note` | ressalva de uma linha, com fundo tingido e moldura inteira |
-| `Disclosure` | "Como ler esta medição" — o destino da metodologia longa |
+| `InfoDica` | "ⓘ" com a ressalva que muda a leitura de um número (balão `fixed`) |
 | `Segmented` | radiogroup acessível (setas, roving tabindex, alvo de 44px) |
 | `SortHeader` | cabeçalho de coluna ordenável, tematizado |
 | `tone.ts` | o vocabulário de severidade: `neutro`, `bom`, `atencao`, `critico`, `ausente` |
@@ -44,10 +44,10 @@ O valor muda entre claro e escuro; nenhuma tela escreve hex.
    mesma faixa; nada de três blocos introdutórios empilhados.
 3. Troque cartões soltos por `Panel`. Cartão não contém cartão: aviso interno
    usa `Note`, não uma segunda moldura.
-4. Mande metodologia, limitação e explicação longa para `Disclosure`. **Mover,
-   nunca apagar**: a ressalva continua existindo, com a mesma palavra.
-   Ressalva que qualifica um número (a LDR reconstruída, por exemplo) fica
-   colada ao número, em `Note` compacto — essa não vai para o recolhível.
+4. Corte metodologia e explicação da tela (ABAS-OBJETIVAS): nada de "Como
+   ler", subtítulo explicativo ou rodapé de método. Ressalva que muda a
+   leitura de um número (a LDR reconstruída, por exemplo) fica colada a ele,
+   num selo curto ou num `InfoDica` (ⓘ).
 5. Gráfico: use `temaDoGrafico(resolvido)` de `@/lib/chart-theme`. O recharts
    pinta SVG e precisa de cor resolvida; `var(--...)` num atributo SVG não é
    confiável.

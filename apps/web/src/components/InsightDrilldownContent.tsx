@@ -11,6 +11,7 @@ import { SEVERITY_LABEL, SEVERITY_TONE, type ExecutiveSeverity } from "@/lib/exe
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import InfoDica from "@/components/ui/InfoDica";
 
 export type PulseView = { mode: "insight" | "all"; key: string | null };
 
@@ -75,7 +76,14 @@ function InsightDetail({ insight }: { insight: PulseInsight }) {
   return (
     <div className="flex flex-col gap-3 text-sm">
       <div>
-        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">O que aconteceu</p>
+        <div className="flex items-center gap-1.5">
+          <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">O que aconteceu</p>
+          {/* O criterio da severidade fica no "ⓘ" do selo. */}
+          <span className={`text-xs font-semibold uppercase rounded px-1.5 py-0.5 ${SEVERITY_TONE[insight.severity]}`}>
+            {SEVERITY_LABEL[insight.severity] ?? insight.severity}
+          </span>
+          <InfoDica texto={severityReason(insight.type, insight.severity)} />
+        </div>
         <p className="text-ink-muted">{insight.description || insight.title}</p>
       </div>
       <div className="grid grid-cols-2 gap-3">
@@ -111,10 +119,6 @@ function InsightDetail({ insight }: { insight: PulseInsight }) {
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-faint">
         {insight.brand && <span>Marca: <span className="font-medium text-ink-muted">{insight.brand}</span></span>}
         {insight.marketplace && <span>Canal: <span className="font-medium text-ink-muted">{insight.marketplace}</span></span>}
-      </div>
-      <div>
-        <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Por que essa severidade</p>
-        <p className="text-ink-muted text-xs">{severityReason(insight.type, insight.severity)}</p>
       </div>
       <DataQualityNote note={insight.confidence_note} />
     </div>

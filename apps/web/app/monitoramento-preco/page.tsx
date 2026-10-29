@@ -79,6 +79,7 @@ import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import InfoDica from "@/components/ui/InfoDica";
 import { computeRequestStatus } from "@/lib/request-freshness";
 
 const LIMITE = MONITORAMENTO_PRECO_MAX_LIMIT;
@@ -419,11 +420,20 @@ export default function MonitoramentoPrecoPage() {
     <PageContainer>
       <PageHeader
         title={`Monitoramento de preços — ${canalLabel(marketplace)}`}
-        subtitle={
-          marketplace === "ml"
-            ? // Texto PUBLICADO do Mercado Livre — inalterado.
-              "Compara os preços anunciados das lojas próprias no Mercado Livre com o preço sugerido de revenda (PDV) das tabelas B2B."
-            : `Compara os preços anunciados das lojas próprias na ${canalLabel(marketplace)} com o preço sugerido de revenda (PDV) das tabelas B2B.`
+        subtitle="Lojas próprias: preço anunciado × preço sugerido (PDV)."
+        meta={
+          // A ressalva de escopo (observacional, sem frete/cupom, sem vigencia)
+          // fica no "ⓘ" do selo: continua existindo, fora do caminho do olho.
+          <span className="inline-flex items-center gap-1 text-xs font-semibold border border-amber-200 bg-amber-50 text-amber-900 rounded-full px-2 py-0.5">
+            Modo observacional
+            <InfoDica
+              texto={[
+                ...AVISO_OBSERVACIONAL,
+                "Cobertura: apenas anúncios das lojas próprias — nenhum vendedor terceiro.",
+                "Comparação histórica indisponível: a referência não tem vigência declarada.",
+              ].join(" ")}
+            />
+          </span>
         }
       />
 
@@ -507,8 +517,12 @@ export default function MonitoramentoPrecoPage() {
             </dd>
           </div>
           <div>
-            <dt className="text-slate-500 text-xs uppercase tracking-wide">
+            <dt className="flex items-center gap-1 text-slate-500 text-xs uppercase tracking-wide">
               Referência PDV capturada em
+              {/* A frase que declara as DUAS datas e a ausencia de vigencia. */}
+              {meta?.comparison_basis_text && (
+                <InfoDica texto={meta.comparison_basis_text} />
+              )}
             </dt>
             <dd className="font-semibold text-slate-800">
               {fmtInstanteBrt(meta?.reference_captured_at)}
@@ -522,19 +536,19 @@ export default function MonitoramentoPrecoPage() {
           </div>
         </dl>
 
-        {/* Gate PMA-2C4B — D0 NAO e' periodo fechado. O aviso vem antes da
-            frase de base da comparacao porque muda como TUDO abaixo se le'. */}
+        {/* Gate PMA-2C4B — D0 NAO e' periodo fechado: muda como TUDO abaixo
+            se le', entao vira um selo curto com a explicacao no "ⓘ". */}
         {politica.avisoMutavel && (
-          <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
-            {politica.avisoMutavel}
+          <p className="inline-flex items-center gap-1 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5 mt-3">
+            Dia corrente: ainda pode mudar
+            <InfoDica texto={politica.avisoMutavel} />
           </p>
         )}
 
         {/* Canal reconhecido, porem sem nada publicado. Nao e' erro. */}
         {canalIndisponivel && (
           <p className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mt-3">
-            Este canal está reconhecido, mas não há fotografia publicada para
-            esta consulta. Nenhum dado de outro canal é exibido no lugar.
+            Sem fotografia publicada neste canal.
           </p>
         )}
 
@@ -549,7 +563,7 @@ export default function MonitoramentoPrecoPage() {
               )}
               {cobertura.ofertasForaDeEscopo > 0 && (
                 <> · {fmtContagem(cobertura.ofertasForaDeEscopo)} fora do escopo
-                  de beleza, sem entrar em nenhum denominador</>
+                  de beleza</>
               )}
             </p>
             <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
@@ -574,23 +588,16 @@ export default function MonitoramentoPrecoPage() {
           </div>
         )}
 
-        {/* A frase que declara as DUAS datas e a ausencia de vigencia. */}
-        {meta?.comparison_basis_text && (
-          <p className="text-xs text-slate-600 mt-3 border-t border-violet-100 pt-3">
-            {meta.comparison_basis_text}
-          </p>
-        )}
         {meta && (
-          <p className="text-xs text-slate-500 mt-3">
+          <p className="text-xs text-slate-500 mt-3 border-t border-violet-100 pt-3">
             Marcas monitoradas: {meta.monitored_brands.map(brandLabel).join(", ")}.
             {/* Gate PMA-2C4D3-H2 — a ausencia e' DECLARADA, e declarada como
                 ausencia de observacao. Antes, Kokeshi aparecia no filtro da
                 Shopee e devolvia "0", que se le como "Kokeshi nao vende".
                 Nenhum nome e' fixo no codigo: a lista vem da API. */}
             {naoObservadas.length > 0 && (
-              <> Sem observação nesta fotografia:{" "}
-                {naoObservadas.map(brandLabel).join(", ")} — a fonte deste canal
-                não devolveu essas marcas, o que não significa zero anúncios.</>
+              <> Sem observação nesta fotografia (não é zero):{" "}
+                {naoObservadas.map(brandLabel).join(", ")}.</>
             )}
             {meta.no_reference_brands.length > 0 && (
               <> Sem tabela de referência: {meta.no_reference_brands.map(brandLabel).join(", ")}.</>
@@ -603,7 +610,7 @@ export default function MonitoramentoPrecoPage() {
                 da Shopee. Por isso a clausula so' aparece no ML, dono do
                 criterio. */}
             {marketplace === "ml" && Object.keys(meta.out_of_scope_brands).length > 0 && (
-              <> Fora do escopo por não terem catálogo próprio no Mercado Livre:{" "}
+              <> Fora do escopo (sem catálogo no Mercado Livre):{" "}
                 {Object.keys(meta.out_of_scope_brands).map(brandLabel).join(", ")}.</>
             )}
           </p>
@@ -627,12 +634,9 @@ export default function MonitoramentoPrecoPage() {
             Sincronização atrasada em {fmtContagem(meta.lag_days ?? 0)} dia(s).
           </p>
           <p className="text-xs text-amber-800 mt-1">
-            A observação mais recente disponível é de{" "}
-            <strong>{fmtData(meta.observed_ref_date)}</strong>, e o último dia
-            elegível seria <strong>{fmtData(meta.eligible_ref_date)}</strong>. As
-            comparações abaixo valem para o dia observado e{" "}
-            <strong>não descrevem o preço de hoje</strong>. Verifique a última
-            execução do sync de preços.
+            Dados de <strong>{fmtData(meta.observed_ref_date)}</strong> (esperado{" "}
+            {fmtData(meta.eligible_ref_date)}) —{" "}
+            <strong>não descrevem o preço de hoje</strong>.
           </p>
         </section>
       )}
@@ -643,18 +647,19 @@ export default function MonitoramentoPrecoPage() {
           aria-label="Aviso de consulta retrospectiva"
           className="bg-sky-50 border border-sky-200 rounded-2xl p-4 mb-4"
         >
-          <p className="text-sm font-semibold text-sky-900">
+          <p className="flex items-center gap-1 text-sm font-semibold text-sky-900">
             Consulta retrospectiva — {fmtData(meta.observed_ref_date)}
+            <InfoDica
+              texto={
+                "A origem não declara a vigência histórica dessa referência: " +
+                "o resultado pode mudar se uma nova referência PDV for " +
+                "importada. Não é defasagem do pipeline."
+              }
+            />
           </p>
           <p className="text-xs text-sky-900 mt-1">
-            O preço anunciado é o daquele dia. A referência usada é o snapshot
-            PDV <strong>mais recente disponível hoje</strong>, capturado em{" "}
-            <strong>{fmtInstanteBrt(meta.reference_captured_at)}</strong>.{" "}
-            <strong>
-              A origem não declara a vigência histórica dessa referência
-            </strong>
-            , portanto este resultado pode mudar se uma nova referência PDV for
-            importada. Não é defasagem do pipeline.
+            Referência PDV mais recente disponível hoje (
+            {fmtInstanteBrt(meta.reference_captured_at)}).
           </p>
         </section>
       )}
@@ -670,8 +675,7 @@ export default function MonitoramentoPrecoPage() {
             {fmtData(meta.requested_observed_date) || INDISPONIVEL}.
           </p>
           <p className="text-xs text-slate-600 mt-1">
-            Esse dia não foi sincronizado. Nenhum número é apresentado —
-            ausência não é zero. Escolha uma das datas disponíveis no seletor.
+            Dia não sincronizado — ausência não é zero.
           </p>
         </section>
       )}
@@ -730,34 +734,17 @@ export default function MonitoramentoPrecoPage() {
                     : "border-slate-200 bg-white"
                 }`}
               >
-                <dt className="text-xs uppercase tracking-wide text-slate-500">
+                <dt className="flex items-center gap-1 text-xs uppercase tracking-wide text-slate-500">
                   {r.rotulo}
+                  <InfoDica texto={r.explicacao} />
                 </dt>
                 <dd className="text-sm font-semibold text-slate-900 mt-0.5 tabular-nums">
                   {r.valor}
                 </dd>
-                <dd className="text-xs text-slate-500 mt-1">{r.explicacao}</dd>
               </div>
             ))}
           </dl>
         )}
-      </section>
-
-      {/* ---------------- aviso de escopo ---------------- */}
-      <section
-        aria-label="Escopo e limitações"
-        className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4"
-      >
-        <p className="text-sm font-semibold text-amber-900 mb-2">
-          Modo observacional
-        </p>
-        <ul className="text-xs text-amber-900 space-y-1 list-disc pl-4">
-          {AVISO_OBSERVACIONAL.map((t) => (
-            <li key={t}>{t}</li>
-          ))}
-          <li>Cobertura: apenas anúncios das lojas próprias — nenhum vendedor terceiro.</li>
-          <li>Comparação histórica indisponível: a referência não tem vigência declarada.</li>
-        </ul>
       </section>
 
       {/* ---------------- KPIs ---------------- */}
@@ -781,13 +768,15 @@ export default function MonitoramentoPrecoPage() {
                       : () => limparFiltros()
                   }
                   className="text-left bg-white border border-violet-100 rounded-2xl shadow-sm p-4 min-h-[44px] hover:border-violet-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-                  title={k.detalhe}
                 >
-                  <span className="block text-xs text-slate-500">{k.rotulo}</span>
+                  <span className="flex items-center gap-1 text-xs text-slate-500">
+                    {k.rotulo}
+                    <InfoDica texto={k.detalhe} emControle />
+                  </span>
                   <span className="block text-2xl font-bold text-slate-900 tabular-nums">
                     {fmtContagem(k.valor)}
                   </span>
-                  <span className="block text-xs text-slate-500 mt-1">{k.detalhe}</span>
+                  <span className="sr-only">{k.detalhe}</span>
                 </button>
               ))}
         </div>
@@ -799,20 +788,19 @@ export default function MonitoramentoPrecoPage() {
                 type="button"
                 onClick={() => trocaFiltro(() => setStatus(k.status as string))}
                 className="text-left bg-slate-50 border border-slate-200 rounded-2xl p-3 min-h-[44px] hover:border-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-                title={k.detalhe}
               >
-                <span className="block text-xs text-slate-500">
+                <span className="flex items-center gap-1 text-xs text-slate-500">
                   Qualidade do dado · {k.rotulo}
+                  <InfoDica texto={k.detalhe} emControle />
                 </span>
                 <span className="block text-lg font-bold text-slate-800 tabular-nums">
                   {fmtContagem(k.valor)}
                 </span>
-                <span className="block text-xs text-slate-500">{k.detalhe}</span>
+                <span className="sr-only">{k.detalhe}</span>
               </button>
             ))}
           </div>
         )}
-        <p className="text-xs text-slate-500 mt-2">{NOTA_DENOMINADOR}</p>
       </section>
 
       {/* ------- Gate PMA-OPS-2: POR QUE nao ha referencia ---------------- */}
@@ -832,8 +820,15 @@ export default function MonitoramentoPrecoPage() {
         className="bg-white border border-violet-100 rounded-2xl shadow-sm p-4 mb-4"
       >
         <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
-          <h2 className="text-sm font-semibold text-slate-800">
+          <h2 className="flex items-center gap-1 text-sm font-semibold text-slate-800">
             Por que não há referência
+            <InfoDica
+              texto={
+                "Conta as ofertas ativas sem referência, kits e marcas fora do " +
+                "escopo de beleza inclusive: soma o cartão “Sem referência”, " +
+                "não o denominador de cobertura."
+              }
+            />
           </h2>
           {!causas.indisponivel && causas.total > 0 && (
             <span
@@ -858,21 +853,17 @@ export default function MonitoramentoPrecoPage() {
           </div>
         ) : estado.error ? (
           <p className="text-sm text-slate-600">
-            Não foi possível carregar as causas — a falha está no aviso acima.
-            Nenhum número é apresentado no lugar.
+            Causas indisponíveis — veja o aviso de falha.
           </p>
         ) : causas.indisponivel ? (
           /* Deploy antigo da API: AUSENCIA DE CAMPO, nao ausencia de causa. */
           <p className="text-sm text-slate-600">
-            Esta versão da API ainda não decompõe as causas. O total sem
-            referência continua correto no cartão acima — o que falta é o
-            detalhamento, não o dado.
+            Detalhamento indisponível nesta versão da API.
           </p>
         ) : causas.total === 0 ? (
           /* Zero MEDIDO, e e' uma boa noticia. Diferente de "nao medimos". */
           <p className="text-sm text-emerald-800">
-            Nenhuma oferta sem referência nesta fotografia. Zero medido, não
-            ausência de medição.
+            Nenhuma oferta sem referência (zero medido).
           </p>
         ) : (
           <ul className="space-y-2">
@@ -887,11 +878,12 @@ export default function MonitoramentoPrecoPage() {
               >
                 <div className="flex items-baseline justify-between gap-3">
                   <span
-                    className={`text-sm font-semibold ${
+                    className={`flex items-center gap-1 text-sm font-semibold ${
                       c.residual ? "text-rose-900" : "text-slate-800"
                     }`}
                   >
                     {c.rotulo}
+                    {c.detalhe && <InfoDica texto={c.detalhe} />}
                   </span>
                   <span className="text-sm font-bold text-slate-900 tabular-nums whitespace-nowrap">
                     {fmtContagem(c.valor)}
@@ -902,25 +894,10 @@ export default function MonitoramentoPrecoPage() {
                     )}
                   </span>
                 </div>
-                {c.detalhe && (
-                  <p
-                    className={`text-xs mt-1 ${
-                      c.residual ? "text-rose-800" : "text-slate-500"
-                    }`}
-                  >
-                    {c.detalhe}
-                  </p>
-                )}
               </li>
             ))}
           </ul>
         )}
-        <p className="text-xs text-slate-500 mt-3">
-          Conta as ofertas <strong>ativas</strong> sem referência — kits e
-          marcas fora do escopo de beleza inclusive. Por isso soma o cartão
-          &ldquo;Sem referência&rdquo; e não o denominador de cobertura, que
-          exclui os dois de propósito.
-        </p>
       </section>
 
       {/* ---------------- filtros ---------------- */}
@@ -973,9 +950,14 @@ export default function MonitoramentoPrecoPage() {
           </div>
 
           <div className="flex flex-col">
-            <label htmlFor={situacaoId} className="text-xs text-slate-500 mb-1">
-              Situação
-            </label>
+            <div className="flex items-center gap-1 mb-1">
+              <label htmlFor={situacaoId} className="text-xs text-slate-500">
+                Situação
+              </label>
+              {/* O filtro de situacao so' mexe na tabela: os KPIs guardam o
+                  denominador. */}
+              <InfoDica texto={NOTA_DENOMINADOR} />
+            </div>
             <select
               id={situacaoId}
               value={status}
@@ -1125,8 +1107,7 @@ export default function MonitoramentoPrecoPage() {
                 HTTP a quem opera. O status continua no estado, escolhendo a
                 redacao; nao aparece. */}
             <p className="text-xs text-slate-600 mt-2">
-              {mensagemDeFalha(erroStatus)} Nenhum dado é exibido: a tela não
-              substitui a medição real por estimativa.
+              {mensagemDeFalha(erroStatus)}
             </p>
             <button
               type="button"
@@ -1145,8 +1126,8 @@ export default function MonitoramentoPrecoPage() {
             </h2>
             <p className="text-xs text-slate-500 mt-2">
               {temFiltro
-                ? "Ajuste marca, situação ou busca para ampliar o resultado."
-                : "Não há anúncios publicados na data observada."}
+                ? "Ajuste os filtros."
+                : "Sem anúncios publicados na data observada."}
             </p>
             {temFiltro && (
               <button
@@ -1442,8 +1423,7 @@ export default function MonitoramentoPrecoPage() {
               {linhaAberta.comparison_status === "non_comparable_reference_ambiguous" && (
                 <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3">
                   Referência ambígua — {fmtContagem(linhaAberta.reference_candidate_count)}{" "}
-                  linhas da tabela de origem disputam a mesma chave nesta marca. Nenhuma
-                  diferença é calculada: a revisão da tabela de origem é necessária.
+                  linhas disputam a mesma chave; sem diferença calculada.
                 </p>
               )}
             </div>

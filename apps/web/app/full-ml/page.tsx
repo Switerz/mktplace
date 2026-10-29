@@ -16,6 +16,9 @@
  * prontos. A unica divisao feita aqui e' o share DIARIO da serie, porque a API
  * entrega o share agregado do periodo, nao por dia -- e ela usa exatamente a
  * mesma regra do backend (denominador `full + non_full`, sem `unknown`).
+ *
+ * NUMERO PRIMEIRO: a ressalva que muda a leitura (carga manual, inicio da
+ * serie, definicao de cada modalidade) fica num "i" ao lado do rotulo.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
@@ -23,12 +26,11 @@ import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import KpiCard from "@/components/KpiCard";
 import MLFulfillmentTrend from "@/components/MLFulfillmentTrend";
+import InfoDica from "@/components/ui/InfoDica";
 import { fetchMLFulfillment, MLFulfillmentError } from "@/lib/api-client";
 import {
   AVISO_COBERTURA,
-  AVISO_JANELA,
   AVISO_MANUAL_SNAPSHOT,
-  AVISO_SEM_ESTOQUE,
   CLASS_DESCRICAO,
   CLASS_LABEL,
   FRESHNESS_LABEL,
@@ -86,13 +88,9 @@ function hojeIsoBrt(): string {
   return new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
 }
 
-function Aviso({ tom, children }: { tom: "info" | "alerta"; children: React.ReactNode }) {
-  const cor =
-    tom === "alerta"
-      ? "bg-amber-50 border-amber-300 text-amber-900"
-      : "bg-slate-50 border-slate-200 text-slate-700";
+function Aviso({ children }: { children: React.ReactNode }) {
   return (
-    <p className={`text-xs leading-relaxed border rounded-lg px-3 py-2 ${cor}`}>
+    <p className="text-xs leading-relaxed border rounded-lg px-3 py-2 bg-amber-50 border-amber-300 text-amber-900">
       {children}
     </p>
   );
@@ -164,7 +162,6 @@ function FullMLPageInner() {
 
   const full = byClass(dados, "full");
   const naoFull = byClass(dados, "non_full");
-  const desconhecido = byClass(dados, "unknown");
   const serie = useMemo(() => serieDiaria(dados, metrica), [dados, metrica]);
   const listaAlertas = useMemo(() => alertas(dados), [dados]);
   const vazio = isVazioReal(dados);
@@ -173,13 +170,14 @@ function FullMLPageInner() {
   const statusBadge = frescor ? (
     <span
       className={
-        "text-xs font-medium px-2 py-1 rounded-full " +
+        "inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full " +
         (frescor.freshness_status === "fresh"
           ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
           : "bg-amber-50 text-amber-900 border border-amber-300")
       }
     >
       {FRESHNESS_LABEL[frescor.freshness_status]} · {LOAD_MODE_LABEL[frescor.load_mode]}
+      <InfoDica texto={AVISO_MANUAL_SNAPSHOT} />
     </span>
   ) : null;
 
@@ -254,12 +252,13 @@ function FullMLPageInner() {
   );
 
   const escopo = (
-    <span className="text-xs text-slate-600">
+    <span className="inline-flex flex-wrap items-center gap-1 text-xs text-slate-600">
       {from} a {to}
       {dados?.freshness.source_max_date && (
         <> · fonte até {dados.freshness.source_max_date}</>
       )}
       {marca && <> · {MARCAS.find((m) => m.key === marca)?.label}</>}
+      <InfoDica texto={AVISO_COBERTURA} />
     </span>
   );
 
@@ -267,27 +266,19 @@ function FullMLPageInner() {
     <PageContainer>
       <PageHeader
         title="Full Mercado Livre"
-        subtitle={
-          "Quanto do negócio no Mercado Livre passa pelo fulfillment (Full) " +
-          "contra as demais modalidades logísticas de envio."
-        }
         scopeLine={escopo}
         status={statusBadge}
         filters={filtros}
       />
 
-      {/* --- Avisos permanentes de contrato ------------------------------ */}
-      <div className="flex flex-col gap-2">
-        <Aviso tom="alerta">{AVISO_MANUAL_SNAPSHOT}</Aviso>
-        <Aviso tom="info">{AVISO_SEM_ESTOQUE}</Aviso>
-        <Aviso tom="info">{AVISO_JANELA}</Aviso>
-        <Aviso tom="info">{AVISO_COBERTURA}</Aviso>
-        {listaAlertas.map((a) => (
-          <Aviso key={a} tom="alerta">
-            {a}
-          </Aviso>
-        ))}
-      </div>
+      {/* --- Alertas do payload (frescor, completude, unknown) ----------- */}
+      {listaAlertas.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {listaAlertas.map((a) => (
+            <Aviso key={a}>{a}</Aviso>
+          ))}
+        </div>
+      )}
 
       {/* --- Estados ----------------------------------------------------- */}
       {erroJanela && (
@@ -329,8 +320,7 @@ function FullMLPageInner() {
             Nenhum pedido no período e filtro selecionados.
           </p>
           <p className="text-xs text-slate-500 mt-1">
-            Isto é ausência de venda, não falha de carga. A série publicada
-            começa em 01/08/2025.
+            É ausência de venda, não falha de carga.
           </p>
         </div>
       )}
@@ -456,7 +446,10 @@ function FullMLPageInner() {
                     return (
                       <tr key={c} className="border-b border-slate-100">
                         <th scope="row" className="text-left py-2 pr-3 font-medium text-slate-800">
-                          {CLASS_LABEL[c]}
+                          <span className="inline-flex items-center gap-1">
+                            {CLASS_LABEL[c]}
+                            <InfoDica texto={CLASS_DESCRICAO[c]} />
+                          </span>
                         </th>
                         <td className="text-right py-2 px-3 tabular-nums">{fmtGmv(linha.paid_gmv)}</td>
                         <td className="text-right py-2 px-3 tabular-nums">{fmtCount(linha.paid_orders)}</td>
@@ -472,14 +465,6 @@ function FullMLPageInner() {
                 </tbody>
               </table>
             </div>
-            <dl className="text-xs text-slate-600 flex flex-col gap-1">
-              {(["full", "non_full", "unknown"] as FulfillmentClass[]).map((c) => (
-                <div key={c} className="flex gap-2">
-                  <dt className="font-semibold shrink-0">{CLASS_LABEL[c]}:</dt>
-                  <dd>{CLASS_DESCRICAO[c]}</dd>
-                </div>
-              ))}
-            </dl>
           </section>
 
           {/* --- Composicao por tipo logistico bruto ---------------------- */}
@@ -491,10 +476,6 @@ function FullMLPageInner() {
               <h2 id="full-ml-tipos" className="text-sm font-semibold text-slate-800">
                 Composição por tipo logístico registrado
               </h2>
-              <p className="text-xs text-slate-600">
-                Rótulo bruto do Mercado Livre, preservado inclusive quando já
-                extinto. Não-Full não equivale a uma modalidade única.
-              </p>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm min-w-[480px]">
                   <caption className="sr-only">GMV por tipo logístico registrado</caption>
@@ -537,9 +518,7 @@ function FullMLPageInner() {
               <div className="border border-amber-300 bg-amber-50/40 rounded-lg p-3">
                 <p className="text-xs font-semibold text-amber-900 uppercase">Mistos</p>
                 <p className="text-2xl font-bold tabular-nums text-slate-900">{fmtCount(dados.listings.mixed)}</p>
-                <p className="text-xs text-slate-600 mt-1">
-                  Venderam pelos dois modais na janela: Full não é atributo do anúncio.
-                </p>
+                <p className="text-xs text-slate-600 mt-1">Full e não-Full na janela</p>
               </div>
               <div className="border border-slate-200 rounded-lg p-3">
                 <p className="text-xs font-semibold text-slate-600 uppercase">Somente não-Full</p>
@@ -589,7 +568,7 @@ function FullMLPageInner() {
             className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-2"
           >
             <h2 id="full-ml-qualidade" className="text-sm font-semibold text-slate-800">
-              Qualidade e limitações
+              Qualidade
             </h2>
             <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
               <div>
@@ -611,17 +590,6 @@ function FullMLPageInner() {
                 </dd>
               </div>
             </dl>
-            <ul className="text-xs text-slate-600 list-disc pl-5 flex flex-col gap-1 mt-1">
-              {dados.quality.limitations.map((l) => (
-                <li key={l}>{l}</li>
-              ))}
-            </ul>
-            {desconhecido && desconhecido.eligible_orders > 0 && (
-              <Aviso tom="alerta">
-                {fmtCount(desconhecido.eligible_orders)} pedido(s) em Desconhecido.{" "}
-                {CLASS_DESCRICAO.unknown}
-              </Aviso>
-            )}
           </section>
         </>
       )}

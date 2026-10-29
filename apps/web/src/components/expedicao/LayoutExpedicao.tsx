@@ -15,7 +15,7 @@
  *
  * O esqueleto NAO conhece canal nem metrica: cada painel entrega as secoes
  * que a SUA fonte sustenta. Secao sem fonte no canal vira
- * `SecaoIndisponivel` — um bloco curto com o `?` explicando —, nunca um
+ * `SecaoIndisponivel` — uma linha com o "ⓘ" —, nunca um
  * buraco nem um numero inventado.
  */
 import type { ReactNode } from "react";
@@ -108,7 +108,7 @@ export function CorpoGestor({
   );
 }
 
-/** Secao que a fonte do canal nao sustenta: dito em uma linha, com o `?`. */
+/** Secao que a fonte do canal nao sustenta: dito em uma linha, com o "ⓘ". */
 export function SecaoIndisponivel({
   titulo,
   motivo,

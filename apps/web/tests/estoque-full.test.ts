@@ -15,10 +15,8 @@ import { test } from "node:test";
 
 import {
   AVISO_ALERTAS_SO_NA_TORRE,
-  AVISO_CARGA_MANUAL,
   AVISO_CONTEXTO,
   AVISO_COBERTURA_TORRE,
-  AVISO_KITS,
   CLASSIFICACOES,
   CLASS_LABEL,
   CD_NAO_INFORMADO,
@@ -475,23 +473,16 @@ test("erro limpa o payload, para nao misturar numero velho com falha", () => {
   assert.ok(trecho.includes("setPayload(null)"));
 });
 
-test("a tela exibe atualizacao e limitacoes", () => {
-  for (const aviso of [
-    AVISO_COBERTURA_TORRE,
-    AVISO_CONTEXTO,
-    AVISO_KITS,
-    AVISO_CARGA_MANUAL,
-    AVISO_ALERTAS_SO_NA_TORRE,
-  ]) {
-    const nome = Object.entries({
-      AVISO_COBERTURA_TORRE,
-      AVISO_CONTEXTO,
-      AVISO_KITS,
-      AVISO_CARGA_MANUAL,
-      AVISO_ALERTAS_SO_NA_TORRE,
-    }).find(([, v]) => v === aviso)?.[0];
-    assert.ok(CLIENT_SRC.includes(`{${nome}}`), `${nome} nao aparece na tela`);
+test("a tela exibe atualizacao e as ressalvas que mudam a leitura", () => {
+  // Abas objetivas: sem bloco "Como ler". A ressalva de cada coluna fica num
+  // InfoDica ao lado do rotulo (`texto={AVISO_...}`).
+  for (const nome of ["AVISO_COBERTURA_TORRE", "AVISO_CONTEXTO", "AVISO_CARGA_MANUAL"]) {
+    assert.ok(
+      CLIENT_SRC.includes(`<InfoDica texto={${nome}} />`),
+      `${nome} nao aparece na tela`,
+    );
   }
+  assert.ok(!CLIENT_SRC.includes("Como ler"), "bloco de metodologia voltou");
   assert.ok(CLIENT_SRC.includes("frescorLabel(payload.frescor)"));
 });
 
@@ -738,8 +729,10 @@ test("a coluna Por CD usa o rotulo, nao o location_id cru", () => {
 // ---------------------------------------------------------------------------
 
 test("AVISO_CONTEXTO cita apenas colunas presentes na tabela", () => {
-  const cabecalhos = [...CLIENT_SRC.matchAll(/<th scope="col"[^>]*>([^<]+)<\/th>/g)]
-    .map((m) => m[1].trim());
+  // O cabecalho pode trazer um InfoDica ao lado do rotulo: tira as tags e o
+  // JSX entre chaves e fica so' o texto visivel.
+  const cabecalhos = [...CLIENT_SRC.matchAll(/<th scope="col"[^>]*>([\s\S]*?)<\/th>/g)]
+    .map((m) => m[1].replace(/<[^>]*>/g, "").replace(/\{[^}]*\}/g, "").trim());
   assert.ok(cabecalhos.length > 0, "nao achei os cabecalhos da tabela");
   const citadas = [...AVISO_CONTEXTO.matchAll(/“([^”]+)”/g)].map((m) => m[1]);
   assert.ok(citadas.length > 0);

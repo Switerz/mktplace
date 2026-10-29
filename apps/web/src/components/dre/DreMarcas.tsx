@@ -4,6 +4,7 @@ import { useId, useMemo, useState } from "react";
 import { Grid3x3, Tags } from "lucide-react";
 
 import Panel from "@/components/ui/Panel";
+import InfoDica from "@/components/ui/InfoDica";
 import Segmented from "@/components/ui/Segmented";
 import Chip from "@/components/ui/Chip";
 import TableScrollHint from "@/components/TableScrollHint";
@@ -66,8 +67,10 @@ function Posicao({ item }: { item: ItemRanking }) {
 }
 
 /** Por que o ranking esta vazio (ou com uma marca so'), em linguagem de gestor. */
+const REGRA_RANKING = "Posição = ordem de margem % entre marcas com os mesmos custos na conta.";
+
 export function explicacaoRanking(comparaveis: number, bloqueadores: string[]): string {
-  if (comparaveis >= 2) return "Posição = ordem de margem % entre marcas com os mesmos custos na conta.";
+  if (comparaveis >= 2) return REGRA_RANKING;
   const quantas = comparaveis === 0 ? "nenhuma marca é comparável" : "só uma marca é comparável";
   if (bloqueadores.length) {
     const verbo = bloqueadores.length > 1 ? "não são calculáveis" : "não é calculável";
@@ -103,8 +106,12 @@ export function DreMarcasTabela({
 
   return (
     <Panel
-      titulo="Comparação entre marcas"
-      descricao="Receita, participação e margem conhecida por marca. Ranking só entre marcas comparáveis."
+      titulo={
+        <>
+          Comparação entre marcas
+          <InfoDica texto={REGRA_RANKING} />
+        </>
+      }
       icone={Tags}
       semPadding
       acao={
@@ -119,10 +126,14 @@ export function DreMarcasTabela({
         />
       }
       rodape={
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-          <span>{explicacaoRanking(comparaveis, bloqueadores)}</span>
-          {comparaveis < 2 && aoFiltrar && <BotaoRecorteCalculavel canais={calculaveis} aoAplicar={aoFiltrar} />}
-        </div>
+        // Com ranking preenchido a regra fica no ⓘ; o rodape so' explica o
+        // ranking vazio, que muda a leitura da coluna Posicao.
+        comparaveis < 2 ? (
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <span>{explicacaoRanking(comparaveis, bloqueadores)}</span>
+            {aoFiltrar && <BotaoRecorteCalculavel canais={calculaveis} aoAplicar={aoFiltrar} />}
+          </div>
+        ) : undefined
       }
     >
       <TableScrollHint>
@@ -238,7 +249,6 @@ export function DreMarcaCanalMatriz({
   return (
     <Panel
       titulo="Margem conhecida por marca e canal"
-      descricao="Cada célula com a própria classificação: um canal não calculável não esconde os outros."
       icone={Grid3x3}
       semPadding
     >

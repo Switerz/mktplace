@@ -18,6 +18,10 @@
  *
  * A TELA NAO RECALCULA NADA: classificacao, cobertura, totais e parcialidade
  * chegam prontos da API.
+ *
+ * NUMERO PRIMEIRO: a ressalva que muda a leitura de uma coluna (grao por
+ * inventario, travessao como ausencia, transferencia) fica num "i" ao lado do
+ * rotulo, nunca em paragrafo.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -26,12 +30,11 @@ import KpiCard from "@/components/KpiCard";
 import TableScrollHint from "@/components/TableScrollHint";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import InfoDica from "@/components/ui/InfoDica";
 import { MLFullEstoqueError, fetchMLFullEstoque } from "@/lib/api-client";
 import {
-  AVISO_ALERTAS_SO_NA_TORRE_ML,
   AVISO_AUSENCIA_ML,
   AVISO_GRAO_ML,
-  AVISO_NAO_E_MODALIDADE_ML,
   AVISO_TRANSFER_ML,
   CLASS_LABEL_ML,
   CLASS_TOM_ML,
@@ -92,12 +95,10 @@ function PainelIndisponivel({
   titulo,
   motivo,
   passo,
-  limitacoes,
 }: {
   titulo: string;
   motivo: string;
   passo?: string;
-  limitacoes?: string[];
 }) {
   return (
     <section
@@ -113,15 +114,8 @@ function PainelIndisponivel({
         </p>
       )}
       <p className="text-sm font-semibold text-slate-900">
-        Isto não significa estoque zero: não há medição publicada.
+        Isto não significa estoque zero.
       </p>
-      {limitacoes?.length ? (
-        <ul className="text-xs text-slate-500 list-disc pl-5 flex flex-col gap-1">
-          {limitacoes.map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-        </ul>
-      ) : null}
     </section>
   );
 }
@@ -234,12 +228,27 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
             <thead>
               <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
                 <th scope="col" className="px-4 py-3">Marca</th>
-                <th scope="col" className="px-4 py-3 text-right">Disponível</th>
-                <th scope="col" className="px-4 py-3 text-right">Não disponível</th>
+                <th scope="col" className="px-4 py-3 text-right">
+                  <span className="inline-flex items-center gap-1">
+                    Disponível
+                    <InfoDica texto={AVISO_AUSENCIA_ML} />
+                  </span>
+                </th>
+                <th scope="col" className="px-4 py-3 text-right">
+                  <span className="inline-flex items-center gap-1">
+                    Não disponível
+                    <InfoDica texto={AVISO_TRANSFER_ML} />
+                  </span>
+                </th>
                 <th scope="col" className="px-4 py-3 text-right">Demanda 28d</th>
                 <th scope="col" className="px-4 py-3 text-right">Cobertura da Torre</th>
                 <th scope="col" className="px-4 py-3">Classificação</th>
-                <th scope="col" className="px-4 py-3 text-right">Anúncios</th>
+                <th scope="col" className="px-4 py-3 text-right">
+                  <span className="inline-flex items-center gap-1">
+                    Anúncios
+                    <InfoDica texto={AVISO_GRAO_ML} />
+                  </span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -456,7 +465,6 @@ export default function MLFullEstoqueClient() {
     <PageContainer>
       <PageHeader
         title="Estoque Full Mercado Livre"
-        subtitle="Estoque físico no Full do Mercado Livre, por inventário."
         scopeLine={escopo}
         filters={filtrosUI}
       />
@@ -501,7 +509,6 @@ export default function MLFullEstoqueClient() {
           titulo={TITULO_INDISPONIVEL_ML[payload.motivo_tecnico]}
           motivo={payload.unavailable_reason}
           passo={PROXIMO_PASSO_ML[payload.motivo_tecnico]}
-          limitacoes={payload.limitacoes}
         />
       )}
 
@@ -509,41 +516,42 @@ export default function MLFullEstoqueClient() {
         <>
           {/* Data historica escolhida de proposito ja tem aviso proprio. */}
           {mostrarAvisoVelhaML(payload.frescor) && (
-            <Aviso tom="alerta">
-              {frescorLabelML(payload.frescor)}. A publicação ainda não tem
-              agendamento.
-            </Aviso>
+            <Aviso tom="alerta">Desatualizado · {frescorLabelML(payload.frescor)}</Aviso>
           )}
           {eDataHistorica(payload.frescor) && (
             <Aviso tom="info">
-              Exibindo a data {fmtData(payload.frescor.ref_date)}. A última
-              fotografia publicada é de{" "}
-              {fmtData(payload.frescor.ultima_fotografia_disponivel)}.
+              Data histórica · última fotografia em{" "}
+              {fmtData(payload.frescor.ultima_fotografia_disponivel)}
             </Aviso>
           )}
 
-          {/* Frescor e cobertura SEMPRE visiveis, antes dos numeros. */}
-          <section className="bg-white rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-700 flex flex-col gap-1">
-            <span>{frescorLabelML(payload.frescor)}</span>
-            <span>{coberturaMarcasLabel(payload.cobertura)}</span>
-            <span>{leituraLabel(payload.cobertura.leitura)}</span>
+          {/* Cobertura e parcialidade SEMPRE visiveis, antes dos numeros (o
+              frescor esta no escopo do cabecalho). */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-700">
+              {coberturaMarcasLabel(payload.cobertura)}
+            </span>
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-700">
+              {leituraLabel(payload.cobertura.leitura)}
+            </span>
             {payload.cobertura.marcas_sem_fotografia.length > 0 && (
-              <span className="text-amber-800">
-                Sem fotografia no dia:{" "}
+              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-amber-800">
+                Sem fotografia:{" "}
                 {payload.cobertura.marcas_sem_fotografia.map(tituloMarca).join(", ")}{" "}
-                — como ausência, nunca como zero.
+                — ausência, não zero
               </span>
             )}
-          </section>
-
-          {payload.indicadores.total_parcial && (
-            <Aviso tom="alerta">
-              Total PARCIAL:{" "}
-              {payload.indicadores.motivos_total_parcial
-                .map(motivoParcialLegivel)
-                .join(" ")}
-            </Aviso>
-          )}
+            {payload.indicadores.total_parcial && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-900">
+                Total parcial
+                <InfoDica
+                  texto={payload.indicadores.motivos_total_parcial
+                    .map(motivoParcialLegivel)
+                    .join(" ")}
+                />
+              </span>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <KpiCard
@@ -634,30 +642,13 @@ export default function MLFullEstoqueClient() {
           ) : (
             <>
               <p className="text-xs text-ink-muted px-1">
-                Exibindo {fmtInt(payload.inventarios.length)} de{" "}
-                {fmtInt(payload.total_no_filtro)} inventários no filtro.
-                {payload.truncado &&
-                  " A lista foi truncada — os indicadores acima cobrem o escopo inteiro."}
+                {fmtInt(payload.inventarios.length)} de{" "}
+                {fmtInt(payload.total_no_filtro)} inventários
+                {payload.truncado && " · lista truncada; indicadores cobrem tudo"}
               </p>
               <TabelaInventarios inventarios={payload.inventarios} />
             </>
           )}
-
-          <section className="flex flex-col gap-2 px-1 pb-4">
-            <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-              Como ler esta tela
-            </h4>
-            <ul className="text-xs text-ink-muted list-disc pl-5 flex flex-col gap-1">
-              <li>{AVISO_GRAO_ML}</li>
-              <li>{AVISO_AUSENCIA_ML}</li>
-              <li>{AVISO_NAO_E_MODALIDADE_ML}</li>
-              <li>{AVISO_TRANSFER_ML}</li>
-              <li>{AVISO_ALERTAS_SO_NA_TORRE_ML}</li>
-              {payload.limitacoes.map((l) => (
-                <li key={l}>{l}</li>
-              ))}
-            </ul>
-          </section>
         </>
       )}
     </PageContainer>

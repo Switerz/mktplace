@@ -80,7 +80,7 @@ test("a tela troca os cards e o contador pela ausencia, sem recalcular nada", ()
   assert.match(page, /ProductCount total=\{shUnavailable \? null :/);
   // nem "0–0 de 0 produtos" no escopo, nem "63 produtos sem GMV" na nota
   assert.match(page, /total: shUnavailable \? null : shDisplayData\?\.total/);
-  assert.match(page, /shUnavailable \? "" : zeroGmvNote\(/);
+  assert.match(page, /shUnavailable \? null : semGmv\(/);
   const cards = readSource("src", "components", "ProductParetoSummary.tsx");
   assert.match(cards, /if \(unavailableReason\)/);
   assert.match(cards, /data-testid="pareto-unavailable"/);

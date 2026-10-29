@@ -24,11 +24,12 @@ import TikTokProductTable from "@/components/TikTokProductTable";
 import ShopeeProductTable from "@/components/ShopeeProductTable";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import {
-  brandSurvivesTabChange, toggleBucketSelection, zeroGmvNote, avgPriceNote, marginUnavailableNote,
+  brandSurvivesTabChange, toggleBucketSelection, marginUnavailableNote,
   lastNMonths, type ProdutosTab,
 } from "@/lib/produtos-tab-transition";
 import { initialChannelState, startFetch, resolveFetch, resolveFetchError, type ChannelState } from "@/lib/async-channel-state";
 import { formatProdutosScope } from "@/lib/produtos-scope";
+import { fmtBrlFull } from "@/lib/formatters";
 import {
   mlRowToExportRecord, tiktokRowToExportRecord, shopeeRowToExportRecord,
   ML_EXPORT_COLUMNS, TIKTOK_EXPORT_COLUMNS, SHOPEE_EXPORT_COLUMNS,
@@ -65,6 +66,19 @@ const TK_SH_BRANDS = [
   { value: "lescent", label: "LESCENT" },
   { value: "rituaria", label: "RITUARIA" },
 ];
+
+// Linha curta sob os cards A/B/C/D: so' o que muda a leitura do Pareto.
+function paretoLinha(partes: (string | null | undefined)[]): string {
+  return partes.filter(Boolean).join(" · ");
+}
+function semGmv(excluded: number | undefined): string | null {
+  return excluded ? `${excluded} sem GMV fora dos buckets` : null;
+}
+function precoMedio(avg: number | null | undefined): string | null {
+  return avg == null ? null : `Preço médio ${fmtBrlFull(avg)}`;
+}
+// Ressalvas de metodologia vao para o ⓘ ao lado da linha.
+const DICA_PARETO = "Pareto só com produtos de GMV positivo. Preço médio ponderado por unidade.";
 
 function fmtRefreshedAt(iso: string | null): string {
   if (!iso) return "";
@@ -427,7 +441,6 @@ function ProdutosPageInner() {
           ganha barra sticky — barra vazia seria afordancia falsa. */}
       <PageHeader
         title="Produtos"
-        subtitle="Ranking de produtos por marketplace — cada aba tem contrato temporal próprio, sem ranking consolidado entre canais."
         // Badge de fonte da aba ativa — nunca reflete o live/mock da requisicao
         // ANTERIOR: enquanto a tabela OU o resumo Pareto da aba atual ainda
         // estao buscando, mostra um estado neutro em vez do `isLive` antigo.
@@ -489,9 +502,8 @@ function ProdutosPageInner() {
               <ProductCount total={mlDisplayData?.total ?? null} />
             </ProductFilterBar>
 
-            {/* Escopo atual — linha compacta (Task 2) */}
             <p className="px-6 pt-3 text-[11px] text-slate-400">
-              Escopo atual: {formatProdutosScope({
+              {formatProdutosScope({
                 channelLabel: activeChannelLabel, brandLabel: activeBrandLabel, periodLabel: null,
                 total: mlDisplayData?.total ?? null, offset: mlOffset, limit: PAGE_SIZE,
               })}
@@ -504,9 +516,14 @@ function ProdutosPageInner() {
               onSelectBucket={setMlBucket}
               scopeNote={
                 mlDisplaySummary
-                  ? `Escopo: ranking acumulado atual${mlDisplaySummary.refreshed_at ? ` · atualizado em ${fmtRefreshedAt(mlDisplaySummary.refreshed_at)}` : ""} — o Mercado Livre nao possui competência mensal na fonte atual, por isso não há seletor de período aqui.${zeroGmvNote(mlDisplaySummary.excluded_zero_gmv_count)}${avgPriceNote(mlDisplaySummary.avg_price_weighted)} ${marginUnavailableNote("ml")}`
+                  ? paretoLinha([
+                      mlDisplaySummary.refreshed_at ? `Atualizado em ${fmtRefreshedAt(mlDisplaySummary.refreshed_at)}` : null,
+                      semGmv(mlDisplaySummary.excluded_zero_gmv_count),
+                      precoMedio(mlDisplaySummary.avg_price_weighted),
+                    ])
                   : undefined
               }
+              dica={`Sem competência mensal na fonte: ranking acumulado atual. ${DICA_PARETO} ${marginUnavailableNote("ml")}`}
             />
 
             <div className="flex items-center px-6 py-2 border-b border-violet-50">
@@ -541,9 +558,8 @@ function ProdutosPageInner() {
               <ProductCount total={tkDisplayData?.total ?? null} />
             </ProductFilterBar>
 
-            {/* Escopo atual — linha compacta (Task 2) */}
             <p className="px-6 pt-3 text-[11px] text-slate-400">
-              Escopo atual: {formatProdutosScope({
+              {formatProdutosScope({
                 channelLabel: activeChannelLabel, brandLabel: activeBrandLabel, periodLabel,
                 total: tkDisplayData?.total ?? null, offset: tkOffset, limit: PAGE_SIZE,
               })}
@@ -554,7 +570,11 @@ function ProdutosPageInner() {
               loading={tkSummaryAvail === "loading"}
               activeBucket={tkBucket}
               onSelectBucket={setTkBucket}
-              scopeNote={`Periodo: ${periodLabel}${zeroGmvNote(tkDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(tkDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("tiktok")}`}
+              scopeNote={paretoLinha([
+                semGmv(tkDisplaySummary?.excluded_zero_gmv_count),
+                precoMedio(tkDisplaySummary?.avg_price_weighted),
+              ])}
+              dica={`${DICA_PARETO} ${marginUnavailableNote("tiktok")}`}
             />
 
             <div className="flex items-center px-6 py-2 border-b border-violet-50">
@@ -590,9 +610,8 @@ function ProdutosPageInner() {
               <ProductCount total={shUnavailable ? null : shDisplayData?.total ?? null} />
             </ProductFilterBar>
 
-            {/* Escopo atual — linha compacta (Task 2) */}
             <p className="px-6 pt-3 text-[11px] text-slate-400">
-              Escopo atual: {formatProdutosScope({
+              {formatProdutosScope({
                 channelLabel: activeChannelLabel, brandLabel: activeBrandLabel, periodLabel,
                 total: shUnavailable ? null : shDisplayData?.total ?? null, offset: shOffset, limit: PAGE_SIZE,
               })}
@@ -613,7 +632,12 @@ function ProdutosPageInner() {
               activeBucket={shBucket}
               onSelectBucket={setShBucket}
               unavailableReason={shUnavailable}
-              scopeNote={`${shPartialNote ? `${shPartialNote} ` : ""}Periodo: ${periodLabel}${shUnavailable ? "" : zeroGmvNote(shDisplaySummary?.excluded_zero_gmv_count)}${avgPriceNote(shDisplaySummary?.avg_price_weighted)} ${marginUnavailableNote("shopee")}`}
+              scopeNote={paretoLinha([
+                shPartialNote,
+                shUnavailable ? null : semGmv(shDisplaySummary?.excluded_zero_gmv_count),
+                precoMedio(shDisplaySummary?.avg_price_weighted),
+              ])}
+              dica={`${DICA_PARETO} ${marginUnavailableNote("shopee")}`}
             />
 
             <div className="flex items-center px-6 py-2 border-b border-violet-50">

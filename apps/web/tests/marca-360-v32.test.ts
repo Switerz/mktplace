@@ -755,8 +755,8 @@ test("V32 Demographics foi removido e não deixou card vazio", () => {
     assert.doesNotMatch(src, /<h\d[^>]*>Demographics/, `${nome}: nenhuma seção Demographics`);
     assert.doesNotMatch(src, /Sem dados de viewers|Sem dados de followers/, nome);
   }
-  // no lugar, uma nota compacta DENTRO do contêiner mensal
-  assert.match(PAINEL, /Limitações do dado nesta competência/);
+  // no lugar, a limitacao fica no ⓘ do cabecalho do contêiner mensal
+  assert.match(PAINEL, /<InfoDica className="ml-1" texto=\{LIMITACOES_CONTRATO\} \/>/);
   assert.match(PAINEL, /Audiência não é coberta/);
   assert.match(PAINEL, /100% nulas na fonte/);
 });

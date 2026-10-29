@@ -122,7 +122,7 @@ function ListaDeEtapas({
   if (base === 0) {
     return (
       <p role="status" className="text-sm text-ink-muted">
-        Nenhum pedido nesta leitura (base 0) — o percentual fica indisponível.
+        Nenhum pedido nesta leitura.
       </p>
     );
   }
@@ -224,25 +224,23 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
   if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
   return (
     <Panel
-      titulo={
-        <>
-          Agora — fila aberta <AjudaMetrica chave="jornada.fila_aberta" />
-        </>
-      }
+      titulo="Agora — fila aberta"
       descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} pagos aguardando expedição.`}
+      // O "ⓘ" fica fora do h3: o nome do titulo continua so' o titulo.
       acao={
-        f.snapshot_at ? (
-          <span className="flex flex-wrap gap-1.5">
+        <span className="flex flex-wrap items-center gap-1.5">
+          <AjudaMetrica chave="jornada.fila_aberta" />
+          {f.snapshot_at ? (
             <ChipsFotografia
               fotografia={{ rotulo: "Fotografia", publicadaEm: f.snapshot_at, idade: null, desatualizada: filaDesatualizada(f) }}
             />
-          </span>
-        ) : undefined
+          ) : null}
+        </span>
       }
     >
       {!f.etapas_fecham ? (
         <div className="mb-2">
-          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base; a tela não refaz a soma." />
+          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
       <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" />
@@ -266,43 +264,36 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
   const velha = coorteDesatualizada(r);
   return (
     <Panel
-      titulo={
-        <>
-          Coorte — {rotuloDaCoorte(c)} <AjudaMetrica chave="jornada.coorte" />
-        </>
-      }
-      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados (até ontem, horário de Brasília) · evento: ${
+      titulo={`Coorte — ${rotuloDaCoorte(c)}`}
+      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados · evento: ${
         evento === "despacho" ? "despacho" : "coleta"
       }.`}
       acao={
-        c.publicado_em || c.desatualizada !== null || velha ? (
-          // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
-          <span className="flex flex-wrap gap-1.5">
-            {c.publicado_em ? (
-              <Chip title="Última publicação dos dias desta coorte">
-                publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
-              </Chip>
-            ) : null}
-            {c.desatualizada !== null || velha ? (
-              <Chip ponto tom={velha ? "atencao" : "bom"}>
-                {velha ? "Desatualizada" : "Atualizada"}
-              </Chip>
-            ) : null}
-          </span>
-        ) : undefined
+        // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
+        // O "ⓘ" fica fora do h3, como na fila aberta.
+        <span className="flex flex-wrap items-center gap-1.5">
+          <AjudaMetrica chave="jornada.coorte" />
+          {c.publicado_em ? (
+            <Chip title="Última publicação dos dias desta coorte">
+              publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
+            </Chip>
+          ) : null}
+          {c.desatualizada !== null || velha ? (
+            <Chip ponto tom={velha ? "atencao" : "bom"}>
+              {velha ? "Desatualizada" : "Atualizada"}
+            </Chip>
+          ) : null}
+        </span>
       }
     >
       {!c.etapas_fecham ? (
         <div className="mb-2">
-          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base; a tela não refaz a soma." />
+          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
       {velha ? (
         <div className="mb-2" data-testid="exp-jornada-coorte-desatualizada">
-          <EstadoSecao
-            tipo="desatualizado"
-            titulo="a publicação ou a fonte desta coorte não foi atualizada dentro do prazo esperado; os números podem não ser atuais."
-          />
+          <EstadoSecao tipo="desatualizado" titulo="publicação ou fonte fora do prazo esperado." />
         </div>
       ) : null}
       <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" />
@@ -320,8 +311,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
       ) : null}
       {c.maturidade ? (
         <p className="mt-1 text-xs text-ink-muted">
-          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda no prazo (os números
-          desses dias ainda mudam).
+          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda mudando.
         </p>
       ) : null}
       <Limitacoes itens={c.limitacoes} />
@@ -397,7 +387,7 @@ export default function JornadaPedidos({
         <EstadoSecao
           tipo="erro"
           titulo="Não foi possível carregar a jornada."
-          descricao={carga.resultado && !carga.resultado.ok ? "A resposta veio fora do contrato e foi descartada." : undefined}
+          descricao={carga.resultado && !carga.resultado.ok ? "Resposta fora do contrato." : undefined}
           aoTentarDeNovo={aoTentarDeNovo}
         />
       ) : null}

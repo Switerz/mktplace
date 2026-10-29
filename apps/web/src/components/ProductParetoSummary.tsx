@@ -1,12 +1,16 @@
 import type { ParetoSummaryBucket } from "@/lib/api-client";
 import { toggleBucketSelection } from "@/lib/produtos-tab-transition";
+import InfoDica from "@/components/ui/InfoDica";
 
 interface Props {
   buckets: ParetoSummaryBucket[] | null;
   loading: boolean;
   activeBucket: string | null;
   onSelectBucket: (bucket: string | null) => void;
+  /** Linha curta sob os cards (atualizacao, parcial, sem GMV, preco medio). */
   scopeNote?: string;
+  /** Metodologia do Pareto — fica num ⓘ ao lado da linha, fora do caminho do olho. */
+  dica?: string;
   /**
    * Preenchido quando o escopo NAO tem valor confiavel (nada carregado, ou so
    * GMV zero). Os cards viram uma mensagem de ausencia em vez de "R$ 0K":
@@ -34,7 +38,17 @@ function fmtGmvShort(v: number): string {
  * torno de 50/30/15/5 por causa do produto que cruza a fronteira — isso e
  * esperado, nao um bug.
  */
-export default function ProductParetoSummary({ buckets, loading, activeBucket, onSelectBucket, scopeNote, unavailableReason }: Props) {
+function ScopeLine({ scopeNote, dica, className }: { scopeNote?: string; dica?: string; className: string }) {
+  if (!scopeNote && !dica) return null;
+  return (
+    <p className={`flex items-center gap-1.5 text-[11px] text-slate-400 ${className}`}>
+      {scopeNote && <span className="tabular-nums">{scopeNote}</span>}
+      {dica && <InfoDica texto={dica} />}
+    </p>
+  );
+}
+
+export default function ProductParetoSummary({ buckets, loading, activeBucket, onSelectBucket, scopeNote, dica, unavailableReason }: Props) {
   if (loading && !buckets) {
     return (
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-4 border-b border-violet-50">
@@ -51,7 +65,7 @@ export default function ProductParetoSummary({ buckets, loading, activeBucket, o
         <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-xs text-slate-600">
           {unavailableReason}
         </p>
-        {scopeNote && <p className="pt-2 text-[11px] text-slate-400">{scopeNote}</p>}
+        <ScopeLine scopeNote={scopeNote} dica={dica} className="pt-2" />
       </div>
     );
   }
@@ -87,9 +101,7 @@ export default function ProductParetoSummary({ buckets, loading, activeBucket, o
           );
         })}
       </div>
-      {scopeNote && (
-        <p className="px-6 pb-3 text-[11px] text-slate-400">{scopeNote}</p>
-      )}
+      <ScopeLine scopeNote={scopeNote} dica={dica} className="px-6 pb-3" />
     </div>
   );
 }

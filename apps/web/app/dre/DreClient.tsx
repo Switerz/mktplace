@@ -32,7 +32,7 @@ import { Calculator, Filter } from "lucide-react";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import Chip from "@/components/ui/Chip";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import Note from "@/components/ui/Note";
 import { PeriodChip } from "@/components/ui/Freshness";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
@@ -160,8 +160,8 @@ export default function DreClient() {
         title="DRE"
         subtitle={
           cenario === "estimada"
-            ? "Margem de contribuição estimada com premissas — ao lado da conhecida, nunca somada a ela."
-            : "Margem de contribuição conhecida por canal e marca — o que falta aparece nomeado."
+            ? "Margem de contribuição estimada com premissas."
+            : "Margem de contribuição conhecida por canal e marca."
         }
         icon={Calculator}
         meta={
@@ -198,11 +198,13 @@ export default function DreClient() {
           valor={cenario}
           aoEscolher={(c) => aplicar({ cenario: c })}
         />
-        <span className="text-xs text-ink-muted">
-          {cenario === "conhecida"
-            ? "Só componentes realizados (oficiais)."
-            : "Realizado + premissas de orçamento por marca. Nunca somada à conhecida."}
-        </span>
+        <InfoDica
+          texto={
+            cenario === "conhecida"
+              ? "Só componentes realizados (oficiais)."
+              : "Realizado + premissas de orçamento por marca. Nunca somada à conhecida."
+          }
+        />
       </div>
 
       <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -210,7 +212,7 @@ export default function DreClient() {
       </span>
 
       {carregando ? (
-        <StateBlock tipo="carregando" titulo="Carregando a DRE…" descricao="Lendo receita, custos e insumos publicados." />
+        <StateBlock tipo="carregando" titulo="Carregando a DRE…" />
       ) : falha ? (
         <StateBlock
           tipo="erro"
@@ -241,7 +243,7 @@ export default function DreClient() {
           <StateBlock
             tipo="vazio"
             titulo="Sem dados para esta seleção"
-            descricao={`Nenhuma venda em ${competencia} para os canais e marcas escolhidos. Isto não é receita zero: não há célula para calcular.`}
+            descricao={`Nenhuma venda em ${competencia}. Isto não é receita zero.`}
           />
         </>
       ) : resp && resp.total ? (
@@ -259,24 +261,23 @@ export default function DreClient() {
           <section aria-labelledby="dre-resumo" className="flex flex-col gap-3">
             <h2 id="dre-resumo" className="sr-only">Resumo da seleção</h2>
             <DreResumo total={resp.total} competencia={competencia ?? ""} bloqueadores={bloqueadores} />
-            <p className="text-xs text-ink-muted">
-              {receitaAte && <>Receita até {fmtInstanteBrt(receitaAte)}. </>}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {receitaAte && <Chip>Receita até {fmtInstanteBrt(receitaAte)}</Chip>}
               {resp.total.data_maxima.cmv_ultima_emissao && (
-                <>CMV: última emissão fiscal {fmtInstanteBrt(resp.total.data_maxima.cmv_ultima_emissao)}. </>
+                <Chip>CMV até {fmtInstanteBrt(resp.total.data_maxima.cmv_ultima_emissao)}</Chip>
               )}
-              Não é lucro nem margem líquida: impostos e devoluções ainda não têm fonte.
-            </p>
+              <Chip tom="atencao">Não é lucro nem margem líquida</Chip>
+              <InfoDica texto="Impostos e devoluções ainda não têm fonte." />
+            </div>
             {ocultos.length > 0 && (
               <Note
                 tom="neutro"
                 acao={<BotaoRecorteCalculavel canais={ocultos} aoAplicar={(canais) => aplicar({ canais })} />}
               >
                 {/* DRE-UX-2: o canal que bloqueia vem NOMEADO (de `por_canal`). */}
-                O total não é calculável porque {juntarNomes(bloqueadores)}{" "}
+                Total não calculável: {juntarNomes(bloqueadores)}{" "}
                 {bloqueadores.length > 1 ? "não são calculáveis" : "não é calculável"}.{" "}
-                {juntarNomes(ocultos.map((c) => ROTULO_CANAL[c]))} {ocultos.length > 1 ? "têm" : "tem"} margem conhecida —
-                veja abaixo, ou filtre só {ocultos.length > 1 ? "esses canais" : "esse canal"} para o agregado calculado
-                pela API.
+                {juntarNomes(ocultos.map((c) => ROTULO_CANAL[c]))} {ocultos.length > 1 ? "têm" : "tem"} margem conhecida.
               </Note>
             )}
           </section>
@@ -297,27 +298,6 @@ export default function DreClient() {
             marcas={resp.por_marca}
             canais={resp.por_canal.map((c) => c.canal ?? "").filter(Boolean)}
           />
-
-          <Disclosure rotulo="Como ler esta DRE">
-            <ul className="flex list-disc flex-col gap-1 pl-4">
-              <li>
-                Margem de contribuição conhecida = receita menos os custos disponíveis. Não é lucro nem margem líquida:
-                impostos e devoluções ainda não têm fonte ratificada.
-              </li>
-              <li>Valor ausente nunca vira zero: a linha mostra o status e o motivo. Zero aparece só quando a fonte mediu zero.</li>
-              <li>Afiliados do TikTok já estão dentro de Taxas; a linha é decomposição e não é somada de novo.</li>
-              <li>
-                Classificação de um agregado é a pior entre as células. Por isso canal e célula marca × canal mostram cada
-                uma a sua.
-              </li>
-              <li>Share = receita do recorte ÷ receita total da seleção, com os valores sem arredondamento.</li>
-              <li>
-                Ranking de margem só entre marcas comparáveis: calculáveis, com taxas e CMV na conta e o mesmo conjunto de
-                custos.
-              </li>
-              <li>Uma competência só fecha depois de dois meses completos (maturação M+2). Mês imaturo sai não calculável.</li>
-            </ul>
-          </Disclosure>
           </>
           )}
         </>
@@ -351,10 +331,10 @@ function VisaoEstimada({
       <section aria-labelledby="dre-resumo-estimado" className="flex flex-col gap-3">
         <h2 id="dre-resumo-estimado" className="sr-only">Resumo do cenário estimado</h2>
         {dispTotal.tipo === "ok" ? <ResumoEstimado cenario={dispTotal.cenario} /> : <SemCenario disp={dispTotal} />}
-        <p className="text-xs text-ink-muted">
-          Estimativa com premissas de orçamento sobre a receita realizada. Não é lucro nem margem líquida, e não
-          substitui a DRE conhecida.
-        </p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Chip tom="atencao">Não é lucro nem margem líquida</Chip>
+          <InfoDica texto="Estimativa com premissas de orçamento; não substitui a DRE conhecida." />
+        </div>
       </section>
       {dispTotal.tipo === "ok" && <ComparacaoCenarios celula={total} cenario={dispTotal.cenario} />}
       <DreVerticalEstimada opcoes={opcoes} selecionado={recorte} aoEscolher={aoEscolher} dispDe={dispDe} />
@@ -362,15 +342,6 @@ function VisaoEstimada({
         <EstimadaPorRecorte linhas={opcoes.map((o) => ({ rotulo: o.rotulo, celula: o.celula }))} dispDe={dispDe} />
       )}
       <PremissasPorMarca resp={resp} />
-      <Disclosure rotulo="Como ler a DRE estimada">
-        <ul className="flex list-disc flex-col gap-1 pl-4">
-          <li>Valor da premissa = receita bruta da célula × taxa da marca. Canal, marca e total somam células; nenhuma taxa é reaplicada.</li>
-          <li>Comissões e Outras Receitas Operacionais aparecem com percentual e valor, mas ficam fora da soma até a ratificação.</li>
-          <li>CMV, Ads e taxas vêm da DRE realizada, com o status dela. Sem CMV publicado, a margem estimada não é calculada.</li>
-          <li>Prévia: competência em andamento. A premissa vale só para a competência publicada; nunca é estendida.</li>
-          <li>Valor ausente nunca vira zero.</li>
-        </ul>
-      </Disclosure>
     </>
   );
 }

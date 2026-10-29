@@ -283,7 +283,9 @@ test("V31B: o frescor ML nao e aplicado a blocos TikTok", () => {
   assert.ok(i > 0 && usos >= 2, "frescor calculado e usado");
   // a unica renderizacao fica no bloco ML do mapa, nao perto de tk_products
   const trecho = s.slice(s.indexOf("{frescorMl}") - 900, s.indexOf("{frescorMl}"));
-  assert.ok(/ml_snapshot|Mercado Livre/i.test(trecho), "o frescor aparece no bloco ML");
+  // Abas objetivas: o rodape do mapa ficou so' com o frescor; o bloco segue
+  // marcado como ML pelo `regime={REGIME_ML}` do card.
+  assert.ok(/ml_snapshot|Mercado Livre|REGIME_ML/i.test(trecho), "o frescor aparece no bloco ML");
   assert.ok(!/tk_products/.test(trecho), "nao encosta em tk_products");
 });
 

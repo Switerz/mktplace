@@ -204,8 +204,7 @@ export default function ExpedicaoShell() {
     <>
       <div className="w-full px-4 pt-4">
         <Note tom="atencao" papel="status">
-          Dados fictícios — modo de demonstração da Expedição (só em desenvolvimento). Nenhum número
-          desta tela veio da API.
+          Dados fictícios — modo de demonstração.
         </Note>
       </div>
       {corpo}

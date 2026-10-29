@@ -94,9 +94,9 @@ export default function TravadosDialog({
   const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];
   // Rodape so' com o que falta dizer; sem nada, nenhum paragrafo vazio.
   const rodape = [
-    alvo?.incluiFbs ? "Lista da fila publicada, com pedidos FBS (despachados pela Shopee)." : null,
-    estado.tipo === "ok" && !temEtapa ? "A etapa de cada pedido ainda não é publicada pela fonte." : null,
-    estado.tipo === "ok" && !temCodigo ? "Por segurança, o número do pedido não é exibido." : null,
+    alvo?.incluiFbs ? "Lista da fila publicada, com pedidos FBS." : null,
+    estado.tipo === "ok" && !temEtapa ? "Etapa ainda não publicada pela fonte." : null,
+    estado.tipo === "ok" && !temCodigo ? "Por segurança, sem número do pedido." : null,
   ]
     .filter(Boolean)
     .join(" ");
