@@ -466,3 +466,20 @@ test("concentracao por marca: a celula empilhada le '3,35% · 199 de 5.940' (sep
   const concentracao = tk.slice(tk.indexOf("Concentração por marca"), tk.indexOf("// 8. DETALHE"));
   assert.match(concentracao, /<TaxaComBase numerador=\{m\.late\} base=\{m\.base\} taxa=\{m\.rate\} linha \/>/);
 });
+
+test("QA F1: o `sr-only` da taxa empilhada fica dentro de um invólucro `relative` (nao ancora no BODY)", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TaxaComBase } = await import("../src/components/expedicao/KpiComAjuda.tsx");
+  const celula = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335, linha: true }));
+  // O elemento que contem o `sr-only` e' o invólucro `relative` (inline: o layout nao muda).
+  assert.match(
+    celula,
+    /^<span class="relative"><span>3,35%<\/span><span class="sr-only"> · <\/span><span class="block[^"]*">199 de 5\.940<\/span><\/span>$/,
+  );
+  // Visual e texto acessivel intactos.
+  assert.equal(celula.replace(/<[^>]+>/g, ""), "3,35% · 199 de 5.940");
+  // KPI (sem `linha`) nao tem `sr-only`: nada a prender, markup igual.
+  const kpi = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335 }));
+  assert.doesNotMatch(kpi, /sr-only/);
+});

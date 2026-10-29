@@ -188,15 +188,19 @@ export default function EvolucaoPorMarca({ resposta }: { resposta: RespostaTende
                   </th>
                   <td className="text-right tabular-nums font-semibold text-ink">{inteiro(s.atual)}</td>
                   <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                    {v.principal}
                     {/* T-0021: o " · " so' para o leitor de tela; sem ele, "−12" e
-                        "−5,0%" eram lidos colados ("−12−5,0%"). */}
-                    {v.secundario ? (
-                      <>
-                        <span className="sr-only"> · </span>
-                        <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
-                      </>
-                    ) : null}
+                        "−5,0%" eram lidos colados ("−12−5,0%"). O `sr-only` e'
+                        absoluto: o invólucro `relative` (inline, sem mudar o
+                        layout) o prende a' celula, nao ao BODY (QA F1). */}
+                    <span className="relative">
+                      {v.principal}
+                      {v.secundario ? (
+                        <>
+                          <span className="sr-only"> · </span>
+                          <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                        </>
+                      ) : null}
+                    </span>
                   </td>
                   <td className="text-right tabular-nums text-ink">{inteiro(ultimo.over48h)}</td>
                   <td className="text-right tabular-nums text-ink">{inteiro(ultimo.stalled)}</td>

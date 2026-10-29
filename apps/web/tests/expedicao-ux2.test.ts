@@ -393,5 +393,26 @@ test("render: o motivo secundario ('um ponto só') tambem ganha o separador", ()
   );
   assert.match(html, />—<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">um ponto só<\/span>/);
   // sem secundario, sem separador solto
-  assert.match(html, />\+20<\/td>/);
+  assert.match(html, /<span class="relative">\+20<\/span><\/td>/);
+});
+
+test("QA F1: o `sr-only` da variacao fica dentro de um invólucro `relative` (nao ancora no BODY)", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+          ponto("1717171717", "lescent", H(16), 12),
+        ],
+        72,
+      ),
+    }),
+  );
+  const srOnly = html.match(/<span class="sr-only">/g) ?? [];
+  assert.equal(srOnly.length, 2, "variacao com percentual + 'um ponto só'");
+  // Todo `sr-only` tem como pai direto o invólucro `relative` da celula.
+  const comPai = html.match(/<span class="relative">[^<]*<span class="sr-only">/g) ?? [];
+  assert.equal(comPai.length, srOnly.length, html);
+  assert.match(COMPONENTE, /<span className="relative">\s*\{v\.principal\}/);
 });

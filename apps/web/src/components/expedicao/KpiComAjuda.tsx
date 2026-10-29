@@ -51,6 +51,9 @@ export default KpiComAjuda;
  * T-0021: empilhada, a base perdia o separador e o leitor de tela lia
  * "3,35% 199 de 5.940". O " · " fica no texto acessivel (`sr-only`), sem
  * mudar o visual: o texto lido e' sempre o de `formatarPercentualComBase`.
+ * O `sr-only` e' `position: absolute`: o invólucro `relative` o prende a'
+ * celula; sem ele, o span ancorava no BODY e criava rolagem horizontal na
+ * pagina (QA T-0021 F1). Invólucro inline: o layout nao muda.
  */
 export function TaxaComBase({
   numerador,
@@ -67,17 +70,19 @@ export function TaxaComBase({
 }) {
   const partes = partesDoPercentualComBase(numerador, base, { taxa: taxa ?? null, casas });
   if (!partes) return <span className="text-ink-faint">{TEXTO_INDISPONIVEL}</span>;
+  if (linha) {
+    return (
+      <span className="relative">
+        <span>{partes.percentual}</span>
+        <span className="sr-only"> · </span>
+        <span className="block text-xs font-normal text-ink-muted">{partes.base}</span>
+      </span>
+    );
+  }
   return (
     <>
       <span>{partes.percentual}</span>
-      {linha ? (
-        <>
-          <span className="sr-only"> · </span>
-          <span className="block text-xs font-normal text-ink-muted">{partes.base}</span>
-        </>
-      ) : (
-        <span className="text-sm font-normal text-ink-muted"> · {partes.base}</span>
-      )}
+      <span className="text-sm font-normal text-ink-muted"> · {partes.base}</span>
     </>
   );
 }
