@@ -291,7 +291,68 @@ function ehObjeto(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** `null` se a forma bate com o contrato; senao, o problema encontrado. */
+const TIPOS: readonly string[] = ["oficial", "torre"];
+const ESTADOS: readonly string[] = ["dado", "vazio_legitimo", "sem_fonte", "nao_comprovado", "erro"];
+const UNIDADES: readonly string[] = ["pct", "contagem"];
+const ORIGENS_LIMIAR: readonly string[] = ["oficial", "interno"];
+
+/** Campo opcional do contrato: string, `null` ou ausente. */
+function textoOpcional(v: unknown): boolean {
+  return v === undefined || v === null || typeof v === "string";
+}
+
+function numeroOuNulo(v: unknown): boolean {
+  return v === undefined || v === null || numeroValido(v);
+}
+
+function problemaNoLimiar(l: unknown): string | null {
+  if (l === undefined || l === null) return null;
+  if (!ehObjeto(l)) return "limiar não é objeto";
+  if (!numeroOuNulo(l.valor)) return "limiar.valor inválido";
+  if (typeof l.origem !== "string" || !ORIGENS_LIMIAR.includes(l.origem)) return "limiar.origem fora do domínio";
+  if (typeof l.rotulo !== "string") return "limiar.rotulo inválido";
+  return null;
+}
+
+function problemaNoIndicador(i: unknown): string | null {
+  if (!ehObjeto(i)) return "indicador não é objeto";
+  if (typeof i.codigo !== "string") return "indicador.codigo inválido";
+  if (typeof i.rotulo !== "string") return "indicador.rotulo inválido";
+  if (typeof i.tipo !== "string" || !TIPOS.includes(i.tipo)) return "indicador.tipo fora do domínio";
+  if (typeof i.estado !== "string" || !ESTADOS.includes(i.estado)) return "indicador.estado fora do domínio";
+  if (!numeroOuNulo(i.valor)) return "indicador.valor inválido";
+  if (!(i.unidade === undefined || i.unidade === null || (typeof i.unidade === "string" && UNIDADES.includes(i.unidade)))) {
+    return "indicador.unidade fora do domínio";
+  }
+  if (typeof i.fonte !== "string") return "indicador.fonte inválida";
+  if (typeof i.ajuda !== "string") return "indicador.ajuda inválida";
+  for (const campo of ["janela", "atualizado_em", "aviso_frescor", "cobertura", "motivo_indisponivel"] as const) {
+    if (!textoOpcional(i[campo])) return `indicador.${campo} inválido`;
+  }
+  return problemaNoLimiar(i.limiar);
+}
+
+function problemaNaCobertura(c: unknown): string | null {
+  if (!ehObjeto(c)) return "cobertura não é objeto";
+  if (!Array.isArray(c.marcas) || !c.marcas.every((m) => typeof m === "string")) {
+    return "cobertura.marcas inválida";
+  }
+  if (!Array.isArray(c.fora)) return "cobertura.fora inválida";
+  for (const f of c.fora) {
+    if (!ehObjeto(f) || typeof f.marca !== "string" || typeof f.motivo !== "string") {
+      return "cobertura.fora com item inválido";
+    }
+  }
+  return null;
+}
+
+/**
+ * `null` se a forma bate com o contrato; senao, o problema encontrado.
+ *
+ * Valida em profundidade TODO campo que a tela desreferencia ou desenha
+ * (parecer R20): um item quebrado em qualquer nivel recusa o payload inteiro
+ * e a tela mostra erro — nunca um TypeError no render nem numero parcial.
+ */
 export function problemaNoPayload(json: unknown): string | null {
   if (!ehObjeto(json)) return "o corpo não é um objeto";
   if (typeof json.gerado_em !== "string") return "gerado_em ausente";
@@ -299,17 +360,92 @@ export function problemaNoPayload(json: unknown): string | null {
   for (const c of json.canais) {
     if (!ehObjeto(c)) return "canal não é objeto";
     if (!CANAIS.some((x) => x.valor === c.canal)) return "canal desconhecido";
-    if (!ehObjeto(c.cobertura) || !Array.isArray(c.cobertura.marcas) || !Array.isArray(c.cobertura.fora)) {
-      return "cobertura inválida";
-    }
+    const cobertura = problemaNaCobertura(c.cobertura);
+    if (cobertura) return cobertura;
     if (!Array.isArray(c.indicadores)) return "indicadores ausente";
     for (const i of c.indicadores) {
-      if (!ehObjeto(i) || typeof i.codigo !== "string" || typeof i.rotulo !== "string") {
-        return "indicador inválido";
-      }
+      const problema = problemaNoIndicador(i);
+      if (problema) return problema;
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Montagem da tela (o que `page.tsx` e `IndicadorItem.tsx` desenham)
+// ---------------------------------------------------------------------------
+
+export interface VisaoIndicador {
+  chave: string;
+  rotulo: string;
+  tipo: "Oficial" | "Cálculo Torre";
+  /** Texto do numero; `null` quando nao ha numero a desenhar. */
+  valor: string | null;
+  /** Bloco de estado no lugar do numero; `null` quando ha numero. */
+  bloco: { tipo: TipoStateBlock; titulo: string; descricao: string | null } | null;
+  idAjuda: string;
+  ajuda: string;
+  janela: string | null;
+  atualizado: string | null;
+  cobertura: string | null;
+  limiar: { texto: string; origem: string } | null;
+  fonte: string;
+  avisoFrescor: string | null;
+}
+
+export interface VisaoCanal {
+  canal: Canal;
+  titulo: string;
+  descricao: string;
+  fora: { chave: string; texto: string }[];
+  indicadores: VisaoIndicador[];
+}
+
+/** Tudo que `IndicadorItem` desenha, ja' resolvido. Puro e testavel. */
+export function montarIndicador(ind: Indicador, canal: string): VisaoIndicador {
+  const efetivo = estadoEfetivo(ind);
+  const valor = efetivo === "dado" ? formatarValor(ind) : null;
+  const tipoBloco = efetivo === "invalido" ? "erro" : estadoParaStateBlock(efetivo);
+  return {
+    chave: ind.codigo,
+    rotulo: ind.rotulo,
+    tipo: rotuloTipo(ind.tipo),
+    valor,
+    bloco:
+      valor === null && tipoBloco
+        ? { tipo: tipoBloco, titulo: tituloEstado(efetivo, ind.janela ?? null), descricao: ind.motivo_indisponivel ?? null }
+        : null,
+    // Id unico por canal + codigo, so' com caracteres seguros para atributo.
+    idAjuda: `ajuda-${canal}-${ind.codigo}`.replace(/[^A-Za-z0-9_-]/g, "_"),
+    ajuda: ind.ajuda,
+    janela: ind.janela ?? null,
+    atualizado: formatarInstante(ind.atualizado_em ?? null),
+    cobertura: ind.cobertura ?? null,
+    limiar: limiarExibivel(ind),
+    fonte: ind.fonte,
+    avisoFrescor: ind.aviso_frescor ?? null,
+  };
+}
+
+/**
+ * Tudo que a pagina desenha por canal, ja' resolvido. `rotuloMarca` e'
+ * injetado (a pagina passa `brandLabel`) para manter este modulo sem imports.
+ */
+export function montarCanais(
+  dados: PerformanceContasResponse,
+  canal: Canal | null,
+  rotuloMarca: (marca: string) => string,
+): VisaoCanal[] {
+  return filtrarCanais(dados.canais, canal).map((c) => {
+    const marcas = c.cobertura.marcas.map(rotuloMarca).join(", ");
+    return {
+      canal: c.canal,
+      titulo: rotuloCanal(c.canal),
+      descricao: marcas ? `Cobertura: ${marcas}` : "Cobertura: nenhuma conta coberta",
+      fora: c.cobertura.fora.map((f) => ({ chave: f.marca, texto: `${rotuloMarca(f.marca)}: ${f.motivo}` })),
+      indicadores: c.indicadores.map((ind) => montarIndicador(ind, c.canal)),
+    };
+  });
 }
 
 /**

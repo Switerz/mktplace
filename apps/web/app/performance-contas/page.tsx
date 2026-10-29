@@ -21,13 +21,12 @@ import { ALL_BRAND_KEYS, ALL_BRAND_OPTIONS, brandLabel } from "@/lib/filters/bra
 import {
   CANAIS,
   carregarPerformanceContas,
-  filtrarCanais,
   formatarInstante,
   habilitado,
   lerFiltros,
-  rotuloCanal,
-  type CanalPerformance,
+  montarCanais,
   type FiltrosPerformanceContas,
+  type VisaoCanal,
 } from "@/lib/performance-contas";
 
 import IndicadorItem from "./IndicadorItem";
@@ -74,7 +73,7 @@ export default async function PerformanceContasPage({
           }
         />
       ) : (
-        <Canais canais={filtrarCanais(resultado.dados.canais, filtros.canal)} />
+        <Canais canais={montarCanais(resultado.dados, filtros.canal, brandLabel)} />
       )}
     </PageContainer>
   );
@@ -129,7 +128,7 @@ function Filtros({ filtros }: { filtros: FiltrosPerformanceContas }) {
   );
 }
 
-function Canais({ canais }: { canais: CanalPerformance[] }) {
+function Canais({ canais }: { canais: VisaoCanal[] }) {
   if (canais.length === 0) {
     return (
       <StateBlock
@@ -148,23 +147,16 @@ function Canais({ canais }: { canais: CanalPerformance[] }) {
   );
 }
 
-function BlocoCanal({ canal }: { canal: CanalPerformance }) {
-  const { cobertura } = canal;
-  const marcas = cobertura.marcas.map(brandLabel).join(", ");
+/** Desenha so' o que `montarCanais` ja' resolveu (testado em node --test). */
+function BlocoCanal({ canal }: { canal: VisaoCanal }) {
   return (
-    <Panel
-      titulo={rotuloCanal(canal.canal)}
-      descricao={marcas ? `Cobertura: ${marcas}` : "Cobertura: nenhuma conta coberta"}
-      aria-label={`Performance das contas: ${rotuloCanal(canal.canal)}`}
-    >
-      {cobertura.fora.length > 0 && (
+    <Panel titulo={canal.titulo} descricao={canal.descricao} aria-label={`Performance das contas: ${canal.titulo}`}>
+      {canal.fora.length > 0 && (
         <div className="mb-3 rounded-lg border border-dashed border-line px-3 py-2 text-xs text-ink-muted">
           <p className="font-medium">Fora da cobertura</p>
           <ul className="mt-1 list-disc pl-4">
-            {cobertura.fora.map((f) => (
-              <li key={f.marca}>
-                {brandLabel(f.marca)}: {f.motivo}
-              </li>
+            {canal.fora.map((f) => (
+              <li key={f.chave}>{f.texto}</li>
             ))}
           </ul>
         </div>
@@ -173,8 +165,8 @@ function BlocoCanal({ canal }: { canal: CanalPerformance }) {
         <StateBlock tipo="vazio" compacto titulo="Nenhum indicador publicado para este canal" />
       ) : (
         <ul className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {canal.indicadores.map((ind) => (
-            <IndicadorItem key={ind.codigo} ind={ind} canal={canal.canal} />
+          {canal.indicadores.map((v) => (
+            <IndicadorItem key={v.chave} v={v} />
           ))}
         </ul>
       )}

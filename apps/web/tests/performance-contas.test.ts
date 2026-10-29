@@ -16,6 +16,8 @@ import {
   habilitado,
   lerFiltros,
   limiarExibivel,
+  montarCanais,
+  montarIndicador,
   problemaNoPayload,
   rotuloOrigemLimiar,
   rotuloTipo,
@@ -25,6 +27,7 @@ import {
   type CanalPerformance,
   type EstadoIndicador,
   type Indicador,
+  type PerformanceContasResponse,
 } from "../src/lib/performance-contas.ts";
 
 const AQUI = dirname(fileURLToPath(import.meta.url));
@@ -221,6 +224,151 @@ test("problemaNoPayload: aceita o contrato e recusa formas quebradas", () => {
   assert.ok(problemaNoPayload(null));
   assert.ok(problemaNoPayload({ gerado_em: "x" }));
   assert.ok(problemaNoPayload({ ...ok, canais: [{ ...ok.canais[0], canal: "amazon" }] }));
+});
+
+// Parecer R20: o payload precisa ser validado em profundidade. `fora: [null]`
+// passava e a pagina quebrava com TypeError em `f.marca`.
+function payloadValido() {
+  return {
+    gerado_em: "2026-10-29T10:00:00Z",
+    canais: [
+      {
+        canal: "shopee",
+        cobertura: { marcas: ["apice"], fora: [{ marca: "barbours", motivo: "sem conta conectada" }] },
+        indicadores: [
+          indicador(),
+          indicador({ codigo: "SPS", tipo: "oficial", estado: "sem_fonte", valor: null, unidade: null }),
+          indicador({
+            codigo: "LDR",
+            limiar: { valor: 4, origem: "interno", rotulo: "Referência de LDR" },
+          }),
+        ],
+      },
+    ],
+  };
+}
+
+// Cada mutacao recebe uma copia nova e a deixa quebrada (via `unknown`, de
+// proposito: o tipo do contrato nao permite essas formas).
+type Bruto = { canais: { cobertura: Record<string, unknown>; indicadores: Record<string, unknown>[] }[] } & Record<
+  string,
+  unknown
+>;
+const QUEBRADOS: Record<string, (p: Bruto) => void> = {
+  "fora=[null]": (p) => void (p.canais[0].cobertura.fora = [null]),
+  "fora=[{}]": (p) => void (p.canais[0].cobertura.fora = [{}]),
+  "fora sem motivo": (p) => void (p.canais[0].cobertura.fora = [{ marca: "apice" }]),
+  "fora nao-array": (p) => void (p.canais[0].cobertura.fora = { marca: "apice", motivo: "x" }),
+  "marcas=[1]": (p) => void (p.canais[0].cobertura.marcas = [1]),
+  "marcas=[null]": (p) => void (p.canais[0].cobertura.marcas = [null]),
+  "cobertura null": (p) => void ((p.canais[0] as Record<string, unknown>).cobertura = null),
+  "canais nao-array": (p) => void ((p as Record<string, unknown>).canais = { shopee: {} }),
+  "canais=[null]": (p) => void ((p as Record<string, unknown>).canais = [null]),
+  "indicador null": (p) => void ((p.canais[0] as Record<string, unknown>).indicadores = [null]),
+  "indicador sem estado": (p) => void delete p.canais[0].indicadores[0].estado,
+  "estado fora do dominio": (p) => void (p.canais[0].indicadores[0].estado = "no_series_published"),
+  "tipo fora do dominio": (p) => void (p.canais[0].indicadores[0].tipo = "OFICIAL"),
+  "sem codigo": (p) => void delete p.canais[0].indicadores[0].codigo,
+  "valor string": (p) => void (p.canais[0].indicadores[0].valor = "4.5"),
+  "unidade fora do dominio": (p) => void (p.canais[0].indicadores[0].unidade = "brl"),
+  "fonte ausente": (p) => void delete p.canais[0].indicadores[0].fonte,
+  "ajuda objeto": (p) => void (p.canais[0].indicadores[0].ajuda = { texto: "x" }),
+  "janela numero": (p) => void (p.canais[0].indicadores[0].janela = 60),
+  "aviso_frescor objeto": (p) => void (p.canais[0].indicadores[0].aviso_frescor = {}),
+  "limiar string": (p) => void (p.canais[0].indicadores[2].limiar = "4%"),
+  "limiar sem origem": (p) => void (p.canais[0].indicadores[2].limiar = { valor: 4, rotulo: "x" }),
+  "limiar origem fora do dominio": (p) =>
+    void (p.canais[0].indicadores[2].limiar = { valor: 4, origem: "meta", rotulo: "x" }),
+  "limiar valor string": (p) =>
+    void (p.canais[0].indicadores[2].limiar = { valor: "4", origem: "interno", rotulo: "x" }),
+  "limiar sem rotulo": (p) => void (p.canais[0].indicadores[2].limiar = { valor: 4, origem: "interno" }),
+};
+
+test("problemaNoPayload: payload valido completo passa", () => {
+  assert.equal(problemaNoPayload(payloadValido()), null);
+});
+
+test("problemaNoPayload: toda forma quebrada que a tela desreferencia e' recusada", () => {
+  for (const [nome, mutar] of Object.entries(QUEBRADOS)) {
+    const p = payloadValido() as unknown as Bruto;
+    mutar(p);
+    assert.ok(problemaNoPayload(p), `deveria recusar: ${nome}`);
+  }
+});
+
+test("carregarPerformanceContas: fora=[null] vira erro da tela, sem dados", async () => {
+  const p = payloadValido() as unknown as Bruto;
+  p.canais[0].cobertura.fora = [null];
+  const fake = (async () => Response.json(p)) as typeof fetch;
+  const r = await carregarPerformanceContas({ marca: null }, fake, "http://x");
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && /Resposta inválida/.test(r.motivo));
+  assert.equal("dados" in r, false);
+});
+
+test("montarCanais: payload valido percorre a arvore inteira sem TypeError", () => {
+  const p = payloadValido() as PerformanceContasResponse;
+  assert.equal(problemaNoPayload(p), null);
+  const visao = montarCanais(p, null, (m) => m.toUpperCase());
+  assert.equal(visao.length, 1);
+  const [shopee] = visao;
+  assert.equal(shopee.titulo, "Shopee");
+  assert.equal(shopee.descricao, "Cobertura: APICE");
+  assert.deepEqual(shopee.fora, [{ chave: "barbours", texto: "BARBOURS: sem conta conectada" }]);
+  const [taxa, sps, ldr] = shopee.indicadores;
+  assert.equal(taxa.valor, "4,5%");
+  assert.equal(taxa.bloco, null);
+  assert.equal(taxa.tipo, "Cálculo Torre");
+  assert.equal(sps.valor, null);
+  assert.equal(sps.tipo, "Oficial");
+  assert.deepEqual(sps.bloco, { tipo: "indisponivel", titulo: "Indisponível: sem fonte na Torre", descricao: null });
+  assert.equal(ldr.limiar?.texto, "Referência de LDR: 4,0%");
+  assert.equal(ldr.idAjuda, "ajuda-shopee-LDR");
+});
+
+test("montarCanais: payload minimo (canal sem indicador, sem cobertura) e filtro de canal", () => {
+  const minimo: PerformanceContasResponse = {
+    gerado_em: "2026-10-29T10:00:00Z",
+    canais: [
+      { canal: "mercado_livre", cobertura: { marcas: [], fora: [] }, indicadores: [] },
+      { canal: "tiktok", cobertura: { marcas: [], fora: [] }, indicadores: [] },
+    ],
+  };
+  assert.equal(problemaNoPayload(minimo), null);
+  assert.deepEqual(
+    montarCanais(minimo, null, (m) => m).map((c) => [c.titulo, c.descricao, c.fora.length, c.indicadores.length]),
+    [
+      ["Mercado Livre", "Cobertura: nenhuma conta coberta", 0, 0],
+      ["TikTok Shop", "Cobertura: nenhuma conta coberta", 0, 0],
+    ],
+  );
+  assert.deepEqual(montarCanais(minimo, "tiktok", (m) => m).map((c) => c.canal), ["tiktok"]);
+  assert.deepEqual(montarCanais({ ...minimo, canais: [] }, null, (m) => m), []);
+});
+
+test("montarIndicador: opcionais ausentes viram null, nunca undefined nem zero", () => {
+  const ind: Partial<Indicador> = indicador({ estado: "vazio_legitimo", valor: null });
+  for (const k of ["janela", "atualizado_em", "aviso_frescor", "cobertura", "motivo_indisponivel", "limiar"] as const) {
+    delete ind[k];
+  }
+  const corpo = { gerado_em: "x", canais: [{ canal: "tiktok", cobertura: { marcas: [], fora: [] }, indicadores: [ind] }] };
+  assert.equal(problemaNoPayload(corpo), null);
+  const v = montarIndicador(ind as Indicador, "tiktok");
+  assert.equal(v.valor, null);
+  assert.deepEqual(v.bloco, { tipo: "vazio", titulo: "Nenhum registro no período", descricao: null });
+  for (const campo of [v.janela, v.atualizado, v.cobertura, v.limiar, v.avisoFrescor]) {
+    assert.equal(campo, null);
+  }
+});
+
+test("pagina e item desenham so' a visao montada (sem desreferenciar o payload cru)", () => {
+  const pagina = readFileSync(join(AQUI, "../app/performance-contas/page.tsx"), "utf8");
+  assert.match(pagina, /montarCanais\(resultado\.dados, filtros\.canal, brandLabel\)/);
+  // (`f.marca` em `hrefAtual` e' o filtro da URL, nao a cobertura.)
+  assert.doesNotMatch(pagina, /cobertura\.(fora|marcas)|brandLabel\(f\.marca\)|f\.motivo|ind\.codigo/);
+  const item = readFileSync(join(AQUI, "../app/performance-contas/IndicadorItem.tsx"), "utf8");
+  assert.match(item, /\{ v \}: \{ v: VisaoIndicador \}/);
+  assert.doesNotMatch(item, /\bind\./);
 });
 
 test("carregarPerformanceContas: falha de rede vira erro, nunca dado", async () => {
