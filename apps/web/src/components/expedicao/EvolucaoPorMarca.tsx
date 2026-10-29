@@ -353,21 +353,29 @@ function TabelaUnica({
                     {inteiro(f ? f.acima48h : (ultimo?.over48h ?? 0))}
                   </td>
                   <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                    {f?.aoVerTravados ? (
-                      <button
-                        type="button"
-                        onClick={f.aoVerTravados}
-                        aria-label={`Ver os ${inteiro(f.travados)} pedidos travados de ${titulo}`}
-                        className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
-                      >
-                        {inteiro(f.travados)}
-                      </button>
-                    ) : (
-                      inteiro(f ? f.travados : (ultimo?.stalled ?? 0))
-                    )}
-                    {f?.pctTravados && f.travados > 0 ? (
-                      <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
-                    ) : null}
+                    {/* T-0021: "12" e "5,3%" eram lidos colados ("125,3%"); o
+                        " · " so' para o leitor de tela, preso ao invólucro
+                        `relative` (QA F1). */}
+                    <span className="relative">
+                      {f?.aoVerTravados ? (
+                        <button
+                          type="button"
+                          onClick={f.aoVerTravados}
+                          aria-label={`Ver os ${inteiro(f.travados)} pedidos travados de ${titulo}`}
+                          className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
+                        >
+                          {inteiro(f.travados)}
+                        </button>
+                      ) : (
+                        inteiro(f ? f.travados : (ultimo?.stalled ?? 0))
+                      )}
+                      {f?.pctTravados && f.travados > 0 ? (
+                        <>
+                          <span className="sr-only"> · </span>
+                          <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
+                        </>
+                      ) : null}
+                    </span>
                   </td>
                   <td>{f?.barra ?? null}</td>
                   <td>

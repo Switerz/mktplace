@@ -582,16 +582,17 @@ test("KpiComAjuda poe o `?` na linha de comparacao do KPI", () => {
 // ===========================================================================
 // T-0021 — ML, secao Prazo: frase no padrao "Indisponível neste canal: …"
 // ===========================================================================
-test("ML Prazo: o painel renderiza 'Indisponível neste canal: …' (a frase antiga sai)", async () => {
-  const { default: Panel } = await import("../src/components/ui/Panel.tsx");
-  // Mesmo corpo do painel do ExpedicaoClient: `<p>{SEM_PRAZO_CANAL_ML}</p>`.
-  assert.match(CLIENTE, /<p className="text-sm text-ink">\{SEM_PRAZO_CANAL_ML\}<\/p>/);
+test("ML Prazo: a secao le 'Indisponível neste canal: …' no ⓘ (a frase antiga sai)", async () => {
+  const { SecaoGerencial } = await import("../src/components/expedicao/SecoesExpedicao.tsx");
+  // #124: a frase saiu do corpo do painel e virou o ⓘ da secao Prazo.
+  assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{SEM_PRAZO_CANAL_ML\}>/);
   const html = renderToStaticMarkup(
-    h(Panel, { titulo: "Prazo" }, h("p", { className: "text-sm text-ink" }, SEM_PRAZO_CANAL_ML)),
+    h(SecaoGerencial, { titulo: "Prazo", dica: SEM_PRAZO_CANAL_ML }, h("div", null)),
   );
+  // O leitor de tela le' a frase inteira pelo `aria-label` do ⓘ.
   assert.match(
     html,
-    /<p class="text-sm text-ink">Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
+    /aria-label="Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
   );
   assert.doesNotMatch(html, /Prazo indisponível pelo canal:/);
   // Igual ao rotulo de origem que o `?` mostra.
@@ -599,17 +600,20 @@ test("ML Prazo: o painel renderiza 'Indisponível neste canal: …' (a frase ant
   assert.match(ajuda, /Indisponível neste canal/);
 });
 
-test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o `?`; a ausencia fica no corpo", async () => {
+test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o `?`; a ausencia fica no ⓘ da secao", async () => {
   const { default: Panel } = await import("../src/components/ui/Panel.tsx");
+  const { SecaoGerencial } = await import("../src/components/expedicao/SecoesExpedicao.tsx");
   // O titulo no cliente, com o `?` do canal sem prazo logo depois.
   assert.match(CLIENTE, /Prazo de despacho <Ajuda chave=\{AJUDA_CANAL_SEM_PRAZO\.prazo\} \/>/);
   assert.doesNotMatch(CLIENTE, /Prazo indisponível pelo canal/, "titulo antigo fora");
-  // Mesma montagem do cliente: titulo + `?` + corpo com a frase do canal.
+  // Mesma montagem do cliente: secao com o ⓘ da frase + painel com titulo e `?`.
   const html = renderToStaticMarkup(
     h(
-      Panel,
-      { titulo: h("span", null, "Prazo de despacho ", h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo })) },
-      h("p", { className: "text-sm text-ink" }, SEM_PRAZO_CANAL_ML),
+      SecaoGerencial,
+      { titulo: "Prazo", dica: SEM_PRAZO_CANAL_ML },
+      h(Panel, {
+        titulo: h("span", null, "Prazo de despacho ", h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo })),
+      }),
     ),
   );
   assert.match(html, /Prazo de despacho /);
