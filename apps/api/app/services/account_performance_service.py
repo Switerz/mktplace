@@ -49,9 +49,24 @@ from app.services import expedicao_service
 from app.services import expedicao_shopee_ldr_service
 from app.services import expedicao_tiktok_service
 from app.services import performance_service
-from app.services.gold_service import BRANDS_IN_SCOPE, ML_BRANDS, SHOPEE_BRANDS
+from app.services.gold_service import BRAND_LABELS, BRANDS_IN_SCOPE, ML_BRANDS, SHOPEE_BRANDS
 
 logger = logging.getLogger(__name__)
+
+
+def _rotulo_marca(chave: Any) -> str:
+    """Rotulo legivel da marca para textos livres (cobertura, aviso).
+
+    Mesmo mapa que o resto da API usa (`BRAND_LABELS`). Chave fora do mapa cai
+    em title-case simples, sem inventar nome. `Cobertura.marcas` e
+    `MarcaFora.marca` continuam CHAVES: a web aplica o rotulo dela.
+    """
+    chave = str(chave)
+    return BRAND_LABELS.get(chave, chave.title())
+
+
+def _lista_marcas(chaves) -> str:
+    return ", ".join(_rotulo_marca(c) for c in chaves)
 
 #: Allowlist do filtro `brands`. E' o escopo de marcas que a Torre ja' usa.
 MARCAS_PERMITIDAS: tuple[str, ...] = tuple(BRANDS_IN_SCOPE)
@@ -141,8 +156,9 @@ META: dict[str, dict[str, Any]] = {
                  "nenhum número Torre a substitui.",
     },
     "ml_cancelamento_torre": {
-        "rotulo": "Taxa de cancelamento · Cálculo Torre · todos os cancelamentos, "
-                  "qualquer autor · não é o cancelamento da reputação ML",
+        # Sem "Calculo Torre" no rotulo: o chip do tipo ja' diz.
+        "rotulo": "Taxa de cancelamento · todos os cancelamentos, qualquer autor "
+                  "· não é o cancelamento da reputação ML",
         "tipo": "torre",
         "unidade": "pct",
         "fonte": "marts.fact_marketplace_daily_performance → /api/v1/performance/quality "
@@ -152,8 +168,7 @@ META: dict[str, dict[str, Any]] = {
                  "não se aplicam a este número.",
     },
     "ml_nao_entregue_torre": {
-        "rotulo": "Não entregue · Cálculo Torre · shipments não entregues / "
-                  "pedidos pagos",
+        "rotulo": "Não entregue · shipments não entregues / pedidos pagos",
         "tipo": "torre",
         "unidade": "pct",
         "fonte": "marts.fact_marketplace_daily_performance → /api/v1/performance/quality "
@@ -163,8 +178,9 @@ META: dict[str, dict[str, Any]] = {
                  "(numerador e denominador). Não é métrica de reputação do ML.",
     },
     "ml_expedicao_48h_torre": {
-        "rotulo": "Expedição acima de 48 h · Cálculo Torre · 48 h é limite "
-                  "interno, não SLA do ML",
+        # A ressalva "limite interno, nao SLA do ML" mora no limiar; aqui so'
+        # o nome, para nao repetir a mesma frase na tela.
+        "rotulo": "Expedição acima de 48 h",
         "tipo": "torre",
         "unidade": "contagem",
         "fonte": "marts.expedicao_fila_atual / marts.expedicao_refresh_run → "
@@ -182,7 +198,7 @@ META: dict[str, dict[str, Any]] = {
                  "autorização do nosso app ainda não foi provada.",
     },
     "shopee_ldr_operacional_torre": {
-        "rotulo": "LDR operacional (coleta × prazo Shopee) · Cálculo Torre",
+        "rotulo": "LDR operacional (coleta × prazo Shopee)",
         "tipo": "torre",
         "unidade": "pct",
         "fonte": "marts.expedicao_shopee_ldr_daily → /api/v1/expedicao/shopee/ldr",
@@ -203,7 +219,7 @@ META: dict[str, dict[str, Any]] = {
                  "capacidade por API para lojas BR não comprovada.",
     },
     "tiktok_ldr_operacional_torre": {
-        "rotulo": "LDR operacional de coleta · Cálculo Torre",
+        "rotulo": "LDR operacional de coleta",
         "tipo": "torre",
         "unidade": "pct",
         "fonte": "marts.expedicao_tiktok_dispatch_daily → "
@@ -286,10 +302,10 @@ def _ml_quality(codigo: str, campo: str, res: Optional[dict], falhou: bool,
 
     def _dinamico() -> dict:
         valor = res["kpis"][campo]
-        marcas = [str(r["brand"]) for r in res.get("brands") or []
+        marcas = [r["brand"] for r in res.get("brands") or []
                   if r.get("ml_total_orders")]
         comum = {"janela": janela, "atualizado_em": res.get("refreshed_at"),
-                 "cobertura": ", ".join(marcas) or None}
+                 "cobertura": _lista_marcas(marcas) or None}
         if valor is None:
             # A fonte respondeu e nao havia base: `get_quality` devolve None
             # justamente quando o denominador e' zero.
@@ -330,9 +346,9 @@ def _ml_nao_entregue(res: Optional[dict], falhou: bool, janela: str) -> Indicado
     def _dinamico() -> dict:
         com_pedidos = [r for r in res.get("brands") or [] if r.get("ml_total_orders")]
         com_dado = [r for r in com_pedidos if _tem_nao_entregue(r)]
-        sem_dado = [str(r["brand"]) for r in com_pedidos if not _tem_nao_entregue(r)]
+        sem_dado = [r["brand"] for r in com_pedidos if not _tem_nao_entregue(r)]
         comum = {"janela": janela, "atualizado_em": res.get("refreshed_at"),
-                 "cobertura": ", ".join(str(r["brand"]) for r in com_dado) or None}
+                 "cobertura": _lista_marcas(r["brand"] for r in com_dado) or None}
         if not com_pedidos:
             return {**comum, "estado": "vazio_legitimo",
                     "motivo_indisponivel": f"Nenhum pedido Mercado Livre em {janela}."}
@@ -349,7 +365,7 @@ def _ml_nao_entregue(res: Optional[dict], falhou: bool, janela: str) -> Indicado
         aviso = None
         if sem_dado:
             aviso = ("Dado de não entregue ausente na fonte para: "
-                     + ", ".join(sem_dado)
+                     + _lista_marcas(sem_dado)
                      + ". Essas marcas ficaram fora do numerador e do denominador; "
                        "a taxa cobre só as marcas listadas na cobertura.")
         return {**comum, "estado": "dado",
@@ -364,8 +380,10 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
     codigo = "ml_expedicao_48h_torre"
     if falhou:
         return _erro(codigo)
-    limiar = Limiar(valor=48, origem="interno",
-                    rotulo="48 h é limite interno, não SLA do ML")
+    # O indicador e' contagem; o limite e' em HORAS. Sem `unidade` propria a
+    # tela formatava "48" como 48 envios.
+    limiar = Limiar(valor=48, origem="interno", unidade="horas",
+                    rotulo="limite interno, não SLA do ML")
 
     def _dinamico() -> dict:
         janela = "fotografia atual da fila (shipments abertos)"
@@ -388,7 +406,8 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
         marcas = sorted({str(c["brand"]) for c in contas})
 
         avisos = []
-        velhas = [f"{f['brand']} ({f['freshness']})" for f in res.get("freshness") or []
+        velhas = [f"{_rotulo_marca(f['brand'])} ({f['freshness']})"
+                  for f in res.get("freshness") or []
                   if str(f.get("brand")) in marcas and f.get("freshness") != "fresh"]
         if velhas:
             avisos.append("Fonte desatualizada em: " + ", ".join(velhas) + ".")
@@ -403,7 +422,7 @@ def _ml_expedicao(res: Optional[dict], falhou: bool,
         return {"estado": "dado", "valor": float(valor), "janela": janela,
                 "limiar": limiar, "atualizado_em": snapshot.get("effective_at"),
                 "aviso_frescor": " ".join(avisos) or None,
-                "cobertura": ", ".join(marcas)}
+                "cobertura": _lista_marcas(marcas)}
 
     return _indicador(codigo, _dinamico)
 
@@ -478,7 +497,7 @@ def _shopee_ldr(res: Optional[dict], falhou: bool) -> Indicador:
             "aviso_frescor": ("Fonte vencida: publicação ou leitura da fonte acima de "
                               f"{LIMITE_FRESCOR_HORAS:.0f} h; o número não é atual."
                               if snapshot.get("stale") else None),
-            "cobertura": ", ".join(str(b["brand"]) for b in res.get("brands") or []) or None,
+            "cobertura": _lista_marcas(b["brand"] for b in res.get("brands") or []) or None,
         }
         if ldr.get("rate") is None:
             if ldr.get("rate_hidden_reason") == "coverage_insufficient":
@@ -560,7 +579,7 @@ def _tiktok_ldr(res: Optional[dict], falhou: bool, selecionadas: list[str],
             "aviso_frescor": (f"Última publicação há {idade:.0f} h (o refresh roda a "
                               f"cada 2 h)." if idade is not None
                               and idade > LIMITE_FRESCOR_HORAS else None),
-            "cobertura": (", ".join(selecionadas) if filtrado
+            "cobertura": (_lista_marcas(selecionadas) if filtrado
                           else "todas as marcas publicadas na série do TikTok"),
         }
         if ldr.get("rate") is None:

@@ -17,8 +17,10 @@ import type { VisaoIndicador } from "@/lib/performance-contas";
 export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
   return (
     <li className="flex min-w-0 flex-col gap-2 rounded-lg border border-line bg-surface p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+      {/* Sem flex-wrap aqui: o "?" fica sempre no canto direito do cabecalho,
+          por maior que seja o rotulo (QA). So' o rotulo + chip quebram linha. */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <h4 className="text-sm font-semibold text-ink">{v.rotulo}</h4>
           <Chip tom="neutro">{v.tipo}</Chip>
         </div>
@@ -71,12 +73,18 @@ export default function IndicadorItem({ v }: { v: VisaoIndicador }) {
             <dd className="inline">{v.cobertura}</dd>
           </div>
         )}
+        {/* Rotulo do limiar e texto da origem em linhas separadas: nao
+            misturar "limite interno" com "referência interna" na mesma frase. */}
         {v.limiar && (
           <div>
             <dt className="inline font-medium">Limiar: </dt>
-            <dd className="inline">
-              {v.limiar.texto} ({v.limiar.origem})
-            </dd>
+            <dd className="inline">{v.limiar.texto}</dd>
+          </div>
+        )}
+        {v.limiar && (
+          <div>
+            <dt className="inline font-medium">Origem do limiar: </dt>
+            <dd className="inline">{v.limiar.origem}</dd>
           </div>
         )}
         <div className="sm:col-span-2">

@@ -143,7 +143,7 @@ test("estadoEfetivo: dado sem numero e estado desconhecido sao invalidos", () =>
 });
 
 test("tituloEstado: textos minimos do contrato", () => {
-  assert.equal(tituloEstado("vazio_legitimo", "últimos 60 dias"), "Nenhum registro em últimos 60 dias");
+  assert.equal(tituloEstado("vazio_legitimo", "últimos 60 dias"), "Sem registros na janela");
   assert.match(tituloEstado("nao_comprovado", null), /autorização não comprovada/);
   assert.match(tituloEstado("sem_fonte", null), /Indisponível/);
 });
@@ -174,6 +174,67 @@ test("limiar interno: origem escrita como referencia interna", () => {
   assert.match(l.origem, /não é meta da plataforma/);
   assert.match(rotuloOrigemLimiar("interno"), /interna/);
   assert.doesNotMatch(rotuloOrigemLimiar("interno"), /oficial/);
+});
+
+test("limiar com unidade horas formata '48 h', nao contagem do indicador", () => {
+  const exp = indicador({
+    codigo: "ml_expedicao_48h_torre",
+    unidade: "contagem",
+    valor: 3,
+    limiar: { valor: 48, origem: "interno", unidade: "horas", rotulo: "limite interno, não SLA do ML" },
+  });
+  const l = limiarExibivel(exp);
+  assert.ok(l);
+  assert.equal(l.texto, "limite interno, não SLA do ML: 48 h");
+  // Rotulo e origem ficam separados; o texto do limiar nao carrega a origem.
+  assert.doesNotMatch(l.texto, /referência/);
+  assert.equal(l.origem, "referência interna, não é meta da plataforma");
+  // O valor do indicador continua contagem.
+  assert.equal(formatarValor(exp), "3");
+});
+
+test("limiar sem unidade (ausente ou null) usa a unidade do indicador", () => {
+  const base = { valor: 4, origem: "interno" as const, rotulo: "Referência de LDR" };
+  assert.equal(limiarExibivel(indicador({ unidade: "pct", limiar: base }))?.texto, "Referência de LDR: 4,0%");
+  assert.equal(
+    limiarExibivel(indicador({ unidade: "pct", limiar: { ...base, unidade: null } }))?.texto,
+    "Referência de LDR: 4,0%",
+  );
+  assert.equal(
+    limiarExibivel(indicador({ unidade: "contagem", limiar: { ...base, valor: 48 } }))?.texto,
+    "Referência de LDR: 48",
+  );
+});
+
+test("problemaNoPayload: limiar.unidade aceita ausente/null/dominio e recusa o resto", () => {
+  for (const unidade of [undefined, null, "pct", "contagem", "horas"]) {
+    const p = payloadValido() as unknown as Bruto;
+    p.canais[0].indicadores[2].limiar = { valor: 48, origem: "interno", rotulo: "x", unidade };
+    assert.equal(problemaNoPayload(p), null, `deveria aceitar ${JSON.stringify(unidade)}`);
+  }
+  for (const unidade of ["dias", "h", "HORAS", "", 48, {}]) {
+    const p = payloadValido() as unknown as Bruto;
+    p.canais[0].indicadores[2].limiar = { valor: 48, origem: "interno", rotulo: "x", unidade };
+    assert.ok(problemaNoPayload(p), `deveria recusar ${JSON.stringify(unidade)}`);
+  }
+  // A unidade "horas" vale so' para o limiar, nao para o indicador.
+  const p = payloadValido() as unknown as Bruto;
+  p.canais[0].indicadores[0].unidade = "horas";
+  assert.ok(problemaNoPayload(p));
+});
+
+test("estado vazio: titulo curto e a janela so' na descricao", () => {
+  const janela = "vencimentos de 22/10/2026 a 29/10/2026, só vencimentos maduros";
+  const comMotivo = montarIndicador(
+    indicador({ estado: "vazio_legitimo", valor: null, janela, motivo_indisponivel: `Nenhum vencimento maduro em ${janela}.` }),
+    "shopee",
+  );
+  assert.equal(comMotivo.bloco?.titulo, "Sem registros na janela");
+  assert.doesNotMatch(comMotivo.bloco?.titulo ?? "", /22\/10/);
+  assert.match(comMotivo.bloco?.descricao ?? "", /22\/10\/2026/);
+  const semMotivo = montarIndicador(indicador({ estado: "vazio_legitimo", valor: null, janela }), "tiktok");
+  assert.equal(semMotivo.bloco?.titulo, "Sem registros na janela");
+  assert.equal(semMotivo.bloco?.descricao, `Nenhum registro em ${janela}.`);
 });
 
 test("limiar oficial ao lado de numero Torre e' suprimido", () => {
@@ -355,7 +416,7 @@ test("montarIndicador: opcionais ausentes viram null, nunca undefined nem zero",
   assert.equal(problemaNoPayload(corpo), null);
   const v = montarIndicador(ind as Indicador, "tiktok");
   assert.equal(v.valor, null);
-  assert.deepEqual(v.bloco, { tipo: "vazio", titulo: "Nenhum registro no período", descricao: null });
+  assert.deepEqual(v.bloco, { tipo: "vazio", titulo: "Sem registros no período", descricao: null });
   for (const campo of [v.janela, v.atualizado, v.cobertura, v.limiar, v.avisoFrescor]) {
     assert.equal(campo, null);
   }

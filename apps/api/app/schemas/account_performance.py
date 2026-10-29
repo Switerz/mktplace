@@ -20,7 +20,9 @@ So' o estado `dado` carrega `valor`. Em `vazio_legitimo`, `sem_fonte`,
 UNIDADE
 -------
 `pct` e' ponto percentual de 0 a 100 (4.5 = 4,5%). O `limiar.valor` esta na
-MESMA unidade do indicador.
+unidade de `limiar.unidade`; ausente/None = a MESMA unidade do indicador. A
+Expedicao ML conta shipments (`contagem`), mas o limite e' de 48 `horas`: sem
+a unidade propria, a tela leria "48" como 48 envios.
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ EstadoIndicador = Literal[
     "dado", "vazio_legitimo", "sem_fonte", "nao_comprovado", "erro",
 ]
 UnidadeIndicador = Literal["pct", "contagem"]
+UnidadeLimiar = Literal["pct", "contagem", "horas"]
 OrigemLimiar = Literal["oficial", "interno"]
 
 #: Ordem fixa dos canais na resposta.
@@ -45,6 +48,8 @@ class Limiar(BaseModel):
     valor: Optional[float] = None
     origem: OrigemLimiar
     rotulo: str
+    #: Aditivo: None = mesma unidade do indicador.
+    unidade: Optional[UnidadeLimiar] = None
 
 
 class Indicador(BaseModel):

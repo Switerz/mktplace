@@ -13,6 +13,7 @@ substituidas por monkeypatch.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -261,7 +262,7 @@ def test_mapeamento_dado_de_cada_indicador_torre(cliente, fontes):
     assert (c["estado"], c["valor"], c["unidade"], c["tipo"]) == ("dado", 4.5, "pct", "torre")
     assert c["limiar"] is None
     assert "qualquer autor" in c["rotulo"] and "não é o cancelamento da reputação ML" in c["rotulo"]
-    assert c["atualizado_em"] and c["cobertura"] == "barbours, kokeshi"
+    assert c["atualizado_em"] and c["cobertura"] == "BARBOURS, KOKESHI"
 
     n = _ind(corpo, "ml_nao_entregue_torre")
     # Recalculado das linhas por marca: (1 + 1) / (100 + 50) = 1,33.
@@ -272,8 +273,8 @@ def test_mapeamento_dado_de_cada_indicador_torre(cliente, fontes):
 
     e = _ind(corpo, "ml_expedicao_48h_torre")
     assert (e["estado"], e["valor"], e["unidade"]) == ("dado", 3.0, "contagem")
-    assert e["limiar"] == {"valor": 48.0, "origem": "interno",
-                           "rotulo": "48 h é limite interno, não SLA do ML"}
+    assert e["limiar"] == {"valor": 48.0, "origem": "interno", "unidade": "horas",
+                           "rotulo": "limite interno, não SLA do ML"}
     assert e["aviso_frescor"] is None and e["atualizado_em"]
 
     t = _ind(corpo, "tiktok_ldr_operacional_torre")
@@ -283,7 +284,7 @@ def test_mapeamento_dado_de_cada_indicador_torre(cliente, fontes):
 
     s = _ind(corpo, "shopee_ldr_operacional_torre")
     assert (s["estado"], s["valor"], s["tipo"]) == ("dado", 5.0, "torre")
-    assert s["limiar"] is None and s["cobertura"] == "barbours, lescent"
+    assert s["limiar"] is None and s["cobertura"] == "BARBOURS, LESCENT"
 
 
 def test_zero_medido_continua_dado(cliente, fontes):
@@ -346,9 +347,9 @@ def test_nao_entregue_parcial_recalcula_sobre_a_mesma_cobertura(cliente, fontes)
     ind = _ind(_get(cliente), "ml_nao_entregue_torre")
     assert (ind["estado"], ind["valor"]) == ("dado", 2.0)
     assert ind["valor"] != 0.5  # nunca o agregado do servico
-    assert ind["cobertura"] == "barbours"
+    assert ind["cobertura"] == "BARBOURS"
     aviso = ind["aviso_frescor"]
-    assert aviso and "kokeshi" in aviso and "barbours" not in aviso
+    assert aviso and "KOKESHI" in aviso and "BARBOURS" not in aviso
     assert "fora do numerador e do denominador" in aviso
 
 
@@ -357,7 +358,7 @@ def test_nao_entregue_completo_e_dado_sem_aviso(cliente, fontes):
     ind = _ind(_get(cliente), "ml_nao_entregue_torre")
     assert (ind["estado"], ind["valor"]) == ("dado", 1.33)
     assert ind["aviso_frescor"] is None
-    assert ind["cobertura"] == "barbours, kokeshi"
+    assert ind["cobertura"] == "BARBOURS, KOKESHI"
 
 
 def test_nao_entregue_denominador_zero_e_vazio_legitimo(cliente, fontes):
@@ -426,8 +427,8 @@ def test_nao_entregue_parcial_diverge_do_agregado_real_do_servico():
                            _linha_mart_ml("kokeshi", 50, 5, 0)])
     assert res["kpis"]["ml_not_delivered_rate_pct"] == 2.0
     ind = svc._ml_nao_entregue(res, False, "janela")
-    assert (ind.estado, ind.valor, ind.cobertura) == ("dado", 3.0, "barbours")
-    assert "kokeshi" in ind.aviso_frescor
+    assert (ind.estado, ind.valor, ind.cobertura) == ("dado", 3.0, "BARBOURS")
+    assert "KOKESHI" in ind.aviso_frescor
 
 
 def test_null_da_ldr_tiktok_vira_vazio_legitimo(cliente, fontes):
@@ -518,7 +519,7 @@ def test_expedicao_desatualizada_gera_aviso(cliente, fontes, estado):
     fontes["expedicao"] = lambda: expedicao_ok(freshness=estado)
     ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
     assert ind["estado"] == "dado"
-    assert ind["aviso_frescor"] and f"barbours ({estado})" in ind["aviso_frescor"]
+    assert ind["aviso_frescor"] and f"BARBOURS ({estado})" in ind["aviso_frescor"]
 
 
 def test_expedicao_fotografia_velha_gera_aviso(cliente, fontes):
@@ -568,6 +569,67 @@ def test_referencia_tiktok_e_interna_nunca_oficial(cliente, fontes):
         assert ind["limiar"]["rotulo"] == "referência interna, sem fonte oficial"
         # Mesma unidade do indicador: 0,04 vira 4 pontos percentuais.
         assert ind["limiar"]["valor"] == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize("resposta", [expedicao_ok(), expedicao_indisponivel("channel_disabled")])
+def test_limiar_da_expedicao_e_em_horas_nao_na_unidade_do_indicador(cliente, fontes, resposta):
+    """QA: "48" saia formatado como contagem (48 envios). O limite e' de 48 h."""
+    fontes["expedicao"] = lambda: resposta
+    ind = _ind(_get(cliente), "ml_expedicao_48h_torre")
+    assert ind["unidade"] == "contagem"
+    assert ind["limiar"]["unidade"] == "horas"
+    assert ind["limiar"]["valor"] == 48.0
+    # O rotulo do limiar nao repete o texto da origem ("referencia interna").
+    assert "referência" not in ind["limiar"]["rotulo"]
+    assert "interno" not in ind["rotulo"]
+
+
+def test_limiar_das_ldrs_mantem_pct(cliente, fontes):
+    ind = _ind(_get(cliente), "tiktok_ldr_operacional_torre")
+    assert ind["unidade"] == "pct"
+    # Sem unidade propria = mesma do indicador (pct). Nunca "horas".
+    assert ind["limiar"]["unidade"] in (None, "pct")
+
+
+def test_schema_limiar_unidade_e_opcional_e_restrita():
+    assert Limiar(valor=4.0, origem="interno", rotulo="x").unidade is None
+    assert Limiar(valor=48, origem="interno", rotulo="x", unidade="horas").unidade == "horas"
+    with pytest.raises(ValueError):
+        Limiar(valor=48, origem="interno", rotulo="x", unidade="dias")
+
+
+def test_rotulos_torre_nao_repetem_o_chip(cliente, fontes):
+    """O chip do tipo ja' diz "Calculo Torre"; o rotulo nao repete."""
+    corpo = _get(cliente)
+    for codigo in TORRE:
+        assert "Cálculo Torre" not in _ind(corpo, codigo)["rotulo"], codigo
+    for meta in svc.META.values():
+        assert "· Cálculo Torre ·" not in meta["rotulo"]
+        assert not meta["rotulo"].endswith("Cálculo Torre")
+
+
+CHAVES_CRUAS = re.compile(r"\b(apice|barbours|kokeshi|lescent|rituaria)\b")
+
+
+def test_textos_de_cobertura_e_aviso_usam_rotulo_legivel_da_marca(cliente, fontes):
+    fontes["quality"] = lambda: quality_ok(
+        linhas=[_linha_ml("barbours", 110, 2, cancelados=10), _linha_ml("kokeshi", 300, None)])
+    fontes["expedicao"] = lambda: expedicao_ok(freshness="stale")
+    corpo = _get(cliente, brands="barbours,kokeshi")
+    for canal in corpo["canais"]:
+        for ind in canal["indicadores"]:
+            for campo in ("cobertura", "aviso_frescor"):
+                assert not CHAVES_CRUAS.search(ind[campo] or ""), (ind["codigo"], campo, ind[campo])
+    assert _ind(corpo, "ml_nao_entregue_torre")["aviso_frescor"].startswith(
+        "Dado de não entregue ausente na fonte para: KOKESHI.")
+    assert _ind(corpo, "tiktok_ldr_operacional_torre")["cobertura"] == "BARBOURS, KOKESHI"
+    # A cobertura estruturada continua em CHAVE (a web aplica o rotulo dela).
+    assert _canal(corpo, "mercado_livre")["cobertura"]["marcas"] == ["barbours", "kokeshi"]
+
+
+def test_rotulo_marca_fora_do_mapa_usa_title_case():
+    assert svc._rotulo_marca("rituaria") == "RITUÁRIA"
+    assert svc._rotulo_marca("nova_marca") == "Nova_Marca"
 
 
 def test_nenhum_indicador_torre_tem_limiar_oficial(cliente, fontes):
@@ -718,13 +780,12 @@ def test_so_kokeshi_nao_consulta_ldr_shopee(cliente, fontes, chamadas):
 def test_expedicao_filtra_contas_pela_marca(cliente, fontes):
     corpo = _get(cliente, brands="kokeshi")
     ind = _ind(corpo, "ml_expedicao_48h_torre")
-    assert (ind["estado"], ind["valor"], ind["cobertura"]) == ("dado", 1.0, "kokeshi")
+    assert (ind["estado"], ind["valor"], ind["cobertura"]) == ("dado", 1.0, "KOKESHI")
 
 
 # ---------------------------------------------------------------------------
 # Capacidade de API: limite da descoberta, nunca ausencia universal
 # ---------------------------------------------------------------------------
-import re  # noqa: E402
 
 #: Frases que afirmam que a plataforma NAO TEM o dado/API. O que sabemos e' so'
 #: o que a Torre nao ingeriu e o que a doc consultada documentou.

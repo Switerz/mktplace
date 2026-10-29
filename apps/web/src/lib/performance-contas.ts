@@ -56,12 +56,16 @@ export type Canal = "mercado_livre" | "shopee" | "tiktok";
 export type TipoIndicador = "oficial" | "torre";
 export type EstadoIndicador = "dado" | "vazio_legitimo" | "sem_fonte" | "nao_comprovado" | "erro";
 export type Unidade = "pct" | "contagem";
+/** O limiar pode ter unidade propria (ex.: Expedicao ML conta envios, limite em horas). */
+export type UnidadeLimiar = Unidade | "horas";
 export type OrigemLimiar = "oficial" | "interno";
 
 export interface Limiar {
   valor: number | null;
   origem: OrigemLimiar;
   rotulo: string;
+  /** Opcional (aditivo): ausente ou `null` = mesma unidade do indicador. */
+  unidade?: UnidadeLimiar | null;
 }
 
 export interface Indicador {
@@ -168,10 +172,11 @@ const FMT_GENERICO = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 2 }
  * Formata um numero conforme a unidade. `pct` assume pontos percentuais
  * (4.5 -> "4,5%"), como os demais campos `*_pct` da API.
  */
-export function formatarNumero(valor: number | null | undefined, unidade: Unidade | null): string | null {
+export function formatarNumero(valor: number | null | undefined, unidade: UnidadeLimiar | null): string | null {
   if (!numeroValido(valor)) return null;
   if (unidade === "pct") return `${FMT_PCT.format(valor)}%`;
   if (unidade === "contagem") return FMT_CONTAGEM.format(valor);
+  if (unidade === "horas") return `${FMT_GENERICO.format(valor)} h`;
   return FMT_GENERICO.format(valor);
 }
 
@@ -214,11 +219,15 @@ export function estadoEfetivo(ind: Pick<Indicador, "estado" | "valor">): EstadoI
   return ind.estado;
 }
 
-/** Titulo do bloco de estado (contrato §4, "texto minimo na tela"). */
+/**
+ * Titulo do bloco de estado (contrato §4, "texto minimo na tela"). Curto de
+ * proposito: a janela inteira no titulo truncava e repetia a linha "Janela"
+ * (QA). A janela vai so' na descricao (`descricaoEstado`).
+ */
 export function tituloEstado(estado: EstadoIndicador | "invalido", janela: string | null): string {
   switch (estado) {
     case "vazio_legitimo":
-      return janela ? `Nenhum registro em ${janela}` : "Nenhum registro no período";
+      return janela ? "Sem registros na janela" : "Sem registros no período";
     case "sem_fonte":
       return "Indisponível: sem fonte na Torre";
     case "nao_comprovado":
@@ -230,6 +239,20 @@ export function tituloEstado(estado: EstadoIndicador | "invalido", janela: strin
     case "dado":
       return "";
   }
+}
+
+/**
+ * Descricao do bloco de estado: o motivo da API; sem motivo, um `vazio_legitimo`
+ * com janela mostra a janela aqui (e nao no titulo).
+ */
+export function descricaoEstado(
+  estado: EstadoIndicador | "invalido",
+  janela: string | null,
+  motivo: string | null,
+): string | null {
+  if (motivo) return motivo;
+  if (estado === "vazio_legitimo" && janela) return `Nenhum registro em ${janela}.`;
+  return null;
 }
 
 /** Origem do limiar escrita por extenso. Interno nunca e' meta da plataforma. */
@@ -245,6 +268,11 @@ export function rotuloOrigemLimiar(origem: string): string {
  * Um limiar `oficial` ao lado de um numero `torre` e' suprimido (contrato
  * §2.1 e §6.3): ele mediria outra definicao. A API ja' nao deveria mandar
  * essa combinacao; aqui e' a segunda barreira.
+ *
+ * O valor usa `limiar.unidade` e, so' na ausencia dela, a do indicador: a
+ * Expedicao ML conta envios mas o limite e' "48 h", nao 48 envios.
+ * `texto` e `origem` sao desenhados em linhas separadas (o rotulo do limiar
+ * nao se mistura com o texto da origem).
  */
 export function limiarExibivel(
   ind: Pick<Indicador, "tipo" | "limiar" | "unidade">,
@@ -252,7 +280,7 @@ export function limiarExibivel(
   const l = ind.limiar;
   if (!l) return null;
   if (l.origem === "oficial" && ind.tipo !== "oficial") return null;
-  const valor = formatarNumero(l.valor, ind.unidade);
+  const valor = formatarNumero(l.valor, l.unidade ?? ind.unidade);
   return {
     texto: valor ? `${l.rotulo}: ${valor}` : l.rotulo,
     origem: rotuloOrigemLimiar(l.origem),
@@ -294,6 +322,7 @@ function ehObjeto(v: unknown): v is Record<string, unknown> {
 const TIPOS: readonly string[] = ["oficial", "torre"];
 const ESTADOS: readonly string[] = ["dado", "vazio_legitimo", "sem_fonte", "nao_comprovado", "erro"];
 const UNIDADES: readonly string[] = ["pct", "contagem"];
+const UNIDADES_LIMIAR: readonly string[] = ["pct", "contagem", "horas"];
 const ORIGENS_LIMIAR: readonly string[] = ["oficial", "interno"];
 
 /** Campo opcional do contrato: string, `null` ou ausente. */
@@ -311,6 +340,9 @@ function problemaNoLimiar(l: unknown): string | null {
   if (!numeroOuNulo(l.valor)) return "limiar.valor inválido";
   if (typeof l.origem !== "string" || !ORIGENS_LIMIAR.includes(l.origem)) return "limiar.origem fora do domínio";
   if (typeof l.rotulo !== "string") return "limiar.rotulo inválido";
+  if (!(l.unidade === undefined || l.unidade === null || (typeof l.unidade === "string" && UNIDADES_LIMIAR.includes(l.unidade)))) {
+    return "limiar.unidade fora do domínio";
+  }
   return null;
 }
 
@@ -413,7 +445,11 @@ export function montarIndicador(ind: Indicador, canal: string): VisaoIndicador {
     valor,
     bloco:
       valor === null && tipoBloco
-        ? { tipo: tipoBloco, titulo: tituloEstado(efetivo, ind.janela ?? null), descricao: ind.motivo_indisponivel ?? null }
+        ? {
+            tipo: tipoBloco,
+            titulo: tituloEstado(efetivo, ind.janela ?? null),
+            descricao: descricaoEstado(efetivo, ind.janela ?? null, ind.motivo_indisponivel ?? null),
+          }
         : null,
     // Id unico por canal + codigo, so' com caracteres seguros para atributo.
     idAjuda: `ajuda-${canal}-${ind.codigo}`.replace(/[^A-Za-z0-9_-]/g, "_"),
