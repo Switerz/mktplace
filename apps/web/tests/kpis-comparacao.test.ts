@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { buildKpiBand, deltaPct } from "../src/lib/gerencial/kpi-band.ts";
-import { tendencia, tendenciasDosKpis, ticketPorPonto, totaisDaSerie } from "../src/lib/gerencial/kpi-trend.ts";
+import { suavizar, tendencia, tendenciasDosKpis, ticketPorPonto, totaisDaSerie } from "../src/lib/gerencial/kpi-trend.ts";
 import type { OverviewData } from "../src/lib/api-client.ts";
 import type { Marketplace } from "../src/lib/mock-data.ts";
 
@@ -137,4 +137,57 @@ test("o card nao esconde valor e variacao do leitor de tela", () => {
   const card = readFileSync(new URL("../src/components/gerencial/KpiBand.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(card, /aria-label=\{`\$\{kpi\.label\} — abrir decomposição`\}/);
   assert.match(card, /<span className="sr-only"> \(abrir decomposição\)<\/span>/);
+});
+
+test("tendencia e' so' o mini grafico com ponto final, sem texto visivel", () => {
+  const card = readFileSync(new URL("../src/components/gerencial/KpiBand.tsx", import.meta.url), "utf8");
+  // nenhum rotulo visivel de tendencia
+  assert.doesNotMatch(card, /↗ tende a subir|↘ tende a descer/);
+  // o leitor de tela ainda ouve a direcao; o mouse ve' a conta no title
+  assert.match(card, /<span className="sr-only">Tendência: \{DIRECAO_FALADA\[t\.direcao\]\}\.<\/span>/);
+  assert.match(card, /title=\{detalhe\}/);
+  // ponto final do grafico
+  assert.match(card, /rounded-\[1px\] bg-current/);
+});
+
+test("DM Sans no corpo e Inter so' nas tabelas (DM Sans nao tem tnum)", () => {
+  const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  assert.match(layout, /DM_Sans\(\{ subsets: \["latin"\], variable: "--font-sans"/);
+  assert.match(layout, /Inter\(\{ subsets: \["latin"\], variable: "--font-num"/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /table \{\s*font-family: var\(--font-num\)/);
+});
+
+test("aviso do bloco principal corta na oracao, nunca no ponto decimal", async () => {
+  const { primeiraOracao } = await import("../src/components/gerencial/MetaHero.tsx").catch(() => ({ primeiraOracao: null as never }));
+  // MetaHero e' TSX (sem execucao no node --test): confere a regra pelo codigo.
+  void primeiraOracao;
+  const src = readFileSync(new URL("../src/components/gerencial/MetaHero.tsx", import.meta.url), "utf8");
+  assert.match(src, /texto\.split\(\/\[;\.\]\(\?=\\s\|\$\)\/\)/);
+  const re = /[;.](?=\s|$)/;
+  assert.equal("Custo/GMV de 16.7% no canal. Mais".split(re)[0], "Custo/GMV de 16.7% no canal");
+  assert.equal("KOKESHI no Shopee tem dados até 12/10/2026; o canal".split(re)[0], "KOKESHI no Shopee tem dados até 12/10/2026");
+});
+
+test("hover usa sombra preta nos dois temas", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const bloco = css.slice(css.indexOf(".card-hover:hover"), css.indexOf(".card-hover:active"));
+  assert.doesNotMatch(bloco, /--tc-ink/);
+  assert.match(bloco, /rgb\(0 0 0 \/ 0\.35\)/);
+});
+
+test("a dica dentro do card nao e' focavel nem entra no nome do botao", () => {
+  const card = readFileSync(new URL("../src/components/gerencial/KpiBand.tsx", import.meta.url), "utf8");
+  assert.match(card, /<InfoDica emControle /);
+  const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
+  assert.match(dica, /tabIndex=\{0\}/);
+  assert.match(dica, /group-focus\/dica:visible/);
+});
+
+test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {
+  const serra = [...Array(14)].map((_, i) => (i % 2 ? 110 : 90));
+  const lisa = suavizar(serra);
+  assert.equal(lisa.length, 8);
+  assert.ok(lisa.every((v) => v > 95 && v < 105), "a serrilha some");
+  assert.deepEqual(suavizar([1, 2, 3]), [1, 2, 3]);
 });

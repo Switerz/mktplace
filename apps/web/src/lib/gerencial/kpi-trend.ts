@@ -85,3 +85,20 @@ export function tendenciasDosKpis(
     avg_ticket: tendencia(ticketPorPonto(g, p), pedidos.granularity),
   };
 }
+
+/**
+ * Linha do mini grafico: media movel de `janela` pontos. A serie diaria oscila
+ * dia a dia (fim de semana, campanha) e a linha crua vira serrilha; suavizada,
+ * ela mostra so' o rumo, que e' o que o indicativo quer dizer. Com poucos
+ * pontos (menos de 2 janelas), devolve a serie como esta'.
+ */
+export function suavizar(pontos: number[], janela = 7): number[] {
+  if (pontos.length < janela * 2) return pontos;
+  const saida: number[] = [];
+  for (let i = janela - 1; i < pontos.length; i++) {
+    let soma = 0;
+    for (let j = i - janela + 1; j <= i; j++) soma += pontos[j];
+    saida.push(soma / janela);
+  }
+  return saida;
+}

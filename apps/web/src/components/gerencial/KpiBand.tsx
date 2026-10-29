@@ -22,7 +22,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { DeltaTone, KpiDescriptor, KpiKey } from "@/lib/gerencial/kpi-band";
-import type { TendenciaKpi } from "@/lib/gerencial/kpi-trend";
+import { suavizar, type TendenciaKpi } from "@/lib/gerencial/kpi-trend";
+import InfoDica from "@/components/ui/InfoDica";
 import { fmtPct } from "@/lib/formatters";
 
 interface Props {
@@ -60,16 +61,18 @@ function DeltaBadge({ pct, tone = "higher_is_better" }: { pct: number; tone?: De
 }
 
 /**
- * UX-TORRE-B2B-1 — um icone por INDICADOR (nao por estado), tingido pela cor
- * de serie que o KPI ja' tinha (`kpi.accent`). Ajuda a achar o numero de
- * relance sem acrescentar significado de bom/ruim.
+ * UX-TORRE-B2B-1 — um icone por INDICADOR (nao por estado).
+ * VISUAL-PALETA-1 — cada KPI tem a PROPRIA cor de identidade (token
+ * `kpi-*`): borda do card, ladrilho do icone e mini grafico, como na Torre do
+ * Atacado. Ajuda a achar o numero de relance sem acrescentar significado de
+ * bom/ruim — a variacao continua em ok/crit.
  */
-const ICONE_KPI: Record<KpiKey, { Icone: LucideIcon; tinta: string }> = {
-  gmv: { Icone: CircleDollarSign, tinta: "text-chart-1" },
-  orders: { Icone: ShoppingBag, tinta: "text-chart-2" },
-  avg_ticket: { Icone: Receipt, tinta: "text-chart-4" },
-  ad_spend: { Icone: Megaphone, tinta: "text-chart-5" },
-  roas: { Icone: Gauge, tinta: "text-chart-3" },
+const ICONE_KPI: Record<KpiKey, { Icone: LucideIcon; tinta: string; borda: string; ladrilho: string }> = {
+  gmv: { Icone: CircleDollarSign, tinta: "text-kpi-gmv", borda: "border-kpi-gmv/30", ladrilho: "bg-kpi-gmv/10" },
+  orders: { Icone: ShoppingBag, tinta: "text-kpi-pedidos", borda: "border-kpi-pedidos/35", ladrilho: "bg-kpi-pedidos/10" },
+  avg_ticket: { Icone: Receipt, tinta: "text-kpi-ticket", borda: "border-kpi-ticket/30", ladrilho: "bg-kpi-ticket/10" },
+  ad_spend: { Icone: Megaphone, tinta: "text-kpi-ads", borda: "border-kpi-ads/30", ladrilho: "bg-kpi-ads/10" },
+  roas: { Icone: Gauge, tinta: "text-kpi-roas", borda: "border-kpi-roas/35", ladrilho: "bg-kpi-roas/10" },
 };
 
 /**
@@ -117,36 +120,51 @@ function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
   // Serie constante fica no MEIO: colada no chao ela parece "caiu para zero".
   const y = (v: number) => (faixa === 0 ? 14 : 26 - ((v - min) / faixa) * 24);
   const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${y(v).toFixed(2)}`);
+  const ultimoY = y(pontos[pontos.length - 1]);
+  // O ponto final e' um <rect> SEPARADO, fora do `preserveAspectRatio="none"`
+  // da linha: dentro dele o quadrado esticaria junto com o grafico.
   return (
-    <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className={`h-7 w-full ${tinta}`}>
-      <polyline
-        points={coords.join(" ")}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.75}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        vectorEffect="non-scaling-stroke"
+    <span className={`relative block h-6 w-full ${tinta}`}>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 h-full w-[calc(100%-6px)]">
+        <polyline
+          points={coords.join(" ")}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.5}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+          opacity={0.75}
+        />
+      </svg>
+      <span
+        aria-hidden="true"
+        className="absolute right-0 h-1.5 w-1.5 rounded-[1px] bg-current"
+        style={{ top: `calc(${(ultimoY / 28) * 100}% - 3px)` }}
       />
-    </svg>
+    </span>
   );
 }
 
+/**
+ * Tendencia como INDICATIVO (pedido do proprietario): SO' o mini grafico,
+ * terminando num ponto — o formato da linha ja' diz se sobe ou desce. Nenhum
+ * texto no card; a conta (ultimos 7 contra os 7 anteriores e o %) fica no
+ * `title` e no texto `sr-only`, para quem quiser conferir.
+ */
+const DIRECAO_FALADA: Record<"up" | "down" | "flat", string> = {
+  up: "tende a subir",
+  down: "tende a descer",
+  flat: "estável",
+};
+
 function LinhaDeTendencia({ t, tinta }: { t: TendenciaKpi; tinta: string }) {
-  const cor =
-    t.direcao === "up" ? "text-ok-ink" : t.direcao === "down" ? "text-crit-ink" : "text-ink-muted";
+  const detalhe =
+    t.variacaoPct != null ? `${t.rotulo}: ${t.variacaoPct >= 0 ? "+" : ""}${t.variacaoPct.toFixed(1)}%` : undefined;
   return (
-    <span className="mt-1 flex flex-col gap-0.5">
-      <Sparkline pontos={t.pontos} tinta={tinta} />
-      {t.variacaoPct != null && t.direcao && (
-        <span className="text-xs leading-snug text-ink-faint tabular-nums">
-          Tendência:{" "}
-          <span className={`font-semibold ${cor}`}>
-            {SETA[t.direcao]} {t.direcao === "flat" ? "estável" : fmtPct(t.variacaoPct)}
-          </span>{" "}
-          ({t.rotulo})
-        </span>
-      )}
+    <span className="mt-1 block w-28" title={detalhe}>
+      <Sparkline pontos={suavizar(t.pontos)} tinta={tinta} />
+      {t.direcao && <span className="sr-only">Tendência: {DIRECAO_FALADA[t.direcao]}.</span>}
     </span>
   );
 }
@@ -161,7 +179,7 @@ function KpiCard({
   tendencia?: TendenciaKpi | null;
 }) {
   const hasChannelList = kpi.channelValues != null && kpi.channelValues.length > 0;
-  const { Icone, tinta } = ICONE_KPI[kpi.key];
+  const { Icone, tinta, borda, ladrilho } = ICONE_KPI[kpi.key];
 
   return (
     <button
@@ -171,18 +189,23 @@ function KpiCard({
       // `w-full min-w-0`: sem eles o <button> se dimensiona pelo conteudo e
       // estoura a trilha da grade — era a origem de 5px de overflow horizontal
       // no mobile (390px), medido no QA.
-      className="group w-full min-w-0 h-full min-h-11 text-left bg-surface border border-line rounded-xl p-4 flex flex-col gap-1.5 transition-[border-color,box-shadow] hover:border-line-strong hover:shadow-[0_4px_14px_-4px_rgb(var(--tc-accent)/0.18)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className={`card-hover group w-full min-w-0 h-full min-h-11 text-left bg-surface border rounded-xl p-4 flex flex-col gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${borda}`}
     >
       <span className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+        <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
           {kpi.label}
+          {/* VISUAL-PALETA-1: compradores e cobertura de Ads saem do corpo do
+              card para o "i" — o numero fala primeiro. */}
+          {(kpi.subvalue || kpi.coverageNote) && (
+            <InfoDica emControle texto={[kpi.subvalue, kpi.coverageNote].filter(Boolean).join(" · ")} />
+          )}
           {/* KPIS-COMPARACAO-1: sem `aria-label` no botao, o nome acessivel e'
               o proprio conteudo (valor, variacao, tendencia); a acao vai aqui. */}
           <span className="sr-only"> (abrir decomposição)</span>
         </span>
         <span
           aria-hidden="true"
-          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised ${tinta}`}
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 ease-out group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:scale-100 ${ladrilho} ${tinta}`}
         >
           <Icone className="h-4 w-4" strokeWidth={1.75} />
         </span>
@@ -242,9 +265,7 @@ function KpiCard({
       )}
 
       <span className="mt-auto flex flex-col gap-0.5 pt-1">
-        {kpi.subvalue && <span className="text-xs text-ink-faint leading-snug">{kpi.subvalue}</span>}
         {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
-        {kpi.coverageNote && <span className="text-xs text-ink-faint leading-snug">{kpi.coverageNote}</span>}
         {kpi.unavailableReason && (
           <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
         )}

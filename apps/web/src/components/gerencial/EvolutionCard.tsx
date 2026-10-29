@@ -16,6 +16,7 @@
  * informa qual grao foi efetivamente resolvido.
  */
 import dynamic from "next/dynamic";
+import InfoDica from "@/components/ui/InfoDica";
 import type { Marketplace } from "@/lib/mock-data";
 import type { MergedSeries, Reconciliation } from "@/lib/gerencial/trend-series";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
@@ -137,14 +138,14 @@ export default function EvolutionCard({
     >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
-          <h2 id="evolucao-heading" className="text-sm font-semibold text-ink-muted">
-            Evolução de {METRIC_LABEL[metric]}
-          </h2>
-          <p className="text-xs text-ink-faint">
-            {grainIssue
-              ? "Granularidade inconsistente entre os canais"
-              : granularityCaption(granularity, merged.granularity)}
-          </p>
+          <div className="flex items-center gap-1.5">
+            <h2 id="evolucao-heading" className="text-sm font-semibold text-ink-muted">
+              Evolução de {METRIC_LABEL[metric]}
+            </h2>
+            {!grainIssue && <InfoDica texto={granularityCaption(granularity, merged.granularity)} />}
+          </div>
+          {/* Problema de grao continua VISIVEL: muda a leitura do grafico. */}
+          {grainIssue && <p className="text-xs text-ink-faint">Granularidade inconsistente entre os canais</p>}
         </div>
 
         <div className="flex items-center gap-2 flex-wrap shrink-0">
@@ -365,17 +366,18 @@ export default function EvolutionCard({
             {/* A janela real e' exibida sempre que conhecida — inclusive quando a
                 comparacao voltou VAZIA: a janela existe, os registros nao. */}
             {cmp.dateFrom && cmp.dateTo && (
-              <p className="text-xs text-ink-faint tabular-nums">
-                Período anterior: {cmp.dateFrom} a {cmp.dateTo}
-                {showComparison ? " — alinhado ao atual pela posição do ponto." : "."}
+              <p
+                className="text-xs text-ink-faint tabular-nums"
+                title={showComparison ? "Alinhado ao período atual pela posição do ponto." : undefined}
+              >
+                Anterior: {cmp.dateFrom} a {cmp.dateTo}
               </p>
             )}
           </>
         )}
 
-        {reconciliation.status === "ok" && (
-          <p className="text-xs text-ink-faint">Soma das séries reconciliada com o total do período.</p>
-        )}
+        {/* VISUAL-PALETA-1: reconciliado e' o estado normal e nao precisa de
+            frase; so' a divergencia (abaixo) aparece. */}
         {/* `compareActive` sem comparacao pedida nas series indica transicao de
             estado; nao inventamos aviso para isso. */}
         {compareActive && !cmp.requested && (

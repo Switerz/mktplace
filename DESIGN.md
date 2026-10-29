@@ -24,45 +24,50 @@ colors:
   canal-tiktok: "#8b5cf6"
   canal-ml: "#06b6d4"
   canal-shopee: "#f97316"
+  kpi-gmv: "#6d28d9"
+  kpi-pedidos: "#d97706"
+  kpi-ticket: "#4f46e5"
+  kpi-ads: "#c026d3"
+  kpi-roas: "#059669"
 typography:
   label:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "12px"
     fontWeight: 600
     lineHeight: 1.2
     letterSpacing: "0.04em"
   data:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.35
     letterSpacing: "normal"
   body:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "14px"
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
   title:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "14px"
     fontWeight: 600
     lineHeight: 1.4
     letterSpacing: "normal"
   headline:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "20px"
     fontWeight: 700
     lineHeight: 1.3
     letterSpacing: "-0.01em"
   kpi:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "24px"
     fontWeight: 600
     lineHeight: 1.15
     letterSpacing: "-0.015em"
   kpi-hero:
-    fontFamily: "Inter, -apple-system, 'Segoe UI', sans-serif"
+    fontFamily: "'DM Sans', -apple-system, 'Segoe UI', sans-serif"
     fontSize: "28px"
     fontWeight: 600
     lineHeight: 1
@@ -123,10 +128,13 @@ What changed from the previous "Brand Observatory" direction, and why:
 | Before | Now | Why |
 |---|---|---|
 | Light lavender sidebar | Navy shell (`--tc-shell`) in **both** themes | Mário's brief; the frame separates navigation from data at a glance |
-| System font stack | **Inter** via `next/font` (self-hosted) | True tabular figures; consistent rendering across Windows/macOS |
+| System font stack | **DM Sans** via `next/font` (self-hosted); **Inter only inside tables** | Rounder, friendlier figures (Torre do Atacado reference); Inter kept where R$ columns must align, since DM Sans has no `tnum` |
 | 16px cards, shadow at rest | 12px panels, 1px border, shadow only on hover | Denser, quieter; the border defines the edge |
 | Two-row filter bar | One row: channel segmented + brand/period triggers | First number moved up ~60px |
 | Prose under titles | Chips (period, freshness) + short notes + disclosures | Warnings stay; their weight drops |
+| Explanatory lines inside cards | An `ⓘ` (`InfoDica`) next to the title: `title` + `sr-only` | The number speaks first; the caveat is one hover away, never deleted |
+| Neutral card borders | Each KPI has an identity colour (`--tc-kpi-*`): border, icon tile, sparkline | Find the number by colour; state colours (ok/warn/crit) stay for good/bad |
+| Hover = border change | `.card-hover`: lift 2px + soft shadow, ease-out 220ms, none with reduced motion | Feels physical; tells you the card opens |
 
 The four anti-references still hold:
 
@@ -139,7 +147,7 @@ The four anti-references still hold:
 **Key characteristics**
 
 - Navy shell, light canvas, white panels, violet for selection and primary series only
-- Inter, tabular numerals everywhere numbers live
+- DM Sans for text and KPI figures; Inter (tabular) inside tables
 - One icon vocabulary (`lucide-react`, 16px, stroke 1.75); the route icon repeats in the page header
 - KPIs as a strip of compact cards: label, icon, number, delta pill, short note
 - Status colours only behind a business rule; channel colours only for identity
@@ -194,9 +202,11 @@ series or status.
 
 ## 3. Typography
 
-**Family:** Inter (`next/font/google`, self-hosted at build, `display: swap`),
-falling back to the system stack. It was chosen for real `tnum` figures, so R$
-columns align without monospace.
+**Family:** DM Sans (`next/font/google`, self-hosted at build, `display: swap`,
+`--font-sans`), falling back to the system stack. Measured: the Google build of
+DM Sans has **no `tnum`** ("1111111" 52px vs "8888888" 102px at 24px), so
+**tables** use Inter (`--font-num`), which has real tabular figures and keeps R$
+columns aligned.
 
 | Role | Size / weight | Use |
 |---|---|---|
