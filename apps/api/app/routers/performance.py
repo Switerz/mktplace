@@ -22,6 +22,10 @@ from app.schemas.shopee_fbs_stock import (
     EstoqueFullResponse,
     EstoqueFullUnavailableResponse,
 )
+from app.schemas.ml_full_stock import (
+    MLFullEstoqueResponse,
+    MLFullEstoqueUnavailableResponse,
+)
 from app.schemas.performance import (
     BrandDetailResponse, BrandsResponse, CanaisResponse, DailyResponse, FinanceiroResponse,
     MonthlyResponse, OverviewResponse, PedidosResponse, ProdutosMLResponse,
@@ -41,6 +45,7 @@ from app.services.tiktok_order_discounts_service import (
 )
 from app.services import shopee_fbs_service as shopee_fbs_svc
 from app.services import shopee_fbs_stock_service as fbs_stock_svc
+from app.services import ml_full_stock_service as ml_stock_svc
 from app.services.ml_fulfillment_service import (
     MLFulfillmentUnavailable,
     get_ml_fulfillment_block,
@@ -1032,3 +1037,86 @@ def shopee_fbs_estoque(
     except fbs_stock_svc.EstoqueFullContractError:
         # Contrato da FONTE quebrado. Nao e' erro do cliente.
         raise HTTPException(503, ERRO_ESTOQUE_FULL_CONTRATO)
+
+
+# ===========================================================================
+# ML-FULL-STOCK-API-1 — ESTOQUE Full do Mercado Livre
+# ---------------------------------------------------------------------------
+# Superficie NOVA e INDEPENDENTE de `/ml-fulfillment` (modalidade de envio do
+# PEDIDO). Mesmo router, sem registrar nada novo em `app/main.py`.
+# ===========================================================================
+
+MOTIVO_ML_FULL_ESTOQUE_DESLIGADO = (
+    "Tela de Estoque Full do Mercado Livre ainda não habilitada. A ativação "
+    "depende da migration 029, do publicador e de decisão de negócio."
+)
+ERRO_ML_FULL_ESTOQUE_CONTRATO = (
+    "Estoque Full do Mercado Livre indisponível: a fonte devolveu dado fora "
+    "do contrato (domínio ou reconciliação). Acione o time de dados."
+)
+ERRO_ML_FULL_ESTOQUE_DATA_FUTURA = (
+    "Filtro “ref_date” inválido: a data não pode ser futura."
+)
+LIMITE_PADRAO_ML_FULL_ESTOQUE = 1000
+
+
+@router.get(
+    "/ml-full-estoque",
+    response_model=Union[MLFullEstoqueResponse, MLFullEstoqueUnavailableResponse],
+)
+def ml_full_estoque(
+    brands: Optional[list[str]] = Query(
+        None, description="Marcas (barbours, kokeshi, lescent, rituaria)."),
+    ref_date: Optional[date] = Query(
+        None, description="Dia da fotografia. Padrao: a ultima publicada."),
+    incluir_fora_do_full: bool = Query(
+        False, description="Lista tambem inventarios sem anuncio Full."),
+    limite: int = Query(
+        LIMITE_PADRAO_ML_FULL_ESTOQUE, ge=1, le=ml_stock_svc.MAX_INVENTARIOS),
+    db: Session = Depends(get_db),
+):
+    """Estoque fisico no CD do Mercado Livre (Full), por INVENTARIO.
+
+    Estoque contado uma vez por inventario; anuncios so' como contagem de
+    associacao. **Ausencia nunca vira zero**: flag desligada, 029 nao
+    aplicada, nada publicado e data sem fotografia devolvem 200 com
+    `status="unavailable"`; inventario SEM_LEITURA e marca sem fotografia
+    chegam como `null`, com o total declarado parcial.
+
+    Le apenas `marts.fact_ml_full_stock_{inventory,status,brand}_daily`.
+    Nenhuma consulta ao Data Mart, a `raw` ou a' API do ML no request.
+    """
+    # FLAG PRIMEIRO: desligada, nenhuma consulta e nem exigimos sessao.
+    if not settings.ml_full_stock_api_enabled:
+        return MLFullEstoqueUnavailableResponse(
+            scope_label=ml_stock_svc.SCOPE_LABEL,
+            unavailable_reason=MOTIVO_ML_FULL_ESTOQUE_DESLIGADO,
+            motivo_tecnico="feature_flag_desligada",
+        )
+
+    hoje = today_brt()
+    if ref_date is not None and ref_date > hoje:
+        raise HTTPException(422, ERRO_ML_FULL_ESTOQUE_DATA_FUTURA)
+
+    try:
+        return ml_stock_svc.get_ml_full_estoque_block(
+            _require_db(db),
+            hoje=hoje,
+            brands=brands,
+            ref_date=ref_date,
+            incluir_fora_do_full=incluir_fora_do_full,
+            limite=limite,
+        )
+    except ml_stock_svc.FiltroInvalido as invalido:
+        # Mensagem so' com constantes: o valor recebido nao volta no corpo.
+        raise HTTPException(422, invalido.mensagem_segura)
+    except ml_stock_svc.MLFullEstoqueIndisponivel as ausente:
+        # 200, nao 503: estado CONHECIDO do rollout (029/publicador pendentes).
+        return MLFullEstoqueUnavailableResponse(
+            scope_label=ml_stock_svc.SCOPE_LABEL,
+            unavailable_reason=ausente.mensagem,
+            motivo_tecnico=ausente.motivo_tecnico,
+            limitacoes=[ml_stock_svc.LIMITACAO_SEM_AGENDAMENTO],
+        )
+    except ml_stock_svc.MLFullEstoqueContractError:
+        raise HTTPException(503, ERRO_ML_FULL_ESTOQUE_CONTRATO)

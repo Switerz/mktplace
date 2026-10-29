@@ -144,6 +144,16 @@ class Settings(BaseSettings):
     shopee_fbs_stock_enabled: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # ML-FULL-STOCK-API-1 — tela de ESTOQUE Full do Mercado Livre
+    # ------------------------------------------------------------------
+    # Le SO' as fatos da migration 029, que NAO esta' aplicada no Neon.
+    # Flag PROPRIA: nao reaproveita a do Full ML de desempenho (modalidade de
+    # envio) nem a do estoque Shopee. NASCE DESLIGADA; desligada, o endpoint
+    # responde 200 `unavailable` sem emitir consulta. Ligada sobre banco sem a
+    # 029, responde `unavailable` (fato_inexistente) -- nunca estoque zero.
+    ml_full_stock_api_enabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
     # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
     # ------------------------------------------------------------------
     # A Torre B2B e' FONTE EXTERNA e somente leitura: esta API chama as RPCs

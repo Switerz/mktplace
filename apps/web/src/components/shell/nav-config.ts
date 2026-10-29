@@ -137,10 +137,28 @@ export const ESTOQUE_FULL_NAV: NavPage = {
   label: "Estoque Full Shopee",
 };
 
+/**
+ * ML-FULL-STOCK-API-1 — item da tela de Estoque Full do Mercado Livre, atras
+ * de `NEXT_PUBLIC_ML_FULL_STOCK_ENABLED`.
+ *
+ * A ROTA nao e' `/estoque-full-ml` nem `/full-ml-estoque` de proposito:
+ * `isNavItemActive` casa por PREFIXO, e qualquer uma das duas deixaria ativo
+ * tambem o item de `/estoque-full` (Shopee) ou de `/full-ml` (modalidade de
+ * envio). `/estoque-ml-full` nao e' prefixada por nenhuma rota existente.
+ *
+ * O rotulo diz "Estoque" por inteiro: "Full Mercado Livre" ja' existe e mede
+ * MODALIDADE DE ENVIO, nao estoque.
+ */
+export const ML_FULL_ESTOQUE_NAV: NavPage = {
+  href: "/estoque-ml-full",
+  label: "Estoque Full Mercado Livre",
+};
+
 export interface NavFlags {
   expedicao?: boolean;
   shopeeFbs?: boolean;
   estoqueFull?: boolean;
+  mlFullEstoque?: boolean;
 }
 
 export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
@@ -151,6 +169,7 @@ export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
   if (f.expedicao) extras.push(EXPEDICAO_NAV);
   if (f.shopeeFbs) extras.push(SHOPEE_FBS_NAV);
   if (f.estoqueFull) extras.push(ESTOQUE_FULL_NAV);
+  if (f.mlFullEstoque) extras.push(ML_FULL_ESTOQUE_NAV);
   if (!extras.length) return NAV_SECTIONS;
   return NAV_SECTIONS.map((s) =>
     s.label === "Operações" ? { ...s, pages: [...s.pages, ...extras] } : s,
@@ -181,6 +200,9 @@ export function getRouteTitle(pathname: string): string {
   //
   // Isto NAO revela tela nenhuma: `getRouteTitle` so' traduz um pathname em
   // rotulo. Quem decide se a rota existe e' o guard de cada page.
+  // ML-FULL-STOCK-API-1: resolvido a' parte, sem mexer na lista abaixo (que
+  // e' pinada por teste). Mesma logica: quem esta' na rota passou pelo guard.
+  if (pathname.startsWith(ML_FULL_ESTOQUE_NAV.href)) return ML_FULL_ESTOQUE_NAV.label;
   for (const section of navSections({ expedicao: true, shopeeFbs: true })) {
     for (const page of section.pages) {
       if (page.disabled) continue;
