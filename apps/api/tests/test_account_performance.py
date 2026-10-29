@@ -48,11 +48,20 @@ def _agora() -> datetime:
 # ---------------------------------------------------------------------------
 # Respostas falsas das fontes (formato real dos servicos)
 # ---------------------------------------------------------------------------
-def quality_ok(cancel=4.5, nao_entregue=1.2):
+def _linha_ml(marca, pedidos, nao_entregues):
+    """Linha por marca no formato de `get_quality`: sem entrega registrada, o
+    servico publica `ml_not_delivered_shipments` e a taxa como None."""
+    return {"brand": marca, "ml_total_orders": pedidos,
+            "ml_not_delivered_shipments": nao_entregues,
+            "ml_not_delivered_rate_pct": (None if nao_entregues is None
+                                          else round(nao_entregues / pedidos * 100, 2))}
+
+
+def quality_ok(cancel=4.5, nao_entregue=1.2, linhas=None):
     return {
         "kpis": {"ml_cancel_rate_pct": cancel, "ml_not_delivered_rate_pct": nao_entregue},
-        "brands": [{"brand": "barbours", "ml_total_orders": 100},
-                   {"brand": "kokeshi", "ml_total_orders": 50}],
+        "brands": linhas if linhas is not None else [
+            _linha_ml("barbours", 100, 1), _linha_ml("kokeshi", 50, 1)],
         "refreshed_at": (_agora() - timedelta(hours=3)).isoformat(),
     }
 
@@ -251,7 +260,9 @@ def test_mapeamento_dado_de_cada_indicador_torre(cliente, fontes):
 
     n = _ind(corpo, "ml_nao_entregue_torre")
     assert (n["estado"], n["valor"], n["unidade"]) == ("dado", 1.2, "pct")
-    assert "por pedido" in n["rotulo"]
+    assert "shipments não entregues / pedidos pagos" in n["rotulo"]
+    assert "por pedido" not in n["rotulo"] + n["ajuda"]
+    assert "pedidos − cancelados" in n["ajuda"]
 
     e = _ind(corpo, "ml_expedicao_48h_torre")
     assert (e["estado"], e["valor"], e["unidade"]) == ("dado", 3.0, "contagem")
@@ -301,6 +312,37 @@ def test_null_do_ml_vira_vazio_legitimo_e_nunca_zero(cliente, fontes):
         assert ind["estado"] == "vazio_legitimo"
         assert ind["valor"] is None
         assert ind["motivo_indisponivel"]
+
+
+def test_nao_entregue_sem_dado_em_nenhuma_marca_e_sem_fonte_nunca_zero(cliente, fontes):
+    # Agregado do servico sai 0,0 porque soma `None or 0`: nao e' medicao.
+    fontes["quality"] = lambda: quality_ok(
+        nao_entregue=0.0,
+        linhas=[_linha_ml("barbours", 100, None), _linha_ml("kokeshi", 50, None)])
+    ind = _ind(_get(cliente), "ml_nao_entregue_torre")
+    assert (ind["estado"], ind["valor"]) == ("sem_fonte", None)
+    assert ind["motivo_indisponivel"] == "Dado de não entregue ausente na fonte."
+    # O cancelamento, da mesma chamada, nao e' afetado.
+    assert _ind(_get(cliente), "ml_cancelamento_torre")["estado"] == "dado"
+
+
+def test_nao_entregue_parcial_e_dado_com_aviso_das_marcas_fora(cliente, fontes):
+    fontes["quality"] = lambda: quality_ok(
+        nao_entregue=0.67,
+        linhas=[_linha_ml("barbours", 100, 1), _linha_ml("kokeshi", 50, None)])
+    ind = _ind(_get(cliente), "ml_nao_entregue_torre")
+    assert (ind["estado"], ind["valor"]) == ("dado", 0.67)  # valor do servico, sem recalculo
+    assert ind["cobertura"] == "barbours"
+    assert ind["aviso_frescor"] and "kokeshi" in ind["aviso_frescor"]
+    assert "barbours" not in ind["aviso_frescor"]
+
+
+def test_nao_entregue_completo_e_dado_sem_aviso(cliente, fontes):
+    fontes["quality"] = lambda: quality_ok(nao_entregue=1.33)
+    ind = _ind(_get(cliente), "ml_nao_entregue_torre")
+    assert (ind["estado"], ind["valor"]) == ("dado", 1.33)
+    assert ind["aviso_frescor"] is None
+    assert ind["cobertura"] == "barbours, kokeshi"
 
 
 def test_null_da_ldr_tiktok_vira_vazio_legitimo(cliente, fontes):

@@ -67,6 +67,7 @@ LIMITE_FRESCOR_HORAS = 6.0
 #: Motivo FIXO do estado `erro`. Nunca o texto da excecao.
 MOTIVO_ERRO = "A fonte falhou ao responder; nenhum valor foi exibido."
 
+MOTIVO_ML_NAO_ENTREGUE_AUSENTE = "Dado de não entregue ausente na fonte."
 MOTIVO_ML_SEM_MARCA = "Nenhuma marca selecionada tem conta no Mercado Livre."
 MOTIVO_SHOPEE_SEM_MARCA = "Nenhuma marca selecionada tem app Shopee."
 
@@ -148,13 +149,14 @@ META: dict[str, dict[str, Any]] = {
                  "não se aplicam a este número.",
     },
     "ml_nao_entregue_torre": {
-        "rotulo": "Não entregue · Cálculo Torre · por pedido",
+        "rotulo": "Não entregue · Cálculo Torre · shipments não entregues / "
+                  "pedidos pagos",
         "tipo": "torre",
         "unidade": "pct",
         "fonte": "marts.fact_marketplace_daily_performance → /api/v1/performance/quality "
                  "(ml_not_delivered_rate_pct)",
-        "ajuda": "Pedidos não entregues / pedidos pagos do período, por pedido "
-                 "(não por shipment). Não é métrica de reputação do ML.",
+        "ajuda": "Shipments não entregues / pedidos pagos (pedidos − cancelados) "
+                 "do período, somados nas marcas. Não é métrica de reputação do ML.",
     },
     "ml_expedicao_48h_torre": {
         "rotulo": "Expedição acima de 48 h · Cálculo Torre · 48 h é limite "
@@ -291,6 +293,48 @@ def _ml_quality(codigo: str, campo: str, res: Optional[dict], falhou: bool,
     return _indicador(codigo, _dinamico)
 
 
+def _tem_nao_entregue(linha: dict) -> bool:
+    return (linha.get("ml_not_delivered_shipments") is not None
+            or linha.get("ml_not_delivered_rate_pct") is not None)
+
+
+def _ml_nao_entregue(res: Optional[dict], falhou: bool, janela: str) -> Indicador:
+    """Nao entregue sem falso zero.
+
+    O agregado de `get_quality` soma `ml_not_delivered_shipments or 0`: marca
+    sem o dado (nenhuma entrega registrada) entra como 0 no numerador e com os
+    pedidos no denominador. Se NENHUMA marca tem o dado, o 0,0 nao e' medicao.
+    Por isso o estado e' decidido pelas linhas por marca, nao pelo agregado.
+    """
+    codigo = "ml_nao_entregue_torre"
+    if falhou:
+        return _erro(codigo)
+
+    def _dinamico() -> dict:
+        valor = res["kpis"]["ml_not_delivered_rate_pct"]
+        com_pedidos = [r for r in res.get("brands") or [] if r.get("ml_total_orders")]
+        com_dado = [str(r["brand"]) for r in com_pedidos if _tem_nao_entregue(r)]
+        sem_dado = [str(r["brand"]) for r in com_pedidos if not _tem_nao_entregue(r)]
+        comum = {"janela": janela, "atualizado_em": res.get("refreshed_at"),
+                 "cobertura": ", ".join(com_dado) or None}
+        if valor is None:
+            return {**comum, "estado": "vazio_legitimo",
+                    "motivo_indisponivel": f"Nenhum pedido Mercado Livre em {janela}."}
+        if not com_dado:
+            return {**comum, "estado": "sem_fonte",
+                    "motivo_indisponivel": MOTIVO_ML_NAO_ENTREGUE_AUSENTE}
+        aviso = None
+        if sem_dado:
+            aviso = ("Dado de não entregue ausente na fonte para: "
+                     + ", ".join(sem_dado)
+                     + ". Os pedidos dessas marcas entram no denominador do agregado, "
+                       "que pode estar subestimado.")
+        return {**comum, "estado": "dado", "valor": float(valor),
+                "aviso_frescor": aviso}
+
+    return _indicador(codigo, _dinamico)
+
+
 def _ml_expedicao(res: Optional[dict], falhou: bool,
                   marcas_ml: Optional[list[str]]) -> Indicador:
     codigo = "ml_expedicao_48h_torre"
@@ -372,8 +416,7 @@ def _canal_ml(db, selecionadas: list[str], filtrado: bool, hoje: date,
         oficial,
         _ml_quality("ml_cancelamento_torre", "ml_cancel_rate_pct",
                     qualidade, q_falhou, janela),
-        _ml_quality("ml_nao_entregue_torre", "ml_not_delivered_rate_pct",
-                    qualidade, q_falhou, janela),
+        _ml_nao_entregue(qualidade, q_falhou, janela),
         _ml_expedicao(expedicao, e_falhou, brand_keys),
     ]
     return CanalResposta(canal="mercado_livre",
