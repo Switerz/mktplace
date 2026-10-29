@@ -77,7 +77,7 @@ Digite o `meta_anterior` de volta na tela (vazio quando era `NULL`) e salve.
 
 ## Fora deste escopo
 
-- Usar as metas na Gerencial (atingimento, projeção contra a meta) — próxima entrega.
+- Usar as metas na Gerencial: entregue em seguida (GERENCIAL-METAS-1, seção abaixo).
 - `apps/web/src/lib/goals-data.ts` (metas antigas fixas no código, sem uso em nenhuma tela) ficou intocado.
 
 ## Gerencial contra a meta (GERENCIAL-METAS-1)
