@@ -391,6 +391,75 @@ def test_reconciliacao_divergente_aborta(amb, monkeypatch):
     assert amb["audit"][-1][0] == "failed" and "ReconciliacaoFalhou" in amb["audit"][-1][1]
 
 
+class EngineCommitAmbiguo(Engine):
+    """A transacao inteira roda e o erro chega NO COMMIT (ACK perdido): o servidor pode ter confirmado."""
+
+    @contextmanager
+    def begin(self):
+        yield self.conn
+        raise OSError("server closed the connection unexpectedly")
+
+
+class LogGravador:
+    def __init__(self):
+        self.msgs = []
+
+    def _grava(self, msg, *args):
+        self.msgs.append(msg % args if args else msg)
+
+    error = warning = info = _grava
+
+
+PROMESSAS_SEM_PROVA = ("revertid", "rollback", "nada foi gravado", "nada foi confirmado", "desfeit")
+
+
+def _sem_promessa(msgs):
+    return [m for m in msgs if any(p in m.lower() for p in PROMESSAS_SEM_PROVA)]
+
+
+@pytest.mark.parametrize("desfecho", ["linha_ja_terminal", "auditoria_inacessivel"])
+def test_commit_ambiguo_loga_estado_indeterminado_sem_prometer(amb, monkeypatch, desfecho):
+    erro = pub.AuditoriaNaoFechou("ja' terminal") if desfecho == "linha_ja_terminal" else OSError("sem rede")
+    conn, log = _conn_certo(), LogGravador()
+    monkeypatch.setattr(pub, "local_engine", lambda: EngineCommitAmbiguo(conn))
+    monkeypatch.setattr(pub, "audit_finish", lambda sid, st, **kw: (_ for _ in ()).throw(erro))
+    monkeypatch.setattr(pub, "uuid", types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex="run-amb")))
+    monkeypatch.setattr(pub, "logger", log)
+    with pytest.raises(OSError, match="closed the connection"):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
+    assert "status = 'success'" in conn.sqls[-1][0]          # success foi no mesmo COMMIT ambiguo
+    assert len(log.msgs) == 1
+    m = log.msgs[0]
+    assert m.startswith("estado INDETERMINADO: ") and "pode ter sido confirmado" in m
+    assert "conferir audit.source_sync_run (sync_run_id=9)" in m and "source_run_id=run-amb" in m
+    assert m.endswith("antes de republicar") and _sem_promessa(log.msgs) == []
+
+
+def test_commit_ambiguo_com_failed_gravado_nao_loga_indeterminado(amb, monkeypatch):
+    # `failed` so' casa linha 'running': grava-lo prova que o COMMIT da publicacao nao confirmou.
+    log = LogGravador()
+    monkeypatch.setattr(pub, "local_engine", lambda: EngineCommitAmbiguo(_conn_certo()))
+    monkeypatch.setattr(pub, "logger", log)
+    with pytest.raises(OSError):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
+    assert amb["audit"][-1][0] == "failed" and "OSError" in amb["audit"][-1][1] and log.msgs == []
+
+
+def test_recusa_com_auditoria_inacessivel_nao_promete(amb, monkeypatch):
+    log = LogGravador()
+    monkeypatch.setattr(pub, "_ler", lambda i, f: dict(zip(("linhas", "cobertura"), _raw_parcial())))
+    monkeypatch.setattr(pub, "audit_start", lambda n: (_ for _ in ()).throw(OSError("sem rede")))
+    monkeypatch.setattr(pub, "logger", log)
+    with pytest.raises(pub.PublicacaoRecusada):
+        pub.run(apply=True, hoje=date(2026, 10, 20))
+    assert len(log.msgs) == 1 and "conferir audit.source_sync_run" in log.msgs[0]
+    assert _sem_promessa(log.msgs) == []
+
+
+def test_docstring_nao_promete_rollback_no_exit_1():
+    assert "rollback, nada confirmado" not in pub.__doc__ and "INDETERMINADO" in pub.__doc__
+
+
 class ConnLeitura:
     def __init__(self, snapshot=pub.SNAPSHOT_ESPERADO):
         self.snapshot, self.sqls = snapshot, []
