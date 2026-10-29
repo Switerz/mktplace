@@ -124,9 +124,49 @@ cd apps/api && alembic upgrade 029          # papel administrativo; cria só as 
 psql "$NEON_ADMIN_URL" -v ON_ERROR_STOP=1 -1 \
      -v papel_publicador=<papel do publicador> -v papel_api=<papel da API> \
      -f db/sql/provisionamento/ml_full_stock_neon_grants.sql
-python -m pipelines.publish_ml_full_stock_daily                       # dry-run: confere o resumo
-ML_FULL_STOCK_PUBLISH_ENABLED=true python -m pipelines.publish_ml_full_stock_daily --apply
 ```
+
+### 7.1 Publicador: contrato do CLI (T-0019)
+
+O dry-run continua sem argumentos obrigatórios. O `--apply` exige **todas** as travas: `--apply`, `ML_FULL_STOCK_PUBLISH_ENABLED=true`, a 029 aplicada e mais três argumentos do chamador.
+
+| Argumento | Regra |
+|---|---|
+| `--marca <m>` | Repetível. Allowlist: `barbours`, `kokeshi`, `lescent`, `rituaria`. A fonte é **filtrada** para essas marcas; marca com fotografia que não foi pedida sai em `marcas_ignoradas` e nunca é gravada. Marca pedida sem fotografia faz o publicador recusar. |
+| `--raw-run <marca>=<run_id>` | Um por marca pedida. Antes de qualquer DELETE/INSERT, toda linha lida (snapshot, ponte e status) da marca/data precisa ter esse `run_id`. Além disso, em `raw.ml_full_stock_runs` o run precisa ter pedido a marca, ter começado na data (fuso de São Paulo), estar `completo`/`parcial` e ter registrado `PUBLICADA` para ela. Se algo divergir, ele recusa. |
+| `--publish-run-id <uuid hex 32>` | Gerado pelo chamador **antes** do apply e gravado como `source_run_id`. Se o id já existir em alguma fato, ele recusa (a checagem roda antes e de novo dentro do lock). |
+
+```bash
+# 1) dry-run: o JSON traz `linhagem_raw` (run_id por marca) para montar o --raw-run
+python -m pipelines.publish_ml_full_stock_daily --ref-date 2026-10-28 \
+       --marca barbours --raw-run barbours=<run_id>        # mesma conferência, sem escrita
+
+# 2) apply só da Barbours
+PID=$(python -c "import uuid; print(uuid.uuid4().hex)")    # guardar ANTES de rodar
+ML_FULL_STOCK_PUBLISH_ENABLED=true python -m pipelines.publish_ml_full_stock_daily --apply \
+       --ref-date 2026-10-28 --marca barbours --raw-run barbours=<run_id> --publish-run-id "$PID"
+
+# 3) depois de timeout / JSON perdido / exit 1 com estado indeterminado (só leitura, sem flag)
+python -m pipelines.publish_ml_full_stock_daily --diagnosticar --ref-date 2026-10-28 --publish-run-id "$PID"
+```
+
+**Saída.** O stdout traz **só o JSON final**. Os logs vão para o stderr: os handlers do `get_logger` que apontam para o stdout são redirecionados no `main()`, e qualquer `print` durante o run também vai para o stderr. Erros, inclusive de argumento, saem como JSON com `erro_classe` e `motivo` sanitizado (sem host, porta, usuário, IP ou DSN).
+
+| Exit | Significado | `estado_transacao` |
+|---|---|---|
+| 0 | dry-run, diagnóstico ou apply com commit e auditoria ok | `commit_confirmado` (no apply) |
+| 2 | recusa: travas, contrato, linhagem, marca, `publish-run-id` reutilizado. Nada gravado | `nao_iniciada` ou `revertida_comprovada` (recusa sob o lock) |
+| 5 | **commit confirmado com pendência**: as fatos foram gravadas, mas o `audit_finish` falhou (`auditoria_ok=false`, `erro_auditoria`) | `commit_confirmado` |
+| 1 | erro (lock, reconciliação, conexão…) | `nao_iniciada`, `revertida_comprovada` (exceção antes do COMMIT, rollback feito) ou `indeterminado` (falhou o próprio COMMIT: rode `--diagnosticar`) |
+
+**Diagnóstico.** `--diagnosticar` abre uma transação `READ ONLY` no Neon, sem lock e sem escrita, e devolve:
+- as linhas por fato e por marca com aquele `source_run_id` na data;
+- as linhas do id em outras datas;
+- o `source_run_id` vigente por marca.
+
+O `veredito` é `commit_confirmado` (há linhas) ou `nenhuma_linha`. `nenhuma_linha` não distingue "não houve commit" de "outra publicação já substituiu o dia/marca": por isso o chamador deve diagnosticar antes de republicar.
+
+Contraprova em PG16 descartável (16/16): `.artefacts/deliveries/ml-full/publicacao-contrato/teste/contraprova_pg.py` (não versionado).
 
 **Atenção à cadeia:** se o #78 (028, DRE) for mesclado antes, o `down_revision` da 029 precisa ser reencadeado antes do `upgrade`. O certo é aplicar a cadeia que estiver na `main`, nunca uma revisão solta.
 
