@@ -1,4 +1,4 @@
-"""METAS-1 — metas mensais de GMV (migration 031, servico, rotas).
+"""METAS-1 — metas mensais de GMV (migration 032, servico, rotas).
 
 Sem banco: a regra de alteracao (`planejar`) e' pura, e as rotas sao
 exercitadas com o servico substituido. O SQL real e' coberto pelo teste de
@@ -24,11 +24,11 @@ from app.routers import metas as rota
 from app.schemas.metas import Canal, Marca
 from app.services import metas_service as svc
 
-MIGRATION = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "031_create_meta_gmv_mensal.py"
+MIGRATION = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "032_create_meta_gmv_mensal.py"
 
 
 def _migration():
-    """Constantes da 031 sem importar `alembic`: a pasta `apps/api/alembic`
+    """Constantes da 032 sem importar `alembic`: a pasta `apps/api/alembic`
     sombreia o pacote real quando os testes rodam daqui. So' a linha do import
     sai; o resto do modulo executa como esta."""
     fonte = MIGRATION.read_text(encoding="utf-8").replace("from alembic import op\n", "")
@@ -57,9 +57,9 @@ def test_ddl_escreve_as_listas_literalmente_no_check():
     assert tuple(x.strip(" '") for x in canais.split(",")) == svc.CANAIS
 
 
-def test_migration_encadeia_na_030_e_cria_so_as_duas_tabelas():
+def test_migration_encadeia_na_031_e_cria_so_as_duas_tabelas():
     m = _migration()
-    assert (m.revision, m.down_revision) == ("031", "030")
+    assert (m.revision, m.down_revision) == ("032", "031")
     criadas = re.findall(r"CREATE TABLE ([a-z_.]+)", " ".join(m.UPGRADE_SQL))
     assert criadas == ["marts.meta_gmv_mensal", "marts.meta_gmv_mensal_historico"]
     assert "INSERT" not in " ".join(m.UPGRADE_SQL).upper()

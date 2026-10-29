@@ -161,11 +161,26 @@ export const ML_FULL_ESTOQUE_NAV: NavPage = {
   label: "Estoque Full Mercado Livre",
 };
 
+/**
+ * T-0014 — item da tela "Performance das contas", atras de
+ * `NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED` (helper `habilitado()` de
+ * `src/lib/performance-contas.ts`).
+ *
+ * Entra em "Operações", grupo existente: saude operacional das contas por
+ * canal. Rota de TOPO e nao prefixada por nenhuma rota existente
+ * (`isNavItemActive` casa por prefixo).
+ */
+export const PERFORMANCE_CONTAS_NAV: NavPage = {
+  href: "/performance-contas",
+  label: "Performance das contas",
+};
+
 export interface NavFlags {
   expedicao?: boolean;
   shopeeFbs?: boolean;
   estoqueFull?: boolean;
   mlFullEstoque?: boolean;
+  performanceContas?: boolean;
 }
 
 export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
@@ -177,6 +192,7 @@ export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
   if (f.shopeeFbs) extras.push(SHOPEE_FBS_NAV);
   if (f.estoqueFull) extras.push(ESTOQUE_FULL_NAV);
   if (f.mlFullEstoque) extras.push(ML_FULL_ESTOQUE_NAV);
+  if (f.performanceContas) extras.push(PERFORMANCE_CONTAS_NAV);
   if (!extras.length) return NAV_SECTIONS;
   return NAV_SECTIONS.map((s) =>
     s.label === "Operações" ? { ...s, pages: [...s.pages, ...extras] } : s,
@@ -210,6 +226,8 @@ export function getRouteTitle(pathname: string): string {
   // ML-FULL-STOCK-API-1: resolvido a' parte, sem mexer na lista abaixo (que
   // e' pinada por teste). Mesma logica: quem esta' na rota passou pelo guard.
   if (pathname.startsWith(ML_FULL_ESTOQUE_NAV.href)) return ML_FULL_ESTOQUE_NAV.label;
+  // T-0014: idem -- quem esta' na rota passou pelo guard da pagina.
+  if (pathname.startsWith(PERFORMANCE_CONTAS_NAV.href)) return PERFORMANCE_CONTAS_NAV.label;
   for (const section of navSections({ expedicao: true, shopeeFbs: true })) {
     for (const page of section.pages) {
       if (page.disabled) continue;

@@ -7,7 +7,7 @@ Primeira rota de ESCRITA da API. Sem login por decisao do proprietario
 (qualquer pessoa com o link edita), entao a protecao e':
   - validacao fechada (marcas, canais, faixa de valor e de mes);
   - limite de gravacoes por minuto, por cliente e global;
-  - historico de toda alteracao no banco (migration 031).
+  - historico de toda alteracao no banco (migration 032).
 
 Falha de banco vira 503 com mensagem fixa: o texto da excecao do
 SQLAlchemy pode carregar o DSN.
