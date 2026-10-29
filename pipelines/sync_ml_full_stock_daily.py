@@ -2,7 +2,8 @@
 
 O que este pipeline e' HOJE
 ---------------------------
-Somente leitura e somente dry-run. Le, no Data Mart e em sessao READ ONLY, a
+Somente leitura e somente dry-run. Le, no Data Mart e numa unica transacao
+REPEATABLE READ READ ONLY (`iniciar_leitura_consistente`), a
 fotografia publicada pela DAG `mercadolivre_full_stock_snapshot` do airflow
 (`raw.ml_full_inventory_snapshot`, `_unavailable`, `_listing`) e as vendas
 Full pagas dos 28 dias completos anteriores. Calcula os indicadores por
@@ -16,6 +17,8 @@ O que ele NAO faz (de proposito)
 - NAO assume que as tabelas `raw.ml_full_*` existem. A DDL delas nao foi
   aplicada; ausentes, o resultado e' `fonte_inexistente`, nunca estoque zero.
 - NAO soma estoque por anuncio nem rateia venda sem vinculo unico.
+- NAO imprime `run_id`: ele e' lido em cada linha (snapshot, status, ponte) so'
+  para o publicador conferir a linhagem RAW; o resumo continua so' agregado.
 - NAO trata `transfer` como remessa do operador (Eli) ao Full: essa remessa
   vem de NF do Bling e e' outro fato.
 
@@ -48,19 +51,19 @@ SQL_PRESENCA = text("SELECT " + ", ".join(f"to_regclass('{t}') IS NOT NULL" for 
 
 SQL_SNAPSHOT = text("""
 SELECT brand, seller_id, inventory_id, read_status, available_quantity,
-       not_available_quantity, total_coerente
+       not_available_quantity, total_coerente, run_id
   FROM raw.ml_full_inventory_snapshot
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)
 
 SQL_STATUS = text("""
-SELECT brand, seller_id, inventory_id, status_raw, quantity
+SELECT brand, seller_id, inventory_id, status_raw, quantity, run_id
   FROM raw.ml_full_inventory_unavailable
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)
 
 SQL_PONTE = text("""
-SELECT brand, seller_id, item_id, variation_id, inventory_id, logistic_type, listing_status
+SELECT brand, seller_id, item_id, variation_id, inventory_id, logistic_type, listing_status, run_id
   FROM raw.ml_full_inventory_listing
  WHERE ref_date = :ref_date AND brand = ANY(:marcas)
 """)
@@ -87,6 +90,29 @@ SELECT l.brand, l.item_id, COALESCE(l.variation_id::text, '0') AS variation_id,
  WHERE e.logistic_type = 'fulfillment'
  GROUP BY l.brand, l.item_id, COALESCE(l.variation_id::text, '0')
 """)
+
+
+#: Fotografia consistente: TODA a fonte (snapshot, status, ponte, vendas e runs)
+#: numa unica transacao REPEATABLE READ READ ONLY. Em READ COMMITTED cada SELECT
+#: ve' um instante diferente e uma republicacao do airflow entre eles intercala
+#: runs (ou esvazia a ponte/status). REPEATABLE READ e' permitido em hot standby
+#: (SERIALIZABLE nao e'). Por transacao: nada persiste na conexao do pool.
+SQL_LEITURA_CONSISTENTE = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+SQL_CONFERE_LEITURA = ("SELECT current_setting('transaction_isolation'), "
+                       "current_setting('transaction_read_only')")
+
+
+class LeituraInconsistente(RuntimeError):
+    """A transacao de leitura nao ficou REPEATABLE READ READ ONLY."""
+
+
+def iniciar_leitura_consistente(conn) -> None:
+    """PRIMEIRO comando da transacao de leitura; confere o efeito (fail closed)."""
+    conn.execute(text(SQL_LEITURA_CONSISTENTE))
+    linha = conn.execute(text(SQL_CONFERE_LEITURA)).fetchone()
+    if linha is None or tuple(linha) != ("repeatable read", "on"):
+        raise LeituraInconsistente(f"leitura_inconsistente: transacao {tuple(linha or ())!r}, "
+                                   "esperado ('repeatable read', 'on')")
 
 
 def janela_demanda(ref_date: date) -> tuple[date, date]:
@@ -146,7 +172,7 @@ def run(ref_date: date | None = None, agora: datetime | None = None) -> dict:
     ref_date = ref_date or _hoje_brt(agora)
     dm = DataMartSession()
     try:
-        dm.connection().connection.set_session(readonly=True)
+        iniciar_leitura_consistente(dm.connection())
         fonte = ler_fonte(dm.connection(), ref_date)
     finally:
         dm.rollback()

@@ -32,8 +32,11 @@ def ponte(brand, item, inv, var="0", lt="fulfillment", st="active", seller="S1")
 
 
 def cenario():
+    # Fiel ao produtor (airflow full_stock/snapshot.py L424): uma linha de snapshot por
+    # inventory_id NAO nulo da ponte, nas duas direcoes; status so' de inventario OK.
     snapshot = [snap("b", "IA", 56, nao=5), snap("b", "IB", 0), snap("b", "IC", status="NAO_ENCONTRADO"),
-                snap("b", "ID", 30), snap("b", "IE", 500)]
+                snap("b", "ID", 30), snap("b", "IE", 500),
+                snap("b", "IV1", status="NAO_ENCONTRADO"), snap("b", "IV2", status="NAO_ENCONTRADO")]
     status = [{"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "transfer", "quantity": 4},
               {"brand": "b", "seller_id": "S1", "inventory_id": "IA", "status_raw": "statusNovo", "quantity": 1}]
     p = [ponte("b", "M1", "IA"), ponte("b", "M2", "IA"), ponte("b", "M3", "IA", st="closed", lt="cross_docking"),
@@ -78,7 +81,7 @@ def test_venda_de_anuncio_inativo_entra_na_velocidade():
 
 def test_variacao_casa_pelo_par_item_variacao():
     s, st, p, v = cenario()
-    s = s + [snap("b", "IV1", 10), snap("b", "IV2", 10)]
+    s = [x for x in s if x["inventory_id"] not in ("IV1", "IV2")] + [snap("b", "IV1", 10), snap("b", "IV2", 10)]
     v = {**v, ("b", "MV", "11"): 5}
     l = por_inv(T.indicadores(s, st, p, v)[0])
     assert l["IV1"]["unidades_28d"] == 5 and l["IV2"]["unidades_28d"] == 0
@@ -219,17 +222,35 @@ def test_ler_fonte_para_se_tabela_ausente():
     assert len(c.sqls) == 1
 
 
-def test_run_usa_sessao_read_only_e_sempre_fecha(monkeypatch):
+@pytest.mark.parametrize("sql", [mod.SQL_SNAPSHOT, mod.SQL_STATUS, mod.SQL_PONTE])
+def test_linhas_raw_trazem_o_run_id_da_linhagem(sql):
+    # O publicador confere a linhagem RAW linha a linha, no MESMO SELECT dos dados.
+    colunas = str(sql).split("SELECT", 1)[1].split("FROM", 1)[0]
+    assert "run_id" in [c.strip() for c in colunas.split(",")]
+
+
+def test_resumo_dry_run_nao_expoe_run_id():
+    s, st, p, v = cenario()
+    marcar = lambda xs: [dict(x, brand="barbours", run_id="run-x") for x in xs]
+    r = mod.resumir({"snapshot": marcar(s), "status": marcar(st), "ponte": marcar(p), "vendas": {}},
+                    date(2026, 10, 20))
+    assert "run-x" not in json.dumps(r, default=str)
+
+
+def test_run_usa_transacao_repeatable_read_read_only_e_sempre_fecha(monkeypatch):
     eventos = []
 
     class Raw:
-        def set_session(self, **kw):
+        def set_session(self, **kw):                 # persistiria no pool: nao e' mais usado
             eventos.append(("set_session", kw))
 
     class Conexao:
         connection = Raw()
 
         def execute(self, sql, params=None):
+            eventos.append(str(sql))
+            if str(sql) == mod.SQL_CONFERE_LEITURA:
+                return _Res([("repeatable read", "on")])
             return _Res([(False, False, False)])
 
     class Sessao:
@@ -245,8 +266,26 @@ def test_run_usa_sessao_read_only_e_sempre_fecha(monkeypatch):
     monkeypatch.setattr(mod, "DataMartSession", Sessao)
     r = mod.run(date(2026, 10, 20))
     assert r["estado"] == "fonte_inexistente"
-    assert ("set_session", {"readonly": True}) in eventos
+    assert eventos[0] == mod.SQL_LEITURA_CONSISTENTE and eventos[1] == mod.SQL_CONFERE_LEITURA
+    assert not any(isinstance(e, tuple) for e in eventos)
     assert eventos[-2:] == ["rollback", "close"]
+
+
+@pytest.mark.parametrize("resposta", [("read committed", "on"), ("repeatable read", "off"), None])
+def test_leitura_que_nao_ficou_repeatable_read_read_only_falha_fechada(resposta):
+    class Conexao:
+        def __init__(self):
+            self.sqls = []
+
+        def execute(self, sql, params=None):
+            self.sqls.append(str(sql))
+            return _Res([resposta])
+
+    c = Conexao()
+    with pytest.raises(mod.LeituraInconsistente, match="leitura_inconsistente"):
+        mod.iniciar_leitura_consistente(c)
+    assert c.sqls == [mod.SQL_LEITURA_CONSISTENTE, mod.SQL_CONFERE_LEITURA]
+    assert "SERIALIZABLE" not in mod.SQL_LEITURA_CONSISTENTE          # proibido em hot standby
 
 
 # ---------------------------------------------------------------------------
