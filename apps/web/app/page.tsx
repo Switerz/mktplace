@@ -25,7 +25,7 @@
  * A lacuna diagnosticada no V2-0 morre por construcao: a grade da segunda dobra
  * nao usa `items-start`, cada card E' o item da grade, e nao existe `row-span`.
  */
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { useGerencialSources } from "@/hooks/useGerencialSources";
@@ -69,6 +69,19 @@ import VolumeHealthCard from "@/components/gerencial/VolumeHealthCard";
 import BrandChannelMatrix, { cellKey, type SignalsState } from "@/components/gerencial/BrandChannelMatrix";
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
+import MetaHero from "@/components/gerencial/MetaHero";
+import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
+import MarcasMeta from "@/components/gerencial/MarcasMeta";
+import { useMetasDoMes } from "@/hooks/useMetasDoMes";
+import {
+  decisoesDoTopo,
+  mesDaMeta,
+  metaDoEscopo,
+  progressoMeta,
+  ultimoDiaComDado,
+  type ProgressoMeta,
+} from "@/lib/gerencial/meta-progress";
+import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
   CommercialAttentionDrilldownContent,
@@ -218,6 +231,58 @@ function GerencialInner() {
     return map;
   }, [sources.canais.data]);
 
+  // ---- metas (GERENCIAL-METAS-1) -----------------------------------------
+  // Fonte PROPRIA (`useMetasDoMes`), fora do hook das fontes do Data Mart: a
+  // meta falhar nao apaga nenhum outro bloco. So' ha meta quando o periodo e'
+  // um mes inteiro, ou o mes corrente ate' hoje.
+  const hoje = useMemo(() => hojeBrt(), []);
+  const mesMeta = mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
+  const metas = useMetasDoMes(mesMeta);
+  const metaEscopo = useMemo(
+    () => metaDoEscopo(metas.celulas, filters.channels, filters.brands),
+    [metas.celulas, filters.channels, filters.brands],
+  );
+  const ultimoDia = useMemo(
+    () => ultimoDiaComDado(merged.buckets, merged.granularity),
+    [merged.buckets, merged.granularity],
+  );
+  const progresso = useMemo(
+    () =>
+      mesMeta && metas.status === "fresh"
+        ? progressoMeta({ meta: metaEscopo.total, realizado: overview?.gmv ?? null, mes: mesMeta, hoje, ultimoDia })
+        : null,
+    [mesMeta, metas.status, metaEscopo.total, overview, hoje, ultimoDia],
+  );
+  const progressoPorMarca = useMemo(() => {
+    const mapa: Record<string, ProgressoMeta | null> = {};
+    if (!mesMeta || metas.status !== "fresh") return mapa;
+    for (const b of brands) {
+      mapa[b.brand] = progressoMeta({
+        meta: metaEscopo.porMarca[b.brand] ?? null,
+        realizado: b.total_gmv,
+        mes: mesMeta,
+        hoje,
+        ultimoDia,
+      });
+    }
+    return mapa;
+  }, [mesMeta, metas.status, metaEscopo.porMarca, brands, hoje, ultimoDia]);
+  const decisoes = useMemo(
+    // O aviso de dado ja' aparece no bloco principal: aqui so' os comerciais.
+    () => decisoesDoTopo(queue.commercial, []).map((d) => d.item as CommercialAttentionItem),
+    [queue.commercial],
+  );
+  const avisoDeDado = queue.dataConfidence.find((d) => d.severity === "attention") ?? null;
+
+  // "Mais detalhes" comeca fechado; "Ver todos os sinais" abre e rola ate' la'.
+  const detalhesRef = useRef<HTMLDetailsElement>(null);
+  const abrirDetalhes = useCallback(() => {
+    const el = detalhesRef.current;
+    if (!el) return;
+    el.open = true;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   const signalsState: SignalsState = sources.canais.status.loading
     ? "loading"
     : sources.canais.status.error
@@ -326,12 +391,29 @@ function GerencialInner() {
         {liveAnnouncement}
       </span>
 
-      {/* ---- Dobra 1: o que aconteceu ----
+      {/* ---- Dobra 1: vamos bater a meta? (GERENCIAL-METAS-1) ----
           Nenhum gate global daqui para baixo: cada bloco decide sozinho. */}
-      <ConfidenceStrip
-        data={confidence}
-        loading={confidence.checkingCount === confidence.selectedCount && confidence.selectedCount > 0}
-        onOpen={() => setDialog({ kind: "confidence" })}
+      <MetaHero
+        periodLabel={periodLabel}
+        loading={overviewStatus.loading}
+        error={overviewStatus.error}
+        gmv={overview?.gmv ?? null}
+        prevGmv={overview?.prev_gmv ?? null}
+        momPct={overview?.gmv_mom_pct ?? null}
+        compareActive={filters.compare}
+        channels={filters.channels}
+        gmvByChannel={{
+          tiktok: overview?.tiktok_gmv ?? null,
+          ml: overview?.ml_gmv ?? null,
+          shopee: overview?.shopee_gmv ?? null,
+        }}
+        mesMeta={mesMeta}
+        metasStatus={metas.status === "idle" ? "fresh" : metas.status}
+        progresso={progresso}
+        ultimoDia={ultimoDia}
+        aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}
+        metasHref={mesMeta ? `/metas?mes=${mesMeta}` : "/metas"}
+        onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
       />
 
       <KpiBand
@@ -340,13 +422,23 @@ function GerencialInner() {
         error={overviewStatus.error}
         onOpen={(key) => setDialog({ kind: "kpi", key })}
         onRetry={sources.retry}
+        semGmv
       />
 
-      {/* ---- Dobra 2: como evoluiu / o que atender ----
-          12 colunas: 8/4 no tablet e 7/5 no desktop. SEM `items-start` e SEM
-          `row-span`: os dois itens esticam juntos. */}
+      <DecisoesTopo
+        itens={decisoes}
+        total={queue.commercial.length}
+        loading={sources.executiveSummary.status.loading}
+        error={sources.executiveSummary.status.error}
+        onOpen={(item) => setDialog({ kind: "commercial", item })}
+        onVerTodos={abrirDetalhes}
+      />
+
+      {/* ---- Dobra 2: como evoluiu / onde ----
+          12 colunas: 7/5 a partir de `lg`. SEM `items-start` e SEM `row-span`:
+          os dois itens esticam juntos. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-        <div className="order-2 lg:order-none lg:col-span-8 xl:col-span-7">
+        <div className="lg:col-span-7">
           <EvolutionCard
             merged={merged}
             metric={metric}
@@ -361,7 +453,55 @@ function GerencialInner() {
             highlightedChannel={highlightedChannel}
           />
         </div>
-        <div className="order-1 lg:order-none lg:col-span-4 xl:col-span-5">
+        <div className="lg:col-span-5">
+          <MarcasMeta
+            brands={brands}
+            channels={filters.channels}
+            progressoPorMarca={progressoPorMarca}
+            compareActive={filters.compare}
+            loading={sources.brands.status.loading}
+            error={sources.brands.status.error}
+            brandHref={brandHref}
+          />
+        </div>
+      </div>
+
+      {/* ---- Dobra 3: marca x canal ---- */}
+      <BrandChannelMatrix
+        matrix={matrix}
+        loading={sources.brands.status.loading}
+        error={sources.brands.status.error}
+        signalsByCell={signalsByCell}
+        signalsState={signalsState}
+        onOpenCell={(brand, channel) => setDialog({ kind: "matrix", brand, channel })}
+        onOpenChannelHeader={(channel) => setDialog({ kind: "matrixChannel", channel })}
+        brandHref={brandHref}
+        onRetry={sources.retry}
+      />
+
+      {/* ---- Mais detalhes (GERENCIAL-METAS-1) ----
+          Profundidade sob demanda: tudo o que a V2 mostrava continua aqui,
+          cada bloco com a propria fonte e o proprio erro. Fechado por padrao
+          para a primeira dobra responder sozinha. */}
+      <details ref={detalhesRef} className="group rounded-xl border border-line bg-surface">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-3 text-sm font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+          <span>
+            Mais detalhes
+            <span className="ml-2 font-normal text-ink-faint">
+              confiança no dado, pulso e canais, saúde do volume, movimentos e fila completa
+            </span>
+          </span>
+          <span aria-hidden="true" className="text-ink-faint transition-transform group-open:rotate-180">
+            ▾
+          </span>
+        </summary>
+        <div className="flex flex-col gap-4 border-t border-line p-4">
+          <ConfidenceStrip
+            data={confidence}
+            loading={confidence.checkingCount === confidence.selectedCount && confidence.selectedCount > 0}
+            onOpen={() => setDialog({ kind: "confidence" })}
+          />
+
           <PulseChannelsColumn
             pulse={pulse}
             health={sources.executiveSummary.data?.health ?? null}
@@ -376,52 +516,37 @@ function GerencialInner() {
             onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
             channelsHref={buildHref("/canais")}
           />
+
+          <VolumeHealthCard
+            rows={volumeRows}
+            loading={sources.quality.status.loading}
+            error={sources.quality.status.error}
+            onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
+            onRetry={sources.retry}
+          />
+
+          <MovementsPanels
+            movements={movements}
+            concentration={concentration}
+            loading={sources.brands.status.loading}
+            error={sources.brands.status.error}
+            onOpenMovement={(movement) => setDialog({ kind: "movement", movement })}
+            onOpenConcentration={(entry) => setDialog({ kind: "concentration", entry })}
+            produtosHref={buildHref("/produtos")}
+            onRetry={sources.retry}
+          />
+
+          <AttentionQueue
+            commercial={queue.commercial}
+            dataConfidence={queue.dataConfidence}
+            commercialLoading={sources.executiveSummary.status.loading}
+            commercialError={sources.executiveSummary.status.error}
+            onOpenCommercial={(item) => setDialog({ kind: "commercial", item })}
+            onOpenDataWarning={(item) => setDialog({ kind: "dataWarning", item })}
+            onRetry={sources.retry}
+          />
         </div>
-      </div>
-
-      {/* ---- Dobra 3: onde aconteceu ---- */}
-      <VolumeHealthCard
-        rows={volumeRows}
-        loading={sources.quality.status.loading}
-        error={sources.quality.status.error}
-        onOpenChannel={(channel) => setDialog({ kind: "volume", channel })}
-        onRetry={sources.retry}
-      />
-
-      <BrandChannelMatrix
-        matrix={matrix}
-        loading={sources.brands.status.loading}
-        error={sources.brands.status.error}
-        signalsByCell={signalsByCell}
-        signalsState={signalsState}
-        onOpenCell={(brand, channel) => setDialog({ kind: "matrix", brand, channel })}
-        onOpenChannelHeader={(channel) => setDialog({ kind: "matrixChannel", channel })}
-        brandHref={brandHref}
-        onRetry={sources.retry}
-      />
-
-      {/* ---- Dobra 4: por que ---- */}
-      <MovementsPanels
-        movements={movements}
-        concentration={concentration}
-        loading={sources.brands.status.loading}
-        error={sources.brands.status.error}
-        onOpenMovement={(movement) => setDialog({ kind: "movement", movement })}
-        onOpenConcentration={(entry) => setDialog({ kind: "concentration", entry })}
-        produtosHref={buildHref("/produtos")}
-        onRetry={sources.retry}
-      />
-
-      {/* ---- Dobra 5: para onde ir ---- */}
-      <AttentionQueue
-        commercial={queue.commercial}
-        dataConfidence={queue.dataConfidence}
-        commercialLoading={sources.executiveSummary.status.loading}
-        commercialError={sources.executiveSummary.status.error}
-        onOpenCommercial={(item) => setDialog({ kind: "commercial", item })}
-        onOpenDataWarning={(item) => setDialog({ kind: "dataWarning", item })}
-        onRetry={sources.retry}
-      />
+      </details>
 
       {/* ---- Shell UNICO de dialogo, para todos os drill-downs ---- */}
       <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle}>

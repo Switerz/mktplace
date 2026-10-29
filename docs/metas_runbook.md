@@ -79,3 +79,21 @@ Digite o `meta_anterior` de volta na tela (vazio quando era `NULL`) e salve.
 
 - Usar as metas na Gerencial (atingimento, projeção contra a meta) — próxima entrega.
 - `apps/web/src/lib/goals-data.ts` (metas antigas fixas no código, sem uso em nenhuma tela) ficou intocado.
+
+## Gerencial contra a meta (GERENCIAL-METAS-1)
+
+A Visão Gerencial lê `GET /api/v1/metas/{AAAA-MM}` quando o período filtrado é
+um mês só, começando no dia 1, e vai até o fim do mês ou até hoje (preset "Mês
+atual"). Nesse caso o bloco principal mostra:
+
+- **atingimento**: GMV realizado ÷ meta do escopo (canais e marcas filtrados);
+- **projeção** pelo ritmo: realizado ÷ dias com dado × dias do mês. "Dias com dado"
+  é o último dia com venda na série diária, porque o Data Mart chega com D-1;
+- **quanto falta por dia** nos dias restantes;
+- **selo**: `Meta atingida` (realizado ≥ meta), `No caminho` (projeção ≥ meta),
+  `Atenção` (projeção entre 95% e 100%), `Abaixo do ritmo` (< 95%) e
+  `Meta não atingida` (mês encerrado abaixo da meta).
+
+Fora disso (um período que não é um mês, ou um mês sem meta) o bloco mostra o GMV
+contra o período anterior e aponta para a aba Metas. Ele nunca inventa uma meta.
+As regras estão em `apps/web/src/lib/gerencial/meta-progress.ts`.
