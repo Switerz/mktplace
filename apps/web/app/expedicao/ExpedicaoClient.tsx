@@ -871,7 +871,7 @@ export default function ExpedicaoClient({
       {LDR_SHOPEE_LIGADA ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
-    <SecaoGerencial titulo="Prazo" dica="O canal não publica prazo de envio.">
+    <SecaoGerencial titulo="Prazo" dica="O canal não publica prazo de despacho.">
       <Panel
         titulo={
           <>
