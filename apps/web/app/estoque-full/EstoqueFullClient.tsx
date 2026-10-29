@@ -65,6 +65,7 @@ import {
   rotuloCD,
   skuExibido,
   temFiltroAtivo,
+  VENDA_NAO_INFORMADA,
   type Classificacao,
   type EstoqueFullResponse,
   type FiltrosEstoque,
@@ -150,7 +151,11 @@ function Etiqueta({ classe }: { classe: Classificacao }) {
   );
 }
 
-/** Distribuicao por CD. `null` em `is_saleable` vira "não informado". */
+/**
+ * Distribuicao por CD. `false` em `is_saleable` vira "(não vendável)"; `null`
+ * vira `VENDA_NAO_INFORMADA` ("(venda não informada)") e nunca e' tratado como
+ * `false` nem como zero.
+ */
 function PorCD({ produto }: { produto: ProdutoEstoque }) {
   if (!produto.por_cd.length) return <span className="text-slate-400">{SEM_DADO}</span>;
   return (
@@ -163,7 +168,7 @@ function PorCD({ produto }: { produto: ProdutoEstoque }) {
             <span className="text-amber-700"> (não vendável)</span>
           )}
           {cd.is_saleable === null && (
-            <span className="text-slate-400"> (não informado)</span>
+            <span className="text-slate-400"> {VENDA_NAO_INFORMADA}</span>
           )}
         </li>
       ))}
@@ -365,7 +370,7 @@ export default function EstoqueFullClient() {
             type="button"
             aria-pressed={filtros.brands.includes(m)}
             onClick={() => alternarMarca(m)}
-            className={`text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+            className={`inline-flex items-center min-h-11 sm:min-h-0 text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
               filtros.brands.includes(m)
                 ? "bg-violet-600 border-violet-600 text-white font-semibold"
                 : "bg-white border-slate-200 text-slate-600 hover:border-violet-300"
@@ -386,7 +391,7 @@ export default function EstoqueFullClient() {
             type="button"
             aria-pressed={filtros.classificacoes.includes(c)}
             onClick={() => alternarClasse(c)}
-            className={`text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+            className={`inline-flex items-center min-h-11 sm:min-h-0 text-sm rounded-full border px-3 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
               filtros.classificacoes.includes(c)
                 ? "bg-violet-600 border-violet-600 text-white font-semibold"
                 : "bg-white border-slate-200 text-slate-600 hover:border-violet-300"

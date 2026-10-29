@@ -46,6 +46,7 @@ import {
   rotuloCD,
   skuExibido,
   temFiltroAtivo,
+  VENDA_NAO_INFORMADA,
   type EstoqueFullOk,
   type EstoqueFullResponse,
   type Frescor,
@@ -746,4 +747,40 @@ test("AVISO_CONTEXTO cita apenas colunas presentes na tabela", () => {
     assert.ok(cabecalhos.includes(c), `"${c}" nao e' coluna da tabela`);
   }
   assert.ok(!AVISO_CONTEXTO.includes("Disponível"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0020 — smoke 29/10: situacao de venda sem repetir "não informado"
+// ---------------------------------------------------------------------------
+
+test("is_saleable null usa VENDA_NAO_INFORMADA, distinto do rotulo do CD", () => {
+  assert.equal(VENDA_NAO_INFORMADA, "(venda não informada)");
+  // "CD não informado: 0 (não informado)" lia como repeticao.
+  assert.ok(!VENDA_NAO_INFORMADA.includes(CD_NAO_INFORMADO));
+  assert.notEqual(VENDA_NAO_INFORMADA, "(não informado)");
+  assert.notEqual(VENDA_NAO_INFORMADA, "(não vendável)");
+  assert.ok(CLIENT_SRC.includes("> {VENDA_NAO_INFORMADA}</span>"));
+  assert.ok(!CLIENT_SRC.includes(" (não informado)</span>"));
+  // false continua com o proprio rotulo
+  assert.ok(CLIENT_SRC.includes(" (não vendável)</span>"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0020 — smoke 29/10: pilulas de filtro com alvo de 44px no mobile
+// ---------------------------------------------------------------------------
+
+test("pilulas de conta e classificacao tem min-h-11 so' no mobile", () => {
+  const pilulas = [
+    ...CLIENT_SRC.matchAll(/className=\{`([^`$]*rounded-full border px-3[^`$]*)\$\{/g),
+  ].map((m) => new Set(m[1].trim().split(/\s+/)));
+  assert.equal(pilulas.length, 2, "esperava os dois grupos de pilulas");
+  for (const tokens of pilulas) {
+    assert.ok(tokens.has("min-h-11"), "alvo de toque de 44px no mobile");
+    assert.ok(tokens.has("sm:min-h-0"), "desktop mantem a altura compacta");
+    assert.ok(
+      tokens.has("inline-flex") && tokens.has("items-center"),
+      "min-h-11 so' rende alvo real com o conteudo centrado",
+    );
+    assert.ok(tokens.has("py-1"), "padding do desktop preservado");
+  }
 });
