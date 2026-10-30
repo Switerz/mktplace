@@ -47,6 +47,11 @@ import {
   subvalorDisponivelTotalML,
   todasSemEstoqueFullML,
   validarPayloadML,
+  identificacaoML,
+  seloAnunciosExtrasML,
+  SEM_IDENTIFICACAO_ML,
+  ROTULO_SKU_ITEM_VARIACAO_ML,
+  ROTULO_TITULO_ITEM_VARIACAO_ML,
   type FrescorML,
   type MarcaML,
   type MLFullEstoqueOk,
@@ -642,4 +647,56 @@ test("T-0051: a tela valida o payload, distingue os estados e nao diz 'nao opera
     CLIENT_SRC.split("marcasSemEstoqueFullML(payload.marcas).length > 0")[1]?.split("</span>")[0] ?? "";
   assert.ok(pill.includes("bg-slate-50"));
   assert.ok(!pill.includes("amber"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0018: identificacao por inventario (SKU · titulo, +N anuncios)
+// ---------------------------------------------------------------------------
+
+test("identificacao: 'SKU · titulo', so' um dos dois, ou 'sem identificação'", () => {
+  assert.deepEqual(identificacaoML({ sku: "SKU-1", titulo: "Shampoo 300ml" }), {
+    texto: "SKU-1 · Shampoo 300ml",
+    identificado: true,
+    avisoVariacao: null,
+  });
+  assert.equal(identificacaoML({ sku: null, titulo: "Perfume" }).texto, "Perfume");
+  assert.equal(identificacaoML({ sku: "SKU-2", titulo: null }).texto, "SKU-2");
+  // Ausente, nulo, vazio ou so' espacos: neutro e explicito, nunca vazio.
+  for (const vazio of [{}, { sku: null, titulo: null }, { sku: "  ", titulo: "" }]) {
+    const r = identificacaoML(vazio);
+    assert.equal(r.texto, SEM_IDENTIFICACAO_ML);
+    assert.equal(r.identificado, false);
+    assert.equal(r.avisoVariacao, null);
+  }
+  assert.equal(SEM_IDENTIFICACAO_ML, "sem identificação");
+});
+
+test("identificacao em variacao declara que o SKU e' do item", () => {
+  const r = identificacaoML({ sku: "SKU-1", titulo: "Kit", ancora_e_variacao: true });
+  assert.equal(r.avisoVariacao, ROTULO_SKU_ITEM_VARIACAO_ML);
+  assert.equal(ROTULO_SKU_ITEM_VARIACAO_ML, "SKU do item (variação)");
+  assert.equal(
+    identificacaoML({ sku: null, titulo: "Kit", ancora_e_variacao: true }).avisoVariacao,
+    ROTULO_TITULO_ITEM_VARIACAO_ML,
+  );
+  // Sem identificacao nao ha' o que qualificar.
+  assert.equal(identificacaoML({ sku: null, titulo: null, ancora_e_variacao: true }).avisoVariacao, null);
+  assert.equal(identificacaoML({ sku: "S", titulo: "T", ancora_e_variacao: null }).avisoVariacao, null);
+});
+
+test("selo '+N anúncios' so' com extras > 0; nulo/0 nao desenha selo", () => {
+  assert.equal(seloAnunciosExtrasML(2), "+2 anúncios");
+  assert.equal(seloAnunciosExtrasML(1), "+1 anúncio");
+  for (const v of [0, null, undefined, -1, Number.NaN]) {
+    assert.equal(seloAnunciosExtrasML(v as number | null | undefined), null);
+  }
+});
+
+test("a tabela mostra a identificacao com tokens existentes e sem ID do anuncio", () => {
+  assert.ok(CLIENT_SRC.includes(">Identificação</th>"));
+  assert.ok(CLIENT_SRC.includes("identificacaoML(i)"));
+  assert.ok(CLIENT_SRC.includes("seloAnunciosExtrasML(i.anuncios_extras)"));
+  assert.ok(CLIENT_SRC.includes("text-ink-muted italic"), "sem identificacao em tom neutro");
+  assert.ok(!CLIENT_SRC.includes("anuncio_ancora"), "o ID do anuncio nao chega a' tela");
+  assert.ok(!CLIENT_SRC.includes("inventory_id"));
 });

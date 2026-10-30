@@ -66,11 +66,13 @@ import {
   fmtOpcional,
   frescorLabelML,
   hojeSaoPauloML,
+  identificacaoML,
   isIndisponivelML,
   leituraLabel,
   mostrarAvisoVelhaML,
   motivoParcialLegivel,
   subtextoSaldoZeroML,
+  seloAnunciosExtrasML,
   subtituloTransferML,
   subvalorContagemML,
   subvalorDisponivelTotalML,
@@ -256,6 +258,7 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
             <thead>
               <tr className="text-left text-xs font-semibold text-slate-600 uppercase tracking-wide border-b border-slate-200">
                 <th scope="col" className="px-4 py-3">Marca</th>
+                <th scope="col" className="px-4 py-3">Identificação</th>
                 <th scope="col" className="px-4 py-3 text-right">
                   <span className="inline-flex items-center gap-1">
                     Disponível
@@ -281,12 +284,31 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
             </thead>
             <tbody>
               {/* key = ordinal da resposta: o ID do inventario nao sai na API publica. */}
-              {inventarios.map((i) => (
+              {inventarios.map((i) => {
+                const ident = identificacaoML(i);
+                const selo = seloAnunciosExtrasML(i.anuncios_extras);
+                return (
                 <tr
                   key={i.posicao}
                   className="border-b border-slate-100 last:border-0 align-top"
                 >
                   <td className="px-4 py-3 whitespace-nowrap text-slate-600">{tituloMarca(i.brand)}</td>
+                  <td className="px-4 py-3 min-w-[14rem] max-w-xs">
+                    {/* Rotulo do anuncio-ancora: atributo da linha, nunca soma estoque. */}
+                    {ident.identificado ? (
+                      <span className="block text-slate-900 break-words">{ident.texto}</span>
+                    ) : (
+                      <span className="block text-ink-muted italic">{ident.texto}</span>
+                    )}
+                    {ident.avisoVariacao && (
+                      <span className="block text-xs text-ink-muted">{ident.avisoVariacao}</span>
+                    )}
+                    {selo && (
+                      <span className="mt-1 inline-block rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600">
+                        {selo}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
                     {/* `null` = sem leitura: travessao, nunca 0. */}
                     {fmtOpcional(i.disponivel)}
@@ -319,7 +341,8 @@ function TabelaInventarios({ inventarios }: { inventarios: InventarioML[] }) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </RegiaoRolavel>

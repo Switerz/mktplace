@@ -98,6 +98,69 @@ export interface InventarioML {
   classificacao_torre: ClassificacaoML;
   vinculo_vendas: string;
   ref_date: string;
+  /**
+   * IDENTIFICACAO do anuncio-ancora do inventario (T-0018, migration 034).
+   * Atributo da linha: nunca multiplica estoque. `null` = sem identificacao.
+   * Opcionais: uma API anterior a' T-0018 nao envia os campos.
+   */
+  sku?: string | null;
+  titulo?: string | null;
+  /** Anuncios do inventario alem do ancora. `null` = publicado antes da 034. */
+  anuncios_extras?: number | null;
+  /** TRUE = ancora e' variacao e o SKU/titulo e' do ITEM (ambiguo). */
+  ancora_e_variacao?: boolean | null;
+}
+
+// ---------------------------------------------------------------------------
+// Identificacao por inventario (SKU · titulo, +N anuncios)
+// ---------------------------------------------------------------------------
+
+/** Sem SKU nem titulo: dito em tom neutro, nunca celula vazia. */
+export const SEM_IDENTIFICACAO_ML = "sem identificação";
+
+/**
+ * A fonte de SKU/titulo e' por ITEM (a de variacao esta' vazia): em variacao,
+ * o rotulo declara a ambiguidade em vez de fingir precisao.
+ */
+export const ROTULO_SKU_ITEM_VARIACAO_ML = "SKU do item (variação)";
+export const ROTULO_TITULO_ITEM_VARIACAO_ML = "título do item (variação)";
+
+export interface IdentificacaoML {
+  /** "SKU · título", so' um dos dois, ou SEM_IDENTIFICACAO_ML. */
+  texto: string;
+  identificado: boolean;
+  /** Rotulo de ambiguidade de variacao, ou `null`. */
+  avisoVariacao: string | null;
+}
+
+function textoLimpo(v: string | null | undefined): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t === "" ? null : t;
+}
+
+export function identificacaoML(
+  i: Pick<InventarioML, "sku" | "titulo" | "ancora_e_variacao">,
+): IdentificacaoML {
+  const sku = textoLimpo(i.sku);
+  const titulo = textoLimpo(i.titulo);
+  if (sku === null && titulo === null) {
+    return { texto: SEM_IDENTIFICACAO_ML, identificado: false, avisoVariacao: null };
+  }
+  const texto = sku !== null && titulo !== null ? `${sku} · ${titulo}` : (sku ?? titulo)!;
+  const avisoVariacao =
+    i.ancora_e_variacao === true
+      ? sku !== null
+        ? ROTULO_SKU_ITEM_VARIACAO_ML
+        : ROTULO_TITULO_ITEM_VARIACAO_ML
+      : null;
+  return { texto, identificado: true, avisoVariacao };
+}
+
+/** "+N anúncios" so' quando ha' outros anuncios no inventario; senao `null`. */
+export function seloAnunciosExtrasML(extras: number | null | undefined): string | null {
+  if (typeof extras !== "number" || !Number.isFinite(extras) || extras <= 0) return null;
+  return extras === 1 ? "+1 anúncio" : `+${fmtInt(extras)} anúncios`;
 }
 
 export interface StatusNaoDisponivel {
