@@ -188,17 +188,21 @@
       box-shadow 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
       border-color 220ms ease;
   }
-  .card-hover:hover {
-    transform: translateY(-2px);
-    /* Preto nos DOIS temas: a cor de texto e' quase branca no escuro e, como
-       sombra, virava um halo claro em volta do card. */
-    box-shadow:
-      0 12px 24px -14px rgb(0 0 0 / 0.35),
-      0 2px 6px rgb(0 0 0 / 0.08);
-  }
-  .card-hover:active {
-    transform: translateY(0);
-    transition-duration: 80ms;
+  /* T-0028: so' onde ha' ponteiro que paira. No toque o `:hover` gruda no
+     ultimo card tocado e ele ficava subido ate' o proximo toque. */
+  @media (hover: hover) {
+    .card-hover:hover {
+      transform: translateY(-2px);
+      /* Preto nos DOIS temas: a cor de texto e' quase branca no escuro e, como
+         sombra, virava um halo claro em volta do card. */
+      box-shadow:
+        0 12px 24px -14px rgb(0 0 0 / 0.35),
+        0 2px 6px rgb(0 0 0 / 0.08);
+    }
+    .card-hover:active {
+      transform: translateY(0);
+      transition-duration: 80ms;
+    }
   }
   @media (prefers-reduced-motion: reduce) {
     .card-hover,

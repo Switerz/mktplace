@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 
 /**
@@ -21,6 +22,12 @@ import { Info } from "lucide-react";
  * Com `absolute` ele era cortado pelo `overflow-hidden` do `Panel` e das
  * tabelas com rolagem, e passava da borda da tela em 390px. Abre abaixo; sem
  * espaco, abre acima. Fecha ao rolar, porque a posicao ficaria velha.
+ *
+ * T-0028 — o balao vai para o `document.body` (portal). `fixed` so' e' relativo
+ * a' tela se nenhum ancestral tiver `transform`: o `.card-hover:hover` sobe o
+ * card com `translateY` e a entrada `.tc-entrada` deixa `transform` preenchido
+ * em cada bloco. Dentro deles o balao abria centenas de px longe do "ⓘ", fora
+ * da tela, e criava rolagem horizontal em 390px (medido).
  */
 const LARGURA = 256;
 const MARGEM = 8;
@@ -95,23 +102,25 @@ export default function InfoDica({
       className={`relative inline-flex shrink-0 cursor-help rounded-full text-ink-faint outline-none transition-colors hover:text-ink-muted focus-visible:ring-2 focus-visible:ring-accent ${className}`}
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2} />
-      {aberto && (
-        <span
-          ref={balao}
-          aria-hidden="true"
-          style={{
-            left: pos?.left ?? 0,
-            top: pos?.top ?? 0,
-            width: `min(${LARGURA}px, calc(100vw - ${2 * MARGEM}px))`,
-            visibility: pos ? "visible" : "hidden",
-          }}
-          className={`pointer-events-none fixed z-50 rounded-lg border border-line bg-surface px-3 py-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] motion-safe:animate-[dica-entra_160ms_cubic-bezier(0.2,0.8,0.2,1)] ${
-            pos?.acima ? "origin-bottom" : "origin-top"
-          }`}
-        >
-          {texto}
-        </span>
-      )}
+      {aberto &&
+        createPortal(
+          <span
+            ref={balao}
+            aria-hidden="true"
+            style={{
+              left: pos?.left ?? 0,
+              top: pos?.top ?? 0,
+              width: `min(${LARGURA}px, calc(100vw - ${2 * MARGEM}px))`,
+              visibility: pos ? "visible" : "hidden",
+            }}
+            className={`pointer-events-none fixed z-50 rounded-lg border border-line bg-surface px-3 py-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] motion-safe:animate-[dica-entra_160ms_cubic-bezier(0.2,0.8,0.2,1)] ${
+              pos?.acima ? "origin-bottom" : "origin-top"
+            }`}
+          >
+            {texto}
+          </span>,
+          document.body,
+        )}
     </span>
   );
 }
