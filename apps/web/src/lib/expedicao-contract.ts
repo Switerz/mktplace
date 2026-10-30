@@ -778,6 +778,16 @@ export function mostrarColunaReferencia(linhas: LinhaFila[]): boolean {
   return linhas.some((l) => numeroDoPedido(l) !== null);
 }
 
+/**
+ * Nome do identificador da linha. Na Shopee e' o numero do pedido (`order_sn`).
+ * No Mercado Livre a fila e' por ENVIO: `marketplace_order_id` recebe o
+ * `shipment_id` (um pedido pode ter mais de um envio), nunca o numero da venda.
+ * Chamar de "Pedido" faria alguem procurar no painel um numero que nao e' o da venda.
+ */
+export function rotuloDoNumero(canal: Canal): string {
+  return canal === "mercadolivre" ? "Envio" : "Pedido";
+}
+
 /** EXPEDICAO-NUMERO-PEDIDO — o numero real; sem ele, o `order_ref` opaco. */
 export function numeroDoPedido(l: Pick<LinhaFila, "order_number" | "order_ref">): string | null {
   if (typeof l.order_number === "string" && l.order_number.length > 0) return l.order_number;

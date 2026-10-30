@@ -108,6 +108,7 @@ import {
   numeroDoPedido,
   paginaAtual,
   rotuloDeadline,
+  rotuloDoNumero,
   rotuloIdade,
   type Canal,
   type Filtros,
@@ -1277,7 +1278,7 @@ export default function ExpedicaoClient({
               <caption className="sr-only">Pedidos aguardando expedição</caption>
               <thead className={CLASSE_CABECALHO}>
                 <tr>
-                  {mostrarRef && <th scope="col" className="pl-4">Pedido</th>}
+                  {mostrarRef && <th scope="col" className="pl-4">{rotuloDoNumero(filtros.channel)}</th>}
                   <th scope="col" className={mostrarRef ? undefined : "pl-4"}>
                     Conta
                   </th>

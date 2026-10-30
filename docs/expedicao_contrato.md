@@ -793,6 +793,10 @@ fila do operador, e o popup exporta a lista em CSV. O numero **nunca vira
 link** para o marketplace. Com `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no
 Render ele volta a nulo, sem deploy de codigo.
 
+No Mercado Livre a fila e' por envio: `order_number` e' o `shipment_id`, e a
+tela o chama de **Envio**, nunca de pedido. O numero da venda do ML nao esta
+na fila (seria preciso publicar `order_id` junto).
+
 Sem o numero, `order_ref` e' opaco e opcional:
 
 * quando a API o omite (default), a coluna de referencia simplesmente **nao

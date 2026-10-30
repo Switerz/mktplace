@@ -175,9 +175,11 @@ class ResumoCanal(BaseModel):
 class OrderRow(BaseModel):
     """Uma linha da fila.
 
-    `order_number` e' o numero real do pedido no marketplace, servido so'
-    com `expedicao_numero_pedido_publico` ligado (decisao de produto de
+    `order_number` e' o `marketplace_order_id` da fila, servido so' com
+    `expedicao_numero_pedido_publico` ligado (decisao de produto de
     30/10/2026, ate' a Torre ter login; ver `config.py`). Desligado, fica nulo.
+    Na Shopee e' o numero do pedido; no Mercado Livre a fila e' por envio, entao
+    e' o `shipment_id`, NAO o numero da venda.
 
     `order_ref` e' opaco e existe so' quando `expedicao_order_ref_secret` esta
     configurado; sem segredo fica nulo. Um hash sem chave seria reversivel por

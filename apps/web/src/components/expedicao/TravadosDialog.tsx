@@ -29,6 +29,7 @@ import {
   formatarHoras,
   numeroDoPedido,
   rotuloDeadline,
+  rotuloDoNumero,
   type Canal,
   type LinhaFila,
   type RespostaExpedicao,
@@ -234,6 +235,7 @@ export default function TravadosDialog({
                     <button
                       type="button"
                       data-testid="exp-travados-csv"
+                      title={`Baixa os ${formatarInteiro(linhas.length)} listados em CSV`}
                       onClick={() => baixarCsv(csvDosTravados(linhas, canal), nomeDoCsvTravados(canal, alvo.marca, new Date()))}
                       className="-my-3 ml-2 inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     >
@@ -248,7 +250,7 @@ export default function TravadosDialog({
                     <caption className="sr-only">Pedidos travados, do mais antigo ao mais novo</caption>
                     <thead className="sticky top-0 bg-raised text-left text-xs uppercase tracking-wide text-ink-faint">
                       <tr>
-                        {temCodigo ? <th scope="col">Pedido</th> : null}
+                        {temCodigo ? <th scope="col">{rotuloDoNumero(canal)}</th> : null}
                         {variasMarcas ? <th scope="col">Marca</th> : null}
                         {temEtapa ? <th scope="col">Etapa</th> : null}
                         <th scope="col" className="text-right">Aberto há</th>

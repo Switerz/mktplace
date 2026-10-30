@@ -147,8 +147,8 @@ test("popup: coluna e resumo de etapa so' com etapa publicada", () => {
 // ---------------------------------------------------------------------------
 // EXPEDICAO-NUMERO-PEDIDO — numero real do pedido e CSV dos travados
 // ---------------------------------------------------------------------------
-const { numeroDoPedido, mostrarColunaReferencia } = await import("../src/lib/expedicao-contract.ts");
-const { COLUNAS_CSV_TRAVADOS, linhaDoCsvTravados, csvDosTravados, nomeDoCsvTravados } = await import(
+const { numeroDoPedido, mostrarColunaReferencia, rotuloDoNumero } = await import("../src/lib/expedicao-contract.ts");
+const { colunasDoCsvTravados, linhaDoCsvTravados, csvDosTravados, nomeDoCsvTravados } = await import(
   "../src/lib/expedicao-travados.ts"
 );
 
@@ -188,8 +188,19 @@ test("CSV dos travados: numero, etapa, dias em pt-BR, prazo em Brasilia, transpo
   const csv = csvDosTravados([travado()], "shopee");
   assert.ok(csv.startsWith("﻿"), "BOM para o Excel pt-BR");
   const [cab, linha] = csv.slice(1).split("\r\n");
-  assert.equal(cab, COLUNAS_CSV_TRAVADOS.join(";"));
+  assert.equal(cab, colunasDoCsvTravados("shopee").join(";"));
   assert.match(linha, /^261027NUB4AHWG;Shopee;BARBOURS;Aguardando coleta;3,8;/);
+});
+
+test("Mercado Livre: o identificador e' o ENVIO, nunca chamado de pedido", () => {
+  assert.equal(rotuloDoNumero("shopee"), "Pedido");
+  assert.equal(rotuloDoNumero("mercadolivre"), "Envio");
+  assert.equal(colunasDoCsvTravados("mercadolivre")[0], "Envio");
+  const r = linhaDoCsvTravados(travado({ order_number: "47951836990" }), "mercadolivre");
+  assert.equal(r["Envio"], "47951836990");
+  assert.equal(r["Pedido"], undefined);
+  assert.match(csvDosTravados([travado({ order_number: "47951836990" })], "mercadolivre"), /^\ufeffEnvio;Canal;/);
+  assert.match(CLIENTE, /\{mostrarRef && <th scope="col" className="pl-4">\{rotuloDoNumero\(filtros\.channel\)\}<\/th>\}/);
 });
 
 test("nome do arquivo: canal, marca e dia de Brasilia", () => {
@@ -200,7 +211,7 @@ test("nome do arquivo: canal, marca e dia de Brasilia", () => {
 
 test("popup: coluna Pedido com o numero e botao Exportar CSV", () => {
   const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
-  assert.match(POPUP, /\{temCodigo \? <th scope="col">Pedido<\/th> : null\}/);
+  assert.match(POPUP, /\{temCodigo \? <th scope="col">\{rotuloDoNumero\(canal\)\}<\/th> : null\}/);
   assert.match(POPUP, /\{numeroDoPedido\(l\) \?\? "—"\}/);
   assert.match(POPUP, /data-testid="exp-travados-csv"/);
   assert.match(POPUP, /baixarCsv\(csvDosTravados\(linhas, canal\), nomeDoCsvTravados\(canal, alvo\.marca, new Date\(\)\)\)/);

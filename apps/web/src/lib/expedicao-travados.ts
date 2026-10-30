@@ -8,6 +8,7 @@ import {
   construirQuery,
   numeroDoPedido,
   rotuloDeadline,
+  rotuloDoNumero,
   type Canal,
   type LinhaFila,
 } from "./expedicao-contract.ts";
@@ -102,11 +103,17 @@ export function queryDosTravados(canal: Canal, marca: string | null, conta: stri
 // ---------------------------------------------------------------------------
 const ROTULO_CANAL: Record<Canal, string> = { shopee: "Shopee", mercadolivre: "Mercado Livre" };
 
-/** Colunas do CSV, na ordem do arquivo. So' o que o popup ja' mostra, mais a transportadora. */
-export const COLUNAS_CSV_TRAVADOS = [
-  "Pedido", "Canal", "Marca", "Etapa", "Dias em aberto", "Por que travou",
-  "Prazo de envio", "Situação do prazo", "Transportadora",
-];
+/**
+ * Colunas do CSV, na ordem do arquivo: so' o que o popup ja' mostra, mais a
+ * transportadora. A primeira e' "Pedido" na Shopee e "Envio" no ML
+ * (`rotuloDoNumero`): no ML a fila e' por envio, nao por venda.
+ */
+export function colunasDoCsvTravados(canal: Canal): string[] {
+  return [
+    rotuloDoNumero(canal), "Canal", "Marca", "Etapa", "Dias em aberto", "Por que travou",
+    "Prazo de envio", "Situação do prazo", "Transportadora",
+  ];
+}
 
 /** Data e hora de Brasilia ("dd/mm/aaaa hh:mm"), ou vazio. */
 function dataBrt(iso: string | null): string | null {
@@ -121,7 +128,7 @@ function dataBrt(iso: string | null): string | null {
 
 export function linhaDoCsvTravados(l: LinhaFila, canal: Canal): ExportRecord {
   return {
-    "Pedido": numeroDoPedido(l),
+    [rotuloDoNumero(canal)]: numeroDoPedido(l),
     "Canal": ROTULO_CANAL[canal],
     "Marca": brandLabel(l.brand),
     "Etapa": l.etapa && l.etapa !== "nao_publicada" ? rotuloDaEtapa(l.etapa) : null,
@@ -136,7 +143,7 @@ export function linhaDoCsvTravados(l: LinhaFila, canal: Canal): ExportRecord {
 
 /** Conteudo do arquivo (com BOM, `;`), pelo MESMO montador do CSV de Produtos. */
 export function csvDosTravados(linhas: LinhaFila[], canal: Canal): string {
-  return buildProdutosCsvFile(COLUNAS_CSV_TRAVADOS, linhas.map((l) => linhaDoCsvTravados(l, canal)));
+  return buildProdutosCsvFile(colunasDoCsvTravados(canal), linhas.map((l) => linhaDoCsvTravados(l, canal)));
 }
 
 /** `travados-shopee-barbours-2026-10-30.csv`; sem marca, `todas`. */
