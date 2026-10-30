@@ -28,7 +28,8 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | API read-only | **implementada e ATIVA** (EXP-2A), `EXPEDICAO_API_ENABLED=true` no Render |
 | Tela (frontend) | **implementada e ATIVA** (EXP-2B), `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel |
 | Autenticacao | **inexistente** — API publica por decisao temporaria (EXP-2C0/2C1-P); divida registrada |
-| `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio, identificador do pedido nao e' servido |
+| `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio |
+| Numero do pedido | **servido** em `order_number` desde 30/10/2026 (decisao de produto, ate' haver login); `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no Render volta a reter |
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
@@ -785,7 +786,14 @@ quando alguem executa o refresh manualmente"** ficam sempre visiveis. Acima de
 
 ### Identificadores
 
-A tela **nao recebe e nao exibe** `order_sn`. `order_ref` e' opaco e opcional:
+EXPEDICAO-NUMERO-PEDIDO (30/10/2026): a API serve o numero real do pedido em
+`order_number`, por decisao de produto e com o risco aceito de a API ser
+publica, ate' a Torre ter login. A tela o mostra no popup de travados e na
+fila do operador, e o popup exporta a lista em CSV. O numero **nunca vira
+link** para o marketplace. Com `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no
+Render ele volta a nulo, sem deploy de codigo.
+
+Sem o numero, `order_ref` e' opaco e opcional:
 
 * quando a API o omite (default), a coluna de referencia simplesmente **nao
   aparece** — nada de coluna vazia nem de mensagem sugerindo erro;
@@ -809,6 +817,7 @@ renderizam nos estados `ok` e `fila vazia por filtro`.
 | `NEXT_PUBLIC_EXPEDICAO_ENABLED` | Vercel (frontend) | ausente = `false` | **`true`** (EXP-2C1-P) |
 | `EXPEDICAO_API_ENABLED` | Render (API) | `False` | **`true`** (EXP-2C1-P) |
 | `expedicao_order_ref_secret` | Render (API) | `""` | **vazia** — `order_ref` desativado |
+| `EXPEDICAO_NUMERO_PEDIDO_PUBLICO` | Render (API) | `true` | ausente = **`true`** — numero do pedido servido (30/10/2026) |
 
 As duas precisam ser ligadas **em conjunto e nessa ordem**: primeiro a API,
 depois a tela. Ligar so' a tela produz `unavailable` em toda requisicao; ligar
@@ -857,7 +866,8 @@ e' apagado; a fotografia publicada segue no banco.
 * A tendencia depende de quantas fotografias existirem.
 * Kokeshi continua **fora da cobertura** — declarada em `brands_not_covered`,
   nunca como zero.
-* `order_ref` desativado enquanto a API nao tiver autenticacao.
+* `order_ref` desativado; o numero real do pedido e' servido sem autenticacao
+  por decisao de 30/10/2026, ate' haver login.
 
 ---
 

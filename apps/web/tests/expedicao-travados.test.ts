@@ -143,3 +143,68 @@ test("popup: coluna e resumo de etapa so' com etapa publicada", () => {
   assert.match(POPUP, /data-testid="exp-travados-por-etapa"/);
   assert.match(POPUP, /Onde estão travados/);
 });
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-NUMERO-PEDIDO — numero real do pedido e CSV dos travados
+// ---------------------------------------------------------------------------
+const { numeroDoPedido, mostrarColunaReferencia } = await import("../src/lib/expedicao-contract.ts");
+const { COLUNAS_CSV_TRAVADOS, linhaDoCsvTravados, csvDosTravados, nomeDoCsvTravados } = await import(
+  "../src/lib/expedicao-travados.ts"
+);
+
+function travado(extra: Record<string, unknown> = {}) {
+  return {
+    order_number: "261027NUB4AHWG", order_ref: null, shop_account: "barbours", brand: "barbours",
+    created_at: "2026-10-26T15:00:00Z", paid_at: null, dispatch_deadline: "2026-10-30T02:59:00Z",
+    deadline_source: "native", deadline_status: "overdue", operational_age_status: "over_48h",
+    is_slow_vs_baseline: true, is_source_zombie: false, is_stalled: true, hours_open: 91.2,
+    hours_overdue: 12, logistic_type: null, carrier: "Full", source_ingested_at: null,
+    source_freshness_status: "fresh", timestamp_quality: "ok", etapa: "aguardando_coleta",
+    ...extra,
+  } as never;
+}
+
+test("numero do pedido: o real primeiro, o order_ref como reserva, nunca vazio", () => {
+  assert.equal(numeroDoPedido({ order_number: "47951836990", order_ref: "abc" }), "47951836990");
+  assert.equal(numeroDoPedido({ order_number: null, order_ref: "abc" }), "abc");
+  assert.equal(numeroDoPedido({ order_number: "", order_ref: null }), null);
+  assert.equal(mostrarColunaReferencia([travado()]), true);
+  assert.equal(mostrarColunaReferencia([travado({ order_number: null })]), false);
+});
+
+test("CSV dos travados: numero, etapa, dias em pt-BR, prazo em Brasilia, transportadora", () => {
+  const r = linhaDoCsvTravados(travado(), "shopee");
+  assert.equal(r["Pedido"], "261027NUB4AHWG");
+  assert.equal(r["Canal"], "Shopee");
+  assert.equal(r["Marca"], "BARBOURS");
+  assert.equal(r["Etapa"], "Aguardando coleta");
+  assert.equal(r["Dias em aberto"], "3,8");
+  assert.equal(r["Por que travou"], "Mais lento que o normal da conta");
+  assert.equal(r["Prazo de envio"], "29/10/2026 23:59");
+  assert.equal(r["Transportadora"], "Full");
+  // etapa ainda nao publicada sai vazia, nunca como texto de aviso
+  assert.equal(linhaDoCsvTravados(travado({ etapa: "nao_publicada" }), "shopee")["Etapa"], null);
+
+  const csv = csvDosTravados([travado()], "shopee");
+  assert.ok(csv.startsWith("﻿"), "BOM para o Excel pt-BR");
+  const [cab, linha] = csv.slice(1).split("\r\n");
+  assert.equal(cab, COLUNAS_CSV_TRAVADOS.join(";"));
+  assert.match(linha, /^261027NUB4AHWG;Shopee;BARBOURS;Aguardando coleta;3,8;/);
+});
+
+test("nome do arquivo: canal, marca e dia de Brasilia", () => {
+  const d = new Date("2026-10-31T01:00:00Z"); // ainda 30/10 em Brasilia
+  assert.equal(nomeDoCsvTravados("shopee", "barbours", d), "travados-shopee-barbours-2026-10-30.csv");
+  assert.equal(nomeDoCsvTravados("mercadolivre", null, d), "travados-mercadolivre-todas-2026-10-30.csv");
+});
+
+test("popup: coluna Pedido com o numero e botao Exportar CSV", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /\{temCodigo \? <th scope="col">Pedido<\/th> : null\}/);
+  assert.match(POPUP, /\{numeroDoPedido\(l\) \?\? "—"\}/);
+  assert.match(POPUP, /data-testid="exp-travados-csv"/);
+  assert.match(POPUP, /baixarCsv\(csvDosTravados\(linhas, canal\), nomeDoCsvTravados\(canal, alvo\.marca, new Date\(\)\)\)/);
+  assert.match(POPUP, /URL\.revokeObjectURL\(url\)/);
+  // numero nunca vira link para o marketplace
+  assert.doesNotMatch(POPUP, /href=\{[^}]*numeroDoPedido/);
+});

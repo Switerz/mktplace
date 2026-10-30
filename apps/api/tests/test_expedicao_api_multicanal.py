@@ -123,11 +123,20 @@ def test_shopee_mantem_kokeshi_fora_da_cobertura(ligada):
     assert r["coverage"]["brands_not_covered"] == ["kokeshi"]
 
 
-def test_shopee_continua_com_as_quatro_notas_originais(ligada):
+def test_shopee_continua_com_as_quatro_notas_originais(ligada, monkeypatch):
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", False, raising=False)
     r = svc.get_expedicao(SessaoFake())
     notas = r["limitations"]["notes"]
     assert len(notas) == 4
     assert "raw.shopee_orders" in notas[1]
+
+
+def test_com_numero_publico_a_nota_de_identificador_retido_sai(ligada, monkeypatch):
+    """EXPEDICAO-NUMERO-PEDIDO: a nota "nao e' servido" mentiria."""
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", True, raising=False)
+    notas = svc.get_expedicao(SessaoFake())["limitations"]["notes"]
+    assert svc.NOTA_SEM_IDENTIFICADOR not in notas
+    assert len(notas) == 3
 
 
 # ===========================================================================

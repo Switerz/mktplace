@@ -8,13 +8,16 @@
  * recalculado: o motivo vem das flags do pipeline (`is_slow_vs_baseline`,
  * `is_source_zombie`) e a idade de `hours_open`.
  *
- * A ETAPA do pedido (a preparar x pronto para envio; substatus do ML) ainda
- * nao e' publicada na fila — dito no rodape, nunca inventado.
+ * A ETAPA do pedido vem da fila (T-0015); sem ela, o rodape diz, nunca inventa.
+ *
+ * EXPEDICAO-NUMERO-PEDIDO — numero real do pedido (decisao de 30/10/2026, ate'
+ * a Torre ter login) e "Exportar CSV" com a lista carregada, para mandar adiante.
  *
  * POPUPS-1 — numero grande com a fatia da fila em pilula; depois as quebras
  * que respondem "por que", "onde" e "de quem" (contagem das linhas ja'
  * carregadas, com barra de participacao) e so' entao a lista de pedidos.
  */
+import { Download } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
@@ -24,13 +27,16 @@ import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import {
   canalTemPrazo,
   formatarHoras,
+  numeroDoPedido,
   rotuloDeadline,
   type Canal,
   type LinhaFila,
   type RespostaExpedicao,
 } from "@/lib/expedicao-contract";
 import {
+  csvDosTravados,
   motivoDoTravado,
+  nomeDoCsvTravados,
   percentualDaFila,
   queryDosTravados,
   rotuloDaEtapa,
@@ -57,6 +63,22 @@ function contarPor(linhas: LinhaFila[], rotulo: (l: LinhaFila) => string): { rot
     n.set(k, (n.get(k) ?? 0) + 1);
   }
   return [...n.entries()].map(([r, qtd]) => ({ rotulo: r, n: qtd })).sort((a, b) => b.n - a.n);
+}
+
+/** Baixa o CSV no navegador (Blob + link sintetico, URL sempre revogada). */
+function baixarCsv(conteudo: string, nome: string): void {
+  let url: string | null = null;
+  try {
+    url = URL.createObjectURL(new Blob([conteudo], { type: "text/csv;charset=utf-8;" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = nome;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+  }
 }
 
 /** POPUPS-1 — uma quebra em linhas com barra; a base e' a lista carregada. */
@@ -118,9 +140,9 @@ export default function TravadosDialog({
   const travados = estado.tipo === "ok" ? estado.total : (alvo?.travados ?? 0);
   const pct = alvo ? percentualDaFila(travados, alvo.backlog) : null;
   const variasMarcas = alvo?.marca === null;
-  // Sem o segredo do `order_ref` configurado na API, todo codigo vem nulo:
-  // uma coluna inteira de "—" nao diz nada, entao ela sai.
-  const temCodigo = estado.tipo === "ok" && estado.linhas.some((l) => l.order_ref);
+  // Numero real (ou `order_ref`); com a chave desligada na API todos vem
+  // nulos, e uma coluna inteira de "—" nao diz nada, entao ela sai.
+  const temCodigo = estado.tipo === "ok" && estado.linhas.some((l) => numeroDoPedido(l) !== null);
   // Sem prazo publicado (Mercado Livre) a coluna seria "Sem prazo" em todas.
   const temPrazo = canalTemPrazo(canal);
   // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
@@ -203,11 +225,22 @@ export default function TravadosDialog({
               <DrilldownSecao
                 titulo="Pedidos"
                 acao={
-                  <span className="tabular-nums">
-                    {cortada
-                      ? `${formatarInteiro(linhas.length)} mais antigos de ${formatarInteiro(estado.total)}`
-                      : "mais antigos primeiro"}
-                  </span>
+                  <>
+                    <span className="tabular-nums">
+                      {cortada
+                        ? `${formatarInteiro(linhas.length)} mais antigos de ${formatarInteiro(estado.total)}`
+                        : "mais antigos primeiro"}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="exp-travados-csv"
+                      onClick={() => baixarCsv(csvDosTravados(linhas, canal), nomeDoCsvTravados(canal, alvo.marca, new Date()))}
+                      className="-my-3 ml-2 inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    >
+                      <Download aria-hidden="true" className="h-3.5 w-3.5" />
+                      Exportar CSV
+                    </button>
+                  </>
                 }
               >
                 <div className="max-h-[50vh] overflow-auto rounded-lg border border-line">
@@ -225,10 +258,10 @@ export default function TravadosDialog({
                     </thead>
                     <tbody>
                       {estado.linhas.map((l, i) => (
-                        <tr key={`${l.shop_account}-${l.order_ref ?? i}`} className="border-t border-line">
+                        <tr key={`${l.shop_account}-${numeroDoPedido(l) ?? i}`} className="border-t border-line">
                           {temCodigo ? (
-                            <td className="font-mono text-xs text-ink-muted" title={l.order_ref ?? undefined}>
-                              {l.order_ref ? l.order_ref.slice(0, 10) : "—"}
+                            <td className="whitespace-nowrap font-mono text-xs text-ink">
+                              {numeroDoPedido(l) ?? "—"}
                             </td>
                           ) : null}
                           {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}

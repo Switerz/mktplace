@@ -173,15 +173,18 @@ class ResumoCanal(BaseModel):
 
 
 class OrderRow(BaseModel):
-    """Uma linha da fila, SEM identificador de pedido.
+    """Uma linha da fila.
+
+    `order_number` e' o numero real do pedido no marketplace, servido so'
+    com `expedicao_numero_pedido_publico` ligado (decisao de produto de
+    30/10/2026, ate' a Torre ter login; ver `config.py`). Desligado, fica nulo.
 
     `order_ref` e' opaco e existe so' quando `expedicao_order_ref_secret` esta
     configurado; sem segredo fica nulo. Um hash sem chave seria reversivel por
-    forca bruta — o espaco de `order_sn` e' pequeno e enumeravel — e publicar o
-    identificador real numa rota sem autenticacao permitiria consultar o pedido
-    no painel do marketplace.
+    forca bruta — o espaco de `order_sn` e' pequeno e enumeravel.
     """
 
+    order_number: Optional[str] = None
     order_ref: Optional[str] = None
     shop_account: str
     brand: str

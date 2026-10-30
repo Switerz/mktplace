@@ -18,11 +18,12 @@
  * Confundir os dois primeiros fez as quatro marcas nascerem vermelhas no
  * primeiro piloto (EXP-1E). A tela repete a separacao em rotulos distintos.
  *
- * SEM IDENTIFICADOR DE PEDIDO
- * ---------------------------
- * A API nao serve `order_sn` porque nao tem autenticacao. `order_ref` e' opaco,
- * opcional e NUNCA vira link para o marketplace. A tela nao tenta reconstruir
- * o identificador real nem exibe coluna vazia quando ele nao vem.
+ * IDENTIFICADOR DE PEDIDO
+ * -----------------------
+ * `order_number` e' o numero real do pedido: a API o serve por decisao de
+ * produto de 30/10/2026, ate' a Torre ter login (desligavel no Render). Sem
+ * ele, `order_ref` e' opaco e opcional. Nenhum dos dois vira link para o
+ * marketplace, e a tela nao exibe coluna vazia quando nenhum vem.
  */
 import { brandLabel } from "./filters/brands.ts";
 import {
@@ -222,6 +223,8 @@ export interface Cobertura {
 }
 
 export interface LinhaFila {
+  /** Numero real do pedido (EXPEDICAO-NUMERO-PEDIDO); nulo com a chave desligada. */
+  order_number?: string | null;
   order_ref: string | null;
   shop_account: string;
   brand: string;
@@ -772,7 +775,14 @@ export function estadoDaTendencia(
  * omitido por erro — ele foi retido por decisao de acesso.
  */
 export function mostrarColunaReferencia(linhas: LinhaFila[]): boolean {
-  return linhas.some((l) => typeof l.order_ref === "string" && l.order_ref.length > 0);
+  return linhas.some((l) => numeroDoPedido(l) !== null);
+}
+
+/** EXPEDICAO-NUMERO-PEDIDO — o numero real; sem ele, o `order_ref` opaco. */
+export function numeroDoPedido(l: Pick<LinhaFila, "order_number" | "order_ref">): string | null {
+  if (typeof l.order_number === "string" && l.order_number.length > 0) return l.order_number;
+  if (typeof l.order_ref === "string" && l.order_ref.length > 0) return l.order_ref;
+  return null;
 }
 
 export function paginaAtual(p: Paginacao | null): { pagina: number; total: number } {

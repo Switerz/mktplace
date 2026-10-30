@@ -6,9 +6,13 @@ import { formatarDecimal } from "./expedicao-formato.ts";
 import {
   FILTROS_PADRAO,
   construirQuery,
+  numeroDoPedido,
+  rotuloDeadline,
   type Canal,
   type LinhaFila,
 } from "./expedicao-contract.ts";
+import { brandLabel } from "./filters/brands.ts";
+import { buildProdutosCsvFile, type ExportRecord } from "./produtos-export.ts";
 
 /**
  * Etapa do pedido (T-0015) — o MESMO dominio e rotulo da API
@@ -92,3 +96,53 @@ export function queryDosTravados(canal: Canal, marca: string | null, conta: stri
     limit: LIMITE_TRAVADOS,
   });
 }
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-NUMERO-PEDIDO — exportar a lista do popup em CSV
+// ---------------------------------------------------------------------------
+const ROTULO_CANAL: Record<Canal, string> = { shopee: "Shopee", mercadolivre: "Mercado Livre" };
+
+/** Colunas do CSV, na ordem do arquivo. So' o que o popup ja' mostra, mais a transportadora. */
+export const COLUNAS_CSV_TRAVADOS = [
+  "Pedido", "Canal", "Marca", "Etapa", "Dias em aberto", "Por que travou",
+  "Prazo de envio", "Situação do prazo", "Transportadora",
+];
+
+/** Data e hora de Brasilia ("dd/mm/aaaa hh:mm"), ou vazio. */
+function dataBrt(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  }).format(d).replace(",", "");
+}
+
+export function linhaDoCsvTravados(l: LinhaFila, canal: Canal): ExportRecord {
+  return {
+    "Pedido": numeroDoPedido(l),
+    "Canal": ROTULO_CANAL[canal],
+    "Marca": brandLabel(l.brand),
+    "Etapa": l.etapa && l.etapa !== "nao_publicada" ? rotuloDaEtapa(l.etapa) : null,
+    // Texto pt-BR ("53,3"): o Excel em portugues le como numero.
+    "Dias em aberto": l.hours_open === null ? null : formatarDecimal(l.hours_open / 24, 1),
+    "Por que travou": motivoDoTravado(l),
+    "Prazo de envio": dataBrt(l.dispatch_deadline),
+    "Situação do prazo": rotuloDeadline(l.deadline_status),
+    "Transportadora": l.carrier,
+  };
+}
+
+/** Conteudo do arquivo (com BOM, `;`), pelo MESMO montador do CSV de Produtos. */
+export function csvDosTravados(linhas: LinhaFila[], canal: Canal): string {
+  return buildProdutosCsvFile(COLUNAS_CSV_TRAVADOS, linhas.map((l) => linhaDoCsvTravados(l, canal)));
+}
+
+/** `travados-shopee-barbours-2026-10-30.csv`; sem marca, `todas`. */
+export function nomeDoCsvTravados(canal: Canal, marca: string | null, hoje: Date): string {
+  const dia = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(hoje);
+  const slug = (marca ?? "todas").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return `travados-${canal}-${slug || "todas"}-${dia}.csv`;
+}
+
