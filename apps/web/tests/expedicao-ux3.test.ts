@@ -555,29 +555,31 @@ test("ML Prazo: a secao le 'Indisponível neste canal: …' no ⓘ (a frase anti
     /aria-label="Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
   );
   assert.doesNotMatch(html, /Prazo indisponível pelo canal:/);
-  // Igual ao rotulo de origem que o `?` mostra.
-  const ajuda = renderToStaticMarkup(h(AjudaMetrica, { chave: "mercadolivre.prazo", abertoInicial: true }));
-  assert.match(ajuda, /Indisponível neste canal/);
 });
 
-test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o `?`; a ausencia fica no ⓘ da secao", async () => {
+test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o ⓘ em `acao`; a ausencia fica no ⓘ da secao", async () => {
   const { default: Panel } = await import("../src/components/ui/Panel.tsx");
   const { SecaoGerencial } = await import("../src/components/expedicao/SecoesExpedicao.tsx");
-  // O titulo no cliente, com o `?` do canal sem prazo logo depois.
-  assert.match(CLIENTE, /Prazo de despacho <Ajuda chave=\{AJUDA_CANAL_SEM_PRAZO\.prazo\} \/>/);
+  // #130..#133: o ⓘ do painel saiu do titulo e foi para `acao`; so' o texto
+  // do titulo e' da T-0021.
+  assert.match(
+    CLIENTE,
+    /<Panel titulo="Prazo de despacho" acao=\{<Ajuda chave=\{AJUDA_CANAL_SEM_PRAZO\.prazo\} \/>\}>/,
+  );
   assert.doesNotMatch(CLIENTE, /Prazo indisponível pelo canal/, "titulo antigo fora");
-  // Mesma montagem do cliente: secao com o ⓘ da frase + painel com titulo e `?`.
+  // Mesma montagem do cliente: secao com o ⓘ da frase + painel com titulo e ⓘ.
   const html = renderToStaticMarkup(
     h(
       SecaoGerencial,
       { titulo: "Prazo", dica: SEM_PRAZO_CANAL_ML },
       h(Panel, {
-        titulo: h("span", null, "Prazo de despacho ", h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo })),
+        titulo: "Prazo de despacho",
+        acao: h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo }),
       }),
     ),
   );
-  assert.match(html, /Prazo de despacho /);
-  assert.match(html, /aria-label="O que é Prazo e LDR no Mercado Livre"/);
+  assert.match(html, />Prazo de despacho</);
+  assert.match(html, /aria-label="Não medido: o canal não publica prazo de despacho\./);
   assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./);
   assert.doesNotMatch(html, /Prazo indisponível pelo canal/);
 });
