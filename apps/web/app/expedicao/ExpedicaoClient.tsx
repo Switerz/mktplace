@@ -79,6 +79,7 @@ import {
   faixasDePrazo,
   montarRiscoAtual,
   recortarPorMarca,
+  rotuloDoProximoVencimento,
   rotuloFonte,
   ORDENACOES,
   ROTULO_CANAL,
@@ -763,6 +764,22 @@ export default function ExpedicaoClient({
                 lista: "vencidos",
               })
           : undefined,
+      // EXPEDICAO-TABELA-AMANHA: os que vencem no proximo dia de prazo, por conta.
+      venceProximo: temPrazo ? (a.due_next_day_count ?? null) : null,
+      pctVenceProximo:
+        temPrazo && a.due_next_day_count != null ? percentualDaFila(a.due_next_day_count, a.backlog_count) : null,
+      aoVerVenceProximo:
+        temPrazo && (a.due_next_day_count ?? 0) > 0
+          ? () =>
+              setAlvoTravados({
+                titulo: `${rotuloDoProximoVencimento(fotografiaDoPrazo?.next_due_date, fotografiaDoPrazo?.effective_at)} · ${brandLabel(a.brand)}`,
+                marca: a.brand,
+                conta: a.shop_account,
+                travados: a.due_next_day_count ?? 0,
+                backlog: a.backlog_count,
+                lista: "vence_proximo",
+              })
+          : undefined,
       acima48h: a.over_48h_count,
       travados: a.stalled_count,
       pctTravados: percentualDaFila(a.stalled_count, a.backlog_count),
@@ -921,17 +938,13 @@ export default function ExpedicaoClient({
 
   const secaoRisco = (
     <SecaoGerencial titulo="Risco atual"
-      // UI-EXPEDICAO-1: de quando e' o "agora" vai para o "ⓘ"; o selo diz
-      // "agora" (a fila do instante, que o periodo nao muda) ou, com a
-      // fotografia velha, "desatualizada" — esse aviso nunca fica escondido.
+      // UI-EXPEDICAO-1: de quando e' a fila vai para o "ⓘ". Pedido do usuario
+      // (30/10/2026): o selo "agora" saiu — o cabecalho ja' mostra a hora da
+      // fotografia. Fica so' o aviso "desatualizada", que nunca se esconde.
       dica={quando}
       selo={
         <>
-          {fotografiaVelha ? (
-            <SeloLeitura tom="atencao">desatualizada</SeloLeitura>
-          ) : (
-            <SeloLeitura>agora</SeloLeitura>
-          )}
+          {fotografiaVelha ? <SeloLeitura tom="atencao">desatualizada</SeloLeitura> : null}
           {filtros.channel === "shopee" && !divisao && recorte.totais ? (
             <span data-testid="exp-aviso-fbs" className="inline-flex items-center gap-1">
               <SeloLeitura tom="atencao">inclui FBS</SeloLeitura>
@@ -1144,7 +1157,13 @@ export default function ExpedicaoClient({
         resposta={temSerieNaTendencia ? tendencia : null}
         fila={linhasDaFila}
         rotuloBarra={temPrazo ? "Prazo" : "Distribuição"}
-        ajudas={{ vencidos: ajudaDaFila("overdue"), acima48h: ajudaDaFila("over48h"), travados: ajudaDaFila("stalled") }}
+        rotuloProximo={rotuloDoProximoVencimento(fotografiaDoPrazo?.next_due_date, fotografiaDoPrazo?.effective_at, "Vencem")}
+        ajudas={{
+          vencidos: ajudaDaFila("overdue"),
+          venceProximo: ajudaDaFila("due_next_day"),
+          acima48h: ajudaDaFila("over48h"),
+          travados: ajudaDaFila("stalled"),
+        }}
       />
       {temSerieNaTendencia && (
         <>

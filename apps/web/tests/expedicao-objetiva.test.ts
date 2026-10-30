@@ -179,7 +179,8 @@ test("tabela unica: fotografia + tendencia; conta sem ponto continua na tabela",
     assert.match(html, new RegExp(`<th scope="col"[^>]*>${c}`), c);
   }
   // os numeros da linha sao os da FOTOGRAFIA (61), nao o ultimo ponto (60)
-  assert.match(html, /ÁPICE<\/th><td[^>]*>61<\/td><td[^>]*text-crit-ink[^>]*>25<\/td>/);
+  // EXPEDICAO-TABELA-AMANHA: vencido em etiqueta vermelha
+  assert.match(html, /ÁPICE<\/th><td[^>]*>61<\/td><td[^>]*><span class="relative"><span class="[^"]*bg-crit-soft[^"]*">25<\/span>/);
   assert.match(html, /<u>barra-a<\/u>/);
   assert.match(html, /KOKESHI<\/th><td[^>]*>9<\/td>/);
   assert.match(html, /sem ponto no período/);
@@ -208,9 +209,9 @@ test("tela: destaque no lugar da faixa e da lista; barra de prazo nao repete", (
   assert.match(CLIENTE, /prazo=\{temPrazo \? barraDePrazo\(true\) : undefined\}/);
 });
 
-test("tela: selo 'agora' (ou 'desatualizada') e 'inclui FBS' com ⓘ", () => {
-  assert.match(CLIENTE, /<SeloLeitura tom="atencao">desatualizada<\/SeloLeitura>/);
-  assert.match(CLIENTE, /<SeloLeitura>agora<\/SeloLeitura>/);
+test("tela: so' o selo 'desatualizada' (o 'agora' saiu a pedido) e 'inclui FBS' com ⓘ", () => {
+  assert.match(CLIENTE, /\{fotografiaVelha \? <SeloLeitura tom="atencao">desatualizada<\/SeloLeitura> : null\}/);
+  assert.doesNotMatch(CLIENTE, /<SeloLeitura>agora<\/SeloLeitura>/);
   assert.match(CLIENTE, /<SeloLeitura tom="atencao">inclui FBS<\/SeloLeitura>\s*<InfoDica texto=\{AVISO_FILA_COM_FBS\} \/>/);
   assert.match(CABECALHO, /<InfoDica texto=\{definicao\} \/>/);
 });

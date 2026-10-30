@@ -109,7 +109,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
           fonte,
           janela: FOTO,
           cobertura,
-          limitacoes: "Prazo da Shopee (ship_by_date); pedido sem prazo publicado fica em “Sem prazo”.",
+          limitacoes: "Prazo oficial da Shopee (ship_by_date).",
         }
       : {
           nome,
@@ -130,75 +130,75 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes:
-        canal === "shopee"
-          ? "Não separa a etapa interna (a preparar × envio organizado)."
-          : "Não publica o substatus do envio.",
+      // EXPEDICAO-DICA-LEGIVEL: a etapa ja' e' publicada (T-0015).
+      limitacoes: `A etapa de cada ${grao === "pedido" ? "pedido" : "envio"} está na Jornada.`,
     },
+    // EXPEDICAO-DICA-LEGIVEL: uma frase que responde "o que entra aqui"; a
+    // ressalva vai separada, embaixo, no balao.
     [`${canal}.overdue`]: prazo(
       "Vencidos",
-      "Pedidos pagos, ainda não coletados, que já passaram do prazo de envio da Shopee.",
+      "Pedidos que passaram do prazo de envio da Shopee e ainda não foram coletados.",
       "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
     ),
     // EXPEDICAO-VENCE-AMANHA: o prazo da Shopee vence sempre as 23:59, entao
     // a janela de 24 h so' alcanca o dia de hoje — o "ⓘ" diz isso.
     [`${canal}.due24h`]: prazo(
       "Vence em 24 h",
-      "Pedidos em aberto cujo prazo vence nas próximas 24 h. Todo prazo da Shopee vence às 23:59: na prática, são os que vencem hoje.",
+      "Vencem nas próximas 24 h. Como todo prazo da Shopee é às 23:59, na prática são os que vencem hoje.",
       "Contagem de pedidos com ship_by_date entre agora e agora + 24 h.",
     ),
     [`${canal}.due_next_day`]: {
       ...prazo(
         "Vence no próximo dia de prazo",
-        "Pedidos em aberto que vencem no próximo dia de prazo: amanhã, de segunda a quinta; na sexta ou antes de feriado, o próximo dia útil (a Shopee não vence prazo em fim de semana).",
+        "Vencem no próximo dia de prazo: amanhã, ou o próximo dia útil na sexta e em véspera de feriado.",
         "Contagem de pedidos com ship_by_date (dia de Brasília) no primeiro dia de prazo depois do dia da fotografia.",
       ),
-      ...(canal === "shopee"
-        ? { limitacoes: "Já contados em “No prazo”. A lista vem da fila publicada, com pedidos FBS." }
-        : {}),
+      ...(canal === "shopee" ? { limitacoes: "Já contados em “No prazo”. Inclui pedidos FBS." } : {}),
     },
     [`${canal}.sem_prazo`]: {
       nome: "Sem prazo publicado",
       origem: "torre",
       definicao:
         canal === "shopee"
-          ? "Pedidos sem prazo de envio (ship_by_date) publicado pela Shopee."
+          ? "Pedidos sem prazo de envio publicado pela Shopee."
           : "Envios sem prazo de despacho na fonte.",
       formula: "Contagem de envios sem prazo publicado.",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: canal === "shopee" ? "Pedido sem ship_by_date na fonte." : SEM_PRAZO_ML,
+      limitacoes: canal === "shopee" ? "Ficam fora de vencidos e de no prazo." : SEM_PRAZO_ML,
     },
     [`${canal}.over48h`]: {
       nome: "Acima de 48 h",
       origem: "torre",
-      definicao: `${grao === "pedido" ? "Pedidos" : "Envios"} abertos há mais de 48 h ${marco.curto}, vencidos ou não: mede a idade, não o prazo.`,
+      definicao: `${grao === "pedido" ? "Pedidos" : "Envios"} em aberto há mais de 48 h ${marco.curto}${
+        grao === "pedido" ? ", vencidos ou não" : ""
+      }.`,
       formula: `Contagem com horas em aberto > 48, contadas a partir do ${marco.regra}.`,
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "Limiar interno da Torre, não é SLA do marketplace.",
+      limitacoes: "Mede a idade, não o prazo. Limite interno da Torre, não é SLA do marketplace.",
     },
     [`${canal}.stalled`]: {
       nome: "Travados",
       origem: "torre",
-      definicao: "Parados: abertos há mais tempo que o normal da própria conta (lentos) ou há mais de 30 dias (zumbis). Cada pedido conta uma vez.",
+      definicao: "Pedidos parados: mais lentos que o normal da conta ou abertos há mais de 30 dias.",
       formula: "União de lentos e zumbis (nunca a soma).",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "Classificação do pipeline; a tela não recalcula.",
+      limitacoes: "Cada pedido conta uma vez, mesmo nos dois casos.",
     },
     [`${canal}.slow`]: {
       nome: "Lentos vs baseline",
       origem: "torre",
-      definicao: "Abertos há mais tempo que o histórico da própria conta.",
+      definicao: "Abertos há mais tempo que o normal da própria conta.",
       formula: "Horas em aberto acima da linha de base da conta.",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "A linha de base é do pipeline; conta nova tem histórico curto.",
+      limitacoes: "Conta nova tem pouco histórico para comparar.",
     },
     [`${canal}.zombie`]: {
       nome: "Zumbis",
@@ -210,7 +210,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: `Mede só a idade: não verifica se o ${grao} mudou na fonte. Pode ser item esquecido na operação ou status não atualizado na fonte; a tela não distingue.`,
+      limitacoes: `Mede só a idade: pode ser ${grao === "pedido" ? "pedido" : "envio"} esquecido ou status desatualizado na fonte.`,
     },
     [`${canal}.marcas_alerta`]: {
       nome: "Marcas com fonte em alerta",
@@ -242,7 +242,7 @@ export const DEFINICOES = {
   "shopee.no_prazo": {
     nome: "No prazo",
     origem: "torre",
-    definicao: "Pedidos em aberto cujo prazo de envio vence depois das próximas 24 h, de amanhã em diante.",
+    definicao: "Vencem depois das próximas 24 h, de amanhã em diante.",
     formula: "Contagem de pedidos com ship_by_date depois de agora + 24 h.",
     fonte: FILA_SHOPEE,
     janela: FOTO,

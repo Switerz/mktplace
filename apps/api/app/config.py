@@ -96,10 +96,13 @@ class Settings(BaseSettings):
     #: flag geral para que ligar a Expedicao nao exponha o ML sem
     #: querer, e para que adiar o ML nao exija derrubar a Shopee.
     expedicao_ml_api_enabled: bool = Field(default=False)
-    #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Nasce DESLIGADA e
-    #: exige tambem a flag geral: com qualquer uma das duas off, a rota
-    #: `/expedicao/shopee/ldr` devolve `unavailable/disabled` sem consultar.
-    expedicao_shopee_ldr_api_enabled: bool = Field(default=False)
+    #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Exige tambem a flag
+    #: geral: com qualquer uma das duas off, a rota `/expedicao/shopee/ldr`
+    #: devolve `unavailable/disabled` sem consultar. Nasceu desligada; LIGADA
+    #: por padrao desde 30/10/2026 (pedido do usuario: coorte da Shopee e
+    #: fila do vendedor x FBS na tela). `EXPEDICAO_SHOPEE_LDR_API_ENABLED=false`
+    #: no Render volta a desligar sem deploy de codigo.
+    expedicao_shopee_ldr_api_enabled: bool = Field(default=True)
 
     # Chave do identificador OPACO de pedido. Vazia por default, e vazia
     # significa NAO PUBLICAR: `order_ref` sai nulo.

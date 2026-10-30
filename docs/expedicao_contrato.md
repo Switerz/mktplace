@@ -1357,11 +1357,15 @@ e na resposta da API. Motivo NULO e' contado como ausente, sem alerta.
 vencida, > 6 h). Exclusoes em `exclusions`, cobertura em `coverage`, por marca
 em `brands` (nunca somadas entre marcas).
 
-### Flags (todas nascem desligadas)
+### Flags (nasceram desligadas)
+
+Em 30/10/2026, a pedido do usuario, `EXPEDICAO_SHOPEE_LDR_API_ENABLED` passou
+a vir LIGADA por padrao no codigo (sem acesso ao painel do Render); `false`
+na env volta a desligar sem deploy. `EXPEDICAO_API_ENABLED` continua exigida.
 
 | Onde | Flag |
 |---|---|
-| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` |
+| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` (padrao `true` desde 30/10/2026) |
 | Web (Vercel) | `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED=true` |
 | Airflow | DAG `marketplace_tower_expedicao_shopee_ldr_publish` nasce PAUSADA |
 

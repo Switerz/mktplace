@@ -27,50 +27,41 @@ import { ALL_BRAND_OPTIONS, brandLabel } from "@/lib/filters/brands";
 /** Ancora da faixa de controles — o convite ao detalhe leva o foco ate' ela. */
 export const ID_FAIXA_DE_CONTROLES = "exp-controles";
 
+/** "30/10, 16:10", no fuso do navegador. */
 function dataHoraCurta(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? "—"
-    : d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+    : d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
 /**
- * Publicacao, frescor e fonte, em selos.
+ * EXPEDICAO-ULTIMA-ATUALIZACAO (pedido de 30/10/2026): no topo, UM selo —
+ * "Última atualização 30/10, 16:10". "Fotografia", "Atualizada" e "Fonte até"
+ * sairam da tela; a idade e a leitura da fonte ficam no `title` do selo.
  *
- * "Desatualizada" e' ESCRITO, nao so' pintado de ambar: cor nao pode ser o
- * unico sinal de que os numeros abaixo descrevem o passado.
+ * So' o aviso "Desatualizada" continua aparecendo, e ESCRITO (nao so'
+ * pintado de ambar): cor nao pode ser o unico sinal de que os numeros
+ * abaixo descrevem o passado. O veredito e' do contrato do canal.
  */
 export function ChipsFotografia({ fotografia: f }: { fotografia: Fotografia }) {
+  const detalhe = [
+    f.idade !== null ? `Publicada há ${f.idade}.` : null,
+    f.fonteLidaAte ? `Fonte lida até ${dataHoraCurta(f.fonteLidaAte)}.` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <>
-      <Chip title={`Instante em que esta ${f.rotulo.toLowerCase()} foi publicada`}>
-        {f.rotulo}{" "}
+      <Chip title={detalhe || undefined}>
+        Última atualização{" "}
         {f.publicadaEm ? <time dateTime={f.publicadaEm}>{dataHoraCurta(f.publicadaEm)}</time> : "—"}
       </Chip>
-      {/* Estado ESCRITO nos dois sentidos (EXPEDICAO-UX-3): "Atualizada" ou
-          "Desatualizada", com a idade quando a API a publica. O veredito e'
-          do contrato do canal (limiar da fila; alerta da API no TikTok). */}
-      {f.publicadaEm ? (
-        <Chip
-          ponto
-          tom={f.desatualizada ? "atencao" : "bom"}
-          title={
-            f.desatualizada
-              ? "Os números descrevem o instante da publicação, não agora."
-              : "Publicação dentro do prazo esperado de atualização."
-          }
-        >
-          {f.desatualizada ? "Desatualizada" : "Atualizada"}
-          {f.idade !== null ? ` · há ${f.idade}` : null}
+      {f.publicadaEm && f.desatualizada ? (
+        <Chip ponto tom="atencao" title="Os números descrevem o instante da publicação, não agora.">
+          Desatualizada
         </Chip>
       ) : null}
-      {f.fonteLidaAte ? (
-        <Chip title="Último dado lido da fonte (watermark)">
-          Fonte até <time dateTime={f.fonteLidaAte}>{dataHoraCurta(f.fonteLidaAte)}</time>
-        </Chip>
-      ) : null}
-      {/* Sem selo de modo de publicacao: a API ainda nao prova a origem do
-          batch (`load_mode` e' constante). Instante, idade e frescor bastam. */}
     </>
   );
 }
