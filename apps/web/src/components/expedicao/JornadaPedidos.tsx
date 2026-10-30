@@ -19,11 +19,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import Chip from "@/components/ui/Chip";
+import InfoDica from "@/components/ui/InfoDica";
 import Panel from "@/components/ui/Panel";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   avisoDeMarcaNaoAplicada,
   coorteDesatualizada,
+  descricaoDaEtapa,
   estadoDaJornada,
   explicarMotivo,
   motivoDaSecao,
@@ -113,11 +115,14 @@ function ListaDeEtapas({
   base,
   evento,
   rotulo,
+  canal,
 }: {
   etapas: EtapaJornada[];
   base: number;
   evento: "coleta" | "despacho" | null;
   rotulo: string;
+  /** EXPEDICAO-VENCE-AMANHA: o "ⓘ" de cada etapa depende do canal. */
+  canal: CanalJornada;
 }) {
   if (base === 0) {
     return (
@@ -128,18 +133,24 @@ function ListaDeEtapas({
   }
   return (
     <ol aria-label={rotulo} className="flex flex-col gap-2">
-      {etapas.map((e) => (
-        <li key={e.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
-          <span className="min-w-0 text-sm text-ink">{rotuloEtapa(e, evento)}</span>
-          <span className="text-right text-xs tabular-nums text-ink-muted">
-            <span className="text-sm font-semibold text-ink">{formatarInteiro(e.count)}</span>{" "}
-            · {formatarPercentualComBase(e.count, base)}
-          </span>
-          <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
-            <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
-          </span>
-        </li>
-      ))}
+      {etapas.map((e) => {
+        const descricao = descricaoDaEtapa(e.key, canal);
+        return (
+          <li key={e.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
+            <span className="flex min-w-0 items-center gap-1.5 text-sm text-ink">
+              <span>{rotuloEtapa(e, evento)}</span>
+              {descricao ? <InfoDica texto={descricao} /> : null}
+            </span>
+            <span className="text-right text-xs tabular-nums text-ink-muted">
+              <span className="text-sm font-semibold text-ink">{formatarInteiro(e.count)}</span>{" "}
+              · {formatarPercentualComBase(e.count, base)}
+            </span>
+            <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
+              <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
+            </span>
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -243,7 +254,7 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
           <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
-      <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" />
+      <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />
       {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
           "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
       {compacta ? null : (
@@ -296,7 +307,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
           <EstadoSecao tipo="desatualizado" titulo="publicação ou fonte fora do prazo esperado." />
         </div>
       ) : null}
-      <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" />
+      <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" canal={r.channel} />
       <Sobreposicoes itens={c.sobreposicoes} etapas={c.etapas} base={c.base} evento={evento} />
       {c.fora_da_coorte.length ? (
         <p className="mt-2 text-xs text-ink-muted">

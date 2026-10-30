@@ -8,8 +8,10 @@ classificadas de `marts.expedicao_fila_atual` e `marts.expedicao_refresh_run`.
 A API NAO reclassifica nada a partir do relogio da requisicao: se o fizesse,
 dois consumidores veriam estados diferentes para a mesma fotografia.
 
-O UNICO agregado calculado aqui e' o total do canal, que e' soma de contas do
-MESMO batch e nao existe materializado de proposito.
+Os agregados calculados aqui sao o total do canal, que e' soma de contas do
+MESMO batch e nao existe materializado de proposito, e o proximo vencimento
+(`_proximo_vencimento`), contado na fila do mesmo batch a partir do dia da
+FOTOGRAFIA — nunca do relogio da requisicao.
 
 A FOTOGRAFIA E' UMA SO'
 ------------------------
@@ -89,6 +91,19 @@ SITUACAO_SQL = {
     "zombie": "is_source_zombie",
 }
 
+#: EXPEDICAO-VENCE-AMANHA — "vence no proximo dia de prazo". FORA de
+#: `SITUACAO_SQL` de proposito: o predicado depende da data do proximo
+#: vencimento, que vem da fotografia e entra como parametro; a jornada monta
+#: `count(*) FILTER (WHERE ...)` so' com predicados fixos.
+SITUACAO_PROXIMO_VENCIMENTO = "due_next_day"
+
+#: O que a borda aceita em `situacao`: os predicados fixos e o parametrizado.
+SITUACOES_ACEITAS = frozenset(SITUACAO_SQL) | {SITUACAO_PROXIMO_VENCIMENTO}
+
+#: Dia do prazo em Brasilia. `ship_by_date` e' `timestamptz`; o dia em UTC
+#: erraria as tres ultimas horas de cada dia.
+DIA_DO_PRAZO_SQL = "(dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date"
+
 #: Ordenacao PADRAO: criticidade operacional, depois prazo mais urgente, e a
 #: chave fisica como desempate. Sem o desempate estavel, duas paginas podem
 #: repetir ou omitir a mesma linha.
@@ -154,6 +169,9 @@ class Canal:
     #: publica em `shop_account`. E' o que permite comparar ESPERADO com
     #: OBSERVADO sem misturar dominios — ver `_identidade_da_conta`.
     identidade_no_registry: str
+    #: A fonte publica prazo de despacho? Sem prazo, "proximo vencimento" nao
+    #: existe: a medida sai nula, nunca zero, e a consulta nem e' feita.
+    publica_prazo: bool = False
 
     @property
     def fonte_auditoria(self) -> str:
@@ -169,6 +187,7 @@ CANAIS: dict[str, Canal] = {
         # o `brand_key`. O `external_seller_id` do registry e' o `shop_id`
         # numerico, que a fotografia NAO publica.
         identidade_no_registry="brand",
+        publica_prazo=True,
         marcas_sem_cobertura=MARCAS_SEM_COBERTURA,
         notas=(
             NOTA_SEM_AGENDAMENTO,
@@ -183,6 +202,7 @@ CANAIS: dict[str, Canal] = {
         # A fila do ML publica o `seller_id` em `shop_account`, e o registry o
         # guarda em `external_seller_id`. Sao a MESMA entidade.
         identidade_no_registry="external_seller_id",
+        publica_prazo=False,
         # A Kokeshi E' coberta aqui. Lista vazia, nao a da Shopee.
         marcas_sem_cobertura=(),
         notas=(
@@ -600,6 +620,40 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
 # ---------------------------------------------------------------------------
 # Endpoint principal
 # ---------------------------------------------------------------------------
+def _proximo_vencimento(db, canal: Canal, batch: str,
+                        effective_at: datetime) -> tuple[Optional[date], dict[str, int]]:
+    """EXPEDICAO-VENCE-AMANHA: o PROXIMO dia de prazo e quantos vencem nele.
+
+    O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia e nunca em fim
+    de semana ou feriado (medido no SHOPEE-LDR-1). Entao "vence em 24 h" e', na
+    pratica, "vence hoje", e quem vence amanha nao aparece em lugar nenhum.
+    Aqui: o primeiro dia de prazo DEPOIS do dia da fotografia — amanha de
+    segunda a quinta; na sexta, o proximo dia util — e a contagem por conta.
+
+    "Hoje" e' o dia da FOTOGRAFIA (`effective_at`), nunca o relogio da
+    requisicao: dois consumidores do mesmo lote veem o mesmo dia. Canal
+    inteiro, como `totals`; o filtro de marca so' recorta a lista.
+
+    Um SELECT so', por dia futuro x conta (poucas linhas: contas x dias
+    uteis); o menor dia e' escolhido aqui.
+    """
+    linhas = _linhas(db, f"""
+        SELECT {DIA_DO_PRAZO_SQL} AS proximo_vencimento, shop_account,
+               count(*) AS vencem
+        FROM {FILA}
+        WHERE channel = :canal AND refresh_batch_id = :batch
+          AND dispatch_deadline IS NOT NULL
+          AND {DIA_DO_PRAZO_SQL} > (CAST(:efetivo AS timestamptz)
+                                    AT TIME ZONE 'America/Sao_Paulo')::date
+        GROUP BY 1, shop_account
+    """, {"canal": canal.slug, "batch": batch, "efetivo": effective_at})
+    if not linhas:
+        return None, {}
+    dia = min(r["proximo_vencimento"] for r in linhas)
+    return dia, {str(r["shop_account"]): int(r["vencem"])
+                 for r in linhas if r["proximo_vencimento"] == dia}
+
+
 def get_expedicao(
     db,
     *,
@@ -634,6 +688,14 @@ def get_expedicao(
                "slow_count", "zombie_count", "stalled_count")
     totais = {m: sum(int(r[m]) for r in resumos) for m in medidas}
 
+    # Proximo vencimento: contado AQUI sobre o mesmo lote (nao e' materializado).
+    # Canal sem prazo: nulo por ausencia, nunca zero.
+    proximo: Optional[date] = None
+    vencem: Optional[dict[str, int]] = None
+    if canal.publica_prazo:
+        proximo, vencem = _proximo_vencimento(db, canal, snap["batch"], effective_at)
+    totais["due_next_day_count"] = None if vencem is None else sum(vencem.values())
+
     saude = "healthy"
     cobertura = _cobertura(db, canal, resumos, effective_at)
     if cobertura["missing_accounts"]:
@@ -662,10 +724,13 @@ def get_expedicao(
             "rows_extracted": aud.get("rows_extracted"),
             "rows_loaded": aud.get("rows_loaded"),
             "audit_run_id": aud.get("sync_run_id"),
+            "next_due_date": proximo,
         },
         "totals": totais,
         "accounts": [
             {**{k: r[k] for k in medidas},
+             "due_next_day_count": (
+                 None if vencem is None else vencem.get(r["shop_account"], 0)),
              "shop_account": r["shop_account"], "brand": r["brand"],
              "run_status": r["run_status"],
              "source_watermark_at": r["source_watermark_at"],
@@ -683,7 +748,8 @@ def get_expedicao(
     if include_queue:
         fila, total = _pagina_da_fila(
             db, canal, snap["batch"], brands=brands, accounts=accounts,
-            situacoes=situacoes, order_by=order_by, limit=limit, offset=offset)
+            situacoes=situacoes, order_by=order_by, limit=limit, offset=offset,
+            proximo_vencimento=proximo)
         resposta["queue"] = fila
         resposta["pagination"] = {
             "limit": limit, "offset": offset, "returned": len(fila),
@@ -693,12 +759,17 @@ def get_expedicao(
 
 
 def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes,
-                    order_by: str, limit: int, offset: int) -> tuple[list[dict], int]:
+                    order_by: str, limit: int, offset: int,
+                    proximo_vencimento: Optional[date] = None) -> tuple[list[dict], int]:
     """Filtros e ordenacao por ALLOWLIST; valores sempre parametrizados.
 
     `channel` e `refresh_batch_id` entram JUNTOS no filtro: o batch ja' seria
     suficiente hoje, mas um lote com o mesmo id em dois canais serviria a fila
     errada, e o custo de manter o canal explicito e' zero.
+
+    `due_next_day` usa a data que `get_expedicao` calculou no MESMO lote. Sem
+    data (canal sem prazo, ou nenhum prazo depois de hoje), o filtro e' `FALSE`:
+    lista vazia, nunca a fila inteira.
     """
     onde = ["channel = :canal", "refresh_batch_id = :batch"]
     params: dict[str, Any] = {"canal": canal.slug, "batch": batch}
@@ -710,8 +781,15 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         onde.append("shop_account = ANY(:accounts)")
         params["accounts"] = list(accounts)
     for i, s in enumerate(situacoes or []):
-        # `s` ja' foi validado contra SITUACAO_SQL pela borda; o predicado vem
-        # do dicionario, nunca da string do cliente.
+        if s == SITUACAO_PROXIMO_VENCIMENTO:
+            if canal.publica_prazo and proximo_vencimento is not None:
+                onde.append(f"{DIA_DO_PRAZO_SQL} = :proximo_vencimento")
+                params["proximo_vencimento"] = proximo_vencimento
+            else:
+                onde.append("FALSE")
+            continue
+        # `s` ja' foi validado contra SITUACOES_ACEITAS pela borda; o predicado
+        # vem do dicionario, nunca da string do cliente.
         onde.append(SITUACAO_SQL[s])
 
     filtro = " AND ".join(onde)

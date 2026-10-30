@@ -149,9 +149,13 @@ test("marca fora da cobertura: ausencia, nao backlog zero", () => {
 // ===========================================================================
 // 3. Risco atual: so' o que o canal sustenta
 // ===========================================================================
-test("Shopee: seis indicadores, com vencidos e vence em 24 h", () => {
-  assert.deepEqual([...KPIS_RISCO_ATUAL.shopee], ["backlog", "overdue", "due24h", "over48h", "stalled", "marcas_alerta"]);
-  assert.equal(montarRiscoAtual(totais(), [], "shopee").length, 6);
+// EXPEDICAO-VENCE-AMANHA: o proximo dia de prazo entrou depois de "vence em 24 h".
+test("Shopee: sete indicadores, com vencidos, vence em 24 h e o proximo dia de prazo", () => {
+  assert.deepEqual(
+    [...KPIS_RISCO_ATUAL.shopee],
+    ["backlog", "overdue", "due24h", "due_next_day", "over48h", "stalled", "marcas_alerta"],
+  );
+  assert.equal(montarRiscoAtual(totais(), [], "shopee").length, 7);
 });
 
 test("Mercado Livre: nenhum vencido, nenhum 'vence em 24 h'", () => {
@@ -532,11 +536,13 @@ test("LDR por loja: Venciam, Atrasados e LDR com ⓘ; Loja segue no SortHeader",
   assert.doesNotMatch(tabela, /<SortHeader rotulo="(Venciam|Atrasados|LDR)"/);
 });
 
-test("KpiComAjuda poe o ⓘ na linha de comparacao do KPI", () => {
+// EXPEDICAO-VENCE-AMANHA: o ⓘ saiu da linha de comparacao para o lado do rotulo.
+test("KpiComAjuda poe o ⓘ ao lado do rotulo do KPI", () => {
   const html = renderToStaticMarkup(
     h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),
   );
-  assert.match(html, /Fila aberta\. <span tabindex="0" role="img" aria-label="Cada pedido pago que ainda não foi expedido\./);
+  assert.match(html, /Backlog total<span tabindex="0" role="img" aria-label="Cada pedido pago que ainda não foi expedido\./);
+  assert.match(html, /<p class="mt-1\.5 text-xs leading-snug text-ink-muted">Fila aberta\.<\/p>/);
 });
 
 // ===========================================================================

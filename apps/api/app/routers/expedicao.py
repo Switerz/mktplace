@@ -27,7 +27,7 @@ from app.services import expedicao_tiktok_service as tiktok_svc
 router = APIRouter(prefix="/api/v1/expedicao", tags=["expedicao"])
 
 _MSG_SITUACAO = "Situacao invalida. Valores aceitos: " + ", ".join(
-    sorted(svc.SITUACAO_SQL))
+    sorted(svc.SITUACOES_ACEITAS))
 _MSG_ORDEM = "Ordenacao invalida. Valores aceitos: " + ", ".join(
     sorted(svc.ORDENACOES))
 _MSG_JANELA = (
@@ -92,11 +92,13 @@ def situacoes_query(
     situacao: Optional[str] = Query(
         None,
         description="Situacao operacional: overdue, due_within_24h, on_time, "
-                    "deadline_unavailable, over_48h, stalled, slow, zombie. "
+                    "deadline_unavailable, over_48h, stalled, slow, zombie, "
+                    "due_next_day (prazo no proximo dia de vencimento depois "
+                    "do dia da fotografia, em Brasilia; vazio sem prazo). "
                     "Varias somam-se como E logico."),
 ) -> Optional[list[str]]:
     itens = _lista(situacao)
-    if itens and any(x not in svc.SITUACAO_SQL for x in itens):
+    if itens and any(x not in svc.SITUACOES_ACEITAS for x in itens):
         raise HTTPException(422, _MSG_SITUACAO)
     return itens
 

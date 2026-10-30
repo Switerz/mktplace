@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -216,6 +216,47 @@ def test_prazo_indisponivel_e_do_ml_e_nao_contamina_a_shopee(sessao):
     assert ml["totals"]["deadline_unavailable_count"] == ml["totals"]["backlog_count"]
     assert all(l["dispatch_deadline"] is None for l in ml["queue"])
     assert all(l["dispatch_deadline"] is not None for l in sh["queue"])
+
+
+def test_proximo_vencimento_conta_o_dia_de_brasilia(sessao):
+    """EXPEDICAO-VENCE-AMANHA: o dia e' o de Brasilia, nao o de UTC.
+
+    AGORA = 22/09 16:04 BRT. 23/09 02:59 UTC ainda e' 22/09 23:59 BRT (mesmo
+    dia da fotografia: nao conta); 23/09 23:59 BRT e' o proximo vencimento.
+    Linhas num lote proprio, desfeitas no fim: a fotografia publicada fica
+    intacta.
+    """
+    from sqlalchemy import text
+
+    lote = str(uuid.uuid4())
+    hoje_2359 = datetime(2026, 9, 23, 2, 59, tzinfo=timezone.utc)
+    amanha_2359 = hoje_2359 + timedelta(days=1)
+    linhas = [("apice", hoje_2359), ("apice", amanha_2359),
+              ("barbours", amanha_2359), ("barbours", hoje_2359 + timedelta(days=2))]
+    try:
+        for i, (conta, prazo) in enumerate(linhas):
+            sessao.execute(text("""
+                INSERT INTO marts.expedicao_fila_atual (
+                    effective_at, refresh_batch_id, channel, shop_account,
+                    marketplace_order_id, brand, created_at, paid_at,
+                    dispatch_deadline, deadline_source, deadline_status,
+                    hours_overdue, hours_open, operational_age_status,
+                    is_slow_vs_baseline, is_source_zombie, is_stalled,
+                    timestamp_quality, source_freshness_status,
+                    source_ingested_at, logistic_type)
+                VALUES (:ef, :lote, 'shopee', :sa, :oid, :sa, :cr, :cr,
+                        :dl, 'marketplace_native', 'on_time', NULL, 10.0,
+                        'within_48h', false, false, false, 'verified',
+                        'fresh', :cr, NULL)"""), {
+                "ef": AGORA, "lote": lote, "sa": conta, "oid": f"VA-{i}",
+                "cr": AGORA - timedelta(hours=10), "dl": prazo,
+            })
+        dia, por_conta = svc._proximo_vencimento(
+            sessao, svc.CANAIS["shopee"], lote, AGORA)
+    finally:
+        sessao.rollback()
+    assert dia == date(2026, 9, 23)
+    assert por_conta == {"apice": 1, "barbours": 1}
 
 
 def test_cobertura_usa_o_registry_do_canal(sessao):

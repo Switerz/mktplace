@@ -134,7 +134,11 @@ class FrescorMarca(BaseModel):
 
 
 class ResumoConta(BaseModel):
-    """Medidas materializadas por conta. Nada e' recalculado aqui."""
+    """Medidas materializadas por conta. Nada e' recalculado aqui.
+
+    Excecao unica: `due_next_day_count` e' CONTADO pela API sobre a fila do
+    MESMO lote (EXPEDICAO-VENCE-AMANHA) — nao existe materializado.
+    """
 
     shop_account: str
     brand: str
@@ -148,6 +152,9 @@ class ResumoConta(BaseModel):
     zombie_count: int
     #: UNIAO de lento e zumbi. `slow + zombie` contaria a sobreposicao duas vezes.
     stalled_count: int
+    #: Pedidos com prazo no `Snapshot.next_due_date` (dia de Brasilia). Ja'
+    #: contados em `on_time_count`. Nulo no canal sem prazo — nunca zero.
+    due_next_day_count: Optional[int] = None
     run_status: str
     source_watermark_at: Optional[datetime] = None
     source_advanced: bool
@@ -170,6 +177,8 @@ class ResumoCanal(BaseModel):
     slow_count: int
     zombie_count: int
     stalled_count: int
+    #: Soma de `ResumoConta.due_next_day_count`; nulo no canal sem prazo.
+    due_next_day_count: Optional[int] = None
 
 
 class OrderRow(BaseModel):
@@ -234,6 +243,10 @@ class Snapshot(BaseModel):
     rows_extracted: Optional[int] = None
     rows_loaded: Optional[int] = None
     audit_run_id: Optional[int] = None
+    #: EXPEDICAO-VENCE-AMANHA — primeiro dia de prazo (Brasilia) DEPOIS do dia
+    #: de `effective_at`: amanha de segunda a quinta, o proximo dia util na
+    #: sexta. Nulo sem prazo publicado ou sem pedido vencendo depois de hoje.
+    next_due_date: Optional[date] = None
 
 
 class Limitacoes(BaseModel):

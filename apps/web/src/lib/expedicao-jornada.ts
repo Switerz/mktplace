@@ -434,6 +434,50 @@ export function rotuloSobreposicao(key: string): string {
   return ROTULO_SOBREPOSICAO[key] ?? key.replace(/_/g, " ");
 }
 
+/**
+ * EXPEDICAO-VENCE-AMANHA — o "ⓘ" de cada etapa: o que ela trata, em uma
+ * leitura. A mesma chave pode querer dizer coisas diferentes por canal
+ * ("Aguardando coleta" e' PROCESSED na Shopee e ready_for_pickup no ML), por
+ * isso `canal.chave` vem antes da chave sozinha. O status da fonte vai entre
+ * parenteses: e' o que se procura no painel do marketplace. Mapeamento em
+ * `pipelines/expedicao/contract.py` (etapa da fila) e nas coortes da API.
+ */
+const DESCRICAO_ETAPA: Record<string, string> = {
+  // Fila aberta
+  "shopee.a_preparar":
+    "Status READY_TO_SHIP na Shopee: o pedido está liberado, mas o envio ainda não foi organizado (sem etiqueta ou coleta programada).",
+  "shopee.aguardando_coleta":
+    "Status PROCESSED na Shopee: o envio já foi organizado e o pedido espera a transportadora coletar.",
+  "mercadolivre.aguardando_coleta": "Substatus ready_for_pickup: o envio está pronto, esperando a coleta.",
+  a_faturar: "Falta emitir a nota fiscal (substatus invoice_pending do Mercado Livre).",
+  a_imprimir: "Falta imprimir a etiqueta (substatus ready_to_print).",
+  em_separacao: "Na lista de separação ou sendo embalado (in_packing_list, ready_to_pack ou packed).",
+  entregue_transportadora:
+    "O Mercado Livre informa que o envio saiu do vendedor (picked_up, dropped_off ou in_hub); continua contando no backlog.",
+  sinalizado_ml: "O Mercado Livre marcou o envio como atrasado ou parado (delayed ou stale).",
+  outro: "Status da fonte fora da lista conhecida; o valor bruto fica guardado para auditoria.",
+  nao_publicada: "Pedido gravado antes de a etapa ser publicada.",
+  aguardando_expedicao: "Pago e ainda não expedido; a etapa interna não é publicada.",
+  // Coorte
+  fora_fbs: "Pedidos que a própria Shopee despacha do armazém dela (FBS): ficam fora, não dependem do vendedor.",
+  fora_amostra: "Amostras grátis: ficam fora da conta.",
+  cancelado_antes: "Cancelados antes de sair: deixam a base de atraso.",
+  enviado_sem_registro:
+    "A fonte diz que o pedido saiu, mas sem a data da coleta: não dá para saber se foi no prazo.",
+  "shopee.aguardando":
+    "Ainda sem coleta. Os que já passaram do prazo aparecem abaixo, em “Dentro dessas etapas”.",
+  aguardando:
+    "Ainda sem o evento escolhido (coleta ou despacho). Os que já passaram do prazo aparecem abaixo.",
+  "shopee.concluido":
+    "Já coletados pela transportadora. Os coletados depois do prazo aparecem abaixo, em “Dentro dessas etapas”.",
+  concluido: "Já saíram (coleta ou despacho, conforme o evento). Os que saíram com atraso aparecem abaixo.",
+};
+
+/** Descricao da etapa no canal; `null` para chave desconhecida (sem "ⓘ"). */
+export function descricaoDaEtapa(key: string, canal: CanalJornada): string | null {
+  return DESCRICAO_ETAPA[`${canal}.${key}`] ?? DESCRICAO_ETAPA[key] ?? null;
+}
+
 /** Largura da barra da etapa, em % da base. Base 0 nao desenha nada. */
 export function larguraDaEtapa(count: number, base: number): number {
   if (!(base > 0)) return 0;

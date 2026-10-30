@@ -81,7 +81,12 @@ function totais(backlog: number, vencidos: number, em24h: number, semPrazo: numb
 
 function soma(lista: Totais[]): Totais {
   const chaves = Object.keys(lista[0]) as (keyof Totais)[];
-  return Object.fromEntries(chaves.map((k) => [k, lista.reduce((s, t) => s + t[k], 0)])) as unknown as Totais;
+  return Object.fromEntries(chaves.map((k) => [k, lista.reduce((s, t) => s + (t[k] ?? 0), 0)])) as unknown as Totais;
+}
+
+/** Shopee: o proximo dia de prazo (EXPEDICAO-VENCE-AMANHA) sai do "no prazo". */
+function comProximoDia(t: Totais): Totais {
+  return { ...t, due_next_day_count: Math.round(t.on_time_count * 0.6) };
 }
 
 function conta(shop: string, brand: string, t: Totais, hora: string): ResumoConta {
@@ -98,9 +103,9 @@ function fila(canal: "shopee" | "mercadolivre", c: CenarioDemo): RespostaExpedic
   const shopee = canal === "shopee";
   const contas = shopee
     ? [
-        conta("apice", "apice", vazio ? totais(0, 0, 0, 0) : totais(620, 24, 130, 6), hora),
-        conta("barbours", "barbours", vazio ? totais(0, 0, 0, 0) : totais(980, 38, 210, 4), hora),
-        conta("kokeshi", "kokeshi", vazio ? totais(0, 0, 0, 0) : totais(220, 0, 40, 0), hora),
+        conta("apice", "apice", comProximoDia(vazio ? totais(0, 0, 0, 0) : totais(620, 24, 130, 6)), hora),
+        conta("barbours", "barbours", comProximoDia(vazio ? totais(0, 0, 0, 0) : totais(980, 38, 210, 4)), hora),
+        conta("kokeshi", "kokeshi", comProximoDia(vazio ? totais(0, 0, 0, 0) : totais(220, 0, 40, 0)), hora),
       ]
     : [
         // ML: sem prazo publicado — todo o backlog e' "sem prazo".
@@ -125,6 +130,8 @@ function fila(canal: "shopee" | "mercadolivre", c: CenarioDemo): RespostaExpedic
       rows_extracted: t.backlog_count,
       rows_loaded: t.backlog_count,
       audit_run_id: null,
+      // AGORA e' segunda 26/10: o proximo dia de prazo e' terca.
+      ...(shopee ? { next_due_date: "2026-10-27" } : {}),
     },
     totals: c === "indisponivel" ? null : t,
     accounts: c === "indisponivel" ? [] : contas,
