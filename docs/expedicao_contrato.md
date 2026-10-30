@@ -463,7 +463,7 @@ Somente `GET`. Nao existe `POST`, `PATCH` nem `DELETE`, e o servico so' emite
 |---|---|---|
 | `brands` | ambos | CSV, ate 50 itens de ate 64 caracteres |
 | `accounts` | ambos | CSV, mesma regra |
-| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`. Varias combinam com E logico |
+| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`, `due_next_day` (ver "Proximo vencimento"). Varias combinam com E logico |
 | `order_by` | principal | `criticidade` (padrao), `deadline`, `oldest` |
 | `limit` / `offset` | principal | 1..500 / >= 0 |
 | `include_queue` | principal | `false` devolve so' o resumo |
@@ -520,6 +520,41 @@ convida a decidir sobre estado vencido.
 `source_advanced=false` e' METADADO: significa "a fonte nao avancou desde a
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
+
+### Proximo vencimento (EXPEDICAO-VENCE-AMANHA, 30/10/2026)
+
+**Por que existe.** O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia
+e nunca em fim de semana ou feriado (medido no SHOPEE-LDR-1). Logo
+`due_within_24h` e', na pratica, "vence hoje", e os pedidos que vencem amanha
+ficavam diluidos em `on_time`, sem contagem nem lista.
+
+**Campos** (`GET /api/v1/expedicao`):
+
+- `snapshot.next_due_date` — primeiro dia de prazo (data de Brasilia) DEPOIS do
+  dia de `effective_at`: amanha de segunda a quinta; na sexta, o proximo dia
+  util. Vem da propria fila (menor dia de prazo maior que o dia da fotografia),
+  entao feriado ja' sai certo. `null` sem prazo publicado ou sem pedido
+  vencendo depois de hoje.
+- `accounts[].due_next_day_count` e `totals.due_next_day_count` — pedidos com
+  prazo nesse dia. Subconjunto de `on_time_count`; nao entra na particao de
+  prazo. Shopee: inteiro (0 quando nao ha data). Mercado Livre: `null` — o
+  canal nao publica prazo e a consulta nem e' feita.
+
+**Regras.**
+
+- "Hoje" e' o dia da FOTOGRAFIA (`effective_at`), nunca o relogio da
+  requisicao: dois consumidores do mesmo lote veem o mesmo dia.
+- Contado pela API sobre `marts.expedicao_fila_atual` do MESMO lote, numa
+  consulta (`channel` + `refresh_batch_id`), dia por
+  `(dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date`. Nao e'
+  materializado.
+- Canal inteiro, como `totals`: `brands`/`accounts` recortam so' a lista.
+- `situacao=due_next_day` lista esses pedidos (predicado com a data como
+  parametro). Fica FORA de `SITUACAO_SQL`, que a jornada usa em
+  `count(*) FILTER` so' com predicados fixos. Sem data, ou no ML, o filtro e'
+  `FALSE`: lista vazia, nunca a fila inteira.
+- A fila publicada inclui FBS (o extrator nao le `fulfillment_flag`): a
+  contagem tambem.
 
 ### Hierarquia gerencial, filtro de marca e LDR (EXPEDICAO-UX-3, 21/10/2026)
 

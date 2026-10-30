@@ -17,6 +17,7 @@ import type { ReactNode } from "react";
 
 import type { Kpi } from "@/lib/expedicao-contract";
 import { formatarInteiro } from "@/lib/expedicao-formato";
+import { percentualDaFila } from "@/lib/expedicao-travados";
 import type { ItemAtencao } from "@/lib/expedicao-ux";
 
 export default function RiscoEmDestaque({
@@ -24,6 +25,7 @@ export default function RiscoEmDestaque({
   backlog,
   marcasAlerta,
   ajuda,
+  acao,
   secundarios,
   prazo,
   ondeAgir,
@@ -34,6 +36,8 @@ export default function RiscoEmDestaque({
   marcasAlerta?: Kpi;
   /** O "ⓘ" da medida em destaque. */
   ajuda?: ReactNode;
+  /** "ver quais" — abre a lista dos pedidos da medida. */
+  acao?: ReactNode;
   /** Os cartoes secundarios, ja' montados. */
   secundarios: ReactNode;
   /** A barra de situacao de prazo (so' no canal que publica prazo). */
@@ -41,6 +45,9 @@ export default function RiscoEmDestaque({
   ondeAgir?: ItemAtencao | null;
 }) {
   const valor = principal.valor ?? 0;
+  // EXPEDICAO-VENCE-AMANHA: o % sobre a MESMA fila do "de N em fila", com a
+  // regra dos travados ("3,7% da fila").
+  const pct = backlog?.valor != null ? percentualDaFila(valor, backlog.valor) : null;
   // Vencido e' prazo do marketplace (vermelho); +48 h e' limiar interno (ambar).
   // Zero nao pinta: cor e' para risco, nao para decorar.
   const critico = principal.chave === "overdue";
@@ -70,7 +77,7 @@ export default function RiscoEmDestaque({
             </span>
           ) : null}
         </div>
-        <p className="flex items-baseline gap-2">
+        <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <span className={`text-4xl font-bold leading-none tabular-nums ${tinta}`}>
             {formatarInteiro(valor)}
           </span>
@@ -79,6 +86,12 @@ export default function RiscoEmDestaque({
               de {formatarInteiro(backlog.valor)} em fila
             </span>
           ) : null}
+          {pct ? (
+            <span className={`rounded-md bg-surface/70 px-1.5 py-0.5 text-sm font-semibold tabular-nums ${tinta}`}>
+              {pct} da fila
+            </span>
+          ) : null}
+          {acao ? <span className="text-sm">{acao}</span> : null}
         </p>
         {prazo ? <div className="mt-1">{prazo}</div> : null}
         {ondeAgir ? (
@@ -96,7 +109,9 @@ export default function RiscoEmDestaque({
       {/* Os cartoes ESTICAM ate' a altura do destaque: sem faixa vazia embaixo. */}
       <section
         aria-label="Demais indicadores de risco"
-        className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:auto-rows-fr [&>*]:h-full"
+        // EXPEDICAO-VENCE-AMANHA: 4 cartoes na Shopee, 1 no ML — as colunas
+        // seguem a quantidade (2 por linha em 390px, todos lado a lado no desktop).
+        className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2 lg:auto-rows-fr [&>*]:h-full"
       >
         {secundarios}
       </section>

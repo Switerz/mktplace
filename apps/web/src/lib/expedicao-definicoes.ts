@@ -77,7 +77,8 @@ const REF_META_TIKTOK =
 
 /** Os KPIs da fila (`montarKpis`), um `?` por canal. */
 export const KPIS_DA_FILA = [
-  "backlog", "overdue", "due24h", "sem_prazo", "over48h", "stalled", "slow", "zombie", "marcas_alerta",
+  "backlog", "overdue", "due24h", "due_next_day", "sem_prazo", "over48h", "stalled", "slow", "zombie",
+  "marcas_alerta",
 ] as const;
 type KpiDaFila = (typeof KPIS_DA_FILA)[number];
 
@@ -136,18 +137,33 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     },
     [`${canal}.overdue`]: prazo(
       "Vencidos",
-      "Pedidos em aberto que já passaram do prazo de envio da Shopee.",
+      "Pedidos pagos, ainda não coletados, que já passaram do prazo de envio da Shopee.",
       "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
     ),
+    // EXPEDICAO-VENCE-AMANHA: o prazo da Shopee vence sempre as 23:59, entao
+    // a janela de 24 h so' alcanca o dia de hoje — o "ⓘ" diz isso.
     [`${canal}.due24h`]: prazo(
       "Vence em 24 h",
-      "Pedidos em aberto cujo prazo de envio vence nas próximas 24 h.",
+      "Pedidos em aberto cujo prazo vence nas próximas 24 h. Todo prazo da Shopee vence às 23:59: na prática, são os que vencem hoje.",
       "Contagem de pedidos com ship_by_date entre agora e agora + 24 h.",
     ),
+    [`${canal}.due_next_day`]: {
+      ...prazo(
+        "Vence no próximo dia de prazo",
+        "Pedidos em aberto que vencem no próximo dia de prazo: amanhã, de segunda a quinta; na sexta ou antes de feriado, o próximo dia útil (a Shopee não vence prazo em fim de semana).",
+        "Contagem de pedidos com ship_by_date (dia de Brasília) no primeiro dia de prazo depois do dia da fotografia.",
+      ),
+      ...(canal === "shopee"
+        ? { limitacoes: "Já contados em “No prazo”. A lista vem da fila publicada, com pedidos FBS." }
+        : {}),
+    },
     [`${canal}.sem_prazo`]: {
       nome: "Sem prazo publicado",
       origem: "torre",
-      definicao: "Envios sem prazo de despacho na fonte.",
+      definicao:
+        canal === "shopee"
+          ? "Pedidos sem prazo de envio (ship_by_date) publicado pela Shopee."
+          : "Envios sem prazo de despacho na fonte.",
       formula: "Contagem de envios sem prazo publicado.",
       fonte,
       janela: FOTO,
@@ -157,7 +173,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     [`${canal}.over48h`]: {
       nome: "Acima de 48 h",
       origem: "torre",
-      definicao: `Abertos há mais de 48 h ${marco.curto}.`,
+      definicao: `${grao === "pedido" ? "Pedidos" : "Envios"} abertos há mais de 48 h ${marco.curto}, vencidos ou não: mede a idade, não o prazo.`,
       formula: `Contagem com horas em aberto > 48, contadas a partir do ${marco.regra}.`,
       fonte,
       janela: FOTO,
@@ -167,7 +183,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
     [`${canal}.stalled`]: {
       nome: "Travados",
       origem: "torre",
-      definicao: "Lentos ou zumbis, sem contar o mesmo pedido duas vezes.",
+      definicao: "Parados: abertos há mais tempo que o normal da própria conta (lentos) ou há mais de 30 dias (zumbis). Cada pedido conta uma vez.",
       formula: "União de lentos e zumbis (nunca a soma).",
       fonte,
       janela: FOTO,
@@ -222,6 +238,16 @@ export const DEFINICOES = {
     janela: FOTO,
     cobertura: COB_SHOPEE,
     limitacoes: "Não é LDR: a fotografia só tem pedidos em aberto, não os já enviados.",
+  },
+  "shopee.no_prazo": {
+    nome: "No prazo",
+    origem: "torre",
+    definicao: "Pedidos em aberto cujo prazo de envio vence depois das próximas 24 h, de amanhã em diante.",
+    formula: "Contagem de pedidos com ship_by_date depois de agora + 24 h.",
+    fonte: FILA_SHOPEE,
+    janela: FOTO,
+    cobertura: COB_SHOPEE,
+    limitacoes: "Inclui os que vencem no próximo dia de prazo.",
   },
   "shopee.fbs": {
     nome: "Pedidos FBS",
@@ -428,7 +454,8 @@ export const AJUDA_CANAL_SEM_PRAZO = {
 /** As metricas exibidas em cada canal — o teste cobre o catalogo com isto. */
 export const METRICAS_POR_CANAL: Record<"shopee" | "mercadolivre" | "tiktokshop", readonly ChaveMetrica[]> = {
   shopee: [
-    "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.over48h", "shopee.stalled",
+    "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.due_next_day", "shopee.no_prazo",
+    "shopee.sem_prazo", "shopee.over48h", "shopee.stalled",
     "shopee.slow", "shopee.zombie", "shopee.marcas_alerta", "shopee.prazo_situacao",
     "shopee.fbs", "shopee.ldr", "shopee.ldr_base", "shopee.ldr_atrasados", "shopee.ldr_em_risco",
     "jornada.fila_aberta", "jornada.coorte",

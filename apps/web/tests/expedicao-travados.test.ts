@@ -50,7 +50,9 @@ test("a lista usa a rota da fila: so' travados, mais antigos primeiro, da marca 
 });
 
 test("tela: cartao de travados com % e 'ver quais'; popup montado uma vez", () => {
-  assert.match(CLIENTE, /k\.chave === "stalled" && k\.valor !== null \? \(\s*cartaoTravados\(k\)/);
+  // EXPEDICAO-VENCE-AMANHA: todo cartao com lista (travados inclusive) usa o mesmo cartao.
+  assert.match(CLIENTE, /stalled: "travados"/);
+  assert.match(CLIENTE, /return lista && k\.valor !== null \? \(\s*cartaoComLista\(k, lista\)/);
   assert.match(CLIENTE, /\{pct \? `\$\{pct\} da fila` : null\}/);
   assert.match(CLIENTE, />\s*ver quais\s*</);
   assert.equal((CLIENTE.match(/<TravadosDialog\b/g) ?? []).length, 1);
@@ -107,7 +109,7 @@ test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclu
   assert.match(POPUP, /alvo\?\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
   assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? "Por segurança/);
   assert.match(POPUP, /\{rodape \? <p className="text-xs text-ink-faint">\{rodape\}<\/p> : null\}/);
-  assert.match(CLIENTE, /<TravadosDialog\s+key=\{alvoTravados \?/);
+  assert.match(CLIENTE, /<TravadosDialog\s+key=\{\s*alvoTravados\s*\?/);
   assert.match(CLIENTE, /incluiFbs: divisao !== null/);
   const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
   // revisao #127: o modo compacto mantem o aviso de marca e as limitacoes
@@ -214,7 +216,8 @@ test("popup: coluna Pedido com o numero e botao Exportar CSV", () => {
   assert.match(POPUP, /\{temCodigo \? <th scope="col">\{rotuloDoNumero\(canal\)\}<\/th> : null\}/);
   assert.match(POPUP, /\{numeroDoPedido\(l\) \?\? "—"\}/);
   assert.match(POPUP, /data-testid="exp-travados-csv"/);
-  assert.match(POPUP, /baixarCsv\(csvDosTravados\(linhas, canal\), nomeDoCsvTravados\(canal, alvo\.marca, new Date\(\)\)\)/);
+  // EXPEDICAO-VENCE-AMANHA: o mesmo botao exporta a lista aberta (travados por padrao).
+  assert.match(POPUP, /baixarCsv\(csvDaLista\(linhas, canal, lista\), nomeDoCsv\(lista, canal, alvo\.marca, new Date\(\)\)\)/);
   assert.match(POPUP, /URL\.revokeObjectURL\(url\)/);
   // numero nunca vira link para o marketplace
   assert.doesNotMatch(POPUP, /href=\{[^}]*numeroDoPedido/);

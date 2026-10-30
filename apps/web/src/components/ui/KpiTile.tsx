@@ -19,6 +19,7 @@ export default function KpiTile({
   contexto,
   tom = "neutro",
   destaque = false,
+  ajuda,
 }: {
   rotulo: string;
   valor: ReactNode;
@@ -28,6 +29,11 @@ export default function KpiTile({
   contexto?: string;
   tom?: Tom;
   destaque?: boolean;
+  /**
+   * O "ⓘ" do rotulo, colado nele (EXPEDICAO-VENCE-AMANHA): quem le' o nome da
+   * classificacao acha a explicacao ali, e nao no rodape do cartao.
+   */
+  ajuda?: ReactNode;
 }) {
   return (
     <div
@@ -35,8 +41,9 @@ export default function KpiTile({
       className={`flex min-w-0 flex-col justify-between rounded-lg border px-3.5 py-3 ${TOM_SUPERFICIE[tom]}`}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
           {rotulo}
+          {ajuda}
         </p>
         {tom !== "neutro" && (
           <span

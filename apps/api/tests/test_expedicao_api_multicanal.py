@@ -10,7 +10,7 @@ junto com a mudanca, tenderia a responder exatamente o que a mudanca espera.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -191,6 +191,45 @@ def test_ml_declara_que_nao_ha_prazo(ml_ligado):
     junto = " ".join(r["limitations"]["notes"])
     assert "nao publica prazo de despacho" in junto
     assert "SHIPMENT" in junto
+
+
+def test_ml_nao_tem_proximo_vencimento_nem_consulta(ml_ligado):
+    """EXPEDICAO-VENCE-AMANHA: sem prazo na fonte, a medida nao existe — nulo,
+    nunca zero — e a consulta nem sai."""
+    s = sessao_ml()
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["next_due_date"] is None
+    assert r["totals"]["due_next_day_count"] is None
+    assert all(c["due_next_day_count"] is None for c in r["accounts"])
+    assert not any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_ml_com_due_next_day_devolve_lista_vazia(ml_ligado):
+    s = sessao_ml()
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_next_day"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert "FALSE" in sql
+
+
+def test_so_a_shopee_declara_que_publica_prazo():
+    assert svc.CANAIS["shopee"].publica_prazo is True
+    assert svc.CANAIS["mercadolivre"].publica_prazo is False
+
+
+def test_rota_aceita_situacao_due_next_day(ligada):
+    s = SessaoFake(proximo=[{"proximo_vencimento": date(2026, 9, 17),
+                             "shop_account": "apice", "vencem": 3}])
+    cliente, app = _cliente(s)
+    try:
+        r = cliente.get("/api/v1/expedicao?situacao=due_next_day")
+    finally:
+        app.dependency_overrides.clear()
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["snapshot"]["next_due_date"] == "2026-09-17"
+    assert corpo["totals"]["due_next_day_count"] == 3
+    pagina = next(p for q, p in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert pagina["proximo_vencimento"] == date(2026, 9, 17)
 
 
 def test_kokeshi_e_coberta_no_ml(ml_ligado):
