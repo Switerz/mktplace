@@ -36,7 +36,11 @@ import {
 } from "./expedicao-ux.ts";
 import { TEXTO_INDISPONIVEL, formatarDecimal, formatarInteiro } from "./expedicao-formato.ts";
 
-/** Os oito valores de `situacao` aceitos pela API. Allowlist fechada. */
+/**
+ * Os valores de `situacao` aceitos pela API. Allowlist fechada.
+ * `due_next_day` (EXPEDICAO-VENCE-AMANHA): o proximo dia de prazo depois do
+ * dia da fotografia, so' na Shopee.
+ */
 export const SITUACOES = [
   "overdue",
   "due_within_24h",
@@ -46,6 +50,7 @@ export const SITUACOES = [
   "stalled",
   "slow",
   "zombie",
+  "due_next_day",
 ] as const;
 export type Situacao = (typeof SITUACOES)[number];
 
@@ -166,6 +171,11 @@ export interface Snapshot {
   rows_extracted: number | null;
   rows_loaded: number | null;
   audit_run_id: number | null;
+  /**
+   * EXPEDICAO-VENCE-AMANHA — proximo dia de prazo depois do dia da fotografia
+   * (Brasilia), "AAAA-MM-DD". Nulo sem prazo na fila; ausente na API antiga.
+   */
+  next_due_date?: string | null;
 }
 
 export interface Totais {
@@ -178,6 +188,12 @@ export interface Totais {
   slow_count: number;
   zombie_count: number;
   stalled_count: number;
+  /**
+   * EXPEDICAO-VENCE-AMANHA — pedidos que vencem no `next_due_date`. Contado
+   * pela API no MESMO batch (nao e' medida materializada). Nulo no canal sem
+   * prazo; ausente na API antiga — a tela mostra ausencia, nunca zero.
+   */
+  due_next_day_count?: number | null;
 }
 
 export interface ResumoConta extends Totais {
@@ -519,6 +535,41 @@ export interface Kpi {
   notaCurta?: string;
 }
 
+const DIA_DA_SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+/** "AAAA-MM-DD" do instante, no dia de Brasilia. */
+function diaBrt(iso: string): string | null {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(d);
+}
+
+/**
+ * EXPEDICAO-VENCE-AMANHA — rotulo do cartao do proximo dia de prazo.
+ *
+ * Todo prazo da Shopee vence as 23:59 e nunca em fim de semana ou feriado:
+ * "Vence em 24 h" ja' e', na pratica, "vence hoje", e o proximo dia de prazo
+ * e' amanha de segunda a quinta. Na sexta (ou antes de feriado) ele e' outro
+ * dia, e o rotulo diz qual ("Vence ter 03/11") em vez de chamar de amanha.
+ * Sem proximo prazo na fila, a contagem e' zero e o rotulo fica "amanhã".
+ */
+export function rotuloDoProximoVencimento(
+  proximo: string | null | undefined,
+  efetivoEm: string | null | undefined,
+): string {
+  const hoje = efetivoEm ? diaBrt(efetivoEm) : null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(proximo ?? "");
+  if (!m || !hoje) return "Vence amanhã";
+  const [a, mes, dia] = hoje.split("-").map(Number);
+  const amanha = new Date(Date.UTC(a, mes - 1, dia + 1)).toISOString().slice(0, 10);
+  if (proximo === amanha) return "Vence amanhã";
+  const semana = DIA_DA_SEMANA[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()];
+  return `Vence ${semana} ${m[3]}/${m[2]}`;
+}
+
+/** O que `montarKpis` precisa da fotografia para o proximo dia de prazo. */
+export type FotografiaDoPrazo = Pick<Snapshot, "effective_at" | "next_due_date">;
+
 /**
  * Cartoes derivados SOMENTE do payload. Medida ausente vira `null`, nunca 0:
  * zero afirmaria uma medicao que nao foi feita.
@@ -532,6 +583,7 @@ export function montarKpis(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
   const v = (n: number | undefined | null) => (typeof n === "number" ? n : null);
   const emAlerta = frescor.filter(
@@ -561,6 +613,18 @@ export function montarKpis(
       (t?.overdue_count ?? 0) > 0,
     ),
     prazo("due24h", "Vence em 24h", v(t?.due_within_24h_count), false),
+    // EXPEDICAO-VENCE-AMANHA: so' no canal com prazo. No Mercado Livre o
+    // cartao N/D repetiria a ausencia que "Vencidos" ja' explica.
+    ...(temPrazo
+      ? [
+          {
+            chave: "due_next_day",
+            rotulo: rotuloDoProximoVencimento(fotografia?.next_due_date, fotografia?.effective_at),
+            valor: v(t?.due_next_day_count),
+            alerta: false,
+          } as Kpi,
+        ]
+      : []),
     ...(temPrazo
       ? []
       : [
@@ -833,8 +897,9 @@ export function montarKpisPrincipais(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
-  const todos = montarKpis(t, frescor, canal);
+  const todos = montarKpis(t, frescor, canal, fotografia);
   const ordem = KPIS_PRINCIPAIS[canal];
   return ordem
     .map((chave) => todos.find((k) => k.chave === chave))
@@ -846,9 +911,10 @@ export function montarKpisSecundarios(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
   const principais = new Set(KPIS_PRINCIPAIS[canal]);
-  return montarKpis(t, frescor, canal).filter((k) => !principais.has(k.chave));
+  return montarKpis(t, frescor, canal, fotografia).filter((k) => !principais.has(k.chave));
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,7 +1409,7 @@ export const DEFINICAO_FILA: Record<Canal, string> = {
  * a ausencia e' explicada na secao de prazo, nao em cartoes N/D.
  */
 export const KPIS_RISCO_ATUAL: Record<Canal, readonly string[]> = {
-  shopee: ["backlog", "overdue", "due24h", "over48h", "stalled", "marcas_alerta"],
+  shopee: ["backlog", "overdue", "due24h", "due_next_day", "over48h", "stalled", "marcas_alerta"],
   mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
 };
 
@@ -1351,8 +1417,9 @@ export function montarRiscoAtual(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
-  const todos = montarKpis(t, frescor, canal);
+  const todos = montarKpis(t, frescor, canal, fotografia);
   return KPIS_RISCO_ATUAL[canal]
     .map((chave) => todos.find((k) => k.chave === chave))
     .filter((k): k is Kpi => k !== undefined);
@@ -1368,6 +1435,7 @@ const MEDIDAS: readonly (keyof Totais)[] = [
   "slow_count",
   "zombie_count",
   "stalled_count",
+  "due_next_day_count",
 ];
 
 export interface RecorteMarca {

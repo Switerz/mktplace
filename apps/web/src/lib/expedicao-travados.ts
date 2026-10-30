@@ -5,12 +5,15 @@
 import { formatarDecimal } from "./expedicao-formato.ts";
 import {
   FILTROS_PADRAO,
+  LIMIT_MAX,
   construirQuery,
   numeroDoPedido,
   rotuloDeadline,
   rotuloDoNumero,
   type Canal,
   type LinhaFila,
+  type Ordenacao,
+  type Situacao,
 } from "./expedicao-contract.ts";
 import { brandLabel } from "./filters/brands.ts";
 import { buildProdutosCsvFile, type ExportRecord } from "./produtos-export.ts";
@@ -59,11 +62,58 @@ export function travadosPorEtapa(linhas: Pick<LinhaFila, "etapa">[]): { etapa: s
 /** Mais que isso vira "mostrando N de M": o popup e' para olhar, nao exportar. */
 export const LIMITE_TRAVADOS = 200;
 
+/**
+ * EXPEDICAO-VENCE-AMANHA — o mesmo popup lista os pedidos de cada cartao do
+ * "Risco atual". `travados` e' o de sempre; os outros sao recortes da MESMA
+ * rota da fila por outra situacao.
+ */
+export type TipoLista = "travados" | "vencidos" | "vence_24h" | "vence_proximo" | "acima_48h";
+
+export interface ConfigLista {
+  situacao: Situacao;
+  ordem: Ordenacao;
+  limite: number;
+  /** "travados de 722 na fila", "vencem no próximo dia de prazo de 722 na fila". */
+  nome: string;
+  vazio: string;
+  /** Prefixo do arquivo CSV. */
+  arquivo: string;
+  /** Cor do numero: vencido e' prazo do marketplace; o resto, atencao. */
+  tom: "critico" | "atencao";
+}
+
+export const LISTAS: Record<TipoLista, ConfigLista> = {
+  travados: {
+    situacao: "stalled", ordem: "oldest", limite: LIMITE_TRAVADOS, nome: "travados",
+    vazio: "Nenhum pedido travado nesta fotografia.", arquivo: "travados", tom: "atencao",
+  },
+  // Mais atrasado primeiro: o prazo mais antigo e' o que mais doi.
+  vencidos: {
+    situacao: "overdue", ordem: "deadline", limite: LIMIT_MAX, nome: "vencidos",
+    vazio: "Nenhum pedido vencido nesta fotografia.", arquivo: "vencidos", tom: "critico",
+  },
+  // Mesmo prazo para todos (23:59): pago ha' mais tempo vem antes.
+  vence_24h: {
+    situacao: "due_within_24h", ordem: "oldest", limite: LIMIT_MAX, nome: "vencem em 24 h",
+    vazio: "Nenhum pedido vence nas próximas 24 h.", arquivo: "vence-24h", tom: "atencao",
+  },
+  // A lista de amanha e' para agir: cabe o dia inteiro (limite da API).
+  vence_proximo: {
+    situacao: "due_next_day", ordem: "oldest", limite: LIMIT_MAX, nome: "vencem no próximo dia de prazo",
+    vazio: "Nenhum pedido vence no próximo dia de prazo.", arquivo: "vence-proximo-dia", tom: "atencao",
+  },
+  acima_48h: {
+    situacao: "over_48h", ordem: "oldest", limite: LIMIT_MAX, nome: "acima de 48 h",
+    vazio: "Nenhum pedido aberto há mais de 48 h.", arquivo: "acima-48h", tom: "atencao",
+  },
+};
+
 export interface AlvoTravados {
   /** Titulo curto: "Travados · ÁPICE". */
   titulo: string;
   marca: string | null;
   conta: string | null;
+  /** Quantos o cartao mostra (travados, vencidos...), ate' a lista chegar. */
   travados: number;
   backlog: number;
   /**
@@ -71,6 +121,8 @@ export interface AlvoTravados {
    * cartao e' so' do vendedor: o popup diz que a lista inclui FBS.
    */
   incluiFbs?: boolean;
+  /** Qual lista abrir; sem ela, travados. */
+  lista?: TipoLista;
 }
 
 /** Por que o pipeline marcou o pedido como travado, em linguagem de gestor. */
@@ -86,16 +138,21 @@ export function percentualDaFila(parte: number, base: number): string | null {
   return `${formatarDecimal((parte / base) * 100, 1)}%`;
 }
 
-export function queryDosTravados(canal: Canal, marca: string | null, conta: string | null): string {
+export function queryDaLista(tipo: TipoLista, canal: Canal, marca: string | null, conta: string | null): string {
+  const l = LISTAS[tipo];
   return construirQuery({
     ...FILTROS_PADRAO,
     channel: canal,
     brands: marca ? [marca] : [],
     accounts: conta ? [conta] : [],
-    situacao: ["stalled"],
-    orderBy: "oldest",
-    limit: LIMITE_TRAVADOS,
+    situacao: [l.situacao],
+    orderBy: l.ordem,
+    limit: l.limite,
   });
+}
+
+export function queryDosTravados(canal: Canal, marca: string | null, conta: string | null): string {
+  return queryDaLista("travados", canal, marca, conta);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +183,12 @@ function dataBrt(iso: string | null): string | null {
   }).format(d).replace(",", "");
 }
 
+/** "03/11 23:59" em Brasilia, para a coluna Prazo do popup; sem data, nulo. */
+export function prazoCurtoBrt(iso: string | null): string | null {
+  const t = dataBrt(iso);
+  return t ? `${t.slice(0, 5)} ${t.slice(-5)}` : null;
+}
+
 export function linhaDoCsvTravados(l: LinhaFila, canal: Canal): ExportRecord {
   return {
     [rotuloDoNumero(canal)]: numeroDoPedido(l),
@@ -146,10 +209,22 @@ export function csvDosTravados(linhas: LinhaFila[], canal: Canal): string {
   return buildProdutosCsvFile(colunasDoCsvTravados(canal), linhas.map((l) => linhaDoCsvTravados(l, canal)));
 }
 
-/** `travados-shopee-barbours-2026-10-30.csv`; sem marca, `todas`. */
-export function nomeDoCsvTravados(canal: Canal, marca: string | null, hoje: Date): string {
+/** As listas de prazo e idade nao tem motivo de travamento: a coluna sai. */
+export function csvDaLista(linhas: LinhaFila[], canal: Canal, tipo: TipoLista): string {
+  if (tipo === "travados") return csvDosTravados(linhas, canal);
+  const colunas = colunasDoCsvTravados(canal).filter((c) => c !== "Por que travou");
+  return buildProdutosCsvFile(colunas, linhas.map((l) => linhaDoCsvTravados(l, canal)));
+}
+
+/** `vencidos-shopee-barbours-2026-10-30.csv`; sem marca, `todas`. */
+export function nomeDoCsv(tipo: TipoLista, canal: Canal, marca: string | null, hoje: Date): string {
   const dia = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(hoje);
   const slug = (marca ?? "todas").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return `travados-${canal}-${slug || "todas"}-${dia}.csv`;
+  return `${LISTAS[tipo].arquivo}-${canal}-${slug || "todas"}-${dia}.csv`;
+}
+
+/** `travados-shopee-barbours-2026-10-30.csv`; sem marca, `todas`. */
+export function nomeDoCsvTravados(canal: Canal, marca: string | null, hoje: Date): string {
+  return nomeDoCsv("travados", canal, marca, hoje);
 }
 
