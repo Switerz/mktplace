@@ -777,7 +777,7 @@ test("jornada ML: fila aberta com etapas e coorte indisponivel com a limitacao",
   assert.match(html, /substatus do shipment não publicado na fila/);
 });
 
-test("jornada TikTok: coorte rotulada, publicado em e selo de frescor; parcial avisado", () => {
+test("jornada TikTok: coorte rotulada, so' o selo 'Desatualizada' (publicacao no hover); parcial avisado", () => {
   const html = render(
     200,
     {
@@ -788,7 +788,9 @@ test("jornada TikTok: coorte rotulada, publicado em e selo de frescor; parcial a
     "tiktok",
   );
   assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
-  assert.match(html, /publicado em <time dateTime="2026-10-26T09:00:00Z">\d{2}\/\d{2} \d{2}:\d{2}<\/time>/);
+  // EXPEDICAO-ULTIMA-ATUALIZACAO: a hora fica so' no topo; aqui, no `title`.
+  assert.doesNotMatch(html, /publicado em <time/);
+  assert.match(html, /title="Última publicação dos dias desta coorte: \d{2}\/\d{2} \d{2}:\d{2}\."/);
   assert.match(html, />Desatualizada</);
   assert.match(html, /Parcial:/);
   assert.match(html, /1 dia\(s\) sem publicação na janela/);

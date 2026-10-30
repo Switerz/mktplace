@@ -290,10 +290,17 @@ test("seletor de marca: 'Todas', o mapa canonico e marcas novas do payload", () 
   assert.match(html, /min-h-11/);
 });
 
-test("frescor escrito nos dois sentidos: 'Atualizada' e 'Desatualizada'", () => {
-  const base = { rotulo: "Fotografia", publicadaEm: "2026-10-21T12:00:00Z", idade: "1.2 h", fonteLidaAte: null };
-  assert.match(renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: false } })), /Atualizada · há 1\.2 h/);
-  assert.match(renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: true } })), /Desatualizada · há 1\.2 h/);
+// EXPEDICAO-ULTIMA-ATUALIZACAO (30/10/2026): no topo, so' "Última atualização";
+// "Atualizada"/"Fotografia"/"Fonte até" sairam. "Desatualizada" continua escrito.
+test("topo: so' 'Última atualização'; 'Desatualizada' escrito quando velha", () => {
+  const base = { rotulo: "Fotografia", publicadaEm: "2026-10-21T12:00:00Z", idade: "1.2 h", fonteLidaAte: "2026-10-21T11:00:00Z" };
+  const fresca = renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: false } }));
+  assert.match(fresca, /Última atualização <time dateTime="2026-10-21T12:00:00Z">\d{2}\/\d{2}, \d{2}:\d{2}<\/time>/);
+  assert.doesNotMatch(fresca, />Atualizada|>Fotografia|Fonte até|Desatualizada/);
+  // a idade e a fonte nao somem: vao para o hover do selo
+  assert.match(fresca, /title="Publicada há 1\.2 h\. Fonte lida até/);
+  const velha = renderToStaticMarkup(h(ChipsFotografia, { fotografia: { ...base, desatualizada: true } }));
+  assert.match(velha, />Desatualizada</);
 });
 
 // ===========================================================================

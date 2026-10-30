@@ -272,3 +272,104 @@ test("tabela por marca: vencidos com % da conta e ⓘ nos cabecalhos", () => {
   assert.match(html, /data-ajuda="vencidos"/);
   assert.match(html, /data-ajuda="travados"/);
 });
+
+// ===========================================================================
+// EXPEDICAO-TABELA-AMANHA — coluna "Vencem amanhã" e vencidos em vermelho
+// ===========================================================================
+test("tabela por marca: coluna 'Vencem amanhã' logo depois de Vencidos, que abre a lista", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: null,
+      fila: [{
+        conta: "apice", titulo: "ÁPICE", apelido: null, backlog: 420, vencidos: 4, acima48h: 2,
+        travados: 7, venceProximo: 46, pctVenceProximo: "11,0%", aoVerVenceProximo: () => {}, barra: null,
+      }],
+      rotuloProximo: "Vencem amanhã",
+      ajudas: { venceProximo: h("span", { "data-ajuda": "proximo" }) },
+    }),
+  );
+  const cab = html.slice(html.indexOf("<thead"), html.indexOf("</thead>"));
+  assert.ok(cab.indexOf(">Vencidos") < cab.indexOf(">Vencem amanhã"), "logo depois de Vencidos");
+  assert.ok(cab.indexOf(">Vencem amanhã") < cab.indexOf(">Acima de 48 h"));
+  assert.match(cab, /data-ajuda="proximo"/);
+  assert.match(html, /aria-label="Ver os 46 pedidos de ÁPICE que vencem amanhã"[^>]*>46<\/button>/);
+  assert.match(html, />11,0%</);
+});
+
+test("tabela por marca: sem a medida (ML ou API antiga), a coluna nao existe", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: null,
+      fila: [{ conta: "1", titulo: "KOKESHI", apelido: null, backlog: 9, vencidos: null, acima48h: 1, travados: 0, barra: null }],
+    }),
+  );
+  assert.doesNotMatch(html, /Vencem/);
+});
+
+test("vencidos em destaque vermelho: titulo da coluna e numero em etiqueta vermelha", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: null,
+      fila: [
+        { conta: "a", titulo: "ÁPICE", apelido: null, backlog: 420, vencidos: 4, acima48h: 2, travados: 7, barra: null },
+        { conta: "b", titulo: "LESCENT", apelido: null, backlog: 89, vencidos: 0, acima48h: 1, travados: 7, barra: null },
+      ],
+    }),
+  );
+  assert.match(html, /<th scope="col" class="[^"]*text-crit-ink[^"]*">Vencidos/);
+  assert.match(html, /<span class="[^"]*bg-crit-soft[^"]*text-crit-ink[^"]*">4<\/span>/);
+  // zero nao pinta: cor e' para risco
+  assert.doesNotMatch(html, /bg-crit-soft[^"]*">0</);
+});
+
+test("tela: a tabela recebe o proximo dia de prazo da fotografia e abre a lista por conta", () => {
+  assert.match(CLIENTE, /venceProximo: temPrazo \? \(a\.due_next_day_count \?\? null\) : null/);
+  assert.match(CLIENTE, /lista: "vence_proximo"/);
+  assert.match(CLIENTE, /rotuloProximo=\{rotuloDoProximoVencimento\(/);
+  assert.equal(
+    rotuloDoProximoVencimento("2026-11-03", "2026-10-30T18:12:23Z", "Vencem"),
+    "Vencem ter 03/11",
+  );
+  assert.equal(rotuloDoProximoVencimento("2026-10-30", "2026-10-29T18:00:00Z", "Vencem"), "Vencem amanhã");
+});
+
+// ===========================================================================
+// EXPEDICAO-DICA-LEGIVEL — balao maior, em tres partes, e texto objetivo
+// ===========================================================================
+const { ConteudoDaDica, LARGURA_DA_DICA } = await import("../src/components/ui/InfoDica.tsx");
+const { default: AjudaMetrica } = await import("../src/components/expedicao/AjudaMetrica.tsx");
+
+test("balao: nome em negrito, frase em tamanho de leitura e ressalva separada", () => {
+  const html = renderToStaticMarkup(
+    h(ConteudoDaDica, { titulo: "Acima de 48 h", texto: "Frase.", nota: "Ressalva." }),
+  );
+  assert.match(html, /<span class="[^"]*font-semibold[^"]*text-ink[^"]*">Acima de 48 h<\/span>/);
+  assert.match(html, /<span class="[^"]*text-sm[^"]*text-ink[^"]*">Frase\.<\/span>/);
+  assert.match(html, /<span class="[^"]*border-t[^"]*text-ink-muted[^"]*">Ressalva\.<\/span>/);
+  // sem titulo nem nota (o resto da Torre): so' a frase
+  assert.equal(
+    renderToStaticMarkup(h(ConteudoDaDica, { texto: "So' isto." })).match(/<span/g)?.length,
+    1,
+  );
+  assert.ok(LARGURA_DA_DICA >= 320, "balao maior que os 256 px de antes");
+});
+
+test("ⓘ da metrica: nome no balao, mas o leitor de tela le' so' definicao + ressalva", () => {
+  const FONTE = fonte("src/components/expedicao/AjudaMetrica.tsx");
+  assert.match(FONTE, /titulo=\{def\.nome\}/);
+  assert.match(FONTE, /nota=\{def\.limitacoes\}/);
+  const def = definicaoDe("shopee.over48h");
+  const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "shopee.over48h" }));
+  assert.match(html, new RegExp(`aria-label="${def.definicao} ${def.limitacoes}"`));
+});
+
+test("textos objetivos: as classificacoes do Risco atual cabem numa leitura", () => {
+  for (const c of [
+    "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.due_next_day", "shopee.no_prazo",
+    "shopee.sem_prazo", "shopee.over48h", "shopee.stalled", "shopee.slow", "shopee.zombie",
+  ] as const) {
+    const d = definicaoDe(c);
+    assert.ok(d.definicao.length <= 110, `${c}.definicao: ${d.definicao.length}`);
+    assert.ok(d.limitacoes.length <= 90, `${c}.limitacoes: ${d.limitacoes.length}`);
+  }
+});

@@ -556,15 +556,17 @@ function diaBrt(iso: string): string | null {
 export function rotuloDoProximoVencimento(
   proximo: string | null | undefined,
   efetivoEm: string | null | undefined,
+  /** "Vence" no cartao; "Vencem" na coluna da tabela por marca. */
+  verbo: "Vence" | "Vencem" = "Vence",
 ): string {
   const hoje = efetivoEm ? diaBrt(efetivoEm) : null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(proximo ?? "");
-  if (!m || !hoje) return "Vence amanhã";
+  if (!m || !hoje) return `${verbo} amanhã`;
   const [a, mes, dia] = hoje.split("-").map(Number);
   const amanha = new Date(Date.UTC(a, mes - 1, dia + 1)).toISOString().slice(0, 10);
-  if (proximo === amanha) return "Vence amanhã";
+  if (proximo === amanha) return `${verbo} amanhã`;
   const semana = DIA_DA_SEMANA[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()];
-  return `Vence ${semana} ${m[3]}/${m[2]}`;
+  return `${verbo} ${semana} ${m[3]}/${m[2]}`;
 }
 
 /** O que `montarKpis` precisa da fotografia para o proximo dia de prazo. */

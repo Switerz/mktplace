@@ -29,18 +29,47 @@ import { Info } from "lucide-react";
  * em cada bloco. Dentro deles o balao abria centenas de px longe do "ⓘ", fora
  * da tela, e criava rolagem horizontal em 390px (medido).
  */
-const LARGURA = 256;
+/**
+ * EXPEDICAO-DICA-LEGIVEL — o balao era 256 px com letra de 12 px em cinza e
+ * tudo num paragrafo so'. Agora: mais largo, frase em tamanho de leitura e,
+ * quando o chamador manda, o nome em negrito no topo e a ressalva separada
+ * embaixo, menor — quem le' acha a resposta antes da letra miuda.
+ */
+export const LARGURA_DA_DICA = 320;
+const LARGURA = LARGURA_DA_DICA;
 const MARGEM = 8;
+
+/** O miolo do balao. Puro (sem portal nem estado), para teste. */
+export function ConteudoDaDica({ titulo, texto, nota }: { titulo?: string; texto: string; nota?: string }) {
+  if (!titulo && !nota) return <span className="block text-sm leading-normal text-ink">{texto}</span>;
+  return (
+    <>
+      {titulo ? <span className="block text-sm font-semibold leading-snug text-ink">{titulo}</span> : null}
+      <span className={`block text-sm leading-normal text-ink ${titulo ? "mt-1" : ""}`}>{texto}</span>
+      {nota ? (
+        <span className="mt-2 block border-t border-line pt-2 text-xs leading-snug text-ink-muted">{nota}</span>
+      ) : null}
+    </>
+  );
+}
 
 export default function InfoDica({
   texto,
+  titulo,
+  nota,
   emControle = false,
   className = "",
 }: {
   texto: string;
+  /** Nome em negrito no topo do balao. So' visual: o rotulo ao lado ja' o diz. */
+  titulo?: string;
+  /** Ressalva que muda a leitura, separada e menor, embaixo da frase. */
+  nota?: string;
   emControle?: boolean;
   className?: string;
 }) {
+  // O leitor de tela le' a frase e a ressalva (o nome ja' esta' no rotulo).
+  const falado = nota ? `${texto} ${nota}` : texto;
   const gatilho = useRef<HTMLSpanElement>(null);
   const balao = useRef<HTMLSpanElement>(null);
   const [aberto, setAberto] = useState(false);
@@ -77,7 +106,7 @@ export default function InfoDica({
 
   if (emControle) {
     return (
-      <span aria-hidden="true" title={texto} className={`inline-flex shrink-0 cursor-help text-ink-faint ${className}`}>
+      <span aria-hidden="true" title={falado} className={`inline-flex shrink-0 cursor-help text-ink-faint ${className}`}>
         <Info className="h-3.5 w-3.5" strokeWidth={2} />
       </span>
     );
@@ -94,7 +123,7 @@ export default function InfoDica({
       ref={gatilho}
       tabIndex={0}
       role="img"
-      aria-label={texto}
+      aria-label={falado}
       onMouseEnter={abrir}
       onMouseLeave={fechar}
       onFocus={abrir}
@@ -113,11 +142,11 @@ export default function InfoDica({
               width: `min(${LARGURA}px, calc(100vw - ${2 * MARGEM}px))`,
               visibility: pos ? "visible" : "hidden",
             }}
-            className={`pointer-events-none fixed z-50 rounded-lg border border-line bg-surface px-3 py-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-ink-muted shadow-[0_8px_24px_-6px_rgb(var(--tc-ink)/0.18)] motion-safe:animate-[dica-entra_160ms_cubic-bezier(0.2,0.8,0.2,1)] ${
+            className={`pointer-events-none fixed z-50 rounded-xl border border-line bg-surface px-4 py-3 text-left font-normal normal-case tracking-normal shadow-[0_12px_32px_-8px_rgb(var(--tc-ink)/0.24)] motion-safe:animate-[dica-entra_160ms_cubic-bezier(0.2,0.8,0.2,1)] ${
               pos?.acima ? "origin-bottom" : "origin-top"
             }`}
           >
-            {texto}
+            <ConteudoDaDica titulo={titulo} texto={texto} nota={nota} />
           </span>,
           document.body,
         )}

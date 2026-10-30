@@ -47,7 +47,6 @@ import {
 import { formatarInteiro, formatarPercentualComBase } from "@/lib/expedicao-formato";
 
 import AjudaMetrica from "./AjudaMetrica";
-import { ChipsFotografia } from "./CabecalhoExpedicao";
 import { EstadoSecao } from "./LayoutExpedicao";
 import { SecaoGerencial } from "./SecoesExpedicao";
 
@@ -238,13 +237,15 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
       titulo="Agora — fila aberta"
       descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} pagos aguardando expedição.`}
       // O "ⓘ" fica fora do h3: o nome do titulo continua so' o titulo.
+      // EXPEDICAO-ULTIMA-ATUALIZACAO: a hora fica so' no topo da tela; aqui,
+      // so' o aviso quando a leitura esta' velha.
       acao={
         <span className="flex flex-wrap items-center gap-1.5">
           <AjudaMetrica chave="jornada.fila_aberta" />
-          {f.snapshot_at ? (
-            <ChipsFotografia
-              fotografia={{ rotulo: "Fotografia", publicadaEm: f.snapshot_at, idade: null, desatualizada: filaDesatualizada(f) }}
-            />
+          {f.snapshot_at && filaDesatualizada(f) ? (
+            <Chip ponto tom="atencao" title="Os números descrevem o instante da publicação, não agora.">
+              Desatualizada
+            </Chip>
           ) : null}
         </span>
       }
@@ -280,18 +281,18 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         evento === "despacho" ? "despacho" : "coleta"
       }.`}
       acao={
-        // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
-        // O "ⓘ" fica fora do h3, como na fila aberta.
+        // EXPEDICAO-ULTIMA-ATUALIZACAO: sem "publicado em" nem "Atualizada" —
+        // a hora fica so' no topo da tela. O aviso ESCRITO so' quando velha
+        // (a publicacao vai no `title`). O "ⓘ" fica fora do h3.
         <span className="flex flex-wrap items-center gap-1.5">
           <AjudaMetrica chave="jornada.coorte" />
-          {c.publicado_em ? (
-            <Chip title="Última publicação dos dias desta coorte">
-              publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
-            </Chip>
-          ) : null}
-          {c.desatualizada !== null || velha ? (
-            <Chip ponto tom={velha ? "atencao" : "bom"}>
-              {velha ? "Desatualizada" : "Atualizada"}
+          {velha ? (
+            <Chip
+              ponto
+              tom="atencao"
+              title={c.publicado_em ? `Última publicação dos dias desta coorte: ${dataHoraCurta(c.publicado_em)}.` : undefined}
+            >
+              Desatualizada
             </Chip>
           ) : null}
         </span>
