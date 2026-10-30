@@ -428,7 +428,9 @@ def conferir_coerencia(fonte, raw_runs: dict) -> None:
 
     `conferir_linhagem` so' recusa run ALHEIO: conjunto vazio passa. As regras
     abaixo sao as INVARIANTES do produtor para marca PUBLICADA (airflow
-    `mercadolivre/ingestion/full_stock/snapshot.py` @ ab0ad334); a linha que
+    `mercadolivre/ingestion/full_stock/snapshot.py`, repo goca-se/airflow, blob
+    cbbc4a8b22a8b4c1736788adad5c57bf0f5ac380, ultima alteracao: commit
+    d6d65608, #2173); a linha que
     garante cada uma esta' no runbook, secao 7.1. Chave: (seller_id, inventory_id).
     - snapshot sem duplicata: uma linha por inventario distinto (L424);
     - inventarios do snapshot == `inventory_id` NAO nulos da ponte, nas duas
