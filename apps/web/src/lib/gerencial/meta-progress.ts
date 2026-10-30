@@ -6,7 +6,7 @@
  * -----------------------
  * A meta e' MENSAL. So' faz sentido comparar quando o periodo filtrado e' um
  * mes so', comecando no dia 1, e cobre o mes inteiro OU o mes corrente ate'
- * hoje. "01 a 15/09" contra a meta cheia de setembro seria um atingimento
+ * ontem (o preset "Mes atual" termina no ultimo dia fechado, D-1). "01 a 15/09" contra a meta cheia de setembro seria um atingimento
  * falso; nesses casos `mesDaMeta` devolve `null` e a tela cai na comparacao
  * com o periodo anterior.
  *
@@ -38,17 +38,24 @@ export function diasNoMes(mes: string): number {
 
 const fimDoMes = (mes: string) => `${mes}-${String(diasNoMes(mes)).padStart(2, "0")}`;
 
+/** Dia anterior de um `AAAA-MM-DD`. */
+function diaAnterior(dia: string): string {
+  const [a, m, d] = dia.split("-").map(Number);
+  return new Date(Date.UTC(a, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+
 /**
  * `AAAA-MM` quando o periodo e' comparavel com a meta mensal: comeca no dia 1,
- * termina no mesmo mes, e vai ate' o fim do mes ou ate' hoje (mes corrente).
+ * termina no mesmo mes, e vai ate' o fim do mes ou ate' ontem (mes corrente).
  */
 export function mesDaMeta(dateFrom: string, dateTo: string, hoje: string): string | null {
   if (!/^\d{4}-\d{2}-01$/.test(dateFrom)) return null;
   const mes = dateFrom.slice(0, 7);
   if (dateTo.slice(0, 7) !== mes) return null;
   if (dateTo === fimDoMes(mes)) return mes;
-  // Mes corrente ate' hoje (o preset "Mes atual" termina em hoje).
-  if (hoje.slice(0, 7) === mes && dateTo >= hoje) return mes;
+  // Mes corrente ate' o ultimo dia fechado: o preset "Mes atual" termina em
+  // D-1 (a fato diaria so' publica dias fechados).
+  if (hoje.slice(0, 7) === mes && dateTo >= diaAnterior(hoje)) return mes;
   return null;
 }
 
