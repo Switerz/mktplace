@@ -22,13 +22,33 @@ sem tocar nelas.
 
 ESTA MIGRATION NAO E' APLICADA PELO GATE QUE A CRIA
 ---------------------------------------------------
-Ordem segura (humana):
-  1. merge;
-  2. `alembic upgrade 034` no Neon (hoje em 033);
-  3. so' DEPOIS a imagem do publicador com as colunas novas: sem a 034 o
-     INSERT dele falha dentro da transacao (revertida, nada gravado).
-A API detecta as colunas a cada request: sem a 034 ela responde como antes,
-com SKU/titulo nulos.
+O head do Neon e' lido por OUTROS publicadores: a barreira do PMA
+(`pipelines.channel_offer_sync` / `assert_apply_authorized`) recusa um head
+que o grafo da imagem nao conhece. Aplicar esta DDL antes de os workers
+conhecerem a 034 repete o apagao da passagem para a 033. Ordem segura
+(humana; detalhe em `docs/ml_full_stock_runbook.md`, secao 7.2):
+  1. merge em `main`. Nada roda: nenhuma DAG chama o publicador do ML Full
+     e o pacote humano de publicacao tem `-Commit` fixo em `bad69cf`, que
+     nao conhece a 034;
+  2. pin da imagem do airflow (`MKTPLACE_PIPELINES_SHA`) e do runner Windows
+     num commit com a 034 no grafo, com rollout e prova em runtime: a
+     barreira do PMA aceita 017 -> 034 e todo publicador que valida o grafo
+     continua passando. Gate humano do supervisor, coordenado com a frente
+     FRESHNESS/PMA;
+  3. so' entao `alembic upgrade 034` no Neon (hoje em 033), DDL humana, fora
+     da janela das cadeias;
+  4. so' depois o publicador novo do ML Full pode ser usado: o `-Commit` do
+     pacote humano passa a um commit com a T-0018, em revisao separada.
+
+Compatibilidade:
+  - o pacote aprovado (`bad69cf`) funciona com ou sem a 034: as colunas sao
+    NULL-aveis sem default e ele nao as escreve. Piloto RAW e primeira
+    publicacao nao dependem da 034;
+  - a API detecta as colunas a cada request: sem a 034 responde como antes,
+    com SKU/titulo nulos;
+  - GATE: o publicador novo NAO roda antes desta DDL. Sem ela o INSERT falha
+    dentro da transacao (revertida, nada gravado), mas isso e' trava, nao
+    risco aceito: o passo 4 so' vem depois do 3.
 
 `downgrade` remove as tres colunas (os CHECKs de coluna saem junto).
 """

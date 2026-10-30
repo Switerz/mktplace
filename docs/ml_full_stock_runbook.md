@@ -193,6 +193,23 @@ Contraprova em PG16 descartável (24/24 com a fixture fiel ao produtor, inclui R
 
 **Atenção à cadeia:** se o #78 (028, DRE) for mesclado antes, o `down_revision` da 029 precisa ser reencadeado antes do `upgrade`. O certo é aplicar a cadeia que estiver na `main`, nunca uma revisão solta.
 
+### 7.2 Ordem operacional da 034 (T-0018, identificação por inventário)
+
+A 034 acrescenta três colunas NULL-áveis, sem default, a `marts.fact_ml_full_stock_inventory_daily`: `anuncio_ancora_item_id`, `anuncio_ancora_variation_id` e `anuncios_extras`. O risco não está nas colunas, e sim no **head** do Neon. Outros publicadores leem esse head: a barreira do PMA (`pipelines.channel_offer_sync` / `assert_apply_authorized`) recusa um head que o grafo da imagem não conhece. Aplicar a 034 antes de os workers a conhecerem repete o apagão da passagem para a 033.
+
+Ordem segura (cada passo só depois do anterior):
+
+1. **Merge em `main`.** Nada roda: nenhuma DAG chama o publicador do ML Full, e o pacote humano de publicação tem `-Commit` fixo em `bad69cf`, que não conhece a 034.
+2. **Grafo compatível no runtime.** Pin da imagem do airflow (`MKTPLACE_PIPELINES_SHA`) e do runner Windows num commit que tenha a 034 no grafo, com rollout e prova em runtime: a barreira do PMA aceita 017→034 e todos os publicadores que validam o grafo continuam passando. É gate humano do supervisor, coordenado com a frente FRESHNESS/PMA.
+3. **DDL humana.** Só então `alembic upgrade 034` no Neon (hoje em 033), fora da janela das cadeias.
+4. **Publicador novo.** Só depois o publicador do ML Full com a T-0018 pode ser usado: o `-Commit` do pacote humano passa a um commit com a T-0018, numa revisão separada.
+
+Compatibilidade:
+
+- O pacote aprovado (`bad69cf`) funciona com ou sem a 034: as colunas são NULL-áveis sem default e ele não as escreve. O piloto RAW e a primeira publicação não dependem da 034.
+- A API detecta as colunas a cada request: sem a 034, ela responde como antes, com `sku`/`titulo`/`anuncios_extras` nulos e uma limitação declarada.
+- **Gate, não risco aceito:** o publicador novo **não** roda antes da DDL do passo 3. Sem a 034, o INSERT dele falha dentro da transação (`revertida_comprovada`, nada gravado). Por isso o passo 4 vem depois do 3.
+
 ## 8. Schedule recomendado (gate próprio)
 
 - **DAG `mercadolivre_full_stock_snapshot`:** `20 10,13,16 * * *` (UTC), ou seja, 07:20, 10:20 e 13:20 em São Paulo.
