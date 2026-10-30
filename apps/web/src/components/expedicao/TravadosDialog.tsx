@@ -166,7 +166,7 @@ export default function TravadosDialog({
     .join(" ");
 
   return (
-    <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"}>
+    <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"} largura="larga">
       {alvo ? (
         <div className="flex flex-col gap-4 text-sm" data-testid="exp-travados">
           {/* POPUPS-1 — o numero e a fatia da fila, sem frase em volta. */}
@@ -246,7 +246,9 @@ export default function TravadosDialog({
                 }
               >
                 <div className="max-h-[50vh] overflow-auto rounded-lg border border-line">
-                  <table className="w-full text-sm [&_td]:px-3 [&_td]:py-1.5 [&_th]:px-3 [&_th]:py-1.5">
+                  {/* Popup largo + celulas curtas sem quebra: cabe sem rolagem
+                      lateral no desktop; so' o motivo pode quebrar linha. */}
+                  <table className="w-full text-sm [&_td]:px-3 [&_td]:py-1.5 [&_th]:whitespace-nowrap [&_th]:px-3 [&_th]:py-1.5">
                     <caption className="sr-only">Pedidos travados, do mais antigo ao mais novo</caption>
                     <thead className="sticky top-0 bg-raised text-left text-xs uppercase tracking-wide text-ink-faint">
                       <tr>
@@ -266,11 +268,11 @@ export default function TravadosDialog({
                               {numeroDoPedido(l) ?? "—"}
                             </td>
                           ) : null}
-                          {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}
-                          {temEtapa ? <td className="font-medium text-ink">{rotuloDaEtapa(l.etapa)}</td> : null}
-                          <td className="text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
+                          {variasMarcas ? <td className="whitespace-nowrap text-ink">{brandLabel(l.brand)}</td> : null}
+                          {temEtapa ? <td className="whitespace-nowrap font-medium text-ink">{rotuloDaEtapa(l.etapa)}</td> : null}
+                          <td className="whitespace-nowrap text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
                           <td className="text-ink-muted">{motivoDoTravado(l)}</td>
-                          {temPrazo ? <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
+                          {temPrazo ? <td className="whitespace-nowrap text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
                         </tr>
                       ))}
                     </tbody>

@@ -148,7 +148,7 @@ function chaveDeFoco(dialog: unknown): string {
 test("V3G focusResetKey e' prop opcional e nao muda os consumidores existentes", () => {
   const shell = read(SHELL);
   assert.match(shell, /focusResetKey\?: string;/, "prop declarada como opcional");
-  assert.match(shell, /\{ open, onClose, title, children, focusResetKey \}/, "prop desestruturada");
+  assert.match(shell, /\{ open, onClose, title, children, focusResetKey(, largura = "padrao")? \}/, "prop desestruturada");
   // sem a prop o efeito novo nem roda: o comportamento anterior fica intacto
   assert.match(shell, /if \(!open \|\| focusResetKey === undefined\) return;/);
   for (const p of SEM_PROP) {
