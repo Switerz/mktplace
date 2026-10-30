@@ -31,6 +31,7 @@ import PageHeader from "@/components/layout/PageHeader";
 import Note from "@/components/ui/Note";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import MetasGrade from "@/components/metas/MetasGrade";
+import MetaPorDia from "@/components/metas/MetaPorDia";
 import { MetasErro, fetchMetas, fetchRealizado, salvarMetas } from "@/lib/metas-api";
 import {
   analisar,
@@ -303,6 +304,8 @@ export default function MetasClient() {
               {aviso.texto}
             </Note>
           )}
+
+          <MetaPorDia mes={mes} valores={analise.efetivos} previa={nAlteradas > 0} />
 
           <div className="sticky bottom-0 z-20 -mx-4 flex flex-wrap items-center justify-between gap-3 border-t border-line bg-canvas/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
             <p className="text-sm text-ink-muted" aria-live="polite">

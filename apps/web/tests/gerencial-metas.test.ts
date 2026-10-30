@@ -6,11 +6,14 @@ import assert from "node:assert/strict";
 
 import {
   avisoQueAfetaOGmv,
+  celulasDoEscopo,
+  diaDaMeta,
   topComerciais,
   diasNoMes,
   mesDaMeta,
   metaDoEscopo,
   progressoMeta,
+  realizadoDoEscopo,
   ultimoDiaComDado,
 } from "../src/lib/gerencial/meta-progress.ts";
 import { presetRange } from "../src/lib/filters/presets.ts";
@@ -146,4 +149,65 @@ test("avisoQueAfetaOGmv: so' aviso de atencao da fonte do GMV", () => {
   assert.equal(avisoQueAfetaOGmv([regiao, nota]), null);
   assert.equal(avisoQueAfetaOGmv([regiao, nota, gmv])?.key, "g");
   assert.equal(avisoQueAfetaOGmv([{ key: "x", severity: "attention" as const, source: null }]), null);
+});
+
+// ---------------------------------------------------------------------------
+// METAS-DIARIAS-1 — so' marca x canal com meta; plano pela curva
+// ---------------------------------------------------------------------------
+
+test("celulasDoEscopo filtra canais e marcas como metaDoEscopo", () => {
+  assert.deepEqual(
+    celulasDoEscopo(CELULAS, ["tiktok"], ["kokeshi"]).map((c) => `${c.brand}:${c.channel}`),
+    ["kokeshi:tiktok"],
+  );
+  assert.equal(celulasDoEscopo(CELULAS, ["tiktok", "ml", "shopee"], []).length, 3);
+});
+
+test("realizadoDoEscopo soma so' marca x canal que tem meta (TikTok sem meta fica fora)", () => {
+  const linhas = [
+    { brand: "kokeshi", tiktok_gmv: 4_600_000, ml_gmv: 1_800_000, shopee_gmv: 3_500_000 },
+    { brand: "apice", tiktok_gmv: 2_400_000, ml_gmv: null, shopee_gmv: 590_000 },
+  ];
+  const celulas = [
+    { brand: "kokeshi", channel: "ml", meta_gmv: 1 },
+    { brand: "kokeshi", channel: "shopee", meta_gmv: 1 },
+    { brand: "apice", channel: "shopee", meta_gmv: 1 },
+    { brand: "barbours", channel: "ml", meta_gmv: 1 },
+  ];
+  const r = realizadoDoEscopo(linhas, celulas);
+  assert.equal(r.total, 5_890_000);
+  assert.deepEqual(r.porMarca, { kokeshi: 5_300_000, apice: 590_000, barbours: 0 });
+  assert.deepEqual(r.canaisPorMarca, { kokeshi: ["ml", "shopee"], apice: ["shopee"], barbours: ["ml"] });
+});
+
+test("diaDaMeta: so' periodo de um dia", () => {
+  assert.equal(diaDaMeta("2026-11-11", "2026-11-11", "2026-11-12"), "2026-11-11");
+  assert.equal(diaDaMeta("2026-11-12", "2026-11-12", "2026-11-12"), "2026-11-12");
+  assert.equal(diaDaMeta("2026-11-01", "2026-11-11", "2026-11-12"), null);
+});
+
+test("diaDaMeta no dia 1: 'Hoje' e' meta do dia; 'Mes atual' do dia 2 continua mensal", () => {
+  assert.equal(diaDaMeta("2026-11-01", "2026-11-01", "2026-11-01"), "2026-11-01");
+  const r = presetRange("mes_atual", new Date("2026-11-02T12:00:00"));
+  assert.equal(diaDaMeta(r.dateFrom, r.dateTo, "2026-11-02"), null);
+  assert.equal(mesDaMeta(r.dateFrom, r.dateTo, "2026-11-02"), "2026-11");
+});
+
+test("progressoMeta com plano pela curva: no plano = no caminho", () => {
+  // Acumulado da aba Meta diaria em 22/11: R$ 8.540.489 de R$ 13.450.000.
+  const plano = (dia: number) => (dia === 22 ? 8_540_489 / 13_450_000 : dia / 30);
+  const base = { meta: 13_450_000, mes: "2026-11", hoje: "2026-11-23", ultimoDia: "2026-11-22" };
+  const p = progressoMeta({ ...base, realizado: 8_540_489, fracaoAte: plano })!;
+  assert.ok(Math.abs(p.planoAteData - 8_540_489) < 1);
+  assert.ok(Math.abs(p.atingimentoDoPlano - 1) < 1e-9);
+  assert.ok(Math.abs(p.projecao! - 13_450_000) < 1);
+  assert.equal(p.status, "no_caminho");
+  // A mesma venda pela conta linear (22/30) ficaria abaixo do ritmo.
+  assert.equal(progressoMeta({ ...base, realizado: 8_540_489 })!.status, "abaixo");
+});
+
+test("progressoMeta sem curva: plano linear, mesma projecao de antes", () => {
+  const p = progressoMeta({ meta: 20_000_000, realizado: 19_607_780, mes: "2026-10", hoje: HOJE, ultimoDia: "2026-10-28" })!;
+  assert.ok(Math.abs(p.planoAteData - (20_000_000 * 28) / 31) < 1e-6);
+  assert.ok(Math.abs(p.projecao! - 21_708_613.6) < 1);
 });

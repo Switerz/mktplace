@@ -19,8 +19,10 @@
  *
  * PROJECAO
  * --------
- * Ritmo linear: realizado / dias com dado x dias do mes. "Dias com dado" e' o
- * ultimo dia que tem venda na serie diaria — o Data Mart chega com D-1, e
+ * Ritmo contra o plano: realizado / fatia do mes esperada ate' o ultimo dia com
+ * dado. Com curva (METAS-DIARIAS-1, `metas-curva.ts`) a fatia segue os pesos
+ * dos dias; sem curva e' linear (dias com dado / dias do mes). "Dias com dado"
+ * e' o ultimo dia que tem venda na serie diaria — o Data Mart chega com D-1, e
  * contar hoje (ainda sem dado) puxaria a projecao para baixo.
  */
 import type { Marketplace } from "../mock-data.ts";
@@ -65,6 +67,17 @@ export interface MetaDoEscopo {
   celulasComMeta: number;
 }
 
+/** Celulas com meta dentro dos canais e marcas filtrados (nenhuma marca = todas). */
+export function celulasDoEscopo(
+  celulas: CelulaMetaGmv[],
+  channels: Marketplace[],
+  brands: string[],
+): CelulaMetaGmv[] {
+  return celulas.filter(
+    (c) => channels.includes(c.channel as Marketplace) && (brands.length === 0 || brands.includes(c.brand)),
+  );
+}
+
 export function metaDoEscopo(
   celulas: CelulaMetaGmv[],
   channels: Marketplace[],
@@ -73,14 +86,67 @@ export function metaDoEscopo(
   const porMarca: Record<string, number | null> = {};
   let total: number | null = null;
   let n = 0;
-  for (const c of celulas) {
-    if (!channels.includes(c.channel as Marketplace)) continue;
-    if (brands.length > 0 && !brands.includes(c.brand)) continue;
+  for (const c of celulasDoEscopo(celulas, channels, brands)) {
     porMarca[c.brand] = (porMarca[c.brand] ?? 0) + c.meta_gmv;
     total = (total ?? 0) + c.meta_gmv;
     n += 1;
   }
   return { total, porMarca, celulasComMeta: n };
+}
+
+/** Linha de `/performance/brands`: GMV de uma marca por canal. */
+export interface GmvPorCanal {
+  brand: string;
+  tiktok_gmv: number | null;
+  ml_gmv: number | null;
+  shopee_gmv: number | null;
+}
+
+export const GMV_DO_CANAL: Record<Marketplace, "tiktok_gmv" | "ml_gmv" | "shopee_gmv"> = {
+  tiktok: "tiktok_gmv",
+  ml: "ml_gmv",
+  shopee: "shopee_gmv",
+};
+
+export interface RealizadoDoEscopo {
+  total: number;
+  porMarca: Record<string, number>;
+  /** Canais que entram na conta de cada marca (os que tem meta). */
+  canaisPorMarca: Record<string, Marketplace[]>;
+}
+
+/**
+ * Realizado COMPARAVEL com a meta: so' as marcas x canais que tem meta
+ * (METAS-DIARIAS-1). Em out/26 o TikTok vendeu R$ 12 mi sem ter meta; somar
+ * esse GMV contra a meta de ML + Shopee inflava o atingimento. Celula com meta
+ * e sem venda entra com zero.
+ */
+export function realizadoDoEscopo(linhas: GmvPorCanal[], celulasEscopo: CelulaMetaGmv[]): RealizadoDoEscopo {
+  const porMarca: Record<string, number> = {};
+  const canaisPorMarca: Record<string, Marketplace[]> = {};
+  let total = 0;
+  for (const c of celulasEscopo) {
+    const canal = c.channel as Marketplace;
+    const linha = linhas.find((l) => l.brand === c.brand);
+    const v = (linha ? linha[GMV_DO_CANAL[canal]] : null) ?? 0;
+    porMarca[c.brand] = (porMarca[c.brand] ?? 0) + v;
+    (canaisPorMarca[c.brand] ??= []).push(canal);
+    total += v;
+  }
+  return { total, porMarca, canaisPorMarca };
+}
+
+/**
+ * O dia, quando o periodo e' um dia so' (ex.: "Hoje"): ai' vale a meta do dia.
+ *
+ * Unica ambiguidade: o dia 1 sozinho tambem e' o "Mes atual" do dia 2 (o
+ * preset termina em D-1). Ai' a meta continua mensal; so' o proprio dia de
+ * hoje vira meta do dia.
+ */
+export function diaDaMeta(dateFrom: string, dateTo: string, hoje: string): string | null {
+  if (dateFrom !== dateTo) return null;
+  if (dateFrom !== hoje && mesDaMeta(dateFrom, dateTo, hoje) != null) return null;
+  return dateFrom;
 }
 
 /**
@@ -120,6 +186,10 @@ export interface ProgressoMeta {
   diasComDado: number;
   diasRestantes: number;
   encerrado: boolean;
+  /** Quanto o plano esperava ate' o ultimo dia com dado (curva ou linear). */
+  planoAteData: number;
+  /** realizado / planoAteData: 1 = exatamente no plano. */
+  atingimentoDoPlano: number;
   /** `null` quando ainda nao ha nenhum dia com dado no mes. */
   projecao: number | null;
   projecaoSobreMeta: number | null;
@@ -144,6 +214,11 @@ export function progressoMeta(args: {
   hoje: string;
   /** Ultimo dia com venda na serie diaria; `null` = desconhecido. */
   ultimoDia: string | null;
+  /**
+   * Fatia da meta esperada ate' o fim do dia `dia` (curva do escopo). Ausente
+   * = linear (dia / dias do mes), a conta de antes das curvas.
+   */
+  fracaoAte?: (dia: number) => number;
 }): ProgressoMeta | null {
   const { meta, realizado, mes, hoje } = args;
   if (meta == null || meta <= 0 || realizado == null) return null;
@@ -158,7 +233,11 @@ export function progressoMeta(args: {
     diasComDado = referencia.slice(0, 7) === mes ? Math.min(diaDe(referencia), n) : 0;
   }
   const diasRestantes = encerrado ? 0 : n - diasComDado;
-  const projecao = encerrado ? realizado : diasComDado > 0 ? (realizado / diasComDado) * n : null;
+  // Ritmo contra o PLANO: quem vendeu o que a curva esperava ate' aqui termina
+  // o mes na meta. No linear, fracao = dias/n e a projecao e' a de sempre.
+  const fracao = args.fracaoAte ? args.fracaoAte(diasComDado) : diasComDado / n;
+  const planoAteData = meta * fracao;
+  const projecao = encerrado ? realizado : fracao > 0 ? realizado / fracao : null;
   const falta = Math.max(meta - realizado, 0);
 
   let status: StatusMeta;
@@ -177,6 +256,8 @@ export function progressoMeta(args: {
     diasComDado,
     diasRestantes,
     encerrado,
+    planoAteData,
+    atingimentoDoPlano: planoAteData > 0 ? realizado / planoAteData : 0,
     projecao,
     projecaoSobreMeta: projecao == null ? null : projecao / meta,
     falta,
