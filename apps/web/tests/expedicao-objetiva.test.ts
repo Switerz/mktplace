@@ -205,8 +205,10 @@ test("tela: destaque no lugar da faixa e da lista; barra de prazo nao repete", (
   assert.match(CLIENTE, /\{destaque \? null : \(\s*<AtencaoAgora/);
   assert.match(CLIENTE, /\{destaque && temBarraDePrazo \? null : \(/);
   assert.match(CLIENTE, /const chaveDestaque = temPrazo \? "overdue" : "over48h";/);
-  // sem prazo publicado, a barra seria 100% "sem prazo": nao entra no destaque
-  assert.match(CLIENTE, /prazo=\{temPrazo \? barraDePrazo\(true\) : undefined\}/);
+  // EXPEDICAO-PERTO-DE-VENCER: a barra saiu do destaque (fileira mais limpa);
+  // o cartao inteiro abre a lista.
+  assert.doesNotMatch(CLIENTE, /prazo=\{temPrazo \? barraDePrazo/);
+  assert.match(CLIENTE, /aoAbrir=\{abrirLista\(destaque, LISTA_DO_KPI\[destaque\.chave\]\)\}/);
 });
 
 test("tela: so' o selo 'desatualizada' (o 'agora' saiu a pedido) e 'inclui FBS' com ⓘ", () => {
