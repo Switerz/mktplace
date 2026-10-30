@@ -463,7 +463,7 @@ Somente `GET`. Nao existe `POST`, `PATCH` nem `DELETE`, e o servico so' emite
 |---|---|---|
 | `brands` | ambos | CSV, ate 50 itens de ate 64 caracteres |
 | `accounts` | ambos | CSV, mesma regra |
-| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`, `due_next_day` (ver "Proximo vencimento"). Varias combinam com E logico |
+| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`, `due_next_day`, `due_soon` (ver "Perto de vencer e proximo vencimento"). Varias combinam com E logico |
 | `order_by` | principal | `criticidade` (padrao), `deadline`, `oldest` |
 | `limit` / `offset` | principal | 1..500 / >= 0 |
 | `include_queue` | principal | `false` devolve so' o resumo |
@@ -521,12 +521,15 @@ convida a decidir sobre estado vencido.
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
 
-### Proximo vencimento (EXPEDICAO-VENCE-AMANHA, 30/10/2026)
+### Perto de vencer e proximo vencimento (EXPEDICAO-VENCE-AMANHA e PERTO-DE-VENCER, 30/10/2026)
 
 **Por que existe.** O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia
 e nunca em fim de semana ou feriado (medido no SHOPEE-LDR-1). Logo
 `due_within_24h` e', na pratica, "vence hoje", e os pedidos que vencem amanha
-ficavam diluidos em `on_time`, sem contagem nem lista.
+ficavam diluidos em `on_time`, sem contagem nem lista. Pedido do usuario
+(30/10/2026): a prioridade da operacao e' **"perto de vencer"** = o que vence
+HOJE ate' 23:59 + o que vence no PROXIMO dia de prazo, sem os ja' vencidos — e
+o cartao, a coluna da tabela por marca e a lista tem de ser o MESMO numero.
 
 **Campos** (`GET /api/v1/expedicao`):
 
@@ -535,26 +538,38 @@ ficavam diluidos em `on_time`, sem contagem nem lista.
   util. Vem da propria fila (menor dia de prazo maior que o dia da fotografia),
   entao feriado ja' sai certo. `null` sem prazo publicado ou sem pedido
   vencendo depois de hoje.
-- `accounts[].due_next_day_count` e `totals.due_next_day_count` — pedidos com
-  prazo nesse dia. Subconjunto de `on_time_count`; nao entra na particao de
-  prazo. Shopee: inteiro (0 quando nao ha data). Mercado Livre: `null` — o
-  canal nao publica prazo e a consulta nem e' feita.
+- `accounts[].due_today_count` / `totals.due_today_count` — ainda nao vencidos
+  com prazo no dia da fotografia (ate' 23:59).
+- `accounts[].due_next_day_count` / `totals.due_next_day_count` — pedidos com
+  prazo em `next_due_date`. Subconjunto de `on_time_count`.
+- `accounts[].due_soon_count` / `totals.due_soon_count` — **perto de vencer** =
+  hoje + proximo dia. `totals` e' a soma das contas (o cartao e' a soma da
+  coluna).
+- Nenhum dos tres entra na particao de prazo. Shopee: inteiros (0 quando nao
+  ha). Mercado Livre: `null` — o canal nao publica prazo e a consulta nem e'
+  feita.
 
 **Regras.**
 
-- "Hoje" e' o dia da FOTOGRAFIA (`effective_at`), nunca o relogio da
-  requisicao: dois consumidores do mesmo lote veem o mesmo dia.
-- Contado pela API sobre `marts.expedicao_fila_atual` do MESMO lote, numa
-  consulta (`channel` + `refresh_batch_id`), dia por
-  `(dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date`. Nao e'
+- "Hoje" e' o dia de Brasilia da FOTOGRAFIA (`effective_at`), calculado UMA vez
+  no servico e passado como `:hoje` ao SQL — nunca o relogio da requisicao:
+  dois consumidores do mesmo lote veem o mesmo dia, e o Python e o SQL nao tem
+  como discordar sobre que dia e' hoje.
+- **Uma base so'** (`NAO_VENCIDO_COM_PRAZO_SQL`): `dispatch_deadline IS NOT
+  NULL AND deadline_status <> 'overdue' AND dia >= :hoje`, com
+  `dia = (dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date`. A
+  contagem agrupa por dia x conta sobre ela, numa consulta (`channel` +
+  `refresh_batch_id`); as listas so' acrescentam o limite superior. Nao e'
   materializado.
 - Canal inteiro, como `totals`: `brands`/`accounts` recortam so' a lista.
-- `situacao=due_next_day` lista esses pedidos (predicado com a data como
-  parametro). Fica FORA de `SITUACAO_SQL`, que a jornada usa em
-  `count(*) FILTER` so' com predicados fixos. Sem data, ou no ML, o filtro e'
-  `FALSE`: lista vazia, nunca a fila inteira.
-- A fila publicada inclui FBS (o extrator nao le `fulfillment_flag`): a
-  contagem tambem.
+- `situacao=due_soon` lista os perto de vencer: base `AND dia <= :limite_perto`
+  (`next_due_date`, ou hoje quando nao ha proximo dia). `situacao=due_next_day`
+  lista o proximo dia: base `AND dia = :proximo_vencimento`. Os dois ficam FORA
+  de `SITUACAO_SQL`, que a jornada usa em `count(*) FILTER` so' com predicados
+  fixos. No ML (ou sem data, no `due_next_day`), o filtro e' `FALSE`: lista
+  vazia, nunca a fila inteira.
+- A fila publicada inclui FBS (o extrator nao le `fulfillment_flag`): as
+  contagens tambem.
 
 ### Hierarquia gerencial, filtro de marca e LDR (EXPEDICAO-UX-3, 21/10/2026)
 

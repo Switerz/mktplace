@@ -12,6 +12,11 @@
  *
  * So' apresentacao: os numeros chegam prontos do contrato (`Kpi`), e quem
  * monta a barra e a frase e' o cliente do canal.
+ *
+ * EXPEDICAO-PERTO-DE-VENCER (30/10/2026, "fileira muito poluida"): a barra de
+ * prazo e a legenda sairam do destaque (a particao esta' nos cartoes e na
+ * tabela) e o "ver quais" virou o cartao inteiro clicavel, com "Ver pedidos →"
+ * no hover, como os cartoes ao lado.
  */
 import type { ReactNode } from "react";
 
@@ -20,12 +25,14 @@ import { formatarInteiro } from "@/lib/expedicao-formato";
 import { percentualDaFila } from "@/lib/expedicao-travados";
 import type { ItemAtencao } from "@/lib/expedicao-ux";
 
+import { CoberturaClicavel, DicaVerPedidos } from "./CartaoDeRisco";
+
 export default function RiscoEmDestaque({
   principal,
   backlog,
   marcasAlerta,
   ajuda,
-  acao,
+  aoAbrir,
   secundarios,
   prazo,
   ondeAgir,
@@ -36,11 +43,11 @@ export default function RiscoEmDestaque({
   marcasAlerta?: Kpi;
   /** O "ⓘ" da medida em destaque. */
   ajuda?: ReactNode;
-  /** "ver quais" — abre a lista dos pedidos da medida. */
-  acao?: ReactNode;
+  /** Abre a lista dos pedidos da medida (o cartao inteiro e' o botao). */
+  aoAbrir?: () => void;
   /** Os cartoes secundarios, ja' montados. */
   secundarios: ReactNode;
-  /** A barra de situacao de prazo (so' no canal que publica prazo). */
+  /** Opcional: uma barra de prazo dentro do destaque. */
   prazo?: ReactNode;
   ondeAgir?: ItemAtencao | null;
 }) {
@@ -64,12 +71,17 @@ export default function RiscoEmDestaque({
     <div className="grid gap-3 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]" data-testid="exp-risco-destaque">
       <section
         aria-label={`${principal.rotulo}: ${formatarInteiro(valor)}`}
-        className={`card-hover flex flex-col gap-2 rounded-xl border p-4 ${fundo}`}
+        className={`group relative flex flex-col gap-2 rounded-xl border p-4 ${fundo} ${
+          aoAbrir ? "card-hover hover:border-accent/50" : ""
+        }`}
       >
-        <div className="flex items-center justify-between gap-2">
+        {aoAbrir ? (
+          <CoberturaClicavel rotulo={`Ver os ${formatarInteiro(valor)} pedidos: ${principal.rotulo}`} aoAbrir={aoAbrir} />
+        ) : null}
+        <div className="pointer-events-none relative z-10 flex items-center justify-between gap-2">
           <p className={`flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${tinta}`}>
             {principal.rotulo}
-            {ajuda}
+            {ajuda ? <span className="pointer-events-auto inline-flex">{ajuda}</span> : null}
           </p>
           {qtdAlerta > 0 ? (
             <span className="rounded-full border border-warn/40 bg-surface px-2 py-0.5 text-xs font-semibold text-warn-ink">
@@ -77,40 +89,43 @@ export default function RiscoEmDestaque({
             </span>
           ) : null}
         </div>
-        <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <p className="pointer-events-none relative z-10 flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <span className={`text-4xl font-bold leading-none tabular-nums ${tinta}`}>
             {formatarInteiro(valor)}
           </span>
           {backlog?.valor != null ? (
             <span className="text-sm text-ink-muted">
-              de {formatarInteiro(backlog.valor)} em fila
+              de {formatarInteiro(backlog.valor)} em fila{pct ? ` · ${pct} da fila` : ""}
             </span>
           ) : null}
-          {pct ? (
-            <span className={`rounded-md bg-surface/70 px-1.5 py-0.5 text-sm font-semibold tabular-nums ${tinta}`}>
-              {pct} da fila
-            </span>
-          ) : null}
-          {acao ? <span className="text-sm">{acao}</span> : null}
         </p>
-        {prazo ? <div className="mt-1">{prazo}</div> : null}
-        {ondeAgir ? (
-          <p className="mt-1 flex items-start gap-2 border-t border-line/70 pt-2 text-sm text-ink" data-testid="exp-onde-agir">
-            <span
-              aria-hidden="true"
-              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${ondeAgir.tom === "critico" ? "bg-crit" : "bg-warn"}`}
-            />
-            <span>
-              <span className="font-semibold">Onde agir:</span> {ondeAgir.texto}
-            </span>
+        {prazo ? <div className="relative z-10 mt-1">{prazo}</div> : null}
+        {ondeAgir || aoAbrir ? (
+          <p
+            className="pointer-events-none relative z-10 mt-auto flex items-start justify-between gap-2 border-t border-line/70 pt-2 text-sm text-ink"
+            data-testid="exp-onde-agir"
+          >
+            {ondeAgir ? (
+              <span className="flex items-start gap-2">
+                <span
+                  aria-hidden="true"
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${ondeAgir.tom === "critico" ? "bg-crit" : "bg-warn"}`}
+                />
+                <span>
+                  <span className="font-semibold">Onde agir:</span> {ondeAgir.texto}
+                </span>
+              </span>
+            ) : (
+              <span />
+            )}
+            {aoAbrir ? <DicaVerPedidos /> : null}
           </p>
         ) : null}
       </section>
-      {/* Os cartoes ESTICAM ate' a altura do destaque: sem faixa vazia embaixo. */}
+      {/* Os cartoes ESTICAM ate' a altura do destaque: sem faixa vazia embaixo.
+          As colunas seguem a quantidade (3 na Shopee, 1 no ML). */}
       <section
         aria-label="Demais indicadores de risco"
-        // EXPEDICAO-VENCE-AMANHA: 4 cartoes na Shopee, 1 no ML — as colunas
-        // seguem a quantidade (2 por linha em 390px, todos lado a lado no desktop).
         className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2 lg:auto-rows-fr [&>*]:h-full"
       >
         {secundarios}

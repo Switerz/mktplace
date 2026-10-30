@@ -139,8 +139,9 @@ export interface DivisaoDaFila {
   velha: boolean;
 }
 
-// O proximo dia de prazo (EXPEDICAO-VENCE-AMANHA) nao vem na divisao por fluxo.
-const MEDIDAS: Exclude<keyof Totais, "due_next_day_count">[] = [
+// O proximo dia de prazo e o "perto de vencer" (EXPEDICAO-VENCE-AMANHA e
+// PERTO-DE-VENCER) nao vem na divisao por fluxo.
+const MEDIDAS: Exclude<keyof Totais, "due_next_day_count" | "due_today_count" | "due_soon_count">[] = [
   "backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
   "deadline_unavailable_count", "over_48h_count", "slow_count", "zombie_count", "stalled_count",
 ];

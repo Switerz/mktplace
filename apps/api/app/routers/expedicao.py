@@ -94,7 +94,10 @@ def situacoes_query(
         description="Situacao operacional: overdue, due_within_24h, on_time, "
                     "deadline_unavailable, over_48h, stalled, slow, zombie, "
                     "due_next_day (prazo no proximo dia de vencimento depois "
-                    "do dia da fotografia, em Brasilia; vazio sem prazo). "
+                    "do dia da fotografia, em Brasilia; vazio sem prazo), "
+                    "due_soon (perto de vencer: nao vencidos com prazo hoje "
+                    "ate' 23:59 ou no proximo dia de vencimento; a mesma "
+                    "definicao de `due_soon_count`). "
                     "Varias somam-se como E logico."),
 ) -> Optional[list[str]]:
     itens = _lista(situacao)

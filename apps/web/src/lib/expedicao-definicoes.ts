@@ -77,8 +77,8 @@ const REF_META_TIKTOK =
 
 /** Os KPIs da fila (`montarKpis`), um `?` por canal. */
 export const KPIS_DA_FILA = [
-  "backlog", "overdue", "due24h", "due_next_day", "sem_prazo", "over48h", "stalled", "slow", "zombie",
-  "marcas_alerta",
+  "backlog", "overdue", "due_soon", "due24h", "due_next_day", "sem_prazo", "over48h", "stalled", "slow",
+  "zombie", "marcas_alerta",
 ] as const;
 type KpiDaFila = (typeof KPIS_DA_FILA)[number];
 
@@ -140,6 +140,15 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       "Pedidos que passaram do prazo de envio da Shopee e ainda não foram coletados.",
       "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
     ),
+    // EXPEDICAO-PERTO-DE-VENCER: a prioridade depois dos vencidos.
+    [`${canal}.due_soon`]: {
+      ...prazo(
+        "Perto de vencer",
+        "Vencem hoje até as 23:59 ou no próximo dia de prazo (amanhã; na sexta, o próximo dia útil).",
+        "Pedidos não vencidos com ship_by_date (dia de Brasília) entre hoje e o próximo dia de prazo.",
+      ),
+      ...(canal === "shopee" ? { limitacoes: "Não inclui os vencidos. Inclui pedidos FBS." } : {}),
+    },
     // EXPEDICAO-VENCE-AMANHA: o prazo da Shopee vence sempre as 23:59, entao
     // a janela de 24 h so' alcanca o dia de hoje — o "ⓘ" diz isso.
     [`${canal}.due24h`]: prazo(
@@ -242,12 +251,13 @@ export const DEFINICOES = {
   "shopee.no_prazo": {
     nome: "No prazo",
     origem: "torre",
-    definicao: "Vencem depois das próximas 24 h, de amanhã em diante.",
-    formula: "Contagem de pedidos com ship_by_date depois de agora + 24 h.",
+    // EXPEDICAO-PERTO-DE-VENCER: "no prazo" e' o que sobra depois de "perto".
+    definicao: "Vencem depois do próximo dia de prazo.",
+    formula: "Backlog − vencidos − perto de vencer − sem prazo.",
     fonte: FILA_SHOPEE,
     janela: FOTO,
     cobertura: COB_SHOPEE,
-    limitacoes: "Inclui os que vencem no próximo dia de prazo.",
+    limitacoes: "Sem a medida de “perto de vencer”, vale a faixa do pipeline (depois de 24 h).",
   },
   "shopee.fbs": {
     nome: "Pedidos FBS",
@@ -403,7 +413,7 @@ export const DEFINICOES = {
     limitacoes: "Não é a LDR: o denominador é outro. Um feriado empurra vários dias de pagamento para o mesmo vencimento.",
   },
   "jornada.fila_aberta": {
-    nome: "Jornada — fila aberta",
+    nome: "Pedidos aguardando expedição",
     origem: "torre",
     definicao: "Pedidos pagos ainda não expedidos, divididos pela etapa em que estão agora.",
     formula: "Contagem por etapa ÷ total da fila aberta (as etapas somam o total).",
@@ -413,7 +423,7 @@ export const DEFINICOES = {
     limitacoes: "A etapa interna (a preparar × envio organizado; substatus no ML) ainda não é publicada. Sobreposições como vencidos são subconjuntos e não se somam.",
   },
   "jornada.coorte": {
-    nome: "Jornada — coorte",
+    nome: "Pedidos dos últimos dias",
     origem: "torre",
     definicao: "Pedidos de uma janela de dias fechados, pela etapa em que terminaram.",
     formula: "Contagem por etapa ÷ base da coorte (as etapas somam a base).",
@@ -454,7 +464,7 @@ export const AJUDA_CANAL_SEM_PRAZO = {
 /** As metricas exibidas em cada canal — o teste cobre o catalogo com isto. */
 export const METRICAS_POR_CANAL: Record<"shopee" | "mercadolivre" | "tiktokshop", readonly ChaveMetrica[]> = {
   shopee: [
-    "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.due_next_day", "shopee.no_prazo",
+    "shopee.backlog", "shopee.overdue", "shopee.due_soon", "shopee.due24h", "shopee.due_next_day", "shopee.no_prazo",
     "shopee.sem_prazo", "shopee.over48h", "shopee.stalled",
     "shopee.slow", "shopee.zombie", "shopee.marcas_alerta", "shopee.prazo_situacao",
     "shopee.fbs", "shopee.ldr", "shopee.ldr_base", "shopee.ldr_atrasados", "shopee.ldr_em_risco",

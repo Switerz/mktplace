@@ -199,8 +199,10 @@ def test_ml_nao_tem_proximo_vencimento_nem_consulta(ml_ligado):
     s = sessao_ml()
     r = svc.get_expedicao(s, channel="mercadolivre")
     assert r["snapshot"]["next_due_date"] is None
-    assert r["totals"]["due_next_day_count"] is None
-    assert all(c["due_next_day_count"] is None for c in r["accounts"])
+    # EXPEDICAO-PERTO-DE-VENCER: as tres medidas sao nulas no canal sem prazo
+    for campo in ("due_today_count", "due_next_day_count", "due_soon_count"):
+        assert r["totals"][campo] is None, campo
+        assert all(c[campo] is None for c in r["accounts"]), campo
     assert not any("AS vencem" in q for q, _ in s.consultas)
 
 
@@ -211,13 +213,21 @@ def test_ml_com_due_next_day_devolve_lista_vazia(ml_ligado):
     assert "FALSE" in sql
 
 
+def test_ml_com_due_soon_devolve_lista_vazia(ml_ligado):
+    s = sessao_ml()
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_soon"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert "FALSE" in sql
+    assert ":limite_perto" not in sql
+
+
 def test_so_a_shopee_declara_que_publica_prazo():
     assert svc.CANAIS["shopee"].publica_prazo is True
     assert svc.CANAIS["mercadolivre"].publica_prazo is False
 
 
 def test_rota_aceita_situacao_due_next_day(ligada):
-    s = SessaoFake(proximo=[{"proximo_vencimento": date(2026, 9, 17),
+    s = SessaoFake(proximo=[{"dia": date(2026, 9, 17),
                              "shop_account": "apice", "vencem": 3}])
     cliente, app = _cliente(s)
     try:

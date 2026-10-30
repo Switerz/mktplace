@@ -49,12 +49,13 @@ test("a lista usa a rota da fila: so' travados, mais antigos primeiro, da marca 
   assert.equal(todas.get("accounts"), null);
 });
 
-test("tela: cartao de travados com % e 'ver quais'; popup montado uma vez", () => {
-  // EXPEDICAO-VENCE-AMANHA: todo cartao com lista (travados inclusive) usa o mesmo cartao.
+test("tela: cartao de travados com % e abre a lista; popup montado uma vez", () => {
+  // EXPEDICAO-PERTO-DE-VENCER: todo cartao do Risco atual e' o `CartaoDeRisco`
+  // clicavel ("Ver pedidos →" no hover), com a fatia da fila na linha de baixo.
   assert.match(CLIENTE, /stalled: "travados"/);
-  assert.match(CLIENTE, /return lista && k\.valor !== null \? \(\s*cartaoComLista\(k, lista\)/);
-  assert.match(CLIENTE, /\{pct \? `\$\{pct\} da fila` : null\}/);
-  assert.match(CLIENTE, />\s*ver quais\s*</);
+  assert.match(CLIENTE, /secundarios=\{secundariosDoRisco\.map\(cartaoDeRisco\)\}/);
+  assert.match(CLIENTE, /pct \? `\$\{pct\} da fila` : undefined/);
+  assert.match(CLIENTE, /aoAbrir=\{abrirLista\(k, LISTA_DO_KPI\[k\.chave\]\)\}/);
   assert.equal((CLIENTE.match(/<TravadosDialog\b/g) ?? []).length, 1);
   assert.match(CLIENTE, /pctTravados: percentualDaFila\(a\.stalled_count, a\.backlog_count\)/);
 });

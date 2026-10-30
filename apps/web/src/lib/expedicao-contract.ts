@@ -39,7 +39,8 @@ import { TEXTO_INDISPONIVEL, formatarDecimal, formatarInteiro } from "./expedica
 /**
  * Os valores de `situacao` aceitos pela API. Allowlist fechada.
  * `due_next_day` (EXPEDICAO-VENCE-AMANHA): o proximo dia de prazo depois do
- * dia da fotografia, so' na Shopee.
+ * dia da fotografia, so' na Shopee. `due_soon` (EXPEDICAO-PERTO-DE-VENCER):
+ * hoje ate' as 23:59 + o proximo dia de prazo, sem os vencidos.
  */
 export const SITUACOES = [
   "overdue",
@@ -51,6 +52,7 @@ export const SITUACOES = [
   "slow",
   "zombie",
   "due_next_day",
+  "due_soon",
 ] as const;
 export type Situacao = (typeof SITUACOES)[number];
 
@@ -194,6 +196,13 @@ export interface Totais {
    * prazo; ausente na API antiga — a tela mostra ausencia, nunca zero.
    */
   due_next_day_count?: number | null;
+  /**
+   * EXPEDICAO-PERTO-DE-VENCER — vencem hoje ate' as 23:59 (sem os vencidos) e
+   * a soma "perto de vencer" = hoje + proximo dia de prazo. A API conta com a
+   * MESMA regra da lista `situacao=due_soon`: cartao, tabela e lista batem.
+   */
+  due_today_count?: number | null;
+  due_soon_count?: number | null;
 }
 
 export interface ResumoConta extends Totais {
@@ -559,14 +568,35 @@ export function rotuloDoProximoVencimento(
   /** "Vence" no cartao; "Vencem" na coluna da tabela por marca. */
   verbo: "Vence" | "Vencem" = "Vence",
 ): string {
+  return `${verbo} ${diaDoProximoVencimento(proximo, efetivoEm)}`;
+}
+
+/** "amanhã" ou, na sexta e antes de feriado, "ter 03/11". */
+export function diaDoProximoVencimento(
+  proximo: string | null | undefined,
+  efetivoEm: string | null | undefined,
+): string {
   const hoje = efetivoEm ? diaBrt(efetivoEm) : null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(proximo ?? "");
-  if (!m || !hoje) return `${verbo} amanhã`;
+  if (!m || !hoje) return "amanhã";
   const [a, mes, dia] = hoje.split("-").map(Number);
   const amanha = new Date(Date.UTC(a, mes - 1, dia + 1)).toISOString().slice(0, 10);
-  if (proximo === amanha) return `${verbo} amanhã`;
+  if (proximo === amanha) return "amanhã";
   const semana = DIA_DA_SEMANA[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()];
-  return `${verbo} ${semana} ${m[3]}/${m[2]}`;
+  return `${semana} ${m[3]}/${m[2]}`;
+}
+
+/**
+ * EXPEDICAO-PERTO-DE-VENCER — a linha de baixo do cartao: de onde vem o
+ * total ("378 hoje · 69 ter 03/11"). Sem as duas parcelas (API antiga), nada.
+ */
+export function detalheDePertoDeVencer(
+  t: Pick<Totais, "due_today_count" | "due_next_day_count"> | null,
+  fotografia: FotografiaDoPrazo | null,
+): string | undefined {
+  if (typeof t?.due_today_count !== "number" || typeof t?.due_next_day_count !== "number") return undefined;
+  const dia = diaDoProximoVencimento(fotografia?.next_due_date, fotografia?.effective_at);
+  return `${formatarInteiro(t.due_today_count)} hoje · ${formatarInteiro(t.due_next_day_count)} ${dia}`;
 }
 
 /** O que `montarKpis` precisa da fotografia para o proximo dia de prazo. */
@@ -614,6 +644,20 @@ export function montarKpis(
       v(t?.overdue_count),
       (t?.overdue_count ?? 0) > 0,
     ),
+    // EXPEDICAO-PERTO-DE-VENCER (pedido de 30/10/2026): a prioridade depois
+    // dos vencidos — hoje ate' as 23:59 + o proximo dia de prazo, num numero
+    // so', o MESMO da tabela e da lista. So' no canal com prazo.
+    ...(temPrazo
+      ? [
+          {
+            chave: "due_soon",
+            rotulo: "Perto de vencer",
+            valor: v(t?.due_soon_count),
+            alerta: (t?.due_soon_count ?? 0) > 0,
+            notaCurta: detalheDePertoDeVencer(t, fotografia),
+          } as Kpi,
+        ]
+      : []),
     prazo("due24h", "Vence em 24h", v(t?.due_within_24h_count), false),
     // EXPEDICAO-VENCE-AMANHA: so' no canal com prazo. No Mercado Livre o
     // cartao N/D repetiria a ausencia que "Vencidos" ja' explica.
@@ -890,7 +934,7 @@ export function formatarHoras(h: number | null): string {
  * nobre da tela. La' a pergunta e' idade operacional e saude da fonte.
  */
 export const KPIS_PRINCIPAIS: Record<Canal, readonly string[]> = {
-  shopee: ["backlog", "overdue", "due24h", "stalled"],
+  shopee: ["backlog", "overdue", "due_soon", "stalled"],
   mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
 };
 
@@ -1217,7 +1261,11 @@ export function montarMapaDeRisco(
     conta: a.shop_account,
     marca: a.brand,
     backlog: a.backlog_count,
-    segmentos: temPrazo
+    // EXPEDICAO-PERTO-DE-VENCER: com a medida publicada, a barra da conta e' a
+    // MESMA particao do topo (vencidos / perto de vencer / no prazo / sem prazo).
+    segmentos: temPrazo && typeof a.due_soon_count === "number"
+      ? (faixasDePrazo(a) ?? [])
+      : temPrazo
       ? [
           { chave: "overdue", rotulo: "Vencidos", valor: a.overdue_count },
           { chave: "due24h", rotulo: "Vence em 24h", valor: a.due_within_24h_count },
@@ -1411,7 +1459,7 @@ export const DEFINICAO_FILA: Record<Canal, string> = {
  * a ausencia e' explicada na secao de prazo, nao em cartoes N/D.
  */
 export const KPIS_RISCO_ATUAL: Record<Canal, readonly string[]> = {
-  shopee: ["backlog", "overdue", "due24h", "due_next_day", "over48h", "stalled", "marcas_alerta"],
+  shopee: ["backlog", "overdue", "due_soon", "over48h", "stalled", "marcas_alerta"],
   mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
 };
 
@@ -1438,6 +1486,8 @@ const MEDIDAS: readonly (keyof Totais)[] = [
   "zombie_count",
   "stalled_count",
   "due_next_day_count",
+  "due_today_count",
+  "due_soon_count",
 ];
 
 export interface RecorteMarca {
@@ -1496,23 +1546,39 @@ export function recortarPorMarca(r: RespostaExpedicao | null, marca: string | nu
 }
 
 export interface FaixaPrazo {
-  chave: "overdue" | "due24h" | "on_time" | "sem_prazo";
+  chave: "overdue" | "due_soon" | "due24h" | "on_time" | "sem_prazo";
   rotulo: string;
   valor: number;
 }
 
 /**
  * Prazo da Shopee pela SITUACAO de cada pedido em fila (do `ship_by_date`).
- * E' uma particao do backlog — o pipeline garante a soma exata —, entao pode
- * ser desenhada empilhada. NAO e' LDR: a fotografia so' tem pedidos em aberto.
+ * E' uma particao do backlog, entao pode ser desenhada empilhada. NAO e' LDR:
+ * a fotografia so' tem pedidos em aberto.
+ *
+ * EXPEDICAO-PERTO-DE-VENCER: a faixa do meio e' "Perto de vencer" (hoje +
+ * proximo dia de prazo), o MESMO numero do cartao e da coluna da tabela; "No
+ * prazo" e' o que vence depois disso. Sem a medida (API antiga), volta a
+ * particao do pipeline (vence em 24 h / no prazo).
  */
 export function faixasDePrazo(t: Totais | null): FaixaPrazo[] | null {
   if (!t) return null;
+  const vencidos = { chave: "overdue", rotulo: "Vencidos", valor: t.overdue_count } as const;
+  const semPrazo = { chave: "sem_prazo", rotulo: "Sem prazo publicado", valor: t.deadline_unavailable_count } as const;
+  if (typeof t.due_soon_count !== "number") {
+    return [
+      vencidos,
+      { chave: "due24h", rotulo: "Vence em 24 h", valor: t.due_within_24h_count },
+      { chave: "on_time", rotulo: "No prazo", valor: t.on_time_count },
+      semPrazo,
+    ];
+  }
+  const depois = t.backlog_count - t.overdue_count - t.due_soon_count - t.deadline_unavailable_count;
   return [
-    { chave: "overdue", rotulo: "Vencidos", valor: t.overdue_count },
-    { chave: "due24h", rotulo: "Vence em 24 h", valor: t.due_within_24h_count },
-    { chave: "on_time", rotulo: "No prazo", valor: t.on_time_count },
-    { chave: "sem_prazo", rotulo: "Sem prazo publicado", valor: t.deadline_unavailable_count },
+    vencidos,
+    { chave: "due_soon", rotulo: "Perto de vencer", valor: t.due_soon_count },
+    { chave: "on_time", rotulo: "No prazo", valor: Math.max(0, depois) },
+    semPrazo,
   ];
 }
 
