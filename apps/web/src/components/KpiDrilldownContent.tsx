@@ -43,6 +43,10 @@ interface Props {
   comparacao?: { deltaPct: number | null; reference: string | null; deltaTone?: string };
   /** POPUPS-1 — a mesma serie do mini grafico do card, aqui em tamanho legivel. */
   tendencia?: TendenciaKpi | null;
+  /** Falso quando nao ha' base justa (comparar desligado ou dia em andamento). */
+  comparar?: boolean;
+  /** Periodo e' so' o dia de hoje, ainda aberto. */
+  diaEmAndamento?: boolean;
 }
 
 function fmtPct1(v: number | null): string {
@@ -66,7 +70,7 @@ function KpiReference({
   overview: OverviewData;
   comparacao?: { deltaPct: number | null; reference: string | null; deltaTone?: string };
 }) {
-  const gmv = kind === "gmv" && overview.gmv_mom_pct != null;
+  const gmv = kind === "gmv" && comparacao != null && overview.gmv_mom_pct != null;
   const outra = kind !== "gmv" && comparacao?.deltaPct != null && comparacao.reference ? comparacao : null;
   if (!gmv && !outra) return null;
   const pct = gmv ? overview.gmv_mom_pct! : outra!.deltaPct!;
@@ -104,11 +108,14 @@ export default function KpiDrilldownContent({
   brands,
   channels,
   buildHref,
-  comparacao,
+  comparacao: comparacaoDoCard,
   tendencia,
+  comparar = true,
+  diaEmAndamento = false,
 }: Props) {
   const meta = KPI_META[kind];
-  const explicacao = [meta.definition, meta.formula, meta.caveat].filter(Boolean).join(" ");
+  const comparacao = comparar ? comparacaoDoCard : undefined;
+  const explicacao = DICA[kind];
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -118,8 +125,12 @@ export default function KpiDrilldownContent({
           <KpiReference kind={kind} overview={overview} comparacao={comparacao} />
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
-          <InfoDica texto={explicacao} />
+          <DrilldownContextLine
+            leading={diaEmAndamento ? "Dia em andamento" : null}
+            periodLabel={periodLabel}
+            refreshedAt={refreshedAt}
+          />
+          {explicacao && <InfoDica texto={explicacao} />}
         </div>
       </div>
 
@@ -135,6 +146,17 @@ export default function KpiDrilldownContent({
     </div>
   );
 }
+
+/**
+ * POPUPS-1 — o "ⓘ" so' existe quando MUDA a leitura do numero. "Pedidos e'
+ * a soma dos pedidos" nao muda nada; a regra de GMV por canal, a cobertura do
+ * investimento e o ROAS sem consolidado mudam.
+ */
+const DICA: Partial<Record<KpiKind, string>> = {
+  gmv: KPI_META.gmv.definition,
+  ad_spend: KPI_META.ad_spend.caveat,
+  roas: KPI_META.roas.caveat,
+};
 
 /** Serie do periodo em area, suavizada como no card, com a variacao recente. */
 function Tendencia({ t }: { t: TendenciaKpi }) {

@@ -31,6 +31,7 @@ import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { useGerencialSources } from "@/hooks/useGerencialSources";
 import { mergeFilteredHref } from "@/lib/filters/nav-links";
 import { fmtPeriodo } from "@/lib/filters/format";
+import { toISODate } from "@/lib/filters/presets";
 import type { Marketplace } from "@/lib/mock-data";
 import { buildPulse } from "@/lib/executive-pulse";
 import { findChannelMedian } from "@/lib/canais-channel-metrics";
@@ -169,14 +170,20 @@ function GerencialInner() {
   }, [sources.retryKey]);
 
   const periodLabel = fmtPeriodo(filters.dateFrom, filters.dateTo);
+  // POPUPS-1 — o dia em andamento contra o dia anterior INTEIRO nao e'
+  // comparacao: 1.494 pedidos ate' as 21h contra 4,4 mil de um dia fechado
+  // dariam "-66%" por causa do relogio, nao do negocio. Sem base justa, sem
+  // variacao — em cards, meta e detalhe.
+  const diaEmAndamento = filters.dateFrom === filters.dateTo && filters.dateTo === toISODate(new Date());
+  const comparar = filters.compare && !diaEmAndamento;
   const buildHref = useMemo(() => (href: string) => mergeFilteredHref(href, searchParams), [searchParams]);
   const brandHref = useCallback((brand: string) => buildHref(`/brand/${brand}`), [buildHref]);
 
   // ---- derivacoes puras -------------------------------------------------
   const overview = sources.overview.data;
   const kpis = useMemo(
-    () => buildKpiBand(overview, filters.channels, filters.compare),
-    [overview, filters.channels, filters.compare],
+    () => buildKpiBand(overview, filters.channels, comparar),
+    [overview, filters.channels, comparar],
   );
 
   const merged = useMemo(
@@ -424,7 +431,7 @@ function GerencialInner() {
         gmv={overview?.gmv ?? null}
         prevGmv={overview?.prev_gmv ?? null}
         momPct={overview?.gmv_mom_pct ?? null}
-        compareActive={filters.compare}
+        compareActive={comparar}
         channels={filters.channels}
         gmvByChannel={{
           tiktok: overview?.tiktok_gmv ?? null,
@@ -472,7 +479,7 @@ function GerencialInner() {
             granularity={granularity}
             onGranularityChange={setGranularity}
             reconciliation={reconciliation}
-            compareActive={filters.compare}
+            compareActive={comparar}
             loading={merged.loadingChannels.length > 0 && merged.availableChannels.length === 0}
             onSelectBucket={openBucket}
             onOpenChannelSeries={(channel) => setDialog({ kind: "channelSeries", channel })}
@@ -484,7 +491,7 @@ function GerencialInner() {
             brands={brands}
             channels={filters.channels}
             progressoPorMarca={progressoPorMarca}
-            compareActive={filters.compare}
+            compareActive={comparar}
             loading={sources.brands.status.loading}
             error={sources.brands.status.error}
             brandHref={brandHref}
@@ -585,6 +592,8 @@ function GerencialInner() {
               return k?.exactValue ?? k?.value ?? "—";
             })()}
             comparacao={kpis.find((k) => k.key === dialog.key)}
+            comparar={comparar}
+            diaEmAndamento={diaEmAndamento}
             tendencia={dialog.key === "orders" || dialog.key === "avg_ticket" ? tendencias[dialog.key] : null}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}

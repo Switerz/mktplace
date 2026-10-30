@@ -124,7 +124,10 @@ test("o card usa o tom do KPI e a tendencia; a pagina passa as tendencias", () =
   assert.match(card, /<LinhaDeTendencia /);
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /tendencias=\{tendencias\}/);
-  assert.match(page, /buildKpiBand\(overview, filters\.channels, filters\.compare\)/);
+  assert.match(page, /buildKpiBand\(overview, filters\.channels, comparar\)/);
+  // POPUPS-1 — dia em andamento contra dia inteiro nao e' base justa.
+  assert.match(page, /const comparar = filters\.compare && !diaEmAndamento;/);
+  assert.match(page, /filters\.dateFrom === filters\.dateTo && filters\.dateTo === toISODate\(new Date\(\)\)/);
 });
 
 test("o detalhe do card usa a mesma comparacao do card", () => {
