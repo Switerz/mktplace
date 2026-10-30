@@ -71,6 +71,32 @@ def _var(v) -> str:
     return "0" if v in (None, "", 0, "0") else str(v)
 
 
+def ancora(anuncios) -> dict:
+    """Anuncio-ancora do inventario: so' IDENTIFICACAO, nunca soma estoque.
+
+    Ordem: Full e `active`; depois Full; depois qualquer. Desempate pelo menor
+    `item_id` e depois pelo menor `variation_id`, ambos como texto, para que a
+    mesma ponte de sempre o mesmo ancora. `anuncios_extras` = anuncios
+    distintos (item, variacao) ligados ao inventario menos 1; sem ponte, ancora
+    nula e 0. `variation_id` "sem variacao" (None/""/0) vira None.
+    """
+    distintos = {(str(a["item_id"]), _var(a.get("variation_id"))) for a in anuncios}
+    if not distintos:
+        return {"anuncio_ancora_item_id": None, "anuncio_ancora_variation_id": None,
+                "anuncios_extras": 0}
+
+    def prioridade(a):
+        full = a.get("logistic_type") == ROTULO_FULL
+        nivel = 0 if full and a.get("listing_status") == "active" else 1 if full else 2
+        return (nivel, str(a["item_id"]), _var(a.get("variation_id")))
+
+    escolhido = min(anuncios, key=prioridade)
+    var = _var(escolhido.get("variation_id"))
+    return {"anuncio_ancora_item_id": str(escolhido["item_id"]),
+            "anuncio_ancora_variation_id": None if var == "0" else var,
+            "anuncios_extras": len(distintos) - 1}
+
+
 def indicadores(snapshot, status, ponte, vendas):
     """Indicadores por inventario + resumo por marca. So' dados, sem I/O.
 
@@ -157,6 +183,8 @@ def indicadores(snapshot, status, ponte, vendas):
             "cobertura_torre_dias": cob,
             "classificacao_torre": classe,
             "vinculo_vendas": "COM_VENDA" if un > 0 else "SEM_VENDA_NA_JANELA",
+            # Identificacao (migration 034): atributo da linha, nao juncao.
+            **ancora(anuncios),
         })
 
     # --- resumo por marca -----------------------------------------------------
