@@ -202,6 +202,18 @@ test("T-0028: o balao do ⓘ sai do card por portal (fixed relativo a' tela)", (
   assert.match(portal, /dica-entra_160ms/);
 });
 
+test("T-0028: hover do card so' sobe com ponteiro que paira (nao gruda no toque)", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const inicio = css.indexOf("@media (hover: hover)");
+  assert.ok(inicio >= 0, "falta @media (hover: hover)");
+  const hover = css.indexOf(".card-hover:hover");
+  const active = css.indexOf(".card-hover:active");
+  assert.ok(hover > inicio && active > inicio, "o primeiro :hover/:active do card mora dentro do media");
+  // nada entre o @media e o :hover fecha o bloco
+  assert.doesNotMatch(css.slice(inicio, hover), /^\s*\}/m);
+  assert.match(css.slice(hover, active), /transform: translateY\(-2px\)/, "o lift de 2px fica");
+});
+
 test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {
   const serra = [...Array(14)].map((_, i) => (i % 2 ? 110 : 90));
   const lisa = suavizar(serra);
