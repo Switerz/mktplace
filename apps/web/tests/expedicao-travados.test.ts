@@ -219,3 +219,13 @@ test("popup: coluna Pedido com o numero e botao Exportar CSV", () => {
   // numero nunca vira link para o marketplace
   assert.doesNotMatch(POPUP, /href=\{[^}]*numeroDoPedido/);
 });
+
+test("popup de travados largo e sem quebra nas colunas curtas (sem rolagem lateral)", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  const DIALOGO = fonte("src/components/KpiDrilldownDialog.tsx");
+  assert.match(POPUP, /title=\{alvo\?\.titulo \?\? "Travados"\} largura="larga">/);
+  assert.match(DIALOGO, /largura === "larga" \? "sm:max-w-4xl" : "sm:max-w-lg"/);
+  assert.match(DIALOGO, /largura = "padrao"/, "sem a prop, os outros popups nao mudam");
+  assert.match(POPUP, /\[&_th\]:whitespace-nowrap/);
+  assert.match(POPUP, /<td className="whitespace-nowrap font-medium text-ink">\{rotuloDaEtapa\(l\.etapa\)\}<\/td>/);
+});
