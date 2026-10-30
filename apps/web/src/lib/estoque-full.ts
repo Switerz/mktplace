@@ -300,6 +300,14 @@ export function rotuloCD(locationId: string | null | undefined): string {
   return locationId?.trim() || CD_NAO_INFORMADO;
 }
 
+/**
+ * Sufixo da coluna "Por CD" quando `is_saleable` e' `null`: a API nao disse se
+ * o saldo esta' a venda. Nao e' "não informado" puro porque, ao lado de
+ * `CD_NAO_INFORMADO`, a celula lia "CD não informado: 0 (não informado)" e
+ * parecia repeticao. `false` continua "(não vendável)".
+ */
+export const VENDA_NAO_INFORMADA = "(venda não informada)";
+
 // ---------------------------------------------------------------------------
 // Cobertura por conta
 // ---------------------------------------------------------------------------

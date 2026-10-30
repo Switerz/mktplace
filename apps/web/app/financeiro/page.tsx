@@ -19,7 +19,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ArrowUpRight, BarChart3, CircleSlash, Megaphone, Percent, Receipt, Wallet } from "lucide-react";
+import { BarChart3, CircleSlash, Megaphone, Percent, Receipt, Wallet } from "lucide-react";
 import {
   fetchFinanceiro,
   type FinanceiroKpis,
@@ -34,7 +34,7 @@ import PageHeader from "@/components/layout/PageHeader";
 import Freshness, { PeriodChip } from "@/components/ui/Freshness";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import StateBlock, { RetryButton } from "@/components/ui/StateBlock";
 import ChannelCostPanel from "@/components/financeiro/ChannelCostPanel";
 import dynamic from "next/dynamic";
@@ -299,7 +299,7 @@ function FinanceiroPageInner() {
     <PageContainer>
       <PageHeader
         title="Financeiro"
-        subtitle="Receita e custos conhecidos por canal; a margem ainda não fecha."
+        subtitle="Receita e custos conhecidos por canal."
         icon={Wallet}
         meta={
           <>
@@ -473,8 +473,12 @@ function FinanceiroPageInner() {
         {/* ── 3. Taxa do marketplace por marca ── */}
         {canaisDoGrafico.length > 0 && (dataIsFresh ? linhasTaxa.length > 0 : true) && (
           <Panel
-            titulo="Taxa do marketplace sobre o GMV, por marca"
-            descricao="Cada canal mede um conjunto próprio de taxas — barras lado a lado, nunca somadas."
+            titulo={
+              <>
+                Taxa do marketplace sobre o GMV, por marca
+                <InfoDica texto="Cada canal mede taxas próprias: barras lado a lado, nunca somadas." />
+              </>
+            }
             icone={BarChart3}
           >
             {dataIsFresh ? (
@@ -497,21 +501,20 @@ function FinanceiroPageInner() {
         {showTiktok && (
           <Panel
             id="tiktok"
-            titulo="Repasses TikTok"
-            descricao="GMV bruto, taxas e encargos e repasse recebido por marca"
+            titulo={
+              <>
+                Repasses TikTok
+                <InfoDica texto="Repasse e GMV podem ter competências diferentes: o repasse pode incluir pedidos de outros meses." />
+              </>
+            }
             icone={Receipt}
             semPadding
             rodape={
-              <div className="flex flex-col gap-1">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos %</span>
-                  <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
-                  <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
-                  <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
-                </div>
-                <Disclosure className="-ml-2">
-                  Taxas e encargos / GMV · Repasse % = Repasse Recebido / GMV · repasses e GMV podem ter competencias diferentes (o repasse pode incluir pedidos de outros meses)
-                </Disclosure>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos / GMV</span>
+                <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
+                <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
+                <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
               </div>
             }
           >
@@ -561,25 +564,24 @@ function FinanceiroPageInner() {
         {showMl && (
           <Panel
             id="mercado-livre"
-            titulo="Tarifa, publicidade e custos ML"
-            descricao="Tarifa do marketplace, Ad Spend, receita atribuída, frete e Ads + frete como % do GMV"
+            titulo={
+              <>
+                Tarifa, publicidade e custos ML
+                <InfoDica texto="Ads + Frete / GMV não inclui a tarifa do Mercado Livre. Tarifa ML = só a comissão do marketplace; não é margem. Receita Ads = GMV atribuído a anúncios." />
+              </>
+            }
             icone={Megaphone}
             semPadding
             rodape={
-              <div className="flex flex-col gap-1">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">ROAS</span>
-                  <Faixa ponto="bg-ok" tinta="text-ok-ink">acima de 10x</Faixa>
-                  <Faixa ponto="bg-warn" tinta="text-warn-ink">5x–10x</Faixa>
-                  <Faixa ponto="bg-crit" tinta="text-crit-ink">abaixo de 5x</Faixa>
-                  <span aria-hidden="true" className="h-3 w-px bg-line-strong" />
-                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Ads + Frete / GMV</span>
-                  <Faixa ponto="bg-chart-2" tinta="text-ink-muted">Ads</Faixa>
-                  <Faixa ponto="bg-chart-4" tinta="text-ink-muted">Frete</Faixa>
-                </div>
-                <Disclosure className="-ml-2">
-                  Ads + Frete / GMV · nao inclui a tarifa do Mercado Livre, que tem coluna propria · Tarifa ML = so' a tarifa/comissao do marketplace (pedidos pagos), sem Ads, frete, imposto, devolucao nem afiliado — nao e' margem · Receita Ads = GMV atribuido a anuncios
-                </Disclosure>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">ROAS</span>
+                <Faixa ponto="bg-ok" tinta="text-ok-ink">acima de 10x</Faixa>
+                <Faixa ponto="bg-warn" tinta="text-warn-ink">5x–10x</Faixa>
+                <Faixa ponto="bg-crit" tinta="text-crit-ink">abaixo de 5x</Faixa>
+                <span aria-hidden="true" className="h-3 w-px bg-line-strong" />
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Ads + Frete / GMV</span>
+                <Faixa ponto="bg-chart-2" tinta="text-ink-muted">Ads</Faixa>
+                <Faixa ponto="bg-chart-4" tinta="text-ink-muted">Frete</Faixa>
               </div>
             }
           >
@@ -646,21 +648,20 @@ function FinanceiroPageInner() {
         {showShopee && (
           <Panel
             id="shopee"
-            titulo="Taxas e Custos Shopee"
-            descricao="GMV, taxas e encargos, total global dos pedidos, anúncios e frete por marca"
+            titulo={
+              <>
+                Taxas e Custos Shopee
+                <InfoDica texto="Total Global (pedidos) não é repasse líquido. Taxas e encargos = comissão + taxa de serviço líquidas, sobre o GMV." />
+              </>
+            }
             icone={Percent}
             semPadding
             rodape={
-              <div className="flex flex-col gap-1">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos %</span>
-                  <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
-                  <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
-                  <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
-                </div>
-                <Disclosure className="-ml-2">
-                  Taxas e encargos = comissao liquida + taxa de servico liquida, sobre o GMV · o indicador de liquidacao foi removido: o campo antigo (Total Global do pedido) nao representa repasse liquido
-                </Disclosure>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Taxas e encargos %</span>
+                <Faixa ponto="bg-ink-faint" tinta="text-ink-muted">abaixo de 20%</Faixa>
+                <Faixa ponto="bg-warn" tinta="text-warn-ink">20–30%</Faixa>
+                <Faixa ponto="bg-crit" tinta="text-crit-ink">acima de 30%</Faixa>
               </div>
             }
           >
@@ -714,13 +715,6 @@ function FinanceiroPageInner() {
               </table>
             </TableScrollHint>
           </Panel>
-        )}
-
-        {dataIsFresh && (
-          <p className="flex items-center gap-1.5 text-xs text-ink-faint">
-            <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
-            O nome da marca abre a visão da marca no canal, com os mesmos filtros.
-          </p>
         )}
       </>
       )}

@@ -345,7 +345,6 @@ test("nenhum arquivo da fatia migrada usa a variante `dark:` solta", () => {
     "src/components/ui/Note.tsx",
     "src/components/ui/Segmented.tsx",
     "src/components/ui/PageBar.tsx",
-    "src/components/ui/Disclosure.tsx",
     "src/components/ui/SortHeader.tsx",
   ];
   for (const rel of fatia) {

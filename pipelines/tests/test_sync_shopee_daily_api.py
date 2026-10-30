@@ -96,6 +96,12 @@ def test_desde_explicito_estende_a_janela_para_tras():
     assert SH.janela(HOJE, date(2026, 1, 1), D.DIAS_JANELA) == (date(2026, 1, 1), HOJE - timedelta(days=1))
 
 
+def test_incluir_hoje_estende_o_fim_ate_d0_sem_mudar_o_inicio():
+    padrao = SH.janela(HOJE, None, D.DIAS_JANELA)
+    liberada = SH.janela(HOJE, None, D.DIAS_JANELA, incluir_hoje=True)
+    assert liberada == (padrao[0], HOJE)
+
+
 # ---------------------------------------------------------------------------
 # Idempotencia, colapso e reconciliacao (logica pura)
 # ---------------------------------------------------------------------------
@@ -218,6 +224,33 @@ def test_apply_sem_flag_vira_dry_run_declarado_e_nao_escreve(monkeypatch):
 def test_dry_run_puro_nao_escreve(monkeypatch):
     _preparar_dry_run(monkeypatch, [bruta()])
     assert D.run(apply=False, agora=AGORA, ambiente={D.FLAG_HABILITADO: "true"})["modo"] == "dry-run"
+
+
+def test_run_incluir_hoje_publica_janela_ate_d0(monkeypatch):
+    _preparar_dry_run(monkeypatch, [bruta()])
+    vistas = []
+    original = SH.janela
+    monkeypatch.setattr(SH, "janela", lambda *a, **k: vistas.append((a, k)) or original(*a, **k))
+    res = D.run(apply=False, agora=AGORA, ambiente={}, incluir_hoje=True)
+    assert res["janela"][1] == str(HOJE)
+    assert res["incluir_hoje"] is True
+
+
+def test_main_inclui_hoje_por_padrao_e_ate_ontem_desliga(monkeypatch):
+    recebidos = {}
+    monkeypatch.setattr(D, "run", lambda **k: recebidos.update(k) or {})
+    assert D.main([]) == 0
+    assert recebidos["incluir_hoje"] is True
+    assert D.main(["--incluir-hoje"]) == 0
+    assert recebidos["incluir_hoje"] is True
+    assert D.main(["--ate-ontem"]) == 0
+    assert recebidos["incluir_hoje"] is False
+
+
+def test_run_sem_argumento_publica_ate_d0(monkeypatch):
+    _preparar_dry_run(monkeypatch, [bruta()])
+    res = D.run(apply=False, agora=AGORA, ambiente={})
+    assert res["janela"][1] == str(HOJE) and res["incluir_hoje"] is True
 
 
 def test_main_lock_ocupado_sai_75(monkeypatch):

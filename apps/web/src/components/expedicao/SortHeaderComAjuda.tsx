@@ -1,15 +1,14 @@
 "use client";
 
 /**
- * T-0010 (revisao) — cabecalho ORDENAVEL de coluna numerica com o `?` da
+ * T-0010 (revisao) — cabecalho ORDENAVEL de coluna numerica com o "ⓘ" da
  * metrica.
  *
- * No `SortHeader` (ui) o `rotulo` mora DENTRO do botao de ordenar: um `?` ali
- * seria botao dentro de botao (HTML invalido) e o clique nele subiria ate' o
- * `onClick` da ordenacao. Aqui o `?` e' IRMAO do botao de ordenar, no mesmo
- * `<th>` — o clique nele nunca chega a `aoOrdenar`. O `SortHeader` nao e'
+ * No `SortHeader` (ui) o `rotulo` mora DENTRO do botao de ordenar: um "ⓘ"
+ * focavel ali seria elemento interativo dentro de botao (HTML invalido). Aqui
+ * o "ⓘ" e' IRMAO do botao de ordenar, no mesmo `<th>`. O `SortHeader` nao e'
  * tocado; este repete o visual dele (mesmo `aria-sort`, mesmas classes, alvo
- * de 44 px) e o `?` e' o mesmo `AjudaMetrica` dos cabecalhos da concentracao.
+ * de 44 px).
  *
  * So' alinhamento a' direita: e' para colunas de contagem e taxa.
  */
@@ -42,7 +41,7 @@ export default function SortHeaderComAjuda({
     >
       <span className="flex items-center justify-end">
         {/* O botao ocupa o resto da celula (como no SortHeader); o rotulo
-            fica encostado no `?` e nos numeros alinhados a' direita. */}
+            fica encostado no "ⓘ" e nos numeros alinhados a' direita. */}
         <button
           type="button"
           onClick={() => aoOrdenar(coluna)}

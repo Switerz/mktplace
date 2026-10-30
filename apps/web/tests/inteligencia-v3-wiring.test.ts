@@ -223,9 +223,11 @@ test("31b. o detalhe usa as primitives do G2, incluindo a que faltava", () => {
   assert.match(src, /<DrilldownCta/);
 });
 
-test("31c. o dialogo do bucket NAO lista produtos e diz por que", () => {
+test("31c. o dialogo do bucket NAO lista produtos", () => {
   const src = read(INTEL);
-  assert.match(src, /ele n.o cont.m a lista de produtos/i);
+  // Abas objetivas: a nota "ele nao contem a lista de produtos" saiu; o CTA
+  // "Ver produtos deste bucket" ja' leva ao destino que lista.
+  assert.match(src, /Ver produtos deste bucket/);
   assert.ok(!/dialog\.share\.products|share\.items|bucketProducts/.test(src));
 });
 
@@ -381,10 +383,10 @@ test("34b. o card TikTok declara o teto proprio e nao inventa ROAS/Ads", () => {
   const fim = src.indexOf("Bloco 6 — fila de evidências");
   const bloco = src.slice(ini, fim);
   assert.match(bloco, /tkSampleNote\(tkRows\.length, tkReceived\)/);
-  assert.match(bloco, /TK_PRODUCTS_LIMIT/);
-  assert.match(bloco, /não traz investimento de mídia/);
+  // Abas objetivas: a prosa sobre teto, agrupamento e ausencia de ROAS saiu;
+  // o card continua sem colunas de ROAS/Ads.
+  assert.ok(!/ad_roas|ad_spend/.test(bloco), "sem ROAS/Ads no card TikTok");
   assert.ok(!/setDialog/.test(bloco), "sem drill-down sem evidencia");
-  assert.match(bloco, /apresentação, não cobertura/);
 });
 
 test("35. a coluna de acao do LTV tem cabecalho proprio, nao 'Marca' duplicado", () => {

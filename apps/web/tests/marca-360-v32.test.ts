@@ -724,8 +724,10 @@ test("V32 um único shell de diálogo, e um único diálogo por vez", () => {
   // estado único e discriminado ⇒ nunca dois abertos
   assert.match(PAGINA, /const \[dialog, setDialog\] = useState<BrandDialog \| null>\(null\)/);
   assert.match(PAGINA, /open=\{dialog != null\}/);
-  // e as primitives do G2 são reutilizadas, não recriadas
-  for (const p of ["DrilldownContextLine", "DataQualityNote", "DrilldownCta", "EvidenceRow"]) {
+  // e as primitives do G2 são reutilizadas, não recriadas. POPUPS-1: a nota de
+  // escopo do detalhe (metodologia, não alerta de dado) foi para o ⓘ; sai o
+  // DataQualityNote, entra a seção compartilhada.
+  for (const p of ["DrilldownContextLine", "DrilldownSecao", "DrilldownCta", "EvidenceRow", "InfoDica"]) {
     assert.match(PAGINA, new RegExp(p), p);
   }
 });
@@ -755,8 +757,8 @@ test("V32 Demographics foi removido e não deixou card vazio", () => {
     assert.doesNotMatch(src, /<h\d[^>]*>Demographics/, `${nome}: nenhuma seção Demographics`);
     assert.doesNotMatch(src, /Sem dados de viewers|Sem dados de followers/, nome);
   }
-  // no lugar, uma nota compacta DENTRO do contêiner mensal
-  assert.match(PAINEL, /Limitações do dado nesta competência/);
+  // no lugar, a limitacao fica no ⓘ do cabecalho do contêiner mensal
+  assert.match(PAINEL, /<InfoDica className="ml-1" texto=\{LIMITACOES_CONTRATO\} \/>/);
   assert.match(PAINEL, /Audiência não é coberta/);
   assert.match(PAINEL, /100% nulas na fonte/);
 });

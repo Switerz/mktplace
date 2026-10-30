@@ -156,7 +156,7 @@ function ConcentrationPanel({
                   </span>
                   <span className="mt-1 block w-full bg-accent-soft rounded-full h-1.5 overflow-hidden">
                     <span
-                      className="block h-1.5 rounded-full bg-accent"
+                      className="tc-barra block h-1.5 rounded-full bg-accent"
                       style={{ width: `${Math.min(entry.sharePct, 100)}%` }}
                     />
                   </span>

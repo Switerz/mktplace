@@ -241,6 +241,8 @@ export interface LinhaFila {
   source_ingested_at: string | null;
   source_freshness_status: string;
   timestamp_quality: string;
+  /** Etapa do pedido (T-0015). Ausente/nula sem a migration 033 na API. */
+  etapa?: string | null;
 }
 
 export interface Paginacao {

@@ -62,8 +62,8 @@ export default function TrendChart({ data, granularity, loading }: Props) {
               width={52}
             />
             <Tooltip content={<CustomTooltip />} />
-            <Bar dataKey="gmv" fill="#c4b5fd" radius={[3, 3, 0, 0]} />
-            <Line
+            <Bar animationDuration={450} animationEasing="ease-out" dataKey="gmv" fill="#c4b5fd" radius={[3, 3, 0, 0]} />
+            <Line animationDuration={450} animationEasing="ease-out"
               type="monotone"
               dataKey="gmv"
               stroke="#7c3aed"

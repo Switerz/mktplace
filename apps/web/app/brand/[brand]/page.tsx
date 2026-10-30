@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { ArrowDown } from "lucide-react";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { buildDemoSeries, DEMO_SERIES_LABEL, DEMO_SERIES_WARNING, type DailyRow } from "@/lib/brand/demo-series";
 import { fetchBrandDetail, type BrandDetail, type BrandDetailChannelRow, type BrandDetailProduto } from "@/lib/api-client";
@@ -27,7 +28,9 @@ import BrandArrivalBanner from "@/components/BrandArrivalBanner";
 import PageContainer from "@/components/layout/PageContainer";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
-import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
+import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import TikTokMonthlyPanel from "@/components/brand/TikTokMonthlyPanel";
@@ -90,7 +93,7 @@ function fmtMetric(m: MetricValue, unit: MetricUnit): string {
 
 function MetricList({ metrics }: { metrics: readonly DrilldownMetric[] }) {
   return (
-    <ul className="flex flex-col gap-1 list-none p-0 m-0">
+    <ul className="flex flex-col list-none p-0 m-0">
       {metrics.map((m) => (
         <EvidenceRow
           key={m.key}
@@ -103,10 +106,73 @@ function MetricList({ metrics }: { metrics: readonly DrilldownMetric[] }) {
   );
 }
 
-function SectionTitle({ children, badge }: { children: ReactNode; badge?: string }) {
+/** Taxas do funil: entram ENTRE as etapas que explicam, como conector. */
+const TAXAS_DO_FUNIL = new Set(["ctr_pct", "cvr_pct"]);
+
+/**
+ * POPUPS-1 — funil de uma superficie: as contagens em linha e as duas taxas
+ * do contrato como conectores entre elas (impressao → visita → item). Sem
+ * barra: largura relativa entre etapas seria uma taxa recalculada aqui.
+ */
+function Funil({ metrics }: { metrics: readonly DrilldownMetric[] }) {
+  return (
+    <ul className="flex flex-col list-none p-0 m-0">
+      {metrics.map((m) =>
+        TAXAS_DO_FUNIL.has(m.key) ? (
+          <li key={m.key} className="flex items-center gap-1.5 py-0.5 pl-0.5 text-xs text-ink-faint">
+            <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2} />
+            <span>{m.label}</span>
+            <span className={`tabular-nums font-semibold ${m.value.kind === "missing" ? "" : "text-ink-muted"}`}>
+              {fmtMetric(m.value, m.unit)}
+            </span>
+          </li>
+        ) : (
+          <EvidenceRow
+            key={m.key}
+            label={m.label}
+            value={fmtMetric(m.value, m.unit)}
+            tone={m.value.kind === "missing" ? "muted" : "value"}
+          />
+        ),
+      )}
+    </ul>
+  );
+}
+
+/** POPUPS-1 — topo dos dois detalhes mensais: numero, selos e ⓘ. */
+function CabecalhoDoDetalhe({
+  valor, rotulo, contexto, selo, dica,
+}: {
+  valor: string;
+  rotulo: string;
+  contexto: ReactNode;
+  selo?: string | null;
+  dica: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+        <NumeroAnimado texto={valor} className="text-[32px] font-bold leading-none tracking-tight text-ink tabular-nums" />
+        <span className="pb-0.5 text-xs text-ink-faint">{rotulo}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {contexto}
+        {selo && (
+          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-ink tabular-nums">{selo}</span>
+        )}
+        <InfoDica texto={dica} />
+      </div>
+    </div>
+  );
+}
+
+function SectionTitle({ children, badge, dica }: { children: ReactNode; badge?: string; dica?: string }) {
   return (
     <div className="flex items-center gap-3 mb-4 flex-wrap">
-      <h3 className="text-sm font-semibold text-slate-600">{children}</h3>
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-600">
+        {children}
+        {dica && <InfoDica texto={dica} />}
+      </h3>
       {badge && (
         <span className="text-xs font-semibold text-slate-600 bg-slate-100 rounded-full px-2.5 py-0.5">
           {badge}
@@ -468,12 +534,16 @@ function BrandPageInner() {
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            {!isLive && <DataQualityNote note={DEMO_SERIES_WARNING} />}
+            {!isLive && (
+              <p className="flex w-fit items-center gap-1.5 text-xs font-semibold text-warn-ink bg-warn-soft border border-warn/35 rounded-lg px-3 py-1.5">
+                Dados de exemplo · não usar para decisão
+                <InfoDica texto={DEMO_SERIES_WARNING} />
+              </p>
+            )}
             {!ordersReliable && (
-              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-                Seleção parcial de canal em modo demonstração — os dados de exemplo não separam
-                pedidos por canal, então Pedidos e Ticket Médio ficam indisponíveis para esta
-                seleção. GMV continua filtrável normalmente.
+              <p className="flex w-fit items-center gap-1.5 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                Pedidos e Ticket N/D nesta seleção
+                <InfoDica texto="Em modo demonstração, os dados de exemplo não separam pedidos por canal. GMV continua filtrável." />
               </p>
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -491,11 +561,6 @@ function BrandPageInner() {
                 <KpiCard label="Ad Spend" value="—" subvalue="N/D para TikTok Shop" accent="bg-slate-300" />
               )}
             </div>
-            <p className="text-xs text-slate-500">
-              Estes quatro indicadores são do <strong>intervalo global</strong>. A classificação de
-              sinais por canal (custo, frete, Ads) é da matriz marca × canal, em Canais — esta
-              página não a recalcula.
-            </p>
           </div>
         )}
       </section>
@@ -518,7 +583,10 @@ function BrandPageInner() {
               <DailyChart data={projectedDaily} hasTiktok={hasTiktok} hasMl={hasMl} hasShopee={hasShopee} />
             </div>
             <div className={`bg-white border rounded-2xl shadow-sm px-4 py-4 ${isLive ? "border-violet-100" : "border-amber-200"}`}>
-              <h3 className="text-sm font-semibold text-slate-700 mb-3">Mix por marketplace</h3>
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 mb-3">
+                Mix por marketplace
+                <InfoDica texto={'Participação sobre a soma dos canais com dado no intervalo. Canal sem cobertura fica "Sem dado", nunca 0%.'} />
+              </h3>
               {mixCanais.length === 0 ? (
                 <p className="text-sm text-slate-500 py-8 text-center">Nenhum canal selecionado.</p>
               ) : (
@@ -538,17 +606,13 @@ function BrandPageInner() {
                             // decorativa: o valor e o percentual ja estao em texto
                             // ao lado, entao a cor nao carrega significado sozinha
                             aria-hidden="true"
-                            className={`h-2 rounded-full ${MIX_TOM[c.key]}`}
+                            className={`tc-barra h-2 rounded-full ${MIX_TOM[c.key]}`}
                             style={{ width: `${Math.max(2, Math.min(100, c.sharePct))}%` }}
                           />
                         )}
                       </div>
                     </li>
                   ))}
-                  <li className="text-xs text-slate-500">
-                    Participação sobre a soma dos canais com dado no intervalo. Canal sem cobertura
-                    fica &quot;Sem dado&quot;, nunca 0%.
-                  </li>
                 </ul>
               )}
             </div>
@@ -558,7 +622,12 @@ function BrandPageInner() {
 
       {/* ══ 5. o que mudou — so quando o dado existente sustenta ═════════ */}
       <section aria-label="O que mudou no intervalo global">
-        <SectionTitle badge={`intervalo global ${periodLabel} vs anterior`}>O que mudou</SectionTitle>
+        <SectionTitle
+          badge={`intervalo global ${periodLabel} vs anterior`}
+          dica="GMV decomposto por canal contra o intervalo equivalente anterior. Sem variação % quando a base anterior não é positiva."
+        >
+          O que mudou
+        </SectionTitle>
         {mudancas !== "ready" ? (
           <p className="text-xs text-slate-500">{CHANGES_NOTE[mudancas]}</p>
         ) : (
@@ -582,11 +651,6 @@ function BrandPageInner() {
                 </span>
               </li>
             ))}
-            <li className="text-xs text-slate-500">
-              Decomposição do mesmo GMV pela coluna de canal do payload diário, contra o intervalo
-              equivalente anterior. Sem variação percentual quando a base anterior não é positiva —
-              dividir por zero não produz leitura.
-            </li>
           </ul>
         )}
       </section>
@@ -613,10 +677,7 @@ function BrandPageInner() {
           className="rounded-2xl border border-slate-200 bg-white px-4 sm:px-6 py-5"
         >
           <h2 className="text-sm font-bold text-slate-700">TikTok Shop · análise mensal</h2>
-          <p className="text-xs text-slate-600 mt-1">
-            A seleção de canais atual não inclui TikTok Shop, e todo o conteúdo deste contêiner vem
-            do contrato mensal do TikTok. Nada foi estimado para preencher o bloco.
-          </p>
+          <p className="text-xs text-slate-600 mt-1">Seleção sem TikTok Shop.</p>
         </section>
       )}
 
@@ -624,9 +685,7 @@ function BrandPageInner() {
       <section aria-label={`Últimos 7 dias do intervalo global ${periodLabel}`} aria-busy={!dailyIsFresh}>
         <SectionTitle badge={`intervalo global ${periodLabel}`}>Últimos 7 dias</SectionTitle>
         {!ordersReliable && dailyIsFresh && (
-          <p className="text-xs text-slate-500 -mt-2 mb-3">
-            Pedidos e Ticket Médio indisponíveis nesta seleção (modo demonstração, canal parcial).
-          </p>
+          <p className="text-xs text-slate-500 -mt-2 mb-3">Pedidos e Ticket N/D nesta seleção.</p>
         )}
         <div className="bg-white rounded-2xl shadow-sm border border-violet-100 overflow-hidden">
           <TableScrollHint>
@@ -721,10 +780,6 @@ function BrandPageInner() {
             </DrilldownCta>
           </li>
         </ul>
-        <p className="text-xs text-slate-500 mt-1">
-          Navegação limpa: os destinos preservam apenas filtros compatíveis, e nenhum contexto de
-          chegada é repropagado.
-        </p>
       </section>
 
       {/* ══ shell UNICO de detalhe — um dialogo por vez ═════════════════ */}
@@ -739,18 +794,28 @@ function BrandPageInner() {
               : `${dialog.produto.product_name} · ${competenciaLabel}`
         }
       >
+        {/* POPUPS-1 — numero grande no topo, competencia em selo, a limitacao
+            do escopo e o que NAO viaja no CTA no ⓘ (antes, dois paragrafos). */}
         {dialog?.kind === "channel" && (() => {
           const d = readChannelDetail(dialog.row, refMonth);
+          const gmv = d.metrics.find((m) => m.key === "gmv");
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine
-                leading={`${meta.label} · TikTok Shop`}
-                periodLabel={`competência ${d.refMonthLabel}`}
-                refreshedAt={null}
+            <div className="flex flex-col gap-4 text-sm">
+              <CabecalhoDoDetalhe
+                valor={gmv ? fmtMetric(gmv.value, gmv.unit) : "Sem dado"}
+                rotulo="GMV da superfície"
+                contexto={
+                  <DrilldownContextLine
+                    leading={`${meta.label} · TikTok Shop`}
+                    periodLabel={`competência ${d.refMonthLabel}`}
+                    refreshedAt={null}
+                  />
+                }
+                dica={`${d.note} ${CHANNEL_CTA_SCOPE_NOTE}`}
               />
-              <MetricList metrics={d.metrics} />
-              <DataQualityNote note={d.note} />
-              <p className="text-xs text-slate-500">{CHANNEL_CTA_SCOPE_NOTE}</p>
+              <DrilldownSecao titulo="Funil">
+                <Funil metrics={d.metrics.filter((m) => m.key !== "gmv")} />
+              </DrilldownSecao>
               <DrilldownCta
                 href={buildHref(channelCtaHref(brand))}
                 ariaLabel={`${d.ctaLabel} para a marca ${meta.label}`}
@@ -763,16 +828,28 @@ function BrandPageInner() {
 
         {dialog?.kind === "product" && (() => {
           const d = readProductDetail(dialog.produto, refMonth);
+          const gmv = d.metrics.find((m) => m.key === "gmv");
+          // Posicao no top da competencia, pela ordem que o contrato ja' entrega.
+          const top = displayDetail?.top_produtos ?? [];
+          const posicao = top.findIndex((p) => p.product_id === dialog.produto.product_id) + 1;
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine
-                leading={`${meta.label} · TikTok Shop`}
-                periodLabel={`competência ${d.refMonthLabel}`}
-                refreshedAt={null}
+            <div className="flex flex-col gap-4 text-sm">
+              <CabecalhoDoDetalhe
+                valor={gmv ? fmtMetric(gmv.value, gmv.unit) : "Sem dado"}
+                rotulo="GMV do produto"
+                contexto={
+                  <DrilldownContextLine
+                    leading={`${meta.label} · TikTok Shop`}
+                    periodLabel={`competência ${d.refMonthLabel}`}
+                    refreshedAt={null}
+                  />
+                }
+                selo={posicao > 0 ? `${posicao}º de ${top.length} em GMV` : null}
+                dica={`${d.note} ${PRODUCT_CTA_SCOPE_NOTE}`}
               />
-              <MetricList metrics={d.metrics} />
-              <DataQualityNote note={d.note} />
-              <p className="text-xs text-slate-500">{PRODUCT_CTA_SCOPE_NOTE}</p>
+              <DrilldownSecao titulo="Indicadores">
+                <MetricList metrics={d.metrics.filter((m) => m.key !== "gmv")} />
+              </DrilldownSecao>
               <DrilldownCta
                 href={buildHref(productCtaHref(brand))}
                 ariaLabel={`${d.ctaLabel} da marca ${meta.label}`}

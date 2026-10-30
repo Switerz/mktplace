@@ -1,5 +1,6 @@
 "use client";
 
+import InfoDica from "@/components/ui/InfoDica";
 import { fmtBrl } from "@/lib/formatters";
 import type { Priority } from "@/lib/inteligencia/priorities";
 
@@ -26,8 +27,8 @@ interface Props {
  * Bloco 2 — prioridades da fotografia ML (Gate V3-1A).
  *
  * Duas regras que o componente materializa e não permite burlar:
- * - a contagem exibida é de REGISTROS RECEBIDOS, com a limitação sempre
- *   visível no próprio cartão (nunca "N produtos no total");
+ * - a contagem exibida é de REGISTROS RECEBIDOS (nunca "N produtos no
+ *   total"); a limitação da amostra fica no "ⓘ" do cartão;
  * - cartão sem registro não chega aqui — `buildPriorities` já o omite, então
  *   não existe "prioridade zero".
  *
@@ -59,13 +60,10 @@ export default function PriorityCards({ priorities, onOpen, disabled }: Props) {
               <span className="text-2xl font-bold text-slate-900 tabular-nums leading-none">
                 {fmtBrl(p.amount)}
               </span>
-              <span className="text-xs text-slate-500">
+              <span className="flex items-center gap-1 text-xs text-slate-500">
                 {p.amountLabel} · {p.received} registro{p.received === 1 ? "" : "s"} exibido
                 {p.received === 1 ? "" : "s"}
-              </span>
-              <span className="text-xs text-slate-600">{p.reason}</span>
-              <span className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
-                {p.limitation}
+                <InfoDica texto={p.limitation} emControle />
               </span>
               <span className="text-xs font-semibold text-violet-700 group-hover:underline mt-auto">
                 Ver evidências →

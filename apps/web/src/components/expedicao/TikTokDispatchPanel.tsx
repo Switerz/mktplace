@@ -75,7 +75,7 @@ import {
   SecaoGerencial,
 } from "@/components/expedicao/SecoesExpedicao";
 import Chip from "@/components/ui/Chip";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import Segmented from "@/components/ui/Segmented";
@@ -89,9 +89,6 @@ import {
   DEFINICAO_TIKTOK,
   EVENTOS,
   EVENTO_PADRAO,
-  EXPLICACAO_EVENTO,
-  EXPLICACAO_FLUXO,
-  EXPLICACAO_LDR,
   EXPLICACAO_META,
   META_TIKTOK_LDR,
   ROTULO_EVENTO,
@@ -254,7 +251,7 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
             {ROTULO_SEVERIDADE[s]}
           </span>
         ))}
-        <span className="text-ink-faint">Números em % dos pedidos que venciam no dia.</span>
+        <span className="text-ink-faint">Valores em %.</span>
       </div>
     </div>
   );
@@ -415,14 +412,13 @@ export default function TikTokDispatchPanel({
   // EXPEDICAO-UX-3 — "Risco atual": o que esta' pendente AGORA, com os
   // mesmos campos que a LDR ja' publicava (nenhum novo, nenhum recalculado).
   const secaoRisco = ldr ? (
-    <SecaoGerencial titulo="Risco atual" descricao={quando}>
+    <SecaoGerencial titulo="Risco atual" dica={quando}>
       <FaixaKpis rotulo="Risco atual">
         <KpiComAjuda
           ajuda="tiktok.pendente_vencido"
           rotulo="Venceram e não saíram"
           valor={formatarInteiro(ldr.pending_overdue)}
           destaque
-          comparacao="Vencimentos da janela consultada, ainda sem o evento."
           tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
         />
         <KpiComAjuda
@@ -430,7 +426,6 @@ export default function TikTokDispatchPanel({
           rotulo="Vencem hoje ou amanhã"
           valor={formatarInteiro(ldr.pending_at_risk)}
           destaque
-          comparacao="Ainda dá para tratar dentro do prazo."
           tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
         />
         <KpiComAjuda
@@ -438,7 +433,6 @@ export default function TikTokDispatchPanel({
           rotulo="Pendentes no prazo"
           valor={formatarInteiro(ldr.pending_on_time)}
           destaque
-          comparacao="Pedidos ainda sem o evento, dentro do prazo."
         />
         {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
         <KpiComAjuda
@@ -448,8 +442,8 @@ export default function TikTokDispatchPanel({
           destaque
           comparacao={
             dados?.brands.length
-              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente · medição interna.`
-              : "Nenhuma loja com base suficiente no período."
+              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente.`
+              : "Nenhuma loja com base suficiente."
           }
           tom={!dados?.brands.length ? "ausente" : piores.length > 0 ? "critico" : "neutro"}
         />
@@ -464,31 +458,19 @@ export default function TikTokDispatchPanel({
     <SecaoGerencial
       titulo="Prazo"
       descricao={`${TITULO_LDR} · evento: ${ROTULO_EVENTO[evento]}${sla ? ` (${sla} dia(s) útil(eis))` : ""}.`}
-      acao={
-        // A ressalva fica COLADA na secao, nunca atras de um tooltip: o numero
-        // sai desta tela para reuniao, e sem ela vira "o TikTok nos penalizou".
-        <Disclosure rotulo="Como ler esta medição">
-          <p>
-            {EXPLICACAO_LDR}
-            {sla ? ` Prazo do evento: ${sla} dia(s) útil(eis).` : ""}
-          </p>
-          <p className="mt-1.5">{EXPLICACAO_META}</p>
-          <p className="mt-1.5">{EXPLICACAO_EVENTO[evento]}</p>
-        </Disclosure>
-      }
+      // A meta e' de referencia e o prazo e' reconstruido: sem isso o numero
+      // vira "o TikTok nos penalizou". O "medição interna" fica no selo do cartao.
+      dica={EXPLICACAO_META}
     >
       {/* Periodo da RESPOSTA (`ldr.from`, `ldr.to`, `ldr.days`), nao do
           seletor. O prazo reconstruido fica colado a ele: e' a ressalva que
           qualifica TODOS os numeros desta faixa. */}
       <p className="text-xs text-ink-muted" data-testid="tk-periodo-consultado">
-        Período consultado:{" "}
         <span className="font-medium text-ink">
-          vencimentos de {formatarDiaLongo(ldr.from)} a {formatarDiaLongo(ldr.to)}
+          Vencimentos de {formatarDiaLongo(ldr.from)} a {formatarDiaLongo(ldr.to)}
         </span>{" "}
         ({ldr.days} {ldr.days === 1 ? "dia" : "dias"} + hoje)
-        {dados?.deadline_is_reconstructed
-          ? " · prazo reconstruído da política de dias úteis — indicador interno"
-          : ""}
+        {dados?.deadline_is_reconstructed ? " · prazo reconstruído" : ""}
       </p>
       <FaixaKpis rotulo="Indicadores principais" colunas={3}>
         <KpiComAjuda
@@ -577,7 +559,7 @@ export default function TikTokDispatchPanel({
           ) : null}
         </span>
       }
-      rodape="Só lojas com base suficiente no período. Vencimentos ainda no prazo ficam de fora."
+      acao={<InfoDica texto="Só lojas com base suficiente; vencimentos no prazo ficam fora." />}
     >
       {/* Sem loja elegivel, um cabecalho de tabela sem linha nenhuma so'
           ocuparia espaco: a tela diz que nao ha loja a ranquear. */}
@@ -598,7 +580,7 @@ export default function TikTokDispatchPanel({
                   aoOrdenar={toggleSort}
                   alinhamento="left"
                 />
-                {/* O `?` fica FORA do botao de ordenar: clicar nele nao ordena. */}
+                {/* O "ⓘ" fica FORA do botao de ordenar. */}
                 <SortHeaderComAjuda
                   rotulo="Venciam"
                   coluna="base"
@@ -650,11 +632,7 @@ export default function TikTokDispatchPanel({
   // campos de `ldr.daily` que o grafico desenha, agora legiveis por leitor de
   // tela. Coorte parcial NUNCA mostra taxa fechada: ela ainda vai mudar.
   const painelCoortes = ldr ? (
-    <Panel
-      semPadding
-      titulo="Coortes por dia de vencimento"
-      descricao="A base da LDR: cada linha são os pedidos cujo envio vencia naquele dia."
-    >
+    <Panel semPadding titulo="Coortes por dia de vencimento">
       {ldr.daily.length ? (
         <div className="max-h-96 overflow-auto">
           <table className={CLASSE_TABELA}>
@@ -727,7 +705,6 @@ export default function TikTokDispatchPanel({
           <Chip>visão auxiliar · não é a LDR</Chip>
         </span>
       }
-      acao={<Disclosure rotulo="Como ler">{EXPLICACAO_FLUXO}</Disclosure>}
     >
       {/* QA T-0010 (M6): sem dia de pagamento na janela, estado de vazio. */}
       {fluxo.length === 0 ? (
@@ -837,7 +814,7 @@ export default function TikTokDispatchPanel({
           ) : null}
           {janelaDescartada ? (
             <Note tom="atencao" papel="status">
-              A janela do link era inválida e foi ignorada. Mostrando a janela padrão.
+              Janela do link inválida; usando a padrão.
             </Note>
           ) : null}
         </>
@@ -863,7 +840,6 @@ export default function TikTokDispatchPanel({
             <StateBlock
               tipo="indisponivel"
               titulo={explicarIndisponivelComMarca(dados.unavailable_reason, marca)}
-              descricao="A tela não mostra 0% enquanto não houver série: zero aqui seria lido como “nenhum atraso”, que é diferente de “sem medição”."
             />
           ) : null}
         </>
@@ -882,7 +858,7 @@ export default function TikTokDispatchPanel({
             convite={
               aoTrocarVisao ? (
                 <ConviteAoDetalhe
-                  conteudo="As coortes por dia de vencimento e o fluxo por data de pagamento (visão auxiliar, não é a LDR) ficam no detalhe operacional."
+                  conteudo="Coortes por vencimento e fluxo por pagamento."
                   aoAbrir={() => aoTrocarVisao("detalhe")}
                 />
               ) : null

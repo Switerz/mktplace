@@ -23,7 +23,7 @@ import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import { buildQualityRequestKey } from "@/lib/quality-request-key";
 import { computeRequestStatus } from "@/lib/request-freshness";
-import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import InfoDica from "@/components/ui/InfoDica";
 import ScopeQualityBanner from "@/components/ScopeQualityBanner";
 import {
   TIKTOK_UNAVAILABLE_QUALITY_METRICS,
@@ -218,7 +218,6 @@ function QualityPageInner() {
     <PageContainer>
       <PageHeader
         title="Qualidade"
-        subtitle="Cancelamentos, devoluções/problemas, entrega e fidelização por canal e marca."
         scopeLine={
           <>
             Período: {periodLabel}
@@ -257,9 +256,10 @@ function QualityPageInner() {
           const isCustomPeriod = detectPreset(filters.dateFrom, filters.dateTo) !== "mes_anterior";
           const note = mockLimitationNote(displayIsLive, filters.brands, isCustomPeriod);
           return note && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
-              <p className="text-xs text-amber-800">{note}</p>
-            </div>
+            <p className="flex w-fit items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
+              Demonstração · filtros ignorados
+              <InfoDica texto={note} />
+            </p>
           );
         })()}
 
@@ -291,7 +291,6 @@ function QualityPageInner() {
         // erro (ja renderizado acima) — nunca skeleton, nunca dado antigo.
         <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
           <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados de qualidade.</p>
-          <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
         </div>
       ) : (
       <>
@@ -374,18 +373,18 @@ function QualityPageInner() {
         </div>
 
         {/* Tabela por marca */}
-        {/* Gate DQ2: limitacao declarada uma vez, junto da tabela que promete
-            "cancelamentos e devolucoes" — sem ela, a ausencia das colunas do
-            TikTok seria lida como "canal sem cancelamento". */}
-        {showTiktok && <DataQualityNote note={TIKTOK_QUALITY_UNAVAILABLE_NOTE} />}
-
         <div id="qualidade-marca" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-violet-50">
             <h2 className="text-sm font-semibold text-slate-700">Qualidade por Marca</h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Cancelamentos, devolucoes e tempos logisticos
-              {showTiktok && " · TikTok Shop entra apenas com tempo de entrega (cancelamento/devolução indisponíveis na fonte)"}
-            </p>
+            {/* Gate DQ2: limitacao declarada junto da tabela — sem ela, a
+                ausencia das colunas do TikTok seria lida como "canal sem
+                cancelamento". */}
+            {showTiktok && (
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-warn-ink">
+                TikTok: só entrega · cancelamento e devolução N/D
+                <InfoDica texto={TIKTOK_QUALITY_UNAVAILABLE_NOTE} />
+              </p>
+            )}
           </div>
 
           <TableScrollHint>
@@ -472,9 +471,7 @@ function QualityPageInner() {
             <span className="flex items-center gap-1.5 text-xs text-rose-700">
               <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;5%
             </span>
-            <span className="ml-auto text-[10px] text-slate-400">
-              TK: cancelamento/problema indisponiveis; ML N. Entregue = proxy pagos - entregues
-            </span>
+            {showMl && <InfoDica texto="ML N. Entregue é proxy: pagos − entregues." className="ml-auto" />}
           </div>
         </div>
 
@@ -482,10 +479,10 @@ function QualityPageInner() {
         {hasMlLoyalty && (
           <div id="fidelizacao-ml" className="scroll-mt-24 bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-violet-50 flex items-start justify-between gap-4 flex-wrap">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-700">Fidelizacao — Mercado Livre</h2>
-                <p className="text-xs text-slate-500 mt-0.5">ML e canal de aquisicao (~90% novos por mes). Recompra &lt;10% e esperado.</p>
-              </div>
+              <h2 className="flex items-center gap-1.5 text-sm font-semibold text-slate-700">
+                Fidelizacao — Mercado Livre
+                <InfoDica texto="Compradores = soma diária, não comprador único do período. ML é canal de aquisição (~90% novos/mês): recompra abaixo de 10% é esperada." />
+              </h2>
             </div>
             <TableScrollHint>
               <table className="w-full text-sm">
@@ -548,12 +545,11 @@ function QualityPageInner() {
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Recompra:</span>
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &gt;20%</span>
               <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 10–20%</span>
-              <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &lt;10% (normal para aquisicao)</span>
+              <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &lt;10%</span>
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest ml-4">Frete:</span>
               <span className="flex items-center gap-1.5 text-xs text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> &lt;11%</span>
               <span className="flex items-center gap-1.5 text-xs text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> 11–14%</span>
               <span className="flex items-center gap-1.5 text-xs text-rose-600"><span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> &gt;14%</span>
-              <span className="ml-auto text-[10px] text-slate-400">Compradores ML: soma diária por dia — não é comprador único do período (mesma pessoa pode ser contada em mais de um dia)</span>
             </div>
           </div>
         )}
@@ -566,10 +562,10 @@ function QualityPageInner() {
         {produtosShQuality && (
           <div id="qualidade-produtos-shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-orange-50">
-              <h2 className="text-sm font-semibold text-slate-700">Produtos Shopee — confiabilidade da competência</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Competência {produtosShQuality.ref_month} · fonte distinta da diária, com maturação própria
-              </p>
+              <h2 className="flex items-center gap-1.5 text-sm font-semibold text-slate-700">
+                Produtos Shopee — competência {produtosShQuality.ref_month}
+                <InfoDica texto="Fonte distinta da diária, com maturação própria." />
+              </h2>
             </div>
             <div className="pb-4">
               <ScopeQualityBanner quality={produtosShQuality} />
@@ -582,7 +578,6 @@ function QualityPageInner() {
           <div id="qualidade-shopee" className="scroll-mt-24 bg-white border border-orange-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-orange-50">
               <h2 className="text-sm font-semibold text-slate-700">Qualidade — Shopee</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Cancelamentos e devoluções por marca</p>
             </div>
             <TableScrollHint>
               <table className="w-full text-sm">

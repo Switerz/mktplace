@@ -32,7 +32,7 @@ export default function RiscoEmDestaque({
   principal: Kpi;
   backlog?: Kpi;
   marcasAlerta?: Kpi;
-  /** O `?` da medida em destaque. */
+  /** O "ⓘ" da medida em destaque. */
   ajuda?: ReactNode;
   /** Os cartoes secundarios, ja' montados. */
   secundarios: ReactNode;

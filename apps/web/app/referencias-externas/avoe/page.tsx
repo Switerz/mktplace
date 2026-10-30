@@ -14,6 +14,9 @@
  * Persona: quem precisa consultar a meta que a agencia digitou e o valor que
  * ela informou nos canais que a Torre nao integra, sabendo o tempo todo que a
  * fonte e' de terceiro e a carga e' manual.
+ *
+ * Os avisos de `buildWarnings` ficam em lista aberta (nunca em tooltip); o
+ * resto da ressalva (nota de proveniencia, por que nao ha total) vai num "i".
  */
 
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
@@ -32,7 +35,6 @@ import {
   channelLabel,
   competenciaOptions,
   coverageLabel,
-  coverageNotes,
   describeFilters,
   filterChannels,
   filterTargets,
@@ -41,7 +43,6 @@ import {
   formatContagem,
   formatData,
   formatValorInformado,
-  isCapturaAntiga,
   marcaOptions,
   resolvePhase,
   unavailableLabel,
@@ -51,6 +52,7 @@ import {
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import InfoDica from "@/components/ui/InfoDica";
 
 const CELULA = "px-3 py-2 text-sm";
 const CABECALHO =
@@ -133,13 +135,10 @@ export default function ReferenciasExternasAvoePage() {
     [data],
   );
 
-  const antiga = data ? isCapturaAntiga(data.meta.captured_age_days) : false;
-
   return (
     <PageContainer>
       <PageHeader
         title={PAGE_TITLE}
-        subtitle={COPY.subtitulo}
         status={
           <span
             className="inline-flex min-h-[32px] items-center rounded-full border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-900"
@@ -192,28 +191,17 @@ export default function ReferenciasExternasAvoePage() {
             >
               Proveniência da captura
             </h2>
-            {antiga && (
-              <p
-                className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
-                data-testid="aviso-captura-antiga"
-              >
-                {COPY.capturaAntiga}
-              </p>
-            )}
+            {/* Captura antiga ja' entra na lista de avisos (`buildWarnings`). */}
             <dl className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {proveniencia.map((item) => (
                 <div key={item.label} className="min-w-0">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                  <dt className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-slate-500">
                     {item.label}
+                    {item.note && <InfoDica texto={item.note} />}
                   </dt>
                   <dd className="mt-1 break-words text-sm font-semibold text-slate-900">
                     {item.value}
                   </dd>
-                  {item.note && (
-                    <p className="mt-1 break-words text-xs text-slate-600">
-                      {item.note}
-                    </p>
-                  )}
                 </div>
               ))}
             </dl>
@@ -242,20 +230,6 @@ export default function ReferenciasExternasAvoePage() {
                 </li>
               ))}
             </ul>
-            <h3 className="mt-4 text-xs font-semibold uppercase tracking-wide text-amber-900">
-              Cobertura documentada
-            </h3>
-            <ul className="mt-2 space-y-2" data-testid="notas-cobertura">
-              {coverageNotes().map((nota) => (
-                <li
-                  key={nota}
-                  className="flex gap-2 text-sm leading-relaxed text-amber-900"
-                >
-                  <span aria-hidden="true">•</span>
-                  <span className="min-w-0 break-words">{nota}</span>
-                </li>
-              ))}
-            </ul>
           </section>
 
           {fase === "unavailable" ? (
@@ -274,8 +248,7 @@ export default function ReferenciasExternasAvoePage() {
                 {unavailableLabel(data.meta.unavailable_reason)}
               </p>
               <p className="mt-2 text-xs text-slate-600">
-                Não há tabela de metas nem de canais nesta situação — ausência de
-                captura não é o mesmo que valores iguais a zero.
+                Ausência de captura não é o mesmo que valores iguais a zero.
               </p>
             </section>
           ) : (
@@ -291,10 +264,6 @@ export default function ReferenciasExternasAvoePage() {
                 >
                   Filtros
                 </h2>
-                <p className="mt-1 text-xs text-slate-600">
-                  Aplicados no navegador, sobre as linhas já recebidas. Nenhuma
-                  nova consulta à API e nenhuma agregação entre linhas.
-                </p>
                 <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
                   <div className="flex min-w-0 flex-col gap-1">
                     <label
@@ -396,10 +365,6 @@ export default function ReferenciasExternasAvoePage() {
                     {describeFilters(filtros, false)}
                   </p>
                 </div>
-                <p className="mt-1 text-xs text-slate-600">
-                  Meta comercial por competência e marca. Sem realizado, sem
-                  atingimento, sem total.
-                </p>
                 {metas.length === 0 ? (
                   <p
                     className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-700"
@@ -496,9 +461,6 @@ export default function ReferenciasExternasAvoePage() {
                     {describeFilters(filtros, true)}
                   </p>
                 </div>
-                <p className="mt-1 text-xs text-slate-600">
-                  Canais que a Torre não integra. {COPY.definicaoNaoConfirmada}
-                </p>
                 {canais.length === 0 ? (
                   <p
                     className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-700"
@@ -589,10 +551,9 @@ export default function ReferenciasExternasAvoePage() {
                     </TableScrollHint>
                   </div>
                 )}
-                <p className="mt-3 text-xs text-slate-600">
-                  Sem total consolidado, de propósito: somar estes valores entre
-                  si ou com o GMV oficial produziria um número que não existe em
-                  fonte nenhuma.
+                <p className="mt-3 inline-flex items-center gap-1 text-xs text-slate-600">
+                  Sem total consolidado
+                  <InfoDica texto="Somar estes valores entre si ou com o GMV oficial produziria um número que não existe em fonte nenhuma." />
                 </p>
               </section>
             </>

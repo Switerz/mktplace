@@ -411,7 +411,7 @@ test("fila: o gestor ve narrativa e concentracao; o detalhe ve a fila", () => {
   assert.match(CLIENTE, /fila=\{linhasDaFila\}/);
   assert.match(CLIENTE, /const secaoRisco = \([\s\S]*?<AtencaoAgora\s+itens=\{atencao\}/);
   // marca de varias contas: a lista vazia diz POR QUE esta' vazia
-  assert.match(CLIENTE, /a leitura de atenção fica por conta/);
+  assert.match(CLIENTE, /Leitura por conta: veja “Backlog por marca”\./);
   assert.ok(!gestor.includes("{painelFila}"), "a fila paginada nao e' visao do gestor");
   for (const s of ["{faixaPrincipal}", "Indicadores secundários", "{painelMaisCriticos}", "{painelFila}", "{painelFonte}", "painelContas("]) {
     assert.ok(detalhe.includes(s), `detalhe sem ${s}`);
@@ -665,7 +665,7 @@ test("estados da fila sao os mesmos componentes do TikTok, com nova tentativa", 
   assert.match(TIKTOK, /<StateBlock tipo="carregando"/);
 });
 
-test("secao sem fonte no canal: bloco curto 'indisponível neste canal' com o ?", () => {
+test("secao sem fonte no canal: bloco curto 'indisponível neste canal' com o ⓘ", () => {
   const html = renderToStaticMarkup(
     h(SecaoIndisponivel, {
       titulo: "Prazo",
@@ -675,7 +675,7 @@ test("secao sem fonte no canal: bloco curto 'indisponível neste canal' com o ?"
   );
   assert.match(html, /<h3[^>]*>Prazo<\/h3>/);
   assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho\./);
-  assert.match(html, /aria-label="O que é Prazo e LDR no Mercado Livre"/);
+  assert.match(html, /role="img" aria-label="Não medido: o canal não publica prazo de despacho\./);
   assert.match(html, /role="status"/);
 });
 

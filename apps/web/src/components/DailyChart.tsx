@@ -138,7 +138,7 @@ export default function DailyChart({ data, hasTiktok, hasMl, hasShopee }: Props)
             />
             {activeSeries.length > 0 ? (
               activeSeries.map((s) => (
-                <Area
+                <Area animationDuration={450} animationEasing="ease-out"
                   key={s.key}
                   type="monotone"
                   dataKey={s.key}
@@ -149,7 +149,7 @@ export default function DailyChart({ data, hasTiktok, hasMl, hasShopee }: Props)
                 />
               ))
             ) : (
-              <Area type="monotone" dataKey="total" stroke="#7c3aed" strokeWidth={2} fill="url(#gradTk)" dot={false} />
+              <Area animationDuration={450} animationEasing="ease-out" type="monotone" dataKey="total" stroke="#7c3aed" strokeWidth={2} fill="url(#gradTk)" dot={false} />
             )}
           </AreaChart>
         </ResponsiveContainer>

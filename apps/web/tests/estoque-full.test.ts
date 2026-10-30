@@ -15,10 +15,8 @@ import { test } from "node:test";
 
 import {
   AVISO_ALERTAS_SO_NA_TORRE,
-  AVISO_CARGA_MANUAL,
   AVISO_CONTEXTO,
   AVISO_COBERTURA_TORRE,
-  AVISO_KITS,
   CLASSIFICACOES,
   CLASS_LABEL,
   CD_NAO_INFORMADO,
@@ -46,6 +44,7 @@ import {
   rotuloCD,
   skuExibido,
   temFiltroAtivo,
+  VENDA_NAO_INFORMADA,
   type EstoqueFullOk,
   type EstoqueFullResponse,
   type Frescor,
@@ -474,23 +473,16 @@ test("erro limpa o payload, para nao misturar numero velho com falha", () => {
   assert.ok(trecho.includes("setPayload(null)"));
 });
 
-test("a tela exibe atualizacao e limitacoes", () => {
-  for (const aviso of [
-    AVISO_COBERTURA_TORRE,
-    AVISO_CONTEXTO,
-    AVISO_KITS,
-    AVISO_CARGA_MANUAL,
-    AVISO_ALERTAS_SO_NA_TORRE,
-  ]) {
-    const nome = Object.entries({
-      AVISO_COBERTURA_TORRE,
-      AVISO_CONTEXTO,
-      AVISO_KITS,
-      AVISO_CARGA_MANUAL,
-      AVISO_ALERTAS_SO_NA_TORRE,
-    }).find(([, v]) => v === aviso)?.[0];
-    assert.ok(CLIENT_SRC.includes(`{${nome}}`), `${nome} nao aparece na tela`);
+test("a tela exibe atualizacao e as ressalvas que mudam a leitura", () => {
+  // Abas objetivas: sem bloco "Como ler". A ressalva de cada coluna fica num
+  // InfoDica ao lado do rotulo (`texto={AVISO_...}`).
+  for (const nome of ["AVISO_COBERTURA_TORRE", "AVISO_CONTEXTO", "AVISO_CARGA_MANUAL"]) {
+    assert.ok(
+      CLIENT_SRC.includes(`<InfoDica texto={${nome}} />`),
+      `${nome} nao aparece na tela`,
+    );
   }
+  assert.ok(!CLIENT_SRC.includes("Como ler"), "bloco de metodologia voltou");
   assert.ok(CLIENT_SRC.includes("frescorLabel(payload.frescor)"));
 });
 
@@ -737,8 +729,10 @@ test("a coluna Por CD usa o rotulo, nao o location_id cru", () => {
 // ---------------------------------------------------------------------------
 
 test("AVISO_CONTEXTO cita apenas colunas presentes na tabela", () => {
-  const cabecalhos = [...CLIENT_SRC.matchAll(/<th scope="col"[^>]*>([^<]+)<\/th>/g)]
-    .map((m) => m[1].trim());
+  // O cabecalho pode trazer um InfoDica ao lado do rotulo: tira as tags e o
+  // JSX entre chaves e fica so' o texto visivel.
+  const cabecalhos = [...CLIENT_SRC.matchAll(/<th scope="col"[^>]*>([\s\S]*?)<\/th>/g)]
+    .map((m) => m[1].replace(/<[^>]*>/g, "").replace(/\{[^}]*\}/g, "").trim());
   assert.ok(cabecalhos.length > 0, "nao achei os cabecalhos da tabela");
   const citadas = [...AVISO_CONTEXTO.matchAll(/“([^”]+)”/g)].map((m) => m[1]);
   assert.ok(citadas.length > 0);
@@ -746,4 +740,40 @@ test("AVISO_CONTEXTO cita apenas colunas presentes na tabela", () => {
     assert.ok(cabecalhos.includes(c), `"${c}" nao e' coluna da tabela`);
   }
   assert.ok(!AVISO_CONTEXTO.includes("Disponível"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0020 — smoke 29/10: situacao de venda sem repetir "não informado"
+// ---------------------------------------------------------------------------
+
+test("is_saleable null usa VENDA_NAO_INFORMADA, distinto do rotulo do CD", () => {
+  assert.equal(VENDA_NAO_INFORMADA, "(venda não informada)");
+  // "CD não informado: 0 (não informado)" lia como repeticao.
+  assert.ok(!VENDA_NAO_INFORMADA.includes(CD_NAO_INFORMADO));
+  assert.notEqual(VENDA_NAO_INFORMADA, "(não informado)");
+  assert.notEqual(VENDA_NAO_INFORMADA, "(não vendável)");
+  assert.ok(CLIENT_SRC.includes("> {VENDA_NAO_INFORMADA}</span>"));
+  assert.ok(!CLIENT_SRC.includes(" (não informado)</span>"));
+  // false continua com o proprio rotulo
+  assert.ok(CLIENT_SRC.includes(" (não vendável)</span>"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0020 — smoke 29/10: pilulas de filtro com alvo de 44px no mobile
+// ---------------------------------------------------------------------------
+
+test("pilulas de conta e classificacao tem min-h-11 so' no mobile", () => {
+  const pilulas = [
+    ...CLIENT_SRC.matchAll(/className=\{`([^`$]*rounded-full border px-3[^`$]*)\$\{/g),
+  ].map((m) => new Set(m[1].trim().split(/\s+/)));
+  assert.equal(pilulas.length, 2, "esperava os dois grupos de pilulas");
+  for (const tokens of pilulas) {
+    assert.ok(tokens.has("min-h-11"), "alvo de toque de 44px no mobile");
+    assert.ok(tokens.has("sm:min-h-0"), "desktop mantem a altura compacta");
+    assert.ok(
+      tokens.has("inline-flex") && tokens.has("items-center"),
+      "min-h-11 so' rende alvo real com o conteudo centrado",
+    );
+    assert.ok(tokens.has("py-1"), "padding do desktop preservado");
+  }
 });

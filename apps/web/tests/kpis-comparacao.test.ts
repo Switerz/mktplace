@@ -124,7 +124,10 @@ test("o card usa o tom do KPI e a tendencia; a pagina passa as tendencias", () =
   assert.match(card, /<LinhaDeTendencia /);
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /tendencias=\{tendencias\}/);
-  assert.match(page, /buildKpiBand\(overview, filters\.channels, filters\.compare\)/);
+  assert.match(page, /buildKpiBand\(overview, filters\.channels, comparar\)/);
+  // POPUPS-1 — dia em andamento contra dia inteiro nao e' base justa.
+  assert.match(page, /const comparar = filters\.compare && !diaEmAndamento;/);
+  assert.match(page, /filters\.dateFrom === filters\.dateTo && filters\.dateTo === toISODate\(new Date\(\)\)/);
 });
 
 test("o detalhe do card usa a mesma comparacao do card", () => {
@@ -182,7 +185,7 @@ test("a dica dentro do card nao e' focavel nem entra no nome do botao", () => {
   assert.match(card, /<InfoDica emControle /);
   const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
   assert.match(dica, /tabIndex=\{0\}/);
-  assert.match(dica, /group-focus\/dica:visible/);
+  assert.match(dica, /onFocus=\{abrir\}/);
 });
 
 test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {

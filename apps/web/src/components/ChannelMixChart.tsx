@@ -110,7 +110,7 @@ export default function ChannelMixChart({ data }: Props) {
           iconType="square"
           wrapperStyle={{ fontSize: 12, paddingTop: 8, color: "#64748b" }}
         />
-        <Area
+        <Area animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Video"
           stackId="a"
@@ -118,7 +118,7 @@ export default function ChannelMixChart({ data }: Props) {
           fill="url(#gVideo)"
           strokeWidth={1.5}
         />
-        <Area
+        <Area animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Live"
           stackId="a"
@@ -126,7 +126,7 @@ export default function ChannelMixChart({ data }: Props) {
           fill="url(#gLive)"
           strokeWidth={1.5}
         />
-        <Area
+        <Area animationDuration={450} animationEasing="ease-out"
           type="monotone"
           dataKey="Card"
           stackId="a"

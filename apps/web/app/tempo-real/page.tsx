@@ -6,6 +6,7 @@ import type { TempoRealData, TempoRealBrand } from "@/lib/api-client";
 import HourlyChart from "@/components/HourlyChart";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import InfoDica from "@/components/ui/InfoDica";
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import { computeTempoRealStatus } from "@/lib/tempo-real-status";
@@ -67,7 +68,7 @@ function GmvProgressBar({ hoje, ontem }: { hoje: number; ontem: number | null })
   return (
     <div className="mt-1.5 w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
       <div
-        className={`h-full rounded-full transition-all duration-500 ${color}`}
+        className={`tc-barra h-full rounded-full ${color}`}
         style={{ width: `${Math.min(pct, 100)}%` }}
       />
     </div>
@@ -287,7 +288,6 @@ export default function TempoRealPage() {
           periodo filtrado): o cabecalho nao ganha barra sticky. */}
       <PageHeader
         title="Tempo Real — TikTok Shop"
-        subtitle="Janela corrente do dia por hora — pedidos, GMV e criadores ativos."
         scopeLine={<>{dateLabel} · {hourLabel}</>}
         status={data ? (
           <div className="flex items-center gap-2">
@@ -307,7 +307,10 @@ export default function TempoRealPage() {
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
-                <span className={`w-1.5 h-1.5 rounded-full bg-emerald-500 ${status === "updating" ? "" : "animate-pulse"}`} />
+                <span aria-hidden="true" className="relative inline-flex h-1.5 w-1.5">
+                  {status !== "updating" && <span className="tc-ping absolute inset-0 rounded-full bg-emerald-500/70" />}
+                  <span className="relative h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                </span>
                 {status === "updating"
                   ? "Atualizando..."
                   : lastUpdated
@@ -340,7 +343,6 @@ export default function TempoRealPage() {
         {status === "unavailable" && (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
             <p className="text-slate-500 font-medium text-sm">API offline — dados em tempo real indisponiveis</p>
-            <p className="text-slate-400 text-xs mt-1">Configure METABASE_API_KEY e reinicie a API para ativar este cockpit.</p>
             <button
               onClick={() => doFetch(false)}
               className="mt-3 text-xs font-semibold text-violet-700 border border-violet-200 rounded-lg px-3 py-1.5 hover:bg-violet-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
@@ -352,15 +354,8 @@ export default function TempoRealPage() {
 
         {data && (
           <>
-            {status === "stale" && (
-              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
-                <p className="text-xs text-amber-800">
-                  Falha ao atualizar automaticamente — exibindo o último dado válido
-                  {lastUpdated && ` (recebido às ${lastUpdated.getHours().toString().padStart(2, "0")}:${lastUpdated.getMinutes().toString().padStart(2, "0")})`}. Nova tentativa automática em breve.
-                </p>
-              </div>
-            )}
-            {/* KPIs — 4 cards */}
+            {/* KPIs — 4 cards. A falha de atualizacao (status "stale") aparece
+                no selo do cabecalho, com o horario do ultimo dado valido. */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-5 py-4">
                 <p className="text-xs text-slate-400 mb-1">GMV Acumulado Hoje</p>
@@ -382,11 +377,13 @@ export default function TempoRealPage() {
               </div>
 
               <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-5 py-4">
-                <p className="text-xs text-slate-400 mb-1">Ritmo Projetado</p>
+                <p className="flex items-center gap-1.5 text-xs text-slate-400 mb-1">
+                  Ritmo Projetado
+                  <InfoDica texto="GMV por hora ativa × 24, se o ritmo atual persistir." />
+                </p>
                 <p className="text-2xl font-bold text-slate-700 tabular-nums">
                   {data.total_ritmo_projetado ? fmtBrl(data.total_ritmo_projetado) : "—"}
                 </p>
-                <p className="text-xs text-slate-400 mt-1">se ritmo atual persistir</p>
               </div>
 
               <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-5 py-4">
@@ -428,18 +425,21 @@ export default function TempoRealPage() {
                     </button>
                   ))}
                 </div>
-                <div className="flex items-center gap-1 bg-slate-50 rounded-lg p-1">
-                  {(["acumulado", "hora"] as ChartMode[]).map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => setMode(m)}
-                      className={`text-xs px-3 py-1 rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
-                        mode === m ? "bg-white shadow-sm text-violet-700" : "text-slate-500"
-                      }`}
-                    >
-                      {m === "acumulado" ? "Acumulado" : "Por hora"}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-2">
+                  <InfoDica texto="Média 7d = mesmas horas dos 7 dias anteriores." />
+                  <div className="flex items-center gap-1 bg-slate-50 rounded-lg p-1">
+                    {(["acumulado", "hora"] as ChartMode[]).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setMode(m)}
+                        className={`text-xs px-3 py-1 rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+                          mode === m ? "bg-white shadow-sm text-violet-700" : "text-slate-500"
+                        }`}
+                      >
+                        {m === "acumulado" ? "Acumulado" : "Por hora"}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -506,7 +506,6 @@ export default function TempoRealPage() {
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-5 py-4 border-b border-violet-100">
                 <h2 className="text-sm font-semibold text-slate-700">Resumo por Marca — Hoje</h2>
-                <p className="text-xs text-slate-400 mt-0.5">Barra de progresso = GMV hoje vs ontem · clique para ver grafico</p>
               </div>
               <table className="w-full" aria-label="Resumo em tempo real por marca">
                 <thead>
@@ -571,10 +570,6 @@ export default function TempoRealPage() {
                 </tbody>
               </table>
             </div>
-
-            <p className="text-[11px] text-slate-400 text-center">
-              Dados de gold.tiktok_shop_hourly · Media 7d = mesmas horas dos 7 dias anteriores · Ritmo projetado = GMV/hora ativa × 24
-            </p>
           </>
         )}
     </PageContainer>

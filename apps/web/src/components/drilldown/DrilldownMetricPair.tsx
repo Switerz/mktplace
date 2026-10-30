@@ -26,13 +26,13 @@ export default function DrilldownMetricPair({ label, value, referenceLabel, refe
   return (
     <div className="flex items-end justify-between gap-4">
       <div className="min-w-0">
-        <p className="text-xs text-slate-500">{label}</p>
-        <p className="text-2xl font-bold text-slate-900 tabular-nums leading-tight">{value}</p>
+        <p className="text-xs text-ink-faint">{label}</p>
+        <p className="text-2xl font-bold text-ink tabular-nums leading-tight">{value}</p>
       </div>
       {hasReference && (
         <div className="text-right shrink-0">
-          <p className="text-xs text-slate-400">{referenceLabel}</p>
-          <p className="text-sm font-semibold text-slate-600 tabular-nums">{referenceValue}</p>
+          <p className="text-xs text-ink-faint">{referenceLabel}</p>
+          <p className="text-sm font-semibold text-ink-muted tabular-nums">{referenceValue}</p>
         </div>
       )}
     </div>

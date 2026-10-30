@@ -5,7 +5,7 @@ import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
 import PeriodSelector from "@/components/PeriodSelector";
 import ChannelMixChart from "@/components/ChannelMixChart";
-import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import InfoDica from "@/components/ui/InfoDica";
 import { SkeletonKpiCard } from "@/components/Skeleton";
 import { fmtBrl, fmtNumber } from "@/lib/formatters";
 import { decBr, pctBr } from "@/lib/inteligencia/format";
@@ -53,7 +53,8 @@ interface Props {
  *   leitor de tela;
  * - **o cabeçalho não exibe timestamp.** `/brand-detail` não traz
  *   `refreshed_at` no contrato; inventar "atualizado agora" seria fabricar
- *   frescor. O que o cabeçalho declara é a fonte e o ESTADO da leitura.
+ *   frescor. O cabeçalho declara o ESTADO da leitura; a fonte e as
+ *   limitações do contrato ficam no ⓘ ao lado.
  */
 export default function TikTokMonthlyPanel({
   state, detail, refMonth, months, onSelectMonth, onRetry,
@@ -92,9 +93,10 @@ export default function TikTokMonthlyPanel({
       <div className="bg-violet-100/70 border-b border-violet-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-sm font-bold text-violet-800">TikTok Shop · análise mensal</h2>
-          <p className="text-xs text-violet-700">
-            Competência <strong>{competencia}</strong> · fonte: contrato mensal do TikTok Shop ·{" "}
+          <p className="flex flex-wrap items-center gap-x-1 text-xs text-violet-700">
+            Competência <strong>{competencia}</strong> ·{" "}
             <EstadoLeitura state={state} competencia={competencia} />
+            <InfoDica className="ml-1" texto={LIMITACOES_CONTRATO} />
           </p>
         </div>
         {months.length > 0 && refMonth != null && (
@@ -105,8 +107,9 @@ export default function TikTokMonthlyPanel({
       <div className="px-4 sm:px-6 py-5 flex flex-col gap-5">
         {/* Relação entre os dois regimes: não é erro, é escopo — tom neutro. */}
         {regimeNote && (
-          <p className="text-xs text-slate-600 bg-white border border-violet-100 rounded-xl px-3 py-2">
-            {regimeNote}
+          <p className="flex w-fit items-center gap-1.5 text-xs text-slate-600 bg-white border border-violet-100 rounded-xl px-3 py-1.5">
+            Mês fora do período dos filtros
+            <InfoDica texto={regimeNote} />
           </p>
         )}
 
@@ -119,13 +122,8 @@ export default function TikTokMonthlyPanel({
 
         {state === "error" && (
           <div className="bg-white border border-rose-200 rounded-xl px-4 py-5 flex flex-col items-start gap-2">
-            <p className="text-sm font-semibold text-rose-900">
-              A leitura mensal falhou. Nenhum dado de {competencia} está sendo exibido.
-            </p>
-            <p className="text-xs text-slate-600">
-              Nada aqui foi preenchido com resposta anterior nem com número gerado — a falha aparece
-              como falha. Não sabemos ainda se a marca tem dado nesta competência.
-            </p>
+            <p className="text-sm font-semibold text-rose-900">A leitura mensal falhou.</p>
+            <p className="text-xs text-slate-600">Não sabemos ainda se a marca tem dado em {competencia}.</p>
             <button
               type="button"
               onClick={onRetry}
@@ -144,11 +142,11 @@ export default function TikTokMonthlyPanel({
             <p className="text-sm font-semibold text-slate-800">
               Esta marca não tem histórico no TikTok Shop.
             </p>
-            <p className="text-xs text-slate-600 mt-1">
-              A leitura de {competencia} foi bem-sucedida e o contrato não devolveu{" "}
-              <strong>nenhuma competência com dado</strong> para esta marca. Não há seletor porque
-              não há mês para escolher, e nenhum indicador foi exibido: zero agregado de um
-              histórico inexistente não é venda zero.
+            <p className="flex flex-wrap items-center gap-x-1.5 text-xs text-slate-600 mt-1">
+              <span>
+                Leitura ok, mas <strong>nenhuma competência com dado</strong> para esta marca: não há mês para escolher.
+              </span>
+              <InfoDica texto="Nenhum indicador exibido: zero agregado de um histórico inexistente não é venda zero." />
             </p>
           </div>
         )}
@@ -160,10 +158,8 @@ export default function TikTokMonthlyPanel({
               Sem dado de TikTok Shop para {competencia}.
             </p>
             <p className="text-xs text-slate-600 mt-1">
-              A competência pedida foi <strong>preservada</strong> — nenhum outro mês foi selecionado
-              no seu lugar em silêncio.{" "}
-              {months.length > 0 &&
-                `Competências com dado para esta marca: ${months.map((m) => m.label).join(" · ")}.`}
+              Competência <strong>preservada</strong>.{" "}
+              {months.length > 0 && `Com dado: ${months.map((m) => m.label).join(" · ")}.`}
             </p>
           </div>
         )}
@@ -207,11 +203,13 @@ export default function TikTokMonthlyPanel({
             </BlocoMensal>
 
             {/* ── funil por canal + drill-down por linha ─────────────────── */}
-            <BlocoMensal titulo="Funil por superfície" competencia={competencia}>
+            <BlocoMensal
+              titulo="Funil por superfície"
+              competencia={competencia}
+              dica="CTR = impressões que geraram visita à página do produto. CVR = visitas que converteram em pedido. As duas taxas vêm prontas do contrato."
+            >
               {funnelRows.length === 0 ? (
-                <p className="text-sm text-slate-500 py-4">
-                  Sem funil por superfície nesta competência. O bloco não é preenchido com zero.
-                </p>
+                <p className="text-sm text-slate-500 py-4">Sem funil por superfície nesta competência.</p>
               ) : (
                 <div className="bg-white border border-violet-100 rounded-xl overflow-hidden">
                   <TableScrollHint>
@@ -259,10 +257,6 @@ export default function TikTokMonthlyPanel({
                       </tbody>
                     </table>
                   </TableScrollHint>
-                  <p className="px-4 py-2.5 border-t border-slate-100 text-xs text-slate-500">
-                    CTR = impressões que geraram visita à página do produto · CVR = visitas que
-                    converteram em pedido. As duas taxas vêm prontas do contrato.
-                  </p>
                 </div>
               )}
             </BlocoMensal>
@@ -271,7 +265,10 @@ export default function TikTokMonthlyPanel({
             <BlocoMensal titulo="Conteúdo e creators" competencia={competencia}>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div className="bg-white border border-violet-100 rounded-xl px-4 py-4">
-                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Ecossistema</h4>
+                  <h4 className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
+                    Ecossistema
+                    <InfoDica texto="Vídeos ativos e visualizações vêm da tabela de marca, não da soma dos produtos: não conferem entre si e não devem ser comparados." />
+                  </h4>
                   <div className="grid grid-cols-2 gap-3">
                     <Stat label="Vídeos ativos" value={fmtNumber(detail.active_videos)} />
                     <Stat label="Vídeos novos" value={fmtNumber(detail.new_videos_posted)} />
@@ -280,10 +277,6 @@ export default function TikTokMonthlyPanel({
                     <Stat label="Lives" value={fmtNumber(detail.total_lives)} />
                     <Stat label="Creators de live" value={fmtNumber(detail.live_creators)} />
                   </div>
-                  <p className="text-xs text-slate-500 mt-3">
-                    Vídeos ativos e visualizações vêm da tabela <strong>de marca</strong>, não da soma
-                    dos produtos: os dois números não conferem entre si e não devem ser comparados.
-                  </p>
                 </div>
 
                 <div className="bg-white border border-violet-100 rounded-xl px-4 py-4">
@@ -305,8 +298,9 @@ export default function TikTokMonthlyPanel({
 
               {detail.top_creators.length > 0 && (
                 <div className="bg-white border border-violet-100 rounded-xl overflow-hidden mt-4">
-                  <h4 className="px-4 py-3 border-b border-violet-100 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <h4 className="flex items-center gap-1.5 px-4 py-3 border-b border-violet-100 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                     Top 5 creators por GMV · {competencia}
+                    <InfoDica texto="Lista capada em cinco no contrato. Sem detalhe por creator: nome de creator é dado sensível e não viaja em URL." />
                   </h4>
                   <TableScrollHint>
                     <table className="w-full" aria-label={`Top 5 creators por GMV em ${competencia}`}>
@@ -333,10 +327,6 @@ export default function TikTokMonthlyPanel({
                       </tbody>
                     </table>
                   </TableScrollHint>
-                  <p className="px-4 py-2.5 border-t border-slate-100 text-xs text-slate-500">
-                    Cinco de ao menos cinco — a lista vem capada no contrato. Sem detalhe por creator:
-                    nome de creator é dado sensível e não viaja em URL.
-                  </p>
                 </div>
               )}
             </BlocoMensal>
@@ -348,9 +338,7 @@ export default function TikTokMonthlyPanel({
               id={SECTION_MENSAL_PRODUTOS}
             >
               {detail.top_produtos.length === 0 ? (
-                <p className="text-sm text-slate-500 py-4">
-                  Sem produtos com dado nesta competência. O bloco não é preenchido com zero.
-                </p>
+                <p className="text-sm text-slate-500 py-4">Sem produtos com dado nesta competência.</p>
               ) : (
                 <div className="bg-white border border-violet-100 rounded-xl overflow-hidden">
                   <TableScrollHint>
@@ -402,23 +390,6 @@ export default function TikTokMonthlyPanel({
                 </div>
               )}
             </BlocoMensal>
-
-            {/* ── limitações do dado, compactas e no lugar certo ────────── */}
-            <div className="flex flex-col gap-2">
-              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Limitações do dado nesta competência
-              </h3>
-              <DataQualityNote
-                note={
-                  "Audiência não é coberta: as sete colunas de demografia (gênero e faixa etária de " +
-                  "viewers e followers) são 100% nulas na fonte, então o bloco de Demographics foi " +
-                  "removido em vez de exibir sete traços. Ads, ROAS e margem também não existem aqui — " +
-                  "o contrato mensal do TikTok não traz investimento de mídia nem custo do produto. " +
-                  "E este contrato não carrega timestamp de sincronização: o cabeçalho declara a fonte " +
-                  "e o estado da leitura, nunca um 'atualizado em' que não foi entregue."
-                }
-              />
-            </div>
           </>
         )}
       </div>
@@ -426,17 +397,28 @@ export default function TikTokMonthlyPanel({
   );
 }
 
+/** Fonte e limitacoes do contrato mensal — no ⓘ do cabecalho do conteiner. */
+const LIMITACOES_CONTRATO =
+  "fonte: contrato mensal do TikTok Shop. Audiência não é coberta: as colunas de demografia são " +
+  "100% nulas na fonte. Sem Ads, ROAS nem margem: o contrato não traz mídia nem custo do produto. " +
+  "Sem timestamp de sincronização: o cabeçalho mostra o estado da leitura, nunca um 'atualizado em' que não foi entregue.";
+
 /** Bloco interno: título + etiqueta de COMPETÊNCIA sempre visível. */
-function BlocoMensal({ titulo, competencia, id, children }: {
+function BlocoMensal({ titulo, competencia, id, dica, children }: {
   titulo: string;
   competencia: string;
   id?: string;
+  /** Ressalva do bloco, num ⓘ ao lado do titulo. */
+  dica?: string;
   children: React.ReactNode;
 }) {
   return (
     <div id={id} className={id ? "scroll-mt-28" : undefined}>
       <div className="flex items-baseline justify-between gap-3 flex-wrap mb-2">
-        <h3 className="text-sm font-semibold text-slate-700">{titulo}</h3>
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-sm font-semibold text-slate-700">{titulo}</h3>
+          {dica && <InfoDica texto={dica} />}
+        </div>
         <span className="text-xs font-semibold text-violet-700 bg-violet-100 rounded-full px-2.5 py-0.5">
           competência {competencia}
         </span>

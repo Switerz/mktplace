@@ -143,7 +143,7 @@ test("marca fora da cobertura: ausencia, nao backlog zero", () => {
   assert.equal(rec.semConta, true);
   assert.equal(rec.foraDaCobertura, true);
   assert.equal(rec.totais, null);
-  assert.match(CLIENTE, /não é coberta pela fonte deste canal — ausência de cobertura, não backlog zero\./);
+  assert.match(CLIENTE, /não é coberta pela fonte deste canal — não é backlog zero\./);
 });
 
 // ===========================================================================
@@ -202,7 +202,7 @@ test("Shopee: particao do backlog por situacao de prazo, que fecha o total", () 
 test("Shopee: a secao diz que NAO ha LDR e por que", () => {
   assert.match(SEM_LDR_SHOPEE, /LDR/);
   assert.match(SEM_LDR_SHOPEE, /só os\s+pedidos em aberto/);
-  assert.match(CLIENTE, /\{SEM_LDR_SHOPEE\}/);
+  assert.match(CLIENTE, /dica=\{LDR_SHOPEE_LIGADA \? undefined : SEM_LDR_SHOPEE\}/);
 });
 
 test("Mercado Livre: prazo indisponivel pelo canal e envelhecimento da fila", () => {
@@ -394,27 +394,19 @@ test("R21: zumbi declara a idade (> 30 dias), sem afirmar que a fonte parou", ()
   }
 });
 
-test("o `?` e' um botao real, de 44px, rotulado e ligado ao painel", () => {
+test("o ⓘ da metrica: InfoDica focavel com definicao e limitacao, sem a metodologia", () => {
+  // Objetividade: o popover de seis campos virou o "ⓘ" do resto da Torre.
+  const d = DEFINICOES["tiktok.ldr"];
   const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr" }));
-  const botao = html.match(/<button[^>]*aria-label="O que é LDR do TikTok"[^>]*>/)?.[0];
-  assert.ok(botao, html);
-  assert.match(botao!, /type="button"/);
-  assert.match(botao!, /aria-expanded="false"/);
-  assert.match(botao!, /h-11 w-11/);
-  // QA T-0010 (B1/I1): FECHADO, o painel nao existe no DOM — nada visivel,
-  // nenhum "Fechar" no Tab, nenhum aria-controls apontando para o vazio.
-  assert.doesNotMatch(botao!, /aria-controls=/);
-  assert.doesNotMatch(html, /role="dialog"|Fechar|Definição/);
-  // ABERTO: painel ligado ao botao, com os seis campos, so' com <span>.
-  const aberto = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr", abertoInicial: true }));
-  const controla = aberto.match(/aria-controls="([^"]+)"/);
-  assert.ok(controla, aberto);
-  assert.match(aberto, /aria-expanded="true"/);
-  assert.ok(aberto.includes(`id="${controla![1]}"`), "aria-controls aponta para o painel");
-  assert.match(aberto, /role="dialog"/);
-  for (const [, rotulo] of CAMPOS_DEFINICAO) assert.ok(aberto.includes(`${rotulo}: `), rotulo);
-  assert.doesNotMatch(aberto, /<div\b/, "so' span: o ? mora dentro de <p>");
-  assert.match(aberto, /min-h-11 min-w-11[^"]*"[^>]*>Fechar<\/button>/);
+  const rotulo = html.match(/<span tabindex="0" role="img" aria-label="([^"]+)"/)?.[1];
+  assert.ok(rotulo, html);
+  assert.equal(rotulo, `${d.definicao} ${d.limitacoes}`);
+  assert.match(rotulo!, /Indicador interno/, "a ressalva que muda a leitura fica");
+  for (const campo of ["formula", "fonte", "janela", "cobertura"] as const) {
+    assert.ok(!html.includes(d[campo]), `${campo} fora da tela`);
+  }
+  assert.doesNotMatch(html, /role="dialog"|<button|Fechar|Definição: /);
+  assert.doesNotMatch(html, /<div\b/, "so' span: o ⓘ mora dentro de <p>");
 });
 
 test("nenhum elemento da Expedicao combina hidden= com classe de display (B1)", () => {
@@ -437,30 +429,10 @@ test("nenhum elemento da Expedicao combina hidden= com classe de display (B1)", 
       }
     }
   }
-  assert.match(fonte("src/components/expedicao/AjudaMetrica.tsx"), /\{aberto \? \(/);
-});
-
-test("clique fora num elemento focavel nao rouba o foco (M1)", () => {
-  const src = fonte("src/components/expedicao/AjudaMetrica.tsx");
-  // Reteste (F1): fecha sem roubar foco; com alvo NAO focavel, o foco volta
-  // ao botao no proximo quadro, so' se o mousedown o jogou no <body>.
-  assert.match(src, /fechar\(false\);\s*if \(!focavel\) \{\s*requestAnimationFrame\(/);
-  assert.match(src, /document\.activeElement === document\.body\) botao\.current\?\.focus\(\)/);
-  assert.match(src, /alvo\.closest\(SELETOR_FOCAVEL\)/);
-});
-
-test("o `?` fecha com Esc, clique fora e devolve o foco; posicao fixa na viewport", () => {
-  const src = fonte("src/components/expedicao/AjudaMetrica.tsx");
-  assert.match(src, /e\.key === "Escape"\) fechar\(true\)/);
-  assert.match(src, /addEventListener\("pointerdown", fora\)/);
-  assert.match(src, /botao\.current\?\.focus\(\)/);
-  assert.match(src, /Math\.min\(LARGURA_MAX, vw - 2 \* MARGEM\)/, "cabe em 390 px");
-  assert.match(src, /className="fixed z-50/);
-  assert.match(src, /ATRASO_HOVER_MS/);
 });
 
 // ===========================================================================
-// Revisao T-0010 — origem do numero (oficial x Torre x indisponivel) e `?`
+// Revisao T-0010 — origem do numero (oficial x Torre x indisponivel) e "ⓘ"
 // nos cabecalhos ordenaveis da "LDR por loja"
 // ===========================================================================
 import { ROTULO_ORIGEM } from "../src/lib/expedicao-definicoes.ts";
@@ -505,18 +477,7 @@ test("origem: classificacao pelos fatos do codigo", () => {
   assert.deepEqual(Object.entries(DEFINICOES).filter(([, d]) => d.origem === "oficial"), []);
 });
 
-test("o `?` mostra a origem como rotulo curto ANTES da definicao", () => {
-  const aberto = renderToStaticMarkup(h(AjudaMetrica, { chave: "tiktok.ldr", abertoInicial: true }));
-  const iOrigem = aberto.indexOf("Cálculo da Torre");
-  assert.ok(iOrigem > 0, aberto);
-  assert.ok(iOrigem < aberto.indexOf("Definição: "), "origem antes da definicao");
-  assert.match(aberto, /Referência: <\/span>Meta de 4% publicada pelo TikTok Shop/);
-  const ml = renderToStaticMarkup(h(AjudaMetrica, { chave: "mercadolivre.prazo", abertoInicial: true }));
-  assert.match(ml, /Indisponível neste canal/);
-  assert.doesNotMatch(ml, /Referência: /);
-});
-
-test("LDR por loja: `?` nos cabecalhos ordenaveis, fora do botao de ordenar", () => {
+test("LDR por loja: ⓘ nos cabecalhos ordenaveis, fora do botao de ordenar", () => {
   const props = {
     rotulo: "LDR",
     coluna: "rate",
@@ -526,16 +487,15 @@ test("LDR por loja: `?` nos cabecalhos ordenaveis, fora do botao de ordenar", ()
   };
   const html = renderToStaticMarkup(h(SortHeaderComAjuda, props));
   assert.match(html, /^<th scope="col" aria-sort="descending"/);
-  const i = html.indexOf('aria-label="O que é LDR do TikTok"');
+  const i = html.indexOf('role="img"');
   assert.ok(i > 0, html);
-  // Antes do `?`, o botao de ordenar ja' fechou: nao ha botao dentro de botao.
+  // Antes do ⓘ, o botao de ordenar ja' fechou: nada focavel dentro de botao.
   const antes = html.slice(0, i);
-  assert.equal((antes.match(/<button\b/g) ?? []).length, 2, "o 2o <button> e' o ?");
-  assert.equal((antes.match(/<\/button>/g) ?? []).length, 1, "o botao de ordenar fecha antes do ?");
+  assert.equal((antes.match(/<button\b/g) ?? []).length, 1, "so' o botao de ordenar");
+  assert.equal((antes.match(/<\/button>/g) ?? []).length, 1, "o botao de ordenar fecha antes do ⓘ");
   assert.match(html, /min-h-11/, "alvo de 44 px do ordenar");
-  assert.match(html, /h-11 w-11/, "alvo de 44 px do ?");
 
-  // Arvore React: so' o botao de ordenar tem onClick, e o `?` nao mora nele.
+  // Arvore React: so' o botao de ordenar tem onClick, e o ⓘ nao mora nele.
   type No = { type: unknown; props: { onClick?: () => void; children?: unknown } };
   const ordenadas: string[] = [];
   const raiz = SortHeaderComAjuda({ ...props, aoOrdenar: (c: string) => ordenadas.push(c) }) as unknown as No;
@@ -552,13 +512,13 @@ test("LDR por loja: `?` nos cabecalhos ordenaveis, fora do botao de ordenar", ()
   assert.equal(comClique.length, 1, "um unico onClick: o de ordenar");
   assert.equal(comClique[0].no.type, "button");
   const ajuda = todos.find((t) => t.no.type === AjudaMetrica);
-  assert.ok(ajuda, "o `?` e' o AjudaMetrica");
-  assert.equal(ajuda!.dentroDoOrdenar, false, "o `?` nao esta' dentro do botao de ordenar");
+  assert.ok(ajuda, "o ⓘ e' o AjudaMetrica");
+  assert.equal(ajuda!.dentroDoOrdenar, false, "o ⓘ nao esta' dentro do botao de ordenar");
   comClique[0].no.props.onClick!();
   assert.deepEqual(ordenadas, ["rate"]);
 });
 
-test("LDR por loja: Venciam, Atrasados e LDR com `?`; Loja segue no SortHeader", () => {
+test("LDR por loja: Venciam, Atrasados e LDR com ⓘ; Loja segue no SortHeader", () => {
   const ini = TIKTOK.indexOf("LDR por loja no período");
   const tabela = TIKTOK.slice(ini, TIKTOK.indexOf("</thead>", ini));
   for (const [coluna, chave] of [["base", "tiktok.venciam"], ["late", "tiktok.atrasaram"], ["rate", "tiktok.ldr"]]) {
@@ -572,11 +532,11 @@ test("LDR por loja: Venciam, Atrasados e LDR com `?`; Loja segue no SortHeader",
   assert.doesNotMatch(tabela, /<SortHeader rotulo="(Venciam|Atrasados|LDR)"/);
 });
 
-test("KpiComAjuda poe o `?` na linha de comparacao do KPI", () => {
+test("KpiComAjuda poe o ⓘ na linha de comparacao do KPI", () => {
   const html = renderToStaticMarkup(
     h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),
   );
-  assert.match(html, /Fila aberta\. <span[^>]*><button[^>]*aria-label="O que é Backlog total"/);
+  assert.match(html, /Fila aberta\. <span tabindex="0" role="img" aria-label="Cada pedido pago que ainda não foi expedido\./);
 });
 
 // ===========================================================================

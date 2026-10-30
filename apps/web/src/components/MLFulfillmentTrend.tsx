@@ -105,7 +105,7 @@ export default function MLFulfillmentTrend({ pontos, metrica }: Props) {
               width={48}
             />
             <Tooltip content={<CustomTooltip metrica={metrica} />} />
-            <Line
+            <Line animationDuration={450} animationEasing="ease-out"
               type="monotone"
               dataKey="share_full"
               stroke="#7c3aed"
