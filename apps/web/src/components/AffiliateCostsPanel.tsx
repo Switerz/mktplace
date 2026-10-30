@@ -1,21 +1,25 @@
 "use client";
 
-import { useState } from "react";
-import type { AffiliateCostsBlock } from "@/lib/api-client";
+import { useState, type ReactNode } from "react";
+import type { AffiliateCostRow, AffiliateCostsBlock } from "@/lib/api-client";
 import {
   AFFILIATE_BLOCK_TITLE,
   AFFILIATE_COMPONENT_LABELS,
   AFFILIATE_COMPONENT_ORDER,
   brandLabel,
-  buildAffiliateDrilldown,
   deriveAffiliateBlockView,
   describeChannelStatus,
   formatRefMonth,
   formatSignedBrl,
   rowCoverageNote,
   type AffiliateBlockPhase,
+  type AffiliateComponentKey,
 } from "@/lib/canais-affiliate-costs";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import KpiDrilldownDialog from "./KpiDrilldownDialog";
+import DrilldownSecao from "./drilldown/DrilldownSecao";
+import EvidenceRow from "./drilldown/EvidenceRow";
+import DataQualityNote from "./drilldown/DataQualityNote";
 import InfoDica from "./ui/InfoDica";
 
 const TONE_CLASS: Record<string, string> = {
@@ -23,6 +27,117 @@ const TONE_CLASS: Record<string, string> = {
   muted: "text-ink-faint",
   warning: "text-warn-ink",
 };
+
+/** POPUPS-1 — selo de contexto do detalhe (mesmo desenho do DrilldownContextLine). */
+const SELO = "rounded-full border border-line bg-raised px-2 py-0.5 tabular-nums";
+
+/** O canal do bloco usa `mercadolivre`; a cor de identidade, `ml`. */
+const PONTO_DO_CANAL: Record<string, string> = {
+  tiktok: CHANNEL_DOT.tiktok,
+  mercadolivre: CHANNEL_DOT.ml,
+  shopee: CHANNEL_DOT.shopee,
+};
+
+/**
+ * Tamanho do lancamento, so' para a largura da barra e a ordem. O VALOR
+ * exibido continua com o sinal da fonte.
+ */
+const tamanho = (v: number | null) => (v == null ? -1 : v < 0 ? 0 - v : v);
+
+/**
+ * POPUPS-1 — detalhe do bloco de afiliados.
+ *
+ * Uma secao por lancamento (os tres NUNCA somados, nem entre si nem num
+ * total), com as marcas do maior ao menor e a barra relativa a maior —
+ * responde "onde esta' a comissao". Competencia e "nao somar" em selos; as
+ * notas da fonte no ⓘ; cobertura incompleta em linha curta, porque muda a
+ * leitura. Sai a lista marca a marca que so' repetia a tabela.
+ */
+function DetalheAfiliados({
+  block,
+  monthsLabel,
+  coverageWarning,
+  children,
+}: {
+  block: AffiliateCostsBlock;
+  monthsLabel: string;
+  coverageWarning: string | null;
+  /** Selos extras (frescor), montados por quem tem a `view`. */
+  children?: ReactNode;
+}) {
+  const variosMeses = block.months_included.length > 1;
+  const rotulo = (r: AffiliateCostRow) =>
+    variosMeses ? `${brandLabel(r.brand)} · ${formatRefMonth(r.ref_month)}` : brandLabel(r.brand);
+  // Cobertura por competencia, uma linha por mes (a contagem e' do mes).
+  const porMes = new Map<string, string>();
+  for (const r of block.rows) {
+    const nota = rowCoverageNote(r);
+    if (nota) porMes.set(r.ref_month, `${formatRefMonth(r.ref_month)}: ${nota}`);
+  }
+
+  const secao = (chave: AffiliateComponentKey) => {
+    const linhas = [...block.rows].sort((a, b) => tamanho(b[chave]) - tamanho(a[chave]));
+    const maior = Math.max(0, ...linhas.map((r) => tamanho(r[chave])));
+    return (
+      <DrilldownSecao key={chave} titulo={AFFILIATE_COMPONENT_LABELS[chave]}>
+        <ul className="flex flex-col">
+          {linhas.map((r) => {
+            const celula = formatSignedBrl(r[chave]);
+            return (
+              <EvidenceRow
+                key={`${r.ref_month}:${r.brand}`}
+                label={rotulo(r)}
+                value={celula.text}
+                tone={celula.tone}
+                pct={r[chave] != null && maior > 0 ? (tamanho(r[chave]) / maior) * 100 : null}
+              />
+            );
+          })}
+        </ul>
+      </DrilldownSecao>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-4 text-sm">
+      <div className="flex flex-col gap-2">
+        <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
+          {monthsLabel && <span className={SELO}>Competência {monthsLabel}</span>}
+          <span className="rounded-full bg-warn-soft px-2 py-0.5 font-medium text-warn-ink">Não somar</span>
+          {children}
+          <InfoDica texto={[block.limitation_note, block.return_note, block.source_note].filter(Boolean).join(" ")} />
+        </p>
+        <DataQualityNote note={coverageWarning} />
+        {[...porMes.entries()].map(([mes, nota]) => (
+          <DataQualityNote key={mes} note={nota} />
+        ))}
+      </div>
+
+      {AFFILIATE_COMPONENT_ORDER.map(secao)}
+
+      {/* Status por canal, AUTORITATIVO: ML e Shopee sao "Dados
+          indisponíveis", nunca "Não aplicável". */}
+      {block.channels.length > 0 && (
+        <DrilldownSecao titulo="Por canal">
+          <ul className="flex flex-col">
+            {block.channels.map((canal) => {
+              const d = describeChannelStatus(canal);
+              return (
+                <EvidenceRow
+                  key={canal.channel}
+                  label={d.label}
+                  ponto={PONTO_DO_CANAL[canal.channel]}
+                  value={d.text}
+                  tone={d.tone}
+                />
+              );
+            })}
+          </ul>
+        </DrilldownSecao>
+      )}
+    </div>
+  );
+}
 
 interface Props {
   /**
@@ -100,7 +215,6 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
   }
 
   const view = deriveAffiliateBlockView(block);
-  const linhas = buildAffiliateDrilldown(block.rows);
 
   return (
     <section className="bg-surface rounded-xl border border-line p-5">
@@ -226,34 +340,15 @@ export default function AffiliateCostsPanel({ block, phase }: Props) {
         onClose={() => setAberto(false)}
         title={AFFILIATE_BLOCK_TITLE}
       >
-        {view.freshnessLabel && (
-          <p className="text-xs text-ink-faint">{view.freshnessLabel}</p>
-        )}
-        {linhas.map((linha) => (
-          <div
-            key={`${linha.refMonth}:${linha.brand}`}
-            className="border-b border-line pb-3 last:border-0"
-          >
-            <p className="text-sm font-semibold text-ink">
-              {linha.brand} · {linha.refMonth}
-            </p>
-            {linha.coverageNote && (
-              <p className="text-xs text-warn-ink">{linha.coverageNote}</p>
-            )}
-            <dl className="mt-1 flex flex-col gap-0.5">
-              {linha.components.map((c) => (
-                <div key={c.label} className="flex justify-between gap-4 text-sm">
-                  <dt className="text-ink-muted">{c.label}</dt>
-                  <dd className={`tabular-nums ${TONE_CLASS[c.cell.tone]}`}>
-                    {c.cell.text}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
-        ))}
-        <p className="text-xs text-ink-faint">{block.limitation_note}</p>
-        <p className="text-xs text-ink-faint">{block.return_note}</p>
+        <DetalheAfiliados block={block} monthsLabel={view.monthsLabel} coverageWarning={view.coverageWarning}>
+          {/* Frescor PROPRIO do bloco: selo curto, a frase inteira no ⓘ. */}
+          {view.freshnessLabel && (
+            <span className={`${SELO} inline-flex items-center gap-1`}>
+              Carga manual
+              <InfoDica texto={view.freshnessLabel} />
+            </span>
+          )}
+        </DetalheAfiliados>
       </KpiDrilldownDialog>
     </section>
   );

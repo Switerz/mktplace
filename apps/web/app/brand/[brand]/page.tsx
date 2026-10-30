@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { ArrowDown } from "lucide-react";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { buildDemoSeries, DEMO_SERIES_LABEL, DEMO_SERIES_WARNING, type DailyRow } from "@/lib/brand/demo-series";
 import { fetchBrandDetail, type BrandDetail, type BrandDetailChannelRow, type BrandDetailProduto } from "@/lib/api-client";
@@ -27,8 +28,9 @@ import BrandArrivalBanner from "@/components/BrandArrivalBanner";
 import PageContainer from "@/components/layout/PageContainer";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
-import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import TikTokMonthlyPanel from "@/components/brand/TikTokMonthlyPanel";
@@ -91,7 +93,7 @@ function fmtMetric(m: MetricValue, unit: MetricUnit): string {
 
 function MetricList({ metrics }: { metrics: readonly DrilldownMetric[] }) {
   return (
-    <ul className="flex flex-col gap-1 list-none p-0 m-0">
+    <ul className="flex flex-col list-none p-0 m-0">
       {metrics.map((m) => (
         <EvidenceRow
           key={m.key}
@@ -101,6 +103,66 @@ function MetricList({ metrics }: { metrics: readonly DrilldownMetric[] }) {
         />
       ))}
     </ul>
+  );
+}
+
+/** Taxas do funil: entram ENTRE as etapas que explicam, como conector. */
+const TAXAS_DO_FUNIL = new Set(["ctr_pct", "cvr_pct"]);
+
+/**
+ * POPUPS-1 — funil de uma superficie: as contagens em linha e as duas taxas
+ * do contrato como conectores entre elas (impressao → visita → item). Sem
+ * barra: largura relativa entre etapas seria uma taxa recalculada aqui.
+ */
+function Funil({ metrics }: { metrics: readonly DrilldownMetric[] }) {
+  return (
+    <ul className="flex flex-col list-none p-0 m-0">
+      {metrics.map((m) =>
+        TAXAS_DO_FUNIL.has(m.key) ? (
+          <li key={m.key} className="flex items-center gap-1.5 py-0.5 pl-0.5 text-xs text-ink-faint">
+            <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2} />
+            <span>{m.label}</span>
+            <span className={`tabular-nums font-semibold ${m.value.kind === "missing" ? "" : "text-ink-muted"}`}>
+              {fmtMetric(m.value, m.unit)}
+            </span>
+          </li>
+        ) : (
+          <EvidenceRow
+            key={m.key}
+            label={m.label}
+            value={fmtMetric(m.value, m.unit)}
+            tone={m.value.kind === "missing" ? "muted" : "value"}
+          />
+        ),
+      )}
+    </ul>
+  );
+}
+
+/** POPUPS-1 — topo dos dois detalhes mensais: numero, selos e ⓘ. */
+function CabecalhoDoDetalhe({
+  valor, rotulo, contexto, selo, dica,
+}: {
+  valor: string;
+  rotulo: string;
+  contexto: ReactNode;
+  selo?: string | null;
+  dica: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+        <NumeroAnimado texto={valor} className="text-[32px] font-bold leading-none tracking-tight text-ink tabular-nums" />
+        <span className="pb-0.5 text-xs text-ink-faint">{rotulo}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {contexto}
+        {selo && (
+          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-ink tabular-nums">{selo}</span>
+        )}
+        <InfoDica texto={dica} />
+      </div>
+    </div>
   );
 }
 
@@ -732,18 +794,28 @@ function BrandPageInner() {
               : `${dialog.produto.product_name} · ${competenciaLabel}`
         }
       >
+        {/* POPUPS-1 — numero grande no topo, competencia em selo, a limitacao
+            do escopo e o que NAO viaja no CTA no ⓘ (antes, dois paragrafos). */}
         {dialog?.kind === "channel" && (() => {
           const d = readChannelDetail(dialog.row, refMonth);
+          const gmv = d.metrics.find((m) => m.key === "gmv");
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine
-                leading={`${meta.label} · TikTok Shop`}
-                periodLabel={`competência ${d.refMonthLabel}`}
-                refreshedAt={null}
+            <div className="flex flex-col gap-4 text-sm">
+              <CabecalhoDoDetalhe
+                valor={gmv ? fmtMetric(gmv.value, gmv.unit) : "Sem dado"}
+                rotulo="GMV da superfície"
+                contexto={
+                  <DrilldownContextLine
+                    leading={`${meta.label} · TikTok Shop`}
+                    periodLabel={`competência ${d.refMonthLabel}`}
+                    refreshedAt={null}
+                  />
+                }
+                dica={`${d.note} ${CHANNEL_CTA_SCOPE_NOTE}`}
               />
-              <MetricList metrics={d.metrics} />
-              <DataQualityNote note={d.note} />
-              <p className="text-xs text-slate-500">{CHANNEL_CTA_SCOPE_NOTE}</p>
+              <DrilldownSecao titulo="Funil">
+                <Funil metrics={d.metrics.filter((m) => m.key !== "gmv")} />
+              </DrilldownSecao>
               <DrilldownCta
                 href={buildHref(channelCtaHref(brand))}
                 ariaLabel={`${d.ctaLabel} para a marca ${meta.label}`}
@@ -756,16 +828,28 @@ function BrandPageInner() {
 
         {dialog?.kind === "product" && (() => {
           const d = readProductDetail(dialog.produto, refMonth);
+          const gmv = d.metrics.find((m) => m.key === "gmv");
+          // Posicao no top da competencia, pela ordem que o contrato ja' entrega.
+          const top = displayDetail?.top_produtos ?? [];
+          const posicao = top.findIndex((p) => p.product_id === dialog.produto.product_id) + 1;
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine
-                leading={`${meta.label} · TikTok Shop`}
-                periodLabel={`competência ${d.refMonthLabel}`}
-                refreshedAt={null}
+            <div className="flex flex-col gap-4 text-sm">
+              <CabecalhoDoDetalhe
+                valor={gmv ? fmtMetric(gmv.value, gmv.unit) : "Sem dado"}
+                rotulo="GMV do produto"
+                contexto={
+                  <DrilldownContextLine
+                    leading={`${meta.label} · TikTok Shop`}
+                    periodLabel={`competência ${d.refMonthLabel}`}
+                    refreshedAt={null}
+                  />
+                }
+                selo={posicao > 0 ? `${posicao}º de ${top.length} em GMV` : null}
+                dica={`${d.note} ${PRODUCT_CTA_SCOPE_NOTE}`}
               />
-              <MetricList metrics={d.metrics} />
-              <DataQualityNote note={d.note} />
-              <p className="text-xs text-slate-500">{PRODUCT_CTA_SCOPE_NOTE}</p>
+              <DrilldownSecao titulo="Indicadores">
+                <MetricList metrics={d.metrics.filter((m) => m.key !== "gmv")} />
+              </DrilldownSecao>
               <DrilldownCta
                 href={buildHref(productCtaHref(brand))}
                 ariaLabel={`${d.ctaLabel} da marca ${meta.label}`}

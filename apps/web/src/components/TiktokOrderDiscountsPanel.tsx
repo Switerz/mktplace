@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import type { TikTokOrderDiscountsBlock } from "@/lib/api-client";
+import type { TikTokOrderDiscountRow, TikTokOrderDiscountsBlock } from "@/lib/api-client";
+import { brandLabel } from "@/lib/canais-affiliate-costs";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import {
-  buildCancelledDrilldown,
   buildDiscountTable,
   CANCELLED_COPY,
   CANCELLED_SECTION_TITLE,
@@ -13,12 +14,18 @@ import {
   DISCOUNT_COMPONENT_LABELS,
   DISCOUNT_COMPONENT_ORDER,
   DISCOUNTS_BLOCK_TITLE,
+  formatCount,
+  formatSignedBrl,
+  formatSignedPct,
   RETROACTIVE_COPY,
   SELLER_COPY,
   SUBSIDY_COPY,
   type DiscountBlockPhase,
 } from "@/lib/canais-tiktok-order-discounts";
 import KpiDrilldownDialog from "./KpiDrilldownDialog";
+import DrilldownSecao from "./drilldown/DrilldownSecao";
+import EvidenceRow from "./drilldown/EvidenceRow";
+import DataQualityNote from "./drilldown/DataQualityNote";
 import InfoDica from "./ui/InfoDica";
 
 const TONE_CLASS: Record<string, string> = {
@@ -26,6 +33,19 @@ const TONE_CLASS: Record<string, string> = {
   muted: "text-ink-faint",
   warning: "text-warn-ink",
 };
+
+/** POPUPS-1 — selo de contexto do detalhe (mesmo desenho do DrilldownContextLine). */
+const SELO = "rounded-full border border-line bg-raised px-2 py-0.5 tabular-nums";
+
+/**
+ * Tamanho, so' para a largura da barra e a ordem. O VALOR exibido continua
+ * com o sinal da fonte: negativo = a marca financiou.
+ */
+const tamanho = (v: number | null) => (v == null ? -1 : v < 0 ? 0 - v : v);
+
+/** Largura da barra (0-100) relativa a maior linha. Nao e' taxa exibida. */
+const barra = (v: number | null, maior: number) =>
+  v == null || maior <= 0 ? null : (100 * tamanho(v)) / maior;
 
 interface Props {
   /**
@@ -101,8 +121,22 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
 
   const view = deriveDiscountBlockView(block);
   const linhas = buildDiscountTable(block.rows);
-  const cancelados = buildCancelledDrilldown(block.rows);
   const notaCobertura = coverageNote(block);
+
+  // POPUPS-1 — ordens do detalhe (maior para menor), so' com as linhas do
+  // bloco. Desconto e subsidio sao ordenados pela TAXA do backend, que ja'
+  // normaliza pelo valor cheio; nenhuma taxa e' recalculada aqui.
+  const ordenar = (f: (r: TikTokOrderDiscountRow) => number | null) =>
+    [...block.rows].sort((a, b) => tamanho(f(b)) - tamanho(f(a)));
+  const maiorDe = (f: (r: TikTokOrderDiscountRow) => number | null) =>
+    Math.max(0, ...block.rows.map((r) => tamanho(f(r))));
+  const porGmv = ordenar((r) => r.official_gmv);
+  const maiorGmv = maiorDe((r) => r.official_gmv);
+  const porDesconto = ordenar((r) => r.seller_discount_rate);
+  const maiorDesconto = maiorDe((r) => r.seller_discount_rate);
+  const porSubsidio = ordenar((r) => r.platform_subsidy_rate);
+  const maiorSubsidio = maiorDe((r) => r.platform_subsidy_rate);
+  const porCancelados = ordenar((r) => r.cancelled_orders);
 
   return (
     <section className="bg-surface rounded-xl border border-line p-5">
@@ -228,76 +262,108 @@ export default function TiktokOrderDiscountsPanel({ block, phase }: Props) {
         onClose={() => setAberto(false)}
         title={DISCOUNTS_BLOCK_TITLE}
       >
-        {view.freshnessLabel && (
-          <p className="text-xs text-ink-faint">{view.freshnessLabel}</p>
-        )}
-        {linhas.map((linha) => (
-          <div
-            key={linha.brandKey}
-            className="border-b border-line pb-3 last:border-0"
-          >
-            <p className="text-sm font-semibold text-ink">
-              {linha.brand} · {linha.commercialOrders} pedidos comerciais
+        <div className="flex flex-col gap-4 text-sm">
+          {/* POPUPS-1 — contexto em selos; quem financia, revisao retroativa
+              e o limite da cobertura no ⓘ; o "nao somar" fica a' vista. */}
+          <div className="flex flex-col gap-2">
+            <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
+              {view.windowLabel && <span className={SELO}>{view.windowLabel}</span>}
+              {view.dayCountLabel && <span className={SELO}>{view.dayCountLabel}</span>}
+              <span className="rounded-full bg-warn-soft px-2 py-0.5 font-medium text-warn-ink">Não somar</span>
+              {view.freshnessLabel && (
+                <span
+                  className={`${SELO} inline-flex items-center gap-1 ${
+                    block.freshness_status === "stale_load" ? "text-warn-ink" : ""
+                  }`}
+                >
+                  {block.freshness_status === "stale_load" ? "Carga antiga" : "Carga recente"}
+                  <InfoDica texto={view.freshnessLabel} />
+                </span>
+              )}
+              <InfoDica
+                texto={`${SELLER_COPY} ${SUBSIDY_COPY} ${RETROACTIVE_COPY}${
+                  view.coverageIsIncomplete ? "" : ` ${COVERAGE_LIMIT_COPY}`
+                } ${block.limitation_note}`}
+              />
             </p>
-            <dl className="mt-1 flex flex-col gap-0.5">
-              {linha.cells.map((c) => (
-                <div key={c.key} className="flex justify-between gap-4 text-sm">
-                  <dt className="text-ink-muted">{c.label}</dt>
-                  <dd className={`tabular-nums ${TONE_CLASS[c.cell.tone]}`}>
-                    {c.cell.text}
-                  </dd>
-                </div>
-              ))}
-              <div className="flex justify-between gap-4 text-sm">
-                <dt className="text-ink-muted">% financiado pela marca</dt>
-                <dd className={`tabular-nums ${TONE_CLASS[linha.sellerRate.tone]}`}>
-                  {linha.sellerRate.text}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-4 text-sm">
-                <dt className="text-ink-muted">% financiado pelo TikTok</dt>
-                <dd className={`tabular-nums ${TONE_CLASS[linha.platformRate.tone]}`}>
-                  {linha.platformRate.text}
-                </dd>
-              </div>
-            </dl>
+            {view.warnings.map((aviso) => (
+              <DataQualityNote key={aviso} note={aviso} />
+            ))}
+            {!view.warnings.length && <DataQualityNote note={notaCobertura} />}
           </div>
-        ))}
 
-        {/* Secao VISUALMENTE separada. Cancelados nao integram as vendas
-            comerciais, e exibi-los na mesma lista convidaria a soma-los. */}
-        <section className="mt-2 pt-3 border-t-2 border-warn/35">
-          <h3 className="text-sm font-semibold text-warn-ink">
-            {CANCELLED_SECTION_TITLE}
-          </h3>
-          <p className="text-xs text-ink-faint mt-0.5 mb-2">{CANCELLED_COPY}</p>
-          {cancelados.map((linha) => (
-            <div key={linha.brandKey} className="mb-2 last:mb-0">
-              <p className="text-sm font-medium text-ink-muted">
-                {linha.brand} · {linha.cancelledOrders} pedidos cancelados
-              </p>
-              <dl className="flex flex-col gap-0.5">
-                {linha.components.map((c) => (
-                  <div key={c.label} className="flex justify-between gap-4 text-sm">
-                    <dt className="text-ink-muted">{c.label}</dt>
-                    <dd className={`tabular-nums ${TONE_CLASS[c.cell.tone]}`}>
-                      {c.cell.text}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
+          {/* Escala de cada marca: GMV oficial e pedidos comerciais, com o
+              valor cheio (base das duas taxas) na sub-linha. */}
+          <DrilldownSecao titulo="Vendas comerciais por marca">
+            <ul className="flex flex-col">
+              {porGmv.map((r) => (
+                <EvidenceRow
+                  key={r.brand}
+                  label={brandLabel(r.brand)}
+                  value={`${formatSignedBrl(r.official_gmv).text} · ${formatCount(r.commercial_orders)} pedidos`}
+                  tone={r.official_gmv == null ? "muted" : "value"}
+                  pct={barra(r.official_gmv, maiorGmv)}
+                  reference={
+                    r.full_product_value != null
+                      ? `Valor cheio ${formatSignedBrl(r.full_product_value).text}`
+                      : null
+                  }
+                />
+              ))}
+            </ul>
+          </DrilldownSecao>
+
+          {/* Os dois componentes em secoes PROPRIAS: financiadores diferentes.
+              Cada linha traz o valor e a taxa do backend, com o sinal. */}
+          <DrilldownSecao titulo={DISCOUNT_COMPONENT_LABELS.seller_discount_signed} acao={<span>% do valor cheio</span>}>
+            <ul className="flex flex-col">
+              {porDesconto.map((r) => (
+                <EvidenceRow
+                  key={r.brand}
+                  label={brandLabel(r.brand)}
+                  value={`${formatSignedBrl(r.seller_discount_signed).text} · ${formatSignedPct(r.seller_discount_rate).text}`}
+                  tone={r.seller_discount_signed == null ? "muted" : "value"}
+                  pct={barra(r.seller_discount_rate, maiorDesconto)}
+                />
+              ))}
+            </ul>
+          </DrilldownSecao>
+
+          <DrilldownSecao titulo={DISCOUNT_COMPONENT_LABELS.platform_subsidy_amount} acao={<span>% do valor cheio</span>}>
+            <ul className="flex flex-col">
+              {porSubsidio.map((r) => (
+                <EvidenceRow
+                  key={r.brand}
+                  label={brandLabel(r.brand)}
+                  value={`${formatSignedBrl(r.platform_subsidy_amount).text} · ${formatSignedPct(r.platform_subsidy_rate).text}`}
+                  tone={r.platform_subsidy_amount == null ? "muted" : "value"}
+                  pct={barra(r.platform_subsidy_rate, maiorSubsidio)}
+                  barra={CHANNEL_DOT.tiktok}
+                />
+              ))}
+            </ul>
+          </DrilldownSecao>
+
+          {/* Secao VISUALMENTE separada. Cancelados nao integram as vendas
+              comerciais, e exibi-los na mesma lista convidaria a soma-los. */}
+          <section className="flex flex-col gap-1.5 border-t-2 border-warn/35 pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-warn-ink">
+                {CANCELLED_SECTION_TITLE}
+                <InfoDica texto={CANCELLED_COPY} />
+              </h3>
             </div>
-          ))}
-        </section>
-
-        <div className="flex flex-col gap-1 text-xs text-ink-faint">
-          <p>{SELLER_COPY}</p>
-          <p>{SUBSIDY_COPY}</p>
-          <p>{RETROACTIVE_COPY}</p>
-          {/* O limite acompanha a cobertura COMPLETA tambem: `complete`
-              significa grade observada completa, nao "ingestao comprovada". */}
-          {!view.coverageIsIncomplete && <p>{COVERAGE_LIMIT_COPY}</p>}
-          <p>{block.limitation_note}</p>
+            <ul className="flex flex-col">
+              {porCancelados.map((r) => (
+                <EvidenceRow
+                  key={r.brand}
+                  label={brandLabel(r.brand)}
+                  value={`${formatCount(r.cancelled_orders)} pedidos`}
+                  reference={`Desconto da marca ${formatSignedBrl(r.cancelled_seller_discount_signed).text} · Subsídio do TikTok ${formatSignedBrl(r.cancelled_platform_subsidy_amount).text}`}
+                />
+              ))}
+            </ul>
+          </section>
         </div>
       </KpiDrilldownDialog>
     </section>

@@ -585,6 +585,7 @@ function GerencialInner() {
               return k?.exactValue ?? k?.value ?? "—";
             })()}
             comparacao={kpis.find((k) => k.key === dialog.key)}
+            tendencia={dialog.key === "orders" || dialog.key === "avg_ticket" ? tendencias[dialog.key] : null}
             periodLabel={periodLabel}
             refreshedAt={sources.overview.refreshedAt}
             overview={overview}
@@ -693,6 +694,7 @@ function GerencialInner() {
         {dialog?.kind === "movement" && (
           <MovementDrilldownContent
             movement={dialog.movement}
+            marca={matrix.rows.find((r) => r.brand === dialog.movement.brand) ?? null}
             periodLabel={periodLabel}
             refreshedAt={sources.brands.refreshedAt}
             brandHref={brandHref(dialog.movement.brand)}
@@ -706,6 +708,7 @@ function GerencialInner() {
             top1Pct={concentration.top1Pct}
             top3Pct={concentration.top3Pct}
             positiveBrands={concentration.positiveBrands}
+            ranking={concentration.entries}
             periodLabel={periodLabel}
             refreshedAt={sources.brands.refreshedAt}
             brandHref={brandHref(dialog.entry.brand)}

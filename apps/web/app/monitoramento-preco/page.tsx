@@ -78,8 +78,13 @@ import {
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import { ArrowUpRight } from "lucide-react";
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import DataQualityNote from "@/components/drilldown/DataQualityNote";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
+import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import { computeRequestStatus } from "@/lib/request-freshness";
 
 const LIMITE = MONITORAMENTO_PRECO_MAX_LIMIT;
@@ -121,6 +126,13 @@ const TONE_CLASS: Record<"attention" | "neutral" | "muted", string> = {
   attention: "bg-amber-50 text-amber-800 border-amber-200",
   neutral: "bg-emerald-50 text-emerald-800 border-emerald-200",
   muted: "bg-slate-50 text-slate-600 border-slate-200",
+};
+
+/** POPUPS-1 — pilula da diferenca no detalhe, pela situacao que o backend deu. */
+const PELE_DIFERENCA: Record<"attention" | "neutral" | "muted", string> = {
+  attention: "bg-warn-soft text-warn-ink",
+  neutral: "bg-ok-soft text-ok-ink",
+  muted: "bg-raised text-ink-muted",
 };
 
 function StatusBadge({ status }: { status: ComparisonStatus }) {
@@ -1320,160 +1332,151 @@ export default function MonitoramentoPrecoPage() {
         title={linhaAberta ? tituloLinha(linhaAberta) : "Anúncio"}
         focusResetKey={linhaAberta?.item_id}
       >
+        {/*
+          POPUPS-1 — o preco anunciado em destaque com a diferenca para o PDV
+          em pilula (cor pela situacao que o BACKEND deu, nunca pelo sinal);
+          situacao, marca e data em selos; depois referencia, correspondencia,
+          o que a fonte nao traz e as limitacoes da linha. O aviso
+          observacional vai para o "ⓘ". Nada e' calculado aqui.
+        */}
         {linhaAberta && (
-          <div className="space-y-4 text-sm">
-            <div>
-              <StatusBadge status={linhaAberta.comparison_status} />
-            </div>
-
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <dt className="text-xs text-slate-500">Marca</dt>
-                <dd className="font-semibold">
-                  {brandLabel(linhaAberta.brand)}
-                  {foraDoEscopo(linhaAberta) && (
-                    <span className="ml-2 inline-block text-xs font-semibold border border-slate-300 text-slate-600 rounded-full px-2 py-0.5 align-middle">
-                      {ROTULO_FORA_DE_ESCOPO}
+          <div className="flex flex-col gap-4 text-sm">
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+                <NumeroAnimado
+                  texto={fmtPrecoObservado(linhaAberta.advertised_price)}
+                  className={`text-[32px] font-bold leading-none tracking-tight tabular-nums ${
+                    temPrecoObservado(linhaAberta) ? "text-ink" : "text-ink-faint"
+                  }`}
+                />
+                <span className="flex flex-wrap items-center gap-2 pb-0.5">
+                  {linhaAberta.difference_pct != null && (
+                    <span
+                      className={`rounded-md px-2 py-0.5 text-sm font-semibold tabular-nums ${
+                        PELE_DIFERENCA[STATUS_TONE[linhaAberta.comparison_status]]
+                      }`}
+                    >
+                      {fmtPercentual(linhaAberta.difference_pct)}
                     </span>
                   )}
-                </dd>
+                  <span className="text-xs text-ink-faint">preço anunciado</span>
+                </span>
               </div>
-              <div>
-                <dt className="text-xs text-slate-500">Item</dt>
-                <dd className="font-mono text-xs">{linhaAberta.item_id}</dd>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <StatusBadge status={linhaAberta.comparison_status} />
+                <span className="rounded-full border border-line bg-raised px-2 py-0.5 text-xs font-medium text-ink-muted">
+                  {brandLabel(linhaAberta.brand)}
+                </span>
+                {foraDoEscopo(linhaAberta) && (
+                  <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs font-semibold text-ink-muted">
+                    {ROTULO_FORA_DE_ESCOPO}
+                  </span>
+                )}
+                <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ink-muted">
+                  Anúncio {listingStatusLabel(linhaAberta.listing_status).toLowerCase()}
+                </span>
+                <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ink-muted tabular-nums">
+                  Data observada {fmtData(linhaAberta.ref_date)}
+                </span>
+                <InfoDica texto={`${AVISO_OBSERVACIONAL[0]} ${AVISO_OBSERVACIONAL[1]}`} />
               </div>
-              <div>
-                <dt className="text-xs text-slate-500">SKU</dt>
-                <dd className="font-mono text-xs">{linhaAberta.seller_sku ?? INDISPONIVEL}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-500">EAN</dt>
-                <dd className="font-mono text-xs">{linhaAberta.gtin ?? INDISPONIVEL}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-500">Situação do anúncio</dt>
-                <dd>{listingStatusLabel(linhaAberta.listing_status)}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-500">Data observada</dt>
-                <dd>{fmtData(linhaAberta.ref_date)}</dd>
-              </div>
-            </dl>
-
-            <div className="border-t border-slate-200 pt-3">
-              <p className="text-xs font-semibold text-slate-700 mb-2">Preços</p>
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <dt className="text-xs text-slate-500">Preço anunciado</dt>
-                  <dd className="font-semibold tabular-nums">
-                    {fmtPrecoObservado(linhaAberta.advertised_price)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Preço sugerido de revenda (PDV)</dt>
-                  <dd className="font-semibold tabular-nums">
-                    {fmtMoeda(linhaAberta.suggested_retail_amount)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Diferença</dt>
-                  <dd className="font-semibold tabular-nums">
-                    {fmtDiferenca(linhaAberta.difference_amount)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Diferença percentual</dt>
-                  <dd className="font-semibold tabular-nums">
-                    {fmtPercentual(linhaAberta.difference_pct)}
-                  </dd>
-                </div>
-              </dl>
             </div>
 
-            <div className="border-t border-slate-200 pt-3">
-              <p className="text-xs font-semibold text-slate-700 mb-2">
-                Correspondência com a referência
-              </p>
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <dt className="text-xs text-slate-500">Método</dt>
-                  <dd>{matchLabel(linhaAberta.match_method, linhaAberta.match_quality)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Qualidade</dt>
-                  <dd>{matchQualityLabel(linhaAberta.match_quality)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Tipo de referência</dt>
-                  <dd>Preço sugerido de revenda (PDV)</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Vigência da referência</dt>
-                  <dd>Não informada</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Referência capturada em</dt>
-                  <dd>{fmtInstanteBrt(linhaAberta.reference_captured_at)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Captura do preço</dt>
-                  <dd>{fmtCapturaPreco(linhaAberta.observed_at)}</dd>
-                </div>
-              </dl>
+            <DrilldownSecao titulo="Contra a referência">
+              <ul className="flex flex-col">
+                <EvidenceRow
+                  label="Preço sugerido de revenda (PDV)"
+                  value={fmtMoeda(linhaAberta.suggested_retail_amount)}
+                  tone={linhaAberta.suggested_retail_amount != null ? "value" : "muted"}
+                />
+                <EvidenceRow
+                  label="Diferença"
+                  value={fmtDiferenca(linhaAberta.difference_amount)}
+                  tone={linhaAberta.difference_amount != null ? "value" : "muted"}
+                />
+              </ul>
               {linhaAberta.comparison_status === "non_comparable_reference_ambiguous" && (
-                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3">
-                  Referência ambígua — {fmtContagem(linhaAberta.reference_candidate_count)}{" "}
-                  linhas disputam a mesma chave; sem diferença calculada.
-                </p>
+                <DataQualityNote
+                  note={`Referência ambígua — ${fmtContagem(linhaAberta.reference_candidate_count)} linhas disputam a mesma chave; sem diferença calculada.`}
+                />
               )}
-            </div>
+            </DrilldownSecao>
 
-            <div className="border-t border-slate-200 pt-3">
-              <p className="text-xs font-semibold text-slate-700 mb-2">
-                Composição indisponível
-              </p>
-              <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <DrilldownSecao titulo="Correspondência com a referência">
+              <ul className="flex flex-col">
+                <EvidenceRow label="Método" value={matchLabel(linhaAberta.match_method, linhaAberta.match_quality)} />
+                <EvidenceRow label="Qualidade" value={matchQualityLabel(linhaAberta.match_quality)} />
+                <EvidenceRow label="Vigência da referência" value="Não informada" tone="muted" />
+                <EvidenceRow label="Referência capturada em" value={fmtInstanteBrt(linhaAberta.reference_captured_at)} />
+                <EvidenceRow label="Captura do preço" value={fmtCapturaPreco(linhaAberta.observed_at)} />
+              </ul>
+            </DrilldownSecao>
+
+            {/* Ausente nao e' zero: os quatro componentes aparecem como "—". */}
+            <DrilldownSecao
+              titulo="Composição indisponível"
+              acao={<InfoDica texto={`${AVISO_OBSERVACIONAL[2]} ${AVISO_OBSERVACIONAL[3]}`} />}
+            >
+              <ul className="flex flex-wrap gap-1.5">
                 {COMPOSICAO_INDISPONIVEL.map((c) => (
-                  <div key={c.rotulo}>
-                    <dt className="text-xs text-slate-500">{c.rotulo}</dt>
-                    <dd className="font-semibold text-slate-500">{c.valor}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-
-            <div className="border-t border-slate-200 pt-3">
-              <p className="text-xs font-semibold text-slate-700 mb-2">Limitações</p>
-              <ul className="text-xs text-slate-600 space-y-1 list-disc pl-4">
-                {linhaAberta.limitations.map((l) => (
-                  <li key={l}>{l}</li>
+                  <li
+                    key={c.rotulo}
+                    className="inline-flex items-baseline gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1 text-xs"
+                  >
+                    <span className="text-ink-muted">{c.rotulo}</span>
+                    <span className="font-semibold text-ink-faint">{c.valor}</span>
+                  </li>
                 ))}
               </ul>
-            </div>
+            </DrilldownSecao>
 
-            <div className="border-t border-slate-200 pt-3">
-              {/*
-                Gate PMA-OPS-2 — TRES estados. A mensagem anterior dizia a
-                mesma frase para "a fonte nao publica URL" (Shopee e TikTok,
-                limite da origem) e para "o canal publica e esta linha veio
-                sem" (ML, defeito do dado). A URL nunca e' montada: so'
-                validada contra a allowlist do canal.
-              */}
-              {linkAnuncio?.estado === "disponivel" && linkAnuncio.url ? (
-                <a
-                  href={linkAnuncio.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block bg-violet-600 text-white rounded-lg px-4 py-3 min-h-[44px] text-sm font-semibold hover:bg-violet-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-                >
-                  {linkAnuncio.rotulo}
-                </a>
-              ) : linkAnuncio?.estado === "ausente_na_fonte" ? (
-                <p className="text-xs text-slate-500">{linkAnuncio.rotulo}</p>
-              ) : linkAnuncio ? (
-                <p className="text-xs text-amber-800">{linkAnuncio.rotulo}</p>
-              ) : null}
-            </div>
+            <DrilldownSecao titulo="Identificação">
+              <ul className="flex flex-col">
+                <EvidenceRow label="Item" value={linhaAberta.item_id} />
+                <EvidenceRow
+                  label="SKU"
+                  value={linhaAberta.seller_sku ?? INDISPONIVEL}
+                  tone={linhaAberta.seller_sku ? "value" : "muted"}
+                />
+                <EvidenceRow label="EAN" value={linhaAberta.gtin ?? INDISPONIVEL} tone={linhaAberta.gtin ? "value" : "muted"} />
+              </ul>
+            </DrilldownSecao>
+
+            {linhaAberta.limitations.length > 0 && (
+              <DrilldownSecao titulo="Limitações">
+                <ul className="flex flex-col gap-1">
+                  {linhaAberta.limitations.map((l) => (
+                    <li key={l} className="flex items-start gap-2 text-xs leading-snug text-ink-muted">
+                      <span aria-hidden="true" className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-line-strong" />
+                      <span>{l}</span>
+                    </li>
+                  ))}
+                </ul>
+              </DrilldownSecao>
+            )}
+
+            {/*
+              Gate PMA-OPS-2 — TRES estados. A mensagem anterior dizia a
+              mesma frase para "a fonte nao publica URL" (Shopee e TikTok,
+              limite da origem) e para "o canal publica e esta linha veio
+              sem" (ML, defeito do dado). A URL nunca e' montada: so'
+              validada contra a allowlist do canal.
+            */}
+            {linkAnuncio?.estado === "disponivel" && linkAnuncio.url ? (
+              <a
+                href={linkAnuncio.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="group mt-1 flex min-h-[44px] items-center justify-between gap-3 rounded-xl border border-line px-4 text-sm font-semibold text-accent transition-colors hover:border-accent/40 hover:bg-accent-soft/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                <span>{linkAnuncio.rotulo}</span>
+                <ArrowUpRight aria-hidden="true" className="h-4 w-4 shrink-0 transition-transform duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+              </a>
+            ) : linkAnuncio?.estado === "ausente_na_fonte" ? (
+              <p className="text-xs text-ink-faint">{linkAnuncio.rotulo}</p>
+            ) : linkAnuncio ? (
+              <DataQualityNote note={linkAnuncio.rotulo} />
+            ) : null}
           </div>
         )}
       </KpiDrilldownDialog>

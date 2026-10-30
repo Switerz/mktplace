@@ -9,9 +9,12 @@ import {
 } from "@/lib/executive-pulse";
 import { SEVERITY_LABEL, SEVERITY_TONE, type ExecutiveSeverity } from "@/lib/executive-summary";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
+import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 
 export type PulseView = { mode: "insight" | "all"; key: string | null };
 
@@ -67,104 +70,171 @@ function severityReason(type: string, severity: ExecutiveSeverity): string {
   }
 }
 
+/** POPUPS-1 — pele da pilula pela severidade; crescimento e' bom sinal. */
+function peleDe(insight: PulseInsight): string {
+  if (insight.type === "growth") return "bg-ok-soft text-ok-ink";
+  if (insight.severity === "critical") return "bg-crit-soft text-crit-ink";
+  if (insight.severity === "warning") return "bg-warn-soft text-warn-ink";
+  return "bg-raised text-ink-muted";
+}
+
+/** Cor da barra de um caso agrupado, pela severidade do proprio caso. */
+const BARRA_SEVERIDADE: Record<ExecutiveSeverity, string> = {
+  critical: "bg-crit",
+  warning: "bg-warn",
+  info: "bg-accent",
+};
+
+/**
+ * POPUPS-1 — topo do insight no padrao do detalhe de KPI: numero grande, a
+ * diferenca em pilula (cor da severidade) com a referencia nomeada, e os selos
+ * de contexto. O criterio da severidade fica no "ⓘ".
+ */
+function InsightTopo({
+  insight,
+  category,
+  periodLabel,
+  refreshedAt,
+}: {
+  insight: PulseInsight;
+  category: string;
+  periodLabel: string;
+  refreshedAt: string | null;
+}) {
+  const valor = formatMetricByType(insight.type, insight.metric_value);
+  // growth/drop: o valor principal JA' e' a variacao %; a pilula leva o R$.
+  const variacaoJaNoValor = insight.type === "growth" || insight.type === "drop";
+  const diferenca = [
+    !variacaoJaNoValor && insight.delta_pct != null ? formatDeltaPct(insight.delta_pct) : null,
+    insight.delta_abs != null ? formatDeltaAbs(insight.type, insight.delta_abs) : null,
+  ]
+    .filter((t): t is string => t != null && t !== "—")
+    .join(" · ");
+  const referencia =
+    insight.reference_value != null
+      ? `vs ${formatReferenceValue(insight.type, insight.reference_value)} (${referenceKindLabel(insight.reference_kind)})`
+      : null;
+  return (
+    <div className="flex flex-col gap-2">
+      {valor !== "—" && (
+        <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+          <NumeroAnimado texto={valor} className="text-[32px] font-bold leading-none tracking-tight text-ink tabular-nums" />
+          {(diferenca || referencia) && (
+            <span className="flex flex-wrap items-center gap-2 pb-0.5">
+              {diferenca && (
+                <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-sm font-semibold tabular-nums ${peleDe(insight)}`}>
+                  {diferenca}
+                </span>
+              )}
+              {referencia && <span className="text-xs text-ink-faint tabular-nums">{referencia}</span>}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${SEVERITY_TONE[insight.severity]}`}>
+          {SEVERITY_LABEL[insight.severity] ?? insight.severity}
+        </span>
+        <DrilldownContextLine leading={category} periodLabel={periodLabel} refreshedAt={refreshedAt} />
+        {insight.brand && (
+          <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ink-muted">{insight.brand}</span>
+        )}
+        {insight.marketplace && (
+          <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ink-muted">{insight.marketplace}</span>
+        )}
+        <InfoDica texto={`${metricLabel(insight.type)}. ${severityReason(insight.type, insight.severity)}`} />
+      </div>
+    </div>
+  );
+}
+
 function InsightDetail({ insight }: { insight: PulseInsight }) {
-  const hasReference = insight.reference_value != null;
-  const hasDelta = insight.delta_abs != null || insight.delta_pct != null;
   const staleEvidence =
     insight.type === "stale_data" &&
     (insight.source || insight.last_date || insight.staleness_days != null || insight.threshold_days != null);
   return (
-    <div className="flex flex-col gap-3 text-sm">
-      <div>
-        <div className="flex items-center gap-1.5">
-          <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">O que aconteceu</p>
-          {/* O criterio da severidade fica no "ⓘ" do selo. */}
-          <span className={`text-xs font-semibold uppercase rounded px-1.5 py-0.5 ${SEVERITY_TONE[insight.severity]}`}>
-            {SEVERITY_LABEL[insight.severity] ?? insight.severity}
-          </span>
-          <InfoDica texto={severityReason(insight.type, insight.severity)} />
-        </div>
-        <p className="text-ink-muted">{insight.description || insight.title}</p>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <p className="text-xs text-ink-faint">{metricLabel(insight.type)}</p>
-          <p className="text-base font-bold text-ink tabular-nums">{formatMetricByType(insight.type, insight.metric_value)}</p>
-        </div>
-        {hasReference && (
-          <div>
-            <p className="text-xs text-ink-faint">Referência ({referenceKindLabel(insight.reference_kind)})</p>
-            <p className="text-base font-semibold text-ink-muted tabular-nums">{formatReferenceValue(insight.type, insight.reference_value)}</p>
-          </div>
-        )}
-      </div>
-      {hasDelta && (
-        <div>
-          <p className="text-xs text-ink-faint">Diferença</p>
-          <p className="text-sm font-semibold text-ink-muted tabular-nums">
-            {insight.delta_pct != null && formatDeltaPct(insight.delta_pct)}
-            {insight.delta_pct != null && insight.delta_abs != null && " · "}
-            {insight.delta_abs != null && formatDeltaAbs(insight.type, insight.delta_abs)}
-          </p>
-        </div>
+    <>
+      {(insight.description || insight.title) && (
+        <p className="text-sm leading-snug text-ink-muted">{insight.description || insight.title}</p>
       )}
       {staleEvidence && (
-        <div className="text-xs text-ink-faint flex flex-col gap-0.5 border border-line rounded-lg px-3 py-2">
-          {insight.source && <span>Origem: <span className="font-medium text-ink-muted">{insight.source}</span></span>}
-          {insight.last_date && <span>Última data disponível: <span className="font-medium text-ink-muted">{insight.last_date}</span></span>}
-          {insight.staleness_days != null && <span>Defasagem: <span className="font-medium text-ink-muted">{insight.staleness_days} dia(s)</span></span>}
-          {insight.threshold_days != null && <span>Limite de frescor: <span className="font-medium text-ink-muted">{insight.threshold_days} dia(s)</span></span>}
-        </div>
+        <DrilldownSecao titulo="Evidência">
+          <ul className="flex flex-col">
+            {insight.source && <EvidenceRow label="Origem" value={insight.source} />}
+            {insight.last_date && <EvidenceRow label="Última data disponível" value={insight.last_date} />}
+            {/* A defasagem ja' e' o numero do topo quando vem em metric_value. */}
+            {insight.staleness_days != null && insight.metric_value == null && (
+              <EvidenceRow label="Defasagem" value={`${insight.staleness_days} dia(s)`} />
+            )}
+            {insight.threshold_days != null && (
+              <EvidenceRow
+                label="Limite de frescor"
+                value={`${insight.threshold_days} dia(s)`}
+                tone={
+                  insight.staleness_days != null && insight.staleness_days > insight.threshold_days ? "warning" : "value"
+                }
+              />
+            )}
+          </ul>
+        </DrilldownSecao>
       )}
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-faint">
-        {insight.brand && <span>Marca: <span className="font-medium text-ink-muted">{insight.brand}</span></span>}
-        {insight.marketplace && <span>Canal: <span className="font-medium text-ink-muted">{insight.marketplace}</span></span>}
-      </div>
       <DataQualityNote note={insight.confidence_note} />
-    </div>
+    </>
   );
 }
 
 function GroupDetail({ group, periodLabel, refreshedAt, buildHref }: { group: PulseGroup; periodLabel: string; refreshedAt: string | null; buildHref: (h: string) => string }) {
   const many = group.count > 1;
+  // POPUPS-1: casos do maior ao menor (pela magnitude da metrica), com barra
+  // relativa ao maior caso e a cor da severidade de cada um.
+  const casos = [...group.members].sort(
+    (a, b) => Math.abs(b.metric_value ?? 0) - Math.abs(a.metric_value ?? 0),
+  );
+  const maior = Math.max(0, ...casos.map((m) => Math.abs(m.metric_value ?? 0)));
   return (
-    <div className="flex flex-col gap-4">
-      <DrilldownContextLine
-        leading={CATEGORY_LABEL[group.category] ?? group.category}
+    <div className="flex flex-col gap-4 text-sm">
+      <InsightTopo
+        insight={group.representative}
+        category={CATEGORY_LABEL[group.category] ?? group.category}
         periodLabel={periodLabel}
         refreshedAt={refreshedAt}
       />
+      <InsightDetail insight={group.representative} />
 
-      {many ? (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">{group.count} itens agrupados</p>
-          <ul className="flex flex-col divide-y divide-line border border-line rounded-lg">
-            {group.members.map((m, i) => (
-              <li key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
-                <span className="text-ink-muted truncate">{m.brand ?? m.title}</span>
-                <div className="flex items-center gap-3 shrink-0">
-                  <span className="tabular-nums font-semibold text-ink">{formatMetricByType(m.type, m.metric_value)}</span>
-                  {/* CTA próprio por membro (Finding 6) — nome acessível
-                      identifica a marca/item; filtros preservados por buildHref. */}
-                  {m.href && (
-                    <Link
-                      href={buildHref(m.href)}
-                      aria-label={`Abrir ${m.brand ?? m.title} na tela de origem`}
-                      className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
-                    >
-                      Abrir
-                    </Link>
-                  )}
+      {many && (
+        <DrilldownSecao titulo="Casos" acao={<span className="tabular-nums">{group.count}</span>}>
+          <ul className="flex flex-col">
+            {casos.map((m, i) => (
+              <li key={i} className="flex flex-col">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate text-ink-muted">{m.brand ?? m.title}</span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    <span className="font-semibold text-ink tabular-nums">{formatMetricByType(m.type, m.metric_value)}</span>
+                    {/* CTA próprio por membro (Finding 6) — nome acessível
+                        identifica a marca/item; filtros preservados por buildHref. */}
+                    {m.href && (
+                      <Link
+                        href={buildHref(m.href)}
+                        aria-label={`Abrir ${m.brand ?? m.title} na tela de origem`}
+                        className="inline-flex items-center justify-center min-h-11 min-w-11 text-xs font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+                      >
+                        Abrir
+                      </Link>
+                    )}
+                  </span>
                 </div>
+                {m.metric_value != null && maior > 0 && (
+                  <span aria-hidden="true" className="mb-1 block h-1.5 w-full overflow-hidden rounded-full bg-raised">
+                    <span
+                      className={`tc-barra block h-full rounded-full ${BARRA_SEVERIDADE[m.severity] ?? "bg-accent"}`}
+                      style={{ width: `${(Math.abs(m.metric_value) / maior) * 100}%` }}
+                    />
+                  </span>
+                )}
               </li>
             ))}
           </ul>
-          <div className="pt-1">
-            <InsightDetail insight={group.representative} />
-          </div>
-        </div>
-      ) : (
-        <InsightDetail insight={group.representative} />
+        </DrilldownSecao>
       )}
 
       {/* Grupo unitário mantém o CTA único (Finding 6). */}
@@ -183,16 +253,19 @@ function GroupButton({ group, onSelect, innerRef }: { group: PulseGroup; onSelec
       ref={innerRef}
       type="button"
       onClick={() => onSelect(group.key)}
-      className="w-full text-left flex items-start gap-2 rounded-lg border border-line px-3 py-2 min-h-11 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="w-full text-left flex items-center gap-2 rounded-lg border border-line px-3 py-2 min-h-11 hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
-      <span className={`text-[10px] font-semibold uppercase rounded px-1.5 py-0.5 shrink-0 mt-0.5 ${SEVERITY_TONE[group.severity]}`}>
+      <span className={`text-xs font-semibold rounded px-1.5 py-0.5 shrink-0 ${SEVERITY_TONE[group.severity]}`}>
         {SEVERITY_LABEL[group.severity]}
       </span>
-      <span className="min-w-0">
-        <span className="block text-sm font-medium text-ink">{group.title}</span>
-        {group.count === 1 && group.representative.metric_value != null && (
-          <span className="block text-xs text-ink-faint tabular-nums">{formatMetricByType(group.type, group.representative.metric_value)}</span>
-        )}
+      <span className="min-w-0 flex-1 text-sm font-medium text-ink">{group.title}</span>
+      {/* POPUPS-1: o numero do caso unico a direita; grupo mostra a contagem. */}
+      <span className="shrink-0 text-xs text-ink-faint tabular-nums">
+        {group.count > 1
+          ? `${group.count} casos`
+          : group.representative.metric_value != null
+            ? formatMetricByType(group.type, group.representative.metric_value)
+            : null}
       </span>
     </button>
   );
@@ -246,17 +319,19 @@ export default function InsightDrilldownContent(props: Props) {
 
   return (
     <div className="flex flex-col gap-4">
+      <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
       {sections.every((s) => s.groups.length === 0) && (
         <p className="text-sm text-ink-faint">Nenhum sinal no período.</p>
       )}
       {sections.map((s) =>
         s.groups.length === 0 ? null : (
-          <div key={s.key} className="flex flex-col gap-2">
-            <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">{CATEGORY_LABEL[s.key]}</p>
-            {s.groups.map((g) => (
-              <GroupButton key={g.key} group={g} onSelect={onSelectGroup} innerRef={assignFirst()} />
-            ))}
-          </div>
+          <DrilldownSecao key={s.key} titulo={CATEGORY_LABEL[s.key]} acao={<span className="tabular-nums">{s.groups.length}</span>}>
+            <div className="flex flex-col gap-1.5">
+              {s.groups.map((g) => (
+                <GroupButton key={g.key} group={g} onSelect={onSelectGroup} innerRef={assignFirst()} />
+              ))}
+            </div>
+          </DrilldownSecao>
         ),
       )}
     </div>
