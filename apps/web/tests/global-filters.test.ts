@@ -20,14 +20,19 @@ test("presetRange: hoje retorna um unico dia", () => {
   assert.equal(r.dateTo, "2026-06-15");
 });
 
-test("presetRange: 7d/30d/90d incluem hoje e contam para tras", () => {
-  assert.deepEqual(presetRange("7d", TODAY), { dateFrom: "2026-06-09", dateTo: "2026-06-15" });
-  assert.deepEqual(presetRange("30d", TODAY), { dateFrom: "2026-05-17", dateTo: "2026-06-15" });
-  assert.deepEqual(presetRange("90d", TODAY), { dateFrom: "2026-03-18", dateTo: "2026-06-15" });
+test("presetRange: 7d/30d/90d terminam ontem (ultimo dia fechado) e contam para tras", () => {
+  assert.deepEqual(presetRange("7d", TODAY), { dateFrom: "2026-06-08", dateTo: "2026-06-14" });
+  assert.deepEqual(presetRange("30d", TODAY), { dateFrom: "2026-05-16", dateTo: "2026-06-14" });
+  assert.deepEqual(presetRange("90d", TODAY), { dateFrom: "2026-03-17", dateTo: "2026-06-14" });
 });
 
-test("presetRange: mes_atual vai do dia 1 ate hoje", () => {
-  assert.deepEqual(presetRange("mes_atual", TODAY), { dateFrom: "2026-06-01", dateTo: "2026-06-15" });
+test("presetRange: mes_atual vai do dia 1 ate ontem", () => {
+  assert.deepEqual(presetRange("mes_atual", TODAY), { dateFrom: "2026-06-01", dateTo: "2026-06-14" });
+});
+
+test("presetRange: mes_atual no dia 1 cobre o mes anterior inteiro (nao ha dia fechado no mes novo)", () => {
+  const dia1 = new Date(2026, 6, 1);
+  assert.deepEqual(presetRange("mes_atual", dia1), { dateFrom: "2026-06-01", dateTo: "2026-06-30" });
 });
 
 test("presetRange: mes_anterior cobre o mes calendario completo anterior", () => {
@@ -45,8 +50,8 @@ test("toISODate nunca usa UTC (evita off-by-one em fuso negativo)", () => {
 });
 
 test("detectPreset reconhece um preset conhecido e cai para 'personalizado' fora deles", () => {
-  assert.equal(detectPreset("2026-06-09", "2026-06-15", TODAY), "7d");
-  assert.equal(detectPreset("2026-06-01", "2026-06-15", TODAY), "mes_atual");
+  assert.equal(detectPreset("2026-06-08", "2026-06-14", TODAY), "7d");
+  assert.equal(detectPreset("2026-06-01", "2026-06-14", TODAY), "mes_atual");
   assert.equal(detectPreset("2026-01-05", "2026-01-20", TODAY), "personalizado");
 });
 
@@ -237,8 +242,8 @@ test("computeDefaultFilters: URL vazia em Qualidade -> mes anterior + compare=tr
 
 test("computeDefaultFilters: URL vazia em Pedidos -> ultimos 30 dias + compare=false", () => {
   const filters = computeDefaultFilters({ defaultPreset: "30d", now: () => TODAY });
-  assert.equal(filters.dateFrom, "2026-05-17");
-  assert.equal(filters.dateTo, "2026-06-15");
+  assert.equal(filters.dateFrom, "2026-05-16");
+  assert.equal(filters.dateTo, "2026-06-14");
   assert.equal(filters.compare, false);
 });
 

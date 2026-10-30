@@ -115,7 +115,7 @@ function ChannelSummary({
                 </span>
                 <span className="block w-full bg-accent-soft rounded-full h-1.5 overflow-hidden">
                   <span
-                    className={`block h-1.5 rounded-full ${s.value != null ? CHANNEL_DOT[s.channel] : "bg-line-strong"}`}
+                    className={`tc-barra block h-1.5 rounded-full ${s.value != null ? CHANNEL_DOT[s.channel] : "bg-line-strong"}`}
                     style={{ width: `${s.pct ?? 0}%` }}
                   />
                 </span>

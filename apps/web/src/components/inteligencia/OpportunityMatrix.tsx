@@ -2,6 +2,7 @@
 
 // `fmtNumber` saiu daqui: as nove contagens deste componente passaram a usar
 // `contagemExata`. Dinheiro segue com `fmtBrl`, que abrevia de propósito.
+import InfoDica from "@/components/ui/InfoDica";
 import { fmtBrl } from "@/lib/formatters";
 import { brandLabel } from "@/lib/inteligencia/brands";
 import { decBr, roasBr } from "@/lib/inteligencia/format";
@@ -48,17 +49,14 @@ export default function OpportunityMatrix({
   if (estado === "out_of_scope") {
     return (
       <p className="px-6 py-8 text-center text-sm text-slate-500">
-        A seleção atual não inclui nenhuma marca do Mercado Livre, e o mapa de
-        oportunidades é da fotografia ML. Nenhum dado foi estimado para preencher
-        o bloco.
+        Sem marca do Mercado Livre na seleção.
       </p>
     );
   }
   if (!map || estado === "empty") {
     return (
       <p className="px-6 py-8 text-center text-sm text-slate-500">
-        Nenhum produto classificado neste escopo. O mapa aparece quando o snapshot
-        ML traz produtos com <code>product_status</code> definido.
+        Nenhum produto classificado neste escopo.
       </p>
     );
   }
@@ -79,13 +77,15 @@ export default function OpportunityMatrix({
             produtos · destaques plotados:{" "}
             <strong className="text-slate-800">{contagemExata(map.returned_count)}</strong>
           </p>
-          <p className="text-xs text-slate-500">
+          <p className="flex items-center gap-1 text-xs text-slate-500">
             Referências: ROAS {roasBr(map.roas_reference)} ·{" "}
             {map.gmv_reference == null ? "GMV indisponível" : `GMV ${moedaExata(map.gmv_reference)}`}
+            {/* A nota vem do backend e e' renderizada como veio, so' que no "ⓘ". */}
+            {map.reference_note && <InfoDica texto={map.reference_note} />}
           </p>
         </div>
-        <p className="text-xs text-slate-500">{sampleDeclaration(map)}</p>
-        <p className="text-xs text-slate-400">{map.reference_note}</p>
+        {/* So' quando os pontos sao amostra: ai' a separacao muda a leitura. */}
+        {isSample(map) && <p className="text-xs text-slate-500">{sampleDeclaration(map)}</p>}
       </div>
 
       {indisponivel ? (
@@ -93,12 +93,8 @@ export default function OpportunityMatrix({
           <p className="text-sm font-semibold text-amber-900">
             Matriz indisponível: não há GMV positivo neste escopo.
           </p>
-          <p className="text-xs text-amber-800 mt-1">
-            Sem nenhum produto com venda, não existe eixo de volume — e sem eixo de
-            volume não existem quatro quadrantes. Os {contagemExata(map.unclassified_count)}{" "}
-            produtos com investimento e ROAS medido ficam sem classificação em vez de
-            serem empurrados para um quadrante inventado. As duas faixas abaixo
-            continuam válidas, porque não dependem do eixo de GMV.
+          <p className="text-xs text-amber-800 mt-1 tabular-nums">
+            {contagemExata(map.unclassified_count)} produtos sem classificação.
           </p>
         </div>
       ) : (
@@ -334,12 +330,6 @@ function Plano({
           tamanho do ponto = investimento em Ads
         </li>
       </ul>
-      {isSample(map) && (
-        <p className="text-xs text-slate-500 mt-1">
-          Cada quadrante plota no máximo {map.highlight_limit_per_quadrant} destaques;
-          os agregados acima cobrem o universo inteiro.
-        </p>
-      )}
     </figure>
   );
 }

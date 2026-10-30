@@ -25,6 +25,7 @@ import {
 import { useSortableTable } from "@/lib/use-sortable-table";
 import SortableHeader from "@/components/SortableHeader";
 import TableScrollHint from "@/components/TableScrollHint";
+import InfoDica from "@/components/ui/InfoDica";
 import {
   buildRegioesRequestKey, buildRegioesFetchScopes, describeRegioesPartialSections, formatRegioesPartialWarning,
 } from "@/lib/regioes-request-key";
@@ -216,7 +217,6 @@ function RegioesPageInner() {
     <PageContainer>
       <PageHeader
         title="Regiões"
-        subtitle="Distribuição geográfica de GMV e pedidos por UF — cobertura de identificação regional por canal."
         scopeLine={
           <>
             Período: {periodLabel}
@@ -283,19 +283,18 @@ function RegioesPageInner() {
 
         {/* Gate DQ2: escopo do que esta sendo medido, SEMPRE visivel com dado
             fresco — separa cobertura de canal (dimensao 1) do preenchimento de
-            UF (dimensao 3) e impede a leitura de "cobertura integral". */}
+            UF (dimensao 3) e impede a leitura de "cobertura integral". O texto
+            completo (e o do canal sem cobertura regional) fica no ⓘ. */}
         {regionalScope && (
-          <div className={`rounded-2xl p-4 border ${regionalScope.status === "not_applicable" ? "bg-slate-50 border-slate-200" : regionalScope.status === "partial_channels" ? "bg-amber-50 border-amber-200" : "bg-violet-50/60 border-violet-100"}`}>
-            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${regionalScope.status === "not_applicable" ? "text-slate-600" : regionalScope.status === "partial_channels" ? "text-amber-700" : "text-violet-700"}`}>
-              {regionalScope.status === "not_applicable" ? "Sem cobertura regional na seleção" : "Escopo regional"}
-            </p>
-            <p className={`text-sm ${regionalScope.status === "not_applicable" ? "text-slate-700" : regionalScope.status === "partial_channels" ? "text-amber-800" : "text-slate-700"}`}>
-              {regionalScope.scopeNote}
-            </p>
-            {regionalScope.ufFillCaveat && (
-              <p className="text-xs text-amber-800 mt-1.5">{regionalScope.ufFillCaveat}</p>
-            )}
-          </div>
+          <p className={`flex w-fit flex-wrap items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium ${regionalScope.status === "not_applicable" ? "bg-slate-50 border-slate-200 text-slate-700" : regionalScope.status === "partial_channels" ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-violet-50/60 border-violet-100 text-violet-700"}`}>
+            {regionalScope.status === "not_applicable"
+              ? "Sem cobertura regional na seleção · não é venda zero"
+              : regionalScope.status === "partial_channels"
+                ? `Só ${regionalScope.channelsInScope.join(" + ")} · ${regionalScope.channelsOutOfScope.join(", ")} fora · não comparável ao GMV total`
+                : `Escopo regional: ${regionalScope.channelsInScope.join(" + ")} · não comparável ao GMV total`}
+            {regionalScope.ufFillCaveat && <span className="text-amber-800">· UF 100% só no escopo regional</span>}
+            <InfoDica texto={[regionalScope.scopeNote, regionalScope.ufFillCaveat, aviso].filter(Boolean).join(" ")} />
+          </p>
         )}
 
         {/* REGIONAL-SOURCE-RECOVERY-2: canal com fonte regional parado. Fica
@@ -306,32 +305,19 @@ function RegioesPageInner() {
             data-testid="aviso-cobertura-canal"
             className={`rounded-2xl p-4 border ${avisoCobertura.severidade === "critico" ? "bg-rose-50 border-rose-200" : avisoCobertura.severidade === "alerta" ? "bg-amber-50 border-amber-300" : "bg-amber-50/60 border-amber-200"}`}
           >
-            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${avisoCobertura.severidade === "critico" ? "text-rose-700" : "text-amber-800"}`}>
+            <p className={`flex items-center gap-1.5 text-sm font-semibold ${avisoCobertura.severidade === "critico" ? "text-rose-800" : "text-amber-900"}`}>
               {avisoCobertura.titulo}
+              <InfoDica texto={[avisoCobertura.mensagem, ...avisoCobertura.detalhes].join(" ")} />
             </p>
-            <p className={`text-sm ${avisoCobertura.severidade === "critico" ? "text-rose-800" : "text-amber-900"}`}>{avisoCobertura.mensagem}</p>
-            {avisoCobertura.detalhes.map((d) => (
-              <p key={d} className="text-xs text-slate-600 mt-1.5">{d}</p>
-            ))}
-          </div>
-        )}
-
-        {dataIsFresh && aviso && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
-            <p className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-1">Canal sem cobertura regional</p>
-            <p className="text-sm text-amber-800">{aviso}</p>
           </div>
         )}
 
         {dataIsFresh && displaySummary?.coverage_warning && (
-          <div className={`rounded-2xl p-4 border ${displaySummary.coverage_level === "low" ? "bg-rose-50 border-rose-200" : "bg-amber-50 border-amber-200"}`}>
-            <p className={`text-xs font-semibold uppercase tracking-wider mb-1 ${displaySummary.coverage_level === "low" ? "text-rose-700" : "text-amber-700"}`}>
-              {displaySummary.coverage_level === "low" ? "Cobertura de UF baixa" : "Cobertura de UF parcial"}
-            </p>
-            <p className={`text-sm ${displaySummary.coverage_level === "low" ? "text-rose-800" : "text-amber-800"}`}>
-              Apenas {fmtPctOrNA(displaySummary.uf_fill_pct)} dos pedidos elegíveis ({fmtNumber(displaySummary.uf_known_orders)} de {fmtNumber(displaySummary.uf_eligible_orders)}) têm UF identificada no período/filtros selecionados. Os números por UF abaixo refletem só os pedidos com UF conhecida — não é erro, é limitação de dado na fonte.
-            </p>
-          </div>
+          <p className={`flex w-fit flex-wrap items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs ${displaySummary.coverage_level === "low" ? "bg-rose-50 border-rose-200 text-rose-800" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+            <span className="font-semibold">{displaySummary.coverage_level === "low" ? "Cobertura de UF baixa" : "Cobertura de UF parcial"}</span>
+            <span className="tabular-nums">· {fmtPctOrNA(displaySummary.uf_fill_pct)} com UF ({fmtNumber(displaySummary.uf_known_orders)} de {fmtNumber(displaySummary.uf_eligible_orders)})</span>
+            <InfoDica texto="Os números por UF refletem só os pedidos elegíveis com UF conhecida — limitação da fonte, não erro." />
+          </p>
         )}
 
         {isErrorState ? (
@@ -341,12 +327,10 @@ function RegioesPageInner() {
           // renderizar KPIs/mapa/tabelas.
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-10 text-center">
             <p className="text-slate-500 text-sm font-medium">Não foi possível carregar os dados regionais.</p>
-            <p className="text-slate-400 text-xs mt-1">Use "Tentar novamente" no banner de erro acima.</p>
           </div>
         ) : isEmpty ? (
           <div className="bg-white border border-violet-100 rounded-2xl shadow-sm px-6 py-12 text-center">
             <p className="text-slate-500 text-sm font-medium">Sem dados regionais no período e filtros selecionados.</p>
-            <p className="text-slate-400 text-xs mt-1">Tente ampliar o intervalo de datas ou revisar canal/marca/UF.</p>
           </div>
         ) : (
           <>
@@ -393,7 +377,7 @@ function RegioesPageInner() {
               <KpiCard
                 label="Cobertura Custo Frete"
                 value={displaySummary ? fmtPctOrNA(displaySummary.shipping_cost_coverage_pct) : "—"}
-                subvalue="Quando aplicável — Shopee não tem este dado na fonte"
+                subvalue="Shopee sem este dado"
                 accent="bg-slate-400"
               />
               <KpiCard
@@ -411,7 +395,6 @@ function RegioesPageInner() {
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50">
                 <h2 className="text-sm font-semibold text-slate-700">Ranking por UF</h2>
-                <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de identificação de UF, por estado</p>
               </div>
               <TableScrollHint>
                 <table className="w-full text-sm">
@@ -457,10 +440,9 @@ function RegioesPageInner() {
             <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-violet-50">
                 <h2 className="text-sm font-semibold text-slate-700">Cobertura por Marca × Canal</h2>
-                <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de UF/frete por marca e marketplace</p>
                 {ufFilter && (
                   <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1 mt-2 inline-block">
-                    O filtro de UF ({ufFilter}) não se aplica aqui — esta tabela sempre mostra o escopo nacional dos filtros globais (canal/marca/período).
+                    Nacional · filtro de UF ({ufFilter}) não se aplica
                   </p>
                 )}
               </div>
@@ -507,8 +489,8 @@ function RegioesPageInner() {
               </TableScrollHint>
               {displaySemCobertura.length > 0 && (
                 <div className="px-6 py-3 border-t border-slate-50">
-                  <span className="text-[10px] text-slate-400">
-                    {displaySemCobertura.map((c) => (c === "tiktok" ? "TikTok Shop" : c)).join(", ")} não aparece nesta tabela — sem cobertura regional na fonte.
+                  <span className="text-[11px] text-slate-400">
+                    {displaySemCobertura.map((c) => (c === "tiktok" ? "TikTok Shop" : c)).join(", ")} fora: sem dado regional
                   </span>
                 </div>
               )}
@@ -521,10 +503,9 @@ function RegioesPageInner() {
               <div className="px-6 py-4 border-b border-violet-50 flex items-center justify-between gap-4 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-700">Tendência</h2>
-                  <p className="text-xs text-slate-500 mt-0.5">GMV, pedidos e cobertura de UF por período — respeita canal e marca</p>
                   {ufFilter && (
                     <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1 mt-2 inline-block">
-                      O filtro de UF ({ufFilter}) não se aplica aqui — esta série sempre mostra o escopo nacional dos filtros globais.
+                      Nacional · filtro de UF ({ufFilter}) não se aplica
                     </p>
                   )}
                 </div>

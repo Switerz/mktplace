@@ -124,7 +124,10 @@ test("o card usa o tom do KPI e a tendencia; a pagina passa as tendencias", () =
   assert.match(card, /<LinhaDeTendencia /);
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /tendencias=\{tendencias\}/);
-  assert.match(page, /buildKpiBand\(overview, filters\.channels, filters\.compare\)/);
+  assert.match(page, /buildKpiBand\(overview, filters\.channels, comparar\)/);
+  // POPUPS-1 — dia em andamento contra dia inteiro nao e' base justa.
+  assert.match(page, /const comparar = filters\.compare && !diaEmAndamento;/);
+  assert.match(page, /filters\.dateFrom === filters\.dateTo && filters\.dateTo === toISODate\(new Date\(\)\)/);
 });
 
 test("o detalhe do card usa a mesma comparacao do card", () => {
@@ -182,7 +185,33 @@ test("a dica dentro do card nao e' focavel nem entra no nome do botao", () => {
   assert.match(card, /<InfoDica emControle /);
   const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
   assert.match(dica, /tabIndex=\{0\}/);
-  assert.match(dica, /group-focus\/dica:visible/);
+  assert.match(dica, /onFocus=\{abrir\}/);
+});
+
+test("T-0028: o balao do ⓘ sai do card por portal (fixed relativo a' tela)", () => {
+  // `.card-hover:hover` e a entrada `.tc-entrada` poem `transform` nos
+  // ancestrais; dentro deles um `fixed` deixa de ser relativo a' viewport e o
+  // balao abria longe do "ⓘ", fora da tela (medido: +488px em 390, rolagem de 8px).
+  const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
+  assert.match(dica, /import \{ createPortal \} from "react-dom";/);
+  const portal = dica.slice(dica.indexOf("createPortal("));
+  assert.match(portal, /^createPortal\(\s*<span\s+ref=\{balao\}/, "o balao e' o filho do portal");
+  assert.match(portal, /<\/span>,\s*document\.body,\s*\)/, "destino: document.body");
+  // o comportamento do colaborador fica: fixed, clamp pela largura, animacao
+  assert.match(portal, /pointer-events-none fixed z-50/);
+  assert.match(portal, /dica-entra_160ms/);
+});
+
+test("T-0028: hover do card so' sobe com ponteiro que paira (nao gruda no toque)", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const inicio = css.indexOf("@media (hover: hover)");
+  assert.ok(inicio >= 0, "falta @media (hover: hover)");
+  const hover = css.indexOf(".card-hover:hover");
+  const active = css.indexOf(".card-hover:active");
+  assert.ok(hover > inicio && active > inicio, "o primeiro :hover/:active do card mora dentro do media");
+  // nada entre o @media e o :hover fecha o bloco
+  assert.doesNotMatch(css.slice(inicio, hover), /^\s*\}/m);
+  assert.match(css.slice(hover, active), /transform: translateY\(-2px\)/, "o lift de 2px fica");
 });
 
 test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {

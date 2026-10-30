@@ -67,20 +67,15 @@ export function useJornada(
   api: string,
   canal: CanalJornada,
   marca: string | null,
-  opcoes: { dias?: number; evento?: "coleta" | "despacho"; ligada?: boolean } = {},
+  opcoes: { dias?: number; evento?: "coleta" | "despacho" } = {},
 ): { carga: CargaJornada; tentarDeNovo: () => void } {
   const url = `${api}${queryDaJornada(canal, marca, opcoes)}`;
-  const ligada = opcoes.ligada ?? true;
   const vigente = useRef(url);
   vigente.current = url;
   const [carga, setCarga] = useState<CargaJornada>(CARGA_INICIAL);
   const [tentativa, setTentativa] = useState(0);
 
   useEffect(() => {
-    if (!ligada) {
-      setCarga({ carregando: false, http: null, erroDeRede: false, resultado: null });
-      return;
-    }
     let vivo = true;
     const minha = url;
     setCarga(CARGA_INICIAL);
@@ -107,7 +102,7 @@ export function useJornada(
     return () => {
       vivo = false;
     };
-  }, [url, canal, tentativa, ligada]);
+  }, [url, canal, tentativa]);
 
   const tentarDeNovo = useCallback(() => setTentativa((n) => n + 1), []);
   return { carga, tentarDeNovo };
@@ -127,7 +122,7 @@ function ListaDeEtapas({
   if (base === 0) {
     return (
       <p role="status" className="text-sm text-ink-muted">
-        Nenhum pedido nesta leitura (base 0) — o percentual fica indisponível.
+        Nenhum pedido nesta leitura.
       </p>
     );
   }
@@ -141,7 +136,7 @@ function ListaDeEtapas({
             · {formatarPercentualComBase(e.count, base)}
           </span>
           <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
-            <span className="block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
+            <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
           </span>
         </li>
       ))}
@@ -216,34 +211,46 @@ function SecaoNula({ titulo, secao, r }: { titulo: string; secao: "fila_aberta" 
   );
 }
 
-function BlocoFilaAberta({ r }: { r: RespostaJornada }) {
+/** A fila aberta tem etapa REAL (T-0015), nao so' "aguardando expedicao". */
+export function filaTemEtapasReais(r: RespostaJornada): boolean {
+  const f = r.fila_aberta;
+  return Boolean(
+    f && f.etapas.some((e) => e.key !== "aguardando_expedicao" && e.key !== "nao_publicada"),
+  );
+}
+
+function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta?: boolean }) {
   const f = r.fila_aberta;
   if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
   return (
     <Panel
-      titulo={
-        <>
-          Agora — fila aberta <AjudaMetrica chave="jornada.fila_aberta" />
-        </>
-      }
+      titulo="Agora — fila aberta"
       descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} pagos aguardando expedição.`}
+      // O "ⓘ" fica fora do h3: o nome do titulo continua so' o titulo.
       acao={
-        f.snapshot_at ? (
-          <span className="flex flex-wrap gap-1.5">
+        <span className="flex flex-wrap items-center gap-1.5">
+          <AjudaMetrica chave="jornada.fila_aberta" />
+          {f.snapshot_at ? (
             <ChipsFotografia
               fotografia={{ rotulo: "Fotografia", publicadaEm: f.snapshot_at, idade: null, desatualizada: filaDesatualizada(f) }}
             />
-          </span>
-        ) : undefined
+          ) : null}
+        </span>
       }
     >
       {!f.etapas_fecham ? (
         <div className="mb-2">
-          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base; a tela não refaz a soma." />
+          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
       <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" />
-      <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
+      {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
+          "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
+      {compacta ? null : (
+        <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
+      )}
+      {/* As limitacoes (ex.: "FBS nao separado na fila aberta") ficam sempre:
+          sao elas que dizem que esta base nao e' a do "Risco atual". */}
       <Limitacoes itens={f.limitacoes} />
     </Panel>
   );
@@ -257,43 +264,36 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
   const velha = coorteDesatualizada(r);
   return (
     <Panel
-      titulo={
-        <>
-          Coorte — {rotuloDaCoorte(c)} <AjudaMetrica chave="jornada.coorte" />
-        </>
-      }
-      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados (até ontem, horário de Brasília) · evento: ${
+      titulo={`Coorte — ${rotuloDaCoorte(c)}`}
+      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados · evento: ${
         evento === "despacho" ? "despacho" : "coleta"
       }.`}
       acao={
-        c.publicado_em || c.desatualizada !== null || velha ? (
-          // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
-          <span className="flex flex-wrap gap-1.5">
-            {c.publicado_em ? (
-              <Chip title="Última publicação dos dias desta coorte">
-                publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
-              </Chip>
-            ) : null}
-            {c.desatualizada !== null || velha ? (
-              <Chip ponto tom={velha ? "atencao" : "bom"}>
-                {velha ? "Desatualizada" : "Atualizada"}
-              </Chip>
-            ) : null}
-          </span>
-        ) : undefined
+        // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
+        // O "ⓘ" fica fora do h3, como na fila aberta.
+        <span className="flex flex-wrap items-center gap-1.5">
+          <AjudaMetrica chave="jornada.coorte" />
+          {c.publicado_em ? (
+            <Chip title="Última publicação dos dias desta coorte">
+              publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
+            </Chip>
+          ) : null}
+          {c.desatualizada !== null || velha ? (
+            <Chip ponto tom={velha ? "atencao" : "bom"}>
+              {velha ? "Desatualizada" : "Atualizada"}
+            </Chip>
+          ) : null}
+        </span>
       }
     >
       {!c.etapas_fecham ? (
         <div className="mb-2">
-          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base; a tela não refaz a soma." />
+          <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
       {velha ? (
         <div className="mb-2" data-testid="exp-jornada-coorte-desatualizada">
-          <EstadoSecao
-            tipo="desatualizado"
-            titulo="a publicação ou a fonte desta coorte não foi atualizada dentro do prazo esperado; os números podem não ser atuais."
-          />
+          <EstadoSecao tipo="desatualizado" titulo="publicação ou fonte fora do prazo esperado." />
         </div>
       ) : null}
       <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" />
@@ -311,8 +311,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
       ) : null}
       {c.maturidade ? (
         <p className="mt-1 text-xs text-ink-muted">
-          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda no prazo (os números
-          desses dias ainda mudam).
+          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda mudando.
         </p>
       ) : null}
       <Limitacoes itens={c.limitacoes} />
@@ -324,31 +323,42 @@ export default function JornadaPedidos({
   carga,
   aoTentarDeNovo,
   marca = null,
-  soCoorte = false,
+  compacta = false,
 }: {
   carga: CargaJornada;
   aoTentarDeNovo: () => void;
   /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
   marca?: string | null;
   /**
-   * EXPEDICAO-TRAVADOS-1 — so' a coorte. Na fila (Shopee/ML) a fila aberta e'
-   * UMA etapa, e as sobreposicoes repetem os numeros do "Risco atual". Sem
-   * coorte publicada, a secao inteira sai (nada a mostrar que ja' nao esteja
-   * na tela).
+   * EXPEDICAO-TRAVADOS-1 — so' o que o "Risco atual" nao diz. A fila aberta
+   * entra apenas com etapa REAL publicada (T-0015) e sem as sobreposicoes; a
+   * coorte, quando existe. Sem nenhuma das duas, a secao inteira sai.
    */
-  soCoorte?: boolean;
+  compacta?: boolean;
 }) {
   const estado = estadoDaJornada(carga);
   const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
-  if (soCoorte) {
-    if (estado !== "pronta" || !resposta?.coorte) return null;
+  if (compacta) {
+    if (estado !== "pronta" || !resposta) return null;
+    const comFila = filaTemEtapasReais(resposta);
+    const comCoorte = Boolean(resposta.coorte);
+    if (!comFila && !comCoorte) return null;
     return (
       <SecaoGerencial
         titulo="Jornada"
-        dica="Pedidos dos dias fechados do período, por etapa."
+        dica="Em que etapa estão os pedidos: agora (fila aberta) e nos dias fechados do período (coorte)."
       >
-        <div data-testid="exp-jornada">
-          <BlocoCoorte r={resposta} />
+        {avisoDeMarcaNaoAplicada(marca, resposta) ? (
+          <div data-testid="exp-jornada-marca-nao-aplicada">
+            <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
+          </div>
+        ) : null}
+        {resposta.status === "partial" && motivoDoTopo(resposta) ? (
+          <EstadoSecao tipo="parcial" titulo={motivoDoTopo(resposta)!} />
+        ) : null}
+        <div className={`grid gap-3 ${comFila && comCoorte ? "lg:grid-cols-2" : ""}`} data-testid="exp-jornada">
+          {comFila ? <BlocoFilaAberta r={resposta} compacta /> : null}
+          {comCoorte ? <BlocoCoorte r={resposta} /> : null}
         </div>
       </SecaoGerencial>
     );
@@ -377,7 +387,7 @@ export default function JornadaPedidos({
         <EstadoSecao
           tipo="erro"
           titulo="Não foi possível carregar a jornada."
-          descricao={carga.resultado && !carga.resultado.ok ? "A resposta veio fora do contrato e foi descartada." : undefined}
+          descricao={carga.resultado && !carga.resultado.ok ? "Resposta fora do contrato." : undefined}
           aoTentarDeNovo={aoTentarDeNovo}
         />
       ) : null}

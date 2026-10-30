@@ -60,10 +60,7 @@ export default function RegioesBrazilMap({ rows, totalGmv, loading }: Props) {
   return (
     <div className="bg-white border border-violet-100 rounded-2xl shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-violet-50 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-slate-700">Mapa regional</h2>
-          <p className="text-xs text-slate-500 mt-0.5">Onde a marca vende mais — intensidade de cor por GMV, UF a UF</p>
-        </div>
+        <h2 className="text-sm font-semibold text-slate-700">Mapa regional</h2>
         <div className="flex items-center gap-2 text-[10px] text-slate-500 shrink-0">
           <span className="font-semibold uppercase tracking-wide text-slate-400">GMV</span>
           <span className="w-16 h-2.5 rounded-full" style={{ background: "linear-gradient(to right, rgb(238,242,247), rgb(91,33,182))" }} aria-hidden="true" />
@@ -161,9 +158,7 @@ export default function RegioesBrazilMap({ rows, totalGmv, loading }: Props) {
             </>
           ) : (
             <>
-              <p className="text-xs text-slate-400">
-                Passe o mouse, foque (Tab) ou clique numa UF no mapa para ver os detalhes.
-              </p>
+              <p className="text-xs text-slate-400">Selecione uma UF para detalhes.</p>
               {top3.length > 0 && (
                 <div className="pt-2 border-t border-slate-200 flex flex-col gap-1.5">
                   <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Top {top3.length} UFs por GMV</p>
@@ -188,7 +183,7 @@ export default function RegioesBrazilMap({ rows, totalGmv, loading }: Props) {
       {xx && (
         <div className="px-6 py-2.5 border-t border-slate-100 bg-slate-50/60">
           <p className="text-[11px] text-slate-500">
-            <span className="font-semibold text-slate-600">UF desconhecida (XX)</span> — não entra no mapa: {fmtBrl(xx.gmv)} · {fmtNumber(xx.orders)} pedidos sem UF identificada no período/filtros selecionados.
+            <span className="font-semibold text-slate-600">Sem UF (XX), fora do mapa:</span> {fmtBrl(xx.gmv)} · {fmtNumber(xx.orders)} pedidos
           </p>
         </div>
       )}

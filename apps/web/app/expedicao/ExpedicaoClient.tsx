@@ -31,9 +31,9 @@
  * (Shopee | Mercado Livre | TikTok Shop). Este componente continua sendo o
  * corpo da FILA e nao conhece o TikTok.
  *
- * TEXTO LONGO FOI MOVIDO, NAO APAGADO. Metodologia, limiar interno e ressalva
- * de recorte vivem em "Como ler" — mesma palavra, sob demanda. Nenhuma
- * ressalva de qualidade foi removida nem teve o sentido alterado.
+ * NUMERO PRIMEIRO. Ressalva que muda a leitura (desatualizada, inclui FBS,
+ * limiar interno, recorte) vira selo ou "ⓘ" ao lado do titulo; metodologia
+ * fica no catalogo (`expedicao-definicoes.ts`), fora da tela.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -59,7 +59,6 @@ import {
   SeloLeitura,
 } from "@/components/expedicao/SecoesExpedicao";
 import InfoDica from "@/components/ui/InfoDica";
-import Disclosure from "@/components/ui/Disclosure";
 import { Ajuda, KpiComAjuda } from "@/components/expedicao/KpiComAjuda";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
@@ -120,7 +119,6 @@ import {
 } from "@/lib/expedicao-contract";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
-import { canalTemCoorte } from "@/lib/expedicao-jornada";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -254,9 +252,7 @@ function CelulaKpi({
       ajuda={chaveDoKpiDaFila(canal, kpi.chave)}
       rotulo={kpi.rotulo}
       valor={texto}
-      // No cartao grande a nota fica visivel; no compacto vira tooltip, para
-      // a faixa secundaria nao reintroduzir cinco paragrafos na tela.
-      comparacao={destaque ? (kpi.notaCurta ?? kpi.nota) : undefined}
+      // So' o numero na tela; a nota vira tooltip e a definicao, o "ⓘ".
       contexto={kpi.nota}
       tom={tomDoKpi(kpi)}
       destaque={destaque || numeroGrande}
@@ -275,7 +271,7 @@ function BlocoFbs({ divisao }: { divisao: DivisaoDaFila }) {
   return (
     <section aria-label="Pedidos FBS" className="mt-3" data-testid="exp-fila-fbs">
       <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
-        Pedidos FBS — responsabilidade logística da Shopee
+        Pedidos FBS — despacho da Shopee
       </h4>
       <FaixaKpis rotulo="Pedidos FBS" secundaria>
         <KpiComAjuda ajuda="shopee.fbs" rotulo="Em aberto (FBS)" valor={numero(f.backlog_count)} />
@@ -304,7 +300,7 @@ function BarraDeRisco({
   return (
     <div className="relative h-4 w-full min-w-[120px] overflow-hidden rounded bg-raised">
       {empilhavel ? (
-        <div className="flex h-full" style={{ width: `${largura}%` }}>
+        <div className="tc-barra flex h-full" style={{ width: `${largura}%` }}>
           {linha.segmentos.map((s) => (
             <div
               key={s.chave}
@@ -321,7 +317,7 @@ function BarraDeRisco({
           {/* Barra do BACKLOG. As sobreposicoes viram marcadores por cima —
               empilhá-las desenharia um total que nao existe. */}
           <div
-            className="h-full rounded bg-accent/70"
+            className="tc-barra h-full rounded bg-accent/70"
             style={{ width: `${largura}%` }}
             title={`Backlog: ${numero(linha.backlog)}`}
           />
@@ -548,12 +544,9 @@ export default function ExpedicaoClient({
   // no SERVIDOR. Nada aqui soma a fila paginada.
   // UI-EXPEDICAO-1: o periodo do topo comanda a pagina — a coorte da jornada
   // e a LDR leem a MESMA janela da tendencia. A fila aberta e' "agora".
-  // O Mercado Livre nao tem coorte (contrato): sem ela a secao nao aparece,
-  // entao nem busca.
-  const jornada = useJornada(API, filtros.channel, marcaAtiva, {
-    dias: janela,
-    ligada: canalTemCoorte(filtros.channel),
-  });
+  // T-0015: a fila aberta do ML tambem tem etapa (substatus do envio), entao
+  // a jornada e' buscada nos dois canais; o `days` so' vai onde ha coorte.
+  const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
 
   const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
 
@@ -606,7 +599,7 @@ export default function ExpedicaoClient({
 
   // Nova tentativa: um objeto de filtros novo, com a MESMA chave, refaz a
   // busca (o efeito depende de `filtros`) sem mudar a requisicao.
-  /** O `?` de uma medida da fila, no canal atual (cabecalhos de tabela). */
+  /** O "ⓘ" de uma medida da fila, no canal atual (cabecalhos de tabela). */
   const ajudaDaFila = (kpi: string) => {
     const chave = chaveDoKpiDaFila(filtros.channel, kpi);
     return chave ? <Ajuda chave={chave} /> : null;
@@ -654,7 +647,7 @@ export default function ExpedicaoClient({
       : null;
   const secundariosDoRisco = risco
     .filter((k) => k.chave !== chaveDestaque && k.chave !== "backlog" && k.chave !== "marcas_alerta")
-    // Rotulo curto no cartao: "limiar interno da Torre" fica no "?".
+    // Rotulo curto no cartao: "limiar interno da Torre" fica no "ⓘ".
     .map((k) => (k.chave === "over48h" ? { ...k, rotulo: "Acima de 48 h" } : k));
   // "Onde agir": so' a marca que concentra — os numeros ja' estao no destaque.
   const ondeAgir = ondeAgirNaFila(totaisRisco, contasRisco, filtros.channel);
@@ -837,8 +830,7 @@ export default function ExpedicaoClient({
       )}
       {janelaDescartada && (
         <Note tom="atencao" papel="status">
-          A janela do link era inválida e foi ignorada. Mostrando a janela
-          padrão.
+          Janela do link inválida; usando a padrão.
         </Note>
       )}
     </div>
@@ -857,9 +849,7 @@ export default function ExpedicaoClient({
   // de "a tela nao soma contas" so' vale sem ela.
   const avisoRecorte = recorte.variasContas && !divisao ? (
     <Note tom="neutro" papel="status">
-      {brandLabel(recorte.marca ?? "")} tem {recorte.contas.length} contas nesta fotografia. A API
-      ainda não recorta o total por marca e a tela não soma contas: os números de cada conta
-      estão em “Backlog por marca”.
+      {brandLabel(recorte.marca ?? "")}: {recorte.contas.length} contas, sem total — veja “Backlog por marca”.
     </Note>
   ) : null;
 
@@ -915,11 +905,7 @@ export default function ExpedicaoClient({
       {destaque ? null : (
         <AtencaoAgora
           itens={atencao}
-          semItens={
-            recorte.variasContas
-              ? "Com mais de uma conta na marca, a leitura de atenção fica por conta: veja “Backlog por marca”."
-              : undefined
-          }
+          semItens={recorte.variasContas ? "Leitura por conta: veja “Backlog por marca”." : undefined}
         />
       )}
     </SecaoGerencial>
@@ -929,19 +915,13 @@ export default function ExpedicaoClient({
   // EXPEDICAO-TRAVADOS-1: sem LDR e com a barra ja' no destaque, a secao
   // "Prazo" so' teria um paragrafo dizendo o que falta — sai da tela.
   const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo ? null : temPrazo ? (
-    <SecaoGerencial
-      titulo="Prazo"
-      dica="Situação de cada pedido em fila frente ao prazo de envio publicado pela Shopee (ship_by_date)."
-    >
+    // Sem LDR, o que falta medir vira o "ⓘ" do titulo.
+    <SecaoGerencial titulo="Prazo" dica={LDR_SHOPEE_LIGADA ? undefined : SEM_LDR_SHOPEE}>
       {/* UI-EXPEDICAO-1: com o destaque, a barra de prazo ja' esta' no topo. */}
       {destaque && temBarraDePrazo ? null : (
         <Panel
-          titulo={
-            <>
-              {divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
-              <Ajuda chave="shopee.prazo_situacao" />
-            </>
-          }
+          titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
+          acao={<Ajuda chave="shopee.prazo_situacao" />}
         >
           {barraDePrazo(false) ?? (
             <p className="text-sm text-ink-muted">
@@ -952,29 +932,18 @@ export default function ExpedicaoClient({
           )}
         </Panel>
       )}
-      {LDR_SHOPEE_LIGADA ? null : (
-        <Note tom="neutro" papel="note">
-          {SEM_LDR_SHOPEE}
-        </Note>
-      )}
       {LDR_SHOPEE_LIGADA ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" dica={SEM_PRAZO_CANAL_ML}>
-      <Panel
-        titulo={
-          <>
-            Prazo indisponível pelo canal <Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />
-          </>
-        }
-      >
+      <Panel titulo="Prazo indisponível pelo canal" acao={<Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />}>
         {envelhecimento ? (
           <dl className="mt-3 grid gap-2 sm:grid-cols-2">
             {/* Com o destaque, "acima de 48 h" ja' e' o numero do topo. */}
             {destaque ? null : (
             <div className="rounded-lg bg-raised px-3 py-2">
               <dt className="text-xs text-ink-muted">
-                Acima de 48 h (limiar interno da Torre){" "}
+                Acima de 48 h{" "}
                 <Ajuda chave={`${filtros.channel}.over48h`} />
               </dt>
               <dd className="text-sm text-ink">
@@ -1010,16 +979,8 @@ export default function ExpedicaoClient({
     timeline.length > 0 ? (
       <Panel
         titulo={`Mais críticos (${timeline.length})`}
-        acao={
-          <Disclosure rotulo="Como ler">
-            {temPrazo
-              ? "Tempo em aberto até agora. A marca vermelha indica prazo contratual vencido."
-              : "Tempo em aberto até agora. O Mercado Livre não publica prazo de despacho, " +
-                "então não há fim contratual a desenhar."}{" "}
-            Recorte dos {TIMELINE_MAX_LINHAS} mais antigos da página atual — não é o
-            backlog inteiro.
-          </Disclosure>
-        }
+        // O recorte muda a leitura: nao e' o backlog inteiro.
+        acao={<InfoDica texto={`Os ${TIMELINE_MAX_LINHAS} mais antigos da página atual, não o backlog inteiro.`} />}
       >
         <ul className="flex flex-col gap-1">
           {timeline.map((b) => {
@@ -1034,7 +995,7 @@ export default function ExpedicaoClient({
                 </span>
                 <span className="h-3.5 flex-1 overflow-hidden rounded bg-raised">
                   <span
-                    className={`block h-full rounded ${
+                    className={`tc-barra block h-full rounded ${
                       b.vencido
                         ? "bg-crit"
                         : b.acimaDoLimiar
@@ -1059,13 +1020,9 @@ export default function ExpedicaoClient({
       titulo="Backlog por marca"
       acao={
         <div className="flex flex-wrap items-center gap-1.5">
-          <InfoDica
-            texto={
-              filtros.channel === "shopee"
-                ? `${mapa.nota} Fila publicada por conta, com pedidos FBS (despachados pela Shopee) incluídos.`
-                : mapa.nota
-            }
-          />
+          {/* Fila publicada por conta: nao separa FBS, ao contrario do "Risco atual". */}
+          {filtros.channel === "shopee" ? <SeloLeitura tom="atencao">inclui FBS</SeloLeitura> : null}
+          <InfoDica texto={mapa.nota} />
           {/* "Ver dados" so' existe quando HA dados a revelar.
               Com a tendencia vazia — o caso da Shopee quando a
               fotografia cai fora da janela — o botao aparecia, alternava
@@ -1111,8 +1068,7 @@ export default function ExpedicaoClient({
       )}
       {estadoTend === "parcial" && (
         <Note tom="atencao" papel="status" className="mb-2">
-          Série parcial: alguma hora tem menos contas que o esperado. A linha se
-          interrompe porque falta dado, não porque o backlog caiu.
+          Série parcial: faltam contas em algumas horas.
         </Note>
       )}
       {/* A fotografia manda nas linhas: a tabela existe mesmo sem tendencia. */}
@@ -1179,15 +1135,15 @@ export default function ExpedicaoClient({
     <Panel
       className={classe}
       titulo="Concentração por marca"
-      // A tabela e' a fila PUBLICADA, que nao separa FBS: dito aqui para que
-      // ninguem compare com o "Risco atual" do vendedor sem saber.
-      descricao={
-        filtros.channel === "shopee"
-          ? "Fila publicada por conta, com pedidos FBS (despachados pela Shopee) incluídos."
-          : undefined
-      }
       semPadding
-      acao={<Disclosure rotulo="Como ler">{mapa.nota}</Disclosure>}
+      // A tabela e' a fila PUBLICADA, que nao separa FBS: o selo avisa, para
+      // que ninguem compare com o "Risco atual" do vendedor sem saber.
+      acao={
+        <span className="flex items-center gap-1.5">
+          {filtros.channel === "shopee" ? <SeloLeitura tom="atencao">inclui FBS</SeloLeitura> : null}
+          <InfoDica texto={mapa.nota} />
+        </span>
+      }
       rodape={legendaDaBarra}
     >
       {/* UMA tabela, com a barra DENTRO dela. Antes eram duas leituras do
@@ -1274,11 +1230,7 @@ export default function ExpedicaoClient({
     <Panel
       titulo="Fila operacional"
       semPadding
-      acao={
-        <Disclosure rotulo="Como ler">
-          {temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO}
-        </Disclosure>
-      }
+      acao={<InfoDica texto={temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO} />}
     >
       <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2">
         {SITUACOES.map((s) => (
@@ -1416,13 +1368,7 @@ export default function ExpedicaoClient({
     <Panel
       titulo="Fonte por marca"
       semPadding
-      acao={
-        <Disclosure rotulo="Como ler">
-          Idade da fonte é quando o Data Mart foi lido. Idade do pedido mais antigo é
-          contexto: um backlog legítimo sempre tem pedido velho, e isso não significa
-          fonte desatualizada.
-        </Disclosure>
-      }
+      acao={<InfoDica texto="Pedido antigo não indica fonte desatualizada." />}
     >
       <div className="overflow-x-auto px-4 py-2">
         <table className={CLASSE_TABELA}>
@@ -1502,11 +1448,7 @@ export default function ExpedicaoClient({
         <>
           {estado === "carregando" && <StateBlock tipo="carregando" titulo={TEXTO_ESTADO.carregando} />}
           {estado === "canal_desligado" && (
-            <StateBlock
-              tipo="indisponivel"
-              titulo="Este canal ainda não está disponível na API."
-              descricao="A fotografia existe, mas a exposição depende de uma ativação coordenada."
-            />
+            <StateBlock tipo="indisponivel" titulo="Este canal ainda não está disponível na API." />
           )}
           {estado === "indisponivel_backend" && (
             <StateBlock tipo="indisponivel" titulo="A API de Expedição está desligada. Nada a exibir." />
@@ -1515,11 +1457,7 @@ export default function ExpedicaoClient({
             <StateBlock tipo="indisponivel" titulo="Nenhuma fotografia publicada ainda." />
           )}
           {estado === "batch_inconsistente" && (
-            <StateBlock
-              tipo="erro"
-              titulo="A fotografia está inconsistente e não pode ser exibida."
-              descricao="Nenhum número parcial é mostrado de propósito."
-            />
+            <StateBlock tipo="erro" titulo="A fotografia está inconsistente e não pode ser exibida." />
           )}
           {estado === "erro_validacao" && (
             <StateBlock tipo="erro" titulo="Filtro inválido. Ajuste a seleção e tente novamente." />
@@ -1542,7 +1480,7 @@ export default function ExpedicaoClient({
         <p role="status" className="rounded-xl border border-dashed border-line-strong bg-surface p-4 text-sm text-ink-muted">
           {brandLabel(recorte.marca ?? "")}{" "}
           {recorte.foraDaCobertura
-            ? "não é coberta pela fonte deste canal — ausência de cobertura, não backlog zero."
+            ? "não é coberta pela fonte deste canal — não é backlog zero."
             : "não tem conta nesta fotografia do canal."}
         </p>
       ) : null}
@@ -1553,9 +1491,9 @@ export default function ExpedicaoClient({
           <CorpoGestor
             risco={secaoRisco}
             prazo={secaoPrazo}
-            // A fila aberta da jornada repetiria o "Risco atual" (uma etapa so');
-            // na fila, a jornada mostra so' a coorte do periodo.
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} soCoorte />}
+            // Compacta: a fila aberta so' com etapa real (sem repetir o
+            // "Risco atual") e a coorte do periodo quando existe.
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marcaAtiva} compacta />}
             evolucao={painelEvolucao}
             convite={
               aoTrocarVisao && (

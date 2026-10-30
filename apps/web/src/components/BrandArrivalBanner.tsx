@@ -7,6 +7,7 @@ import {
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import InfoDica from "@/components/ui/InfoDica";
 
 interface Props {
   /** Contexto já validado. `null` ⇒ nada é renderizado (acesso direto). */
@@ -73,13 +74,10 @@ export default function BrandArrivalBanner({ ctx, periodLabel, buildHref }: Prop
         >
           {returnCtaLabel(ctx)} →
         </DrilldownCta>
+        {/* Quando HÁ evidência, a ressalva de escopo fica no ⓘ — o número
+            exibido na seção é da marca, não a comparação. */}
+        {ctx.hasEvidence && ctx.unavailableNote && <InfoDica texto={ctx.unavailableNote} />}
       </div>
-
-      {/* Quando HÁ evidência, a ressalva de escopo continua visível, mas em tom
-          discreto — o número exibido na seção é da marca, não a comparação. */}
-      {ctx.hasEvidence && ctx.unavailableNote && (
-        <p className="text-xs text-slate-500">{ctx.unavailableNote}</p>
-      )}
     </section>
   );
 }

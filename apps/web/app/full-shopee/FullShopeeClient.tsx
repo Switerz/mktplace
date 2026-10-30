@@ -8,6 +8,7 @@
  * A esteira de API cobre QUATRO contas. Kokeshi, a maior marca Shopee por
  * volume, NAO esta na API e nao entra em nenhum total, share, tabela ou
  * grafico. Ela aparece como NAO COBERTA -- nunca como zero, 0% ou "sem FBS".
+ * A ressalva fica num chip no topo; o texto longo, num "i" ao lado.
  *
  * Apice e' o oposto: esta coberta e teve share FBS de 0% em agosto/2026. Isso
  * e' medicao, nao ausencia, e a tela mostra "0,00%" com nota, nao travessao.
@@ -24,6 +25,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import KpiCard from "@/components/KpiCard";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import InfoDica from "@/components/ui/InfoDica";
 import { fetchShopeeFbs, ShopeeFbsError } from "@/lib/api-client";
 import { MOTIVO_DESLIGADA } from "@/lib/shopee-fbs-flag";
 import {
@@ -31,8 +33,6 @@ import {
   AVISO_COBERTURA,
   AVISO_DIVERGENCIA,
   AVISO_GMV_BRUTO,
-  AVISO_HANDLING,
-  AVISO_JANELA,
   CLASS_LABEL,
   FRESHNESS_LABEL,
   PERIOD_PRESETS,
@@ -44,7 +44,6 @@ import {
   fmtGmv,
   fmtHandling,
   fmtShare,
-  handlingPoucaCobertura,
   hojeIsoBrt,
   isUnavailable,
   isVazioReal,
@@ -76,13 +75,9 @@ const CONTROLE_BASE =
   "focus-visible:outline-offset-2 focus-visible:outline-violet-600";
 const CONTROLE = `${CONTROLE_BASE} border-slate-300 bg-white text-slate-800`;
 
-function Aviso({ tom, children }: { tom: "info" | "alerta"; children: React.ReactNode }) {
-  const cor =
-    tom === "alerta"
-      ? "bg-amber-50 border-amber-300 text-amber-900"
-      : "bg-slate-50 border-slate-200 text-slate-700";
+function Aviso({ children }: { children: React.ReactNode }) {
   return (
-    <p className={`text-xs leading-relaxed border rounded-lg px-3 py-2 ${cor}`}>
+    <p className="text-xs leading-relaxed border rounded-lg px-3 py-2 bg-amber-50 border-amber-300 text-amber-900">
       {children}
     </p>
   );
@@ -228,7 +223,6 @@ function FullShopeeInner() {
     <PageContainer>
       <PageHeader
         title="Full Shopee"
-        subtitle="Quanto da operação Shopee coberta pela API sai pelo fulfillment da Shopee (FBS) contra o envio pelo próprio vendedor."
         filters={filtros}
       />
 
@@ -240,57 +234,30 @@ function FullShopeeInner() {
           {frescor && (
             <>
               <span className={
-                "px-2 py-1 rounded-full font-medium border " +
+                "inline-flex items-center gap-1 px-2 py-1 rounded-full font-medium border " +
                 (frescor.freshness_status === "fresh"
                   ? "bg-emerald-50 text-emerald-800 border-emerald-200"
                   : "bg-amber-50 text-amber-900 border-amber-300")
               }>
                 {FRESHNESS_LABEL[frescor.freshness_status]} · carga manual
+                <InfoDica texto={AVISO_CARGA_MANUAL} />
               </span>
               <span>Fonte até <strong>{frescor.source_max_date ?? SEM_DADO}</strong></span>
-              <span>
-                Publicado{" "}
-                {frescor.refreshed_at
-                  ? new Date(frescor.refreshed_at).toLocaleString("pt-BR",
-                      { timeZone: "America/Sao_Paulo" })
-                  : SEM_DADO}
+            </>
+          )}
+          {dados && (
+            <>
+              <span>Contas: {dados.meta.observed_accounts.join(", ") || SEM_DADO}</span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full font-medium border bg-amber-50 text-amber-900 border-amber-300">
+                Cobertura parcial · fora da API: {dados.meta.brands_not_covered.join(", ")}
+                <InfoDica texto={AVISO_COBERTURA} />
               </span>
-              <span>
-                Idade do snapshot:{" "}
-                {frescor.snapshot_age_hours !== null
-                  ? `${frescor.snapshot_age_hours.toFixed(1).replace(".", ",")} h`
-                  : SEM_DADO}
-              </span>
-              <span className="text-slate-500">load_mode: manual_snapshot</span>
             </>
           )}
         </div>
 
-        <Aviso tom="alerta">{AVISO_COBERTURA}</Aviso>
-        <Aviso tom="info">{AVISO_CARGA_MANUAL}</Aviso>
-        <Aviso tom="info">{AVISO_GMV_BRUTO} {AVISO_DIVERGENCIA}</Aviso>
-        <Aviso tom="info">{AVISO_JANELA}</Aviso>
-
-        {dados && (
-          <div className="flex flex-wrap gap-4 text-xs text-slate-700 border border-slate-200 rounded-lg px-3 py-2 bg-white">
-            <span>
-              <strong>Contas cobertas:</strong>{" "}
-              {dados.meta.observed_accounts.join(", ") || SEM_DADO}
-            </span>
-            <span>
-              <strong>Marcas cobertas:</strong>{" "}
-              {dados.meta.covered_brands.join(", ") || SEM_DADO}
-            </span>
-            <span className="text-amber-900">
-              <strong>Fora da cobertura da API:</strong>{" "}
-              {dados.meta.brands_not_covered.join(", ")} — não aparece como zero
-              porque não há medição, e não porque não vendeu.
-            </span>
-          </div>
-        )}
-
         {listaAlertas.map((a) => (
-          <Aviso key={a} tom="alerta">{a}</Aviso>
+          <Aviso key={a}>{a}</Aviso>
         ))}
       </section>
 
@@ -326,8 +293,7 @@ function FullShopeeInner() {
 
       {!erroJanela && !carregando && !erro && !desligadoBackend && vazio && (
         <p role="status" className="text-sm border border-slate-300 bg-slate-50 text-slate-700 rounded-lg px-3 py-2">
-          Nenhum pedido publicado nesta janela para o filtro selecionado. Isso
-          significa <strong>ausência de dado publicado</strong>, não queda de
+          Nenhum pedido nesta janela: ausência de dado publicado, não queda de
           vendas.
         </p>
       )}
@@ -337,8 +303,9 @@ function FullShopeeInner() {
         <>
           {/* KPIs */}
           <section aria-labelledby="sh-kpis" className="flex flex-col gap-2">
-            <h2 id="sh-kpis" className="text-sm font-semibold text-slate-800">
+            <h2 id="sh-kpis" className="inline-flex items-center gap-1 text-sm font-semibold text-slate-800">
               Participação do FBS no período
+              <InfoDica texto={`${AVISO_GMV_BRUTO} ${AVISO_DIVERGENCIA}`} />
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <KpiCard label="GMV bruto (total)" value={fmtGmv(dados.totals.gross_gmv)}
@@ -346,7 +313,7 @@ function FullShopeeInner() {
               <KpiCard label="GMV FBS" value={fmtGmv(fbs?.gross_gmv ?? null)}
                 subvalue={`Vendedor: ${fmtGmv(seller?.gross_gmv ?? null)}`} />
               <KpiCard label="Share FBS — GMV" value={fmtShare(dados.shares.share_fbs_gmv)}
-                subvalue="FBS ÷ (FBS + vendedor), no período inteiro"
+                subvalue="FBS ÷ (FBS + vendedor)"
                 accent="bg-violet-600" />
               <KpiCard label="Share FBS — pedidos" value={fmtShare(dados.shares.share_fbs_orders)}
                 subvalue={`${fmtCount(dados.totals.eligible_orders)} pedidos elegíveis`}
@@ -362,21 +329,6 @@ function FullShopeeInner() {
                 value={fmtShare(dados.totals.handling.coverage_ratio, 1)}
                 subvalue={`${fmtCount(dados.totals.handling.sample_count)} pedidos com coleta registrada`} />
             </div>
-            <p className="text-xs text-slate-500">
-              Todos os valores referem-se a {from} a {to}, apenas para as contas
-              cobertas pela API. {SEM_DADO} indica denominador zero — nunca
-              zero medido.
-            </p>
-            {handlingPoucaCobertura(dados.totals.handling) && (
-              <Aviso tom="alerta">
-                {AVISO_HANDLING} A amostra cobre apenas{" "}
-                {fmtShare(dados.totals.handling.coverage_ratio, 0)} dos pedidos
-                elegíveis: a média descreve essa amostra, não o período inteiro.
-              </Aviso>
-            )}
-            {!handlingPoucaCobertura(dados.totals.handling) && (
-              <Aviso tom="info">{AVISO_HANDLING}</Aviso>
-            )}
           </section>
 
           {/* Composicao logistica */}
@@ -427,21 +379,20 @@ function FullShopeeInner() {
               </table>
             </div>
             <p className="text-xs text-slate-500">
-              As duas modalidades somam o total: não existe terceira classe nesta
-              fonte. Devolução (to_return): {fmtGmv(dados.totals.to_return_gmv)} em{" "}
-              {fmtCount(dados.totals.to_return_orders)} pedidos · não pagos
-              (unpaid): {fmtGmv(dados.totals.unpaid_gmv)} em{" "}
+              Devolução: {fmtGmv(dados.totals.to_return_gmv)} em{" "}
+              {fmtCount(dados.totals.to_return_orders)} pedidos · não pagos:{" "}
+              {fmtGmv(dados.totals.unpaid_gmv)} em{" "}
               {fmtCount(dados.totals.unpaid_orders)} pedidos — <strong>já
-              incluídos</strong> no GMV bruto acima, exibidos aqui para que o
-              peso deles seja visível. Não some novamente.
+              incluídos</strong> no GMV bruto. Não some novamente.
             </p>
           </section>
 
           {/* Tendencia */}
           <section aria-labelledby="sh-tendencia" className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 id="sh-tendencia" className="text-sm font-semibold text-slate-800">
+              <h2 id="sh-tendencia" className="inline-flex items-center gap-1 text-sm font-semibold text-slate-800">
                 Tendência diária do share de FBS
+                <InfoDica texto="Share de cada dia: FBS ÷ (FBS + vendedor) do dia. O share do período, nos cartões, vem dos totais — não é a média destes pontos." />
               </h2>
               <div className="flex gap-1" role="group" aria-label="Métrica da série">
                 {METRICAS.map((m) => (
@@ -459,12 +410,6 @@ function FullShopeeInner() {
               </div>
             </div>
             <ShopeeFbsTrend pontos={serie} metrica={metrica} />
-            <p className="text-xs text-slate-500">
-              O share de cada dia é FBS ÷ (FBS + vendedor) daquele dia. O share
-              do período, nos cartões acima, vem dos totais consolidados — não é
-              a média destes pontos, que daria o mesmo peso a um dia fraco e a
-              um dia forte.
-            </p>
           </section>
 
           {/* Por marca */}
@@ -499,19 +444,6 @@ function FullShopeeInner() {
             }))}
             ausentes={dados.meta.missing_accounts}
           />
-
-          {/* Qualidade */}
-          <section aria-labelledby="sh-qualidade" className="flex flex-col gap-2">
-            <h2 id="sh-qualidade" className="text-sm font-semibold text-slate-800">
-              Qualidade e limitações
-            </h2>
-            <ul className="list-disc pl-5 text-xs text-slate-600 flex flex-col gap-1">
-              {dados.meta.limitations.map((l) => <li key={l}>{l}</li>)}
-            </ul>
-            <p className="text-xs text-slate-500">
-              Definição servida pela API: {dados.meta.gmv_definition}
-            </p>
-          </section>
         </>
       )}
     </PageContainer>

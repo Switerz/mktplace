@@ -12,7 +12,7 @@ import { useId } from "react";
 import { BookOpenCheck, FileSpreadsheet, Scale, Table2 } from "lucide-react";
 
 import Chip from "@/components/ui/Chip";
-import Disclosure from "@/components/ui/Disclosure";
+import InfoDica from "@/components/ui/InfoDica";
 import KpiTile from "@/components/ui/KpiTile";
 import Panel from "@/components/ui/Panel";
 import StateBlock from "@/components/ui/StateBlock";
@@ -65,7 +65,7 @@ export function SemCenario({ disp }: { disp: Exclude<Disponibilidade, { tipo: "o
       <StateBlock
         tipo="indisponivel"
         titulo="A API publicada ainda não fornece o cenário estimado"
-        descricao="Esta versão da API não traz premissas. A visão Conhecida continua disponível."
+        descricao="Use a visão Conhecida."
       />
     );
   }
@@ -73,7 +73,7 @@ export function SemCenario({ disp }: { disp: Exclude<Disponibilidade, { tipo: "o
     <StateBlock
       tipo="indisponivel"
       titulo="Sem premissas para esta competência"
-      descricao={`${disp.motivo}. A premissa vale só para a competência publicada; nunca é estendida a outro mês.`}
+      descricao={`${disp.motivo}.`}
     />
   );
 }
@@ -131,8 +131,12 @@ export function ComparacaoCenarios({ celula, cenario }: { celula: CelulaDRE; cen
   const m = celula.margem_contribuicao_conhecida;
   return (
     <Panel
-      titulo="Conhecida × Estimada"
-      descricao="Mesma receita base; margens de naturezas diferentes, nunca somadas nem misturadas."
+      titulo={
+        <>
+          Conhecida × Estimada
+          <InfoDica texto="Margens de naturezas diferentes: nunca somadas nem misturadas." />
+        </>
+      }
       icone={Scale}
     >
       <dl className="grid grid-cols-1 divide-y divide-line text-data sm:grid-cols-2 sm:divide-x sm:divide-y-0">
@@ -288,35 +292,20 @@ export function DreVerticalEstimada({
   const nc = c.estado === "nao_calculavel" || c.margem_contribuicao_estimada === null;
   return (
     <Panel
-      titulo="DRE estimada"
-      descricao={
-        c.linhas.some((l) => l.percentual !== null && l.percentual !== undefined)
-          ? `${c.fonte_premissas.rotulo} sobre a receita realizada. Origem de cada linha ao lado.`
-          : `${c.fonte_premissas.rotulo}. Recorte agregado: soma das células, sem taxa própria — as taxas estão em Premissas por marca.`
+      titulo={
+        <>
+          DRE estimada
+          {/* Sem taxa por linha o recorte e' agregado: a coluna Premissa fica
+              vazia de proposito, e isso muda a leitura. */}
+          {!c.linhas.some((l) => l.percentual !== null && l.percentual !== undefined) && (
+            <InfoDica texto="Recorte agregado: soma das células, sem taxa própria. Taxas em Premissas por marca." />
+          )}
+        </>
       }
       icone={FileSpreadsheet}
       semPadding
       acao={seletor}
-      rodape={
-        c.avisos.length ? (
-          <div className="flex flex-col gap-0.5">
-            <ul className="flex flex-col gap-0.5">
-              {c.avisos.slice(0, 2).map((a) => (
-                <li key={a}>{a}</li>
-              ))}
-            </ul>
-            {c.avisos.length > 2 && (
-              <Disclosure rotulo={`Mais ${c.avisos.length - 2} avisos`} className="-ml-2">
-                <ul className="flex flex-col gap-0.5">
-                  {c.avisos.slice(2).map((a) => (
-                    <li key={a}>{a}</li>
-                  ))}
-                </ul>
-              </Disclosure>
-            )}
-          </div>
-        ) : undefined
-      }
+      rodape={c.avisos.length ? <Motivos motivos={c.avisos} visiveis={2} unidade={["aviso", "avisos"]} /> : undefined}
     >
       <table className="w-full text-data" aria-label={`DRE estimada — ${atual.rotulo}`}>
         <thead>
@@ -393,8 +382,12 @@ export function EstimadaPorRecorte({
 }) {
   return (
     <Panel
-      titulo="Margem estimada por recorte"
-      descricao="Cada recorte com o próprio estado. Agregado é soma das células, sem reaplicar taxa."
+      titulo={
+        <>
+          Margem estimada por recorte
+          <InfoDica texto="Agregado = soma das células, sem reaplicar taxa." />
+        </>
+      }
       icone={Table2}
       semPadding
     >
@@ -452,24 +445,20 @@ export function PremissasPorMarca({ resp }: { resp: DreResponse }) {
   if (!marcas.length) return null;
   return (
     <Panel
-      titulo="Premissas por marca"
-      descricao={`${fonte?.rotulo ?? "Premissas"} — percentual da receita bruta aplicado em cada célula.`}
+      titulo={
+        <>
+          Premissas por marca
+          <InfoDica texto="Percentual da receita bruta aplicado em cada célula." />
+        </>
+      }
       icone={BookOpenCheck}
       semPadding
       rodape={
-        <div className="flex flex-col gap-1">
-          <span>
-            Fonte: {fonte?.rotulo ?? "—"}
-            {fonte?.data_fonte ? ` · enviada em ${fmtInstanteBrt(fonte.data_fonte)}` : ""}
-            {fonte?.carregado_em ? ` · carregada em ${fmtInstanteBrt(fonte.carregado_em)}` : ""}
-          </span>
-          {fonte?.source_sha256 && (
-            <Disclosure rotulo="Detalhes da fonte" className="-ml-2">
-              <span className="break-all">SHA-256 {fonte.source_sha256}</span>
-            </Disclosure>
-          )}
-          <span>Comissões e Outras Receitas Operacionais aparecem, mas ficam fora da soma até a ratificação.</span>
-        </div>
+        <span>
+          Fonte: {fonte?.rotulo ?? "—"}
+          {fonte?.data_fonte ? ` · enviada em ${fmtInstanteBrt(fonte.data_fonte)}` : ""}
+          {fonte?.carregado_em ? ` · carregada em ${fmtInstanteBrt(fonte.carregado_em)}` : ""}
+        </span>
       }
     >
       <TableScrollHint>

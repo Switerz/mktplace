@@ -26,7 +26,8 @@ import type { LucideIcon } from "lucide-react";
 
 interface Props {
   title: string;
-  subtitle: string;
+  /** Opcional: aba objetiva fica so' com titulo e selos. */
+  subtitle?: string;
   /**
    * UX-TORRE-B2B-1 — icone da rota (o MESMO da sidebar). Opcional: as rotas
    * ainda nao redesenhadas seguem sem ele, com o cabecalho exatamente igual.
@@ -77,7 +78,7 @@ export default function PageHeader({ title, subtitle, icon: Icon, meta, scopeLin
             )}
             <div className="min-w-0">
               <h2 className="text-xl font-bold text-ink">{title}</h2>
-              <p className="text-sm text-ink-muted">{subtitle}</p>
+              {subtitle && <p className="text-sm text-ink-muted">{subtitle}</p>}
               {!meta && scopeLine && <p className="text-xs text-ink-muted mt-0.5 tabular-nums">{scopeLine}</p>}
             </div>
           </div>

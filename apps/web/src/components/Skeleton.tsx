@@ -1,6 +1,6 @@
 export function SkeletonKpiCard() {
   return (
-    <div className="bg-surface rounded-2xl shadow-sm border border-line p-5 flex flex-col gap-3 animate-pulse">
+    <div className="bg-surface rounded-xl border border-line p-4 flex flex-col gap-3 animate-pulse">
       <div className="flex items-center gap-2">
         <span className="w-2 h-2 rounded-full bg-line shrink-0" />
         <div className="h-3 bg-raised rounded w-24" />

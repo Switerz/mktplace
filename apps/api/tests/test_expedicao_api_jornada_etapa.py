@@ -339,3 +339,34 @@ def test_ordem_das_etapas_e_o_dominio_do_contrato():
                      "aguardando_coleta", "entregue_transportadora",
                      "sinalizado_ml", "outro", "nao_publicada"]
     assert len(set(ORDEM)) == 9
+
+
+# ---------------------------------------------------------------------------
+# EXPEDICAO-ETAPA-POPUP: a etapa de CADA pedido na fila paginada
+# ---------------------------------------------------------------------------
+def _fila(eng, channel, **kw):
+    with sessionmaker(bind=eng)() as s:
+        r = svc.get_expedicao(s, channel=channel, **kw)
+        s.rollback()
+    return r
+
+
+def test_fila_paginada_traz_a_etapa_de_cada_pedido(bancos, ligado):
+    eng = bancos["com"]
+    _publicar(eng, {"mercadolivre": ML_REAL})
+    r = _fila(eng, "mercadolivre", brands=["kokeshi"])
+    etapas = sorted(l["etapa"] for l in r["queue"])
+    assert etapas == sorted(["a_faturar", "em_separacao", "em_separacao",
+                             "sinalizado_ml", "aguardando_coleta"])
+    from app.schemas.expedicao import OrderRow
+    for l in r["queue"]:
+        OrderRow.model_validate(l)
+
+
+def test_fila_paginada_sem_coluna_tem_etapa_nula(bancos, ligado):
+    eng = bancos["sem"]
+    _publicar(eng, {"mercadolivre": ML_REAL})
+    r = _fila(eng, "mercadolivre")
+    assert r["queue"], "a massa precisa ter fila"
+    assert all(l["etapa"] is None for l in r["queue"])
+

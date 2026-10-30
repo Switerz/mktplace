@@ -460,11 +460,10 @@ test("R5. toda dimensao visivel tem filtro correspondente", async () => {
 
 test("R7. o que e' novo fica ESCOPADO aos canais; o ML nao ganha nada", async () => {
   const codigo = await lerCodigo(PAGE);
-  // Subtitulo publicado do ML, palavra por palavra.
+  // Abas objetivas: subtitulo curto e unico, sem citar canal.
   assert.ok(codigo.includes(
-    "Compara os preços anunciados das lojas próprias no Mercado Livre com o "
-    + "preço sugerido de revenda (PDV) das tabelas B2B."),
-    "o subtitulo do ML e' contrato publicado");
+    'subtitle="Lojas próprias: preço anunciado × preço sugerido (PDV)."'),
+    "subtitulo curto, igual em todos os canais");
   // O chip de politica de data nao aparece no ML.
   assert.ok(codigo.includes('meta && marketplace !== "ml" &&'),
     "o chip de teto de data e' so' dos canais novos");
@@ -614,7 +613,7 @@ test("H1-4. o nome acessivel e o alvo de 44px do seletor sao preservados", async
 
 test("H1-5. a frase de escopo do Mercado Livre NAO aparece nos outros canais", async () => {
   const codigo = await ler(PAGE);
-  const i = codigo.indexOf("Fora do escopo por não terem catálogo próprio");
+  const i = codigo.indexOf("Fora do escopo (sem catálogo no Mercado Livre)");
   assert.ok(i > 0, "a frase existe");
   const antes = codigo.slice(Math.max(0, i - 400), i);
   assert.ok(/marketplace === "ml" &&/.test(antes),
@@ -688,10 +687,9 @@ test("H2-4. a ausencia e' apresentada como ausencia, nunca como zero", async () 
   const i = codigo.indexOf("Sem observação nesta fotografia");
   assert.ok(i > 0, "a frase existe");
   const frase = codigo.slice(i, i + 320);
-  assert.ok(/não significa zero anúncios/.test(frase),
+  // Abas objetivas: a ressalva encolheu para "(não é zero)", sem a prosa.
+  assert.ok(/não é zero/.test(frase),
     "precisa dizer explicitamente que nao e' zero");
-  assert.ok(/não devolveu essas marcas/.test(frase),
-    "precisa atribuir a ausencia a FONTE, nao ao desempenho da marca");
 });
 
 test("H2-5. marca que saiu da cobertura e' limpa", async () => {

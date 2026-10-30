@@ -283,7 +283,9 @@ test("V31B: o frescor ML nao e aplicado a blocos TikTok", () => {
   assert.ok(i > 0 && usos >= 2, "frescor calculado e usado");
   // a unica renderizacao fica no bloco ML do mapa, nao perto de tk_products
   const trecho = s.slice(s.indexOf("{frescorMl}") - 900, s.indexOf("{frescorMl}"));
-  assert.ok(/ml_snapshot|Mercado Livre/i.test(trecho), "o frescor aparece no bloco ML");
+  // Abas objetivas: o rodape do mapa ficou so' com o frescor; o bloco segue
+  // marcado como ML pelo `regime={REGIME_ML}` do card.
+  assert.ok(/ml_snapshot|Mercado Livre|REGIME_ML/i.test(trecho), "o frescor aparece no bloco ML");
   assert.ok(!/tk_products/.test(trecho), "nao encosta em tk_products");
 });
 
@@ -601,10 +603,12 @@ test("V3F a nota de referencia continua vindo do backend, acentuada", () => {
 test("V3F o dialogo do quadrante usa contagem exata, nao K/M", () => {
   const PAGE_SRC = src(PAGE);
   // as duas contagens do par universo x destaques
+  // POPUPS-1: o par virou duas linhas (EvidenceRow) sob o GMV do quadrante; a
+  // protecao e' a mesma — as duas contagens seguem exatas.
   assert.match(PAGE_SRC, /label="Produtos no quadrante \(universo\)"[\s\S]{0,80}value=\{contagemExata\(q\?\.count \?\? 0\)\}/);
-  assert.match(PAGE_SRC, /referenceLabel="Destaques plotados"[\s\S]{0,90}referenceValue=\{contagemExata\(q\?\.returned_count \?\? 0\)\}/);
+  assert.match(PAGE_SRC, /label="Destaques plotados"[\s\S]{0,90}value=\{contagemExata\(q\?\.returned_count \?\? 0\)\}/);
   assert.doesNotMatch(PAGE_SRC, /value=\{fmtNumber\(q\?\.count \?\? 0\)\}/);
-  assert.doesNotMatch(PAGE_SRC, /referenceValue=\{fmtNumber\(q\?\.returned_count \?\? 0\)\}/);
+  assert.doesNotMatch(PAGE_SRC, /[vV]alue=\{fmtNumber\(q\?\.returned_count \?\? 0\)\}/);
 
   // comportamento: os numeros que o dialogo vai renderizar
   assert.equal(contagemExata(1650), "1.650");
@@ -619,7 +623,12 @@ test("V3F o dialogo do quadrante usa contagem exata, nao K/M", () => {
   // e os OUTROS usos de fmtNumber na pagina seguem intactos
   for (const alvo of [
     "fmtNumber(r.orders)", "nullable(r.total_buyers, fmtNumber)",
-    "nullable(r.at_risk_or_churned, fmtNumber)", "fmtNumber(b?.count ?? 0)",
-    "fmtNumber(oppMap.total_count)", "fmtNumber(dialog.share.n_products)",
+    "nullable(r.at_risk_or_churned, fmtNumber)", "fmtNumber(dialog.share.n_products)",
   ]) assert.ok(PAGE_SRC.includes(alvo), alvo);
+  // POPUPS-1: a faixa passou a contar EXATO tambem — o numero do topo conta
+  // ate' o valor, e "1.6K" mostraria valores falsos no caminho.
+  for (const alvo of ["contagemExata(b?.count ?? 0)", "contagemExata(oppMap.total_count)"]) {
+    assert.ok(PAGE_SRC.includes(alvo), alvo);
+  }
+  assert.ok(!PAGE_SRC.includes("fmtNumber(b?.count ?? 0)"), "contagem da faixa nao volta a abreviar");
 });

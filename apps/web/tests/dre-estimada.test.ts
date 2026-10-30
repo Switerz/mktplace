@@ -263,15 +263,15 @@ test("DRE estimada sem cenario: API antiga e competencia sem premissa tem mensag
   assert.match(t2, /nenhuma competencia do periodo tem premissa publicada/);
 });
 
-test("premissas por marca: taxa por marca, ausencia por escrito, nao somaveis marcados, hash no detalhe", () => {
+test("premissas por marca: taxa por marca, ausencia por escrito, nao somaveis marcados, sem hash na tela", () => {
   const html = render(h(comp.PremissasPorMarca, { resp: fe.respostaEstimada({ estado: "parcial" }) }));
   const t = texto(html);
   assert.match(t, /APICE.*KOKESHI/);
   assert.match(t, /ICMS 10,00% 10,00%/);
   assert.match(t, /Gateway Ausente na matriz Ausente na matriz/);
   assert.match(t, /Comissões fora da soma 12,50%/);
-  assert.match(t, /Detalhes da fonte/);
-  assert.doesNotMatch(t, new RegExp("a".repeat(64)), "hash inteiro so' dentro do detalhe (fechado)");
+  assert.doesNotMatch(t, /Detalhes da fonte/, "o recolhivel de metodologia saiu da tela");
+  assert.doesNotMatch(t, new RegExp("a".repeat(64)), "hash da fonte nao aparece na tela");
   assert.match(t, /Premissas de outubro\/2026/);
 });
 

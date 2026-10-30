@@ -250,7 +250,6 @@ function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-ink-faint">{NOTA_DO_EIXO}</p>
     </div>
   );
 }

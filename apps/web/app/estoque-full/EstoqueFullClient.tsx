@@ -25,8 +25,13 @@
  *
  * ALERTAS SO' AQUI
  * ----------------
- * Nada e' enviado ao marketplace e nada dispara reposicao automatica. A tela
- * diz isso por escrito, para que ninguem assuma que "ruptura" ja' virou pedido.
+ * Nada e' enviado ao marketplace e nada dispara reposicao automatica.
+ *
+ * NUMERO PRIMEIRO
+ * ---------------
+ * A ressalva que muda a leitura de uma coluna (cobertura calculada pela
+ * Torre, reservado como contexto, carga manual) fica num "i" ao lado do
+ * rotulo, nunca em paragrafo.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -34,13 +39,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import KpiCard from "@/components/KpiCard";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
+import InfoDica from "@/components/ui/InfoDica";
 import { EstoqueFullError, fetchEstoqueFull } from "@/lib/api-client";
 import {
-  AVISO_ALERTAS_SO_NA_TORRE,
   AVISO_CARGA_MANUAL,
   AVISO_CONTEXTO,
   AVISO_COBERTURA_TORRE,
-  AVISO_KITS,
   CLASSIFICACOES,
   CLASS_LABEL,
   CLASS_TOM,
@@ -107,12 +111,10 @@ function PainelIndisponivel({
   titulo,
   motivo,
   passo,
-  limitacoes,
 }: {
   titulo: string;
   motivo: string;
   passo?: string;
-  limitacoes?: string[];
 }) {
   return (
     <section
@@ -128,15 +130,8 @@ function PainelIndisponivel({
         </p>
       )}
       <p className="text-sm font-semibold text-slate-900">
-        Isto não significa estoque zero: não há medição publicada.
+        Isto não significa estoque zero.
       </p>
-      {limitacoes?.length ? (
-        <ul className="text-xs text-slate-500 list-disc pl-5 flex flex-col gap-1">
-          {limitacoes.map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-        </ul>
-      ) : null}
     </section>
   );
 }
@@ -189,9 +184,19 @@ function Tabela({ produtos }: { produtos: ProdutoEstoque[] }) {
             <th scope="col" className="px-4 py-3">SKU e produto</th>
             <th scope="col" className="px-4 py-3 text-right">Estoque Full vendável</th>
             <th scope="col" className="px-4 py-3 text-right">Demanda 28d</th>
-            <th scope="col" className="px-4 py-3 text-right">Cobertura da Torre</th>
+            <th scope="col" className="px-4 py-3 text-right">
+              <span className="inline-flex items-center gap-1">
+                Cobertura da Torre
+                <InfoDica texto={AVISO_COBERTURA_TORRE} />
+              </span>
+            </th>
             <th scope="col" className="px-4 py-3">Classificação</th>
-            <th scope="col" className="px-4 py-3 text-right">Reservado</th>
+            <th scope="col" className="px-4 py-3 text-right">
+              <span className="inline-flex items-center gap-1">
+                Reservado
+                <InfoDica texto={AVISO_CONTEXTO} />
+              </span>
+            </th>
             <th scope="col" className="px-4 py-3">Por CD</th>
             <th scope="col" className="px-4 py-3">Fotografia</th>
           </tr>
@@ -446,7 +451,6 @@ export default function EstoqueFullClient() {
     <PageContainer>
       <PageHeader
         title="Estoque Full Shopee"
-        subtitle="Estoque físico no centro de distribuição da Shopee (FBS), por produto."
         scopeLine={escopo}
         filters={filtrosUI}
       />
@@ -482,7 +486,6 @@ export default function EstoqueFullClient() {
           titulo={TITULO_INDISPONIVEL[payload.motivo_tecnico]}
           motivo={payload.unavailable_reason}
           passo={PROXIMO_PASSO[payload.motivo_tecnico]}
-          limitacoes={payload.limitacoes}
         />
       )}
 
@@ -490,7 +493,10 @@ export default function EstoqueFullClient() {
         <>
           {fotografiaEstaVelha(payload.frescor) && (
             <Aviso tom="alerta">
-              {frescorLabel(payload.frescor)}. {AVISO_CARGA_MANUAL}
+              <span className="inline-flex items-center gap-1.5">
+                Desatualizado · {frescorLabel(payload.frescor)}
+                <InfoDica texto={AVISO_CARGA_MANUAL} />
+              </span>
             </Aviso>
           )}
 
@@ -511,9 +517,8 @@ export default function EstoqueFullClient() {
                 Conta sem fotografia nesta data
               </h3>
               <p className="text-sm text-slate-600">
-                {selecionadasSemFotografia.map(tituloMarca).join(", ")} não
-                aparece na fotografia de {fmtData(payload.frescor.ref_date)}.
-                Os números desta seleção não são exibidos: ausência de dado,
+                {selecionadasSemFotografia.map(tituloMarca).join(", ")} em{" "}
+                {fmtData(payload.frescor.ref_date)}: ausência de dado,
                 não estoque zero.
               </p>
               <button
@@ -579,9 +584,8 @@ export default function EstoqueFullClient() {
 
               {payload.marcas_nao_cobertas.length > 0 && (
                 <Aviso tom="info">
-                  Cobertura parcial:{" "}
-                  {payload.marcas_nao_cobertas.map(tituloMarca).join(", ")} não
-                  está na esteira de API e não aparece em nenhum número desta tela —
+                  Cobertura parcial: sem{" "}
+                  {payload.marcas_nao_cobertas.map(tituloMarca).join(", ")} —
                   como ausência, nunca como zero.
                 </Aviso>
               )}
@@ -596,11 +600,6 @@ export default function EstoqueFullClient() {
                   <h3 className="text-base font-semibold text-slate-900">
                     Nenhum produto neste filtro
                   </h3>
-                  <p className="text-sm text-slate-600">
-                    A fotografia de {fmtData(payload.frescor.ref_date)} tem{" "}
-                    {fmtInt(payload.indicadores.produtos_total)} produtos. Nenhum
-                    deles casa com os filtros atuais.
-                  </p>
                   {temFiltroAtivo(filtros) && (
                     <button
                       type="button"
@@ -614,30 +613,15 @@ export default function EstoqueFullClient() {
               ) : (
                 <>
                   <p className="text-xs text-slate-500 px-1">
-                    Exibindo {fmtInt(payload.produtos.length)} de{" "}
-                    {fmtInt(payload.total_no_filtro)} produtos no filtro.
-                    {payload.truncado &&
-                      " A lista foi truncada — refine o filtro para ver o restante."}
+                    {fmtInt(payload.produtos.length)} de{" "}
+                    {fmtInt(payload.total_no_filtro)} produtos
+                    {payload.truncado && " · lista truncada, refine o filtro"}
                   </p>
                   <Tabela produtos={payload.produtos} />
                 </>
               )}
             </>
           )}
-
-          <section className="flex flex-col gap-2 px-1 pb-4">
-            <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-              Como ler esta tela
-            </h4>
-            <ul className="text-xs text-slate-500 list-disc pl-5 flex flex-col gap-1">
-              <li>{AVISO_COBERTURA_TORRE}</li>
-              <li>{payload.limites.observacao}</li>
-              <li>{AVISO_CONTEXTO}</li>
-              <li>{AVISO_KITS}</li>
-              <li>{AVISO_CARGA_MANUAL}</li>
-              <li>{AVISO_ALERTAS_SO_NA_TORRE}</li>
-            </ul>
-          </section>
         </>
       )}
     </PageContainer>

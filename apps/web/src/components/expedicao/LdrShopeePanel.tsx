@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { FaixaKpis } from "@/components/expedicao/SecoesExpedicao";
 import { KpiComAjuda, TaxaComBase } from "@/components/expedicao/KpiComAjuda";
+import InfoDica from "@/components/ui/InfoDica";
 import Note from "@/components/ui/Note";
 import Panel from "@/components/ui/Panel";
 import {
@@ -118,10 +119,17 @@ export default function LdrShopeePanel({ ldr, marca }: { ldr: EstadoLdr; marca: 
   const titulo = resposta?.metric_name ?? NOME_LDR_SHOPEE;
 
   return (
-    <Panel titulo={titulo} id="exp-ldr-shopee">
-      <p className="mb-2 text-xs text-ink-muted" data-testid="exp-ldr-shopee-aviso">
-        {resposta?.disclaimer ?? AVISO_LDR_SHOPEE}
-      </p>
+    <Panel
+      id="exp-ldr-shopee"
+      titulo={titulo}
+      // Indicador interno, nao o oficial da Shopee: a ressalva mora no "ⓘ",
+      // fora do h3 (o nome do titulo continua so' o titulo).
+      acao={
+        <span data-testid="exp-ldr-shopee-aviso" className="inline-flex">
+          <InfoDica texto={resposta?.disclaimer ?? AVISO_LDR_SHOPEE} />
+        </span>
+      }
+    >
       {estado !== "pronta" || !resposta?.ldr ? (
         <p
           className="rounded-lg border border-dashed border-line px-3 py-2 text-sm text-ink-muted"
@@ -151,9 +159,8 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
   return (
     <>
       <p className="mb-2 text-xs text-ink-muted" data-testid="exp-ldr-shopee-periodo">
-        Vencimentos de {diaCurto(l.from)} a {diaCurto(l.to)} ({l.days} dias + hoje) · evento: coleta
-        pela transportadora · só vencimentos fechados entram na taxa ({l.mature_due_days} fechado(s),{" "}
-        {l.partial_due_days} em aberto).
+        Vencimentos de {diaCurto(l.from)} a {diaCurto(l.to)} ({l.days} dias + hoje) · {l.mature_due_days}{" "}
+        fechado(s) na taxa, {l.partial_due_days} em aberto.
       </p>
       {alertas.length > 0 && (
         <ul className="mb-3 space-y-1.5" data-testid="exp-ldr-shopee-alertas">
@@ -171,7 +178,7 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
           ajuda="shopee.ldr"
           rotulo="LDR operacional"
           valor={<TaxaComBase numerador={l.late} base={l.base} taxa={l.rate} />}
-          comparacao={motivo ?? "Atrasados sobre os pedidos com prazo vencido na janela."}
+          comparacao={motivo}
           contexto={AVISO_LDR_SHOPEE}
           tom={l.rate === null ? "ausente" : "neutro"}
           destaque
@@ -180,7 +187,6 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
           ajuda="shopee.ldr_base"
           rotulo="Base (prazos vencidos)"
           valor={l.mature_due_days ? numero(l.base) : VALOR_AUSENTE}
-          comparacao="Pagos, do vendedor, sem FBS e sem cancelados sem coleta."
           tom={l.mature_due_days ? "neutro" : "ausente"}
           destaque
         />
@@ -196,7 +202,6 @@ function Conteudo({ r }: { r: RespostaLdrShopee }) {
           ajuda="shopee.ldr_em_risco"
           rotulo="Vencem hoje ou amanhã"
           valor={numero(l.pending_at_risk)}
-          comparacao="Ainda sem coleta e dentro do prazo."
           destaque
         />
       </FaixaKpis>

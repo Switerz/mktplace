@@ -171,7 +171,7 @@ export default function EvidenceQueue({ lens, rows, onOpenDetail, loading }: Pro
     return (
       <p className="px-6 py-10 text-center text-sm text-slate-500">
         Nenhuma evidência na lente <span className="font-semibold">{LENS_LABELS[lens]}</span> para o escopo
-        selecionado. Não é modo demonstração — a lista veio vazia.
+        selecionado.
       </p>
     );
   }

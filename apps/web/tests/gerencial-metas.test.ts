@@ -13,19 +13,31 @@ import {
   progressoMeta,
   ultimoDiaComDado,
 } from "../src/lib/gerencial/meta-progress.ts";
+import { presetRange } from "../src/lib/filters/presets.ts";
 
 const HOJE = "2026-10-29";
 
-test("mesDaMeta: so' mes unico, do dia 1, inteiro ou corrente ate' hoje", () => {
+test("mesDaMeta: so' mes unico, do dia 1, inteiro ou corrente ate' ontem", () => {
   assert.equal(mesDaMeta("2026-09-01", "2026-09-30", HOJE), "2026-09");
   assert.equal(mesDaMeta("2026-10-01", "2026-10-29", HOJE), "2026-10");
+  // "Mes atual" termina em D-1 (presets ate' ontem): continua com meta
+  assert.equal(mesDaMeta("2026-10-01", "2026-10-28", HOJE), "2026-10");
   assert.equal(mesDaMeta("2026-10-01", "2026-10-31", HOJE), "2026-10");
   // parcial de mes passado, nao comeca no dia 1, ou atravessa meses: sem meta
   assert.equal(mesDaMeta("2026-09-01", "2026-09-15", HOJE), null);
   assert.equal(mesDaMeta("2026-10-02", "2026-10-29", HOJE), null);
   assert.equal(mesDaMeta("2026-09-01", "2026-10-29", HOJE), null);
-  // mes corrente parado antes de hoje (ex.: 01 a 20/10) tambem nao
+  // mes corrente parado antes de ontem (ex.: 01 a 20/10) tambem nao
   assert.equal(mesDaMeta("2026-10-01", "2026-10-20", HOJE), null);
+  assert.equal(mesDaMeta("2026-10-01", "2026-10-27", HOJE), null);
+});
+
+test("mesDaMeta casa com o preset Mes atual (D-1), inclusive na virada de mes", () => {
+  const range = (hoje: string) => presetRange("mes_atual", new Date(`${hoje}T12:00:00`));
+  for (const hoje of ["2026-10-30", "2026-10-02", "2026-11-01", "2026-03-01"]) {
+    const r = range(hoje);
+    assert.notEqual(mesDaMeta(r.dateFrom, r.dateTo, hoje), null, hoje);
+  }
 });
 
 test("diasNoMes", () => {

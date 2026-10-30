@@ -53,7 +53,6 @@ export default async function PerformanceContasPage({
     <PageContainer>
       <PageHeader
         title="Performance das contas"
-        subtitle="Saúde e reputação das contas por marketplace, separando métrica oficial da plataforma e cálculo da Torre."
         scopeLine={escopo}
         filters={<Filtros filtros={filtros} />}
       />
@@ -134,7 +133,6 @@ function Canais({ canais }: { canais: VisaoCanal[] }) {
       <StateBlock
         tipo="vazio"
         titulo="Nenhum canal no recorte"
-        descricao="A API respondeu, mas não trouxe o canal selecionado."
       />
     );
   }

@@ -159,12 +159,12 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
                 {active && (
                   <span
                     aria-hidden="true"
-                    className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-shell-accent"
+                    className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-shell-accent animate-[tc-indicador_260ms_var(--mov-ease)]"
                   />
                 )}
                 <Icone
                   aria-hidden="true"
-                  className={`h-4 w-4 shrink-0 ${active ? "text-shell-accent" : "text-shell-faint group-hover:text-shell-muted"}`}
+                  className={`h-4 w-4 shrink-0 transition-transform duration-200 ease-[var(--mov-ease)] ${active ? "text-shell-accent" : "text-shell-faint group-hover:translate-x-0.5 group-hover:text-shell-muted"}`}
                   strokeWidth={active ? 2.25 : 1.75}
                 />
                 <span className={recolhido ? "sr-only" : "truncate"}>{page.label}</span>
