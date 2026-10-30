@@ -188,6 +188,20 @@ test("a dica dentro do card nao e' focavel nem entra no nome do botao", () => {
   assert.match(dica, /onFocus=\{abrir\}/);
 });
 
+test("T-0028: o balao do ⓘ sai do card por portal (fixed relativo a' tela)", () => {
+  // `.card-hover:hover` e a entrada `.tc-entrada` poem `transform` nos
+  // ancestrais; dentro deles um `fixed` deixa de ser relativo a' viewport e o
+  // balao abria longe do "ⓘ", fora da tela (medido: +488px em 390, rolagem de 8px).
+  const dica = readFileSync(new URL("../src/components/ui/InfoDica.tsx", import.meta.url), "utf8");
+  assert.match(dica, /import \{ createPortal \} from "react-dom";/);
+  const portal = dica.slice(dica.indexOf("createPortal("));
+  assert.match(portal, /^createPortal\(\s*<span\s+ref=\{balao\}/, "o balao e' o filho do portal");
+  assert.match(portal, /<\/span>,\s*document\.body,\s*\)/, "destino: document.body");
+  // o comportamento do colaborador fica: fixed, clamp pela largura, animacao
+  assert.match(portal, /pointer-events-none fixed z-50/);
+  assert.match(portal, /dica-entra_160ms/);
+});
+
 test("linha do mini grafico e' media movel de 7; serie curta fica como esta'", () => {
   const serra = [...Array(14)].map((_, i) => (i % 2 ? 110 : 90));
   const lisa = suavizar(serra);
