@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowRight } from "lucide-react";
 import LiveStatusBadge from "@/components/LiveStatusBadge";
 import PageContainer from "@/components/layout/PageContainer";
 import PageHeader from "@/components/layout/PageHeader";
@@ -12,7 +13,9 @@ import DrilldownMetricPair from "@/components/drilldown/DrilldownMetricPair";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import PriorityCards from "@/components/inteligencia/PriorityCards";
 import ConcentrationBars from "@/components/inteligencia/ConcentrationBars";
 import EvidenceQueue from "@/components/inteligencia/EvidenceQueue";
@@ -26,7 +29,7 @@ import {
   type BandKey, type QuadrantKey,
 } from "@/lib/inteligencia/opportunity";
 import { fetchInteligencia, type InteligenciaData, type LtvRow, type OpportunityHighlight } from "@/lib/api-client";
-import { fmtBrl, fmtNumber } from "@/lib/formatters";
+import { fmtBrl, fmtBrlCurto, fmtNumber } from "@/lib/formatters";
 import { decBr, pctBr, roasBr } from "@/lib/inteligencia/format";
 import { useSortableTable, type SortColumnType } from "@/lib/use-sortable-table";
 import { computeRequestStatus } from "@/lib/request-freshness";
@@ -96,6 +99,47 @@ function SectionCard({ id, title, subtitle, regime, action, children }: {
     </section>
   );
 }
+
+// ---------------------------------------------------------------------------
+// POPUPS-1 — pecas dos detalhes desta pagina (so' o diálogo as usa).
+// ---------------------------------------------------------------------------
+
+/** Topo de todo detalhe: numero grande, rotulo curto, selos e o "ⓘ". */
+function TopoDetalhe({ valor, rotulo, contexto, dica }: {
+  valor: string;
+  rotulo: string;
+  contexto: React.ReactNode;
+  dica: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+        <NumeroAnimado texto={valor} className="text-[32px] font-bold leading-none tracking-tight text-ink tabular-nums" />
+        <span className="pb-0.5 text-xs text-ink-faint tabular-nums">{rotulo}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {contexto}
+        <InfoDica texto={dica} />
+      </div>
+    </div>
+  );
+}
+
+/** Selo extra ao lado do periodo e do frescor (mesmo desenho do DrilldownContextLine). */
+function Selo({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="rounded-full border border-line bg-raised px-2 py-0.5 text-xs text-ink-muted tabular-nums">{children}</span>
+  );
+}
+
+/** Linha de medida: ausente vira "Sem dado" esmaecido, nunca zero. */
+function Medida<T>({ label, v, fmt }: { label: string; v: T | null | undefined; fmt: (x: T) => string }) {
+  return <EvidenceRow label={label} value={v == null ? "Sem dado" : fmt(v)} tone={v == null ? "muted" : "value"} />;
+}
+
+/** Botao que age na propria pagina, com o desenho do DrilldownCta. */
+const CLASSE_CTA_BOTAO =
+  "group mt-1 flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-line px-4 text-sm font-semibold text-accent transition-colors hover:border-accent/40 hover:bg-accent-soft/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
 /** `null` → "—" com título "sem dado"; zero continua sendo zero. */
 function nullable(v: number | null | undefined, fmt: (x: number) => string) {
@@ -740,71 +784,94 @@ function InteligenciaPageInner() {
         </>
       )}
 
-      {/* ---------------- Diálogo único (contrato §3 do G2) ---------------- */}
+      {/* ---------------- Diálogo único (contrato §3 do G2) ----------------
+          POPUPS-1 — todo detalhe abre com o numero grande, selos de contexto e
+          um "ⓘ" com a regra; depois as quebras e a saida. Regra, metodologia e
+          "o que nao e'" moram no ⓘ, nunca em paragrafo. */}
       <KpiDrilldownDialog open={dialog != null} onClose={() => setDialog(null)} title={dialogTitle} focusResetKey={dialogFocusKey}>
-        {/* ---- V3-1B: quadrante. Regra, fronteiras, origem de cada
-             referência, agregados do UNIVERSO e quantos destaques. ---- */}
+        {/* ---- V3-1B: quadrante. GMV do quadrante, criterio, universo x
+             destaques e ad spend. A declaracao de amostra vai para o ⓘ. ---- */}
         {dialog?.kind === "quadrant" && oppMap && (() => {
           const q = oppMap.quadrants.find((x) => x.key === dialog.key);
           const meta = QUADRANT_META[dialog.key];
           const gmvRef = oppMap.gmv_reference == null ? "sem referência" : moedaExata(oppMap.gmv_reference);
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
-              <p className="text-sm text-slate-700">
-                <strong>Regra:</strong> {meta.regra(roasBr(oppMap.roas_reference), gmvRef)}.
-              </p>
-              {/* Mesmo contrato de contagem auditável do cabeçalho da matriz: o
-                  diálogo é onde se confere que N destaques saem de M produtos, e
-                  `fmtNumber` abreviava os dois para K/M. Só estas duas contagens
-                  mudam — dinheiro, ROAS e os outros usos da página seguem iguais. */}
-              <DrilldownMetricPair
-                label="Produtos no quadrante (universo)"
-                value={contagemExata(q?.count ?? 0)}
-                referenceLabel="Destaques plotados"
-                referenceValue={contagemExata(q?.returned_count ?? 0)}
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={fmtBrlCurto(q?.gmv ?? 0)}
+                rotulo="GMV do quadrante"
+                contexto={
+                  <>
+                    <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
+                    <Selo>{meta.regra(roasBr(oppMap.roas_reference), gmvRef)}</Selo>
+                  </>
+                }
+                dica={`${meta.leitura} Referências descritivas do portfólio, não metas.${isSample(oppMap) ? ` ${sampleDeclaration(oppMap)}` : ""}`}
               />
-              <DrilldownMetricPair
-                label="GMV do quadrante"
-                value={fmtBrl(q?.gmv ?? 0)}
-                referenceLabel="Ad spend do quadrante"
-                referenceValue={fmtBrl(q?.ad_spend ?? 0)}
-              />
-              <DataQualityNote note={isSample(oppMap) ? sampleDeclaration(oppMap) : null} />
+              {/* Contagem EXATA nas duas (V3F): o detalhe e' onde se confere
+                  que N destaques saem de M produtos; `fmtNumber` abreviava. */}
+              <DrilldownSecao titulo="Universo do quadrante" acao={<span className="tabular-nums">de {contagemExata(oppMap.total_count)} produtos</span>}>
+                <ul className="flex flex-col">
+                  <EvidenceRow
+                    label="Produtos no quadrante (universo)"
+                    value={contagemExata(q?.count ?? 0)}
+                    pct={oppMap.total_count > 0 ? ((q?.count ?? 0) / oppMap.total_count) * 100 : null}
+                  />
+                  <EvidenceRow label="Ad spend do quadrante" value={fmtBrlCurto(q?.ad_spend ?? 0)} />
+                  <EvidenceRow label="Destaques plotados" value={contagemExata(q?.returned_count ?? 0)} tone="muted" />
+                </ul>
+              </DrilldownSecao>
+              {/* Botao, nao link: troca a lente na propria pagina. Mesmo
+                  desenho do DrilldownCta. */}
               <button
                 type="button"
                 onClick={() => { setDialog(null); setLens(dialog.key === "escalar" ? "escalar" : dialog.key === "reduzir_parar" ? "parar" : "todos"); }}
                 aria-label={`Ver a fila de evidências filtrada a partir do quadrante ${meta.label}`}
-                className="self-start inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                className={CLASSE_CTA_BOTAO}
               >
-                Ver evidências na fila →
+                <span>Ver evidências na fila</span>
+                <ArrowRight aria-hidden="true" className="h-4 w-4 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5" />
               </button>
             </div>
           );
         })()}
 
-        {/* ---- V3-1B: ponto. Produto, as duas comparações e o porquê. ---- */}
+        {/* ---- V3-1B: ponto. GMV e ROAS contra as referencias; o porque no ⓘ. ---- */}
         {dialog?.kind === "point" && oppMap && (() => {
           const h = dialog.highlight;
+          const meta = QUADRANT_META[h.quadrant];
           const leitura = readPoint(h, oppMap, moedaExata, roasBr);
+          const gmvRef = oppMap.gmv_reference == null ? "sem referência" : moedaExata(oppMap.gmv_reference);
           // "" quando o quadrante nao sustenta foco: CTA frio.
           const focoDoPonto = buildInteligenciaArrivalParams(focusForQuadrant(h.quadrant), h.brand);
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine leading={`${brandLabel(h.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
-              <DrilldownMetricPair label="GMV" value={fmtBrl(h.gmv)} referenceLabel="Ad spend" referenceValue={fmtBrl(h.ad_spend)} />
-              <DrilldownMetricPair
-                label="ROAS"
-                value={h.ad_roas == null ? "sem dado" : roasBr(h.ad_roas)}
-                referenceLabel="Referência de ROAS"
-                referenceValue={roasBr(oppMap.roas_reference)}
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={moedaExata(h.gmv)}
+                rotulo={`GMV ${meta.gmvHigh ? "≥" : "<"} referência ${gmvRef}`}
+                contexto={
+                  <>
+                    <DrilldownContextLine leading={`${brandLabel(h.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
+                    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-semibold ${meta.chip}`}>
+                      <span aria-hidden="true" className={`h-2 w-2 rounded-full ${meta.dot}`} />
+                      {meta.label}
+                    </span>
+                  </>
+                }
+                dica={leitura.porque}
               />
-              <ul className="flex flex-col gap-1 list-none p-0 m-0">
-                <li className="text-sm text-slate-700">{leitura.roasComparacao}</li>
-                <li className="text-sm text-slate-700">{leitura.gmvComparacao}</li>
-              </ul>
-              <p className="text-sm text-slate-700">{leitura.porque}</p>
-              <Link
+              <DrilldownSecao titulo="Retorno em ads">
+                <DrilldownMetricPair
+                  label={h.ad_roas == null ? "ROAS (indisponível no snapshot)" : `ROAS ${meta.roasHigh ? "≥" : "<"} referência`}
+                  value={h.ad_roas == null ? "Sem dado" : roasBr(h.ad_roas)}
+                  referenceLabel="Referência de ROAS"
+                  referenceValue={roasBr(oppMap.roas_reference)}
+                />
+                <ul className="flex flex-col">
+                  <EvidenceRow label="Ad spend" value={moedaExata(h.ad_spend)} />
+                </ul>
+              </DrilldownSecao>
+              <DrilldownCta
                 // V3-2: o consumidor de foco existe, e o CTA esquenta APENAS
                 // quando o quadrante prova a populacao. `escalar` exige ROAS >=
                 // referencia, a mesma da lista `scale` que forma `escala_ads`,
@@ -815,36 +882,37 @@ function InteligenciaPageInner() {
                 href={`/brand/${h.brand}?brands=${h.brand}${
                   focoDoPonto ? `&${focoDoPonto}` : ""
                 }`}
-                aria-label={`Abrir a visão da marca ${brandLabel(h.brand)} a partir deste produto`}
-                className="self-start inline-flex items-center min-h-11 text-sm font-semibold text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                ariaLabel={`Abrir a visão da marca ${brandLabel(h.brand)} a partir deste produto`}
               >
                 Abrir marca deste produto →
-              </Link>
+              </DrilldownCta>
             </div>
           );
         })()}
 
-        {/* ---- V3-1B: faixa. As duas explicações são DIFERENTES, e cada uma
-             diz o que NÃO é, porque é justamente o que se confunde. ---- */}
+        {/* ---- V3-1B: faixa. Contagem exata; a explicacao (e o que a faixa
+             NAO e') vai para o ⓘ. A unica ressalva que muda a leitura — ROAS
+             nao medido nao e' ROAS baixo — fica numa linha. ---- */}
         {dialog?.kind === "band" && oppMap && (() => {
           const b = oppMap.bands.find((x) => x.key === dialog.key);
           const meta = BAND_META[dialog.key];
           return (
-            <div className="flex flex-col gap-4">
-              <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />
-              <p className="text-sm text-slate-700">{meta.explicacao}</p>
-              <DrilldownMetricPair
-                label="Produtos na faixa"
-                value={fmtNumber(b?.count ?? 0)}
-                referenceLabel="GMV da faixa"
-                referenceValue={fmtBrl(b?.gmv ?? 0)}
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={contagemExata(b?.count ?? 0)}
+                rotulo="produtos na faixa"
+                contexto={<DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={mlRefreshedAt} />}
+                dica={`${meta.explicacao} ${meta.naoConfundir}`}
               />
-              <DrilldownMetricPair
-                label="Ad spend da faixa"
-                value={fmtBrl(b?.ad_spend ?? 0)}
-                referenceLabel="Universo classificado"
-                referenceValue={fmtNumber(oppMap.total_count)}
+              <DataQualityNote
+                note={dialog.key === "roas_indisponivel_com_investimento" ? "Falha de mensuração, não ROAS baixo." : null}
               />
+              <DrilldownSecao titulo="Na faixa" acao={<span className="tabular-nums">universo classificado: {contagemExata(oppMap.total_count)}</span>}>
+                <ul className="flex flex-col">
+                  <EvidenceRow label="GMV da faixa" value={fmtBrlCurto(b?.gmv ?? 0)} />
+                  <EvidenceRow label="Ad spend da faixa" value={fmtBrlCurto(b?.ad_spend ?? 0)} />
+                </ul>
+              </DrilldownSecao>
             </div>
           );
         })()}
@@ -861,117 +929,149 @@ function InteligenciaPageInner() {
           />
         )}
 
-        {dialog?.kind === "priority" && (
-          <div className="flex flex-col gap-4">
-            <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
-            <p className="text-sm text-slate-700">
-              {dialog.priority.received} registro{dialog.priority.received === 1 ? "" : "s"} nesta lista porque são{" "}
-              {KIND_RULES[dialog.priority.kind]}.
-            </p>
-            <DrilldownMetricPair
-              label={dialog.priority.amountLabel}
-              value={fmtBrl(dialog.priority.amount)}
-              referenceLabel="Registros exibidos"
-              referenceValue={String(dialog.priority.received)}
-            />
-            <div>
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
-                Maiores contribuintes (até 5)
-              </p>
-              <ul className="flex flex-col gap-1 list-none p-0 m-0">
-                {dialog.priority.contributors.map((c, i) => (
-                  <EvidenceRow
-                    key={`${c.brand}-${i}`}
-                    label={`${brandLabel(c.brand)} · ${c.title && c.title.length > 30 ? `${c.title.slice(0, 30)}…` : c.title}`}
-                    value={dialog.priority.kind === "parar"
-                      ? (c.ad_spend == null ? "sem dado" : fmtBrl(c.ad_spend))
-                      : (c.gmv == null ? "sem dado" : fmtBrl(c.gmv))}
-                    tone={(dialog.priority.kind === "parar" ? c.ad_spend : c.gmv) == null ? "muted" : "value"}
-                  />
-                ))}
-              </ul>
-            </div>
-            <DataQualityNote
-              note={`Lista capada em ${priorityLimit(dialog.priority.kind)} registros — não é o total do portfólio.`}
-            />
-            <DrilldownCta href={buildLensHref("/inteligencia", dialog.priority.kind, searchParams)}>
-              Ver evidências na lente {LENS_LABELS[dialog.priority.kind]} →
-            </DrilldownCta>
-          </div>
-        )}
-
-        {dialog?.kind === "bucket" && (
-          <div className="flex flex-col gap-4">
-            <DrilldownContextLine leading={`${brandLabel(dialog.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
-            <p className="text-sm text-slate-700">
-              {BUCKET_LABEL[dialog.share.bucket]} concentra{" "}
-              {dialog.share.sharePct == null ? "uma parcela não calculável" : pctBr(dialog.share.sharePct)}{" "}
-              do GMV de {brandLabel(dialog.brand)}.
-            </p>
-            <DrilldownMetricPair
-              label="GMV do bucket"
-              value={fmtBrl(dialog.share.gmv)}
-              referenceLabel="GMV da marca"
-              referenceValue={fmtBrl(dialog.totalGmv)}
-            />
-            <ul className="flex flex-col gap-1 list-none p-0 m-0">
-              <EvidenceRow label="Produtos no bucket" value={fmtNumber(dialog.share.n_products)} />
-              <EvidenceRow label="Ad spend no bucket" value={fmtBrl(dialog.share.ad_spend)} />
-              <EvidenceRow
-                label="Participação no GMV da marca"
-                value={dialog.share.sharePct == null ? "sem dado" : pctBr(dialog.share.sharePct)}
-                tone={dialog.share.sharePct == null ? "muted" : "value"}
+        {/* ---- Prioridade: o dinheiro da amostra, quantos registros, e quem
+             pesa mais nela (barra = fatia da amostra). ---- */}
+        {dialog?.kind === "priority" && (() => {
+          const p = dialog.priority;
+          const valorDe = (c: EvidenceItem) => (p.kind === "parar" ? c.ad_spend : c.gmv);
+          return (
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={fmtBrlCurto(p.amount)}
+                rotulo={p.amountLabel}
+                contexto={
+                  <>
+                    <DrilldownContextLine leading={`${scope} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
+                    <Selo>{p.received === 1 ? "1 registro exibido" : `${p.received} registros exibidos`}</Selo>
+                  </>
+                }
+                dica={`Na lista: ${KIND_RULES[p.kind]}.`}
               />
-            </ul>
-            <DrilldownCta
-              href={buildParetoProdutosHref(dialog.brand, dialog.share.bucket)}
-              ariaLabel={`Ver produtos do bucket ${dialog.share.bucket.charAt(0)} de ${brandLabel(dialog.brand)} em Produtos`}
-            >
-              Ver produtos deste bucket →
-            </DrilldownCta>
-          </div>
-        )}
+              <DataQualityNote note={`Lista capada em ${priorityLimit(p.kind)} registros — não é o total do portfólio.`} />
+              <DrilldownSecao titulo="Maiores contribuintes" acao={<span className="tabular-nums">top {p.contributors.length}</span>}>
+                <ul className="flex flex-col">
+                  {p.contributors.map((c, i) => {
+                    const v = valorDe(c);
+                    return (
+                      <EvidenceRow
+                        key={`${c.brand}-${i}`}
+                        label={`${brandLabel(c.brand)} · ${c.title}`}
+                        pct={v != null && p.amount > 0 ? (v / p.amount) * 100 : null}
+                        value={v == null ? "Sem dado" : fmtBrlCurto(v)}
+                        tone={v == null ? "muted" : "value"}
+                      />
+                    );
+                  })}
+                </ul>
+              </DrilldownSecao>
+              <DrilldownCta href={buildLensHref("/inteligencia", p.kind, searchParams)}>
+                Ver evidências na lente {LENS_LABELS[p.kind]} →
+              </DrilldownCta>
+            </div>
+          );
+        })()}
 
-        {dialog?.kind === "evidence" && (
-          <div className="flex flex-col gap-4">
-            <DrilldownContextLine
-              leading={`${KIND_LABELS[dialog.item.kind]} · fotografia ML`}
-              periodLabel="sem janela temporal"
-              refreshedAt={null}
-            />
-            <p className="text-sm text-slate-700">
-              Este produto está na lista porque são {KIND_RULES[dialog.item.kind]}.
-            </p>
-            <DrilldownMetricPair
-              label={dialog.item.kind === "parar" ? "Ad spend" : "GMV"}
-              value={dialog.item.kind === "parar"
-                ? (dialog.item.ad_spend == null ? "sem dado" : fmtBrl(dialog.item.ad_spend))
-                : (dialog.item.gmv == null ? "sem dado" : fmtBrl(dialog.item.gmv))}
-              referenceLabel={dialog.item.kind === "escalar" ? "ROAS" : "Velocidade"}
-              referenceValue={dialog.item.kind === "escalar"
-                ? (dialog.item.ad_roas == null ? "sem dado" : roasBr(dialog.item.ad_roas))
-                : (dialog.item.revenue_velocity ?? "sem dado")}
-            />
-            <ul className="flex flex-col gap-1 list-none p-0 m-0">
-              <EvidenceRow label="GMV" value={dialog.item.gmv == null ? "sem dado" : fmtBrl(dialog.item.gmv)} tone={dialog.item.gmv == null ? "muted" : "value"} />
-              <EvidenceRow label="Ad spend" value={dialog.item.ad_spend == null ? "sem dado" : fmtBrl(dialog.item.ad_spend)} tone={dialog.item.ad_spend == null ? "muted" : "value"} />
-              <EvidenceRow label="ROAS" value={dialog.item.ad_roas == null ? "sem dado" : roasBr(dialog.item.ad_roas)} tone={dialog.item.ad_roas == null ? "muted" : "value"} />
-              <EvidenceRow label="ACOS" value={dialog.item.ad_acos_pct == null ? "sem dado" : pctBr(dialog.item.ad_acos_pct)} tone={dialog.item.ad_acos_pct == null ? "muted" : "value"} />
-              <EvidenceRow label="Dias com ads" value={dialog.item.days_advertised == null ? "sem dado" : fmtNumber(dialog.item.days_advertised)} tone={dialog.item.days_advertised == null ? "muted" : "value"} />
-              <EvidenceRow label="Bucket Pareto" value={dialog.item.pareto_bucket ?? "sem dado"} tone={dialog.item.pareto_bucket == null ? "muted" : "value"} />
-            </ul>
-            <DrilldownCta
-              // Mapeamento EXATO lente -> foco: as tres lentes SAO as tres
-              // listas do payload, e os tres focos sao essas mesmas listas.
-              href={`/brand/${dialog.item.brand}?brands=${dialog.item.brand}&${
-                buildInteligenciaArrivalParams(focusForEvidenceKind(dialog.item.kind), dialog.item.brand)
-              }`}
-              ariaLabel={`Abrir a visão da marca ${brandLabel(dialog.item.brand)} com o contexto desta evidência`}
-            >
-              Abrir marca {brandLabel(dialog.item.brand)} →
-            </DrilldownCta>
-          </div>
-        )}
+        {/* ---- Bucket: a fatia do GMV da marca e, ao lado, os outros buckets
+             da mesma marca (dado ja' carregado em `concentration`). ---- */}
+        {dialog?.kind === "bucket" && (() => {
+          const s = dialog.share;
+          const daMarca = concentration.find((c) => c.brand === dialog.brand)?.buckets ?? [];
+          return (
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={s.sharePct == null ? "Sem dado" : pctBr(s.sharePct)}
+                rotulo={`do GMV de ${brandLabel(dialog.brand)}`}
+                contexto={
+                  <>
+                    <DrilldownContextLine leading={`${brandLabel(dialog.brand)} · fotografia ML`} periodLabel="sem janela temporal" refreshedAt={null} />
+                    <Selo>{BUCKET_LABEL[s.bucket]}</Selo>
+                  </>
+                }
+                dica={`Pareto do GMV da marca: ${Object.values(BUCKET_LABEL).join("; ")}.`}
+              />
+              <DrilldownSecao titulo="Este bucket">
+                <ul className="flex flex-col">
+                  <EvidenceRow label="GMV do bucket" value={fmtBrlCurto(s.gmv)} />
+                  <EvidenceRow label="Produtos no bucket" value={fmtNumber(dialog.share.n_products)} />
+                  <EvidenceRow label="Ad spend no bucket" value={fmtBrlCurto(s.ad_spend)} />
+                </ul>
+              </DrilldownSecao>
+              {daMarca.length > 1 && (
+                <DrilldownSecao titulo="Por bucket" acao={<span className="tabular-nums">GMV da marca {fmtBrlCurto(dialog.totalGmv)}</span>}>
+                  <ul className="flex flex-col">
+                    {daMarca.map((x) => (
+                      <EvidenceRow
+                        key={x.bucket}
+                        label={BUCKET_LABEL[x.bucket]}
+                        ponto={x.bucket === s.bucket ? "bg-accent" : undefined}
+                        mutedLabel={x.bucket !== s.bucket}
+                        pct={x.sharePct}
+                        value={`${fmtBrlCurto(x.gmv)} · ${x.sharePct == null ? "—" : pctBr(x.sharePct)}`}
+                      />
+                    ))}
+                  </ul>
+                </DrilldownSecao>
+              )}
+              <DrilldownCta
+                href={buildParetoProdutosHref(dialog.brand, dialog.share.bucket)}
+                ariaLabel={`Ver produtos do bucket ${dialog.share.bucket.charAt(0)} de ${brandLabel(dialog.brand)} em Produtos`}
+              >
+                Ver produtos deste bucket →
+              </DrilldownCta>
+            </div>
+          );
+        })()}
+
+        {/* ---- Evidencia: a metrica que pos o produto na lista em destaque;
+             venda e midia separadas, sem repetir o numero do topo. ---- */}
+        {dialog?.kind === "evidence" && (() => {
+          const it = dialog.item;
+          const parar = it.kind === "parar";
+          const topo = parar ? it.ad_spend : it.gmv;
+          return (
+            <div className="flex flex-col gap-4 text-sm">
+              <TopoDetalhe
+                valor={topo == null ? "Sem dado" : fmtBrlCurto(topo)}
+                rotulo={parar ? "Ad spend" : "GMV"}
+                contexto={
+                  <DrilldownContextLine
+                    leading={`${KIND_LABELS[it.kind]} · fotografia ML`}
+                    periodLabel="sem janela temporal"
+                    refreshedAt={null}
+                  />
+                }
+                dica={`Na lista porque são ${KIND_RULES[it.kind]}.`}
+              />
+              <DrilldownSecao titulo="Venda">
+                <ul className="flex flex-col">
+                  {parar && <Medida label="GMV" v={it.gmv} fmt={fmtBrlCurto} />}
+                  <Medida label="Unidades vendidas" v={it.units_sold} fmt={contagemExata} />
+                  <Medida label="Velocidade" v={it.revenue_velocity} fmt={(x) => x} />
+                  <Medida label="Bucket Pareto" v={it.pareto_bucket} fmt={(x) => x} />
+                  <Medida label="Cancelamento" v={it.cancel_rate_pct} fmt={pctBr} />
+                </ul>
+              </DrilldownSecao>
+              <DrilldownSecao titulo="Mídia">
+                <ul className="flex flex-col">
+                  {!parar && <Medida label="Ad spend" v={it.ad_spend} fmt={fmtBrlCurto} />}
+                  <Medida label="ROAS" v={it.ad_roas} fmt={roasBr} />
+                  <Medida label="ACOS" v={it.ad_acos_pct} fmt={pctBr} />
+                  <Medida label="Dias com ads" v={it.days_advertised} fmt={contagemExata} />
+                </ul>
+              </DrilldownSecao>
+              <DrilldownCta
+                // Mapeamento EXATO lente -> foco: as tres lentes SAO as tres
+                // listas do payload, e os tres focos sao essas mesmas listas.
+                href={`/brand/${dialog.item.brand}?brands=${dialog.item.brand}&${
+                  buildInteligenciaArrivalParams(focusForEvidenceKind(dialog.item.kind), dialog.item.brand)
+                }`}
+                ariaLabel={`Abrir a visão da marca ${brandLabel(dialog.item.brand)} com o contexto desta evidência`}
+              >
+                Abrir marca {brandLabel(dialog.item.brand)} →
+              </DrilldownCta>
+            </div>
+          );
+        })()}
       </KpiDrilldownDialog>
     </PageContainer>
   );

@@ -15,8 +15,11 @@ interface Props {
 export default function DataQualityNote({ note }: Props) {
   if (!note) return null;
   return (
-    <p className="text-xs text-warn-ink bg-warn-soft border border-warn/35 rounded-lg px-3 py-1.5">
-      {note}
+    // POPUPS-1 — uma linha com marcador, sem caixa: a ressalva fica visivel
+    // sem competir com o numero.
+    <p className="flex items-start gap-2 text-xs leading-snug text-warn-ink">
+      <span aria-hidden="true" className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
+      <span>{note}</span>
     </p>
   );
 }

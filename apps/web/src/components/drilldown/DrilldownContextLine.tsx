@@ -19,10 +19,13 @@ interface Props {
  */
 export default function DrilldownContextLine({ leading, periodLabel, refreshedAt }: Props) {
   return (
-    <p className="text-xs text-ink-faint">
-      {leading && <>{leading} · </>}
-      {periodLabel}
-      {refreshedAt && <> · Atualizado em {fmtRefreshedAt(refreshedAt)}</>}
+    // POPUPS-1 — contexto em selos, nao em frase: periodo e frescor de relance.
+    <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
+      {leading && <span className="rounded-full bg-accent-soft px-2 py-0.5 font-medium text-accent-ink">{leading}</span>}
+      <span className="rounded-full border border-line bg-raised px-2 py-0.5 tabular-nums">{periodLabel}</span>
+      {refreshedAt && (
+        <span className="rounded-full border border-line px-2 py-0.5 tabular-nums">Atualizado {fmtRefreshedAt(refreshedAt)}</span>
+      )}
     </p>
   );
 }

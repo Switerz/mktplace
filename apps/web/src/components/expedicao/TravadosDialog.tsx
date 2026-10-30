@@ -10,10 +10,17 @@
  *
  * A ETAPA do pedido (a preparar x pronto para envio; substatus do ML) ainda
  * nao e' publicada na fila — dito no rodape, nunca inventado.
+ *
+ * POPUPS-1 — numero grande com a fatia da fila em pilula; depois as quebras
+ * que respondem "por que", "onde" e "de quem" (contagem das linhas ja'
+ * carregadas, com barra de participacao) e so' entao a lista de pedidos.
  */
 import { useEffect, useState } from "react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
+import EvidenceRow from "@/components/drilldown/EvidenceRow";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import {
   canalTemPrazo,
   formatarHoras,
@@ -41,6 +48,33 @@ type Estado =
   | { tipo: "carregando" }
   | { tipo: "erro" }
   | { tipo: "ok"; linhas: LinhaFila[]; total: number };
+
+/** POPUPS-1 — contagem por rotulo, da maior para a menor. */
+function contarPor(linhas: LinhaFila[], rotulo: (l: LinhaFila) => string): { rotulo: string; n: number }[] {
+  const n = new Map<string, number>();
+  for (const l of linhas) {
+    const k = rotulo(l);
+    n.set(k, (n.get(k) ?? 0) + 1);
+  }
+  return [...n.entries()].map(([r, qtd]) => ({ rotulo: r, n: qtd })).sort((a, b) => b.n - a.n);
+}
+
+/** POPUPS-1 — uma quebra em linhas com barra; a base e' a lista carregada. */
+function Quebra({ itens, base }: { itens: { rotulo: string; n: number }[]; base: number }) {
+  return (
+    <ul className="flex flex-col">
+      {itens.map((i) => (
+        <EvidenceRow
+          key={i.rotulo}
+          label={i.rotulo}
+          pct={base > 0 ? (i.n / base) * 100 : null}
+          barra="bg-warn"
+          value={`${formatarInteiro(i.n)} · ${percentualDaFila(i.n, base) ?? "—"}`}
+        />
+      ))}
+    </ul>
+  );
+}
 
 export default function TravadosDialog({
   api,
@@ -92,6 +126,13 @@ export default function TravadosDialog({
   // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
   const temEtapa = estado.tipo === "ok" && temEtapaPublicada(estado.linhas);
   const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];
+  // POPUPS-1 — quebras sobre as linhas carregadas. Com a lista cortada no
+  // limite, elas falam dos N mais antigos, e o rotulo da secao diz isso.
+  const linhas = estado.tipo === "ok" ? estado.linhas : [];
+  const porMotivo = contarPor(linhas, motivoDoTravado);
+  const porMarca = variasMarcas ? contarPor(linhas, (l) => brandLabel(l.brand)) : [];
+  const cortada = estado.tipo === "ok" && estado.total > estado.linhas.length;
+  const amostra = cortada ? <span className="tabular-nums">nos {formatarInteiro(linhas.length)} mais antigos</span> : undefined;
   // Rodape so' com o que falta dizer; sem nada, nenhum paragrafo vazio.
   const rodape = [
     alvo?.incluiFbs ? "Lista da fila publicada, com pedidos FBS." : null,
@@ -104,13 +145,24 @@ export default function TravadosDialog({
   return (
     <KpiDrilldownDialog open={alvo !== null} onClose={aoFechar} title={alvo?.titulo ?? "Travados"}>
       {alvo ? (
-        <div className="flex flex-col gap-3" data-testid="exp-travados">
-          <p className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold tabular-nums text-warn-ink">{formatarInteiro(travados)}</span>
-            <span className="text-sm text-ink-muted">
-              travados{pct ? ` · ${pct} da fila` : ""}
+        <div className="flex flex-col gap-4 text-sm" data-testid="exp-travados">
+          {/* POPUPS-1 — o numero e a fatia da fila, sem frase em volta. */}
+          <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+            <NumeroAnimado
+              texto={formatarInteiro(travados)}
+              className="text-[32px] font-bold leading-none tracking-tight text-warn-ink tabular-nums"
+            />
+            <span className="flex flex-wrap items-center gap-2 pb-0.5">
+              {pct ? (
+                <span className="rounded-md bg-warn-soft px-2 py-0.5 text-sm font-semibold tabular-nums text-warn-ink">
+                  {pct} da fila
+                </span>
+              ) : null}
+              <span className="text-xs text-ink-faint tabular-nums">
+                travados{alvo.backlog > 0 ? ` de ${formatarInteiro(alvo.backlog)} na fila` : ""}
+              </span>
             </span>
-          </p>
+          </div>
 
           {estado.tipo === "carregando" ? (
             <p role="status" className="text-sm text-ink-muted">Carregando pedidos…</p>
@@ -129,64 +181,67 @@ export default function TravadosDialog({
             <p role="status" className="text-sm text-ink-muted">Nenhum pedido travado nesta fotografia.</p>
           ) : (
             <>
+              <DrilldownSecao titulo="Por que travou" acao={amostra}>
+                <Quebra itens={porMotivo} base={linhas.length} />
+              </DrilldownSecao>
+
               {porEtapa.length ? (
                 <div data-testid="exp-travados-por-etapa">
-                  <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
-                    Onde estão travados
-                    {estado.total > estado.linhas.length
-                      ? ` (nos ${formatarInteiro(estado.linhas.length)} mais antigos)`
-                      : ""}
-                  </p>
-                  <ul className="flex flex-wrap gap-1.5">
-                    {porEtapa.map((e) => (
-                      <li
-                        key={e.etapa}
-                        className="inline-flex items-baseline gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1 text-xs"
-                      >
-                        <span className="text-ink-muted">{e.rotulo}</span>
-                        <span className="font-semibold tabular-nums text-ink">{formatarInteiro(e.n)}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  {/* Etapa na ordem do fluxo, nao por tamanho: e' o caminho do pedido. */}
+                  <DrilldownSecao titulo="Onde estão travados" acao={amostra}>
+                    <Quebra itens={porEtapa} base={linhas.length} />
+                  </DrilldownSecao>
                 </div>
               ) : null}
-              <div className="max-h-[50vh] overflow-auto rounded-lg border border-line">
-                <table className="w-full text-sm [&_td]:px-3 [&_td]:py-1.5 [&_th]:px-3 [&_th]:py-1.5">
-                  <caption className="sr-only">Pedidos travados, do mais antigo ao mais novo</caption>
-                  <thead className="sticky top-0 bg-surface text-left text-xs uppercase tracking-wide text-ink-faint">
-                    <tr>
-                      {temCodigo ? <th scope="col">Pedido</th> : null}
-                      {variasMarcas ? <th scope="col">Marca</th> : null}
-                      {temEtapa ? <th scope="col">Etapa</th> : null}
-                      <th scope="col" className="text-right">Aberto há</th>
-                      <th scope="col">Por que travou</th>
-                      {temPrazo ? <th scope="col">Prazo</th> : null}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {estado.linhas.map((l, i) => (
-                      <tr key={`${l.shop_account}-${l.order_ref ?? i}`} className="border-t border-line">
-                        {temCodigo ? (
-                          <td className="font-mono text-xs text-ink-muted" title={l.order_ref ?? undefined}>
-                            {l.order_ref ? l.order_ref.slice(0, 10) : "—"}
-                          </td>
-                        ) : null}
-                        {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}
-                        {temEtapa ? <td className="font-medium text-ink">{rotuloDaEtapa(l.etapa)}</td> : null}
-                        <td className="text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
-                        <td className="text-ink">{motivoDoTravado(l)}</td>
-                        {temPrazo ? <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {estado.total > estado.linhas.length ? (
-                <p className="text-xs text-ink-muted">
-                  Mostrando os {formatarInteiro(estado.linhas.length)} mais antigos de{" "}
-                  {formatarInteiro(estado.total)}.
-                </p>
+
+              {porMarca.length > 1 ? (
+                <DrilldownSecao titulo="Por marca" acao={amostra}>
+                  <Quebra itens={porMarca} base={linhas.length} />
+                </DrilldownSecao>
               ) : null}
+
+              <DrilldownSecao
+                titulo="Pedidos"
+                acao={
+                  <span className="tabular-nums">
+                    {cortada
+                      ? `${formatarInteiro(linhas.length)} mais antigos de ${formatarInteiro(estado.total)}`
+                      : "mais antigos primeiro"}
+                  </span>
+                }
+              >
+                <div className="max-h-[50vh] overflow-auto rounded-lg border border-line">
+                  <table className="w-full text-sm [&_td]:px-3 [&_td]:py-1.5 [&_th]:px-3 [&_th]:py-1.5">
+                    <caption className="sr-only">Pedidos travados, do mais antigo ao mais novo</caption>
+                    <thead className="sticky top-0 bg-raised text-left text-xs uppercase tracking-wide text-ink-faint">
+                      <tr>
+                        {temCodigo ? <th scope="col">Pedido</th> : null}
+                        {variasMarcas ? <th scope="col">Marca</th> : null}
+                        {temEtapa ? <th scope="col">Etapa</th> : null}
+                        <th scope="col" className="text-right">Aberto há</th>
+                        <th scope="col">Por que travou</th>
+                        {temPrazo ? <th scope="col">Prazo</th> : null}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {estado.linhas.map((l, i) => (
+                        <tr key={`${l.shop_account}-${l.order_ref ?? i}`} className="border-t border-line">
+                          {temCodigo ? (
+                            <td className="font-mono text-xs text-ink-muted" title={l.order_ref ?? undefined}>
+                              {l.order_ref ? l.order_ref.slice(0, 10) : "—"}
+                            </td>
+                          ) : null}
+                          {variasMarcas ? <td className="text-ink">{brandLabel(l.brand)}</td> : null}
+                          {temEtapa ? <td className="font-medium text-ink">{rotuloDaEtapa(l.etapa)}</td> : null}
+                          <td className="text-right font-semibold tabular-nums text-ink">{formatarHoras(l.hours_open)}</td>
+                          <td className="text-ink-muted">{motivoDoTravado(l)}</td>
+                          {temPrazo ? <td className="text-ink-muted">{rotuloDeadline(l.deadline_status)}</td> : null}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </DrilldownSecao>
             </>
           )}
           {rodape ? <p className="text-xs text-ink-faint">{rodape}</p> : null}

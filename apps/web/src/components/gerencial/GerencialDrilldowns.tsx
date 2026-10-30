@@ -5,34 +5,43 @@
  * das Tasks B, D e F da rodada consolidada).
  *
  * Todos seguem o contrato transversal do Gate G2 (docs/DRILLDOWN_ARCHITECTURE.md
- * §3): contexto -> diagnostico -> evidencia -> limitacao -> acao, compostos com
- * os quatro primitives existentes. Nenhum shell novo: sao renderizados dentro do
- * unico `KpiDrilldownDialog`.
+ * §3), renderizados dentro do unico `KpiDrilldownDialog`.
+ *
+ * POPUPS-1 — mesmo desenho do detalhe de KPI: numero principal grande, variacao
+ * em pilula quando ha' base, selos de contexto e um "ⓘ" com a definicao e a
+ * ressalva. Depois, secoes com as quebras que respondem a proxima pergunta
+ * (por canal, por marca), do maior ao menor, com barra de participacao, ponto
+ * de canal e variacao por linha. Paragrafos de metodologia sairam; a ressalva
+ * que muda a leitura ficou em uma linha ou no "ⓘ".
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ArrowDownRight, ArrowRight, ArrowUpRight } from "lucide-react";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
+import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import DataQualityNote from "@/components/drilldown/DataQualityNote";
 import DrilldownCta from "@/components/drilldown/DrilldownCta";
+import InfoDica from "@/components/ui/InfoDica";
+import NumeroAnimado from "@/components/ui/NumeroAnimado";
 import { fetchBrands, fetchOverview, type BrandRow, type OverviewData } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
-import { fmtBrlFull, fmtNumber, fmtPct } from "@/lib/formatters";
+import { fmtBrlFull, fmtNumber, fmtPctBr } from "@/lib/formatters";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import type {
   ConfidenceStripData,
   CommercialAttentionItem,
   DataConfidenceItem,
 } from "@/lib/gerencial/attention";
 import { AVAILABILITY_LABEL, REFERENCE_KIND_LABEL } from "@/lib/gerencial/attention";
+import { formatDeltaAbs, formatMetricByType, formatReferenceValue } from "@/lib/executive-pulse";
 import type { MergedBucket, MergedSeries } from "@/lib/gerencial/trend-series";
 import { bucketRange } from "@/lib/gerencial/trend-series";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
-import type { BrandChannelMatrix, ConcentrationEntry, Movement } from "@/lib/gerencial/brand-matrix";
+import type { BrandChannelMatrix, ConcentrationEntry, MatrixRow, Movement } from "@/lib/gerencial/brand-matrix";
 import { PRODUCTS_SCOPE_NOTE } from "@/lib/gerencial/brand-matrix";
 import type { VolumeHealthRow } from "@/lib/gerencial/volume-health";
 import { CANCEL_RATE_FORMULA, NO_CROSS_CHANNEL_RANKING } from "@/lib/gerencial/volume-health";
-
-const SECTION_LABEL = "text-xs font-semibold text-ink-faint uppercase tracking-wide";
 
 /** Escopo do ponto por grao. O grao semanal (Gate V2-2) nao e' "competência". */
 const BUCKET_SCOPE_LABEL: Record<"day" | "week" | "month", string> = {
@@ -41,12 +50,113 @@ const BUCKET_SCOPE_LABEL: Record<"day" | "week" | "month", string> = {
   month: "da competência",
 };
 
+/** Cor de canal como TEXTO (para o SVG, que pinta com currentColor). Literal
+ * para o Tailwind enxergar a classe. */
+const CHANNEL_TEXT: Record<Marketplace, string> = {
+  tiktok: "text-canal-tiktok",
+  ml: "text-canal-ml",
+  shopee: "text-canal-shopee",
+};
+
 function metricLabel(metric: TrendMetric): string {
   return metric === "gmv" ? "GMV" : "Pedidos";
 }
 
 function formatMetric(value: number, metric: TrendMetric): string {
   return metric === "gmv" ? fmtBrlFull(value) : fmtNumber(value);
+}
+
+function fmtPct1(v: number): string {
+  return `${v.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+}
+
+function variacao(atual: number | null | undefined, anterior: number | null | undefined): number | null {
+  return atual != null && anterior != null && anterior > 0 ? (atual / anterior - 1) * 100 : null;
+}
+
+/** "2026-07-05" -> "05/07". */
+function diaMes(iso: string): string {
+  const [, m, d] = iso.split("-");
+  return d && m ? `${d}/${m}` : iso;
+}
+
+// ---------------------------------------------------------------------------
+// POPUPS-1 — topo comum: numero, pilula e selos
+// ---------------------------------------------------------------------------
+
+type Pele = "ok" | "crit" | "warn" | "neutro";
+
+const PELE: Record<Pele, string> = {
+  ok: "bg-ok-soft text-ok-ink",
+  crit: "bg-crit-soft text-crit-ink",
+  warn: "bg-warn-soft text-warn-ink",
+  neutro: "bg-raised text-ink-muted",
+};
+
+/** Variacao em pilula + a base nomeada ("vs R$ X no período anterior"). */
+function Variacao({ pct, base, neutro }: { pct: number; base?: string | null; neutro?: boolean }) {
+  const sobe = pct >= 0;
+  const Seta = sobe ? ArrowUpRight : ArrowDownRight;
+  return (
+    <span className="flex flex-wrap items-center gap-2 pb-0.5">
+      <span
+        className={`inline-flex items-center gap-0.5 rounded-md px-2 py-0.5 text-sm font-semibold tabular-nums ${
+          PELE[neutro ? "neutro" : sobe ? "ok" : "crit"]
+        }`}
+      >
+        <Seta aria-hidden="true" className="h-4 w-4" strokeWidth={2.25} />
+        {fmtPctBr(pct)}
+      </span>
+      {base && <span className="text-xs text-ink-faint tabular-nums">{base}</span>}
+    </span>
+  );
+}
+
+/** Pilula de leitura sem seta (participacao, contagem de avisos). */
+function Selo({ children, pele = "neutro" }: { children: ReactNode; pele?: Pele }) {
+  return (
+    <span className={`mb-0.5 inline-flex items-center rounded-md px-2 py-0.5 text-sm font-semibold tabular-nums ${PELE[pele]}`}>
+      {children}
+    </span>
+  );
+}
+
+function Topo({
+  valor,
+  vazio,
+  tom = "text-ink",
+  extra,
+  leading,
+  periodLabel,
+  refreshedAt,
+  dica,
+}: {
+  /** Valor ja' formatado; null mostra `vazio` (nunca um zero inventado). */
+  valor: string | null;
+  vazio?: string;
+  tom?: string;
+  extra?: ReactNode;
+  leading?: string | null;
+  periodLabel: string;
+  refreshedAt: string | null;
+  dica?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+        {valor != null ? (
+          <NumeroAnimado texto={valor} className={`text-[32px] font-bold leading-none tracking-tight tabular-nums ${tom}`} />
+        ) : (
+          <span className="text-xl font-semibold leading-none text-ink-faint">{vazio ?? "Sem dado"}</span>
+        )}
+        {extra}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <DrilldownContextLine leading={leading} periodLabel={periodLabel} refreshedAt={refreshedAt} />
+        {dica && <InfoDica texto={dica} />}
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -66,85 +176,94 @@ export function ConfidenceDrilldownContent({
   refreshedAt: string | null;
   regioesHref: string;
 }) {
+  // POPUPS-1: topo = quantos canais tem serie; a pilula diz se ha' aviso, ou
+  // se os avisos nem foram verificados (o que nao e' "sem aviso").
+  const avisos = !data.warningsChecked ? (
+    <Selo>Avisos não verificados</Selo>
+  ) : items.length > 0 ? (
+    <Selo pele="warn">
+      {items.length} {items.length === 1 ? "aviso" : "avisos"}
+    </Selo>
+  ) : (
+    <Selo pele="ok">Sem avisos</Selo>
+  );
+
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
+      <Topo
+        valor={`${data.availableCount} de ${data.selectedCount}`}
+        extra={avisos}
+        leading="Canais com série"
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica="Série disponível = a fonte respondeu com registros no período, inclusive registros de valor zero. Não comprova completude. Sem aviso de defasagem também não garante que toda fonte está atualizada até hoje."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Disponibilidade da série por canal</p>
-        <ul className="flex flex-col gap-1">
+      <DrilldownSecao titulo="Por canal">
+        <ul className="flex flex-col">
           {data.channels.map((c) => (
             <EvidenceRow
               key={c.channel}
               label={c.label}
+              ponto={CHANNEL_DOT[c.channel]}
               value={AVAILABILITY_LABEL[c.availability]}
-              tone={
-                c.availability === "available"
-                  ? "value"
-                  : c.availability === "unavailable"
-                    ? "warning"
-                    : "muted"
-              }
-              reference={
-                c.availability === "available"
-                  ? "Há registros no período — inclusive registros de valor zero"
-                  : c.availability === "no_records"
-                    ? "A fonte respondeu, mas não há linhas no período"
-                    : null
-              }
+              tone={c.availability === "available" ? "value" : c.availability === "unavailable" ? "warning" : "muted"}
             />
           ))}
         </ul>
-      </div>
+      </DrilldownSecao>
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Defasagem e avisos</p>
+      <DrilldownSecao titulo="Defasagem">
         {!data.warningsChecked ? (
-          <p className="text-xs text-ink-muted">
-            O resumo executivo não respondeu nesta carga, então defasagem e avisos de dado{" "}
-            <strong>não foram verificados</strong>. Isso não é o mesmo que ausência de avisos.
-          </p>
-        ) : data.maxStalenessDays != null ? (
-          <EvidenceRow
-            label="Maior defasagem observada"
-            value={`${data.maxStalenessDays} dia(s)`}
-            tone={data.maxStalenessDays > 2 ? "warning" : "value"}
-            reference={data.sources.length ? `Fontes: ${data.sources.join(", ")}` : null}
-          />
+          <DataQualityNote note="Defasagem e avisos não verificados: o resumo executivo não respondeu nesta carga." />
         ) : (
-          <p className="text-xs text-ink-faint">
-            Nenhum aviso de defasagem para o período — o que não é o mesmo que garantir que toda fonte está
-            atualizada até hoje.
-          </p>
+          <ul className="flex flex-col">
+            <EvidenceRow
+              label="Maior defasagem"
+              value={data.maxStalenessDays != null ? `${data.maxStalenessDays} dia(s)` : "Sem aviso"}
+              tone={data.maxStalenessDays == null ? "muted" : data.maxStalenessDays > 2 ? "warning" : "value"}
+              reference={data.maxStalenessDays != null && data.sources.length ? data.sources.join(" · ") : null}
+            />
+          </ul>
         )}
-      </div>
+      </DrilldownSecao>
 
-      {data.warningsChecked && (
-        <div className="flex flex-col gap-1.5">
-          <p className={SECTION_LABEL}>Avisos ativos ({items.length})</p>
-          {items.length === 0 ? (
-            <p className="text-xs text-ink-faint">Nenhum aviso de confiança no dado neste período.</p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {items.map((item) => (
-                <li key={item.key} className="text-xs text-ink-muted leading-snug">
-                  {item.message}
-                  {(item.source || item.lastDate) && (
-                    <span className="block text-xs text-ink-faint tabular-nums">
-                      {item.source && <>fonte {item.source}</>}
-                      {item.lastDate && <> · até {item.lastDate}</>}
-                      {item.thresholdDays != null && <> · limiar {item.thresholdDays}d</>}
+      {data.warningsChecked && items.length > 0 && (
+        <DrilldownSecao titulo="Avisos ativos" acao={<span>{items.length}</span>}>
+          <ul className="flex flex-col divide-y divide-line">
+            {[...items]
+              .sort((a, b) => (b.stalenessDays ?? -1) - (a.stalenessDays ?? -1))
+              .map((item) => (
+                <li key={item.key} className="flex items-start justify-between gap-3 py-1.5">
+                  <span className="min-w-0 text-ink-muted leading-snug">
+                    {item.message}
+                    {(item.source || item.lastDate) && (
+                      <span className="block text-xs text-ink-faint tabular-nums">
+                        {[item.source, item.lastDate && `até ${item.lastDate}`].filter(Boolean).join(" · ")}
+                      </span>
+                    )}
+                  </span>
+                  {item.stalenessDays != null && (
+                    <span
+                      className={`shrink-0 tabular-nums font-semibold ${
+                        item.thresholdDays != null && item.stalenessDays > item.thresholdDays ? "text-warn-ink" : "text-ink"
+                      }`}
+                      title={item.thresholdDays != null ? `Limiar: ${item.thresholdDays} dia(s)` : undefined}
+                    >
+                      {item.stalenessDays} d
+                      {item.thresholdDays != null && (
+                        <span className="font-normal text-ink-faint"> / {item.thresholdDays} d</span>
+                      )}
                     </span>
                   )}
                 </li>
               ))}
-            </ul>
-          )}
-        </div>
+          </ul>
+        </DrilldownSecao>
       )}
 
-      {/* O limite epistemico da faixa, dito sem rodeio. */}
-      <DataQualityNote note="Disponibilidade de série indica que a fonte respondeu com registros no período. Ela NÃO comprova completude do dado: um canal pode ter série disponível e ainda assim estar com carga parcial ou atrasada." />
+      {/* O limite epistemico da faixa, em uma linha. */}
+      <DataQualityNote note="Série disponível não é dado completo: o canal pode estar com carga parcial ou atrasada." />
       <DrilldownCta href={regioesHref}>Ver cobertura regional em Regiões →</DrilldownCta>
     </div>
   );
@@ -268,164 +387,175 @@ export function TrendBucketDrilldownContent({
     state.overviewStatus === "unavailable" && state.brandsStatus === "unavailable";
   const isDemo = state.overviewStatus === "demo" || state.brandsStatus === "demo";
 
+  // POPUPS-1: canais do maior ao menor, com participacao no total do ponto
+  // (so' quando o total existe — denominador parcial inflaria o share) e
+  // variacao contra a mesma posicao do periodo anterior.
+  const cmp = bucket.comparison;
+  const porCanal = channels
+    .map((channel) => {
+      const value = bucket.values[channel] ?? null;
+      return {
+        channel,
+        value,
+        pct: value != null && bucket.total != null && bucket.total > 0 ? (value / bucket.total) * 100 : null,
+        delta: variacao(value, cmp?.values[channel]),
+      };
+    })
+    .sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+  const deltaTotal = variacao(bucket.total, cmp?.total);
+
+  const marcas = brandsUsable ? state.brands!.filter((b) => b.total_gmv > 0).sort((a, b) => b.total_gmv - a.total_gmv) : [];
+  const somaMarcas = marcas.reduce((a, b) => a + b.total_gmv, 0);
+  const ticket =
+    overviewUsable && state.overview!.orders > 0 ? state.overview!.gmv / state.overview!.orders : null;
+
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <div>
-        <p className="text-2xl font-bold text-ink tabular-nums leading-none">
-          {bucket.total != null ? (
-            formatMetric(bucket.total, metric)
-          ) : (
-            <span className="text-ink-faint">Total indisponível</span>
-          )}
-        </p>
-        <div className="mt-1">
-          <DrilldownContextLine
-            leading={`${bucket.label} · ${granularityLabel}`}
-            periodLabel={periodLabel}
-            refreshedAt={null}
-          />
-        </div>
-        <p className="text-xs text-ink-faint mt-0.5">
-          Ponto {position} de {merged.buckets.length} na série de {metricLabel(metric)}
-        </p>
-      </div>
+      <Topo
+        valor={bucket.total != null ? formatMetric(bucket.total, metric) : null}
+        vazio="Total indisponível"
+        extra={
+          deltaTotal != null &&
+          cmp?.total != null && (
+            <Variacao pct={deltaTotal} base={`vs ${formatMetric(cmp.total, metric)} em ${cmp.label}`} />
+          )
+        }
+        leading={`${bucket.label} · ${granularityLabel}`}
+        periodLabel={periodLabel}
+        refreshedAt={null}
+        dica={`Ponto ${position} de ${merged.buckets.length} na série de ${metricLabel(metric)}. A variação compara com a mesma posição do período anterior.`}
+      />
+      {bucket.total == null && (
+        <DataQualityNote note="Sem total: pelo menos um canal selecionado não tem valor neste ponto." />
+      )}
 
       {/* Evidencia que NAO depende de fetch: ja veio com a serie. */}
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>{metricLabel(metric)} por canal neste ponto</p>
-        <ul className="flex flex-col gap-1">
-          {channels.map((channel) => {
-            const value = bucket.values[channel];
-            return (
-              <EvidenceRow
-                key={channel}
-                label={CHANNEL_LABEL[channel]}
-                value={value == null ? "Sem dado neste ponto" : formatMetric(value, metric)}
-                tone={value == null ? "muted" : "value"}
-              />
-            );
-          })}
+      <DrilldownSecao titulo="Por canal">
+        <ul className="flex flex-col">
+          {porCanal.map((c) => (
+            <EvidenceRow
+              key={c.channel}
+              label={CHANNEL_LABEL[c.channel]}
+              ponto={CHANNEL_DOT[c.channel]}
+              barra={CHANNEL_DOT[c.channel]}
+              pct={c.pct}
+              delta={c.delta != null ? { pct: c.delta } : null}
+              value={
+                c.value == null
+                  ? "Sem dado"
+                  : c.pct != null
+                    ? `${formatMetric(c.value, metric)} · ${fmtPct1(c.pct)}`
+                    : formatMetric(c.value, metric)
+              }
+              tone={c.value == null ? "muted" : "value"}
+            />
+          ))}
         </ul>
-        {bucket.total == null && (
-          <p className="text-xs text-ink-faint mt-1">
-            O total não é exibido porque pelo menos um canal selecionado não tem valor neste ponto.
-          </p>
-        )}
-      </div>
+      </DrilldownSecao>
 
       {/* Lado comparativo alinhado por posicao ordinal, com a data REAL da
           janela anterior. O CTA abaixo continua fixando o periodo ATUAL. */}
-      {bucket.comparison && (
-        <div className="flex flex-col gap-1">
-          <p className={SECTION_LABEL}>Mesma posição no período anterior</p>
-          <p className="text-xs text-ink-faint tabular-nums">
-            {bucket.comparison.label} · {bucket.comparison.date}
-          </p>
-          <ul className="flex flex-col gap-1">
-            {channels.map((channel) => {
-              const value = bucket.comparison!.values[channel];
+      {cmp && (
+        <DrilldownSecao
+          titulo="Mesma posição no período anterior"
+          acao={<span className="tabular-nums">{cmp.label}</span>}
+        >
+          <ul className="flex flex-col">
+            {porCanal.map(({ channel }) => {
+              const value = cmp.values[channel];
               return (
                 <EvidenceRow
                   key={channel}
                   label={CHANNEL_LABEL[channel]}
-                  value={value == null ? "Sem dado nesta posição" : formatMetric(value, metric)}
+                  ponto={CHANNEL_DOT[channel]}
+                  value={value == null ? "Sem dado" : formatMetric(value, metric)}
                   tone={value == null ? "muted" : "value"}
                 />
               );
             })}
           </ul>
-          {bucket.comparison.total == null && (
-            <p className="text-xs text-ink-faint mt-1">
-              Total anterior não exibido: falta valor em pelo menos um canal comparativo nesta posição.
-            </p>
-          )}
+          {cmp.total == null && <DataQualityNote note="Sem total anterior: falta valor em um canal nesta posição." />}
           {/* Janela do CONTRATO, nao derivada dos buckets: o primeiro bucket
               semanal comeca antes dela. */}
           {merged.comparison.dateFrom && merged.comparison.dateTo && (
-            <p className="text-xs text-ink-faint mt-1 tabular-nums">
-              Janela anterior completa: {merged.comparison.dateFrom} a {merged.comparison.dateTo}.
+            <p className="text-xs text-ink-faint tabular-nums">
+              Janela anterior completa: {merged.comparison.dateFrom} a {merged.comparison.dateTo}
             </p>
           )}
-        </div>
+        </DrilldownSecao>
       )}
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Detalhe {BUCKET_SCOPE_LABEL[merged.granularity]}</p>
-
+      <DrilldownSecao titulo={`Detalhe ${BUCKET_SCOPE_LABEL[merged.granularity]}`}>
         {anyLoading ? (
           <p className="text-xs text-ink-faint" role="status" aria-busy="true">
             Carregando detalhe…
           </p>
         ) : bothUnavailable ? (
           <p className="text-xs text-crit-ink">
-            Detalhe indisponível nesta carga: nem o agregado nem o desempenho por marca responderam. Os valores
-            por canal acima vêm da série já carregada e continuam válidos.
+            Detalhe indisponível nesta carga. Os valores por canal acima vêm da série e seguem válidos.
           </p>
+        ) : overviewUsable ? (
+          <ul className="flex flex-col">
+            <EvidenceRow label="GMV" value={fmtBrlFull(state.overview!.gmv)} />
+            <EvidenceRow label="Pedidos" value={fmtNumber(state.overview!.orders)} />
+            {ticket != null && <EvidenceRow label="Ticket médio" value={fmtBrlFull(ticket)} />}
+          </ul>
         ) : (
-          <>
-            {overviewUsable ? (
-              <ul className="flex flex-col gap-1">
-                <EvidenceRow label="GMV do recorte" value={fmtBrlFull(state.overview!.gmv)} />
-                <EvidenceRow label="Pedidos do recorte" value={fmtNumber(state.overview!.orders)} />
-              </ul>
-            ) : (
-              <p className="text-xs text-ink-faint">Agregado do recorte indisponível nesta carga.</p>
-            )}
-
-            {brandsUsable && state.brands!.filter((b) => b.total_gmv > 0).length > 0 ? (
-              <>
-                <p className="text-xs text-ink-faint mt-1.5">Por marca</p>
-                <ul className="flex flex-col gap-1">
-                  {state.brands!
-                    .filter((b) => b.total_gmv > 0)
-                    .slice(0, 5)
-                    .map((b) => (
-                      <EvidenceRow key={b.brand} label={b.label} value={fmtBrlFull(b.total_gmv)} />
-                    ))}
-                </ul>
-              </>
-            ) : (
-              <p className="text-xs text-ink-faint mt-1.5">
-                Desempenho por marca indisponível nesta carga.
-              </p>
-            )}
-
-            {/* Parcial: nomeia exatamente a fonte ausente. */}
-            {overviewUsable !== brandsUsable && (
-              <div className="mt-1.5">
-                <DataQualityNote
-                  note={`Detalhe parcial: ${
-                    overviewUsable ? "o desempenho por marca" : "o agregado do recorte"
-                  } não respondeu nesta carga. O que está acima veio da fonte que respondeu.`}
-                />
-              </div>
-            )}
-            {isDemo && (
-              <div className="mt-1.5">
-                <DataQualityNote note="Detalhe em modo demonstração — a Torre inteira está com dados de demonstração nesta sessão." />
-              </div>
-            )}
-          </>
+          <p className="text-xs text-ink-faint">Agregado do recorte indisponível nesta carga.</p>
         )}
-      </div>
+      </DrilldownSecao>
+
+      {!anyLoading && !bothUnavailable && (
+        <DrilldownSecao
+          titulo="Por marca"
+          acao={marcas.length > 5 ? <span className="tabular-nums">5 de {marcas.length}</span> : undefined}
+        >
+          {marcas.length > 0 ? (
+            <ul className="flex flex-col">
+              {marcas.slice(0, 5).map((b) => {
+                const pct = somaMarcas > 0 ? (b.total_gmv / somaMarcas) * 100 : null;
+                return (
+                  <EvidenceRow
+                    key={b.brand}
+                    label={b.label}
+                    pct={pct}
+                    value={pct != null ? `${fmtBrlFull(b.total_gmv)} · ${fmtPct1(pct)}` : fmtBrlFull(b.total_gmv)}
+                  />
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-xs text-ink-faint">Desempenho por marca indisponível nesta carga.</p>
+          )}
+        </DrilldownSecao>
+      )}
+
+      {/* Parcial: nomeia exatamente a fonte ausente. */}
+      {!anyLoading && !bothUnavailable && overviewUsable !== brandsUsable && (
+        <DataQualityNote
+          note={`Detalhe parcial: ${overviewUsable ? "o desempenho por marca" : "o agregado do recorte"} não respondeu nesta carga.`}
+        />
+      )}
+      {!anyLoading && isDemo && <DataQualityNote note="Detalhe com dados de demonstração." />}
 
       {/* Task D2: o CTA promete exatamente o recorte que aplica. */}
       <button
         type="button"
         onClick={() => onPinRange(range.dateFrom, range.dateTo)}
-        className="inline-flex items-center min-h-11 self-start text-sm font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+        title="Só o intervalo de datas muda; canais, marcas e comparação são preservados."
+        className="group mt-1 flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-line px-4 text-left text-sm font-semibold text-accent transition-colors hover:border-accent/40 hover:bg-accent-soft/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
-        Fixar {range.label} como período →
-      </button>
-      <p className="text-xs text-ink-faint -mt-2 tabular-nums">
-        Aplicará {range.dateFrom} a {range.dateTo}. Canais, marcas e comparação são preservados; apenas o
-        intervalo de datas muda.
-        {range.clamped && (
-          <span className="block text-ink-faint">
-            Intervalo cortado pelo período selecionado: este bucket é parcial na borda do filtro.
+        <span>Fixar {range.label} como período</span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="text-xs font-normal text-ink-faint tabular-nums">
+            {range.dateFrom === range.dateTo ? diaMes(range.dateFrom) : `${diaMes(range.dateFrom)} – ${diaMes(range.dateTo)}`}
           </span>
-        )}
-      </p>
+          <ArrowRight aria-hidden="true" className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+        </span>
+      </button>
+      {range.clamped && (
+        <DataQualityNote note="Intervalo cortado pelo período selecionado: este ponto é parcial na borda do filtro." />
+      )}
     </div>
   );
 }
@@ -433,6 +563,39 @@ export function TrendBucketDrilldownContent({
 // ---------------------------------------------------------------------------
 // Serie de um canal (Task B.1)
 // ---------------------------------------------------------------------------
+
+/** POPUPS-1 — a serie do canal em tamanho legivel. Lacuna interrompe a linha
+ * (ausencia nao vira zero); escala de zero ao maior ponto. */
+function SerieCanal({ values, channel }: { values: (number | null)[]; channel: Marketplace }) {
+  const max = Math.max(0, ...values.map((v) => v ?? 0)) || 1;
+  const passo = values.length > 1 ? 300 / (values.length - 1) : 0;
+  const y = (v: number) => 62 - (v / max) * 56;
+  const trechos: string[][] = [];
+  let atual: string[] = [];
+  values.forEach((v, i) => {
+    if (v == null) {
+      if (atual.length) trechos.push(atual);
+      atual = [];
+      return;
+    }
+    atual.push(`${(i * passo).toFixed(1)},${y(v).toFixed(1)}`);
+  });
+  if (atual.length) trechos.push(atual);
+  return (
+    <svg viewBox="0 0 300 64" preserveAspectRatio="none" aria-hidden="true" className={`tc-revela h-16 w-full ${CHANNEL_TEXT[channel]}`}>
+      {trechos.map((t, i) =>
+        t.length > 1 ? (
+          <g key={i}>
+            <polygon points={`${t[0].split(",")[0]},64 ${t.join(" ")} ${t[t.length - 1].split(",")[0]},64`} fill="currentColor" opacity={0.12} />
+            <polyline points={t.join(" ")} fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          </g>
+        ) : (
+          <circle key={i} cx={t[0].split(",")[0]} cy={t[0].split(",")[1]} r={2} fill="currentColor" />
+        ),
+      )}
+    </svg>
+  );
+}
 
 export function ChannelSeriesDrilldownContent({
   channel,
@@ -448,7 +611,7 @@ export function ChannelSeriesDrilldownContent({
   canaisHref: string;
 }) {
   // Tudo derivado da serie JA carregada — zero fetch novo.
-  const values = merged.buckets.map((b) => b.values[channel]);
+  const values = merged.buckets.map((b) => b.values[channel] ?? null);
   const numeric = values.filter((v): v is number => typeof v === "number");
   const gaps = values.length - numeric.length;
   const sum = numeric.reduce((a, v) => a + v, 0);
@@ -464,56 +627,61 @@ export function ChannelSeriesDrilldownContent({
 
   const max = numeric.length ? Math.max(...numeric) : null;
   const peak = max != null ? merged.buckets.find((b) => b.values[channel] === max) : undefined;
+  const temValor = !failed && !empty && numeric.length > 0;
 
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <DrilldownContextLine leading={CHANNEL_LABEL[channel]} periodLabel={periodLabel} refreshedAt={null} />
+      <Topo
+        valor={temValor ? formatMetric(sum, metric) : null}
+        vazio={failed ? "Série indisponível" : "Sem registros"}
+        extra={sharePct != null && temValor && <Selo>{fmtPct1(sharePct)} do total</Selo>}
+        leading={`${metricLabel(metric)} no período`}
+        periodLabel={periodLabel}
+        refreshedAt={null}
+        dica="Soma dos pontos deste canal na série exibida; não substitui o agregado do período, que tem cláusula de filtro própria. A participação só aparece com todos os canais selecionados com série completa."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Disponibilidade</p>
-        {failed ? (
-          <p className="text-xs text-warn-ink">
-            A série deste canal não respondeu nesta carga. As demais séries continuam no gráfico e o total por
-            ponto não é apresentado como completo.
-          </p>
-        ) : empty ? (
-          <p className="text-xs text-ink-muted">
-            A fonte respondeu, mas não há registros deste canal no período — ausência de dado, não zero.
-          </p>
-        ) : (
-          <ul className="flex flex-col gap-1">
-            <EvidenceRow
-              label="Pontos com valor"
-              value={`${numeric.length} de ${values.length}`}
-              reference={gaps > 0 ? `${gaps} ponto(s) sem registro — a linha se interrompe` : "série sem lacunas"}
-            />
-          </ul>
-        )}
-      </div>
-
-      {numeric.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <p className={SECTION_LABEL}>{metricLabel(metric)} no período</p>
-          <ul className="flex flex-col gap-1">
-            <EvidenceRow label="Soma dos pontos deste canal" value={formatMetric(sum, metric)} />
-            <EvidenceRow
-              label="Participação no total"
-              value={sharePct != null ? `${sharePct.toFixed(1)}%` : "Indisponível"}
-              tone={sharePct != null ? "value" : "muted"}
-              reference={
-                sharePct == null
-                  ? "Exige todos os canais selecionados com série completa — o denominador parcial seria enganoso"
-                  : null
+      {failed ? (
+        <DataQualityNote note="A série deste canal não respondeu nesta carga; o total por ponto não é completo." />
+      ) : empty ? (
+        <DataQualityNote note="Sem registros deste canal no período — ausência de dado, não zero." />
+      ) : (
+        <>
+          {values.length > 1 && numeric.length > 0 && (
+            <DrilldownSecao
+              titulo="Série"
+              acao={
+                <span className={`tabular-nums ${gaps > 0 ? "text-warn-ink" : ""}`}>
+                  {numeric.length} de {values.length} pontos com valor
+                </span>
               }
-            />
-            {peak && max != null && (
-              <EvidenceRow label="Maior ponto" value={formatMetric(max, metric)} reference={peak.label} />
-            )}
-          </ul>
-        </div>
+            >
+              <SerieCanal values={values} channel={channel} />
+              {gaps > 0 && <DataQualityNote note={`${gaps} ponto(s) sem registro: a linha se interrompe.`} />}
+            </DrilldownSecao>
+          )}
+
+          {numeric.length > 0 && (
+            <DrilldownSecao titulo="Resumo">
+              <ul className="flex flex-col">
+                {peak && max != null && (
+                  <EvidenceRow label={`Maior ponto · ${peak.label}`} value={formatMetric(max, metric)} />
+                )}
+                <EvidenceRow label="Média por ponto com valor" value={formatMetric(sum / numeric.length, metric)} />
+                <EvidenceRow
+                  label="Participação no total"
+                  ponto={CHANNEL_DOT[channel]}
+                  barra={CHANNEL_DOT[channel]}
+                  pct={sharePct}
+                  value={sharePct != null ? fmtPct1(sharePct) : "Indisponível"}
+                  tone={sharePct != null ? "value" : "muted"}
+                />
+              </ul>
+            </DrilldownSecao>
+          )}
+        </>
       )}
 
-      <DataQualityNote note="A soma acima é dos pontos deste canal na série exibida. Ela não substitui o agregado do período, que tem a própria cláusula de filtro." />
       <DrilldownCta href={canaisHref}>Abrir este canal em Canais →</DrilldownCta>
     </div>
   );
@@ -541,48 +709,45 @@ export function MatrixChannelDrilldownContent({
   const rows = matrix.rows
     .map((r) => ({ label: r.label, cell: r.cells.find((c) => c.channel === channel) }))
     .filter((r) => r.cell != null);
-  const withData = rows.filter((r) => r.cell!.available);
+  const withData = rows
+    .filter((r) => r.cell!.available)
+    .sort((a, b) => (b.cell!.gmv ?? 0) - (a.cell!.gmv ?? 0));
   const withoutData = rows.filter((r) => !r.cell!.available);
+  const doTotal = matrix.channels.length > 1 && matrix.grandTotal > 0 ? (total / matrix.grandTotal) * 100 : null;
 
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <div>
-        <p className="text-2xl font-bold text-ink tabular-nums leading-none">{fmtBrlFull(total)}</p>
-        <div className="mt-1">
-          <DrilldownContextLine
-            leading={`${CHANNEL_LABEL[channel]} · GMV do canal`}
-            periodLabel={periodLabel}
-            refreshedAt={refreshedAt}
-          />
-        </div>
-      </div>
+      <Topo
+        valor={fmtBrlFull(total)}
+        extra={doTotal != null && <Selo>{fmtPct1(doTotal)} do GMV dos canais</Selo>}
+        leading="GMV do canal"
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica="Participação de cada marca calculada dentro deste canal. Comparar o share de um canal com o de outro não é válido: ordens de grandeza e regras de GMV diferem por marketplace."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Distribuição entre as marcas</p>
-        <ul className="flex flex-col gap-1">
-          {withData
-            .sort((a, b) => (b.cell!.gmv ?? 0) - (a.cell!.gmv ?? 0))
-            .map((r) => (
-              <EvidenceRow
-                key={r.label}
-                label={r.label}
-                value={fmtBrlFull(r.cell!.gmv as number)}
-                reference={
-                  r.cell!.sharePctInChannel != null
-                    ? `${r.cell!.sharePctInChannel.toFixed(1)}% deste canal${
-                        r.cell!.momPct != null ? ` · ${fmtPct(r.cell!.momPct)} vs. anterior` : ""
-                      }`
-                    : null
-                }
-              />
-            ))}
+      <DrilldownSecao titulo="Por marca" acao={<span className="tabular-nums">{withData.length}</span>}>
+        <ul className="flex flex-col">
+          {withData.map((r) => (
+            <EvidenceRow
+              key={r.label}
+              label={r.label}
+              barra={CHANNEL_DOT[channel]}
+              pct={r.cell!.sharePctInChannel}
+              delta={r.cell!.momPct != null ? { pct: r.cell!.momPct } : null}
+              value={
+                r.cell!.sharePctInChannel != null
+                  ? `${fmtBrlFull(r.cell!.gmv as number)} · ${fmtPct1(r.cell!.sharePctInChannel)}`
+                  : fmtBrlFull(r.cell!.gmv as number)
+              }
+            />
+          ))}
           {withoutData.map((r) => (
-            <EvidenceRow key={r.label} label={r.label} value="Sem dado neste canal" tone="muted" />
+            <EvidenceRow key={r.label} label={r.label} value="Sem dado" tone="muted" mutedLabel />
           ))}
         </ul>
-      </div>
+      </DrilldownSecao>
 
-      <DataQualityNote note="Participação calculada dentro deste canal. Comparar o share de um canal com o de outro não é válido: as ordens de grandeza e as regras de GMV diferem por marketplace." />
       {/* Destino explicito vence o filtro global atual. */}
       <DrilldownCta href={canaisHref}>Abrir {CHANNEL_LABEL[channel]} em Canais →</DrilldownCta>
     </div>
@@ -599,6 +764,7 @@ export function ConcentrationDrilldownContent({
   top1Pct,
   top3Pct,
   positiveBrands,
+  ranking,
   periodLabel,
   refreshedAt,
   brandHref,
@@ -609,53 +775,58 @@ export function ConcentrationDrilldownContent({
   top1Pct: number | null;
   top3Pct: number | null;
   positiveBrands: number;
+  /** POPUPS-1 — as marcas do periodo ja' ordenadas (mesma base da faixa), para
+   * mostrar quem esta' a frente e atras desta marca. */
+  ranking?: ConcentrationEntry[];
   periodLabel: string;
   refreshedAt: string | null;
   brandHref: string;
   produtosHref: string;
 }) {
+  const lista = ranking ?? [];
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <div>
-        <p className="text-2xl font-bold text-ink tabular-nums leading-none">{fmtBrlFull(entry.gmv)}</p>
-        <div className="mt-1">
-          <DrilldownContextLine
-            leading={`${entry.label} · ${position}ª no período`}
-            periodLabel={periodLabel}
-            refreshedAt={refreshedAt}
-          />
-        </div>
-      </div>
+      <Topo
+        valor={fmtBrlFull(entry.gmv)}
+        extra={<Selo>{fmtPct1(entry.sharePct)} do total</Selo>}
+        leading={`${position}ª de ${positiveBrands} marcas`}
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica="Participação sobre o GMV total do escopo selecionado. Trocar canal ou período muda o denominador: o percentual não é comparável entre filtros. Top 3 exige pelo menos três marcas com GMV positivo — não se aproxima."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Participação</p>
-        <ul className="flex flex-col gap-1">
-          <EvidenceRow
-            label="Participação no total selecionado"
-            value={`${entry.sharePct.toFixed(1)}%`}
-            reference={`Posição ${position} de ${positiveBrands} marcas com GMV positivo`}
-          />
-          <EvidenceRow
-            label="Top 1 do período"
-            value={top1Pct != null ? `${top1Pct.toFixed(1)}%` : "N/D"}
-            tone={top1Pct != null ? "value" : "muted"}
-          />
-          <EvidenceRow
-            label="Top 3 do período"
-            value={top3Pct != null ? `${top3Pct.toFixed(1)}%` : "Base insuficiente"}
-            tone={top3Pct != null ? "value" : "muted"}
-            reference={
-              top3Pct == null ? "Exige pelo menos três marcas com GMV positivo — não se aproxima" : null
-            }
-          />
-        </ul>
-      </div>
-
-      <DataQualityNote note="A participação usa o GMV total do escopo selecionado. Trocar canal ou período muda o denominador, então este percentual não é comparável entre filtros diferentes." />
+      <DrilldownSecao
+        titulo="Concentração"
+        acao={
+          <span className="tabular-nums">
+            Top 1 {top1Pct != null ? fmtPct1(top1Pct) : "N/D"} · Top 3 {top3Pct != null ? fmtPct1(top3Pct) : "base insuficiente"}
+          </span>
+        }
+      >
+        {lista.length > 1 ? (
+          <ul className="flex flex-col">
+            {lista.map((e, i) => (
+              <EvidenceRow
+                key={e.brand}
+                label={`${i + 1}. ${e.label}`}
+                mutedLabel={e.brand !== entry.brand}
+                barra={e.brand === entry.brand ? "bg-accent" : "bg-line-strong"}
+                pct={e.sharePct}
+                value={`${fmtBrlFull(e.gmv)} · ${fmtPct1(e.sharePct)}`}
+                tone={e.brand === entry.brand ? "value" : "muted"}
+              />
+            ))}
+          </ul>
+        ) : (
+          <ul className="flex flex-col">
+            <EvidenceRow label={entry.label} pct={entry.sharePct} value={fmtPct1(entry.sharePct)} />
+          </ul>
+        )}
+      </DrilldownSecao>
 
       <div className="flex flex-col gap-2">
         <DrilldownCta href={brandHref}>Abrir visão completa da marca →</DrilldownCta>
-        <div className="flex flex-col gap-0.5">
+        <div className="flex flex-col gap-1">
           <DrilldownCta href={produtosHref}>Ver produtos desta seleção →</DrilldownCta>
           <p className="text-xs text-ink-faint">{PRODUCTS_SCOPE_NOTE}.</p>
         </div>
@@ -679,22 +850,26 @@ export function VolumeHealthDrilldownContent({
   refreshedAt: string | null;
   qualidadeHref: string;
 }) {
+  // POPUPS-1: a pergunta de quem abre e' "quanto se perde"; a taxa de
+  // cancelamento vira o numero principal. A definicao do denominador, a
+  // formula e a ressalva entre canais vao para o "ⓘ".
+  const taxa = row.cancelAvailable && row.cancelRatePct != null ? row.cancelRatePct : null;
+  const pct2 = (v: number) => `${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+  const int = (v: number) => v.toLocaleString("pt-BR");
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <DrilldownContextLine leading={row.channelLabel} periodLabel={periodLabel} refreshedAt={refreshedAt} />
+      <Topo
+        valor={taxa != null ? pct2(taxa) : null}
+        vazio="Cancelamento N/D"
+        leading="Taxa de cancelamento"
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica={`${row.ordersDefinition} ${CANCEL_RATE_FORMULA}; taxa servida pelo endpoint de qualidade, sem recálculo. Devolução é métrica independente, não parcela do total. ${NO_CROSS_CHANNEL_RANKING}`}
+      />
+      {!row.cancelAvailable && <DataQualityNote note={row.cancelUnavailableReason} />}
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Definição</p>
-        <p className="text-ink-muted">{row.ordersDefinition}</p>
-        <p className="text-xs text-ink-faint font-mono mt-1">{CANCEL_RATE_FORMULA}</p>
-        <p className="text-xs text-ink-faint mt-1">
-          A taxa exibida é a servida pelo endpoint de qualidade. A Torre não a recalcula com outro denominador.
-        </p>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Valores do período</p>
-        <ul className="flex flex-col gap-1">
+      <DrilldownSecao titulo="Volume">
+        <ul className="flex flex-col">
           <EvidenceRow
             label="GMV"
             value={row.gmv != null ? fmtBrlFull(row.gmv) : "Sem dado"}
@@ -702,43 +877,35 @@ export function VolumeHealthDrilldownContent({
           />
           <EvidenceRow
             label={row.ordersLabel}
-            value={row.orders != null ? row.orders.toLocaleString("pt-BR") : "Sem dado"}
+            value={row.orders != null ? int(row.orders) : "Sem dado"}
             tone={row.orders != null ? "value" : "muted"}
           />
+        </ul>
+      </DrilldownSecao>
+
+      <DrilldownSecao titulo="Perdas">
+        <ul className="flex flex-col">
           <EvidenceRow
             label="Cancelados"
-            value={row.cancelAvailable && row.canceled != null ? row.canceled.toLocaleString("pt-BR") : "N/D"}
-            tone={row.cancelAvailable ? "value" : "muted"}
-          />
-          <EvidenceRow
-            label="Taxa de cancelamento"
-            value={row.cancelAvailable && row.cancelRatePct != null ? `${row.cancelRatePct.toFixed(2)}%` : "N/D"}
+            value={
+              row.cancelAvailable && row.canceled != null
+                ? `${int(row.canceled)}${row.cancelRatePct != null ? ` · ${pct2(row.cancelRatePct)}` : ""}`
+                : "N/D"
+            }
             tone={row.cancelAvailable ? "value" : "muted"}
           />
           <EvidenceRow
             label="Devolvidos"
-            value={row.returnAvailable && row.returned != null ? row.returned.toLocaleString("pt-BR") : "N/D"}
-            tone={row.returnAvailable ? "value" : "muted"}
-            reference={row.returnAvailable ? "Métrica independente, não é parcela do total considerado" : null}
-          />
-          <EvidenceRow
-            label="Taxa de devolução"
-            value={row.returnAvailable && row.returnRatePct != null ? `${row.returnRatePct.toFixed(2)}%` : "N/D"}
+            value={
+              row.returnAvailable && row.returned != null
+                ? `${int(row.returned)}${row.returnRatePct != null ? ` · ${pct2(row.returnRatePct)}` : ""}`
+                : "N/D"
+            }
             tone={row.returnAvailable ? "value" : "muted"}
           />
         </ul>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <p className={SECTION_LABEL}>Fonte e limitações</p>
-        <p className="text-xs text-ink-faint">
-          GMV vem do agregado do período; contagens e taxas vêm do endpoint de qualidade, no mesmo escopo de
-          canal, marca e datas.
-        </p>
-        {!row.cancelAvailable && <DataQualityNote note={row.cancelUnavailableReason} />}
         {row.cancelAvailable && !row.returnAvailable && <DataQualityNote note={row.returnUnavailableReason} />}
-        <DataQualityNote note={NO_CROSS_CHANNEL_RANKING} />
-      </div>
+      </DrilldownSecao>
 
       <DrilldownCta href={qualidadeHref}>Ver qualidade por marca →</DrilldownCta>
     </div>
@@ -748,6 +915,12 @@ export function VolumeHealthDrilldownContent({
 // ---------------------------------------------------------------------------
 // Atencao comercial / aviso de dado
 // ---------------------------------------------------------------------------
+
+/** Formata pelo tipo do insight quando conhecido; senao, o numero cru. */
+function porTipo(fmt: (type: string, v: number) => string, type: string, v: number): string {
+  const s = fmt(type, v);
+  return s === "—" ? v.toLocaleString("pt-BR") : s;
+}
 
 export function CommercialAttentionDrilldownContent({
   item,
@@ -761,50 +934,42 @@ export function CommercialAttentionDrilldownContent({
   href: string;
 }) {
   const referenceLabel = item.referenceKind ? REFERENCE_KIND_LABEL[item.referenceKind] : null;
+  const referencia =
+    item.referenceValue != null && referenceLabel
+      ? `vs ${porTipo(formatReferenceValue, item.type, item.referenceValue)} (${referenceLabel})`
+      : null;
+  // Crescimento e queda tem direcao de juizo; custo e cancelamento altos sao
+  // ruins quando sobem — ai' a pilula fica neutra em vez de pintar de verde.
+  const comJuizo = item.type === "growth" || item.type === "drop";
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <DrilldownContextLine
+      <Topo
+        valor={item.metricValue != null ? porTipo(formatMetricByType, item.type, item.metricValue) : null}
+        vazio="Sem valor no contrato"
+        extra={
+          item.deltaPct != null ? (
+            <Variacao pct={item.deltaPct} base={referencia} neutro={!comJuizo} />
+          ) : (
+            referencia && <span className="pb-0.5 text-xs text-ink-faint tabular-nums">{referencia}</span>
+          )
+        }
         leading={[item.brand, item.marketplace].filter(Boolean).join(" · ") || null}
         periodLabel={periodLabel}
         refreshedAt={refreshedAt}
       />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Diagnóstico</p>
-        <p className="text-ink-muted">{item.description}</p>
-      </div>
+      {item.description && <p className="text-ink-muted leading-snug">{item.description}</p>}
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Impacto</p>
-        <ul className="flex flex-col gap-1">
-          <EvidenceRow
-            label="Métrica"
-            value={item.metricValue != null ? item.metricValue.toLocaleString("pt-BR") : "Sem valor no contrato"}
-            tone={item.metricValue != null ? "value" : "muted"}
-            reference={
-              item.referenceValue != null && referenceLabel
-                ? `Referência (${referenceLabel}): ${item.referenceValue.toLocaleString("pt-BR")}`
-                : null
-            }
-          />
+      <DrilldownSecao titulo="Evidência">
+        <ul className="flex flex-col">
           {item.deltaAbs != null && (
-            <EvidenceRow
-              label="Variação absoluta"
-              value={item.deltaAbs.toLocaleString("pt-BR")}
-              reference={item.deltaPct != null ? `${fmtPct(item.deltaPct)} vs. referência` : null}
-            />
+            <EvidenceRow label="Diferença absoluta" value={porTipo(formatDeltaAbs, item.type, item.deltaAbs)} />
           )}
+          <EvidenceRow label="Fonte" value={item.source ?? "Não declarada"} tone={item.source ? "value" : "muted"} />
+          {item.lastDate && <EvidenceRow label="Dado até" value={item.lastDate} />}
         </ul>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <p className={SECTION_LABEL}>Evidência</p>
-        <p className="text-xs text-ink-faint tabular-nums">
-          {item.source ? `Fonte: ${item.source}` : "Fonte não declarada pelo resumo executivo"}
-          {item.lastDate && ` · até ${item.lastDate}`}
-        </p>
         <DataQualityNote note={item.confidenceNote} />
-      </div>
+      </DrilldownSecao>
 
       <DrilldownCta href={href}>Ver evidência →</DrilldownCta>
     </div>
@@ -822,40 +987,28 @@ export function DataWarningDrilldownContent({
   refreshedAt: string | null;
   href: string | null;
 }) {
+  const acima = item.stalenessDays != null && item.thresholdDays != null && item.stalenessDays > item.thresholdDays;
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <DrilldownContextLine periodLabel={periodLabel} refreshedAt={refreshedAt} />
+      <Topo
+        valor={item.stalenessDays != null ? `${item.stalenessDays} dia(s)` : null}
+        vazio="Defasagem não declarada"
+        tom={acima ? "text-warn-ink" : "text-ink"}
+        extra={item.thresholdDays != null && <Selo pele={acima ? "warn" : "neutro"}>limiar {item.thresholdDays} dia(s)</Selo>}
+        leading="Defasagem"
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica="Um aviso de dado descreve o que a fonte não sustenta neste período. Não é diagnóstico comercial e não deve ser lido como queda de desempenho."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>O que está indisponível</p>
-        <p className="text-ink-muted">{item.message}</p>
-      </div>
+      <p className="text-ink-muted leading-snug">{item.message}</p>
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Evidência</p>
-        <ul className="flex flex-col gap-1">
+      <DrilldownSecao titulo="Evidência">
+        <ul className="flex flex-col">
           <EvidenceRow label="Fonte" value={item.source ?? "Não declarada"} tone={item.source ? "value" : "muted"} />
-          <EvidenceRow
-            label="Última data"
-            value={item.lastDate ?? "Não declarada"}
-            tone={item.lastDate ? "value" : "muted"}
-          />
-          <EvidenceRow
-            label="Defasagem"
-            value={item.stalenessDays != null ? `${item.stalenessDays} dia(s)` : "Não declarada"}
-            tone={item.stalenessDays != null ? "value" : "muted"}
-            reference={item.thresholdDays != null ? `Limiar: ${item.thresholdDays} dia(s)` : null}
-          />
+          <EvidenceRow label="Última data" value={item.lastDate ?? "Não declarada"} tone={item.lastDate ? "value" : "muted"} />
         </ul>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Impacto interpretativo</p>
-        <p className="text-xs text-ink-muted">
-          Um aviso de dado descreve o que a fonte não sustenta neste período. Ele não é um diagnóstico comercial
-          e não deve ser lido como queda de desempenho.
-        </p>
-      </div>
+      </DrilldownSecao>
 
       {href && <DrilldownCta href={href}>Entender esta limitação →</DrilldownCta>}
     </div>
@@ -868,50 +1021,75 @@ export function DataWarningDrilldownContent({
 
 export function MovementDrilldownContent({
   movement,
+  marca,
   periodLabel,
   refreshedAt,
   brandHref,
 }: {
   movement: Movement;
+  /** POPUPS-1 — a linha da matriz desta marca (ja' carregada), para responder
+   * se o movimento e' do canal ou da marca inteira. */
+  marca?: MatrixRow | null;
   periodLabel: string;
   refreshedAt: string | null;
   brandHref: string;
 }) {
   const up = movement.deltaAbs > 0;
+  const maior = Math.max(movement.current, movement.previous) || 1;
+  const outros = (marca?.cells ?? [])
+    .filter((c) => c.available && c.gmv != null)
+    .sort((a, b) => (b.gmv ?? 0) - (a.gmv ?? 0));
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <div>
-        <p className={`text-2xl font-bold tabular-nums leading-none ${up ? "text-ok-ink" : "text-crit-ink"}`}>
-          {up ? "+" : "−"}
-          {fmtBrlFull(Math.abs(movement.deltaAbs))}
-        </p>
-        <div className="mt-1">
-          <DrilldownContextLine
-            leading={`${movement.brandLabel} · ${CHANNEL_LABEL[movement.channel]}`}
-            periodLabel={periodLabel}
-            refreshedAt={refreshedAt}
-          />
-        </div>
-      </div>
+      <Topo
+        valor={`${up ? "+" : "−"}${fmtBrlFull(Math.abs(movement.deltaAbs))}`}
+        tom={up ? "text-ok-ink" : "text-crit-ink"}
+        extra={movement.deltaPct != null && <Variacao pct={movement.deltaPct} base={`vs ${fmtBrlFull(movement.previous)} no período anterior`} />}
+        leading={`Variação em ${CHANNEL_LABEL[movement.channel]}`}
+        periodLabel={periodLabel}
+        refreshedAt={refreshedAt}
+        dica="A lista ordena pelo valor absoluto; o percentual é contexto. Pares marca × canal com base anterior inferior a R$ 1 mil ficam fora: sobre base pequena, o percentual engana."
+      />
 
-      <div className="flex flex-col gap-1">
-        <p className={SECTION_LABEL}>Base do cálculo</p>
-        <ul className="flex flex-col gap-1">
-          <EvidenceRow label="GMV no período" value={fmtBrlFull(movement.current)} />
-          <EvidenceRow label="GMV no período anterior" value={fmtBrlFull(movement.previous)} />
+      <DrilldownSecao titulo="Antes e agora">
+        <ul className="flex flex-col">
           <EvidenceRow
-            label="Variação absoluta"
-            value={`${up ? "+" : "−"}${fmtBrlFull(Math.abs(movement.deltaAbs))}`}
-            reference={
-              movement.deltaPct != null
-                ? `${fmtPct(movement.deltaPct)} — percentual é contexto; a ordenação usa o valor absoluto`
-                : "Percentual indisponível: base anterior igual a zero"
-            }
+            label="Período atual"
+            ponto={CHANNEL_DOT[movement.channel]}
+            barra={CHANNEL_DOT[movement.channel]}
+            pct={(movement.current / maior) * 100}
+            value={fmtBrlFull(movement.current)}
+          />
+          <EvidenceRow
+            label="Período anterior"
+            barra="bg-line-strong"
+            pct={(movement.previous / maior) * 100}
+            value={fmtBrlFull(movement.previous)}
+            tone="muted"
           />
         </ul>
-      </div>
+      </DrilldownSecao>
 
-      <DataQualityNote note="Pares marca × canal com base anterior inferior a R$ 1 mil ficam fora desta lista: sobre base pequena, o percentual engana." />
+      {outros.length > 1 && marca && (
+        <DrilldownSecao titulo={`${movement.brandLabel} por canal`}>
+          <ul className="flex flex-col">
+            {outros.map((c) => {
+              const pct = marca.brandTotal > 0 ? ((c.gmv as number) / marca.brandTotal) * 100 : null;
+              return (
+                <EvidenceRow
+                  key={c.channel}
+                  label={CHANNEL_LABEL[c.channel]}
+                  ponto={CHANNEL_DOT[c.channel]}
+                  barra={CHANNEL_DOT[c.channel]}
+                  pct={pct}
+                  delta={c.momPct != null ? { pct: c.momPct } : null}
+                  value={pct != null ? `${fmtBrlFull(c.gmv as number)} · ${fmtPct1(pct)}` : fmtBrlFull(c.gmv as number)}
+                />
+              );
+            })}
+          </ul>
+        </DrilldownSecao>
+      )}
 
       <DrilldownCta href={brandHref}>Abrir visão completa da marca →</DrilldownCta>
     </div>
@@ -928,6 +1106,8 @@ export function MovementDrilldownContent({
  * afirmava falha de fonte inclusive quando a fonte respondeu bem e apenas nao
  * tinha aquela combinacao — e escondia que o mock de demonstracao nao modela
  * Ads, custos, frete, sinais nem medianas por marca x canal.
+ *
+ * POPUPS-1: uma frase por causa, mais uma linha curta do que segue valendo.
  */
 export function MatrixCellUnavailableContent({
   status,
@@ -944,23 +1124,18 @@ export function MatrixCellUnavailableContent({
 
   if (status === "loading") {
     return (
-      <div className="flex flex-col gap-2 text-sm" role="status" aria-busy="true">
+      <div className="flex flex-col gap-1.5 text-sm" role="status" aria-busy="true">
         <p className="text-ink-muted">Verificando sinais e referências comparativas deste canal…</p>
-        <p className="text-xs text-ink-faint">
-          O GMV, a participação e a variação de {scope} já estão na matriz e vêm do desempenho por marca.
-        </p>
+        <p className="text-xs text-ink-faint">GMV, participação e variação de {scope} já estão na matriz.</p>
       </div>
     );
   }
 
   if (status === "error") {
     return (
-      <div className="flex flex-col gap-2 text-sm">
+      <div className="flex flex-col gap-1.5 text-sm">
         <p className="text-ink-muted">Fonte de sinais e referências indisponível nesta carga.</p>
-        <p className="text-xs text-ink-faint">
-          Ela fornece os sinais de eficiência e as referências de mediana e p75 do próprio canal. O GMV, a
-          participação e a variação de {scope} continuam válidos, pois vêm do desempenho por marca.
-        </p>
+        <p className="text-xs text-ink-faint">GMV, participação e variação de {scope} seguem válidos na matriz.</p>
       </div>
     );
   }
@@ -968,25 +1143,16 @@ export function MatrixCellUnavailableContent({
   // A fonte respondeu bem, mas nao trouxe esta combinacao.
   if (demoMode) {
     return (
-      <div className="flex flex-col gap-2 text-sm">
-        <p className="text-ink-muted">
-          O modo demonstração não modela Ads, custos, frete, sinais ou medianas por marca × canal.
-        </p>
-        <p className="text-xs text-ink-faint">
-          Por isso não há detalhe comparativo para {scope} nesta sessão. Com a API respondendo, este diálogo
-          traz o diagnóstico completo do canal.
-        </p>
-      </div>
+      <p className="text-sm text-ink-muted">
+        O modo demonstração não modela Ads, custos, frete, sinais ou medianas por marca × canal.
+      </p>
     );
   }
 
   return (
-    <div className="flex flex-col gap-2 text-sm">
+    <div className="flex flex-col gap-1.5 text-sm">
       <p className="text-ink-muted">Não há registro comparativo para {scope} no período.</p>
-      <p className="text-xs text-ink-faint">
-        A fonte de canais respondeu normalmente — apenas não existe linha desta marca neste canal no período
-        selecionado. Isso não indica falha de carga.
-      </p>
+      <p className="text-xs text-ink-faint">A fonte de canais respondeu. Isso não indica falha de carga.</p>
     </div>
   );
 }

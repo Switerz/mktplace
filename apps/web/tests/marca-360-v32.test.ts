@@ -724,8 +724,10 @@ test("V32 um único shell de diálogo, e um único diálogo por vez", () => {
   // estado único e discriminado ⇒ nunca dois abertos
   assert.match(PAGINA, /const \[dialog, setDialog\] = useState<BrandDialog \| null>\(null\)/);
   assert.match(PAGINA, /open=\{dialog != null\}/);
-  // e as primitives do G2 são reutilizadas, não recriadas
-  for (const p of ["DrilldownContextLine", "DataQualityNote", "DrilldownCta", "EvidenceRow"]) {
+  // e as primitives do G2 são reutilizadas, não recriadas. POPUPS-1: a nota de
+  // escopo do detalhe (metodologia, não alerta de dado) foi para o ⓘ; sai o
+  // DataQualityNote, entra a seção compartilhada.
+  for (const p of ["DrilldownContextLine", "DrilldownSecao", "DrilldownCta", "EvidenceRow", "InfoDica"]) {
     assert.match(PAGINA, new RegExp(p), p);
   }
 });

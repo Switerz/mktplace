@@ -1289,6 +1289,9 @@ function CanaisPageInner() {
           <ChannelComparisonDialogContent
             row={detailRow}
             median={findChannelMedian(displayChannelMedians, detailRow.channel)}
+            /* POPUPS-1 — as mesmas linhas da matriz, para as quebras por
+               canal e por marca do detalhe; nada novo e' buscado. */
+            rows={displayChannelRows}
             periodLabel={periodLabel}
             refreshedAt={refreshedAt}
             buildHref={buildHref}
