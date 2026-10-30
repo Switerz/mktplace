@@ -583,3 +583,90 @@ test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o ⓘ em `acao`; a 
   assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./);
   assert.doesNotMatch(html, /Prazo indisponível pelo canal/);
 });
+
+// ===========================================================================
+// T-0033 — o ⓘ abre pelo teclado mesmo quando o foco rola a pagina
+// ===========================================================================
+// Tab ate' um ⓘ fora da tela: o onFocus abre, o navegador rola ate' o ⓘ e o
+// evento dessa rolagem (no quadro seguinte) fechava o balao na hora — 22 de
+// 22 em producao. Sem DOM aqui: a decisao mora em `rolagemAoAbrir`, com o
+// relogio de quadros injetado; a ligacao no componente e' lida da fonte.
+const { rolagemAoAbrir } = await import("../src/components/ui/InfoDica.tsx");
+const DICA = fonte("src/components/ui/InfoDica.tsx");
+
+function quadros() {
+  const fila = new Map<number, () => void>();
+  let seq = 0;
+  return {
+    quadro: (cb: () => void) => {
+      fila.set(++seq, cb);
+      return seq;
+    },
+    cancelar: (id: number) => void fila.delete(id),
+    rodar() {
+      const agora = [...fila.entries()];
+      fila.clear();
+      for (const [, cb] of agora) cb();
+    },
+    pendentes: () => fila.size,
+  };
+}
+
+test("T-0033: aberto pelo foco, a rolagem do proprio foco reposiciona em vez de fechar", () => {
+  const q = quadros();
+  let pos = 0;
+  let fechou = 0;
+  const r = rolagemAoAbrir(true, () => pos++, () => fechou++, q.quadro, q.cancelar);
+  // a rolagem do foco chega antes do primeiro requestAnimationFrame
+  r.aoRolar();
+  r.aoRolar();
+  assert.equal(fechou, 0, "a rolagem do foco nao fecha");
+  assert.equal(pos, 2, "cada evento da rolagem do foco recalcula a posicao");
+  q.rodar();
+  assert.equal(pos, 2);
+  q.rodar();
+  assert.equal(pos, 3, "ao fim do segundo quadro a posicao e' recalculada");
+  assert.equal(q.pendentes(), 0);
+  // dali em diante a rolagem e' do usuario: fecha (sem balao orfao)
+  r.aoRolar();
+  assert.equal(fechou, 1);
+  assert.equal(pos, 3);
+});
+
+test("T-0033: aberto pelo mouse, rolar fecha na hora (comportamento de antes)", () => {
+  const q = quadros();
+  let pos = 0;
+  let fechou = 0;
+  const r = rolagemAoAbrir(false, () => pos++, () => fechou++, q.quadro, q.cancelar);
+  assert.equal(q.pendentes(), 0, "sem janela de quadros");
+  r.aoRolar();
+  assert.equal(fechou, 1);
+  assert.equal(pos, 0);
+});
+
+test("T-0033: fechar antes dos dois quadros cancela o recalculo pendente", () => {
+  const q = quadros();
+  let pos = 0;
+  const r = rolagemAoAbrir(true, () => pos++, () => {}, q.quadro, q.cancelar);
+  q.rodar(); // primeiro quadro agenda o segundo
+  r.parar(); // Escape/blur/desmontagem
+  q.rodar();
+  assert.equal(pos, 0, "nada reposiciona um balao ja' fechado");
+  assert.equal(q.pendentes(), 0);
+});
+
+test("T-0033: o InfoDica liga a rolagem por `rolagemAoAbrir` e sabe se abriu pelo foco", () => {
+  assert.match(DICA, /porFoco\.current = e\.type === "focus";/);
+  assert.match(DICA, /onFocus=\{abrir\}/);
+  assert.match(DICA, /onMouseEnter=\{abrir\}/);
+  assert.match(DICA, /const rolagem = rolagemAoAbrir\(porFoco\.current, posicionar, fechar\);/);
+  assert.match(DICA, /window\.addEventListener\("scroll", rolagem\.aoRolar, true\);/);
+  assert.match(DICA, /window\.removeEventListener\("scroll", rolagem\.aoRolar, true\);/);
+  assert.match(DICA, /rolagem\.parar\(\);/);
+  assert.doesNotMatch(DICA, /addEventListener\("scroll", fechar/, "rolar nao fecha direto");
+  // resize e Escape continuam fechando direto
+  assert.match(DICA, /window\.addEventListener\("resize", fechar\);/);
+  assert.match(DICA, /if \(e\.key === "Escape"\) fechar\(\);/);
+  // a posicao e' calculada na abertura (antes do primeiro quadro)
+  assert.match(DICA, /\n {4}posicionar\(\);\n/);
+});
