@@ -158,7 +158,8 @@ PRECOS = [
     _preco("barbours", "MLB-B1", REF, "SKU-B1", "Shampoo B1 300ml"),
     _preco("barbours", "MLB-B1", REF, "SKU-OUTRA-CONTA", "Outra conta", seller=202),
     _preco("barbours", "MLB-B1", date(2026, 10, 26), "SKU-FUTURO", "Futuro"),
-    _preco("lescent", "MLB-B1", REF, "SKU-OUTRA-MARCA", "Outra marca"),
+    # Outra marca = outra conta: a PK da 014 nao inclui `brand`.
+    _preco("lescent", "MLB-B1", REF, "SKU-OUTRA-MARCA", "Outra marca", seller=303),
     _preco("lescent", "MLB-L1", ANTERIOR, None, "Perfume L1 50ml"),
 ]
 
