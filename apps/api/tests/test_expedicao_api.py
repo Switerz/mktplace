@@ -509,8 +509,9 @@ def test_zero_pii_no_schema_e_no_payload(ligada):
         assert termo not in plano, f"payload contem {termo}"
 
 
-def test_order_sn_bruto_ausente_sem_protecao_de_acesso(ligada):
-    """Esta API nao tem autenticacao: o identificador do pedido nao sai."""
+def test_order_sn_bruto_ausente_sem_protecao_de_acesso(ligada, monkeypatch):
+    """Com a chave do numero DESLIGADA, o identificador do pedido nao sai."""
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", False, raising=False)
     s = SessaoFake(fila=[linha_fila(ordem="250916ABCDEF")])
     r = svc.get_expedicao(s)
     linha = r["queue"][0]
@@ -518,12 +519,34 @@ def test_order_sn_bruto_ausente_sem_protecao_de_acesso(ligada):
     assert linha["order_ref"] is None
     assert "250916ABCDEF" not in json.dumps(r, default=str)
     assert r["limitations"]["order_identifier_withheld"] is True
+    assert linha["order_number"] is None
+
+
+def test_numero_do_pedido_sai_com_a_chave_ligada(ligada, monkeypatch):
+    """EXPEDICAO-NUMERO-PEDIDO: decisao de produto, ate' haver login."""
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", True, raising=False)
+    s = SessaoFake(fila=[linha_fila(ordem="250916ABCDEF")])
+    r = svc.get_expedicao(s)
+    linha = r["queue"][0]
+    assert linha["order_number"] == "250916ABCDEF"
+    assert "marketplace_order_id" not in linha
+    assert r["limitations"]["order_identifier_withheld"] is False
+    from app.schemas.expedicao import OrderRow
+    OrderRow.model_validate(linha)
+
+
+def test_numero_do_pedido_publico_por_padrao_e_desligavel():
+    """O default e' a decisao de 30/10/2026; a env var desliga sem deploy."""
+    from app.config import Settings
+    campo = Settings.model_fields["expedicao_numero_pedido_publico"]
+    assert campo.default is True
 
 
 def test_order_ref_opaco_so_existe_com_segredo_configurado(monkeypatch):
     monkeypatch.setattr(svc.settings, "expedicao_api_enabled", True, raising=False)
     monkeypatch.setattr(svc.settings, "expedicao_order_ref_secret",
                         "k" * 32, raising=False)
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", False, raising=False)
     s = SessaoFake(fila=[linha_fila(ordem="250916ABCDEF")])
     r = svc.get_expedicao(s)
     ref = r["queue"][0]["order_ref"]

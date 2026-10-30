@@ -105,8 +105,10 @@ import {
   montarSeries,
   montarTimeline,
   mostrarColunaReferencia,
+  numeroDoPedido,
   paginaAtual,
   rotuloDeadline,
+  rotuloDoNumero,
   rotuloIdade,
   type Canal,
   type Filtros,
@@ -1276,7 +1278,7 @@ export default function ExpedicaoClient({
               <caption className="sr-only">Pedidos aguardando expedição</caption>
               <thead className={CLASSE_CABECALHO}>
                 <tr>
-                  {mostrarRef && <th scope="col" className="pl-4">Referência</th>}
+                  {mostrarRef && <th scope="col" className="pl-4">{rotuloDoNumero(filtros.channel)}</th>}
                   <th scope="col" className={mostrarRef ? undefined : "pl-4"}>
                     Conta
                   </th>
@@ -1291,12 +1293,12 @@ export default function ExpedicaoClient({
               <tbody>
                 {(dados?.queue ?? []).map((l, i) => (
                   <tr
-                    key={`${l.shop_account}-${l.order_ref ?? i}`}
+                    key={`${l.shop_account}-${numeroDoPedido(l) ?? i}`}
                     className="border-t border-line hover:bg-raised"
                   >
                     {mostrarRef && (
                       <td className="pl-4 font-mono text-xs text-ink-faint">
-                        {l.order_ref ?? "—"}
+                        {numeroDoPedido(l) ?? "—"}
                       </td>
                     )}
                     <th

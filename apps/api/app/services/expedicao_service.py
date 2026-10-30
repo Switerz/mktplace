@@ -269,6 +269,15 @@ def _order_ref(order_sn: str) -> Optional[str]:
     return texto[:ORDER_REF_CHARS]
 
 
+def _numero_publico() -> bool:
+    """EXPEDICAO-NUMERO-PEDIDO: o numero real do pedido sai na fila?
+
+    Decisao de produto de 30/10/2026 (ver `config.py`): sim, ate' a Torre ter
+    login. A chave existe para voltar a reter sem deploy de codigo.
+    """
+    return bool(getattr(settings, "expedicao_numero_pedido_publico", False))
+
+
 def _horas(inicio: Optional[datetime], fim: Optional[datetime]) -> Optional[float]:
     if inicio is None or fim is None:
         return None
@@ -315,14 +324,16 @@ def _indisponivel(canal: Canal, motivo: str, *, tendencia: bool = False) -> dict
 
 def _limitacoes(canal: Canal, idade_h: Optional[float],
                 extras: Optional[list[str]] = None) -> dict:
-    notas = list(canal.notas)
+    # Com o numero do pedido publico, a nota "nao e' servido" mentiria.
+    notas = [n for n in canal.notas
+             if not (n == NOTA_SEM_IDENTIFICADOR and _numero_publico())]
     notas.extend(extras or [])
     return {
         "no_automation": True,
         "load_mode": "manual_snapshot",
         "snapshot_age_hours": idade_h,
         "brands_not_covered": list(canal.marcas_sem_cobertura),
-        "order_identifier_withheld": _order_ref("x") is None,
+        "order_identifier_withheld": not _numero_publico() and _order_ref("x") is None,
         "notes": notas,
     }
 
@@ -728,6 +739,7 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         linha["hours_open"] = _num(r["hours_open"])
         linha["hours_overdue"] = _num(r["hours_overdue"])
         linha["order_ref"] = _order_ref(str(r["marketplace_order_id"]))
+        linha["order_number"] = str(r["marketplace_order_id"]) if _numero_publico() else None
         linha["etapa"] = str(r["etapa"]) if tem_etapa and r["etapa"] is not None else None
         linhas.append(linha)
     return linhas, total

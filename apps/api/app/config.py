@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     # execucoes e inutil para quem nao tem a chave.
     expedicao_order_ref_secret: str = ""
 
+    # EXPEDICAO-NUMERO-PEDIDO — numero do pedido (`marketplace_order_id`) na
+    # fila. Decisao de produto de 30/10/2026: a operacao precisa do numero
+    # para agir nos travados e mandar a lista adiante (CSV), ANTES de a Torre
+    # ter login. Risco aceito e conhecido: esta API e' publica, entao quem tem
+    # o link ve os numeros. `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no Render
+    # volta a reter o numero sem deploy de codigo. Sai quando houver login.
+    expedicao_numero_pedido_publico: bool = True
+
     # ------------------------------------------------------------------
     # Gate FULL-SH-1C — superficie de desempenho FBS da Shopee
     # ------------------------------------------------------------------
