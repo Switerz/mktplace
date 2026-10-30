@@ -231,10 +231,19 @@ function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
                   </th>
                   <td className="text-right tabular-nums font-semibold text-ink">{inteiro(s.atual)}</td>
                   <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                    {v.principal}
-                    {v.secundario ? (
-                      <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
-                    ) : null}
+                    {/* T-0021: o " · " so' para o leitor de tela; sem ele, "−12" e
+                        "−5,0%" eram lidos colados ("−12−5,0%"). O `sr-only` e'
+                        absoluto: o invólucro `relative` (inline, sem mudar o
+                        layout) o prende a' celula, nao ao BODY (QA F1). */}
+                    <span className="relative">
+                      {v.principal}
+                      {v.secundario ? (
+                        <>
+                          <span className="sr-only"> · </span>
+                          <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                        </>
+                      ) : null}
+                    </span>
                   </td>
                   <td className="text-right tabular-nums text-ink">{inteiro(ultimo.over48h)}</td>
                   <td className="text-right tabular-nums text-ink">{inteiro(ultimo.stalled)}</td>
@@ -343,21 +352,29 @@ function TabelaUnica({
                     {inteiro(f ? f.acima48h : (ultimo?.over48h ?? 0))}
                   </td>
                   <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                    {f?.aoVerTravados ? (
-                      <button
-                        type="button"
-                        onClick={f.aoVerTravados}
-                        aria-label={`Ver os ${inteiro(f.travados)} pedidos travados de ${titulo}`}
-                        className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
-                      >
-                        {inteiro(f.travados)}
-                      </button>
-                    ) : (
-                      inteiro(f ? f.travados : (ultimo?.stalled ?? 0))
-                    )}
-                    {f?.pctTravados && f.travados > 0 ? (
-                      <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
-                    ) : null}
+                    {/* T-0021: "12" e "5,3%" eram lidos colados ("125,3%"); o
+                        " · " so' para o leitor de tela, preso ao invólucro
+                        `relative` (QA F1). */}
+                    <span className="relative">
+                      {f?.aoVerTravados ? (
+                        <button
+                          type="button"
+                          onClick={f.aoVerTravados}
+                          aria-label={`Ver os ${inteiro(f.travados)} pedidos travados de ${titulo}`}
+                          className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
+                        >
+                          {inteiro(f.travados)}
+                        </button>
+                      ) : (
+                        inteiro(f ? f.travados : (ultimo?.stalled ?? 0))
+                      )}
+                      {f?.pctTravados && f.travados > 0 ? (
+                        <>
+                          <span className="sr-only"> · </span>
+                          <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
+                        </>
+                      ) : null}
+                    </span>
                   </td>
                   <td>{f?.barra ?? null}</td>
                   <td>
@@ -365,9 +382,17 @@ function TabelaUnica({
                       <span className="inline-flex items-center gap-2">
                         <Sparkline serie={s} dominioX={dominioX} />
                         {v ? (
-                          <span className="whitespace-nowrap text-xs tabular-nums text-ink">
+                          // T-0021: o " · " so' para o leitor de tela (sem ele,
+                          // "−12" e "−5,0%" eram lidos colados), preso ao
+                          // invólucro `relative` (QA F1).
+                          <span className="relative whitespace-nowrap text-xs tabular-nums text-ink">
                             {v.principal}
-                            {v.secundario ? <span className="ml-1 text-ink-muted">{v.secundario}</span> : null}
+                            {v.secundario ? (
+                              <>
+                                <span className="sr-only"> · </span>
+                                <span className="ml-1 text-ink-muted">{v.secundario}</span>
+                              </>
+                            ) : null}
                           </span>
                         ) : null}
                         {s.lacunas > 0 ? (

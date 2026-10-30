@@ -21,6 +21,10 @@
  *   jornadaVazia  pagina ok; a Jornada responde com base 0
  *   jornadaCoorteAusente  pagina ok; Shopee com a fila valida e a coorte
  *                 nula (`coorte: table_not_migrated`) — R21: a fila continua
+ *   jornadaEtapas pagina ok; fila do ML em varias etapas (a faturar, a
+ *                 imprimir, ..., entregue a' transportadora), que fecham a base
+ *   jornadaEtapaParcial  pagina ok; fila do ML `partial` com
+ *                 `fila_aberta: etapa_parcial` e parte em `nao_publicada`
  *
  * Com `&marca=`, a Jornada recorta pela marca e devolve `brands_applied`.
  */
@@ -47,6 +51,8 @@ export const CENARIOS_DEMO = [
   "jornadaErro",
   "jornadaVazia",
   "jornadaCoorteAusente",
+  "jornadaEtapas",
+  "jornadaEtapaParcial",
 ] as const;
 export type CenarioDemo = (typeof CENARIOS_DEMO)[number];
 
@@ -437,6 +443,49 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
   }
   if (canal === "mercadolivre") {
     const base = escala(230);
+    const sobreML = [
+      { key: "vencido", count: null, reason: "o Mercado Livre não publica prazo de despacho" },
+      { key: "sem_prazo", count: base },
+      { key: "acima_48h", count: Math.floor(base * 0.19) },
+    ];
+    // T-0021: a fila do ML por etapa, com as chaves e os `label` que a API
+    // publica. As etapas FECHAM a base (a ultima leva o resto); no cenario
+    // parcial, o resto fica em `nao_publicada`.
+    if (c === "jornadaEtapas" || c === "jornadaEtapaParcial") {
+      const parcialEtapa = c === "jornadaEtapaParcial";
+      const modelo = parcialEtapa
+        ? [
+            { key: "a_faturar", label: "A faturar", parte: 0.12 },
+            { key: "a_imprimir", label: "A imprimir", parte: 0.2 },
+            { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.3 },
+            { key: "nao_publicada", label: "Etapa ainda não publicada", parte: 1 },
+          ]
+        : [
+            { key: "a_faturar", label: "A faturar", parte: 0.1 },
+            { key: "a_imprimir", label: "A imprimir", parte: 0.18 },
+            { key: "em_separacao", label: "Em separação", parte: 0.15 },
+            { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.27 },
+            { key: "entregue_transportadora", label: "Entregue à transportadora", parte: 0.2 },
+            { key: "sinalizado_ml", label: "Sinalizado pelo Mercado Livre", parte: 0.04 },
+            { key: "outro", label: "Outro status da fonte", parte: 1 },
+          ];
+      return {
+        status: 200,
+        corpo: {
+          ...comum,
+          channel: "mercadolivre",
+          status: parcialEtapa ? "partial" : "ok",
+          reason: parcialEtapa ? "fila_aberta: etapa_parcial" : null,
+          fila_aberta: {
+            ...filaAberta("shipment", base, sobreML, []),
+            etapas: etapasQueFecham(base, modelo),
+            etapas_fecham: true,
+          },
+          coorte: null,
+          limitacoes: ["o Mercado Livre não publica prazo de despacho"],
+        },
+      };
+    }
     return {
       status: 200,
       corpo: {
@@ -444,16 +493,7 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
         channel: "mercadolivre",
         status: c === "parcial" && base > 3 ? "partial" : "ok",
         reason: c === "parcial" && base > 3 ? "fila_aberta: etapas_nao_fecham" : null,
-        fila_aberta: filaAberta(
-          "shipment",
-          base,
-          [
-            { key: "vencido", count: null, reason: "o Mercado Livre não publica prazo de despacho" },
-            { key: "sem_prazo", count: base },
-            { key: "acima_48h", count: Math.floor(base * 0.19) },
-          ],
-          ["substatus do shipment não publicado na fila"],
-        ),
+        fila_aberta: filaAberta("shipment", base, sobreML, ["substatus do shipment não publicado na fila"]),
         coorte: null,
         limitacoes: ["o Mercado Livre não publica prazo de despacho"],
       },

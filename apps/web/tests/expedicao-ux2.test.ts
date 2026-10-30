@@ -359,3 +359,177 @@ test("render: tabela por marca, conta ausente do HTML, estados escritos", () => 
   assert.equal((html.match(/<circle/g) ?? []).length, 5, "um circulo por ponto real");
   assert.equal((html.match(/tabindex="0"/gi) ?? []).length, 3, "um ponto de tabulacao por linha");
 });
+
+// ===========================================================================
+// T-0021 — variacao: absoluto e percentual com separador para o leitor de tela
+// ===========================================================================
+test("render: a variacao le '−12 · −12,0%' (separador em sr-only), visual igual", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+        ],
+        72,
+      ),
+    }),
+  );
+  const celula = html.match(/<td class="whitespace-nowrap[^"]*">([\s\S]*?)<\/td>/);
+  assert.ok(celula, html);
+  assert.match(celula![1], /<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">−12,0%<\/span>/);
+  // O que o leitor de tela ouve: nada colado.
+  assert.equal(celula![1].replace(/<[^>]+>/g, ""), "−12 · −12,0%");
+  assert.doesNotMatch(html, /−12−12,0%/);
+});
+
+test("render: o motivo secundario ('um ponto só') tambem ganha o separador", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [ponto("2227056661", "kokeshi", H(13), 300), ponto("2227056661", "kokeshi", H(16), 320), ponto("1717171717", "lescent", H(16), 12)],
+        72,
+      ),
+    }),
+  );
+  assert.match(html, />—<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">um ponto só<\/span>/);
+  // sem secundario, sem separador solto
+  assert.match(html, /<span class="relative">\+20<\/span><\/td>/);
+});
+
+test("QA F1: o `sr-only` da variacao fica dentro de um invólucro `relative` (nao ancora no BODY)", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+          ponto("1717171717", "lescent", H(16), 12),
+        ],
+        72,
+      ),
+    }),
+  );
+  const srOnly = html.match(/<span class="sr-only">/g) ?? [];
+  assert.equal(srOnly.length, 2, "variacao com percentual + 'um ponto só'");
+  // Todo `sr-only` tem como pai direto o invólucro `relative` da celula.
+  const comPai = html.match(/<span class="relative">[^<]*<span class="sr-only">/g) ?? [];
+  assert.equal(comPai.length, srOnly.length, html);
+  assert.match(COMPONENTE, /<span className="relative">\s*\{v\.principal\}/);
+});
+
+// ===========================================================================
+// T-0021 sobre a UI objetiva (#121): a tela usa a TABELA UNICA (`fila`); o
+// par absoluto/percentual da variacao mora nela agora. Os testes acima cobrem
+// o modo so' de tendencia (sem `fila`), que o componente ainda exporta.
+// ===========================================================================
+const linhaDaFila = (conta: string, titulo: string, backlog: number) => ({
+  conta,
+  titulo,
+  apelido: null,
+  backlog,
+  vencidos: null,
+  acima48h: 3,
+  travados: 1,
+  barra: null,
+});
+
+// EXPEDICAO-TRAVADOS-1 (#124) levou a variacao para a coluna "Tendência", ao
+// lado da linha: o separador acompanha a variacao no lugar novo.
+const VARIACAO_NA_TENDENCIA = /<span class="relative whitespace-nowrap[^"]*">([^<]*(?:<span[^>]*>[^<]*<\/span>)*)<\/span>/g;
+
+test("tabela unica: a variacao le '−12 · −12,0%' (separador em sr-only), visual igual", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+        ],
+        72,
+      ),
+      fila: [linhaDaFila("2227056661", "KOKESHI", 88)],
+    }),
+  );
+  const variacoes = [...html.matchAll(VARIACAO_NA_TENDENCIA)];
+  assert.equal(variacoes.length, 1, html);
+  const celula = variacoes[0][1];
+  assert.match(celula, /<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">−12,0%<\/span>/);
+  // O que o leitor de tela ouve: nada colado.
+  assert.equal(celula.replace(/<[^>]+>/g, ""), "−12 · −12,0%");
+  assert.doesNotMatch(html, /−12−12,0%/);
+  // a variacao mora na coluna da linha, nao numa celula propria
+  assert.match(html, /<polyline[\s\S]*?<\/svg><\/div><span class="relative whitespace-nowrap/);
+});
+
+test("tabela unica: 'um ponto só' ganha o separador; sem secundario, sem separador; sem serie, nenhum", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [ponto("2227056661", "kokeshi", H(13), 300), ponto("2227056661", "kokeshi", H(16), 320), ponto("1717171717", "lescent", H(16), 12)],
+        72,
+      ),
+      fila: [
+        linhaDaFila("2227056661", "KOKESHI", 320),
+        linhaDaFila("1717171717", "LESCENT", 12),
+        linhaDaFila("9999999999", "ÁPICE", 5),
+      ],
+    }),
+  );
+  assert.match(html, />—<span class="sr-only"> · <\/span><span class="ml-1 [^"]*">um ponto só<\/span>/);
+  assert.match(html, /<span class="relative whitespace-nowrap[^"]*">\+20<\/span>/);
+  // a conta sem ponto no periodo nao ganha separador solto
+  const apice = html.match(/ÁPICE<\/th>([\s\S]*?)<\/tr>/);
+  assert.ok(apice, html);
+  assert.match(apice![1], /sem ponto no período/);
+  assert.doesNotMatch(apice![1], /sr-only/);
+});
+
+test("QA F1 na tabela unica: todo `sr-only` da variacao fica dentro do invólucro `relative`", () => {
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: resposta(
+        [
+          ponto("2227056661", "kokeshi", "2026-10-20T13:00:00Z", 100),
+          ponto("2227056661", "kokeshi", "2026-10-21T13:00:00Z", 88),
+          ponto("1717171717", "lescent", H(16), 12),
+        ],
+        72,
+      ),
+      fila: [linhaDaFila("2227056661", "KOKESHI", 88), linhaDaFila("1717171717", "LESCENT", 12)],
+    }),
+  );
+  const srOnly = html.match(/<span class="sr-only">/g) ?? [];
+  assert.equal(srOnly.length, 2, "variacao com percentual + 'um ponto só'");
+  const comPai = html.match(/<span class="relative[^"]*">[^<]*<span class="sr-only">/g) ?? [];
+  assert.equal(comPai.length, srOnly.length, html);
+  // os DOIS modos (so' tendencia e tabela unica) usam o invólucro
+  assert.equal((COMPONENTE.match(/<span className="relative[^"]*">\s*\{v\.principal\}/g) ?? []).length, 2);
+});
+
+// ===========================================================================
+// T-0021 sobre EXPEDICAO-TRAVADOS-1 (#124): travados e o percentual sobre o
+// backlog ("12" + "5,3%") ganham o mesmo separador para o leitor de tela.
+// ===========================================================================
+test("tabela unica: travados le '12 · 5,3%' (com e sem o botao 'ver quais'), preso ao `relative`", () => {
+  const comBotao = { ...linhaDaFila("2227056661", "KOKESHI", 226), travados: 12, pctTravados: "5,3%", aoVerTravados: () => {} };
+  const semBotao = { ...linhaDaFila("1717171717", "LESCENT", 40), travados: 2, pctTravados: "5,0%" };
+  const semPct = { ...linhaDaFila("9999999999", "ÁPICE", 5), travados: 0, pctTravados: "0,0%" };
+  const html = renderToStaticMarkup(h(EvolucaoPorMarca, { resposta: null, fila: [comBotao, semBotao, semPct] }));
+  const linha = (marca: string) => {
+    const m = html.match(new RegExp(`${marca}</th>([\\s\\S]*?)</tr>`));
+    assert.ok(m, html);
+    return m![1];
+  };
+  const travadosDe = (marca: string) =>
+    linha(marca).match(/<td class="whitespace-nowrap text-right[^"]*">([\s\S]*?)<\/td>/)![1];
+
+  const k = travadosDe("KOKESHI");
+  assert.match(k, /^<span class="relative"><button[^>]*aria-label="Ver os 12 pedidos travados de KOKESHI"[^>]*>12<\/button><span class="sr-only"> · <\/span><span class="ml-1 [^"]*">5,3%<\/span><\/span>$/);
+  const l = travadosDe("LESCENT");
+  assert.equal(l.replace(/<[^>]+>/g, ""), "2 · 5,0%");
+  assert.match(l, /^<span class="relative">2<span class="sr-only"> · <\/span>/);
+  // sem percentual (zero travados), sem separador solto
+  assert.equal(travadosDe("ÁPICE"), '<span class="relative">0</span>');
+  assert.doesNotMatch(html, /125,3%|25,0%/);
+});

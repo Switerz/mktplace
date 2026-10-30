@@ -936,7 +936,7 @@ export default function ExpedicaoClient({
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" dica={SEM_PRAZO_CANAL_ML}>
-      <Panel titulo="Prazo indisponível pelo canal" acao={<Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />}>
+      <Panel titulo="Prazo de despacho" acao={<Ajuda chave={AJUDA_CANAL_SEM_PRAZO.prazo} />}>
         {envelhecimento ? (
           <dl className="mt-3 grid gap-2 sm:grid-cols-2">
             {/* Com o destaque, "acima de 48 h" ja' e' o numero do topo. */}

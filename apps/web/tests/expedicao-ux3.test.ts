@@ -206,7 +206,11 @@ test("Shopee: a secao diz que NAO ha LDR e por que", () => {
 });
 
 test("Mercado Livre: prazo indisponivel pelo canal e envelhecimento da fila", () => {
-  assert.match(SEM_PRAZO_CANAL_ML, /Prazo indisponível pelo canal/);
+  assert.match(
+    SEM_PRAZO_CANAL_ML,
+    /^Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
+  );
+  assert.doesNotMatch(SEM_PRAZO_CANAL_ML, /Prazo indisponível pelo canal/, "frase antiga fora");
   assert.match(SEM_PRAZO_CANAL_ML, /Não há vencidos nem LDR/);
   const e = envelhecimentoDaFila(totais({ over_48h_count: 30 }), [frescor("a", 50), frescor("b", 200), frescor("c", null)])!;
   assert.deepEqual(e, { acima48h: 30, backlog: 100, maisAntigo: { marca: "b", horas: 200 } });
@@ -533,4 +537,49 @@ test("KpiComAjuda poe o ⓘ na linha de comparacao do KPI", () => {
     h(KpiComAjuda, { ajuda: "shopee.backlog", rotulo: "Backlog total", valor: "1.820", comparacao: "Fila aberta." }),
   );
   assert.match(html, /Fila aberta\. <span tabindex="0" role="img" aria-label="Cada pedido pago que ainda não foi expedido\./);
+});
+
+// ===========================================================================
+// T-0021 — ML, secao Prazo: frase no padrao "Indisponível neste canal: …"
+// ===========================================================================
+test("ML Prazo: a secao le 'Indisponível neste canal: …' no ⓘ (a frase antiga sai)", async () => {
+  const { SecaoGerencial } = await import("../src/components/expedicao/SecoesExpedicao.tsx");
+  // #124: a frase saiu do corpo do painel e virou o ⓘ da secao Prazo.
+  assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{SEM_PRAZO_CANAL_ML\}>/);
+  const html = renderToStaticMarkup(
+    h(SecaoGerencial, { titulo: "Prazo", dica: SEM_PRAZO_CANAL_ML }, h("div", null)),
+  );
+  // O leitor de tela le' a frase inteira pelo `aria-label` do ⓘ.
+  assert.match(
+    html,
+    /aria-label="Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./,
+  );
+  assert.doesNotMatch(html, /Prazo indisponível pelo canal:/);
+});
+
+test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o ⓘ em `acao`; a ausencia fica no ⓘ da secao", async () => {
+  const { default: Panel } = await import("../src/components/ui/Panel.tsx");
+  const { SecaoGerencial } = await import("../src/components/expedicao/SecoesExpedicao.tsx");
+  // #130..#133: o ⓘ do painel saiu do titulo e foi para `acao`; so' o texto
+  // do titulo e' da T-0021.
+  assert.match(
+    CLIENTE,
+    /<Panel titulo="Prazo de despacho" acao=\{<Ajuda chave=\{AJUDA_CANAL_SEM_PRAZO\.prazo\} \/>\}>/,
+  );
+  assert.doesNotMatch(CLIENTE, /Prazo indisponível pelo canal/, "titulo antigo fora");
+  // Mesma montagem do cliente: secao com o ⓘ da frase + painel com titulo e ⓘ.
+  const html = renderToStaticMarkup(
+    h(
+      SecaoGerencial,
+      { titulo: "Prazo", dica: SEM_PRAZO_CANAL_ML },
+      h(Panel, {
+        titulo: "Prazo de despacho",
+        acao: h(AjudaMetrica, { chave: AJUDA_CANAL_SEM_PRAZO.prazo }),
+      }),
+    ),
+  );
+  assert.match(html, />Prazo de despacho</);
+  assert.match(html, /aria-label="Não medido: o canal não publica prazo de despacho\./);
+  assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./);
+  assert.doesNotMatch(html, /Prazo indisponível pelo canal/);
 });

@@ -954,3 +954,116 @@ test("lacunas: tendencia com nova tentativa e ? nos cabecalhos de contagem", () 
     assert.ok(CLIENTE.includes(`{ajudaDaFila("${k}")}`), k);
   }
 });
+
+// ===========================================================================
+// T-0021 — etapas novas da API, chave desconhecida e `etapa_parcial`
+// ===========================================================================
+import { motivoDaSecao, motivoDoTopo, rotuloEtapa } from "../src/lib/expedicao-jornada.ts";
+import { CENARIOS_DEMO as CENARIOS_T0021, respostaFicticia as ficticiaT0021 } from "../src/lib/expedicao-fixtures.ts";
+
+const ETAPAS_NOVAS: [string, string][] = [
+  ["a_faturar", "A faturar"],
+  ["a_imprimir", "A imprimir"],
+  ["em_separacao", "Em separação"],
+  ["a_preparar", "A preparar"],
+  ["aguardando_coleta", "Aguardando coleta"],
+  ["entregue_transportadora", "Entregue à transportadora"],
+  ["sinalizado_ml", "Sinalizado pelo Mercado Livre"],
+  ["outro", "Outro status da fonte"],
+  ["nao_publicada", "Etapa ainda não publicada"],
+];
+
+function jornadaMlComEtapas(etapas: { key: string; label: string | null; count: number }[], over: Record<string, unknown> = {}) {
+  const base = etapas.reduce((s, e) => s + e.count, 0);
+  return {
+    ...JORNADA_ML,
+    reason: null,
+    fila_aberta: { ...JORNADA_ML.fila_aberta, base, etapas, etapas_fecham: true, sobreposicoes: [], limitacoes: [] },
+    ...over,
+  };
+}
+
+test("jornada: etapas novas aparecem com o `label` da API; sem label, o rotulo de reserva e' o mesmo", () => {
+  const html = render(
+    200,
+    jornadaMlComEtapas(ETAPAS_NOVAS.map(([key, label], i) => ({ key, label, count: i + 1 }))),
+    "mercadolivre",
+  );
+  for (const [key, label] of ETAPAS_NOVAS) {
+    assert.match(html, new RegExp(`>${label}</span>`), key);
+    assert.doesNotMatch(html, new RegExp(`>${key}<`), `chave crua ${key} nao aparece`);
+    // Resposta sem `label`: o mapa local devolve o mesmo texto da API.
+    assert.equal(rotuloEtapa({ key, label: null, count: 1 }), label, key);
+  }
+  assert.match(html, /Entregue à transportadora<\/span>[\s\S]*?6<\/span> · 13,3% · 6 de 45/);
+});
+
+test("jornada: chave de etapa DESCONHECIDA nao derruba o parser e aparece com o `label` da API", () => {
+  const payload = jornadaMlComEtapas([
+    { key: "a_faturar", label: "A faturar", count: 3 },
+    { key: "etapa_que_ainda_nao_existe", label: "Em trânsito para o CD", count: 7 },
+    { key: "outra_sem_label", label: null, count: 2 },
+  ]);
+  const r = lerJornada(payload, "mercadolivre");
+  assert.ok(r.ok, r.ok ? "" : r.erro);
+  const html = render(200, payload, "mercadolivre");
+  assert.match(html, />Em trânsito para o CD<\/span>/);
+  assert.match(html, /58,3% · 7 de 12/);
+  assert.doesNotMatch(html, /etapa_que_ainda_nao_existe/);
+  // sem label e sem rotulo local: humanizado, nunca a chave crua
+  assert.match(html, />Outra sem label<\/span>/);
+  assert.doesNotMatch(html, /Não foi possível carregar a jornada/);
+});
+
+test("jornada: `fila_aberta: etapa_parcial` e' traduzido (topo e secao), sem o codigo cru", () => {
+  const payload = jornadaMlComEtapas(
+    [
+      { key: "a_faturar", label: "A faturar", count: 4 },
+      { key: "nao_publicada", label: "Etapa ainda não publicada", count: 6 },
+    ],
+    { status: "partial", reason: "fila_aberta: etapa_parcial" },
+  );
+  const r = lerJornada(payload, "mercadolivre");
+  assert.ok(r.ok, r.ok ? "" : r.erro);
+  const resposta = (r as Ok).resposta;
+  const frase = "parte da fila ainda não tem a etapa publicada; os números por etapa não cobrem a fila inteira";
+  assert.equal(explicarMotivo("fila_aberta: etapa_parcial"), `Fila aberta: ${frase}`);
+  assert.equal(motivoDaSecao(resposta, "fila_aberta"), frase);
+  assert.equal(motivoDoTopo(resposta), `Fila aberta: ${frase}`);
+  const html = render(200, payload, "mercadolivre");
+  assert.match(html, /Parcial:/);
+  assert.ok(html.includes(frase), html);
+  assert.match(html, />Etapa ainda não publicada<\/span>/);
+  assert.doesNotMatch(html, /etapa_parcial|motivo não detalhado/);
+});
+
+test("demo jornadaEtapas e jornadaEtapaParcial: fila do ML por etapa, coerente com o contrato", () => {
+  assert.ok(CENARIOS_T0021.includes("jornadaEtapas"));
+  assert.ok(CENARIOS_T0021.includes("jornadaEtapaParcial"));
+  // a pagina segue no cenario ok
+  assert.equal(ficticiaT0021("/api/v1/expedicao?channel=mercadolivre", "jornadaEtapas")!.status, 200);
+
+  const etapas = ficticiaT0021("/api/v1/expedicao/jornada?channel=mercadolivre", "jornadaEtapas")!.corpo;
+  const re = lerJornada(etapas, "mercadolivre");
+  assert.ok(re.ok, re.ok ? "" : re.erro);
+  const f = (re as Ok).resposta.fila_aberta!;
+  assert.equal((re as Ok).resposta.status, "ok");
+  assert.ok(f.etapas.length >= 5, "varias etapas");
+  assert.ok(f.etapas.some((e) => e.key === "entregue_transportadora"));
+  const htmlEtapas = render(200, etapas, "mercadolivre");
+  assert.match(htmlEtapas, />Entregue à transportadora<\/span>/);
+  assert.match(htmlEtapas, />Sinalizado pelo Mercado Livre<\/span>/);
+
+  const parcial = ficticiaT0021("/api/v1/expedicao/jornada?channel=mercadolivre", "jornadaEtapaParcial")!.corpo as {
+    status: string;
+    reason: string;
+  };
+  assert.equal(parcial.status, "partial");
+  assert.equal(parcial.reason, "fila_aberta: etapa_parcial");
+  const rp = lerJornada(parcial, "mercadolivre");
+  assert.ok(rp.ok, rp.ok ? "" : rp.erro);
+  assert.ok((rp as Ok).resposta.fila_aberta!.etapas.some((e) => e.key === "nao_publicada" && e.count > 0));
+  const htmlParcial = render(200, parcial, "mercadolivre");
+  assert.match(htmlParcial, /parte da fila ainda não tem a etapa publicada/);
+  assert.match(htmlParcial, />Etapa ainda não publicada<\/span>/);
+});

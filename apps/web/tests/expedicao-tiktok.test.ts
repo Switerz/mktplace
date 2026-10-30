@@ -418,7 +418,10 @@ test("LDR do TikTok e da Shopee (KPI e tabelas) usam TaxaComBase", async () => {
   const kpi = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335 }));
   assert.equal(kpi.replace(/<[^>]+>/g, ""), "3,35% · 199 de 5.940");
   const linha = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335, linha: true }));
-  assert.match(linha, /<span>3,35%<\/span><span class="block[^"]*">199 de 5\.940<\/span>/);
+  assert.match(
+    linha,
+    /<span>3,35%<\/span><span class="sr-only"> · <\/span><span class="block[^"]*">199 de 5\.940<\/span>/,
+  );
   assert.equal(
     renderToStaticMarkup(h(TaxaComBase, { numerador: 0, base: 0, taxa: null })).replace(/<[^>]+>/g, ""),
     "indisponível",
@@ -435,4 +438,48 @@ test("LDR do TikTok e da Shopee (KPI e tabelas) usam TaxaComBase", async () => {
     assert.doesNotMatch(tk, proibido);
   }
   assert.doesNotMatch(sh, /valor=\{formatarTaxaLdr\(/);
+});
+
+// ===========================================================================
+// T-0021 — concentracao por marca: o leitor de tela ouve o separador "·"
+// ===========================================================================
+test("concentracao por marca: a celula empilhada le '3,35% · 199 de 5.940' (separador em sr-only)", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TaxaComBase } = await import("../src/components/expedicao/KpiComAjuda.tsx");
+  const celula = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335, linha: true }));
+  // O texto lido (sem tags) e' exatamente o formato unico, 2 casas.
+  assert.equal(
+    celula.replace(/<[^>]+>/g, ""),
+    formatarPercentualComBase(199, 5940, { taxa: 0.0335, casas: 2 }),
+  );
+  assert.equal(celula.replace(/<[^>]+>/g, ""), "3,35% · 199 de 5.940");
+  // O separador e' so' para o leitor: visualmente segue empilhado.
+  assert.match(celula, /<span class="sr-only"> · <\/span>/);
+  assert.match(celula, /<span class="block[^"]*">199 de 5\.940<\/span>/);
+  // Taxa abaixo de 0,01% com contagem: continua com o separador ("<" escapado no HTML).
+  assert.equal(
+    renderToStaticMarkup(h(TaxaComBase, { numerador: 1, base: 100000, taxa: 0.00001, linha: true })).replace(/<[^>]+>/g, ""),
+    "&lt;0,01% · 1 de 100.000",
+  );
+  const tk = lerFonte(juntar(import.meta.dirname, "..", "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+  const concentracao = tk.slice(tk.indexOf("Concentração por marca"), tk.indexOf("// 8. DETALHE"));
+  assert.match(concentracao, /<TaxaComBase numerador=\{m\.late\} base=\{m\.base\} taxa=\{m\.rate\} linha \/>/);
+});
+
+test("QA F1: o `sr-only` da taxa empilhada fica dentro de um invólucro `relative` (nao ancora no BODY)", async () => {
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TaxaComBase } = await import("../src/components/expedicao/KpiComAjuda.tsx");
+  const celula = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335, linha: true }));
+  // O elemento que contem o `sr-only` e' o invólucro `relative` (inline: o layout nao muda).
+  assert.match(
+    celula,
+    /^<span class="relative"><span>3,35%<\/span><span class="sr-only"> · <\/span><span class="block[^"]*">199 de 5\.940<\/span><\/span>$/,
+  );
+  // Visual e texto acessivel intactos.
+  assert.equal(celula.replace(/<[^>]+>/g, ""), "3,35% · 199 de 5.940");
+  // KPI (sem `linha`) nao tem `sr-only`: nada a prender, markup igual.
+  const kpi = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335 }));
+  assert.doesNotMatch(kpi, /sr-only/);
 });
