@@ -143,7 +143,7 @@ import {
   urlComDias,
   valorDoSeletor,
 } from "@/lib/expedicao-janela";
-import { formatarHoraBrt, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
+import { formatarHoraBrt, horaPropriaDaConta, montarEvolucaoPorMarca } from "@/lib/expedicao-evolucao";
 import { formatarInteiro } from "@/lib/expedicao-formato";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import { AJUDA_CANAL_SEM_PRAZO, chaveDoKpiDaFila, type ChaveMetrica } from "@/lib/expedicao-definicoes";
@@ -774,6 +774,8 @@ export default function ExpedicaoClient({
       conta: a.shop_account,
       titulo: brandLabel(a.brand),
       apelido: irmas.length > 1 ? `conta ${irmas.indexOf(a) + 1} de ${irmas.length}` : null,
+      // EXPEDICAO-KOKESHI-EXPORT: so' a conta carregada em outra hora ganha a hora.
+      atualizadaEm: horaPropriaDaConta(a.observed_at, dados?.snapshot?.effective_at),
       backlog: a.backlog_count,
       vencidos: temPrazo ? a.overdue_count : null,
       pctVencidos: temPrazo ? percentualDaFila(a.overdue_count, a.backlog_count) : null,

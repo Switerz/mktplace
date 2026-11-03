@@ -68,6 +68,11 @@ export interface LinhaDaFila {
   pertoDeVencer?: number | null;
   pctPertoDeVencer?: string | null;
   aoVerPertoDeVencer?: () => void;
+  /**
+   * EXPEDICAO-KOKESHI-EXPORT: "03/11 11:20" quando a conta foi atualizada em
+   * outra hora que a do topo (carga do export do Seller Centre).
+   */
+  atualizadaEm?: string | null;
   /** Barra de prazo (ou de distribuicao) desenhada pelo cliente do canal. */
   barra: ReactNode;
 }
@@ -391,6 +396,14 @@ function TabelaUnica({
                     {titulo}
                     {apelido ? (
                       <span className="ml-1.5 text-xs font-normal text-ink-faint">{apelido}</span>
+                    ) : null}
+                    {f?.atualizadaEm ? (
+                      <span
+                        className="block text-xs font-normal text-ink-faint"
+                        data-testid="exp-hora-da-conta"
+                      >
+                        atualizada {f.atualizadaEm}
+                      </span>
                     ) : null}
                   </th>
                   <td className="text-right tabular-nums font-semibold text-ink">

@@ -53,6 +53,20 @@ FILA_TABLE = "marts.expedicao_fila_atual"
 #: backlog zero — e assim que a fotografia vazia deixa prova.
 RUN_TABLE = "marts.expedicao_refresh_run"
 
+#: EXPEDICAO-KOKESHI-EXPORT (migration 034). Conta sem app na Open Platform tem
+#: a fila montada do export do Seller Centre e publicada em tabelas PROPRIAS,
+#: com a MESMA forma das duas acima: o publicador agendado apaga a fila da
+#: Shopee inteira a cada execucao, e uma linha do export gravada la' sumiria.
+#: A API junta as duas fotografias na leitura.
+FILA_EXPORT_TABLE = "marts.expedicao_fila_export"
+RUN_EXPORT_TABLE = "marts.expedicao_refresh_run_export"
+#: Registry das contas alimentadas por export. NAO e' `dim_seller_account`: la',
+#: a conta passaria a ser esperada no Data Mart e bloquearia a Shopee inteira.
+CONTA_EXPORT_TABLE = "marts.expedicao_conta_export"
+#: Ultimo estado conhecido de cada pedido exportado. Grao (shop_account,
+#: order_sn), espelho de `pk_shopee_orders`, sem coluna de comprador.
+PEDIDO_EXPORT_TABLE = "marts.expedicao_shopee_export_pedido"
+
 #: EVOLUCAO FUTURA, nao implementada neste gate.
 #: `marts.expedicao_alert_event` — uma linha quando um pedido ENTRA ou SAI de
 #: `overdue`, `over_48h`, `slow`, `zombie` ou `stalled`. Substitui a ideia de
@@ -163,6 +177,11 @@ ADVISORY_LOCK_KEYS = {
     Channel.MERCADOLIVRE: 916_120_016,
     Channel.TIKTOKSHOP: 917_120_017,
 }
+
+#: Lock da carga do export (EXPEDICAO-KOKESHI-EXPORT). Chave PROPRIA: com a da
+#: Shopee, a carga do bot falharia toda vez que coincidisse com a execucao
+#: agendada, sem que as duas escrevam uma tabela em comum.
+EXPORT_ADVISORY_LOCK_KEY = 915_120_115
 
 KNOWN_FOREIGN_LOCK_KEYS = frozenset(
     {

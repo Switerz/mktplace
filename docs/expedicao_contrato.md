@@ -23,6 +23,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | Migration `018` | **aplicada** no Neon em 16/09/2026 (`016` = Full ML, `017` = PMA) |
 | Tabelas em producao | criadas e populadas; `expedicao_refresh_run` acumula 4 linhas por hora |
 | Registry (`marts.dim_seller_account`) | **4 contas ativas** (Kokeshi fora: nao existe na fonte) |
+| Kokeshi Shopee | **pelo export do Seller Centre** (migration `034`, EXPEDICAO-KOKESHI-EXPORT): registry proprio, fila em tabelas proprias, juntada pela API. Ver `docs/expedicao_kokeshi_export_runbook.md` |
 | Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** (EXP-1E, 1F-P, 2C1-P) |
 | Refresh publicado | 3, todos **manuais** (ultimo: batch `494c2441-52b3-48bf-afea-dbea850effe7`, auditoria #319 `success`, 821 pedidos) |
 | API read-only | **implementada e ATIVA** (EXP-2A), `EXPEDICAO_API_ENABLED=true` no Render |
@@ -36,6 +37,32 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
+
+---
+
+## Conta pelo export do Seller Centre (EXPEDICAO-KOKESHI-EXPORT)
+
+A Kokeshi nao tem app na Open Platform. O operador dela carrega o export de pedidos
+com `python -m pipelines.expedicao.shopee_export_cli` (runbook proprio). Regras:
+
+- **Tabelas proprias** (`034`): `marts.expedicao_fila_export` e
+  `marts.expedicao_refresh_run_export` tem a MESMA forma da fila e do resumo da
+  `018`/`033` (`LIKE ... INCLUDING ALL`). O publicador agendado apaga a fila da
+  Shopee inteira; uma linha do export gravada la' sumiria.
+- **Registry proprio**: `marts.expedicao_conta_export`. A conta NAO entra em
+  `dim_seller_account`, onde viraria `ACCOUNT_MISSING` no publicador agendado e
+  travaria a Shopee. O CLI recusa conta que ja' esteja em `dim_seller_account`.
+- **Mesma publicacao**: `publish_channel` com `Destino(fila, resumo, contas)`. O
+  DELETE continua restrito ao canal e ganha `AND shop_account = ANY(...)`. O
+  destino padrao e' identico ao de antes.
+- **Leitura**: a API junta o lote agendado com o ultimo lote coerente de cada
+  conta do export (`_fotografia_export`). Conta incoerente fica fora e volta a
+  `brands_not_covered`; nunca derruba a Shopee. `snapshot.effective_at` continua
+  sendo o do lote agendado; `accounts[].observed_at` traz a hora de cada conta.
+  As contagens, as listas, a Jornada e a tendencia leem a uniao (`_origem_da_fila`).
+- **Frescor** da conta do export: idade do watermark contra o instante mais
+  recente da resposta (`max(effective_at, observed_at)`), nunca contra a propria
+  carga, que a deixaria fresca para sempre.
 
 ---
 

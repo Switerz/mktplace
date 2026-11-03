@@ -268,6 +268,12 @@ export interface ResumoConta extends Totais {
   source_watermark_at: string | null;
   source_advanced: boolean;
   snapshot_hour: string;
+  /**
+   * EXPEDICAO-KOKESHI-EXPORT — instante da fotografia DESTA conta. Igual ao
+   * `snapshot.effective_at`, exceto na conta carregada do export do Seller
+   * Centre (Kokeshi), que tem a hora da propria carga. Ausente na API antiga.
+   */
+  observed_at?: string | null;
 }
 
 export interface FrescorMarca {
